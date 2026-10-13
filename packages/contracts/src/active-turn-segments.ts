@@ -1,16 +1,22 @@
 import { ContractError } from './errors.js';
+import type { CheckpointControlInputIdentity } from './checkpoint-controls.js';
 import type { JournalCommitRef } from './i2-history.js';
 import type { TaskRuntimeIncarnation } from './framework.js';
+import type { CompletionReadInput } from './operation-completion.js';
+import type { RecoveryHoldFacts } from './native-reasoning.js';
 import type { EvidenceRef, ScopeRef, WorkAssignment } from './index.js';
 import { assertEvidenceRef, assertScope, validateWorkAssignment } from './index.js';
 import {
   validateAcceptedChildDelivery,
   validateAcceptedRawFact,
   validateActiveTurnCaptureBody,
+  type AcceptedRawFact,
   type AcceptedTurnEntry,
   type ActiveTurnCaptureBody,
   type ActiveTurnProviderExecutionIdentityRef,
+  type ActiveTurnProviderRequestIdentityRef,
   type ChildInvocationRecord,
+  type ProviderProducerDrainResult,
   type RawAsset,
   type RuntimeRequestRecord,
   type TurnCaptureCut,
@@ -68,6 +74,23 @@ export interface ActiveTurnSegmentBinding {
 }
 
 /**
+ * The complete typed segment-open intent. D-S builds it from the immutable
+ * first capture and the committed chain after every read-only check, then hands
+ * it to the current-authority admission. The admission registers this exact
+ * work and derives the intent identity; the intent never carries a fabricated
+ * grant or registration commit.
+ */
+export interface ActiveTurnSegmentOpenIntent {
+  readonly businessTurnRef: OriginalBusinessTurnRef;
+  readonly segmentId: string;
+  /** Real chain tail (or the derived initial segment) and its exact receipt. */
+  readonly predecessor: ActiveTurnSegmentPredecessorRef;
+  readonly binding: ActiveTurnSegmentBinding;
+  /** The unique original input asset; never a second copy. */
+  readonly initialInput: RawAsset;
+}
+
+/**
  * Exact read of one segment's recovery-assets receipt. A failed or unknown
  * receipt keeps the recovery obligation; the consumer never chooses the latest
  * state or replays an effect.
@@ -84,7 +107,14 @@ export interface ResumedTurnSegmentOpened {
   readonly businessTurnRef: OriginalBusinessTurnRef;
   readonly predecessor: ActiveTurnSegmentPredecessorRef;
   readonly binding: ActiveTurnSegmentBinding;
+  /** Exact durable grant commit that admitted the work. */
   readonly authorityCommitRef: JournalCommitRef;
+  /** Exact business reservation commit; a distinct fact from the grant commit. */
+  readonly businessRegistrationCommitRef: JournalCommitRef;
+  /** Stable identity of this segment-open work; binds business turn + segment. */
+  readonly requestRef: string;
+  /** Intent identity registered for this segment; its requestRef equals requestRef. */
+  readonly inputIdentity: CheckpointControlInputIdentity;
 }
 
 /**
@@ -94,6 +124,8 @@ export interface ResumedTurnSegmentOpened {
  */
 export interface ActiveTurnSegmentCaptureV2 {
   readonly version: typeof ACTIVE_TURN_SEGMENT_SCHEMA_VERSION;
+  /** Locates this segment within the business turn; part of the commit identity. */
+  readonly segmentId: string;
   readonly businessTurnRef: OriginalBusinessTurnRef;
   readonly binding: ActiveTurnSegmentBinding;
   /** References the unique original input asset; never a second copy. */
@@ -103,6 +135,20 @@ export interface ActiveTurnSegmentCaptureV2 {
   readonly childInvocations: readonly ChildInvocationRecord[];
   readonly cut: TurnCaptureCut;
   readonly predecessor: ActiveTurnSegmentPredecessorRef;
+}
+
+/**
+ * Narrow prepared segment capture. It reuses the real control proof of the
+ * prepared v1 capture (record count, producer drains, completion lookups,
+ * recovery holds) for the current segment. It never copies completion results or
+ * alignment facts.
+ */
+export interface PreparedActiveTurnSegmentCaptureV2 {
+  readonly body: ActiveTurnSegmentCaptureV2;
+  readonly controlRecordCount: number;
+  readonly producerDrains: readonly ProviderProducerDrainResult[];
+  readonly completionLookups: readonly CompletionReadInput[];
+  readonly recovery: RecoveryHoldFacts;
 }
 
 /** Exact read of the immutable first (v1) capture plus its binding commit. */
@@ -196,6 +242,23 @@ export function validateActiveTurnSegmentBinding(input: unknown): asserts input 
   }
 }
 
+export function validateActiveTurnSegmentOpenIntent(input: unknown): asserts input is ActiveTurnSegmentOpenIntent {
+  assertPlainObject(input, 'segment open intent');
+  validateOriginalBusinessTurnRef(input.businessTurnRef);
+  assertNonEmptyString(input.segmentId, 'segment open intent segmentId');
+  assertPlainObject(input.predecessor, 'segment open intent predecessor');
+  assertNonEmptyString(input.predecessor.segmentId, 'segment open intent predecessor segmentId');
+  assertNonEmptyString(input.predecessor.recoveryAssetsReceiptRef, 'segment open intent predecessor recoveryAssetsReceiptRef');
+  if (input.predecessor.segmentId === input.segmentId) {
+    throw new ContractError('segment open intent cannot precede itself');
+  }
+  validateActiveTurnSegmentBinding(input.binding);
+  if (input.binding.businessTurnRef.businessTurnId !== input.businessTurnRef.businessTurnId) {
+    throw new ContractError('segment open intent binding business turn does not match its ref');
+  }
+  assertRawAsset(input.initialInput, 'segment open intent initialInput');
+}
+
 export function validateResumedTurnSegmentOpened(input: unknown): asserts input is ResumedTurnSegmentOpened {
   assertPlainObject(input, 'resumed segment opened');
   if (input.kind !== 'segment-opened') throw new ContractError('resumed segment kind must be segment-opened');
@@ -209,6 +272,17 @@ export function validateResumedTurnSegmentOpened(input: unknown): asserts input 
   }
   validateActiveTurnSegmentBinding(input.binding);
   validateJournalCommitRef(input.authorityCommitRef as JournalCommitRef);
+  validateJournalCommitRef(input.businessRegistrationCommitRef as JournalCommitRef);
+  if ((input.authorityCommitRef as JournalCommitRef).commitId === (input.businessRegistrationCommitRef as JournalCommitRef).commitId) {
+    throw new ContractError('resumed segment registration commit must be distinct from its authority commit');
+  }
+  assertNonEmptyString(input.requestRef, 'resumed segment requestRef');
+  assertPlainObject(input.inputIdentity, 'resumed segment inputIdentity');
+  assertNonEmptyString(input.inputIdentity.requestRef, 'resumed segment inputIdentity requestRef');
+  assertNonEmptyString(input.inputIdentity.digest, 'resumed segment inputIdentity digest');
+  if (input.inputIdentity.requestRef !== input.requestRef) {
+    throw new ContractError('resumed segment inputIdentity requestRef must match its requestRef');
+  }
   if (input.binding.businessTurnRef.businessTurnId !== input.businessTurnRef.businessTurnId) {
     throw new ContractError('resumed segment binding business turn does not match its record');
   }
@@ -217,6 +291,7 @@ export function validateResumedTurnSegmentOpened(input: unknown): asserts input 
 export function validateActiveTurnSegmentCaptureV2(input: unknown): asserts input is ActiveTurnSegmentCaptureV2 {
   assertPlainObject(input, 'segment capture v2');
   if (input.version !== ACTIVE_TURN_SEGMENT_SCHEMA_VERSION) throw new ContractError('segment capture version must be 2');
+  assertNonEmptyString(input.segmentId, 'segment capture segmentId');
   validateOriginalBusinessTurnRef(input.businessTurnRef);
   validateActiveTurnSegmentBinding(input.binding);
   if (input.binding.businessTurnRef.businessTurnId !== input.businessTurnRef.businessTurnId) {
@@ -270,6 +345,59 @@ export function validateActiveTurnSegmentCaptureV2(input: unknown): asserts inpu
   assertPlainObject(input.predecessor, 'segment capture predecessor');
   assertNonEmptyString(input.predecessor.segmentId, 'segment capture predecessor segmentId');
   assertNonEmptyString(input.predecessor.recoveryAssetsReceiptRef, 'segment capture predecessor recoveryAssetsReceiptRef');
+  if (input.predecessor.segmentId === input.segmentId) {
+    throw new ContractError('segment capture cannot precede itself');
+  }
+}
+
+/**
+ * Validate a prepared segment v2 capture. The drain boundary, runtime and epoch
+ * must belong to this segment; the fixed request cut and the durable raw
+ * producer sequences must match the actual drains; every completion lookup must
+ * belong to the captured task/execution; and the recovery responsibility must be
+ * present. `producersDrained:true` is a structural condition, not proof.
+ */
+export function validatePreparedActiveTurnSegmentCaptureV2(input: PreparedActiveTurnSegmentCaptureV2): void {
+  validateActiveTurnSegmentCaptureV2(input.body);
+  assertNonNegativeSafeInteger(input.controlRecordCount, 'segment capture controlRecordCount');
+  const { body } = input;
+  const requests = new Map<string, { request: ActiveTurnProviderRequestIdentityRef; lastProducerSeq: number }>();
+  for (const drain of input.producerDrains) {
+    if (drain.boundaryId !== body.cut.pauseId
+      || drain.execution.runtimeId !== body.binding.execution.runtimeId
+      || drain.execution.executionEpoch !== body.binding.execution.executionEpoch) {
+      throw new ContractError('producer drain does not belong to this segment boundary and execution');
+    }
+    for (const record of drain.requests) {
+      assertPlainObject(record.request, 'drained request identity');
+      assertNonEmptyString(record.request.turnId, 'drained request turnId');
+      assertNonEmptyString(record.request.requestId, 'drained request requestId');
+      assertNonNegativeSafeInteger(record.lastProducerSeq, 'drained request lastProducerSeq');
+      if (requests.has(record.request.requestId)) throw new ContractError('segment capture repeats a drained request');
+      requests.set(record.request.requestId, record);
+      if (!body.requests.some((candidate) => candidate.request.requestId === record.request.requestId
+        && candidate.request.turnId === record.request.turnId
+        && candidate.request.parentRequestId === record.request.parentRequestId)) {
+        throw new ContractError('drained request is absent from the fixed segment cut');
+      }
+    }
+  }
+  for (const record of body.requests) {
+    if (!requests.has(record.request.requestId)) throw new ContractError('segment capture request has no producer drain');
+  }
+  for (const [requestId, drained] of requests) {
+    const raw = body.entries.filter((entry) => 'envelope' in entry && entry.envelope.request.requestId === requestId) as AcceptedRawFact[];
+    const lastSeq = raw.reduce((last, entry) => Math.max(last, entry.envelope.producerSeq), 0);
+    if (lastSeq !== drained.lastProducerSeq) throw new ContractError('producer drain sequence does not match durable segment raw');
+  }
+  for (const lookup of input.completionLookups) {
+    if (lookup.binding.execution.runtimeId !== body.binding.execution.runtimeId
+      || lookup.binding.execution.executionEpoch !== body.binding.execution.executionEpoch
+      || lookup.binding.execution.taskId.value !== body.binding.assignment.taskId.value) {
+      throw new ContractError('completion lookup does not belong to the captured segment execution');
+    }
+  }
+  assertNonEmptyString(input.recovery.recoveryResponsibilityRef, 'segment capture recovery responsibility');
 }
 
 /**

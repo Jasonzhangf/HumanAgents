@@ -1,15 +1,19 @@
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../../contracts/src/framework.js';
-import type { ScopeRef, WorkAssignment } from '../../../contracts/src/index.js';
+import { assertSameScope, type ScopeRef, type WorkAssignment } from '../../../contracts/src/index.js';
 import { validateActiveTurnCaptureBody, type ActiveTurnCaptureBody } from '../../../contracts/src/index.js';
+import { canonicalJsonStringify } from '../../../contracts/src/explicit-brain.js';
+import type { CheckpointControlInputIdentity } from '../../../contracts/src/checkpoint-controls.js';
 import {
   activeTurnSegmentCommitId,
   originalBusinessTurnRef,
   validateActiveTurnSegmentChainRead,
+  validateActiveTurnSegmentOpenIntent,
   validateResumedTurnSegmentOpened,
   type ActiveTurnInitialSegmentCapture,
   type ActiveTurnSegmentBinding,
   type ActiveTurnSegmentChainRead,
+  type ActiveTurnSegmentOpenIntent,
   type ActiveTurnSegmentPredecessorRef,
   type ActiveTurnSegmentRecoveryReceiptRead,
   type OriginalBusinessTurnRef,
@@ -41,14 +45,21 @@ export interface ActiveTurnSegmentAppendPort {
   }): Promise<JournalCommitRef>;
 }
 
-export interface ActiveTurnSegmentAdmissionInput {
-  readonly businessTurnRef: OriginalBusinessTurnRef;
-  readonly incarnation: TaskRuntimeIncarnation;
-  readonly segmentId: string;
-}
-
+/**
+ * Exact reservation receipt. `authorityCommitRef` is the durable grant commit;
+ * `businessRegistrationCommitRef` is the distinct business reservation commit;
+ * `requestRef`/`inputIdentity` are the registered intent identity. Only the
+ * current-authority admission that actually registered the work returns the
+ * success branch; a bare read never does.
+ */
 export type ActiveTurnSegmentAdmission =
-  | { readonly authorized: true; readonly authorityCommitRef: JournalCommitRef }
+  | {
+      readonly authorized: true;
+      readonly authorityCommitRef: JournalCommitRef;
+      readonly businessRegistrationCommitRef: JournalCommitRef;
+      readonly requestRef: string;
+      readonly inputIdentity: CheckpointControlInputIdentity;
+    }
   | { readonly authorized: false; readonly reason: string };
 
 export interface ResumeActiveTurnSegmentInput {
@@ -62,8 +73,12 @@ export interface ResumeActiveTurnSegmentInput {
     readonly read: ActiveTurnSegmentReadPort;
     readonly append: ActiveTurnSegmentAppendPort;
   };
-  /** Current-authority admission. It is called before any durable registration. */
-  readonly admit: (input: ActiveTurnSegmentAdmissionInput) => Promise<ActiveTurnSegmentAdmission>;
+  /**
+   * Current-authority admission. It receives the already-validated segment-open
+   * intent, registers that exact work and returns the real reservation receipt.
+   * It is the only write boundary and runs after every read-only check.
+   */
+  readonly admit: (intent: ActiveTurnSegmentOpenIntent) => Promise<ActiveTurnSegmentAdmission>;
 }
 
 export type ResumeActiveTurnSegmentResult =
@@ -95,6 +110,53 @@ function assertSameAssignmentIdentity(requested: WorkAssignment, original: WorkA
   }
 }
 
+function sameAssignmentIdentity(left: WorkAssignment, right: WorkAssignment): boolean {
+  return left.assignmentId === right.assignmentId
+    && left.taskId.value === right.taskId.value
+    && left.pipelineNodeId === right.pipelineNodeId
+    && left.attempt === right.attempt
+    && left.executionEpoch === right.executionEpoch
+    && left.inputRevision === right.inputRevision;
+}
+
+/**
+ * The resumed segment keeps the original task and assignment identity; only its
+ * real handle and epoch advance. A mismatch ends before registration. The scope
+ * relation is covered by the original-scope check in the caller.
+ */
+function assertSegmentIdentityRelations(input: {
+  readonly incarnation: TaskRuntimeIncarnation;
+  readonly assignment: WorkAssignment;
+}): void {
+  if (input.incarnation.taskId.value !== input.assignment.taskId.value) {
+    fail('active-turn.segment.incarnation-task-mismatch', 'the resumed incarnation task must match the work assignment');
+  }
+  if (input.incarnation.assignmentId !== input.assignment.assignmentId) {
+    fail('active-turn.segment.incarnation-assignment-mismatch', 'the resumed incarnation must keep the original work assignment identity');
+  }
+}
+
+/**
+ * Content match for an exact retry. The committed record is authoritative for
+ * its predecessor and reservation receipts, so only the caller-controlled and
+ * chain-independent identity is compared: business turn, segment and binding.
+ */
+function sameSegmentIntentIdentity(
+  stored: ResumedTurnSegmentOpened,
+  candidate: {
+    readonly businessTurnRef: OriginalBusinessTurnRef;
+    readonly segmentId: string;
+    readonly binding: ActiveTurnSegmentBinding;
+  },
+): boolean {
+  return stored.segmentId === candidate.segmentId
+    && canonicalJsonStringify(stored.businessTurnRef) === canonicalJsonStringify(candidate.businessTurnRef)
+    && sameAssignmentIdentity(stored.binding.assignment, candidate.binding.assignment)
+    && canonicalJsonStringify(stored.binding.execution) === canonicalJsonStringify(candidate.binding.execution)
+    && canonicalJsonStringify(stored.binding.incarnation) === canonicalJsonStringify(candidate.binding.incarnation)
+    && canonicalJsonStringify(stored.binding.scope) === canonicalJsonStringify(candidate.binding.scope);
+}
+
 /**
  * Resume one business turn on a new execution epoch. The immutable first
  * capture and the exact predecessor receipt are read before any write. Unknown
@@ -116,50 +178,94 @@ export async function resumeActiveTurnSegment(
   if (businessTurnRef.businessTurnId !== input.businessTurnId) {
     fail('active-turn.segment.business-turn-mismatch', 'immutable first capture does not belong to the requested business turn');
   }
-
-  // The initial segment is derived from the original v1 binding; no new
-  // binding-opened record is written.
-  const initialSegmentId = businessTurnRef.businessTurnId;
-  const receipt = await input.ports.read.readSegmentRecoveryReceipt(initialSegmentId);
-  if (receipt.status === 'failed' || receipt.status === 'unknown') {
-    return { status: 'receipt-held', segmentId: initialSegmentId, receipt };
-  }
-
-  const admission = await input.admit({
-    businessTurnRef,
-    incarnation: input.incarnation,
-    segmentId: input.segmentId,
-  });
-  if (!admission.authorized) {
-    return { status: 'grant-denied', reason: admission.reason };
-  }
+  // The resumed segment keeps the original business scope.
+  assertSameScope(input.scope, initial.body.binding.scope);
+  assertSegmentIdentityRelations({ incarnation: input.incarnation, assignment: input.assignment });
 
   const execution = {
     runtimeId: input.incarnation.runtimeId,
     executionEpoch: input.incarnation.executionEpoch,
   };
-  if (execution.executionEpoch <= businessTurnRef.execution.executionEpoch) {
-    fail('active-turn.segment.epoch-not-advanced', 'a resumed segment must advance to a new execution epoch');
-  }
-
-  const binding: ActiveTurnSegmentBinding = {
+  const candidateBinding: ActiveTurnSegmentBinding = {
     businessTurnRef,
     assignment: input.assignment,
     execution,
     incarnation: input.incarnation,
     scope: input.scope,
   };
+
+  // Read and validate the committed chain before creating anything.
+  const appended = await input.ports.read.readSegments(input.businessTurnId);
+  const chain: ActiveTurnSegmentChainRead = { businessTurnRef, initial: initial.body, segments: appended };
+  validateActiveTurnSegmentChainRead(chain);
+
+  // Exact retry: the target may already be committed. Reuse its content and the
+  // original receipt; a different intent is an explicit conflict. The committed
+  // record is authoritative for its own predecessor and receipts.
+  const stored = chain.segments.find((candidate) => candidate.segmentId === input.segmentId);
+  if (stored) {
+    if (!sameSegmentIntentIdentity(stored, {
+      businessTurnRef,
+      segmentId: input.segmentId,
+      binding: candidateBinding,
+    })) {
+      fail('active-turn.segment.retry-conflict', `segment ${input.segmentId} is already committed with different content`);
+    }
+    const replayReceipt = await input.ports.append.appendSegmentOpened({
+      commitId: activeTurnSegmentCommitId(input.segmentId, 'segment-opened'),
+      record: stored,
+    });
+    return { status: 'resumed', chain, segment: stored, appendReceipt: replayReceipt };
+  }
+
+  // The new segment resumes the committed chain tail, or the initial segment
+  // derived from the original v1 binding when no resumed segment exists yet.
+  const tail = chain.segments.length === 0 ? undefined : chain.segments[chain.segments.length - 1];
+  const predecessorSegmentId = tail ? tail.segmentId : businessTurnRef.businessTurnId;
+  const predecessorEpoch = tail ? tail.binding.execution.executionEpoch : businessTurnRef.execution.executionEpoch;
+  if (predecessorSegmentId === input.segmentId) {
+    fail('active-turn.segment.self-predecessor', 'a resumed segment cannot be its own predecessor');
+  }
+
+  // Exact read of the predecessor's recovery receipt; use the real returned ref.
+  const receipt = await input.ports.read.readSegmentRecoveryReceipt(predecessorSegmentId);
+  if (receipt.status !== 'exact') {
+    return { status: 'receipt-held', segmentId: predecessorSegmentId, receipt };
+  }
+  if (execution.executionEpoch <= predecessorEpoch) {
+    fail('active-turn.segment.epoch-not-advanced', 'a resumed segment must advance to a new execution epoch');
+  }
+
   const predecessor: ActiveTurnSegmentPredecessorRef = {
-    segmentId: initialSegmentId,
-    recoveryAssetsReceiptRef: businessTurnRef.bindingCommitRef.commitId,
+    segmentId: predecessorSegmentId,
+    recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef,
   };
+  const intent: ActiveTurnSegmentOpenIntent = {
+    businessTurnRef,
+    segmentId: input.segmentId,
+    predecessor,
+    binding: candidateBinding,
+    initialInput: initial.body.initialInput,
+  };
+  validateActiveTurnSegmentOpenIntent(intent);
+
+  // The only write boundary: the current-authority admission registers this
+  // exact work and returns the real reservation receipt.
+  const admission = await input.admit(intent);
+  if (!admission.authorized) {
+    return { status: 'grant-denied', reason: admission.reason };
+  }
+
   const segment: ResumedTurnSegmentOpened = {
     kind: 'segment-opened',
     segmentId: input.segmentId,
     businessTurnRef,
     predecessor,
-    binding,
+    binding: candidateBinding,
     authorityCommitRef: admission.authorityCommitRef,
+    businessRegistrationCommitRef: admission.businessRegistrationCommitRef,
+    requestRef: admission.requestRef,
+    inputIdentity: admission.inputIdentity,
   };
   validateResumedTurnSegmentOpened(segment);
 
@@ -168,10 +274,14 @@ export async function resumeActiveTurnSegment(
     record: segment,
   });
 
-  const appended = await input.ports.read.readSegments(input.businessTurnId);
-  const chain: ActiveTurnSegmentChainRead = { businessTurnRef, initial: initial.body, segments: appended };
-  validateActiveTurnSegmentChainRead(chain);
-  const stored = chain.segments.find((candidate) => candidate.segmentId === input.segmentId);
-  if (!stored) fail('active-turn.segment.append-missing', 'the appended segment is absent from the durable chain');
-  return { status: 'resumed', chain, segment: stored, appendReceipt };
+  // Exact cold re-read: the durable record must equal what we appended.
+  const reopened = await input.ports.read.readSegments(input.businessTurnId);
+  const committed: ActiveTurnSegmentChainRead = { businessTurnRef, initial: initial.body, segments: reopened };
+  validateActiveTurnSegmentChainRead(committed);
+  const persisted = committed.segments.find((candidate) => candidate.segmentId === input.segmentId);
+  if (!persisted) fail('active-turn.segment.append-missing', 'the appended segment is absent from the durable chain');
+  if (canonicalJsonStringify(persisted) !== canonicalJsonStringify(segment)) {
+    fail('active-turn.segment.append-content-mismatch', 'the durable segment does not match the appended content');
+  }
+  return { status: 'resumed', chain: committed, segment: persisted, appendReceipt };
 }
