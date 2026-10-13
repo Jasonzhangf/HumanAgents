@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { assembleProviderExecutionPort } from '../../packages/app/src/provider-assembly.js';
@@ -31,6 +31,19 @@ interface FetchCapture {
 }
 
 const encoder = new TextEncoder();
+
+/**
+ * Every durable artifact must live under `~/.humanagent`. `HUMANAGENT_TEST_ROOT`
+ * exists only so a sandboxed worker can exercise this same consumer locally;
+ * the formal default stays the `~/.humanagent` root.
+ */
+const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
+  ?? join(homedir(), '.humanagent', 'test-fixtures');
+
+async function createEvidenceRoot(name: string): Promise<string> {
+  await mkdir(PERSISTENCE_ROOT, { recursive: true });
+  return mkdtemp(join(PERSISTENCE_ROOT, `humanagent-g-source-assembly-${name}-`));
+}
 
 function sseResponse(frames: readonly unknown[]): Response {
   const payload = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
@@ -92,7 +105,7 @@ const httpBinding: ProviderBinding = {
 
 test('G source-aware assembly uses the HTTP source without RCC discovery', async () => {
   const capture = captureFetch();
-  const evidenceRoot = await mkdtemp(join(tmpdir(), 'humanagent-g-source-assembly-http-'));
+  const evidenceRoot = await createEvidenceRoot('http');
   try {
     const port = assembleProviderExecutionPort({
       binding: httpBinding,
@@ -157,7 +170,7 @@ test('G source-aware assembly uses the HTTP source without RCC discovery', async
 
 test('G source-aware assembly keeps the RCC source discovery contract', async () => {
   const capture = captureFetch();
-  const evidenceRoot = await mkdtemp(join(tmpdir(), 'humanagent-g-source-assembly-rcc-'));
+  const evidenceRoot = await createEvidenceRoot('rcc');
   const rccBinding: ProviderBinding = { ...httpBinding, bindingId: 'g-rcc-binding', endpointRef: 'rcc-v3:127.0.0.1:4599' };
   try {
     const port = assembleProviderExecutionPort({
