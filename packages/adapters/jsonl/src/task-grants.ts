@@ -75,6 +75,26 @@ function commitRef(record: JournalRecord): JournalCommitRef {
   return { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
 }
 
+export interface TaskBusinessRegistrationRecordRead {
+  readonly registration: TaskGrantBusinessRegistration;
+  readonly commit: JournalCommitRef;
+}
+
+/**
+ * Narrow read-only decoder for the shared TG1 business-registration codec. It
+ * reuses this owner's payload check and commit projection so a consumer (the
+ * segment journal) verifies the exact registration commit without a second
+ * parser and without re-locking the Journal. It makes no grant decision.
+ */
+export function readTaskBusinessRegistration(input: {
+  readonly records: readonly JournalRecord[];
+  readonly commitId: string;
+}): TaskBusinessRegistrationRecordRead | null {
+  const record = input.records.find((candidate) => candidate.commitId === input.commitId);
+  if (record === undefined || !isTaskBusinessRecord(record)) return null;
+  return { registration: payloadRegistration(record), commit: commitRef(record) };
+}
+
 function commandCommitId(scope: ScopeRef, requestId: string): string {
   return `task-grant:v1:${createHash('sha256')
     .update(`${scope.organId.value}\0${scope.taskId?.value ?? ''}\0${requestId}`)
