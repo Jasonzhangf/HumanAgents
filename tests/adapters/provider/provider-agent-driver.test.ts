@@ -1299,62 +1299,114 @@ test('provider agent driver rethrows an executor-returned failure as a typed pro
 });
 
 test('provider agent driver honors the configured tool round limit', async () => {
-  // The provider always asks for another tool round, so only the configured
-  // bound can stop the loop. A long-horizon task needs a bound larger than the
-  // adapter default, so the limit must come from the assembly decision.
-  const runtimePort = port({
-    observe: async function* (): AsyncIterable<ProviderEvent> {
-      yield {
-        ...identity,
-        eventId: 'event-tool-call-loop',
-        kind: 'tool',
-        summary: 'file.read',
-        outputRefs: ['artifact://tool-call-loop'],
-        evidenceRefs: [evidence],
-        toolCall: { callId: 'call-loop', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-round-1' },
-      };
-      yield {
-        ...identity,
-        eventId: 'event-tool-waiting-loop',
-        kind: 'terminal',
-        terminalState: 'waiting',
-        evidenceRefs: [evidence],
-        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
-      };
-    },
-    submit: async (): Promise<ProviderSubmitResult> => ({ ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] }),
-  });
-  let executions = 0;
-  const instance = new ProviderAgentDriver({
-    port: runtimePort,
-    binding,
-    runtimeId: identity.runtimeId,
-    taskId,
-    operationId,
-    executionEpoch: 1,
-    assignmentId: 'assignment-a',
-    scope,
-    inputRefs: ['input-1'],
-    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
-    maxToolRounds: 3,
-    executeTool: {
-      async execute() {
-        executions += 1;
-        return { output: 'file body', outputRefs: [], evidenceRefs: [evidence] };
+  // The fixture always asks for another tool round up to a finite ninth round,
+  // then emits an ordinary `succeeded` terminal with no tool call. Only an
+  // explicit budget may stop the loop; a long-horizon task must not inherit a
+  // hidden default bound. The same local fixture expresses both conditions.
+  const buildDriver = (maxToolRounds?: number) => {
+    let observeCalls = 0;
+    let executions = 0;
+    const runtimePort = port({
+      observe: async function* (): AsyncIterable<ProviderEvent> {
+        observeCalls += 1;
+        const round = observeCalls;
+        if (round <= 9) {
+          yield {
+            ...identity,
+            eventId: `event-tool-call-${round}`,
+            kind: 'tool',
+            summary: 'file.read',
+            outputRefs: [`artifact://tool-call-${round}`],
+            evidenceRefs: [evidence],
+            toolCall: {
+              callId: `call-${round}`,
+              toolId: 'file.read',
+              arguments: { path: `file-${round}.md` },
+              continuationRef: `response-round-${round}`,
+            },
+          };
+          yield {
+            ...identity,
+            eventId: `event-tool-waiting-${round}`,
+            kind: 'terminal',
+            terminalState: 'waiting',
+            evidenceRefs: [evidence],
+            nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+          };
+          return;
+        }
+        yield {
+          ...identity,
+          eventId: 'event-terminal-succeeded',
+          kind: 'terminal',
+          terminalState: 'succeeded',
+          evidenceRefs: [evidence],
+        };
       },
-    },
-  });
-  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
-  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+      submit: async (): Promise<ProviderSubmitResult> => ({ ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] }),
+    });
+    const instance = new ProviderAgentDriver({
+      port: runtimePort,
+      binding,
+      runtimeId: identity.runtimeId,
+      taskId,
+      operationId,
+      executionEpoch: 1,
+      assignmentId: 'assignment-a',
+      scope,
+      inputRefs: ['input-1'],
+      tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+      ...(maxToolRounds === undefined ? {} : { maxToolRounds }),
+      executeTool: {
+        async execute() {
+          executions += 1;
+          return { output: `file body ${executions}`, outputRefs: [], evidenceRefs: [evidence] };
+        },
+      },
+    });
+    return { instance, executions: () => executions };
+  };
+
+  // Missing budget: nine tool rounds must run, each producing a tool-result
+  // continuation, and the ordinary terminal must arrive without a round-limit
+  // rejection.
+  const unbounded = buildDriver();
+  await unbounded.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await unbounded.instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+  const unboundedResults: string[] = [];
+  let unboundedTerminal: string | undefined;
+  let unboundedError: unknown;
+  try {
+    for await (const event of unbounded.instance.observe({ runtimeId: identity.runtimeId })) {
+      if (event.kind === 'provider.tool-result') unboundedResults.push(event.providerEvent?.toolResult?.callId ?? '');
+      if (event.kind === 'provider.terminal') unboundedTerminal = event.terminalState;
+    }
+  } catch (cause) {
+    unboundedError = cause;
+  }
+  assert.equal(
+    unbounded.executions(),
+    9,
+    `the missing-budget loop must run all nine rounds (error: ${unboundedError instanceof Error ? unboundedError.message : 'none'})`,
+  );
+  assert.equal(unboundedError, undefined, `the missing-budget loop must reach the normal terminal, not ${String(unboundedError)}`);
+  assert.deepEqual(unboundedResults, ['call-1', 'call-2', 'call-3', 'call-4', 'call-5', 'call-6', 'call-7', 'call-8', 'call-9']);
+  assert.equal(unboundedTerminal, 'succeeded');
+
+  // Explicit budget: three rounds run, the fourth is rejected before any tool
+  // side effect and without submitting its result.
+  const bounded = buildDriver(3);
+  await bounded.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await bounded.instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
   await assert.rejects(
     (async () => {
-      for await (const _event of instance.observe({ runtimeId: identity.runtimeId })) {
-        // Drain until the bound stops the loop.
+      for await (const _event of bounded.instance.observe({ runtimeId: identity.runtimeId })) {
+        // Drain until the explicit bound stops the loop.
       }
     })(),
     /tool round limit was exceeded/,
   );
-  assert.equal(executions, 3);
+  assert.equal(bounded.executions(), 3);
 });
 
 function deferred<T = void>(): {

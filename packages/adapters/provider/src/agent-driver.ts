@@ -481,7 +481,7 @@ export class ProviderAgentDriver implements AgentDriver {
         throw this.error('provider.production.closed', 'provider production was closed; no new tool work can start', 'observe', 'runtime');
       }
       rounds += 1;
-      if (rounds > (this.options.maxToolRounds ?? 8)) {
+      if (this.options.maxToolRounds !== undefined && rounds > this.options.maxToolRounds) {
         throw this.error('tool.round-limit', 'provider tool round limit was exceeded', 'observe', 'runtime');
       }
       for (const call of toolCalls) {
