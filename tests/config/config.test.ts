@@ -1,10 +1,23 @@
 import assert from 'node:assert/strict';
 import { symlinkSync } from 'node:fs';
-import { mkdtemp, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveWebSearchBackendConfig, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
+import { DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, ensureControlLayout, listConfiguredProjects, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, saveUiDisplayPreference, validateInternalConfig, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type RuntimePaths } from '../../packages/config/src/index.js';
+
+const minimalInteractionAgent = () => ({
+  agentId: 'interaction-default',
+  roleId: 'interaction',
+  templateRef: 'builtin/interaction@1.0.0',
+  driverRef: 'fake',
+  skills: ['input-normalization'],
+  tools: ['input.receive'],
+  permissions: ['task.read'],
+  memoryScopes: ['task'],
+  resourceClass: 'foreground',
+});
 
 test('parses agent array tables and sections', () => {
   const value = parseToml('schemaVersion = 1\n[[agents]]\nagentId = "one"\nroleId = "interaction"\ntemplateRef = "t"\ndriverRef = "fake"\nskills = ["a"]\ntools = ["b"]\npermissions = ["c"]\nmemoryScopes = ["task"]\nresourceClass = "foreground"\n[project]\nreviewRequired = true\n');
@@ -359,6 +372,126 @@ test('separates colliding readable project keys with a canonical-path suffix', a
   await ensureControlLayout(second);
 });
 
+test('project catalog uses manifest identity without writing configured project state', async () => {
+  const runRoot = '/Volumes/Intel/playground/humanagent/.worker-runs/ux-restart-20261012/w5-f-config-binding-join-gcm-20261013';
+  await mkdir(runRoot, { recursive: true });
+  const root = await mkdtemp(join(runRoot, 'catalog-fixture-'));
+  const controlRoot = join(root, 'control');
+  const offlineWorkspace = join(root, 'offline-workspace');
+  const firstWorkspace = join(root, 'workspace', 'a-b');
+  const secondWorkspace = join(root, 'workspace', 'a', 'b');
+  const offlineProjectKey = createReadableProjectKey(offlineWorkspace);
+  const onlineProjectKey = createReadableProjectKey(firstWorkspace);
+  const collisionProjectKey = createProjectCollisionKey(secondWorkspace);
+  await mkdir(controlRoot, { recursive: true });
+  await mkdir(join(controlRoot, 'projects', offlineProjectKey), { recursive: true });
+  await mkdir(join(controlRoot, 'projects', onlineProjectKey), { recursive: true });
+  await mkdir(join(controlRoot, 'projects', collisionProjectKey), { recursive: true });
+  await mkdir(join(controlRoot, 'projects', 'mismatch-project'), { recursive: true });
+  await mkdir(join(controlRoot, 'projects', 'impossible-project'), { recursive: true });
+  await mkdir(firstWorkspace, { recursive: true });
+  await mkdir(secondWorkspace, { recursive: true });
+  await writeFile(join(controlRoot, 'projects', offlineProjectKey, 'project.json'), JSON.stringify({
+    schemaVersion: 1,
+    projectKey: offlineProjectKey,
+    workspaceCwd: offlineWorkspace,
+  }), 'utf8');
+  await writeFile(join(controlRoot, 'projects', onlineProjectKey, 'project.json'), JSON.stringify({
+    schemaVersion: 1,
+    projectKey: onlineProjectKey,
+    workspaceCwd: firstWorkspace,
+  }), 'utf8');
+  await writeFile(join(controlRoot, 'projects', collisionProjectKey, 'project.json'), JSON.stringify({
+    schemaVersion: 1,
+    projectKey: collisionProjectKey,
+    workspaceCwd: secondWorkspace,
+  }), 'utf8');
+  await writeFile(join(controlRoot, 'projects', 'mismatch-project', 'project.json'), JSON.stringify({
+    schemaVersion: 1,
+    projectKey: 'renamed-project',
+    workspaceCwd: join(root, 'another-same-name'),
+  }), 'utf8');
+  await writeFile(join(controlRoot, 'projects', 'impossible-project', 'project.json'), JSON.stringify({
+    schemaVersion: 1,
+    projectKey: 'impossible-project',
+    workspaceCwd: join(root, 'impossible-workspace'),
+  }), 'utf8');
+
+  const sessionRoot = join(controlRoot, 'projects');
+  const snapshot = async (): Promise<Record<string, string>> => {
+    const entries: Record<string, string> = {};
+    const walk = async (directory: string, relative: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+        const childPath = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          entries[childRelative] = '<dir>';
+          await walk(childPath, childRelative);
+        } else {
+          entries[childRelative] = await readFile(childPath, 'utf8');
+        }
+      }
+    };
+    await walk(sessionRoot, '');
+    return entries;
+  };
+  const before = await snapshot();
+  const catalog = await listConfiguredProjects({
+    controlRoot,
+    agentCwd: controlRoot,
+    securityRoot: join(controlRoot, 'security'),
+    webAccessCredentialPath: join(controlRoot, 'security', 'web-access.json'),
+    mainRoot: join(controlRoot, 'main'),
+    mainSessionsRoot: join(controlRoot, 'main', 'sessions'),
+    workspaceCwd: firstWorkspace,
+    projectKey: onlineProjectKey,
+    projectRoot: join(sessionRoot, onlineProjectKey),
+    projectManifest: join(sessionRoot, onlineProjectKey, 'project.json'),
+    sessionsRoot: join(sessionRoot, onlineProjectKey),
+    journalRoot: join(sessionRoot, onlineProjectKey, 'journal'),
+    checkpointsRoot: join(sessionRoot, onlineProjectKey, 'checkpoints'),
+    indexRoot: join(sessionRoot, onlineProjectKey, 'index'),
+    artifactsRoot: join(sessionRoot, onlineProjectKey, 'artifacts'),
+    memoryRoot: join(sessionRoot, onlineProjectKey, 'memory'),
+    userRoot: join(controlRoot, 'user'),
+    globalMemoryRoot: join(controlRoot, 'memory', 'global'),
+    locksRoot: join(sessionRoot, onlineProjectKey, 'locks'),
+    runNotesRoot: join(sessionRoot, onlineProjectKey, 'run-notes'),
+  });
+  const after = await snapshot();
+
+  assert.deepEqual(Object.keys(after).sort(), Object.keys(before).sort());
+  assert.deepEqual(after, before);
+  assert.deepEqual(catalog.projects.map(({ projectKey, workspaceCwd, projectRoot, checkpointsRoot }) => ({ projectKey, workspaceCwd, projectRoot, checkpointsRoot })).sort((a, b) => a.projectKey.localeCompare(b.projectKey)), [
+    {
+      projectKey: offlineProjectKey,
+      workspaceCwd: offlineWorkspace,
+      projectRoot: join(sessionRoot, offlineProjectKey),
+      checkpointsRoot: join(sessionRoot, offlineProjectKey, 'checkpoints'),
+    },
+    {
+      projectKey: onlineProjectKey,
+      workspaceCwd: firstWorkspace,
+      projectRoot: join(sessionRoot, onlineProjectKey),
+      checkpointsRoot: join(sessionRoot, onlineProjectKey, 'checkpoints'),
+    },
+    {
+      projectKey: collisionProjectKey,
+      workspaceCwd: secondWorkspace,
+      projectRoot: join(sessionRoot, collisionProjectKey),
+      checkpointsRoot: join(sessionRoot, collisionProjectKey, 'checkpoints'),
+    },
+  ]);
+  assert.equal(catalog.projects.some((project) => project.projectKey === 'impossible-project'), false);
+  assert.equal(catalog.failures.length, 2);
+  const mismatchFailure = catalog.failures.find((failure) => failure.message.includes('mismatch-project'));
+  const impossibleFailure = catalog.failures.find((failure) => failure.message.includes('impossible-project'));
+  assert.equal(mismatchFailure?.code, 'project-identity-mismatch');
+  assert.equal(impossibleFailure?.code, 'project-identity-mismatch');
+  assert.equal(mismatchFailure?.ownerId, 'humanagent.config');
+  assert.equal(impossibleFailure?.ownerId, 'humanagent.config');
+});
+
 test('separates colliding project keys below a non-default session root', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-config-session-collision-'));
   const controlRoot = join(root, 'control');
@@ -563,6 +696,34 @@ test('validates a global provider separately from the agent driver and rejects u
     agents,
     provider: { provider: 'rcc', binding: 'rcc', protocol: 'custom', model: 'x', route: 'default', baseUrl: 'http://127.0.0.1:4444' },
   }), /unsupported provider protocol: custom/);
+});
+
+test('preserves an explicit provider source through TOML while an omitted source keeps the legacy RCC shape', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-provider-source-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+
+  const legacy = await loadConfiguration(paths);
+  assert.equal(legacy.effective.provider?.provider, 'rcc');
+  assert.equal(Object.prototype.hasOwnProperty.call(legacy.effective.provider, 'source'), false);
+
+  const configPath = join(paths.controlRoot, 'config.toml');
+  const base = await readFile(configPath, 'utf8');
+  await writeFile(configPath, base.replace('provider = "rcc"', 'provider = "http"\nsource = "http"'), 'utf8');
+  const explicit = await loadConfiguration(paths);
+  assert.equal(explicit.effective.provider?.provider, 'http');
+  assert.equal(explicit.effective.provider?.source, 'http');
+
+  // `provider` is a local label, not the source strategy: rcc + http stays legal.
+  await writeFile(configPath, base.replace('provider = "rcc"', 'provider = "rcc"\nsource = "http"'), 'utf8');
+  const labeled = await loadConfiguration(paths);
+  assert.equal(labeled.effective.provider?.provider, 'rcc');
+  assert.equal(labeled.effective.provider?.source, 'http');
+
+  await writeFile(configPath, base.replace('provider = "rcc"', 'provider = "rcc"\nsource = "unsupported"'), 'utf8');
+  await assert.rejects(() => loadConfiguration(paths), /unsupported provider source: unsupported/);
 });
 
 test('validates explicit provider retry candidates under user execution config and rejects them from project override', async () => {
@@ -772,4 +933,513 @@ test('web search backend binding rejects an empty route or an out-of-range bound
     () => resolveWebSearchBackendConfig({ HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS: 'ten' }),
     /HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS must be an integer between 100 and 30000/,
   );
+});
+
+test('agent provider binding compiles independent per-agent selections from a config fixture', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-agent-binding-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.controlRoot, 'config.toml'), [
+    'schemaVersion = 1',
+    '',
+    '[provider]',
+    'provider = "rcc"',
+    'binding = "shared"',
+    'protocol = "responses"',
+    'model = "shared-model"',
+    'route = "default"',
+    'baseUrl = "http://127.0.0.1:4444"',
+    '',
+    '[[agents]]',
+    'agentId = "interaction-a"',
+    'roleId = "interaction"',
+    'templateRef = "builtin/interaction@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["input-normalization"]',
+    'tools = ["input.receive"]',
+    'permissions = ["task.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "binding-a"',
+    'provider.protocol = "responses"',
+    'provider.model = "model-a"',
+    'provider.route = "route-a"',
+    'provider.baseUrl = "http://127.0.0.1:4444"',
+    '',
+    '[[agents]]',
+    'agentId = "execution-b"',
+    'roleId = "execution"',
+    'templateRef = "builtin/execution@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["single-capability-worker"]',
+    'tools = ["search"]',
+    'permissions = ["task.read", "workspace.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "binding-b"',
+    'provider.protocol = "anthropic"',
+    'provider.model = "model-b"',
+    'provider.route = "route-b"',
+    'provider.baseUrl = "http://127.0.0.1:5555"',
+    '',
+  ].join('\n'), 'utf8');
+
+  const loaded = await loadConfiguration(paths);
+  const bindings = loaded.agentProviderBindings;
+  assert.equal(bindings.length, 2);
+  const a = bindings.find((binding) => binding.agentId === 'interaction-a');
+  const b = bindings.find((binding) => binding.agentId === 'execution-b');
+  assert.deepEqual(a, {
+    agentId: 'interaction-a',
+    roleId: 'interaction',
+    source: 'agent',
+    provider: { provider: 'rcc', binding: 'binding-a', protocol: 'responses', model: 'model-a', route: 'route-a', baseUrl: 'http://127.0.0.1:4444' },
+  });
+  assert.deepEqual(b, {
+    agentId: 'execution-b',
+    roleId: 'execution',
+    source: 'agent',
+    provider: { provider: 'rcc', binding: 'binding-b', protocol: 'anthropic', model: 'model-b', route: 'route-b', baseUrl: 'http://127.0.0.1:5555' },
+  });
+  // The two agents must not share protocol, model, route, binding or endpoint.
+  assert.equal(a?.provider?.model === b?.provider?.model, false);
+  assert.equal(a?.provider?.protocol === b?.provider?.protocol, false);
+  assert.equal(a?.provider?.route === b?.provider?.route, false);
+  assert.equal(a?.provider?.binding === b?.provider?.binding, false);
+  assert.equal(a?.provider?.baseUrl === b?.provider?.baseUrl, false);
+  // The shared top-level provider stays untouched by per-agent selections.
+  assert.deepEqual(loaded.effective.provider, {
+    provider: 'rcc', binding: 'shared', protocol: 'responses', model: 'shared-model', route: 'default', baseUrl: 'http://127.0.0.1:4444',
+  });
+});
+
+test('agent provider binding keeps the legacy single top-level provider effective config compatible', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-agent-binding-legacy-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  // Default layout writes the legacy single `[provider]` and agents without a provider block.
+  await ensureControlLayout(paths);
+  const loaded = await loadConfiguration(paths);
+  const legacy = {
+    provider: 'rcc', binding: 'rcc-entry', protocol: 'responses', model: 'MiniMax-M3', route: 'default', baseUrl: 'http://127.0.0.1:4444',
+  };
+  assert.deepEqual(loaded.effective.provider, legacy);
+  assert.equal(loaded.agentProviderBindings.length, loaded.effective.agents.length);
+  for (const binding of loaded.agentProviderBindings) {
+    assert.equal(binding.source, 'inherited');
+    assert.deepEqual(binding.provider, legacy);
+  }
+});
+
+test('agent provider binding rejects an invalid per-agent provider selection', () => {
+  const agent = {
+    agentId: 'interaction-a',
+    roleId: 'interaction',
+    templateRef: 'builtin/interaction@1.0.0',
+    driverRef: 'fake',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  };
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{ ...agent, provider: { provider: 'rcc', binding: 'b', protocol: 'custom', model: 'm', route: 'r', baseUrl: 'http://127.0.0.1:4444' } }],
+  }), /unsupported provider protocol: custom/);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{ ...agent, provider: { provider: 'dsh', binding: 'b', protocol: 'responses', model: 'm', route: 'r', baseUrl: 'http://127.0.0.1:4444' } }],
+  }), /unknown provider: dsh/);
+});
+
+test('agent provider binding applies the agent model override over the binding model', () => {
+  const base = {
+    roleId: 'interaction',
+    templateRef: 'builtin/interaction@1.0.0',
+    driverRef: 'fake',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  };
+  const compiled = compileAgentProviderBindings(validateUserConfig({
+    schemaVersion: 1,
+    provider: { provider: 'rcc', binding: 'shared', protocol: 'responses', model: 'shared-model', route: 'default', baseUrl: 'http://127.0.0.1:4444' },
+    agents: [
+      { ...base, agentId: 'explicit-default', provider: { provider: 'rcc', binding: 'b', protocol: 'anthropic', model: 'binding-model', route: 'r', baseUrl: 'http://127.0.0.1:5555' } },
+      { ...base, agentId: 'explicit-override', model: 'override-model', provider: { provider: 'rcc', binding: 'b', protocol: 'anthropic', model: 'binding-model', route: 'r', baseUrl: 'http://127.0.0.1:5555' } },
+      { ...base, agentId: 'inherited-override', model: 'inherited-override-model' },
+    ],
+  }));
+  assert.equal(compiled.find((binding) => binding.agentId === 'explicit-default')?.provider?.model, 'binding-model');
+  assert.equal(compiled.find((binding) => binding.agentId === 'explicit-override')?.provider?.model, 'override-model');
+  assert.equal(compiled.find((binding) => binding.agentId === 'inherited-override')?.provider?.model, 'inherited-override-model');
+  // Overriding the model does not change the selected protocol/endpoint.
+  assert.equal(compiled.find((binding) => binding.agentId === 'explicit-override')?.provider?.protocol, 'anthropic');
+});
+
+test('agent provider binding rejects prototype traversal without polluting shared state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-agent-binding-proto-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.controlRoot, 'config.toml'), [
+    'schemaVersion = 1',
+    '',
+    '[[agents]]',
+    'agentId = "attacker"',
+    'roleId = "interaction"',
+    'templateRef = "builtin/interaction@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["input-normalization"]',
+    'tools = ["input.receive"]',
+    'permissions = ["task.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "attacker"',
+    'provider.protocol = "responses"',
+    'provider.route = "route-a"',
+    'provider.baseUrl = "http://127.0.0.1:4444"',
+    'provider.__proto__.model = "injected-model"',
+    '',
+    '[[agents]]',
+    'agentId = "later"',
+    'roleId = "execution"',
+    'templateRef = "builtin/execution@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["single-capability-worker"]',
+    'tools = ["search"]',
+    'permissions = ["task.read", "workspace.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "later"',
+    'provider.protocol = "anthropic"',
+    'provider.route = "route-b"',
+    'provider.baseUrl = "http://127.0.0.1:5555"',
+    '',
+  ].join('\n'), 'utf8');
+
+  let error: unknown;
+  try {
+    await loadConfiguration(paths);
+  } catch (caught) {
+    error = caught;
+  }
+  const polluted = Object.prototype.hasOwnProperty.call(Object.prototype, 'model');
+  delete (Object.prototype as { model?: unknown }).model;
+  assert.equal(polluted, false);
+  assert.match(String(error), /invalid key: provider\.__proto__\.model/);
+});
+
+test('config binding catalog join preserves per-agent transport source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-binding-join-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  const configPath = join(paths.controlRoot, 'config.toml');
+  const config = (source: string) => [
+    'schemaVersion = 1',
+    '',
+    '[provider]',
+    'provider = "rcc"',
+    'binding = "shared"',
+    'protocol = "responses"',
+    'model = "shared-model"',
+    'route = "default"',
+    'baseUrl = "http://127.0.0.1:4444"',
+    '',
+    '[[agents]]',
+    'agentId = "interaction-a"',
+    'roleId = "interaction"',
+    'templateRef = "builtin/interaction@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["input-normalization"]',
+    'tools = ["input.receive"]',
+    'permissions = ["task.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'model = "agent-model"',
+    'provider.provider = "rcc"',
+    `provider.source = "${source}"`,
+    'provider.binding = "agent-binding"',
+    'provider.protocol = "anthropic"',
+    'provider.model = "binding-model"',
+    'provider.route = "agent-route"',
+    'provider.baseUrl = "http://127.0.0.1:5555"',
+    '',
+    '[[agents]]',
+    'agentId = "execution-b"',
+    'roleId = "execution"',
+    'templateRef = "builtin/execution@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["single-capability-worker"]',
+    'tools = ["search"]',
+    'permissions = ["task.read", "workspace.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    '',
+  ].join('\n');
+  const expectedBinding: EffectiveAgentProviderBinding = {
+    agentId: 'interaction-a',
+    roleId: 'interaction',
+    source: 'agent',
+    provider: {
+      provider: 'rcc',
+      source: 'http',
+      binding: 'agent-binding',
+      protocol: 'anthropic',
+      model: 'agent-model',
+      route: 'agent-route',
+      baseUrl: 'http://127.0.0.1:5555',
+    },
+  };
+  const assertExpectedBinding = (binding: EffectiveAgentProviderBinding | undefined): void => {
+    assert.deepEqual(binding, expectedBinding);
+  };
+
+  await writeFile(configPath, config('http'), 'utf8');
+  const loaded = await loadConfiguration(paths);
+  const agentBinding = loaded.agentProviderBindings.find((binding) => binding.agentId === 'interaction-a');
+  assertExpectedBinding(agentBinding);
+  const inherited = loaded.agentProviderBindings.find((binding) => binding.agentId === 'execution-b');
+  assert.equal(inherited?.source, 'inherited');
+  assert.equal(inherited?.provider?.model, 'shared-model');
+  assert.equal(Object.prototype.hasOwnProperty.call(inherited?.provider, 'source'), false);
+
+  const droppedSourceCopy = {
+    ...agentBinding!,
+    provider: { ...agentBinding!.provider, source: undefined },
+  } as EffectiveAgentProviderBinding;
+  assert.throws(() => assertExpectedBinding(droppedSourceCopy));
+
+  await writeFile(configPath, config('unsupported'), 'utf8');
+  await assert.rejects(() => loadConfiguration(paths), /unsupported provider source: unsupported/);
+});
+function createReadableProjectKey(workspace: string): string {
+  return workspace.replaceAll(sep, '/').replaceAll('/', '-') || '-';
+}
+function createProjectCollisionKey(workspace: string): string {
+  return `${createReadableProjectKey(workspace)}--${createHash('sha256').update(workspace).digest('hex').slice(0, 16)}`;
+}
+
+// Failure mode: a cold start with no saved preference must fall back to the
+// documented `current` view instead of an arbitrary or undefined mode.
+test('defaults the UI display preference to the cold-start current view', () => {
+  const valid = validateUserConfig({ schemaVersion: 1, agents: [minimalInteractionAgent()] });
+  assert.equal(valid.ui?.display.mode, 'current');
+  assert.equal(valid.ui?.display.lastManual, null);
+  assert.equal(resolveUiDisplayMode(valid.ui!.display), 'current');
+  assert.equal(resolveUiDisplayMode(DEFAULT_UI_DISPLAY_PREFERENCE), 'current');
+});
+
+// Failure mode: a saved selection is dropped on reload, or an explicit link is
+// ignored in favour of the saved preference. Priority must be explicit link >
+// saved preference > cold-start default, and the value must persist.
+test('persists a UI display selection in config.toml and applies explicit-link priority', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-ui-preference-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+
+  const cold = await loadConfiguration(paths);
+  assert.equal(cold.effective.ui?.display.mode, 'current');
+
+  const base = await readFile(join(paths.controlRoot, 'config.toml'), 'utf8');
+  await writeFile(join(paths.controlRoot, 'config.toml'), `${base}\n[ui.display]\nschemaVersion = 1\nmode = "semantic"\n`, 'utf8');
+  const loaded = await loadConfiguration(paths);
+  assert.equal(loaded.effective.ui?.display.mode, 'semantic');
+  assert.equal(resolveUiDisplayMode(loaded.effective.ui!.display), 'semantic');
+  // An explicit link selection outranks the saved preference.
+  assert.equal(resolveUiDisplayMode(loaded.effective.ui!.display, 'raw'), 'raw');
+});
+
+// Failure mode: `follow-last` resolves to a stale or invented mode, or an
+// unknown enum/version silently selects another view.
+test('resolves follow-last against the last manual selection and rejects invalid values', () => {
+  const follow = validateUiDisplayPreference({ schemaVersion: 1, mode: 'follow-last', lastManual: 'actions' });
+  assert.equal(resolveUiDisplayMode(follow), 'actions');
+  assert.equal(resolveUiDisplayMode(follow, 'semantic'), 'semantic');
+  const cold = validateUiDisplayPreference({ schemaVersion: 1, mode: 'follow-last' });
+  assert.equal(cold.lastManual, null);
+  assert.equal(resolveUiDisplayMode(cold), 'current');
+
+  assert.throws(() => validateUiDisplayPreference({ schemaVersion: 1, mode: 'bogus' }), /not a supported display mode/);
+  assert.throws(() => validateUiDisplayPreference({ schemaVersion: 2, mode: 'current' }), /unsupported ui.display schema/);
+  assert.throws(() => validateUiDisplayPreference({ schemaVersion: 1, mode: 'current', lastManual: 'bogus' }), /lastManual is not a supported display mode/);
+  assert.throws(() => validateUiDisplayPreference({ schemaVersion: 1, mode: 'current', extra: true }), /unsupported key: extra/);
+});
+
+// Failure mode: a navigation update mutates a fixed preference, or a failed
+// manual selection overwrites a valid saved value.
+test('only a follow-last preference tracks manual selection and keeps the valid value on rejection', () => {
+  const follow = validateUiDisplayPreference({ schemaVersion: 1, mode: 'follow-last' });
+  const updated = applyManualDisplaySelection(follow, 'actions');
+  assert.equal(updated.mode, 'follow-last');
+  assert.equal(updated.lastManual, 'actions');
+  assert.equal(resolveUiDisplayMode(updated), 'actions');
+
+  const fixed = validateUiDisplayPreference({ schemaVersion: 1, mode: 'semantic' });
+  assert.equal(applyManualDisplaySelection(fixed, 'raw'), fixed);
+  assert.equal(resolveUiDisplayMode(fixed), 'semantic');
+
+  assert.throws(() => applyManualDisplaySelection(follow, 'bogus' as never), /manual display selection is not supported/);
+  assert.equal(follow.lastManual, null);
+});
+
+// Failure mode: an invalid enum in the persisted file loads silently instead of
+// failing visibly, or a project override carries a user display preference.
+test('rejects an invalid persisted UI preference and keeps it user-scoped', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-ui-invalid-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+
+  const base = await readFile(join(paths.controlRoot, 'config.toml'), 'utf8');
+  await writeFile(join(paths.controlRoot, 'config.toml'), `${base}\n[ui.display]\nschemaVersion = 1\nmode = "bogus"\n`, 'utf8');
+  await assert.rejects(() => loadConfiguration(paths), /not a supported display mode/);
+
+  await writeFile(join(paths.controlRoot, 'config.toml'), base, 'utf8');
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[ui.display]\nmode = "raw"\n', 'utf8');
+  await assert.rejects(() => loadConfiguration(paths), /project config contains unsupported key: ui/);
+});
+
+async function makeControlRoot(): Promise<{ root: string; paths: RuntimePaths }> {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-ui-store-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  return { root, paths };
+}
+
+const userConfigFingerprint = (configuration: { user: unknown }): string => {
+  const user = configuration.user as {
+    schemaVersion?: unknown; agents?: unknown; provider?: unknown; project?: unknown;
+    memory?: unknown; execution?: unknown; ui?: unknown;
+  };
+  return JSON.stringify({
+    schemaVersion: user.schemaVersion,
+    agents: user.agents,
+    provider: user.provider,
+    project: user.project,
+    memory: user.memory,
+    execution: user.execution,
+  });
+};
+
+// Failure mode: a saved preference is lost on reload, or saving the display
+// preference drops unrelated configuration. The write must persist the exact
+// value and leave the rest of the user config untouched.
+test('saves a UI display preference and reloads it with unrelated config preserved', async () => {
+  const { paths } = await makeControlRoot();
+  const configPath = join(paths.controlRoot, 'config.toml');
+  const before = await loadConfiguration(paths);
+  const original = await readFile(configPath, 'utf8');
+
+  const saved = await saveUiDisplayPreference(paths, { schemaVersion: 1, mode: 'follow-last', lastManual: 'actions' });
+  assert.deepEqual(saved, { schemaVersion: 1, mode: 'follow-last', lastManual: 'actions' });
+  assert.equal(resolveUiDisplayMode(saved), 'actions');
+
+  const text = await readFile(configPath, 'utf8');
+  assert.match(text, /\[ui\.display\]/);
+  // Every byte before the appended `[ui.display]` table stays byte-identical.
+  assert.equal(text.slice(0, text.indexOf('\n[ui.display]\n')), original);
+
+  const after = await loadConfiguration(paths);
+  assert.equal(after.effective.ui?.display.mode, 'follow-last');
+  assert.equal(after.effective.ui?.display.lastManual, 'actions');
+  assert.equal(resolveUiDisplayMode(after.effective.ui!.display), 'actions');
+  assert.equal(userConfigFingerprint(after), userConfigFingerprint(before));
+});
+
+// Failure mode: a second preference overwrites instead of replacing the saved
+// table, or re-saving clobbers unrelated config again. The stored table must be
+// replaced in place and repeated saves must stay lossless.
+test('replaces an existing UI display table without duplicating it', async () => {
+  const { paths } = await makeControlRoot();
+  await saveUiDisplayPreference(paths, { schemaVersion: 1, mode: 'semantic', lastManual: 'raw' });
+  const after = await loadConfiguration(paths);
+  assert.equal(after.effective.ui?.display.mode, 'semantic');
+  assert.equal(after.effective.ui?.display.lastManual, 'raw');
+
+  await saveUiDisplayPreference(paths, { schemaVersion: 1, mode: 'current', lastManual: null });
+  const text = await readFile(join(paths.controlRoot, 'config.toml'), 'utf8');
+  assert.equal((text.match(/\[ui\.display\]/g) ?? []).length, 1);
+
+  const reloaded = await loadConfiguration(paths);
+  assert.equal(reloaded.effective.ui?.display.mode, 'current');
+  assert.equal(reloaded.effective.ui?.display.lastManual, null);
+  assert.equal(reloaded.effective.provider?.route, 'default');
+  assert.equal(reloaded.effective.agents.length, 2);
+});
+
+// Failure mode: a failed write overwrites the previous valid file or value. A
+// failure must keep the old file readable, valid and unchanged.
+test('keeps the old valid config.toml when a UI display write fails', async () => {
+  const { paths } = await makeControlRoot();
+  const configPath = join(paths.controlRoot, 'config.toml');
+  await saveUiDisplayPreference(paths, { schemaVersion: 1, mode: 'raw', lastManual: null });
+  const before = await readFile(configPath, 'utf8');
+
+  // A read-only control root makes the atomic temp-file write fail.
+  await chmod(paths.controlRoot, 0o500);
+  await assert.rejects(() => saveUiDisplayPreference(paths, { schemaVersion: 1, mode: 'actions', lastManual: null }));
+  await chmod(paths.controlRoot, 0o700);
+
+  const text = await readFile(configPath, 'utf8');
+  assert.equal(text, before);
+  assert.match(text, /mode = "raw"/);
+  assert.equal(text.includes('mode = "actions"'), false);
+
+  const kept = await loadConfiguration(paths);
+  assert.equal(kept.effective.ui?.display.mode, 'raw');
+
+  const recovered = await saveUiDisplayPreference(paths, { schemaVersion: 1, mode: 'actions', lastManual: null });
+  assert.equal(recovered.mode, 'actions');
+  assert.equal((await loadConfiguration(paths)).effective.ui?.display.mode, 'actions');
+});
+
+// Failure mode: an unsupported preference is written to disk anyway, or an
+// explicit link/navigation selection is persisted as if the user had saved a
+// new preference. Validation must reject before any write, and only an explicit
+// save call persists a preference.
+test('rejects invalid preferences without writing and does not persist explicit link selections', async () => {
+  const { paths } = await makeControlRoot();
+  const configPath = join(paths.controlRoot, 'config.toml');
+  const before = await readFile(configPath, 'utf8');
+  const cold = await loadConfiguration(paths);
+
+  const invalid: unknown[] = [
+    { schemaVersion: 1, mode: 'bogus', lastManual: null },
+    { schemaVersion: 9, mode: 'semantic', lastManual: null },
+    { schemaVersion: 1, mode: 'semantic', lastManual: 'bogus' },
+  ];
+  for (const value of invalid) {
+    await assert.rejects(() => saveUiDisplayPreference(paths, value as never));
+  }
+
+  assert.equal(await readFile(configPath, 'utf8'), before);
+  const untouched = await loadConfiguration(paths);
+  assert.equal(userConfigFingerprint(untouched), userConfigFingerprint(cold));
+  assert.equal(untouched.effective.ui?.display.mode, 'current');
+
+  // Resolution alone must not write: explicit link selection and follow-last
+  // navigation stay out of config.toml.
+  assert.equal(resolveUiDisplayMode(untouched.effective.ui!.display, 'raw'), 'raw');
+  const resolved = validateUiDisplayPreference({ schemaVersion: 1, mode: 'follow-last' });
+  assert.equal(resolveUiDisplayMode(applyManualDisplaySelection(resolved, 'actions')), 'actions');
+  assert.equal(await readFile(configPath, 'utf8'), before);
 });
