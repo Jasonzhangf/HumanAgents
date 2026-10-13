@@ -22,6 +22,8 @@ import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } fr
 import { MemoryAgent } from '../../packages/runtime/src/memory/index.js';
 import { FakeReplayExecutionRuntimePort, FileCheckpointStore, UiRuntimeService, UiRuntimeJournal } from '../../packages/app/src/ui-runtime/index.js';
 import type { AttentionPort } from '../../packages/runtime/src/index.js';
+import { prepareAgentOperation } from '../../packages/app/src/agent-operation.js';
+import { closeAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -75,6 +77,141 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   await ensureControlLayout(paths);
   return { root, controlRoot, workspace };
 }
+
+async function nativePairFixture() {
+  const fixture = await createConfiguredWorkspace('native-shared-pair-');
+  const upstream = await memoryUpstream('native.preparation.model');
+  const configPath = join(fixture.controlRoot, 'config.toml');
+  const config = (await readFile(configPath, 'utf8')).replace('driverRef = "fake"', [
+    'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "native-preparation-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "native.preparation.model"',
+    'provider.route = "native-preparation-route"',
+    `provider.baseUrl = "${upstream.baseUrl}"`,
+  ].join('\n'));
+  await writeFile(configPath, config, 'utf8');
+  const paths = await resolveRuntimePaths(fixture);
+  const configuration = await loadConfiguration(paths);
+  return { ...fixture, upstream, paths, configuration };
+}
+
+test('native shared-pair preparation binds final identity without starting and closes its own pair', async () => {
+  const fixture = await nativePairFixture();
+  const pairs: Awaited<ReturnType<typeof prepareAgentProvider>>[] = [];
+  const calls: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>[] = [];
+  const closed: ProviderCloseResult[] = [];
+  try {
+    const input = {
+      ...fixture, sessionId: 'native-prepared', plan: 'default', prompt: 'prepare only',
+      runtimeId: 'native-final-runtime', taskId: id('task', 'native-final-task'),
+      operationId: id('operation', 'native-final-operation'), executionEpoch: 7, directiveRevision: 3,
+      prepareAgentProvider: async (selected: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>) => {
+        calls.push(selected);
+        const pair = await prepareAgentProvider({ ...selected, agentProviderBindings: fixture.configuration.agentProviderBindings, evidenceRoot: join(fixture.controlRoot, 'pair-evidence') });
+        pairs.push(pair);
+        const close = pair.port.close.bind(pair.port);
+        pair.port.close = async (binding) => { const receipt = await close(binding); closed.push(receipt); return receipt; };
+        return pair;
+      },
+    };
+    const prepared = await prepareAgentOperation(input);
+    assert.deepEqual(calls, [{ roleId: prepared.agent.roleId, configuredAgentId: prepared.agent.agentId }]);
+    assert.equal(pairs.length, 1);
+    assert.equal(pairs[0]!.configuredAgentId, prepared.agent.agentId);
+    assert.equal(pairs[0]!.binding.modelRef, 'native.preparation.model');
+    const binding = prepared.execution.runtime.binding;
+    assert.equal(binding.runtimeId, input.runtimeId);
+    assert.deepEqual(binding.taskId, input.taskId);
+    assert.deepEqual(binding.operationId, input.operationId);
+    assert.equal(binding.executionEpoch, 7);
+    assert.deepEqual(binding.cycleId, prepared.cycleId);
+    assert.deepEqual(binding.organId, prepared.scope.organId);
+    assert.equal(binding.assignmentId, 'native-prepared-assignment');
+    assert.equal(prepared.execution.runtime.driver, prepared.driver);
+    assert.equal(prepared.execution.runtime.snapshot().state, 'created');
+    console.log('native preparation identity', JSON.stringify({ ...binding, scope: prepared.scope, directiveRevision: prepared.directiveRevision, selected: calls[0], model: pairs[0]!.binding.modelRef }));
+  } finally {
+    for (const pair of pairs) await closeAgentProvider(pair);
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true });
+  }
+  assert.deepEqual(closed.map((receipt) => receipt.state), ['closed']);
+  assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, 0);
+  console.log('native preparation resources', JSON.stringify({ rootRemoved: fixture.root, closed: closed.map((receipt) => receipt.state), readinessRequests: fixture.upstream.wires.length, generationPosts: 0 }));
+});
+
+test('native shared-pair preparation closes acquired pairs on template failure and preserves cleanup errors', async () => {
+  for (const failClose of [false, true]) {
+    const fixture = await nativePairFixture();
+    let closeCount = 0;
+    let receipt: ProviderCloseResult | undefined;
+    const cleanupError = new Error('native pair close evidence failure');
+    try {
+      const input = {
+        ...fixture, configuration: { ...fixture.configuration, promptCatalog: {} },
+        sessionId: 'native-template-invalid', plan: 'default', prompt: 'prepare only',
+        prepareAgentProvider: async (selected: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>) => {
+          const pair = await prepareAgentProvider({ ...selected, agentProviderBindings: fixture.configuration.agentProviderBindings, evidenceRoot: join(fixture.controlRoot, 'pair-evidence') });
+          const close = pair.port.close.bind(pair.port);
+          pair.port.close = async (binding) => {
+            closeCount += 1;
+            receipt = await close(binding);
+            if (failClose) throw cleanupError;
+            return receipt;
+          };
+          return pair;
+        },
+      };
+      await assert.rejects(() => prepareAgentOperation(input), (error: unknown) => {
+        const original = failClose && error instanceof AggregateError ? error.errors[0] : error;
+        if (!(original instanceof AppLifecycleError)) throw original;
+        assert.equal(original.code, 'template-invalid');
+        if (failClose) { if (!(error instanceof AggregateError)) throw error; assert.equal(error.errors[1], cleanupError); }
+        return true;
+      });
+      assert.equal(closeCount, 1);
+      assert.equal(receipt?.state, 'closed');
+      assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, 0);
+      console.log('native preparation failure cleanup', JSON.stringify({ failClose, closeCount, actualClose: receipt?.state, original: 'template-invalid', generationPosts: 0 }));
+    } finally {
+      await fixture.upstream.close();
+      await rm(fixture.root, { recursive: true });
+    }
+  }
+});
+
+test('native CLI shared-pair boundary keeps actual run and recoverable resume unbound', async () => {
+  const fixture = await nativePairFixture();
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const sessionId = 'native-cli-resume';
+  try {
+    const runtime = await openRuntime({ controlRoot: fixture.controlRoot, workspace: fixture.workspace, plan: 'default', sessionId });
+    await new SessionStore(fixture.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+    await runtime.lock.release();
+    const first = await runAgentOperation({ ...fixture, sessionId, plan: 'default', prompt: 'seed recoverable checkpoint', composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) } });
+    assert.equal(first.checkpoint.outcome, 'failed');
+    for (const command of ['run', 'resume']) {
+      await assert.rejects(async () => execFileSync(process.execPath, [cli, command, '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', command === 'run' ? 'native-cli-run' : sessionId, '--prompt', 'prepare boundary'], { encoding: 'utf8', stdio: 'pipe' }), (error: unknown) => {
+        if (!(error instanceof Error && 'stderr' in error && 'status' in error)) throw error;
+        assert.ok(error.status !== 0);
+        assert.match(String(error.stderr), /rcc-config-missing/);
+        assert.equal(/rcc-port-unbound/.test(String(error.stderr)), false);
+        console.log(`native CLI ${command} actual failure`, String(error.stderr));
+        return true;
+      });
+    }
+    assert.equal(fixture.upstream.wires.length, 0);
+    const manifest = await readRunManifest(fixture.paths, sessionId);
+    assert.equal(manifest.driverRef, 'rcc');
+    const session = await new SessionStore(fixture.paths).open(sessionId);
+    console.log('native CLI boundary', JSON.stringify({ providerRequests: fixture.upstream.wires.length, manifestEpoch: manifest.executionEpoch, sessionRecordTypes: session.records.map((record) => record.type) }));
+  } finally {
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true });
+  }
+});
 
 interface MemoryUpstreamWire {
   readonly method: string;

@@ -25,7 +25,7 @@ import {
   type TaskId,
 } from '../../contracts/src/index.js';
 import type { AgentConfig, LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
-import { composeAgentDriver, ensureDshSettings, resolveDshHome, type ComposedAgentDriver } from './agent-driver-composition.js';
+import { closeAgentProvider, composeAgentDriver, ensureDshSettings, prepareAgentProvider, resolveDshHome, type AgentProviderComposition, type ComposedAgentDriver } from './agent-driver-composition.js';
 import { openAgentExecution, type AgentExecutionSession, type AgentExecutionReceipt } from './agent-execution.js';
 import { createJsonlAttentionPort } from './attention-journal.js';
 import {
@@ -71,6 +71,12 @@ export interface MemoryBoundaryPublishInput {
   readonly event: ReturnType<typeof createMemoryAnalysisRequestedEvent>;
   readonly checkpoint: Checkpoint;
   readonly recordDigest: string;
+}
+
+export interface PrepareAgentOperationInput extends OpenAgentOperationInput {
+  readonly prepareAgentProvider?: (
+    input: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>,
+  ) => Promise<AgentProviderComposition>;
 }
 
 export interface MemoryBoundaryPublisher {
@@ -183,7 +189,7 @@ export function checkpointJournal(paths: RuntimePaths): CheckpointJournalPort {
   return createJsonlCheckpointJournal({ filePath: join(paths.journalRoot, 'checkpoints.jsonl') });
 }
 
-export async function prepareAgentOperation(input: OpenAgentOperationInput): Promise<PreparedOperation> {
+export async function prepareAgentOperation(input: PrepareAgentOperationInput): Promise<PreparedOperation> {
   const agent = selectAgent(input);
   const runtimeId = input.runtimeId ?? `runtime-${input.sessionId}`;
   const executionEpoch = input.executionEpoch ?? 1;
@@ -191,83 +197,97 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
   const operationId = operationIdFor(input, runtimeId, executionEpoch);
   const cycleId = id('cycle', `${input.sessionId}-cycle-${executionEpoch}`);
   const directiveRevision = input.directiveRevision ?? 1;
-  const composed = input.composed ?? composeAgentDriver({
-    agent,
-    paths: input.paths,
-    ...(input.configuration.effective.execution?.dsh === undefined ? {} : { dsh: input.configuration.effective.execution.dsh }),
-    ...(input.configuration.effective.execution?.opencode === undefined ? {} : { opencode: input.configuration.effective.execution.opencode }),
-    ...(input.configuration.effective.execution?.antigravity === undefined ? {} : { antigravity: input.configuration.effective.execution.antigravity }),
-    ...(input.configuration.effective.execution?.dshAcp === undefined ? {} : { dshAcp: input.configuration.effective.execution.dshAcp }),
-    runtimeId,
-    workspace: input.workspace,
-  });
-  const dshSettings = input.configuration.effective.execution?.dsh;
-  if (agent.driverRef === 'dsh' && dshSettings) {
-    // The DSH home owns provider routes, so HumanAgent must place the one
-    // configured route before the runtime boots. Conflicts fail loudly.
-    await ensureDshSettings(resolveDshHome({ paths: input.paths, configuredHome: dshSettings.home }), dshSettings);
-  }
-  const scope = scopeFor({
-    agent,
-    taskId,
-    operationId,
-    cycleId,
-  });
-  const journal = checkpointJournal(input.paths);
-  const closurePort = createJsonlCheckpointClosurePort({
-    filePath: join(input.paths.journalRoot, 'checkpoints.jsonl'),
-  });
-  const assembled = assemblePrompt(input, agent);
-  const recalled = await recallCheckpoint(journal, { ownerId: OWNER, scope });
-  const previous = input.newChain ? null : recalled;
-  const recoveryStateRef: EvidenceRef = {
-    evidenceId: id('evidence', `recovery-${input.sessionId}-${executionEpoch}`),
-    kind: 'operation',
-    source: OWNER,
-    locator: `humanagent://session/${input.sessionId}/epoch/${executionEpoch}`,
-    scope,
-  };
-  const execution = openAgentExecution({
-    driver: composed.driver,
-    request: {
+  const scope = scopeFor({ agent, taskId, operationId, cycleId });
+  const assignmentId = `${input.sessionId}-assignment`;
+  const inputRefs = [`humanagent://session/${input.sessionId}/input/${directiveRevision}`];
+  const pair = agent.driverRef === 'rcc' && !input.composed && input.prepareAgentProvider
+    ? await input.prepareAgentProvider({ roleId: agent.roleId, configuredAgentId: agent.agentId })
+    : undefined;
+  try {
+    // The acquired pair needs prompt references before composition. Other
+    // drivers retain their composition-before-template failure order.
+    const pairPrompt = pair ? assemblePrompt(input, agent) : undefined;
+    if (pairPrompt?.promptRef !== undefined) inputRefs.push(pairPrompt.promptRef);
+    const composed = input.composed ?? composeAgentDriver({
+      agent,
+      paths: input.paths,
+      ...(input.configuration.effective.execution?.dsh === undefined ? {} : { dsh: input.configuration.effective.execution.dsh }),
+      ...(input.configuration.effective.execution?.opencode === undefined ? {} : { opencode: input.configuration.effective.execution.opencode }),
+      ...(input.configuration.effective.execution?.antigravity === undefined ? {} : { antigravity: input.configuration.effective.execution.antigravity }),
+      ...(input.configuration.effective.execution?.dshAcp === undefined ? {} : { dshAcp: input.configuration.effective.execution.dshAcp }),
       runtimeId,
-      taskId,
-      assignmentId: `${input.sessionId}-assignment`,
-      organId: scope.organId,
-      ...(scope.cycleId ? { cycleId: scope.cycleId } : {}),
-      operationId,
+      workspace: input.workspace,
+      ...(pair === undefined ? {} : { rcc: { port: pair.port, binding: pair.binding, scope, taskId, operationId, executionEpoch, assignmentId, inputRefs } }),
+    });
+    const dshSettings = input.configuration.effective.execution?.dsh;
+    if (agent.driverRef === 'dsh' && dshSettings) {
+      // The DSH home owns provider routes, so HumanAgent must place the one
+      // configured route before the runtime boots. Conflicts fail loudly.
+      await ensureDshSettings(resolveDshHome({ paths: input.paths, configuredHome: dshSettings.home }), dshSettings);
+    }
+    const journal = checkpointJournal(input.paths);
+    const closurePort = createJsonlCheckpointClosurePort({
+      filePath: join(input.paths.journalRoot, 'checkpoints.jsonl'),
+    });
+    const assembled = pairPrompt ?? assemblePrompt(input, agent);
+    if (!pair && assembled.promptRef !== undefined) inputRefs.push(assembled.promptRef);
+    const recalled = await recallCheckpoint(journal, { ownerId: OWNER, scope });
+    const previous = input.newChain ? null : recalled;
+    const recoveryStateRef: EvidenceRef = {
+      evidenceId: id('evidence', `recovery-${input.sessionId}-${executionEpoch}`),
+      kind: 'operation',
+      source: OWNER,
+      locator: `humanagent://session/${input.sessionId}/epoch/${executionEpoch}`,
+      scope,
+    };
+    const execution = openAgentExecution({
+      driver: composed.driver,
+      request: {
+        runtimeId,
+        taskId,
+        assignmentId,
+        organId: scope.organId,
+        ...(scope.cycleId ? { cycleId: scope.cycleId } : {}),
+        operationId,
+        executionEpoch,
+        ownerRef: OWNER,
+        input: { prompt: assembled.prompt },
+        inputRefs,
+        waitConditionRef: `humanagent://session/${input.sessionId}/condition`,
+        recoveryRef: recoveryStateRef.locator,
+      },
+    });
+    return {
+      agent,
+      paths: input.paths,
+      sessionId: input.sessionId,
+      prompt: assembled.prompt,
+      runtimeId,
       executionEpoch,
-      ownerRef: OWNER,
-      input: { prompt: assembled.prompt },
-      inputRefs: [
-        `humanagent://session/${input.sessionId}/input/${directiveRevision}`,
-        ...(assembled.promptRef === undefined ? [] : [assembled.promptRef]),
-      ],
-      waitConditionRef: `humanagent://session/${input.sessionId}/condition`,
-      recoveryRef: recoveryStateRef.locator,
-    },
-  });
-  return {
-    agent,
-    paths: input.paths,
-    sessionId: input.sessionId,
-    prompt: assembled.prompt,
-    runtimeId,
-    executionEpoch,
-    taskId,
-    operationId,
-    cycleId,
-    directiveRevision,
-    scope,
-    journal,
-    closurePort,
-    previous,
-    recoveryStateRef,
-    execution,
-    driver: composed.driver,
-    attentionPort: createJsonlAttentionPort({ paths: input.paths }),
-    ...(input.memoryBoundaryPublisher === undefined ? {} : { memoryBoundaryPublisher: input.memoryBoundaryPublisher }),
-  };
+      taskId,
+      operationId,
+      cycleId,
+      directiveRevision,
+      scope,
+      journal,
+      closurePort,
+      previous,
+      recoveryStateRef,
+      execution,
+      driver: composed.driver,
+      attentionPort: createJsonlAttentionPort({ paths: input.paths }),
+      ...(input.memoryBoundaryPublisher === undefined ? {} : { memoryBoundaryPublisher: input.memoryBoundaryPublisher }),
+    };
+  } catch (error) {
+    if (pair) {
+      try {
+        await closeAgentProvider(pair);
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], 'agent operation preparation and provider cleanup failed');
+      }
+    }
+    throw error;
+  }
 }
 
 export class AgentOperationController {
