@@ -16,6 +16,7 @@ import { id } from '../../../dist/app/contracts/src/index.js';
 const BASE_URL = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
 const MODEL = process.env.HUMANAGENT_RCC_MODEL ?? 'gpt-5.5';
 const PROTOCOL = process.env.HUMANAGENT_RCC_PROTOCOL ?? 'responses';
+const CONTINUE_CURRENT_TURN = process.env.HUMANAGENT_RCC_CONTINUE_CURRENT_TURN === '1';
 assert.ok(['responses', 'openai', 'anthropic'].includes(PROTOCOL), 'unsupported RCC proof protocol');
 const ENDPOINT = { responses: '/v1/responses', openai: '/v1/chat/completions', anthropic: '/v1/messages' }[PROTOCOL];
 
@@ -49,7 +50,9 @@ function bounded(work, milliseconds, label) {
 
 async function run() {
   const paths = await resolveRuntimePaths({ workspace: process.cwd(), controlRoot: join(homedir(), '.humanagent') });
-  const ownedRoot = join(paths.controlRoot, 'test-fixtures', 'provider-protocol-live-r1-20261013');
+  const continuationRoot = join(paths.controlRoot, 'test-fixtures', 'provider-current-turn-proof-r1-20261013');
+  if (CONTINUE_CURRENT_TURN) assert.equal(process.env.HUMANAGENT_TEST_ROOT, continuationRoot, 'explicit canonical owned fixture root required');
+  const ownedRoot = CONTINUE_CURRENT_TURN ? process.env.HUMANAGENT_TEST_ROOT : join(paths.controlRoot, 'test-fixtures', 'provider-protocol-live-r1-20261013');
   await mkdir(ownedRoot, { recursive: true });
   const root = await mkdtemp(join(ownedRoot, `${PROTOCOL}-`));
   const artifactRoot = join(await realpath(root), 'assets');
@@ -87,10 +90,83 @@ async function run() {
     scopeClaim: 'Provider dependency consumer only; no Task/standard turn/native/UI/G5 claim',
   };
   const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(artifactRoot));
+  const { createJsonlActiveTurnJournal } = CONTINUE_CURRENT_TURN
+    ? await import('../../../dist/app/adapters/jsonl/src/active-turn.js') : {};
+  const { ActiveTurnContext } = CONTINUE_CURRENT_TURN
+    ? await import('../../../dist/app/runtime/src/context/active-turn-context.js') : {};
+  const { providerRawContentReader } = CONTINUE_CURRENT_TURN
+    ? await import('../../../dist/app/adapters/provider/src/evidence.js') : {};
+  const transientInstructions = { text: `Continuation proof ${runId}: reply with the single word CONTINUED.` };
+  let turn;
+  let journal;
+  const rawReader = CONTINUE_CURRENT_TURN ? providerRawContentReader(sink) : undefined;
+  // This fixture binds real Runtime/JSONL producers, not a production Task admission.
+  // Reconstruct before each read so the next request uses committed raw facts.
+  async function latestCanonical() {
+    const cold = await ActiveTurnContext.reconstruct(journal, turn.admittedTurn.turnId);
+    const initial = cold.initialInput();
+    assert.ok(initial, 'durable initial input');
+    const units = [{ kind: 'message', role: 'user', text: new TextDecoder().decode(await rawReader.read({ scope, content: initial })) }];
+    const content = new Map();
+    for (const entry of cold.entries()) {
+      assert.ok('envelope' in entry, 'ordinary Provider facts only');
+      const { fact, request } = entry.envelope;
+      assert.ok(fact.kind !== 'tool-call' && fact.kind !== 'tool-result', 'ordinary no-tool proof required');
+      if (fact.kind !== 'content' || fact.channel !== 'assistant-text') continue;
+      const key = `${request.requestId}:${fact.contentUnitId}`;
+      for (const replaced of fact.replacesUnitIds ?? []) content.delete(`${request.requestId}:${replaced}`);
+      const text = new TextDecoder().decode(await rawReader.read({ scope, content: fact.content }));
+      content.set(key, fact.update === 'full' ? text : (content.get(key) ?? '') + text);
+    }
+    for (const text of content.values()) units.push({ kind: 'message', role: 'assistant', text });
+    return { units };
+  }
+  const nativeHooks = CONTINUE_CURRENT_TURN ? {
+    rawEvidence: sink,
+    async registerRequest(registration) {
+      if (!turn) {
+        const turnId = registration.record.request.turnId;
+        const cycleId = id('cycle', `provider-proof-${runId}`);
+        const assignmentId = `assignment-${runId}`;
+        journal = createJsonlActiveTurnJournal({ filePath: join(root, 'journal.jsonl'), turnId });
+        turn = await ActiveTurnContext.open({ journal, currentTurnRef: `fixture-current-${runId}`, binding: {
+          execution: { runtimeId, executionEpoch: 1 }, scope,
+          admittedTurn: { turnId, workAssignmentRef: assignmentId, taskRef: taskId, scopeRef: scope,
+            cycleRef: cycleId, inputRevision: 1, directiveRevision: 1, executionEpoch: 1,
+            runtimeBindingRef: runtimeId, permissionRevision: 'fixture-owned-provider-proof',
+            admissionEvidenceRefs: [], currentTurnRef: `fixture-current-${runId}`, recoveryStateRef: `fixture-recovery-${runId}` },
+          assignment: { assignmentId, taskId, pipelineNodeId: 'provider-proof', attempt: 1, executionEpoch: 1,
+            inputRevision: 1, objective: receipt.request.prompt, targetRefs: [], expectedOutputRefs: [],
+            acceptanceCriteriaDigest: `sha256:${createHash('sha256').update(receipt.request.prompt).digest('hex')}`,
+            successCriteria: ['two ordinary requests in one turn'], failureCriteria: ['request failure'],
+            incompleteCriteria: ['unreleased resource'], requiredCapabilities: [], mergeGate: 'not-required' },
+        } });
+        const ref = await sink.write({ scope, kind: 'execution', type: 'proof-initial-input', locator: runId, content: receipt.request.prompt });
+        await turn.registerInitialInput({ ref, view: { kind: 'utf8-text' } });
+        receipt.fixture = { kind: 'fixture-owned-runtime-producers', journalPath: join(root, 'journal.jsonl'), binding: turn.activeBinding };
+      }
+      return turn.registerProviderRequest(registration);
+    },
+    acceptRawFact: (envelope) => turn.acceptRawFact(envelope),
+    async requestContext(input) {
+      assert.ok(turn.requests().some((record) => record.request.requestId === input.request.requestId && record.phase === 'dispatching'), 'registration precedes materialization');
+      const canonical = await latestCanonical();
+      receipt.contextReads.push({ input, canonical: structuredClone(canonical), acceptedSeq: turn.entries().at(-1)?.seq ?? 0 });
+      return { canonical };
+    },
+  } : {};
+  if (CONTINUE_CURRENT_TURN) {
+    receipt.mode = 'continue-current-turn';
+    receipt.contextReads = [];
+    receipt.requests = [];
+    receipt.transientInstructions = transientInstructions;
+    receipt.executionActions = [];
+  }
   const driver = new ProviderAgentDriver({
     port: composition.port, binding: composition.binding, runtimeId, taskId, operationId, executionEpoch: 1,
     assignmentId: `assignment-${runId}`, scope, inputRefs: [], ownerId: 'humanagent.provider-proof',
     onRequestLifecycle: (event) => receipt.lifecycle.push(event),
+    ...nativeHooks,
   });
   let active = false;
   let pendingStart = false;
@@ -114,6 +190,28 @@ async function run() {
       pendingStart = false;
       active = true;
       for await (const event of driver.observe({ runtimeId })) receipt.observed.push(event);
+      if (CONTINUE_CURRENT_TURN) {
+        receipt.requests.push({ submit: receipt.submit, observed: [...receipt.observed] });
+        assert.ok(receipt.observed.some((event) => event.kind === 'provider.terminal' && event.terminalState === 'succeeded'), 'first ordinary success');
+        assert.equal(new Set(receipt.lifecycle.map((event) => event.requestId)).size, 1, 'no automatic tool request');
+        assert.equal(driver.settlement(), undefined, 'no execution settlement between requests');
+        assert.equal(receipt.close, undefined, 'no close between requests');
+        receipt.betweenRequests = { settlement: 'absent', close: 'not-called', requests: turn.requests() };
+        assert.equal(turn.requests().at(-1)?.phase, 'settled', 'first request durably terminal');
+        receipt.generationAttempts = 2;
+        receipt.continuationSubmit = await driver.continueCurrentTurn({ instructions: transientInstructions });
+        const observed = [];
+        for await (const event of driver.observe({ runtimeId })) {
+          observed.push(event);
+          receipt.observed.push(event);
+        }
+        receipt.requests.push({ submit: receipt.continuationSubmit, observed });
+        receipt.canonicalReadback = await latestCanonical();
+        receipt.durableRequests = turn.requests();
+        receipt.acceptedRawFacts = turn.entries();
+        receipt.journalRecords = await journal.replay();
+      }
+      if (CONTINUE_CURRENT_TURN) receipt.executionActions.push('settle');
       receipt.closure = await driver.settle({ runtimeId, executionEpoch: 1 });
       receipt.settlement = driver.settlement();
     })(), 90_000, 'admission/generation');
@@ -127,10 +225,12 @@ async function run() {
         try {
           if (active && !receipt.settlement) {
             receipt.stop = await driver.requestStop({ runtimeId, executionEpoch: 1, operationId });
+            if (CONTINUE_CURRENT_TURN) receipt.executionActions.push('settle');
             receipt.closure = await driver.settle({ runtimeId, executionEpoch: 1 });
             receipt.settlement = driver.settlement();
           }
         } finally {
+          if (CONTINUE_CURRENT_TURN) receipt.executionActions.push('close');
           receipt.close = await driver.close();
         }
       })(), 10_000, 'cleanup');
@@ -157,15 +257,47 @@ async function run() {
     }
     const starts = receipt.assets.filter(({ content }) => content?.endpoint === ENDPOINT && content?.status !== undefined);
     if (receipt.generationAttempts) {
-      assert.equal(starts.length, 1, 'one real transport start asset');
-      assert.equal(starts[0].content.protocol, PROTOCOL);
-      assert.equal(starts[0].content.model, MODEL);
-      assert.equal(starts[0].content.route, 'rcc:default');
-      assert.ok(starts[0].content.status >= 200 && starts[0].content.status < 300);
+      assert.equal(starts.length, CONTINUE_CURRENT_TURN ? 2 : 1, 'real transport request assets');
+      for (const start of starts) {
+        assert.equal(start.content.protocol, PROTOCOL);
+        assert.equal(start.content.model, MODEL);
+        assert.equal(start.content.route, 'rcc:default');
+        assert.ok(start.content.status >= 200 && start.content.status < 300);
+      }
       const identities = [...receipt.lifecycle, ...receipt.observed.map((event) => event.providerEvent)];
       assert.equal(new Set(identities.map((event) => event.turnId)).size, 1);
-      assert.equal(new Set(identities.map((event) => event.requestId)).size, 1);
-      assert.ok(identities.every((event) => event.parentRequestId === undefined));
+      assert.equal(new Set(identities.map((event) => event.requestId)).size, CONTINUE_CURRENT_TURN ? 2 : 1);
+      if (CONTINUE_CURRENT_TURN) {
+        assert.deepEqual(receipt.executionActions, ['settle', 'close'], 'one final execution settlement and close');
+        assert.equal(receipt.requests.length, 2);
+        assert.equal(receipt.contextReads.length, 2, 'one fresh hook per ordinary request');
+        const [first, second] = receipt.contextReads;
+        assert.equal(first.input.phase, 'initial');
+        assert.equal(second.input.phase, 'continuation');
+        assert.equal(first.input.request.parentRequestId, undefined);
+        assert.notEqual(second.input.request.requestId, first.input.request.requestId);
+        assert.equal(second.input.request.parentRequestId, first.input.request.requestId);
+        assert.equal(second.input.request.turnId, first.input.request.turnId);
+        assert.deepEqual(second.input.execution, first.input.execution);
+        assert.ok(second.acceptedSeq > first.acceptedSeq, 'latest accepted raw facts are visible');
+        assert.ok(second.canonical.units.some((unit) => unit.role === 'assistant' && unit.text.trim()), 'first output in second canonical request');
+        for (const request of receipt.requests) {
+          assert.ok(request.observed.some((event) => event.kind === 'provider.output' && typeof event.summary === 'string' && event.summary.trim()), 'actual per-request output');
+          assert.ok(request.observed.some((event) => event.kind === 'provider.terminal' && event.terminalState === 'succeeded'), 'ordinary per-request finish');
+        }
+        for (const hook of receipt.contextReads) assert.ok(!JSON.stringify(hook.canonical).includes(transientInstructions.text), 'instructions excluded from canonical hook');
+        assert.ok(!JSON.stringify(receipt.canonicalReadback).includes(transientInstructions.text), 'instructions excluded from next readback');
+        assert.ok(!JSON.stringify(receipt.journalRecords).includes(transientInstructions.text), 'instructions excluded from durable turn history');
+        for (const hook of receipt.contextReads) {
+          const requestId = hook.input.request.requestId;
+          assert.ok(receipt.durableRequests.some((record) => record.request.requestId === requestId && record.phase === 'settled'), 'durable request terminal');
+          assert.ok(receipt.acceptedRawFacts.some((entry) => entry.envelope.request.requestId === requestId && entry.envelope.fact.kind === 'request-complete' && entry.envelope.fact.terminal === 'completed'), 'accepted raw completion');
+        }
+        assert.ok(identities.every((event) => event.requestId === first.input.request.requestId
+          ? event.parentRequestId === undefined : event.parentRequestId === first.input.request.requestId));
+      } else {
+        assert.ok(identities.every((event) => event.parentRequestId === undefined));
+      }
       for (const event of receipt.lifecycle) {
         assert.equal(event.runtimeId, runtimeId);
         assert.deepEqual(event.taskId, taskId);
@@ -180,7 +312,7 @@ async function run() {
     }
     assert.equal(receipt.close?.state, 'closed');
     assert.ok(receipt.close.evidenceRefs.some((ref) => receipt.assets.some((asset) => asset.ref.locator === ref.locator)), 'readable close evidence');
-    receipt.result = receipt.error ? 'FAIL' : receipt.generationAttempts === 1 ? 'PASS' : 'BLOCKED';
+    receipt.result = receipt.error ? 'FAIL' : receipt.generationAttempts === (CONTINUE_CURRENT_TURN ? 2 : 1) ? 'PASS' : 'BLOCKED';
   } catch (error) {
     receipt.assertionError = errorRecord(error);
     receipt.result = 'FAIL';
