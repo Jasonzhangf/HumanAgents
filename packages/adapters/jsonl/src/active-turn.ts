@@ -124,7 +124,7 @@ function discriminatorOf(record: ActiveTurnJournalRecord): string {
     case 'accepted-fact':
       return `fact:${record.entry.envelope.request.requestId}:${record.entry.envelope.producerSeq}`;
     case 'child-invocation':
-      return `invocation:${record.record.invocationId}`;
+      return invocationDiscriminatorOf(record.record);
     default:
       return `delivery:${record.entry.invocationId}`;
   }
@@ -251,7 +251,20 @@ function validateInvocationRecord(record: ChildInvocationRecord): void {
     if (record.binding.kind !== 'review') {
       throw new JournalIntegrityError('active turn post-review checkpoint requires a review invocation');
     }
+    if (record.adoptedResultSeq === undefined) {
+      throw new JournalIntegrityError('active turn post-review checkpoint requires an adopted result');
+    }
+    if (record.postReviewCheckpointRef === record.checkpointReceiptRef) {
+      throw new JournalIntegrityError('active turn post-review checkpoint must differ from the pre-call checkpoint');
+    }
   }
+}
+
+function invocationDiscriminatorOf(record: ChildInvocationRecord): string {
+  validateInvocationRecord(record);
+  if (record.postReviewCheckpointRef !== undefined) return `review-checkpoint:${record.invocationId}`;
+  if (record.adoptedResultSeq !== undefined) return `adopted:${record.invocationId}`;
+  return `invocation:${record.invocationId}`;
 }
 
 function validateAcceptedRaw(entry: AcceptedRawFact): void {
@@ -302,8 +315,7 @@ function validateRecordIdentity(
     return { record: typed, turnId, scope: binding.scope };
   }
   if (typed.kind === 'child-invocation') {
-    validateInvocationRecord(typed.record);
-    const turnId = turnIdFromCommitId(commitId, `invocation:${typed.record.invocationId}`, admittedTurnId);
+    const turnId = turnIdFromCommitId(commitId, invocationDiscriminatorOf(typed.record), admittedTurnId);
     return { record: typed, turnId, scope: binding.scope };
   }
   validateAcceptedDelivery(typed.entry);
@@ -459,7 +471,7 @@ function segmentDiscriminatorOf(record: ActiveTurnSegmentJournalRecord): string 
     case 'accepted-fact':
       return `fact:${record.entry.envelope.request.requestId}:${record.entry.envelope.producerSeq}`;
     case 'child-invocation':
-      return `invocation:${record.record.invocationId}`;
+      return invocationDiscriminatorOf(record.record);
     default:
       return `delivery:${record.entry.invocationId}`;
   }
@@ -511,8 +523,7 @@ function validateSegmentRecordIdentity(
     return binding.scope;
   }
   if (typed.kind === 'child-invocation') {
-    validateInvocationRecord(typed.record);
-    segmentIdFromCommitId(commitId, `invocation:${typed.record.invocationId}`, segmentId);
+    segmentIdFromCommitId(commitId, invocationDiscriminatorOf(typed.record), segmentId);
     return binding.scope;
   }
   validateAcceptedDelivery(typed.entry);
