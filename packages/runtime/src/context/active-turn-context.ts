@@ -455,4 +455,3 @@ export function childInvocationId(input: {
 }): string {
   return `invocation:${input.assignmentId}:${input.attempt}:${input.executionEpoch}`;
 }
-
