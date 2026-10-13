@@ -5,8 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { ProviderConfig, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
-import { selectAgentProvider, createAgentProviderPort, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
-import { admitAgentProvider } from '../../packages/app/src/agent-provider-admission.js';
+import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
 import { ProviderAgentDriver } from '../../packages/adapters/provider/src/index.js';
 import { id, type ScopeRef } from '../../packages/contracts/src/index.js';
 
@@ -66,11 +65,15 @@ async function upstream(model: string) {
 test('selected public default factory preserves each actor wire, own admission and fresh lifecycle', async () => {
   await mkdir(fixtureRoot, { recursive: true });
   const root = await mkdtemp(join(fixtureRoot, 'selected-s4-'));
-  const http = await upstream('http.actor.model');
-  const rcc = await upstream('rcc.actor.model');
+  const listeners: Awaited<ReturnType<typeof upstream>>[] = [];
   const drivers: ProviderAgentDriver[] = [];
   const receipts: string[] = [];
+  let primaryError: unknown;
   try {
+    const http = await upstream('http.actor.model');
+    listeners.push(http);
+    const rcc = await upstream('rcc.actor.model');
+    listeners.push(rcc);
     const httpProvider: ProviderConfig = {
       source: 'http', provider: 'http', binding: 'http-binding',
       protocol: 'responses', model: 'http.actor.model', route: 'http-route', baseUrl: http.baseUrl,
@@ -83,14 +86,14 @@ test('selected public default factory preserves each actor wire, own admission a
       { agentId: 'configured-http', roleId: 'execution', source: 'agent', provider: httpProvider },
       { agentId: 'configured-rcc', roleId: 'execution', source: 'agent', provider: rccProvider },
     ];
-    const select = (agentId: string) => selectAgentProvider({
-      roleId: 'execution', agentId, agentProviderBindings: entries,
+    const prepare = (configuredAgentId: string) => prepareAgentProvider({
+      roleId: 'execution', configuredAgentId, agentProviderBindings: entries,
       legacyProvider: httpProvider,
-      createPort: (input) => createAgentProviderPort(input, root),
+      evidenceRoot: root,
     });
-    const httpActor = select('configured-http');
-    const rccActor = select('configured-rcc');
-    const repeated = select('configured-rcc');
+    const httpActor = await prepare('configured-http');
+    const rccActor = await prepare('configured-rcc');
+    const repeated = await prepare('configured-rcc');
     assert.equal(httpActor.configuredAgentId, 'configured-http');
     assert.equal(rccActor.configuredAgentId, 'configured-rcc');
     assert.equal(repeated.configuredAgentId, 'configured-rcc');
@@ -98,14 +101,6 @@ test('selected public default factory preserves each actor wire, own admission a
     assert.ok(httpActor.port !== rccActor.port, 'actors must not share the default port');
 
     const execute = async (actor: AgentProviderComposition, runtimeId: string) => {
-      const readiness = await admitAgentProvider(actor);
-      assert.equal(readiness.bindingId, actor.binding.bindingId);
-      assert.equal(readiness.capabilityDigest, actor.binding.capabilityDigest);
-      assert.equal(readiness.state, actor.source === 'http' ? 'unknown' : 'ready');
-      if (actor.source === 'http') {
-        assert.equal(readiness.ownerId, 'humanagent.provider-adapter.http');
-        assert.equal(readiness.nextAction?.ref, 'http.start');
-      }
       const scope: ScopeRef = {
         organId: id('organ', 'selected-s4'), taskId: id('task', runtimeId), operationId: id('operation', runtimeId),
       };
@@ -153,11 +148,10 @@ test('selected public default factory preserves each actor wire, own admission a
     ]);
 
     rcc.deny();
-    const rejected = select('configured-rcc');
     const postsBefore = rcc.wires.filter((wire) => wire.method === 'POST').length;
-    await assert.rejects(() => admitAgentProvider(rejected), /health endpoint did not report status ok/);
+    await assert.rejects(() => prepare('configured-rcc'), /health endpoint did not report status ok/);
     assert.equal(rcc.wires.filter((wire) => wire.method === 'POST').length, postsBefore);
-    await execute(select('configured-http'), 'http-after-reject');
+    await execute(await prepare('configured-http'), 'http-after-reject');
     assertWire(http.wires, httpProvider.model, 2);
     assertWire(rcc.wires, rccProvider.model, 2);
     assert.deepEqual(receipts, [
@@ -165,12 +159,27 @@ test('selected public default factory preserves each actor wire, own admission a
       'rcc-repeat:request-settled', 'rcc-repeat:closed', 'http-after-reject:request-settled', 'http-after-reject:closed',
     ]);
     console.log(JSON.stringify({ root, http: http.baseUrl, rcc: rcc.baseUrl, receipts, httpWire: http.wires, rccWire: rcc.wires }));
+  } catch (error: unknown) {
+    primaryError = error;
+    throw error;
   } finally {
-    for (const driver of drivers) await driver.close();
-    await http.close();
-    await rcc.close();
-    await rm(root, { recursive: true, force: true });
-    assert.equal((await readdir(fixtureRoot)).includes(root.slice(root.lastIndexOf('/') + 1)), false);
-    console.log('S4 cleanup: all drivers closed; both listeners closed; owned evidence root removed');
+    const closedDrivers = await Promise.allSettled(drivers.map((driver) => driver.close()));
+    const closedListeners = await Promise.allSettled(listeners.map((listener) => listener.close()));
+    const cleanupErrors = [...closedDrivers, ...closedListeners]
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (cleanupErrors.length > 0) {
+      if (primaryError !== undefined) console.error('S4 cleanup failure; original failure preserved', cleanupErrors);
+      else throw new AggregateError(cleanupErrors, 'S4 driver/listener cleanup failed');
+    } else {
+      try {
+        await rm(root, { recursive: true, force: true });
+        assert.equal((await readdir(fixtureRoot)).includes(root.slice(root.lastIndexOf('/') + 1)), false);
+        console.log(`S4 cleanup: ${drivers.length} drivers closed; ${listeners.length} listeners closed; owned evidence root removed`);
+      } catch (cleanupError: unknown) {
+        if (primaryError !== undefined) console.error('S4 evidence cleanup failure; original failure preserved', cleanupError);
+        else throw cleanupError;
+      }
+    }
   }
 });
