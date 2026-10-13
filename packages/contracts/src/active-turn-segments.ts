@@ -4,8 +4,8 @@ import type { JournalCommitRef } from './i2-history.js';
 import type { TaskRuntimeIncarnation } from './framework.js';
 import type { CompletionReadInput } from './operation-completion.js';
 import type { RecoveryHoldFacts } from './native-reasoning.js';
-import type { EvidenceRef, ScopeRef, WorkAssignment } from './index.js';
-import { assertEvidenceRef, assertScope, validateWorkAssignment } from './index.js';
+import type { AdmittedTurn, EvidenceRef, ScopeRef, WorkAssignment } from './index.js';
+import { assertEvidenceRef, assertScope, validateAdmittedTurn, validateWorkAssignment } from './index.js';
 import {
   validateAcceptedChildDelivery,
   validateAcceptedRawFact,
@@ -155,6 +155,19 @@ export interface PreparedActiveTurnSegmentCaptureV2 {
 export interface ActiveTurnInitialSegmentCapture {
   readonly bindingCommitRef: JournalCommitRef;
   readonly body: ActiveTurnCaptureBody;
+}
+
+/**
+ * Canonical source bundle for one resumed-segment native save. It is a read
+ * result assembled by the App/Journal owner, not a grant, permission or second
+ * admission record. Native save and semantic history must import this same
+ * type so neither owner duplicates the shared v2 source shape.
+ */
+export interface NativeSegmentSaveSourceV2 {
+  readonly originalAdmittedTurn: AdmittedTurn;
+  readonly originalBusinessTurnRef: OriginalBusinessTurnRef;
+  readonly opened: ResumedTurnSegmentOpened;
+  readonly openedCommitRef: JournalCommitRef;
 }
 
 /** Immutable cold read of one business turn's ordered segment chain. */
@@ -448,6 +461,32 @@ export function validateActiveTurnSegmentChainRead(input: unknown): asserts inpu
     seenSegmentIds.add(segment.segmentId);
     previousEpoch = segment.binding.execution.executionEpoch;
     previousSegmentId = segment.segmentId;
+  }
+}
+
+export function validateNativeSegmentSaveSourceV2(input: unknown): asserts input is NativeSegmentSaveSourceV2 {
+  assertPlainObject(input, 'native segment save source v2');
+  validateAdmittedTurn(input.originalAdmittedTurn as AdmittedTurn);
+  validateOriginalBusinessTurnRef(input.originalBusinessTurnRef as OriginalBusinessTurnRef);
+  validateResumedTurnSegmentOpened(input.opened as ResumedTurnSegmentOpened);
+  validateJournalCommitRef(input.openedCommitRef as JournalCommitRef);
+  const original = input.originalAdmittedTurn as AdmittedTurn;
+  const businessRef = input.originalBusinessTurnRef as OriginalBusinessTurnRef;
+  const opened = input.opened as ResumedTurnSegmentOpened;
+  if (original.turnId !== businessRef.businessTurnId) {
+    throw new ContractError('native segment source admission does not match its business turn');
+  }
+  if (original.workAssignmentRef !== opened.binding.assignment.assignmentId) {
+    throw new ContractError('native segment source admission does not match its segment assignment');
+  }
+  if (businessRef.bindingCommitRef.commitId !== opened.businessTurnRef.bindingCommitRef.commitId
+    || businessRef.bindingCommitRef.journalSeq !== opened.businessTurnRef.bindingCommitRef.journalSeq
+    || businessRef.bindingCommitRef.recordDigest !== opened.businessTurnRef.bindingCommitRef.recordDigest) {
+    throw new ContractError('native segment source business refs do not match its opened record');
+  }
+  if (businessRef.execution.runtimeId !== opened.businessTurnRef.execution.runtimeId
+    || businessRef.execution.executionEpoch !== opened.businessTurnRef.execution.executionEpoch) {
+    throw new ContractError('native segment source execution does not match its opened record');
   }
 }
 
