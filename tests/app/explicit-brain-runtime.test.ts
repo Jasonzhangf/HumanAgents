@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,8 @@ import {
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
 import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/fake-port.js';
 import type { ProviderBinding } from '../../packages/contracts/src/index.js';
+import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
+import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
 
 function digest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
@@ -272,7 +275,7 @@ test('provider explicit brain interpreter loads the interaction template and val
     configDigest: 'sha256:explicit-interpret-config',
     capabilityDigest: 'sha256:explicit-interpret-capability',
   };
-  const interpreter = createProviderExplicitBrainInterpreter({
+  const options = {
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
     port: new FakeReplayExecutionRuntimePort({
@@ -307,7 +310,82 @@ test('provider explicit brain interpreter loads the interaction template and val
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
       ],
     }),
+  };
+
+  // Confirmed shared-pair gap; probability unknown, wrong source/model has high
+  // impact. Extend this consumer with one local selected wire, not a matrix.
+  const posts: string[] = [];
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      if (request.method === 'POST') posts.push(Buffer.concat(chunks).toString('utf8'));
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end([
+        { type: 'response.created', response: { id: `selected-${posts.length}` } },
+        { type: 'response.output_text.done', item_id: 'message-final', text: JSON.stringify({
+          kind: 'requirement', normalizedInput: '整理启动步骤', knownFacts: ['README exists'],
+          proposal: {
+            revision: 1, intent: 'create', title: '整理启动步骤', objective: '整理项目启动步骤',
+            deliverable: '可执行的启动步骤清单', owner: null, ownerNote: '运行时决定 owner。',
+            deliveryConditions: ['启动步骤完整并有证据'], evidenceRefs: ['README'], blockingGaps: [],
+            lifecycle: 'draft -> awaiting-user-confirmation -> requirement.submit',
+            requiresUserConfirmation: true, confirmationPrompt: '是否确认并提交该需求？',
+          }, decisionRefs: ['decision:provider-test'],
+        }) },
+        { type: 'response.completed', response: { id: `selected-${posts.length}` } },
+      ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+    })().catch((error: unknown) => { response.writeHead(500); response.end(String(error)); });
   });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('missing socket address');
+  const root = await mkdtemp(join(tmpdir(), 'interaction-selected-'));
+  const entries: EffectiveAgentProviderBinding[] = [{
+    agentId: 'configured-interaction', roleId: 'interaction', source: 'agent',
+    provider: { source: 'http', provider: 'http', binding: 'selected-interaction', protocol: 'responses',
+      model: 'selected.interaction.model', route: 'selected-route', baseUrl: `http://127.0.0.1:${address.port}` },
+  }];
+  const compositions: AgentProviderComposition[] = [];
+  const lifecycle: string[] = [];
+  const starts: Parameters<AgentProviderComposition['port']['start']>[0][] = [];
+  const observations: Parameters<AgentProviderComposition['port']['observe']>[0][] = [];
+  let borrowedStarts = 0;
+  const primaryStart = options.port.start.bind(options.port);
+  options.port.start = async (request) => { borrowedStarts += 1; return primaryStart(request); };
+  const selectedOptions = {
+    ...options,
+    prepareAgentProvider: async (selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string }) => {
+      assert.deepEqual(selection, { roleId: 'interaction' });
+      const own = await prepareAgentProvider({ ...selection, agentProviderBindings: entries, evidenceRoot: root });
+      assert.equal(own.configuredAgentId, 'configured-interaction');
+      assert.equal(own.source, 'http');
+      assert.equal(own.binding.modelRef, 'selected.interaction.model');
+      const index = compositions.length;
+      compositions.push(own);
+      const start = own.port.start.bind(own.port);
+      const settle = own.port.settle.bind(own.port);
+      const close = own.port.close.bind(own.port);
+      const observe = own.port.observe.bind(own.port);
+      own.port.start = async (request) => { starts.push(request); return start(request); };
+      own.port.observe = (request) => { observations.push(request); return observe(request); };
+      own.port.settle = async (request) => {
+        assert.equal(request.runtimeId, starts[index].runtimeId);
+        const receipt = await settle(request); lifecycle.push(`${index}:settled`); return receipt;
+      };
+      own.port.close = async (binding) => {
+        assert.equal(binding, own.binding);
+        const receipt = await close(binding); lifecycle.push(`${index}:closed`); return receipt;
+      };
+      return own;
+    },
+  };
+  const interpreter = createProviderExplicitBrainInterpreter(selectedOptions);
+
+  try {
 
   const result = await interpreter.interpret({
     interactionId: 'interaction-provider-test',
@@ -324,8 +402,39 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.equal(result.intent, 'create');
   assert.match(result.proposal, /可执行的启动步骤清单/);
   assert.equal(result.proposal.includes('awaiting-user-confirmation'), false);
+  assert.equal(compositions.length, 1, 'selected interaction callback must run');
+  assert.deepEqual(lifecycle, ['0:settled', '0:closed']);
+  await interpreter.interpret({ interactionId: 'interaction-provider-second', inputRevision: 1,
+    sourceRef: 'ui:second', rawInput: '第二次独立输入', clarifications: [], taskCandidates: [] });
+  assert.equal(compositions.length, 2);
+  assert.ok(compositions[0].port !== compositions[1].port);
+  assert.ok(starts[0].runtimeId !== starts[1].runtimeId);
+  assert.ok(starts[0].taskId.value !== starts[1].taskId.value);
+  assert.ok(observations[0].requestId !== undefined);
+  assert.ok(observations[1].requestId !== undefined);
+  assert.ok(observations[0].requestId !== observations[1].requestId);
+  assert.ok(observations[0].turnId !== observations[1].turnId);
+  assert.deepEqual(starts.map((start) => start.inputRefs), [
+    ['humanagent://interaction/interaction-provider-test/revision/1'],
+    ['humanagent://interaction/interaction-provider-second/revision/1'],
+  ]);
+  assert.equal(borrowedStarts, 0);
+  assert.equal(posts.length, 2);
+  for (const body of posts) assert.equal(JSON.parse(body).model, 'selected.interaction.model');
+  assert.ok(posts[0].includes('帮我整理启动步骤'));
+  assert.ok(posts[1].includes('第二次独立输入'));
+  assert.ok(posts[1].includes('ui:second'));
+  assert.equal(posts[1].includes('帮我整理启动步骤'), false);
+  assert.deepEqual(lifecycle, ['0:settled', '0:closed', '1:settled', '1:closed']);
+  } finally {
+    server.closeIdleConnections?.();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    assert.equal(server.address(), null);
+    await rm(root, { recursive: true, force: true });
+    await assert.rejects(() => realpath(root), /ENOENT/);
+  }
 
-  const arbitraryProposal = createProviderExplicitBrainInterpreter({
+  const malformedOptions = {
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
     port: new FakeReplayExecutionRuntimePort({
@@ -346,18 +455,96 @@ test('provider explicit brain interpreter loads the interaction template and val
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
       ],
     }),
+  };
+  const malformedLifecycle: string[] = [];
+  const malformedSettle = malformedOptions.port.settle.bind(malformedOptions.port);
+  const malformedClose = malformedOptions.port.close.bind(malformedOptions.port);
+  malformedOptions.port.settle = async (request) => {
+    malformedLifecycle.push('settle');
+    return malformedSettle(request);
+  };
+  malformedOptions.port.close = async (binding) => {
+    assert.equal(binding, malformedOptions.binding);
+    malformedLifecycle.push('close');
+    return malformedClose(binding);
+  };
+  const arbitraryProposal = createProviderExplicitBrainInterpreter({
+    ...malformedOptions,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+      provider: entries[0].provider!, binding, port: malformedOptions.port }),
   });
+  const malformedInput = {
+    interactionId: 'interaction-arbitrary-proposal', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: '帮我整理启动步骤', clarifications: [], taskCandidates: [],
+  };
   await assert.rejects(
-    () => arbitraryProposal.interpret({
-      interactionId: 'interaction-arbitrary-proposal',
-      inputRevision: 1,
-      sourceRef: 'ui:new-task',
-      rawInput: '帮我整理启动步骤',
-      clarifications: [],
-      taskCandidates: [],
-    }),
+    () => arbitraryProposal.interpret(malformedInput),
     /does not match the structured proposal contract/,
   );
+  assert.deepEqual(malformedLifecycle, ['settle', 'close']);
+
+  // Driver.submit reaches start, not port.submit. An unaccepted request has
+  // no invented settlement; original request and cleanup errors stay intact.
+  const originalStart = malformedOptions.port.start.bind(malformedOptions.port);
+  const startError = new Error('actual start rejection');
+  const closeError = new Error('owned close rejection');
+  malformedLifecycle.length = 0;
+  malformedOptions.port.start = async () => { malformedLifecycle.push('start'); throw startError; };
+  malformedOptions.port.close = async () => { malformedLifecycle.push('close'); throw closeError; };
+  await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    if (!(error instanceof AggregateError)) throw error;
+    assert.equal(error.errors[0], startError);
+    assert.equal(error.errors[1], closeError);
+    return true;
+  });
+  assert.deepEqual(malformedLifecycle, ['start', 'close']);
+
+  // Fail observation after accepted start, with a real terminal fake session
+  // available to settle. One required settle precedes the owned close.
+  malformedOptions.port.start = originalStart;
+  const originalObserve = malformedOptions.port.observe.bind(malformedOptions.port);
+  const observationError = new Error('observation rejection');
+  malformedOptions.port.observe = async function* (request) {
+    for await (const event of originalObserve(request)) {
+      if (event.terminalState !== undefined) throw observationError;
+      yield event;
+    }
+  };
+  malformedOptions.port.close = async (binding) => {
+    malformedLifecycle.push('close'); return malformedClose(binding);
+  };
+  malformedLifecycle.length = 0;
+  await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => error === observationError);
+  assert.deepEqual(malformedLifecycle, ['settle', 'close']);
+
+  const settleError = new Error('settlement rejection');
+  malformedOptions.port.settle = async () => { malformedLifecycle.push('settle'); throw settleError; };
+  malformedOptions.port.close = async (binding) => {
+    malformedLifecycle.push('close'); await malformedClose(binding); throw closeError;
+  };
+  malformedLifecycle.length = 0;
+  await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => {
+    if (!(error instanceof AggregateError)) throw error;
+    const executionError: unknown = error.errors[0];
+    if (!(executionError instanceof AggregateError)) throw executionError;
+    assert.equal(executionError.errors[0], observationError);
+    assert.equal(executionError.errors[1], settleError);
+    assert.equal(error.errors[1], closeError);
+    return true;
+  });
+  assert.deepEqual(malformedLifecycle, ['settle', 'close']);
+
+  // A normal settle rejection is not retried by error cleanup.
+  malformedOptions.port.observe = originalObserve;
+  malformedLifecycle.length = 0;
+  await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => {
+    if (!(error instanceof AggregateError)) throw error;
+    assert.equal(error.errors[0], settleError);
+    assert.equal(error.errors[1], closeError);
+    return true;
+  });
+  assert.deepEqual(malformedLifecycle, ['settle', 'close']);
 });
 
 test('provider explicit brain interpreter accepts the live requirement contract with intent owned by proposal', async () => {
@@ -370,7 +557,7 @@ test('provider explicit brain interpreter accepts the live requirement contract 
     configDigest: 'sha256:explicit-live-requirement-config',
     capabilityDigest: 'sha256:explicit-live-requirement-capability',
   };
-  const interpreter = createProviderExplicitBrainInterpreter({
+  const options = {
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
     port: new FakeReplayExecutionRuntimePort({
@@ -405,7 +592,11 @@ test('provider explicit brain interpreter accepts the live requirement contract 
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
       ],
     }),
-  });
+  };
+  let borrowedCloses = 0;
+  const close = options.port.close.bind(options.port);
+  options.port.close = async (binding) => { borrowedCloses += 1; return close(binding); };
+  const interpreter = createProviderExplicitBrainInterpreter(options);
 
   const result = await interpreter.interpret({
     interactionId: 'interaction-1',
@@ -420,4 +611,19 @@ test('provider explicit brain interpreter accepts the live requirement contract 
   if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
   assert.equal(result.intent, 'create');
   assert.match(result.proposal, /HumanAgent 项目中文启动检查清单/);
+  assert.equal(borrowedCloses, 0);
+
+  // Successful-path close rejects directly and gets exactly one attempt.
+  const closeError = new Error('successful interpretation close rejection');
+  let ownCloses = 0;
+  options.port.close = async (binding) => { ownCloses += 1; await close(binding); throw closeError; };
+  const ownedInterpreter = createProviderExplicitBrainInterpreter({ ...options,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port: options.port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'existing-fixture', baseUrl: binding.endpointRef } }),
+  });
+  await assert.rejects(() => ownedInterpreter.interpret({ interactionId: 'interaction-close', inputRevision: 1,
+    sourceRef: 'ui:new-task', rawInput: '整理项目启动检查清单', clarifications: [], taskCandidates: [] }),
+  (error: unknown) => error === closeError);
+  assert.equal(ownCloses, 1);
 });

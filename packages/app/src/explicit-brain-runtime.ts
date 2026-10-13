@@ -22,6 +22,7 @@ import {
   type ExplicitBrainWorkspaceToolPort,
 } from '../../runtime/src/explicit-brain/index.js';
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
+import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -332,6 +333,10 @@ export function createProviderExplicitBrainInterpreter(input: {
   readonly port: ExecutionRuntimePort;
   readonly binding: ProviderBinding;
   readonly templateRoot: string;
+  readonly prepareAgentProvider?: (input: {
+    readonly roleId: import('../../config/src/index.js').AgentRole;
+    readonly configuredAgentId?: string;
+  }) => Promise<AgentProviderComposition>;
   /**
    * Private App callback for the authoritative Provider settlement receipt.
    * The App assembly points it at the existing interaction journal; the
@@ -355,50 +360,78 @@ export function createProviderExplicitBrainInterpreter(input: {
     async interpret(request) {
       const identity = randomUUID();
       const runtimeId = `explicit-interpret-${identity}`;
-      const taskId = id('task', `explicit-interpret-${identity}`);
-      const operationId = id('operation', `explicit-interpret-${identity}`);
-      const driver = new ProviderAgentDriver({
-        port: input.port,
-        binding: input.binding,
-        runtimeId,
-        taskId,
-        operationId,
-        executionEpoch: 1,
-        assignmentId: `explicit-interpret-${identity}`,
-        scope: { organId: id('organ', 'humanagent-explicit-brain'), taskId, operationId },
-        inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
-        ownerId: 'humanagent.runtime.explicit-brain',
-      });
-      const output: string[] = [];
-      await driver.start({ runtimeId, taskId, operationId, organId: id('organ', 'humanagent-explicit-brain'), executionEpoch: 1, assignmentId: `explicit-interpret-${identity}` });
-      await driver.submit({
-        taskId,
-        executionEpoch: 1,
-        assignmentId: `explicit-interpret-${identity}`,
-        payload: { prompt: interpreterPrompt(request, await loadPromptSegments()) },
-      });
-      for await (const event of driver.observe({ runtimeId })) {
-        if (event.kind === 'provider.output' && event.summary) output.push(event.summary);
-        if (event.terminalState !== undefined) break;
-      }
-      const closure = await driver.settle({ runtimeId, executionEpoch: 1 });
-      if (closure.state !== 'succeeded') {
-        throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
-      }
-      const interpretation = parseInterpreterOutput(output.join(''), request);
-      // Only the simple-answer path carries the authoritative settlement receipt;
-      // complex requirement routing keeps its existing behavior.
-      if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
-        const settlement = driver.settlement();
-        if (settlement === undefined) {
-          throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
-        }
-        await input.publishProviderSettlement({
-          interactionId: request.interactionId,
-          inputRevision: request.inputRevision,
-          settlement,
+      const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
+      let driver: ProviderAgentDriver | undefined;
+      let submitted = false;
+      let settleAttempted = false;
+      let interpretation: ExplicitBrainInterpretation;
+      try {
+        const taskId = id('task', `explicit-interpret-${identity}`);
+        const operationId = id('operation', `explicit-interpret-${identity}`);
+        driver = new ProviderAgentDriver({
+          port: owned === undefined ? input.port : owned.port,
+          binding: owned === undefined ? input.binding : owned.binding,
+          runtimeId,
+          taskId,
+          operationId,
+          executionEpoch: 1,
+          assignmentId: `explicit-interpret-${identity}`,
+          scope: { organId: id('organ', 'humanagent-explicit-brain'), taskId, operationId },
+          inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
+          ownerId: 'humanagent.runtime.explicit-brain',
         });
+        const output: string[] = [];
+        await driver.start({ runtimeId, taskId, operationId, organId: id('organ', 'humanagent-explicit-brain'), executionEpoch: 1, assignmentId: `explicit-interpret-${identity}` });
+        await driver.submit({
+          taskId,
+          executionEpoch: 1,
+          assignmentId: `explicit-interpret-${identity}`,
+          payload: { prompt: interpreterPrompt(request, await loadPromptSegments()) },
+        });
+        submitted = true;
+        for await (const event of driver.observe({ runtimeId })) {
+          if (event.kind === 'provider.output' && event.summary) output.push(event.summary);
+          if (event.terminalState !== undefined) break;
+        }
+        settleAttempted = true;
+        const closure = await driver.settle({ runtimeId, executionEpoch: 1 });
+        if (closure.state !== 'succeeded') {
+          throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
+        }
+        interpretation = parseInterpreterOutput(output.join(''), request);
+        // Only the simple-answer path carries the authoritative settlement receipt;
+        // complex requirement routing keeps its existing behavior.
+        if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
+          const settlement = driver.settlement();
+          if (settlement === undefined) {
+            throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
+          }
+          await input.publishProviderSettlement({
+            interactionId: request.interactionId,
+            inputRevision: request.inputRevision,
+            settlement,
+          });
+        }
+      } catch (error) {
+        let failure = error;
+        if (submitted && !settleAttempted && driver !== undefined) {
+          settleAttempted = true;
+          try {
+            await driver.settle({ runtimeId, executionEpoch: 1 });
+          } catch (settleError) {
+            failure = new AggregateError([failure, settleError], 'interaction observation and settlement failed');
+          }
+        }
+        if (owned !== undefined) {
+          try {
+            await closeAgentProvider(owned);
+          } catch (closeError) {
+            throw new AggregateError([failure, closeError], 'interaction execution and provider close failed');
+          }
+        }
+        throw failure;
       }
+      if (owned !== undefined) await closeAgentProvider(owned);
       return interpretation;
     },
   };
