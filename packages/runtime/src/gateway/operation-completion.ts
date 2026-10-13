@@ -3,11 +3,14 @@ import {
   validateFileWriteEffectIntent,
   type CompletionReadInput,
   type CompletionReadback,
+  type CompletionCommitIdentity,
   type DurableCompletionReceipt,
   type EffectExecutionBinding,
+  type EffectIdentity,
   type FileWriteEffect,
   type FileWriteCompletionFact,
   type FileWriteEffectIntent,
+  type ProviderExecutionIdentityRef,
 } from '../../../contracts/src/index.js';
 
 export interface OperationCompletionCommitPort {
@@ -15,8 +18,29 @@ export interface OperationCompletionCommitPort {
   commitCompletion(input: FileWriteCompletionFact): Promise<DurableCompletionReceipt>;
 }
 
+/**
+ * The exact read descriptor for one committed effect intent. It carries only
+ * the identity needed to call `readExact`; it never copies a completion result
+ * or invents a confirmed state. A caller that has a descriptor must still read
+ * the completion truth through the journal port.
+ */
+export interface OperationCompletionLookupDescriptor {
+  readonly commitIdentity: CompletionCommitIdentity;
+  readonly binding: EffectExecutionBinding;
+  readonly effectId: EffectIdentity;
+}
+
 export interface OperationCompletionJournalPort extends OperationCompletionCommitPort {
   readExact(input: CompletionReadInput): Promise<CompletionReadback>;
+  /**
+   * Discovers the exact lookup descriptors for every committed effect intent
+   * bound to one real execution, including intents whose completion was never
+   * committed. Discovery reads the actual committed intents; it does not scan
+   * successful tool results and it never reports completion truth.
+   */
+  discoverExactExecution(input: {
+    readonly execution: ProviderExecutionIdentityRef;
+  }): Promise<readonly OperationCompletionLookupDescriptor[]>;
 }
 
 export class OperationCompletionIntegrityError extends Error {

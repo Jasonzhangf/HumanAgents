@@ -12,8 +12,10 @@ import {
   type EffectIdentity,
   type FileWriteCompletionFact,
   type FileWriteEffectIntent,
+  type ProviderExecutionIdentityRef,
 } from '../../../contracts/src/index.js';
 import type {
+  OperationCompletionLookupDescriptor,
   OperationCompletionJournalPort,
 } from '../../../runtime/src/gateway/operation-completion.js';
 import { JsonlOrganJournal, JournalIntegrityError, type JournalRecord } from './index.js';
@@ -24,6 +26,18 @@ type OperationCompletionPayload =
 
 function intentCommitId(binding: EffectExecutionBinding, effectId: EffectIdentity): string {
   return `operation-effect-intent:v1:${binding.toolOperationId.value}:${effectId.slice('file-write-effect:v1:'.length)}`;
+}
+
+function sameExecutionIdentity(
+  left: ProviderExecutionIdentityRef,
+  right: ProviderExecutionIdentityRef,
+): boolean {
+  return left.runtimeId === right.runtimeId
+    && left.taskId.value === right.taskId.value
+    && left.operationId.value === right.operationId.value
+    && left.organId?.value === right.organId?.value
+    && left.cycleId?.value === right.cycleId?.value
+    && left.executionEpoch === right.executionEpoch;
 }
 
 function parsePayload(record: JournalRecord): OperationCompletionPayload {
@@ -154,5 +168,27 @@ export class JsonlOperationCompletionJournal implements OperationCompletionJourn
       nextAction: 'reconcile',
       replayAllowed: false,
     };
+  }
+
+  async discoverExactExecution(input: {
+    readonly execution: ProviderExecutionIdentityRef;
+  }): Promise<readonly OperationCompletionLookupDescriptor[]> {
+    const records = await this.journal.replay();
+    const descriptors: OperationCompletionLookupDescriptor[] = [];
+    for (const record of records) {
+      const payload = parsePayload(record);
+      if (payload.kind !== 'operation-effect-intent') continue;
+      const { binding, effect } = payload.intent;
+      if (!sameExecutionIdentity(binding.execution, input.execution)) continue;
+      if (effect.effectId !== await fileWriteEffectId(binding)) {
+        throw new JournalIntegrityError('committed effect intent identity does not match its binding');
+      }
+      descriptors.push({
+        commitIdentity: await completionCommitIdentity(binding, effect.effectId),
+        binding,
+        effectId: effect.effectId,
+      });
+    }
+    return descriptors;
   }
 }
