@@ -6,6 +6,7 @@ import {
   type ProviderBinding,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
+import type { ProviderRequestContext } from '../../../packages/contracts/src/provider-request-context.js';
 import {
   AnthropicProviderCodec,
   OpenAIChatProviderCodec,
@@ -187,6 +188,174 @@ test('RCC v3 Responses submit opens a second stream bound to the completed tool 
     { type: 'function_call', call_id: 'call-readme', name: 'file_read', arguments: JSON.stringify({ path: 'README.md' }) },
     { type: 'function_call_output', call_id: 'call-readme', output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }) },
   ]);
+  const submitWrite = built.writes.find((write) => write.type === 'submit');
+  assert.deepEqual(submitWrite?.content, {
+    status: 200,
+    endpoint: '/v1/responses',
+    protocol: 'responses',
+    model: 'provider.model',
+    route: 'cc:test-route',
+    callIds: ['call-readme'],
+    continuationRef: 'response-round-1',
+  });
+});
+
+test('RCC v3 Responses typed submit sends the native context without legacy continuation fields', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const streams = [
+    chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-native-1' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'call-native', name: 'file_read', arguments: '{"path":"README.md"}' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-native-1' } })}\n\n`,
+    ]),
+    chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-native-2' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'message-native', text: 'NATIVE_CONTINUATION_OK' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-native-2' } })}\n\n`,
+    ]),
+  ];
+  const built = adapter(async (url, init) => {
+    calls.push({ url, init });
+    const body = streams.shift();
+    if (!body) throw new Error('unexpected provider round');
+    return response(body);
+  });
+  const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];
+  await built.adapter.start({ ...startInput(), tools });
+  const roundOne = [];
+  for await (const event of built.adapter.observe(execution)) roundOne.push(event);
+  assert.equal(roundOne.at(-1)?.terminalState, 'waiting');
+
+  const submitted = await built.adapter.submit({
+    ...execution,
+    inputRefs: ['asset://provider-tool/output/call-native'],
+    evidenceRefs: [evidence('native-tool-result')],
+    payload: { toolResultRef: 'asset://provider-tool/output/call-native' },
+    tools,
+    requestContext: typedContext(),
+  });
+  assert.equal(submitted.status, 'accepted');
+  const roundTwo = [];
+  for await (const event of built.adapter.observe(execution)) roundTwo.push(event);
+  assert.equal(roundTwo.find((event) => event.kind === 'output')?.summary, 'NATIVE_CONTINUATION_OK');
+  assert.equal((await built.adapter.settle(execution)).state, 'succeeded');
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.url, 'http://127.0.0.1:4444/v1/responses');
+  assert.equal((JSON.parse(String(calls[1]?.init.body)) as { model?: string }).model, 'provider.model');
+  const submitWrite = built.writes.find((write) => write.type === 'submit');
+  assert.deepEqual(submitWrite?.content, {
+    status: 200,
+    endpoint: '/v1/responses',
+    protocol: 'responses',
+    model: 'provider.model',
+    route: 'cc:test-route',
+  });
+});
+
+test('RCC v3 openai typed submit sends the continuation to Chat Completions', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const streams = [
+    chunks([
+      'data: {"id":"chat-native-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}\n\n',
+      'data: {"id":"chat-native-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ]),
+    chunks([
+      'data: {"id":"chat-native-2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"OPENAI_CONTINUATION_OK"},"finish_reason":null}]}\n\n',
+      'data: {"id":"chat-native-2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ]),
+  ];
+  const built = openAIAdapter(async (url, init) => {
+    calls.push({ url, init });
+    const body = streams.shift();
+    if (!body) throw new Error('unexpected provider round');
+    return response(body);
+  });
+  const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];
+  await built.adapter.start({ ...startInput(), tools });
+  for await (const _event of built.adapter.observe(execution)) void _event;
+
+  const submitted = await built.adapter.submit({
+    ...execution,
+    inputRefs: ['asset://provider-tool/output/call-native'],
+    evidenceRefs: [evidence('native-tool-result')],
+    payload: { toolResultRef: 'asset://provider-tool/output/call-native' },
+    tools,
+    requestContext: typedContext(),
+  });
+  assert.equal(submitted.status, 'accepted');
+  const roundTwo = [];
+  for await (const event of built.adapter.observe(execution)) roundTwo.push(event);
+  assert.equal(roundTwo.find((event) => event.kind === 'output')?.summary, 'OPENAI_CONTINUATION_OK');
+  assert.equal((await built.adapter.settle(execution)).state, 'succeeded');
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.url, 'http://127.0.0.1:4444/v1/chat/completions');
+  assert.equal((JSON.parse(String(calls[1]?.init.body)) as { model?: string }).model, 'provider.model');
+  const submitWrite = built.writes.find((write) => write.type === 'submit');
+  assert.deepEqual(submitWrite?.content, {
+    status: 200,
+    endpoint: '/v1/chat/completions',
+    protocol: 'openai',
+    model: 'provider.model',
+    route: 'rcc-openai-entry:test-route',
+  });
+});
+
+test('RCC v3 anthropic typed submit sends the continuation to Messages', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const streams = [
+    chunks([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-native-1","model":"provider.model","role":"assistant"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]),
+    chunks([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-native-2","model":"provider.model","role":"assistant"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ANTHROPIC_CONTINUATION_OK"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]),
+  ];
+  const built = anthropicAdapter(async (url, init) => {
+    calls.push({ url, init });
+    const body = streams.shift();
+    if (!body) throw new Error('unexpected provider round');
+    return response(body);
+  });
+  const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];
+  await built.adapter.start({ ...startInput(), tools });
+  for await (const _event of built.adapter.observe(execution)) void _event;
+
+  const submitted = await built.adapter.submit({
+    ...execution,
+    inputRefs: ['asset://provider-tool/output/call-native'],
+    evidenceRefs: [evidence('native-tool-result')],
+    payload: { toolResultRef: 'asset://provider-tool/output/call-native' },
+    tools,
+    requestContext: typedContext(),
+  });
+  assert.equal(submitted.status, 'accepted');
+  const roundTwo = [];
+  for await (const event of built.adapter.observe(execution)) roundTwo.push(event);
+  assert.equal(roundTwo.some((event) => event.kind === 'output' && event.summary === 'ANTHROPIC_CONTINUATION_OK'), true);
+  assert.equal((await built.adapter.settle(execution)).state, 'succeeded');
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.url, 'http://127.0.0.1:4444/v1/messages');
+  assert.equal((JSON.parse(String(calls[1]?.init.body)) as { model?: string }).model, 'provider.model');
+  const submitWrite = built.writes.find((write) => write.type === 'submit');
+  assert.deepEqual(submitWrite?.content, {
+    status: 200,
+    endpoint: '/v1/messages',
+    protocol: 'anthropic',
+    model: 'provider.model',
+    route: 'goaichat:test-route',
+  });
 });
 
 function sink(): ProviderEvidenceSink {
@@ -247,6 +416,16 @@ function startInput() {
     inputRefs: ['task://task-provider-rcc/input/1'],
     evidenceRefs: [evidence('start')],
     payload: { prompt: 'summarize the failing build log' },
+  };
+}
+
+function typedContext(): ProviderRequestContext {
+  return {
+    units: [
+      { kind: 'message', role: 'user', text: 'read the readme' },
+      { kind: 'tool-call', callId: 'call-native', toolId: 'file.read', arguments: { path: 'README.md' } },
+      { kind: 'tool-result', callId: 'call-native', toolId: 'file.read', output: 'REAL_FILE_CONTENT', status: 'succeeded' },
+    ],
   };
 }
 

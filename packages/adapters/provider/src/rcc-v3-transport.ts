@@ -566,11 +566,9 @@ export class RccV3ProviderTransport implements ProviderTransport {
   async submit(input: ProviderSubmitInput, request: ProviderWireRequest): Promise<ProviderSubmitResult> {
     const active = this.active(input);
     const scope = active.evidenceScope;
-    if (request.protocol !== 'responses' || input.toolContinuations === undefined) {
-      const error = this.providerError(scope, 'submit', 'submit.unsupported', 'RCC v3 transport supports submit only for typed Responses tool continuation', 'capability');
-      const ref = await this.writeEvidence(scope, 'submit-unsupported', error);
-      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: this.owner, nextAction: { kind: 'recover', ref: this.owner } };
-    }
+    const protocol = protocolOf(request);
+    this.assertProtocol(protocol);
+    const route = requestRoute(request);
     if (!active.streamDone || !active.resourceReleased) {
       const error = this.providerError(scope, 'submit', 'submit.previous-stream-active', 'RCC v3 tool continuation requires the previous stream to release first', 'runtime');
       const ref = await this.writeEvidence(scope, 'submit-previous-stream-active', error);
@@ -592,7 +590,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     active.responsesToolCallsPending = false;
     let response: RccV3FetchResponse;
     try {
-      response = await this.send('responses', request, controller);
+      response = await this.send(protocol, request, controller);
     } catch (cause) {
       active.streamDone = true;
       active.resourceReleased = true;
@@ -612,10 +610,14 @@ export class RccV3ProviderTransport implements ProviderTransport {
     active.body = response.body;
     const ref = await this.writeEvidence(scope, 'submit', {
       status: response.status,
-      endpoint: endpointPath('responses'),
-      protocol: 'responses',
-      callIds: input.toolContinuations.map((continuation) => continuation.callId),
-      continuationRef: input.toolContinuations[0].continuationRef,
+      endpoint: endpointPath(protocol),
+      protocol,
+      model: request.model,
+      route,
+      ...(input.toolContinuations === undefined || input.toolContinuations.length === 0 ? {} : {
+        callIds: input.toolContinuations.map((continuation) => continuation.callId),
+        continuationRef: input.toolContinuations[0].continuationRef,
+      }),
     });
     return { ...input, status: 'accepted', outputRefs: [], evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'continue', ref: 'rcc-v3.observe' } };
   }
