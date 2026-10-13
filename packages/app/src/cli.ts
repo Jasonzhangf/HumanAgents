@@ -35,7 +35,8 @@ import {
 import { SessionStore } from './session-store.js';
 import { startUiRuntime } from './ui-runtime/index.js';
 import { assembleProviderExecutionPort } from './provider-assembly.js';
-import { prepareAgentProvider, providerBindingFromConfig } from './agent-driver-composition.js';
+import { closeAgentProvider, prepareAgentProvider, providerBindingFromConfig, type AgentProviderComposition } from './agent-driver-composition.js';
+import type { MemoryAgentOptions } from '../../runtime/src/memory/agent.js';
 import { AccessControlService, deriveSupervisorToken } from './ui-runtime/access-control.js';
 import { providerRetryConfigFromEffective } from './retry-config.js';
 import {
@@ -257,22 +258,13 @@ function uiMemoryEvidence(checkpointRoot: string, mode: 'fake' | 'rcc') {
   };
 }
 
-/** Admitted memory operation identity passed to the memory-role driver factory. */
-interface MemoryDriverRequest {
-  readonly taskId: import('../../contracts/src/index.js').TaskId;
-  readonly operationId: import('../../contracts/src/index.js').OperationId;
-  readonly executionEpoch: number;
-  readonly assignmentId: string;
-  readonly scope: import('../../contracts/src/index.js').CanonicalMemoryScope;
-}
-
 async function composeTaskMemory(input: {
   readonly paths: RuntimePaths;
   readonly configuration: LoadedConfiguration;
   readonly sessionId: string;
   readonly bindingRef: string;
   readonly executionEpoch: number;
-  readonly driverFor?: (request: MemoryDriverRequest) => import('../../contracts/src/index.js').AgentDriver;
+  readonly driverFor?: MemoryAgentOptions['driverFor'];
 }) {
   const localSkill = input.configuration.projectSourceManifest.sources?.localSkill;
   const mainAgentId = input.configuration.effective.project?.defaultAgent
@@ -326,16 +318,21 @@ export interface ServeRccDriverBinding {
  * is composed for each admitted memory operation so its runtime/operation
  * identity cannot leak into the main task execution.
  *
- * `rcc` is the one driver whose execution identity must come from the admitted
- * memory operation: the serve RCC port and provider binding are supplied by the
- * caller, while task/operation/assignment identity is bound per request.
+ * Each RCC operation prepares its configured memory provider and hands off
+ * that same pair with a release callback. Explicit controlled consumers can
+ * supply their own pair when no preparation callback is present.
  */
 export function memoryDriverFactory(input: {
   readonly paths: RuntimePaths;
   readonly configuration: LoadedConfiguration;
   readonly workspace: string;
   readonly rcc?: ServeRccDriverBinding;
-}): ((request: MemoryDriverRequest) => import('../../contracts/src/index.js').AgentDriver) | undefined {
+  readonly inputRefs?: readonly string[];
+  readonly prepareAgentProvider?: (input: {
+    readonly roleId: import('../../config/src/index.js').AgentRole;
+    readonly configuredAgentId?: string;
+  }) => Promise<AgentProviderComposition>;
+}): MemoryAgentOptions['driverFor'] {
   const memoryAgent = input.configuration.agentRoster.find((agent) => agent.roleId === 'memory');
   if (memoryAgent === undefined) return undefined;
   return ({ assignmentId, scope, operationId, taskId, executionEpoch }) => {
@@ -347,42 +344,66 @@ export function memoryDriverFactory(input: {
         'humanagent.app.entry-composition',
       );
     }
-    const rcc = input.rcc === undefined
-      ? undefined
-      : {
-          port: input.rcc.port,
-          binding: input.rcc.binding,
-          scope: {
-            organId: scope.organId,
+    const compose = (pair: ServeRccDriverBinding | undefined) => {
+      const rcc = pair === undefined
+        ? undefined
+        : {
+            port: pair.port,
+            binding: pair.binding,
+            scope: {
+              organId: scope.organId,
+              taskId,
+              operationId,
+            },
             taskId,
             operationId,
-          },
-          taskId,
-          operationId,
-          executionEpoch,
-          assignmentId,
-          inputRefs: input.rcc.inputRefs,
-        };
-    const composed = composeAgentDriver({
-      agent: memoryAgent,
-      paths: input.paths,
-      ...(input.configuration.effective.execution?.dsh === undefined
-        ? {}
-        : { dsh: input.configuration.effective.execution.dsh }),
-      ...(input.configuration.effective.execution?.opencode === undefined
-        ? {}
-        : { opencode: input.configuration.effective.execution.opencode }),
-      ...(input.configuration.effective.execution?.antigravity === undefined
-        ? {}
-        : { antigravity: input.configuration.effective.execution.antigravity }),
-      ...(input.configuration.effective.execution?.dshAcp === undefined
-        ? {}
-        : { dshAcp: input.configuration.effective.execution.dshAcp }),
-      ...(rcc === undefined ? {} : { rcc }),
-      runtimeId: assignmentId,
-      workspace: input.workspace,
-    });
-    return composed.driver;
+            executionEpoch,
+            assignmentId,
+            inputRefs: pair.inputRefs,
+          };
+      const composed = composeAgentDriver({
+        agent: memoryAgent,
+        paths: input.paths,
+        ...(input.configuration.effective.execution?.dsh === undefined
+          ? {}
+          : { dsh: input.configuration.effective.execution.dsh }),
+        ...(input.configuration.effective.execution?.opencode === undefined
+          ? {}
+          : { opencode: input.configuration.effective.execution.opencode }),
+        ...(input.configuration.effective.execution?.antigravity === undefined
+          ? {}
+          : { antigravity: input.configuration.effective.execution.antigravity }),
+        ...(input.configuration.effective.execution?.dshAcp === undefined
+          ? {}
+          : { dshAcp: input.configuration.effective.execution.dshAcp }),
+        ...(rcc === undefined ? {} : { rcc }),
+        runtimeId: assignmentId,
+        workspace: input.workspace,
+      });
+      return composed.driver;
+    };
+    if (memoryAgent.driverRef === 'rcc' && input.prepareAgentProvider !== undefined) {
+      const prepare = input.prepareAgentProvider;
+      return (async () => {
+        const composition = await prepare({ roleId: 'memory', configuredAgentId: memoryAgent.agentId });
+        try {
+          const driver = compose({
+            port: composition.port,
+            binding: composition.binding,
+            inputRefs: input.inputRefs ?? input.rcc?.inputRefs ?? [],
+          });
+          return { driver, release: () => closeAgentProvider(composition) };
+        } catch (error) {
+          try {
+            await closeAgentProvider(composition);
+          } catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], 'memory driver construction and cleanup failed');
+          }
+          throw error;
+        }
+      })();
+    }
+    return compose(input.rcc);
   };
 }
 
@@ -613,6 +634,49 @@ function servePromptSegments(
   return loaded.segments.map((segment) => segment.content);
 }
 
+function taskAgentProviderPreparer(
+  args: readonly string[],
+  configuration: LoadedConfiguration,
+  evidenceRoot: string,
+) {
+  return async (input: {
+    readonly roleId: import('../../config/src/index.js').AgentRole;
+    readonly configuredAgentId?: string;
+  }) => {
+    const configured = configuration.effective.provider ?? DEFAULT_RCC_PROVIDER;
+    const protocol = option(args, '--protocol') ?? configured.protocol;
+    if (protocol !== 'responses' && protocol !== 'openai' && protocol !== 'anthropic') {
+      throw new Error('--protocol must be responses, openai, or anthropic');
+    }
+    const source = configured.source ?? 'rcc';
+    const selected = resolveServeProvider(args, configuration.effective.provider);
+    const baseUrl = option(args, '--rcc-base-url') ?? configured.baseUrl;
+    const binding = providerBindingFromOptions(args, configured, protocol, selected.provider, baseUrl, source, selected.providerIdOverride);
+    const legacyProvider: ProviderConfig = {
+      ...configured,
+      source,
+      binding: binding.bindingId,
+      provider: binding.providerId === 'rcc' || binding.providerId === 'http' ? binding.providerId : configured.provider,
+      protocol,
+      model: binding.modelRef,
+      route: option(args, '--route') ?? configured.route,
+      baseUrl,
+    };
+    return prepareAgentProvider({
+      ...input,
+      agentProviderBindings: configuration.agentProviderBindings,
+      legacyProvider,
+      legacyBindingOverrides: {
+        endpointRef: binding.endpointRef,
+        configDigest: binding.configDigest,
+        capabilityDigest: binding.capabilityDigest,
+      },
+      maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+      evidenceRoot,
+    });
+  };
+}
+
 export async function main(args: readonly string[]): Promise<void> {
   configureBuiltinPromptRoot();
   const requestedCommand = args[0];
@@ -647,6 +711,8 @@ export async function main(args: readonly string[]): Promise<void> {
         paths: runtime.paths,
         configuration: runtime.configuration,
         workspace: runtime.paths.workspaceCwd,
+        inputRefs: [`humanagent://session/${sessionId}/input/1`],
+        prepareAgentProvider: taskAgentProviderPreparer(args, runtime.configuration, join(runtime.paths.artifactsRoot, 'provider-evidence')),
       });
       const memory = memoryRef === undefined
         ? undefined
@@ -744,6 +810,8 @@ export async function main(args: readonly string[]): Promise<void> {
         paths: runtime.paths,
         configuration: runtime.configuration,
         workspace: runtime.paths.workspaceCwd,
+        inputRefs: [`humanagent://session/${sessionId}/input/1`],
+        prepareAgentProvider: taskAgentProviderPreparer(args, runtime.configuration, join(runtime.paths.artifactsRoot, 'provider-evidence')),
       });
       const memory = memoryRef === undefined
         ? undefined
@@ -954,6 +1022,12 @@ export async function main(args: readonly string[]): Promise<void> {
       ...input,
       agentProviderBindings: configuration.agentProviderBindings,
       legacyProvider: effectiveLegacyProvider,
+      legacyBindingOverrides: {
+        endpointRef: binding.endpointRef,
+        configDigest: binding.configDigest,
+        capabilityDigest: binding.capabilityDigest,
+      },
+      maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
       evidenceRoot,
     });
     const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
@@ -981,6 +1055,8 @@ export async function main(args: readonly string[]): Promise<void> {
       paths,
       configuration,
       workspace: paths.workspaceCwd,
+      inputRefs: [`humanagent://memory/project/${paths.projectKey}`],
+      prepareAgentProvider: prepareSelectedAgentProvider,
     });
     const memoryRuntime = await composeMemoryRuntime({
       paths,
