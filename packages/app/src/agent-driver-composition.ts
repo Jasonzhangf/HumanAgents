@@ -23,7 +23,7 @@ import type {
 } from '../../config/src/index.js';
 import { FakeAgentDriver } from '../../adapters/testing/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
-import { assembleProviderExecutionPort } from './provider-assembly.js';
+import { assembleProviderExecutionPort, type ProviderAssemblyInput } from './provider-assembly.js';
 import {
   createAcpClientDriver,
   createAntigravityRuntime,
@@ -245,6 +245,7 @@ export interface AgentProviderSelectionInput {
   readonly agentId?: string;
   readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
   readonly legacyProvider?: ProviderConfig;
+  readonly legacyBindingOverrides?: Partial<Pick<ProviderBinding, 'endpointRef' | 'configDigest' | 'capabilityDigest'>>;
   readonly createPort: AgentProviderPortFactory;
 }
 
@@ -367,7 +368,10 @@ function resolveSelectedInstance(input: AgentProviderSelectionInput): ResolvedAg
 export function selectAgentProvider(input: AgentProviderSelectionInput): AgentProviderComposition {
   const selected = resolveSelectedInstance(input);
   const provider = selected.provider;
-  const binding = providerBindingFromConfig(provider);
+  const binding = {
+    ...providerBindingFromConfig(provider),
+    ...(selected.configuredAgentId === undefined ? input.legacyBindingOverrides : {}),
+  };
   return {
     configuredAgentId: selected.configuredAgentId,
     roleId: selected.roleId,
@@ -387,13 +391,29 @@ export function selectAgentProvider(input: AgentProviderSelectionInput): AgentPr
 export function createAgentProviderPort(
   input: AgentProviderPortFactoryInput,
   evidenceRoot: string,
+  maxTokens?: ProviderAssemblyInput['maxTokens'],
 ): ExecutionRuntimePort {
   return assembleProviderExecutionPort({
     binding: input.binding,
     routeRef: input.provider.route,
     baseUrl: input.provider.baseUrl,
     source: input.provider.source ?? 'rcc',
+    maxTokens,
   }, evidenceRoot);
+}
+
+/** Close an owned composition and require an actual closed receipt. */
+export async function closeAgentProvider(composition: AgentProviderComposition): Promise<void> {
+  const receipt = await composition.port.close(composition.binding);
+  if (receipt.state !== 'closed') {
+    throw new AppLifecycleError(
+      'agent-provider-close-incomplete',
+      `provider ${composition.binding.bindingId} close returned ${receipt.state}`,
+      'complete the selected provider close before releasing its ownership',
+      AGENT_PROVIDER_OWNER,
+      receipt.error,
+    );
+  }
 }
 
 /** Prepare one fresh execution instance and admit only its own provider. */
@@ -402,6 +422,8 @@ export async function prepareAgentProvider(input: {
   readonly configuredAgentId?: string;
   readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
   readonly legacyProvider?: ProviderConfig;
+  readonly legacyBindingOverrides?: AgentProviderSelectionInput['legacyBindingOverrides'];
+  readonly maxTokens?: ProviderAssemblyInput['maxTokens'];
   readonly evidenceRoot: string;
 }): Promise<AgentProviderComposition> {
   const composition = selectAgentProvider({
@@ -409,9 +431,19 @@ export async function prepareAgentProvider(input: {
     ...(input.configuredAgentId === undefined ? {} : { agentId: input.configuredAgentId }),
     agentProviderBindings: input.agentProviderBindings,
     ...(input.legacyProvider === undefined ? {} : { legacyProvider: input.legacyProvider }),
-    createPort: (selected) => createAgentProviderPort(selected, input.evidenceRoot),
+    ...(input.legacyBindingOverrides === undefined ? {} : { legacyBindingOverrides: input.legacyBindingOverrides }),
+    createPort: (selected) => createAgentProviderPort(selected, input.evidenceRoot, input.maxTokens),
   });
-  await admitAgentProvider(composition);
+  try {
+    await admitAgentProvider(composition);
+  } catch (error) {
+    try {
+      await closeAgentProvider(composition);
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'selected provider admission and cleanup failed');
+    }
+    throw error;
+  }
   return composition;
 }
 
