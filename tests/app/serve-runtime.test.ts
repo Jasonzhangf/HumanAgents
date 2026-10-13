@@ -22,6 +22,7 @@ import {
   type WorkResult,
 } from '../../packages/contracts/src/index.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
+import type { AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
 import { fakeExecutionBinding } from '../../packages/app/src/fake-execution.js';
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
 import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
@@ -632,8 +633,16 @@ test('RCC orchestration ports provide review and merge agents for the live execu
     taskId: task.id,
     cycleId: id('cycle', 'serve-rcc-agent-cycle'),
   };
+  let borrowedCloseCount = 0;
+  const borrowedPort = providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed', outputRef: 'serve-rcc-output' });
   const ports = createRccServeOrchestrationPorts({
-    port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed', outputRef: 'serve-rcc-output' }),
+    port: {
+      ...borrowedPort,
+      async close(binding) {
+        borrowedCloseCount += 1;
+        return borrowedPort.close(binding);
+      },
+    },
     binding: providerBinding(),
     promptSegments: { review: ['review system prompt'] },
   });
@@ -693,6 +702,7 @@ test('RCC orchestration ports provide review and merge agents for the live execu
   assert.equal(review.status, 'passed');
   assert.equal(review.reviewKind, 'quality');
   assert.ok(review.evidenceRefs.length > 0);
+  assert.equal(borrowedCloseCount, 0);
   const merged = await ports.mergeCoordinator.merge({
     workerAssignment: workAssignment,
     workerResult: worker,
@@ -781,9 +791,41 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
     memoryScope: 'task',
   };
   const scope: ScopeRef = { organId: task.organId, taskId: task.id, cycleId: id('cycle', 'serve-rcc-review-retry-cycle') };
+  const lifecycle: string[] = [];
+  const compositions = [undefined, 'HUMANAGENT_REVIEW: passed'].map<AgentProviderComposition>((reviewMarker, index) => {
+    const binding = providerBinding();
+    const port = providerPort({ state: 'succeeded', reviewMarker });
+    return {
+      roleId: 'review',
+      source: 'rcc',
+      provider: { provider: 'rcc', binding: binding.bindingId, protocol: 'responses', model: binding.modelRef, route: 'test', baseUrl: 'http://127.0.0.1:4444' },
+      binding,
+      port: {
+        ...port,
+        async settle(request) {
+          const settlement = await port.settle(request);
+          lifecycle.push(`settle ${index + 1}`);
+          return settlement;
+        },
+        async close(request) {
+          assert.equal(request, binding);
+          lifecycle.push(`close ${index + 1}`);
+          return port.close(request);
+        },
+      } satisfies ExecutionRuntimePort,
+    };
+  });
+  let prepared = 0;
   const ports = createRccServeOrchestrationPorts({
-    port: providerPort({ state: 'succeeded', reviewMarkerSequence: [undefined, 'HUMANAGENT_REVIEW: passed'] }),
+    port: providerPort({ state: 'succeeded' }),
     binding: providerBinding(),
+    async prepareAgentProvider({ roleId }) {
+      assert.equal(roleId, 'review');
+      lifecycle.push(`prepare ${++prepared}`);
+      const composition = compositions[prepared - 1];
+      assert.ok(composition);
+      return composition;
+    },
     promptSegments: { review: ['review system prompt'] },
   });
   const reviewAssignment: ReviewAssignment = {
@@ -832,6 +874,58 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
   });
   assert.equal(review.status, 'passed');
   assert.equal(review.findings.length, 0);
+  lifecycle.push('result');
+  assert.deepEqual(lifecycle, ['prepare 1', 'settle 1', 'close 1', 'prepare 2', 'settle 2', 'close 2', 'result']);
+  assert.equal(prepared, 2);
+
+  const runError = new Error('review dispatch failed');
+  const closeError = new Error('review close failed');
+  const failedComposition = compositions[0]!;
+  let errorPrepared = 0;
+  let errorClosed = 0;
+  const errorLifecycle: string[] = [];
+  const failingPorts = createRccServeOrchestrationPorts({
+    port: providerPort({ state: 'succeeded' }),
+    binding: providerBinding(),
+    promptSegments: { review: ['review system prompt'] },
+    async prepareAgentProvider() {
+      errorPrepared += 1;
+      return {
+        ...failedComposition,
+        port: {
+          ...failedComposition.port,
+          async start() { throw runError; },
+          async settle(request) {
+            const settlement = await failedComposition.port.settle(request);
+            errorLifecycle.push('settle');
+            return settlement;
+          },
+          async close(binding) {
+            assert.equal(binding, failedComposition.binding);
+            errorClosed += 1;
+            errorLifecycle.push('close');
+            throw closeError;
+          },
+        },
+      };
+    },
+  });
+  await assert.rejects(() => failingPorts.reviewAgent.review({
+    reviewAssignment,
+    workerAssignment,
+    workerResult,
+    reviewMaterial: materialFor(workerAssignment, workerResult),
+    scope,
+  }), (error: unknown) => {
+    if (!(error instanceof AggregateError)) throw error;
+    assert.equal(error.errors.length, 2);
+    assert.equal(error.errors[0], runError);
+    assert.equal(error.errors[1], closeError);
+    return true;
+  });
+  assert.equal(errorPrepared, 1);
+  assert.equal(errorClosed, 1);
+  assert.deepEqual(errorLifecycle, ['settle', 'close']);
 });
 
 test('RCC review agent retries an inconclusive verdict before accepting a later pass', async () => {

@@ -1,6 +1,6 @@
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
 import type { AgentRole } from '../../config/src/index.js';
-import type { AgentProviderComposition } from './agent-driver-composition.js';
+import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 import {
   id,
   type AgentEvent,
@@ -281,18 +281,30 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
         const composition = input.prepareAgentProvider === undefined
           ? undefined
           : await input.prepareAgentProvider({ roleId: 'review' });
-        provider = await runProviderAgent({
-          role: 'review',
-          port: composition?.port ?? input.port,
-          binding: composition?.binding ?? input.binding,
-          taskId: id('task', request.reviewAssignment.taskId),
-          assignmentId: request.reviewAssignment.assignmentId,
-          attempt: request.reviewAssignment.attempt + attemptIndex,
-          executionEpoch: request.reviewAssignment.executionEpoch,
-          scope: request.scope,
-          inputRefs: request.reviewAssignment.subjectRefs,
-          prompt,
-        });
+        try {
+          provider = await runProviderAgent({
+            role: 'review',
+            port: composition?.port ?? input.port,
+            binding: composition?.binding ?? input.binding,
+            taskId: id('task', request.reviewAssignment.taskId),
+            assignmentId: request.reviewAssignment.assignmentId,
+            attempt: request.reviewAssignment.attempt + attemptIndex,
+            executionEpoch: request.reviewAssignment.executionEpoch,
+            scope: request.scope,
+            inputRefs: request.reviewAssignment.subjectRefs,
+            prompt,
+          });
+        } catch (error) {
+          if (composition !== undefined) {
+            try {
+              await closeAgentProvider(composition);
+            } catch (closeError) {
+              throw new AggregateError([error, closeError], 'provider review failed and close also failed');
+            }
+          }
+          throw error;
+        }
+        if (composition !== undefined) await closeAgentProvider(composition);
         marker = provider.settlement.state === 'succeeded' ? reviewMarker(provider.events) : undefined;
         if (marker === 'passed' || marker === 'failed' || provider.settlement.state !== 'succeeded') break;
       }
