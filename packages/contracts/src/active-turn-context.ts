@@ -22,6 +22,8 @@ import {
   type ReviewResult,
 } from './review-data.js';
 import { ContractError } from './errors.js';
+import type { CompletionReadInput } from './operation-completion.js';
+import type { RecoveryHoldFacts } from './native-reasoning.js';
 
 /**
  * W1 raw boundary. A Provider produces ordered raw facts. The Runtime owns the
@@ -188,6 +190,22 @@ export interface RuntimeRequestRecord {
   readonly phase: RuntimeRequestLifecyclePhase;
 }
 
+/** Required acknowledgement before native Provider dispatch. */
+export interface NativeRequestRegistration {
+  readonly execution: ActiveTurnProviderExecutionIdentityRef;
+  readonly record: RuntimeRequestRecord;
+}
+
+/** Returned only after this producer's admitted work actually finished. */
+export interface ProviderProducerDrainResult {
+  readonly execution: ActiveTurnProviderExecutionIdentityRef;
+  readonly boundaryId: string;
+  readonly requests: readonly {
+    readonly request: ActiveTurnProviderRequestIdentityRef;
+    readonly lastProducerSeq: number;
+  }[];
+}
+
 export interface ChildInvocationRecord {
   readonly invocationId: string;
   readonly childTurnId: string;
@@ -241,6 +259,73 @@ export interface ActiveTurnCaptureBody {
   readonly checkpointPath: readonly string[];
   readonly cut: TurnCaptureCut;
   readonly completionRefs: readonly CompletionRef[];
+}
+
+/** Production control proof kept beside, rather than inside, raw content. */
+export interface PreparedRecoveryCapture {
+  readonly body: ActiveTurnCaptureBody;
+  readonly controlRecordCount: number;
+  readonly producerDrains: readonly ProviderProducerDrainResult[];
+  readonly completionLookups: readonly CompletionReadInput[];
+  readonly recovery: RecoveryHoldFacts;
+}
+
+export interface RecoveryAssetsReceipt {
+  readonly commitIdentity: string;
+  readonly journalReceiptRef: string;
+  readonly commitFactDigest: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+  readonly turnId: string;
+  readonly boundaryId: string;
+  readonly capture: RawAsset;
+}
+
+export interface RecoveryAssetsReadback {
+  readonly receipt: RecoveryAssetsReceipt;
+  readonly prepared: PreparedRecoveryCapture;
+}
+
+/** Checks source relationships, not the truth of a producer's execution. */
+export function validatePreparedRecoveryCapture(input: PreparedRecoveryCapture): void {
+  validateActiveTurnCaptureBody(input.body);
+  assertNonNegativeSafeInteger(input.controlRecordCount, 'capture controlRecordCount');
+  const { body } = input;
+  const requests = new Map<string, { request: ActiveTurnProviderRequestIdentityRef; lastProducerSeq: number }>();
+  for (const drain of input.producerDrains) {
+    if (drain.boundaryId !== body.cut.pauseId
+      || drain.execution.runtimeId !== body.binding.execution.runtimeId
+      || drain.execution.executionEpoch !== body.binding.execution.executionEpoch) {
+      throw new ContractError('producer drain does not belong to this capture boundary and execution');
+    }
+    for (const record of drain.requests) {
+      assertProviderRequestIdentity(record.request, 'drained request');
+      assertNonNegativeSafeInteger(record.lastProducerSeq, 'drained request lastProducerSeq');
+      if (requests.has(record.request.requestId)) throw new ContractError('capture repeats a drained request');
+      requests.set(record.request.requestId, record);
+      if (!body.requests.some((candidate) => candidate.request.requestId === record.request.requestId
+        && candidate.request.turnId === record.request.turnId
+        && candidate.request.parentRequestId === record.request.parentRequestId)) {
+        throw new ContractError('drained request is absent from the fixed control cut');
+      }
+    }
+  }
+  for (const record of body.requests) {
+    if (!requests.has(record.request.requestId)) throw new ContractError('capture request has no producer drain');
+  }
+  for (const [requestId, drained] of requests) {
+    const raw = body.entries.filter((entry) => 'envelope' in entry && entry.envelope.request.requestId === requestId) as AcceptedRawFact[];
+    const lastSeq = raw.reduce((last, entry) => Math.max(last, entry.envelope.producerSeq), 0);
+    if (lastSeq !== drained.lastProducerSeq) throw new ContractError('producer drain sequence does not match durable raw');
+  }
+  for (const lookup of input.completionLookups) {
+    if (lookup.binding.execution.runtimeId !== body.binding.execution.runtimeId
+      || lookup.binding.execution.executionEpoch !== body.binding.execution.executionEpoch
+      || lookup.binding.execution.taskId.value !== body.binding.admittedTurn.taskRef.value) {
+      throw new ContractError('completion lookup does not belong to the captured execution');
+    }
+  }
+  assertNonEmptyString(input.recovery.recoveryResponsibilityRef, 'capture recovery responsibility');
 }
 
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {

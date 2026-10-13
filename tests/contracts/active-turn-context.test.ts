@@ -7,6 +7,8 @@ import {
   validateAcceptedRawFact,
   validateActiveTurnCaptureBody,
   validateRawFactEnvelope,
+  validatePreparedRecoveryCapture,
+  type PreparedRecoveryCapture,
   type AcceptedChildDelivery,
   type AcceptedReviewChildDelivery,
   type ActiveTurnProviderExecutionIdentityRef,
@@ -128,6 +130,26 @@ const baseBody: ActiveTurnCaptureBody = {
   cut: { pauseId: 'pause-a', lastSeq: 6, producersDrained: true, frozenAt: '2026-10-12T00:00:00.000Z' },
   completionRefs: [{ requestId: 'request-a', producerSeq: 4, effectRef: 'effect-a' }],
 };
+
+test('production capture proof binds the actual producer boundary and durable raw sequence', () => {
+  const prepared: PreparedRecoveryCapture = {
+    body: baseBody,
+    controlRecordCount: 10,
+    producerDrains: [{ execution, boundaryId: 'pause-a', requests: [{ request: assistantDelta.request, lastProducerSeq: 5 }] }],
+    completionLookups: [],
+    recovery: { commitIdentity: 'capture-a', rawTurnRefs: [], laterErrorRefs: [], unresolvedOperationRefs: [], stages: [], durablePhases: [], durableReceiptRefs: [], recoveryResponsibilityRef: 'recovery-a' },
+  };
+  assert.doesNotThrow(() => validatePreparedRecoveryCapture(prepared));
+  assert.throws(() => validatePreparedRecoveryCapture({ ...prepared, producerDrains: [] }), ContractError);
+  assert.throws(() => validatePreparedRecoveryCapture({
+    ...prepared,
+    producerDrains: [{ ...prepared.producerDrains[0]!, boundaryId: 'another-boundary' }],
+  }), ContractError);
+  assert.throws(() => validatePreparedRecoveryCapture({
+    ...prepared,
+    producerDrains: [{ ...prepared.producerDrains[0]!, requests: [{ request: assistantDelta.request, lastProducerSeq: 6 }] }],
+  }), ContractError);
+});
 
 test('valid raw fact envelopes and a frozen capture body validate', () => {
   for (const item of [assistantDelta, assistantFull, toolCall, toolResultFact, requestComplete]) {
