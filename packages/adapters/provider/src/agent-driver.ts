@@ -151,6 +151,19 @@ function operationEvidence(scope: ScopeRef, operationId: OperationId): EvidenceR
   };
 }
 
+/**
+ * Combines the Runtime materializer's request-scoped orientation with the
+ * caller's one-shot continuation instructions. Both enter exactly this request;
+ * neither is written back to canonical context or carried to the next request.
+ */
+function mergeRequestScopedInstructions(
+  hook: RequestScopedInstructions | undefined,
+  caller: RequestScopedInstructions,
+): RequestScopedInstructions {
+  if (hook === undefined) return caller;
+  return { text: `${hook.text}\n${caller.text}` };
+}
+
 function sameExecution(
   expected: ProviderAgentDriverOptions,
   actual: ProviderExecutionIdentityRef,
@@ -248,6 +261,8 @@ export class ProviderAgentDriver implements AgentDriver {
   private observeIterator?: AsyncIterator<ProviderEvent>;
   private productionClosed = false;
   private producerFailure?: unknown;
+  private executionSettled = false;
+  private continuationInFlight = false;
   private readonly now: () => Date;
 
   constructor(private readonly options: ProviderAgentDriverOptions) {
@@ -339,6 +354,70 @@ export class ProviderAgentDriver implements AgentDriver {
     };
   }
 
+  /**
+   * Continues the current business turn with a fresh Provider request on the
+   * same admitted execution, turn and parent chain. The previous request must
+   * be fully observed and its request-level terminal committed; the Provider
+   * execution, driver and turn stay open. The caller's instructions enter this
+   * request only, and the caller still owns execution settle/close.
+   */
+  async continueCurrentTurn(input: {
+    readonly instructions: RequestScopedInstructions;
+  }): Promise<ProviderSubmitResult> {
+    if (!this.handle) throw this.error('runtime.not.started', 'provider agent driver has not started', 'submit');
+    if (!this.providerStarted) throw this.error('runtime.not.submitted', 'provider execution has not been submitted', 'submit', 'runtime');
+    if (this.productionClosed) throw this.error('provider.production.closed', 'provider production was closed; no continuation can be dispatched', 'submit', 'runtime');
+    if (this.stopping) throw this.error('provider.stop.requested', 'provider stop was requested; the current turn cannot continue', 'submit', 'runtime');
+    if (this.executionSettled) throw this.error('provider.execution.settled', 'provider execution settlement started; the current turn cannot continue', 'submit', 'runtime');
+    if (this.producerFailure !== undefined) throw this.producerFailure;
+    if (this.continuationInFlight) throw this.error('continuation.overlap', 'another continuation is already dispatching', 'submit', 'runtime');
+    const previous = this.activeRequest;
+    if (previous === undefined || previous.terminalPhase !== 'settled') {
+      throw this.error('continuation.not.quiescent', 'the current request is not fully observed and settled', 'submit', 'runtime');
+    }
+    if (this.options.requestContext === undefined) {
+      throw this.error('request.context.missing', 'continueCurrentTurn requires a bound request-context hook', 'submit', 'capability');
+    }
+    // Occupy dispatch admission before the first await so two callers can never
+    // register the same continuation turn concurrently.
+    this.continuationInFlight = true;
+    const request = this.nextRequest();
+    const work = (async (): Promise<ProviderSubmitResult> => {
+      await this.commitRequestPhase(request, 'dispatching');
+      this.publishLifecycle(request, 'dispatching');
+      this.assertDispatchOpen();
+      const context = await this.materializeRequestContext(request, 'continuation');
+      if (context === undefined) {
+        throw this.error('request.context.missing', 'continueCurrentTurn requires a bound request-context hook', 'submit', 'capability');
+      }
+      // A stop or drain can begin while registration or the context hook was
+      // awaited; never dispatch across that boundary.
+      this.assertDispatchOpen();
+      const submitted = await this.options.port.submit({
+        ...identity(this.options),
+        ...this.continuationRequestIdentity(request),
+        inputRefs: [...this.options.inputRefs],
+        evidenceRefs: [this.evidenceRef],
+        payload: this.initialPayload ?? inputPayloadMissing(),
+        requestContext: context.canonical,
+        instructions: mergeRequestScopedInstructions(context.instructions, input.instructions),
+        ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
+      });
+      this.assertProviderIdentity(submitted, 'provider continuation receipt', 'submit');
+      await this.commitRequestPhase(request, 'dispatched');
+      this.publishLifecycle(request, 'dispatched', [], submitted.evidenceRefs);
+      return submitted;
+    })();
+    try {
+      return await this.track(work);
+    } catch (cause) {
+      if (!this.stopping) await this.publishFailed(request, cause, 'submit');
+      throw cause;
+    } finally {
+      this.continuationInFlight = false;
+    }
+  }
+
   async *observe(input: { readonly runtimeId: string }): AsyncIterable<ProviderAgentEvent> {
     if (!this.providerStarted) throw this.error('runtime.not.submitted', 'provider execution has not been submitted', 'observe', 'runtime');
     if (this.productionClosed) {
@@ -382,7 +461,13 @@ export class ProviderAgentDriver implements AgentDriver {
         await this.closeProviderIterator(providerIterator);
       }
       if (this.stopping || this.productionClosed) return;
-      if (toolCalls.length === 0) return;
+      if (toolCalls.length === 0) {
+        // Only a confirmed normal terminal makes the fully observed request
+        // continuable. Preserve waiting, unknown and existing failure facts;
+        // execution settle/close stays caller-owned.
+        if (terminal?.terminalState === 'succeeded') await this.commitObservedCompletion(request);
+        return;
+      }
       if (!isToolWaiting(terminal, toolCalls)) {
         throw this.error('tool.terminal.missing', 'provider emitted a tool call without a tool-waiting terminal', 'observe', 'runtime');
       }
@@ -552,6 +637,9 @@ export class ProviderAgentDriver implements AgentDriver {
     if (input.runtimeId !== this.options.runtimeId || input.executionEpoch !== this.options.executionEpoch) {
       throw this.error('runtime.identity.mismatch', 'provider settle is not bound to the current execution', 'settle', 'runtime');
     }
+    // Once execution settlement starts the public continuation entry point is
+    // closed; request-level bookkeeping never releases the execution.
+    this.executionSettled = true;
     if (this.toolBarrier) await this.toolBarrier.promise;
     if (this.continuationCompletion) await this.continuationCompletion;
     // A failed exact-output save or durable acceptance must surface on settle;
@@ -911,6 +999,9 @@ export class ProviderAgentDriver implements AgentDriver {
     externalResponseId?: string,
     error?: ProviderError,
   ): void {
+    // Internal terminal bookkeeping must not depend on the optional lifecycle
+    // notification: continuation admission reads `terminalPhase` directly.
+    if (phase === 'failed' || phase === 'cancelled' || phase === 'settled') request.terminalPhase = phase;
     if (this.options.onRequestLifecycle === undefined) return;
     const evidenceRefs = [...baseEvidenceRefs, ...extraEvidenceRefs];
     const event: ProviderRequestLifecycleEvent = {
@@ -923,7 +1014,6 @@ export class ProviderAgentDriver implements AgentDriver {
       ...(error === undefined ? {} : { error }),
     };
     validateProviderRequestLifecycleEvent(event);
-    if (phase === 'failed' || phase === 'cancelled' || phase === 'settled') request.terminalPhase = phase;
     this.options.onRequestLifecycle(event);
   }
 
@@ -944,6 +1034,28 @@ export class ProviderAgentDriver implements AgentDriver {
           ).providerError;
     await this.commitRequestPhase(request, 'failed');
     this.publishLifecycle(request, 'failed', [], [], undefined, error);
+  }
+
+  /**
+   * Commits the request-level terminal for a normally observed request. This
+   * only closes the request lifecycle; it never calls the execution-level
+   * `port.settle`, releases the provider stream or closes the driver, so the
+   * same admitted turn can dispatch the next request.
+   */
+  private async commitObservedCompletion(request: RequestAttempt | undefined): Promise<void> {
+    if (request === undefined || request.terminalPhase !== undefined) return;
+    await this.commitRequestPhase(request, 'settled');
+    this.publishLifecycle(request, 'settled', [], [], request.externalResponseId);
+  }
+
+  /**
+   * Re-checks stop/drain/settlement admission after an awaited registration or
+   * context boundary and before any external dispatch.
+   */
+  private assertDispatchOpen(): void {
+    if (this.stopping) throw this.error('provider.stop.requested', 'provider stop was requested before dispatch', 'submit', 'runtime');
+    if (this.productionClosed) throw this.error('provider.production.closed', 'provider production was closed before dispatch', 'submit', 'runtime');
+    if (this.executionSettled) throw this.error('provider.execution.settled', 'provider execution settlement started before dispatch', 'submit', 'runtime');
   }
 
   private async publishObservedLifecycle(event: ProviderEvent): Promise<void> {
