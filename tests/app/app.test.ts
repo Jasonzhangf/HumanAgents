@@ -132,12 +132,18 @@ test('native shared-pair preparation binds final identity without starting and c
     assert.equal(prepared.execution.runtime.driver, prepared.driver);
     assert.equal(prepared.execution.runtime.snapshot().state, 'created');
     console.log('native preparation identity', JSON.stringify({ ...binding, scope: prepared.scope, directiveRevision: prepared.directiveRevision, selected: calls[0], model: pairs[0]!.binding.modelRef }));
+    const controller = await openAgentOperation({ ...input, sessionId: 'native-opened' });
+    assert.deepEqual(calls[1], calls[0]);
+    assert.equal(pairs.length, 2);
+    assert.equal(controller.snapshot().runtimeId, input.runtimeId);
+    assert.equal(controller.snapshot().executionEpoch, 7);
+    assert.equal(controller.snapshot().state, 'created');
   } finally {
     for (const pair of pairs) await closeAgentProvider(pair);
     await fixture.upstream.close();
     await rm(fixture.root, { recursive: true });
   }
-  assert.deepEqual(closed.map((receipt) => receipt.state), ['closed']);
+  assert.deepEqual(closed.map((receipt) => receipt.state), ['closed', 'closed']);
   assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, 0);
   console.log('native preparation resources', JSON.stringify({ rootRemoved: fixture.root, closed: closed.map((receipt) => receipt.state), readinessRequests: fixture.upstream.wires.length, generationPosts: 0 }));
 });
@@ -164,7 +170,7 @@ test('native shared-pair preparation closes acquired pairs on template failure a
           return pair;
         },
       };
-      await assert.rejects(() => prepareAgentOperation(input), (error: unknown) => {
+      await assert.rejects(() => openAgentOperation(input), (error: unknown) => {
         const original = failClose && error instanceof AggregateError ? error.errors[0] : error;
         if (!(original instanceof AppLifecycleError)) throw original;
         assert.equal(original.code, 'template-invalid');
@@ -190,7 +196,7 @@ test('native CLI shared-pair boundary keeps actual run and recoverable resume un
     const runtime = await openRuntime({ controlRoot: fixture.controlRoot, workspace: fixture.workspace, plan: 'default', sessionId });
     await new SessionStore(fixture.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
     await runtime.lock.release();
-    const first = await runAgentOperation({ ...fixture, sessionId, plan: 'default', prompt: 'seed recoverable checkpoint', composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) } });
+    const first = await runAgentOperation({ ...fixture, sessionId, plan: 'default', prompt: 'seed recoverable checkpoint', composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) }, prepareAgentProvider: async () => { throw new Error('composed execution must retain its own driver'); } });
     assert.equal(first.checkpoint.outcome, 'failed');
     for (const command of ['run', 'resume']) {
       await assert.rejects(async () => execFileSync(process.execPath, [cli, command, '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', command === 'run' ? 'native-cli-run' : sessionId, '--prompt', 'prepare boundary'], { encoding: 'utf8', stdio: 'pipe' }), (error: unknown) => {
@@ -205,6 +211,54 @@ test('native CLI shared-pair boundary keeps actual run and recoverable resume un
     assert.equal(fixture.upstream.wires.length, 0);
     const manifest = await readRunManifest(fixture.paths, sessionId);
     assert.equal(manifest.driverRef, 'rcc');
+    const runForwarded: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>[] = [];
+    await assert.rejects(() => runAgentOperation({
+      ...fixture, sessionId: 'native-run-forwarding', plan: 'default', prompt: 'forwarding probe',
+      prepareAgentProvider: async (selected) => {
+        runForwarded.push(selected);
+        throw new AppLifecycleError('native-forwarding-probe', 'run reached the selected-agent callback', 'forward the callback through the run wrapper', 'humanagent.app.run-operation');
+      },
+    }), (error: unknown) => {
+      assert.equal(runForwarded.length, 1);
+      assert.equal(runForwarded[0]!.configuredAgentId, manifest.agentId);
+      if (!(error instanceof AppLifecycleError)) throw error;
+      assert.equal(error.code, 'native-forwarding-probe');
+      return true;
+    });
+    // J1a: the resume wrapper must forward a supplied selected-agent callback
+    // to the operation seam. Pre-fix resume rebuilt its input and dropped the
+    // callback, so a supplied pair never reached the operation and the run
+    // fell through to the original rcc-config-missing error. A reached
+    // callback proves the forward without any real provider generation.
+    const forwarded: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>[] = [];
+    const resumeInput = {
+      paths: fixture.paths,
+      configuration: fixture.configuration,
+      workspace: fixture.workspace,
+      sessionId,
+      plan: 'default',
+      prompt: 'forwarding probe',
+      taskId: manifest.taskId,
+      cycleId: manifest.cycleId,
+      scope: manifest.scope,
+      executionEpoch: manifest.executionEpoch,
+      directiveRevision: manifest.directiveRevision,
+      agentId: manifest.agentId,
+      driverRef: manifest.driverRef,
+      prepareAgentProvider: async (selected: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>) => {
+        forwarded.push(selected);
+        throw new AppLifecycleError('native-forwarding-probe', 'resume reached the selected-agent callback', 'forward the callback through the resume wrapper', 'humanagent.app.run-operation');
+      },
+    };
+    await assert.rejects(() => resumeAgentOperation(resumeInput), (error: unknown) => {
+      assert.equal(forwarded.length, 1);
+      assert.equal(forwarded[0]!.configuredAgentId, manifest.agentId);
+      if (!(error instanceof AppLifecycleError)) throw error;
+      assert.equal(error.code, 'native-forwarding-probe');
+      return true;
+    });
+    assert.equal(fixture.upstream.wires.length, 0);
+    console.log('native CLI forwarding', JSON.stringify({ forwarded: forwarded.length, selected: forwarded[0], generationPosts: 0 }));
     const session = await new SessionStore(fixture.paths).open(sessionId);
     console.log('native CLI boundary', JSON.stringify({ providerRequests: fixture.upstream.wires.length, manifestEpoch: manifest.executionEpoch, sessionRecordTypes: session.records.map((record) => record.type) }));
   } finally {

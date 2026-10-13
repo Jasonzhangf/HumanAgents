@@ -58,6 +58,9 @@ export interface OpenAgentOperationInput {
    * it so the app composes the configured driver itself; no fallback exists.
    */
   readonly composed?: ComposedAgentDriver;
+  readonly prepareAgentProvider?: (
+    input: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>,
+  ) => Promise<AgentProviderComposition>;
   /**
    * Recovery starts a fresh checkpoint chain for the new operation/epoch while
    * keeping the recovered checkpoint as evidence. A cross-operation resume is
@@ -73,11 +76,7 @@ export interface MemoryBoundaryPublishInput {
   readonly recordDigest: string;
 }
 
-export interface PrepareAgentOperationInput extends OpenAgentOperationInput {
-  readonly prepareAgentProvider?: (
-    input: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>,
-  ) => Promise<AgentProviderComposition>;
-}
+export interface PrepareAgentOperationInput extends OpenAgentOperationInput {}
 
 export interface MemoryBoundaryPublisher {
   prepareProjectPatch?(input: {
