@@ -22,12 +22,18 @@ import {
   type ProviderStopReceipt,
   type ProviderSubmitResult,
   type ProviderSubmitInput,
+  type ProviderToolCall,
   type ProviderToolStatus,
+  type NativeRequestRegistration,
   type RawFactEnvelope,
+  type RuntimeRequestRecord,
   type ScopeRef,
   type WorkAssignment,
 } from '../../../packages/contracts/src/index.js';
+import type { ProviderRequestContextHook } from '../../../packages/contracts/src/provider-request-context.js';
 import {
+  AnthropicProviderCodec,
+  OpenAIChatProviderCodec,
   ResponsesProviderCodec,
   ProviderAdapter,
   ProviderAgentDriver,
@@ -38,6 +44,11 @@ import {
   type ProviderEvidenceSink,
   type ProviderEvidenceWrite,
   type ProviderToolExecutionPort,
+  type ProviderTransport,
+  type ProviderWireEvent,
+  type ProviderWireRequest,
+  type AnthropicWireRequest,
+  type OpenAIChatWireRequest,
   type V3ProviderFetch,
   type V3ProviderFetchInit,
   type V3ProviderFetchResponse,
@@ -1634,6 +1645,29 @@ interface RawPersistenceHarnessInput {
   readonly accept?: (
     inner: (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>,
   ) => (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>;
+  readonly registerRequest?: (registration: NativeRequestRegistration) => Promise<RuntimeRequestRecord>;
+}
+
+function sseResponseReturning(onClose: () => void): V3ProviderFetch {
+  return async (_url, init): Promise<V3ProviderFetchResponse> => {
+    // The transport aborts its request controller when the observe consumer
+    // stops before the provider terminal, so the abort is the observable
+    // stream-close signal. A generator `finally` would not fire while the body
+    // is parked on a never-resolving await.
+    init.signal?.addEventListener('abort', onClose);
+    return delayedResponse((async function* (): AsyncIterable<Uint8Array> {
+      yield new TextEncoder().encode(
+        `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-close-probe' } })}\n\n`,
+      );
+      yield new TextEncoder().encode(
+        `data: ${JSON.stringify({ type: 'response.output_text.delta', item_id: 'msg-close-probe', delta: 'probe' })}\n\n`,
+      );
+      yield new TextEncoder().encode(
+        `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-close-probe' } })}\n\n`,
+      );
+      await new Promise<void>(() => {});
+    })());
+  };
 }
 
 interface RawPersistenceHarness {
@@ -1676,6 +1710,8 @@ async function rawPersistenceHarness(input: RawPersistenceHarnessInput): Promise
   };
   const acceptBase = (envelope: RawFactEnvelope): Promise<AcceptedRawFact> => context.acceptRawFact(envelope);
   const acceptRawFact = input.accept === undefined ? acceptBase : input.accept(acceptBase);
+  const registerRequest = input.registerRequest
+    ?? ((registration: NativeRequestRegistration) => context.registerRequest(registration.record));
   const instance = new ProviderAgentDriver({
     port,
     binding,
@@ -1689,6 +1725,7 @@ async function rawPersistenceHarness(input: RawPersistenceHarnessInput): Promise
     tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
     rawEvidence: input.sink ?? baseSink,
     acceptRawFact,
+    registerRequest,
     executeTool: input.executeTool,
   });
   return { instance, context, store, baseSink, submissions, settleCalls: () => settleCalls };
@@ -1802,6 +1839,264 @@ test('R1-A: provider driver forwards codec raw facts and persists the exact exec
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// --- C/D native tool-loop round trips (Chat + Anthropic) ---
+
+interface ProtocolRoundTripHarness {
+  readonly instance: ProviderAgentDriver;
+  readonly requests: ProviderWireRequest[];
+  readonly submissions: ProviderSubmitInput[];
+  readonly accepted: RawFactEnvelope[];
+  readonly executed: ProviderToolCall[];
+}
+
+/**
+ * Real ProviderAgentDriver + real ProviderAdapter + the protocol codec over a
+ * scripted transport. The raw path is bound so the typed call must pass durable
+ * acceptance before the executor runs.
+ */
+function protocolRoundTripHarness(input: {
+  readonly protocol: 'openai' | 'anthropic';
+  readonly rounds: readonly (readonly ProviderWireEvent[])[];
+  readonly requestContext: ProviderRequestContextHook;
+}): ProtocolRoundTripHarness {
+  const protocolBinding: ProviderBinding = {
+    ...binding,
+    bindingId: `binding-${input.protocol}`,
+    providerId: `provider-${input.protocol}`,
+    protocol: input.protocol,
+    endpointRef: `endpoint-${input.protocol}`,
+    modelRef: `model-${input.protocol}`,
+  };
+  const requests: ProviderWireRequest[] = [];
+  const submissions: ProviderSubmitInput[] = [];
+  const accepted: RawFactEnvelope[] = [];
+  const executed: ProviderToolCall[] = [];
+  let round = 0;
+  const captured = recordingEvidenceSink();
+  const transport: ProviderTransport = {
+    start: async (_input, request) => {
+      requests.push(request);
+      return { ...identity, startedAt: '2026-01-01T00:00:00.000Z', evidenceRefs: [evidence] };
+    },
+    resume: async () => {
+      throw new Error('not used');
+    },
+    submit: async (submitInput, request) => {
+      submissions.push(submitInput);
+      requests.push(request);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+    observe: async function* () {
+      const events = input.rounds[round] ?? [];
+      round += 1;
+      yield* events;
+    },
+    requestStop: async () => ({
+      ...identity,
+      status: 'accepted',
+      receivedAt: '2026-01-01T00:00:00.000Z',
+      evidenceRefs: [evidence],
+    }),
+    settle: async () => settlement(),
+    close: async () => ({
+      bindingId: protocolBinding.bindingId,
+      providerId: protocolBinding.providerId,
+      protocol: protocolBinding.protocol,
+      state: 'closed',
+      evidenceRefs: [evidence],
+    }),
+  };
+  const adapter = new ProviderAdapter({
+    binding: protocolBinding,
+    routeRef: 'test-route',
+    codec: input.protocol === 'openai' ? new OpenAIChatProviderCodec() : new AnthropicProviderCodec(4096),
+    transport,
+    evidence: captured.sink,
+  });
+  const port: ExecutionRuntimePort = {
+    kind: adapter.kind,
+    probe: (target) => adapter.probe(target),
+    capabilities: (target) => adapter.capabilities(target),
+    start: (startInput) => adapter.start(startInput),
+    resume: (resumeInput) => adapter.resume(resumeInput),
+    submit: (submitInput) => adapter.submit(submitInput),
+    observe: (observeInput) => adapter.observe(observeInput),
+    requestStop: (stopInput) => adapter.requestStop(stopInput),
+    settle: (settleInput) => adapter.settle(settleInput),
+    close: (target) => adapter.close(target),
+  };
+  const instance = new ProviderAgentDriver({
+    port,
+    binding: protocolBinding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-protocol',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    rawEvidence: captured.sink,
+    acceptRawFact: async (envelope) => {
+      accepted.push(envelope);
+      return { seq: accepted.length, envelope };
+    },
+    registerRequest: async (registration) => registration.record,
+    requestContext: input.requestContext,
+    executeTool: {
+      async execute({ call }) {
+        executed.push(call);
+        return { output: 'PROTO_CONTENT', outputRefs: [], evidenceRefs: [evidence] };
+      },
+    },
+  });
+  return { instance, requests, submissions, accepted, executed };
+}
+
+function toolCallRawFact(envelopes: readonly RawFactEnvelope[]): RawFactEnvelope {
+  const entry = envelopes.find((envelope) => envelope.fact.kind === 'tool-call');
+  assert.ok(entry, 'expected a durable tool-call raw fact');
+  return entry;
+}
+
+test('C/D: openai chat native tool round trip executes the typed call once and continues with fresh context', async () => {
+  const chatId = 'chat-round-1';
+  const hookPhases: string[] = [];
+  const harness = protocolRoundTripHarness({
+    protocol: 'openai',
+    rounds: [
+      [
+        { protocol: 'openai', type: 'openai.chat.completion', id: chatId, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call-chat', type: 'function', function: { name: 'file_read', arguments: '{"path":' } }] }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: chatId, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"README.md"}' } }] }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: chatId, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+      ],
+      [
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-round-2', choices: [{ index: 0, delta: { content: 'done' }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-round-2', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ],
+    ],
+    requestContext: async (input) => {
+      hookPhases.push(input.phase);
+      return input.phase === 'initial'
+        ? { canonical: { units: [{ kind: 'message', role: 'user', text: 'CURRENT_TURN' }] }, instructions: { text: 'ORIENT_ONE' } }
+        : {
+            canonical: {
+              units: [
+                { kind: 'message', role: 'user', text: 'CURRENT_TURN' },
+                { kind: 'tool-call', callId: 'call-chat', toolId: 'file.read', arguments: { path: 'README.md' } },
+                { kind: 'tool-result', callId: 'call-chat', toolId: 'file.read', output: 'PROTO_CONTENT', status: 'succeeded' },
+              ],
+            },
+            instructions: { text: 'ORIENT_TWO' },
+          };
+    },
+  });
+  await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-protocol', payload: { prompt: 'read README.md' } });
+  const observed: ProviderAgentEvent[] = [];
+  for await (const event of harness.instance.observe({ runtimeId: identity.runtimeId })) observed.push(event);
+
+  assert.deepEqual(hookPhases, ['initial', 'continuation']);
+  assert.deepEqual(harness.executed, [{ callId: 'call-chat', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: chatId }]);
+  assert.equal(harness.submissions.length, 1);
+  assert.equal(harness.submissions[0]?.toolContinuations, undefined);
+  assert.equal(harness.submissions[0]?.requestContext?.units.length, 3);
+  assert.equal(harness.requests.length, 2);
+  const rawCall = toolCallRawFact(harness.accepted);
+  if (rawCall.fact.kind === 'tool-call') {
+    assert.equal(rawCall.fact.call.callId, 'call-chat');
+    assert.equal(rawCall.fact.call.toolId, 'file.read');
+    assert.deepEqual(rawCall.fact.call.arguments, { path: 'README.md' });
+    assert.equal(rawCall.fact.call.continuationRef, chatId);
+  }
+  assert.equal(harness.accepted.some((envelope) => envelope.fact.kind === 'tool-result'), true);
+
+  const initial = harness.requests[0] as OpenAIChatWireRequest;
+  assert.equal(initial.tools?.[0]?.function.name, 'file_read');
+  const continuation = harness.requests[1] as OpenAIChatWireRequest;
+  const assistant = continuation.messages.find((message) => message.role === 'assistant');
+  assert.ok(assistant && assistant.role === 'assistant');
+  assert.equal(assistant.tool_calls?.[0]?.id, 'call-chat');
+  assert.equal(assistant.tool_calls?.[0]?.function.name, 'file_read');
+  assert.equal(assistant.tool_calls?.[0]?.function.arguments, '{"path":"README.md"}');
+  const tool = continuation.messages.find((message) => message.role === 'tool');
+  assert.ok(tool && tool.role === 'tool');
+  assert.equal(tool.tool_call_id, 'call-chat');
+  assert.equal(tool.content, 'PROTO_CONTENT');
+  assert.equal(observed.at(-1)?.terminalState, 'succeeded');
+});
+
+test('C/D: anthropic native tool round trip executes the typed call once and continues with fresh context', async () => {
+  const messageId = 'anthropic-message-1';
+  const hookPhases: string[] = [];
+  const harness = protocolRoundTripHarness({
+    protocol: 'anthropic',
+    rounds: [
+      [
+        { protocol: 'anthropic', type: 'message_start', message: { id: messageId, model: 'model-anthropic', role: 'assistant' } },
+        { protocol: 'anthropic', type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-anth', name: 'file_read', input: {} } },
+        { protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } },
+        { protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"README.md"}' } },
+        { protocol: 'anthropic', type: 'content_block_stop', index: 0 },
+        { protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+        { protocol: 'anthropic', type: 'message_stop' },
+      ],
+      [
+        { protocol: 'anthropic', type: 'message_start', message: { id: 'anthropic-message-2', model: 'model-anthropic', role: 'assistant' } },
+        { protocol: 'anthropic', type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'done' } },
+        { protocol: 'anthropic', type: 'content_block_stop', index: 0 },
+        { protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+        { protocol: 'anthropic', type: 'message_stop' },
+      ],
+    ],
+    requestContext: async (input) => {
+      hookPhases.push(input.phase);
+      return input.phase === 'initial'
+        ? { canonical: { units: [{ kind: 'message', role: 'user', text: 'CURRENT_TURN' }] }, instructions: { text: 'ORIENT_ONE' } }
+        : {
+            canonical: {
+              units: [
+                { kind: 'message', role: 'user', text: 'CURRENT_TURN' },
+                { kind: 'tool-call', callId: 'call-anth', toolId: 'file.read', arguments: { path: 'README.md' } },
+                { kind: 'tool-result', callId: 'call-anth', toolId: 'file.read', output: 'PROTO_CONTENT', status: 'succeeded' },
+              ],
+            },
+            instructions: { text: 'ORIENT_TWO' },
+          };
+    },
+  });
+  await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-protocol', payload: { prompt: 'read README.md' } });
+  const observed: ProviderAgentEvent[] = [];
+  for await (const event of harness.instance.observe({ runtimeId: identity.runtimeId })) observed.push(event);
+
+  assert.deepEqual(hookPhases, ['initial', 'continuation']);
+  assert.deepEqual(harness.executed, [{ callId: 'call-anth', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: messageId }]);
+  assert.equal(harness.submissions.length, 1);
+  assert.equal(harness.submissions[0]?.toolContinuations, undefined);
+  assert.equal(harness.submissions[0]?.requestContext?.units.length, 3);
+  assert.equal(harness.requests.length, 2);
+  const rawCall = toolCallRawFact(harness.accepted);
+  if (rawCall.fact.kind === 'tool-call') {
+    assert.equal(rawCall.fact.call.callId, 'call-anth');
+    assert.equal(rawCall.fact.call.toolId, 'file.read');
+    assert.deepEqual(rawCall.fact.call.arguments, { path: 'README.md' });
+    assert.equal(rawCall.fact.call.continuationRef, messageId);
+  }
+  assert.equal(harness.accepted.some((envelope) => envelope.fact.kind === 'tool-result'), true);
+
+  const continuation = harness.requests[1] as AnthropicWireRequest;
+  const toolUse = continuation.messages.flatMap((message) => message.content).find((block) => block.type === 'tool_use');
+  assert.ok(toolUse && toolUse.type === 'tool_use');
+  assert.equal(toolUse.id, 'call-anth');
+  assert.deepEqual(toolUse.input, { path: 'README.md' });
+  const toolResult = continuation.messages.flatMap((message) => message.content).find((block) => block.type === 'tool_result');
+  assert.ok(toolResult && toolResult.type === 'tool_result');
+  assert.equal(toolResult.tool_use_id, 'call-anth');
+  assert.equal(toolResult.content, 'PROTO_CONTENT');
+  assert.equal(observed.at(-1)?.terminalState, 'succeeded');
 });
 
 test('R1-B: stop signals immediately but settlement waits for the exact-output save and durable ack', async () => {
@@ -1999,6 +2294,420 @@ test('R1-C: non-success output stays evidence and save, accept and ack failures 
         (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.ack.mismatch',
       );
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function flushMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function nativeDriver(input: {
+  readonly fetch: V3ProviderFetch;
+  readonly registerRequest?: (registration: NativeRequestRegistration) => Promise<RuntimeRequestRecord>;
+  readonly tools?: ProviderStartInput['tools'];
+  readonly executeTool?: ProviderToolExecutionPort;
+}): ProviderAgentDriver {
+  return new ProviderAgentDriver({
+    port: realProviderAdapter(input.fetch),
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-native',
+    scope,
+    inputRefs: ['input-1'],
+    ...(input.tools === undefined ? {} : { tools: input.tools }),
+    ...(input.executeTool === undefined ? {} : { executeTool: input.executeTool }),
+    ...(input.registerRequest === undefined ? {} : { registerRequest: input.registerRequest }),
+  });
+}
+
+test('P1-L1: native registration is awaited before the external start and a rejected registration blocks dispatch', async () => {
+  const gate = deferred<void>();
+  const registrations: NativeRequestRegistration[] = [];
+  let dispatchCalls = 0;
+  const instance = nativeDriver({
+    fetch: async () => {
+      dispatchCalls += 1;
+      return sseResponse([{ type: 'response.completed', response: { id: 'resp-p1-l1' } }]);
+    },
+    registerRequest: async (registration) => {
+      registrations.push(structuredClone(registration));
+      if (registration.record.phase === 'dispatching') await gate.promise;
+      return registration.record;
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  const submit = instance.submit({
+    taskId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-native',
+    payload: { prompt: 'register first' },
+  });
+  await flushMicrotasks();
+  assert.equal(dispatchCalls, 0, 'the external start ran before the dispatching registration resolved');
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0]?.record.phase, 'dispatching');
+  gate.resolve();
+  await submit;
+  assert.equal(dispatchCalls, 1);
+  assert.deepEqual(registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched']);
+  assert.equal(registrations.every((entry) => entry.execution.runtimeId === identity.runtimeId), true);
+  assert.equal(registrations.every((entry) => entry.record.scope.organId.value === organ.value), true);
+
+  let rejectedDispatchCalls = 0;
+  const rejected = nativeDriver({
+    fetch: async () => {
+      rejectedDispatchCalls += 1;
+      throw new Error('dispatch must not run');
+    },
+    registerRequest: async () => {
+      throw new Error('active turn journal append failed');
+    },
+  });
+  await rejected.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await assert.rejects(
+    () => rejected.submit({
+      taskId,
+      executionEpoch: identity.executionEpoch,
+      assignmentId: 'assignment-native',
+      payload: { prompt: 'no dispatch' },
+    }),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'request.registration.failed',
+  );
+  assert.equal(rejectedDispatchCalls, 0, 'a rejected registration still dispatched to the provider');
+});
+
+test('P1-L1: continuation registration carries the parent request id and both dispatch phases', async () => {
+  const registrations: NativeRequestRegistration[] = [];
+  let round = 0;
+  const fetch: V3ProviderFetch = async () => {
+    round += 1;
+    if (round === 1) {
+      return sseResponse([
+        { type: 'response.created', response: { id: 'resp-p1-r1' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call-p1', name: 'file_read', arguments: '' } },
+        { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'call-p1', name: 'file_read', arguments: '{"path":"README.md"}' } },
+        { type: 'response.completed', response: { id: 'resp-p1-r1' } },
+      ]);
+    }
+    return sseResponse([
+      { type: 'response.created', response: { id: 'resp-p1-r2' } },
+      { type: 'response.output_text.done', item_id: 'msg-p1-r2', text: 'done' },
+      { type: 'response.completed', response: { id: 'resp-p1-r2' } },
+    ]);
+  };
+  const instance = nativeDriver({
+    fetch,
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute() {
+        return { output: 'README_CONTENT', outputRefs: [], evidenceRefs: [evidence] };
+      },
+    },
+    registerRequest: async (registration) => {
+      registrations.push(structuredClone(registration));
+      return registration.record;
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-native', payload: { prompt: 'read README.md' } });
+  for await (const _event of instance.observe({ runtimeId: identity.runtimeId })) {
+    // Drain the whole request chain so both requests are registered.
+  }
+  await instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch });
+
+  assert.deepEqual(
+    registrations.map((entry) => entry.record.phase),
+    ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled'],
+  );
+  const initialRequestId = registrations[0]!.record.request.requestId;
+  const continuationDispatch = registrations.filter((entry) => entry.record.phase === 'dispatching')[1]!;
+  assert.equal(continuationDispatch.record.request.parentRequestId, initialRequestId);
+  assert.equal(continuationDispatch.record.parentRequestId, initialRequestId);
+  assert.notEqual(continuationDispatch.record.request.requestId, initialRequestId);
+});
+
+test('P1-L2: closeProductionAndDrain waits for the exact-output write and durable ack of a late tool result', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-p1-l2-'));
+  try {
+    const rawOutput = 'LATE_DRAIN_OUTPUT\n{"token":"P1_L2"}';
+    const toolEntered = deferred<void>();
+    const releaseTool = deferred<void>();
+    const writeEntered = deferred<void>();
+    const releaseWrite = deferred<void>();
+    const acceptEntered = deferred<void>();
+    const releaseAccept = deferred<void>();
+    const gateStore = new ImmutableAssetStore(root);
+    const gateSink = filesystemProviderEvidenceSink(gateStore, 'provider-p1-l2-test');
+    const gatedSink: ProviderEvidenceSink = {
+      async write(writeInput) {
+        writeEntered.resolve();
+        await releaseWrite.promise;
+        return gateSink.write(writeInput);
+      },
+      read: (ref) => gateSink.read(ref),
+    };
+    const harness = await rawPersistenceHarness({
+      root,
+      fetch: singleToolRoundFetch('call-drain', 'resp-drain'),
+      sink: gatedSink,
+      accept: (inner) => async (envelope) => {
+        if (envelope.fact.kind === 'tool-result') {
+          acceptEntered.resolve();
+          await releaseAccept.promise;
+        }
+        return inner(envelope);
+      },
+      executeTool: {
+        async execute() {
+          toolEntered.resolve();
+          await releaseTool.promise;
+          return { output: rawOutput, outputRefs: [], evidenceRefs: [evidence] };
+        },
+      },
+    });
+    const { pendingObservation } = await startHarnessTool(harness);
+    await toolEntered.promise;
+    await harness.instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch, operationId });
+    let drained = false;
+    const pendingDrain = harness.instance.closeProductionAndDrain({
+      execution: { runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch },
+      boundaryId: 'boundary-p1-l2',
+    }).then((result) => {
+      drained = true;
+      return result;
+    });
+    releaseTool.resolve();
+    await writeEntered.promise;
+    await flushMicrotasks();
+    assert.equal(drained, false, 'drain resolved before the exact output was saved');
+    releaseWrite.resolve();
+    await acceptEntered.promise;
+    await flushMicrotasks();
+    assert.equal(drained, false, 'drain resolved before durable acceptance returned');
+    releaseAccept.resolve();
+    const result = await pendingDrain;
+    assert.equal(result.boundaryId, 'boundary-p1-l2');
+    assert.equal(result.execution.runtimeId, identity.runtimeId);
+    assert.equal(result.requests.length, 1);
+    const factSeqs = acceptedRawFacts(harness.context).map((entry) => [
+      entry.envelope.fact.kind,
+      entry.envelope.producerSeq,
+    ]);
+    assert.deepEqual(factSeqs, [['tool-call', 1], ['request-complete', 2], ['tool-result', 3]]);
+    assert.equal(result.requests[0]!.lastProducerSeq, 3, 'drain did not bind the final accepted producer sequence');
+    assert.equal(harness.submissions.length, 0, 'drain started a new continuation request');
+    assert.equal((await pendingObservation).done, true);
+    const fact = durableToolResultFact(harness.context);
+    assert.equal(await coldRead(harness, fact), rawOutput);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('P1-L2: an executor rejection with no further consumer resume still drains and surfaces the failure', async () => {
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      yield {
+        ...identity,
+        eventId: 'event-reject-call',
+        kind: 'tool',
+        summary: 'file.read',
+        outputRefs: ['artifact://reject-call'],
+        evidenceRefs: [evidence],
+        toolCall: { callId: 'call-reject', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-reject' },
+      };
+      yield {
+        ...identity,
+        eventId: 'event-reject-waiting',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-native',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute() {
+        throw new Error('executor failed hard');
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-native', payload: { prompt: 'read README.md' } });
+  const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+  const failed = await iterator.next();
+  assert.equal(failed.value?.kind, 'provider.tool-result');
+  assert.equal(failed.value?.providerEvent.toolResult?.status, 'failed');
+  // Deliberately do not resume the iterator again: the barrier must already be
+  // released so the drain cannot deadlock on a suspended yield.
+  await assert.rejects(
+    () => withDeadline(instance.closeProductionAndDrain({
+      execution: { runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch },
+      boundaryId: 'boundary-reject',
+    }), 2_000),
+    /executor failed hard/,
+  );
+});
+
+test('P1-L2: an early observe exit explicitly closes the provider iterator', async () => {
+  let closed = false;
+  let closedByDrain = false;
+  const makePort = (onClose: () => void): ExecutionRuntimePort => port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      try {
+        yield {
+          ...identity,
+          eventId: 'event-close-model',
+          kind: 'model',
+          summary: 'first model event',
+          outputRefs: [],
+          evidenceRefs: [evidence],
+        };
+        await new Promise<void>(() => {});
+      } finally {
+        onClose();
+      }
+    },
+  });
+  const makeInstance = (runtimePort: ExecutionRuntimePort): ProviderAgentDriver => new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-native',
+    scope,
+    inputRefs: ['input-1'],
+  });
+
+  const consumerExit = makeInstance(makePort(() => {
+    closed = true;
+  }));
+  await consumerExit.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await consumerExit.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-native', payload: { prompt: 'close early' } });
+  const iterator = consumerExit.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  assert.equal(first.done, false);
+  await iterator.return?.();
+  assert.equal(closed, true, 'the provider observe iterator was not explicitly closed on consumer exit');
+
+  const drainExit = makeInstance(makePort(() => {
+    closedByDrain = true;
+  }));
+  await drainExit.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await drainExit.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-native', payload: { prompt: 'close by drain' } });
+  const drainIterator = drainExit.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  const drainFirst = await drainIterator.next();
+  assert.equal(drainFirst.done, false);
+  await drainExit.closeProductionAndDrain({
+    execution: { runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch },
+    boundaryId: 'boundary-iterator-close',
+  });
+  assert.equal(closedByDrain, true, 'closeProductionAndDrain did not explicitly close the live provider iterator');
+});
+
+test('P1-L2: closeProductionAndDrain waits for an in-flight observe raw acceptance and then closes the provider stream', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-p1-observer-drain-'));
+  try {
+    const releaseAccept = deferred<void>();
+    const acceptEntered = deferred<void>();
+    let transportClosed = false;
+    const harness = await rawPersistenceHarness({
+      root,
+      fetch: sseResponseReturning(() => {
+        transportClosed = true;
+      }),
+      accept: (inner) => async (envelope) => {
+        if (envelope.fact.kind === 'content') {
+          acceptEntered.resolve();
+          await releaseAccept.promise;
+        }
+        return inner(envelope);
+      },
+      executeTool: {
+        async execute() {
+          return { output: 'OBSERVER_DRAIN_OUTPUT', outputRefs: [], evidenceRefs: [evidence] };
+        },
+      },
+    });
+    await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+    await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-r1', payload: { prompt: 'observe then drain' } });
+    const iterator = harness.instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+    // response.created yields the first model event and carries no raw fact.
+    const first = await iterator.next();
+    assert.equal(first.value?.kind, 'provider.model');
+    // The next step drives the adapter into the delta content raw acceptance,
+    // which the gate holds, so the observer/decode/raw-ack work is genuinely in
+    // flight when the drain starts.
+    const second = iterator.next();
+    await acceptEntered.promise;
+    assert.equal(transportClosed, false, 'the provider stream closed before the close/drain was requested');
+
+    let closed = false;
+    const pendingClose = Promise.resolve(iterator.return?.()).then(() => {
+      closed = true;
+    });
+    let drained = false;
+    const pendingDrain = harness.instance.closeProductionAndDrain({
+      execution: { runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch },
+      boundaryId: 'boundary-observer-drain',
+    }).then((result) => {
+      drained = true;
+      return result;
+    });
+    await flushMicrotasks();
+    assert.equal(closed, false, 'observe close resolved before the in-flight raw acceptance returned');
+    assert.equal(drained, false, 'drain resolved before the in-flight observe raw acceptance returned');
+    assert.equal(transportClosed, false, 'the provider stream closed before the in-flight raw acceptance returned');
+
+    releaseAccept.resolve();
+    const result = await withDeadline(pendingDrain, 3_000);
+    assert.equal(result.boundaryId, 'boundary-observer-drain');
+    assert.equal(result.execution.runtimeId, identity.runtimeId);
+    assert.equal(result.requests.length, 1);
+    assert.equal(result.requests[0]!.lastProducerSeq, 1, 'drain did not bind the observed content raw fact sequence');
+    assert.equal(transportClosed, true, 'drain did not close the provider stream');
+    assert.equal(
+      acceptedRawFacts(harness.context).some((entry) => entry.envelope.fact.kind === 'content'),
+      true,
+      'the observed raw fact was lost when production drained',
+    );
+    const observed = await withDeadline(second, 3_000);
+    assert.equal(observed.value?.kind, 'provider.output');
+    await withDeadline(pendingClose, 3_000);
+    assert.equal(closed, true, 'the observe iterator did not close after the raw acceptance resolved');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

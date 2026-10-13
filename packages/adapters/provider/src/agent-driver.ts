@@ -12,13 +12,17 @@ import {
   type AgentOutput,
   type AgentResumeRequest,
   type AgentStartRequest,
+  type ActiveTurnProviderExecutionIdentityRef,
+  type ActiveTurnProviderRequestIdentityRef,
   type EvidenceRef,
   type ExecutionRuntimePort,
+  type NativeRequestRegistration,
   type OperationId,
   type ProviderBinding,
   type ProviderCloseResult,
   type ProviderEvent,
   type ProviderError,
+  type ProviderProducerDrainResult,
   type ProviderRequestLifecycleEvent,
   type ProviderExecutionIdentityRef,
   type ProviderSettlement,
@@ -32,12 +36,21 @@ import {
   type ProviderRawFact,
   type RawAsset,
   type RawFactEnvelope,
+  type RuntimeRequestLifecyclePhase,
+  type RuntimeRequestRecord,
   type ScopeRef,
   type StopRequestReceipt,
   type TaskId,
   type ToolExecutionFact,
   type ToolIdentity,
 } from '../../../contracts/src/index.js';
+import type {
+  MaterializedRequestInput,
+  ProviderRequestContext,
+  ProviderRequestContextHook,
+  ProviderRequestContextPhase,
+  RequestScopedInstructions,
+} from '../../../contracts/src/provider-request-context.js';
 import { randomUUID } from 'node:crypto';
 import type { ProviderObserveInputWithRawFacts, ProviderRawFactReceiver } from './adapter.js';
 import type { ProviderEvidenceSink } from './evidence.js';
@@ -76,6 +89,22 @@ export interface ProviderAgentDriverOptions {
    */
   readonly rawEvidence?: ProviderEvidenceSink;
   readonly acceptRawFact?: (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>;
+  /**
+   * Native causal registration. When raw acceptance is enabled this port is
+   * required: the driver awaits the 'dispatching' commit before the external
+   * start/submit, then commits the remaining lifecycle phases. Legacy callers
+   * that bind no raw sink leave this unset and keep the event-only path.
+   */
+  readonly registerRequest?: (registration: NativeRequestRegistration) => Promise<RuntimeRequestRecord>;
+  /**
+   * Fresh typed request-context materialization. When bound, the driver awaits
+   * this hook after durable registration and before the external start/submit
+   * of every initial request and every tool continuation, then sends the
+   * returned canonical units plus request-scoped instructions instead of the
+   * payload string and the driver-local tool history. The Runtime owns the
+   * materialization; the driver never invents or caches context.
+   */
+  readonly requestContext?: ProviderRequestContextHook;
   readonly now?: () => Date;
 }
 
@@ -150,6 +179,19 @@ function isProviderError(value: unknown): value is ProviderError {
     && Array.isArray(candidate.evidenceRefs);
 }
 
+/**
+ * A tool-waiting terminal is a real typed executable call (at least one decoded
+ * `toolCall`) plus a `waiting` terminal whose next action continues. It is not
+ * tied to one protocol's continuation ref, so Responses, Chat and Anthropic all
+ * qualify without inferring control from `outputRefs` or payload text.
+ */
+function isToolWaiting(event: ProviderEvent | undefined, toolCalls: readonly ProviderToolCall[]): boolean {
+  return event !== undefined
+    && event.terminalState === 'waiting'
+    && toolCalls.length > 0
+    && event.nextAction?.kind === 'continue';
+}
+
 interface RequestAttempt {
   readonly turnId: string;
   readonly requestId: string;
@@ -157,6 +199,30 @@ interface RequestAttempt {
   producerSeq: number;
   externalResponseId?: string;
   terminalPhase?: ProviderRequestLifecycleEvent['phase'];
+}
+
+function requestIdentityRef(request: RequestAttempt): ActiveTurnProviderRequestIdentityRef {
+  return {
+    turnId: request.turnId,
+    requestId: request.requestId,
+    ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
+  };
+}
+
+/**
+ * The registration ack must echo the submitted request identity, scope and
+ * phase. A different phase, identity or scope means the Runtime persisted a
+ * different fact than the driver asked for, so native dispatch must not trust it.
+ */
+function sameRegistrationAck(ack: RuntimeRequestRecord, expected: RuntimeRequestRecord): boolean {
+  return ack.phase === expected.phase
+    && ack.parentRequestId === expected.parentRequestId
+    && ack.request.turnId === expected.request.turnId
+    && ack.request.requestId === expected.request.requestId
+    && ack.request.parentRequestId === expected.request.parentRequestId
+    && ack.scope.organId.value === expected.scope.organId.value
+    && ack.scope.taskId?.value === expected.scope.taskId?.value
+    && ack.scope.operationId?.value === expected.scope.operationId?.value;
 }
 
 function requestIdentity(kind: 'turn' | 'request'): string {
@@ -177,6 +243,10 @@ export class ProviderAgentDriver implements AgentDriver {
   private initialPayload?: AgentInput['payload'];
   private turnId?: string;
   private activeRequest?: RequestAttempt;
+  private readonly requests: RequestAttempt[] = [];
+  private readonly inflight = new Set<Promise<unknown>>();
+  private observeIterator?: AsyncIterator<ProviderEvent>;
+  private productionClosed = false;
   private producerFailure?: unknown;
   private readonly now: () => Date;
 
@@ -185,6 +255,14 @@ export class ProviderAgentDriver implements AgentDriver {
       throw this.error(
         'raw.persistence.incomplete',
         'native raw persistence requires both an evidence sink and a raw-fact acceptance port',
+        'start',
+        'runtime',
+      );
+    }
+    if (options.acceptRawFact !== undefined && options.registerRequest === undefined) {
+      throw this.error(
+        'raw.registration.incomplete',
+        'native raw acceptance requires a causal request registration port',
         'start',
         'runtime',
       );
@@ -221,28 +299,35 @@ export class ProviderAgentDriver implements AgentDriver {
   async submit(input: AgentInput): Promise<AgentOutput> {
     if (!this.handle) throw this.error('runtime.not.started', 'provider agent driver has not started', 'submit');
     if (this.providerStarted) throw this.error('runtime.already.submitted', 'provider execution was already submitted', 'submit');
+    if (this.productionClosed) {
+      throw this.error('provider.production.closed', 'provider production was closed; no new request can be dispatched', 'submit', 'runtime');
+    }
     if (input.taskId.value !== this.options.taskId.value || input.executionEpoch !== this.options.executionEpoch) {
       throw this.error('runtime.identity.mismatch', 'provider submit is not bound to the current execution', 'submit', 'runtime');
     }
     const request = this.nextRequest();
+    await this.commitRequestPhase(request, 'dispatching');
     this.publishLifecycle(request, 'dispatching');
     let receipt: ProviderStartReceipt;
     try {
-      receipt = await this.options.port.start({
+      const context = await this.materializeRequestContext(request, 'initial');
+      receipt = await this.track(this.options.port.start({
         ...identity(this.options),
         ...this.currentRequestIdentity(),
         inputRefs: [...this.options.inputRefs],
         evidenceRefs: [this.evidenceRef],
         payload: input.payload,
+        ...this.requestContextFields(context),
         ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
-      });
+      }));
       this.assertProviderIdentity(receipt, 'provider start receipt', 'start');
     } catch (cause) {
-      if (!this.stopping) this.publishFailed(request, cause, 'start');
+      if (!this.stopping) await this.publishFailed(request, cause, 'start');
       throw cause;
     }
     this.providerStarted = true;
     this.initialPayload = input.payload;
+    await this.commitRequestPhase(request, 'dispatched');
     this.publishLifecycle(request, 'dispatched', [], receipt.evidenceRefs);
     return {
       taskId: input.taskId,
@@ -256,6 +341,9 @@ export class ProviderAgentDriver implements AgentDriver {
 
   async *observe(input: { readonly runtimeId: string }): AsyncIterable<ProviderAgentEvent> {
     if (!this.providerStarted) throw this.error('runtime.not.submitted', 'provider execution has not been submitted', 'observe', 'runtime');
+    if (this.productionClosed) {
+      throw this.error('provider.production.closed', 'provider production was closed; the stream cannot be re-entered', 'observe', 'runtime');
+    }
     if (input.runtimeId !== this.options.runtimeId) {
       throw this.error('runtime.identity.mismatch', 'provider observe is not bound to the current execution', 'observe', 'runtime');
     }
@@ -275,17 +363,27 @@ export class ProviderAgentDriver implements AgentDriver {
         ...this.currentRequestIdentity(),
         ...(onRawFacts === undefined ? {} : { onRawFacts }),
       };
-      for await (const providerEvent of this.options.port.observe(observeInput)) {
-        this.assertProviderIdentity(providerEvent, 'provider event', 'observe');
-        if (providerEvent.toolCall !== undefined) toolCalls.push(providerEvent.toolCall);
-        if (providerEvent.terminalState !== undefined) terminal = providerEvent;
-        this.publishObservedLifecycle(providerEvent);
-        if (providerEvent.terminalState === 'waiting' && providerEvent.nextAction?.ref === 'responses-tool-call') continue;
-        yield this.agentEvent(providerEvent, request);
+      const providerIterator = this.options.port.observe(observeInput)[Symbol.asyncIterator]();
+      this.observeIterator = providerIterator;
+      try {
+        while (true) {
+          const step = await providerIterator.next();
+          if (step.done === true) break;
+          const providerEvent = step.value;
+          this.assertProviderIdentity(providerEvent, 'provider event', 'observe');
+          if (providerEvent.toolCall !== undefined) toolCalls.push(providerEvent.toolCall);
+          if (providerEvent.terminalState !== undefined) terminal = providerEvent;
+          await this.publishObservedLifecycle(providerEvent);
+          if (isToolWaiting(providerEvent, toolCalls)) continue;
+          yield this.agentEvent(providerEvent, request);
+        }
+      } finally {
+        if (this.observeIterator === providerIterator) this.observeIterator = undefined;
+        await this.closeProviderIterator(providerIterator);
       }
-      if (this.stopping) return;
+      if (this.stopping || this.productionClosed) return;
       if (toolCalls.length === 0) return;
-      if (terminal?.terminalState !== 'waiting' || terminal.nextAction?.ref !== 'responses-tool-call') {
+      if (!isToolWaiting(terminal, toolCalls)) {
         throw this.error('tool.terminal.missing', 'provider emitted a tool call without a tool-waiting terminal', 'observe', 'runtime');
       }
       if (request === undefined) {
@@ -293,6 +391,9 @@ export class ProviderAgentDriver implements AgentDriver {
       }
       if (this.options.executeTool === undefined || this.options.tools === undefined) {
         throw this.error('tool.executor.missing', 'provider requested a tool but no execution port is bound', 'observe', 'capability');
+      }
+      if (this.productionClosed) {
+        throw this.error('provider.production.closed', 'provider production was closed; no new tool work can start', 'observe', 'runtime');
       }
       rounds += 1;
       if (rounds > (this.options.maxToolRounds ?? 8)) {
@@ -321,26 +422,32 @@ export class ProviderAgentDriver implements AgentDriver {
         };
         let result: ProviderToolExecutionResult;
         try {
-          result = await this.options.executeTool.execute({
+          result = await this.track(this.options.executeTool.execute({
             execution: identity(this.options),
             scope: this.options.scope,
             ...(this.activeRequest === undefined ? {} : { requestId: this.activeRequest.requestId }),
             call,
             signal: toolController.signal,
-          });
+          }));
         } catch (cause) {
           // A stop aborts the tool signal. Whether the executor rejected with
           // that abort or with its own failure, the outcome is evidence: it must
           // emit a typed result bound to the same callId instead of only
           // returning or throwing, so a cancelled tool never disappears from
           // the journal. No output was returned, so no raw asset is fabricated.
+          // The barrier is released before any yield: a consumer that stops
+          // resuming must never hold the barrier and deadlock settle()/drain.
           if (this.stopping) {
-            yield* this.toolFailedEvents(request, call, cause, 'cancelled');
             releaseBarrier();
+            yield* this.toolFailedEvents(request, call, cause, 'cancelled');
             return;
           }
-          yield* this.toolFailedEvents(request, call, cause, 'failed');
+          // Record the real executor failure before releasing the barrier and
+          // yielding, so a later settle()/drain surfaces it instead of reading
+          // the stopped producer as a normal result.
+          this.recordProducerFailure(cause);
           releaseBarrier();
+          yield* this.toolFailedEvents(request, call, cause, 'failed');
           throw cause;
         }
         const status: ProviderToolStatus = result.error !== undefined
@@ -353,9 +460,9 @@ export class ProviderAgentDriver implements AgentDriver {
         // stop return or continuation: a late result must still reach the
         // Runtime, and a failing acceptance must not read as a normal stop.
         try {
-          await this.persistToolResult(request, call, result, toolResult);
+          await this.track(this.persistToolResult(request, call, result, toolResult));
         } catch (cause) {
-          this.producerFailure = cause;
+          this.recordProducerFailure(cause);
           throw cause;
         } finally {
           releaseBarrier();
@@ -374,27 +481,36 @@ export class ProviderAgentDriver implements AgentDriver {
       this.continuationCompletion = continuationCompletion;
       let submitted: ProviderSubmitResult;
       const continuation = this.nextRequest();
+      await this.commitRequestPhase(continuation, 'dispatching');
       this.publishLifecycle(continuation, 'dispatching');
       try {
-        submitted = await this.options.port.submit({
+        const context = await this.materializeRequestContext(continuation, 'continuation');
+        submitted = await this.track(this.options.port.submit({
           ...identity(this.options),
           ...this.continuationRequestIdentity(continuation),
           inputRefs: [...this.options.inputRefs],
           evidenceRefs: toolHistory.flatMap(({ result }) => result.evidenceRefs),
           payload: this.initialPayload ?? inputPayloadMissing(),
           tools: this.options.tools,
-          toolContinuations: toolHistory.map(({ call, result }) => ({
-            callId: call.callId,
-            toolId: call.toolId,
-            arguments: call.arguments,
-            continuationRef: call.continuationRef,
-            output: result.output,
-          })),
-        });
+          ...(context === undefined
+            ? {
+                toolContinuations: toolHistory.map(({ call, result }) => ({
+                  callId: call.callId,
+                  toolId: call.toolId,
+                  arguments: call.arguments,
+                  continuationRef: call.continuationRef,
+                  output: result.output,
+                })),
+              }
+            : this.requestContextFields(context)),
+        }));
         this.assertProviderIdentity(submitted, 'provider tool continuation receipt', 'submit');
-        if (!this.stopping) this.publishLifecycle(continuation, 'dispatched', [], submitted.evidenceRefs);
+        if (!this.stopping) {
+          await this.commitRequestPhase(continuation, 'dispatched');
+          this.publishLifecycle(continuation, 'dispatched', [], submitted.evidenceRefs);
+        }
       } catch (cause) {
-        if (!this.stopping) this.publishFailed(continuation, cause, 'submit');
+        if (!this.stopping) await this.publishFailed(continuation, cause, 'submit');
         throw cause;
       } finally {
         completeContinuation();
@@ -425,7 +541,7 @@ export class ProviderAgentDriver implements AgentDriver {
         ownerId: this.options.ownerId ?? 'humanagent.app',
       });
     } catch (cause) {
-      if (!this.stopping && this.activeRequest) this.publishFailed(this.activeRequest, cause, 'stop');
+      if (!this.stopping && this.activeRequest) await this.publishFailed(this.activeRequest, cause, 'stop');
       throw cause;
     }
     this.assertProviderIdentity(receipt, 'provider stop receipt', 'stop');
@@ -449,7 +565,7 @@ export class ProviderAgentDriver implements AgentDriver {
         ...this.currentRequestIdentity(),
       });
     } catch (cause) {
-      if (!this.stopping && this.activeRequest) this.publishFailed(this.activeRequest, cause, 'settle');
+      if (!this.stopping && this.activeRequest) await this.publishFailed(this.activeRequest, cause, 'settle');
       throw cause;
     }
     this.assertProviderIdentity(settlement, 'provider settlement', 'settle');
@@ -457,11 +573,13 @@ export class ProviderAgentDriver implements AgentDriver {
     const request = this.activeRequest;
     if (request !== undefined && request.terminalPhase === undefined) {
       if (settlement.state === 'cancelled' || settlement.state === 'stopped') {
+        await this.commitRequestPhase(request, 'cancelled');
         this.publishLifecycle(request, 'cancelled', [], settlement.evidenceRefs, request.externalResponseId);
       } else if (settlement.state === 'succeeded') {
+        await this.commitRequestPhase(request, 'settled');
         this.publishLifecycle(request, 'settled', [], settlement.evidenceRefs, request.externalResponseId);
       } else if (settlement.error !== undefined) {
-        this.publishFailed(request, settlement.error, 'settle');
+        await this.publishFailed(request, settlement.error, 'settle');
       }
     }
     return { state: settlement.state, evidenceRefs: [...settlement.evidenceRefs] };
@@ -473,6 +591,153 @@ export class ProviderAgentDriver implements AgentDriver {
 
   settlement(): ProviderSettlement | undefined {
     return this.providerSettlement ? structuredClone(this.providerSettlement) : undefined;
+  }
+
+  /**
+   * Synchronously closes new request/tool admission, then awaits the work that
+   * already entered the driver: the external start/submit, tool executor
+   * execution, exact-output write and durable raw acceptance. A recorded
+   * producer failure is rethrown so a drain failure never reads as a normal
+   * stopped settlement. The result binds only the request identities the driver
+   * actually created and their final producer sequence.
+   */
+  async closeProductionAndDrain(input: {
+    readonly execution: ActiveTurnProviderExecutionIdentityRef;
+    readonly boundaryId: string;
+  }): Promise<ProviderProducerDrainResult> {
+    this.productionClosed = true;
+    if (input.execution.runtimeId !== this.options.runtimeId
+      || input.execution.executionEpoch !== this.options.executionEpoch) {
+      throw this.error('runtime.identity.mismatch', 'provider drain is not bound to the current execution', 'settle', 'runtime');
+    }
+    // Close the live provider iterator first: this awaits the current
+    // decode/raw-ack step and tears the stream down, so the drain result covers
+    // the observing work, not only the start/tool promises.
+    const iterator = this.observeIterator;
+    if (iterator !== undefined) await this.closeProviderIterator(iterator);
+    // Re-check after each settle: admitted work can schedule the next unit
+    // (for example, a tool result write+ack after the executor resolves) after
+    // the drain started. Production is closed, so the set only grows to the
+    // already-admitted boundary and then stops.
+    while (true) {
+      const batch = [...this.inflight];
+      await Promise.allSettled(batch);
+      if (this.inflight.size === batch.length) break;
+    }
+    if (this.producerFailure !== undefined) throw this.producerFailure;
+    return {
+      execution: { runtimeId: this.options.runtimeId, executionEpoch: this.options.executionEpoch },
+      boundaryId: input.boundaryId,
+      requests: this.requests.map((request) => ({
+        request: requestIdentityRef(request),
+        lastProducerSeq: request.producerSeq,
+      })),
+    };
+  }
+
+  /**
+   * Awaits the Runtime registration of one request lifecycle phase before the
+   * matching external effect. A missing port (legacy event-only caller) is a
+   * no-op; a rejected registration or a phase/identity/scope-mismatched ack
+   * aborts the dispatch so the driver never runs an unregistered request.
+   */
+  private async commitRequestPhase(request: RequestAttempt, phase: RuntimeRequestLifecyclePhase): Promise<void> {
+    const register = this.options.registerRequest;
+    if (register === undefined) return;
+    const record: RuntimeRequestRecord = {
+      request: requestIdentityRef(request),
+      ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
+      scope: this.options.scope,
+      phase,
+    };
+    const registration: NativeRequestRegistration = {
+      execution: { runtimeId: this.options.runtimeId, executionEpoch: this.options.executionEpoch },
+      record,
+    };
+    let ack: RuntimeRequestRecord;
+    try {
+      ack = await register(registration);
+    } catch (cause) {
+      throw this.error(
+        'request.registration.failed',
+        `runtime rejected the ${phase} registration for ${request.requestId}`,
+        'submit',
+        'runtime',
+        cause,
+      );
+    }
+    if (!sameRegistrationAck(ack, record)) {
+      throw this.error(
+        'request.registration.ack-mismatch',
+        `runtime registration ack does not match the submitted ${phase} request record`,
+        'submit',
+        'runtime',
+      );
+    }
+  }
+
+  /**
+   * Awaits the Runtime-owned materialization of this request's typed context.
+   * A hook rejection propagates to the caller and fails the request; the driver
+   * never falls back to an earlier context.
+   */
+  private async materializeRequestContext(
+    request: RequestAttempt,
+    phase: ProviderRequestContextPhase,
+  ): Promise<MaterializedRequestInput | undefined> {
+    const hook = this.options.requestContext;
+    if (hook === undefined) return undefined;
+    return hook({
+      execution: identity(this.options),
+      request: requestIdentityRef(request),
+      phase,
+    });
+  }
+
+  private requestContextFields(context: MaterializedRequestInput | undefined): {
+    readonly requestContext?: ProviderRequestContext;
+    readonly instructions?: RequestScopedInstructions;
+  } {
+    if (context === undefined) return {};
+    return {
+      requestContext: context.canonical,
+      ...(context.instructions === undefined ? {} : { instructions: context.instructions }),
+    };
+  }
+
+  /**
+   * Keeps a promise visible to `closeProductionAndDrain`. Settled promises stay
+   * in the set so the drain can detect work that was scheduled while it was
+   * waiting, instead of snapshotting too early.
+   */
+  private track<T>(promise: Promise<T>): Promise<T> {
+    this.inflight.add(promise);
+    return promise;
+  }
+
+  private recordProducerFailure(cause: unknown): void {
+    if (this.producerFailure === undefined) this.producerFailure = cause;
+  }
+
+  /**
+   * Closes the provider observe iterator explicitly instead of relying on the
+   * implicit `for await` teardown. Awaited so the driver waits for the current
+   * decode/raw-ack work before reporting a drain; a close failure is recorded
+   * so an incomplete teardown surfaces instead of reading as a clean drain.
+   */
+  private async closeProviderIterator(iterator: AsyncIterator<ProviderEvent>): Promise<void> {
+    if (iterator.return === undefined) return;
+    try {
+      await iterator.return();
+    } catch (cause) {
+      this.recordProducerFailure(this.error(
+        'provider.observe.close.failed',
+        'provider observe iterator did not close cleanly',
+        'observe',
+        'runtime',
+        cause,
+      ));
+    }
   }
 
   private agentEvent(providerEvent: ProviderEvent, request: RequestAttempt | undefined): ProviderAgentEvent {
@@ -616,6 +881,7 @@ export class ProviderAgentDriver implements AgentDriver {
     };
     this.turnId = request.turnId;
     this.activeRequest = request;
+    this.requests.push(request);
     return request;
   }
 
@@ -661,11 +927,11 @@ export class ProviderAgentDriver implements AgentDriver {
     this.options.onRequestLifecycle(event);
   }
 
-  private publishFailed(
+  private async publishFailed(
     request: RequestAttempt,
     cause: unknown,
     phase: 'start' | 'submit' | 'stop' | 'settle' | 'observe',
-  ): void {
+  ): Promise<void> {
     if (request.terminalPhase !== undefined) return;
     const error = cause instanceof ProviderAdapterError
       ? cause.providerError
@@ -676,16 +942,18 @@ export class ProviderAgentDriver implements AgentDriver {
             cause instanceof Error ? cause.message : 'provider request failed',
             phase,
           ).providerError;
+    await this.commitRequestPhase(request, 'failed');
     this.publishLifecycle(request, 'failed', [], [], undefined, error);
   }
 
-  private publishObservedLifecycle(event: ProviderEvent): void {
+  private async publishObservedLifecycle(event: ProviderEvent): Promise<void> {
     if (this.activeRequest === undefined) return;
     if (event.externalResponseId !== undefined) this.activeRequest.externalResponseId = event.externalResponseId;
     if (event.kind === 'terminal' && event.terminalState === 'waiting') {
+      await this.commitRequestPhase(this.activeRequest, 'waiting');
       this.publishLifecycle(this.activeRequest, 'waiting', event.evidenceRefs);
     } else if (event.kind === 'error') {
-      this.publishFailed(this.activeRequest, event.error === undefined ? new Error('provider emitted an error event') : event.error, 'observe');
+      await this.publishFailed(this.activeRequest, event.error === undefined ? new Error('provider emitted an error event') : event.error, 'observe');
     }
   }
 

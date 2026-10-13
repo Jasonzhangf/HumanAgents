@@ -744,6 +744,7 @@ export interface WorkResult {
 
 import { ContractError } from './errors.js';
 import { validateToolExecutionFact, type ToolExecutionFact, type ToolIdentity } from './native-reasoning.js';
+import type { ProviderRequestContext, RequestScopedInstructions } from './provider-request-context.js';
 export { ContractError } from './errors.js';
 const ID_SCOPES: readonly ScopeKind[] = ['organ', 'task', 'cycle', 'operation', 'checkpoint', 'evidence'];
 const CONTROL_KEYS = new Set([
@@ -969,6 +970,10 @@ export interface ProviderExecutionInput extends ProviderExecutionIdentityRef {
   readonly payload?: BusinessPayload;
   readonly imageContents?: readonly ProviderImageContent[];
   readonly tools?: readonly ProviderToolDefinition[];
+  /** Typed canonical request context. When set, codecs encode these units instead of stringifying `payload`. */
+  readonly requestContext?: ProviderRequestContext;
+  /** Transient request-scoped orientation. It enters this request only. */
+  readonly instructions?: RequestScopedInstructions;
 }
 
 export interface ProviderToolDefinition {

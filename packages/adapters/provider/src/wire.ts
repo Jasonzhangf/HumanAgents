@@ -15,7 +15,7 @@ export interface ResponsesWireRequest {
 }
 
 export type ResponsesWireInputItem =
-  | { readonly type: 'message'; readonly role: 'user' | 'system'; readonly content: string }
+  | { readonly type: 'message'; readonly role: 'user' | 'assistant' | 'system'; readonly content: string }
   | { readonly type: 'function_call'; readonly call_id: string; readonly name: string; readonly arguments: string }
   | { readonly type: 'function_call_output'; readonly call_id: string; readonly output: string };
 
@@ -99,10 +99,34 @@ export interface OpenAIChatWireRequest {
   readonly checkpointId?: CheckpointId;
 }
 
-export interface OpenAIChatWireMessage {
-  readonly role: 'user' | 'system' | 'assistant';
-  readonly content: string;
-}
+/**
+ * OpenAI Chat request message. `content` stays a plain string; a
+ * tool-call-only assistant message uses an empty string. Consecutive
+ * tool-call units fold into one assistant `tool_calls` group, and each tool
+ * result binds back to its call by `tool_call_id`.
+ */
+export type OpenAIChatWireMessage =
+  | {
+      readonly role: 'user' | 'system';
+      readonly content: string;
+    }
+  | {
+      readonly role: 'assistant';
+      readonly content: string;
+      readonly tool_calls?: readonly {
+        readonly id: string;
+        readonly type: 'function';
+        readonly function: {
+          readonly name: string;
+          readonly arguments: string;
+        };
+      }[];
+    }
+  | {
+      readonly role: 'tool';
+      readonly tool_call_id: string;
+      readonly content: string;
+    };
 
 export interface OpenAIChatWireTool {
   readonly type: 'function';
