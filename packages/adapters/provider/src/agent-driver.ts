@@ -179,6 +179,19 @@ function isProviderError(value: unknown): value is ProviderError {
     && Array.isArray(candidate.evidenceRefs);
 }
 
+/**
+ * A tool-waiting terminal is a real typed executable call (at least one decoded
+ * `toolCall`) plus a `waiting` terminal whose next action continues. It is not
+ * tied to one protocol's continuation ref, so Responses, Chat and Anthropic all
+ * qualify without inferring control from `outputRefs` or payload text.
+ */
+function isToolWaiting(event: ProviderEvent | undefined, toolCalls: readonly ProviderToolCall[]): boolean {
+  return event !== undefined
+    && event.terminalState === 'waiting'
+    && toolCalls.length > 0
+    && event.nextAction?.kind === 'continue';
+}
+
 interface RequestAttempt {
   readonly turnId: string;
   readonly requestId: string;
@@ -361,7 +374,7 @@ export class ProviderAgentDriver implements AgentDriver {
           if (providerEvent.toolCall !== undefined) toolCalls.push(providerEvent.toolCall);
           if (providerEvent.terminalState !== undefined) terminal = providerEvent;
           await this.publishObservedLifecycle(providerEvent);
-          if (providerEvent.terminalState === 'waiting' && providerEvent.nextAction?.ref === 'responses-tool-call') continue;
+          if (isToolWaiting(providerEvent, toolCalls)) continue;
           yield this.agentEvent(providerEvent, request);
         }
       } finally {
@@ -370,7 +383,7 @@ export class ProviderAgentDriver implements AgentDriver {
       }
       if (this.stopping || this.productionClosed) return;
       if (toolCalls.length === 0) return;
-      if (terminal?.terminalState !== 'waiting' || terminal.nextAction?.ref !== 'responses-tool-call') {
+      if (!isToolWaiting(terminal, toolCalls)) {
         throw this.error('tool.terminal.missing', 'provider emitted a tool call without a tool-waiting terminal', 'observe', 'runtime');
       }
       if (request === undefined) {

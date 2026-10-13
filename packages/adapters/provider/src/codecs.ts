@@ -306,6 +306,13 @@ interface AnthropicBlockState {
   argumentsDelta: string;
 }
 
+/** Request-local Chat tool-call state assembled across streaming chunks. */
+interface OpenAIChatPendingToolCall {
+  readonly id?: string;
+  readonly name?: string;
+  readonly arguments: string;
+}
+
 export interface ProviderCodec<W extends ProviderWireRequest = ProviderWireRequest> {
   readonly protocol: 'responses' | 'anthropic' | 'openai';
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): W;
@@ -544,6 +551,7 @@ function ownedEvent(
     readonly evidenceRefs?: readonly EvidenceRef[];
     readonly summary?: string;
     readonly toolCall?: ProviderEvent['toolCall'];
+    readonly toolPhase?: ProviderEvent['toolPhase'];
     readonly externalResponseId?: string;
   } = {},
 ): ProviderEvent {
@@ -558,6 +566,7 @@ function ownedEvent(
     ...(extra.evidenceRefs === undefined ? {} : { evidenceRefs: extra.evidenceRefs }),
     ...(extra.summary === undefined ? {} : { summary: extra.summary }),
     ...(extra.toolCall === undefined ? {} : { toolCall: extra.toolCall }),
+    ...(extra.toolPhase === undefined ? {} : { toolPhase: extra.toolPhase }),
     ...(extra.externalResponseId === undefined ? {} : { externalResponseId: extra.externalResponseId }),
   };
 }
@@ -611,16 +620,40 @@ function anthropicTerminal(stopReason: string | undefined): 'completed' | 'incom
   }
 }
 
-function parseJsonObject(text: string): BusinessPayload | undefined {
-  if (text.trim() === '') return undefined;
+/**
+ * Parses already-assembled fragmented tool-call arguments into a business
+ * payload. Fragment assembly joins the real per-protocol fragments first; this
+ * then fails closed on invalid JSON or a non-object shape, so a malformed call
+ * never becomes an executable tool call.
+ */
+function parseToolArguments(json: string, execution: ProviderExecutionIdentityRef): BusinessPayload {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    return undefined;
+    parsed = JSON.parse(json || '{}');
+  } catch (cause) {
+    throw new ProviderAdapterError({
+      code: 'tool.arguments.invalid-json',
+      category: 'protocol',
+      phase: 'tool',
+      message: cause instanceof Error ? cause.message : 'provider tool arguments are invalid JSON',
+      scope: execution,
+    });
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ProviderAdapterError({
+      code: 'tool.arguments.invalid-shape',
+      category: 'protocol',
+      phase: 'tool',
+      message: 'provider tool arguments must be a JSON object',
+      scope: execution,
+    });
+  }
   return parsed as BusinessPayload;
+}
+
+/** One provider execution's request-local state key; shared by codec maps. */
+function executionKey(execution: ProviderExecutionIdentityRef): string {
+  return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
 }
 
 function requireString(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): string {
@@ -1327,6 +1360,14 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
 export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequest> {
   readonly protocol = 'openai' as const;
 
+  /**
+   * Fragmented assistant tool calls keyed by execution, chat completion id and
+   * choice index, then by the wire tool index. Arguments arrive across several
+   * chunks and the call id may arrive late; nothing is executable until the
+   * finish_reason closes the call.
+   */
+  private readonly pendingToolCalls = new Map<string, Map<number, OpenAIChatPendingToolCall>>();
+
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
@@ -1444,6 +1485,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               scope: context.execution,
             });
           }
+          const pendingKey = `${executionKey(context.execution)}:${id}:${choiceIndex}`;
           for (const toolCall of toolCalls ?? []) {
             if (!toolCall || typeof toolCall !== 'object' || Array.isArray(toolCall)) {
               throw new ProviderAdapterError({
@@ -1467,10 +1509,24 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               });
             }
             const functionValue = (functionRecord ?? {}) as Record<string, unknown>;
-            const callId = typeof toolRecord.id === 'string' && toolRecord.id.trim() ? toolRecord.id : `tool-${id}-${toolIndex}`;
+            const wireCallId = typeof toolRecord.id === 'string' && toolRecord.id.trim() ? toolRecord.id : undefined;
+            const callId = wireCallId ?? `tool-${id}-${toolIndex}`;
             const name = typeof functionValue.name === 'string' && functionValue.name.trim() ? functionValue.name : undefined;
             const argumentsDelta = typeof functionValue.arguments === 'string' ? functionValue.arguments : undefined;
             if (name === undefined && argumentsDelta === undefined) continue;
+            // Accumulate the real fragments; nothing is executable until the
+            // finish_reason closes the call and the arguments parse.
+            let pending = this.pendingToolCalls.get(pendingKey);
+            if (pending === undefined) {
+              pending = new Map();
+              this.pendingToolCalls.set(pendingKey, pending);
+            }
+            const current = pending.get(toolIndex) ?? { arguments: '' };
+            pending.set(toolIndex, {
+              ...(wireCallId === undefined ? (current.id === undefined ? {} : { id: current.id }) : { id: wireCallId }),
+              ...(name === undefined ? (current.name === undefined ? {} : { name: current.name }) : { name }),
+              arguments: `${current.arguments}${argumentsDelta ?? ''}`,
+            });
             const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, {
               ...(name === undefined ? {} : { name }),
               ...(argumentsDelta === undefined ? {} : { arguments: argumentsDelta }),
@@ -1496,6 +1552,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
                 outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
                 evidenceRefs,
                 ...(name === undefined ? {} : { summary: `调用工具：${name}` }),
+                toolPhase: 'invoke',
               },
             ));
           }
@@ -1512,6 +1569,48 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
           if (typeof finishReason === 'string') {
             const evidenceRefs = [await captureEvidence(context, raw.type, `finish/${id}/${choiceIndex}`, finishReason)];
             const mapping = mapOpenAIFinishReason(finishReason);
+            const pending = this.pendingToolCalls.get(pendingKey);
+            this.pendingToolCalls.delete(pendingKey);
+            if (mapping.terminalState === 'waiting' && (finishReason === 'tool_calls' || finishReason === 'function_call')) {
+              for (const [toolIndex, pendingCall] of [...(pending ?? new Map<number, OpenAIChatPendingToolCall>()).entries()].sort((left, right) => left[0] - right[0])) {
+                if (pendingCall.name === undefined) {
+                  throw new ProviderAdapterError({
+                    code: 'missing.field',
+                    category: 'protocol',
+                    phase: 'tool',
+                    message: `${raw.type} tool call missing function name`,
+                    scope: context.execution,
+                  });
+                }
+                const callId = pendingCall.id ?? `tool-${id}-${toolIndex}`;
+                const toolId = responsesToolId(pendingCall.name);
+                const argumentsValue = parseToolArguments(pendingCall.arguments, context.execution);
+                const toolEvidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}/typed`, {
+                  name: pendingCall.name,
+                  arguments: pendingCall.arguments,
+                })];
+                events.push(ownedEvent(
+                  context.execution,
+                  context.scope,
+                  'tool',
+                  raw.type,
+                  eventId(context, raw.type, `tool/${callId}/typed`),
+                  `tool-${callId}`,
+                  { kind: 'continue' },
+                  {
+                    outputRefs: [artifactRef(raw.type, `tool/${callId}/typed`, toolEvidenceRefs[0].digest)],
+                    evidenceRefs: toolEvidenceRefs,
+                    summary: `调用工具：${toolId}`,
+                    toolCall: { callId, toolId, arguments: argumentsValue, continuationRef: id },
+                  },
+                ));
+                rawFacts.push(toolCallFact(
+                  unitId('openai', 'tool-arguments', `${id}:${choiceIndex}:${toolIndex}`),
+                  { callId, toolId, arguments: argumentsValue, continuationRef: id },
+                  rawAsset(toolEvidenceRefs[0], { kind: 'arguments' }),
+                ));
+              }
+            }
             const error = mapping.errorCode
               ? providerError(
                   context.execution,
@@ -1713,7 +1812,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
                 eventId(context, raw.type, `tool/${callId}`),
                 `tool-${callId}`,
                 { kind: 'continue' },
-                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs, summary: `调用工具：${name}` },
+                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs, summary: `调用工具：${name}`, toolPhase: 'invoke' },
               ),
             ],
             rawFacts: [contentFact({
@@ -1855,24 +1954,48 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const block = this.blocks.get(blockKey);
         this.blocks.delete(blockKey);
         const rawFacts: ProviderRawFact[] = [];
+        const events: ProviderEvent[] = [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(index)}`), [await captureEvidence(context, raw.type, `block/${String(index)}`)])];
         if (block) {
           for (const channel of block.channels) rawFacts.push(contentCompleteFact(unitId('anthropic', channel, String(index))));
           if (block.type === 'tool_use' && block.callId !== undefined && block.toolId !== undefined) {
             const continuationRef = this.messageIds.get(this.stopReasonKey(context.execution));
-            const argumentsJson = block.argumentsDelta.length > 0 ? block.argumentsDelta : block.startArgumentsJson ?? '';
-            const parsed = parseJsonObject(argumentsJson);
-            if (continuationRef !== undefined && parsed !== undefined) {
-              const argumentsEvidence = await captureEvidence(context, raw.type, `tool/${block.callId}/arguments`, { arguments: argumentsJson });
-              rawFacts.push(toolCallFact(
-                unitId('anthropic', 'tool-arguments', String(index)),
-                { callId: block.callId, toolId: block.toolId, arguments: parsed, continuationRef },
-                rawAsset(argumentsEvidence, { kind: 'arguments' }),
-              ));
+            if (continuationRef === undefined) {
+              throw new ProviderAdapterError({
+                code: 'tool.continuation.missing',
+                category: 'protocol',
+                phase: 'tool',
+                message: 'anthropic tool call is missing its message continuation identity',
+                scope: context.execution,
+              });
             }
+            const argumentsJson = block.argumentsDelta.length > 0 ? block.argumentsDelta : block.startArgumentsJson ?? '';
+            const parsed = parseToolArguments(argumentsJson, context.execution);
+            const toolId = responsesToolId(block.toolId);
+            const argumentsEvidence = await captureEvidence(context, raw.type, `tool/${block.callId}/arguments`, { arguments: argumentsJson });
+            rawFacts.push(toolCallFact(
+              unitId('anthropic', 'tool-arguments', String(index)),
+              { callId: block.callId, toolId, arguments: parsed, continuationRef },
+              rawAsset(argumentsEvidence, { kind: 'arguments' }),
+            ));
+            events.push(ownedEvent(
+              context.execution,
+              context.scope,
+              'tool',
+              raw.type,
+              eventId(context, raw.type, `tool/${block.callId}/typed`),
+              `tool-${block.callId}`,
+              { kind: 'continue' },
+              {
+                outputRefs: [artifactRef(raw.type, `tool/${block.callId}/typed`, argumentsEvidence.digest)],
+                evidenceRefs: [argumentsEvidence],
+                summary: `调用工具：${toolId}`,
+                toolCall: { callId: block.callId, toolId, arguments: parsed, continuationRef },
+              },
+            ));
           }
         }
         return {
-          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(index)}`), [await captureEvidence(context, raw.type, `block/${String(index)}`)])],
+          events,
           rawFacts,
         };
       }
@@ -1932,7 +2055,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
   }
 
   private stopReasonKey(execution: ProviderExecutionIdentityRef): string {
-    return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
+    return executionKey(execution);
   }
 
   private blockKey(execution: ProviderExecutionIdentityRef, index: number): string {

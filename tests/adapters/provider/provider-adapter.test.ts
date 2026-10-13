@@ -8,6 +8,7 @@ import { ImmutableAssetStore } from '../../../packages/adapters/filesystem/src/i
 import {
   ContractError,
   id,
+  validateProviderEvent,
   type EvidenceRef,
   type ProviderBinding,
   type ProviderCapabilities,
@@ -1484,6 +1485,108 @@ test('openai chat codec keeps tool argument fragments in one unit across a late 
   }, context);
   const terminal = finish.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'request-complete' }> => candidate.kind === 'request-complete');
   assert.equal(terminal?.terminal, 'completed');
+});
+
+test('openai chat codec assembles fragments into one executable typed tool call with a legal phase', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const context = codecContext();
+
+  const first = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-typed',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { name: 'file_read', arguments: '{"path":' } }] }, finish_reason: null }],
+  }, context);
+  assert.equal(first.events[0].kind, 'tool');
+  assert.equal(first.events[0].toolPhase, 'invoke');
+  assert.equal(first.events[0].toolCall, undefined);
+  for (const event of first.events) validateProviderEvent(event);
+
+  const second = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-typed',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-typed', function: { arguments: '"README.md"}' } }] }, finish_reason: null }],
+  }, context);
+  assert.equal(second.events[0].toolPhase, 'invoke');
+
+  const finish = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-typed',
+    choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+  }, context);
+  const executable = finish.events.filter((event) => event.toolCall !== undefined);
+  assert.equal(executable.length, 1);
+  assert.deepEqual(executable[0]?.toolCall, { callId: 'call-typed', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'chat-typed' });
+  assert.equal(executable[0]?.toolPhase, undefined);
+  for (const event of finish.events) validateProviderEvent(event);
+  const rawCall = finish.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'tool-call' }> => candidate.kind === 'tool-call');
+  assert.ok(rawCall, 'expected a typed tool-call raw fact');
+  assert.equal(rawCall.contentUnitId, 'openai:tool-arguments:chat-typed:0:0');
+  assert.deepEqual(rawCall.call.arguments, { path: 'README.md' });
+});
+
+test('openai chat codec fails closed on incomplete fragmented tool arguments', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const context = codecContext();
+  await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-bad',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-bad', function: { name: 'file_read', arguments: '{"path":' } }] }, finish_reason: null }],
+  }, context);
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'openai',
+      type: 'openai.chat.completion',
+      id: 'chat-bad',
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+    }, context),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'tool.arguments.invalid-json',
+  );
+});
+
+test('anthropic codec emits one executable typed tool call with a legal phase on block stop', async () => {
+  const codec = new AnthropicProviderCodec(4096);
+  const context = codecContext();
+
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'msg-typed', model: 'm', role: 'assistant' } }, context);
+  const start = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'tool_use', id: 'call-typed', name: 'file_read', input: {} },
+  }, context);
+  assert.equal(start.events[0].kind, 'tool');
+  assert.equal(start.events[0].toolPhase, 'invoke');
+  assert.equal(start.events[0].toolCall, undefined);
+  for (const event of start.events) validateProviderEvent(event);
+
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"README.md"}' } }, context);
+
+  const stop = await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, context);
+  const executable = stop.events.filter((event) => event.toolCall !== undefined);
+  assert.equal(executable.length, 1);
+  assert.deepEqual(executable[0]?.toolCall, { callId: 'call-typed', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'msg-typed' });
+  for (const event of stop.events) validateProviderEvent(event);
+  const rawCall = stop.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'tool-call' }> => candidate.kind === 'tool-call');
+  assert.ok(rawCall, 'expected a typed tool-call raw fact');
+  assert.equal(rawCall.call.toolId, 'file.read');
+  assert.equal(rawCall.call.continuationRef, 'msg-typed');
+});
+
+test('anthropic codec fails closed on incomplete tool arguments at block stop', async () => {
+  const codec = new AnthropicProviderCodec(4096);
+  const context = codecContext();
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'msg-bad', model: 'm', role: 'assistant' } }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-bad', name: 'file_read', input: {} } }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } }, context);
+  await assert.rejects(
+    () => codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, context),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'tool.arguments.invalid-json',
+  );
 });
 
 test('provider raw reader cold-reads an immutable asset from a fresh store object and rejects scope mismatch', async () => {

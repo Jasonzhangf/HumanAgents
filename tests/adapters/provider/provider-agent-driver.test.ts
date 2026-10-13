@@ -22,6 +22,7 @@ import {
   type ProviderStopReceipt,
   type ProviderSubmitResult,
   type ProviderSubmitInput,
+  type ProviderToolCall,
   type ProviderToolStatus,
   type NativeRequestRegistration,
   type RawFactEnvelope,
@@ -29,7 +30,10 @@ import {
   type ScopeRef,
   type WorkAssignment,
 } from '../../../packages/contracts/src/index.js';
+import type { ProviderRequestContextHook } from '../../../packages/contracts/src/provider-request-context.js';
 import {
+  AnthropicProviderCodec,
+  OpenAIChatProviderCodec,
   ResponsesProviderCodec,
   ProviderAdapter,
   ProviderAgentDriver,
@@ -40,6 +44,11 @@ import {
   type ProviderEvidenceSink,
   type ProviderEvidenceWrite,
   type ProviderToolExecutionPort,
+  type ProviderTransport,
+  type ProviderWireEvent,
+  type ProviderWireRequest,
+  type AnthropicWireRequest,
+  type OpenAIChatWireRequest,
   type V3ProviderFetch,
   type V3ProviderFetchInit,
   type V3ProviderFetchResponse,
@@ -1830,6 +1839,264 @@ test('R1-A: provider driver forwards codec raw facts and persists the exact exec
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// --- C/D native tool-loop round trips (Chat + Anthropic) ---
+
+interface ProtocolRoundTripHarness {
+  readonly instance: ProviderAgentDriver;
+  readonly requests: ProviderWireRequest[];
+  readonly submissions: ProviderSubmitInput[];
+  readonly accepted: RawFactEnvelope[];
+  readonly executed: ProviderToolCall[];
+}
+
+/**
+ * Real ProviderAgentDriver + real ProviderAdapter + the protocol codec over a
+ * scripted transport. The raw path is bound so the typed call must pass durable
+ * acceptance before the executor runs.
+ */
+function protocolRoundTripHarness(input: {
+  readonly protocol: 'openai' | 'anthropic';
+  readonly rounds: readonly (readonly ProviderWireEvent[])[];
+  readonly requestContext: ProviderRequestContextHook;
+}): ProtocolRoundTripHarness {
+  const protocolBinding: ProviderBinding = {
+    ...binding,
+    bindingId: `binding-${input.protocol}`,
+    providerId: `provider-${input.protocol}`,
+    protocol: input.protocol,
+    endpointRef: `endpoint-${input.protocol}`,
+    modelRef: `model-${input.protocol}`,
+  };
+  const requests: ProviderWireRequest[] = [];
+  const submissions: ProviderSubmitInput[] = [];
+  const accepted: RawFactEnvelope[] = [];
+  const executed: ProviderToolCall[] = [];
+  let round = 0;
+  const captured = recordingEvidenceSink();
+  const transport: ProviderTransport = {
+    start: async (_input, request) => {
+      requests.push(request);
+      return { ...identity, startedAt: '2026-01-01T00:00:00.000Z', evidenceRefs: [evidence] };
+    },
+    resume: async () => {
+      throw new Error('not used');
+    },
+    submit: async (submitInput, request) => {
+      submissions.push(submitInput);
+      requests.push(request);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+    observe: async function* () {
+      const events = input.rounds[round] ?? [];
+      round += 1;
+      yield* events;
+    },
+    requestStop: async () => ({
+      ...identity,
+      status: 'accepted',
+      receivedAt: '2026-01-01T00:00:00.000Z',
+      evidenceRefs: [evidence],
+    }),
+    settle: async () => settlement(),
+    close: async () => ({
+      bindingId: protocolBinding.bindingId,
+      providerId: protocolBinding.providerId,
+      protocol: protocolBinding.protocol,
+      state: 'closed',
+      evidenceRefs: [evidence],
+    }),
+  };
+  const adapter = new ProviderAdapter({
+    binding: protocolBinding,
+    routeRef: 'test-route',
+    codec: input.protocol === 'openai' ? new OpenAIChatProviderCodec() : new AnthropicProviderCodec(4096),
+    transport,
+    evidence: captured.sink,
+  });
+  const port: ExecutionRuntimePort = {
+    kind: adapter.kind,
+    probe: (target) => adapter.probe(target),
+    capabilities: (target) => adapter.capabilities(target),
+    start: (startInput) => adapter.start(startInput),
+    resume: (resumeInput) => adapter.resume(resumeInput),
+    submit: (submitInput) => adapter.submit(submitInput),
+    observe: (observeInput) => adapter.observe(observeInput),
+    requestStop: (stopInput) => adapter.requestStop(stopInput),
+    settle: (settleInput) => adapter.settle(settleInput),
+    close: (target) => adapter.close(target),
+  };
+  const instance = new ProviderAgentDriver({
+    port,
+    binding: protocolBinding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-protocol',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    rawEvidence: captured.sink,
+    acceptRawFact: async (envelope) => {
+      accepted.push(envelope);
+      return { seq: accepted.length, envelope };
+    },
+    registerRequest: async (registration) => registration.record,
+    requestContext: input.requestContext,
+    executeTool: {
+      async execute({ call }) {
+        executed.push(call);
+        return { output: 'PROTO_CONTENT', outputRefs: [], evidenceRefs: [evidence] };
+      },
+    },
+  });
+  return { instance, requests, submissions, accepted, executed };
+}
+
+function toolCallRawFact(envelopes: readonly RawFactEnvelope[]): RawFactEnvelope {
+  const entry = envelopes.find((envelope) => envelope.fact.kind === 'tool-call');
+  assert.ok(entry, 'expected a durable tool-call raw fact');
+  return entry;
+}
+
+test('C/D: openai chat native tool round trip executes the typed call once and continues with fresh context', async () => {
+  const chatId = 'chat-round-1';
+  const hookPhases: string[] = [];
+  const harness = protocolRoundTripHarness({
+    protocol: 'openai',
+    rounds: [
+      [
+        { protocol: 'openai', type: 'openai.chat.completion', id: chatId, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call-chat', type: 'function', function: { name: 'file_read', arguments: '{"path":' } }] }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: chatId, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"README.md"}' } }] }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: chatId, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+      ],
+      [
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-round-2', choices: [{ index: 0, delta: { content: 'done' }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-round-2', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ],
+    ],
+    requestContext: async (input) => {
+      hookPhases.push(input.phase);
+      return input.phase === 'initial'
+        ? { canonical: { units: [{ kind: 'message', role: 'user', text: 'CURRENT_TURN' }] }, instructions: { text: 'ORIENT_ONE' } }
+        : {
+            canonical: {
+              units: [
+                { kind: 'message', role: 'user', text: 'CURRENT_TURN' },
+                { kind: 'tool-call', callId: 'call-chat', toolId: 'file.read', arguments: { path: 'README.md' } },
+                { kind: 'tool-result', callId: 'call-chat', toolId: 'file.read', output: 'PROTO_CONTENT', status: 'succeeded' },
+              ],
+            },
+            instructions: { text: 'ORIENT_TWO' },
+          };
+    },
+  });
+  await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-protocol', payload: { prompt: 'read README.md' } });
+  const observed: ProviderAgentEvent[] = [];
+  for await (const event of harness.instance.observe({ runtimeId: identity.runtimeId })) observed.push(event);
+
+  assert.deepEqual(hookPhases, ['initial', 'continuation']);
+  assert.deepEqual(harness.executed, [{ callId: 'call-chat', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: chatId }]);
+  assert.equal(harness.submissions.length, 1);
+  assert.equal(harness.submissions[0]?.toolContinuations, undefined);
+  assert.equal(harness.submissions[0]?.requestContext?.units.length, 3);
+  assert.equal(harness.requests.length, 2);
+  const rawCall = toolCallRawFact(harness.accepted);
+  if (rawCall.fact.kind === 'tool-call') {
+    assert.equal(rawCall.fact.call.callId, 'call-chat');
+    assert.equal(rawCall.fact.call.toolId, 'file.read');
+    assert.deepEqual(rawCall.fact.call.arguments, { path: 'README.md' });
+    assert.equal(rawCall.fact.call.continuationRef, chatId);
+  }
+  assert.equal(harness.accepted.some((envelope) => envelope.fact.kind === 'tool-result'), true);
+
+  const initial = harness.requests[0] as OpenAIChatWireRequest;
+  assert.equal(initial.tools?.[0]?.function.name, 'file_read');
+  const continuation = harness.requests[1] as OpenAIChatWireRequest;
+  const assistant = continuation.messages.find((message) => message.role === 'assistant');
+  assert.ok(assistant && assistant.role === 'assistant');
+  assert.equal(assistant.tool_calls?.[0]?.id, 'call-chat');
+  assert.equal(assistant.tool_calls?.[0]?.function.name, 'file_read');
+  assert.equal(assistant.tool_calls?.[0]?.function.arguments, '{"path":"README.md"}');
+  const tool = continuation.messages.find((message) => message.role === 'tool');
+  assert.ok(tool && tool.role === 'tool');
+  assert.equal(tool.tool_call_id, 'call-chat');
+  assert.equal(tool.content, 'PROTO_CONTENT');
+  assert.equal(observed.at(-1)?.terminalState, 'succeeded');
+});
+
+test('C/D: anthropic native tool round trip executes the typed call once and continues with fresh context', async () => {
+  const messageId = 'anthropic-message-1';
+  const hookPhases: string[] = [];
+  const harness = protocolRoundTripHarness({
+    protocol: 'anthropic',
+    rounds: [
+      [
+        { protocol: 'anthropic', type: 'message_start', message: { id: messageId, model: 'model-anthropic', role: 'assistant' } },
+        { protocol: 'anthropic', type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-anth', name: 'file_read', input: {} } },
+        { protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } },
+        { protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"README.md"}' } },
+        { protocol: 'anthropic', type: 'content_block_stop', index: 0 },
+        { protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+        { protocol: 'anthropic', type: 'message_stop' },
+      ],
+      [
+        { protocol: 'anthropic', type: 'message_start', message: { id: 'anthropic-message-2', model: 'model-anthropic', role: 'assistant' } },
+        { protocol: 'anthropic', type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'done' } },
+        { protocol: 'anthropic', type: 'content_block_stop', index: 0 },
+        { protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+        { protocol: 'anthropic', type: 'message_stop' },
+      ],
+    ],
+    requestContext: async (input) => {
+      hookPhases.push(input.phase);
+      return input.phase === 'initial'
+        ? { canonical: { units: [{ kind: 'message', role: 'user', text: 'CURRENT_TURN' }] }, instructions: { text: 'ORIENT_ONE' } }
+        : {
+            canonical: {
+              units: [
+                { kind: 'message', role: 'user', text: 'CURRENT_TURN' },
+                { kind: 'tool-call', callId: 'call-anth', toolId: 'file.read', arguments: { path: 'README.md' } },
+                { kind: 'tool-result', callId: 'call-anth', toolId: 'file.read', output: 'PROTO_CONTENT', status: 'succeeded' },
+              ],
+            },
+            instructions: { text: 'ORIENT_TWO' },
+          };
+    },
+  });
+  await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-protocol', payload: { prompt: 'read README.md' } });
+  const observed: ProviderAgentEvent[] = [];
+  for await (const event of harness.instance.observe({ runtimeId: identity.runtimeId })) observed.push(event);
+
+  assert.deepEqual(hookPhases, ['initial', 'continuation']);
+  assert.deepEqual(harness.executed, [{ callId: 'call-anth', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: messageId }]);
+  assert.equal(harness.submissions.length, 1);
+  assert.equal(harness.submissions[0]?.toolContinuations, undefined);
+  assert.equal(harness.submissions[0]?.requestContext?.units.length, 3);
+  assert.equal(harness.requests.length, 2);
+  const rawCall = toolCallRawFact(harness.accepted);
+  if (rawCall.fact.kind === 'tool-call') {
+    assert.equal(rawCall.fact.call.callId, 'call-anth');
+    assert.equal(rawCall.fact.call.toolId, 'file.read');
+    assert.deepEqual(rawCall.fact.call.arguments, { path: 'README.md' });
+    assert.equal(rawCall.fact.call.continuationRef, messageId);
+  }
+  assert.equal(harness.accepted.some((envelope) => envelope.fact.kind === 'tool-result'), true);
+
+  const continuation = harness.requests[1] as AnthropicWireRequest;
+  const toolUse = continuation.messages.flatMap((message) => message.content).find((block) => block.type === 'tool_use');
+  assert.ok(toolUse && toolUse.type === 'tool_use');
+  assert.equal(toolUse.id, 'call-anth');
+  assert.deepEqual(toolUse.input, { path: 'README.md' });
+  const toolResult = continuation.messages.flatMap((message) => message.content).find((block) => block.type === 'tool_result');
+  assert.ok(toolResult && toolResult.type === 'tool_result');
+  assert.equal(toolResult.tool_use_id, 'call-anth');
+  assert.equal(toolResult.content, 'PROTO_CONTENT');
+  assert.equal(observed.at(-1)?.terminalState, 'succeeded');
 });
 
 test('R1-B: stop signals immediately but settlement waits for the exact-output save and durable ack', async () => {
