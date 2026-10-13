@@ -19,6 +19,10 @@ import {
   type RawAssetView,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
+import type {
+  ProviderRequestContext,
+  RequestScopedInstructions,
+} from '../../../contracts/src/provider-request-context.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderEvidenceSink } from './evidence.js';
 import { mapOpenAIFinishReason } from './openai-finish-reason.js';
@@ -41,6 +45,7 @@ import type {
   ProviderWireStopRequest,
   ResponsesWireCancelRequest,
   ResponsesWireEvent,
+  ResponsesWireInputItem,
   ResponsesWireRequest,
   ResponsesWireTool,
 } from './wire.js';
@@ -68,6 +73,87 @@ function harnessToolSurfaceInstructions(
     'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
     'Call a tool only when it makes concrete progress; a tool call with missing or empty arguments is a failed round.',
   ].join(' ');
+}
+
+/**
+ * The wire `instructions`/`system` text for one request: the stable harness
+ * tool-surface guidance followed by the transient request-scoped orientation.
+ * The transient text is request-local and is never persisted as canonical
+ * context or inherited by the next request.
+ */
+function requestInstructions(
+  tools: readonly { readonly toolId: string }[] | undefined,
+  instructions: RequestScopedInstructions | undefined,
+): string {
+  return [harnessToolSurfaceInstructions(tools), instructions?.text ?? '']
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+}
+
+/** Maps canonical units to Responses input items. Tool units keep their real call identity. */
+function responsesContextInput(context: ProviderRequestContext): readonly ResponsesWireInputItem[] {
+  return context.units.map((unit): ResponsesWireInputItem => {
+    switch (unit.kind) {
+      case 'message':
+        return { type: 'message', role: unit.role, content: unit.text };
+      case 'tool-call':
+        return {
+          type: 'function_call',
+          call_id: unit.callId,
+          name: responsesWireToolName(unit.toolId),
+          arguments: JSON.stringify(unit.arguments),
+        };
+      case 'tool-result':
+        return { type: 'function_call_output', call_id: unit.callId, output: unit.output };
+    }
+  });
+}
+
+/**
+ * Maps canonical units to Anthropic messages. Consecutive same-role units fold
+ * into one message so tool blocks stay valid; no reasoning/signature block is
+ * fabricated.
+ */
+function anthropicContextMessages(context: ProviderRequestContext): readonly AnthropicWireMessage[] {
+  const messages: AnthropicWireMessage[] = [];
+  const append = (role: AnthropicWireMessage['role'], block: AnthropicWireContentBlock): void => {
+    const last = messages[messages.length - 1];
+    if (last !== undefined && last.role === role) {
+      messages[messages.length - 1] = { role, content: [...last.content, block] };
+      return;
+    }
+    messages.push({ role, content: [block] });
+  };
+  for (const unit of context.units) {
+    switch (unit.kind) {
+      case 'message':
+        append(unit.role, { type: 'text', text: unit.text });
+        break;
+      case 'tool-call':
+        append('assistant', { type: 'tool_use', id: unit.callId, name: unit.toolId, input: unit.arguments });
+        break;
+      case 'tool-result':
+        append('user', { type: 'tool_result', tool_use_id: unit.callId, content: unit.output });
+        break;
+    }
+  }
+  return messages;
+}
+
+/**
+ * The wire `execution` field is identity only. The request input, business
+ * payload and request-scoped context never belong on it, so the codec emits a
+ * plain identity ref instead of the whole execution input object.
+ */
+function executionIdentity(execution: ProviderExecutionIdentityRef): ProviderExecutionIdentityRef {
+  return {
+    runtimeId: execution.runtimeId,
+    taskId: execution.taskId,
+    operationId: execution.operationId,
+    ...(execution.organId === undefined ? {} : { organId: execution.organId }),
+    ...(execution.cycleId === undefined ? {} : { cycleId: execution.cycleId }),
+    executionEpoch: execution.executionEpoch,
+  };
 }
 
 function businessText(
@@ -640,7 +726,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
-    if (input.toolContinuations !== undefined) {
+    if (input.requestContext === undefined && input.toolContinuations !== undefined) {
       return {
         protocol: 'responses',
         type: 'responses.request',
@@ -660,7 +746,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             output: continuation.output,
           }])),
         ],
-        execution: input,
+        execution: executionIdentity(input),
         ...(input.tools === undefined || input.tools.length === 0 ? {} : {
           tools: input.tools.map((tool) => ({
             type: 'function' as const,
@@ -1170,8 +1256,9 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): ResponsesWireRequest {
-    const content = businessText(execution, payload);
-    const input: ResponsesWireRequest['input'] = [{ type: 'message', role: 'user', content }];
+    const input: ResponsesWireRequest['input'] = execution.requestContext === undefined
+      ? [{ type: 'message', role: 'user', content: businessText(execution, payload) }]
+      : responsesContextInput(execution.requestContext);
     const tools: ResponsesWireTool[] = (execution.tools ?? []).map((tool) => ({
       type: 'function',
       name: responsesWireToolName(tool.toolId),
@@ -1183,9 +1270,9 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       type: 'responses.request',
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
-      instructions: harnessToolSurfaceInstructions(execution.tools),
+      instructions: requestInstructions(execution.tools, execution.instructions),
       input,
-      execution,
+      execution: executionIdentity(execution),
       ...(checkpointId === undefined ? {} : { checkpointId }),
       ...(tools.length === 0 ? {} : { tools }),
     };
@@ -1196,15 +1283,15 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
   readonly protocol = 'openai' as const;
 
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload, undefined, 'start');
   }
 
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
+    return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId, 'resume');
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload, undefined, 'submit');
   }
 
   encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): OpenAIChatCancelRequest {
@@ -1449,10 +1536,24 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderExecutionIdentityRef,
+    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
+    phase: 'start' | 'resume' | 'submit' = 'start',
   ): OpenAIChatWireRequest {
+    // The OpenAI chat wire only carries user/assistant/system text messages.
+    // It cannot express the typed tool-call/tool-result units of a canonical
+    // request context, so consuming one here would silently drop it and
+    // stringify the legacy payload. Reject before the request is dispatched.
+    if (execution.requestContext !== undefined || execution.instructions !== undefined) {
+      throw new ProviderAdapterError({
+        code: 'request.context.unsupported',
+        category: 'capability',
+        phase,
+        message: 'openai chat protocol cannot encode typed request context; use a responses or anthropic codec',
+        scope: execution,
+      });
+    }
     const messages: OpenAIChatWireMessage[] = [
       { role: 'user', content: businessText(execution, payload) },
     ];
@@ -1463,7 +1564,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
       messages,
-      execution,
+      execution: executionIdentity(execution),
       ...(checkpointId === undefined ? {} : { checkpointId }),
       ...(tools.length === 0 ? {} : { tools }),
     };
@@ -1793,15 +1894,13 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderExecutionIdentityRef,
+    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): AnthropicWireRequest {
-    const content = businessText(execution, payload);
-    const message: AnthropicWireMessage = {
-      role: 'user',
-      content: [{ type: 'text', text: content }],
-    };
+    const messages: AnthropicWireMessage[] = execution.requestContext === undefined
+      ? [{ role: 'user', content: [{ type: 'text', text: businessText(execution, payload) }] }]
+      : [...anthropicContextMessages(execution.requestContext)];
     const tools: AnthropicWireTool[] = [];
     return {
       protocol: 'anthropic',
@@ -1809,9 +1908,9 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
       max_tokens: this.maxTokens,
-      system: '',
-      messages: [message],
-      execution,
+      system: execution.instructions?.text ?? '',
+      messages,
+      execution: executionIdentity(execution),
       ...(checkpointId === undefined ? {} : { checkpointId }),
       ...(tools.length === 0 ? {} : { tools }),
     };

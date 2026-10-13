@@ -44,6 +44,13 @@ import {
   type ToolExecutionFact,
   type ToolIdentity,
 } from '../../../contracts/src/index.js';
+import type {
+  MaterializedRequestInput,
+  ProviderRequestContext,
+  ProviderRequestContextHook,
+  ProviderRequestContextPhase,
+  RequestScopedInstructions,
+} from '../../../contracts/src/provider-request-context.js';
 import { randomUUID } from 'node:crypto';
 import type { ProviderObserveInputWithRawFacts, ProviderRawFactReceiver } from './adapter.js';
 import type { ProviderEvidenceSink } from './evidence.js';
@@ -89,6 +96,15 @@ export interface ProviderAgentDriverOptions {
    * that bind no raw sink leave this unset and keep the event-only path.
    */
   readonly registerRequest?: (registration: NativeRequestRegistration) => Promise<RuntimeRequestRecord>;
+  /**
+   * Fresh typed request-context materialization. When bound, the driver awaits
+   * this hook after durable registration and before the external start/submit
+   * of every initial request and every tool continuation, then sends the
+   * returned canonical units plus request-scoped instructions instead of the
+   * payload string and the driver-local tool history. The Runtime owns the
+   * materialization; the driver never invents or caches context.
+   */
+  readonly requestContext?: ProviderRequestContextHook;
   readonly now?: () => Date;
 }
 
@@ -281,12 +297,14 @@ export class ProviderAgentDriver implements AgentDriver {
     this.publishLifecycle(request, 'dispatching');
     let receipt: ProviderStartReceipt;
     try {
+      const context = await this.materializeRequestContext(request, 'initial');
       receipt = await this.track(this.options.port.start({
         ...identity(this.options),
         ...this.currentRequestIdentity(),
         inputRefs: [...this.options.inputRefs],
         evidenceRefs: [this.evidenceRef],
         payload: input.payload,
+        ...this.requestContextFields(context),
         ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
       }));
       this.assertProviderIdentity(receipt, 'provider start receipt', 'start');
@@ -453,6 +471,7 @@ export class ProviderAgentDriver implements AgentDriver {
       await this.commitRequestPhase(continuation, 'dispatching');
       this.publishLifecycle(continuation, 'dispatching');
       try {
+        const context = await this.materializeRequestContext(continuation, 'continuation');
         submitted = await this.track(this.options.port.submit({
           ...identity(this.options),
           ...this.continuationRequestIdentity(continuation),
@@ -460,13 +479,17 @@ export class ProviderAgentDriver implements AgentDriver {
           evidenceRefs: toolHistory.flatMap(({ result }) => result.evidenceRefs),
           payload: this.initialPayload ?? inputPayloadMissing(),
           tools: this.options.tools,
-          toolContinuations: toolHistory.map(({ call, result }) => ({
-            callId: call.callId,
-            toolId: call.toolId,
-            arguments: call.arguments,
-            continuationRef: call.continuationRef,
-            output: result.output,
-          })),
+          ...(context === undefined
+            ? {
+                toolContinuations: toolHistory.map(({ call, result }) => ({
+                  callId: call.callId,
+                  toolId: call.toolId,
+                  arguments: call.arguments,
+                  continuationRef: call.continuationRef,
+                  output: result.output,
+                })),
+              }
+            : this.requestContextFields(context)),
         }));
         this.assertProviderIdentity(submitted, 'provider tool continuation receipt', 'submit');
         if (!this.stopping) {
@@ -638,6 +661,35 @@ export class ProviderAgentDriver implements AgentDriver {
         'runtime',
       );
     }
+  }
+
+  /**
+   * Awaits the Runtime-owned materialization of this request's typed context.
+   * A hook rejection propagates to the caller and fails the request; the driver
+   * never falls back to an earlier context.
+   */
+  private async materializeRequestContext(
+    request: RequestAttempt,
+    phase: ProviderRequestContextPhase,
+  ): Promise<MaterializedRequestInput | undefined> {
+    const hook = this.options.requestContext;
+    if (hook === undefined) return undefined;
+    return hook({
+      execution: identity(this.options),
+      request: requestIdentityRef(request),
+      phase,
+    });
+  }
+
+  private requestContextFields(context: MaterializedRequestInput | undefined): {
+    readonly requestContext?: ProviderRequestContext;
+    readonly instructions?: RequestScopedInstructions;
+  } {
+    if (context === undefined) return {};
+    return {
+      requestContext: context.canonical,
+      ...(context.instructions === undefined ? {} : { instructions: context.instructions }),
+    };
   }
 
   /**
