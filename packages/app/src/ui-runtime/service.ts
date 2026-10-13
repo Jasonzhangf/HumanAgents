@@ -153,6 +153,7 @@ import {
   ProviderAgentDriver,
   ProviderAdapterError,
   type ProviderToolExecutionPort,
+  type ProviderEvidenceSink,
 } from '../../../adapters/provider/src/index.js';
 import {
   type RuntimeDashboardProjection,
@@ -348,6 +349,11 @@ export interface UiRuntimeServiceOptions {
    * behaviour is unchanged.
    */
   readonly activeTurnJournal?: import('../../../runtime/src/context/active-turn-journal.js').ActiveTurnJournalPort;
+  readonly activeTurnJournalFor?: import('../../../runtime/src/ui-runtime/coordinator.js').RuntimeTaskCoordinatorOptions['activeTurnJournalFor'];
+  readonly initialInputStore?: import('../../../runtime/src/ui-runtime/coordinator.js').RuntimeTaskCoordinatorOptions['initialInputStore'];
+  readonly recoveryReferencesFor?: import('../../../runtime/src/ui-runtime/coordinator.js').RuntimeTaskCoordinatorOptions['recoveryReferencesFor'];
+  /** Native raw writes and acceptance must refer to the same actual execution. */
+  readonly rawEvidence?: ProviderEvidenceSink;
   /**
    * Real Runtime permission/binding snapshot used to open the active turn.
    * Required whenever `activeTurnJournal` is bound; a missing snapshot stops
@@ -1209,6 +1215,9 @@ export class UiRuntimeService {
       }),
       ...(this.memory.checkpointBoundary === undefined ? {} : { checkpointBoundary: this.memory.checkpointBoundary }),
       ...(options.activeTurnJournal === undefined ? {} : { activeTurnJournal: options.activeTurnJournal }),
+      ...(options.activeTurnJournalFor === undefined ? {} : { activeTurnJournalFor: options.activeTurnJournalFor }),
+      ...(options.initialInputStore === undefined ? {} : { initialInputStore: options.initialInputStore }),
+      ...(options.recoveryReferencesFor === undefined ? {} : { recoveryReferencesFor: options.recoveryReferencesFor }),
       ...(options.permissionSnapshot === undefined ? {} : { permissionSnapshot: options.permissionSnapshot }),
       ...(options.refinedDeliveryStore === undefined ? {} : { refinedDeliveryStore: options.refinedDeliveryStore }),
     });
@@ -1672,6 +1681,13 @@ export class UiRuntimeService {
       inputRefs: input.inputRefs,
       ownerId: input.ownerId,
       onRequestLifecycle: (event) => this.coordinator.recordProviderRequestIdentity(event),
+      ...(this.options.rawEvidence === undefined ? {} : {
+        rawEvidence: this.options.rawEvidence,
+        registerRequest: (registration: Parameters<RuntimeTaskCoordinator['registerNativeProviderRequest']>[1]) =>
+          this.coordinator.registerNativeProviderRequest(input.taskId, registration),
+        acceptRawFact: (envelope: import('../../../contracts/src/index.js').RawFactEnvelope) =>
+          this.coordinator.acceptNativeProviderRawFact(input.taskId, envelope),
+      }),
       ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
       ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
       ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
@@ -1687,6 +1703,10 @@ export class UiRuntimeService {
       execute: async (input): Promise<WorkResult> => {
         const runtimeId = `implicit-executor-${input.assignment.assignmentId}-${input.attempt}-${input.executionEpoch}`;
         const operationId = id('operation', `implicit-${input.assignment.assignmentId}-${input.attempt}`);
+        const scope = { ...input.scope, operationId };
+        const nativeTurn = this.options.rawEvidence === undefined ? undefined : await this.coordinator.openNativeChildTurn({
+          assignment: input.assignment, scope, runtimeId,
+        });
         const driver = new ProviderAgentDriver({
           port: this.options.port,
           binding: this.options.binding,
@@ -1695,10 +1715,17 @@ export class UiRuntimeService {
           operationId,
           executionEpoch: input.executionEpoch,
           assignmentId: input.assignment.assignmentId,
-          scope: { ...input.scope, operationId },
+          scope,
           inputRefs: [...input.assignment.targetRefs, input.assignment.objective],
           ownerId: RUNTIME_OWNER,
           onRequestLifecycle: (event) => this.coordinator.recordProviderRequestIdentity(event),
+          ...(nativeTurn === undefined ? {} : {
+            rawEvidence: this.options.rawEvidence!,
+            registerRequest: (registration: Parameters<RuntimeTaskCoordinator['registerNativeProviderRequest']>[1]) =>
+              nativeTurn.context.registerProviderRequest(registration),
+            acceptRawFact: (envelope: import('../../../contracts/src/index.js').RawFactEnvelope) =>
+              nativeTurn.context.acceptRawFact(envelope),
+          }),
           ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
           ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
           ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
@@ -1922,6 +1949,10 @@ export class UiRuntimeService {
     pauseId: string,
   ): import('../../../contracts/src/index.js').ActiveTurnCaptureBody | undefined {
     return this.coordinator.activeTurnCapture(taskId, pauseId);
+  }
+
+  prepareRecoveryCapture(taskId: TaskId, boundaryId: string, childRuntimeId?: string): Promise<import('../../../contracts/src/index.js').PreparedRecoveryCapture> {
+    return this.coordinator.prepareRecoveryCapture(taskId, boundaryId, childRuntimeId);
   }
 
   private withRequirementAdmission(task: RuntimeTaskSnapshot): RuntimeTaskSnapshotInput {

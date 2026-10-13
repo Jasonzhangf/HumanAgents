@@ -18,6 +18,7 @@ import type {
  */
 export type ActiveTurnJournalRecord =
   | { readonly kind: 'binding-opened'; readonly binding: ActiveTurnBinding; readonly currentTurnRef: string }
+  | { readonly kind: 'initial-input'; readonly content: import('../../../contracts/src/index.js').RawAsset }
   | { readonly kind: 'request'; readonly record: RuntimeRequestRecord }
   | { readonly kind: 'accepted-fact'; readonly entry: AcceptedRawFact }
   | { readonly kind: 'child-invocation'; readonly record: ChildInvocationRecord }

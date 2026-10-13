@@ -21,6 +21,7 @@ import {
   type ProviderError,
   type ProviderEvent,
   type ProviderRequestLifecycleEvent,
+  type PreparedRecoveryCapture,
   type ProviderToolCall,
   type ToolExecutionFact,
   type ScopeRef,
@@ -36,8 +37,9 @@ import { computeReentryDecision, type CheckpointReentryDecision } from '../check
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { InteractionClosureRecord } from '../checkpoints/closure.js';
 import { produceAdmittedTurn, newActiveTurnId, type RuntimeBindingSnapshot } from '../admission/admitted-turn.js';
-import { ActiveTurnContext, RuntimeActiveTurnError } from '../context/active-turn-context.js';
+import { ActiveTurnContext, RuntimeActiveTurnError, childInvocationId } from '../context/active-turn-context.js';
 import type { ActiveTurnJournalPort } from '../context/active-turn-journal.js';
+import { ActiveTurnRecoveryCapture, type ActiveTurnProviderProducer, type RecoveryCaptureReferences } from '../context/recovery-assets.js';
 import type {
   ChildCallAdoptionInput,
   ChildCallPort,
@@ -402,6 +404,11 @@ export interface RuntimeTaskCoordinatorOptions {
    * absent the prior behaviour is unchanged.
    */
   readonly activeTurnJournal?: ActiveTurnJournalPort;
+  readonly activeTurnJournalFor?: (binding: import('../../../contracts/src/index.js').ActiveTurnBinding) => ActiveTurnJournalPort;
+  readonly initialInputStore?: {
+    store(input: { readonly binding: import('../../../contracts/src/index.js').ActiveTurnBinding; readonly bytes: Uint8Array }): Promise<RawAsset>;
+  };
+  readonly recoveryReferencesFor?: (binding: import('../../../contracts/src/index.js').ActiveTurnBinding) => Promise<Pick<RecoveryCaptureReferences, 'completionLookups' | 'recovery'>>;
   /**
    * Runtime permission/binding snapshot used to open the active turn. It must
    * come from real assembled Runtime inputs. It is required whenever an
@@ -503,6 +510,10 @@ interface TaskRecord {
   taskAssembly?: RuntimeTaskAssembly;
   /** Live Runtime-owned active turn for the current orchestrated execution. */
   activeTurn?: ActiveTurnContext;
+  captureOwner?: ActiveTurnRecoveryCapture;
+  preparedCapture?: PreparedRecoveryCapture;
+  childTurns?: Map<string, { readonly context: ActiveTurnContext; readonly capture: ActiveTurnRecoveryCapture }>;
+  originalInput?: string;
   /** The single Runtime-built assignment for the current orchestrated execution. */
   assignment?: WorkAssignment;
   implicitRequirement?: {
@@ -1065,24 +1076,82 @@ export class RuntimeTaskCoordinator {
       phase: event.phase,
       occurredAt: event.occurredAt,
     };
-    const context = record.activeTurn;
-    if (!context) return;
-    const scope = context.scope();
-    if (event.taskId.value !== record.taskId.value
-      || event.executionEpoch !== context.executionIdentity().executionEpoch
-      || event.runtimeId !== context.executionIdentity().runtimeId) {
-      return;
+  }
+
+  /** Required native ingress, separate from best-effort UI lifecycle projection. */
+  async registerNativeProviderRequest(taskId: TaskId, input: Parameters<ActiveTurnContext['registerProviderRequest']>[0]) {
+    const context = this.requireActiveTurn(taskId, input.execution);
+    if (!context.initialInput()) throw new RuntimeActiveTurnError('active-turn.input.missing', 'native dispatch requires a saved original input');
+    return context.registerProviderRequest(input);
+  }
+
+  async acceptNativeProviderRawFact(taskId: TaskId, envelope: RawFactEnvelope) {
+    return this.requireActiveTurn(taskId, envelope.execution).acceptRawFact(envelope);
+  }
+
+  bindNativeProviderProducer(taskId: TaskId, execution: { readonly runtimeId: string; readonly executionEpoch: number }, producer: ActiveTurnProviderProducer): void {
+    this.requireActiveTurn(taskId, execution);
+    const owner = this.tasks.get(taskId.value)?.captureOwner;
+    if (!owner) throw new RuntimeActiveTurnError('active-turn.capture.owner-missing', 'native dispatch requires the Runtime capture owner');
+    owner.bindProvider(producer);
+  }
+
+  /** Child execution receives only its assignment and its own durable context. */
+  async openNativeChildTurn(input: {
+    readonly assignment: WorkAssignment;
+    readonly scope: ScopeRef;
+    readonly runtimeId: string;
+  }): Promise<{ readonly context: ActiveTurnContext; readonly capture: ActiveTurnRecoveryCapture }> {
+    const record = this.requireTask(input.assignment.taskId);
+    const parent = record.activeTurn;
+    if (!parent || !this.options.activeTurnJournalFor || !this.options.initialInputStore) {
+      throw new RuntimeActiveTurnError('active-turn.child.binding-missing', 'native child requires an admitted parent and a turn-scoped journal factory');
     }
-    await context.registerRequest({
-      request: {
-        turnId: event.turnId,
-        requestId: event.requestId,
-        ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
+    parent.assertProductionOpen();
+    const invocation = parent.childInvocations().find((entry) => entry.invocationId === childInvocationId(input.assignment));
+    if (!invocation || invocation.binding.kind !== 'execution'
+      || JSON.stringify(invocation.binding.assignment) !== JSON.stringify(input.assignment)) {
+      throw new RuntimeActiveTurnError('active-turn.child.invocation-missing', 'native child requires its committed invocation assignment');
+    }
+    const currentTurnRef = `active-turn://${invocation.childTurnId}/binding`;
+    const admittedTurn = produceAdmittedTurn({
+      runtime: {
+        runtimeId: input.runtimeId,
+        executionEpoch: input.assignment.executionEpoch,
+        ownerRef: RUNTIME_OWNER,
+        permissionRevision: parent.admittedTurn.permissionRevision,
       },
-      ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
-      scope,
-      phase: event.phase,
+      taskId: input.assignment.taskId,
+      scope: input.scope,
+      assignment: input.assignment,
+      directiveRevision: parent.admittedTurn.directiveRevision,
+      turnId: invocation.childTurnId,
+      currentTurnRef,
+      admissionEvidence: [this.operationScopeEvidence(input.scope, invocation.checkpointReceiptRef)],
+      recoveryStateRef: this.operationScopeEvidence(input.scope, `recovery/${invocation.childTurnId}`),
     });
+    const binding = {
+      admittedTurn, assignment: input.assignment,
+      execution: { runtimeId: input.runtimeId, executionEpoch: input.assignment.executionEpoch },
+      scope: input.scope,
+    };
+    const context = await ActiveTurnContext.open({ journal: this.options.activeTurnJournalFor(binding), binding, currentTurnRef });
+    await context.registerInitialInput(await this.options.initialInputStore.store({
+      binding, bytes: new TextEncoder().encode(input.assignment.objective),
+    }));
+    const capture = this.createRecoveryCaptureOwner(context);
+    record.childTurns ??= new Map();
+    record.childTurns.set(input.runtimeId, { context, capture });
+    return { context, capture };
+  }
+
+  private requireActiveTurn(taskId: TaskId, execution: { readonly runtimeId: string; readonly executionEpoch: number }): ActiveTurnContext {
+    const context = this.tasks.get(taskId.value)?.activeTurn;
+    if (!context || context.executionIdentity().runtimeId !== execution.runtimeId
+      || context.executionIdentity().executionEpoch !== execution.executionEpoch) {
+      throw new RuntimeActiveTurnError('active-turn.binding.missing', 'native Provider ingress requires the exact admitted Runtime execution');
+    }
+    return context;
   }
 
   startExecution(taskId: TaskId, input: {
@@ -1101,6 +1170,7 @@ export class RuntimeTaskCoordinator {
     }
     const prompt = input.prompt.trim();
     if (!prompt) throw new RuntimeTaskControlError('execution.input.required', RUNTIME_OWNER, 'execution input is required', 'provide a non-empty prompt');
+    record.originalInput = input.prompt;
     if (input.orchestrate === true && !this.options.createTaskAssembly) {
       throw new RuntimeTaskControlError(
         'orchestration.unavailable',
@@ -1550,20 +1620,21 @@ export class RuntimeTaskCoordinator {
    * This never dispatches a child or replays a side effect.
    */
   activeTurnCapture(taskId: TaskId, pauseId: string): import('../../../contracts/src/index.js').ActiveTurnCaptureBody | undefined {
-    const context = this.tasks.get(taskId.value)?.activeTurn;
-    if (!context) return undefined;
-    const scope = context.scope();
-    const initialInput: RawAsset = {
-      ref: this.operationScopeEvidence(scope, `operation/${context.admittedTurn.turnId}/input`),
-      view: { kind: 'utf8-text' },
-    };
-    return context.capture({
-      pauseId,
-      frozenAt: this.now().toISOString(),
-      initialInput,
-      checkpointPath: [],
-      completionRefs: [],
-    });
+    const prepared = this.tasks.get(taskId.value)?.preparedCapture;
+    return prepared?.body.cut.pauseId === pauseId ? structuredClone(prepared.body) : undefined;
+  }
+
+  async prepareRecoveryCapture(taskId: TaskId, boundaryId: string, childRuntimeId?: string): Promise<PreparedRecoveryCapture> {
+    const record = this.requireTask(taskId);
+    if (childRuntimeId !== undefined) {
+      const child = record.childTurns?.get(childRuntimeId);
+      if (!child) throw new RuntimeActiveTurnError('active-turn.child.binding-missing', 'no native child capture owner matches this runtime');
+      return child.capture.prepare(boundaryId);
+    }
+    if (!record.captureOwner) throw new RuntimeActiveTurnError('active-turn.capture.owner-missing', 'no native capture owner is assembled for this task');
+    const prepared = await record.captureOwner.prepare(boundaryId);
+    record.preparedCapture = prepared;
+    return structuredClone(prepared);
   }
 
   attentionAudit(): { readonly published: readonly Attention[]; readonly resolved: readonly Attention[] } {
@@ -1836,7 +1907,8 @@ export class RuntimeTaskCoordinator {
     operation: OperationRecord,
     scope: ScopeRef,
   ): Promise<ActiveTurnContext | undefined> {
-    if (!this.options.activeTurnJournal) return undefined;
+    if (!this.options.activeTurnJournal && !this.options.activeTurnJournalFor) return undefined;
+    if (record.activeTurn?.admittedTurn.turnId === newActiveTurnId(operation.operationId.value)) return record.activeTurn;
     const snapshot = this.options.permissionSnapshot;
     if (!snapshot) {
       throw new RuntimeTaskControlError(
@@ -1857,7 +1929,7 @@ export class RuntimeTaskCoordinator {
     const assignment = this.buildWorkAssignment(record, operation, scope);
     const currentTurnRef = `active-turn://${operation.operationId.value}/binding`;
     const admittedTurn = produceAdmittedTurn({
-      runtime: { ...snapshot, executionEpoch: operation.executionEpoch },
+      runtime: { ...snapshot, runtimeId: this.runtimeId(operation.operationId), executionEpoch: operation.executionEpoch },
       taskId: record.taskId,
       scope,
       assignment,
@@ -1870,17 +1942,46 @@ export class RuntimeTaskCoordinator {
     const binding: import('../../../contracts/src/index.js').ActiveTurnBinding = {
       admittedTurn,
       assignment,
-      execution: { runtimeId: snapshot.runtimeId, executionEpoch: operation.executionEpoch },
+      execution: { runtimeId: this.runtimeId(operation.operationId), executionEpoch: operation.executionEpoch },
       scope,
     };
     const context = await ActiveTurnContext.open({
-      journal: this.options.activeTurnJournal,
+      journal: this.options.activeTurnJournalFor?.(binding) ?? this.options.activeTurnJournal!,
       binding,
       currentTurnRef,
     });
     record.activeTurn = context;
+    delete record.childTurns;
+    delete record.preparedCapture;
     record.assignment = assignment;
+    if (this.options.initialInputStore) {
+      const initialInput = await this.options.initialInputStore.store({
+        binding,
+        bytes: new TextEncoder().encode(record.originalInput ?? operation.input),
+      });
+      await context.registerInitialInput(initialInput);
+      record.captureOwner = this.createRecoveryCaptureOwner(context);
+    }
     return context;
+  }
+
+  private createRecoveryCaptureOwner(context: ActiveTurnContext): ActiveTurnRecoveryCapture {
+    return new ActiveTurnRecoveryCapture(context, async () => {
+        if (!this.options.recoveryReferencesFor) {
+          throw new RuntimeActiveTurnError('active-turn.capture.references-missing', 'capture requires actual completion and recovery reference readers');
+        }
+        const references = await this.options.recoveryReferencesFor(context.activeBinding);
+        const checkpointPath = [...new Set(context.childInvocations().flatMap((invocation) => [
+          invocation.checkpointReceiptRef,
+          ...(invocation.postReviewCheckpointRef ? [invocation.postReviewCheckpointRef] : []),
+        ]))];
+        const completionRefs = context.entries().flatMap((entry) => (
+          'envelope' in entry && entry.envelope.fact.kind === 'tool-result'
+            ? [{ requestId: entry.envelope.request.requestId, producerSeq: entry.envelope.producerSeq }]
+            : []
+        ));
+        return { ...references, checkpointPath, completionRefs };
+    }, this.now);
   }
 
   private buildWorkAssignment(
@@ -1924,6 +2025,7 @@ export class RuntimeTaskCoordinator {
     const store = this.options.checkpointStoreFor(record.taskId, scope.cycleId!);
     return {
       async prepare(input: ChildCallPrepareInput): Promise<PreparedChildCall> {
+        context.assertProductionOpen();
         const committed = await coordinator.commitChildCallCheckpoint(context, store, input);
         await context.openChildInvocation({
           invocationId: input.invocationId,
@@ -1956,6 +2058,7 @@ export class RuntimeTaskCoordinator {
         }
       },
       async recordAdoption(input: ChildCallAdoptionInput): Promise<void> {
+        context.assertProductionOpen();
         const delivery = context.entries().find((entry) => (
           !('envelope' in entry) && entry.invocationId === input.invocationId && entry.kind === input.kind
         ));
@@ -2116,6 +2219,7 @@ export class RuntimeTaskCoordinator {
     let retryCycle: ReturnType<typeof createRetryCycleManager> | undefined;
     const closedRetryDrivers = new Map<RuntimeExecutionDriver, ProviderCloseResult>();
     try {
+      await this.openActiveTurn(record, operation, scope);
       if (this.options.providerRetry) {
         retryCycle = createRetryCycleManager({
           config: this.options.providerRetry.config,
@@ -2378,13 +2482,14 @@ export class RuntimeTaskCoordinator {
         record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
         record.nextStep = '编排执行、审查并合并';
         record.taskAssembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
-        const dispatched = await record.taskAssembly.orchestration.dispatch({
+        const dispatch = () => record.taskAssembly!.orchestration.dispatch({
           stageNodeId,
           assignment,
           agentId: 'humanagent.provider-execution',
           scope,
           reviewKinds: ['quality'],
         });
+        const dispatched = activeTurn ? await activeTurn.runProducer(dispatch) : await dispatch();
         if (record.stopping || record.postCommitRecoveryPending) return;
         if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {
           if (!closure) {

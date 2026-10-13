@@ -40,6 +40,8 @@ import {
 import type { RefinedDeliveryStore } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import { MemoryCoordinator, type AttentionPort } from '../../packages/runtime/src/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
+import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
+import { filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/evidence.js';
 import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-active-turn-test');
@@ -88,6 +90,26 @@ function testMemory(projectKey: string) {
     backend: new DeterministicMemoryBackend(),
     projectKey,
     roleId: 'execution',
+  };
+}
+
+function nativeCaptureOptions(root: string) {
+  const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'native-assets')));
+  return {
+    initialInputStore: {
+      async store(input: { readonly binding: ActiveTurnBinding; readonly bytes: Uint8Array }): Promise<RawAsset> {
+        return {
+          ref: await sink.write({ scope: input.binding.scope, kind: 'execution', type: 'initial-input', locator: input.binding.admittedTurn.turnId, content: new TextDecoder().decode(input.bytes) }),
+          view: { kind: 'utf8-text' },
+        };
+      },
+    },
+    async recoveryReferencesFor(active: ActiveTurnBinding) {
+      return {
+        completionLookups: [],
+        recovery: { commitIdentity: `capture-${active.admittedTurn.turnId}`, rawTurnRefs: [], laterErrorRefs: [], unresolvedOperationRefs: [], stages: [], durablePhases: [], durableReceiptRefs: [], recoveryResponsibilityRef: active.admittedTurn.recoveryStateRef },
+      };
+    },
   };
 }
 
@@ -342,6 +364,7 @@ test('behavior 1: FIFO admission persists the binding and call checkpoint before
       memory: testMemory('project-active-turn-dispatch'),
       explicitBrainInterpreter: unusedExplicitBrainInterpreter,
       activeTurnJournal,
+      ...nativeCaptureOptions(root),
       permissionSnapshot,
       refinedDeliveryStore,
       runtimeComposition: {
@@ -418,12 +441,14 @@ test('behavior 1: FIFO admission persists the binding and call checkpoint before
     assert.ok(reviewDispatch!.receiptRef !== executionDispatch!.receiptRef, 'each real child call gets its own call checkpoint');
 
     const taskId = service.listTasks().completed[0]!.taskId;
-    const capture = service.activeTurnCapture(taskId, 'pause-1');
+    const capture = (await service.prepareRecoveryCapture(taskId, 'pause-1')).body;
+    assert.deepEqual(service.activeTurnCapture(taskId, 'pause-1'), capture, 'capture reader returns only the prepared immutable cut');
     assert.ok(capture, 'the opened active turn must be readable from durable facts');
     assert.equal(capture!.binding.admittedTurn.workAssignmentRef, capture!.binding.assignment.assignmentId);
     assert.equal(capture!.binding.assignment.taskId.value, taskId.value);
     assert.ok(capture!.binding.scope.cycleId, 'the binding must carry the execution cycle');
-    assert.equal(capture!.binding.execution.runtimeId, permissionSnapshot.runtimeId);
+    assert.equal(capture!.binding.execution.runtimeId, capture!.binding.admittedTurn.runtimeBindingRef);
+    assert.ok(capture!.binding.execution.runtimeId !== permissionSnapshot.runtimeId, 'Runtime binds the actual execution identity rather than the shared snapshot placeholder');
     assert.equal(capture!.binding.execution.executionEpoch, capture!.binding.assignment.executionEpoch);
     assert.equal(capture!.binding.admittedTurn.permissionRevision, permissionSnapshot.permissionRevision);
 
@@ -506,6 +531,7 @@ async function runBlockedDispatch(
       memory: testMemory(`project-active-turn-blocked-${failure}`),
       explicitBrainInterpreter: unusedExplicitBrainInterpreter,
       activeTurnJournal,
+      ...nativeCaptureOptions(root),
       permissionSnapshot,
       refinedDeliveryStore: new MemoryRefinedDeliveryStore(),
       runtimeComposition: {
@@ -604,6 +630,7 @@ test('behavior 2: refined child delivery is returned, then adopted, and never po
       memory: testMemory('project-active-turn-child'),
       explicitBrainInterpreter: unusedExplicitBrainInterpreter,
       activeTurnJournal,
+      ...nativeCaptureOptions(root),
       permissionSnapshot,
       refinedDeliveryStore,
       runtimeComposition: {
@@ -627,7 +654,7 @@ test('behavior 2: refined child delivery is returned, then adopted, and never po
     await waitFor(() => assert.equal(service.listTasks().completed[0]?.state, 'succeeded'));
     const taskId = service.listTasks().completed[0]!.taskId;
 
-    const capture = service.activeTurnCapture(taskId, 'pause-2');
+    const capture = (await service.prepareRecoveryCapture(taskId, 'pause-2')).body;
     assert.ok(capture);
     // Select the execution delivery from its persisted binding. The parent may
     // also carry the review delivery after W1-4; neither may be confused with a
@@ -734,7 +761,14 @@ test('behavior 3: request chain, checkpoint and child delivery survive object re
       scope,
     };
     const context = await ActiveTurnContext.open({ journal, binding: activeBinding, currentTurnRef: admittedTurn.currentTurnRef });
+    await context.registerRequest({ request: { turnId: 'provider-turn-1', requestId: 'request-1' }, scope, phase: 'dispatching' });
     await context.registerRequest({ request: { turnId: 'provider-turn-1', requestId: 'request-1' }, scope, phase: 'dispatched' });
+    await context.registerRequest({
+      request: { turnId: 'provider-turn-1', requestId: 'request-2', parentRequestId: 'request-1' },
+      parentRequestId: 'request-1',
+      scope,
+      phase: 'dispatching',
+    });
     await context.registerRequest({
       request: { turnId: 'provider-turn-1', requestId: 'request-2', parentRequestId: 'request-1' },
       parentRequestId: 'request-1',
@@ -791,11 +825,12 @@ test('behavior 3: request chain, checkpoint and child delivery survive object re
     assert.equal(rebuilt.admittedTurn.permissionRevision, permissionSnapshot.permissionRevision);
 
     const requests = rebuilt.requests();
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 4);
+    assert.deepEqual(requests.map((record) => record.phase), ['dispatching', 'dispatched', 'dispatching', 'dispatched']);
     assert.equal(requests[0]!.request.requestId, 'request-1');
-    assert.equal(requests[1]!.request.requestId, 'request-2');
-    assert.equal(requests[1]!.request.parentRequestId, 'request-1');
-    assert.equal(requests[1]!.parentRequestId, 'request-1');
+    assert.equal(requests[2]!.request.requestId, 'request-2');
+    assert.equal(requests[2]!.request.parentRequestId, 'request-1');
+    assert.equal(requests[2]!.parentRequestId, 'request-1');
 
     const invocations = rebuilt.childInvocations();
     assert.equal(invocations.length, 1);

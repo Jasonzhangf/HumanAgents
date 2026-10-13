@@ -31,6 +31,7 @@ import {
   type ActiveTurnJournalPort,
   type ActiveTurnJournalRecord,
 } from './active-turn-journal.js';
+import { ActiveTurnProducerBarrier } from './active-turn-capture.js';
 
 export class RuntimeActiveTurnError extends Error {
   constructor(readonly code: string, message: string) {
@@ -77,6 +78,14 @@ export class ActiveTurnContext {
   private readonly records: ActiveTurnJournalRecord[];
   private binding: ActiveTurnBinding;
   private readonly currentTurnRef: string;
+  private readonly producers = new ActiveTurnProducerBarrier();
+  private mutations: Promise<void> = Promise.resolve();
+  private mutationFailure: { readonly cause: unknown } | undefined;
+  private frozen = false;
+  private drained = false;
+  private captured: ActiveTurnCaptureBody | undefined;
+  private capturePromise: Promise<ActiveTurnCaptureBody> | undefined;
+  private drainPromise: Promise<void> | undefined;
 
   private constructor(
     private readonly journal: ActiveTurnJournalPort,
@@ -84,9 +93,9 @@ export class ActiveTurnContext {
     currentTurnRef: string,
     records: readonly ActiveTurnJournalRecord[],
   ) {
-    this.binding = binding;
+    this.binding = structuredClone(binding);
     this.currentTurnRef = currentTurnRef;
-    this.records = [...records];
+    this.records = structuredClone([...records]);
   }
 
   /**
@@ -129,11 +138,11 @@ export class ActiveTurnContext {
   }
 
   get admittedTurn() {
-    return this.binding.admittedTurn;
+    return structuredClone(this.binding.admittedTurn);
   }
 
   get activeBinding(): ActiveTurnBinding {
-    return this.binding;
+    return structuredClone(this.binding);
   }
 
   currentBindingRef(): string {
@@ -141,11 +150,44 @@ export class ActiveTurnContext {
   }
 
   executionIdentity(): ActiveTurnProviderExecutionIdentityRef {
-    return this.binding.execution;
+    return structuredClone(this.binding.execution);
   }
 
   scope(): ScopeRef {
-    return this.binding.scope;
+    return structuredClone(this.binding.scope);
+  }
+
+  async registerInitialInput(content: RawAsset): Promise<void> {
+    const owned = structuredClone(content);
+    return this.mutate(async () => {
+      assertSameScope(owned.ref.scope, this.binding.scope);
+      const previous = this.initialInput();
+      if (previous) {
+        if (JSON.stringify(previous) !== JSON.stringify(owned)) {
+          fail('active-turn.input.conflict', 'initial input cannot change within a business turn');
+        }
+        return;
+      }
+      if (!owned.ref.digest) fail('active-turn.input.digest-missing', 'initial input must name actual immutable bytes');
+      const record = { kind: 'initial-input' as const, content: owned };
+      await this.journal.append({ commitId: activeTurnCommitId(this.admittedTurn.turnId, 'initial-input'), record });
+      this.records.push(record);
+    });
+  }
+
+  initialInput(): RawAsset | undefined {
+    const record = this.records.find((entry) => entry.kind === 'initial-input');
+    return record?.kind === 'initial-input' ? structuredClone(record.content) : undefined;
+  }
+
+  async registerProviderRequest(input: {
+    readonly execution: ActiveTurnProviderExecutionIdentityRef;
+    readonly record: RuntimeRequestRecord;
+  }): Promise<RuntimeRequestRecord> {
+    if (!sameProviderExecution(input.execution, this.binding.execution)) {
+      fail('active-turn.request.execution-mismatch', 'request registration does not match active execution');
+    }
+    return this.registerRequest(input.record);
   }
 
   /**
@@ -154,31 +196,53 @@ export class ActiveTurnContext {
    * against the open binding and persists it.
    */
   async registerRequest(record: RuntimeRequestRecord): Promise<RuntimeRequestRecord> {
+    const owned = structuredClone(record);
+    return this.mutate(() => this.registerRequestRecord(owned));
+  }
+
+  private async registerRequestRecord(record: RuntimeRequestRecord): Promise<RuntimeRequestRecord> {
     assertSameScope(record.scope, this.binding.scope);
-    const existing = this.requests().find((candidate) => sameProviderRequest(candidate.request, record.request));
+    if (record.parentRequestId !== record.request.parentRequestId) {
+      fail('active-turn.request.parent-mismatch', 'request parent must match its identity');
+    }
+    const requests = this.requests();
+    const sameId = requests.find((candidate) => candidate.request.requestId === record.request.requestId);
+    if (sameId && !sameProviderRequest(sameId.request, record.request)) {
+      fail('active-turn.request.identity-conflict', 'request identity cannot change within a turn');
+    }
+    if (record.request.parentRequestId !== undefined && !requests.some((candidate) => (
+      candidate.request.requestId === record.request.parentRequestId
+      && candidate.request.turnId === record.request.turnId
+    ))) {
+      fail('active-turn.request.unknown-parent', 'continuation parent must be durably registered');
+    }
+    if (!sameId && record.phase !== 'dispatching') {
+      fail('active-turn.request.unregistered', 'request must register dispatching before later phases');
+    }
+    const existing = requests.find((candidate) => sameProviderRequest(candidate.request, record.request) && candidate.phase === record.phase);
     const commitId = activeTurnCommitId(
       this.binding.admittedTurn.turnId,
-      `request:${record.request.requestId}`,
+      `request:${record.request.requestId}:${record.phase}`,
     );
     if (existing) {
-      if (existing.parentRequestId !== record.parentRequestId || existing.phase !== record.phase) {
-        await this.journal.append({ commitId, record: { kind: 'request', record } });
-        this.records.push({ kind: 'request', record });
-        return record;
-      }
-      return existing;
+      return structuredClone(existing);
     }
     await this.journal.append({ commitId, record: { kind: 'request', record } });
     this.records.push({ kind: 'request', record });
-    return record;
+    return structuredClone(record);
   }
 
   /**
    * Accepts one Provider raw fact. It verifies the runtime/epoch and exact scope
-   * against the open binding, registers the request identity, dedupes by
+   * against the open binding, requires causal request registration, dedupes by
    * producer sequence and durably commits before projecting.
    */
   async acceptRawFact(envelope: RawFactEnvelope): Promise<AcceptedRawFact> {
+    const owned = structuredClone(envelope);
+    return this.mutate(() => this.acceptRawFactRecord(owned));
+  }
+
+  private async acceptRawFactRecord(envelope: RawFactEnvelope): Promise<AcceptedRawFact> {
     validateRawFactEnvelope(envelope);
     if (!sameProviderExecution(envelope.execution, this.binding.execution)) {
       fail('active-turn.accept.execution-mismatch', 'raw fact execution does not match the open active turn binding');
@@ -194,15 +258,12 @@ export class ActiveTurnContext {
       if (JSON.stringify(duplicate.envelope.fact) !== JSON.stringify(envelope.fact)) {
         fail('active-turn.accept.conflict', 'the same request producer sequence was accepted with different content');
       }
-      return duplicate;
+      return structuredClone(duplicate);
     }
 
-    await this.registerRequest({
-      request: envelope.request,
-      ...(envelope.request.parentRequestId === undefined ? {} : { parentRequestId: envelope.request.parentRequestId }),
-      scope: this.binding.scope,
-      phase: 'dispatched',
-    });
+    if (!this.requests().some((record) => sameProviderRequest(record.request, envelope.request))) {
+      fail('active-turn.accept.unregistered-request', 'raw fact must follow durable request registration');
+    }
     const seq = this.nextSeq();
     const entry: AcceptedRawFact = { seq, envelope };
     validateAcceptedRawFact(entry);
@@ -212,7 +273,7 @@ export class ActiveTurnContext {
     );
     await this.journal.append({ commitId, record: { kind: 'accepted-fact', entry } });
     this.records.push({ kind: 'accepted-fact', entry });
-    return entry;
+    return structuredClone(entry);
   }
 
   /**
@@ -221,6 +282,16 @@ export class ActiveTurnContext {
    * owner; this only links it to the invocation intent.
    */
   async openChildInvocation(input: {
+    readonly invocationId: string;
+    readonly childTurnId: string;
+    readonly checkpointReceiptRef: string;
+    readonly binding: ChildCallBinding;
+  }): Promise<ChildInvocationRecord> {
+    const owned = structuredClone(input);
+    return this.mutate(() => this.openChildInvocationRecord(owned));
+  }
+
+  private async openChildInvocationRecord(input: {
     readonly invocationId: string;
     readonly childTurnId: string;
     readonly checkpointReceiptRef: string;
@@ -269,6 +340,11 @@ export class ActiveTurnContext {
         readonly result: ReviewResult;
       }
   )): Promise<AcceptedChildDelivery> {
+    const owned = structuredClone(input);
+    return this.mutate(() => this.recordChildReturnRecord(owned));
+  }
+
+  private async recordChildReturnRecord(input: Parameters<ActiveTurnContext['recordChildReturn']>[0]): Promise<AcceptedChildDelivery> {
     const invocation = this.childInvocations().find((record) => record.invocationId === input.invocationId);
     if (!invocation) fail('active-turn.invocation.unknown', `child delivery references unknown invocation ${input.invocationId}`);
     if (input.kind === 'execution') {
@@ -342,6 +418,11 @@ export class ActiveTurnContext {
    * parent acceptance may set `adoptedResultSeq`.
    */
   async recordChildAdoption(invocationId: string, delivery: AcceptedChildDelivery): Promise<void> {
+    const owned = structuredClone(delivery);
+    return this.mutate(() => this.recordChildAdoptionRecord(invocationId, owned));
+  }
+
+  private async recordChildAdoptionRecord(invocationId: string, delivery: AcceptedChildDelivery): Promise<void> {
     const invocation = this.childInvocations().find((record) => record.invocationId === invocationId);
     if (!invocation) fail('active-turn.invocation.unknown', `adoption references unknown invocation ${invocationId}`);
     const stored = this.entries().find((entry): entry is AcceptedChildDelivery => (
@@ -363,6 +444,10 @@ export class ActiveTurnContext {
    * result, and an unadopted review is not checkpointed as complete.
    */
   async recordReviewCheckpoint(invocationId: string, checkpointReceiptRef: string): Promise<void> {
+    return this.mutate(() => this.recordReviewCheckpointRecord(invocationId, checkpointReceiptRef));
+  }
+
+  private async recordReviewCheckpointRecord(invocationId: string, checkpointReceiptRef: string): Promise<void> {
     if (!checkpointReceiptRef.trim()) {
       fail('active-turn.review-checkpoint.incomplete', 'review result checkpoint reference is required');
     }
@@ -388,16 +473,16 @@ export class ActiveTurnContext {
   }
 
   entries(): readonly (AcceptedRawFact | AcceptedChildDelivery)[] {
-    return this.records
+    return structuredClone(this.records
       .filter((record): record is Extract<ActiveTurnJournalRecord, { kind: 'accepted-fact' | 'child-delivery' }> => (
         record.kind === 'accepted-fact' || record.kind === 'child-delivery'
       ))
       .map((record) => (record.kind === 'accepted-fact' ? record.entry : record.entry))
-      .sort((left, right) => left.seq - right.seq);
+      .sort((left, right) => left.seq - right.seq));
   }
 
   requests(): readonly RuntimeRequestRecord[] {
-    return this.records.filter((record): record is Extract<ActiveTurnJournalRecord, { kind: 'request' }> => record.kind === 'request').map((record) => record.record);
+    return structuredClone(this.records.filter((record): record is Extract<ActiveTurnJournalRecord, { kind: 'request' }> => record.kind === 'request').map((record) => record.record));
   }
 
   childInvocations(): readonly ChildInvocationRecord[] {
@@ -405,7 +490,7 @@ export class ActiveTurnContext {
     for (const record of this.records) {
       if (record.kind === 'child-invocation') byId.set(record.record.invocationId, record.record);
     }
-    return [...byId.values()];
+    return structuredClone([...byId.values()]);
   }
 
   /**
@@ -419,6 +504,13 @@ export class ActiveTurnContext {
     readonly checkpointPath: readonly string[];
     readonly completionRefs: readonly CompletionRef[];
   }): ActiveTurnCaptureBody {
+    if (!this.drained) fail('active-turn.capture.not-drained', 'prepareCapture must drain producers before reading a capture');
+    if (this.captured) {
+      if (this.captured.cut.pauseId !== input.pauseId) {
+        fail('active-turn.capture.boundary-conflict', 'a frozen segment has one capture boundary');
+      }
+      return structuredClone(this.captured);
+    }
     const entries = this.entries();
     const cut: TurnCaptureCut = {
       pauseId: input.pauseId,
@@ -438,7 +530,54 @@ export class ActiveTurnContext {
       completionRefs: [...input.completionRefs],
     };
     validateActiveTurnCaptureBody(body);
-    return body;
+    this.captured = structuredClone(body);
+    return structuredClone(this.captured);
+  }
+
+  /** Register the entire producer, including its final durable acknowledgement. */
+  runProducer<T>(produce: () => T | Promise<T>): Promise<T> {
+    return this.producers.run(produce);
+  }
+
+  assertProductionOpen(): void { this.producers.assertOpen(); }
+
+  closeAndDrainProducers(): Promise<void> {
+    this.drainPromise ??= (async () => {
+      await this.producers.closeAndDrain();
+      this.frozen = true;
+      await this.mutations;
+      if (this.mutationFailure) throw this.mutationFailure.cause;
+      this.drained = true;
+    })();
+    return this.drainPromise;
+  }
+
+  /** Close admission, await admitted producers and writes, then freeze once. */
+  async prepareCapture(input: Parameters<ActiveTurnContext['capture']>[0]): Promise<ActiveTurnCaptureBody> {
+    if (!this.capturePromise) {
+      const owned = structuredClone(input);
+      this.capturePromise = (async () => {
+        await this.closeAndDrainProducers();
+        return this.capture(owned);
+      })();
+    }
+    const body = await this.capturePromise;
+    if (body.cut.pauseId !== input.pauseId) {
+      fail('active-turn.capture.boundary-conflict', 'a frozen segment has one capture boundary');
+    }
+    return structuredClone(body);
+  }
+
+  controlRecordCount(): number { return this.records.length; }
+
+  private mutate<T>(mutation: () => Promise<T>): Promise<T> {
+    if (this.frozen) return Promise.reject(new RuntimeActiveTurnError('active-turn.frozen', 'cannot mutate a frozen active turn'));
+    const result = this.mutations.then(mutation);
+    this.mutations = result.then(
+      () => undefined,
+      (cause: unknown) => { this.mutationFailure ??= { cause }; },
+    );
+    return result.then((value) => structuredClone(value));
   }
 
   private nextSeq(): number {
