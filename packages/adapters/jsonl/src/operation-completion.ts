@@ -78,11 +78,111 @@ async function receiptFromRecord(record: JournalRecord, fact: FileWriteCompletio
  * Journal payload is only the encoding carrier; callers read typed receipts or
  * typed reconcile obligations, never the raw payload.
  */
+export interface JsonlOperationCompletionJournalOptions {
+  /** Physical path when the codec owns its own Journal handle. */
+  readonly filePath?: string;
+  /** Actual shared Organ Journal object; preferred when the caller already holds it. */
+  readonly journal?: JsonlOrganJournal;
+}
+
+function isOwnedPayloadKind(record: JournalRecord): boolean {
+  const kind = record.payload?.kind;
+  return kind === 'operation-effect-intent' || kind === 'operation-completion';
+}
+
+/**
+ * Pure discovery over supplied, already-verified records. It selects only its
+ * own payload kinds before parsing, so an unrelated mixed-Journal record cannot
+ * fail discovery. A record that claims one of these kinds but is malformed is
+ * still an integrity error.
+ */
+export async function decodeOperationCompletionLookups(
+  records: readonly JournalRecord[],
+  execution: ProviderExecutionIdentityRef,
+): Promise<readonly OperationCompletionLookupDescriptor[]> {
+  const descriptors: OperationCompletionLookupDescriptor[] = [];
+  for (const record of records) {
+    if (!isOwnedPayloadKind(record)) continue;
+    const payload = parsePayload(record);
+    if (payload.kind !== 'operation-effect-intent') continue;
+    const { binding, effect } = payload.intent;
+    if (!sameExecutionIdentity(binding.execution, execution)) continue;
+    if (effect.effectId !== await fileWriteEffectId(binding)) {
+      throw new JournalIntegrityError('committed effect intent identity does not match its binding');
+    }
+    descriptors.push({
+      commitIdentity: await completionCommitIdentity(binding, effect.effectId),
+      binding,
+      effectId: effect.effectId,
+    });
+  }
+  return descriptors;
+}
+
+/**
+ * Pure exact read over supplied records. It preserves the same identity checks
+ * as the journal-backed read, but never locks or awaits a producer: the caller
+ * supplies the verified cut.
+ */
+export async function decodeOperationCompletionReadback(
+  records: readonly JournalRecord[],
+  input: CompletionReadInput,
+): Promise<CompletionReadback> {
+  if (input.effectId !== await fileWriteEffectId(input.binding)) {
+    throw new JournalIntegrityError('completion read effect identity does not match the requested binding');
+  }
+  const expectedCompletionCommit = await completionCommitIdentity(input.binding, input.effectId);
+  if (input.commitIdentity !== expectedCompletionCommit) {
+    throw new JournalIntegrityError('completion commit identity does not match the requested binding');
+  }
+  const completionRecord = records.find((candidate) => candidate.commitId === input.commitIdentity);
+  if (completionRecord !== undefined) {
+    const payload = parsePayload(completionRecord);
+    if (payload.kind !== 'operation-completion') {
+      throw new JournalIntegrityError('completion commitId does not identify a completion fact');
+    }
+    if (!sameEffectExecutionBinding(payload.completion.binding, input.binding)
+      || payload.completion.effect.effectId !== input.effectId) {
+      throw new JournalIntegrityError('completion read binding does not match the committed completion');
+    }
+    return { state: 'confirmed', receipt: await receiptFromRecord(completionRecord, payload.completion) };
+  }
+
+  const intentRecord = records.find((candidate) => candidate.commitId === intentCommitId(input.binding, input.effectId));
+  if (intentRecord === undefined) return { state: 'not-found' };
+  const payload = parsePayload(intentRecord);
+  if (payload.kind !== 'operation-effect-intent') {
+    throw new JournalIntegrityError('effect intent commitId does not identify an intent');
+  }
+  if (!sameEffectExecutionBinding(payload.intent.binding, input.binding)
+    || payload.intent.effect.effectId !== input.effectId) {
+    throw new JournalIntegrityError('effect intent read binding does not match the committed intent');
+  }
+  return {
+    state: 'unknown',
+    intent: payload.intent,
+    nextAction: 'reconcile',
+    replayAllowed: false,
+  };
+}
+
 export class JsonlOperationCompletionJournal implements OperationCompletionJournalPort {
   private readonly journal: JsonlOrganJournal;
 
-  constructor(filePath: string) {
-    this.journal = new JsonlOrganJournal(filePath);
+  constructor(input: string | JsonlOperationCompletionJournalOptions) {
+    if (typeof input === 'string') {
+      if (!input.trim()) throw new JournalIntegrityError('operation completion journal path is required');
+      this.journal = new JsonlOrganJournal(input);
+      return;
+    }
+    if (input.journal !== undefined) {
+      this.journal = input.journal;
+      return;
+    }
+    if (input.filePath === undefined || !input.filePath.trim()) {
+      throw new JournalIntegrityError('operation completion journal requires a path or shared journal');
+    }
+    this.journal = new JsonlOrganJournal(input.filePath);
   }
 
   async commitIntent(intent: FileWriteEffectIntent): Promise<void> {
@@ -132,63 +232,12 @@ export class JsonlOperationCompletionJournal implements OperationCompletionJourn
   }
 
   async readExact(input: CompletionReadInput): Promise<CompletionReadback> {
-    if (input.effectId !== await fileWriteEffectId(input.binding)) {
-      throw new JournalIntegrityError('completion read effect identity does not match the requested binding');
-    }
-    const expectedCompletionCommit = await completionCommitIdentity(input.binding, input.effectId);
-    if (input.commitIdentity !== expectedCompletionCommit) {
-      throw new JournalIntegrityError('completion commit identity does not match the requested binding');
-    }
-    const completionRecord = await this.journal.findByCommitId(input.commitIdentity);
-    if (completionRecord !== null) {
-      const payload = parsePayload(completionRecord);
-      if (payload.kind !== 'operation-completion') {
-        throw new JournalIntegrityError('completion commitId does not identify a completion fact');
-      }
-      if (!sameEffectExecutionBinding(payload.completion.binding, input.binding)
-        || payload.completion.effect.effectId !== input.effectId) {
-        throw new JournalIntegrityError('completion read binding does not match the committed completion');
-      }
-      return { state: 'confirmed', receipt: await receiptFromRecord(completionRecord, payload.completion) };
-    }
-
-    const intentRecord = await this.journal.findByCommitId(intentCommitId(input.binding, input.effectId));
-    if (intentRecord === null) return { state: 'not-found' };
-    const payload = parsePayload(intentRecord);
-    if (payload.kind !== 'operation-effect-intent') {
-      throw new JournalIntegrityError('effect intent commitId does not identify an intent');
-    }
-    if (!sameEffectExecutionBinding(payload.intent.binding, input.binding)
-      || payload.intent.effect.effectId !== input.effectId) {
-      throw new JournalIntegrityError('effect intent read binding does not match the committed intent');
-    }
-    return {
-      state: 'unknown',
-      intent: payload.intent,
-      nextAction: 'reconcile',
-      replayAllowed: false,
-    };
+    return await decodeOperationCompletionReadback(await this.journal.replay(), input);
   }
 
   async discoverExactExecution(input: {
     readonly execution: ProviderExecutionIdentityRef;
   }): Promise<readonly OperationCompletionLookupDescriptor[]> {
-    const records = await this.journal.replay();
-    const descriptors: OperationCompletionLookupDescriptor[] = [];
-    for (const record of records) {
-      const payload = parsePayload(record);
-      if (payload.kind !== 'operation-effect-intent') continue;
-      const { binding, effect } = payload.intent;
-      if (!sameExecutionIdentity(binding.execution, input.execution)) continue;
-      if (effect.effectId !== await fileWriteEffectId(binding)) {
-        throw new JournalIntegrityError('committed effect intent identity does not match its binding');
-      }
-      descriptors.push({
-        commitIdentity: await completionCommitIdentity(binding, effect.effectId),
-        binding,
-        effectId: effect.effectId,
-      });
-    }
-    return descriptors;
+    return await decodeOperationCompletionLookups(await this.journal.replay(), input.execution);
   }
 }

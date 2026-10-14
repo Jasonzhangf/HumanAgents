@@ -72,6 +72,11 @@ import {
   assertPlannerAlignmentRecord,
   assertTurnClosureRecord,
   assertTurnRecoveryRecord,
+  distinctReviewCommitRefs,
+  sameReviewCommitRefs,
+  sanitizeId,
+  turnBoundaryRecordRefs,
+  type CheckpointClosurePreparationRecord,
   type CheckpointSubmissionSource,
   type ClosureRecord,
   type OperationReconcileResult,
@@ -150,6 +155,11 @@ export interface TurnRecoveryFacts {
 }
 
 export interface CloseTurnInput {
+  readonly reviewCommitRefs?: readonly JournalCommitRef[];
+  readonly prepareCheckpointClosure?: (checkpoint: Checkpoint) => Promise<{
+    readonly preparation: CheckpointClosurePreparationRecord;
+    readonly turnRecoveryRef: string;
+  }>;
   readonly summary: TurnCloseSummary;
   readonly recovery: TurnRecoveryFacts;
   readonly outcome: Checkpoint['outcome'];
@@ -485,11 +495,6 @@ function sameId(left: { readonly scope: string; readonly value: string } | undef
   return left?.scope === right?.scope && left?.value === right?.value;
 }
 
-function sanitizeId(value: string): string {
-  const cleaned = value.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^[^A-Za-z0-9]+/, '');
-  return cleaned || 'turn';
-}
-
 function renderTurnCloseSummary(summary: TurnCloseSummary): string {
   return [
     `goal: ${summary.goal.text}`,
@@ -529,6 +534,13 @@ export class AgentLoopRuntime {
     readonly checkpoint: Checkpoint;
     readonly previous: Checkpoint | null;
     readonly recoveryRecord: TurnRecoveryRecord;
+    readonly reviewCommitRefs: readonly JournalCommitRef[];
+    readonly inputs: Omit<CloseTurnInput, 'prepareCheckpointClosure' | 'reviewCommitRefs'>;
+    readonly bound: boolean;
+    prepared?: {
+      readonly preparation: CheckpointClosurePreparationRecord;
+      readonly turnRecoveryRef: string;
+    };
   } | null = null;
   private turnState:
     | { readonly phase: 'open' }
@@ -1307,44 +1319,100 @@ export class AgentLoopRuntime {
   async closeTurn(input: CloseTurnInput): Promise<TurnCloseResult> {
     const turn = this.requireTurn();
     const identity = turn.identity;
-    if (this.turnState.phase === 'awaiting-planner-alignment' && this.lastCloseResult) {
-      return this.lastCloseResult;
-    }
+    let reviewCommitRefs: readonly JournalCommitRef[];
     try {
+      reviewCommitRefs = distinctReviewCommitRefs(input.reviewCommitRefs);
       validateTurnCloseSummary(input.summary, identity.scopeRef);
     } catch (error) {
       throw new AgentLoopRuntimeError('turn-close-validation', messageOf(error));
     }
-    const summaryText = renderTurnCloseSummary(input.summary);
+    // Copy serializable effective facts only. The composition callback is never cloned.
+    const inputs = structuredClone({
+      summary: input.summary,
+      recovery: input.recovery,
+      outcome: input.outcome,
+      source: input.source,
+      permissionRevoked: input.permissionRevoked ?? false,
+      hardBlockers: input.hardBlockers ?? [],
+      unknownOperations: input.unknownOperations ?? [],
+      reconciledOperations: input.reconciledOperations ?? [],
+    });
+    const bound = input.prepareCheckpointClosure !== undefined;
+    if (this.pendingClose && (JSON.stringify(this.pendingClose.inputs) !== JSON.stringify(inputs)
+      || this.pendingClose.bound !== bound)) {
+      throw new AgentLoopRuntimeError('turn-close-validation', 'turn close already started with different frozen inputs or preparation requirement');
+    }
+    if (this.turnState.phase === 'awaiting-planner-alignment' || this.turnState.phase === 'aligned') {
+      const checkpointId = this.turnState.closure.checkpointId;
+      const record = await turn.closurePort.read(turnBoundaryRecordRefs(identity, checkpointId).turnClosureRef);
+      if (!record || !('closureKind' in record) || record.closureKind !== 'turn-closure') {
+        throw new AgentLoopRuntimeError('turn-close-validation', 'closed turn has no durable typed closure');
+      }
+      assertTurnClosureRecord(record);
+      if (!sameReviewCommitRefs(record.reviewCommitRefs, reviewCommitRefs)) {
+        throw new AgentLoopRuntimeError('turn-close-validation', 'closed turn binds a different ordered review receipt list');
+      }
+      const committed = await turn.journal.readCommitted(identity.scopeRef, checkpointId);
+      if (!committed) throw new AgentLoopRuntimeError('turn-close-validation', 'closed turn checkpoint is absent');
+      const checkpointClosure = await turn.closurePort.read(record.closureRef);
+      const recovery = await turn.closurePort.read(turnBoundaryRecordRefs(identity, checkpointId).turnRecoveryRecordRef);
+      if (!checkpointClosure || !('closureKind' in checkpointClosure) || checkpointClosure.closureKind !== 'checkpoint'
+        || checkpointClosure.source !== inputs.source || committed.checkpoint.outcome !== inputs.outcome
+        || JSON.stringify(record.summary) !== JSON.stringify(inputs.summary)
+        || !!checkpointClosure.recoveryBinding !== bound
+        || !recovery || !('closureKind' in recovery) || recovery.closureKind !== 'turn-recovery'
+        || JSON.stringify({ contextRef: recovery.contextRef, unfinishedRef: recovery.unfinishedRef,
+          unreturnedCallRefs: recovery.unreturnedCallRefs, unresolvedOperationRefs: recovery.unresolvedOperationRefs,
+          ...(recovery.firstErrorRef === undefined ? {} : { firstErrorRef: recovery.firstErrorRef }) }) !== JSON.stringify(inputs.recovery)) {
+        throw new AgentLoopRuntimeError('turn-close-validation', 'closed turn has different frozen facts or preparation requirement');
+      }
+      if (this.lastCloseResult) return structuredClone(this.lastCloseResult);
+      return {
+        state: 'closed-awaiting-planner-alignment',
+        turnSummary: record.summary,
+        checkpoint: committed.checkpoint,
+        closureRef: record.closureRef,
+        recoveryStateRef: record.recoveryStateRef,
+        plannerAlignment: 'pending',
+        advance: 'blocked-pending-planner-alignment',
+      };
+    }
     if (!this.pendingClose) {
       const latest = await turn.journal.readLatest(identity.scopeRef);
       const previous = latest?.checkpoint ?? null;
       const recoveryStateRef = this.turnRecoveryStateRef();
-      const checkpoint = this.buildTurnCheckpoint(previous, input, recoveryStateRef);
+      const checkpoint = this.buildTurnCheckpoint(previous, inputs, recoveryStateRef);
       const recoveryRecord: TurnRecoveryRecord = {
         closureKind: 'turn-recovery',
-        closureId: `turn-recovery:${sanitizeId(identity.turnId)}:${checkpoint.id.value}`,
+        closureId: turnBoundaryRecordRefs(identity, checkpoint.id).turnRecoveryRecordRef,
         identity,
         checkpointId: checkpoint.id,
         recoveryStateRef,
-        contextRef: input.recovery.contextRef,
-        unfinishedRef: input.recovery.unfinishedRef,
-        unreturnedCallRefs: input.recovery.unreturnedCallRefs,
-        unresolvedOperationRefs: input.recovery.unresolvedOperationRefs,
-        ...(input.recovery.firstErrorRef === undefined ? {} : { firstErrorRef: input.recovery.firstErrorRef }),
+        contextRef: inputs.recovery.contextRef,
+        unfinishedRef: inputs.recovery.unfinishedRef,
+        unreturnedCallRefs: inputs.recovery.unreturnedCallRefs,
+        unresolvedOperationRefs: inputs.recovery.unresolvedOperationRefs,
+        ...(inputs.recovery.firstErrorRef === undefined ? {} : { firstErrorRef: inputs.recovery.firstErrorRef }),
         failedPhase: 'submission',
       };
       assertTurnRecoveryRecord(recoveryRecord);
-      this.pendingClose = { checkpoint, previous, recoveryRecord };
-    } else if (this.pendingClose.checkpoint.summary !== summaryText) {
-      throw new AgentLoopRuntimeError('turn-close-validation', 'turn close already started with a different four-part summary');
+      this.pendingClose = { checkpoint, previous, recoveryRecord, reviewCommitRefs, inputs, bound };
     }
-    const { checkpoint, previous, recoveryRecord } = this.pendingClose;
+    if (!sameReviewCommitRefs(this.pendingClose.reviewCommitRefs, reviewCommitRefs)) {
+      throw new AgentLoopRuntimeError('turn-close-validation', 'pending turn close binds a different ordered review receipt list');
+    }
+    const pending = this.pendingClose;
+    const { checkpoint, previous, recoveryRecord, inputs: frozen, reviewCommitRefs: retainedReviewCommitRefs } = pending;
 
     // Persist the recovery responsibility before any durable checkpoint/closure commit.
     try {
       const existingRecovery = await turn.closurePort.read(recoveryRecord.closureId);
-      if (!existingRecovery) await turn.closurePort.commit(recoveryRecord);
+      if (existingRecovery) {
+        assertTurnRecoveryRecord(existingRecovery as TurnRecoveryRecord);
+        if (JSON.stringify(existingRecovery) !== JSON.stringify(recoveryRecord)) {
+          throw new AgentLoopRuntimeError('turn-close-validation', 'durable turn recovery has different frozen facts');
+        }
+      } else await turn.closurePort.commit(recoveryRecord);
     } catch (error) {
       throw new AgentLoopRuntimeError('turn-close-validation', `turn recovery asset could not be persisted: ${messageOf(error)}`);
     }
@@ -1352,17 +1420,21 @@ export class AgentLoopRuntime {
     // Single durable commit path: existing submitCheckpoint (journal checkpoint -> closure).
     let closureRef: string;
     try {
+      if (pending.bound && !pending.prepared) {
+        pending.prepared = structuredClone(await input.prepareCheckpointClosure!(structuredClone(checkpoint)));
+      }
       const submitted = await submitCheckpoint({
-        source: input.source,
+        source: frozen.source,
         ownerId: turn.ownerId,
         checkpoint,
         previous,
         journal: turn.journal,
         closurePort: turn.closurePort,
-        permissionRevoked: input.permissionRevoked,
-        hardBlockers: input.hardBlockers,
-        unknownOperations: input.unknownOperations,
-        reconciledOperations: input.reconciledOperations,
+        permissionRevoked: frozen.permissionRevoked,
+        hardBlockers: frozen.hardBlockers,
+        unknownOperations: frozen.unknownOperations,
+        reconciledOperations: frozen.reconciledOperations,
+        ...pending.prepared,
       });
       closureRef = submitted.closure.closureId;
     } catch (error) {
@@ -1379,20 +1451,38 @@ export class AgentLoopRuntime {
     }
 
     // Persist the typed four-part closure relationship as a first-class durable fact.
-    const turnClosureRecord: TurnClosureRecord = {
-      closureKind: 'turn-closure',
-      closureId: `turn-closure:${sanitizeId(identity.turnId)}:${checkpoint.id.value}`,
+    const turnClosureFacts = {
+      closureKind: 'turn-closure' as const,
+      closureId: turnBoundaryRecordRefs(identity, checkpoint.id).turnClosureRef,
       identity,
       checkpointId: checkpoint.id,
       closureRef,
       recoveryStateRef: recoveryRecord.recoveryStateRef,
-      summary: input.summary,
-      closedAt: this.now().toISOString(),
+      summary: frozen.summary,
+      ...(retainedReviewCommitRefs.length ? { reviewCommitRefs: retainedReviewCommitRefs } : {}),
     };
+    let turnClosureRecord: TurnClosureRecord;
     try {
-      assertTurnClosureRecord(turnClosureRecord);
-      const existingClosure = await turn.closurePort.read(turnClosureRecord.closureId);
-      if (!existingClosure) await turn.closurePort.commit(turnClosureRecord);
+      const existingClosure = await turn.closurePort.read(turnClosureFacts.closureId);
+      if (existingClosure) {
+        if (!('closureKind' in existingClosure) || existingClosure.closureKind !== 'turn-closure') {
+          throw new AgentLoopRuntimeError('turn-close-validation', 'durable turn closure has a different kind');
+        }
+        assertTurnClosureRecord(existingClosure);
+        if (!sameReviewCommitRefs(existingClosure.reviewCommitRefs, retainedReviewCommitRefs)) {
+          throw new AgentLoopRuntimeError('turn-close-validation', 'durable turn closure binds a different ordered review receipt list');
+        }
+        const { closedAt: _closedAt, reviewCommitRefs: _reviews, ...existingFacts } = existingClosure;
+        const { reviewCommitRefs: _retainedReviews, ...expectedFacts } = turnClosureFacts;
+        if (JSON.stringify(existingFacts) !== JSON.stringify(expectedFacts)) {
+          throw new AgentLoopRuntimeError('turn-close-validation', 'durable turn closure has different frozen facts');
+        }
+        turnClosureRecord = existingClosure;
+      } else {
+        turnClosureRecord = { ...turnClosureFacts, closedAt: this.now().toISOString() };
+        assertTurnClosureRecord(turnClosureRecord);
+        await turn.closurePort.commit(turnClosureRecord);
+      }
     } catch (error) {
       const firstErrorRef = this.turnErrorRef('turn-closure', messageOf(error));
       const recovery = this.turnRecoveryReference(recoveryRecord, firstErrorRef);
@@ -1408,7 +1498,7 @@ export class AgentLoopRuntime {
 
     const result: TurnCloseResult = {
       state: 'closed-awaiting-planner-alignment',
-      turnSummary: input.summary,
+      turnSummary: turnClosureRecord.summary,
       checkpoint,
       closureRef,
       recoveryStateRef: recoveryRecord.recoveryStateRef,
@@ -1424,8 +1514,8 @@ export class AgentLoopRuntime {
       closedAt: turnClosureRecord.closedAt,
     };
     this.turnState = { phase: 'awaiting-planner-alignment', closureRef, closure: turnClosure, recoveryRecord };
-    this.lastCloseResult = result;
-    return result;
+    this.lastCloseResult = structuredClone(result);
+    return structuredClone(result);
   }
 
   /**
@@ -1465,7 +1555,7 @@ export class AgentLoopRuntime {
     }
 
     const { closure, recoveryRecord } = this.turnState;
-    const alignmentId = `turn-alignment:${sanitizeId(identity.turnId)}:${closure.checkpointId.value}`;
+    const alignmentId = turnBoundaryRecordRefs(identity, closure.checkpointId).alignmentRef;
     try {
       const existing = await turn.closurePort.read(alignmentId);
       const record = existing
@@ -1561,7 +1651,7 @@ export class AgentLoopRuntime {
    * - `alignment-committed`: retry the exact readback only; never re-plan, re-publish, or re-commit.
    * - `unknown`: stay paused; an unconfirmed stage is never treated as absent.
    */
-  async recoverTurn(input: RecoverTurnInput): Promise<RecoverTurnResult> {
+  async recoverTurn(input?: RecoverTurnInput): Promise<RecoverTurnResult> {
     const turn = this.requireTurn();
     const identity = turn.identity;
 
@@ -1598,6 +1688,15 @@ export class AgentLoopRuntime {
         closure: resolved.closure,
         recoveryRecord: resolved.recovery,
       };
+      if (!input) {
+        return {
+          stage: 'closure-committed-alignment-absent',
+          turnId: identity.turnId,
+          checkpointId: resolved.checkpointId,
+          closure: resolved.closure,
+          advance: 'alignment-only',
+        };
+      }
       const aligned = await this.alignTurn(input);
       if (aligned.state === 'aligned') {
         return {
@@ -1642,11 +1741,11 @@ export class AgentLoopRuntime {
     if (!latest) return { kind: 'closure-absent' };
 
     const checkpointId = latest.checkpoint.id;
-    const suffix = `${sanitizeId(identity.turnId)}:${checkpointId.value}`;
+    const refs = turnBoundaryRecordRefs(identity, checkpointId);
     const [closureRecord, alignmentRecord, recoveryRecord] = await Promise.all([
-      turn.closurePort.read(`turn-closure:${suffix}`),
-      turn.closurePort.read(`turn-alignment:${suffix}`),
-      turn.closurePort.read(`turn-recovery:${suffix}`),
+      turn.closurePort.read(refs.turnClosureRef),
+      turn.closurePort.read(refs.alignmentRef),
+      turn.closurePort.read(refs.turnRecoveryRecordRef),
     ]);
 
     const recovery = recoveryRecord ? this.asTurnRecoveryRecord(recoveryRecord) : null;

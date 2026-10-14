@@ -15,14 +15,17 @@ import {
   type EvidenceRef,
   type OperationEvent,
   type OperationFailure,
+  type OperationId,
   type OperationIntent,
   type OperationLease,
   type OperationResult,
   type OperationStatus,
   type RouteSelection,
   type Scope,
+  type ScopeRef,
   type ToolRegistration,
 } from '../../../contracts/src/index.js';
+import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import {
   assertTransitionOperationStatus,
   planBlockedRecovery,
@@ -30,9 +33,15 @@ import {
   planReconcileRequiredResolution,
 } from '../../../core/src/index.js';
 import { GatewayError, OperationNotificationError } from './errors.js';
-import { HandRuntime } from './hand-runtime.js';
+import { HandRuntime, type HandEmitSettlement } from './hand-runtime.js';
 import type {
   OperationBlockedState,
+  OperationChildAdmission,
+  OperationControlBinding,
+  OperationControlReadback,
+  OperationControlRecord,
+  OperationControlSelector,
+  OperationCoverageInitialization,
   OperationExecutorObservation,
   OperationExecutorPort,
   OperationJournalPort,
@@ -44,6 +53,7 @@ import type {
   OperationSubmissionResult,
   OperationTaskBoundaryPort,
   OperationVerifierPort,
+  ExternalOperationLifecycle,
   ResolveReconcileInput,
   ResumeOperationInput,
 } from './ports.js';
@@ -62,9 +72,13 @@ export interface GatewayOptions {
 }
 
 interface OperationRecord {
+  readonly binding: OperationControlBinding;
+  readonly childAdmission?: OperationChildAdmission;
   readonly intent: OperationIntent;
   readonly registration: ToolRegistration;
   readonly route: RouteSelection;
+  readonly namespaceKey: string;
+  readonly fingerprintKey: string;
   status: OperationStatus;
   executionEpoch: number;
   lease?: OperationLease;
@@ -87,6 +101,97 @@ function resultRef(operationId: OperationIntent['operationId']): string {
 
 function operationKey(operationId: OperationIntent['operationId']): string {
   return `${operationId.scope.length}:${operationId.scope}${operationId.value.length}:${operationId.value}`;
+}
+
+/**
+ * Copy the full mutable operation state, including optional fields, so a
+ * successor can be committed before it is published to the cache. Spreading a
+ * record omits never-assigned optional keys; this explicit copy keeps every
+ * field so a successor can clear previously set lease/blocked/reconcile state.
+ */
+function cloneRecord(record: OperationRecord): OperationRecord {
+  return {
+    binding: record.binding,
+    childAdmission: record.childAdmission,
+    intent: record.intent,
+    registration: record.registration,
+    route: record.route,
+    namespaceKey: record.namespaceKey,
+    fingerprintKey: record.fingerprintKey,
+    status: record.status,
+    executionEpoch: record.executionEpoch,
+    lease: record.lease,
+    observation: record.observation,
+    result: record.result,
+    failure: record.failure,
+    blocked: record.blocked,
+    reconcile: record.reconcile,
+    executionInvalidated: record.executionInvalidated,
+  };
+}
+
+function isTerminalOperationStatus(status: OperationStatus): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+}
+
+function sameScopedId(
+  left: { readonly scope: string; readonly value: string },
+  right: { readonly scope: string; readonly value: string },
+): boolean {
+  return left.scope === right.scope && left.value === right.value;
+}
+
+function assertCommitRef(value: JournalCommitRef, label: string): void {
+  if (typeof value.commitId !== 'string' || value.commitId.trim().length === 0
+    || !Number.isSafeInteger(value.journalSeq)
+    || typeof value.recordDigest !== 'string' || value.recordDigest.trim().length === 0) {
+    throw new GatewayError('invalid-state', `${label} must be a real journal commit receipt`);
+  }
+}
+
+function sameCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean {
+  return left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest;
+}
+
+function sameScopeRef(left: ScopeRef, right: ScopeRef): boolean {
+  return sameScopedId(left.organId, right.organId)
+    && (left.taskId?.value ?? null) === (right.taskId?.value ?? null)
+    && (left.cycleId?.value ?? null) === (right.cycleId?.value ?? null)
+    && (left.operationId?.value ?? null) === (right.operationId?.value ?? null);
+}
+
+function sameControlBinding(left: OperationControlBinding, right: OperationControlBinding): boolean {
+  return sameScopeRef(left.scope, right.scope)
+    && left.agentRuntimeId === right.agentRuntimeId
+    && left.harnessExecutionEpoch === right.harnessExecutionEpoch
+    && sameScopedId(left.parentOperationId, right.parentOperationId)
+    && sameCommitRef(left.admissionCommitRef, right.admissionCommitRef);
+}
+
+function sameChildAdmission(
+  left: OperationChildAdmission | undefined,
+  right: OperationChildAdmission | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return sameCommitRef(left.authorityCommitRef, right.authorityCommitRef)
+    && sameCommitRef(left.businessRegistrationCommitRef, right.businessRegistrationCommitRef)
+    && sameCommitRef(left.coverageCommitRef, right.coverageCommitRef);
+}
+
+/**
+ * A parent permits new child effects only while it is a live, non-stopped,
+ * non-terminal operation. Terminal, blocked, cancel-requested and
+ * reconcile-required parents never authorize child IO.
+ */
+function isPermittingParentStatus(status: OperationStatus): boolean {
+  return status === 'accepted'
+    || status === 'queued'
+    || status === 'leased'
+    || status === 'running'
+    || status === 'settling'
+    || status === 'verifying';
 }
 
 export class ToolExecutionGateway {
@@ -122,14 +227,22 @@ export class ToolExecutionGateway {
     this.hand = new HandRuntime({
       executor: this.executor,
       verifier: this.verifier,
-      emit: (event) => this.emit(event),
+      emit: (event, settlement) => this.emit(event, settlement),
       createEvidence: (label, scope) => this.createEvidence(label, scope),
       now: this.now,
     });
   }
 
-  async submit(intent: OperationIntent): Promise<OperationSubmissionResult> {
+  async submit(
+    intent: OperationIntent,
+    binding: OperationControlBinding,
+    childAdmission?: OperationChildAdmission,
+  ): Promise<OperationSubmissionResult> {
     validateOperationIntent(intent);
+    this.assertControlBinding(binding, intent, childAdmission);
+    if (childAdmission !== undefined) {
+      await this.verifyChildAdmission(binding, intent, childAdmission);
+    }
     const resolved = this.registry.resolve(intent);
     const namespaceKey = operationIdempotencyKey(intent);
     const fingerprintKey = operationSemanticFingerprintKey(
@@ -138,7 +251,7 @@ export class ToolExecutionGateway {
 
     const existing = this.idempotency.get(namespaceKey);
     if (existing) {
-      return this.replayOrConflict(existing, fingerprintKey);
+      return this.replayOrConflict(existing, fingerprintKey, binding, childAdmission);
     }
 
     const pending = this.pendingSubmissions.get(namespaceKey);
@@ -151,11 +264,12 @@ export class ToolExecutionGateway {
         );
       }
       const operation = await pending.promise;
+      this.assertReplayIdentity(operation, binding, childAdmission);
       this.throwPendingNotificationFailure(intent.operationId);
       return { decision: 'replay', operation: this.snapshot(operation) };
     }
 
-    const promise = this.acceptNew(intent, resolved, namespaceKey, fingerprintKey);
+    const promise = this.acceptNew(intent, binding, resolved, namespaceKey, fingerprintKey, childAdmission);
     this.pendingSubmissions.set(namespaceKey, { fingerprintKey, promise });
     try {
       const operation = await promise;
@@ -231,8 +345,11 @@ export class ToolExecutionGateway {
       const decision = planBlockedRecovery({ blockedAfter, sideEffectState, retryAllowed });
 
       if (decision.status === 'queued' && decision.executionMode === 'execute') {
-        await this.transition(record, 'queued', 'operation.queued', input.evidenceRefs ?? record.blocked.evidenceRefs);
-        record.blocked = undefined;
+        await this.transition(record, 'queued', 'operation.queued', input.evidenceRefs ?? record.blocked.evidenceRefs, {
+          mutate: (draft) => {
+            draft.blocked = undefined;
+          },
+        });
         return {
           kind: 'execute' as const,
           record,
@@ -254,7 +371,11 @@ export class ToolExecutionGateway {
       await this.transition(record, 'verifying', 'operation.verification_started', [
         ...(input.evidenceRefs ?? record.blocked.evidenceRefs),
         ...record.observation.evidenceRefs,
-      ]);
+      ], {
+        mutate: (draft) => {
+          draft.blocked = undefined;
+        },
+      });
       const outcome = await this.hand.verifyOnly({
         intent: record.intent,
         registration: record.registration,
@@ -263,7 +384,6 @@ export class ToolExecutionGateway {
         observation: record.observation,
         verificationStartedAlready: true,
       });
-      record.blocked = undefined;
       return {
         kind: 'snapshot' as const,
         snapshot: await this.applyHandOutcome(record, outcome),
@@ -322,7 +442,6 @@ export class ToolExecutionGateway {
         ...(record.lease ? { lease: record.lease } : {}),
       });
       this.assertStopSettlementReceipt(record, receipt);
-      record.executionInvalidated = true;
       const settlement = {
         stopped: receipt.stopped,
         sideEffectState: receipt.sideEffectState,
@@ -330,15 +449,21 @@ export class ToolExecutionGateway {
       };
       const decision = planOperationCancellation(record.status, settlement);
       if (decision.status === 'reconcile_required') {
-        await this.transition(record, 'reconcile_required', 'operation.reconcile_required', settlement.evidenceRefs, undefined, undefined, record.executionEpoch, undefined, true);
-        record.reconcile = {
-          owner: record.registration.owner,
-          reason: decision.reason,
-          sideEffectState: settlement.sideEffectState,
-          nextAction: { kind: 'recover', ref: 'reconcile' },
-          evidenceRefs: settlement.evidenceRefs,
-        };
-        record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
+        await this.transition(record, 'reconcile_required', 'operation.reconcile_required', settlement.evidenceRefs, {
+          executionEpoch: record.executionEpoch,
+          allowInvalidated: true,
+          mutate: (draft) => {
+            draft.executionInvalidated = true;
+            draft.reconcile = {
+              owner: record.registration.owner,
+              reason: decision.reason,
+              sideEffectState: settlement.sideEffectState,
+              nextAction: { kind: 'recover', ref: 'reconcile' },
+              evidenceRefs: settlement.evidenceRefs,
+            };
+            if (draft.lease) draft.lease = { ...draft.lease, state: 'released' };
+          },
+        });
         return this.snapshot(record);
       }
 
@@ -351,16 +476,30 @@ export class ToolExecutionGateway {
           settlement.evidenceRefs,
           { kind: 'recover', ref: 'reconcile' },
         );
-        await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, undefined, failure, record.executionEpoch, undefined, true);
-        record.failure = failure;
-        record.result = this.failedResult(record, failure, 'cancellation-failed');
-        record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
+        await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, {
+          failure,
+          executionEpoch: record.executionEpoch,
+          allowInvalidated: true,
+          mutate: (draft) => {
+            draft.executionInvalidated = true;
+            draft.failure = failure;
+            draft.result = this.failedResult(draft, failure, 'cancellation-failed');
+            if (draft.lease) draft.lease = { ...draft.lease, state: 'released' };
+          },
+        });
         return this.snapshot(record);
       }
 
-      await this.transition(record, 'cancelled', 'operation.cancelled', settlement.evidenceRefs, resultRef(record.intent.operationId), undefined, record.executionEpoch, undefined, true);
-      record.result = this.cancelledResult(record, settlement.evidenceRefs);
-      record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
+      await this.transition(record, 'cancelled', 'operation.cancelled', settlement.evidenceRefs, {
+        resultRef: resultRef(record.intent.operationId),
+        executionEpoch: record.executionEpoch,
+        allowInvalidated: true,
+        mutate: (draft) => {
+          draft.executionInvalidated = true;
+          draft.result = this.cancelledResult(draft, settlement.evidenceRefs);
+          if (draft.lease) draft.lease = { ...draft.lease, state: 'released' };
+        },
+      });
       return this.snapshot(record);
     });
   }
@@ -381,24 +520,35 @@ export class ToolExecutionGateway {
           );
         }
         const sideEffectState = record.reconcile.sideEffectState;
-        await this.transition(record, 'blocked', 'operation.blocked', input.evidenceRefs, undefined, undefined, record.executionEpoch, undefined, record.executionInvalidated === true);
-        record.reconcile = undefined;
-        record.blocked = {
-          blockedAfter: 'reconcile',
-          sideEffectState,
-          retryAllowed: false,
-          owner: record.registration.owner,
-          nextAction: { kind: 'recover', ref: 'verify-only' },
-          evidenceRefs: input.evidenceRefs,
-        };
+        await this.transition(record, 'blocked', 'operation.blocked', input.evidenceRefs, {
+          executionEpoch: record.executionEpoch,
+          allowInvalidated: record.executionInvalidated === true,
+          mutate: (draft) => {
+            draft.reconcile = undefined;
+            draft.blocked = {
+              blockedAfter: 'reconcile',
+              sideEffectState,
+              retryAllowed: false,
+              owner: record.registration.owner,
+              nextAction: { kind: 'recover', ref: 'verify-only' },
+              evidenceRefs: input.evidenceRefs,
+            };
+          },
+        });
         return this.snapshot(record);
       }
 
       if (decision.status === 'cancelled') {
-        await this.transition(record, 'cancelled', 'operation.cancelled', input.evidenceRefs, resultRef(record.intent.operationId), undefined, record.executionEpoch, undefined, record.executionInvalidated === true);
-        record.result = this.cancelledResult(record, input.evidenceRefs);
-        record.reconcile = undefined;
-        record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
+        await this.transition(record, 'cancelled', 'operation.cancelled', input.evidenceRefs, {
+          resultRef: resultRef(record.intent.operationId),
+          executionEpoch: record.executionEpoch,
+          allowInvalidated: record.executionInvalidated === true,
+          mutate: (draft) => {
+            draft.result = this.cancelledResult(draft, input.evidenceRefs);
+            draft.reconcile = undefined;
+            if (draft.lease) draft.lease = { ...draft.lease, state: 'released' };
+          },
+        });
         return this.snapshot(record);
       }
 
@@ -410,10 +560,16 @@ export class ToolExecutionGateway {
         input.evidenceRefs,
         { kind: 'recover', ref: 'reconcile' },
       );
-      await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, undefined, failure, record.executionEpoch, undefined, record.executionInvalidated === true);
-      record.failure = failure;
-      record.result = this.failedResult(record, failure, 'reconcile-failed');
-      record.reconcile = undefined;
+      await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, {
+        failure,
+        executionEpoch: record.executionEpoch,
+        allowInvalidated: record.executionInvalidated === true,
+        mutate: (draft) => {
+          draft.failure = failure;
+          draft.result = this.failedResult(draft, failure, 'reconcile-failed');
+          draft.reconcile = undefined;
+        },
+      });
       return this.snapshot(record);
     });
   }
@@ -422,11 +578,226 @@ export class ToolExecutionGateway {
     return this.snapshot(this.requireOperation(operationId));
   }
 
+  /**
+   * Read complete or unknown operation-control state for one exact scope and
+   * hydrate the cache from a complete read. Cold hydration never revives a
+   * lease or replays an effect.
+   */
+  async readControl(input: OperationControlSelector): Promise<OperationControlReadback> {
+    const readback = await this.journal.readControl(input);
+    if (readback.state === 'complete') this.hydrate(readback.operations);
+    return readback;
+  }
+
+  /**
+   * Initialize durable task coverage at an actual new-task admission. A scope
+   * without this fact reads as unknown rather than known-empty.
+   */
+  async initializeCoverage(input: OperationCoverageInitialization): Promise<JournalCommitRef> {
+    if (typeof input.admissionCommitRef.commitId !== 'string'
+      || input.admissionCommitRef.commitId.trim().length === 0) {
+      throw new GatewayError('invalid-state', 'coverage initialization requires a real admission commit receipt');
+    }
+    return this.journal.initializeCoverage(input);
+  }
+
+  /**
+   * Bounded externally driven lifecycle register/update for the existing parent
+   * Provider controller. The Gateway commits the event and successor control
+   * state atomically, then publishes the cache. It never invokes an executor or
+   * model; the controller still owns the actual Provider start/settle call.
+   */
+  async applyExternalLifecycle(input: ExternalOperationLifecycle): Promise<OperationSnapshot> {
+    const { event, control } = input;
+    validateOperationEvent(event);
+    this.assertControlRecord(event, control);
+    const key = operationKey(control.intent.operationId);
+    const existing = this.operations.get(key);
+    if (existing) {
+      if (existing.fingerprintKey !== control.fingerprintKey) {
+        throw new GatewayError(
+          'idempotency-conflict',
+          `external lifecycle conflicts with existing operation ${control.intent.operationId.value}`,
+          { operationStatus: existing.status },
+        );
+      }
+      if (control.executionEpoch < existing.executionEpoch) {
+        throw new GatewayError(
+          'stale-epoch',
+          `external lifecycle execution epoch is stale for ${control.intent.operationId.value}`,
+          { operationStatus: existing.status },
+        );
+      }
+      if (isTerminalOperationStatus(existing.status) && control.status !== existing.status) {
+        throw new GatewayError(
+          'invalid-state',
+          `external lifecycle cannot change terminal operation ${control.intent.operationId.value}`,
+          { operationStatus: existing.status },
+        );
+      }
+    }
+    const record = this.fromControlRecord(control);
+    await this.commitControl(event, record);
+    this.operations.set(key, record);
+    this.idempotency.set(control.namespaceKey, {
+      namespaceKey: control.namespaceKey,
+      fingerprintKey: control.fingerprintKey,
+      operationId: key,
+    });
+    await this.publish(event);
+    return this.snapshot(record);
+  }
+
+  private assertControlBinding(
+    binding: OperationControlBinding,
+    intent: OperationIntent,
+    childAdmission?: OperationChildAdmission,
+  ): void {
+    if (typeof binding.agentRuntimeId !== 'string' || binding.agentRuntimeId.trim().length === 0) {
+      throw new GatewayError('invalid-state', 'operation control binding requires a non-empty agent runtime id');
+    }
+    if (!Number.isSafeInteger(binding.harnessExecutionEpoch) || binding.harnessExecutionEpoch < 1) {
+      throw new GatewayError(
+        'invalid-state',
+        'operation control binding requires a positive safe-integer harness execution epoch',
+      );
+    }
+    if (binding.parentOperationId.scope !== 'operation' || binding.parentOperationId.value.trim().length === 0) {
+      throw new GatewayError('invalid-state', 'operation control binding requires a real parent operation identity');
+    }
+    if (typeof binding.admissionCommitRef.commitId !== 'string'
+      || binding.admissionCommitRef.commitId.trim().length === 0
+      || !Number.isSafeInteger(binding.admissionCommitRef.journalSeq)) {
+      throw new GatewayError('invalid-state', 'operation control binding requires an admission commit receipt');
+    }
+    if (childAdmission === undefined) {
+      if (!scopeContains(binding.scope, intent.requestedScope)) {
+        throw new GatewayError('scope-denied', 'operation control binding scope does not cover the requested scope');
+      }
+      return;
+    }
+    // Explicit child path: the binding names the actual admitted parent and
+    // the child owns its own operation identity. The parent operation scope
+    // must never be widened to contain the child operation.
+    assertCommitRef(childAdmission.authorityCommitRef, 'child admission authority commit ref');
+    assertCommitRef(childAdmission.businessRegistrationCommitRef, 'child admission business registration commit ref');
+    assertCommitRef(childAdmission.coverageCommitRef, 'child admission coverage commit ref');
+    if (intent.requestedScope.operationId === undefined
+      || !sameScopedId(intent.requestedScope.operationId, intent.operationId)) {
+      throw new GatewayError('scope-denied', 'child intent must name its own operation in the requested scope');
+    }
+    if (sameScopedId(intent.operationId, binding.parentOperationId)) {
+      throw new GatewayError('scope-denied', 'child operation identity must differ from the parent operation identity');
+    }
+    if (binding.scope.organId === undefined
+      || binding.scope.taskId === undefined
+      || binding.scope.cycleId === undefined
+      || intent.requestedScope.organId === undefined
+      || intent.requestedScope.taskId === undefined
+      || intent.requestedScope.cycleId === undefined
+      || !sameScopedId(binding.scope.organId, intent.requestedScope.organId)
+      || !sameScopedId(binding.scope.taskId, intent.requestedScope.taskId)
+      || !sameScopedId(binding.scope.cycleId, intent.requestedScope.cycleId)) {
+      throw new GatewayError('scope-denied', 'child intent requires an organ, task and cycle scope');
+    }
+  }
+
+  /**
+   * Physical child-admission verification. The Journal physically joins the
+   * exact decoded registration, the parent control record and the coverage
+   * fact. A missing lookup, unknown join or non-permitting parent denies the
+   * child before any IO. The Gateway never trusts a caller-supplied receipt.
+   */
+  private async verifyChildAdmission(
+    binding: OperationControlBinding,
+    intent: OperationIntent,
+    childAdmission: OperationChildAdmission,
+  ): Promise<void> {
+    const lookup = this.journal.readChildAdmission;
+    if (lookup === undefined) {
+      throw new GatewayError(
+        'control-unknown',
+        'child admission requires a journal that can physically verify the child registration',
+      );
+    }
+    let readback;
+    try {
+      readback = await lookup.call(this.journal, { binding, intent, admission: childAdmission });
+    } catch (error) {
+      throw new GatewayError(
+        'control-unknown',
+        error instanceof Error ? error.message : 'child admission physical lookup failed',
+        { cause: error },
+      );
+    }
+    if (readback.state !== 'verified') {
+      throw new GatewayError(
+        'control-unknown',
+        `child admission is not physically verified: ${readback.reason}`,
+      );
+    }
+    if (!sameCommitRef(readback.registrationCommitRef, childAdmission.businessRegistrationCommitRef)
+      || !sameCommitRef(readback.coverageCommitRef, childAdmission.coverageCommitRef)) {
+      throw new GatewayError(
+        'control-unknown',
+        'child admission receipts do not match the durable business registration and coverage',
+      );
+    }
+    if (!isPermittingParentStatus(readback.parentControl.status)) {
+      throw new GatewayError(
+        'permission-denied',
+        `parent operation ${binding.parentOperationId.value} does not permit new child effects`,
+        { operationStatus: readback.parentControl.status },
+      );
+    }
+  }
+
+  private assertReplayIdentity(
+    operation: OperationRecord,
+    binding: OperationControlBinding,
+    childAdmission?: OperationChildAdmission,
+  ): void {
+    if (!sameControlBinding(operation.binding, binding)) {
+      throw new GatewayError(
+        'idempotency-conflict',
+        `operation ${operation.intent.operationId.value} is already bound to a different parent control binding`,
+        { operationStatus: operation.status },
+      );
+    }
+    if (!sameChildAdmission(operation.childAdmission, childAdmission)) {
+      throw new GatewayError(
+        'idempotency-conflict',
+        `operation ${operation.intent.operationId.value} is already bound to a different child admission provenance`,
+        { operationStatus: operation.status },
+      );
+    }
+  }
+
+  private assertControlRecord(event: OperationEvent, control: OperationControlRecord): void {
+    if (event.operationId.scope !== control.intent.operationId.scope
+      || event.operationId.value !== control.intent.operationId.value) {
+      throw new GatewayError('invalid-state', 'external control event operation does not match its control record');
+    }
+    if (event.taskId.scope !== control.intent.taskId.scope
+      || event.taskId.value !== control.intent.taskId.value) {
+      throw new GatewayError('invalid-state', 'external control event task does not match its control record');
+    }
+    if (event.status !== control.status) {
+      throw new GatewayError('invalid-state', 'external control event status does not match its control record');
+    }
+    if (event.executionEpoch !== control.executionEpoch) {
+      throw new GatewayError('invalid-state', 'external control event execution epoch does not match its control record');
+    }
+    this.assertControlBinding(control.binding, control.intent, control.childAdmission);
+  }
+
   private async acceptNew(
     intent: OperationIntent,
+    binding: OperationControlBinding,
     resolved: ResolvedToolRegistration,
     namespaceKey: string,
     fingerprintKey: string,
+    childAdmission?: OperationChildAdmission,
   ): Promise<OperationRecord> {
     const operationKeyValue = operationKey(intent.operationId);
     if (this.operations.has(operationKeyValue)) {
@@ -508,36 +879,42 @@ export class ToolExecutionGateway {
     validateRouteSelection(route, resolved.registration);
 
     const record: OperationRecord = {
+      binding,
+      childAdmission,
       intent,
       registration: resolved.registration,
       route,
+      namespaceKey,
+      fingerprintKey,
       status: 'accepted',
       executionEpoch: 1,
     };
-    await this.emit(
-      {
-        kind: 'operation.accepted',
-        operationId: intent.operationId,
-        taskId: intent.taskId,
-        executionEpoch: record.executionEpoch,
-        status: 'accepted',
-        evidenceRefs: [...grant.evidenceRefs, ...boundary.evidenceRefs],
-      },
-      () => {
-        this.operations.set(operationKeyValue, record);
-        this.idempotency.set(namespaceKey, {
-          namespaceKey,
-          fingerprintKey,
-          operationId: operationKeyValue,
-        });
-      },
-    );
+    // Commit the exact accepted control state first, then publish the cache and
+    // idempotency lookup. A failed commit must not expose a fabricated record.
+    const event = this.buildEvent({
+      kind: 'operation.accepted',
+      operationId: intent.operationId,
+      taskId: intent.taskId,
+      executionEpoch: record.executionEpoch,
+      status: 'accepted',
+      evidenceRefs: [...grant.evidenceRefs, ...boundary.evidenceRefs],
+    });
+    await this.commitControl(event, record);
+    this.operations.set(operationKeyValue, record);
+    this.idempotency.set(namespaceKey, {
+      namespaceKey,
+      fingerprintKey,
+      operationId: operationKeyValue,
+    });
+    await this.publish(event);
     return record;
   }
 
   private replayOrConflict(
     existing: { readonly namespaceKey: string; readonly fingerprintKey: string; readonly operationId: string },
     fingerprintKey: string,
+    binding: OperationControlBinding,
+    childAdmission?: OperationChildAdmission,
   ): OperationSubmissionResult {
     if (existing.fingerprintKey !== fingerprintKey) {
       const operation = this.operations.get(existing.operationId);
@@ -554,6 +931,7 @@ export class ToolExecutionGateway {
     if (!operation) {
       throw new GatewayError('invalid-state', 'idempotency record points to a missing operation');
     }
+    this.assertReplayIdentity(operation, binding, childAdmission);
     return { decision: 'replay', operation: this.snapshot(operation) };
   }
 
@@ -562,18 +940,37 @@ export class ToolExecutionGateway {
       intent: record.intent,
       registration: record.registration,
     });
-    if (!grant || grant.revoked || !scopeContains(grant.scope, record.route.effectiveScope)) {
+    const boundary = await this.taskBoundaries.readBoundary({
+      intent: record.intent,
+      registration: record.registration,
+    });
+    const grantDenied = !grant || grant.revoked || !scopeContains(grant.scope, record.route.effectiveScope);
+    const boundaryDenied = !boundary || !scopeContains(boundary.scope, record.route.effectiveScope);
+    if (grantDenied || boundaryDenied) {
+      const message = grantDenied
+        ? grant?.revoked
+          ? 'permission was revoked before lease'
+          : 'permission no longer covers effective scope'
+        : 'task resource boundary no longer covers effective scope';
+      const evidenceRefs = [
+        ...(grant?.evidenceRefs ?? []),
+        ...(boundary?.evidenceRefs ?? []),
+      ];
       const failure = this.failure(
         record,
         'admission',
         'permission',
-        grant?.revoked ? 'permission was revoked before lease' : 'permission no longer covers effective scope',
-        grant?.evidenceRefs ?? [],
-        { kind: 'recover', ref: 'grant-permission' },
+        message,
+        evidenceRefs,
+        { kind: 'recover', ref: grantDenied ? 'grant-permission' : 'bind-task-boundary' },
       );
-      await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, undefined, failure);
-      record.failure = failure;
-      record.result = this.failedResult(record, failure, 'permission-denied');
+      await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, {
+        failure,
+        mutate: (draft) => {
+          draft.failure = failure;
+          draft.result = this.failedResult(draft, failure, 'permission-denied');
+        },
+      });
       return undefined;
     }
 
@@ -586,12 +983,12 @@ export class ToolExecutionGateway {
       'leased',
       'operation.leased',
       [...grantEvidenceRefs, this.createEvidence('operation-leased', lease.effectiveScope)],
-      undefined,
-      undefined,
-      lease.executionEpoch,
-      () => {
-        record.lease = lease;
-        record.executionEpoch = lease.executionEpoch;
+      {
+        executionEpoch: lease.executionEpoch,
+        mutate: (draft) => {
+          draft.lease = lease;
+          draft.executionEpoch = lease.executionEpoch;
+        },
       },
     );
     await this.transition(record, 'running', 'operation.started', [this.createEvidence('operation-started', lease.effectiveScope)]);
@@ -631,14 +1028,11 @@ export class ToolExecutionGateway {
 
   private async applyHandOutcome(
     record: OperationRecord,
-    outcome: Awaited<ReturnType<HandRuntime['execute']>>,
+    _outcome: Awaited<ReturnType<HandRuntime['execute']>>,
   ): Promise<OperationSnapshot> {
-    record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
-    if (outcome.observation) record.observation = outcome.observation;
-    if (outcome.result) record.result = outcome.result;
-    if (outcome.failure) record.failure = outcome.failure;
-    if (outcome.blocked) record.blocked = outcome.blocked;
-    if (outcome.reconcile) record.reconcile = outcome.reconcile;
+    // The Hand terminal emit already committed the exact successor control
+    // state (including lease release and settlement). Nothing is applied here
+    // after the durable commit.
     return this.snapshot(record);
   }
 
@@ -655,30 +1049,61 @@ export class ToolExecutionGateway {
     to: OperationStatus,
     kind: OperationEvent['kind'],
     evidenceRefs: readonly EvidenceRef[],
-    result?: string,
-    failure?: OperationFailure,
-    executionEpoch = record.executionEpoch,
-    afterCommit?: () => void,
-    allowInvalidated = false,
+    options: {
+      readonly resultRef?: string;
+      readonly failure?: OperationFailure;
+      readonly executionEpoch?: number;
+      readonly allowInvalidated?: boolean;
+      readonly mutate?: (draft: OperationRecord) => void;
+    } = {},
   ): Promise<void> {
     assertTransitionOperationStatus(record.status, to);
-    await this.emit({
+    const event = this.buildEvent({
       kind,
       operationId: record.intent.operationId,
       taskId: record.intent.taskId,
-      executionEpoch,
+      executionEpoch: options.executionEpoch ?? record.executionEpoch,
       status: to,
       evidenceRefs,
-      ...(result ? { resultRef: result } : {}),
-      ...(failure ? { failure } : {}),
-    }, afterCommit, allowInvalidated);
+      ...(options.resultRef ? { resultRef: options.resultRef } : {}),
+      ...(options.failure ? { failure: options.failure } : {}),
+    });
+    const successor = cloneRecord(record);
+    successor.status = to;
+    if (options.executionEpoch !== undefined) successor.executionEpoch = options.executionEpoch;
+    if (options.failure) successor.failure = options.failure;
+    options.mutate?.(successor);
+    await this.commitSuccessor(event, record, successor, options.allowInvalidated === true);
   }
 
+  /**
+   * Hand terminal-outcome emit. The Hand emitter passes the exact settlement
+   * so the successor control state is committed atomically with its event.
+   */
   private async emit(
     input: Omit<OperationEvent, 'eventId' | 'schemaVersion' | 'occurredAt'>,
-    afterCommit?: () => void,
+    settlement?: HandEmitSettlement,
     allowInvalidated = false,
   ): Promise<void> {
+    const event = this.buildEvent(input);
+    const current = this.operations.get(operationKey(event.operationId));
+    if (!current) {
+      throw new GatewayError(
+        'invalid-state',
+        `cannot commit control for an unadmitted operation: ${event.operationId.value}`,
+        { operationStatus: event.status },
+      );
+    }
+    const successor = cloneRecord(current);
+    successor.status = event.status;
+    if (event.failure) successor.failure = event.failure;
+    if (settlement) this.applySettlement(successor, settlement);
+    await this.commitSuccessor(event, current, successor, allowInvalidated);
+  }
+
+  private buildEvent(
+    input: Omit<OperationEvent, 'eventId' | 'schemaVersion' | 'occurredAt'>,
+  ): OperationEvent {
     const event: OperationEvent = {
       eventId: `runtime-gateway-event-${randomUUID()}`,
       schemaVersion: 1,
@@ -686,21 +1111,40 @@ export class ToolExecutionGateway {
       ...input,
     };
     validateOperationEvent(event);
-    const current = this.operations.get(operationKey(event.operationId));
-    if (current?.executionInvalidated && !allowInvalidated) return;
-    const settlingCancellation = current?.status === 'cancel_requested'
-      && ['cancelled', 'reconcile_required', 'failed'].includes(event.status);
-    if (current && (current.status === 'cancel_requested' || current.status === 'cancelled')
-      && event.status !== current.status && !settlingCancellation) {
+    return event;
+  }
+
+  /**
+   * Commit the successor control state and only then publish it to the cache
+   * and notifications. Cancellation fencing and execution invalidation are
+   * enforced before the commit so a fenced late outcome is never durable.
+   */
+  private async commitSuccessor(
+    event: OperationEvent,
+    record: OperationRecord,
+    successor: OperationRecord,
+    allowInvalidated: boolean,
+  ): Promise<void> {
+    if (record.executionInvalidated && !allowInvalidated) return;
+    const settlingCancellation = record.status === 'cancel_requested'
+      && (event.status === 'cancelled' || event.status === 'reconcile_required' || event.status === 'failed');
+    if ((record.status === 'cancel_requested' || record.status === 'cancelled')
+      && event.status !== record.status && !settlingCancellation) {
       return;
     }
-    await this.journal.commit(event);
-    afterCommit?.();
-    const record = this.operations.get(operationKey(event.operationId));
-    if (record) {
-      record.status = event.status;
-      if (event.failure) record.failure = event.failure;
-    }
+    await this.commitControl(event, successor);
+    Object.assign(record, successor);
+    await this.publish(event);
+  }
+
+  private async commitControl(
+    event: OperationEvent,
+    successor: OperationRecord,
+  ): Promise<JournalCommitRef> {
+    return this.journal.commit(event, this.toControlRecord(successor));
+  }
+
+  private async publish(event: OperationEvent): Promise<void> {
     if (!this.journal.publishCommitted) return;
     try {
       await this.journal.publishCommitted(event);
@@ -709,6 +1153,74 @@ export class ToolExecutionGateway {
       if (!this.notificationFailures.has(key)) {
         this.notificationFailures.set(key, new OperationNotificationError(event, error));
       }
+    }
+  }
+
+  private applySettlement(successor: OperationRecord, settlement: HandEmitSettlement): void {
+    if (settlement.observation) successor.observation = settlement.observation;
+    if (settlement.result) successor.result = settlement.result;
+    if (settlement.failure) successor.failure = settlement.failure;
+    if (settlement.blocked) successor.blocked = settlement.blocked;
+    if (settlement.reconcile) successor.reconcile = settlement.reconcile;
+    if (successor.lease) successor.lease = { ...successor.lease, state: 'released' };
+  }
+
+  private toControlRecord(record: OperationRecord): OperationControlRecord {
+    return {
+      binding: record.binding,
+      ...(record.childAdmission ? { childAdmission: record.childAdmission } : {}),
+      intent: record.intent,
+      registration: record.registration,
+      route: record.route,
+      status: record.status,
+      executionEpoch: record.executionEpoch,
+      namespaceKey: record.namespaceKey,
+      fingerprintKey: record.fingerprintKey,
+      ...(record.lease ? { lease: record.lease } : {}),
+      ...(record.observation ? { observation: record.observation } : {}),
+      ...(record.result ? { result: record.result } : {}),
+      ...(record.failure ? { failure: record.failure } : {}),
+      ...(record.blocked ? { blocked: record.blocked } : {}),
+      ...(record.reconcile ? { reconcile: record.reconcile } : {}),
+      ...(record.executionInvalidated ? { executionInvalidated: true } : {}),
+    };
+  }
+
+  private fromControlRecord(control: OperationControlRecord): OperationRecord {
+    return {
+      binding: control.binding,
+      childAdmission: control.childAdmission,
+      intent: control.intent,
+      registration: control.registration,
+      route: control.route,
+      namespaceKey: control.namespaceKey,
+      fingerprintKey: control.fingerprintKey,
+      status: control.status,
+      executionEpoch: control.executionEpoch,
+      lease: control.lease,
+      observation: control.observation,
+      result: control.result,
+      failure: control.failure,
+      blocked: control.blocked,
+      reconcile: control.reconcile,
+      executionInvalidated: control.executionInvalidated,
+    };
+  }
+
+  /**
+   * Hydrate the in-memory cache from committed control records. It never
+   * revives a lease, replays an effect, or drops a blocked/reconcile
+   * obligation; it only replaces cache entries with the committed state.
+   */
+  private hydrate(records: readonly OperationControlRecord[]): void {
+    for (const control of records) {
+      const key = operationKey(control.intent.operationId);
+      this.operations.set(key, this.fromControlRecord(control));
+      this.idempotency.set(control.namespaceKey, {
+        namespaceKey: control.namespaceKey,
+        fingerprintKey: control.fingerprintKey,
+        operationId: key,
+      });
     }
   }
 

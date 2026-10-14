@@ -359,8 +359,22 @@ function bindingOf(records: readonly JournalRecord[], admittedTurnId: string): A
 }
 
 export interface JsonlActiveTurnJournalOptions {
-  readonly filePath: string;
+  readonly filePath?: string;
+  /** Actual shared Organ Journal object; preferred over a second path handle. */
+  readonly journal?: JsonlOrganJournal;
   readonly turnId: string;
+}
+
+/**
+ * Pure decoder over supplied, already-verified records for one admitted turn.
+ * It selects only its own payload kind, derives the binding from the committed
+ * record, and never locks, replays or awaits a producer.
+ */
+export function decodeActiveTurnRecords(
+  records: readonly JournalRecord[],
+  admittedTurnId: string,
+): readonly ActiveTurnJournalRecord[] {
+  return validateRecords(records, admittedTurnId, bindingOf(records, admittedTurnId));
 }
 
 /**
@@ -374,9 +388,15 @@ export class JsonlActiveTurnJournal implements ActiveTurnJournalPort {
   private readonly turnId: string;
 
   constructor(input: JsonlActiveTurnJournalOptions) {
-    if (!input.filePath.trim()) throw new JournalIntegrityError('active turn journal path is required');
     this.turnId = nonEmpty(input.turnId, 'active turn journal turnId');
-    this.journal = new JsonlOrganJournal(input.filePath);
+    if (input.journal !== undefined) {
+      this.journal = input.journal;
+    } else {
+      if (input.filePath === undefined || !input.filePath.trim()) {
+        throw new JournalIntegrityError('active turn journal requires a path or shared journal');
+      }
+      this.journal = new JsonlOrganJournal(input.filePath);
+    }
   }
 
   async append(input: ActiveTurnJournalAppendRequest): Promise<void> {
@@ -577,7 +597,9 @@ function assertPredecessorReceiptRef(records: readonly JournalRecord[], receiptR
 }
 
 export interface JsonlActiveTurnSegmentJournalOptions {
-  readonly filePath: string;
+  readonly filePath?: string;
+  /** Actual shared Organ Journal object; preferred over a second path handle. */
+  readonly journal?: JsonlOrganJournal;
   readonly businessTurnId: string;
   /**
    * Optional held-transaction check that the predecessor's recovery receipt
@@ -603,9 +625,15 @@ export class JsonlActiveTurnSegmentJournal {
   private readonly verifyPredecessorReceipt?: JsonlActiveTurnSegmentJournalOptions['verifyPredecessorReceipt'];
 
   constructor(input: JsonlActiveTurnSegmentJournalOptions) {
-    if (!input.filePath.trim()) throw new JournalIntegrityError('active turn segment journal path is required');
     this.businessTurnId = nonEmpty(input.businessTurnId, 'active turn segment journal businessTurnId');
-    this.journal = new JsonlOrganJournal(input.filePath);
+    if (input.journal !== undefined) {
+      this.journal = input.journal;
+    } else {
+      if (input.filePath === undefined || !input.filePath.trim()) {
+        throw new JournalIntegrityError('active turn segment journal requires a path or shared journal');
+      }
+      this.journal = new JsonlOrganJournal(input.filePath);
+    }
     this.verifyPredecessorReceipt = input.verifyPredecessorReceipt;
   }
 

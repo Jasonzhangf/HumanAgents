@@ -4,6 +4,9 @@ import {
   type OperationIntent,
 } from '../../../contracts/src/index.js';
 import type {
+  OperationControlBinding,
+  OperationControlReadback,
+  OperationControlSelector,
   OperationSnapshot,
   ResolveReconcileInput,
   ResumeOperationInput,
@@ -20,6 +23,11 @@ import type { ToolExecutionGateway } from '../gateway/gateway.js';
  */
 export interface HandOperationRequest {
   readonly intent: OperationIntent;
+  /**
+   * Parent Harness runtime admission binding. It is required control input, not
+   * metadata; the Gateway rejects a missing or fabricated binding.
+   */
+  readonly binding: OperationControlBinding;
   readonly signal?: AbortSignal;
 }
 
@@ -39,7 +47,7 @@ export class HandOperationRuntime {
   async execute(input: HandOperationRequest): Promise<HandOperationResult> {
     validateOperationIntent(input.intent);
     if (input.signal?.aborted) throw abortError();
-    const submission = await this.gateway.submit(input.intent);
+    const submission = await this.gateway.submit(input.intent, input.binding);
     if (!canStart(submission.operation.status)) {
       return { submission, operation: submission.operation };
     }
@@ -96,6 +104,11 @@ export class HandOperationRuntime {
 
   get(operationId: OperationId): OperationSnapshot {
     return this.gateway.get(operationId);
+  }
+
+  /** Transparent scoped operation-control read; the Gateway owns the semantics. */
+  readControl(input: OperationControlSelector): Promise<OperationControlReadback> {
+    return this.gateway.readControl(input);
   }
 
   requestCancel(operationId: OperationId): Promise<OperationSnapshot> {

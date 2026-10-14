@@ -1,14 +1,22 @@
-import type {
-  JournalCommitRef,
-  PublishedTaskPlanRevision,
-  ScopeRef,
-  TaskPlanRevisionPublicationInput,
+import {
+  assertSameScope,
+  canonicalJsonStringify,
+  id,
+  validateTaskIdentityRecord,
+  type JournalCommitRef,
+  type PublishedTaskPlanRevision,
+  type ScopeRef,
+  type TaskIdentityRecord,
+  type TaskPlanRevisionPublicationInput,
 } from '../../../contracts/src/index.js';
 import {
   JournalCommitConflictError,
   type JsonlTaskPlanRevisionJournal,
 } from '../../../adapters/jsonl/src/index.js';
-import { OrchestrationPortError } from './errors.js';
+import { validatePublishedTaskPlanRevision } from '../../../core/src/task-plan-revision.js';
+import { sameJournalCommitRef } from '../checkpoints/coordinator.js';
+import type { RuntimeTaskCurrentPlan } from '../ui-runtime/current-state.js';
+import { OrchestrationError, OrchestrationPortError } from './errors.js';
 
 /**
  * Publication input owned by the Runtime consumer. It is the K1 contract input without the
@@ -37,6 +45,48 @@ export interface TaskPlanRevisionConsumerPort {
 }
 
 const OWNER_ID = 'runtime.orchestration.task-plan-revisions';
+
+/** Exact selected publication and its physical receipt; reading does not accept a plan. */
+export interface CurrentTaskPlanResult {
+  readonly revision: PublishedTaskPlanRevision;
+  readonly currentPlan: RuntimeTaskCurrentPlan;
+}
+
+function currentPlanFailure(scope: ScopeRef, reason: string): OrchestrationError {
+  return new OrchestrationError(reason, {
+    ownerId: OWNER_ID,
+    reason: 'current-task-plan-binding',
+    nextAction: { kind: 'recover', ref: 'task-plan-revision.publication' },
+    evidenceRefs: [{ evidenceId: id('evidence', 'current-task-plan-source'), kind: 'operation',
+      source: OWNER_ID, locator: 'task-plan-revision.publication', scope }],
+  });
+}
+
+/** Resolve only Runtime's exact accepted reference. Missing selection never falls back to history. */
+export async function readCurrentTaskPlan(input: {
+  readonly plans: Pick<TaskPlanRevisionConsumerPort, 'get' | 'getCommitRef'>;
+  readonly identity: TaskIdentityRecord;
+  readonly currentPlan: RuntimeTaskCurrentPlan;
+}): Promise<CurrentTaskPlanResult> {
+  const { plans, identity, currentPlan } = input;
+  validateTaskIdentityRecord(identity);
+  const revision = await plans.get(identity.scope, currentPlan.revisionId);
+  const receipt = await plans.getCommitRef(identity.scope, currentPlan.revisionId);
+  if (!revision || !receipt || revision.revisionId !== currentPlan.revisionId
+    || revision.journalCommitRef !== `jsonl:${receipt.commitId}`) {
+    throw currentPlanFailure(identity.scope, 'task plan exact publication or physical receipt is missing or mismatched');
+  }
+  assertSameScope(revision.scope, identity.scope);
+  const { evidenceRefs: _evidence, ...source } = revision.source;
+  if (canonicalJsonStringify(source) !== canonicalJsonStringify(identity.source)) {
+    throw currentPlanFailure(identity.scope, 'task plan publication does not match confirmed Task identity source');
+  }
+  validatePublishedTaskPlanRevision(revision);
+  if (!sameJournalCommitRef(receipt, currentPlan.revisionCommitRef)) {
+    throw currentPlanFailure(identity.scope, 'selected current plan receipt differs from exact publication receipt');
+  }
+  return { revision, currentPlan: { revisionId: revision.revisionId, revisionCommitRef: receipt } };
+}
 
 function toPortError(error: unknown): OrchestrationPortError {
   if (error instanceof OrchestrationPortError) return error;

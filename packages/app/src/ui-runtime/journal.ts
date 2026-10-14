@@ -9,6 +9,12 @@ import type {
   CheckpointAppendRequest,
   CheckpointChainVerification,
   CheckpointJournalPort,
+  CheckpointListQuery,
+  CheckpointListResult,
+  CheckpointRecoveryBinding,
+  CommittedCheckpointRecord,
+  ExecutionPosition,
+  JournalCommitRef,
   LatestCheckpointRecord,
 } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
@@ -22,6 +28,7 @@ import type {
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
+import { createJsonlCheckpointJournal } from '../checkpoint-journal.js';
 import {
   toolExecutionFactIntegrityError,
   validatePersistedToolExecutionFact,
@@ -554,6 +561,27 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
       committed: true,
       recordDigest: receipt.recordDigest,
     };
+  }
+
+  // Exact reads use the authoritative JSONL checkpoint owner.
+  async readCommitted(scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null> {
+    return this.checkpointPort().readCommitted(scope, checkpointId);
+  }
+
+  async listCommitted(query: CheckpointListQuery): Promise<CheckpointListResult> {
+    return this.checkpointPort().listCommitted(query);
+  }
+
+  async readExecutionPosition(taskScope: ScopeRef): Promise<ExecutionPosition | null> {
+    return this.checkpointPort().readExecutionPosition(taskScope);
+  }
+
+  async readCheckpointRecoveryBinding(scope: ScopeRef, checkpointCommitRef: JournalCommitRef): Promise<CheckpointRecoveryBinding | null> {
+    return this.checkpointPort().readCheckpointRecoveryBinding(scope, checkpointCommitRef);
+  }
+
+  private checkpointPort(): CheckpointJournalPort {
+    return createJsonlCheckpointJournal({ filePath: this.filePath });
   }
 
   private journal(): JsonlOrganJournal {

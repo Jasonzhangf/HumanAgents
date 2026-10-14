@@ -12,6 +12,7 @@ export type GatewayErrorCode =
   | 'permission-denied'
   | 'scope-denied'
   | 'idempotency-conflict'
+  | 'control-unknown'
   | 'invalid-state'
   | 'stale-epoch'
   | 'notification-failed';

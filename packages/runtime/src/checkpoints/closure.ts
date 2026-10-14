@@ -6,6 +6,7 @@ import {
   validatePlannerAlignmentReference,
   validateTurnCloseSummary,
   validateTurnRecoveryReference,
+  validateJournalCommitRef,
   type AdmittedTurnIdentity,
   type Checkpoint,
   type CheckpointClosureRecord as CoreCheckpointClosureRecord,
@@ -25,6 +26,28 @@ import { checkpointCommitId, readCommittedContextHistory } from './coordinator.j
 import { CheckpointClosureError, CheckpointClosureSourceError, CheckpointSubmissionError } from './errors.js';
 
 export type CheckpointSubmissionSource = 'agent-tool' | 'harness-control' | 'recovery';
+
+export function sanitizeId(value: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^[^A-Za-z0-9]+/, '');
+  return cleaned || 'turn';
+}
+
+/** Existing durable turn record keys, shared by their writers and exact readers. */
+export function turnBoundaryRecordRefs(
+  identity: Pick<AdmittedTurnIdentity, 'turnId'>,
+  checkpointId: Checkpoint['id'],
+): {
+  readonly turnClosureRef: string;
+  readonly turnRecoveryRecordRef: string;
+  readonly alignmentRef: string;
+} {
+  const suffix = `${sanitizeId(identity.turnId)}:${checkpointId.value}`;
+  return {
+    turnClosureRef: `turn-closure:${suffix}`,
+    turnRecoveryRecordRef: `turn-recovery:${suffix}`,
+    alignmentRef: `turn-alignment:${suffix}`,
+  };
+}
 
 export interface CheckpointReentryDecision {
   readonly allowed: boolean;
@@ -140,7 +163,8 @@ export async function prepareCheckpointClosure(input: PrepareCheckpointClosureIn
     if (!sameScopedId(binding.scope.organId, selected.organId)
       || (selected.taskId && !sameScopedId(binding.scope.taskId, selected.taskId))
       || (selected.cycleId && !sameScopedId(binding.scope.cycleId, selected.cycleId))
-      || (selected.operationId && !sameScopedId(operation.intent.operationId, selected.operationId))
+      || (selected.operationId && (!sameScopedId(binding.scope.operationId, selected.operationId)
+        || !sameScopedId(binding.parentOperationId, selected.operationId)))
       || (input.operationSelector.agentRuntimeId !== undefined && binding.agentRuntimeId !== input.operationSelector.agentRuntimeId)
       || (input.operationSelector.harnessExecutionEpoch !== undefined && binding.harnessExecutionEpoch !== input.operationSelector.harnessExecutionEpoch)) {
       throw new CheckpointClosureError('operation control contains facts outside the closure selector');
@@ -261,6 +285,7 @@ export interface TurnClosureRecord {
   readonly recoveryStateRef: EvidenceRef;
   readonly summary: TurnCloseSummary;
   readonly closedAt: string;
+  readonly reviewCommitRefs?: readonly JournalCommitRef[];
 }
 
 /**
@@ -546,6 +571,30 @@ function assertTurnRecoveryPhase(value: unknown): asserts value is TurnRecoveryP
   }
 }
 
+/** Empty and absent lists both mean no attribution. Receipt order is part of the binding. */
+export function sameReviewCommitRefs(
+  left: readonly JournalCommitRef[] | undefined,
+  right: readonly JournalCommitRef[] | undefined,
+): boolean {
+  const a = left ?? [];
+  const b = right ?? [];
+  return a.length === b.length && a.every((ref, index) => {
+    const other = b[index]!;
+    return ref.commitId === other.commitId && ref.journalSeq === other.journalSeq && ref.recordDigest === other.recordDigest;
+  });
+}
+
+/** Copy and retain acceptance order; repeated acceptance of one exact receipt is idempotent. */
+export function distinctReviewCommitRefs(refs: readonly JournalCommitRef[] = []): readonly JournalCommitRef[] {
+  if (!Array.isArray(refs)) throw new CheckpointClosureError('review commit references must be an array');
+  const result: JournalCommitRef[] = [];
+  for (const ref of refs) {
+    validateJournalCommitRef(ref);
+    if (!result.some((existing) => sameReviewCommitRefs([existing], [ref]))) result.push({ ...ref });
+  }
+  return result;
+}
+
 /** Validate a durable turn-closure record by reusing the frozen Contracts validators. */
 export function assertTurnClosureRecord(record: TurnClosureRecord): void {
   try {
@@ -557,6 +606,10 @@ export function assertTurnClosureRecord(record: TurnClosureRecord): void {
     }
     nonEmpty(record.closureRef, 'turn closure commit reference');
     nonEmpty(record.closedAt, 'turn closure closedAt');
+    if (record.reviewCommitRefs !== undefined
+      && distinctReviewCommitRefs(record.reviewCommitRefs).length !== record.reviewCommitRefs.length) {
+      throw new CheckpointClosureError('turn closure review commit references must be distinct');
+    }
   } catch (error) {
     throw new CheckpointClosureError(error instanceof Error ? error.message : 'turn closure record is invalid');
   }

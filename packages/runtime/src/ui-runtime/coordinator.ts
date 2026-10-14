@@ -12,6 +12,7 @@ import {
   type CycleId,
   type DecisionTraceRecord,
   type EvidenceRef,
+  type JournalCommitRef,
   type LifecycleState,
   type NextAction,
   type OperationId,
@@ -34,6 +35,10 @@ import {
   validateProviderEvent,
 } from '../../../contracts/src/index.js';
 import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
+import type { CommittedCheckpointRecord } from '../checkpoints/ports.js';
+import type { AdvanceTurnResult } from '../agent-loop/runtime.js';
+import type { RuntimeTaskCurrentState, RuntimeTaskCurrentStateFacts, RuntimeTaskCurrentStateFactsPort,
+  RuntimeTaskCurrentStatePort, RuntimeTaskProcessingState, RuntimeTaskCurrentPlan } from './current-state.js';
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { InteractionClosureRecord } from '../checkpoints/closure.js';
@@ -207,6 +212,12 @@ export interface RuntimeTaskSnapshot {
 
 export interface RuntimeExecutionDriver extends AgentDriver {
   close(): Promise<ProviderCloseResult>;
+  /** Canonical turn owner; a transport or projection checkpoint cannot replace it. */
+  readonly standardTurn?: {
+    acceptReviews(refs: readonly JournalCommitRef[]): Promise<void>;
+    readCheckpoint(): Promise<CommittedCheckpointRecord>;
+    align(): Promise<AdvanceTurnResult>;
+  };
 }
 
 /**
@@ -484,6 +495,9 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => TaskCheckpointStore;
   readonly attentionPort: AttentionPort;
   readonly journal?: RuntimeTaskJournalPort;
+  readonly currentStatePort?: RuntimeTaskCurrentStatePort;
+  /** Actual AgentLoop and native-save facts; unknown never becomes an empty recovery. */
+  readonly currentStateFacts?: RuntimeTaskCurrentStateFactsPort;
   readonly hookRegistry?: AgentHookRegistry;
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
@@ -586,6 +600,7 @@ interface TaskRecord {
   updatedAt: string;
   operationId?: OperationId;
   executionEpoch?: number;
+  cycleId?: CycleId;
   /**
    * Confirmed `append`/`change` input revisions for this task. `appendTaskRevision`
    * is the single owner of the append-without-overwrite rule; this record only
@@ -626,6 +641,8 @@ interface TaskRecord {
   requestIdentity?: RuntimeTaskRequestIdentity;
   checkpoint?: Checkpoint;
   checkpointSeq: number;
+  currentStateCommitRef?: JournalCommitRef;
+  currentPlan?: RuntimeTaskCurrentPlan;
   error?: RuntimeTaskError;
   orchestrated: boolean;
   running: boolean;
@@ -676,6 +693,26 @@ function sameCheckpointBusinessScope(requested: ScopeRef, checkpoint: ScopeRef):
     && sameId(requested.taskId, checkpoint.taskId)
     && sameId(requested.cycleId, checkpoint.cycleId)
     && (!checkpoint.operationId || sameId(requested.operationId, checkpoint.operationId));
+}
+
+function nextActionForRuntimeState(state: LifecycleState): NextAction {
+  switch (state) {
+    case 'created':
+    case 'waiting':
+    case 'admitted':
+      return { kind: 'wait' };
+    case 'running':
+      return { kind: 'continue' };
+    case 'settling':
+      return { kind: 'stop' };
+    case 'blocked':
+    case 'failed':
+    case 'unknown':
+    case 'stale':
+      return { kind: 'recover' };
+    default:
+      return { kind: 'stop' };
+  }
 }
 
 function toNextActionText(next: NextAction | undefined): string | undefined {
@@ -1165,6 +1202,223 @@ export class RuntimeTaskCoordinator {
 
   taskSnapshot(taskId: TaskId): RuntimeTaskSnapshot {
     return this.snapshot(this.requireTask(taskId));
+  }
+
+  private taskScopeFor(record: TaskRecord): ScopeRef {
+    const scope = record.operationId ? this.scopes.get(record.operationId.value) : undefined;
+    if (scope) return { ...scope };
+    return {
+      organId: this.options.organId,
+      taskId: record.taskId,
+      ...(record.cycleId === undefined ? {} : { cycleId: record.cycleId }),
+    };
+  }
+
+  private currentTaskFor(
+    record: TaskRecord,
+    override?: { readonly title?: string; readonly directive?: string; readonly directiveRevision?: number },
+  ): Task {
+    return {
+      id: record.taskId,
+      organId: this.options.organId,
+      title: override?.title ?? record.title,
+      directive: override?.directive ?? record.directive,
+      directiveRevision: override?.directiveRevision ?? record.directiveRevision,
+      state: record.state,
+      memoryScope: 'task',
+    };
+  }
+
+  private currentProcessingFor(
+    record: TaskRecord,
+    facts?: RuntimeTaskCurrentStateFacts,
+  ): RuntimeTaskProcessingState {
+    const errorRef = record.error ? `${record.error.code}@${record.error.ownerId}` : undefined;
+    const firstErrorRef = facts?.turn.firstErrorRef ?? errorRef;
+    const laterErrorRefs = [...(facts?.turn.laterErrorRefs ?? [])];
+    if (errorRef !== undefined && errorRef !== firstErrorRef && !laterErrorRefs.includes(errorRef)) {
+      laterErrorRefs.push(errorRef);
+    }
+    return {
+      entryPhase: facts?.turn.phase ?? record.state,
+      nextAction: facts?.turn.nextAction ?? record.checkpoint?.next ?? nextActionForRuntimeState(record.state),
+      hardBlockers: record.state === 'blocked' && errorRef !== undefined ? [errorRef] : [],
+      recoveryResponsibilityRef: facts?.turn.recoveryResponsibilityRef
+        ?? record.error?.ownerId
+        ?? facts?.turn.ownerRef
+        ?? RUNTIME_OWNER,
+      ...(firstErrorRef === undefined ? {} : { firstErrorRef }),
+      laterErrorRefs,
+      stages: facts?.stages.state === 'known' ? facts.stages.stages : [],
+    };
+  }
+
+  private currentStateFor(
+    record: TaskRecord,
+    override?: { readonly title?: string; readonly directive?: string; readonly directiveRevision?: number },
+    facts?: RuntimeTaskCurrentStateFacts,
+  ): RuntimeTaskCurrentState {
+    return {
+      task: this.currentTaskFor(record, override),
+      processing: this.currentProcessingFor(record, facts),
+      // A bound turn recovery record is the actual retained-duty owner. A task
+      // with no execution turn has a known-empty set because no turn exists.
+      retainedDuties: facts === undefined
+        ? []
+        : facts.turn.unresolvedOperationRefs.map((operationRef) => ({
+            operationRef,
+            owner: facts.turn.ownerRef,
+          })),
+      // The transition is derived from the coordinator's own accepted control
+      // state, not from other Journal records. An empty list is the owner's
+      // actual known-empty source set and keeps the transition content stable
+      // across an exact retry.
+      sourceCommitRefs: [],
+      ...((facts?.currentPlan ?? record.currentPlan) === undefined ? {} : { currentPlan: facts?.currentPlan ?? record.currentPlan }),
+    };
+  }
+
+  /**
+   * Commit one accepted current-state transition through the owner port. A cold
+   * coordinator first recovers the exact committed predecessor from the same
+   * Organ Journal instead of assuming there is none. On failure the prior
+   * committed receipt stays on the record.
+   */
+  private async persistCurrentState(
+    record: TaskRecord,
+    transitionId: string,
+    taskScope: ScopeRef,
+    override?: { readonly title?: string; readonly directive?: string; readonly directiveRevision?: number },
+    facts?: RuntimeTaskCurrentStateFacts,
+  ): Promise<JournalCommitRef | undefined> {
+    const port = this.options.currentStatePort;
+    if (!port) return undefined;
+    try {
+      const ownerFacts = facts ?? await this.readCurrentStateFacts(record, taskScope);
+      let expected = record.currentStateCommitRef ?? null;
+      if (expected === null) {
+        const current = await port.read(taskScope);
+        if (current.state === 'known') {
+          record.currentStateCommitRef = current.stateCommitRef;
+          record.currentPlan = current.value.currentPlan;
+          expected = current.stateCommitRef;
+        }
+      }
+      const ref = await port.commit({
+        transitionId,
+        taskScope,
+        expectedStateCommitRef: expected,
+        state: this.currentStateFor(record, override, ownerFacts),
+      });
+      record.currentStateCommitRef = ref;
+      if (ownerFacts?.currentPlan) record.currentPlan = ownerFacts.currentPlan;
+      return ref;
+    } catch (error) {
+      const failure = errorFromUnknown(error);
+      record.error = record.error
+        ? { ...record.error, cleanupError: failure }
+        : failure;
+      throw error;
+    }
+  }
+
+  /**
+   * Publish a processing/error/recovery transition without failing the primary
+   * control flow. A failed append keeps the prior committed state, stays
+   * visible in the task error chain, and does not crash unrelated tasks.
+   */
+  private async tryPersistCurrentState(
+    record: TaskRecord,
+    transitionId: string,
+    taskScope?: ScopeRef,
+    override?: { readonly title?: string; readonly directive?: string; readonly directiveRevision?: number },
+    facts?: RuntimeTaskCurrentStateFacts,
+  ): Promise<RuntimeTaskError | undefined> {
+    if (!this.options.currentStatePort) return undefined;
+    try {
+      await this.persistCurrentState(
+        record,
+        transitionId,
+        taskScope ?? this.taskScopeFor(record),
+        override,
+        facts,
+      );
+      return undefined;
+    } catch (error) {
+      return errorFromUnknown(error);
+    }
+  }
+
+  private requiresCurrentStateFacts(record: TaskRecord): boolean {
+    return record.operationId !== undefined
+      && record.executionEpoch !== undefined
+      && record.state !== 'created'
+      && (record.state !== 'waiting' || record.driver !== undefined);
+  }
+
+  private async readCurrentStateFacts(
+    record: TaskRecord,
+    taskScope: ScopeRef,
+  ): Promise<RuntimeTaskCurrentStateFacts | undefined> {
+    if (!this.requiresCurrentStateFacts(record)) return undefined;
+    const source = this.options.currentStateFacts;
+    if (!source) {
+      throw new RuntimeTaskControlError(
+        'runtime.current-state.facts-source-unknown',
+        RUNTIME_OWNER,
+        'the actual Runtime turn/recovery/stage owner is not bound for this execution',
+        'bind the AgentLoop turn transition and native-save stage sources before releasing or acknowledging this transition',
+      );
+    }
+    const read = await source.read({
+      taskId: record.taskId,
+      scope: taskScope,
+      ...(record.executionEpoch === undefined ? {} : { executionEpoch: record.executionEpoch }),
+    });
+    if (read.state === 'unknown') {
+      throw new RuntimeTaskControlError(
+        'runtime.current-state.facts-unknown',
+        RUNTIME_OWNER,
+        read.reason,
+        'bind the actual Runtime turn/recovery/stage owner before releasing or acknowledging this transition',
+      );
+    }
+    if (read.value.stages.state === 'unknown') {
+      throw new RuntimeTaskControlError(
+        'runtime.current-state.stages-unknown',
+        RUNTIME_OWNER,
+        read.value.stages.reason,
+        'bind the actual native-save stage owner before releasing or acknowledging this transition',
+      );
+    }
+    return read.value;
+  }
+
+  /**
+   * Publish the actual logical-turn transition after the AgentLoop owner
+   * accepts it. OF3 supplies the `currentStateFacts` source that reads the
+   * retained AgentLoop runtime and native-save progress owner.
+   */
+  async publishCurrentTurnState(taskId: TaskId): Promise<JournalCommitRef | undefined> {
+    const record = this.requireTask(taskId);
+    const taskScope = this.taskScopeFor(record);
+    const facts = await this.readCurrentStateFacts(record, taskScope);
+    if (!facts) {
+      throw new RuntimeTaskControlError(
+        'runtime.current-state.turn-absent',
+        RUNTIME_OWNER,
+        'task has no execution-backed logical turn to publish',
+        'prepare and release an execution before publishing a turn transition',
+      );
+    }
+    const transitionRef = facts.turn.nextAction.ref ?? facts.turn.recoveryResponsibilityRef ?? '';
+    return this.persistCurrentState(
+      record,
+      `turn:${record.taskId.value}:${record.executionEpoch ?? 0}:${facts.turn.phase}:${facts.turn.nextAction.kind}:${transitionRef}`,
+      taskScope,
+      undefined,
+      facts,
+    );
   }
 
   /**
@@ -1800,6 +2054,11 @@ export class RuntimeTaskCoordinator {
     const replay = index === -1 ? operation.events : operation.events.slice(index + 1);
     const unsubscribe = this.listeners.add(operationId.value, listener);
     return { replay, unsubscribe };
+  }
+
+  /** Return the actual Task assembly pool for the independent closed-turn Planner. */
+  closedTurnPlannerPool(taskId: TaskId): AgentRuntimePoolManager {
+    return this.taskAssembly(taskId).runtimePool;
   }
 
   taskAssembly(taskId: TaskId): RuntimeTaskAssembly {

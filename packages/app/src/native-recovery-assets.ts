@@ -30,6 +30,7 @@ import {
 } from '../../adapters/jsonl/src/index.js';
 import { createJsonlActiveTurnSegmentJournal } from '../../adapters/jsonl/src/active-turn.js';
 import { JsonlOperationCompletionJournal } from '../../adapters/jsonl/src/operation-completion.js';
+import type { OperationCompletionJournalPort } from '../../runtime/src/gateway/operation-completion.js';
 import type {
   ActiveTurnSegmentCaptureExactRead,
   ActiveTurnSegmentJournalPort,
@@ -427,16 +428,19 @@ function decodeSegmentCapture(bytes: Uint8Array): ActiveTurnSegmentCaptureV2 {
 
 export function createNativeRecoveryAssets(input: {
   readonly journalPath: string;
+  readonly journal?: JsonlOrganJournal;
   readonly assetRoot: string;
   readonly completionJournalPath?: string;
+  readonly completionJournal?: OperationCompletionJournalPort;
 }): NativeRecoveryAssets {
   if (!input.journalPath.trim()) throw new RecoveryAssetsIntegrityError('recovery-assets journal path is required');
   if (!input.assetRoot.trim()) throw new RecoveryAssetsIntegrityError('recovery-assets asset root is required');
-  const journal = new JsonlOrganJournal(input.journalPath);
+  const journal = input.journal ?? new JsonlOrganJournal(input.journalPath);
   const assets = new ImmutableAssetStore(input.assetRoot);
-  const completionJournal = input.completionJournalPath?.trim()
-    ? new JsonlOperationCompletionJournal(input.completionJournalPath)
-    : undefined;
+  const completionJournal = input.completionJournal
+    ?? (input.completionJournalPath?.trim()
+      ? new JsonlOperationCompletionJournal({ filePath: input.completionJournalPath })
+      : undefined);
 
   async function writeInitialInput(initial: {
     readonly scope: ScopeRef;
@@ -647,6 +651,7 @@ export interface ActiveTurnSegmentJournalInput {
   readonly journalPath: string;
   readonly assetRoot: string;
   readonly completionJournalPath?: string;
+  readonly completionJournal?: OperationCompletionJournalPort;
   readonly businessTurnId: string;
 }
 
@@ -672,13 +677,17 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
   const native = createNativeRecoveryAssets({
     journalPath: input.journalPath,
     assetRoot: input.assetRoot,
-    ...(input.completionJournalPath === undefined ? {} : { completionJournalPath: input.completionJournalPath }),
+    ...(input.completionJournal === undefined
+      ? (input.completionJournalPath === undefined ? {} : { completionJournalPath: input.completionJournalPath })
+      : { completionJournal: input.completionJournal }),
   });
-  const completionJournal = input.completionJournalPath?.trim()
-    ? new JsonlOperationCompletionJournal(input.completionJournalPath)
-    : undefined;
+  const completionJournal = input.completionJournal
+    ?? (input.completionJournalPath?.trim()
+      ? new JsonlOperationCompletionJournal({ filePath: input.completionJournalPath })
+      : undefined);
   const segmentJournal = createJsonlActiveTurnSegmentJournal({
     filePath: input.journalPath,
+    journal,
     businessTurnId,
     verifyPredecessorReceipt: (records, predecessor) => {
       const record = records.find((candidate) => candidate.commitId === predecessor.recoveryAssetsReceiptRef);
