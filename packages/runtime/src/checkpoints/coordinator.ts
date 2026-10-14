@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   assertEvidenceRef,
   assertSameScope,
@@ -6,13 +7,28 @@ import {
   type CheckpointTimeAuthority,
   type CycleId,
   type EvidenceRef,
+  type JsonValue,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
 import { assertCheckpointRecoveryResponsibility } from '../../../core/src/checkpoint.js';
-import { CheckpointCompletionError, CheckpointRecallError } from './errors.js';
+import { validateContextHistoryRecord } from '../../../contracts/src/agent-loop.js';
+import type { ContextBuildInput } from '../context/index.js';
+import { CheckpointCompletionError, CheckpointRecallError, ContextHistoryError } from './errors.js';
 import type {
   CheckpointAppendReceipt,
+  CheckpointJournalReaderPort,
+  CheckpointListQuery,
+  CheckpointListResult,
   CheckpointJournalPort,
+  CheckpointRecoveryBinding,
+  CommittedCheckpointRecord,
+  ContextHistoryPort,
+  ContextHistoryReadQuery,
+  ContextHistoryReadResult,
+  ContextHistoryRecord,
+  ExecutionPosition,
+  ExecutionIncarnationRef,
+  JournalCommitRef,
   LatestCheckpointRecord,
   NativeCheckpointJournalPort,
 } from './ports.js';
@@ -49,15 +65,15 @@ export interface CompleteCheckpointInput {
   readonly windowLimits?: Partial<CheckpointWindowLimits>;
 }
 
-export type CompleteNativeCheckpointInput = Omit<CompleteCheckpointInput, 'windowLimits'> & {
-  readonly timeAuthority: CheckpointTimeAuthority;
-};
-
 export interface CompletedCheckpoint {
   readonly checkpoint: Checkpoint;
   readonly receipt: CheckpointAppendReceipt;
   readonly windows: CheckpointWindows;
 }
+
+export type CompleteNativeCheckpointInput = Omit<CompleteCheckpointInput, 'windowLimits'> & {
+  readonly timeAuthority: CheckpointTimeAuthority;
+};
 
 function sameId(left: { readonly scope: string; readonly value: string }, right: { readonly scope: string; readonly value: string }): boolean {
   return left.scope === right.scope && left.value === right.value;
@@ -220,6 +236,189 @@ export async function completeCheckpoint(
   }
 }
 
+/**
+ * Digest of the exact ordered durable context body. It protects the assembled content and
+ * is deliberately distinct from `ContextView.contextDigest`, which keeps its existing meaning.
+ */
+export function durableContextDigest(context: ContextBuildInput<JsonValue>): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify(context)).digest('hex')}`;
+}
+
+function sameScopedIdValue(
+  left: { readonly scope: string; readonly value: string } | undefined,
+  right: { readonly scope: string; readonly value: string } | undefined,
+): boolean {
+  return left?.scope === right?.scope && left?.value === right?.value;
+}
+
+/**
+ * Matches one publication identity against committed affected-binding fences.
+ * When the publication carries an agent runtime id, that id is part of the
+ * match. A checkpoint publication has no runtime id, so its exact scope and
+ * Harness epoch carry the bound identity instead of denying every numeric epoch.
+ */
+export function matchesExecutionIncarnationFence(
+  fences: readonly ExecutionIncarnationRef[],
+  candidate: ExecutionIncarnationRef,
+): boolean {
+  return fences.some((fence) => fence.executionEpoch === candidate.executionEpoch
+    && sameScopedIdValue(fence.scope.organId, candidate.scope.organId)
+    && sameScopedIdValue(fence.scope.taskId, candidate.scope.taskId)
+    && sameScopedIdValue(fence.scope.cycleId, candidate.scope.cycleId)
+    && sameScopedIdValue(fence.scope.operationId, candidate.scope.operationId)
+    && (candidate.agentRuntimeId === undefined || fence.agentRuntimeId === candidate.agentRuntimeId));
+}
+
+export function sameJournalCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean {
+  return left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest;
+}
+
+function assertJournalCommitRef(ref: JournalCommitRef, label: string): void {
+  if (!ref.commitId.trim()) throw new ContextHistoryError(`${label} commit id is required`);
+  if (!Number.isSafeInteger(ref.journalSeq) || ref.journalSeq < 1) {
+    throw new ContextHistoryError(`${label} journal seq must be a positive safe integer`);
+  }
+  if (!ref.recordDigest.trim()) throw new ContextHistoryError(`${label} record digest is required`);
+}
+
+export function assertContextHistoryRecord(record: ContextHistoryRecord): void {
+  // Canonical CT shape/binding validation is the single source of truth for the shared DTO.
+  try {
+    validateContextHistoryRecord(record);
+  } catch (error) {
+    throw new ContextHistoryError(error instanceof Error ? error.message : String(error));
+  }
+  // The exact ordered durable body digest is a Runtime-owned guarantee on top of the CT shape.
+  const digest = durableContextDigest(record.durableContext);
+  if (digest !== record.durableContextDigest) {
+    throw new ContextHistoryError('context history durable context digest does not match its body');
+  }
+}
+
+export interface ProduceContextHistoryInput {
+  readonly record: ContextHistoryRecord;
+  readonly expectedCurrentContextCommitRef: JournalCommitRef | null;
+}
+
+export interface ProducedContextHistory {
+  readonly record: ContextHistoryRecord;
+  readonly commitRef: JournalCommitRef;
+}
+
+/**
+ * Pending -> durable commit -> exact readback. The committed body is read back and compared
+ * to the prepared record before anything may install successor state. A commit or readback
+ * failure surfaces unchanged; an unknown commit is never treated as absent.
+ */
+export async function produceContextHistory(
+  port: ContextHistoryPort,
+  input: ProduceContextHistoryInput,
+): Promise<ProducedContextHistory> {
+  assertContextHistoryRecord(input.record);
+  const commitRef = await port.commit(input.record, input.expectedCurrentContextCommitRef);
+  assertJournalCommitRef(commitRef, 'context history commit');
+  const readback = await port.readContextCommit(input.record.scope, commitRef);
+  if (
+    readback.kind !== 'context-history'
+    || readback.agentRuntimeId !== input.record.agentRuntimeId
+    || readback.contextView.contextViewRef !== input.record.contextView.contextViewRef
+    || readback.durableContextDigest !== input.record.durableContextDigest
+  ) {
+    throw new ContextHistoryError('context history readback does not match the committed identity');
+  }
+  if (durableContextDigest(readback.durableContext) !== readback.durableContextDigest) {
+    throw new ContextHistoryError('context history readback body is corrupt');
+  }
+  return { record: readback, commitRef };
+}
+
+export async function readCommittedContextHistory(
+  port: ContextHistoryPort,
+  scope: ScopeRef,
+  commitRef: JournalCommitRef,
+): Promise<ContextHistoryRecord> {
+  assertJournalCommitRef(commitRef, 'context history');
+  const record = await port.readContextCommit(scope, commitRef);
+  assertContextHistoryRecord(record);
+  return record;
+}
+
+export async function readContextHistory(
+  port: ContextHistoryPort,
+  query: ContextHistoryReadQuery,
+): Promise<ContextHistoryReadResult> {
+  return port.readContextHistory(query);
+}
+
+function assertCheckpointInQuery(entry: CommittedCheckpointRecord, query: CheckpointListQuery): void {
+  const scope = entry.checkpoint.scope;
+  if (!sameScopedIdValue(scope.organId, query.scope.organId)) {
+    throw new ContextHistoryError('committed checkpoint is outside the query organ');
+  }
+  if (query.scope.taskId && !sameScopedIdValue(scope.taskId, query.scope.taskId)) {
+    throw new ContextHistoryError('committed checkpoint is outside the query task');
+  }
+  if (query.scope.cycleId && !sameScopedIdValue(scope.cycleId, query.scope.cycleId)) {
+    throw new ContextHistoryError('committed checkpoint is outside the query cycle');
+  }
+  if (query.scope.operationId && !sameScopedIdValue(scope.operationId, query.scope.operationId)) {
+    throw new ContextHistoryError('committed checkpoint is outside the query operation');
+  }
+  if (query.cycleId && !sameScopedIdValue(scope.cycleId, query.cycleId)) {
+    throw new ContextHistoryError('committed checkpoint does not match the cycle filter');
+  }
+  if (query.directiveRevision !== undefined && entry.checkpoint.directiveRevision !== query.directiveRevision) {
+    throw new ContextHistoryError('committed checkpoint does not match the directive revision filter');
+  }
+  if (query.executionEpoch !== undefined && entry.checkpoint.executionEpoch !== query.executionEpoch) {
+    throw new ContextHistoryError('committed checkpoint does not match the execution epoch filter');
+  }
+}
+
+/**
+ * Enumerate committed checkpoints. Every filter is an independent AND predicate; a port that
+ * returns an entry which violates any filter is rejected instead of silently widening the query.
+ * The `occurrenceRef` filter is an explicit unavailable external dependency and must fail.
+ */
+export async function enumerateCheckpointHistory(
+  journal: CheckpointJournalReaderPort,
+  query: CheckpointListQuery,
+): Promise<CheckpointListResult> {
+  if (query.occurrenceRef !== undefined) {
+    throw new ContextHistoryError('occurrence checkpoint filter is unavailable: no occurrence binding producer');
+  }
+  if (!Number.isSafeInteger(query.limit) || query.limit < 1) {
+    throw new ContextHistoryError('checkpoint list limit must be a positive safe integer');
+  }
+  const result = await journal.listCommitted(query);
+  for (const entry of result.checkpoints) assertCheckpointInQuery(entry, query);
+  return result;
+}
+
+export async function readCommittedCheckpoint(
+  journal: CheckpointJournalReaderPort,
+  scope: ScopeRef,
+  checkpointId: Checkpoint['id'],
+): Promise<CommittedCheckpointRecord | null> {
+  return journal.readCommitted(scope, checkpointId);
+}
+
+export async function readExecutionPosition(
+  journal: CheckpointJournalReaderPort,
+  taskScope: ScopeRef,
+): Promise<ExecutionPosition | null> {
+  return journal.readExecutionPosition(taskScope);
+}
+
+export async function readCheckpointRecoveryBinding(
+  journal: CheckpointJournalReaderPort,
+  scope: ScopeRef,
+  checkpointCommitRef: JournalCommitRef,
+): Promise<CheckpointRecoveryBinding | null> {
+  return journal.readCheckpointRecoveryBinding(scope, checkpointCommitRef);
+}
 export async function completeNativeCheckpoint(
   journal: NativeCheckpointJournalPort,
   input: CompleteNativeCheckpointInput,

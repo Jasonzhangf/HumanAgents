@@ -15,9 +15,12 @@ import {
   type ActiveTurnProviderRequestIdentityRef,
   type ChildCallBinding,
   type ChildInvocationRecord,
+  type CompletionReadInput,
   type CompletionRef,
+  type ProviderProducerDrainResult,
   type RawAsset,
   type RawFactEnvelope,
+  type RecoveryHoldFacts,
   type RuntimeRequestRecord,
   type ScopeRef,
   type TurnCaptureCut,
@@ -31,7 +34,23 @@ import {
   type ActiveTurnJournalPort,
   type ActiveTurnJournalRecord,
 } from './active-turn-journal.js';
+import {
+  activeTurnSegmentCommitId,
+  validateActiveTurnSegmentCaptureV2,
+  validatePreparedActiveTurnSegmentCaptureV2,
+  validateResumedTurnSegmentOpened,
+  type ActiveTurnSegmentBinding,
+  type ActiveTurnSegmentCaptureV2,
+  type PreparedActiveTurnSegmentCaptureV2,
+  type ResumedTurnSegmentOpened,
+} from '../../../contracts/src/active-turn-segments.js';
+import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import { ActiveTurnProducerBarrier } from './active-turn-capture.js';
+import type {
+  ActiveTurnLivePrefix,
+  ActiveTurnProductionObligationRef,
+  ActiveTurnSegmentLivePrefix,
+} from './active-turn-live-prefix.js';
 
 export class RuntimeActiveTurnError extends Error {
   constructor(readonly code: string, message: string) {
@@ -65,6 +84,270 @@ function sameProviderRequest(
   return left.turnId === right.turnId
     && left.requestId === right.requestId
     && left.parentRequestId === right.parentRequestId;
+}
+
+type RecordChildReturnInput = {
+  readonly invocationId: string;
+  readonly refinedDelivery: RawAsset;
+} & (
+  | {
+      readonly kind: 'execution';
+      readonly assignment: WorkAssignment;
+      readonly result: WorkResult;
+    }
+  | {
+      readonly kind: 'review';
+      readonly assignment: ReviewAssignment;
+      readonly result: ReviewResult;
+    }
+);
+
+/**
+ * Shared durable-record state for one execution epoch. The v1 active turn and
+ * the v2 resumed segment differ only in their binding view and commit identity
+ * function, so the mutation, acceptance, ordering and adoption rules live here
+ * once.
+ */
+interface ActiveTurnRecordState {
+  readonly records: ActiveTurnJournalRecord[];
+  readonly execution: ActiveTurnProviderExecutionIdentityRef;
+  readonly scope: ScopeRef;
+  readonly commitId: (discriminator: string) => string;
+  readonly append: (commitId: string, record: ActiveTurnJournalRecord) => Promise<void>;
+}
+
+function projectEntries(
+  records: readonly ActiveTurnJournalRecord[],
+): readonly (AcceptedRawFact | AcceptedChildDelivery)[] {
+  return records
+    .filter((record): record is Extract<ActiveTurnJournalRecord, { kind: 'accepted-fact' | 'child-delivery' }> => (
+      record.kind === 'accepted-fact' || record.kind === 'child-delivery'
+    ))
+    .map((record) => (record.kind === 'accepted-fact' ? record.entry : record.entry))
+    .sort((left, right) => left.seq - right.seq);
+}
+
+function projectRequests(records: readonly ActiveTurnJournalRecord[]): readonly RuntimeRequestRecord[] {
+  return records
+    .filter((record): record is Extract<ActiveTurnJournalRecord, { kind: 'request' }> => record.kind === 'request')
+    .map((record) => record.record);
+}
+
+function projectChildInvocations(records: readonly ActiveTurnJournalRecord[]): readonly ChildInvocationRecord[] {
+  const byId = new Map<string, ChildInvocationRecord>();
+  for (const record of records) {
+    if (record.kind === 'child-invocation') byId.set(record.record.invocationId, record.record);
+  }
+  return [...byId.values()];
+}
+
+function nextEntrySeq(records: readonly ActiveTurnJournalRecord[]): number {
+  const entries = projectEntries(records);
+  return entries.length === 0 ? 1 : entries[entries.length - 1]!.seq + 1;
+}
+
+async function registerRequestRecord(
+  state: ActiveTurnRecordState,
+  record: RuntimeRequestRecord,
+): Promise<RuntimeRequestRecord> {
+  assertSameScope(record.scope, state.scope);
+  if (record.parentRequestId !== record.request.parentRequestId) {
+    fail('active-turn.request.parent-mismatch', 'request parent must match its identity');
+  }
+  const requests = projectRequests(state.records);
+  const sameId = requests.find((candidate) => candidate.request.requestId === record.request.requestId);
+  if (sameId && !sameProviderRequest(sameId.request, record.request)) {
+    fail('active-turn.request.identity-conflict', 'request identity cannot change within a turn');
+  }
+  if (record.request.parentRequestId !== undefined && !requests.some((candidate) => (
+    candidate.request.requestId === record.request.parentRequestId
+    && candidate.request.turnId === record.request.turnId
+  ))) {
+    fail('active-turn.request.unknown-parent', 'continuation parent must be durably registered');
+  }
+  if (!sameId && record.phase !== 'dispatching') {
+    fail('active-turn.request.unregistered', 'request must register dispatching before later phases');
+  }
+  const existing = requests.find((candidate) => sameProviderRequest(candidate.request, record.request) && candidate.phase === record.phase);
+  if (existing) return existing;
+  await state.append(state.commitId(`request:${record.request.requestId}:${record.phase}`), { kind: 'request', record });
+  return record;
+}
+
+async function acceptRawFactRecord(
+  state: ActiveTurnRecordState,
+  envelope: RawFactEnvelope,
+): Promise<AcceptedRawFact> {
+  validateRawFactEnvelope(envelope);
+  if (!sameProviderExecution(envelope.execution, state.execution)) {
+    fail('active-turn.accept.execution-mismatch', 'raw fact execution does not match the open active turn binding');
+  }
+  assertSameScope(envelope.scope, state.scope);
+
+  const duplicate = projectEntries(state.records).find((entry): entry is AcceptedRawFact => (
+    'envelope' in entry
+    && sameProviderRequest(entry.envelope.request, envelope.request)
+    && entry.envelope.producerSeq === envelope.producerSeq
+  ));
+  if (duplicate) {
+    if (JSON.stringify(duplicate.envelope.fact) !== JSON.stringify(envelope.fact)) {
+      fail('active-turn.accept.conflict', 'the same request producer sequence was accepted with different content');
+    }
+    return duplicate;
+  }
+
+  if (!projectRequests(state.records).some((record) => sameProviderRequest(record.request, envelope.request))) {
+    fail('active-turn.accept.unregistered-request', 'raw fact must follow durable request registration');
+  }
+  const seq = nextEntrySeq(state.records);
+  const entry: AcceptedRawFact = { seq, envelope };
+  validateAcceptedRawFact(entry);
+  await state.append(state.commitId(`fact:${envelope.request.requestId}:${envelope.producerSeq}`), {
+    kind: 'accepted-fact',
+    entry,
+  });
+  return entry;
+}
+
+async function openChildInvocationRecord(
+  state: ActiveTurnRecordState,
+  input: {
+    readonly invocationId: string;
+    readonly childTurnId: string;
+    readonly checkpointReceiptRef: string;
+    readonly binding: ChildCallBinding;
+  },
+): Promise<ChildInvocationRecord> {
+  if (!input.invocationId.trim() || !input.childTurnId.trim() || !input.checkpointReceiptRef.trim()) {
+    fail('active-turn.invocation.incomplete', 'child invocation requires an id, child turn id and checkpoint receipt reference');
+  }
+  const existing = projectChildInvocations(state.records).find((record) => record.invocationId === input.invocationId);
+  if (existing) {
+    if (JSON.stringify(existing.binding) !== JSON.stringify(input.binding)) {
+      fail('active-turn.invocation.conflict', `child invocation ${input.invocationId} is already bound to a different assignment`);
+    }
+    return existing;
+  }
+  const record: ChildInvocationRecord = {
+    invocationId: input.invocationId,
+    childTurnId: input.childTurnId,
+    checkpointReceiptRef: input.checkpointReceiptRef,
+    binding: input.binding,
+  };
+  await state.append(state.commitId(`invocation:${input.invocationId}`), { kind: 'child-invocation', record });
+  return record;
+}
+
+async function recordChildReturnRecord(
+  state: ActiveTurnRecordState,
+  input: RecordChildReturnInput,
+): Promise<AcceptedChildDelivery> {
+  const invocation = projectChildInvocations(state.records).find((record) => record.invocationId === input.invocationId);
+  if (!invocation) fail('active-turn.invocation.unknown', `child delivery references unknown invocation ${input.invocationId}`);
+  if (input.kind === 'execution') {
+    if (invocation.binding.kind !== 'execution') {
+      fail('active-turn.child.kind-mismatch', 'execution delivery cannot bind to a review invocation');
+    }
+    if (input.assignment.assignmentId !== invocation.binding.assignment.assignmentId
+      || input.assignment.taskId.value !== invocation.binding.assignment.taskId.value
+      || input.assignment.pipelineNodeId !== invocation.binding.assignment.pipelineNodeId
+      || input.assignment.attempt !== invocation.binding.assignment.attempt
+      || input.assignment.inputRevision !== invocation.binding.assignment.inputRevision) {
+      fail('active-turn.child.assignment-mismatch', 'child result assignment does not match its invocation binding');
+    }
+    if (input.assignment.executionEpoch !== state.execution.executionEpoch
+      || input.result.executionEpoch !== state.execution.executionEpoch) {
+      fail('active-turn.child.epoch-mismatch', 'child result execution epoch does not match the active turn');
+    }
+    try {
+      validateWorkResult(input.result, input.assignment);
+    } catch (error) {
+      fail('active-turn.child.result-mismatch', error instanceof Error ? error.message : 'child result does not match its assignment');
+    }
+  } else {
+    if (invocation.binding.kind !== 'review') {
+      fail('active-turn.child.kind-mismatch', 'review delivery cannot bind to an execution invocation');
+    }
+    if (input.assignment.executionEpoch !== state.execution.executionEpoch
+      || input.result.executionEpoch !== state.execution.executionEpoch) {
+      fail('active-turn.child.epoch-mismatch', 'review result execution epoch does not match the active turn');
+    }
+    try {
+      assertReviewAssignmentsMatch(invocation.binding.assignment, input.assignment);
+      assertReviewResultMatchesAssignment(input.assignment, input.result);
+    } catch (error) {
+      fail('active-turn.child.review-mismatch', error instanceof Error ? error.message : 'review result does not match its invocation binding');
+    }
+  }
+  const seq = nextEntrySeq(state.records);
+  let entry: AcceptedChildDelivery;
+  if (input.kind === 'execution') {
+    entry = {
+      kind: 'execution',
+      seq,
+      invocationId: input.invocationId,
+      refinedDelivery: input.refinedDelivery,
+      assignment: input.assignment,
+      result: input.result,
+    };
+  } else {
+    entry = {
+      kind: 'review',
+      seq,
+      invocationId: input.invocationId,
+      refinedDelivery: input.refinedDelivery,
+      assignment: input.assignment,
+      result: input.result,
+    };
+  }
+  validateAcceptedChildDelivery(entry);
+  await state.append(state.commitId(`delivery:${input.invocationId}`), { kind: 'child-delivery', entry });
+  return entry;
+}
+
+async function recordChildAdoptionRecord(
+  state: ActiveTurnRecordState,
+  invocationId: string,
+  delivery: AcceptedChildDelivery,
+): Promise<void> {
+  const invocation = projectChildInvocations(state.records).find((record) => record.invocationId === invocationId);
+  if (!invocation) fail('active-turn.invocation.unknown', `adoption references unknown invocation ${invocationId}`);
+  const stored = projectEntries(state.records).find((entry): entry is AcceptedChildDelivery => (
+    !('envelope' in entry) && entry.invocationId === invocationId && entry.seq === delivery.seq
+  ));
+  if (!stored) fail('active-turn.adoption.unreturned', 'cannot adopt a child delivery that was not durably returned');
+  if (stored.kind !== invocation.binding.kind) {
+    fail('active-turn.adoption.kind-mismatch', 'adopted delivery kind does not match its invocation binding');
+  }
+  const record: ChildInvocationRecord = { ...invocation, adoptedResultSeq: delivery.seq };
+  await state.append(state.commitId(`adopted:${invocationId}`), { kind: 'child-invocation', record });
+}
+
+async function recordReviewCheckpointRecord(
+  state: ActiveTurnRecordState,
+  invocationId: string,
+  checkpointReceiptRef: string,
+): Promise<void> {
+  if (!checkpointReceiptRef.trim()) {
+    fail('active-turn.review-checkpoint.incomplete', 'review result checkpoint reference is required');
+  }
+  const invocation = projectChildInvocations(state.records).find((record) => record.invocationId === invocationId);
+  if (!invocation) fail('active-turn.invocation.unknown', `review checkpoint references unknown invocation ${invocationId}`);
+  if (invocation.binding.kind !== 'review') {
+    fail('active-turn.review-checkpoint.kind-mismatch', 'post-review checkpoint requires a review invocation');
+  }
+  if (invocation.adoptedResultSeq === undefined) {
+    fail('active-turn.review-checkpoint.unadopted', 'cannot checkpoint a review result before parent adoption');
+  }
+  if (invocation.postReviewCheckpointRef === checkpointReceiptRef) return;
+  if (invocation.checkpointReceiptRef === checkpointReceiptRef) {
+    fail('active-turn.review-checkpoint.pre-call', 'post-review checkpoint must differ from the pre-call checkpoint');
+  }
+  if (invocation.postReviewCheckpointRef !== undefined) {
+    fail('active-turn.review-checkpoint.conflict', `review invocation ${invocationId} already has a review-result checkpoint`);
+  }
+  const record: ChildInvocationRecord = { ...invocation, postReviewCheckpointRef: checkpointReceiptRef };
+  await state.append(state.commitId(`review-checkpoint:${invocationId}`), { kind: 'child-invocation', record });
 }
 
 /**
@@ -201,35 +484,7 @@ export class ActiveTurnContext {
   }
 
   private async registerRequestRecord(record: RuntimeRequestRecord): Promise<RuntimeRequestRecord> {
-    assertSameScope(record.scope, this.binding.scope);
-    if (record.parentRequestId !== record.request.parentRequestId) {
-      fail('active-turn.request.parent-mismatch', 'request parent must match its identity');
-    }
-    const requests = this.requests();
-    const sameId = requests.find((candidate) => candidate.request.requestId === record.request.requestId);
-    if (sameId && !sameProviderRequest(sameId.request, record.request)) {
-      fail('active-turn.request.identity-conflict', 'request identity cannot change within a turn');
-    }
-    if (record.request.parentRequestId !== undefined && !requests.some((candidate) => (
-      candidate.request.requestId === record.request.parentRequestId
-      && candidate.request.turnId === record.request.turnId
-    ))) {
-      fail('active-turn.request.unknown-parent', 'continuation parent must be durably registered');
-    }
-    if (!sameId && record.phase !== 'dispatching') {
-      fail('active-turn.request.unregistered', 'request must register dispatching before later phases');
-    }
-    const existing = requests.find((candidate) => sameProviderRequest(candidate.request, record.request) && candidate.phase === record.phase);
-    const commitId = activeTurnCommitId(
-      this.binding.admittedTurn.turnId,
-      `request:${record.request.requestId}:${record.phase}`,
-    );
-    if (existing) {
-      return structuredClone(existing);
-    }
-    await this.journal.append({ commitId, record: { kind: 'request', record } });
-    this.records.push({ kind: 'request', record });
-    return structuredClone(record);
+    return registerRequestRecord(this.state(), record);
   }
 
   /**
@@ -243,37 +498,7 @@ export class ActiveTurnContext {
   }
 
   private async acceptRawFactRecord(envelope: RawFactEnvelope): Promise<AcceptedRawFact> {
-    validateRawFactEnvelope(envelope);
-    if (!sameProviderExecution(envelope.execution, this.binding.execution)) {
-      fail('active-turn.accept.execution-mismatch', 'raw fact execution does not match the open active turn binding');
-    }
-    assertSameScope(envelope.scope, this.binding.scope);
-
-    const duplicate = this.entries().find((entry): entry is AcceptedRawFact => (
-      'envelope' in entry
-      && sameProviderRequest(entry.envelope.request, envelope.request)
-      && entry.envelope.producerSeq === envelope.producerSeq
-    ));
-    if (duplicate) {
-      if (JSON.stringify(duplicate.envelope.fact) !== JSON.stringify(envelope.fact)) {
-        fail('active-turn.accept.conflict', 'the same request producer sequence was accepted with different content');
-      }
-      return structuredClone(duplicate);
-    }
-
-    if (!this.requests().some((record) => sameProviderRequest(record.request, envelope.request))) {
-      fail('active-turn.accept.unregistered-request', 'raw fact must follow durable request registration');
-    }
-    const seq = this.nextSeq();
-    const entry: AcceptedRawFact = { seq, envelope };
-    validateAcceptedRawFact(entry);
-    const commitId = activeTurnCommitId(
-      this.binding.admittedTurn.turnId,
-      `fact:${envelope.request.requestId}:${envelope.producerSeq}`,
-    );
-    await this.journal.append({ commitId, record: { kind: 'accepted-fact', entry } });
-    this.records.push({ kind: 'accepted-fact', entry });
-    return structuredClone(entry);
+    return acceptRawFactRecord(this.state(), envelope);
   }
 
   /**
@@ -297,26 +522,7 @@ export class ActiveTurnContext {
     readonly checkpointReceiptRef: string;
     readonly binding: ChildCallBinding;
   }): Promise<ChildInvocationRecord> {
-    if (!input.invocationId.trim() || !input.childTurnId.trim() || !input.checkpointReceiptRef.trim()) {
-      fail('active-turn.invocation.incomplete', 'child invocation requires an id, child turn id and checkpoint receipt reference');
-    }
-    const existing = this.childInvocations().find((record) => record.invocationId === input.invocationId);
-    if (existing) {
-      if (JSON.stringify(existing.binding) !== JSON.stringify(input.binding)) {
-        fail('active-turn.invocation.conflict', `child invocation ${input.invocationId} is already bound to a different assignment`);
-      }
-      return existing;
-    }
-    const record: ChildInvocationRecord = {
-      invocationId: input.invocationId,
-      childTurnId: input.childTurnId,
-      checkpointReceiptRef: input.checkpointReceiptRef,
-      binding: input.binding,
-    };
-    const commitId = activeTurnCommitId(this.binding.admittedTurn.turnId, `invocation:${input.invocationId}`);
-    await this.journal.append({ commitId, record: { kind: 'child-invocation', record } });
-    this.records.push({ kind: 'child-invocation', record });
-    return record;
+    return openChildInvocationRecord(this.state(), input);
   }
 
   /**
@@ -344,73 +550,8 @@ export class ActiveTurnContext {
     return this.mutate(() => this.recordChildReturnRecord(owned));
   }
 
-  private async recordChildReturnRecord(input: Parameters<ActiveTurnContext['recordChildReturn']>[0]): Promise<AcceptedChildDelivery> {
-    const invocation = this.childInvocations().find((record) => record.invocationId === input.invocationId);
-    if (!invocation) fail('active-turn.invocation.unknown', `child delivery references unknown invocation ${input.invocationId}`);
-    if (input.kind === 'execution') {
-      if (invocation.binding.kind !== 'execution') {
-        fail('active-turn.child.kind-mismatch', 'execution delivery cannot bind to a review invocation');
-      }
-      if (input.assignment.assignmentId !== invocation.binding.assignment.assignmentId
-        || input.assignment.taskId.value !== invocation.binding.assignment.taskId.value
-        || input.assignment.pipelineNodeId !== invocation.binding.assignment.pipelineNodeId
-        || input.assignment.attempt !== invocation.binding.assignment.attempt
-        || input.assignment.inputRevision !== invocation.binding.assignment.inputRevision) {
-        fail('active-turn.child.assignment-mismatch', 'child result assignment does not match its invocation binding');
-      }
-      if (input.assignment.executionEpoch !== this.binding.execution.executionEpoch
-        || input.result.executionEpoch !== this.binding.execution.executionEpoch) {
-        fail('active-turn.child.epoch-mismatch', 'child result execution epoch does not match the active turn');
-      }
-      try {
-        validateWorkResult(input.result, input.assignment);
-      } catch (error) {
-        fail('active-turn.child.result-mismatch', error instanceof Error ? error.message : 'child result does not match its assignment');
-      }
-    } else {
-      if (invocation.binding.kind !== 'review') {
-        fail('active-turn.child.kind-mismatch', 'review delivery cannot bind to an execution invocation');
-      }
-      if (input.assignment.executionEpoch !== this.binding.execution.executionEpoch
-        || input.result.executionEpoch !== this.binding.execution.executionEpoch) {
-        fail('active-turn.child.epoch-mismatch', 'review result execution epoch does not match the active turn');
-      }
-      try {
-        assertReviewAssignmentsMatch(invocation.binding.assignment, input.assignment);
-        assertReviewResultMatchesAssignment(input.assignment, input.result);
-      } catch (error) {
-        fail('active-turn.child.review-mismatch', error instanceof Error ? error.message : 'review result does not match its invocation binding');
-      }
-    }
-    const seq = this.nextSeq();
-    let entry: AcceptedChildDelivery;
-    if (input.kind === 'execution') {
-      entry = {
-        kind: 'execution',
-        seq,
-        invocationId: input.invocationId,
-        refinedDelivery: input.refinedDelivery,
-        assignment: input.assignment,
-        result: input.result,
-      };
-    } else {
-      entry = {
-        kind: 'review',
-        seq,
-        invocationId: input.invocationId,
-        refinedDelivery: input.refinedDelivery,
-        assignment: input.assignment,
-        result: input.result,
-      };
-    }
-    validateAcceptedChildDelivery(entry);
-    const commitId = activeTurnCommitId(
-      this.binding.admittedTurn.turnId,
-      `delivery:${input.invocationId}`,
-    );
-    await this.journal.append({ commitId, record: { kind: 'child-delivery', entry } });
-    this.records.push({ kind: 'child-delivery', entry });
-    return entry;
+  private async recordChildReturnRecord(input: RecordChildReturnInput): Promise<AcceptedChildDelivery> {
+    return recordChildReturnRecord(this.state(), input);
   }
 
   /**
@@ -423,19 +564,7 @@ export class ActiveTurnContext {
   }
 
   private async recordChildAdoptionRecord(invocationId: string, delivery: AcceptedChildDelivery): Promise<void> {
-    const invocation = this.childInvocations().find((record) => record.invocationId === invocationId);
-    if (!invocation) fail('active-turn.invocation.unknown', `adoption references unknown invocation ${invocationId}`);
-    const stored = this.entries().find((entry): entry is AcceptedChildDelivery => (
-      !('envelope' in entry) && entry.invocationId === invocationId && entry.seq === delivery.seq
-    ));
-    if (!stored) fail('active-turn.adoption.unreturned', 'cannot adopt a child delivery that was not durably returned');
-    if (stored.kind !== invocation.binding.kind) {
-      fail('active-turn.adoption.kind-mismatch', 'adopted delivery kind does not match its invocation binding');
-    }
-    const record: ChildInvocationRecord = { ...invocation, adoptedResultSeq: delivery.seq };
-    const commitId = activeTurnCommitId(this.binding.admittedTurn.turnId, `adopted:${invocationId}`);
-    await this.journal.append({ commitId, record: { kind: 'child-invocation', record } });
-    this.records.push({ kind: 'child-invocation', record });
+    return recordChildAdoptionRecord(this.state(), invocationId, delivery);
   }
 
   /**
@@ -448,49 +577,75 @@ export class ActiveTurnContext {
   }
 
   private async recordReviewCheckpointRecord(invocationId: string, checkpointReceiptRef: string): Promise<void> {
-    if (!checkpointReceiptRef.trim()) {
-      fail('active-turn.review-checkpoint.incomplete', 'review result checkpoint reference is required');
-    }
-    const invocation = this.childInvocations().find((record) => record.invocationId === invocationId);
-    if (!invocation) fail('active-turn.invocation.unknown', `review checkpoint references unknown invocation ${invocationId}`);
-    if (invocation.binding.kind !== 'review') {
-      fail('active-turn.review-checkpoint.kind-mismatch', 'post-review checkpoint requires a review invocation');
-    }
-    if (invocation.adoptedResultSeq === undefined) {
-      fail('active-turn.review-checkpoint.unadopted', 'cannot checkpoint a review result before parent adoption');
-    }
-    if (invocation.postReviewCheckpointRef === checkpointReceiptRef) return;
-    if (invocation.checkpointReceiptRef === checkpointReceiptRef) {
-      fail('active-turn.review-checkpoint.pre-call', 'post-review checkpoint must differ from the pre-call checkpoint');
-    }
-    if (invocation.postReviewCheckpointRef !== undefined) {
-      fail('active-turn.review-checkpoint.conflict', `review invocation ${invocationId} already has a review-result checkpoint`);
-    }
-    const record: ChildInvocationRecord = { ...invocation, postReviewCheckpointRef: checkpointReceiptRef };
-    const commitId = activeTurnCommitId(this.binding.admittedTurn.turnId, `review-checkpoint:${invocationId}`);
-    await this.journal.append({ commitId, record: { kind: 'child-invocation', record } });
-    this.records.push({ kind: 'child-invocation', record });
+    return recordReviewCheckpointRecord(this.state(), invocationId, checkpointReceiptRef);
   }
 
   entries(): readonly (AcceptedRawFact | AcceptedChildDelivery)[] {
-    return structuredClone(this.records
-      .filter((record): record is Extract<ActiveTurnJournalRecord, { kind: 'accepted-fact' | 'child-delivery' }> => (
-        record.kind === 'accepted-fact' || record.kind === 'child-delivery'
-      ))
-      .map((record) => (record.kind === 'accepted-fact' ? record.entry : record.entry))
-      .sort((left, right) => left.seq - right.seq));
+    return structuredClone(projectEntries(this.records));
   }
 
   requests(): readonly RuntimeRequestRecord[] {
-    return structuredClone(this.records.filter((record): record is Extract<ActiveTurnJournalRecord, { kind: 'request' }> => record.kind === 'request').map((record) => record.record));
+    return structuredClone(projectRequests(this.records));
   }
 
   childInvocations(): readonly ChildInvocationRecord[] {
-    const byId = new Map<string, ChildInvocationRecord>();
-    for (const record of this.records) {
-      if (record.kind === 'child-invocation') byId.set(record.record.invocationId, record.record);
+    return structuredClone(projectChildInvocations(this.records));
+  }
+
+  /**
+   * A live read over the committed projection. It waits for accepted mutations
+   * already in the serial queue, but never closes admission, never drains
+   * producers and never calls `prepareCapture`. A returned prefix is a detached
+   * snapshot: later commits do not mutate it. A required prior mutation failure
+   * is a retained error control fact: every read surfaces it instead of reading
+   * a successful tail, and a later drain surfaces the same original failure.
+   */
+  async readLivePrefix(source: string): Promise<ActiveTurnLivePrefix> {
+    if (!source.trim()) {
+      fail('active-turn.live-prefix.source-missing', 'live prefix requires a segment identity source');
     }
-    return structuredClone([...byId.values()]);
+    await this.mutations;
+    if (this.mutationFailure) {
+      const cause = this.mutationFailure.cause;
+      throw new RuntimeActiveTurnError(
+        'active-turn.live-prefix.mutation-failed',
+        cause instanceof Error ? cause.message : 'a prior required mutation failed',
+      );
+    }
+    const entries = this.entries();
+    const requests = this.requests();
+    const childInvocations = this.childInvocations();
+    const obligations: ActiveTurnProductionObligationRef[] = [
+      ...requests
+        .filter((record) => record.phase === 'dispatching' || record.phase === 'dispatched' || record.phase === 'waiting')
+        .map((record): ActiveTurnProductionObligationRef => ({
+          kind: 'request',
+          requestId: record.request.requestId,
+          phase: record.phase,
+        })),
+      ...childInvocations
+        .filter((invocation) => invocation.adoptedResultSeq === undefined)
+        .map((invocation): ActiveTurnProductionObligationRef => ({
+          kind: 'child-invocation',
+          invocationId: invocation.invocationId,
+          phase: 'pending',
+        })),
+    ];
+    const initialInput = this.initialInput();
+    return {
+      kind: 'live-accepted-prefix',
+      source,
+      binding: structuredClone(this.binding),
+      ...(initialInput === undefined ? {} : { initialInput }),
+      entries,
+      requests,
+      childInvocations,
+      watermark: {
+        lastAcceptedSeq: entries.length === 0 ? 0 : entries[entries.length - 1]!.seq,
+        controlRecordCount: this.records.length,
+      },
+      obligations,
+    };
   }
 
   /**
@@ -570,6 +725,19 @@ export class ActiveTurnContext {
 
   controlRecordCount(): number { return this.records.length; }
 
+  private state(): ActiveTurnRecordState {
+    return {
+      records: this.records,
+      execution: this.binding.execution,
+      scope: this.binding.scope,
+      commitId: (discriminator) => activeTurnCommitId(this.binding.admittedTurn.turnId, discriminator),
+      append: async (commitId, record) => {
+        await this.journal.append({ commitId, record });
+        this.records.push(record);
+      },
+    };
+  }
+
   private mutate<T>(mutation: () => Promise<T>): Promise<T> {
     if (this.frozen) return Promise.reject(new RuntimeActiveTurnError('active-turn.frozen', 'cannot mutate a frozen active turn'));
     const result = this.mutations.then(mutation);
@@ -581,8 +749,7 @@ export class ActiveTurnContext {
   }
 
   private nextSeq(): number {
-    const entries = this.entries();
-    return entries.length === 0 ? 1 : entries[entries.length - 1]!.seq + 1;
+    return nextEntrySeq(this.records);
   }
 }
 
@@ -593,4 +760,291 @@ export function childInvocationId(input: {
   readonly executionEpoch: number;
 }): string {
   return `invocation:${input.assignmentId}:${input.attempt}:${input.executionEpoch}`;
+}
+
+/** One durable segment record kind. A segment never carries a binding or a second initial input. */
+export type ActiveTurnSegmentRecord = Exclude<ActiveTurnJournalRecord, { kind: 'binding-opened' | 'initial-input' }>;
+
+/**
+ * Owner-injected exact record boundary for one resumed segment. The J1 journal
+ * owner provides the physical commit/read; this consumer only names the shape it
+ * needs. A segment record keeps the current epoch's request, accepted-fact,
+ * child-invocation and child-delivery content under the segment envelope. This
+ * port is a consumer contract, not a second Journal or registry.
+ */
+export interface ActiveTurnSegmentRecordPort {
+  appendSegmentRecord(input: {
+    readonly businessTurnId: string;
+    readonly segmentId: string;
+    readonly commitId: string;
+    readonly record: ActiveTurnSegmentRecord;
+  }): Promise<JournalCommitRef>;
+  readSegmentRecords(input: {
+    readonly businessTurnId: string;
+    readonly segmentId: string;
+  }): Promise<readonly ActiveTurnSegmentRecord[]>;
+}
+
+export interface OpenActiveTurnSegmentInput {
+  /** The actual opened segment record committed by the Journal owner. */
+  readonly segment: ResumedTurnSegmentOpened;
+  /** The unique original input asset; referenced, never copied or relabeled. */
+  readonly initialInput: RawAsset;
+  readonly port: ActiveTurnSegmentRecordPort;
+}
+
+/**
+ * Runtime-owned mutable consumer for one resumed execution segment. It keeps
+ * the actual opened record, the current binding and incarnation, and a fresh
+ * producer barrier. It never reopens the original active turn, never mints a
+ * new `AdmittedTurn` and never copies the old epoch's raw. Records it appends
+ * stay in the current epoch with the real business turn id.
+ */
+export class ActiveTurnSegmentContext {
+  private readonly records: ActiveTurnJournalRecord[];
+  private readonly segment: ResumedTurnSegmentOpened;
+  private readonly initialInputAsset: RawAsset;
+  private readonly producers = new ActiveTurnProducerBarrier();
+  private mutations: Promise<void> = Promise.resolve();
+  private mutationFailure: { readonly cause: unknown } | undefined;
+  private frozen = false;
+  private drained = false;
+  private captured: ActiveTurnSegmentCaptureV2 | undefined;
+  private drainPromise: Promise<void> | undefined;
+
+  private constructor(
+    private readonly port: ActiveTurnSegmentRecordPort,
+    segment: ResumedTurnSegmentOpened,
+    initialInput: RawAsset,
+    records: readonly ActiveTurnSegmentRecord[],
+  ) {
+    this.segment = structuredClone(segment);
+    this.initialInputAsset = structuredClone(initialInput);
+    this.records = structuredClone([...records]);
+  }
+
+  static async open(input: OpenActiveTurnSegmentInput): Promise<ActiveTurnSegmentContext> {
+    validateResumedTurnSegmentOpened(input.segment);
+    if (!input.initialInput.ref.digest) {
+      fail('active-turn.segment.input-digest-missing', 'a resumed segment requires the original immutable input digest');
+    }
+    const records = await input.port.readSegmentRecords({
+      businessTurnId: input.segment.businessTurnRef.businessTurnId,
+      segmentId: input.segment.segmentId,
+    });
+    return new ActiveTurnSegmentContext(input.port, input.segment, input.initialInput, records);
+  }
+
+  get segmentOpened(): ResumedTurnSegmentOpened {
+    return structuredClone(this.segment);
+  }
+
+  segmentBinding(): ActiveTurnSegmentBinding {
+    return structuredClone(this.segment.binding);
+  }
+
+  executionIdentity(): ActiveTurnProviderExecutionIdentityRef {
+    return structuredClone(this.segment.binding.execution);
+  }
+
+  scope(): ScopeRef {
+    return structuredClone(this.segment.binding.scope);
+  }
+
+  originalInput(): RawAsset {
+    return structuredClone(this.initialInputAsset);
+  }
+
+  async registerRequest(record: RuntimeRequestRecord): Promise<RuntimeRequestRecord> {
+    const owned = structuredClone(record);
+    return this.mutate(() => registerRequestRecord(this.state(), owned));
+  }
+
+  async registerProviderRequest(input: {
+    readonly execution: ActiveTurnProviderExecutionIdentityRef;
+    readonly record: RuntimeRequestRecord;
+  }): Promise<RuntimeRequestRecord> {
+    if (!sameProviderExecution(input.execution, this.segment.binding.execution)) {
+      fail('active-turn.segment-request.execution-mismatch', 'request registration does not match the segment execution');
+    }
+    return this.registerRequest(input.record);
+  }
+
+  async acceptRawFact(envelope: RawFactEnvelope): Promise<AcceptedRawFact> {
+    const owned = structuredClone(envelope);
+    return this.mutate(() => acceptRawFactRecord(this.state(), owned));
+  }
+
+  async openChildInvocation(input: {
+    readonly invocationId: string;
+    readonly childTurnId: string;
+    readonly checkpointReceiptRef: string;
+    readonly binding: ChildCallBinding;
+  }): Promise<ChildInvocationRecord> {
+    const owned = structuredClone(input);
+    return this.mutate(() => openChildInvocationRecord(this.state(), owned));
+  }
+
+  async recordChildReturn(input: RecordChildReturnInput): Promise<AcceptedChildDelivery> {
+    const owned = structuredClone(input);
+    return this.mutate(() => recordChildReturnRecord(this.state(), owned));
+  }
+
+  async recordChildAdoption(invocationId: string, delivery: AcceptedChildDelivery): Promise<void> {
+    const owned = structuredClone(delivery);
+    return this.mutate(() => recordChildAdoptionRecord(this.state(), invocationId, owned));
+  }
+
+  async recordReviewCheckpoint(invocationId: string, checkpointReceiptRef: string): Promise<void> {
+    return this.mutate(() => recordReviewCheckpointRecord(this.state(), invocationId, checkpointReceiptRef));
+  }
+
+  entries(): readonly (AcceptedRawFact | AcceptedChildDelivery)[] {
+    return structuredClone(projectEntries(this.records));
+  }
+
+  requests(): readonly RuntimeRequestRecord[] {
+    return structuredClone(projectRequests(this.records));
+  }
+
+  childInvocations(): readonly ChildInvocationRecord[] {
+    return structuredClone(projectChildInvocations(this.records));
+  }
+
+  /**
+   * A live read over this segment's committed projection. It waits for accepted
+   * mutations already in the queue but never closes admission, never drains
+   * producers and never forges a capture cut. A required prior mutation failure
+   * is retained and keeps surfacing instead of reading a successful tail.
+   */
+  async readLivePrefix(): Promise<ActiveTurnSegmentLivePrefix> {
+    await this.mutations;
+    if (this.mutationFailure) {
+      const cause = this.mutationFailure.cause;
+      throw new RuntimeActiveTurnError(
+        'active-turn.segment-live-prefix.mutation-failed',
+        cause instanceof Error ? cause.message : 'a prior required mutation failed',
+      );
+    }
+    const entries = this.entries();
+    const requests = this.requests();
+    const childInvocations = this.childInvocations();
+    const obligations: ActiveTurnProductionObligationRef[] = [
+      ...requests
+        .filter((record) => record.phase === 'dispatching' || record.phase === 'dispatched' || record.phase === 'waiting')
+        .map((record): ActiveTurnProductionObligationRef => ({
+          kind: 'request',
+          requestId: record.request.requestId,
+          phase: record.phase,
+        })),
+      ...childInvocations
+        .filter((invocation) => invocation.adoptedResultSeq === undefined)
+        .map((invocation): ActiveTurnProductionObligationRef => ({
+          kind: 'child-invocation',
+          invocationId: invocation.invocationId,
+          phase: 'pending',
+        })),
+    ];
+    return {
+      kind: 'segment-live-accepted-prefix',
+      segment: structuredClone(this.segment),
+      binding: structuredClone(this.segment.binding),
+      initialInput: structuredClone(this.initialInputAsset),
+      entries,
+      requests,
+      childInvocations,
+      watermark: {
+        lastAcceptedSeq: entries.length === 0 ? 0 : entries[entries.length - 1]!.seq,
+        controlRecordCount: this.records.length,
+      },
+      obligations,
+    };
+  }
+
+  /**
+   * The immutable capture body for this segment, read from durable facts only.
+   * It references the unique original input asset and keeps the exact
+   * predecessor link. It never copies the old epoch's raw or relabels it.
+   */
+  captureSegment(input: { readonly boundaryId: string; readonly frozenAt: string }): ActiveTurnSegmentCaptureV2 {
+    if (!this.drained) fail('active-turn.segment-capture.not-drained', 'prepareSegmentCapture must drain producers before reading a capture');
+    if (this.captured) {
+      if (this.captured.cut.pauseId !== input.boundaryId) {
+        fail('active-turn.segment-capture.boundary-conflict', 'a frozen segment has one capture boundary');
+      }
+      return structuredClone(this.captured);
+    }
+    const entries = this.entries();
+    const cut: TurnCaptureCut = {
+      pauseId: input.boundaryId,
+      lastSeq: entries.length === 0 ? 0 : entries[entries.length - 1]!.seq,
+      producersDrained: true,
+      frozenAt: input.frozenAt,
+    };
+    const body: ActiveTurnSegmentCaptureV2 = {
+      version: 2,
+      segmentId: this.segment.segmentId,
+      businessTurnRef: this.segment.businessTurnRef,
+      binding: this.segment.binding,
+      initialInput: this.initialInputAsset,
+      entries,
+      requests: this.requests(),
+      childInvocations: this.childInvocations(),
+      cut,
+      predecessor: this.segment.predecessor,
+    };
+    validateActiveTurnSegmentCaptureV2(body);
+    this.captured = structuredClone(body);
+    return structuredClone(this.captured);
+  }
+
+  runProducer<T>(produce: () => T | Promise<T>): Promise<T> {
+    return this.producers.run(produce);
+  }
+
+  assertProductionOpen(): void { this.producers.assertOpen(); }
+
+  closeAndDrainProducers(): Promise<void> {
+    this.drainPromise ??= (async () => {
+      await this.producers.closeAndDrain();
+      this.frozen = true;
+      await this.mutations;
+      if (this.mutationFailure) throw this.mutationFailure.cause;
+      this.drained = true;
+    })();
+    return this.drainPromise;
+  }
+
+  controlRecordCount(): number { return this.records.length; }
+
+  private state(): ActiveTurnRecordState {
+    return {
+      records: this.records,
+      execution: this.segment.binding.execution,
+      scope: this.segment.binding.scope,
+      commitId: (discriminator) => activeTurnSegmentCommitId(this.segment.segmentId, discriminator),
+      append: async (commitId, record) => {
+        if (record.kind === 'binding-opened' || record.kind === 'initial-input') {
+          fail('active-turn.segment.record-invalid', 'a resumed segment cannot append binding or initial-input records');
+        }
+        await this.port.appendSegmentRecord({
+          businessTurnId: this.segment.businessTurnRef.businessTurnId,
+          segmentId: this.segment.segmentId,
+          commitId,
+          record,
+        });
+        this.records.push(record);
+      },
+    };
+  }
+
+  private mutate<T>(mutation: () => Promise<T>): Promise<T> {
+    if (this.frozen) return Promise.reject(new RuntimeActiveTurnError('active-turn.segment.frozen', 'cannot mutate a frozen segment'));
+    const result = this.mutations.then(mutation);
+    this.mutations = result.then(
+      () => undefined,
+      (cause: unknown) => { this.mutationFailure ??= { cause }; },
+    );
+    return result.then((value) => structuredClone(value));
+  }
 }

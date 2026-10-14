@@ -5,7 +5,9 @@ export type AgentLoopRuntimeErrorCode =
   | 'invalid-state'
   | 'duplicate'
   | 'conflict'
-  | 'budget-exhausted';
+  | 'budget-exhausted'
+  | 'turn-not-configured'
+  | 'turn-close-validation';
 
 export class AgentLoopRuntimeError extends RuntimeError {
   readonly code: AgentLoopRuntimeErrorCode;

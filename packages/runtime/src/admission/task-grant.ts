@@ -9,7 +9,7 @@ import {
   type CheckpointControlRevokeRequest,
 } from '../../../contracts/src/checkpoint-controls.js';
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
-import type { TaskId } from '../../../contracts/src/index.js';
+import type { OperationId, ScopeRef, TaskId } from '../../../contracts/src/index.js';
 import {
   validateTaskGrantAdmission,
   validateTaskGrantSnapshot,
@@ -41,6 +41,22 @@ export interface TaskGrantAuthority {
  * current grant. It is a control record: it carries the admitted revision and
  * never replaces the grant readback.
  */
+export interface TaskGrantOperationProvenance {
+  readonly kind: 'provider-tool';
+  readonly parentNamespace: ScopeRef;
+  readonly parentOperationId: OperationId;
+  readonly parentAdmissionCommitRef: JournalCommitRef;
+  readonly parentControlCommitRef: JournalCommitRef;
+  readonly agentRuntimeId: string;
+  readonly harnessExecutionEpoch: number;
+  readonly operationId: OperationId;
+  readonly effectScope: ScopeRef;
+  readonly providerRequestId: string;
+  readonly toolCallId: string;
+  readonly authorityCommitRef: JournalCommitRef;
+  readonly coverageCommitRef: JournalCommitRef;
+}
+
 export interface TaskGrantBusinessRegistration {
   readonly requestRef: string;
   readonly taskId: TaskId;
@@ -48,6 +64,12 @@ export interface TaskGrantBusinessRegistration {
   readonly capability: CheckpointControlCapabilityRef;
   readonly inputIdentity: CheckpointControlInputIdentity;
   readonly grantRevision: number;
+  /**
+   * Typed control provenance for an explicit child operation. It is not tool
+   * business input, and it is the only durable link that lets a cold parent
+   * read identify a registered child before its Gateway control append.
+   */
+  readonly operationProvenance?: TaskGrantOperationProvenance;
 }
 
 /**

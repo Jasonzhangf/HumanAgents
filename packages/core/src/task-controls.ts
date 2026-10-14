@@ -180,11 +180,20 @@ export function revokeCheckpointControl(input: {
  * only when the durable read is unknown (a hold): it is never treated as
  * absence, and no cache, constant or caller revision can stand in for it.
  */
-export function validateTaskGrantAdmission(input: {
-  readonly request: CheckpointControlBusinessRequest;
+/**
+ * Shared pure action comparison: the declared task, owner, capability and
+ * active state of one current grant against one requested action. It makes no
+ * Journal read, forms no business request, and creates no registration. The
+ * business admission and the control reentry check use this same comparison so
+ * neither side drifts into its own copy.
+ */
+export function validateTaskGrantAction(input: {
+  readonly request: Pick<
+    CheckpointControlBusinessRequest,
+    'taskId' | 'owner' | 'capability'
+  >;
   readonly current: CheckpointControlGrant | null | undefined;
 }): TaskBusinessAdmission {
-  validateCheckpointControlBusinessRequest(input.request);
   const { request, current } = input;
   if (current === undefined) return { outcome: 'business-denied', allowed: false, reason: 'current-unknown' };
   if (current === null) return { outcome: 'business-denied', allowed: false, reason: 'missing-grant' };
@@ -201,6 +210,14 @@ export function validateTaskGrantAdmission(input: {
     grantRevisionString: String(current.revision),
     grantOwner: current.owner,
   };
+}
+
+export function validateTaskGrantAdmission(input: {
+  readonly request: CheckpointControlBusinessRequest;
+  readonly current: CheckpointControlGrant | null | undefined;
+}): TaskBusinessAdmission {
+  validateCheckpointControlBusinessRequest(input.request);
+  return validateTaskGrantAction({ request: input.request, current: input.current });
 }
 
 /**

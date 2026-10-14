@@ -1,24 +1,25 @@
+import { createHash } from 'node:crypto';
+import { assertCheckpointClosureCommitted } from '../../../core/src/index.js';
 import {
   assertEvidenceRef,
   assertSameScope,
   type Checkpoint,
   type EvidenceRef,
+  type JournalCommitRef,
   type NextAction,
   type OperationId,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
-import { checkpointCommitId, completeCheckpoint, sameCheckpoint } from './coordinator.js';
+import { checkpointCommitId, completeCheckpoint, sameCheckpoint, sameJournalCommitRef } from './coordinator.js';
 import {
   assertDeadEndRecord,
   assertInteractionClosure,
   assertReconcileEvidenceScope,
-  assertReentryRecord,
   computeReentryDecision,
+  readCheckpointClosurePreparation,
   sameEvidenceRef,
   sameCheckpointClosureRecord,
-  sameReentryDecision,
   sameOperationId,
-  sameReentryRecord,
   type CheckpointClosureRecord,
   type CheckpointClosureCompatibilityVersion,
   type ClosureRecord,
@@ -26,18 +27,36 @@ import {
   type InteractionClosureRecord,
   type OperationReconcilePort,
   type OperationReconcileResult,
-  type ReentryRecord,
   type CheckpointReentryDecision,
   type CheckpointSubmissionSource,
+  type CheckpointClosurePreparationRecord,
 } from './closure.js';
+import {
+  assertConfirmedReentryCommand,
+  sameConditionalReentryCommand,
+  sameConditionalReentryRecord,
+  type ConditionalReentryRecord,
+  type ConfirmedReentryCommand,
+} from './conditional-reentry.js';
 import { CheckpointSubmissionError } from './errors.js';
 import type {
   CheckpointClosurePort,
   CheckpointJournalPort,
+  CheckpointJournalReaderPort,
   CheckpointReentryAdmissionPort,
+  ConditionalReentrySubmissionPort,
 } from './ports.js';
 
 const CHECKPOINT_SOURCES: readonly CheckpointSubmissionSource[] = ['agent-tool', 'harness-control', 'recovery'];
+
+function asCheckpointJournalReader(journal: CheckpointJournalPort): CheckpointJournalReaderPort {
+  if (typeof (journal as Partial<CheckpointJournalReaderPort>).readCommitted !== 'function') {
+    throw new CheckpointSubmissionError(
+      'bound checkpoint preparation requires the canonical exact checkpoint reader',
+    );
+  }
+  return journal as CheckpointJournalReaderPort;
+}
 
 /**
  * Checkpoint closure identity is owned by the Checkpoint/Control Owner.
@@ -238,6 +257,9 @@ export interface SubmitCheckpointInput {
   readonly hardBlockers?: readonly string[];
   readonly unknownOperations?: readonly OperationId[];
   readonly reconciledOperations?: readonly OperationReconcileResult[];
+  /** Required on new producing callers; omission supports only old unbound consumers. */
+  readonly preparation?: CheckpointClosurePreparationRecord;
+  readonly turnRecoveryRef?: string;
 }
 
 export interface SubmittedCheckpoint {
@@ -260,6 +282,18 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
         throw new CheckpointSubmissionError(`${input.source} closure requires settle evidence`);
       }
     }
+    const preparation = input.preparation;
+    if (preparation) {
+      const stored = await readCheckpointClosurePreparation(input.closurePort, input.checkpoint);
+      if (!stored || JSON.stringify(stored) !== JSON.stringify(preparation)
+        || stored.checkpointDigest !== `sha256:${createHash('sha256').update(JSON.stringify(input.checkpoint)).digest('hex')}`
+        || stored.coreClosure.source !== input.source
+        || stored.coreClosure.executionEpoch !== input.checkpoint.executionEpoch
+        || !sameEvidenceRef(stored.coreClosure.recoveryStateRef, input.checkpoint.recoveryStateRef)
+        || JSON.stringify(stored.coreClosure.nextAction) !== JSON.stringify(input.checkpoint.next)) {
+        throw new CheckpointSubmissionError('bound checkpoint preparation does not match its exact stored candidate');
+      }
+    }
     const unknownOperations = input.unknownOperations ?? [];
     for (const operationId of unknownOperations) assertOperationIdScope(input.checkpoint.scope, operationId);
     const reconciledOperations = input.reconciledOperations ?? [];
@@ -274,7 +308,7 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
     }
     const unresolved = unresolvedOperations(unknownOperations, reconciledOperations);
     assertKnownClosure(input.checkpoint, unresolved);
-    const reentry = computeReentryDecision({
+    const reentry = preparation?.reentry ?? computeReentryDecision({
       outcome: input.checkpoint.outcome,
       permissionRevoked: input.permissionRevoked,
       hardBlockers: input.hardBlockers,
@@ -283,8 +317,16 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
     if (input.permissionRevoked && input.checkpoint.outcome !== 'blocked' && input.checkpoint.outcome !== 'stopped' && input.checkpoint.outcome !== 'unknown') {
       throw new CheckpointSubmissionError('permission revoke closure must be blocked, stopped, or unknown');
     }
+    if (preparation?.coreClosure.unknownOperations.length
+      && (input.checkpoint.outcome !== 'unknown' || input.checkpoint.next.kind !== 'recover')) {
+      throw new CheckpointSubmissionError('unknown operations require an unknown checkpoint closure until reconcile');
+    }
+    if (preparation?.permission.revoked
+      && !['blocked', 'stopped', 'unknown'].includes(input.checkpoint.outcome)) {
+      throw new CheckpointSubmissionError('permission revoke closure must be blocked, stopped, or unknown');
+    }
     const evidenceRefs = reconciledOperations.flatMap((result) => result.evidenceRef ? [result.evidenceRef] : []);
-    const closure: CheckpointClosureRecord = {
+    let closure: CheckpointClosureRecord = {
       closureKind: 'checkpoint',
       compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.current.version,
       closureId: checkpointClosureId(input.checkpoint),
@@ -297,6 +339,58 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
       reentry,
     };
     const existing = await readCheckpointClosure(input.closurePort, input.checkpoint);
+    if (preparation) {
+      // Checkpoint and closure are separate commits. Never materialize authority before exact readback.
+      const reader = asCheckpointJournalReader(input.journal);
+      const verification = await reader.verify(input.checkpoint.scope);
+      if (!verification.valid) throw new CheckpointSubmissionError(`checkpoint journal is invalid: ${verification.reason}`);
+      let committed = await reader.readCommitted(input.checkpoint.scope, input.checkpoint.id);
+      if (!committed) {
+        if (existing) throw new CheckpointSubmissionError('checkpoint closure exists without its exact committed checkpoint');
+        await completeCheckpoint(reader, {
+          ownerId: input.ownerId,
+          context: {
+            scope: input.checkpoint.scope, cycleId: input.checkpoint.cycleId,
+            executionEpoch: input.checkpoint.executionEpoch, directiveRevision: input.checkpoint.directiveRevision,
+          },
+          previous: input.previous,
+          checkpoint: input.checkpoint,
+        });
+        committed = await reader.readCommitted(input.checkpoint.scope, input.checkpoint.id);
+      }
+      if (!committed || !sameCheckpoint(committed.checkpoint, input.checkpoint)) {
+        throw new CheckpointSubmissionError('bound checkpoint exact readback is absent or different');
+      }
+      const coreClosure = { ...preparation.coreClosure, committed: true };
+      assertCheckpointClosureCommitted(coreClosure);
+      closure = {
+        ...closure,
+        recoveryBinding: {
+          checkpointCommitRef: committed.commitRef,
+          contextCommitRef: preparation.contextCommitRef,
+          coreClosure,
+          preparationRef: preparation.closureId,
+          ...(input.turnRecoveryRef ? { turnRecoveryRef: input.turnRecoveryRef } : {}),
+        },
+      };
+      if (existing) {
+        if (!('closureKind' in existing) || existing.closureKind !== 'checkpoint'
+          || !sameCheckpointClosureContent(existing, closure)) {
+          throw new CheckpointSubmissionError('checkpoint closure id is already committed with different content');
+        }
+      } else {
+        const receipt = await input.closurePort.commit(closure);
+        if (!receipt.committed || receipt.closureId !== closure.closureId) {
+          throw new CheckpointSubmissionError('checkpoint closure fact was not acknowledged');
+        }
+      }
+      const readback = await input.closurePort.read(closure.closureId);
+      if (!readback || !('closureKind' in readback) || readback.closureKind !== 'checkpoint'
+        || !sameCheckpointClosureContent(readback, closure)) {
+        throw new CheckpointSubmissionError('bound checkpoint closure exact readback is absent or different');
+      }
+      return { state: 'committed', checkpoint: committed.checkpoint, closure: readback, reentry: readback.reentry, unresolvedOperations: unresolved };
+    }
     if (existing) {
       if (!('closureKind' in existing) || existing.closureKind !== 'checkpoint' || !sameCheckpointClosureContent(existing, closure)) {
         throw new CheckpointSubmissionError('checkpoint closure id is already committed with different content');
@@ -415,113 +509,67 @@ export async function commitDeadEnd(input: CommitDeadEndInput): Promise<Committe
   }
 }
 
+export interface ConditionalReentryCommit {
+  readonly port: ConditionalReentrySubmissionPort;
+  readonly command: ConfirmedReentryCommand;
+}
+
 export interface CommitReentryInput {
   readonly ownerId: string;
-  readonly closureId: string;
-  readonly checkpoint: Checkpoint;
+  readonly conditional?: ConditionalReentryCommit;
+  /**
+   * Legacy unbound fields remain in the input shape only so existing callers
+   * compile while A4.3 composes the actual public caller. They never authorize
+   * or append a new reentry.
+   */
+  readonly closureId?: string;
+  readonly checkpoint?: Checkpoint;
   readonly source?: 'agent-tool' | 'recovery';
-  readonly previousExecutionEpoch: number;
-  readonly newExecutionEpoch: number;
+  readonly previousExecutionEpoch?: number;
+  readonly newExecutionEpoch?: number;
   readonly deadEndRef?: string;
-  readonly nextAction: NextAction;
-  readonly journal: CheckpointJournalPort;
-  readonly closurePort: CheckpointClosurePort;
-  readonly admissionPort: CheckpointReentryAdmissionPort;
+  readonly nextAction?: NextAction;
+  readonly journal?: CheckpointJournalPort;
+  readonly closurePort?: CheckpointClosurePort;
+  readonly admissionPort?: CheckpointReentryAdmissionPort;
 }
 
 export interface CommittedReentry {
   readonly state: 'committed';
-  readonly record: ReentryRecord;
+  readonly record: ConditionalReentryRecord;
+  readonly commitRef: JournalCommitRef;
 }
 
+/**
+ * Canonical reentry now delegates to the schema-versioned conditional owner.
+ * Legacy unbound history remains readable, but this mutation path never
+ * reconstructs a latest-only target, an outcome-only decision or a recovery
+ * bypass.
+ */
 export async function commitReentry(input: CommitReentryInput): Promise<CommittedReentry> {
   try {
     nonEmpty(input.ownerId, 'reentry owner');
-    assertReentryRecord({
-      closureId: input.closureId,
-      checkpointId: input.checkpoint.id,
-      checkpointExecutionEpoch: input.checkpoint.executionEpoch,
-      previousExecutionEpoch: input.previousExecutionEpoch,
-      newExecutionEpoch: input.newExecutionEpoch,
-      deadEndRef: input.deadEndRef,
-      nextAction: input.nextAction,
-    });
-    const existing = await input.closurePort.read(input.closureId);
-    if (existing) {
-      if (!('closureKind' in existing) || existing.closureKind !== 'reentry' || !existing.reentry.allowed || !sameReentryRecord(existing, {
-        closureKind: 'reentry',
-        closureId: input.closureId,
-        checkpointId: input.checkpoint.id,
-        checkpointExecutionEpoch: input.checkpoint.executionEpoch,
-        previousExecutionEpoch: input.previousExecutionEpoch,
-        newExecutionEpoch: input.newExecutionEpoch,
-        ...(input.deadEndRef ? { deadEndRef: input.deadEndRef } : {}),
-        nextAction: input.nextAction,
-        reentry: existing.reentry,
-      })) {
-        throw new CheckpointSubmissionError('reentry closure id is already committed with different content');
-      }
-      return { state: 'committed', record: existing };
-    }
-    const verification = await input.journal.verify(input.checkpoint.scope);
-    if (!verification.valid) {
-      throw new CheckpointSubmissionError(`checkpoint journal is invalid: ${verification.reason}`);
-    }
-    const latest = await input.journal.readLatest(input.checkpoint.scope);
-    if (!latest || !sameCheckpoint(latest.checkpoint, input.checkpoint)) {
-      throw new CheckpointSubmissionError('reentry checkpoint is not the committed latest checkpoint');
-    }
-    const closure = await readCheckpointClosure(input.closurePort, latest.checkpoint);
-    if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') {
-      throw new CheckpointSubmissionError('reentry requires a committed checkpoint closure');
-    }
-    if (closure.checkpointId.scope !== latest.checkpoint.id.scope || closure.checkpointId.value !== latest.checkpoint.id.value) {
-      throw new CheckpointSubmissionError('committed closure does not match reentry checkpoint');
-    }
-    if (
-      !closure.reentry.allowed
-      && input.source !== 'recovery'
-    ) {
-      throw new CheckpointSubmissionError('committed checkpoint closure does not allow reentry');
-    }
-    if (
-      closure.reentry.allowed
-      && !sameReentryDecision(closure.reentry, computeReentryDecision({ outcome: latest.checkpoint.outcome }))
-    ) {
-      throw new CheckpointSubmissionError('committed checkpoint closure does not allow reentry');
-    }
-    const admission = await input.admissionPort.admit({
-      ownerId: input.ownerId,
-      checkpoint: latest.checkpoint,
-      closure,
-      previousExecutionEpoch: input.previousExecutionEpoch,
-      newExecutionEpoch: input.newExecutionEpoch,
-    });
-    if (!admission.allowed) {
+    if (!input.conditional) {
       throw new CheckpointSubmissionError(
-        `reentry admission denied: ${admission.reason}`,
-        { nextAction: { kind: 'recover', ref: admission.blockedBy?.[0] ?? 'reentry-admission' } },
+        'legacy unbound reentry is read-only; a confirmed conditional command and its owner port are required',
       );
     }
-    const record: ReentryRecord = {
-      closureKind: 'reentry',
-      closureId: input.closureId,
-      checkpointId: latest.checkpoint.id,
-      checkpointExecutionEpoch: latest.checkpoint.executionEpoch,
-      previousExecutionEpoch: input.previousExecutionEpoch,
-      newExecutionEpoch: input.newExecutionEpoch,
-      ...(input.deadEndRef ? { deadEndRef: input.deadEndRef } : {}),
-      nextAction: input.nextAction,
-      reentry: {
-        allowed: true,
-        reason: admission.reason,
-      },
-    };
-    const receipt = await input.closurePort.commit(record);
-    if (!receipt.committed || receipt.closureId !== record.closureId) {
-      throw new CheckpointSubmissionError('reentry fact was not acknowledged');
+    const { port, command } = input.conditional;
+    assertConfirmedReentryCommand(command);
+    if (command.principalOwner !== input.ownerId) {
+      throw new CheckpointSubmissionError('reentry owner does not match the verified principal');
     }
-    return { state: 'committed', record };
+    const prepared = await port.prepare(command);
+    if (!sameConditionalReentryCommand(prepared.command, command)) {
+      throw new CheckpointSubmissionError('conditional preparation changed the confirmed command');
+    }
+    const commitRef = await port.commitReentryRecord(prepared, command.expectedCurrentControlCommitRef);
+    const readback = await port.readReentry(command.taskScope, command.commandId);
+    if (!readback || !sameJournalCommitRef(readback.commitRef, commitRef)
+      || !sameConditionalReentryRecord(readback.record, prepared)) {
+      throw new CheckpointSubmissionError('reentry exact readback is absent or different');
+    }
+    return { state: 'committed', record: readback.record, commitRef: readback.commitRef };
   } catch (error) {
     throw asSubmissionError(error);
   }

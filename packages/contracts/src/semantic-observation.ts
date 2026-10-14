@@ -115,6 +115,72 @@ export interface SemanticObservationEnvelope<TEvent> {
   readonly capabilities: readonly CapabilityStatus[];
 }
 
+/**
+ * I1 公开输出提交合同（provider-neutral，冻结形状）。
+ *
+ * - `binding` 只由权威 scope、executionEpoch 与**真实存在**的 Harness/Provider turn 来源构成；
+ *   Harness turn 缺失时字段缺省，不得用 `latestTurnId()` 或 Provider turn 补造身份。
+ *   `providerTurnId` / `requestId` 仅作来源关联，不参与公开身份匹配。
+ * - `text` 不进入提交身份；同身份不同文本由既有 Journal conflict 拒绝。
+ * - 本模块只声明形状；生产由 Runtime coordinator（候选）、App Organ Journal port（提交/读回）
+ *   与 context-events 公共语义（选择）各自拥有，不在此处复制实现。
+ */
+export interface PublicOutputBinding {
+  readonly scope: ScopeRef;
+  readonly executionEpoch: number;
+  readonly harnessTurnId?: string;
+  readonly providerTurnId?: string;
+  readonly requestId?: string;
+}
+
+/** 一次已接受、非空的公开 output 文本段候选（尚未提交）。 */
+export interface PublicOutputCandidate {
+  readonly binding: PublicOutputBinding;
+  /** 原 Provider output 事件 ID。 */
+  readonly sourceId: string;
+  /** 本次非空公开 output 文本段。 */
+  readonly text: string;
+}
+
+/** 已提交公开内容的确切引用：绑定 + 来源 + 提交身份 + Journal 位置 + 记录摘要。 */
+export interface PublicOutputCommitRef {
+  readonly binding: PublicOutputBinding;
+  readonly sourceId: string;
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+/** 一条已确认的公开提交：确切引用与其公开文本。 */
+export interface PublicOutputCommit {
+  readonly ref: PublicOutputCommitRef;
+  readonly text: string;
+}
+
+/**
+ * 某个 binding 的公开输出发布状态。
+ *
+ * - `pending`：存在尚未提交的公开文本段；其文本不得公开，但已确认的 commits 仍可显示。
+ * - `committed`：没有未提交段。
+ * - `unavailable` / `unknown`：无法确定；保留责任，旧已确认提交仍有效。
+ * - `publicCommitWatermark` 是当前 operation/epoch 最后一条匹配公开提交的 Journal seq；
+ *   无提交时缺省（不是 0，也不等于 `sourceWatermark`）。
+ */
+export interface PublicOutputPublication {
+  readonly state: 'pending' | 'committed' | 'unavailable' | 'unknown';
+  readonly commits: readonly PublicOutputCommit[];
+  readonly publicCommitWatermark?: number;
+}
+
+/**
+ * 公开输出的持久读写 port。App 在同 task/cycle Organ Journal 上实现；
+ * `commitPublicOutput` 幂等，`readPublicOutputs` 按 binding 读回确切提交。
+ */
+export interface PublicOutputJournalPort {
+  commitPublicOutput(candidate: PublicOutputCandidate): Promise<PublicOutputCommitRef>;
+  readPublicOutputs(binding: PublicOutputBinding): Promise<PublicOutputPublication>;
+}
+
 function assertNonEmpty(value: string, label: string): void {
   if (typeof value !== 'string' || !value.trim()) throw new ContractError(`${label} must be a non-empty string`);
 }

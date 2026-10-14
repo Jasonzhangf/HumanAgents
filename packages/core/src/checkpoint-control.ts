@@ -29,7 +29,13 @@ export function assertCheckpointClosureCanReenter(closure: CheckpointClosureReco
   if (closure.checkpointId.scope !== reentry.checkpointId.scope || closure.checkpointId.value !== reentry.checkpointId.value) {
     throw new CheckpointError('checkpoint reentry target mismatch');
   }
+  if (reentry.checkpointExecutionEpoch !== closure.executionEpoch) {
+    throw new CheckpointError('checkpoint reentry target epoch does not match the committed closure epoch');
+  }
   if (!reentry.fencedEpochs.includes(closure.executionEpoch)) {
     throw new CheckpointError('checkpoint reentry must fence the source epoch');
+  }
+  if (!reentry.fencedEpochs.includes(reentry.previousExecutionEpoch)) {
+    throw new CheckpointError('checkpoint reentry must fence the displaced current epoch');
   }
 }

@@ -1,9 +1,13 @@
 import {
   validateActiveTurnCaptureBody,
+  validateAcceptedChildDelivery,
+  validateAcceptedRawFact,
   type AcceptedChildDelivery,
   type AcceptedRawFact,
+  type AcceptedTurnEntry,
   type ActiveTurnBinding,
   type ActiveTurnCaptureBody,
+  type ActiveTurnProviderExecutionIdentityRef,
   type ActiveTurnProviderRequestIdentityRef,
   type ChildInvocationRecord,
   type CompletionRef,
@@ -17,6 +21,7 @@ import {
   type TurnCaptureCut,
 } from '../../../contracts/src/index.js';
 import { RuntimeActiveTurnError } from './active-turn-context.js';
+import { sameActiveTurnScope } from './active-turn-live-prefix.js';
 
 /**
  * Runtime-local materialization of one already-captured active turn. It reads
@@ -88,10 +93,19 @@ export interface ResolvedContentUnit {
   };
 }
 
-export interface ResolvedActiveTurn {
+/**
+ * Narrow binding facts shared by a v1 active turn and a v2 resumed segment.
+ * The folding path only needs the real execution identity and scope; it must
+ * never fabricate a v1 `AdmittedTurn` just to reuse the shared fold.
+ */
+export interface ActiveTurnFoldBinding {
+  readonly execution: ActiveTurnProviderExecutionIdentityRef;
+  readonly scope: ScopeRef;
+}
+
+export interface ResolvedActiveTurnCore<Binding extends ActiveTurnFoldBinding = ActiveTurnBinding> {
   readonly version: 1;
-  readonly binding: ActiveTurnBinding;
-  readonly cut: TurnCaptureCut;
+  readonly binding: Binding;
   readonly initialInput: {
     readonly content: RawAsset;
     readonly bytes: Uint8Array;
@@ -104,15 +118,36 @@ export interface ResolvedActiveTurn {
   readonly completionRefs: readonly CompletionRef[];
 }
 
-function fail(code: string, message: string): never {
-  throw new RuntimeActiveTurnError(code, message);
+export interface ResolvedActiveTurn extends ResolvedActiveTurnCore<ActiveTurnBinding> {
+  readonly cut: TurnCaptureCut;
 }
 
-function sameScope(left: ScopeRef, right: ScopeRef): boolean {
-  return left.organId.value === right.organId.value
-    && left.taskId?.value === right.taskId?.value
-    && left.cycleId?.value === right.cycleId?.value
-    && left.operationId?.value === right.operationId?.value;
+/**
+ * Shared live/capture input. Both entries are already durable accepted records;
+ * the caller owns the cut and validates its own boundary before calling.
+ */
+export interface ActiveTurnFoldInput<Cut, Binding extends ActiveTurnFoldBinding = ActiveTurnBinding> {
+  readonly binding: Binding;
+  readonly initialInput: RawAsset;
+  readonly entries: readonly AcceptedTurnEntry[];
+  readonly requests: readonly RuntimeRequestRecord[];
+  readonly childInvocations: readonly ChildInvocationRecord[];
+  readonly cut: Cut;
+  readonly checkpointPath: readonly string[];
+  readonly completionRefs: readonly CompletionRef[];
+  readonly rawContent: RawContentReadPort;
+}
+
+/**
+ * The common result fields of a live prefix and a drained capture. Both
+ * materializers share this shape and differ only by their cut.
+ */
+export type ResolvedActiveTurnFold<Cut, Binding extends ActiveTurnFoldBinding = ActiveTurnBinding> = ResolvedActiveTurnCore<Binding> & {
+  readonly cut: Cut;
+};
+
+function fail(code: string, message: string): never {
+  throw new RuntimeActiveTurnError(code, message);
 }
 
 function requestKey(request: ActiveTurnProviderRequestIdentityRef): string {
@@ -163,12 +198,9 @@ interface MutableUnit {
 }
 
 /**
- * Resolves the supplied captured body against the injected raw reader. Every
- * referenced asset is read through the reader; the Runtime never parses wire
- * JSON, infers selectors or inspects UI summaries. A missing asset, a mismatched
- * execution/scope/request, an unpaired tool result, an ambiguous
- * content-complete, a cross-channel replacement or a superseded-unit rewrite
- * all fail explicitly instead of returning a partial result.
+ * Resolves the supplied captured body against the injected raw reader. The
+ * drained cut is the boundary; the body is validated at its original owner
+ * before folding.
  */
 export async function materializeActiveTurn(input: {
   readonly capture: ActiveTurnCaptureBody;
@@ -176,21 +208,65 @@ export async function materializeActiveTurn(input: {
 }): Promise<ResolvedActiveTurn> {
   const { capture, rawContent } = input;
   validateActiveTurnCaptureBody(capture);
+  return foldActiveTurn({
+    binding: capture.binding,
+    initialInput: capture.initialInput,
+    entries: capture.entries,
+    requests: capture.requests,
+    childInvocations: capture.childInvocations,
+    cut: capture.cut,
+    checkpointPath: capture.checkpointPath,
+    completionRefs: capture.completionRefs,
+    rawContent,
+  });
+}
 
-  const binding = capture.binding;
+/**
+ * Shared pure folding for a live prefix and a drained capture. Every referenced
+ * asset is read through the reader; the Runtime never parses wire JSON, infers
+ * selectors or inspects UI summaries. A missing asset, a mismatched
+ * execution/scope/request, an unpaired tool result, an ambiguous
+ * content-complete, a cross-channel replacement or a superseded-unit rewrite
+ * all fail explicitly instead of returning a partial result.
+ *
+ * The caller owns validation of its own boundary (a drained v1 body or a live
+ * committed prefix) and the cut it supplies. This function makes no drain claim.
+ */
+export async function foldActiveTurn<Cut, Binding extends ActiveTurnFoldBinding = ActiveTurnBinding>(
+  input: ActiveTurnFoldInput<Cut, Binding>,
+): Promise<ResolvedActiveTurnFold<Cut, Binding>> {
+  const {
+    binding,
+    initialInput,
+    entries: acceptedEntries,
+    requests,
+    childInvocations,
+    cut,
+    checkpointPath,
+    completionRefs,
+    rawContent,
+  } = input;
   const execution = binding.execution;
 
-  const knownRequests = new Set(capture.requests.map((record) => requestKey(record.request)));
+  // A live prefix may come from a persisted read seam, so re-check each accepted
+  // record before folding. A capture body is already validated at its owner; the
+  // re-check is idempotent for it.
+  for (const entry of acceptedEntries) {
+    if ('envelope' in entry) validateAcceptedRawFact(entry);
+    else validateAcceptedChildDelivery(entry);
+  }
+
+  const knownRequests = new Set(requests.map((record) => requestKey(record.request)));
   const requestById = new Map<string, RuntimeRequestRecord>();
-  for (const record of capture.requests) requestById.set(record.request.requestId, record);
+  for (const record of requests) requestById.set(record.request.requestId, record);
 
   const invocationById = new Map<string, ChildInvocationRecord>();
-  for (const invocation of capture.childInvocations) invocationById.set(invocation.invocationId, invocation);
+  for (const invocation of childInvocations) invocationById.set(invocation.invocationId, invocation);
 
   // Captured tool calls, keyed by request identity + callId + continuationRef, so
   // an identical call id in a different request cannot pair across requests.
   const capturedCalls = new Set<string>();
-  for (const entry of capture.entries) {
+  for (const entry of acceptedEntries) {
     if (!('envelope' in entry)) continue;
     const fact = entry.envelope.fact;
     if (fact.kind === 'tool-call') {
@@ -198,20 +274,20 @@ export async function materializeActiveTurn(input: {
     }
   }
 
-  const readBytes = async (scope: ScopeRef, content: RawAsset): Promise<Uint8Array> => {
-    const bytes = await rawContent.read({ scope, content });
+  const readBytes = async (assetScope: ScopeRef, content: RawAsset): Promise<Uint8Array> => {
+    const bytes = await rawContent.read({ scope: assetScope, content });
     if (!(bytes instanceof Uint8Array)) {
       fail('active-turn.materialize.read-invalid', 'raw content reader did not return bytes');
     }
     return new Uint8Array(bytes);
   };
 
-  const entries: ResolvedActiveTurnEntry[] = [];
+  const resolvedEntries: ResolvedActiveTurnEntry[] = [];
   const units: MutableUnit[] = [];
   const unitByKey = new Map<string, MutableUnit>();
   const unitsByRequestUnit = new Map<string, MutableUnit[]>();
 
-  for (const entry of capture.entries) {
+  for (const entry of acceptedEntries) {
     if (!('envelope' in entry)) {
       const invocation = invocationById.get(entry.invocationId);
       if (!invocation) {
@@ -220,7 +296,7 @@ export async function materializeActiveTurn(input: {
       // Only a delivery the owner actually adopted enters the resolved turn.
       if (invocation.adoptedResultSeq !== entry.seq) continue;
       const bytes = await readBytes(entry.refinedDelivery.ref.scope, entry.refinedDelivery);
-      entries.push({
+      resolvedEntries.push({
         kind: 'adopted-child-delivery',
         accepted: structuredClone(entry),
         invocation: structuredClone(invocation),
@@ -236,7 +312,7 @@ export async function materializeActiveTurn(input: {
       || envelope.execution.executionEpoch !== execution.executionEpoch) {
       fail('active-turn.materialize.execution-mismatch', 'raw fact execution does not match the captured binding');
     }
-    if (!sameScope(envelope.scope, binding.scope)) {
+    if (!sameActiveTurnScope(envelope.scope, binding.scope)) {
       fail('active-turn.materialize.scope-mismatch', 'raw fact scope does not match the captured binding');
     }
     if (!knownRequests.has(requestKey(request))) {
@@ -292,7 +368,7 @@ export async function materializeActiveTurn(input: {
             }
           }
         }
-        entries.push({ kind: 'content', accepted: acceptedAs<ContentFact>(entry), bytes });
+        resolvedEntries.push({ kind: 'content', accepted: acceptedAs<ContentFact>(entry), bytes });
         break;
       }
       case 'content-complete': {
@@ -310,12 +386,12 @@ export async function materializeActiveTurn(input: {
         unit.complete = true;
         unit.lastSeq = entry.seq;
         unit.sourceSeqs.push(entry.seq);
-        entries.push({ kind: 'content-complete', accepted: acceptedAs<ContentCompleteFact>(entry) });
+        resolvedEntries.push({ kind: 'content-complete', accepted: acceptedAs<ContentCompleteFact>(entry) });
         break;
       }
       case 'tool-call': {
         const rawArguments = await readBytes(binding.scope, fact.rawArguments);
-        entries.push({ kind: 'tool-call', accepted: acceptedAs<ToolCallFact>(entry), rawArguments });
+        resolvedEntries.push({ kind: 'tool-call', accepted: acceptedAs<ToolCallFact>(entry), rawArguments });
         break;
       }
       case 'tool-result': {
@@ -323,11 +399,11 @@ export async function materializeActiveTurn(input: {
           fail('active-turn.materialize.tool-result-unpaired', `tool result ${fact.callId} has no captured call in its request`);
         }
         const rawOutput = await readBytes(binding.scope, fact.rawOutput);
-        entries.push({ kind: 'tool-result', accepted: acceptedAs<ToolResultFact>(entry), rawOutput });
+        resolvedEntries.push({ kind: 'tool-result', accepted: acceptedAs<ToolResultFact>(entry), rawOutput });
         break;
       }
       case 'request-complete': {
-        entries.push({ kind: 'request-complete', accepted: acceptedAs<RequestCompleteFact>(entry) });
+        resolvedEntries.push({ kind: 'request-complete', accepted: acceptedAs<RequestCompleteFact>(entry) });
         break;
       }
       default:
@@ -335,7 +411,7 @@ export async function materializeActiveTurn(input: {
     }
   }
 
-  const initialBytes = await readBytes(binding.scope, capture.initialInput);
+  const initialBytes = await readBytes(binding.scope, initialInput);
 
   const contentUnits: ResolvedContentUnit[] = units.map((unit) => ({
     request: structuredClone(unit.request),
@@ -352,13 +428,13 @@ export async function materializeActiveTurn(input: {
   return {
     version: 1,
     binding: structuredClone(binding),
-    cut: structuredClone(capture.cut),
-    initialInput: { content: structuredClone(capture.initialInput), bytes: initialBytes },
-    entries,
+    cut: structuredClone(cut),
+    initialInput: { content: structuredClone(initialInput), bytes: initialBytes },
+    entries: resolvedEntries,
     contentUnits,
-    requests: capture.requests.map((record) => structuredClone(record)),
-    childInvocations: capture.childInvocations.map((invocation) => structuredClone(invocation)),
-    checkpointPath: [...capture.checkpointPath],
-    completionRefs: capture.completionRefs.map((completion) => structuredClone(completion)),
+    requests: requests.map((record) => structuredClone(record)),
+    childInvocations: childInvocations.map((invocation) => structuredClone(invocation)),
+    checkpointPath: [...checkpointPath],
+    completionRefs: completionRefs.map((completion) => structuredClone(completion)),
   };
 }

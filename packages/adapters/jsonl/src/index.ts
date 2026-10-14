@@ -633,4 +633,6 @@ export function createJsonlEventPublicationJournal(input: {
 
 export { JsonlTaskPlanRevisionJournal } from './task-plan-revisions.js';
 export type { TaskPlanRevisionAppendInput } from './task-plan-revisions.js';
+export { JsonlTaskIdentityJournal } from './task-identities.js';
+export type { TaskIdentityAppendInput } from './task-identities.js';
 export { JsonlOperationCompletionJournal } from './operation-completion.js';

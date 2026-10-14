@@ -48,3 +48,18 @@ export class CheckpointClosureError extends CheckpointCoordinatorError {
     this.name = 'CheckpointClosureError';
   }
 }
+
+export class ContextHistoryError extends CheckpointCoordinatorError {
+  constructor(message: string, options: CheckpointCoordinatorErrorOptions = {}) {
+    super(message, options);
+    this.name = 'ContextHistoryError';
+  }
+}
+
+/** Required closure facts could not be read; absence must not become known empty. */
+export class CheckpointClosureSourceError extends CheckpointClosureError {
+  constructor(message: string, options: CheckpointCoordinatorErrorOptions = {}) {
+    super(message, options);
+    this.name = 'CheckpointClosureSourceError';
+  }
+}

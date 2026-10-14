@@ -4,6 +4,8 @@ export * from './hand-services.js';
 export * from './web-search.js';
 export * from './task-flow.js';
 export * from './task-plan-revision.js';
+export * from './task-identity.js';
+export * from './turn-closure.js';
 import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';
 
 export interface ScopedId<K extends ScopeKind = ScopeKind> {
