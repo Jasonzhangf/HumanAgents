@@ -113,23 +113,6 @@ function turnIdFromCommitId(commitId: string, discriminator: string, admittedTur
   return turnId;
 }
 
-function discriminatorOf(record: ActiveTurnJournalRecord): string {
-  switch (record.kind) {
-    case 'binding-opened':
-      return 'binding-opened';
-    case 'initial-input':
-      return 'initial-input';
-    case 'request':
-      return `request:${record.record.request.requestId}:${record.record.phase}`;
-    case 'accepted-fact':
-      return `fact:${record.entry.envelope.request.requestId}:${record.entry.envelope.producerSeq}`;
-    case 'child-invocation':
-      return invocationDiscriminatorOf(record.record);
-    default:
-      return `delivery:${record.entry.invocationId}`;
-  }
-}
-
 function validateRawAssetContent(asset: RawAsset, label: string): void {
   if (asset === null || typeof asset !== 'object' || Array.isArray(asset)) {
     throw new JournalIntegrityError(`${label} must be a raw asset`);
@@ -246,13 +229,16 @@ function validateInvocationRecord(record: ChildInvocationRecord): void {
   if (record.adoptedResultSeq !== undefined) {
     positiveInteger(record.adoptedResultSeq, 'active turn invocation adoptedResultSeq');
   }
+  if (record.notSelectedResultSeq !== undefined) {
+    positiveInteger(record.notSelectedResultSeq, 'active turn invocation notSelectedResultSeq');
+  }
+  if (record.adoptedResultSeq !== undefined && record.notSelectedResultSeq !== undefined) {
+    throw new JournalIntegrityError('active turn invocation cannot both adopt and not select its delivery');
+  }
   if (record.postReviewCheckpointRef !== undefined) {
     nonEmpty(record.postReviewCheckpointRef, 'active turn invocation postReviewCheckpointRef');
     if (record.binding.kind !== 'review') {
       throw new JournalIntegrityError('active turn post-review checkpoint requires a review invocation');
-    }
-    if (record.adoptedResultSeq === undefined) {
-      throw new JournalIntegrityError('active turn post-review checkpoint requires an adopted result');
     }
     if (record.postReviewCheckpointRef === record.checkpointReceiptRef) {
       throw new JournalIntegrityError('active turn post-review checkpoint must differ from the pre-call checkpoint');
@@ -260,11 +246,113 @@ function validateInvocationRecord(record: ChildInvocationRecord): void {
   }
 }
 
-function invocationDiscriminatorOf(record: ChildInvocationRecord): string {
+/**
+ * One child-invocation snapshot names its transition through the typed decision
+ * fields it carries, never through a single field-presence precedence. A
+ * selection snapshot may retain the already committed post-review association,
+ * and a review-checkpoint snapshot may still carry no selection, so the exact
+ * permitted commit id is a bounded set. The commit id itself is validated
+ * against that set instead of inferring the transition from key text.
+ */
+type InvocationTransition = 'invocation' | 'adopted' | 'not-selected' | 'review-checkpoint';
+
+function permittedInvocationTransitions(
+  record: ChildInvocationRecord,
+): readonly { readonly transition: InvocationTransition; readonly discriminator: string }[] {
+  const adopted = record.adoptedResultSeq !== undefined;
+  const notSelected = record.notSelectedResultSeq !== undefined;
+  const permitted: { transition: InvocationTransition; discriminator: string }[] = [];
+  if (adopted && !notSelected) permitted.push({ transition: 'adopted', discriminator: `adopted:${record.invocationId}` });
+  if (notSelected && !adopted) permitted.push({ transition: 'not-selected', discriminator: `not-selected:${record.invocationId}` });
+  if (record.postReviewCheckpointRef !== undefined) {
+    permitted.push({ transition: 'review-checkpoint', discriminator: `review-checkpoint:${record.invocationId}` });
+  }
+  if (!adopted && !notSelected && record.postReviewCheckpointRef === undefined) {
+    permitted.push({ transition: 'invocation', discriminator: `invocation:${record.invocationId}` });
+  }
+  return permitted;
+}
+
+/**
+ * Fold of the child facts retained before one child-invocation snapshot. The
+ * latest snapshot per invocation carries every committed decision; the delivery
+ * map carries each invocation's exact durable return.
+ */
+interface ChildInvocationFold {
+  readonly latest: Map<string, ChildInvocationRecord>;
+  readonly deliveries: Map<string, AcceptedChildDelivery>;
+}
+
+function emptyChildInvocationFold(): ChildInvocationFold {
+  return { latest: new Map(), deliveries: new Map() };
+}
+
+/**
+ * Validate one child-invocation snapshot against its exact permitted transition
+ * identity and the retained preceding facts. The commit id must name one of the
+ * transitions the typed decision fields permit. The snapshot must keep its
+ * opening binding and every committed decision, and adoption, non-selection and
+ * the post-review association each require their matching durable return.
+ */
+function validateChildInvocationTransition(
+  commitId: string,
+  record: ChildInvocationRecord,
+  commitIdFor: (discriminator: string) => string,
+  fold: ChildInvocationFold,
+): void {
   validateInvocationRecord(record);
-  if (record.postReviewCheckpointRef !== undefined) return `review-checkpoint:${record.invocationId}`;
-  if (record.adoptedResultSeq !== undefined) return `adopted:${record.invocationId}`;
-  return `invocation:${record.invocationId}`;
+  const matched = permittedInvocationTransitions(record)
+    .find((candidate) => commitIdFor(candidate.discriminator) === commitId);
+  if (matched === undefined) {
+    throw new JournalIntegrityError('active turn child invocation commit id does not match its decision');
+  }
+  const { transition } = matched;
+  const prior = fold.latest.get(record.invocationId);
+  if (transition === 'invocation') {
+    if (prior !== undefined) {
+      // The same-key exact retry reuses the committed opening snapshot.
+      if (canonicalJsonStringify(prior) === canonicalJsonStringify(record)) return;
+      throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} is already opened`);
+    }
+    fold.latest.set(record.invocationId, record);
+    return;
+  }
+  if (prior === undefined) {
+    throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} transition requires its opening record`);
+  }
+  if (canonicalJsonStringify(prior.binding) !== canonicalJsonStringify(record.binding)) {
+    throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} cannot change its binding`);
+  }
+  if (prior.adoptedResultSeq !== undefined && record.adoptedResultSeq !== prior.adoptedResultSeq) {
+    throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} cannot change its adopted decision`);
+  }
+  if (prior.notSelectedResultSeq !== undefined && record.notSelectedResultSeq !== prior.notSelectedResultSeq) {
+    throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} cannot change its non-selection decision`);
+  }
+  if (prior.postReviewCheckpointRef !== undefined && record.postReviewCheckpointRef !== prior.postReviewCheckpointRef) {
+    throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} cannot change its post-review association`);
+  }
+  const delivery = fold.deliveries.get(record.invocationId);
+  if (transition === 'adopted') {
+    if (prior.notSelectedResultSeq !== undefined) {
+      throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} cannot adopt after a non-selection`);
+    }
+    if (delivery === undefined || delivery.seq !== record.adoptedResultSeq) {
+      throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} adoption requires its retained delivery`);
+    }
+  }
+  if (transition === 'not-selected') {
+    if (prior.adoptedResultSeq !== undefined) {
+      throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} cannot not-select after an adoption`);
+    }
+    if (delivery === undefined || delivery.seq !== record.notSelectedResultSeq) {
+      throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} non-selection requires its retained delivery`);
+    }
+  }
+  if (transition === 'review-checkpoint' && (delivery === undefined || delivery.kind !== 'review')) {
+    throw new JournalIntegrityError(`active turn child invocation ${record.invocationId} post-review checkpoint requires its retained review return`);
+  }
+  fold.latest.set(record.invocationId, record);
 }
 
 function validateAcceptedRaw(entry: AcceptedRawFact): void {
@@ -288,8 +376,10 @@ function validateRecordIdentity(
   typed: ActiveTurnJournalRecord,
   admittedTurnId: string,
   binding: ActiveTurnBinding,
+  fold: ChildInvocationFold,
 ): ValidatedRecord {
   if (typed.kind === 'binding-opened') {
+    turnIdFromCommitId(commitId, 'binding-opened', admittedTurnId);
     return { record: typed, turnId: admittedTurnId, scope: bindingOfRecord(typed, admittedTurnId).scope };
   }
   if (typed.kind === 'initial-input') {
@@ -315,28 +405,41 @@ function validateRecordIdentity(
     return { record: typed, turnId, scope: binding.scope };
   }
   if (typed.kind === 'child-invocation') {
-    const turnId = turnIdFromCommitId(commitId, invocationDiscriminatorOf(typed.record), admittedTurnId);
-    return { record: typed, turnId, scope: binding.scope };
+    validateChildInvocationTransition(
+      commitId,
+      typed.record,
+      (discriminator) => activeTurnCommitId(admittedTurnId, discriminator),
+      fold,
+    );
+    return { record: typed, turnId: admittedTurnId, scope: binding.scope };
   }
   validateAcceptedDelivery(typed.entry);
+  fold.deliveries.set(typed.entry.invocationId, typed.entry);
   const turnId = turnIdFromCommitId(commitId, `delivery:${typed.entry.invocationId}`, admittedTurnId);
   return { record: typed, turnId, scope: binding.scope };
+}
+
+interface ValidatedRecords {
+  readonly records: ActiveTurnJournalRecord[];
+  /** Child facts retained after the last validated record, for the next append. */
+  readonly fold: ChildInvocationFold;
 }
 
 function validateRecords(
   records: readonly JournalRecord[],
   admittedTurnId: string,
   binding: ActiveTurnBinding,
-): ActiveTurnJournalRecord[] {
+): ValidatedRecords {
   const owned: ActiveTurnJournalRecord[] = [];
+  const fold = emptyChildInvocationFold();
   for (const record of records) {
     if (!isActiveTurnCarrier(record) || !isBoundTurnCarrier(record, admittedTurnId)) continue;
     const typed = payloadOf(record);
     assertOwnedKind(typed.kind);
-    const validated = validateRecordIdentity(record.commitId, typed, admittedTurnId, binding);
+    const validated = validateRecordIdentity(record.commitId, typed, admittedTurnId, binding, fold);
     owned.push(validated.record);
   }
-  return owned;
+  return { records: owned, fold };
 }
 
 /**
@@ -374,7 +477,7 @@ export function decodeActiveTurnRecords(
   records: readonly JournalRecord[],
   admittedTurnId: string,
 ): readonly ActiveTurnJournalRecord[] {
-  return validateRecords(records, admittedTurnId, bindingOf(records, admittedTurnId));
+  return validateRecords(records, admittedTurnId, bindingOf(records, admittedTurnId)).records;
 }
 
 /**
@@ -403,14 +506,12 @@ export class JsonlActiveTurnJournal implements ActiveTurnJournalPort {
     if (!input.commitId.trim()) throw new JournalIntegrityError('active turn append commit id is required');
     const record = input.record;
     assertOwnedKind(record.kind);
-    if (input.commitId !== activeTurnCommitId(this.turnId, discriminatorOf(record))) {
-      throw new JournalIntegrityError(`active turn append does not carry the commit id of turn ${this.turnId}`);
-    }
     const records = await this.journal.replay();
     const binding = record.kind === 'binding-opened'
       ? bindingOfRecord(record, this.turnId)
       : bindingOf(records, this.turnId);
-    const validated = validateRecordIdentity(input.commitId, record, this.turnId, binding);
+    const { fold } = validateRecords(records, this.turnId, binding);
+    const validated = validateRecordIdentity(input.commitId, record, this.turnId, binding, fold);
     const payload: ActiveTurnJournalPayload = { type: ACTIVE_TURN_PAYLOAD_TYPE, record };
     await this.journal.append({
       commitId: input.commitId,
@@ -422,7 +523,7 @@ export class JsonlActiveTurnJournal implements ActiveTurnJournalPort {
 
   async replay(): Promise<readonly ActiveTurnJournalRecord[]> {
     const records = await this.journal.replay();
-    return validateRecords(records, this.turnId, bindingOf(records, this.turnId));
+    return validateRecords(records, this.turnId, bindingOf(records, this.turnId)).records;
   }
 }
 
@@ -484,19 +585,6 @@ function decodeSegmentOpened(record: JournalRecord): ResumedTurnSegmentOpened {
   return typed;
 }
 
-function segmentDiscriminatorOf(record: ActiveTurnSegmentJournalRecord): string {
-  switch (record.kind) {
-    case 'request':
-      return `request:${record.record.request.requestId}:${record.record.phase}`;
-    case 'accepted-fact':
-      return `fact:${record.entry.envelope.request.requestId}:${record.entry.envelope.producerSeq}`;
-    case 'child-invocation':
-      return invocationDiscriminatorOf(record.record);
-    default:
-      return `delivery:${record.entry.invocationId}`;
-  }
-}
-
 function segmentIdFromCommitId(commitId: string, discriminator: string, segmentId: string): void {
   const suffix = `:${discriminator}`;
   if (!commitId.startsWith(ACTIVE_TURN_SEGMENT_COMMIT_PREFIX) || !commitId.endsWith(suffix)) {
@@ -525,6 +613,7 @@ function validateSegmentRecordIdentity(
   typed: ActiveTurnSegmentJournalRecord,
   segmentId: string,
   binding: ActiveTurnSegmentBinding,
+  fold: ChildInvocationFold,
 ): ScopeRef {
   if (typed.kind === 'request') {
     validateRequestRecord(typed.record);
@@ -543,12 +632,42 @@ function validateSegmentRecordIdentity(
     return binding.scope;
   }
   if (typed.kind === 'child-invocation') {
-    segmentIdFromCommitId(commitId, invocationDiscriminatorOf(typed.record), segmentId);
+    validateChildInvocationTransition(
+      commitId,
+      typed.record,
+      (discriminator) => activeTurnSegmentCommitId(segmentId, discriminator),
+      fold,
+    );
     return binding.scope;
   }
   validateAcceptedDelivery(typed.entry);
+  fold.deliveries.set(typed.entry.invocationId, typed.entry);
   segmentIdFromCommitId(commitId, `delivery:${typed.entry.invocationId}`, segmentId);
   return binding.scope;
+}
+
+/**
+ * Validate every retained record of one segment in append order and return the
+ * child fold left for the next append. The same shared transition and fold
+ * rules as the v1 active turn apply; only the commit-id namespace differs.
+ */
+function validateSegmentRecordsInOrder(
+  records: readonly JournalRecord[],
+  segmentId: string,
+  binding: ActiveTurnSegmentBinding,
+): { readonly records: ActiveTurnSegmentJournalRecord[]; readonly fold: ChildInvocationFold } {
+  const owned: ActiveTurnSegmentJournalRecord[] = [];
+  const fold = emptyChildInvocationFold();
+  for (const record of records) {
+    if (!isSegmentCarrier(record) || record.commitId === undefined) continue;
+    if (!record.commitId.startsWith(`${ACTIVE_TURN_SEGMENT_COMMIT_PREFIX}${segmentId}:`)) continue;
+    const typed = segmentPayloadOf(record);
+    if (typed.kind === 'segment-opened') continue;
+    assertSegmentRecordKind(typed.kind);
+    validateSegmentRecordIdentity(record.commitId, typed, segmentId, binding, fold);
+    owned.push(typed);
+  }
+  return { records: owned, fold };
 }
 
 function bindingCommitRefOf(records: readonly JournalRecord[], businessTurnId: string): JournalCommitRef {
@@ -747,8 +866,7 @@ export class JsonlActiveTurnSegmentJournal {
       throw new JournalIntegrityError(`segment record does not belong to business turn ${this.businessTurnId}`);
     }
     assertSegmentRecordKind(input.record.kind);
-    const discriminator = segmentDiscriminatorOf(input.record);
-    if (input.commitId !== activeTurnSegmentCommitId(input.segmentId, discriminator)) {
+    if (!input.commitId.startsWith(`${ACTIVE_TURN_SEGMENT_COMMIT_PREFIX}${input.segmentId}:`)) {
       throw new JournalIntegrityError('segment record commit id does not match its segment identity');
     }
     return await this.journal.transaction(
@@ -765,7 +883,8 @@ export class JsonlActiveTurnSegmentJournal {
         if (opened === null) {
           throw new JournalIntegrityError(`active turn segment is not opened: ${input.segmentId}`);
         }
-        validateSegmentRecordIdentity(input.commitId, input.record, input.segmentId, opened.binding);
+        const { fold } = validateSegmentRecordsInOrder(records, input.segmentId, opened.binding);
+        validateSegmentRecordIdentity(input.commitId, input.record, input.segmentId, opened.binding, fold);
         return { kind: 'append' as const, scope: opened.binding.scope, commitId: input.commitId };
       },
       async (plan, append) => {
@@ -791,17 +910,7 @@ export class JsonlActiveTurnSegmentJournal {
     if (opened === null) {
       throw new JournalIntegrityError(`active turn segment is not opened: ${input.segmentId}`);
     }
-    const owned: ActiveTurnSegmentJournalRecord[] = [];
-    for (const record of records) {
-      if (!isSegmentCarrier(record) || record.commitId === undefined) continue;
-      if (!record.commitId.startsWith(`${ACTIVE_TURN_SEGMENT_COMMIT_PREFIX}${input.segmentId}:`)) continue;
-      const typed = segmentPayloadOf(record);
-      if (typed.kind === 'segment-opened') continue;
-      assertSegmentRecordKind(typed.kind);
-      validateSegmentRecordIdentity(record.commitId, typed, input.segmentId, opened.binding);
-      owned.push(typed);
-    }
-    return owned;
+    return validateSegmentRecordsInOrder(records, input.segmentId, opened.binding).records;
   }
 }
 

@@ -18,6 +18,7 @@ import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-gr
 import { createActiveTurnSegmentJournal, createNativeRecoveryAssets } from '../../packages/app/src/native-recovery-assets.js';
 import { produceAdmittedTurn } from '../../packages/runtime/src/admission/admitted-turn.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import { activeTurnCommitId, type ActiveTurnJournalRecord } from '../../packages/runtime/src/context/active-turn-journal.js';
 import { resumeActiveTurnSegment } from '../../packages/runtime/src/context/active-turn-segments.js';
 
 // Observed A item139 rejects legal adoption and blocks four HP cases. This one
@@ -246,6 +247,160 @@ test('Runtime child dispatch, adoption and post-review survive exact v1/v2 Journ
       'active-turn-segment:lifecycle-segment:review-checkpoint:review-child',
     ]);
     assert.equal(await readFile(journalPath, 'utf8'), before, 'fresh reconstruction and reads append nothing');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// A completed review commits its post-review checkpoint before the parent
+// selects. The old codec inferred the transition from post-review field
+// presence, so that later selection commit would collapse onto the
+// review-checkpoint identity. Wrong-transition commit probability is UNKNOWN;
+// it silently corrupts a later decision write and its cold decode, so the
+// counterexample is one physical Journal round trip, not a matrix.
+test('JSONL codec commits the exact not-selected transition and rejects a missing or conflicting selection', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'nonselection-codec-'));
+  try {
+    const journalPath = join(root, 'organ.jsonl');
+    const assetRoot = join(root, 'assets');
+    const turnId = 'codec-turn';
+    const taskId = id('task', 'codec-task');
+    const scope: ScopeRef = {
+      organId: id('organ', 'codec-organ'), taskId,
+      cycleId: id('cycle', 'codec-cycle'), operationId: id('operation', 'codec-operation'),
+    };
+    const evidence = (label: string): EvidenceRef => ({
+      evidenceId: id('evidence', label), kind: 'operation', source: 'child-lifecycle-consumer',
+      locator: `test://codec/${label}`, scope,
+    });
+    const assignment: WorkAssignment = {
+      assignmentId: 'codec-assignment', taskId, pipelineNodeId: 'codec-node',
+      attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'retain a terminal non-selection',
+      targetRefs: ['subject:codec'], expectedOutputRefs: ['output:codec'],
+      acceptanceCriteriaDigest: 'sha256:codec-criteria', successCriteria: ['exact codec identity'],
+      failureCriteria: ['a mis-derived transition identity'], incompleteCriteria: ['missing cold read'],
+      requiredCapabilities: ['provider.execution'], mergeGate: 'not-required',
+    };
+    const runtime = {
+      runtimeId: 'codec-runtime', executionEpoch: 1, ownerRef: 'codec-owner',
+      permissionRevision: 'codec-permission',
+    };
+    const admittedTurn = produceAdmittedTurn({
+      runtime, taskId, scope, assignment, directiveRevision: 1, turnId,
+      currentTurnRef: 'active-turn://codec-turn', admissionEvidence: [evidence('admission')],
+      recoveryStateRef: evidence('recovery'),
+    });
+    const binding: ActiveTurnBinding = {
+      admittedTurn, assignment, execution: { runtimeId: runtime.runtimeId, executionEpoch: 1 }, scope,
+    };
+    const store = new ImmutableAssetStore(assetRoot);
+    const initialInput: RawAsset = {
+      ref: evidenceReference(await store.write('codec-input', new TextEncoder().encode('codec input')), scope, 'operation', 'codec-input'),
+      view: { kind: 'utf8-text' },
+    };
+    const refinedDelivery: RawAsset = {
+      ref: evidenceReference(await store.write('codec-refined', new TextEncoder().encode('codec review passed')), scope, 'operation', 'codec-refined'),
+      view: { kind: 'utf8-text' },
+    };
+    const journal = createJsonlActiveTurnJournal({ filePath: journalPath, turnId });
+    const context = await ActiveTurnContext.open({ journal, binding, currentTurnRef: admittedTurn.currentTurnRef });
+    await context.registerInitialInput(initialInput);
+    const review: ReviewAssignment = {
+      assignmentId: 'codec-review-assignment', taskId: taskId.value, workerAgentId: 'codec-worker',
+      reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
+      acceptanceCriteriaDigest: assignment.acceptanceCriteriaDigest, subjectRefs: ['subject:codec'],
+      subjectDigests: ['sha256:codec-subject'], workerCapabilities: ['provider.execution'],
+      requiredCapabilities: ['review.quality'], mergeGate: 'not-required',
+    };
+    const result: ReviewResult = {
+      resultId: 'codec-review-result', assignmentId: review.assignmentId, taskId: review.taskId,
+      workerAgentId: review.workerAgentId, reviewKind: review.reviewKind, attempt: review.attempt,
+      executionEpoch: review.executionEpoch, inputRevision: review.inputRevision,
+      acceptanceCriteriaDigest: review.acceptanceCriteriaDigest, subjectRefs: review.subjectRefs,
+      subjectDigests: review.subjectDigests, status: 'passed', findings: [], evidenceRefs: [evidence('review')],
+    };
+    await context.openChildInvocation({
+      invocationId: 'codec-review', childTurnId: 'codec-review-turn', checkpointReceiptRef: 'codec-pre',
+      binding: { kind: 'review', assignment: review },
+    });
+    const delivery = await context.recordChildReturn({
+      kind: 'review', invocationId: 'codec-review', assignment: review, result, refinedDelivery,
+    });
+    await context.openChildInvocation({
+      invocationId: 'codec-unreturned', childTurnId: 'codec-unreturned-turn',
+      checkpointReceiptRef: 'codec-unreturned-pre', binding: { kind: 'review', assignment: review },
+    });
+    const opening = context.childInvocations().find((record) => record.invocationId === 'codec-review')!;
+    const unreturned = context.childInvocations().find((record) => record.invocationId === 'codec-unreturned')!;
+
+    // The completed review commits its post-review checkpoint while selection
+    // is still pending.
+    const withCheckpoint = { ...opening, postReviewCheckpointRef: 'codec-post' };
+    await journal.append({
+      commitId: activeTurnCommitId(turnId, 'review-checkpoint:codec-review'),
+      record: { kind: 'child-invocation', record: withCheckpoint },
+    });
+    // The later terminal non-selection keeps that association under its own
+    // transition identity.
+    const notSelected = { ...withCheckpoint, notSelectedResultSeq: delivery.seq };
+    await journal.append({
+      commitId: activeTurnCommitId(turnId, 'not-selected:codec-review'),
+      record: { kind: 'child-invocation', record: notSelected },
+    });
+
+    const cold = await createJsonlActiveTurnJournal({ filePath: journalPath, turnId }).replay();
+    const decisions = cold.filter(
+      (record): record is Extract<ActiveTurnJournalRecord, { kind: 'child-invocation' }> => record.kind === 'child-invocation',
+    );
+    assert.equal(decisions.length, 4);
+    const latest = decisions[decisions.length - 1]!;
+    assert.equal(latest.record.notSelectedResultSeq, delivery.seq);
+    assert.equal(latest.record.adoptedResultSeq, undefined);
+    assert.equal(latest.record.postReviewCheckpointRef, 'codec-post');
+    const committed = await new JsonlOrganJournal(journalPath).verify();
+    assert.equal(committed.valid, true);
+    assert.ok(committed.records.some((record) => record.commitId === `active-turn:${turnId}:review-checkpoint:codec-review`));
+    assert.ok(committed.records.some((record) => record.commitId === `active-turn:${turnId}:not-selected:codec-review`));
+
+    // The same-key exact retry reuses the committed snapshot.
+    await journal.append({
+      commitId: activeTurnCommitId(turnId, 'not-selected:codec-review'),
+      record: { kind: 'child-invocation', record: notSelected },
+    });
+    const retried = await new JsonlOrganJournal(journalPath).verify();
+    assert.equal(retried.records.filter((record) => record.commitId === `active-turn:${turnId}:not-selected:codec-review`).length, 1);
+    // The exact opening retry likewise reuses its committed snapshot.
+    await journal.append({
+      commitId: activeTurnCommitId(turnId, 'invocation:codec-unreturned'),
+      record: { kind: 'child-invocation', record: unreturned },
+    });
+    assert.equal(
+      (await new JsonlOrganJournal(journalPath).verify()).records.filter((record) => record.commitId === `active-turn:${turnId}:invocation:codec-unreturned`).length,
+      1,
+    );
+
+    // A snapshot that both adopts and not-selects one delivery is rejected.
+    await assert.rejects(
+      () => journal.append({
+        commitId: activeTurnCommitId(turnId, 'not-selected:codec-review'),
+        record: { kind: 'child-invocation', record: { ...notSelected, adoptedResultSeq: delivery.seq } },
+      }),
+      (error: unknown) => error instanceof JournalIntegrityError,
+    );
+    // A non-selection without a durable return is rejected.
+    await assert.rejects(
+      () => journal.append({
+        commitId: activeTurnCommitId(turnId, 'not-selected:codec-unreturned'),
+        record: { kind: 'child-invocation', record: { ...unreturned, notSelectedResultSeq: 1 } },
+      }),
+      (error: unknown) => error instanceof JournalIntegrityError,
+    );
+    assert.equal(
+      await new JsonlOrganJournal(journalPath).verify().then((chain) => chain.records.length),
+      committed.records.length,
+      'every rejected transition appends zero bytes',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
