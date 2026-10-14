@@ -105,16 +105,33 @@ function matchesSelectorScope(recordScope: ScopeRef, selectorScope: ScopeRef): b
   return true;
 }
 
-function matchesRuntime(
+/**
+ * Physical namespace selector. An operation-control namespace is the exact
+ * (agentRuntimeId, harnessExecutionEpoch) pair on top of the declared scope. A
+ * selector that declares a field matches only records carrying the same value,
+ * so a record that omits the field can never prove a successor namespace.
+ */
+function matchesSelectedNamespace(
   agentRuntimeId: string | undefined,
   harnessExecutionEpoch: number | undefined,
   selector: OperationControlSelector,
 ): boolean {
-  if (agentRuntimeId !== undefined && selector.agentRuntimeId !== undefined && agentRuntimeId !== selector.agentRuntimeId) return false;
-  if (harnessExecutionEpoch !== undefined
-    && selector.harnessExecutionEpoch !== undefined
-    && harnessExecutionEpoch !== selector.harnessExecutionEpoch) return false;
+  if (selector.agentRuntimeId !== undefined && agentRuntimeId !== selector.agentRuntimeId) return false;
+  if (selector.harnessExecutionEpoch !== undefined && harnessExecutionEpoch !== selector.harnessExecutionEpoch) return false;
   return true;
+}
+
+/** Exact physical namespace equality between a coverage fact and a binding. */
+function sameCoverageNamespace(
+  payload: CoveragePayload,
+  agentRuntimeId: string | undefined,
+  harnessExecutionEpoch: number | undefined,
+): boolean {
+  return payload.agentRuntimeId === agentRuntimeId && payload.harnessExecutionEpoch === harnessExecutionEpoch;
+}
+
+function coverageNamespaceKey(payload: CoveragePayload): string {
+  return `${payload.agentRuntimeId ?? 'none'}|${payload.harnessExecutionEpoch ?? 'none'}`;
 }
 
 function assertCommitRef(value: unknown, label: string): asserts value is JournalCommitRef {
@@ -373,8 +390,23 @@ function coverageCommitId(input: OperationCoverageInitialization): string {
   ])}`;
 }
 
-function envelopeCommitId(event: OperationEvent): string {
-  return `operation-control-envelope:${hexDigest([event.operationId.scope, event.operationId.value, event.eventId])}`;
+/**
+ * Envelope commit identity binds the exact physical namespace. A Provider
+ * lifecycle event id may be reused across incarnations, so the same event id in
+ * a different runtime/epoch must not collide with the original record.
+ */
+function envelopeCommitId(event: OperationEvent, binding: OperationControlBinding): string {
+  return `operation-control-envelope:${hexDigest([
+    binding.scope.organId.scope,
+    binding.scope.organId.value,
+    binding.scope.taskId?.scope ?? null,
+    binding.scope.taskId?.value ?? null,
+    binding.agentRuntimeId,
+    binding.harnessExecutionEpoch,
+    event.operationId.scope,
+    event.operationId.value,
+    event.eventId,
+  ])}`;
 }
 
 function coverageRecords(records: readonly JournalRecord[], scope: ScopeRef): readonly { readonly record: JournalRecord; readonly payload: CoveragePayload }[] {
@@ -418,11 +450,15 @@ export function createJsonlOperationControlJournal(input: {
       const commitId = coverageCommitId(coverage);
       const appended = await journal.transaction<{ readonly existing: JournalRecord | null }, JournalRecord>(
         ({ records }) => {
-          const existing = coverageRecords(records, coverage.scope).at(0) ?? null;
-          if (existing) {
-            if (!sameCommitRef(existing.payload.admissionCommitRef, coverage.admissionCommitRef)
-              || existing.payload.agentRuntimeId !== coverage.agentRuntimeId
-              || existing.payload.harnessExecutionEpoch !== coverage.harnessExecutionEpoch) {
+          // A coverage fact is keyed by the exact physical namespace
+          // (runtime + Harness epoch), never by task scope alone. The same
+          // namespace with the same admission receipt is idempotent; the same
+          // namespace with a different receipt is a conflict; a different
+          // physical namespace appends its own independent coverage.
+          const sameNamespace = coverageRecords(records, coverage.scope)
+            .filter((entry) => sameCoverageNamespace(entry.payload, coverage.agentRuntimeId, coverage.harnessExecutionEpoch));
+          if (sameNamespace.length > 0) {
+            if (sameNamespace.some((entry) => !sameCommitRef(entry.payload.admissionCommitRef, coverage.admissionCommitRef))) {
               throw new AppLifecycleError(
                 'operation-control-coverage-conflict',
                 `operation control coverage already exists for ${coverage.scope.taskId?.value}`,
@@ -430,8 +466,9 @@ export function createJsonlOperationControlJournal(input: {
                 OWNER,
               );
             }
+            return { existing: sameNamespace[0]!.record };
           }
-          return { existing: existing?.record ?? null };
+          return { existing: null };
         },
         async ({ existing }, append) => existing ?? append({
           commitId,
@@ -466,12 +503,17 @@ export function createJsonlOperationControlJournal(input: {
         control,
       };
       assertEnvelopeConsistent(payload);
-      const scope = control.binding.scope;
-      const commitId = envelopeCommitId(event);
-      const appended = await journal.transaction<{ readonly payload: EnvelopePayload }, JournalRecord>(
+      const binding = control.binding;
+      const scope = binding.scope;
+      const commitId = envelopeCommitId(event, binding);
+      const appended = await journal.transaction<
+        { readonly existing: JournalRecord | null; readonly payload: EnvelopePayload | null },
+        JournalRecord
+      >(
         ({ records }) => {
-          const coverages = coverageRecords(records, scope);
-          if (coverages.length === 0) {
+          const coverage = coverageRecords(records, scope)
+            .find((entry) => sameCoverageNamespace(entry.payload, binding.agentRuntimeId, binding.harnessExecutionEpoch));
+          if (coverage === undefined) {
             throw new AppLifecycleError(
               'operation-control-coverage-missing',
               `operation ${event.operationId.value} cannot commit control before its task coverage is initialized`,
@@ -479,12 +521,11 @@ export function createJsonlOperationControlJournal(input: {
               OWNER,
             );
           }
-          const coverage = coverages.at(0)!;
-          if (coverage.payload.agentRuntimeId !== undefined && coverage.payload.agentRuntimeId !== control.binding.agentRuntimeId) {
+          if (!sameCommitRef(coverage.payload.admissionCommitRef, binding.admissionCommitRef)) {
             throw new AppLifecycleError(
               'operation-control-binding-conflict',
-              `operation ${event.operationId.value} runtime does not match the scope coverage binding`,
-              'reconcile the runtime binding with its admitted coverage before retrying',
+              `operation ${event.operationId.value} admission does not match its physical namespace coverage`,
+              'reconcile the runtime/admission binding with the admitted coverage before retrying',
               OWNER,
             );
           }
@@ -492,7 +533,7 @@ export function createJsonlOperationControlJournal(input: {
           // relationship inside the same append transaction, before any child
           // control becomes durable.
           if (control.childAdmission !== undefined) {
-            const verified = verifyChildRelationship(records, control.binding, control.intent, control.childAdmission);
+            const verified = verifyChildRelationship(records, binding, control.intent, control.childAdmission);
             if (verified.state !== 'verified') {
               throw new AppLifecycleError(
                 'operation-control-child-admission-unknown',
@@ -505,6 +546,9 @@ export function createJsonlOperationControlJournal(input: {
           const chain = records
             .map((record) => ({ record, envelope: readEnvelopePayload(record) }))
             .filter((entry): entry is { record: JournalRecord; envelope: EnvelopePayload } => entry.envelope !== null)
+            .filter((entry) => matchesExactScope(entry.envelope.control.binding.scope, binding.scope))
+            .filter((entry) => entry.envelope.control.binding.agentRuntimeId === binding.agentRuntimeId
+              && entry.envelope.control.binding.harnessExecutionEpoch === binding.harnessExecutionEpoch)
             .filter((entry) => sameScopedId(entry.envelope.control.intent.operationId, event.operationId))
             .sort((left, right) => left.record.seq - right.record.seq);
           const latest = chain.at(-1);
@@ -517,8 +561,22 @@ export function createJsonlOperationControlJournal(input: {
                 OWNER,
               );
             }
-            const replay = latest.envelope.event.eventId === event.eventId;
-            if (!replay && control.executionEpoch < latest.envelope.control.executionEpoch) {
+            if (latest.envelope.event.eventId === event.eventId) {
+              // Exact replay in the same physical namespace returns the
+              // original receipt and never rewrites the ledger or borrows
+              // another namespace's record.
+              if (latest.envelope.control.status !== control.status
+                || latest.envelope.control.executionEpoch !== control.executionEpoch) {
+                throw new AppLifecycleError(
+                  'operation-control-replay-conflict',
+                  `operation ${event.operationId.value} replay reuses event ${event.eventId} with different content`,
+                  'commit a new event identity for a different successor state',
+                  OWNER,
+                );
+              }
+              return { existing: latest.record, payload: null };
+            }
+            if (control.executionEpoch < latest.envelope.control.executionEpoch) {
               throw new AppLifecycleError(
                 'operation-control-stale-transition',
                 `operation ${event.operationId.value} control transition regresses execution epoch`,
@@ -527,13 +585,13 @@ export function createJsonlOperationControlJournal(input: {
               );
             }
           }
-          return { payload };
+          return { existing: null, payload };
         },
-        async (plan, append) => append({
+        async (plan, append) => plan.existing ?? append({
           commitId,
           kind: 'event',
           scope,
-          payload: { ...plan.payload },
+          payload: { ...plan.payload! },
         }),
       );
       return journalCommitRef(appended);
@@ -559,7 +617,7 @@ export function readOperationControlFromRecords(
   selector: OperationControlSelector,
 ): OperationControlReadback {
       const coverages = coverageRecords(records, selector.scope)
-        .filter((entry) => matchesRuntime(entry.payload.agentRuntimeId, entry.payload.harnessExecutionEpoch, selector));
+        .filter((entry) => matchesSelectedNamespace(entry.payload.agentRuntimeId, entry.payload.harnessExecutionEpoch, selector));
       if (coverages.length === 0) {
         return {
           state: 'unknown',
@@ -569,8 +627,23 @@ export function readOperationControlFromRecords(
         };
       }
       const distinctCoverage = new Set(coverages.map((entry) => entry.payload.admissionCommitRef.commitId));
-      if (distinctCoverage.size > 1) corrupt('operation control scope carries conflicting coverage facts');
-      const coverageRef = journalCommitRef(coverages[0]!.record);
+      const namespaces = new Set(coverages.map((entry) => coverageNamespaceKey(entry.payload)));
+      if (namespaces.size > 1) {
+        return {
+          state: 'unknown',
+          scope: selector.scope,
+          reason: 'scope carries more than one physical operation-control namespace; read it with an explicit agent runtime and Harness execution epoch',
+          missingRefs: [],
+        };
+      }
+      if (distinctCoverage.size > 1) corrupt('operation control namespace carries conflicting coverage facts');
+      const selected = coverages[0]!;
+      const coverageRef = journalCommitRef(selected.record);
+      const namespace: OperationControlSelector = {
+        scope: selector.scope,
+        agentRuntimeId: selected.payload.agentRuntimeId,
+        harnessExecutionEpoch: selected.payload.harnessExecutionEpoch,
+      };
 
       const scopedEnvelopes: { readonly record: JournalRecord; readonly envelope: EnvelopePayload }[] = [];
       let legacy = false;
@@ -578,7 +651,7 @@ export function readOperationControlFromRecords(
         const envelope = readEnvelopePayload(record);
         if (envelope) {
           if (matchesSelectorScope(envelope.control.binding.scope, selector.scope)
-            && matchesRuntime(envelope.control.binding.agentRuntimeId, envelope.control.binding.harnessExecutionEpoch, selector)) {
+            && matchesSelectedNamespace(envelope.control.binding.agentRuntimeId, envelope.control.binding.harnessExecutionEpoch, namespace)) {
             scopedEnvelopes.push({ record, envelope });
           }
           continue;
@@ -618,7 +691,7 @@ export function readOperationControlFromRecords(
       const currentControlCommitRef = scopedEnvelopes.length > 0
         ? journalCommitRef(scopedEnvelopes[scopedEnvelopes.length - 1]!.record)
         : coverageRef;
-      const pendingChildren = pendingChildRegistrations(records, selector, latestByOperation);
+      const pendingChildren = pendingChildRegistrations(records, namespace, latestByOperation);
       if (pendingChildren.length > 0) {
         return {
           state: 'unknown',
@@ -679,7 +752,7 @@ function pendingChildRegistrations(
     if (registration === null || provenance === undefined) continue;
     if (!matchesSelectorScope(provenance.parentNamespace, selector.scope)) continue;
     if (!sameScopedId(provenance.parentOperationId, parentOperationId)) continue;
-    if (!matchesRuntime(provenance.agentRuntimeId, provenance.harnessExecutionEpoch, selector)) continue;
+    if (!matchesSelectedNamespace(provenance.agentRuntimeId, provenance.harnessExecutionEpoch, selector)) continue;
     const key = `${provenance.operationId.scope}:${provenance.operationId.value}`;
     const committedAdmission = committedByOperation.get(key)?.envelope.control.childAdmission;
     if (committedAdmission !== undefined
