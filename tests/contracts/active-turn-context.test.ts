@@ -487,3 +487,111 @@ test('a post-review checkpoint is review-only and never the pre-call checkpoint'
     ContractError,
   );
 });
+
+test('a not-selected child invocation keeps the retained delivery and records the terminal decision', () => {
+  const notSelected: ActiveTurnCaptureBody = {
+    ...baseBody,
+    childInvocations: baseBody.childInvocations.map((invocation) => (
+      invocation.invocationId === 'invocation-b'
+        ? {
+            invocationId: 'invocation-b', childTurnId: 'turn-child-b', checkpointReceiptRef: 'checkpoint-receipt-b',
+            binding: { kind: 'execution', assignment: childAssignment }, notSelectedResultSeq: 6,
+          }
+        : invocation
+    )),
+  };
+  assert.doesNotThrow(() => validateActiveTurnCaptureBody(notSelected));
+  const invocation = notSelected.childInvocations.find((candidate) => candidate.invocationId === 'invocation-b')!;
+  assert.equal(invocation.adoptedResultSeq, undefined);
+  assert.equal(invocation.notSelectedResultSeq, 6);
+  // The retained delivery stays exact evidence after the terminal decision.
+  const retained = notSelected.entries.find((entry) => entry.seq === 6) as AcceptedChildDelivery;
+  assert.equal(retained.invocationId, 'invocation-b');
+  assert.equal('envelope' in retained, false);
+});
+
+test('a child invocation cannot both adopt and not select the same delivery', () => {
+  assert.throws(
+    () => validateActiveTurnCaptureBody({
+      ...baseBody,
+      childInvocations: baseBody.childInvocations.map((invocation) => (
+        invocation.invocationId === 'invocation-b'
+          ? { ...invocation, notSelectedResultSeq: 6 }
+          : invocation
+      )),
+    }),
+    ContractError,
+  );
+});
+
+test('a not-selected seq must reference a retained delivery of the same invocation and kind', () => {
+  const notSelectedInvocation = (overrides: Record<string, unknown>) => ({
+    invocationId: 'invocation-b', childTurnId: 'turn-child-b', checkpointReceiptRef: 'checkpoint-receipt-b',
+    binding: { kind: 'execution', assignment: childAssignment }, ...overrides,
+  });
+  // Missing entry.
+  assert.throws(
+    () => validateActiveTurnCaptureBody({
+      ...baseBody,
+      childInvocations: [baseBody.childInvocations[0]!, notSelectedInvocation({ notSelectedResultSeq: 99 })],
+    }),
+    ContractError,
+  );
+  // A raw Provider envelope is not a refined child delivery.
+  assert.throws(
+    () => validateActiveTurnCaptureBody({
+      ...baseBody,
+      childInvocations: baseBody.childInvocations.map((invocation) => (
+        invocation.invocationId === 'invocation-a'
+          ? { ...invocation, notSelectedResultSeq: 1 }
+          : invocation
+      )),
+    }),
+    ContractError,
+  );
+  // The retained delivery belongs to another invocation.
+  assert.throws(
+    () => validateActiveTurnCaptureBody({
+      ...baseBody,
+      childInvocations: [
+        baseBody.childInvocations[0]!,
+        baseBody.childInvocations[1]!,
+        { invocationId: 'invocation-c', childTurnId: 'turn-child-c', checkpointReceiptRef: 'checkpoint-receipt-c', binding: { kind: 'execution', assignment: childAssignment }, notSelectedResultSeq: 6 },
+      ],
+    }),
+    ContractError,
+  );
+  // A review invocation cannot not-select an execution delivery.
+  assert.throws(
+    () => validateActiveTurnCaptureBody({
+      ...reviewBody,
+      childInvocations: reviewBody.childInvocations.map((invocation) => (
+        invocation.invocationId === 'invocation-review'
+          ? { ...invocation, notSelectedResultSeq: 6 }
+          : invocation
+      )),
+    }),
+    ContractError,
+  );
+});
+
+test('a completed review keeps its post-review checkpoint without adoption and can be terminally not selected', () => {
+  const reviewNotSelected: ActiveTurnCaptureBody = {
+    ...reviewBody,
+    childInvocations: reviewBody.childInvocations.map((invocation) => (
+      invocation.invocationId === 'invocation-review'
+        ? {
+            invocationId: 'invocation-review', childTurnId: 'turn-child-review',
+            checkpointReceiptRef: 'checkpoint-receipt-review-pre',
+            binding: { kind: 'review', assignment: reviewAssignment },
+            postReviewCheckpointRef: 'checkpoint-receipt-review-post', notSelectedResultSeq: 7,
+          }
+        : invocation
+    )),
+  };
+  assert.doesNotThrow(() => validateActiveTurnCaptureBody(reviewNotSelected));
+  const invocation = reviewNotSelected.childInvocations.find((candidate) => candidate.invocationId === 'invocation-review')!;
+  assert.equal(invocation.adoptedResultSeq, undefined);
+  assert.equal(invocation.notSelectedResultSeq, 7);
+  assert.equal(invocation.postReviewCheckpointRef, 'checkpoint-receipt-review-post');
+});
