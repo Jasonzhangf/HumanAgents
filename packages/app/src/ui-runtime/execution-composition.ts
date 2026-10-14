@@ -17,7 +17,7 @@ import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../
 import { createJsonlActiveTurnJournal } from '../../../adapters/jsonl/src/active-turn.js';
 import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
 import { produceAdmittedTurn, newActiveTurnId } from '../../../runtime/src/admission/admitted-turn.js';
-import { AgentLoopRuntime } from '../../../runtime/src/agent-loop/runtime.js';
+import { AgentLoopRuntime, type HistoricalTurnBinding, type RecoverTurnResult } from '../../../runtime/src/agent-loop/runtime.js';
 import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlContextHistoryPort,
   createJsonlSemanticHistoryJournal, readCommittedNativeSegmentSource } from '../checkpoint-journal.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
@@ -29,7 +29,7 @@ import { closeAgentProvider, type AgentProviderComposition } from '../agent-driv
 import type { RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/agent-driver.js';
-import type { EvidenceRef, ProviderToolDefinition, WorkAssignment } from '../../../contracts/src/index.js';
+import type { AdmittedTurnIdentity, EvidenceRef, ProviderToolDefinition, WorkAssignment } from '../../../contracts/src/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { createResponsesFileToolExecutor } from '../provider-tool-execution.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
@@ -103,6 +103,11 @@ function missing(message: string): never {
 }
 
 type StandardTurnLifecycle = NonNullable<RuntimeExecutionDriver['standardTurn']>;
+type HistoricalRestoreBinding = {
+  readonly binding: HistoricalTurnBinding;
+  readonly segmentSource?: NativeSegmentSaveSourceV2;
+  readonly execution: { readonly runtimeId: string; readonly executionEpoch: number };
+};
 /**
  * Exact historical boundary lifecycle. It owns no live Provider and cannot
  * generate. `finishBoundary` completes only the retained native save phases.
@@ -256,35 +261,57 @@ export function createDefaultExecutionComposition(input: {
     if (!execution.standardTurn) missing('resumed generation driver has no standard-turn port');
     return execution as RuntimeExecutionDriver & { readonly standardTurn: StandardTurnLifecycle };
   }
+  /** Select the real physical binding that owns one historical execution epoch. */
+  async function readHistoricalRestoreBinding(source: RuntimeColdExecutionSource, identity: AdmittedTurnIdentity,
+    executionEpoch: number): Promise<HistoricalRestoreBinding | null> {
+    const matching = source.segments.filter((segment) => segment.binding.execution.executionEpoch === executionEpoch);
+    if (matching.length > 1) return null;
+    if (matching.length === 1) {
+      const segmentSource = await readCommittedNativeSegmentSource({ journal: input.journal,
+        originalAdmittedTurn: source.initial.body.binding.admittedTurn, opened: matching[0]! });
+      return { binding: { kind: 'segment', segment: matching[0]! }, segmentSource,
+        execution: segmentSource.opened.binding.execution };
+    }
+    if (executionEpoch !== identity.executionEpoch) return null;
+    return { binding: { kind: 'initial', initial: source.initial },
+      execution: source.initial.body.binding.execution };
+  }
   /**
-   * Read-only exact reconstruction of the original durable turn. It selects the
-   * current committed context and the original admitted-turn identity, so the
-   * boundary classification and alignment reuse the real `AgentLoopRuntime`
-   * machine without acquiring an instance or publishing a successor context.
+   * Read-only exact reconstruction of the original durable turn. The physical
+   * binding comes from the actual initial capture or committed segment, and the
+   * restored loop is the same loop reused by boundary classification, save and
+   * alignment. It never selects a Provider, requires a granted state, acquires
+   * an incarnation or publishes a successor context.
    */
-  async function coldLoop(source: RuntimeColdExecutionSource): Promise<AgentLoopRuntime> {
+  async function coldLoop(source: RuntimeColdExecutionSource, identity: AdmittedTurnIdentity,
+    executionEpoch: number, checkpointId: import('../../../contracts/src/index.js').Checkpoint['id'] | null):
+  Promise<{ readonly loop: AgentLoopRuntime; readonly recovery: RecoverTurnResult;
+    readonly historical: HistoricalRestoreBinding } | null> {
+    const historical = await readHistoricalRestoreBinding(source, identity, executionEpoch);
+    if (!historical) return null;
+    if (source.current.position.executionEpoch !== executionEpoch
+      || source.current.context.agentRuntimeId !== historical.execution.runtimeId
+      || source.current.context.loopCheckpoint.executionEpoch !== executionEpoch) return null;
     const grant = await grants.readTaskGrant(source.allocation.taskId);
     if (!grant.grant || !grant.commit || grant.grant.owner !== input.principal.owner) {
       missing('the current grant does not authorize the original durable turn');
     }
     const mode = source.current.context.loopControl.mode;
-    const selected = await input.prepareAgentProvider({ roleId: source.allocation.role ?? 'execution',
-      ...(source.allocation.configuredAgentId === undefined ? {} : { configuredAgentId: source.allocation.configuredAgentId }) });
-    try {
-      return await AgentLoopRuntime.restore({ role: 'execution', mode,
-        profiles: [{ profileId: 'task-execution-context', role: 'execution', mode,
-          observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
-          orchestrationCapabilities: [], capabilityDigest: selected.binding.capabilityDigest }],
-        budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
-        agentRuntimeId: source.current.context.agentRuntimeId, scope: source.scope,
-        executionEpoch: projectAdmittedTurnIdentityV1(source.initial.body.binding.admittedTurn).executionEpoch,
-        permissionRevision: String(grant.grant.revision),
-        observationStreamId: source.current.context.loopControl.inboxStreamId, now: input.now,
-        turn: { identity: projectAdmittedTurnIdentityV1(source.initial.body.binding.admittedTurn),
-          cycleId: source.allocation.scope.cycleId!, directiveRevision: source.allocation.directiveRevision,
-          ownerId: source.allocation.ownerId, journal: nativeCheckpoints, closurePort: closures } },
-        context, source.scope, source.current.position.contextCommitRef);
-    } finally { await closeAgentProvider(selected); }
+    const restored = await AgentLoopRuntime.restoreHistoricalTurn({
+      role: 'execution', mode,
+      profiles: [{ profileId: 'task-execution-context', role: 'execution', mode,
+        observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
+        // The read-only historical loop issues no Provider work. Its lease label is the exact
+        // grant commit that admitted the original turn; no Provider selection runs here.
+        orchestrationCapabilities: [], capabilityDigest: grant.commit.recordDigest }],
+      budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
+      permissionRevision: String(grant.grant.revision),
+      observationStreamId: source.current.context.loopControl.inboxStreamId, now: input.now,
+      turn: { identity, cycleId: source.allocation.scope.cycleId!, directiveRevision: source.allocation.directiveRevision,
+        ownerId: source.allocation.ownerId, journal: nativeCheckpoints, closurePort: closures } },
+      context, { binding: historical.binding, contextCommitRef: source.current.position.contextCommitRef,
+        exact: { checkpointId } });
+    return { ...restored, historical };
   }
   async function recoverOriginalTurn(value: { readonly source: RuntimeColdExecutionSource }): Promise<RuntimeColdTurnPreparation> {
     const source = value.source;
@@ -293,10 +320,20 @@ export function createDefaultExecutionComposition(input: {
     const verification = await input.journal.verify();
     if (!verification.valid) missing(verification.error ?? 'exact recovery Journal verification failed');
     const position = verification.records.find((entry) => entry.commitId === source.current.position.checkpointCommitRef.commitId);
-    const selected = retained && 'closureKind' in retained && retained.closureKind === 'turn-recovery'
-      ? retained.checkpointId : position?.checkpoint?.id ?? null;
-    const loop = await coldLoop(source);
-    const recovery = await loop.recoverTurn(undefined, { checkpointId: selected });
+    const retainedRecovery = retained && 'closureKind' in retained && retained.closureKind === 'turn-recovery'
+      ? retained : null;
+    const selected = retainedRecovery
+      ? retainedRecovery.checkpointId : (position?.checkpoint?.id ?? null);
+    const executionEpoch = retainedRecovery?.frozenClose?.checkpoint.executionEpoch
+      ?? source.current.position.executionEpoch;
+    const restored = await coldLoop(source, identity, executionEpoch, selected);
+    if (!restored) {
+      const recovery: RecoverTurnResult = { stage: 'unknown', turnId: identity.turnId, advance: 'paused' };
+      return { kind: 'unknown-held', turnId: identity.turnId,
+        reason: 'the exact historical physical binding and committed context cannot be restored for the original turn',
+        recovery };
+    }
+    const { loop, recovery, historical } = restored;
     if (recovery.stage === 'unknown') {
       return { kind: 'unknown-held', turnId: identity.turnId, reason: 'exact original turn stage is unknown', recovery };
     }
@@ -311,12 +348,9 @@ export function createDefaultExecutionComposition(input: {
     if (!frozen.bound || !(await readCheckpointClosurePreparation(closures, frozen.checkpoint))) {
       return { kind: 'unknown-held', turnId: identity.turnId, reason: 'exact original bound closure preparation is absent', recovery };
     }
-    let segmentSource: NativeSegmentSaveSourceV2 | undefined;
-    if (frozen.checkpoint.executionEpoch !== identity.executionEpoch) {
-      const matching = source.segments.filter((segment) => segment.binding.execution.executionEpoch === frozen.checkpoint.executionEpoch);
-      if (matching.length !== 1) return { kind: 'unknown-held', turnId: identity.turnId, reason: 'exact historical segment execution is unavailable', recovery };
-      segmentSource = await readCommittedNativeSegmentSource({ journal: input.journal,
-        originalAdmittedTurn: source.initial.body.binding.admittedTurn, opened: matching[0]! });
+    const segmentSource = historical.segmentSource;
+    if (frozen.checkpoint.executionEpoch !== identity.executionEpoch && !segmentSource) {
+      return { kind: 'unknown-held', turnId: identity.turnId, reason: 'exact historical segment execution is unavailable', recovery };
     }
     const boundaryId = segmentSource ? `segment-close:${segmentSource.opened.segmentId}` : `execution-close:${source.allocation.operationId.value}`;
     const key = { turn: identity, boundaryId, checkpoint: { id: frozen.checkpoint.id, scope: frozen.checkpoint.scope },
@@ -334,7 +368,7 @@ export function createDefaultExecutionComposition(input: {
       attemptExecutionEpoch: frozen.checkpoint.executionEpoch, attemptBindingId: boundaryId },
       { source, loop, ...(segmentSource === undefined ? {} : { segment: segmentSource.opened }), retainedIntent: complete.intent });
     if (!('finishBoundary' in lifecycle)) missing('boundary preparation resolved a generation driver');
-    const execution = { runtimeId: segmentSource?.opened.binding.execution.runtimeId ?? source.current.context.agentRuntimeId,
+    const execution = { runtimeId: historical.execution.runtimeId,
       executionEpoch: frozen.checkpoint.executionEpoch };
     if (recovery.stage === 'closure-absent') {
       return { kind: 'exact-pending-boundary', execution, key, standardTurn: lifecycle.standardTurn,
