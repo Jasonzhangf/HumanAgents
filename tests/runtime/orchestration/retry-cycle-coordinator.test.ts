@@ -138,8 +138,19 @@ class Reviewer implements ReviewAgentPort {
 
 type ProviderOutcome = 'failed' | 'succeeded' | 'unknown' | 'unsettled' | 'cancelled';
 
+type DriverConstructor = new (
+  input: RuntimeExecutionDriverInput,
+  bindingId: string,
+  outcome: ProviderOutcome,
+  events: string[],
+  closeState?: ProviderCloseResult['state'],
+) => RuntimeExecutionDriver;
+
 class FakeProviderDriver implements RuntimeExecutionDriver {
   readonly kind = 'retry10-fake-provider';
+
+  bindChildCallManager(_manager: Pick<OrchestrationManager, 'callChild'>): void {}
+
   constructor(
     readonly input: RuntimeExecutionDriverInput,
     private readonly bindingId: string,
@@ -235,13 +246,39 @@ class FakeProviderDriver implements RuntimeExecutionDriver {
   }
 }
 
+/**
+ * Records the real child-manager binding the coordinator hands it and refuses
+ * to start a root model request before that binding happened. This is the
+ * executable counterexample for "the model must not start unbound": without
+ * the coordinator binding, `start` throws and the task never succeeds.
+ */
+class BindingRecordingDriver extends FakeProviderDriver {
+  readonly boundManagers: Array<Pick<OrchestrationManager, 'callChild'>> = [];
+  readonly order: string[] = [];
+
+  override bindChildCallManager(manager: Pick<OrchestrationManager, 'callChild'>): void {
+    this.boundManagers.push(manager);
+    this.order.push('bind');
+  }
+
+  override async start(input: { readonly runtimeId: string; readonly executionEpoch: number }) {
+    if (this.boundManagers.length === 0) {
+      throw new Error(`root model request started before the child manager was bound: attempt ${this.input.executionEpoch}`);
+    }
+    this.order.push('start');
+    return super.start(input);
+  }
+}
+
 function makeHarness(input: {
   readonly bindingIds: readonly string[];
   readonly outcomes: readonly ProviderOutcome[];
   readonly closeStates?: readonly ProviderCloseResult['state'][];
+  readonly driverCtor?: DriverConstructor;
 }) {
   const events: string[] = [];
   const createdBindings: string[] = [];
+  const drivers: RuntimeExecutionDriver[] = [];
   const journal = new MemoryRetryJournal();
   const attentions: Attention[] = [];
   const runtimePool = new AgentRuntimePoolManager({
@@ -253,19 +290,23 @@ function makeHarness(input: {
     organId,
     taskIdPrefix: 'retry10',
     createDriver: () => { throw new Error('retry10 must select a candidate-bound driver'); },
+    admitExecution: async () => {},
     providerRetry: {
       config: retryConfig(input.bindingIds),
       journal,
       createDriverForBinding(bindingId, driverInput) {
         const index = createdBindings.length;
         createdBindings.push(bindingId);
-        return new FakeProviderDriver(
+        const Driver = input.driverCtor ?? FakeProviderDriver;
+        const driver = new Driver(
           driverInput,
           bindingId,
           input.outcomes[index] ?? 'failed',
           events,
           input.closeStates?.[index] ?? 'closed',
         );
+        drivers.push(driver);
+        return driver;
       },
     },
     checkpointStoreFor: () => ({
@@ -273,6 +314,10 @@ function makeHarness(input: {
       async readLatest() { return null; },
       async append(input) { return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq }; },
       async commit(checkpoint) { return { checkpointId: checkpoint.id, committed: true as const }; },
+      async readCommitted() { return null; },
+      async listCommitted() { return { checkpoints: [] as const }; },
+      async readExecutionPosition() { return null; },
+      async readCheckpointRecoveryBinding() { return null; },
     }),
     attentionPort: {
       async publish(attention) { attentions.push(attention); return { attentionId: attention.attentionId, delivered: true }; },
@@ -294,7 +339,7 @@ function makeHarness(input: {
       return { orchestration, runtimePool };
     },
   });
-  return { coordinator, journal, events, createdBindings, attentions };
+  return { coordinator, journal, events, createdBindings, drivers, attentions };
 }
 
 async function run(harness: ReturnType<typeof makeHarness>) {
@@ -302,7 +347,7 @@ async function run(harness: ReturnType<typeof makeHarness>) {
   const started = harness.coordinator.startExecution(task.taskId, { prompt: 'run', orchestrate: true });
   for (let index = 0; index < 200; index += 1) {
     const current = harness.coordinator.taskSnapshot(task.taskId);
-    if (!['running', 'settling'].includes(current.state)) return { task: current, operationId: started.operationId };
+    if (!['waiting', 'running', 'settling'].includes(current.state)) return { task: current, operationId: started.operationId };
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`coordinator did not settle; last task state=${harness.coordinator.taskSnapshot(task.taskId).state}`);
@@ -376,3 +421,28 @@ for (const outcome of ['unknown', 'unsettled', 'cancelled'] as const) {
     assert.ok(harness.coordinator.attentionAudit().published.length > 0, JSON.stringify({ state: result.task.state, error: result.task.error, retryState: harness.journal.writes.at(-1)?.state }));
   });
 }
+
+// Probability UNKNOWN; the real producer cannot call a child before the
+// coordinator hands it the manager. The counterexample is executable: a driver
+// that refuses to start unbound fails this case if the coordinator does not
+// bind each real attempt driver from the assembly before the root request.
+test('RuntimeTaskCoordinator binds the assembly child manager to each real retry driver before start without building extra instances', async () => {
+  const harness = makeHarness({
+    bindingIds: ['binding-a', 'binding-b'],
+    outcomes: ['failed', 'succeeded'],
+    driverCtor: BindingRecordingDriver,
+  });
+  const result = await run(harness);
+
+  assert.notEqual(result.task.state, 'waiting', JSON.stringify({ state: result.task.state, error: result.task.error, bindings: harness.createdBindings, events: harness.events }));
+  const drivers = harness.drivers as BindingRecordingDriver[];
+  // The binding step must not acquire or construct any driver of its own: the
+  // count equals the real retry attempts, one per selected binding.
+  assert.equal(drivers.length, harness.createdBindings.length, 'binding must not build extra driver instances');
+  assert.equal(drivers.length, 2, JSON.stringify({ bindings: harness.createdBindings }));
+  assert.deepEqual(drivers.map((driver) => driver.order), [['bind', 'start'], ['bind', 'start']],
+    'each real retry driver binds the child manager before its root model request starts');
+  assert.ok(drivers.every((driver) => driver.boundManagers.length === 1), 'each driver receives exactly one child manager');
+  assert.ok(drivers.every((driver) => typeof driver.boundManagers[0]?.callChild === 'function'),
+    'the bound manager is the typed OrchestrationManager child entry, not a business payload copy');
+});
