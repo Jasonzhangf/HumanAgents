@@ -91,6 +91,9 @@ import {
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
 import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
+import type { DispatchInput } from '../orchestration/types.js';
+import { resumeColdExecution, type ColdExecutionLifecycleBinding, type PreparedColdExecution,
+  type RuntimeColdExecutionProducer, type RuntimeColdExecutionResumeRequest } from './cold-execution-resume.js';
 
 export type RuntimeTaskError = {
   readonly code: string;
@@ -473,6 +476,12 @@ export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCo
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
+  /**
+   * Same App composition's mandatory cold owners (source, grant, incarnation
+   * config, original-turn recovery and native v2 composition). Absence keeps a
+   * cold resume held; it never fabricates an empty producer.
+   */
+  readonly coldExecution?: RuntimeColdExecutionProducer;
   readonly admitExecution?: RuntimeExecutionAdmission;
   /**
    * Reads back the files an execution produced, so the quality reviewer is
@@ -623,6 +632,8 @@ export interface TaskRecord {
   resolveRelease?: (release: RuntimeExecutionRelease) => void;
   rejectRelease?: (error: unknown) => void;
   composition?: RuntimeExecutionComposition;
+  /** Settled closure of the retained cold execution, read by the generation lane. */
+  resumedClosure?: AgentRuntimeClosure;
   checkpointBoundary?: ContextCheckpointBoundary;
   taskAssembly?: RuntimeTaskAssembly;
   /** Live Runtime-owned active turn for the current orchestrated execution. */
@@ -1412,9 +1423,11 @@ export class RuntimeTaskCoordinator {
       );
     }
     const transitionRef = facts.turn.nextAction.ref ?? facts.turn.recoveryResponsibilityRef ?? '';
+    const stateDigest = createHash('sha256')
+      .update(JSON.stringify(this.currentStateFor(record, undefined, facts))).digest('hex');
     return this.persistCurrentState(
       record,
-      `turn:${record.taskId.value}:${record.executionEpoch ?? 0}:${facts.turn.phase}:${facts.turn.nextAction.kind}:${transitionRef}`,
+      `turn:${record.taskId.value}:${record.executionEpoch ?? 0}:${facts.turn.phase}:${facts.turn.nextAction.kind}:${transitionRef}:${stateDigest}`,
       taskScope,
       undefined,
       facts,
@@ -1733,6 +1746,394 @@ export class RuntimeTaskCoordinator {
     record.resolveRelease?.(record.release);
     record.resolveRelease = undefined;
     record.rejectRelease = undefined;
+  }
+
+  /**
+   * Cold callers select retained business identity only; every control fact
+   * (source, grant, incarnation config, original-turn stage, native composition)
+   * is supplied by the bound owners. This is a selector, not a second prepare.
+   */
+  resumeExecution(
+    taskId: RuntimeExecutionAllocation['taskId'],
+    operationId: RuntimeExecutionAllocation['operationId'],
+    request: RuntimeColdExecutionResumeRequest,
+  ): Promise<RuntimeExecutionRelease> {
+    return resumeColdExecution({
+      tasks: this.tasks,
+      operations: this.operations,
+      producer: this.options.coldExecution,
+      lifecycle: this.coldLifecycle(),
+    }, taskId, operationId, request);
+  }
+
+  private createProviderExecutionAgent(
+    execute: ExecutionAgentPort['execute'],
+  ): ExecutionAgentPort {
+    return {
+      roleId: 'humanagent.ui-runtime.provider-execution',
+      createInstance: (create) => ({ incarnation: create.incarnation, execute, dispose: async () => {} }),
+      execute,
+    };
+  }
+
+  /** Runtime owns the same actual lifecycle and resource transfer for cold resumes. */
+  private coldLifecycle(): ColdExecutionLifecycleBinding {
+    return {
+      assemblyFor: (record, operation, scope) => this.coldAssemblyFor(record, operation, scope),
+      releaseToLifecycle: (record, operation, prepared) => this.releaseColdToLifecycle(record, operation, prepared),
+    };
+  }
+
+  /**
+   * Reuses the retained assembly when it exists; otherwise builds one through
+   * the same real factory and shared provider-execution executor. It never
+   * mints a second pool or a hollow executor.
+   */
+  private coldAssemblyFor(record: TaskRecord, operation: OperationRecord, scope: ScopeRef): RuntimeTaskAssembly {
+    if (record.taskAssembly) return record.taskAssembly;
+    if (!this.options.createTaskAssembly) {
+      throw new RuntimeTaskControlError(
+        'orchestration.unavailable',
+        RUNTIME_OWNER,
+        'cold execution resume requires the task assembly factory',
+        'bind execution, review, and merge orchestration ports before resuming',
+      );
+    }
+    const assembly = this.options.createTaskAssembly({
+      task: this.currentTaskFor(record),
+      scope,
+      checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+      // The cold module acquires the retained instance from this assembly, and
+      // the retained-handle dispatch executes through that acquired handle. So
+      // the shared executor here is the real resumed-attempt driver, not a
+      // hollow placeholder.
+      executionAgent: this.createProviderExecutionAgent(
+        (input) => this.executeResumedProviderAttempt(record, operation, scope, input),
+      ),
+      maxAttempts: 1,
+    });
+    record.taskAssembly = assembly;
+    return assembly;
+  }
+
+  private releaseColdToLifecycle(
+    record: TaskRecord,
+    operation: OperationRecord,
+    prepared: PreparedColdExecution,
+  ): Promise<RuntimeExecutionRelease> {
+    return prepared.kind === 'generation-ready'
+      ? this.runResumedGeneration(record, operation, prepared)
+      : this.finishColdBoundary(record, operation, prepared);
+  }
+
+  private coldScopeFor(operation: OperationRecord): ScopeRef {
+    const scope = operation.allocation?.scope ?? this.scopes.get(operation.operationId.value);
+    if (!scope) {
+      throw new RuntimeTaskControlError(
+        'operation.scope.missing',
+        RUNTIME_OWNER,
+        'cold resume has no retained execution scope',
+        'resolve the exact retained operation allocation before resuming',
+      );
+    }
+    this.scopes.set(operation.operationId.value, scope);
+    return scope;
+  }
+
+  /**
+   * Generation branch. It reuses the already-acquired handle/lease/incarnation
+   * and the original business assignment, dispatches through the retained-handle
+   * manager entry (no second acquire, no new assignment, no retry begin), then
+   * runs the same canonical turn tail as the normal lane. The acquired lease is
+   * released exactly once here, whatever the outcome.
+   */
+  private async runResumedGeneration(
+    record: TaskRecord,
+    operation: OperationRecord,
+    prepared: Extract<PreparedColdExecution, { kind: 'generation-ready' }>,
+  ): Promise<RuntimeExecutionRelease> {
+    const scope = this.coldScopeFor(operation);
+    const assembly = prepared.assembly;
+    record.taskAssembly = assembly;
+    // Bind the real resumed driver before dispatch: the retained handle the
+    // cold module already acquired executes through the assembly's shared
+    // executor, which resolves the driver from this record instead of a second
+    // acquire or a stale placeholder.
+    record.driver = prepared.driver;
+    const assignment = prepared.source.assignment;
+    const stageNodeId = `stage-${operation.operationId.value}`;
+    record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
+    record.nextStep = '编排执行、审查并合并';
+    this.markExecutionReleased(record, operation);
+    let failure: unknown;
+    try {
+      assembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
+      const dispatchInput: DispatchInput = {
+        stageNodeId,
+        assignment,
+        agentId: 'humanagent.provider-execution',
+        scope,
+        reviewKinds: ['quality'],
+      };
+      const dispatched = await assembly.orchestration.dispatchAcquired(dispatchInput, prepared.acquired);
+      // C3 accepts the completed review receipts on the retained turn before
+      // the native close. Late reviews that land after the close stay the first
+      // error; the frozen closure is never rewritten to claim completion.
+      await prepared.driver.standardTurn.acceptReviews(dispatched.reviewCommitRefs ?? []);
+      if (record.stopping || record.postCommitRecoveryPending || record.state === 'stopped') {
+        return { state: 'released' };
+      }
+      if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {
+        const problem = dispatched.issue;
+        throw new RuntimeTaskControlError(
+          'orchestration.dispatch.failed',
+          problem?.ownerId ?? RUNTIME_OWNER,
+          problem?.reason ?? `resumed orchestration dispatch ended as ${dispatched.status}`,
+          problem ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}` : 'inspect orchestration assignment',
+        );
+      }
+      record.running = false;
+      record.currentState = '收拢中';
+      record.nextStep = '等待 checkpoint';
+      record.allowedActions = [];
+      await this.completeStandardTurn({
+        record,
+        operation,
+        scope,
+        standardTurn: prepared.driver.standardTurn,
+        expectedExecutionEpoch: prepared.acquired.lease.executionEpoch,
+        closeOwned: async () => {
+          const closure = record.resumedClosure;
+          if (!closure) {
+            throw new RuntimeTaskControlError('turn.closure.missing', RUNTIME_OWNER,
+              'cold resume settled without a provider closure to close',
+              'inspect the resumed provider execution');
+          }
+          const close = await this.closeForExecution(operation.operationId, prepared.driver, closure.evidenceRefs);
+          if (close.state !== 'closed') {
+            throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER,
+              `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
+          }
+        },
+      });
+      return { state: 'released' };
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      try {
+        await this.releaseColdLease(prepared, scope);
+      } catch (cleanup) {
+        if (failure !== undefined) {
+          throw new AggregateError([failure, cleanup],
+            'cold generation failed and its retained lease release also failed');
+        }
+        throw cleanup;
+      }
+    }
+  }
+
+  /**
+   * Boundary branch. The historical boundary retains its exact physical
+   * binding; only the real `finishBoundary` completes the remaining retained
+   * phases, then the same canonical tail aligns and applies acceptance. No new
+   * execution generation, driver, start/observe/settle is created.
+   */
+  private async finishColdBoundary(
+    record: TaskRecord,
+    operation: OperationRecord,
+    prepared: Extract<PreparedColdExecution, { kind: 'exact-pending-boundary' | 'committed-close-alignment' }>,
+  ): Promise<RuntimeExecutionRelease> {
+    const scope = this.coldScopeFor(operation);
+    await prepared.finishBoundary();
+    record.running = false;
+    record.currentState = '收拢中';
+    record.nextStep = '等待 checkpoint';
+    record.allowedActions = [];
+    await this.completeStandardTurn({
+      record,
+      operation,
+      scope,
+      standardTurn: prepared.standardTurn,
+      expectedExecutionEpoch: prepared.execution.executionEpoch,
+      // `finishBoundary` already completed the once-owned native/Provider close.
+      closeOwned: async () => {},
+    });
+    return { state: 'released' };
+  }
+
+  /**
+   * The retained handle executes through the assembly's shared executor. It
+   * binds the real resumed driver (installed by the generation lane before
+   * dispatch) and runs the same provider attempt body as the normal lane, so
+   * the physical report, checkpoint and context all use the real new binding.
+   */
+  private async executeResumedProviderAttempt(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    input: Parameters<ExecutionAgentPort['execute']>[0],
+  ): Promise<WorkResult> {
+    const driver = record.driver;
+    if (!driver) {
+      throw new RuntimeTaskControlError(
+        'execution.cold.driver.missing',
+        RUNTIME_OWNER,
+        'cold resume reached its retained handle without the resumed driver binding',
+        'resume through the coordinator so the retained handle drives the execution',
+      );
+    }
+    const lease = input.lease;
+    const checkpointBoundary = new ContextCheckpointBoundary(
+      this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+    );
+    record.checkpointBoundary = checkpointBoundary;
+    const composition = new HarnessExecutionComposition({
+      driver,
+      runtimeId: lease.runtimeId,
+      taskId: record.taskId,
+      assignmentId: input.assignment.assignmentId,
+      operationId: operation.operationId,
+      executionEpoch: lease.executionEpoch,
+      scope,
+      checkpointBoundary,
+      now: this.now,
+      hookRegistry: this.options.hookRegistry,
+    });
+    record.composition = composition;
+    record.driver = driver;
+    record.runtime = composition.runtime;
+    const outputRef = `operation://${operation.operationId.value}/output`;
+    const attempt = await this.executePreparedProviderAttempt(
+      record,
+      operation,
+      scope,
+      operation.input,
+      outputRef,
+      input,
+      this.providerAttemptReport(input, input.assignment.attempt, lease.executionEpoch),
+      composition,
+      composition.runtime,
+    );
+    record.resumedClosure = attempt.closure;
+    return attempt.result;
+  }
+
+  /** Owned lease release runs exactly once at the cold endpoint. */
+  private async releaseColdLease(
+    prepared: Extract<PreparedColdExecution, { kind: 'generation-ready' }>,
+    scope: ScopeRef,
+  ): Promise<void> {
+    const released = await prepared.assembly.runtimePool.release(prepared.acquired.lease, { scope });
+    if (released.status === 'blocked') {
+      throw new RuntimeTaskControlError(released.issue.code, released.issue.ownerId,
+        released.issue.reason, released.issue.nextAction.kind);
+    }
+  }
+
+  /**
+   * The canonical turn tail shared by the normal executed lane and a cold
+   * resumed lane. It adopts the real closing checkpoint (never a generic
+   * business checkpoint), closes the once-owned Provider, aligns the retained
+   * turn, applies acceptance/disposition, and admits the next standard turn only
+   * when the retained turn advances.
+   */
+  private async completeStandardTurn(input: {
+    readonly record: TaskRecord;
+    readonly operation: OperationRecord;
+    readonly scope: ScopeRef;
+    readonly standardTurn: NonNullable<RuntimeExecutionDriver['standardTurn']>;
+    readonly expectedExecutionEpoch: number;
+    readonly closeOwned: () => Promise<void>;
+  }): Promise<AdvanceTurnResult> {
+    const { record, operation, scope, standardTurn } = input;
+    const committed = await standardTurn.readCheckpoint();
+    if (committed.checkpoint.scope.operationId?.value !== operation.operationId.value
+      || committed.checkpoint.executionEpoch !== input.expectedExecutionEpoch) {
+      throw new RuntimeTaskControlError('turn.checkpoint.conflict', RUNTIME_OWNER,
+        'canonical closing checkpoint belongs to another execution', 'resolve the exact turn checkpoint');
+    }
+    record.checkpoint = committed.checkpoint;
+    record.checkpointSeq = committed.checkpoint.seq;
+    this.pushEvent(record, operation, 'checkpoint.committed', committed.checkpoint.outcome,
+      committed.checkpoint.summary, committed.checkpoint.evidenceRefs);
+    await input.closeOwned();
+    const advance = await standardTurn.align();
+    await this.applyStandardTurnAdvance(record, operation, scope, advance);
+    if (advance.state === 'advancing') await this.startNextStandardTurn(record, operation, advance);
+    return advance;
+  }
+
+  /**
+   * Recovers the retained standard turn of a task that already settled: it
+   * closes the owned Provider, aligns the frozen turn and applies the
+   * acceptance/disposition. It reuses the same canonical tail body.
+   */
+  async recoverStandardTurn(taskId: TaskId): Promise<AdvanceTurnResult> {
+    const record = this.requireTask(taskId);
+    const driver = record.driver;
+    const operation = record.operationId ? this.operations.get(record.operationId.value) : undefined;
+    const scope = operation ? this.scopes.get(operation.operationId.value) : undefined;
+    if (!driver?.standardTurn || !operation || !scope || record.running || record.stopping) {
+      throw new RuntimeTaskControlError('turn.recovery.unavailable', RUNTIME_OWNER,
+        'no settled retained standard turn is available', 'resolve the actual turn owner before recovery');
+    }
+    return this.completeStandardTurn({
+      record,
+      operation,
+      scope,
+      standardTurn: driver.standardTurn,
+      expectedExecutionEpoch: operation.executionEpoch,
+      closeOwned: async () => {
+        const close = await this.closeForExecution(operation.operationId, driver, []);
+        if (close.state !== 'closed') {
+          throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER,
+            `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
+        }
+      },
+    });
+  }
+
+  private async applyStandardTurnAdvance(record: TaskRecord, operation: OperationRecord, scope: ScopeRef,
+    advance: AdvanceTurnResult): Promise<void> {
+    if (!advance.admission || !advance.alignment || (advance.state !== 'advancing' && advance.state !== 'terminal')) {
+      throw new RuntimeTaskControlError('turn.alignment.pending', RUNTIME_OWNER,
+        advance.reason, 'recover alignment on the same logical turn');
+    }
+    const state = advance.state === 'advancing' ? 'waiting' : advance.decision === 'complete' ? 'succeeded' : 'failed';
+    record.state = state;
+    record.running = false;
+    record.error = undefined;
+    await this.persistCurrentState(record,
+      `turn-aligned:${record.taskId.value}:${operation.operationId.value}:${advance.alignment.planRevisionId}`, scope);
+    this.pushEvent(record, operation, 'execution.terminal', state, advance.reason,
+      record.checkpoint?.evidenceRefs ?? [], undefined, undefined, undefined, undefined, 'final');
+    this.finalize(record, state);
+    if (advance.state === 'advancing') {
+      record.allowedActions = ['start'];
+    }
+  }
+
+  private async startNextStandardTurn(record: TaskRecord, operation: OperationRecord, advance: AdvanceTurnResult) {
+    if (advance.state !== 'advancing' || !advance.admission || advance.decision !== 'continue') {
+      throw new RuntimeTaskControlError('turn.advance.denied', RUNTIME_OWNER,
+        'next turn has no durable continue admission', 'resolve the existing turn admission');
+    }
+    try {
+      // The old execution's release/finally must finish before normal prepare
+      // installs the next operation's pending release on this same Task record.
+      this.startExecution(record.taskId, { prompt: operation.input, orchestrate: operation.orchestrated,
+        ...(operation.allocation?.role === undefined ? {} : { role: operation.allocation.role }),
+        ...(operation.allocation?.configuredAgentId === undefined ? {} : { configuredAgentId: operation.allocation.configuredAgentId }) });
+    } catch (error) {
+      record.error = errorFromUnknown(error);
+      record.state = 'blocked';
+      record.running = false;
+      record.allowedActions = [];
+      record.nextStep = record.error.nextAction;
+      await this.tryPersistCurrentState(record,
+        `turn-advance-pending:${record.taskId.value}:${operation.operationId.value}:${record.error.code}`, this.taskScopeFor(record));
+    }
   }
 
   /**
@@ -2992,11 +3393,7 @@ export class RuntimeTaskCoordinator {
               return blockedResult(workResult, failure.issue);
             }
         };
-        const providerExecutionAgent: ExecutionAgentPort = {
-          roleId: 'humanagent.ui-runtime.provider-execution',
-          createInstance: (create) => ({ incarnation: create.incarnation, execute: executeProviderAttempt, dispose: async () => {} }),
-          execute: executeProviderAttempt,
-        };
+        const providerExecutionAgent = this.createProviderExecutionAgent(executeProviderAttempt);
         record.taskAssembly = this.options.createTaskAssembly({
           task: {
             id: record.taskId,
@@ -3031,6 +3428,10 @@ export class RuntimeTaskCoordinator {
           reviewKinds: ['quality'],
         });
         const dispatched = activeTurn ? await activeTurn.runProducer(dispatch) : await dispatch();
+        // C3 accepts the completed review receipts on the retained turn before
+        // the native close. Late reviews that land after the close stay the first
+        // error; the frozen closure is never rewritten to claim completion.
+        await driver?.standardTurn?.acceptReviews(dispatched.reviewCommitRefs ?? []);
         if (record.stopping || record.postCommitRecoveryPending || record.state === 'stopped') return;
         if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {
           if (!closure) {
@@ -3118,11 +3519,11 @@ export class RuntimeTaskCoordinator {
         closure = await composition!.settle();
       }
       if (record.postCommitRecoveryPending || !closure) return;
+      const settledClosure = closure;
       record.running = false;
       record.currentState = '收拢中';
       record.nextStep = '等待 checkpoint';
       record.allowedActions = [];
-      await this.commitBusinessCheckpoint(record, scope, closure.state);
       const closeDriver = driver ?? record.driver;
       if (!closeDriver) {
         throw new RuntimeTaskControlError(
@@ -3133,19 +3534,40 @@ export class RuntimeTaskCoordinator {
         );
       }
       const cachedRetryClose = closedRetryDrivers.get(closeDriver);
-      let close: Pick<ProviderCloseResult, 'state' | 'evidenceRefs' | 'ownerId' | 'nextAction'> & { readonly retained: boolean };
-      if (cachedRetryClose) {
-        this.activeExecutions.delete(operation.operationId.value);
-        close = {
-          state: cachedRetryClose.state,
-          evidenceRefs: cachedRetryClose.evidenceRefs,
-          retained: false,
-          ownerId: cachedRetryClose.ownerId,
-          nextAction: cachedRetryClose.nextAction,
-        };
-      } else {
-        close = await this.closeForExecution(operation.operationId, closeDriver, closure.evidenceRefs);
+      const closeProvider = async (): Promise<Pick<ProviderCloseResult, 'state' | 'evidenceRefs' | 'ownerId' | 'nextAction'> & { readonly retained: boolean }> => {
+        if (cachedRetryClose) {
+          this.activeExecutions.delete(operation.operationId.value);
+          return {
+            state: cachedRetryClose.state,
+            evidenceRefs: cachedRetryClose.evidenceRefs,
+            retained: false,
+            ownerId: cachedRetryClose.ownerId,
+            nextAction: cachedRetryClose.nextAction,
+          };
+        }
+        return this.closeForExecution(operation.operationId, closeDriver, settledClosure.evidenceRefs);
+      };
+      if (closeDriver.standardTurn) {
+        // The same canonical tail the cold resumed lane runs: adopt the real
+        // closing checkpoint, close the owned Provider, align, then apply the
+        // acceptance/disposition and admit the next turn only when it advances.
+        await this.completeStandardTurn({
+          record,
+          operation,
+          scope,
+          standardTurn: closeDriver.standardTurn,
+          expectedExecutionEpoch: operation.executionEpoch,
+          closeOwned: async () => {
+            const closed = await closeProvider();
+            if (closed.state !== 'closed') {
+              throw new RuntimeTaskControlError('provider.close.failed', closed.ownerId ?? RUNTIME_OWNER, `provider close is ${closed.state}`, toNextActionText(closed.nextAction) ?? 'inspect provider close evidence');
+            }
+          },
+        });
+        return;
       }
+      await this.commitBusinessCheckpoint(record, scope, closure.state);
+      const close = await closeProvider();
       if (close.state !== 'closed') {
         throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
       }
@@ -3182,6 +3604,25 @@ export class RuntimeTaskCoordinator {
         return;
       }
       const projection: MutableRuntimeTaskError = errorFromUnknown(error);
+      if (driver?.standardTurn) {
+        // Canonical turn failure retains its own checkpoint/recovery stage. The
+        // generic terminal path must not append a second projection checkpoint.
+        record.error = projection;
+        record.running = false;
+        record.state = 'blocked';
+        record.allowedActions = [];
+        record.nextStep = projection.nextAction;
+        try {
+          await this.closeForExecution(operation.operationId, driver, []);
+        } catch (cleanupError) {
+          projection.cleanupError = errorFromUnknown(cleanupError);
+        }
+        await this.tryPersistCurrentState(record,
+          `turn-pending:${record.taskId.value}:${operation.operationId.value}:${projection.code}`, scope);
+        this.pushEvent(record, operation, 'execution.terminal', 'blocked', projection.message,
+          [], projection.ownerId, true, projection.nextAction, { error: projection }, 'final');
+        return;
+      }
       const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: scope.cycleId };
       const errorEvidenceRef: EvidenceRef = {
         evidenceId: id('evidence', `error-${record.operationId?.value ?? 'none'}-${record.checkpointSeq + 1}`),
