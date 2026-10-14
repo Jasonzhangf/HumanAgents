@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   assertExecutionEpoch,
   assertSameScope,
+  canonicalJsonStringify,
   id,
   validateAdmittedTurn,
   validateAdmittedTurnIdentity,
@@ -42,6 +43,7 @@ import {
   type TurnCloseSummary,
   type TurnClosureReference,
   type TurnRecoveryReference,
+  type TurnSummaryEvidenceContext,
 } from '../../../contracts/src/index.js';
 import { validateContextHistoryRecord } from '../../../contracts/src/agent-loop.js';
 import { validateActiveTurnCaptureBody } from '../../../contracts/src/active-turn-context.js';
@@ -176,6 +178,7 @@ export interface CloseTurnInput {
     readonly preparation: CheckpointClosurePreparationRecord;
     readonly turnRecoveryRef: string;
   }>;
+  readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
   readonly summary: TurnCloseSummary;
   readonly recovery: TurnRecoveryFacts;
   readonly outcome: Checkpoint['outcome'];
@@ -276,6 +279,7 @@ export interface RecoverTurnResult {
   readonly turnId: string;
   readonly checkpointId?: Checkpoint['id'];
   readonly closure?: TurnClosureReference;
+  readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
   readonly alignment?: PlannerAlignmentReference;
   readonly recovery?: TurnRecoveryReference;
   readonly advance: 'resume-same-turn' | 'alignment-only' | 'readback-only' | 'paused';
@@ -301,12 +305,14 @@ type ResolvedTurnRecoveryStage =
     readonly checkpointId: Checkpoint['id'];
     readonly closure: TurnClosureReference;
     readonly recovery: TurnRecoveryRecord;
+    readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
   }
   | {
     readonly kind: 'alignment-committed';
     readonly checkpointId: Checkpoint['id'];
     readonly closure: TurnClosureReference;
     readonly alignment: PlannerAlignmentReference;
+    readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
   };
 
 export interface OpenObservationScopeRequest {
@@ -630,8 +636,14 @@ export class AgentLoopRuntime {
       readonly closureRef: string;
       readonly closure: TurnClosureReference;
       readonly recoveryRecord: TurnRecoveryRecord;
+      readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
     }
-    | { readonly phase: 'aligned'; readonly closure: TurnClosureReference; readonly alignment: PlannerAlignmentReference } = { phase: 'open' };
+    | {
+      readonly phase: 'aligned';
+      readonly closure: TurnClosureReference;
+      readonly alignment: PlannerAlignmentReference;
+      readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
+    } = { phase: 'open' };
   private lastCloseResult: TurnCloseResult | null = null;
   private leaseOrdinal = 0;
   private usage: AgentLoopBudgetUsage = {
@@ -1439,13 +1451,14 @@ export class AgentLoopRuntime {
     let reviewCommitRefs: readonly JournalCommitRef[];
     try {
       reviewCommitRefs = distinctReviewCommitRefs(input.reviewCommitRefs);
-      validateTurnCloseSummary(input.summary, identity.scopeRef);
+      validateTurnCloseSummary(input.summary, identity.scopeRef, input.summaryEvidenceContext);
     } catch (error) {
       throw new AgentLoopRuntimeError('turn-close-validation', messageOf(error));
     }
     // Copy serializable effective facts only. The composition callback is never cloned.
     const inputs = structuredClone({
       summary: input.summary,
+      summaryEvidenceContext: input.summaryEvidenceContext,
       recovery: input.recovery,
       outcome: input.outcome,
       source: input.source,
@@ -1465,7 +1478,7 @@ export class AgentLoopRuntime {
       if (!record || !('closureKind' in record) || record.closureKind !== 'turn-closure') {
         throw new AgentLoopRuntimeError('turn-close-validation', 'closed turn has no durable typed closure');
       }
-      assertTurnClosureRecord(record);
+      assertTurnClosureRecord(record, input.summaryEvidenceContext);
       if (!sameReviewCommitRefs(record.reviewCommitRefs, reviewCommitRefs)) {
         throw new AgentLoopRuntimeError('turn-close-validation', 'closed turn binds a different ordered review receipt list');
       }
@@ -1476,6 +1489,7 @@ export class AgentLoopRuntime {
       if (!checkpointClosure || !('closureKind' in checkpointClosure) || checkpointClosure.closureKind !== 'checkpoint'
         || checkpointClosure.source !== inputs.source || committed.checkpoint.outcome !== inputs.outcome
         || JSON.stringify(record.summary) !== JSON.stringify(inputs.summary)
+        || canonicalJsonStringify(record.summaryEvidenceContext ?? null) !== canonicalJsonStringify(inputs.summaryEvidenceContext ?? null)
         || !!checkpointClosure.recoveryBinding !== bound
         || !recovery || !('closureKind' in recovery) || recovery.closureKind !== 'turn-recovery'
         || JSON.stringify({ contextRef: recovery.contextRef, unfinishedRef: recovery.unfinishedRef,
@@ -1583,6 +1597,7 @@ export class AgentLoopRuntime {
       closureRef,
       recoveryStateRef: recoveryRecord.recoveryStateRef,
       summary: frozen.summary,
+      ...(frozen.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: frozen.summaryEvidenceContext }),
       ...(retainedReviewCommitRefs.length ? { reviewCommitRefs: retainedReviewCommitRefs } : {}),
     };
     let turnClosureRecord: TurnClosureRecord;
@@ -1592,7 +1607,7 @@ export class AgentLoopRuntime {
         if (!('closureKind' in existingClosure) || existingClosure.closureKind !== 'turn-closure') {
           throw new AgentLoopRuntimeError('turn-close-validation', 'durable turn closure has a different kind');
         }
-        assertTurnClosureRecord(existingClosure);
+        assertTurnClosureRecord(existingClosure, frozen.summaryEvidenceContext);
         if (!sameReviewCommitRefs(existingClosure.reviewCommitRefs, retainedReviewCommitRefs)) {
           throw new AgentLoopRuntimeError('turn-close-validation', 'durable turn closure binds a different ordered review receipt list');
         }
@@ -1604,7 +1619,7 @@ export class AgentLoopRuntime {
         turnClosureRecord = existingClosure;
       } else {
         turnClosureRecord = { ...turnClosureFacts, closedAt: this.now().toISOString() };
-        assertTurnClosureRecord(turnClosureRecord);
+        assertTurnClosureRecord(turnClosureRecord, frozen.summaryEvidenceContext);
         await turn.closurePort.commit(turnClosureRecord);
       }
     } catch (error) {
@@ -1637,7 +1652,13 @@ export class AgentLoopRuntime {
       recoveryStateRef: turnClosureRecord.recoveryStateRef,
       closedAt: turnClosureRecord.closedAt,
     };
-    this.turnState = { phase: 'awaiting-planner-alignment', closureRef, closure: turnClosure, recoveryRecord };
+    this.turnState = {
+      phase: 'awaiting-planner-alignment',
+      closureRef,
+      closure: turnClosure,
+      recoveryRecord,
+      ...(frozen.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: frozen.summaryEvidenceContext }),
+    };
     this.lastCloseResult = structuredClone(result);
     return structuredClone(result);
   }
@@ -1678,7 +1699,7 @@ export class AgentLoopRuntime {
       };
     }
 
-    const { closure, recoveryRecord } = this.turnState;
+    const { closure, recoveryRecord, summaryEvidenceContext } = this.turnState;
     const alignmentId = turnBoundaryRecordRefs(identity, closure.checkpointId).alignmentRef;
     try {
       const existing = await turn.closurePort.read(alignmentId);
@@ -1686,9 +1707,14 @@ export class AgentLoopRuntime {
         ? this.asAlignmentRecord(existing)
         : await this.commitAlignment(turn, input, identity, closure, alignmentId);
       const alignment = record.alignment;
-      assertTurnAlignmentBinding(closure, alignment);
-      assertTurnDecisionAdmission({ closure, alignment, decision: input.decision });
-      this.turnState = { phase: 'aligned', closure, alignment };
+      assertTurnAlignmentBinding(closure, alignment, summaryEvidenceContext);
+      assertTurnDecisionAdmission({ closure, alignment, decision: input.decision }, summaryEvidenceContext);
+      this.turnState = {
+        phase: 'aligned',
+        closure,
+        alignment,
+        ...(summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext }),
+      };
       return {
         state: 'aligned',
         alignment,
@@ -1730,9 +1756,9 @@ export class AgentLoopRuntime {
       };
     }
     if (this.turnState.phase === 'aligned') {
-      const { closure, alignment } = this.turnState;
+      const { closure, alignment, summaryEvidenceContext } = this.turnState;
       const admission: TurnAdvanceAdmission = { state: 'closed', decision: alignment.decision, closure, alignment };
-      assertTurnAdvanceAdmission(admission);
+      assertTurnAdvanceAdmission(admission, summaryEvidenceContext);
       if (alignment.decision === 'continue') {
         return {
           advanced: true,
@@ -1827,6 +1853,7 @@ export class AgentLoopRuntime {
         closureRef: resolved.closure.closureRef,
         closure: resolved.closure,
         recoveryRecord: resolved.recovery,
+        ...(resolved.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: resolved.summaryEvidenceContext }),
       };
       if (!input) {
         return {
@@ -1834,6 +1861,7 @@ export class AgentLoopRuntime {
           turnId: identity.turnId,
           checkpointId: resolved.checkpointId,
           closure: resolved.closure,
+          ...(resolved.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: resolved.summaryEvidenceContext }),
           advance: 'alignment-only',
         };
       }
@@ -1845,6 +1873,7 @@ export class AgentLoopRuntime {
           checkpointId: resolved.checkpointId,
           closure: resolved.closure,
           alignment: aligned.alignment,
+          ...(resolved.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: resolved.summaryEvidenceContext }),
           advance: 'alignment-only',
         };
       }
@@ -1853,6 +1882,7 @@ export class AgentLoopRuntime {
         turnId: identity.turnId,
         checkpointId: resolved.checkpointId,
         closure: resolved.closure,
+        ...(resolved.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: resolved.summaryEvidenceContext }),
         recovery: aligned.recovery,
         advance: 'paused',
       };
@@ -1860,17 +1890,23 @@ export class AgentLoopRuntime {
 
     // Alignment is already durable: only re-read it and re-validate the exact binding.
     try {
-      assertTurnAlignmentBinding(resolved.closure, resolved.alignment);
+      assertTurnAlignmentBinding(resolved.closure, resolved.alignment, resolved.summaryEvidenceContext);
     } catch {
       return { stage: 'unknown', turnId: identity.turnId, advance: 'paused' };
     }
-    this.turnState = { phase: 'aligned', closure: resolved.closure, alignment: resolved.alignment };
+    this.turnState = {
+      phase: 'aligned',
+      closure: resolved.closure,
+      alignment: resolved.alignment,
+      ...(resolved.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: resolved.summaryEvidenceContext }),
+    };
     return {
       stage: 'alignment-committed',
       turnId: identity.turnId,
       checkpointId: resolved.checkpointId,
       closure: resolved.closure,
       alignment: resolved.alignment,
+      ...(resolved.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: resolved.summaryEvidenceContext }),
       advance: 'readback-only',
     };
   }
@@ -1905,15 +1941,24 @@ export class AgentLoopRuntime {
     // durable stage cannot be confirmed and the turn stays paused instead of resuming.
     if (!recovery) return { kind: 'unknown' };
 
-    const closure = this.asTurnClosureReference(this.asTurnClosureRecord(closureRecord));
+    const record = this.asTurnClosureRecord(closureRecord);
+    assertTurnClosureRecord(record);
+    const closure = this.asTurnClosureReference(record);
     if (!alignmentRecord) {
-      return { kind: 'closure-committed-alignment-absent', checkpointId, closure, recovery };
+      return {
+        kind: 'closure-committed-alignment-absent',
+        checkpointId,
+        closure,
+        recovery,
+        ...(record.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: record.summaryEvidenceContext }),
+      };
     }
     return {
       kind: 'alignment-committed',
       checkpointId,
       closure,
       alignment: this.asAlignmentRecord(alignmentRecord).alignment,
+      ...(record.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: record.summaryEvidenceContext }),
     };
   }
 
