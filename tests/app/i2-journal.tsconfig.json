@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "noEmitOnError": true,
+    "rootDir": "../..",
+    "outDir": "../../dist/tests-i2-journal",
+    "declaration": false
+  },
+  "include": [
+    "node-modules.d.ts",
+    "../../packages/app/src/node-modules.d.ts",
+    "../../packages/core/src/node-modules.d.ts",
+    "../../packages/context-events/src/node-modules.d.ts",
+    "../../packages/config/src/node-modules.d.ts",
+    "i2-journal-public-consumer.test.ts",
+    "../../packages/app/src/i2-journal.ts"
+  ]
+}

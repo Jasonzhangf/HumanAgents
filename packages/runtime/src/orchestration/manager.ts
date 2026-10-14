@@ -1,8 +1,20 @@
 import {
   assertEvidenceRef,
+  assertProviderExecutionIdentityMatch,
+  canonicalJsonStringify,
   id,
+  validateJournalCommitRef,
+  validateWorkAssignment,
+  validateWorkResult,
+  validateMilestoneReviewResultRecord,
+  validateReviewDelivery,
   type EvidenceRef,
+  type I2JournalPort,
+  type I2Record,
+  type JournalCommitRef,
+  type MilestoneReviewResultRecord,
   type NextAction,
+  type ReviewDelivery,
   type ScopeRef,
   type WorkAssignment,
   type WorkResult,
@@ -17,7 +29,7 @@ import {
 } from '../review/index.js';
 import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from './assignment-graph.js';
 import { OrchestrationError } from './errors.js';
-import { type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
+import { assertReviewMaterial, digestOf, type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
 import { AgentRuntimePoolManager, type RuntimePoolAcquireResult } from './runtime-pool.js';
 import { scopeContains } from '../events/acl.js';
 import type {
@@ -28,6 +40,9 @@ import type {
   ExecutionAgentPort,
   ExecutionDelivery,
   ExecutionInstanceAcquireInput,
+  IndependentChildCallInput,
+  IndependentChildCallResult,
+  MilestoneReviewBinding,
   TaskRuntimeIncarnation,
   TaskExecutionHandle,
   MergeCoordinatorPort,
@@ -36,7 +51,9 @@ import type {
   OrchestrationFeedbackPort,
   OrchestrationIssue,
   ReviewAgentPort,
+  ReviewInstanceRequest,
   RuntimePoolLease,
+  TaskReviewHandle,
 } from './types.js';
 
 export interface OrchestrationManagerOptions {
@@ -44,6 +61,11 @@ export interface OrchestrationManagerOptions {
   readonly runtimePool: AgentRuntimePoolManager;
   readonly executionAgent?: ExecutionAgentPort;
   readonly reviewAgent?: ReviewAgentPort;
+  /**
+   * Durable Journal port for declared I2 milestone reviews. Absent, a declared
+   * I2 review fails explicitly instead of falling back to the in-memory gate.
+   */
+  readonly reviewJournal?: I2JournalPort;
   readonly mergeCoordinator?: MergeCoordinatorPort;
   readonly feedback?: OrchestrationFeedbackPort;
   readonly graph?: AssignmentGraph;
@@ -128,6 +150,33 @@ function normalizeDelivery(delivery: WorkResult | ExecutionDelivery): ExecutionD
   return { result: delivery };
 }
 
+function assertExecutionDelivery(delivery: ExecutionDelivery, assignment: WorkAssignment, agentId: string): void {
+  validateWorkResult(delivery.result, assignment);
+  if (delivery.result.agentId !== agentId) throw new Error('work result agent does not match the selected agent');
+  for (const ref of delivery.result.evidenceRefs) assertEvidenceRef(ref);
+  const criteria = delivery.criteria;
+  if (criteria) {
+    const known = new Set([...assignment.successCriteria, ...assignment.failureCriteria, ...assignment.incompleteCriteria]);
+    for (const value of [...criteria.satisfied, ...criteria.failed, ...criteria.incomplete]) {
+      if (!known.has(value)) throw new Error(`criterion is not part of the assignment: ${value}`);
+    }
+    if (delivery.result.status === 'succeeded'
+      && (new Set(criteria.satisfied).size !== new Set(assignment.successCriteria).size
+        || assignment.successCriteria.some((value) => !criteria.satisfied.includes(value))
+        || criteria.failed.length > 0 || criteria.incomplete.length > 0)) {
+      throw new Error('success criteria were not all satisfied or also matched failure/incomplete criteria');
+    }
+  }
+  if (delivery.result.status === 'failed'
+    && (assignment.failureCriteria.length === 0 || (criteria && criteria.failed.length === 0))) {
+    throw new Error('failed result did not match a failure criterion');
+  }
+  if (delivery.result.status === 'incomplete'
+    && (assignment.incompleteCriteria.length === 0 || (criteria && criteria.incomplete.length === 0))) {
+    throw new Error('incomplete result did not match an incomplete criterion');
+  }
+}
+
 function uniqueEvidenceRefs(refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
   const seen = new Set<string>();
   return refs.filter((ref) => {
@@ -207,17 +256,47 @@ function hasIncarnationPort(port: ExecutionAgentPort | undefined): port is Execu
     && typeof port.roleId === 'string' && port.roleId.trim().length > 0;
 }
 
+function hasReviewIncarnationPort(port: ReviewAgentPort | undefined): port is ReviewAgentPort {
+  return !!port && typeof port.createInstance === 'function'
+    && typeof port.roleId === 'string' && port.roleId.trim().length > 0;
+}
+
+type DurableReviewOutcome =
+  | { readonly ok: true; readonly delivery: ReviewDelivery; readonly commitRef: JournalCommitRef }
+  | { readonly ok: false; readonly issue: OrchestrationIssue };
+
+type ReturnedChildCall = Extract<IndependentChildCallResult, { readonly state: 'returned' }>;
+interface ChildCallAttempt {
+  readonly digest: string;
+  inFlight?: Promise<IndependentChildCallResult>;
+  returned?: ReturnedChildCall;
+  terminal?: IndependentChildCallResult;
+  invoked: boolean;
+}
+
+/** The readback must resolve the exact record that was committed. */
+function assertMilestoneReviewReadback(record: I2Record, expected: MilestoneReviewResultRecord): void {
+  if (record.kind !== 'milestone-review-result') {
+    throw new Error('milestone review readback is not a milestone review result');
+  }
+  if (JSON.stringify(record) !== JSON.stringify(expected)) {
+    throw new Error('milestone review readback does not match the committed record');
+  }
+}
+
 export class OrchestrationManager {
   readonly ownerId: string;
   readonly graph: AssignmentGraph;
   private readonly runtimePool: AgentRuntimePoolManager;
   private readonly executionAgent?: ExecutionAgentPort;
   private readonly reviewAgent?: ReviewAgentPort;
+  private readonly reviewJournal?: I2JournalPort;
   private readonly mergeCoordinator?: MergeCoordinatorPort;
   private readonly feedback?: OrchestrationFeedbackPort;
   private readonly childCallPort?: ChildCallPort;
   private readonly maxAttempts: number;
   private readonly inFlightDispatches = new Map<string, Promise<OrchestrationDispatchResult>>();
+  private readonly childCalls = new Map<string, ChildCallAttempt>();
 
   constructor(options: OrchestrationManagerOptions) {
     if (!options.ownerId.trim()) throw new OrchestrationError('orchestration owner is required', {
@@ -238,6 +317,7 @@ export class OrchestrationManager {
     this.runtimePool = options.runtimePool;
     this.executionAgent = options.executionAgent;
     this.reviewAgent = options.reviewAgent;
+    this.reviewJournal = options.reviewJournal;
     this.mergeCoordinator = options.mergeCoordinator;
     this.feedback = options.feedback;
     this.childCallPort = options.childCallPort;
@@ -293,6 +373,208 @@ export class OrchestrationManager {
       creator: (createInput) => agent.createInstance(createInput),
       scope: input.scope,
     });
+  }
+
+  /**
+   * One parent-selected genuine child. Returns only; adoption and the next
+   * choice belong to the parent. Durable restart lookup belongs to the
+   * registered tool producer, not this task-local in-flight/known-return cache.
+   */
+  async callChild(input: IndependentChildCallInput): Promise<IndependentChildCallResult> {
+    const invocationId = input.call.invocationId;
+    const blocked = (error: unknown): IndependentChildCallResult => ({
+      state: 'blocked', invocationId,
+      issue: issueFromUnknown(error, {
+        code: 'orchestration.child-call-failed', ownerId: this.ownerId,
+        scope: input.scope, conditionRef: invocationId,
+      }),
+    });
+    let digest: string;
+    try {
+      for (const value of [invocationId, input.call.providerRequestId, input.call.toolCallId, input.agentId]) {
+        if (!value.trim()) throw new Error('registered child call identity is required');
+      }
+      assertProviderExecutionIdentityMatch(input.call.parentExecution, input.call.parentExecution);
+      validateJournalCommitRef(input.call.businessRegistrationCommitRef);
+      const worker = input.kind === 'execution' ? input.assignment : input.input.workerAssignment;
+      validateWorkAssignment(worker);
+      if (input.call.parentExecution.taskId.value !== worker.taskId.value
+        || input.scope.taskId?.value !== worker.taskId.value) {
+        throw new Error('child call task must match its registered parent and scope');
+      }
+      if (input.kind === 'review') {
+        validateWorkResult(input.input.workerResult, worker);
+        assertReviewMaterial(input.input.reviewMaterial);
+        const material = resolveReviewMaterial({
+          workerAssignment: worker, workerResult: input.input.workerResult,
+          subjects: input.input.reviewMaterial.subjects,
+          executorEvidence: input.input.reviewMaterial.executorEvidence,
+        });
+        if (material.acceptanceCriteria !== input.input.reviewMaterial.acceptanceCriteria
+          || material.acceptanceCriteriaDigest !== input.input.reviewMaterial.acceptanceCriteriaDigest
+          || canonicalJsonStringify(material.subjects) !== canonicalJsonStringify(input.input.reviewMaterial.subjects)
+          || canonicalJsonStringify(input.input.scope) !== canonicalJsonStringify(input.scope)) {
+          throw new Error('review material or scope does not match the real worker');
+        }
+        const expected = createReviewAssignments({
+          workerAssignment: worker, workerResult: input.input.workerResult,
+          reviewKinds: [input.input.reviewAssignment.reviewKind],
+          subjectRefs: worker.targetRefs, subjectDigests: input.input.workerResult.producedArtifactDigests,
+        })[0];
+        if (canonicalJsonStringify(expected) !== canonicalJsonStringify(input.input.reviewAssignment)) {
+          throw new Error('review assignment does not match the real worker');
+        }
+        if (!hasReviewIncarnationPort(input.reviewAgent)) throw new Error('review incarnation creator is required');
+        if (input.milestoneReview) {
+          if (!this.reviewJournal) throw new Error('a declared I2 review requires an injected I2 journal port');
+          if (!input.milestoneReview.milestoneId.trim()
+            || input.milestoneReview.reviewerAgentId !== input.agentId
+            || input.milestoneReview.taskScope.taskId.value !== worker.taskId.value
+            || input.milestoneReview.taskScope.cycleId || input.milestoneReview.taskScope.operationId
+            || canonicalJsonStringify(input.milestoneReview.executionScope) !== canonicalJsonStringify(input.scope)) {
+            throw new Error('milestone binding does not match the selected reviewer and scope');
+          }
+          validateJournalCommitRef(input.milestoneReview.planRevisionCommitRef);
+        }
+      }
+      digest = digestOf(canonicalJsonStringify({
+        call: input.call, kind: input.kind, agentId: input.agentId, scope: input.scope,
+        roleId: input.kind === 'execution' ? input.executionAgent.roleId : input.reviewAgent.roleId,
+        request: input.kind === 'execution' ? input.assignment : { ...input.input, signal: undefined },
+        milestoneReview: input.kind === 'review' ? input.milestoneReview ?? null : null,
+      }));
+    } catch (error) { return blocked(error); }
+    let attempt = this.childCalls.get(invocationId);
+    if (attempt && attempt.digest !== digest) return blocked(new Error('registered invocation already binds different child input'));
+    if (attempt?.inFlight) return attempt.inFlight;
+    if (attempt?.terminal) return attempt.terminal;
+    if (!attempt) {
+      attempt = { digest, invoked: false };
+      this.childCalls.set(invocationId, attempt);
+    }
+    const current = attempt;
+    const pending = this.runChildCall(input, current).catch(blocked);
+    current.inFlight = pending;
+    try { return await pending; }
+    finally { current.inFlight = undefined; }
+  }
+
+  private async runChildCall(
+    input: IndependentChildCallInput,
+    attempt: ChildCallAttempt,
+  ): Promise<IndependentChildCallResult> {
+    const invocationId = input.call.invocationId;
+    let lease: RuntimePoolLease | undefined;
+    let outcome: IndependentChildCallResult;
+    try {
+      input.signal.throwIfAborted();
+      if (!attempt.returned) {
+        const acquired = input.kind === 'execution'
+          ? await this.acquireBoundExecutionInstance({
+              assignment: input.assignment, scope: input.scope, agentId: input.agentId,
+              executionEpoch: input.assignment.executionEpoch,
+            }, input.executionAgent)
+          : await this.runtimePool.acquire<ReviewInstanceRequest, TaskReviewHandle>({
+              requiredCapabilities: input.input.reviewAssignment.requiredCapabilities,
+              ownerId: this.ownerId, executionEpoch: input.input.reviewAssignment.executionEpoch,
+              taskId: input.input.workerAssignment.taskId, roleId: input.reviewAgent.roleId,
+              agentId: input.agentId, scope: input.scope,
+              assignment: {
+                assignmentId: invocationId, taskId: input.input.workerAssignment.taskId,
+                attempt: input.input.reviewAssignment.attempt,
+                reviewAssignment: input.input.reviewAssignment, workerAssignment: input.input.workerAssignment,
+              },
+              creator: (create) => input.reviewAgent.createInstance(create),
+            });
+        if (acquired.status !== 'acquired') return { state: acquired.status, invocationId, issue: acquired.issue };
+        lease = acquired.lease;
+        const assignment = input.kind === 'execution' ? input.assignment : input.input.reviewAssignment;
+        const prepared = input.kind === 'execution'
+          ? await input.childCallPort.prepare({
+              kind: 'execution', invocationId, assignment: input.assignment, agentId: input.agentId,
+              attempt: input.assignment.attempt, executionEpoch: input.assignment.executionEpoch,
+              scope: input.scope, lease,
+            })
+          : await input.childCallPort.prepare({
+              kind: 'review', invocationId, assignment: input.input.reviewAssignment, agentId: input.agentId,
+              attempt: input.input.reviewAssignment.attempt,
+              executionEpoch: input.input.reviewAssignment.executionEpoch,
+              scope: input.scope, lease,
+            });
+        if (prepared.invocationId !== invocationId || !prepared.checkpointReceiptRef.trim()) {
+          throw new Error('prepared child call must retain the exact invocation and checkpoint receipt');
+        }
+        input.signal.throwIfAborted();
+        attempt.invoked = true;
+        if (input.kind === 'execution') {
+          const delivery = normalizeDelivery(await (acquired.handle as TaskExecutionHandle).execute({
+            assignment: input.assignment, agentId: input.agentId,
+            executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt,
+            lease, scope: input.scope, signal: input.signal,
+          }));
+          assertExecutionDelivery(delivery, input.assignment, input.agentId);
+          attempt.returned = {
+            state: 'returned', kind: 'execution', invocationId, incarnation: acquired.incarnation,
+            result: { ...delivery.result, evidenceRefs: scopedEvidenceRefs(input.scope, delivery.result.evidenceRefs) },
+          };
+        } else {
+          const delivery = await this.invokeReviewHandle(acquired.handle as TaskReviewHandle, {
+            ...input.input, signal: input.signal,
+          });
+          attempt.returned = { state: 'returned', kind: 'review', invocationId, incarnation: acquired.incarnation, delivery };
+        }
+      }
+      outcome = await this.persistChildReturn(input, attempt.returned!);
+      attempt.returned = outcome;
+      attempt.terminal = outcome;
+    } catch (error) {
+      outcome = {
+        state: 'blocked', invocationId,
+        issue: issueFromUnknown(error, {
+          code: 'orchestration.child-call-failed', ownerId: this.ownerId,
+          scope: input.scope, conditionRef: invocationId,
+        }),
+      };
+      // A possibly invoked external call with no validated return is unknown.
+      // It cannot be replayed merely by retrying the same registered tool call.
+      if (attempt.invoked && !attempt.returned) attempt.terminal = outcome;
+    }
+    if (lease) {
+      const released = await this.runtimePool.release(lease, { scope: input.scope });
+      if (released.status === 'blocked') {
+        outcome = outcome.state === 'returned'
+          ? { state: 'blocked', invocationId, issue: released.issue }
+          : { ...outcome, releaseIssue: released.issue };
+        attempt.terminal = outcome;
+      }
+    }
+    return outcome;
+  }
+
+  private async persistChildReturn(input: IndependentChildCallInput, returned: ReturnedChildCall): Promise<ReturnedChildCall> {
+    if (input.kind === 'execution' && returned.kind === 'execution') {
+      await input.childCallPort.recordReturn({
+        kind: 'execution', invocationId: returned.invocationId, assignment: input.assignment,
+        agentId: input.agentId, attempt: input.assignment.attempt,
+        executionEpoch: input.assignment.executionEpoch, scope: input.scope, result: returned.result,
+      });
+      return returned;
+    }
+    if (input.kind !== 'review' || returned.kind !== 'review') throw new Error('child return kind mismatch');
+    let reviewCommitRef = returned.reviewCommitRef;
+    if (input.milestoneReview && !reviewCommitRef) {
+      const committed = await this.commitMilestoneReviewDelivery(
+        input.milestoneReview, input.input.reviewAssignment, returned.delivery, this.reviewJournal!, input.scope,
+      );
+      if (!committed.ok) throw new OrchestrationError(committed.issue.reason, committed.issue);
+      reviewCommitRef = committed.commitRef;
+    }
+    await input.childCallPort.recordReturn({
+      kind: 'review', invocationId: returned.invocationId, assignment: input.input.reviewAssignment,
+      agentId: input.agentId, attempt: input.input.reviewAssignment.attempt,
+      executionEpoch: input.input.reviewAssignment.executionEpoch, scope: input.scope, result: returned.delivery.result,
+    });
+    return { ...returned, ...(reviewCommitRef ? { reviewCommitRef } : {}) };
   }
 
   async dispatch(input: DispatchInput): Promise<OrchestrationDispatchResult> {
@@ -724,12 +1006,230 @@ export class OrchestrationManager {
     return this.reviewAndMerge(input, accepted.record, result);
   }
 
+  /**
+   * Constructs a real reviewer instance, invokes its scope-bound handle, and
+   * commits the milestone review result with an exact readback BEFORE the
+   * caller records graph acceptance, publishes feedback, or decides the gate.
+   * A missing port, an invalid delivery, or a failed commit/readback returns an
+   * explicit issue; the reviewer identity is the constructed incarnation and is
+   * never the reviewed worker.
+   */
+  private async runDurableMilestoneReview(
+    input: DispatchInput,
+    binding: MilestoneReviewBinding,
+    reviewAssignment: ReviewAssignment,
+    workerAssignment: WorkAssignment,
+    workerResult: WorkResult,
+    reviewMaterial: ReviewMaterial,
+  ): Promise<DurableReviewOutcome> {
+    const agent = input.reviewAgentOverride ?? this.reviewAgent;
+    if (!agent) {
+      return {
+        ok: false,
+        issue: issue(
+          'review-agent-unavailable',
+          this.ownerId,
+          'review agent capability port is not bound',
+          { kind: 'recover', ref: 'orchestration.review.bind' },
+          [evidence(input.scope, 'orchestration.review.unavailable')],
+          'orchestration.review.unavailable',
+        ),
+      };
+    }
+    if (!hasReviewIncarnationPort(agent)) {
+      return {
+        ok: false,
+        issue: issue(
+          'review-incarnation-unavailable',
+          this.ownerId,
+          'review agent cannot construct a task-scoped reviewer instance (roleId/createInstance missing)',
+          { kind: 'recover', ref: 'orchestration.review.incarnation' },
+          [evidence(input.scope, 'orchestration.review.incarnation')],
+          'orchestration.review.incarnation',
+        ),
+      };
+    }
+    const journal = this.reviewJournal;
+    if (!journal) {
+      return {
+        ok: false,
+        issue: issue(
+          'review-journal-unavailable',
+          this.ownerId,
+          'a declared I2 review requires an injected I2 journal port',
+          { kind: 'recover', ref: 'orchestration.review.journal' },
+          [evidence(input.scope, 'orchestration.review.journal')],
+          'orchestration.review.journal',
+        ),
+      };
+    }
+    try {
+      if (!binding.milestoneId.trim()) throw new Error('milestone review milestone id is required');
+      if (!binding.reviewerAgentId.trim()) throw new Error('milestone review reviewer agent id is required');
+      if (
+        binding.taskScope.cycleId !== undefined
+        || binding.taskScope.operationId !== undefined
+      ) {
+        throw new Error('milestone review task scope must be task-level');
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        issue: issueFromUnknown(error, {
+          code: 'review-milestone-invalid',
+          ownerId: this.ownerId,
+          scope: input.scope,
+          conditionRef: 'orchestration.review.milestone',
+        }),
+      };
+    }
+
+    const reviewRequest: ReviewInstanceRequest = {
+      assignmentId: reviewAssignment.assignmentId,
+      taskId: workerAssignment.taskId,
+      attempt: reviewAssignment.attempt,
+      reviewAssignment,
+      workerAssignment,
+    };
+    const acquired = await this.runtimePool.acquire({
+      requiredCapabilities: reviewAssignment.requiredCapabilities,
+      ownerId: this.ownerId,
+      executionEpoch: reviewAssignment.executionEpoch,
+      taskId: workerAssignment.taskId,
+      roleId: agent.roleId,
+      agentId: binding.reviewerAgentId,
+      assignment: reviewRequest,
+      creator: (createInput) => agent.createInstance(createInput),
+      scope: input.scope,
+    });
+    if (acquired.status !== 'acquired') return { ok: false, issue: acquired.issue };
+
+    let outcome: DurableReviewOutcome;
+    try {
+      outcome = await this.invokeAndCommitMilestoneReview(
+        acquired.handle,
+        binding,
+        reviewAssignment,
+        workerAssignment,
+        workerResult,
+        reviewMaterial,
+        journal,
+        input.scope,
+      );
+    } catch (error) {
+      outcome = {
+        ok: false,
+        issue: issueFromUnknown(error, {
+          code: 'review-commit-failed',
+          ownerId: this.ownerId,
+          scope: input.scope,
+          conditionRef: 'orchestration.review.commit',
+        }),
+      };
+    }
+    const released = await this.runtimePool.release(acquired.lease, { scope: input.scope });
+    if (released.status === 'blocked') return { ok: false, issue: released.issue };
+    return outcome;
+  }
+
+  private async invokeAndCommitMilestoneReview(
+    handle: TaskReviewHandle,
+    binding: MilestoneReviewBinding,
+    reviewAssignment: ReviewAssignment,
+    workerAssignment: WorkAssignment,
+    workerResult: WorkResult,
+    reviewMaterial: ReviewMaterial,
+    journal: I2JournalPort,
+    scope: ScopeRef,
+  ): Promise<DurableReviewOutcome> {
+    let delivery: ReviewDelivery;
+    try {
+      delivery = await this.invokeReviewHandle(handle, {
+        reviewAssignment,
+        workerAssignment,
+        workerResult,
+        reviewMaterial,
+        scope,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        issue: issueFromUnknown(error, {
+          code: 'review-delivery-invalid',
+          ownerId: this.ownerId,
+          scope,
+          conditionRef: 'orchestration.review.delivery',
+        }),
+      };
+    }
+
+    return this.commitMilestoneReviewDelivery(binding, reviewAssignment, delivery, journal, scope);
+  }
+
+  private async invokeReviewHandle(
+    handle: TaskReviewHandle,
+    input: Parameters<TaskReviewHandle['review']>[0],
+  ): Promise<ReviewDelivery> {
+    assertReviewMaterial(input.reviewMaterial);
+    const delivered = await handle.review(input);
+    assertReviewMaterial(input.reviewMaterial);
+    assertReviewResultMatchesAssignment(input.reviewAssignment, delivered.result);
+    const delivery: ReviewDelivery = {
+      result: delivered.result, reviewer: handle.incarnation,
+      output: delivered.output, completedAt: delivered.completedAt,
+    };
+    validateReviewDelivery(delivery);
+    if (delivery.result.workerAgentId === delivery.reviewer.agentInstanceId) {
+      throw new Error('reviewed worker identity must not equal the reviewer instance identity');
+    }
+    return delivery;
+  }
+
+  private async commitMilestoneReviewDelivery(
+    binding: MilestoneReviewBinding,
+    reviewAssignment: ReviewAssignment,
+    delivery: ReviewDelivery,
+    journal: I2JournalPort,
+    scope: ScopeRef,
+  ): Promise<DurableReviewOutcome> {
+    const record: MilestoneReviewResultRecord = {
+      kind: 'milestone-review-result',
+      schemaVersion: 1,
+      milestoneId: binding.milestoneId,
+      cycleId: binding.cycleId,
+      taskScope: binding.taskScope,
+      executionScope: binding.executionScope,
+      planRevisionCommitRef: binding.planRevisionCommitRef,
+      reviewAssignment,
+      delivery,
+      completedAt: delivery.completedAt,
+    };
+    try {
+      validateMilestoneReviewResultRecord(record);
+      const commitRef = await journal.commit(record);
+      const readBack = await journal.read(binding.taskScope, commitRef);
+      assertMilestoneReviewReadback(readBack, record);
+      return { ok: true, delivery, commitRef };
+    } catch (error) {
+      return {
+        ok: false,
+        issue: issueFromUnknown(error, {
+          code: 'review-commit-failed',
+          ownerId: this.ownerId,
+          scope,
+          conditionRef: 'orchestration.review.commit',
+        }),
+      };
+    }
+  }
+
   private async reviewAndMerge(
     input: DispatchInput,
     record: AssignmentRecord,
     result: WorkResult,
   ): Promise<OrchestrationDispatchResult> {
-    if (!this.reviewAgent) {
+    const reviewAgent = input.reviewAgentOverride ?? this.reviewAgent;
+    if (!reviewAgent) {
       const unavailable = issue(
         'review-agent-unavailable',
         this.ownerId,
@@ -816,8 +1316,11 @@ export class OrchestrationManager {
     }
 
     const reviewResults: ReviewResult[] = [];
+    const reviewCommitRefs: JournalCommitRef[] = [];
+    const milestoneBinding = input.milestoneReview;
     for (const reviewAssignment of reviewAssignments) {
       const reviewInvocationId = `invocation:review:${reviewAssignment.assignmentId}:${reviewAssignment.attempt}`;
+      const reviewerAgentId = milestoneBinding?.reviewerAgentId ?? reviewAssignment.workerAgentId;
       if (this.childCallPort) {
         try {
           // Persist the pre-call checkpoint and invocation association before the
@@ -827,7 +1330,7 @@ export class OrchestrationManager {
             kind: 'review',
             invocationId: reviewInvocationId,
             assignment: reviewAssignment,
-            agentId: reviewAssignment.workerAgentId,
+            agentId: reviewerAgentId,
             attempt: reviewAssignment.attempt,
             executionEpoch: reviewAssignment.executionEpoch,
             scope: input.scope,
@@ -842,44 +1345,59 @@ export class OrchestrationManager {
               conditionRef: 'orchestration.child.checkpoint',
             }),
             input.scope,
+            reviewCommitRefs,
           );
         }
       }
       let reviewResult: ReviewResult;
-      try {
-        reviewResult = await this.reviewAgent.review({
+      if (milestoneBinding) {
+        const durable = await this.runDurableMilestoneReview(
+          input,
+          milestoneBinding,
           reviewAssignment,
-          workerAssignment: input.assignment,
-          workerResult: result,
+          input.assignment,
+          result,
           reviewMaterial,
-          scope: input.scope,
-        });
-      } catch (error) {
-        return this.blockedResult(
-          record,
-          issueFromUnknown(error, {
-            code: 'review-failed',
-            ownerId: this.ownerId,
-            scope: input.scope,
-            conditionRef: `orchestration.review.${reviewAssignment.reviewKind}`,
-          }),
-          input.scope,
         );
-      }
-      try {
-        assertReviewResultMatchesAssignment(reviewAssignment, reviewResult);
-      } catch (error) {
-        return this.blockedResult(
-          record,
-          issueFromUnknown(error, {
-            code: 'review-result-invalid',
-            ownerId: this.ownerId,
+        if (!durable.ok) return this.blockedResult(record, durable.issue, input.scope);
+        reviewResult = durable.delivery.result;
+        reviewCommitRefs.push(durable.commitRef);
+      } else {
+        try {
+          reviewResult = await reviewAgent.review({
+            reviewAssignment,
+            workerAssignment: input.assignment,
+            workerResult: result,
+            reviewMaterial,
             scope: input.scope,
-            conditionRef: 'orchestration.review.result',
-            evidenceRefs: reviewResult.evidenceRefs,
-          }),
-          input.scope,
-        );
+          });
+        } catch (error) {
+          return this.blockedResult(
+            record,
+            issueFromUnknown(error, {
+              code: 'review-failed',
+              ownerId: this.ownerId,
+              scope: input.scope,
+              conditionRef: `orchestration.review.${reviewAssignment.reviewKind}`,
+            }),
+            input.scope,
+          );
+        }
+        try {
+          assertReviewResultMatchesAssignment(reviewAssignment, reviewResult);
+        } catch (error) {
+          return this.blockedResult(
+            record,
+            issueFromUnknown(error, {
+              code: 'review-result-invalid',
+              ownerId: this.ownerId,
+              scope: input.scope,
+              conditionRef: 'orchestration.review.result',
+              evidenceRefs: reviewResult.evidenceRefs,
+            }),
+            input.scope,
+          );
+        }
       }
       if (this.childCallPort) {
         try {
@@ -887,7 +1405,7 @@ export class OrchestrationManager {
             kind: 'review',
             invocationId: reviewInvocationId,
             assignment: reviewAssignment,
-            agentId: reviewAssignment.workerAgentId,
+            agentId: reviewerAgentId,
             attempt: reviewAssignment.attempt,
             executionEpoch: reviewAssignment.executionEpoch,
             scope: input.scope,
@@ -904,6 +1422,7 @@ export class OrchestrationManager {
               evidenceRefs: reviewResult.evidenceRefs,
             }),
             input.scope,
+            reviewCommitRefs,
           );
         }
         try {
@@ -925,6 +1444,7 @@ export class OrchestrationManager {
               evidenceRefs: reviewResult.evidenceRefs,
             }),
             input.scope,
+            reviewCommitRefs,
           );
         }
         try {
@@ -946,6 +1466,7 @@ export class OrchestrationManager {
               evidenceRefs: reviewResult.evidenceRefs,
             }),
             input.scope,
+            reviewCommitRefs,
           );
         }
       }
@@ -963,6 +1484,7 @@ export class OrchestrationManager {
             evidenceRefs: reviewResult.evidenceRefs,
           }),
           input.scope,
+          reviewCommitRefs,
         );
       }
       const persistedReviewResult = recorded.reviewResults.find(
@@ -979,6 +1501,7 @@ export class OrchestrationManager {
             reviewResult.evidenceRefs,
           ),
           input.scope,
+          reviewCommitRefs,
         );
       }
       reviewResults.push(persistedReviewResult);
@@ -991,7 +1514,7 @@ export class OrchestrationManager {
         scope: input.scope,
         evidenceRefs: reviewResult.evidenceRefs,
       });
-      if (feedbackIssue) return this.blockedResult(record, feedbackIssue, input.scope);
+      if (feedbackIssue) return this.blockedResult(record, feedbackIssue, input.scope, reviewCommitRefs);
     }
 
     let gate: ReviewDecision;
@@ -1040,7 +1563,7 @@ export class OrchestrationManager {
         remediation ? 'retry' : 'attention',
         remediation?.attempt,
       );
-      if (feedbackIssue) return this.blockedResult(updated, feedbackIssue, input.scope);
+      if (feedbackIssue) return this.blockedResult(updated, feedbackIssue, input.scope, reviewCommitRefs);
       return {
         status: updated.status,
         assignment: updated,
@@ -1053,6 +1576,7 @@ export class OrchestrationManager {
         ),
         ...(remediation ? { remediation } : {}),
         reviewResults,
+        ...(reviewCommitRefs.length > 0 ? { reviewCommitRefs } : {}),
       };
     }
     if (gate.status !== 'succeeded' && !reviewWaitingForMerge(gate, input.assignment)) {
@@ -1072,6 +1596,7 @@ export class OrchestrationManager {
           blocked.evidenceRefs,
         ),
         input.scope,
+        reviewCommitRefs,
       );
     }
     if (input.assignment.mergeGate !== 'required') {
@@ -1080,6 +1605,7 @@ export class OrchestrationManager {
         status: 'succeeded',
         assignment: completed,
         reviewResults,
+        ...(reviewCommitRefs.length > 0 ? { reviewCommitRefs } : {}),
       };
     }
     if (!allReviewsPassed(reviewResults)) {
@@ -1093,6 +1619,7 @@ export class OrchestrationManager {
           reviewResults.flatMap((review) => review.evidenceRefs),
         ),
         input.scope,
+        reviewCommitRefs,
       );
     }
     if (!this.mergeCoordinator) {
@@ -1107,6 +1634,7 @@ export class OrchestrationManager {
           'orchestration.merge.unavailable',
         ),
         input.scope,
+        reviewCommitRefs,
       );
     }
 
@@ -1131,6 +1659,7 @@ export class OrchestrationManager {
           conditionRef: 'orchestration.merge',
         }),
         input.scope,
+        reviewCommitRefs,
       );
     }
     const mergeFeedbackIssue = await this.publish({
@@ -1141,7 +1670,7 @@ export class OrchestrationManager {
       scope: input.scope,
       evidenceRefs: mergeOutcome.evidenceRefs,
     });
-    if (mergeFeedbackIssue) return this.blockedResult(record, mergeFeedbackIssue, input.scope);
+    if (mergeFeedbackIssue) return this.blockedResult(record, mergeFeedbackIssue, input.scope, reviewCommitRefs);
 
     if (mergeOutcome.status !== 'merged') {
       const mergeEvidenceRefs = mergeOutcome.evidenceRefs.length > 0
@@ -1165,6 +1694,7 @@ export class OrchestrationManager {
         ),
         reviewResults,
         mergeOutcome,
+        ...(reviewCommitRefs.length > 0 ? { reviewCommitRefs } : {}),
       };
     }
 
@@ -1187,6 +1717,7 @@ export class OrchestrationManager {
           finalGate.evidenceRefs,
         ),
         input.scope,
+        reviewCommitRefs,
       );
     }
     return {
@@ -1194,6 +1725,7 @@ export class OrchestrationManager {
       assignment: this.graph.markMerged(input.assignment, finalGate.evidenceRefs),
       reviewResults,
       mergeOutcome,
+      ...(reviewCommitRefs.length > 0 ? { reviewCommitRefs } : {}),
     };
   }
 
@@ -1254,6 +1786,7 @@ export class OrchestrationManager {
     record: AssignmentRecord,
     orchestrationIssue: OrchestrationIssue,
     _scope: ScopeRef,
+    reviewCommitRefs: readonly JournalCommitRef[] = [],
   ): OrchestrationDispatchResult {
     const current = this.graph.get(record.assignment) ?? record;
     const terminal = current.status === 'escalated'
@@ -1274,6 +1807,7 @@ export class OrchestrationManager {
       assignment: terminal,
       issue: orchestrationIssue,
       reviewResults: terminal.reviewResults,
+      ...(reviewCommitRefs.length > 0 ? { reviewCommitRefs } : {}),
     };
   }
 

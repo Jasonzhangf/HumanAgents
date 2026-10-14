@@ -1,6 +1,10 @@
 import type {
+  CycleId,
   EvidenceRef,
+  JournalCommitRef,
   NextAction,
+  ProviderExecutionIdentityRef,
+  ReviewDelivery,
   ReviewOutput,
   ScopeRef,
   TaskId,
@@ -96,6 +100,7 @@ export interface ExecutionAgentInput {
   readonly attempt: number;
   readonly lease: RuntimePoolLease;
   readonly scope: ScopeRef;
+  readonly signal?: AbortSignal;
 }
 
 export interface ExecutionAgentPort {
@@ -163,6 +168,8 @@ export interface ChildCallPrepareReviewInput {
   readonly attempt: number;
   readonly executionEpoch: number;
   readonly scope: ScopeRef;
+  /** Genuine acquired review lease; legacy direct review callers may omit it. */
+  readonly lease?: RuntimePoolLease;
 }
 
 export type ChildCallPrepareInput = ChildCallPrepareExecutionInput | ChildCallPrepareReviewInput;
@@ -245,7 +252,62 @@ export interface ReviewAgentInput {
    */
   readonly reviewMaterial: ReviewMaterial;
   readonly scope: ScopeRef;
+  readonly signal?: AbortSignal;
 }
+
+/** Verified and registered by the actual parent tool/admission owner. */
+export interface RegisteredParentChildCall {
+  readonly invocationId: string;
+  readonly parentExecution: ProviderExecutionIdentityRef;
+  readonly providerRequestId: string;
+  readonly toolCallId: string;
+  readonly businessRegistrationCommitRef: JournalCommitRef;
+}
+
+export interface ChildCallCommon {
+  readonly call: RegisteredParentChildCall;
+  readonly agentId: string;
+  readonly scope: ScopeRef;
+  readonly childCallPort: ChildCallPort;
+  readonly signal: AbortSignal;
+}
+
+export type IndependentChildCallInput =
+  | (ChildCallCommon & {
+      readonly kind: 'execution';
+      readonly assignment: WorkAssignment;
+      readonly executionAgent: ExecutionAgentPort;
+    })
+  | (ChildCallCommon & {
+      readonly kind: 'review';
+      readonly input: ReviewAgentInput;
+      readonly reviewAgent: ReviewAgentPort;
+      readonly milestoneReview?: MilestoneReviewBinding;
+    });
+
+export type IndependentChildCallResult =
+  | {
+      readonly state: 'returned';
+      readonly kind: 'execution';
+      readonly invocationId: string;
+      readonly incarnation: TaskRuntimeIncarnation;
+      readonly result: WorkResult;
+    }
+  | {
+      readonly state: 'returned';
+      readonly kind: 'review';
+      readonly invocationId: string;
+      readonly incarnation: TaskRuntimeIncarnation;
+      readonly delivery: ReviewDelivery;
+      readonly reviewCommitRef?: JournalCommitRef;
+    }
+  | {
+      readonly state: 'waiting' | 'blocked';
+      readonly invocationId: string;
+      readonly issue: OrchestrationIssue;
+      /** Secondary release failure never replaces the primary call error. */
+      readonly releaseIssue?: OrchestrationIssue;
+    };
 
 export interface ReviewAgentPort {
   readonly roleId: string;
@@ -425,6 +487,24 @@ export interface AssignmentGraphSnapshot {
   readonly assignments: readonly AssignmentRecord[];
 }
 
+/**
+ * Declares one dispatch as an I2 milestone review. The manager binds the
+ * committed `MilestoneReviewResultRecord` to these exact facts and to the real
+ * review assignment and delivery it produced.
+ */
+export interface MilestoneReviewBinding {
+  readonly milestoneId: string;
+  readonly cycleId: CycleId;
+  /**
+   * Task-level scope: the committed milestone review record binds a task, not a
+   * cycle or operation. The shared contract validator re-checks this at commit.
+   */
+  readonly taskScope: ScopeRef & { readonly taskId: TaskId };
+  readonly executionScope: ScopeRef;
+  readonly planRevisionCommitRef: JournalCommitRef;
+  readonly reviewerAgentId: string;
+}
+
 export interface DispatchInput {
   readonly stageNodeId: string;
   readonly assignment: WorkAssignment;
@@ -436,6 +516,12 @@ export interface DispatchInput {
    * override only selects which worker executes the bounded work.
    */
   readonly executionAgentOverride?: ExecutionAgentPort;
+  /**
+   * Optional reviewer bound to this dispatch only. The orchestration manager
+   * still owns the graph, review gate, merge gate, and feedback path; this
+   * override only selects which reviewer answers the bounded review.
+   */
+  readonly reviewAgentOverride?: ReviewAgentPort;
   readonly reviewKinds?: readonly ReviewKind[];
   readonly reviewSubjectDigests?: readonly string[];
   /**
@@ -446,6 +532,12 @@ export interface DispatchInput {
     readonly ref: string;
     readonly body: string;
   }[];
+  /**
+   * Declares the review as an I2 milestone review. When present the manager
+   * constructs a real reviewer instance and commits the milestone review result
+   * (with an exact readback) before any graph acceptance, feedback, or gate.
+   */
+  readonly milestoneReview?: MilestoneReviewBinding;
 }
 
 export interface OrchestrationDispatchResult {
@@ -455,4 +547,6 @@ export interface OrchestrationDispatchResult {
   readonly remediation?: WorkAssignment;
   readonly reviewResults: readonly ReviewResult[];
   readonly mergeOutcome?: MergeOutcome;
+  /** Committed milestone-review receipts, in review-assignment order. */
+  readonly reviewCommitRefs?: readonly JournalCommitRef[];
 }
