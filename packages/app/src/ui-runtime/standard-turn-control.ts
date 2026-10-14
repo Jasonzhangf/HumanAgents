@@ -2,6 +2,8 @@ import { canonicalJsonStringify, type BusinessPayload, type EvidenceRef,
   type ProviderExecutionIdentityRef, type ProviderToolCall,
   type ProviderToolDefinition } from '../../../contracts/src/index.js';
 import type { AdmittedTurnIdentity } from '../../../contracts/src/native-reasoning.js';
+import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
+import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
 import type { TurnCloseSummary } from '../../../contracts/src/turn-closure.js';
 import {
   STANDARD_TURN_END_TOOL_ID,
@@ -64,6 +66,11 @@ export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
  * identity or authority.
  */
 export interface StandardTurnEndOwnerPort {
+  /** Real source and durable request registration, resolved by the segment owner. */
+  resolveSegmentBinding?(input: { readonly execution: ProviderExecutionIdentityRef; readonly requestId?: string }): Promise<{
+    readonly source: NativeSegmentSaveSourceV2;
+    readonly request: import('../../../contracts/src/index.js').RuntimeRequestRecord;
+  } | null>;
   /** Resolve the admitted turn bound to the actual typed Provider request. */
   resolveBoundTurn(input: {
     readonly execution: ProviderExecutionIdentityRef;
@@ -143,7 +150,21 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
           'no admitted turn is bound to the actual provider request; the standard end cannot be accepted',
         );
       }
-      assertBoundExecution(identity, execution);
+      const segment = input.owner.resolveSegmentBinding
+        ? await input.owner.resolveSegmentBinding({ execution, ...(requestId === undefined ? {} : { requestId }) }) : null;
+      if (segment) {
+        validateNativeSegmentSaveSourceV2(segment.source);
+        const physical = segment.source.opened.binding;
+        if (canonicalJsonStringify(projectAdmittedTurnIdentityV1(segment.source.originalAdmittedTurn)) !== canonicalJsonStringify(identity)
+          || physical.execution.runtimeId !== execution.runtimeId
+          || physical.execution.executionEpoch !== execution.executionEpoch
+          || physical.scope.taskId?.value !== execution.taskId.value
+          || physical.scope.operationId?.value !== execution.operationId.value
+          || segment.request.request.turnId !== identity.turnId || segment.request.request.requestId !== requestId
+          || canonicalJsonStringify(segment.request.scope) !== canonicalJsonStringify(physical.scope)) {
+          throw new StandardTurnEndError('standard-turn-end.binding', 'committed segment or exact request registration conflicts');
+        }
+      } else assertBoundExecution(identity, execution);
       validateStandardTurnEndInput(parsed, identity.scopeRef);
       const resolvedEvidenceRefs = await input.owner.resolveDelivery({
         identity,

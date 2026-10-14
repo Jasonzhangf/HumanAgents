@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
+import { validateNativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
+import { projectAdmittedTurnIdentityV1 as projectSegmentIdentity } from '../context/semantic-history.js';
 import {
   id,
+  canonicalJsonStringify,
   validateTurnClosureReference,
   validateTaskIdentityRecord,
   type Checkpoint,
@@ -142,6 +145,15 @@ export type ClosedTurnPlannerCallInput = {
   readonly closure: TurnClosureReference;
   readonly refinedResults: readonly TaskFlowRefinedResult[];
   readonly allocation: ClosedTurnPlannerCallAllocation;
+  /**
+   * Exact declared authority scope of the current Task grant. It is distinct
+   * from the physical closure scope: the grant declares the organ/task the
+   * principal may act in, while the closure scope also names the cycle and
+   * operation. The actual grant owner supplies it; a missing value falls back
+   * to the physical scope for callers that carry no separate declaration.
+   */
+  readonly capabilityScope?: ScopeRef;
+  readonly segmentSource?: import('../../../contracts/src/active-turn-segments.js').NativeSegmentSaveSourceV2;
 } & ClosedTurnPlannerPlanBasis;
 
 /** Stable identity of one Planner duty. An identical retry reuses it; changed input under it conflicts. */
@@ -330,6 +342,7 @@ export function deriveClosedTurnPlannerDuty(input: ClosedTurnPlannerCallInput, c
     predecessorRevisionId: input.priorPlan === null ? null : input.priorPlan.revisionId,
     predecessorContentDigest: input.priorPlan === null ? null : input.priorPlan.contentDigest,
     refinedResults: input.refinedResults,
+    ...(input.segmentSource === undefined ? {} : { segmentSource: input.segmentSource }),
     ...(input.priorPlan === null ? {
       identity: input.identity,
       directive: input.task.directive,
@@ -386,6 +399,25 @@ function assertInput(input: ClosedTurnPlannerCallInput): void {
       'the predecessor plan revision does not name this task',
       { scope, nextAction: { kind: 'recover', ref: 'closed-turn-planner-call.plan' }, conditionRef: 'closed-turn-planner-call.plan' },
     );
+  }
+  if (input.segmentSource) {
+    validateNativeSegmentSaveSourceV2(input.segmentSource);
+    if (canonicalJsonStringify(projectSegmentIdentity(input.segmentSource.originalAdmittedTurn)) !== canonicalJsonStringify(input.closure.identity)) {
+      throw new Error('closed Planner segment source does not retain the original business identity');
+    }
+  }
+  if (input.capabilityScope) {
+    const declared = input.capabilityScope;
+    if (declared.organId.value !== scope.organId.value
+      || (declared.taskId !== undefined && declared.taskId.value !== scope.taskId?.value)
+      || (declared.cycleId !== undefined && declared.cycleId.value !== scope.cycleId?.value)
+      || (declared.operationId !== undefined && declared.operationId.value !== scope.operationId?.value)) {
+      throw new ClosedTurnPlannerCallError(
+        'planner.call.capability-scope-mismatch',
+        'the declared capability scope does not belong to this closed turn',
+        { scope, nextAction: { kind: 'recover', ref: 'closed-turn-planner-call.capability' }, conditionRef: 'closed-turn-planner-call.capability' },
+      );
+    }
   }
   if (input.closure.identity.executionEpoch !== input.allocation.executionEpoch) {
     throw new ClosedTurnPlannerCallError(
@@ -621,7 +653,7 @@ class ClosedTurnPlannerCallOwner implements ClosedTurnPlannerCallPort {
       );
     }
     if (anchor.checkpoint.id.value !== checkpointId.value
-      || anchor.checkpoint.executionEpoch !== input.allocation.executionEpoch) {
+      || anchor.checkpoint.executionEpoch !== (input.segmentSource?.opened.binding.execution.executionEpoch ?? input.allocation.executionEpoch)) {
       throw new ClosedTurnPlannerCallError(
         'planner.call.checkpoint-mismatch',
         'the committed checkpoint does not match the closed turn anchor',
@@ -639,7 +671,7 @@ class ClosedTurnPlannerCallOwner implements ClosedTurnPlannerCallPort {
     const capability: CheckpointControlCapabilityRef = {
       actionId: 'task.execute',
       capabilities: ['provider.execution'],
-      scope,
+      scope: input.capabilityScope ?? scope,
     };
     const inputIdentity: CheckpointControlInputIdentity = { requestRef: duty.dutyKey, digest: duty.inputDigest };
     const request: CheckpointControlBusinessRequest = {
