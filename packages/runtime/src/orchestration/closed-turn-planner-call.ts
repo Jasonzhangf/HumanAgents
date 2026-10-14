@@ -21,6 +21,7 @@ import {
   type TaskIdentityRecord,
   type TaskRuntimeIncarnation,
   type TurnClosureReference,
+  type TurnSummaryEvidenceContext,
 } from '../../../contracts/src/index.js';
 import { createPublishedTaskPlanRevision, validateTaskPlanRevisionTransition } from '../../../core/src/task-plan-revision.js';
 import type {
@@ -143,6 +144,7 @@ export type ClosedTurnPlannerPlanBasis =
 export type ClosedTurnPlannerCallInput = {
   readonly task: Task;
   readonly closure: TurnClosureReference;
+  readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
   readonly refinedResults: readonly TaskFlowRefinedResult[];
   readonly allocation: ClosedTurnPlannerCallAllocation;
   /**
@@ -342,6 +344,7 @@ export function deriveClosedTurnPlannerDuty(input: ClosedTurnPlannerCallInput, c
     predecessorRevisionId: input.priorPlan === null ? null : input.priorPlan.revisionId,
     predecessorContentDigest: input.priorPlan === null ? null : input.priorPlan.contentDigest,
     refinedResults: input.refinedResults,
+    ...(input.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: input.summaryEvidenceContext }),
     ...(input.segmentSource === undefined ? {} : { segmentSource: input.segmentSource }),
     ...(input.priorPlan === null ? {
       identity: input.identity,
@@ -377,7 +380,7 @@ function assertSameDuty(actual: ClosedTurnPlannerCallDuty, expected: ClosedTurnP
 
 function assertInput(input: ClosedTurnPlannerCallInput): void {
   const scope = input.closure.identity.scopeRef;
-  validateTurnClosureReference(input.closure);
+  validateTurnClosureReference(input.closure, input.summaryEvidenceContext);
   if (input.closure.identity.taskRef.value !== input.task.id.value) {
     throw new ClosedTurnPlannerCallError(
       'planner.call.task-mismatch',

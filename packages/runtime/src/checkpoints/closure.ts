@@ -3,6 +3,8 @@ import {
   assertEvidenceRef,
   assertCheckpointLink,
   assertSameScope,
+  assertTurnSummaryContextIdentity,
+  canonicalJsonStringify,
   validateAdmittedTurnIdentity,
   validatePlannerAlignmentReference,
   validateTurnCloseSummary,
@@ -18,6 +20,7 @@ import {
   type PlannerAlignmentReference,
   type ScopeRef,
   type TurnCloseSummary,
+  type TurnSummaryEvidenceContext,
 } from '../../../contracts/src/index.js';
 import { isTerminalOperationStatus } from '../../../core/src/index.js';
 import type { OperationControlReadback, OperationControlSelector } from '../gateway/ports.js';
@@ -287,6 +290,12 @@ export interface TurnClosureRecord {
   readonly summary: TurnCloseSummary;
   readonly closedAt: string;
   readonly reviewCommitRefs?: readonly JournalCommitRef[];
+  /**
+   * Trusted control context persisted with the closure. It is supplied by the
+   * App readback, never derived from the summary or model args. Absent means the
+   * original exact parent scope rule applies.
+   */
+  readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
 }
 
 /**
@@ -612,11 +621,17 @@ export function distinctReviewCommitRefs(refs: readonly JournalCommitRef[] = [])
 }
 
 /** Validate a durable turn-closure record by reusing the frozen Contracts validators. */
-export function assertTurnClosureRecord(record: TurnClosureRecord): void {
+export function assertTurnClosureRecord(record: TurnClosureRecord, context?: TurnSummaryEvidenceContext): void {
   try {
     nonEmpty(record.closureId, 'turn closure id');
     validateAdmittedTurnIdentity(record.identity);
-    validateTurnCloseSummary(record.summary, record.identity.scopeRef);
+    const effectiveContext = context ?? record.summaryEvidenceContext;
+    if (effectiveContext !== undefined) assertTurnSummaryContextIdentity(effectiveContext, record.identity);
+    if (context !== undefined && record.summaryEvidenceContext !== undefined
+      && canonicalJsonStringify(context) !== canonicalJsonStringify(record.summaryEvidenceContext)) {
+      throw new CheckpointClosureError('turn closure summary evidence context conflicts with the durable context');
+    }
+    validateTurnCloseSummary(record.summary, record.identity.scopeRef, effectiveContext);
     if (record.checkpointId.scope !== 'checkpoint' || !record.checkpointId.value.trim()) {
       throw new CheckpointClosureError('turn closure checkpoint id is invalid');
     }
@@ -649,7 +664,10 @@ export function assertTurnRecoveryRecord(record: TurnRecoveryRecord): void {
         || frozen.checkpoint.seq !== (frozen.previous?.seq ?? 0) + 1) {
         throw new CheckpointClosureError('frozen close candidate identity conflicts');
       }
-      validateTurnCloseSummary(frozen.inputs.summary, record.identity.scopeRef);
+      if (frozen.inputs.summaryEvidenceContext !== undefined) {
+        assertTurnSummaryContextIdentity(frozen.inputs.summaryEvidenceContext, record.identity);
+      }
+      validateTurnCloseSummary(frozen.inputs.summary, record.identity.scopeRef, frozen.inputs.summaryEvidenceContext);
       if (frozen.checkpoint.directiveRevision !== record.identity.directiveRevision
         || frozen.checkpoint.cycleId.value !== record.identity.cycleRef.value
         || frozen.inputs.recovery.contextRef !== record.contextRef

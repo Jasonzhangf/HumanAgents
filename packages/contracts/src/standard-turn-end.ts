@@ -1,6 +1,13 @@
 import { assertEvidenceRef, assertSameScope, type EvidenceRef } from './index.js';
 import { validateAdmittedTurnIdentity, type AdmittedTurnIdentity } from './native-reasoning.js';
-import { validateTurnCloseSummary, type TurnCloseSummary } from './turn-closure.js';
+import {
+  assertTurnSummaryContextIdentity,
+  isAllowlistedTurnSummaryEvidence,
+  turnSummaryEvidenceAllowSet,
+  validateTurnCloseSummary,
+  type TurnCloseSummary,
+  type TurnSummaryEvidenceContext,
+} from './turn-closure.js';
 import { ContractError } from './errors.js';
 
 /**
@@ -49,11 +56,12 @@ export interface StandardTurnEndCommand {
 export function validateStandardTurnEndInput(
   input: StandardTurnEndInput,
   scope: AdmittedTurnIdentity['scopeRef'],
+  context?: TurnSummaryEvidenceContext,
 ): void {
   if (typeof input !== 'object' || input === null) {
     throw new ContractError('standard turn end input must be an object');
   }
-  validateTurnCloseSummary(input.summary, scope);
+  validateTurnCloseSummary(input.summary, scope, context);
   if (!Array.isArray(input.deliveryRefs) || input.deliveryRefs.length === 0) {
     throw new ContractError('standard turn end requires at least one delivery reference');
   }
@@ -73,7 +81,7 @@ export function validateStandardTurnEndInput(
  * every resolved delivery evidence reference must be well formed and bound to
  * the admitted-turn scope.
  */
-export function validateStandardTurnEndCommand(command: StandardTurnEndCommand): void {
+export function validateStandardTurnEndCommand(command: StandardTurnEndCommand, context?: TurnSummaryEvidenceContext): void {
   if (typeof command !== 'object' || command === null) {
     throw new ContractError('standard turn end command must be an object');
   }
@@ -81,15 +89,23 @@ export function validateStandardTurnEndCommand(command: StandardTurnEndCommand):
     throw new ContractError('standard turn end command kind is invalid');
   }
   validateAdmittedTurnIdentity(command.identity);
+  if (context !== undefined) assertTurnSummaryContextIdentity(context, command.identity);
   validateStandardTurnEndInput(
     { summary: command.summary, deliveryRefs: command.deliveryRefs },
     command.identity.scopeRef,
+    context,
   );
   if (!Array.isArray(command.resolvedEvidenceRefs) || command.resolvedEvidenceRefs.length === 0) {
     throw new ContractError('standard turn end command requires resolved delivery evidence');
   }
+  const allow = context === undefined ? undefined : turnSummaryEvidenceAllowSet(context, command.identity.scopeRef);
   for (const reference of command.resolvedEvidenceRefs) {
     assertEvidenceRef(reference);
-    assertSameScope(command.identity.scopeRef, reference.scope);
+    try {
+      assertSameScope(command.identity.scopeRef, reference.scope);
+    } catch (error) {
+      if (isAllowlistedTurnSummaryEvidence(allow, reference)) continue;
+      throw error;
+    }
   }
 }

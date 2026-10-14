@@ -9,6 +9,7 @@ import {
   type ScopeRef,
   type TurnClosureReference,
   type TurnRecoveryReference,
+  type TurnSummaryEvidenceContext,
 } from '../../contracts/src/index.js';
 import { TurnClosureError } from './errors.js';
 
@@ -76,8 +77,12 @@ export function assertSameLogicalTurn(left: AdmittedTurnIdentity, right: Admitte
   }
 }
 
-export function assertTurnAlignmentBinding(closure: TurnClosureReference, alignment: PlannerAlignmentReference): void {
-  validated(() => validateTurnClosureReference(closure));
+export function assertTurnAlignmentBinding(
+  closure: TurnClosureReference,
+  alignment: PlannerAlignmentReference,
+  context?: TurnSummaryEvidenceContext,
+): void {
+  validated(() => validateTurnClosureReference(closure, context));
   validated(() => validatePlannerAlignmentReference(alignment));
   assertSameAdmittedTurn(closure.identity, alignment.identity);
   if (!sameCheckpointId(closure.checkpointId, alignment.checkpointId)) {
@@ -88,9 +93,12 @@ export function assertTurnAlignmentBinding(closure: TurnClosureReference, alignm
   }
 }
 
-export function assertTurnDecisionAdmission(input: { readonly closure: TurnClosureReference; readonly alignment: PlannerAlignmentReference; readonly decision: TurnDecision }): void {
+export function assertTurnDecisionAdmission(
+  input: { readonly closure: TurnClosureReference; readonly alignment: PlannerAlignmentReference; readonly decision: TurnDecision },
+  context?: TurnSummaryEvidenceContext,
+): void {
   if (typeof input !== 'object' || input === null) throw new TurnClosureError('turn decision admission must be an object');
-  assertTurnAlignmentBinding(input.closure, input.alignment);
+  assertTurnAlignmentBinding(input.closure, input.alignment, context);
   if (input.decision !== input.alignment.decision) {
     throw new TurnClosureError('turn decision must match the planner alignment decision');
   }
@@ -101,10 +109,10 @@ export function assertTurnRecoveryAdmission(recovery: TurnRecoveryReference, exp
   if (expected !== undefined) assertSameLogicalTurn(expected, recovery.identity);
 }
 
-export function assertTurnAdvanceAdmission(admission: TurnAdvanceAdmission): void {
+export function assertTurnAdvanceAdmission(admission: TurnAdvanceAdmission, context?: TurnSummaryEvidenceContext): void {
   if (typeof admission !== 'object' || admission === null) throw new TurnClosureError('turn advance admission must be an object');
   if (admission.state === 'closed') {
-    assertTurnDecisionAdmission(admission);
+    assertTurnDecisionAdmission(admission, context);
     return;
   }
   if (admission.state === 'recovering') {
