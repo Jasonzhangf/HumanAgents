@@ -873,7 +873,7 @@ async function runNativeTask(input: {
       composition: {
         journal,
         filePath: controlJournalPath,
-        artifactsRoot: paths.artifactsRoot,
+        artifactsRoot: evidenceRoot,
         preparedJournal,
         resourceBoundary: createPreparedOperationBoundary(preparedJournal),
         prepareAgentProvider,
@@ -918,7 +918,25 @@ async function runNativeTask(input: {
         'humanagent.app.cli',
       );
     }
-    const handle = preparation.prepareRun(selectedTask.taskId, { prompt });
+    // The actual configured default agent is the typed control selection for
+    // this execution. It comes from the loaded roster, never from a dispatch
+    // label, task payload or the legacy top-level provider fallback.
+    const configuredAgentId = input.configuration.effective.project?.defaultAgent
+      ?? input.configuration.agentRoster[0]!.agentId;
+    const configuredAgent = input.configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
+    if (configuredAgent === undefined) {
+      throw new AppLifecycleError(
+        'native-control.agent-not-found',
+        `no configured agent matches the selected default ${configuredAgentId}`,
+        'select a defaultAgent that exists in the configured roster',
+        'humanagent.app.cli',
+      );
+    }
+    const handle = preparation.prepareRun(selectedTask.taskId, {
+      prompt,
+      role: configuredAgent.roleId,
+      configuredAgentId: configuredAgent.agentId,
+    });
     // Subscribe to the exact operation before release. Only the Runtime
     // execution.terminal/final event is a completion candidate; a Provider
     // phase terminal or the release receipt is never completion.

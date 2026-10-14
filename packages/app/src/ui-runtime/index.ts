@@ -22,7 +22,6 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
-import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
 import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
@@ -305,7 +304,6 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           workspaceRoot: options.workspaceRoot,
           projectKey: options.projectKey,
           artifactRoot: join(options.evidenceRoot, 'provider-tools'),
-          operationCompletionPortFor: (taskId, cycleId) => new JsonlOperationCompletionJournal(taskCycleJournalPath(taskId, cycleId)),
           ...(options.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: options.webSearchProviderConfig }),
         });
         return { executor: built.executor, toolOutputs: built.toolOutputs };
