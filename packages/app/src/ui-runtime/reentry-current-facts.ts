@@ -36,7 +36,8 @@ import {
  * - Related position, exact full context and any committed conditional
  *   relation: `foldExecutionPositionFromRecords`, `exactJournalRecord`,
  *   `conditionalReentryFromRecord`, `contextHistoryFromRecord`.
- * - Task-wide operation control: `readOperationControlFromRecords`.
+ * - Current physical operation-control namespace: `readOperationControlFromRecords`,
+ *   keyed by the canonical position's runtime and Harness execution epoch.
  * - Admitted active request/child obligations: `decodeActiveTurnRecords`.
  *
  * It is synchronous and never relocks, probes, drains, awaits a model or reads
@@ -239,9 +240,23 @@ export function readCurrentFromRecords(
       };
     }
 
-    const control = readOperationControlFromRecords(records, { scope: taskScope });
+    // The operation-control namespace is the exact physical (runtime, Harness
+    // epoch) of the canonical execution position and its full context. A
+    // task-wide read is ambiguous once a successor namespace exists, so select
+    // the real current namespace and never fall back to first/latest.
+    if (position.executionEpoch !== context.loopCheckpoint.executionEpoch) {
+      return {
+        state: 'unknown',
+        reason: 'the canonical execution position and its full context disagree on the physical Harness execution epoch',
+      };
+    }
+    const control = readOperationControlFromRecords(records, {
+      scope: taskScope,
+      agentRuntimeId: context.agentRuntimeId,
+      harnessExecutionEpoch: position.executionEpoch,
+    });
     if (control.state !== 'complete') {
-      return { state: 'unknown', reason: `task-wide operation control is unknown: ${control.reason}` };
+      return { state: 'unknown', reason: `current physical operation control is unknown: ${control.reason}` };
     }
 
     const fences = fencedBindings(records, taskScope, context);

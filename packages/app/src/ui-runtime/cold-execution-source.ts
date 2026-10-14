@@ -127,7 +127,10 @@ export async function readColdExecutionSource(
       businessTurnId: request.businessTurnId, segmentId: segment.segmentId, recoveryAssetsReceiptRef: exactReceipt,
     }) });
   }
-  const control = readOperationControlFromRecords(records, { scope: taskScope });
+  // The current operation-control namespace is the exact physical incarnation
+  // the canonical position/context already bound to the committed segment tail.
+  const control = readOperationControlFromRecords(records, { scope: taskScope,
+    agentRuntimeId: tailBinding.execution.runtimeId, harnessExecutionEpoch: tailBinding.execution.executionEpoch });
   if (control.state !== 'complete') missing(control.reason);
   const durableEpochs: ColdExecutionEpochFact[] = [];
   for (const record of records) {
@@ -150,7 +153,8 @@ export async function readColdExecutionSource(
     if (closure && 'closureKind' in closure && closure.closureKind === 'checkpoint' && closure.recoveryBinding) {
       addEpoch('closure', closure.recoveryBinding.coreClosure.executionEpoch);
     }
-    // readOperationControlFromRecords has validated all scoped coverage carriers.
+    // The floor scans every scoped coverage carrier directly, so a narrow
+    // current-namespace read never drops a valid historical epoch source.
     if (record.payload?.['kind'] === 'operation-control-coverage/v1') {
       const epoch = record.payload['harnessExecutionEpoch'];
       if (typeof epoch === 'number') addEpoch('operation-control', epoch);
