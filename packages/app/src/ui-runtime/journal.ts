@@ -99,6 +99,46 @@ function requireOptionalRecordStringArray(record: Record<string, unknown>, key: 
   }
 }
 
+function requireBoolean(record: Record<string, unknown>, key: string, filePath: string, line: number): void {
+  if (typeof record[key] !== 'boolean') {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} must be a boolean`);
+  }
+}
+
+function validateExecutionAllocation(value: unknown, filePath: string, line: number): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: allocation is required`);
+  }
+  const allocation = value as Record<string, unknown>;
+  requireRecordString(allocation, 'runtimeId', filePath, line);
+  requireScopedId(allocation, 'taskId', 'task', filePath, line);
+  requireScopedId(allocation, 'operationId', 'operation', filePath, line);
+  requirePositiveInteger(allocation, 'executionEpoch', filePath, line);
+  requireRecordString(allocation, 'assignmentId', filePath, line);
+  const scope = requireRecordObject(allocation, 'scope', filePath, line);
+  requireScopedId(scope, 'organId', 'organ', filePath, line);
+  requireScopedId(scope, 'taskId', 'task', filePath, line);
+  requireScopedId(scope, 'cycleId', 'cycle', filePath, line);
+  requireScopedId(scope, 'operationId', 'operation', filePath, line);
+  const inputRefs = allocation.inputRefs;
+  if (!Array.isArray(inputRefs) || inputRefs.length === 0 || inputRefs.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: allocation.inputRefs are required`);
+  }
+  requireRecordString(allocation, 'ownerId', filePath, line);
+  requirePositiveInteger(allocation, 'directiveRevision', filePath, line);
+  requirePositiveInteger(allocation, 'inputRevision', filePath, line);
+  requireBoolean(allocation, 'orchestrated', filePath, line);
+  if (allocation.role !== undefined) {
+    requireRecordString(allocation, 'role', filePath, line);
+    if (!['interaction', 'orchestration', 'execution', 'review', 'memory'].includes(String(allocation.role))) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: allocation.role is invalid`);
+    }
+  }
+  if (allocation.configuredAgentId !== undefined) {
+    requireRecordString(allocation, 'configuredAgentId', filePath, line);
+  }
+}
+
 function checkpointIdKey(id: Checkpoint['id']): string {
   return `${id.scope}:${id.value}`;
 }
@@ -195,6 +235,39 @@ function validateJournalRecord(
   if (kind === 'task.deleted') {
     requireScopedId(record, 'taskId', 'task', filePath, line);
     requireRecordString(record, 'deletedAt', filePath, line);
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
+  }
+  if (kind === 'operation.prepared') {
+    validateExecutionAllocation(record.allocation, filePath, line);
+    const prepared = record as Extract<UiRuntimeJournalRecord, { readonly kind: 'operation.prepared' }>;
+    const allocation = prepared.allocation;
+    // The allocation is the only identity carrier on this record. Its outer
+    // task/operation ids must equal the scope it was frozen with; there is no
+    // second top-level copy to re-derive them from.
+    if (!sameScopedId(allocation.taskId, allocation.scope.taskId)
+      || !sameScopedId(allocation.operationId, allocation.scope.operationId)
+    ) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.prepared allocation identity does not match the enclosing record`);
+    }
+    requireRecordString(record, 'input', filePath, line);
+    requirePositiveInteger(record, 'operationCounter', filePath, line);
+    requirePositiveInteger(record, 'cycleCounter', filePath, line);
+    const operationId = allocation.operationId;
+    const taskId = allocation.taskId;
+    const existing = context.operationIdentities.get(operationId.value);
+    if (
+      existing
+      && (existing.taskId.value !== taskId.value || existing.executionEpoch !== allocation.executionEpoch)
+    ) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.prepared identity conflict for ${operationId.value}`);
+    }
+    if (!existing) {
+      context.operationIdentities.set(operationId.value, {
+        taskId,
+        operationId,
+        executionEpoch: allocation.executionEpoch,
+      });
+    }
     return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'operation.started') {

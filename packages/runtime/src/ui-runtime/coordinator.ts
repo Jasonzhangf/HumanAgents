@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   id,
   type AgentDriver,
+  type AgentRoleDisplay,
   type AgentEvent,
   type AgentHandle,
   type Attention,
@@ -208,6 +209,63 @@ export interface RuntimeExecutionDriver extends AgentDriver {
   close(): Promise<ProviderCloseResult>;
 }
 
+/**
+ * The typed execution identity the coordinator allocates for one operation.
+ * Everything here is produced by the coordinator's own task execution owner
+ * (scope, runtime id, operation, cycle, Harness epoch, assignment, directive
+ * input revision) before any external effect, so an execution can be prepared
+ * and registered while still unreleased. `role` and `configuredAgentId` are the
+ * typed control selection the actual owner supplies; they are never derived
+ * from a dispatch label, transcript, task payload or metadata.
+ */
+export interface RuntimeExecutionAllocation {
+  readonly runtimeId: string;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly assignmentId: string;
+  readonly scope: ScopeRef;
+  readonly inputRefs: readonly string[];
+  readonly ownerId: string;
+  readonly directiveRevision: number;
+  readonly inputRevision: number;
+  readonly orchestrated: boolean;
+  /**
+   * The configured control selection for this execution, when the actual owner
+   * bound one. Absent means no selection was supplied, which is not the same as
+   * a default selection: the producer resolves it, and a same-role ambiguity
+   * stays an explicit failure instead of a substituted route. This is the same
+   * role vocabulary as the canonical Config `AgentRole`; contracts carry their
+   * own equivalent copy so control-side consumers need not import Config.
+   */
+  readonly role?: AgentRoleDisplay;
+  readonly configuredAgentId?: string;
+}
+
+/**
+ * The exact input the driver factory receives: the allocated identity, plus
+ * the binding/epoch this particular attempt selected. A Retry-10 attempt
+ * selects its own binding and epoch, so those two are per-attempt while the
+ * rest of the allocation stays the operation's own identity.
+ */
+export interface RuntimeExecutionPreparationInput extends RuntimeExecutionAllocation {
+  readonly attemptBindingId?: string;
+  readonly attemptExecutionEpoch: number;
+}
+
+/**
+ * The release state of an allocated execution. `prepared` is the durable
+ * identity that exists before any Provider runs; `released` means the actual
+ * admission for that allocation completed and the driver may start. An
+ * unreleased allocation must never be reported as a running Provider.
+ */
+export type RuntimeExecutionRelease =
+  | { readonly state: 'prepared' }
+  | { readonly state: 'released' };
+
+/** The caller completes real registration/coverage here, outside Provider waits. */
+export type RuntimeExecutionAdmission = (allocation: RuntimeExecutionAllocation) => Promise<void>;
+
 export interface RuntimeExecutionDriverInput {
   readonly runtimeId: string;
   readonly taskId: TaskId;
@@ -219,10 +277,28 @@ export interface RuntimeExecutionDriverInput {
   readonly ownerId: string;
 }
 
-export type RuntimeExecutionDriverFactory = (input: RuntimeExecutionDriverInput) => RuntimeExecutionDriver;
+/**
+ * The execution driver factory. The returned driver may be produced
+ * synchronously, or asynchronously when the producer must resolve the actual
+ * Provider for this execution first (configured selection, own probe, own
+ * admission). The coordinator awaits the factory exactly once, before the
+ * driver starts, so an unresolved selection can never dispatch a late request
+ * to a Provider this execution never admitted. A factory that returns a plain
+ * driver keeps the existing synchronous behavior.
+ */
+export type RuntimeExecutionDriverFactory = (
+  input: RuntimeExecutionPreparationInput,
+) => RuntimeExecutionDriver | Promise<RuntimeExecutionDriver>;
 
-export type RuntimeExecutionDriverForBindingFactory =
-  (bindingId: string, input: RuntimeExecutionDriverInput) => RuntimeExecutionDriver;
+/**
+ * The Retry-10 selected-binding driver factory. It is the same seam as
+ * `RuntimeExecutionDriverFactory`: a retry attempt selects its own binding and
+ * may produce that binding's driver asynchronously before the attempt starts.
+ */
+export type RuntimeExecutionDriverForBindingFactory = (
+  bindingId: string,
+  input: RuntimeExecutionPreparationInput,
+) => RuntimeExecutionDriver | Promise<RuntimeExecutionDriver>;
 
 export interface RuntimeExecutionCapabilities {
   readonly providerNeutralHarness: {
@@ -338,6 +414,20 @@ export type RuntimeTaskJournalRecord =
       readonly orchestrated?: boolean;
     }
   | {
+      /**
+       * The coordinator-owned execution allocation, persisted before any
+       * external effect. It is the durable prepared identity an exact retry
+       * reuses, and the exact input the bounded async preparation consumes.
+       * `role`/`configuredAgentId` are the typed control selection the actual
+       * owner supplied; they are never re-derived from a label or metadata.
+       */
+      readonly kind: 'operation.prepared';
+      readonly allocation: RuntimeExecutionAllocation;
+      readonly input: string;
+      readonly operationCounter: number;
+      readonly cycleCounter: number;
+    }
+  | {
       readonly kind: 'operation.event';
       readonly operationId: OperationId;
       readonly event: RuntimeTaskEvent;
@@ -372,6 +462,7 @@ export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCo
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
+  readonly admitExecution?: RuntimeExecutionAdmission;
   /**
    * Reads back the files an execution produced, so the quality reviewer is
    * handed the artifact itself. A provider text summary cannot be verified
@@ -505,6 +596,17 @@ interface TaskRecord {
   allowedActions: string[];
   runtime?: AgentRuntime;
   driver?: RuntimeExecutionDriver;
+  /**
+   * The durable execution allocation for the current operation, and its
+   * release state. `running` only becomes true after the actual admission
+   * released the prepared identity, so a task held during preparation is never
+   * reported as an executing Provider.
+   */
+  allocation?: RuntimeExecutionAllocation;
+  release?: RuntimeExecutionRelease;
+  releasePending?: Promise<RuntimeExecutionRelease>;
+  resolveRelease?: (release: RuntimeExecutionRelease) => void;
+  rejectRelease?: (error: unknown) => void;
   composition?: RuntimeExecutionComposition;
   checkpointBoundary?: ContextCheckpointBoundary;
   taskAssembly?: RuntimeTaskAssembly;
@@ -539,6 +641,12 @@ interface OperationRecord {
   readonly executionEpoch: number;
   readonly input: string;
   readonly orchestrated: boolean;
+  /**
+   * The coordinator-owned allocation for this operation, once it has been
+   * persisted. An exact retry of the same operation reuses this identity
+   * instead of minting a second scope, runtime id or Harness epoch.
+   */
+  allocation?: RuntimeExecutionAllocation;
   readonly events: RuntimeTaskEvent[];
   seq: number;
 }
@@ -1019,7 +1127,7 @@ export class RuntimeTaskCoordinator {
 
   updateTask(taskId: TaskId, input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
     const record = this.requireTask(taskId);
-    if (record.stopping || record.state === 'running' || record.state === 'settling') {
+    if (record.release?.state === 'prepared' || record.stopping || record.state === 'running' || record.state === 'settling') {
       throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'running tasks cannot be edited', 'stop the current execution first');
     }
     const title = input.title?.trim() ?? record.title;
@@ -1045,7 +1153,7 @@ export class RuntimeTaskCoordinator {
 
   deleteTask(taskId: TaskId): { readonly taskId: TaskId; readonly deleted: true } {
     const record = this.requireTask(taskId);
-    if (record.stopping || record.state === 'running' || record.state === 'settling') {
+    if (record.release?.state === 'prepared' || record.stopping || record.state === 'running' || record.state === 'settling') {
       throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'running tasks cannot be deleted', 'stop the current execution first');
     }
     const deletedAt = this.now().toISOString();
@@ -1154,20 +1262,25 @@ export class RuntimeTaskCoordinator {
     return context;
   }
 
-  startExecution(taskId: TaskId, input: {
+  prepareExecution(taskId: TaskId, input: {
     readonly prompt: string;
     readonly orchestrate?: boolean;
     readonly operationId?: OperationId;
+    /**
+     * The typed control selection for this execution. It comes from the actual
+     * App/configured selection; the runtime never derives role or agent from a
+     * dispatch label, task payload, transcript or metadata. On an exact retry
+     * the persisted allocation is the authority: no new identity is minted and
+     * a caller-supplied selection must not replace the prepared one.
+     */
+    readonly role?: AgentRoleDisplay;
+    readonly configuredAgentId?: string;
     readonly implicitRequirement?: {
       readonly envelope: RequirementEnvelope;
       readonly admission: RequirementAdmissionReceipt;
     };
-  }): { readonly operationId: OperationId; readonly executionEpoch: number } {
+  }): RuntimeExecutionAllocation {
     const record = this.requireTask(taskId);
-    if (record.running) throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'task already has a running execution', 'stop the current execution first');
-    if (!record.allowedActions.includes('start')) {
-      throw new RuntimeTaskControlError('task.not.startable', RUNTIME_OWNER, 'task is not in a state that allows starting an execution', record.nextStep);
-    }
     const prompt = input.prompt.trim();
     if (!prompt) throw new RuntimeTaskControlError('execution.input.required', RUNTIME_OWNER, 'execution input is required', 'provide a non-empty prompt');
     record.originalInput = input.prompt;
@@ -1182,11 +1295,10 @@ export class RuntimeTaskCoordinator {
     const expectedExecutionEpoch = (record.executionEpoch ?? 0) + 1;
     let operation = input.operationId ? this.operations.get(input.operationId.value) : undefined;
     let scope = operation ? this.scopes.get(operation.operationId.value) : undefined;
+    let allocation: RuntimeExecutionAllocation;
     if (operation) {
       if (
-        operation.events.length > 0
-        || operation.taskId.value !== taskId.value
-        || operation.executionEpoch !== expectedExecutionEpoch
+        operation.taskId.value !== taskId.value
         || operation.input !== prompt
         || operation.orchestrated !== (input.orchestrate === true)
         || !scope
@@ -1198,13 +1310,48 @@ export class RuntimeTaskCoordinator {
           'inspect the durable requirement dispatch identity',
         );
       }
+      const persisted = operation.allocation;
+      if (persisted === undefined) {
+        throw new RuntimeTaskControlError(
+          'operation.prepared.missing',
+          RUNTIME_OWNER,
+          'reused operation has no persisted execution allocation',
+          'inspect the durable requirement dispatch identity',
+        );
+      }
+      if (
+        persisted.taskId.value !== taskId.value
+        || persisted.operationId.value !== operation.operationId.value
+        || persisted.executionEpoch !== operation.executionEpoch
+        || persisted.scope.taskId?.value !== scope?.taskId?.value
+        || persisted.scope.operationId?.value !== operation.operationId.value
+        || persisted.directiveRevision !== record.directiveRevision
+        || persisted.role !== input.role
+        || persisted.configuredAgentId !== input.configuredAgentId
+      ) {
+        throw new RuntimeTaskControlError(
+          'operation.identity.conflict',
+          RUNTIME_OWNER,
+          'persisted execution allocation does not match the reused operation',
+          'inspect the durable requirement dispatch identity',
+        );
+      }
+      allocation = persisted;
+      return allocation;
     } else {
+      if (record.running || record.release?.state === 'prepared') {
+        throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'task already has an active execution', 'stop the current execution first');
+      }
+      if (!record.allowedActions.includes('start')) {
+        throw new RuntimeTaskControlError('task.not.startable', RUNTIME_OWNER, 'task is not in a state that allows starting an execution', record.nextStep);
+      }
       const operationCounter = this.operationCounter + 1;
       const cycleCounter = this.cycleCounter + 1;
       const operationId = input.operationId ?? id('operation', `ui-operation-${operationCounter}`);
       const cycleId = id('cycle', `ui-cycle-${cycleCounter}`);
       const executionEpoch = expectedExecutionEpoch;
-      scope = { organId: this.options.organId, taskId, cycleId, operationId };
+      const execScope: ScopeRef = Object.freeze({ organId: this.options.organId, taskId, cycleId, operationId });
+      scope = execScope;
       const startedAt = this.now().toISOString();
       operation = {
         operationId,
@@ -1215,6 +1362,30 @@ export class RuntimeTaskCoordinator {
         events: [],
         seq: 0,
       };
+      allocation = Object.freeze({
+        runtimeId: this.runtimeId(operationId),
+        taskId,
+        operationId,
+        executionEpoch,
+        assignmentId: `assignment-${operationId.value}`,
+        scope: execScope,
+        inputRefs: Object.freeze([`task://${taskId.value}/input/${operationCounter}`]),
+        ownerId: RUNTIME_OWNER,
+        directiveRevision: record.directiveRevision,
+        inputRevision: record.inputRevisionState?.revisions.at(-1)?.inputRevision ?? record.directiveRevision,
+        orchestrated: input.orchestrate === true,
+        ...(input.role === undefined ? {} : { role: input.role }),
+        ...(input.configuredAgentId === undefined ? {} : { configuredAgentId: input.configuredAgentId }),
+      });
+      operation.allocation = allocation;
+      record.allocation = allocation;
+      this.journal?.append({
+        kind: 'operation.prepared',
+        allocation,
+        input: prompt,
+        operationCounter,
+        cycleCounter,
+      });
       this.journal?.append({
         kind: 'operation.started',
         operationId,
@@ -1234,34 +1405,17 @@ export class RuntimeTaskCoordinator {
       this.scopes.set(operationId.value, scope);
     }
 
-    const startedEvent: RuntimeTaskEvent = {
-      eventId: `${operation.operationId.value}-1`,
-      seq: 1,
-      occurredAt: this.now().toISOString(),
-      taskId,
-      operationId: operation.operationId.value,
-      executionEpoch: operation.executionEpoch,
-      kind: 'execution.started',
-      state: 'running',
-      summary: 'execution started',
-      evidenceRefs: [],
-    };
-    this.journal?.append({
-      kind: 'operation.event',
-      operationId: operation.operationId,
-      event: startedEvent,
-    });
-    operation.seq = startedEvent.seq;
-    operation.events.push(startedEvent);
-    this.activeExecutions.add(operation.operationId.value);
-
-    record.running = true;
+    record.release = { state: 'prepared' };
+    record.releasePending = undefined;
+    record.runtime = undefined;
+    record.driver = undefined;
+    record.running = false;
     record.stopping = false;
     record.executionReady = new Promise<boolean>((resolve) => {
       record.resolveExecutionReady = resolve;
     });
-    record.state = 'running';
-    record.currentState = '运行中';
+    record.state = 'waiting';
+    record.currentState = '等待执行准入';
     record.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
     record.input = operation.input;
     record.output = '';
@@ -1273,16 +1427,58 @@ export class RuntimeTaskCoordinator {
     record.checkpointBoundary = undefined;
     record.taskAssembly = undefined;
     record.implicitRequirement = input.implicitRequirement;
-    record.nextStep = '等待 Provider 事件';
+    record.nextStep = '完成执行注册与覆盖后释放';
     record.allowedActions = ['stop'];
     record.error = undefined;
     record.orchestrated = operation.orchestrated;
-    record.events.push(startedEvent);
-    record.updatedAt = startedEvent.occurredAt;
-    this.listeners.emit(operation.operationId.value, startedEvent);
+    record.updatedAt = this.now().toISOString();
+    return allocation;
+  }
 
-    void this.runExecution(record, operation, scope, operation.input);
-    return { operationId: operation.operationId, executionEpoch: operation.executionEpoch };
+  /** Compatibility entry: allocates synchronously; it does not acknowledge release. */
+  startExecution(
+    taskId: TaskId,
+    input: Parameters<RuntimeTaskCoordinator['prepareExecution']>[1],
+  ): { readonly operationId: OperationId; readonly executionEpoch: number } {
+    const allocation = this.prepareExecution(taskId, input);
+    void this.releaseExecution(taskId, allocation.operationId).catch(() => {});
+    return { operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
+  }
+
+  /** Await this entry before reporting release. Admission and factory each run once. */
+  releaseExecution(taskId: TaskId, operationId: OperationId): Promise<RuntimeExecutionRelease> {
+    const record = this.requireTask(taskId);
+    const operation = this.operations.get(operationId.value);
+    if (!operation?.allocation || record.operationId?.value !== operationId.value
+      || operation.taskId.value !== taskId.value) {
+      throw new RuntimeTaskControlError('operation.prepared.missing', RUNTIME_OWNER, 'execution allocation is not current for this task', 'prepare this task execution first');
+    }
+    if (record.releasePending) return record.releasePending;
+    if (record.stopping || record.release?.state !== 'prepared') {
+      throw new RuntimeTaskControlError('execution.not.releasable', RUNTIME_OWNER, 'execution is no longer prepared for release', record.nextStep);
+    }
+    record.executionReady = new Promise<boolean>((resolve) => { record.resolveExecutionReady = resolve; });
+    record.error = undefined;
+    const pending = new Promise<RuntimeExecutionRelease>((resolve, reject) => {
+      record.resolveRelease = resolve;
+      record.rejectRelease = reject;
+    });
+    record.releasePending = pending;
+    void this.runExecution(record, operation, operation.allocation.scope, operation.input, operation.allocation);
+    return pending;
+  }
+
+  private markExecutionReleased(record: TaskRecord, operation: OperationRecord): void {
+    record.release = { state: 'released' };
+    record.running = true;
+    record.state = 'running';
+    record.currentState = '运行中';
+    record.nextStep = '等待 Provider 事件';
+    this.activeExecutions.add(operation.operationId.value);
+    this.pushEvent(record, operation, 'execution.started', 'running', 'execution admitted and released', []);
+    record.resolveRelease?.(record.release);
+    record.resolveRelease = undefined;
+    record.rejectRelease = undefined;
   }
 
   /**
@@ -1385,12 +1581,16 @@ export class RuntimeTaskCoordinator {
 
   async stop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
     const record = this.requireTask(taskId);
-    if (!record.running || record.stopping || !record.operationId || !record.executionEpoch) {
+    if ((!record.running && record.release?.state !== 'prepared') || record.stopping || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'task has no running execution to stop', 'start an execution first');
     }
     record.stopping = true;
+    if (record.release?.state === 'prepared' && !record.releasePending) {
+      await this.stopPreparedExecution(record, this.operations.get(record.operationId.value)!);
+    }
     const executionReady = await record.executionReady;
     if (!executionReady) {
+      if (record.state === 'stopped') return { state: 'stopped', operationId: record.operationId.value };
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'execution ended before stop control could start', 'start an execution first');
     }
     if (!record.running || !record.runtime || !record.driver || !record.composition || !record.operationId || !record.executionEpoch) {
@@ -1483,6 +1683,11 @@ export class RuntimeTaskCoordinator {
 
   async retryStop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
     const record = this.requireTask(taskId);
+    if (record.stopping && record.release?.state === 'prepared' && record.operationId) {
+      const prepared = this.operations.get(record.operationId.value)!;
+      await this.stopPreparedExecution(record, prepared, record.driver);
+      return { state: 'stopped', operationId: record.operationId.value };
+    }
     if (!record.stopping || !record.operationId || !record.driver || !record.runtime || !record.composition || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.recoverable', RUNTIME_OWNER, 'task has no pending stop recovery', 'start an execution first');
     }
@@ -2201,7 +2406,38 @@ export class RuntimeTaskCoordinator {
     });
   }
 
-  private async runExecution(record: TaskRecord, operation: OperationRecord, scope: ScopeRef, prompt: string): Promise<void> {
+  private async stopPreparedExecution(
+    record: TaskRecord,
+    operation: OperationRecord,
+    driver?: RuntimeExecutionDriver,
+  ): Promise<void> {
+    // This driver belongs to this preparation. Another task's execution does
+    // not retain it, unlike the legacy shared-provider close path.
+    const close = driver ? await driver.close() : undefined;
+    if (close && close.state !== 'closed') {
+      throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER,
+        `prepared provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'release the prepared provider resource');
+    }
+    const error = new RuntimeTaskControlError('execution.preparation.stopped', RUNTIME_OWNER,
+      'execution stopped before provider start', 'start a new execution');
+    record.rejectRelease?.(error);
+    record.rejectRelease = undefined;
+    record.resolveRelease = undefined;
+    record.resolveExecutionReady?.(false);
+    record.resolveExecutionReady = undefined;
+    record.release = undefined;
+    this.pushEvent(record, operation, 'execution.terminal', 'stopped', error.message,
+      close?.evidenceRefs ?? [], error.ownerId, false, error.nextAction, undefined, 'final');
+    this.finalize(record, 'stopped');
+  }
+
+  private async runExecution(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    prompt: string,
+    allocation: RuntimeExecutionAllocation,
+  ): Promise<void> {
     this.scopes.set(operation.operationId.value, scope);
     const runtimeId = this.runtimeId(operation.operationId);
     const evidenceRef: EvidenceRef = {
@@ -2220,6 +2456,15 @@ export class RuntimeTaskCoordinator {
     const closedRetryDrivers = new Map<RuntimeExecutionDriver, ProviderCloseResult>();
     try {
       await this.openActiveTurn(record, operation, scope);
+      if (!this.options.admitExecution) {
+        throw new RuntimeTaskControlError('execution.admission.missing', RUNTIME_OWNER,
+          'execution admission source is not bound', 'bind the actual task admission owner before release');
+      }
+      await this.options.admitExecution(allocation);
+      if (record.stopping) {
+        await this.stopPreparedExecution(record, operation);
+        return;
+      }
       if (this.options.providerRetry) {
         retryCycle = createRetryCycleManager({
           config: this.options.providerRetry.config,
@@ -2246,17 +2491,25 @@ export class RuntimeTaskCoordinator {
           this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
         );
         record.checkpointBoundary = checkpointBoundary;
-        const createDriverInput = {
-          runtimeId,
-          taskId: record.taskId,
-          operationId: operation.operationId,
-          executionEpoch: operation.executionEpoch,
-          assignmentId: `assignment-${operation.operationId.value}`,
-          scope,
-          inputRefs: [`task://${record.taskId.value}/input/${operation.seq}`],
-          ownerId: RUNTIME_OWNER,
-        } as const;
-        driver = this.options.createDriver(createDriverInput);
+        const preparationInput: RuntimeExecutionPreparationInput = {
+          ...allocation,
+          attemptExecutionEpoch: allocation.executionEpoch,
+        };
+        /**
+         * The bounded execution preparation seam. The driver factory may need
+         * to resolve the actual Provider for this execution (configured
+         * selection, own probe, own admission) before the driver exists, so
+         * the coordinator awaits it exactly once before any driver start. A
+         * stop that landed while this promise is pending must not start a
+         * Provider after the stop.
+         */
+        const prepared = await this.options.createDriver(preparationInput);
+        driver = prepared;
+        record.driver = prepared;
+        if (record.stopping) {
+          await this.stopPreparedExecution(record, operation, prepared);
+          return;
+        }
         composition = new HarnessExecutionComposition({
           driver,
           runtimeId,
@@ -2273,6 +2526,7 @@ export class RuntimeTaskCoordinator {
         record.composition = composition;
         record.driver = driver;
         record.runtime = runtime;
+        this.markExecutionReleased(record, operation);
       }
       let closure: AgentRuntimeClosure | undefined;
       if (record.orchestrated && this.options.createTaskAssembly) {
@@ -2318,16 +2572,40 @@ export class RuntimeTaskCoordinator {
                   coordinator.options.checkpointStoreFor(record.taskId, scope.cycleId!),
                 );
                 record.checkpointBoundary = checkpointBoundary;
-                attemptDriver = coordinator.options.providerRetry.createDriverForBinding(attemptBindingId, {
+                const attemptPreparationInput: RuntimeExecutionPreparationInput = {
+                  ...allocation,
                   runtimeId: `retry-${assignmentId}-${attemptEpoch}`,
-                  taskId: record.taskId,
                   operationId: operation.operationId,
-                  executionEpoch: attemptEpoch,
+                  executionEpoch: operation.executionEpoch,
                   assignmentId,
                   scope,
-                  inputRefs: [`task://${record.taskId.value}/input/${operation.seq}`],
-                  ownerId: RUNTIME_OWNER,
-                });
+                  attemptBindingId,
+                  attemptExecutionEpoch: attemptEpoch,
+                };
+                attemptDriver = await coordinator.options.providerRetry.createDriverForBinding(
+                  attemptBindingId,
+                  attemptPreparationInput,
+                );
+                record.driver = attemptDriver;
+                if (record.stopping) {
+                  await coordinator.stopPreparedExecution(record, operation, attemptDriver);
+                  return {
+                    taskId: input.assignment.taskId,
+                    pipelineNodeId: input.assignment.pipelineNodeId,
+                    agentId: input.agentId,
+                    assignmentId: input.assignment.assignmentId,
+                    attempt: input.assignment.attempt,
+                    executionEpoch: input.assignment.executionEpoch,
+                    inputRevision: input.assignment.inputRevision,
+                    producedArtifactRefs: [],
+                    producedArtifactDigests: [],
+                    status: 'cancelled',
+                    summary: 'provider execution was stopped before the retry attempt started',
+                    outputRefs: [],
+                    evidenceRefs: [],
+                    nextAction: 'settle',
+                  };
+                }
                 attemptComposition = new HarnessExecutionComposition({
                   driver: attemptDriver,
                   runtimeId: `retry-${assignmentId}-${attemptEpoch}`,
@@ -2344,6 +2622,7 @@ export class RuntimeTaskCoordinator {
                 record.composition = attemptComposition;
                 record.driver = attemptDriver;
                 record.runtime = attemptRuntime;
+                if (record.release?.state === 'prepared') coordinator.markExecutionReleased(record, operation);
               } else {
                 attemptComposition = composition!;
                 attemptRuntime = runtime!;
@@ -2490,7 +2769,7 @@ export class RuntimeTaskCoordinator {
           reviewKinds: ['quality'],
         });
         const dispatched = activeTurn ? await activeTurn.runProducer(dispatch) : await dispatch();
-        if (record.stopping || record.postCommitRecoveryPending) return;
+        if (record.stopping || record.postCommitRecoveryPending || record.state === 'stopped') return;
         if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {
           if (!closure) {
             const problem = dispatched.issue;
@@ -2611,6 +2890,24 @@ export class RuntimeTaskCoordinator {
       this.pushEvent(record, operation, 'execution.terminal', closure.state, close.retained ? `execution ${closure.state}; provider retained for active executions` : `execution ${closure.state}; provider closed`, [...closure.evidenceRefs, ...close.evidenceRefs], undefined, undefined, undefined, undefined, 'final');
       this.finalize(record, closure.state);
     } catch (error) {
+      if (record.release?.state === 'prepared') {
+        const projection = errorFromUnknown(error);
+        // No model/tool has started. Keep the allocation and its typed duty;
+        // a projection checkpoint cannot claim that admission completed.
+        record.error = projection;
+        record.state = 'blocked';
+        record.running = false;
+        record.currentState = '执行准入受阻';
+        record.nextStep = projection.nextAction;
+        record.allowedActions = record.stopping ? ['retry-stop'] : ['stop'];
+        this.pushEvent(record, operation, 'execution.terminal', 'blocked', projection.message,
+          [], projection.ownerId, projection.retryable, projection.nextAction, { error: projection }, 'final');
+        record.rejectRelease?.(error);
+        record.rejectRelease = undefined;
+        record.resolveRelease = undefined;
+        record.releasePending = undefined;
+        return;
+      }
       if (record.postCommitRecoveryPending) return;
       const startupFailureBeforeReady = record.resolveExecutionReady !== undefined;
       if (startupFailureBeforeReady) {
@@ -2799,6 +3096,10 @@ export class RuntimeTaskCoordinator {
       );
       this.finalize(record, outcome);
     } finally {
+      record.rejectRelease?.(new RuntimeTaskControlError('execution.not.released', RUNTIME_OWNER,
+        'execution ended without release', 'inspect execution admission responsibility'));
+      record.rejectRelease = undefined;
+      record.resolveRelease = undefined;
       record.resolveExecutionReady?.(false);
       record.resolveExecutionReady = undefined;
       this.activeExecutions.delete(operation.operationId.value);
@@ -3333,6 +3634,49 @@ export class RuntimeTaskCoordinator {
         case 'task.deleted': {
           this.deletedTaskIds.add(record.taskId.value);
           this.tasks.delete(record.taskId.value);
+          break;
+        }
+        case 'operation.prepared': {
+          this.operationCounter = Math.max(this.operationCounter, record.operationCounter);
+          this.cycleCounter = Math.max(this.cycleCounter, record.cycleCounter);
+          const existing = this.operations.get(record.allocation.operationId.value);
+          if (existing && existing.allocation !== undefined) {
+            if (
+              existing.allocation.taskId.value !== record.allocation.taskId.value
+              || existing.allocation.operationId.value !== record.allocation.operationId.value
+              || existing.allocation.executionEpoch !== record.allocation.executionEpoch
+            ) {
+              throw new RuntimeTaskControlError(
+                'journal.corrupt',
+                RUNTIME_OWNER,
+                `journal prepared allocation ${record.allocation.operationId.value} does not match its first allocation`,
+                'repair or discard the UI runtime journal before restarting',
+              );
+            }
+            break;
+          }
+          const operation = existing ?? {
+            operationId: record.allocation.operationId,
+            taskId: record.allocation.taskId,
+            executionEpoch: record.allocation.executionEpoch,
+            input: record.input,
+            orchestrated: record.allocation.orchestrated,
+            events: [],
+            seq: 0,
+            allocation: record.allocation,
+          };
+          operation.allocation = record.allocation;
+          this.operations.set(operation.operationId.value, operation);
+          this.scopes.set(operation.operationId.value, record.allocation.scope);
+          const task = this.tasks.get(record.allocation.taskId.value);
+          if (task) {
+            task.allocation = record.allocation;
+            task.operationId = operation.operationId;
+            task.executionEpoch = operation.executionEpoch;
+            task.input = operation.input;
+            task.orchestrated = operation.orchestrated;
+            task.release = { state: 'prepared' };
+          }
           break;
         }
         case 'operation.started': {
