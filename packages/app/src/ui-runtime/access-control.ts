@@ -10,6 +10,7 @@ const CREDENTIAL_SCHEMA_VERSION = 1 as const;
 const SESSION_PROTOCOL_VERSION = 1 as const;
 const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_PAIRING_TTL_MS = 120_000;
+const PRODUCT_PRINCIPAL_DOMAIN = 'product-principal:v1' as const;
 const ACCESS_CONTROL_OWNER = 'humanagent.app.access-control';
 const CREDENTIAL_LOCK_RETRY_MS = 10;
 const CREDENTIAL_LOCK_WAIT_MS = 5_000;
@@ -29,6 +30,17 @@ export interface AccessSession {
   readonly expiresAt: number;
 }
 
+/**
+ * Stable nonsecret realm identity produced only after the existing cookie and
+ * session verification succeeded. It derives from the persisted credential
+ * with a distinct HMAC domain, so paired sessions, logout generations and cold
+ * processes with the same credential project the same owner.
+ */
+export interface VerifiedProductPrincipal {
+  readonly owner: string;
+  readonly session: AccessSession;
+}
+
 export interface PairingChallenge {
   readonly code: string;
   readonly expiresAt: number;
@@ -44,6 +56,13 @@ export interface AccessControlOptions {
 
 export type SessionVerification =
   | { readonly state: 'valid'; readonly session: AccessSession }
+  | { readonly state: 'missing' }
+  | { readonly state: 'invalid' }
+  | { readonly state: 'expired'; readonly session: AccessSession }
+  | { readonly state: 'generation-mismatch'; readonly session: AccessSession };
+
+export type ProductPrincipalVerification =
+  | { readonly state: 'valid'; readonly principal: VerifiedProductPrincipal }
   | { readonly state: 'missing' }
   | { readonly state: 'invalid' }
   | { readonly state: 'expired'; readonly session: AccessSession }
@@ -329,6 +348,24 @@ export class AccessControlService {
     return session.sessionGeneration === current.sessionGeneration;
   }
 
+  /**
+   * Produces the verified product principal only when the existing cookie and
+   * session verification succeeds. The owner is the domain-separated HMAC of
+   * the persisted credential secret; it is stable across paired sessions and
+   * generations and is never the session token or credential itself.
+   */
+  async verifyProductPrincipal(cookieHeader: string | undefined): Promise<ProductPrincipalVerification> {
+    const verification = await this.verifySession(cookieHeader);
+    if (verification.state !== 'valid') return verification;
+    return {
+      state: 'valid',
+      principal: {
+        owner: this.productPrincipalOwner(),
+        session: verification.session,
+      },
+    };
+  }
+
   async readPersistedGeneration(): Promise<number> {
     const current = await this.readCurrentCredential();
     this.credential = current;
@@ -400,6 +437,13 @@ export class AccessControlService {
 
   isExpired(session: AccessSession): boolean {
     return session.expiresAt <= this.now();
+  }
+
+  private productPrincipalOwner(): string {
+    const secret = decodeSecret(this.credential.secret);
+    return `${PRODUCT_PRINCIPAL_DOMAIN}:${createHmac('sha256', secret)
+      .update(PRODUCT_PRINCIPAL_DOMAIN)
+      .digest('base64url')}`;
   }
 
   nextExpiryDelayMs(sessions: readonly AccessSession[]): number | undefined {

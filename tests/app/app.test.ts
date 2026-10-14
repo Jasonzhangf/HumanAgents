@@ -21,6 +21,7 @@ import { readCommittedCheckpoint } from '../../packages/app/src/checkpoint-journ
 import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } from '../../packages/runtime/src/memory/index.js';
 import { MemoryAgent } from '../../packages/runtime/src/memory/index.js';
 import { FakeReplayExecutionRuntimePort, FileCheckpointStore, UiRuntimeService, UiRuntimeJournal } from '../../packages/app/src/ui-runtime/index.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import type { AttentionPort } from '../../packages/runtime/src/index.js';
 import { prepareAgentOperation } from '../../packages/app/src/agent-operation.js';
 import { closeAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
@@ -261,6 +262,113 @@ test('native CLI shared-pair boundary keeps actual run and recoverable resume un
     console.log('native CLI forwarding', JSON.stringify({ forwarded: forwarded.length, selected: forwarded[0], generationPosts: 0 }));
     const session = await new SessionStore(fixture.paths).open(sessionId);
     console.log('native CLI boundary', JSON.stringify({ providerRequests: fixture.upstream.wires.length, manifestEpoch: manifest.executionEpoch, sessionRecordTypes: session.records.map((record) => record.type) }));
+  } finally {
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true });
+  }
+});
+
+/**
+ * Bounded process fixture for the native CLI control input seam (J1b). A real
+ * fixture-owned A1 credential issues one paired session; the cookie header is
+ * written to a control-session file and handed to the CLI. The fixture asserts
+ * that a valid principal reaches the current real native unbound error and an
+ * invalid session fails at the real verifier before any dispatch. Raw cookies
+ * must never appear in stdout/stderr. The full native factory is J2 and is not
+ * claimed here.
+ */
+test('native CLI preparation control input', async () => {
+  const fixture = await nativePairFixture();
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const sessionId = 'native-cli-control';
+  const taskId = 'native-cli-control-task';
+  const controlFile = join(fixture.root, 'control-session.txt');
+  const invalidFile = join(fixture.root, 'control-session-invalid.txt');
+  const run = (args: readonly string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    child.once('error', reject);
+    child.once('exit', (code) => resolve({ code, stdout, stderr }));
+  });
+  try {
+    // Real fixture-owned A1 credential and paired session. The cookie header is
+    // the only control-session-file content; it stays out of business payload.
+    const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
+    const session = await access.consumePairingCode(access.createPairingChallenge('cli-control-lease', 1).code);
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    await writeFile(controlFile, `${cookie}\n`, 'utf8');
+    const cookieName = cookie.slice(0, cookie.indexOf('='));
+    await writeFile(invalidFile, `${cookieName}=not-a-valid-token\n`, 'utf8');
+
+    // Seed a real recoverable session/manifest with a declared Task so the
+    // native resume branch has an existing Task identity to select.
+    const runtime = await openRuntime({ controlRoot: fixture.controlRoot, workspace: fixture.workspace, plan: 'default', sessionId });
+    await new SessionStore(fixture.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+    await runtime.lock.release();
+    const seeded = await runAgentOperation({
+      ...fixture,
+      sessionId,
+      plan: 'default',
+      prompt: 'seed control session',
+      taskId: id('task', taskId),
+      composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) },
+      prepareAgentProvider: async () => { throw new Error('composed execution must retain its own driver'); },
+    });
+    assert.equal(seeded.checkpoint.outcome, 'failed');
+    const manifest = await readRunManifest(fixture.paths, sessionId);
+    assert.equal(manifest.taskId.value, taskId);
+
+    const runArgs = (session: string) => ['run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', session, '--task', taskId, '--prompt', 'control probe'];
+
+    // RED against the old source: the parser ignored --control-session-file and
+    // --task and the verifier never ran, so an invalid session still produced
+    // the wrong native error. After adoption the same input fails at the real
+    // A1 verifier before any dispatch.
+    const invalidRun = await run([...runArgs('native-cli-control-invalid'), '--control-session-file', invalidFile]);
+    assert.ok(invalidRun.code !== 0, 'invalid session must fail before dispatch');
+    assert.ok(!/rcc-config-missing/.test(invalidRun.stderr));
+    assert.match(invalidRun.stderr, /auth\.session\.invalid/);
+
+    // Valid verified principal reaches the current real native unbound error:
+    // no provider request, no automatic grant, no raw cookie in output.
+    const validRun = await run([...runArgs('native-cli-control-valid'), '--control-session-file', controlFile]);
+    assert.ok(validRun.code !== 0, 'valid session must reach the real native unbound error');
+    assert.match(validRun.stderr, /rcc-config-missing/);
+    assert.equal(/rcc-port-unbound/.test(validRun.stderr), false);
+
+    const resumeArgs = ['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', taskId, '--prompt', 'control resume probe'];
+    const invalidResume = await run([...resumeArgs, '--control-session-file', invalidFile]);
+    assert.ok(invalidResume.code !== 0, 'invalid resume session must fail before dispatch');
+    assert.ok(!/rcc-config-missing/.test(invalidResume.stderr));
+    assert.match(invalidResume.stderr, /auth\.session\.invalid/);
+    const validResume = await run([...resumeArgs, '--control-session-file', controlFile]);
+    assert.ok(validResume.code !== 0, 'valid resume session must reach the real native unbound error');
+    assert.match(validResume.stderr, /rcc-config-missing/);
+
+    // An explicit native selector may not rebind the recovered Task.
+    const mismatchResume = await run(['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', 'native-cli-other-task', '--prompt', 'control resume probe', '--control-session-file', controlFile]);
+    assert.ok(mismatchResume.code !== 0, 'mismatched native selector must not rebind the recovered task');
+    assert.match(mismatchResume.stderr, /native-control\.task-mismatch/);
+    assert.ok(!/rcc-config-missing/.test(mismatchResume.stderr));
+
+    for (const result of [invalidRun, validRun, invalidResume, validResume, mismatchResume]) {
+      for (const output of [result.stdout, result.stderr]) {
+        assert.equal(output.includes(cookie), false);
+        assert.equal(output.includes('not-a-valid-token'), false);
+      }
+    }
+    assert.equal(fixture.upstream.wires.length, 0);
+    console.log('native CLI preparation control input', JSON.stringify({
+      invalidRun: invalidRun.code,
+      validRun: validRun.code,
+      invalidResume: invalidResume.code,
+      validResume: validResume.code,
+      mismatchResume: mismatchResume.code,
+      providerRequests: fixture.upstream.wires.length,
+    }));
   } finally {
     await fixture.upstream.close();
     await rm(fixture.root, { recursive: true });

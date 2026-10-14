@@ -38,6 +38,7 @@ import { assembleProviderExecutionPort } from './provider-assembly.js';
 import { closeAgentProvider, prepareAgentProvider, providerBindingFromConfig, type AgentProviderComposition } from './agent-driver-composition.js';
 import type { MemoryAgentOptions } from '../../runtime/src/memory/agent.js';
 import { AccessControlService, deriveSupervisorToken } from './ui-runtime/access-control.js';
+import type { ProductPrincipalVerification, VerifiedProductPrincipal } from './ui-runtime/access-control.js';
 import { providerRetryConfigFromEffective } from './retry-config.js';
 import {
   createFakeExecutionPort,
@@ -57,6 +58,7 @@ import { createCordisHost } from './cordis-host.js';
 import { readDaemonLease, runSupervisorStartup, waitForDaemonLeaseHandoff, type SupervisorStartup } from './supervisor/supervisor.js';
 import { requestDaemonRestart } from './supervisor/restart-client.js';
 import { existsSync, readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -72,6 +74,7 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
   '--binding',
   '--capability-digest',
   '--config-digest',
+  '--control-session-file',
   '--control-root',
   '--endpoint',
   '--fake-scenario',
@@ -89,6 +92,7 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
   '--rcc-base-url',
   '--route',
   '--session',
+  '--task',
   '--ui-root',
   '--workspace',
 ]);
@@ -706,6 +710,12 @@ export async function main(args: readonly string[]): Promise<void> {
     const sessionId = option(args, '--session') ?? 'session-' + Date.now();
     const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
     try {
+      const configuredAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;
+      const configuredAgent = runtime.configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
+      if (configuredAgent?.driverRef === 'rcc') {
+        const control = await resolveNativeControlInput(runtime.paths, args);
+        requireNativeControlInput(control, undefined);
+      }
       const memoryRef = option(args, '--memory');
       const memoryDriverFor = memoryDriverFactory({
         paths: runtime.paths,
@@ -725,8 +735,6 @@ export async function main(args: readonly string[]): Promise<void> {
             ...(memoryDriverFor === undefined ? {} : { driverFor: memoryDriverFor }),
           });
       const running = await new SessionStore(runtime.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
-      const configuredAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;
-      const configuredAgent = runtime.configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
       const runtimeId = `runtime-${sessionId}`;
       const taskId = id('task', sessionId);
       const operationId = id('operation', `runtime-${runtimeId}-epoch-1`);
@@ -798,6 +806,10 @@ export async function main(args: readonly string[]): Promise<void> {
     const runtime = await resumeRuntime({ workspace, controlRoot, sessionId });
     try {
       const manifest = await readRunManifest(runtime.paths, sessionId);
+      if (manifest.driverRef === 'rcc') {
+        const control = await resolveNativeControlInput(runtime.paths, args);
+        requireNativeControlInput(control, manifest.taskId.value);
+      }
       const store = new SessionStore(runtime.paths);
       if (runtime.session.state !== 'ready' && runtime.session.state !== 'running') {
         throw new Error(`session cannot resume from state: ${runtime.session.state}`);
@@ -1400,6 +1412,65 @@ interface CliErrorPayload {
   readonly ownerId: string;
   readonly nextAction: string;
   readonly message: string;
+}
+
+interface NativeControlInput {
+  readonly principal: VerifiedProductPrincipal;
+  readonly task?: string;
+}
+
+function controlSessionError(verification: ProductPrincipalVerification): AppLifecycleError {
+  if (verification.state === 'missing') {
+    return new AppLifecycleError('native-control.session-missing', '--control-session-file does not contain a paired session cookie', 'pair this control file with the active serve credential', 'humanagent.app.cli');
+  }
+  if (verification.state === 'expired') {
+    return new AppLifecycleError('native-control.session-expired', '--control-session-file contains an expired session', 'pair this control file with the active serve credential again', 'humanagent.app.cli');
+  }
+  if (verification.state === 'generation-mismatch') {
+    return new AppLifecycleError('native-control.session-generation-mismatch', '--control-session-file belongs to a previous credential generation', 'pair this control file with the active serve credential again', 'humanagent.app.cli');
+  }
+  return new AppLifecycleError('auth.session.invalid', '--control-session-file contains an invalid session', 'pair this control file with the active serve credential again', 'humanagent.app.cli');
+}
+
+function formatControlTaskMismatch(manifestTask: string, requestedTask: string): AppLifecycleError {
+  return new AppLifecycleError(
+    'native-control.task-mismatch',
+    `--task requests ${requestedTask} but the recovered session owns task ${manifestTask}`,
+    'drop --task or pass the recovered task value',
+    'humanagent.app.cli',
+  );
+}
+
+/**
+ * Resolves the typed native control input from the CLI's own control-session
+ * file. It reads the cookie-header file, opens the active serve credential
+ * read-only and verifies the principal at the real A1 verifier. The result is
+ * a verified principal and optional Task selector for the native control seam.
+ * It is never written into business payloads, manifests, output or errors.
+ * Downstream native admission is not composed at this boundary yet.
+ */
+async function resolveNativeControlInput(paths: RuntimePaths, args: readonly string[]): Promise<NativeControlInput | undefined> {
+  const controlFile = option(args, '--control-session-file');
+  if (controlFile === undefined) return undefined;
+  const cookieHeader = (await readFile(controlFile, 'utf8')).trim();
+  if (!cookieHeader) {
+    throw new AppLifecycleError('native-control.session-missing', '--control-session-file is empty', 'provide the paired session cookie in --control-session-file', 'humanagent.app.cli');
+  }
+  const accessControl = await AccessControlService.open({ credentialPath: paths.webAccessCredentialPath, create: false });
+  const verification = await accessControl.verifyProductPrincipal(cookieHeader);
+  if (verification.state !== 'valid') throw controlSessionError(verification);
+  const task = option(args, '--task');
+  return { principal: verification.principal, ...(task === undefined ? {} : { task }) };
+}
+
+function requireNativeControlInput(
+  control: NativeControlInput | undefined,
+  manifestTask: string | undefined,
+): void {
+  if (control === undefined) return;
+  if (control.task !== undefined && manifestTask !== undefined && control.task !== manifestTask) {
+    throw formatControlTaskMismatch(manifestTask, control.task);
+  }
 }
 
 function cliErrorPayload(error: unknown): CliErrorPayload {
