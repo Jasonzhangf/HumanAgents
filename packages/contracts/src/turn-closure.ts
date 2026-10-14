@@ -1,4 +1,5 @@
-import { assertEvidenceRef, assertSameScope, type CheckpointId, type EvidenceRef } from './index.js';
+import { assertEvidenceRef, assertSameScope, type CheckpointId, type EvidenceRef, type ScopeRef } from './index.js';
+import { validateJournalCommitRef, type JournalCommitRef } from './i2-history.js';
 import { validateAdmittedTurnIdentity, type AdmittedTurnIdentity } from './native-reasoning.js';
 import { isCanonicalInstant } from './time.js';
 import { ContractError } from './errors.js';
@@ -55,6 +56,33 @@ export interface TurnRecoveryReference {
   readonly firstErrorRef?: string;
 }
 
+/**
+ * One real child tool operation whose evidence a parent turn may cite in its
+ * summary or delivery. `evidenceRef` is the actual child evidence reference,
+ * kept at the child's own scope; the remaining fields tie it to the durable
+ * business registration and to the concrete provider request/tool call.
+ */
+export interface TurnSummaryEvidenceChild {
+  readonly evidenceRef: EvidenceRef;
+  readonly businessRegistrationCommitRef: JournalCommitRef;
+  readonly providerRequestId: string;
+  readonly toolCallId: string;
+}
+
+/**
+ * Trusted control context for one parent turn's summary/delivery evidence.
+ *
+ * A trusted owner (the App readback over registration provenance and child
+ * admission) builds it from real journal reads. Contracts only checks structure
+ * and consistency: it never treats the context as source proof and never derives
+ * it from model args, summary text or metadata. The context is a separate
+ * control parameter, never a business field.
+ */
+export interface TurnSummaryEvidenceContext {
+  readonly identity: AdmittedTurnIdentity;
+  readonly children: readonly TurnSummaryEvidenceChild[];
+}
+
 function nonEmpty(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || !value.trim()) throw new ContractError(`${label} must be a non-empty string`);
 }
@@ -64,6 +92,93 @@ function checkpointScopedId(value: unknown, label: string): void {
   const scoped = value as { scope?: unknown; value?: unknown };
   if (scoped.scope !== 'checkpoint' || typeof scoped.value !== 'string' || !scoped.value.trim()) {
     throw new ContractError(`${label} must be a checkpoint scoped id`);
+  }
+}
+
+function sameScopedId(left?: { readonly scope: string; readonly value: string }, right?: { readonly scope: string; readonly value: string }): boolean {
+  return left?.scope === right?.scope && left?.value === right?.value;
+}
+
+function identicalScopeRef(left: ScopeRef, right: ScopeRef): boolean {
+  return sameScopedId(left.organId, right.organId)
+    && sameScopedId(left.taskId, right.taskId)
+    && sameScopedId(left.cycleId, right.cycleId)
+    && sameScopedId(left.operationId, right.operationId);
+}
+
+/** Canonical full-value key of an evidence reference, including its own scope. */
+function evidenceRefKey(ref: EvidenceRef): string {
+  const scope = ref.scope;
+  return JSON.stringify([
+    ref.evidenceId.scope, ref.evidenceId.value, ref.kind, ref.source, ref.locator, ref.digest ?? null,
+    scope.organId.scope, scope.organId.value,
+    scope.taskId?.value ?? null, scope.cycleId?.value ?? null, scope.operationId?.value ?? null,
+  ]);
+}
+
+function sameTurnIdentity(left: AdmittedTurnIdentity, right: AdmittedTurnIdentity): boolean {
+  return left.turnId === right.turnId
+    && left.workAssignmentRef === right.workAssignmentRef
+    && left.inputRevision === right.inputRevision
+    && left.directiveRevision === right.directiveRevision
+    && left.executionEpoch === right.executionEpoch
+    && left.runtimeBindingRef === right.runtimeBindingRef
+    && left.permissionRevision === right.permissionRevision
+    && sameScopedId(left.taskRef, right.taskRef)
+    && sameScopedId(left.cycleRef, right.cycleRef)
+    && identicalScopeRef(left.scopeRef, right.scopeRef);
+}
+
+/**
+ * Validates the summary evidence context structure and that its identity is the
+ * parent turn being closed. Each child must be a real, well-formed evidence ref
+ * whose scope stays inside the parent turn's task and cycle: a child operation
+ * under the same turn, never a foreign task or an unrelated scope.
+ */
+export function validateTurnSummaryEvidenceContext(context: TurnSummaryEvidenceContext, scope: ScopeRef): void {
+  if (typeof context !== 'object' || context === null) {
+    throw new ContractError('turn summary evidence context must be an object');
+  }
+  validateAdmittedTurnIdentity(context.identity);
+  assertSameScope(scope, context.identity.scopeRef);
+  if (!Array.isArray(context.children)) {
+    throw new ContractError('turn summary evidence context children must be an array');
+  }
+  for (const child of context.children) {
+    if (typeof child !== 'object' || child === null) {
+      throw new ContractError('turn summary evidence context child must be an object');
+    }
+    assertEvidenceRef(child.evidenceRef);
+    validateJournalCommitRef(child.businessRegistrationCommitRef);
+    nonEmpty(child.providerRequestId, 'turn summary evidence context child providerRequestId');
+    nonEmpty(child.toolCallId, 'turn summary evidence context child toolCallId');
+    const childScope = child.evidenceRef.scope;
+    if (!sameScopedId(context.identity.scopeRef.organId, childScope.organId)
+      || !sameScopedId(context.identity.scopeRef.taskId, childScope.taskId)
+      || !sameScopedId(context.identity.scopeRef.cycleId, childScope.cycleId)
+      || !childScope.operationId) {
+      throw new ContractError('turn summary evidence context child must be an operation under the parent turn');
+    }
+  }
+}
+
+/** Allowlist of full-value child evidence keys for one validated parent turn. */
+export function turnSummaryEvidenceAllowSet(context: TurnSummaryEvidenceContext, scope: ScopeRef): ReadonlySet<string> {
+  validateTurnSummaryEvidenceContext(context, scope);
+  const keys = new Set<string>();
+  for (const child of context.children) keys.add(evidenceRefKey(child.evidenceRef));
+  return keys;
+}
+
+/** True when the reference full-value matches an allowlisted real child evidence reference. */
+export function isAllowlistedTurnSummaryEvidence(allow: ReadonlySet<string> | undefined, ref: EvidenceRef): boolean {
+  return allow !== undefined && allow.has(evidenceRefKey(ref));
+}
+
+/** Throws when the context identity is not the admitted turn being closed. */
+export function assertTurnSummaryContextIdentity(context: TurnSummaryEvidenceContext, identity: AdmittedTurnIdentity): void {
+  if (!sameTurnIdentity(context.identity, identity)) {
+    throw new ContractError('turn summary evidence context does not match the admitted turn identity');
   }
 }
 
@@ -77,16 +192,21 @@ function uniqueStrings(values: unknown, label: string): void {
   }
 }
 
-function scopeBoundEvidenceRef(ref: EvidenceRef, scope: AdmittedTurnIdentity['scopeRef'], label: string): void {
+function scopeBoundEvidenceRef(ref: EvidenceRef, scope: AdmittedTurnIdentity['scopeRef'], label: string, allow?: ReadonlySet<string>): void {
   try {
     assertEvidenceRef(ref);
+  } catch (error) {
+    throw new ContractError(error instanceof Error ? `${label}: ${error.message}` : `${label} is invalid`);
+  }
+  try {
     assertSameScope(scope, ref.scope);
   } catch (error) {
+    if (isAllowlistedTurnSummaryEvidence(allow, ref)) return;
     throw new ContractError(error instanceof Error ? `${label}: ${error.message}` : `${label} is invalid`);
   }
 }
 
-function validateSummarySection(section: TurnSummarySection, label: string, scope: AdmittedTurnIdentity['scopeRef']): void {
+function validateSummarySection(section: TurnSummarySection, label: string, scope: AdmittedTurnIdentity['scopeRef'], allow?: ReadonlySet<string>): void {
   if (typeof section !== 'object' || section === null) throw new ContractError(`${label} must be an object`);
   nonEmpty(section.text, `${label} text`);
   if (!Array.isArray(section.evidenceRefs) || section.evidenceRefs.length === 0) {
@@ -94,26 +214,37 @@ function validateSummarySection(section: TurnSummarySection, label: string, scop
   }
   const seen = new Set<string>();
   for (const ref of section.evidenceRefs) {
-    scopeBoundEvidenceRef(ref, scope, `${label} evidence`);
+    scopeBoundEvidenceRef(ref, scope, `${label} evidence`, allow);
     if (seen.has(ref.evidenceId.value)) throw new ContractError(`${label} evidence references must be unique`);
     seen.add(ref.evidenceId.value);
   }
 }
 
-export function validateTurnCloseSummary(summary: TurnCloseSummary, scope: AdmittedTurnIdentity['scopeRef']): void {
+/**
+ * When `context` is absent, evidence refs must sit at the exact parent turn
+ * scope, as before. When present, evidence refs may also be real child
+ * operations whose full-value reference is allowlisted by the context.
+ */
+export function validateTurnCloseSummary(
+  summary: TurnCloseSummary,
+  scope: AdmittedTurnIdentity['scopeRef'],
+  context?: TurnSummaryEvidenceContext,
+): void {
   if (typeof summary !== 'object' || summary === null) throw new ContractError('turn close summary must be an object');
-  validateSummarySection(summary.goal, 'turn summary goal', scope);
-  validateSummarySection(summary.actions, 'turn summary actions', scope);
-  validateSummarySection(summary.result, 'turn summary result', scope);
-  validateSummarySection(summary.expectedNextStep, 'turn summary expectedNextStep', scope);
+  const allow = context === undefined ? undefined : turnSummaryEvidenceAllowSet(context, scope);
+  validateSummarySection(summary.goal, 'turn summary goal', scope, allow);
+  validateSummarySection(summary.actions, 'turn summary actions', scope, allow);
+  validateSummarySection(summary.result, 'turn summary result', scope, allow);
+  validateSummarySection(summary.expectedNextStep, 'turn summary expectedNextStep', scope, allow);
 }
 
-export function validateTurnClosureReference(close: TurnClosureReference): void {
+export function validateTurnClosureReference(close: TurnClosureReference, context?: TurnSummaryEvidenceContext): void {
   if (typeof close !== 'object' || close === null) throw new ContractError('turn closure reference must be an object');
   validateAdmittedTurnIdentity(close.identity);
   checkpointScopedId(close.checkpointId, 'turn closure checkpointId');
   nonEmpty(close.closureRef, 'turn closure closureRef');
-  validateTurnCloseSummary(close.summary, close.identity.scopeRef);
+  if (context !== undefined) assertTurnSummaryContextIdentity(context, close.identity);
+  validateTurnCloseSummary(close.summary, close.identity.scopeRef, context);
   scopeBoundEvidenceRef(close.recoveryStateRef, close.identity.scopeRef, 'turn closure recoveryStateRef');
   if (!isCanonicalInstant(close.closedAt)) throw new ContractError('turn closure closedAt must be a canonical instant');
 }
