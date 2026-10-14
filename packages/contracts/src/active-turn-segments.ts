@@ -10,6 +10,7 @@ import {
   validateAcceptedChildDelivery,
   validateAcceptedRawFact,
   validateActiveTurnCaptureBody,
+  validateChildInvocationReferences,
   type AcceptedRawFact,
   type AcceptedTurnEntry,
   type ActiveTurnCaptureBody,
@@ -340,11 +341,7 @@ export function validateActiveTurnSegmentCaptureV2(input: unknown): asserts inpu
     }
   }
 
-  if (!Array.isArray(input.childInvocations)) throw new ContractError('segment capture childInvocations must be an array');
-  for (const invocation of input.childInvocations as readonly ChildInvocationRecord[]) {
-    assertPlainObject(invocation, 'segment capture child invocation');
-    assertNonEmptyString(invocation.invocationId, 'segment capture child invocationId');
-  }
+  validateChildInvocationReferences(input.childInvocations, entries, 'segment capture');
 
   assertPlainObject(input.cut, 'segment capture cut');
   const cut = input.cut as unknown as TurnCaptureCut;

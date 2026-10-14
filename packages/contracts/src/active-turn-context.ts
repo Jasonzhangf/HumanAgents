@@ -213,8 +213,19 @@ export interface ChildInvocationRecord {
   readonly checkpointReceiptRef: string;
   /** The typed assignment the dispatched child call is bound to. */
   readonly binding: ChildCallBinding;
-  /** Set only after the parent receives the matching refined delivery. */
+  /**
+   * Set only after the parent receives the matching refined delivery and selects
+   * it for adopted semantic context. Mutually exclusive with
+   * `notSelectedResultSeq`.
+   */
   readonly adoptedResultSeq?: number;
+  /**
+   * Set only after the parent makes a terminal decision not to select this exact
+   * retained delivery for adopted semantic context. It references the same
+   * accepted child delivery entry, so the returned delivery stays immutable
+   * evidence. Mutually exclusive with `adoptedResultSeq`.
+   */
+  readonly notSelectedResultSeq?: number;
   /**
    * Set only for a review invocation after the review-result checkpoint is
    * durably committed. It is a separate reference from the pre-call
@@ -509,6 +520,68 @@ export function validateAcceptedChildDelivery(input: unknown): asserts input is 
   throw new ContractError('accepted child delivery kind is invalid');
 }
 
+/**
+ * Shared child-reference validation for the v1 capture body and the v2 segment
+ * capture. It checks each invocation identity, its typed binding, the pre-call
+ * anchor, the optional post-review association and the terminal selection
+ * reference. A selection reference (`adoptedResultSeq` or
+ * `notSelectedResultSeq`) must resolve to a retained child delivery of the same
+ * invocation, kind and assignment identity; the two selection fields are
+ * mutually exclusive. It reads typed facts only: it never inspects a Provider
+ * outcome and never reconstructs a Runtime decision.
+ */
+export function validateChildInvocationReferences(
+  childInvocations: unknown,
+  entries: readonly AcceptedTurnEntry[],
+  label: string,
+): void {
+  if (!Array.isArray(childInvocations)) throw new ContractError(`${label} childInvocations must be an array`);
+  const invocationById = new Map<string, ChildInvocationRecord>();
+  for (const invocation of childInvocations as readonly ChildInvocationRecord[]) {
+    assertPlainObject(invocation, `${label} child invocation`);
+    assertNonEmptyString(invocation.invocationId, `${label} child invocationId`);
+    assertNonEmptyString(invocation.childTurnId, `${label} child turnId`);
+    assertNonEmptyString(invocation.checkpointReceiptRef, `${label} child checkpointReceiptRef`);
+    assertChildCallBinding(invocation.binding, `${label} child invocation binding`);
+    if (invocation.postReviewCheckpointRef !== undefined) {
+      if (invocation.binding.kind !== 'review') throw new ContractError(`${label} child post-review checkpoint requires a review invocation`);
+      assertNonEmptyString(invocation.postReviewCheckpointRef, `${label} child postReviewCheckpointRef`);
+      if (invocation.postReviewCheckpointRef === invocation.checkpointReceiptRef) {
+        throw new ContractError(`${label} child post-review checkpoint must differ from the pre-call checkpoint`);
+      }
+    }
+    if (invocation.adoptedResultSeq !== undefined && invocation.notSelectedResultSeq !== undefined) {
+      throw new ContractError(`${label} child invocation cannot both adopt and not select its delivery`);
+    }
+    for (const selection of [invocation.adoptedResultSeq, invocation.notSelectedResultSeq]) {
+      if (selection === undefined) continue;
+      assertPositiveSafeInteger(selection, `${label} child selection resultSeq`);
+      const selected = entries.find((entry) => entry.seq === selection);
+      if (!selected) throw new ContractError(`${label} child selection resultSeq must reference an accepted entry`);
+      if ('envelope' in selected) throw new ContractError(`${label} child selection resultSeq must reference a child delivery entry`);
+      if (selected.invocationId !== invocation.invocationId) throw new ContractError(`${label} child selection resultSeq must reference the same invocation`);
+      if (selected.kind !== invocation.binding.kind) throw new ContractError(`${label} child selection result kind does not match its invocation binding`);
+      if (selected.kind === 'execution' && invocation.binding.kind === 'execution') {
+        assertSameExecutionAssignmentIdentity(invocation.binding.assignment, selected.assignment);
+      } else if (selected.kind === 'review' && invocation.binding.kind === 'review') {
+        assertReviewAssignmentsMatch(invocation.binding.assignment, selected.assignment);
+      }
+    }
+    invocationById.set(invocation.invocationId, invocation);
+  }
+  for (const entry of entries) {
+    if ('envelope' in entry) continue;
+    const invocation = invocationById.get(entry.invocationId);
+    if (!invocation) throw new ContractError(`${label} child delivery must reference a known invocation`);
+    if (entry.kind !== invocation.binding.kind) throw new ContractError(`${label} child delivery kind does not match its invocation binding`);
+    if (entry.kind === 'execution' && invocation.binding.kind === 'execution') {
+      assertSameExecutionAssignmentIdentity(invocation.binding.assignment, entry.assignment);
+    } else if (entry.kind === 'review' && invocation.binding.kind === 'review') {
+      assertReviewAssignmentsMatch(invocation.binding.assignment, entry.assignment);
+    }
+  }
+}
+
 export function validateActiveTurnCaptureBody(input: unknown): asserts input is ActiveTurnCaptureBody {
   assertPlainObject(input, 'active turn capture body');
   assertNoBusinessMirror(input, 'active turn capture body');
@@ -579,42 +652,7 @@ export function validateActiveTurnCaptureBody(input: unknown): asserts input is 
     }
   }
 
-  if (!Array.isArray(input.childInvocations)) throw new ContractError('capture childInvocations must be an array');
-  const invocationById = new Map<string, ChildInvocationRecord>();
-  for (const invocation of input.childInvocations as readonly ChildInvocationRecord[]) {
-    assertPlainObject(invocation, 'capture child invocation');
-    assertNonEmptyString(invocation.invocationId, 'capture child invocationId');
-    assertNonEmptyString(invocation.childTurnId, 'capture child turnId');
-    assertNonEmptyString(invocation.checkpointReceiptRef, 'capture child checkpointReceiptRef');
-    assertChildCallBinding(invocation.binding, 'capture child invocation binding');
-    if (invocation.postReviewCheckpointRef !== undefined) {
-      if (invocation.binding.kind !== 'review') throw new ContractError('capture child post-review checkpoint requires a review invocation');
-      assertNonEmptyString(invocation.postReviewCheckpointRef, 'capture child postReviewCheckpointRef');
-      if (invocation.postReviewCheckpointRef === invocation.checkpointReceiptRef) {
-        throw new ContractError('capture child post-review checkpoint must differ from the pre-call checkpoint');
-      }
-    }
-    invocationById.set(invocation.invocationId, invocation);
-    if (invocation.adoptedResultSeq !== undefined) {
-      assertPositiveSafeInteger(invocation.adoptedResultSeq, 'capture child adoptedResultSeq');
-      const adopted = entries.find((entry) => entry.seq === invocation.adoptedResultSeq);
-      if (!adopted) throw new ContractError('capture child adoptedResultSeq must reference an accepted entry');
-      if ('envelope' in adopted) throw new ContractError('capture child adoptedResultSeq must reference a child delivery entry');
-      if (adopted.invocationId !== invocation.invocationId) throw new ContractError('capture child adoptedResultSeq must reference the same invocation');
-      if (adopted.kind !== invocation.binding.kind) throw new ContractError('capture child adopted result kind does not match its invocation binding');
-    }
-  }
-  for (const entry of entries) {
-    if ('envelope' in entry) continue;
-    const invocation = invocationById.get(entry.invocationId);
-    if (!invocation) throw new ContractError('capture child delivery must reference a known invocation');
-    if (entry.kind !== invocation.binding.kind) throw new ContractError('capture child delivery kind does not match its invocation binding');
-    if (entry.kind === 'execution' && invocation.binding.kind === 'execution') {
-      assertSameExecutionAssignmentIdentity(invocation.binding.assignment, entry.assignment);
-    } else if (entry.kind === 'review' && invocation.binding.kind === 'review') {
-      assertReviewAssignmentsMatch(invocation.binding.assignment, entry.assignment);
-    }
-  }
+  validateChildInvocationReferences(input.childInvocations, entries, 'capture');
 
   if (!Array.isArray(input.checkpointPath)) throw new ContractError('capture checkpointPath must be an array');
   for (const ref of input.checkpointPath as readonly string[]) assertNonEmptyString(ref, 'capture checkpointPath entry');

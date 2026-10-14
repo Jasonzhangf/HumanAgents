@@ -3,6 +3,7 @@ import test from 'node:test';
 import { id } from '../../../packages/contracts/src/index.js';
 import type {
   AcceptedRawFact,
+  AcceptedChildDelivery,
   ActiveTurnBinding,
   ActiveTurnCaptureBody,
   CompletionReadInput,
@@ -11,6 +12,8 @@ import type {
   RawFactEnvelope,
   RecoveryHoldFacts,
   ScopeRef,
+  WorkAssignment,
+  WorkResult,
 } from '../../../packages/contracts/src/index.js';
 import type { JournalCommitRef } from '../../../packages/contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../../packages/contracts/src/framework.js';
@@ -559,5 +562,58 @@ test('prepared segment capture v2 validates real drains and rejects wrong epoch 
   expectThrows(
     () => validateActiveTurnSegmentCaptureV2({ ...body, predecessor: { ...body.predecessor, segmentId: body.segmentId } }),
     'cannot precede itself',
+  );
+});
+
+test('segment capture v2 shares child selection validation with the v1 capture', async () => {
+  const world = await makeWorld();
+  const ok = await resumeActiveTurnSegment(resumeInput(world, { segmentId: 'segment-child', executionEpoch: 2 }));
+  assert.equal(ok.status, 'resumed');
+  if (ok.status !== 'resumed') return;
+  const segment = ok.segment;
+
+  const childAssignment: WorkAssignment = {
+    ...binding.assignment,
+    assignmentId: 'segment-child-assignment',
+    pipelineNodeId: 'segment-child-node',
+    executionEpoch: 2,
+  };
+  const childResult: WorkResult = {
+    taskId, pipelineNodeId: 'segment-child-node', agentId: 'segment-child-agent', assignmentId: 'segment-child-assignment',
+    attempt: 1, executionEpoch: 2, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [],
+    status: 'succeeded', summary: 'segment child delivery', outputRefs: [],
+    evidenceRefs: [{ evidenceId: id('evidence', 'segment-child-result'), kind: 'execution', source: 'segment-fixture', locator: 'segment-child-result', digest: digestA, scope }],
+    nextAction: 'settle',
+  };
+  const childDelivery: AcceptedChildDelivery = {
+    kind: 'execution', seq: 2, invocationId: 'segment-child-invocation',
+    refinedDelivery: { ref: { evidenceId: id('evidence', 'segment-child-refined'), kind: 'execution', source: 'segment-fixture', locator: 'segment-child-refined', digest: digestB, scope }, view: { kind: 'utf8-text' } },
+    assignment: childAssignment,
+    result: childResult,
+  };
+  const epoch2Entry: AcceptedRawFact = { seq: 1, envelope: envelope({ runtimeId: 'runtime-a', executionEpoch: 2 }, 1) };
+  const body: ActiveTurnSegmentCaptureV2 = {
+    version: 2,
+    segmentId: 'segment-child',
+    businessTurnRef: segment.businessTurnRef,
+    binding: segment.binding,
+    initialInput,
+    entries: [epoch2Entry, childDelivery],
+    requests: [requestRecord],
+    childInvocations: [{
+      invocationId: 'segment-child-invocation', childTurnId: 'segment-child-turn', checkpointReceiptRef: 'segment-child-pre',
+      binding: { kind: 'execution', assignment: childAssignment }, notSelectedResultSeq: 2,
+    }],
+    cut: { pauseId: 'boundary-child', lastSeq: 2, producersDrained: true, frozenAt: '2026-10-13T00:02:00.000Z' },
+    predecessor: segment.predecessor,
+  };
+  validateActiveTurnSegmentCaptureV2(body);
+  expectThrows(
+    () => validateActiveTurnSegmentCaptureV2({ ...body, childInvocations: [{ ...body.childInvocations[0]!, adoptedResultSeq: 2 }] }),
+    'cannot both adopt and not select',
+  );
+  expectThrows(
+    () => validateActiveTurnSegmentCaptureV2({ ...body, childInvocations: [{ ...body.childInvocations[0]!, notSelectedResultSeq: 99 }] }),
+    'must reference an accepted entry',
   );
 });
