@@ -34,7 +34,12 @@ import {
   validatePreparedActiveTurnSegmentCaptureV2,
   validateResumedTurnSegmentOpened,
 } from '../../../packages/contracts/src/active-turn-segments.js';
-import { ActiveTurnContext } from '../../../packages/runtime/src/context/active-turn-context.js';
+import {
+  ActiveTurnContext,
+  ActiveTurnSegmentContext,
+  type ActiveTurnSegmentRecord,
+  type ActiveTurnSegmentRecordPort,
+} from '../../../packages/runtime/src/context/active-turn-context.js';
 import type { ActiveTurnJournalPort, ActiveTurnJournalRecord } from '../../../packages/runtime/src/context/active-turn-journal.js';
 import {
   ActiveTurnRecoveryCapture,
@@ -616,4 +621,60 @@ test('segment capture v2 shares child selection validation with the v1 capture',
     () => validateActiveTurnSegmentCaptureV2({ ...body, childInvocations: [{ ...body.childInvocations[0]!, notSelectedResultSeq: 99 }] }),
     'must reference an accepted entry',
   );
+});
+
+test('the resumed segment shares the non-selection transition and obligation fold', async () => {
+  const world = await makeWorld();
+  const ok = await resumeActiveTurnSegment(resumeInput(world, { segmentId: 'segment-ns', executionEpoch: 2 }));
+  assert.equal(ok.status, 'resumed');
+  if (ok.status !== 'resumed') return;
+
+  const childAssignment: WorkAssignment = {
+    ...binding.assignment,
+    assignmentId: 'segment-ns-assignment',
+    pipelineNodeId: 'segment-ns-node',
+    executionEpoch: 2,
+  };
+  const childResult: WorkResult = {
+    taskId, pipelineNodeId: 'segment-ns-node', agentId: 'segment-ns-agent', assignmentId: 'segment-ns-assignment',
+    attempt: 1, executionEpoch: 2, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [],
+    status: 'succeeded', summary: 'segment non-selection delivery', outputRefs: [],
+    evidenceRefs: [{ evidenceId: id('evidence', 'segment-ns-result'), kind: 'execution', source: 'segment-fixture', locator: 'segment-ns-result', digest: digestA, scope }],
+    nextAction: 'settle',
+  };
+  const refinedDelivery: RawAsset = {
+    ref: { evidenceId: id('evidence', 'segment-ns-refined'), kind: 'execution', source: 'segment-fixture', locator: 'segment-ns-refined', digest: digestB, scope },
+    view: { kind: 'utf8-text' },
+  };
+
+  const records: ActiveTurnSegmentRecord[] = [];
+  const commits: string[] = [];
+  const port: ActiveTurnSegmentRecordPort = {
+    async appendSegmentRecord({ commitId, record }) {
+      commits.push(commitId);
+      records.push(structuredClone(record));
+      return { commitId, journalSeq: records.length, recordDigest: digestC };
+    },
+    async readSegmentRecords() { return structuredClone(records); },
+  };
+  const segment = await ActiveTurnSegmentContext.open({ segment: ok.segment, initialInput, port });
+  await segment.openChildInvocation({
+    invocationId: 'segment-ns-inv', childTurnId: 'segment-ns-turn', checkpointReceiptRef: 'segment-ns-pre',
+    binding: { kind: 'execution', assignment: childAssignment },
+  });
+  let prefix = await segment.readLivePrefix();
+  assert.deepEqual(prefix.obligations, [{ kind: 'child-invocation', invocationId: 'segment-ns-inv', phase: 'pending' }]);
+
+  const delivery = await segment.recordChildReturn({
+    kind: 'execution', invocationId: 'segment-ns-inv', assignment: childAssignment, result: childResult,
+    refinedDelivery,
+  });
+  prefix = await segment.readLivePrefix();
+  assert.deepEqual(prefix.obligations, [{ kind: 'child-invocation', invocationId: 'segment-ns-inv', phase: 'pending' }]);
+
+  await segment.recordChildNonSelection('segment-ns-inv');
+  assert.equal(segment.childInvocations()[0]!.notSelectedResultSeq, delivery.seq);
+  prefix = await segment.readLivePrefix();
+  assert.deepEqual(prefix.obligations, []);
+  assert.equal(commits.at(-1), activeTurnSegmentCommitId('segment-ns', 'not-selected:segment-ns-inv'));
 });

@@ -141,6 +141,37 @@ function projectChildInvocations(records: readonly ActiveTurnJournalRecord[]): r
   return [...byId.values()];
 }
 
+/**
+ * One child-obligation projection shared by the v1 active turn and the v2
+ * resumed segment. A child invocation still owes work while its durable return
+ * is missing, while the parent selection decision is pending, or while a
+ * returned review lacks its required post-review checkpoint association. A
+ * durable adoption or non-selection discharges only this child decision duty;
+ * independent request, operation and completion references are untouched.
+ */
+function projectChildObligations(
+  childInvocations: readonly ChildInvocationRecord[],
+  entries: readonly (AcceptedRawFact | AcceptedChildDelivery)[],
+): ActiveTurnProductionObligationRef[] {
+  const returned = new Set(
+    entries
+      .filter((entry): entry is AcceptedChildDelivery => !('envelope' in entry))
+      .map((entry) => entry.invocationId),
+  );
+  return childInvocations
+    .filter((invocation) => {
+      if (!returned.has(invocation.invocationId)) return true;
+      const decided = invocation.adoptedResultSeq !== undefined || invocation.notSelectedResultSeq !== undefined;
+      if (!decided) return true;
+      return invocation.binding.kind === 'review' && invocation.postReviewCheckpointRef === undefined;
+    })
+    .map((invocation): ActiveTurnProductionObligationRef => ({
+      kind: 'child-invocation',
+      invocationId: invocation.invocationId,
+      phase: 'pending',
+    }));
+}
+
 function nextEntrySeq(records: readonly ActiveTurnJournalRecord[]): number {
   const entries = projectEntries(records);
   return entries.length === 0 ? 1 : entries[entries.length - 1]!.seq + 1;
@@ -312,6 +343,9 @@ async function recordChildAdoptionRecord(
 ): Promise<void> {
   const invocation = projectChildInvocations(state.records).find((record) => record.invocationId === invocationId);
   if (!invocation) fail('active-turn.invocation.unknown', `adoption references unknown invocation ${invocationId}`);
+  if (invocation.notSelectedResultSeq !== undefined) {
+    fail('active-turn.adoption.declined', `child invocation ${invocationId} was already declined`);
+  }
   const stored = projectEntries(state.records).find((entry): entry is AcceptedChildDelivery => (
     !('envelope' in entry) && entry.invocationId === invocationId && entry.seq === delivery.seq
   ));
@@ -321,6 +355,29 @@ async function recordChildAdoptionRecord(
   }
   const record: ChildInvocationRecord = { ...invocation, adoptedResultSeq: delivery.seq };
   await state.append(state.commitId(`adopted:${invocationId}`), { kind: 'child-invocation', record });
+}
+
+async function recordChildNonSelectionRecord(
+  state: ActiveTurnRecordState,
+  invocationId: string,
+): Promise<void> {
+  const invocation = projectChildInvocations(state.records).find((record) => record.invocationId === invocationId);
+  if (!invocation) fail('active-turn.invocation.unknown', `non-selection references unknown invocation ${invocationId}`);
+  const delivery = projectEntries(state.records).find((entry): entry is AcceptedChildDelivery => (
+    !('envelope' in entry) && entry.invocationId === invocationId
+  ));
+  if (!delivery) {
+    fail('active-turn.non-selection.unreturned', 'cannot decline a child delivery that has not been durably returned');
+  }
+  if (delivery.kind !== invocation.binding.kind) {
+    fail('active-turn.non-selection.kind-mismatch', 'declined delivery kind does not match its invocation binding');
+  }
+  if (invocation.adoptedResultSeq !== undefined) {
+    fail('active-turn.non-selection.adopted', 'cannot decline a child delivery the parent already adopted');
+  }
+  if (invocation.notSelectedResultSeq === delivery.seq) return;
+  const record: ChildInvocationRecord = { ...invocation, notSelectedResultSeq: delivery.seq };
+  await state.append(state.commitId(`not-selected:${invocationId}`), { kind: 'child-invocation', record });
 }
 
 async function recordReviewCheckpointRecord(
@@ -336,8 +393,11 @@ async function recordReviewCheckpointRecord(
   if (invocation.binding.kind !== 'review') {
     fail('active-turn.review-checkpoint.kind-mismatch', 'post-review checkpoint requires a review invocation');
   }
-  if (invocation.adoptedResultSeq === undefined) {
-    fail('active-turn.review-checkpoint.unadopted', 'cannot checkpoint a review result before parent adoption');
+  const returned = projectEntries(state.records).find((entry): entry is AcceptedChildDelivery => (
+    !('envelope' in entry) && entry.invocationId === invocationId
+  ));
+  if (!returned || returned.kind !== 'review') {
+    fail('active-turn.review-checkpoint.unreturned', 'cannot checkpoint a review result before its durable return');
   }
   if (invocation.postReviewCheckpointRef === checkpointReceiptRef) return;
   if (invocation.checkpointReceiptRef === checkpointReceiptRef) {
@@ -568,9 +628,24 @@ export class ActiveTurnContext {
   }
 
   /**
+   * Records the parent's terminal decision not to select this exact retained
+   * delivery. The delivery is resolved from the owner's retained entries; the
+   * caller supplies no result bytes or sequence. A missing return or a prior
+   * adoption rejects, and a repeated identical decision is idempotent.
+   */
+  async recordChildNonSelection(invocationId: string): Promise<void> {
+    return this.mutate(() => this.recordChildNonSelectionRecord(invocationId));
+  }
+
+  private async recordChildNonSelectionRecord(invocationId: string): Promise<void> {
+    return recordChildNonSelectionRecord(this.state(), invocationId);
+  }
+
+  /**
    * Associates a review invocation with its committed review-result checkpoint.
    * The pre-call dispatch checkpoint never stands in for the persisted review
-   * result, and an unadopted review is not checkpointed as complete.
+   * result. The checkpoint requires the durable review return, not adoption: a
+   * completed review is checkpointed before the parent decides selection.
    */
   async recordReviewCheckpoint(invocationId: string, checkpointReceiptRef: string): Promise<void> {
     return this.mutate(() => this.recordReviewCheckpointRecord(invocationId, checkpointReceiptRef));
@@ -623,13 +698,7 @@ export class ActiveTurnContext {
           requestId: record.request.requestId,
           phase: record.phase,
         })),
-      ...childInvocations
-        .filter((invocation) => invocation.adoptedResultSeq === undefined)
-        .map((invocation): ActiveTurnProductionObligationRef => ({
-          kind: 'child-invocation',
-          invocationId: invocation.invocationId,
-          phase: 'pending',
-        })),
+      ...projectChildObligations(childInvocations, entries),
     ];
     const initialInput = this.initialInput();
     return {
@@ -895,6 +964,10 @@ export class ActiveTurnSegmentContext {
     return this.mutate(() => recordChildAdoptionRecord(this.state(), invocationId, owned));
   }
 
+  async recordChildNonSelection(invocationId: string): Promise<void> {
+    return this.mutate(() => recordChildNonSelectionRecord(this.state(), invocationId));
+  }
+
   async recordReviewCheckpoint(invocationId: string, checkpointReceiptRef: string): Promise<void> {
     return this.mutate(() => recordReviewCheckpointRecord(this.state(), invocationId, checkpointReceiptRef));
   }
@@ -937,13 +1010,7 @@ export class ActiveTurnSegmentContext {
           requestId: record.request.requestId,
           phase: record.phase,
         })),
-      ...childInvocations
-        .filter((invocation) => invocation.adoptedResultSeq === undefined)
-        .map((invocation): ActiveTurnProductionObligationRef => ({
-          kind: 'child-invocation',
-          invocationId: invocation.invocationId,
-          phase: 'pending',
-        })),
+      ...projectChildObligations(childInvocations, entries),
     ];
     return {
       kind: 'segment-live-accepted-prefix',

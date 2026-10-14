@@ -1,11 +1,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { id, type ActiveTurnBinding, type RawAsset, type RawFactEnvelope } from '../../../packages/contracts/src/index.js';
+import {
+  id,
+  type ActiveTurnBinding,
+  type AcceptedChildDelivery,
+  type RawAsset,
+  type RawFactEnvelope,
+  type ReviewAssignment,
+  type ReviewResult,
+  type WorkResult,
+} from '../../../packages/contracts/src/index.js';
 import { ActiveTurnContext } from '../../../packages/runtime/src/context/active-turn-context.js';
 import type { ActiveTurnJournalPort, ActiveTurnJournalRecord } from '../../../packages/runtime/src/context/active-turn-journal.js';
 import { ActiveTurnRecoveryCapture } from '../../../packages/runtime/src/context/recovery-assets.js';
 
 const scope = { organId: id('organ', 'capture-organ'), taskId: id('task', 'capture-task'), cycleId: id('cycle', 'capture-cycle') };
+
+async function expectRejects(fn: () => Promise<unknown>, substring: string): Promise<void> {
+  let caught: unknown;
+  try { await fn(); } catch (error) { caught = error; }
+  assert.ok(caught instanceof Error, `expected a rejection containing "${substring}"`);
+  assert.ok((caught as Error).message.includes(substring), `expected "${(caught as Error).message}" to contain "${substring}"`);
+}
+
 const binding: ActiveTurnBinding = {
   execution: { runtimeId: 'capture-runtime', executionEpoch: 1 }, scope,
   admittedTurn: {
@@ -30,6 +47,45 @@ const request = { turnId: 'provider-turn', requestId: 'request-a' };
 function envelope(seq: number): RawFactEnvelope {
   return { execution: binding.execution, scope, request, producerSeq: seq, fact: { kind: 'request-complete', terminal: 'completed' } };
 }
+
+const childResult: WorkResult = {
+  taskId: scope.taskId, pipelineNodeId: binding.assignment.pipelineNodeId, agentId: 'child-agent',
+  assignmentId: binding.assignment.assignmentId, attempt: binding.assignment.attempt,
+  executionEpoch: binding.assignment.executionEpoch, inputRevision: binding.assignment.inputRevision,
+  producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded',
+  summary: 'child delivery', outputRefs: [],
+  evidenceRefs: [{
+    evidenceId: id('evidence', 'child-result'), kind: 'execution', source: 'runtime-fixture',
+    locator: 'child-result', digest: `sha256:${'b'.repeat(64)}`, scope,
+  }],
+  nextAction: 'settle',
+};
+const childDeliveryAsset: RawAsset = {
+  ref: {
+    evidenceId: id('evidence', 'child-refined'), kind: 'execution', source: 'runtime-fixture',
+    locator: 'child-refined', digest: `sha256:${'c'.repeat(64)}`, scope,
+  },
+  view: { kind: 'utf8-text' },
+};
+const reviewAssignment: ReviewAssignment = {
+  assignmentId: 'review-assignment', taskId: scope.taskId.value, workerAgentId: 'review-agent',
+  reviewKind: 'quality', attempt: 1, executionEpoch: binding.execution.executionEpoch, inputRevision: 1,
+  acceptanceCriteriaDigest: binding.assignment.acceptanceCriteriaDigest, subjectRefs: ['subject:a'],
+  subjectDigests: [`sha256:${'d'.repeat(64)}`], workerCapabilities: ['provider.execution'],
+  requiredCapabilities: ['review.quality'], mergeGate: 'not-required',
+};
+const reviewResult: ReviewResult = {
+  resultId: 'review-result', assignmentId: reviewAssignment.assignmentId, taskId: reviewAssignment.taskId,
+  workerAgentId: reviewAssignment.workerAgentId, reviewKind: reviewAssignment.reviewKind,
+  attempt: reviewAssignment.attempt, executionEpoch: reviewAssignment.executionEpoch,
+  inputRevision: reviewAssignment.inputRevision, acceptanceCriteriaDigest: reviewAssignment.acceptanceCriteriaDigest,
+  subjectRefs: reviewAssignment.subjectRefs, subjectDigests: reviewAssignment.subjectDigests,
+  status: 'passed', findings: [],
+  evidenceRefs: [{
+    evidenceId: id('evidence', 'review-result'), kind: 'execution', source: 'runtime-fixture',
+    locator: 'review-result', digest: `sha256:${'e'.repeat(64)}`, scope,
+  }],
+};
 async function open(beforeAppend?: (record: ActiveTurnJournalRecord) => Promise<void>) {
   const records: ActiveTurnJournalRecord[] = [];
   const commits = new Map<string, string>();
@@ -152,4 +208,102 @@ test('production capture calls bound drain and reads recovery references only af
   assert.equal(result.controlRecordCount, 4);
   assert.deepEqual(result.body.initialInput, initialInput);
   assert.deepEqual(await owner.prepare('boundary'), result);
+});
+
+test('a missing return is not a decision: it rejects and keeps the child duty', async () => {
+  const { context } = await open();
+  await context.openChildInvocation({
+    invocationId: 'child-missing', childTurnId: 'child-turn-missing', checkpointReceiptRef: 'pre-call-m',
+    binding: { kind: 'execution', assignment: binding.assignment },
+  });
+  // The invocation owes work while its return is unknown.
+  const prefix = await context.readLivePrefix('runtime-fixture');
+  assert.deepEqual(prefix.obligations, [{ kind: 'child-invocation', invocationId: 'child-missing', phase: 'pending' }]);
+  // Declining before a durable return rejects and leaves the invocation unresolved.
+  await expectRejects(() => context.recordChildNonSelection('child-missing'), 'not been durably returned');
+  assert.equal(context.childInvocations()[0]!.notSelectedResultSeq, undefined);
+  assert.equal(context.entries().length, 0);
+});
+
+test('a known non-selection discharges the child duty without losing the retained delivery', async () => {
+  const { context } = await open();
+  await context.openChildInvocation({
+    invocationId: 'child-a', childTurnId: 'child-turn-a', checkpointReceiptRef: 'pre-call-a',
+    binding: { kind: 'execution', assignment: binding.assignment },
+  });
+  const delivery = await context.recordChildReturn({
+    kind: 'execution', invocationId: 'child-a', assignment: binding.assignment, result: childResult,
+    refinedDelivery: childDeliveryAsset,
+  });
+  // The return is known but the parent decision is still pending: the duty remains.
+  let prefix = await context.readLivePrefix('runtime-fixture');
+  assert.deepEqual(prefix.obligations, [{ kind: 'child-invocation', invocationId: 'child-a', phase: 'pending' }]);
+
+  await context.recordChildNonSelection('child-a');
+  const decision = context.childInvocations()[0]!;
+  assert.equal(decision.notSelectedResultSeq, delivery.seq);
+  assert.equal(decision.adoptedResultSeq, undefined);
+  // The durable non-selection discharges the child decision duty.
+  prefix = await context.readLivePrefix('runtime-fixture');
+  assert.deepEqual(prefix.obligations, []);
+  // The declined delivery stays immutable evidence.
+  assert.deepEqual(context.entries().find((entry) => !('envelope' in entry)), delivery);
+  // A repeat of the same decision is idempotent: no new record.
+  const before = context.controlRecordCount();
+  await context.recordChildNonSelection('child-a');
+  assert.equal(context.controlRecordCount(), before);
+});
+
+test('adoption and non-selection are mutually exclusive terminal decisions', async () => {
+  const { context } = await open();
+  await context.openChildInvocation({
+    invocationId: 'child-b', childTurnId: 'child-turn-b', checkpointReceiptRef: 'pre-call-b',
+    binding: { kind: 'execution', assignment: binding.assignment },
+  });
+  const declined: AcceptedChildDelivery = await context.recordChildReturn({
+    kind: 'execution', invocationId: 'child-b', assignment: binding.assignment, result: childResult,
+    refinedDelivery: childDeliveryAsset,
+  });
+  await context.recordChildNonSelection('child-b');
+  await expectRejects(() => context.recordChildAdoption('child-b', declined), 'was already declined');
+  assert.equal(context.childInvocations()[0]!.adoptedResultSeq, undefined);
+  assert.equal(context.childInvocations()[0]!.notSelectedResultSeq, declined.seq);
+
+  await context.openChildInvocation({
+    invocationId: 'child-c', childTurnId: 'child-turn-c', checkpointReceiptRef: 'pre-call-c',
+    binding: { kind: 'execution', assignment: binding.assignment },
+  });
+  const adopted = await context.recordChildReturn({
+    kind: 'execution', invocationId: 'child-c', assignment: binding.assignment, result: childResult,
+    refinedDelivery: childDeliveryAsset,
+  });
+  await context.recordChildAdoption('child-c', adopted);
+  await expectRejects(() => context.recordChildNonSelection('child-c'), 'already adopted');
+  assert.equal(context.childInvocations().find((record) => record.invocationId === 'child-c')!.notSelectedResultSeq, undefined);
+});
+
+test('a review post-checkpoint requires the durable review return, not adoption', async () => {
+  const { context } = await open();
+  await context.openChildInvocation({
+    invocationId: 'review-a', childTurnId: 'review-turn-a', checkpointReceiptRef: 'pre-call-r',
+    binding: { kind: 'review', assignment: reviewAssignment },
+  });
+  // No durable review return yet: the checkpoint must still be refused.
+  await expectRejects(() => context.recordReviewCheckpoint('review-a', 'post-review-r'), 'before its durable return');
+
+  await context.recordChildReturn({
+    kind: 'review', invocationId: 'review-a', assignment: reviewAssignment, result: reviewResult,
+    refinedDelivery: childDeliveryAsset,
+  });
+  // The return is known and no adoption has been manufactured, yet the checkpoint commits.
+  await context.recordReviewCheckpoint('review-a', 'post-review-r');
+  const record = context.childInvocations()[0]!;
+  assert.equal(record.postReviewCheckpointRef, 'post-review-r');
+  assert.equal(record.adoptedResultSeq, undefined);
+  assert.equal(record.notSelectedResultSeq, undefined);
+
+  // Distinct pre-call and single post-review checkpoint guards still hold.
+  await expectRejects(() => context.recordReviewCheckpoint('review-a', 'pre-call-r'), 'must differ');
+  await expectRejects(() => context.recordReviewCheckpoint('review-a', 'another'), 'already has a review-result checkpoint');
+  assert.equal(context.childInvocations()[0]!.postReviewCheckpointRef, 'post-review-r');
 });
