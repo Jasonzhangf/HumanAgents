@@ -12,6 +12,7 @@ import type {
   InspectionItemResultRecord,
   InspectionOccurrenceOpenedRecord,
   InspectionOccurrenceSettledRecord,
+  I2JournalPort,
   JournalCommitRef,
   MilestoneReviewAlignedRecord,
   MilestoneReviewResultRecord,
@@ -411,21 +412,29 @@ async function singleCallFixture() {
       };
     },
   };
-  const reviewAgent: ReviewAgentPort = {
+  // The registered parent invocation is a separate identity from the
+  // subject-bound review assignment. The creator binds the former from the
+  // registered call it was handed, never from `incarnation.assignmentId`.
+  const seenRequestInvocations: (string | undefined)[] = [];
+  const makeReviewAgent = (registeredInvocation: string): ReviewAgentPort => ({
     roleId: 'review',
     async review() { throw new Error('direct/root review callback must never run'); },
     createInstance(create) {
+      seenRequestInvocations.push(create.assignment.invocationId);
       return { incarnation: create.incarnation, release, dispose,
         async review(input) {
           reviews += 1;
           const records = await journal.replay();
-          assert.ok(records.some((item) => item.commitId === `fixture-checkpoint:${create.incarnation.assignmentId}`));
-          assert.ok(records.some((item) => item.commitId === `fixture-association:${create.incarnation.assignmentId}`));
+          assert.ok(records.some((item) => item.commitId === `fixture-checkpoint:${registeredInvocation}`));
+          assert.ok(records.some((item) => item.commitId === `fixture-association:${registeredInvocation}`));
           assert.equal(input.reviewMaterial.subjects[0]!.body, await readFile(join(root, 'child-output.txt'), 'utf8'));
           const url = process.env.HUMANAGENT_SINGLE_CALL_HTTP;
           if (url) {
+            assert.equal(create.assignment.invocationId, registeredInvocation,
+              'review request must carry the registered parent invocation, not the review assignment');
             const response = await fetch(url, { method: 'POST', signal: input.signal,
-              body: JSON.stringify({ kind: 'review', invocationId: create.incarnation.assignmentId,
+              body: JSON.stringify({ kind: 'review', invocationId: registeredInvocation,
+                reviewAssignmentId: input.reviewAssignment.assignmentId,
                 incarnation: create.incarnation, journalPath: join(root, 'organ.jsonl'), material: input.reviewMaterial }) });
             assert.equal(response.ok, true);
             await response.text();
@@ -438,6 +447,11 @@ async function singleCallFixture() {
         },
       };
     },
+  });
+  const reviewAgent: ReviewAgentPort = {
+    roleId: 'review',
+    async review() { throw new Error('direct/root review callback must never run'); },
+    createInstance() { throw new Error('single-call fixture never dispatches a root reviewer'); },
   };
   const manager = new OrchestrationManager({ ownerId: 'single-call-manager', runtimePool: pool,
     executionAgent, reviewAgent, reviewJournal: createJsonlI2JournalPort({ filePath: join(root, 'organ.jsonl'), journal }) });
@@ -455,7 +469,7 @@ async function singleCallFixture() {
     ...await common(key), kind: 'execution', assignment: { ...assignment, assignmentId: key }, executionAgent,
   });
   const review = async (key: string, workerAssignment: WorkAssignment, workerResult: WorkResult): Promise<IndependentChildCallInput & { kind: 'review' }> => ({
-    ...await common(key), agentId: 'configured-reviewer', kind: 'review', reviewAgent,
+    ...await common(key), agentId: 'configured-reviewer', kind: 'review', reviewAgent: makeReviewAgent(key),
     input: { scope, workerAssignment, workerResult,
       reviewAssignment: createReviewAssignments({ workerAssignment, workerResult, reviewKinds: ['quality'],
         subjectRefs: workerAssignment.targetRefs, subjectDigests: workerResult.producedArtifactDigests })[0]!,
@@ -463,6 +477,7 @@ async function singleCallFixture() {
     },
   });
   return { root, journal, pool, manager, execution, review, taskScope, scope,
+    seenRequestInvocations: () => [...seenRequestInvocations],
     counts: () => ({ executions, reviews, releases, disposes }), fail: (value: typeof failure) => { failure = value; },
     async cleanup() { const disposed = await pool.dispose(); assert.equal(disposed.status, 'disposed'); await rm(root, { recursive: true, force: true }); },
   };
@@ -490,9 +505,16 @@ test('single call public API returns genuine work and standalone repeated review
     if (first.state !== 'returned' || first.kind !== 'review' || second.state !== 'returned' || second.kind !== 'review') {
       throw new Error(JSON.stringify({ first, second }));
     }
-    assert.equal(first.incarnation.assignmentId, 'review-call:first');
-    assert.equal(second.incarnation.assignmentId, 'review-call:second');
+    const reviewAssignmentId = firstInput.input.reviewAssignment.assignmentId;
+    assert.equal(first.invocationId, 'review-call:first');
+    assert.equal(second.invocationId, 'review-call:second');
     assert.ok(first.incarnation.agentInstanceId !== second.incarnation.agentInstanceId);
+    // Two registered invocations share one real subject-bound review assignment
+    // but are two genuine reviewer incarnations bound to that assignment.
+    assert.equal(first.incarnation.assignmentId, reviewAssignmentId);
+    assert.equal(second.incarnation.assignmentId, reviewAssignmentId);
+    assert.equal(first.delivery.reviewer.assignmentId, reviewAssignmentId);
+    assert.equal(second.delivery.reviewer.assignmentId, reviewAssignmentId);
     assert.equal(first.delivery.result.assignmentId, second.delivery.result.assignmentId, 'real review assignment stays stable');
     assert.equal(first.reviewCommitRef, undefined, 'ordinary review must not invent I2');
     assert.equal(second.reviewCommitRef, undefined);
@@ -504,6 +526,8 @@ test('single call public API returns genuine work and standalone repeated review
       input: { ...secondInput.input, reviewMaterial: { ...secondInput.input.reviewMaterial, acceptanceCriteria: 'drifted' } } });
     assert.equal(invalid.state, 'blocked');
     assert.deepEqual(f.counts(), { executions: 1, reviews: 2, releases: 3, disposes: 3 });
+    assert.deepEqual(f.seenRequestInvocations(), ['review-call:first', 'review-call:second'],
+      'each review request carries its own registered parent invocation, not the review assignment');
     assert.deepEqual(f.manager.graph.snapshot(), { stages: [], assignments: [] }, 'single calls do not run dispatch');
     const records = await f.journal.replay();
     assert.equal(records.filter((r) => r.payload?.kind === 'single-call-fixture-return').length, 3);
@@ -588,11 +612,12 @@ test('single call retains unknown invocation and preserves primary error plus ac
   } finally { f.fail(undefined); await f.cleanup(); }
 });
 
-// CONFIRMED contract mismatch, occurrence probability UNKNOWN. The accepted
-// invocation-bound reviewer conflicts with I2's assignment equality. Impact:
-// declared milestone cannot commit. Cost: one physical published plan and one
-// acquired review in this consumer. Keep the original error; no owner bypass.
-test('single call exposes existing I2 incarnation assignment conflict and does not repeat the known review', async () => {
+// A declared milestone review now commits a real I2 receipt. The registered
+// parent invocation and the subject-bound review assignment stay separate
+// identities, and two registered invocations produce two genuine reviewer
+// incarnations with distinct receipts. The physical return fault proves the
+// receipt survives and the same registered call recovers it without replay.
+test('declared milestone review commits a real I2 receipt per registered invocation and never repeats a known review', async () => {
   const f = await singleCallFixture();
   try {
     const workInput = await f.execution('milestone-work');
@@ -611,19 +636,157 @@ test('single call exposes existing I2 incarnation assignment conflict and does n
       historyCoverage: 'complete-from-task-start', publishedAt: at(0), publishedBy: 'single-call-fixture-owner' });
     const planCommit = await plans.getCommitRef(f.taskScope, plan.revisionId);
     assert.ok(planCommit);
-    const reviewInput = await f.review('milestone-review', workInput.assignment, work.result);
-    const input = { ...reviewInput, milestoneReview: { milestoneId: 'bounded-output-milestone',
+    const binding = { milestoneId: 'bounded-output-milestone',
       cycleId: f.scope.cycleId!, taskScope: f.taskScope, executionScope: f.scope,
-      planRevisionCommitRef: planCommit!, reviewerAgentId: reviewInput.agentId } };
-    const outcome = await f.manager.callChild(input);
-    assert.equal(outcome.state, 'blocked');
-    if (outcome.state === 'returned') throw new Error('conflicting I2 identity was accepted');
-    assert.equal(outcome.issue.reason, 'selected reviewer incarnation assignment does not match the review assignment');
-    assert.deepEqual(await f.manager.callChild(input), outcome);
-    assert.deepEqual(f.counts(), { executions: 1, reviews: 1, releases: 2, disposes: 2 });
-    assert.equal((await f.journal.replay()).some((r) => r.payload?.kind === I2_JOURNAL_PAYLOAD_KIND), false);
-    console.info('I2 compatibility remains INCOMPLETE', JSON.stringify(outcome));
-  } finally { await f.cleanup(); }
+      planRevisionCommitRef: planCommit! };
+    const reviewInput = await f.review('milestone-review', workInput.assignment, work.result);
+    const input = { ...reviewInput, milestoneReview: { ...binding, reviewerAgentId: reviewInput.agentId } };
+    const reviewAssignmentId = reviewInput.input.reviewAssignment.assignmentId;
+
+    // I2 is committed before the parent return. A refused return must keep the
+    // receipt and let the same registered call recover it without another call.
+    f.fail('return');
+    const interrupted = await f.manager.callChild(input);
+    assert.equal(interrupted.state, 'blocked');
+    if (interrupted.state === 'returned') throw new Error('a refused parent return reported returned');
+    f.fail(undefined);
+    const first = await f.manager.callChild(input);
+    assert.equal(first.state, 'returned', JSON.stringify(first));
+    if (first.state !== 'returned' || first.kind !== 'review') throw new Error(JSON.stringify(first));
+    const firstRef = first.reviewCommitRef;
+    if (!firstRef) throw new Error('declared milestone must carry its real I2 receipt');
+    assert.equal(first.invocationId, 'milestone-review');
+    assert.equal(first.incarnation.assignmentId, reviewAssignmentId, 'reviewer incarnation binds the real review assignment');
+    assert.equal(first.delivery.reviewer.assignmentId, reviewAssignmentId);
+
+    const i2Port = createJsonlI2JournalPort({ filePath: join(f.root, 'organ.jsonl'), journal: f.journal });
+    const committed = await i2Port.read(f.taskScope, firstRef);
+    assert.equal(committed.kind, 'milestone-review-result');
+    if (committed.kind !== 'milestone-review-result') throw new Error(JSON.stringify(committed));
+    assert.equal(committed.reviewAssignment.assignmentId, reviewAssignmentId);
+    assert.equal(committed.delivery.reviewer.assignmentId, reviewAssignmentId);
+    assert.equal(committed.delivery.reviewer.agentInstanceId, first.incarnation.agentInstanceId);
+    assert.equal(committed.milestoneId, 'bounded-output-milestone');
+    assert.equal(committed.planRevisionCommitRef.commitId, planCommit!.commitId);
+
+    // A second registered invocation reviews the same real subject. It must be
+    // a genuine second incarnation with its own distinct durable receipt.
+    const reviewInput2 = await f.review('milestone-review-2', workInput.assignment, work.result);
+    const input2 = { ...reviewInput2, milestoneReview: { ...binding, reviewerAgentId: reviewInput2.agentId } };
+    const second = await f.manager.callChild(input2);
+    assert.equal(second.state, 'returned', JSON.stringify(second));
+    if (second.state !== 'returned' || second.kind !== 'review') throw new Error(JSON.stringify(second));
+    const secondRef = second.reviewCommitRef;
+    if (!secondRef) throw new Error('the second registered invocation must carry its real I2 receipt');
+    assert.equal(second.invocationId, 'milestone-review-2');
+    assert.equal(second.incarnation.assignmentId, reviewAssignmentId);
+    assert.ok(second.incarnation.agentInstanceId !== first.incarnation.agentInstanceId, 'two invocations are two real reviewer incarnations');
+    assert.ok(secondRef.commitId !== firstRef.commitId, 'two invocations have distinct receipts');
+    const secondRecord = await i2Port.read(f.taskScope, secondRef);
+    assert.equal(secondRecord.kind, 'milestone-review-result');
+    if (secondRecord.kind !== 'milestone-review-result') throw new Error(JSON.stringify(secondRecord));
+    assert.equal(secondRecord.delivery.reviewer.agentInstanceId, second.incarnation.agentInstanceId);
+    assert.equal(secondRecord.reviewAssignment.assignmentId, reviewAssignmentId);
+
+    // Same-call retry of a known return never re-acquires, re-invokes, or appends.
+    const before = (await f.journal.replay()).length;
+    assert.deepEqual(await f.manager.callChild(input), first);
+    assert.deepEqual(await f.manager.callChild(input2), second);
+    assert.equal((await f.journal.replay()).length, before, 'a known-return retry must not append I2 history');
+    assert.deepEqual(f.counts(), { executions: 1, reviews: 2, releases: 3, disposes: 3 });
+    const receipts = (await f.journal.replay()).filter((r) => r.payload?.kind === I2_JOURNAL_PAYLOAD_KIND);
+    assert.equal(receipts.length, 2, 'each registered invocation commits exactly one I2 receipt');
+    assert.deepEqual(f.seenRequestInvocations(), ['milestone-review', 'milestone-review-2'],
+      'each declared review request carries its own registered parent invocation');
+    console.info('declared milestone receipts', JSON.stringify({ first: firstRef, second: secondRef }));
+  } finally { f.fail(undefined); await f.cleanup(); }
+});
+
+// The dispatch review loop accumulates durable receipts. When a later review's
+// durable commit fails, the already-committed receipt must still be returned, or
+// the caller loses durable facts and closes the wrong way. The reviewer lease is
+// still released. Cost: one controlled durable-step failure on an existing port.
+test('dispatch keeps the already-committed milestone receipt when a later review fails its durable step', async () => {
+  const base = process.env.HUMANAGENT_SINGLE_CALL_FIXTURE_ROOT
+    ?? '/Users/fanzhang/.humanagent/test-fixtures/ux-i0-single-call-20261013';
+  await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'dispatch-'));
+  const journal = new JsonlOrganJournal(join(root, 'organ.jsonl'));
+  const taskScope: TaskScope = { organId, taskId: id('task', 'dispatch-milestone-task') };
+  const scope: ScopeRef = { ...taskScope, cycleId: id('cycle', 'dispatch-milestone-cycle') };
+  const body = 'durable dispatch review body';
+  const work: WorkAssignment = { assignmentId: 'dispatch-milestone-work', taskId: taskScope.taskId,
+    pipelineNodeId: 'dispatch-milestone-node', attempt: 1, executionEpoch: 1, inputRevision: 1,
+    objective: 'produce bounded output', targetRefs: ['child-output'], expectedOutputRefs: ['child-output'],
+    successCriteria: ['produced exact output'], failureCriteria: ['failed output'], incompleteCriteria: ['missing output'],
+    acceptanceCriteriaDigest: '', requiredCapabilities: ['execute'], mergeGate: 'not-required' };
+  const assignment = { ...work, acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(work)) };
+  const ref = (label: string) => ({ evidenceId: id('evidence', label), kind: 'execution' as const,
+    source: 'dispatch-public-consumer', locator: label, scope });
+  const result: WorkResult = { taskId: taskScope.taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: 'dispatch-worker',
+    assignmentId: assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
+    producedArtifactRefs: ['child-output'], producedArtifactDigests: [digestOf(body)], producedArtifactBodies: [body],
+    status: 'succeeded', summary: 'bounded output produced', outputRefs: ['child-output'],
+    evidenceRefs: [ref('worker-output')], nextAction: 'review' };
+  // The dispatch execution lease is still held while the review loop runs, so
+  // the durable reviewers need a second pool slot; every runtime advertises the
+  // full capability set so the second review reuses the spawned slot.
+  const runtimeCapabilities = ['execute', 'quality.review', 'security.review'];
+  const pool = new AgentRuntimePoolManager({ maxRuntimes: 2, ownerId: 'dispatch-pool',
+    initialRuntimes: [{ runtimeId: 'dispatch-runtime', capabilities: runtimeCapabilities }],
+    factory: { async start(input) { return { runtimeId: input.runtimeId, generation: input.generation, capabilities: runtimeCapabilities }; },
+      async dispose() {} } });
+  const executionAgent: ExecutionAgentPort = { roleId: 'execution',
+    async execute() { throw new Error('root execution callback must never run'); },
+    createInstance(create) {
+      return { incarnation: create.incarnation, async dispose() {},
+        async execute() { return { result, criteria: { satisfied: assignment.successCriteria, failed: [], incomplete: [] } }; } };
+    } };
+  const reviewAgent: ReviewAgentPort = { roleId: 'review',
+    async review() { throw new Error('root review callback must never run'); },
+    createInstance(create) {
+      return { incarnation: create.incarnation, async dispose() {},
+        async review(input) {
+          return { result: { ...input.reviewAssignment, resultId: `result:${create.incarnation.agentInstanceId}`,
+            status: 'passed', findings: [], evidenceRefs: [ref('review-output')] },
+            output: { text: 'independent review passed', artifactRef: null, artifactDigest: null }, completedAt: at(1) };
+        } };
+    } };
+  const realI2 = createJsonlI2JournalPort({ filePath: join(root, 'organ.jsonl'), journal });
+  let milestoneCommits = 0;
+  const reviewJournal: I2JournalPort = { ...realI2,
+    async commit(record) {
+      if (record.kind === 'milestone-review-result') {
+        milestoneCommits += 1;
+        if (milestoneCommits === 2) throw new Error('second durable review commit refused');
+      }
+      return realI2.commit(record);
+    } };
+  const manager = new OrchestrationManager({ ownerId: 'dispatch-manager', runtimePool: pool,
+    executionAgent, reviewAgent, reviewJournal });
+  try {
+    manager.planStage({ nodeId: 'dispatch-milestone-node', taskId: taskScope.taskId });
+    const dispatched = await manager.dispatch({ stageNodeId: 'dispatch-milestone-node', assignment, agentId: 'dispatch-worker',
+      scope, reviewKinds: ['quality', 'security'], reviewSubjectDigests: [digestOf(body)],
+      reviewSubjects: [{ ref: 'child-output', body }],
+      milestoneReview: { milestoneId: 'dispatch-milestone', cycleId: scope.cycleId!, taskScope,
+        executionScope: scope, planRevisionCommitRef: externalRef('dispatch-plan'), reviewerAgentId: 'dispatch-reviewer' } });
+    assert.equal(dispatched.status, 'blocked');
+    assert.equal(dispatched.issue?.code, 'review-commit-failed');
+    assert.match(dispatched.issue?.reason ?? '', /second durable review commit refused/);
+    assert.equal(dispatched.reviewCommitRefs?.length, 1, 'the first committed receipt must survive the later failure');
+    const firstRef = dispatched.reviewCommitRefs![0]!;
+    const record = await realI2.read(taskScope, firstRef);
+    assert.equal(record.kind, 'milestone-review-result');
+    if (record.kind !== 'milestone-review-result') throw new Error(JSON.stringify(record));
+    assert.equal(record.reviewAssignment.reviewKind, 'quality');
+    assert.equal(record.delivery.reviewer.assignmentId, record.reviewAssignment.assignmentId);
+    assert.equal(pool.inspect().runtimes.some((r) => r.state === 'running'), false, 'the reviewer lease must still be released');
+  } finally {
+    const disposed = await pool.dispose();
+    assert.equal(disposed.status, 'disposed');
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('actual I2 journal port commits, cold-reads and lists typed definition/occurrence/cycle/review relations from the same Organ Journal', async () => {
@@ -944,6 +1107,20 @@ test('actual I2 journal port rejects a foreign-task reference, an unresolved or 
       })),
       /already binds different immutable content/,
     );
+
+    // A reviewer incarnation bound to something other than the real review
+    // assignment is still rejected by Core and appends nothing. The manager fix
+    // removes this mismatch from the manager path; it never relaxes Core.
+    const beforeWrongAssignment = (await journal.replay()).length;
+    const wrongAssignmentReview = reviewResult({ taskScope, milestoneId: 'milestone-a', cycleId: 'cycle-a',
+      assignmentId: 'assignment-a', resultId: 'review-result-wrong-assignment', completedAt: at(10) });
+    await assert.rejects(
+      () => port.commit({ ...wrongAssignmentReview,
+        delivery: { ...wrongAssignmentReview.delivery,
+          reviewer: { ...wrongAssignmentReview.delivery.reviewer, assignmentId: 'invocation-not-the-assignment' } } }),
+      /selected reviewer incarnation assignment does not match the review assignment/,
+    );
+    assert.equal((await journal.replay()).length, beforeWrongAssignment, 'a wrong reviewer assignment must not append I2 history');
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

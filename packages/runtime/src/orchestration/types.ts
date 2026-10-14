@@ -349,6 +349,13 @@ export interface TaskInstanceHandle {
 }
 
 export interface ReviewInstanceRequest extends RuntimeInstanceRequest {
+  /**
+   * Registered standalone parent call that selected this review. It is the
+   * parent invocation identity, not the subject-bound review assignment, and it
+   * lets the reviewer creator bind the real registered call. Absent for the
+   * durable dispatch review path, which already carries its own binding.
+   */
+  readonly invocationId?: string;
   readonly reviewAssignment: ReviewAssignment;
   readonly workerAssignment: WorkAssignment;
 }

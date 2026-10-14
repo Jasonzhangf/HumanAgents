@@ -480,7 +480,11 @@ export class OrchestrationManager {
               taskId: input.input.workerAssignment.taskId, roleId: input.reviewAgent.roleId,
               agentId: input.agentId, scope: input.scope,
               assignment: {
-                assignmentId: invocationId, taskId: input.input.workerAssignment.taskId,
+                // The pool assignment identity is the real subject-bound review
+                // assignment. The registered parent invocation travels beside it
+                // so the reviewer creator binds the real registered call.
+                assignmentId: input.input.reviewAssignment.assignmentId, invocationId,
+                taskId: input.input.workerAssignment.taskId,
                 attempt: input.input.reviewAssignment.attempt,
                 reviewAssignment: input.input.reviewAssignment, workerAssignment: input.input.workerAssignment,
               },
@@ -1359,7 +1363,9 @@ export class OrchestrationManager {
           result,
           reviewMaterial,
         );
-        if (!durable.ok) return this.blockedResult(record, durable.issue, input.scope);
+        // A failed durable step must still return the receipts already committed
+        // by the earlier reviews in this loop.
+        if (!durable.ok) return this.blockedResult(record, durable.issue, input.scope, reviewCommitRefs);
         reviewResult = durable.delivery.result;
         reviewCommitRefs.push(durable.commitRef);
       } else {
