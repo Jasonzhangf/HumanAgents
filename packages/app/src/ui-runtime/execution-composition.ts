@@ -25,6 +25,7 @@ import { createNativeExecution } from './native-execution.js';
 import { createNativeBoundaryContinuation } from './native-boundary-continuation.js';
 import { createJsonlNativeSaveProgressPort } from '../../../adapters/jsonl/src/native-save-progress.js';
 import { frozenTurnCloseRef, readCheckpointClosurePreparation } from '../../../runtime/src/checkpoints/closure.js';
+import { digestModeCapabilityProfile } from '../../../agent-templates/src/index.js';
 import { closeAgentProvider, type AgentProviderComposition } from '../agent-driver-composition.js';
 import type { RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
@@ -297,13 +298,15 @@ export function createDefaultExecutionComposition(input: {
       missing('the current grant does not authorize the original durable turn');
     }
     const mode = source.current.context.loopControl.mode;
+    // The read-only historical loop issues no Provider work. Its capability
+    // digest hashes this exact declared read-only profile through the existing
+    // template profile owner; it never borrows the current grant record digest.
+    const historicalProfile = { profileId: 'task-execution-context', role: 'execution' as const, mode,
+      observationScopes: ['task'] as const, observationCapabilities: ['read-task'] as const,
+      orchestrationScope: 'local' as const, orchestrationCapabilities: [] as const, capabilityDigest: '' };
     const restored = await AgentLoopRuntime.restoreHistoricalTurn({
       role: 'execution', mode,
-      profiles: [{ profileId: 'task-execution-context', role: 'execution', mode,
-        observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
-        // The read-only historical loop issues no Provider work. Its lease label is the exact
-        // grant commit that admitted the original turn; no Provider selection runs here.
-        orchestrationCapabilities: [], capabilityDigest: grant.commit.recordDigest }],
+      profiles: [{ ...historicalProfile, capabilityDigest: digestModeCapabilityProfile(historicalProfile) }],
       budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
       permissionRevision: String(grant.grant.revision),
       observationStreamId: source.current.context.loopControl.inboxStreamId, now: input.now,
