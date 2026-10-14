@@ -28,6 +28,7 @@ import type {
   ExecutionAgentPort,
   ExecutionDelivery,
   ExecutionInstanceAcquireInput,
+  TaskRuntimeIncarnation,
   TaskExecutionHandle,
   MergeCoordinatorPort,
   MergeOutcome,
@@ -148,6 +149,16 @@ function leaseBinding(lease: RuntimePoolLease) {
     assignmentId: lease.assignmentId,
     executionEpoch: lease.executionEpoch,
   };
+}
+
+function sameIncarnation(a: TaskRuntimeIncarnation, b: TaskRuntimeIncarnation): boolean {
+  return a.runtimeId === b.runtimeId
+    && a.generation === b.generation
+    && a.agentInstanceId === b.agentInstanceId
+    && a.roleId === b.roleId
+    && a.taskId.value === b.taskId.value
+    && a.assignmentId === b.assignmentId
+    && a.executionEpoch === b.executionEpoch;
 }
 
 function retryAssignment(
@@ -285,39 +296,8 @@ export class OrchestrationManager {
   }
 
   async dispatch(input: DispatchInput): Promise<OrchestrationDispatchResult> {
-    const planned = this.graph.createAssignment(input.stageNodeId, input.assignment);
-    const key = assignmentKey(input.assignment);
-    if (this.inFlightDispatches.has(key)) {
-      return this.progressResult(planned);
-    }
-    if (planned.status === 'running' && planned.result) {
-      return this.progressResult(planned);
-    }
-    if (
-      planned.status === 'succeeded'
-      || planned.status === 'failed'
-      || planned.status === 'incomplete'
-      || planned.status === 'blocked'
-      || planned.status === 'escalated'
-      || planned.status === 'merged'
-    ) {
-      return {
-        status: planned.status,
-        assignment: planned,
-        ...(planned.status === 'blocked' || planned.status === 'escalated' || planned.status === 'failed' || planned.status === 'incomplete'
-          ? {
-              issue: issue(
-                `assignment-${planned.status}`,
-                planned.ownerId,
-                planned.reason,
-                planned.nextAction,
-                planned.evidenceRefs,
-              ),
-            }
-          : {}),
-        reviewResults: planned.reviewResults,
-      };
-    }
+    const begun = this.beginDispatch(input);
+    if ('result' in begun) return begun.result;
     const agent = input.executionAgentOverride ?? this.executionAgent;
     if (!agent) {
       const unavailable = issue(
@@ -328,10 +308,76 @@ export class OrchestrationManager {
         [evidence(input.scope, 'orchestration.execution.unavailable')],
         'orchestration.execution.unavailable',
       );
-      return this.blockedResult(planned, unavailable, input.scope);
+      return this.blockedResult(begun.planned, unavailable, input.scope);
     }
+    return this.awaitDispatch(begun.key, this.dispatchWithLease(input, begun.planned));
+  }
 
-    const pending = this.dispatchWithLease(input, planned);
+  /**
+   * Retained-handle dispatch. The caller has already acquired the exact
+   * execution instance; this path reuses the shared dispatch graph, in-flight
+   * coalescing, execution, child-call, review and merge machinery, but neither
+   * acquires a second instance nor releases the supplied lease. The owning
+   * coordinator releases that lease through its real lifecycle endpoint.
+   */
+  async dispatchAcquired(
+    input: DispatchInput,
+    acquired: Extract<RuntimePoolAcquireResult<TaskExecutionHandle>, { status: 'acquired' }>,
+  ): Promise<OrchestrationDispatchResult> {
+    this.assertRetainedAcquisition(input, acquired);
+    const begun = this.beginDispatch(input);
+    if ('result' in begun) return begun.result;
+    return this.awaitDispatch(
+      begun.key,
+      this.executeRetainedDispatch(input, begun.planned, acquired),
+    );
+  }
+
+  private beginDispatch(input: DispatchInput):
+    | { readonly result: OrchestrationDispatchResult }
+    | { readonly planned: AssignmentRecord; readonly key: string } {
+    const planned = this.graph.createAssignment(input.stageNodeId, input.assignment);
+    const key = assignmentKey(input.assignment);
+    if (this.inFlightDispatches.has(key)) {
+      return { result: this.progressResult(planned) };
+    }
+    if (planned.status === 'running' && planned.result) {
+      return { result: this.progressResult(planned) };
+    }
+    if (
+      planned.status === 'succeeded'
+      || planned.status === 'failed'
+      || planned.status === 'incomplete'
+      || planned.status === 'blocked'
+      || planned.status === 'escalated'
+      || planned.status === 'merged'
+    ) {
+      return {
+        result: {
+          status: planned.status,
+          assignment: planned,
+          ...(planned.status === 'blocked' || planned.status === 'escalated' || planned.status === 'failed' || planned.status === 'incomplete'
+            ? {
+                issue: issue(
+                  `assignment-${planned.status}`,
+                  planned.ownerId,
+                  planned.reason,
+                  planned.nextAction,
+                  planned.evidenceRefs,
+                ),
+              }
+            : {}),
+          reviewResults: planned.reviewResults,
+        },
+      };
+    }
+    return { planned, key };
+  }
+
+  private async awaitDispatch(
+    key: string,
+    pending: Promise<OrchestrationDispatchResult>,
+  ): Promise<OrchestrationDispatchResult> {
     this.inFlightDispatches.set(key, pending);
     try {
       return await pending;
@@ -339,6 +385,58 @@ export class OrchestrationManager {
       if (this.inFlightDispatches.get(key) === pending) {
         this.inFlightDispatches.delete(key);
       }
+    }
+  }
+
+  private assertRetainedAcquisition(
+    input: DispatchInput,
+    acquired: Extract<RuntimePoolAcquireResult<TaskExecutionHandle>, { status: 'acquired' }>,
+  ): void {
+    const mismatch = (conditionRef: string) => new OrchestrationError(
+      'retained dispatch acquisition does not match the requested assignment',
+      {
+        ownerId: this.ownerId,
+        reason: conditionRef,
+        nextAction: { kind: 'recover', ref: conditionRef },
+        evidenceRefs: [evidence(input.scope, conditionRef)],
+        conditionRef,
+      },
+    );
+    const { lease, incarnation, handle } = acquired;
+    if (lease.ownerId !== this.ownerId) throw mismatch('orchestration.dispatch.retained.owner');
+    if (lease.assignmentId !== input.assignment.assignmentId
+      || incarnation.assignmentId !== input.assignment.assignmentId) {
+      throw mismatch('orchestration.dispatch.retained.assignment');
+    }
+    if (incarnation.taskId.value !== input.assignment.taskId.value) {
+      throw mismatch('orchestration.dispatch.retained.task');
+    }
+    if (input.scope.taskId && input.scope.taskId.value !== input.assignment.taskId.value) {
+      throw mismatch('orchestration.dispatch.retained.scope');
+    }
+    if (!sameIncarnation(handle.incarnation, incarnation) || !sameIncarnation(lease.incarnation, incarnation)) {
+      throw mismatch('orchestration.dispatch.retained.instance');
+    }
+  }
+
+  private async executeRetainedDispatch(
+    input: DispatchInput,
+    planned: AssignmentRecord,
+    acquired: Extract<RuntimePoolAcquireResult<TaskExecutionHandle>, { status: 'acquired' }>,
+  ): Promise<OrchestrationDispatchResult> {
+    try {
+      return await this.executeWithLease(input, acquired.lease, acquired.handle);
+    } catch (error) {
+      return this.blockedResult(
+        planned,
+        issueFromUnknown(error, {
+          code: 'orchestration-dispatch-failed',
+          ownerId: this.ownerId,
+          scope: input.scope,
+          conditionRef: 'orchestration.dispatch',
+        }),
+        input.scope,
+      );
     }
   }
 
@@ -458,10 +556,12 @@ export class OrchestrationManager {
     }
     let rawDelivery: WorkResult | ExecutionDelivery;
     try {
+      // Physical execution input comes from the acquired lease; the business
+      // result identity stays with the assignment and is validated by the graph.
       rawDelivery = await executionAgent.execute({
         assignment: input.assignment,
         agentId: input.agentId,
-        executionEpoch: input.assignment.executionEpoch,
+        executionEpoch: lease.executionEpoch,
         attempt: input.assignment.attempt,
         lease,
         scope: input.scope,
