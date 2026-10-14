@@ -585,7 +585,7 @@ export interface RuntimeCheckpointBoundaryPort {
   publish(input: RuntimeCheckpointBoundary): Promise<void>;
 }
 
-interface TaskRecord {
+export interface TaskRecord {
   readonly taskId: TaskId;
   title: string;
   directive: string;
@@ -652,7 +652,7 @@ interface TaskRecord {
   resolveExecutionReady?: (ready: boolean) => void;
 }
 
-interface OperationRecord {
+export interface OperationRecord {
   readonly operationId: OperationId;
   readonly taskId: TaskId;
   readonly executionEpoch: number;
