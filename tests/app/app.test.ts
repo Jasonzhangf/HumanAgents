@@ -25,6 +25,13 @@ import { AccessControlService } from '../../packages/app/src/ui-runtime/access-c
 import type { AttentionPort } from '../../packages/runtime/src/index.js';
 import { prepareAgentOperation } from '../../packages/app/src/agent-operation.js';
 import { closeAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
+import { RuntimeTaskCoordinator } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
+import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
+import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
+import { newActiveTurnId } from '../../packages/runtime/src/admission/admitted-turn.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -269,21 +276,174 @@ test('native CLI shared-pair boundary keeps actual run and recoverable resume un
 });
 
 /**
- * Bounded process fixture for the native CLI control input seam (J1b). A real
- * fixture-owned A1 credential issues one paired session; the cookie header is
- * written to a control-session file and handed to the CLI. The fixture asserts
- * that a valid principal reaches the current real native unbound error and an
- * invalid session fails at the real verifier before any dispatch. Raw cookies
- * must never appear in stdout/stderr. The full native factory is J2 and is not
- * claimed here.
+ * Native CLI durable layout. This is the coordination point with the concurrent
+ * CLI caller author (accepted r5/r6 plan): the plan names
+ * `join(paths.checkpointsRoot, 'rcc', 'ui-runtime-journal.jsonl')` while the live
+ * serve composition writes `join(paths.checkpointsRoot, 'ui-runtime', mode, ...)`.
+ * This fixture follows the actual serve layout so the retained Task is the same
+ * Task the running instance replays.
+ */
+function nativeRuntimeLayout(paths: { readonly checkpointsRoot: string }) {
+  const modeRoot = join(paths.checkpointsRoot, 'ui-runtime', 'rcc');
+  return {
+    modeRoot,
+    preparedJournalPath: join(modeRoot, 'ui-runtime-journal.jsonl'),
+    organJournalPath: join(modeRoot, 'task-control.jsonl'),
+  };
+}
+
+const nativeProcessFixtureRoot = process.env.HUMANAGENT_TEST_ROOT
+  ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-cli-native-process-r1-20261013');
+
+interface NativeUpstreamWire {
+  readonly method: string;
+  readonly path: string;
+  readonly body: string;
+}
+
+/**
+ * Controlled local upstream for the native CLI run. It answers the real RCC
+ * readiness probes and serves the real Responses standard-end sequence: one
+ * physical file write, the bound four-part turn end that cites that write's real
+ * evidence locator, then a final drain. The wire list is the minimal physical
+ * effect counter; the file write is the minimal physical side effect.
+ */
+async function nativeResponsesUpstream(input: {
+  readonly model: string;
+  readonly organFilePath: string;
+  readonly journal: JsonlOrganJournal;
+}): Promise<{ readonly wires: NativeUpstreamWire[]; readonly baseUrl: string; close(): Promise<void> }> {
+  const wires: NativeUpstreamWire[] = [];
+  const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+  const toolCall = (roundId: string, name: string, args: unknown) => [
+    { type: 'response.created', response: { id: roundId } },
+    { type: 'response.output_item.added', output_index: 0,
+      item: { type: 'function_call', call_id: `call-${roundId}`, name, arguments: '' } },
+    { type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: `call-${roundId}`, name, arguments: JSON.stringify(args) } },
+    { type: 'response.completed', response: { id: roundId } },
+  ];
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const path = request.url ?? '';
+      const body = Buffer.concat(chunks).toString('utf8');
+      wires.push({ method: request.method ?? '', path, body });
+      if (path === '/health' || path === '/v1/models') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(path === '/health'
+          ? { status: 'ok', version: 'native-process' }
+          : { data: [{ id: input.model }] }));
+        return;
+      }
+      const posts = wires.filter((wire) => wire.method === 'POST');
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (posts.length === 1) {
+        response.end(frame(toolCall('native-write', 'file_write',
+          { file_path: 'native-process-result.txt', content: 'native process physical effect' })));
+        return;
+      }
+      if (posts.length === 2) {
+        const verified = await input.journal.verify();
+        const coverage = [...verified.records].reverse()
+          .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
+        const operationId = coverage?.scope?.operationId?.value;
+        if (!operationId) throw new Error('native run has no admitted operation coverage');
+        const active = await createJsonlActiveTurnJournal({ filePath: input.organFilePath,
+          journal: input.journal, turnId: newActiveTurnId(operationId) }).replay();
+        const completed = active.find((record) => record.kind === 'accepted-fact'
+          && record.entry.envelope.fact.kind === 'tool-result'
+          && record.entry.envelope.fact.result.toolId === 'file.write');
+        const ref = completed?.kind === 'accepted-fact' && completed.entry.envelope.fact.kind === 'tool-result'
+          ? completed.entry.envelope.fact.result.evidenceRefs[0]?.locator
+          : undefined;
+        if (!ref) throw new Error('native run file-write evidence missing');
+        const section = (text: string) => ({ text, evidenceRefs: [ref] });
+        response.end(frame(toolCall('native-end', 'humanagent_turn_end', { summary: {
+          goal: section('Run the native CLI task'), actions: section('Wrote the native process result'),
+          result: section('Physical file readback is available'), expectedNextStep: section('Close this turn'),
+        }, deliveryRefs: [ref] })));
+        return;
+      }
+      response.end(frame([
+        { type: 'response.created', response: { id: 'native-drain' } },
+        { type: 'response.output_text.done', item_id: 'native-text', text: 'Native end drained' },
+        { type: 'response.completed', response: { id: 'native-drain' } },
+      ]));
+    })().catch((error: unknown) => {
+      response.writeHead(500, { 'content-type': 'text/plain' });
+      response.end(String(error));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('missing native upstream socket address');
+  return {
+    wires,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    },
+  };
+}
+
+/** Canonical fixture: real workspace, real RCC agent config and a controlled Provider. */
+async function nativeProcessFixture() {
+  await mkdir(nativeProcessFixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(nativeProcessFixtureRoot, 'native-process-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const layout = nativeRuntimeLayout(paths);
+  await mkdir(layout.modeRoot, { recursive: true });
+  const journal = new JsonlOrganJournal(layout.organJournalPath);
+  const upstream = await nativeResponsesUpstream({ model: 'native.process.model',
+    organFilePath: layout.organJournalPath, journal });
+  const configPath = join(controlRoot, 'config.toml');
+  const config = (await readFile(configPath, 'utf8')).replace('driverRef = "fake"', [
+    'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "native-process-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "native.process.model"',
+    'provider.route = "native-process-route"',
+    `provider.baseUrl = "${upstream.baseUrl}"`,
+  ].join('\n'));
+  await writeFile(configPath, config, 'utf8');
+  const configuration = await loadConfiguration(paths);
+  return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration };
+}
+
+/**
+ * Bounded process fixture for the native CLI run seam. It seeds the real durable
+ * state the native caller selects: a retained Task in the existing prepared
+ * Journal (via the real coordinator replay contract), the real Task identity and
+ * an explicit fixture-owned grant in the same Organ Journal. A real A1 credential
+ * issues the paired control-session cookie. The case asserts the real
+ * selector-first boundary, that an invalid principal or a foreign-owned grant
+ * has zero Provider effects, and that the valid path actually reaches the
+ * Provider, the bound standard end and the real disposition. Raw cookies must
+ * never appear in stdout/stderr. Released execution or a Provider terminal is not
+ * Task completion; the receipt must carry the real Task disposition.
  */
 test('native CLI preparation control input', async () => {
-  const fixture = await nativePairFixture();
+  const fixture = await nativeProcessFixture();
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const sessionId = 'native-cli-control';
-  const taskId = 'native-cli-control-task';
+  const legacyTaskId = 'native-cli-control-task';
+  const organId = id('organ', 'humanagent-ui');
+  const retainedTaskId = id('task', 'native-cli-retained-task');
+  const deniedTaskId = id('task', 'native-cli-denied-task');
   const controlFile = join(fixture.root, 'control-session.txt');
   const invalidFile = join(fixture.root, 'control-session-invalid.txt');
+  let passed = false;
   const run = (args: readonly string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -302,9 +462,18 @@ test('native CLI preparation control input', async () => {
     await writeFile(controlFile, `${cookie}\n`, 'utf8');
     const cookieName = cookie.slice(0, cookie.indexOf('='));
     await writeFile(invalidFile, `${cookieName}=not-a-valid-token\n`, 'utf8');
+    const caller = await access.verifyProductPrincipal(cookie);
+    assert.equal(caller.state, 'valid');
+    if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
+    // A second, independent credential gives a distinct owner for the foreign grant.
+    const otherAccess = await AccessControlService.open({ credentialPath: join(fixture.root, 'other-access.json'), create: true });
+    const otherSession = await otherAccess.consumePairingCode(otherAccess.createPairingChallenge('cli-control-other', 1).code);
+    const other = await otherAccess.verifyProductPrincipal(otherAccess.sessionCookie(otherSession).split(';')[0]!);
+    assert.equal(other.state, 'valid');
+    if (other.state !== 'valid') throw new Error('fixture other principal unavailable');
+    assert.ok(caller.principal.owner !== other.principal.owner);
 
-    // Seed a real recoverable session/manifest with a declared Task so the
-    // native resume branch has an existing Task identity to select.
+    // Seed the real recoverable session/manifest the unchanged cold resume branch selects.
     const runtime = await openRuntime({ controlRoot: fixture.controlRoot, workspace: fixture.workspace, plan: 'default', sessionId });
     await new SessionStore(fixture.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
     await runtime.lock.release();
@@ -313,33 +482,96 @@ test('native CLI preparation control input', async () => {
       sessionId,
       plan: 'default',
       prompt: 'seed control session',
-      taskId: id('task', taskId),
+      taskId: id('task', legacyTaskId),
       composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) },
       prepareAgentProvider: async () => { throw new Error('composed execution must retain its own driver'); },
     });
     assert.equal(seeded.checkpoint.outcome, 'failed');
     const manifest = await readRunManifest(fixture.paths, sessionId);
-    assert.equal(manifest.taskId.value, taskId);
+    assert.equal(manifest.taskId.value, legacyTaskId);
 
-    const runArgs = (session: string) => ['run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', session, '--task', taskId, '--prompt', 'control probe'];
+    // Retained Task replay entity plus the real identity/grant owners, all in the
+    // same journals the native caller reads. The production side mints nothing.
+    const preparedJournal = new UiRuntimeJournal(fixture.layout.preparedJournalPath);
+    const seedCoordinator = new RuntimeTaskCoordinator({
+      organId, taskIdPrefix: 'native-process',
+      journal: preparedJournal,
+      checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
+      attentionPort: {
+        async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
+        async resolve(value) { return { attentionId: value.attentionId, delivered: true }; },
+      },
+      async createDriver() { throw new Error('seed coordinator never releases execution'); },
+    });
+    const retained = seedCoordinator.createTask({ taskId: retainedTaskId, title: 'retained native task', directive: 'run the retained native task' });
+    const denied = seedCoordinator.createTask({ taskId: deniedTaskId, title: 'denied native task', directive: 'run the denied native task' });
+    const taskIdentity = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal));
+    const grants = new JsonlTaskGrantJournal(fixture.journal);
+    for (const [entity, owner] of [[denied, other.principal.owner], [retained, caller.principal.owner]] as const) {
+      await taskIdentity.establish({ scope: { organId, taskId: entity.taskId }, source: {
+        requirementId: `requirement:${entity.taskId.value}`, inputRevision: 1,
+        draftId: `draft:${entity.taskId.value}`, draftRevisionVersion: 1,
+        draftRevisionHash: `draft-hash:${entity.taskId.value}`, confirmationRef: `confirmation:${entity.taskId.value}`,
+      } });
+      await grants.grant({ requestId: `grant:${entity.taskId.value}`, taskId: entity.taskId, owner,
+        capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId: entity.taskId } },
+        expectedRevision: 0 });
+    }
+    const taskCount = () => preparedJournal.replay().filter((record) => record.kind === 'task.created').length;
+    const grantCount = async () => (await fixture.journal.verify()).records.filter((record) => record.payload?.['kind'] === 'task-grant').length;
+    const postWires = () => fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    const nativeRunArgs = (task: string) => ['run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', 'native-cli-native-run', '--task', task, '--prompt', 'native control probe'];
 
-    // RED against the old source: the parser ignored --control-session-file and
-    // --task and the verifier never ran, so an invalid session still produced
-    // the wrong native error. After adoption the same input fails at the real
-    // A1 verifier before any dispatch.
-    const invalidRun = await run([...runArgs('native-cli-control-invalid'), '--control-session-file', invalidFile]);
+    // 1. An invalid control session fails at the real A1 verifier before any effect.
+    const tasksBefore = taskCount();
+    const grantsBefore = await grantCount();
+    const invalidRun = await run([...nativeRunArgs(retainedTaskId.value), '--control-session-file', invalidFile]);
     assert.ok(invalidRun.code !== 0, 'invalid session must fail before dispatch');
     assert.ok(!/rcc-config-missing/.test(invalidRun.stderr));
     assert.match(invalidRun.stderr, /auth\.session\.invalid/);
+    assert.equal(taskCount(), tasksBefore, 'rejected control input creates no replacement Task');
+    assert.equal(await grantCount(), grantsBefore, 'rejected control input creates no grant');
+    assert.equal(postWires().length, 0);
 
-    // Valid verified principal reaches the current real native unbound error:
-    // no provider request, no automatic grant, no raw cookie in output.
-    const validRun = await run([...runArgs('native-cli-control-valid'), '--control-session-file', controlFile]);
-    assert.ok(validRun.code !== 0, 'valid session must reach the real native unbound error');
-    assert.match(validRun.stderr, /rcc-config-missing/);
-    assert.equal(/rcc-port-unbound/.test(validRun.stderr), false);
+    // 2. A verified principal with an unknown selector fails selector-first, not
+    //    on the legacy rcc-config-missing boundary, and mints no Task/grant.
+    const unknownRun = await run([...nativeRunArgs('native-cli-unknown-task'), '--control-session-file', controlFile]);
+    assert.ok(unknownRun.code !== 0, 'unknown selector must fail before dispatch');
+    assert.ok(!/rcc-config-missing/.test(unknownRun.stderr), 'the native entry is selector-first, not the legacy error');
+    assert.equal(taskCount(), tasksBefore, 'unknown selector creates no replacement Task');
+    assert.equal(await grantCount(), grantsBefore, 'unknown selector creates no grant');
+    assert.equal(postWires().length, 0);
 
-    const resumeArgs = ['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', taskId, '--prompt', 'control resume probe'];
+    // 3. A grant owned by another principal cannot authorize the caller.
+    const deniedRun = await run([...nativeRunArgs(deniedTaskId.value), '--control-session-file', controlFile]);
+    assert.ok(deniedRun.code !== 0, 'a foreign-owned grant must not authorize the caller');
+    assert.equal(postWires().length, 0, 'a denied admission has zero Provider effects');
+
+    // 4. The real retained Task with the caller-owned grant reaches the real
+    //    Provider, the bound standard end, the real disposition and cleanup.
+    const validRun = await run([...nativeRunArgs(retainedTaskId.value), '--control-session-file', controlFile]);
+    assert.equal(validRun.code, 0, `valid native run must succeed: ${validRun.stderr}`);
+    const posts = postWires();
+    assert.ok(posts.length >= 3, 'the native run sends the real write, bound end and drain requests');
+    assert.ok(posts[0]!.body.includes('native control probe'), 'the native request retains the immutable prepared input');
+    const receiptStart = validRun.stdout.indexOf('{');
+    const receiptEnd = validRun.stdout.lastIndexOf('}');
+    assert.ok(receiptStart >= 0 && receiptEnd > receiptStart, `the native run prints its receipt: ${validRun.stdout}`);
+    const receipt = JSON.parse(validRun.stdout.slice(receiptStart, receiptEnd + 1)) as {
+      readonly command?: string; readonly taskId?: string; readonly state?: string;
+    };
+    assert.equal(receipt.command, 'run');
+    assert.equal(receipt.taskId, retainedTaskId.value);
+    assert.ok(typeof receipt.state === 'string' && receipt.state.length > 0, 'the receipt carries the real Task disposition');
+    const terminal = preparedJournal.replay().some((record) => record.kind === 'operation.event'
+      && record.event.kind === 'execution.terminal');
+    assert.equal(terminal, true, 'the real runtime published its terminal event');
+    const current = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }).read({ organId, taskId: retainedTaskId });
+    assert.equal(current.state, 'known', 'exact current-state readback uses the same Organ Journal owner');
+    assert.equal(await readFile(join(fixture.workspace, 'native-process-result.txt'), 'utf8'), 'native process physical effect');
+
+    // The unchanged cold resume branch keeps its own boundary.
+    const resumeArgs = ['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', legacyTaskId, '--prompt', 'control resume probe'];
     const invalidResume = await run([...resumeArgs, '--control-session-file', invalidFile]);
     assert.ok(invalidResume.code !== 0, 'invalid resume session must fail before dispatch');
     assert.ok(!/rcc-config-missing/.test(invalidResume.stderr));
@@ -347,31 +579,33 @@ test('native CLI preparation control input', async () => {
     const validResume = await run([...resumeArgs, '--control-session-file', controlFile]);
     assert.ok(validResume.code !== 0, 'valid resume session must reach the real native unbound error');
     assert.match(validResume.stderr, /rcc-config-missing/);
-
-    // An explicit native selector may not rebind the recovered Task.
     const mismatchResume = await run(['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', 'native-cli-other-task', '--prompt', 'control resume probe', '--control-session-file', controlFile]);
     assert.ok(mismatchResume.code !== 0, 'mismatched native selector must not rebind the recovered task');
     assert.match(mismatchResume.stderr, /native-control\.task-mismatch/);
     assert.ok(!/rcc-config-missing/.test(mismatchResume.stderr));
 
-    for (const result of [invalidRun, validRun, invalidResume, validResume, mismatchResume]) {
+    for (const result of [invalidRun, unknownRun, deniedRun, validRun, invalidResume, validResume, mismatchResume]) {
       for (const output of [result.stdout, result.stderr]) {
         assert.equal(output.includes(cookie), false);
         assert.equal(output.includes('not-a-valid-token'), false);
       }
     }
-    assert.equal(fixture.upstream.wires.length, 0);
     console.log('native CLI preparation control input', JSON.stringify({
       invalidRun: invalidRun.code,
+      unknownRun: unknownRun.code,
+      deniedRun: deniedRun.code,
       validRun: validRun.code,
-      invalidResume: invalidResume.code,
       validResume: validResume.code,
       mismatchResume: mismatchResume.code,
-      providerRequests: fixture.upstream.wires.length,
+      providerRequests: posts.length,
+      state: receipt.state,
     }));
+    passed = true;
   } finally {
     await fixture.upstream.close();
-    await rm(fixture.root, { recursive: true });
+    // A failed native run keeps its canonical fixture child for parent handoff.
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.log(`native CLI preparation evidence retained: ${fixture.root}`);
   }
 });
 
