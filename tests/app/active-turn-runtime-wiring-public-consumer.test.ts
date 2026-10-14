@@ -262,25 +262,43 @@ function runtimePool(): AgentRuntimePoolManager {
 function passingReviewAgent(
   onReview: (input: Parameters<ReviewAgentPort['review']>[0]) => void | Promise<void>,
 ): ReviewAgentPort {
+  const reviewOnce = async (input: Parameters<ReviewAgentPort['review']>[0]) => {
+    await onReview(input);
+    return {
+      resultId: `review-${input.reviewAssignment.assignmentId}`,
+      assignmentId: input.reviewAssignment.assignmentId,
+      taskId: input.reviewAssignment.taskId,
+      workerAgentId: input.reviewAssignment.workerAgentId,
+      reviewKind: input.reviewAssignment.reviewKind,
+      attempt: input.reviewAssignment.attempt,
+      executionEpoch: input.reviewAssignment.executionEpoch,
+      inputRevision: input.reviewAssignment.inputRevision,
+      acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+      subjectRefs: [...input.reviewAssignment.subjectRefs],
+      subjectDigests: [...input.reviewAssignment.subjectDigests],
+      status: 'passed' as const,
+      findings: [],
+      evidenceRefs: [evidence('review', input.scope)],
+    };
+  };
   return {
-    async review(input) {
-      await onReview(input);
+    roleId: 'active-turn-test-review',
+    createInstance(create) {
       return {
-        resultId: `review-${input.reviewAssignment.assignmentId}`,
-        assignmentId: input.reviewAssignment.assignmentId,
-        taskId: input.reviewAssignment.taskId,
-        workerAgentId: input.reviewAssignment.workerAgentId,
-        reviewKind: input.reviewAssignment.reviewKind,
-        attempt: input.reviewAssignment.attempt,
-        executionEpoch: input.reviewAssignment.executionEpoch,
-        inputRevision: input.reviewAssignment.inputRevision,
-        acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
-        subjectRefs: [...input.reviewAssignment.subjectRefs],
-        subjectDigests: [...input.reviewAssignment.subjectDigests],
-        status: 'passed' as const,
-        findings: [],
-        evidenceRefs: [evidence('review', input.scope)],
+        incarnation: create.incarnation,
+        async review(input) {
+          const result = await reviewOnce(input);
+          return {
+            result,
+            output: { text: `active-turn review ${input.reviewAssignment.assignmentId}`, artifactRef: null, artifactDigest: null },
+            completedAt: new Date().toISOString(),
+          };
+        },
+        async dispose() {},
       };
+    },
+    async review(input) {
+      return reviewOnce(input);
     },
   };
 }

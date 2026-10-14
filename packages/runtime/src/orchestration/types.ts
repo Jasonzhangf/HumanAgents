@@ -1,8 +1,10 @@
 import type {
   EvidenceRef,
   NextAction,
+  ReviewOutput,
   ScopeRef,
   TaskId,
+  TaskRuntimeIncarnation,
   WorkAssignment,
   WorkResult,
 } from '../../../contracts/src/index.js';
@@ -12,6 +14,8 @@ import type {
   ReviewKind,
   ReviewResult,
 } from '../review/index.js';
+
+export type { TaskRuntimeIncarnation } from '../../../contracts/src/index.js';
 
 export type AssignmentStatus =
   | 'planned'
@@ -224,8 +228,69 @@ export interface ReviewAgentInput {
 }
 
 export interface ReviewAgentPort {
+  readonly roleId: string;
+  createInstance(input: TaskReviewInstanceCreateInput): TaskReviewHandle;
   review(input: ReviewAgentInput): Promise<ReviewResult>;
 }
+
+/** Minimal identity an acquired runtime instance is bound to. */
+export interface RuntimeInstanceRequest {
+  readonly assignmentId: string;
+  readonly taskId: TaskId;
+  readonly attempt: number;
+}
+
+export interface RuntimeInstanceCreateContext<TRequest extends RuntimeInstanceRequest> {
+  readonly incarnation: TaskRuntimeIncarnation;
+  readonly agentId: string;
+  readonly scope: ScopeRef;
+  readonly assignment: TRequest;
+}
+
+export interface RuntimeInstanceReleaseInput {
+  readonly assignment: RuntimeInstanceRequest;
+  readonly agentId: string;
+  readonly executionEpoch: number;
+  readonly attempt: number;
+  readonly scope: ScopeRef;
+}
+
+/** Lifecycle shared by every acquired, incarnation-bound instance handle. */
+export interface TaskInstanceHandle {
+  readonly incarnation: TaskRuntimeIncarnation;
+  /**
+   * Releases per-instance resources, including any active Provider driver or
+   * attempt state. Pool slot ownership remains with the factory.
+   */
+  release?(input: RuntimeInstanceReleaseInput): Promise<void>;
+  dispose(): Promise<void>;
+}
+
+export interface ReviewInstanceRequest extends RuntimeInstanceRequest {
+  readonly reviewAssignment: ReviewAssignment;
+  readonly workerAssignment: WorkAssignment;
+}
+
+export type TaskReviewInstanceCreateInput = RuntimeInstanceCreateContext<ReviewInstanceRequest>;
+
+/**
+ * Reviewer-side delivery returned by a constructed review instance. The
+ * manager pairs it with the handle's real incarnation to form the shared
+ * `ReviewDelivery`: the reviewer cannot name its own identity.
+ */
+export interface ReviewAgentDelivery {
+  readonly result: ReviewResult;
+  readonly output: ReviewOutput;
+  readonly completedAt: string;
+}
+
+export interface TaskReviewHandle extends TaskInstanceHandle {
+  review(input: ReviewAgentInput): Promise<ReviewAgentDelivery>;
+}
+
+export type ReviewInstanceCreator = (
+  input: TaskReviewInstanceCreateInput,
+) => TaskReviewHandle;
 
 export interface MergeCoordinatorInput {
   readonly workerAssignment: WorkAssignment;

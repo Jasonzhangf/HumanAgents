@@ -1312,3 +1312,124 @@ test('RCC review uses the terminal verdict when verdict markers conflict across 
   assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
 });
+
+test('RCC review instance delivers the actual provider text of the same review call', async () => {
+  const task: Task = {
+    id: id('task', 'serve-rcc-instance-delivery'),
+    organId: id('organ', 'humanagent-ui'),
+    title: 'RCC instance delivery',
+    directive: 'deliver the real reviewer text of the invoked review instance',
+    directiveRevision: 1,
+    state: 'created',
+    memoryScope: 'task',
+  };
+  const scope: ScopeRef = { organId: task.organId, taskId: task.id, cycleId: id('cycle', 'serve-rcc-instance-delivery-cycle') };
+  const provider = providerPort({
+    state: 'succeeded',
+    chunkedReviewText: [
+      'review instance actual output for this assignment. ',
+      'HUMANAGENT_REVIEW: passed',
+    ],
+  });
+  let settlements = 0;
+  const ports = createRccServeOrchestrationPorts({
+    port: {
+      ...provider,
+      async settle(request) {
+        settlements += 1;
+        return provider.settle(request);
+      },
+    },
+    binding: providerBinding(),
+    promptSegments: { review: ['review system prompt'] },
+  });
+  const workerPorts = createDeterministicServeOrchestrationPorts();
+  const workAssignment: WorkAssignment = {
+    ...assignment(task),
+    assignmentId: 'serve-rcc-instance-delivery-worker',
+    expectedArtifactDigests: [digestOf(serveArtifactBody)],
+  };
+  const workerDelivery = await workerPorts.executionAgent!.execute({
+    assignment: workAssignment,
+    agentId: 'serve-rcc-instance-delivery-execution-agent',
+    executionEpoch: 1,
+    attempt: 1,
+    lease: {
+      leaseId: 'serve-rcc-instance-delivery-lease',
+      runtimeId: 'serve-rcc-instance-delivery-runtime',
+      generation: 1,
+      executionEpoch: 1,
+      ownerId: 'serve-test',
+      assignmentId: workAssignment.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    scope,
+  });
+  const worker = 'result' in workerDelivery ? workerDelivery.result : workerDelivery;
+  const reviewAssignment: ReviewAssignment = {
+    assignmentId: 'serve-rcc-instance-delivery-review',
+    taskId: task.id.value,
+    workerAgentId: 'serve-rcc-instance-delivery-execution-agent',
+    reviewKind: 'quality',
+    attempt: 1,
+    executionEpoch: 1,
+    inputRevision: 1,
+    acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
+    subjectRefs: ['serve-output'],
+    subjectDigests: [],
+    workerCapabilities: ['provider.execution'],
+    requiredCapabilities: ['quality.review'],
+    mergeGate: 'required',
+  };
+  const reviewInput = {
+    reviewAssignment,
+    workerAssignment: workAssignment,
+    workerResult: worker,
+    reviewMaterial: materialFor(workAssignment, worker),
+    scope,
+  };
+
+  const { createInstance } = ports.reviewAgent;
+  if (!createInstance) throw new Error('RCC review agent has no review instance creator');
+  const create = createInstance({
+    incarnation: {
+      runtimeId: 'serve-rcc-instance-delivery-runtime',
+      generation: 1,
+      agentInstanceId: 'serve-rcc-instance-delivery-instance',
+      roleId: 'serve-rcc-review',
+      taskId: task.id,
+      assignmentId: reviewAssignment.assignmentId,
+      executionEpoch: 1,
+    },
+    agentId: 'serve-rcc-instance-delivery-execution-agent',
+    scope,
+    assignment: {
+      assignmentId: reviewAssignment.assignmentId,
+      taskId: task.id,
+      attempt: 1,
+      reviewAssignment,
+      workerAssignment: workAssignment,
+    },
+  });
+  const delivered = await create.review(reviewInput);
+
+  assert.equal(delivered.result.status, 'passed');
+  assert.deepEqual(delivered.result.findings, []);
+  assert.equal(
+    delivered.output.text,
+    'review instance actual output for this assignment. HUMANAGENT_REVIEW: passed',
+  );
+  assert.equal(delivered.output.artifactRef, null);
+  assert.equal(delivered.output.artifactDigest, null);
+  assert.ok(delivered.completedAt.length > 0);
+
+  const legacy = await ports.reviewAgent.review(reviewInput);
+  assert.equal(legacy.resultId, delivered.result.resultId);
+  assert.equal(legacy.status, delivered.result.status);
+  await create.dispose();
+  assert.equal(
+    settlements,
+    2,
+    'one provider invocation per review call, no shared output and no second generation',
+  );
+});
