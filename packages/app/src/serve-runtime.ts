@@ -34,15 +34,23 @@ import { AppLifecycleError } from './errors.js';
 
 const OWNER = 'humanagent.app.serve-runtime';
 
-const unboundExecutionAgent: ExecutionAgentPort = {
-  async execute(): Promise<never> {
-    throw new AppLifecycleError(
+function unboundExecutionError(): AppLifecycleError {
+  return new AppLifecycleError(
       'serve.m3.execution-agent.missing',
       'M3 orchestration has no execution agent bound for this task assembly',
       'bind an execution agent before dispatching an orchestration assignment',
       OWNER,
-    );
-  },
+  );
+}
+
+const unboundExecutionAgent: ExecutionAgentPort = {
+  roleId: 'serve-unbound-execution',
+  createInstance: (create) => ({
+    incarnation: create.incarnation,
+    execute: async (): Promise<never> => { throw unboundExecutionError(); },
+    dispose: async () => {},
+  }),
+  execute: async (): Promise<never> => { throw unboundExecutionError(); },
 };
 
 export interface ServeAgentIoOwner {

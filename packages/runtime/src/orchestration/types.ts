@@ -42,6 +42,7 @@ export interface RuntimePoolLease {
   readonly leaseId: string;
   readonly runtimeId: string;
   readonly generation: number;
+  readonly incarnation: TaskRuntimeIncarnation;
   readonly executionEpoch: number;
   readonly ownerId: string;
   readonly assignmentId: string;
@@ -98,6 +99,8 @@ export interface ExecutionAgentInput {
 }
 
 export interface ExecutionAgentPort {
+  readonly roleId: string;
+  createInstance(input: TaskExecutionInstanceCreateInput): TaskExecutionHandle;
   execute(input: ExecutionAgentInput): Promise<WorkResult | ExecutionDelivery>;
   /**
    * Optional release hook for execution agents that bind external resources
@@ -113,6 +116,23 @@ export interface ExecutionAgentPort {
     readonly scope: ScopeRef;
   }): Promise<void>;
 }
+
+export interface ExecutionInstanceAcquireInput {
+  readonly assignment: WorkAssignment;
+  readonly scope: ScopeRef;
+  readonly agentId: string;
+  readonly executionEpoch: number;
+}
+
+export type TaskExecutionInstanceCreateInput = RuntimeInstanceCreateContext<WorkAssignment>;
+
+export interface TaskExecutionHandle extends TaskInstanceHandle {
+  execute(input: ExecutionAgentInput): Promise<WorkResult | ExecutionDelivery>;
+}
+
+export type ExecutionInstanceCreator = (
+  input: TaskExecutionInstanceCreateInput,
+) => TaskExecutionHandle;
 
 /**
  * One prepared child call. The Runtime persists the call checkpoint and the

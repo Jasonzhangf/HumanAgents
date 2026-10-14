@@ -97,6 +97,12 @@ export function createDeterministicServeOrchestrationPorts(): ServeOrchestration
   });
 
   const executionAgent: ExecutionAgentPort = {
+    roleId: 'serve-fake-execution',
+    createInstance: (create) => ({
+      incarnation: create.incarnation,
+      execute,
+      dispose: async () => {},
+    }),
     execute,
   };
 

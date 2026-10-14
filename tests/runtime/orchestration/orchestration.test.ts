@@ -29,6 +29,12 @@ import {
   type ReviewAgentPort,
 } from '../../../packages/runtime/src/orchestration/index.js';
 import type { ReviewResult } from '../../../packages/runtime/src/review/index.js';
+import type {
+  TaskExecutionHandle,
+  TaskExecutionInstanceCreateInput,
+  TaskReviewHandle,
+  TaskReviewInstanceCreateInput,
+} from '../../../packages/runtime/src/orchestration/types.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
@@ -148,8 +154,17 @@ class FakeRuntimeFactory implements OrchestrationRuntimeFactoryPort {
 }
 
 class StaticExecutionAgent implements ExecutionAgentPort {
+  readonly roleId = 'executor';
   readonly inputs: ExecutionAgentInput[] = [];
   constructor(private readonly deliveries: readonly (WorkResult | { readonly result: WorkResult; readonly criteria: ReturnType<typeof criteria> })[]) {}
+
+  createInstance(create: TaskExecutionInstanceCreateInput): TaskExecutionHandle {
+    return {
+      incarnation: create.incarnation,
+      execute: (input) => this.execute(input),
+      async dispose() {},
+    };
+  }
 
   async execute(input: ExecutionAgentInput): Promise<WorkResult> {
     this.inputs.push(input);
@@ -159,7 +174,30 @@ class StaticExecutionAgent implements ExecutionAgentPort {
   }
 }
 
+function poolExecutionIdentity(assignmentId: string) {
+  const agent = new StaticExecutionAgent([result({ assignmentId })]);
+  return {
+    taskId: task,
+    roleId: agent.roleId,
+    agentId: 'agent-a',
+    assignment: assignment({ assignmentId }),
+    creator: (create: TaskExecutionInstanceCreateInput) => agent.createInstance(create),
+  };
+}
+
 class PassingReviewAgent implements ReviewAgentPort {
+  readonly roleId = 'reviewer';
+  createInstance(create: TaskReviewInstanceCreateInput): TaskReviewHandle {
+    return {
+      incarnation: create.incarnation,
+      review: async (input) => ({
+        result: await this.review(input),
+        output: { text: `review ${input.reviewAssignment.assignmentId}`, artifactRef: null, artifactDigest: null },
+        completedAt: new Date().toISOString(),
+      }),
+      async dispose() {},
+    };
+  }
   readonly kinds: string[] = [];
   readonly results: ReviewResult[] = [];
   fail = false;
@@ -222,6 +260,75 @@ function factoryPool(options: {
   };
 }
 
+test('manager acquires dormant execution from its bound creator and same pool', async () => {
+  const taskId = id('task', 'cold-acquisition');
+  const scope: ScopeRef = { organId: id('organ', 'cold-acquisition'), taskId };
+  const assignment: WorkAssignment = {
+    assignmentId: 'original-assignment', taskId, pipelineNodeId: 'node',
+    attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'bounded acquisition',
+    targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
+    acceptanceCriteriaDigest: 'criteria', successCriteria: [], failureCriteria: [],
+    incompleteCriteria: [], requiredCapabilities: ['execute'], mergeGate: 'not-required',
+  };
+  let creates = 0;
+  let effects = 0;
+  let disposes = 0;
+  let createdInput: TaskExecutionInstanceCreateInput | undefined;
+  let createdHandle: TaskExecutionHandle | undefined;
+  const delivery: WorkResult = {
+    taskId, pipelineNodeId: 'node', agentId: 'worker', assignmentId: assignment.assignmentId,
+    attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [],
+    producedArtifactDigests: [], status: 'succeeded', summary: 'done', outputRefs: [],
+    evidenceRefs: [], nextAction: 'review',
+  };
+  const agent: ExecutionAgentPort = {
+    roleId: 'executor',
+    createInstance(input) {
+      assert.equal(this, agent, 'creator must retain bound port receiver');
+      creates += 1;
+      createdInput = input;
+      createdHandle = {
+        incarnation: input.incarnation,
+        async execute() { effects += 1; return delivery; },
+        async dispose() { disposes += 1; },
+      };
+      return createdHandle;
+    },
+    async execute() { throw new Error('legacy execution must not run'); },
+  };
+  const pool = new AgentRuntimePoolManager({
+    maxRuntimes: 1, instanceIdFactory: () => 'fresh-instance',
+    initialRuntimes: [{ runtimeId: 'same-slot', capabilities: ['execute'] }],
+    factory: {
+      async start(input) { return { runtimeId: input.runtimeId, generation: input.generation, capabilities: input.requiredCapabilities }; },
+      async dispose() {},
+    },
+  });
+  const manager = new OrchestrationManager({ ownerId: 'owner', runtimePool: pool, executionAgent: agent });
+  const acquired = await manager.acquireExecutionInstance({ assignment, scope, agentId: 'worker', executionEpoch: 7 });
+  assert.equal(acquired.status, 'acquired');
+  if (acquired.status !== 'acquired') throw new Error(acquired.issue.reason);
+  assert.equal(creates, 1, 'bound creator must run exactly once');
+  assert.equal(acquired.handle, createdHandle);
+  assert.equal(createdInput?.assignment, assignment);
+  assert.equal(createdInput?.agentId, 'worker');
+  assert.deepEqual(createdInput?.scope, scope);
+  assert.equal(acquired.incarnation.agentInstanceId, 'fresh-instance');
+  assert.equal(acquired.incarnation.executionEpoch, 7);
+  assert.equal(acquired.incarnation.roleId, 'executor');
+  assert.equal(acquired.incarnation.assignmentId, assignment.assignmentId);
+  assert.equal(acquired.lease.runtimeId, 'same-slot');
+  assert.deepEqual(acquired.lease.incarnation, acquired.incarnation);
+  assert.equal(pool.inspect().runtimes[0]?.lease?.leaseId, acquired.lease.leaseId, 'lease must belong to the bound pool');
+  assert.equal(effects, 0, 'acquisition must remain dormant');
+  await acquired.handle.execute({ assignment, scope, agentId: 'worker', executionEpoch: 7, attempt: 1, lease: acquired.lease });
+  assert.equal(effects, 1);
+  assert.equal((await pool.release(acquired.lease, { scope })).status, 'released');
+  assert.equal(disposes, 1);
+  assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
+  assert.equal((await pool.dispose()).status, 'disposed');
+});
+
 test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks unavailable capabilities', async () => {
   const { pool, factory } = factoryPool({
     maxRuntimes: 3,
@@ -233,7 +340,7 @@ test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks un
   const first = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   assert.equal(first.status, 'acquired');
@@ -244,7 +351,7 @@ test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks un
   const second = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-b',
+    ...poolExecutionIdentity('assignment-b'),
     scope,
   });
   assert.equal(second.status, 'acquired');
@@ -255,7 +362,7 @@ test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks un
   const waiting = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-c',
+    ...poolExecutionIdentity('assignment-c'),
     scope,
   });
   assert.equal(waiting.status, 'waiting');
@@ -265,7 +372,7 @@ test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks un
   const blocked = await pool.acquire({
     requiredCapabilities: ['missing'],
     executionEpoch: 1,
-    assignmentId: 'assignment-d',
+    ...poolExecutionIdentity('assignment-d'),
     scope,
   });
   assert.equal(blocked.status, 'blocked');
@@ -289,7 +396,7 @@ test('runtime pool fences release by assignment, lease, generation, and executio
   const acquired = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   assert.equal(acquired.status, 'acquired');
@@ -320,7 +427,7 @@ test('explicit failed runtime remains failed and is never reused', async () => {
   const acquired = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
 
@@ -345,7 +452,7 @@ test('runtime pool rejects startup completed after dispose and cleans the genera
   const acquiring = pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   await started;
@@ -397,7 +504,7 @@ test('runtime pool does not block dispose after delayed startup failure with suc
   const acquiring = pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   await started;
@@ -434,7 +541,7 @@ test('runtime pool waits for delayed startup cleanup failure and retries without
   const acquiring = pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   await started;
@@ -468,7 +575,7 @@ test('runtime pool waits for delayed startup cleanup failure and retries without
   const blocked = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-b',
+    ...poolExecutionIdentity('assignment-b'),
     scope,
   });
   assert.equal(blocked.status, 'blocked');
@@ -496,7 +603,7 @@ test('runtime pool cleans failed generation, advances on retry, and disposes the
   const acquired = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   assert.equal(acquired.status, 'blocked');
@@ -525,7 +632,7 @@ test('runtime pool cleans failed generation, advances on retry, and disposes the
   const running = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-b',
+    ...poolExecutionIdentity('assignment-b'),
     scope,
   });
   assert.equal(running.status, 'acquired');
@@ -914,6 +1021,14 @@ test('duplicate dispatch returns recoverable progress while execution is pending
   });
   let executionCalls = 0;
   const execution: ExecutionAgentPort = {
+    roleId: 'executor',
+    createInstance(create) {
+      return {
+        incarnation: create.incarnation,
+        execute: (input) => execution.execute(input),
+        async dispose() {},
+      };
+    },
     async execute() {
       executionCalls += 1;
       markExecutionStarted();
@@ -1006,7 +1121,7 @@ test('resource admission blocked keeps the same assignment reusable after releas
   const held = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-other',
+    ...poolExecutionIdentity('assignment-other'),
     scope,
   });
   assert.equal(held.status, 'acquired');
@@ -1114,7 +1229,7 @@ test('dispose retries a failed runtime cleanup and remains idempotent after succ
   const acquired = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   assert.equal(acquired.status, 'acquired');
@@ -1340,7 +1455,7 @@ test('runtime startup cleanup uses full identity inputs and idle leases preserve
   const badIdentity = await new AgentRuntimePoolManager({ maxRuntimes: 1, factory }).acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   assert.equal(badIdentity.status, 'acquired');
@@ -1361,7 +1476,7 @@ test('runtime startup cleanup uses full identity inputs and idle leases preserve
   const failed = await pool.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   assert.equal(failed.status, 'blocked');
@@ -1387,7 +1502,7 @@ test('runtime startup cleanup uses full identity inputs and idle leases preserve
   const first = await growing.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 1,
-    assignmentId: 'assignment-a',
+    ...poolExecutionIdentity('assignment-a'),
     scope,
   });
   assert.equal(first.status, 'acquired');
@@ -1397,7 +1512,7 @@ test('runtime startup cleanup uses full identity inputs and idle leases preserve
   const second = await growing.acquire({
     requiredCapabilities: ['execute'],
     executionEpoch: 2,
-    assignmentId: 'assignment-b',
+    ...poolExecutionIdentity('assignment-b'),
     scope,
   });
   assert.equal(second.status, 'acquired');
@@ -1510,9 +1625,18 @@ class ImplicitRuntimeFactory implements OrchestrationRuntimeFactoryPort {
 }
 
 class ImplicitExecutor implements ExecutionAgentPort {
+  readonly roleId = 'executor';
   readonly inputs: ExecutionAgentInput[] = [];
 
   constructor(private readonly failures = new Set<string>()) {}
+
+  createInstance(create: TaskExecutionInstanceCreateInput): TaskExecutionHandle {
+    return {
+      incarnation: create.incarnation,
+      execute: (input) => this.execute(input),
+      async dispose() {},
+    };
+  }
 
   async execute(input: ExecutionAgentInput): Promise<WorkResult> {
     this.inputs.push(input);
@@ -1557,6 +1681,18 @@ class ImplicitExecutor implements ExecutionAgentPort {
 }
 
 class ImplicitReviewAgent implements ReviewAgentPort {
+  readonly roleId = 'reviewer';
+  createInstance(create: TaskReviewInstanceCreateInput): TaskReviewHandle {
+    return {
+      incarnation: create.incarnation,
+      review: async (input) => ({
+        result: await this.review(input),
+        output: { text: `review ${input.reviewAssignment.assignmentId}`, artifactRef: null, artifactDigest: null },
+        completedAt: new Date().toISOString(),
+      }),
+      async dispose() {},
+    };
+  }
   readonly results: ReviewResult[] = [];
 
   async review(input: Parameters<ReviewAgentPort['review']>[0]): Promise<ReviewResult> {

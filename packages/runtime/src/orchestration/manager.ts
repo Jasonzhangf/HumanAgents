@@ -18,7 +18,7 @@ import {
 import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from './assignment-graph.js';
 import { OrchestrationError } from './errors.js';
 import { type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
-import { AgentRuntimePoolManager } from './runtime-pool.js';
+import { AgentRuntimePoolManager, type RuntimePoolAcquireResult } from './runtime-pool.js';
 import { scopeContains } from '../events/acl.js';
 import type {
   AssignmentRecord,
@@ -27,6 +27,8 @@ import type {
   DispatchInput,
   ExecutionAgentPort,
   ExecutionDelivery,
+  ExecutionInstanceAcquireInput,
+  TaskExecutionHandle,
   MergeCoordinatorPort,
   MergeOutcome,
   OrchestrationDispatchResult,
@@ -189,6 +191,11 @@ function reviewNextAction(
   }
 }
 
+function hasIncarnationPort(port: ExecutionAgentPort | undefined): port is ExecutionAgentPort {
+  return !!port && typeof port.createInstance === 'function'
+    && typeof port.roleId === 'string' && port.roleId.trim().length > 0;
+}
+
 export class OrchestrationManager {
   readonly ownerId: string;
   readonly graph: AssignmentGraph;
@@ -241,6 +248,40 @@ export class OrchestrationManager {
 
   createAssignment(stageNodeId: string, assignment: WorkAssignment): AssignmentRecord {
     return this.graph.createAssignment(stageNodeId, assignment);
+  }
+
+  async acquireExecutionInstance(input: ExecutionInstanceAcquireInput): Promise<RuntimePoolAcquireResult<TaskExecutionHandle>> {
+    return this.acquireBoundExecutionInstance(input, this.executionAgent);
+  }
+
+  private async acquireBoundExecutionInstance(
+    input: ExecutionInstanceAcquireInput,
+    agent: ExecutionAgentPort | undefined,
+  ): Promise<RuntimePoolAcquireResult<TaskExecutionHandle>> {
+    if (!hasIncarnationPort(agent)) {
+      return {
+        status: 'blocked',
+        issue: issue(
+          'execution-incarnation-unavailable',
+          this.ownerId,
+          'execution agent cannot construct a task-scoped instance (roleId/createInstance missing)',
+          { kind: 'recover', ref: 'orchestration.execution.incarnation' },
+          [evidence(input.scope, 'orchestration.execution.incarnation')],
+          'orchestration.execution.incarnation',
+        ),
+      };
+    }
+    return this.runtimePool.acquire({
+      requiredCapabilities: input.assignment.requiredCapabilities,
+      ownerId: this.ownerId,
+      executionEpoch: input.executionEpoch,
+      taskId: input.assignment.taskId,
+      roleId: agent.roleId,
+      agentId: input.agentId,
+      assignment: input.assignment,
+      creator: (createInput) => agent.createInstance(createInput),
+      scope: input.scope,
+    });
   }
 
   async dispatch(input: DispatchInput): Promise<OrchestrationDispatchResult> {
@@ -305,13 +346,15 @@ export class OrchestrationManager {
     input: DispatchInput,
     planned: AssignmentRecord,
   ): Promise<OrchestrationDispatchResult> {
-    const acquired = await this.runtimePool.acquire({
-      requiredCapabilities: input.assignment.requiredCapabilities,
-      ownerId: this.ownerId,
+    const acquireInput: ExecutionInstanceAcquireInput = {
+      assignment: input.assignment,
       executionEpoch: input.assignment.executionEpoch,
-      assignmentId: input.assignment.assignmentId,
+      agentId: input.agentId,
       scope: input.scope,
-    });
+    };
+    const acquired = input.executionAgentOverride
+      ? await this.acquireBoundExecutionInstance(acquireInput, input.executionAgentOverride)
+      : await this.acquireExecutionInstance(acquireInput);
     if (acquired.status !== 'acquired') {
       return {
         status: 'blocked',
@@ -323,7 +366,7 @@ export class OrchestrationManager {
     const lease = acquired.lease;
     let result: OrchestrationDispatchResult | undefined;
     try {
-      result = await this.executeWithLease(input, lease);
+      result = await this.executeWithLease(input, lease, acquired.handle);
     } catch (error) {
       const unexpected = issueFromUnknown(error, {
         code: 'orchestration-dispatch-failed',
@@ -381,10 +424,10 @@ export class OrchestrationManager {
   private async executeWithLease(
     input: DispatchInput,
     lease: RuntimePoolLease,
+    executionAgent: TaskExecutionHandle,
   ): Promise<OrchestrationDispatchResult> {
     this.graph.assign(input.assignment, input.agentId, leaseBinding(lease));
     const planned = this.graph.start(input.assignment, input.agentId, leaseBinding(lease));
-    const executionAgent = input.executionAgentOverride ?? this.executionAgent!;
     let preparedCall: PreparedChildCall | undefined;
     if (this.childCallPort) {
       try {
@@ -424,14 +467,6 @@ export class OrchestrationManager {
         scope: input.scope,
       });
     } catch (error) {
-      const agent = input.executionAgentOverride ?? this.executionAgent;
-      if (agent?.release) {
-        try {
-          await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
-        } catch {
-          // Preserve the original execute error; release is best-effort cleanup.
-        }
-      }
       const executionIssue = issueFromUnknown(error, {
         code: 'execution-failed',
         ownerId: this.ownerId,
@@ -528,10 +563,6 @@ export class OrchestrationManager {
     }
 
     if (accepted.record.status === 'retryable' || accepted.record.status === 'escalated' || accepted.record.status === 'blocked') {
-      const agent = input.executionAgentOverride ?? this.executionAgent;
-      if (agent?.release) {
-        await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
-      }
       const retry = accepted.record.status === 'retryable'
         ? retryAssignment(input.assignment, { reason: 'failed or incomplete result' })
         : undefined;
@@ -560,10 +591,6 @@ export class OrchestrationManager {
     }
 
     if (result.nextAction === 'attention') {
-      const agent = input.executionAgentOverride ?? this.executionAgent;
-      if (agent?.release) {
-        await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
-      }
       const escalated = this.graph.markEscalated(
         input.assignment,
         result.conditionRef ?? result.failureRef ?? 'work result requires attention',

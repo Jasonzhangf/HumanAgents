@@ -2536,8 +2536,7 @@ export class RuntimeTaskCoordinator {
         const childCallPort = activeTurn === undefined
           ? undefined
           : this.createChildCallPort(record, activeTurn, scope);
-        const providerExecutionAgent: ExecutionAgentPort = {
-          async execute(input): Promise<WorkResult> {
+        const executeProviderAttempt = async (input: Parameters<ExecutionAgentPort['execute']>[0]): Promise<WorkResult> => {
             const assignmentId = `assignment-${operation.operationId.value}`;
             const initialExecutionEpoch = operation.executionEpoch;
             let attemptBindingId = selectedBindingId;
@@ -2733,7 +2732,11 @@ export class RuntimeTaskCoordinator {
               }
               return blockedResult(workResult, failure.issue);
             }
-          },
+        };
+        const providerExecutionAgent: ExecutionAgentPort = {
+          roleId: 'humanagent.ui-runtime.provider-execution',
+          createInstance: (create) => ({ incarnation: create.incarnation, execute: executeProviderAttempt, dispose: async () => {} }),
+          execute: executeProviderAttempt,
         };
         record.taskAssembly = this.options.createTaskAssembly({
           task: {

@@ -21,6 +21,12 @@ import {
   type ReviewAgentPort,
 } from '../../../packages/runtime/src/orchestration/index.js';
 import type { ReviewResult } from '../../../packages/runtime/src/review/index.js';
+import type {
+  TaskExecutionHandle,
+  TaskExecutionInstanceCreateInput,
+  TaskReviewHandle,
+  TaskReviewInstanceCreateInput,
+} from '../../../packages/runtime/src/orchestration/types.js';
 
 const organ = id('organ', 'organ-review-material');
 const task = id('task', 'task-review-material');
@@ -111,7 +117,16 @@ function pool(): AgentRuntimePoolManager {
 }
 
 class StaticExecutionAgent implements ExecutionAgentPort {
+  readonly roleId = 'executor';
   constructor(private readonly delivery: WorkResult | { readonly result: WorkResult }) {}
+
+  createInstance(create: TaskExecutionInstanceCreateInput): TaskExecutionHandle {
+    return {
+      incarnation: create.incarnation,
+      execute: (input) => this.execute(input),
+      async dispose() {},
+    };
+  }
 
   async execute(_input: ExecutionAgentInput): Promise<WorkResult> {
     return 'result' in this.delivery ? this.delivery.result : this.delivery;
@@ -120,6 +135,18 @@ class StaticExecutionAgent implements ExecutionAgentPort {
 }
 
 class RecordingReviewAgent implements ReviewAgentPort {
+  readonly roleId = 'reviewer';
+  createInstance(create: TaskReviewInstanceCreateInput): TaskReviewHandle {
+    return {
+      incarnation: create.incarnation,
+      review: async (input) => ({
+        result: await this.review(input),
+        output: { text: `review ${input.reviewAssignment.assignmentId}`, artifactRef: null, artifactDigest: null },
+        completedAt: new Date().toISOString(),
+      }),
+      async dispose() {},
+    };
+  }
   readonly inputs: Array<Parameters<ReviewAgentPort['review']>[0]> = [];
   readonly results: ReviewResult[] = [];
 

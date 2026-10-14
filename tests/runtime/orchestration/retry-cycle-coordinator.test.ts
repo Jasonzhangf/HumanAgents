@@ -20,6 +20,11 @@ import type {
   ReviewAgentPort,
 } from '../../../packages/runtime/src/orchestration/index.js';
 import type { ReviewResult } from '../../../packages/runtime/src/review/index.js';
+import type {
+  ReviewAgentDelivery,
+  TaskReviewHandle,
+  TaskReviewInstanceCreateInput,
+} from '../../../packages/runtime/src/orchestration/types.js';
 import {
   type RetryCycleConfigSet,
   type RetryCycleControlRecord,
@@ -93,6 +98,24 @@ class RuntimeFactory implements OrchestrationRuntimeFactoryPort {
 }
 
 class Reviewer implements ReviewAgentPort {
+  readonly roleId = 'reviewer';
+
+  createInstance(create: TaskReviewInstanceCreateInput): TaskReviewHandle {
+    return {
+      incarnation: create.incarnation,
+      review: async (input): Promise<ReviewAgentDelivery> => ({
+        result: await this.review(input),
+        output: {
+          text: `review ${input.reviewAssignment.assignmentId}`,
+          artifactRef: null,
+          artifactDigest: null,
+        },
+        completedAt: new Date().toISOString(),
+      }),
+      async dispose() {},
+    };
+  }
+
   async review(input: Parameters<ReviewAgentPort['review']>[0]): Promise<ReviewResult> {
     return {
       resultId: `retry10-review-${input.reviewAssignment.assignmentId}`,

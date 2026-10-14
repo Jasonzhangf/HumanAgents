@@ -1701,8 +1701,7 @@ export class UiRuntimeService {
 
   private createImplicitSubtaskExecutionAgent(): ExecutionAgentPort {
     const activeDrivers = new Map<string, ProviderAgentDriver>();
-    return {
-      execute: async (input): Promise<WorkResult> => {
+    const execute = async (input: Parameters<ExecutionAgentPort['execute']>[0]): Promise<WorkResult> => {
         const runtimeId = `implicit-executor-${input.assignment.assignmentId}-${input.attempt}-${input.executionEpoch}`;
         const operationId = id('operation', `implicit-${input.assignment.assignmentId}-${input.attempt}`);
         const scope = { ...input.scope, operationId };
@@ -1834,7 +1833,11 @@ export class UiRuntimeService {
             ? { failureRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/failed` }
             : {}),
         };
-      },
+    };
+    return {
+      roleId: 'ui-runtime-implicit-executor',
+      createInstance: (create) => ({ incarnation: create.incarnation, execute, dispose: async () => {} }),
+      execute,
     };
   }
 
