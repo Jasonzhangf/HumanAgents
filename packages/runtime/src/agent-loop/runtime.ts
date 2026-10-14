@@ -3,7 +3,9 @@ import {
   assertExecutionEpoch,
   assertSameScope,
   id,
+  validateAdmittedTurn,
   validateAdmittedTurnIdentity,
+  validateJournalCommitRef,
   validatePlannerAlignmentReference,
   validateTurnCloseSummary,
   type AdmittedTurnIdentity,
@@ -42,8 +44,10 @@ import {
   type TurnRecoveryReference,
 } from '../../../contracts/src/index.js';
 import { validateContextHistoryRecord } from '../../../contracts/src/agent-loop.js';
+import { validateActiveTurnCaptureBody } from '../../../contracts/src/active-turn-context.js';
 import {
   validateResumedTurnSegmentOpened,
+  type ActiveTurnInitialSegmentCapture,
   type ResumedTurnSegmentOpened,
 } from '../../../contracts/src/active-turn-segments.js';
 import {
@@ -136,6 +140,17 @@ export interface AgentLoopStartRequest extends AgentLoopRuntimeRequest {
 
 /** Restore request. The committed body replaces this request's in-memory assembly. */
 export type AgentLoopRestoreRequest = AgentLoopRuntimeRequest;
+
+/** Exact historical physical binding for one original admitted business turn. */
+export type HistoricalTurnBinding =
+  | {
+      readonly kind: 'initial';
+      readonly initial: ActiveTurnInitialSegmentCapture;
+    }
+  | {
+      readonly kind: 'segment';
+      readonly segment: ResumedTurnSegmentOpened;
+    };
 
 export interface AgentLoopTurnConfig {
   readonly identity: AdmittedTurnIdentity;
@@ -384,6 +399,70 @@ function sameScope(left: ScopeRef, right: ScopeRef): boolean {
     && left.cycleId?.value === right.cycleId?.value
     && left.operationId?.scope === right.operationId?.scope
     && left.operationId?.value === right.operationId?.value;
+}
+
+/**
+ * Derive the actual physical execution binding for a historical restore. The original
+ * admitted identity stays untouched; only the real initial capture or committed segment
+ * supplies the runtime id, physical epoch and scope that own the exact context.
+ */
+function historicalPhysicalBinding(
+  binding: HistoricalTurnBinding,
+  identity: AdmittedTurnIdentity,
+): {
+  readonly agentRuntimeId: string;
+  readonly executionEpoch: number;
+  readonly scope: ScopeRef;
+  readonly committedSegment?: ResumedTurnSegmentOpened;
+} {
+  if (binding.kind === 'initial') {
+    const { initial } = binding;
+    validateJournalCommitRef(initial.bindingCommitRef);
+    validateActiveTurnCaptureBody(initial.body);
+    const capture = initial.body.binding;
+    try {
+      validateAdmittedTurn(capture.admittedTurn, identity);
+    } catch {
+      throw new AgentLoopRuntimeError('conflict', 'historical initial capture does not bind the original admitted turn');
+    }
+    if (!sameScope(capture.scope, identity.scopeRef)
+      || !sameId(capture.assignment.taskId, identity.taskRef)
+      || capture.assignment.assignmentId !== identity.workAssignmentRef
+      || capture.assignment.inputRevision !== identity.inputRevision
+      || capture.execution.executionEpoch !== identity.executionEpoch) {
+      throw new AgentLoopRuntimeError('conflict', 'historical initial capture does not bind the original business turn and execution');
+    }
+    return {
+      agentRuntimeId: capture.execution.runtimeId,
+      executionEpoch: capture.execution.executionEpoch,
+      scope: capture.scope,
+    };
+  }
+
+  const { segment } = binding;
+  validateResumedTurnSegmentOpened(segment);
+  const { businessTurnRef, assignment, execution, incarnation, scope } = segment.binding;
+  if (identity.turnId !== segment.businessTurnRef.businessTurnId
+    || identity.turnId !== businessTurnRef.businessTurnId
+    || identity.workAssignmentRef !== assignment.assignmentId
+    || !sameId(identity.taskRef, assignment.taskId)
+    || !sameScope(identity.scopeRef, scope)
+    || identity.inputRevision !== assignment.inputRevision
+    || identity.executionEpoch !== businessTurnRef.execution.executionEpoch
+    || identity.executionEpoch !== assignment.executionEpoch
+    || !sameId(incarnation.taskId, assignment.taskId)
+    || incarnation.assignmentId !== assignment.assignmentId
+    || incarnation.runtimeId !== execution.runtimeId
+    || incarnation.executionEpoch !== execution.executionEpoch
+    || digest(segment.binding.businessTurnRef) !== digest(segment.businessTurnRef)) {
+    throw new AgentLoopRuntimeError('conflict', 'historical segment does not bind the original business turn and physical execution');
+  }
+  return {
+    agentRuntimeId: execution.runtimeId,
+    executionEpoch: execution.executionEpoch,
+    scope,
+    committedSegment: segment,
+  };
 }
 
 function refOf(checkpoint: AgentLoopCheckpoint): AgentLoopCheckpointRef {
@@ -702,6 +781,43 @@ export class AgentLoopRuntime {
     const runtime = new AgentLoopRuntime(request, contextHistory, null);
     await runtime.restoreCommitted(scope, commitRef);
     return runtime;
+  }
+
+  /**
+   * Restore the original admitted turn at its exact historical physical binding.
+   * This is a read-only recovery entry: it installs the exact committed context and
+   * runs the existing turn recovery, but never publishes a context, opens a segment,
+   * acquires an incarnation or starts Provider execution.
+   */
+  static async restoreHistoricalTurn(
+    request: Omit<AgentLoopRestoreRequest, 'agentRuntimeId' | 'executionEpoch' | 'scope' | 'activeRefs' | 'omittedRefs'>,
+    contextHistory: ContextHistoryPort,
+    input: {
+      readonly binding: HistoricalTurnBinding;
+      readonly contextCommitRef: JournalCommitRef;
+      readonly exact: { readonly checkpointId: Checkpoint['id'] | null };
+    },
+  ): Promise<{ readonly loop: AgentLoopRuntime; readonly recovery: RecoverTurnResult }> {
+    const turn = request.turn;
+    if (!turn) throw new AgentLoopRuntimeError('turn-not-configured', 'historical restore requires the original durable turn');
+    const physical = historicalPhysicalBinding(input.binding, turn.identity);
+    const record = await readCommittedContextHistory(contextHistory, physical.scope, input.contextCommitRef);
+    if (record.agentRuntimeId !== physical.agentRuntimeId
+      || record.loopCheckpoint.executionEpoch !== physical.executionEpoch
+      || record.loopControl.inboxStreamId !== request.observationStreamId
+      || !sameScope(record.scope, physical.scope)) {
+      throw new AgentLoopRuntimeError('conflict', 'exact committed context does not match the historical physical binding');
+    }
+    const runtime = new AgentLoopRuntime({
+      ...request,
+      agentRuntimeId: physical.agentRuntimeId,
+      executionEpoch: physical.executionEpoch,
+      scope: physical.scope,
+      mode: record.loopControl.mode,
+    }, contextHistory, null, physical.committedSegment);
+    runtime.installCommittedContext(record, input.contextCommitRef, true);
+    const recovery = await runtime.recoverTurn(undefined, input.exact);
+    return { loop: runtime, recovery };
   }
 
   /** Transfer an exact durable context to a committed incarnation of the same business turn. */
