@@ -215,6 +215,16 @@ export interface RuntimeTaskSnapshot {
 
 export interface RuntimeExecutionDriver extends AgentDriver {
   close(): Promise<ProviderCloseResult>;
+  /**
+   * Hands this execution the typed child-call manager that already exists on
+   * the task assembly. The coordinator calls it after `createTaskAssembly`
+   * returns and before the root model request starts, passing the manager
+   * straight from that typed owner: never through business args or metadata.
+   * It stays optional so an existing driver with no child capability keeps
+   * compiling and running unchanged; the coordinator never mints a manager,
+   * driver, pool or assembly just to bind one.
+   */
+  bindChildCallManager?(manager: Pick<OrchestrationManager, 'callChild'>): void;
   /** Canonical turn owner; a transport or projection checkpoint cannot replace it. */
   readonly standardTurn?: {
     acceptReviews(refs: readonly JournalCommitRef[]): Promise<void>;
@@ -1860,6 +1870,7 @@ export class RuntimeTaskCoordinator {
     // executor, which resolves the driver from this record instead of a second
     // acquire or a stale placeholder.
     record.driver = prepared.driver;
+    this.bindChildCallManager(prepared.driver, assembly);
     const assignment = prepared.source.assignment;
     const stageNodeId = `stage-${operation.operationId.value}`;
     record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
@@ -3091,6 +3102,21 @@ export class RuntimeTaskCoordinator {
     this.finalize(record, 'stopped');
   }
 
+  /**
+   * The single child-manager binding owner. It passes the assembly's already
+   * constructed orchestration manager to the driver that is about to run the
+   * root model request, and nothing else: a driver without the optional child
+   * capability is left untouched, and no driver, pool or assembly is created
+   * here. The boundary/readback lanes call nothing at all.
+   */
+  private bindChildCallManager(
+    driver: RuntimeExecutionDriver | undefined,
+    assembly: RuntimeTaskAssembly | undefined,
+  ): void {
+    if (driver === undefined || assembly === undefined) return;
+    driver.bindChildCallManager?.(assembly.orchestration);
+  }
+
   private async runExecution(
     record: TaskRecord,
     operation: OperationRecord,
@@ -3246,6 +3272,7 @@ export class RuntimeTaskCoordinator {
                   attemptPreparationInput,
                 );
                 record.driver = attemptDriver;
+                coordinator.bindChildCallManager(attemptDriver, record.taskAssembly);
                 if (record.stopping) {
                   await coordinator.stopPreparedExecution(record, operation, attemptDriver);
                   return {
@@ -3410,6 +3437,7 @@ export class RuntimeTaskCoordinator {
           maxAttempts: 1,
           ...(childCallPort === undefined ? {} : { childCallPort }),
         });
+        this.bindChildCallManager(driver, record.taskAssembly);
         const stageNodeId = `stage-${operation.operationId.value}`;
         // The acceptance criteria digest is derived from the criteria content
         // itself, so the review gate can re-verify the content it receives
@@ -3488,6 +3516,7 @@ export class RuntimeTaskCoordinator {
             scope,
             checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
           });
+          this.bindChildCallManager(driver, record.taskAssembly);
         }
         await composition!.start();
         await composition!.submit(prompt);
