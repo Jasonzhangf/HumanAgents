@@ -10,11 +10,14 @@ import {
 } from '../../config/src/index.js';
 import {
   id,
+  type Attention,
   type Checkpoint,
+  type CycleId,
   type EvidenceRef,
   type ExecutionRuntimePort,
   type HarnessPlugin,
   type ProviderBinding,
+  type TaskId,
 } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 import {
@@ -66,6 +69,30 @@ import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
 import { PROVIDERS, type ProviderConfig, type ProviderSource } from '../../config/src/index.js';
+import { createTaskExecutionPreparation } from './task-execution-preparation.js';
+import { createPreparedOperationBoundary } from './prepared-operation-boundary.js';
+import { createJsonlI2JournalPort } from './i2-journal.js';
+import { JsonlTaskIdentityJournal } from '../../adapters/jsonl/src/task-identities.js';
+import { JsonlOrganJournal } from '../../adapters/jsonl/src/index.js';
+import { TaskIdentityConsumer } from '../../runtime/src/orchestration/task-identity.js';
+import { UiRuntimeJournal } from './ui-runtime/journal.js';
+import { ServiceExecutionCheckpointStore } from './ui-runtime/execution-composition.js';
+import type { AttentionPort } from '../../runtime/src/control/attention.js';
+import type { RuntimeTaskEvent } from '../../runtime/src/ui-runtime/coordinator.js';
+import {
+  RESPONSES_BASH_TOOL,
+  RESPONSES_CREATE_GOAL_TOOL,
+  RESPONSES_FILE_EDIT_TOOL,
+  RESPONSES_FILE_LIST_TOOL,
+  RESPONSES_FILE_READ_TOOL,
+  RESPONSES_FILE_SEARCH_TOOL,
+  RESPONSES_FILE_WRITE_TOOL,
+  RESPONSES_GET_GOAL_TOOL,
+  RESPONSES_PRESENT_TOOL,
+  RESPONSES_TODO_WRITE_TOOL,
+  RESPONSES_UPDATE_GOAL_TOOL,
+  RESPONSES_WEB_SEARCH_TOOL,
+} from './provider-tool-execution.js';
 
 // Options that consume the following argument as their value. `--help`/`-h`
 // appearing in such a value position is payload (for example
@@ -681,6 +708,274 @@ function taskAgentProviderPreparer(
   };
 }
 
+const NATIVE_PROVIDER_TOOLS = [
+  RESPONSES_FILE_READ_TOOL,
+  RESPONSES_FILE_LIST_TOOL,
+  RESPONSES_FILE_SEARCH_TOOL,
+  RESPONSES_FILE_WRITE_TOOL,
+  RESPONSES_FILE_EDIT_TOOL,
+  RESPONSES_BASH_TOOL,
+  RESPONSES_TODO_WRITE_TOOL,
+  RESPONSES_GET_GOAL_TOOL,
+  RESPONSES_CREATE_GOAL_TOOL,
+  RESPONSES_UPDATE_GOAL_TOOL,
+  RESPONSES_PRESENT_TOOL,
+  RESPONSES_WEB_SEARCH_TOOL,
+] as const;
+
+function stderrWrite(line: string): Promise<void> {
+  // The app `process` shim exposes no `stderr` stream; `console.error` is the
+  // CLI's stderr channel. Awaiting the returned promise keeps the delivered
+  // receipt ordered after the write, not before it.
+  console.error(line);
+  return Promise.resolve();
+}
+
+/**
+ * Real CLI attention delivery owner. The coordinator remains the only publisher
+ * and resolver of Attention; this port writes each published/resolved Attention
+ * to the CLI stderr stream and only acknowledges `delivered` after that write
+ * resolves. It is not an immediate-delivered stub and adds no control authority.
+ */
+function nativeAttentionPort(): AttentionPort {
+  const deliver = async (event: string, attention: Attention) => {
+    await stderrWrite(JSON.stringify({
+      event,
+      attentionId: attention.attentionId,
+      state: attention.state,
+      severity: attention.severity,
+      ownerId: attention.ownerId,
+      message: attention.message,
+      scope: attention.scope,
+    }));
+    return { attentionId: attention.attentionId, delivered: true as const };
+  };
+  return {
+    publish: (attention) => deliver('attention.published', attention),
+    resolve: (attention) => deliver('attention.resolved', attention),
+  };
+}
+
+/**
+ * Native RCC run. The CLI caller binds the same production owners the serve
+ * runtime uses (the prepared UI journal, the Organ Journal control records, the
+ * Runtime current state, I2, Task identity, the selected RCC provider and the
+ * shared Task pool) and drives one retained Task through the coordinator's own
+ * prepare/subscribe/release edge. It never creates a Task, identity, session or
+ * grant; it selects an existing replay entity and reads the real completion
+ * state back from the same owner after the final execution event.
+ */
+async function runNativeTask(input: {
+  readonly args: readonly string[];
+  readonly paths: RuntimePaths;
+  readonly configuration: LoadedConfiguration;
+  readonly principal: VerifiedProductPrincipal;
+  readonly taskSelector: string | undefined;
+  readonly prompt: string;
+}): Promise<void> {
+  const { args, paths, configuration, principal, prompt } = input;
+  const configuredProvider = configuration.effective.provider ?? DEFAULT_RCC_PROVIDER;
+  const resolvedSource = configuredProvider.source ?? 'rcc';
+  const selected = resolveServeProvider(args, configuration.effective.provider);
+  if (selected.provider !== 'rcc') {
+    throw new AppLifecycleError(
+      'native-run.provider-unsupported',
+      'the native run entry requires the rcc provider',
+      'run with the configured rcc provider, or use fake only for internal tests',
+      'humanagent.app.cli',
+    );
+  }
+  const protocol = (option(args, '--protocol') ?? configuredProvider.protocol) as UiProviderProtocol;
+  if (protocol !== 'responses' && protocol !== 'openai' && protocol !== 'anthropic') {
+    throw new Error('run --protocol must be responses, openai, or anthropic');
+  }
+  const baseUrl = option(args, '--rcc-base-url') ?? configuredProvider.baseUrl;
+  const binding = providerBindingFromOptions(args, configuredProvider, protocol, 'rcc', baseUrl, resolvedSource, selected.providerIdOverride);
+  const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
+  // Same real prepared journal startUiRuntime writes, so a retained Task created
+  // by serve is selectable here instead of a second, invisible store.
+  const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
+  const modeRoot = join(checkpointRoot, 'rcc');
+  const preparedJournalPath = join(modeRoot, 'ui-runtime-journal.jsonl');
+  const preparedJournal = new UiRuntimeJournal(preparedJournalPath);
+  // The control Organ Journal is the same physical file startUiRuntime writes:
+  // mode root = <checkpointRoot>/<mode>, so task-control.jsonl sits beside the
+  // prepared ui-runtime journal, not under a second journalRoot authority.
+  const controlJournalPath = join(modeRoot, 'task-control.jsonl');
+  const journal = new JsonlOrganJournal(controlJournalPath);
+  const now = () => new Date();
+  const prepareAgentProvider = taskAgentProviderPreparer(args, configuration, evidenceRoot);
+  const port = assembleProviderExecutionPort({
+    binding,
+    routeRef: option(args, '--route') ?? configuredProvider.route,
+    baseUrl,
+    source: resolvedSource,
+    maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+  }, evidenceRoot);
+  const memoryDriverFor = memoryDriverFactory({
+    paths,
+    configuration,
+    workspace: paths.workspaceCwd,
+    inputRefs: [`humanagent://memory/project/${paths.projectKey}`],
+    prepareAgentProvider,
+  });
+  const memoryRuntime = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+    auditPromptRef: configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
+    autoUpdate: configuration.effective.memory?.update.auto ?? false,
+    ...(memoryDriverFor === undefined ? {} : { driverFor: memoryDriverFor }),
+    binding: {
+      bindingRef: `memory-ui:${paths.projectKey}`,
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', 'humanagent-ui'),
+      },
+      interactionScopeId: `runtime:${paths.projectKey}`,
+      mainAgentId: 'humanagent-ui',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+    checkpointEvidence: uiMemoryEvidence(checkpointRoot, 'rcc'),
+    taskEvidence: filesystemTaskEvidence({ journalPath: preparedJournalPath }),
+  });
+  const orchestrationPorts = createRccServeOrchestrationPorts({
+    port,
+    binding,
+    prepareAgentProvider,
+    promptSegments: {
+      review: servePromptSegments(configuration, 'review'),
+    },
+  });
+  const serveRuntime = createServeRuntimeComposition({
+    eventBusPorts: memoryRuntime.ports,
+    feedbackPorts: {
+      journal: memoryRuntime.ports.journal,
+      publishers: memoryRuntime.ports.publishers,
+    },
+    feedbackPublisherId: 'serve-orchestration-publisher',
+    ...orchestrationPorts,
+  });
+  try {
+    const preparation = createTaskExecutionPreparation({
+      principal,
+      composition: {
+        journal,
+        filePath: controlJournalPath,
+        artifactsRoot: paths.artifactsRoot,
+        preparedJournal,
+        resourceBoundary: createPreparedOperationBoundary(preparedJournal),
+        prepareAgentProvider,
+        providerOptions: {},
+        providerToolScope: {
+          workspaceRoot: paths.workspaceCwd,
+          projectKey: paths.projectKey,
+          artifactRoot: join(evidenceRoot, 'provider-tools'),
+          tools: [...NATIVE_PROVIDER_TOOLS],
+          webSearchProviderConfig: resolveWebSearchBackendConfig(),
+        },
+        now,
+        taskIdentity: new TaskIdentityConsumer(new JsonlTaskIdentityJournal(journal)),
+        i2Journal: createJsonlI2JournalPort({ filePath: controlJournalPath, journal }),
+      },
+      coordinator: {
+        organId: id('organ', 'humanagent-ui'),
+        // Same canonical native checkpoint owner as the UI-runtime index: the
+        // public-output checkpoint store commits into the shared control Organ
+        // Journal, not a per-task legacy file store.
+        checkpointStoreFor: (_taskId: TaskId, _cycleId: CycleId) =>
+          new ServiceExecutionCheckpointStore(controlJournalPath, journal, now),
+        attentionPort: nativeAttentionPort(),
+        createTaskAssembly: serveRuntime.createTaskAssembly,
+      },
+    });
+    if (input.taskSelector === undefined) {
+      throw new AppLifecycleError(
+        'native-control.task-required',
+        'the native run entry requires an explicit --task selector',
+        'pass --task with the retained task id',
+        'humanagent.app.cli',
+      );
+    }
+    const selectedTask = preparation.coordinator.taskSnapshots()
+      .find((snapshot) => snapshot.taskId.value === input.taskSelector);
+    if (selectedTask === undefined) {
+      throw new AppLifecycleError(
+        'native-control.task-not-found',
+        `no retained task matches --task ${input.taskSelector}`,
+        'select a task that already exists in the retained runtime journal',
+        'humanagent.app.cli',
+      );
+    }
+    const handle = preparation.prepareRun(selectedTask.taskId, { prompt });
+    // Subscribe to the exact operation before release. Only the Runtime
+    // execution.terminal/final event is a completion candidate; a Provider
+    // phase terminal or the release receipt is never completion.
+    let unsubscribe: (() => void) | undefined;
+    const finalEvent = new Promise<RuntimeTaskEvent>((resolve) => {
+      const subscription = preparation.coordinator.subscribeReplay(
+        handle.allocation.operationId,
+        undefined,
+        (event) => {
+          if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') resolve(event);
+        },
+      );
+      unsubscribe = subscription.unsubscribe;
+      for (const event of subscription.replay) {
+        if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') resolve(event);
+      }
+    });
+    let releaseState: string;
+    try {
+      releaseState = (await handle.release()).state;
+    } catch (error) {
+      unsubscribe?.();
+      throw error;
+    }
+    const terminal = await finalEvent;
+    unsubscribe?.();
+    // The event only notifies; the same owner reads the actual Task state back
+    // after finalize. The receipt keeps waiting/blocked truth instead of
+    // reporting a synthetic success.
+    const snapshot = preparation.coordinator.taskSnapshot(handle.allocation.taskId);
+    console.log(JSON.stringify({
+      command: 'run',
+      entry: 'native',
+      taskId: snapshot.taskId.value,
+      operationId: handle.allocation.operationId.value,
+      executionEpoch: snapshot.executionEpoch ?? handle.allocation.executionEpoch,
+      release: releaseState,
+      state: snapshot.state,
+      currentState: snapshot.currentState,
+      nextStep: snapshot.nextStep,
+      output: snapshot.output,
+      checkpoint: snapshot.checkpoint,
+      error: snapshot.error,
+      terminal: {
+        kind: terminal.kind,
+        phase: terminal.terminalPhase,
+        status: terminal.status,
+        summary: terminal.summary,
+      },
+    }, null, 2));
+  } finally {
+    // Provider close belongs to the native coordinator; the caller disposes only
+    // its own ServeRuntime composition once, after the normal end point.
+    await serveRuntime.dispose();
+  }
+}
+
 export async function main(args: readonly string[]): Promise<void> {
   configureBuiltinPromptRoot();
   const requestedCommand = args[0];
@@ -708,6 +1003,35 @@ export async function main(args: readonly string[]): Promise<void> {
     const plan = required(option(args, '--plan'), '--plan');
     const prompt = requiredPrompt(option(args, '--prompt'));
     const sessionId = option(args, '--session') ?? 'session-' + Date.now();
+    // Resolve the configured agent before the legacy openRuntime/session-task
+    // path. An RCC-configured run uses the native task-bound entry and never
+    // creates a legacy session, session-derived Task or run-manifest Task; fake
+    // and other drivers keep the unchanged legacy path.
+    const nativePaths = await resolveRuntimePaths({ workspace, controlRoot });
+    await ensureControlLayout(nativePaths);
+    const nativeConfiguration = await loadConfiguration(nativePaths);
+    const nativeAgentId = nativeConfiguration.effective.project?.defaultAgent ?? nativeConfiguration.agentRoster[0]!.agentId;
+    const nativeAgent = nativeConfiguration.agentRoster.find((agent) => agent.agentId === nativeAgentId);
+    if (nativeAgent?.driverRef === 'rcc') {
+      const control = await resolveNativeControlInput(nativePaths, args);
+      if (control === undefined) {
+        throw new AppLifecycleError(
+          'native-control.session-missing',
+          'the native rcc run entry requires --control-session-file',
+          'pair the control session file with the active serve credential and pass it with --control-session-file',
+          'humanagent.app.cli',
+        );
+      }
+      await runNativeTask({
+        args,
+        paths: nativePaths,
+        configuration: nativeConfiguration,
+        principal: control.principal,
+        taskSelector: control.task,
+        prompt,
+      });
+      return;
+    }
     const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
     try {
       const configuredAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;

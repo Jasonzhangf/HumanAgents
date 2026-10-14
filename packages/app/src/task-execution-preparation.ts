@@ -1,9 +1,11 @@
-import type {
-  RuntimeExecutionAllocation,
+import {
   RuntimeTaskCoordinator,
-  RuntimeTaskJournalPort,
+  type RuntimeExecutionAllocation,
+  type RuntimeTaskJournalPort,
 } from '../../runtime/src/ui-runtime/coordinator.js';
 import { readPreparedExecutionInput } from './prepared-execution-input.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from './runtime-current-state-journal.js';
+import { createDefaultExecutionComposition } from './ui-runtime/execution-composition.js';
 
 /**
  * The exact prepared-execution handle the thin consumer returns: the actual
@@ -19,6 +21,74 @@ export type PreparedExecutionHandle = {
 };
 
 type PrepareExecutionArgs = Parameters<RuntimeTaskCoordinator['prepareExecution']>;
+
+type CompositionInput = Parameters<typeof createDefaultExecutionComposition>[0];
+type CoordinatorInput = ConstructorParameters<typeof RuntimeTaskCoordinator>[0];
+
+/**
+ * The preparation handle the CLI caller consumes: the exact prepared-execution
+ * consumer plus a narrow typed access to the same coordinator instance for Task
+ * selection and completion readback. `Pick` exposes only the read/subscribe
+ * surface; `createTask`, grant, stop and a second release stay unexposed, so the
+ * caller cannot mint identity or re-drive the execution through this handle.
+ */
+export type TaskExecutionPreparation =
+  ReturnType<typeof createPreparedExecutionConsumer> & {
+    readonly coordinator: Pick<
+      RuntimeTaskCoordinator,
+      'taskSnapshots' | 'taskSnapshot' | 'subscribeReplay'
+    >;
+  };
+
+export type TaskExecutionPreparationInput = {
+  readonly principal: CompositionInput['principal'];
+  readonly composition: Omit<
+    CompositionInput,
+    'principal' | 'currentState' | 'publishCurrentTurnState' | 'closedTurnPlannerPool'
+  >;
+  readonly coordinator: Omit<
+    CoordinatorInput,
+    | 'journal'
+    | 'admitExecution'
+    | 'createDriver'
+    | 'currentStatePort'
+    | 'currentStateFacts'
+    | 'createTaskAssembly'
+  > & {
+    readonly createTaskAssembly: NonNullable<CoordinatorInput['createTaskAssembly']>;
+  };
+};
+
+/** Bind production owners once; execution stays behind the original release edge. */
+export function createTaskExecutionPreparation(
+  input: TaskExecutionPreparationInput,
+): TaskExecutionPreparation {
+  const currentState = createJsonlRuntimeTaskCurrentStateJournal({
+    journal: input.composition.journal,
+  });
+  const composition = createDefaultExecutionComposition({
+    ...input.composition,
+    principal: input.principal,
+    currentState,
+    publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
+    closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
+  });
+  const coordinator = new RuntimeTaskCoordinator({
+    ...input.coordinator,
+    journal: input.composition.preparedJournal,
+    currentStatePort: currentState,
+    currentStateFacts: composition.currentStateFacts,
+    admitExecution: composition.admitExecution,
+    createDriver: composition.createExecutionDriver,
+  });
+  return {
+    ...createPreparedExecutionConsumer({
+      coordinator,
+      preparedJournal: input.composition.preparedJournal,
+    }),
+    coordinator,
+  };
+}
 
 /**
  * Binds one actual coordinator to the same prepared Journal. `prepareRun`
