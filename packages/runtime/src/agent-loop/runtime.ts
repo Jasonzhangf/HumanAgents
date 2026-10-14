@@ -73,6 +73,7 @@ import {
   assertTurnClosureRecord,
   assertTurnRecoveryRecord,
   distinctReviewCommitRefs,
+  frozenTurnCloseRef,
   sameReviewCommitRefs,
   sanitizeId,
   turnBoundaryRecordRefs,
@@ -1394,6 +1395,7 @@ export class AgentLoopRuntime {
         unresolvedOperationRefs: inputs.recovery.unresolvedOperationRefs,
         ...(inputs.recovery.firstErrorRef === undefined ? {} : { firstErrorRef: inputs.recovery.firstErrorRef }),
         failedPhase: 'submission',
+        frozenClose: { version: 1, checkpoint, previous, inputs, reviewCommitRefs, bound },
       };
       assertTurnRecoveryRecord(recoveryRecord);
       this.pendingClose = { checkpoint, previous, recoveryRecord, reviewCommitRefs, inputs, bound };
@@ -1406,6 +1408,12 @@ export class AgentLoopRuntime {
 
     // Persist the recovery responsibility before any durable checkpoint/closure commit.
     try {
+      const candidate = { ...recoveryRecord, closureId: frozenTurnCloseRef(identity) };
+      const retained = await turn.closurePort.read(candidate.closureId);
+      if (retained && JSON.stringify(retained) !== JSON.stringify(candidate)) {
+        throw new AgentLoopRuntimeError('turn-close-validation', 'exact frozen close candidate conflicts');
+      }
+      if (!retained) await turn.closurePort.commit(candidate);
       const existingRecovery = await turn.closurePort.read(recoveryRecord.closureId);
       if (existingRecovery) {
         assertTurnRecoveryRecord(existingRecovery as TurnRecoveryRecord);
@@ -1651,13 +1659,26 @@ export class AgentLoopRuntime {
    * - `alignment-committed`: retry the exact readback only; never re-plan, re-publish, or re-commit.
    * - `unknown`: stay paused; an unconfirmed stage is never treated as absent.
    */
-  async recoverTurn(input?: RecoverTurnInput): Promise<RecoverTurnResult> {
+  async recoverTurn(input?: RecoverTurnInput, exact?: { readonly checkpointId: Checkpoint['id'] | null }): Promise<RecoverTurnResult> {
     const turn = this.requireTurn();
     const identity = turn.identity;
 
     let resolved: ResolvedTurnRecoveryStage;
     try {
-      resolved = await this.resolveTurnRecoveryStage(turn);
+      const retained = await turn.closurePort.read(frozenTurnCloseRef(identity));
+      if (retained) {
+        const candidate = this.asTurnRecoveryRecord(retained);
+        assertTurnRecoveryRecord(candidate);
+        if (!candidate.frozenClose || JSON.stringify(candidate.identity) !== JSON.stringify(identity)
+          || (exact?.checkpointId && exact.checkpointId.value !== candidate.checkpointId.value)) {
+          return { stage: 'unknown', turnId: identity.turnId, advance: 'paused' };
+        }
+        const frozen = candidate.frozenClose;
+        const recoveryRecord = { ...candidate, closureId: turnBoundaryRecordRefs(identity, candidate.checkpointId).turnRecoveryRecordRef };
+        this.pendingClose = { ...structuredClone(frozen), recoveryRecord };
+        exact = { checkpointId: candidate.checkpointId };
+      }
+      resolved = await this.resolveTurnRecoveryStage(turn, exact);
     } catch {
       return { stage: 'unknown', turnId: identity.turnId, advance: 'paused' };
     }
@@ -1668,6 +1689,9 @@ export class AgentLoopRuntime {
 
     if (resolved.kind === 'closure-absent') {
       // Resume the same logical turn. Recovery never builds a new turn or replays a confirmed effect.
+      if (resolved.recovery && !this.pendingClose) {
+        return { stage: 'unknown', turnId: identity.turnId, checkpointId: resolved.checkpointId, advance: 'paused' };
+      }
       this.turnState = { phase: 'open' };
       return {
         stage: 'closure-absent',
@@ -1735,12 +1759,20 @@ export class AgentLoopRuntime {
     };
   }
 
-  private async resolveTurnRecoveryStage(turn: AgentLoopTurnConfig): Promise<ResolvedTurnRecoveryStage> {
-    const identity = turn.identity;
-    const latest = await turn.journal.readLatest(identity.scopeRef);
-    if (!latest) return { kind: 'closure-absent' };
+  /** Exact serialized candidate for App boundary continuation; callback stays App-owned. */
+  retainedTurnClose() {
+    if (!this.pendingClose) return null;
+    const { checkpoint, previous, inputs, reviewCommitRefs, bound } = this.pendingClose;
+    return structuredClone({ checkpoint, previous, inputs, reviewCommitRefs, bound });
+  }
 
-    const checkpointId = latest.checkpoint.id;
+  private async resolveTurnRecoveryStage(turn: AgentLoopTurnConfig, exact?: { readonly checkpointId: Checkpoint['id'] | null }): Promise<ResolvedTurnRecoveryStage> {
+    const identity = turn.identity;
+    const selected = exact === undefined ? await turn.journal.readLatest(identity.scopeRef)
+      : exact.checkpointId === null ? null : await turn.journal.readCommitted(identity.scopeRef, exact.checkpointId);
+    if (!selected && !exact?.checkpointId) return { kind: 'closure-absent' };
+
+    const checkpointId = exact?.checkpointId ?? selected!.checkpoint.id;
     const refs = turnBoundaryRecordRefs(identity, checkpointId);
     const [closureRecord, alignmentRecord, recoveryRecord] = await Promise.all([
       turn.closurePort.read(refs.turnClosureRef),
@@ -1818,7 +1850,7 @@ export class AgentLoopRuntime {
       seq,
       previousCheckpointId: previous?.id ?? null,
       directiveRevision: identity.directiveRevision,
-      executionEpoch: identity.executionEpoch,
+      executionEpoch: this.committedSegment?.binding.execution.executionEpoch ?? identity.executionEpoch,
       outcome: input.outcome,
       summary: renderTurnCloseSummary(input.summary),
       recoveryStateRef,

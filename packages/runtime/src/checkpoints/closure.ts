@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   assertEvidenceRef,
+  assertCheckpointLink,
   assertSameScope,
   validateAdmittedTurnIdentity,
   validatePlannerAlignmentReference,
@@ -304,6 +305,21 @@ export interface TurnRecoveryRecord {
   readonly unresolvedOperationRefs: readonly string[];
   readonly firstErrorRef?: string;
   readonly failedPhase: TurnRecoveryPhase;
+  readonly frozenClose?: FrozenTurnCloseCandidateV1;
+}
+
+/** Serializable inputs retained before the checkpoint submission can have effects. */
+export interface FrozenTurnCloseCandidateV1 {
+  readonly version: 1;
+  readonly checkpoint: Checkpoint;
+  readonly previous: Checkpoint | null;
+  readonly inputs: Omit<import('../agent-loop/runtime.js').CloseTurnInput, 'prepareCheckpointClosure' | 'reviewCommitRefs'>;
+  readonly reviewCommitRefs: readonly JournalCommitRef[];
+  readonly bound: boolean;
+}
+
+export function frozenTurnCloseRef(identity: AdmittedTurnIdentity): string {
+  return `turn-frozen-close:${identity.turnId}`;
 }
 
 /**
@@ -623,6 +639,29 @@ export function assertTurnRecoveryRecord(record: TurnRecoveryRecord): void {
       throw new CheckpointClosureError('turn recovery checkpoint id is invalid');
     }
     assertTurnRecoveryPhase(record.failedPhase);
+    if (record.frozenClose) {
+      const frozen = record.frozenClose;
+      assertCheckpointLink(frozen.checkpoint, frozen.previous);
+      assertSameScope(frozen.checkpoint.scope, record.identity.scopeRef);
+      if (frozen.version !== 1 || typeof frozen.bound !== 'boolean'
+        || frozen.checkpoint.id.value !== record.checkpointId.value
+        || JSON.stringify(frozen.checkpoint.previousCheckpointId) !== JSON.stringify(frozen.previous?.id ?? null)
+        || frozen.checkpoint.seq !== (frozen.previous?.seq ?? 0) + 1) {
+        throw new CheckpointClosureError('frozen close candidate identity conflicts');
+      }
+      validateTurnCloseSummary(frozen.inputs.summary, record.identity.scopeRef);
+      if (frozen.checkpoint.directiveRevision !== record.identity.directiveRevision
+        || frozen.checkpoint.cycleId.value !== record.identity.cycleRef.value
+        || frozen.inputs.recovery.contextRef !== record.contextRef
+        || frozen.inputs.recovery.unfinishedRef !== record.unfinishedRef
+        || JSON.stringify(frozen.inputs.recovery.unreturnedCallRefs) !== JSON.stringify(record.unreturnedCallRefs)
+        || JSON.stringify(frozen.inputs.recovery.unresolvedOperationRefs) !== JSON.stringify(record.unresolvedOperationRefs)) {
+        throw new CheckpointClosureError('frozen close candidate inputs conflict with the recovery duty');
+      }
+      if (distinctReviewCommitRefs(frozen.reviewCommitRefs).length !== frozen.reviewCommitRefs.length) {
+        throw new CheckpointClosureError('frozen close candidate contains duplicate reviews');
+      }
+    }
     validateTurnRecoveryReference({
       identity: record.identity,
       recoveryStateRef: record.recoveryStateRef,

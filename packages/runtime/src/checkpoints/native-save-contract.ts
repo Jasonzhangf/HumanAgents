@@ -200,6 +200,13 @@ export type NativeSaveProgressReadback =
 export interface NativeSaveProgressPort {
   begin(intent: NativeSaveIntent): Promise<JournalCommitRef>;
 
+  /** Legacy records without the complete immutable input remain held. */
+  readIntentExact?(key: NativeSaveKey): Promise<
+    | { readonly state: 'found'; readonly intent: NativeSaveIntent; readonly commitRef: JournalCommitRef }
+    | { readonly state: 'absent'; readonly verifiedThrough: JournalCommitRef | null }
+    | { readonly state: 'unknown'; readonly recoveryRef: string }
+  >;
+
   readExact(key: NativeSaveKey): Promise<NativeSaveProgressReadback>;
 
   recordProgress(progress: NativeSaveProgress): Promise<JournalCommitRef>;

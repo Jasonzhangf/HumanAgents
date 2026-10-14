@@ -23,6 +23,7 @@ interface StoredIntent {
   readonly ownerId: string;
   readonly recoveryResponsibilityRef: string;
   readonly rawTurnRefs: readonly string[];
+  readonly completeIntent?: NativeSaveIntent;
   readonly initial: Omit<NativeSaveProgress, 'intentCommitRef'>;
 }
 
@@ -81,9 +82,19 @@ async function decodeIntent(record: JournalRecord): Promise<StoredIntent & { rea
   if (await keyDigest(initial.key) !== value.keyDigest) {
     throw new JournalIntegrityError('native save intent identity is inconsistent');
   }
+  if (value.completeIntent) {
+    const fingerprint = isNativeSegmentSaveIntentV2(value.completeIntent)
+      ? await nativeSegmentSaveIntentDigestV2(value.completeIntent)
+      : digest('humanagent.native-save-input.v1', value.completeIntent);
+    if (fingerprint !== value.inputFingerprint
+      || canonicalJsonStringify(value.completeIntent.key) !== canonicalJsonStringify(initial.key)) {
+      throw new JournalIntegrityError('native save complete intent conflicts with its immutable fingerprint');
+    }
+  }
   return { version: 1, keyDigest: value.keyDigest, inputFingerprint: value.inputFingerprint,
     ownerId: value.ownerId, recoveryResponsibilityRef: value.recoveryResponsibilityRef,
-    rawTurnRefs: value.rawTurnRefs, initial };
+    rawTurnRefs: value.rawTurnRefs, initial,
+    ...(value.completeIntent === undefined ? {} : { completeIntent: value.completeIntent }) };
 }
 
 async function decodeProgress(record: JournalRecord): Promise<StoredProgress> {
@@ -164,6 +175,7 @@ export function createJsonlNativeSaveProgressPort({ journal }: { readonly journa
             version: 1, keyDigest: locator, inputFingerprint: fingerprint,
             ownerId: intent.ownerId, recoveryResponsibilityRef: intent.recoveryResponsibilityRef,
             rawTurnRefs: intent.rawTurnRefs,
+            completeIntent: intent,
             initial: {
               key: intent.key, intentDigest: intent.inputIntentDigest,
               phases: NATIVE_SAVE_PHASES.map((phase) => ({ phase, state: 'not-executed' })),
@@ -174,6 +186,21 @@ export function createJsonlNativeSaveProgressPort({ journal }: { readonly journa
         });
         return commitRef(record);
       });
+    },
+    async readIntentExact(key) {
+      try {
+        const verification = await journal.verify();
+        if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is corrupt');
+        const saved = await exact(verification.records, await keyDigest(key));
+        if (saved.intent && saved.intentRecord) {
+          if (!saved.intent.completeIntent) return { state: 'unknown', recoveryRef: 'native-save:legacy-intent-incomplete' };
+          return { state: 'found', intent: structuredClone(saved.intent.completeIntent), commitRef: commitRef(saved.intentRecord) };
+        }
+        const last = verification.records.at(-1);
+        return { state: 'absent', verifiedThrough: last ? commitRef(last) : null };
+      } catch (error) {
+        return { state: 'unknown', recoveryRef: `native-save:unknown:${error instanceof Error ? error.message : String(error)}` };
+      }
     },
     async readExact(key) {
       try {

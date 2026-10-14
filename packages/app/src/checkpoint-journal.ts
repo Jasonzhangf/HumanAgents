@@ -85,6 +85,7 @@ import {
 } from '../../runtime/src/context/semantic-history.js';
 import { materializeAdoptedChildSource } from '../../runtime/src/context/semantic-history-adoption.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../adapters/jsonl/src/index.js';
+import { decodeActiveTurnRecords } from '../../adapters/jsonl/src/active-turn.js';
 import type {
   Checkpoint,
   ContextHistoryRecord,
@@ -303,7 +304,9 @@ export function createJsonlSemanticHistoryJournal(input: {
   readonly segmentJournal?: ActiveTurnSegmentJournalPort;
   readonly rawContent: RawContentReadPort;
   readonly timeAuthority: CheckpointTimeAuthority;
-}): SemanticHistoryPersistencePort {
+}): SemanticHistoryPersistencePort & {
+  listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]>;
+} {
   if (!input.filePath.trim()) {
     throw new AppLifecycleError(
       'semantic-history-journal-invalid',
@@ -421,6 +424,20 @@ export function createJsonlSemanticHistoryJournal(input: {
   }
 
   const port = {
+    /** Verified owner enumeration for cold context; absence is established by Journal verification. */
+    async listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]> {
+      const result: SemanticHistoryExactLookupV1[] = [];
+      for (const record of await verifiedRecords()) {
+        if (!sameScope(record.scope, scope) || record.kind !== 'event'
+          || record.payload?.['kind'] !== SEMANTIC_HISTORY_PUBLICATION_KIND) continue;
+        const body = await publicationBody(record);
+        const receipt = await phaseReceipt({ record, phase: 'history-publication', identity: body.identity,
+          committedAt: body.committedAt, authority: body.timeAuthority, scope });
+        result.push({ scope, checkpoint: body.checkpoint.checkpoint,
+          publicationReceiptRef: receipt.journalReceiptRef });
+      }
+      return result;
+    },
     async commitContextView(request: SemanticContextViewCommitRequest | SemanticContextViewCommitRequestV2): Promise<SemanticPhaseReceiptV1> {
       if (!request.ownerId.trim()) {
         throw new AppLifecycleError(
@@ -1211,6 +1228,31 @@ export function segmentOpenedFromRecord(record: JournalRecord): ResumedTurnSegme
     throw bindingCorrupt('committed segment carrier identity or scope does not match its binding');
   }
   return value;
+}
+
+/** Physical receipt comes from the verified carrier; no string-derived receipt. */
+export async function readCommittedNativeSegmentSource(input: {
+  readonly journal: JsonlOrganJournal;
+  readonly originalAdmittedTurn: NativeSegmentSaveSourceV2['originalAdmittedTurn'];
+  readonly opened: ResumedTurnSegmentOpened;
+}): Promise<NativeSegmentSaveSourceV2> {
+  const verification = await input.journal.verify();
+  if (!verification.valid) throw bindingCorrupt(verification.error ?? 'segment Journal verification failed');
+  const commitId = activeTurnSegmentCommitId(input.opened.segmentId, 'segment-opened');
+  const record = verification.records.find((entry) => entry.commitId === commitId);
+  const opened = record ? segmentOpenedFromRecord(record) : null;
+  if (!record || !opened || canonicalJsonStringify(opened) !== canonicalJsonStringify(input.opened)) {
+    throw bindingCorrupt('exact segment-opened physical carrier is absent or conflicts');
+  }
+  exactJournalRecord(verification.records, opened.businessTurnRef.bindingCommitRef);
+  const original = decodeActiveTurnRecords(verification.records, opened.businessTurnRef.businessTurnId)
+    .find((entry) => entry.kind === 'binding-opened');
+  if (!original || original.kind !== 'binding-opened'
+    || canonicalJsonStringify(original.binding.admittedTurn) !== canonicalJsonStringify(input.originalAdmittedTurn)) {
+    throw bindingCorrupt('segment source original business admission is absent or conflicts');
+  }
+  return { originalAdmittedTurn: input.originalAdmittedTurn, originalBusinessTurnRef: opened.businessTurnRef,
+    opened, openedCommitRef: journalCommitRef(record) };
 }
 
 /**

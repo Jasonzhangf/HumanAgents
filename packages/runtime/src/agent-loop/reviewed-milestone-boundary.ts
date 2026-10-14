@@ -30,9 +30,18 @@ import { projectAdmittedTurnIdentityV1 } from '../context/semantic-history.js';
 import type { TaskPlanRevisionConsumerPort } from '../orchestration/task-plan-revisions.js';
 import { assertReviewResultMatchesAssignment } from '../review/index.js';
 import { AgentLoopRuntimeError } from './errors.js';
+import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2,
+  type PreparedActiveTurnSegmentCaptureV2 } from '../../../contracts/src/active-turn-segments.js';
+import type { ActiveTurnSegmentRecoveryAssetsReceipt } from '../context/active-turn-journal.js';
+
+export type ReviewedBoundaryRecoveryAssets =
+  | { readonly version: 1; readonly assets: RecoveryAssetsReadback }
+  | { readonly version: 2; readonly assets: { readonly receipt: ActiveTurnSegmentRecoveryAssetsReceipt;
+      readonly prepared: PreparedActiveTurnSegmentCaptureV2 }; readonly source: NativeSegmentSaveSourceV2 };
 
 export interface ReviewedBoundaryRecoveryAssetsPort {
   readRecoveryAssetsExact(receiptRef: string): Promise<RecoveryAssetsReadback>;
+  readBoundaryRecoveryAssetsExact?(receiptRef: string): Promise<ReviewedBoundaryRecoveryAssets>;
 }
 
 export interface ReadReviewedMilestoneBoundaryInput {
@@ -82,7 +91,6 @@ export async function readReviewedMilestoneBoundary(
   requireMatch(checkpoint.id.scope === input.checkpointId.scope && checkpoint.id.value === input.checkpointId.value
     && closure.checkpointId.scope === checkpoint.id.scope && closure.checkpointId.value === checkpoint.id.value
     && checkpoint.cycleId.value === input.identity.cycleRef?.value
-    && checkpoint.executionEpoch === input.identity.executionEpoch
     && checkpoint.directiveRevision === input.identity.directiveRevision
     && sameEvidenceRef(checkpoint.recoveryStateRef, closure.recoveryStateRef), 'checkpoint does not match the admitted closure');
 
@@ -103,7 +111,23 @@ export async function readReviewedMilestoneBoundary(
   requireMatch(recovery.closureId === keys.turnRecoveryRecordRef && recovery.checkpointId.scope === checkpoint.id.scope
     && recovery.checkpointId.value === checkpoint.id.value
     && sameEvidenceRef(recovery.recoveryStateRef, closure.recoveryStateRef), 'typed turn recovery conflicts');
-  const capture = await input.nativeRecoveryAssets.readRecoveryAssetsExact(binding.turnRecoveryRef);
+  const readback: ReviewedBoundaryRecoveryAssets = input.nativeRecoveryAssets.readBoundaryRecoveryAssetsExact
+    ? await input.nativeRecoveryAssets.readBoundaryRecoveryAssetsExact(binding.turnRecoveryRef)
+    : { version: 1, assets: await input.nativeRecoveryAssets.readRecoveryAssetsExact(binding.turnRecoveryRef) };
+  let physical = { runtimeId: input.identity.runtimeBindingRef, executionEpoch: input.identity.executionEpoch };
+  if (readback.version === 2) {
+    validateNativeSegmentSaveSourceV2(readback.source);
+    const capture = readback.assets;
+    physical = readback.source.opened.binding.execution;
+    assertSameAdmittedTurn(input.identity, projectAdmittedTurnIdentityV1(readback.source.originalAdmittedTurn));
+    requireMatch(capture.receipt.commitIdentity === binding.turnRecoveryRef
+      && capture.receipt.businessTurnId === input.identity.turnId
+      && capture.receipt.segmentId === readback.source.opened.segmentId
+      && JSON.stringify(capture.prepared.body.binding) === JSON.stringify(readback.source.opened.binding),
+    'native segment capture receipt or committed execution conflicts');
+    assertSameScope(scope, capture.receipt.capture.ref.scope);
+  } else {
+  const capture = readback.assets;
   requireMatch(capture.receipt.commitIdentity === binding.turnRecoveryRef
     && capture.receipt.turnId === input.identity.turnId
     && capture.prepared.body.binding.execution.runtimeId === input.identity.runtimeBindingRef
@@ -112,6 +136,8 @@ export async function readReviewedMilestoneBoundary(
   assertSameAdmittedTurn(input.identity, projectAdmittedTurnIdentityV1(capture.prepared.body.binding.admittedTurn));
   assertSameScope(scope, capture.prepared.body.binding.scope);
   assertSameScope(scope, capture.receipt.capture.ref.scope);
+  }
+  requireMatch(checkpoint.executionEpoch === physical.executionEpoch, 'checkpoint physical execution conflicts with the exact native capture');
   const checkpointClosure = await input.closures.read(closure.closureRef);
   requireMatch(!!checkpointClosure && 'closureKind' in checkpointClosure && checkpointClosure.closureKind === 'checkpoint'
     && checkpointClosure.closureId === closure.closureRef && checkpointClosure.checkpointId.value === checkpoint.id.value
@@ -123,8 +149,8 @@ export async function readReviewedMilestoneBoundary(
   'bound checkpoint closure preparation conflicts');
   const context = await readCommittedContextHistory(input.contexts, scope, binding.contextCommitRef);
   assertSameScope(scope, context.scope);
-  requireMatch(context.agentRuntimeId === input.identity.runtimeBindingRef
-    && context.loopCheckpoint.executionEpoch === input.identity.executionEpoch
+  requireMatch(context.agentRuntimeId === physical.runtimeId
+    && context.loopCheckpoint.executionEpoch === physical.executionEpoch
     && recovery.contextRef === binding.contextCommitRef.commitId, 'bound context runtime, epoch or typed recovery reference conflicts');
 
   const aligned = await input.closures.read(input.alignmentRef);
