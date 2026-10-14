@@ -1,6 +1,6 @@
 import {
   assertExecutionEpoch, canonicalJsonStringify,
-  type ProviderCloseResult, type ScopeRef, type WorkAssignment,
+  type ScopeRef, type WorkAssignment,
 } from '../../../contracts/src/index.js';
 import type { ActiveTurnInitialSegmentCapture, ActiveTurnSegmentPredecessorRef,
   ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
@@ -45,7 +45,7 @@ interface ColdBoundaryPreparation {
   readonly key: NativeSaveKey;
   readonly standardTurn: StandardTurnLifecycle;
   /** Bound shared owner helper; completes retained phases without generation. */
-  finishBoundary(): Promise<ProviderCloseResult>;
+  finishBoundary(): Promise<void>;
 }
 
 export type RuntimeColdTurnPreparation =
