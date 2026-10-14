@@ -329,6 +329,87 @@ test('manager acquires dormant execution from its bound creator and same pool', 
   assert.equal((await pool.dispose()).status, 'disposed');
 });
 
+test('retained dispatch uses the exact acquired handle without re-acquiring or releasing its lease', async () => {
+  const taskId = id('task', 'retained-dispatch');
+  const retainedScope: ScopeRef = { organId: id('organ', 'retained-dispatch'), taskId };
+  const originalAssignment = assignment({ assignmentId: 'retained-assignment', taskId });
+  const physicalEpoch = 2;
+  const businessDelivery = result({
+    taskId,
+    assignmentId: originalAssignment.assignmentId,
+    nextAction: 'settle',
+  });
+  let creates = 0;
+  let executes = 0;
+  let disposes = 0;
+  const executeInputs: ExecutionAgentInput[] = [];
+  let createdHandle: TaskExecutionHandle | undefined;
+  const agent: ExecutionAgentPort = {
+    roleId: 'executor',
+    createInstance(create: TaskExecutionInstanceCreateInput): TaskExecutionHandle {
+      creates += 1;
+      createdHandle = {
+        incarnation: create.incarnation,
+        async execute(input) {
+          executes += 1;
+          executeInputs.push(input);
+          return businessDelivery;
+        },
+        async dispose() { disposes += 1; },
+      };
+      return createdHandle;
+    },
+    async execute() { throw new Error('legacy execution must not run'); },
+  };
+  const { pool } = factoryPool({
+    maxRuntimes: 2,
+    initialRuntimes: [{ runtimeId: 'retained-runtime', capabilities: ['execute'] }],
+  });
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: agent,
+  });
+  manager.planStage({ nodeId: 'node-a', taskId });
+  const acquired = await manager.acquireExecutionInstance({
+    assignment: originalAssignment,
+    scope: retainedScope,
+    agentId: 'agent-a',
+    executionEpoch: physicalEpoch,
+  });
+  assert.equal(acquired.status, 'acquired');
+  if (acquired.status !== 'acquired') return;
+  assert.equal(creates, 1, 'the retained instance is created once');
+  assert.equal(acquired.handle, createdHandle);
+  assert.equal(acquired.incarnation.executionEpoch, physicalEpoch);
+  assert.equal(acquired.lease.executionEpoch, physicalEpoch);
+
+  const dispatched = await manager.dispatchAcquired({
+    stageNodeId: 'node-a',
+    assignment: originalAssignment,
+    agentId: 'agent-a',
+    scope: retainedScope,
+  }, acquired);
+
+  assert.equal(dispatched.status, 'succeeded');
+  assert.equal(executes, 1, 'retained dispatch executes the acquired handle exactly once');
+  assert.equal(creates, 1, 'retained dispatch must not acquire a second instance');
+  assert.equal(executeInputs[0]?.lease, acquired.lease, 'the exact acquired lease reaches the handle');
+  assert.equal(executeInputs[0]?.executionEpoch, physicalEpoch, 'physical execution input comes from the lease');
+  assert.equal(dispatched.assignment.result?.assignmentId, originalAssignment.assignmentId);
+  assert.equal(
+    dispatched.assignment.result?.executionEpoch,
+    originalAssignment.executionEpoch,
+    'business result epoch stays the original assignment epoch',
+  );
+  assert.equal(dispatched.assignment.runtimeBinding?.executionEpoch, physicalEpoch, 'physical lease epoch is bound separately');
+  assert.equal(pool.inspect().runtimes[0]?.lease?.leaseId, acquired.lease.leaseId, 'manager must not release the retained lease');
+  assert.equal((await pool.release(acquired.lease, { scope: retainedScope })).status, 'released');
+  assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
+  assert.equal((await pool.dispose()).status, 'disposed');
+  assert.equal(disposes, 1);
+});
+
 test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks unavailable capabilities', async () => {
   const { pool, factory } = factoryPool({
     maxRuntimes: 3,
