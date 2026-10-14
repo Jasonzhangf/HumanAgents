@@ -32,7 +32,8 @@ import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJ
 
 export type NativeAdmittedExecution =
   | { readonly version: 1; readonly activeTurn: ActiveTurnContext }
-  | { readonly version: 2; readonly activeTurn: ActiveTurnSegmentContext; readonly segmentJournal: ActiveTurnSegmentJournalPort };
+  | { readonly version: 2; readonly activeTurn: ActiveTurnSegmentContext; readonly segmentJournal: ActiveTurnSegmentJournalPort;
+      readonly source: import('../../../contracts/src/active-turn-segments.js').NativeSegmentSaveSourceV2 };
 
 /** Current owner facts. Null is unknown, never a successful empty recovery. */
 export interface NativeExecutionOwnerReaders {
@@ -148,13 +149,16 @@ export function createNativeExecution(input: NativeExecutionInput) {
     acceptRawFact: (envelope) => active.acceptRawFact(envelope),
     registerRequest: (registration) => active.registerProviderRequest(registration), requestContext, now: input.now });
 
+  let producerDrain: Promise<Awaited<ReturnType<ProviderAgentDriver['closeProductionAndDrain']>>> | undefined;
   const producer = {
     async closeProductionAndDrain(value: Parameters<ProviderAgentDriver['closeProductionAndDrain']>[0]) {
-      const drain = await driver.closeProductionAndDrain(value);
-      // Settlement still owes its durable request registration. Keep the
-      // Runtime producer lifetime open until that final accepted write.
-      await driver.settle(binding.execution);
-      return drain;
+      return producerDrain ??= (async () => {
+        const drain = await driver.closeProductionAndDrain(value);
+        // Settlement still owes its durable request registration. Keep the
+        // Runtime producer lifetime open until that final accepted write.
+        await driver.settle(binding.execution);
+        return drain;
+      })();
     },
   };
 
@@ -171,7 +175,7 @@ export function createNativeExecution(input: NativeExecutionInput) {
   function drainCurrentTurn(boundaryId: string) {
     if (boundary !== undefined && boundary !== boundaryId) throw new Error('native capture has one save boundary');
     boundary = boundaryId;
-    if (admitted.version !== 1) throw new Error('original-turn drain requires the actual original turn');
+    if (admitted.version === 2) return producer.closeProductionAndDrain({ execution: binding.execution, boundaryId });
     return drained ??= (async () => {
       const runtimeDrain = admitted.activeTurn.closeAndDrainProducers();
       let drain;
@@ -216,7 +220,14 @@ export function createNativeExecution(input: NativeExecutionInput) {
       }
       throw new Error('native capture owner mismatch');
     })();
-    return structuredClone(await captured);
+    const attempt = captured;
+    try { return structuredClone(await attempt); }
+    catch (error) {
+      // The segment capture owner retains its immutable cut and drain. Only
+      // persistence may retry; clearing this acknowledgement never recaptures.
+      if (captured === attempt) captured = undefined;
+      throw error;
+    }
   }
 
   async function prepareTurnClosure(checkpoint: import('../../../contracts/src/index.js').Checkpoint, boundaryId: string) {
@@ -255,7 +266,11 @@ export function createNativeExecution(input: NativeExecutionInput) {
       readPreparedCapture: async (ref) => (await recovery.readSegmentRecoveryAssetsExact(ref)).prepared });
   let saveIntent: NativeSaveIntent | undefined;
   return { driver, requestContext, prepareCapture, prepareTurnClosure, drainCurrentTurn,
-    recoveryAssetsReader: ({ readRecoveryAssetsExact: recovery.readRecoveryAssetsExact } satisfies
+    recoveryAssetsReader: ({ readRecoveryAssetsExact: recovery.readRecoveryAssetsExact,
+      async readBoundaryRecoveryAssetsExact(ref: string) {
+        return admitted.version === 1 ? { version: 1 as const, assets: await recovery.readRecoveryAssetsExact(ref) }
+          : { version: 2 as const, assets: await recovery.readSegmentRecoveryAssetsExact(ref), source: admitted.source };
+      } } satisfies
       import('../../../runtime/src/agent-loop/reviewed-milestone-boundary.js').ReviewedBoundaryRecoveryAssetsPort),
     savePorts: saveOwner.ports, saveProgress: saveOwner.progress,
     async readSaveStageFacts(): Promise<import('../../../runtime/src/ui-runtime/current-state.js').RuntimeTaskStageFacts> {

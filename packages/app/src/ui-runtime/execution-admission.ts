@@ -27,6 +27,7 @@ import { createJsonlOperationControlJournal } from '../operation-control-journal
 import { AppLifecycleError } from '../errors.js';
 
 import type { AdmittedExecutionInput } from '../prepared-execution-input.js';
+import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
 export type { AdmittedExecutionInput } from '../prepared-execution-input.js';
 
 /** Actual parent owner facts; only the admission binding is filled here. */
@@ -216,6 +217,34 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
     return parent.binding;
   }
 
+  /** New physical control coverage retains the original immutable input/admission. */
+  async function bindCommittedSegment(allocation: RuntimeExecutionAllocation, source: NativeSegmentSaveSourceV2, occurredAt: string): Promise<OperationControlBinding> {
+    validateNativeSegmentSaveSourceV2(source);
+    const physical = source.opened.binding;
+    if (physical.assignment.assignmentId !== allocation.assignmentId
+      || physical.assignment.inputRevision !== allocation.inputRevision
+      || canonicalJsonStringify(physical.scope) !== canonicalJsonStringify(allocation.scope)
+      || source.originalAdmittedTurn.executionEpoch !== allocation.executionEpoch) {
+      invalid('committed segment conflicts with retained business allocation');
+    }
+    const original = await bindingFor(allocation);
+    const control = await gateway.readControl({ scope: allocation.scope, agentRuntimeId: original.agentRuntimeId,
+      harnessExecutionEpoch: original.harnessExecutionEpoch });
+    if (control.state !== 'complete') invalid('original parent control is unknown');
+    const parent = control.operations.find((item) => item.intent.operationId.value === allocation.operationId.value);
+    if (!parent) invalid('original parent controller is absent');
+    const binding: OperationControlBinding = { ...original, agentRuntimeId: physical.execution.runtimeId,
+      harnessExecutionEpoch: physical.execution.executionEpoch, admissionCommitRef: source.opened.businessRegistrationCommitRef };
+    await gateway.initializeCoverage(binding);
+    const executionEpoch = parent.executionEpoch + 1;
+    const { result: _oldResult, ...parentControl } = parent;
+    await gateway.applyExternalLifecycle({ control: { ...parentControl, binding, executionEpoch, status: 'accepted' },
+      event: { eventId: `segment-parent-admitted:${source.opened.segmentId}`, schemaVersion: 1,
+        kind: 'operation.accepted', operationId: allocation.operationId, taskId: allocation.taskId,
+        executionEpoch, status: 'accepted', occurredAt, evidenceRefs: [] } });
+    return binding;
+  }
+
   /**
    * Actual explicit child tool-operation admission. It exact-reads the durable
    * parent control and coverage, checks the current resource boundary for the
@@ -337,6 +366,7 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
     admitNewBusiness,
     admitExecution,
     bindingFor,
+    bindCommittedSegment,
     admitToolOperation,
   };
 }
