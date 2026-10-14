@@ -4,14 +4,16 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { id, type ContextHistoryRecord, type JournalCommitRef, type ScopeRef, type WorkAssignment } from '../../../packages/contracts/src/index.js';
+import { id, type ActiveTurnCaptureBody, type ContextHistoryRecord, type JournalCommitRef, type ScopeRef, type WorkAssignment } from '../../../packages/contracts/src/index.js';
 import { validateContextHistoryRecord } from '../../../packages/contracts/src/agent-loop.js';
 import { validateResumedTurnSegmentOpened, type ResumedTurnSegmentOpened } from '../../../packages/contracts/src/active-turn-segments.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../../packages/adapters/jsonl/src/index.js';
 import { AgentLoopRuntime, type AgentLoopStartRequest } from '../../../packages/runtime/src/agent-loop/runtime.js';
+import { frozenTurnCloseRef } from '../../../packages/runtime/src/checkpoints/closure.js';
 import type { ContextHistoryPort } from '../../../packages/runtime/src/checkpoints/ports.js';
 
-const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures', 'provider-cold-incarnation-handoff-r1-20261013');
+const fixtureRoot = process.env.HUMANAGENT_TEST_ROOT
+  ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-historical-loop-restore-r1-20261014');
 const scope: ScopeRef = { organId: id('organ', 'cold-organ'), taskId: id('task', 'cold-task'), cycleId: id('cycle', 'cold-cycle'), operationId: id('operation', 'cold-operation') };
 
 function hash(value: unknown): string {
@@ -194,6 +196,151 @@ test('public incarnation handoff preserves the exact same-turn context with a fr
     assert.deepEqual((await port.readContextHistory({ scope, agentRuntimeId: segment.binding.incarnation.runtimeId, limit: 1 })).currentContextCommitRef, installedRef);
   }
   assert.deepEqual((await journal.verify()).records, verifiedAfter.records);
-  await writeFile(join(root, 'receipt.json'), JSON.stringify({ sourceRef, targetHeadBefore, segmentCommitRef, installedRef, originalTurn: original.turn!.identity, segment, source, installed, lease: snapshot.lease, historicalActors, historicalActorsRejected: historicalActors.length, oldActorPublications: port.commits.length - publicationsBeforeOldActors, commits: port.commits, reads: port.reads }, null, 2));
+
+  const readKeys: string[] = [];
+  const historicalRequest = {
+    ...original,
+    turn: {
+      ...original.turn!,
+      closurePort: {
+        commit: async () => { throw new Error('historical restore must not commit closure'); },
+        read: async (ref: string) => { readKeys.push(ref); return null; },
+      },
+    },
+  };
+  const commitsBeforeHistorical = port.commits.length;
+  const readsBeforeHistorical = port.reads.length;
+  const identityBeforeHistorical = structuredClone(original.turn!.identity);
+
+  const ordinaryRestoreRequest = { ...original, executionEpoch: 2 };
+  await assert.rejects(
+    () => AgentLoopRuntime.restore(ordinaryRestoreRequest, port, scope, installedRef),
+    /durable turn execution epoch must match the runtime execution epoch/,
+  );
+  assert.equal(port.commits.length, commitsBeforeHistorical, 'rejected ordinary restore must not publish');
+  assert.equal(port.reads.length, readsBeforeHistorical, 'rejected ordinary restore must fail before exact context read');
+
+  const wrongBusinessTurnRef = { ...segment.businessTurnRef, businessTurnId: 'different-business-turn' };
+  const wrongSegment: ResumedTurnSegmentOpened = {
+    ...segment,
+    businessTurnRef: wrongBusinessTurnRef,
+    binding: { ...segment.binding, businessTurnRef: wrongBusinessTurnRef },
+  };
+  await assert.rejects(
+    () => AgentLoopRuntime.restoreHistoricalTurn(historicalRequest, port, {
+      binding: { kind: 'segment', segment: wrongSegment },
+      contextCommitRef: installedRef,
+      exact: { checkpointId: null },
+    }),
+    /historical segment does not bind the original business turn/,
+  );
+  assert.equal(port.commits.length, commitsBeforeHistorical, 'rejected historical binding must not publish');
+  assert.equal(port.reads.length, readsBeforeHistorical, 'rejected historical binding must fail before exact context read');
+
+  await assert.rejects(
+    () => AgentLoopRuntime.restoreHistoricalTurn(historicalRequest, port, {
+      binding: { kind: 'segment', segment },
+      contextCommitRef: sourceRef,
+      exact: { checkpointId: null },
+    }),
+    /exact committed context does not match the historical physical binding/,
+  );
+  assert.equal(port.commits.length, commitsBeforeHistorical, 'rejected exact context must not publish');
+  assert.equal(port.reads.length, readsBeforeHistorical + 1, 'rejected exact context must read that exact context once');
+  const readsBeforeCorrectHistorical = port.reads.length;
+
+  const journalBeforeHistorical = await journal.verify();
+  const historical = await AgentLoopRuntime.restoreHistoricalTurn(historicalRequest, port, {
+    binding: { kind: 'segment', segment },
+    contextCommitRef: installedRef,
+    exact: { checkpointId: null },
+  });
+  assert.equal(historical.recovery.stage, 'closure-absent');
+  assert.equal(historical.recovery.advance, 'resume-same-turn');
+  assert.equal(historical.recovery.turnId, original.turn!.identity.turnId);
+  assert.deepEqual(readKeys, [frozenTurnCloseRef(original.turn!.identity)], 'recovery must use the original admitted identity key');
+  assert.equal(historical.loop.contextCommitRef()?.commitId, installedRef.commitId);
+  assert.deepEqual(historical.loop.contextHistoryRecord(), installed);
+  assert.equal(historical.loop.snapshot().modeState.agentRuntimeId, segment.binding.execution.runtimeId);
+  assert.equal(historical.loop.snapshot().modeState.executionEpoch, 2);
+  assert.equal(historical.loop.snapshot().lease.executionEpoch, 2);
+  assert.equal(original.turn!.identity.executionEpoch, 1);
+  assert.notEqual(historical.loop.snapshot().modeState.executionEpoch, original.turn!.identity.executionEpoch);
+  assert.deepEqual(original.turn!.identity, identityBeforeHistorical, 'historical restore must not mutate the original admitted identity');
+  assert.equal(historical.loop.currentTurnTransition().phase, 'open');
+  assert.equal(historical.loop.currentTurnTransition().turnOwnerRef, original.turn!.ownerId);
+  assert.equal(port.commits.length, commitsBeforeHistorical, 'historical restore must not publish a context');
+  assert.equal(port.reads.length, readsBeforeCorrectHistorical + 1, 'historical restore must read exactly one committed context');
+  assert.equal(port.reads.at(-1)?.commitId, installedRef.commitId);
+  const journalAfterHistorical = await journal.verify();
+  assert.equal(journalAfterHistorical.valid, true);
+  assert.deepEqual(journalAfterHistorical.records, journalBeforeHistorical.records, 'historical restore must not change the journal prefix');
+  assert.equal(
+    journalAfterHistorical.records.filter((row) => row.payload?.kind === 'segment-opened').length,
+    journalBeforeHistorical.records.filter((row) => row.payload?.kind === 'segment-opened').length,
+    'historical restore must not open a new segment',
+  );
+
+  const initialBody: ActiveTurnCaptureBody = {
+    version: 1,
+    binding: {
+      admittedTurn: {
+        ...original.turn!.identity,
+        admissionEvidenceRefs: [],
+        currentTurnRef: 'cold-current-turn',
+        recoveryStateRef: 'cold-recovery-state',
+      },
+      assignment,
+      execution: { runtimeId: original.agentRuntimeId, executionEpoch: original.executionEpoch },
+      scope,
+    },
+    initialInput: {
+      ref: {
+        evidenceId: id('evidence', 'cold-initial-input'),
+        kind: 'execution',
+        source: 'cold-consumer-fixture',
+        locator: 'cold-initial-input',
+        digest: hash('cold-initial-input'),
+        scope,
+      },
+      view: { kind: 'utf8-text' },
+    },
+    entries: [],
+    requests: [],
+    childInvocations: [],
+    checkpointPath: [],
+    cut: { pauseId: 'cold-pause', lastSeq: 0, producersDrained: true, frozenAt: '2026-10-13T00:00:00.000Z' },
+    completionRefs: [],
+  };
+  const readsBeforeV1 = port.reads.length;
+  const v1 = await AgentLoopRuntime.restoreHistoricalTurn(historicalRequest, port, {
+    binding: { kind: 'initial', initial: { bindingCommitRef: bindingRef, body: initialBody } },
+    contextCommitRef: sourceRef,
+    exact: { checkpointId: null },
+  });
+  assert.equal(v1.recovery.stage, 'closure-absent');
+  assert.equal(v1.loop.snapshot().modeState.executionEpoch, 1);
+  assert.equal(v1.loop.snapshot().lease.executionEpoch, 1);
+  assert.equal(port.reads.length, readsBeforeV1 + 1, 'v1 historical restore must read exactly one committed context');
+  assert.deepEqual((await journal.verify()).records, journalAfterHistorical.records, 'v1 historical restore must not change the journal');
+
+  const historicalActor = { agentRuntimeId: historical.loop.snapshot().modeState.agentRuntimeId, leaseId: historical.loop.snapshot().lease.leaseId };
+  const closedScope = await historical.loop.closeObservationScope(historicalActor);
+  assert.equal(closedScope.executionEpoch, 2);
+  const continuationRef = historical.loop.contextCommitRef();
+  if (!continuationRef) throw new Error('historical continuation close did not commit');
+  const continuation = await port.readContextCommit(scope, continuationRef);
+  assert.equal(continuation.agentRuntimeId, segment.binding.execution.runtimeId);
+  assert.equal(continuation.loopCheckpoint.executionEpoch, 2);
+  assert.deepEqual(continuation.previousContextCommitRef, installedRef);
+  const afterCloseActor = { agentRuntimeId: historical.loop.snapshot().modeState.agentRuntimeId, leaseId: historical.loop.snapshot().lease.leaseId };
+  await historical.loop.openObservationScope({ actor: afterCloseActor, kind: 'task', scope, readableRefs: ['task:goal'], capabilities: ['read-task'] });
+  const reopenedRef = historical.loop.contextCommitRef();
+  if (!reopenedRef) throw new Error('historical continuation reopen did not commit');
+  const reopened = await port.readContextCommit(scope, reopenedRef);
+  assert.equal(reopened.loopCheckpoint.executionEpoch, 2);
+  assert.deepEqual(reopened.previousContextCommitRef, continuationRef);
+
+  await writeFile(join(root, 'receipt.json'), JSON.stringify({ sourceRef, targetHeadBefore, segmentCommitRef, installedRef, originalTurn: original.turn!.identity, segment, source, installed, lease: snapshot.lease, historicalActors, historicalActorsRejected: historicalActors.length, oldActorPublications: port.commits.length - publicationsBeforeOldActors, historical: { recovery: historical.recovery, identityKey: readKeys[0], installedRef, continuationRef, reopenedRef, ordinaryRestoreRejected: true, wrongBindingRejected: true, helperPublications: 0, helperSegments: 0, v1Recovery: v1.recovery }, commits: port.commits, reads: port.reads }, null, 2));
   console.log(`incarnation receipt: ${join(root, 'receipt.json')}`);
 });
