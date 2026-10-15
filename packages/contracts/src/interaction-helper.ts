@@ -12,10 +12,15 @@
 
 import {
   ContractError,
+  assertAgentRuntimeId,
+  assertExecutionEpoch,
   assertEvidenceRef,
   assertScope,
+  type AgentRuntimeId,
   type EvidenceRef,
   type OrganId,
+  type OperationId,
+  type ProviderProtocol,
   type RawAsset,
   type SemanticClaim,
   type WorkAssignment,
@@ -39,6 +44,18 @@ export interface InteractionHelperIdentity
     Pick<WorkAssignment, 'assignmentId' | 'attempt'> {
   readonly parentTurnId: string;
   readonly helperCallId: string;
+}
+
+/** Real execution and provider binding identity acquired before dispatch. */
+export interface InteractionHelperIncarnation extends InteractionHelperIdentity {
+  readonly runtimeId: AgentRuntimeId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly bindingId: string;
+  readonly providerId: string;
+  readonly protocol: ProviderProtocol;
+  readonly modelRef: string;
+  readonly capabilityDigest: string;
 }
 
 export type InteractionHelperAssignmentFields = Pick<
@@ -120,6 +137,7 @@ export interface InteractionLatestTurn extends InteractionTurnIdentity {
 export interface InteractionHelperDispatchAcceptedFact {
   readonly kind: 'dispatch-accepted';
   readonly assignment: InteractionHelperAssignment;
+  readonly incarnation?: InteractionHelperIncarnation;
   readonly dispatchAcceptedAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
 }
@@ -156,6 +174,12 @@ export type InteractionHelperHandoffFact =
 const HELPER_RESULT_STATUSES = ['succeeded', 'failed', 'incomplete', 'blocked', 'cancelled'] as const;
 const HELPER_NEXT_ACTIONS = ['continue', 'wait', 'attention', 'review', 'settle', 'remediate'] as const;
 const SEMANTIC_CERTAINTIES = ['confirmed', 'partial', 'unknown', 'corrected'] as const;
+const HELPER_PROVIDER_PROTOCOLS = new Set<ProviderProtocol>([
+  'responses',
+  'anthropic',
+  'openai',
+  'other-explicit',
+]);
 
 function assertNonEmptyString(value: string, label: string): void {
   if (typeof value !== 'string' || !value.trim()) {
@@ -295,6 +319,28 @@ export function validateInteractionHelperIdentity(input: InteractionHelperIdenti
   assertNonEmptyString(input.assignmentId, 'helper assignmentId');
   assertNonEmptyString(input.helperCallId, 'helper callId');
   assertPositiveSafeInteger(input.attempt, 'helper attempt');
+}
+
+export function validateInteractionHelperIncarnation(
+  input: InteractionHelperIncarnation,
+  assignment: InteractionHelperAssignment,
+): void {
+  validateInteractionHelperAssignment(assignment);
+  validateInteractionHelperIdentity(input);
+  if (!sameHelperIdentity(input, assignment)) {
+    throw new ContractError('helper incarnation does not match assignment');
+  }
+  assertAgentRuntimeId(input.runtimeId);
+  assertScope(input.operationId, 'operation');
+  assertNonEmptyString(input.operationId.value, 'helper incarnation operationId');
+  assertExecutionEpoch(input.executionEpoch);
+  assertNonEmptyString(input.bindingId, 'helper incarnation bindingId');
+  assertNonEmptyString(input.providerId, 'helper incarnation providerId');
+  if (!HELPER_PROVIDER_PROTOCOLS.has(input.protocol)) {
+    throw new ContractError('helper incarnation protocol is invalid');
+  }
+  assertNonEmptyString(input.modelRef, 'helper incarnation modelRef');
+  assertNonEmptyString(input.capabilityDigest, 'helper incarnation capabilityDigest');
 }
 
 export function validateInteractionHelperAssignment(input: InteractionHelperAssignment): void {
@@ -442,6 +488,9 @@ export function validateInteractionHelperHandoffFact(
   switch (input.kind) {
     case 'dispatch-accepted':
       validateInteractionHelperAssignment(input.assignment);
+      if (input.incarnation !== undefined) {
+        validateInteractionHelperIncarnation(input.incarnation, input.assignment);
+      }
       assertValidTimestamp(input.dispatchAcceptedAt, 'helper dispatch acceptedAt');
       assertHelperEvidenceRefs(
         input.evidenceRefs,

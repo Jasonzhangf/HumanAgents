@@ -15,7 +15,7 @@ declare module 'node:fs/promises' {
 }
 
 export * from './ui-preferences.js';
-export { saveUiDisplayPreference } from './ui-preference-store.js';
+export { resetUiDisplayPreference, saveUiDisplayPreference } from './ui-preference-store.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;

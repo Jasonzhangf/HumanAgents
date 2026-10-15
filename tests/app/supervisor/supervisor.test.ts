@@ -9,10 +9,13 @@ import { SessionStore } from '../../../packages/app/src/session-store.js';
 import { AppLifecycleError } from '../../../packages/app/src/errors.js';
 import {
   acquireDaemonLease,
+  assertDaemonLeaseIdentity,
   daemonLeasePath,
   isDaemonLeaseHandoffCommitted,
   readDaemonLease,
+  recordDaemonRestartTransition,
   runSupervisorStartup,
+  startDaemonCodeHandoff,
 } from '../../../packages/app/src/supervisor/index.js';
 import { AccessControlService } from '../../../packages/app/src/ui-runtime/access-control.js';
 
@@ -45,6 +48,52 @@ test('daemon lease is unique and generation advances after release', async () =>
   assert.equal(second.record.generation, 2);
   assert.equal(second.record.ownerId, 'host-test');
   await second.release();
+});
+
+test('daemon lease identity requires a live process before an HTTP identity check', async () => {
+  const paths = await fixture();
+  const lease = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve' });
+  const record = await readDaemonLease(paths);
+  if (!record) throw new Error('expected a daemon lease record');
+  await assert.rejects(
+    () => assertDaemonLeaseIdentity(paths, { ...record, pid: 999999999 }),
+    (error: any) => {
+      assert.equal(error.code, 'daemon-takeover.identity-mismatch');
+      assert.match(error.message, /no longer running/);
+      return true;
+    },
+  );
+  await lease.release();
+});
+
+test('code handoff preserves the first replacement spawn failure', async () => {
+  const paths = await fixture();
+  const startup = {
+    launcherPath: '/definitely/missing/humanagent.mjs',
+    cwd: '/definitely/missing/workspace',
+    args: ['--workspace', paths.workspaceCwd, '--control-root', paths.controlRoot, '--provider', 'fake', '--port', '0'],
+    source: {
+      entryPath: '/definitely/missing/cli.js',
+      entryDigest: 'sha256:missing-cli',
+      packageVersion: '0.1.29',
+    },
+  };
+  const lease = await acquireDaemonLease(paths, {
+    ownerId: 'humanagent.app.serve',
+    startup,
+  });
+  const handoff = startDaemonCodeHandoff(paths, {
+    expected: lease.record,
+    startup,
+    timeoutMs: 1_000,
+  });
+  await assert.rejects(() => handoff.completion, (error: any) => {
+    assert.equal(error.code, 'daemon-restart.spawn-failed');
+    return true;
+  });
+  const persisted = await readDaemonLease(paths);
+  assert.equal(persisted?.restart?.failure?.errorCode, 'daemon-restart.spawn-failed');
+  await lease.release();
 });
 
 test('missing readiness is not availability and marked ready is still leased', async () => {
@@ -173,6 +222,68 @@ test('restart reuses the active owner lease and restarts stages without takeover
   assert.deepEqual(lease?.controlEndpoint, { host: '127.0.0.1', port: 10086 });
   assert.equal(lease?.disposedAt, undefined);
   await startup.dispose();
+});
+
+test('restart transition crosses the disposed lease and completes only on the new ready owner', async () => {
+  const paths = await fixture();
+  const startup = {
+    launcherPath: '/fixture/candidate/bin/humanagent.mjs',
+    cwd: '/fixture/workspace',
+    args: ['--provider', 'fake', '--port', '0'],
+    source: {
+      entryPath: '/fixture/candidate/runtime/app/src/cli.js',
+      entryDigest: 'sha256:candidate-cli',
+      packageVersion: '0.1.31',
+    },
+  };
+  const first = await acquireDaemonLease(paths, {
+    ownerId: 'humanagent.app.serve',
+    startup,
+  });
+  const transition = {
+    requestId: 'restart-request-1',
+    requestedAt: new Date().toISOString(),
+    previousLeaseId: first.record.leaseId,
+    previousGeneration: first.record.generation,
+    previousProcessStartToken: first.record.processStartToken,
+    targetEntryPath: startup.source.entryPath,
+    targetEntryDigest: startup.source.entryDigest,
+  };
+  const requested = await recordDaemonRestartTransition(paths, {
+    leaseId: first.record.leaseId,
+    generation: first.record.generation,
+    processStartToken: first.record.processStartToken,
+  }, transition);
+  assert.equal(requested.restart?.requestId, transition.requestId);
+
+  const closed = await first.release();
+  assert.equal(closed.restart?.requestId, transition.requestId);
+  const replacement = await acquireDaemonLease(paths, {
+    ownerId: 'humanagent.app.serve',
+    startup,
+  });
+  assert.equal(replacement.record.generation, first.record.generation + 1);
+  assert.equal(replacement.record.restart?.requestId, transition.requestId);
+  assert.equal(replacement.record.restart?.completedAt, undefined);
+  const ready = await replacement.markReady();
+  assert.ok(ready.restart?.completedAt);
+  await replacement.release();
+});
+
+test('dispose cleanup failure is durable in the lease and the caller receipt', async () => {
+  const paths = await fixture();
+  const startup = await runSupervisorStartup(paths, [
+    {
+      name: 'stage-a',
+      ownerId: 'owner-a',
+      start: async () => {},
+      dispose: async () => { throw new Error('listener close failed'); },
+    },
+  ]);
+  const receipt = await startup.dispose();
+  assert.equal(receipt.cleanupFailure?.ownerId, 'owner-a');
+  assert.match(receipt.cleanupFailure?.message ?? '', /listener close failed/);
+  assert.equal(receipt.lease.failure?.errorCode, 'supervisor-dispose.cleanup-failed');
 });
 
 test('startup dispose remains retryable when lease release fails', async () => {

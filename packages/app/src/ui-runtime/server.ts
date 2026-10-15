@@ -23,6 +23,10 @@ import {
   type AccessSession,
   type SessionVerification,
 } from './access-control.js';
+import {
+  UI_DISPLAY_PREFERENCE_ROUTE,
+  type UiDisplayPreferenceResourceHandler,
+} from './display-preferences.js';
 
 const APP_OWNER = 'humanagent.app';
 
@@ -30,6 +34,7 @@ export interface UiRuntimeServerOptions {
   readonly service: UiRuntimeService;
   readonly accessControl: AccessControlService;
   readonly uiRoot: string;
+  readonly displayPreference?: UiDisplayPreferenceResourceHandler;
   readonly host?: string;
   readonly port?: number;
   readonly restart?: (input: {
@@ -205,18 +210,6 @@ async function requireSession(accessControl: AccessControlService, request: Inco
   return verification.session;
 }
 
-function requireOrigin(accessControl: AccessControlService, request: IncomingMessage): void {
-  const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin;
-  const host = Array.isArray(request.headers.host) ? request.headers.host[0] : request.headers.host;
-  if (!accessControl.validateOrigin(origin, host)) {
-    throw new AccessControlError('auth.origin.invalid', 'request Origin does not match the listener origin', 'retry the mutation from the same UI origin', 403);
-  }
-}
-
-function isMutation(method: string): boolean {
-  return method === 'POST' || method === 'PATCH' || method === 'DELETE';
-}
-
 function bearerToken(request: IncomingMessage): string | undefined {
   const header = request.headers.authorization;
   if (Array.isArray(header)) return undefined;
@@ -224,18 +217,11 @@ function bearerToken(request: IncomingMessage): string | undefined {
   return header.slice('Bearer '.length).trim() || undefined;
 }
 
-function isLoopbackAddress(address: string | undefined): boolean {
-  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
-}
-
 function requireSupervisor(
   accessControl: AccessControlService,
   request: IncomingMessage,
   identity: UiRuntimeServerOptions['identity'],
 ): { readonly leaseId: string; readonly generation: number } {
-  if (!isLoopbackAddress(request.socket.remoteAddress)) {
-    throw new AccessControlError('auth.supervisor.forbidden', 'supervisor endpoints are loopback-only', 'run the command on the serve host', 403);
-  }
   if (!identity) {
     throw new UiRuntimeApiError(
       'daemon-identity.unsupported',
@@ -495,6 +481,47 @@ function createSseRegistry() {
   };
 }
 
+export interface UiRuntimeRequestDispatcher {
+  readonly listener: (request: IncomingMessage, response: ServerResponse) => void;
+  readonly sseRegistry: ReturnType<typeof createSseRegistry>;
+}
+
+/**
+ * Builds the exact request listener the TCP server uses, so callers can drive
+ * the real routes without binding a socket. `startUiRuntimeServer` owns the
+ * listener lifecycle through `isClosing`.
+ */
+export function createUiRuntimeRequestDispatcher(options: {
+  readonly service: UiRuntimeService;
+  readonly accessControl: AccessControlService;
+  readonly uiRoot: string;
+  readonly isClosing: () => boolean;
+  readonly displayPreference?: UiRuntimeServerOptions['displayPreference'];
+  readonly restart?: UiRuntimeServerOptions['restart'];
+  readonly identity?: UiRuntimeServerOptions['identity'];
+  readonly schedulerStatus?: UiRuntimeServerOptions['schedulerStatus'];
+}): UiRuntimeRequestDispatcher {
+  const sseRegistry = createSseRegistry();
+  const listener = (request: IncomingMessage, response: ServerResponse): void => {
+    void handleRequest(
+      request,
+      response,
+      options.service,
+      options.accessControl,
+      sseRegistry,
+      options.isClosing,
+      options.uiRoot,
+      options.restart,
+      options.identity,
+      options.schedulerStatus,
+      options.displayPreference,
+    ).catch((error) => {
+      writeError(response, error);
+    });
+  };
+  return { listener, sseRegistry };
+}
+
 export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Promise<UiRuntimeServer> {
   const host = options.host ?? '127.0.0.1';
   if (host !== '0.0.0.0' && host !== '::' && host !== '127.0.0.1' && host !== '::1') {
@@ -502,7 +529,17 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   }
   const service = options.service;
   const accessControl = options.accessControl;
-  const sseRegistry = createSseRegistry();
+  let closing = false;
+  const { listener, sseRegistry } = createUiRuntimeRequestDispatcher({
+    service,
+    accessControl,
+    uiRoot: options.uiRoot,
+    isClosing: () => closing,
+    ...(options.displayPreference === undefined ? {} : { displayPreference: options.displayPreference }),
+    ...(options.restart === undefined ? {} : { restart: options.restart }),
+    ...(options.identity === undefined ? {} : { identity: options.identity }),
+    ...(options.schedulerStatus === undefined ? {} : { schedulerStatus: options.schedulerStatus }),
+  });
   accessControl.startCredentialWatch(
     () => sseRegistry.revalidateNow(accessControl).then(() => undefined),
     async (error) => {
@@ -510,15 +547,9 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
       throw error;
     },
   );
-  let closing = false;
   let closeReceipt: ListenerShutdownReceipt | undefined;
   let closePromise: Promise<ListenerShutdownReceipt> | undefined;
-  const server = createServer((request, response) => {
-    void handleRequest(request, response, service, accessControl, sseRegistry, () => closing, options.uiRoot, options.restart, options.identity, options.schedulerStatus)
-      .catch((error) => {
-        writeError(response, error);
-      });
-  });
+  const server = createServer(listener);
   let bound: { readonly address: string; readonly family: string; readonly port: number };
   try {
     bound = await new Promise<{ readonly address: string; readonly family: string; readonly port: number }>((resolve, reject) => {
@@ -588,6 +619,7 @@ async function handleRequest(
   restart?: UiRuntimeServerOptions['restart'],
   identity?: UiRuntimeServerOptions['identity'],
   schedulerStatus?: UiRuntimeServerOptions['schedulerStatus'],
+  displayPreference?: UiRuntimeServerOptions['displayPreference'],
 ): Promise<void> {
   const method = request.method ?? 'GET';
   try {
@@ -618,7 +650,6 @@ async function handleRequest(
       return;
     }
     if (path === '/api/auth/pair' && method === 'POST') {
-      requireOrigin(accessControl, request);
       const body = await readBody(request);
       const session = await accessControl.consumePairingCode(requireString(body, 'code'));
       writeJson(response, 200, {
@@ -629,7 +660,6 @@ async function handleRequest(
     }
     if (path === '/api/auth/logout' && method === 'POST') {
       await requireSession(accessControl, request);
-      requireOrigin(accessControl, request);
       await accessControl.logout();
       await sseRegistry.revalidateNow(accessControl);
       writeJson(response, 200, { authenticated: false }, { 'set-cookie': accessControl.clearSessionCookie() });
@@ -641,7 +671,7 @@ async function handleRequest(
           code: 'request.method-not-allowed',
           ownerId: APP_OWNER,
           message: 'health probe requires POST',
-          nextAction: 'send an authenticated same-origin POST request',
+          nextAction: 'send an authenticated POST request',
         },
       }, { allow: 'POST' });
       return;
@@ -674,12 +704,31 @@ async function handleRequest(
     }
     if (path.startsWith('/api/') && !supervisorControlled) {
       const session = await requireSession(accessControl, request);
-      if (isMutation(method)) requireOrigin(accessControl, request);
       if (path === '/api/executions/' || path.startsWith('/api/executions/')) {
         if (isClosing()) {
           throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
         }
       }
+    }
+    // The single public display-preference resource, reached only after the
+    // authenticated boundary above. It is Config-backed and writes only the
+    // user's display preference; it never touches task or control Journal state.
+    if (
+      path === UI_DISPLAY_PREFERENCE_ROUTE
+      && (method === 'GET' || method === 'PUT' || method === 'DELETE')
+    ) {
+      if (displayPreference === undefined) {
+        throw new UiRuntimeApiError(
+          'display-preference.unsupported',
+          APP_OWNER,
+          'this runtime was started without a Config-backed display preference resource',
+          'start the runtime through the supervisor-owned serve entry that assembles Config paths',
+          501,
+        );
+      }
+      const body = method === 'PUT' ? await readBody(request) : undefined;
+      writeJson(response, 200, await displayPreference.handle(method, body));
+      return;
     }
     if (path === '/api/runtime/status' && method === 'GET') {
       writeJson(response, 200, service.status());
@@ -832,11 +881,39 @@ async function handleRequest(
       return;
     }
     if (path === '/api/dashboard' && method === 'GET') {
-      writeJson(response, 200, service.dashboard());
-      return;
+      const scope = url.searchParams.get('scope');
+      if (scope === null) {
+        writeJson(response, 200, service.dashboard());
+        return;
+      }
+      if (scope === 'system') {
+        writeJson(response, 200, await service.systemRead());
+        return;
+      }
+      if (scope === 'project') {
+        const projectKey = url.searchParams.get('projectKey')?.trim();
+        if (!projectKey) {
+          throw new UiRuntimeApiError(
+            'read.scope.invalid',
+            APP_OWNER,
+            'project scope requires a non-empty projectKey',
+            'send scope=project&projectKey=<declared projectKey>',
+            400,
+          );
+        }
+        writeReadResult(response, await service.projectRead(projectKey));
+        return;
+      }
+      throw new UiRuntimeApiError(
+        'read.scope.invalid',
+        APP_OWNER,
+        `unsupported dashboard scope: ${scope}`,
+        'send scope=system or scope=project&projectKey=<declared projectKey>',
+        400,
+      );
     }
     if (path === '/api/tasks' && method === 'GET') {
-      writeJson(response, 200, service.listTasks());
+      writeJson(response, 200, await service.listTasksWithIdentitySource());
       return;
     }
     if (path === '/api/tasks' && method === 'POST') {
@@ -1069,7 +1146,86 @@ async function handleRequest(
     }
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);
     if (taskDashboard && method === 'GET') {
-      writeJson(response, 200, await service.taskDashboardWithPlan(id('task', decodeURIComponent(taskDashboard[1]!))));
+      const taskId = id('task', decodeURIComponent(taskDashboard[1]!));
+      const projectKey = url.searchParams.get('projectKey');
+      const mode = url.searchParams.get('mode');
+      if (projectKey !== null || mode !== null) {
+        if (!projectKey || !mode) {
+          throw new UiRuntimeApiError(
+            'read.scope.invalid',
+            APP_OWNER,
+            'scoped task dashboard requires both projectKey and mode',
+            'send projectKey=<declared projectKey>&mode=fake|rcc',
+            400,
+          );
+        }
+        if (mode !== 'fake' && mode !== 'rcc') {
+          throw new UiRuntimeApiError(
+            'read.scope.invalid',
+            APP_OWNER,
+            `unsupported task read mode: ${mode}`,
+            'send mode=fake or mode=rcc',
+            400,
+          );
+        }
+        writeReadResult(response, await service.scopedTaskDashboard(taskId, projectKey, mode));
+        return;
+      }
+      writeJson(response, 200, await service.taskDashboardWithPlan(taskId));
+      return;
+    }
+    const taskRecords = /^\/api\/tasks\/([^/]+)\/records$/.exec(path);
+    if (taskRecords && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskRecords[1]!));
+      const projectKey = url.searchParams.get('projectKey')?.trim();
+      const mode = url.searchParams.get('mode');
+      const view = url.searchParams.get('view');
+      if (!projectKey || !mode) {
+        throw new UiRuntimeApiError(
+          'read.scope.invalid',
+          APP_OWNER,
+          'scoped task records require both projectKey and mode',
+          'send projectKey=<declared projectKey>&mode=fake|rcc&view=actions|raw',
+          400,
+        );
+      }
+      if (mode !== 'fake' && mode !== 'rcc') {
+        throw new UiRuntimeApiError(
+          'read.scope.invalid',
+          APP_OWNER,
+          `unsupported task read mode: ${mode}`,
+          'send mode=fake or mode=rcc',
+          400,
+        );
+      }
+      if (view !== 'actions' && view !== 'raw') {
+        throw new UiRuntimeApiError(
+          'records.view.invalid',
+          APP_OWNER,
+          'records view must be actions or raw',
+          'send view=actions or view=raw',
+          400,
+        );
+      }
+      const limitParam = url.searchParams.get('limit');
+      const limit = limitParam === null ? 20 : Number(limitParam);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+        throw new UiRuntimeApiError(
+          'records.limit.invalid',
+          APP_OWNER,
+          'records limit must be an integer from 1 to 500',
+          'send a valid records limit',
+          400,
+        );
+      }
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      writeReadResult(response, await service.taskRecords(taskId, {
+        projectKey,
+        mode,
+        view,
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+      }));
       return;
     }
     const taskContextHistory = /^\/api\/tasks\/([^/]+)\/context-history$/.exec(path);

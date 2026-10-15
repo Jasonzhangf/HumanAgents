@@ -1,4 +1,5 @@
 import type {
+  AnyProviderExecutionIdentityRef,
   BusinessPayload,
   ProviderExecutionIdentityRef,
   ProviderRequestIdentityRef,
@@ -67,8 +68,10 @@ export interface MaterializedRequestInput {
 /** Which provider request boundary the hook is materializing. */
 export type ProviderRequestContextPhase = 'initial' | 'continuation';
 
-export interface ProviderRequestContextHookInput {
-  readonly execution: ProviderExecutionIdentityRef;
+export interface ProviderRequestContextHookInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
+  readonly execution: TIdentity;
   readonly request: ProviderRequestIdentityRef;
   readonly phase: ProviderRequestContextPhase;
 }
@@ -78,6 +81,8 @@ export interface ProviderRequestContextHookInput {
  * and before every tool continuation, after durable request registration and
  * before the external side effect. A hook failure stops the request.
  */
-export type ProviderRequestContextHook = (
-  input: ProviderRequestContextHookInput,
+export type ProviderRequestContextHook<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = (
+  input: ProviderRequestContextHookInput<TIdentity>,
 ) => Promise<MaterializedRequestInput>;

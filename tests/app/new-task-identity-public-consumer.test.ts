@@ -1,0 +1,1010 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import {
+  id,
+  TASK_FLOW_DEFINITION_VERSION,
+  type EvidenceRef,
+  type ExecutionPolicyDefinition,
+  type JournalCommitRef,
+  type ProviderBinding,
+  type ProviderStartInput,
+  type ProviderStartReceipt,
+  type ScopeRef,
+  type TaskId,
+  type TaskFlowBinding,
+  type TaskIdentityAppendInput,
+  type TaskIdentityRecord,
+  type TaskPlanSnapshot,
+} from '../../packages/contracts/src/index.js';
+import {
+  JsonlOrganJournal,
+  JsonlTaskPlanRevisionJournal,
+} from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
+import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
+import { TaskPlanRevisionConsumer } from '../../packages/runtime/src/orchestration/task-plan-revisions.js';
+import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
+import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
+import { FakeReplayExecutionRuntimePort, startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import {
+  uiRuntimeCheckpointRoot,
+  uiRuntimeControlJournalPath,
+  uiRuntimeModeRoot,
+} from '../../packages/app/src/ui-runtime/journal.js';
+import { TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from '../../packages/app/src/ui-runtime/task-control.js';
+import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
+import type {
+  RuntimeTaskDashboardProjection,
+  RuntimeTaskListProjection,
+} from '../../packages/ui/contracts/runtime.js';
+import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
+
+// A real public new-task submission must bind the confirmed typed requirement
+// source to the Task it creates before execution starts. The current product
+// wiring had no such edge, so a genuine Task reached the native closed-turn
+// Planner without identity. This one local consumer exercises the actual
+// HTTP/intake/confirmation owners and the existing Organ Journal identity owner
+// instead of a scenario matrix.
+
+const ROOT = process.env.HUMANAGENT_TEST_ROOT
+  ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-production-task-identity-r1-20261014');
+
+const organId = id('organ', 'organ-task-identity-consumer');
+const binding: ProviderBinding = {
+  bindingId: 'binding-task-identity',
+  providerId: 'provider-task-identity',
+  protocol: 'responses',
+  endpointRef: 'rcc-v3:127.0.0.1:4444',
+  modelRef: 'model-task-identity',
+  configDigest: 'sha256:task-identity-config',
+  capabilityDigest: 'sha256:task-identity-capability',
+};
+
+const rawFetch = globalThis.fetch.bind(globalThis);
+const sessionByOrigin = new Map<string, string>();
+
+globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const origin = new URL(url).origin;
+  const cookie = sessionByOrigin.get(origin);
+  const headers = new Headers(init.headers ?? {});
+  if (cookie) headers.set('cookie', cookie);
+  const method = (init.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') headers.set('origin', origin);
+  return rawFetch(input, { ...init, headers });
+}) as typeof fetch;
+
+/**
+ * One authenticated request that deliberately carries NO Origin header.
+ *
+ * The Origin guard was deleted, so this must now succeed. The module-level fetch
+ * wrapper above always adds an Origin for mutations, so the no-Origin proof has
+ * to use the raw fetch with the cookie set explicitly.
+ */
+async function rawNoOrigin(
+  url: string,
+  method: 'GET' | 'PUT' | 'DELETE',
+  cookie: string,
+  body?: unknown,
+): Promise<Response> {
+  return rawFetch(url, {
+    method,
+    headers: {
+      cookie,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
+async function accessControlFor(root: string) {
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('task-identity-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  return { accessControl, cookie: accessControl.sessionCookie(session).split(';')[0]! };
+}
+
+function memoryFor(projectKey: string) {
+  return {
+    coordinator: new MemoryCoordinator(),
+    backend: new DeterministicMemoryBackend(),
+    projectKey,
+    roleId: 'execution',
+  };
+}
+
+const createInterpreter: ExplicitBrainInputInterpreter = {
+  async interpret(input) {
+    return {
+      kind: 'requirement',
+      normalizedInput: input.rawInput,
+      knownFacts: [],
+      intent: 'create',
+      proposal: `create a task for ${input.rawInput}`,
+      decisionRefs: [],
+    };
+  },
+};
+
+// The execution port is the first real boundary that observes a started
+// execution. Reading the actual identity Journal here proves the identity is
+// committed before any execution start, not merely present later.
+class IdentityBeforeStartPort extends FakeReplayExecutionRuntimePort {
+  readonly identitiesAtStart: Array<TaskIdentityRecord | undefined> = [];
+
+  constructor(
+    private readonly taskControlPath: string,
+    options: ConstructorParameters<typeof FakeReplayExecutionRuntimePort>[0],
+  ) {
+    super(options);
+  }
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    const identities = await new JsonlTaskIdentityJournal(new JsonlOrganJournal(this.taskControlPath)).replay();
+    this.identitiesAtStart.push(identities.find((identity) => identity.scope.taskId.value === input.taskId.value));
+    return super.start(input);
+  }
+}
+
+class FailOnceIdentityJournal extends JsonlTaskIdentityJournal {
+  failNextAppend = false;
+
+  override async append(input: TaskIdentityAppendInput): Promise<TaskIdentityRecord> {
+    if (this.failNextAppend) {
+      this.failNextAppend = false;
+      throw new Error('task identity journal unavailable');
+    }
+    return super.append(input);
+  }
+}
+
+class TaskFlowPreparingIdentityJournal implements TaskIdentityPort {
+  constructor(
+    private readonly inner: TaskIdentityPort,
+    private readonly taskFlow: TaskFlowBinding,
+  ) {}
+
+  append(input: TaskIdentityAppendInput): Promise<TaskIdentityRecord> {
+    return this.inner.append({ ...input, taskFlow: this.taskFlow });
+  }
+
+  replay(scope?: ScopeRef): Promise<readonly TaskIdentityRecord[]> {
+    return this.inner.replay(scope);
+  }
+}
+
+/** Counts real execution starts so a pure resource mount can prove none happened. */
+class CountingStartPort extends FakeReplayExecutionRuntimePort {
+  startCount = 0;
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.startCount += 1;
+    return super.start(input);
+  }
+}
+
+// The real admission owner rejects any execution without a current TaskGrant.
+// The fixture therefore commits the real identity first and only then grants
+// exactly the returned Task scope to the actual product principal owner. It
+// reuses the same physical control Organ Journal and never grants in production;
+// a failed identity append (case B) throws before any grant is written.
+class GrantPreparingIdentityJournal implements TaskIdentityPort {
+  constructor(
+    private readonly inner: TaskIdentityPort,
+    private readonly grants: JsonlTaskGrantJournal,
+    private readonly principalOwner: string,
+  ) {}
+
+  async append(input: TaskIdentityAppendInput): Promise<TaskIdentityRecord> {
+    const record = await this.inner.append(input);
+    const existing = await this.grants.readTaskGrant(record.scope.taskId);
+    if (existing.grant === null) {
+      await this.grants.grant({
+        requestId: `task-identity-fixture-grant:${record.scope.taskId.value}`,
+        taskId: record.scope.taskId,
+        owner: this.principalOwner,
+        capability: {
+          actionId: TASK_EXECUTION_ACTION_ID,
+          capabilities: [TASK_EXECUTION_CAPABILITY],
+          scope: { organId: record.scope.organId, taskId: record.scope.taskId },
+        },
+        expectedRevision: 0,
+      });
+    }
+    return record;
+  }
+
+  replay(scope?: ScopeRef): Promise<readonly TaskIdentityRecord[]> {
+    return this.inner.replay(scope);
+  }
+}
+
+function identityWithFixtureGrant(
+  principalOwner: string,
+  taskControlPath: string,
+  inner: TaskIdentityPort = new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)),
+  taskFlow?: TaskFlowBinding,
+): TaskIdentityConsumer {
+  const identityJournal = taskFlow === undefined
+    ? inner
+    : new TaskFlowPreparingIdentityJournal(inner, taskFlow);
+  return new TaskIdentityConsumer(new GrantPreparingIdentityJournal(
+    identityJournal,
+    new JsonlTaskGrantJournal(new JsonlOrganJournal(taskControlPath)),
+    principalOwner,
+  ));
+}
+
+function taskControlPathFor(root: string): string {
+  return join(root, 'checkpoints', 'fake', 'task-control.jsonl');
+}
+
+async function startRuntime(root: string, port: FakeReplayExecutionRuntimePort, extra: {
+  readonly projectKey: string;
+  readonly taskIdentity?: (principalOwner: string, taskControlPath: string) => TaskIdentityConsumer;
+}) {
+  const auth = await accessControlFor(root);
+  const principalOwner = auth.accessControl.readProductPrincipalOwner();
+  const taskControlPath = taskControlPathFor(root);
+  const taskIdentity = extra.taskIdentity?.(principalOwner, taskControlPath);
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port,
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages', 'ui', 'static'),
+    projectKey: extra.projectKey,
+    workspaceRoot: root,
+    memory: memoryFor(extra.projectKey),
+    accessControl: auth.accessControl,
+    explicitBrainInterpreter: createInterpreter,
+    ...(taskIdentity === undefined ? {} : { taskIdentity }),
+  });
+  sessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
+  return runtime;
+}
+
+async function submitNewTask(runtime: Awaited<ReturnType<typeof startUiRuntime>>, suffix: string) {
+  const post = async (path: string, body: unknown): Promise<Response> => fetch(`${runtime.server.url}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const receive = await post('/api/explicit/inputs', {
+    sourceRef: `ui:${suffix}`,
+    rawInput: `create the ${suffix} task`,
+    channel: 'business',
+    requestKind: 'new-task-create' as const,
+  });
+  assert.equal(receive.status, 201);
+  const { interactionId } = await receive.json() as { readonly interactionId: string };
+  const interpret = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, {});
+  assert.equal(interpret.status, 200);
+  const inspected = await (await fetch(
+    `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}`,
+  )).json() as {
+    readonly draft?: { readonly draftId: string };
+    readonly revision?: { readonly revisionVersion: number; readonly revisionHash: string };
+  };
+  assert.ok(inspected.draft);
+  assert.ok(inspected.revision);
+  const confirmation = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/confirmation`, {
+    interactionId,
+    draftId: inspected.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: `confirmation:${suffix}`,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-14T00:00:00.000Z',
+    payloadRef: `asset://requirements/${suffix}`,
+    requestKind: 'new-task-create',
+    draftRevisionVersion: inspected.revision!.revisionVersion,
+    draftRevisionHash: inspected.revision!.revisionHash,
+  });
+  assert.equal(confirmation.status, 200);
+  const receipt = await confirmation.json() as { readonly requirement: { readonly requirementId: string; readonly draftId: string } };
+  const confirmationParams = {
+    interactionId,
+    draftId: inspected.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: `confirmation:${suffix}`,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-14T00:00:00.000Z',
+    payloadRef: `asset://requirements/${suffix}`,
+    requestKind: 'new-task-create' as const,
+    draftRevisionVersion: inspected.revision!.revisionVersion,
+    draftRevisionHash: inspected.revision!.revisionHash,
+  };
+  return {
+    interactionId,
+    draftId: inspected.draft!.draftId,
+    revisionVersion: inspected.revision!.revisionVersion,
+    revisionHash: inspected.revision!.revisionHash,
+    receipt,
+    confirmationParams,
+  };
+}
+
+async function replayConfirmation(
+  runtime: Awaited<ReturnType<typeof startUiRuntime>>,
+  confirmationParams: {
+    readonly interactionId: string;
+    readonly draftId: string;
+    readonly inputRevision: number;
+    readonly confirmationRef: string;
+    readonly confirmedBy: string;
+    readonly confirmedAt: string;
+    readonly payloadRef: string;
+    readonly requestKind: 'new-task-create';
+    readonly draftRevisionVersion: number;
+    readonly draftRevisionHash: string;
+  },
+): Promise<{ readonly status: number; readonly body: unknown }> {
+  const replay = await fetch(
+    `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(confirmationParams.interactionId)}/confirmation`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(confirmationParams),
+    },
+  );
+  return { status: replay.status, body: await replay.json() };
+}
+
+async function waitFor(assertion: () => void, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      last = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  if (last instanceof Error) throw last;
+  throw new Error('waitFor timed out');
+}
+
+async function waitForAsync(assertion: () => Promise<void>, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown;
+  while (Date.now() < deadline) {
+    try {
+      await assertion();
+      return;
+    } catch (error) {
+      last = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  if (last instanceof Error) throw last;
+  throw new Error('waitForAsync timed out');
+}
+
+async function identityRecords(taskControlPath: string): Promise<readonly TaskIdentityRecord[]> {
+  return new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)).replay();
+}
+
+async function createdTaskIds(runtime: Awaited<ReturnType<typeof startUiRuntime>>): Promise<readonly string[]> {
+  const tasks = runtime.service.listTasks();
+  return [
+    ...tasks.running,
+    ...tasks.waiting,
+    ...tasks.completed,
+    ...tasks.stopped,
+    ...tasks.draft,
+    ...tasks.failed,
+  ].map((row) => row.taskId.value);
+}
+
+function taskPlanEvidence(label: string, scope: ScopeRef): EvidenceRef {
+  return {
+    evidenceId: id('evidence', `app-read-mount-${label}`),
+    kind: 'execution',
+    source: 'humanagent.tests.app-read-mounts',
+    locator: `test://app-read-mounts/${label}`,
+    scope,
+  };
+}
+
+function taskPlanSnapshot(label: string): TaskPlanSnapshot {
+  return {
+    title: `Reasoning plan ${label}`,
+    summary: `Published reasoning plan ${label}.`,
+    completeness: { scope: 'whole-task', status: 'complete' },
+    acceptanceCriteria: [{
+      criterionId: `${label}-criterion`,
+      description: `Verify the ${label} reasoning plan.`,
+    }],
+    nodes: [
+      {
+        nodeId: `${label}-work`,
+        kind: 'work',
+        title: `Do ${label}`,
+        intent: `Complete the ${label} work.`,
+        definition: { owner: 'runtime' },
+        phaseId: `${label}-phase`,
+      },
+      {
+        nodeId: `${label}-check`,
+        kind: 'check',
+        title: `Check ${label}`,
+        intent: `Verify the ${label} result.`,
+        definition: { owner: 'runtime' },
+        phaseId: `${label}-phase`,
+      },
+    ],
+    phases: [{
+      phaseId: `${label}-phase`,
+      title: `Phase ${label}`,
+      memberNodeIds: [`${label}-work`, `${label}-check`],
+    }],
+    relations: [{
+      fromNodeId: `${label}-work`,
+      toNodeId: `${label}-check`,
+      kind: 'depends-on',
+    }],
+  };
+}
+
+function taskPlanSource(
+  revision: number,
+  label: string,
+  scope: ScopeRef,
+): {
+  readonly requirementId: string;
+  readonly inputRevision: number;
+  readonly draftId: string;
+  readonly draftRevisionVersion: number;
+  readonly draftRevisionHash: string;
+  readonly confirmationRef: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+} {
+  return {
+    requirementId: `requirement-${label}`,
+    inputRevision: revision,
+    draftId: `draft-${label}`,
+    draftRevisionVersion: revision,
+    draftRevisionHash: `draft-hash-${label}`,
+    confirmationRef: `confirmation-${label}`,
+    evidenceRefs: [taskPlanEvidence(`source-${label}`, scope)],
+  };
+}
+
+function dashboardSchedulePolicy(): ExecutionPolicyDefinition {
+  return {
+    policyId: 'policy-app-read-mount-dashboard',
+    policyRevision: 1,
+    timezone: 'UTC',
+    canonicalInstant: '2026-10-15T00:00:00.000Z',
+    dstMode: 'wall',
+    dstMissedPolicy: 'shift-forward',
+    dstAmbiguousPolicy: 'earlier-offset',
+    latePolicy: 'run-once',
+    busyPolicy: 'skip',
+    executionMode: 'recurring',
+    startAt: '2026-10-15T00:00:00.000Z',
+    frequency: 'interval',
+    intervalMinutes: 60,
+  };
+}
+
+async function readOptionalFile(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as { readonly code?: string }).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+async function currentTaskPlanReceipt(
+  consumer: TaskPlanRevisionConsumer,
+  scope: ScopeRef,
+  revisionId: string,
+): Promise<JournalCommitRef> {
+  const receipt = await consumer.getCommitRef(scope, revisionId);
+  if (receipt === null) throw new Error(`fixture lost the physical receipt for ${revisionId}`);
+  return receipt;
+}
+
+test('public new-task submit binds the real typed source and cold-reads before and after execution', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-a-'));
+  const committedTaskFlow: TaskFlowBinding = {
+    kind: 'long-running',
+    definitionVersion: TASK_FLOW_DEFINITION_VERSION,
+  };
+  const taskControlPath = taskControlPathFor(root);
+  const port = new IdentityBeforeStartPort(taskControlPath, { binding, stepDelayMs: 1 });
+  const runtime = await startRuntime(root, port, {
+    projectKey: 'project-task-identity-a',
+    taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path, undefined, committedTaskFlow),
+  });
+  let submission: Awaited<ReturnType<typeof submitNewTask>> | undefined;
+  try {
+    submission = await submitNewTask(runtime, 'public-identity-a');
+
+    // The public GET projects the exact committed Task identity source for the
+    // row of the same task scope. This is the released read-only linkage; it
+    // proves projection only, not that the native execution chain ran.
+    await waitForAsync(async () => {
+      const records = await identityRecords(taskControlPath);
+      assert.equal(records.length, 1);
+    });
+    const committedIdentity = (await identityRecords(taskControlPath))[0]!;
+    const listResponse = await fetch(`${runtime.server.url}/api/tasks`);
+    assert.equal(listResponse.status, 200);
+    const list = await listResponse.json() as RuntimeTaskListProjection;
+    const allRows = [
+      ...list.running, ...list.waiting, ...list.completed,
+      ...list.stopped, ...list.draft, ...list.failed,
+    ];
+    const projectedRow = allRows.find((row) => row.taskId.value === committedIdentity.scope.taskId.value);
+    assert.ok(projectedRow, 'the public task row for the committed identity must be present');
+    assert.deepEqual(projectedRow!.identitySource, committedIdentity.source);
+    assert.deepEqual(projectedRow!.taskFlow, committedTaskFlow);
+    assert.deepEqual(
+      Object.keys(committedIdentity.source).sort(),
+      ['confirmationRef', 'draftId', 'draftRevisionHash', 'draftRevisionVersion', 'inputRevision', 'requirementId'].sort(),
+    );
+
+    await waitFor(() => assert.equal(port.identitiesAtStart.length, 1));
+
+    const identities = await identityRecords(taskControlPath);
+    assert.equal(identities.length, 1);
+    const identity = identities[0]!;
+    const beforeExecution = port.identitiesAtStart[0];
+    assert.ok(beforeExecution, 'identity must be readable at the first execution start');
+    assert.equal(beforeExecution!.scope.organId.value, organId.value);
+    assert.equal(identity.scope.taskId.value, port.identitiesAtStart[0]!.scope.taskId.value);
+    assert.equal(identity.source.requirementId, submission.receipt.requirement.requirementId);
+    assert.equal(identity.source.draftId, submission.draftId);
+    assert.equal(identity.source.inputRevision, 1);
+    assert.equal(identity.source.draftRevisionVersion, submission.revisionVersion);
+    assert.equal(identity.source.draftRevisionHash, submission.revisionHash);
+    assert.equal(identity.source.confirmationRef, 'confirmation:public-identity-a');
+    assert.match(identity.journalCommitRef, /^jsonl:/);
+
+    // One real Task, one identity, one execution.
+    assert.equal(runtime.service.listTasks().counts.total, 1);
+    assert.equal(port.identitiesAtStart.length, 1);
+  } finally {
+    await runtime.close();
+  }
+
+  // A fresh reader over the same physical Journal resolves the same identity.
+  const cold = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)));
+  const coldIdentity = await cold.read({ organId, taskId: id('task', (await identityRecords(taskControlPath))[0]!.scope.taskId.value) });
+  assert.ok(coldIdentity);
+  assert.deepEqual(coldIdentity!.taskFlow, committedTaskFlow);
+
+  const replayPort = new IdentityBeforeStartPort(taskControlPath, { binding, stepDelayMs: 1 });
+  const replayed = await startRuntime(root, replayPort, {
+    projectKey: 'project-task-identity-a',
+    taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path, undefined, committedTaskFlow),
+  });
+  try {
+    // Replaying the same final submission must not create a second Task,
+    // identity, or FIFO consumption.
+    const duplicate = await replayConfirmation(replayed, submission!.confirmationParams);
+    assert.equal(duplicate.status, 200);
+    assert.equal((duplicate.body as { readonly requirement: { readonly status: string } }).requirement.status, 'duplicate');
+    assert.equal((await identityRecords(taskControlPath)).length, 1);
+    assert.equal(replayPort.identitiesAtStart.length, 0, 'a duplicate submit must not start a second execution');
+    assert.equal(replayed.service.listTasks().counts.total, 1, 'a duplicate submit must not create a second Task');
+
+    // A real task without a committed identity remains unbound: the public row
+    // must omit taskFlow instead of defaulting a legacy row to one-shot.
+    const legacy = replayed.service.createTask({ title: 'legacy task', directive: 'legacy task' });
+    const legacyResponse = await fetch(`${replayed.server.url}/api/tasks`);
+    assert.equal(legacyResponse.status, 200);
+    const legacyList = await legacyResponse.json() as RuntimeTaskListProjection;
+    const legacyRow = [
+      ...legacyList.running, ...legacyList.waiting, ...legacyList.completed,
+      ...legacyList.stopped, ...legacyList.draft, ...legacyList.failed,
+    ].find((row) => row.taskId.value === legacy.taskId.value);
+    assert.ok(legacyRow, 'the identityless task must still appear in the public task list');
+    assert.equal(Object.prototype.hasOwnProperty.call(legacyRow, 'taskFlow'), false);
+  } finally {
+    await replayed.close();
+  }
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('a real identity append failure stops execution and retries the same Task and source', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-b-'));
+  const taskControlPath = taskControlPathFor(root);
+  const faultJournal = new FailOnceIdentityJournal(new JsonlOrganJournal(taskControlPath));
+  const port = new IdentityBeforeStartPort(taskControlPath, { binding, stepDelayMs: 1 });
+  const runtime = await startRuntime(root, port, {
+    projectKey: 'project-task-identity-b',
+    taskIdentity: (principalOwner, path) => identityWithFixtureGrant(principalOwner, path, faultJournal),
+  });
+  try {
+    faultJournal.failNextAppend = true;
+    await submitNewTask(runtime, 'public-identity-b');
+    await waitFor(() => assert.equal(runtime.service.status().implicitScheduling?.state, 'failed'));
+    assert.match(runtime.service.status().implicitScheduling?.message ?? '', /task identity journal unavailable/);
+    assert.equal(port.identitiesAtStart.length, 0, 'no execution may start while identity is uncommitted');
+    assert.equal((await identityRecords(taskControlPath)).length, 0);
+    const taskIds = await createdTaskIds(runtime);
+    assert.equal(taskIds.length, 1);
+
+    // Retrying reuses the created Task and the same typed source.
+    runtime.service.markConnected();
+    await waitFor(() => assert.equal(port.identitiesAtStart.length, 1));
+    const identities = await identityRecords(taskControlPath);
+    assert.equal(identities.length, 1);
+    assert.equal(identities[0]!.scope.taskId.value, taskIds[0]);
+    assert.deepEqual(await createdTaskIds(runtime), taskIds, 'retry must reuse the same Task');
+    assert.equal(port.identitiesAtStart.length, 1, 'identity is established exactly once before the retried start');
+  } finally {
+    await runtime.close();
+  }
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('app_read_mounts_preference_routes_dispatch_to_config_resource', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-pref-route-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ workspace, controlRoot });
+  await ensureControlLayout(paths);
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('pref-route-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  // The bound runtime uses Config-owned paths, so compare the exact canonical
+  // Journal that the service resolves rather than a path guessed from the root.
+  const taskControlPath = uiRuntimeControlJournalPath(
+    uiRuntimeModeRoot(paths.checkpointsRoot, 'fake'),
+  );
+  const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    accessControl,
+    organId,
+    binding,
+    port,
+    checkpointRoot: uiRuntimeCheckpointRoot(paths.checkpointsRoot),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages', 'ui', 'static'),
+    projectKey: 'project-pref-route',
+    workspaceRoot: root,
+    memory: memoryFor('project-pref-route'),
+    explicitBrainInterpreter: createInterpreter,
+    runtimePaths: paths,
+  });
+  sessionByOrigin.set(new URL(runtime.server.url).origin, cookie);
+  try {
+    const controlBytesBefore = await readOptionalFile(taskControlPath);
+    const url = `${runtime.server.url}/api/ui/display-preference`;
+
+    const initial = await rawNoOrigin(url, 'GET', cookie);
+    assert.equal(initial.status, 200);
+    const initialDto = await initial.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string; readonly lastManual?: unknown };
+      readonly defaultMode: string;
+    };
+    assert.equal(initialDto.preference.schemaVersion, 1);
+    assert.equal(initialDto.defaultMode, 'current');
+
+    const saved = await rawNoOrigin(url, 'PUT', cookie, {
+      kind: 'set-default',
+      mode: 'semantic',
+    });
+    assert.equal(saved.status, 200);
+    const savedDto = await saved.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(savedDto.preference.mode, 'semantic');
+    assert.equal(savedDto.defaultMode, 'semantic');
+
+    const afterSave = await rawNoOrigin(url, 'GET', cookie);
+    assert.equal(afterSave.status, 200);
+    const afterSaveDto = await afterSave.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(afterSaveDto.preference.mode, 'semantic');
+
+    const removed = await rawNoOrigin(url, 'DELETE', cookie);
+    assert.equal(removed.status, 200);
+    const removedDto = await removed.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(removedDto.preference.mode, 'current');
+
+    // One minimal invalid business field keeps a typed non-success and writes
+    // neither Config nor the task/control Journal.
+    const invalid = await rawNoOrigin(url, 'PUT', cookie, {
+      kind: 'set-default',
+      mode: 'not-a-mode',
+    });
+    assert.equal(invalid.status, 400);
+    const invalidBody = await invalid.json() as { readonly error?: { readonly code: string } };
+    assert.equal(invalidBody.error?.code, 'display-preference.invalid-mode');
+
+    // An unauthenticated mutation keeps the session rejection and changes no
+    // stored value.
+    const unauth = await rawFetch(url, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'set-default', mode: 'actions' }),
+    });
+    assert.equal(unauth.status, 401);
+    const afterInvalid = await rawNoOrigin(url, 'GET', cookie);
+    const afterInvalidDto = await afterInvalid.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(afterInvalidDto.preference.mode, 'current');
+
+    // The mount is a pure read/save/reset resource: no task Journal record is
+    // appended, and the execution port is never called (there is no task to
+    // start, so the fake port keeps zero sessions).
+    assert.equal(await readOptionalFile(taskControlPath), controlBytesBefore);
+    assert.equal(runtime.service.listTasks().counts.total, 0);
+    assert.equal(port.startCount, 0);
+  } finally {
+    await runtime.close();
+  }
+  await rm(root, { recursive: true, force: true });
+});
+
+test('app_read_mounts_dashboard_history_uses_accepted_current_and_scoped_identity', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-w1-dashboard-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ workspace, controlRoot: join(root, 'control') });
+  await ensureControlLayout(paths);
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('dashboard-history-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const taskControlPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(paths.checkpointsRoot, 'fake'));
+  const taskControlJournal = new JsonlOrganJournal(taskControlPath);
+  const taskIdentity = identityWithFixtureGrant(accessControl.readProductPrincipalOwner(), taskControlPath);
+  const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    accessControl,
+    organId,
+    binding,
+    port,
+    checkpointRoot: uiRuntimeCheckpointRoot(paths.checkpointsRoot),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages', 'ui', 'static'),
+    projectKey: paths.projectKey,
+    workspaceRoot: workspace,
+    memory: memoryFor(paths.projectKey),
+    explicitBrainInterpreter: createInterpreter,
+    runtimePaths: paths,
+    taskIdentity,
+  });
+  sessionByOrigin.set(new URL(runtime.server.url).origin, cookie);
+  try {
+    await submitNewTask(runtime, 'public-dashboard-w1');
+    await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 1));
+    const committedIdentity = (await identityRecords(taskControlPath))[0]!;
+    // The committed identity (seq 1) is only the first write of an independent
+    // real lifecycle. The runtime keeps appending admission, coverage and the
+    // terminal business checkpoint to the same control Journal, so wait for the
+    // genuine Task settlement before seeding plan/current facts and snapshotting.
+    await waitFor(() => assert.equal(
+      runtime.service.taskDashboard(committedIdentity.scope.taskId).state,
+      'succeeded',
+    ));
+    const plans = new TaskPlanRevisionConsumer(
+      new JsonlTaskPlanRevisionJournal(taskControlJournal),
+    );
+    const source = (revision: number) => ({
+      ...committedIdentity.source,
+      inputRevision: revision,
+      draftRevisionVersion: revision,
+      evidenceRefs: [taskPlanEvidence(`dashboard-source-${revision}`, committedIdentity.scope)],
+    });
+    const publish = async (
+      revisionId: string,
+      sequence: number,
+      predecessor: { readonly revisionId: string; readonly sequence: number; readonly contentDigest: `sha256:${string}` } | null,
+    ) => (await plans.publish({
+      scope: committedIdentity.scope,
+      revisionId,
+      sequence,
+      predecessor,
+      snapshot: taskPlanSnapshot(`v${sequence}`),
+      reason: sequence === 1
+        ? { kind: 'initial' as const, basisRefs: [] }
+        : { kind: 'adjustment' as const, text: `Publish reasoning plan v${sequence}`, basisRefs: [] },
+      source: source(sequence),
+      historyCoverage: 'complete-from-task-start',
+      publishedAt: `2026-10-15T00:0${sequence}:00.000Z`,
+      publishedBy: 'app-read-mount-fixture',
+    })).revision;
+    const v1 = await publish('plan-v1', 1, null);
+    const v2 = await publish('plan-v2', 2, {
+      revisionId: v1.revisionId,
+      sequence: v1.sequence,
+      contentDigest: v1.contentDigest,
+    });
+    const v3 = await publish('plan-v3', 3, {
+      revisionId: v2.revisionId,
+      sequence: v2.sequence,
+      contentDigest: v2.contentDigest,
+    });
+    const v2Receipt = await currentTaskPlanReceipt(plans, committedIdentity.scope, v2.revisionId);
+
+    const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: taskControlJournal });
+    const beforeCurrent = await currentState.read(committedIdentity.scope);
+    assert.equal(beforeCurrent.state, 'unknown');
+    await currentState.commit({
+      transitionId: 'fixture-current-v2',
+      taskScope: committedIdentity.scope,
+      expectedStateCommitRef: null,
+      state: {
+        task: {
+          id: committedIdentity.scope.taskId,
+          organId: committedIdentity.scope.organId,
+          title: 'Dashboard history fixture',
+          directive: 'Read the accepted reasoning plan',
+          directiveRevision: 1,
+          state: 'succeeded',
+          memoryScope: 'task',
+        },
+        processing: {
+          entryPhase: 'succeeded',
+          nextAction: { kind: 'stop' },
+          hardBlockers: [],
+          recoveryResponsibilityRef: 'fixture',
+          laterErrorRefs: [],
+          stages: [],
+        },
+        retainedDuties: [],
+        sourceCommitRefs: [],
+        currentPlan: {
+          revisionId: v2.revisionId,
+          revisionCommitRef: v2Receipt,
+        },
+      },
+    });
+
+    const subscriptionPath = join(paths.checkpointsRoot, 'ui-runtime', 'fake', 'subscriptions.jsonl');
+    const subscriptions = new SubscriptionControlPort(
+      new JsonlOrganJournal(subscriptionPath),
+      { organId },
+      subscriptionPath,
+    );
+    const subscriptionId = `subscription:${committedIdentity.source.requirementId}`;
+    const existingSchedule = await subscriptions.snapshot(subscriptionId).catch((error: unknown) => {
+      if ((error as { readonly code?: string }).code === 'not-found') return undefined;
+      throw error;
+    });
+    const schedule = existingSchedule ?? await subscriptions.create({
+      subscriptionId,
+      goalId: committedIdentity.source.requirementId,
+      scheduleRevision: 1,
+      state: 'active',
+      busyPolicy: 'skip',
+      currentOccurrenceOrdinal: 0,
+    }, dashboardSchedulePolicy(), subscriptionId);
+    const taskId = committedIdentity.scope.taskId;
+    const scheduleDueAt = '2026-10-15T00:00:00.000Z';
+    const occurrence = await subscriptions.schedule({
+      occurrence: {
+        subscriptionId,
+        scheduleRevision: schedule.subscription.scheduleRevision,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt: scheduleDueAt,
+      },
+      nowAt: scheduleDueAt,
+    });
+    assert.equal(occurrence.state, 'due');
+    const claim = await subscriptions.claim({
+      subscriptionId,
+      scheduleRevision: schedule.subscription.scheduleRevision,
+      occurrenceOrdinal: 1,
+      dueAt: scheduleDueAt,
+      taskId,
+      operationId: id('operation', 'app-read-mount-dashboard-claim'),
+      inputArtifactDigest: 'sha256:app-read-mount-dashboard-claim',
+      schedulerInstanceId: 'app-read-mount-dashboard-fixture',
+      leaseId: 'app-read-mount-dashboard-fixture',
+      generation: 1,
+      executionEpoch: 1,
+      nowAt: scheduleDueAt,
+      leaseUntil: '2026-10-15T01:00:00.000Z',
+    });
+    assert.equal(claim.taskId.value, taskId.value);
+    const controlBytesBeforeRead = await readOptionalFile(taskControlPath);
+    const dashboardResponse = await rawNoOrigin(
+      `${runtime.server.url}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`,
+      'GET',
+      cookie,
+    );
+    assert.equal(dashboardResponse.status, 200);
+    const dashboard = await dashboardResponse.json() as RuntimeTaskDashboardProjection & {
+      readonly plan?: { readonly subscriptionId: string; readonly state: string };
+    };
+    assert.equal(dashboard.plan?.subscriptionId, subscriptionId);
+    assert.equal(dashboard.plan?.state, schedule.subscription.state);
+    assert.equal(dashboard.taskPlanHistory.ok, true);
+    if (!dashboard.taskPlanHistory.ok) throw new Error(dashboard.taskPlanHistory.failure.message);
+    const history = dashboard.taskPlanHistory.value;
+    assert.deepEqual(history.revisions.map((revision) => revision.sequence), [1, 2, 3]);
+    assert.equal(history.current.state, 'known');
+    if (history.current.state !== 'known') throw new Error('accepted current must be known');
+    assert.equal(history.current.value.revisionId, v2.revisionId);
+    assert.deepEqual(history.current.value.revisionCommitRef, v2Receipt);
+    assert.equal(await readOptionalFile(taskControlPath), controlBytesBeforeRead);
+
+    const coldCurrent = await currentState.read(committedIdentity.scope);
+    assert.equal(coldCurrent.state, 'known');
+    if (coldCurrent.state !== 'known') throw new Error('cold current must be known');
+    assert.deepEqual(coldCurrent.value.currentPlan, {
+      revisionId: v2.revisionId,
+      revisionCommitRef: v2Receipt,
+    });
+    const coldIdentity = await new TaskIdentityConsumer(
+      new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)),
+    ).read(committedIdentity.scope);
+    assert.ok(coldIdentity);
+    assert.deepEqual(coldIdentity!.source, committedIdentity.source);
+
+    const scopedResponse = await rawNoOrigin(
+      `${runtime.server.url}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`
+        + `?projectKey=${encodeURIComponent(paths.projectKey)}&mode=fake`,
+      'GET',
+      cookie,
+    );
+    assert.equal(scopedResponse.status, 200);
+    const scoped = await scopedResponse.json() as RuntimeTaskDashboardProjection;
+    assert.equal(scoped.taskPlanHistory.ok, true);
+    if (!scoped.taskPlanHistory.ok) throw new Error(scoped.taskPlanHistory.failure.message);
+    assert.deepEqual(
+      scoped.taskPlanHistory.value.revisions.map((revision) => revision.sequence),
+      [1, 2, 3],
+    );
+    assert.equal(scoped.taskPlanHistory.value.current.state, 'known');
+    if (scoped.taskPlanHistory.value.current.state !== 'known') {
+      throw new Error('scoped accepted current must be known');
+    }
+    assert.deepEqual(scoped.taskPlanHistory.value.current.value, {
+      revisionId: v2.revisionId,
+      revisionCommitRef: v2Receipt,
+    });
+    assert.equal(v3.sequence, 3);
+  } finally {
+    await runtime.close();
+  }
+  await rm(root, { recursive: true, force: true });
+});

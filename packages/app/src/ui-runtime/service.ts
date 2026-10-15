@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
 import {
@@ -62,6 +62,8 @@ import {
   type ContextReplacement,
   type ContextView,
   type JournalCommitRef,
+  type TaskIdentityScope,
+  type TaskIdentityRecord,
 } from '../../../contracts/src/index.js';
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
@@ -120,17 +122,28 @@ import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
   RuntimeTaskEvent,
+  projectDurableTaskInventory,
   producedArtifactBody,
   producedArtifactPaths,
   type RuntimeCheckpointBoundaryPort,
+  type DurableTaskInventoryEntry,
   type RuntimeExecutionDriver,
   type RuntimeExecutionDriverInput,
   type RuntimeExplicitBrainJournalState,
   type RuntimeExecutionCapabilities,
+  type RuntimeTaskCoordinatorOptions,
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+import { createDefaultExecutionComposition } from './execution-composition.js';
 import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
+import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
+import { TaskPlanRevisionConsumer } from '../../../runtime/src/orchestration/task-plan-revisions.js';
+import { JsonlTaskPlanRevisionJournal } from '../../../adapters/jsonl/src/task-plan-revisions.js';
+import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
+import { createTaskPlanHistoryReader, type TaskPlanHistoryCurrentRead } from './task-plan-history.js';
+import type { RuntimeTaskPlanHistoryProjection } from '../../../ui/contracts/task-plan-history.js';
 // The declared silence budget is owned by the agent-io policy. The dashboard
 // reports it as the budget it was measured against; it is never restated here.
 import { DEFAULT_AGENT_IO_POLICY } from '../../../runtime/src/agent-io/types.js';
@@ -170,6 +183,15 @@ import {
   type RuntimeTaskErrorProjection,
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
+  type RuntimeProjectReadProjection,
+  type RuntimeProjectTaskReadRow,
+  type RuntimeRawEventProjection,
+  type RuntimeRawRecordBody,
+  type RuntimeRawRecordProjection,
+  type RuntimeStoredRecordRef,
+  type RuntimeSystemReadProjection,
+  type RuntimeTaskRecordsProjection,
+  type RuntimeTaskRowProjection,
   type RuntimeMode,
   type RuntimeReadResult,
   type RuntimeReadFailure,
@@ -222,8 +244,12 @@ import type {
 } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import { readProducedArtifacts, RESPONSES_FILE_SEARCH_TOOL } from '../provider-tool-execution.js';
+import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import {
+  FileCheckpointStore,
   readUiRuntimeTaskJournal,
+  uiRuntimeControlJournalPath,
+  uiRuntimeModeRoot,
   uiRuntimeTaskCheckpointPath,
   type UiRuntimeJournal,
   type UiRuntimeJournalRecord,
@@ -254,6 +280,7 @@ import {
 import type { OccurrenceTerminalProduction } from './occurrence-consumer.js';
 
 const APP_OWNER = 'humanagent.app';
+const TASK_PLAN_HISTORY_OWNER = 'humanagent.app.ui-runtime.task-plan-history';
 const RUNTIME_OWNER = 'humanagent.runtime';
 const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
 // Keep the confirmed FIFO entry observable through real HTTP reads (status and
@@ -343,6 +370,26 @@ export interface UiRuntimeMemoryComposition {
   readonly reviewState?: () => Promise<MemoryReviewState>;
 }
 
+/**
+ * The five execution ports the single Runtime coordinator consumes. The native
+ * launch assembly supplies them from one `createDefaultExecutionComposition`;
+ * a pure-library fixture supplies only `admitExecution`.
+ */
+type ServiceExecutionPorts = Pick<
+  RuntimeTaskCoordinatorOptions,
+  'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts'
+>;
+
+/**
+ * The original coordinator callbacks the native composition needs. They are
+ * captured before the coordinator exists and only delegate lazily, so the
+ * composition never executes a callback during construction.
+ */
+type ServiceCoordinatorCallbacks = Pick<
+  RuntimeTaskCoordinator,
+  'publishCurrentTurnState' | 'closedTurnPlannerPool' | 'recordProviderRequestIdentity'
+>;
+
 export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
   readonly organId: OrganId;
@@ -377,6 +424,15 @@ export interface UiRuntimeServiceOptions {
   readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
+  /**
+   * The existing Task identity owner over the same control Organ Journal the
+   * runtime already persists. The service never opens its own journal or mints
+   * identity from snapshot/log/model metadata; it only binds the confirmed
+   * typed requirement source to the Task it just created or reused. Absent on
+   * a genuine typed new-task create, the dispatch fails instead of fabricating
+   * an identity.
+   */
+  readonly taskIdentity?: TaskIdentityConsumer;
   readonly memory: UiRuntimeMemoryComposition;
   /**
    * The single owner of persisted execution plans (subscriptions). The app
@@ -405,6 +461,23 @@ export interface UiRuntimeServiceOptions {
       readonly maxAttempts?: number;
       readonly childCallPort?: import('../../../runtime/src/orchestration/types.js').ChildCallPort;
     }) => RuntimeTaskAssembly;
+    /**
+     * Pure-library fixtures and fake contracts bind the real admission owner
+     * directly on the original coordinator. Production launch uses
+     * `createExecutionPorts` instead so it never opens a second coordinator.
+     */
+    readonly admitExecution?: RuntimeTaskCoordinatorOptions['admitExecution'];
+    /**
+     * Launch assembly of the full native execution ports. It is called exactly
+     * once, before the coordinator is constructed; the supplied callbacks only
+     * delegate lazily to that same coordinator.
+     */
+    readonly createExecutionPorts?: (coordinator: ServiceCoordinatorCallbacks) => ServiceExecutionPorts;
+    /**
+     * The configured native Provider selection the launch composition needs to
+     * build its real execution driver. Absent for fake mode and pure fixtures.
+     */
+    readonly prepareAgentProvider?: Parameters<typeof createDefaultExecutionComposition>[0]['prepareAgentProvider'];
   };
   /**
    * Narrow durable boundary for the Runtime-owned active turn. The App
@@ -1273,6 +1346,42 @@ function unknownTaskFailure(taskId: TaskId, projectKey: string, mode: RuntimeMod
   };
 }
 
+/**
+ * Reasoning plan history answers only for a task whose committed typed identity
+ * names its Organ in the source/mode's canonical control Journal. When no
+ * identity is committed the caller sees this typed failure; it never receives
+ * an empty history, the latest publication, or the scheduling plan.
+ */
+function taskIdentityAuthorityFailure(
+  taskId: TaskId,
+  projectKey: string,
+  mode: RuntimeMode,
+  conflict: boolean,
+): RuntimeReadFailure {
+  return conflict
+    ? {
+      code: 'task-plan-history.identity-conflict',
+      ownerId: TASK_PLAN_HISTORY_OWNER,
+      message: `task ${taskId.value} in ${projectKey}/${mode} has conflicting committed Task identity Organ authority`,
+      nextAction: 'resolve the conflicting Task identity records before reading plan history for this scope',
+    }
+    : {
+      code: 'task-plan-history.scope-unavailable',
+      ownerId: TASK_PLAN_HISTORY_OWNER,
+      message: `task ${taskId.value} in ${projectKey}/${mode} has no committed Task identity scope in its canonical Journal`,
+      nextAction: 'establish the Task identity before reading reasoning plan history for this scope',
+    };
+}
+
+function taskPlanHistoryReadFailure(taskId: TaskId, message: string): RuntimeReadFailure {
+  return {
+    code: 'task-plan-history.read-failed',
+    ownerId: TASK_PLAN_HISTORY_OWNER,
+    message,
+    nextAction: 'restore the canonical task control Journal read for this task scope',
+  };
+}
+
 function readFailureFromError(error: unknown): RuntimeReadFailure {
   if (error instanceof UiRuntimeApiError) {
     return { code: error.code, ownerId: error.ownerId, message: error.message, nextAction: error.nextAction };
@@ -1405,6 +1514,171 @@ function journalRecordTaskId(record: UiRuntimeJournalRecord): string | undefined
   }
 }
 
+/** Modes with a real UI runtime Journal layout. `dsh` has no durable reader here. */
+const READABLE_RUNTIME_MODES: readonly RuntimeMode[] = ['fake', 'rcc'];
+
+function taskRowOf(input: RuntimeTaskSnapshotInput, mode: RuntimeMode): RuntimeTaskRowProjection {
+  const list = projectRuntimeTaskList({ mode, tasks: [input] });
+  const row = [...list.running, ...list.waiting, ...list.completed, ...list.stopped, ...list.draft, ...list.failed][0];
+  if (row === undefined) throw new Error('task row projection returned no row');
+  return row;
+}
+
+interface RecordsCursor {
+  readonly view: 'actions' | 'raw';
+  readonly ref: RuntimeStoredRecordRef;
+}
+
+function encodeRecordsCursor(cursor: RecordsCursor): string {
+  return JSON.stringify(cursor);
+}
+
+function decodeRecordsCursor(value: string): RecordsCursor | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const candidate = parsed as { readonly view?: unknown; readonly ref?: unknown };
+  if (candidate.view !== 'actions' && candidate.view !== 'raw') return undefined;
+  if (!candidate.ref || typeof candidate.ref !== 'object' || Array.isArray(candidate.ref)) return undefined;
+  return candidate as RecordsCursor;
+}
+
+function sameStoredRef(left: RuntimeStoredRecordRef, right: RuntimeStoredRecordRef): boolean {
+  return left.projectKey === right.projectKey
+    && left.mode === right.mode
+    && left.taskId.scope === right.taskId.scope
+    && left.taskId.value === right.taskId.value
+    && left.source === right.source
+    && left.ordinal === right.ordinal
+    && left.operationId === right.operationId
+    && left.executionEpoch === right.executionEpoch
+    && left.checkpointId === right.checkpointId;
+}
+
+function rawEventProjection(event: RuntimeTaskEvent): RuntimeRawEventProjection {
+  return {
+    seq: event.seq,
+    kind: event.kind,
+    state: event.state,
+    summary: event.summary,
+    occurredAt: event.occurredAt,
+    evidenceRefs: event.evidenceRefs,
+    ...(event.callId === undefined ? {} : { callId: event.callId }),
+    ...(event.toolId === undefined ? {} : { toolId: event.toolId }),
+    ...(event.arguments === undefined ? {} : { arguments: event.arguments }),
+    ...(event.status === undefined ? {} : { status: event.status }),
+    ...(event.error === undefined ? {} : { error: event.error }),
+    ...(event.outputRef === undefined ? {} : { outputRef: event.outputRef }),
+    ...(event.outputDigest === undefined ? {} : { outputDigest: event.outputDigest }),
+    ...(event.ownerId === undefined ? {} : { ownerId: event.ownerId }),
+    ...(event.retryable === undefined ? {} : { retryable: event.retryable }),
+    ...(event.nextAction === undefined ? {} : { nextAction: event.nextAction }),
+    ...(event.terminalPhase === undefined ? {} : { terminalPhase: event.terminalPhase }),
+    eventId: event.eventId,
+    operationId: event.operationId,
+    executionEpoch: event.executionEpoch,
+    ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+    ...(event.requestId === undefined ? {} : { requestId: event.requestId }),
+    ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
+    ...(event.providerOccurredAt === undefined ? {} : { providerOccurredAt: event.providerOccurredAt }),
+  };
+}
+
+interface RawRecordBuild {
+  readonly body: RuntimeRawRecordBody;
+  readonly occurredAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly operationId?: string;
+  readonly executionEpoch?: number;
+}
+
+function rawBuildForJournalRecord(record: UiRuntimeJournalRecord): RawRecordBuild | undefined {
+  switch (record.kind) {
+    case 'task.created':
+      return {
+        body: { kind: 'task.created', title: record.title, directive: record.directive, directiveRevision: record.directiveRevision },
+        occurredAt: record.createdAt,
+        evidenceRefs: [],
+      };
+    case 'task.updated':
+      return {
+        body: { kind: 'task.updated', title: record.title, directive: record.directive, directiveRevision: record.directiveRevision },
+        occurredAt: record.updatedAt,
+        evidenceRefs: [],
+      };
+    case 'task.deleted':
+      return { body: { kind: 'task.deleted', deletedAt: record.deletedAt }, occurredAt: record.deletedAt, evidenceRefs: [] };
+    case 'operation.started':
+      return {
+        body: {
+          kind: 'operation.started',
+          operationId: record.operationId.value,
+          executionEpoch: record.executionEpoch,
+          input: record.input,
+          orchestrated: record.orchestrated === true,
+        },
+        occurredAt: record.startedAt,
+        evidenceRefs: [],
+        operationId: record.operationId.value,
+        executionEpoch: record.executionEpoch,
+      };
+    case 'operation.event':
+      return {
+        body: { kind: 'operation.event', event: rawEventProjection(record.event) },
+        occurredAt: record.event.occurredAt,
+        evidenceRefs: record.event.evidenceRefs,
+        operationId: record.operationId.value,
+        executionEpoch: record.event.executionEpoch,
+      };
+    default:
+      return undefined;
+  }
+}
+
+interface PagedRecords<T> {
+  readonly items: readonly T[];
+  readonly hasMore: boolean;
+  readonly nextCursor?: string;
+  readonly failure?: RuntimeReadFailure;
+}
+
+function paginateRecords<T extends { readonly ref: RuntimeStoredRecordRef }>(
+  all: readonly T[],
+  cursor: RecordsCursor | undefined,
+  limit: number,
+  view: 'actions' | 'raw',
+): PagedRecords<T> {
+  let start = 0;
+  if (cursor !== undefined) {
+    const index = all.findIndex((item) => sameStoredRef(item.ref, cursor.ref));
+    if (index < 0) {
+      return {
+        items: [],
+        hasMore: false,
+        failure: {
+          code: 'records.cursor-not-found',
+          ownerId: APP_OWNER,
+          message: 'records cursor does not point at a current record in this task scope',
+          nextAction: 'request the first records page again',
+        },
+      };
+    }
+    start = index + 1;
+  }
+  const items = all.slice(start, start + limit);
+  const hasMore = start + items.length < all.length;
+  const last = items.at(-1);
+  return {
+    items,
+    hasMore,
+    ...(hasMore && last !== undefined ? { nextCursor: encodeRecordsCursor({ view, ref: last.ref }) } : {}),
+  };
+}
+
 export class UiRuntimeService {
   private readonly mode: 'fake' | 'rcc';
   private readonly coordinator: RuntimeTaskCoordinator;
@@ -1493,6 +1767,15 @@ export class UiRuntimeService {
       () => this.persistExplicitBrainState(),
     );
     this.mode = options.mode;
+    // The native launch assembly builds its execution ports once, before this
+    // coordinator exists. The callbacks it receives only delegate lazily to the
+    // coordinator assigned below, so nothing runs during construction.
+    const executionPorts = options.runtimeComposition?.createExecutionPorts?.({
+      publishCurrentTurnState: (taskId) => this.coordinator.publishCurrentTurnState(taskId),
+      closedTurnPlannerPool: (taskId) => this.coordinator.closedTurnPlannerPool(taskId),
+      recordProviderRequestIdentity: (event) => this.coordinator.recordProviderRequestIdentity(event),
+    });
+    const nativeDriverBound = executionPorts?.createDriver !== undefined;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
       checkpointStoreFor: options.checkpointStoreFor,
@@ -1511,7 +1794,9 @@ export class UiRuntimeService {
               journal: createJsonlRetryCycleJournalPort({
                 filePath: retryCycleJournalFilePath({ journalRoot: options.providerRetryConfig.journalRoot }),
               }),
-              createDriverForBinding: (bindingId, input) => this.createMemoryBoundDriverForBinding(bindingId, input),
+              createDriverForBinding: (bindingId, input) => nativeDriverBound
+                ? this.nativeRetryBindingSelectionUnavailable(bindingId)
+                : this.createMemoryBoundDriverForBinding(bindingId, input),
             },
           }),
       ...(options.runtimeComposition === undefined ? {} : {
@@ -1525,6 +1810,10 @@ export class UiRuntimeService {
             ...(input.childCallPort === undefined ? {} : { childCallPort: input.childCallPort }),
           }),
         }),
+      }),
+      ...(executionPorts === undefined ? {} : executionPorts),
+      ...(options.runtimeComposition?.admitExecution === undefined ? {} : {
+        admitExecution: options.runtimeComposition.admitExecution,
       }),
       ...(options.workspaceRoot === undefined ? {} : {
         producedArtifacts: {
@@ -1982,6 +2271,22 @@ export class UiRuntimeService {
     return this.createMemoryBoundDriverForBinding(this.options.binding.bindingId, input);
   }
 
+  /**
+   * The native execution factory selects its Provider through the configured
+   * `prepareAgentProvider` rather than a Retry-10 binding id, so the legacy
+   * per-binding driver cannot serve a configured retry path without bypassing
+   * native. Surface that exact gap instead of silently ignoring the declared
+   * retry config or falling back to the old driver.
+   */
+  private nativeRetryBindingSelectionUnavailable(bindingId: string): never {
+    throw new RuntimeTaskControlError(
+      'execution.retry.native-binding-selection-unavailable',
+      'humanagent.app.ui-runtime',
+      `the configured native execution factory has no binding-selection entry for retry candidate ${bindingId}`,
+      'select the declared retry candidate through the native Provider factory before dispatch',
+    );
+  }
+
   private findProviderRetryBinding(bindingId: string): ProviderBinding | undefined {
     return this.options.providerRetryConfig?.config.candidates.find((candidate) => candidate.binding.bindingId === bindingId)?.binding;
   }
@@ -2415,11 +2720,41 @@ export class UiRuntimeService {
   listTasks(): RuntimeTaskListProjection {
     return projectRuntimeTaskList({
       mode: this.mode,
-      tasks: [
-        ...this.queuedTaskSnapshots(),
-        ...this.coordinator.taskSnapshots().map((task) => this.withRequirementAdmission(task)),
-      ],
+      tasks: this.taskListSnapshots(),
     });
+  }
+
+  private taskListSnapshots(): readonly RuntimeTaskSnapshotInput[] {
+    return [
+      ...this.queuedTaskSnapshots(),
+      ...this.coordinator.taskSnapshots().map((task) => this.withRequirementAdmission(task)),
+    ];
+  }
+
+  /**
+   * Public task-list read composition. The synchronous `listTasks` stays free of
+   * Journal I/O for internal callers (for example admission counts); the HTTP
+   * read boundary composes the exact committed Task identity per row here. A row
+   * without a committed identity omits `identitySource`. A failed identity read
+   * keeps its typed error instead of degrading into an omitted (matching) row.
+   */
+  async listTasksWithIdentitySource(): Promise<RuntimeTaskListProjection> {
+    const snapshots = this.taskListSnapshots();
+    const taskIdentity = this.options.taskIdentity;
+    if (taskIdentity === undefined || snapshots.length === 0) {
+      return projectRuntimeTaskList({ mode: this.mode, tasks: snapshots });
+    }
+    const enriched = await Promise.all(snapshots.map(async (snapshot): Promise<RuntimeTaskSnapshotInput> => {
+      const identity = await taskIdentity.read({ organId: this.options.organId, taskId: snapshot.taskId });
+      return identity === undefined
+        ? snapshot
+        : {
+          ...snapshot,
+          identitySource: identity.source,
+          ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
+        };
+    }));
+    return projectRuntimeTaskList({ mode: this.mode, tasks: enriched });
   }
 
   dashboard(): RuntimeDashboardProjection {
@@ -2462,7 +2797,92 @@ export class UiRuntimeService {
     // Re-run the same pure dashboard projection with the authoritative
     // publication so the output/narrative are computed from committed records.
     const withPublication = publicOutput === undefined ? dashboard : this.taskDashboard(taskId, publicOutput);
-    return plan === undefined ? withPublication : { ...withPublication, plan };
+    return {
+      ...withPublication,
+      ...(plan === undefined ? {} : { plan }),
+      taskPlanHistory: await this.boundTaskPlanHistory(taskId),
+    };
+  }
+
+  /**
+   * Reasoning plan history for the serve-bound project/mode. The bound
+   * Dashboard GET carries no project/mode query, so the source is the
+   * Config-derived bound source rather than a request value.
+   */
+  private async boundTaskPlanHistory(
+    taskId: TaskId,
+  ): Promise<RuntimeReadResult<RuntimeTaskPlanHistoryProjection>> {
+    const source = this.boundProjectSource();
+    if (source === undefined) {
+      return { ok: false, failure: taskPlanHistoryReadFailure(taskId, 'the serve-bound project has no configured runtime paths') };
+    }
+    return this.taskPlanHistoryFor(source, this.mode, taskId);
+  }
+
+  /**
+   * Reasoning plan history and the exact Runtime-accepted current selection for
+   * one declared task scope.
+   *
+   * The Organ authority is the committed typed Task identity in that
+   * source/mode's one canonical control Journal. It is never borrowed from this
+   * instance's Organ, a workspace name, or another project's Journal. When that
+   * authority is absent or conflicting the read returns a typed failure; it
+   * never degrades to the latest publication, the scheduling plan, or an empty
+   * history. `current` comes from the committed Runtime current-state, so a
+   * task that accepted v2 reports v2 even after v3 is published.
+   */
+  private async taskPlanHistoryFor(
+    source: ConfiguredProjectReadSource,
+    mode: RuntimeMode,
+    taskId: TaskId,
+  ): Promise<RuntimeReadResult<RuntimeTaskPlanHistoryProjection>> {
+    const scope = { kind: 'task' as const, projectKey: source.projectKey, mode, taskId };
+    const journal = new JsonlOrganJournal(
+      uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
+    );
+    let taskScope: TaskIdentityScope;
+    try {
+      const identities = await new JsonlTaskIdentityJournal(journal).replay();
+      const matches = identities.filter((identity) => identity.scope.taskId.value === taskId.value);
+      const organIds = new Set(matches.map((identity) => identity.scope.organId.value));
+      if (matches.length === 0 || organIds.size !== 1) {
+        return {
+          ok: false,
+          failure: taskIdentityAuthorityFailure(taskId, source.projectKey, mode, organIds.size > 1),
+        };
+      }
+      taskScope = matches[0]!.scope;
+    } catch (error) {
+      return {
+        ok: false,
+        failure: taskPlanHistoryReadFailure(
+          taskId,
+          `committed Task identity read failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      };
+    }
+    const plans = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(journal));
+    let current: TaskPlanHistoryCurrentRead;
+    try {
+      const accepted = await createJsonlRuntimeTaskCurrentStateJournal({ journal }).read(taskScope);
+      current = accepted.state === 'unknown'
+        ? { state: 'unknown', reason: accepted.reason }
+        : accepted.value.currentPlan === undefined
+          ? {
+            state: 'unknown',
+            reason: 'the committed Runtime current-state has no accepted TaskPlan selection',
+          }
+          : { state: 'known', value: accepted.value.currentPlan };
+    } catch (error) {
+      return {
+        ok: false,
+        failure: taskPlanHistoryReadFailure(
+          taskId,
+          `committed Runtime current-state read failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      };
+    }
+    return createTaskPlanHistoryReader(plans).read({ scope, taskScope, current });
   }
 
   /**
@@ -2836,6 +3256,434 @@ export class UiRuntimeService {
   }
 
   /**
+   * The committed Task identities for one declared project/mode scope, read from
+   * that scope's own canonical control Journal. A row in this scope never
+   * borrows another instance's Organ: the replay is resolved from the same
+   * `checkpointsRoot`/mode as the row. A missing identity leaves the row
+   * unbound (absence, not a claim); a corrupt/unreadable identity Journal is
+   * surfaced as a typed failure so it never degrades into a default binding.
+   */
+  private async scopeCommittedIdentities(
+    source: ConfiguredProjectReadSource,
+    mode: RuntimeMode,
+  ): Promise<{ readonly byTaskId: ReadonlyMap<string, TaskIdentityRecord>; readonly failure?: RuntimeReadFailure }> {
+    try {
+      const journal = new JsonlOrganJournal(
+        uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
+      );
+      const identities = await new JsonlTaskIdentityJournal(journal).replay();
+      return { byTaskId: new Map(identities.map((identity) => [identity.scope.taskId.value, identity])) };
+    } catch (error) {
+      return {
+        byTaskId: new Map(),
+        failure: {
+          code: 'read.identity-failed',
+          ownerId: TASK_PLAN_HISTORY_OWNER,
+          message: `committed Task identity read failed for ${source.projectKey}/${mode}: ${error instanceof Error ? error.message : String(error)}`,
+          nextAction: 'restore the canonical task control Journal read for this scope',
+        },
+      };
+    }
+  }
+
+  /** Row snapshot enriched with this scope's own committed identity and task-flow binding. */
+  private snapshotWithScopeIdentity(
+    snapshot: RuntimeTaskSnapshot,
+    identity: TaskIdentityRecord | undefined,
+  ): RuntimeTaskSnapshotInput {
+    return {
+      ...toRuntimeTaskSnapshotInput(snapshot),
+      ...(identity === undefined
+        ? {}
+        : {
+          identitySource: identity.source,
+          ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
+        }),
+    };
+  }
+
+  private async liveProjectRows(source: ConfiguredProjectReadSource, mode: RuntimeMode): Promise<{
+    readonly rows: RuntimeProjectTaskReadRow[];
+    readonly failure?: RuntimeReadFailure;
+  }> {
+    const { byTaskId, failure } = await this.scopeCommittedIdentities(source, mode);
+    const rows = this.coordinator.taskSnapshots().map((snapshot) => ({
+      scope: { kind: 'task' as const, projectKey: source.projectKey, mode, taskId: snapshot.taskId },
+      task: taskRowOf(this.snapshotWithScopeIdentity(snapshot, byTaskId.get(snapshot.taskId.value)), mode),
+      basis: 'live-runtime' as const,
+    }));
+    return failure === undefined ? { rows } : { rows, failure };
+  }
+
+  private async readDurableInventory(
+    source: ConfiguredProjectReadSource,
+    mode: RuntimeMode,
+  ): Promise<{ entries: readonly DurableTaskInventoryEntry[]; failures: readonly RuntimeReadFailure[] }> {
+    const read = readUiRuntimeTaskJournal(source.checkpointsRoot, mode);
+    if (read.failure !== undefined) return { entries: [], failures: [read.failure] };
+    const inventory = await projectDurableTaskInventory({
+      records: read.records,
+      checkpointFor: (taskId, cycleId) => new FileCheckpointStore(
+        uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
+      ),
+    });
+    return { entries: inventory.entries, failures: inventory.failures };
+  }
+
+  private async projectReadRows(
+    source: ConfiguredProjectReadSource,
+  ): Promise<{ rows: RuntimeProjectTaskReadRow[]; failures: RuntimeReadFailure[] }> {
+    const rows: RuntimeProjectTaskReadRow[] = [];
+    const failures: RuntimeReadFailure[] = [];
+    for (const mode of READABLE_RUNTIME_MODES) {
+      if (this.isBoundScope(source.projectKey, mode)) {
+        const live = await this.liveProjectRows(source, mode);
+        rows.push(...live.rows);
+        if (live.failure !== undefined) failures.push(live.failure);
+        continue;
+      }
+      const inventory = await this.readDurableInventory(source, mode);
+      for (const failure of inventory.failures) failures.push(failure);
+      const { byTaskId, failure: identityFailure } = await this.scopeCommittedIdentities(source, mode);
+      if (identityFailure !== undefined) failures.push(identityFailure);
+      for (const entry of inventory.entries) {
+        rows.push({
+          scope: { kind: 'task', projectKey: source.projectKey, mode, taskId: entry.snapshot.taskId },
+          task: taskRowOf(
+            this.snapshotWithScopeIdentity(entry.snapshot, byTaskId.get(entry.snapshot.taskId.value)),
+            mode,
+          ),
+          basis: 'durable-history',
+        });
+      }
+    }
+    return { rows, failures };
+  }
+
+  private projectProjection(
+    source: ConfiguredProjectReadSource,
+    rows: readonly RuntimeProjectTaskReadRow[],
+    failures: readonly RuntimeReadFailure[],
+  ): RuntimeProjectReadProjection {
+    return {
+      surface: 'runtime-project',
+      scope: { kind: 'project', projectKey: source.projectKey },
+      label: basename(source.workspaceCwd),
+      observedAt: this.now().toISOString(),
+      tasks: rows,
+      taskCount: rows.length,
+      complete: failures.length === 0,
+      failures,
+    };
+  }
+
+  /** Public project read: one declared project's saved task inventory across modes. */
+  async projectRead(projectKey: string): Promise<RuntimeReadResult<RuntimeProjectReadProjection>> {
+    const source = await this.findProjectSource(projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
+    const { rows, failures } = await this.projectReadRows(source);
+    return { ok: true, value: this.projectProjection(source, rows, failures) };
+  }
+
+  /**
+   * Public system read: every configured project in the current control root.
+   * `taskCount` is the sum of the returned project rows, never the current
+   * instance `listTasks()` total, so a bound project cannot masquerade as the
+   * whole installation.
+   */
+  async systemRead(): Promise<RuntimeSystemReadProjection> {
+    const catalog = await this.resolveProjectCatalog();
+    const failures: RuntimeReadFailure[] = catalog.failures.map((failure) => ({
+      code: failure.code,
+      ownerId: failure.ownerId,
+      message: failure.message,
+      nextAction: failure.nextAction,
+    }));
+    const projects: RuntimeProjectReadProjection[] = [];
+    const sources = [...catalog.projects];
+    const bound = this.boundProjectSource();
+    if (bound !== undefined && !sources.some((source) => source.projectKey === bound.projectKey)) sources.push(bound);
+    for (const source of sources) {
+      const { rows, failures: projectFailures } = await this.projectReadRows(source);
+      projects.push(this.projectProjection(source, rows, projectFailures));
+      failures.push(...projectFailures);
+    }
+    return {
+      surface: 'runtime-system',
+      scope: { kind: 'system' },
+      observedAt: this.now().toISOString(),
+      runtime: this.status(),
+      coverage: 'configured-projects-in-current-control-root',
+      projects,
+      taskCount: projects.reduce((total, project) => total + project.taskCount, 0),
+      complete: failures.length === 0,
+      failures,
+    };
+  }
+
+  /**
+   * Scoped task dashboard. The serve-bound project/mode uses the live runtime
+   * facts; any other scope reads only durable history, so a persisted running
+   * event is never reported as the current live execution.
+   */
+  async scopedTaskDashboard(
+    taskId: TaskId,
+    projectKey: string,
+    mode: 'fake' | 'rcc',
+  ): Promise<RuntimeReadResult<RuntimeTaskDashboardView>> {
+    if (this.isBoundScope(projectKey, mode)) {
+      try {
+        return { ok: true, value: await this.taskDashboardWithPlan(taskId) };
+      } catch (error) {
+        return { ok: false, failure: readFailureFromError(error) };
+      }
+    }
+    const source = await this.findProjectSource(projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
+    const inventory = await this.readDurableInventory(source, mode);
+    const entry = inventory.entries.find((candidate) => candidate.snapshot.taskId.value === taskId.value);
+    if (entry === undefined) {
+      if (inventory.failures.length > 0) return { ok: false, failure: inventory.failures[0]! };
+      return { ok: false, failure: unknownTaskFailure(taskId, projectKey, mode) };
+    }
+    return {
+      ok: true,
+      value: {
+        ...runtimeTaskDashboard(entry.snapshot, mode),
+        taskPlanHistory: await this.taskPlanHistoryFor(source, mode, taskId),
+      },
+    };
+  }
+
+  private async rawRecordsForTask(
+    source: ConfiguredProjectReadSource,
+    mode: RuntimeMode,
+    taskId: TaskId,
+    records: readonly UiRuntimeJournalRecord[],
+  ): Promise<RuntimeRawRecordProjection[]> {
+    const taskRecords = records
+      .map((record, ordinal) => ({ record, ordinal }))
+      .filter(({ record }) => journalRecordTaskId(record) === taskId.value);
+    const raw: RuntimeRawRecordProjection[] = [];
+    const checkpointCommittedAt = new Map<string, string>();
+    let taskUpdatedAt: string | undefined;
+    for (const { record } of taskRecords) {
+      if (record.kind === 'task.created') taskUpdatedAt = record.createdAt;
+      else if (record.kind === 'task.updated') taskUpdatedAt = record.updatedAt;
+      else if (record.kind === 'operation.event') {
+        taskUpdatedAt = record.event.occurredAt;
+        if (record.event.kind === 'checkpoint.committed') checkpointCommittedAt.set(record.operationId.value, record.event.occurredAt);
+      }
+    }
+    for (const { record, ordinal } of taskRecords) {
+      const built = rawBuildForJournalRecord(record);
+      if (built === undefined) continue;
+      raw.push({
+        ref: {
+          projectKey: source.projectKey,
+          mode,
+          taskId,
+          source: 'task-journal',
+          ordinal,
+          ...(built.operationId === undefined ? {} : { operationId: built.operationId }),
+          ...(built.executionEpoch === undefined ? {} : { executionEpoch: built.executionEpoch }),
+        },
+        occurredAt: built.occurredAt,
+        body: built.body,
+        evidenceRefs: built.evidenceRefs,
+      });
+    }
+    // The request's canonical control Journal is replayed once. It carries
+    // every task's checkpoints, public output, grants and identity records, so
+    // ordinals are taken from that replay before filtering and only checkpoint
+    // records whose real scope matches this task/operation/epoch are projected.
+    const controlJournal = await new JsonlOrganJournal(
+      uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
+    ).replay();
+    const taskOperations = new Map<string, { readonly scope: ScopeRef; readonly executionEpoch: number }>();
+    for (const { record } of taskRecords) {
+      if (record.kind !== 'operation.started') continue;
+      taskOperations.set(record.operationId.value, { scope: record.scope, executionEpoch: record.executionEpoch });
+    }
+    controlJournal.forEach((checkpointRecord, ordinal) => {
+      if (checkpointRecord.kind !== 'checkpoint' || checkpointRecord.checkpoint === undefined) return;
+      const checkpoint = checkpointRecord.checkpoint;
+      if (checkpoint.scope.taskId === undefined || checkpoint.scope.taskId.value !== taskId.value) return;
+      const operation = taskOperations.get(checkpoint.scope.operationId?.value ?? '');
+      if (operation === undefined) return;
+      if (checkpoint.scope.cycleId?.value !== operation.scope.cycleId?.value) return;
+      if (checkpoint.executionEpoch !== operation.executionEpoch) return;
+      const operationId = operation.scope.operationId?.value ?? '';
+      const occurredAt = checkpointCommittedAt.get(operationId) ?? taskUpdatedAt;
+      if (occurredAt === undefined) return;
+      raw.push({
+        ref: {
+          projectKey: source.projectKey,
+          mode,
+          taskId,
+          source: 'checkpoint-journal',
+          ordinal,
+          operationId,
+          executionEpoch: checkpoint.executionEpoch,
+          checkpointId: checkpoint.id.value,
+        },
+        occurredAt,
+        body: {
+          kind: 'checkpoint',
+          checkpointId: checkpoint.id.value,
+          seq: checkpoint.seq,
+          outcome: checkpoint.outcome,
+          summary: checkpoint.summary,
+          evidenceRefs: checkpoint.evidenceRefs,
+        },
+        evidenceRefs: checkpoint.evidenceRefs,
+      });
+    });
+    return raw;
+  }
+
+  private actionRecordsForTask(
+    snapshot: RuntimeTaskSnapshot,
+    projectKey: string,
+    mode: RuntimeMode,
+    taskId: TaskId,
+    records: readonly UiRuntimeJournalRecord[],
+  ): RuntimeTaskRecordsProjection['actions'] {
+    const refByEvent = new Map<string, RuntimeStoredRecordRef>();
+    records.forEach((record, ordinal) => {
+      if (record.kind !== 'operation.event') return;
+      refByEvent.set(`${record.operationId.value}:${record.event.seq}`, {
+        projectKey,
+        mode,
+        taskId,
+        source: 'task-journal',
+        ordinal,
+        operationId: record.operationId.value,
+        executionEpoch: record.event.executionEpoch,
+      });
+    });
+    const history = projectRuntimeTaskHistory(snapshot, { limit: Math.min(Math.max(snapshot.events.length, 1), 500) });
+    if (!history.ok) return [];
+    const actions: RuntimeTaskRecordsProjection['actions'][number][] = [];
+    for (const entry of history.page.items) {
+      const rawRef = refByEvent.get(`${entry.operationId.value}:${entry.seq}`);
+      if (rawRef === undefined) continue;
+      actions.push({ entry, rawRef });
+    }
+    return actions;
+  }
+
+  /**
+   * Public scoped records read. `raw` returns the durable record bodies in
+   * replay order with a stable per-source ordinal; `actions` returns the typed
+   * interaction trace with the same `rawRef` origin. The cursor binds the exact
+   * project/mode/task/view scope and the last returned record, so filtering
+   * never renumbers the prefix and a foreign cursor is rejected.
+   */
+  async taskRecords(taskId: TaskId, input: {
+    readonly projectKey: string;
+    readonly mode: RuntimeMode;
+    readonly view: 'actions' | 'raw';
+    readonly limit: number;
+    readonly cursor?: string;
+  }): Promise<RuntimeReadResult<RuntimeTaskRecordsProjection>> {
+    const source = await this.findProjectSource(input.projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
+    if (input.view !== 'actions' && input.view !== 'raw') {
+      return {
+        ok: false,
+        failure: {
+          code: 'records.view.invalid',
+          ownerId: APP_OWNER,
+          message: `records view must be actions or raw: ${String(input.view)}`,
+          nextAction: 'request view=actions or view=raw',
+        },
+      };
+    }
+    let cursor: RecordsCursor | undefined;
+    if (input.cursor !== undefined) {
+      cursor = decodeRecordsCursor(input.cursor);
+      if (cursor === undefined) {
+        return {
+          ok: false,
+          failure: {
+            code: 'records.cursor-invalid',
+            ownerId: APP_OWNER,
+            message: 'records cursor is not a decoded stored-record ref',
+            nextAction: 'request the first records page without a cursor',
+          },
+        };
+      }
+      if (cursor.view !== input.view) {
+        return {
+          ok: false,
+          failure: {
+            code: 'records.cursor-scope-mismatch',
+            ownerId: APP_OWNER,
+            message: `records cursor belongs to the ${cursor.view} view`,
+            nextAction: 'use a cursor returned for the same view',
+          },
+        };
+      }
+      const ref = cursor.ref;
+      if (ref.projectKey !== input.projectKey || ref.mode !== input.mode || ref.taskId.scope !== 'task' || ref.taskId.value !== taskId.value) {
+        return {
+          ok: false,
+          failure: {
+            code: 'records.cursor-scope-mismatch',
+            ownerId: APP_OWNER,
+            message: 'records cursor belongs to a different project/mode/task scope',
+            nextAction: 'use a cursor returned for the same task scope',
+          },
+        };
+      }
+    }
+    const read = readUiRuntimeTaskJournal(source.checkpointsRoot, input.mode);
+    if (read.failure !== undefined) return { ok: false, failure: read.failure };
+    const scope = { kind: 'task' as const, projectKey: input.projectKey, mode: input.mode, taskId };
+    if (input.view === 'raw') {
+      const raw = await this.rawRecordsForTask(source, input.mode, taskId, read.records);
+      if (raw.length === 0) return { ok: false, failure: unknownTaskFailure(taskId, input.projectKey, input.mode) };
+      const page = paginateRecords(raw.map((record) => ({ ref: record.ref, record })), cursor, input.limit, 'raw');
+      if (page.failure !== undefined) return { ok: false, failure: page.failure };
+      return {
+        ok: true,
+        value: {
+          surface: 'runtime-task-records',
+          scope,
+          observedAt: this.now().toISOString(),
+          actions: [],
+          raw: page.items.map((item) => item.record),
+          ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+          hasMore: page.hasMore,
+        },
+      };
+    }
+    const inventory = await this.readDurableInventory(source, input.mode);
+    const entry = inventory.entries.find((candidate) => candidate.snapshot.taskId.value === taskId.value);
+    const actions = entry === undefined
+      ? []
+      : this.actionRecordsForTask(entry.snapshot, input.projectKey, input.mode, taskId, read.records);
+    if (actions.length === 0 && entry === undefined && inventory.failures.length > 0) {
+      return { ok: false, failure: inventory.failures[0]! };
+    }
+    const page = paginateRecords(actions.map((action) => ({ ref: action.rawRef, action })), cursor, input.limit, 'actions');
+    if (page.failure !== undefined) return { ok: false, failure: page.failure };
+    return {
+      ok: true,
+      value: {
+        surface: 'runtime-task-records',
+        scope,
+        observedAt: this.now().toISOString(),
+        actions: page.items.map((item) => item.action),
+        raw: [],
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        hasMore: page.hasMore,
+      },
+    };
+  }
+
+  /**
    * Resolves one task's durable history scope: the declared project source, the
    * task's own cycle journals (from its real operation records) and the organ
    * identity recorded there. A task that never existed fails explicitly; a task
@@ -2865,6 +3713,11 @@ export class UiRuntimeService {
     if (this.isBoundScope(projectKey, mode) && this.options.executionJournalPath !== undefined) {
       files.push(this.options.executionJournalPath);
     }
+    // The App-owned task identity, plan history, and cold record reads all use
+    // this canonical control Journal. It stays last in the read order so its
+    // committed head stays authoritative, while the native cycle files keep
+    // their existing per-cycle history.
+    files.push(uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)));
     return { ok: true, source, organId: cycles[0]?.organId ?? this.options.organId, files };
   }
 
@@ -3782,9 +4635,9 @@ export class UiRuntimeService {
 
   async confirmExplicitRequirement(input: ConfirmExplicitRequirementInput): Promise<ExplicitBrainReceipt> {
     try {
-      // A typed draft revision (or an execution policy that requests one) must
-      // final-submit through the exact revision path. The legacy path stays for
-      // interactions that never created a typed revision.
+      // A typed draft revision, an execution policy that requests one, or an
+      // explicit typed request kind must final-submit through the exact revision
+      // path. The legacy path stays for interactions that do not declare one.
       if (this.requiresTypedFinalSubmit(input)) {
         return await this.confirmTypedExplicitRequirement(input);
       }
@@ -3822,7 +4675,7 @@ export class UiRuntimeService {
   }
 
   private requiresTypedFinalSubmit(input: ConfirmExplicitRequirementInput): boolean {
-    if (input.requestKind === 'existing-task-change') return true;
+    if (input.requestKind === 'new-task-create' || input.requestKind === 'existing-task-change') return true;
     if (input.executionPolicy !== undefined) return true;
     if (input.interactionId === undefined) return false;
     return this.explicitIntake.currentDraftRevision(input.interactionId) !== undefined;
@@ -4459,6 +5312,13 @@ export class UiRuntimeService {
     let executionEpoch = prepared.executionEpoch;
     const isTaskInputUpdate = consumed.taskRef !== undefined
       && (consumed.intent === 'append' || consumed.intent === 'change');
+    // A genuine new-task create binds the confirmed typed requirement source to
+    // the Task before any execution may start. Existing-task append/change keeps
+    // the Task's original immutable identity; legacy non-typed submits have no
+    // typed final receipt and receive no fabricated identity.
+    if (!isTaskInputUpdate && consumed.intent === 'create') {
+      await this.establishNewTaskIdentity(consumed, task.taskId);
+    }
     if (isTaskInputUpdate) {
       // Route `append`/`change` intents to this task's input mailbox instead of
       // overwriting its directive with a fresh execution. `appendTaskRevision`
@@ -4544,6 +5404,70 @@ export class UiRuntimeService {
       operationId,
       executionEpoch,
     };
+  }
+
+  /**
+   * Bind the exact typed final-submit source to a genuine new-task create.
+   *
+   * The requirement envelope does not carry the typed revision hash or
+   * confirmation reference, so the source can only come from the existing
+   * `RequirementSubmissionOwner` typed receipt. The match is bound to the
+   * requirement's FIFO identity, so a retry that reuses the same Task and the
+   * same source resolves the same receipt. A legacy non-typed submit has no
+   * typed receipt and keeps its prior scope with no identity.
+   */
+  private async establishNewTaskIdentity(consumed: RequirementEnvelope, taskId: TaskId): Promise<void> {
+    const source = this.typedFinalRequirementFor(consumed);
+    if (source === undefined) return;
+    const taskIdentity = this.options.taskIdentity;
+    if (taskIdentity === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.task-identity-owner-missing',
+        APP_OWNER,
+        `typed new-task requirement ${consumed.requirementId} cannot be established without the Task identity owner`,
+        'assemble the Task identity consumer over the runtime control journal',
+        500,
+      );
+    }
+    await taskIdentity.establish({
+      scope: { organId: this.options.organId, taskId },
+      source: {
+        requirementId: source.requirementId,
+        inputRevision: source.inputRevision,
+        draftId: source.draftId,
+        draftRevisionVersion: source.draftRevisionVersion,
+        draftRevisionHash: source.draftRevisionHash,
+        confirmationRef: source.confirmationRef,
+      },
+      ...(consumed.taskFlow === undefined ? {} : { taskFlow: consumed.taskFlow }),
+    });
+  }
+
+  /**
+   * The exact typed final-submit receipt for this consumed requirement, or
+   * `undefined` when this is a legacy non-typed submission. The receipt is the
+   * only owner of the revision hash and confirmation reference, so a partial
+   * identity match is an explicit source conflict rather than a silent default.
+   */
+  private typedFinalRequirementFor(consumed: RequirementEnvelope): AuthorizedRequirement | undefined {
+    const candidates = this.requirementSubmissions.finalReceipts()
+      .map((receipt) => receipt.requirement)
+      .filter((requirement) => requirement.requirementId === consumed.requirementId
+        && requirement.draftId === consumed.draftId
+        && requirement.inputRevision === consumed.inputRevision);
+    if (candidates.length === 0) return undefined;
+    const exact = candidates.find((requirement) => requirement.fifoSeq === consumed.fifoSeq
+      && requirement.payloadRef === consumed.payloadRef);
+    if (exact === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.task-identity-source-conflict',
+        APP_OWNER,
+        `typed requirement ${consumed.requirementId} does not match the consumed FIFO identity`,
+        'inspect the persisted final-submit receipt before retrying dispatch',
+        409,
+      );
+    }
+    return exact;
   }
 
   private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {

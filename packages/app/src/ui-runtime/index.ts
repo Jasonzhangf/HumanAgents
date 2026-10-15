@@ -22,12 +22,15 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
 import { createJsonlI2JournalPort } from '../i2-journal.js';
 import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import type { ConfiguredProjectCatalog, RuntimePaths } from '../../../config/src/index.js';
-import { UiRuntimeJournal } from './journal.js';
+import { resetUiDisplayPreference } from '../../../config/src/index.js';
+import { UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
 import { UiRuntimeApiError } from './errors.js';
+import { bindUiDisplayPreferenceResource } from './display-preferences.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
 import {
   UiRuntimeService,
@@ -35,12 +38,21 @@ import {
   type UiRuntimeMemoryComposition,
   type UiRuntimeServiceOptions,
 } from './service.js';
-import { ServiceExecutionCheckpointStore } from './execution-composition.js';
+import {
+  ServiceExecutionCheckpointStore,
+  createDefaultExecutionComposition,
+  createServiceExecutionAdmission,
+} from './execution-composition.js';
+import { createPreparedOperationBoundary } from '../prepared-operation-boundary.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
+import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
+import type { RuntimeExecutionAllocation } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import type { SupervisorLease } from '../supervisor/index.js';
 import { OccurrenceConsumerRouter } from './occurrence-router.js';
 import type { OccurrenceDispatchPort } from './occurrence-consumer.js';
+import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
 import { UiRuntimeScheduler } from './scheduler.js';
 import { AccessControlService } from './access-control.js';
 import {
@@ -118,6 +130,13 @@ export interface UiRuntimeLaunchOptions {
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
   readonly explicitBrainTemplateRoot?: string;
+  /**
+   * Override for the Task identity owner. Production always assembles the real
+   * `TaskIdentityConsumer` over the runtime control Organ Journal; this option
+   * only lets a consumer inject a wrapper that still delegates to that same
+   * physical journal, so a fault can be observed at the real adapter boundary.
+   */
+  readonly taskIdentity?: TaskIdentityConsumer;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
   readonly i2CurrentPosition?: import('./i2-history.js').I2CurrentPositionPort;
@@ -193,6 +212,26 @@ function providerErrorFromReadiness(readiness: ProviderReadiness): {
  * that while still terminating a runaway round loop.
  */
 const PROVIDER_TOOL_ROUND_LIMIT = 32;
+
+/**
+ * The declared native Provider tool set. The same definitions drive both the
+ * service tool surface and the native execution composition, so the launch
+ * never assembles a second, content-identical registry.
+ */
+const NATIVE_PROVIDER_TOOLS = [
+  RESPONSES_FILE_READ_TOOL,
+  RESPONSES_FILE_LIST_TOOL,
+  RESPONSES_FILE_SEARCH_TOOL,
+  RESPONSES_FILE_WRITE_TOOL,
+  RESPONSES_FILE_EDIT_TOOL,
+  RESPONSES_BASH_TOOL,
+  RESPONSES_TODO_WRITE_TOOL,
+  RESPONSES_GET_GOAL_TOOL,
+  RESPONSES_CREATE_GOAL_TOOL,
+  RESPONSES_UPDATE_GOAL_TOOL,
+  RESPONSES_PRESENT_TOOL,
+  RESPONSES_WEB_SEARCH_TOOL,
+] as const;
 
 export function buildRccExecutionPort(config: RccModeConfig, evidenceRoot: string): ExecutionRuntimePort {
   const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot));
@@ -309,8 +348,13 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     : undefined;
   // I2 product history is committed through the same task-control Organ Journal the runtime already
   // owns, so the read layer reuses that authority instead of introducing a second store.
-  const taskControlJournalPath = join(modeRoot, 'task-control.jsonl');
+  const taskControlJournalPath = uiRuntimeControlJournalPath(modeRoot);
   const taskControlJournal = new JsonlOrganJournal(taskControlJournalPath);
+  // The Task identity owner commits onto that same control Organ Journal the
+  // runtime already owns, so a producer and a cold reader resolve one authority
+  // instead of a second identity store.
+  const taskIdentity = options.taskIdentity
+    ?? new TaskIdentityConsumer(new JsonlTaskIdentityJournal(taskControlJournal));
   // The real native checkpoint owner commits onto the control Organ Journal this
   // runtime already owns. Public output and checkpoints share that same physical
   // store, so the producer and the reader resolve one authority, not two files.
@@ -331,6 +375,94 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         return { executor: built.executor, toolOutputs: built.toolOutputs };
       })()
     : undefined;
+  const principalOwner = options.accessControl.readProductPrincipalOwner();
+  const resourceBoundary = createPreparedOperationBoundary(journal);
+  const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: taskControlJournal });
+  const executionNow = clock ?? (() => new Date());
+  // The native launch assembly binds the same physical owners the service and
+  // the HTTP read already use: the control Organ Journal, the prepared
+  // UI-runtime journal, and the canonical checkpoint store. It is built once,
+  // before the coordinator; its callbacks only delegate to that coordinator.
+  const nativeToolScope = options.workspaceRoot === undefined || options.projectKey === undefined
+    ? undefined
+    : {
+        workspaceRoot: options.workspaceRoot,
+        projectKey: options.projectKey,
+        artifactRoot: join(options.evidenceRoot, 'provider-tools'),
+        tools: NATIVE_PROVIDER_TOOLS,
+        ...(options.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: options.webSearchProviderConfig }),
+      };
+  const fakeAdmission = options.mode === 'fake'
+    ? createServiceExecutionAdmission({
+        journal: taskControlJournal,
+        preparedJournal: journal,
+        principalOwner,
+        resourceBoundary,
+        now: executionNow,
+      })
+    : undefined;
+  const prepareAgentProvider = options.runtimeComposition?.prepareAgentProvider;
+  // Fake mode keeps its fixture driver and still uses the real admission path.
+  // Every non-fake launch is configured native and requires the actual preparer.
+  const configuredNativeLaunch = options.mode !== 'fake';
+  if (configuredNativeLaunch && prepareAgentProvider === undefined) {
+    throw new AppLifecycleError(
+      'ui-runtime.native-preparer-missing',
+      'the configured rcc launch requires the actual native Provider preparer',
+      'assemble the configured Provider preparation before starting the UI runtime',
+      'humanagent.app.ui-runtime',
+    );
+  }
+  const launchComposition: UiRuntimeServiceOptions['runtimeComposition'] = {
+    ...(options.runtimeComposition?.createTaskAssembly === undefined ? {} : {
+      createTaskAssembly: options.runtimeComposition.createTaskAssembly,
+    }),
+    ...(configuredNativeLaunch ? {
+      createExecutionPorts: (coordinator) => {
+        const composition = createDefaultExecutionComposition({
+          principalOwner,
+          journal: taskControlJournal,
+          filePath: taskControlJournalPath,
+          artifactsRoot: options.evidenceRoot,
+          preparedJournal: journal,
+          resourceBoundary,
+          prepareAgentProvider: prepareAgentProvider!,
+          providerOptions: {
+            onRequestLifecycle: (event) => coordinator.recordProviderRequestIdentity(event),
+          },
+          ...(nativeToolScope === undefined ? {} : { providerToolScope: nativeToolScope }),
+          now: executionNow,
+          currentState,
+          publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
+          closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
+          taskIdentity,
+          i2Journal,
+          ...(options.providerRetryConfig === undefined ? {} : {
+            retryJournal: createJsonlRetryCycleJournalPort({
+              filePath: retryCycleJournalFilePath({ journalRoot: options.providerRetryConfig.journalRoot }),
+            }),
+          }),
+        });
+        return {
+          admitExecution: composition.admitExecution,
+          createDriver: composition.createExecutionDriver,
+          coldExecution: {
+            readColdExecutionSource: composition.readColdExecutionSource,
+            admitSegment: composition.admitSegment,
+            readIncarnationBinding: composition.readIncarnationBinding,
+            recoverOriginalTurn: composition.recoverOriginalTurn,
+            createResumedExecutionDriver: composition.createResumedExecutionDriver,
+          },
+          currentStatePort: currentState,
+          currentStateFacts: composition.currentStateFacts,
+        };
+      },
+    } : fakeAdmission === undefined ? {} : {
+      admitExecution: async (allocation: RuntimeExecutionAllocation) => {
+        await fakeAdmission.admitExecution(allocation);
+      },
+    }),
+  };
   const runtimeService = new UiRuntimeService({
     mode: options.mode,
     organId: options.organId,
@@ -351,20 +483,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(options.providerRetryConfig === undefined ? {} : { providerRetryConfig: options.providerRetryConfig }),
     ...(providerToolExecutor === undefined ? {} : {
-      providerTools: [
-        RESPONSES_FILE_READ_TOOL,
-        RESPONSES_FILE_LIST_TOOL,
-        RESPONSES_FILE_SEARCH_TOOL,
-        RESPONSES_FILE_WRITE_TOOL,
-        RESPONSES_FILE_EDIT_TOOL,
-        RESPONSES_BASH_TOOL,
-        RESPONSES_TODO_WRITE_TOOL,
-        RESPONSES_GET_GOAL_TOOL,
-        RESPONSES_CREATE_GOAL_TOOL,
-        RESPONSES_UPDATE_GOAL_TOOL,
-        RESPONSES_PRESENT_TOOL,
-        RESPONSES_WEB_SEARCH_TOOL,
-      ],
+      providerTools: [...NATIVE_PROVIDER_TOOLS],
       providerToolExecutor: providerToolExecutor.executor,
       toolOutputStore: providerToolExecutor.toolOutputs,
       providerToolRoundLimit: PROVIDER_TOOL_ROUND_LIMIT,
@@ -378,7 +497,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.runtimePaths === undefined ? {} : { runtimePaths: options.runtimePaths }),
     ...(options.projectCatalog === undefined ? {} : { projectCatalog: options.projectCatalog }),
     subscriptionControl,
-    ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
+    taskIdentity,
+    runtimeComposition: launchComposition,
     ...(clock === undefined ? {} : { now: clock }),
   });
   service = runtimeService;
@@ -397,12 +517,19 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         ...(options.schedulerIntervalMs === undefined ? {} : { intervalMs: options.schedulerIntervalMs }),
       });
   scheduler?.start();
+  // One Config-backed display-preference resource per server assembly. It is
+  // only bound when the entry assembled the canonical Config paths; without
+  // them the route reports a typed unavailable instead of a default success.
+  const displayPreference = options.runtimePaths === undefined
+    ? undefined
+    : bindUiDisplayPreferenceResource(options.runtimePaths, resetUiDisplayPreference);
   const server = await startUiRuntimeServer({
     service: runtimeService,
     accessControl: options.accessControl,
     uiRoot: options.uiRoot,
     host: options.host,
     port: options.portNumber,
+    ...(displayPreference === undefined ? {} : { displayPreference }),
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
     schedulerStatus: async () => scheduler === undefined
@@ -471,7 +598,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
 export { UiRuntimeApiError } from './errors.js';
 export { MemoryBoundExecutionDriver, MemoryContextCapture, UiRuntimeService } from './service.js';
 export type { TaskCheckpointStore, UiRuntimeMemoryComposition } from './service.js';
-export { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
+export { FileCheckpointStore, UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
 export { FakeReplayExecutionRuntimePort } from './fake-port.js';
 export { UiRuntimeScheduler } from './scheduler.js';
 export type {

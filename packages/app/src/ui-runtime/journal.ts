@@ -70,6 +70,17 @@ export function uiRuntimeJournalPath(projectCheckpointsRoot: string, mode: Runti
   return join(uiRuntimeModeRoot(projectCheckpointsRoot, mode), 'ui-runtime-journal.jsonl');
 }
 
+/**
+ * Canonical control Organ Journal for one mode root. Native checkpoints, public
+ * output, task identity and I2 history all commit onto this single physical
+ * `task-control.jsonl`, so the producer, the cold reader and the tests resolve
+ * one authority instead of a second path calculator. `modeRoot` is the
+ * already-derived `<project.checkpointsRoot>/ui-runtime/<mode>` directory.
+ */
+export function uiRuntimeControlJournalPath(modeRoot: string): string {
+  return join(modeRoot, 'task-control.jsonl');
+}
+
 export function uiRuntimeTaskCheckpointPath(
   projectCheckpointsRoot: string,
   mode: RuntimeMode,

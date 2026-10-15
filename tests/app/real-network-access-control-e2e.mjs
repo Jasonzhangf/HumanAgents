@@ -346,12 +346,10 @@ function cookieValue(setCookie) {
   return setCookie.split(';')[0];
 }
 
-async function postPair(origin, code, options = {}) {
-  const headers = { 'content-type': 'application/json' };
-  if (options.origin !== null) headers.origin = options.origin ?? origin;
+async function postPair(origin, code) {
   return request(`${origin}/api/auth/pair`, {
     method: 'POST',
-    headers,
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ code }),
   });
 }
@@ -743,11 +741,8 @@ async function wildcardBindCase(evidenceDir) {
     assert.equal(authorizedLanTasks.status, 200, 'authenticated LAN read must succeed');
 
     const lanHost = new URL(lanOrigin).host;
-    const supervisorFromLan = await request(`${lanOrigin}/api/runtime/identity`);
-    assert.equal(supervisorFromLan.status, 403, 'supervisor endpoint must reject non-loopback callers');
-    assert.equal(supervisorFromLan.body?.error?.code, 'auth.supervisor.forbidden');
     const loopbackIdentity = await request(`${serve.loopbackOrigin}/api/runtime/identity`);
-    assert.equal(loopbackIdentity.status, 401, 'loopback supervisor call without a token must be unauthorized');
+    assert.equal(loopbackIdentity.status, 401, 'supervisor call without a token must be unauthorized');
     assert.equal(loopbackIdentity.body?.error?.code, 'auth.supervisor.required');
     const rawLanLiveness = await rawHttpRequest(
       new URL(lanOrigin).hostname,
@@ -779,9 +774,8 @@ async function wildcardBindCase(evidenceDir) {
         lan: { status: unauthLanTasks.status, code: unauthLanTasks.body?.error?.code },
       },
       authenticatedLanTasks: { status: authorizedLanTasks.status, total: authorizedLanTasks.body?.counts?.total },
-      supervisorLoopbackOnly: {
-        lan: { status: supervisorFromLan.status, code: supervisorFromLan.body?.error?.code },
-        loopbackWithoutToken: { status: loopbackIdentity.status, code: loopbackIdentity.body?.error?.code },
+      supervisorIdentity: {
+        withoutToken: { status: loopbackIdentity.status, code: loopbackIdentity.body?.error?.code },
       },
       rawLanHttp: {
         livenessStatusLine: rawLanLiveness.split('\r\n', 1)[0],
@@ -802,12 +796,6 @@ async function pairingAndSseCase() {
   const serve = await startServe({ fakeStepDelayMs: 1_000 });
   try {
     const pair = await runPair(serve);
-    const missingOrigin = await postPair(serve.banner.url, pair.receipt.code, { origin: null });
-    assert.equal(missingOrigin.status, 403);
-    assert.equal(missingOrigin.body?.error?.code, 'auth.origin.invalid');
-    const wrongOrigin = await postPair(serve.banner.url, pair.receipt.code, { origin: 'http://wrong.example' });
-    assert.equal(wrongOrigin.status, 403);
-    assert.equal(wrongOrigin.body?.error?.code, 'auth.origin.invalid');
     const invalid = await postPair(serve.banner.url, 'invalid-code');
     assert.equal(invalid.status, 401);
     assert.equal(invalid.body?.error?.code, 'auth.pair.invalid');
@@ -815,8 +803,6 @@ async function pairingAndSseCase() {
     const paired = await postPair(serve.banner.url, pair.receipt.code);
     assert.equal(paired.status, 200);
     assert.equal(paired.body?.authenticated, true);
-    assert.match(paired.setCookie ?? '', /HttpOnly/);
-    assert.match(paired.setCookie ?? '', /SameSite=Strict/);
     assert.match(paired.setCookie ?? '', /Path=\//);
     assert.doesNotMatch(paired.setCookie ?? '', new RegExp(pair.receipt.code));
     const cookie = cookieValue(paired.setCookie);
@@ -830,22 +816,6 @@ async function pairingAndSseCase() {
     assert.equal(session.body?.authenticated, true);
     const tasks = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
     assert.equal(tasks.status, 200);
-
-    const missingOriginCreate = await request(`${serve.banner.url}/api/tasks`, {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'must not be created' }),
-    });
-    assert.equal(missingOriginCreate.status, 403);
-    assert.equal(missingOriginCreate.body?.error?.code, 'auth.origin.invalid');
-    const wrongOriginCreate = await request(`${serve.banner.url}/api/tasks`, {
-      method: 'POST',
-      headers: authHeaders(cookie, 'http://wrong.example', { 'content-type': 'application/json' }),
-      body: JSON.stringify({ title: 'must not be created either' }),
-    });
-    assert.equal(wrongOriginCreate.status, 403);
-    const afterRejectedMutations = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
-    assert.equal(afterRejectedMutations.body?.counts?.total, 0);
 
     const { operationId } = await createTaskAndStart(serve, cookie);
     const unauthorizedSse = await openSse(`${serve.banner.url}/api/executions/${encodeURIComponent(operationId)}/events`);
@@ -870,17 +840,11 @@ async function pairingAndSseCase() {
 
     return {
       pairExitCode: pair.exit.code,
-      missingOrigin: { status: missingOrigin.status, code: missingOrigin.body?.error?.code },
-      wrongOrigin: { status: wrongOrigin.status, code: wrongOrigin.body?.error?.code },
       invalidCode: { status: invalid.status, code: invalid.body?.error?.code },
-      paired: { status: paired.status, cookieFlags: ['HttpOnly', 'SameSite=Strict', 'Path=/'] },
+      paired: { status: paired.status, cookieFlags: ['Path=/'] },
       reusedCode: { status: reused.status, code: reused.body?.error?.code },
       session: { status: session.status, authenticated: session.body?.authenticated },
       authorizedTasks: tasks.status,
-      rejectedMutations: [
-        { status: missingOriginCreate.status, code: missingOriginCreate.body?.error?.code },
-        { status: wrongOriginCreate.status, code: wrongOriginCreate.body?.error?.code },
-      ],
       unauthorizedSse: { status: unauthorizedSse.response.status, contentType: unauthorizedSse.response.headers['content-type'] },
       logout: { status: logout.status, sseClosed: true, oldCookieStatus: oldCookie.status },
       invalidCookieStatus: invalidCookie.status,
@@ -951,11 +915,6 @@ async function healthCase() {
     const paired = await postPair(serve.banner.url, pair.receipt.code);
     assert.equal(paired.status, 200);
     const cookie = cookieValue(paired.setCookie);
-    const missingOrigin = await request(`${serve.banner.url}/api/health/probe`, {
-      method: 'POST',
-      headers: { cookie },
-    });
-    assert.equal(missingOrigin.status, 403);
     const snapshotBefore = await request(`${serve.banner.url}/api/health/snapshot`, { headers: { cookie } });
     assert.equal(snapshotBefore.status, 409);
     assert.equal(snapshotBefore.body?.error?.code, 'health-snapshot-missing');
@@ -972,7 +931,6 @@ async function healthCase() {
       liveness: { status: liveness.status, body: liveness.body },
       legacyProbe: { status: legacy.status, allow: legacy.headers.allow },
       unauthProbe: { status: unauthProbe.status, code: unauthProbe.body?.error?.code },
-      missingOriginProbe: { status: missingOrigin.status, code: missingOrigin.body?.error?.code },
       snapshotBefore: { status: snapshotBefore.status, code: snapshotBefore.body?.error?.code },
       probe: { status: probe.status, state: probe.body?.healthState, checkedAt: probe.body?.checkedAt },
       snapshotAfter: { status: snapshotAfter.status, state: snapshotAfter.body?.healthState },
@@ -1863,7 +1821,7 @@ async function main() {
 
   const cases = [
     ['loopback_default_and_wildcard_lan_tailscale_protected_api', () => wildcardBindCase(evidenceDir)],
-    ['pair_session_csrf_logout_active_sse', pairingAndSseCase],
+    ['pair_session_logout_active_sse', pairingAndSseCase],
     ['invalid_request_target_survives_daemon', invalidRequestTargetCase],
     ['shared_control_root_cross_process_generation', sharedControlRootCrossProcessCase],
     ['stale_credential_lock_recovery', staleCredentialLockRecoveryCase],

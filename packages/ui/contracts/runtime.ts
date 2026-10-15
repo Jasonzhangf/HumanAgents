@@ -6,9 +6,12 @@ import type {
   OrganId,
   SemanticObservationEnvelope,
   TaskId,
+  TaskIdentitySource,
+  TaskFlowBinding,
 } from '@humanagent/contracts';
 import type { CanonicalContextEvent } from '../../context-events/src/index.js';
 import type { TaskDetailProjection } from './models.js';
+import type { RuntimeTaskPlanHistoryProjection } from './task-plan-history.js';
 
 export type { TaskDetailProjection };
 
@@ -137,9 +140,17 @@ export interface RuntimeTaskRowProjection {
   readonly title: string;
   readonly state: LifecycleState;
   readonly stateLabel: string;
+  readonly taskFlow?: TaskFlowBinding;
   readonly requirementQueue?: string;
   readonly requirementAdmission?: 'queued' | 'admitted' | 'executing' | 'completed' | 'blocked' | 'retired' | 'unknown';
   readonly requirementAdmissionLabel?: string;
+  /**
+   * Exact accepted source of the Task, projected from the committed Task
+   * identity whose scope matches this row. Absent when no identity is committed
+   * for this Task (for example a queued or legacy row). Absence must not be read
+   * as a matching Task.
+   */
+  readonly identitySource?: TaskIdentitySource;
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;
@@ -376,6 +387,7 @@ export interface RuntimeTaskDashboardProjection {
     readonly incarnations: readonly TaskRuntimeIncarnationProjection[];
     readonly availability: RuntimePoolAvailabilityProjection;
   };
+  readonly taskPlanHistory: RuntimeReadResult<RuntimeTaskPlanHistoryProjection>;
 }
 
 export interface RuntimeCommitRefProjection {

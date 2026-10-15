@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn, type ChildProcessLike as ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -21,7 +22,7 @@ import {
 } from '../../packages/contracts/src/index.js';
 import type { ActiveTurnSegmentPredecessorRef } from '../../packages/contracts/src/active-turn-segments.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../packages/adapters/jsonl/src/index.js';
-import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
+import { createJsonlActiveTurnJournal, decodeActiveTurnRecords } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { ImmutableAssetStore, evidenceReference } from '../../packages/adapters/filesystem/src/index.js';
@@ -91,6 +92,15 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
   ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-d-cold-consumer-r1-20261014');
 const at = '2026-10-14T00:00:00.000Z';
 const organId = id('organ', 'cold-resume-organ');
+const processMode = process.argv.find((arg) => arg.startsWith('--cold-process='))?.split('=', 2)[1];
+const processRoot = process.argv.find((arg) => arg === '--fixture-root') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--fixture-root') + 1];
+const processTask = process.argv.find((arg) => arg === '--task-id') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--task-id') + 1];
+/** The ambient frozen surface does not declare ppid; read it through one typed cast. */
+const processPpid = (process as unknown as { readonly ppid: number }).ppid;
 
 function digest(text: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
@@ -127,6 +137,86 @@ interface Upstream {
   readonly baseUrl: string;
   readonly wires: { readonly path: string; readonly body: string }[];
   readonly close: () => Promise<void>;
+}
+
+/**
+ * The only process boundary the test owns: a seed child commits the accepted
+ * cold fixture, a fresh resume child reopens the same durable owners and calls
+ * the public `resumeExecution` selector. No allocation, capture, lease or other
+ * in-memory control object ever crosses this boundary; the child receives only
+ * the fixture root and the original Task ID and reads every other fact from the
+ * committed Journal and immutable assets.
+ */
+interface ColdProcessReceipt {
+  readonly phase: 'seed' | 'resume';
+  readonly pid: number;
+  readonly ppid: number;
+  readonly root: string;
+  readonly taskId: string;
+  readonly archiveRoot?: string;
+}
+
+function emitReceipt(receipt: ColdProcessReceipt): void {
+  (process as unknown as { readonly stdout: { readonly write: (text: string) => void } })
+    .stdout.write(`${JSON.stringify({ coldProcessReceipt: receipt })}\n`);
+}
+
+/** Spawns one child with only the persistent fixture config, never parent test args. */
+function spawnColdProcess(args: readonly string[]): ChildProcess {
+  const env: Record<string, string | undefined> = { ...process.env };
+  delete env.NODE_OPTIONS;
+  env.HUMANAGENT_TEST_ROOT = PERSISTENCE_ROOT;
+  env.TMPDIR = PERSISTENCE_ROOT;
+  return spawn(process.execPath, [...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+interface ColdProcessRun {
+  readonly receipt: ColdProcessReceipt;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly close: { readonly code: number | null; readonly signal: string | null };
+}
+
+/** Waits for natural child close, then decodes the JSON receipt from stdout. */
+async function collectColdProcess(child: ChildProcess): Promise<ColdProcessRun> {
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => stdoutChunks.push(chunk));
+  child.stderr?.on('data', (chunk: string) => stderrChunks.push(chunk));
+  const close = await new Promise<{ readonly code: number | null; readonly signal: string | null }>(
+    (resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code: unknown, signal: unknown) => resolve({
+        code: typeof code === 'number' ? code : null,
+        signal: typeof signal === 'string' ? signal : null,
+      }));
+    });
+  const stdout = stdoutChunks.join('');
+  const stderr = stderrChunks.join('');
+  const receiptLine = stdout.split('\n').find((line) => line.includes('"coldProcessReceipt"'));
+  if (receiptLine === undefined) {
+    throw new Error(`cold process emitted no receipt; exit ${String(close.code)} signal ${String(close.signal)}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+  return { receipt: (JSON.parse(receiptLine) as { readonly coldProcessReceipt: ColdProcessReceipt }).coldProcessReceipt,
+    stdout, stderr, close };
+}
+
+async function runSeedProcess(): Promise<void> {
+  const fixture = await buildColdFixture('resume-endpoint');
+  emitReceipt({ phase: 'seed', pid: process.pid, ppid: processPpid,
+    root: fixture.root, taskId: fixture.taskId.value });
+}
+
+async function runResumeProcess(): Promise<void> {
+  if (processRoot === undefined || processTask === undefined) {
+    throw new Error('the resume child requires --fixture-root and --task-id');
+  }
+  const fixture = await reopenColdFixture(processRoot, processTask);
+  const archiveRoot = await runResumeAssertions(fixture, 'cold-resume.model');
+  emitReceipt({ phase: 'resume', pid: process.pid, ppid: processPpid,
+    root: processRoot, taskId: processTask, archiveRoot });
 }
 
 /** One real Responses HTTP request, decoded only as far as its cold-resume stage. */
@@ -649,6 +739,83 @@ async function buildColdFixture(name: string): Promise<ColdFixture> {
 }
 
 /**
+ * Reopens the exact fixture handles a fresh process needs, using only the
+ * committed fixture root and the original Task ID. The single `operation.prepared`
+ * record is the allocation owner; the v1 recovery receipt is discovered from the
+ * committed Journal, never passed across the process boundary and never re-created.
+ */
+async function reopenColdFixture(root: string, taskIdValue: string): Promise<ColdFixture> {
+  const preparedPath = join(root, 'prepared.jsonl');
+  const journalPath = join(root, 'organ.jsonl');
+  const artifactsRoot = join(root, 'assets');
+  const retryPath = join(root, 'retry.jsonl');
+  const journal = new JsonlOrganJournal(journalPath);
+  const records = (await journal.verify()).records;
+  const preparedJournal = new UiRuntimeJournal(preparedPath);
+  const prepared = preparedJournal.replay()
+    .filter((record) => record.kind === 'operation.prepared')
+    .filter((record) => record.allocation.taskId.value === taskIdValue);
+  if (prepared.length !== 1) {
+    throw new Error('the committed fixture has no retained prepared allocation');
+  }
+  const allocation = prepared[0]!.kind === 'operation.prepared' ? prepared[0]!.allocation : undefined;
+  if (allocation === undefined) throw new Error('the retained prepared allocation is not readable');
+  const completion = new JsonlOperationCompletionJournal({ journal });
+  const native = createNativeRecoveryAssets({ journalPath, journal, assetRoot: artifactsRoot, completionJournal: completion });
+  // The v1 recovery receipt is the committed predecessor selector; it is
+  // discovered from the Journal, never handed to this process.
+  const v1Receipts = records.filter((record) => record.kind === 'event'
+    && record.payload?.['type'] === 'recovery-assets.phase' && record.payload?.['version'] === 1);
+  if (v1Receipts.length !== 1) throw new Error('the committed fixture does not carry exactly one v1 recovery receipt');
+  const receipt = (v1Receipts[0]!.payload as { readonly receipt: { readonly turnId?: unknown } }).receipt;
+  const businessTurnId = receipt?.turnId;
+  if (typeof businessTurnId !== 'string' || businessTurnId.length === 0) {
+    throw new Error('the committed v1 recovery receipt does not name the original business turn');
+  }
+  const predecessor: ActiveTurnSegmentPredecessorRef = {
+    segmentId: businessTurnId, recoveryAssetsReceiptRef: v1Receipts[0]!.commitId!,
+  };
+  const segmentJournal = createActiveTurnSegmentJournal({ journalPath, assetRoot: artifactsRoot,
+    completionJournal: completion, businessTurnId });
+  const initial = await segmentJournal.readInitialSegmentCapture(businessTurnId);
+  if (initial === null) throw new Error('the committed fixture does not carry the original v1 capture');
+  const assignment = initial.body.binding.assignment;
+  if (assignment.taskId.value !== taskIdValue) {
+    throw new Error('the committed original assignment does not carry the requested Task ID');
+  }
+  // The confirmed effect and its exact bytes come from the committed completion
+  // and its immutable raw asset, never from the post-resume file value.
+  const original = await native.readRecoveryAssetsExact(predecessor.recoveryAssetsReceiptRef);
+  let effect: FileWriteEffect | undefined;
+  let acceptedEvidenceLocator: string | undefined;
+  for (const lookup of original.prepared.completionLookups) {
+    const readback = await completion.readExact(lookup);
+    if (readback.state !== 'confirmed') throw new Error('the committed effect completion is not confirmed');
+    effect = readback.receipt.fact.effect;
+    acceptedEvidenceLocator = readback.receipt.fact.result.evidenceRefs[0]?.locator;
+  }
+  if (effect === undefined || acceptedEvidenceLocator === undefined) {
+    throw new Error('the committed fixture does not carry the confirmed effect');
+  }
+  const rawOutputs = decodeActiveTurnRecords(records, businessTurnId)
+    .flatMap((record) => record.kind === 'accepted-fact'
+      ? [record.entry.envelope.fact.kind === 'tool-result' ? record.entry.envelope.fact.rawOutput : undefined] : []);
+  const rawOutput = rawOutputs.find((candidate) => candidate !== undefined);
+  if (rawOutput === undefined) throw new Error('the committed fixture does not carry the confirmed raw output asset');
+  const output = new TextDecoder('utf-8', { fatal: true })
+    .decode(await new ImmutableAssetStore(artifactsRoot).readEvidence(rawOutput.ref));
+  if (digest(output) !== effect.expectedContentDigest) {
+    throw new Error('the committed raw output asset does not match the confirmed effect digest');
+  }
+  return {
+    root, preparedPath, journalPath, artifactsRoot, retryPath, allocation,
+    assignment, taskScope: allocation.scope, businessTurnId, predecessor, effect,
+    effectPath: join(root, effect.relativePath), output, journal, acceptedEvidenceLocator,
+    preparedJournal, completion, native, segmentJournal, taskId: allocation.taskId,
+  };
+}
+
+/**
  * The real production owners. `createDefaultExecutionComposition` binds the five
  * cold producer ports; the coordinator owns the actual assembly/pool/lifecycle
  * transfer and exposes the public `resumeExecution` selector.
@@ -775,16 +942,20 @@ function effectRecordCount(records: readonly JournalRecord[], effectId: string):
   return count;
 }
 
-test('public resumeExecution preserves business identity and reaches the standard-end endpoint without replaying the confirmed effect', async () => {
-  const fixture = await buildColdFixture('resume-endpoint');
+/**
+ * The full cold-resume assertion surface, shared by the in-process consumer
+ * case and by the fresh resume child. Only the resume child runs it for the
+ * process-boundary acceptance; the parent then verifies the child's receipt.
+ */
+async function runResumeAssertions(fixture: ColdFixture, model: string): Promise<string> {
   const journalBytesBefore = await readFile(fixture.journalPath, 'utf8');
   const recordsBefore = (await fixture.journal.verify()).records;
   const effectRecordsBefore = effectRecordCount(recordsBefore, fixture.effect.effectId);
-  const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator);
+  const http = await upstream(model, fixture.acceptedEvidenceLocator);
   let assemblies: ReturnType<typeof buildResumeRuntime>['assemblies'] = [];
   let succeeded = false;
   try {
-    const runtime = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model');
+    const runtime = buildResumeRuntime(fixture, http.baseUrl, model);
     const { coordinator, composition } = runtime;
     assemblies = runtime.assemblies;
     const release: RuntimeExecutionRelease = await coordinator.resumeExecution(
@@ -949,20 +1120,60 @@ test('public resumeExecution preserves business identity and reaches the standar
       throw error;
     }
     succeeded = true;
+    return archiveRoot;
   } finally {
     await http.close();
     for (const assembly of assemblies) await assembly.runtimePool.dispose();
-    if (succeeded) {
-      await rm(fixture.root, { recursive: true, force: true });
-    } else {
+    if (!succeeded) {
       await writeFile(join(fixture.root, 'upstream-wires.json'), JSON.stringify(http.wires, null, 2), 'utf8')
         .catch(() => undefined);
       console.error(`cold-resume fixture retained for evidence at ${fixture.root}`);
     }
   }
-});
+}
 
-test('public resumeExecution holds with zero generation and zero effects when the current grant denies the resumed incarnation', async () => {
+function registerPublicConsumers(): void {
+  test('public resumeExecution preserves business identity and reaches the standard-end endpoint without replaying the confirmed effect', async () => {
+    const moduleUrl = import.meta.url;
+    const compiledPath = moduleUrl.startsWith('file://') ? decodeURIComponent(moduleUrl.slice('file://'.length)) : moduleUrl;
+    const seed = spawnColdProcess([compiledPath, '--cold-process=seed']);
+    const seedRun = await collectColdProcess(seed);
+    assert.equal(seedRun.close.code, 0, 'the seed child must exit normally');
+    assert.equal(seedRun.close.signal, null, 'the seed child must not be signaled');
+    assert.equal(seed.pid, seedRun.receipt.pid, 'the seed receipt PID must be the actual ChildProcess pid');
+    assert.ok(seed.pid !== process.pid, 'the seed must run in an independent child process');
+
+    // The resume process starts only after the seed child has closed.
+    const root = seedRun.receipt.root;
+    const taskId = seedRun.receipt.taskId;
+    const resume = spawnColdProcess([compiledPath, '--cold-process=resume', '--fixture-root', root, '--task-id', taskId]);
+    const resumeRun = await collectColdProcess(resume);
+    assert.equal(resumeRun.close.code, 0, 'the resume child must exit normally');
+    assert.equal(resumeRun.close.signal, null, 'the resume child must not be signaled');
+    assert.equal(resume.pid, resumeRun.receipt.pid, 'the resume receipt PID must be the actual ChildProcess pid');
+    assert.ok(resume.pid !== process.pid, 'the resume must run in an independent child process');
+    assert.ok(resume.pid !== seed.pid, 'the resume must run in a second independent child process');
+
+    // The resume child archived the upstream wires and the exact Organ Journal;
+    // the parent adds the process lifecycle evidence to the same archive.
+    const archiveRoot = resumeRun.receipt.archiveRoot;
+    assert.ok(archiveRoot !== undefined, 'the resume child must publish the passed receipt archive');
+    await writeFile(join(archiveRoot!, 'process-evidence.json'), JSON.stringify({
+      parentPid: process.pid,
+      seed: { pid: seed.pid, receiptPid: seedRun.receipt.pid, ppid: seedRun.receipt.ppid,
+        code: seedRun.close.code, signal: seedRun.close.signal },
+      resume: { pid: resume.pid, receiptPid: resumeRun.receipt.pid, ppid: resumeRun.receipt.ppid,
+        code: resumeRun.close.code, signal: resumeRun.close.signal },
+      ordering: { seedClosedBeforeResumeSpawned: true },
+    }, null, 2), 'utf8');
+    await writeFile(join(archiveRoot!, 'seed-child.log'), seedRun.stdout, 'utf8');
+    await writeFile(join(archiveRoot!, 'resume-child.log'), resumeRun.stdout, 'utf8');
+    if (seedRun.stderr.length > 0) await writeFile(join(archiveRoot!, 'seed-child.stderr.log'), seedRun.stderr, 'utf8');
+    if (resumeRun.stderr.length > 0) await writeFile(join(archiveRoot!, 'resume-child.stderr.log'), resumeRun.stderr, 'utf8');
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test('public resumeExecution holds with zero generation and zero effects when the current grant denies the resumed incarnation', async () => {
   const fixture = await buildColdFixture('resume-grant-denied');
   const http = await upstream('cold-resume-denied.model', fixture.acceptedEvidenceLocator);
   let assemblies: ReturnType<typeof buildResumeRuntime>['assemblies'] = [];
@@ -1001,3 +1212,10 @@ test('public resumeExecution holds with zero generation and zero effects when th
     }
   }
 });
+}
+
+if (processMode === 'seed' || processMode === 'resume') {
+  await (processMode === 'seed' ? runSeedProcess() : runResumeProcess());
+} else {
+  registerPublicConsumers();
+}
