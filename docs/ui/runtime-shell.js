@@ -1246,6 +1246,12 @@ function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) 
 // document only ever has one open shell layer: opening the detail closes any other open layer,
 // and closing it returns focus to the trigger.
 let technicalDetailLayer = null
+// Opening the technical detail from inside another shell layer (for example the
+// records/history host in the configuration drawer) replaces that layer instead
+// of leaving it. The replaced layer's own close handler must keep its read alive,
+// so the handoff is recorded here and consumed by the one handler that owns that
+// layer's leave cleanup. A user close or section switch never records a handoff.
+const shellLayerHandoffs = new WeakSet()
 // `content` lets a page module host its own read-only drill-down (for example the
 // shared agent-activity detail) in this same shell layer. Either way the layer stays
 // the one desktop side panel / mobile bottom drawer: the header, close button, single
@@ -1264,7 +1270,10 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
   }
   const { layer, title: titleNode, body, close } = technicalDetailLayer
   for (const openLayer of document.querySelectorAll('dialog.shell-layer[open]')) {
-    if (openLayer !== layer) openLayer.close()
+    if (openLayer !== layer) {
+      shellLayerHandoffs.add(openLayer)
+      openLayer.close()
+    }
   }
   titleNode.textContent = title
   clearNode(body)
@@ -1520,9 +1529,17 @@ export function mountShellLayer(context = {}) {
     }
     if (id === 'view') {
       const content = viewSectionContent(currentContext)
-      for (const text of content.paragraphs) section.append(element('p', text))
+      const parentNodes = []
+      for (const text of content.paragraphs) {
+        const paragraph = element('p', text)
+        parentNodes.push(paragraph)
+        section.append(paragraph)
+      }
+      // The chooser's own display:grid rule overrides [hidden], so the parent
+      // visibility switch owns this plain wrapper instead.
+      const parentChoice = element('div')
       if (currentContext.displaySurface) {
-        section.append(renderDisplayModeChooser({
+        parentChoice.append(renderDisplayModeChooser({
           surface: currentContext.displaySurface,
           state: displayController?.getState(),
           onSelect: (mode) => void selectDisplayMode(mode),
@@ -1534,8 +1551,10 @@ export function mountShellLayer(context = {}) {
           element('strong', '阅读方式未接入'),
           element('p', '这个页面没有可切换的阅读层。', 'muted'),
         )
-        section.append(missing)
+        parentChoice.append(missing)
       }
+      parentNodes.push(parentChoice)
+      section.append(parentChoice)
       if (!content.showHistory) {
         restorePanelFocus(section, focusKey)
         return
@@ -1550,6 +1569,9 @@ export function mountShellLayer(context = {}) {
         focusTarget?.focus()
       }
       const openLevel = (run) => {
+        // The records/history sublayer owns the view panel while active: the
+        // parent mode copy stays hidden until the back entry rebuilds it.
+        for (const node of parentNodes) node.hidden = true
         const back = element('button', '返回查看方式', 'button button--quiet')
         back.type = 'button'
         back.addEventListener('click', backToView)
@@ -1714,6 +1736,14 @@ export function mountShellLayer(context = {}) {
 
   // Return/close restores focus to the triggering corner when that button still exists.
   layer.addEventListener('close', () => {
+    // A handoff to another shell layer (the technical detail) replaced this
+    // layer instead of leaving its level. Keep the records/history read alive so
+    // the replaced level can still be rendered and returned to; only a real user
+    // close or section switch runs the leave cleanup below.
+    if (shellLayerHandoffs.has(layer)) {
+      shellLayerHandoffs.delete(layer)
+      return
+    }
     leaveDrawerReads()
     openPanelId = null
     const target = returnFocus
