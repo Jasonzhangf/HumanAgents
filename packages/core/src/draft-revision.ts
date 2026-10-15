@@ -6,6 +6,7 @@ import {
   validateDraftRevision,
   validateDraftRevisionInput,
   validateExecutionPolicyDefinition,
+  validateTaskFlowBinding,
   type DraftConfirmation,
   type DraftRevision,
   type DraftRevisionFailure,
@@ -15,6 +16,7 @@ import {
   type ExecutionPolicyDefinition,
   type FinalSubmit,
   type RequirementIntent,
+  type TaskFlowBinding,
 } from '../../contracts/src/index.js';
 import { CoreError } from './errors.js';
 
@@ -72,6 +74,7 @@ const REFINABLE_FIELDS = [
   'proposal',
   'knownFacts',
   'executionPolicy',
+  'taskFlow',
 ] as const;
 
 type RefinableField = (typeof REFINABLE_FIELDS)[number];
@@ -102,6 +105,7 @@ function hashableContent(revision: DraftRevision | Omit<DraftRevision, 'revision
     decisionRefs: revision.decisionRefs,
     immutableOriginalRef: revision.immutableOriginalRef,
     ...(revision.executionPolicy === undefined ? {} : { executionPolicy: revision.executionPolicy }),
+    ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
     ...(revision.executionControlRef === undefined ? {} : { executionControlRef: revision.executionControlRef }),
   };
 }
@@ -132,6 +136,7 @@ export interface CreateDraftRevisionInput {
   readonly knownFacts?: readonly string[];
   readonly decisionRefs?: readonly string[];
   readonly executionPolicy?: ExecutionPolicyDefinition;
+  readonly taskFlow?: TaskFlowBinding;
   readonly executionControlRef?: string;
   readonly immutableOriginalRef: string;
 }
@@ -160,6 +165,7 @@ export function createDraftRevision(input: CreateDraftRevisionInput): DraftRevis
     history: [],
     immutableOriginalRef: input.immutableOriginalRef,
     ...(input.executionPolicy === undefined ? {} : { executionPolicy: input.executionPolicy }),
+    ...(input.taskFlow === undefined ? {} : { taskFlow: structuredClone(input.taskFlow) }),
     ...(input.executionControlRef ? { executionControlRef: input.executionControlRef } : {}),
   };
   const created: DraftRevision = { ...revision, revisionHash: draftRevisionHash(revision) };
@@ -201,6 +207,15 @@ function requireExecutionPolicy(draftId: string, value: unknown): ExecutionPolic
   }
 }
 
+function requireTaskFlow(draftId: string, value: unknown): TaskFlowBinding {
+  try {
+    validateTaskFlowBinding(value as TaskFlowBinding);
+    return structuredClone(value as TaskFlowBinding);
+  } catch {
+    fail('invalid-refinement', draftId, 'draft refinement taskFlow is invalid');
+  }
+}
+
 function applyFields(current: DraftRevision, fields: Readonly<Record<string, unknown>>): DraftRevision {
   const draftId = current.draftId;
   return {
@@ -216,6 +231,7 @@ function applyFields(current: DraftRevision, fields: Readonly<Record<string, unk
     ...(fields.executionPolicy === undefined
       ? {}
       : { executionPolicy: requireExecutionPolicy(draftId, fields.executionPolicy) }),
+    ...(fields.taskFlow === undefined ? {} : { taskFlow: requireTaskFlow(draftId, fields.taskFlow) }),
   };
 }
 
@@ -223,8 +239,8 @@ function applyFields(current: DraftRevision, fields: Readonly<Record<string, unk
  * Produce the next revision of a draft from an explicit typed edit. The caller
  * must name the base revision version and hash; a stale base is rejected
  * without touching the current revision. A refinement that omits
- * `normalizedInput` may only change the execution policy; every other accepted
- * refinement must change the normalized execution input.
+ * `normalizedInput` may change only the execution policy or task flow; every
+ * other accepted refinement must change the normalized execution input.
  */
 export function refineDraftRevision(current: DraftRevision, input: DraftRevisionInput): DraftRevision {
   validateDraftRevision(current);
@@ -269,11 +285,11 @@ export function refineDraftRevision(current: DraftRevision, input: DraftRevision
   const applied = applyFields(current, fields);
   const changed = draftRevisionDiff(current, applied);
   if (fields.normalizedInput === undefined) {
-    if (changed.length !== 1 || changed[0] !== 'executionPolicy') {
+    if (changed.length === 0 || changed.some((field) => field !== 'executionPolicy' && field !== 'taskFlow')) {
       fail(
         'invalid-refinement',
         current.draftId,
-        'draft refinement without normalized execution input may only change the execution policy',
+        'draft refinement without normalized execution input may only change task flow or execution policy',
       );
     }
   } else if (applied.normalizedInput === current.normalizedInput) {
