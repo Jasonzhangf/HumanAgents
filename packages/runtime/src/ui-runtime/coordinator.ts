@@ -3494,6 +3494,7 @@ export class RuntimeTaskCoordinator {
           binding: input.kind === 'execution'
             ? { kind: 'execution', assignment: input.assignment }
             : { kind: 'review', assignment: input.assignment },
+          ...(input.lease === undefined ? {} : { incarnation: input.lease.incarnation }),
         });
         return { invocationId: input.invocationId, checkpointReceiptRef: committed.receipt.checkpointId.value };
       },

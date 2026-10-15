@@ -1,19 +1,22 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
   id,
+  type AgentEvent,
   type ActiveTurnBinding,
   type Attention,
   type Checkpoint,
   type EvidenceRef,
   type ProviderBinding,
+  type ProviderCloseResult,
   type RawAsset,
   type ScopeRef,
   type TaskId,
+  type TaskRuntimeIncarnation,
   type WorkAssignment,
   type WorkResult,
 } from '../../packages/contracts/src/index.js';
@@ -42,7 +45,12 @@ import {
   type ReviewAgentPort,
   type TaskExecutionHandle,
 } from '../../packages/runtime/src/orchestration/index.js';
-import type { RefinedDeliveryStore } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import {
+  RuntimeTaskCoordinator,
+  type RefinedDeliveryStore,
+  type RuntimeExecutionDriver,
+  type RuntimeExecutionPreparationInput,
+} from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import { MemoryCoordinator, type AttentionPort } from '../../packages/runtime/src/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -1052,6 +1060,197 @@ test('behavior 3: request chain, checkpoint and child delivery survive object re
     assert.equal(latest!.checkpoint.id.value, checkpoint.id.value);
     // Cold read must not append a record or replay a side effect.
     assert.equal((await rebuiltJournal.replay()).length, linesBeforeReplay, 'reconstruction must not write or re-dispatch');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Minimal real Runtime execution driver for the direct coordinator consumer.
+ * It emits one provider output and settles succeeded, so the real orchestrated
+ * active turn completes without any Provider process.
+ */
+class SingleTurnActiveTurnDriver implements RuntimeExecutionDriver {
+  readonly kind = 'active-turn-test.single-turn';
+
+  constructor(readonly input: RuntimeExecutionPreparationInput) {}
+
+  async capabilities() {
+    return { driverKind: this.kind, capabilities: ['execute'], version: '1' };
+  }
+
+  async start(input: { readonly runtimeId: string; readonly executionEpoch: number }) {
+    return { runtimeId: input.runtimeId, executionEpoch: input.executionEpoch };
+  }
+
+  async resume(input: { readonly runtimeId: string; readonly executionEpoch: number }) {
+    return { runtimeId: input.runtimeId, executionEpoch: input.executionEpoch };
+  }
+
+  async submit(input: Parameters<RuntimeExecutionDriver['submit']>[0]) {
+    return {
+      taskId: input.taskId,
+      executionEpoch: input.executionEpoch,
+      assignmentId: input.assignmentId,
+      payload: input.payload,
+      outputRefs: [],
+      evidenceRefs: [evidence('provider-submit', this.input.scope)],
+    };
+  }
+
+  async *observe(): AsyncIterable<AgentEvent> {
+    yield {
+      taskId: this.input.taskId,
+      executionEpoch: this.input.executionEpoch,
+      kind: 'provider.output',
+      evidenceRefs: [evidence('provider-output', this.input.scope)],
+      providerEvent: {
+        eventId: 'active-turn-incarnation-output',
+        kind: 'output',
+        bindingId: binding.bindingId,
+        providerId: binding.providerId,
+        executionEpoch: this.input.executionEpoch,
+        operationId: this.input.operationId,
+        taskId: this.input.taskId,
+        assignmentId: this.input.assignmentId,
+        summary: 'active turn single-turn provider output',
+        evidenceRefs: [evidence('provider-output', this.input.scope)],
+      },
+    } as AgentEvent;
+  }
+
+  async requestStop(input: Parameters<RuntimeExecutionDriver['requestStop']>[0]) {
+    return { requested: true, operationId: input.operationId };
+  }
+
+  async settle() {
+    return { state: 'succeeded' as const, evidenceRefs: [evidence('provider-settle', this.input.scope)] };
+  }
+
+  async close(): Promise<ProviderCloseResult> {
+    return {
+      bindingId: binding.bindingId,
+      providerId: binding.providerId,
+      protocol: 'responses',
+      state: 'closed',
+      evidenceRefs: [evidence('provider-close', this.input.scope)],
+    };
+  }
+}
+
+// Probability UNKNOWN; before this change the prepared child call persisted only
+// its assignment, so the actual acquired instance could not be read back after the
+// lease was released. Silence would break instance attribution, so one executable
+// omission counterexample plus a fresh-reader assertion is warranted, not a matrix.
+test('behavior 4: the actual acquired instance is persisted on the child invocation before dispatch and read back fresh', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-active-turn-incarnation-'));
+  const journalPath = join(root, 'active-turn.jsonl');
+  const activeTurnJournal = new FileActiveTurnJournal(journalPath);
+  const refinedDeliveryStore = new MemoryRefinedDeliveryStore();
+  let acquiredIncarnation: TaskRuntimeIncarnation | undefined;
+  let leaseIncarnation: TaskRuntimeIncarnation | undefined;
+  let durableBeforeDispatch: TaskRuntimeIncarnation | undefined;
+  let executionInvocationId: string | undefined;
+  let executionCalls = 0;
+  try {
+    const pool = runtimePool();
+    const coordinator = new RuntimeTaskCoordinator({
+      organId,
+      taskIdPrefix: 'active-turn-incarnation',
+      // Real typed admission boundary; this fixture performs no control write.
+      admitExecution: async () => {},
+      createDriver: (input) => new SingleTurnActiveTurnDriver(input),
+      checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+      attentionPort: attentionPort(),
+      journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+      activeTurnJournal,
+      ...nativeCaptureOptions(root),
+      permissionSnapshot,
+      refinedDeliveryStore,
+      createTaskAssembly({ scope, checkpointJournal, executionAgent, maxAttempts, childCallPort }) {
+        assert.ok(executionAgent, 'the coordinator must supply the real provider execution agent');
+        assert.ok(childCallPort, 'the active turn must supply the real child call port');
+        const innerExecutionAgent = executionAgent!;
+        const recordingExecutionAgent: ExecutionAgentPort = {
+          roleId: innerExecutionAgent.roleId,
+          createInstance(create) {
+            // The pool constructs this instance and hands the creator its exact
+            // incarnation; the acquire path rejects any other identity.
+            acquiredIncarnation = structuredClone(create.incarnation);
+            const handle = innerExecutionAgent.createInstance(create);
+            return {
+              incarnation: handle.incarnation,
+              async execute(input) {
+                executionCalls += 1;
+                // The child call port already committed before this handle runs, so
+                // the durable relation is readable here and before any Provider IO.
+                const invocationId = `invocation:${input.assignment.assignmentId}:${input.assignment.attempt}:${input.assignment.executionEpoch}`;
+                const records = await activeTurnJournal.replay();
+                const invocation = records.find((record) => record.kind === 'child-invocation' && record.record.invocationId === invocationId);
+                if (!invocation || invocation.kind !== 'child-invocation') {
+                  throw new Error('execution dispatch ran without a durable invocation association');
+                }
+                const latest = await checkpointJournal.readLatest(scope);
+                if (!latest) throw new Error('execution dispatch ran without a durable call checkpoint');
+                executionInvocationId = invocationId;
+                leaseIncarnation = input.lease === undefined ? undefined : structuredClone(input.lease.incarnation);
+                durableBeforeDispatch = invocation.record.incarnation === undefined
+                  ? undefined
+                  : structuredClone(invocation.record.incarnation);
+                return handle.execute(input);
+              },
+              async dispose() {
+                await handle.dispose();
+              },
+            };
+          },
+          async execute(input) {
+            return innerExecutionAgent.execute(input);
+          },
+        };
+        const orchestration = new OrchestrationManager({
+          ownerId: 'active-turn-test',
+          runtimePool: pool,
+          executionAgent: recordingExecutionAgent,
+          reviewAgent: passingReviewAgent(() => {}),
+          mergeCoordinator,
+          maxAttempts: maxAttempts ?? 1,
+          childCallPort,
+        });
+        return { orchestration, runtimePool: pool };
+      },
+    });
+
+    const task = coordinator.createTask({ title: 'active turn incarnation', directive: 'persist the actual acquired instance' });
+    coordinator.startExecution(task.taskId, { prompt: 'run the real orchestrated turn', orchestrate: true });
+    await waitFor(() => {
+      const state = coordinator.taskSnapshot(task.taskId).state;
+      assert.ok(!['waiting', 'running', 'settling'].includes(state), `the task did not settle: ${state}`);
+    });
+    const settled = coordinator.taskSnapshot(task.taskId);
+    assert.equal(settled.state, 'succeeded', JSON.stringify({ state: settled.state, error: settled.error }));
+    assert.equal(executionCalls, 1, 'the real child execution must run exactly once');
+
+    // The relation recorded at dispatch must equal the instance the pool
+    // actually constructed and leased, not a label or a duplicate instance.
+    assert.ok(acquiredIncarnation, 'the pool must construct a real acquired incarnation');
+    assert.ok(leaseIncarnation, 'the producer must receive the real acquired lease');
+    assert.deepEqual(leaseIncarnation!, acquiredIncarnation!, 'the lease must carry the pool-constructed instance');
+    assert.ok(durableBeforeDispatch, 'the child invocation must persist the actual acquired instance before dispatch');
+    assert.deepEqual(durableBeforeDispatch!, acquiredIncarnation!, 'the durable incarnation must equal the real acquired instance');
+
+    // Fresh reader: a brand-new journal handle plus a reconstructed context must
+    // read the same relation and must not append a record.
+    const turnId = coordinator.activeTurnId(task.taskId);
+    assert.ok(turnId, 'the active turn must expose its durable turn id');
+    assert.ok(executionInvocationId, 'the dispatch must observe its invocation id');
+    const linesBeforeFreshRead = (await readFile(journalPath, 'utf8')).trimEnd().split('\n').length;
+    const freshContext = await ActiveTurnContext.reconstruct(new FileActiveTurnJournal(journalPath), turnId!);
+    const freshInvocation = freshContext.childInvocations().find((record) => record.invocationId === executionInvocationId!);
+    assert.ok(freshInvocation, 'the fresh reader must resolve the dispatched child invocation');
+    assert.deepEqual(freshInvocation!.incarnation, acquiredIncarnation!, 'the fresh reader must return the actual acquired instance');
+    const linesAfterFreshRead = (await readFile(journalPath, 'utf8')).trimEnd().split('\n').length;
+    assert.equal(linesAfterFreshRead, linesBeforeFreshRead, 'the fresh read must not append to the journal');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

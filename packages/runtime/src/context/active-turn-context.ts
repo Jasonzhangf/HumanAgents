@@ -3,6 +3,7 @@ import {
   assertReviewResultMatchesAssignment,
   assertSameScope,
   validateAcceptedChildDelivery,
+  validateChildInvocationIncarnation,
   validateAcceptedRawFact,
   validateActiveTurnCaptureBody,
   validateRawFactEnvelope,
@@ -23,6 +24,7 @@ import {
   type RecoveryHoldFacts,
   type RuntimeRequestRecord,
   type ScopeRef,
+  type TaskRuntimeIncarnation,
   type TurnCaptureCut,
   type ReviewAssignment,
   type ReviewResult,
@@ -247,6 +249,7 @@ async function openChildInvocationRecord(
     readonly childTurnId: string;
     readonly checkpointReceiptRef: string;
     readonly binding: ChildCallBinding;
+    readonly incarnation?: TaskRuntimeIncarnation;
   },
 ): Promise<ChildInvocationRecord> {
   if (!input.invocationId.trim() || !input.childTurnId.trim() || !input.checkpointReceiptRef.trim()) {
@@ -259,11 +262,19 @@ async function openChildInvocationRecord(
     }
     return existing;
   }
+  if (input.incarnation !== undefined) {
+    try {
+      validateChildInvocationIncarnation(input.incarnation, input.binding, 'child invocation');
+    } catch (error) {
+      fail('active-turn.invocation.incarnation-invalid', error instanceof Error ? error.message : 'child invocation incarnation is invalid');
+    }
+  }
   const record: ChildInvocationRecord = {
     invocationId: input.invocationId,
     childTurnId: input.childTurnId,
     checkpointReceiptRef: input.checkpointReceiptRef,
     binding: input.binding,
+    ...(input.incarnation === undefined ? {} : { incarnation: input.incarnation }),
   };
   await state.append(state.commitId(`invocation:${input.invocationId}`), { kind: 'child-invocation', record });
   return record;
@@ -571,6 +582,7 @@ export class ActiveTurnContext {
     readonly childTurnId: string;
     readonly checkpointReceiptRef: string;
     readonly binding: ChildCallBinding;
+    readonly incarnation?: TaskRuntimeIncarnation;
   }): Promise<ChildInvocationRecord> {
     const owned = structuredClone(input);
     return this.mutate(() => this.openChildInvocationRecord(owned));
@@ -581,6 +593,7 @@ export class ActiveTurnContext {
     readonly childTurnId: string;
     readonly checkpointReceiptRef: string;
     readonly binding: ChildCallBinding;
+    readonly incarnation?: TaskRuntimeIncarnation;
   }): Promise<ChildInvocationRecord> {
     return openChildInvocationRecord(this.state(), input);
   }
@@ -949,6 +962,7 @@ export class ActiveTurnSegmentContext {
     readonly childTurnId: string;
     readonly checkpointReceiptRef: string;
     readonly binding: ChildCallBinding;
+    readonly incarnation?: TaskRuntimeIncarnation;
   }): Promise<ChildInvocationRecord> {
     const owned = structuredClone(input);
     return this.mutate(() => openChildInvocationRecord(this.state(), owned));
