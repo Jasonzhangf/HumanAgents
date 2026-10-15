@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "noEmitOnError": true,
+    "rootDir": "../..",
+    "outDir": "../../dist/tests-checkpoint-history",
+    "declaration": false
+  },
+  "include": [
+    "node-modules.d.ts",
+    "../../packages/app/src/node-modules.d.ts",
+    "../../packages/core/src/node-modules.d.ts",
+    "../../packages/context-events/src/node-modules.d.ts",
+    "../../packages/config/src/node-modules.d.ts",
+    "../../packages/ui/contracts/checkpoint-history.ts",
+    "../../packages/app/src/ui-runtime/checkpoint-history.ts",
+    "checkpoint-history-public-consumer.test.ts"
+  ]
+}
