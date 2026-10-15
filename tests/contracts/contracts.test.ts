@@ -833,7 +833,8 @@ const closureRecord = (overrides: Partial<CheckpointClosureRecord> = {}): Checkp
   nextAction: { kind: 'stop', ref: 'stopped' }, closedAt: '2099-01-01T00:00:00Z', ...overrides,
 });
 const reentryRecord = (overrides: Partial<CheckpointReentryRecord> = {}): CheckpointReentryRecord => ({
-  checkpointId: id('checkpoint', 'checkpoint-a'), reentryId: 'reentry-a', executionEpoch: 2, fencedEpochs: [1],
+  checkpointId: id('checkpoint', 'checkpoint-a'), reentryId: 'reentry-a',
+  checkpointExecutionEpoch: 1, previousExecutionEpoch: 1, newExecutionEpoch: 2, fencedEpochs: [1],
   permissionRevision: 'permission-r2', contextViewRef: 'context://view-a', entryPhase: 'recovery', nextAction: 'continue task',
   reentryRef: 'fact://reentry-a', ...overrides,
 });
@@ -1071,7 +1072,7 @@ test('checkpoint closure and reentry keep committed facts separate from reentry 
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'wait' } }) }), ContractError);
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'wait', ref: ' ' } }) }), ContractError);
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'unknown' as never, ref: 'unknown' } }) }), ContractError);
-  assert.throws(() => validateCheckpointReentryRecord({ ...reentryRecord({ executionEpoch: 1, fencedEpochs: [1] }) }), ContractError);
+  assert.throws(() => validateCheckpointReentryRecord({ ...reentryRecord({ newExecutionEpoch: 1 }) }), ContractError);
 });
 
 test('interaction closure is independent from task checkpoint closure', () => {
