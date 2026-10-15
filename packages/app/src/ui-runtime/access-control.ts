@@ -309,11 +309,11 @@ export class AccessControlService {
     });
     const token = encodeToken(payload, decodeSecret(this.credential.secret));
     const maxAgeSeconds = Math.max(1, Math.floor((session.expiresAt - this.now()) / 1000));
-    return `${SESSION_COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+    return `${SESSION_COOKIE_NAME}=${token}; Path=/; Max-Age=${maxAgeSeconds}`;
   }
 
   clearSessionCookie(): string {
-    return `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
+    return `${SESSION_COOKIE_NAME}=; Path=/; Max-Age=0`;
   }
 
   async logout(): Promise<number> {
@@ -335,11 +335,6 @@ export class AccessControlService {
 
   closeChallengeStore(): void {
     this.challenges.clear();
-  }
-
-  validateOrigin(origin: string | undefined, host: string | undefined): boolean {
-    if (!origin || !host) return false;
-    return origin === `http://${host}`;
   }
 
   async isCurrentGeneration(session: AccessSession): Promise<boolean> {
@@ -444,6 +439,15 @@ export class AccessControlService {
     return `${PRODUCT_PRINCIPAL_DOMAIN}:${createHmac('sha256', secret)
       .update(PRODUCT_PRINCIPAL_DOMAIN)
       .digest('base64url')}`;
+  }
+
+  /**
+   * Reads the stable nonsecret product owner for the current control root
+   * without requiring a request session. It delegates the existing derivation;
+   * the owner is never the session token or the credential.
+   */
+  readProductPrincipalOwner(): string {
+    return this.productPrincipalOwner();
   }
 
   nextExpiryDelayMs(sessions: readonly AccessSession[]): number | undefined {

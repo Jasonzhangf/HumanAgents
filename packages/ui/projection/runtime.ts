@@ -1,4 +1,4 @@
-import type { EvidenceRef, LifecycleState, TaskId } from '@humanagent/contracts';
+import type { EvidenceRef, LifecycleState, TaskFlowBinding, TaskId, TaskIdentitySource } from '@humanagent/contracts';
 import type { SemanticObservationEnvelope } from '@humanagent/contracts';
 import {
   type RuntimeDashboardProjection,
@@ -17,6 +17,7 @@ import {
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
+  type RuntimeReadResult,
   type PublicOutputPublicationProjection,
   type RuntimeCheckpointFilter,
   type RuntimeCheckpointHistoryProjection,
@@ -46,6 +47,7 @@ import {
 } from '../contracts/runtime.js';
 import type { RuntimeSemanticObservationEnvelope } from '../contracts/runtime.js';
 import { RuntimeProjectionError } from '../contracts/runtime.js';
+import type { RuntimeTaskPlanHistoryProjection } from '../contracts/task-plan-history.js';
 
 export type {
   PublicOutputCommitProjection,
@@ -123,9 +125,16 @@ export interface RuntimeTaskSnapshotInput {
   readonly taskId: TaskId;
   readonly title: string;
   readonly state: LifecycleState;
+  /**
+   * Committed task-flow binding read from this Task's identity record. Absent
+   * when the Task committed no binding; the projection then claims no binding.
+   */
+  readonly taskFlow?: TaskFlowBinding;
   readonly requirementQueue?: string;
   readonly requirementAdmission?: RuntimeTaskRowProjection['requirementAdmission'];
   readonly requirementAdmissionLabel?: string;
+  readonly identitySource?: TaskIdentitySource;
+  readonly taskPlanHistory?: RuntimeReadResult<RuntimeTaskPlanHistoryProjection>;
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;
@@ -324,9 +333,11 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
     title: source.title,
     state: source.state,
     stateLabel: stateLabel(source.state),
+    ...(source.taskFlow === undefined ? {} : { taskFlow: source.taskFlow }),
     requirementQueue: source.requirementQueue,
     requirementAdmission: source.requirementAdmission,
     requirementAdmissionLabel: source.requirementAdmissionLabel,
+    ...(source.identitySource === undefined ? {} : { identitySource: source.identitySource }),
     currentState: source.currentState,
     nextStep: source.nextStep,
     updatedAt: source.updatedAt,
@@ -456,6 +467,15 @@ export function projectRuntimeTaskDashboard(
     observationRef: `task://${source.taskId.value}/observation`,
     publicOutput,
     runtimePool: source.runtimePool,
+    taskPlanHistory: source.taskPlanHistory ?? {
+      ok: false,
+      failure: {
+        code: 'task-plan-history.not-composed',
+        ownerId: 'humanagent.ui.projection.runtime',
+        message: 'no task plan history read was composed for this dashboard projection',
+        nextAction: 'compose the task plan history read through the canonical control Journal before projecting the dashboard',
+      },
+    },
     ...(liveness === undefined ? {} : { liveness }),
   };
 }

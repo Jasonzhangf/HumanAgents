@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "noEmitOnError": true,
+    "rootDir": "../..",
+    "outDir": "../../dist/tests-new-task-identity",
+    "declaration": false
+  },
+  "include": [
+    "node-modules.d.ts",
+    "../../packages/app/src/node-modules.d.ts",
+    "../../packages/core/src/node-modules.d.ts",
+    "../../packages/context-events/src/node-modules.d.ts",
+    "../../packages/config/src/node-modules.d.ts",
+    "new-task-identity-public-consumer.test.ts",
+    "../../packages/app/src/**/*.ts",
+    "../../packages/context-events/src/**/*.ts",
+    "../../packages/config/src/**/*.ts",
+    "../../packages/core/src/**/*.ts",
+    "../../packages/ui/contracts/**/*.ts",
+    "../../packages/runtime/src/subscriptions/**/*.ts",
+    "../../packages/contracts/src/**/*.ts"
+  ]
+}

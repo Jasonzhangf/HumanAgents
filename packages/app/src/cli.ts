@@ -2,6 +2,7 @@
 import {
   ConfigurationError,
   ensureControlLayout,
+  listConfiguredProjects,
   loadConfiguration,
   resolveRuntimePaths,
   resolveWebSearchBackendConfig,
@@ -75,7 +76,7 @@ import { createJsonlI2JournalPort } from './i2-journal.js';
 import { JsonlTaskIdentityJournal } from '../../adapters/jsonl/src/task-identities.js';
 import { JsonlOrganJournal } from '../../adapters/jsonl/src/index.js';
 import { TaskIdentityConsumer } from '../../runtime/src/orchestration/task-identity.js';
-import { UiRuntimeJournal } from './ui-runtime/journal.js';
+import { UiRuntimeJournal, uiRuntimeControlJournalPath } from './ui-runtime/journal.js';
 import { ServiceExecutionCheckpointStore } from './ui-runtime/execution-composition.js';
 import type { AttentionPort } from '../../runtime/src/control/attention.js';
 import type { RuntimeTaskEvent } from '../../runtime/src/ui-runtime/coordinator.js';
@@ -801,7 +802,7 @@ async function runNativeTask(input: {
   // The control Organ Journal is the same physical file startUiRuntime writes:
   // mode root = <checkpointRoot>/<mode>, so task-control.jsonl sits beside the
   // prepared ui-runtime journal, not under a second journalRoot authority.
-  const controlJournalPath = join(modeRoot, 'task-control.jsonl');
+  const controlJournalPath = uiRuntimeControlJournalPath(modeRoot);
   const journal = new JsonlOrganJournal(controlJournalPath);
   const now = () => new Date();
   const prepareAgentProvider = taskAgentProviderPreparer(args, configuration, evidenceRoot);
@@ -1648,6 +1649,11 @@ export async function main(args: readonly string[]): Promise<void> {
             portNumber: boundPortNumber,
             projectKey: paths.projectKey,
             workspaceRoot: paths.workspaceCwd,
+            // Project identity comes only from the Config-owned manifest
+            // catalog; the read model derives each project/mode journal path
+            // from these canonical paths instead of scanning workspaces.
+            runtimePaths: paths,
+            projectCatalog: () => listConfiguredProjects(paths),
             restart: requestRestart,
             // The scheduled-occurrence patrol may only dispatch under the live
             // supervisor lease. The stage starts before `runSupervisorStartup`
