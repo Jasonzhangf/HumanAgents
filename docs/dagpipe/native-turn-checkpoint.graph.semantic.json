@@ -1,0 +1,36 @@
+{
+  "graph": "humanagent-native-turn-checkpoint",
+  "labels": {
+    "validate_candidate": "校验语义描述、身份、来源和验收依据",
+    "reconcile_operations": "按原 operation 身份收拢副作用并保留未知责任",
+    "persist_recovery_state": "持久保存恢复状态、原始证据与提交意图",
+    "commit_checkpoint_fact": "提交带可信时间的 checkpoint 事实",
+    "commit_closure_fact": "单独提交 turn closure 事实",
+    "commit_context_view_fact": "单独提交语义 Context View 转换事实",
+    "publish_qualified_history": "只从合格 durable 事实发布语义历史",
+    "project_durable_success": "仅投影五阶段完整且无未决责任的成功处置",
+    "recovery_hold": "汇总首错、后续错误、raw、未决操作、阶段和恢复责任",
+    "resolve_boundary_outcome": "返回完整 receipt 或明确部分提交与恢复责任"
+  },
+  "design": {
+    "status": "DESIGN-PLANNED",
+    "reusedBy": "humanagent-native-admitted-turn",
+    "singleWriter": "Runtime Checkpoint/Control Owner submits typed intents; the JSONL Journal Owner alone appends, assigns sequence/digest, flushes, and returns durable receipts.",
+    "stageEnvelope": "Expected phase errors and unknown results are values in the typed envelope, not Operator transport failures. A durable phase may execute a side effect only when its incoming envelope declares its exact prerequisite phase succeeded, the commit identity is unchanged, and permission/epoch checks pass; otherwise it emits not-executed with the original first error/cause and recovery ref. Following nodes are still scheduled in this static DAG, but must not perform their side effect when gated off. Both terminal projections always run as pure transformations: success is active only when all five durable phases have eligible receipts and no unresolved operations/errors; recovery_hold is active for any failed/unknown/not-executed phase, missing receipt, stale epoch, or unresolved operation. The unique Z verifies exactly one active projection and returns all recorded facts.",
+    "durableStages": ["recovery-assets", "checkpoint", "closure", "context-view", "history-publication"],
+    "durableStageNodes": {
+      "recovery-assets": "persist_recovery_state",
+      "checkpoint": "commit_checkpoint_fact",
+      "closure": "commit_closure_fact",
+      "context-view": "commit_context_view_fact",
+      "history-publication": "publish_qualified_history"
+    },
+    "recoveryHoldFields": ["commitIdentity", "firstErrorRef", "laterErrorRefs", "rawTurnRefs", "unresolvedOperationRefs", "allStageAndDurablePhaseStates", "allDurableReceipts", "recoveryResponsibilityRef"],
+    "routeNodes": {"successProjection": "project_durable_success", "recoveryProjection": "recovery_hold", "uniqueJoinOutput": "checkpoint_boundary_outcome"},
+    "routingEvidence": "DAGpipe 0.1.1 installed SDK Edge has only from/to/arc_id; its executor schedules all nodes in each topological wave. No conditional-edge or mutually exclusive route support is evidenced. This graph is target topology and envelope contract only; conditional activation and effect gating require future runtime implementation/evidence.",
+    "historyQualification": "History publication requires committed checkpoint, committed closure, and committed Context View receipts. Publication itself is not turn closure and does not grant next-turn eligibility.",
+    "rawRetention": "Preserve current-turn raw evidence until a complete durable turn receipt is returned. Never delete immutable Journal facts or evidence assets.",
+    "idempotency": "Retries use the same commit identity and return the original durable fact and timestamp; they do not invent a later time.",
+    "operatorStatus": "Bindings identify responsibility paths only. No Operator registration, static type validation, runtime behavior, or product acceptance is claimed."
+  }
+}

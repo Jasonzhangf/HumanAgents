@@ -1,5 +1,7 @@
 # Agent 流程与入口设计
 
+> 最新产品角色链与预算内 N 实例以[双大脑语义上下文设计](dual-brain-semantic-context-design-2026-10-11.md)为准；需求库 v11。显式大脑先分流，问答直接回答；复杂任务角色调用动态选择，阶段 turn 收口后由 planner 规划；编排者主要接收精炼结果。
+
 状态：`NEXT-DESIGN / UI-BASELINE-FROZEN`
 日期：2026-09-11
 适用阶段：`DESIGN-BOOTSTRAP` → MVP 设计收口
@@ -356,6 +358,7 @@ type WorkResult = {
   inputRevision: number
   producedArtifactRefs: string[]
   producedArtifactDigests: string[]
+  producedArtifactBodies?: string[]
   status: 'succeeded' | 'failed' | 'incomplete' | 'blocked' | 'cancelled'
   summary: string
   outputRefs: string[]
@@ -367,6 +370,39 @@ type WorkResult = {
 ```
 
 编排 agent 只接受与当前 `taskId`、`pipelineNodeId`、`assignmentId`、`attempt`、`executionEpoch` 和 `inputRevision` 全部匹配的结果。旧 epoch、旧 attempt、旧输入 revision 或不匹配 artifact digest 的结果只能记录为 stale evidence，不能推进任务。
+
+**原生 Provider 的交付绑定（2026-10-14 设计合同，端到端实现待验收）。** `outputRefs` 是派单声明的逻辑交付，`producedArtifactRefs` 是实际产物；两者不必使用相同引用。原生默认派单的一个逻辑输出表示本次标准结束所交付的完整材料集合。只有材料来源和正文得到确认，Runtime 才能绑定该逻辑输出；一个输出标签、一次请求结束或一份同任务材料都不能单独证明交付。
+
+```mermaid
+flowchart TD
+  S([当前业务 turn 的标准交付候选]):::boundary
+  R[沿原始已接纳记录读取交付材料<br/>确认完成回执、原始正文和来源]:::action
+  V{真实产物、正文、内容指纹<br/>与交付证据是否一致}:::decision
+  B[将完整材料集合绑定到<br/>原派单的逻辑输出]:::action
+  O[(结果保留真实产物引用<br/>完整正文、内容指纹和同源证据)]:::data
+  H[拒绝未获确认的交付<br/>保留原 turn 与未完成责任]:::failure
+  E([交回原编排处理]):::boundary
+  S --> R --> V
+  V -->|已确认| B --> O --> E
+  V -->|缺失、冲突或不支持| H --> E
+
+  classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
+  classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
+  classDef decision fill:#FFF4CC,stroke:#D97706,color:#0F172A,stroke-width:1.5px
+  classDef data fill:#F1EAFE,stroke:#7C3AED,color:#0F172A,stroke-width:1.5px
+  classDef failure fill:#FDECEC,stroke:#DC2626,color:#0F172A,stroke-width:1.5px
+  linkStyle default stroke:#475569,stroke-width:1.5px
+```
+
+Runtime 拥有材料匹配、逻辑输出绑定和结果装配。App 只接入已接纳标准结束、确切历史记录、完成回执和不可变资产的读取接口。冷恢复使用材料原来所属的执行身份读回正文；后继物理执行身份不替换原业务派单。正文与 digest 必须对应同一份原始字节，不拼入 drain 文本、总结或文件标题，也不重放已经确认的副作用。
+
+父执行身份与工具操作身份须分别核对。已接纳工具结果保留父执行身份和 scope；完成描述符及回执还保留具体工具操作的身份和 scope。两者通过原请求、工具调用、续接引用及确切完成描述符关联，不能要求父 operation 与工具 operation 相同，也不能用描述符自身的字段在比较两侧证明来源。完成回执的产物引用须对应同一已接纳工具结果声明的真实产物；正文或 digest 相同不能替代该引用关系。
+
+文件写入的副作用确认与工具报告的产物指纹属于不同对象。`confirmation.observedContentDigest` 对应目标文件，须与 `effect.expectedContentDigest` 相符；`result.outputDigest` 对应交付报告资产，须与所读报告的原始字节相符。真实 `file.write` 报告包含路径、操作及写入前后内容，不能要求报告指纹等于文件指纹。确认关系由既有完成回执契约保证，交付绑定沿用该关系。
+
+当前首增量支持单逻辑输出及标准结束明确交付的已确认 `file.write` 文本材料。纯语义文本、其它工具材料、多逻辑输出和二进制仍需补齐各自的交付合同与真实入口证据，不能据此宣布完整原生执行能力完成。交付绑定成功只完成本执行阶段的结果装配；原有准入、适用 review/merge、checkpoint、Planner 对齐和 Core 任务终态责任保持不变。此图细化既有“交付真实结果与引用”的数据合同，不新增固定角色流程。
+
+**直接语义交付（后续设计候选，真实入口尚未验收）。** 探索、规划、审查和记忆分析可以直接交付精炼文本。标准结束输入可显式携带 `deliveryText`，其正文与四项 summary 分开；原有引用交付方式继续有效，正文和材料引用均缺失时仍须拒绝。Runtime 从原已接纳的结束调用、原始参数资产和 accepted command 核对这份正文，通过既有不可变资产能力保留确切内容，再绑定到原派单。该来源不要求先产生 workspace 文件或伪造文件写入完成回执。App 只提供真实来源和读回，材料选择与逻辑绑定继续归 Runtime。纯文本与引用材料共用本节已有来源、绑定和标准尾部，不新增业务节点或固定角色流程。多输出关系、其它工具和已采纳 child 材料、二进制保存及其内容评价仍按各自需求和真实证据推进。
 
 任务编排 agent 根据 `nextAction` 做唯一处理：
 

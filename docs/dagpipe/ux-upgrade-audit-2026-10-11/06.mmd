@@ -1,0 +1,24 @@
+flowchart TB
+ I[读取同任务 Journal 提交事实]:::truth
+ S[核对 author／operation 身份<br/>资源／持久化／实际副作用]:::truth
+ C[Core 裁决恢复责任]:::truth
+ U[无法确认是否闭合<br/>保持未知／禁止盲目重放]:::truth
+ F[证实闭合且尚未执行<br/>启动前失败]:::truth
+ A[已执行或存在副作用<br/>按标准收拢与恢复规则处理]:::truth
+ J[reconcile 结果幂等追加 Journal<br/>提交失败公开]:::truth
+ P[typed 恢复投影<br/>责任／身份／来源／允许动作]:::derived
+ I --> S --> C
+ C -->|未知| U
+ C -->|明确未开始且闭合| F
+ C -->|已开始| A
+ U --> J
+ F --> J
+ A --> J
+ J --> P
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

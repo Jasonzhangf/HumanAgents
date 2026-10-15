@@ -1,0 +1,24 @@
+flowchart TB
+ I[当前目标＋语义 checkpoints<br/>最新完整且简单的 turn context]:::design
+ D[编排者依据事实、未知与预算<br/>自主选择下一步]:::design
+ O[探索一次或多次<br/>标准模板，独立 context]:::design
+ P[plan 一次或多次<br/>独立 context]:::design
+ X[execute 一次或多次<br/>独立 context]:::design
+ R[review 一次或多次<br/>独立 context]:::design
+ W[等待在途结果／补充输入<br/>必要的定向读写]:::design
+ F[精炼语义结果与证据<br/>父编排者核实／接受／补充]:::design
+ N[输出下一决策输入<br/>继续当前 turn 或申请 turn 收口<br/>不自动结束编排 agent]:::design
+ I --> D
+ D -->|自主选择| O --> F
+ D -->|自主选择| P --> F
+ D -->|自主选择| X --> F
+ D -->|自主选择| R --> F
+ D -->|自主选择| W --> F
+ F --> N
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

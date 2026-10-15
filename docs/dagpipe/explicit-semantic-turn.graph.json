@@ -1,0 +1,170 @@
+{
+  "id": "humanagent-explicit-semantic-turn",
+  "version": "1",
+  "meta": {
+    "title": "explicit-semantic-turn",
+    "requirements_version": 14,
+    "requirements": [
+      "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+      "humanagent-continuation-oriented-by-explicit-dispatch-template"
+    ],
+    "designStatus": "USER-REQUIREMENT-DESIGN",
+    "implementationStatus": "UNVERIFIED",
+    "bindingBoundary": "语义设计责任名称，不声明 Operator 已注册或 runtime 执行",
+    "outcomeBoundary": "简单问答直接回答结束；复杂需求形成标准模板经既有确认/FIFO派发。结果携既有明确分流，不依赖模型布尔 control block。",
+    "ablationDecision": "保留 assemble、route、outcome、history、return 五个节点；无证据证明可物理删除，删除数为 0。",
+    "settlementEvidenceBoundary": "explicit-brain.state、trace 或回复文本不能证明 Provider settlement。原 typed 成功 Provider settlement receipt 是独立控制证据，关联同一 interactionId 与 inputRevision；不得写入 prompt、回答 JSON、reply、explicit-brain.state、decisionRefs 或任务 payload。",
+    "existingCheckpointDesign": "native-turn-checkpoint.graph.json"
+  },
+  "inputs": [
+    {
+      "id": "explicit_input",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "assemble",
+      "operator": "humanagent-explicit-semantic-turn-assemble",
+      "operator_version": "1",
+      "inputs": [
+        "explicit_input"
+      ],
+      "output": {
+        "id": "assemble_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "route",
+      "operator": "humanagent-explicit-semantic-turn-route",
+      "operator_version": "1",
+      "inputs": [
+        "assemble_result"
+      ],
+      "output": {
+        "id": "route_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "outcome",
+      "operator": "humanagent-explicit-semantic-turn-outcome",
+      "operator_version": "1",
+      "inputs": [
+        "route_result"
+      ],
+      "output": {
+        "id": "outcome_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "history",
+      "operator": "humanagent-explicit-semantic-turn-history",
+      "operator_version": "1",
+      "inputs": [
+        "outcome_result"
+      ],
+      "output": {
+        "id": "history_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "return",
+      "operator": "humanagent-explicit-semantic-turn-return",
+      "operator_version": "1",
+      "inputs": [
+        "history_result"
+      ],
+      "output": {
+        "id": "return_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "assemble",
+      "to": "route",
+      "arc_id": "assemble_result"
+    },
+    {
+      "from": "route",
+      "to": "outcome",
+      "arc_id": "route_result"
+    },
+    {
+      "from": "outcome",
+      "to": "history",
+      "arc_id": "outcome_result"
+    },
+    {
+      "from": "history",
+      "to": "return",
+      "arc_id": "history_result"
+    }
+  ],
+  "outputs": [
+    "return_result"
+  ]
+}

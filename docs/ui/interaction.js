@@ -44,6 +44,18 @@ const deleteTaskButton = safe('[data-action="delete"]', createTaskForm)
 const liveEventList = safe('[data-task-live-events]')
 const liveEventMeta = safe('[data-task-live-meta]')
 const confirmPolicyRadios = safeAll('[data-confirm-policy] input[name="confirmPolicy"]')
+const existingChangeIntake = safe('[data-existing-change-intake]')
+const existingChangeState = safe('[data-existing-change-state]')
+const existingChangeFeedback = safe('[data-existing-change-feedback]')
+const existingChangeError = safe('[data-existing-change-error]')
+const existingChangeProposal = safe('[data-existing-change-proposal]')
+const existingChangeTask = safe('[data-existing-change-task]')
+const existingChangeRevision = safe('[data-existing-change-revision]')
+const existingChangeEdit = safe('[data-existing-change-edit]')
+const existingChangeConfirmation = safe('[data-existing-change-confirmation]')
+const existingChangeOrganizeButton = safe('[data-action="organize-existing-change"]', existingChangeIntake)
+const existingChangeSaveButton = safe('[data-action="save-existing-change"]', existingChangeEdit)
+const existingChangeConfirmButton = safe('[data-action="confirm-existing-change"]', existingChangeProposal)
 
 const INTERPRET_TIMEOUT_MS = 8000
 
@@ -52,6 +64,13 @@ let currentInspection
 let confirmPolicy = 'manual'
 let selectedTaskId
 let tasks = []
+let existingChangeInteractionId
+let existingChangeSnapshot
+let existingChangeIdentity
+let existingChangeLastInput
+let existingChangeLastTaskRef
+let existingChangeInFlight = false
+let existingChangeSaveRejected = false
 
 function field(form, name) {
   return form.elements.namedItem(name)
@@ -85,6 +104,362 @@ function setCreateFeedback(message) {
 function setCreateFeedbackError(error) {
   setCreateFeedback(`${error.message} · ${error.nextAction || 'inspect runtime'}`)
   appendPairingEntry(createTaskFeedback, error)
+}
+
+function setExistingChangeFeedback(message) {
+  existingChangeFeedback.textContent = message
+}
+
+function clearExistingChangeError() {
+  clearNode(existingChangeError)
+  existingChangeError.hidden = true
+}
+
+function showExistingChangeError(error) {
+  clearNode(existingChangeError)
+  existingChangeError.hidden = false
+  existingChangeError.append(
+    element('strong', error.code || 'runtime.request.failed'),
+    element('p', `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`),
+  )
+  appendPairingEntry(existingChangeError, error)
+}
+
+function newExistingChangeIdentity() {
+  const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  return {
+    confirmationRef: `confirmation:existing-change:${nonce}`,
+    payloadRef: `asset://requirements/existing-change:${nonce}`,
+    idempotencyKey: `existing-change:${nonce}`,
+    confirmedAt: new Date().toISOString(),
+    submitted: false,
+    invalidated: false,
+  }
+}
+
+function resetExistingChange() {
+  existingChangeInteractionId = undefined
+  existingChangeSnapshot = undefined
+  existingChangeIdentity = undefined
+  existingChangeLastInput = undefined
+  existingChangeLastTaskRef = undefined
+  existingChangeInFlight = false
+  existingChangeSaveRejected = false
+  existingChangeProposal.hidden = true
+  existingChangeState.textContent = '尚未整理'
+  clearExistingChangeError()
+}
+
+function existingChangeCurrentTaskRef(snapshot) {
+  return snapshot?.draft?.matchedTasks?.find((task) => task.relation === 'current')?.taskId?.value
+}
+
+function existingChangeEditorFields() {
+  return {
+    goal: value(existingChangeEdit, 'goal'),
+    scope: value(existingChangeEdit, 'scope'),
+    proposal: value(existingChangeEdit, 'proposal'),
+  }
+}
+
+/**
+ * A confirmation authorizes exactly the revision the runtime last returned for
+ * the fields on screen. Editing those fields, or having a save rejected, leaves
+ * the displayed text without a server revision, so the confirmation stays
+ * unavailable. Only a revision returned by the runtime clears this gate; the UI
+ * never mints a domain revision of its own.
+ */
+function existingChangeConfirmBlocker() {
+  const snapshot = existingChangeSnapshot
+  const revision = snapshot?.revision
+  if (!snapshot || !revision) return 'missing-revision'
+  if (snapshot.state !== 'awaiting-confirmation') return 'state'
+  if (existingChangeIdentity?.submitted) return 'submitted'
+  if (existingChangeSaveRejected) return 'stale-edit'
+  const fields = existingChangeEditorFields()
+  const saved = {
+    goal: revision.goal ?? '',
+    scope: revision.scope ?? '',
+    proposal: revision.proposal ?? '',
+  }
+  if (fields.goal !== saved.goal || fields.scope !== saved.scope || fields.proposal !== saved.proposal) return 'unsaved-edit'
+  return undefined
+}
+
+function existingChangeBlockerRefusal(blocker) {
+  return blocker === 'unsaved-edit'
+    ? {
+        code: 'ui.existing-change.unsaved-edit',
+        message: 'the edited fields are not a saved draft revision',
+        nextAction: 'save the edited revision before confirming the change',
+        feedback: '编辑尚未保存；当前修订不能确认。',
+      }
+    : {
+        code: 'ui.existing-change.stale-edit',
+        message: 'the last save was rejected; the displayed revision is not the current server revision',
+        nextAction: 'reload the reviewable revision before confirming the change',
+        feedback: '保存修改被拒绝；当前修订不能确认。',
+      }
+}
+
+function existingChangeConfirmationText(blocker) {
+  if (existingChangeIdentity?.submitted) return `已提交：${existingChangeIdentity.receiptText || 'requirement accepted'}`
+  if (blocker === 'unsaved-edit') return '编辑尚未保存；当前修订不能确认。'
+  if (blocker === 'stale-edit') return '保存修改被拒绝；当前修订不能确认，请重新整理或重新保存。'
+  if (existingChangeIdentity?.invalidated) return '修改已保存；旧确认已失效，请确认当前修订。'
+  return '确认是独立动作；保存修改会使旧确认失效。'
+}
+
+function renderExistingChange(snapshot) {
+  existingChangeSnapshot = snapshot
+  existingChangeState.textContent = readable(snapshot?.state)
+  const draft = snapshot?.draft
+  const revision = snapshot?.revision
+  existingChangeProposal.hidden = !draft
+  if (!draft) return
+
+  const target = existingChangeCurrentTaskRef(snapshot)
+  existingChangeTask.textContent = target ? `目标任务：${target}` : '目标任务：未匹配到当前任务'
+  existingChangeRevision.textContent = revision
+    ? `修订 v${revision.revisionVersion} · ${revision.revisionHash}`
+    : '修订：未提供'
+  if (revision) {
+    field(existingChangeEdit, 'goal').value = revision.goal ?? draft.proposal ?? ''
+    field(existingChangeEdit, 'scope').value = revision.scope ?? draft.normalizedInput ?? ''
+    field(existingChangeEdit, 'proposal').value = revision.proposal ?? draft.proposal ?? ''
+  }
+  // The confirmation stays available only for the revision the runtime last
+  // returned and while the fields on screen still match it. Target validity is
+  // checked by the confirmation action itself, so a wrong target surfaces as a
+  // typed runtime error instead of a silently disabled button that never
+  // explains why.
+  const blocker = existingChangeConfirmBlocker()
+  existingChangeSaveButton.disabled = !revision || existingChangeIdentity?.submitted === true
+  existingChangeConfirmButton.disabled = Boolean(blocker)
+  existingChangeConfirmation.textContent = existingChangeConfirmationText(blocker)
+  showServerResult(snapshot)
+}
+
+async function organizeExistingChange(event) {
+  event.preventDefault()
+  if (existingChangeInFlight) return
+  const target = value(existingChangeIntake, 'taskRef')
+  const rawInput = value(existingChangeIntake, 'changeInput')
+  if (!target || !rawInput) {
+    setExistingChangeFeedback('请填写任务引用和变更输入。')
+    return
+  }
+  if (existingChangeLastTaskRef !== undefined
+    && (existingChangeLastTaskRef !== target || existingChangeLastInput !== rawInput)) {
+    resetExistingChange()
+  }
+  existingChangeInFlight = true
+  existingChangeOrganizeButton.disabled = true
+  clearExistingChangeError()
+  setExistingChangeFeedback('正在整理变更提案…')
+  try {
+    let snapshot
+    if (!existingChangeInteractionId) {
+      const received = await api.receiveExplicitInput({
+        sourceRef: 'ui:interaction:existing-change',
+        rawInput,
+        inputRevision: 1,
+        requestKind: 'existing-task-change',
+      })
+      existingChangeInteractionId = received.interactionId
+      snapshot = await api.interpretExplicitInput(existingChangeInteractionId)
+    } else {
+      snapshot = await api.inspectExplicitInteraction(existingChangeInteractionId)
+      if (snapshot.state === 'received' || snapshot.state === 'matching') {
+        snapshot = await api.interpretExplicitInput(existingChangeInteractionId)
+      }
+    }
+    existingChangeLastTaskRef = target
+    existingChangeLastInput = rawInput
+    // The runtime just returned its current revision for these fields, so a
+    // previously rejected save no longer owns the gate.
+    existingChangeSaveRejected = false
+    renderExistingChange(snapshot)
+    const runtimeTarget = existingChangeCurrentTaskRef(snapshot)
+    if (snapshot.state === 'awaiting-clarification') {
+      setExistingChangeFeedback(snapshot.reply || '显式大脑需要补充信息；请修改变更输入后重新整理。')
+      return
+    }
+    if (snapshot.state !== 'awaiting-confirmation') {
+      setExistingChangeFeedback(`当前状态：${snapshot.state}。${snapshot.nextAction || ''}`)
+      return
+    }
+    if (!runtimeTarget) {
+      existingChangeIdentity = undefined
+      showExistingChangeError(Object.assign(new Error('整理结果没有绑定当前任务，不能提交变更。'), {
+        code: 'explicit-brain.missing-existing-task-target',
+        ownerId: 'humanagent.runtime.explicit-brain',
+        nextAction: 'select the task that owns the confirmed draft revision before submitting the change',
+      }))
+      return
+    }
+    if (runtimeTarget !== target) {
+      existingChangeIdentity = undefined
+      showExistingChangeError(Object.assign(new Error(`变更目标 ${target} 与整理结果 ${runtimeTarget} 不一致。`), {
+        code: 'explicit-brain.task-target-mismatch',
+        ownerId: 'humanagent.runtime.explicit-brain',
+        nextAction: 'select the task that owns the confirmed draft revision before submitting the change',
+      }))
+      return
+    }
+    if (!existingChangeIdentity) existingChangeIdentity = newExistingChangeIdentity()
+    setExistingChangeFeedback('提案已整理；请检查后单独确认。')
+  } catch (error) {
+    showExistingChangeError(error)
+    setExistingChangeFeedback(`${error.message} · ${error.nextAction || 'inspect the runtime'}`)
+  } finally {
+    existingChangeInFlight = false
+    existingChangeOrganizeButton.disabled = false
+  }
+}
+
+async function saveExistingChange(event) {
+  event.preventDefault()
+  const revision = existingChangeSnapshot?.revision
+  if (!revision) {
+    setExistingChangeFeedback('请先整理变更提案。')
+    return
+  }
+  const fields = {
+    goal: value(existingChangeEdit, 'goal'),
+    scope: value(existingChangeEdit, 'scope'),
+    proposal: value(existingChangeEdit, 'proposal'),
+  }
+  if (!fields.goal || !fields.scope || !fields.proposal) {
+    setExistingChangeFeedback('目标、范围和处理方式都需要填写。')
+    return
+  }
+  const changed = fields.goal !== revision.goal
+    || fields.scope !== revision.scope
+    || fields.proposal !== revision.proposal
+  if (!changed) {
+    setExistingChangeFeedback(existingChangeSaveRejected
+      ? '没有检测到修改；请重新整理以取得服务端当前修订。'
+      : '没有检测到修改；当前修订仍可确认。')
+    return
+  }
+  // An edit is a new revision identity. Clear the previous confirmation before
+  // asking the runtime to mint it, so a failed edit can never leave the old
+  // confirmation usable for the edited text.
+  existingChangeIdentity = undefined
+  existingChangeConfirmButton.disabled = true
+  existingChangeConfirmation.textContent = existingChangeConfirmationText('unsaved-edit')
+  existingChangeSaveButton.disabled = true
+  clearExistingChangeError()
+  setExistingChangeFeedback('正在保存修改…')
+  try {
+    const snapshot = await api.refineExplicitDraft(existingChangeInteractionId, {
+      draftId: revision.draftId,
+      baseRevisionVersion: revision.revisionVersion,
+      requestedRevisionHash: revision.revisionHash,
+      fields,
+      instructionRef: 'existing-change-edit',
+      idempotencyKey: `existing-change-edit:${revision.draftId}:${revision.revisionVersion}:${Date.now().toString(36)}`,
+    })
+    existingChangeIdentity = newExistingChangeIdentity()
+    existingChangeIdentity.invalidated = true
+    // Only the revision the runtime just returned may re-arm the confirmation.
+    existingChangeSaveRejected = false
+    renderExistingChange(snapshot)
+    setExistingChangeFeedback('修改已保存；旧确认已失效，请确认当前修订。')
+  } catch (error) {
+    existingChangeSaveRejected = true
+    existingChangeConfirmButton.disabled = true
+    existingChangeConfirmation.textContent = existingChangeConfirmationText('stale-edit')
+    showExistingChangeError(error)
+    setExistingChangeFeedback(`修改未保存：${error.message} · ${error.nextAction || 'inspect the runtime'}`)
+  } finally {
+    existingChangeSaveButton.disabled = false
+  }
+}
+
+async function confirmExistingChange() {
+  if (existingChangeInFlight) return
+  const snapshot = existingChangeSnapshot
+  const revision = snapshot?.revision
+  const target = value(existingChangeIntake, 'taskRef')
+  if (!existingChangeInteractionId || !revision) {
+    setExistingChangeFeedback('请先整理变更提案。')
+    return
+  }
+  if (snapshot.state !== 'awaiting-confirmation') {
+    setExistingChangeFeedback(`当前状态：${snapshot.state}。${snapshot.nextAction || ''}`)
+    return
+  }
+  // The confirmation action re-checks the screen itself: a disabled button is
+  // not the authorization boundary, the exact revision is.
+  const blocker = existingChangeConfirmBlocker()
+  if (blocker === 'unsaved-edit' || blocker === 'stale-edit') {
+    const refusal = existingChangeBlockerRefusal(blocker)
+    existingChangeConfirmButton.disabled = true
+    showExistingChangeError(Object.assign(new Error(refusal.message), {
+      code: refusal.code,
+      ownerId: 'humanagent.ui.existing-change',
+      nextAction: refusal.nextAction,
+    }))
+    setExistingChangeFeedback(refusal.feedback)
+    return
+  }
+  const draftTarget = existingChangeCurrentTaskRef(snapshot)
+  if (!draftTarget) {
+    existingChangeConfirmButton.disabled = true
+    showExistingChangeError(Object.assign(new Error('整理结果没有绑定当前任务，不能提交变更。'), {
+      code: 'explicit-brain.missing-existing-task-target',
+      ownerId: 'humanagent.runtime.explicit-brain',
+      nextAction: 'select the task that owns the confirmed draft revision before submitting the change',
+    }))
+    return
+  }
+  if (draftTarget !== target) {
+    existingChangeConfirmButton.disabled = true
+    showExistingChangeError(Object.assign(new Error(`变更目标 ${target} 与整理结果 ${draftTarget} 不一致。`), {
+      code: 'explicit-brain.task-target-mismatch',
+      ownerId: 'humanagent.runtime.explicit-brain',
+      nextAction: 'select the task that owns the confirmed draft revision before submitting the change',
+    }))
+    return
+  }
+  if (!existingChangeIdentity) existingChangeIdentity = newExistingChangeIdentity()
+  existingChangeInFlight = true
+  existingChangeConfirmButton.disabled = true
+  existingChangeSaveButton.disabled = true
+  clearExistingChangeError()
+  setExistingChangeFeedback('正在单独确认并提交变更…')
+  try {
+    const receipt = await api.confirmExplicitRequirement(existingChangeInteractionId, {
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      confirmationRef: existingChangeIdentity.confirmationRef,
+      confirmedBy: 'human:operator',
+      confirmedAt: existingChangeIdentity.confirmedAt,
+      payloadRef: existingChangeIdentity.payloadRef,
+      idempotencyKey: existingChangeIdentity.idempotencyKey,
+      requestKind: 'existing-task-change',
+      taskRef: { scope: 'task', value: target },
+    })
+    const requirement = receipt?.requirement
+    existingChangeIdentity.submitted = true
+    existingChangeIdentity.receiptText = requirement
+      ? `requirement=${requirement.requirementId} · draft=${requirement.draftId} · inputRevision=${requirement.inputRevision}`
+      : 'requirement accepted'
+    renderExistingChange(snapshot)
+    setExistingChangeFeedback(`变更已提交：${existingChangeIdentity.receiptText}`)
+    showServerResult(receipt)
+  } catch (error) {
+    showExistingChangeError(error)
+    setExistingChangeFeedback(`${error.message} · ${error.nextAction || 'inspect the runtime'}`)
+    existingChangeConfirmButton.disabled = Boolean(existingChangeConfirmBlocker())
+    existingChangeSaveButton.disabled = false
+  } finally {
+    existingChangeInFlight = false
+  }
 }
 
 function showServerResult(result) {
@@ -243,6 +618,51 @@ confirmationForm.addEventListener('submit', (event) => {
     payloadRef: value(confirmationForm, 'payloadRef'),
   }), 'confirmation receipt 已返回；现在才允许 dispatch。')
 })
+
+existingChangeIntake.addEventListener('submit', (event) => void organizeExistingChange(event))
+existingChangeEdit.addEventListener('submit', (event) => void saveExistingChange(event))
+existingChangeConfirmButton.addEventListener('click', () => void confirmExistingChange())
+const existingChangeTaskRefInput = (() => {
+  try { return existingChangeIntake?.elements?.namedItem?.('taskRef') ?? null } catch (_) { return null }
+})()
+existingChangeTaskRefInput?.addEventListener('input', () => {
+  const snapshot = existingChangeSnapshot
+  if (!snapshot?.revision || existingChangeIdentity?.submitted) return
+  const target = value(existingChangeIntake, 'taskRef')
+  const draftTarget = existingChangeCurrentTaskRef(snapshot)
+  // Correcting the target clears only the previous mismatch. A wrong target is
+  // not refused here: the human still presses the separate confirmation and
+  // gets the runtime-typed mismatch error. An unsaved edit or a rejected save
+  // keeps its own gate closed, because no server revision owns those fields.
+  if (snapshot.state === 'awaiting-confirmation' && Boolean(draftTarget) && draftTarget === target
+    && !existingChangeConfirmBlocker()) {
+    existingChangeConfirmButton.disabled = false
+    clearExistingChangeError()
+  }
+})
+
+// Typing in the reviewable fields makes the confirmation unavailable at once:
+// the displayed text no longer belongs to any revision the runtime returned.
+for (const name of ['goal', 'scope', 'proposal']) {
+  const editorInput = (() => {
+    try { return existingChangeEdit?.elements?.namedItem?.(name) ?? null } catch (_) { return null }
+  })()
+  editorInput?.addEventListener('input', () => {
+    if (!existingChangeSnapshot?.revision) return
+    const blocker = existingChangeConfirmBlocker()
+    existingChangeConfirmButton.disabled = Boolean(blocker)
+    existingChangeConfirmation.textContent = existingChangeConfirmationText(blocker)
+  })
+}
+
+// A Task Detail deep link can name the exact task whose change is being
+// proposed. The input stays editable, but the default is the selected task.
+try {
+  const linkedTask = new URLSearchParams(globalThis.location?.search || '').get('task')
+  if (linkedTask && existingChangeTaskRefInput) existingChangeTaskRefInput.value = linkedTask
+} catch (_) {
+  // A missing or non-browser location only means there is no deep link to apply.
+}
 
 for (const button of statusButtons) {
   button.addEventListener('click', () => void run(async () => {

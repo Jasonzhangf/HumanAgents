@@ -717,6 +717,33 @@ class FailOnceProjectionJournal extends UiRuntimeJournal {
   }
 }
 
+class CapturingRuntimeEventJournal extends UiRuntimeJournal {
+  readonly appendErrors: unknown[] = [];
+  readonly operationEvents: Array<{
+    readonly seq: number;
+    readonly kind: string;
+    readonly summary: unknown;
+    readonly outputRefs?: readonly string[];
+  }> = [];
+
+  override append(record: RuntimeTaskJournalRecord): void {
+    if (record.kind === 'operation.event') {
+      this.operationEvents.push({
+        seq: record.event.seq,
+        kind: record.event.kind,
+        summary: (record.event as { readonly summary?: unknown }).summary,
+        ...(record.event.outputRefs === undefined ? {} : { outputRefs: record.event.outputRefs }),
+      });
+    }
+    try {
+      super.append(record);
+    } catch (error) {
+      this.appendErrors.push(error);
+      throw error;
+    }
+  }
+}
+
 // Fails every task-creation journal write while the flag is set, so a persistent
 // non-admission dispatch failure keeps a failed FIFO head while later confirmed
 // requirements remain queued behind it.
@@ -5391,16 +5418,19 @@ test('runtime output concatenates repeated provider deltas without suffix dedupe
   assert.equal(service.taskDashboard(task.taskId).output, 'aa');
 });
 
-test('provider output without readable text never projects artifact refs into task output', async () => {
+test('provider output summaries remain journalable when provider text is blank', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-output-artifact-ref-'));
   const artifactRef = 'humanagent.provider-adapter:response.content_part.added:part-msg-1:sha256:c45b5b';
+  const emptyArtifactRef = 'humanagent.provider-adapter:response.content_part.added:part-msg-2:sha256:empty';
+  const missingArtifactRef = 'humanagent.provider-adapter:response.content_part.added:part-msg-3:sha256:missing';
   try {
+    const journal = new CapturingRuntimeEventJournal(join(root, 'ui-runtime-journal.jsonl'));
     class MissingOutputSummaryReplayPort extends FakeReplayExecutionRuntimePort {
       override async *observe(
         input: Parameters<ExecutionRuntimePort['observe']>[0],
       ): AsyncIterable<ProviderEvent> {
         for await (const event of super.observe(input)) {
-          if (event.kind === 'output' && event.outputRefs?.includes(artifactRef)) {
+          if (event.kind === 'output' && event.outputRefs?.includes(missingArtifactRef)) {
             const { summary: _summary, ...withoutSummary } = event;
             yield withoutSummary;
           } else {
@@ -5414,22 +5444,32 @@ test('provider output without readable text never projects artifact refs into ta
       binding,
       stepDelayMs: 1,
       replay: [
-        { kind: 'output', state: 'output', summary: 'ignored snapshot summary', outputRefs: [artifactRef] },
+        { kind: 'output', state: 'output', summary: ' ', outputRefs: [artifactRef] },
+        { kind: 'output', state: 'output', summary: '', outputRefs: [emptyArtifactRef] },
+        { kind: 'output', state: 'output', summary: 'ignored snapshot summary', outputRefs: [missingArtifactRef] },
         { kind: 'output', state: 'output', summary: 'real model reply', outputRefs: ['humanagent.provider-adapter:response.output_text.done:text-msg-1:sha256:done'] },
         { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
       ],
-    }));
+    }), 'fake', 'ready', journal);
     const task = service.createTask({ title: 'provider artifact ref', directive: 'keep the task output readable' });
     service.startExecution(task.taskId, { prompt: 'read the marker and reply' });
-    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+    await waitFor(() => assert.equal(
+      journal.appendErrors.length > 0 || service.taskDashboard(task.taskId).state === 'succeeded',
+      true,
+    ));
+    if (journal.appendErrors.length > 0) {
+      assert.match(String(journal.appendErrors[0]), /summary is required/);
+    }
+    assert.equal(journal.appendErrors.length, 0, 'UiRuntimeJournal must accept every provider output event');
+    assert.equal(service.taskDashboard(task.taskId).state, 'succeeded');
 
     const dashboard = service.taskDashboard(task.taskId);
-    assert.equal(dashboard.output, 'real model reply');
+    assert.equal(dashboard.output, ' real model reply');
     assert.equal(dashboard.output.includes('humanagent.provider-adapter:'), false);
 
     const observation = service.observation(task.taskId);
     const executionNode = observation.scope.nodes.find((node) => node.nodeId === 'pipeline.execute');
-    assert.equal(executionNode?.summary, 'real model reply');
+    assert.equal(executionNode?.summary, ' real model reply');
     assert.equal(executionNode?.summary.includes('humanagent.provider-adapter:'), false);
 
     const providerScope = service.observation(
@@ -5444,6 +5484,28 @@ test('provider output without readable text never projects artifact refs into ta
     assert.equal(
       providerScope.scope.nodes.some((node) => node.summary === '未投影'),
       true,
+    );
+
+    const artifactEvent = journal.operationEvents.find((event) => event.outputRefs?.includes(artifactRef));
+    if (artifactEvent === undefined) throw new Error('journal did not receive the artifact output event');
+    assert.equal(artifactEvent.kind, 'provider.output');
+    assert.equal(artifactEvent.summary, '未投影');
+    const emptyArtifactEvent = journal.operationEvents.find((event) => event.outputRefs?.includes(emptyArtifactRef));
+    if (emptyArtifactEvent === undefined) throw new Error('journal did not receive the empty output event');
+    assert.equal(emptyArtifactEvent.kind, 'provider.output');
+    assert.equal(emptyArtifactEvent.summary, '未投影');
+    const missingArtifactEvent = journal.operationEvents.find((event) => event.outputRefs?.includes(missingArtifactRef));
+    if (missingArtifactEvent === undefined) throw new Error('journal did not receive the missing-summary output event');
+    assert.equal(missingArtifactEvent.kind, 'provider.output');
+    assert.equal(missingArtifactEvent.summary, '未投影');
+    assert.equal(
+      journal.operationEvents.some((event) => event.kind === 'provider.output' && event.summary === 'real model reply'),
+      true,
+    );
+    assert.equal(journal.operationEvents.every((event) => typeof event.summary === 'string' && event.summary.trim().length > 0), true);
+    assert.equal(
+      journal.replay().filter((record) => record.kind === 'operation.event').length,
+      journal.operationEvents.length,
     );
   } finally {
     await rm(root, { recursive: true, force: true });

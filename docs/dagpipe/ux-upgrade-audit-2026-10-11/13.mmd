@@ -1,0 +1,18 @@
+flowchart TB
+ I[已有订阅的到期槽位]:::truth
+ S[读取已提交订阅版本与待提醒事实]:::truth
+ R[按忙闲／late-skip 规则处理槽位]:::truth
+ C[原子版本比较与 occurrence 认领]:::truth
+ A[真实执行身份与资源准入]:::truth
+ X[启动或恢复对应任务]:::truth
+ T[消费实际任务终态与 settlement]:::truth
+ J[原子提交 occurrence 消费与结果]:::truth
+ O[周期结果与剩余恢复责任投影]:::derived
+ I --> S --> R --> C --> A --> X --> T --> J --> O
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

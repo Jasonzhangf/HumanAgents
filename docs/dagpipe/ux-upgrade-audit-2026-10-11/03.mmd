@@ -1,0 +1,24 @@
+flowchart TB
+ Q[按 FIFO 读取已确认需求]:::truth
+ C[分类／任务匹配／资源准入]:::truth
+ B[绑定真实 task／requirement／operation<br/>消费提交与 pre-author 责任提交]:::truth
+ P[绑定可替换执行 Provider<br/>独立协议与 readiness]:::truth
+ A[启动作者并提交业务输入]:::truth
+ R[读取精确完成响应与合法计划]:::truth
+ S[收拢作者<br/>身份／资源释放／持久化／证据]:::truth
+ J[提交作者 outcome 到 Organ Journal]:::truth
+ V[decision-ready 且 closed<br/>发布 TaskPlan 并提交 Journal]:::truth
+ D[派发根 operation]:::truth
+ Q --> C --> B --> P --> A --> R --> S --> J
+ J -->|闭合且有效| V --> D
+ J -->|失败／未知| U[保留 created 与恢复责任<br/>不直接派发]:::truth
+ F[当前偏离：无消费的 capability 查询<br/>实际阻断作者启动]:::gap
+ P -.->|现状偏离标注，非必要业务节点| F
+ F -.->|现场未启动，author unknown| U
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

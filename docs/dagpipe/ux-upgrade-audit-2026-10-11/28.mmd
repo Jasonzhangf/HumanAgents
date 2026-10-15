@@ -1,0 +1,19 @@
+flowchart TB
+ I[说出问题或需求]:::derived
+ D{这次是否需要持续处理}:::derived
+ A[直接回答问题]:::derived
+ Z[本次问答结束<br/>不出现空任务卡或执行流程]:::derived
+ T[整理要完成的事<br/>只补充无法可靠获知的必要信息]:::derived
+ C[任务已收到<br/>显示人类可读目标与当前状态]:::derived
+ P[真实进展／结果／必要决定]:::derived
+ R[获得成果或清楚知道未完成原因]:::derived
+ I --> D
+ D -->|普通问答| A --> Z
+ D -->|需要持续处理| T --> C --> P --> R
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

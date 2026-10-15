@@ -1,0 +1,352 @@
+{
+  "kind": "humanagent-product-design",
+  "candidate": "762d94653fd0cf27115286204ad4e900fe0f2130",
+  "charts": [
+    {
+      "id": "02",
+      "title": "新任务输入、确认与需求队列",
+      "note": "新建表单的提交本身确认该最终修订；显式大脑同次整理、精确关联并投递一次。标题由已确认 goal 派生，canonical 输入/hash 保持业务合同；改已有任务目标仍需独立确认。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart LR\n I[用户提交目标／范围／约束／交付物]:::truth\n D[最终草稿修订<br/>revision／hash／真实身份]:::truth\n C[同次提交确认与幂等 receipt]:::truth\n Q[唯一 RequirementEnvelope<br/>FIFO 序号]:::truth\n O[隐式大脑待分类业务需求]:::truth\n I --> D --> C --> Q --> O\n D -->|已确认 goal| T[人类可读标题]:::derived\n D -->|canonical 输入与 hash| B[保持原始业务合同]:::truth\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "03",
+      "title": "隐式大脑、计划作者与首次派发",
+      "note": "正确设计是有效决策与作者闭合后，提交作者 outcome 和 TaskPlan publication，再派发根 operation。当前实际偏离是 author 启动前调用了未消费的能力查询；readiness 不等于能力已知，也不等于生成成功。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n Q[按 FIFO 读取已确认需求]:::truth\n C[分类／任务匹配／资源准入]:::truth\n B[绑定真实 task／requirement／operation<br/>消费提交与 pre-author 责任提交]:::truth\n P[绑定可替换执行 Provider<br/>独立协议与 readiness]:::truth\n A[启动作者并提交业务输入]:::truth\n R[读取精确完成响应与合法计划]:::truth\n S[收拢作者<br/>身份／资源释放／持久化／证据]:::truth\n J[提交作者 outcome 到 Organ Journal]:::truth\n V[decision-ready 且 closed<br/>发布 TaskPlan 并提交 Journal]:::truth\n D[派发根 operation]:::truth\n Q --> C --> B --> P --> A --> R --> S --> J\n J -->|闭合且有效| V --> D\n J -->|失败／未知| U[保留 created 与恢复责任<br/>不直接派发]:::truth\n F[当前偏离：无消费的 capability 查询<br/>实际阻断作者启动]:::gap\n P -.->|现状偏离标注，非必要业务节点| F\n F -.->|现场未启动，author unknown| U\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "04",
+      "title": "任务、执行轮次与真实副作用结果",
+      "note": "Task、Cycle、Operation 与 Provider request 身份不能混用。结果判定只消费该任务合同要求的真实证据；Provider 请求结束不能直接决定 Harness task 终态。这里是产品内部执行链，不是开发测试流程。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[已发布计划与合法执行身份]:::truth\n A[创建或恢复真实任务执行<br/>assignment／epoch／attempt]:::truth\n W[装配当前有效上下文与执行窗口]:::truth\n P[执行 Provider 轮次与工具操作]:::truth\n E[收集业务结果与实际副作用<br/>不可变资产引用]:::truth\n V[按任务合同判定业务结果<br/>仅消费要求的证据]:::truth\n S[实际收拢运行资源与副作用]:::truth\n C[提交 checkpoint／结果／恢复责任]:::truth\n J[Organ Journal 追加事实]:::truth\n O[可公开任务状态与交付结果]:::derived\n I --> A --> W --> P --> E --> V --> S --> C --> J --> O\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "05",
+      "title": "显式控制与标准停止",
+      "note": "steer 只能启动标准停止 operation。取消模型请求只是执行后端动作，必须继续核对实际副作用与 checkpoint，才能报告停止完成；未知结果保留恢复责任。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[用户显式 steer／停止命令]:::truth\n C[Core 按生命周期裁决许可]:::truth\n O[Runtime 启动标准停止 operation]:::truth\n P[要求执行后端取消或停止<br/>映射真实 operation 身份]:::truth\n S[核对已发生副作用与资源状态]:::truth\n K[提交收拢 checkpoint]:::truth\n J[Journal 追加停止 outcome]:::truth\n R[公开已停止或仍未知的责任]:::derived\n I --> C --> O --> P --> S --> K --> J --> R\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "06",
+      "title": "Journal 恢复责任与 created-only 分类",
+      "note": "恢复真相来自 Organ Journal 和实际 settlement，不能从 UI snapshot、摘要、DSH 日志或 PID 是否存在重建。未知 author 即使已有 plan，也不能直接当作可执行；已提交的责任独立保留。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[读取同任务 Journal 提交事实]:::truth\n S[核对 author／operation 身份<br/>资源／持久化／实际副作用]:::truth\n C[Core 裁决恢复责任]:::truth\n U[无法确认是否闭合<br/>保持未知／禁止盲目重放]:::truth\n F[证实闭合且尚未执行<br/>启动前失败]:::truth\n A[已执行或存在副作用<br/>按标准收拢与恢复规则处理]:::truth\n J[reconcile 结果幂等追加 Journal<br/>提交失败公开]:::truth\n P[typed 恢复投影<br/>责任／身份／来源／允许动作]:::derived\n I --> S --> C\n C -->|未知| U\n C -->|明确未开始且闭合| F\n C -->|已开始| A\n U --> J\n F --> J\n A --> J\n J --> P\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "07",
+      "title": "语义事实、stable/live 与四种模式",
+      "note": "Context Events 是共同语义 owner，不是 Journal owner。stable 是已提交事实，live 是尚在形成的当前活动；二者同源、有真实关联与水位。四模式只是选择展示，raw 不回流为业务状态。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[结构化运行事实<br/>task／operation／epoch／request／call 身份]:::truth\n C[归类 canonical 事件<br/>无法解释的事实保留 unknown 与来源]:::derived\n P[同 scope 精确配对调用与结果]:::derived\n N[共同 narrative／digest／compact 产物]:::derived\n S[已提交 stable 事实与当前 live 活动<br/>各自有水位和来源]:::derived\n U[typed 视角投影]:::derived\n A[公开语义查询与更新]:::derived\n M[共享呈现：当前／语义／动作]:::derived\n I --> C --> P --> N --> S --> U\n U -.->|当前生产全链消费仍未闭合| A\n A --> M\n Q[用户主动证据请求或显式 raw 模式]:::truth\n R[只读查询原始记录与不可变资产]:::derived\n D[raw 模式／证据 drawer\n来源引用与双向导航]:::derived\n Q --> R --> D\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "08",
+      "title": "真实 scope、查看选择与导航",
+      "note": "scope 是业务归属；mode/revision/checkpoint/cycle/occurrence 是查看选择。runtime current 游标与 viewed 游标同时独立显示，导航不推进运行任务。多项目、Agent detail 等是设计消费边，不声称已接线。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[用户请求真实 project／task／organ／agent scope]:::truth\n C[config 项目身份与 Runtime 真实归属<br/>不从标题／目录／角色 frame 造身份]:::truth\n Q[读取合法 scope 的 typed 数据<br/>未知或矛盾选择明确失败]:::derived\n V[显式链接优先，其次保存偏好<br/>冷启动默认 current 模式]:::derived\n S[系统／项目／任务／实例视角]:::design\n D[递归下钻与面包屑返回<br/>保留合法身份与历史选择]:::design\n O[当前执行游标与用户查看游标<br/>分别呈现]:::design\n I --> C --> Q --> V\n V -.->|设计查询与聚合边| S --> D --> O\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "09",
+      "title": "三类任务、实际执行图与计划修订",
+      "note": "任务模板与定时触发策略分开。实际 assignment 决定实例图，固定 Harness 骨架只作结构参考。semantic 保存 why/what 与有序 revision 演变；current 只看最新权威计划。 任务模板约束业务合同，不强制编排者的角色调用顺序。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[已确认任务类型与独立触发策略]:::truth\n T[单次四阶段／巡检可比检查<br/>长程有界业务 cycle]:::design\n P[领域许可与实际任务计划]:::truth\n A[真实 assignment／attempt／epoch／cycle]:::truth\n J[追加已发布 revision<br/>why／what／节点边变化／前后关系]:::design\n E[关联 checkpoint／业务结果／证据<br/>保留已执行事实与在途责任]:::design\n U[typed 最新计划与有序历史投影]:::design\n G[同一图控件显示实际实例<br/>当前最新与历史演变分开]:::design\n I -.->|三模板产品绑定仍有缺边| T\n T --> P --> A\n A -.->|历史发布消费边尚未闭合| J --> E --> U --> G\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "10",
+      "title": "checkpoint 历史读取",
+      "note": "查询已提交 checkpoint，独立显示编号、简介、scope、当前/查看游标以及 context/semantic/action/raw 引用。未知、未提交或跨任务目标显式失败，不替换为其他快照。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart LR\n I[用户选择同 scope 的历史点]:::truth\n Q[读取已提交 checkpoint 与合法关联]:::truth\n V[分别读取 runtime current<br/>与 viewed checkpoint]:::derived\n R[解析 context／semantic／action／raw 引用]:::derived\n U[历史列表／简介／证据 drawer<br/>仅查看，不改变运行]:::design\n I --> Q --> V --> R\n R -.->|产品查询与浏览闭环待接| U\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "11",
+      "title": "上下文修正与继续执行",
+      "note": "修正只排除明确错误 refs，保留未完成义务、旧 checkpoint、raw/action 历史及真实副作用。回退/前进追加新事实，不伪造 undo。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart LR\n I[用户明确修正或继续请求]:::truth\n C[Core 裁决许可／错误 refs／剩余义务]:::truth\n V[Runtime 形成新的有效 ContextView]:::truth\n J[提交 ContextReplacement／checkpoint<br/>Journal 追加关系与责任]:::truth\n E[新 execution／epoch 继续<br/>fencing 隔离旧结果]:::truth\n U[公开新当前游标与完整旧历史]:::design\n I --> C --> V --> J --> E\n J -.->|产品历史查询边待接| U\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "12",
+      "title": "浏览器共享对象、事件与展示偏好",
+      "note": "transport 解码一次，同 projection version 共享不可变引用；事件通知引用和关联，不按页面复制 payload。scope 切换隔离旧订阅、卸载退订。偏好只保存展示字段，不写 task payload 或 Journal。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[同 scope 的 typed API／更新]:::derived\n T[transport 单次解码]:::derived\n R[唯一不可变共享对象与版本]:::derived\n E[声明事件通知引用与关联]:::design\n W[共用状态／对话／轨迹／图／证据控件]:::design\n A[任务与 Organ Console]:::design\n B[Pipeline Observation 与多视角]:::design\n I --> T --> R\n R -.->|整体事件与共享消费者边待闭合| E --> W\n W --> A\n W --> B\n M[成功的直接手动模式选择]:::truth\n P[typed 展示偏好<br/>config 派生 ~/.humanagent 路径]:::design\n V[展示选择<br/>不改领域状态与业务 payload]:::derived\n M -.->|生产偏好持久边待接| P --> V\n V --> W\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "13",
+      "title": "周期任务的到期执行",
+      "note": "订阅控制与到期业务执行是独立对象流。一次 occurrence 认领后以稳定身份启动或恢复任务，只有实际结算后才发布结果；once 任务不经此巡检创建第二次执行。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[已有订阅的到期槽位]:::truth\n S[读取已提交订阅版本与待提醒事实]:::truth\n R[按忙闲／late-skip 规则处理槽位]:::truth\n C[原子版本比较与 occurrence 认领]:::truth\n A[真实执行身份与资源准入]:::truth\n X[启动或恢复对应任务]:::truth\n T[消费实际任务终态与 settlement]:::truth\n J[原子提交 occurrence 消费与结果]:::truth\n O[周期结果与剩余恢复责任投影]:::derived\n I --> S --> R --> C --> A --> X --> T --> J --> O\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "14",
+      "title": "订阅控制事务",
+      "note": "pause/resume/cancel 是明确控制命令，不能混入业务需求。Runtime 编排事务，Core 裁决版本与生命周期，JSONL 在事务边界提交状态、失效槽位和提醒回执。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart LR\n I[用户明确订阅控制请求]:::truth\n R[Runtime 编排控制事务]:::truth\n L[锁定已提交订阅版本]:::truth\n C[Core 裁决许可与下一状态]:::truth\n J[原子提交状态／失效槽位／提醒 receipt]:::truth\n O[公开控制结果与合法动作]:::derived\n I --> R --> L --> C --> J --> O\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "15",
+      "title": "失败、等待、恢复责任与公开错误",
+      "note": "生命周期、连接新鲜度、后台错误与恢复责任分别投影。后台作者 detail 当前已在 status issue 中；精确 requirement/task 的 error 消费边仍缺失。重启后仍读 durable unknown，不从日志重建已丢失 detail。",
+      "kind": "业务对象流",
+      "mermaid": "flowchart TB\n I[运行结果／错误与等待事实]:::truth\n C[Core 分层处置与局部降级<br/>保持未解决恢复义务]:::truth\n J[Journal 追加领域状态与责任]:::truth\n P[typed 状态／等待／恢复／允许动作]:::derived\n U[工作卡回答：发生什么／得到什么<br/>是否需要决定／现在能做什么]:::derived\n I --> C --> J --> P --> U\n E[当前进程捕获的作者错误<br/>status issue 已公开]:::truth\n M[按 exact requirement／task 关联<br/>复用既有任务 error 投影]:::design\n E -.->|当前任务消费断边| M\n P -->|提供真实关联身份| M\n M -.->|待接页面原有错误展示| U\n N[连接状态与同步新鲜度]:::derived\n N -->|断连保留旧内容并标 stale<br/>不决定任务失败| U\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "17",
+      "title": "隐式大脑：预算内 N 个独立 runtime",
+      "note": "三个实例仅示意 1、2、…、N，不代表固定三并发。每个实例各自拥有目标、checkpoint/current-turn、在途 assignment 与 Provider/model；子调用也占预算。 编排者主要接收子 agent 的精炼交付，不共享或复制其完整活动 context。",
+      "kind": "单阶段产品 DAG",
+      "mermaid": "flowchart TB\n I[已确认业务需求与当前预算]:::truth\n A[Runtime 资源准入<br/>预算内并行 N 个编排实例]:::design\n R1[实例 1<br/>独立目标／checkpoints／完整最新 turn]:::design\n R2[实例 2<br/>独立目标／checkpoints／完整最新 turn]:::design\n RN[实例 … N<br/>独立目标／checkpoints／完整最新 turn]:::design\n C1[实例 1 的角色调用与回传<br/>独立 Provider/model/context]:::design\n C2[实例 2 的角色调用与回传<br/>独立 Provider/model/context]:::design\n CN[实例 N 的角色调用与回传<br/>独立 Provider/model/context]:::design\n O[按各自 task／assignment 身份返回结果<br/>不共享可写上下文]:::design\n I --> A\n A --> R1 --> C1 --> O\n A --> R2 --> C2 --> O\n A --> RN --> CN --> O\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "18",
+      "title": "一个决策步：编排者自主选择能力",
+      "note": "本图不是整个 agent 的固定流程，只展开一个决策步。每个选项可不调用、调用一次或多次；真实并行取决于预算和依赖。所有返回进入编排者下一次判断，不因某个角色结束而结束父 agent。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart TB\n I[当前目标＋语义 checkpoints<br/>最新完整且简单的 turn context]:::design\n D[编排者依据事实、未知与预算<br/>自主选择下一步]:::design\n O[探索一次或多次<br/>标准模板，独立 context]:::design\n P[plan 一次或多次<br/>独立 context]:::design\n X[execute 一次或多次<br/>独立 context]:::design\n R[review 一次或多次<br/>独立 context]:::design\n W[等待在途结果／补充输入<br/>必要的定向读写]:::design\n F[精炼语义结果与证据<br/>父编排者核实／接受／补充]:::design\n N[输出下一决策输入<br/>继续当前 turn 或申请 turn 收口<br/>不自动结束编排 agent]:::design\n I --> D\n D -->|自主选择| O --> F\n D -->|自主选择| P --> F\n D -->|自主选择| X --> F\n D -->|自主选择| R --> F\n D -->|自主选择| W --> F\n F --> N\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "19",
+      "title": "结果接纳、turn 换轮与 agent 结束分别判断",
+      "note": "只适用于已派发的复杂任务；简单问答直接回答结束。角色交付是精炼结果；父编排者决定是否纳入 checkpoint。turn 内可以反复探索/规划/执行/审查；turn 结束必须四项 checkpoint 再 Planner。任务完成/失败与 agent 结束才是运行终点。 换轮前须完成压缩/总结/交付；重试后暂停不关闭 turn。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart TB\n I[一个或多个角色返回精炼结果]:::design\n A[编排者核实结果<br/>决定接受／需补充／仍未知]:::design\n S[保留已接受语义与证据<br/>review 结论与在途责任进入 checkpoint]:::design\n D[标准收口动作是否完成]:::design\n C[继续 turn<br/>完整保留 context，自主选择下一调用]:::design\n T[标准收口：压缩／四项总结／交付<br/>目标／做了什么／结果／下一步预计]:::design\n J[动作完成后提交 checkpoint／closure<br/>保留恢复状态与在途义务]:::truth\n P[Planner 依据 checkpoint 计划下一轮]:::design\n K[编排者核实计划和目标事实]:::design\n N[任务仍在推进<br/>新 turn 继续动态编排]:::design\n E[任务完成或失败<br/>编排 agent 结束并输出真实责任]:::truth\n I --> A --> S --> D\n D -->|未结束| C\n D -->|申请收口| T --> J --> P --> K\n K -->|继续| N\n K -->|运行终点| E\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "20",
+      "title": "独立角色调用与精炼交付",
+      "note": "父编排者可读写，但主要委派；它保留自身完整的决策 turn，不继承子 agent 完整执行 context。每个角色可用不同 Provider/model。精炼结果含结论、条件、证据、未知与剩余责任。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart LR\n I[明确角色任务<br/>目标／范围／输入 refs／交付要求]:::design\n C[调用 checkpoint<br/>assignment／阶段／未返回责任]:::design\n B[独立 Provider/model 与 context]:::design\n X[子 agent 自己执行<br/>完整活动与 raw 留在自身证据归属]:::design\n R[精炼语义结果＋交付 refs<br/>条件／依据／未知／剩余责任]:::design\n O[父编排者核实并选择下一步<br/>活动 context 保持简单]:::design\n I --> C --> B --> X --> R --> O\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "23",
+      "title": "实际动态依赖 DAG：来自编排决定的实例",
+      "note": "没有预先固定的探索/plan/execute/review 阶段骨架。重复调用是不同 assignment/attempt 节点；依赖边由实际编排决定产生，UI 只读展示这些实例与事实。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart LR\n I[编排者的真实派发与依赖决定]:::design\n A[创建具体 assignment／attempt 实例<br/>允许多个探索节点、多个 plan 节点等]:::design\n D[发布本次实际依赖 DAG<br/>并行、先后只来自真实数据／任务依赖]:::design\n J[Journal 保留调用／交付／接纳事实]:::truth\n P[typed 实例图与状态投影]:::derived\n U[UX 展示实际动态图<br/>不按角色名补造节点或固定阶段]:::derived\n I --> A --> D --> J --> P --> U\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "21",
+      "title": "复杂任务的阶段 turn 收口与下一轮规划",
+      "note": "只适用于已派发的复杂任务；简单问答直接回答结束。申请结束不是已结束。压缩/四项总结/交付的真实完成和持久 checkpoint/closure 是必要条件；缺失则继续同 turn。闭合后才进入 Planner 下一轮规划。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart LR\n I[申请当前 turn 标准收口]:::design\n C[压缩任务语义<br/>保留判断／未知／证据／义务]:::design\n S[四项总结<br/>目标／做了什么／结果／下一步预计]:::design\n D[向既定接收方交付结果与引用]:::design\n J[动作完成后持久保存 checkpoint／closure]:::truth\n P[已闭合 turn 的下一轮 Planner]:::design\n N[编排者核实计划并决定继续或任务终点]:::design\n I --> C --> S --> D --> J --> P --> N\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "22",
+      "title": "持续编排：标准收口与同 turn 恢复",
+      "note": "仅已派发的复杂任务进入此持续控制循环。使用显式大脑派单模板续推，不读取重复的简单问答/完成布尔标签；阶段 turn 标准动作与错误同 turn 恢复保持。",
+      "kind": "产品控制循环，不是静态 DAG",
+      "mermaid": "flowchart TB\n I[装配显式派单模板／checkpoint 历史<br/>与当前 turn 真实 context]:::design\n D[编排者自主选择行动<br/>探索／plan／execute／review 可多次]:::design\n R[接收精炼结果与必要证据]:::design\n G[请求返回或申请收口<br/>核对标准压缩／总结／交付事实<br/>任务真相与阶段动作<br/>不读重复布尔标签]:::design\n F[未达任务/阶段要求：临时模板续推提示<br/>强制继续同 turn 推理]:::design\n C[标准动作全部完成<br/>提交 checkpoint 与 turn closure]:::truth\n P[Planner 对齐目标并计划下一轮]:::design\n V[编排者核实并判断任务终点]:::design\n N[新 turn：历史语义＋新活动 context<br/>不携带旧临时提示词]:::design\n Z[任务完成或失败<br/>agent 结束]:::truth\n E[错误：预算/策略内多次 retry]:::design\n H[仍不能继续：暂停<br/>保留同 turn 完整 context 与责任]:::design\n K[恢复原 turn 与未完成位置]:::design\n I --> D --> R --> G\n G -->|标准动作缺失| F --> D\n G -->|阶段收口且任务仍在推进| C --> P --> V\n V -->|继续| N --> D\n V -->|任务终点| Z\n D -->|出现错误| E\n E -->|retry 成功| D\n E -->|多次仍失败| H -->|恢复| K --> F\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n\n G -->|实际任务已完成／明确失败| Z\n"
+    },
+    {
+      "id": "25",
+      "title": "错误 retry、暂停与恢复：同一个 turn",
+      "note": "只适用于已派发的复杂任务；简单问答直接回答结束。重试请求/attempt 可以变化，业务 turn 不变。停止等待恢复不是 turn closure。恢复继续未完成位置，保留部分标准动作、在途责任与实际副作用事实。",
+      "kind": "错误恢复控制循环",
+      "mermaid": "flowchart TB\n I[当前 turn 推理或操作出现错误]:::design\n R[按现有预算与错误策略 retry<br/>可以多次，不编固定次数]:::design\n C{是否可以继续}:::design\n W[继续原 turn 推理<br/>未完成位置与责任不变]:::design\n H[仍失败：暂停等待恢复<br/>完整 context／部分完成事实／恢复责任]:::design\n K[收到恢复触发<br/>重建同 turn context 与未完成位置]:::design\n P[生成当次临时目标提示<br/>继续原 turn，不重复已完成副作用]:::design\n I --> R --> C\n C -->|重试可继续| W\n C -->|预算内还能 retry| R\n C -->|多次后停下| H --> K --> P --> W\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "01",
+      "title": "显式分流：直接问答或模板派单，复杂任务动态续推",
+      "note": "需求 v11。显式大脑决定是否派发任务，简单问答直接回答结束。复杂任务以已确认模板为依据；编排动态选择角色，依据实际任务完成状态停止，不使用重复布尔 control block。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart TB\n I[用户输入]:::truth\n E[显式大脑整理并分流<br/>最新完整语义＋前序语义 checkpoints]:::design\n Q[简单问答：直接返回答案<br/>此次交互结束，不派业务任务]:::design\n T[复杂问题：整理为标准任务模板<br/>目标／范围／约束／交付与完成要求]:::design\n F[确认后的唯一需求 FIFO]:::truth\n R[预算内 N 个独立编排 runtime<br/>任务模板＋语义 checkpoints＋当前 turn]:::design\n D[动态选择探索／plan／execute／review<br/>角色独立 context，返回精炼结果]:::design\n S[读取该任务真实状态]:::truth\n C[任务未完成：依据派单模板重新 orientation<br/>当次临时指令续推]:::design\n H[阶段 turn 标准压缩／总结／交付<br/>checkpoint→Planner→新一轮]:::design\n Z[任务完成或明确失败<br/>结束运行并返回结果]:::truth\n J[Organ Journal<br/>任务事实／checkpoint／在途与恢复责任]:::truth\n U[typed 投影与公开只读 UX]:::derived\n I --> E\n E -->|简单问答| Q\n E -->|需要执行的复杂问题| T --> F --> R --> D --> S\n S -->|未完成，继续当前 turn| C\n S -->|阶段可收口| H\n S -->|任务终点| Z\n C --> N[同 turn 继续动态判断<br/>临时指令不进入后续 context]:::design\n H --> P[下一轮继续动态编排<br/>不是任务已经完成]:::design\n R --> J --> U\n Q -->|普通回答| V[显式交互呈现]:::derived\n Z --> U\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "16",
+      "title": "显式大脑：先分流，再使用对应上下文与结果路径",
+      "note": "简单问答不创建 Task，不要求任务 goal/交付物或额外 Planner。复杂问题使用标准任务模板，经既有确认/FIFO 进入任务执行。两者都保留真实交互语义，不额外猜控制标签。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart TB\n I[用户输入＋前序语义 checkpoints]:::design\n C[显式大脑装配最新完整 turn<br/>整理、查询、匹配与分流]:::design\n D{是否需要派发执行任务}:::design\n A[不需要：直接形成并返回答案]:::design\n Z[简单交互完成<br/>保留普通语义历史]:::design\n T[需要：整理标准任务模板]:::design\n Q[同次新建确认与唯一 FIFO 需求]:::truth\n R[隐式大脑准入与动态任务执行]:::design\n I --> C --> D\n D -->|简单问答| A --> Z\n D -->|复杂问题| T --> Q --> R\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "24",
+      "title": "停止与续推：按入口分流和任务真相，不读重复标签",
+      "note": "显式分流后无需 model control block。简单问答回答后结束；复杂任务看实际完成状态，未完成就按派单模板续推或正常换 turn，错误可暂停原 turn。finish reason 不代替任务完成。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart TB\n I[已由显式大脑确定的入口]:::design\n A[简单问答直接回答]:::design\n Z[交互结束]:::design\n T[复杂任务执行／请求返回]:::design\n D{Core／Runtime 任务真实状态}:::truth\n E[已完成或明确失败<br/>返回结果并结束运行]:::truth\n P[未完成：读显式派单模板<br/>通用临时提示恢复 orientation]:::design\n R[继续同 turn 动态推理<br/>或按任务协议收口后规划下一轮]:::design\n H[错误/未知：retry 或暂停<br/>恢复原 turn]:::design\n I -->|问答分支| A --> Z\n I -->|任务分支| T --> D\n D -->|任务终点| E\n D -->|未完成| P --> R\n D -->|错误／未知| H\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "26",
+      "title": "模板续推：业务派单依据保留，临时指令不回填",
+      "note": "复杂路径的模板由显式大脑提供并在恢复时装配。续推引用这份真实模板，不要求固定 goal 字段；模板是业务依据，临时 orientation 指令只用于当前推理。简单问答不进入此链。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart TB\n T[显式大脑已确认的标准派单模板<br/>身份／修订／实际任务要求]:::truth\n B[Context owner 装配模板与基础 context<br/>语义 checkpoints＋当前 turn 真实活动]:::truth\n S[Runtime 判断任务尚未完成<br/>或正在恢复同 turn]:::truth\n P[通用临时指令<br/>重新 orientation，对照派单要求继续完成]:::design\n R[Provider／Prompt Renderer<br/>业务 context＋当次临时指令]:::design\n M[本次模型推理]:::design\n O[处理真实输出和操作事实]:::truth\n H[规范 history 保留真实活动与结果<br/>不追加临时续推指令]:::truth\n N[下一请求/turn 从规范 context 重建<br/>派单依据保留；旧临时指令不携带]:::design\n T --> B --> R\n S --> P --> R --> M --> O --> H --> N\n P --> X[仅当次请求有效<br/>再次续推时重新使用指令]:::design\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "27",
+      "title": "显式大脑派单模板：复杂任务与续推的共同依据",
+      "note": "标准业务任务模板来自显式大脑已整理/确认的需求，不是四角色流程骨架。Runtime 初次执行与恢复都装配同一身份/修订的任务依据；缺失时恢复或报告装配缺口，不让模型编造。",
+      "kind": "产品对象依赖图",
+      "mermaid": "flowchart LR\n I[复杂用户需求]:::truth\n E[显式大脑整理标准任务模板<br/>目标／范围／约束／交付／完成要求]:::design\n C[既有确认与任务身份/修订绑定]:::truth\n Q[唯一需求 FIFO 与任务派发]:::truth\n B[Runtime／Context 装配真实模板<br/>首次执行或同 turn 恢复]:::design\n P[当次临时提示引用派单要求<br/>重新 orientation 并完成剩余工作]:::design\n I --> E --> C --> Q --> B --> P\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "28",
+      "title": "从提问到结果：只展示这次交互需要的内容",
+      "note": "对话先服务用户问题。普通问答直接回答；需要持续处理的需求才出现任务目标与进展。信息缺口只问具体问题，不把整个内部任务模型变成输入表单。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart TB\n I[说出问题或需求]:::derived\n D{这次是否需要持续处理}:::derived\n A[直接回答问题]:::derived\n Z[本次问答结束<br/>不出现空任务卡或执行流程]:::derived\n T[整理要完成的事<br/>只补充无法可靠获知的必要信息]:::derived\n C[任务已收到<br/>显示人类可读目标与当前状态]:::derived\n P[真实进展／结果／必要决定]:::derived\n R[获得成果或清楚知道未完成原因]:::derived\n I --> D\n D -->|普通问答| A --> Z\n D -->|需要持续处理| T --> C --> P --> R\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "29",
+      "title": "逐层阅读：每层有用途，不必逐层走完",
+      "note": "层级是用户选择的阅读深度。概要不复制全部细节；需要决定的内容、结果与重要失败可直接访问。技术记录只有明确需要时出现。 桌面按主内容旁的面板展开；手机下一层统一从底部抽屉进入，返回上一层保留位置。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart TB\n A[对话入口<br/>用途：说需求、得到答案<br/>显示：问题、回答、必要追问]:::derived\n B[任务总览<br/>用途：找到需要关注的事<br/>显示：目标、状态、必要行动、结果入口]:::derived\n C[任务详情<br/>用途：理解并处理这一件事<br/>显示：当前工作、已有结果、影响与下一步]:::derived\n D[处理经过<br/>用途：理解结论和方案变化<br/>显示：真实步骤、原因、阶段回顾]:::derived\n E[资料与证据<br/>用途：查成果、核对依据<br/>显示：名称、摘要、关联结论、内容]:::derived\n F[技术记录<br/>用途：定位实现问题<br/>仅明确要求时打开]:::evidence\n A -->|存在复杂任务或主动查看| B\n B -->|打开某件事| C\n C -->|需要解释过程| D\n C -->|直接取得成果或核对| E\n D -->|查看对应依据| E\n E -.->|明确需要技术诊断| F\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "30",
+      "title": "当前层显示什么：按用户问题决定必要性",
+      "note": "只显示服务当前阅读/决定的信息；无内容区域、重复摘要、纯内部字段不显示。隐藏技术细节不隐藏失败、未知或影响。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart LR\n I[同一份真实任务语义]:::truth\n Q{是否帮助当前层回答<br/>发生什么／得到什么／需我决定吗<br/>能做什么／依据是什么}:::derived\n S[必要：在当前区域显示<br/>用清楚的业务语言]:::derived\n D[只对深入阅读有用<br/>按需展开，不堆在概要]:::derived\n H[不必要／重复／无当前内容<br/>不渲染该区域]:::evidence\n I --> Q\n Q -->|直接有用| S\n Q -->|深入时有用| D\n Q -->|没有用途或没有内容| H\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "31",
+      "title": "从真实工作到人类可读呈现",
+      "note": "语义来自共同事实链，界面只按当前用途组织与呈现。未知保持未知；不把一次请求结束或一个工具结果翻译成任务已完成。详细实现 owner 在设计正文中，默认阅读图不露出代码名。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart LR\n I[已确认的工作事实与责任]:::truth\n S[统一解释发生了什么<br/>保留来源、条件和未知]:::derived\n V[按当前阅读层组织<br/>目标／状态／结果／必要行动]:::derived\n F[选出当前必要区域<br/>其余不显示或按需展开]:::derived\n U[人类可读标题、句子与操作]:::derived\n E[主动打开资料或技术记录]:::evidence\n I --> S --> V --> F --> U\n U -->|核对依据时| E\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "32",
+      "title": "状态与行动：在用户需要的时候出现",
+      "note": "以下是表达结构而非新增状态机。需要决定、暂停、未知、过期都必须说明其真实影响；操作只显示当前实际允许的动作。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart TB\n I[当前真实状态与已确认结果]:::truth\n A[处理中<br/>显示正在做什么与已得到什么<br/>没有成果时不放空成果栏]:::derived\n D[需要决定<br/>显示原因、影响与必要选项<br/>不把决定埋在过程里]:::derived\n P[暂停或结果未确认<br/>说明已知影响、未知部分与可用下一步]:::derived\n Z[已完成<br/>成果优先，过程按需查看<br/>不再显示进行中动画]:::derived\n S[新进展暂不可读<br/>保留上次内容并说明尚未更新]:::derived\n I -->|有实际活动| A\n I -->|确需用户决定| D\n I -->|暂停／未知| P\n I -->|真实完成| Z\n I -->|读取失败／过期| S\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "33",
+      "title": "处理经过：展示真实工作，不展示固定角色骨架",
+      "note": "只有用户要理解过程或恢复时展开。多次探索/计划等显示为实际业务进展与调整原因，不变成四个永远占位的角色卡。查看旧回顾不改变正在执行的状态。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart LR\n I[用户打开处理经过]:::derived\n W[真实发生的工作与结果<br/>例如补充查找、核对、整理]:::derived\n C[确有方案变化时<br/>说明为什么改、改了什么]:::derived\n H[确有已保存进展时<br/>阶段回顾：当时目标、已做工作<br/>结果与接下来打算]:::derived\n V[当前进展与正在看的旧记录<br/>分别标明，查看只读]:::derived\n I --> W\n W -->|发生过调整| C\n W -->|需要复盘或恢复| H --> V\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "34",
+      "title": "资料与证据：先看内容，技术记录最后展开",
+      "note": "成果可从任务详情直接打开。资料层回答这份材料是什么、支持哪个结论；代码/结构化文件如果本来就是成果可直接看。原始协议和内部标识仅用于主动技术诊断。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart LR\n I[用户打开成果或结论依据]:::derived\n N[名称与内容摘要<br/>说明这份材料有什么用]:::derived\n C[查看实际内容<br/>关联它支持的结论]:::derived\n Q[需要定位实现问题时<br/>主动打开技术记录]:::evidence\n R[查看相关原始记录与关联信息<br/>不回流成业务状态]:::evidence\n I --> N --> C\n C -.->|明确需要技术细节| Q --> R\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "35",
+      "title": "桌面与手机：同一语义，不同展开方式",
+      "note": "阅读层级和语义不变。桌面让主内容与下一层并列，手机用同一个底部抽屉递进；返回上一层保留阅读位置，关闭回到原入口，不堆叠多个抽屉。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart TB\n I[点击任务、结果或过程入口]:::derived\n D{当前阅读设备}:::derived\n W[桌面：主内容保留<br/>旁侧面板展开下一层]:::derived\n M[手机：底部弹出抽屉<br/>显示当前层内容]:::derived\n N[再打开下一层<br/>保持任务与来源关联]:::derived\n B[返回上一层<br/>保留选择与阅读位置]:::derived\n C[关闭展开内容<br/>回到原入口并恢复焦点]:::derived\n I --> D\n D -->|桌面| W --> N\n D -->|手机| M --> N\n N --> B\n B --> C\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    },
+    {
+      "id": "36",
+      "title": "主动配置：四个角落入口",
+      "note": "四角按钮是主动配置，内容中的结果/决定/阅读入口是当前工作的一部分，不是第五个全局配置按钮。下列名称为职责示意；配置内容按真实可用项显示，不改变阅读层级或绕过原任务控制 owner。",
+      "kind": "面向人的 UX 设计图",
+      "mermaid": "flowchart TB\n L[左上：工作范围<br/>选择当前查看什么]:::derived\n R[右上：查看方式<br/>选择当前进展或历史阅读]:::derived\n C[中心：当前内容<br/>问题／答案／目标／结果／必要行动<br/>没有无关设置栏]:::derived\n B[左下：显示设置<br/>调整字号、主题与阅读偏好]:::derived\n I[右下：输入设置<br/>调整输入方式与快捷操作]:::derived\n P[配置按需展开<br/>手机底部抽屉，桌面旁侧面板]:::derived\n L --> P\n R --> P\n B --> P\n I --> P\n P -->|仅改变对应偏好或查看选择| C\n\nclassDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;\nclassDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;\nclassDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;\nclassDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;\nclassDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;\n"
+    }
+  ],
+  "requirements_version": 13,
+  "requirement_ids": [
+    "humanagent-explicit-brain-semantic-turn-context",
+    "humanagent-implicit-brain-budgeted-independent-orchestration",
+    "humanagent-dynamic-orchestrator-choice-and-agent-termination",
+    "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+    "humanagent-orchestrator-delegation-and-refined-result-context",
+    "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
+    "humanagent-transient-goal-oriented-continuation-prompt",
+    "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+    "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+    "humanagent-continuation-oriented-by-explicit-dispatch-template",
+    "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+    "humanagent-responsive-ux-bottom-sheet-and-four-corner-configuration"
+  ],
+  "design_basis": "用户原始双大脑需求与三条后续纠正；角色选择动态，turn 收口为必要强制节点",
+  "navigation_order": [
+    "28",
+    "29",
+    "35",
+    "36",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34",
+    "01",
+    "16",
+    "27",
+    "24",
+    "26",
+    "22",
+    "25",
+    "21",
+    "18",
+    "19",
+    "20",
+    "17",
+    "23",
+    "02",
+    "03",
+    "04",
+    "05",
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15"
+  ],
+  "ux_navigation_order": [
+    "28",
+    "29",
+    "35",
+    "36",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34"
+  ],
+  "runtime_navigation_order": [
+    "01",
+    "16",
+    "27",
+    "24",
+    "26",
+    "22",
+    "25",
+    "21",
+    "18",
+    "19",
+    "20",
+    "17",
+    "23",
+    "02",
+    "03",
+    "04",
+    "05",
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15"
+  ]
+}

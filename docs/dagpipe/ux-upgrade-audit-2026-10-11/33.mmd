@@ -1,0 +1,16 @@
+flowchart LR
+ I[用户打开处理经过]:::derived
+ W[真实发生的工作与结果<br/>例如补充查找、核对、整理]:::derived
+ C[确有方案变化时<br/>说明为什么改、改了什么]:::derived
+ H[确有已保存进展时<br/>阶段回顾：当时目标、已做工作<br/>结果与接下来打算]:::derived
+ V[当前进展与正在看的旧记录<br/>分别标明，查看只读]:::derived
+ I --> W
+ W -->|发生过调整| C
+ W -->|需要复盘或恢复| H --> V
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

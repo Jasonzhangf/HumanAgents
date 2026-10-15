@@ -4,9 +4,15 @@
  * Owns graph node: candidate_binding (in every per-command graph).
  *
  * `bindCandidate` binds this attempt to exactly one candidate revision: the HEAD
- * SHA of the reviewed worktree, a digest of its tracked tree, and the release
- * version stamped at that SHA. It also registers every resource this attempt
- * owns so the cleanup closure can release exactly them and nothing else.
+ * SHA/tree of the reviewed worktree, `git diff --binary HEAD` (the exact bytes
+ * the documented candidate-identity command hashes), the status list, every
+ * untracked run input by content hash, the harness/build input manifest and the
+ * built artifacts the harness executes, plus the release version stamped at that
+ * SHA. `finalizeSourceIdentity` re-captures that identity at the end of the run
+ * and persists both captures to `<receiptDir>/source-identity.json`, so a receipt
+ * can prove the source did not move during the run. It also registers every
+ * resource this attempt owns so the cleanup closure can release exactly them and
+ * nothing else.
  *
  * The persistent control root, the project/session tree, the journal/checkpoint
  * roots and the receipt root are all derived by the single product owner
@@ -19,7 +25,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -34,6 +40,33 @@ const DEFAULT_REPO_PATH = resolve(__dirname, '..', '..', '..', '..');
  * and never substitutes a temporary control root.
  */
 export const CONFIG_MODULE_RELATIVE = join('dist', 'config', 'config', 'src', 'index.js');
+
+/**
+ * Run-affecting source roots whose working-tree content the source identity
+ * binds: the E2E harness itself, the served UI, the build inputs and the
+ * packaging inputs. A run is only bound to a candidate when every one of these
+ * inputs is byte-identical at the start and at the end of the run.
+ */
+export const HARNESS_INPUT_ROOTS = Object.freeze([
+  'packages',
+  'tests/app/dashboard-e2e',
+  'tests/ui',
+  'docs/ui',
+  'scripts',
+  'package.json',
+  'pnpm-lock.yaml',
+  'tsconfig.json',
+]);
+
+/**
+ * Built artifacts this harness itself executes. They are git-ignored build
+ * output, so they never appear in the tracked/untracked identity; hashing them
+ * proves the receipt was produced by this exact build and not a stale one.
+ */
+export const BUILD_ARTIFACT_PATHS = Object.freeze([
+  join('dist', 'app', 'app', 'src', 'cli.js'),
+  CONFIG_MODULE_RELATIVE,
+]);
 
 /**
  * The built contracts module is the public owner of typed identity validation.
@@ -71,8 +104,200 @@ export function taskIdValue(taskId) {
   throw new Error(`task identity must be a string or a typed TaskId { scope: 'task', value }, got ${JSON.stringify(taskId)}`);
 }
 
+const GIT_MAX_BUFFER = 256 * 1024 * 1024;
+
 function git(repoPath, args) {
-  return execFileSync('git', ['-C', repoPath, ...args], { encoding: 'utf8' }).trim();
+  return execFileSync('git', ['-C', repoPath, ...args], { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER }).trim();
+}
+
+/** Raw git stdout bytes, so a digest matches `git ... | shasum -a 256` exactly. */
+function gitRaw(repoPath, args) {
+  return execFileSync('git', ['-C', repoPath, ...args], { maxBuffer: GIT_MAX_BUFFER });
+}
+
+function sha256Hex(data) {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+function fileIdentity(repo, relPath) {
+  try {
+    const content = readFileSync(join(repo, relPath));
+    return { path: relPath, sha256: `sha256:${sha256Hex(content)}`, bytes: content.byteLength };
+  } catch (error) {
+    // A deleted tracked file or an unreadable input is recorded as missing, not
+    // silently dropped: the digest then differs from a clean run.
+    return { path: relPath, sha256: null, bytes: null, error: String(error?.code ?? error?.message ?? error) };
+  }
+}
+
+function manifestDigest(files) {
+  return `sha256:${sha256Hex(files.map((file) => `${file.path}\t${file.sha256 ?? `missing:${file.error ?? 'unknown'}`}`).join('\n'))}`;
+}
+
+function changedManifestPaths(before, after) {
+  const beforeByPath = new Map(before.map((file) => [file.path, file.sha256]));
+  const afterByPath = new Map(after.map((file) => [file.path, file.sha256]));
+  const changed = [];
+  for (const [path, digest] of beforeByPath) if (afterByPath.get(path) !== digest) changed.push(path);
+  for (const [path, digest] of afterByPath) if (beforeByPath.get(path) !== digest) changed.push(path);
+  return [...new Set(changed)].sort();
+}
+
+/**
+ * Capture the complete source identity of one candidate revision.
+ *
+ * It records, from the real repository, every component a receipt needs to bind
+ * the exact candidate and to prove the source did not move during the run:
+ * HEAD SHA and tree, the index listing, `git diff --binary HEAD` (the same
+ * bytes `git diff --binary HEAD | shasum -a 256` hashes), the status list, every
+ * untracked run input with its content SHA-256, a digest over the harness/build
+ * input manifest, and the built artifacts the harness executes. `digest` folds
+ * all of them into the single `treeDigest` the receipt carries.
+ */
+export function captureSourceIdentity(repoPath = DEFAULT_REPO_PATH) {
+  const repo = resolve(repoPath);
+  const candidateSha = git(repo, ['rev-parse', 'HEAD']);
+  const headTree = git(repo, ['rev-parse', 'HEAD^{tree}']);
+  const indexEntries = git(repo, ['ls-files', '-s'])
+    .split('\n')
+    .filter((line) => line && !line.includes('dist/receipts/'))
+    .sort();
+  const status = git(repo, ['status', '--porcelain']).split('\n').filter(Boolean);
+  const trackedDiffBinary = gitRaw(repo, ['diff', '--binary', 'HEAD']);
+  const untracked = git(repo, ['ls-files', '--others', '--exclude-standard'])
+    .split('\n')
+    .filter(Boolean)
+    .sort()
+    .map((relPath) => fileIdentity(repo, relPath));
+  const harnessFiles = git(repo, ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...HARNESS_INPUT_ROOTS])
+    .split('\n')
+    .filter(Boolean)
+    .sort()
+    .map((relPath) => fileIdentity(repo, relPath));
+  const buildArtifacts = BUILD_ARTIFACT_PATHS.map((relPath) => fileIdentity(repo, relPath));
+  const identity = {
+    capturedAt: new Date().toISOString(),
+    candidateSha,
+    headTree,
+    trackedDiffDigest: `sha256:${sha256Hex(trackedDiffBinary)}`,
+    trackedDiffBytes: trackedDiffBinary.byteLength,
+    indexDigest: `sha256:${sha256Hex(`${indexEntries.join('\n')}\n`)}`,
+    indexEntries: indexEntries.length,
+    status,
+    statusDigest: `sha256:${sha256Hex(`${status.join('\n')}\n`)}`,
+    untracked,
+    untrackedDigest: manifestDigest(untracked),
+    harness: {
+      digest: manifestDigest(harnessFiles),
+      roots: [...HARNESS_INPUT_ROOTS],
+      files: harnessFiles.length,
+      manifest: harnessFiles,
+    },
+    buildArtifacts,
+    buildDigest: manifestDigest(buildArtifacts),
+  };
+  identity.digest = `sha256:${sha256Hex([
+    identity.candidateSha,
+    identity.headTree,
+    identity.trackedDiffDigest,
+    identity.indexDigest,
+    identity.statusDigest,
+    identity.untrackedDigest,
+    identity.harness.digest,
+    identity.buildDigest,
+  ].join('\n'))}`;
+  return identity;
+}
+
+/** The identity record without the per-file manifest, for receipt-sized evidence. */
+export function compactSourceIdentity(identity) {
+  if (!identity) return null;
+  return {
+    capturedAt: identity.capturedAt,
+    candidateSha: identity.candidateSha,
+    headTree: identity.headTree,
+    trackedDiffDigest: identity.trackedDiffDigest,
+    trackedDiffBytes: identity.trackedDiffBytes,
+    indexDigest: identity.indexDigest,
+    indexEntries: identity.indexEntries,
+    status: identity.status,
+    statusDigest: identity.statusDigest,
+    untracked: identity.untracked,
+    untrackedDigest: identity.untrackedDigest,
+    harness: {
+      digest: identity.harness.digest,
+      roots: identity.harness.roots,
+      files: identity.harness.files,
+    },
+    buildArtifacts: identity.buildArtifacts,
+    buildDigest: identity.buildDigest,
+    digest: identity.digest,
+  };
+}
+
+/**
+ * Re-capture the source identity at the end of the run and compare it with the
+ * start capture. The result is written to `<receiptDir>/source-identity.json`
+ * (or the attempt root before the receipt root exists) so the receipt can be
+ * checked independently of the runner's own claim, and `stable: false` names
+ * every input that moved. Idempotent: a second call returns the first result, so
+ * a scenario that already finalized the end identity keeps exactly that capture.
+ */
+export async function finalizeSourceIdentity(binding) {
+  if (!binding || typeof binding !== 'object') {
+    throw new Error('finalizeSourceIdentity requires a binding record from bindCandidate()');
+  }
+  if (!binding.sourceIdentity?.start) {
+    throw new Error('finalizeSourceIdentity requires a binding record from bindCandidate()');
+  }
+  if (binding.sourceIdentity.end) return binding.sourceIdentity;
+  const start = binding.sourceIdentity.start;
+  const end = captureSourceIdentity(binding.repoPath);
+  const changedPaths = [...new Set([
+    ...changedManifestPaths(start.untracked, end.untracked),
+    ...changedManifestPaths(start.harness.manifest, end.harness.manifest),
+    ...changedManifestPaths(start.buildArtifacts, end.buildArtifacts),
+  ])].sort();
+  const stable = start.digest === end.digest;
+  binding.sourceIdentity.end = end;
+  binding.sourceIdentity.stable = stable;
+  binding.sourceIdentity.changedPaths = stable ? [] : changedPaths.slice(0, 200);
+  const sidecarDir = binding.receiptDir ?? binding.attemptRoot ?? null;
+  if (sidecarDir) {
+    binding.sourceIdentityPath = join(sidecarDir, 'source-identity.json');
+    await mkdir(dirname(binding.sourceIdentityPath), { recursive: true });
+    await writeFile(binding.sourceIdentityPath, `${JSON.stringify({
+      schema: 'humanagent.dashboard-e2e.source-identity.v1',
+      attemptId: binding.attemptId ?? null,
+      scenario: binding.scenario ?? null,
+      candidateSha: start.candidateSha,
+      treeDigest: start.digest,
+      stable,
+      changedPaths: binding.sourceIdentity.changedPaths,
+      start,
+      end,
+    }, null, 2)}\n`, 'utf8');
+  }
+  return binding.sourceIdentity;
+}
+
+/**
+ * Project the finalized source identity into the receipt-sized evidence the
+ * single receipt sink carries: the start and end captures (compact), the
+ * stability verdict, every path that moved, and the sidecar path. The receipt
+ * has no other owner for the end identity, so the sink records this shape for
+ * every branch, including a failure before the scenario ran.
+ */
+export function sourceIdentityEvidence(binding) {
+  const identity = binding?.sourceIdentity ?? null;
+  if (!identity?.start) return null;
+  return {
+    stable: identity.stable ?? null,
+    changedPaths: identity.changedPaths ?? null,
+    sidecarPath: binding.sourceIdentityPath ?? null,
+    start: compactSourceIdentity(identity.start),
+    end: compactSourceIdentity(identity.end),
+  };
 }
 
 function nowStamp() {
@@ -116,20 +341,16 @@ function isWithin(root, candidate) {
 
 export function bindCandidate(repoPath = DEFAULT_REPO_PATH, options = {}) {
   const repo = resolve(repoPath);
-  const candidateSha = git(repo, ['rev-parse', 'HEAD']);
-  const files = git(repo, ['ls-files', '-s'])
-    .split('\n')
-    .filter((line) => line && !line.includes('dist/receipts/'))
-    .sort();
-  // `ls-files -s` hashes the index, not the working tree, so an uncommitted
-  // change would leave the digest unchanged. Fold in the working-tree diff and
-  // the status list so the digest actually identifies the tested candidate.
-  const worktreeDiff = git(repo, ['diff', 'HEAD']);
-  const worktreeStatus = git(repo, ['status', '--porcelain']);
-  const treeDigest = `sha256:${createHash('sha256')
-    .update(`${files.join('\n')}\n`)
-    .update(`--diff--\n${worktreeDiff}\n--status--\n${worktreeStatus}\n`)
-    .digest('hex')}`;
+  // The start identity is the full source manifest of this candidate revision:
+  // HEAD SHA/tree, the index listing, `git diff --binary HEAD` (the exact bytes
+  // the documented candidate-identity command hashes), the status list, every
+  // untracked run input by content hash, the harness/build input manifest and
+  // the built artifacts the harness executes. `treeDigest` is that aggregate, so
+  // the receipt no longer reuses HEAD alone and no longer drops untracked
+  // content. `finalizeSourceIdentity()` re-captures it at the end of the run.
+  const sourceIdentityStart = captureSourceIdentity(repo);
+  const candidateSha = sourceIdentityStart.candidateSha;
+  const treeDigest = sourceIdentityStart.digest;
   const headFiles = git(repo, ['show', '--name-only', '--format=', 'HEAD'])
     .split('\n')
     .filter(Boolean)
@@ -147,6 +368,8 @@ export function bindCandidate(repoPath = DEFAULT_REPO_PATH, options = {}) {
     candidateVersion: readReleaseVersion(repo),
     treeDigest,
     headFiles,
+    sourceIdentity: { start: sourceIdentityStart, end: null, stable: null, changedPaths: null },
+    sourceIdentityPath: null,
     attemptId,
     scenario,
     entry: options.entry ?? 'dashboard',

@@ -1,0 +1,25 @@
+{
+  "graph": "humanagent-checkpoint-path-reentry",
+  "operator": {
+    "operator": "humanagent-checkpoint-path-reentry",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "read_saved_target": {
+      "ownerPath": "packages/app/src/checkpoint-journal.ts",
+      "ownerRel": "packages/app/src/checkpoint-journal.ts"
+    },
+    "admit_reentry": {
+      "ownerPath": "packages/runtime/src/checkpoints/conditional-reentry.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/conditional-reentry.ts"
+    },
+    "append_path_fact": {
+      "ownerPath": "packages/app/src/checkpoint-journal.ts",
+      "ownerRel": "packages/app/src/checkpoint-journal.ts"
+    },
+    "return_typed_outcome": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
+    }
+  }
+}

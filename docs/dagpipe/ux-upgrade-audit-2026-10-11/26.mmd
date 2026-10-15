@@ -1,0 +1,20 @@
+flowchart TB
+ T[显式大脑已确认的标准派单模板<br/>身份／修订／实际任务要求]:::truth
+ B[Context owner 装配模板与基础 context<br/>语义 checkpoints＋当前 turn 真实活动]:::truth
+ S[Runtime 判断任务尚未完成<br/>或正在恢复同 turn]:::truth
+ P[通用临时指令<br/>重新 orientation，对照派单要求继续完成]:::design
+ R[Provider／Prompt Renderer<br/>业务 context＋当次临时指令]:::design
+ M[本次模型推理]:::design
+ O[处理真实输出和操作事实]:::truth
+ H[规范 history 保留真实活动与结果<br/>不追加临时续推指令]:::truth
+ N[下一请求/turn 从规范 context 重建<br/>派单依据保留；旧临时指令不携带]:::design
+ T --> B --> R
+ S --> P --> R --> M --> O --> H --> N
+ P --> X[仅当次请求有效<br/>再次续推时重新使用指令]:::design
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

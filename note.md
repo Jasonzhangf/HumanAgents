@@ -1,70 +1,26 @@
-# Explicit Brain Implementation
+# HumanAgent 项目状态汇总（2026-10-15）
 
-## Gate25 replay on 6d52fe2
+- **当前阶段**：`MVP-IMPLEMENTATION`（`I1–I5` / `G1–G14` / `F01–F20` 纵切片合流收口中，状态 `ACTIVE / INCOMPLETE`）。
+- **权威需求与进度入口**：
+  - 用户需求真源：[`.appsdk/requirements.json`](.appsdk/requirements.json)（`version: 14`，共 10 条核心需求）。
+  - 长期执行计划：[整体执行计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)、[Provider 缺口计划](docs/goals/native-provider-gap-plan-2026-10-11.md)。
+  - 进度汇总：[Native Reasoning & UX 进度摘要](docs/goals/native-reasoning-progress-2026-10-08.md)（历史完整流水账已归档至 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/`）。
 
-- Bug: `cd8e2d77a2f9307e15003509b95e5f335131e4552e9600aba8b631227f476651`
-- Old candidate: `32df7773bad2144a30b26aded653a7148eb842bf`, tree `ae3e92be7beb8c8fb8daa6379c5fe8e626f13b84`, parent `ec56133254e3ae51d1dae6731757027556ec91cc`.
-- Exact replay base: `6d52fe2ff4c5cac8c5cbc91e20a2dafb1daef8a7`.
-- Root cause: the base created only the audit-prompt directory at `packages/app/src/memory-runtime.ts:192`; `packages/runtime/src/memory/agent.ts:1112` then read a missing prompt file.
-- Pre-fix red: real serve journal reached `retry` with `failureRef=memory-agent-prompt-unavailable` and no `consumer-commit`.
-- Final candidate commit: recorded in the delivery report after this evidence was folded into it.
-- Focused tests: 3 pass. Full gates: `pnpm build:app`, `pnpm typecheck`, `pnpm test:app` (179 pass), `pnpm test:runtime` (331 pass), `pnpm test:release` (31 pass), `git diff --check` all exit 0.
-- Final positive serve: 6 journal records, `external-operation settled`, `consumer-commit applied`, `retry=0`, prompt unavailable count `0`; prompt digest `sha256:488b1dd16521515737863da1791ff5c0295a4a1008b486aed547edd012357258`.
-- Final negative serve: exit 1, no stdout, explicit unknown builtin audit prompt error, no event journal.
-- Boundary: no merge, push, install, restart, or release was performed. Broader serve composition inventory still reports AgentIo/EventBus, M3, and HarnessNodeRuntime unavailable.
+## 1. Worktree SESE 治理与存量核销回执（2026-10-15）
 
-Baseline: `origin/main@811efc03e28eeb3b3ff2bd170aeaf88ff8f310e3`
-Worktree: `/Volumes/extension/code/humanagent/playground/explicit-brain-impl-20260917`
-Branch: `codex/explicit-brain-impl-20260917`
-Design: `playground/explicit-brain-design-20260917/docs/architecture/explicit-brain.md@6a29bee`
-Gate: `explicit-brain-design-astra-20260917-r7` PASS
+- **全局 SESE 规则已生效**：新建或续派 worktree 严格执行「先关旧树再开新树（Close-Before-Open）」，多子任务合流统一通过标准 Git 分支合并，禁止跨树文件级手工拼装。
+- **存量清理结果**：
+  - 清理前：`git worktree list` **798 个**，`/Volumes/Intel/playground/humanagent` **1,081 个**条目，仓库内 `playground/` **7 个**旧目录。
+  - 本轮核销：共归档并移除 **791 个**非活动工作树（438 个 clean 树 + 281 个历史未提交树快照归档至 `refs/archive/wt-dirty/*` + 72 个已完成 `20261014/15` 候选树直接提交至各自 `codex/<name>` 分支后移除），并移出 290 个未注册孤儿条目与仓库内 `playground/` 目录。
+  - 当前保留：仅 **6 个**注册工作树（主树 `main` + 5 个当前有活动进程占用的 `PROTECTED_HOLD` 工作树：`provider-context-correction-r1-20261015`、`provider-native-public-composition-r1-20261014`、`provider-production-task-identity-r1-20261014`、`provider-ux-served-composition-r1-20261014`、`runtime-reload-r1-20261015`）。
 
-## Scope
+## 2. 当前候选分支与待交付切片
 
-Implement explicit brain interaction template, typed tool intent/admission, channel routing,
-Attention triage/priority, memory operation status and bounded wakeups, git-bug operation-barrier
-intake, scheduler patrol, and queryable decision traces.
-
-## Non-goals
-
-No second Attention state machine, Bug system, scheduler, memory runtime, task queue, or pipeline.
-No DSH adapter work. No production deployment or real external channel claim without evidence.
-
-## Ownership split
-
-- Main: contracts, template registry/profile, interaction admission/router, integration.
-- Worker A: Attention policy and decision trace owner.
-- Worker B: Memory operation projection and boundary wakeup owner.
-- Worker C: git-bug intake and operation-barrier owner.
-- Worker D: scheduler patrol owner.
-
-## Evidence log
-
-- 2026-09-17: Created clean worktree from `origin/main`; design and existing contracts inspected.
-- 2026-09-17: Candidate `477f31121913e7897419c76b0e4973a454e6b9f7` completed the first
-  review-fix round for input revision binding, idempotent confirmation retry, serialized
-  dispatch, durable explicit-brain state hydration, and typed HTTP routes. Independent review
-  `explicit-brain-reviewfix-477f311` returned FAIL with two P1 findings: accepted raw input was
-  not recoverable and the HTTP control channel was advertised but unsupported.
-- 2026-09-17: Review-fix changes now persist `rawInput` in explicit interaction state and reject
-  unsupported control requests explicitly at the HTTP boundary instead of claiming that channel
-  is accepted.
-- 2026-09-17: Independent review `explicit-brain-reviewfix-d8689f8b` returned FAIL with a P1
-  finding in `DecisionTraceJournal`: after restart, a new append hid previously loaded durable
-  traces from later queries. The journal now hydrates persisted records into its in-memory
-  collection before append/query, and a regression asserts history remains visible after a new
-  append.
-- 2026-09-17: Independent review `explicit-brain-reviewfix-2bcdb20` returned FAIL with P1
-  findings on restart idempotency. Submitted receipts are now persisted/restored with
-  `RequirementSubmissionOwner`, and dispatch records a durable ledger entry with the started
-  task/operation before acknowledging the FIFO envelope so restart recovery reuses the existing
-  execution instead of starting another.
-- Verification: `pnpm exec tsc --noEmit`, `pnpm test:explicit-brain`, `pnpm test:app`,
-  `pnpm test:agent-templates`, `pnpm test:release`, full `pnpm test`, and `git diff --check`
-  all PASS after the review fixes.
-- Verified in current source tests: explicit confirmation is the only path to FIFO; status-only
-  does not enqueue; `intent`, `taskRef`, `normalizedInput`, and `payloadRef` survive
-  confirmation/submission; router errors map to typed UI API errors.
-- Unverified: latest review-fix candidate SHA/review/merge/push, real Journal/EventBus wiring
-  beyond the typed decision-trace port, real git-bug/channel/RCC integration, and post-merge
-  runtime load or crash recovery.
+- **主干与候选基线**：
+  - `origin/main` (`db915e7a`)：含 `task-flow` 与 `task-plan-revision` 契约/Core/JSONL 实现。
+  - 后端集成基线：`codex/provider-d-backend-compose-r1-20261014` (`8d2946a1`) 及全部分支化固化后的 `20261014/15` 模块提交。
+  - 前端集成基线：`codex/ux-frontend-agent-glue-20261015` (`53abe04b`) 及 `codex/ux-frontend-composition-20261015` (`5d258ac0`)。
+- **下一步动作**：
+  1. 在唯一集成候选工作树合流后端与前端候选分支，跑通 `pnpm dagpipe:validate`、`pnpm typecheck`、`pnpm build:app` 与受影响聚焦测试。
+  2. 完成垂直切片 1（`M0 + M1 + M2`：真实 RCC 4444 + Ego14 浏览器首屏/新建任务/Checkpoint 验收）与 1 次独立 Milestone Review 后合入 `main`。
+  3. 推进垂直切片 2（`M3 + M4 + M5`：子 Agent 动态调用与审查闭环 + 偏好/响应式抽屉验收）。

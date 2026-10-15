@@ -26,7 +26,6 @@
  *   HOMEPAGE_PLAYWRIGHT   playwright entry point override
  */
 
-import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +34,20 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const uiRoot = resolve(process.env.HOMEPAGE_UI_ROOT ?? join(repoRoot, 'docs', 'ui'));
 const evidenceRoot = process.env.HOMEPAGE_EVIDENCE?.trim();
 const contractPath = join(repoRoot, 'packages', 'contracts', 'dist', 'explicit-brain.js');
+
+// The UI is served through Playwright request interception against a synthetic
+// origin. That needs no listening socket, so the proof still runs real Chromium
+// over the real `docs/ui` modules and the real public request/response shapes
+// in a sandbox that denies TCP/UDP bind.
+const proofOrigin = 'http://humanagent.homepage.test';
+
+// Constrained execution sandboxes can deny Chromium's bootstrap mach port.
+// `--single-process --no-zygote` keeps the proof runnable without a host
+// service; override with HOMEPAGE_BROWSER_ARGS when needed.
+const launchArgs = (process.env.HOMEPAGE_BROWSER_ARGS ?? '--single-process,--no-zygote')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 const playwrightModule = await import(
   process.env.HOMEPAGE_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js'
@@ -168,61 +181,43 @@ async function handleScriptedApi(url, method, body) {
   return { status: 404, body: { error: { code: 'scripted.route.missing', message: url.pathname } } };
 }
 
-async function startScriptedServer() {
-  const server = createServer(async (request, response) => {
-    request.socket.setKeepAlive(false);
+async function installProofRoutes(context) {
+  await context.route('**/*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.origin !== proofOrigin) {
+      await route.continue();
+      return;
+    }
+    if (url.pathname.startsWith('/api/')) {
+      const raw = request.postData();
+      let body;
+      if (raw) { try { body = JSON.parse(raw); } catch { body = undefined; } }
+      const result = await handleScriptedApi(url, request.method(), body);
+      await route.fulfill({
+        status: result.status,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify(result.body),
+      });
+      return;
+    }
+    const relative = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
+    if (!relative || relative.split('/').includes('..')) {
+      await route.fulfill({ status: 400, body: 'bad path' });
+      return;
+    }
+    const filePath = resolve(uiRoot, relative);
+    if (!filePath.startsWith(`${uiRoot}${sep}`)) {
+      await route.fulfill({ status: 403, body: 'forbidden' });
+      return;
+    }
     try {
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname.startsWith('/api/')) {
-        const chunks = [];
-        for await (const chunk of request) chunks.push(chunk);
-        const raw = Buffer.concat(chunks).toString('utf8');
-        let body;
-        if (raw) { try { body = JSON.parse(raw); } catch { body = undefined; } }
-        const result = await handleScriptedApi(url, request.method ?? 'GET', body);
-        const payload = Buffer.from(JSON.stringify(result.body));
-        response.writeHead(result.status, {
-          'content-type': 'application/json; charset=utf-8',
-          'content-length': payload.byteLength,
-        });
-        response.end(payload);
-        return;
-      }
-      const relative = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
-      if (!relative || relative.split('/').includes('..')) {
-        response.writeHead(400);
-        response.end('bad path');
-        return;
-      }
-      const filePath = resolve(uiRoot, relative);
-      if (!filePath.startsWith(`${uiRoot}${sep}`)) {
-        response.writeHead(403);
-        response.end('forbidden');
-        return;
-      }
       const file = await readFile(filePath);
-      response.writeHead(200, { 'content-type': mimeType(filePath), 'content-length': file.byteLength });
-      response.end(file);
+      await route.fulfill({ status: 200, contentType: mimeType(filePath), body: file });
     } catch {
-      response.writeHead(404);
-      response.end('not found');
+      await route.fulfill({ status: 404, body: 'not found' });
     }
   });
-  await new Promise((settle, fail) => {
-    server.once('error', fail);
-    server.listen(0, '127.0.0.1', settle);
-  });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('scripted server did not expose a port');
-  server.unref();
-  return { server, url: `http://127.0.0.1:${address.port}` };
-}
-
-async function closeServer(server) {
-  if (!server || !server.listening) return;
-  server.closeAllConnections?.();
-  server.closeIdleConnections?.();
-  await new Promise((settle, fail) => server.close((error) => (error ? fail(error) : settle())));
 }
 
 // ---------------------------------------------------------------------------
@@ -267,13 +262,22 @@ function probeForm() {
   };
 }
 
-async function openEntryPage(browser, base) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+// Constrained sandboxes restart Chromium after a context close under
+// `--single-process`, so each scenario owns a fresh browser+context+page and
+// closes all three. `launchArgs` is resolved once at the bottom of the file.
+async function withEntryPage(run, { viewport = { width: 1440, height: 1000 } } = {}) {
+  const browser = await playwright.chromium.launch({ headless: true, args: launchArgs });
+  const context = await browser.newContext({ viewport });
+  await installProofRoutes(context);
   const page = await context.newPage();
-  page.__base = base;
-  await page.goto(`${base}/index.html`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('#entry-form textarea[name="rawInput"]');
-  return { context, page };
+  try {
+    await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#entry-form textarea[name="rawInput"]');
+    return await run(page);
+  } finally {
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
 }
 
 async function selectMode(page, mode, frequency) {
@@ -339,9 +343,8 @@ function assertPolicy(name, policy, expectedKeys) {
 // Scenarios
 // ---------------------------------------------------------------------------
 
-async function visibilityScenario(browser, base) {
-  const { context, page } = await openEntryPage(browser, base);
-  try {
+async function visibilityScenario() {
+  await withEntryPage(async (page) => {
     const once = await page.evaluate(probeForm);
     await capture(page, 'default-once');
     observe('default once form', once);
@@ -415,15 +418,12 @@ async function visibilityScenario(browser, base) {
     check('switching back to once drops the hidden required flags',
       SCHEDULING_FIELDS.every((name) => backToOnce.fields[name].required === false),
       backToOnce.fields);
-  } finally {
-    await context.close();
-  }
+  });
 }
 
-async function submissionScenario(browser, base) {
+async function submissionScenario() {
   {
-    const { context, page } = await openEntryPage(browser, base);
-    try {
+    await withEntryPage(async (page) => {
       const policy = await submitAndCapturePolicy(page, { rawInput: '读取 workspace 里的 marker.txt 并汇报内容' });
       observe('once submitted policy', policy);
       check('once submission keeps executionMode once', policy.executionMode === 'once', policy);
@@ -432,13 +432,10 @@ async function submissionScenario(browser, base) {
         'busyPolicy', 'canonicalInstant', 'dstAmbiguousPolicy', 'dstMissedPolicy', 'dstMode', 'dueAt',
         'executionMode', 'latePolicy', 'policyId', 'policyRevision', 'timezone',
       ]);
-    } finally {
-      await context.close();
-    }
+    });
   }
   {
-    const { context, page } = await openEntryPage(browser, base);
-    try {
+    await withEntryPage(async (page) => {
       const policy = await submitAndCapturePolicy(page, {
         rawInput: '2030 年检查一次发布状态',
         mode: 'scheduled',
@@ -451,13 +448,10 @@ async function submissionScenario(browser, base) {
         'busyPolicy', 'canonicalInstant', 'dstAmbiguousPolicy', 'dstMissedPolicy', 'dstMode',
         'executionMode', 'latePolicy', 'policyId', 'policyRevision', 'startAt', 'timezone',
       ]);
-    } finally {
-      await context.close();
-    }
+    });
   }
   {
-    const { context, page } = await openEntryPage(browser, base);
-    try {
+    await withEntryPage(async (page) => {
       const policy = await submitAndCapturePolicy(page, {
         rawInput: '每周一和周三整理一次发布说明',
         mode: 'recurring',
@@ -477,9 +471,7 @@ async function submissionScenario(browser, base) {
         'executionMode', 'frequency', 'latePolicy', 'policyId', 'policyRevision', 'startAt',
         'timeOfDay', 'timezone', 'weekDays',
       ]);
-    } finally {
-      await context.close();
-    }
+    });
   }
 }
 
@@ -487,17 +479,12 @@ async function submissionScenario(browser, base) {
 // Entry point
 // ---------------------------------------------------------------------------
 
-const { server, url: base } = await startScriptedServer();
-const browser = await playwright.chromium.launch({ headless: true });
 let crashed = null;
 try {
-  await visibilityScenario(browser, base);
-  await submissionScenario(browser, base);
+  await visibilityScenario();
+  await submissionScenario();
 } catch (error) {
   crashed = error.stack ?? String(error);
-} finally {
-  await browser.close();
-  await closeServer(server);
 }
 
 const result = {

@@ -1,0 +1,46 @@
+{
+  "graph": "humanagent-turn-continuation-request",
+  "operator": {
+    "operator": "humanagent-turn-continuation-request",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-UNVERIFIED",
+  "nodes": {
+    "base_context": {
+      "ownerPath": "packages/runtime/src/context/active-turn-context.ts",
+      "ownerRel": "packages/runtime/src/context/active-turn-context.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "装配显式派单模板与当前 turn 真实 context"
+    },
+    "transient_prompt": {
+      "ownerPath": "packages/runtime/src/agent-loop/runtime.ts",
+      "ownerRel": "packages/runtime/src/agent-loop/runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "生成引用派单要求的通用临时 orientation 指令"
+    },
+    "render_request": {
+      "ownerPath": "packages/adapters/provider/src/index.ts",
+      "ownerRel": "packages/adapters/provider/src/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "编码基础 context 与临时指令为当前请求"
+    },
+    "infer": {
+      "ownerPath": "packages/adapters/provider/src/index.ts",
+      "ownerRel": "packages/adapters/provider/src/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "在同 turn 内发起本次模型推理"
+    },
+    "accept_output": {
+      "ownerPath": "packages/runtime/src/agent-loop/runtime.ts",
+      "ownerRel": "packages/runtime/src/agent-loop/runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "处理真实输出与动作事实，不追加临时指令"
+    },
+    "next_context": {
+      "ownerPath": "packages/runtime/src/context/active-turn-context.ts",
+      "ownerRel": "packages/runtime/src/context/active-turn-context.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "从规范 history 与 checkpoint 装配后续 context"
+    }
+  }
+}

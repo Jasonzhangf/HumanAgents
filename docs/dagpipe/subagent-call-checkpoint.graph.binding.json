@@ -1,0 +1,40 @@
+{
+  "graph": "humanagent-subagent-call-checkpoint",
+  "operator": {
+    "operator": "humanagent-subagent-call-checkpoint",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-UNVERIFIED",
+  "nodes": {
+    "assignment": {
+      "ownerPath": "packages/contracts/src/native-reasoning.ts",
+      "ownerRel": "packages/contracts/src/native-reasoning.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "明确角色目标输入与交付合同"
+    },
+    "checkpoint": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "保存本次调用 checkpoint 与未返回义务"
+    },
+    "context": {
+      "ownerPath": "packages/runtime/src/context/active-turn-context.ts",
+      "ownerRel": "packages/runtime/src/context/active-turn-context.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "建立独立 Provider/model 与 context"
+    },
+    "execute": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "执行角色并返回语义交付"
+    },
+    "acceptance": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "由编排者输出接纳或待补充决定"
+    }
+  }
+}

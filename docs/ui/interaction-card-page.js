@@ -32,6 +32,14 @@ function interactiveEntry(entry) {
   }
 }
 
+// The explicit-intake lifecycle is not a task lifecycle, so this page projects
+// it onto the card's declared `LifecycleState` vocabulary and never mints a
+// state of its own. `confirmed` and `dispatched` are the states the runtime
+// records once the human authorization is done and the requirement is handed to
+// the runtime: from there the runtime owns the next step, so the card shows the
+// running lifecycle instead of falling through to `unknown` (which would render
+// the empty "未知" label). This matches `taskStateFor`, which projects the same
+// post-confirmation states from a runtime snapshot.
 function toLifecycleState(state) {
   switch (state) {
     case 'awaiting-clarification':
@@ -40,6 +48,9 @@ function toLifecycleState(state) {
     case 'received':
     case 'matching':
       return 'created'
+    case 'confirmed':
+    case 'dispatched':
+      return 'running'
     case 'status-only':
     case 'submitted':
       return 'succeeded'

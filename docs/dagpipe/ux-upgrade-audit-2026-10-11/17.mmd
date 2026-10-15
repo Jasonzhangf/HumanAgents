@@ -1,0 +1,21 @@
+flowchart TB
+ I[已确认业务需求与当前预算]:::truth
+ A[Runtime 资源准入<br/>预算内并行 N 个编排实例]:::design
+ R1[实例 1<br/>独立目标／checkpoints／完整最新 turn]:::design
+ R2[实例 2<br/>独立目标／checkpoints／完整最新 turn]:::design
+ RN[实例 … N<br/>独立目标／checkpoints／完整最新 turn]:::design
+ C1[实例 1 的角色调用与回传<br/>独立 Provider/model/context]:::design
+ C2[实例 2 的角色调用与回传<br/>独立 Provider/model/context]:::design
+ CN[实例 N 的角色调用与回传<br/>独立 Provider/model/context]:::design
+ O[按各自 task／assignment 身份返回结果<br/>不共享可写上下文]:::design
+ I --> A
+ A --> R1 --> C1 --> O
+ A --> R2 --> C2 --> O
+ A --> RN --> CN --> O
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

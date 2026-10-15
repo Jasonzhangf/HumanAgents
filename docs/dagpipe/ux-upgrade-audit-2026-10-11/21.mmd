@@ -1,0 +1,16 @@
+flowchart LR
+ I[申请当前 turn 标准收口]:::design
+ C[压缩任务语义<br/>保留判断／未知／证据／义务]:::design
+ S[四项总结<br/>目标／做了什么／结果／下一步预计]:::design
+ D[向既定接收方交付结果与引用]:::design
+ J[动作完成后持久保存 checkpoint／closure]:::truth
+ P[已闭合 turn 的下一轮 Planner]:::design
+ N[编排者核实计划并决定继续或任务终点]:::design
+ I --> C --> S --> D --> J --> P --> N
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

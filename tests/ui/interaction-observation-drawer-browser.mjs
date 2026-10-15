@@ -183,14 +183,61 @@ function mimeType(path) {
   }
 }
 
+// The observation page now also mounts the shared read-only semantic panel from
+// the runtime's public semantic GET. A terminal envelope keeps the proof
+// subscription-free while still exercising the real page wiring.
+function semanticEnvelope() {
+  const scope = {
+    organId: { scope: 'organ', value: 'organ-observation' },
+    taskId: { scope: 'task', value: TASK_ID },
+    operationId: { scope: 'operation', value: 'operation-observation-1' },
+  }
+  return {
+    scope,
+    projectionVersion: 'runtime-semantic-v1',
+    sourceWatermark: 1,
+    events: [{
+      eventId: 'semantic-event-1',
+      sourceId: 'source-semantic-event-1',
+      type: 'task.created',
+      scope,
+      occurredAt: TIME,
+      status: 'completed',
+      summary: '任务已创建',
+      payloadRef: 'asset://semantic-event-1',
+      dataDigest: 'sha256:semantic-event-1',
+      evidenceRefs: [],
+    }],
+    coverageIssues: [],
+    pairing: [{
+      groupId: 'semantic-group-1',
+      kind: 'operation',
+      scope,
+      executionEpoch: 1,
+      state: 'closed',
+      eventRefs: [],
+    }],
+    capabilities: [{ capability: 'runtime-task-events', state: 'available' }],
+  }
+}
+
+let mutationRequests = 0
+
 async function startServer() {
   const server = createServer(async (request, response) => {
     request.socket.setKeepAlive(false)
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      if (request.method !== 'GET' && url.pathname.startsWith('/api/')) mutationRequests += 1
       if (url.pathname === '/api/runtime/status') {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         response.end(JSON.stringify({ mode: 'fake', state: 'ready', providerState: 'ready', connected: true }))
+        return
+      }
+      const semanticMatch = /^\/api\/tasks\/([^/]+)\/semantic$/.exec(url.pathname)
+      if (semanticMatch) {
+        response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify(semanticEnvelope()))
         return
       }
       const observationMatch = /^\/api\/tasks\/([^/]+)\/observation$/.exec(url.pathname)
@@ -325,6 +372,14 @@ try {
     const drawer = await readDrawer(page)
     observe(`${run.label} drawer`, drawer)
     observe(`${run.label} page errors`, pageErrors)
+    const semanticPanel = await page.evaluate(() => ({
+      mounted: Boolean(document.querySelector('.semantic-observation')),
+      contract: document.querySelector('.semantic-observation')?.dataset.contractVersion ?? '',
+      modes: document.querySelectorAll('.so-mode').length,
+      text: document.querySelector('.semantic-observation')?.innerText ?? '',
+    }))
+    observe(`${run.label} semantic panel`, semanticPanel)
+    record(`${run.label} shared semantic observation panel mounts read-only`, semanticPanel.mounted && semanticPanel.contract === 'semantic-observation-view@1' && semanticPanel.modes === 4 && semanticPanel.text.includes('任务已创建'), semanticPanel)
     record(`${run.label} shared status/conversation/trace card`, drawer.statusRendered && drawer.conversationRendered && drawer.traceRendered, drawer)
     record(`${run.label} conversation contains real activity and conclusion`, drawer.conversationText.includes('已接收执行请求') && drawer.conversationText.includes('执行完成'), drawer.conversationText)
     const realTurnGroups = drawer.turnGroups.filter((group) => group.turnKey === REAL_TURN_ID)
@@ -378,6 +433,7 @@ try {
     record(`${run.label} Escape closes and returns focus to trigger`, closed.open === false && closed.focusNode === 'pipeline.execute', closed)
     await context.close()
   }
+  record('observation page issues no mutation request', mutationRequests === 0, mutationRequests)
 } finally {
   await closeServer(server)
   await browser.close()

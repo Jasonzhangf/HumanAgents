@@ -1,0 +1,19 @@
+flowchart TB
+ I[已发布计划与合法执行身份]:::truth
+ A[创建或恢复真实任务执行<br/>assignment／epoch／attempt]:::truth
+ W[装配当前有效上下文与执行窗口]:::truth
+ P[执行 Provider 轮次与工具操作]:::truth
+ E[收集业务结果与实际副作用<br/>不可变资产引用]:::truth
+ V[按任务合同判定业务结果<br/>仅消费要求的证据]:::truth
+ S[实际收拢运行资源与副作用]:::truth
+ C[提交 checkpoint／结果／恢复责任]:::truth
+ J[Organ Journal 追加事实]:::truth
+ O[可公开任务状态与交付结果]:::derived
+ I --> A --> W --> P --> E --> V --> S --> C --> J --> O
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

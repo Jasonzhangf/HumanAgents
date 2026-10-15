@@ -1,0 +1,16 @@
+flowchart LR
+ I[已确认的工作事实与责任]:::truth
+ S[统一解释发生了什么<br/>保留来源、条件和未知]:::derived
+ V[按当前阅读层组织<br/>目标／状态／结果／必要行动]:::derived
+ F[选出当前必要区域<br/>其余不显示或按需展开]:::derived
+ U[人类可读标题、句子与操作]:::derived
+ E[主动打开资料或技术记录]:::evidence
+ I --> S --> V --> F --> U
+ U -->|核对依据时| E
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

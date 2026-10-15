@@ -1,0 +1,58 @@
+{
+  "graph": "humanagent-checkpoint-path-reentry",
+  "labels": {
+    "read_saved_target": "读取已保存点的可读描述、可信时间与精确身份",
+    "admit_reentry": "按当前权限、控制位置与恢复责任判定是否准入",
+    "append_path_fact": "允许时在原 Journal 后条件追加新路径、时期与恢复引用",
+    "return_typed_outcome": "返回唯一 typed outcome（已提交或保持，拒绝分支无副作用）"
+  },
+  "design": {
+    "status": "DESIGN-PLANNED",
+    "implementationStatus": "UNVERIFIED",
+    "purpose": "表达一次从历史或前向已保存点发起的新执行的业务对象流：精确读取目标、当前条件准入、条件追加路径事实、返回 typed outcome。",
+    "routing": "四个节点的边是无条件 ARC 依赖，节点按单一波次线性执行。准入节点产出 typed decision 值；追加节点以该值为门，被拒绝或保持时返回 not-executed 且不写入任何路径事实；出口节点汇合返回单一 typed outcome。本图不声称条件边、运行期条件路由或仅用于可视化的成功/失败投影节点。",
+    "typedOutcomes": {
+      "committed": "已提交的 conditional reentry record（新 epoch、fence 与恢复引用），原 Journal 前缀不变；须精确回读成功后才返回。",
+      "held": "因当前权限、控制位置、未知或未收拢操作、或恢复责任而保持当前位置；显式返回原因，零新增路径事实，零副作用。"
+    },
+    "descriptionAndIdentity": "可读 description 与可信保存时间只用于人或 Agent 判断该选哪个保存点；系统实际操作的保存点由精确 checkpoint 与 publication 身份决定。不增加语义搜索、描述查找注册表或把描述当作身份。",
+    "appendOnly": "新执行只以现有 schema 追加新路径事实，不修改历史账本，不要求目标历史 epoch 等于当前 effective epoch。前向与后向都是一次新执行，本图内不存在历史循环。",
+    "sideEffectResponsibility": "已发生、未返回或未知的外部副作用仍由原 operation owner 收拢/对账；路径切换不撤销这些事实，也不自动 replay 或 fallback。补偿只能使用独立授权与独立 operation 身份。",
+    "memoryConsumption": {
+      "consumerGraph": "humanagent-memory-curation",
+      "boundaryOwner": "packages/app/src/memory-runtime.ts",
+      "crossGraphEdge": "本图出口的 committed typed outcome 是既有记忆沉淀边界的输入。Memory 只消费已提交的旧/新路径与纠正证据并产出候选，不决定当前路径、恢复许可或规则发布。此处只引用既有边界，不把整条 Memory 流复制进本图。"
+    },
+    "separateSameTurnRecovery": "同一业务 turn 的冷恢复是另一张独立图；本图只表达任意历史/前向保存点的条件重入。",
+    "notAdded": [
+      "语义搜索或描述注册表",
+      "独立 path store 或新状态机",
+      "第二个恢复算法",
+      "第二套 Memory consumer",
+      "无条件 replay 或 fallback",
+      "仅用于可视化的成功/失败投影节点"
+    ],
+    "nodeOwnerMapping": {
+      "read_saved_target": {
+        "operator": "humanagent-checkpoint-path-target-read@1",
+        "owner": "packages/app/src/checkpoint-journal.ts",
+        "responsibility": "App Journal 精确读取：按身份读取目标 checkpoint、closure、publication/context 与当前 typed facts，并提供既有 exact reader 供人/Agent 决策。"
+      },
+      "admit_reentry": {
+        "operator": "humanagent-checkpoint-path-admission@1",
+        "owner": "packages/runtime/src/checkpoints/conditional-reentry.ts",
+        "responsibility": "conditional record/command 及关系校验的现有所有者；产出允许或保持的 typed decision，区分目标、被顶替与新三个时期。"
+      },
+      "append_path_fact": {
+        "operator": "humanagent-checkpoint-path-append@1",
+        "owner": "packages/app/src/checkpoint-journal.ts",
+        "responsibility": "App 拥有的锁内 Journal 事务：在提交时重核当前 control、epoch、grant/permission 与 operation-control，追加 conditional reentry record 并精确回读。"
+      },
+      "return_typed_outcome": {
+        "operator": "humanagent-checkpoint-path-outcome@1",
+        "owner": "packages/runtime/src/checkpoints/submission.ts",
+        "responsibility": "canonical commitReentry 的提交与返回：prepare→commit→readback 成功才返回 committed，否则返回 typed 拒绝/保持，遗留 legacy 未绑定重入保持只读。"
+      }
+    }
+  }
+}

@@ -63,6 +63,44 @@
         <p class="action-feedback" role="status" aria-live="polite" data-action-feedback>等待输入。</p>
       </section>
 
+      <section class="panel existing-change-panel" data-existing-change>
+        <header class="section-head">
+          <h2>已有任务变更</h2>
+          <span class="section-meta" data-existing-change-state>尚未整理</span>
+        </header>
+        <p class="muted">目标、范围或处理方式的变化先整理成提案；确认是独立动作，不会复用新建任务授权。</p>
+        <form data-existing-change-intake class="form-grid">
+          <label>任务引用 <input name="taskRef" required placeholder="task-..." /></label>
+          <label>变更输入 <textarea name="changeInput" required placeholder="说明要改变的目标、范围或处理方式"></textarea></label>
+          <div class="action-row">
+            <button class="action-primary" type="submit" data-action="organize-existing-change">整理变更提案</button>
+          </div>
+        </form>
+        <p class="action-feedback" role="status" aria-live="polite" data-existing-change-feedback>尚未整理。</p>
+
+        <section class="panel" data-existing-change-proposal hidden>
+          <header class="section-head">
+            <h3>变更提案</h3>
+            <span class="section-meta" data-existing-change-task></span>
+          </header>
+          <p class="section-meta" data-existing-change-revision></p>
+          <form data-existing-change-edit class="form-grid">
+            <label>目标 <textarea name="goal" required></textarea></label>
+            <label>范围 <textarea name="scope" required></textarea></label>
+            <label>处理方式 <textarea name="proposal" required></textarea></label>
+            <div class="action-row">
+              <button type="submit" data-action="save-existing-change">保存修改</button>
+            </div>
+          </form>
+          <div class="confirmation-bar">
+            <p class="muted" data-existing-change-confirmation>确认是独立动作；保存修改会使旧确认失效。</p>
+            <button class="action-primary" type="button" data-action="confirm-existing-change" disabled>确认并提交变更</button>
+          </div>
+        </section>
+
+        <div role="alert" data-existing-change-error hidden></div>
+      </section>
+
       <section class="panel inspection-panel" data-region="inspection">
         <header class="section-head">
           <h2>2. Inspection</h2>

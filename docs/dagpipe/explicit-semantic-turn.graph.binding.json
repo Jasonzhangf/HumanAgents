@@ -1,0 +1,40 @@
+{
+  "graph": "humanagent-explicit-semantic-turn",
+  "operator": {
+    "operator": "humanagent-explicit-semantic-turn",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-UNVERIFIED",
+  "nodes": {
+    "assemble": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "装配显式交互与前序语义"
+    },
+    "route": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "显式大脑形成直接回答或标准任务模板"
+    },
+    "outcome": {
+      "ownerPath": "packages/runtime/src/explicit-brain/index.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "按明确分流形成交互答案或既有派发业务结果"
+    },
+    "history": {
+      "ownerPath": "packages/runtime/src/explicit-brain/index.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "保存交互业务结果及关联的独立执行收拢凭证"
+    },
+    "return": {
+      "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
+      "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "返回本次交互答案完成或复杂需求派发结果"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "graph": "humanagent-subagent-call-checkpoint",
+  "requirements_version": 11,
+  "labels": {
+    "assignment": "明确角色目标输入与交付合同",
+    "checkpoint": "保存本次调用 checkpoint 与未返回义务",
+    "context": "建立独立 Provider/model 与 context",
+    "execute": "执行角色并返回语义交付",
+    "acceptance": "由编排者输出接纳或待补充决定"
+  },
+  "owners": {
+    "assignment": "packages/contracts",
+    "checkpoint": "packages/runtime",
+    "context": "packages/runtime",
+    "execute": "packages/runtime",
+    "acceptance": "packages/runtime"
+  },
+  "implementationStatus": "UNVERIFIED"
+}

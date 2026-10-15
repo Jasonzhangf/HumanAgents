@@ -18,7 +18,7 @@
 | `scheduled-occurrence` | v1 | 9 | `due_occurrence` | F04 定时/周期触发与 occurrence 收拢 |
 | `subscription-control` | v1 | 5 | `subscription_control_request` | F04 计划的暂停/恢复/取消 |
 | `observation-read` | v2 | 7 | `browser_request` | F02 对话 + 轨迹 + 调用/返回关联 |
-| `dashboard-e2e-{web-search,local-file-search,aitest}` | v1 | 11–16 | `candidate_revision` | 验收门禁绑定 |
+| `dashboard-e2e-{web-search,local-file-search}` | v1 | 11–16 | `candidate_revision` | 验收门禁绑定 |
 | `ci-checkpoint` / `hand-search-websearch` / `headless-session` / `memory-curation` | v1 | 4–14 | — | 既有能力，与本轮无关 |
 
 **关键事实：semantic labels 只覆盖 8 张图，且没有一张图覆盖 F01–F05 的「卡片呈现层」。**

@@ -1,0 +1,20 @@
+flowchart TB
+ I[点击任务、结果或过程入口]:::derived
+ D{当前阅读设备}:::derived
+ W[桌面：主内容保留<br/>旁侧面板展开下一层]:::derived
+ M[手机：底部弹出抽屉<br/>显示当前层内容]:::derived
+ N[再打开下一层<br/>保持任务与来源关联]:::derived
+ B[返回上一层<br/>保留选择与阅读位置]:::derived
+ C[关闭展开内容<br/>回到原入口并恢复焦点]:::derived
+ I --> D
+ D -->|桌面| W --> N
+ D -->|手机| M --> N
+ N --> B
+ B --> C
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

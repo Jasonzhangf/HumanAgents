@@ -1,0 +1,15 @@
+flowchart LR
+ I[复杂用户需求]:::truth
+ E[显式大脑整理标准任务模板<br/>目标／范围／约束／交付／完成要求]:::design
+ C[既有确认与任务身份/修订绑定]:::truth
+ Q[唯一需求 FIFO 与任务派发]:::truth
+ B[Runtime／Context 装配真实模板<br/>首次执行或同 turn 恢复]:::design
+ P[当次临时提示引用派单要求<br/>重新 orientation 并完成剩余工作]:::design
+ I --> E --> C --> Q --> B --> P
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

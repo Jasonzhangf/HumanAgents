@@ -10,8 +10,8 @@
       "ownerRel": "packages/app/src/ui-runtime/server.ts"
     },
     "load_task_truth": {
-      "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts"
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
     },
     "load_event_history": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",

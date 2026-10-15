@@ -1,0 +1,133 @@
+{
+  "graph": "humanagent-native-turn-segment-recovery",
+  "operator": {
+    "operator": "humanagent-native-turn-segment-recovery",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-PLANNED",
+  "requirements_version": 14,
+  "requirements": [
+    "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
+    "humanagent-explicit-brain-semantic-turn-context",
+    "humanagent-implicit-brain-budgeted-independent-orchestration",
+    "humanagent-dynamic-orchestrator-choice-and-agent-termination",
+    "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+    "humanagent-transient-goal-oriented-continuation-prompt",
+    "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+    "humanagent-continuation-oriented-by-explicit-dispatch-template",
+    "humanagent-provider-work-order-ablate-graph-governance-code"
+  ],
+  "designInput": {
+    "plan": "/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/provider-segment-admission-integration-plan-r2-20261013/plan.md",
+    "planSections": "§1 目标图；§3 实际端口与 corrective 缺口；§4 三 commit 职责与 reservation 输入；§5 v2 backing；§6 单元 owner/allowlist",
+    "reuseNodeSchema": "docs/dagpipe/native-turn-checkpoint.graph.json"
+  },
+  "ownerDomains": {
+    "D-S Runtime domain": "packages/runtime/src/context/active-turn-segments.ts",
+    "TG1 grant/registration adapter": "packages/runtime/src/admission/task-grant.ts",
+    "J1 JSONL/immutable assets": "packages/adapters/jsonl/src/active-turn.ts + packages/app/src/native-recovery-assets.ts",
+    "A shared final App": "packages/app/src/ui-runtime/task-control.ts"
+  },
+  "candidates": {
+    "TG1": {
+      "sha": "864f8e2a0e73ea11ef1291a8f6d68e5710464909",
+      "source": "provider-task-grant-foundation-r1-20261013",
+      "exists": true,
+      "state": "accepted-internal-foundation; not-in-main"
+    },
+    "D-S": {
+      "sha": "5edce4e3f9e010cefa9ce18481c794193921e03f",
+      "source": "provider-segment-corrective-r2-20261013",
+      "exists": true,
+      "state": "accepted-internal-runtime-contract; exact-reservation-and-chain-consumer-verified; J1-factory-accepted; App-composition-pending; not-in-main"
+    },
+    "D-L": {
+      "sha": "17708748d0fa4bcb3626027fed76cf339a02553c",
+      "source": "provider-segment-live-v2-r1-20261013",
+      "exists": true,
+      "state": "accepted-internal-current-segment-live-and-drain; real-Journal-and-App-composition-pending; not-in-main"
+    },
+    "NS": {
+      "sha": "523dc067",
+      "source": "provider-native-save-launch-contract-plan-r1-20261013",
+      "exists": true,
+      "state": "internal-controller-accepted; phase/progress-backing-pending-A"
+    },
+    "J1": {
+      "sha": "00a96ffdc908ecfa95d8d95939b88678e4b1cee4",
+      "source": "provider-segment-journal-v2-r1-20261013",
+      "exists": true,
+      "state": "v1-v2-factory-and-exact-cold-read-accepted; canonical-public-consumer7/7; App-assembly-pending; not-in-main"
+    },
+    "D-M": {
+      "sha": "2751de0fa0036eec979676b55e6ea6e2b188130d",
+      "source": "provider-segment-mapper-v2-r1-20261013",
+      "exists": true,
+      "state": "runtime-chain-reader-accepted5/5; actual-App-request-context-and-cold-composition-pending; not-in-main"
+    }
+  },
+  "backingGaps": [
+    "D-S: Runtime 的真实 reservation、predecessor receipt、多次恢复、登记前验证与 exact retry 已验收；真实 J1 工厂已有同源消费者证明，A 调用接线尚待组合。",
+    "J1: 真实 segment codec、v2 assets exact-read 和新进程冷读已在正式 .humanagent 测试 root 验收 7/7；A 仍需注入该工厂并接实际阶段，不可据组件证明关闭完整业务 turn。",
+    "D-L: 当前 segment 的 live prefix、execution 归属与真实 drain 已内部验收；仍待 J1 真实记录端口和 A 冷恢复组合，不能把 owner-injected port 用例当作生产证明。",
+    "D-M: Runtime 跨段 reader 已验收 5/5；按 chain 和 segment-local seq 装配一个逻辑 turn，原始输入一次、HP v1/v2 exact prior history。实际 App request hook 和完整冷恢复消费者尚未验收。",
+    "A: 需要真实 TG1 reservation adapter、exact cold lookup、真实新 handle、NS phase/progress backing 注入、barrier 与逐业务准入、真实 request mapper 消费。",
+    "TG1: readBusinessRegistration 目前是 JsonlTaskGrantJournal 具体方法，不是 TaskGrantPort 成员；A 需注入窄 typed read seam，不扩展通用 TaskGrantPort。"
+  ],
+  "nodes": {
+    "read_exact_predecessor_facts": {
+      "ownerPath": "packages/runtime/src/context/active-turn-segments.ts",
+      "ownerRel": "packages/runtime/src/context/active-turn-segments.ts",
+      "ownerDomain": "D-S Runtime domain",
+      "readBackingOwnerPath": "packages/adapters/jsonl/src/active-turn.ts",
+      "readBackingOwnerRel": "packages/adapters/jsonl/src/active-turn.ts",
+      "implementationStatus": "runtime-contract-and-Journal-factory-accepted; App-callers-pending",
+      "designNote": "消费 J1 提供的 readInitialSegmentCapture/readSegments/readSegmentRecoveryReceipt；必须使用 exact receipt，不扫描 latest。失败/unknown/非法 epoch/身份不符在登记前结束，不留新 registration。"
+    },
+    "register_current_grant_business": {
+      "ownerPath": "packages/runtime/src/admission/task-grant.ts",
+      "ownerRel": "packages/runtime/src/admission/task-grant.ts",
+      "ownerDomain": "TG1 grant/registration adapter",
+      "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "journalWriterOwnerRel": "packages/adapters/jsonl/src/index.ts",
+      "implementationStatus": "pending-reservation-intent-binding-and-registration-receipt",
+      "designNote": "在同一 held 事务内完成授权检查与 business reservation 登记，产出 grant commit 与 business registration commit 两个独立回执。authorized:true 只在 registerBusiness() 返回真实 commit 后成立；只读 readTaskGrant() 不满足。"
+    },
+    "append_segment_opened": {
+      "ownerPath": "packages/adapters/jsonl/src/active-turn.ts",
+      "ownerRel": "packages/adapters/jsonl/src/active-turn.ts",
+      "ownerDomain": "J1 JSONL/immutable assets",
+      "runtimePortOwnerPath": "packages/runtime/src/context/active-turn-journal.ts",
+      "runtimePortOwnerRel": "packages/runtime/src/context/active-turn-journal.ts",
+      "implementationStatus": "typed-Journal-factory-and-exact-append-accepted; App-callers-pending",
+      "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内不读网络、不执行工具。"
+    },
+    "establish_epoch_window": {
+      "ownerPath": "packages/app/src/ui-runtime/task-control.ts",
+      "ownerRel": "packages/app/src/ui-runtime/task-control.ts",
+      "ownerDomain": "A shared final App",
+      "admissionBackingOwnerPath": "packages/runtime/src/admission/task-grant.ts",
+      "admissionBackingOwnerRel": "packages/runtime/src/admission/task-grant.ts",
+      "implementationStatus": "pending-epoch-barrier-and-per-work-admission",
+      "designNote": "segment-opened 后建立本 epoch context/barrier；新 request、child、effect 各自按当前 grant 逐次准入。segment reservation 不授予后续无限执行。"
+    },
+    "persist_segment_recovery_assets": {
+      "ownerPath": "packages/app/src/native-recovery-assets.ts",
+      "ownerRel": "packages/app/src/native-recovery-assets.ts",
+      "ownerDomain": "J1 JSONL/immutable assets",
+      "journalWriterOwnerPath": "packages/adapters/jsonl/src/active-turn.ts",
+      "journalWriterOwnerRel": "packages/adapters/jsonl/src/active-turn.ts",
+      "immutableAssetOwnerPath": "packages/adapters/filesystem/src/index.ts",
+      "immutableAssetOwnerRel": "packages/adapters/filesystem/src/index.ts",
+      "implementationStatus": "prepared-drain-and-v2-asset-factory-accepted; actual-save-phase-composition-pending",
+      "designNote": "保存本 segment 的真实 v2 capture、producer drains 与 recovery-assets receipt；producersDrained:true 只是结构条件，不能替代实际 drain/请求/completion 关系。v1 资产与 v1 receipt 保持原样。"
+    },
+    "resolve_resume_outcome": {
+      "ownerPath": "packages/app/src/ui-runtime/task-control.ts",
+      "ownerRel": "packages/app/src/ui-runtime/task-control.ts",
+      "ownerDomain": "A shared final App",
+      "implementationStatus": "pending-typed-outcome-projection",
+      "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）。failed/unknown completion 保留责任，不伪造成 complete。"
+    }
+  }
+}

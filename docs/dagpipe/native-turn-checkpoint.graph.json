@@ -1,0 +1,129 @@
+{
+  "id": "humanagent-native-turn-checkpoint",
+  "version": "1",
+  "meta": {
+    "title": "原生 turn 的唯一 checkpoint 保存边界",
+    "baseline": "f410f134aba33e73c1c783a843389d7fdc8f9d37",
+    "status": "DESIGN-PLANNED",
+    "scope": "由 admitted-turn 外层图复用；仅表达保存和恢复结果，不派发下一 turn，也不声称 Operator 已注册或运行",
+    "routingContract": "Edges express unconditional ARC dependencies only; installed DAGpipe grammar/runtime provides no conditional-edge routing evidence. After the durable phase envelope, pure success and recovery-hold projections both execute and converge at the unique checkpoint_boundary_outcome Z. Exactly one projection is active by envelope state; this is target topology/contract only, not proof of runtime routing."
+  },
+  "inputs": [
+    { "id": "semantic_closure_candidate", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "validate_candidate",
+      "operator": "humanagent-native-checkpoint-validate",
+      "operator_version": "1",
+      "inputs": ["semantic_closure_candidate"],
+      "output": { "id": "candidate_validation_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "reconcile_operations",
+      "operator": "humanagent-native-checkpoint-reconcile",
+      "operator_version": "1",
+      "inputs": ["candidate_validation_result"],
+      "output": { "id": "operation_reconcile_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "persist_recovery_state",
+      "operator": "humanagent-native-checkpoint-persist-recovery",
+      "operator_version": "1",
+      "inputs": ["operation_reconcile_result"],
+      "output": { "id": "recovery_persistence_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_checkpoint_fact",
+      "operator": "humanagent-native-checkpoint-commit-fact",
+      "operator_version": "1",
+      "inputs": ["recovery_persistence_result"],
+      "output": { "id": "checkpoint_commit_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_closure_fact",
+      "operator": "humanagent-native-checkpoint-commit-closure",
+      "operator_version": "1",
+      "inputs": ["checkpoint_commit_result"],
+      "output": { "id": "closure_commit_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_context_view_fact",
+      "operator": "humanagent-native-checkpoint-commit-view",
+      "operator_version": "1",
+      "inputs": ["closure_commit_result"],
+      "output": { "id": "context_view_commit_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_qualified_history",
+      "operator": "humanagent-native-checkpoint-publish-history",
+      "operator_version": "1",
+      "inputs": ["context_view_commit_result"],
+      "output": { "id": "history_publication_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_durable_success",
+      "operator": "humanagent-native-checkpoint-success-projection",
+      "operator_version": "1",
+      "inputs": ["history_publication_result"],
+      "output": { "id": "durable_success_disposition", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "recovery_hold",
+      "operator": "humanagent-native-checkpoint-recovery-hold",
+      "operator_version": "1",
+      "inputs": ["history_publication_result"],
+      "output": { "id": "checkpoint_recovery_hold", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_boundary_outcome",
+      "operator": "humanagent-native-checkpoint-boundary-outcome",
+      "operator_version": "1",
+      "inputs": ["durable_success_disposition", "checkpoint_recovery_hold"],
+      "output": { "id": "checkpoint_boundary_outcome", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "validate_candidate", "to": "reconcile_operations", "arc_id": "candidate_validation_result" },
+    { "from": "reconcile_operations", "to": "persist_recovery_state", "arc_id": "operation_reconcile_result" },
+    { "from": "persist_recovery_state", "to": "commit_checkpoint_fact", "arc_id": "recovery_persistence_result" },
+    { "from": "commit_checkpoint_fact", "to": "commit_closure_fact", "arc_id": "checkpoint_commit_result" },
+    { "from": "commit_closure_fact", "to": "commit_context_view_fact", "arc_id": "closure_commit_result" },
+    { "from": "commit_context_view_fact", "to": "publish_qualified_history", "arc_id": "context_view_commit_result" },
+    { "from": "publish_qualified_history", "to": "project_durable_success", "arc_id": "history_publication_result" },
+    { "from": "publish_qualified_history", "to": "recovery_hold", "arc_id": "history_publication_result" },
+    { "from": "project_durable_success", "to": "resolve_boundary_outcome", "arc_id": "durable_success_disposition" },
+    { "from": "recovery_hold", "to": "resolve_boundary_outcome", "arc_id": "checkpoint_recovery_hold" }
+  ],
+  "outputs": ["checkpoint_boundary_outcome"]
+}

@@ -303,6 +303,10 @@ try {
   const eventErrors = [];
   eventPage.on('pageerror', (error) => eventErrors.push(`pageerror: ${error.message}`));
   let releaseInterpret;
+  let markInterpretRequestStarted;
+  const interpretRequestStarted = new Promise((resolvePromise) => {
+    markInterpretRequestStarted = resolvePromise;
+  });
   const interpretGate = new Promise((resolvePromise) => {
     releaseInterpret = resolvePromise;
   });
@@ -332,6 +336,7 @@ try {
       return body({ state: 'received', rawInput: '读取 README', nextAction: 'interpret' });
     }
     if (path === '/api/explicit/interactions/interaction-progress-proof/interpret' && request.method() === 'POST') {
+      markInterpretRequestStarted({ method: request.method(), path, body: request.postDataJSON() });
       await interpretGate;
       return body({
         state: 'awaiting-confirmation',
@@ -347,6 +352,16 @@ try {
         },
       });
     }
+    if (path === '/api/explicit/interactions/interaction-progress-proof/confirmation' && request.method() === 'POST') {
+      return body({
+        requirement: {
+          status: 'submitted',
+          requirementId: 'requirement:progress-proof',
+          draftId: 'draft-progress-proof',
+          inputRevision: 1,
+        },
+      });
+    }
     return body({ error: { code: 'not-found', message: `unexpected route ${request.method()} ${path}`, ownerId: 'test', nextAction: 'none' } }, 404);
   });
 
@@ -354,6 +369,15 @@ try {
   await eventPage.waitForSelector('.quick-create-form textarea[name="directive"]');
   await eventPage.fill('.quick-create-form textarea[name="directive"]', '读取 README');
   await eventPage.click('form button[type="submit"]');
+
+  const interpretStarted = await Promise.race([
+    interpretRequestStarted,
+    sleep(5000).then(() => null),
+  ]);
+  record('dashboard F01 reaches the held real interpret POST',
+    interpretStarted?.method === 'POST'
+      && interpretStarted.path === '/api/explicit/interactions/interaction-progress-proof/interpret',
+    interpretStarted);
 
   const phaseText = () => eventPage.evaluate(() =>
     document.querySelector('.quick-create-progress .progress-phase')?.textContent ?? '');
@@ -363,12 +387,9 @@ try {
     { timeout: 20000 },
   ).then(() => true).catch(() => false);
 
-  // The receive+inspect round trips resolve from real stub events and advance
-  // the phase to the step that issues the held interpret request. Wait for
-  // that real-event-driven step, then prove the phase stays fixed while the
-  // next request is held open and only the elapsed-time timer moves.
-  const heldPhaseReached = await waitForPhase('显式大脑正在匹配任务');
-  record('dashboard F01 phase reaches the held request from real events', heldPhaseReached, { heldPhaseReached });
+  // The generic submit progress is expected to remain visible while the
+  // confirmed interpret POST is held. The request-start signal above, rather
+  // than a phase label, identifies the actual asynchronous boundary.
   const earlyProgress = await eventPage.evaluate(() => ({
     phase: document.querySelector('.quick-create-progress .progress-phase')?.textContent ?? '',
     timer: document.querySelector('.quick-create-progress .progress-timer')?.textContent ?? '',
@@ -380,6 +401,9 @@ try {
   }));
   const earlyCard = await readCard(eventPage);
   observe('dashboard F01 held-response progress', { early: earlyProgress, late: lateProgress, card: earlyCard });
+  record('dashboard F01 keeps generic submit progress during the held interpret request',
+    earlyProgress.phase === '显式大脑正在整理并提交',
+    { interpretStarted, early: earlyProgress });
   record('dashboard F01 phase does not advance on a timer while waiting on a real event',
     earlyProgress.phase === lateProgress.phase,
     { early: earlyProgress, late: lateProgress });
@@ -387,9 +411,18 @@ try {
     lateProgress.timer !== earlyProgress.timer,
     { early: earlyProgress, late: lateProgress });
 
-  // Focus a stable card trigger node, then release the event so the card
-  // re-renders from the real response. Focus must return to that node.
+  // Record the card's own focus restoration separately from the Dashboard's
+  // intentional post-success focus migration to the next-task input.
   await eventPage.evaluate(() => {
+    window.__dashboardFocusTrace = [];
+    document.addEventListener('focus', (event) => {
+      const target = event.target;
+      window.__dashboardFocusTrace.push({
+        key: target?.dataset?.focusKey ?? null,
+        tag: target?.tagName ?? null,
+        name: target?.getAttribute?.('name') ?? null,
+      });
+    }, true);
     const tab = document.querySelector('[data-focus-key="tab:trace"]');
     if (tab) tab.focus();
   });
@@ -397,20 +430,29 @@ try {
     key: document.activeElement?.dataset?.focusKey ?? null,
   }));
   releaseInterpret();
-  await waitForPhase('等待你确认任务草案');
-  const afterFocus = await eventPage.evaluate(() => ({
-    key: document.activeElement?.dataset?.focusKey ?? null,
+  await waitForPhase('已入队 · 隐式大脑将消费');
+  const focusEvidence = await eventPage.evaluate(() => ({
+    trace: window.__dashboardFocusTrace,
+    active: {
+      key: document.activeElement?.dataset?.focusKey ?? null,
+      tag: document.activeElement?.tagName ?? null,
+      name: document.activeElement?.getAttribute?.('name') ?? null,
+    },
   }));
   const eventCard = await readCard(eventPage);
   const latestPhase = await phaseText();
   observe('dashboard F01 post-event card', eventCard);
-  observe('dashboard F09 focus before/after event', { before: beforeFocus, after: afterFocus });
-  record('dashboard F01 typed progress turn follows the real event',
-    latestPhase.includes('等待你确认任务草案') && eventCard.cardMounted,
+  observe('dashboard F09 focus timeline', { before: beforeFocus, ...focusEvidence });
+  record('dashboard F01 typed progress turn follows the real event through final submit',
+    latestPhase.includes('已入队 · 隐式大脑将消费') && eventCard.cardMounted,
     { latestPhase, card: eventCard });
-  record('dashboard F09 focus returns to the stable trigger node after re-render',
-    beforeFocus.key === afterFocus.key && afterFocus.key === 'tab:trace',
-    { before: beforeFocus, after: afterFocus });
+  const cardRestoreEvents = focusEvidence.trace.filter((entry) => entry.key === 'tab:trace').length - 1;
+  record('dashboard F09 card re-render restores its focused trigger',
+    beforeFocus.key === 'tab:trace' && cardRestoreEvents >= 1,
+    { before: beforeFocus, focusTrace: focusEvidence.trace, cardRestoreEvents });
+  record('dashboard F09 successful submit focuses the next-task input',
+    focusEvidence.active.tag === 'TEXTAREA' && focusEvidence.active.name === 'directive',
+    { active: focusEvidence.active, focusTrace: focusEvidence.trace });
 
   await eventPage.screenshot({ path: join(artifactDir, 'dashboard-event-driven.png'), fullPage: true });
   if (eventErrors.length) {

@@ -1,0 +1,15 @@
+flowchart LR
+ I[用户打开成果或结论依据]:::derived
+ N[名称与内容摘要<br/>说明这份材料有什么用]:::derived
+ C[查看实际内容<br/>关联它支持的结论]:::derived
+ Q[需要定位实现问题时<br/>主动打开技术记录]:::evidence
+ R[查看相关原始记录与关联信息<br/>不回流成业务状态]:::evidence
+ I --> N --> C
+ C -.->|明确需要技术细节| Q --> R
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

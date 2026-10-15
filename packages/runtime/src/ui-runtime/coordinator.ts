@@ -1202,8 +1202,8 @@ export async function projectDurableTaskInventory(input: {
 function providerEventSummary(event: ProviderEvent): string {
   if (event.kind === 'terminal') return `execution ${event.terminalState ?? 'unknown'}`;
   if (event.kind === 'error') return event.error?.message ?? 'provider error';
+  if (event.kind === 'output') return event.summary?.trim() ? event.summary : '未投影';
   if (event.summary) return event.summary;
-  if (event.kind === 'output') return '未投影';
   if (event.outputRefs && event.outputRefs.length > 0) return `${event.kind}: ${event.outputRefs.join(', ')}`;
   return event.kind;
 }
@@ -3149,6 +3149,9 @@ export class RuntimeTaskCoordinator {
     const coordinator = this;
     let producedOutput = '';
     const executorEvidence: ExecutorReviewEvidence[] = [];
+    const acceptedProviderEvidenceRefs: EvidenceRef[] = [];
+    let acceptedProviderEventCount = 0;
+    let acceptedToolEventCount = 0;
     const producedPaths: string[] = [];
     await composition.start();
     await composition.submit(prompt);
@@ -3202,10 +3205,13 @@ export class RuntimeTaskCoordinator {
       }
       const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
       if (!event.providerEvent) continue;
+      acceptedProviderEventCount += 1;
+      acceptedProviderEvidenceRefs.push(...event.providerEvent.evidenceRefs);
       if (event.providerEvent.kind === 'output' && event.providerEvent.summary) {
         producedOutput = `${producedOutput}${event.providerEvent.summary}`;
       }
       if (event.providerEvent.kind === 'tool') {
+        acceptedToolEventCount += 1;
         executorEvidence.push({
           summary: providerEventSummary(event.providerEvent),
           evidenceRefs: [...event.providerEvent.evidenceRefs],
@@ -3272,6 +3278,12 @@ export class RuntimeTaskCoordinator {
           paths: [...producedPaths],
         })
       : [];
+    if (closure.state === 'succeeded') {
+      executorEvidence.push({
+        summary: `executor aggregate: observed ${acceptedProviderEventCount} provider event(s) (accepted observations only), ${acceptedToolEventCount} tool event(s); ${acceptedToolEventCount === 0 ? 'no tool execution was observed' : 'tool execution was observed'}; closure ${closure.state}; ${producedArtifacts.length} produced file readback(s)`,
+        evidenceRefs: [...acceptedProviderEvidenceRefs, ...closure.evidenceRefs],
+      });
+    }
     const artifactBody = producedArtifactBody(producedOutput, producedArtifacts);
     const status: WorkResult['status'] = closure.state === 'succeeded'
       ? 'succeeded'

@@ -1,0 +1,42 @@
+{
+  "graph": "humanagent-native-turn-segment-recovery",
+  "requirements_version": 14,
+  "labels": {
+    "read_exact_predecessor_facts": "exact 读取原 v1 capture、已提交 segment chain 与指定 predecessor receipt，并核验同一业务 turn 可恢复及新 handle 身份",
+    "register_current_grant_business": "持锁读取当前 grant，并在同一 held 登记事务内登记本次 segment-open 的精确 business reservation，分别取得 grant commit 与 business registration commit",
+    "append_segment_opened": "核验 reservation 与本 segment 的 predecessor 后，向 Organ Journal 追加 segment-opened 并取得独立 segment commit",
+    "establish_epoch_window": "建立本 epoch 的 context/barrier 生产窗口；新 request、child、effect 各自按当前 grant 逐次准入",
+    "persist_segment_recovery_assets": "保存本 segment 的真实 v2 capture、producer drains 与 recovery-assets receipt",
+    "resolve_resume_outcome": "返回实际 receipts，或返回保留恢复责任且无新执行的 typed outcome"
+  },
+  "arcs": {
+    "predecessor_facts_result": "已核验的原 turn、predecessor 与真实 receipt 事实",
+    "grant_registration_result": "当前 grant commit 与精确 business registration commit",
+    "segment_opened_commit_result": "已提交的 segment-opened 与独立 segment commit",
+    "epoch_window_result": "本 epoch 生产窗口与逐次准入结果",
+    "segment_recovery_assets_result": "本 segment 的 v2 capture、drains 与 recovery-assets receipt",
+    "segment_recovery_outcome": "typed 恢复结果：resumed receipts 或 retained recovery responsibility"
+  },
+  "owners": {
+    "read_exact_predecessor_facts": "packages/runtime",
+    "register_current_grant_business": "packages/runtime",
+    "append_segment_opened": "packages/adapters/jsonl",
+    "establish_epoch_window": "packages/app",
+    "persist_segment_recovery_assets": "packages/adapters/jsonl",
+    "resolve_resume_outcome": "packages/app"
+  },
+  "design": {
+    "status": "DESIGN-PLANNED",
+    "direction": "flowchart TD",
+    "palette": "flow-presentation 共享调色板：入口/出口 boundary #E9EEF5/#64748B，动作 action #E8F1FF/#2563EB，数据 data #F1EAFE/#7C3AED，成功 success #E8F7EE/#16A34A，失败 failure #FDECEC/#DC2626。本图唯一出口是 typed 联合结果，按中性 boundary 呈现。",
+    "singleInputOutput": "一个 resume intent 输入 ARC，一个 typed recovery/resume outcome 输出 ARC（SESE）。",
+    "envelopeGating": "已安装 grammar 只有无条件边，执行器按波次调度全部节点。typed prerequisite/error envelope 承载条件：节点只在其入边声明精确前置成功后执行副作用，否则输出 not-executed 并保留原首错/恢复 ref；链条仍到达唯一输出节点。",
+    "threeCommits": "grant commit、business registration commit、segment commit 职责分离：节点 2 在同一 held 事务产出 grant commit 与 business registration commit；节点 3 的 append 产出独立 segment commit。",
+    "noFixedPipeline": "本图不写 observation/plan/execute/review 固定角色流水线，无重复/回退边；下一次恢复是本图的新执行，而非图内环。",
+    "revokeOrder": "reservation 前撤权零副作用；reservation 后撤权允许完成本次已登记 segment，但新 request/child/effect 仍按当前 grant 逐次准入。",
+    "immutability": "原 v1 capture 与原 binding commit 不可变；只追加新 segment 与 v2 capture，不重标旧 epoch。",
+    "statusBoundary": "本图只表达目标合同与责任名称；不证明 Operator 已注册、runtime 已执行或产品已验收。",
+    "mermaid": "flowchart TD\n  I([同一业务 turn 冷恢复入口]):::boundary\n  A1[\"exact 读原 v1／已提交 segment chain／指定 predecessor receipt；核验可恢复与新 handle 身份\"]:::action\n  A2[\"持锁读取当前 grant 并登记精确 business reservation；grant commit ＋ business registration commit\"]:::action\n  A3[\"核验 reservation 与 predecessor 后追加 segment-opened；独立 segment commit\"]:::action\n  A4[\"建立本 epoch context/barrier；逐次准入新 request／child／effect\"]:::action\n  A5[\"保存本 segment v2 capture／真实 drains／recovery-assets receipt\"]:::action\n  Z([typed 恢复结果：resumed receipts 或 retained recovery responsibility]):::boundary\n  I --> A1 --> A2 --> A3 --> A4 --> A5 --> Z\n  classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px\n  classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px"
+  },
+  "implementationStatus": "UNVERIFIED"
+}

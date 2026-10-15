@@ -1,0 +1,16 @@
+flowchart LR
+ I[用户提交目标／范围／约束／交付物]:::truth
+ D[最终草稿修订<br/>revision／hash／真实身份]:::truth
+ C[同次提交确认与幂等 receipt]:::truth
+ Q[唯一 RequirementEnvelope<br/>FIFO 序号]:::truth
+ O[隐式大脑待分类业务需求]:::truth
+ I --> D --> C --> Q --> O
+ D -->|已确认 goal| T[人类可读标题]:::derived
+ D -->|canonical 输入与 hash| B[保持原始业务合同]:::truth
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

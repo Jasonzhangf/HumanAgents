@@ -1,0 +1,19 @@
+flowchart TB
+ I[用户输入＋前序语义 checkpoints]:::design
+ C[显式大脑装配最新完整 turn<br/>整理、查询、匹配与分流]:::design
+ D{是否需要派发执行任务}:::design
+ A[不需要：直接形成并返回答案]:::design
+ Z[简单交互完成<br/>保留普通语义历史]:::design
+ T[需要：整理标准任务模板]:::design
+ Q[同次新建确认与唯一 FIFO 需求]:::truth
+ R[隐式大脑准入与动态任务执行]:::design
+ I --> C --> D
+ D -->|简单问答| A --> Z
+ D -->|复杂问题| T --> Q --> R
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

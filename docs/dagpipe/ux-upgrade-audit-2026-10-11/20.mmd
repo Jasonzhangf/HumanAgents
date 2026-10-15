@@ -1,0 +1,15 @@
+flowchart LR
+ I[明确角色任务<br/>目标／范围／输入 refs／交付要求]:::design
+ C[调用 checkpoint<br/>assignment／阶段／未返回责任]:::design
+ B[独立 Provider/model 与 context]:::design
+ X[子 agent 自己执行<br/>完整活动与 raw 留在自身证据归属]:::design
+ R[精炼语义结果＋交付 refs<br/>条件／依据／未知／剩余责任]:::design
+ O[父编排者核实并选择下一步<br/>活动 context 保持简单]:::design
+ I --> C --> B --> X --> R --> O
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

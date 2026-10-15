@@ -1,0 +1,22 @@
+flowchart TB
+ I[已由显式大脑确定的入口]:::design
+ A[简单问答直接回答]:::design
+ Z[交互结束]:::design
+ T[复杂任务执行／请求返回]:::design
+ D{Core／Runtime 任务真实状态}:::truth
+ E[已完成或明确失败<br/>返回结果并结束运行]:::truth
+ P[未完成：读显式派单模板<br/>通用临时提示恢复 orientation]:::design
+ R[继续同 turn 动态推理<br/>或按任务协议收口后规划下一轮]:::design
+ H[错误/未知：retry 或暂停<br/>恢复原 turn]:::design
+ I -->|问答分支| A --> Z
+ I -->|任务分支| T --> D
+ D -->|任务终点| E
+ D -->|未完成| P --> R
+ D -->|错误／未知| H
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

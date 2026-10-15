@@ -10,11 +10,18 @@
  * journal that the existing `file.search` and `file.read` tools ran against the
  * same real path and that the workspace is byte-identical afterwards
  * (relative path -> SHA-256 manifest before and after).
+ *
+ * The input stage is asserted and screenshotted inside the submit flow, after
+ * the served entry shows the filled directive and before the single submit
+ * click; the confirmation request revision is bound to the requirement identity
+ * the runtime returns; and the receipt carries the start/end source identity of
+ * the candidate revision.
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  assertEntryInputStage,
   captureDashboardEvidence,
   captureScreenshot,
   collectDashboardEventRows,
@@ -28,6 +35,7 @@ import {
   submitDirectiveAndConfirmDraft,
   waitForTerminal,
 } from '../lib/browser.mjs';
+import { compactSourceIdentity, finalizeSourceIdentity } from '../lib/binding.mjs';
 import {
   countTurnEvidenceFor,
   journalPathFor,
@@ -71,10 +79,16 @@ export async function runLocalFileSearchScenario(binding) {
     'Do not create, modify, move or delete any file. Do not ask clarifying questions.',
   ].join(' ');
 
-  // browser input -> visible draft -> user confirmation
-  await captureScreenshot(binding, '01-input-before-submit');
-  evidence.screenshots.push(`${binding.screenshotsDir}/01-input-before-submit.png`);
-  await submitDirectiveAndConfirmDraft(binding, directive, { clarificationAnswer: CLARIFY_ANSWER });
+  // browser input -> visible draft -> user confirmation. The input-stage
+  // screenshot is captured inside the submit flow: after the served entry is on
+  // screen with the directive really in its form, and before the one submit
+  // click. It is never captured before the page has loaded.
+  await submitDirectiveAndConfirmDraft(binding, directive, {
+    clarificationAnswer: CLARIFY_ANSWER,
+    onDirectiveFilled: (stage) => captureInputStage(binding, directive, stage),
+  });
+  const inputStage = binding.inputStage ?? null;
+  if (inputStage?.screenshot) evidence.screenshots.unshift(inputStage.screenshot);
   const draftIntent = binding.draft?.intent ?? '';
   await captureScreenshot(binding, '02-draft-confirmed');
   evidence.screenshots.push(`${binding.screenshotsDir}/02-draft-confirmed.png`);
@@ -185,8 +199,12 @@ export async function runLocalFileSearchScenario(binding) {
       missing.push('SSE interruption did not mark the connection freshness as disconnected');
     }
     if (liveSse.broken?.stateChip === '失败') missing.push('SSE interruption was rendered as task failure');
-    if (!String(liveSse.broken?.pageStatus ?? '').includes('读取任务失败')) {
-      missing.push('SSE interruption did not perform a visible projection readback');
+    const brokenPageStatus = String(liveSse.broken?.pageStatus ?? '');
+    if (liveSse.broken?.pageStatusRole !== 'status'
+      || !brokenPageStatus.trim()
+      || brokenPageStatus === liveSse.connected?.pageStatus
+      || brokenPageStatus.includes('任务投影已同步')) {
+      missing.push('SSE interruption did not visibly replace the successful projection status with a failed-read state');
     }
     if (!(liveSse.broken?.dashboardReads > (liveSse.connected?.dashboardReads ?? 0))) {
       missing.push('SSE interruption did not trigger a dashboard projection read');
@@ -292,6 +310,56 @@ export async function runLocalFileSearchScenario(binding) {
     }
   }
 
+  // Input-stage evidence: the screenshot must show the served entry with the
+  // real directive in its form, and the one authorization request must carry the
+  // exact revision/requirement identity the runtime returned. No second
+  // confirmation is accepted.
+  if (!inputStage) {
+    missing.push('the input-stage screenshot was not captured before the submit click');
+  } else {
+    if (inputStage.dom.value !== directive) {
+      missing.push('the input-stage screenshot did not show the submitted directive');
+    }
+    if (inputStage.dom.visible !== true || !inputStage.dom.bbox
+      || inputStage.dom.bbox.width <= 0 || inputStage.dom.bbox.height <= 0) {
+      missing.push('the input-stage directive control was not visible with a positive layout box');
+    }
+    if (inputStage.dom.secondConfirmationControls !== 0) {
+      missing.push(`the input stage rendered ${inputStage.dom.secondConfirmationControls} second-confirmation control(s)`);
+    }
+    if (inputStage.dom.submitEnabled !== true) {
+      missing.push('the input-stage submit control was not enabled');
+    }
+  }
+  const requirementReceipt = binding.requirementReceipt ?? null;
+  if ((binding.entry ?? 'dashboard') === 'dashboard') {
+    if (!requirementReceipt?.requirementId
+      || typeof requirementReceipt.draftId !== 'string'
+      || !Number.isInteger(requirementReceipt.inputRevision)) {
+      missing.push('the confirmation response did not identify the submitted requirement (requirementId/draftId/inputRevision)');
+    } else {
+      const confirmationRequest = binding.confirmationRequest ?? null;
+      if (!confirmationRequest) {
+        missing.push('the confirmation request body was not captured');
+      } else if (confirmationRequest.draftId !== requirementReceipt.draftId
+        || confirmationRequest.inputRevision !== requirementReceipt.inputRevision) {
+        missing.push(
+          `the confirmation request (draft ${JSON.stringify(confirmationRequest.draftId)}, `
+          + `revision ${JSON.stringify(confirmationRequest.inputRevision)}) does not match the returned requirement identity `
+          + `(draft ${JSON.stringify(requirementReceipt.draftId)}, revision ${JSON.stringify(requirementReceipt.inputRevision)})`,
+        );
+      }
+    }
+  }
+
+  // Source identity: re-capture the candidate source at the end of the run and
+  // compare it with the start capture. The receipt only binds this exact
+  // candidate when every run-affecting input is identical at both captures.
+  const sourceIdentity = await finalizeSourceIdentity(binding);
+  if (sourceIdentity.stable !== true) {
+    missing.push(`candidate source identity changed during the run: ${sourceIdentity.changedPaths.join(', ') || 'unknown input'}`);
+  }
+
   evidence.scenarioEvidence = {
     directive,
     marker,
@@ -303,6 +371,31 @@ export async function runLocalFileSearchScenario(binding) {
     checkpoint: dashboard.checkpoint ?? null,
     toolRounds: turnEvidence?.toolRounds ?? 0,
     requestStartTurns: turnEvidence?.requestStartTurns ?? 0,
+    inputStage: inputStage
+      ? {
+          entry: inputStage.entry,
+          url: inputStage.url,
+          directive: inputStage.directive,
+          screenshot: inputStage.screenshot,
+          capturedAt: inputStage.capturedAt,
+          dom: inputStage.dom,
+        }
+      : null,
+    confirmation: {
+      status: binding.confirmStatus ?? null,
+      request: binding.confirmationRequest ?? null,
+      requestUrl: binding.confirmationRequestUrl ?? null,
+      responseStatus: binding.confirmationResponseStatus ?? null,
+      requirement: requirementReceipt,
+      interactionId: binding.explicitInteractionId ?? null,
+    },
+    sourceIdentity: {
+      stable: sourceIdentity.stable,
+      changedPaths: sourceIdentity.changedPaths,
+      sidecarPath: binding.sourceIdentityPath ?? null,
+      start: compactSourceIdentity(sourceIdentity.start),
+      end: compactSourceIdentity(sourceIdentity.end),
+    },
     searchCalls: searchCalls.map(pickEvent),
     searchResults: searchResults.map(pickEvent),
     readCalls: readCalls.map(pickEvent),
@@ -507,6 +600,9 @@ async function runRequestedNonSuccess(binding) {
     operationId: dashboard.operationId ?? null,
     executionEpoch: dashboard.executionEpoch ?? null,
   };
+  // The same start/end source identity as the success path: a non-success
+  // receipt must also prove it belongs to this exact candidate revision.
+  const sourceIdentity = await finalizeSourceIdentity(binding);
   evidence.scenarioEvidence = {
     directive,
     requestedOutcome: outcome,
@@ -519,6 +615,18 @@ async function runRequestedNonSuccess(binding) {
     executionEpoch: dashboard.executionEpoch ?? null,
     stopResponse,
     terminalIds,
+    confirmation: {
+      status: binding.confirmStatus ?? null,
+      request: binding.confirmationRequest ?? null,
+      requirement: binding.requirementReceipt ?? null,
+    },
+    sourceIdentity: {
+      stable: sourceIdentity.stable,
+      changedPaths: sourceIdentity.changedPaths,
+      sidecarPath: binding.sourceIdentityPath ?? null,
+      start: compactSourceIdentity(sourceIdentity.start),
+      end: compactSourceIdentity(sourceIdentity.end),
+    },
     outputPreview: String(dashboard.output ?? '').slice(0, 1600),
     toolRounds: turnEvidence?.toolRounds ?? 0,
     requestStartTurns: turnEvidence?.requestStartTurns ?? 0,
@@ -567,6 +675,33 @@ async function waitForExecutionIdentity(binding, timeoutMs = Number(process.env.
     }
     await sleep(250);
   }
+}
+
+/**
+ * Assert the real input stage and capture it before the single submit click.
+ *
+ * The screenshot only exists when the served entry really shows the filled
+ * directive: `assertEntryInputStage` first proves the URL, the visible directive
+ * value, its layout box, the required attribute, the enabled submit control and
+ * the absence of any second confirmation control. A failed precondition throws,
+ * so the runner records the deviation instead of a green input stage.
+ */
+async function captureInputStage(binding, directive, stage) {
+  const dom = await assertEntryInputStage(binding, {
+    entry: stage.entry,
+    inputSelector: stage.inputSelector,
+    directive,
+  });
+  const screenshot = await captureScreenshot(binding, '01-input-before-submit');
+  binding.inputStage = {
+    entry: stage.entry,
+    url: dom.url,
+    directive,
+    dom,
+    screenshot,
+    capturedAt: new Date().toISOString(),
+  };
+  return binding.inputStage;
 }
 
 function pickEvent(event) {

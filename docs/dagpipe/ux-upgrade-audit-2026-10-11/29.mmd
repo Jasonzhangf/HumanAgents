@@ -1,0 +1,20 @@
+flowchart TB
+ A[对话入口<br/>用途：说需求、得到答案<br/>显示：问题、回答、必要追问]:::derived
+ B[任务总览<br/>用途：找到需要关注的事<br/>显示：目标、状态、必要行动、结果入口]:::derived
+ C[任务详情<br/>用途：理解并处理这一件事<br/>显示：当前工作、已有结果、影响与下一步]:::derived
+ D[处理经过<br/>用途：理解结论和方案变化<br/>显示：真实步骤、原因、阶段回顾]:::derived
+ E[资料与证据<br/>用途：查成果、核对依据<br/>显示：名称、摘要、关联结论、内容]:::derived
+ F[技术记录<br/>用途：定位实现问题<br/>仅明确要求时打开]:::evidence
+ A -->|存在复杂任务或主动查看| B
+ B -->|打开某件事| C
+ C -->|需要解释过程| D
+ C -->|直接取得成果或核对| E
+ D -->|查看对应依据| E
+ E -.->|明确需要技术诊断| F
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

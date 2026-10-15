@@ -1,0 +1,19 @@
+flowchart TB
+ I[当前真实状态与已确认结果]:::truth
+ A[处理中<br/>显示正在做什么与已得到什么<br/>没有成果时不放空成果栏]:::derived
+ D[需要决定<br/>显示原因、影响与必要选项<br/>不把决定埋在过程里]:::derived
+ P[暂停或结果未确认<br/>说明已知影响、未知部分与可用下一步]:::derived
+ Z[已完成<br/>成果优先，过程按需查看<br/>不再显示进行中动画]:::derived
+ S[新进展暂不可读<br/>保留上次内容并说明尚未更新]:::derived
+ I -->|有实际活动| A
+ I -->|确需用户决定| D
+ I -->|暂停／未知| P
+ I -->|真实完成| Z
+ I -->|读取失败／过期| S
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

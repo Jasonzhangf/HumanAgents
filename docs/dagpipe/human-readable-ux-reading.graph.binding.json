@@ -1,0 +1,40 @@
+{
+  "graph": "humanagent-human-readable-ux-reading",
+  "operator": {
+    "operator": "humanagent-human-readable-ux-reading",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-UNVERIFIED",
+  "nodes": {
+    "truth": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "读取同范围真实事实与责任"
+    },
+    "semantic": {
+      "ownerPath": "packages/context-events/src/index.ts",
+      "ownerRel": "packages/context-events/src/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "复用共同语义与来源"
+    },
+    "purpose": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "按当前阅读用途组织展示投影"
+    },
+    "necessary": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "仅保留当前必要内容与合法操作"
+    },
+    "present": {
+      "ownerPath": "packages/ui/index.ts",
+      "ownerRel": "packages/ui/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "共享控件人类可读呈现并按需展开"
+    }
+  }
+}
