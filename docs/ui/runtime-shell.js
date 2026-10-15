@@ -1246,12 +1246,9 @@ function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) 
 // document only ever has one open shell layer: opening the detail closes any other open layer,
 // and closing it returns focus to the trigger.
 let technicalDetailLayer = null
-// Opening the technical detail from inside another shell layer (for example the
-// records/history host in the configuration drawer) replaces that layer instead
-// of leaving it. The replaced layer's own close handler must keep its read alive,
-// so the handoff is recorded here and consumed by the one handler that owns that
-// layer's leave cleanup. A user close or section switch never records a handoff.
-const shellLayerHandoffs = new WeakSet()
+// Register the drawer's lifetime owner before any handoff. The technical frame
+// retains that same owner until the replacement layer actually leaves.
+const shellLayerLeaves = new WeakMap()
 // `content` lets a page module host its own read-only drill-down (for example the
 // shared agent-activity detail) in this same shell layer. Either way the layer stays
 // the one desktop side panel / mobile bottom drawer: the header, close button, single
@@ -1265,13 +1262,23 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
       titleId: 'technical-detail-title',
     })
     frame.layer.dataset.technicalDetail = 'true'
+    frame.layer.addEventListener('close', () => {
+      // A queued close from an earlier opening cannot close a reopened frame.
+      if (!frame.layer.open) closeTechnicalDetailLayer()
+    })
     document.body.append(frame.layer)
     technicalDetailLayer = frame
   }
   const { layer, title: titleNode, body, close } = technicalDetailLayer
+  if (!technicalDetailLayer.active) {
+    technicalDetailLayer.returnFocus = document.activeElement
+    technicalDetailLayer.active = true
+  }
+  technicalDetailLayer.onClose = onClose
   for (const openLayer of document.querySelectorAll('dialog.shell-layer[open]')) {
     if (openLayer !== layer) {
-      shellLayerHandoffs.add(openLayer)
+      // Transfer before close() queues the drawer's native close event.
+      technicalDetailLayer.leaveDrawer = shellLayerLeaves.get(openLayer)
       openLayer.close()
     }
   }
@@ -1294,14 +1301,24 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
     body.append(list)
   }
   if (footer) body.append(element('p', footer))
-  const opener = document.activeElement
-  layer.addEventListener('close', () => {
-    if (typeof onClose === 'function') onClose()
-    if (opener && opener.isConnected) opener.focus()
-  }, { once: true })
   if (!layer.open) layer.showModal()
   close.focus()
   return layer
+}
+
+// Native close, section changes and page leave all consume this one lifetime.
+// Clear ownership before callbacks, which can themselves close the same dialog.
+function closeTechnicalDetailLayer() {
+  if (!technicalDetailLayer?.active) return
+  const { layer, onClose, leaveDrawer, returnFocus } = technicalDetailLayer
+  technicalDetailLayer.active = false
+  technicalDetailLayer.onClose = null
+  technicalDetailLayer.leaveDrawer = null
+  technicalDetailLayer.returnFocus = null
+  if (layer.open) layer.close()
+  if (typeof onClose === 'function') onClose()
+  if (leaveDrawer) leaveDrawer()
+  else if (returnFocus?.isConnected && !returnFocus.closest('dialog:not([open]), [hidden]')) returnFocus.focus()
 }
 
 // A contextual trigger for the technical-detail layer. It is not a global configuration
@@ -1489,6 +1506,7 @@ export function mountShellLayer(context = {}) {
   let returnFocus = null
   let currentContext = { ...context }
   let openPanelId = null
+  let drawerReadsActive = false
   let displayController = null
   let displayUnsubscribe = null
   let draftDefault = null
@@ -1576,6 +1594,7 @@ export function mountShellLayer(context = {}) {
         back.type = 'button'
         back.addEventListener('click', backToView)
         actions.replaceChildren(back)
+        drawerReadsActive = true
         void run()
       }
       for (const [view, label] of [
@@ -1714,9 +1733,11 @@ export function mountShellLayer(context = {}) {
   function open(id) {
     const item = SHELL_SECTIONS.find((entry) => entry.id === id)
     if (!item) return
+    closeTechnicalDetailLayer()
     leaveDrawerReads()
     returnFocus = triggers.get(id) || null
     openPanelId = id
+    drawerReadsActive = true
     title.textContent = item.title
     for (const [key, section] of panels) {
       section.hidden = key !== id
@@ -1730,26 +1751,34 @@ export function mountShellLayer(context = {}) {
   // read that belonged to the departed level, so a late response cannot publish
   // into a level the user already left.
   function leaveDrawerReads() {
+    if (!drawerReadsActive) return
+    drawerReadsActive = false
     currentContext.capabilities?.onLeaveRecords?.()
     currentContext.capabilities?.onLeaveHistory?.()
   }
 
-  // Return/close restores focus to the triggering corner when that button still exists.
-  layer.addEventListener('close', () => {
-    // A handoff to another shell layer (the technical detail) replaced this
-    // layer instead of leaving its level. Keep the records/history read alive so
-    // the replaced level can still be rendered and returned to; only a real user
-    // close or section switch runs the leave cleanup below.
-    if (shellLayerHandoffs.has(layer)) {
-      shellLayerHandoffs.delete(layer)
-      return
-    }
-    leaveDrawerReads()
+  // Return/close restores focus to the visible corner, including after a detail
+  // handoff where the original opener now belongs to the closed drawer.
+  function leaveDrawer() {
+    if (openPanelId === null) return
     openPanelId = null
+    if (layer.open) layer.close()
+    leaveDrawerReads()
     const target = returnFocus
     returnFocus = null
     for (const section of panels.values()) section.hidden = true
     if (target && target.isConnected) target.focus()
+  }
+  shellLayerLeaves.set(layer, leaveDrawer)
+  layer.addEventListener('close', () => {
+    // The technical frame owns the departed drawer until its final close. A
+    // queued close also cannot tear down a section that has already reopened.
+    if (layer.open || technicalDetailLayer?.leaveDrawer === leaveDrawer) return
+    leaveDrawer()
+  })
+  window.addEventListener('pagehide', () => {
+    closeTechnicalDetailLayer()
+    leaveDrawer()
   })
   for (const [id, button] of triggers) button.addEventListener('click', () => open(id))
 
