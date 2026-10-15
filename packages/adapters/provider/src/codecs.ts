@@ -871,7 +871,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
         context.responsesCurrentResponseId?.set('current', responseId);
-        const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`)];
+        const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`, response)];
         const marked = context.responsesRequestStartEmitted.get(responseId);
         if (marked) return { events: [] };
         context.responsesRequestStartEmitted.set(responseId, true);

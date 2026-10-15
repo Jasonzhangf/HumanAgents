@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -834,6 +834,54 @@ test('responses wire shape uses nested response id and real tool parameters', as
     parameters: { type: 'object', properties: { key: { type: 'string' } } },
   };
   assert.deepEqual(toolSchema.parameters.properties, { key: { type: 'string' } });
+});
+
+test('provider adapter keeps response-reported model evidence distinct from the request model', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-attribution-'));
+  try {
+    const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(root));
+    let requestedModel: string | undefined;
+    const transport = makeTransport(ccBinding, {
+      start: async (_input, request) => {
+        requestedModel = request.model;
+        return startReceipt(ccBinding);
+      },
+      observe: async function* () {
+        yield { protocol: 'responses', type: 'response.created', response: { id: 'response-observed', model: 'model-observed' } };
+        yield { protocol: 'responses', type: 'response.in_progress', response: { id: 'response-model-unconfirmed' } };
+      },
+    });
+    const adapter = new ProviderAdapter({
+      binding: ccBinding,
+      routeRef: 'cc-route',
+      codec: new ResponsesProviderCodec(),
+      transport,
+      evidence: sink,
+    });
+
+    await adapter.start(startInput());
+    const observed: ProviderEvent[] = [];
+    for await (const event of adapter.observe(execution())) observed.push(event);
+
+    assert.equal(requestedModel, 'model-cc');
+    const reported = observed.find((event) => event.externalResponseId === 'response-observed');
+    const unconfirmed = observed.find((event) => event.externalResponseId === 'response-model-unconfirmed');
+    assert.ok(reported);
+    assert.ok(unconfirmed);
+
+    const reportedContent = JSON.parse(new TextDecoder().decode(await sink.read(reported.evidenceRefs[0]))) as Record<string, unknown>;
+    assert.deepEqual(reportedContent, { id: 'response-observed', model: 'model-observed' });
+    assert.notEqual(reportedContent.model, requestedModel);
+    assert.deepEqual(reported.evidenceRefs[0].scope, operationScope);
+
+    const unconfirmedContent = JSON.parse(new TextDecoder().decode(await sink.read(unconfirmed.evidenceRefs[0]))) as Record<string, unknown>;
+    assert.deepEqual(unconfirmedContent, { id: 'response-model-unconfirmed' });
+    assert.equal('model' in unconfirmedContent, false);
+    assert.notEqual(unconfirmedContent.model, requestedModel);
+    assert.deepEqual(unconfirmed.evidenceRefs[0].scope, operationScope);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('anthropic codec maps terminal, tool, and error wire events', async () => {
