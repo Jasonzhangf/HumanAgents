@@ -45,7 +45,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 已批准 MVP 实现代码在 `packages/`、`tests/`；当前阶段已经进入 runtime 实现。
 - 未获批准的 DSH adapter、SQLite、vector/RAG、daemon 和生产部署能力不得作为 MVP 放行结果声称。
 - DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。
-- 后续实现必须在 `playground/<task>` 下的独立 clean worktree 中进行。
+- 后续实现必须在 `/Volumes/Intel/playground/humanagent/<task>` 下的独立 clean worktree 中进行，并遵守全局 AGENTS L2 的 **Worktree SESE 先关后开生命周期与存量治理规则**（严禁在仓库内新建 `<repo>/playground/<task>`）。
 
 ## Git 交付流程
 
@@ -61,7 +61,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 具体 feature/debug/重构/迁移/清理任务必须拆分给 peer 执行；master 只做目标拆解、
   依赖判定、派发、证据验收、集成裁决和最终验收，不亲自实现 peer-owned concrete task。
 - 全局规则提供原则，本项目规则提供 HumanAgent 的执行细节；不得把项目细节反向当作全局规则。
-- peer 写入必须在 `playground/<task>` 独立 clean worktree 完成；docs-only 快速路径除外，
+- peer 写入必须在 `/Volumes/Intel/playground/humanagent/<task>` 独立 clean worktree 完成；docs-only 快速路径除外，
   但仍保留已有 dirty 状态。
 - 每个 peer 任务必须写明入口、唯一 owner、allowed/forbidden paths、交付物、测试命令、
   E2E/manual 验证、review 条件和资源清理条件。
@@ -69,8 +69,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
   独立 review PASS、清理列表和剩余风险。READ IS NOT DONE；测试和 review 是 gate，不是建议。
 - master 合并前必须 fetch 最新 `origin/main`，确认候选已组合到最新 main 并重跑受影响验证；
   若当前 main 有大量 dirty 或未归属候选，先派 audit/classification 任务，不得直接提交。
-- 资源清理是终点生命周期：只核销 owner 明确、已确认 stale 且本任务可负责的资源；清理失败必须
-  报告原因并标记 `INCOMPLETE`，不得静默跳过或清理他人资源。
+- 资源清理是终点生命周期：遵循全局 [`worktree-lifecycle.graph.json`](/Users/fanzhang/.agents/skills/codex-orchestrator/references/worktree-lifecycle.graph.json) 与 [交付合同：Worktree SESE 生命周期](/Users/fanzhang/.agents/skills/codex-orchestrator/references/delivery-contract.md#worktree-sese-生命周期与资源单源单汇)（先关旧树再开新树、唯一集成分支合流、存量四分类核销）；清理失败必须报告原因并标记 `INCOMPLETE`，不得静默跳过或清理他人资源。
 
 ## 已批准 MVP 交付门禁
 
@@ -79,4 +78,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 3. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
 4. Provider 直连路径必须通过 fake contract、Responses/Anthropic 录制 replay 和真实 RCC 4444 同入口；DSH bridge 在此基础上另行通过真实 DSH 同入口。只有声称 Provider+DSH 组合交付时，四层证据才必须同时齐全；单一 TypeScript 编译不算任一路径接入完成。
 5. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。
-6. Dashboard 输入、确认、turn 展示和结果展示的浏览器验收与清理统一按 [`docs/ui/dashboard-e2e-acceptance.md`](docs/ui/dashboard-e2e-acceptance.md) 执行；缺任一真实任务 receipt 或资源清理核对时标记 `INCOMPLETE`。
+6. Dashboard 输入、确认、turn 展示和结果展示的浏览器验收与清理统一按 [`docs/ui/dashboard-e2e-acceptance.md`](docs/ui/dashboard-e2e-acceptance.md) 执行；本次变更适用的真实任务 receipt 或资源清理核对缺失时标记 `INCOMPLETE`。
+7. 测试按最小充分性选择。每项测试必须对应需求/不变量、具体失败模式和应失败断言，并以已有红测或可执行反例说明抓错能力；未验证的能力标 `UNVERIFIED`。证据足够即停止，不按数量、覆盖率或场景类别扩面。
+8. 新增测试前记录失败可能性的依据（允许为 `未知`）、失败影响、执行和维护成本；没有这些理由不新增测试。测试/review 必须直接服务于本次改动的验收。
+9. MVP 首版优先功能完整。保留内存、资源与业务正确性所需约束，以及产品身份和 task-scoped 授权；不为传输安全增加或保留 TLS、Origin/CSRF、cookie 安全标志、远端访问拒绝或 supervisor loopback-only 限制及其专属测试。
