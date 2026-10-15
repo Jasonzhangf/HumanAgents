@@ -13,7 +13,7 @@
 import { chmod, open as openFile, readFile, rename, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ensureControlLayout, parseToml, validateUserConfig, type RuntimePaths } from './index.js';
-import { validateUiDisplayPreference, type UiDisplayPreference } from './ui-preferences.js';
+import { DEFAULT_UI_DISPLAY_PREFERENCE, validateUiDisplayPreference, type UiDisplayPreference } from './ui-preferences.js';
 
 const UI_DISPLAY_HEADER = '[ui.display]';
 
@@ -64,6 +64,21 @@ function withUiDisplayTable(text: string, preference: UiDisplayPreference): stri
   return text.endsWith('\n') && !body.endsWith('\n') ? `${body}\n` : body;
 }
 
+/**
+ * Remove the `[ui.display]` table from `text` and keep every unrelated byte.
+ * The table ends at the next TOML table header, so its keys and comments go
+ * with it while later sections stay intact.
+ */
+function withoutUiDisplayTable(text: string): string {
+  const lines = text.split('\n');
+  const start = lines.findIndex((line) => stripComment(line).trim() === UI_DISPLAY_HEADER);
+  if (start === -1) return text;
+  let end = start + 1;
+  while (end < lines.length && !isTableHeader(lines[end])) end += 1;
+  const body = [...lines.slice(0, start), ...lines.slice(end)].join('\n');
+  return text.endsWith('\n') && !body.endsWith('\n') ? `${body}\n` : body;
+}
+
 async function replaceFileAtomically(filePath: string, contents: string): Promise<void> {
   let mode: number | undefined;
   try {
@@ -104,4 +119,21 @@ export async function saveUiDisplayPreference(
   validateUserConfig(parseToml(candidate));
   await replaceFileAtomically(configPath, candidate);
   return saved;
+}
+
+/**
+ * Remove the persisted display preference from the control-root `config.toml`.
+ *
+ * The candidate is validated before the existing atomic replacement runs.
+ * An absent table is a successful no-op. On any failure the previous file and
+ * preference stay in place and the error is surfaced to the caller.
+ */
+export async function resetUiDisplayPreference(paths: RuntimePaths): Promise<UiDisplayPreference> {
+  await ensureControlLayout(paths);
+  const configPath = join(paths.controlRoot, 'config.toml');
+  const current = await readFile(configPath, 'utf8');
+  const candidate = withoutUiDisplayTable(current);
+  validateUserConfig(parseToml(candidate));
+  if (candidate !== current) await replaceFileAtomically(configPath, candidate);
+  return DEFAULT_UI_DISPLAY_PREFERENCE;
 }
