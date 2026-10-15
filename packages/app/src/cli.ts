@@ -60,10 +60,15 @@ import {
 } from './entry-composition.js';
 import { createCordisHost } from './cordis-host.js';
 import { readDaemonLease, runSupervisorStartup, waitForDaemonLeaseHandoff, type SupervisorStartup } from './supervisor/supervisor.js';
-import { requestDaemonRestart } from './supervisor/restart-client.js';
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  captureLoadedSourceReceipt,
+  restartDaemonWithCodeHandoff,
+  startDaemonCodeHandoff,
+  type DaemonCodeHandoff,
+  type SupervisorStartupDeclaration,
+} from './supervisor/restart-client.js';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,9 +130,61 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
   '--workspace',
 ]);
 
+const SERVE_STARTUP_OPTIONS: ReadonlySet<string> = new Set([
+  '--binding',
+  '--capability-digest',
+  '--config-digest',
+  '--control-root',
+  '--endpoint',
+  '--fake-scenario',
+  '--fake-step-delay-ms',
+  '--host',
+  '--max-tokens',
+  '--mode',
+  '--model',
+  '--port',
+  '--protocol',
+  '--provider',
+  '--rcc-base-url',
+  '--route',
+  '--ui-root',
+  '--workspace',
+]);
+
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index === -1 ? undefined : args[index + 1];
+}
+
+function startupOptionMap(args: readonly string[]): Map<string, string> {
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index]!;
+    if (!SERVE_STARTUP_OPTIONS.has(name)) continue;
+    const value = args[index + 1];
+    if (value === undefined) continue;
+    values.set(name, value);
+    index += 1;
+  }
+  return values;
+}
+
+function mergeStartupArgs(base: readonly string[], overrides: readonly string[]): readonly string[] {
+  const merged = startupOptionMap(base);
+  for (const [name, value] of startupOptionMap(overrides)) merged.set(name, value);
+  return [...merged.entries()].flatMap(([name, value]) => [name, value]);
+}
+
+function assertLegacyRestartOptions(args: readonly string[]): void {
+  const values = startupOptionMap(args);
+  const missing = ['--provider', '--port'].filter((name) => !values.has(name));
+  if (missing.length === 0) return;
+  throw new AppLifecycleError(
+    'daemon-restart.startup-incomplete',
+    `legacy serve owner has no startup declaration; missing explicit restart input: ${missing.join(', ')}`,
+    'retry restart with the original serve startup options, including --provider and --port',
+    'humanagent.app.serve',
+  );
 }
 
 function helpRequested(args: readonly string[]): boolean {
@@ -178,6 +235,32 @@ function packageVersion(): string {
     current = parent;
   }
   return '0.1.0';
+}
+
+async function currentStartupDeclaration(
+  args: readonly string[],
+  baseArgs: readonly string[] = [],
+): Promise<SupervisorStartupDeclaration> {
+  const entryPath = fileURLToPath(import.meta.url);
+  let launcherPath = entryPath;
+  if (process.argv[1]) {
+    try {
+      launcherPath = realpathSync(process.argv[1]);
+    } catch {
+      // Keep the loaded module path when the launcher path is no longer present.
+    }
+  }
+  const releaseVersion = process.env.HUMANAGENT_RELEASE_VERSION?.trim();
+  return {
+    launcherPath,
+    cwd: process.cwd(),
+    args: mergeStartupArgs(baseArgs, args),
+    source: await captureLoadedSourceReceipt({
+      entryPath,
+      packageVersion: packageVersion(),
+      ...(releaseVersion === undefined || releaseVersion.length === 0 ? {} : { releaseVersion }),
+    }),
+  };
 }
 
 function defaultUiRoot(): string {
@@ -642,7 +725,7 @@ function helpText(): string {
     '  --provider <name>        provider（默认读取 ~/.humanagent/config.toml）',
     '  --port <number>          WebUI 端口（默认 10086）',
     '  --protocol <name>        responses、openai 或 anthropic',
-    '  humanagent restart       请求原 serve owner 重启；当前 CLI 只观察，不接管显示',
+    '  humanagent restart       使用原 serve owner 的启动声明完成一次代码交接',
     '  --help                   显示帮助',
     '  --json                   以机器可读 JSON 输出错误',
     '',
@@ -1282,8 +1365,22 @@ export async function main(args: readonly string[]): Promise<void> {
   if (command === 'restart') {
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
-    const receipt = await requestDaemonRestart(paths, paths.webAccessCredentialPath);
-    console.log(JSON.stringify({ command, ...receipt }, null, 2));
+    const lease = await readDaemonLease(paths);
+    if (lease === undefined || lease.ownerId !== 'humanagent.app.serve' || lease.disposedAt) {
+      throw new AppLifecycleError(
+        'daemon-restart.owner-missing',
+        'no active serve owner was found for this workspace',
+        'start humanagent serve before requesting restart',
+        'humanagent.app.serve',
+      );
+    }
+    if (lease.startup === undefined) assertLegacyRestartOptions(args.slice(1));
+    const startup = await currentStartupDeclaration(args.slice(1), lease.startup?.args ?? []);
+    const completion = await restartDaemonWithCodeHandoff(paths, {
+      expected: lease,
+      startup,
+    });
+    console.log(JSON.stringify({ command, ...completion }, null, 2));
     return;
   }
   if (command === 'pair') {
@@ -1471,17 +1568,11 @@ export async function main(args: readonly string[]): Promise<void> {
     }
     const cordisHost = createCordisHost(plugins);
     cordisHost.assertLoadedPlugins(SERVE_COMPOSITION_PLUGINS[mode].map((plugin) => plugin.pluginId));
+    const startup = await currentStartupDeclaration(args);
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
     let serveRuntime: ServeRuntimeComposition | undefined;
     let supervisor: SupervisorStartup | undefined;
-    let restartInFlight: { readonly requestId: string; readonly receipt: {
-      readonly requestId: string;
-      readonly acceptedAt: string;
-      readonly ownerId: 'humanagent.app.serve';
-      readonly leaseId: string;
-      readonly generation: number;
-      readonly observerOnly: true;
-    }; readonly operation: Promise<void> } | undefined;
+    let restartInFlight: DaemonCodeHandoff | undefined;
     const requestRestart = (input: { readonly leaseId: string; readonly generation: number }) => {
       if (supervisor === undefined) {
         throw new AppLifecycleError(
@@ -1501,38 +1592,27 @@ export async function main(args: readonly string[]): Promise<void> {
         );
       }
       if (restartInFlight !== undefined) return restartInFlight.receipt;
-      const requestId = randomUUID();
-      const receipt = {
-        requestId,
-        acceptedAt: new Date().toISOString(),
-        ownerId: 'humanagent.app.serve' as const,
-        leaseId: activeLease.leaseId,
-        generation: activeLease.generation,
-        observerOnly: true as const,
-      };
-      const operation = new Promise<void>((resolve) => {
-        setTimeout(() => {
-          void (async () => {
-            console.log(JSON.stringify({ event: 'restart.stopping', ...receipt }, null, 2));
-            try {
-              const restarted = await supervisor!.restart();
-              if (!runtime) throw new AppLifecycleError('daemon-restart.runtime-missing', 'serve restart completed without a UI runtime', 'inspect the original serve CLI startup failure', 'humanagent.app.serve');
-              await supervisor!.lease.setControlEndpoint(controlEndpointFor(host, runtime.server.port));
-              console.log(JSON.stringify({ event: 'restart.ready', ...receipt, readyAt: restarted.readyAt, url: displayOrigin({ listenAddress: runtime.server.listenAddress, port: runtime.server.port }) }, null, 2));
-            } catch (error) {
-              console.error(JSON.stringify({ event: 'restart.failed', ...receipt, error: cliErrorPayload(error) }, null, 2));
-            } finally {
-              resolve();
-            }
-          })();
-        }, 0);
+      if (activeLease.startup === undefined) {
+        throw new AppLifecycleError(
+          'daemon-restart.startup-missing',
+          'the active serve owner did not publish a restart startup declaration',
+          'restart through the official CLI with the original serve startup options',
+          'humanagent.app.serve',
+        );
+      }
+      const handoff = startDaemonCodeHandoff(paths, {
+        expected: activeLease,
+        startup: activeLease.startup,
       });
-      restartInFlight = { requestId, receipt, operation };
-      void operation.finally(() => {
-        if (restartInFlight?.requestId === requestId) restartInFlight = undefined;
+      restartInFlight = handoff;
+      const requestId = handoff.receipt.requestId;
+      void handoff.completion.catch((error: unknown) => {
+        console.error(JSON.stringify({ event: 'restart.failed', ...handoff.receipt, error: cliErrorPayload(error) }, null, 2));
+      }).finally(() => {
+        if (restartInFlight?.receipt.requestId === requestId) restartInFlight = undefined;
       });
-      console.log(JSON.stringify({ event: 'restart.accepted', ...receipt }, null, 2));
-      return receipt;
+      console.log(JSON.stringify({ event: 'restart.accepted', ...handoff.receipt }, null, 2));
+      return handoff.receipt;
     };
     const orchestrationPorts = mode === 'fake'
       ? createDeterministicServeOrchestrationPorts()
@@ -1693,6 +1773,7 @@ export async function main(args: readonly string[]): Promise<void> {
     ], {
       lease: {
         ownerId: 'humanagent.app.serve',
+        startup,
         takeover: {
           reason: 'new hm serve process takes over the previous daemon',
           stop: {},
@@ -1707,17 +1788,31 @@ export async function main(args: readonly string[]): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;
       const previousLease = supervisor!.lease.record;
-      void supervisor!.dispose().catch(async (error: unknown) => {
-        // A transition guard alone is not a handoff receipt. Suppress this
-        // expected race only after the replacement lease is durable and live.
-        if (
-          error instanceof AppLifecycleError
-          && error.code === 'daemon-lease-transition-in-progress'
-          && await waitForDaemonLeaseHandoff(paths, previousLease)
-        ) return;
-        console.error(formatCliError(error, process.argv.slice(2)));
-        process.exitCode = 1;
-      });
+      void supervisor!.dispose()
+        .then((receipt) => {
+          if (!receipt.cleanupFailure) return;
+          console.error(formatCliError(
+            new AppLifecycleError(
+              'supervisor-dispose.cleanup-failed',
+              receipt.cleanupFailure.message,
+              'repair the failed stage disposal before relying on the released daemon lease',
+              receipt.cleanupFailure.ownerId,
+            ),
+            process.argv.slice(2),
+          ));
+          process.exitCode = 1;
+        })
+        .catch(async (error: unknown) => {
+          // A transition guard alone is not a handoff receipt. Suppress this
+          // expected race only after the replacement lease is durable and live.
+          if (
+            error instanceof AppLifecycleError
+            && error.code === 'daemon-lease-transition-in-progress'
+            && await waitForDaemonLeaseHandoff(paths, previousLease)
+          ) return;
+          console.error(formatCliError(error, process.argv.slice(2)));
+          process.exitCode = 1;
+        });
     };
     const signalProcess = process as unknown as { once(signal: string, listener: () => void): void };
     signalProcess.once('SIGTERM', shutdown);
