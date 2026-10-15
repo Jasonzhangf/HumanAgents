@@ -32,13 +32,25 @@ import {
   type RequirementEnvelope,
   type WorkAssignment,
   type WorkResult,
+  canonicalJsonStringify,
   validateProviderEvent,
+  type PublicOutputBinding,
+  type PublicOutputCandidate,
+  type PublicOutputJournalPort,
+  type PublicOutputPublication,
 } from '../../../contracts/src/index.js';
+import {
+  bindAssignmentDelivery,
+  type StandardTurnDeliveryBinding,
+  type StandardTurnDeliveryReadback,
+} from './standard-turn-delivery.js';
 import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
-import type { CommittedCheckpointRecord } from '../checkpoints/ports.js';
+import type { CommittedCheckpointRecord, LatestCheckpointRecord } from '../checkpoints/ports.js';
 import type { AdvanceTurnResult } from '../agent-loop/runtime.js';
+import { selectRuntimeTaskCurrentState } from './current-state.js';
 import type { RuntimeTaskCurrentState, RuntimeTaskCurrentStateFacts, RuntimeTaskCurrentStateFactsPort,
-  RuntimeTaskCurrentStatePort, RuntimeTaskProcessingState, RuntimeTaskCurrentPlan } from './current-state.js';
+  RuntimeTaskCurrentStatePort, RuntimeTaskCurrentStateRead, RuntimeTaskCurrentStateSelection,
+  RuntimeTaskProcessingState, RuntimeTaskCurrentPlan } from './current-state.js';
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { InteractionClosureRecord } from '../checkpoints/closure.js';
@@ -192,6 +204,9 @@ export interface RuntimeTaskSnapshot {
   readonly currentNode: string;
   readonly operationId?: string;
   readonly executionEpoch?: number;
+  readonly cycleId?: string;
+  /** Rebuildable committed public-output projection for the current operation/epoch. */
+  readonly publicOutput?: PublicOutputPublication;
   readonly orchestrated: boolean;
   readonly allowedActions: readonly string[];
   readonly recentEvents: readonly RuntimeTaskEvent[];
@@ -230,6 +245,13 @@ export interface RuntimeExecutionDriver extends AgentDriver {
     acceptReviews(refs: readonly JournalCommitRef[]): Promise<void>;
     readCheckpoint(): Promise<CommittedCheckpointRecord>;
     align(): Promise<AdvanceTurnResult>;
+    /**
+     * Reads the accepted standard-end delivery bundle for the retained
+     * assignment. Native succeeded-result assembly requires this capability;
+     * a missing reader is an explicit stop, never a fallback to operation refs
+     * or drain text.
+     */
+    readDelivery?(): Promise<StandardTurnDeliveryReadback>;
   };
 }
 
@@ -517,6 +539,7 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly currentStatePort?: RuntimeTaskCurrentStatePort;
   /** Actual AgentLoop and native-save facts; unknown never becomes an empty recovery. */
   readonly currentStateFacts?: RuntimeTaskCurrentStateFactsPort;
+  readonly publicOutputStoreFor?: (taskId: TaskId, cycleId: CycleId) => PublicOutputJournalPort;
   readonly hookRegistry?: AgentHookRegistry;
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
@@ -660,6 +683,7 @@ export interface TaskRecord {
   };
   events: RuntimeTaskEvent[];
   requestIdentity?: RuntimeTaskRequestIdentity;
+  publicOutput?: PublicOutputPublication;
   checkpoint?: Checkpoint;
   checkpointSeq: number;
   currentStateCommitRef?: JournalCommitRef;
@@ -780,6 +804,401 @@ function lifecycleStateLabel(state: LifecycleState): string {
   }
 }
 
+/**
+ * Mutable projection state rebuilt from task Journal records. It is the exact
+ * shape the coordinator's own replay writes, so a cold read-only consumer gets
+ * the same inventory and event identity rules without owning a lifecycle.
+ */
+export interface TaskJournalReplayState {
+  taskCounter: number;
+  operationCounter: number;
+  cycleCounter: number;
+  tasks: Map<string, TaskRecord>;
+  operations: Map<string, OperationRecord>;
+  scopes: Map<string, ScopeRef>;
+  deletedTaskIds: Set<string>;
+}
+
+/**
+ * Folds task Journal records into projection state. This is the replay rule a
+ * cold read-only reader reuses: it restores only identity, inventory, input,
+ * output and events. It never claims live running state and never writes.
+ */
+export function replayTaskJournalRecords(
+  state: TaskJournalReplayState,
+  records: readonly RuntimeTaskJournalRecord[],
+): void {
+  for (const record of records) {
+    switch (record.kind) {
+      case 'task.created': {
+        state.taskCounter = Math.max(state.taskCounter, record.taskCounter);
+        if (state.tasks.has(record.taskId.value)) break;
+        state.tasks.set(record.taskId.value, {
+          taskId: record.taskId,
+          title: record.title,
+          directive: record.directive,
+          directiveRevision: record.directiveRevision,
+          state: 'created',
+          currentState: '已创建',
+          nextStep: '选择模式并发起执行',
+          input: '',
+          output: '',
+          currentNode: RUNTIME_NODE_MARKERS.inputReceived,
+          createdAt: record.createdAt,
+          updatedAt: record.createdAt,
+          allowedActions: ['start'],
+          events: [],
+          checkpointSeq: 0,
+          orchestrated: false,
+          running: false,
+          stopping: false,
+        });
+        break;
+      }
+      case 'task.updated': {
+        const task = state.tasks.get(record.taskId.value);
+        if (task) {
+          task.title = record.title;
+          task.directive = record.directive;
+          task.directiveRevision = record.directiveRevision;
+          task.updatedAt = record.updatedAt;
+        }
+        break;
+      }
+      case 'task.deleted': {
+        state.deletedTaskIds.add(record.taskId.value);
+        state.tasks.delete(record.taskId.value);
+        break;
+      }
+      case 'operation.prepared': {
+        state.operationCounter = Math.max(state.operationCounter, record.operationCounter);
+        state.cycleCounter = Math.max(state.cycleCounter, record.cycleCounter);
+        const existing = state.operations.get(record.allocation.operationId.value);
+        if (existing && existing.allocation !== undefined) {
+          if (
+            existing.allocation.taskId.value !== record.allocation.taskId.value
+            || existing.allocation.operationId.value !== record.allocation.operationId.value
+            || existing.allocation.executionEpoch !== record.allocation.executionEpoch
+          ) {
+            throw new RuntimeTaskControlError(
+              'journal.corrupt',
+              RUNTIME_OWNER,
+              `journal prepared allocation ${record.allocation.operationId.value} does not match its first allocation`,
+              'repair or discard the UI runtime journal before restarting',
+            );
+          }
+          break;
+        }
+        const operation = existing ?? {
+          operationId: record.allocation.operationId,
+          taskId: record.allocation.taskId,
+          executionEpoch: record.allocation.executionEpoch,
+          input: record.input,
+          orchestrated: record.allocation.orchestrated,
+          events: [],
+          seq: 0,
+          allocation: record.allocation,
+        };
+        operation.allocation = record.allocation;
+        state.operations.set(operation.operationId.value, operation);
+        state.scopes.set(operation.operationId.value, record.allocation.scope);
+        const task = state.tasks.get(record.allocation.taskId.value);
+        if (task) {
+          task.allocation = record.allocation;
+          task.operationId = operation.operationId;
+          task.executionEpoch = operation.executionEpoch;
+          task.input = operation.input;
+          task.orchestrated = operation.orchestrated;
+          task.release = { state: 'prepared' };
+        }
+        break;
+      }
+      case 'operation.started': {
+        state.operationCounter = Math.max(state.operationCounter, record.operationCounter);
+        state.cycleCounter = Math.max(state.cycleCounter, record.cycleCounter);
+        const existing = state.operations.get(record.operationId.value);
+        if (
+          existing
+          && (existing.taskId.value !== record.taskId.value || existing.executionEpoch !== record.executionEpoch)
+        ) {
+          throw new RuntimeTaskControlError(
+            'journal.corrupt',
+            RUNTIME_OWNER,
+            `journal operation ${record.operationId.value} identity does not match its first start`,
+            'repair or discard the UI runtime journal before restarting',
+          );
+        }
+        const operation = existing ?? {
+          operationId: record.operationId,
+          taskId: record.taskId,
+          executionEpoch: record.executionEpoch,
+          input: record.input,
+          orchestrated: record.orchestrated === true,
+          events: [],
+          seq: 0,
+        };
+        state.operations.set(record.operationId.value, operation);
+        state.scopes.set(record.operationId.value, record.scope);
+        const startedTask = state.tasks.get(record.taskId.value);
+        if (startedTask) startedTask.cycleId = record.scope.cycleId;
+        break;
+      }
+      case 'operation.event': {
+        const operation = state.operations.get(record.operationId.value);
+        if (!operation) {
+          throw new RuntimeTaskControlError(
+            'journal.corrupt',
+            RUNTIME_OWNER,
+            `journal event ${record.event.eventId} references unknown operation ${record.operationId.value}`,
+            'repair or discard the UI runtime journal before restarting',
+          );
+        }
+        if (
+          record.event.operationId !== record.operationId.value
+          || record.event.taskId.value !== operation.taskId.value
+          || record.event.executionEpoch !== operation.executionEpoch
+        ) {
+          throw new RuntimeTaskControlError(
+            'journal.corrupt',
+            RUNTIME_OWNER,
+            `journal event ${record.event.eventId} identity does not match operation ${record.operationId.value}`,
+            'repair or discard the UI runtime journal before restarting',
+          );
+        }
+        const task = state.tasks.get(operation.taskId.value);
+        if (!task) {
+          if (state.deletedTaskIds.has(operation.taskId.value)) break;
+          throw new RuntimeTaskControlError(
+            'journal.corrupt',
+            RUNTIME_OWNER,
+            `journal event ${record.event.eventId} references unknown task ${operation.taskId.value}`,
+            'repair or discard the UI runtime journal before restarting',
+          );
+        }
+        operation.events.push(record.event);
+        operation.seq = Math.max(operation.seq, record.event.seq);
+        task.events.push(record.event);
+        task.updatedAt = record.event.occurredAt;
+        if (record.event.kind === 'execution.started') {
+          task.operationId = operation.operationId;
+          task.executionEpoch = operation.executionEpoch;
+          task.input = operation.input;
+          task.orchestrated = operation.orchestrated;
+          task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
+        }
+        if (record.taskOutput !== undefined) task.output = record.taskOutput;
+        if (record.error) task.error = record.error;
+        if (record.event.kind === 'provider.tool') task.currentNode = RUNTIME_NODE_MARKERS.providerTool;
+        if (record.event.kind === 'provider.model') task.currentNode = RUNTIME_NODE_MARKERS.providerModel;
+        break;
+      }
+      case 'explicit-brain.state': {
+        break;
+      }
+    }
+  }
+}
+
+/** Durable task projection built only from persisted task Journal records. */
+function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, ScopeRef>): RuntimeTaskSnapshot {
+  const checkpointEvent = record.events.slice().reverse().find((event) => event.kind === 'checkpoint.committed');
+  return {
+    taskId: record.taskId,
+    title: record.title,
+    directive: record.directive,
+    directiveRevision: record.directiveRevision,
+    state: record.state,
+    currentState: record.currentState,
+    nextStep: record.nextStep,
+    updatedAt: record.updatedAt,
+    input: record.input,
+    output: record.output,
+    currentNode: record.currentNode,
+    operationId: record.operationId?.value,
+    executionEpoch: record.executionEpoch,
+    cycleId: record.cycleId?.value
+      ?? (record.operationId === undefined ? undefined : scopes.get(record.operationId.value)?.cycleId?.value),
+    publicOutput: record.publicOutput,
+    orchestrated: record.orchestrated,
+    allowedActions: record.allowedActions,
+    recentEvents: record.events.slice(-20),
+    events: record.events,
+    requestIdentity: record.requestIdentity,
+    checkpoint: record.checkpoint
+      ? {
+          checkpointId: record.checkpoint.id.value,
+          seq: record.checkpoint.seq,
+          outcome: record.checkpoint.outcome,
+          summary: record.checkpoint.summary,
+          committedAt: checkpointEvent?.occurredAt ?? record.updatedAt,
+          evidenceRefs: record.checkpoint.evidenceRefs,
+        }
+      : undefined,
+    error: record.error,
+  };
+}
+
+export interface DurableTaskInventoryFailure {
+  readonly code: string;
+  readonly ownerId: string;
+  readonly message: string;
+  readonly nextAction: string;
+}
+
+export interface DurableTaskInventoryEntry {
+  readonly snapshot: RuntimeTaskSnapshot;
+  /**
+   * `checkpoint` means a real committed checkpoint confirmed the state.
+   * `recovery-required` means the durable record alone cannot confirm a live
+   * or terminal state; a persisted running event is never treated as live.
+   */
+  readonly durableState: 'checkpoint' | 'recovery-required';
+}
+
+export interface DurableTaskInventory {
+  readonly entries: readonly DurableTaskInventoryEntry[];
+  readonly failures: readonly DurableTaskInventoryFailure[];
+}
+
+/** Minimal read-only checkpoint surface a durable task read needs. */
+export interface DurableTaskCheckpointReadPort {
+  readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null>;
+  /**
+   * Exact committed checkpoint by identity; supplies the Journal ordering
+   * receipt the shared current-state selection uses. Absent means the caller
+   * does not bind a current-state read and keeps checkpoint-only behavior.
+   */
+  readCommitted?(scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null>;
+}
+
+/** Minimal read-only current-state surface the same shared selection can consume. */
+export interface DurableTaskCurrentStateReadPort {
+  read(taskScope: ScopeRef): Promise<RuntimeTaskCurrentStateRead>;
+}
+
+/**
+ * Rebuilds task inventory from task Journal records and reconciles each task's
+ * durable state with its authoritative checkpoint. It reuses the coordinator's
+ * replay rule and checkpoint scope match but never constructs a coordinator,
+ * starts/arms recovery, appends, subscribes or issues a control command. A task
+ * whose checkpoint cannot confirm a terminal state stays explicitly
+ * `recovery-required` instead of being reported as live running.
+ */
+export async function projectDurableTaskInventory(input: {
+  readonly records: readonly RuntimeTaskJournalRecord[];
+  readonly checkpointFor: (taskId: TaskId, cycleId: CycleId) => DurableTaskCheckpointReadPort;
+  readonly currentStateFor?: (taskId: TaskId) => DurableTaskCurrentStateReadPort | undefined;
+}): Promise<DurableTaskInventory> {
+  const state: TaskJournalReplayState = {
+    taskCounter: 0,
+    operationCounter: 0,
+    cycleCounter: 0,
+    tasks: new Map(),
+    operations: new Map(),
+    scopes: new Map(),
+    deletedTaskIds: new Set(),
+  };
+  try {
+    replayTaskJournalRecords(state, input.records);
+  } catch (error) {
+    return {
+      entries: [],
+      failures: [{
+        code: error instanceof RuntimeTaskControlError ? error.code : 'journal.corrupt',
+        ownerId: RUNTIME_OWNER,
+        message: error instanceof Error ? error.message : String(error),
+        nextAction: 'repair or discard the UI runtime journal before reading it',
+      }],
+    };
+  }
+  const entries: DurableTaskInventoryEntry[] = [];
+  const failures: DurableTaskInventoryFailure[] = [];
+  for (const record of state.tasks.values()) {
+    const operation = record.operationId === undefined ? undefined : state.operations.get(record.operationId.value);
+    const scope = record.operationId === undefined ? undefined : state.scopes.get(record.operationId.value);
+    if (!operation || !scope?.cycleId) {
+      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'checkpoint' });
+      continue;
+    }
+    try {
+      const checkpointRead = input.checkpointFor(record.taskId, scope.cycleId);
+      const latest = await checkpointRead.readLatest(scope);
+      if (latest && sameCheckpointBusinessScope(scope, latest.checkpoint.scope)) {
+        record.checkpoint = latest.checkpoint;
+        record.checkpointSeq = latest.checkpoint.seq;
+        const committed = checkpointRead.readCommitted
+          ? await checkpointRead.readCommitted(latest.checkpoint.scope, latest.checkpoint.id)
+          : null;
+        const currentStatePort = input.currentStateFor?.(record.taskId);
+        const currentStateRead = committed && currentStatePort
+          ? await currentStatePort.read(scope)
+          : { state: 'unknown' as const, reason: 'no current-state read is bound to this task' };
+        const selection = committed && currentStatePort
+          ? selectRuntimeTaskCurrentState({
+              checkpointOutcome: latest.checkpoint.outcome,
+              scope,
+              checkpointCommitRef: committed.commitRef,
+              currentState: currentStateRead,
+            })
+          : null;
+        record.state = selection?.basis === 'terminal'
+          ? selection.lifecycle
+          : latest.checkpoint.outcome;
+        record.running = false;
+        record.stopping = false;
+        record.currentState = lifecycleStateLabel(record.state);
+        record.nextStep = selection?.basis === 'terminal'
+          ? record.state === 'succeeded'
+            ? '可发起新的执行或停止'
+            : record.state === 'stopped'
+              ? '已收拢；可发起新的执行'
+              : '检查错误 owner 与 next action'
+          : latest.checkpoint.next.kind === 'continue'
+          ? '可发起新的执行'
+          : `${latest.checkpoint.next.kind}${latest.checkpoint.next.ref ? `:${latest.checkpoint.next.ref}` : ''}`;
+        record.allowedActions = record.state === 'succeeded'
+          || record.state === 'stopped'
+          || record.state === 'failed'
+          || record.state === 'cancelled'
+          ? ['start']
+          : [];
+        record.currentNode = record.state === 'stopped'
+          ? RUNTIME_NODE_MARKERS.checkpointCommit
+          : record.currentNode;
+        if (selection?.basis === 'terminal' && currentStateRead.state === 'known') {
+          record.currentStateCommitRef = currentStateRead.stateCommitRef;
+          if (currentStateRead.value.currentPlan) record.currentPlan = currentStateRead.value.currentPlan;
+        }
+        record.updatedAt = record.events.at(-1)?.occurredAt ?? record.updatedAt;
+        entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'checkpoint' });
+      } else {
+        record.state = 'unknown';
+        record.running = false;
+        record.stopping = false;
+        record.currentState = '需要恢复确认';
+        record.nextStep = '从权威 checkpoint 恢复状态';
+        record.allowedActions = [];
+        entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'recovery-required' });
+      }
+    } catch (error) {
+      failures.push({
+        code: 'checkpoint.unreadable',
+        ownerId: RUNTIME_OWNER,
+        message: error instanceof Error ? error.message : String(error),
+        nextAction: 'inspect the task checkpoint journal before reading the task',
+      });
+      record.state = 'unknown';
+      record.running = false;
+      record.stopping = false;
+      record.currentState = '需要恢复确认';
+      record.nextStep = '从权威 checkpoint 恢复状态';
+      record.allowedActions = [];
+      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'recovery-required' });
+    }
+  }
+  return { entries, failures };
+}
+
 function providerEventSummary(event: ProviderEvent): string {
   if (event.kind === 'terminal') return `execution ${event.terminalState ?? 'unknown'}`;
   if (event.kind === 'error') return event.error?.message ?? 'provider error';
@@ -831,6 +1250,23 @@ export function producedArtifactBody(output: string, files: readonly ProducedArt
 function runtimeProviderEventKind(event: ProviderEvent): RuntimeTaskEventKind {
   if (event.kind === 'tool' && event.toolPhase === 'result') return 'provider.tool-result';
   return mapProviderEventKind(event.kind);
+}
+
+/**
+ * Merges the bound delivery evidence with the existing closure evidence.
+ * Evidence identity is the whole canonical ref, so the same source appears once
+ * and every distinct source is retained.
+ */
+function mergeDeliveryEvidence(bound: readonly EvidenceRef[], closure: readonly EvidenceRef[]): EvidenceRef[] {
+  const merged: EvidenceRef[] = [];
+  const seen = new Set<string>();
+  for (const ref of [...bound, ...closure]) {
+    const key = canonicalJsonStringify(ref);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(ref);
+  }
+  return merged;
 }
 
 function appendOutput(current: string, next: string): string {
@@ -1696,8 +2132,10 @@ export class RuntimeTaskCoordinator {
     record.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
     record.input = operation.input;
     record.output = '';
+    record.publicOutput = undefined;
     record.operationId = operation.operationId;
     record.executionEpoch = operation.executionEpoch;
+    record.cycleId = scope?.cycleId;
     record.checkpoint = undefined;
     record.checkpointSeq = 0;
     record.composition = undefined;
@@ -2070,9 +2508,128 @@ export class RuntimeTaskCoordinator {
       committed.checkpoint.summary, committed.checkpoint.evidenceRefs);
     await input.closeOwned();
     const advance = await standardTurn.align();
+    // The direct native lane owns its public result through the typed accepted
+    // delivery. Commit and read it back through the same public-output owner
+    // before the turn is accepted as succeeded, so a drain/empty turn can never
+    // finish as a success with no delivered body. The orchestrated lane keeps
+    // its existing WorkResult delivery binding (`bindAssignmentDelivery`).
+    if (!operation.orchestrated && advance.state === 'terminal' && advance.decision === 'complete') {
+      await this.commitStandardTurnDelivery(record, operation, scope, standardTurn);
+    }
     await this.applyStandardTurnAdvance(record, operation, scope, advance);
     if (advance.state === 'advancing') await this.startNextStandardTurn(record, operation, advance);
     return advance;
+  }
+
+  /**
+   * Accepts the delivery of a terminal `complete` native turn.
+   *
+   * A refs-only accepted end (no declared `deliveryText`) must bind its real
+   * material bundle to the retained assignment through the existing
+   * assignment-level binder: the bundle is non-empty and its business-turn
+   * identity, artifact refs, digests, bodies and evidence all agree with the
+   * original readback assignment. That binding is the whole delivery gate, so
+   * the turn completes without synthesizing any public text.
+   *
+   * When the accepted end does declare a `deliveryText`, the exact accepted
+   * text is published through the canonical public-output owner: the reader
+   * exposes exactly one text material bound to this operation/epoch, the
+   * immutable body equals the accepted text, and the committed publication
+   * reads the exact text back. Only after that does the caller accept
+   * succeeded/final. Any failure stops the turn with a specific typed error; it
+   * never downgrades to a drain/summary fallback.
+   */
+  private async commitStandardTurnDelivery(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    standardTurn: NonNullable<RuntimeExecutionDriver['standardTurn']>,
+  ): Promise<void> {
+    if (standardTurn.readDelivery === undefined) {
+      throw new RuntimeTaskControlError('standard-turn-delivery.unavailable', RUNTIME_OWNER,
+        'the native standard turn exposes no readDelivery capability to publish its exact body',
+        'assemble the runtime delivery reader before accepting a terminal complete turn');
+    }
+    const readback = await standardTurn.readDelivery();
+    // A refs-only accepted end declares no `deliveryText`. Bind its real
+    // material bundle to the retained assignment through the existing
+    // assignment-level binder (non-empty materials, business-turn identity,
+    // artifact refs/digests/bodies and evidence) against the original readback
+    // assignment; that binding is the whole gate and generates no public text.
+    // The assignment is never rebuilt from the current physical epoch.
+    if (readback.acceptedEnd.deliveryText === undefined) {
+      bindAssignmentDelivery({ assignment: readback.assignment, readback });
+      return;
+    }
+    const textMaterials = readback.materials.filter((material) => material.kind === 'delivery-text');
+    if (textMaterials.length !== 1) {
+      throw new RuntimeTaskControlError('standard-turn-delivery.text-unresolved', RUNTIME_OWNER,
+        `the accepted turn exposes ${textMaterials.length} text deliveries, expected exactly one`,
+        'resolve the single accepted text delivery before accepting a terminal complete turn');
+    }
+    const material = textMaterials[0]!;
+    if (material.kind !== 'delivery-text') {
+      throw new RuntimeTaskControlError('standard-turn-delivery.text-unresolved', RUNTIME_OWNER,
+        'the accepted turn delivery is not a text delivery',
+        'resolve the accepted text delivery before accepting a terminal complete turn');
+    }
+    const endCall = material.acceptedEndCall.envelope.fact;
+    if (endCall.kind !== 'tool-call'
+      || material.acceptedEndCall.envelope.execution.executionEpoch !== operation.executionEpoch
+      || material.acceptedEndCall.envelope.request.requestId.length === 0
+      || canonicalJsonStringify(material.acceptedEndCall.envelope.scope) !== canonicalJsonStringify(scope)) {
+      throw new RuntimeTaskControlError('standard-turn-delivery.source-conflict', RUNTIME_OWNER,
+        'the accepted delivery source does not belong to the completing execution',
+        'resolve the delivery bound to this exact operation and epoch');
+    }
+    const exactText = new TextDecoder('utf-8', { fatal: true }).decode(material.bytes);
+    if (exactText !== readback.acceptedEnd.deliveryText) {
+      throw new RuntimeTaskControlError('standard-turn-delivery.text-mismatch', RUNTIME_OWNER,
+        'the immutable delivery body does not equal the accepted delivery text',
+        'resolve the immutable body bound to the accepted delivery text');
+    }
+    const storeFor = this.options.publicOutputStoreFor;
+    if (storeFor === undefined) {
+      throw new RuntimeTaskControlError('public-output.store-unbound', RUNTIME_OWNER,
+        'the native standard turn exposes no canonical public-output store',
+        'bind the canonical public-output store before accepting a terminal complete turn');
+    }
+    const cycleId = scope.cycleId;
+    if (cycleId === undefined) {
+      throw new RuntimeTaskControlError('public-output.cycle-missing', RUNTIME_OWNER,
+        'the accepted delivery scope carries no cycle identity',
+        'resolve the execution cycle before accepting a terminal complete turn');
+    }
+    const binding = this.publicOutputSelection(scope, operation.executionEpoch);
+    const candidate: PublicOutputCandidate = {
+      binding,
+      sourceId: `standard-turn-delivery:${material.acceptedEndCall.envelope.request.requestId}:${endCall.call.callId}`,
+      text: exactText,
+    };
+    record.publicOutput = this.pendingPublicOutput(record.publicOutput);
+    const committedText = await (async (): Promise<string> => {
+      const store = storeFor(record.taskId, cycleId);
+      const committed = await store.commitPublicOutput(candidate);
+      const publication = await store.readPublicOutputs(binding);
+      record.publicOutput = publication;
+      const match = publication.commits.find((commit) =>
+        commit.ref.sourceId === candidate.sourceId && commit.text === exactText);
+      if (match === undefined || match.ref.commitId !== committed.commitId) {
+        throw new RuntimeTaskControlError('public-output.readback-mismatch', RUNTIME_OWNER,
+          'the canonical public output did not read back the exact committed delivery text',
+          'inspect the canonical public-output journal for this binding');
+      }
+      return exactText;
+    })().catch((error: unknown) => {
+      record.publicOutput = this.unknownPublicOutput(record.publicOutput);
+      if (error instanceof RuntimeTaskControlError) throw error;
+      throw new RuntimeTaskControlError('public-output.commit-failed', RUNTIME_OWNER,
+        error instanceof Error ? error.message : String(error),
+        'inspect the canonical public-output journal and retry the same accepted delivery');
+    });
+    // The user-visible output is the exact committed delivery body, not the
+    // Provider drain/summary process text.
+    record.output = committedText;
   }
 
   /**
@@ -2605,7 +3162,7 @@ export class RuntimeTaskCoordinator {
           agentId: report.agentId,
           assignmentId: report.assignmentId,
           attempt: report.attempt,
-          executionEpoch: report.executionEpoch,
+          executionEpoch: input.assignment.executionEpoch,
           inputRevision: report.inputRevision,
           producedArtifactRefs: [],
           producedArtifactDigests: [],
@@ -2626,7 +3183,7 @@ export class RuntimeTaskCoordinator {
             agentId: report.agentId,
             assignmentId: report.assignmentId,
             attempt: report.attempt,
-            executionEpoch: report.executionEpoch,
+            executionEpoch: input.assignment.executionEpoch,
             inputRevision: report.inputRevision,
             producedArtifactRefs: [],
             producedArtifactDigests: [],
@@ -2656,7 +3213,7 @@ export class RuntimeTaskCoordinator {
         const producedPath = producedFilePath(event.providerEvent.toolCall);
         if (producedPath !== undefined && !producedPaths.includes(producedPath)) producedPaths.push(producedPath);
       }
-      coordinator.recordProviderEvent(record, operation, event.providerEvent);
+      await coordinator.recordProviderEvent(record, operation, event.providerEvent);
     }
     if (record.postCommitRecoveryPending) {
       return {
@@ -2666,7 +3223,7 @@ export class RuntimeTaskCoordinator {
           agentId: report.agentId,
           assignmentId: report.assignmentId,
           attempt: report.attempt,
-          executionEpoch: report.executionEpoch,
+          executionEpoch: input.assignment.executionEpoch,
           inputRevision: report.inputRevision,
           producedArtifactRefs: [],
           producedArtifactDigests: [],
@@ -2689,7 +3246,7 @@ export class RuntimeTaskCoordinator {
           agentId: report.agentId,
           assignmentId: report.assignmentId,
           attempt: report.attempt,
-          executionEpoch: report.executionEpoch,
+          executionEpoch: input.assignment.executionEpoch,
           inputRevision: report.inputRevision,
           producedArtifactRefs: [],
           producedArtifactDigests: [],
@@ -2732,22 +3289,28 @@ export class RuntimeTaskCoordinator {
         : closure.state === 'blocked' || closure.state === 'failed' || closure.state === 'unknown'
           ? 'attention'
           : 'settle';
+    const nativeDeliveryTurn = record.driver?.standardTurn;
+    const deliveryBinding = closure.state === 'succeeded' && nativeDeliveryTurn !== undefined
+      ? await this.bindNativeDelivery(input.assignment, nativeDeliveryTurn)
+      : undefined;
     const workResult: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] } = {
       taskId: report.taskId,
       pipelineNodeId: report.pipelineNodeId,
       agentId: report.agentId,
       assignmentId: report.assignmentId,
       attempt: report.attempt,
-      executionEpoch: report.executionEpoch,
+      executionEpoch: input.assignment.executionEpoch,
       inputRevision: report.inputRevision,
-      producedArtifactRefs: [outputRef],
-      producedArtifactDigests: [digestOf(artifactBody)],
-      producedArtifactBodies: [artifactBody],
+      producedArtifactRefs: deliveryBinding !== undefined ? [...deliveryBinding.producedArtifactRefs] : [outputRef],
+      producedArtifactDigests: deliveryBinding !== undefined ? [...deliveryBinding.producedArtifactDigests] : [digestOf(artifactBody)],
+      producedArtifactBodies: deliveryBinding !== undefined ? [...deliveryBinding.producedArtifactBodies] : [artifactBody],
       executorEvidence,
       status,
       summary: `provider execution ${closure.state}`,
-      outputRefs: [outputRef],
-      evidenceRefs: closure.evidenceRefs,
+      outputRefs: deliveryBinding !== undefined ? [...deliveryBinding.outputRefs] : [outputRef],
+      evidenceRefs: deliveryBinding !== undefined
+        ? mergeDeliveryEvidence(deliveryBinding.evidenceRefs, closure.evidenceRefs)
+        : closure.evidenceRefs,
       nextAction,
       ...(nextAction === 'wait'
         ? { conditionRef: closure.conditionRef ?? `operation://${operation.operationId.value}/waiting` }
@@ -2757,6 +3320,27 @@ export class RuntimeTaskCoordinator {
         : {}),
     };
     return { closure, result: workResult };
+  }
+
+  /**
+   * Reads and binds the accepted standard-end delivery on a native retained
+   * turn. The capability must exist; an absent reader stops the succeeded
+   * result instead of reusing the operation output ref or drain body.
+   */
+  private async bindNativeDelivery(
+    assignment: WorkAssignment,
+    standardTurn: NonNullable<RuntimeExecutionDriver['standardTurn']>,
+  ): Promise<StandardTurnDeliveryBinding> {
+    if (standardTurn.readDelivery === undefined) {
+      throw new RuntimeTaskControlError(
+        'standard-turn-delivery.unavailable',
+        RUNTIME_OWNER,
+        'the native standard turn exposes no readDelivery capability',
+        'assemble the runtime delivery reader before native result binding',
+      );
+    }
+    const readback = await standardTurn.readDelivery();
+    return bindAssignmentDelivery({ assignment, readback });
   }
 
   private readonly scopes = new Map<string, ScopeRef>();
@@ -3212,6 +3796,28 @@ export class RuntimeTaskCoordinator {
         record.composition = composition;
         record.driver = driver;
         record.runtime = runtime;
+        if (driver.standardTurn) {
+          // A native standard turn closes through `readClosureFacts`, which
+          // requires the Runtime-owned current state to be already committed.
+          // The release boundary is the true owner of that publication: it is
+          // the first point where the real loop/native facts are bound, and it
+          // runs before the release acknowledgement and before start/submit.
+          // A missing port or a failed commit keeps the release prepared, so
+          // no Provider request and no model execution ever start.
+          const releaseStateRef = await this.persistCurrentState(
+            record,
+            `execution-release:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}`,
+            scope,
+          );
+          if (releaseStateRef === undefined) {
+            throw new RuntimeTaskControlError(
+              'runtime.current-state.release-port-unknown',
+              RUNTIME_OWNER,
+              'the native release boundary has no Runtime current-state port',
+              'bind the Runtime current-state port before releasing a native execution',
+            );
+          }
+        }
         this.markExecutionReleased(record, operation);
       }
       let closure: AgentRuntimeClosure | undefined;
@@ -3531,7 +4137,7 @@ export class RuntimeTaskCoordinator {
           }
           const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
           if (!event.providerEvent) continue;
-          this.recordProviderEvent(record, operation, event.providerEvent);
+          await this.recordProviderEvent(record, operation, event.providerEvent);
         }
         if (record.postCommitRecoveryPending) return;
         if (runtime!.snapshot().state === 'stopped') {
@@ -3932,7 +4538,7 @@ export class RuntimeTaskCoordinator {
     }
   }
 
-  private recordProviderEvent(record: TaskRecord, operation: OperationRecord, event: ProviderEvent): void {
+  private async recordProviderEvent(record: TaskRecord, operation: OperationRecord, event: ProviderEvent): Promise<void> {
     const executionFact = event.toolResult?.executionFact;
     if (executionFact !== undefined) {
       const result = event.toolResult!;
@@ -3970,6 +4576,7 @@ export class RuntimeTaskCoordinator {
       }
       record.updatedAt = this.now().toISOString();
     }
+    await this.commitAcceptedPublicOutput(record, operation, event);
     const toolProjection = event.toolCall !== undefined
       ? {
         callId: event.toolCall.callId,
@@ -4019,6 +4626,82 @@ export class RuntimeTaskCoordinator {
     if (event.kind === 'tool') record.currentNode = RUNTIME_NODE_MARKERS.providerTool;
     if (event.kind === 'model') record.currentNode = RUNTIME_NODE_MARKERS.providerModel;
     if (error) record.error = error;
+  }
+
+  /**
+   * Commits the canonical public output for one accepted Provider event.
+   *
+   * A native standard-turn execution owns its public result through the typed
+   * accepted delivery, so its Provider output/drain stays process observation
+   * and is never committed as the canonical body. The split is the real driver
+   * lifecycle identity, never event text or metadata. Other execution kinds keep
+   * the existing Provider output publication contract.
+   */
+  private async commitAcceptedPublicOutput(record: TaskRecord, operation: OperationRecord, event: ProviderEvent): Promise<void> {
+    if (event.kind !== 'output') return;
+    if (record.driver?.standardTurn !== undefined) return;
+    const text = event.summary;
+    if (text === undefined || text.trim().length === 0) return;
+    const storeFor = this.options.publicOutputStoreFor;
+    if (storeFor === undefined) return;
+    const scope = this.scopes.get(operation.operationId.value);
+    const cycleId = scope?.cycleId;
+    if (!scope || !cycleId) {
+      record.publicOutput = this.unknownPublicOutput(record.publicOutput);
+      return;
+    }
+    const binding: PublicOutputBinding = {
+      scope,
+      executionEpoch: operation.executionEpoch,
+      ...(event.turnId === undefined ? {} : { providerTurnId: event.turnId }),
+      ...(event.requestId === undefined ? {} : { requestId: event.requestId }),
+    };
+    const candidate: PublicOutputCandidate = { binding, sourceId: event.eventId, text };
+    record.publicOutput = this.pendingPublicOutput(record.publicOutput);
+    try {
+      const store = storeFor(record.taskId, cycleId);
+      await store.commitPublicOutput(candidate);
+      record.publicOutput = await store.readPublicOutputs(this.publicOutputSelection(scope, operation.executionEpoch));
+    } catch (error) {
+      record.publicOutput = this.unknownPublicOutput(record.publicOutput);
+      if (record.error === undefined) {
+        record.error = {
+          code: 'public-output.commit.failed', ownerId: RUNTIME_OWNER,
+          message: error instanceof Error ? error.message : String(error), retryable: false,
+          nextAction: 'inspect the public-output journal and retry the same candidate',
+        };
+      }
+    }
+  }
+
+  private unknownPublicOutput(current: PublicOutputPublication | undefined): PublicOutputPublication {
+    return { state: 'unknown', commits: current?.commits ?? [],
+      ...(current?.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: current.publicCommitWatermark }) };
+  }
+
+  private pendingPublicOutput(current: PublicOutputPublication | undefined): PublicOutputPublication {
+    return { state: 'pending', commits: current?.commits ?? [],
+      ...(current?.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: current.publicCommitWatermark }) };
+  }
+
+  private publicOutputSelection(scope: ScopeRef, executionEpoch: number): PublicOutputBinding {
+    return { scope, executionEpoch };
+  }
+
+  private async hydratePublicOutput(task: TaskRecord, scope: ScopeRef): Promise<void> {
+    const storeFor = this.options.publicOutputStoreFor;
+    if (storeFor === undefined || !scope.cycleId) return;
+    const executionEpoch = task.executionEpoch ?? this.operations.get(task.operationId!.value)?.executionEpoch;
+    if (executionEpoch === undefined) {
+      task.publicOutput = this.unknownPublicOutput(task.publicOutput);
+      return;
+    }
+    const binding = this.publicOutputSelection(scope, executionEpoch);
+    try {
+      task.publicOutput = await storeFor(task.taskId, scope.cycleId).readPublicOutputs(binding);
+    } catch {
+      task.publicOutput = this.unknownPublicOutput(task.publicOutput);
+    }
   }
 
   private async commitBusinessCheckpoint(record: TaskRecord, executionScope: ScopeRef, outcome: string, extraEvidenceRefs: readonly EvidenceRef[] = []): Promise<void> {
@@ -4405,6 +5088,7 @@ export class RuntimeTaskCoordinator {
             task.allocation = record.allocation;
             task.operationId = operation.operationId;
             task.executionEpoch = operation.executionEpoch;
+            task.cycleId = record.allocation.scope.cycleId;
             task.input = operation.input;
             task.orchestrated = operation.orchestrated;
             task.release = { state: 'prepared' };
@@ -4437,6 +5121,8 @@ export class RuntimeTaskCoordinator {
           };
           this.operations.set(record.operationId.value, operation);
           this.scopes.set(record.operationId.value, record.scope);
+          const task = this.tasks.get(record.taskId.value);
+          if (task) task.cycleId = record.scope.cycleId;
           break;
         }
         case 'operation.event': {
@@ -4515,6 +5201,7 @@ export class RuntimeTaskCoordinator {
         this.markRecoveryRequired(task);
         continue;
       }
+      await this.hydratePublicOutput(task, scope);
       try {
         const store = this.options.checkpointStoreFor(task.taskId, scope.cycleId);
         const businessScope: ScopeRef = {
@@ -4543,20 +5230,60 @@ export class RuntimeTaskCoordinator {
           this.markCommittedCheckpointRecovery(task, task.error.nextAction);
           continue;
         }
-        task.state = checkpoint.outcome;
+        const currentStatePort = this.options.currentStatePort;
+        let selection: RuntimeTaskCurrentStateSelection | null = null;
+        if (currentStatePort) {
+          const committed = await store.readCommitted(latest.checkpoint.scope, latest.checkpoint.id);
+          if (!committed || !sameCheckpointBusinessScope(scope, committed.checkpoint.scope)) {
+            this.markRecoveryRequired(task);
+            continue;
+          }
+          const readScope: ScopeRef = {
+            organId: latest.checkpoint.scope.organId,
+            taskId: latest.checkpoint.scope.taskId,
+            cycleId: scope.cycleId,
+            operationId: scope.operationId,
+          };
+          const currentStateRead = await currentStatePort.read(readScope);
+          selection = selectRuntimeTaskCurrentState({
+            checkpointOutcome: checkpoint.outcome,
+            scope,
+            checkpointCommitRef: committed.commitRef,
+            currentState: currentStateRead,
+          });
+          if (selection.basis === 'terminal') {
+            task.state = selection.lifecycle;
+            task.currentStateCommitRef = currentStateRead.state === 'known'
+              ? currentStateRead.stateCommitRef
+              : task.currentStateCommitRef;
+            if (selection.currentState.currentPlan) {
+              task.currentPlan = selection.currentState.currentPlan;
+            }
+          } else {
+            task.state = checkpoint.outcome;
+          }
+        } else {
+          task.state = checkpoint.outcome;
+        }
         task.running = false;
         task.stopping = false;
-        task.currentState = lifecycleStateLabel(checkpoint.outcome);
-        task.nextStep = checkpoint.next.kind === 'continue'
+        task.currentState = lifecycleStateLabel(task.state);
+        task.nextStep = selection?.basis === 'terminal'
+          ? task.state === 'succeeded'
+            ? '可发起新的执行或停止'
+            : task.state === 'stopped'
+              ? '已收拢；可发起新的执行'
+              : '检查错误 owner 与 next action'
+          : checkpoint.next.kind === 'continue'
           ? '可发起新的执行'
           : `${checkpoint.next.kind}${checkpoint.next.ref ? `:${checkpoint.next.ref}` : ''}`;
-        task.allowedActions = checkpoint.outcome === 'succeeded'
-          || checkpoint.outcome === 'stopped'
-          || checkpoint.outcome === 'failed'
-          || checkpoint.outcome === 'cancelled'
+        task.allowedActions = task.state === 'succeeded'
+          || task.state === 'stopped'
+          || task.state === 'failed'
+          || task.state === 'cancelled'
           ? ['start']
           : [];
-        task.currentNode = checkpoint.outcome === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
+        task.currentNode = task.state === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
         task.updatedAt = task.events.at(-1)?.occurredAt ?? task.updatedAt;
       } catch {
         this.markRecoveryRequired(task);
@@ -4590,6 +5317,8 @@ export class RuntimeTaskCoordinator {
       currentNode: record.currentNode,
       operationId: record.operationId?.value,
       executionEpoch: record.executionEpoch,
+      cycleId: record.cycleId?.value,
+      publicOutput: record.publicOutput,
       orchestrated: record.orchestrated,
       allowedActions: record.allowedActions,
       recentEvents: record.events.slice(-20),

@@ -1,5 +1,6 @@
 import type {
   JournalCommitRef,
+  LifecycleState,
   NextAction,
   ScopeRef,
   StageResult,
@@ -137,8 +138,79 @@ export type RuntimeTaskCurrentStateRead =
       readonly state: 'known';
       readonly value: RuntimeTaskCurrentState;
       readonly stateCommitRef: JournalCommitRef;
+      /** The original committed record scope, exposed by the serialization owner. */
+      readonly scope: ScopeRef;
     }
   | { readonly state: 'unknown'; readonly reason: string };
+
+/**
+ * The committed Task lifecycle one cold read must project. It is selected by
+ * the single Runtime rule below, never assembled at a call site. The two
+ * variants keep the accepted current-state payload only where it applies, so
+ * a checkpoint-only read has no state payload to read by mistake.
+ */
+export type RuntimeTaskCurrentStateSelection =
+  | {
+      /** A committed current-state follows the checkpoint and is authoritative. */
+      readonly basis: 'terminal';
+      readonly lifecycle: LifecycleState;
+      readonly currentState: RuntimeTaskCurrentState;
+    }
+  | {
+      /** No applicable record; the existing checkpoint outcome stays authoritative. */
+      readonly basis: 'checkpoint-only';
+      readonly lifecycle: LifecycleState;
+    };
+
+function sameScopedValue(
+  left: { readonly scope: string; readonly value: string } | undefined,
+  right: { readonly scope: string; readonly value: string } | undefined,
+): boolean {
+  return left !== undefined && right !== undefined
+    && left.scope === right.scope && left.value === right.value;
+}
+
+/**
+ * One common Runtime read-only rule: reconcile the latest committed Task
+ * current-state against the latest committed checkpoint. Both are typed facts
+ * from the same Organ Journal at different phases, not parallel state sources.
+ *
+ * Selection rules, in order:
+ * 1. A current-state that does not belong to this task, or that carries a
+ *    different scope than the retained execution scope, is not applicable.
+ *    Another operation's success never overrides the current execution.
+ * 2. Journal sequence decides precedence. A current-state that precedes the
+ *    latest checkpoint never overrides a newer checkpoint.
+ * 3. An applicable current-state that follows the checkpoint supplies the Task
+ *    lifecycle and the accepted current plan. The business checkpoint itself
+ *    stays intact as the turn-close fact.
+ * 4. An absent or inapplicable current-state keeps the checkpoint rule. This
+ *    covers checkpoint-only histories.
+ * 5. A failed current-state read is an explicit failure with its own reason,
+ *    never a silent fall back to waiting or succeeded.
+ */
+export function selectRuntimeTaskCurrentState(input: {
+  readonly checkpointOutcome: LifecycleState;
+  readonly scope: ScopeRef;
+  readonly checkpointCommitRef: JournalCommitRef;
+  readonly currentState: RuntimeTaskCurrentStateRead;
+}): RuntimeTaskCurrentStateSelection {
+  if (input.currentState.state !== 'known') {
+    return { basis: 'checkpoint-only', lifecycle: input.checkpointOutcome };
+  }
+  const owner = input.currentState.value;
+  const sameExecutionScope = sameScopedValue(input.currentState.scope.organId, input.scope.organId)
+    && sameScopedValue(input.currentState.scope.taskId, input.scope.taskId)
+    && sameScopedValue(input.currentState.scope.cycleId, input.scope.cycleId)
+    && sameScopedValue(input.currentState.scope.operationId, input.scope.operationId);
+  if (!sameExecutionScope) {
+    return { basis: 'checkpoint-only', lifecycle: input.checkpointOutcome };
+  }
+  if (input.currentState.stateCommitRef.journalSeq <= input.checkpointCommitRef.journalSeq) {
+    return { basis: 'checkpoint-only', lifecycle: input.checkpointOutcome };
+  }
+  return { basis: 'terminal', lifecycle: owner.task.state as LifecycleState, currentState: owner };
+}
 
 /**
  * The Runtime serialization boundary. The implementation commits the transition

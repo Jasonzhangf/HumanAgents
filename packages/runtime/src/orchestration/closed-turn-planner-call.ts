@@ -321,6 +321,34 @@ function sameScopedId(left: { readonly value: string } | undefined, right: strin
   return left !== undefined && left.value === right;
 }
 
+/**
+ * Narrow business template for the closed-turn Planner model input/output
+ * contract. Runtime owns this duty's semantics; the App adapter serializes it
+ * and must not re-declare the output shape. The template names the exact
+ * TaskPlanSnapshot fields and constraints that the Contracts validator
+ * enforces. Publication id, sequence, digest, source, Journal commit and run
+ * state stay owned by the framework and are never part of this model contract.
+ */
+export function closedTurnPlannerOutputContract(): string {
+  return [
+    'You are the independent Planner for exactly one HumanAgent task turn.',
+    'You receive the exact committed turn closure, the current task directive, the accepted refined child/review results, and either the exact prior whole-task plan revision or null with the actual confirmed source for the first publication.',
+    'Reply with one JSON object and nothing else:',
+    '{"decision":"continue"|"complete"|"failed","snapshot":{"title":"...","summary":"...","completeness":{"scope":"whole-task","status":"complete"},"acceptanceCriteria":[...],"nodes":[...],"phases":[...],"relations":[...]},"reasonText":"..."}',
+    'The snapshot must use exactly these fields and types:',
+    '- "title": non-empty string naming the whole-task plan.',
+    '- "summary": non-empty string summarising the whole-task plan.',
+    '- "completeness": {"scope":"whole-task","status":"complete"}.',
+    '- "acceptanceCriteria": non-empty array of {"criterionId": non-empty string, "description": non-empty string}.',
+    '- "nodes": non-empty array of {"nodeId": non-empty string, "kind": non-empty string, "title": non-empty string, "intent": non-empty string, "definition": JSON object, and an optional "phaseId": non-empty string}.',
+    '- "phases": array of {"phaseId": non-empty string, "title": non-empty string, "memberNodeIds": array of node ids}; may be empty.',
+    '- "relations": array of {"fromNodeId": non-empty string, "toNodeId": non-empty string, "kind": "depends-on" | "parent-child" | "sequence"}; may be empty.',
+    'Acceptance "criterionId" values, node "nodeId" values and phase "phaseId" values must each be unique within their own array. A phase "memberNodeIds" list must not repeat a node, and relation triples must not repeat the same kind with the same "fromNodeId" and "toNodeId". Every "memberNodeIds" entry, node "phaseId" and relation endpoint must reference a declared node or phase. A phase membership and its node "phaseId" must agree in both directions. A relation must not point at itself, and the relations of one single kind must be acyclic.',
+    'The publication id, revision sequence, content digest, source binding, Journal commit and run state are owned by the framework; never emit or invent them.',
+    'A declaration of whole-task coverage is a plan, not a proof of completion. Do not report task completion; report the alignment decision only.',
+  ].join('\n');
+}
+
 /** Shared with the no-Provider durable-return preflight; legacy revision keys stay exact. */
 export function closedTurnPlannerDutyKey(input: Pick<ClosedTurnPlannerCallInput, 'task' | 'closure' | 'priorPlan'>): string {
   return [

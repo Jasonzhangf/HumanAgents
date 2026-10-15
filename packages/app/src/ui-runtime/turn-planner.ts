@@ -24,6 +24,7 @@ import type { AgentRole } from '../../../config/src/index.js';
 import type { TaskFlowRefinedResult } from '../../../runtime/src/orchestration/task-flow-selector.js';
 import type { TaskPlanRevisionPublishInput } from '../../../runtime/src/orchestration/task-plan-revisions.js';
 import {
+  closedTurnPlannerOutputContract,
   deriveClosedTurnPlannerDuty,
   type ClosedTurnPlannerPlanBasis,
   type PreparedClosedTurnPlannerCall,
@@ -256,14 +257,10 @@ function plannerRequestPayload(input: IndependentTurnPlannerInput): BusinessPayl
       outputRefs: result.outputRefs,
       evidenceRefs: result.evidenceRefs.map(plannerEvidenceRef),
     })),
-    instruction: [
-      'You are the independent Planner for exactly one HumanAgent task turn.',
-      'You receive the exact committed turn closure, the current task directive, the accepted refined child/review results, and either the exact prior whole-task plan revision or null with the actual confirmed source for the first publication.',
-      'Reply with one JSON object and nothing else:',
-      '{"decision":"continue"|"complete"|"failed","snapshot":{...whole-task plan snapshot...},"reasonText":"..."}',
-      'The snapshot must declare completeness {scope:"whole-task",status:"complete"} and include acceptanceCriteria, nodes, phases and relations.',
-      'A declaration of whole-task coverage is a plan, not a proof of completion. Do not report task completion; report the alignment decision only.',
-    ].join('\n'),
+    // The closed-turn Planner output contract is owned by the Runtime duty
+    // template, not re-declared here. The adapter serializes the exact template
+    // the Contracts validator enforces.
+    instruction: closedTurnPlannerOutputContract(),
   };
   return payload as unknown as BusinessPayload;
 }
