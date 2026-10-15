@@ -13,6 +13,7 @@ import {
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
+import type { CheckpointHistoryReadInput } from './checkpoint-history.js';
 import type { RuntimeReadResult, RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import { AppLifecycleError } from '../errors.js';
@@ -150,6 +151,38 @@ function optionalIntegerParam(url: URL, name: string, code: string): number | un
     throw new UiRuntimeApiError(code, APP_OWNER, `${name} must be an integer`, `send ${name} as an integer`);
   }
   return parsed;
+}
+
+function checkpointViewedTarget(url: URL): CheckpointHistoryReadInput['viewed'] {
+  const allowed = new Set(['projectKey', 'mode', 'limit', 'cursor', 'directiveRevision', 'executionEpoch',
+    'cycleId', 'occurrenceRef', 'checkpointId', 'checkpointCommitId', 'checkpointJournalSeq', 'checkpointRecordDigest']);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+      throw new UiRuntimeApiError('checkpoint-history.query-invalid', APP_OWNER,
+        `unsupported or repeated checkpoint query key: ${key}`, 'send the checkpoint query keys exactly once', 400);
+    }
+  }
+  const checkpointId = url.searchParams.get('checkpointId');
+  const commitId = url.searchParams.get('checkpointCommitId');
+  const journalSeq = url.searchParams.get('checkpointJournalSeq');
+  const recordDigest = url.searchParams.get('checkpointRecordDigest');
+  if (checkpointId === null && commitId === null && journalSeq === null && recordDigest === null) return undefined;
+  const hasReceipt = commitId !== null || journalSeq !== null || recordDigest !== null;
+  if ((checkpointId !== null && checkpointId.trim() === '')
+    || (hasReceipt && (commitId === null || journalSeq === null || recordDigest === null))) {
+    throw new UiRuntimeApiError('checkpoint-history.viewed-partial', APP_OWNER,
+      'checkpoint target has an empty identity or an incomplete physical receipt',
+      'send checkpointId and the complete checkpointCommitId/checkpointJournalSeq/checkpointRecordDigest receipt', 400);
+  }
+  if (hasReceipt && (commitId!.trim() === '' || !/^[1-9]\d*$/.test(journalSeq!)
+    || !Number.isSafeInteger(Number(journalSeq)) || !/^sha256:[0-9a-f]{64}$/.test(recordDigest!))) {
+    throw new UiRuntimeApiError('checkpoint-history.viewed-invalid', APP_OWNER,
+      'checkpoint physical receipt is malformed', 'send the exact committed checkpoint receipt', 400);
+  }
+  return {
+    ...(checkpointId === null ? {} : { checkpointId: id('checkpoint', checkpointId) }),
+    ...(hasReceipt ? { commitRef: { commitId: commitId!, journalSeq: Number(journalSeq), recordDigest: recordDigest! } } : {}),
+  };
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
@@ -1252,7 +1285,7 @@ async function handleRequest(
       const { projectKey, mode } = requireReadScope(url);
       const limit = requireHistoryLimit(url, 'checkpoints');
       const cursor = url.searchParams.get('cursor') ?? undefined;
-      const viewed = url.searchParams.get('viewed') ?? undefined;
+      const viewed = checkpointViewedTarget(url);
       const directiveRevision = optionalIntegerParam(url, 'directiveRevision', 'checkpoints.directiveRevision.invalid');
       const executionEpoch = optionalIntegerParam(url, 'executionEpoch', 'checkpoints.executionEpoch.invalid');
       const cycleIdParam = url.searchParams.get('cycleId')?.trim();

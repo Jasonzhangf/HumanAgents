@@ -296,6 +296,24 @@ function decodeSemanticAssetBody(bytes: Uint8Array): FourPartSemanticViewV1 {
  * derives publication from the latest checkpoint or from an asset that exists
  * without a durable adoption.
  */
+interface SemanticHistoryReadDependencies {
+  readonly filePath: string;
+  readonly journal?: JsonlOrganJournal;
+  readonly artifactsRoot: string;
+  readonly activeTurnJournalFor: (turnId: string) => Pick<ActiveTurnJournalPort, 'replay'>;
+  readonly segmentJournalFor?: (turnId: string) => Pick<ActiveTurnSegmentJournalPort, 'readSegmentRecords'>;
+  readonly rawContent: RawContentReadPort;
+}
+
+/** The same verified history reads, without a clock or any publication capability. */
+export function createJsonlSemanticHistoryReader(input: SemanticHistoryReadDependencies) {
+  const port = semanticHistoryJournal(input);
+  return {
+    listCompletedTurnLookups: port.listCompletedTurnLookups,
+    readCommittedSemanticCheckpoint: port.readCommittedSemanticCheckpoint,
+  };
+}
+
 export function createJsonlSemanticHistoryJournal(input: {
   readonly filePath: string;
   readonly journal?: JsonlOrganJournal;
@@ -304,6 +322,17 @@ export function createJsonlSemanticHistoryJournal(input: {
   readonly segmentJournal?: ActiveTurnSegmentJournalPort;
   readonly rawContent: RawContentReadPort;
   readonly timeAuthority: CheckpointTimeAuthority;
+}): SemanticHistoryPersistencePort & {
+  listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]>;
+} {
+  return semanticHistoryJournal({ ...input,
+    activeTurnJournalFor: () => input.activeTurnJournal,
+    ...(input.segmentJournal === undefined ? {} : { segmentJournalFor: () => input.segmentJournal! }),
+  });
+}
+
+function semanticHistoryJournal(input: SemanticHistoryReadDependencies & {
+  readonly timeAuthority?: CheckpointTimeAuthority;
 }): SemanticHistoryPersistencePort & {
   listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]>;
 } {
@@ -326,11 +355,10 @@ export function createJsonlSemanticHistoryJournal(input: {
   const journal = input.journal ?? new JsonlOrganJournal(input.filePath);
   const assets = new ImmutableAssetStore(input.artifactsRoot);
   const checkpoints = createJsonlCheckpointJournal({ filePath: input.filePath, journal });
-  const timeAuthority: CheckpointTimeAuthorityMetadata = {
-    source: input.timeAuthority.source,
-    owner: input.timeAuthority.owner,
-    authorityRef: input.timeAuthority.authorityRef,
-  };
+  function writeAuthority(): CheckpointTimeAuthority {
+    if (input.timeAuthority === undefined) throw new Error('readonly semantic history has no publication authority');
+    return input.timeAuthority;
+  }
 
   async function verifiedRecords(): Promise<readonly JournalRecord[]> {
     const verification = await journal.verify();
@@ -439,6 +467,10 @@ export function createJsonlSemanticHistoryJournal(input: {
       return result;
     },
     async commitContextView(request: SemanticContextViewCommitRequest | SemanticContextViewCommitRequestV2): Promise<SemanticPhaseReceiptV1> {
+      const authority = writeAuthority();
+      const timeAuthority: CheckpointTimeAuthorityMetadata = {
+        source: authority.source, owner: authority.owner, authorityRef: authority.authorityRef,
+      };
       if (!request.ownerId.trim()) {
         throw new AppLifecycleError(
           'semantic-history-owner-missing',
@@ -510,7 +542,7 @@ export function createJsonlSemanticHistoryJournal(input: {
               scope,
             });
           }
-          const committedAt = await input.timeAuthority.sampleCommittedAt();
+          const committedAt = await authority.sampleCommittedAt();
           const body = accepted.version === 2
             ? await buildSemanticContextViewBodyV2({ accepted, semanticAsset: descriptor, committedAt, timeAuthority })
             : await buildSemanticContextViewBodyV1({ accepted, semanticAsset: descriptor, committedAt, timeAuthority });
@@ -631,7 +663,11 @@ export function createJsonlSemanticHistoryJournal(input: {
               scope,
             });
           }
-          const committedAt = await input.timeAuthority.sampleCommittedAt();
+          const authority = writeAuthority();
+          const timeAuthority: CheckpointTimeAuthorityMetadata = {
+            source: authority.source, owner: authority.owner, authorityRef: authority.authorityRef,
+          };
+          const committedAt = await authority.sampleCommittedAt();
           const body = 'segment' in request
             ? await buildSemanticHistoryPublicationBodyV2({ ...request, committedAt, timeAuthority })
             : await buildSemanticHistoryPublicationBodyV1({ ...request, committedAt, timeAuthority });
@@ -819,8 +855,8 @@ export function createJsonlSemanticHistoryJournal(input: {
         if (publication.version !== 2 || canonicalJsonStringify(publication.segment) !== canonicalJsonStringify(view.segment)) {
           throw new Error('semantic publication segment mismatch');
         }
-        if (!input.segmentJournal) throw new Error('segment Journal is required for semantic v2 cold read');
-        const segmentRecords = await input.segmentJournal.readSegmentRecords({
+        if (!input.segmentJournalFor) throw new Error('segment Journal is required for semantic v2 cold read');
+        const segmentRecords = await input.segmentJournalFor(view.turn.turnId).readSegmentRecords({
           businessTurnId: view.turn.turnId,
           segmentId: view.segment.opened.segmentId,
         });
@@ -842,7 +878,7 @@ export function createJsonlSemanticHistoryJournal(input: {
       }
       if (publication.version !== 1) throw new Error('semantic publication version mismatch');
       const adoptedChildren: AdoptedChildSourceV1[] = [];
-      const activeTurnRecords = await input.activeTurnJournal.replay();
+      const activeTurnRecords = await input.activeTurnJournalFor(view.turn.turnId).replay();
       for (const source of view.adoptedChildren) {
         const materialized = await materializeAdoptedChildSource({
           source,
