@@ -32,11 +32,16 @@ import {
   type CheckpointClosurePreparationRecord,
 } from './closure.js';
 import {
+  assertConfirmedContextCorrectionCommand,
   assertConfirmedReentryCommand,
+  sameContextCorrectionCommand,
+  sameContextCorrectionRecord,
   sameConditionalReentryCommand,
   sameConditionalReentryRecord,
   type ConditionalReentryRecord,
+  type ConfirmedContextCorrectionCommand,
   type ConfirmedReentryCommand,
+  type ContextCorrectionRecord,
 } from './conditional-reentry.js';
 import { CheckpointSubmissionError } from './errors.js';
 import type {
@@ -45,6 +50,7 @@ import type {
   CheckpointJournalReaderPort,
   CheckpointReentryAdmissionPort,
   ConditionalReentrySubmissionPort,
+  ContextCorrectionSubmissionPort,
 } from './ports.js';
 
 const CHECKPOINT_SOURCES: readonly CheckpointSubmissionSource[] = ['agent-tool', 'harness-control', 'recovery'];
@@ -568,6 +574,81 @@ export async function commitReentry(input: CommitReentryInput): Promise<Committe
     if (!readback || !sameJournalCommitRef(readback.commitRef, commitRef)
       || !sameConditionalReentryRecord(readback.record, prepared)) {
       throw new CheckpointSubmissionError('reentry exact readback is absent or different');
+    }
+    return { state: 'committed', record: readback.record, commitRef: readback.commitRef };
+  } catch (error) {
+    throw asSubmissionError(error);
+  }
+}
+
+export interface ContextCorrectionCommit {
+  readonly port: ContextCorrectionSubmissionPort;
+  readonly command: ConfirmedContextCorrectionCommand;
+}
+
+export interface CommitContextCorrectionInput {
+  readonly ownerId: string;
+  readonly correction: ContextCorrectionCommit;
+}
+
+export interface CommittedContextCorrection {
+  readonly state: 'committed';
+  readonly record: ContextCorrectionRecord;
+  readonly commitRef: JournalCommitRef;
+}
+
+function confirmedCommandOf(record: ContextCorrectionRecord): ConfirmedContextCorrectionCommand {
+  return {
+    basis: record.basis,
+    expectedOperationControlCommitRef: record.expectedOperationControlCommitRef,
+    expectedGrantCommitRef: record.expectedGrantCommitRef,
+    permissionRevision: record.permissionRevision,
+  };
+}
+
+/**
+ * Canonical Context correction submission. It reuses the existing conditional
+ * branch: prepare from authoritative current facts, compare the exact current
+ * control token, commit the append-only carrier and read the physical record back.
+ */
+export async function commitContextCorrection(
+  input: CommitContextCorrectionInput,
+): Promise<CommittedContextCorrection> {
+  try {
+    nonEmpty(input.ownerId, 'context correction owner');
+    const { port, command } = input.correction;
+    assertConfirmedContextCorrectionCommand(command);
+    if (command.basis.principalOwner !== input.ownerId) {
+      throw new CheckpointSubmissionError('context correction owner does not match the verified principal');
+    }
+    const taskScope = {
+      organId: command.basis.taskScope.organId,
+      taskId: command.basis.taskScope.taskId,
+    };
+    const existing = await port.readContextCorrection(taskScope, command.basis.commandId);
+    if (existing) {
+      if (!sameContextCorrectionCommand(confirmedCommandOf(existing.record), command)) {
+        throw new CheckpointSubmissionError(
+          'context correction command id is already committed with different confirmed facts',
+        );
+      }
+      return { state: 'committed', record: existing.record, commitRef: existing.commitRef };
+    }
+    const prepared = await port.prepare(command);
+    if (!sameContextCorrectionCommand(confirmedCommandOf(prepared), command)) {
+      throw new CheckpointSubmissionError('context correction preparation changed the confirmed command');
+    }
+    const commitRef = await port.commitContextCorrectionRecord(
+      prepared,
+      command.basis.expectedControlReceipt,
+    );
+    const readback = await port.readContextCorrection(
+      taskScope,
+      command.basis.commandId,
+    );
+    if (!readback || !sameJournalCommitRef(readback.commitRef, commitRef)
+      || !sameContextCorrectionRecord(readback.record, prepared)) {
+      throw new CheckpointSubmissionError('context correction exact readback is absent or different');
     }
     return { state: 'committed', record: readback.record, commitRef: readback.commitRef };
   } catch (error) {

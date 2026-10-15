@@ -4,10 +4,35 @@ import type {
   NextAction,
   ScopeRef,
 } from '../../../contracts/src/index.js';
-import type { JournalRecord } from '../../../adapters/jsonl/src/index.js';
+import type {
+  ConfirmedContextCorrectionBasis,
+  ContextCorrectionBasisFacts,
+  ContextCorrectionRef,
+} from '../../../contracts/src/context-correction.js';
+import {
+  validateCheckpointControlGrant,
+  type CheckpointControlGrant,
+} from '../../../contracts/src/checkpoint-controls.js';
+import { JsonlOrganJournal, type JournalRecord } from '../../../adapters/jsonl/src/index.js';
 import { decodeActiveTurnRecords } from '../../../adapters/jsonl/src/active-turn.js';
 import { activeTurnCommitId } from '../../../runtime/src/context/active-turn-journal.js';
-import type { ExecutionPosition } from '../../../runtime/src/checkpoints/ports.js';
+import {
+  buildConfirmedContextCorrectionBasis,
+  sameCorrectionTaskScope,
+} from '../../../core/src/context-correction.js';
+import {
+  buildContextCorrection,
+  assertConfirmedContextCorrectionCommand,
+  contextCorrectionIdentity,
+  sameContextCorrectionCommand,
+  type ConfirmedContextCorrectionCommand,
+  type ContextCorrectionReadback,
+  type ContextCorrectionRecord,
+} from '../../../runtime/src/checkpoints/conditional-reentry.js';
+import type {
+  ContextCorrectionSubmissionPort,
+  ExecutionPosition,
+} from '../../../runtime/src/checkpoints/ports.js';
 import type {
   ReentryCurrentFacts,
   ReentryCurrentRead,
@@ -17,9 +42,11 @@ import type {
 import { readRuntimeTaskCurrentStateFromRecords } from '../runtime-current-state-journal.js';
 import { readOperationControlFromRecords } from '../operation-control-journal.js';
 import {
-  assertRecoveryBinding,
+  baseExecutionPositionFromRecords,
   closureFromRecord,
+  commitConditionalTransitionRecord,
   conditionalReentryFromRecord,
+  contextCorrectionFromRecord,
   contextHistoryFromRecord,
   exactJournalRecord,
   foldExecutionPositionFromRecords,
@@ -64,11 +91,6 @@ function sameScope(left: ScopeRef, right: ScopeRef): boolean {
     && left.operationId?.value === right.operationId?.value;
 }
 
-function journalCommitRef(record: JournalRecord): JournalCommitRef {
-  if (!record.commitId) throw new Error('the current-state record has no commit identity');
-  return { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
-}
-
 /** The existing Runtime owner string form for a typed `NextAction`. */
 function nextActionText(next: NextAction): string {
   return `${next.kind}${next.ref ? `:${next.ref}` : ''}`;
@@ -86,34 +108,6 @@ function sameIncarnation(left: ReentryFence, right: ReentryFence): boolean {
   return left.agentRuntimeId === right.agentRuntimeId
     && left.executionEpoch === right.executionEpoch
     && sameScope(left.scope, right.scope);
-}
-
-/**
- * The committed base of the related execution position. It reuses the exact
- * rule the async canonical reader uses: the latest bound checkpoint closure in
- * the task scope supplies the anchor receipt, context and epoch, and
- * `foldExecutionPositionFromRecords` advances it over committed transitions.
- */
-function baseExecutionPosition(
-  records: readonly JournalRecord[],
-  taskScope: ScopeRef,
-): ExecutionPosition | null {
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    const record = records[index]!;
-    if (!inTaskScope(record.scope, taskScope)) continue;
-    const closure = closureFromRecord(record);
-    if (closure === null || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') continue;
-    const binding = closure.recoveryBinding;
-    if (binding === undefined) continue;
-    assertRecoveryBinding(records, record, closure);
-    return {
-      checkpointCommitRef: binding.checkpointCommitRef,
-      contextCommitRef: binding.contextCommitRef,
-      executionEpoch: binding.coreClosure.executionEpoch,
-      controlCommitRef: journalCommitRef(record),
-    };
-  }
-  return null;
 }
 
 function contextOfPosition(
@@ -224,7 +218,7 @@ export function readCurrentFromRecords(
     const current = readRuntimeTaskCurrentStateFromRecords(records, taskScope);
     if (current.state !== 'known') return { state: 'unknown', reason: current.reason };
 
-    const base = baseExecutionPosition(records, taskScope);
+    const base = baseExecutionPositionFromRecords(records, taskScope);
     if (base === null) {
       return {
         state: 'unknown',
@@ -282,4 +276,273 @@ export function readCurrentFromRecords(
   } catch (error) {
     return { state: 'unknown', reason: `locked current-facts composition failed: ${message(error)}` };
   }
+}
+
+interface TaskGrantRecordRead {
+  readonly grant: CheckpointControlGrant;
+  readonly commitRef: JournalCommitRef;
+}
+
+function readTaskGrantFromRecords(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+): TaskGrantRecordRead | null {
+  let latest: TaskGrantRecordRead | null = null;
+  for (const record of records) {
+    if (record.kind !== 'event' || !record.commitId || record.payload?.['kind'] !== 'task-grant') continue;
+    const grant = record.payload['grant'] as CheckpointControlGrant | undefined;
+    if (!grant) continue;
+    validateCheckpointControlGrant(grant);
+    if (grant.task.value !== taskScope.taskId?.value
+      || grant.capability.scope.organId.value !== taskScope.organId.value
+      || grant.capability.scope.taskId?.value !== taskScope.taskId.value) {
+      throw new Error('task grant does not match the context correction task scope');
+    }
+    latest = {
+      grant,
+      commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
+    };
+  }
+  return latest;
+}
+
+function sameCommit(left: JournalCommitRef, right: JournalCommitRef): boolean {
+  return left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest;
+}
+
+function resolvedBusinessRefsFromRecords(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+): readonly ContextCorrectionRef[] {
+  const refs: ContextCorrectionRef[] = [];
+  const seen = new Set<string>();
+  for (const record of records) {
+    if (!record.commitId) continue;
+    const context = contextHistoryFromRecord(record);
+    if (!context || !inTaskScope(context.scope, taskScope)) continue;
+    for (const ref of context.contextView.activeRefs) {
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      refs.push({ taskScope: { organId: taskScope.organId, taskId: taskScope.taskId! }, ref });
+    }
+  }
+  return Object.freeze(refs);
+}
+
+function sourceCheckpointFromRecords(
+  records: readonly JournalRecord[],
+  command: ConfirmedContextCorrectionCommand,
+): JournalRecord {
+  const record = exactJournalRecord(records, command.basis.sourceCheckpointReceipt);
+  if (record.kind !== 'checkpoint' || !record.checkpoint) {
+    throw new Error('context correction source receipt is not a committed checkpoint');
+  }
+  const taskScope: ScopeRef = {
+    organId: command.basis.taskScope.organId,
+    taskId: command.basis.taskScope.taskId,
+  };
+  if (!inTaskScope(record.checkpoint.scope, taskScope)) {
+    throw new Error('context correction source checkpoint belongs to another task');
+  }
+  return record;
+}
+
+function expectedCurrentControl(
+  records: readonly JournalRecord[],
+  command: ConfirmedContextCorrectionCommand,
+): ReentryCurrentFacts {
+  const taskScope: ScopeRef = {
+    organId: command.basis.taskScope.organId,
+    taskId: command.basis.taskScope.taskId,
+  };
+  const current = readCurrentFromRecords(records, taskScope);
+  if (current.state !== 'known') {
+    throw new Error(`context correction current facts are unknown: ${current.reason}`);
+  }
+  if (current.unresolvedDisplacedRefs.length > 0) {
+    throw new Error('context correction requires a settled current incarnation with no unresolved displaced work');
+  }
+  if (current.position.executionEpoch !== command.basis.expectedExecutionEpoch
+    || !sameCommit(current.position.controlCommitRef, command.basis.expectedControlReceipt)
+    || !sameCommit(current.position.contextCommitRef, command.basis.expectedContextReceipt)) {
+    throw new Error('context correction current control token is stale');
+  }
+  return current;
+}
+
+function assertCurrentOperationControl(
+  records: readonly JournalRecord[],
+  current: ReentryCurrentFacts,
+  command: ConfirmedContextCorrectionCommand,
+): void {
+  const readback = readOperationControlFromRecords(records, {
+    scope: {
+      organId: current.context.scope.organId,
+      taskId: current.context.scope.taskId,
+    },
+    agentRuntimeId: current.context.agentRuntimeId,
+    harnessExecutionEpoch: current.position.executionEpoch,
+  });
+  if (readback.state !== 'complete') {
+    throw new Error(`context correction operation control is unknown: ${readback.reason}`);
+  }
+  if (!sameCommit(readback.currentControlCommitRef, command.expectedOperationControlCommitRef)) {
+    throw new Error('context correction operation control token changed');
+  }
+}
+
+function assertCurrentGrant(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+  command: ConfirmedContextCorrectionCommand,
+): void {
+  const readback = readTaskGrantFromRecords(records, taskScope);
+  if (!readback || readback.grant.state !== 'granted'
+    || readback.grant.owner !== command.basis.principalOwner
+    || String(readback.grant.revision) !== command.permissionRevision
+    || !sameCommit(readback.commitRef, command.expectedGrantCommitRef)) {
+    throw new Error('context correction grant token or permission revision changed');
+  }
+}
+
+function maxExecutionEpochForCorrection(
+  source: JournalRecord,
+  current: ReentryCurrentFacts,
+): number {
+  const sourceEpoch = source.checkpoint?.executionEpoch ?? 0;
+  return Math.max(
+    current.position.executionEpoch,
+    current.context.contextView.executionEpoch,
+    current.context.loopCheckpoint.executionEpoch,
+    sourceEpoch,
+    ...current.fencedBindings.map((fence) => fence.executionEpoch),
+  );
+}
+
+function buildCorrectionFromRecords(
+  records: readonly JournalRecord[],
+  command: ConfirmedContextCorrectionCommand,
+): ContextCorrectionRecord {
+  assertConfirmedContextCorrectionCommand(command);
+  const taskScope: ScopeRef = {
+    organId: command.basis.taskScope.organId,
+    taskId: command.basis.taskScope.taskId,
+  };
+  const source = sourceCheckpointFromRecords(records, command);
+  const current = expectedCurrentControl(records, command);
+  assertCurrentOperationControl(records, current, command);
+  assertCurrentGrant(records, taskScope, command);
+
+  const facts: ContextCorrectionBasisFacts = {
+    commandId: command.basis.commandId,
+    taskScope: command.basis.taskScope,
+    sourceCheckpointReceipt: command.basis.sourceCheckpointReceipt,
+    expectedControlReceipt: command.basis.expectedControlReceipt,
+    expectedContextReceipt: command.basis.expectedContextReceipt,
+    expectedExecutionEpoch: command.basis.expectedExecutionEpoch,
+    repairText: command.basis.repairText,
+    confirmationRef: command.basis.confirmationRef,
+    principalOwner: command.basis.principalOwner,
+    source: {
+      taskScope: command.basis.taskScope,
+      checkpointReceipt: command.basis.sourceCheckpointReceipt,
+    },
+    current: {
+      taskScope: command.basis.taskScope,
+      controlReceipt: current.position.controlCommitRef,
+      contextReceipt: current.position.contextCommitRef,
+      executionEpoch: current.position.executionEpoch,
+    },
+    wrongRefs: command.basis.wrongRefs,
+    resolvedBusinessRefs: resolvedBusinessRefsFromRecords(records, taskScope),
+  };
+  const basis = buildConfirmedContextCorrectionBasis(facts);
+  if (JSON.stringify(basis) !== JSON.stringify(command.basis)) {
+    throw new Error('context correction confirmed basis conflicts with authoritative Journal facts');
+  }
+  return buildContextCorrection({
+    command,
+    sourceCheckpoint: source.checkpoint!,
+    current,
+    maxExecutionEpoch: maxExecutionEpochForCorrection(source, current),
+  });
+}
+
+/**
+ * App-owned correction submission over the authoritative Organ Journal. The
+ * viewed checkpoint is resolved only as a source pointer. Current Context,
+ * committed business refs, grant, operation control and CAS all come from the
+ * same locked Journal records.
+ */
+export function createJsonlContextCorrectionSubmissionPort(input: {
+  readonly filePath: string;
+  readonly journal?: JsonlOrganJournal;
+}): ContextCorrectionSubmissionPort {
+  if (!input.filePath.trim()) throw new Error('context correction journal path is required');
+  const journal = input.journal ?? new JsonlOrganJournal(input.filePath);
+
+  async function records(): Promise<readonly JournalRecord[]> {
+    const verification = await journal.verify();
+    if (!verification.valid) throw new Error(verification.error ?? 'context correction Journal is invalid');
+    return verification.records;
+  }
+
+  return {
+    async prepare(command: ConfirmedContextCorrectionCommand): Promise<ContextCorrectionRecord> {
+      return buildCorrectionFromRecords(await records(), command);
+    },
+
+    async commitContextCorrectionRecord(
+      record: ContextCorrectionRecord,
+      expectedCurrentControlCommitRef: JournalCommitRef,
+    ): Promise<JournalCommitRef> {
+      const command = {
+        basis: record.basis,
+        expectedOperationControlCommitRef: record.expectedOperationControlCommitRef,
+        expectedGrantCommitRef: record.expectedGrantCommitRef,
+        permissionRevision: record.permissionRevision,
+      };
+      assertConfirmedContextCorrectionCommand(command);
+      if (record.closureId !== contextCorrectionIdentity(command)
+        || !sameContextCorrectionCommand(command, {
+          basis: record.basis,
+          expectedOperationControlCommitRef: record.expectedOperationControlCommitRef,
+          expectedGrantCommitRef: record.expectedGrantCommitRef,
+          permissionRevision: record.permissionRevision,
+        })) {
+        throw new Error('context correction record does not match its confirmed command');
+      }
+      return commitConditionalTransitionRecord({
+        journal,
+        record,
+        expectedCurrentControlCommitRef,
+        validateLocked: (lockedRecords) => {
+          const rebuilt = buildCorrectionFromRecords(lockedRecords, command);
+          if (JSON.stringify(rebuilt) !== JSON.stringify(record)) {
+            throw new Error('context correction transition conflicts with locked authoritative facts');
+          }
+        },
+      });
+    },
+
+    async readContextCorrection(
+      taskScope: ScopeRef,
+      commandId: string,
+    ): Promise<ContextCorrectionReadback | null> {
+      const recordsValue = await records();
+      for (const record of recordsValue) {
+        const correction = contextCorrectionFromRecord(record);
+        if (!correction || correction.basis.commandId !== commandId) continue;
+        if (!inTaskScope(correction.scope, taskScope)) continue;
+        if (!record.commitId) throw new Error('context correction record has no physical commit identity');
+        return {
+          record: correction,
+          commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
+        };
+      }
+      return null;
+    },
+  };
 }
