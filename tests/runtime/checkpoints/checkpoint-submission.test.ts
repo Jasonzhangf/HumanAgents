@@ -3,7 +3,9 @@ import test from 'node:test';
 import {
   id,
   type Checkpoint,
+  type ContextHistoryRecord,
   type EvidenceRef,
+  type JournalCommitRef,
   type OperationId,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
@@ -13,14 +15,9 @@ import type {
   CheckpointChainVerification,
   CheckpointClosurePort,
   CheckpointJournalPort,
-  CheckpointListQuery,
-  CheckpointListResult,
-  CheckpointRecoveryBinding,
   CheckpointReentryAdmissionDecision,
   CheckpointReentryAdmissionPort,
-  CommittedCheckpointRecord,
-  ExecutionPosition,
-  JournalCommitRef,
+  ConditionalReentrySubmissionPort,
   LatestCheckpointRecord,
 } from '../../../packages/runtime/src/checkpoints/ports.js';
 import type {
@@ -38,11 +35,19 @@ import {
   submitInteractionClosure,
   type SubmitCheckpointInput,
 } from '../../../packages/runtime/src/checkpoints/submission.js';
-import { checkpointCommitId } from '../../../packages/runtime/src/checkpoints/coordinator.js';
+import { checkpointCommitId, durableContextDigest } from '../../../packages/runtime/src/checkpoints/coordinator.js';
 import { reconcileUnknownOperations } from '../../../packages/runtime/src/checkpoints/closure.js';
+import {
+  buildConditionalReentry,
+  type ConfirmedReentryCommand,
+  type ConditionalReentryRecord,
+  type ReentryCurrentFacts,
+} from '../../../packages/runtime/src/checkpoints/conditional-reentry.js';
 import {
   CheckpointSubmissionError,
 } from '../../../packages/runtime/src/checkpoints/errors.js';
+import { assertReentryRecord } from '../../../packages/runtime/src/checkpoints/closure.js';
+import { assertConditionalReentryRecord } from '../../../packages/runtime/src/checkpoints/conditional-reentry.js';
 import {
   recordDeadEndTool,
   reenterCheckpointTool,
@@ -95,13 +100,6 @@ function checkpoint(
   };
 }
 
-function committedRefFor(checkpoint: Checkpoint): JournalCommitRef {
-  // This double records committed checkpoints, not Journal receipts. It exposes the
-  // canonical checkpoint commit id as a stable exact reference for readback parity.
-  const commitId = checkpointCommitId(checkpoint);
-  return { commitId, journalSeq: checkpoint.seq, recordDigest: commitId };
-}
-
 class FakeJournal implements CheckpointJournalPort {
   verification: CheckpointChainVerification = { valid: true };
   readonly latestByScope = new Map<string, LatestCheckpointRecord>();
@@ -138,35 +136,29 @@ class FakeJournal implements CheckpointJournalPort {
     return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq };
   }
 
-  // Submission paths use verify/readLatest/append only. The exact readers below are
-  // implemented over this double's committed state so the port stays honest. They are
-  // instance properties so a spread of this journal keeps the full read surface.
-  readCommitted = async (scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null> => {
-    const record = this.latestByScope.get(this.scopeKey(scope));
-    if (!record) return null;
-    if (record.checkpoint.id.scope !== checkpointId.scope || record.checkpoint.id.value !== checkpointId.value) return null;
-    return { checkpoint: record.checkpoint, previous: record.previous, commitRef: committedRefFor(record.checkpoint) };
-  };
+  async readCommitted(
+    ..._args: Parameters<CheckpointJournalPort['readCommitted']>
+  ): ReturnType<CheckpointJournalPort['readCommitted']> {
+    throw new Error('FakeJournal.readCommitted is unsupported in this fixture');
+  }
 
-  listCommitted = async (query: CheckpointListQuery): Promise<CheckpointListResult> => {
-    const record = this.latestByScope.get(this.scopeKey(query.scope));
-    if (!record) return { checkpoints: [] };
-    const { checkpoint } = record;
-    if (query.directiveRevision !== undefined && checkpoint.directiveRevision !== query.directiveRevision) return { checkpoints: [] };
-    if (query.executionEpoch !== undefined && checkpoint.executionEpoch !== query.executionEpoch) return { checkpoints: [] };
-    if (query.cycleId !== undefined && (checkpoint.cycleId.scope !== query.cycleId.scope || checkpoint.cycleId.value !== query.cycleId.value)) return { checkpoints: [] };
-    if (!Number.isSafeInteger(query.limit) || query.limit < 1) return { checkpoints: [] };
-    return { checkpoints: [{ checkpoint, previous: record.previous, commitRef: committedRefFor(checkpoint) }] };
-  };
+  async listCommitted(
+    ..._args: Parameters<CheckpointJournalPort['listCommitted']>
+  ): ReturnType<CheckpointJournalPort['listCommitted']> {
+    throw new Error('FakeJournal.listCommitted is unsupported in this fixture');
+  }
 
-  // This double records checkpoint commits only; no recovery binding or execution
-  // position is committed here, so the exact lookup returns the honest absent result.
-  readExecutionPosition = async (_taskScope: ScopeRef): Promise<ExecutionPosition | null> => null;
+  async readExecutionPosition(
+    ..._args: Parameters<CheckpointJournalPort['readExecutionPosition']>
+  ): ReturnType<CheckpointJournalPort['readExecutionPosition']> {
+    throw new Error('FakeJournal.readExecutionPosition is unsupported in this fixture');
+  }
 
-  readCheckpointRecoveryBinding = async (
-    _scope: ScopeRef,
-    _checkpointCommitRef: JournalCommitRef,
-  ): Promise<CheckpointRecoveryBinding | null> => null;
+  async readCheckpointRecoveryBinding(
+    ..._args: Parameters<CheckpointJournalPort['readCheckpointRecoveryBinding']>
+  ): ReturnType<CheckpointJournalPort['readCheckpointRecoveryBinding']> {
+    throw new Error('FakeJournal.readCheckpointRecoveryBinding is unsupported in this fixture');
+  }
 }
 
 class FakeClosurePort implements CheckpointClosurePort {
@@ -358,6 +350,223 @@ test('reconcile operation port separates resolved unknowns from unresolved unkno
   ]);
 });
 
+function journalCommitRef(name: string, journalSeq: number): JournalCommitRef {
+  return { commitId: `commit-${name}`, journalSeq, recordDigest: `sha256:${name}` };
+}
+
+interface ConditionalReentryFixture {
+  readonly taskScope: ScopeRef;
+  readonly command: ConfirmedReentryCommand;
+  readonly prepared: ConditionalReentryRecord;
+  readonly preparedCommands: ConfirmedReentryCommand[];
+  readonly commits: Array<{ readonly record: ConditionalReentryRecord; readonly expected: JournalCommitRef }>;
+  readonly reads: Array<{ readonly scope: ScopeRef; readonly commandId: string }>;
+  readonly port: ConditionalReentrySubmissionPort;
+}
+
+/**
+ * Minimal in-file conditional reentry fixture. It reuses the production builder
+ * and the ConditionalReentrySubmissionPort seam so the reentry cases exercise
+ * the Runtime contract instead of the legacy read-only gate. The double keeps
+ * the first committed record per command id: an exact retry reads that record
+ * back (idempotent), while a changed command under the same id fails the exact
+ * readback comparison in commitReentry.
+ */
+function conditionalReentryFixture(committedCheckpoint: Checkpoint, sourceClosureRef: string): ConditionalReentryFixture {
+  const taskScope: ScopeRef = { organId: organ, taskId: task };
+  const contextHistory = (agentRuntimeId: string, executionEpoch: number, suffix: string): ContextHistoryRecord => {
+    const checkpointRef = { checkpointId: id('checkpoint', `loop-${suffix}`), digest: `sha256:loop-${suffix}` };
+    const observationScopeId = `observation-${suffix}`;
+    const durableContext = { stablePrefix: [{ goal: 'resume confirmed path' }], indexRefs: [], dynamicHead: [], repairRefs: [] };
+    return {
+      kind: 'context-history',
+      schemaVersion: 1,
+      scope: taskScope,
+      agentRuntimeId,
+      contextView: {
+        contextViewRef: `context-${suffix}`,
+        executionEpoch,
+        checkpoint: checkpointRef,
+        contextDigest: `sha256:context-${suffix}`,
+        activeRefs: ['task:goal'],
+        omittedRefs: [],
+      },
+      loopCheckpoint: {
+        ...checkpointRef,
+        sequence: 1,
+        executionEpoch,
+        observationScopeId,
+        contextViewRef: `context-${suffix}`,
+        eventWatermark: { streamId: `stream-${suffix}`, sequence: 0 },
+        predecessor: null,
+      },
+      replacement: null,
+      previousContextCommitRef: null,
+      durableContext,
+      durableContextDigest: durableContextDigest(durableContext),
+      loopControl: {
+        mode: 'orchestration',
+        transitionSeq: 1,
+        observationScopeId,
+        observationScope: null,
+        inboxStreamId: `stream-${suffix}`,
+        inboxExecutionEpoch: executionEpoch,
+        inboxCheckpoint: checkpointRef,
+        inboxObservationScopeId: observationScopeId,
+        inboxWatermark: 0,
+        handledEventIds: [],
+        handledBatchKeys: [],
+        deltaExecutionEpoch: executionEpoch,
+        deltaCheckpoint: checkpointRef,
+        deltaObservationScopeId: observationScopeId,
+        deltaWatermark: { streamId: `stream-${suffix}`, sequence: 0 },
+        appliedDeltaIds: [],
+        appliedDeltaKeys: [],
+        closedObservationScopeIds: [],
+        budgetUsage: { modeTransitions: 0, observationScopes: 0, contextReplacements: 0, deferredEvents: 0 },
+      },
+    };
+  };
+  const command: ConfirmedReentryCommand = {
+    commandId: 'reentry-conditional',
+    taskScope,
+    targetCheckpointCommitRef: journalCommitRef('target-checkpoint', 1),
+    expectedCurrentControlCommitRef: journalCommitRef('current-control', 2),
+    expectedExecutionEpoch: committedCheckpoint.executionEpoch,
+    expectedOperationControlCommitRef: journalCommitRef('operation-control', 3),
+    expectedGrantCommitRef: journalCommitRef('grant', 4),
+    permissionRevision: 'permission-revision-a',
+    confirmationRef: 'confirmation-a',
+    principalOwner: 'task-owner',
+  };
+  const targetContext = contextHistory('runtime-target', committedCheckpoint.executionEpoch, 'target');
+  const currentContext = contextHistory('runtime-current', committedCheckpoint.executionEpoch, 'current');
+  const current: ReentryCurrentFacts = {
+    state: 'known',
+    stateCommitRef: journalCommitRef('state', 5),
+    task: {
+      id: task,
+      organId: organ,
+      title: 'reentry task',
+      directive: 'continue the confirmed path',
+      directiveRevision: 2,
+      state: 'waiting',
+      memoryScope: 'task',
+    },
+    position: {
+      checkpointCommitRef: command.targetCheckpointCommitRef,
+      contextCommitRef: journalCommitRef('current-context', 6),
+      executionEpoch: committedCheckpoint.executionEpoch,
+      controlCommitRef: command.expectedCurrentControlCommitRef,
+    },
+    context: currentContext,
+    entryPhase: 'orchestration',
+    nextAction: 'continue:after-reentry',
+    fencedBindings: [{
+      scope: taskScope,
+      agentRuntimeId: currentContext.agentRuntimeId,
+      executionEpoch: committedCheckpoint.executionEpoch,
+    }],
+    retainedDuties: [],
+    unresolvedDisplacedRefs: [],
+  };
+  const buildInput = {
+    command,
+    targetScope: taskScope,
+    targetContext,
+    targetClosure: {
+      checkpointId: committedCheckpoint.id,
+      source: 'agent-tool' as const,
+      closureReason: 'confirmed reentry target',
+      executionEpoch: committedCheckpoint.executionEpoch,
+      committed: true,
+      reentryAllowed: true,
+      pendingOperations: [],
+      unknownOperations: [],
+      recoveryStateRef: committedCheckpoint.recoveryStateRef,
+      nextAction: { kind: 'continue' as const, ref: 'after-reentry' },
+      closedAt: '2026-10-15T00:00:00.000Z',
+    },
+    sourceContextCommitRef: journalCommitRef('target-context', 7),
+    sourceClosureRef,
+    current,
+    maxExecutionEpoch: committedCheckpoint.executionEpoch,
+  };
+  const prepared = buildConditionalReentry(buildInput);
+  const preparedCommands: ConfirmedReentryCommand[] = [];
+  const commits: ConditionalReentryFixture['commits'] = [];
+  const reads: ConditionalReentryFixture['reads'] = [];
+  const committedByCommand = new Map<string, { readonly record: ConditionalReentryRecord; readonly commitRef: JournalCommitRef }>();
+  const port: ConditionalReentrySubmissionPort = {
+    async prepare(received) {
+      preparedCommands.push(received);
+      return buildConditionalReentry({ ...buildInput, command: received });
+    },
+    async commitReentryRecord(record, expected) {
+      const existing = committedByCommand.get(record.command.commandId);
+      if (existing) return existing.commitRef;
+      const commitRef = journalCommitRef('conditional-reentry', 8);
+      committedByCommand.set(record.command.commandId, { record, commitRef });
+      commits.push({ record, expected });
+      return commitRef;
+    },
+    async readReentry(readScope, commandId) {
+      reads.push({ scope: readScope, commandId });
+      const entry = committedByCommand.get(commandId);
+      return entry ? { record: entry.record, commitRef: entry.commitRef } : null;
+    },
+  };
+  return { taskScope, command, prepared, preparedCommands, commits, reads, port };
+}
+
+/**
+ * A conditional reentry port whose prepare runs the real production validators
+ * against a caller-supplied record. The negative cases therefore fail inside the
+ * Runtime contract instead of the legacy entry gate. Commit and readback stay
+ * unreachable because preparation must reject first.
+ */
+function preparedValidationPort(
+  record: ConditionalReentryRecord,
+  validation: { readonly targetExecutionEpoch?: number; readonly currentExecutionEpoch?: number } = {},
+): ConditionalReentrySubmissionPort {
+  return {
+    async prepare() {
+      assertReentryRecord(record);
+      assertConditionalReentryRecord({
+        record,
+        targetExecutionEpoch: validation.targetExecutionEpoch ?? record.checkpointExecutionEpoch,
+        currentExecutionEpoch: validation.currentExecutionEpoch ?? record.previousExecutionEpoch,
+        permissionRevision: record.coreReentry.permissionRevision,
+        command: record.command,
+        restoredContext: record.restoredContext,
+      });
+      return record;
+    },
+    async commitReentryRecord() {
+      throw new Error('unreachable: preparation must reject before commit');
+    },
+    async readReentry() {
+      throw new Error('unreachable: preparation must reject before readback');
+    },
+  };
+}
+
+/**
+ * Assert that a rejection happens and that its message matches a pattern. The
+ * shared Node ambient types reject the RegExp overload of assert.rejects, so the
+ * message is captured and matched with the declared assert.equal.
+ */
+async function rejectsWithMessage(fn: () => Promise<unknown>, pattern: RegExp): Promise<void> {
+  let message: string | null = null;
+  try {
+    await fn();
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  assert.equal(message === null, false, `expected a rejection matching ${pattern}`);
+  assert.equal(pattern.test(message ?? ''), true, `rejection message did not match ${pattern}: ${message}`);
+}
+
 test('dead-end and reentry tools commit separate closure facts before reentry is allowed', async () => {
   const journal = new FakeJournal();
   const closurePort = new FakeClosurePort();
@@ -390,24 +599,33 @@ test('dead-end and reentry tools commit separate closure facts before reentry is
     journal,
     closurePort,
   });
-  const reentry = await reenterCheckpointTool(context, {
-    closureId: 'reentry-a',
-    checkpoint: committedCheckpoint,
-    previousExecutionEpoch: 4,
-    newExecutionEpoch: 5,
-    deadEndRef: 'dead-end-a',
-    nextAction: { kind: 'continue', ref: 'after-dead-end' },
-  });
+  const originalClosureIds = closurePort.committed.map((record) =>
+    'closureId' in record ? record.closureId : record.deadEndRef);
+  assert.deepEqual(originalClosureIds, [
+    'dead-end-a',
+    `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`,
+  ]);
+
+  const canonicalRef = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
+  const { taskScope, command, port, preparedCommands, commits, reads } =
+    conditionalReentryFixture(committedCheckpoint, canonicalRef);
+
+  const reentry = await reenterCheckpointTool(context, { port, command });
   assert.equal(reentry.state, 'committed');
   assert.equal(reentry.record.reentry.allowed, true);
-  assert.equal(admissionPort.calls.length, 1);
-  assert.equal(admissionPort.calls[0]?.checkpoint.id.value, committedCheckpoint.id.value);
+  assert.equal(preparedCommands.length, 1);
+  assert.equal(preparedCommands[0], command);
+  assert.equal(commits.length, 1);
+  assert.deepEqual(commits[0]?.expected, command.expectedCurrentControlCommitRef);
+  assert.deepEqual(reads, [{ scope: taskScope, commandId: command.commandId }]);
+  assert.equal(admissionPort.calls.length, 0);
+  assert.deepEqual(closurePort.committed.map((record) =>
+    'closureId' in record ? record.closureId : record.deadEndRef), originalClosureIds);
 });
 
 test('reentry retries are idempotent and reject a reused closure id with different content', async () => {
   const journal = new FakeJournal();
   const closurePort = new FakeClosurePort();
-  const admissionPort = new FakeAdmissionPort();
   const committedCheckpoint = checkpoint(1, null);
   await submitCheckpoint({
     source: 'agent-tool',
@@ -417,34 +635,37 @@ test('reentry retries are idempotent and reject a reused closure id with differe
     journal,
     closurePort,
   });
-  const input = {
-    ownerId: 'task-owner',
-    closureId: 'reentry-idempotent',
-    checkpoint: committedCheckpoint,
-    previousExecutionEpoch: 4,
-    newExecutionEpoch: 5,
-    nextAction: { kind: 'continue' as const, ref: 'after-reentry' },
-    journal,
-    closurePort,
-    admissionPort,
-  };
+  const canonicalRef = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
+  const { taskScope, command, port, commits, reads } = conditionalReentryFixture(committedCheckpoint, canonicalRef);
 
-  const first = await commitReentry(input);
+  const first = await commitReentry({ ownerId: 'task-owner', conditional: { port, command } });
+  assert.equal(first.state, 'committed');
+
+  // An exact retry under the same command id reuses the first committed fact
+  // without appending a second one, even though the journal has moved on.
   journal.latest = {
     checkpoint: checkpoint(2, committedCheckpoint.id, { id: id('checkpoint', 'checkpoint-later') }),
     previous: committedCheckpoint,
   };
-  const retry = await commitReentry(input);
+  const retry = await commitReentry({ ownerId: 'task-owner', conditional: { port, command } });
   assert.deepEqual(retry, first);
-  assert.equal(admissionPort.calls.length, 1);
-  assert.equal(closurePort.committed.length, 2);
+  assert.equal(commits.length, 1);
+  assert.equal(closurePort.committed.length, 1);
 
-  await assert.rejects(
-    () => commitReentry({ ...input, newExecutionEpoch: 6 }),
-    CheckpointSubmissionError,
+  // The same command id with changed confirmed content is rejected by the exact
+  // readback comparison instead of overwriting the first committed record.
+  const conflictingCommand: ConfirmedReentryCommand = { ...command, confirmationRef: 'confirmation-conflict' };
+  await rejectsWithMessage(
+    () => commitReentry({ ownerId: 'task-owner', conditional: { port, command: conflictingCommand } }),
+    /reentry exact readback is absent or different/,
   );
-  assert.equal(admissionPort.calls.length, 1);
-  assert.equal(closurePort.committed.length, 2);
+  assert.equal(commits.length, 1);
+  assert.equal(closurePort.committed.length, 1);
+  assert.deepEqual(reads, [
+    { scope: taskScope, commandId: command.commandId },
+    { scope: taskScope, commandId: command.commandId },
+    { scope: taskScope, commandId: command.commandId },
+  ]);
 });
 
 test('checkpoint.save tool exposes committed versus blocked outcomes without bypassing unified submission', async () => {
@@ -651,15 +872,16 @@ test('legacy checkpoint closure ids remain readable for submission retries and r
   const input = submissionInput();
   assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version, 1);
   assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.scope, 'checkpoint-id');
+  const legacyClosureId = `checkpoint-closure:${input.checkpoint.id.value}`;
   await input.journal.append({
     ownerId: 'task-owner',
     commitId: checkpointCommitId(input.checkpoint),
     checkpoint: input.checkpoint,
   });
-  input.closurePort.records.set(`checkpoint-closure:${input.checkpoint.id.value}`, {
+  input.closurePort.records.set(legacyClosureId, {
     closureKind: 'checkpoint',
     compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version,
-    closureId: `checkpoint-closure:${input.checkpoint.id.value}`,
+    closureId: legacyClosureId,
     checkpointId: input.checkpoint.id,
     source: 'agent-tool',
     outcome: input.checkpoint.outcome,
@@ -673,19 +895,29 @@ test('legacy checkpoint closure ids remain readable for submission retries and r
   assert.equal(retried.state, 'committed');
   assert.equal(input.closurePort.committed.length, 0);
 
-  const reentry = await commitReentry({
-    ownerId: 'task-owner',
-    closureId: 'reentry-from-legacy-closure',
-    checkpoint: input.checkpoint,
-    previousExecutionEpoch: input.checkpoint.executionEpoch,
-    newExecutionEpoch: input.checkpoint.executionEpoch + 1,
-    nextAction: { kind: 'continue', ref: 'after-legacy-reentry' },
-    journal: input.journal,
-    closurePort: input.closurePort,
-    admissionPort: new FakeAdmissionPort(),
-  });
-  assert.equal(reentry.state, 'committed');
-  assert.equal(input.closurePort.committed.length, 1);
+  // Reading a legacy closure never authorizes an unbound mutation.
+  await rejectsWithMessage(
+    () => commitReentry({
+      ownerId: 'task-owner',
+      closureId: 'reentry-from-legacy-closure',
+      checkpoint: input.checkpoint,
+      previousExecutionEpoch: input.checkpoint.executionEpoch,
+      newExecutionEpoch: input.checkpoint.executionEpoch + 1,
+      nextAction: { kind: 'continue', ref: 'after-legacy-reentry' },
+      journal: input.journal,
+      closurePort: input.closurePort,
+      admissionPort: new FakeAdmissionPort(),
+    }),
+    /legacy unbound reentry is read-only/,
+  );
+
+  // A confirmed conditional command may reuse the decoded legacy closure as its source.
+  const { command, port, commits } = conditionalReentryFixture(input.checkpoint, legacyClosureId);
+  const committed = await commitReentry({ ownerId: 'task-owner', conditional: { port, command } });
+  assert.equal(committed.state, 'committed');
+  assert.equal(committed.record.sourceClosureRef, legacyClosureId);
+  assert.equal(commits.length, 1);
+  assert.equal(input.closurePort.committed.length, 0);
 });
 
 test('pre-version legacy checkpoint closures infer v1 for retry and reentry', async () => {
@@ -712,18 +944,12 @@ test('pre-version legacy checkpoint closures infer v1 for retry and reentry', as
   assert.equal(retried.state, 'committed');
   assert.equal(retried.closure.compatibilityVersion, undefined);
 
-  const reentry = await commitReentry({
-    ownerId: 'task-owner',
-    closureId: 'reentry-from-pre-version-legacy-closure',
-    checkpoint: input.checkpoint,
-    previousExecutionEpoch: input.checkpoint.executionEpoch,
-    newExecutionEpoch: input.checkpoint.executionEpoch + 1,
-    nextAction: { kind: 'continue', ref: 'after-pre-version-legacy-reentry' },
-    journal: input.journal,
-    closurePort: input.closurePort,
-    admissionPort: new FakeAdmissionPort(),
-  });
+  const { command, port, commits } = conditionalReentryFixture(input.checkpoint, legacyId);
+  const reentry = await commitReentry({ ownerId: 'task-owner', conditional: { port, command } });
   assert.equal(reentry.state, 'committed');
+  assert.equal(reentry.record.sourceClosureRef, legacyId);
+  assert.equal(commits.length, 1);
+  assert.equal(input.closurePort.committed.length, 0);
 });
 
 test('legacy checkpoint closure mismatches fail explicitly without canonical fallback', async () => {
@@ -842,18 +1068,12 @@ test('pre-version canonical checkpoint closures infer v2 for retry and reentry',
   assert.equal(retried.state, 'committed');
   assert.equal(retried.closure.compatibilityVersion, undefined);
 
-  const reentry = await commitReentry({
-    ownerId: 'task-owner',
-    closureId: 'reentry-from-pre-version-canonical-closure',
-    checkpoint: input.checkpoint,
-    previousExecutionEpoch: input.checkpoint.executionEpoch,
-    newExecutionEpoch: input.checkpoint.executionEpoch + 1,
-    nextAction: { kind: 'continue', ref: 'after-pre-version-canonical-reentry' },
-    journal: input.journal,
-    closurePort: input.closurePort,
-    admissionPort: new FakeAdmissionPort(),
-  });
+  const { command, port, commits } = conditionalReentryFixture(input.checkpoint, canonicalId);
+  const reentry = await commitReentry({ ownerId: 'task-owner', conditional: { port, command } });
   assert.equal(reentry.state, 'committed');
+  assert.equal(reentry.record.sourceClosureRef, canonicalId);
+  assert.equal(commits.length, 1);
+  assert.equal(input.closurePort.committed.length, 0);
 });
 
 test('checkpoint submission rejects a canonical closure whose stored identity does not match its key', async () => {
@@ -964,7 +1184,6 @@ test('reentry rejects wrong checkpoint epoch, non-increasing epoch, and non-reen
   const committedCheckpoint = checkpoint(1, null);
   const journal = new FakeJournal();
   const closurePort = new FakeClosurePort();
-  const admissionPort = new FakeAdmissionPort();
   await submitCheckpoint({
     source: 'agent-tool',
     ownerId: 'task-owner',
@@ -973,50 +1192,41 @@ test('reentry rejects wrong checkpoint epoch, non-increasing epoch, and non-reen
     journal,
     closurePort,
   });
-  const base = {
-    ownerId: 'task-owner',
-    checkpoint: committedCheckpoint,
-    journal,
-    closurePort,
-    admissionPort,
-    nextAction: { kind: 'continue' as const, ref: 'after-dead-end' },
-  };
+  const canonicalRef = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
+  const { command, prepared, commits } = conditionalReentryFixture(committedCheckpoint, canonicalRef);
 
-  await assert.rejects(
+  // The target epoch must match the committed target recovered under the lock.
+  await rejectsWithMessage(
     () => commitReentry({
-      ...base,
-      closureId: 'reentry-wrong-checkpoint-epoch',
-      previousExecutionEpoch: 3,
-      newExecutionEpoch: 5,
+      ownerId: 'task-owner',
+      conditional: { port: preparedValidationPort(prepared, { targetExecutionEpoch: prepared.checkpointExecutionEpoch + 1 }), command },
     }),
-    CheckpointSubmissionError,
+    /target epoch must match/,
   );
-  await assert.rejects(
+  // The new execution epoch must exceed the displaced epoch.
+  await rejectsWithMessage(
     () => commitReentry({
-      ...base,
-      closureId: 'reentry-same-epoch',
-      previousExecutionEpoch: 4,
-      newExecutionEpoch: 4,
+      ownerId: 'task-owner',
+      conditional: { port: preparedValidationPort({ ...prepared, newExecutionEpoch: prepared.previousExecutionEpoch }), command },
     }),
-    CheckpointSubmissionError,
+    /must create a new execution epoch/,
   );
-  await assert.rejects(
+  // A next action that does not allow reentry is rejected.
+  await rejectsWithMessage(
     () => commitReentry({
-      ...base,
-      closureId: 'reentry-stop-next',
-      previousExecutionEpoch: 4,
-      newExecutionEpoch: 5,
-      nextAction: { kind: 'stop', ref: 'stop-instead-of-reentry' },
+      ownerId: 'task-owner',
+      conditional: { port: preparedValidationPort({ ...prepared, nextAction: { kind: 'stop', ref: 'stop-instead-of-reentry' } }), command },
     }),
-    CheckpointSubmissionError,
+    /reentry next action must allow reentry/,
   );
+  assert.equal(commits.length, 0);
+  assert.equal(closurePort.committed.length, 1);
 });
 
 test('reentry rejects missing committed closure, wrong checkpoint identity, stale epochs, and denied admission', async () => {
   const committedCheckpoint = checkpoint(1, null);
   const journal = new FakeJournal();
   const closurePort = new FakeClosurePort();
-  const admissionPort = new FakeAdmissionPort();
   await submitCheckpoint({
     source: 'agent-tool',
     ownerId: 'task-owner',
@@ -1025,69 +1235,54 @@ test('reentry rejects missing committed closure, wrong checkpoint identity, stal
     journal,
     closurePort,
   });
-  const base = {
-    ownerId: 'task-owner',
-    checkpoint: committedCheckpoint,
-    journal,
-    closurePort,
-    admissionPort,
-    nextAction: { kind: 'continue' as const, ref: 'after-reentry' },
-  };
+  const canonicalRef = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
+  const { command, prepared, port } = conditionalReentryFixture(committedCheckpoint, canonicalRef);
 
-  const noClosureJournal = new FakeJournal();
-  const noClosurePort = new FakeClosurePort();
-  await noClosureJournal.append({
-    ownerId: 'task-owner',
-    commitId: checkpointCommitId(committedCheckpoint),
-    checkpoint: committedCheckpoint,
-  });
-  await assert.rejects(
+  // Missing committed reentry: the port commits but the exact readback is absent.
+  await rejectsWithMessage(
     () => commitReentry({
-      ...base,
-      journal: noClosureJournal,
-      closurePort: noClosurePort,
-      closureId: 'reentry-no-closure',
-      previousExecutionEpoch: 4,
-      newExecutionEpoch: 5,
+      ownerId: 'task-owner',
+      conditional: { port: { ...port, async readReentry() { return null; } }, command },
     }),
-    CheckpointSubmissionError,
+    /reentry exact readback is absent or different/,
   );
-
-  const wrongCheckpoint = checkpoint(2, committedCheckpoint.id, { id: id('checkpoint', 'checkpoint-other') });
-  await assert.rejects(
+  // Wrong committed identity: the readback returns a different record.
+  await rejectsWithMessage(
     () => commitReentry({
-      ...base,
-      checkpoint: wrongCheckpoint,
-      closureId: 'reentry-wrong-identity',
-      previousExecutionEpoch: 4,
-      newExecutionEpoch: 5,
+      ownerId: 'task-owner',
+      conditional: {
+        port: {
+          ...port,
+          async readReentry() {
+            return { record: { ...prepared, newExecutionEpoch: prepared.newExecutionEpoch + 1 }, commitRef: journalCommitRef('different', 9) };
+          },
+        },
+        command,
+      },
     }),
-    CheckpointSubmissionError,
+    /reentry exact readback is absent or different/,
   );
-
-  await assert.rejects(
+  // A stale displaced epoch must not be treated as the current position.
+  await rejectsWithMessage(
     () => commitReentry({
-      ...base,
-      closureId: 'reentry-stale-old-epoch',
-      previousExecutionEpoch: 3,
-      newExecutionEpoch: 5,
+      ownerId: 'task-owner',
+      conditional: { port: preparedValidationPort(prepared, { currentExecutionEpoch: prepared.previousExecutionEpoch + 1 }), command },
     }),
-    CheckpointSubmissionError,
+    /displaced epoch must match/,
   );
-
-  admissionPort.decision = {
-    allowed: false,
-    reason: 'permission revoked and resources are not admitted',
-    blockedBy: ['permission-revoked', 'resource-admission'],
-  };
-  await assert.rejects(
+  // A fence at or above the new execution epoch is rejected.
+  await rejectsWithMessage(
     () => commitReentry({
-      ...base,
-      closureId: 'reentry-admission-denied',
-      previousExecutionEpoch: 4,
-      newExecutionEpoch: 5,
+      ownerId: 'task-owner',
+      conditional: {
+        port: preparedValidationPort({
+          ...prepared,
+          fencedBindings: prepared.fencedBindings.map((fence) => ({ ...fence, executionEpoch: prepared.newExecutionEpoch })),
+        }),
+        command,
+      },
     }),
-    CheckpointSubmissionError,
+    /must fence epochs below/,
   );
   assert.equal(closurePort.committed.length, 1);
 });
@@ -1105,31 +1300,19 @@ test('reentry rejects a canonical closure that mismatches the committed checkpoi
     closurePort,
   });
   const canonicalId = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
-  const committedClosure = closurePort.records.get(canonicalId);
-  if (!committedClosure || !('closureKind' in committedClosure) || committedClosure.closureKind !== 'checkpoint') {
-    throw new Error('expected a committed checkpoint closure');
-  }
-  closurePort.records.set(canonicalId, {
-    ...committedClosure,
-    summary: 'tampered canonical summary',
-  });
-  const admissionPort = new FakeAdmissionPort();
+  const { command, prepared } = conditionalReentryFixture(committedCheckpoint, canonicalId);
+  const tamperedCommand: ConfirmedReentryCommand = { ...command, confirmationRef: 'confirmation-tampered' };
+  const port: ConditionalReentrySubmissionPort = {
+    async prepare() { return { ...prepared, command: tamperedCommand }; },
+    async commitReentryRecord() { throw new Error('unreachable: preparation must reject before commit'); },
+    async readReentry() { return null; },
+  };
 
-  await assert.rejects(
-    () => commitReentry({
-      ownerId: 'task-owner',
-      closureId: 'reentry-canonical-mismatch',
-      checkpoint: committedCheckpoint,
-      previousExecutionEpoch: committedCheckpoint.executionEpoch,
-      newExecutionEpoch: committedCheckpoint.executionEpoch + 1,
-      nextAction: { kind: 'continue', ref: 'after-canonical-mismatch' },
-      journal,
-      closurePort,
-      admissionPort,
-    }),
-    CheckpointSubmissionError,
+  // Preparation must return the confirmed command unchanged.
+  await rejectsWithMessage(
+    () => commitReentry({ ownerId: 'task-owner', conditional: { port, command } }),
+    /conditional preparation changed the confirmed command/,
   );
-  assert.equal(admissionPort.calls.length, 0);
   assert.equal(closurePort.committed.length, 1);
 });
 
@@ -1145,23 +1328,29 @@ test('reentry rejects a corrupt journal before admission or closure commit', asy
     journal,
     closurePort,
   });
-  journal.verification = { valid: false, reason: 'broken digest' };
-  const admissionPort = new FakeAdmissionPort();
+  const canonicalId = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
+  const { command, port, commits } = conditionalReentryFixture(committedCheckpoint, canonicalId);
 
-  await assert.rejects(
+  // The verified principal must own the confirmed command.
+  await rejectsWithMessage(
+    () => commitReentry({ ownerId: 'other-owner', conditional: { port, command } }),
+    /reentry owner does not match the verified principal/,
+  );
+  // The legacy unbound mutation stays read-only.
+  await rejectsWithMessage(
     () => commitReentry({
       ownerId: 'task-owner',
-      closureId: 'reentry-corrupt-journal',
+      closureId: 'reentry-legacy-unbound',
       checkpoint: committedCheckpoint,
-      previousExecutionEpoch: 4,
-      newExecutionEpoch: 5,
-      nextAction: { kind: 'continue', ref: 'after-reentry' },
+      previousExecutionEpoch: committedCheckpoint.executionEpoch,
+      newExecutionEpoch: committedCheckpoint.executionEpoch + 1,
+      nextAction: { kind: 'continue', ref: 'after-legacy-unbound' },
       journal,
       closurePort,
-      admissionPort,
+      admissionPort: new FakeAdmissionPort(),
     }),
-    CheckpointSubmissionError,
+    /legacy unbound reentry is read-only/,
   );
-  assert.equal(admissionPort.calls.length, 0);
+  assert.equal(commits.length, 0);
   assert.equal(closurePort.committed.length, 1);
 });

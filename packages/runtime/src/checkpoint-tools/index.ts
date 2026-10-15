@@ -1,6 +1,5 @@
 import type {
   Checkpoint,
-  NextAction,
   OperationId,
   ScopeRef,
 } from '../../../contracts/src/index.js';
@@ -9,6 +8,7 @@ import {
   commitDeadEnd,
   commitReentry,
   submitCheckpoint,
+  type ConditionalReentryCommit,
   type CommittedDeadEnd,
   type CommittedReentry,
   type SubmitCheckpointInput,
@@ -132,14 +132,7 @@ export async function recordDeadEndTool(
   });
 }
 
-export interface ReenterCheckpointToolInput {
-  readonly closureId: string;
-  readonly checkpoint: Checkpoint;
-  readonly previousExecutionEpoch: number;
-  readonly newExecutionEpoch: number;
-  readonly deadEndRef?: string;
-  readonly nextAction: NextAction;
-}
+export type ReenterCheckpointToolInput = ConditionalReentryCommit;
 
 export async function reenterCheckpointTool(
   context: BuiltInCheckpointToolContext,
@@ -147,15 +140,7 @@ export async function reenterCheckpointTool(
 ): Promise<CommittedReentry> {
   return commitReentry({
     ownerId: context.ownerId,
-    closureId: input.closureId,
-    checkpoint: input.checkpoint,
-    previousExecutionEpoch: input.previousExecutionEpoch,
-    newExecutionEpoch: input.newExecutionEpoch,
-    deadEndRef: input.deadEndRef,
-    nextAction: input.nextAction,
-    journal: context.journal,
-    closurePort: context.closurePort,
-    admissionPort: context.admissionPort,
+    conditional: input,
   });
 }
 
