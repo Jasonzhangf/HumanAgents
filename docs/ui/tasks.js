@@ -1,351 +1,87 @@
 import {
   api,
-  appendPairingEntry,
+  createScopedReadPublication,
   element,
-  formatTime,
   loadRuntimeStatus,
   makePageShell,
+  projectReadScopeFromQuery,
   renderPageError,
+  renderProjectRead,
   renderRuntimeStatus,
-  stateTone,
-  taskDashboardHref,
-  taskDetailHref,
+  renderSystemRead,
+  systemTasksHref,
 } from './runtime-shell.js'
 
+const readScope = projectReadScopeFromQuery()
+const projectView = readScope.kind === 'project'
 const { main, status } = makePageShell(
   'Task List',
-  'Runtime',
-  '任务列表',
-  '运行中、等待决策、已完成和失败任务都来自 Runtime projection。',
+  '',
+  projectView ? '项目任务' : '全部项目',
+  projectView
+    ? '这里列出这个项目本次读取返回的任务，并标明读取是否完整。'
+    : '这里列出系统本次读取返回的项目，并标明读取范围是否已确认。',
+  {
+    scope: readScope,
+    breadcrumbs: projectView
+      ? [
+          { label: '系统', href: './dashboard.html' },
+          { label: '项目', href: systemTasksHref() },
+          { label: readScope.projectKey, href: null },
+        ]
+      : [
+          { label: '系统', href: './dashboard.html' },
+          { label: '全部项目', href: null },
+        ],
+  },
 )
 
-let currentFilter = 'all'
-let rows = []
-const selectedTaskIds = new Set()
+const listRegion = element('div', undefined, 'task-lists')
+const refreshButton = element('button', '刷新当前范围', 'button button--quiet')
+refreshButton.type = 'button'
+refreshButton.addEventListener('click', () => void load())
+main.append(refreshButton, listRegion)
 
-function selectedRows() {
-  return rows.filter((row) => selectedTaskIds.has(row.taskId.value))
-}
+const readPublication = createScopedReadPublication((scope) => (
+  scope.kind === 'project'
+    ? api.projectDashboard({ projectKey: scope.projectKey })
+    : api.systemDashboard()
+))
 
-function renderBulkActions() {
-  main.querySelector('[data-bulk-actions]')?.remove()
-  const bar = element('section', undefined, 'bulk-actions')
-  bar.dataset.bulkActions = ''
-  const selectAll = element('input')
-  selectAll.type = 'checkbox'
-  selectAll.checked = rows.length > 0 && selectedTaskIds.size === rows.length
-  selectAll.indeterminate = selectedTaskIds.size > 0 && selectedTaskIds.size < rows.length
-  selectAll.setAttribute('aria-label', '选择全部任务')
-  selectAll.addEventListener('change', () => {
-    if (selectAll.checked) rows.forEach((row) => selectedTaskIds.add(row.taskId.value))
-    else selectedTaskIds.clear()
-    renderTasks()
-    renderBulkActions()
-  })
-  const label = element('label', undefined, 'bulk-select-all')
-  label.append(selectAll, element('span', `${selectedTaskIds.size} 项已选择`))
-  const stop = element('button', '停止选中', 'button')
-  stop.type = 'button'
-  stop.disabled = selectedTaskIds.size === 0
-  stop.addEventListener('click', async () => {
-    await runBulkAction('stop')
-  })
-  const remove = element('button', '删除选中', 'button button--danger')
-  remove.type = 'button'
-  remove.disabled = selectedTaskIds.size === 0
-  remove.addEventListener('click', async () => {
-    if (!window.confirm('删除选中的任务？运行中的任务不会被删除。')) return
-    await runBulkAction('delete')
-  })
-  const clear = element('button', '清除选择', 'button button--quiet')
-  clear.type = 'button'
-  clear.disabled = selectedTaskIds.size === 0
-  clear.addEventListener('click', () => {
-    selectedTaskIds.clear()
-    renderBulkActions()
-    renderTasks()
-  })
-  bar.append(label, stop, remove, clear)
-  const groups = main.querySelector('[data-task-groups]')
-  if (groups) groups.before(bar)
-  else main.append(bar)
-}
-
-async function runBulkAction(action) {
-  const ids = selectedRows().map((row) => row.taskId.value)
-  if (ids.length === 0) return
-  try {
-    const result = await api.bulkTaskAction(ids, action)
-    const failed = result.results.filter((item) => item.state === 'failed')
-    const succeeded = result.results.length - failed.length
-    status.textContent = failed.length === 0
-      ? `${succeeded} 项已${action === 'delete' ? '删除' : '停止'}。`
-      : `${succeeded} 项已处理，${failed.length} 项未处理：${failed[0].error.message}`
-    selectedTaskIds.clear()
-    await loadTasks()
-  } catch (error) {
-    renderPageError(status, error, 'inspect the task action')
-  }
-}
-
-async function editTask(row) {
-  try {
-    const detail = await api.taskDetail(row.taskId.value)
-    const dialog = element('dialog', undefined, 'task-editor')
-    const form = element('form', undefined, 'form-grid')
-    form.method = 'dialog'
-    const titleLabel = element('label', '任务名称')
-    const title = element('input')
-    title.value = detail.title
-    title.required = true
-    titleLabel.append(title)
-    const actions = element('div', undefined, 'actions')
-    const cancel = element('button', '取消', 'button button--quiet')
-    cancel.type = 'button'
-    cancel.addEventListener('click', () => dialog.close())
-    const save = element('button', '保存修改', 'button button--primary')
-    save.type = 'submit'
-    actions.append(cancel, save)
-    form.append(titleLabel, actions)
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault()
-      save.disabled = true
-      try {
-        await api.updateTask(row.taskId.value, { title: title.value.trim() })
-        dialog.close()
-        await loadTasks()
-      } catch (error) {
-        save.disabled = false
-        renderPageError(status, error, 'inspect the task update')
-      }
+function renderReadState(state) {
+  if (!state.content) {
+    renderPageError(status, state.failure || {
+      message: 'scoped read failed',
+      ownerId: 'humanagent.ui',
+      nextAction: 'retry the same scoped read',
     })
-    dialog.append(form)
-    document.body.append(dialog)
-    dialog.addEventListener('close', () => dialog.remove(), { once: true })
-    dialog.showModal()
-  } catch (error) {
-    renderPageError(status, error, 'inspect the task')
+    return
   }
-}
-
-async function deleteTask(row) {
-  if (!window.confirm(`删除任务“${row.title}”？`)) return
-  try {
-    await api.deleteTask(row.taskId.value)
-    selectedTaskIds.delete(row.taskId.value)
-    await loadTasks()
-  } catch (error) {
-    renderPageError(status, error, 'inspect the task deletion')
+  listRegion.replaceChildren()
+  if (state.content.scope?.kind === 'project') {
+    listRegion.append(renderProjectRead(state.content, { includeProjectLink: false }))
+  } else {
+    listRegion.append(renderSystemRead(state.content, { includeTasks: false }))
   }
-}
-
-function visibleGroups() {
-  const filtered = rows.filter((row) => currentFilter === 'all' || row.group === currentFilter)
-  return [
-    ['running', '执行中任务', filtered.filter((row) => row.group === 'running'), '当前没有执行中的任务。'],
-    ['waiting', '受阻或等待决策任务', filtered.filter((row) => row.group === 'waiting'), '当前没有受阻或等待决策的任务。'],
-    ['completed', '已完成任务', filtered.filter((row) => row.group === 'completed'), '当前没有已完成的任务。'],
-    ['stopped', '已停止任务', filtered.filter((row) => row.group === 'stopped'), '当前没有已停止的任务。'],
-    ['draft', '排队与准入任务', filtered.filter((row) => row.group === 'draft'), '当前没有排队或已准入但未执行的任务。'],
-    ['failed', '失败任务', filtered.filter((row) => row.group === 'failed'), '当前没有失败的任务。'],
-  ]
-}
-
-function renderRequirementDispatch(runtimeStatus) {
-  main.querySelector('[data-requirement-dispatch]')?.remove()
-  const scheduling = runtimeStatus?.implicitScheduling
-  if (!scheduling) return
-  const retired = scheduling.code === 'explicit-brain.requirement-retired'
-  const queued = scheduling.code === 'explicit-brain.requirement-queued'
-  const panel = element('section', undefined, 'panel requirement-dispatch')
-  panel.dataset.requirementDispatch = ''
-  panel.dataset.tone = retired || scheduling.state === 'blocked' ? 'danger' : 'warning'
-  const heading = element('div', undefined, 'section-head')
-  heading.append(
-    element(
-      'h2',
-      retired
-        ? '需求已退休'
-        : queued
-          ? '需求已排队'
-          : scheduling.state === 'waiting'
-            ? '需求等待准入'
-            : '需求调度受阻',
-    ),
-    element('span', `FIFO #${scheduling.fifoSeq}`, 'section-meta'),
-  )
-  const facts = element('dl', undefined, 'detail-grid')
-  for (const [label, value] of [
-    ['状态码', scheduling.code],
-    ['需求', scheduling.requirementId],
-    ['草稿', scheduling.draftId],
-    ['负责 owner', scheduling.ownerId],
-    ['下一步', scheduling.nextAction],
-    ['说明', scheduling.message],
-  ]) {
-    const cell = element('div', undefined, 'detail-cell')
-    cell.append(element('dt', label), element('dd', value))
-    facts.append(cell)
+  if (state.stale) {
+    renderPageError(status, state.failure)
+    status.dataset.tone = 'warning'
+    status.append(element('span', ' · 上次读取失败，当前显示上次确认内容（stale）'))
   }
-  panel.append(heading, facts)
-  const groups = main.querySelector('[data-task-groups]')
-  if (groups) groups.before(panel)
-  else main.append(panel)
-}
-
-function renderRuntimeRow(row) {
-  const item = element('article', undefined, 'task-row')
-  item.setAttribute('role', 'row')
-  const checkboxHitArea = element('label', undefined, 'task-row-check')
-  const checkbox = element('input')
-  checkbox.type = 'checkbox'
-  checkbox.checked = selectedTaskIds.has(row.taskId.value)
-  checkbox.setAttribute('aria-label', `选择任务 ${row.title}`)
-  checkbox.addEventListener('change', () => {
-    if (checkbox.checked) selectedTaskIds.add(row.taskId.value)
-    else selectedTaskIds.delete(row.taskId.value)
-    renderBulkActions()
-  })
-  checkboxHitArea.append(checkbox)
-
-  const link = element('a', undefined, 'task-row-link')
-  link.href = row.state === 'waiting' || row.state === 'blocked'
-    ? taskDetailHref(row.taskId.value)
-    : taskDashboardHref(row.taskId.value)
-
-  const title = element('div', undefined, 'task-cell task-cell--title')
-  title.append(element('span', '任务', 'task-cell-label'))
-  const titleValue = element('span', undefined, 'task-cell-value')
-  titleValue.append(element('strong', row.title))
-  if (row.currentState && row.currentState !== row.stateLabel) {
-    titleValue.append(element('span', row.currentState, 'task-status'))
-  }
-  title.append(titleValue)
-  title.setAttribute('title', row.title)
-  link.append(title)
-
-  const chip = element('span', row.stateLabel, 'state-chip')
-  chip.dataset.tone = stateTone(row.state)
-  const stateCell = element('div', undefined, 'task-cell task-cell--status')
-  stateCell.append(element('span', '状态', 'task-cell-label'), chip)
-  link.append(stateCell)
-
-  const timeCell = element('div', undefined, 'task-cell task-cell--time')
-  timeCell.append(element('span', '最近更新', 'task-cell-label'), element('time', formatTime(row.updatedAt)))
-  link.append(timeCell)
-
-  const actions = element('div', undefined, 'task-row-actions')
-  actions.setAttribute('role', 'cell')
-  const edit = element('button', '编辑', 'button button--quiet')
-  edit.type = 'button'
-  edit.addEventListener('click', () => void editTask(row))
-  const remove = element('button', '删除', 'button button--quiet')
-  remove.type = 'button'
-  remove.addEventListener('click', () => void deleteTask(row))
-  actions.append(edit, remove)
-  item.append(checkboxHitArea, link, actions)
-  return item
-}
-
-function renderTasks() {
-  const groups = element('section', undefined, 'stack')
-  for (const [, title, groupRows, emptyText] of visibleGroups()) {
-    const section = element('section', undefined, 'section')
-    const head = element('header', undefined, 'section-head')
-    head.append(element('h2', title), element('span', `${groupRows.length} 项`, 'section-meta'))
-    const panel = element('div', undefined, 'panel')
-    panel.setAttribute('role', 'table')
-    panel.setAttribute('aria-label', title)
-    if (groupRows.length === 0) {
-      panel.append(element('p', emptyText, 'empty'))
-    } else {
-      const header = element('div', undefined, 'task-row task-row--head')
-      header.setAttribute('role', 'row')
-      header.setAttribute('aria-hidden', 'true')
-      for (const label of ['任务', '状态', '最近更新', '操作']) {
-        header.append(element('span', label, 'task-cell-label'))
-      }
-      panel.append(header)
-      for (const row of groupRows) panel.append(renderRuntimeRow(row))
-    }
-    section.append(head, panel)
-    groups.append(section)
-  }
-  main.querySelector('[data-task-groups]')?.remove()
-  groups.dataset.taskGroups = ''
-  main.append(groups)
-}
-
-function addFilters() {
-  const bar = element('section', undefined, 'filterbar')
-  const segments = element('div', undefined, 'segments')
-  for (const [value, label] of [
-    ['all', '全部'],
-    ['running', '执行中'],
-    ['waiting', '受阻/等待'],
-    ['completed', '已完成'],
-    ['stopped', '已停止'],
-    ['draft', '排队/准入'],
-    ['failed', '失败'],
-  ]) {
-    const button = element('button', label, 'segment')
-    button.type = 'button'
-    button.setAttribute('aria-pressed', String(value === currentFilter))
-    button.addEventListener('click', () => {
-      currentFilter = value
-      for (const candidate of segments.querySelectorAll('button')) {
-        candidate.setAttribute('aria-pressed', String(candidate === button))
-      }
-      renderTasks()
-      renderBulkActions()
-    })
-    segments.append(button)
-  }
-  bar.append(segments)
-  main.append(bar)
 }
 
 async function load() {
   try {
-    const [{ status: runtimeStatus, error }, taskList] = await Promise.all([loadRuntimeStatus(), api.listTasks()])
-    renderRuntimeStatus(status, runtimeStatus, error)
-    renderRequirementDispatch(runtimeStatus)
-    rows = [
-      ...taskList.running.map((row) => ({ ...row, group: 'running' })),
-      ...taskList.waiting.map((row) => ({ ...row, group: 'waiting' })),
-      ...taskList.completed.map((row) => ({ ...row, group: 'completed' })),
-      ...taskList.stopped.map((row) => ({ ...row, group: 'stopped' })),
-      ...taskList.draft.map((row) => ({ ...row, group: 'draft' })),
-      ...taskList.failed.map((row) => ({ ...row, group: 'failed' })),
-    ]
-    for (const taskId of selectedTaskIds) {
-      if (!rows.some((row) => row.taskId.value === taskId)) selectedTaskIds.delete(taskId)
-    }
-    renderTasks()
-    renderBulkActions()
+    const [read, runtime] = await Promise.all([
+      readPublication.refresh(readScope),
+      loadRuntimeStatus(),
+    ])
+    if (!read.published) return
+    renderRuntimeStatus(status, runtime.status, runtime.error)
+    renderReadState(read.state)
   } catch (error) {
     renderPageError(status, error)
   }
 }
 
-async function loadTasks() {
-  const [{ status: runtimeStatus, error }, taskList] = await Promise.all([loadRuntimeStatus(), api.listTasks()])
-  renderRuntimeStatus(status, runtimeStatus, error)
-  renderRequirementDispatch(runtimeStatus)
-  rows = [
-    ...taskList.running.map((row) => ({ ...row, group: 'running' })),
-    ...taskList.waiting.map((row) => ({ ...row, group: 'waiting' })),
-    ...taskList.completed.map((row) => ({ ...row, group: 'completed' })),
-    ...taskList.stopped.map((row) => ({ ...row, group: 'stopped' })),
-    ...taskList.draft.map((row) => ({ ...row, group: 'draft' })),
-    ...taskList.failed.map((row) => ({ ...row, group: 'failed' })),
-  ]
-  for (const taskId of selectedTaskIds) {
-    if (!rows.some((row) => row.taskId.value === taskId)) selectedTaskIds.delete(taskId)
-  }
-  renderTasks()
-  renderBulkActions()
-}
-
-addFilters()
 void load()

@@ -13,6 +13,7 @@ import {
   stateTone,
   taskDashboardHref,
   taskIdFromQuery,
+  technicalDetailTrigger,
 } from './runtime-shell.js'
 import { advanceExplicitInteraction } from './explicit-interaction-flow.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
@@ -28,22 +29,41 @@ const isNew = (requestedTask === 'new' || !requestedTask) && !requestedInteracti
 const { main, status, interactionCardHosts } = makePageShell(
   'Task List',
   'Task',
-  isNew ? '新建任务' : requestedInteraction ? '确认任务' : '任务详情',
-  isNew ? '用一句话告诉显式大脑你要完成什么。' : requestedInteraction ? '显式大脑会先整理，再由你确认是否提交后台。' : '查看任务状态和处理结果。',
+  requestedInteraction ? '确认任务' : '任务详情',
+  requestedInteraction ? '显式大脑会先整理，再由你确认是否提交后台。' : '查看任务状态和处理结果。',
 )
 const interactionCardHost = interactionCardHosts[0]
-const interactionCard = interactionCardHost
-  ? mountInteractionWorkCard(interactionCardHost, {
-      onAction: async (action) => {
-        if (action.id === 'confirm-requirement') {
-          const confirmationButton = document.querySelector('#task-confirm-button')
-          if (confirmationButton) void confirmationButton.click()
-        }
-      },
-      onHistoryQuery: (query) => loadTaskHistory(query),
-    })
-  : null
-interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
+// The shared work card mounts on the first real projection: a returned
+// interaction event or snapshot, or an existing Task's own dashboard/history
+// read. Until one of those facts exists the host stays genuinely empty, so an
+// unsent new Task no longer claims that a task or interaction exists. The
+// shared projector maps `received` onto `created`, so the old eager empty
+// projection is what produced a source-less "已创建" card here.
+let interactionCard = null
+
+function mountTaskCard() {
+  interactionCard = mountInteractionWorkCard(interactionCardHost, {
+    onAction: async (action) => {
+      if (action.id === 'confirm-requirement') {
+        const confirmationButton = document.querySelector('#task-confirm-button')
+        if (confirmationButton) void confirmationButton.click()
+      }
+    },
+    onHistoryQuery: (query) => loadTaskHistory(query),
+  })
+  return interactionCard
+}
+
+// The one Task-local presentation path. Every existing card update is routed
+// through it, so the card appears with real content only, and it re-attaches
+// the preserved host after the page rebuilds that `renderInteraction` /
+// `renderTask` perform.
+function presentInteractionCard(projection) {
+  if (!interactionCardHost || !projection) return
+  attachInteractionCardHost()
+  if (!interactionCard) mountTaskCard()
+  interactionCard.update(projection)
+}
 
 // ── Liveness + transport ─────────────────────────────────────────────────────
 //
@@ -196,7 +216,7 @@ function updateTaskExecution(dashboard) {
     cardMetadata: { ...base.cardMetadata, stream: { state: effectiveTransport(dashboard) } },
   }
   cardState.projection = projection
-  interactionCard?.update(cardState.history
+  presentInteractionCard(cardState.history
     ? withTaskHistory(projection, cardState.history.query, cardState.history.result)
     : projection)
 }
@@ -217,7 +237,10 @@ function effectiveTransport(dashboard) {
 }
 
 async function refreshTaskDashboard() {
-  if (!interactionCard || !taskId || taskId === 'new') return
+  // Eligibility is the real host plus a real existing Task identity, not
+  // whether the card already mounted: a valid Task with zero interaction
+  // events must still issue this read and render the dashboard it returns.
+  if (!interactionCardHost || !taskId || taskId === 'new') return
   let dashboard
   try {
     dashboard = await api.taskDashboard(taskId)
@@ -270,7 +293,8 @@ async function refreshTaskDashboard() {
 // times are the values the provider binding reported; when the task has no
 // event yet the card keeps the explicit empty state.
 async function loadTaskHistory(query) {
-  if (!interactionCard || !taskId || taskId === 'new') return
+  // Same boundary as the dashboard read: the host and a real Task identity.
+  if (!interactionCardHost || !taskId || taskId === 'new') return
   const effectiveQuery = query ?? { limit: 20, replay: true }
   let result
   try {
@@ -292,7 +316,12 @@ async function loadTaskHistory(query) {
     }
   }
   cardState.history = { query: effectiveQuery, result }
-  interactionCard.update(withTaskHistory(cardState.projection, effectiveQuery, result))
+  // History can return before the base projection exists. The read is a real
+  // runtime fact, so it is cached and applied onto the base when the actual
+  // dashboard/event/snapshot projection arrives; it is never projected against
+  // an absent base.
+  if (!cardState.projection) return
+  presentInteractionCard(withTaskHistory(cardState.projection, effectiveQuery, result))
 }
 
 let taskId = requestedTask
@@ -301,7 +330,8 @@ let activeInteractionId
 const cardState = {
   sequence: 0,
   entries: [],
-  projection: projectInteractionCardFromEntries([], 'received'),
+  // The base projection stays absent until an actual update exists.
+  projection: null,
   history: null,
 }
 
@@ -310,7 +340,7 @@ function updateCard(projection) {
   // local interaction events must not drop it. `cardState.projection` stays the
   // base projection; the last loaded history page is re-applied on top.
   cardState.projection = projection
-  interactionCard?.update(cardState.history
+  presentInteractionCard(cardState.history
     ? withTaskHistory(projection, cardState.history.query, cardState.history.result)
     : projection)
 }
@@ -333,22 +363,14 @@ function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   updateCard(projectInteractionCardFromEntries(cardState.entries, activeInteractionId ? 'received' : 'awaiting-confirmation'))
 }
 
-function appendCardError(error) {
-  appendCardEvent('failure', error.message || String(error), 'error', {
-    eventKey: 'request-failed',
-    error: { code: error.code, message: error.message || String(error), ownerId: error.ownerId || 'humanagent.app' },
-    evidenceRefs: error.evidenceRefs || [],
-  })
-}
-
 function updateCardFromSnapshot(snapshot) {
   cardState.sequence = 0
   cardState.entries = []
   updateCard(projectInteractionCardFromSnapshot(snapshot))
 }
 
-// `renderCreate` / `renderInteraction` / `renderTask` rebuild `main`, so the
-// card host must be re-attached after every rebuild instead of being dropped.
+// `renderInteraction` / `renderTask` rebuild `main`, so the card host must be
+// re-attached after every rebuild instead of being dropped.
 function attachInteractionCardHost() {
   if (interactionCardHost) main.append(interactionCardHost)
 }
@@ -364,113 +386,6 @@ function readable(value, placeholder = '暂无信息') {
   return String(value)
 }
 
-function renderCreate() {
-  const panel = element('section', undefined, 'panel')
-  const form = element('form', undefined, 'form-grid')
-  const directiveLabel = element('label', '你要完成什么？')
-  const directive = element('textarea')
-  directive.required = true
-  directive.placeholder = '直接描述目标、背景和限制，不需要填写标题或执行指令。'
-  directiveLabel.append(directive)
-  const button = element('button', '提交给显式大脑', 'button button--primary')
-  button.type = 'submit'
-  const feedback = element('p', '显式大脑会整理输入、补齐任务信息，并在需要时向你确认。', 'muted')
-  feedback.setAttribute('role', 'status')
-  feedback.setAttribute('aria-live', 'polite')
-  const diagnostics = element('details')
-  diagnostics.hidden = true
-  const diagnosticText = element('pre')
-  diagnostics.append(element('summary', '查看技术详情'), diagnosticText)
-  const restartPanel = element('div')
-  restartPanel.hidden = true
-  const restart = element('a', '重新填写新任务', 'button')
-  restart.href = './task.html?task=new'
-  restartPanel.append(restart, element('p', '重试或继续查看会保留当前输入；重新填写会打开新请求，不修改或取消当前请求。', 'muted'))
-  let interactionId
-  let inFlight = false
-  form.append(directiveLabel, button, feedback, restartPanel, diagnostics)
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault()
-    if (inFlight) return
-    const rawInput = directive.value.trim()
-    if (!rawInput) {
-      feedback.textContent = '请先填写你要完成的任务或补充信息。'
-      return
-    }
-    inFlight = true
-    button.disabled = true
-    directive.readOnly = true
-    form.setAttribute('aria-busy', 'true')
-    diagnostics.hidden = true
-    restartPanel.hidden = true
-    button.textContent = '正在处理…'
-    try {
-      feedback.textContent = '正在交给显式大脑整理…'
-      appendCardEvent('status', '正在交给显式大脑整理', 'progress')
-      if (!interactionId) {
-        const received = await api.receiveExplicitInput({
-          sourceRef: 'ui:new-task',
-          rawInput,
-          inputRevision: 1,
-        })
-        interactionId = received.interactionId
-        activeInteractionId = interactionId
-        appendCardEvent('user', rawInput, 'user', { eventKey: 'explicit.raw-input', interactionId })
-      }
-      const snapshot = await advanceExplicitInteraction(api, {
-        interactionId,
-        clarificationAnswer: rawInput,
-      })
-      appendCardEvent('status', `状态：${snapshot.state}`, 'progress', { eventKey: 'explicit.advance', interactionId })
-      updateCardFromSnapshot(snapshot)
-      if (snapshot.state === 'status-only') {
-        feedback.textContent = snapshot.reply || snapshot.nextAction
-        interactionId = undefined
-        directive.readOnly = false
-        button.textContent = '提交给显式大脑'
-        return
-      }
-      if (snapshot.state === 'awaiting-clarification') {
-        feedback.textContent = snapshot.reply || snapshot.nextAction
-        directive.value = ''
-        directive.placeholder = snapshot.reply || '请补充显式大脑需要的信息。'
-        directive.readOnly = false
-        button.textContent = '回答并继续'
-        return
-      }
-      if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
-        feedback.textContent = `显式大脑当前状态：${snapshot.state}。${snapshot.nextAction}`
-        button.textContent = '继续查看本次提交'
-        return
-      }
-      const matchedTaskId = snapshot.draft.matchedTasks.find((task) => task.relation === 'current')?.taskId?.value
-      window.history.replaceState(
-        null,
-        '',
-        `./task.html?task=${encodeURIComponent(matchedTaskId || 'new')}&interaction=${encodeURIComponent(interactionId)}#task-interaction`,
-      )
-      await renderInteraction(interactionId, matchedTaskId)
-    } catch (error) {
-      feedback.textContent = interactionId
-        ? '本次处理未完成。输入已保留并锁定，点击“重试本次提交”继续同一次请求。'
-        : '未能确认输入已接收。内容已保留，请重试提交。'
-      diagnosticText.textContent = [error.message, error.code, error.ownerId, error.nextAction, interactionId].filter(Boolean).join('\n')
-      appendCardError(error)
-      diagnostics.hidden = false
-      directive.readOnly = Boolean(interactionId)
-      button.textContent = '重试本次提交'
-    } finally {
-      inFlight = false
-      button.disabled = false
-      restartPanel.hidden = !interactionId || !directive.readOnly
-      form.setAttribute('aria-busy', 'false')
-    }
-  })
-  panel.append(form)
-  main.append(panel)
-  attachInteractionCardHost()
-}
-
 async function renderInteraction(interactionId, currentTaskId) {
   clearNode(main)
   const panel = element('section', undefined, 'panel')
@@ -478,13 +393,19 @@ async function renderInteraction(interactionId, currentTaskId) {
   const feedback = element('p', '正在整理你的输入…', 'muted')
   feedback.setAttribute('role', 'status')
   feedback.setAttribute('aria-live', 'polite')
-  const diagnostics = element('details')
-  diagnostics.hidden = true
-  const diagnosticText = element('pre')
-  diagnostics.append(element('summary', '查看技术详情'), diagnosticText)
   const body = element('div', undefined, 'form-grid')
   const actions = element('div', undefined, 'actions')
-  panel.append(feedback, diagnostics, body, actions)
+  // The failure the detail layer must explain is held here and read at click
+  // time, so the shared technical-detail trigger always shows the exact typed
+  // values of the most recent failure. The primary layer keeps only human copy;
+  // no diagnostic field is invented Task-locally.
+  let currentFailureEntries = null
+  const detailTrigger = technicalDetailTrigger(() => ({
+    title: '技术详情',
+    entries: currentFailureEntries || [],
+  }))
+  detailTrigger.hidden = true
+  panel.append(feedback, detailTrigger, body, actions)
   main.append(panel)
   attachInteractionCardHost()
 
@@ -500,17 +421,18 @@ async function renderInteraction(interactionId, currentTaskId) {
     return [rest ? `${head} (${rest})` : head, ...causeLines(cause.cause, depth + 1)]
   }
 
-  const showError = (error) => {
+  const showError = (summary, error) => {
     clearNode(feedback)
-    feedback.append(element('span', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`))
+    feedback.append(element('span', summary))
     appendPairingEntry(feedback, error)
-    diagnosticText.textContent = [
-      `code=${error.code || 'runtime.request.failed'}`,
-      `owner=${error.ownerId || 'unknown'}`,
-      `next=${error.nextAction || 'inspect the runtime error'}`,
-      ...causeLines(error.cause),
-    ].join('\n')
-    diagnostics.hidden = false
+    currentFailureEntries = [
+      ['code', error.code, 'data-detail-code'],
+      ['owner', error.ownerId, 'data-detail-owner'],
+      ['message', error.message, 'data-detail-message'],
+      ['next', error.nextAction, 'data-detail-next'],
+      ...causeLines(error.cause).map((line) => ['cause', line]),
+    ]
+    detailTrigger.hidden = false
   }
 
   try {
@@ -540,7 +462,7 @@ async function renderInteraction(interactionId, currentTaskId) {
           window.location.reload()
         } catch (error) {
           submitAnswer.disabled = false
-          showError(error)
+          showError('这次补充未能处理完成。', error)
         }
       })
       actions.append(answer, submitAnswer)
@@ -566,8 +488,7 @@ async function renderInteraction(interactionId, currentTaskId) {
           appendCardEvent('decision', '任务已确认，等待队列消费', 'decision', { eventKey: 'explicit.confirmation-submitted', interactionId })
         } catch (error) {
           if (button) button.disabled = false
-          showError(error)
-          appendCardError(error)
+          showError('本次确认提交未获成功回执。', error)
         }
       }
       feedback.textContent = '已整理完成。只有改变已有任务目标时才需要再次确认。'
@@ -580,8 +501,7 @@ async function renderInteraction(interactionId, currentTaskId) {
       feedback.textContent = `当前状态：${snapshot.state}。${snapshot.nextAction}`
     }
   } catch (error) {
-    showError(error)
-    appendCardError(error)
+    showError('这次交互未能打开或整理完成。', error)
   }
 }
 
@@ -627,14 +547,20 @@ function renderTask() {
 }
 
 async function load() {
-  const { status: runtimeStatus, error } = await loadRuntimeStatus()
-  renderRuntimeStatus(status, runtimeStatus, error)
+  // The public new-task entry is the canonical index page, where one form
+  // submit is the confirmation and the typed submit is the single creation
+  // mechanism. This old alias therefore replaces itself before any runtime
+  // read or business request happens here, and it submits nothing on load. An
+  // explicit interaction (task=new&interaction=<id>) is not a new form and
+  // stays on `renderInteraction`.
   if (isNew) {
-    renderCreate()
+    window.location.replace('./index.html')
     return
   }
+  const { status: runtimeStatus, error } = await loadRuntimeStatus()
+  renderRuntimeStatus(status, runtimeStatus, error)
   if (requestedInteraction) {
-    if (taskId) detail = await api.taskDetail(taskId)
+    if (taskId && taskId !== 'new') detail = await api.taskDetail(taskId)
     await renderInteraction(requestedInteraction, taskId)
     return
   }

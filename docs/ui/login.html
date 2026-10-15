@@ -15,7 +15,7 @@
           <p class="eyebrow">浏览器会话</p>
           <h1>配对这台浏览器</h1>
           <p class="lede">
-            运行时用一次性配对码把浏览器会话绑定到本机控制面。配对成功后，你会回到刚才请求的那个页面。
+            用一次性配对码连接这台浏览器。配对成功后，你会回到刚才请求的页面。
           </p>
         </div>
         <span class="section-meta" data-auth-session-state>检查会话中…</span>
@@ -24,6 +24,8 @@
       <div class="status-banner" role="status" aria-live="polite" data-auth-status>
         正在检查浏览器会话…
       </div>
+
+      <div data-auth-detail-host></div>
 
       <section class="login-card" data-pair-card hidden aria-labelledby="pair-form-title">
         <h2 id="pair-form-title">一次性配对码</h2>
@@ -53,14 +55,10 @@
         hidden
         aria-labelledby="pair-error-title"
       >
-        <h2 id="pair-error-title">配对被拒绝</h2>
-        <dl class="login-error-detail" data-auth-error-detail></dl>
+        <h2 id="pair-error-title" data-auth-error-heading>配对未完成</h2>
+        <p class="login-hint" data-auth-error-impact hidden></p>
         <p class="login-hint" data-auth-error-retry hidden></p>
       </section>
-
-      <p class="login-hint">
-        配对码属于控制面：它只经 <code>POST /api/auth/pair</code> 交给运行时，不会写进任何业务请求。
-      </p>
     </main>
     <script type="module" src="./login.js"></script>
   </body>
