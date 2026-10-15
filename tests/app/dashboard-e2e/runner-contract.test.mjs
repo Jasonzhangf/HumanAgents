@@ -128,7 +128,7 @@ test.after(async () => {
 });
 
 test('option surface is reported and accepted combinations parse', () => {
-  assert.deepEqual([...SCENARIOS], ['web-search', 'local-file-search', 'aitest', 'existing-task-change']);
+  assert.deepEqual([...SCENARIOS], ['web-search', 'local-file-search', 'existing-task-change']);
   assert.deepEqual([...ENTRIES], ['homepage', 'dashboard']);
   assert.deepEqual([...OUTCOMES], ['success', 'failure', 'cancel']);
   assert.deepEqual([...SERVICE_MODES], ['candidate', 'installed-attach']);
@@ -156,7 +156,6 @@ test('unsupported combinations are rejected, never downgraded', () => {
   assert.throws(() => parseOptions(['--scenario', 'local-file-search', '--service-mode', 'detached']), /unsupported --service-mode/);
   // A scenario with no wired non-success path must refuse the request.
   assert.throws(() => parseOptions(['--scenario', 'web-search', '--outcome', 'failure']), /cannot exercise a real failure outcome/);
-  assert.throws(() => parseOptions(['--scenario', 'aitest', '--outcome', 'cancel']), /cannot exercise a real cancel outcome/);
   assert.throws(
     () => parseOptions(['--scenario', 'existing-task-change', '--outcome', 'failure']),
     /cannot exercise a real failure outcome/,
@@ -1823,72 +1822,6 @@ test('finalizeSourceIdentity is idempotent and never overwrites a recorded end i
     () => finalizeSourceIdentity({ repoPath: REPO }),
     /requires a binding record from bindCandidate/,
   );
-});
-
-test('AItest scenario evidence without an accepted visual observation stays INCOMPLETE', async () => {
-  assertResolverAvailable();
-  const controlRoot = await makeTempRoot('aitest-obs-control');
-  const dir = await makeTempRoot('aitest-obs-journal');
-  const journal = await writeOutcomeFixture(dir, 'aitest-obs');
-  const owned = spawnIdle();
-  try {
-    const { runScenario } = await import('./runner.mjs');
-    const result = await runScenario('aitest', {
-      attemptIdSuffix: 'aitest-obs',
-      resolvePaths: resolveRuntimePaths,
-      controlRoot,
-      scope: CONTRACT_SCOPE,
-      hooks: {
-        probeProvider: async () => {},
-        startServeForAttempt: async (binding) => {
-          binding.serveBaseUrl = 'http://127.0.0.1:1';
-          binding.servePort = null;
-          binding.servePid = owned.pid;
-        },
-        launchBrowserSession: async (binding) => { binding.browser = { close: async () => {} }; },
-        runScenario: async (binding) => {
-          binding.scope = CONTRACT_SCOPE;
-          binding.taskId = CONTRACT_SCOPE.taskId;
-          binding.operationId = CONTRACT_SCOPE.operationId;
-          binding.cycleId = CONTRACT_SCOPE.cycleId;
-          binding.executionEpoch = CONTRACT_SCOPE.executionEpoch;
-          binding.journalPath = journal.paths[0];
-          binding.journalPaths = journal.paths;
-          return {
-            terminalState: 'succeeded',
-            dashboardState: 'succeeded',
-            scenarioEvidence: {
-              taskId: CONTRACT_SCOPE.taskId,
-              operationId: CONTRACT_SCOPE.operationId,
-              cycleId: CONTRACT_SCOPE.cycleId,
-              executionEpoch: CONTRACT_SCOPE.executionEpoch,
-              visualObservationAccepted: false,
-            },
-            toolRounds: 1,
-            requestStartTurns: 1,
-            checkpointCommitted: 1,
-            terminalRecord: { kind: 'execution.terminal', state: 'succeeded' },
-            evidenceRefs: [],
-            screenshots: [],
-            missingEvidence: ['visual observation not accepted: no structured visual observation was supplied'],
-          };
-        },
-      },
-    });
-    // The real Dashboard terminal succeeded and cleanup settled, yet the AItest
-    // acceptance is still INCOMPLETE: a structural PASS plus a browser open is
-    // not semantic proof, and the receipt never rewrites the observed terminal.
-    assert.equal(result.receipt.result, 'INCOMPLETE');
-    assert.equal(result.receipt.task.terminalState, 'succeeded');
-    assert.equal(result.receipt.settlement.settled, true, result.receipt.settlement.reason);
-    assert.equal(result.receipt.cleaned, true);
-    assert.ok(result.receipt.missingEvidence.some((item) => /visual observation not accepted/.test(item)));
-    assert.equal(result.receipt.evidence.scenarioEvidence.visualObservationAccepted, false);
-    assert.equal(result.stageErrors.find((stage) => stage.stage === 'attempt_stop_settle').ok, true);
-    assert.equal(result.stageErrors.find((stage) => stage.stage === 'aitest_cleanup').ok, true);
-  } finally {
-    await stopChild(owned);
-  }
 });
 
 test('public main/CLI stays INCOMPLETE when scenario success has no strict Journal settlement', async () => {

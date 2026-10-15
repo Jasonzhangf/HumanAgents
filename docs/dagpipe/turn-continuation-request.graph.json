@@ -1,0 +1,204 @@
+{
+  "id": "humanagent-turn-continuation-request",
+  "version": "1",
+  "meta": {
+    "title": "单请求临时目标续推，不回填下一轮 context",
+    "requirements_version": 11,
+    "requirements": [
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-implicit-brain-budgeted-independent-orchestration",
+      "humanagent-dynamic-orchestrator-choice-and-agent-termination",
+      "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+      "humanagent-orchestrator-delegation-and-refined-result-context",
+      "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
+      "humanagent-transient-goal-oriented-continuation-prompt",
+      "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+      "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-continuation-oriented-by-explicit-dispatch-template"
+    ],
+    "designStatus": "USER-REQUIREMENT-DESIGN",
+    "implementationStatus": "UNVERIFIED",
+    "bindingBoundary": "语义设计责任名称，不声明 Operator 已注册或 Runtime 已执行",
+    "instructionScope": "temporary current-request input; never append to canonical history/checkpoint/next context",
+    "controlSource": "Core/Runtime/Journal facts, not finish reason, prompt text or model echo",
+    "errorBoundary": "当前请求错误由外层 Runtime 在同 turn retry/暂停/恢复；不能伪造请求成功或关闭 turn",
+    "trigger": "只用于显式大脑已派发的复杂任务；简单问答不进入续推。",
+    "instructionBasis": "显式大脑的已确认派单模板，与该任务同身份/修订；无额外 goal 占位字段或 model control block。"
+  },
+  "inputs": [
+    {
+      "id": "current_turn_request_scope",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "base_context",
+      "operator": "humanagent-turn-continuation-request-base_context",
+      "operator_version": "1",
+      "inputs": [
+        "current_turn_request_scope"
+      ],
+      "output": {
+        "id": "base_context_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "transient_prompt",
+      "operator": "humanagent-turn-continuation-request-transient_prompt",
+      "operator_version": "1",
+      "inputs": [
+        "base_context_result"
+      ],
+      "output": {
+        "id": "transient_prompt_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "render_request",
+      "operator": "humanagent-turn-continuation-request-render_request",
+      "operator_version": "1",
+      "inputs": [
+        "transient_prompt_result"
+      ],
+      "output": {
+        "id": "render_request_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "infer",
+      "operator": "humanagent-turn-continuation-request-infer",
+      "operator_version": "1",
+      "inputs": [
+        "render_request_result"
+      ],
+      "output": {
+        "id": "infer_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "accept_output",
+      "operator": "humanagent-turn-continuation-request-accept_output",
+      "operator_version": "1",
+      "inputs": [
+        "infer_result"
+      ],
+      "output": {
+        "id": "accept_output_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "next_context",
+      "operator": "humanagent-turn-continuation-request-next_context",
+      "operator_version": "1",
+      "inputs": [
+        "accept_output_result"
+      ],
+      "output": {
+        "id": "next_context_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "base_context",
+      "to": "transient_prompt",
+      "arc_id": "base_context_result"
+    },
+    {
+      "from": "transient_prompt",
+      "to": "render_request",
+      "arc_id": "transient_prompt_result"
+    },
+    {
+      "from": "render_request",
+      "to": "infer",
+      "arc_id": "render_request_result"
+    },
+    {
+      "from": "infer",
+      "to": "accept_output",
+      "arc_id": "infer_result"
+    },
+    {
+      "from": "accept_output",
+      "to": "next_context",
+      "arc_id": "accept_output_result"
+    }
+  ],
+  "outputs": [
+    "next_context_result"
+  ]
+}

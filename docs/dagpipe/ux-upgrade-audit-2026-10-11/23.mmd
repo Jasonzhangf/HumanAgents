@@ -1,0 +1,15 @@
+flowchart LR
+ I[编排者的真实派发与依赖决定]:::design
+ A[创建具体 assignment／attempt 实例<br/>允许多个探索节点、多个 plan 节点等]:::design
+ D[发布本次实际依赖 DAG<br/>并行、先后只来自真实数据／任务依赖]:::design
+ J[Journal 保留调用／交付／接纳事实]:::truth
+ P[typed 实例图与状态投影]:::derived
+ U[UX 展示实际动态图<br/>不按角色名补造节点或固定阶段]:::derived
+ I --> A --> D --> J --> P --> U
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

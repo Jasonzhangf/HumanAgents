@@ -1,0 +1,17 @@
+flowchart LR
+ I[同一份真实任务语义]:::truth
+ Q{是否帮助当前层回答<br/>发生什么／得到什么／需我决定吗<br/>能做什么／依据是什么}:::derived
+ S[必要：在当前区域显示<br/>用清楚的业务语言]:::derived
+ D[只对深入阅读有用<br/>按需展开，不堆在概要]:::derived
+ H[不必要／重复／无当前内容<br/>不渲染该区域]:::evidence
+ I --> Q
+ Q -->|直接有用| S
+ Q -->|深入时有用| D
+ Q -->|没有用途或没有内容| H
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

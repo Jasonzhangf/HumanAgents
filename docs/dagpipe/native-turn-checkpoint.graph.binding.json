@@ -1,0 +1,62 @@
+{
+  "graph": "humanagent-native-turn-checkpoint",
+  "operator": {
+    "operator": "humanagent-native-turn-checkpoint-boundary",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-PLANNED",
+  "nodes": {
+    "validate_candidate": {
+      "ownerPath": "packages/core/src/checkpoint.ts",
+      "ownerRel": "packages/core/src/checkpoint.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "reconcile_operations": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "persist_recovery_state": {
+      "ownerPath": "packages/adapters/filesystem/src/index.ts",
+      "ownerRel": "packages/adapters/filesystem/src/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "commit_checkpoint_fact": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "journalWriterOwnerRel": "packages/adapters/jsonl/src/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "commit_closure_fact": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "commit_context_view_fact": {
+      "ownerPath": "packages/runtime/src/context/index.ts",
+      "ownerRel": "packages/runtime/src/context/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "publish_qualified_history": {
+      "ownerPath": "packages/runtime/src/context/index.ts",
+      "ownerRel": "packages/runtime/src/context/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "project_durable_success": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "recovery_hold": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "resolve_boundary_outcome": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    }
+  }
+}

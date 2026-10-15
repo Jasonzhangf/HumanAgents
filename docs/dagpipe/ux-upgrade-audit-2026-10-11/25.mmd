@@ -1,0 +1,19 @@
+flowchart TB
+ I[当前 turn 推理或操作出现错误]:::design
+ R[按现有预算与错误策略 retry<br/>可以多次，不编固定次数]:::design
+ C{是否可以继续}:::design
+ W[继续原 turn 推理<br/>未完成位置与责任不变]:::design
+ H[仍失败：暂停等待恢复<br/>完整 context／部分完成事实／恢复责任]:::design
+ K[收到恢复触发<br/>重建同 turn context 与未完成位置]:::design
+ P[生成当次临时目标提示<br/>继续原 turn，不重复已完成副作用]:::design
+ I --> R --> C
+ C -->|重试可继续| W
+ C -->|预算内还能 retry| R
+ C -->|多次后停下| H --> K --> P --> W
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

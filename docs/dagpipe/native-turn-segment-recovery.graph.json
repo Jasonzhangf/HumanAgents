@@ -1,0 +1,103 @@
+{
+  "id": "humanagent-native-turn-segment-recovery",
+  "version": "1",
+  "meta": {
+    "title": "同一业务 turn 的 segment 冷恢复",
+    "requirements_version": 14,
+    "requirements": [
+      "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-implicit-brain-budgeted-independent-orchestration",
+      "humanagent-dynamic-orchestrator-choice-and-agent-termination",
+      "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+      "humanagent-transient-goal-oriented-continuation-prompt",
+      "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+      "humanagent-continuation-oriented-by-explicit-dispatch-template",
+      "humanagent-provider-work-order-ablate-graph-governance-code"
+    ],
+    "designStatus": "USER-REQUIREMENT-DESIGN",
+    "implementationStatus": "UNVERIFIED",
+    "scope": "一次同一业务 turn 的 resume intent；单输入单输出 SESE；不派发固定 observation/plan/execute/review 角色流水线，无重复/回退边，下一次恢复是本图的新执行",
+    "seseBoundary": "一个 resume intent 输入 ARC，一个 typed recovery/resume outcome 输出 ARC。",
+    "routingContract": "已安装 DAGpipe 0.1.1 grammar 只有无条件 from/to/arc_id 边，执行器按拓扑波次调度全部节点，无条件边。因此 prerequisite/error 由 typed envelope 承载：节点只在其入边 envelope 声明精确前置成功后执行副作用，否则输出 not-executed 并保留原首错；链条仍到达唯一输出节点，由该节点解析 typed outcome。此为目标拓扑与合同，不证明 runtime 路由。",
+    "commitSeparation": "grant commit、business registration commit、segment commit 三种职责分离：TG1 在同一 held 事务内产出 grant commit 与 business registration commit；J1 的 segment-opened append 产出独立 segment commit。禁止用任一 commit 填充另一职责。",
+    "revokeOrder": "reservation 提交前撤权：零登记、零 append、零 dispatch；reservation 提交后撤权：允许完成本次已登记 segment 的 append 与收拢，但新 request、child、effect 仍各自按当前 grant 逐次准入。",
+    "immutability": "原 v1 initial capture 与原 binding commit 保持不可变；本图只追加新 segment 与 v2 capture，不重标旧 epoch、不重写 v1 receipt。",
+    "reuseBoundary": "复用 native-turn-checkpoint.graph.json 的节点 schema；本图不证明 Operator 已注册、runtime 已执行或产品已验收。",
+    "bindingCompanion": "native-turn-segment-recovery.graph.binding.json",
+    "semanticCompanion": "native-turn-segment-recovery.graph.semantic.json"
+  },
+  "inputs": [
+    { "id": "resume_intent", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "read_exact_predecessor_facts",
+      "operator": "humanagent-native-turn-segment-recovery-read-predecessor-facts",
+      "operator_version": "1",
+      "inputs": ["resume_intent"],
+      "output": { "id": "predecessor_facts_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "register_current_grant_business",
+      "operator": "humanagent-native-turn-segment-recovery-register-grant-business",
+      "operator_version": "1",
+      "inputs": ["predecessor_facts_result"],
+      "output": { "id": "grant_registration_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "append_segment_opened",
+      "operator": "humanagent-native-turn-segment-recovery-append-segment-opened",
+      "operator_version": "1",
+      "inputs": ["grant_registration_result"],
+      "output": { "id": "segment_opened_commit_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "establish_epoch_window",
+      "operator": "humanagent-native-turn-segment-recovery-establish-epoch-window",
+      "operator_version": "1",
+      "inputs": ["segment_opened_commit_result"],
+      "output": { "id": "epoch_window_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "persist_segment_recovery_assets",
+      "operator": "humanagent-native-turn-segment-recovery-persist-segment-recovery-assets",
+      "operator_version": "1",
+      "inputs": ["epoch_window_result"],
+      "output": { "id": "segment_recovery_assets_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_resume_outcome",
+      "operator": "humanagent-native-turn-segment-recovery-resolve-outcome",
+      "operator_version": "1",
+      "inputs": ["segment_recovery_assets_result"],
+      "output": { "id": "segment_recovery_outcome", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "read_exact_predecessor_facts", "to": "register_current_grant_business", "arc_id": "predecessor_facts_result" },
+    { "from": "register_current_grant_business", "to": "append_segment_opened", "arc_id": "grant_registration_result" },
+    { "from": "append_segment_opened", "to": "establish_epoch_window", "arc_id": "segment_opened_commit_result" },
+    { "from": "establish_epoch_window", "to": "persist_segment_recovery_assets", "arc_id": "epoch_window_result" },
+    { "from": "persist_segment_recovery_assets", "to": "resolve_resume_outcome", "arc_id": "segment_recovery_assets_result" }
+  ],
+  "outputs": ["segment_recovery_outcome"]
+}

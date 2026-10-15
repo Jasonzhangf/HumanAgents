@@ -1,0 +1,74 @@
+{
+  "id": "humanagent-checkpoint-path-reentry",
+  "version": "1",
+  "meta": {
+    "title": "从一个可读保存点发起条件重入：读取、准入、条件追加入口、typed outcome",
+    "baseline": "e13a84a24c6181f03298fea99a1f155f8805f145",
+    "status": "DESIGN-PLANNED",
+    "scope": "一次从历史或前向已保存点发起的新执行。读取带可读描述的保存点并解析精确 checkpoint/publication 身份；按当前权限、控制位置与恢复责任作出准入决定；允许时在原 Journal 之后条件追加新路径与时期事实；最终返回唯一 typed outcome。不包含同一 turn 的分段恢复、整个 Memory 沉淀流、历史循环或自动 replay。",
+    "routingContract": "本图的边是无条件 ARC 依赖。当前安装的 DAGpipe 语法没有条件边字段，调度器会执行每个波次内的节点。准入节点产出 typed decision 值，其后每个副作用阶段都以该值为门，唯一的出口节点返回单一 typed outcome；被拒绝或保持的分支不产生副作用。本图不声称任何条件边或运行期条件路由，也不增加仅用于可视化的成功/失败投影节点。",
+    "implementationStatus": "UNVERIFIED",
+    "implementationGap": "本图是目标拓扑与业务契约，不是已注册或可执行 SDK Operator 的证据。四个节点当前没有 production Operator factory，且新文件 checkpoint-reentry.ts 尚未实现。下列 owner 文件是各责任当前的唯一真源。dagpipe graph validate 只证明静态拓扑与绑定形状，不证明运行行为。",
+    "conditionalOwner": {
+      "decisionAndRecord": "packages/runtime/src/checkpoints/conditional-reentry.ts",
+      "canonicalSubmission": "packages/runtime/src/checkpoints/submission.ts",
+      "appJournalComposition": "packages/app/src/checkpoint-journal.ts",
+      "note": "与 provider-context-correction-r1-20261015 上 C4 的同一 conditional 所有者保持连贯：复用既有 conditional record、command、builder、validator 与 submission，本图不定义第二套 record 或第二个恢复算法。"
+    },
+    "separateGraphs": {
+      "sameTurnSegmentRecovery": "同一业务 turn 的冷恢复仍是独立图，不在本图内表达。",
+      "memoryCuration": "humanagent-memory-curation"
+    }
+  },
+  "inputs": [
+    { "id": "reentry_target_request", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "read_saved_target",
+      "operator": "humanagent-checkpoint-path-target-read",
+      "operator_version": "1",
+      "inputs": ["reentry_target_request"],
+      "output": { "id": "saved_target_facts", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "admit_reentry",
+      "operator": "humanagent-checkpoint-path-admission",
+      "operator_version": "1",
+      "inputs": ["saved_target_facts"],
+      "output": { "id": "admission_decision", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "append_path_fact",
+      "operator": "humanagent-checkpoint-path-append",
+      "operator_version": "1",
+      "inputs": ["admission_decision"],
+      "output": { "id": "path_fact", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "return_typed_outcome",
+      "operator": "humanagent-checkpoint-path-outcome",
+      "operator_version": "1",
+      "inputs": ["path_fact"],
+      "output": { "id": "reentry_outcome", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "read_saved_target", "to": "admit_reentry", "arc_id": "saved_target_facts" },
+    { "from": "admit_reentry", "to": "append_path_fact", "arc_id": "admission_decision" },
+    { "from": "append_path_fact", "to": "return_typed_outcome", "arc_id": "path_fact" }
+  ],
+  "outputs": ["reentry_outcome"]
+}

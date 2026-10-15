@@ -1,0 +1,32 @@
+flowchart TB
+ I[用户输入]:::truth
+ E[显式大脑整理并分流<br/>最新完整语义＋前序语义 checkpoints]:::design
+ Q[简单问答：直接返回答案<br/>此次交互结束，不派业务任务]:::design
+ T[复杂问题：整理为标准任务模板<br/>目标／范围／约束／交付与完成要求]:::design
+ F[确认后的唯一需求 FIFO]:::truth
+ R[预算内 N 个独立编排 runtime<br/>任务模板＋语义 checkpoints＋当前 turn]:::design
+ D[动态选择探索／plan／execute／review<br/>角色独立 context，返回精炼结果]:::design
+ S[读取该任务真实状态]:::truth
+ C[任务未完成：依据派单模板重新 orientation<br/>当次临时指令续推]:::design
+ H[阶段 turn 标准压缩／总结／交付<br/>checkpoint→Planner→新一轮]:::design
+ Z[任务完成或明确失败<br/>结束运行并返回结果]:::truth
+ J[Organ Journal<br/>任务事实／checkpoint／在途与恢复责任]:::truth
+ U[typed 投影与公开只读 UX]:::derived
+ I --> E
+ E -->|简单问答| Q
+ E -->|需要执行的复杂问题| T --> F --> R --> D --> S
+ S -->|未完成，继续当前 turn| C
+ S -->|阶段可收口| H
+ S -->|任务终点| Z
+ C --> N[同 turn 继续动态判断<br/>临时指令不进入后续 context]:::design
+ H --> P[下一轮继续动态编排<br/>不是任务已经完成]:::design
+ R --> J --> U
+ Q -->|普通回答| V[显式交互呈现]:::derived
+ Z --> U
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

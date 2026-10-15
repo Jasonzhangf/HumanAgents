@@ -1,0 +1,15 @@
+flowchart LR
+ I[用户明确订阅控制请求]:::truth
+ R[Runtime 编排控制事务]:::truth
+ L[锁定已提交订阅版本]:::truth
+ C[Core 裁决许可与下一状态]:::truth
+ J[原子提交状态／失效槽位／提醒 receipt]:::truth
+ O[公开控制结果与合法动作]:::derived
+ I --> R --> L --> C --> J --> O
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

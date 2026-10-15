@@ -1,0 +1,15 @@
+flowchart LR
+ I[用户选择同 scope 的历史点]:::truth
+ Q[读取已提交 checkpoint 与合法关联]:::truth
+ V[分别读取 runtime current<br/>与 viewed checkpoint]:::derived
+ R[解析 context／semantic／action／raw 引用]:::derived
+ U[历史列表／简介／证据 drawer<br/>仅查看，不改变运行]:::design
+ I --> Q --> V --> R
+ R -.->|产品查询与浏览闭环待接| U
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

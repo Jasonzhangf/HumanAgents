@@ -4,26 +4,23 @@ Status: design candidate（等待独立 review）
 Baseline: `cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2`
 Graphs: 每条命令一个独立 SESE 图
 [`dashboard-e2e-web-search.graph.json`](../dagpipe/dashboard-e2e-web-search.graph.json)、
-[`dashboard-e2e-local-file-search.graph.json`](../dagpipe/dashboard-e2e-local-file-search.graph.json)、
-[`dashboard-e2e-aitest.graph.json`](../dagpipe/dashboard-e2e-aitest.graph.json)
+[`dashboard-e2e-local-file-search.graph.json`](../dagpipe/dashboard-e2e-local-file-search.graph.json)
 Contract: [`docs/ui/dashboard-e2e-acceptance.md`](dashboard-e2e-acceptance.md)
 Web-search gate: [`docs/architecture/hand-search-websearch-plan.md`](../architecture/hand-search-websearch-plan.md)
 
 ## 1. 目标与范围
 
-实现验收合同要求的三个命令，各自独立跑通一次真实浏览器 E2E 并产出绑定同一候选 SHA 的 receipt：
+实现验收合同要求的两个命令，各自独立跑通一次真实浏览器 E2E 并产出绑定同一候选 SHA 的 receipt：
 
 ```sh
 pnpm e2e:dashboard:web-search
 pnpm e2e:dashboard:local-file-search
-pnpm e2e:dashboard:aitest
 ```
 
-三次 attempt 是三条互相独立的链路：各自新的 task/run ID、独立的隔离 runtime/workspace、独立的
-receipt 与独立收口。因此每条命令有**自己的 SESE 图**（单源单汇），不把三条命令 AND-join 到一个终点：
-单独跑一条命令时，另外两条的产物根本不存在，任何要求"三条同时成立"的汇合节点都无法满足。
+两次 attempt 是两条互相独立的链路：各自新的 task/run ID、独立的隔离 runtime/workspace、独立的
+receipt 与独立收口。因此每条命令有**自己的 SESE 图**（单源单汇），不把两条命令 AND-join 到一个终点。
 
-范围内：统一 runner 与 lib、三个场景断言、为本地搜索补齐 typed 结果契约与读取入口、receipt/截图、
+范围内：统一 runner 与 lib、两个场景断言、为本地搜索补齐 typed 结果契约与读取入口、receipt/截图、
 失败/超时/取消两条收口分支。
 范围外：Retry-10 独立验收（本轮不验证，标 `INCOMPLETE`）；扩大 Dashboard 的事件窗口。
 
@@ -38,7 +35,6 @@ receipt 与独立收口。因此每条命令有**自己的 SESE 图**（单源�
 | 网络搜索后端的分页与完整性语义 | 已按真实 provider 复核并记录：`docs/architecture/evidence/tinyfish-search-capability.md`。实测 `page` 为 0–10 的零基分页，每页恰 10 条且 `position` 每页从 1 重排；`total_results === results.length`，不是全局命中数；唯一可观测的完整性信号是"某页少于每页上限"。因此契约改为 provider 自己翻页 0–10、在首个短页停止，并记录 `providerPagesFetched` / `exhausted`，不再声称"网络上全部匹配" | 可用（契约已按实测修正） |
 | 网络搜索的取消语义 | 同上证据文档：`monid runs get -r <runId>` / `monid runs stop -r <runId>` 存在；对已结束 run 调 stop 返回 `CONFLICT ... already COMPLETED`。本地 abort 不证明远端 run 已停 | 可用（契约已按实测修正） |
 | 网络搜索 Provider 工具 | 不存在；`web.search` 目前只是 Hand gateway service | **缺口，见 §5 门禁** |
-| AItest 任务与 checker | `AItest/tasks/pelican-bicycle/`：`prepare-run.sh`（run 已存在即失败，天然不覆盖）与 `inspect-result.mjs`（exit 0 要求非空 + html root + 恰好 1 个内联 SVG + 存在动画） | 可用 |
 
 ## 3. 已定位的既有偏差
 
@@ -63,7 +59,6 @@ lib/receipt.mjs                   receipt / INCOMPLETE receipt 写入
 lib/cleanup.mjs                   settled / 未 settled 两条收口分支
 scenarios/web-search.mjs
 scenarios/local-file-search.mjs
-scenarios/aitest.mjs
 ```
 
 `package.json` 增加三条 script，均调用同一 runner 并显式设定 receipt 与截图目录：
@@ -71,10 +66,9 @@ scenarios/aitest.mjs
 ```json
 "e2e:dashboard:web-search": "node tests/app/dashboard-e2e/runner.mjs --scenario web-search",
 "e2e:dashboard:local-file-search": "node tests/app/dashboard-e2e/runner.mjs --scenario local-file-search",
-"e2e:dashboard:aitest": "node tests/app/dashboard-e2e/runner.mjs --scenario aitest"
 ```
 
-DAG 节点与 owner 的绑定见四张图的 `.graph.binding.json`：runner 步骤绑定到本轮新增的
+DAG 节点与 owner 的绑定见两张图的 `.graph.binding.json`：runner 步骤绑定到本轮新增的
 runner/lib/scenario 模块——`browser_session` 绑定 `lib/browser.mjs`（真实浏览器与 serve 生命周期），
 `candidate_binding` 绑定 `lib/binding.mjs`，失败/收口链路绑定 `runner.mjs`、`lib/journal.mjs`、
 `lib/receipt.mjs`、`lib/cleanup.mjs`——产品步骤绑定到真实产品 owner。Dashboard `web.search` 工具链上：
@@ -171,12 +165,6 @@ runner 断言：
 
 以上投影、报告、读取入口或清单证据任一缺失，该场景为 `INCOMPLETE`。
 
-### 6.4 AItest
-
-- 先核实 AItest 仓库、目标 task、输入/输出与适用 checker；使用本轮专属隔离目录执行真实任务。
-- 新建 run 目录（不得覆盖既有 `AGY_01`/`CLAUDE_01`/`CODEX_01..07`），产物写到 task 要求的路径。
-- 运行 task 指定 checker，保存原始 stdout 与 exit code；按 task 人工观察要求记录截图与结论。
-- 仅存在 HTML/SVG/动画标签不构成 task 完成；checker 通过也不替代语义验收。
 
 ## 7. 失败、超时与取消收口（每条命令图内的链路）
 
@@ -211,5 +199,5 @@ candidate_binding                    绑定候选并登记本轮资源
 ## 8. 非目标与风险
 
 - 非目标：Retry-10；扩大 20 条事件窗口；新增 Dashboard 产品界面。
-- 风险：AItest run 命名冲突（用本轮 run ID 前缀避免）；TinyFish 依赖外网，不可用时该场景只能标 `INCOMPLETE`；
+- 风险：TinyFish 依赖外网，不可用时网络搜索场景只能标 `INCOMPLETE`；
   本地搜索需要跨 6 个产品 owner 的契约补齐，是三条分支中工作量最大的一条。

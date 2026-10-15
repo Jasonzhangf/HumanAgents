@@ -1,0 +1,21 @@
+{
+  "graph": "humanagent-turn-continuation-request",
+  "requirements_version": 11,
+  "labels": {
+    "base_context": "装配显式派单模板与当前 turn 真实 context",
+    "transient_prompt": "生成引用派单要求的通用临时 orientation 指令",
+    "render_request": "编码基础 context 与临时指令为当前请求",
+    "infer": "在同 turn 内发起本次模型推理",
+    "accept_output": "处理真实输出与动作事实，不追加临时指令",
+    "next_context": "从规范 history 与 checkpoint 装配后续 context"
+  },
+  "owners": {
+    "base_context": "packages/runtime",
+    "transient_prompt": "packages/runtime",
+    "render_request": "packages/adapters/provider",
+    "infer": "packages/adapters/provider",
+    "accept_output": "packages/runtime",
+    "next_context": "packages/runtime"
+  },
+  "implementationStatus": "UNVERIFIED"
+}

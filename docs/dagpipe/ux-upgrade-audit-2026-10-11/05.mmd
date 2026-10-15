@@ -1,0 +1,17 @@
+flowchart TB
+ I[用户显式 steer／停止命令]:::truth
+ C[Core 按生命周期裁决许可]:::truth
+ O[Runtime 启动标准停止 operation]:::truth
+ P[要求执行后端取消或停止<br/>映射真实 operation 身份]:::truth
+ S[核对已发生副作用与资源状态]:::truth
+ K[提交收拢 checkpoint]:::truth
+ J[Journal 追加停止 outcome]:::truth
+ R[公开已停止或仍未知的责任]:::derived
+ I --> C --> O --> P --> S --> K --> J --> R
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

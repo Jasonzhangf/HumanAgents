@@ -1,0 +1,13 @@
+{
+  "project_id": "humanagent",
+  "request_id": "provider-graph-ablation-governance-before-code-20261012",
+  "requirement_id": "humanagent-provider-work-order-ablate-graph-governance-code",
+  "base_version": 0,
+  "operation": "create",
+  "text": "先消融图的节点，然后更新治理程序，然后再开始执行代码修改",
+  "authorization": {
+    "role": "user",
+    "source": "当前 Codex 对话，用户在 Provider gap 分层计划之后明确的执行顺序。未提供独立 message ID。",
+    "original_text": "先消融图的节点，然后更新治理程序，然后再开始执行代码修改"
+  }
+}

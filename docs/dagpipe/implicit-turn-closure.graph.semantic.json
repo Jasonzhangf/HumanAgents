@@ -1,0 +1,32 @@
+{
+  "graph": "humanagent-implicit-turn-closure",
+  "requirements_version": 14,
+  "labels": {
+    "compress": "压缩任务语义并保留义务",
+    "summarize": "总结目标、行动、结果、下一步",
+    "deliver": "捕获真实已接受的标准交付来源，不声明传输完成或重复保存正文",
+    "checkpoint": "完成标准动作后提交 checkpoint 与 closure",
+    "planner": "调用独立 Planner 进行下一轮计划",
+    "adopt": "编排者核实适合性与目标事实",
+    "next_state": "消费已校验交付并提交 canonical 公开输出后，输出继续任务或真实终点决定"
+  },
+  "owners": {
+    "compress": "packages/runtime",
+    "summarize": "packages/runtime",
+    "deliver": "packages/runtime",
+    "checkpoint": "packages/runtime",
+    "planner": "packages/runtime",
+    "adopt": "packages/runtime",
+    "next_state": "packages/runtime"
+  },
+  "implementationStatus": "UNVERIFIED",
+  "design": {
+    "status": "USER-REQUIREMENT-DESIGN",
+    "deliverySource": "deliver 捕获的是真实已接受的标准交付来源，即 acceptedEndCall 与原始 rawArguments 中的 exact deliveryText。它区别于后续 canonical public-output 发布，不代表传输完成或任务成功，也不重复保存正文。",
+    "terminalAcceptance": "next_state 的 COMPLETED 分支必须先消费 typed readDelivery 校验过的 delivery body，并在同一 canonical public-output 上完成 commit 与 exact readback，之后才可接受 succeeded/final。失败时保留原错误与恢复责任，不得接受 succeeded。",
+    "continueBranch": "CONTINUE 分支保持既有 checkpoint 与独立 Planner 语义，不受交付门影响。",
+    "canonicalOutputExclusion": "canonical output 不得使用 native drain 或 summary。正文只来自已校验的标准交付。",
+    "noForcedRoleSequence": "该图不强制编排者、Planner 或 reviewer 的固定角色顺序，也不新增模型完成标签。",
+    "runtimeBoundary": "本图是目标契约。在真实 typed readDelivery、canonical public-output commit 与 exact readback 组合回执出现之前，implementationStatus 保持 UNVERIFIED。"
+  }
+}

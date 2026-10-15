@@ -1,0 +1,232 @@
+{
+  "id": "humanagent-implicit-turn-closure",
+  "version": "1",
+  "meta": {
+    "title": "implicit-turn-closure",
+    "requirements_version": 14,
+    "requirements": [
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-implicit-brain-budgeted-independent-orchestration",
+      "humanagent-dynamic-orchestrator-choice-and-agent-termination",
+      "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+      "humanagent-orchestrator-delegation-and-refined-result-context",
+      "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
+      "humanagent-transient-goal-oriented-continuation-prompt",
+      "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+      "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-continuation-oriented-by-explicit-dispatch-template"
+    ],
+    "designStatus": "USER-REQUIREMENT-DESIGN",
+    "implementationStatus": "UNVERIFIED",
+    "bindingBoundary": "语义设计责任名称，不声明 Operator 已注册或 runtime 执行",
+    "outcomeBoundary": "缺标准动作则同 turn 继续推理；错误可多次 retry 后暂停，恢复同 turn；阶段未完成/提交未知时下游不得伪造 closure 或开始新 turn。",
+    "existingCheckpointDesign": "native-turn-checkpoint.graph.json",
+    "trigger": "已派发复杂任务的阶段 turn 收口申请；不套用于简单问答。",
+    "deliveryContract": "deliver 节点捕获真实已接受的标准交付来源（acceptedEndCall 与原始 rawArguments 中的 exact deliveryText），它不同于后续 canonical public-output 发布。它不声明传输完成、任务成功，也不重复保存 body。",
+    "terminalAcceptanceContract": "next_state 的 COMPLETED 分支必须先消费 typed readDelivery 校验过的 delivery body，并在同一 canonical public-output 上完成 commit 与 exact readback，之后才可接受 succeeded/final；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与独立 Planner 语义。canonical output 不得使用 native drain 或 summary。不强制角色顺序，也不新增模型完成标签。"
+  },
+  "inputs": [
+    {
+      "id": "turn_closure_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "compress",
+      "operator": "humanagent-implicit-turn-closure-compress",
+      "operator_version": "1",
+      "inputs": [
+        "turn_closure_request"
+      ],
+      "output": {
+        "id": "compress_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "summarize",
+      "operator": "humanagent-implicit-turn-closure-summarize",
+      "operator_version": "1",
+      "inputs": [
+        "compress_result"
+      ],
+      "output": {
+        "id": "summarize_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "deliver",
+      "operator": "humanagent-implicit-turn-closure-deliver",
+      "operator_version": "1",
+      "inputs": [
+        "summarize_result"
+      ],
+      "output": {
+        "id": "deliver_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "checkpoint",
+      "operator": "humanagent-implicit-turn-closure-checkpoint",
+      "operator_version": "1",
+      "inputs": [
+        "deliver_result"
+      ],
+      "output": {
+        "id": "checkpoint_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "planner",
+      "operator": "humanagent-implicit-turn-closure-planner",
+      "operator_version": "1",
+      "inputs": [
+        "checkpoint_result"
+      ],
+      "output": {
+        "id": "planner_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "adopt",
+      "operator": "humanagent-implicit-turn-closure-adopt",
+      "operator_version": "1",
+      "inputs": [
+        "planner_result"
+      ],
+      "output": {
+        "id": "adopt_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "next_state",
+      "operator": "humanagent-implicit-turn-closure-next_state",
+      "operator_version": "1",
+      "inputs": [
+        "adopt_result"
+      ],
+      "output": {
+        "id": "next_state_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "compress",
+      "to": "summarize",
+      "arc_id": "compress_result"
+    },
+    {
+      "from": "summarize",
+      "to": "deliver",
+      "arc_id": "summarize_result"
+    },
+    {
+      "from": "deliver",
+      "to": "checkpoint",
+      "arc_id": "deliver_result"
+    },
+    {
+      "from": "checkpoint",
+      "to": "planner",
+      "arc_id": "checkpoint_result"
+    },
+    {
+      "from": "planner",
+      "to": "adopt",
+      "arc_id": "planner_result"
+    },
+    {
+      "from": "adopt",
+      "to": "next_state",
+      "arc_id": "adopt_result"
+    }
+  ],
+  "outputs": [
+    "next_state_result"
+  ]
+}

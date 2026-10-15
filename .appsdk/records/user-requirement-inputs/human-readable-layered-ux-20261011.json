@@ -1,0 +1,13 @@
+{
+  "project_id": "humanagent",
+  "request_id": "human-readable-layered-ux-20261011",
+  "requirement_id": "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+  "base_version": 0,
+  "operation": "create",
+  "text": "在这个基础上，你把 UX 部分重新画图，把显示部分按照人类可读优化：\n\n1. 不显示机械语言：需要根据语义显式\n2. 显示必须是按层次显式内容：当前层是干什么用，显式什么，是否必要，不必要的不显示。",
+  "authorization": {
+    "role": "user",
+    "source": "当前 Codex 对话，基于双大脑分流与派单模板续推设计的 UX 重绘要求。未提供独立 message ID。",
+    "original_text": "在这个基础上，你把 UX 部分重新画图，把显示部分按照人类可读优化：\n\n1. 不显示机械语言：需要根据语义显式\n2. 显示必须是按层次显式内容：当前层是干什么用，显式什么，是否必要，不必要的不显示。"
+  }
+}

@@ -1,0 +1,173 @@
+{
+  "id": "humanagent-subagent-call-checkpoint",
+  "version": "1",
+  "meta": {
+    "title": "subagent-call-checkpoint",
+    "requirements_version": 11,
+    "requirements": [
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-implicit-brain-budgeted-independent-orchestration",
+      "humanagent-dynamic-orchestrator-choice-and-agent-termination",
+      "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+      "humanagent-orchestrator-delegation-and-refined-result-context",
+      "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
+      "humanagent-transient-goal-oriented-continuation-prompt",
+      "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+      "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-continuation-oriented-by-explicit-dispatch-template"
+    ],
+    "designStatus": "USER-REQUIREMENT-DESIGN",
+    "implementationStatus": "UNVERIFIED",
+    "bindingBoundary": "语义设计责任名称，不声明 Operator 已注册或 runtime 执行",
+    "outcomeBoundary": "业务不满足条件时输出保留当前 turn/待补充的结果；不伪造 checkpoint 提交或强行执行。",
+    "existingCheckpointDesign": "native-turn-checkpoint.graph.json"
+  },
+  "inputs": [
+    {
+      "id": "input",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "assignment",
+      "operator": "humanagent-subagent-call-checkpoint-assignment",
+      "operator_version": "1",
+      "inputs": [
+        "input"
+      ],
+      "output": {
+        "id": "assignment_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "checkpoint",
+      "operator": "humanagent-subagent-call-checkpoint-checkpoint",
+      "operator_version": "1",
+      "inputs": [
+        "assignment_result"
+      ],
+      "output": {
+        "id": "checkpoint_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "context",
+      "operator": "humanagent-subagent-call-checkpoint-context",
+      "operator_version": "1",
+      "inputs": [
+        "checkpoint_result"
+      ],
+      "output": {
+        "id": "context_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "execute",
+      "operator": "humanagent-subagent-call-checkpoint-execute",
+      "operator_version": "1",
+      "inputs": [
+        "context_result"
+      ],
+      "output": {
+        "id": "execute_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "acceptance",
+      "operator": "humanagent-subagent-call-checkpoint-acceptance",
+      "operator_version": "1",
+      "inputs": [
+        "execute_result"
+      ],
+      "output": {
+        "id": "acceptance_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "assignment",
+      "to": "checkpoint",
+      "arc_id": "assignment_result"
+    },
+    {
+      "from": "checkpoint",
+      "to": "context",
+      "arc_id": "checkpoint_result"
+    },
+    {
+      "from": "context",
+      "to": "execute",
+      "arc_id": "context_result"
+    },
+    {
+      "from": "execute",
+      "to": "acceptance",
+      "arc_id": "execute_result"
+    }
+  ],
+  "outputs": [
+    "acceptance_result"
+  ]
+}

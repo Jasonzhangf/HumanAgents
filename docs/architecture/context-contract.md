@@ -1,5 +1,7 @@
 # Agent Context Contract
 
+> 本次 Brain 上下文与调用/turn 边界以[双大脑语义上下文设计](dual-brain-semantic-context-design-2026-10-11.md)为准；绑定项目需求库 v11。旧活动窗口与 fork 描述不得覆盖该用户决定。
+
 状态：`DESIGN-CANDIDATE / CONTEXT-CONTRACT-V1`
 
 本文定义 HumanAgent 如何从不可变事实、记忆索引、Agent Profile 和当前执行状态装配 Agent Context。本文是 Context Slot、Journal Projection、缓存边界、Tool Result 映射和统一 Context Builder 的共同契约。
@@ -125,6 +127,137 @@ version is an explicit error and cannot fall through to a new canonical
 commit. Remove the v1 reader after every supported closure store contains no
 legacy checkpoint-id records; until then, this is the sole declared
 compatibility boundary and not a second submission owner.
+
+### 1.6 Native Turn 的语义历史与保存描述
+
+显式/隐式大脑的跨 turn Context 只装配固定身份与规则、当前目标/约束，以及合法 scope 下已提交 Checkpoint 的可信时间、可决策 `summary` 和语义证据引用。跨 turn 历史不装配旧 turn 的原始模型消息、完整推理内容、工具结果正文或隐藏 Provider continuation/session 链。当前仍未收拢的 turn 可以保留完整当前消息和 raw tool evidence；保存边界返回完整 durable turn receipt 后，这些 raw 才能退出 active Context。Absolute Journal 与不可变 evidence asset 仍保留且可授权读取。
+
+沿用现有 Checkpoint `summary` 字段作为人可读的 description，不增加同义的 `description` 字段。它必须说明当前可证实的进展、限制/未决问题，以及可用于判断是否选择该恢复点的下一项决策；用户应能仅凭 description 选择回退点，无需先查询或展开 raw 历史。description 是语义摘要，不代替 recovery state、未决 Operation 状态或证据。
+
+Checkpoint 的保存时间由 Runtime/Checkpoint 提交 owner 在首次 durable commit 时赋可信 UTC 时间及 Harness 来源；不能采信模型时间。相同 commit identity 的重试返回首次提交的事实与时间。Journal seq 和提交关系拥有逻辑顺序；不通过篡改时间掩盖时钟回拨。现有 Checkpoint shape 尚无保存时间字段，本节定义后续 native contract 的要求，不声称当前实现已有该字段。
+
+保存边界按独立 receipt 记录 recovery asset、checkpoint、closure、Context View 和合格 history publication 阶段。Checkpoint committed 不等于 turn closed；history publication 也不等于 turn closure 或 next-turn eligibility。只有完整 durable turn receipt 才允许把 raw 从 active Context 移出；若任何阶段失败或结果 unknown，则保留 raw、原错、commit identity、已提交阶段及恢复责任。副作用不得因 Context 回退而被假定已撤销。
+
+### 1.6.1 Native turn 的逻辑 receipt
+
+以下是 native turn 与 checkpoint 边界的逻辑 discriminated union，供后续 `contracts` / Runtime 实现使用；它不是当前 TypeScript validator 或 JSON Schema，也不表示运行时已实现。每个阶段都显式返回结果；先前事实不能因后续失败而丢失，因前置阶段失败而未运行的阶段必须标记 `not-executed`。
+
+```ts
+type StageResult<T> =
+  | { stageId: string; state: 'succeeded'; value: T; evidenceRefs: string[] }
+  | { stageId: string; state: 'failed'; error: TypedError; recoveryRef: string; evidenceRefs: string[] }
+  | { stageId: string; state: 'not-executed'; blockedByStage: string; causeRef: string; firstErrorRef?: string; recoveryRef: string }
+
+type EffectState = 'not-started' | 'accepted' | 'running' | 'succeeded'
+  | 'failed' | 'blocked' | 'cancelled' | 'unknown' | 'stale'
+
+type AdmittedTurn = {
+  turnId: string; workAssignmentRef: string; taskRef: string; scopeRef: string
+  cycleRef: string; inputRevision: number; directiveRevision: number
+  executionEpoch: number; runtimeBindingRef: string; permissionRevision: string
+  admissionEvidenceRefs: string[]; currentTurnRef: string; recoveryStateRef: string
+}
+
+type ToolExecutionFact = {
+  identity: { surface: string; toolId: string; bindingRef: string; route: string }
+  requestRef: string; callRef?: string; operationRef?: string; state: EffectState
+  rawEvidenceRefs: string[]; resultRef?: string; resultDigest?: string; errorRef?: string
+}
+
+type TurnExecutionFacts = {
+  turnId: string
+  dispatchState: 'not-dispatched' | 'accepted' | 'running' | 'returned' | 'failed' | 'unknown' | 'cancelled'
+  assignmentRef: string; childResultRef?: string
+  workResultState?: 'reported' | 'accepted' | 'rejected' | 'incomplete' | 'unknown'
+  toolFacts: ToolExecutionFact[]; operationRefs: string[]; acceptanceEvidenceRefs: string[]
+  firstErrorRef?: string; unresolvedOperationRefs: string[]; rawTurnRefs: string[]
+}
+
+type SemanticClaim = { fact: string; certainty: 'confirmed' | 'partial' | 'unknown' | 'corrected'; sourceRefs: string[] }
+
+type SemanticClosureCandidate = {
+  turnId: string; checkpointSummary: string; ruleVersion: string
+  claims: SemanticClaim[]; constraints: SemanticClaim[]; unresolvedQuestions: string[]
+  semanticArtifactRefs: string[]; rawTurnRefs: string[]
+  requestedOutcome: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown'
+}
+
+type DurablePhase = 'recovery-assets' | 'checkpoint' | 'closure' | 'context-view' | 'history-publication'
+type DurableCheckpointReceipt = {
+  commitIdentity: string
+  checkpointRef: string
+  journalReceiptRef: string
+  committedAt: string // RFC 3339 UTC instant, assigned at first durable commit
+  timeAuthority: {
+    source: 'harness'
+    owner: 'runtime-checkpoint-control-owner'
+    authorityRef: string
+  }
+}
+
+type CheckpointBoundaryOutcome = {
+  commitIdentity: string; stages: StageResult<unknown>[]
+  durablePhases: Array<{ phase: DurablePhase; state: 'committed' | 'failed' | 'unknown' | 'not-executed'; receiptRef?: string }>
+  checkpointReceipt?: DurableCheckpointReceipt; closureReceiptRef?: string; contextViewReceiptRef?: string
+  historyReceiptRef?: string; firstErrorRef?: string; laterErrorRefs: string[]
+  unresolvedOperationRefs: string[]; rawTurnRefs: string[]; recoveryRef?: string
+}
+
+type RecoveryHoldFacts = {
+  commitIdentity: string; firstErrorRef?: string; laterErrorRefs: string[]
+  rawTurnRefs: string[]; unresolvedOperationRefs: string[]
+  stages: StageResult<unknown>[]; durablePhases: CheckpointBoundaryOutcome['durablePhases']
+  durableReceiptRefs: string[]; recoveryResponsibilityRef: string
+}
+
+type SuccessPathProjection =
+  | { path: 'success'; active: true; durableTurnReceiptRef: string; checkpointReceiptRef: string; historyReceiptRef: string }
+  | { path: 'success'; active: false; reasonRef: string }
+
+type RecoveryHoldProjection =
+  | { path: 'recovery-hold'; active: true; facts: RecoveryHoldFacts }
+  | { path: 'recovery-hold'; active: false; reasonRef: string }
+
+type TurnDisposition =
+  | { state: 'ready-next'; durableTurnReceiptRef: string; checkpointReceiptRef: string; historyReceiptRef: string; nextActionRef: string }
+  | { state: 'waiting-recovery'; recoveryRef: string; firstErrorRef?: string }
+  | { state: 'waiting-reconcile'; operationRefs: string[]; recoveryRef: string }
+  | { state: 'waiting-correction'; rawTurnRefs: string[]; correctionRef: string }
+  | { state: 'stopped'; stopOperationRef: string; settleEvidenceRefs: string[]; checkpointReceiptRef: string }
+  | { state: 'save-incomplete'; commitIdentity: string; durablePhases: CheckpointBoundaryOutcome['durablePhases']; recoveryRef: string; firstErrorRef?: string }
+  | { state: 'stale'; evidenceRef: string; currentEpoch: number }
+```
+
+Runtime 生成 identity、binding、epoch 和准入证据；模型只能提出语义候选，不能设置提交完成、权限、下一 turn 资格或可信保存时间。Tool identity 是完整的 `(surface, tool id, binding, route)`，相同名称不代表同一能力。ACK、reported WorkResult、acceptance、Operation settle 和业务验收是不同事实。`accepted`/`running` 不代表效果完成；`unknown` 保留原 operation 身份并要求 reconcile；旧 epoch 的 `stale` 结果不能推进当前路径。无 Tool 的 turn 用空 `toolFacts`，不伪造调用或 receipt。
+
+Runtime Checkpoint/Control Owner 提交 typed intent，JSONL Journal Owner 仍是唯一追加和 receipt owner。`DurableCheckpointReceipt` 将 `committedAt`、明确的 Harness source/authority、checkpoint fact 和 Journal receipt 绑定到同一 `commitIdentity`。`committedAt` 必须表示首次 durable commit 的 UTC 时间；字段格式校验只证明字符串形状，不证明时间由可信 Harness owner 赋值。结果未知时必须按同一 `commitIdentity` 查询；若已 durable，重试必须返回首次事实、原时间和原 receipt，不能另造时间或身份。五个 durable phase 各自可见，后续成功不能覆盖前序失败。`ready-next` 只表示本 turn 有完整 durable receipt；它本身不派发下一 turn，后续仍要重新检查 permission、resource、health 和未收拢 effects。
+
+静态 admitted-turn 和 checkpoint 图均以无条件 ARC dependency 表达拓扑。成功投影 `S`、恢复保持 `R` 都是纯 envelope projection，静态图中两者都会运行并汇入唯一 `Z`；投影里的 `active` 判别式要求恰好一个路径 active。图不声称 DAGpipe 存在互斥条件边，也不构成 Runtime 条件路由证据。会产生副作用的只有对应的业务阶段节点：它们必须验证入站 envelope 的所需前置阶段为 `succeeded`、commit identity 未变、当前权限与 epoch 有效后才可执行；否则不执行副作用，输出 `not-executed`，携带原 `firstErrorRef`/cause 和恢复引用。预期失败、unknown 与 stale 必须作为 typed envelope 值返回，而非令 Operator transport 失败，以便其后节点无副作用收拢。只有五阶段都有合格 receipt 且没有错误、unknown、stale 或未决 operation 时，`S` 可 active；其余情况由 `R` active，并收集首错、后续 reconcile/save 错误、raw refs、未决 operation、各阶段状态/receipt 与恢复责任。唯一 `Z` 校验两投影恰好一个 active，再返回 disposition/boundary outcome。
+
+### 1.6.2 Native turn 语义检查样例
+
+以下是设计检查，不是运行时测试结果；实现审查需对照 admitted-turn 与 checkpoint-save 两个图和上述 unions 逐项复核。
+
+| 输入情况 | 必须保留的事实 | 结果与禁止推断 |
+|---|---|---|
+| 派发前拒绝 | dispatch failed；后续未运行阶段为 `not-executed` | `waiting-recovery`；不能伪装为 child result 或 checkpoint 成功 |
+| 收到 dispatch ACK 但没有 WorkResult | accepted 与 unknown 分开，保留原 operation identity | `waiting-reconcile`；不能把 ACK 当完成或换新 identity 盲重试 |
+| Tool 失败且已知无副作用 | call/result/error refs 与该 Tool 的规则版本 | 可描述有界失败；不能据此断言整项任务失败或可安全重试 |
+| Tool/WorkResult 部分返回 | partial、完整性信息、未决 refs 和来源证据 | 等待纠正或恢复；不能升格为完整验收 |
+| 已请求取消但效果未 settle | stop request 与 open operation | `waiting-reconcile`；不能当作 stopped 或跳过 closure |
+| recovery asset 已保存、checkpoint 失败 | asset receipt、失败阶段、raw 和原 commit identity | `save-incomplete`；不得换身份重做或丢弃 raw |
+| checkpoint receipt 丢失或结果 unknown | 用同一 commit identity 查询，保留首次 trusted time | 未验证前 `save-incomplete`；不能猜测或重复追加 |
+| checkpoint durable、closure/Context View 未完成 | 每阶段独立状态与 receipt | `save-incomplete`；checkpoint 不等于 turn closed |
+| Context View durable、history publication 失败 | 可重建的 durable facts 与 publication 恢复责任 | 只恢复 publication；不能重跑 child/tool |
+| Recovery asset 持久化失败 | 已收集的 recovery intent、首错、raw 与未提交阶段 | `save-incomplete`；checkpoint/closure/view/publication 全部 `not-executed` |
+| Closure 提交失败或结果 unknown | checkpoint receipt、closure error/unknown、同一 commit identity | `save-incomplete`；不能假设 turn closed，也不能发布 history |
+| Context View 提交失败或结果 unknown | checkpoint 与 closure receipt、view 阶段状态 | `save-incomplete`；不能宣称跨 turn history 已发布 |
+| History publication 阶段未执行 | 前序阶段的精确 receipt/失败状态 | `save-incomplete`；不能把未执行写成 publication 成功 |
+| 旧 epoch 迟到结果 | source epoch 和 stale evidence | `stale`；不能覆盖当前 turn/checkpoint |
+| 全部副作用已 reconcile、保存完整 | 各阶段 receipt、合格 publication receipt | 可返回 `ready-next`；之后仍需 admission recheck |
+| 完整 receipt 已返回 | recovery assets、checkpoint、closure、Context View、history publication 各有 receipt；raw 可退出 active Context，Journal/assets 仍可引用 | 不能删除 Journal 或 evidence assets |
+
+图拓扑为显式 SESE fan-out/fan-in：admitted-turn 的保存结果分到成功投影和 `recovery_hold`，再汇入唯一 disposition；checkpoint 图的五个 durable phase 顺序执行后分到成功投影和 `recovery_hold`，再汇入唯一 `checkpoint_boundary_outcome`。DAGpipe grammar 不声明条件边，因此两投影节点都在静态 DAG 计划中执行，只能按入站 envelope 产出 active/inactive 的纯投影。上游预期失败不得令 Operator transport 失败或跳过节点；后续效果阶段收到 failed/unknown/not-executed envelope 时必须不执行副作用，输出带原错和恢复引用的 `not-executed`，供末端 `recovery_hold` 聚合。checkpoint 图每个 durable phase 都有独立 receipt；边界结果保留所有已提交 receipts、首错、后续错误和恢复责任。静态 DAG 验证只证明拓扑，不验证这些 envelope、条件激活或副作用门控行为；后者仍须由 Runtime contract/E2E 证明。
 
 Agent-to-Agent 的发布者证明、消息类别、scope/ACL、durable cursor、consumer receipt、ACK、重试和离线恢复以 [`agent-communication-and-feedback.md`](agent-communication-and-feedback.md) 为唯一真源；Context 只消费已经通过通信 owner 提交的事实和 projection，不自行确认消息或推进 Agent 状态。
 

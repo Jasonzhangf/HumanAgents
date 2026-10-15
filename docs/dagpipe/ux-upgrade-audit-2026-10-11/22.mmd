@@ -1,0 +1,31 @@
+flowchart TB
+ I[装配显式派单模板／checkpoint 历史<br/>与当前 turn 真实 context]:::design
+ D[编排者自主选择行动<br/>探索／plan／execute／review 可多次]:::design
+ R[接收精炼结果与必要证据]:::design
+ G[请求返回或申请收口<br/>核对标准压缩／总结／交付事实<br/>任务真相与阶段动作<br/>不读重复布尔标签]:::design
+ F[未达任务/阶段要求：临时模板续推提示<br/>强制继续同 turn 推理]:::design
+ C[标准动作全部完成<br/>提交 checkpoint 与 turn closure]:::truth
+ P[Planner 对齐目标并计划下一轮]:::design
+ V[编排者核实并判断任务终点]:::design
+ N[新 turn：历史语义＋新活动 context<br/>不携带旧临时提示词]:::design
+ Z[任务完成或失败<br/>agent 结束]:::truth
+ E[错误：预算/策略内多次 retry]:::design
+ H[仍不能继续：暂停<br/>保留同 turn 完整 context 与责任]:::design
+ K[恢复原 turn 与未完成位置]:::design
+ I --> D --> R --> G
+ G -->|标准动作缺失| F --> D
+ G -->|阶段收口且任务仍在推进| C --> P --> V
+ V -->|继续| N --> D
+ V -->|任务终点| Z
+ D -->|出现错误| E
+ E -->|retry 成功| D
+ E -->|多次仍失败| H -->|恢复| K --> F
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+
+ G -->|实际任务已完成／明确失败| Z
+

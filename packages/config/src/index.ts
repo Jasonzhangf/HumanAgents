@@ -28,6 +28,13 @@ export interface AgentConfig {
   readonly memoryScopes: readonly ('task' | 'organ' | 'approved-global')[];
   readonly resourceClass: string;
   readonly model?: string;
+  /**
+   * Optional per-agent provider binding. When omitted the agent inherits the
+   * shared top-level `[provider]`; when present it is validated with the same
+   * rules as the top-level block so role/instance/child agents can select an
+   * independent provider, protocol, model and endpoint.
+   */
+  readonly provider?: ProviderConfig;
 }
 
 export interface DshExecutionConfig {
@@ -72,6 +79,20 @@ export interface ProviderConfig {
   readonly model: string;
   readonly route: string;
   readonly baseUrl: string;
+}
+
+/**
+ * Compiled, per-agent provider selection. Every configured agent gets one
+ * entry. `source` records how the binding was resolved: the agent's own
+ * `provider` block (`agent`), the shared top-level `[provider]` (`inherited`),
+ * or nothing when neither block is present (`unconfigured`, no `provider`).
+ * The agent's own `model` overrides the selected binding's model.
+ */
+export interface EffectiveAgentProviderBinding {
+  readonly agentId: string;
+  readonly roleId: AgentRole;
+  readonly source: 'agent' | 'inherited' | 'unconfigured';
+  readonly provider?: ProviderConfig;
 }
 
 export interface UserConfig {
@@ -155,6 +176,7 @@ export interface LoadedConfiguration {
   readonly projectOverride?: Partial<UserConfig>;
   readonly effective: UserConfig;
   readonly agentRoster: readonly AgentConfig[];
+  readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
   readonly promptCatalog: Partial<Record<AgentRole, LoadedAgentPromptSegments>>;
   readonly projectSourceManifest: ProjectSourceManifest;
 }
@@ -314,9 +336,17 @@ function parseValue(raw: string, line: number): unknown {
   fail('config-parse', `unsupported TOML value at line ${line}`);
 }
 
+const PROTOTYPE_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function rejectPrototypePath(path: readonly string[]): void {
+  const segment = path.find((part) => PROTOTYPE_PATH_SEGMENTS.has(part));
+  if (segment !== undefined) fail('config-parse', `invalid key: ${path.join('.')}`);
+}
+
 function assign(target: Record<string, unknown>, path: readonly string[], key: string, value: unknown): void {
+  rejectPrototypePath([...path, key]);
   const section = path.reduce<Record<string, unknown>>((current, part) => {
-    const existing = current[part];
+    const existing = Object.prototype.hasOwnProperty.call(current, part) ? current[part] : undefined;
     if (existing !== undefined && (typeof existing !== 'object' || Array.isArray(existing) || existing === null)) {
       fail('config-parse', `section conflicts with value: ${path.join('.')}`);
     }
@@ -328,10 +358,11 @@ function assign(target: Record<string, unknown>, path: readonly string[], key: s
 }
 
 function declareTable(target: Record<string, unknown>, path: readonly string[]): void {
+  rejectPrototypePath(path);
   const key = path.at(-1);
   if (!key) fail('config-parse', 'table name cannot be empty');
   const parent = path.slice(0, -1).reduce<Record<string, unknown>>((current, part) => {
-    const existing = current[part];
+    const existing = Object.prototype.hasOwnProperty.call(current, part) ? current[part] : undefined;
     if (existing === undefined) current[part] = {};
     else if (typeof existing !== 'object' || existing === null || Array.isArray(existing)) fail('config-parse', `section conflicts with value: ${path.join('.')}`);
     return current[part] as Record<string, unknown>;
@@ -372,13 +403,14 @@ export function parseToml(input: string): Record<string, unknown> {
     const separator = line.indexOf('=');
     if (separator <= 0) fail('config-parse', `expected key/value at line ${lineNumber}`);
     const key = line.slice(0, separator).trim();
-    if (!/^[A-Za-z0-9_-]+$/.test(key)) fail('config-parse', `invalid key at line ${lineNumber}`);
+    const keyParts = key.split('.');
+    if (keyParts.some((part) => !/^[A-Za-z0-9_-]+$/.test(part))) fail('config-parse', `invalid key at line ${lineNumber}`);
+    const leaf = keyParts[keyParts.length - 1];
     const value = parseValue(line.slice(separator + 1), lineNumber);
-    if (arrayTable) {
-      if (Object.prototype.hasOwnProperty.call(arrayTable, key)) fail('config-parse', `duplicate key: ${key}`);
-      arrayTable[key] = value;
-    }
-    else assign(root, section, key, value);
+    // Dotted keys (`a.b = 1`) are standard TOML and are the only way to attach a
+    // nested block such as a per-agent provider to an `[[agents]]` array table.
+    if (arrayTable) assign(arrayTable, keyParts.slice(0, -1), leaf, value);
+    else assign(root, [...section, ...keyParts.slice(0, -1)], leaf, value);
   }
   return root;
 }
@@ -408,7 +440,7 @@ function rejectUnknownKeys(value: Record<string, unknown>, allowed: readonly str
 
 function validateAgent(value: unknown, index: number): AgentConfig {
   const agent = asRecord(value, `agents[${index}]`);
-  rejectUnknownKeys(agent, ['agentId', 'roleId', 'templateRef', 'driverRef', 'skills', 'tools', 'permissions', 'memoryScopes', 'resourceClass', 'model'], `agents[${index}]`);
+  rejectUnknownKeys(agent, ['agentId', 'roleId', 'templateRef', 'driverRef', 'skills', 'tools', 'permissions', 'memoryScopes', 'resourceClass', 'model', 'provider'], `agents[${index}]`);
   const role = asString(agent.roleId, `agents[${index}].roleId`);
   if (!(AGENT_ROLES as readonly string[]).includes(role)) fail('config-invalid', `unknown agent role: ${role}`);
   const driverRef = asString(agent.driverRef, `agents[${index}].driverRef`);
@@ -442,6 +474,7 @@ function validateAgent(value: unknown, index: number): AgentConfig {
     memoryScopes: memoryScopes as AgentConfig['memoryScopes'],
     resourceClass: asString(agent.resourceClass, `agents[${index}].resourceClass`),
     ...(agent.model === undefined ? {} : { model: asString(agent.model, `agents[${index}].model`) }),
+    ...(agent.provider === undefined ? {} : { provider: validateProviderConfig(agent.provider, `agents[${index}].provider`) }),
   };
 }
 
@@ -517,6 +550,28 @@ function validateProviderRetryExecution(value: unknown, label: string): Provider
   return {
     candidates: retry.candidates.map((candidate, index) => validateProviderConfig(candidate, `${label}.candidates[${index}]`)),
   };
+}
+
+/**
+ * Resolve the effective provider binding for every configured agent so the App
+ * layer can consume a typed selection without re-parsing TOML. An agent's own
+ * `provider` block wins over the shared top-level `[provider]`; the agent's own
+ * `model` overrides the selected binding's model.
+ */
+export function compileAgentProviderBindings(config: UserConfig): readonly EffectiveAgentProviderBinding[] {
+  return config.agents.map((agent) => {
+    const selected = agent.provider ?? config.provider;
+    if (selected === undefined) {
+      return { agentId: agent.agentId, roleId: agent.roleId, source: 'unconfigured' };
+    }
+    const provider = agent.model === undefined ? selected : { ...selected, model: agent.model };
+    return {
+      agentId: agent.agentId,
+      roleId: agent.roleId,
+      source: agent.provider === undefined ? 'inherited' : 'agent',
+      provider,
+    };
+  });
 }
 
 function validateMemoryConfig(value: unknown): NonNullable<UserConfig['memory']> {
@@ -972,7 +1027,13 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
       }
     }
   }
-  return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents], promptCatalog, projectSourceManifest };
+  return {
+    paths, internal, user, projectOverride, effective,
+    agentRoster: [...effective.agents],
+    agentProviderBindings: compileAgentProviderBindings(effective),
+    promptCatalog,
+    projectSourceManifest,
+  };
 }
 
 /**

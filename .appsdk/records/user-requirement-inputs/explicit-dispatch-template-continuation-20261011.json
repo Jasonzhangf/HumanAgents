@@ -1,0 +1,13 @@
+{
+  "project_id": "humanagent",
+  "request_id": "explicit-dispatch-template-continuation-20261011",
+  "requirement_id": "humanagent-continuation-oriented-by-explicit-dispatch-template",
+  "base_version": 0,
+  "operation": "create",
+  "text": "也就是提示词里面要用显式大脑派单的模板来进行提示",
+  "authorization": {
+    "role": "user",
+    "source": "当前 Codex 对话，移除重复 control block 后，用户明确续推提示词依据显式大脑派单模板。未提供独立 message ID。",
+    "original_text": "也就是提示词里面要用显式大脑派单的模板来进行提示"
+  }
+}

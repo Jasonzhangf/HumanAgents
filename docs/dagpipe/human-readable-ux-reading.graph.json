@@ -1,0 +1,173 @@
+{
+  "id": "humanagent-human-readable-ux-reading",
+  "version": "1",
+  "meta": {
+    "requirements_version": 13,
+    "requirements": [
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-implicit-brain-budgeted-independent-orchestration",
+      "humanagent-dynamic-orchestrator-choice-and-agent-termination",
+      "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+      "humanagent-orchestrator-delegation-and-refined-result-context",
+      "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
+      "humanagent-transient-goal-oriented-continuation-prompt",
+      "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+      "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-continuation-oriented-by-explicit-dispatch-template",
+      "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+      "humanagent-responsive-ux-bottom-sheet-and-four-corner-configuration"
+    ],
+    "designStatus": "USER-REQUIREMENT-DESIGN",
+    "implementationStatus": "UNVERIFIED",
+    "bindingBoundary": "设计责任名称，不声称 Operator 已注册或 Runtime 已执行",
+    "visibilityBoundary": "不显示重复/无内容/无用途字段；必要失败、未知与恢复责任不得隐藏。"
+  },
+  "inputs": [
+    {
+      "id": "view_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "truth",
+      "operator": "humanagent-human-readable-ux-reading-truth",
+      "operator_version": "1",
+      "inputs": [
+        "view_request"
+      ],
+      "output": {
+        "id": "truth_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "semantic",
+      "operator": "humanagent-human-readable-ux-reading-semantic",
+      "operator_version": "1",
+      "inputs": [
+        "truth_result"
+      ],
+      "output": {
+        "id": "semantic_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "purpose",
+      "operator": "humanagent-human-readable-ux-reading-purpose",
+      "operator_version": "1",
+      "inputs": [
+        "semantic_result"
+      ],
+      "output": {
+        "id": "purpose_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "necessary",
+      "operator": "humanagent-human-readable-ux-reading-necessary",
+      "operator_version": "1",
+      "inputs": [
+        "purpose_result"
+      ],
+      "output": {
+        "id": "necessary_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "present",
+      "operator": "humanagent-human-readable-ux-reading-present",
+      "operator_version": "1",
+      "inputs": [
+        "necessary_result"
+      ],
+      "output": {
+        "id": "present_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "truth",
+      "to": "semantic",
+      "arc_id": "truth_result"
+    },
+    {
+      "from": "semantic",
+      "to": "purpose",
+      "arc_id": "semantic_result"
+    },
+    {
+      "from": "purpose",
+      "to": "necessary",
+      "arc_id": "purpose_result"
+    },
+    {
+      "from": "necessary",
+      "to": "present",
+      "arc_id": "necessary_result"
+    }
+  ],
+  "outputs": [
+    "present_result"
+  ]
+}

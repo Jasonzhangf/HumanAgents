@@ -1,0 +1,13 @@
+{
+  "project_id": "humanagent",
+  "request_id": "ablate-redundant-control-block-20261011",
+  "requirement_id": "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
+  "base_version": 1,
+  "operation": "replace",
+  "text": "通用续推提示词不依赖上下文必有 goal、阶段结果或交付字段。显式大脑已负责简单问答/复杂任务分流，因此移除重复的模型 control block 及是否简单问答/是否完成任务布尔标签。简单问答直接回答结束；复杂任务依据已有任务真相判断完成，未完成时通过通用临时提示词重新 orientation 并继续。",
+  "authorization": {
+    "role": "user",
+    "source": "当前 Codex 对话，用户在显式大脑分流说明之后明确指出重复控制不再需要；此变更只撤回 control block，保留通用提示词要求。未提供独立 message ID。",
+    "original_text": "显式大脑分流了，就不需要这个了，不是吗"
+  }
+}

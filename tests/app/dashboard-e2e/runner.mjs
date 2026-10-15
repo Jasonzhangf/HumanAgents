@@ -6,12 +6,10 @@
  * Contract: docs/ui/dashboard-e2e-acceptance.md
  * Graphs:   docs/dagpipe/dashboard-e2e-web-search.graph.json
  *           docs/dagpipe/dashboard-e2e-local-file-search.graph.json
- *           docs/dagpipe/dashboard-e2e-aitest.graph.json
  *
  * Single entry for the acceptance commands:
  *   pnpm e2e:dashboard:web-search
  *   pnpm e2e:dashboard:local-file-search
- *   pnpm e2e:dashboard:aitest
  *   node tests/app/dashboard-e2e/runner.mjs --scenario existing-task-change
  *
  * Follows the single chain each per-command graph declares:
@@ -20,7 +18,7 @@
  *   <cmd>_cleanup -> attempt_receipt   (the single sink, written last)
  *
  * Options (parsed by parseOptions):
- *   --scenario <web-search|local-file-search|aitest|existing-task-change>
+ *   --scenario <web-search|local-file-search|existing-task-change>
  *   --entry <homepage|dashboard>                 default dashboard
  *   --outcome <success|failure|cancel>           default success
  *   --service-mode <candidate|installed-attach>  default candidate
@@ -64,12 +62,11 @@ import {
 } from './lib/cleanup.mjs';
 import { countTurnEvidenceFor, journalPathFor, journalRootFor } from './lib/journal.mjs';
 import { buildReceipt, writeReceipt } from './lib/receipt.mjs';
-import { runAitestScenario } from './scenarios/aitest.mjs';
 import { runExistingTaskChangeScenario } from './scenarios/existing-task-change.mjs';
 import { runLocalFileSearchScenario } from './scenarios/local-file-search.mjs';
 import { runWebSearchScenario } from './scenarios/web-search.mjs';
 
-export const SCENARIOS = Object.freeze(['web-search', 'local-file-search', 'aitest', 'existing-task-change']);
+export const SCENARIOS = Object.freeze(['web-search', 'local-file-search', 'existing-task-change']);
 export const ENTRIES = Object.freeze(['homepage', 'dashboard']);
 export const OUTCOMES = Object.freeze(['success', 'failure', 'cancel']);
 export const SERVICE_MODES = Object.freeze(['candidate', 'installed-attach']);
@@ -82,7 +79,6 @@ export const SERVICE_MODES = Object.freeze(['candidate', 'installed-attach']);
 const SCENARIO_OUTCOME_SUPPORT = Object.freeze({
   'web-search': Object.freeze(['success']),
   'local-file-search': Object.freeze(['success', 'failure', 'cancel']),
-  aitest: Object.freeze(['success']),
   'existing-task-change': Object.freeze(['success']),
 });
 
@@ -90,7 +86,7 @@ export const USAGE = [
   'Usage: node tests/app/dashboard-e2e/runner.mjs --scenario <name> [options]',
   '',
   'Options:',
-  '  --scenario <web-search|local-file-search|aitest|existing-task-change>  required',
+  '  --scenario <web-search|local-file-search|existing-task-change>  required',
   '  --entry <homepage|dashboard>                                          default dashboard',
   '  --outcome <success|failure|cancel>                                    default success',
   '  --service-mode <candidate|installed-attach>                           default candidate',
@@ -100,7 +96,6 @@ export const USAGE = [
 const RUNNERS = {
   'web-search': runWebSearchScenario,
   'local-file-search': runLocalFileSearchScenario,
-  aitest: runAitestScenario,
   'existing-task-change': runExistingTaskChangeScenario,
 };
 

@@ -1,0 +1,17 @@
+flowchart TB
+ I[用户请求真实 project／task／organ／agent scope]:::truth
+ C[config 项目身份与 Runtime 真实归属<br/>不从标题／目录／角色 frame 造身份]:::truth
+ Q[读取合法 scope 的 typed 数据<br/>未知或矛盾选择明确失败]:::derived
+ V[显式链接优先，其次保存偏好<br/>冷启动默认 current 模式]:::derived
+ S[系统／项目／任务／实例视角]:::design
+ D[递归下钻与面包屑返回<br/>保留合法身份与历史选择]:::design
+ O[当前执行游标与用户查看游标<br/>分别呈现]:::design
+ I --> C --> Q --> V
+ V -.->|设计查询与聚合边| S --> D --> O
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

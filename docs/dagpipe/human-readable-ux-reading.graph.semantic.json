@@ -1,0 +1,19 @@
+{
+  "graph": "humanagent-human-readable-ux-reading",
+  "requirements_version": 13,
+  "labels": {
+    "truth": "读取同范围真实事实与责任",
+    "semantic": "复用共同语义与来源",
+    "purpose": "按当前阅读用途组织展示投影",
+    "necessary": "仅保留当前必要内容与合法操作",
+    "present": "共享控件人类可读呈现并按需展开"
+  },
+  "owners": {
+    "truth": "packages/runtime",
+    "semantic": "packages/context-events",
+    "purpose": "packages/ui/projection",
+    "necessary": "packages/ui/projection",
+    "present": "packages/ui"
+  },
+  "implementationStatus": "UNVERIFIED"
+}

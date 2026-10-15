@@ -1,0 +1,19 @@
+flowchart TB
+ I[已确认任务类型与独立触发策略]:::truth
+ T[单次四阶段／巡检可比检查<br/>长程有界业务 cycle]:::design
+ P[领域许可与实际任务计划]:::truth
+ A[真实 assignment／attempt／epoch／cycle]:::truth
+ J[追加已发布 revision<br/>why／what／节点边变化／前后关系]:::design
+ E[关联 checkpoint／业务结果／证据<br/>保留已执行事实与在途责任]:::design
+ U[typed 最新计划与有序历史投影]:::design
+ G[同一图控件显示实际实例<br/>当前最新与历史演变分开]:::design
+ I -.->|三模板产品绑定仍有缺边| T
+ T --> P --> A
+ A -.->|历史发布消费边尚未闭合| J --> E --> U --> G
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

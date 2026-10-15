@@ -1,0 +1,16 @@
+flowchart LR
+ I[用户明确修正或继续请求]:::truth
+ C[Core 裁决许可／错误 refs／剩余义务]:::truth
+ V[Runtime 形成新的有效 ContextView]:::truth
+ J[提交 ContextReplacement／checkpoint<br/>Journal 追加关系与责任]:::truth
+ E[新 execution／epoch 继续<br/>fencing 隔离旧结果]:::truth
+ U[公开新当前游标与完整旧历史]:::design
+ I --> C --> V --> J --> E
+ J -.->|产品历史查询边待接| U
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

@@ -1,0 +1,19 @@
+flowchart TB
+ L[左上配置按钮<br/>范围：当前对话／任务]:::derived
+ R[右上配置按钮<br/>查看：当前进展／历史]:::derived
+ C[中心：当前内容<br/>问题／答案／目标／结果／必要行动<br/>没有无关设置栏]:::derived
+ B[左下配置按钮<br/>显示：字号／主题]:::derived
+ I[右下配置按钮<br/>输入：输入方式]:::derived
+ P[配置按需展开<br/>手机底部抽屉，桌面旁侧面板]:::derived
+ L --> P
+ R --> P
+ B --> P
+ I --> P
+ P -->|仅改变对应偏好或查看选择| C
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

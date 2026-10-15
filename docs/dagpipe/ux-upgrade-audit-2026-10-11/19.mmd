@@ -1,0 +1,24 @@
+flowchart TB
+ I[一个或多个角色返回精炼结果]:::design
+ A[编排者核实结果<br/>决定接受／需补充／仍未知]:::design
+ S[保留已接受语义与证据<br/>review 结论与在途责任进入 checkpoint]:::design
+ D[标准收口动作是否完成]:::design
+ C[继续 turn<br/>完整保留 context，自主选择下一调用]:::design
+ T[标准收口：压缩／四项总结／交付<br/>目标／做了什么／结果／下一步预计]:::design
+ J[动作完成后提交 checkpoint／closure<br/>保留恢复状态与在途义务]:::truth
+ P[Planner 依据 checkpoint 计划下一轮]:::design
+ K[编排者核实计划和目标事实]:::design
+ N[任务仍在推进<br/>新 turn 继续动态编排]:::design
+ E[任务完成或失败<br/>编排 agent 结束并输出真实责任]:::truth
+ I --> A --> S --> D
+ D -->|未结束| C
+ D -->|申请收口| T --> J --> P --> K
+ K -->|继续| N
+ K -->|运行终点| E
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

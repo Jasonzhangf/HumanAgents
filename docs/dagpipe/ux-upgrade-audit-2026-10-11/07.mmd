@@ -1,0 +1,24 @@
+flowchart TB
+ I[结构化运行事实<br/>task／operation／epoch／request／call 身份]:::truth
+ C[归类 canonical 事件<br/>无法解释的事实保留 unknown 与来源]:::derived
+ P[同 scope 精确配对调用与结果]:::derived
+ N[共同 narrative／digest／compact 产物]:::derived
+ S[已提交 stable 事实与当前 live 活动<br/>各自有水位和来源]:::derived
+ U[typed 视角投影]:::derived
+ A[公开语义查询与更新]:::derived
+ M[共享呈现：当前／语义／动作]:::derived
+ I --> C --> P --> N --> S --> U
+ U -.->|当前生产全链消费仍未闭合| A
+ A --> M
+ Q[用户主动证据请求或显式 raw 模式]:::truth
+ R[只读查询原始记录与不可变资产]:::derived
+ D[raw 模式／证据 drawer
+来源引用与双向导航]:::derived
+ Q --> R --> D
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

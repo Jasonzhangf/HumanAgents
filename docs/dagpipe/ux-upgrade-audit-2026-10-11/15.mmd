@@ -1,0 +1,21 @@
+flowchart TB
+ I[运行结果／错误与等待事实]:::truth
+ C[Core 分层处置与局部降级<br/>保持未解决恢复义务]:::truth
+ J[Journal 追加领域状态与责任]:::truth
+ P[typed 状态／等待／恢复／允许动作]:::derived
+ U[工作卡回答：发生什么／得到什么<br/>是否需要决定／现在能做什么]:::derived
+ I --> C --> J --> P --> U
+ E[当前进程捕获的作者错误<br/>status issue 已公开]:::truth
+ M[按 exact requirement／task 关联<br/>复用既有任务 error 投影]:::design
+ E -.->|当前任务消费断边| M
+ P -->|提供真实关联身份| M
+ M -.->|待接页面原有错误展示| U
+ N[连接状态与同步新鲜度]:::derived
+ N -->|断连保留旧内容并标 stale<br/>不决定任务失败| U
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

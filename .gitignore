@@ -1,5 +1,10 @@
 playground/
 .agent-collab/
+.worker-runs/
+.claude/
+.codex/
+.mcp.json
+.pi/
 node_modules/
 dist/
 build/

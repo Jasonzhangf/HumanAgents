@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveWebSearchBackendConfig, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
+import { compileAgentProviderBindings, ensureControlLayout, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveWebSearchBackendConfig, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
 
 test('parses agent array tables and sections', () => {
   const value = parseToml('schemaVersion = 1\n[[agents]]\nagentId = "one"\nroleId = "interaction"\ntemplateRef = "t"\ndriverRef = "fake"\nskills = ["a"]\ntools = ["b"]\npermissions = ["c"]\nmemoryScopes = ["task"]\nresourceClass = "foreground"\n[project]\nreviewRequired = true\n');
@@ -772,4 +772,210 @@ test('web search backend binding rejects an empty route or an out-of-range bound
     () => resolveWebSearchBackendConfig({ HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS: 'ten' }),
     /HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS must be an integer between 100 and 30000/,
   );
+});
+
+test('agent provider binding compiles independent per-agent selections from a config fixture', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-agent-binding-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.controlRoot, 'config.toml'), [
+    'schemaVersion = 1',
+    '',
+    '[provider]',
+    'provider = "rcc"',
+    'binding = "shared"',
+    'protocol = "responses"',
+    'model = "shared-model"',
+    'route = "default"',
+    'baseUrl = "http://127.0.0.1:4444"',
+    '',
+    '[[agents]]',
+    'agentId = "interaction-a"',
+    'roleId = "interaction"',
+    'templateRef = "builtin/interaction@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["input-normalization"]',
+    'tools = ["input.receive"]',
+    'permissions = ["task.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "binding-a"',
+    'provider.protocol = "responses"',
+    'provider.model = "model-a"',
+    'provider.route = "route-a"',
+    'provider.baseUrl = "http://127.0.0.1:4444"',
+    '',
+    '[[agents]]',
+    'agentId = "execution-b"',
+    'roleId = "execution"',
+    'templateRef = "builtin/execution@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["single-capability-worker"]',
+    'tools = ["search"]',
+    'permissions = ["task.read", "workspace.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "binding-b"',
+    'provider.protocol = "anthropic"',
+    'provider.model = "model-b"',
+    'provider.route = "route-b"',
+    'provider.baseUrl = "http://127.0.0.1:5555"',
+    '',
+  ].join('\n'), 'utf8');
+
+  const loaded = await loadConfiguration(paths);
+  const bindings = loaded.agentProviderBindings;
+  assert.equal(bindings.length, 2);
+  const a = bindings.find((binding) => binding.agentId === 'interaction-a');
+  const b = bindings.find((binding) => binding.agentId === 'execution-b');
+  assert.deepEqual(a, {
+    agentId: 'interaction-a',
+    roleId: 'interaction',
+    source: 'agent',
+    provider: { provider: 'rcc', binding: 'binding-a', protocol: 'responses', model: 'model-a', route: 'route-a', baseUrl: 'http://127.0.0.1:4444' },
+  });
+  assert.deepEqual(b, {
+    agentId: 'execution-b',
+    roleId: 'execution',
+    source: 'agent',
+    provider: { provider: 'rcc', binding: 'binding-b', protocol: 'anthropic', model: 'model-b', route: 'route-b', baseUrl: 'http://127.0.0.1:5555' },
+  });
+  // The two agents must not share protocol, model, route, binding or endpoint.
+  assert.equal(a?.provider?.model === b?.provider?.model, false);
+  assert.equal(a?.provider?.protocol === b?.provider?.protocol, false);
+  assert.equal(a?.provider?.route === b?.provider?.route, false);
+  assert.equal(a?.provider?.binding === b?.provider?.binding, false);
+  assert.equal(a?.provider?.baseUrl === b?.provider?.baseUrl, false);
+  // The shared top-level provider stays untouched by per-agent selections.
+  assert.deepEqual(loaded.effective.provider, {
+    provider: 'rcc', binding: 'shared', protocol: 'responses', model: 'shared-model', route: 'default', baseUrl: 'http://127.0.0.1:4444',
+  });
+});
+
+test('agent provider binding keeps the legacy single top-level provider effective config compatible', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-agent-binding-legacy-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  // Default layout writes the legacy single `[provider]` and agents without a provider block.
+  await ensureControlLayout(paths);
+  const loaded = await loadConfiguration(paths);
+  const legacy = {
+    provider: 'rcc', binding: 'rcc-entry', protocol: 'responses', model: 'MiniMax-M3', route: 'default', baseUrl: 'http://127.0.0.1:4444',
+  };
+  assert.deepEqual(loaded.effective.provider, legacy);
+  assert.equal(loaded.agentProviderBindings.length, loaded.effective.agents.length);
+  for (const binding of loaded.agentProviderBindings) {
+    assert.equal(binding.source, 'inherited');
+    assert.deepEqual(binding.provider, legacy);
+  }
+});
+
+test('agent provider binding rejects an invalid per-agent provider selection', () => {
+  const agent = {
+    agentId: 'interaction-a',
+    roleId: 'interaction',
+    templateRef: 'builtin/interaction@1.0.0',
+    driverRef: 'fake',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  };
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{ ...agent, provider: { provider: 'rcc', binding: 'b', protocol: 'custom', model: 'm', route: 'r', baseUrl: 'http://127.0.0.1:4444' } }],
+  }), /unsupported provider protocol: custom/);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{ ...agent, provider: { provider: 'dsh', binding: 'b', protocol: 'responses', model: 'm', route: 'r', baseUrl: 'http://127.0.0.1:4444' } }],
+  }), /unknown provider: dsh/);
+});
+
+test('agent provider binding applies the agent model override over the binding model', () => {
+  const base = {
+    roleId: 'interaction',
+    templateRef: 'builtin/interaction@1.0.0',
+    driverRef: 'fake',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  };
+  const compiled = compileAgentProviderBindings(validateUserConfig({
+    schemaVersion: 1,
+    provider: { provider: 'rcc', binding: 'shared', protocol: 'responses', model: 'shared-model', route: 'default', baseUrl: 'http://127.0.0.1:4444' },
+    agents: [
+      { ...base, agentId: 'explicit-default', provider: { provider: 'rcc', binding: 'b', protocol: 'anthropic', model: 'binding-model', route: 'r', baseUrl: 'http://127.0.0.1:5555' } },
+      { ...base, agentId: 'explicit-override', model: 'override-model', provider: { provider: 'rcc', binding: 'b', protocol: 'anthropic', model: 'binding-model', route: 'r', baseUrl: 'http://127.0.0.1:5555' } },
+      { ...base, agentId: 'inherited-override', model: 'inherited-override-model' },
+    ],
+  }));
+  assert.equal(compiled.find((binding) => binding.agentId === 'explicit-default')?.provider?.model, 'binding-model');
+  assert.equal(compiled.find((binding) => binding.agentId === 'explicit-override')?.provider?.model, 'override-model');
+  assert.equal(compiled.find((binding) => binding.agentId === 'inherited-override')?.provider?.model, 'inherited-override-model');
+  // Overriding the model does not change the selected protocol/endpoint.
+  assert.equal(compiled.find((binding) => binding.agentId === 'explicit-override')?.provider?.protocol, 'anthropic');
+});
+
+test('agent provider binding rejects prototype traversal without polluting shared state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-agent-binding-proto-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.controlRoot, 'config.toml'), [
+    'schemaVersion = 1',
+    '',
+    '[[agents]]',
+    'agentId = "attacker"',
+    'roleId = "interaction"',
+    'templateRef = "builtin/interaction@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["input-normalization"]',
+    'tools = ["input.receive"]',
+    'permissions = ["task.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "attacker"',
+    'provider.protocol = "responses"',
+    'provider.route = "route-a"',
+    'provider.baseUrl = "http://127.0.0.1:4444"',
+    'provider.__proto__.model = "injected-model"',
+    '',
+    '[[agents]]',
+    'agentId = "later"',
+    'roleId = "execution"',
+    'templateRef = "builtin/execution@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["single-capability-worker"]',
+    'tools = ["search"]',
+    'permissions = ["task.read", "workspace.read"]',
+    'memoryScopes = ["task"]',
+    'resourceClass = "foreground"',
+    'provider.provider = "rcc"',
+    'provider.binding = "later"',
+    'provider.protocol = "anthropic"',
+    'provider.route = "route-b"',
+    'provider.baseUrl = "http://127.0.0.1:5555"',
+    '',
+  ].join('\n'), 'utf8');
+
+  let error: unknown;
+  try {
+    await loadConfiguration(paths);
+  } catch (caught) {
+    error = caught;
+  }
+  const polluted = Object.prototype.hasOwnProperty.call(Object.prototype, 'model');
+  delete (Object.prototype as { model?: unknown }).model;
+  assert.equal(polluted, false);
+  assert.match(String(error), /invalid key: provider\.__proto__\.model/);
 });

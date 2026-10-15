@@ -1,0 +1,24 @@
+flowchart TB
+ I[同 scope 的 typed API／更新]:::derived
+ T[transport 单次解码]:::derived
+ R[唯一不可变共享对象与版本]:::derived
+ E[声明事件通知引用与关联]:::design
+ W[共用状态／对话／轨迹／图／证据控件]:::design
+ A[任务与 Organ Console]:::design
+ B[Pipeline Observation 与多视角]:::design
+ I --> T --> R
+ R -.->|整体事件与共享消费者边待闭合| E --> W
+ W --> A
+ W --> B
+ M[成功的直接手动模式选择]:::truth
+ P[typed 展示偏好<br/>config 派生 ~/.humanagent 路径]:::design
+ V[展示选择<br/>不改领域状态与业务 payload]:::derived
+ M -.->|生产偏好持久边待接| P --> V
+ V --> W
+
+classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;
+classDef derived fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+classDef design fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray:5 3;
+classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px;
+classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
+

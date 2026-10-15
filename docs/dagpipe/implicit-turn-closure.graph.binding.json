@@ -1,0 +1,52 @@
+{
+  "graph": "humanagent-implicit-turn-closure",
+  "operator": {
+    "operator": "humanagent-implicit-turn-closure",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-UNVERIFIED",
+  "nodes": {
+    "compress": {
+      "ownerPath": "packages/runtime/src/context/index.ts",
+      "ownerRel": "packages/runtime/src/context/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "工作上下文装配与压缩 owner。语义设计责任名称，不声明 Operator 已注册或 runtime 执行。"
+    },
+    "summarize": {
+      "ownerPath": "packages/runtime/src/agent-loop/runtime.ts",
+      "ownerRel": "packages/runtime/src/agent-loop/runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "agent-loop checkpoint 与 summary 状态 owner；四段总结（目标、行动、结果、下一步）在此边界产生，尚未声明 runtime 已接通。"
+    },
+    "deliver": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "标准 turn 交付记录 owner。捕获真实已接受的标准交付来源，区别于后续 canonical public-output 发布；不声明传输完成或任务成功，不重复保存正文。typed readDelivery 的 runtime 消费为待实现契约。"
+    },
+    "checkpoint": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "唯一 checkpoint 与 closure 提交边界；保留未完成恢复责任。"
+    },
+    "planner": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "planStage 与独立 Planner 派发边界；Planner 调用为待实现契约，本绑定不声明已注册或已执行。"
+    },
+    "adopt": {
+      "ownerPath": "packages/runtime/src/admission/implicit-orchestrator.ts",
+      "ownerRel": "packages/runtime/src/admission/implicit-orchestrator.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "编排者核实计划适合性与目标事实的边界。"
+    },
+    "next_state": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "终态推进 owner。COMPLETED 分支须先消费 typed readDelivery 校验过的 delivery body 并通过同一 canonical public-output commit 与 exact readback 才接受 succeeded/final；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与 Planner 语义。canonical output 不得使用 native drain 或 summary。"
+    }
+  }
+}

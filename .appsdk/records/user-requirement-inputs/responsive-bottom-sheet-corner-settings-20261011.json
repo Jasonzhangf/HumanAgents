@@ -1,0 +1,13 @@
+{
+  "project_id": "humanagent",
+  "request_id": "responsive-bottom-sheet-corner-settings-20261011",
+  "requirement_id": "humanagent-responsive-ux-bottom-sheet-and-four-corner-configuration",
+  "base_version": 0,
+  "operation": "create",
+  "text": "整体考虑手机和 desktop 两种排版，手机以下方弹抽屉为进入下一层入口\n\n主动的配置是四个角落的 button",
+  "authorization": {
+    "role": "user",
+    "source": "当前 Codex 对话中的两条连续 UX 排版补充，按收到顺序保留原文。未提供独立 message ID。",
+    "original_text": "整体考虑手机和 desktop 两种排版，手机以下方弹抽屉为进入下一层入口\n\n主动的配置是四个角落的 button"
+  }
+}

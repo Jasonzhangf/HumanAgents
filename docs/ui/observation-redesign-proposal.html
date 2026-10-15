@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="HumanAgent Pipeline Observation 重设计静态方案：执行语义 DAG（目标 -> Turn -> Step -> 输入/输出/evidence）"
+    />
+    <title>HumanAgent · 观测页重设计静态方案（审批稿）</title>
+    <link rel="stylesheet" href="./observation-redesign-proposal.css" />
+  </head>
+  <body>
+    <p class="approval-notice">
+      <span>静态方案</span>
+      <strong>审批后接入真实 projection</strong>
+      ：本页数据全部写死，仅用于评审视觉与信息结构；不连接 Runtime，不读取 Journal / DSH Session。
+    </p>
+
+    <main class="page">
+      <section class="header-grid">
+        <div class="card hero">
+          <p class="eyebrow">Pipeline Observation · 重设计草案</p>
+          <h1>用执行语义看一次任务：目标、轮次、步骤、证据</h1>
+          <p class="lede">
+            新方案完全移除旧的 agent 分类框与泳道。页面只呈现任务实际执行结构：任务目标在最上方，
+            下面是按时间推进的 Turn 时间线；每个 Turn 内是 Step；每个 Step 显示 tool semantic、输入、输出和
+            evidence。当前正在执行的 Turn 与 Step 有明确的高亮。
+          </p>
+        </div>
+
+        <aside class="card goal-card" aria-labelledby="goal-title">
+          <div class="goal-title-row">
+            <h2 id="goal-title">任务目标</h2>
+            <span class="badge is-running">执行中 · Turn 3/5</span>
+          </div>
+          <p>
+            让观测页以执行语义 DAG 呈现一次任务：目标 → Turn → Step → 输入/输出/evidence，
+            并突出当前执行中的 Turn 与 Step。
+          </p>
+          <dl class="meta-grid">
+            <div class="meta">
+              <dt>任务</dt>
+              <dd>observation-redesign-static</dd>
+            </div>
+            <div class="meta">
+              <dt>任务状态</dt>
+              <dd>运行中</dd>
+            </div>
+            <div class="meta">
+              <dt>轮次进度</dt>
+              <dd>3 / 5 轮</dd>
+            </div>
+            <div class="meta">
+              <dt>最近更新</dt>
+              <dd>2 分钟前</dd>
+            </div>
+          </dl>
+        </aside>
+      </section>
+
+      <section class="section" aria-labelledby="rules-title">
+        <div class="section-heading">
+          <h2 id="rules-title">这次重设计的四条规则</h2>
+          <span class="badge is-pending">静态，不驱动运行时</span>
+        </div>
+        <ul class="principles">
+          <li>
+            <strong>只保留执行语义</strong>
+            <span>不再出现 agent 分类框、归属泳道或角色链路；节点由目标、Turn、Step、evidence 组成。</span>
+          </li>
+          <li>
+            <strong>时间线优先</strong>
+            <span>Turn 按发生顺序自上而下排列，Step 是 Turn 的子节点，不做跨泳道绕线。</span>
+          </li>
+          <li>
+            <strong>证据就地呈现</strong>
+            <span>输入、输出、evidence 直接挂在对应 Step 下，缩进表示父子关系。</span>
+          </li>
+          <li>
+            <strong>焦点唯一</strong>
+            <span>同一时刻只有一个执行中的 Turn 和 Step，其余为已完成、待执行或等待输入。</span>
+          </li>
+        </ul>
+      </section>
+
+      <section class="section" aria-labelledby="dag-title">
+        <div class="card dag-card">
+          <header class="dag-toolbar">
+            <div>
+              <p class="eyebrow">执行语义 DAG</p>
+              <h2 id="dag-title">目标 → Turn 时间线 → Step → 输入 / 输出 / evidence</h2>
+            </div>
+            <div class="legend" aria-label="连线与状态图例">
+              <span class="legend-item done">已完成</span>
+              <span class="legend-item running">执行中（流动虚线为静态预览）</span>
+              <span class="legend-item">待执行</span>
+            </div>
+          </header>
+
+          <div class="dag" role="list" aria-label="执行语义 DAG 静态示例">
+            <article class="goal-node" role="listitem">
+              <h3>任务目标</h3>
+              <p>
+                让观测页以执行语义 DAG 呈现一次任务，并突出当前执行中的 Turn 与 Step。
+                <br />
+                验收：页面结构、状态语义与移动端布局通过审批；审批后才接入真实 projection。
+              </p>
+            </article>
+
+            <p class="flow-arrow" aria-hidden="true"></p>
+
+            <article class="turn-card done" role="listitem" aria-labelledby="turn-1-title">
+              <div class="turn-title">
+                <div class="turn-topline">
+                  <h3 id="turn-1-title">Turn 1 · 读取现状并定位观测页 owner</h3>
+                  <span class="badge is-done">已完成</span>
+                </div>
+                <p class="turn-summary">目标：确认旧观测页的结构与唯一 owner，形成重设计输入。</p>
+              </div>
+
+              <ol class="steps">
+                <li class="step-card done">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>读取旧观测页结构</h4>
+                      <span class="tool-semantic">tool · read</span>
+                    </div>
+                    <p class="step-description">
+                      读取 docs/ui/observation.html 与 observation.css，记录 agent 泳道与归属框的出现位置。
+                    </p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence"><span><strong>输入：</strong><span class="code">docs/ui/observation.html#L30-L86</span></span></li>
+                      <li class="evidence"><span><strong>输出：</strong>旧视觉由 5 个 agent-lane 与 1 条 agent-chain 组成</span></li>
+                      <li class="evidence"><span><strong>Evidence：</strong><span class="code">fact://observation/legacy-lane-inventory</span></span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>read</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>目标</dt>
+                      <dd class="code">docs/ui/**</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>已完成 · 3 条证据</dd>
+                    </dl>
+                  </div>
+                </li>
+
+                <li class="step-card done">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>确认投影 owner</h4>
+                      <span class="tool-semantic">tool · grep</span>
+                    </div>
+                    <p class="step-description">检索 observation 投影与 UI 责任描述，确认 UI 不拥有运行时状态。</p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence"><span><strong>输入：</strong><span class="code">packages/ui/projection</span></span></li>
+                      <li class="evidence"><span><strong>输出：</strong>观测页只消费 projection，不读取 Journal/DSH Session</span></li>
+                      <li class="evidence"><span><strong>Evidence：</strong><span class="code">fact://owner/pipeline-observation</span></span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>grep</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>范围</dt>
+                      <dd>docs/ui, packages/ui</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>已完成</dd>
+                    </dl>
+                  </div>
+                </li>
+              </ol>
+            </article>
+
+            <p class="flow-arrow" aria-hidden="true"></p>
+
+            <article class="turn-card done" role="listitem" aria-labelledby="turn-2-title">
+              <div class="turn-title">
+                <div class="turn-topline">
+                  <h3 id="turn-2-title">Turn 2 · 确定执行语义 DAG 的信息结构</h3>
+                  <span class="badge is-done">已完成</span>
+                </div>
+                <p class="turn-summary">目标：把观测对象从 agent 分类改成任务执行结构。</p>
+              </div>
+
+              <ol class="steps">
+                <li class="step-card done">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>写出节点层级</h4>
+                      <span class="tool-semantic">tool · write</span>
+                    </div>
+                    <p class="step-description">定义四级结构：任务目标 → Turn → Step → 输入/输出/evidence。</p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence"><span><strong>输入：</strong>Turn 1 的旧结构清单</span></li>
+                      <li class="evidence"><span><strong>输出：</strong><span class="code">docs/plans/observation-dag-structure.md</span></span></li>
+                      <li class="evidence"><span><strong>Evidence：</strong><span class="code">asset://observation/dag-structure-v2</span></span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>write</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>产物</dt>
+                      <dd class="code">dag-structure.md</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>已完成</dd>
+                    </dl>
+                  </div>
+                </li>
+              </ol>
+            </article>
+
+            <p class="flow-arrow active" aria-hidden="true"></p>
+
+            <article class="turn-card current" role="listitem" aria-labelledby="turn-3-title" aria-current="step">
+              <div class="turn-title">
+                <div class="turn-topline">
+                  <h3 id="turn-3-title">Turn 3 · 产出静态审批稿（当前执行中）</h3>
+                  <span class="badge is-running">执行中</span>
+                </div>
+                <p class="turn-summary">目标：用固定数据画出可评审的页面，不触碰动态逻辑。</p>
+              </div>
+
+              <ol class="steps">
+                <li class="step-card done">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>建立静态数据</h4>
+                      <span class="tool-semantic">tool · write</span>
+                    </div>
+                    <p class="step-description">写死 5 个 Turn、若干 Step 与 evidence 引用，保证页面可离线打开。</p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence"><span><strong>输入：</strong>Turn 2 的结构定义</span></li>
+                      <li class="evidence"><span><strong>输出：</strong>静态 HTML + CSS 各一份</span></li>
+                      <li class="evidence"><span><strong>Evidence：</strong><span class="code">asset://observation/static-dataset</span></span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>write</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>文件</dt>
+                      <dd class="code">observation-redesign-proposal.html</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>已完成</dd>
+                    </dl>
+                  </div>
+                </li>
+
+                <li class="step-card current">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>渲染执行语义 DAG 与当前焦点</h4>
+                      <span class="tool-semantic">tool · edit</span>
+                    </div>
+                    <p class="step-description">
+                      当前步骤：绘制 Turn 时间线、Step 卡片与 evidence 缩进，并给执行中的 Turn/Step 加静态高亮。
+                    </p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence pending"><span><strong>输入：</strong>静态数据集与视觉规则草稿</span></li>
+                      <li class="evidence pending"><span><strong>输出：</strong>待产出（本步骤尚未结束，输出尚未落盘）</span></li>
+                      <li class="evidence pending"><span><strong>Evidence：</strong>待产出（当前步骤进行中）</span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>edit</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>当前焦点</dt>
+                      <dd>Turn 3 · Step 2</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>执行中</dd>
+                    </dl>
+                  </div>
+                </li>
+
+                <li class="step-card pending">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>移动端适配检查</h4>
+                      <span class="tool-semantic">tool · browser</span>
+                    </div>
+                    <p class="step-description">待执行：在 375px 宽度检查单列布局、触控目标与文本换行。</p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence pending"><span><strong>输入：</strong>待产出</span></li>
+                      <li class="evidence pending"><span><strong>输出：</strong>待产出</span></li>
+                      <li class="evidence pending"><span><strong>Evidence：</strong>待产出</span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>browser</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>视口</dt>
+                      <dd>375 × 812</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>待执行</dd>
+                    </dl>
+                  </div>
+                </li>
+              </ol>
+            </article>
+
+            <p class="flow-arrow" aria-hidden="true"></p>
+
+            <article class="turn-card pending" role="listitem" aria-labelledby="turn-4-title">
+              <div class="turn-title">
+                <div class="turn-topline">
+                  <h3 id="turn-4-title">Turn 4 · 提交审批并收集反馈</h3>
+                  <span class="badge is-pending">待执行</span>
+                </div>
+                <p class="turn-summary">目标：取得审批，确认后再进入 projection 接入。</p>
+              </div>
+
+              <ol class="steps">
+                <li class="step-card pending">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>提交审批稿</h4>
+                      <span class="tool-semantic">tool · submit</span>
+                    </div>
+                    <p class="step-description">待执行：需要人类审批视觉方向与信息层级。</p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence pending"><span><strong>输入：</strong>静态页面</span></li>
+                      <li class="evidence pending"><span><strong>输出：</strong>待产出</span></li>
+                      <li class="evidence pending"><span><strong>Evidence：</strong>待产出（需要人类决定）</span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>submit</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>等待</dt>
+                      <dd>人类审批</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>待执行</dd>
+                    </dl>
+                  </div>
+                </li>
+              </ol>
+            </article>
+
+            <p class="flow-arrow" aria-hidden="true"></p>
+
+            <article class="turn-card pending" role="listitem" aria-labelledby="turn-5-title">
+              <div class="turn-title">
+                <div class="turn-topline">
+                  <h3 id="turn-5-title">Turn 5 · 接入真实 projection（审批后）</h3>
+                  <span class="badge is-pending">未开始</span>
+                </div>
+                <p class="turn-summary">目标：审批通过后，把静态结构替换为 Runtime typed projection。</p>
+              </div>
+
+              <ol class="steps">
+                <li class="step-card pending">
+                  <div class="step-main">
+                    <div class="step-header">
+                      <h4>绑定 projection 字段</h4>
+                      <span class="tool-semantic">tool · wire-projection</span>
+                    </div>
+                    <p class="step-description">
+                      待执行：把目标、Turn、Step、输入/输出/evidence 映射到只读 projection；本草案不做这一步。
+                    </p>
+                    <p class="evidence-row"><span>输入 / 输出 / evidence</span></p>
+                    <ul class="evidence-list">
+                      <li class="evidence pending"><span><strong>输入：</strong>待产出</span></li>
+                      <li class="evidence pending"><span><strong>输出：</strong>待产出</span></li>
+                      <li class="evidence pending"><span><strong>Evidence：</strong>待产出</span></li>
+                    </ul>
+                  </div>
+                  <div class="payload-stack">
+                    <dl class="payload">
+                      <dt>tool</dt>
+                      <dd>wire-projection</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>前置</dt>
+                      <dd>人类审批通过</dd>
+                    </dl>
+                    <dl class="payload">
+                      <dt>状态</dt>
+                      <dd>未开始</dd>
+                    </dl>
+                  </div>
+                </li>
+              </ol>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section approval-grid" aria-label="审批说明">
+        <div class="card approval-panel">
+          <h2>这份草案改了什么</h2>
+          <ul class="checklist">
+            <li><span class="check">✓</span><span>移除了 agent 链路条与五个 agent 归属框。</span></li>
+            <li><span class="check">✓</span><span>移除了按 agent 分组的泳道；节点只按执行顺序排列。</span></li>
+            <li><span class="check">✓</span><span>新增任务目标节点、Turn 时间线、Turn 内 Step 列表。</span></li>
+            <li><span class="check">✓</span><span>每个 Step 直接显示 tool semantic、输入、输出与 evidence。</span></li>
+            <li><span class="check">✓</span><span>执行中的 Turn 与 Step 用高亮、脉冲点和流动虚线标示；待执行为虚线弱化。</span></li>
+            <li><span class="check">✓</span><span>单列结构可直接用于移动端；未使用横向铺开的画布。</span></li>
+          </ul>
+        </div>
+
+        <div class="card approval-panel">
+          <h2>审批后才会做的事</h2>
+          <ul class="checklist">
+            <li><span class="check">1</span><span>接入真实 projection，替换本页写死数据。</span></li>
+            <li><span class="check">2</span><span>保留现有 observation 页面与动态代码不动，新结构单独接线。</span></li>
+            <li><span class="check">3</span><span>将 Turn/Step 的状态与 evidence 引用映射到 typed projection 字段。</span></li>
+            <li><span class="check">4</span><span>按项目规则补 focused tests 与真实入口验收，再做独立 review。</span></li>
+          </ul>
+          <p class="footer-note">
+            静态方案，审批后接入真实 projection。当前页面不消费需求、不修改队列、不重试 operation，也不下发控制命令。
+          </p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
