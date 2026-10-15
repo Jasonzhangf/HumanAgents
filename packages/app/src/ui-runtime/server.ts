@@ -13,7 +13,7 @@ import {
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
-import type { RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
+import type { RuntimeReadResult, RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import { AppLifecycleError } from '../errors.js';
 import {
@@ -79,6 +79,72 @@ function writeJson(response: ServerResponse, status: number, body: unknown, head
   const payload = JSON.stringify(body);
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
   response.end(payload);
+}
+
+function readFailureStatus(code: string): number {
+  if (code === 'project.unknown' || code === 'task.not-found' || code === 'records.cursor-not-found') return 404;
+  if (code === 'records.view.invalid' || code === 'records.cursor-invalid') return 400;
+  if (code === 'i2.history.unavailable') return 503;
+  if (code === 'i2.cursor-invalid' || code === 'i2.cursor-scope-mismatch') return 400;
+  if (code === 'i2.cursor-not-found' || code.endsWith('.unknown') || code.endsWith('.viewed-unknown')) return 404;
+  return 409;
+}
+
+function writeReadResult<T>(response: ServerResponse, result: RuntimeReadResult<T>): void {
+  if (result.ok) {
+    writeJson(response, 200, result.value);
+    return;
+  }
+  writeJson(response, readFailureStatus(result.failure.code), { error: result.failure });
+}
+
+function requireReadScope(url: URL): { readonly projectKey: string; readonly mode: 'fake' | 'rcc' } {
+  const projectKey = url.searchParams.get('projectKey')?.trim();
+  const mode = url.searchParams.get('mode');
+  if (!projectKey || !mode) {
+    throw new UiRuntimeApiError(
+      'read.scope.invalid',
+      APP_OWNER,
+      'scoped task history requires both projectKey and mode',
+      'send projectKey=<declared projectKey>&mode=fake|rcc',
+      400,
+    );
+  }
+  if (mode !== 'fake' && mode !== 'rcc') {
+    throw new UiRuntimeApiError(
+      'read.scope.invalid',
+      APP_OWNER,
+      `unsupported task read mode: ${mode}`,
+      'send mode=fake or mode=rcc',
+      400,
+    );
+  }
+  return { projectKey, mode };
+}
+
+function requireHistoryLimit(url: URL, family: 'context-history' | 'checkpoints' | 'i2-history'): number {
+  const limitParam = url.searchParams.get('limit');
+  const limit = limitParam === null ? 20 : Number(limitParam);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+    throw new UiRuntimeApiError(
+      `${family}.limit.invalid`,
+      APP_OWNER,
+      `${family} limit must be an integer from 1 to 500`,
+      `send a valid ${family} limit`,
+      400,
+    );
+  }
+  return limit;
+}
+
+function optionalIntegerParam(url: URL, name: string, code: string): number | undefined {
+  const value = url.searchParams.get(name);
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UiRuntimeApiError(code, APP_OWNER, `${name} must be an integer`, `send ${name} as an integer`);
+  }
+  return parsed;
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
@@ -1004,6 +1070,123 @@ async function handleRequest(
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);
     if (taskDashboard && method === 'GET') {
       writeJson(response, 200, await service.taskDashboardWithPlan(id('task', decodeURIComponent(taskDashboard[1]!))));
+      return;
+    }
+    const taskContextHistory = /^\/api\/tasks\/([^/]+)\/context-history$/.exec(path);
+    if (taskContextHistory && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskContextHistory[1]!));
+      const { projectKey, mode } = requireReadScope(url);
+      const limit = requireHistoryLimit(url, 'context-history');
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      const agentRuntimeId = url.searchParams.get('agentRuntimeId') ?? undefined;
+      const contextViewRef = url.searchParams.get('contextViewRef') ?? undefined;
+      writeReadResult(response, await service.taskContextHistory(taskId, {
+        projectKey,
+        mode,
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(agentRuntimeId === undefined ? {} : { agentRuntimeId }),
+        ...(contextViewRef === undefined ? {} : { contextViewRef }),
+      }));
+      return;
+    }
+    const taskCheckpoints = /^\/api\/tasks\/([^/]+)\/checkpoints$/.exec(path);
+    if (taskCheckpoints && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskCheckpoints[1]!));
+      const { projectKey, mode } = requireReadScope(url);
+      const limit = requireHistoryLimit(url, 'checkpoints');
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      const viewed = url.searchParams.get('viewed') ?? undefined;
+      const directiveRevision = optionalIntegerParam(url, 'directiveRevision', 'checkpoints.directiveRevision.invalid');
+      const executionEpoch = optionalIntegerParam(url, 'executionEpoch', 'checkpoints.executionEpoch.invalid');
+      const cycleIdParam = url.searchParams.get('cycleId')?.trim();
+      const cycleId = cycleIdParam ? id('cycle', cycleIdParam) : undefined;
+      const occurrenceRef = url.searchParams.get('occurrenceRef') ?? undefined;
+      writeReadResult(response, await service.taskCheckpointHistory(taskId, {
+        projectKey,
+        mode,
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(viewed === undefined ? {} : { viewed }),
+        ...(directiveRevision === undefined ? {} : { directiveRevision }),
+        ...(executionEpoch === undefined ? {} : { executionEpoch }),
+        ...(cycleId === undefined ? {} : { cycleId }),
+        ...(occurrenceRef === undefined ? {} : { occurrenceRef }),
+      }));
+      return;
+    }
+    // I2 read-only history. These routes never invoke execution, modify the
+    // queue, publish, retry or steer; they only read committed I2 authority.
+    const taskInspectionComparison = /^\/api\/tasks\/([^/]+)\/inspection-comparison$/.exec(path);
+    if (taskInspectionComparison && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskInspectionComparison[1]!));
+      const left = url.searchParams.get('left')?.trim();
+      const right = url.searchParams.get('right')?.trim();
+      if (!left || !right) {
+        throw new UiRuntimeApiError(
+          'i2.comparison.scope.invalid',
+          APP_OWNER,
+          'inspection comparison requires left and right occurrence ids',
+          'send left=<occurrenceId>&right=<occurrenceId>',
+          400,
+        );
+      }
+      writeReadResult(response, await service.taskInspectionComparison(taskId, left, right));
+      return;
+    }
+    const taskInspectionOccurrence = /^\/api\/tasks\/([^/]+)\/inspection-occurrences\/([^/]+)$/.exec(path);
+    if (taskInspectionOccurrence && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskInspectionOccurrence[1]!));
+      const occurrenceId = decodeURIComponent(taskInspectionOccurrence[2]!);
+      writeReadResult(response, await service.taskInspectionOccurrence(taskId, occurrenceId));
+      return;
+    }
+    const taskInspectionOccurrences = /^\/api\/tasks\/([^/]+)\/inspection-occurrences$/.exec(path);
+    if (taskInspectionOccurrences && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskInspectionOccurrences[1]!));
+      const limit = requireHistoryLimit(url, 'i2-history');
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      const viewed = url.searchParams.get('viewed')?.trim() || undefined;
+      writeReadResult(response, await service.taskInspectionOccurrences(taskId, {
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(viewed === undefined ? {} : { viewed }),
+      }));
+      return;
+    }
+    const taskBusinessCycle = /^\/api\/tasks\/([^/]+)\/cycles\/([^/]+)$/.exec(path);
+    if (taskBusinessCycle && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskBusinessCycle[1]!));
+      const cycleId = decodeURIComponent(taskBusinessCycle[2]!);
+      writeReadResult(response, await service.taskBusinessCycle(taskId, cycleId));
+      return;
+    }
+    const taskBusinessCycles = /^\/api\/tasks\/([^/]+)\/cycles$/.exec(path);
+    if (taskBusinessCycles && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskBusinessCycles[1]!));
+      const limit = requireHistoryLimit(url, 'i2-history');
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      const viewed = url.searchParams.get('viewed')?.trim() || undefined;
+      writeReadResult(response, await service.taskBusinessCycles(taskId, {
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(viewed === undefined ? {} : { viewed }),
+      }));
+      return;
+    }
+    const taskReviews = /^\/api\/tasks\/([^/]+)\/reviews$/.exec(path);
+    if (taskReviews && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskReviews[1]!));
+      const limit = requireHistoryLimit(url, 'i2-history');
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      const cycleId = url.searchParams.get('cycleId')?.trim() || undefined;
+      const milestoneId = url.searchParams.get('milestoneId')?.trim() || undefined;
+      writeReadResult(response, await service.taskMilestoneReviews(taskId, {
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(cycleId === undefined ? {} : { cycleId }),
+        ...(milestoneId === undefined ? {} : { milestoneId }),
+      }));
       return;
     }
     const taskObservation = /^\/api\/tasks\/([^/]+)\/observation$/.exec(path);

@@ -72,7 +72,13 @@ export type TaskDashboardCommand =
   | (UiCommandBase<'task-dashboard', 'open-agent-drawer'> & { readonly agentId: string })
   | UiCommandBase<'task-dashboard', 'close-agent-drawer'>
   | (UiCommandBase<'task-dashboard', 'navigate.task-detail'> & { readonly taskId: TaskId })
-  | (UiCommandBase<'task-dashboard', 'navigate.observation'> & { readonly taskId: TaskId });
+  | (UiCommandBase<'task-dashboard', 'navigate.observation'> & { readonly taskId: TaskId })
+  // History navigation is read-only: selecting a checkpoint or context view only changes what is
+  // being looked at, never the authoritative execution position. Reentry stays a separate,
+  // explicitly confirmed control command owned by the task control surface.
+  | (UiCommandBase<'task-dashboard', 'select-checkpoint'> & { readonly checkpointId: string })
+  | (UiCommandBase<'task-dashboard', 'select-context-view'> & { readonly contextViewRef: string })
+  | UiCommandBase<'task-dashboard', 'return-current-view'>;
 
 export type PipelineObservationCommand =
   | (UiCommandBase<'observation', 'open-node-drawer'> & { readonly nodeId: string })
@@ -143,6 +149,9 @@ const READ_ONLY_SURFACE_KINDS = new Set([
   'set-filters',
   'open-agent-drawer',
   'close-agent-drawer',
+  'select-checkpoint',
+  'select-context-view',
+  'return-current-view',
 ]);
 
 function hasPayload(command: UiCommand): command is Extract<UiCommand, { readonly payload: BusinessPayload }> {

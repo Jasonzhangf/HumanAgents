@@ -18,9 +18,14 @@ import {
   type ProviderSubmitResult,
   type ScopeRef,
   type Task,
+  type TaskIdentityAppendInput,
+  type TaskIdentityRecord,
   type WorkAssignment,
   type WorkResult,
 } from '../../packages/contracts/src/index.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import type { AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
 import { fakeExecutionBinding } from '../../packages/app/src/fake-execution.js';
@@ -28,13 +33,15 @@ import { createDeterministicServeOrchestrationPorts, createRccServeOrchestration
 import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
 import { FakeReplayExecutionRuntimePort, startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import { TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from '../../packages/app/src/ui-runtime/task-control.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import type { CheckpointJournalPort } from '../../packages/runtime/src/checkpoints/ports.js';
 import type { ReviewAssignment } from '../../packages/runtime/src/review/index.js';
 import type { ReviewResult } from '../../packages/runtime/src/review/index.js';
-import { acceptanceCriteriaContent, digestOf, resolveReviewMaterial } from '../../packages/runtime/src/orchestration/index.js';
-import type { ExecutionAgentPort } from '../../packages/runtime/src/orchestration/index.js';
+import { AgentRuntimePoolManager, acceptanceCriteriaContent, digestOf, resolveReviewMaterial } from '../../packages/runtime/src/orchestration/index.js';
+import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
+import type { ExecutionAgentPort, TaskExecutionHandle } from '../../packages/runtime/src/orchestration/index.js';
 
 /** Produced subject body used by the fixture assignments in this file. */
 const serveArtifactBody = 'serve fixture artifact body';
@@ -55,6 +62,53 @@ async function accessControlFor(root: string): Promise<AccessControlService> {
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
+}
+
+function taskControlPathFor(root: string): string {
+  return join(root, 'checkpoints', 'fake', 'task-control.jsonl');
+}
+
+// The real admission owner rejects execution without a current TaskGrant. This
+// fixture commits the real identity first and only then grants exactly the
+// returned Task scope to the actual product principal owner, over the same
+// physical control Organ Journal. A failed identity append writes no grant.
+class GrantPreparingIdentityJournal implements TaskIdentityPort {
+  constructor(
+    private readonly inner: TaskIdentityPort,
+    private readonly grants: JsonlTaskGrantJournal,
+    private readonly principalOwner: string,
+  ) {}
+
+  async append(input: TaskIdentityAppendInput): Promise<TaskIdentityRecord> {
+    const record = await this.inner.append(input);
+    const existing = await this.grants.readTaskGrant(record.scope.taskId);
+    if (existing.grant === null) {
+      await this.grants.grant({
+        requestId: `serve-fixture-grant:${record.scope.taskId.value}`,
+        taskId: record.scope.taskId,
+        owner: this.principalOwner,
+        capability: {
+          actionId: TASK_EXECUTION_ACTION_ID,
+          capabilities: [TASK_EXECUTION_CAPABILITY],
+          scope: { organId: record.scope.organId, taskId: record.scope.taskId },
+        },
+        expectedRevision: 0,
+      });
+    }
+    return record;
+  }
+
+  replay(scope?: ScopeRef): Promise<readonly TaskIdentityRecord[]> {
+    return this.inner.replay(scope);
+  }
+}
+
+function identityWithFixtureGrant(principalOwner: string, taskControlPath: string): TaskIdentityConsumer {
+  return new TaskIdentityConsumer(new GrantPreparingIdentityJournal(
+    new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)),
+    new JsonlTaskGrantJournal(new JsonlOrganJournal(taskControlPath)),
+    principalOwner,
+  ));
 }
 
 async function eventBusPorts(): Promise<{ readonly ports: EventBusPorts; readonly close: () => Promise<void> }> {
@@ -150,6 +204,64 @@ function materialFor(
     workerResult,
     subjects: workerAssignment.targetRefs.map((ref) => ({ ref, body })),
   });
+}
+
+/**
+ * Runs the deterministic fixture worker through the same real pool acquisition
+ * the orchestration manager uses, so the worker result carries the actual
+ * lease and incarnation of this fixture instead of a hand-written literal.
+ */
+async function runDeterministicWorker(input: {
+  readonly workerPorts: ReturnType<typeof createDeterministicServeOrchestrationPorts>;
+  readonly workAssignment: WorkAssignment;
+  readonly task: Task;
+  readonly scope: ScopeRef;
+  readonly agentId: string;
+}): Promise<WorkResult> {
+  const worker = input.workerPorts.executionAgent!;
+  const pool = new AgentRuntimePoolManager({
+    maxRuntimes: 1,
+    factory: {
+      async start(request) {
+        return {
+          runtimeId: request.runtimeId,
+          generation: request.generation,
+          capabilities: [...request.requiredCapabilities],
+        };
+      },
+      async dispose() {},
+    },
+    ownerId: 'serve-test',
+  });
+  try {
+    const acquired = await pool.acquire({
+      requiredCapabilities: input.workAssignment.requiredCapabilities,
+      ownerId: 'serve-test',
+      executionEpoch: input.workAssignment.executionEpoch,
+      taskId: input.task.id,
+      roleId: worker.roleId,
+      agentId: input.agentId,
+      assignment: input.workAssignment,
+      creator: (create) => worker.createInstance(create),
+      scope: input.scope,
+    });
+    if (acquired.status !== 'acquired') throw new Error(`runtime lease unavailable: ${acquired.issue.reason}`);
+    try {
+      const delivery = await acquired.handle.execute({
+        assignment: input.workAssignment,
+        agentId: input.agentId,
+        executionEpoch: acquired.lease.executionEpoch,
+        attempt: input.workAssignment.attempt,
+        lease: acquired.lease,
+        scope: input.scope,
+      });
+      return 'result' in delivery ? delivery.result : delivery;
+    } finally {
+      await pool.release(acquired.lease, { scope: input.scope });
+    }
+  } finally {
+    await pool.dispose();
+  }
 }
 
 function providerBinding(): ProviderBinding {
@@ -383,21 +495,44 @@ test('confirmed requirement enters task orchestration with RCC review before pro
   // so refs, digests and body all describe one artifact.
   const fixtureWorker = deterministicPorts.executionAgent!;
   const fixtureBody = 'serve orchestration fixture artifact body';
+  const decorateWorkerDelivery = (
+    input: Parameters<ExecutionAgentPort['execute']>[0],
+    delivery: Awaited<ReturnType<ExecutionAgentPort['execute']>>,
+  ): WorkResult => {
+    const result = 'result' in delivery ? delivery.result : delivery;
+    return {
+      ...result,
+      // One artifact: the ref, its digest and its body must all describe the
+      // same produced text, so the review gate can recompute the digest.
+      producedArtifactDigests: input.assignment.targetRefs.map(() => digestOf(fixtureBody)),
+      producedArtifactBodies: input.assignment.targetRefs.map(() => fixtureBody),
+      // The composed provider fixture reports its own organ; the feedback
+      // event scope is the task's, so evidence must be re-scoped to it.
+      evidenceRefs: result.evidenceRefs.map((ref) => ({ ...ref, scope: { ...input.scope } })),
+      // Evidence must sit inside the feedback event's admitted scope.
+    };
+  };
   const executionAgent: ExecutionAgentPort = {
-    async execute(input) {
-      const delivery = await fixtureWorker.execute(input);
-      const result = 'result' in delivery ? delivery.result : delivery;
+    roleId: fixtureWorker.roleId,
+    createInstance(create) {
+      const handle = fixtureWorker.createInstance(create);
       return {
-        ...result,
-        // One artifact: the ref, its digest and its body must all describe the
-        // same produced text, so the review gate can recompute the digest.
-        producedArtifactDigests: input.assignment.targetRefs.map(() => digestOf(fixtureBody)),
-        producedArtifactBodies: input.assignment.targetRefs.map(() => fixtureBody),
-        // The composed provider fixture reports its own organ; the feedback
-        // event scope is the task's, so evidence must be re-scoped to it.
-        evidenceRefs: result.evidenceRefs.map((ref) => ({ ...ref, scope: { ...input.scope } })),
-        // Evidence must sit inside the feedback event's admitted scope.
+        incarnation: handle.incarnation,
+        async execute(input) {
+          return decorateWorkerDelivery(input, await handle.execute(input));
+        },
+        async dispose() {
+          await handle.dispose();
+        },
+        ...(handle.release === undefined ? {} : {
+          async release(input: Parameters<NonNullable<TaskExecutionHandle['release']>>[0]) {
+            await handle.release!(input);
+          },
+        }),
       };
+    },
+    async execute(input) {
+      return decorateWorkerDelivery(input, await fixtureWorker.execute(input));
     },
   };
   const rccPorts = createRccServeOrchestrationPorts({
@@ -416,9 +551,14 @@ test('confirmed requirement enters task orchestration with RCC review before pro
     reviewAgent: rccPorts.reviewAgent,
     mergeCoordinator: rccPorts.mergeCoordinator,
   });
+  const accessControl = await accessControlFor(root);
+  const taskIdentity = identityWithFixtureGrant(
+    accessControl.readProductPrincipalOwner(),
+    taskControlPathFor(root),
+  );
   const runtime = await startUiRuntime({
-    mode: 'rcc',
-    accessControl: await accessControlFor(root),
+    mode: 'fake',
+    accessControl,
     organId: id('organ', 'humanagent-ui'),
     binding,
     port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed' }),
@@ -432,6 +572,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
       backend: new DeterministicMemoryBackend(),
       projectKey: 'serve-requirement-project',
     },
+    taskIdentity,
     runtimeComposition,
   });
   try {
@@ -439,6 +580,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
       sourceRef: 'ui:task-detail',
       rawInput: 'run the confirmed orchestration path',
       channel: 'business',
+      requestKind: 'new-task-create',
     });
     await runtime.service.beginExplicitMatching(interactionId);
     await runtime.service.recordExplicitMatch(interactionId, {
@@ -453,21 +595,59 @@ test('confirmed requirement enters task orchestration with RCC review before pro
     const proposed = await runtime.service.inspectExplicitInteraction(interactionId);
     assert.ok(proposed.draft);
     await runtime.service.confirmExplicitRequirement({
+      interactionId,
       draftId: proposed.draft!.draftId,
       inputRevision: 1,
       confirmationRef: 'confirmation:serve-orchestration',
       confirmedBy: 'human:operator',
       confirmedAt: '2026-09-20T00:00:00.000Z',
       payloadRef: 'asset://requirements/serve-orchestration',
+      requestKind: 'new-task-create',
     });
 
     const taskId = await waitForRuntimeTask(runtime);
-    for (let attempt = 0; attempt < 300; attempt += 1) {
-      if (runtime.service.taskDashboard(taskId).state === 'succeeded') break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    let graph: ReturnType<ReturnType<typeof runtime.service.taskAssembly>['orchestration']['graph']['snapshot']>;
+    try {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (runtime.service.taskDashboard(taskId).state === 'succeeded') break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      graph = runtime.service.taskAssembly(taskId).orchestration.graph.snapshot();
+      assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
+    } catch (error) {
+      const original = error instanceof Error ? error : new Error(String(error));
+      try {
+        // D1: observe the first public-visible failure before the fixture
+        // directory is removed. The original error and its stack are preserved;
+        // every diagnostic read is isolated so a failed read never masks it.
+        const diagnostics: string[] = [];
+        const issue = runtime.service.implicitSchedulingIssue();
+        diagnostics.push(`implicitSchedulingIssue: ${issue === undefined ? 'none' : JSON.stringify({ code: issue.code, ownerId: issue.ownerId, message: issue.message, nextAction: issue.nextAction })}`);
+        const list = runtime.service.listTasks();
+        const buckets = { running: list.running, waiting: list.waiting, completed: list.completed, stopped: list.stopped, draft: list.draft, failed: list.failed };
+        for (const [bucket, rows] of Object.entries(buckets)) {
+          for (const row of rows) diagnostics.push(`listTasks.${bucket}: taskId=${row.taskId.value} state=${row.state} requirementAdmission=${row.requirementAdmission ?? 'none'} nextStep=${row.nextStep}`);
+        }
+        try {
+          const dashboard = runtime.service.taskDashboard(taskId);
+          diagnostics.push(`taskDashboard(${taskId.value}): state=${dashboard.state} currentNode=${dashboard.currentNode} nextStep=${dashboard.nextStep} error=${dashboard.error === undefined ? 'none' : JSON.stringify(dashboard.error)}`);
+        } catch (dashboardError) {
+          diagnostics.push(`taskDashboard(${taskId.value}) failed: ${String(dashboardError)}`);
+        }
+        try {
+          const observation = runtime.service.observation(taskId, undefined, `task://${taskId.value}/observation/pipeline.execute`);
+          diagnostics.push(`observation(${taskId.value}): state=${observation.state} scope=${observation.scope.scopeRef}`);
+          for (const node of observation.nodes) diagnostics.push(`  observation.node: nodeId=${node.nodeId} kind=${node.kindDisplay} state=${node.stateDisplay} summary=${node.summary} activity=${node.activity.map((entry) => entry.summary).join(' | ')}`);
+          for (const node of observation.scope.nodes) diagnostics.push(`  observation.scopeNode: nodeId=${node.nodeId} kind=${node.kindDisplay} state=${node.stateDisplay} summary=${node.summary} evidenceCount=${node.evidenceCount}`);
+        } catch (observationError) {
+          diagnostics.push(`observation(${taskId.value}) failed: ${String(observationError)}`);
+        }
+        original.message = `${original.message}\n--- D1 first-error diagnostics ---\n${diagnostics.join('\n')}`;
+      } catch (diagnosticError) {
+        original.message = `${original.message}\n--- D1 diagnostics failed: ${String(diagnosticError)}`;
+      }
+      throw original;
     }
-    const graph = runtime.service.taskAssembly(taskId).orchestration.graph.snapshot();
-    assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
     assert.equal(graph.stages.length, 1);
     assert.equal(graph.assignments.length, 1);
     assert.equal(graph.assignments[0]?.status, 'merged', JSON.stringify(graph.assignments[0]));
@@ -655,23 +835,13 @@ test('RCC orchestration ports provide review and merge agents for the live execu
     expectedOutputRefs: ['serve-rcc-output'],
     expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
-  const workerDelivery = await workerPorts.executionAgent!.execute({
-    assignment: workAssignment,
-    agentId: 'serve-rcc-execution-agent',
-    executionEpoch: 1,
-    attempt: 1,
-    lease: {
-      leaseId: 'serve-rcc-lease',
-      runtimeId: 'serve-rcc-runtime',
-      generation: 1,
-      executionEpoch: 1,
-      ownerId: 'serve-test',
-      assignmentId: workAssignment.assignmentId,
-      capabilities: ['provider.execution'],
-    },
+  const worker = await runDeterministicWorker({
+    workerPorts,
+    workAssignment,
+    task,
     scope,
+    agentId: 'serve-rcc-execution-agent',
   });
-  const worker = 'result' in workerDelivery ? workerDelivery.result : workerDelivery;
   assert.equal(worker.status, 'succeeded');
   assert.equal(worker.agentId, 'serve-rcc-execution-agent');
   assert.deepEqual(worker.outputRefs, ['serve-rcc-output']);
@@ -737,23 +907,13 @@ test('RCC review agent stays inconclusive when the model exhausts retries withou
     assignmentId: 'serve-rcc-omission-worker',
     expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
-  const workerDelivery = await workerPorts.executionAgent!.execute({
-    assignment: workAssignment,
-    agentId: 'serve-rcc-execution-agent',
-    executionEpoch: 1,
-    attempt: 1,
-    lease: {
-      leaseId: 'serve-rcc-omission-lease',
-      runtimeId: 'serve-rcc-omission-runtime',
-      generation: 1,
-      executionEpoch: 1,
-      ownerId: 'serve-test',
-      assignmentId: workAssignment.assignmentId,
-      capabilities: ['provider.execution'],
-    },
+  const worker = await runDeterministicWorker({
+    workerPorts,
+    workAssignment,
+    task,
     scope,
+    agentId: 'serve-rcc-execution-agent',
   });
-  const worker = 'result' in workerDelivery ? workerDelivery.result : workerDelivery;
   const review = await ports.reviewAgent.review({
     reviewAssignment: {
       assignmentId: 'serve-rcc-omission-review',
@@ -968,23 +1128,13 @@ test('RCC review agent renders executor tool evidence into the review prompt', a
     pipelineNodeId: 'serve-rcc-review-executor-stage',
     expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
-  const workerDelivery = await workerPorts.executionAgent!.execute({
-    assignment: workAssignment,
-    agentId: 'serve-rcc-review-executor-agent',
-    executionEpoch: 1,
-    attempt: 1,
-    lease: {
-      leaseId: 'serve-rcc-review-executor-lease',
-      runtimeId: 'serve-rcc-review-executor-runtime',
-      generation: 1,
-      executionEpoch: 1,
-      ownerId: 'serve-test',
-      assignmentId: workAssignment.assignmentId,
-      capabilities: ['provider.execution'],
-    },
+  const worker = await runDeterministicWorker({
+    workerPorts,
+    workAssignment,
+    task,
     scope,
+    agentId: 'serve-rcc-review-executor-agent',
   });
-  const worker = 'result' in workerDelivery ? workerDelivery.result : workerDelivery;
   const executorEvidence = [
     {
       summary: 'provider.tool search matched 3 files',
@@ -1221,23 +1371,13 @@ async function reviewWithProviderText(input: {
     pipelineNodeId: `serve-chunk-${input.taskSuffix}-stage`,
     expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
-  const delivery = await workerPorts.executionAgent!.execute({
-    assignment: workAssignment,
-    agentId: `serve-chunk-${input.taskSuffix}-worker`,
-    executionEpoch: 1,
-    attempt: 1,
-    lease: {
-      leaseId: `serve-chunk-${input.taskSuffix}-lease`,
-      runtimeId: `serve-chunk-${input.taskSuffix}-runtime`,
-      generation: 1,
-      executionEpoch: 1,
-      ownerId: 'serve-test',
-      assignmentId: workAssignment.assignmentId,
-      capabilities: ['provider.execution'],
-    },
+  const worker = await runDeterministicWorker({
+    workerPorts,
+    workAssignment,
+    task,
     scope,
+    agentId: `serve-chunk-${input.taskSuffix}-worker`,
   });
-  const worker = 'result' in delivery ? delivery.result : delivery;
   const reviewAssignment: ReviewAssignment = {
     assignmentId: `serve-chunk-${input.taskSuffix}-review`,
     taskId: task.id.value,
@@ -1349,23 +1489,13 @@ test('RCC review instance delivers the actual provider text of the same review c
     assignmentId: 'serve-rcc-instance-delivery-worker',
     expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
-  const workerDelivery = await workerPorts.executionAgent!.execute({
-    assignment: workAssignment,
-    agentId: 'serve-rcc-instance-delivery-execution-agent',
-    executionEpoch: 1,
-    attempt: 1,
-    lease: {
-      leaseId: 'serve-rcc-instance-delivery-lease',
-      runtimeId: 'serve-rcc-instance-delivery-runtime',
-      generation: 1,
-      executionEpoch: 1,
-      ownerId: 'serve-test',
-      assignmentId: workAssignment.assignmentId,
-      capabilities: ['provider.execution'],
-    },
+  const worker = await runDeterministicWorker({
+    workerPorts,
+    workAssignment,
+    task,
     scope,
+    agentId: 'serve-rcc-instance-delivery-execution-agent',
   });
-  const worker = 'result' in workerDelivery ? workerDelivery.result : workerDelivery;
   const reviewAssignment: ReviewAssignment = {
     assignmentId: 'serve-rcc-instance-delivery-review',
     taskId: task.id.value,

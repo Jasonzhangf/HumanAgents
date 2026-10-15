@@ -136,7 +136,10 @@ export interface PublicOutputBinding {
 /** 一次已接受、非空的公开 output 文本段候选（尚未提交）。 */
 export interface PublicOutputCandidate {
   readonly binding: PublicOutputBinding;
-  /** 原 Provider output 事件 ID。 */
+  /**
+   * 真实已接受输出来源的稳定身份：Provider output 事件 ID，或 native 标准交付
+   * 已接受 end call 的稳定来源身份。不得用 summary、metadata 或伪造事件代替。
+   */
   readonly sourceId: string;
   /** 本次非空公开 output 文本段。 */
   readonly text: string;

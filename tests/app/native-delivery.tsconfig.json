@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "noEmitOnError": true,
+    "rootDir": "../..",
+    "outDir": "../../dist/tests-native-text",
+    "declaration": false
+  },
+  "include": [
+    "node-modules.d.ts",
+    "../../packages/adapters/jsonl/src/node-modules.d.ts",
+    "../../packages/adapters/memory/src/node-modules.d.ts",
+    "../../packages/agent-templates/src/node-modules.d.ts",
+    "../../packages/app/src/node-modules.d.ts",
+    "../../packages/app/src/ui-runtime/node-modules.d.ts",
+    "../../packages/config/src/node-modules.d.ts",
+    "../../packages/context-events/src/node-modules.d.ts",
+    "../../packages/core/src/node-modules.d.ts",
+    "../../packages/runtime/src/node-modules.d.ts",
+    "native-delivery-public-consumer.test.ts"
+  ]
+}

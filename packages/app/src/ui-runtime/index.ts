@@ -22,17 +22,20 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { createJsonlI2JournalPort } from '../i2-journal.js';
 import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
-import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
+import type { ConfiguredProjectCatalog, RuntimePaths } from '../../../config/src/index.js';
+import { UiRuntimeJournal } from './journal.js';
 import { UiRuntimeApiError } from './errors.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
 import {
   UiRuntimeService,
-  type TaskCheckpointStore,
+  type PublicOutputCheckpointStore,
   type UiRuntimeMemoryComposition,
   type UiRuntimeServiceOptions,
 } from './service.js';
+import { ServiceExecutionCheckpointStore } from './execution-composition.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import type { SupervisorLease } from '../supervisor/index.js';
@@ -87,6 +90,16 @@ export interface UiRuntimeLaunchOptions {
   readonly projectKey?: string;
   readonly workspaceRoot?: string;
   /**
+   * Canonical Config-owned paths for the serve-bound project. Injected by the
+   * entry that owns configuration so the read model never recomputes identity.
+   */
+  readonly runtimePaths?: RuntimePaths;
+  /**
+   * Config-owned resolver for every declared project in the current control
+   * root. Absent keeps cross-project reads explicitly unavailable.
+   */
+  readonly projectCatalog?: () => Promise<ConfiguredProjectCatalog>;
+  /**
    * Control-plane binding for the external web-search backend. It is injected by
    * the entry that owns configuration, so the runtime assembly never hardcodes a
    * provider route; without it the web.search tool is not wired at all.
@@ -107,6 +120,7 @@ export interface UiRuntimeLaunchOptions {
   readonly explicitBrainTemplateRoot?: string;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
+  readonly i2CurrentPosition?: import('./i2-history.js').I2CurrentPositionPort;
   readonly restart?: (input: {
     readonly leaseId: string;
     readonly generation: number;
@@ -293,8 +307,16 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const interactionJournal = options.interactionRoot
     ? new UiRuntimeJournal(join(options.interactionRoot, 'sessions', 'explicit-brain.jsonl'))
     : undefined;
-  const taskCycleJournalPath = (taskId: TaskId, cycleId: CycleId): string => join(modeRoot, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
-  const checkpointStoreFor = (taskId: TaskId, cycleId: CycleId): TaskCheckpointStore => new FileCheckpointStore(taskCycleJournalPath(taskId, cycleId));
+  // I2 product history is committed through the same task-control Organ Journal the runtime already
+  // owns, so the read layer reuses that authority instead of introducing a second store.
+  const taskControlJournalPath = join(modeRoot, 'task-control.jsonl');
+  const taskControlJournal = new JsonlOrganJournal(taskControlJournalPath);
+  // The real native checkpoint owner commits onto the control Organ Journal this
+  // runtime already owns. Public output and checkpoints share that same physical
+  // store, so the producer and the reader resolve one authority, not two files.
+  const checkpointStoreFor = (_taskId: TaskId, _cycleId: CycleId): PublicOutputCheckpointStore =>
+    new ServiceExecutionCheckpointStore(taskControlJournalPath, taskControlJournal, clock ?? (() => new Date()));
+  const i2Journal = createJsonlI2JournalPort({ filePath: taskControlJournalPath, journal: taskControlJournal });
   const providerToolExecutor = options.mode === 'rcc'
     && options.binding.protocol === 'responses'
     && options.workspaceRoot !== undefined
@@ -315,6 +337,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     binding: options.binding,
     port: options.port,
     checkpointStoreFor,
+    i2History: {
+      journal: i2Journal,
+      ...(options.i2CurrentPosition === undefined ? {} : { currentPosition: options.i2CurrentPosition }),
+    },
     attentionPort,
     providerState,
     providerError,
@@ -349,6 +375,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     explicitBrainInterpreter,
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
+    ...(options.runtimePaths === undefined ? {} : { runtimePaths: options.runtimePaths }),
+    ...(options.projectCatalog === undefined ? {} : { projectCatalog: options.projectCatalog }),
     subscriptionControl,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
     ...(clock === undefined ? {} : { now: clock }),

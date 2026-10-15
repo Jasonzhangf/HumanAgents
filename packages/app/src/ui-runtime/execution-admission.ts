@@ -2,12 +2,13 @@ import { createHash } from 'node:crypto';
 import { canonicalJsonStringify } from '../../../contracts/src/explicit-brain.js';
 import type { CheckpointControlBusinessRequest, CheckpointControlCapabilityRef } from '../../../contracts/src/checkpoint-controls.js';
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
-import { id, scopeContains, type OperationIntent, type ToolRegistration } from '../../../contracts/src/index.js';
+import { id, scopeContains, type OperationIntent, type TaskId, type ToolRegistration } from '../../../contracts/src/index.js';
 import {
   admitTaskGrantBusiness,
   decideTaskGrantAdmission,
   validateTaskGrantReadback,
   type TaskGrantAuthority,
+  type TaskGrantBusinessRegistration,
   type TaskGrantPort,
   type TaskGrantRegistrationPort,
 } from '../../../runtime/src/admission/task-grant.js';
@@ -29,6 +30,7 @@ import { AppLifecycleError } from '../errors.js';
 import type { AdmittedExecutionInput } from '../prepared-execution-input.js';
 import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
 export type { AdmittedExecutionInput } from '../prepared-execution-input.js';
+import type { RegisteredParentChildCall } from '../../../runtime/src/orchestration/types.js';
 
 /** Actual parent owner facts; only the admission binding is filled here. */
 export type PreparedParentLifecycle = Omit<ExternalOperationLifecycle, 'control'> & {
@@ -88,6 +90,21 @@ function sameCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean
   return left.commitId === right.commitId
     && left.journalSeq === right.journalSeq
     && left.recordDigest === right.recordDigest;
+}
+
+/**
+ * One child business registration readback. It is the only place the concrete
+ * grant journal exposes the durable typed child provenance; the grant port
+ * itself never carries it.
+ */
+interface BusinessRegistrationReadPort {
+  readBusinessRegistration(input: {
+    readonly taskId: TaskId;
+    readonly requestRef: string;
+  }): Promise<{
+    readonly registration: TaskGrantBusinessRegistration;
+    readonly commit: JournalCommitRef;
+  } | null>;
 }
 
 export function executionAdmissionInputDigest(allocation: RuntimeExecutionAllocation, input: AdmittedExecutionInput): string {
@@ -359,6 +376,99 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
     };
   }
 
+  /**
+   * Exact read seam for the durable parent control binding a registered child
+   * tool operation must join. A `ToolOperationAdmissionReceipt` carries three
+   * commit references, never a binding; the only durable source of the parent
+   * namespace, operation, admission and control facts is the typed provenance
+   * on the registered child business. This rebuilds the binding from that
+   * provenance and then physically confirms it against the live parent control
+   * before returning it. It never casts a receipt into a binding, and it never
+   * reads or writes anything the child operation did not already register.
+   */
+  async function readChildToolBinding(input: {
+    readonly call: RegisteredParentChildCall;
+    readonly operation: ToolOperationAdmissionReceipt;
+  }): Promise<OperationControlBinding> {
+    const { call, operation } = input;
+    if (!sameCommitRef(call.businessRegistrationCommitRef, operation.businessRegistrationCommitRef)) {
+      invalid('child binding read receipt does not name the registered child business commit');
+    }
+    if (typeof call.providerRequestId !== 'string' || call.providerRequestId.trim().length === 0
+      || typeof call.toolCallId !== 'string' || call.toolCallId.trim().length === 0) {
+      invalid('child binding read requires the actual Provider request and tool call ids');
+    }
+    if (!Number.isSafeInteger(call.parentExecution.executionEpoch) || call.parentExecution.executionEpoch < 1) {
+      invalid('child binding read requires the actual parent Harness epoch');
+    }
+    // The grant port is a narrow interface; the concrete journal owns the
+    // durable provenance read. Absent that exact read, this seam cannot prove
+    // the child relationship, so it stops instead of guessing a binding.
+    const registrationPort = options.taskGrantPort as TaskGrantPort & Partial<BusinessRegistrationReadPort>;
+    if (typeof registrationPort.readBusinessRegistration !== 'function') {
+      invalid('the concrete grant journal cannot read the registered child business provenance');
+    }
+    const requestRef = [
+      'provider-tool',
+      call.parentExecution.runtimeId,
+      String(call.parentExecution.executionEpoch),
+      call.parentExecution.operationId.value,
+      call.providerRequestId,
+      call.toolCallId,
+    ].join(':');
+    const readback = await registrationPort.readBusinessRegistration({
+      taskId: call.parentExecution.taskId,
+      requestRef,
+    });
+    if (readback === null
+      || !sameCommitRef(readback.commit, call.businessRegistrationCommitRef)
+      || !sameCommitRef(readback.commit, operation.businessRegistrationCommitRef)) {
+      invalid('no durable child business registration matches the actual call and admission receipt');
+    }
+    const provenance = readback.registration.operationProvenance;
+    if (provenance === undefined || provenance.kind !== 'provider-tool') {
+      invalid('the registered child business carries no typed provider-tool provenance');
+    }
+    if (!sameCommitRef(provenance.authorityCommitRef, operation.authorityCommitRef)
+      || !sameCommitRef(provenance.coverageCommitRef, operation.coverageCommitRef)) {
+      invalid('the registered child provenance does not match the admission receipt authority and coverage');
+    }
+    if (provenance.agentRuntimeId !== call.parentExecution.runtimeId
+      || provenance.harnessExecutionEpoch !== call.parentExecution.executionEpoch
+      || !sameScopedId(provenance.parentOperationId, call.parentExecution.operationId)
+      || provenance.parentNamespace.taskId === undefined
+      || !sameScopedId(provenance.parentNamespace.taskId, call.parentExecution.taskId)
+      || !Number.isSafeInteger(provenance.harnessExecutionEpoch) || provenance.harnessExecutionEpoch < 1) {
+      invalid('the durable child provenance does not describe the actual parent execution');
+    }
+    // Only the durable provenance may name the parent binding.
+    const binding: OperationControlBinding = {
+      scope: provenance.parentNamespace,
+      agentRuntimeId: provenance.agentRuntimeId,
+      harnessExecutionEpoch: provenance.harnessExecutionEpoch,
+      parentOperationId: provenance.parentOperationId,
+      admissionCommitRef: provenance.parentAdmissionCommitRef,
+    };
+    // The provenance is an admission-time fact; the live parent control must
+    // still carry the exact same binding before any child effect is released.
+    const control = await gateway.readControl({
+      scope: binding.scope,
+      agentRuntimeId: binding.agentRuntimeId,
+      harnessExecutionEpoch: binding.harnessExecutionEpoch,
+    });
+    if (control.state !== 'complete') invalid('child binding parent control namespace is unknown');
+    const parent = control.operations.find((record) => sameScopedId(record.intent.operationId, binding.parentOperationId));
+    if (parent === undefined
+      || parent.binding.agentRuntimeId !== binding.agentRuntimeId
+      || parent.binding.harnessExecutionEpoch !== binding.harnessExecutionEpoch
+      || !sameScopedId(parent.binding.parentOperationId, binding.parentOperationId)
+      || !sameCommitRef(parent.binding.admissionCommitRef, binding.admissionCommitRef)
+      || canonicalJsonStringify(parent.binding.scope) !== canonicalJsonStringify(binding.scope)) {
+      invalid('the child binding does not match the exact durable parent control');
+    }
+    return binding;
+  }
+
   return {
     gateway,
     permissions,
@@ -368,5 +478,6 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
     bindingFor,
     bindCommittedSegment,
     admitToolOperation,
+    readChildToolBinding,
   };
 }

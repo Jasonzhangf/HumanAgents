@@ -22,8 +22,12 @@ import {
   FakeReplayExecutionRuntimePort,
   UiRuntimeJournal,
   UiRuntimeService,
-  type TaskCheckpointStore,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
+import { createServiceExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import { TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from '../../packages/app/src/ui-runtime/task-control.js';
+import type { PublicOutputCheckpointStore } from '../../packages/app/src/ui-runtime/service.js';
 import { FileActiveTurnJournal } from '../../packages/app/src/ui-runtime/journal.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import type { CheckpointAppendReceipt } from '../../packages/runtime/src/checkpoints/ports.js';
@@ -36,6 +40,7 @@ import {
   type ExecutionAgentPort,
   type MergeCoordinatorPort,
   type ReviewAgentPort,
+  type TaskExecutionHandle,
 } from '../../packages/runtime/src/orchestration/index.js';
 import type { RefinedDeliveryStore } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import { MemoryCoordinator, type AttentionPort } from '../../packages/runtime/src/index.js';
@@ -60,6 +65,9 @@ const permissionSnapshot: RuntimeBindingSnapshot = {
   ownerRef: 'active-turn-test',
   permissionRevision: 'perm-rev-1',
 };
+// The declared control owner for this fixture's real admission and grant.
+// Both active-turn cases write to one control Organ Journal owned by this name.
+const fixtureControlOwner = 'active-turn-test-control';
 
 const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
   async interpret() {
@@ -91,6 +99,21 @@ function testMemory(projectKey: string) {
     projectKey,
     roleId: 'execution',
   };
+}
+
+// One prepared journal, one control journal, one real admission owner. The
+// service receives this exact prepared journal, and the admission resolves the
+// same prepared operation records the coordinator retained before release.
+function fixtureExecutionAdmission(root: string) {
+  const preparedJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const admission = createServiceExecutionAdmission({
+    journal: new JsonlOrganJournal(join(root, 'task-control.jsonl')),
+    preparedJournal,
+    principalOwner: fixtureControlOwner,
+    resourceBoundary: createPreparedOperationBoundary(preparedJournal),
+    now: () => new Date(),
+  });
+  return { preparedJournal, admission };
 }
 
 function nativeCaptureOptions(root: string) {
@@ -203,11 +226,15 @@ class MemoryRefinedDeliveryStore implements RefinedDeliveryStore {
 function failingChildCallCheckpointStore(
   inner: FileCheckpointStore,
   failOn: 'first' | 'second' | 'third',
-): TaskCheckpointStore {
+): PublicOutputCheckpointStore {
   let childCallAppends = 0;
   return {
     verify: (scope) => inner.verify(scope),
     readLatest: (scope) => inner.readLatest(scope),
+    readCommitted: (scope, checkpointId) => inner.readCommitted(scope, checkpointId),
+    listCommitted: (query) => inner.listCommitted(query),
+    readExecutionPosition: (taskScope) => inner.readExecutionPosition(taskScope),
+    readCheckpointRecoveryBinding: (scope, checkpointCommitRef) => inner.readCheckpointRecoveryBinding(scope, checkpointCommitRef),
     append: async (input): Promise<CheckpointAppendReceipt> => {
       const isChildCall = String(input.commitId).includes('child-call-');
       const isReviewResult = input.checkpoint.id.value.includes('review-result-');
@@ -222,6 +249,8 @@ function failingChildCallCheckpointStore(
       return inner.append(input);
     },
     commit: (checkpoint) => inner.commit(checkpoint),
+    commitPublicOutput: (candidate) => inner.commitPublicOutput(candidate),
+    readPublicOutputs: (publicOutputBinding) => inner.readPublicOutputs(publicOutputBinding),
   };
 }
 
@@ -303,6 +332,41 @@ function passingReviewAgent(
   };
 }
 
+function recordingExecutionAgentPort(
+  inner: ExecutionAgentPort,
+  onExecute: (input: Parameters<ExecutionAgentPort['execute']>[0]) => void | Promise<void>,
+): ExecutionAgentPort {
+  return {
+    roleId: inner.roleId,
+    createInstance(create) {
+      const handle = inner.createInstance(create);
+      return {
+        incarnation: handle.incarnation,
+        async execute(input) {
+          await onExecute(input);
+          return handle.execute(input);
+        },
+        async dispose() {
+          await handle.dispose();
+        },
+        ...(handle.release === undefined ? {} : {
+          async release(input: Parameters<NonNullable<TaskExecutionHandle['release']>>[0]) {
+            await handle.release!(input);
+          },
+        }),
+      };
+    },
+    async execute(input) {
+      return inner.execute(input);
+    },
+    ...(inner.release === undefined ? {} : {
+      async release(input: Parameters<NonNullable<ExecutionAgentPort['release']>>[0]) {
+        await inner.release!(input);
+      },
+    }),
+  };
+}
+
 const mergeCoordinator: MergeCoordinatorPort = {
   async merge(request) {
     return {
@@ -357,6 +421,7 @@ function workResult(taskId: TaskId, assignment: WorkAssignment): WorkResult {
 
 test('behavior 1: FIFO admission persists the binding and call checkpoint before dispatch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-active-turn-dispatch-'));
+  const { preparedJournal, admission } = fixtureExecutionAdmission(root);
   const activeTurnJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
   const refinedDeliveryStore = new MemoryRefinedDeliveryStore();
   const port = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
@@ -377,7 +442,7 @@ test('behavior 1: FIFO admission persists the binding and call checkpoint before
       },
       attentionPort: attentionPort(),
       providerState: 'ready',
-      journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+      journal: preparedJournal,
       closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
       memory: testMemory('project-active-turn-dispatch'),
       explicitBrainInterpreter: unusedExplicitBrainInterpreter,
@@ -386,30 +451,41 @@ test('behavior 1: FIFO admission persists the binding and call checkpoint before
       permissionSnapshot,
       refinedDeliveryStore,
       runtimeComposition: {
+        admitExecution: async (allocation) => {
+          await admission.grants.grant({
+            taskId: allocation.taskId,
+            requestId: `fixture-task-execution:${allocation.taskId.value}`,
+            expectedRevision: 0,
+            owner: fixtureControlOwner,
+            capability: {
+              actionId: TASK_EXECUTION_ACTION_ID,
+              capabilities: [TASK_EXECUTION_CAPABILITY],
+              scope: { organId: allocation.scope.organId, taskId: allocation.taskId },
+            },
+          });
+          await admission.admitExecution(allocation);
+        },
         createTaskAssembly({ scope, checkpointJournal, executionAgent, maxAttempts, childCallPort }) {
           const pool = runtimePool();
           // Each child port call confirms its own durable recovery anchor and
           // invocation association. The receipt binds to that invocation, not to
           // a fixed role order or a turn-wide latest checkpoint.
-          const recordingExecutionAgent: ExecutionAgentPort = {
-            async execute(input) {
-              executionCalls += 1;
-              const invocationId = `invocation:${input.assignment.assignmentId}:${input.assignment.attempt}:${input.assignment.executionEpoch}`;
-              const records = await activeTurnJournal.replay();
-              const invocation = records.find((record) => record.kind === 'child-invocation' && record.record.invocationId === invocationId);
-              if (!invocation || invocation.kind !== 'child-invocation') {
-                throw new Error('execution dispatch ran without a durable invocation association');
-              }
-              const latest = await checkpointJournal.readLatest(scope);
-              if (!latest) throw new Error('execution dispatch ran without a durable call checkpoint');
-              executionDispatch = {
-                invocationId,
-                receiptRef: invocation.record.checkpointReceiptRef,
-                latestCheckpointId: latest.checkpoint.id.value,
-              };
-              return executionAgent!.execute(input);
-            },
-          };
+          const recordingExecutionAgent = recordingExecutionAgentPort(executionAgent!, async (input) => {
+            executionCalls += 1;
+            const invocationId = `invocation:${input.assignment.assignmentId}:${input.assignment.attempt}:${input.assignment.executionEpoch}`;
+            const records = await activeTurnJournal.replay();
+            const invocation = records.find((record) => record.kind === 'child-invocation' && record.record.invocationId === invocationId);
+            if (!invocation || invocation.kind !== 'child-invocation') {
+              throw new Error('execution dispatch ran without a durable invocation association');
+            }
+            const latest = await checkpointJournal.readLatest(scope);
+            if (!latest) throw new Error('execution dispatch ran without a durable call checkpoint');
+            executionDispatch = {
+              invocationId,
+              receiptRef: invocation.record.checkpointReceiptRef,
+              latestCheckpointId: latest.checkpoint.id.value,
+            };
+          });
           const orchestration = new OrchestrationManager({
             ownerId: 'active-turn-test',
             runtimePool: pool,
@@ -448,7 +524,56 @@ test('behavior 1: FIFO admission persists the binding and call checkpoint before
     });
     service.startImplicitConsumer();
     await confirmRequirement(service, 'active-turn-dispatch');
-    await waitFor(() => assert.equal(service.listTasks().completed[0]?.state, 'succeeded'));
+    try {
+      await waitFor(() => assert.equal(service.listTasks().completed[0]?.state, 'succeeded'));
+    } catch (error) {
+      const original = error instanceof Error ? error : new Error(String(error));
+      try {
+        // D1: observe the first public-visible failure before the fixture
+        // directory is removed. The original error and its stack are preserved;
+        // every diagnostic read is isolated so a failed read never masks it.
+        const diagnostics: string[] = [];
+        const issue = service.implicitSchedulingIssue();
+        diagnostics.push(`implicitSchedulingIssue: ${issue === undefined ? 'none' : JSON.stringify({ code: issue.code, ownerId: issue.ownerId, message: issue.message, nextAction: issue.nextAction })}`);
+        const list = service.listTasks();
+        const buckets = { running: list.running, waiting: list.waiting, completed: list.completed, stopped: list.stopped, draft: list.draft, failed: list.failed };
+        for (const [bucket, rows] of Object.entries(buckets)) {
+          for (const row of rows) diagnostics.push(`listTasks.${bucket}: taskId=${row.taskId.value} state=${row.state} requirementAdmission=${row.requirementAdmission ?? 'none'} nextStep=${row.nextStep}`);
+        }
+        for (const row of Object.values(buckets).flat()) {
+          try {
+            const dashboard = service.taskDashboard(row.taskId);
+            diagnostics.push(`taskDashboard(${row.taskId.value}): state=${dashboard.state} currentNode=${dashboard.currentNode} nextStep=${dashboard.nextStep} error=${dashboard.error === undefined ? 'none' : JSON.stringify(dashboard.error)}`);
+          } catch (dashboardError) {
+            diagnostics.push(`taskDashboard(${row.taskId.value}) failed: ${String(dashboardError)}`);
+          }
+          try {
+            const observation = service.observation(row.taskId, undefined, `task://${row.taskId.value}/observation/pipeline.execute`);
+            diagnostics.push(`observation(${row.taskId.value}): state=${observation.state} scope=${observation.scope.scopeRef}`);
+            for (const node of observation.nodes) diagnostics.push(`  observation.node: nodeId=${node.nodeId} kind=${node.kindDisplay} state=${node.stateDisplay} summary=${node.summary} activity=${node.activity.map((entry) => entry.summary).join(' | ')}`);
+            for (const node of observation.scope.nodes) diagnostics.push(`  observation.scopeNode: nodeId=${node.nodeId} kind=${node.kindDisplay} state=${node.stateDisplay} summary=${node.summary} evidenceCount=${node.evidenceCount}`);
+          } catch (observationError) {
+            diagnostics.push(`observation(${row.taskId.value}) failed: ${String(observationError)}`);
+          }
+        }
+        try {
+          const records = await activeTurnJournal.replay();
+          for (const record of records) {
+            if (record.kind === 'binding-opened') diagnostics.push(`journal: binding-opened turnId=${record.binding.admittedTurn.turnId} assignmentId=${record.binding.assignment.assignmentId}`);
+            else if (record.kind === 'child-invocation') diagnostics.push(`journal: child-invocation invocationId=${record.record.invocationId} binding=${record.record.binding.kind} checkpointReceiptRef=${record.record.checkpointReceiptRef} adoptedResultSeq=${record.record.adoptedResultSeq ?? 'none'}`);
+            else if (record.kind === 'child-delivery') diagnostics.push(`journal: child-delivery kind=${record.entry.kind} invocationId=${record.entry.invocationId} seq=${record.entry.seq}`);
+            else if (record.kind === 'request') diagnostics.push(`journal: request requestId=${record.record.request.requestId} phase=${record.record.phase}`);
+            else diagnostics.push(`journal: ${record.kind}`);
+          }
+        } catch (journalError) {
+          diagnostics.push(`activeTurnJournal.replay failed: ${String(journalError)}`);
+        }
+        original.message = `${original.message}\n--- D1 first-error diagnostics ---\n${diagnostics.join('\n')}`;
+      } catch (diagnosticError) {
+        original.message = `${original.message}\n--- D1 diagnostics failed: ${String(diagnosticError)}`;
+      }
+      throw original;
+    }
 
     assert.equal(executionCalls, 1, 'the execution port must be called exactly once');
     assert.equal(reviewCalls, 1, 'the review port must be called exactly once');
@@ -526,6 +651,7 @@ async function runBlockedDispatch(
   readonly durable: readonly ActiveTurnJournalRecord[];
 }> {
   const root = await mkdtemp(join(tmpdir(), `humanagent-active-turn-blocked-${failure}-`));
+  const { preparedJournal, admission } = fixtureExecutionAdmission(root);
   const rawJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
   const activeTurnJournal: ActiveTurnJournalPort = failure === 'association' ? failingInvocationJournal(rawJournal) : rawJournal;
   const port = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
@@ -544,7 +670,7 @@ async function runBlockedDispatch(
       },
       attentionPort: attentionPort(),
       providerState: 'ready',
-      journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+      journal: preparedJournal,
       closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
       memory: testMemory(`project-active-turn-blocked-${failure}`),
       explicitBrainInterpreter: unusedExplicitBrainInterpreter,
@@ -553,18 +679,28 @@ async function runBlockedDispatch(
       permissionSnapshot,
       refinedDeliveryStore: new MemoryRefinedDeliveryStore(),
       runtimeComposition: {
+        admitExecution: async (allocation) => {
+          await admission.grants.grant({
+            taskId: allocation.taskId,
+            requestId: `fixture-task-execution:${allocation.taskId.value}`,
+            expectedRevision: 0,
+            owner: fixtureControlOwner,
+            capability: {
+              actionId: TASK_EXECUTION_ACTION_ID,
+              capabilities: [TASK_EXECUTION_CAPABILITY],
+              scope: { organId: allocation.scope.organId, taskId: allocation.taskId },
+            },
+          });
+          await admission.admitExecution(allocation);
+        },
         createTaskAssembly({ executionAgent, maxAttempts, childCallPort }) {
           const pool = runtimePool();
-          const recordingExecutionAgent: ExecutionAgentPort = {
-            async execute(input) {
-              executionCalls += 1;
-              return executionAgent!.execute(input);
-            },
-          };
           const orchestration = new OrchestrationManager({
             ownerId: 'active-turn-test',
             runtimePool: pool,
-            executionAgent: recordingExecutionAgent,
+            executionAgent: recordingExecutionAgentPort(executionAgent!, async () => {
+              executionCalls += 1;
+            }),
             reviewAgent: passingReviewAgent(() => { reviewCalls += 1; }),
             mergeCoordinator,
             maxAttempts: maxAttempts ?? 1,
@@ -578,11 +714,60 @@ async function runBlockedDispatch(
     await confirmRequirement(service, `active-turn-blocked-${failure}`);
     // A blocked dispatch settles into `failed` when no child ran, and into
     // `blocked` (waiting) when a legitimate child call already completed.
-    await waitFor(() => {
-      const tasks = service.listTasks();
-      const settled = expected === 'failed' ? tasks.failed.length : tasks.waiting.length;
-      assert.equal(settled, 1, `the blocked dispatch must settle into ${expected}`);
-    });
+    try {
+      await waitFor(() => {
+        const tasks = service.listTasks();
+        const settled = expected === 'failed' ? tasks.failed.length : tasks.waiting.length;
+        assert.equal(settled, 1, `the blocked dispatch must settle into ${expected}`);
+      });
+    } catch (error) {
+      const original = error instanceof Error ? error : new Error(String(error));
+      try {
+        // D1: observe the first public-visible failure for this injected branch
+        // before the fixture directory is removed. The original error and stack
+        // are preserved; every diagnostic read is isolated.
+        const diagnostics: string[] = [`failure=${failure} expected=${expected}`];
+        const issue = service.implicitSchedulingIssue();
+        diagnostics.push(`implicitSchedulingIssue: ${issue === undefined ? 'none' : JSON.stringify({ code: issue.code, ownerId: issue.ownerId, message: issue.message, nextAction: issue.nextAction })}`);
+        const list = service.listTasks();
+        const buckets = { running: list.running, waiting: list.waiting, completed: list.completed, stopped: list.stopped, draft: list.draft, failed: list.failed };
+        for (const [bucket, rows] of Object.entries(buckets)) {
+          for (const row of rows) diagnostics.push(`listTasks.${bucket}: taskId=${row.taskId.value} state=${row.state} requirementAdmission=${row.requirementAdmission ?? 'none'} nextStep=${row.nextStep}`);
+        }
+        for (const row of Object.values(buckets).flat()) {
+          try {
+            const dashboard = service.taskDashboard(row.taskId);
+            diagnostics.push(`taskDashboard(${row.taskId.value}): state=${dashboard.state} currentNode=${dashboard.currentNode} nextStep=${dashboard.nextStep} error=${dashboard.error === undefined ? 'none' : JSON.stringify(dashboard.error)}`);
+          } catch (dashboardError) {
+            diagnostics.push(`taskDashboard(${row.taskId.value}) failed: ${String(dashboardError)}`);
+          }
+          try {
+            const observation = service.observation(row.taskId, undefined, `task://${row.taskId.value}/observation/pipeline.execute`);
+            diagnostics.push(`observation(${row.taskId.value}): state=${observation.state} scope=${observation.scope.scopeRef}`);
+            for (const node of observation.nodes) diagnostics.push(`  observation.node: nodeId=${node.nodeId} kind=${node.kindDisplay} state=${node.stateDisplay} summary=${node.summary} activity=${node.activity.map((entry) => entry.summary).join(' | ')}`);
+            for (const node of observation.scope.nodes) diagnostics.push(`  observation.scopeNode: nodeId=${node.nodeId} kind=${node.kindDisplay} state=${node.stateDisplay} summary=${node.summary} evidenceCount=${node.evidenceCount}`);
+          } catch (observationError) {
+            diagnostics.push(`observation(${row.taskId.value}) failed: ${String(observationError)}`);
+          }
+        }
+        try {
+          const records = await rawJournal.replay();
+          for (const record of records) {
+            if (record.kind === 'binding-opened') diagnostics.push(`journal: binding-opened turnId=${record.binding.admittedTurn.turnId} assignmentId=${record.binding.assignment.assignmentId}`);
+            else if (record.kind === 'child-invocation') diagnostics.push(`journal: child-invocation invocationId=${record.record.invocationId} binding=${record.record.binding.kind} checkpointReceiptRef=${record.record.checkpointReceiptRef} adoptedResultSeq=${record.record.adoptedResultSeq ?? 'none'}`);
+            else if (record.kind === 'child-delivery') diagnostics.push(`journal: child-delivery kind=${record.entry.kind} invocationId=${record.entry.invocationId} seq=${record.entry.seq}`);
+            else if (record.kind === 'request') diagnostics.push(`journal: request requestId=${record.record.request.requestId} phase=${record.record.phase}`);
+            else diagnostics.push(`journal: ${record.kind}`);
+          }
+        } catch (journalError) {
+          diagnostics.push(`rawJournal.replay failed: ${String(journalError)}`);
+        }
+        original.message = `${original.message}\n--- D1 first-error diagnostics ---\n${diagnostics.join('\n')}`;
+      } catch (diagnosticError) {
+        original.message = `${original.message}\n--- D1 diagnostics failed: ${String(diagnosticError)}`;
+      }
+      throw original;
+    }
     return { executionCalls, reviewCalls, durable: await rawJournal.replay() };
   } finally {
     await rm(root, { recursive: true, force: true });

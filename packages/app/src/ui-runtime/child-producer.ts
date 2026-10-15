@@ -3,6 +3,8 @@ import {
   canonicalJsonStringify,
   id,
   REVIEW_KIND_WHITELIST,
+  REVIEW_STATUS_WHITELIST,
+  REVIEW_SEVERITY_WHITELIST,
   type AcceptedChildDelivery,
   type AgentEvent,
   type ActiveTurnProviderExecutionIdentityRef,
@@ -19,7 +21,12 @@ import {
   type ReviewKind,
   type ReviewOutput,
   type ReviewResult,
+  type ReviewFinding,
+  type ReviewSeverity,
+  type ReviewStatus,
   type ScopeRef,
+  type ProviderTerminalState,
+  type ProviderProducerDrainResult,
   type WorkAssignment,
   type WorkResult,
 } from '../../../contracts/src/index.js';
@@ -40,11 +47,13 @@ import type {
   ReviewAgentDelivery,
   ReviewAgentInput,
   ReviewAgentPort,
+  TaskRuntimeIncarnation,
 } from '../../../runtime/src/orchestration/types.js';
 import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
 import {
   acceptanceCriteriaContent,
   digestOf,
+  assertReviewMaterial,
   resolveReviewMaterial,
   type ReviewMaterial,
 } from '../../../runtime/src/orchestration/review-material.js';
@@ -53,10 +62,20 @@ import type { CommittedCheckpointRecord } from '../../../runtime/src/checkpoints
 import type { RefinedDeliveryStore } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ActiveTurnContext, ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
 import { ProviderAgentDriver } from '../../../adapters/provider/src/index.js';
-import type { ProviderToolExecutionPort, ProviderToolExecutionResult } from '../../../adapters/provider/src/index.js';
+import type { ProviderToolExecutionResult } from '../../../adapters/provider/src/index.js';
+import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/index.js';
+import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
 import { closeAgentProvider, type AgentProviderComposition } from '../agent-driver-composition.js';
 import type { AgentRole } from '../../../config/src/index.js';
 import type { ToolOperationAdmissionReceipt } from './execution-admission.js';
+import type { StandardTurnEndOwnerPort } from './standard-turn-control.js';
+import { createStandardTurnEndExecutor } from './standard-turn-control.js';
+import {
+  ADVERTISED_STANDARD_TURN_END_TOOL,
+  createStandardTurnEndWireExecutor,
+  isStandardTurnEndCall,
+} from './standard-turn-composition.js';
+import type { StandardTurnEndCommand } from '../../../contracts/src/standard-turn-end.js';
 
 const OWNER = 'humanagent.app.child-producer';
 
@@ -67,6 +86,9 @@ const MAX_CRITERIA_ITEM = 500;
 const MAX_TARGET_REF = 256;
 const MAX_INVOCATION_REF = 256;
 const MAX_REFINED_CHARS = 8000;
+const MAX_CHILD_REQUESTS = 8;
+/** The delivery body must support a real result well past the refined summary bound. */
+const MAX_DELIVERY_CHARS = 2_000_000;
 
 export const APP_CHILD_CALL_TOOL: ProviderToolDefinition = {
   toolId: 'child.call',
@@ -143,6 +165,60 @@ export const APP_CHILD_TOOLS: readonly ProviderToolDefinition[] = [
 ];
 
 /**
+ * The real semantic delivery action of one independent child. It writes the
+ * complete business body as an immutable asset and reads the exact bytes back.
+ * It never sets a completion flag and never ends the turn; the standard end
+ * action owns that, separately.
+ *
+ * The model owns only the business content: the delivery body, the review
+ * judgment and findings, and which of this child's own accepted evidence refs
+ * support the body. Kind, scope, invocation, assignment, criteria/subject
+ * digests, Provider identity and the asset target are bound by this module.
+ */
+export const APP_CHILD_DELIVER_TOOL: ProviderToolDefinition = {
+  toolId: 'humanagent_child_deliver',
+  description: [
+    'Deliver one child result for the bounded assignment you received.',
+    'Put the complete final body in "body", and the evidenceId or locator of each piece of your own accepted evidence that supports it in "evidenceRefs".',
+    'For a review also state the business "judgment" (passed, failed or inconclusive) and the concrete findings.',
+    'The delivery must stand on its own: no summary, ref or digest substitutes for the body. This action records the delivery only; ending this turn is a separate action.',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['body'],
+    properties: {
+      body: { type: 'string', minLength: 1 },
+      judgment: { type: 'string', enum: ['passed', 'failed', 'inconclusive'] },
+      findings: {
+        type: 'array',
+        maxItems: MAX_CRITERIA_ITEMS,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['detail', 'evidenceRefs'],
+          properties: {
+            detail: { type: 'string', minLength: 1 },
+            severity: { type: 'string', enum: [...REVIEW_SEVERITY_WHITELIST] },
+            locationRef: { type: 'string', minLength: 1, maxLength: MAX_TARGET_REF },
+            evidenceRefs: {
+              type: 'array',
+              minItems: 1,
+              items: { type: 'string', minLength: 1, maxLength: MAX_TARGET_REF },
+            },
+          },
+        },
+      },
+      evidenceRefs: {
+        type: 'array',
+        minItems: 1,
+        items: { type: 'string', minLength: 1, maxLength: MAX_TARGET_REF },
+      },
+    },
+  },
+};
+
+/**
  * Physical checkpoint owner for one genuine child call. The pre-call checkpoint
  * anchors recovery before the child runs; the post-review checkpoint is distinct
  * and is committed only after the durable review return. Both return the
@@ -189,6 +265,8 @@ export interface AppChildProducerInput {
   readonly parentAssignment: WorkAssignment;
   readonly checkpoints: AppChildCheckpointPort;
   readonly refinedDeliveryStore: RefinedDeliveryStore;
+  readonly bodyAssets: ChildBodyAssetPort;
+  readonly bindChildRun: BindChildRunPort;
   readonly prepareAgentProvider: (selection: {
     readonly roleId: AgentRole;
     readonly configuredAgentId: string;
@@ -202,11 +280,95 @@ export interface ConfiguredChildAgentInput {
   readonly call: RegisteredParentChildCall;
   readonly operation: ToolOperationAdmissionReceipt;
   readonly selected: { readonly agentId: string; readonly roleId: AgentRole };
+  readonly bodyAssets: ChildBodyAssetPort;
+  readonly bindChildRun: BindChildRunPort;
   readonly prepareAgentProvider: (selection: {
     readonly roleId: AgentRole;
     readonly configuredAgentId: string;
   }) => Promise<AgentProviderComposition>;
   readonly now?: () => Date;
+}
+
+// ---------------------------------------------------------------------------
+// Native child ABI (accepted creator plan §4). Frozen type seam for the
+// independent child binder; admission wiring and body assets land in later
+// implementation steps.
+// ---------------------------------------------------------------------------
+
+export type ChildDriverNativePorts = Required<
+  Pick<
+    ProviderAgentDriverOptions,
+    'rawEvidence' | 'acceptRawFact' | 'registerRequest' | 'requestContext'
+  >
+>;
+
+export type ChildCreatorRequest =
+  | { readonly kind: 'execution'; readonly input: ExecutionAgentInput }
+  | { readonly kind: 'review'; readonly input: ReviewAgentInput };
+
+export interface BoundChildRun {
+  readonly native: ChildDriverNativePorts;
+  readonly toolDefinitions: readonly ProviderToolDefinition[];
+  readonly toolExecution: ProviderToolExecutionPort;
+  readonly maxToolRounds?: number;
+  readonly standardEndOwner: StandardTurnEndOwnerPort;
+}
+
+export type BindChildRunPort = (input: {
+  readonly call: RegisteredParentChildCall;
+  readonly operation: ToolOperationAdmissionReceipt;
+  readonly incarnation: TaskRuntimeIncarnation;
+  readonly scope: ScopeRef;
+  readonly request: ChildCreatorRequest;
+}) => Promise<BoundChildRun>;
+
+export interface ChildBodyAssetPort {
+  target(input: {
+    readonly scope: ScopeRef;
+    readonly invocationId: string;
+    readonly kind: 'execution' | 'review';
+  }): string;
+  write(input: {
+    readonly scope: ScopeRef;
+    readonly invocationId: string;
+    readonly kind: 'execution' | 'review';
+    readonly body: string;
+  }): Promise<RawAsset>;
+  read(asset: RawAsset): Promise<Uint8Array>;
+}
+
+/**
+ * One delivery the child itself produced. The body is the complete business
+ * result; the reference is the immutable asset that actually holds it.
+ */
+export interface ChildDeliveryRecord {
+  readonly kind: 'execution' | 'review';
+  readonly invocationId: string;
+  readonly body: string;
+  readonly asset: RawAsset;
+  readonly digest: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly judgment?: ReviewStatus;
+  readonly findings: readonly ReviewFinding[];
+}
+
+/** What one independent child run can honestly end as. */
+export type ChildRunOutcome =
+  | { readonly state: 'delivered'; readonly events: readonly AgentEvent[] }
+  | { readonly state: 'incomplete'; readonly events: readonly AgentEvent[]; readonly reason: string }
+  | { readonly state: 'preserved'; readonly events: readonly AgentEvent[]; readonly reason: string }
+  | { readonly state: 'failed'; readonly events: readonly AgentEvent[]; readonly reason: string };
+
+/**
+ * Mutable holder the creator installs into a run. The delivery tool records the
+ * real delivery here; the standard-end owner records the accepted control
+ * command. Neither the model nor a caller can fill either one from outside, so
+ * a candidate can only exist when this child actually did both.
+ */
+interface ChildRunState {
+  delivery?: ChildDeliveryRecord;
+  acceptedCommand?: StandardTurnEndCommand;
+  driver?: ProviderAgentDriver;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,16 +521,19 @@ function selectRosterEntry(
 // Independent Provider run
 // ---------------------------------------------------------------------------
 
-function outputText(events: readonly AgentEvent[]): string {
-  return events.map((event) => event.summary ?? '').join('').trim();
-}
-
-function uniqueEvidence(
+/**
+ * Only the evidence this child actually accepted. A lifecycle summary is not
+ * evidence and an empty set stays empty: no locator is invented so a
+ * non-delivery can read as delivered.
+ */
+function acceptedEvidenceRefs(
   events: readonly AgentEvent[],
-  settlement: ProviderSettlement,
-  scope: ScopeRef,
+  settlement: ProviderSettlement | undefined,
 ): readonly EvidenceRef[] {
-  const refs = [...events.flatMap((event) => event.evidenceRefs), ...settlement.evidenceRefs];
+  const refs = [
+    ...events.flatMap((event) => event.evidenceRefs),
+    ...(settlement?.evidenceRefs ?? []),
+  ];
   const seen = new Set<string>();
   const unique: EvidenceRef[] = [];
   for (const ref of refs) {
@@ -376,7 +541,7 @@ function uniqueEvidence(
     seen.add(ref.evidenceId.value);
     unique.push(ref);
   }
-  return unique.length > 0 ? unique : [scopedEvidence(scope, 'child-provider-settlement')];
+  return unique;
 }
 
 function scopedEvidence(scope: ScopeRef, label: string): EvidenceRef {
@@ -390,77 +555,153 @@ function scopedEvidence(scope: ScopeRef, label: string): EvidenceRef {
 }
 
 /**
- * Runs one real, independent Provider request on the selected composition. The
- * driver is bound to the real pool incarnation and the admitted child operation;
- * it inherits neither the parent request-context hook nor the parent raw sink,
- * transcript, tool surface or lifecycle callback.
+ * The real independent child run. It drives one child driver bound to the
+ * child's own native raw/registration/request-context ports, its own tool
+ * definitions and executor, and its own standard-end owner. It inherits no
+ * parent hook, transcript, tool surface or lifecycle callback.
+ *
+ * The loop covers the whole observation of every request, so tool execution,
+ * the tool follow-up request and request-level bookkeeping all complete. A
+ * normal request terminal with no accepted standard end continues this same
+ * child turn. An EOF, an unknown terminal, an error or a cancellation is kept as
+ * its own outcome and is never replayed here.
+ *
+ * Nothing in this function marks the business done. A candidate exists only
+ * after the caller has closed production, drained the real producer and settled.
  */
-async function runIndependentChildModel(input: {
-  readonly port: ExecutionRuntimePort;
-  readonly binding: ProviderBinding;
-  readonly runtimeId: string;
-  readonly taskId: WorkAssignment['taskId'];
+async function runIndependentChild(input: {
+  readonly composition: AgentProviderComposition;
+  readonly run: BoundChildRun;
+  readonly state: ChildRunState;
+  readonly collect: (event: AgentEvent) => void;
+  readonly incarnation: TaskRuntimeIncarnation;
   readonly operationId: OperationId;
-  readonly executionEpoch: number;
   readonly assignmentId: string;
   readonly scope: ScopeRef;
   readonly inputRefs: readonly string[];
   readonly payload: BusinessPayload;
+  readonly signal: AbortSignal;
+  readonly maxRequests: number;
   readonly now?: () => Date;
-}): Promise<{ readonly events: readonly AgentEvent[]; readonly settlement: ProviderSettlement }> {
+}): Promise<ChildRunOutcome> {
+  const runtimeId = input.incarnation.runtimeId;
+  const taskId = input.incarnation.taskId;
+  const executionEpoch = input.incarnation.executionEpoch;
+  const events: AgentEvent[] = [];
+  let terminalState: ProviderTerminalState | undefined;
+  let terminalError: string | undefined;
+  let requests = 0;
   const driver = new ProviderAgentDriver({
-    port: input.port,
-    binding: input.binding,
-    runtimeId: input.runtimeId,
-    taskId: input.taskId,
+    port: input.composition.port,
+    binding: input.composition.binding,
+    runtimeId,
+    taskId,
     operationId: input.operationId,
-    executionEpoch: input.executionEpoch,
+    executionEpoch,
     assignmentId: input.assignmentId,
     scope: input.scope,
     inputRefs: [...input.inputRefs],
     ownerId: OWNER,
+    ...input.run.native,
+    tools: input.run.toolDefinitions,
+    executeTool: input.run.toolExecution,
+    ...(input.run.maxToolRounds === undefined ? {} : { maxToolRounds: input.run.maxToolRounds }),
     ...(input.now === undefined ? {} : { now: input.now }),
   });
-  const events: AgentEvent[] = [];
-  let started = false;
+  input.state.driver = driver;
   try {
     await driver.start({
-      runtimeId: input.runtimeId,
-      taskId: input.taskId,
-      executionEpoch: input.executionEpoch,
+      runtimeId,
+      taskId,
+      executionEpoch,
       assignmentId: input.assignmentId,
       organId: input.scope.organId,
       ...(input.scope.cycleId === undefined ? {} : { cycleId: input.scope.cycleId }),
       operationId: input.operationId,
     });
-    started = true;
     await driver.submit({
-      taskId: input.taskId,
-      executionEpoch: input.executionEpoch,
+      taskId,
+      executionEpoch,
       assignmentId: input.assignmentId,
       payload: input.payload,
     });
-    for await (const event of driver.observe({ runtimeId: input.runtimeId })) {
-      events.push(event);
-      if (event.terminalState !== undefined) break;
+    requests = 1;
+    while (true) {
+      input.signal.throwIfAborted();
+      terminalState = undefined;
+      terminalError = undefined;
+      for await (const event of driver.observe({ runtimeId })) {
+        events.push(event);
+        input.collect(event);
+        if (event.providerEvent.kind === 'error') {
+          terminalState = 'failed';
+          terminalError = event.providerEvent.error?.message ?? 'the child provider emitted an error event';
+        }
+        if (event.terminalState !== undefined) terminalState = event.terminalState;
+      }
+      if (terminalState === 'succeeded') {
+        if (input.state.acceptedCommand !== undefined) {
+          return { state: 'delivered', events };
+        }
+        if (requests >= input.maxRequests) {
+          return {
+            state: 'incomplete',
+            events,
+            reason: `the child turn produced no legal delivery after ${requests} requests`,
+          };
+        }
+        await driver.continueCurrentTurn({
+          instructions: { text: reorientationInstructions(input.scope) },
+        });
+        requests += 1;
+        continue;
+      }
+      if (terminalState === 'failed') {
+        return { state: 'failed', events, reason: terminalError ?? 'the child request failed' };
+      }
+      return {
+        state: 'preserved',
+        events,
+        reason: `the child request ended ${terminalState ?? 'without a terminal'}; recovery responsibility is retained and nothing is replayed`,
+      };
     }
   } catch (error) {
-    if (started) {
-      try {
-        await driver.settle({ runtimeId: input.runtimeId, executionEpoch: input.executionEpoch });
-      } catch (settleError) {
-        throw new AggregateError(
-          [error, settleError],
-          'independent child call failed and its own settlement also failed',
-        );
-      }
+    const preserved = isAbort(error) || input.signal.aborted;
+    try {
+      await driver.settle({ runtimeId, executionEpoch });
+    } catch (settleError) {
+      throw new AggregateError(
+        [error, settleError],
+        'independent child call failed and its own settlement also failed',
+      );
     }
-    throw error;
+    if (preserved) {
+      return {
+        state: 'preserved',
+        events,
+        reason: 'the child call was cancelled; recovery responsibility is retained and nothing is replayed',
+      };
+    }
+    return { state: 'failed', events, reason: error instanceof Error ? error.message : String(error) };
   }
-  await driver.settle({ runtimeId: input.runtimeId, executionEpoch: input.executionEpoch });
-  const settlement = driver.settlement();
-  if (!settlement) throw new Error('independent child call exposed no Provider settlement');
-  return { events, settlement };
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'AbortError' || error.name === 'CanceledError');
+}
+
+/**
+ * Transient orientation for this child turn only. It enters this one request
+ * and is never written back to canonical context or carried to a new turn.
+ */
+function reorientationInstructions(scope: ScopeRef): string {
+  void scope;
+  return [
+    'This child turn is still open and no delivery has been accepted yet.',
+    'Do the bounded work with the tools you were given, then record the complete result with the delivery tool.',
+    'A summary, a reference or a digest is not a delivery: the delivery body must be the complete final result on its own.',
+    'Only after a legal delivery is recorded, end this turn with the standard end action.',
+  ].join(' ');
 }
 
 function executionPrompt(assignment: WorkAssignment): string {
@@ -471,8 +712,7 @@ function executionPrompt(assignment: WorkAssignment): string {
     `Success criteria: ${assignment.successCriteria.join('; ')}`,
     ...(assignment.failureCriteria.length === 0 ? [] : [`Failure criteria: ${assignment.failureCriteria.join('; ')}`]),
     ...(assignment.incompleteCriteria.length === 0 ? [] : [`Incomplete criteria: ${assignment.incompleteCriteria.join('; ')}`]),
-    `Produce exactly the single refined result named by: ${assignment.targetRefs.join(', ')}`,
-    'Reply with the refined result body only.',
+    'Use the tools you were given for the real work, then record the complete result with the delivery tool, and end this turn with the standard end action.',
   ].join('\n');
 }
 
@@ -483,35 +723,169 @@ function reviewPrompt(assignment: ReviewAssignment, material: ReviewMaterial): s
     `Review kind: ${assignment.reviewKind}`,
     `Acceptance criteria: ${material.acceptanceCriteria}`,
     ...material.subjects.map((subject, index) => `Subject ${index + 1} (${subject.ref}):\n${subject.body}`),
-    'End on the final line with exactly HUMANAGENT_REVIEW: passed, failed, or inconclusive',
+    'Record the complete review text as the delivery body, the business judgment, and each concrete finding together with the evidence that supports it.',
   ].join('\n');
 }
 
-function reviewStatus(text: string, settlement: ProviderSettlement): ReviewResult['status'] {
-  if (settlement.state !== 'succeeded') return 'inconclusive';
-  const markers = [...text.matchAll(/HUMANAGENT_REVIEW\s*:\s*(passed|failed|inconclusive)/gi)]
-    .map((match) => (match[1] ?? '').toLowerCase());
-  const last = markers.at(-1);
-  return last === 'passed' || last === 'failed' || last === 'inconclusive' ? last : 'inconclusive';
+
+/**
+ * The owner-bound delivery tool. It resolves the model's evidence selectors
+ * against the evidence this child actually accepted, writes the complete body
+ * immutably, reads the exact bytes back, and only then records the delivery.
+ * A selector that does not resolve to this child's own accepted evidence
+ * rejects; no fallback locator is constructed.
+ */
+function createChildDeliveryExecutor(input: {
+  readonly kind: 'execution' | 'review';
+  readonly state: ChildRunState;
+  readonly invocationId: string;
+  readonly incarnation: TaskRuntimeIncarnation;
+  readonly scope: ScopeRef;
+  readonly bodyAssets: ChildBodyAssetPort;
+  readonly acceptedEvidence: () => readonly EvidenceRef[];
+}): ProviderToolExecutionPort {
+  return {
+    async execute(request): Promise<ProviderToolExecutionResult> {
+      if (request.execution.runtimeId !== input.incarnation.runtimeId
+        || request.execution.executionEpoch !== input.incarnation.executionEpoch
+        || request.execution.taskId.value !== input.incarnation.taskId.value) {
+        throw new Error('child delivery must be executed by this child provider request');
+      }
+      const args = request.call.arguments;
+      const body = readBoundedString(args.body, 'child delivery body', MAX_DELIVERY_CHARS, true);
+      if (body.trim() === '') throw new Error('child delivery body must not be blank');
+      const selectors = readBoundedStringArray(
+        args.evidenceRefs, 'child delivery evidenceRefs', MAX_CRITERIA_ITEMS, MAX_TARGET_REF, false,
+      );
+      const judgment = input.kind === 'review' ? readReviewJudgment(args.judgment) : undefined;
+      if (input.kind === 'execution' && (args.judgment !== undefined || args.findings !== undefined)) {
+        throw new Error('an execution delivery carries no review judgment or findings');
+      }
+      const candidateFindings = input.kind === 'review' ? parseReviewFindingSelectors(args.findings) : [];
+      const byReference = new Map<string, EvidenceRef>();
+      for (const ref of input.acceptedEvidence()) {
+        byReference.set(ref.evidenceId.value, ref);
+        byReference.set(ref.locator, ref);
+      }
+      const resolve = (selector: string): EvidenceRef => {
+        const match = byReference.get(selector);
+        if (match === undefined) {
+          throw new Error(`child delivery evidence ${selector} is not accepted evidence of this child`);
+        }
+        return match;
+      };
+      const evidenceRefs = selectors.map(resolve);
+      const findings = candidateFindings.map((finding) => ({
+        findingId: `child-finding:${sha256Hex(`${finding.detail}\n${finding.locationRef}\n${finding.evidenceRefs.join('\n')}`)}`,
+        severity: finding.severity,
+        locationRef: finding.locationRef,
+        problem: finding.detail,
+        expected: finding.detail,
+        evidenceRefs: finding.evidenceRefs.map(resolve),
+      }));
+      const asset = await input.bodyAssets.write({
+        scope: input.scope,
+        invocationId: input.invocationId,
+        kind: input.kind,
+        body,
+      });
+      const readBack = new TextDecoder().decode(await input.bodyAssets.read(asset));
+      if (readBack !== body) throw new Error('child delivery asset readback does not match the written body');
+      const digest = digestOf(body);
+      if (asset.ref.digest !== undefined && asset.ref.digest !== digest) {
+        throw new Error('child delivery asset digest does not match the written body');
+      }
+      input.state.delivery = {
+        kind: input.kind,
+        invocationId: input.invocationId,
+        body,
+        asset,
+        digest,
+        evidenceRefs,
+        ...(judgment === undefined ? {} : { judgment }),
+        findings,
+      };
+      return {
+        output: JSON.stringify({
+          owner: OWNER,
+          state: 'delivered',
+          kind: input.kind,
+          digest,
+          bytes: body.length,
+          ...(judgment === undefined ? {} : { judgment }),
+          findings: findings.length,
+        }),
+        outputRefs: [asset.ref.locator],
+        outputRef: asset.ref.locator,
+        outputDigest: digest,
+        evidenceRefs: [asset.ref, ...evidenceRefs, ...findings.flatMap((finding) => finding.evidenceRefs)],
+        status: 'succeeded',
+        executorRoute: APP_CHILD_DELIVER_TOOL.toolId,
+      };
+    },
+  };
 }
 
-function buildExecutionResult(input: {
+interface ReviewFindingSelectors {
+  readonly detail: string;
+  readonly severity: ReviewSeverity;
+  readonly locationRef: string;
+  readonly evidenceRefs: readonly string[];
+}
+
+function readReviewJudgment(value: unknown): ReviewStatus {
+  if (typeof value !== 'string' || !REVIEW_STATUS_WHITELIST.includes(value as ReviewStatus)) {
+    throw new Error('child review delivery judgment must be passed, failed or inconclusive');
+  }
+  return value as ReviewStatus;
+}
+
+function parseReviewFindingSelectors(value: unknown): readonly ReviewFindingSelectors[] {
+  if (value === undefined || value === null) {
+    throw new Error('a review delivery must state its concrete findings');
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('a review delivery must state its concrete findings');
+  }
+  return value.map((entry, index) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`child review delivery finding ${index} must be an object`);
+    }
+    const candidate = entry as Record<string, unknown>;
+    const detail = readBoundedString(candidate.detail, `finding ${index} detail`, MAX_DELIVERY_CHARS, true);
+    const severityRaw = readBoundedString(candidate.severity, `finding ${index} severity`, 32, false);
+    if (!REVIEW_SEVERITY_WHITELIST.includes(severityRaw as ReviewSeverity)) {
+      throw new Error(`finding ${index} severity must be a registered review severity`);
+    }
+    const locationRef = readBoundedString(candidate.locationRef, `finding ${index} locationRef`, MAX_TARGET_REF, false);
+    return {
+      detail,
+      severity: severityRaw as ReviewSeverity,
+      locationRef: locationRef === '' ? `finding:${index}` : locationRef,
+      evidenceRefs: readBoundedStringArray(
+        candidate.evidenceRefs, `finding ${index} evidenceRefs`, MAX_CRITERIA_ITEMS, MAX_TARGET_REF, true,
+      ),
+    };
+  });
+}
+
+/**
+ * A bounded summary of the real body, never the body itself. The complete body
+ * stays in the immutable asset and is what every consumer reads back.
+ */
+function boundedSummary(body: string): string {
+  const trimmed = body.trim();
+  if (trimmed === '') throw new Error('a child delivery body must not be empty');
+  return trimmed.length <= MAX_REFINED_CHARS ? trimmed : `${trimmed.slice(0, MAX_REFINED_CHARS)}...`;
+}
+
+function executionResult(input: {
+  readonly delivery: ChildDeliveryRecord;
   readonly assignment: WorkAssignment;
   readonly agentId: string;
-  readonly text: string;
   readonly events: readonly AgentEvent[];
-  readonly settlement: ProviderSettlement;
-  readonly scope: ScopeRef;
 }): WorkResult {
-  const succeeded = input.settlement.state === 'succeeded';
-  const evidenceRefs = uniqueEvidence(input.events, input.settlement, input.scope);
-  const target = input.assignment.targetRefs[0];
-  if (target === undefined) throw new Error('child execution assignment declares no target ref');
-  const body = input.text.slice(0, MAX_REFINED_CHARS);
-  const summary = succeeded
-    ? (input.text.trim().slice(0, MAX_REFINED_CHARS) || 'independent child execution succeeded')
-    : `independent child execution ${input.settlement.state}`;
-  const base = {
+  return {
     taskId: input.assignment.taskId,
     pipelineNodeId: input.assignment.pipelineNodeId,
     agentId: input.agentId,
@@ -519,28 +893,133 @@ function buildExecutionResult(input: {
     attempt: input.assignment.attempt,
     executionEpoch: input.assignment.executionEpoch,
     inputRevision: input.assignment.inputRevision,
-    summary,
-    evidenceRefs,
-    nextAction: succeeded ? ('review' as const) : ('attention' as const),
+    summary: boundedSummary(input.delivery.body),
+    evidenceRefs: [...input.delivery.evidenceRefs, ...acceptedEvidenceRefs(input.events, undefined)],
+    nextAction: 'review',
+    producedArtifactRefs: [input.delivery.asset.ref.locator],
+    producedArtifactDigests: [input.delivery.digest],
+    producedArtifactBodies: [input.delivery.body],
+    status: 'succeeded',
+    // The declared business target is what the assignment promised. The
+    // produced artifact is the immutable asset the child actually wrote.
+    outputRefs: [...input.assignment.expectedOutputRefs],
   };
-  if (succeeded) {
+}
+
+function reviewResult(input: {
+  readonly delivery: ChildDeliveryRecord;
+  readonly assignment: ReviewAssignment;
+  readonly agentId: string;
+  readonly events: readonly AgentEvent[];
+}): ReviewResult {
+  if (input.delivery.judgment === undefined) {
+    throw new Error('a review delivery must carry its business judgment');
+  }
+  return {
+    resultId: `review-result:${input.agentId}:${input.assignment.assignmentId}`,
+    assignmentId: input.assignment.assignmentId,
+    taskId: input.assignment.taskId,
+    workerAgentId: input.assignment.workerAgentId,
+    reviewKind: input.assignment.reviewKind,
+    attempt: input.assignment.attempt,
+    executionEpoch: input.assignment.executionEpoch,
+    inputRevision: input.assignment.inputRevision,
+    acceptanceCriteriaDigest: input.assignment.acceptanceCriteriaDigest,
+    subjectRefs: [...input.assignment.subjectRefs],
+    subjectDigests: [...input.assignment.subjectDigests],
+    status: input.delivery.judgment,
+    findings: input.delivery.findings,
+    evidenceRefs: [...input.delivery.evidenceRefs, ...acceptedEvidenceRefs(input.events, undefined)],
+  };
+}
+
+/**
+ * A real run is only resolved after the caller has closed production, drained
+ * the real producer and settled. `blocked` keeps the primary issue visible;
+ * `returned` carries the real result.
+ */
+type RunResolvedOutcome =
+  | { readonly state: 'returned'; readonly result: WorkResult | ReviewAgentDelivery }
+  | { readonly state: 'blocked'; readonly reason: string };
+
+/**
+ * The success gate. Every one of these must hold:
+ *
+ * 1. the child turn ended normally with an accepted standard end action,
+ * 2. that action cites this child's real delivery,
+ * 3. the complete body is physically readable back and still matches,
+ * 4. the Provider settlement really succeeded,
+ * 5. the producer was drained and the composition closed.
+ *
+ * A Provider finish, a settlement state, a declared target ref or a delivery
+ * without an accepted standard end never produces a candidate.
+ */
+async function resolveRunOutcome(input: {
+  readonly kind: 'execution' | 'review';
+  readonly state: ChildRunState;
+  readonly outcome: ChildRunOutcome;
+  readonly assignment: WorkAssignment;
+  readonly reviewAssignment?: ReviewAssignment;
+  readonly agentId: string;
+  readonly bodyAssets: ChildBodyAssetPort;
+  readonly settlement: ProviderSettlement | undefined;
+  readonly drained: boolean;
+  readonly closed: boolean;
+  readonly now?: () => Date;
+}): Promise<RunResolvedOutcome> {
+  const blocked = (reason: string): RunResolvedOutcome => ({ state: 'blocked', reason });
+  if (input.outcome.state !== 'delivered') return blocked(input.outcome.reason);
+  const command = input.state.acceptedCommand;
+  if (command === undefined) return blocked('the child turn has no accepted standard end action');
+  const delivery = input.state.delivery;
+  if (delivery === undefined) return blocked('the child turn produced no delivery');
+  const cited = new Set(command.deliveryRefs);
+  if (!cited.has(delivery.asset.ref.locator) && !cited.has(delivery.asset.ref.evidenceId.value)) {
+    return blocked('the accepted standard end does not cite this child delivery');
+  }
+  if (!command.resolvedEvidenceRefs.some((ref) => ref.evidenceId.value === delivery.asset.ref.evidenceId.value)) {
+    return blocked('the accepted standard end did not resolve this child delivery asset');
+  }
+  if (input.settlement === undefined) return blocked('the child exposed no Provider settlement');
+  if (input.settlement.state !== 'succeeded') {
+    return blocked(`the child Provider settlement was ${input.settlement.state}`);
+  }
+  if (!input.drained) return blocked('the child producer was not drained');
+  if (!input.closed) return blocked('the child Provider composition was not closed');
+  const readBack = new TextDecoder().decode(await input.bodyAssets.read(delivery.asset));
+  if (readBack !== delivery.body) return blocked('the delivered body does not read back exactly');
+  if (digestOf(readBack) !== delivery.digest) return blocked('the delivered body digest drifted');
+  if (delivery.digest !== digestOf(delivery.body)) return blocked('the delivered body digest does not match its asset');
+  if (input.kind === 'execution') {
     return {
-      ...base,
-      producedArtifactRefs: [target],
-      producedArtifactDigests: [digestOf(body)],
-      producedArtifactBodies: [body],
-      status: 'succeeded',
-      outputRefs: [target],
+      state: 'returned',
+      result: executionResult({
+        delivery,
+        assignment: input.assignment,
+        agentId: input.agentId,
+        events: input.outcome.events,
+      }),
     };
   }
-  const status: WorkResult['status'] = input.settlement.state === 'cancelled' ? 'cancelled' : 'failed';
+  if (input.reviewAssignment === undefined) return blocked('a review resolution needs its real assignment');
   return {
-    ...base,
-    producedArtifactRefs: [],
-    producedArtifactDigests: [],
-    status,
-    outputRefs: [],
-    ...(status === 'failed' ? { failureRef: `child:${input.assignment.assignmentId}:failure` } : {}),
+    state: 'returned',
+    result: {
+      result: reviewResult({
+        delivery,
+        assignment: input.reviewAssignment,
+        agentId: input.agentId,
+        events: input.outcome.events,
+      }),
+      // The complete review body travels with the durable return; it is never
+      // replaced by the status or the findings alone.
+      output: {
+        text: delivery.body,
+        artifactRef: delivery.asset.ref.locator,
+        artifactDigest: delivery.digest,
+      },
+      completedAt: (input.now?.() ?? new Date()).toISOString(),
+    },
   };
 }
 
@@ -548,7 +1027,7 @@ function buildExecutionResult(input: {
 // Configured independent creators
 // ---------------------------------------------------------------------------
 
-function createCompositionCloser(): { hold(composition: AgentProviderComposition): void; close(): Promise<void> } {
+function createCompositionCloser(): { hold(composition: AgentProviderComposition): void; close(): Promise<boolean> } {
   let pending: AgentProviderComposition | undefined;
   let closed = false;
   return {
@@ -556,9 +1035,13 @@ function createCompositionCloser(): { hold(composition: AgentProviderComposition
     async close() {
       const current = pending;
       pending = undefined;
-      if (current === undefined || closed) return;
+      if (current === undefined) return true;
+      if (closed) return true;
       closed = true;
+      // closeAgentProvider throws when the close is not complete, so a
+      // resolved close is a real closed composition.
       await closeAgentProvider(current);
+      return true;
     },
   };
 }
@@ -574,9 +1057,152 @@ function assertAdmittedOperation(input: ConfiguredChildAgentInput): void {
 }
 
 /**
+ * Assembles the child's own tool surface: the delivery action and the standard
+ * end action on top of the admitted tools the binder resolved for this child.
+ * Neither action completes the business; each one records what it really did.
+ */
+function childToolSurface(input: {
+  readonly run: BoundChildRun;
+  readonly state: ChildRunState;
+  readonly invocationId: string;
+  readonly kind: 'execution' | 'review';
+  readonly scope: ScopeRef;
+  readonly incarnation: TaskRuntimeIncarnation;
+  readonly bodyAssets: ChildBodyAssetPort;
+  readonly acceptedEvidence: () => readonly EvidenceRef[];
+}): {
+  readonly toolDefinitions: readonly ProviderToolDefinition[];
+  readonly toolExecution: ProviderToolExecutionPort;
+} {
+  const endExecutor = createStandardTurnEndWireExecutor(
+    input.run.standardEndOwner,
+    createStandardTurnEndExecutor({
+      owner: input.run.standardEndOwner,
+      // The route only records the accepted typed control event. It never
+      // settles, drains or builds a result here.
+      route: (command: StandardTurnEndCommand) => { input.state.acceptedCommand = command; },
+    }),
+  );
+  const delivery = createChildDeliveryExecutor({
+    kind: input.kind,
+    state: input.state,
+    invocationId: input.invocationId,
+    incarnation: input.incarnation,
+    scope: input.scope,
+    bodyAssets: input.bodyAssets,
+    acceptedEvidence: input.acceptedEvidence,
+  });
+  const existingToolIds = new Set(input.run.toolDefinitions.map((tool) => tool.toolId));
+  const additions = [APP_CHILD_DELIVER_TOOL, ADVERTISED_STANDARD_TURN_END_TOOL]
+    .filter((tool) => !existingToolIds.has(tool.toolId));
+  return {
+    toolDefinitions: [...input.run.toolDefinitions, ...additions],
+    toolExecution: {
+      async execute(request) {
+        if (request.call.toolId === APP_CHILD_DELIVER_TOOL.toolId) return delivery.execute(request);
+        if (isStandardTurnEndCall(request.call.toolId)) return endExecutor.execute(request);
+        return input.run.toolExecution.execute(request);
+      },
+    },
+  };
+}
+
+interface ConfiguredChildRunInput {
+  readonly input: ConfiguredChildAgentInput;
+  readonly composition: AgentProviderComposition;
+  readonly closer: { close(): Promise<boolean> };
+  readonly state: ChildRunState;
+  readonly run: BoundChildRun;
+  readonly kind: 'execution' | 'review';
+  readonly scope: ScopeRef;
+  readonly operationId: OperationId;
+  readonly incarnation: TaskRuntimeIncarnation;
+  readonly assignmentId: string;
+  readonly assignment: WorkAssignment;
+  readonly reviewAssignment?: ReviewAssignment;
+  readonly agentId: string;
+  readonly inputRefs: readonly string[];
+  readonly prompt: string;
+  readonly invocationId: string;
+  readonly signal: AbortSignal;
+}
+
+/**
+ * The one place an independent child actually runs. It binds the child's own
+ * run, drives the whole multi-request loop, and only then closes production,
+ * drains the real producer, settles and resolves the candidate. Nothing marks
+ * completion before that point.
+ */
+async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunResolvedOutcome> {
+  const events: AgentEvent[] = [];
+  const acceptedEvidence = (): readonly EvidenceRef[] => acceptedEvidenceRefs(events, undefined);
+  const surface = childToolSurface({
+    run: input.run,
+    state: input.state,
+    invocationId: input.invocationId,
+    kind: input.kind,
+    scope: input.scope,
+    incarnation: input.incarnation,
+    bodyAssets: input.input.bodyAssets,
+    acceptedEvidence,
+  });
+  const outcome = await runIndependentChild({
+    composition: input.composition,
+    run: { ...input.run, ...surface },
+    state: input.state,
+    collect: (event) => events.push(event),
+    incarnation: input.incarnation,
+    operationId: input.operationId,
+    assignmentId: input.assignmentId,
+    scope: input.scope,
+    inputRefs: [...input.inputRefs],
+    payload: { prompt: input.prompt },
+    signal: input.signal,
+    maxRequests: MAX_CHILD_REQUESTS,
+    ...(input.input.now === undefined ? {} : { now: input.input.now }),
+  });
+  const driver = input.state.driver;
+  if (driver === undefined) return { state: 'blocked', reason: 'the child run never created its own driver' };
+  // The accepted control event is acted on here, outside any tool executor, so
+  // no executor ever waits for its own drain.
+  let drained = false;
+  let settlement: ProviderSettlement | undefined;
+  let closed = false;
+  try {
+    if (outcome.state === 'delivered') {
+      await driver.closeProductionAndDrain({
+        execution: {
+          runtimeId: input.incarnation.runtimeId,
+          executionEpoch: input.incarnation.executionEpoch,
+        },
+        boundaryId: `child-close:${input.operationId.value}`,
+      });
+      drained = true;
+    }
+    await driver.settle({ runtimeId: input.incarnation.runtimeId, executionEpoch: input.incarnation.executionEpoch });
+    settlement = driver.settlement();
+  } finally {
+    closed = await input.closer.close();
+  }
+  return resolveRunOutcome({
+    kind: input.kind,
+    state: input.state,
+    outcome,
+    assignment: input.assignment,
+    ...(input.reviewAssignment === undefined ? {} : { reviewAssignment: input.reviewAssignment }),
+    agentId: input.agentId,
+    bodyAssets: input.input.bodyAssets,
+    settlement,
+    drained,
+    closed,
+    ...(input.input.now === undefined ? {} : { now: input.input.now }),
+  });
+}
+
+/**
  * Configured execution creator. `createInstance` synchronously returns the real
- * incarnation handle and performs no Provider request; `execute` prepares the
- * exact selected Provider and constructs the fresh independent driver.
+ * incarnation handle and performs no Provider request; `execute` binds this
+ * child's own run and runs the real delivery loop.
  */
 export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput): ExecutionAgentPort {
   const prepare = async (): Promise<AgentProviderComposition> => input.prepareAgentProvider({
@@ -587,41 +1213,61 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
     roleId: input.selected.roleId,
     createInstance(create) {
       assertAdmittedOperation(input);
-      const composition = createCompositionCloser();
+      const closer = createCompositionCloser();
       return {
         incarnation: create.incarnation,
-        async release() { await composition.close(); },
-        async dispose() { await composition.close(); },
+        async release() { await closer.close(); },
+        async dispose() { await closer.close(); },
         async execute(execution: ExecutionAgentInput): Promise<WorkResult> {
-          const selected = await prepare();
-          composition.hold(selected);
-          try {
-            const operationId = childOperationId(input.call.invocationId);
-            const scope: ScopeRef = { ...execution.scope, operationId };
-            const { events, settlement } = await runIndependentChildModel({
-              port: selected.port,
-              binding: selected.binding,
-              runtimeId: create.incarnation.runtimeId,
-              taskId: create.incarnation.taskId,
-              operationId,
-              executionEpoch: create.incarnation.executionEpoch,
-              assignmentId: create.incarnation.assignmentId,
-              scope,
-              inputRefs: [...execution.assignment.targetRefs, `child:${input.call.invocationId}`],
-              payload: { prompt: executionPrompt(execution.assignment) },
-              ...(input.now === undefined ? {} : { now: input.now }),
-            });
-            return buildExecutionResult({
-              assignment: execution.assignment,
+          const composition = await prepare();
+          closer.hold(composition);
+          const operationId = childOperationId(input.call.invocationId);
+          const scope: ScopeRef = { ...execution.scope, operationId };
+          const run = await input.bindChildRun({
+            call: input.call,
+            operation: input.operation,
+            incarnation: create.incarnation,
+            scope,
+            request: { kind: 'execution', input: execution },
+          });
+          const resolved = await runConfiguredChild({
+            input,
+            composition,
+            closer,
+            state: {},
+            run,
+            kind: 'execution',
+            scope,
+            operationId,
+            incarnation: create.incarnation,
+            assignmentId: create.incarnation.assignmentId,
+            assignment: execution.assignment,
+            agentId: execution.agentId,
+            invocationId: input.call.invocationId,
+            inputRefs: [...execution.assignment.targetRefs, `child:${input.call.invocationId}`],
+            prompt: executionPrompt(execution.assignment),
+            signal: execution.signal ?? new AbortController().signal,
+          });
+          if (resolved.state === 'blocked') {
+            return {
+              taskId: execution.assignment.taskId,
+              pipelineNodeId: execution.assignment.pipelineNodeId,
               agentId: execution.agentId,
-              text: outputText(events),
-              events,
-              settlement,
-              scope,
-            });
-          } finally {
-            await composition.close();
+              assignmentId: execution.assignment.assignmentId,
+              attempt: execution.assignment.attempt,
+              executionEpoch: execution.assignment.executionEpoch,
+              inputRevision: execution.assignment.inputRevision,
+              summary: boundedSummary(resolved.reason),
+              evidenceRefs: [],
+              nextAction: 'attention',
+              producedArtifactRefs: [],
+              producedArtifactDigests: [],
+              status: 'failed',
+              outputRefs: [],
+              failureRef: `child:${execution.assignment.assignmentId}:no-delivery`,
+            };
           }
+          return resolved.result as WorkResult;
         },
       };
     },
@@ -632,9 +1278,9 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
 }
 
 /**
- * Configured review creator. `createInstance` synchronously returns the real
- * incarnation handle and performs no Provider request; `review` prepares the
- * exact selected Provider and constructs the fresh independent driver.
+ * Configured review creator. It reads the real, complete subject bodies and
+ * criteria, runs on the selected independent context and model, and requires
+ * the same legal delivery and standard end before any review result exists.
  */
 export function createConfiguredReviewAgent(input: ConfiguredChildAgentInput): ReviewAgentPort {
   const prepare = async (): Promise<AgentProviderComposition> => input.prepareAgentProvider({
@@ -645,57 +1291,65 @@ export function createConfiguredReviewAgent(input: ConfiguredChildAgentInput): R
     roleId: input.selected.roleId,
     createInstance(create) {
       assertAdmittedOperation(input);
-      const composition = createCompositionCloser();
+      const closer = createCompositionCloser();
       return {
         incarnation: create.incarnation,
-        async release() { await composition.close(); },
-        async dispose() { await composition.close(); },
+        async release() { await closer.close(); },
+        async dispose() { await closer.close(); },
         async review(review: ReviewAgentInput): Promise<ReviewAgentDelivery> {
-          const selected = await prepare();
-          composition.hold(selected);
-          try {
-            const operationId = childOperationId(input.call.invocationId);
-            const scope: ScopeRef = { ...review.scope, operationId };
-            const { events, settlement } = await runIndependentChildModel({
-              port: selected.port,
-              binding: selected.binding,
-              runtimeId: create.incarnation.runtimeId,
-              taskId: create.incarnation.taskId,
-              operationId,
-              executionEpoch: create.incarnation.executionEpoch,
-              assignmentId: create.incarnation.assignmentId,
-              scope,
-              inputRefs: [...review.reviewAssignment.subjectRefs, `child:${input.call.invocationId}`],
-              payload: { prompt: reviewPrompt(review.reviewAssignment, review.reviewMaterial) },
-              ...(input.now === undefined ? {} : { now: input.now }),
-            });
-            const text = outputText(events);
-            const assignment = review.reviewAssignment;
-            const result: ReviewResult = {
-              resultId: `review-result:${create.incarnation.agentInstanceId}`,
-              assignmentId: assignment.assignmentId,
-              taskId: assignment.taskId,
-              workerAgentId: assignment.workerAgentId,
-              reviewKind: assignment.reviewKind,
-              attempt: assignment.attempt,
-              executionEpoch: assignment.executionEpoch,
-              inputRevision: assignment.inputRevision,
-              acceptanceCriteriaDigest: assignment.acceptanceCriteriaDigest,
-              subjectRefs: [...assignment.subjectRefs],
-              subjectDigests: [...assignment.subjectDigests],
-              status: reviewStatus(text, settlement),
-              findings: [],
-              evidenceRefs: uniqueEvidence(events, settlement, scope),
+          const composition = await prepare();
+          closer.hold(composition);
+          const operationId = childOperationId(input.call.invocationId);
+          const scope: ScopeRef = { ...review.scope, operationId };
+          const run = await input.bindChildRun({
+            call: input.call,
+            operation: input.operation,
+            incarnation: create.incarnation,
+            scope,
+            request: { kind: 'review', input: review },
+          });
+          const resolved = await runConfiguredChild({
+            input,
+            composition,
+            closer,
+            state: {},
+            run,
+            kind: 'review',
+            scope,
+            operationId,
+            incarnation: create.incarnation,
+            assignmentId: create.incarnation.assignmentId,
+            assignment: review.workerAssignment,
+            reviewAssignment: review.reviewAssignment,
+            agentId: create.incarnation.agentInstanceId,
+            invocationId: input.call.invocationId,
+            inputRefs: [...review.reviewAssignment.subjectRefs, `child:${input.call.invocationId}`],
+            prompt: reviewPrompt(review.reviewAssignment, assertReviewMaterial(review.reviewMaterial)),
+            signal: review.signal ?? new AbortController().signal,
+          });
+          if (resolved.state === 'blocked') {
+            return {
+              result: {
+                resultId: `review-result:${create.incarnation.agentInstanceId}:blocked`,
+                assignmentId: review.reviewAssignment.assignmentId,
+                taskId: review.reviewAssignment.taskId,
+                workerAgentId: review.reviewAssignment.workerAgentId,
+                reviewKind: review.reviewAssignment.reviewKind,
+                attempt: review.reviewAssignment.attempt,
+                executionEpoch: review.reviewAssignment.executionEpoch,
+                inputRevision: review.reviewAssignment.inputRevision,
+                acceptanceCriteriaDigest: review.reviewAssignment.acceptanceCriteriaDigest,
+                subjectRefs: [...review.reviewAssignment.subjectRefs],
+                subjectDigests: [...review.reviewAssignment.subjectDigests],
+                status: 'inconclusive',
+                findings: [],
+                evidenceRefs: [],
+              },
+              output: { text: boundedSummary(resolved.reason), artifactRef: null, artifactDigest: null },
+              completedAt: (input.now?.() ?? new Date()).toISOString(),
             };
-            const output: ReviewOutput = {
-              text: text.slice(0, MAX_REFINED_CHARS),
-              artifactRef: null,
-              artifactDigest: null,
-            };
-            return { result, output, completedAt: (input.now?.() ?? new Date()).toISOString() };
-          } finally {
-            await composition.close();
           }
+          return resolved.result as ReviewAgentDelivery;
         },
       };
     },
@@ -776,6 +1430,14 @@ function encodeRefinedPayload(input: ChildCallReturnInput): Uint8Array {
         status: input.result.status,
         findings: input.result.findings,
         evidenceRefs: input.result.evidenceRefs,
+        // The complete review body survives as its own durable asset; the
+        // evidence locator and digest point at it. A cold read resolves the
+        // full review, never only the status and findings.
+        artifactRefs: input.result.evidenceRefs.map((ref) => ({
+          evidenceId: ref.evidenceId.value,
+          locator: ref.locator,
+          ...(ref.digest === undefined ? {} : { digest: ref.digest }),
+        })),
       };
   return new TextEncoder().encode(JSON.stringify(payload));
 }
@@ -787,9 +1449,13 @@ function buildExecutionAssignment(input: {
   readonly inputRevision: number;
   readonly executionEpoch: number;
   readonly requiredCapabilities: readonly string[];
+  readonly bodyAssetTarget: string;
 }): WorkAssignment {
   const assignmentId = `child-${input.childOperationId.value}`;
-  const objective = input.request.instructions;
+  // The model's declared target stays a business requirement in the dispatch.
+  // The physical artifact ref is the real immutable asset target bound below,
+  // so a declared target alone never reads as a produced artifact.
+  const objective = `${input.request.instructions}\nBusiness target: ${input.request.target}`;
   const criteria = {
     objective,
     successCriteria: [...input.request.successCriteria],
@@ -804,8 +1470,8 @@ function buildExecutionAssignment(input: {
     executionEpoch: input.executionEpoch,
     inputRevision: input.inputRevision,
     objective,
-    targetRefs: [input.request.target],
-    expectedOutputRefs: [input.request.target],
+    targetRefs: [input.bodyAssetTarget],
+    expectedOutputRefs: [input.bodyAssetTarget],
     acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     successCriteria: criteria.successCriteria,
     failureCriteria: criteria.failureCriteria,
@@ -903,8 +1569,8 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
     };
   }
 
-  function boundedEvidence(scope: ScopeRef, label: string, refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
-    return refs.length > 0 ? refs : [scopedEvidence(scope, label)];
+  function boundedEvidence(refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
+    return refs;
   }
 
   function returnResult(delivery: AcceptedChildDelivery, scope: ScopeRef): ProviderToolExecutionResult {
@@ -919,7 +1585,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           outputRefs: [...delivery.result.outputRefs],
         }),
         outputRefs: [...delivery.result.outputRefs],
-        evidenceRefs: boundedEvidence(scope, 'child-return', delivery.result.evidenceRefs),
+        evidenceRefs: boundedEvidence(delivery.result.evidenceRefs),
         status: 'succeeded',
       };
     }
@@ -932,7 +1598,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         findings: delivery.result.findings.length,
       }),
       outputRefs: [`child:${delivery.invocationId}`],
-      evidenceRefs: boundedEvidence(scope, 'child-review-return', delivery.result.evidenceRefs),
+      evidenceRefs: boundedEvidence(delivery.result.evidenceRefs),
       status: 'succeeded',
     };
   }
@@ -953,7 +1619,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           outputRefs: [...result.result.outputRefs],
         }),
         outputRefs: [...result.result.outputRefs],
-        evidenceRefs: boundedEvidence(scope, 'child-return', result.result.evidenceRefs),
+        evidenceRefs: boundedEvidence(result.result.evidenceRefs),
         status: 'succeeded',
       };
     }
@@ -968,7 +1634,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           findings: result.delivery.result.findings.length,
         }),
         outputRefs: [`child:${result.invocationId}`],
-        evidenceRefs: boundedEvidence(scope, 'child-review-return', result.delivery.result.evidenceRefs),
+        evidenceRefs: boundedEvidence(result.delivery.result.evidenceRefs),
         status: 'succeeded',
       };
     }
@@ -981,19 +1647,64 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         nextAction: issue.nextAction,
       }),
       outputRefs: [],
-      evidenceRefs: boundedEvidence(scope, 'child-held', issue.evidenceRefs),
+      evidenceRefs: boundedEvidence(issue.evidenceRefs),
       status: 'blocked',
     };
   }
 
   async function resolveReviewSource(
     subjectInvocationId: string,
-  ): Promise<{ readonly worker: WorkAssignment; readonly result: WorkResult }> {
+    scope: ScopeRef,
+  ): Promise<{ readonly worker: WorkAssignment; readonly result: WorkResult; readonly bodies: readonly string[] }> {
     const delivery = findDelivery(parent, subjectInvocationId);
     if (!delivery || delivery.kind !== 'execution') {
       throw new Error(`review subject invocation ${subjectInvocationId} has no retained execution delivery`);
     }
-    return { worker: delivery.assignment, result: delivery.result };
+    // The subject under review is the delivery's own immutable asset, read back
+    // from the filesystem. A carried copy is accepted only when it still hashes
+    // to the persisted digest; otherwise the durable asset is the authority.
+    const digests = delivery.result.producedArtifactDigests;
+    const bodies = await Promise.all(delivery.result.producedArtifactRefs.map(async (locator, index) => {
+      const digest = digests[index];
+      const carried = delivery.result.producedArtifactBodies?.[index];
+      if (carried !== undefined && digest !== undefined && digestOf(carried) === digest) return carried;
+      const bytes = await input.bodyAssets.read(rawAssetFromLocator(locator, scope, digest));
+      const body = new TextDecoder().decode(bytes);
+      if (digest !== undefined && digestOf(body) !== digest) {
+        throw new Error(`review subject ${locator} does not read back to its recorded digest`);
+      }
+      return body;
+    }));
+    return { worker: delivery.assignment, result: delivery.result, bodies };
+  }
+
+  /** Rebuilds the immutable asset descriptor for a durable child delivery locator. */
+  function rawAssetFromLocator(locator: string, scope: ScopeRef, digest?: string): RawAsset {
+    const assetId = locator.split('/').filter(Boolean).at(-1) ?? locator;
+    return {
+      ref: {
+        evidenceId: id('evidence', assetId),
+        kind: 'execution',
+        source: OWNER,
+        locator,
+        ...(digest === undefined ? {} : { digest }),
+        scope,
+      },
+      view: { kind: 'utf8-text' },
+    };
+  }
+
+  /**
+   * The one authoritative subject body: the immutable asset the execution child
+   * actually wrote. The producer reads it through the child body asset port.
+   */
+  async function readSubjectBody(
+    source: { readonly worker: WorkAssignment; readonly result: WorkResult; readonly bodies: readonly string[] },
+    index: number,
+  ): Promise<string> {
+    const carried = source.bodies[index];
+    if (carried !== undefined && carried !== '') return carried;
+    throw new Error('review subject body is not readable from its durable asset');
   }
 
   async function dispatchCall(request: Parameters<ProviderToolExecutionPort['execute']>[0]): Promise<ProviderToolExecutionResult> {
@@ -1044,7 +1755,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           };
         }
         if (delivery.kind === 'review' && existing.postReviewCheckpointRef === undefined) {
-          const source = await resolveReviewSource(parsed.kind === 'review' ? parsed.subjectInvocationId : '');
+          const source = await resolveReviewSource(parsed.kind === 'review' ? parsed.subjectInvocationId : '', request.scope);
           await input.checkpoints.post({
             call,
             returned: {
@@ -1068,11 +1779,18 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           inputRevision: input.parentAssignment.inputRevision,
           executionEpoch: parentExecutionEpoch,
           requiredCapabilities: input.parentAssignment.requiredCapabilities,
+          bodyAssetTarget: input.bodyAssets.target({
+            scope: request.scope,
+            invocationId,
+            kind: 'execution',
+          }),
         });
         const executionAgent = createConfiguredExecutionAgent({
           call,
           operation: receipt,
           selected,
+          bodyAssets: input.bodyAssets,
+          bindChildRun: input.bindChildRun,
           prepareAgentProvider: prepareProvider,
           ...(input.now === undefined ? {} : { now: input.now }),
         });
@@ -1089,11 +1807,15 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         return callResult(result, request.scope);
       }
 
-      const source = await resolveReviewSource(parsed.subjectInvocationId);
-      const subjects = source.worker.targetRefs.map((ref, index) => ({
+      const source = await resolveReviewSource(parsed.subjectInvocationId, request.scope);
+      // The reviewer must see the complete subject body. The authoritative copy
+      // is the execution delivery's own immutable asset, read back here; a
+      // body that cannot be read rejects instead of degrading into a
+      // digest-only review.
+      const subjects = await Promise.all(source.worker.targetRefs.map(async (ref, index) => ({
         ref,
-        body: source.result.producedArtifactBodies?.[index] ?? '',
-      }));
+        body: await readSubjectBody(source, index),
+      })));
       const reviewMaterial = resolveReviewMaterial({
         workerAssignment: source.worker,
         workerResult: source.result,
@@ -1111,6 +1833,8 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         call,
         operation: receipt,
         selected,
+        bodyAssets: input.bodyAssets,
+        bindChildRun: input.bindChildRun,
         prepareAgentProvider: prepareProvider,
         ...(input.now === undefined ? {} : { now: input.now }),
       });

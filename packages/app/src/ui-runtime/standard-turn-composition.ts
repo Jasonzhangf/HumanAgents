@@ -1,22 +1,15 @@
 import type { ProviderToolDefinition } from '../../../contracts/src/index.js';
-import { STANDARD_TURN_END_TOOL_ID } from '../../../contracts/src/standard-turn-end.js';
+import { isStandardTurnEndToolId, STANDARD_TURN_END_WIRE_TOOL_ID } from '../../../contracts/src/standard-turn-end.js';
 import { STANDARD_TURN_END_TOOL } from './standard-turn-control.js';
 import { StandardTurnEndError, type StandardTurnEndOwnerPort } from './standard-turn-control.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/agent-driver.js';
 import type { BusinessPayload, TurnCloseSummary } from '../../../contracts/src/index.js';
 
 /**
- * Wire-legal advertised identity of the bound standard-turn end action.
- *
- * The canonical control event identity is the frozen
- * `STANDARD_TURN_END_TOOL_ID` (`humanagent.turn.end`): it is what the accepted
- * `StandardTurnEndCommand` and its executor route carry. The Provider Responses
- * codec can only declare and decode function names matching
- * `[A-Za-z0-9_-]`, so the same action is advertised to the model under this
- * transport-legal id. Both ids denote exactly one action; there is no second
- * end action, no completion flag and no separate Task schema.
+ * Re-exported from the shared standard-end contract. Both ids denote exactly
+ * one action; there is no second end action, no completion flag and no
+ * separate Task schema.
  */
-export const STANDARD_TURN_END_WIRE_TOOL_ID = 'humanagent_turn_end';
 
 /** The advertised Provider tool surface for the bound standard-turn end action. */
 export const ADVERTISED_STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
@@ -32,7 +25,8 @@ export const ADVERTISED_STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
           required: ['text', 'evidenceRefs'], additionalProperties: false,
         }]),
       ), required: ['goal', 'actions', 'result', 'expectedNextStep'], additionalProperties: false },
-      deliveryRefs: { type: 'array', items: { type: 'string' }, minItems: 1 },
+      deliveryText: { type: 'string' },
+      deliveryRefs: { type: 'array', items: { type: 'string' } },
     },
     required: ['summary', 'deliveryRefs'], additionalProperties: false,
   },
@@ -62,13 +56,16 @@ export function createStandardTurnEndWireExecutor(owner: StandardTurnEndOwnerPor
         summary[key] = { text: section.text,
           evidenceRefs: await owner.resolveDelivery({ identity, deliveryRefs: section.evidenceRefs as string[] }) };
       }
+      const rawArguments = request.call.arguments as Record<string, unknown>;
+      const deliveryText = rawArguments.deliveryText;
+      if (deliveryText !== undefined && typeof deliveryText !== 'string') {
+        throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end deliveryText must be a string when present');
+      }
       return control.execute({ ...request, call: { ...request.call,
-        arguments: { ...request.call.arguments, summary } as unknown as BusinessPayload } });
+        arguments: { ...request.call.arguments, summary,
+          ...(deliveryText === undefined ? {} : { deliveryText }) } as unknown as BusinessPayload } });
     },
   };
 }
 
-/** True for the advertised Provider tool id of the bound standard-turn end action. */
-export function isStandardTurnEndCall(toolId: string): boolean {
-  return toolId === STANDARD_TURN_END_WIRE_TOOL_ID;
-}
+export { isStandardTurnEndToolId as isStandardTurnEndCall, STANDARD_TURN_END_WIRE_TOOL_ID };

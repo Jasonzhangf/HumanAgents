@@ -867,9 +867,11 @@ async function runNativeTask(input: {
     feedbackPublisherId: 'serve-orchestration-publisher',
     ...orchestrationPorts,
   });
+  const canonicalCheckpointStoreFor = (_taskId: TaskId, _cycleId: CycleId) =>
+    new ServiceExecutionCheckpointStore(controlJournalPath, journal, now);
   try {
     const preparation = createTaskExecutionPreparation({
-      principal,
+      principalOwner: principal.owner,
       composition: {
         journal,
         filePath: controlJournalPath,
@@ -894,8 +896,11 @@ async function runNativeTask(input: {
         // Same canonical native checkpoint owner as the UI-runtime index: the
         // public-output checkpoint store commits into the shared control Organ
         // Journal, not a per-task legacy file store.
-        checkpointStoreFor: (_taskId: TaskId, _cycleId: CycleId) =>
-          new ServiceExecutionCheckpointStore(controlJournalPath, journal, now),
+        checkpointStoreFor: canonicalCheckpointStoreFor,
+        // The public-output producer resolves its store from the same factory as
+        // checkpoints and the public GET, so a committed delivery lands on the
+        // one canonical `task-control.jsonl` instead of a parallel journal.
+        publicOutputStoreFor: canonicalCheckpointStoreFor,
         attentionPort: nativeAttentionPort(),
         createTaskAssembly: serveRuntime.createTaskAssembly,
       },

@@ -1,9 +1,13 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import type {
   Checkpoint,
+  CycleId,
   ScopeRef,
+  TaskId,
 } from '../../../contracts/src/index.js';
+import type { RuntimeMode } from '../../../ui/contracts/runtime.js';
 import type {
   CheckpointAppendReceipt,
   CheckpointAppendRequest,
@@ -29,6 +33,13 @@ import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
 import { createJsonlCheckpointJournal } from '../checkpoint-journal.js';
+import type {
+  PublicOutputBinding,
+  PublicOutputCandidate,
+  PublicOutputCommitRef,
+  PublicOutputJournalPort,
+  PublicOutputPublication,
+} from '../../../contracts/src/semantic-observation.js';
 import {
   toolExecutionFactIntegrityError,
   validatePersistedToolExecutionFact,
@@ -40,6 +51,67 @@ import {
 // runtime server to reconstruct tasks, operation event streams, and counters
 // after a process restart without making the browser read raw runtime state.
 export type UiRuntimeJournalRecord = RuntimeTaskJournalRecord;
+
+/**
+ * Canonical UI runtime checkpoint layout under one project's control root:
+ * `<project.checkpointsRoot>/ui-runtime/<mode>/`. The serve entry, the durable
+ * reader and the tests all derive paths from these helpers, so a project
+ * identity can never be relocated by a second path calculator.
+ */
+export function uiRuntimeCheckpointRoot(projectCheckpointsRoot: string): string {
+  return join(projectCheckpointsRoot, 'ui-runtime');
+}
+
+export function uiRuntimeModeRoot(projectCheckpointsRoot: string, mode: RuntimeMode): string {
+  return join(uiRuntimeCheckpointRoot(projectCheckpointsRoot), mode);
+}
+
+export function uiRuntimeJournalPath(projectCheckpointsRoot: string, mode: RuntimeMode): string {
+  return join(uiRuntimeModeRoot(projectCheckpointsRoot, mode), 'ui-runtime-journal.jsonl');
+}
+
+export function uiRuntimeTaskCheckpointPath(
+  projectCheckpointsRoot: string,
+  mode: RuntimeMode,
+  taskId: TaskId,
+  cycleId: CycleId,
+): string {
+  return join(uiRuntimeModeRoot(projectCheckpointsRoot, mode), `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
+}
+
+export interface DurableJournalReadFailure {
+  readonly code: string;
+  readonly ownerId: string;
+  readonly message: string;
+  readonly nextAction: string;
+}
+
+export interface DurableJournalReadResult {
+  readonly records: readonly UiRuntimeJournalRecord[];
+  readonly failure?: DurableJournalReadFailure;
+}
+
+/**
+ * Reads one project/mode task Journal without lifecycle. A missing file is a
+ * legal "no saved task" state; a corrupt file returns an explicit failure so a
+ * read model can never turn corruption into an empty project.
+ */
+export function readUiRuntimeTaskJournal(projectCheckpointsRoot: string, mode: RuntimeMode): DurableJournalReadResult {
+  const filePath = uiRuntimeJournalPath(projectCheckpointsRoot, mode);
+  try {
+    return { records: new UiRuntimeJournal(filePath).replay() };
+  } catch (error) {
+    return {
+      records: [],
+      failure: {
+        code: 'journal.corrupt',
+        ownerId: 'humanagent.app.ui-runtime',
+        message: error instanceof Error ? error.message : String(error),
+        nextAction: 'inspect the UI runtime journal for this project and mode before reading it',
+      },
+    };
+  }
+}
 
 interface JournalValidationContext {
   readonly operationIdentities: Map<string, ToolExecutionFactOuterIdentity>;
@@ -478,7 +550,72 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
 // File-backed checkpoint store. Wraps the authoritative JsonlOrganJournal adapter
 // (packages/adapters/jsonl) so checkpoint persistence and link validation stay in
 // their single owner; the UI runtime only assembles the port.
-export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCommitPort {
+/**
+ * Payload of one durable public-output commit. It records only the public
+ * content fact; pending/retry/unknown control truth never enters this payload.
+ */
+interface PublicOutputPayload {
+  readonly type: 'public-output.committed';
+  readonly binding: PublicOutputBinding;
+  readonly sourceId: string;
+  readonly text: string;
+}
+
+/**
+ * Deterministic commit identity: `public-output:<sha256(canonical binding + sourceId)>`.
+ * The text is deliberately excluded so a same-identity/different-text retry is
+ * rejected by the existing Journal conflict owner instead of silently diverging.
+ */
+function publicOutputCommitId(candidate: PublicOutputCandidate): string {
+  const binding = candidate.binding;
+  const identity = JSON.stringify({
+    scope: {
+      organId: { scope: binding.scope.organId.scope, value: binding.scope.organId.value },
+      taskId: binding.scope.taskId ? { scope: binding.scope.taskId.scope, value: binding.scope.taskId.value } : null,
+      cycleId: binding.scope.cycleId ? { scope: binding.scope.cycleId.scope, value: binding.scope.cycleId.value } : null,
+      operationId: binding.scope.operationId ? { scope: binding.scope.operationId.scope, value: binding.scope.operationId.value } : null,
+    },
+    executionEpoch: binding.executionEpoch,
+    harnessTurnId: binding.harnessTurnId ?? null,
+    providerTurnId: binding.providerTurnId ?? null,
+    requestId: binding.requestId ?? null,
+    sourceId: candidate.sourceId,
+  });
+  return `public-output:${createHash('sha256').update(identity).digest('hex')}`;
+}
+
+/** Public identity match: scope, executionEpoch and the actually reported Harness turn only. */
+function publicOutputBindingMatches(candidate: PublicOutputBinding, requested: PublicOutputBinding): boolean {
+  return sameScopedId(candidate.scope.organId, requested.scope.organId)
+    && sameScopedId(candidate.scope.taskId, requested.scope.taskId)
+    && sameScopedId(candidate.scope.cycleId, requested.scope.cycleId)
+    && sameScopedId(candidate.scope.operationId, requested.scope.operationId)
+    && candidate.executionEpoch === requested.executionEpoch
+    && candidate.harnessTurnId === requested.harnessTurnId;
+}
+
+function readPublicOutputPayload(record: import('../../../adapters/jsonl/src/index.js').JournalRecord): PublicOutputPayload | undefined {
+  if (record.kind !== 'event') return undefined;
+  const payload = record.payload;
+  if (!payload || payload.type !== 'public-output.committed') return undefined;
+  return payload as unknown as PublicOutputPayload;
+}
+
+function publicOutputRefFromRecord(record: import('../../../adapters/jsonl/src/index.js').JournalRecord): PublicOutputCommitRef {
+  const payload = readPublicOutputPayload(record);
+  if (!payload || record.commitId === undefined) {
+    throw new Error('public output commit read back an unexpected journal record');
+  }
+  return {
+    binding: payload.binding,
+    sourceId: payload.sourceId,
+    commitId: record.commitId,
+    journalSeq: record.seq,
+    recordDigest: record.recordDigest,
+  };
+}
+
+export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCommitPort, PublicOutputJournalPort {
   constructor(private readonly filePath: string) {}
 
   async verify(_scope: ScopeRef): Promise<CheckpointChainVerification> {
@@ -582,6 +719,67 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
 
   private checkpointPort(): CheckpointJournalPort {
     return createJsonlCheckpointJournal({ filePath: this.filePath });
+  }
+
+  /**
+   * Commits one accepted public-output candidate onto the SAME task/cycle Organ
+   * Journal as checkpoints. Recovery first reads the exact commit id back; a
+   * present record reuses its original ref and a missing one appends. The append
+   * is idempotent through the adapter's own commit-id handling, and the exact
+   * read-back before returning keeps seq/digest tied to the durable record.
+   */
+  async commitPublicOutput(candidate: PublicOutputCandidate): Promise<PublicOutputCommitRef> {
+    const journal = this.journal();
+    const commitId = publicOutputCommitId(candidate);
+    const existing = await journal.findByCommitId(commitId);
+    if (existing) return publicOutputRefFromRecord(existing);
+    const record = await journal.append({
+      commitId,
+      kind: 'event',
+      scope: candidate.binding.scope,
+      payload: {
+        type: 'public-output.committed',
+        binding: candidate.binding,
+        sourceId: candidate.sourceId,
+        text: candidate.text,
+      },
+    });
+    const readback = await journal.findByCommitId(commitId);
+    if (!readback || readback.seq !== record.seq || readback.recordDigest !== record.recordDigest) {
+      throw new Error(`public output commit ${commitId} could not be read back exactly`);
+    }
+    return publicOutputRefFromRecord(readback);
+  }
+
+  /**
+   * Reads the committed public publication for one binding by replaying the
+   * same Organ Journal. Only records whose binding matches are returned, ordered
+   * by Journal seq; the watermark is the last matching record's seq.
+   */
+  async readPublicOutputs(binding: PublicOutputBinding): Promise<PublicOutputPublication> {
+    const records = await this.journal().replay();
+    const commits: { readonly ref: PublicOutputCommitRef; readonly text: string }[] = [];
+    for (const record of records) {
+      const payload = readPublicOutputPayload(record);
+      if (!payload || !publicOutputBindingMatches(payload.binding, binding)) continue;
+      commits.push({
+        ref: {
+          binding: payload.binding,
+          sourceId: payload.sourceId,
+          commitId: record.commitId!,
+          journalSeq: record.seq,
+          recordDigest: record.recordDigest,
+        },
+        text: payload.text,
+      });
+    }
+    commits.sort((left, right) => left.ref.journalSeq - right.ref.journalSeq);
+    const last = commits.at(-1);
+    return {
+      state: 'committed',
+      commits,
+      ...(last === undefined ? {} : { publicCommitWatermark: last.ref.journalSeq }),
+    };
   }
 
   private journal(): JsonlOrganJournal {

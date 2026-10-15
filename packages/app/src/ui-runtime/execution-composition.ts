@@ -30,7 +30,8 @@ import { closeAgentProvider, type AgentProviderComposition } from '../agent-driv
 import type { RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/agent-driver.js';
-import type { AdmittedTurnIdentity, EvidenceRef, ProviderToolDefinition, WorkAssignment } from '../../../contracts/src/index.js';
+import type { AcceptedRawFact, AdmittedTurnIdentity, CompletionReadInput, EvidenceRef,
+  ProviderToolDefinition, RawAsset, WorkAssignment } from '../../../contracts/src/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { createResponsesFileToolExecutor } from '../provider-tool-execution.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
@@ -53,7 +54,6 @@ import {
 } from './standard-turn-control.js';
 import { ADVERTISED_STANDARD_TURN_END_TOOL, createStandardTurnEndWireExecutor, isStandardTurnEndCall } from './standard-turn-composition.js';
 import type { StandardTurnEndCommand } from '../../../contracts/src/standard-turn-end.js';
-import type { VerifiedProductPrincipal } from './access-control.js';
 import { createExecutionOwnerReaders } from './execution-owner-facts.js';
 import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
 import type { RuntimeTaskCurrentStatePort, RuntimeTaskCurrentStateFactsPort } from '../../../runtime/src/ui-runtime/current-state.js';
@@ -74,6 +74,8 @@ import { createPublishedTaskPlanRevision, assertTaskPlanRevisionRetryMatches,
   validateTaskPlanRevisionTransition } from '../../../core/src/task-plan-revision.js';
 import { readReviewedMilestoneBoundary } from '../../../runtime/src/agent-loop/reviewed-milestone-boundary.js';
 import { distinctReviewCommitRefs, sameReviewCommitRefs, turnBoundaryRecordRefs } from '../../../runtime/src/checkpoints/closure.js';
+import { readStandardTurnDelivery,
+  type StandardTurnDeliveryReadback } from '../../../runtime/src/ui-runtime/standard-turn-delivery.js';
 
 /** Public-output and checkpoints share the same physical native Journal. */
 export class ServiceExecutionCheckpointStore extends FileCheckpointStore {
@@ -104,6 +106,10 @@ function missing(message: string): never {
 }
 
 type StandardTurnLifecycle = NonNullable<RuntimeExecutionDriver['standardTurn']>;
+/** App-composed native standard-turn lifecycle with the real delivery reader. */
+type NativeStandardTurnLifecycle = StandardTurnLifecycle & {
+  readonly readDelivery: () => Promise<StandardTurnDeliveryReadback>;
+};
 type HistoricalRestoreBinding = {
   readonly binding: HistoricalTurnBinding;
   readonly segmentSource?: NativeSegmentSaveSourceV2;
@@ -120,7 +126,7 @@ export interface StandardTurnBoundaryLifecycle {
 
 /** Shared physical owner assembly. Provider selection occurs only after the durable A2 release edge. */
 export function createDefaultExecutionComposition(input: {
-  readonly principal: VerifiedProductPrincipal;
+  readonly principalOwner: string;
   readonly journal: JsonlOrganJournal;
   readonly filePath: string;
   readonly artifactsRoot: string;
@@ -176,11 +182,11 @@ export function createDefaultExecutionComposition(input: {
         ...(retained.currentPlan === undefined ? {} : { currentPlan: retained.currentPlan }) } };
     },
   };
-  const admission = createServiceExecutionAdmission({ ...input, principalOwner: input.principal.owner });
+  const admission = createServiceExecutionAdmission({ ...input, principalOwner: input.principalOwner });
   async function owner(taskId: RuntimeExecutionAllocation['taskId']) {
     const read = await grants.readTaskGrant(taskId);
     if (!read.grant || !read.commit) missing('verified TG1 owner is absent; no Provider factory can run');
-    if (read.grant.owner !== input.principal.owner) missing('the current grant does not authorize the actual verified execution origin');
+    if (read.grant.owner !== input.principalOwner) missing('the current grant does not authorize the actual verified execution origin');
     return admission;
   }
   /**
@@ -211,7 +217,7 @@ export function createDefaultExecutionComposition(input: {
       const requestRef = `segment-open:${intent.businessTurnRef.businessTurnId}:${intent.segmentId}`;
       const inputIdentity = { requestRef, digest: `sha256:${createHash('sha256').update(canonicalJsonStringify(intent)).digest('hex')}` };
       const request = { requestRef, taskId: intent.binding.assignment.taskId,
-        owner: input.principal.owner, capability: { actionId: TASK_EXECUTION_ACTION_ID,
+        owner: input.principalOwner, capability: { actionId: TASK_EXECUTION_ACTION_ID,
           capabilities: [TASK_EXECUTION_CAPABILITY], scope: { organId: intent.binding.scope.organId, taskId: intent.binding.assignment.taskId } },
         inputIdentity };
       return await admitted.admitNewBusiness({ request, register: async (authority, registration) => ({
@@ -227,7 +233,7 @@ export function createDefaultExecutionComposition(input: {
     readonly request: Parameters<typeof AgentLoopRuntime.resumeIncarnation>[0]; readonly contextHistory: typeof context;
   }> {
     const grant = await grants.readTaskGrant(source.allocation.taskId);
-    if (!grant.grant || !grant.commit || grant.grant.state !== 'granted' || grant.grant.owner !== input.principal.owner) {
+    if (!grant.grant || !grant.commit || grant.grant.state !== 'granted' || grant.grant.owner !== input.principalOwner) {
       missing('current grant cannot authorize the actual cold incarnation');
     }
     if (source.current.context.loopControl.mode !== 'observation') missing('actual execution factory does not support the retained first mode');
@@ -294,7 +300,7 @@ export function createDefaultExecutionComposition(input: {
       || source.current.context.agentRuntimeId !== historical.execution.runtimeId
       || source.current.context.loopCheckpoint.executionEpoch !== executionEpoch) return null;
     const grant = await grants.readTaskGrant(source.allocation.taskId);
-    if (!grant.grant || !grant.commit || grant.grant.owner !== input.principal.owner) {
+    if (!grant.grant || !grant.commit || grant.grant.owner !== input.principalOwner) {
       missing('the current grant does not authorize the original durable turn');
     }
     const mode = source.current.context.loopControl.mode;
@@ -418,7 +424,7 @@ export function createDefaultExecutionComposition(input: {
         admission: {
           organJournal: input.journal,
           currentTaskGrantPort: admitted.permissions,
-          principalOwner: input.principal.owner,
+          principalOwner: input.principalOwner,
           resourceBoundary: input.resourceBoundary,
           bindingFor: async (request) => {
             const parent = resolveToolParentAllocation(request);
@@ -466,6 +472,40 @@ export function createDefaultExecutionComposition(input: {
         : { version: 2 as const, activeTurn: active, segmentJournal: resume!.source.segmentJournal, source: segmentSource! };
       const readLivePrefix = () => active === undefined ? missing('a boundary-only continuation has no live prefix')
         : active instanceof ActiveTurnContext ? active.readLivePrefix(currentTurnRef) : active.readLivePrefix();
+      // Real delivery sources: the immutable exact captures retain the original
+      // and successor accepted facts plus their committed completion lookups;
+      // the live prefix adds the current epoch's accepted facts. Both keep
+      // their own physical scope, so a foreign namespace is never relabelled.
+      const currentEntries = async (): Promise<readonly AcceptedRawFact[]> => {
+        const prefix = await readLivePrefix();
+        const captured = resume === undefined ? []
+          : resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries);
+        const seen = new Set<string>();
+        const entries: AcceptedRawFact[] = [];
+        for (const entry of [...captured, ...prefix.entries]) {
+          if (!('envelope' in entry)) continue;
+          const key = canonicalJsonStringify(entry.envelope);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          entries.push(entry);
+        }
+        return entries;
+      };
+      const currentCompletionLookups = async (): Promise<readonly CompletionReadInput[]> => {
+        const captured = resume === undefined ? []
+          : resume.source.captures.flatMap((capture) => capture.source.prepared.completionLookups);
+        const live = await completion.discoverExactExecution({ execution: { ...physical, taskId: allocation.taskId,
+          operationId: allocation.operationId } });
+        const seen = new Set<string>();
+        const lookups: CompletionReadInput[] = [];
+        for (const lookup of [...captured, ...live]) {
+          const key = canonicalJsonStringify(lookup);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          lookups.push(lookup);
+        }
+        return lookups;
+      };
       const loop = resume?.loop ?? await AgentLoopRuntime.start({ agentRuntimeId: allocation.runtimeId, role: 'execution', mode: 'observation',
         profiles: [{ profileId: 'task-execution-context', role: 'execution', mode: 'observation',
           observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
@@ -494,10 +534,19 @@ export function createDefaultExecutionComposition(input: {
             || execution.operationId.value !== allocation.operationId.value) return null;
           return projectAdmittedTurnIdentityV1(admittedTurn);
         },
-        ...(segment === undefined ? {} : { async resolveSegmentBinding({ requestId }: Parameters<NonNullable<StandardTurnEndOwnerPort['resolveSegmentBinding']>>[0]) {
-          const record = (await resume!.source.segmentJournal.readSegmentRecords({ businessTurnId: turnId,
-            segmentId: segment.segmentId })).find((entry) => entry.kind === 'request' && entry.record.request.requestId === requestId);
-          return record?.kind === 'request' ? { source: segmentSource!, request: record.record } : null;
+        ...(segment === undefined ? {} : { async resolveSegmentBinding({ requestId, call }: Parameters<NonNullable<StandardTurnEndOwnerPort['resolveSegmentBinding']>>[0]) {
+          const records = await resume!.source.segmentJournal.readSegmentRecords({ businessTurnId: turnId,
+            segmentId: segment.segmentId });
+          const record = records.find((entry) => entry.kind === 'request'
+            && entry.record.request.requestId === requestId);
+          if (record?.kind !== 'request') return null;
+          const acceptedEndCall = records.find((entry) => entry.kind === 'accepted-fact'
+            && entry.entry.envelope.request.requestId === record.record.request.requestId
+            && entry.entry.envelope.fact.kind === 'tool-call'
+            && entry.entry.envelope.fact.call.callId === call.callId
+            && isStandardTurnEndCall(entry.entry.envelope.fact.call.toolId));
+          return acceptedEndCall?.kind === 'accepted-fact'
+            ? { source: segmentSource!, request: record.record, acceptedEndCall: acceptedEndCall.entry } : null;
         } }),
         async resolveDelivery({ deliveryRefs }) {
           // Delivery references are the model's claims; they only count when they
@@ -506,7 +555,11 @@ export function createDefaultExecutionComposition(input: {
           // candidates; a foreign or missing reference rejects.
           const prefix = await readLivePrefix();
           const candidates: EvidenceRef[] = [admitted.evidence(allocation, binding.admissionCommitRef.commitId)];
-          for (const entry of prefix.entries) {
+          const entries = resume === undefined ? prefix.entries : [
+            ...resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries),
+            ...prefix.entries,
+          ];
+          for (const entry of entries) {
             if (!('envelope' in entry)) continue;
             const fact = entry.envelope.fact;
             if (fact.kind !== 'tool-result') continue;
@@ -722,7 +775,7 @@ export function createDefaultExecutionComposition(input: {
         let unusedClose: Promise<void> | undefined;
         const closeUnused = () => invoked ? Promise.resolve() : unusedClose ??= closeAgentProvider(selected);
         const handles = new Map<string, TaskInstanceHandle & { readonly planner: IndependentTurnPlannerPort }>();
-        const duty = createClosedTurnPlannerCall({ ownerId: allocation.ownerId, principalOwner: input.principal.owner,
+        const duty = createClosedTurnPlannerCall({ ownerId: allocation.ownerId, principalOwner: input.principalOwner,
           roleId: selected.roleId, agentId: selected.configuredAgentId, assignmentId,
           requiredCapabilities: [TASK_EXECUTION_CAPABILITY], pool, taskGrant: grants, checkpoints,
           journal: plannerJournal, now: input.now,
@@ -919,7 +972,7 @@ export function createDefaultExecutionComposition(input: {
         const advance = loop.advanceTurn();
         return advance;
       }
-      const standardTurn: NonNullable<RuntimeExecutionDriver['standardTurn']> = {
+      const standardTurn: NativeStandardTurnLifecycle = {
           async acceptReviews(refs) {
             const distinct = distinctReviewCommitRefs(refs);
             if (distinct.length !== refs.length) missing('dispatch accepted duplicate review receipts');
@@ -945,6 +998,29 @@ export function createDefaultExecutionComposition(input: {
             const settled = () => { if (alignmentInFlight === pending) alignmentInFlight = undefined; };
             void pending.then(settled, settled);
             return pending;
+          },
+          async readDelivery() {
+            if (!acceptedEnd) missing('delivery readback requires the bound standard-turn end');
+            const entries = await currentEntries();
+            let deliveryTextBody: RawAsset | undefined;
+            if (acceptedEnd.deliveryText !== undefined) {
+              const reference = acceptedEnd.acceptedEndCall;
+              if (reference === undefined) missing('the accepted text end has no trusted end-call reference');
+              const ref = await rawEvidence.write({
+                scope: reference.scope,
+                kind: 'tool',
+                type: 'standard-turn-delivery-text',
+                locator: `standard-turn-delivery/text/${reference.callId}`,
+                content: acceptedEnd.deliveryText,
+              });
+              deliveryTextBody = { ref, view: { kind: 'utf8-text' } };
+            }
+            const readback = await readStandardTurnDelivery({
+              assignment, acceptedEnd, entries,
+              completionLookups: await currentCompletionLookups(),
+              ...(deliveryTextBody === undefined ? {} : { deliveryTextBody }),
+            }, { completion, rawContent });
+            return readback;
           },
       };
       if (!('driver' in native)) return { standardTurn,
@@ -1002,7 +1078,7 @@ export function createDefaultExecutionComposition(input: {
           } : undefined;
           await publishLifecycle(status, status === 'succeeded' ? 'operation.completed'
             : status === 'cancelled' ? 'operation.cancelled' : status === 'failed' ? 'operation.failed' : 'operation.blocked', settled.evidenceRefs, controllerResult);
-          const outcome = settled.state === 'succeeded' ? 'waiting' as const : settled.state;
+          const outcome = status === 'succeeded' ? 'succeeded' as const : settled.state;
           if (!allocation.scope.cycleId) missing('native checkpoint has no allocated cycle');
           if (!acceptedEnd) missing('the drained execution has no accepted standard-turn end; retain the same logical turn');
           const contextRef = loop.contextCommitRef();

@@ -1,12 +1,13 @@
-import { canonicalJsonStringify, type BusinessPayload, type EvidenceRef,
-  type ProviderExecutionIdentityRef, type ProviderToolCall,
-  type ProviderToolDefinition } from '../../../contracts/src/index.js';
+import { canonicalJsonStringify, type AcceptedRawFact, type BusinessPayload,
+  type EvidenceRef, type ProviderExecutionIdentityRef, type ProviderToolCall,
+  type ProviderToolDefinition, type RuntimeRequestRecord } from '../../../contracts/src/index.js';
 import type { AdmittedTurnIdentity } from '../../../contracts/src/native-reasoning.js';
 import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
 import type { TurnCloseSummary } from '../../../contracts/src/turn-closure.js';
 import {
   STANDARD_TURN_END_TOOL_ID,
+  isStandardTurnEndToolId,
   validateStandardTurnEndCommand,
   validateStandardTurnEndInput,
   type StandardTurnEndCommand,
@@ -52,7 +53,8 @@ export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
         required: ['goal', 'actions', 'result', 'expectedNextStep'],
         additionalProperties: false,
       },
-      deliveryRefs: { type: 'array', items: { type: 'string' }, minItems: 1 },
+      deliveryText: { type: 'string' },
+      deliveryRefs: { type: 'array', items: { type: 'string' } },
     },
     required: ['summary', 'deliveryRefs'],
     additionalProperties: false,
@@ -66,10 +68,20 @@ export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
  * identity or authority.
  */
 export interface StandardTurnEndOwnerPort {
-  /** Real source and durable request registration, resolved by the segment owner. */
-  resolveSegmentBinding?(input: { readonly execution: ProviderExecutionIdentityRef; readonly requestId?: string }): Promise<{
+  /**
+   * The exact binding for the actual call: the committed segment source, the
+   * durable request registration and the accepted standard-end tool-call of
+   * that same request. Provider request identity is independent of business
+   * turn identity, so the normal check is registration <-> accepted fact.
+   */
+  resolveSegmentBinding?(input: {
+    readonly execution: ProviderExecutionIdentityRef;
+    readonly requestId?: string;
+    readonly call: ProviderToolCall;
+  }): Promise<{
     readonly source: NativeSegmentSaveSourceV2;
-    readonly request: import('../../../contracts/src/index.js').RuntimeRequestRecord;
+    readonly request: RuntimeRequestRecord;
+    readonly acceptedEndCall: AcceptedRawFact;
   } | null>;
   /** Resolve the admitted turn bound to the actual typed Provider request. */
   resolveBoundTurn(input: {
@@ -104,14 +116,19 @@ export interface StandardTurnEndControlInput {
 function parseStandardTurnEndArguments(call: ProviderToolCall): StandardTurnEndInput {
   const args = call.arguments;
   const summary = args.summary;
+  const deliveryText = args.deliveryText;
   const deliveryRefs = args.deliveryRefs;
   if (typeof summary !== 'object' || summary === null || Array.isArray(summary)) {
     throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end requires a summary object');
   }
+  if (deliveryText !== undefined && typeof deliveryText !== 'string') {
+    throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end deliveryText must be a string when present');
+  }
   if (!Array.isArray(deliveryRefs) || !deliveryRefs.every((reference) => typeof reference === 'string')) {
     throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end requires a delivery reference string array');
   }
-  return { summary: summary as unknown as TurnCloseSummary, deliveryRefs };
+  return { summary: summary as unknown as TurnCloseSummary,
+    ...(deliveryText === undefined ? {} : { deliveryText }), deliveryRefs };
 }
 
 function assertBoundExecution(identity: AdmittedTurnIdentity, execution: ProviderExecutionIdentityRef): void {
@@ -138,7 +155,7 @@ function assertBoundExecution(identity: AdmittedTurnIdentity, execution: Provide
  */
 export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput): ProviderToolExecutionPort {
   return {
-    async execute({ execution, requestId, call }): Promise<ProviderToolExecutionResult> {
+    async execute({ execution, scope, requestId, call }): Promise<ProviderToolExecutionResult> {
       const parsed = parseStandardTurnEndArguments(call);
       const identity = await input.owner.resolveBoundTurn({
         execution,
@@ -151,29 +168,60 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
         );
       }
       const segment = input.owner.resolveSegmentBinding
-        ? await input.owner.resolveSegmentBinding({ execution, ...(requestId === undefined ? {} : { requestId }) }) : null;
-      if (segment) {
+        ? await input.owner.resolveSegmentBinding({ execution, ...(requestId === undefined ? {} : { requestId }), call })
+        : null;
+      if (segment === null) {
+        if (input.owner.resolveSegmentBinding) {
+          throw new StandardTurnEndError(
+            'standard-turn-end.unbound',
+            'the committed segment has no exact request registration and accepted end call for the actual provider request',
+          );
+        }
+        assertBoundExecution(identity, execution);
+      } else {
         validateNativeSegmentSaveSourceV2(segment.source);
         const physical = segment.source.opened.binding;
+        // Business identity stays the original admitted turn; the Provider
+        // request identity is its own value and is proven by the exact
+        // registration <-> accepted fact match, never by turn equality.
+        const accepted = segment.acceptedEndCall;
+        const endCall = accepted.envelope.fact.kind === 'tool-call'
+          ? accepted.envelope.fact.call : null;
         if (canonicalJsonStringify(projectAdmittedTurnIdentityV1(segment.source.originalAdmittedTurn)) !== canonicalJsonStringify(identity)
           || physical.execution.runtimeId !== execution.runtimeId
           || physical.execution.executionEpoch !== execution.executionEpoch
           || physical.scope.taskId?.value !== execution.taskId.value
           || physical.scope.operationId?.value !== execution.operationId.value
-          || segment.request.request.turnId !== identity.turnId || segment.request.request.requestId !== requestId
-          || canonicalJsonStringify(segment.request.scope) !== canonicalJsonStringify(physical.scope)) {
-          throw new StandardTurnEndError('standard-turn-end.binding', 'committed segment or exact request registration conflicts');
+          || segment.request.request.requestId !== requestId
+          || canonicalJsonStringify(segment.request.scope) !== canonicalJsonStringify(physical.scope)
+          || canonicalJsonStringify(segment.request.request) !== canonicalJsonStringify(accepted.envelope.request)
+          || canonicalJsonStringify(accepted.envelope.execution) !== canonicalJsonStringify(physical.execution)
+          || canonicalJsonStringify(accepted.envelope.scope) !== canonicalJsonStringify(physical.scope)
+          || endCall === null
+          || !isStandardTurnEndToolId(endCall.toolId)
+          || endCall.callId !== call.callId) {
+          throw new StandardTurnEndError(
+            'standard-turn-end.binding',
+            'committed segment, exact request registration or accepted end call conflicts',
+          );
         }
-      } else assertBoundExecution(identity, execution);
+      }
       validateStandardTurnEndInput(parsed, identity.scopeRef);
-      const resolvedEvidenceRefs = await input.owner.resolveDelivery({
-        identity,
-        deliveryRefs: parsed.deliveryRefs,
-      });
+      const resolvedEvidenceRefs = parsed.deliveryRefs.length === 0 ? []
+        : await input.owner.resolveDelivery({ identity, deliveryRefs: parsed.deliveryRefs });
       const command: StandardTurnEndCommand = {
         kind: 'standard-turn-end',
         identity,
         summary: parsed.summary,
+        ...(parsed.deliveryText === undefined ? {} : { deliveryText: parsed.deliveryText }),
+        ...(requestId === undefined ? {} : {
+          acceptedEndCall: {
+            requestId,
+            callId: call.callId,
+            execution: { runtimeId: execution.runtimeId, executionEpoch: execution.executionEpoch },
+            scope,
+          },
+        }),
         deliveryRefs: parsed.deliveryRefs,
         resolvedEvidenceRefs,
       };

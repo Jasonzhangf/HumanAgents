@@ -16,7 +16,9 @@ import {
   type OperationId,
   type OperationIntent,
   type ProviderToolDefinition,
+  type ProviderExecutionIdentityRef,
   type Scope,
+  type ScopeRef,
   type Sha256Digest,
   type ToolRegistration,
   type WebSearchRequest,
@@ -256,6 +258,12 @@ export interface UiRuntimeToolOutputStore {
   readonly store: ImmutableAssetStore;
   writeReport(input: { readonly outputId: string; readonly report: unknown }): Promise<{ readonly outputRef: string; readonly outputDigest: string }>;
   readReport(input: { readonly outputRef: string; readonly outputDigest: string }): Promise<unknown>;
+  /** Persist exact delivered bytes and return an immutable artifact descriptor
+   *  distinct from any tool report descriptor. */
+  writeArtifact(input: { readonly outputId: string; readonly bytes: Uint8Array }): Promise<{ readonly assetRef: string; readonly digest: string; readonly size: number }>;
+  /** Resolve the exact delivered bytes from the immutable descriptor alone, so
+   *  the read never follows the mutable workspace path. */
+  readArtifact(input: { readonly assetRef: string; readonly digest: string }): Promise<Uint8Array>;
 }
 
 /**
@@ -480,6 +488,17 @@ class ToolOutputAssets implements UiRuntimeToolOutputStore {
     const data = await this.store.readByDigest(reportAssetId(outputId, input.outputDigest), input.outputDigest);
     return JSON.parse(new TextDecoder().decode(data)) as unknown;
   }
+
+  async writeArtifact(input: { readonly outputId: string; readonly bytes: Uint8Array }): Promise<{ readonly assetRef: string; readonly digest: string; readonly size: number }> {
+    const reference = await this.store.write(artifactAssetId(input.outputId, digestBytes(input.bytes)), input.bytes);
+    return { assetRef: artifactOutputRef(input.outputId), digest: reference.digest, size: reference.size };
+  }
+
+  async readArtifact(input: { readonly assetRef: string; readonly digest: string }): Promise<Uint8Array> {
+    const outputId = outputIdFromArtifactRef(input.assetRef);
+    if (outputId === undefined) throw new Error('tool artifact reference is not a provider tool artifact');
+    return this.store.readByDigest(artifactAssetId(outputId, input.digest), input.digest);
+  }
 }
 
 function reportOutputRef(outputId: string): string {
@@ -498,6 +517,20 @@ function outputIdFromRef(outputRef: string): string | undefined {
   const prefix = 'asset://provider-tool/output/';
   if (!outputRef.startsWith(prefix)) return undefined;
   return decodeURIComponent(outputRef.slice(prefix.length));
+}
+
+function artifactOutputRef(outputId: string): string {
+  return `asset://provider-tool/artifact/${encodeURIComponent(outputId)}`;
+}
+
+function artifactAssetId(outputId: string, contentDigest: string): string {
+  return safeId(`provider-tool-artifact-${outputId}-${contentDigest.slice(-12)}`);
+}
+
+function outputIdFromArtifactRef(artifactRef: string): string | undefined {
+  const prefix = 'asset://provider-tool/artifact/';
+  if (!artifactRef.startsWith(prefix)) return undefined;
+  return decodeURIComponent(artifactRef.slice(prefix.length));
 }
 
 class FileReadAssets implements FileReadArtifactStore {
@@ -622,6 +655,18 @@ export interface ProviderToolAdmissionInput {
   readonly principalOwner: string;
   readonly resourceBoundary: OperationTaskBoundaryPort;
   readonly bindingFor: (request: ToolExecRequest) => Promise<OperationControlBinding>;
+  /**
+   * Thin child route. A registered child operation has its own execution and
+   * scope, but its tool effects join the admitted parent namespace. When this
+   * seam returns a match, the request is a real child tool call and the
+   * returned parent binding is used; the parent's own identity assertion does
+   * not apply. Returning `null` keeps the unchanged parent route.
+   */
+  readonly childBindingFor?: (request: ToolExecRequest) => Promise<{
+    readonly execution: ProviderExecutionIdentityRef;
+    readonly scope: ScopeRef;
+    readonly binding: OperationControlBinding;
+  } | null>;
   /**
    * Actual explicit child admission seam. It registers the child business fact
    * with typed Provider request/tool-call provenance and returns the separate
@@ -795,14 +840,29 @@ export function createResponsesFileToolExecutor(input: {
         }
         const registration = registrationByTool.get(request.call.toolId);
         if (!registration) throw new Error(`provider tool is not registered: ${request.call.toolId}`);
-        const binding = await admission.bindingFor(request);
-        if (binding.agentRuntimeId !== request.execution.runtimeId
-          || binding.harnessExecutionEpoch !== request.execution.executionEpoch
-          || canonicalJsonStringify(binding.parentOperationId) !== canonicalJsonStringify(request.execution.operationId)
-          || canonicalJsonStringify(binding.scope.taskId) !== canonicalJsonStringify(request.execution.taskId)
-          || canonicalJsonStringify(binding.scope.operationId) !== canonicalJsonStringify(request.execution.operationId)
-          || canonicalJsonStringify(binding.scope) !== canonicalJsonStringify(request.scope)) {
-          throw new Error('provider tool admission binding does not match the actual execution');
+        // A registered child operation owns a child execution and scope while
+        // its tool effect joins the admitted parent namespace. Only the real
+        // child route may supply that parent binding, and it must describe this
+        // exact request; otherwise the parent's own identity binding applies.
+        const childRoute = admission.childBindingFor === undefined
+          ? null : await admission.childBindingFor(request);
+        let binding: OperationControlBinding;
+        if (childRoute) {
+          if (canonicalJsonStringify(childRoute.execution) !== canonicalJsonStringify(request.execution)
+            || canonicalJsonStringify(childRoute.scope) !== canonicalJsonStringify(request.scope)) {
+            throw new Error('child provider tool binding does not match the actual child execution');
+          }
+          binding = childRoute.binding;
+        } else {
+          binding = await admission.bindingFor(request);
+          if (binding.agentRuntimeId !== request.execution.runtimeId
+            || binding.harnessExecutionEpoch !== request.execution.executionEpoch
+            || canonicalJsonStringify(binding.parentOperationId) !== canonicalJsonStringify(request.execution.operationId)
+            || canonicalJsonStringify(binding.scope.taskId) !== canonicalJsonStringify(request.execution.taskId)
+            || canonicalJsonStringify(binding.scope.operationId) !== canonicalJsonStringify(request.execution.operationId)
+            || canonicalJsonStringify(binding.scope) !== canonicalJsonStringify(request.scope)) {
+            throw new Error('provider tool admission binding does not match the actual execution');
+          }
         }
         const control = await gateway.readControl(binding);
         if (control.state !== 'complete') throw new Error(`provider tool operation control source is unknown: ${control.reason}`);
@@ -832,7 +892,11 @@ export function createResponsesFileToolExecutor(input: {
           const output = pending.get(intent.operationId.value)?.result;
           if (result.status === 'failed' && output?.status === 'failed') return output;
           if (result.status !== 'succeeded' || !output) throw new Error(result.failure?.message ?? result.reconcile?.reason ?? `provider tool ended in ${result.status}`);
-          return output;
+          // The gateway operation completed succeeded; the result envelope must
+          // carry that typed terminal status like every sibling executor
+          // (standard-turn-end, child producer, web.search) instead of leaving
+          // the optional field unset.
+          return { ...output, status: 'succeeded' };
         } finally {
           request.signal.removeEventListener('abort', abort);
           pending.delete(intent.operationId.value);
@@ -1306,7 +1370,10 @@ async function executeUpdateGoal(request: ToolExecRequest, params: { readonly ar
   return { output: JSON.stringify({ goal: state.goal }), outputRefs: [], evidenceRefs: [taskEvidence(request, 'update-goal')] };
 }
 
-async function executePresent(request: ToolExecRequest, params: { readonly workspaceRoot: string }): Promise<ToolExecResult> {
+async function executePresent(
+  request: ToolExecRequest,
+  params: { readonly workspaceRoot: string; readonly toolOutputs: UiRuntimeToolOutputStore },
+): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('present was stopped before admission'), { name: 'AbortError' });
   const rawFiles = request.call.arguments.files;
   if (!Array.isArray(rawFiles) || rawFiles.length === 0) throw new Error('present requires a non-empty files array');
@@ -1316,11 +1383,22 @@ async function executePresent(request: ToolExecRequest, params: { readonly works
     if (typeof item.path !== 'string' || item.path.trim() === '') throw new Error('present requires a non-empty file path');
     return { path: item.path, ...(typeof item.description === 'string' && item.description.length > 0 ? { description: item.description } : {}) };
   });
-  for (const file of files) {
+  // Deliver the file bytes into the shared immutable store; the report below
+  // only describes the immutable descriptors, never the mutable workspace path.
+  const presentOutputId = safeId(`provider-tool-present-${request.execution.taskId.value}-${request.call.callId}`);
+  const artifacts: { readonly path: string; readonly assetRef: string; readonly digest: string; readonly size: number }[] = [];
+  for (const [index, file] of files.entries()) {
     const target = await resolveWorkspacePath(params.workspaceRoot, file.path);
     await assertRegularWorkspaceFile(target);
+    const bytes = new Uint8Array(await readFile(target));
+    const descriptor = await params.toolOutputs.writeArtifact({ outputId: `${presentOutputId}-${index}`, bytes });
+    artifacts.push({ path: file.path, ...descriptor });
   }
-  return { output: JSON.stringify({ turn: request.execution.executionEpoch, files }), outputRefs: [], evidenceRefs: [taskEvidence(request, 'present')] };
+  return {
+    output: JSON.stringify({ turn: request.execution.executionEpoch, files, artifacts }),
+    outputRefs: artifacts.map((artifact) => artifact.assetRef),
+    evidenceRefs: [taskEvidence(request, 'present')],
+  };
 }
 
 async function executeWebSearch(

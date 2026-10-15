@@ -17,14 +17,80 @@ import {
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
+  type PublicOutputPublicationProjection,
+  type RuntimeCheckpointFilter,
+  type RuntimeCheckpointHistoryProjection,
+  type RuntimeCheckpointProjection,
+  type RuntimeContextHistoryProjection,
+  type RuntimeCommitRefProjection,
+  type RuntimeContextReplacementProjection,
+  type RuntimeContextViewProjection,
+  type RuntimePoolAvailabilityProjection,
+  type RuntimeBusinessCycleHistoryProjection,
+  type RuntimeBusinessCycleEntryProjection,
+  type RuntimeBusinessCycleProjection,
+  type RuntimeI2CurrentPosition,
+  type RuntimeInspectionComparisonProjection,
+  type RuntimeInspectionItemComparisonProjection,
+  type RuntimeInspectionItemProjection,
+  type RuntimeInspectionOccurrenceEntryProjection,
+  type RuntimeInspectionOccurrenceHistoryProjection,
+  type RuntimeInspectionOccurrenceProjection,
+  type RuntimeMilestoneReviewHistoryProjection,
+  type RuntimeMilestoneReviewProjection,
+  type RuntimeNextActionProjection,
+  type RuntimeReviewFindingProjection,
+  type RuntimeScheduleOccurrenceProjection,
+  type RuntimeSelectedReviewerProjection,
+  type RuntimeTaskScopeProjection,
 } from '../contracts/runtime.js';
 import type { RuntimeSemanticObservationEnvelope } from '../contracts/runtime.js';
 import { RuntimeProjectionError } from '../contracts/runtime.js';
 
 export type {
+  PublicOutputCommitProjection,
+  PublicOutputPublicationProjection,
+  RuntimeCheckpointCursorProjection,
+  RuntimeCheckpointFilter,
+  RuntimeCheckpointHistoryProjection,
+  RuntimeCheckpointProjection,
+  RuntimeContextHistoryProjection,
+  RuntimeContextReplacementProjection,
+  RuntimeContextViewProjection,
+  RuntimeCommitRefProjection,
+  RuntimePoolAvailabilityProjection,
+  RuntimeBusinessCycleEntryProjection,
+  RuntimeBusinessCycleHistoryProjection,
+  RuntimeBusinessCycleProjection,
+  RuntimeI2CurrentPosition,
+  RuntimeInspectionComparisonProjection,
+  RuntimeInspectionItemComparisonProjection,
+  RuntimeInspectionItemProjection,
+  RuntimeInspectionOccurrenceEntryProjection,
+  RuntimeInspectionOccurrenceHistoryProjection,
+  RuntimeInspectionOccurrenceProjection,
+  RuntimeMilestoneReviewHistoryProjection,
+  RuntimeMilestoneReviewProjection,
+  RuntimeNextActionProjection,
+  RuntimeReviewFindingProjection,
+  RuntimeScheduleOccurrenceProjection,
+  RuntimeSelectedReviewerProjection,
+  RuntimeTaskScopeProjection,
   RuntimeLivenessInput,
   RuntimeLivenessProjection,
   RuntimeLivenessState,
+  RuntimeProjectReadProjection,
+  RuntimeProjectTaskReadRow,
+  RuntimeRawEventProjection,
+  RuntimeRawRecordBody,
+  RuntimeRawRecordProjection,
+  RuntimeReadFailure,
+  RuntimeReadResult,
+  RuntimeReadScope,
+  RuntimeStoredRecordRef,
+  RuntimeSystemReadProjection,
+  RuntimeTaskRecordsProjection,
+  TaskRuntimeIncarnationProjection,
 } from '../contracts/runtime.js';
 
 const STATE_LABELS: Record<LifecycleState, string> = {
@@ -79,6 +145,131 @@ export interface RuntimeTaskSnapshotInput {
    * facts; the projection then claims nothing.
    */
   readonly liveness?: RuntimeLivenessInput;
+  /** Committed public output, supplied by the authoritative publication read. */
+  readonly publicOutput?: PublicOutputPublicationProjection;
+  readonly runtimePool?: RuntimeTaskDashboardProjection['runtimePool'];
+}
+
+export interface PublicOutputCommitRefInput {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+export interface PublicOutputPublicationInput {
+  readonly state: PublicOutputPublicationProjection['state'];
+  readonly commits: readonly (PublicOutputCommitRefInput & { readonly text: string })[];
+  readonly publicCommitWatermark?: number;
+}
+
+export interface TaskRuntimeIncarnationInput {
+  readonly runtimeId: string;
+  readonly generation: number;
+  readonly agentInstanceId?: string;
+  readonly roleId?: string;
+  readonly taskId: TaskId;
+  readonly assignmentId?: string;
+  readonly executionEpoch?: number;
+  readonly capabilities?: readonly string[];
+  readonly unavailable?: string;
+}
+
+export interface RuntimePoolAvailabilityInput {
+  readonly state: RuntimePoolAvailabilityProjection['state'];
+  readonly reason?: string;
+}
+
+export interface RuntimeCommitRefInput {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+export interface RuntimeContextViewInput {
+  readonly contextViewRef: string;
+  readonly executionEpoch: number;
+  readonly contextDigest: string;
+  readonly checkpointId: string;
+  readonly activeRefs: readonly string[];
+  readonly omittedRefs: readonly string[];
+}
+
+export interface RuntimeContextReplacementInput {
+  readonly replacementId: string;
+  readonly executionEpoch: number;
+  readonly fromContextViewRef: string;
+  readonly toContextViewRef: string;
+  readonly toContextDigest: string;
+  readonly deltaIds: readonly string[];
+  readonly reason: RuntimeContextReplacementProjection['reason'];
+  readonly replacementDigest: string;
+}
+
+export interface RuntimeContextHistoryInput {
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly currentContextCommitRef?: RuntimeCommitRefInput;
+  readonly views: readonly RuntimeContextViewInput[];
+  readonly replacements: readonly RuntimeContextReplacementInput[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeCheckpointHistoryInput {
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly current?: { readonly checkpointId: string; readonly executionEpoch: number };
+  readonly viewed?: { readonly checkpointId: string; readonly executionEpoch: number };
+  readonly checkpoints: readonly RuntimeCheckpointProjection[];
+  readonly nextCursor?: string;
+  readonly capabilities: Partial<Record<RuntimeCheckpointFilter, RuntimePoolAvailabilityInput>>;
+}
+
+export interface RuntimeInspectionOccurrenceHistoryInput {
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly occurrenceId: string } | null;
+  readonly occurrences: readonly RuntimeInspectionOccurrenceProjection[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeInspectionOccurrenceEntryInput {
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly occurrenceId: string } | null;
+  readonly occurrence: RuntimeInspectionOccurrenceProjection;
+}
+
+export interface RuntimeMilestoneReviewHistoryInput {
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly reviews: readonly RuntimeMilestoneReviewProjection[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeBusinessCycleHistoryInput {
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly cycleId: string } | null;
+  readonly cycles: readonly RuntimeBusinessCycleProjection[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeBusinessCycleEntryInput {
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly cycleId: string } | null;
+  readonly cycle: RuntimeBusinessCycleProjection;
+}
+
+export interface RuntimeInspectionComparisonInput {
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly left: { readonly occurrenceId: string };
+  readonly right: { readonly occurrenceId: string };
+  readonly comparable: boolean;
+  readonly reason: string | null;
+  readonly definition: { readonly definitionId: string; readonly definitionVersion: string } | null;
+  readonly items: readonly RuntimeInspectionItemComparisonProjection[];
 }
 
 export interface RuntimeDashboardInput {
@@ -159,13 +350,15 @@ export function projectRuntimeStatus(input: RuntimeStatusInput): RuntimeStatusPr
 
 export function projectRuntimeDashboard(input: RuntimeDashboardInput): RuntimeDashboardProjection {
   const recentOutputs: RuntimeRecentOutputProjection[] = input.tasks
-    .filter((task) => task.output.trim().length > 0)
+    // Dashboard summaries display committed publication only. `task.output` can still be the
+    // runtime's internal execution value, but it is not trusted public publication evidence.
+    .filter((task) => projectPublicOutputPublication(task.publicOutput).commits.length > 0)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 5)
     .map((task) => ({
       taskId: task.taskId,
       taskTitle: task.title,
-      text: task.output,
+      text: joinPublicOutputText(projectPublicOutputPublication(task.publicOutput).commits),
       occurredAt: task.updatedAt,
     }));
   const recentFailures: RuntimeRecentFailureProjection[] = input.tasks
@@ -236,6 +429,7 @@ export function projectRuntimeTaskDashboard(
   source: RuntimeTaskSnapshotInput,
   mode: RuntimeMode,
 ): RuntimeTaskDashboardProjection {
+  const publicOutput = projectPublicOutputPublication(source.publicOutput);
   const liveness = source.liveness === undefined
     ? undefined
     : projectRuntimeLiveness(source.liveness, {
@@ -251,7 +445,7 @@ export function projectRuntimeTaskDashboard(
     stateLabel: stateLabel(source.state),
     currentNode: source.currentNode,
     input: source.input,
-    output: source.output,
+    output: joinPublicOutputText(publicOutput.commits),
     recentEvents: source.recentEvents.slice(-20),
     checkpoint: source.checkpoint,
     error: source.error,
@@ -260,6 +454,8 @@ export function projectRuntimeTaskDashboard(
     executionEpoch: source.executionEpoch,
     allowedActions: source.allowedActions,
     observationRef: `task://${source.taskId.value}/observation`,
+    publicOutput,
+    runtimePool: source.runtimePool,
     ...(liveness === undefined ? {} : { liveness }),
   };
 }
@@ -355,5 +551,159 @@ export function projectRuntimeLiveness(
     state: 'working',
     silentForMs,
     reason: `real activity ${silentForMs} ms ago; the declared silence budget is ${budget} ms`,
+  };
+}
+
+export function projectPublicOutputPublication(
+  input: PublicOutputPublicationInput | undefined,
+): PublicOutputPublicationProjection {
+  if (!input) return { state: 'unavailable', commits: [] };
+  return {
+    state: input.state,
+    commits: [...input.commits],
+    ...(input.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: input.publicCommitWatermark }),
+  };
+}
+
+function joinPublicOutputText(commits: readonly { readonly text: string }[]): string {
+  return commits.map((commit) => commit.text).join('');
+}
+
+export function projectTaskRuntimePool(input: {
+  readonly incarnations?: readonly TaskRuntimeIncarnationInput[];
+  readonly availability?: RuntimePoolAvailabilityInput;
+}): RuntimeTaskDashboardProjection['runtimePool'] {
+  if (!input.incarnations && !input.availability) return undefined;
+  return {
+    incarnations: (input.incarnations ?? []).map((entry) => ({ ...entry })),
+    availability: {
+      state: input.availability?.state ?? (input.incarnations?.length ? 'available' : 'unknown'),
+      reason: input.availability?.reason,
+    },
+  };
+}
+
+function projectCommitRef(ref: RuntimeCommitRefInput): RuntimeCommitRefProjection {
+  return { ...ref };
+}
+
+export function projectRuntimeContextHistory(input: RuntimeContextHistoryInput): RuntimeContextHistoryProjection {
+  return {
+    surface: 'runtime-context-history',
+    mode: input.mode,
+    taskId: input.taskId,
+    currentContextCommitRef: input.currentContextCommitRef
+      ? projectCommitRef(input.currentContextCommitRef)
+      : undefined,
+    views: input.views.map((view) => ({ ...view })),
+    replacements: input.replacements.map((replacement) => ({ ...replacement })),
+    ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
+  };
+}
+
+export function projectRuntimeCheckpointHistory(input: RuntimeCheckpointHistoryInput): RuntimeCheckpointHistoryProjection {
+  return {
+    surface: 'runtime-checkpoint-history',
+    mode: input.mode,
+    taskId: input.taskId,
+    current: input.current,
+    viewed: input.viewed,
+    checkpoints: input.checkpoints.map((checkpoint) => ({ ...checkpoint })),
+    ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
+    capabilities: Object.fromEntries(
+      Object.entries(input.capabilities).map(([filter, value]) => [filter, { ...value }]),
+    ),
+  };
+}
+
+export function projectRuntimeInspectionOccurrences(
+  input: RuntimeInspectionOccurrenceHistoryInput,
+): RuntimeInspectionOccurrenceHistoryProjection {
+  return {
+    surface: 'runtime-inspection-occurrences',
+    taskScope: { ...input.taskScope },
+    current: input.current,
+    viewed: input.viewed,
+    entries: input.occurrences.map((occurrence) => ({ ...occurrence })),
+    ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
+  };
+}
+
+export function projectRuntimeInspectionOccurrence(
+  input: RuntimeInspectionOccurrenceEntryInput,
+): RuntimeInspectionOccurrenceEntryProjection {
+  return {
+    surface: 'runtime-inspection-occurrence',
+    taskScope: { ...input.taskScope },
+    current: input.current,
+    viewed: input.viewed,
+    entry: { ...input.occurrence },
+  };
+}
+
+export function projectRuntimeMilestoneReviews(
+  input: RuntimeMilestoneReviewHistoryInput,
+): RuntimeMilestoneReviewHistoryProjection {
+  return {
+    surface: 'runtime-milestone-reviews',
+    taskScope: { ...input.taskScope },
+    current: input.current,
+    entries: input.reviews.map((review) => ({ ...review })),
+    ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
+  };
+}
+
+export function projectRuntimeBusinessCycles(
+  input: RuntimeBusinessCycleHistoryInput,
+): RuntimeBusinessCycleHistoryProjection {
+  return {
+    surface: 'runtime-business-cycles',
+    taskScope: { ...input.taskScope },
+    current: input.current,
+    viewed: input.viewed,
+    entries: input.cycles.map((cycle) => ({ ...cycle })),
+    ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
+  };
+}
+
+export function projectRuntimeBusinessCycle(
+  input: RuntimeBusinessCycleEntryInput,
+): RuntimeBusinessCycleEntryProjection {
+  return {
+    surface: 'runtime-business-cycle',
+    taskScope: { ...input.taskScope },
+    current: input.current,
+    viewed: input.viewed,
+    entry: { ...input.cycle },
+  };
+}
+
+export function projectRuntimeInspectionComparison(
+  input: RuntimeInspectionComparisonInput,
+): RuntimeInspectionComparisonProjection {
+  return {
+    surface: 'runtime-inspection-comparison',
+    taskScope: { ...input.taskScope },
+    current: input.current,
+    left: { ...input.left },
+    right: { ...input.right },
+    comparable: input.comparable,
+    reason: input.reason,
+    definition: input.definition === null ? null : { ...input.definition },
+    items: input.items.map((item) => ({ ...item })),
+  };
+}
+
+export function selectRuntimeCheckpointView(
+  source: RuntimeCheckpointHistoryProjection,
+  checkpointId: string,
+): RuntimeCheckpointHistoryProjection {
+  const target = source.checkpoints.find((checkpoint) => checkpoint.checkpointId === checkpointId);
+  if (!target) {
+    throw new RuntimeProjectionError(`unknown checkpoint ${checkpointId}; current stays unchanged`);
+  }
+  return {
+    ...source,
+    viewed: { checkpointId: target.checkpointId, executionEpoch: target.executionEpoch },
   };
 }

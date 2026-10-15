@@ -41,10 +41,10 @@ export type TaskExecutionPreparation =
   };
 
 export type TaskExecutionPreparationInput = {
-  readonly principal: CompositionInput['principal'];
+  readonly principalOwner: CompositionInput['principalOwner'];
   readonly composition: Omit<
     CompositionInput,
-    'principal' | 'currentState' | 'publishCurrentTurnState' | 'closedTurnPlannerPool'
+    'principalOwner' | 'currentState' | 'publishCurrentTurnState' | 'closedTurnPlannerPool'
   >;
   readonly coordinator: Omit<
     CoordinatorInput,
@@ -68,7 +68,7 @@ export function createTaskExecutionPreparation(
   });
   const composition = createDefaultExecutionComposition({
     ...input.composition,
-    principal: input.principal,
+    principalOwner: input.principalOwner,
     currentState,
     publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
     closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),

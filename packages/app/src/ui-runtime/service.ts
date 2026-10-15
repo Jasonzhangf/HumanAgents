@@ -59,11 +59,14 @@ import {
   type InteractionHistoryQuery,
   type InteractionHistoryResult,
   type WorkResult,
+  type ContextReplacement,
+  type ContextView,
+  type JournalCommitRef,
 } from '../../../contracts/src/index.js';
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
-import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
+import type { CheckpointJournalPort, CommittedCheckpointRecord } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { submitInteractionClosure, type SubmittedInteractionClosure } from '../../../runtime/src/checkpoints/submission.js';
 import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
@@ -127,6 +130,7 @@ import {
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
 // The declared silence budget is owned by the agent-io policy. The dashboard
 // reports it as the budget it was measured against; it is never restated here.
 import { DEFAULT_AGENT_IO_POLICY } from '../../../runtime/src/agent-io/types.js';
@@ -158,6 +162,7 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import {
   type RuntimeDashboardProjection,
+  type PublicOutputPublicationProjection,
   type RuntimeLivenessInput,
   type RuntimeSseEvent,
   type RuntimeStatusProjection,
@@ -165,6 +170,22 @@ import {
   type RuntimeTaskErrorProjection,
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
+  type RuntimeMode,
+  type RuntimeReadResult,
+  type RuntimeReadFailure,
+  type RuntimeContextHistoryProjection,
+  type RuntimeCommitRefProjection,
+  type RuntimeContextReplacementProjection,
+  type RuntimeBusinessCycleHistoryProjection,
+  type RuntimeBusinessCycleEntryProjection,
+  type RuntimeCheckpointFilter,
+  type RuntimeCheckpointHistoryProjection,
+  type RuntimeCheckpointProjection,
+  type RuntimeInspectionOccurrenceHistoryProjection,
+  type RuntimeInspectionOccurrenceEntryProjection,
+  type RuntimeInspectionComparisonProjection,
+  type RuntimeMilestoneReviewHistoryProjection,
+  type RuntimePoolAvailabilityProjection,
   type TaskDetailProjection,
   type OrganHealthProjection,
   type OrganHealthDimensionProjection,
@@ -173,6 +194,8 @@ import {
   projectRuntimeDashboard,
   projectRuntimeStatus,
   projectRuntimeSemanticObservation,
+  projectRuntimeContextHistory,
+  projectRuntimeCheckpointHistory,
   projectRuntimeTaskDashboard,
   projectRuntimeTaskList,
 } from '../../../ui/projection/runtime.js';
@@ -190,12 +213,35 @@ import { UiProjectionError, type PipelineObservationProjection } from '../../../
 import type { RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js';
 import type { RuntimeSemanticObservationEnvelope } from '../../../ui/contracts/runtime.js';
 import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/nodes/node-registry.js';
-import type { AgentRoleDisplay, LifecycleState } from '../../../contracts/src/index.js';
+import type {
+  AgentRoleDisplay,
+  LifecycleState,
+  PublicOutputBinding,
+  PublicOutputJournalPort,
+  PublicOutputPublication,
+} from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import { readProducedArtifacts, RESPONSES_FILE_SEARCH_TOOL } from '../provider-tool-execution.js';
-import type { UiRuntimeJournal } from './journal.js';
+import {
+  readUiRuntimeTaskJournal,
+  uiRuntimeTaskCheckpointPath,
+  type UiRuntimeJournal,
+  type UiRuntimeJournalRecord,
+} from './journal.js';
+import {
+  createI2HistoryReader,
+  type I2HistoryReadPorts,
+  type I2HistoryReader,
+} from './i2-history.js';
+import type {
+  ConfiguredProjectCatalog,
+  ConfiguredProjectReadSource,
+  RuntimePaths,
+} from '../../../config/src/index.js';
 import { digestOf, type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
+import { createJsonlCheckpointJournal, createJsonlContextHistoryPort } from '../checkpoint-journal.js';
+import { AppLifecycleError } from '../errors.js';
 import {
   createExplicitBrainRuntime,
   type ExplicitBrainRuntime,
@@ -278,6 +324,13 @@ const LIFECYCLE_STATES = new Set([
 
 export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCommitPort {}
 
+/**
+ * The task/cycle Organ Journal store the app assembles. It carries checkpoints
+ * and durable public-output records on the same file, so the public-output
+ * port is resolved from the same store rather than a second journal.
+ */
+export type PublicOutputCheckpointStore = TaskCheckpointStore & PublicOutputJournalPort;
+
 export interface UiRuntimeMemoryComposition {
   readonly coordinator: MemoryCoordinator;
   readonly backend: DeterministicMemoryBackend;
@@ -295,7 +348,7 @@ export interface UiRuntimeServiceOptions {
   readonly organId: OrganId;
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
-  readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => TaskCheckpointStore;
+  readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => PublicOutputCheckpointStore;
   readonly attentionPort: AttentionPort;
   readonly providerState: string;
   readonly providerSource?: ProviderTransportSource;
@@ -331,6 +384,14 @@ export interface UiRuntimeServiceOptions {
    * revision's execution policy into it.
    */
   readonly subscriptionControl?: SubscriptionControlPort;
+  /** Canonical RuntimePaths for the serve-bound project. */
+  readonly runtimePaths?: RuntimePaths;
+  /** Declared physical native Journal for the bound runtime's readonly history. */
+  readonly executionJournalPath?: string;
+  /** Read-only I2 history authority; absent reports explicit unavailable. */
+  readonly i2History?: I2HistoryReadPorts;
+  /** Config-owned resolver for declared projects in the current control root. */
+  readonly projectCatalog?: () => Promise<ConfiguredProjectCatalog>;
   readonly providerRetryConfig?: {
     readonly config: RetryCycleConfigSet;
     readonly journalRoot: string;
@@ -814,20 +875,81 @@ function runtimeLivenessInput(
   };
 }
 
+/**
+ * The runtime snapshot carries the contracts publication; the UI projection
+ * consumes the flattened shape. This is the single boundary converting between
+ * them, so no raw runtime type leaks into the projection.
+ */
+function toPublicOutputProjection(
+  publication: PublicOutputPublication | undefined,
+): PublicOutputPublicationProjection | undefined {
+  if (publication === undefined) return undefined;
+  return {
+    state: publication.state,
+    commits: publication.commits.map((commit) => ({
+      commitId: commit.ref.commitId,
+      journalSeq: commit.ref.journalSeq,
+      recordDigest: commit.ref.recordDigest,
+      text: commit.text,
+    })),
+    ...(publication.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: publication.publicCommitWatermark }),
+  };
+}
+
+/**
+ * The runtime snapshot carries the contracts publication; the UI projection
+ * consumes the flattened shape. This is the single boundary that converts
+ * between them so no raw runtime type leaks into the projection.
+ */
+function toRuntimeTaskSnapshotInput(task: RuntimeTaskSnapshot): RuntimeTaskSnapshotInput {
+  return { ...task, publicOutput: toPublicOutputProjection(task.publicOutput) };
+}
+
+/**
+ * The current operation/epoch binding for a task, or `undefined` when the task
+ * has no active operation. `harnessTurnId` stays absent because this legacy
+ * execution slice never claims a Harness turn.
+ */
+/**
+ * The coordinator ABI owner lands `readonly cycleId?: string` on the runtime
+ * snapshot. This reader dereferences it through the structural extension so
+ * the app tree stays buildable before that runtime ABI composes.
+ */
+type RuntimeTaskSnapshotWithCycle = RuntimeTaskSnapshot & { readonly cycleId?: string };
+
+function publicOutputBindingFor(task: RuntimeTaskSnapshotWithCycle, organId: OrganId): PublicOutputBinding | undefined {
+  if (task.operationId === undefined || task.cycleId === undefined || task.executionEpoch === undefined) {
+    return undefined;
+  }
+  return {
+    scope: {
+      organId,
+      taskId: task.taskId,
+      cycleId: id('cycle', task.cycleId),
+      operationId: id('operation', task.operationId),
+    },
+    executionEpoch: task.executionEpoch,
+  };
+}
+
 function runtimeTaskDashboard(
   task: RuntimeTaskSnapshot,
   mode: 'fake' | 'rcc',
   liveness?: RuntimeLivenessInput,
+  authoritativePublication?: PublicOutputPublicationProjection,
 ): RuntimeTaskDashboardView {
+  // Public result availability is derived from committed publication only; the
+  // internal execution output is not publication evidence.
   const projected = projectRuntimeTaskDashboard({
-    ...task,
+    ...toRuntimeTaskSnapshotInput(task),
+    ...(authoritativePublication === undefined ? {} : { publicOutput: authoritativePublication }),
     ...(liveness === undefined ? {} : { liveness }),
   }, mode);
   const history = task.events;
   const omitted = Math.max(0, history.length - task.recentEvents.length);
   const stateLabel = projected.stateLabel;
   const hasCheckpoint = task.checkpoint !== undefined;
-  const resultAvailable = task.output.trim().length > 0;
+  const resultAvailable = projected.publicOutput !== undefined && projected.publicOutput.commits.length > 0;
   const requestedStopWithoutReceipt = (task.state === 'stopped' || task.state === 'cancelled') && !hasCheckpoint;
   return {
     ...projected,
@@ -1091,6 +1213,198 @@ function requirementIdForSubscription(subscriptionId: string): string {
  */
 const SCHEDULED_OCCURRENCE_TERMINAL_TIMEOUT_MS = 30 * 60_000;
 
+export interface TaskContextHistoryQuery {
+  readonly projectKey: string;
+  readonly mode: RuntimeMode;
+  readonly limit: number;
+  readonly cursor?: string;
+  readonly agentRuntimeId?: string;
+  readonly contextViewRef?: string;
+}
+
+export interface TaskCheckpointHistoryQuery {
+  readonly projectKey: string;
+  readonly mode: RuntimeMode;
+  readonly limit: number;
+  readonly cursor?: string;
+  readonly viewed?: string;
+  readonly directiveRevision?: number;
+  readonly executionEpoch?: number;
+  readonly cycleId?: CycleId;
+  readonly occurrenceRef?: string;
+}
+
+/** Read-only I2 history queries. Scope is the exact task; there is no write path. */
+export interface I2HistoryListQuery {
+  readonly limit: number;
+  readonly cursor?: string;
+}
+
+export interface I2HistoryViewedQuery extends I2HistoryListQuery {
+  readonly viewed?: string;
+}
+
+export interface I2HistoryReviewQuery extends I2HistoryListQuery {
+  readonly cycleId?: string;
+  readonly milestoneId?: string;
+}
+
+interface ResolvedTaskHistoryJournals {
+  readonly source: ConfiguredProjectReadSource;
+  readonly organId: OrganId;
+  readonly files: readonly string[];
+}
+
+function unknownProjectFailure(projectKey: string): RuntimeReadFailure {
+  return {
+    code: 'project.unknown',
+    ownerId: APP_OWNER,
+    message: `no configured project: ${projectKey}`,
+    nextAction: 'list configured projects and retry with a declared projectKey',
+  };
+}
+
+function unknownTaskFailure(taskId: TaskId, projectKey: string, mode: RuntimeMode): RuntimeReadFailure {
+  return {
+    code: 'task.not-found',
+    ownerId: APP_OWNER,
+    message: `no durable task ${taskId.value} in ${projectKey}/${mode}`,
+    nextAction: 'select an existing task scope',
+  };
+}
+
+function readFailureFromError(error: unknown): RuntimeReadFailure {
+  if (error instanceof UiRuntimeApiError) {
+    return { code: error.code, ownerId: error.ownerId, message: error.message, nextAction: error.nextAction };
+  }
+  if (error instanceof RuntimeTaskControlError) {
+    return { code: error.code, ownerId: error.ownerId, message: error.message, nextAction: error.nextAction };
+  }
+  if (error instanceof AppLifecycleError) {
+    return { code: error.code, ownerId: error.ownerId, message: error.message, nextAction: error.nextAction };
+  }
+  return {
+    code: 'read.failed',
+    ownerId: APP_OWNER,
+    message: error instanceof Error ? error.message : String(error),
+    nextAction: 'inspect the runtime read failure and retry',
+  };
+}
+
+function i2UnavailableFailure(): RuntimeReadFailure {
+  return {
+    code: 'i2.history.unavailable',
+    ownerId: APP_OWNER,
+    message: 'no I2 history authority is bound to this runtime',
+    nextAction: 'assemble the runtime with the Organ Journal I2 history port',
+  };
+}
+
+const HISTORY_ENUMERATION_LIMIT = 10_000;
+
+/**
+ * Opaque cursor for the task-scoped context/checkpoint history reads. `f` is the
+ * resolved cycle-journal index, `i` the item position inside that journal, and
+ * `fp` a fingerprint of the project/mode/task/filter identity so a cursor can
+ * never be replayed against a different scope or filter set.
+ */
+interface HistoryCursor {
+  readonly f: number;
+  readonly i: number;
+  readonly fp: string;
+}
+
+function encodeHistoryCursor(cursor: HistoryCursor): string {
+  return JSON.stringify({ v: 1, f: cursor.f, i: cursor.i, fp: cursor.fp });
+}
+
+function decodeHistoryCursor(value: string): HistoryCursor | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const candidate = parsed as { readonly f?: unknown; readonly i?: unknown; readonly fp?: unknown };
+  if (!Number.isSafeInteger(candidate.f) || (candidate.f as number) < 0) return undefined;
+  if (!Number.isSafeInteger(candidate.i) || (candidate.i as number) < 0) return undefined;
+  if (typeof candidate.fp !== 'string') return undefined;
+  return { f: candidate.f as number, i: candidate.i as number, fp: candidate.fp };
+}
+
+function historyFingerprint(parts: readonly (string | number)[]): string {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+}
+
+function toRuntimeCommitRef(ref: JournalCommitRef): RuntimeCommitRefProjection {
+  return { commitId: ref.commitId, journalSeq: ref.journalSeq, recordDigest: ref.recordDigest };
+}
+
+function toRuntimeReplacement(replacement: ContextReplacement): RuntimeContextReplacementProjection {
+  return {
+    replacementId: replacement.replacementId,
+    executionEpoch: replacement.executionEpoch,
+    fromContextViewRef: replacement.fromContextViewRef,
+    toContextViewRef: replacement.toContextViewRef,
+    toContextDigest: replacement.toContextDigest,
+    deltaIds: [...replacement.deltaIds],
+    reason: replacement.reason,
+    replacementDigest: replacement.replacementDigest,
+  };
+}
+
+function toRuntimeCheckpoint(record: CommittedCheckpointRecord): RuntimeCheckpointProjection {
+  return {
+    checkpointId: record.checkpoint.id.value,
+    seq: record.checkpoint.seq,
+    executionEpoch: record.checkpoint.executionEpoch,
+    summary: record.checkpoint.summary,
+    directiveRevision: String(record.checkpoint.directiveRevision),
+    cycleId: record.checkpoint.cycleId.value,
+    commitRef: toRuntimeCommitRef(record.commitRef),
+  };
+}
+
+function historyCursorFailure(family: 'context-history' | 'checkpoints', kind: 'invalid' | 'scope' | 'not-found'): RuntimeReadFailure {
+  if (kind === 'invalid') {
+    return {
+      code: `${family}.cursor-invalid`,
+      ownerId: APP_OWNER,
+      message: 'history cursor is not a decoded history cursor',
+      nextAction: `request the first ${family} page without a cursor`,
+    };
+  }
+  if (kind === 'scope') {
+    return {
+      code: `${family}.cursor-scope-mismatch`,
+      ownerId: APP_OWNER,
+      message: 'history cursor belongs to a different project/mode/task scope or filter set',
+      nextAction: `use a cursor returned for the same ${family} scope`,
+    };
+  }
+  return {
+    code: `${family}.cursor-not-found`,
+    ownerId: APP_OWNER,
+    message: 'history cursor does not point at a current entry in this task scope',
+    nextAction: `request the first ${family} page again`,
+  };
+}
+
+function journalRecordTaskId(record: UiRuntimeJournalRecord): string | undefined {
+  switch (record.kind) {
+    case 'task.created':
+    case 'task.updated':
+    case 'task.deleted':
+    case 'operation.started':
+      return record.taskId.value;
+    case 'operation.event':
+      return record.event.taskId.value;
+    default:
+      return undefined;
+  }
+}
+
 export class UiRuntimeService {
   private readonly mode: 'fake' | 'rcc';
   private readonly coordinator: RuntimeTaskCoordinator;
@@ -1122,6 +1436,7 @@ export class UiRuntimeService {
   private implicitConsumerRequirement: Pick<RequirementEnvelope, 'requirementId' | 'draftId' | 'fifoSeq'> | undefined;
   private readonly implicitWatchedOperations = new Set<string>();
   private readonly implicitBrain: ImplicitBrainFifo;
+  private readonly i2Reader?: I2HistoryReader;
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
@@ -1181,6 +1496,7 @@ export class UiRuntimeService {
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
       checkpointStoreFor: options.checkpointStoreFor,
+      publicOutputStoreFor: options.checkpointStoreFor,
       attentionPort: options.attentionPort,
       journal: options.journal,
       hookRegistry: options.hookRegistry,
@@ -1253,6 +1569,7 @@ export class UiRuntimeService {
         ...(options.explicitBrainAgentMessage === undefined ? {} : { sendAgentMessage: options.explicitBrainAgentMessage }),
       });
     }
+    this.i2Reader = options.i2History === undefined ? undefined : createI2HistoryReader(options.i2History);
   }
 
   semanticObservation(taskId: TaskId): RuntimeSemanticObservationEnvelope {
@@ -1869,12 +2186,12 @@ export class UiRuntimeService {
   }
 
   createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshotInput {
-    return this.coordinator.createTask(input);
+    return toRuntimeTaskSnapshotInput(this.coordinator.createTask(input));
   }
 
   updateTask(taskId: TaskId, input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshotInput {
     try {
-      return this.coordinator.updateTask(taskId, input);
+      return toRuntimeTaskSnapshotInput(this.coordinator.updateTask(taskId, input));
     } catch (error) {
       throw apiError(error);
     }
@@ -1962,7 +2279,7 @@ export class UiRuntimeService {
 
   private withRequirementAdmission(task: RuntimeTaskSnapshot): RuntimeTaskSnapshotInput {
     const admission = this.requirementAdmissions.get(task.taskId.value);
-    if (!admission) return task;
+    if (!admission) return toRuntimeTaskSnapshotInput(task);
     const state = task.state === 'created'
       ? 'queued'
       : task.state === 'admitted'
@@ -1975,7 +2292,7 @@ export class UiRuntimeService {
               ? 'blocked'
               : 'queued';
     return {
-      ...task,
+      ...toRuntimeTaskSnapshotInput(task),
       requirementQueue: admission.queue,
       requirementAdmission: state,
       requirementAdmissionLabel: `需求${state} · ${admission.queue} 队列`,
@@ -2106,7 +2423,7 @@ export class UiRuntimeService {
   }
 
   dashboard(): RuntimeDashboardProjection {
-    const tasks = this.coordinator.taskSnapshots();
+    const tasks = this.coordinator.taskSnapshots().map(toRuntimeTaskSnapshotInput);
     return projectRuntimeDashboard({
       mode: this.mode,
       tasks,
@@ -2123,10 +2440,10 @@ export class UiRuntimeService {
     });
   }
 
-  taskDashboard(taskId: TaskId): RuntimeTaskDashboardView {
+  taskDashboard(taskId: TaskId, authoritativePublication?: PublicOutputPublicationProjection): RuntimeTaskDashboardView {
     try {
       const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
-      return runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()));
+      return runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()), authoritativePublication);
     } catch (error) {
       throw apiError(error);
     }
@@ -2141,7 +2458,30 @@ export class UiRuntimeService {
   async taskDashboardWithPlan(taskId: TaskId): Promise<RuntimeTaskDashboardView> {
     const dashboard = this.taskDashboard(taskId);
     const plan = await this.executionPlanForTask(taskId);
-    return plan === undefined ? dashboard : { ...dashboard, plan };
+    const publicOutput = await this.authoritativePublicOutputForTask(taskId);
+    // Re-run the same pure dashboard projection with the authoritative
+    // publication so the output/narrative are computed from committed records.
+    const withPublication = publicOutput === undefined ? dashboard : this.taskDashboard(taskId, publicOutput);
+    return plan === undefined ? withPublication : { ...withPublication, plan };
+  }
+
+  /**
+   * Reads the committed public publication for a task's current operation from
+   * the authoritative task/cycle Organ Journal. The synchronous `taskDashboard`
+   * stays free of journal I/O for internal callers, so the async HTTP read model
+   * composes the durable read here. A read failure degrades to `unknown` with an
+   * empty commit list rather than hiding a published result.
+   */
+  private async authoritativePublicOutputForTask(taskId: TaskId): Promise<PublicOutputPublicationProjection | undefined> {
+    const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+    const binding = publicOutputBindingFor(task, this.options.organId);
+    if (binding === undefined || binding.scope.cycleId === undefined) return undefined;
+    try {
+      const publication = await this.options.checkpointStoreFor(task.taskId, binding.scope.cycleId).readPublicOutputs(binding);
+      return toPublicOutputProjection(publication);
+    } catch {
+      return { state: 'unknown', commits: [] };
+    }
   }
 
   /**
@@ -2448,6 +2788,345 @@ export class UiRuntimeService {
         );
       }
       throw apiError(error);
+    }
+  }
+
+  // ---- Public scoped history reads (I4/I5) ----------------------------------
+
+  private async resolveProjectCatalog(): Promise<ConfiguredProjectCatalog> {
+    const resolver = this.options.projectCatalog;
+    if (resolver === undefined) {
+      throw new UiRuntimeApiError(
+        'read.catalog-unavailable',
+        APP_OWNER,
+        'the UI runtime was started without a configured project catalog',
+        'start the runtime through the serve entry that resolves configuration',
+        503,
+      );
+    }
+    return resolver();
+  }
+
+  private async findProjectSource(projectKey: string): Promise<ConfiguredProjectReadSource | undefined> {
+    const catalog = await this.resolveProjectCatalog();
+    const declared = catalog.projects.find((project) => project.projectKey === projectKey);
+    if (declared !== undefined) return declared;
+    const bound = this.boundProjectSource();
+    return bound?.projectKey === projectKey ? bound : undefined;
+  }
+
+  /**
+   * Canonical source for the serve-bound project, derived from Config-owned
+   * RuntimePaths. It keeps the bound project readable even if the manifest
+   * catalog fails; it never scans a workspace for persistent state.
+   */
+  private boundProjectSource(): ConfiguredProjectReadSource | undefined {
+    const paths = this.options.runtimePaths;
+    if (paths === undefined || this.options.projectKey === undefined || paths.projectKey !== this.options.projectKey) return undefined;
+    return {
+      projectKey: paths.projectKey,
+      workspaceCwd: paths.workspaceCwd,
+      projectRoot: paths.projectRoot,
+      checkpointsRoot: paths.checkpointsRoot,
+    };
+  }
+
+  private isBoundScope(projectKey: string, mode: RuntimeMode): boolean {
+    return this.options.projectKey === projectKey && this.mode === mode;
+  }
+
+  /**
+   * Resolves one task's durable history scope: the declared project source, the
+   * task's own cycle journals (from its real operation records) and the organ
+   * identity recorded there. A task that never existed fails explicitly; a task
+   * that exists but has no committed cycle is a legal empty history.
+   */
+  private async resolveTaskHistoryJournals(
+    taskId: TaskId,
+    projectKey: string,
+    mode: RuntimeMode,
+  ): Promise<({ ok: true } & ResolvedTaskHistoryJournals) | { ok: false; failure: RuntimeReadFailure }> {
+    const source = await this.findProjectSource(projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
+    const read = readUiRuntimeTaskJournal(source.checkpointsRoot, mode);
+    if (read.failure !== undefined) return { ok: false, failure: read.failure };
+    const taskRecords = read.records.filter((record) => journalRecordTaskId(record) === taskId.value);
+    const live = this.isBoundScope(projectKey, mode)
+      && this.coordinator.taskSnapshots().some((snapshot) => snapshot.taskId.value === taskId.value);
+    const exists = taskRecords.some((record) => record.kind === 'task.created') || live;
+    if (!exists) return { ok: false, failure: unknownTaskFailure(taskId, projectKey, mode) };
+    const cycles: { readonly cycleId: CycleId; readonly organId: OrganId }[] = [];
+    for (const record of taskRecords) {
+      if (record.kind !== 'operation.started' || record.cycleId === undefined) continue;
+      if (cycles.some((entry) => entry.cycleId.value === record.cycleId!.value)) continue;
+      cycles.push({ cycleId: record.cycleId, organId: record.scope.organId });
+    }
+    const files = cycles.map((entry) => uiRuntimeTaskCheckpointPath(source.checkpointsRoot, mode, taskId, entry.cycleId));
+    if (this.isBoundScope(projectKey, mode) && this.options.executionJournalPath !== undefined) {
+      files.push(this.options.executionJournalPath);
+    }
+    return { ok: true, source, organId: cycles[0]?.organId ?? this.options.organId, files };
+  }
+
+  /**
+   * Public scoped context history read. It resolves the task's own cycle
+   * journals from the durable UI runtime journal and reads each through the
+   * same JSONL context-history port the producer commits to. `currentContextCommitRef`
+   * is the actual typed context head; a `contextViewRef` selects an older view
+   * without moving the head. A read never appends or advances control state.
+   */
+  async taskContextHistory(
+    taskId: TaskId,
+    input: TaskContextHistoryQuery,
+  ): Promise<RuntimeReadResult<RuntimeContextHistoryProjection>> {
+    const resolved = await this.resolveTaskHistoryJournals(taskId, input.projectKey, input.mode);
+    if (!resolved.ok) return { ok: false, failure: resolved.failure };
+    const fingerprint = historyFingerprint([
+      'context-history',
+      input.projectKey,
+      input.mode,
+      taskId.value,
+      input.agentRuntimeId ?? '',
+      input.contextViewRef ?? '',
+    ]);
+    let cursor: HistoryCursor | undefined;
+    if (input.cursor !== undefined) {
+      cursor = decodeHistoryCursor(input.cursor);
+      if (cursor === undefined) return { ok: false, failure: historyCursorFailure('context-history', 'invalid') };
+      if (cursor.fp !== fingerprint) return { ok: false, failure: historyCursorFailure('context-history', 'scope') };
+    }
+    try {
+      const scope: ScopeRef = { organId: resolved.organId, taskId };
+      const ordered: {
+        readonly f: number;
+        readonly i: number;
+        readonly view: ContextView;
+        readonly replacement: ContextReplacement | null;
+      }[] = [];
+      let head: JournalCommitRef | null = null;
+      for (let f = 0; f < resolved.files.length; f += 1) {
+        const port = createJsonlContextHistoryPort({ filePath: resolved.files[f]! });
+        const result = await port.readContextHistory({
+          scope,
+          limit: HISTORY_ENUMERATION_LIMIT,
+          ...(input.agentRuntimeId === undefined ? {} : { agentRuntimeId: input.agentRuntimeId }),
+        });
+        if (result.currentContextCommitRef) head = result.currentContextCommitRef;
+        const replacementByView = new Map(
+          result.replacements.map((replacement) => [replacement.toContextViewRef, replacement]),
+        );
+        result.views.forEach((view, i) => {
+          ordered.push({ f, i, view, replacement: replacementByView.get(view.contextViewRef) ?? null });
+        });
+      }
+      const selected = input.contextViewRef === undefined
+        ? ordered
+        : ordered.filter((entry) => entry.view.contextViewRef === input.contextViewRef);
+      let start = 0;
+      if (cursor !== undefined) {
+        const index = selected.findIndex((entry) => entry.f === cursor!.f && entry.i === cursor!.i);
+        if (index < 0) return { ok: false, failure: historyCursorFailure('context-history', 'not-found') };
+        start = index + 1;
+      }
+      const page = selected.slice(start, start + input.limit);
+      const hasMore = start + page.length < selected.length;
+      const last = page.at(-1);
+      const value = projectRuntimeContextHistory({
+        mode: input.mode,
+        taskId,
+        ...(head ? { currentContextCommitRef: toRuntimeCommitRef(head) } : {}),
+        views: page.map((entry) => ({
+          contextViewRef: entry.view.contextViewRef,
+          executionEpoch: entry.view.executionEpoch,
+          contextDigest: entry.view.contextDigest,
+          checkpointId: entry.view.checkpoint.checkpointId.value,
+          activeRefs: [...entry.view.activeRefs],
+          omittedRefs: [...entry.view.omittedRefs],
+        })),
+        replacements: page
+          .filter((entry) => entry.replacement !== null)
+          .map((entry) => toRuntimeReplacement(entry.replacement as ContextReplacement)),
+        ...(hasMore && last !== undefined
+          ? { nextCursor: encodeHistoryCursor({ f: last.f, i: last.i, fp: fingerprint }) }
+          : {}),
+      });
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, failure: readFailureFromError(error) };
+    }
+  }
+
+  /**
+   * Public scoped checkpoint history read. It enumerates exact committed
+   * checkpoints from the task's cycle journals with every supplied filter as an
+   * independent AND predicate. `viewed` resolves one exact committed target and
+   * never substitutes the latest checkpoint. `current` stays undefined because
+   * no verified checkpoint/recovery binding producer exists yet; the history is
+   * still readable and the occurrence filter advertises its own capability.
+   */
+  async taskCheckpointHistory(
+    taskId: TaskId,
+    input: TaskCheckpointHistoryQuery,
+  ): Promise<RuntimeReadResult<RuntimeCheckpointHistoryProjection>> {
+    const resolved = await this.resolveTaskHistoryJournals(taskId, input.projectKey, input.mode);
+    if (!resolved.ok) return { ok: false, failure: resolved.failure };
+    const fingerprint = historyFingerprint([
+      'checkpoints',
+      input.projectKey,
+      input.mode,
+      taskId.value,
+      input.directiveRevision === undefined ? '' : String(input.directiveRevision),
+      input.executionEpoch === undefined ? '' : String(input.executionEpoch),
+      input.cycleId?.value ?? '',
+      input.occurrenceRef ?? '',
+    ]);
+    let cursor: HistoryCursor | undefined;
+    if (input.cursor !== undefined) {
+      cursor = decodeHistoryCursor(input.cursor);
+      if (cursor === undefined) return { ok: false, failure: historyCursorFailure('checkpoints', 'invalid') };
+      if (cursor.fp !== fingerprint) return { ok: false, failure: historyCursorFailure('checkpoints', 'scope') };
+    }
+    try {
+      const scope: ScopeRef = { organId: resolved.organId, taskId };
+      const enumerate = async (applyFilters: boolean): Promise<{
+        readonly f: number;
+        readonly i: number;
+        readonly record: CommittedCheckpointRecord;
+      }[]> => {
+        const ordered: { readonly f: number; readonly i: number; readonly record: CommittedCheckpointRecord }[] = [];
+        for (let f = 0; f < resolved.files.length; f += 1) {
+          const port = createJsonlCheckpointJournal({ filePath: resolved.files[f]! });
+          const result = await port.listCommitted({
+            scope,
+            limit: HISTORY_ENUMERATION_LIMIT,
+            ...(applyFilters && input.directiveRevision !== undefined ? { directiveRevision: input.directiveRevision } : {}),
+            ...(applyFilters && input.executionEpoch !== undefined ? { executionEpoch: input.executionEpoch } : {}),
+            ...(applyFilters && input.cycleId !== undefined ? { cycleId: input.cycleId } : {}),
+            ...(applyFilters && input.occurrenceRef !== undefined ? { occurrenceRef: input.occurrenceRef } : {}),
+          });
+          result.checkpoints.forEach((record, i) => ordered.push({ f, i, record }));
+        }
+        return ordered;
+      };
+      // `viewed` resolves against every committed checkpoint of the task, so a
+      // list filter can never hide or substitute the selected target.
+      const all = await enumerate(false);
+      let viewed: { readonly checkpointId: string; readonly executionEpoch: number } | undefined;
+      if (input.viewed !== undefined) {
+        const target = all.find((entry) => entry.record.checkpoint.id.value === input.viewed);
+        if (target === undefined) {
+          return {
+            ok: false,
+            failure: {
+              code: 'checkpoints.viewed.unknown',
+              ownerId: APP_OWNER,
+              message: `no committed checkpoint ${input.viewed} in this task scope`,
+              nextAction: 'select a committed checkpoint of this task',
+            },
+          };
+        }
+        viewed = {
+          checkpointId: target.record.checkpoint.id.value,
+          executionEpoch: target.record.checkpoint.executionEpoch,
+        };
+      }
+      const hasFilter = input.directiveRevision !== undefined
+        || input.executionEpoch !== undefined
+        || input.cycleId !== undefined
+        || input.occurrenceRef !== undefined;
+      const selected = hasFilter ? await enumerate(true) : all;
+      let start = 0;
+      if (cursor !== undefined) {
+        const index = selected.findIndex((entry) => entry.f === cursor!.f && entry.i === cursor!.i);
+        if (index < 0) return { ok: false, failure: historyCursorFailure('checkpoints', 'not-found') };
+        start = index + 1;
+      }
+      const page = selected.slice(start, start + input.limit);
+      const hasMore = start + page.length < selected.length;
+      const last = page.at(-1);
+      const capabilities: Partial<Record<RuntimeCheckpointFilter, RuntimePoolAvailabilityProjection>> = {
+        directiveRevision: { state: 'available' },
+        executionEpoch: { state: 'available' },
+        cycleId: { state: 'available' },
+        occurrenceRef: { state: 'unavailable', reason: 'no occurrence binding producer exists yet' },
+      };
+      const value = projectRuntimeCheckpointHistory({
+        mode: input.mode,
+        taskId,
+        current: undefined,
+        ...(viewed === undefined ? {} : { viewed }),
+        checkpoints: page.map((entry) => toRuntimeCheckpoint(entry.record)),
+        ...(hasMore && last !== undefined
+          ? { nextCursor: encodeHistoryCursor({ f: last.f, i: last.i, fp: fingerprint }) }
+          : {}),
+        capabilities,
+      });
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, failure: readFailureFromError(error) };
+    }
+  }
+
+  /**
+   * Read-only I2 history reads. Every method resolves the exact task scope and
+   * reads the injected I2 authority; none of them commit, publish, retry, steer
+   * or advance the current position. `current` comes only from the
+   * owner-provided resolver, never from committed history or an event count.
+   */
+  async taskBusinessCycles(
+    taskId: TaskId,
+    input: I2HistoryViewedQuery,
+  ): Promise<RuntimeReadResult<RuntimeBusinessCycleHistoryProjection>> {
+    return this.readI2(taskId, (reader, taskScope) => reader.listBusinessCycles({ taskScope, ...input }));
+  }
+
+  async taskBusinessCycle(
+    taskId: TaskId,
+    cycleId: string,
+  ): Promise<RuntimeReadResult<RuntimeBusinessCycleEntryProjection>> {
+    return this.readI2(taskId, (reader, taskScope) => reader.readBusinessCycle({ taskScope, cycleId }));
+  }
+
+  async taskMilestoneReviews(
+    taskId: TaskId,
+    input: I2HistoryReviewQuery,
+  ): Promise<RuntimeReadResult<RuntimeMilestoneReviewHistoryProjection>> {
+    return this.readI2(taskId, (reader, taskScope) => reader.listMilestoneReviews({ taskScope, ...input }));
+  }
+
+  async taskInspectionOccurrences(
+    taskId: TaskId,
+    input: I2HistoryViewedQuery,
+  ): Promise<RuntimeReadResult<RuntimeInspectionOccurrenceHistoryProjection>> {
+    return this.readI2(taskId, (reader, taskScope) => reader.listInspectionOccurrences({ taskScope, ...input }));
+  }
+
+  async taskInspectionOccurrence(
+    taskId: TaskId,
+    occurrenceId: string,
+  ): Promise<RuntimeReadResult<RuntimeInspectionOccurrenceEntryProjection>> {
+    return this.readI2(taskId, (reader, taskScope) => reader.readInspectionOccurrence({ taskScope, occurrenceId }));
+  }
+
+  async taskInspectionComparison(
+    taskId: TaskId,
+    left: string,
+    right: string,
+  ): Promise<RuntimeReadResult<RuntimeInspectionComparisonProjection>> {
+    return this.readI2(taskId, (reader, taskScope) => reader.compareInspections({ taskScope, left, right }));
+  }
+
+  private async readI2<T>(
+    taskId: TaskId,
+    run: (reader: I2HistoryReader, taskScope: ScopeRef) => Promise<T>,
+  ): Promise<RuntimeReadResult<T>> {
+    const reader = this.i2Reader;
+    if (reader === undefined) return { ok: false, failure: i2UnavailableFailure() };
+    const taskScope: ScopeRef = { organId: this.options.organId, taskId };
+    try {
+      return { ok: true, value: await run(reader, taskScope) };
+    } catch (error) {
+      return { ok: false, failure: readFailureFromError(error) };
     }
   }
 
@@ -4241,6 +4920,16 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
 
   settle(input: { readonly runtimeId: string; readonly executionEpoch: number }): Promise<AgentClosure> {
     return this.driver.settle(input);
+  }
+
+  /**
+   * Hands the inner driver the child-call manager that already exists on this
+   * task's assembly. This wrapper only forwards the typed manager; it never
+   * builds a manager, pool, driver or assembly of its own.
+   */
+  bindChildCallManager(manager: Pick<OrchestrationManager, 'callChild'>): void {
+    (this.driver as Partial<RuntimeExecutionDriver & { bindChildCallManager?: (manager: Pick<OrchestrationManager, 'callChild'>) => void }>)
+      .bindChildCallManager?.(manager);
   }
 
   close(): Promise<ProviderCloseResult> {

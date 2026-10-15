@@ -1,4 +1,12 @@
-import type { EvidenceRef, HealthState, LifecycleState, OrganId, SemanticObservationEnvelope, TaskId } from '@humanagent/contracts';
+import type {
+  EvidenceRef,
+  HealthState,
+  InteractionTraceEntry,
+  LifecycleState,
+  OrganId,
+  SemanticObservationEnvelope,
+  TaskId,
+} from '@humanagent/contracts';
 import type { CanonicalContextEvent } from '../../context-events/src/index.js';
 import type { TaskDetailProjection } from './models.js';
 
@@ -186,6 +194,152 @@ export interface RuntimeTaskCheckpointProjection {
   readonly committedAt: string;
 }
 
+export interface RuntimeReadFailure {
+  readonly code: string;
+  readonly ownerId: string;
+  readonly message: string;
+  readonly nextAction: string;
+}
+
+export type RuntimeReadResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly failure: RuntimeReadFailure };
+
+export type RuntimeReadScope =
+  | { readonly kind: 'system' }
+  | { readonly kind: 'project'; readonly projectKey: string }
+  | {
+      readonly kind: 'task';
+      readonly projectKey: string;
+      readonly mode: RuntimeMode;
+      readonly taskId: TaskId;
+    };
+
+export interface RuntimeProjectTaskReadRow {
+  readonly scope: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+  readonly task: RuntimeTaskRowProjection;
+  readonly basis: 'live-runtime' | 'durable-history';
+}
+
+export interface RuntimeProjectReadProjection {
+  readonly surface: 'runtime-project';
+  readonly scope: Extract<RuntimeReadScope, { readonly kind: 'project' }>;
+  readonly label: string;
+  readonly observedAt: string;
+  readonly tasks: readonly RuntimeProjectTaskReadRow[];
+  readonly taskCount: number;
+  readonly complete: boolean;
+  readonly failures: readonly RuntimeReadFailure[];
+}
+
+export interface RuntimeSystemReadProjection {
+  readonly surface: 'runtime-system';
+  readonly scope: { readonly kind: 'system' };
+  readonly observedAt: string;
+  readonly runtime: RuntimeStatusProjection;
+  readonly coverage: 'configured-projects-in-current-control-root';
+  readonly projects: readonly RuntimeProjectReadProjection[];
+  readonly taskCount: number;
+  readonly complete: boolean;
+  readonly failures: readonly RuntimeReadFailure[];
+}
+
+export interface RuntimeStoredRecordRef {
+  readonly projectKey: string;
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly source: 'task-journal' | 'checkpoint-journal';
+  readonly ordinal: number;
+  readonly operationId?: string;
+  readonly executionEpoch?: number;
+  readonly checkpointId?: string;
+}
+
+export interface RuntimeRawEventProjection extends RuntimeTaskEventProjection {
+  readonly eventId: string;
+  readonly operationId: string;
+  readonly executionEpoch: number;
+  readonly turnId?: string;
+  readonly requestId?: string;
+  readonly parentRequestId?: string;
+  readonly providerOccurredAt?: string;
+}
+
+export type RuntimeRawRecordBody =
+  | {
+      readonly kind: 'task.created' | 'task.updated';
+      readonly title: string;
+      readonly directive: string;
+      readonly directiveRevision: number;
+    }
+  | { readonly kind: 'task.deleted'; readonly deletedAt: string }
+  | {
+      readonly kind: 'operation.started';
+      readonly operationId: string;
+      readonly executionEpoch: number;
+      readonly input: string;
+      readonly orchestrated: boolean;
+    }
+  | { readonly kind: 'operation.event'; readonly event: RuntimeRawEventProjection }
+  | {
+      readonly kind: 'checkpoint';
+      readonly checkpointId: string;
+      readonly seq: number;
+      readonly outcome: string;
+      readonly summary: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+    };
+
+export interface RuntimeRawRecordProjection {
+  readonly ref: RuntimeStoredRecordRef;
+  readonly occurredAt: string;
+  readonly body: RuntimeRawRecordBody;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface RuntimeTaskRecordsProjection {
+  readonly surface: 'runtime-task-records';
+  readonly scope: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+  readonly observedAt: string;
+  readonly actions: readonly {
+    readonly entry: InteractionTraceEntry;
+    readonly rawRef: RuntimeStoredRecordRef;
+  }[];
+  readonly raw: readonly RuntimeRawRecordProjection[];
+  readonly nextCursor?: string;
+  readonly hasMore: boolean;
+}
+
+export interface PublicOutputCommitProjection {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+  readonly text: string;
+}
+
+export interface PublicOutputPublicationProjection {
+  readonly state: 'pending' | 'committed' | 'unavailable' | 'unknown';
+  readonly commits: readonly PublicOutputCommitProjection[];
+  readonly publicCommitWatermark?: number;
+}
+
+export interface TaskRuntimeIncarnationProjection {
+  readonly runtimeId: string;
+  readonly generation: number;
+  readonly agentInstanceId?: string;
+  readonly roleId?: string;
+  readonly taskId: TaskId;
+  readonly assignmentId?: string;
+  readonly executionEpoch?: number;
+  readonly capabilities?: readonly string[];
+  readonly unavailable?: string;
+}
+
+export interface RuntimePoolAvailabilityProjection {
+  readonly state: 'available' | 'unavailable' | 'unknown';
+  readonly reason?: string;
+}
+
 export interface RuntimeTaskErrorProjection {
   readonly code: string;
   readonly ownerId: string;
@@ -216,6 +370,281 @@ export interface RuntimeTaskDashboardProjection {
   readonly observationRef: string;
   /** Real execution liveness as the runtime observed it; absent when no facts were reported. */
   readonly liveness?: RuntimeLivenessProjection;
+  /** Public text exists only when its commit is explicitly included here. */
+  readonly publicOutput?: PublicOutputPublicationProjection;
+  readonly runtimePool?: {
+    readonly incarnations: readonly TaskRuntimeIncarnationProjection[];
+    readonly availability: RuntimePoolAvailabilityProjection;
+  };
+}
+
+export interface RuntimeCommitRefProjection {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+export type RuntimeCheckpointFilter =
+  | 'directiveRevision'
+  | 'executionEpoch'
+  | 'cycleId'
+  | 'occurrenceRef';
+
+export interface RuntimeContextViewProjection {
+  readonly contextViewRef: string;
+  readonly executionEpoch: number;
+  readonly contextDigest: string;
+  readonly checkpointId: string;
+  readonly activeRefs: readonly string[];
+  readonly omittedRefs: readonly string[];
+}
+
+export interface RuntimeContextReplacementProjection {
+  readonly replacementId: string;
+  readonly executionEpoch: number;
+  readonly fromContextViewRef: string;
+  readonly toContextViewRef: string;
+  readonly toContextDigest: string;
+  readonly deltaIds: readonly string[];
+  readonly reason: 'observation' | 'compaction' | 'recovery';
+  readonly replacementDigest: string;
+}
+
+export interface RuntimeContextHistoryProjection {
+  readonly surface: 'runtime-context-history';
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly currentContextCommitRef: RuntimeCommitRefProjection | undefined;
+  readonly views: readonly RuntimeContextViewProjection[];
+  readonly replacements: readonly RuntimeContextReplacementProjection[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeCheckpointProjection {
+  readonly checkpointId: string;
+  readonly seq: number;
+  readonly executionEpoch: number;
+  readonly summary: string;
+  readonly directiveRevision?: string;
+  readonly cycleId?: string;
+  readonly occurrenceRef?: string;
+  readonly committedAt?: string;
+  readonly commitRef?: RuntimeCommitRefProjection;
+}
+
+export interface RuntimeCheckpointCursorProjection {
+  readonly checkpointId: string;
+  readonly executionEpoch: number;
+}
+
+export interface RuntimeCheckpointHistoryProjection {
+  readonly surface: 'runtime-checkpoint-history';
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  /** Execution position is independent from user selection. */
+  readonly current: RuntimeCheckpointCursorProjection | undefined;
+  readonly viewed: RuntimeCheckpointCursorProjection | undefined;
+  readonly checkpoints: readonly RuntimeCheckpointProjection[];
+  readonly nextCursor?: string;
+  readonly capabilities: Partial<Record<RuntimeCheckpointFilter, RuntimePoolAvailabilityProjection>>;
+}
+
+// ── I2 durable history read projections ─────────────────────────────────────
+// These are the frozen U schema for the I2 public history routes. Every field
+// comes from a committed I2 record or an owner-provided current-position
+// resolver. The projection never derives the current position from history.
+
+export interface RuntimeTaskScopeProjection {
+  readonly organId: OrganId;
+  readonly taskId: TaskId;
+}
+
+/**
+ * Current execution position for an I2 history read.
+ *
+ * `unknown` is explicit: a runtime assembled without a current-position owner
+ * reports `unknown`, never a known-empty `{ cycleId: null }` that would read as
+ * "this task has no current cycle". Selecting an old history entry never writes
+ * this value.
+ */
+export type RuntimeI2CurrentPosition =
+  | {
+      readonly state: 'known';
+      readonly cycleId: string | null;
+      readonly planRevisionCommitRef: RuntimeCommitRefProjection | null;
+    }
+  | { readonly state: 'unknown'; readonly reason: string };
+
+export interface RuntimeNextActionProjection {
+  readonly kind: string;
+  readonly ref: string | null;
+}
+
+export interface RuntimeScheduleOccurrenceProjection {
+  readonly subscriptionId: string;
+  readonly scheduleRevision: number;
+  readonly ordinal: number;
+  readonly occurrenceId: string;
+}
+
+export interface RuntimeInspectionItemProjection {
+  readonly checkId: string;
+  /** What the check inspected, from the immutable definition. */
+  readonly criterion: string;
+  /** Display state; a negative observed condition is still `completed`. */
+  readonly state: 'completed' | 'failed' | 'missing';
+  /** Exact execution outcome, keeping the distinct blocked/cancelled/unknown. */
+  readonly outcome: 'completed' | 'failed' | 'blocked' | 'cancelled' | 'unknown' | 'missing';
+  readonly judgment: string | null;
+  readonly reason: string | null;
+  readonly resultRef: string | null;
+  readonly completedAt: string | null;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface RuntimeInspectionOccurrenceProjection {
+  readonly occurrenceId: string;
+  readonly cycleId: string;
+  readonly executionEpoch: number;
+  readonly definitionId: string;
+  readonly definitionVersion: string;
+  readonly definitionDigest: string;
+  readonly definitionCommitRef: RuntimeCommitRefProjection;
+  readonly openingCommitRef: RuntimeCommitRefProjection;
+  readonly settlementCommitRef: RuntimeCommitRefProjection | null;
+  readonly openedAt: string;
+  readonly settledAt: string | null;
+  readonly state: 'open' | 'settled';
+  readonly outcome: 'completed' | 'failed' | 'blocked' | 'cancelled' | 'unknown' | 'pending';
+  readonly outcomeReason: string | null;
+  readonly scheduleOccurrenceRef: RuntimeScheduleOccurrenceProjection | null;
+  readonly items: readonly RuntimeInspectionItemProjection[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface RuntimeInspectionOccurrenceHistoryProjection {
+  readonly surface: 'runtime-inspection-occurrences';
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly occurrenceId: string } | null;
+  readonly entries: readonly RuntimeInspectionOccurrenceProjection[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeInspectionOccurrenceEntryProjection {
+  readonly surface: 'runtime-inspection-occurrence';
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly occurrenceId: string } | null;
+  readonly entry: RuntimeInspectionOccurrenceProjection;
+}
+
+export interface RuntimeReviewFindingProjection {
+  readonly findingId: string;
+  readonly severity: string;
+  readonly locationRef: string;
+  readonly problem: string;
+  readonly expected: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface RuntimeSelectedReviewerProjection {
+  readonly runtimeId: string;
+  readonly generation: number;
+  readonly agentInstanceId: string;
+  readonly roleId: string;
+  readonly assignmentId: string;
+  readonly executionEpoch: number;
+}
+
+export interface RuntimeMilestoneReviewProjection {
+  readonly milestoneId: string;
+  readonly cycleId: string;
+  readonly status: 'passed' | 'failed' | 'inconclusive';
+  readonly reviewKind: string;
+  readonly findings: readonly RuntimeReviewFindingProjection[];
+  readonly outputText: string;
+  readonly artifactRef: string | null;
+  readonly artifactDigest: string | null;
+  readonly reviewer: RuntimeSelectedReviewerProjection;
+  readonly completedAt: string;
+  readonly reviewCommitRef: RuntimeCommitRefProjection;
+  readonly planRevisionCommitRef: RuntimeCommitRefProjection;
+  /** Alignment is a separate durable edge; `pending` is not a passed milestone. */
+  readonly alignment: 'aligned' | 'pending';
+  readonly alignmentCommitRef: RuntimeCommitRefProjection | null;
+  readonly alignedPlanRevisionCommitRef: RuntimeCommitRefProjection | null;
+  readonly checkpointCommitRef: RuntimeCommitRefProjection | null;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface RuntimeMilestoneReviewHistoryProjection {
+  readonly surface: 'runtime-milestone-reviews';
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly entries: readonly RuntimeMilestoneReviewProjection[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeBusinessCycleProjection {
+  readonly cycleId: string;
+  readonly state: LifecycleState;
+  readonly directiveRevision: number;
+  readonly executionEpoch: number;
+  readonly taskFlow: { readonly kind: string; readonly definitionVersion: number };
+  readonly openedAt: string;
+  readonly openingReason: string;
+  readonly openedCommitRef: RuntimeCommitRefProjection;
+  readonly planRevisionCommitRef: RuntimeCommitRefProjection;
+  readonly previousCycleCommitRef: RuntimeCommitRefProjection | null;
+  readonly scheduleOccurrenceRef: RuntimeScheduleOccurrenceProjection | null;
+  readonly inspectionOccurrenceId: string | null;
+  readonly progress: 'open' | 'closed';
+  readonly outcome: 'continue' | 'wait' | 'stop' | 'recover' | null;
+  readonly next: RuntimeNextActionProjection | null;
+  readonly closedAt: string | null;
+  readonly closureCommitRef: RuntimeCommitRefProjection | null;
+  readonly checkpointCommitRef: RuntimeCommitRefProjection | null;
+  readonly inspectionSettlementCommitRef: RuntimeCommitRefProjection | null;
+  readonly reviews: readonly RuntimeMilestoneReviewProjection[];
+  readonly alignmentPending: number;
+}
+
+export interface RuntimeBusinessCycleHistoryProjection {
+  readonly surface: 'runtime-business-cycles';
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly cycleId: string } | null;
+  readonly entries: readonly RuntimeBusinessCycleProjection[];
+  readonly nextCursor?: string;
+}
+
+export interface RuntimeBusinessCycleEntryProjection {
+  readonly surface: 'runtime-business-cycle';
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly viewed: { readonly cycleId: string } | null;
+  readonly entry: RuntimeBusinessCycleProjection;
+}
+
+export interface RuntimeInspectionItemComparisonProjection {
+  readonly checkId: string;
+  readonly criterion: string;
+  readonly change: 'unchanged' | 'changed' | 'not-compared';
+  readonly before: RuntimeInspectionItemProjection;
+  readonly after: RuntimeInspectionItemProjection;
+}
+
+export interface RuntimeInspectionComparisonProjection {
+  readonly surface: 'runtime-inspection-comparison';
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly current: RuntimeI2CurrentPosition;
+  readonly left: { readonly occurrenceId: string };
+  readonly right: { readonly occurrenceId: string };
+  readonly comparable: boolean;
+  readonly reason: string | null;
+  readonly definition: { readonly definitionId: string; readonly definitionVersion: string } | null;
+  readonly items: readonly RuntimeInspectionItemComparisonProjection[];
 }
 
 /**
