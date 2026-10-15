@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { id } from '../../dist/app/contracts/src/index.js';
 import { resolveRuntimePaths } from '../../dist/app/config/src/index.js';
@@ -53,7 +54,7 @@ async function snapshot(root) {
   return files;
 }
 
-async function fixture() {
+export async function fixture() {
   await mkdir(fixtureRoot, { recursive: true });
   const root = await mkdtemp(join(fixtureRoot, 'http-'));
   const paths = await resolveRuntimePaths({ workspace: process.cwd(), controlRoot: root });
@@ -172,7 +173,7 @@ async function fixture() {
   return { root, paths, service, checkpoints, contextCommit, recordA, recordB, semantics, publication, capture, effects: () => effects };
 }
 
-test('production checkpoint GET preserves canonical current and exact viewed receipts without writes', async () => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) test('production checkpoint GET preserves canonical current and exact viewed receipts without writes', async () => {
   const f = await fixture();
   const accessControl = await AccessControlService.open({ credentialPath: f.paths.webAccessCredentialPath, create: true });
   const challenge = accessControl.createPairingChallenge('c3-http-fixture', 1);
