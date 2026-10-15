@@ -26,7 +26,7 @@
     "D-S Runtime domain": "packages/runtime/src/context/active-turn-segments.ts",
     "TG1 grant/registration adapter": "packages/runtime/src/admission/task-grant.ts",
     "J1 JSONL/immutable assets": "packages/adapters/jsonl/src/active-turn.ts + packages/app/src/native-recovery-assets.ts",
-    "A shared final App": "packages/app/src/task-control.ts"
+    "A shared final App": "packages/app/src/ui-runtime/task-control.ts"
   },
   "candidates": {
     "TG1": {
@@ -103,8 +103,8 @@
       "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内不读网络、不执行工具。"
     },
     "establish_epoch_window": {
-      "ownerPath": "packages/app/src/task-control.ts",
-      "ownerRel": "packages/app/src/task-control.ts",
+      "ownerPath": "packages/app/src/ui-runtime/task-control.ts",
+      "ownerRel": "packages/app/src/ui-runtime/task-control.ts",
       "ownerDomain": "A shared final App",
       "admissionBackingOwnerPath": "packages/runtime/src/admission/task-grant.ts",
       "admissionBackingOwnerRel": "packages/runtime/src/admission/task-grant.ts",
@@ -123,8 +123,8 @@
       "designNote": "保存本 segment 的真实 v2 capture、producer drains 与 recovery-assets receipt；producersDrained:true 只是结构条件，不能替代实际 drain/请求/completion 关系。v1 资产与 v1 receipt 保持原样。"
     },
     "resolve_resume_outcome": {
-      "ownerPath": "packages/app/src/task-control.ts",
-      "ownerRel": "packages/app/src/task-control.ts",
+      "ownerPath": "packages/app/src/ui-runtime/task-control.ts",
+      "ownerRel": "packages/app/src/ui-runtime/task-control.ts",
       "ownerDomain": "A shared final App",
       "implementationStatus": "pending-typed-outcome-projection",
       "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）。failed/unknown completion 保留责任，不伪造成 complete。"
