@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type {
+  JournalCommitRef,
   PublishedTaskPlanRevision,
   ScopeRef,
   TaskPlanRevisionPublicationInput,
@@ -27,8 +28,19 @@ function sameTaskScope(scope: PublishedTaskPlanRevision['scope'], filter: ScopeR
     && (!filter.taskId || (scope.taskId.scope === filter.taskId.scope && scope.taskId.value === filter.taskId.value));
 }
 
+function revisionIdentityDigest(organId: string, taskId: string, revisionId: string): string {
+  return createHash('sha256').update(`${organId}\0${taskId}\0${revisionId}`).digest('hex');
+}
+
 function revisionCommitId(scope: PublishedTaskPlanRevision['scope'], revisionId: string): string {
-  return `task-plan-revision:${createHash('sha256').update(`${scope.organId.value}\0${scope.taskId.value}\0${revisionId}`).digest('hex')}`;
+  return `task-plan-revision:${revisionIdentityDigest(scope.organId.value, scope.taskId.value, revisionId)}`;
+}
+
+function commitRef(record: JournalRecord): JournalCommitRef {
+  if (record.commitId === undefined) {
+    throw new JournalIntegrityError('task plan revision record is not committed');
+  }
+  return { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
 }
 
 function revisionFromRecord(record: JournalRecord): PublishedTaskPlanRevision | undefined {
@@ -127,5 +139,24 @@ export class JsonlTaskPlanRevisionJournal {
   async replay(scope?: ScopeRef): Promise<readonly PublishedTaskPlanRevision[]> {
     const revisions = typedReplay(await this.journal.replay());
     return scope === undefined ? revisions : revisions.filter((revision) => sameTaskScope(revision.scope, scope));
+  }
+
+  /**
+   * Reads the commit receipt of one revision from the physical Journal record that holds it. The
+   * three fields come from that record, never from the revision payload.
+   */
+  async getCommitRef(scope: ScopeRef, revisionId: string): Promise<JournalCommitRef | null> {
+    if (scope.taskId === undefined) return null;
+    const records = await this.journal.replay();
+    typedReplay(records);
+    const commitId = `task-plan-revision:${revisionIdentityDigest(scope.organId.value, scope.taskId.value, revisionId)}`;
+    const record = records.find((candidate) => candidate.commitId === commitId);
+    if (record === undefined) return null;
+    const revision = revisionFromRecord(record);
+    if (revision === undefined) {
+      throw new JournalIntegrityError('task plan revision commit identity does not resolve to a revision record');
+    }
+    if (!sameTaskScope(revision.scope, scope) || revision.revisionId !== revisionId) return null;
+    return commitRef(record);
   }
 }

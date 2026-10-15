@@ -9,15 +9,25 @@ import {
   type EvidenceRef,
   type NextAction,
   type ScopeRef,
+  type TaskId,
+  type WorkAssignment,
 } from '../../../contracts/src/index.js';
 import { OrchestrationError, OrchestrationPortError } from './errors.js';
 import type {
   OrchestrationIssue,
   OrchestrationRuntimeFactoryPort,
+  RuntimeInstanceCreateContext,
+  RuntimeInstanceRequest,
+  TaskInstanceHandle,
+  TaskRuntimeIncarnation,
+  TaskExecutionHandle,
   RuntimePoolLease,
 } from './types.js';
 
 const DEFAULT_OWNER_ID = 'orchestration-runtime-manager';
+function defaultInstanceId(): string {
+  return globalThis.crypto.randomUUID();
+}
 
 interface RuntimeRecord {
   readonly runtimeId: string;
@@ -25,6 +35,16 @@ interface RuntimeRecord {
   capabilities: readonly string[];
   state: 'idle' | 'running' | 'spawning' | 'failed' | 'disposed';
   lease?: RuntimePoolLease;
+  handle?: TaskInstanceHandle;
+  /**
+   * Settle context captured for the current acquisition. The handle's release
+   * hook needs the originating assignment and agent, which the pool keeps so
+   * that release stays a single entry point on the pool.
+   */
+  acquisition?: {
+    readonly assignment: RuntimeInstanceRequest;
+    readonly agentId: string;
+  };
   binding?: {
     readonly executionEpoch: number;
     readonly ownerId: string;
@@ -35,19 +55,28 @@ interface RuntimeRecord {
   startupIssue?: OrchestrationIssue;
 }
 
-export interface RuntimePoolAcquireInput {
+export interface RuntimePoolAcquireInput<
+  TRequest extends RuntimeInstanceRequest = WorkAssignment,
+  THandle extends TaskInstanceHandle = TaskExecutionHandle,
+> {
   readonly requiredCapabilities: readonly string[];
   readonly ownerId?: string;
   readonly executionEpoch: number;
-  readonly assignmentId: string;
+  readonly taskId: TaskId;
+  readonly roleId: string;
+  readonly agentId: string;
+  readonly assignment: TRequest;
+  readonly creator: (input: RuntimeInstanceCreateContext<TRequest>) => THandle;
   readonly scope: ScopeRef;
   readonly evidenceRefs?: readonly EvidenceRef[];
 }
 
-export type RuntimePoolAcquireResult =
+export type RuntimePoolAcquireResult<THandle extends TaskInstanceHandle = TaskExecutionHandle> =
   | {
       readonly status: 'acquired';
+      readonly incarnation: TaskRuntimeIncarnation;
       readonly lease: RuntimePoolLease;
+      readonly handle: THandle;
       readonly decision: ReturnType<typeof decideOrchestrationRuntimePool>;
     }
   | {
@@ -69,6 +98,12 @@ export interface AgentRuntimePoolManagerOptions {
   readonly maxRuntimes: number;
   readonly factory: OrchestrationRuntimeFactoryPort;
   readonly ownerId?: string;
+  /**
+   * Allocates the domain instance id for a newly constructed execution handle.
+   * The default is a random UUID; it is never derived from a runtime, role,
+   * session, path, or assignment label.
+   */
+  readonly instanceIdFactory?: () => string;
   readonly initialRuntimes?: readonly {
     readonly runtimeId: string;
     readonly generation?: number;
@@ -153,7 +188,30 @@ function issueFromError(
 }
 
 function cloneLease(lease: RuntimePoolLease): RuntimePoolLease {
-  return { ...lease, capabilities: [...lease.capabilities] };
+  return { ...lease, incarnation: { ...lease.incarnation }, capabilities: [...lease.capabilities] };
+}
+
+function assertSameIncarnation(
+  actual: TaskRuntimeIncarnation,
+  expected: TaskRuntimeIncarnation,
+  scope: ScopeRef,
+): void {
+  const matches = actual.runtimeId === expected.runtimeId
+    && actual.generation === expected.generation
+    && actual.agentInstanceId === expected.agentInstanceId
+    && actual.roleId === expected.roleId
+    && actual.taskId.value === expected.taskId.value
+    && actual.assignmentId === expected.assignmentId
+    && actual.executionEpoch === expected.executionEpoch;
+  if (!matches) {
+    throw new OrchestrationPortError('execution port returned a mismatched incarnation', {
+      ownerId: DEFAULT_OWNER_ID,
+      reason: 'orchestration.runtime.instance.identity-mismatch',
+      nextAction: { kind: 'recover', ref: 'orchestration.runtime.instance' },
+      evidenceRefs: [evidence(scope, 'orchestration.runtime.instance')],
+      conditionRef: 'orchestration.runtime.instance',
+    });
+  }
 }
 
 export class AgentRuntimePoolManager {
@@ -161,6 +219,7 @@ export class AgentRuntimePoolManager {
   private readonly ownerId: string;
   private readonly maxRuntimes: number;
   private readonly factory: OrchestrationRuntimeFactoryPort;
+  private readonly instanceIdFactory: () => string;
   private disposed = false;
   private sequence = 0;
   private generationSequence = 0;
@@ -177,6 +236,7 @@ export class AgentRuntimePoolManager {
     }
     this.maxRuntimes = options.maxRuntimes;
     this.factory = options.factory;
+    this.instanceIdFactory = options.instanceIdFactory ?? defaultInstanceId;
     this.ownerId = options.ownerId ?? DEFAULT_OWNER_ID;
     assertNonEmpty(this.ownerId, 'orchestration pool owner');
     for (const runtime of options.initialRuntimes ?? []) {
@@ -210,7 +270,10 @@ export class AgentRuntimePoolManager {
     return { maxRuntimes: this.maxRuntimes, runtimes };
   }
 
-  async acquire(input: RuntimePoolAcquireInput): Promise<RuntimePoolAcquireResult> {
+  async acquire<
+    TRequest extends RuntimeInstanceRequest = WorkAssignment,
+    THandle extends TaskInstanceHandle = TaskExecutionHandle,
+  >(input: RuntimePoolAcquireInput<TRequest, THandle>): Promise<RuntimePoolAcquireResult<THandle>> {
     if (this.disposed) {
       return {
         status: 'blocked',
@@ -226,7 +289,18 @@ export class AgentRuntimePoolManager {
     }
     try {
       assertExecutionEpoch(input.executionEpoch);
-      assertNonEmpty(input.assignmentId, 'assignment id');
+      assertNonEmpty(input.assignment.assignmentId, 'assignment id');
+      assertNonEmpty(input.agentId, 'agent id');
+      assertNonEmpty(input.roleId, 'execution role id');
+      if (input.taskId.scope !== 'task' || input.taskId.value !== input.assignment.taskId.value) {
+        throw new OrchestrationError('acquisition task does not match the assignment task', {
+          ownerId: input.ownerId ?? this.ownerId,
+          reason: 'orchestration.runtime.task-mismatch',
+          nextAction: { kind: 'recover', ref: 'orchestration.runtime.task' },
+          evidenceRefs: input.evidenceRefs ?? [evidence(input.scope, 'orchestration.runtime.task')],
+          conditionRef: 'orchestration.runtime.task',
+        });
+      }
       for (const capability of input.requiredCapabilities) assertNonEmpty(capability, 'required capability');
     } catch (error) {
       return {
@@ -275,10 +349,26 @@ export class AgentRuntimePoolManager {
 
     const runtime = this.runtimes.get(decision.runtimeId);
     if (decision.action === 'reuse' && runtime) {
-      const lease = this.createLease(runtime, input, decision.ownerId);
-      runtime.state = 'running';
-      runtime.lease = lease;
-      return { status: 'acquired', lease: cloneLease(lease), decision };
+      try {
+        const { incarnation, handle } = await this.createInstanceHandle(runtime, input);
+        const lease = this.createLease(runtime, input, decision.ownerId, incarnation);
+        runtime.state = 'running';
+        runtime.lease = lease;
+        runtime.handle = handle;
+        runtime.acquisition = { assignment: input.assignment, agentId: input.agentId };
+        return { status: 'acquired', incarnation, lease: cloneLease(lease), handle, decision };
+      } catch (error) {
+        return {
+          status: 'blocked',
+          issue: issueFromError(error, {
+            code: 'runtime-instance-failed',
+            ownerId: decision.ownerId,
+            scope: input.scope,
+            conditionRef: 'orchestration.runtime.instance',
+            fallbackEvidenceRefs: input.evidenceRefs,
+          }),
+        };
+      }
     }
 
     this.generationSequence += 1;
@@ -291,7 +381,7 @@ export class AgentRuntimePoolManager {
       binding: {
         executionEpoch: input.executionEpoch,
         ownerId: decision.ownerId,
-        assignmentId: input.assignmentId,
+        assignmentId: input.assignment.assignmentId,
       },
     };
     this.runtimes.set(spawning.runtimeId, spawning);
@@ -305,7 +395,7 @@ export class AgentRuntimePoolManager {
         generation,
         executionEpoch: input.executionEpoch,
         ownerId: decision.ownerId,
-        assignmentId: input.assignmentId,
+        assignmentId: input.assignment.assignmentId,
         requiredCapabilities: [...input.requiredCapabilities],
         scope: input.scope,
       });
@@ -372,10 +462,13 @@ export class AgentRuntimePoolManager {
         });
       }
       spawning.capabilities = [...started.capabilities];
-      const lease = this.createLease(spawning, input, decision.ownerId);
+      const { incarnation, handle } = await this.createInstanceHandle(spawning, input);
+      const lease = this.createLease(spawning, input, decision.ownerId, incarnation);
       spawning.state = 'running';
       spawning.lease = lease;
-      return { status: 'acquired', lease: cloneLease(lease), decision };
+      spawning.handle = handle;
+      spawning.acquisition = { assignment: input.assignment, agentId: input.agentId };
+      return { status: 'acquired', incarnation, lease: cloneLease(lease), handle, decision };
     } catch (error) {
       let cleanupIssue: OrchestrationIssue | undefined;
       try {
@@ -421,6 +514,10 @@ export class AgentRuntimePoolManager {
     if (runtime.disposePromise) return runtime.disposePromise;
     const binding = runtime.lease ?? runtime.binding;
     runtime.disposePromise = (async () => {
+      const handle = runtime.handle;
+      runtime.handle = undefined;
+      runtime.acquisition = undefined;
+      if (handle) await handle.dispose();
       await this.factory.dispose({
         runtimeId: runtime.runtimeId,
         generation: runtime.generation,
@@ -438,21 +535,63 @@ export class AgentRuntimePoolManager {
     return runtime.disposePromise;
   }
 
-  private createLease(
+  private createLease<TRequest extends RuntimeInstanceRequest, THandle extends TaskInstanceHandle>(
     runtime: RuntimeRecord,
-    input: RuntimePoolAcquireInput,
+    input: RuntimePoolAcquireInput<TRequest, THandle>,
     ownerId: string,
+    incarnation: TaskRuntimeIncarnation,
   ): RuntimePoolLease {
     this.sequence += 1;
     return {
       leaseId: `${runtime.runtimeId}:${runtime.generation}:${this.sequence}`,
       runtimeId: runtime.runtimeId,
       generation: runtime.generation,
+      incarnation,
       executionEpoch: input.executionEpoch,
       ownerId,
-      assignmentId: input.assignmentId,
+      assignmentId: input.assignment.assignmentId,
       capabilities: [...runtime.capabilities],
     };
+  }
+
+  /**
+   * Allocates the domain instance id and constructs the real execution handle
+   * for one acquisition. A handle whose declared identity does not match the
+   * allocated incarnation is disposed and never published.
+   */
+  private async createInstanceHandle<
+    TRequest extends RuntimeInstanceRequest,
+    THandle extends TaskInstanceHandle,
+  >(
+    runtime: RuntimeRecord,
+    input: RuntimePoolAcquireInput<TRequest, THandle>,
+  ): Promise<{ readonly incarnation: TaskRuntimeIncarnation; readonly handle: THandle }> {
+    const incarnation: TaskRuntimeIncarnation = {
+      runtimeId: runtime.runtimeId,
+      generation: runtime.generation,
+      agentInstanceId: this.instanceIdFactory(),
+      roleId: input.roleId,
+      taskId: input.taskId,
+      assignmentId: input.assignment.assignmentId,
+      executionEpoch: input.executionEpoch,
+    };
+    const handle = input.creator({
+      incarnation,
+      agentId: input.agentId,
+      scope: input.scope,
+      assignment: input.assignment,
+    });
+    try {
+      assertSameIncarnation(handle.incarnation, incarnation, input.scope);
+    } catch (error) {
+      try {
+        await handle.dispose();
+      } catch {
+        // Preserve the identity mismatch; the rejected handle is never published.
+      }
+      throw error;
+    }
+    return { incarnation, handle };
   }
 
   async release(lease: RuntimePoolLease, input: { readonly scope: ScopeRef }): Promise<RuntimePoolReleaseResult> {
@@ -464,6 +603,7 @@ export class AgentRuntimePoolManager {
       || !current
       || current.leaseId !== lease.leaseId
       || current.generation !== lease.generation
+      || current.incarnation.agentInstanceId !== lease.incarnation.agentInstanceId
       || current.executionEpoch !== lease.executionEpoch
       || current.ownerId !== lease.ownerId
       || current.assignmentId !== lease.assignmentId
@@ -480,8 +620,45 @@ export class AgentRuntimePoolManager {
         ),
       };
     }
+    const handle = runtime.handle;
+    const acquisition = runtime.acquisition;
+    const failures: OrchestrationIssue[] = [];
+    if (handle?.release && acquisition) {
+      try {
+        await handle.release({
+          assignment: acquisition.assignment,
+          agentId: acquisition.agentId,
+          executionEpoch: lease.executionEpoch,
+          attempt: acquisition.assignment.attempt,
+          scope: input.scope,
+        });
+      } catch (error) {
+        failures.push(issueFromError(error, {
+          code: 'runtime-instance-settle-failed',
+          ownerId: this.ownerId,
+          scope: input.scope,
+          conditionRef: `orchestration.runtime.instance.settle.${lease.runtimeId}`,
+        }));
+      }
+    }
+    if (handle) {
+      try {
+        await handle.dispose();
+      } catch (error) {
+        failures.push(issueFromError(error, {
+          code: 'runtime-instance-dispose-failed',
+          ownerId: this.ownerId,
+          scope: input.scope,
+          conditionRef: `orchestration.runtime.instance.dispose.${lease.runtimeId}`,
+        }));
+      }
+    }
     runtime.lease = undefined;
-    runtime.state = 'idle';
+    runtime.handle = undefined;
+    runtime.acquisition = undefined;
+    runtime.state = failures.length === 0 ? 'idle' : 'failed';
+    const [firstFailure] = failures;
+    if (firstFailure) return { status: 'blocked', issue: firstFailure };
     return { status: 'released' };
   }
 
@@ -534,6 +711,7 @@ export class AgentRuntimePoolManager {
       readonly state: RuntimeRecord['state'];
       readonly capabilities: readonly string[];
       readonly lease?: RuntimePoolLease;
+      readonly incarnation?: TaskRuntimeIncarnation;
     }[];
   } {
     return {
@@ -544,6 +722,7 @@ export class AgentRuntimePoolManager {
         state: runtime.state,
         capabilities: [...runtime.capabilities],
         ...(runtime.lease ? { lease: cloneLease(runtime.lease) } : {}),
+        ...(runtime.lease ? { incarnation: { ...runtime.lease.incarnation } } : {}),
       })),
     };
   }

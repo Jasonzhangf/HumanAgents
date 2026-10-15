@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
+import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type AgentRole } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -19,7 +21,17 @@ import { readCommittedCheckpoint } from '../../packages/app/src/checkpoint-journ
 import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } from '../../packages/runtime/src/memory/index.js';
 import { MemoryAgent } from '../../packages/runtime/src/memory/index.js';
 import { FakeReplayExecutionRuntimePort, FileCheckpointStore, UiRuntimeService, UiRuntimeJournal } from '../../packages/app/src/ui-runtime/index.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import type { AttentionPort } from '../../packages/runtime/src/index.js';
+import { prepareAgentOperation } from '../../packages/app/src/agent-operation.js';
+import { closeAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
+import { RuntimeTaskCoordinator } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
+import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
+import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
+import { newActiveTurnId } from '../../packages/runtime/src/admission/admitted-turn.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -72,6 +84,611 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   return { root, controlRoot, workspace };
+}
+
+async function nativePairFixture() {
+  const fixture = await createConfiguredWorkspace('native-shared-pair-');
+  const upstream = await memoryUpstream('native.preparation.model');
+  const configPath = join(fixture.controlRoot, 'config.toml');
+  const config = (await readFile(configPath, 'utf8')).replace('driverRef = "fake"', [
+    'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "native-preparation-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "native.preparation.model"',
+    'provider.route = "native-preparation-route"',
+    `provider.baseUrl = "${upstream.baseUrl}"`,
+  ].join('\n'));
+  await writeFile(configPath, config, 'utf8');
+  const paths = await resolveRuntimePaths(fixture);
+  const configuration = await loadConfiguration(paths);
+  return { ...fixture, upstream, paths, configuration };
+}
+
+test('native shared-pair preparation binds final identity without starting and closes its own pair', async () => {
+  const fixture = await nativePairFixture();
+  const pairs: Awaited<ReturnType<typeof prepareAgentProvider>>[] = [];
+  const calls: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>[] = [];
+  const closed: ProviderCloseResult[] = [];
+  try {
+    const input = {
+      ...fixture, sessionId: 'native-prepared', plan: 'default', prompt: 'prepare only',
+      runtimeId: 'native-final-runtime', taskId: id('task', 'native-final-task'),
+      operationId: id('operation', 'native-final-operation'), executionEpoch: 7, directiveRevision: 3,
+      prepareAgentProvider: async (selected: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>) => {
+        calls.push(selected);
+        const pair = await prepareAgentProvider({ ...selected, agentProviderBindings: fixture.configuration.agentProviderBindings, evidenceRoot: join(fixture.controlRoot, 'pair-evidence') });
+        pairs.push(pair);
+        const close = pair.port.close.bind(pair.port);
+        pair.port.close = async (binding) => { const receipt = await close(binding); closed.push(receipt); return receipt; };
+        return pair;
+      },
+    };
+    const prepared = await prepareAgentOperation(input);
+    assert.deepEqual(calls, [{ roleId: prepared.agent.roleId, configuredAgentId: prepared.agent.agentId }]);
+    assert.equal(pairs.length, 1);
+    assert.equal(pairs[0]!.configuredAgentId, prepared.agent.agentId);
+    assert.equal(pairs[0]!.binding.modelRef, 'native.preparation.model');
+    const binding = prepared.execution.runtime.binding;
+    assert.equal(binding.runtimeId, input.runtimeId);
+    assert.deepEqual(binding.taskId, input.taskId);
+    assert.deepEqual(binding.operationId, input.operationId);
+    assert.equal(binding.executionEpoch, 7);
+    assert.deepEqual(binding.cycleId, prepared.cycleId);
+    assert.deepEqual(binding.organId, prepared.scope.organId);
+    assert.equal(binding.assignmentId, 'native-prepared-assignment');
+    assert.equal(prepared.execution.runtime.driver, prepared.driver);
+    assert.equal(prepared.execution.runtime.snapshot().state, 'created');
+    console.log('native preparation identity', JSON.stringify({ ...binding, scope: prepared.scope, directiveRevision: prepared.directiveRevision, selected: calls[0], model: pairs[0]!.binding.modelRef }));
+    const controller = await openAgentOperation({ ...input, sessionId: 'native-opened' });
+    assert.deepEqual(calls[1], calls[0]);
+    assert.equal(pairs.length, 2);
+    assert.equal(controller.snapshot().runtimeId, input.runtimeId);
+    assert.equal(controller.snapshot().executionEpoch, 7);
+    assert.equal(controller.snapshot().state, 'created');
+  } finally {
+    for (const pair of pairs) await closeAgentProvider(pair);
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true });
+  }
+  assert.deepEqual(closed.map((receipt) => receipt.state), ['closed', 'closed']);
+  assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, 0);
+  console.log('native preparation resources', JSON.stringify({ rootRemoved: fixture.root, closed: closed.map((receipt) => receipt.state), readinessRequests: fixture.upstream.wires.length, generationPosts: 0 }));
+});
+
+test('native shared-pair preparation closes acquired pairs on template failure and preserves cleanup errors', async () => {
+  for (const failClose of [false, true]) {
+    const fixture = await nativePairFixture();
+    let closeCount = 0;
+    let receipt: ProviderCloseResult | undefined;
+    const cleanupError = new Error('native pair close evidence failure');
+    try {
+      const input = {
+        ...fixture, configuration: { ...fixture.configuration, promptCatalog: {} },
+        sessionId: 'native-template-invalid', plan: 'default', prompt: 'prepare only',
+        prepareAgentProvider: async (selected: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>) => {
+          const pair = await prepareAgentProvider({ ...selected, agentProviderBindings: fixture.configuration.agentProviderBindings, evidenceRoot: join(fixture.controlRoot, 'pair-evidence') });
+          const close = pair.port.close.bind(pair.port);
+          pair.port.close = async (binding) => {
+            closeCount += 1;
+            receipt = await close(binding);
+            if (failClose) throw cleanupError;
+            return receipt;
+          };
+          return pair;
+        },
+      };
+      await assert.rejects(() => openAgentOperation(input), (error: unknown) => {
+        const original = failClose && error instanceof AggregateError ? error.errors[0] : error;
+        if (!(original instanceof AppLifecycleError)) throw original;
+        assert.equal(original.code, 'template-invalid');
+        if (failClose) { if (!(error instanceof AggregateError)) throw error; assert.equal(error.errors[1], cleanupError); }
+        return true;
+      });
+      assert.equal(closeCount, 1);
+      assert.equal(receipt?.state, 'closed');
+      assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, 0);
+      console.log('native preparation failure cleanup', JSON.stringify({ failClose, closeCount, actualClose: receipt?.state, original: 'template-invalid', generationPosts: 0 }));
+    } finally {
+      await fixture.upstream.close();
+      await rm(fixture.root, { recursive: true });
+    }
+  }
+});
+
+test('native CLI shared-pair boundary keeps actual run and recoverable resume unbound', async () => {
+  const fixture = await nativePairFixture();
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const sessionId = 'native-cli-resume';
+  try {
+    const runtime = await openRuntime({ controlRoot: fixture.controlRoot, workspace: fixture.workspace, plan: 'default', sessionId });
+    await new SessionStore(fixture.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+    await runtime.lock.release();
+    const first = await runAgentOperation({ ...fixture, sessionId, plan: 'default', prompt: 'seed recoverable checkpoint', composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) }, prepareAgentProvider: async () => { throw new Error('composed execution must retain its own driver'); } });
+    assert.equal(first.checkpoint.outcome, 'failed');
+    for (const command of ['run', 'resume']) {
+      await assert.rejects(async () => execFileSync(process.execPath, [cli, command, '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', command === 'run' ? 'native-cli-run' : sessionId, '--prompt', 'prepare boundary'], { encoding: 'utf8', stdio: 'pipe' }), (error: unknown) => {
+        if (!(error instanceof Error && 'stderr' in error && 'status' in error)) throw error;
+        assert.ok(error.status !== 0);
+        assert.match(String(error.stderr), /rcc-config-missing/);
+        assert.equal(/rcc-port-unbound/.test(String(error.stderr)), false);
+        console.log(`native CLI ${command} actual failure`, String(error.stderr));
+        return true;
+      });
+    }
+    assert.equal(fixture.upstream.wires.length, 0);
+    const manifest = await readRunManifest(fixture.paths, sessionId);
+    assert.equal(manifest.driverRef, 'rcc');
+    const runForwarded: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>[] = [];
+    await assert.rejects(() => runAgentOperation({
+      ...fixture, sessionId: 'native-run-forwarding', plan: 'default', prompt: 'forwarding probe',
+      prepareAgentProvider: async (selected) => {
+        runForwarded.push(selected);
+        throw new AppLifecycleError('native-forwarding-probe', 'run reached the selected-agent callback', 'forward the callback through the run wrapper', 'humanagent.app.run-operation');
+      },
+    }), (error: unknown) => {
+      assert.equal(runForwarded.length, 1);
+      assert.equal(runForwarded[0]!.configuredAgentId, manifest.agentId);
+      if (!(error instanceof AppLifecycleError)) throw error;
+      assert.equal(error.code, 'native-forwarding-probe');
+      return true;
+    });
+    // J1a: the resume wrapper must forward a supplied selected-agent callback
+    // to the operation seam. Pre-fix resume rebuilt its input and dropped the
+    // callback, so a supplied pair never reached the operation and the run
+    // fell through to the original rcc-config-missing error. A reached
+    // callback proves the forward without any real provider generation.
+    const forwarded: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>[] = [];
+    const resumeInput = {
+      paths: fixture.paths,
+      configuration: fixture.configuration,
+      workspace: fixture.workspace,
+      sessionId,
+      plan: 'default',
+      prompt: 'forwarding probe',
+      taskId: manifest.taskId,
+      cycleId: manifest.cycleId,
+      scope: manifest.scope,
+      executionEpoch: manifest.executionEpoch,
+      directiveRevision: manifest.directiveRevision,
+      agentId: manifest.agentId,
+      driverRef: manifest.driverRef,
+      prepareAgentProvider: async (selected: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>) => {
+        forwarded.push(selected);
+        throw new AppLifecycleError('native-forwarding-probe', 'resume reached the selected-agent callback', 'forward the callback through the resume wrapper', 'humanagent.app.run-operation');
+      },
+    };
+    await assert.rejects(() => resumeAgentOperation(resumeInput), (error: unknown) => {
+      assert.equal(forwarded.length, 1);
+      assert.equal(forwarded[0]!.configuredAgentId, manifest.agentId);
+      if (!(error instanceof AppLifecycleError)) throw error;
+      assert.equal(error.code, 'native-forwarding-probe');
+      return true;
+    });
+    assert.equal(fixture.upstream.wires.length, 0);
+    console.log('native CLI forwarding', JSON.stringify({ forwarded: forwarded.length, selected: forwarded[0], generationPosts: 0 }));
+    const session = await new SessionStore(fixture.paths).open(sessionId);
+    console.log('native CLI boundary', JSON.stringify({ providerRequests: fixture.upstream.wires.length, manifestEpoch: manifest.executionEpoch, sessionRecordTypes: session.records.map((record) => record.type) }));
+  } finally {
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true });
+  }
+});
+
+/**
+ * Native CLI durable layout. This is the coordination point with the concurrent
+ * CLI caller author (accepted r5/r6 plan): the plan names
+ * `join(paths.checkpointsRoot, 'rcc', 'ui-runtime-journal.jsonl')` while the live
+ * serve composition writes `join(paths.checkpointsRoot, 'ui-runtime', mode, ...)`.
+ * This fixture follows the actual serve layout so the retained Task is the same
+ * Task the running instance replays.
+ */
+function nativeRuntimeLayout(paths: { readonly checkpointsRoot: string }) {
+  const modeRoot = join(paths.checkpointsRoot, 'ui-runtime', 'rcc');
+  return {
+    modeRoot,
+    preparedJournalPath: join(modeRoot, 'ui-runtime-journal.jsonl'),
+    organJournalPath: join(modeRoot, 'task-control.jsonl'),
+  };
+}
+
+const nativeProcessFixtureRoot = process.env.HUMANAGENT_TEST_ROOT
+  ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-cli-native-process-r1-20261013');
+
+interface NativeUpstreamWire {
+  readonly method: string;
+  readonly path: string;
+  readonly body: string;
+}
+
+/**
+ * Controlled local upstream for the native CLI run. It answers the real RCC
+ * readiness probes and serves the real Responses standard-end sequence: one
+ * physical file write, the bound four-part turn end that cites that write's real
+ * evidence locator, then a final drain. The wire list is the minimal physical
+ * effect counter; the file write is the minimal physical side effect.
+ */
+async function nativeResponsesUpstream(input: {
+  readonly model: string;
+  readonly organFilePath: string;
+  readonly journal: JsonlOrganJournal;
+}): Promise<{ readonly wires: NativeUpstreamWire[]; readonly baseUrl: string; close(): Promise<void> }> {
+  const wires: NativeUpstreamWire[] = [];
+  const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+  const toolCall = (roundId: string, name: string, args: unknown) => [
+    { type: 'response.created', response: { id: roundId } },
+    { type: 'response.output_item.added', output_index: 0,
+      item: { type: 'function_call', call_id: `call-${roundId}`, name, arguments: '' } },
+    { type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: `call-${roundId}`, name, arguments: JSON.stringify(args) } },
+    { type: 'response.completed', response: { id: roundId } },
+  ];
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const path = request.url ?? '';
+      const body = Buffer.concat(chunks).toString('utf8');
+      wires.push({ method: request.method ?? '', path, body });
+      if (path === '/health' || path === '/v1/models') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(path === '/health'
+          ? { status: 'ok', version: 'native-process' }
+          : { data: [{ id: input.model }] }));
+        return;
+      }
+      const posts = wires.filter((wire) => wire.method === 'POST');
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (posts.length === 1) {
+        response.end(frame(toolCall('native-write', 'file_write',
+          { file_path: 'native-process-result.txt', content: 'native process physical effect' })));
+        return;
+      }
+      if (posts.length === 2) {
+        const verified = await input.journal.verify();
+        const coverage = [...verified.records].reverse()
+          .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
+        const operationId = coverage?.scope?.operationId?.value;
+        if (!operationId) throw new Error('native run has no admitted operation coverage');
+        const active = await createJsonlActiveTurnJournal({ filePath: input.organFilePath,
+          journal: input.journal, turnId: newActiveTurnId(operationId) }).replay();
+        const completed = active.find((record) => record.kind === 'accepted-fact'
+          && record.entry.envelope.fact.kind === 'tool-result'
+          && record.entry.envelope.fact.result.toolId === 'file.write');
+        const ref = completed?.kind === 'accepted-fact' && completed.entry.envelope.fact.kind === 'tool-result'
+          ? completed.entry.envelope.fact.result.evidenceRefs[0]?.locator
+          : undefined;
+        if (!ref) throw new Error('native run file-write evidence missing');
+        const section = (text: string) => ({ text, evidenceRefs: [ref] });
+        response.end(frame(toolCall('native-end', 'humanagent_turn_end', { summary: {
+          goal: section('Run the native CLI task'), actions: section('Wrote the native process result'),
+          result: section('Physical file readback is available'), expectedNextStep: section('Close this turn'),
+        }, deliveryRefs: [ref] })));
+        return;
+      }
+      response.end(frame([
+        { type: 'response.created', response: { id: 'native-drain' } },
+        { type: 'response.output_text.done', item_id: 'native-text', text: 'Native end drained' },
+        { type: 'response.completed', response: { id: 'native-drain' } },
+      ]));
+    })().catch((error: unknown) => {
+      response.writeHead(500, { 'content-type': 'text/plain' });
+      response.end(String(error));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('missing native upstream socket address');
+  return {
+    wires,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    },
+  };
+}
+
+/** Canonical fixture: real workspace, real RCC agent config and a controlled Provider. */
+async function nativeProcessFixture() {
+  await mkdir(nativeProcessFixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(nativeProcessFixtureRoot, 'native-process-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const layout = nativeRuntimeLayout(paths);
+  await mkdir(layout.modeRoot, { recursive: true });
+  const journal = new JsonlOrganJournal(layout.organJournalPath);
+  const upstream = await nativeResponsesUpstream({ model: 'native.process.model',
+    organFilePath: layout.organJournalPath, journal });
+  const configPath = join(controlRoot, 'config.toml');
+  const config = (await readFile(configPath, 'utf8')).replace('driverRef = "fake"', [
+    'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "native-process-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "native.process.model"',
+    'provider.route = "native-process-route"',
+    `provider.baseUrl = "${upstream.baseUrl}"`,
+  ].join('\n'));
+  await writeFile(configPath, config, 'utf8');
+  const configuration = await loadConfiguration(paths);
+  return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration };
+}
+
+/**
+ * Bounded process fixture for the native CLI run seam. It seeds the real durable
+ * state the native caller selects: a retained Task in the existing prepared
+ * Journal (via the real coordinator replay contract), the real Task identity and
+ * an explicit fixture-owned grant in the same Organ Journal. A real A1 credential
+ * issues the paired control-session cookie. The case asserts the real
+ * selector-first boundary, that an invalid principal or a foreign-owned grant
+ * has zero Provider effects, and that the valid path actually reaches the
+ * Provider, the bound standard end and the real disposition. Raw cookies must
+ * never appear in stdout/stderr. Released execution or a Provider terminal is not
+ * Task completion; the receipt must carry the real Task disposition.
+ */
+test('native CLI preparation control input', async () => {
+  const fixture = await nativeProcessFixture();
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const sessionId = 'native-cli-control';
+  const legacyTaskId = 'native-cli-control-task';
+  const organId = id('organ', 'humanagent-ui');
+  const retainedTaskId = id('task', 'native-cli-retained-task');
+  const deniedTaskId = id('task', 'native-cli-denied-task');
+  const controlFile = join(fixture.root, 'control-session.txt');
+  const invalidFile = join(fixture.root, 'control-session-invalid.txt');
+  let passed = false;
+  const run = (args: readonly string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    child.once('error', reject);
+    child.once('exit', (code) => resolve({ code, stdout, stderr }));
+  });
+  try {
+    // Real fixture-owned A1 credential and paired session. The cookie header is
+    // the only control-session-file content; it stays out of business payload.
+    const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
+    const session = await access.consumePairingCode(access.createPairingChallenge('cli-control-lease', 1).code);
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    await writeFile(controlFile, `${cookie}\n`, 'utf8');
+    const cookieName = cookie.slice(0, cookie.indexOf('='));
+    await writeFile(invalidFile, `${cookieName}=not-a-valid-token\n`, 'utf8');
+    const caller = await access.verifyProductPrincipal(cookie);
+    assert.equal(caller.state, 'valid');
+    if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
+    // A second, independent credential gives a distinct owner for the foreign grant.
+    const otherAccess = await AccessControlService.open({ credentialPath: join(fixture.root, 'other-access.json'), create: true });
+    const otherSession = await otherAccess.consumePairingCode(otherAccess.createPairingChallenge('cli-control-other', 1).code);
+    const other = await otherAccess.verifyProductPrincipal(otherAccess.sessionCookie(otherSession).split(';')[0]!);
+    assert.equal(other.state, 'valid');
+    if (other.state !== 'valid') throw new Error('fixture other principal unavailable');
+    assert.ok(caller.principal.owner !== other.principal.owner);
+
+    // Seed the real recoverable session/manifest the unchanged cold resume branch selects.
+    const runtime = await openRuntime({ controlRoot: fixture.controlRoot, workspace: fixture.workspace, plan: 'default', sessionId });
+    await new SessionStore(fixture.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+    await runtime.lock.release();
+    const seeded = await runAgentOperation({
+      ...fixture,
+      sessionId,
+      plan: 'default',
+      prompt: 'seed control session',
+      taskId: id('task', legacyTaskId),
+      composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) },
+      prepareAgentProvider: async () => { throw new Error('composed execution must retain its own driver'); },
+    });
+    assert.equal(seeded.checkpoint.outcome, 'failed');
+    const manifest = await readRunManifest(fixture.paths, sessionId);
+    assert.equal(manifest.taskId.value, legacyTaskId);
+
+    // Retained Task replay entity plus the real identity/grant owners, all in the
+    // same journals the native caller reads. The production side mints nothing.
+    const preparedJournal = new UiRuntimeJournal(fixture.layout.preparedJournalPath);
+    const seedCoordinator = new RuntimeTaskCoordinator({
+      organId, taskIdPrefix: 'native-process',
+      journal: preparedJournal,
+      checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
+      attentionPort: {
+        async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
+        async resolve(value) { return { attentionId: value.attentionId, delivered: true }; },
+      },
+      async createDriver() { throw new Error('seed coordinator never releases execution'); },
+    });
+    const retained = seedCoordinator.createTask({ taskId: retainedTaskId, title: 'retained native task', directive: 'run the retained native task' });
+    const denied = seedCoordinator.createTask({ taskId: deniedTaskId, title: 'denied native task', directive: 'run the denied native task' });
+    const taskIdentity = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal));
+    const grants = new JsonlTaskGrantJournal(fixture.journal);
+    for (const [entity, owner] of [[denied, other.principal.owner], [retained, caller.principal.owner]] as const) {
+      await taskIdentity.establish({ scope: { organId, taskId: entity.taskId }, source: {
+        requirementId: `requirement:${entity.taskId.value}`, inputRevision: 1,
+        draftId: `draft:${entity.taskId.value}`, draftRevisionVersion: 1,
+        draftRevisionHash: `draft-hash:${entity.taskId.value}`, confirmationRef: `confirmation:${entity.taskId.value}`,
+      } });
+      await grants.grant({ requestId: `grant:${entity.taskId.value}`, taskId: entity.taskId, owner,
+        capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId: entity.taskId } },
+        expectedRevision: 0 });
+    }
+    const taskCount = () => preparedJournal.replay().filter((record) => record.kind === 'task.created').length;
+    const grantCount = async () => (await fixture.journal.verify()).records.filter((record) => record.payload?.['kind'] === 'task-grant').length;
+    const postWires = () => fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    const nativeRunArgs = (task: string) => ['run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', 'native-cli-native-run', '--task', task, '--prompt', 'native control probe'];
+
+    // 1. An invalid control session fails at the real A1 verifier before any effect.
+    const tasksBefore = taskCount();
+    const grantsBefore = await grantCount();
+    const invalidRun = await run([...nativeRunArgs(retainedTaskId.value), '--control-session-file', invalidFile]);
+    assert.ok(invalidRun.code !== 0, 'invalid session must fail before dispatch');
+    assert.ok(!/rcc-config-missing/.test(invalidRun.stderr));
+    assert.match(invalidRun.stderr, /auth\.session\.invalid/);
+    assert.equal(taskCount(), tasksBefore, 'rejected control input creates no replacement Task');
+    assert.equal(await grantCount(), grantsBefore, 'rejected control input creates no grant');
+    assert.equal(postWires().length, 0);
+
+    // 2. A verified principal with an unknown selector fails selector-first, not
+    //    on the legacy rcc-config-missing boundary, and mints no Task/grant.
+    const unknownRun = await run([...nativeRunArgs('native-cli-unknown-task'), '--control-session-file', controlFile]);
+    assert.ok(unknownRun.code !== 0, 'unknown selector must fail before dispatch');
+    assert.ok(!/rcc-config-missing/.test(unknownRun.stderr), 'the native entry is selector-first, not the legacy error');
+    assert.equal(taskCount(), tasksBefore, 'unknown selector creates no replacement Task');
+    assert.equal(await grantCount(), grantsBefore, 'unknown selector creates no grant');
+    assert.equal(postWires().length, 0);
+
+    // 3. A grant owned by another principal cannot authorize the caller.
+    const deniedRun = await run([...nativeRunArgs(deniedTaskId.value), '--control-session-file', controlFile]);
+    assert.ok(deniedRun.code !== 0, 'a foreign-owned grant must not authorize the caller');
+    assert.equal(postWires().length, 0, 'a denied admission has zero Provider effects');
+
+    // 4. The real retained Task with the caller-owned grant reaches the real
+    //    Provider, the bound standard end, the real disposition and cleanup.
+    const validRun = await run([...nativeRunArgs(retainedTaskId.value), '--control-session-file', controlFile]);
+    assert.equal(validRun.code, 0, `valid native run must succeed: ${validRun.stderr}`);
+    const posts = postWires();
+    assert.ok(posts.length >= 3, 'the native run sends the real write, bound end and drain requests');
+    assert.ok(posts[0]!.body.includes('native control probe'), 'the native request retains the immutable prepared input');
+    const receiptStart = validRun.stdout.indexOf('{');
+    const receiptEnd = validRun.stdout.lastIndexOf('}');
+    assert.ok(receiptStart >= 0 && receiptEnd > receiptStart, `the native run prints its receipt: ${validRun.stdout}`);
+    const receipt = JSON.parse(validRun.stdout.slice(receiptStart, receiptEnd + 1)) as {
+      readonly command?: string; readonly taskId?: string; readonly state?: string;
+    };
+    assert.equal(receipt.command, 'run');
+    assert.equal(receipt.taskId, retainedTaskId.value);
+    assert.ok(typeof receipt.state === 'string' && receipt.state.length > 0, 'the receipt carries the real Task disposition');
+    const terminal = preparedJournal.replay().some((record) => record.kind === 'operation.event'
+      && record.event.kind === 'execution.terminal');
+    assert.equal(terminal, true, 'the real runtime published its terminal event');
+    const current = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }).read({ organId, taskId: retainedTaskId });
+    assert.equal(current.state, 'known', 'exact current-state readback uses the same Organ Journal owner');
+    assert.equal(await readFile(join(fixture.workspace, 'native-process-result.txt'), 'utf8'), 'native process physical effect');
+
+    // The unchanged cold resume branch keeps its own boundary.
+    const resumeArgs = ['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', legacyTaskId, '--prompt', 'control resume probe'];
+    const invalidResume = await run([...resumeArgs, '--control-session-file', invalidFile]);
+    assert.ok(invalidResume.code !== 0, 'invalid resume session must fail before dispatch');
+    assert.ok(!/rcc-config-missing/.test(invalidResume.stderr));
+    assert.match(invalidResume.stderr, /auth\.session\.invalid/);
+    const validResume = await run([...resumeArgs, '--control-session-file', controlFile]);
+    assert.ok(validResume.code !== 0, 'valid resume session must reach the real native unbound error');
+    assert.match(validResume.stderr, /rcc-config-missing/);
+    const mismatchResume = await run(['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', 'native-cli-other-task', '--prompt', 'control resume probe', '--control-session-file', controlFile]);
+    assert.ok(mismatchResume.code !== 0, 'mismatched native selector must not rebind the recovered task');
+    assert.match(mismatchResume.stderr, /native-control\.task-mismatch/);
+    assert.ok(!/rcc-config-missing/.test(mismatchResume.stderr));
+
+    for (const result of [invalidRun, unknownRun, deniedRun, validRun, invalidResume, validResume, mismatchResume]) {
+      for (const output of [result.stdout, result.stderr]) {
+        assert.equal(output.includes(cookie), false);
+        assert.equal(output.includes('not-a-valid-token'), false);
+      }
+    }
+    console.log('native CLI preparation control input', JSON.stringify({
+      invalidRun: invalidRun.code,
+      unknownRun: unknownRun.code,
+      deniedRun: deniedRun.code,
+      validRun: validRun.code,
+      validResume: validResume.code,
+      mismatchResume: mismatchResume.code,
+      providerRequests: posts.length,
+      state: receipt.state,
+    }));
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    // A failed native run keeps its canonical fixture child for parent handoff.
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.log(`native CLI preparation evidence retained: ${fixture.root}`);
+  }
+});
+
+interface MemoryUpstreamWire {
+  readonly method: string;
+  readonly path: string;
+  readonly body: string;
+}
+
+/**
+ * Bounded local upstream for the real memory composition producer. It answers
+ * the RCC readiness/model probes and returns one SSE curation stream per POST.
+ * The curation echoes the business source refs and prompt from the request so
+ * the memory owner can validate the admitted operation without a second network
+ * fixture.
+ */
+async function memoryUpstream(model: string): Promise<{
+  readonly wires: MemoryUpstreamWire[];
+  readonly baseUrl: string;
+  deny(): void;
+  allow(): void;
+  close(): Promise<void>;
+}> {
+  const wires: MemoryUpstreamWire[] = [];
+  let ready = true;
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const path = request.url ?? '';
+      const body = Buffer.concat(chunks).toString('utf8');
+      wires.push({ method: request.method ?? '', path, body });
+      if (path === '/health' || path === '/v1/models') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(path === '/health'
+          ? { status: ready ? 'ok' : 'not-ready', version: 'memory-local' }
+          : { data: [{ id: model }] }));
+        return;
+      }
+      const sent = JSON.parse(body) as { readonly input?: readonly { readonly content?: readonly { readonly text?: string }[] | string }[] };
+      const content = sent.input?.[0]?.content;
+      const business = JSON.parse(typeof content === 'string' ? content : (content?.[0]?.text ?? '{}')) as {
+        readonly sourceRefs?: readonly string[];
+        readonly prompt?: unknown;
+      };
+      const curation = {
+        auditPrompt: business.prompt,
+        sourceRefs: business.sourceRefs,
+        outcome: 'candidate',
+        candidateId: 'rcc-memory-candidate',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'memory local upstream curation',
+        nextAction: 'review',
+      };
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end([
+        { type: 'response.created', response: { id: `response-${model}` } },
+        { type: 'response.output_text.done', item_id: 'message-final', text: JSON.stringify(curation) },
+        { type: 'response.completed', response: { id: `response-${model}` } },
+      ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+    })().catch((error: unknown) => {
+      response.writeHead(500);
+      response.end(String(error));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('missing memory upstream socket address');
+  return {
+    wires,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    deny: () => { ready = false; },
+    allow: () => { ready = true; },
+    close: async () => {
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      assert.equal(server.address(), null);
+    },
+  };
 }
 
 interface ServeAuth {
@@ -4855,7 +5472,7 @@ test('CLI memory driver factory selects the configured memory-role agent and dri
   const factory = memoryDriverFactory({ paths, configuration, workspace });
   assert.ok(factory, 'a configured memory-role agent must yield a driver factory');
 
-  const driver = factory!({
+  const value = await factory!({
     taskId: id('task', 'memory-driver-factory-task'),
     operationId: id('operation', 'memory-driver-factory-operation'),
     executionEpoch: 3,
@@ -4867,6 +5484,7 @@ test('CLI memory driver factory selects the configured memory-role agent and dri
       taskId: id('task', 'memory-driver-factory-task'),
     },
   });
+  const driver = 'start' in value ? value : value.driver;
   const events: string[] = [];
   const wrapped: typeof driver = {
     ...driver,
@@ -4930,6 +5548,12 @@ test('memory driver factory requires a bound serve RCC port for an explicitly co
     'roleId = "memory"',
     'templateRef = "builtin/memory@1.0.0"',
     'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "memory-rcc-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "memory.rcc.model"',
+    'provider.route = "memory-rcc-route"',
+    'provider.baseUrl = "http://rcc.invalid:4444"',
     'skills = ["history-search", "novelty-review", "recurrence-review"]',
     'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
     'permissions = ["memory.read", "memory.propose"]',
@@ -4965,7 +5589,7 @@ test('memory driver factory requires a bound serve RCC port for an explicitly co
     rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/test'] },
   });
   assert.ok(bound);
-  const driver = bound!({
+  const value = await bound!({
     taskId: id('task', 'memory-rcc-bound-task'),
     operationId: id('operation', 'memory-rcc-bound-operation'),
     executionEpoch: 4,
@@ -4977,6 +5601,7 @@ test('memory driver factory requires a bound serve RCC port for an explicitly co
       taskId: id('task', 'memory-rcc-bound-task'),
     },
   });
+  const driver = 'start' in value ? value : value.driver;
   assert.equal(driver.kind, 'humanagent.provider-agent-driver');
   await rm(root, { recursive: true, force: true });
 });
@@ -5025,13 +5650,14 @@ test('rcc memory-role driver parses provider output as a MemoryCurationResult an
   };
   // The composed rcc driver runs an analysis round on the admitted operation
   // identity and its provider output is the curation the memory owner parses.
-  const driver = driverFor!({
+  const value = await driverFor!({
     taskId,
     operationId,
     executionEpoch: 1,
     assignmentId: `memory-analysis:${operationId.value}`,
     scope,
   });
+  const driver = 'start' in value ? value : value.driver;
   assert.equal(driver.kind, 'humanagent.provider-agent-driver');
   await driver.start({
     runtimeId: `memory-analysis:${operationId.value}`,
@@ -5074,8 +5700,19 @@ test('rcc memory-role driver parses provider output as a MemoryCurationResult an
 test('rcc memory-role driver consumes a real curation end to end and exposes model analysis', async () => {
   const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-rcc-consume-');
   await writeFile(join(workspace, 'AGENTS.md'), '# RCC memory consume\n', 'utf8');
+  const upstream = await memoryUpstream('memory.rcc.model');
+  const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures', 'provider-g-memory-consumer-m4-20261013');
+  await mkdir(fixtureRoot, { recursive: true });
+  const evidenceRoot = await mkdtemp(join(fixtureRoot, 'memory-evidence-'));
   const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId: 'session-memory-rcc-consume' });
   const { paths } = runtime;
+  let primaryError: unknown;
+  const admittedPorts: ExecutionRuntimePort[] = [];
+  const closeReceipts: ProviderCloseResult[] = [];
+  const compositions: Awaited<ReturnType<typeof prepareAgentProvider>>[] = [];
+  const settlements: ProviderSettlement[] = [];
+  const lifecycle: string[] = [];
+  try {
   await appendFile(join(controlRoot, 'config.toml'), [
     '',
     '[[agents]]',
@@ -5083,6 +5720,12 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
     'roleId = "memory"',
     'templateRef = "builtin/memory@1.0.0"',
     'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "memory-rcc-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "memory.rcc.model"',
+    'provider.route = "memory-rcc-route"',
+    `provider.baseUrl = "${upstream.baseUrl}"`,
     'skills = ["history-search", "novelty-review", "recurrence-review"]',
     'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
     'permissions = ["memory.read", "memory.propose"]',
@@ -5091,12 +5734,47 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
     '',
   ].join('\n'), 'utf8');
   const reloaded = await loadConfiguration(paths);
-  const port = new MemoryCurationReplayPort(fakeExecutionBinding());
+  // Each NEW memory analysis is prepared through the actual production factory
+  // callback and admitted on its own composition, so no port is shared between
+  // two different analysis operations. The real producer probes the local
+  // upstream and the release closes the real adapter port.
+  const prepare = async (input: { readonly roleId: AgentRole; readonly configuredAgentId?: string }) => {
+    assert.equal(input.roleId, 'memory');
+    // The actual memory agent id, not a role-only guess, reaches preparation.
+    assert.equal(input.configuredAgentId, 'memory-rcc');
+    const composition = await prepareAgentProvider({
+      roleId: input.roleId,
+      configuredAgentId: input.configuredAgentId,
+      agentProviderBindings: reloaded.agentProviderBindings,
+      evidenceRoot,
+    });
+    admittedPorts.push(composition.port);
+    compositions.push(composition);
+    assert.equal(composition.source, 'rcc');
+    assert.equal(composition.binding.modelRef, 'memory.rcc.model');
+    const originalSettle = composition.port.settle.bind(composition.port);
+    composition.port.settle = async (request) => {
+      const receipt = await originalSettle(request);
+      settlements.push(receipt);
+      lifecycle.push('settle');
+      return receipt;
+    };
+    const originalClose = composition.port.close.bind(composition.port);
+    composition.port.close = async (binding: ProviderBinding) => {
+      assert.ok(settlements.some((receipt) => receipt.state === 'succeeded'), 'release follows actual settlement');
+      const receipt = await originalClose(binding);
+      closeReceipts.push(receipt);
+      lifecycle.push('close');
+      return receipt;
+    };
+    return composition;
+  };
   const driverFor = memoryDriverFactory({
     paths,
     configuration: reloaded,
     workspace: paths.workspaceCwd,
-    rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/rcc-consume'] },
+    inputRefs: ['humanagent://memory/project/rcc-consume'],
+    prepareAgentProvider: prepare,
   })!;
   const taskId = id('task', 'session-memory-rcc-consume');
   const memory = await composeMemoryRuntime({
@@ -5124,7 +5802,6 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
       actor: { actorId: 'memory-agent', roleId: 'memory', permissions: ['memory.read', 'memory.propose'], projectKey: paths.projectKey },
     },
   });
-  try {
     await mkdir(join(paths.controlRoot, 'memory-audit'), { recursive: true });
     await writeFile(join(paths.controlRoot, 'memory-audit', 'project-memory-audit.md'), '# Audit\n', 'utf8');
     await new SessionStore(paths).append(
@@ -5132,7 +5809,7 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
       { type: 'session.state', state: 'running' },
       runtime.lock,
     );
-    const result = await runAgentOperation({
+    const resultOne = await runAgentOperation({
       paths,
       configuration: reloaded,
       workspace,
@@ -5141,36 +5818,137 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
       prompt: 'consume rcc memory curation',
       memoryBoundaryPublisher: memory.publisher,
     });
+    const resultTwo = await runAgentOperation({
+      paths,
+      configuration: reloaded,
+      workspace,
+      sessionId: 'session-memory-rcc-consume',
+      plan: 'default',
+      prompt: 'consume a second rcc memory curation',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    assert.ok(resultTwo.checkpoint.id.value !== resultOne.checkpoint.id.value);
+    const posts = () => upstream.wires.filter((wire) => wire.method === 'POST').length;
+    const postsBeforeConsume = posts();
     const consumed = await memory.consume();
-    if (consumed.retries.length !== 0) {
-      throw new Error(`DEBUG retry=${consumed.retries[0]?.failureRef ?? 'none'}`);
+    assert.equal(consumed.retries.length, 0, JSON.stringify(consumed.retries));
+    assert.equal(consumed.committed.length, 2);
+    assert.ok(consumed.committed.every((receipt) => receipt.disposition === 'applied'));
+    assert.equal(posts(), postsBeforeConsume + 2);
+    // Both NEW analysis operations were admitted on their own real ports; the
+    // prepare callback received the actual memory agent id, and each later
+    // closes its own resource.
+    assert.equal(admittedPorts.length, 2);
+    assert.ok(admittedPorts[0] !== admittedPorts[1]);
+    assert.equal(closeReceipts.length, 2);
+    assert.ok(closeReceipts.every((receipt) => receipt.state === 'closed'));
+    assert.equal(settlements.length, 2);
+    assert.deepEqual(lifecycle, ['settle', 'close', 'settle', 'close']);
+    assert.ok(settlements.every((receipt) => receipt.state === 'succeeded'));
+    assert.ok(settlements.every((receipt) => receipt.resourceRelease.state === 'released' && receipt.persistence.state === 'committed'));
+    for (const receipt of settlements) assert.match(receipt.runtimeId, /^memory-analysis:memory-analysis-/);
+    assert.ok(settlements[0]!.operationId.value !== settlements[1]!.operationId.value);
+    assert.ok(settlements[0]!.runtimeId !== settlements[1]!.runtimeId);
+    assert.ok(settlements.every((receipt) => receipt.taskId.value === taskId.value));
+    assert.deepEqual(upstream.wires.filter((wire) => wire.method === 'GET').map((wire) => wire.path),
+      ['/health', '/v1/models', '/health', '/v1/models']);
+    const modelPosts = upstream.wires.filter((wire) => wire.method === 'POST');
+    for (const wire of modelPosts) {
+      assert.equal(wire.path, '/v1/responses');
+      const sent: { model: string; input: { content: { text: string }[] }[] } = JSON.parse(wire.body);
+      assert.equal(sent.model, 'memory.rcc.model');
+      const business: { sourceRefs: string[] } = JSON.parse(sent.input[0]!.content[0]!.text);
+      assert.ok(business.sourceRefs.length > 0);
     }
-    assert.equal(consumed.committed.length, 1);
-    assert.equal(consumed.committed[0]?.disposition, 'applied');
+    // Provider terminal is not task success: the session is still running until
+    // the checkpoint owner settles it explicitly.
+    assert.equal((await new SessionStore(paths).open('session-memory-rcc-consume')).state, 'running');
     const state = await memory.reviewState();
     assert.equal(state.analysis.mode, 'model');
     assert.equal(state.analysis.state, 'succeeded');
-    assert.equal(state.analysis.operationRef, `memory-analysis:memory-binding:rcc-consume:checkpoint-${result.checkpoint.id.value}`);
+    assert.equal(state.analysis.operationRef, `memory-analysis:memory-binding:rcc-consume:checkpoint-${resultTwo.checkpoint.id.value}`);
     assert.equal(state.autoUpdate, false);
-    assert.equal(state.candidates.length, 1);
-    // The memory owner assigns the durable candidate identity; the provider's
-    // candidateId is not authoritative for the report.
-    assert.match(state.candidates[0]?.candidateId ?? '', /^memory-analysis:/);
-    assert.equal(state.candidates[0]?.state, 'candidate');
-    assert.equal(state.candidates[0]?.namespace, 'project');
-    assert.equal(state.candidates[0]?.projectKey, paths.projectKey);
-    // The model round ran on the admitted memory-analysis identity, never on the
-    // main operation's runtime/operation identity.
-    assert.equal(port.startedRounds.length, 1);
-    assert.match(port.startedRounds[0]!, /^memory-analysis:memory-analysis-/);
-    await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+    assert.equal(state.candidates.length, 2);
+    for (const candidate of state.candidates) {
+      // The memory owner assigns the durable candidate identity; the provider's
+      // candidateId is never authoritative for the report.
+      assert.match(candidate.candidateId ?? '', /^memory-analysis:/);
+      assert.equal(candidate.state, 'candidate');
+      assert.equal(candidate.namespace, 'project');
+      assert.equal(candidate.projectKey, paths.projectKey);
+      assert.equal(candidate.taskId, taskId.value);
+    }
+    // A local readiness refusal keeps the accepted candidates and retries the
+    // unstarted analysis without dispatching it to the model.
+    upstream.deny();
+    const resultThree = await runAgentOperation({
+      paths,
+      configuration: reloaded,
+      workspace,
+      sessionId: 'session-memory-rcc-consume',
+      plan: 'default',
+      prompt: 'consume a refused rcc memory curation',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    const postsBeforeRefusal = posts();
+    const refused = await memory.consume();
+    assert.equal(refused.committed.length, 0);
+    assert.equal(refused.retries.length, 1);
+    assert.equal(posts(), postsBeforeRefusal);
+    const waiting = await memory.reviewState();
+    assert.equal(waiting.analysis.state, 'waiting');
+    assert.equal(waiting.candidates.length, 2);
+    upstream.allow();
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0,
+      Date.parse(refused.retries[0]!.nextAttemptAt) - Date.now() + 1)));
+    const retried = await memory.consume();
+    assert.equal(retried.retries.length, 0, JSON.stringify({ retries: retried.retries, analysis: (await memory.reviewState()).analysis }));
+    assert.equal(retried.committed.length, 1);
+    assert.equal(posts(), postsBeforeConsume + 3);
+    assert.equal(closeReceipts.length, 3);
+    assert.ok(closeReceipts.every((receipt) => receipt.state === 'closed'));
+    const after = await memory.reviewState();
+    assert.equal(after.analysis.state, 'succeeded');
+    assert.equal(after.candidates.length, 3);
+    console.log(JSON.stringify({ admittedPorts: admittedPorts.length, settlements, closeReceipts,
+      probes: upstream.wires.filter((wire) => wire.method === 'GET'), modelPosts: posts(),
+      refusal: refused.retries, candidates: after.candidates }));
+    await settleSessionOutcome(runtime, resultThree.checkpoint.outcome, resultThree.checkpoint.id.value);
+  } catch (error: unknown) {
+    primaryError = error;
+    throw error;
   } finally {
+    let cleanupError: unknown;
+    for (const composition of compositions) {
+      try {
+        assert.equal((await composition.port.close(composition.binding)).state, 'closed');
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    try {
+      await upstream.close();
+    } catch (error) {
+      cleanupError = error;
+    }
     try {
       await runtime.lock.release();
     } catch {
       // The successful settlement path already released the session lock.
     }
-    await rm(root, { recursive: true, force: true });
+    if (cleanupError === undefined) {
+      try {
+        await rm(root, { recursive: true, force: true });
+        await rm(evidenceRoot, { recursive: true, force: true });
+        console.log('Memory cleanup: owned ports closed; listener closed; owned fixture roots removed');
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    if (cleanupError !== undefined) {
+      if (primaryError !== undefined) console.error('Memory cleanup failure; original failure preserved', cleanupError);
+      else throw cleanupError;
+    }
   }
 });
 

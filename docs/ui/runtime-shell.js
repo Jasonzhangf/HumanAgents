@@ -1,15 +1,30 @@
 import {
   clearNode,
   createRuntimeApi,
+  createRuntimeReadPublication,
   element,
   formatTime,
   isAuthSessionError,
   loginHref,
   queryParam,
-  RuntimeApiError,
+  readScopeKey,
   stateTone,
 } from './runtime-api.js'
-import { mountSemanticObservation } from './semantic-observation.js'
+import {
+  createDisplayPreferenceController,
+  DISPLAY_MODES,
+  DISPLAY_PREFERENCE_MODES,
+} from './display-preferences.js'
+import {
+  DISPLAY_MODE_DESCRIPTIONS,
+  displayModeLabel,
+  unavailableModeFailure,
+} from './task-display.js'
+import {
+  UNCLASSIFIED_REASON_LABELS,
+  groupTaskFlowRows,
+  unclassifiedTaskFlowReason,
+} from './task-flow-groups.js'
 
 export const api = createRuntimeApi()
 
@@ -46,25 +61,56 @@ export async function loadRuntimeStatus() {
 export function renderRuntimeStatus(target, status, error) {
   clearNode(target)
   if (error) {
+    const copy = readFailureCopy(error)
     target.dataset.tone = 'danger'
     target.append(
-      element('strong', 'Runtime 未连接'),
-      element('span', ` ${error.message} · ${error.ownerId} · ${error.nextAction}`),
+      element('strong', copy.result),
+      element('p', copy.next),
+      technicalDetailTrigger(() => ({
+        title: '技术详情',
+        entries: errorDetailEntries(error, 'retry the runtime status read'),
+      })),
     )
     appendPairingEntry(target, error)
     return
   }
   target.dataset.tone = status.state === 'ready' ? 'success' : 'warning'
-  const provider = status.providerError
-    ? ` · ${status.providerError.code} · owner=${status.providerError.ownerId} · ${status.providerError.nextAction}`
-    : ''
-  const implicit = status.implicitScheduling
-    ? ` · requirement=${status.implicitScheduling.requirementId} · ${status.implicitScheduling.code} · owner=${status.implicitScheduling.ownerId} · next=${status.implicitScheduling.nextAction}`
-    : ''
   if (status.implicitScheduling) target.dataset.tone = status.implicitScheduling.state === 'failed' ? 'danger' : 'warning'
+  const modeLabel = status.mode === 'fake' ? '演示模式' : `模式 ${status.mode}`
+  const stateLabel = status.state === 'ready' ? '运行正常' : '运行状态需要注意'
+  const summary = [status.connected ? '服务已连接。' : '服务当前未连接。']
+  if (status.providerError) summary.push('提供方状态需要注意，可打开技术详情核对。')
+  if (status.implicitScheduling) {
+    summary.push(status.implicitScheduling.state === 'failed'
+      ? '隐式调度失败，可打开技术详情核对。'
+      : '隐式调度需要注意，可打开技术详情核对。')
+  }
+  const entries = [
+    ['mode', status.mode, 'data-detail-mode'],
+    ['state', status.state, 'data-detail-state'],
+    ['providerState', status.providerState, 'data-detail-provider-state'],
+    ['connected', String(status.connected), 'data-detail-connected'],
+  ]
+  if (status.providerError) {
+    entries.push(
+      ['providerError.code', status.providerError.code, 'data-detail-provider-code'],
+      ['providerError.owner', status.providerError.ownerId, 'data-detail-provider-owner'],
+      ['providerError.message', status.providerError.message, 'data-detail-provider-message'],
+      ['providerError.nextAction', status.providerError.nextAction, 'data-detail-provider-next'],
+    )
+  }
+  if (status.implicitScheduling) {
+    entries.push(
+      ['implicit.requirementId', status.implicitScheduling.requirementId, 'data-detail-implicit-requirement'],
+      ['implicit.code', status.implicitScheduling.code, 'data-detail-implicit-code'],
+      ['implicit.owner', status.implicitScheduling.ownerId, 'data-detail-implicit-owner'],
+      ['implicit.nextAction', status.implicitScheduling.nextAction, 'data-detail-implicit-next'],
+    )
+  }
   target.append(
-    element('strong', `mode=${status.mode}`),
-    element('span', ` · provider=${status.providerState} · ${status.connected ? 'connected' : 'disconnected'}${provider}${implicit}`),
+    element('strong', `${modeLabel} · ${stateLabel}`),
+    element('p', summary.join('')),
+    technicalDetailTrigger(() => ({ title: '技术详情', entries })),
   )
 }
 
@@ -77,7 +123,7 @@ export function makeTopbar(active) {
   const links = [
     ['dashboard.html', 'Dashboard'],
     ['tasks.html', 'Task List'],
-    ['task.html?task=new', '新建 Task'],
+    ['./index.html', '新建 Task'],
     ['memory.html', 'Memory'],
   ]
   for (const [href, label] of links) {
@@ -90,23 +136,1774 @@ export function makeTopbar(active) {
   return header
 }
 
-export function makePageShell(active, eyebrow, title, lede) {
+// The four corner buttons are the surface's persistent configuration entries: top-left work
+// scope, top-right view mode, bottom-left display settings, bottom-right input settings. Each
+// one opens the same next-layer panel instead of stacking dialogs. The panel only reports what
+// the current surface really supports: it never renders a fake selector and never calls a task
+// action, so opening or closing it cannot change task state.
+const SHELL_SECTIONS = [
+  { id: 'scope', corner: 'top-left', label: '工作范围', title: '工作范围：查看当前内容属于哪个任务' },
+  { id: 'view', corner: 'top-right', label: '查看方式', title: '查看方式：选择这一层的阅读深度' },
+  { id: 'display', corner: 'bottom-left', label: '显示设置', title: '显示设置：调整展开与排版方式' },
+  { id: 'input', corner: 'bottom-right', label: '输入设置', title: '输入设置：设置如何输入与操作' },
+]
+
+export const RUNTIME_READ_MODES = Object.freeze(['fake', 'rcc'])
+
+function taskIdValue(taskId) {
+  return taskId && typeof taskId === 'object' ? taskId.value : taskId
+}
+
+export function readScopeLabel(scope) {
+  if (scope?.kind === 'system') return '全部项目（System）'
+  if (scope?.kind === 'project') return `项目 ${scope.projectKey}`
+  if (scope?.kind === 'task') {
+    return `项目 ${scope.projectKey} · 模式 ${scope.mode} · 任务 ${taskIdValue(scope.taskId)}`
+  }
+  return '未确认范围'
+}
+
+/**
+ * Read the project selection carried by the URL. The URL is UI display state;
+ * it never changes the runtime's current project or execution mode.
+ */
+export function projectReadScopeFromQuery() {
+  const projectKey = queryParam('projectKey')
+  return projectKey
+    ? { kind: 'project', projectKey }
+    : { kind: 'system' }
+}
+
+/**
+ * Read an explicit task scope from the URL. A task page without any scope is
+ * kept as a legacy read for old links. A partial or unsupported explicit scope
+ * is invalid and must fail visibly instead of falling back to another project.
+ */
+export function taskReadScopeFromQuery() {
+  const task = queryParam('task')
+  const projectKey = queryParam('projectKey')
+  const mode = queryParam('mode')
+  if (task && !projectKey && !mode) return { kind: 'legacy', taskId: task }
+  if (!task && !projectKey && !mode) return { kind: 'legacy', taskId: undefined }
+  const missing = []
+  if (!task) missing.push('task')
+  if (!projectKey) missing.push('projectKey')
+  if (!mode) missing.push('mode')
+  if (missing.length > 0) {
+    return {
+      kind: 'invalid',
+      failure: {
+        code: 'read.scope.invalid',
+        ownerId: 'humanagent.ui',
+        message: `explicit task scope is missing ${missing.join(', ')}`,
+        nextAction: 'open the task from the project list so the URL carries task, projectKey, and mode',
+      },
+    }
+  }
+  if (!RUNTIME_READ_MODES.includes(mode)) {
+    return {
+      kind: 'invalid',
+      failure: {
+        code: 'read.scope.invalid',
+        ownerId: 'humanagent.ui',
+        message: `unsupported scoped read mode: ${mode}`,
+        nextAction: 'use a task row whose mode is fake or rcc',
+      },
+    }
+  }
+  return { kind: 'task', projectKey, mode, taskId: { value: task } }
+}
+
+function addTaskScope(params, scope) {
+  if (scope?.kind === 'task') {
+    params.set('projectKey', scope.projectKey)
+    params.set('mode', scope.mode)
+  }
+  return params
+}
+
+export function projectTasksHref(projectKey) {
+  return `./tasks.html?projectKey=${encodeURIComponent(projectKey)}`
+}
+
+export function systemTasksHref() {
+  return './tasks.html'
+}
+
+export function observationHref(taskId, scope) {
+  const params = new URLSearchParams({ task: String(taskIdValue(taskId)) })
+  addTaskScope(params, scope)
+  return `./observation.html?${params}`
+}
+
+export function taskDashboardHref(taskId, scope) {
+  const params = new URLSearchParams({ task: String(taskIdValue(taskId)) })
+  addTaskScope(params, scope)
+  return `./task-dashboard.html?${params}`
+}
+
+export function taskDetailHref(taskId, scope) {
+  const params = new URLSearchParams({ task: String(taskIdValue(taskId)) })
+  addTaskScope(params, scope)
+  return `./task.html?${params}`
+}
+
+/**
+ * Wrap an existing public GET in the shared scoped-publication owner. The API
+ * builders return projections, while the publication owner consumes typed
+ * results; this adapter keeps that conversion in one place for every page.
+ */
+export function createScopedReadPublication(read) {
+  if (typeof read !== 'function') throw new TypeError('createScopedReadPublication requires a read function')
+  return createRuntimeReadPublication({
+    read: async (scope) => {
+      try {
+        return { ok: true, value: await read(scope) }
+      } catch (error) {
+        return { ok: false, failure: error }
+      }
+    },
+  })
+}
+
+// Human failure copy for one scoped/page read. The mapping covers only the codes the
+// runtime owner actually returns; every other code keeps the confirmed default (this read
+// failed, the specific reason is not confirmed yet) instead of guessing a direction. The
+// runtime's code/owner/message/nextAction stay verbatim in the evidence detail, so the
+// mapping never hides or relabels an unknown failure.
+const READ_FAILURE_COPY = Object.freeze({
+  'auth.session.missing': {
+    result: '这台浏览器尚未配对',
+    next: '请打开配对入口，用一次性配对码连接这台浏览器。',
+  },
+  'auth.session.expired': {
+    result: '会话已失效',
+    next: '请打开配对入口，用一次性配对码重新配对这台浏览器。',
+  },
+  'auth.session.invalid': {
+    result: '会话无效',
+    next: '请打开配对入口，用一次性配对码重新配对这台浏览器。',
+  },
+  'read.scope.invalid': {
+    result: '读取范围不完整',
+    next: '请从项目或任务列表重新打开这一层，不要选择未知范围。',
+  },
+  'runtime.read.invalid-target': {
+    result: '读取目标不在当前范围内',
+    next: '请从项目或任务列表重新打开这一层，不要选择未知范围。',
+  },
+  'project.unknown': {
+    result: '当前范围内没有这个项目',
+    next: '请回到项目列表核对范围后再进入。',
+  },
+  'task.not-found': {
+    result: '当前范围内没有这个任务',
+    next: '请回到任务列表核对范围后再进入。',
+  },
+  'task.not.found': {
+    result: '当前范围内没有这个任务',
+    next: '请回到任务列表核对范围后再进入。',
+  },
+  'i2.history.unavailable': {
+    result: '权威历史读取尚未接入',
+    next: '此次历史结果暂不可用，请查看已有详情。',
+  },
+  'project-manifest-missing': {
+    result: '该项目资源未登记',
+    next: '请先登记该项目再读取。',
+  },
+})
+
+function readFailureCopy(failure) {
+  return READ_FAILURE_COPY[failure?.code] || {
+    result: '这次读取没有成功',
+    next: '具体原因尚未确认，可打开技术详情核对。',
+  }
+}
+
+function renderScopedFailures(failures, emptyText) {
+  const panel = element('div', undefined, 'panel scope-failures')
+  if (!failures || failures.length === 0) {
+    if (emptyText) panel.append(element('p', emptyText, 'empty'))
+    return panel
+  }
+  panel.append(element('p', '部分内容读取失败', 'eyebrow'))
+  for (const failure of failures) {
+    const row = element('div', undefined, 'scope-failure')
+    row.dataset.failureCode = failure.code || ''
+    const copy = readFailureCopy(failure)
+    row.append(
+      element('strong', copy.result),
+      element('p', copy.next),
+      historyRawDetail([
+        ['code', failure.code || 'read.failed'],
+        ['detail', `${failure.message || ''} · owner=${failure.ownerId || 'unknown'} · next=${failure.nextAction || 'retry the same read'}`],
+      ]),
+    )
+    panel.append(row)
+  }
+  return panel
+}
+
+function renderTaskReadRow(row, options = {}) {
+  const task = row.task
+  const item = element('div', undefined, 'task-item')
+  const link = element('a', undefined, 'task-item-main')
+  link.href = taskDashboardHref(row.scope.taskId, row.scope)
+  link.dataset.taskScope = JSON.stringify(row.scope)
+  link.append(
+    element('h3', task.title || '未命名任务'),
+    element('p', `${task.currentState || task.state || ''} · ${task.nextStep || ''}`),
+  )
+  const meta = element('div', undefined, 'task-item-meta')
+  const state = element('span', task.stateLabel || task.state || '', 'task-state-pill')
+  state.dataset.tone = stateTone(task.state)
+  meta.append(
+    state,
+    element('span', row.basis === 'live-runtime' ? '当前实例' : '持久历史', 'scope-basis'),
+    element('time', formatTime(task.updatedAt)),
+  )
+  if (options.reasonLabel) meta.append(element('span', options.reasonLabel, 'task-flow-reason'))
+  link.append(meta)
+  item.append(link)
+  return item
+}
+
+// Scope and completeness facts belong to the section header metadata, so the
+// empty paragraph below never repeats them. A System scope is confirmed only
+// when both the owning scope and the known coverage token are present.
+function completenessLabel(complete) {
+  if (complete === true) return '本次读取完整'
+  if (complete === false) return '本次读取不完整'
+  return '完整性尚未确认'
+}
+
+function hasConfirmedSystemScope(projection) {
+  return projection?.scope?.kind === 'system'
+    && projection.coverage === 'configured-projects-in-current-control-root'
+}
+
+function hasConfirmedProjectScope(projection) {
+  return projection?.scope?.kind === 'project'
+    && typeof projection.scope.projectKey === 'string'
+    && projection.scope.projectKey !== ''
+}
+
+function systemScopeMeta(projection) {
+  return hasConfirmedSystemScope(projection) ? '读取范围：当前系统已声明的项目' : '读取范围尚未确认'
+}
+
+function projectScopeMeta(projection) {
+  return hasConfirmedProjectScope(projection) ? '读取范围：当前项目' : '读取范围尚未确认'
+}
+
+function systemReadMeta(projection) {
+  const projects = Array.isArray(projection.projects) ? projection.projects : null
+  const parts = []
+  if (projects !== null) {
+    parts.push(`本次读取返回 ${projects.length} 个项目`)
+    if (typeof projection.taskCount === 'number') parts.push(`本次读取返回 ${projection.taskCount} 个任务`)
+  }
+  parts.push(systemScopeMeta(projection), completenessLabel(projection.complete))
+  return parts.join(' · ')
+}
+
+function projectTaskMeta(projection) {
+  const tasks = Array.isArray(projection.tasks) ? projection.tasks : null
+  const parts = []
+  if (tasks !== null) parts.push(`本次读取返回 ${tasks.length} 个任务`)
+  parts.push(projectScopeMeta(projection), completenessLabel(projection.complete))
+  return parts.join(' · ')
+}
+
+// One type section of the grouped list. Every group reuses renderTaskReadRow, so
+// the link, scope, basis, state pill and time stay owned by the shared row
+// renderer. An unclassified row keeps its binding reason label visible.
+function renderTaskFlowSection(group) {
+  const section = element('section', undefined, 'section')
+  const head = element('header', undefined, 'section-head')
+  head.append(element('h3', group.label))
+  section.append(head)
+  const panel = element('div', undefined, 'panel')
+  if (group.rows.length === 0) {
+    panel.append(element('p', `本次读取的内容里没有匹配的${group.label}任务。`, 'empty'))
+  } else {
+    for (const row of group.rows) {
+      const reason = unclassifiedTaskFlowReason(row)
+      panel.append(renderTaskReadRow(row, reason ? { reasonLabel: UNCLASSIFIED_REASON_LABELS[reason] } : {}))
+    }
+  }
+  section.append(panel)
+  return section
+}
+
+// A native labelled select. The visible text is the row's own stateLabel; the raw
+// state is only the transient option value used by the grouping helper. No new
+// lifecycle schema and no persisted default: the choice is local view state.
+function renderLifecycleControl(rows, current, onChange) {
+  const label = element('label')
+  const select = element('select')
+  const all = element('option', '全部')
+  all.value = ''
+  select.append(all)
+  const seen = new Set()
+  for (const row of rows) {
+    const state = row?.task?.state
+    if (state === undefined || state === null || seen.has(state)) continue
+    seen.add(state)
+    const option = element('option', row.task.stateLabel || '状态未标注')
+    option.value = String(state)
+    select.append(option)
+  }
+  select.value = current ?? ''
+  select.addEventListener('change', () => onChange(select.value))
+  label.append('生命周期', select)
+  return label
+}
+
+// Type-first grouped list. The three TaskFlow type groups render before the
+// lifecycle refinement, and the helper returns the original scoped wrappers, so
+// the input rows and their references are never mutated. The lifecycle choice is
+// local readonly view state: it re-renders only the row sections, not the
+// control, so the select keeps focus, and it never fetches or persists anything.
+function renderTaskFlowGroups(rows) {
+  const host = element('div')
+  const sectionsHost = element('div')
+  let lifecycle = ''
+  const renderSections = () => {
+    const grouped = groupTaskFlowRows(rows, lifecycle ? { lifecycle } : {})
+    clearNode(sectionsHost)
+    for (const group of grouped.sections) sectionsHost.append(renderTaskFlowSection(group))
+    if (grouped.unclassified.rows.length > 0) sectionsHost.append(renderTaskFlowSection(grouped.unclassified))
+  }
+  renderSections()
+  const control = element('div', undefined, 'actions')
+  control.append(renderLifecycleControl(rows, lifecycle, (value) => {
+    lifecycle = value
+    renderSections()
+  }))
+  host.append(sectionsHost, control)
+  return host
+}
+
+export function renderProjectRead(projection, options = {}) {
+  const section = element('section', undefined, 'section')
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', projection.label || projection.scope?.projectKey || '项目'),
+    element('span', projectTaskMeta(projection), 'section-meta'),
+  )
+  section.append(head)
+  section.append(renderScopedFailures(projection.failures, null))
+  const tasks = Array.isArray(projection.tasks) ? projection.tasks : null
+  if (tasks === null) {
+    const empty = element('div', undefined, 'panel')
+    empty.append(element('p', '这次响应没有提供任务列表。', 'empty'))
+    section.append(empty)
+    return section
+  }
+  if (tasks.length === 0) {
+    const empty = element('div', undefined, 'panel')
+    empty.append(element('p', hasConfirmedProjectScope(projection) && projection.complete === true
+      ? '该项目没有已保存的任务。'
+      : '本次未读到任务。', 'empty'))
+    section.append(empty)
+    return section
+  }
+  section.append(renderTaskFlowGroups(tasks))
+  if (options.includeProjectLink !== false && projection.scope?.projectKey) {
+    const footer = element('p', undefined, 'section-footnote')
+    const link = element('a', '在项目页查看', 'button button--quiet')
+    link.href = projectTasksHref(projection.scope.projectKey)
+    footer.append(link)
+    section.append(footer)
+  }
+  return section
+}
+
+function renderProjectSummary(project) {
+  const section = element('section', undefined, 'section scope-project')
+  const head = element('header', undefined, 'section-head')
+  const title = element('h2')
+  const link = element('a', project.label || project.scope?.projectKey || '项目')
+  link.href = projectTasksHref(project.scope?.projectKey || '')
+  title.append(link)
+  head.append(
+    title,
+    element('span', projectTaskMeta(project), 'section-meta'),
+  )
+  section.append(head)
+  section.append(renderScopedFailures(project.failures, null))
+  const tasks = Array.isArray(project.tasks) ? project.tasks : null
+  if (tasks === null) {
+    const empty = element('div', undefined, 'panel')
+    empty.append(element('p', '这次响应没有提供任务列表。', 'empty'))
+    section.append(empty)
+    return section
+  }
+  if (tasks.length === 0) {
+    const empty = element('div', undefined, 'panel')
+    empty.append(element('p', hasConfirmedProjectScope(project) && project.complete === true
+      ? '该项目没有已保存的任务。'
+      : '本次未读到任务。', 'empty'))
+    section.append(empty)
+    return section
+  }
+  const panel = element('div', undefined, 'panel')
+  for (const row of tasks) panel.append(renderTaskReadRow(row))
+  section.append(panel)
+  return section
+}
+
+export function renderSystemRead(projection, options = {}) {
+  const section = element('section', undefined, 'section')
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', options.title || '全部项目'),
+    element('span', systemReadMeta(projection), 'section-meta'),
+  )
+  section.append(head)
+  section.append(renderScopedFailures(projection.failures, null))
+  const projects = Array.isArray(projection.projects) ? projection.projects : null
+  if (projects === null) {
+    const empty = element('div', undefined, 'panel')
+    empty.append(element('p', '这次响应没有提供项目列表。', 'empty'))
+    section.append(empty)
+    return section
+  }
+  if (projects.length === 0) {
+    const empty = element('div', undefined, 'panel')
+    empty.append(element('p', hasConfirmedSystemScope(projection) && projection.complete === true
+      ? '当前范围内没有已声明项目。'
+      : '本次未读到项目。', 'empty'))
+    section.append(empty)
+    return section
+  }
+  for (const project of projects) {
+    if (options.includeTasks === false) {
+      const row = element('div', undefined, 'task-item')
+      const link = element('a', undefined, 'task-item-main')
+      link.href = projectTasksHref(project.scope?.projectKey || '')
+      link.append(
+        element('h3', project.label || project.scope?.projectKey || '项目'),
+        element('p', projectTaskMeta(project)),
+      )
+      row.append(link)
+      section.append(row)
+    } else {
+      section.append(renderProjectSummary(project))
+    }
+  }
+  return section
+}
+
+function renderRawRef(ref) {
+  const facts = element('dl', undefined, 'record-ref')
+  for (const [label, value] of [
+    ['source', ref.source],
+    ['ordinal', String(ref.ordinal)],
+    ['projectKey', ref.projectKey],
+    ['mode', ref.mode],
+    ['taskId', taskIdValue(ref.taskId)],
+    ['operationId', ref.operationId],
+    ['executionEpoch', ref.executionEpoch],
+    ['checkpointId', ref.checkpointId],
+  ]) {
+    const row = element('div')
+    row.append(element('dt', label), element('dd', value ?? '未提供'))
+    facts.append(row)
+  }
+  return facts
+}
+
+/**
+ * Render records in the exact order returned by the runtime. The ordinal is
+ * the source-local position from the projection; the page never sorts or
+ * renumbers records globally.
+ */
+export function renderTaskRecords(projection, options = {}) {
+  const section = element('section', undefined, 'records')
+  const head = element('header', undefined, 'section-head')
+  const count = options.view === 'raw' ? (projection.raw?.length || 0) : (projection.actions?.length || 0)
+  head.append(
+    element('h2', options.view === 'raw' ? '原始记录' : '动作轨迹'),
+    element('span', `${count} 条 · ${projection.hasMore ? '还有更多' : '已到末尾'}`, 'section-meta'),
+  )
+  section.append(head)
+  section.append(element('p', `范围：${readScopeLabel(projection.scope)}`, 'muted'))
+  const list = element('div', undefined, 'record-list')
+  if (options.view === 'raw') {
+    for (const record of projection.raw || []) {
+      const item = element('article', undefined, 'record-item')
+      item.dataset.source = record.ref.source
+      item.dataset.ordinal = String(record.ref.ordinal)
+      item.append(
+        element('p', `${record.ref.source} · ordinal=${record.ref.ordinal} · ${record.body?.kind || 'unknown'}`, 'record-kind'),
+        element('time', formatTime(record.occurredAt), 'record-time'),
+        element('pre', JSON.stringify(record.body, null, 2), 'record-body'),
+      )
+      item.append(renderRawRef(record.ref))
+      list.append(item)
+    }
+  } else {
+    for (const action of projection.actions || []) {
+      const item = element('article', undefined, 'record-item')
+      item.dataset.ordinal = String(action.rawRef?.ordinal ?? '')
+      item.append(
+        element('p', `seq=${action.entry?.seq ?? '未知'} · ${action.entry?.kind || 'unknown'}`, 'record-kind'),
+        element('time', formatTime(action.entry?.occurredAt), 'record-time'),
+        element('p', action.entry?.summary || action.entry?.modelRef || '未提供摘要'),
+      )
+      if (action.rawRef) item.append(renderRawRef(action.rawRef))
+      if (action.rawRef && options.onRawRef) {
+        const raw = element('button', '查看这条原始记录', 'button button--quiet')
+        raw.type = 'button'
+        raw.addEventListener('click', () => options.onRawRef(action.rawRef))
+        item.append(raw)
+      }
+      list.append(item)
+    }
+  }
+  if (list.children.length === 0) list.append(element('p', '没有可显示的记录。', 'empty'))
+  section.append(list)
+  if (projection.hasMore && projection.nextCursor) {
+    const next = element('button', '继续读取下一页', 'button button--quiet')
+    next.type = 'button'
+    next.dataset.nextCursor = projection.nextCursor
+    next.addEventListener('click', () => options.onNext?.(projection.nextCursor))
+    section.append(next)
+  }
+  return section
+}
+
+const HISTORY_FILTER_LABELS = Object.freeze({
+  directiveRevision: '任务版本',
+  executionEpoch: '执行轮次',
+  cycleId: '任务周期',
+  occurrenceRef: '巡检轮次',
+})
+
+// Typed enums are mapped for display only. An unrecognized raw value keeps a
+// truthful "not yet determined" default here, and the raw value moves to the
+// evidence detail instead of being guessed or treated as success/failure.
+const REPLACEMENT_REASON_LABELS = Object.freeze({
+  observation: '新增观察',
+  compaction: '整理上下文',
+  recovery: '恢复任务',
+})
+
+const CAPABILITY_STATE_LABELS = Object.freeze({
+  available: '可筛选',
+  unavailable: '暂不能筛选',
+  unknown: '尚未确定',
+})
+
+function replacementReasonLabel(reason) {
+  return REPLACEMENT_REASON_LABELS[reason] || '未说明原因'
+}
+
+function capabilityStateLabel(state) {
+  return CAPABILITY_STATE_LABELS[state] || '尚未确定'
+}
+
+// Evidence-only detail level. Raw commit IDs, digests and cursors stay here so
+// the default copy shows readable summaries instead of mechanical identifiers.
+function historyRawDetail(pairs) {
+  const details = element('details', undefined, 'history-detail')
+  details.append(element('summary', '证据详情'))
+  const list = element('dl', undefined, 'record-ref')
+  for (const [label, value] of pairs) {
+    const row = element('div')
+    const text = value === undefined || value === null || value === '' ? '未提供' : String(value)
+    row.append(element('dt', label), element('dd', text))
+    list.append(row)
+  }
+  details.append(list)
+  return details
+}
+
+function historyPositionCell(label, cursor, checkpoints) {
+  const cell = element('div', undefined, 'detail-cell')
+  cell.dataset.position = label
+  cell.append(element('dt', label))
+  const value = element('dd')
+  if (!cursor) {
+    value.textContent = label === '正在查看' ? '未选择旧点' : '未提供'
+  } else {
+    const match = (checkpoints || []).find((checkpoint) => checkpoint.checkpointId === cursor.checkpointId)
+    value.textContent = match && match.summary
+      ? `${match.summary} · 执行轮次 ${cursor.executionEpoch}`
+      : `执行轮次 ${cursor.executionEpoch}`
+  }
+  cell.append(value)
+  return cell
+}
+
+function historyActions(projection, options) {
+  const actions = element('div', undefined, 'history-actions')
+  const refresh = element('button', '重新读取历史', 'button button--quiet')
+  refresh.type = 'button'
+  refresh.addEventListener('click', () => options.onRefresh?.())
+  actions.append(refresh)
+  if (projection.nextCursor) {
+    const next = element('button', '继续读取下一页', 'button button--quiet')
+    next.type = 'button'
+    next.dataset.nextCursor = projection.nextCursor
+    next.addEventListener('click', () => options.onNext?.(projection.nextCursor))
+    actions.append(next)
+  }
+  return actions
+}
+
+export function renderContextHistory(projection, options = {}) {
+  const section = element('section', undefined, 'history-section')
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '上下文变化'),
+    element('span', `${projection.views?.length || 0} 个视图 · ${projection.replacements?.length || 0} 次替换`, 'section-meta'),
+  )
+  section.append(head)
+  section.append(historyRawDetail([
+    ['mode', projection.mode],
+    ['taskId', taskIdValue(projection.taskId)],
+  ]))
+  section.append(element('p', projection.currentContextCommitRef
+    ? '当前上下文：已提交一个持久上下文。'
+    : '当前上下文：本任务尚无已提交的持久上下文。', 'muted'))
+
+  const views = element('div', undefined, 'history-list')
+  for (const view of projection.views || []) {
+    const item = element('article', undefined, 'history-item')
+    item.dataset.contextView = view.contextViewRef
+    item.append(
+      element('p', `执行轮次 ${view.executionEpoch} · 保留 ${view.activeRefs?.length || 0} 个引用 · 省略 ${view.omittedRefs?.length || 0} 个引用`, 'history-item-title'),
+      historyRawDetail([
+        ['contextViewRef', view.contextViewRef],
+        ['contextDigest', view.contextDigest],
+        ['checkpointId', view.checkpointId],
+        ['activeRefs', (view.activeRefs || []).join(', ')],
+        ['omittedRefs', (view.omittedRefs || []).join(', ')],
+      ]),
+    )
+    views.append(item)
+  }
+  if (views.children.length === 0) views.append(element('p', '这个任务还没有记录到上下文变化。', 'empty'))
+  section.append(views)
+
+  if ((projection.replacements || []).length > 0) {
+    section.append(element('h3', '替换关系'))
+    const replacements = element('div', undefined, 'history-list')
+    for (const replacement of projection.replacements) {
+      const item = element('article', undefined, 'history-item')
+      item.dataset.replacement = replacement.replacementId
+      item.append(
+        element('p', `替换原因：${replacementReasonLabel(replacement.reason)} · 涉及 ${replacement.deltaIds?.length || 0} 项增量`, 'history-item-title'),
+        element('p', `执行轮次 ${replacement.executionEpoch} · 由旧视图切换到新视图`, 'muted'),
+        historyRawDetail([
+          ['reason', replacement.reason],
+          ['replacementId', replacement.replacementId],
+          ['fromContextViewRef', replacement.fromContextViewRef],
+          ['toContextViewRef', replacement.toContextViewRef],
+          ['toContextDigest', replacement.toContextDigest],
+          ['replacementDigest', replacement.replacementDigest],
+          ['deltaIds', (replacement.deltaIds || []).join(', ')],
+        ]),
+      )
+      replacements.append(item)
+    }
+    section.append(replacements)
+  }
+
+  section.append(historyActions(projection, options))
+  return section
+}
+
+export function renderCheckpointHistory(projection, options = {}) {
+  const section = element('section', undefined, 'history-section')
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '阶段记录'),
+    element('span', `${projection.checkpoints?.length || 0} 条 · ${projection.nextCursor ? '还有更多' : '已到末尾'}`, 'section-meta'),
+  )
+  section.append(head)
+  section.append(historyRawDetail([
+    ['mode', projection.mode],
+    ['taskId', taskIdValue(projection.taskId)],
+  ]))
+
+  const positions = element('dl', undefined, 'detail-grid history-positions')
+  positions.append(historyPositionCell('当前执行点', projection.current, projection.checkpoints))
+  positions.append(historyPositionCell('正在查看', projection.viewed, projection.checkpoints))
+  section.append(positions)
+
+  const capabilities = Object.entries(projection.capabilities || {})
+  if (capabilities.length > 0) {
+    const list = element('ul', undefined, 'history-capabilities')
+    for (const [name, value] of capabilities) {
+      const row = element('li')
+      row.dataset.capability = name
+      row.dataset.capabilityState = value?.state || 'unknown'
+      row.append(
+        element('strong', HISTORY_FILTER_LABELS[name] || name),
+        element('span', ` · ${capabilityStateLabel(value?.state)}`),
+        historyRawDetail([
+          ['state', value?.state],
+          ['reason', value?.reason],
+        ]),
+      )
+      list.append(row)
+    }
+    section.append(list)
+  }
+
+  const available = Object.keys(HISTORY_FILTER_LABELS)
+    .filter((name) => projection.capabilities?.[name]?.state === 'available')
+  if (available.length > 0) {
+    const filters = element('div', undefined, 'history-filters')
+    for (const name of available) {
+      const label = element('label', undefined, 'history-filter')
+      label.append(element('span', HISTORY_FILTER_LABELS[name]))
+      const input = element('input')
+      input.type = name === 'executionEpoch' ? 'number' : 'text'
+      input.value = options.filters?.[name] ?? ''
+      input.dataset.filter = name
+      label.append(input)
+      filters.append(label)
+    }
+    const apply = element('button', '应用筛选', 'button button--quiet')
+    apply.type = 'button'
+    apply.addEventListener('click', () => options.onFilter?.(readHistoryFilters(filters)))
+    filters.append(apply)
+    section.append(filters)
+  }
+
+  const list = element('div', undefined, 'history-list')
+  for (const checkpoint of projection.checkpoints || []) {
+    const viewed = projection.viewed?.checkpointId === checkpoint.checkpointId
+    const item = element('article', undefined, 'history-item')
+    item.dataset.checkpoint = checkpoint.checkpointId
+    item.dataset.viewed = String(viewed)
+    item.append(
+      element('p', checkpoint.summary || '未提供摘要', 'history-item-title'),
+      element('p', `执行轮次 ${checkpoint.executionEpoch} · 序号 ${checkpoint.seq}${checkpoint.committedAt ? ` · ${formatTime(checkpoint.committedAt)}` : ''}`, 'muted'),
+    )
+    if (viewed) item.append(element('span', '正在查看', 'history-viewed-tag'))
+    const select = element('button', viewed ? '正在查看此点' : '查看此旧点', 'button button--quiet')
+    select.type = 'button'
+    select.disabled = viewed
+    select.addEventListener('click', () => options.onSelect?.(checkpoint.checkpointId))
+    item.append(select)
+    item.append(historyRawDetail([
+      ['checkpointId', checkpoint.checkpointId],
+      ['directiveRevision', checkpoint.directiveRevision],
+      ['cycleId', checkpoint.cycleId],
+      ['occurrenceRef', checkpoint.occurrenceRef],
+      ['commitId', checkpoint.commitRef?.commitId],
+      ['journalSeq', checkpoint.commitRef === undefined ? undefined : checkpoint.commitRef.journalSeq],
+      ['recordDigest', checkpoint.commitRef?.recordDigest],
+    ]))
+    list.append(item)
+  }
+  if (list.children.length === 0) list.append(element('p', '这个任务还没有记录到阶段。', 'empty'))
+  section.append(list)
+  section.append(historyActions(projection, options))
+  return section
+}
+
+function readHistoryFilters(host) {
+  const filters = {}
+  for (const input of host.querySelectorAll('[data-filter]')) {
+    const value = String(input.value ?? '').trim()
+    if (value !== '') filters[input.dataset.filter] = value
+  }
+  return filters
+}
+
+// ── I2 durable history renderers ───────────────────────────────────────────
+// Semantic business labels come first: what was inspected, what failed, cycle
+// progress/result/next action, review verdict/findings/alignment. Commit IDs,
+// digests and check IDs stay in the evidence-only detail level.
+const I2_CYCLE_OUTCOME_LABELS = Object.freeze({
+  continue: '继续',
+  wait: '等待',
+  stop: '停止',
+  recover: '恢复',
+})
+const I2_REVIEW_STATUS_LABELS = Object.freeze({
+  passed: '通过',
+  failed: '未通过',
+  inconclusive: '未定',
+})
+const I2_ITEM_STATE_LABELS = Object.freeze({
+  completed: '已完成',
+  failed: '失败',
+  missing: '缺失',
+})
+const I2_ITEM_OUTCOME_LABELS = Object.freeze({
+  completed: '已观测',
+  failed: '失败',
+  blocked: '阻塞',
+  cancelled: '取消',
+  unknown: '未知',
+  missing: '缺失',
+})
+const I2_OCCURRENCE_OUTCOME_LABELS = Object.freeze({
+  completed: '完成',
+  failed: '失败',
+  blocked: '阻塞',
+  cancelled: '取消',
+  unknown: '未知',
+  pending: '进行中',
+})
+const I2_ITEM_CHANGE_LABELS = Object.freeze({
+  unchanged: '无变化',
+  changed: '有变化',
+  'not-compared': '未可比对',
+})
+
+function i2Label(labels, value) {
+  return labels[value] || (value === undefined || value === null ? '' : String(value))
+}
+
+function i2CurrentLabel(current) {
+  if (current?.state === 'known') {
+    return current.cycleId ? `当前业务周期：${current.cycleId}` : '当前没有已打开的业务周期。'
+  }
+  return `当前执行位置未知：${current?.reason || '未绑定当前执行位置读取'}。历史仍然可用。`
+}
+
+function i2EvidenceRefsText(refs) {
+  return (refs || []).map((ref) => ref?.evidenceId?.value || ref?.locator || '').filter(Boolean).join(', ')
+}
+
+function i2ItemLine(item) {
+  const outcome = i2Label(I2_ITEM_OUTCOME_LABELS, item.outcome)
+  if (item.state === 'completed') return `${outcome} · ${item.judgment || '未提供观测结果'}`
+  if (item.reason) return `${outcome} · ${item.reason}`
+  return outcome
+}
+
+function i2OccurrenceSummary(occurrence) {
+  const counts = { failed: 0, missing: 0 }
+  for (const item of occurrence.items || []) {
+    if (item.state === 'failed') counts.failed += 1
+    if (item.state === 'missing') counts.missing += 1
+  }
+  const parts = [`${occurrence.items?.length || 0} 项检查`]
+  if (counts.failed > 0) parts.push(`${counts.failed} 项失败`)
+  if (counts.missing > 0) parts.push(`${counts.missing} 项缺失`)
+  return parts.join(' · ')
+}
+
+function i2ItemDetail(item) {
+  return historyRawDetail([
+    ['checkId', item.checkId],
+    ['outcome', item.outcome],
+    ['judgment', item.judgment],
+    ['reason', item.reason],
+    ['resultRef', item.resultRef],
+    ['completedAt', item.completedAt],
+    ['evidenceRefs', i2EvidenceRefsText(item.evidenceRefs)],
+  ])
+}
+
+function i2TaskScopeDetail(projection) {
+  return [
+    ['organId', projection.taskScope?.organId?.value],
+    ['taskId', projection.taskScope?.taskId?.value],
+  ]
+}
+
+export function renderI2BusinessCycles(projection, options = {}) {
+  const section = element('section', undefined, 'history-section')
+  section.dataset.i2History = 'cycles'
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '业务周期'),
+    element('span', `${projection.entries?.length || 0} 个周期 · ${projection.nextCursor ? '还有更多' : '已到末尾'}`, 'section-meta'),
+  )
+  section.append(head)
+  section.append(historyRawDetail(i2TaskScopeDetail(projection)))
+  section.append(element('p', i2CurrentLabel(projection.current), 'muted'))
+  const list = element('div', undefined, 'history-list')
+  for (const cycle of projection.entries || []) {
+    const item = element('article', undefined, 'history-item')
+    item.dataset.businessCycle = cycle.cycleId
+    item.dataset.progress = cycle.progress
+    const viewed = projection.viewed?.cycleId === cycle.cycleId
+    if (viewed) item.append(element('span', '正在查看', 'history-viewed-tag'))
+    const progressLabel = cycle.progress === 'closed' ? '已收拢' : '进行中'
+    const outcomeLabel = cycle.outcome ? ` · 结果：${i2Label(I2_CYCLE_OUTCOME_LABELS, cycle.outcome)}` : ''
+    item.append(
+      element('p', `${progressLabel}${outcomeLabel} · ${formatTime(cycle.openedAt)}`, 'history-item-title'),
+      element('p', cycle.openingReason || '未提供开启原因', 'muted'),
+    )
+    const reviewText = cycle.reviews?.length
+      ? cycle.reviews.map((review) => `${review.milestoneId} ${i2Label(I2_REVIEW_STATUS_LABELS, review.status)}${review.alignment === 'pending' ? '（待对齐）' : ''}`).join(' · ')
+      : '本周期还没有里程碑评审'
+    item.append(element('p', `里程碑评审：${reviewText}`, 'muted'))
+    if (cycle.next) {
+      const nextLabel = i2Label(I2_CYCLE_OUTCOME_LABELS, cycle.next.kind)
+      item.append(element('p', `下一步：${cycle.next.ref ? `${nextLabel}（${cycle.next.ref}）` : nextLabel}`, 'muted'))
+    }
+    item.append(historyRawDetail([
+      ['cycleId', cycle.cycleId],
+      ['progress', cycle.progress],
+      ['outcome', cycle.outcome],
+      ['directiveRevision', cycle.directiveRevision],
+      ['executionEpoch', cycle.executionEpoch],
+      ['taskFlow kind', cycle.taskFlow?.kind],
+      ['taskFlow definitionVersion', cycle.taskFlow?.definitionVersion],
+      ['openedCommitRef', cycle.openedCommitRef?.commitId],
+      ['planRevisionCommitRef', cycle.planRevisionCommitRef?.commitId],
+      ['closureCommitRef', cycle.closureCommitRef?.commitId],
+      ['checkpointCommitRef', cycle.checkpointCommitRef?.commitId],
+      ['inspectionSettlementCommitRef', cycle.inspectionSettlementCommitRef?.commitId],
+      ['alignmentPending', cycle.alignmentPending],
+    ]))
+    list.append(item)
+  }
+  if (list.children.length === 0) list.append(element('p', '这个任务还没有记录到业务周期。', 'empty'))
+  section.append(list)
+  section.append(historyActions(projection, options))
+  return section
+}
+
+export function renderI2MilestoneReviews(projection, options = {}) {
+  const section = element('section', undefined, 'history-section')
+  section.dataset.i2History = 'reviews'
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '里程碑评审'),
+    element('span', `${projection.entries?.length || 0} 条 · ${projection.nextCursor ? '还有更多' : '已到末尾'}`, 'section-meta'),
+  )
+  section.append(head)
+  section.append(historyRawDetail(i2TaskScopeDetail(projection)))
+  section.append(element('p', i2CurrentLabel(projection.current), 'muted'))
+
+  const filters = element('div', undefined, 'history-filters')
+  for (const [name, label] of [['cycleId', '任务周期'], ['milestoneId', '里程碑']]) {
+    const wrap = element('label', undefined, 'history-filter')
+    wrap.append(element('span', label))
+    const input = element('input')
+    input.type = 'text'
+    input.value = options.filters?.[name] ?? ''
+    input.dataset.filter = name
+    wrap.append(input)
+    filters.append(wrap)
+  }
+  const apply = element('button', '应用筛选', 'button button--quiet')
+  apply.type = 'button'
+  apply.addEventListener('click', () => options.onFilter?.(readHistoryFilters(filters)))
+  filters.append(apply)
+  section.append(filters)
+
+  const list = element('div', undefined, 'history-list')
+  for (const review of projection.entries || []) {
+    const item = element('article', undefined, 'history-item')
+    item.dataset.milestoneReview = `${review.milestoneId}:${review.cycleId}`
+    item.dataset.alignment = review.alignment
+    const verdict = i2Label(I2_REVIEW_STATUS_LABELS, review.status)
+    item.append(
+      element('p', `${review.milestoneId} · ${verdict} · ${review.alignment === 'pending' ? '待对齐' : '已对齐'}`, 'history-item-title'),
+      element('p', `周期 ${review.cycleId} · ${formatTime(review.completedAt)}`, 'muted'),
+      element('p', review.outputText || '未提供评审输出', 'muted'),
+    )
+    if (review.findings?.length) {
+      const findings = element('div', undefined, 'history-list')
+      for (const finding of review.findings) {
+        const row = element('article', undefined, 'history-item')
+        row.dataset.finding = finding.findingId
+        row.append(
+          element('p', `${finding.problem || '未提供问题'} · ${finding.severity || ''}`, 'history-item-title'),
+          element('p', `期望：${finding.expected || '未提供'}`, 'muted'),
+          historyRawDetail([
+            ['findingId', finding.findingId],
+            ['locationRef', finding.locationRef],
+            ['severity', finding.severity],
+            ['evidenceRefs', i2EvidenceRefsText(finding.evidenceRefs)],
+          ]),
+        )
+        findings.append(row)
+      }
+      item.append(findings)
+    }
+    item.append(historyRawDetail([
+      ['reviewKind', review.reviewKind],
+      ['reviewCommitRef', review.reviewCommitRef?.commitId],
+      ['planRevisionCommitRef', review.planRevisionCommitRef?.commitId],
+      ['alignment', review.alignment],
+      ['alignmentCommitRef', review.alignmentCommitRef?.commitId],
+      ['alignedPlanRevisionCommitRef', review.alignedPlanRevisionCommitRef?.commitId],
+      ['checkpointCommitRef', review.checkpointCommitRef?.commitId],
+      ['artifactRef', review.artifactRef],
+      ['artifactDigest', review.artifactDigest],
+      ['reviewer runtimeId', review.reviewer?.runtimeId],
+      ['evidenceRefs', i2EvidenceRefsText(review.evidenceRefs)],
+    ]))
+    list.append(item)
+  }
+  if (list.children.length === 0) list.append(element('p', '这个任务还没有记录到里程碑评审。', 'empty'))
+  section.append(list)
+  section.append(historyActions(projection, options))
+  return section
+}
+
+export function renderI2InspectionOccurrences(projection, options = {}) {
+  const section = element('section', undefined, 'history-section')
+  section.dataset.i2History = 'inspections'
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '巡检记录'),
+    element('span', `${projection.entries?.length || 0} 次 · ${projection.nextCursor ? '还有更多' : '已到末尾'}`, 'section-meta'),
+  )
+  section.append(head)
+  section.append(historyRawDetail(i2TaskScopeDetail(projection)))
+  section.append(element('p', i2CurrentLabel(projection.current), 'muted'))
+  if (options.comparisonLeft) {
+    section.append(element('p', `已选择 ${options.comparisonLeft} 作为对比基准；请选择另一次巡检作为右侧。`, 'muted'))
+  }
+  const list = element('div', undefined, 'history-list')
+  for (const occurrence of projection.entries || []) {
+    const item = element('article', undefined, 'history-item')
+    item.dataset.occurrence = occurrence.occurrenceId
+    const viewed = projection.viewed?.occurrenceId === occurrence.occurrenceId
+    if (viewed) item.append(element('span', '正在查看', 'history-viewed-tag'))
+    const outcome = i2Label(I2_OCCURRENCE_OUTCOME_LABELS, occurrence.outcome)
+    item.append(
+      element('p', `${occurrence.occurrenceId} · ${outcome} · ${formatTime(occurrence.openedAt)}`, 'history-item-title'),
+      element('p', i2OccurrenceSummary(occurrence), 'muted'),
+    )
+    const items = element('details', undefined, 'history-detail')
+    items.append(element('summary', '检查明细'))
+    const rows = element('div', undefined, 'history-list')
+    for (const check of occurrence.items || []) {
+      const row = element('article', undefined, 'history-item')
+      row.dataset.checkItem = check.checkId
+      row.dataset.itemState = check.state
+      row.append(
+        element('p', check.criterion || '未提供检查内容', 'history-item-title'),
+        element('p', `状态：${i2Label(I2_ITEM_STATE_LABELS, check.state)} · ${i2ItemLine(check)}`, 'muted'),
+        i2ItemDetail(check),
+      )
+      rows.append(row)
+    }
+    items.append(rows)
+    item.append(items)
+    const selected = options.comparisonLeft === occurrence.occurrenceId
+    const compare = element(
+      'button',
+      selected ? '已选为基准' : (options.comparisonLeft ? '作为右侧对比' : '选择为对比基准'),
+      'button button--quiet',
+    )
+    compare.type = 'button'
+    compare.disabled = selected
+    compare.addEventListener('click', () => {
+      if (options.comparisonLeft) options.onCompare?.(options.comparisonLeft, occurrence.occurrenceId)
+      else options.onSelectCompare?.(occurrence.occurrenceId)
+    })
+    item.append(compare)
+    item.append(historyRawDetail([
+      ['definitionId', occurrence.definitionId],
+      ['definitionVersion', occurrence.definitionVersion],
+      ['definitionDigest', occurrence.definitionDigest],
+      ['definitionCommitRef', occurrence.definitionCommitRef?.commitId],
+      ['openingCommitRef', occurrence.openingCommitRef?.commitId],
+      ['settlementCommitRef', occurrence.settlementCommitRef?.commitId],
+      ['cycleId', occurrence.cycleId],
+      ['executionEpoch', occurrence.executionEpoch],
+      ['state', occurrence.state],
+      ['outcome', occurrence.outcome],
+      ['outcomeReason', occurrence.outcomeReason],
+      ['scheduleOccurrenceRef', occurrence.scheduleOccurrenceRef ? `${occurrence.scheduleOccurrenceRef.subscriptionId}:${occurrence.scheduleOccurrenceRef.occurrenceId}` : '未绑定调度槽'],
+      ['evidenceRefs', i2EvidenceRefsText(occurrence.evidenceRefs)],
+    ]))
+    list.append(item)
+  }
+  if (list.children.length === 0) list.append(element('p', '这个任务还没有记录到巡检。', 'empty'))
+  section.append(list)
+  section.append(historyActions(projection, options))
+  return section
+}
+
+export function renderI2InspectionComparison(projection, options = {}) {
+  const section = element('section', undefined, 'history-section')
+  section.dataset.i2History = 'comparison'
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '巡检对比'),
+    element('span', `左 ${projection.left?.occurrenceId || ''} · 右 ${projection.right?.occurrenceId || ''}`, 'section-meta'),
+  )
+  section.append(head)
+  section.append(historyRawDetail(i2TaskScopeDetail(projection)))
+  section.append(element('p', i2CurrentLabel(projection.current), 'muted'))
+  if (!projection.comparable) {
+    section.append(element('p', `无法对比：${projection.reason || '未提供原因'}。`, 'muted'))
+  } else if (projection.definition) {
+    section.append(element('p', `定义 ${projection.definition.definitionId} · 版本 ${projection.definition.definitionVersion}`, 'muted'))
+  }
+  const list = element('div', undefined, 'history-list')
+  for (const item of projection.items || []) {
+    const row = element('article', undefined, 'history-item')
+    row.dataset.comparisonItem = item.checkId
+    row.dataset.change = item.change
+    row.append(
+      element('p', item.criterion || '未提供检查内容', 'history-item-title'),
+      element('p', `变化：${i2Label(I2_ITEM_CHANGE_LABELS, item.change)}`, 'muted'),
+      element('p', `对比前：${i2ItemLine(item.before)}`, 'muted'),
+      element('p', `对比后：${i2ItemLine(item.after)}`, 'muted'),
+    )
+    row.append(historyRawDetail([
+      ['checkId', item.checkId],
+      ['change', item.change],
+      ['before state', item.before?.state],
+      ['before judgment', item.before?.judgment],
+      ['before reason', item.before?.reason],
+      ['after state', item.after?.state],
+      ['after judgment', item.after?.judgment],
+      ['after reason', item.after?.reason],
+    ]))
+    list.append(row)
+  }
+  if (projection.comparable && list.children.length === 0) {
+    list.append(element('p', '没有可对比的检查项。', 'empty'))
+  }
+  section.append(list)
+  const actions = historyActions(projection, options)
+  const back = element('button', '返回巡检历史', 'button button--quiet')
+  back.type = 'button'
+  back.addEventListener('click', () => options.onBack?.())
+  actions.append(back)
+  section.append(actions)
+  return section
+}
+
+function shellPanel(id, label) {
+  const section = element('section', undefined, 'shell-panel')
+  section.dataset.shellPanel = id
+  section.setAttribute('aria-label', label)
+  section.hidden = true
+  return section
+}
+
+function scopeSectionContent(context) {
+  const scope = context.scope
+  if (scope?.kind === 'task') {
+    return [
+      `当前范围：${readScopeLabel(scope)}。`,
+      '这个范围来自当前 URL 或上一层的任务行。刷新和重新打开只重新读取同一范围。',
+      '工作范围只改变你正在查看的内容，不会停止、重试或改变任务状态。',
+    ]
+  }
+  if (scope?.kind === 'project') {
+    return [
+      `当前范围：${readScopeLabel(scope)}。`,
+      '项目范围来自 URL 或上一层的项目行。返回全部项目请使用面包屑。',
+      '工作范围只改变你正在查看的内容，不会停止、重试或改变任务状态。',
+    ]
+  }
+  return [
+    '当前范围：全部项目（System）。',
+    '选择项目或任务后，范围会进入 URL；刷新会重新读取当前 URL 的范围。',
+    '工作范围只改变你正在查看的内容，不会停止、重试或改变任务状态。',
+  ]
+}
+
+function viewSectionContent(context) {
+  const page = location.pathname.split('/').pop() || ''
+  const taskScope = context.scope?.kind === 'task'
+  const current = page === 'observation.html'
+    ? '节点流转与节点详情（只读）'
+    : taskScope
+      ? '任务概要与按需记录'
+      : '默认阅读层'
+  const paragraphs = [
+    `当前查看方式：${current}`,
+    '切换查看方式只改变阅读深度，不会停止、重试或改变任务状态。',
+  ]
+  const showHistory = taskScope && context.capabilities?.history === true
+  if (showHistory) paragraphs.push('阶段记录和上下文变化是只读历史：选择旧点只改变正在查看的内容，不会移动当前执行点。')
+  return { paragraphs, showHistory }
+}
+
+function displaySectionContent(hasPreferenceBinding) {
+  const paragraphs = [
+    '展开方式：桌面在右侧展开，主内容保留在旁边；手机从底部抽屉展开。',
+    '排版：窄屏时正文换行，展开层正文可以滚动，标题与关闭入口保持可用。',
+    '调整显示只改变这一层怎么展开，不会停止、重试或改变任务状态。',
+  ]
+  if (hasPreferenceBinding) paragraphs.push('默认阅读方式保存在这台浏览器；直接手动切换会在 follow-last 下记录上一次成功选择。')
+  return paragraphs
+}
+
+function inputSectionContent() {
+  return [
+    '键盘操作：展开层打开后，Tab 在展开层内移动；Esc 关闭展开层。',
+    '读屏：展开层的标题与正文按页面文字播报。',
+    '自定义输入源、语音输入和输入历史尚未提供，因此这里不显示对应选项。',
+    '输入设置只改变你怎么操作这一层，不会停止、重试或改变任务状态。',
+  ]
+}
+
+// One shell-layer frame owns the next-layer surface for both the four-corner configuration
+// panel and a contextual 技术详情 disclosure. Desktop shows it beside the page; mobile shows
+// it as a bottom drawer. Keeping one frame builder means a contextual detail cannot drift from
+// the configuration panel or become a second overlay primitive.
+function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) {
+  const layer = element('dialog', undefined, 'shell-layer')
+  layer.setAttribute('aria-label', ariaLabel)
+  const head = element('header', undefined, 'shell-layer-head')
+  const titleWrap = element('div')
+  const title = element('h2', titleText, 'shell-layer-title')
+  if (titleId) title.id = titleId
+  titleWrap.append(element('p', eyebrow, 'eyebrow'), title)
+  const close = element('button', '关闭', 'button shell-layer-close')
+  close.type = 'button'
+  close.addEventListener('click', () => layer.close())
+  head.append(titleWrap, close)
+  const body = element('div', undefined, 'shell-layer-body')
+  layer.append(head, body)
+  return { layer, title, body, close }
+}
+
+// The contextual 技术详情 disclosure. It reuses the shell-layer frame, so it opens as the same
+// desktop side panel / mobile bottom drawer. Exact typed values (code/owner/message/nextAction
+// and the control-plane footer) live here; the primary layer keeps only human copy. The
+// document only ever has one open shell layer: opening the detail closes any other open layer,
+// and closing it returns focus to the trigger.
+let technicalDetailLayer = null
+// `content` lets a page module host its own read-only drill-down (for example the
+// shared agent-activity detail) in this same shell layer. Either way the layer stays
+// the one desktop side panel / mobile bottom drawer: the header, close button, single
+// open layer and focus return are not re-implemented by the page.
+export function openTechnicalDetail({ title = '技术详情', entries = [], footer, content, onClose } = {}) {
+  if (!technicalDetailLayer) {
+    const frame = createShellLayerFrame({
+      ariaLabel: '技术详情',
+      eyebrow: '技术详情',
+      titleText: '技术详情',
+      titleId: 'technical-detail-title',
+    })
+    frame.layer.dataset.technicalDetail = 'true'
+    document.body.append(frame.layer)
+    technicalDetailLayer = frame
+  }
+  const { layer, title: titleNode, body, close } = technicalDetailLayer
+  for (const openLayer of document.querySelectorAll('dialog.shell-layer[open]')) {
+    if (openLayer !== layer) openLayer.close()
+  }
+  titleNode.textContent = title
+  clearNode(body)
+  if (content) {
+    body.append(content)
+  } else {
+    const list = element('dl', undefined, 'draft-receipt')
+    for (const [label, value, hook] of entries) {
+      const raw = value === undefined || value === null ? '' : String(value)
+      const detail = element('dd', raw === '' ? '未提供' : raw)
+      detail.setAttribute('data-detail-label', label)
+      detail.setAttribute('data-detail-value', raw)
+      if (hook) detail.setAttribute(hook, raw)
+      const row = element('div')
+      row.append(element('dt', label), detail)
+      list.append(row)
+    }
+    body.append(list)
+  }
+  if (footer) body.append(element('p', footer))
+  const opener = document.activeElement
+  layer.addEventListener('close', () => {
+    if (typeof onClose === 'function') onClose()
+    if (opener && opener.isConnected) opener.focus()
+  }, { once: true })
+  if (!layer.open) layer.showModal()
+  close.focus()
+  return layer
+}
+
+// A contextual trigger for the technical-detail layer. It is not a global configuration
+// button: the caller places it next to the state it explains.
+export function technicalDetailTrigger(getDetail, { label = '技术详情' } = {}) {
+  const button = element('button', label, 'button button--quiet')
+  button.type = 'button'
+  button.dataset.technicalDetailTrigger = 'true'
+  button.addEventListener('click', () => openTechnicalDetail(getDetail()))
+  return button
+}
+
+function errorDetailEntries(error, fallbackNext) {
+  return [
+    ['code', error?.code, 'data-detail-code'],
+    ['owner', error?.ownerId, 'data-detail-owner'],
+    ['message', error?.message, 'data-detail-message'],
+    ['nextAction', error?.nextAction || fallbackNext, 'data-detail-next'],
+  ]
+}
+
+function displayMountFailure() {
+  return {
+    code: 'display-preference.missing-mount',
+    ownerId: 'humanagent.ui',
+    message: 'this page did not mount a display preference surface',
+    nextAction: 'open a task reading surface that can render a reading mode',
+  }
+}
+
+function renderDisplayModeChooser({ surface, state, onSelect }) {
+  const group = element('div', undefined, 'shell-mode-chooser')
+  group.setAttribute('role', 'group')
+  group.setAttribute('aria-label', '阅读方式')
+  const supported = new Set(Array.isArray(surface?.supportedModes) ? surface.supportedModes : [])
+  for (const mode of DISPLAY_MODES) {
+    const label = displayModeLabel(mode)
+    const button = element('button', label, 'button button--quiet shell-mode')
+    button.type = 'button'
+    button.dataset.displayMode = mode
+    button.dataset.shellFocus = `mode:${mode}`
+    button.setAttribute('aria-pressed', String(state?.mode === mode))
+    if (supported.has(mode)) {
+      button.addEventListener('click', () => onSelect(mode))
+    } else {
+      button.disabled = true
+      button.dataset.unavailable = 'true'
+      button.setAttribute('aria-disabled', 'true')
+      button.title = `${label}尚未接入`
+    }
+    group.append(button)
+    if (DISPLAY_MODE_DESCRIPTIONS[mode]) {
+      const description = element('p', DISPLAY_MODE_DESCRIPTIONS[mode], 'muted')
+      description.dataset.displayModeDescription = mode
+      group.append(description)
+    }
+  }
+  for (const mode of DISPLAY_MODES) {
+    if (supported.has(mode)) continue
+    const reason = surface?.unavailableReasons?.[mode] || '这个页面还不能渲染这层内容。'
+    const note = element('p', `${displayModeLabel(mode)}：${reason}`, 'muted display-mode-unavailable')
+    note.dataset.displayUnavailable = mode
+    group.append(note)
+  }
+  return group
+}
+
+function preferenceStatusCopy(state, { draftDefault, notice }) {
+  if (!state) return '显示偏好控制尚未挂载。'
+  if (state.disposed) return '显示偏好控制已经离开这个页面。'
+  if (state.preferenceRead === 'error') return '显示偏好读取失败，当前保留可用视图；保存和重置已停用。'
+  if (state.pending) return '正在处理显示偏好…'
+  if (state.unsaved) return '未保存：这次手动选择没有写入，仍保留上一次保存的偏好。'
+  const saved = state.preference?.mode
+  const currentDraft = draftDefault ?? saved ?? ''
+  if (saved && currentDraft && currentDraft !== saved) return '有未保存的修改；点保存才会写入默认阅读方式。'
+  if (saved) {
+    const resolved = state.defaultMode && state.defaultMode !== saved
+      ? `（当前解析为${displayModeLabel(state.defaultMode)}）`
+      : ''
+    return `已保存默认：${displayModeLabel(saved)}${resolved}。`
+  }
+  return notice || '显示偏好控制已就绪。'
+}
+
+function renderDisplayPreferencePanel({ state, draftDefault, notice, onDraft, onSave, onReset, onRetry }) {
+  const panel = element('div', undefined, 'display-preference-panel')
+  panel.dataset.displayPreference = 'true'
+
+  const field = element('label', undefined, 'display-preference-field')
+  field.htmlFor = 'display-default-select'
+  field.append(element('span', '默认阅读方式'))
+  const select = element('select')
+  select.id = 'display-default-select'
+  select.dataset.shellFocus = 'default-select'
+  const savedMode = state?.preference?.mode ?? state?.defaultMode ?? 'current'
+  for (const mode of DISPLAY_PREFERENCE_MODES) {
+    const option = element('option', displayModeLabel(mode))
+    option.value = mode
+    select.append(option)
+  }
+  select.value = draftDefault ?? savedMode
+  select.disabled = state?.preferenceRead !== 'ready' || state?.pending === true
+  select.addEventListener('change', () => onDraft(select.value))
+  field.append(select)
+  panel.append(field)
+
+  const actions = element('div', undefined, 'display-preference-actions')
+  const save = element('button', '保存默认', 'button button--primary')
+  save.type = 'button'
+  save.dataset.shellFocus = 'default-save'
+  save.disabled = state?.preferenceRead !== 'ready' || state?.pending === true
+  save.addEventListener('click', () => onSave())
+  const reset = element('button', '重置', 'button button--quiet')
+  reset.type = 'button'
+  reset.dataset.shellFocus = 'default-reset'
+  reset.disabled = state?.preferenceRead !== 'ready' || state?.pending === true
+  reset.addEventListener('click', () => onReset())
+  actions.append(save, reset)
+  panel.append(actions)
+
+  const status = element('p', preferenceStatusCopy(state, { draftDefault, notice }), 'muted display-preference-status')
+  status.setAttribute('role', 'status')
+  status.setAttribute('aria-live', 'polite')
+  if (state?.error) status.dataset.tone = 'danger'
+  panel.append(status)
+
+  if (state?.preferenceRead === 'error') {
+    const retry = element('button', '重试读取', 'button button--quiet')
+    retry.type = 'button'
+    retry.dataset.shellFocus = 'default-retry'
+    retry.addEventListener('click', () => onRetry())
+    panel.append(retry)
+  }
+  if (state?.error) {
+    panel.append(technicalDetailTrigger(() => ({
+      title: '技术详情',
+      entries: errorDetailEntries(state.error, 'retry the display preference request'),
+    })))
+  }
+  return panel
+}
+
+function renderMissingDisplayMount() {
+  const box = element('div', undefined, 'display-preference-panel display-preference-missing')
+  box.dataset.displayPreference = 'missing-mount'
+  box.append(
+    element('strong', '显示偏好未接入'),
+    element('p', '这个页面没有可切换的阅读层，无法读取或保存显示偏好。', 'muted'),
+    technicalDetailTrigger(() => ({ title: '技术详情', entries: errorDetailEntries(displayMountFailure(), 'open a task reading surface') })),
+  )
+  return box
+}
+
+export function mountShellLayer(context = {}) {
+  const controls = element('div', undefined, 'shell-controls')
+  controls.setAttribute('role', 'group')
+  controls.setAttribute('aria-label', '主动配置')
+  const triggers = new Map()
+  for (const item of SHELL_SECTIONS) {
+    const button = element('button', item.label, 'button shell-corner')
+    button.type = 'button'
+    button.dataset.shellCorner = item.corner
+    button.dataset.shellSection = item.id
+    button.setAttribute('aria-label', item.title)
+    controls.append(button)
+    triggers.set(item.id, button)
+  }
+
+  const { layer, title, body, close } = createShellLayerFrame({
+    ariaLabel: '主动配置',
+    eyebrow: '主动配置',
+    titleText: '',
+    titleId: 'shell-layer-title',
+  })
+  const panels = new Map()
+  for (const item of SHELL_SECTIONS) {
+    const section = shellPanel(item.id, item.label)
+    panels.set(item.id, section)
+    body.append(section)
+  }
+
+  document.body.append(controls, layer)
+
+  let returnFocus = null
+  let currentContext = { ...context }
+  let openPanelId = null
+  let displayController = null
+  let displayUnsubscribe = null
+  let draftDefault = null
+  let displayNotice = ''
+
+  if (currentContext.displaySurface) {
+    displayController = createDisplayPreferenceController({
+      client: {
+        displayPreference: () => api.displayPreference(),
+        updateDisplayPreference: (update) => api.updateDisplayPreference(update),
+        resetDisplayPreference: () => api.resetDisplayPreference(),
+      },
+      surface: currentContext.displaySurface,
+    })
+    displayUnsubscribe = displayController.subscribe(() => {
+      if (openPanelId === 'view' || openPanelId === 'display') renderPanel(openPanelId)
+    })
+  }
+
+  function renderPanel(id) {
+    const section = panels.get(id)
+    if (!section) return
+    const active = document.activeElement
+    const focusKey = active && section.contains(active) ? active.dataset?.shellFocus : null
+    clearNode(section)
+    if (id === 'scope') {
+      for (const text of scopeSectionContent(currentContext)) section.append(element('p', text))
+      const system = element('a', '全部项目', 'button button--quiet')
+      system.href = systemTasksHref()
+      section.append(system)
+      if (currentContext.scope?.projectKey) {
+        const project = element('a', '当前项目', 'button button--quiet')
+        project.href = projectTasksHref(currentContext.scope.projectKey)
+        section.append(project)
+      }
+      restorePanelFocus(section, focusKey)
+      return
+    }
+    if (id === 'view') {
+      const content = viewSectionContent(currentContext)
+      for (const text of content.paragraphs) section.append(element('p', text))
+      if (currentContext.displaySurface) {
+        section.append(renderDisplayModeChooser({
+          surface: currentContext.displaySurface,
+          state: displayController?.getState(),
+          onSelect: (mode) => void selectDisplayMode(mode),
+        }))
+      } else {
+        const missing = element('div', undefined, 'display-mount-failure')
+        missing.dataset.displayMount = 'missing'
+        missing.append(
+          element('strong', '阅读方式未接入'),
+          element('p', '这个页面没有可切换的阅读层。', 'muted'),
+        )
+        section.append(missing)
+      }
+      if (!content.showHistory) {
+        restorePanelFocus(section, focusKey)
+        return
+      }
+      const host = element('div', undefined, 'shell-records-host')
+      host.dataset.shellRecordsHost = ''
+      const actions = element('div', undefined, 'shell-record-actions')
+      const backToView = () => {
+        leaveDrawerReads()
+        renderPanel('view')
+        const focusTarget = panels.get('view').querySelector('[data-history-view]')
+        focusTarget?.focus()
+      }
+      const openLevel = (run) => {
+        const back = element('button', '返回查看方式', 'button button--quiet')
+        back.type = 'button'
+        back.addEventListener('click', backToView)
+        actions.replaceChildren(back)
+        void run()
+      }
+      for (const [view, label] of [
+        ['cycles', '查看业务周期'],
+        ['reviews', '查看里程碑评审'],
+        ['inspections', '查看巡检历史'],
+        ['checkpoints', '查看阶段记录'],
+        ['context', '查看上下文变化'],
+      ]) {
+        const button = element('button', label, 'button button--quiet')
+        button.type = 'button'
+        button.dataset.historyView = view
+        button.addEventListener('click', () => {
+          if (typeof currentContext.capabilities?.onReadHistory !== 'function') return
+          openLevel(() => currentContext.capabilities.onReadHistory(view, host))
+        })
+        actions.append(button)
+      }
+      section.append(actions, host)
+      restorePanelFocus(section, focusKey)
+      return
+    }
+    if (id === 'display') {
+      const hasBinding = Boolean(currentContext.displaySurface && displayController)
+      for (const text of displaySectionContent(hasBinding)) section.append(element('p', text))
+      if (hasBinding) {
+        section.append(renderDisplayPreferencePanel({
+          state: displayController.getState(),
+          draftDefault,
+          notice: displayNotice,
+          onDraft: (mode) => {
+            draftDefault = mode
+            displayNotice = ''
+            renderPanel('display')
+          },
+          onSave: () => void saveDisplayDefault(),
+          onReset: () => void resetDisplayPreference(),
+          onRetry: () => void refreshDisplayPreference(),
+        }))
+      } else {
+        section.append(renderMissingDisplayMount())
+      }
+      const wrap = element('button', '切换记录换行', 'button button--quiet')
+      wrap.type = 'button'
+      wrap.addEventListener('click', () => {
+        const enabled = layer.classList.toggle('shell-layer--wrap')
+        wrap.setAttribute('aria-pressed', String(enabled))
+      })
+      section.append(wrap)
+      restorePanelFocus(section, focusKey)
+      return
+    }
+    for (const text of inputSectionContent()) section.append(element('p', text))
+    const focusClose = element('button', '移到关闭入口', 'button button--quiet')
+    focusClose.type = 'button'
+    focusClose.addEventListener('click', () => close.focus())
+    section.append(focusClose)
+    restorePanelFocus(section, focusKey)
+  }
+
+  function restorePanelFocus(section, focusKey) {
+    if (!focusKey) return
+    const next = section.querySelector(`[data-shell-focus="${CSS.escape(focusKey)}"]`)
+    if (next) next.focus()
+  }
+
+  async function selectDisplayMode(mode) {
+    if (!displayController) return
+    displayNotice = ''
+    await displayController.selectMode(mode)
+  }
+
+  async function saveDisplayDefault() {
+    if (!displayController) return
+    const state = displayController.getState()
+    const mode = draftDefault ?? state.preference?.mode ?? state.defaultMode ?? 'current'
+    displayNotice = '正在保存默认阅读方式…'
+    renderPanel('display')
+    const result = await displayController.saveDefault(mode)
+    if (result.ok) {
+      draftDefault = mode
+      displayNotice = `已保存默认：${displayModeLabel(mode)}。`
+    } else {
+      displayNotice = ''
+    }
+    renderPanel('display')
+  }
+
+  async function resetDisplayPreference() {
+    if (!displayController) return
+    displayNotice = ''
+    const result = await displayController.reset()
+    if (result.ok) {
+      draftDefault = result.preference?.mode ?? result.defaultMode ?? 'current'
+      displayNotice = `已重置默认阅读方式：${displayModeLabel(draftDefault)}。`
+    }
+    renderPanel('display')
+  }
+
+  async function refreshDisplayPreference() {
+    if (!displayController) return
+    displayNotice = ''
+    const result = await displayController.refreshPreference()
+    if (result.ok) {
+      const state = displayController.getState()
+      draftDefault = state.preference?.mode ?? state.defaultMode ?? 'current'
+      displayNotice = '显示偏好已重新读取。'
+    }
+    renderPanel('display')
+  }
+
+  async function initializeDisplayPreference() {
+    if (!displayController) {
+      return { ok: false, failure: displayMountFailure() }
+    }
+    draftDefault = null
+    displayNotice = ''
+    const result = await displayController.initialize({ displayParam: queryParam('display') })
+    if (result.ok) {
+      const state = displayController.getState()
+      draftDefault = state.preference?.mode ?? state.defaultMode ?? 'current'
+    }
+    if (openPanelId === 'view' || openPanelId === 'display') renderPanel(openPanelId)
+    return result
+  }
+
+  function disposeDisplayPreference() {
+    if (displayUnsubscribe) {
+      displayUnsubscribe()
+      displayUnsubscribe = null
+    }
+    displayController?.dispose()
+    displayController = null
+  }
+
+  function open(id) {
+    const item = SHELL_SECTIONS.find((entry) => entry.id === id)
+    if (!item) return
+    leaveDrawerReads()
+    returnFocus = triggers.get(id) || null
+    openPanelId = id
+    title.textContent = item.title
+    for (const [key, section] of panels) {
+      section.hidden = key !== id
+      if (key === id) renderPanel(key)
+    }
+    layer.showModal()
+    close.focus()
+  }
+
+  // Leaving the drawer (or switching sections) discards any records or history
+  // read that belonged to the departed level, so a late response cannot publish
+  // into a level the user already left.
+  function leaveDrawerReads() {
+    currentContext.capabilities?.onLeaveRecords?.()
+    currentContext.capabilities?.onLeaveHistory?.()
+  }
+
+  // Return/close restores focus to the triggering corner when that button still exists.
+  layer.addEventListener('close', () => {
+    leaveDrawerReads()
+    openPanelId = null
+    const target = returnFocus
+    returnFocus = null
+    for (const section of panels.values()) section.hidden = true
+    if (target && target.isConnected) target.focus()
+  })
+  for (const [id, button] of triggers) button.addEventListener('click', () => open(id))
+
+  function setScope(scope) {
+    currentContext = { ...currentContext, scope }
+  }
+
+  function setCapabilities(capabilities) {
+    currentContext = { ...currentContext, capabilities }
+  }
+
+  return { open, setScope, setCapabilities, initializeDisplayPreference, disposeDisplayPreference }
+}
+
+export function makePageShell(active, eyebrow, title, lede, options = {}) {
   const interactionCardHosts = [...document.querySelectorAll('[data-interaction-work-card-host]')]
   document.body.replaceChildren()
   const header = makeTopbar(active)
   const main = element('main', undefined, 'page')
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
-  copy.append(element('p', eyebrow, 'eyebrow'), element('h1', title))
+  if (eyebrow) copy.append(element('p', eyebrow, 'eyebrow'))
+  copy.append(element('h1', title))
   if (lede) copy.append(element('p', lede, 'lede'))
+  const breadcrumbs = element('nav', undefined, 'breadcrumbs')
+  breadcrumbs.setAttribute('aria-label', '范围面包屑')
+  for (const crumb of options.breadcrumbs || []) {
+    if (crumb.href) {
+      const link = element('a', crumb.label)
+      link.href = crumb.href
+      breadcrumbs.append(link)
+    } else {
+      breadcrumbs.append(element('span', crumb.label))
+    }
+  }
+  if (breadcrumbs.children.length > 0) copy.append(breadcrumbs)
   const status = element('div', undefined, 'status-banner')
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
-  status.textContent = '正在连接 Runtime API…'
+  status.textContent = '正在读取当前状态…'
   heading.append(copy, status)
   main.append(heading)
   document.body.append(header, main)
-  return { main, status, interactionCardHosts }
+  const shellLayer = mountShellLayer({
+    scope: options.scope,
+    capabilities: options.capabilities,
+    ...(options.displaySurface ? { displaySurface: options.displaySurface } : {}),
+  })
+  return {
+    main,
+    status,
+    interactionCardHosts,
+    openShellSection: shellLayer.open,
+    setShellScope: shellLayer.setScope,
+    setShellCapabilities: shellLayer.setCapabilities,
+    initializeDisplayPreference: shellLayer.initializeDisplayPreference,
+    disposeDisplayPreference: shellLayer.disposeDisplayPreference,
+  }
 }
 
 export function showError(target, error) {
@@ -128,10 +1925,18 @@ export function showError(target, error) {
 export function renderPageError(target, error, fallbackNext = 'check runtime') {
   clearNode(target)
   target.dataset.tone = 'danger'
-  target.append(element(
-    'span',
-    `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || fallbackNext}`,
-  ))
+  const copy = readFailureCopy(error)
+  // The primary layer is human copy. The runtime's exact diagnostic line (code, owner,
+  // message, next) is preserved verbatim in the contextual 技术详情 layer so nothing is
+  // swallowed and existing failure detectors keep their exact tokens.
+  target.append(
+    element('strong', copy.result),
+    element('p', copy.next),
+    technicalDetailTrigger(() => ({
+      title: '技术详情',
+      entries: errorDetailEntries(error, fallbackNext),
+    })),
+  )
   appendPairingEntry(target, error)
 }
 
@@ -141,685 +1946,4 @@ export function taskIdFromQuery(required = true) {
   return taskId
 }
 
-export function observationHref(taskId) {
-  return `./observation.html?task=${encodeURIComponent(taskId)}`
-}
-
-export function taskDashboardHref(taskId) {
-  return `./task-dashboard.html?task=${encodeURIComponent(taskId)}`
-}
-
-export function taskDetailHref(taskId) {
-  return `./task.html?task=${encodeURIComponent(taskId)}`
-}
-
-export { clearNode, element, formatTime, queryParam, stateTone }
-
-/* ---------------------------------------------------------------------------
- * Shared semantic observation surface.
- *
- * One transport boundary decodes the runtime's public semantic envelope exactly
- * once (GET `response.json()` and SSE `JSON.parse`); the read-only adapter below
- * turns that typed envelope into the shared component projection. The Task
- * Observation page and the Task Dashboard mount the same panel, so rendering and
- * evidence references are identical across consumers and a revision replaces the
- * whole decoded payload instead of mutating bytes another view still holds.
- * ------------------------------------------------------------------------- */
-
-export const SEMANTIC_OBSERVATION_MODES = Object.freeze([
-  { id: 'current', label: '简洁' },
-  { id: 'semantic', label: '语义' },
-  { id: 'actions', label: '动作' },
-  { id: 'raw', label: '原始' },
-])
-
-// Closed presentation vocabularies. These map typed canonical fields to human
-// labels; they never re-derive the event taxonomy or pairing from raw text.
-const SEMANTIC_STATUS_LABELS = Object.freeze({
-  active: { label: '进行中', tone: 'warning' },
-  completed: { label: '已完成', tone: 'success' },
-  failed: { label: '失败', tone: 'danger' },
-  resolved: { label: '已解决', tone: 'success' },
-  superseded: { label: '已被取代', tone: 'gray' },
-  rejected: { label: '已否决', tone: 'warning' },
-})
-
-const SEMANTIC_GROUP_LABELS = Object.freeze({
-  open: { label: '进行中', tone: 'warning' },
-  closed: { label: '已收拢', tone: 'success' },
-  waiting: { label: '等待中', tone: 'warning' },
-  blocked: { label: '受阻', tone: 'warning' },
-  cancelled: { label: '已取消', tone: 'gray' },
-  unknown: { label: '未知', tone: 'warning' },
-  unavailable: { label: '不可用', tone: 'gray' },
-})
-
-const SEMANTIC_PAIR_ROLE_LABELS = Object.freeze({
-  opened: '起始事件',
-  resolved: '已闭合',
-  rejected: '已否决',
-})
-
-const SEMANTIC_ACTION_KIND_LABELS = Object.freeze({
-  request: '模型请求',
-  operation: '操作',
-  invocation: '工具调用',
-})
-
-const SEMANTIC_COVERAGE_LABELS = Object.freeze({
-  'unknown-kind': '存在未归类事件',
-  'waiting-is-not-terminal': '等待不等于结束',
-  'indistinguishable-tool-phase': '工具阶段无法区分',
-  'correlation-unavailable': '缺少关联信息',
-  'source-facet-missing': '来源字段缺失',
-  'duplicate-conflict': '重复事实冲突',
-  'opener-missing': '缺少起始事件',
-  'multi-opener': '存在多个起始事件',
-  'closer-conflict': '结束事件冲突',
-})
-
-function semanticModes() {
-  return SEMANTIC_OBSERVATION_MODES.map((mode) => ({ id: mode.id, label: mode.label, available: true }))
-}
-
-function semanticValue(part) {
-  return part && typeof part.value === 'string' ? part.value : ''
-}
-
-function semanticScopeCrumbs(scope) {
-  const crumbs = []
-  const organ = semanticValue(scope?.organId)
-  if (organ) crumbs.push({ scopeRef: `organ:${organ}`, title: '组织范围' })
-  const task = semanticValue(scope?.taskId)
-  if (task) crumbs.push({ scopeRef: `task:${task}`, title: '任务范围' })
-  const operation = semanticValue(scope?.operationId)
-  if (operation) crumbs.push({ scopeRef: `operation:${operation}`, title: '当前操作' })
-  return crumbs
-}
-
-// A crumb ref names the depth it filters to; the value stays in the ref (data
-// attribute) so no technical id leaks into the human-readable breadcrumb text.
-function semanticScopeMatches(ref, scope) {
-  const index = ref.indexOf(':')
-  if (index < 0) return true
-  const kind = ref.slice(0, index)
-  const value = ref.slice(index + 1)
-  if (kind === 'task') return semanticValue(scope?.taskId) === value
-  if (kind === 'operation') return semanticValue(scope?.operationId) === value
-  return true
-}
-
-function semanticScopeSummary(scope) {
-  const parts = []
-  const operation = semanticValue(scope?.operationId)
-  if (operation) parts.push('当前操作')
-  const task = semanticValue(scope?.taskId)
-  if (task) parts.push('任务范围')
-  if (parts.length === 0) parts.push('组织范围')
-  return `只读观测：${parts.join(' · ')}`
-}
-
-function semanticShortDigest(digest) {
-  const value = typeof digest === 'string' ? digest : ''
-  return value.length > 16 ? `${value.slice(0, 16)}…` : value
-}
-
-function semanticEvidenceOf(event) {
-  const ref = Array.isArray(event?.evidenceRefs) ? event.evidenceRefs[0] : undefined
-  const status = SEMANTIC_STATUS_LABELS[event?.status] ?? { label: event?.status ?? '未知' }
-  return {
-    evidenceId: ref?.evidenceId?.value || `event:${event?.eventId ?? 'unknown'}`,
-    title: event?.summary || event?.type || '事件证据',
-    summary: `${event?.type ?? '事件'} · ${status.label}`,
-    scopeLabel: semanticScopeSummary(event?.scope),
-    sourceLabel: ref?.source || event?.sourceId || 'runtime semantic projection',
-    inputs: event?.summary ? [event.summary] : [],
-    outputs: event?.payloadRef ? [`payload=${event.payloadRef}`] : [],
-    refs: [
-      ...(ref?.locator ? [ref.locator] : []),
-      `source=${event?.sourceId ?? '未提供'}`,
-      ...(event?.payloadRef ? [`payload=${event.payloadRef}`] : []),
-      ...(event?.dataDigest ? [`digest=${event.dataDigest}`] : []),
-    ],
-    raw: {
-      label: '原始事件记录（主动查看）',
-      content: JSON.stringify({
-        eventId: event?.eventId,
-        sourceId: event?.sourceId,
-        type: event?.type,
-        status: event?.status,
-        occurredAt: event?.occurredAt,
-        payloadRef: event?.payloadRef,
-        dataDigest: event?.dataDigest,
-      }, null, 2),
-    },
-  }
-}
-
-function semanticEventItem(event) {
-  const status = SEMANTIC_STATUS_LABELS[event?.status] ?? { label: event?.status ?? '未知', tone: 'gray' }
-  return {
-    id: event?.eventId ?? 'event',
-    title: event?.summary || '未提供摘要',
-    kind: 'semantic',
-    state: event?.status,
-    stateLabel: status.label,
-    tone: status.tone,
-    meta: [
-      event?.occurredAt ? formatTime(event.occurredAt) : '',
-      event?.pairing?.role ? SEMANTIC_PAIR_ROLE_LABELS[event.pairing.role] ?? event.pairing.role : '',
-      event?.supersededByEventId ? '已被后续事件取代' : '',
-      event?.type ?? '',
-    ].filter((value) => value),
-    evidence: semanticEvidenceOf(event),
-  }
-}
-
-function semanticActionItem(group) {
-  const state = SEMANTIC_GROUP_LABELS[group?.state] ?? { label: group?.state ?? '未知', tone: 'gray' }
-  const identity = group?.toolId || group?.callId || group?.requestId || group?.groupId || '动作'
-  const kind = SEMANTIC_ACTION_KIND_LABELS[group?.kind] ?? group?.kind ?? '动作'
-  return {
-    id: group?.groupId ?? identity,
-    title: `${kind} · ${identity}`,
-    kind: 'action',
-    state: group?.state,
-    stateLabel: state.label,
-    tone: state.tone,
-    meta: [
-      Number.isSafeInteger(group?.executionEpoch) ? `epoch=${group.executionEpoch}` : '',
-      Array.isArray(group?.eventRefs) ? `${group.eventRefs.length} 个事件引用` : '',
-    ].filter((value) => value),
-  }
-}
-
-function semanticRawItem(event) {
-  return {
-    id: event?.eventId ?? 'event',
-    title: event?.type || '未标注类型',
-    detail: `${event?.eventId ?? '未知事件'} · ${event?.sourceId ?? '未知来源'}`,
-    kind: 'raw',
-    state: event?.status,
-    stateLabel: SEMANTIC_STATUS_LABELS[event?.status]?.label ?? event?.status ?? '未知',
-    meta: [
-      event?.occurredAt ?? '',
-      `payload=${event?.payloadRef || '未提供'}`,
-      `digest=${semanticShortDigest(event?.dataDigest) || '未提供'}`,
-    ].filter((value) => value),
-    evidence: semanticEvidenceOf(event),
-  }
-}
-
-// The typed pairing vocabulary of `PAIRED_EXECUTION_STATES` maps to one headline
-// state each. `waiting`, `blocked`, `cancelled`, `unknown` and `unavailable` are
-// never rewritten as `completed` or as an ordinary `failed` summary.
-const SEMANTIC_PAIRING_HEADLINE = Object.freeze({
-  open: 'running',
-  closed: 'completed',
-  waiting: 'waiting',
-  blocked: 'blocked',
-  cancelled: 'cancelled',
-  unknown: 'unknown',
-  unavailable: 'unavailable',
-})
-
-// Headline precedence when one scope holds several typed states: unfinished and
-// abnormal states outrank `completed` so a closed group cannot hide them. The
-// summary below still lists every state that is present.
-const SEMANTIC_STATE_PRECEDENCE = Object.freeze([
-  'running',
-  'blocked',
-  'waiting',
-  'cancelled',
-  'failed',
-  'unknown',
-  'unavailable',
-  'completed',
-])
-
-// Non-open/non-closed pairing states get their own summary row, so a `completed`
-// headline never becomes the only visible fact about the scope.
-const SEMANTIC_LISTED_PAIRING_STATES = Object.freeze(['blocked', 'waiting', 'cancelled', 'unknown', 'unavailable'])
-
-function semanticDeriveState(events, pairing) {
-  if (events.length === 0 && pairing.length === 0) return 'empty'
-  const observed = new Set()
-  for (const group of pairing) {
-    observed.add(SEMANTIC_PAIRING_HEADLINE[group?.state] ?? 'unknown')
-  }
-  for (const event of events) {
-    if (event?.status === 'active') observed.add('running')
-    else if (event?.status === 'failed') observed.add('failed')
-  }
-  for (const state of SEMANTIC_STATE_PRECEDENCE) {
-    if (observed.has(state)) return state
-  }
-  return 'completed'
-}
-
-const SEMANTIC_STATE_LABELS = Object.freeze({
-  running: '进行中',
-  waiting: '等待中',
-  blocked: '受阻',
-  cancelled: '已取消',
-  failed: '失败',
-  completed: '已收拢',
-  empty: '空',
-  stale: '已过期',
-  unknown: '未知',
-  unavailable: '不可用',
-})
-
-function semanticSections(mode, events, pairing) {
-  if (mode === 'semantic') {
-    return [{
-      id: 'semantic',
-      title: '语义事实',
-      kind: 'semantic',
-      description: '来自 Runtime canonical 事件的只读语义；按发生顺序。',
-      items: events.map(semanticEventItem),
-    }]
-  }
-  if (mode === 'actions') {
-    return [{
-      id: 'actions',
-      title: '实际动作时间线',
-      kind: 'action',
-      description: '实际发生的操作与工具调用；不改写已执行事实。',
-      items: pairing.map(semanticActionItem),
-    }]
-  }
-  if (mode === 'raw') {
-    return [{
-      id: 'raw',
-      title: '原始记录',
-      kind: 'raw',
-      description: '仅在主动查看时读取，不驱动语义分类。',
-      items: events.map(semanticRawItem),
-    }]
-  }
-  const stable = events.filter((event) => event?.status !== 'active' && event?.status !== 'superseded')
-  const live = events.filter((event) => event?.status === 'active')
-  const superseded = events.filter((event) => event?.status === 'superseded')
-  const sections = [
-    {
-      id: 'stable',
-      title: '已提交事实',
-      kind: 'stable',
-      description: '已收拢的语义事实；进行中的活动不在此列。',
-      items: stable.map(semanticEventItem),
-    },
-    {
-      id: 'live',
-      title: '当前活动',
-      kind: 'live',
-      description: '未收拢活动不冒充完成。',
-      items: live.map(semanticEventItem),
-    },
-  ]
-  if (superseded.length > 0) {
-    sections.push({
-      id: 'superseded',
-      title: '已被取代',
-      kind: 'semantic',
-      description: '被后续事件取代的历史事实。',
-      items: superseded.map(semanticEventItem),
-    })
-  }
-  return sections
-}
-
-function semanticCoverageNotices(coverageIssues) {
-  const notices = []
-  if (coverageIssues.length > 0) {
-    notices.push({
-      tone: 'unknown',
-      title: '覆盖不完整（partial）',
-      detail: `${coverageIssues.length} 项事实未能完整归入语义；未覆盖内容保持未知，不冒充完成。`,
-    })
-    for (const issue of coverageIssues) {
-      const label = SEMANTIC_COVERAGE_LABELS[issue?.reason] ?? '语义覆盖问题'
-      notices.push({ tone: 'unavailable', title: label, detail: semanticScopeSummary(issue?.scope) })
-    }
-  }
-  return notices
-}
-
-/**
- * Pure read-only adapter: RuntimeSemanticObservationEnvelope -> the shared
- * component projection. It reads only typed canonical fields (scope, events,
- * pairing, coverageIssues, capabilities); it never re-derives the event
- * taxonomy, pairing or authorization and never mutates the envelope.
- */
-export function buildSemanticObservationProjection(envelope, options = {}) {
-  const source = envelope && typeof envelope === 'object' ? envelope : {}
-  const events = Array.isArray(source.events) ? source.events : []
-  const pairing = Array.isArray(source.pairing) ? source.pairing : []
-  const coverageIssues = Array.isArray(source.coverageIssues) ? source.coverageIssues : []
-  const capabilities = Array.isArray(source.capabilities) ? source.capabilities : []
-  const mode = SEMANTIC_OBSERVATION_MODES.some((entry) => entry.id === options.mode) ? options.mode : 'current'
-
-  const crumbs = semanticScopeCrumbs(source.scope)
-  const requested = typeof options.focusScopeRef === 'string' && options.focusScopeRef
-    ? options.focusScopeRef
-    : ''
-  const activeRef = requested && crumbs.some((crumb) => crumb.scopeRef === requested)
-    ? requested
-    : (crumbs.length > 0 ? crumbs[crumbs.length - 1].scopeRef : '')
-
-  const scopedEvents = events.filter((event) => semanticScopeMatches(activeRef, event?.scope))
-  const scopedPairing = pairing.filter((group) => semanticScopeMatches(activeRef, group?.scope))
-  const state = semanticDeriveState(scopedEvents, scopedPairing)
-  const pairingCounts = new Map()
-  for (const group of scopedPairing) {
-    const key = typeof group?.state === 'string' && group.state ? group.state : 'unknown'
-    pairingCounts.set(key, (pairingCounts.get(key) ?? 0) + 1)
-  }
-  const closed = pairingCounts.get('closed') ?? 0
-  const open = pairingCounts.get('open') ?? 0
-
-  return {
-    mode,
-    modes: semanticModes(),
-    scope: {
-      scopeRef: activeRef,
-      title: '语义观测',
-      summary: '从 Runtime canonical 事实到只读证据；不消费需求、不修改队列、不执行控制。',
-      breadcrumbs: crumbs.map((crumb) => ({
-        scopeRef: crumb.scopeRef,
-        title: crumb.title,
-        current: crumb.scopeRef === activeRef,
-      })),
-    },
-    state,
-    stateLabel: SEMANTIC_STATE_LABELS[state] ?? '未知',
-    projectionVersion: typeof source.projectionVersion === 'string' ? source.projectionVersion : '',
-    summary: [
-      { label: '语义事件', value: `${scopedEvents.length} 条` },
-      { label: '已收拢动作', value: `${closed} 项` },
-      { label: '进行中动作', value: `${open} 项`, tone: open > 0 ? 'warning' : undefined },
-      ...SEMANTIC_LISTED_PAIRING_STATES
-        .filter((pairingState) => (pairingCounts.get(pairingState) ?? 0) > 0)
-        .map((pairingState) => ({
-          label: `${SEMANTIC_GROUP_LABELS[pairingState].label}动作`,
-          value: `${pairingCounts.get(pairingState)} 项`,
-          tone: SEMANTIC_GROUP_LABELS[pairingState].tone,
-        })),
-      { label: '覆盖问题', value: `${coverageIssues.length} 项`, tone: coverageIssues.length > 0 ? 'warning' : undefined },
-    ],
-    notices: semanticCoverageNotices(coverageIssues),
-    capabilities: capabilities.map((capability) => ({
-      capability: capability?.capability ?? '未命名能力',
-      state: capability?.state ?? 'unknown',
-      reason: capability?.reason,
-    })),
-    sections: semanticSections(mode, scopedEvents, scopedPairing),
-  }
-}
-
-export function semanticObservationLoadingProjection() {
-  return {
-    mode: 'current',
-    modes: semanticModes(),
-    scope: { scopeRef: '', title: '语义观测', summary: '', breadcrumbs: [] },
-    state: 'loading',
-    stateLabel: '加载中',
-    projectionVersion: '',
-    summary: [],
-    notices: [{ tone: 'loading', title: '正在读取语义投影', detail: '完成前不使用原始内容推断状态。' }],
-    capabilities: [],
-    sections: [],
-  }
-}
-
-export function semanticObservationFailureProjection(error) {
-  return {
-    mode: 'current',
-    modes: semanticModes(),
-    scope: { scopeRef: '', title: '语义观测', summary: '', breadcrumbs: [] },
-    state: 'failed',
-    stateLabel: '失败',
-    projectionVersion: '',
-    summary: [],
-    notices: [{
-      tone: 'error',
-      title: '读取语义投影失败',
-      detail: `${error?.code || 'runtime.request.failed'} · ${error?.message || String(error)}`,
-      nextAction: error?.nextAction || '检查 runtime',
-    }],
-    capabilities: [],
-    sections: [],
-  }
-}
-
-// A semantic stream is terminal only for the operation it currently observes;
-// reaching it means the runtime closed the live read, not that the task was
-// cancelled. Closing our own subscription is unsubscribe, not a control command.
-function semanticEnvelopeTerminal(envelope) {
-  const operationId = semanticValue(envelope?.scope?.operationId)
-  if (!operationId) return false
-  const pairing = Array.isArray(envelope?.pairing) ? envelope.pairing : []
-  return pairing.some((group) => group?.kind === 'operation'
-    && semanticValue(group?.scope?.operationId) === operationId
-    && group?.state === 'closed')
-}
-
-// The Task Dashboard page only links runtime.css, so the shared component styles
-// are attached once (guarded) instead of duplicating the token-driven rules.
-function ensureSemanticObservationStyles() {
-  const present = [...document.querySelectorAll('link[rel="stylesheet"]')].some((link) => {
-    const href = link.getAttribute('href') || ''
-    return href.split('?')[0].endsWith('observation.css')
-  })
-  if (present) return
-  const link = document.createElement('link')
-  link.rel = 'stylesheet'
-  link.href = './observation.css'
-  link.dataset.semanticObservationStyles = 'true'
-  document.head.append(link)
-}
-
-// A read is only successful when the runtime returns a decoded envelope object.
-// A malformed body is a typed read failure, not an empty observation.
-function isSemanticEnvelope(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-}
-
-function decodeSemanticEnvelope(data) {
-  let decoded
-  try {
-    decoded = JSON.parse(data)
-  } catch {
-    return null
-  }
-  return isSemanticEnvelope(decoded) ? decoded : null
-}
-
-async function fetchSemanticObservation(taskId) {
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/semantic`, {
-    headers: { accept: 'application/json' },
-  })
-  let body = null
-  try {
-    body = await response.json()
-  } catch {
-    body = null
-  }
-  if (!response.ok) throw new RuntimeApiError(body?.error || body || {}, response.status)
-  if (!isSemanticEnvelope(body)) {
-    throw new RuntimeApiError({
-      code: 'semantic.read.malformed',
-      message: 'Runtime semantic read did not return a JSON envelope',
-      ownerId: 'humanagent.app',
-      nextAction: 'reload the semantic observation',
-    }, response.status)
-  }
-  return body
-}
-
-/**
- * Mount the shared read-only semantic observation panel for one task.
- *
- * The panel owns the transport boundary (one GET decode + one SSE decode per
- * revision), mode and scope selection, and stale/empty/failure presentation. It
- * never issues a task, checkpoint, confirmation or control mutation: mode
- * switching and scope drill-down only re-project the already-decoded envelope.
- */
-export function mountSemanticObservationPanel(host, options = {}) {
-  if (!(host instanceof HTMLElement)) {
-    throw new TypeError('mountSemanticObservationPanel requires an HTMLElement host')
-  }
-  const taskId = options.taskId
-  if (typeof taskId !== 'string' || taskId.length === 0) {
-    throw new TypeError('mountSemanticObservationPanel requires a taskId')
-  }
-  ensureSemanticObservationStyles()
-
-  let component
-  let envelope = null
-  let mode = 'current'
-  let focusScopeRef = ''
-  let stream = null
-  let stale = false
-  let errorState = null
-  let disposed = false
-
-  const errorHost = element('div', undefined, 'semantic-observation-error')
-
-  function renderError(error) {
-    clearNode(errorHost)
-    // A typed session rejection is the only failure the component cannot voice
-    // itself: it needs a real pairing entry. Every other failure is already shown
-    // by the component's own error notice, so no duplicate banner is rendered.
-    if (!isAuthSessionError(error)) return
-    errorHost.dataset.tone = 'danger'
-    errorHost.append(element('span', `${error.code || 'semantic.read.failed'} · ${error.message}`))
-    appendPairingEntry(errorHost, error)
-  }
-
-  // The kept envelope stays visible, but a dropped stream or a failed read/parse
-  // makes it stale and is stated with a typed notice. Neither path retries or
-  // sends a control command: this is read-only transport state.
-  function transportNotices() {
-    const notices = []
-    if (stale) {
-      notices.push({
-        tone: 'stale',
-        title: '实时连接已断开，显示上次内容',
-        detail: '断开不改变任务终态。',
-      })
-    }
-    if (errorState) {
-      notices.push({
-        tone: 'error',
-        title: '语义读取失败，显示上次内容',
-        detail: `${errorState.code || 'runtime.request.failed'} · ${errorState.message || String(errorState)}`,
-        nextAction: errorState.nextAction || '检查 runtime',
-      })
-    }
-    return notices
-  }
-
-  function render() {
-    if (disposed) return
-    if (!envelope) {
-      component.update(errorState ? semanticObservationFailureProjection(errorState) : semanticObservationLoadingProjection())
-      return
-    }
-    const projection = buildSemanticObservationProjection(envelope, { mode, focusScopeRef })
-    const notices = transportNotices()
-    if (notices.length > 0) {
-      projection.state = 'stale'
-      projection.stateLabel = SEMANTIC_STATE_LABELS.stale
-      projection.notices = [...notices, ...(projection.notices || [])]
-    }
-    component.update(projection)
-  }
-
-  function closeStream() {
-    if (!stream) return
-    const closing = stream
-    stream = null
-    closing.close()
-  }
-
-  function subscribe() {
-    closeStream()
-    const next = new EventSource(`/api/tasks/${encodeURIComponent(taskId)}/semantic/stream`)
-    stream = next
-    next.addEventListener('semantic.observation', (message) => {
-      if (disposed || stream !== next) return
-      const decoded = decodeSemanticEnvelope(message.data)
-      if (!decoded) {
-        errorState = new RuntimeApiError({
-          code: 'semantic.stream.malformed',
-          message: 'Runtime semantic stream delivered an unreadable revision',
-          ownerId: 'humanagent.app',
-          nextAction: 'wait for the next revision or reload the read',
-        }, 0)
-        render()
-        return
-      }
-      envelope = decoded
-      stale = false
-      errorState = null
-      renderError(null)
-      render()
-      if (semanticEnvelopeTerminal(decoded)) closeStream()
-    })
-    // Opening a stream is not receiving a revision. Only a decoded envelope
-    // clears `stale`, so a reconnect that carries no data keeps the stale notice.
-    next.onerror = () => {
-      if (disposed || stream !== next || !envelope) return
-      stale = true
-      render()
-    }
-  }
-
-  async function start() {
-    render()
-    try {
-      const decoded = await fetchSemanticObservation(taskId)
-      if (disposed) return
-      envelope = decoded
-      stale = false
-      errorState = null
-      renderError(null)
-      render()
-      if (!semanticEnvelopeTerminal(decoded)) subscribe()
-    } catch (error) {
-      if (disposed) return
-      errorState = error
-      render()
-      renderError(error)
-    }
-  }
-
-  component = mountSemanticObservation(host, {
-    onModeChange(nextMode) {
-      mode = nextMode
-      render()
-    },
-    onScopeRequest(scopeRef) {
-      focusScopeRef = scopeRef
-      render()
-    },
-    onEvidenceRequest(evidence, trigger) {
-      component.openEvidence(evidence, trigger)
-    },
-  })
-  host.append(errorHost)
-  void start()
-
-  return {
-    reload() {
-      void start()
-    },
-    dispose() {
-      disposed = true
-      closeStream()
-      component.dispose()
-      clearNode(errorHost)
-    },
-  }
-}
+export { clearNode, element, formatTime, queryParam, readScopeKey, stateTone }

@@ -6,6 +6,7 @@ import {
   type ExecutionRuntimePort,
   type InteractionDecision,
   type ProviderBinding,
+  type ProviderSettlement,
   type RequirementIntent,
 } from '../../contracts/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
@@ -21,6 +22,7 @@ import {
   type ExplicitBrainWorkspaceToolPort,
 } from '../../runtime/src/explicit-brain/index.js';
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
+import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -93,6 +95,13 @@ export type ExplicitBrainInterpretation =
       readonly decisionRefs: readonly string[];
     }
   | {
+      readonly kind: 'answer';
+      readonly normalizedInput: string;
+      readonly knownFacts: readonly string[];
+      readonly answer: string;
+      readonly decisionRefs: readonly string[];
+    }
+  | {
       readonly kind: 'clarification';
       readonly normalizedInput: string;
       readonly knownFacts: readonly string[];
@@ -159,15 +168,16 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     ...promptSegments,
     '# Explicit intake decision output',
     'Return one JSON object only. Do not call tools and do not claim execution.',
-    'kind must be requirement, status-query, or clarification.',
+    'kind must be requirement, status-query, clarification, or answer.',
     'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
     'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
-    'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates; create does not require a task match.',
-    'Use status-query only when the user asks about the current state or progress of an existing task. Answer from taskCandidates and use matchedTaskId when one task is selected; do not create a requirement for a status query.',
+    'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
+    'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
+    'Use answer only for a general question you can answer directly from the current input and provided context, with no execution, exploration, external retrieval, or deliverable. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
     'For clarification, ask one concrete question and do not invent a task match.',
     'All variants require normalizedInput, knownFacts string array, and decisionRefs string array.',
     `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
-    'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Clarification requires question.',
+    'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Answer requires a non-empty answer. Clarification requires question.',
     JSON.stringify(input),
   ].join('\n\n');
 }
@@ -268,7 +278,7 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
   const normalizedInput = record.normalizedInput;
   const knownFacts = record.knownFacts;
   const decisionRefs = record.decisionRefs;
-  if ((kind !== 'requirement' && kind !== 'status-query' && kind !== 'clarification')
+  if ((kind !== 'requirement' && kind !== 'status-query' && kind !== 'clarification' && kind !== 'answer')
     || typeof normalizedInput !== 'string' || !normalizedInput.trim()
     || !Array.isArray(knownFacts) || !knownFacts.every((entry) => typeof entry === 'string')
     || !Array.isArray(decisionRefs) || !decisionRefs.every((entry) => typeof entry === 'string')) {
@@ -284,6 +294,18 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
       throw new ExplicitBrainOperationalToolError('unsupported-tool', 'clarification decision requires a question');
     }
     return { kind, ...common, question: record.question };
+  }
+  if (kind === 'answer') {
+    if (record.matchedTaskId !== undefined) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'answer decision cannot select a task');
+    }
+    if (record.intent !== undefined || record.proposal !== undefined) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'answer decision cannot carry a requirement proposal');
+    }
+    if (typeof record.answer !== 'string' || !record.answer.trim()) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'answer decision requires a non-empty answer');
+    }
+    return { kind, ...common, answer: record.answer };
   }
   const matchedTaskId = typeof record.matchedTaskId === 'string' && record.matchedTaskId.trim()
     ? record.matchedTaskId
@@ -311,6 +333,20 @@ export function createProviderExplicitBrainInterpreter(input: {
   readonly port: ExecutionRuntimePort;
   readonly binding: ProviderBinding;
   readonly templateRoot: string;
+  readonly prepareAgentProvider?: (input: {
+    readonly roleId: import('../../config/src/index.js').AgentRole;
+    readonly configuredAgentId?: string;
+  }) => Promise<AgentProviderComposition>;
+  /**
+   * Private App callback for the authoritative Provider settlement receipt.
+   * The App assembly points it at the existing interaction journal; the
+   * interpreter never writes business payload fields with settlement data.
+   */
+  readonly publishProviderSettlement?: (receipt: {
+    readonly interactionId: string;
+    readonly inputRevision: number;
+    readonly settlement: ProviderSettlement;
+  }) => void | Promise<void>;
 }): ExplicitBrainInputInterpreter {
   let promptSegments: Promise<readonly string[]> | undefined;
   const loadPromptSegments = (): Promise<readonly string[]> => {
@@ -324,37 +360,79 @@ export function createProviderExplicitBrainInterpreter(input: {
     async interpret(request) {
       const identity = randomUUID();
       const runtimeId = `explicit-interpret-${identity}`;
-      const taskId = id('task', `explicit-interpret-${identity}`);
-      const operationId = id('operation', `explicit-interpret-${identity}`);
-      const driver = new ProviderAgentDriver({
-        port: input.port,
-        binding: input.binding,
-        runtimeId,
-        taskId,
-        operationId,
-        executionEpoch: 1,
-        assignmentId: `explicit-interpret-${identity}`,
-        scope: { organId: id('organ', 'humanagent-explicit-brain'), taskId, operationId },
-        inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
-        ownerId: 'humanagent.runtime.explicit-brain',
-      });
-      const output: string[] = [];
-      await driver.start({ runtimeId, taskId, operationId, organId: id('organ', 'humanagent-explicit-brain'), executionEpoch: 1, assignmentId: `explicit-interpret-${identity}` });
-      await driver.submit({
-        taskId,
-        executionEpoch: 1,
-        assignmentId: `explicit-interpret-${identity}`,
-        payload: { prompt: interpreterPrompt(request, await loadPromptSegments()) },
-      });
-      for await (const event of driver.observe({ runtimeId })) {
-        if (event.kind === 'provider.output' && event.summary) output.push(event.summary);
-        if (event.terminalState !== undefined) break;
+      const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
+      let driver: ProviderAgentDriver | undefined;
+      let submitted = false;
+      let settleAttempted = false;
+      let interpretation: ExplicitBrainInterpretation;
+      try {
+        const taskId = id('task', `explicit-interpret-${identity}`);
+        const operationId = id('operation', `explicit-interpret-${identity}`);
+        driver = new ProviderAgentDriver({
+          port: owned === undefined ? input.port : owned.port,
+          binding: owned === undefined ? input.binding : owned.binding,
+          runtimeId,
+          taskId,
+          operationId,
+          executionEpoch: 1,
+          assignmentId: `explicit-interpret-${identity}`,
+          scope: { organId: id('organ', 'humanagent-explicit-brain'), taskId, operationId },
+          inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
+          ownerId: 'humanagent.runtime.explicit-brain',
+        });
+        const output: string[] = [];
+        await driver.start({ runtimeId, taskId, operationId, organId: id('organ', 'humanagent-explicit-brain'), executionEpoch: 1, assignmentId: `explicit-interpret-${identity}` });
+        await driver.submit({
+          taskId,
+          executionEpoch: 1,
+          assignmentId: `explicit-interpret-${identity}`,
+          payload: { prompt: interpreterPrompt(request, await loadPromptSegments()) },
+        });
+        submitted = true;
+        for await (const event of driver.observe({ runtimeId })) {
+          if (event.kind === 'provider.output' && event.summary) output.push(event.summary);
+          if (event.terminalState !== undefined) break;
+        }
+        settleAttempted = true;
+        const closure = await driver.settle({ runtimeId, executionEpoch: 1 });
+        if (closure.state !== 'succeeded') {
+          throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
+        }
+        interpretation = parseInterpreterOutput(output.join(''), request);
+        // Only the simple-answer path carries the authoritative settlement receipt;
+        // complex requirement routing keeps its existing behavior.
+        if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
+          const settlement = driver.settlement();
+          if (settlement === undefined) {
+            throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
+          }
+          await input.publishProviderSettlement({
+            interactionId: request.interactionId,
+            inputRevision: request.inputRevision,
+            settlement,
+          });
+        }
+      } catch (error) {
+        let failure = error;
+        if (submitted && !settleAttempted && driver !== undefined) {
+          settleAttempted = true;
+          try {
+            await driver.settle({ runtimeId, executionEpoch: 1 });
+          } catch (settleError) {
+            failure = new AggregateError([failure, settleError], 'interaction observation and settlement failed');
+          }
+        }
+        if (owned !== undefined) {
+          try {
+            await closeAgentProvider(owned);
+          } catch (closeError) {
+            throw new AggregateError([failure, closeError], 'interaction execution and provider close failed');
+          }
+        }
+        throw failure;
       }
-      const closure = await driver.settle({ runtimeId, executionEpoch: 1 });
-      if (closure.state !== 'succeeded') {
-        throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
-      }
-      return parseInterpreterOutput(output.join(''), request);
+      if (owned !== undefined) await closeAgentProvider(owned);
+      return interpretation;
     },
   };
 }

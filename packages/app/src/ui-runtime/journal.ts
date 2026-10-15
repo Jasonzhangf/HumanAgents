@@ -9,14 +9,26 @@ import type {
   CheckpointAppendRequest,
   CheckpointChainVerification,
   CheckpointJournalPort,
+  CheckpointListQuery,
+  CheckpointListResult,
+  CheckpointRecoveryBinding,
+  CommittedCheckpointRecord,
+  ExecutionPosition,
+  JournalCommitRef,
   LatestCheckpointRecord,
 } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
 import type { ClosureRecord, InteractionClosureRecord } from '../../../runtime/src/checkpoints/closure.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
+import type {
+  ActiveTurnJournalAppendRequest,
+  ActiveTurnJournalPort,
+  ActiveTurnJournalRecord,
+} from '../../../runtime/src/context/active-turn-journal.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
+import { createJsonlCheckpointJournal } from '../checkpoint-journal.js';
 import {
   toolExecutionFactIntegrityError,
   validatePersistedToolExecutionFact,
@@ -91,6 +103,46 @@ function requireOptionalRecordStringArray(record: Record<string, unknown>, key: 
     if (typeof candidate !== 'string' || candidate.trim().length === 0) {
       throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} must contain non-empty strings`);
     }
+  }
+}
+
+function requireBoolean(record: Record<string, unknown>, key: string, filePath: string, line: number): void {
+  if (typeof record[key] !== 'boolean') {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} must be a boolean`);
+  }
+}
+
+function validateExecutionAllocation(value: unknown, filePath: string, line: number): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: allocation is required`);
+  }
+  const allocation = value as Record<string, unknown>;
+  requireRecordString(allocation, 'runtimeId', filePath, line);
+  requireScopedId(allocation, 'taskId', 'task', filePath, line);
+  requireScopedId(allocation, 'operationId', 'operation', filePath, line);
+  requirePositiveInteger(allocation, 'executionEpoch', filePath, line);
+  requireRecordString(allocation, 'assignmentId', filePath, line);
+  const scope = requireRecordObject(allocation, 'scope', filePath, line);
+  requireScopedId(scope, 'organId', 'organ', filePath, line);
+  requireScopedId(scope, 'taskId', 'task', filePath, line);
+  requireScopedId(scope, 'cycleId', 'cycle', filePath, line);
+  requireScopedId(scope, 'operationId', 'operation', filePath, line);
+  const inputRefs = allocation.inputRefs;
+  if (!Array.isArray(inputRefs) || inputRefs.length === 0 || inputRefs.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: allocation.inputRefs are required`);
+  }
+  requireRecordString(allocation, 'ownerId', filePath, line);
+  requirePositiveInteger(allocation, 'directiveRevision', filePath, line);
+  requirePositiveInteger(allocation, 'inputRevision', filePath, line);
+  requireBoolean(allocation, 'orchestrated', filePath, line);
+  if (allocation.role !== undefined) {
+    requireRecordString(allocation, 'role', filePath, line);
+    if (!['interaction', 'orchestration', 'execution', 'review', 'memory'].includes(String(allocation.role))) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: allocation.role is invalid`);
+    }
+  }
+  if (allocation.configuredAgentId !== undefined) {
+    requireRecordString(allocation, 'configuredAgentId', filePath, line);
   }
 }
 
@@ -190,6 +242,39 @@ function validateJournalRecord(
   if (kind === 'task.deleted') {
     requireScopedId(record, 'taskId', 'task', filePath, line);
     requireRecordString(record, 'deletedAt', filePath, line);
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
+  }
+  if (kind === 'operation.prepared') {
+    validateExecutionAllocation(record.allocation, filePath, line);
+    const prepared = record as Extract<UiRuntimeJournalRecord, { readonly kind: 'operation.prepared' }>;
+    const allocation = prepared.allocation;
+    // The allocation is the only identity carrier on this record. Its outer
+    // task/operation ids must equal the scope it was frozen with; there is no
+    // second top-level copy to re-derive them from.
+    if (!sameScopedId(allocation.taskId, allocation.scope.taskId)
+      || !sameScopedId(allocation.operationId, allocation.scope.operationId)
+    ) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.prepared allocation identity does not match the enclosing record`);
+    }
+    requireRecordString(record, 'input', filePath, line);
+    requirePositiveInteger(record, 'operationCounter', filePath, line);
+    requirePositiveInteger(record, 'cycleCounter', filePath, line);
+    const operationId = allocation.operationId;
+    const taskId = allocation.taskId;
+    const existing = context.operationIdentities.get(operationId.value);
+    if (
+      existing
+      && (existing.taskId.value !== taskId.value || existing.executionEpoch !== allocation.executionEpoch)
+    ) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.prepared identity conflict for ${operationId.value}`);
+    }
+    if (!existing) {
+      context.operationIdentities.set(operationId.value, {
+        taskId,
+        operationId,
+        executionEpoch: allocation.executionEpoch,
+      });
+    }
     return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'operation.started') {
@@ -451,7 +536,9 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
     });
     return {
       checkpointId: input.checkpoint.id,
-      seq: record.seq,
+      // The append receipt carries the committed checkpoint's chain sequence,
+      // never the journal-global record sequence (`record.seq`).
+      seq: input.checkpoint.seq,
       recordDigest: record.recordDigest,
     };
   }
@@ -476,7 +563,84 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
     };
   }
 
+  // Exact reads use the authoritative JSONL checkpoint owner.
+  async readCommitted(scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null> {
+    return this.checkpointPort().readCommitted(scope, checkpointId);
+  }
+
+  async listCommitted(query: CheckpointListQuery): Promise<CheckpointListResult> {
+    return this.checkpointPort().listCommitted(query);
+  }
+
+  async readExecutionPosition(taskScope: ScopeRef): Promise<ExecutionPosition | null> {
+    return this.checkpointPort().readExecutionPosition(taskScope);
+  }
+
+  async readCheckpointRecoveryBinding(scope: ScopeRef, checkpointCommitRef: JournalCommitRef): Promise<CheckpointRecoveryBinding | null> {
+    return this.checkpointPort().readCheckpointRecoveryBinding(scope, checkpointCommitRef);
+  }
+
+  private checkpointPort(): CheckpointJournalPort {
+    return createJsonlCheckpointJournal({ filePath: this.filePath });
+  }
+
   private journal(): JsonlOrganJournal {
     return new JsonlOrganJournal(this.filePath);
+  }
+}
+
+interface ActiveTurnJournalLine {
+  readonly commitId: string;
+  readonly record: ActiveTurnJournalRecord;
+}
+
+/**
+ * File-backed durable port for the Runtime-owned active turn. It appends typed
+ * records as JSON lines and dedupes by `commitId`. It stores control facts
+ * verbatim; it never mirrors a business payload, summary or log, and it never
+ * reconstructs a record from a projection.
+ */
+export class FileActiveTurnJournal implements ActiveTurnJournalPort {
+  constructor(private readonly filePath: string) {}
+
+  async append(input: ActiveTurnJournalAppendRequest): Promise<void> {
+    const lines = this.lines();
+    const existing = lines.find((line) => line.commitId === input.commitId);
+    if (existing) {
+      if (JSON.stringify(existing.record) !== JSON.stringify(input.record)) {
+        throw new Error(`active turn journal conflict: ${input.commitId}`);
+      }
+      return;
+    }
+    mkdirSync(dirname(this.filePath), { recursive: true });
+    appendFileSync(this.filePath, `${JSON.stringify({ commitId: input.commitId, record: input.record })}\n`, 'utf8');
+  }
+
+  async replay(): Promise<readonly ActiveTurnJournalRecord[]> {
+    return this.lines().map((line) => line.record);
+  }
+
+  private lines(): readonly ActiveTurnJournalLine[] {
+    if (!existsSync(this.filePath)) return [];
+    const text = readFileSync(this.filePath, 'utf8');
+    const lines: ActiveTurnJournalLine[] = [];
+    const rows = text.split('\n');
+    for (let index = 0; index < rows.length; index += 1) {
+      const trimmed = rows[index]!.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as ActiveTurnJournalLine;
+        if (typeof parsed.commitId !== 'string' || !parsed.record || typeof parsed.record !== 'object') {
+          throw new Error('record shape is invalid');
+        }
+        lines.push(parsed);
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          throw new Error(`corrupt active turn journal ${this.filePath}:${index + 1}: invalid JSON`);
+        }
+        throw error;
+      }
+    }
+    return lines;
   }
 }

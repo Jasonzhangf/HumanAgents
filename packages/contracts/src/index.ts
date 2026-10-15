@@ -4,6 +4,8 @@ export * from './hand-services.js';
 export * from './web-search.js';
 export * from './task-flow.js';
 export * from './task-plan-revision.js';
+export * from './task-identity.js';
+export * from './turn-closure.js';
 import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';
 
 export interface ScopedId<K extends ScopeKind = ScopeKind> {
@@ -744,6 +746,7 @@ export interface WorkResult {
 
 import { ContractError } from './errors.js';
 import { validateToolExecutionFact, type ToolExecutionFact, type ToolIdentity } from './native-reasoning.js';
+import type { ProviderRequestContext, RequestScopedInstructions } from './provider-request-context.js';
 export { ContractError } from './errors.js';
 const ID_SCOPES: readonly ScopeKind[] = ['organ', 'task', 'cycle', 'operation', 'checkpoint', 'evidence'];
 const CONTROL_KEYS = new Set([
@@ -969,6 +972,10 @@ export interface ProviderExecutionInput extends ProviderExecutionIdentityRef {
   readonly payload?: BusinessPayload;
   readonly imageContents?: readonly ProviderImageContent[];
   readonly tools?: readonly ProviderToolDefinition[];
+  /** Typed canonical request context. When set, codecs encode these units instead of stringifying `payload`. */
+  readonly requestContext?: ProviderRequestContext;
+  /** Transient request-scoped orientation. It enters this request only. */
+  readonly instructions?: RequestScopedInstructions;
 }
 
 export interface ProviderToolDefinition {
@@ -1663,7 +1670,12 @@ export * from './explicit-brain.js';
 export * from './agent-loop.js';
 export * from './tool-execution.js';
 export * from './native-reasoning.js';
+export * from './operation-completion.js';
 export * from './semantic-observation.js';
+export * from './active-turn-context.js';
+export * from './review-data.js';
+export * from './inspection.js';
+export * from './i2-history.js';
 
 /**
  * Requirement pipeline node identity. Single source of truth for the thirteen nodes of

@@ -10,6 +10,14 @@ export interface TaskFlowBinding {
   readonly kind: TaskFlowKind;
   readonly definitionVersion: typeof TASK_FLOW_DEFINITION_VERSION;
 }
+
+/** Initial task-flow guidance and display grouping. Not task identity or control truth. */
+export interface TaskFlowGuidance {
+  readonly kind: TaskFlowKind;
+  readonly aim: string;
+  readonly selectionGuidance: string;
+  readonly displayGroups: readonly string[];
+}
 export function assertTaskFlowKind(kind: unknown): asserts kind is TaskFlowKind {
   if (typeof kind !== 'string' || !TASK_FLOW_KINDS.includes(kind as TaskFlowKind)) {
     throw new ContractError('invalid task flow kind');

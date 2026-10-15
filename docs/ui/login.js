@@ -15,6 +15,7 @@ import {
   queryParam,
   sameOriginPath,
 } from './runtime-api.js'
+import { technicalDetailTrigger } from './runtime-shell.js'
 
 const api = createRuntimeApi()
 
@@ -29,9 +30,13 @@ const pairCard = document.querySelector('[data-pair-card]')
 const form = document.querySelector('[data-pair-form]')
 const codeInput = document.querySelector('[data-pair-code]')
 const submitButton = document.querySelector('[data-pair-submit]')
+const detailHost = document.querySelector('[data-auth-detail-host]')
 const errorCard = document.querySelector('[data-auth-error]')
-const errorDetail = document.querySelector('[data-auth-error-detail]')
+const errorHeading = document.querySelector('[data-auth-error-heading]')
+const errorImpact = document.querySelector('[data-auth-error-impact]')
 const errorRetry = document.querySelector('[data-auth-error-retry]')
+
+const protocolFooter = '配对码属于控制面：它只经 POST /api/auth/pair 交给运行时，不会写进任何业务请求。'
 
 function setBanner(tone, text) {
   statusBanner.dataset.tone = tone
@@ -39,34 +44,58 @@ function setBanner(tone, text) {
   statusBanner.append(element('span', text))
 }
 
-function clearTypedError() {
-  errorCard.hidden = true
-  errorRetry.hidden = true
-  clearNode(errorDetail)
+// Exact typed values keep their original per-field hooks, but they live in the
+// contextual 技术详情 layer. The primary layer reads in human language instead.
+function typedEntries(error) {
+  return [
+    ['code', error?.code ?? 'auth.pair.failed', 'data-auth-error-code'],
+    ['owner', error?.ownerId ?? 'unknown', 'data-auth-error-owner'],
+    ['message', error?.message ?? String(error), 'data-auth-error-message'],
+    ['nextAction', error?.nextAction ?? 'inspect the runtime error', 'data-auth-error-next'],
+  ]
 }
 
-// The typed rejection is rendered field by field. Each field also carries the raw
-// value on its own hook, so a reader never has to parse the rendered copy and the
-// runtime's code/owner/message/nextAction stay separable.
-function showTypedError(error) {
-  clearNode(errorDetail)
-  const fields = [
-    ['code', error?.code ?? 'auth.pair.failed'],
-    ['owner', error?.ownerId ?? 'unknown'],
-    ['message', error?.message ?? String(error)],
-    ['next', error?.nextAction ?? 'inspect the runtime error'],
-  ]
-  for (const [label, value] of fields) {
-    const term = element('dt', label)
-    const detail = element('dd', value)
-    detail.setAttribute(`data-auth-error-${label}`, value)
-    errorDetail.append(term, detail)
+function renderDetail({ entries, footer = protocolFooter }) {
+  clearNode(detailHost)
+  const detail = { title: '技术详情', entries, footer }
+  detailHost.append(technicalDetailTrigger(() => detail))
+}
+
+function clearTypedError() {
+  errorCard.hidden = true
+  errorCard.dataset.errorKind = ''
+  errorRetry.hidden = true
+  clearNode(detailHost)
+}
+
+// A rejected pairing attempt is the only state that shows the danger card. Carried session
+// context and a session-check failure stay out of it, so ordinary setup is never presented as
+// a failed attempt.
+// The runtime refuses a pairing code with one of these two typed codes. Only a typed result proves
+// that the code was rejected, so a request that never got a typed answer, such as a network failure,
+// is reported as an unconfirmed pairing instead of as a refusal.
+const PAIR_REJECTION_CODES = Object.freeze(['auth.pair.invalid', 'auth.pair.expired'])
+
+function isPairRejection(error) {
+  return typeof error?.code === 'string' && PAIR_REJECTION_CODES.includes(error.code)
+}
+
+function showPairFailure(error) {
+  errorHeading.textContent = '配对未完成'
+  if (isPairRejection(error)) {
+    errorImpact.textContent = '这次配对码没有被接受，请重新获取配对码后再试。'
+    errorRetry.textContent = '重试：在运行 HumanAgent 的机器上重新执行 humanagent pair，再把新的配对码填回上面的输入框。'
+  } else {
+    errorImpact.textContent = '这次配对请求没有完成，运行时没有给出配对结果。'
+    errorRetry.textContent = '重试：确认网络和运行中的 HumanAgent 都正常后，再重新提交配对码；这次请求的确切信息在技术详情里。'
   }
-  errorCard.hidden = false
-  errorCard.dataset.tone = 'danger'
-  errorRetry.hidden = false
-  errorRetry.textContent = '重试：在运行 HumanAgent 的机器上重新执行 humanagent pair，再把新的配对码填回上面的输入框。'
+  errorImpact.hidden = false
   errorRetry.dataset.authErrorRetry = 'true'
+  errorRetry.hidden = false
+  errorCard.dataset.errorKind = 'pair'
+  errorCard.dataset.tone = 'danger'
+  errorCard.hidden = false
+  renderDetail({ entries: typedEntries(error) })
 }
 
 async function submitPairing(code) {
@@ -81,7 +110,7 @@ async function submitPairing(code) {
     return true
   } catch (error) {
     setBanner('danger', '配对未完成')
-    showTypedError(error)
+    showPairFailure(error)
     codeInput.value = ''
     codeInput.focus()
     return false
@@ -96,18 +125,18 @@ form.addEventListener('submit', (event) => {
 })
 
 async function boot() {
-  // A shell that already hit a typed session rejection carries that exact
-  // rejection here, so the page can show what the runtime said before it
-  // re-reads the session.
+  // A shell that already hit a typed session rejection carries those exact fields here as
+  // setup context. They stay in the 技术详情 layer; they do not mean this browser just made a
+  // failed pairing attempt.
   const carriedCode = queryParam('authCode')
-  if (typeof carriedCode === 'string' && carriedCode.startsWith('auth.')) {
-    showTypedError({
-      code: carriedCode,
-      ownerId: queryParam('authOwner') ?? '',
-      message: queryParam('authMessage') ?? '',
-      nextAction: queryParam('authNext') ?? '',
-    })
-  }
+  const carried = typeof carriedCode === 'string' && carriedCode.startsWith('auth.')
+    ? {
+        code: carriedCode,
+        ownerId: queryParam('authOwner') ?? '',
+        message: queryParam('authMessage') ?? '',
+        nextAction: queryParam('authNext') ?? '',
+      }
+    : null
 
   setBanner('warning', '正在检查浏览器会话…')
   try {
@@ -125,10 +154,11 @@ async function boot() {
     // without ever seeing a code field it does not need.
     pairCard.hidden = false
     codeInput.focus()
+    if (carried) renderDetail({ entries: typedEntries(carried) })
   } catch (error) {
     sessionState.textContent = '会话检查失败'
-    setBanner('danger', '无法读取浏览器会话')
-    showTypedError(error)
+    setBanner('danger', '无法读取浏览器会话，暂时无法确认这台浏览器是否已配对。')
+    renderDetail({ entries: typedEntries(error) })
     // The session could not be read, so pairing is the only remedy left; offer
     // it instead of leaving the page with no action.
     pairCard.hidden = false

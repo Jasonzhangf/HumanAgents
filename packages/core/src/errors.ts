@@ -46,3 +46,10 @@ export class HealthError extends CoreError {
     this.name = 'HealthError';
   }
 }
+
+export class TurnClosureError extends CoreError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TurnClosureError';
+  }
+}

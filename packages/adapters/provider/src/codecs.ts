@@ -1,19 +1,28 @@
 import {
   id,
   type BusinessPayload,
+  type ContentUnitChannel,
   type EvidenceRef,
   type NextAction,
   type ProviderBinding,
   type ProviderError,
   type ProviderEvent,
   type ProviderExecutionIdentityRef,
+  type ProviderRawFact,
   type ProviderResumeInput,
   type ProviderStartInput,
   type ProviderStopRequest,
   type ProviderSubmitInput,
+  type ProviderToolCall,
   type ProviderTerminalState,
+  type RawAsset,
+  type RawAssetView,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
+import type {
+  ProviderRequestContext,
+  RequestScopedInstructions,
+} from '../../../contracts/src/provider-request-context.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderEvidenceSink } from './evidence.js';
 import { mapOpenAIFinishReason } from './openai-finish-reason.js';
@@ -36,6 +45,7 @@ import type {
   ProviderWireStopRequest,
   ResponsesWireCancelRequest,
   ResponsesWireEvent,
+  ResponsesWireInputItem,
   ResponsesWireRequest,
   ResponsesWireTool,
 } from './wire.js';
@@ -63,6 +73,132 @@ function harnessToolSurfaceInstructions(
     'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
     'Call a tool only when it makes concrete progress; a tool call with missing or empty arguments is a failed round.',
   ].join(' ');
+}
+
+/**
+ * The wire `instructions`/`system` text for one request: the stable harness
+ * tool-surface guidance followed by the transient request-scoped orientation.
+ * The transient text is request-local and is never persisted as canonical
+ * context or inherited by the next request.
+ */
+function requestInstructions(
+  tools: readonly { readonly toolId: string }[] | undefined,
+  instructions: RequestScopedInstructions | undefined,
+): string {
+  return [harnessToolSurfaceInstructions(tools), instructions?.text ?? '']
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+}
+
+/** Maps canonical units to Responses input items. Tool units keep their real call identity. */
+function responsesContextInput(context: ProviderRequestContext): readonly ResponsesWireInputItem[] {
+  return context.units.map((unit): ResponsesWireInputItem => {
+    switch (unit.kind) {
+      case 'message':
+        return { type: 'message', role: unit.role, content: unit.text };
+      case 'tool-call':
+        return {
+          type: 'function_call',
+          call_id: unit.callId,
+          name: responsesWireToolName(unit.toolId),
+          arguments: JSON.stringify(unit.arguments),
+        };
+      case 'tool-result':
+        return { type: 'function_call_output', call_id: unit.callId, output: unit.output };
+    }
+  });
+}
+
+/**
+ * Maps canonical units to Anthropic messages. Consecutive same-role units fold
+ * into one message so tool blocks stay valid; no reasoning/signature block is
+ * fabricated.
+ */
+function anthropicContextMessages(context: ProviderRequestContext): readonly AnthropicWireMessage[] {
+  const messages: AnthropicWireMessage[] = [];
+  const append = (role: AnthropicWireMessage['role'], block: AnthropicWireContentBlock): void => {
+    const last = messages[messages.length - 1];
+    if (last !== undefined && last.role === role) {
+      messages[messages.length - 1] = { role, content: [...last.content, block] };
+      return;
+    }
+    messages.push({ role, content: [block] });
+  };
+  for (const unit of context.units) {
+    switch (unit.kind) {
+      case 'message':
+        append(unit.role, { type: 'text', text: unit.text });
+        break;
+      case 'tool-call':
+        append('assistant', { type: 'tool_use', id: unit.callId, name: unit.toolId, input: unit.arguments });
+        break;
+      case 'tool-result':
+        append('user', { type: 'tool_result', tool_use_id: unit.callId, content: unit.output });
+        break;
+    }
+  }
+  return messages;
+}
+
+/**
+ * Maps canonical units to OpenAI Chat messages. Consecutive tool-call units
+ * fold into one assistant `tool_calls` group so the wire never emits an invalid
+ * assistant-call / assistant-call / tool-result ordering; a message or
+ * tool-result unit closes the open group. Tool result output is preserved
+ * exactly, with no status wrapper or non-standard field.
+ */
+function openaiChatContextMessages(context: ProviderRequestContext): readonly OpenAIChatWireMessage[] {
+  const messages: OpenAIChatWireMessage[] = [];
+  let pendingToolCalls: {
+    readonly id: string;
+    readonly type: 'function';
+    readonly function: { readonly name: string; readonly arguments: string };
+  }[] | undefined;
+  const flushToolCalls = (): void => {
+    if (pendingToolCalls === undefined) return;
+    messages.push({ role: 'assistant', content: '', tool_calls: pendingToolCalls });
+    pendingToolCalls = undefined;
+  };
+  for (const unit of context.units) {
+    switch (unit.kind) {
+      case 'message':
+        flushToolCalls();
+        messages.push(unit.role === 'user'
+          ? { role: 'user', content: unit.text }
+          : { role: 'assistant', content: unit.text });
+        break;
+      case 'tool-call':
+        if (pendingToolCalls === undefined) pendingToolCalls = [];
+        pendingToolCalls.push({
+          id: unit.callId,
+          type: 'function',
+          function: { name: responsesWireToolName(unit.toolId), arguments: JSON.stringify(unit.arguments) },
+        });
+        break;
+      case 'tool-result':
+        flushToolCalls();
+        messages.push({ role: 'tool', tool_call_id: unit.callId, content: unit.output });
+        break;
+    }
+  }
+  flushToolCalls();
+  return messages;
+}
+
+/**
+ * The wire `execution` field is identity only. The request input, business
+ * payload and request-scoped context never belong on it, so the codec emits a
+ * plain identity ref instead of the whole execution input object.
+ */
+function executionIdentity(execution: ProviderExecutionIdentityRef): ProviderExecutionIdentityRef {
+  return {
+    runtimeId: execution.runtimeId,
+    taskId: execution.taskId,
+    operationId: execution.operationId,
+    ...(execution.organId === undefined ? {} : { organId: execution.organId }),
+    ...(execution.cycleId === undefined ? {} : { cycleId: execution.cycleId }),
+    executionEpoch: execution.executionEpoch,
+  };
 }
 
 function businessText(
@@ -142,6 +278,39 @@ const REQUEST_START_SUMMARY = 'provider requested model work';
 
 export interface ProviderDecodedEvent {
   readonly events: readonly ProviderEvent[];
+  /**
+   * Ordered typed raw facts produced from the same wire decode. The Runtime
+   * (W1-3) assigns the exact-request `producerSeq` and acceptance order; the
+   * codec only emits the fact content.
+   */
+  readonly rawFacts: readonly ProviderRawFact[];
+}
+
+/**
+ * Internal decode shape. Branches that carry raw content return `rawFacts`;
+ * branches without raw content leave it undefined. `decodeEvent` normalises the
+ * public shape so `rawFacts` is always present.
+ */
+interface DecodedWire {
+  readonly events: readonly ProviderEvent[];
+  readonly rawFacts?: readonly ProviderRawFact[];
+}
+
+/** Request-local Anthropic block state used to close declared units on block stop. */
+interface AnthropicBlockState {
+  readonly type: 'text' | 'thinking' | 'tool_use';
+  readonly channels: readonly ContentUnitChannel[];
+  readonly callId?: string;
+  readonly toolId?: string;
+  readonly startArgumentsJson?: string;
+  argumentsDelta: string;
+}
+
+/** Request-local Chat tool-call state assembled across streaming chunks. */
+interface OpenAIChatPendingToolCall {
+  readonly id?: string;
+  readonly name?: string;
+  readonly arguments: string;
 }
 
 export interface ProviderCodec<W extends ProviderWireRequest = ProviderWireRequest> {
@@ -210,6 +379,48 @@ async function captureEvidence(context: DecodeContext, type: string, locator: st
     locator,
     content: value ?? `${type}:${locator}`,
   });
+}
+
+function unitId(protocol: 'responses' | 'anthropic' | 'openai', channel: ContentUnitChannel, locator: string): string {
+  return `${protocol}:${channel}:${locator}`;
+}
+
+function rawAsset(ref: EvidenceRef, view: RawAssetView): RawAsset {
+  return { ref, view };
+}
+
+function contentFact(input: {
+  readonly contentUnitId: string;
+  readonly channel: ContentUnitChannel;
+  readonly update: 'delta' | 'full';
+  readonly content: RawAsset;
+  readonly complete: boolean;
+  readonly replacesUnitIds?: readonly string[];
+}): ProviderRawFact {
+  return {
+    kind: 'content',
+    contentUnitId: input.contentUnitId,
+    channel: input.channel,
+    update: input.update,
+    content: input.content,
+    complete: input.complete,
+    ...(input.replacesUnitIds === undefined ? {} : { replacesUnitIds: input.replacesUnitIds }),
+  };
+}
+
+function contentCompleteFact(contentUnitId: string): ProviderRawFact {
+  return { kind: 'content-complete', contentUnitId };
+}
+
+function requestCompleteFact(
+  terminal: 'completed' | 'incomplete' | 'failed' | 'cancelled',
+  error?: ProviderError,
+): ProviderRawFact {
+  return { kind: 'request-complete', terminal, ...(error === undefined ? {} : { error }) };
+}
+
+function toolCallFact(contentUnitId: string, call: ProviderToolCall, rawArguments: RawAsset): ProviderRawFact {
+  return { kind: 'tool-call', contentUnitId, call, rawArguments, complete: true };
 }
 
 function providerError(
@@ -340,6 +551,7 @@ function ownedEvent(
     readonly evidenceRefs?: readonly EvidenceRef[];
     readonly summary?: string;
     readonly toolCall?: ProviderEvent['toolCall'];
+    readonly toolPhase?: ProviderEvent['toolPhase'];
     readonly externalResponseId?: string;
   } = {},
 ): ProviderEvent {
@@ -354,6 +566,7 @@ function ownedEvent(
     ...(extra.evidenceRefs === undefined ? {} : { evidenceRefs: extra.evidenceRefs }),
     ...(extra.summary === undefined ? {} : { summary: extra.summary }),
     ...(extra.toolCall === undefined ? {} : { toolCall: extra.toolCall }),
+    ...(extra.toolPhase === undefined ? {} : { toolPhase: extra.toolPhase }),
     ...(extra.externalResponseId === undefined ? {} : { externalResponseId: extra.externalResponseId }),
   };
 }
@@ -377,6 +590,70 @@ function mapAnthropicStopReason(stopReason: string | undefined): { readonly stat
     default:
       return { state: 'unknown', nextAction: { kind: 'recover', ref: OWNER } };
   }
+}
+
+function openAIFinishTerminal(reason: string): 'completed' | 'incomplete' | 'failed' {
+  switch (reason) {
+    case 'stop':
+    case 'tool_calls':
+    case 'function_call':
+      return 'completed';
+    case 'length':
+      return 'incomplete';
+    default:
+      return 'failed';
+  }
+}
+
+function anthropicTerminal(stopReason: string | undefined): 'completed' | 'incomplete' | 'failed' {
+  switch (stopReason) {
+    case 'end_turn':
+    case 'stop_sequence':
+    case 'tool_use':
+      return 'completed';
+    case 'max_tokens':
+    case 'pause_turn':
+    case undefined:
+      return 'incomplete';
+    default:
+      return 'failed';
+  }
+}
+
+/**
+ * Parses already-assembled fragmented tool-call arguments into a business
+ * payload. Fragment assembly joins the real per-protocol fragments first; this
+ * then fails closed on invalid JSON or a non-object shape, so a malformed call
+ * never becomes an executable tool call.
+ */
+function parseToolArguments(json: string, execution: ProviderExecutionIdentityRef): BusinessPayload {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json || '{}');
+  } catch (cause) {
+    throw new ProviderAdapterError({
+      code: 'tool.arguments.invalid-json',
+      category: 'protocol',
+      phase: 'tool',
+      message: cause instanceof Error ? cause.message : 'provider tool arguments are invalid JSON',
+      scope: execution,
+    });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ProviderAdapterError({
+      code: 'tool.arguments.invalid-shape',
+      category: 'protocol',
+      phase: 'tool',
+      message: 'provider tool arguments must be a JSON object',
+      scope: execution,
+    });
+  }
+  return parsed as BusinessPayload;
+}
+
+/** One provider execution's request-local state key; shared by codec maps. */
+function executionKey(execution: ProviderExecutionIdentityRef): string {
+  return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
 }
 
 function requireString(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): string {
@@ -489,6 +766,20 @@ function responseItemText(item: Record<string, unknown>): string | undefined {
   return text.length > 0 ? text : undefined;
 }
 
+/**
+ * The already-declared part-scoped assistant-text units a message item snapshot
+ * covers. The item-level full snapshot supersedes those finer units.
+ */
+function responsesItemPartUnitIds(itemId: string, item: Record<string, unknown>): readonly string[] {
+  if (!Array.isArray(item.content)) return [];
+  return item.content.map((_part, index) => unitId('responses', 'assistant-text', `${itemId}:${index}`));
+}
+
+function responsesReasoningLocator(itemId: string, record: Record<string, unknown>): string {
+  const contentIndex = typeof record.content_index === 'number' ? record.content_index : undefined;
+  return contentIndex === undefined ? itemId : `${itemId}:${contentIndex}`;
+}
+
 function asRecord(raw: ProviderWireEvent): Record<string, unknown> {
   if (!raw || typeof raw !== 'object') {
     throw new ProviderAdapterError({
@@ -513,7 +804,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
-    if (input.toolContinuations !== undefined) {
+    if (input.requestContext === undefined && input.toolContinuations !== undefined) {
       return {
         protocol: 'responses',
         type: 'responses.request',
@@ -533,7 +824,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             output: continuation.output,
           }])),
         ],
-        execution: input,
+        execution: executionIdentity(input),
         ...(input.tools === undefined || input.tools.length === 0 ? {} : {
           tools: input.tools.map((tool) => ({
             type: 'function' as const,
@@ -559,6 +850,11 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   }
 
   async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
+    const decoded = await this.decodeWire(raw, context);
+    return { events: decoded.events, rawFacts: decoded.rawFacts ?? [] };
+  }
+
+  private async decodeWire(raw: ProviderWireEvent, context: DecodeContext): Promise<DecodedWire> {
     if (raw.protocol !== 'responses') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -593,7 +889,17 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         if (itemType === 'reasoning') {
           const itemId = stringOrGenerated(item, 'id', `rcc-reasoning-${record.output_index}`);
           const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, item)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+          const summaryText = responsesReasoningSummaryText(item);
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+            rawFacts: summaryText.length === 0 ? [] : [contentFact({
+              contentUnitId: unitId('responses', 'reasoning-summary', itemId),
+              channel: 'reasoning-summary',
+              update: 'full',
+              content: rawAsset(evidenceRefs[0], { kind: 'reasoning-item', selector: 'summary' }),
+              complete: false,
+            })],
+          };
         }
         if (itemType !== 'message') {
           throw new ProviderAdapterError({ code: 'unknown.output.item', category: 'protocol', phase: 'observe', message: `unknown responses output item type ${itemType}`, scope: context.execution });
@@ -601,32 +907,73 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
         const text = responseItemText(item);
-        return text === undefined || text === ''
-          ? { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] }
-          : { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
+        if (text === undefined || text === '') {
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] };
+        }
+        const replacesUnitIds = responsesItemPartUnitIds(itemId, item);
+        return {
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'assistant-text', itemId),
+            channel: 'assistant-text',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'content-part', partIndex: 0 }),
+            complete: false,
+            ...(replacesUnitIds.length === 0 ? {} : { replacesUnitIds }),
+          })],
+        };
       }
       case 'response.output_text.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
+        const contentIndex = typeof record.content_index === 'number' ? record.content_index : undefined;
         const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, delta)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, delta, 'delta'))] };
+        return {
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, delta, 'delta'))],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'assistant-text', contentIndex === undefined ? itemId : `${itemId}:${contentIndex}`),
+            channel: 'assistant-text',
+            update: 'delta',
+            content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+            complete: false,
+          })],
+        };
       }
       case 'response.output_text.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
+        const contentIndex = typeof record.content_index === 'number' ? record.content_index : undefined;
         const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, text)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
+        return {
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'assistant-text', contentIndex === undefined ? itemId : `${itemId}:${contentIndex}`),
+            channel: 'assistant-text',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+            complete: true,
+          })],
+        };
       }
       case 'response.content_part.added': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         requireNumber(record, 'output_index', context.execution, raw.type);
-        requireNumber(record, 'content_index', context.execution, raw.type);
+        const contentIndex = requireNumber(record, 'content_index', context.execution, raw.type);
         const part = requireObject(record, 'part', context.execution, raw.type);
         const partType = requireString(part, 'type', context.execution, raw.type);
         const text = requireStringValue(part, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
         if (partType === RESPONSES_REASONING_CONTENT_PART) {
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('responses', 'reasoning-text', `${itemId}:${contentIndex}`),
+              channel: 'reasoning-text',
+              update: 'full',
+              content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+              complete: false,
+            })],
+          };
         }
         if (partType !== 'output_text') {
           throw new ProviderAdapterError({
@@ -637,20 +984,47 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             scope: context.execution,
           });
         }
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
+        return {
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'assistant-text', `${itemId}:${contentIndex}`),
+            channel: 'assistant-text',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+            complete: false,
+          })],
+        };
       }
       case 'response.content_part.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         requireNumber(record, 'output_index', context.execution, raw.type);
-        requireNumber(record, 'content_index', context.execution, raw.type);
+        const contentIndex = requireNumber(record, 'content_index', context.execution, raw.type);
         const part = requireObject(record, 'part', context.execution, raw.type);
         const partType = requireString(part, 'type', context.execution, raw.type);
         const text = requireStringValue(part, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
         if (partType === RESPONSES_REASONING_CONTENT_PART) {
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('responses', 'reasoning-text', `${itemId}:${contentIndex}`),
+              channel: 'reasoning-text',
+              update: 'full',
+              content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+              complete: true,
+            })],
+          };
         }
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
+        return {
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'assistant-text', `${itemId}:${contentIndex}`),
+            channel: 'assistant-text',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+            complete: true,
+          })],
+        };
       }
       case 'response.output_item.done': {
         requireNumber(record, 'output_index', context.execution, raw.type);
@@ -715,12 +1089,27 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
                 },
               ),
             ],
+            rawFacts: [toolCallFact(
+              unitId('responses', 'tool-arguments', callId),
+              { callId, toolId: name, arguments: args as BusinessPayload, continuationRef },
+              rawAsset(evidenceRefs[0], { kind: 'arguments' }),
+            )],
           };
         }
         if (itemType === 'reasoning') {
           const itemId = stringOrGenerated(item, 'id', `rcc-reasoning-${record.output_index}`);
           const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, item)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+          const summaryText = responsesReasoningSummaryText(item);
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+            rawFacts: summaryText.length === 0 ? [] : [contentFact({
+              contentUnitId: unitId('responses', 'reasoning-summary', itemId),
+              channel: 'reasoning-summary',
+              update: 'full',
+              content: rawAsset(evidenceRefs[0], { kind: 'reasoning-item', selector: 'summary' }),
+              complete: true,
+            })],
+          };
         }
         if (itemType !== 'message') {
           throw new ProviderAdapterError({ code: 'unknown.output.item', category: 'protocol', phase: 'observe', message: `unknown responses output item type ${itemType}`, scope: context.execution });
@@ -728,9 +1117,21 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
         const text = responseItemText(item);
-        return text === undefined || text === ''
-          ? { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] }
-          : { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
+        if (text === undefined || text === '') {
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] };
+        }
+        const replacesUnitIds = responsesItemPartUnitIds(itemId, item);
+        return {
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'assistant-text', itemId),
+            channel: 'assistant-text',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'content-part', partIndex: 0 }),
+            complete: true,
+            ...(replacesUnitIds.length === 0 ? {} : { replacesUnitIds }),
+          })],
+        };
       }
       case 'response.reasoning_summary_part.added':
       case 'response.reasoning_summary_part.done': {
@@ -738,50 +1139,122 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const part = requireObject(record, 'part', context.execution, raw.type);
         const text = responsesReasoningSummaryText(part);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        return {
+          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'reasoning-summary', responsesReasoningLocator(itemId, record)),
+            channel: 'reasoning-summary',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+            complete: raw.type === 'response.reasoning_summary_part.done',
+          })],
+        };
       }
       case 'response.reasoning_summary_part.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireObject(record, 'delta', context.execution, raw.type);
         const text = responsesReasoningSummaryText(delta);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        return {
+          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'reasoning-summary', responsesReasoningLocator(itemId, record)),
+            channel: 'reasoning-summary',
+            update: 'delta',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+            complete: false,
+          })],
+        };
       }
       case 'response.reasoning_summary_text.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        return {
+          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'reasoning-summary', responsesReasoningLocator(itemId, record)),
+            channel: 'reasoning-summary',
+            update: 'delta',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'delta' }),
+            complete: false,
+          })],
+        };
       }
       case 'response.reasoning_summary_text.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        return {
+          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'reasoning-summary', responsesReasoningLocator(itemId, record)),
+            channel: 'reasoning-summary',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+            complete: true,
+          })],
+        };
       }
       case 'response.reasoning_text.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        return {
+          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'reasoning-text', responsesReasoningLocator(itemId, record)),
+            channel: 'reasoning-text',
+            update: 'delta',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'delta' }),
+            complete: false,
+          })],
+        };
       }
       case 'response.reasoning_text.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        return {
+          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'reasoning-text', responsesReasoningLocator(itemId, record)),
+            channel: 'reasoning-text',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'text' }),
+            complete: true,
+          })],
+        };
       }
       case 'response.function_call_arguments.delta': {
         const itemId = requireToolEventIdentity(record, context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${itemId}`, delta)];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), evidenceRefs)] };
+        return {
+          events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'tool-arguments', itemId),
+            channel: 'tool-arguments',
+            update: 'delta',
+            content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+            complete: false,
+          })],
+        };
       }
       case 'response.function_call_arguments.done': {
         const itemId = requireToolEventIdentity(record, context.execution, raw.type);
         const args = requireStringValue(record, 'arguments', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${itemId}`, args)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), [artifactRef(raw.type, `arguments/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+        return {
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), [artifactRef(raw.type, `arguments/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)],
+          rawFacts: [contentFact({
+            contentUnitId: unitId('responses', 'tool-arguments', itemId),
+            channel: 'tool-arguments',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+            complete: true,
+          })],
+        };
       }
       case 'response.completed':
       case 'response.incomplete': {
@@ -812,6 +1285,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
               { terminalState: raw.type === 'response.incomplete' || waitingForTool ? 'waiting' : 'succeeded', evidenceRefs, externalResponseId: responseId },
             ),
           ],
+          rawFacts: [requestCompleteFact(raw.type === 'response.incomplete' ? 'incomplete' : 'completed')],
         };
       }
       case 'response.failed': {
@@ -827,6 +1301,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${responseId}`), `error-${responseId}`, { kind: 'recover', ref: OWNER }, { error }),
             ownedEvent(context.execution, context.scope, 'terminal', raw.type, eventId(context, raw.type, `terminal/${responseId}`), `terminal-${responseId}`, { kind: 'recover', ref: OWNER }, { terminalState: 'failed' }),
           ],
+          rawFacts: [requestCompleteFact('failed', error)],
         };
       }
       case 'error': {
@@ -838,6 +1313,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const error = providerError(context.execution, context.scope, code, message, 'protocol', [errorEvidence]);
         return {
           events: [ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],
+          rawFacts: [requestCompleteFact('failed', error)],
         };
       }
       default:
@@ -858,8 +1334,9 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): ResponsesWireRequest {
-    const content = businessText(execution, payload);
-    const input: ResponsesWireRequest['input'] = [{ type: 'message', role: 'user', content }];
+    const input: ResponsesWireRequest['input'] = execution.requestContext === undefined
+      ? [{ type: 'message', role: 'user', content: businessText(execution, payload) }]
+      : responsesContextInput(execution.requestContext);
     const tools: ResponsesWireTool[] = (execution.tools ?? []).map((tool) => ({
       type: 'function',
       name: responsesWireToolName(tool.toolId),
@@ -871,9 +1348,9 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       type: 'responses.request',
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
-      instructions: harnessToolSurfaceInstructions(execution.tools),
+      instructions: requestInstructions(execution.tools, execution.instructions),
       input,
-      execution,
+      execution: executionIdentity(execution),
       ...(checkpointId === undefined ? {} : { checkpointId }),
       ...(tools.length === 0 ? {} : { tools }),
     };
@@ -882,6 +1359,14 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
 
 export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequest> {
   readonly protocol = 'openai' as const;
+
+  /**
+   * Fragmented assistant tool calls keyed by execution, chat completion id and
+   * choice index, then by the wire tool index. Arguments arrive across several
+   * chunks and the call id may arrive late; nothing is executable until the
+   * finish_reason closes the call.
+   */
+  private readonly pendingToolCalls = new Map<string, Map<number, OpenAIChatPendingToolCall>>();
 
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
@@ -907,6 +1392,11 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
   }
 
   async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
+    const decoded = await this.decodeWire(raw, context);
+    return { events: decoded.events, rawFacts: decoded.rawFacts ?? [] };
+  }
+
+  private async decodeWire(raw: ProviderWireEvent, context: DecodeContext): Promise<DecodedWire> {
     if (raw.protocol !== 'openai') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -930,8 +1420,9 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
             scope: context.execution,
           });
         }
-        if (choices.length === 0) return { events: [] };
+        if (choices.length === 0) return { events: [], rawFacts: [] };
         const events: ProviderEvent[] = [];
+        const rawFacts: ProviderRawFact[] = [];
         for (const candidate of choices) {
           if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
             throw new ProviderAdapterError({
@@ -976,6 +1467,13 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               evidenceRefs,
               content,
             ));
+            rawFacts.push(contentFact({
+              contentUnitId: unitId('openai', 'assistant-text', `${id}:${choiceIndex}`),
+              channel: 'assistant-text',
+              update: 'delta',
+              content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+              complete: false,
+            }));
           }
           const toolCalls = deltaRecord.tool_calls;
           if (toolCalls !== undefined && !Array.isArray(toolCalls)) {
@@ -987,6 +1485,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               scope: context.execution,
             });
           }
+          const pendingKey = `${executionKey(context.execution)}:${id}:${choiceIndex}`;
           for (const toolCall of toolCalls ?? []) {
             if (!toolCall || typeof toolCall !== 'object' || Array.isArray(toolCall)) {
               throw new ProviderAdapterError({
@@ -1010,14 +1509,37 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               });
             }
             const functionValue = (functionRecord ?? {}) as Record<string, unknown>;
-            const callId = typeof toolRecord.id === 'string' && toolRecord.id.trim() ? toolRecord.id : `tool-${id}-${toolIndex}`;
+            const wireCallId = typeof toolRecord.id === 'string' && toolRecord.id.trim() ? toolRecord.id : undefined;
+            const callId = wireCallId ?? `tool-${id}-${toolIndex}`;
             const name = typeof functionValue.name === 'string' && functionValue.name.trim() ? functionValue.name : undefined;
             const argumentsDelta = typeof functionValue.arguments === 'string' ? functionValue.arguments : undefined;
             if (name === undefined && argumentsDelta === undefined) continue;
+            // Accumulate the real fragments; nothing is executable until the
+            // finish_reason closes the call and the arguments parse.
+            let pending = this.pendingToolCalls.get(pendingKey);
+            if (pending === undefined) {
+              pending = new Map();
+              this.pendingToolCalls.set(pendingKey, pending);
+            }
+            const current = pending.get(toolIndex) ?? { arguments: '' };
+            pending.set(toolIndex, {
+              ...(wireCallId === undefined ? (current.id === undefined ? {} : { id: current.id }) : { id: wireCallId }),
+              ...(name === undefined ? (current.name === undefined ? {} : { name: current.name }) : { name }),
+              arguments: `${current.arguments}${argumentsDelta ?? ''}`,
+            });
             const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, {
               ...(name === undefined ? {} : { name }),
               ...(argumentsDelta === undefined ? {} : { arguments: argumentsDelta }),
             })];
+            if (argumentsDelta !== undefined) {
+              rawFacts.push(contentFact({
+                contentUnitId: unitId('openai', 'tool-arguments', `${id}:${choiceIndex}:${toolIndex}`),
+                channel: 'tool-arguments',
+                update: 'delta',
+                content: rawAsset(evidenceRefs[0], { kind: 'arguments' }),
+                complete: false,
+              }));
+            }
             events.push(ownedEvent(
               context.execution,
               context.scope,
@@ -1030,6 +1552,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
                 outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
                 evidenceRefs,
                 ...(name === undefined ? {} : { summary: `调用工具：${name}` }),
+                toolPhase: 'invoke',
               },
             ));
           }
@@ -1046,6 +1569,48 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
           if (typeof finishReason === 'string') {
             const evidenceRefs = [await captureEvidence(context, raw.type, `finish/${id}/${choiceIndex}`, finishReason)];
             const mapping = mapOpenAIFinishReason(finishReason);
+            const pending = this.pendingToolCalls.get(pendingKey);
+            this.pendingToolCalls.delete(pendingKey);
+            if (mapping.terminalState === 'waiting' && (finishReason === 'tool_calls' || finishReason === 'function_call')) {
+              for (const [toolIndex, pendingCall] of [...(pending ?? new Map<number, OpenAIChatPendingToolCall>()).entries()].sort((left, right) => left[0] - right[0])) {
+                if (pendingCall.name === undefined) {
+                  throw new ProviderAdapterError({
+                    code: 'missing.field',
+                    category: 'protocol',
+                    phase: 'tool',
+                    message: `${raw.type} tool call missing function name`,
+                    scope: context.execution,
+                  });
+                }
+                const callId = pendingCall.id ?? `tool-${id}-${toolIndex}`;
+                const toolId = responsesToolId(pendingCall.name);
+                const argumentsValue = parseToolArguments(pendingCall.arguments, context.execution);
+                const toolEvidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}/typed`, {
+                  name: pendingCall.name,
+                  arguments: pendingCall.arguments,
+                })];
+                events.push(ownedEvent(
+                  context.execution,
+                  context.scope,
+                  'tool',
+                  raw.type,
+                  eventId(context, raw.type, `tool/${callId}/typed`),
+                  `tool-${callId}`,
+                  { kind: 'continue' },
+                  {
+                    outputRefs: [artifactRef(raw.type, `tool/${callId}/typed`, toolEvidenceRefs[0].digest)],
+                    evidenceRefs: toolEvidenceRefs,
+                    summary: `调用工具：${toolId}`,
+                    toolCall: { callId, toolId, arguments: argumentsValue, continuationRef: id },
+                  },
+                ));
+                rawFacts.push(toolCallFact(
+                  unitId('openai', 'tool-arguments', `${id}:${choiceIndex}:${toolIndex}`),
+                  { callId, toolId, arguments: argumentsValue, continuationRef: id },
+                  rawAsset(toolEvidenceRefs[0], { kind: 'arguments' }),
+                ));
+              }
+            }
             const error = mapping.errorCode
               ? providerError(
                   context.execution,
@@ -1078,9 +1643,10 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               mapping.nextAction,
               { terminalState: mapping.terminalState, evidenceRefs },
             ));
+            rawFacts.push(requestCompleteFact(openAIFinishTerminal(finishReason), error));
           }
         }
-        return { events };
+        return { events, rawFacts };
       }
       case 'error': {
         const errorRecord = requireObject(record, 'error', context.execution, raw.type);
@@ -1097,6 +1663,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
             ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error }),
             ownedEvent(context.execution, context.scope, 'terminal', raw.type, eventId(context, raw.type, `terminal/${code}`), `terminal-${code}`, { kind: 'recover', ref: OWNER }, { terminalState: 'failed' }),
           ],
+          rawFacts: [requestCompleteFact('failed', error)],
         };
       }
       default:
@@ -1113,21 +1680,38 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderExecutionIdentityRef,
+    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): OpenAIChatWireRequest {
-    const messages: OpenAIChatWireMessage[] = [
-      { role: 'user', content: businessText(execution, payload) },
-    ];
-    const tools: OpenAIChatWireTool[] = [];
+    // The transient orientation (with the harness tool-surface guidance) is a
+    // request-local system message, never part of the canonical units. When a
+    // typed context is bound, its units replace the legacy payload string.
+    const messages: OpenAIChatWireMessage[] = [];
+    if (execution.requestContext !== undefined) {
+      const systemText = requestInstructions(execution.tools, execution.instructions);
+      if (systemText.length > 0) messages.push({ role: 'system', content: systemText });
+      messages.push(...openaiChatContextMessages(execution.requestContext));
+    } else if (execution.instructions !== undefined) {
+      const systemText = requestInstructions(execution.tools, execution.instructions);
+      if (systemText.length > 0) messages.push({ role: 'system', content: systemText });
+      messages.push({ role: 'user', content: businessText(execution, payload) });
+    } else {
+      messages.push({ role: 'user', content: businessText(execution, payload) });
+    }
+    const tools: OpenAIChatWireTool[] = execution.requestContext === undefined
+      ? []
+      : (execution.tools ?? []).map((tool) => ({
+          type: 'function',
+          function: { name: responsesWireToolName(tool.toolId), description: tool.description, parameters: tool.inputSchema },
+        }));
     return {
       protocol: 'openai',
       type: 'openai.chat.request',
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
       messages,
-      execution,
+      execution: executionIdentity(execution),
       ...(checkpointId === undefined ? {} : { checkpointId }),
       ...(tools.length === 0 ? {} : { tools }),
     };
@@ -1138,6 +1722,8 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
   readonly protocol = 'anthropic' as const;
 
   private readonly stopReasons = new Map<string, string>();
+  private readonly messageIds = new Map<string, string>();
+  private readonly blocks = new Map<string, AnthropicBlockState>();
 
   constructor(private readonly maxTokens: number) {
     if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) {
@@ -1174,6 +1760,11 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
   }
 
   async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
+    const decoded = await this.decodeWire(raw, context);
+    return { events: decoded.events, rawFacts: decoded.rawFacts ?? [] };
+  }
+
+  private async decodeWire(raw: ProviderWireEvent, context: DecodeContext): Promise<DecodedWire> {
     if (raw.protocol !== 'anthropic') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -1189,18 +1780,28 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       {
         const message = requireObject(record, 'message', context.execution, raw.type);
         const messageId = requireString(message, 'id', context.execution, raw.type);
+        this.messageIds.set(this.stopReasonKey(context.execution), messageId);
         const evidenceRefs = [await captureEvidence(context, raw.type, `message/${messageId}`)];
         return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `message/${messageId}`), evidenceRefs, 'provider requested model work', messageId)] };
       }
       case 'content_block_start': {
-        requireNumber(record, 'index', context.execution, raw.type);
+        const index = requireNumber(record, 'index', context.execution, raw.type);
         const blockRecord = requireObject(record, 'content_block', context.execution, raw.type);
         const blockType = requireString(blockRecord, 'type', context.execution, raw.type);
         if (blockType === 'tool_use') {
           const callId = requireString(blockRecord, 'id', context.execution, raw.type);
           const name = requireString(blockRecord, 'name', context.execution, raw.type);
           const input = requireObject(blockRecord, 'input', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { name, input })];
+          const startArgumentsJson = JSON.stringify(input);
+          this.blocks.set(this.blockKey(context.execution, index), {
+            type: 'tool_use',
+            channels: ['tool-arguments'],
+            callId,
+            toolId: name,
+            startArgumentsJson,
+            argumentsDelta: '',
+          });
+          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { name, input, arguments: startArgumentsJson })];
           return {
             events: [
               ownedEvent(
@@ -1211,21 +1812,62 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
                 eventId(context, raw.type, `tool/${callId}`),
                 `tool-${callId}`,
                 { kind: 'continue' },
-                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs, summary: `调用工具：${name}` },
+                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs, summary: `调用工具：${name}`, toolPhase: 'invoke' },
               ),
             ],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('anthropic', 'tool-arguments', String(index)),
+              channel: 'tool-arguments',
+              update: 'full',
+              content: rawAsset(evidenceRefs[0], { kind: 'arguments' }),
+              complete: false,
+            })],
           };
         }
         if (blockType === 'text') {
           const text = requireStringValue(blockRecord, 'text', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `block/${String(record.index)}`, text)];
-          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(record.index)}`), [artifactRef(raw.type, `block/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs, text)] };
+          this.blocks.set(this.blockKey(context.execution, index), { type: 'text', channels: ['assistant-text'], argumentsDelta: '' });
+          const evidenceRefs = [await captureEvidence(context, raw.type, `block/${String(index)}`, text)];
+          return {
+            events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(index)}`), [artifactRef(raw.type, `block/${String(index)}`, evidenceRefs[0].digest)], evidenceRefs, text)],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('anthropic', 'assistant-text', String(index)),
+              channel: 'assistant-text',
+              update: 'full',
+              content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+              complete: false,
+            })],
+          };
         }
         if (blockType === 'thinking') {
           const thinking = requireStringValue(blockRecord, 'thinking', context.execution, raw.type);
           const signature = typeof blockRecord.signature === 'string' ? blockRecord.signature : undefined;
-          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(record.index)}`, { thinking, ...(signature === undefined ? {} : { signature }) })];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(record.index)}`), evidenceRefs)] };
+          this.blocks.set(this.blockKey(context.execution, index), {
+            type: 'thinking',
+            channels: signature === undefined ? ['reasoning-text'] : ['reasoning-text', 'reasoning-signature'],
+            argumentsDelta: '',
+          });
+          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(index)}`, { thinking, ...(signature === undefined ? {} : { signature }) })];
+          const rawFacts: ProviderRawFact[] = [contentFact({
+            contentUnitId: unitId('anthropic', 'reasoning-text', String(index)),
+            channel: 'reasoning-text',
+            update: 'full',
+            content: rawAsset(evidenceRefs[0], { kind: 'thinking-field', field: 'thinking' }),
+            complete: false,
+          })];
+          if (signature !== undefined) {
+            rawFacts.push(contentFact({
+              contentUnitId: unitId('anthropic', 'reasoning-signature', String(index)),
+              channel: 'reasoning-signature',
+              update: 'full',
+              content: rawAsset(evidenceRefs[0], { kind: 'thinking-field', field: 'signature' }),
+              complete: false,
+            }));
+          }
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(index)}`), evidenceRefs)],
+            rawFacts,
+          };
         }
         throw new ProviderAdapterError({
           code: 'unknown.event',
@@ -1236,28 +1878,66 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         });
       }
       case 'content_block_delta': {
-        requireNumber(record, 'index', context.execution, raw.type);
+        const index = requireNumber(record, 'index', context.execution, raw.type);
         const deltaRecord = requireObject(record, 'delta', context.execution, raw.type);
         const deltaType = requireString(deltaRecord, 'type', context.execution, raw.type);
         if (deltaType === 'text_delta') {
           const text = requireStringValue(deltaRecord, 'text', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `text/${String(record.index)}`, text)];
-          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${String(record.index)}`), [artifactRef(raw.type, `text/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs, text)] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `text/${String(index)}`, text)];
+          return {
+            events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${String(index)}`), [artifactRef(raw.type, `text/${String(index)}`, evidenceRefs[0].digest)], evidenceRefs, text)],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('anthropic', 'assistant-text', String(index)),
+              channel: 'assistant-text',
+              update: 'delta',
+              content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+              complete: false,
+            })],
+          };
         }
         if (deltaType === 'thinking_delta') {
           const thinking = requireStringValue(deltaRecord, 'thinking', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(record.index)}`, thinking)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(record.index)}`), evidenceRefs, 'provider provided model reasoning')] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(index)}`, thinking)];
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(index)}`), evidenceRefs, 'provider provided model reasoning')],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('anthropic', 'reasoning-text', String(index)),
+              channel: 'reasoning-text',
+              update: 'delta',
+              content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+              complete: false,
+            })],
+          };
         }
         if (deltaType === 'signature_delta') {
           const signature = requireStringValue(deltaRecord, 'signature', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `signature/${String(record.index)}`, signature)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `signature/${String(record.index)}`), evidenceRefs, 'provider completed reasoning signature')] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `signature/${String(index)}`, signature)];
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `signature/${String(index)}`), evidenceRefs, 'provider completed reasoning signature')],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('anthropic', 'reasoning-signature', String(index)),
+              channel: 'reasoning-signature',
+              update: 'delta',
+              content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+              complete: false,
+            })],
+          };
         }
         if (deltaType === 'input_json_delta') {
           const partialJson = requireStringValue(deltaRecord, 'partial_json', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `input-json/${String(record.index)}`, partialJson)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `input-json/${String(record.index)}`), evidenceRefs, 'provider completed tool request details')] };
+          const block = this.blocks.get(this.blockKey(context.execution, index));
+          if (block) block.argumentsDelta += partialJson;
+          const evidenceRefs = [await captureEvidence(context, raw.type, `input-json/${String(index)}`, partialJson)];
+          return {
+            events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `input-json/${String(index)}`), evidenceRefs, 'provider completed tool request details')],
+            rawFacts: [contentFact({
+              contentUnitId: unitId('anthropic', 'tool-arguments', String(index)),
+              channel: 'tool-arguments',
+              update: 'delta',
+              content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
+              complete: false,
+            })],
+          };
         }
         throw new ProviderAdapterError({
           code: 'unknown.event',
@@ -1268,8 +1948,57 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         });
       }
       case 'content_block_stop':
-        requireNumber(record, 'index', context.execution, raw.type);
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(record.index)}`), [await captureEvidence(context, raw.type, `block/${String(record.index)}`)])] };
+      {
+        const index = requireNumber(record, 'index', context.execution, raw.type);
+        const blockKey = this.blockKey(context.execution, index);
+        const block = this.blocks.get(blockKey);
+        this.blocks.delete(blockKey);
+        const rawFacts: ProviderRawFact[] = [];
+        const events: ProviderEvent[] = [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(index)}`), [await captureEvidence(context, raw.type, `block/${String(index)}`)])];
+        if (block) {
+          for (const channel of block.channels) rawFacts.push(contentCompleteFact(unitId('anthropic', channel, String(index))));
+          if (block.type === 'tool_use' && block.callId !== undefined && block.toolId !== undefined) {
+            const continuationRef = this.messageIds.get(this.stopReasonKey(context.execution));
+            if (continuationRef === undefined) {
+              throw new ProviderAdapterError({
+                code: 'tool.continuation.missing',
+                category: 'protocol',
+                phase: 'tool',
+                message: 'anthropic tool call is missing its message continuation identity',
+                scope: context.execution,
+              });
+            }
+            const argumentsJson = block.argumentsDelta.length > 0 ? block.argumentsDelta : block.startArgumentsJson ?? '';
+            const parsed = parseToolArguments(argumentsJson, context.execution);
+            const toolId = responsesToolId(block.toolId);
+            const argumentsEvidence = await captureEvidence(context, raw.type, `tool/${block.callId}/arguments`, { arguments: argumentsJson });
+            rawFacts.push(toolCallFact(
+              unitId('anthropic', 'tool-arguments', String(index)),
+              { callId: block.callId, toolId, arguments: parsed, continuationRef },
+              rawAsset(argumentsEvidence, { kind: 'arguments' }),
+            ));
+            events.push(ownedEvent(
+              context.execution,
+              context.scope,
+              'tool',
+              raw.type,
+              eventId(context, raw.type, `tool/${block.callId}/typed`),
+              `tool-${block.callId}`,
+              { kind: 'continue' },
+              {
+                outputRefs: [artifactRef(raw.type, `tool/${block.callId}/typed`, argumentsEvidence.digest)],
+                evidenceRefs: [argumentsEvidence],
+                summary: `调用工具：${toolId}`,
+                toolCall: { callId: block.callId, toolId, arguments: parsed, continuationRef },
+              },
+            ));
+          }
+        }
+        return {
+          events,
+          rawFacts,
+        };
+      }
       case 'message_delta':
       {
         const delta = requireObject(record, 'delta', context.execution, raw.type);
@@ -1280,6 +2009,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       case 'message_stop': {
         const stopReason = this.stopReasons.get(this.stopReasonKey(context.execution));
         this.stopReasons.delete(this.stopReasonKey(context.execution));
+        this.messageIds.delete(this.stopReasonKey(context.execution));
         const mapped = mapAnthropicStopReason(stopReason);
         const evidenceRefs = [await captureEvidence(context, raw.type, `stop/${stopReason ?? 'unknown'}`, stopReason)];
         return {
@@ -1295,6 +2025,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
               { terminalState: mapped.state, evidenceRefs },
             ),
           ],
+          rawFacts: [requestCompleteFact(anthropicTerminal(stopReason))],
         };
       }
       case 'ping': {
@@ -1309,6 +2040,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const error = providerError(context.execution, context.scope, code, message, 'provider', [errorEvidence]);
         return {
           events: [ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],
+          rawFacts: [requestCompleteFact('failed', error)],
         };
       }
       default:
@@ -1323,21 +2055,23 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
   }
 
   private stopReasonKey(execution: ProviderExecutionIdentityRef): string {
-    return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
+    return executionKey(execution);
+  }
+
+  private blockKey(execution: ProviderExecutionIdentityRef, index: number): string {
+    return `${this.stopReasonKey(execution)}:${index}`;
   }
 
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderExecutionIdentityRef,
+    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): AnthropicWireRequest {
-    const content = businessText(execution, payload);
-    const message: AnthropicWireMessage = {
-      role: 'user',
-      content: [{ type: 'text', text: content }],
-    };
+    const messages: AnthropicWireMessage[] = execution.requestContext === undefined
+      ? [{ role: 'user', content: [{ type: 'text', text: businessText(execution, payload) }] }]
+      : [...anthropicContextMessages(execution.requestContext)];
     const tools: AnthropicWireTool[] = [];
     return {
       protocol: 'anthropic',
@@ -1345,9 +2079,9 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
       max_tokens: this.maxTokens,
-      system: '',
-      messages: [message],
-      execution,
+      system: execution.instructions?.text ?? '',
+      messages,
+      execution: executionIdentity(execution),
       ...(checkpointId === undefined ? {} : { checkpointId }),
       ...(tools.length === 0 ? {} : { tools }),
     };

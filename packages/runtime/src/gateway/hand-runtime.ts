@@ -29,8 +29,24 @@ import type {
   OperationVerifierPort,
 } from './ports.js';
 
+/**
+ * Successor settlement details that must be committed with the terminal event.
+ *
+ * The Gateway commits the event and this exact successor control state in one
+ * append. A terminal status event without settlement evidence must not become a
+ * final durable result.
+ */
+export interface HandEmitSettlement {
+  readonly observation?: OperationExecutorObservation;
+  readonly result?: OperationResult;
+  readonly failure?: OperationFailure;
+  readonly blocked?: OperationBlockedState;
+  readonly reconcile?: OperationReconcileState;
+}
+
 export type EmitOperationEvent = (
   event: Omit<OperationEvent, 'eventId' | 'schemaVersion' | 'occurredAt'>,
+  settlement?: HandEmitSettlement,
 ) => Promise<void>;
 
 export type CreateOperationEvidence = (label: string, scope: Scope) => EvidenceRef;
@@ -134,7 +150,10 @@ export class HandRuntime {
         ...(observation.conditionRef ? { conditionRef: observation.conditionRef } : {}),
         evidenceRefs: this.ensureEvidence(observation.evidenceRefs, 'execution-blocked', input.route.effectiveScope),
       };
-      await this.emitStatus(input, 'operation.blocked', 'blocked', blocked.evidenceRefs);
+      await this.emitStatus(input, 'operation.blocked', 'blocked', blocked.evidenceRefs, undefined, undefined, {
+        observation,
+        blocked,
+      });
       return { status: 'blocked', observation, blocked };
     }
 
@@ -148,7 +167,10 @@ export class HandRuntime {
         nextAction: observation.nextAction ?? { kind: 'recover', ref: 'reconcile' },
         evidenceRefs: this.ensureEvidence(observation.evidenceRefs, 'execution-reconcile', input.route.effectiveScope),
       };
-      await this.emitStatus(input, 'operation.reconcile_required', 'reconcile_required', reconcile.evidenceRefs);
+      await this.emitStatus(input, 'operation.reconcile_required', 'reconcile_required', reconcile.evidenceRefs, undefined, undefined, {
+        observation,
+        reconcile,
+      });
       return { status: 'reconcile_required', observation, reconcile };
     }
 
@@ -223,18 +245,26 @@ export class HandRuntime {
         nextAction: { kind: 'recover', ref: 'reconcile' },
       });
       assertTransitionOperationStatus('verifying', 'failed');
-      await this.emitStatus(input, 'operation.failed', 'failed', failure.evidenceRefs, undefined, failure);
+      const result = this.failedResult(input, failure, decision.decision);
+      await this.emitStatus(input, 'operation.failed', 'failed', failure.evidenceRefs, undefined, failure, {
+        observation: input.observation,
+        failure,
+        result,
+      });
       return {
         status: 'failed',
         observation: input.observation,
         failure,
-        result: this.failedResult(input, failure, decision.decision),
+        result,
       };
     }
 
     assertTransitionOperationStatus('verifying', 'succeeded');
     const result = this.succeededResult(input, decision.decision, decision.evidenceRefs);
-    await this.emitStatus(input, 'operation.completed', 'succeeded', result.evidenceRefs, this.resultRef(input.intent));
+    await this.emitStatus(input, 'operation.completed', 'succeeded', result.evidenceRefs, this.resultRef(input.intent), undefined, {
+      observation: input.observation,
+      result,
+    });
     return { status: 'succeeded', observation: input.observation, result };
   }
 
@@ -266,7 +296,11 @@ export class HandRuntime {
       failure,
       failure.failureClass,
     );
-    await this.emitStatus(input, 'operation.failed', 'failed', failure.evidenceRefs, undefined, failure);
+    await this.emitStatus(input, 'operation.failed', 'failed', failure.evidenceRefs, undefined, failure, {
+      ...(observation ? { observation } : {}),
+      failure,
+      result,
+    });
     return { status: 'failed', ...(observation ? { observation } : {}), failure, result };
   }
 
@@ -283,7 +317,11 @@ export class HandRuntime {
       nextAction: { kind: 'recover', ref: 'reconcile' },
     });
     const result = this.failedResult(input, failure, 'verifier-error');
-    await this.emitStatus(input, 'operation.failed', 'failed', failure.evidenceRefs, undefined, failure);
+    await this.emitStatus(input, 'operation.failed', 'failed', failure.evidenceRefs, undefined, failure, {
+      observation: input.observation,
+      failure,
+      result,
+    });
     return { status: 'failed', observation: input.observation, failure, result };
   }
 
@@ -372,22 +410,26 @@ export class HandRuntime {
     evidenceRefs: readonly EvidenceRef[],
     resultRef?: string,
     failure?: OperationFailure,
+    settlement?: HandEmitSettlement,
   ): Promise<void> {
     const executionEpoch = input.lease
       ? input.lease.executionEpoch
       : 'observation' in input
         ? input.observation.executionEpoch
         : 1;
-    await this.dependencies.emit({
-      kind,
-      operationId: input.intent.operationId,
-      taskId: input.intent.taskId,
-      executionEpoch,
-      status,
-      evidenceRefs,
-      ...(resultRef ? { resultRef } : {}),
-      ...(failure ? { failure } : {}),
-    });
+    await this.dependencies.emit(
+      {
+        kind,
+        operationId: input.intent.operationId,
+        taskId: input.intent.taskId,
+        executionEpoch,
+        status,
+        evidenceRefs,
+        ...(resultRef ? { resultRef } : {}),
+        ...(failure ? { failure } : {}),
+      },
+      settlement,
+    );
   }
 
   private async blockStale(
@@ -414,7 +456,10 @@ export class HandRuntime {
         input.route.effectiveScope,
       ),
     };
-    await this.emitStatus(input, 'operation.blocked', 'blocked', blocked.evidenceRefs);
+    await this.emitStatus(input, 'operation.blocked', 'blocked', blocked.evidenceRefs, undefined, undefined, {
+      observation,
+      blocked,
+    });
     return { status: 'blocked', observation, blocked };
   }
 

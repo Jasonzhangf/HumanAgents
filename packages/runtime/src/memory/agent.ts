@@ -180,19 +180,31 @@ export interface MemoryAnalysisResult {
   readonly promptSnapshot: AuditPromptSnapshot;
 }
 
+/** A driver handed off with a resource this memory analysis instance must release. */
+export interface PreparedMemoryDriver {
+  readonly driver: AgentDriver;
+  readonly release: () => Promise<void>;
+}
+
+export interface MemoryDriverRequest {
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly assignmentId: string;
+  /** Admitted analysis scope; an external provider driver binds its own identity from it. */
+  readonly scope: CanonicalMemoryScope;
+}
+
+export type MemoryDriverFactory = (
+  request: MemoryDriverRequest,
+) => AgentDriver | PreparedMemoryDriver | Promise<AgentDriver | PreparedMemoryDriver>;
+
 export interface MemoryAgentOptions {
   readonly projectKey: string;
   readonly auditPromptRef: string;
   readonly autoUpdate: boolean;
   readonly driver?: AgentDriver;
-  readonly driverFor?: (input: {
-    readonly taskId: TaskId;
-    readonly operationId: OperationId;
-    readonly executionEpoch: number;
-    readonly assignmentId: string;
-    /** Admitted analysis scope; an external provider driver binds its own identity from it. */
-    readonly scope: CanonicalMemoryScope;
-  }) => AgentDriver;
+  readonly driverFor?: MemoryDriverFactory;
   readonly sessions: MemorySessionEvidenceSourcePort;
   readonly projectSources: MemoryProjectSourcePort;
   readonly auditPrompts: MemoryAuditPromptSourcePort;
@@ -832,6 +844,25 @@ async function observeCuration(driver: AgentDriver, request: AgentInput): Promis
   return parseProviderCuration(observed);
 }
 
+function isPreparedMemoryDriver(value: AgentDriver | PreparedMemoryDriver): value is PreparedMemoryDriver {
+  return !('start' in value);
+}
+
+async function resolveMemoryDriver(
+  options: Pick<MemoryAgentOptions, 'driver' | 'driverFor'>,
+  request: MemoryDriverRequest,
+): Promise<{ readonly driver: AgentDriver; readonly release?: () => Promise<void> }> {
+  if (options.driver !== undefined) return { driver: options.driver };
+  if (options.driverFor !== undefined) {
+    const value = await options.driverFor(request);
+    if (value === undefined) throw new ContractError('memory analysis provider is not configured');
+    return isPreparedMemoryDriver(value)
+      ? { driver: value.driver, release: value.release }
+      : { driver: value };
+  }
+  throw new ContractError('memory analysis provider is not configured');
+}
+
 async function providerOutcome(
   options: Pick<MemoryAgentOptions, 'driver' | 'driverFor'>,
   input: MemoryAnalysisRequest,
@@ -841,56 +872,87 @@ async function providerOutcome(
 ): Promise<MemoryCurationResult> {
   const request = memoryAnalysisInput(input, prompt, promptContent, inspectedSources);
   if (input.scope.namespace !== 'project') throw new ContractError('memory analysis provider requires a project scope');
-  const driver = options.driver ?? options.driverFor?.({
+  const { driver, release } = await resolveMemoryDriver(options, {
     taskId: request.taskId,
     operationId: input.operationId,
     executionEpoch: request.executionEpoch,
     assignmentId: request.assignmentId,
     scope: { ...input.scope },
   });
-  if (driver === undefined) throw new ContractError('memory analysis provider is not configured');
-  const handle = await driver.start({
-    runtimeId: request.assignmentId,
-    taskId: request.taskId,
-    executionEpoch: request.executionEpoch,
-    assignmentId: request.assignmentId,
-    organId: input.scope.organId,
-    operationId: input.operationId,
-  });
-  if (handle.runtimeId !== request.assignmentId || handle.executionEpoch !== request.executionEpoch) {
-    throw new ContractError('memory provider returned a handle for another runtime or epoch');
-  }
-  let firstError: unknown;
+  const cleanupErrors: unknown[] = [];
+  let started = false;
+  let analysisError: unknown;
+  let curation: MemoryCurationResult | undefined;
   try {
-    const output = await driver.submit(request);
-    if (
-      output.taskId.value !== request.taskId.value
-      || output.executionEpoch !== request.executionEpoch
-      || output.assignmentId !== request.assignmentId
-    ) {
-      throw new ContractError('memory provider output is not bound to the admitted operation');
-    }
-    const payload = output.payload as Record<string, unknown>;
-    if (payload.curation !== undefined) {
-      return providerCuration(payload.curation, input, prompt, request);
-    }
-    const observed = await observeCuration(driver, request);
-    return providerCuration(observed, input, prompt, request);
-  } catch (error) {
-    firstError = error;
-    throw error;
-  } finally {
+    // Start, handle validation, submit, observation and curation share one
+    // cleanup boundary: a returned start is settled, and the prepared instance
+    // is released even when start or later analysis fails.
     try {
-      const closure = await driver.settle({ runtimeId: request.assignmentId, executionEpoch: request.executionEpoch });
-      if (closure.state !== 'succeeded') {
-        const settleError = new ContractError(`memory provider settle did not succeed: ${closure.state}`);
-        if (firstError === undefined) throw settleError;
+      const handle = await driver.start({
+        runtimeId: request.assignmentId,
+        taskId: request.taskId,
+        executionEpoch: request.executionEpoch,
+        assignmentId: request.assignmentId,
+        organId: input.scope.organId,
+        operationId: input.operationId,
+      });
+      started = true;
+      if (handle.runtimeId !== request.assignmentId || handle.executionEpoch !== request.executionEpoch) {
+        throw new ContractError('memory provider returned a handle for another runtime or epoch');
       }
-    } catch (settleError) {
-      if (firstError === undefined) throw settleError;
+      const output = await driver.submit(request);
+      if (
+        output.taskId.value !== request.taskId.value
+        || output.executionEpoch !== request.executionEpoch
+        || output.assignmentId !== request.assignmentId
+      ) {
+        throw new ContractError('memory provider output is not bound to the admitted operation');
+      }
+      const payload = output.payload as Record<string, unknown>;
+      const reported = payload.curation !== undefined ? payload.curation : await observeCuration(driver, request);
+      curation = providerCuration(reported, input, prompt, request);
+    } finally {
+      // Settlement follows a successful start and also follows a failed
+      // analysis; a settlement failure is reported, never silently dropped.
+      if (started) {
+        try {
+          const closure = await driver.settle({ runtimeId: request.assignmentId, executionEpoch: request.executionEpoch });
+          if (closure.state !== 'succeeded') {
+            throw new ContractError(`memory provider settle did not succeed: ${closure.state}`);
+          }
+        } catch (settleError) {
+          cleanupErrors.push(settleError);
+        }
+      }
+    }
+  } catch (error) {
+    analysisError = error;
+  } finally {
+    if (release !== undefined) {
+      try {
+        await release();
+      } catch (releaseError) {
+        // This analysis owns the prepared instance, so a release failure stays
+        // attached to the analysis error instead of replacing or hiding it.
+        cleanupErrors.push(releaseError);
+      }
     }
   }
+  // The analysis error leads; the cleanup errors stay attached so a settle or
+  // release failure can never turn a failed analysis into a reported success.
+  if (analysisError !== undefined) {
+    throw cleanupErrors.length === 0
+      ? analysisError
+      : new AggregateError([analysisError, ...cleanupErrors], 'memory analysis failed and provider cleanup also failed');
+  }
+  if (cleanupErrors.length > 0) {
+    throw cleanupErrors.length === 1
+      ? cleanupErrors[0]
+      : new AggregateError(cleanupErrors, 'memory provider cleanup failed');
+  }
+  return curation!;
 }
+
 
 function followUpAnalysisRequest(input: MemoryFollowUpRequest, prior: MemoryAnalysisRequest): MemoryAnalysisRequest {
   return {

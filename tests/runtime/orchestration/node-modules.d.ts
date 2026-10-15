@@ -11,6 +11,26 @@ declare module 'node:assert/strict' {
   const assert: Assert;
   export = assert;
 }
+
+declare module 'node:fs/promises' {
+  function mkdir(path: string, options: { recursive: true }): Promise<string | undefined>;
+  function mkdtemp(prefix: string): Promise<string>;
+  function readFile(path: string, encoding: 'utf8'): Promise<string>;
+  function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+}
+
+declare module 'node:os' {
+  function homedir(): string;
+}
+
+declare module 'node:path' {
+  function join(...paths: string[]): string;
+}
+
+declare module 'node:process' {
+  const process: { env: Record<string, string | undefined> };
+  export default process;
+}
 declare module 'node:test' {
   const test: (name: string, fn: () => void | Promise<void>) => void;
   export default test;

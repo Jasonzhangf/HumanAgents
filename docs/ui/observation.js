@@ -4,13 +4,21 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
-  mountSemanticObservationPanel,
+  openTechnicalDetail,
   renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskIdFromQuery,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
+import { unavailableModeFailure } from './task-display.js'
+import {
+  agentActivityQuery,
+  agentActivitySelectionFromQuery,
+  agentSelectionReadFailure,
+  renderAgentActivity,
+  renderAgentActivityDetail,
+} from './agent-activity.js'
 
 // Node order, display row and agent ownership are read from the HTTP projection only. The page keeps
 // no second node-order table and no keyword-based attribution: `projection.nodes[].row` comes from
@@ -29,25 +37,59 @@ const EDGE_GAP = 1.5
 const EDGE_STUB = 24
 
 const taskId = taskIdFromQuery()
-// The shared semantic observation panel is mounted once and re-attached into
-// `main` after every pipeline re-render, so its live subscription survives the
-// node-flow reloads instead of being torn down and re-created each time.
-const semanticHost = element('section', undefined, 'semantic-observation-section')
-semanticHost.setAttribute('aria-label', '语义观测')
-let semanticPanel
+// The agent-instance selection is URL view state decoded through the shared A3
+// helpers with the canonical task id. A bad explicit deep link stays visible
+// instead of being dropped to the task catalog.
+const canonicalTaskId = { scope: 'task', value: taskId }
+const initialAgentSelection = agentActivitySelectionFromQuery(new URLSearchParams(location.search), canonicalTaskId)
+let agentSelectionFailure = initialAgentSelection.ok ? undefined : initialAgentSelection.failure
+let agentQuery = initialAgentSelection.ok ? requestAgentQuery(initialAgentSelection.value) : undefined
+// A late response from a departed selection or scope must not publish over the
+// current one; the serial is the page's existing-style invalidation, not a new layer.
+let loadSerial = 0
+let agentViewDispose = null
+let agentDetailDispose = null
+let agentDetailLayer = null
+let agentReadFailure
+let agentReadPending = false
+// The projection currently rendered, so a drill-down reads the same supplied field.
+let lastProjection
 
-const { main, status } = makePageShell(
+function requestAgentQuery(selection) {
+  if (!selection) return undefined
+  const encoded = agentActivityQuery(new URLSearchParams(), selection)
+  if (!encoded.ok) {
+    agentSelectionFailure = encoded.failure
+    return undefined
+  }
+  return encoded.value.size ? encoded.value : undefined
+}
+
+// Observation renders one read-only node-flow layer. Only the `current`
+// reading layer has a real renderer here, so the mode chooser offers just that
+// one and every other layer stays an explicit unavailable receipt.
+const OBSERVATION_DISPLAY_SURFACE = {
+  supportedModes: ['current'],
+  unavailableReasons: {
+    semantic: '任务观测只呈现只读节点流转。',
+    actions: '任务观测只呈现只读节点流转。',
+    raw: '任务观测只呈现只读节点流转。',
+  },
+  applyMode: applyObservationDisplayMode,
+}
+
+const {
+  main,
+  status,
+  initializeDisplayPreference,
+  disposeDisplayPreference,
+} = makePageShell(
   'Task List',
   'Pipeline Observation',
   '任务观测',
   '从输入到任务输出的只读节点流转；节点详情只呈现工具调用、工具返回和 agent 写入的结论。',
+  { displaySurface: OBSERVATION_DISPLAY_SURFACE },
 )
-main.append(semanticHost)
-
-function ensureSemanticPanel() {
-  if (semanticPanel) return
-  semanticPanel = mountSemanticObservationPanel(semanticHost, { taskId })
-}
 
 let drawer
 let drawerCard
@@ -63,10 +105,6 @@ let currentScopeRef
 // projection facts, not page-owned tables: the page only groups and displays them.
 let currentFrames = []
 let currentHandoffs = []
-// Raw lifecycle state per node id of the projection the page is currently rendering. The typed
-// top-level `nodes[]` carries only the human `stateDisplay`; the same projection's scope node view
-// (`scope.nodes[]`) carries the machine `state` that drives the chip tone and the edge tone.
-let currentNodeStates = new Map()
 let runtimeMode = ''
 
 // Only `ownerAgentRole` (typed contract field) attributes a node. Anything else, including an
@@ -97,12 +135,23 @@ function pipelineRow(node) {
   return typeof node.row === 'number' ? node.row : Number.MAX_SAFE_INTEGER
 }
 
-// Node state is a typed projection fact. The top-level pipeline node projection carries the
-// `stateDisplay` label the chip shows; the raw `state` comes from the projection's scope node view
-// for the same node id. A node the projection does not classify keeps the explicit `unknown`
-// negative instead of defaulting to a settled tone.
+// Raw LifecycleState for the scope the page is currently rendering. The layout
+// `projection.nodes` entries carry only `stateDisplay`, so the typed state comes
+// from this same response's `projection.scope.nodes` by exact nodeId. Rebuilt on
+// every render, so cards and edges share one lookup and never a stale scope.
+let currentScopeStates = new Map()
+
+function scopeStatesOf(projection) {
+  const nodes = Array.isArray(projection?.scope?.nodes) ? projection.scope.nodes : []
+  return new Map(
+    nodes
+      .filter((node) => typeof node?.nodeId === 'string' && typeof node.state === 'string' && node.state.length > 0)
+      .map((node) => [node.nodeId, node.state]),
+  )
+}
+
 function nodeState(node) {
-  const state = currentNodeStates.get(node.nodeId)
+  const state = currentScopeStates.get(node.nodeId)
   return typeof state === 'string' && state.length > 0 ? state : 'unknown'
 }
 
@@ -575,12 +624,12 @@ function renderNodeDrawer(node, handoffs, detail) {
   close.focus()
 }
 
-function renderReferences(_node, _handoffs, detail) {
+function renderReferences(node) {
   const facts = element('dl', undefined, 'drawer-facts')
   // Refs come from the typed drawer detail (`projection.selectedNode`), never from the node card.
-  const inputs = unresolvedList((detail?.inputs || []).map((entry) => entry.ref), '无输入引用')
-  const outputs = unresolvedList((detail?.outputs || []).map((entry) => entry.ref), '无输出引用')
-  const evidence = unresolvedList((detail?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
+  const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
+  const outputs = unresolvedList((node?.outputs || []).map((entry) => entry.ref), '无输出引用')
+  const evidence = unresolvedList((node?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
   for (const [label, group] of [['输入引用', inputs], ['输出引用', outputs], ['Evidence', evidence]]) {
     const cell = element('div')
     const dd = element('dd', group.items.join(', '))
@@ -591,16 +640,161 @@ function renderReferences(_node, _handoffs, detail) {
   return facts
 }
 
+/**
+ * The same shared A3 renderer and callbacks as the task dashboard. Role lanes keep
+ * their projection-owned layout above; this surface adds instance entries only from
+ * a supplied read, so absent producer data invents nothing and a failed read stays
+ * an explicit alert.
+ */
+function renderAgentActivitySection(projection) {
+  if (agentSelectionFailure) {
+    const section = element('section', undefined, 'section agent-activity-section')
+    section.dataset.agentActivity = 'selection-failed'
+    section.append(element('h2', '执行实例 / 处理经过'))
+    renderPageError(section, agentSelectionFailure, '重新选择完整的运行实例或返回任务实例列表')
+    return section
+  }
+  if (agentReadPending) {
+    const section = element('section', undefined, 'section agent-activity-section')
+    section.dataset.agentActivity = 'pending'
+    section.append(
+      element('h2', '执行实例 / 处理经过'),
+      element('p', '正在读取所选运行实例…', 'muted'),
+    )
+    return section
+  }
+  const read = projection?.agentActivity
+  const readFailure = agentReadFailure || agentSelectionReadFailure(agentQuery, read)
+  if (!read && !readFailure) return null
+  const section = element('section', undefined, 'section agent-activity-section')
+  if (readFailure) {
+    section.dataset.agentActivity = 'failed'
+    section.append(element('h2', '执行实例 / 处理经过'))
+    renderPageError(section, readFailure, '重试所选实例读取，或返回任务实例列表')
+    return section
+  }
+  section.dataset.agentActivity = read.ok ? (read.value?.mode || 'read') : 'failed'
+  section.append(element('h2', '执行实例 / 处理经过'))
+  const view = renderAgentActivity(read, {
+    element,
+    onSelect: (selection) => void selectAgentInstance(selection),
+    ...(read.ok && read.value?.mode === 'selected' ? { onOpenDetail: openAgentDetail } : {}),
+  })
+  agentViewDispose = view.dispose
+  section.append(view.element)
+  return section
+}
+
+// Selecting an instance is URL view state plus a re-read of the same observation
+// scope. It writes no control state and opens no second scope.
+async function selectAgentInstance(selection) {
+  const full = agentActivityQuery(new URLSearchParams(location.search), selection)
+  const request = agentActivityQuery(new URLSearchParams(), selection)
+  if (!full.ok || !request.ok) {
+    agentSelectionFailure = full.failure || request.failure
+    await load(currentScopeRef)
+    return
+  }
+  agentSelectionFailure = undefined
+  agentQuery = request.value.size ? request.value : undefined
+  closeAgentDetail()
+  agentReadPending = true
+  agentReadFailure = undefined
+  window.history.replaceState(null, '', `${location.pathname}?${full.value}${location.hash}`)
+  if (lastProjection) renderObservation(lastProjection)
+  await load(currentScopeRef)
+}
+
+function referenceRows(payload) {
+  const selection = payload.selection || {}
+  const rows = [
+    ['实例类型', selection.instance?.kind === 'native-execution' ? '原生执行' : '运行实例'],
+    ['assignmentId', selection.assignmentId],
+    ['attempt', selection.attempt],
+  ]
+  if (payload.kind === 'node') rows.push(['nodeId', payload.nodeId])
+  if (payload.kind === 'commit') rows.push(
+    ['commitId', payload.commitRef?.commitId],
+    ['journalSeq', payload.commitRef?.journalSeq],
+    ['recordDigest', payload.commitRef?.recordDigest],
+  )
+  if (payload.kind === 'evidence') rows.push(
+    ['evidenceId', payload.evidenceRef?.evidenceId?.value],
+    ['kind', payload.evidenceRef?.kind],
+    ['source', payload.evidenceRef?.source],
+    ['locator', payload.evidenceRef?.locator],
+    ['digest', payload.evidenceRef?.digest],
+  )
+  return rows.filter(([, value]) => value !== undefined && value !== null && value !== '')
+}
+
+// No exact task-scoped deep link exists for node/commit/evidence yet, so the layer
+// shows the exact typed reference and says so instead of fabricating a URL.
+function agentReferenceDetail(payload) {
+  const wrap = element('div', undefined, 'agent-activity-reference')
+  const back = element('button', '返回实例详情', 'button button--quiet')
+  back.type = 'button'
+  back.addEventListener('click', () => openAgentDetail({ kind: 'activity', selection: payload.selection }))
+  const list = element('dl', undefined, 'draft-receipt')
+  for (const [label, value] of referenceRows(payload)) {
+    const row = element('div')
+    const detail = element('dd', String(value))
+    detail.setAttribute('data-detail-label', label)
+    row.append(element('dt', label), detail)
+    list.append(row)
+  }
+  wrap.append(back, list, element('p', '没有可用的任务内深链；上面是该引用的精确内容。', 'muted'))
+  return wrap
+}
+
+function closeAgentDetail() {
+  if (agentDetailDispose) {
+    agentDetailDispose()
+    agentDetailDispose = null
+  }
+  if (agentDetailLayer?.open) agentDetailLayer.close()
+  agentDetailLayer = null
+}
+
+// The A3 module builds content only; the shared shell layer keeps the one overlay,
+// focus, close and the single-open-layer rule.
+function openAgentDetail(payload) {
+  if (!payload || !payload.selection) return
+  closeAgentDetail()
+  if (payload.kind === 'activity') {
+    const read = lastProjection?.agentActivity
+    if (!read) return
+    const detail = renderAgentActivityDetail(read, {
+      element,
+      onSelect: (selection) => void selectAgentInstance(selection),
+      onOpenDetail: openAgentDetail,
+    })
+    agentDetailDispose = detail.dispose
+    agentDetailLayer = openTechnicalDetail({
+      title: '运行实例详情',
+      content: detail.element,
+      onClose: closeAgentDetail,
+    })
+    return
+  }
+  agentDetailLayer = openTechnicalDetail({
+    title: '关联引用',
+    content: agentReferenceDetail(payload),
+    onClose: closeAgentDetail,
+  })
+}
+
 function renderObservation(projection) {
+  if (agentViewDispose) {
+    agentViewDispose()
+    agentViewDispose = null
+  }
+  lastProjection = projection
   clearNode(main)
 
+  currentScopeStates = scopeStatesOf(projection)
   currentFrames = laneDefinitions(Array.isArray(projection.agentFrames) ? projection.agentFrames : [])
   currentHandoffs = Array.isArray(projection.handoffs) ? projection.handoffs : []
-  currentNodeStates = new Map(
-    (Array.isArray(projection.scope?.nodes) ? projection.scope.nodes : [])
-      .filter((node) => typeof node?.state === 'string' && node.state.length > 0)
-      .map((node) => [node.nodeId, node.state]),
-  )
 
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
@@ -620,8 +814,6 @@ function renderObservation(projection) {
   meta.append(element('span', projection.data?.label || '未投影状态', 'state-chip'))
   heading.append(copy, meta)
   main.append(heading)
-  ensureSemanticPanel()
-  main.append(semanticHost)
 
   const breadcrumbs = element('nav', undefined, 'breadcrumbs')
   breadcrumbs.setAttribute('aria-label', '当前观测路径')
@@ -638,6 +830,9 @@ function renderObservation(projection) {
   main.append(breadcrumbs)
 
   main.append(renderAgentChain(projection.nodes, currentFrames))
+
+  const agentSection = renderAgentActivitySection(projection)
+  if (agentSection) main.append(agentSection)
 
   const flowSection = element('section', undefined, 'flow-section')
   const flowHead = element('header', undefined, 'section-head')
@@ -697,20 +892,68 @@ function renderLegend() {
 }
 
 async function load(scopeRef) {
+  const serial = ++loadSerial
   try {
-    const projection = await api.observation(taskId, scopeRef, selectedNodeId)
+    const projection = await api.observation(taskId, scopeRef, selectedNodeId, agentQuery)
+    if (serial !== loadSerial) return
     currentScopeRef = scopeRef
+    agentReadPending = false
+    agentReadFailure = undefined
     renderObservation(projection)
   } catch (error) {
+    if (serial !== loadSerial) return
+    agentReadPending = false
+    if (agentQuery) {
+      agentReadFailure = error
+      if (lastProjection) renderObservation(lastProjection)
+    }
     renderPageError(status, error)
   }
 }
 
-ensureSemanticPanel()
+async function applyObservationDisplayMode({ mode }) {
+  if (mode !== 'current') {
+    return { ok: false, failure: unavailableModeFailure(mode, '任务观测只呈现只读节点流转。') }
+  }
+  const serial = ++loadSerial
+  try {
+    const projection = await api.observation(taskId, currentScopeRef, selectedNodeId, agentQuery)
+    if (serial !== loadSerial) return { ok: false, superseded: true, failure: { code: 'observation.superseded', ownerId: 'humanagent.ui', message: '更晚的读取已经接管这个页面。', nextAction: '使用当前显示的观测结果' } }
+    agentReadPending = false
+    agentReadFailure = undefined
+    renderObservation(projection)
+    return { ok: true, mode: 'current' }
+  } catch (error) {
+    if (serial !== loadSerial) return { ok: false, superseded: true, failure: { code: 'observation.superseded', ownerId: 'humanagent.ui', message: '更晚的读取已经接管这个页面。', nextAction: '使用当前显示的观测结果' } }
+    agentReadPending = false
+    if (agentQuery) {
+      agentReadFailure = error
+      if (lastProjection) renderObservation(lastProjection)
+    }
+    renderPageError(status, error)
+    return {
+      ok: false,
+      failure: {
+        code: error?.code || 'observation.read-failed',
+        ownerId: error?.ownerId || 'humanagent.ui',
+        message: error?.message || '任务观测读取失败。',
+        nextAction: error?.nextAction || '重新读取这个任务观测。',
+      },
+    }
+  }
+}
+
 buildDrawer()
 void (async () => {
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
   runtimeMode = runtimeStatus?.mode || ''
   renderRuntimeStatus(status, runtimeStatus, error)
   await load()
+  // The controller starts after this page's first read settled, so applying
+  // the resolved default cannot outrun the node-flow it needs to render.
+  await initializeDisplayPreference()
 })()
+
+window.addEventListener('pagehide', () => {
+  disposeDisplayPreference()
+})

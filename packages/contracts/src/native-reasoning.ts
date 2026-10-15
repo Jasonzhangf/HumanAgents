@@ -335,7 +335,7 @@ function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function validateExpectedTurnIdentity(value: unknown): asserts value is AdmittedTurnIdentity {
+export function validateAdmittedTurnIdentity(value: unknown): asserts value is AdmittedTurnIdentity {
   const input = record(value, 'expected admitted turn identity');
   exactKeys(input,
     ['turnId', 'workAssignmentRef', 'taskRef', 'scopeRef', 'cycleRef', 'inputRevision', 'directiveRevision', 'executionEpoch', 'runtimeBindingRef', 'permissionRevision'],
@@ -389,7 +389,7 @@ export function validateAdmittedTurn(value: unknown, expectedIdentity?: Admitted
   nonEmpty(input.currentTurnRef, 'currentTurnRef');
   nonEmpty(input.recoveryStateRef, 'recoveryStateRef');
   if (expectedIdentity !== undefined) {
-    validateExpectedTurnIdentity(expectedIdentity);
+    validateAdmittedTurnIdentity(expectedIdentity);
     validateExpectedIdentityMatches(value as AdmittedTurn, expectedIdentity);
   }
 }

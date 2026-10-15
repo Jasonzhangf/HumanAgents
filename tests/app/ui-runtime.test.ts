@@ -3070,25 +3070,40 @@ test('orchestrated confirmed requirement dispatches implicit executor agents thr
             capabilities: ['code.search', 'file.checkpoint', 'provider.execution'],
           }],
         });
+        const reviewOnce = async (input: Parameters<ReviewAgentPort['review']>[0]) => ({
+          resultId: `review-${input.reviewAssignment.assignmentId}`,
+          assignmentId: input.reviewAssignment.assignmentId,
+          taskId: input.reviewAssignment.taskId,
+          workerAgentId: input.reviewAssignment.workerAgentId,
+          reviewKind: input.reviewAssignment.reviewKind,
+          attempt: input.reviewAssignment.attempt,
+          executionEpoch: input.reviewAssignment.executionEpoch,
+          inputRevision: input.reviewAssignment.inputRevision,
+          acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+          subjectRefs: [...input.reviewAssignment.subjectRefs],
+          subjectDigests: [...input.reviewAssignment.subjectDigests],
+          status: 'passed' as const,
+          findings: [],
+          evidenceRefs: [evidence('implicit-review', input.scope)],
+        });
         const reviewAgent: ReviewAgentPort = {
-          async review(input) {
-            const reviewResult = {
-              resultId: `review-${input.reviewAssignment.assignmentId}`,
-              assignmentId: input.reviewAssignment.assignmentId,
-              taskId: input.reviewAssignment.taskId,
-              workerAgentId: input.reviewAssignment.workerAgentId,
-              reviewKind: input.reviewAssignment.reviewKind,
-              attempt: input.reviewAssignment.attempt,
-              executionEpoch: input.reviewAssignment.executionEpoch,
-              inputRevision: input.reviewAssignment.inputRevision,
-              acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
-              subjectRefs: [...input.reviewAssignment.subjectRefs],
-              subjectDigests: [...input.reviewAssignment.subjectDigests],
-              status: 'passed' as const,
-              findings: [],
-              evidenceRefs: [evidence('implicit-review', input.scope)],
+          roleId: 'ui-runtime-test-review',
+          createInstance(create) {
+            return {
+              incarnation: create.incarnation,
+              async review(input) {
+                const result = await reviewOnce(input);
+                return {
+                  result,
+                  output: { text: `ui review ${input.reviewAssignment.assignmentId}`, artifactRef: null, artifactDigest: null },
+                  completedAt: new Date().toISOString(),
+                };
+              },
+              async dispose() {},
             };
-            return reviewResult;
+          },
+          async review(input) {
+            return reviewOnce(input);
           },
         };
         const mergeCoordinator: MergeCoordinatorPort = {
@@ -8355,25 +8370,43 @@ test('orchestrated review is handed the produced file bodies, not only the execu
             capabilities: ['code.search', 'file.checkpoint', 'provider.execution'],
           }],
         });
+        const reviewOnce = async (input: Parameters<ReviewAgentPort['review']>[0]) => {
+          for (const subject of input.reviewMaterial?.subjects ?? []) subjectBodies.push(subject.body);
+          return {
+            resultId: `review-${input.reviewAssignment.assignmentId}`,
+            assignmentId: input.reviewAssignment.assignmentId,
+            taskId: input.reviewAssignment.taskId,
+            workerAgentId: input.reviewAssignment.workerAgentId,
+            reviewKind: input.reviewAssignment.reviewKind,
+            attempt: input.reviewAssignment.attempt,
+            executionEpoch: input.reviewAssignment.executionEpoch,
+            inputRevision: input.reviewAssignment.inputRevision,
+            acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+            subjectRefs: [...input.reviewAssignment.subjectRefs],
+            subjectDigests: [...input.reviewAssignment.subjectDigests],
+            status: 'passed' as const,
+            findings: [],
+            evidenceRefs: [evidence('produced-artifacts-review', input.scope)],
+          };
+        };
         const reviewAgent: ReviewAgentPort = {
-          async review(input) {
-            for (const subject of input.reviewMaterial?.subjects ?? []) subjectBodies.push(subject.body);
+          roleId: 'ui-runtime-test-review',
+          createInstance(create) {
             return {
-              resultId: `review-${input.reviewAssignment.assignmentId}`,
-              assignmentId: input.reviewAssignment.assignmentId,
-              taskId: input.reviewAssignment.taskId,
-              workerAgentId: input.reviewAssignment.workerAgentId,
-              reviewKind: input.reviewAssignment.reviewKind,
-              attempt: input.reviewAssignment.attempt,
-              executionEpoch: input.reviewAssignment.executionEpoch,
-              inputRevision: input.reviewAssignment.inputRevision,
-              acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
-              subjectRefs: [...input.reviewAssignment.subjectRefs],
-              subjectDigests: [...input.reviewAssignment.subjectDigests],
-              status: 'passed' as const,
-              findings: [],
-              evidenceRefs: [evidence('produced-artifacts-review', input.scope)],
+              incarnation: create.incarnation,
+              async review(input) {
+                const result = await reviewOnce(input);
+                return {
+                  result,
+                  output: { text: `ui review ${input.reviewAssignment.assignmentId}`, artifactRef: null, artifactDigest: null },
+                  completedAt: new Date().toISOString(),
+                };
+              },
+              async dispose() {},
             };
+          },
+          async review(input) {
+            return reviewOnce(input);
           },
         };
         const mergeCoordinator: MergeCoordinatorPort = {

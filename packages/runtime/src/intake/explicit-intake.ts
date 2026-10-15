@@ -62,12 +62,14 @@ export type ExplicitInteractionState =
   | 'awaiting-confirmation'
   | 'confirmed'
   | 'dispatched'
+  | 'answered'
   | 'status-only'
   | 'rejected';
 
 const TERMINAL_INTERACTION_STATES: ReadonlySet<ExplicitInteractionState> = new Set([
   'confirmed',
   'dispatched',
+  'answered',
   'status-only',
   'rejected',
 ]);
@@ -463,6 +465,23 @@ export class ExplicitIntake {
     };
   }
 
+  /**
+   * Terminal state for a general question the explicit brain answered directly.
+   * The answer ends the interaction without creating a requirement draft,
+   * revision, envelope, task or subscription. It is reachable only from
+   * `matching`, so a status query (`status-checking`) and a requirement draft
+   * (`awaiting-intent`/`awaiting-confirmation`) keep their own paths.
+   */
+  async completeAnswer(input: InteractionId, answer: string): Promise<void> {
+    const interaction = this.requireState(input, ['matching'], 'complete answer');
+    if (!answer || !answer.trim()) {
+      throw this.invalidState('complete answer', 'answer is required', 'provide-answer');
+    }
+    this.transition(interaction, 'answered', 'explicit-intake', 'present-answer', undefined, (candidate) => {
+      candidate.reply = answer;
+    });
+  }
+
   async requestClarification(input: InteractionId, question: string): Promise<void> {
     const interaction = this.requireState(input, ['matching'], 'request clarification');
     if (!question || !question.trim()) {
@@ -522,7 +541,7 @@ export class ExplicitIntake {
 
   async reject(input: InteractionId, reason: string): Promise<void> {
     const interaction = this.requireInteraction(input);
-    if (interaction.state === 'confirmed' || interaction.state === 'dispatched' || interaction.state === 'status-only' || interaction.state === 'rejected') {
+    if (TERMINAL_INTERACTION_STATES.has(interaction.state)) {
       throw this.invalidState('reject requirement', `cannot reject from ${interaction.state}`, 'inspect-terminal-interaction');
     }
     if (!reason || !reason.trim()) {

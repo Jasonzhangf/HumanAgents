@@ -171,3 +171,12 @@ function isCancellableRoute(route: DeterministicInspectRoute | CodeSearchRoute |
 export function createHandOperationRuntime(input: ToolExecutionGatewayAssemblyInput): HandOperationRuntime {
   return new HandOperationRuntime(createToolExecutionGateway(input));
 }
+
+/** Bounded local IO routes use the same registry and Gateway lifecycle. */
+export function createProviderToolGateway(input: Omit<GatewayOptions, 'registry'> & {
+  readonly registrations: readonly ToolRegistration[];
+}): ToolExecutionGateway {
+  const registry = new ToolRegistry();
+  registry.load(input.registrations);
+  return new ToolExecutionGateway({ ...input, registry });
+}

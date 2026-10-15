@@ -7,6 +7,30 @@
   padding-bottom: 64px;
 }
 
+/* Unified next-layer layout: on desktop the node detail keeps the page visible and expands in a
+   side panel. The narrow-viewport bottom sheet defined above stays the mobile behavior. */
+@media (min-width: 901px) {
+  .node-drawer {
+    inset: 16px 16px 16px auto;
+    width: min(500px, calc(100vw - 32px));
+    max-height: none;
+    border-radius: 10px;
+  }
+
+  .node-drawer::backdrop {
+    background: transparent;
+  }
+
+  .drawer-panes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Reserve the open drawer's column so the primary observation content stays visible. */
+  body:has(.node-drawer[open]) .page {
+    padding-right: calc(516px + env(safe-area-inset-right));
+  }
+}
+
 .page-heading {
   align-items: flex-start;
 }

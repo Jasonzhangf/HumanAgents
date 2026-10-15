@@ -1,19 +1,24 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { canonicalJsonStringify } from '../../contracts/src/explicit-brain.js';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { lstat } from 'node:fs/promises';
 import { dirname, join, resolve, sep, relative } from 'node:path';
 import {
   CODE_SEARCH_CONTRACT_VERSION,
   CODE_SEARCH_SERVICE_ID,
+  fileWriteEffectId,
   id,
   validateCodeSearchReport,
+  type EffectExecutionBinding,
   type EvidenceRef,
-  type OperationEvent,
+  type FileWriteEffect,
   type OperationId,
   type OperationIntent,
   type ProviderToolDefinition,
   type Scope,
+  type Sha256Digest,
+  type ToolRegistration,
   type WebSearchRequest,
   type WebSearchRecency,
   WEB_SEARCH_SERVICE_ID,
@@ -31,8 +36,20 @@ import {
 } from '../../adapters/operations/src/index.js';
 import { CodeSearchService, WebSearchService, type WebSearchProvider } from '../../runtime/src/hand/index.js';
 import type { ProviderToolExecutionPort } from '../../adapters/provider/src/index.js';
-import type { OperationJournalPort } from '../../runtime/src/gateway/index.js';
-import { createHandOperationRuntime } from './tool-execution-gateway.js';
+import type {
+  OperationChildAdmission,
+  OperationControlBinding,
+  OperationPermissionPort,
+  OperationTaskBoundaryPort,
+  OperationExecutorObservation,
+} from '../../runtime/src/gateway/ports.js';
+import type { JournalCommitRef } from '../../contracts/src/i2-history.js';
+import type { ToolExecutionGateway } from '../../runtime/src/gateway/index.js';
+import { OperationCompletionOwner } from '../../runtime/src/gateway/operation-completion.js';
+import type { JsonlOrganJournal } from '../../adapters/jsonl/src/index.js';
+import { JsonlOperationCompletionJournal } from '../../adapters/jsonl/src/operation-completion.js';
+import { createJsonlOperationControlJournal } from './operation-control-journal.js';
+import { createProviderToolGateway } from './tool-execution-gateway.js';
 
 const OWNER = 'humanagent.app.provider-tool-execution';
 
@@ -241,8 +258,26 @@ export interface UiRuntimeToolOutputStore {
   readReport(input: { readonly outputRef: string; readonly outputDigest: string }): Promise<unknown>;
 }
 
-function digest(value: string): string {
+/**
+ * The exact provider-tool report store the admitted executor writes. The UI
+ * readback route binds this same store so a tool result descriptor resolves
+ * against the physical report bytes without a process-local index.
+ */
+export function createProviderToolOutputStore(artifactRoot: string): UiRuntimeToolOutputStore {
+  return new ToolOutputAssets(new ImmutableAssetStore(join(artifactRoot, 'tool-output')));
+}
+
+function digestBytes(value: Uint8Array): Sha256Digest {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function digest(value: string): Sha256Digest {
+  return digestBytes(new TextEncoder().encode(value));
+}
+
+function requireSha256Digest(value: string, label: string): Sha256Digest {
+  if (!/^sha256:[0-9a-f]{64}$/.test(value)) throw new Error(`${label} must be a sha256 digest`);
+  return value as Sha256Digest;
 }
 
 function safeId(value: string): string {
@@ -285,7 +320,7 @@ function taskEvidence(request: ToolExecRequest, label: string): EvidenceRef {
     organId: request.scope.organId,
     taskId: request.execution.taskId,
     cycleId,
-    operationId: request.execution.operationId,
+    operationId: request.scope.operationId ?? id('operation', safeId(`provider-tool-${request.execution.operationId.value}-${request.call.callId}`)),
   }, `${request.call.callId}-${label}`);
 }
 
@@ -494,22 +529,49 @@ class FileReadAssets implements FileReadArtifactStore {
   }
 }
 
-class FileOperationJournal implements OperationJournalPort {
-  constructor(private readonly filePath: string) {}
-
-  async commit(event: OperationEvent): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await appendFile(this.filePath, `${JSON.stringify(event)}\n`, 'utf8');
-  }
-}
-
 type ToolExecRequest = Parameters<ProviderToolExecutionPort['execute']>[0];
 type ToolExecResult = ProviderToolExecutionPort['execute'] extends (input: infer _I) => Promise<infer R> ? R : never;
 
+interface FileWriteCompletionContext {
+  readonly binding: EffectExecutionBinding;
+  readonly inputDigest: Sha256Digest;
+  readonly completion: OperationCompletionOwner;
+  readonly now: () => Date;
+}
+
+/**
+ * A file.write error after its durable intent may have left an effect behind.
+ * The Gateway must reconcile that exact child operation instead of treating it
+ * as a clean pre-effect failure.
+ */
+class FileWriteEffectUncertainError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = 'FileWriteEffectUncertainError';
+    if (cause !== undefined) Object.assign(this, { cause });
+  }
+}
+
+/**
+ * Every advertised tool's existing IO adapter, keyed by tool id. The Gateway
+ * registers these handlers before any effect; each function stays a plain IO
+ * adapter and never becomes a lifecycle owner.
+ */
+interface ProviderToolIo {
+  readonly workspaceRef: string;
+  readonly workspaceRoot: string;
+  readonly artifactRoot: string;
+  readonly functions: WorkspaceCodeSearchFunctions;
+  readonly readRoute: FileReadRoute;
+  readonly codeSearchService: CodeSearchService;
+  readonly webSearchService: WebSearchService | null;
+  readonly toolOutputs: ToolOutputAssets;
+  readonly readAssets: FileReadAssets;
+}
 /** Tool ids this executor owns; surfaced to the provider when it calls a tool
  *  this Harness does not own (for example a backend harness tool such as
  *  `exec_command`) so the model can retry with an owned tool. */
-const REGISTERED_TOOL_IDS: readonly string[] = [
+const ADVERTISED_TOOL_IDS: readonly string[] = [
   RESPONSES_FILE_READ_TOOL.toolId,
   RESPONSES_FILE_LIST_TOOL.toolId,
   RESPONSES_FILE_SEARCH_TOOL.toolId,
@@ -524,12 +586,73 @@ const REGISTERED_TOOL_IDS: readonly string[] = [
   RESPONSES_WEB_SEARCH_TOOL.toolId,
 ];
 
+/** Gateway registrations for the advertised provider tools. Registration is a
+ *  declaration only: the Gateway still owns admission, lifecycle, coverage and
+ *  settlement, and each handler stays an IO adapter. */
+function mutates(toolId: string): boolean {
+  return ['file.write', 'file.edit', 'bash', 'todo_write', 'create_goal', 'update_goal'].includes(toolId);
+}
+
+function providerToolRegistrations(): ToolRegistration[] {
+  return ADVERTISED_TOOL_IDS.map((toolId) => ({
+    toolName: toolId,
+    contractVersion: '1.0.0',
+    supportedKinds: [mutates(toolId) ? 'apply' as const : 'inspect' as const],
+    routeId: `provider-tool-${toolId}`,
+    routeVersion: 'provider-tool.v1',
+    mode: 'gateway' as const,
+    acceptedScopes: [{}],
+    inputContract: `schema://provider-tool/${toolId}.request/v1`,
+    outputContract: `schema://provider-tool/${toolId}.report/v1`,
+    verifier: `verifier://provider-tool/${toolId}/v1`,
+    capabilities: ['io'],
+    retryPolicy: mutates(toolId) ? 'retry://explicit-reconciliation/v1' : 'retry://read-only/v1',
+    owner: OWNER,
+  }));
+}
+
+/** Actual new-task admission provenance. A tool effect can never fabricate
+ *  this: the Organ Journal, the parent Harness epoch and the admitted runtime
+ *  identity come from the real caller. */
+export interface ProviderToolAdmissionInput {
+  /** Same-Organ Journal that already owns this task's durable history. */
+  readonly organJournal: JsonlOrganJournal;
+  /** Caller adapter over TaskGrantPort/projectTaskGrantAuthority for this principal. */
+  readonly currentTaskGrantPort: OperationPermissionPort;
+  readonly principalOwner: string;
+  readonly resourceBoundary: OperationTaskBoundaryPort;
+  readonly bindingFor: (request: ToolExecRequest) => Promise<OperationControlBinding>;
+  /**
+   * Actual explicit child admission seam. It registers the child business fact
+   * with typed Provider request/tool-call provenance and returns the separate
+   * authority, business-registration and coverage receipts the Gateway needs.
+   */
+  readonly admitToolOperation: (input: {
+    readonly binding: OperationControlBinding;
+    readonly intent: OperationIntent;
+    readonly registration: ToolRegistration;
+    readonly providerRequestId: string;
+    readonly toolCallId: string;
+  }) => Promise<{
+    readonly authorityCommitRef: JournalCommitRef;
+    readonly businessRegistrationCommitRef: JournalCommitRef;
+    readonly coverageCommitRef: JournalCommitRef;
+    readonly childAdmission: OperationChildAdmission;
+  }>;
+  readonly now: () => Date;
+}
+
 export function createResponsesFileToolExecutor(input: {
   readonly workspaceRoot: string;
   readonly projectKey: string;
   readonly artifactRoot: string;
   readonly webSearchProviderConfig?: WebSearchProviderBackendConfig;
-}): { readonly executor: ResponsesFileToolExecutor; readonly toolOutputs: UiRuntimeToolOutputStore } {
+  readonly admission?: ProviderToolAdmissionInput;
+}): {
+  readonly executor: ResponsesFileToolExecutor;
+  readonly toolOutputs: UiRuntimeToolOutputStore;
+  readonly operationControl?: ToolExecutionGateway;
+} {
   const workspaceRef = `workspace:${input.projectKey}`;
   const functions = new WorkspaceCodeSearchFunctions({ workspaceRef, workspaceRoot: input.workspaceRoot });
   // One report store owns every provider tool report, so the task-scoped
@@ -543,64 +666,285 @@ export function createResponsesFileToolExecutor(input: {
     ? createAgentReachWebSearchProvider(input.webSearchProviderConfig)
     : undefined;
   const webSearchService = webSearchProvider ? new WebSearchService(webSearchProvider) : null;
-  const hand = createHandOperationRuntime({
-    fileReadRoute: readRoute,
-    permissions: {
-      async readGrant({ intent }) {
-        return { scope: intent.requestedScope, revoked: false, evidenceRefs: [evidence(intent.requestedScope, `${intent.operationId.value}-permission`)] };
+  const toolIo: ProviderToolIo = {
+    workspaceRef,
+    workspaceRoot: input.workspaceRoot,
+    artifactRoot: input.artifactRoot,
+    functions,
+    readRoute,
+    codeSearchService,
+    webSearchService,
+    toolOutputs,
+    readAssets,
+  };
+  const pending = new Map<string, {
+    readonly request: ToolExecRequest;
+    readonly controller: AbortController;
+    result?: ToolExecResult;
+    settled?: Promise<OperationExecutorObservation>;
+  }>();
+  const admission = input.admission;
+  const completion = admission === undefined
+    ? undefined
+    : new OperationCompletionOwner(new JsonlOperationCompletionJournal({ journal: admission.organJournal }));
+  const registrations = providerToolRegistrations();
+  const registrationByTool = new Map(registrations.map((registration) => [registration.toolName, registration]));
+  const gateway = admission ? createProviderToolGateway({
+    registrations,
+    permissions: admission.currentTaskGrantPort,
+    taskBoundaries: admission.resourceBoundary,
+    journal: createJsonlOperationControlJournal({ journal: admission.organJournal }),
+    now: admission.now,
+    executor: {
+      async execute({ intent, lease }) {
+        const call = pending.get(intent.operationId.value);
+        if (!call) throw new Error('provider tool IO request is unavailable; cold control reads never replay an effect');
+        call.settled = (async (): Promise<OperationExecutorObservation> => {
+          try {
+            let completionContext: FileWriteCompletionContext | undefined;
+            if (intent.toolName === RESPONSES_FILE_WRITE_TOOL.toolId) {
+              if (completion === undefined) throw new Error('file.write completion owner is missing');
+              completionContext = fileWriteCompletionContext(call.request, intent, completion, admission.now);
+            }
+            const result = await executeRawTool(
+              { ...call.request, scope: intent.requestedScope, signal: call.controller.signal },
+              toolIo,
+              completionContext,
+            );
+            call.result = result;
+            const descriptor = result.outputRef && result.outputDigest
+              ? { outputRef: result.outputRef, outputDigest: result.outputDigest }
+              : await toolOutputs.writeReport({ outputId: intent.operationId.value, report: JSON.parse(result.output) });
+            const bashResult: unknown = intent.toolName === 'bash' ? JSON.parse(result.output) : undefined;
+            const bashInterrupted = bashResult !== null && typeof bashResult === 'object'
+              && ('timedOut' in bashResult && bashResult.timedOut === true || 'aborted' in bashResult && bashResult.aborted === true);
+            const uncertain = mutates(intent.toolName) && (call.controller.signal.aborted || bashInterrupted);
+            return {
+              executionEpoch: lease.executionEpoch,
+              status: uncertain ? 'reconcile_required' : 'completed',
+              ...descriptor,
+              owner: OWNER,
+              sideEffectState: uncertain ? 'possible' : mutates(intent.toolName) ? 'confirmed' : 'none',
+              evidenceRefs: result.evidenceRefs,
+              ...(uncertain ? { message: 'tool settled after stop; admitted effects require reconciliation' } : {}),
+            };
+          } catch (error) {
+            if (!mutates(intent.toolName)) throw error;
+            if (intent.toolName === RESPONSES_FILE_WRITE_TOOL.toolId
+              && !(error instanceof FileWriteEffectUncertainError)) {
+              throw error;
+            }
+            // A mutation exception does not prove the write/spawn never happened.
+            return {
+              executionEpoch: lease.executionEpoch,
+              status: 'reconcile_required',
+              owner: OWNER,
+              sideEffectState: 'possible',
+              evidenceRefs: [evidence(intent.requestedScope, 'provider-tool-effect-unknown')],
+              message: error instanceof Error ? error.message : 'provider tool mutation failed',
+            };
+          }
+        })();
+        return await call.settled;
       },
     },
-    taskBoundaries: {
-      async readBoundary({ intent }) {
-        return { scope: intent.requestedScope, evidenceRefs: [evidence(intent.requestedScope, `${intent.operationId.value}-boundary`)] };
+    verifier: {
+      async verify({ intent, observation }) {
+        const call = pending.get(intent.operationId.value);
+        return {
+          executionEpoch: observation.executionEpoch,
+          accepted: call?.result !== undefined && call.result.status !== 'failed',
+          decision: call?.result?.status === 'failed' ? 'provider tool reported failure' : 'provider tool IO settled with report',
+          evidenceRefs: observation.evidenceRefs,
+        };
       },
     },
-    journal: new FileOperationJournal(join(input.artifactRoot, 'operation-journal.jsonl')),
-  });
+    stopSettlement: {
+      async settle({ intent, executionEpoch, owner, lease }) {
+        const call = pending.get(intent.operationId.value);
+        call?.controller.abort();
+        const observation = await call?.settled;
+        return {
+          receiptId: `provider-tool-stop-${intent.operationId.value}-${executionEpoch}`,
+          operationId: intent.operationId,
+          taskId: intent.taskId,
+          executionEpoch,
+          owner,
+          ...(lease ? { leaseId: lease.leaseId } : {}),
+          stopped: call !== undefined,
+          sideEffectState: observation?.sideEffectState ?? (mutates(intent.toolName) && lease ? 'possible' : 'none'),
+          evidenceRefs: observation?.evidenceRefs ?? [evidence(intent.requestedScope, 'provider-tool-stop')],
+        };
+      },
+    },
+  }) : undefined;
 
   return {
     executor: {
       async execute(request): Promise<ToolExecResult> {
         if (request.signal.aborted) throw Object.assign(new Error('provider tool was stopped before admission'), { name: 'AbortError' });
-        switch (request.call.toolId) {
-          case RESPONSES_FILE_READ_TOOL.toolId:
-            return await executeFileRead(request, { hand, assets: readAssets, workspaceRef });
-          case RESPONSES_FILE_LIST_TOOL.toolId:
-            return await executeFileList(request, { functions, workspaceRef });
-          case RESPONSES_FILE_SEARCH_TOOL.toolId:
-            return await executeFileSearch(request, { service: codeSearchService, workspaceRef, assets: toolOutputs });
-          case RESPONSES_FILE_WRITE_TOOL.toolId:
-            return await executeFileWrite(request, { workspaceRoot: input.workspaceRoot });
-          case RESPONSES_FILE_EDIT_TOOL.toolId:
-            return await executeFileEdit(request, { workspaceRoot: input.workspaceRoot });
-          case RESPONSES_BASH_TOOL.toolId:
-            return await executeBash(request, { workspaceRoot: input.workspaceRoot });
-          case RESPONSES_TODO_WRITE_TOOL.toolId:
-            return await executeTodoWrite(request, { artifactRoot: input.artifactRoot });
-          case RESPONSES_GET_GOAL_TOOL.toolId:
-            return await executeGetGoal(request, { artifactRoot: input.artifactRoot });
-          case RESPONSES_CREATE_GOAL_TOOL.toolId:
-            return await executeCreateGoal(request, { artifactRoot: input.artifactRoot });
-          case RESPONSES_UPDATE_GOAL_TOOL.toolId:
-            return await executeUpdateGoal(request, { artifactRoot: input.artifactRoot });
-          case RESPONSES_PRESENT_TOOL.toolId:
-            return await executePresent(request, { workspaceRoot: input.workspaceRoot });
-          case RESPONSES_WEB_SEARCH_TOOL.toolId:
-            return await executeWebSearch(request, { service: webSearchService, assets: toolOutputs });
-          default:
-            throw new Error(
-              `provider tool is not registered: ${request.call.toolId}; tools this Harness owns: ${REGISTERED_TOOL_IDS.join(', ')}`,
-            );
+        if (!ADVERTISED_TOOL_IDS.includes(request.call.toolId)) {
+          throw new Error(
+            `provider tool is not registered: ${request.call.toolId}; tools this Harness owns: ${ADVERTISED_TOOL_IDS.join(', ')}`,
+          );
+        }
+        if (!admission || !gateway) throw new Error('provider tool control source is missing: same Journal, current task grant, principal, resource boundary, admission binding and clock are required');
+        if (!admission.principalOwner.trim()) throw new Error('provider tool verified principal is missing');
+        if (typeof request.requestId !== 'string' || request.requestId.trim().length === 0) {
+          throw new Error('provider tool execution requires the actual typed Provider request id');
+        }
+        const registration = registrationByTool.get(request.call.toolId);
+        if (!registration) throw new Error(`provider tool is not registered: ${request.call.toolId}`);
+        const binding = await admission.bindingFor(request);
+        if (binding.agentRuntimeId !== request.execution.runtimeId
+          || binding.harnessExecutionEpoch !== request.execution.executionEpoch
+          || canonicalJsonStringify(binding.parentOperationId) !== canonicalJsonStringify(request.execution.operationId)
+          || canonicalJsonStringify(binding.scope.taskId) !== canonicalJsonStringify(request.execution.taskId)
+          || canonicalJsonStringify(binding.scope.operationId) !== canonicalJsonStringify(request.execution.operationId)
+          || canonicalJsonStringify(binding.scope) !== canonicalJsonStringify(request.scope)) {
+          throw new Error('provider tool admission binding does not match the actual execution');
+        }
+        const control = await gateway.readControl(binding);
+        if (control.state !== 'complete') throw new Error(`provider tool operation control source is unknown: ${control.reason}`);
+        const intent = toolIntent(request, binding);
+        if (pending.has(intent.operationId.value)) throw new Error('provider tool call is already executing');
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        request.signal.addEventListener('abort', abort, { once: true });
+        if (request.signal.aborted) controller.abort();
+        const call = { request, controller };
+        pending.set(intent.operationId.value, call);
+        try {
+          const child = await admission.admitToolOperation({
+            binding,
+            intent,
+            registration,
+            providerRequestId: request.requestId,
+            toolCallId: request.call.callId,
+          });
+          await gateway.submit(intent, binding, child.childAdmission);
+          if (controller.signal.aborted) {
+            await gateway.requestCancel(intent.operationId);
+            await gateway.settleCancellation(intent.operationId);
+            throw Object.assign(new Error('provider tool was stopped before execution'), { name: 'AbortError' });
+          }
+          const result = await gateway.execute(intent.operationId);
+          const output = pending.get(intent.operationId.value)?.result;
+          if (result.status === 'failed' && output?.status === 'failed') return output;
+          if (result.status !== 'succeeded' || !output) throw new Error(result.failure?.message ?? result.reconcile?.reason ?? `provider tool ended in ${result.status}`);
+          return output;
+        } finally {
+          request.signal.removeEventListener('abort', abort);
+          pending.delete(intent.operationId.value);
         }
       },
     },
     toolOutputs,
+    ...(gateway ? { operationControl: gateway } : {}),
   };
+}
+
+function toolIntent(request: ToolExecRequest, binding: OperationControlBinding): OperationIntent {
+  const cycleId = request.scope.cycleId;
+  if (!cycleId) throw new Error('provider tool current cycle scope is missing');
+  const operationId = id('operation', safeId(`provider-tool-${request.execution.operationId.value}-${request.call.callId}`));
+  return {
+    operationId,
+    taskId: request.execution.taskId,
+    cycleId,
+    requestedBy: OWNER,
+    intentRevision: '1',
+    kind: mutates(request.call.toolId) ? 'apply' : 'inspect',
+    toolName: request.call.toolId,
+    inputRef: `provider-tool-call:${encodeURIComponent(request.call.callId)}`,
+    inputDigest: digest(JSON.stringify(request.call.arguments)),
+    requestedScope: { ...binding.scope, cycleId, operationId },
+    idempotencyKey: `${request.execution.executionEpoch}:${request.call.callId}`,
+    expectedOutput: { schemaRef: `schema://provider-tool/${request.call.toolId}.report/v1`, requiredEvidenceKinds: ['tool'] },
+  };
+}
+
+function fileWriteCompletionContext(
+  request: ToolExecRequest,
+  intent: OperationIntent,
+  completion: OperationCompletionOwner,
+  now: () => Date,
+): FileWriteCompletionContext {
+  const requestId = request.requestId;
+  if (typeof requestId !== 'string' || requestId.trim().length === 0) {
+    throw new Error('file.write requires the actual typed Provider request id');
+  }
+  const callId = request.call.callId;
+  if (typeof callId !== 'string' || callId.trim().length === 0) {
+    throw new Error('file.write requires the actual Provider tool call id');
+  }
+  const continuationRef = request.call.continuationRef;
+  if (typeof continuationRef !== 'string' || continuationRef.trim().length === 0) {
+    throw new Error('file.write requires the codec-produced continuation ref');
+  }
+  const scope = intent.requestedScope;
+  if (scope.taskId === undefined || scope.cycleId === undefined || scope.operationId === undefined) {
+    throw new Error('file.write child intent has no complete effect scope');
+  }
+  if (scope.operationId.value !== intent.operationId.value
+    || scope.taskId.value !== intent.taskId.value
+    || scope.cycleId.value !== intent.cycleId.value) {
+    throw new Error('file.write child intent scope does not match the admitted operation');
+  }
+  if (request.execution.operationId.value === intent.operationId.value) {
+    throw new Error('file.write tool operation must differ from the parent execution operation');
+  }
+  const expectedInputDigest = digest(JSON.stringify(request.call.arguments));
+  if (intent.inputDigest !== expectedInputDigest) {
+    throw new Error('file.write admitted input digest does not match the typed Provider call');
+  }
+  return {
+    binding: {
+      execution: request.execution,
+      scope,
+      toolOperationId: intent.operationId,
+      requestId,
+      callId,
+      continuationRef,
+    },
+    inputDigest: requireSha256Digest(intent.inputDigest, 'file.write input digest'),
+    completion,
+    now,
+  };
+}
+
+async function executeRawTool(
+  request: ToolExecRequest,
+  io: ProviderToolIo,
+  fileWriteCompletion?: FileWriteCompletionContext,
+): Promise<ToolExecResult> {
+  switch (request.call.toolId) {
+    case 'file.read': return executeFileRead(request, { route: io.readRoute, assets: io.readAssets, workspaceRef: io.workspaceRef });
+    case 'file.list': return executeFileList(request, { functions: io.functions, workspaceRef: io.workspaceRef });
+    case 'file.search': return executeFileSearch(request, { service: io.codeSearchService, workspaceRef: io.workspaceRef, assets: io.toolOutputs });
+    case 'file.write': {
+      if (fileWriteCompletion === undefined) throw new Error('file.write requires the admitted completion context');
+      return executeFileWrite(request, {
+        workspaceRef: io.workspaceRef,
+        workspaceRoot: io.workspaceRoot,
+        toolOutputs: io.toolOutputs,
+      }, fileWriteCompletion);
+    }
+    case 'file.edit': return executeFileEdit(request, io);
+    case 'bash': return executeBash(request, io);
+    case 'todo_write': return executeTodoWrite(request, io);
+    case 'get_goal': return executeGetGoal(request, io);
+    case 'create_goal': return executeCreateGoal(request, io);
+    case 'update_goal': return executeUpdateGoal(request, io);
+    case 'present': return executePresent(request, io);
+    case 'web.search': return executeWebSearch(request, { service: io.webSearchService, assets: io.toolOutputs });
+    default: throw new Error(`provider tool is not registered: ${request.call.toolId}`);
+  }
 }
 
 async function executeFileRead(
   request: ToolExecRequest,
-  params: { readonly hand: ReturnType<typeof createHandOperationRuntime>; readonly assets: FileReadAssets; readonly workspaceRef: string },
+  params: { readonly route: FileReadRoute; readonly assets: FileReadAssets; readonly workspaceRef: string },
 ): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('file.read was stopped before admission'), { name: 'AbortError' });
   const path = request.call.arguments.path;
@@ -629,23 +973,24 @@ async function executeFileRead(
     expectedOutput: { schemaRef: 'schema://file.read.report/v1', requiredEvidenceKinds: ['tool'] },
   };
   if (request.signal.aborted) throw Object.assign(new Error('file.read was stopped before admission'), { name: 'AbortError' });
-  const result = await params.hand.execute({ intent, signal: request.signal });
-  if (request.signal.aborted || result.operation.status === 'cancelled') {
+  const observation = await params.route.execute({ intent, effectiveScope: scope, executionEpoch: request.execution.executionEpoch });
+  const result = await params.route.verify({ intent, effectiveScope: scope, observation });
+  if (request.signal.aborted) {
     throw Object.assign(new Error('file.read was stopped'), { name: 'AbortError' });
   }
-  if (result.operation.status !== 'succeeded' || !result.operation.result?.outputRef || !result.operation.result.outputDigest) {
-    throw new Error(result.operation.failure?.message ?? `file.read ended in ${result.operation.status}`);
+  if (result.status !== 'succeeded' || !observation.outputRef || !observation.outputDigest) {
+    throw new Error(result.failure?.message ?? `file.read ended in ${result.status}`);
   }
   const report = await params.assets.readReport({
-    outputRef: result.operation.result.outputRef,
-    outputDigest: result.operation.result.outputDigest,
+    outputRef: observation.outputRef,
+    outputDigest: observation.outputDigest,
   });
   return {
     output: JSON.stringify(report),
-    outputRefs: [result.operation.result.outputRef],
-    outputRef: result.operation.result.outputRef,
-    outputDigest: result.operation.result.outputDigest,
-    evidenceRefs: result.operation.result.evidenceRefs,
+    outputRefs: [observation.outputRef],
+    outputRef: observation.outputRef,
+    outputDigest: observation.outputDigest,
+    evidenceRefs: result.evidenceRefs,
   };
 }
 
@@ -734,19 +1079,76 @@ async function executeFileSearch(
   };
 }
 
-async function executeFileWrite(request: ToolExecRequest, params: { readonly workspaceRoot: string }): Promise<ToolExecResult> {
+async function executeFileWrite(
+  request: ToolExecRequest,
+  params: {
+    readonly workspaceRef: string;
+    readonly workspaceRoot: string;
+    readonly toolOutputs: ToolOutputAssets;
+  },
+  context: FileWriteCompletionContext,
+): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('file.write was stopped before admission'), { name: 'AbortError' });
   const args = request.call.arguments;
   const path = args.file_path;
   const content = args.content;
   if (typeof path !== 'string' || path.trim() === '') throw new Error('file.write requires a non-empty file_path');
   if (typeof content !== 'string') throw new Error('file.write requires string content');
+  if (context.inputDigest !== digest(JSON.stringify(args))) {
+    throw new Error('file.write admitted input digest does not match the actual typed request');
+  }
   const target = await resolveWorkspacePath(params.workspaceRoot, path);
   const before = await readOptionalWorkspaceFile(target);
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, content, 'utf8');
-  const result = { path: workspaceRelative(params.workspaceRoot, target), operation: before === null ? 'create' : 'update', before, after: content };
-  return { output: JSON.stringify(result), outputRefs: [], evidenceRefs: [taskEvidence(request, 'file-write')] };
+  const relativePath = workspaceRelative(params.workspaceRoot, target);
+  const effect: FileWriteEffect = {
+    kind: 'file.write',
+    effectId: await fileWriteEffectId(context.binding),
+    workspaceRef: params.workspaceRef,
+    relativePath,
+    inputDigest: context.inputDigest,
+    expectedContentDigest: digestBytes(new TextEncoder().encode(content)),
+  };
+  await context.completion.begin(context.binding, effect);
+  if (request.signal.aborted) {
+    throw new FileWriteEffectUncertainError('file.write was stopped after durable intent; the effect requires reconciliation');
+  }
+  try {
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, content, 'utf8');
+    const observedContentDigest = digestBytes(await readFile(target));
+    if (observedContentDigest !== effect.expectedContentDigest) {
+      throw new Error('file.write readback digest does not match the requested content');
+    }
+    const result = { path: relativePath, operation: before === null ? 'create' : 'update', before, after: content };
+    const descriptor = await params.toolOutputs.writeReport({ outputId: context.binding.toolOperationId.value, report: result });
+    const evidenceRefs = [taskEvidence(request, 'file-write')];
+    await context.completion.commit(context.binding, effect, observedContentDigest, {
+      operationId: context.binding.toolOperationId,
+      status: 'succeeded',
+      outputRef: descriptor.outputRef,
+      outputDigest: requireSha256Digest(descriptor.outputDigest, 'file.write output digest'),
+      evidenceRefs,
+      verifier: {
+        name: 'file-write-readback',
+        version: '1',
+        decision: 'actual target bytes matched the requested content digest',
+      },
+      completedAt: context.now().toISOString(),
+    });
+    return {
+      output: JSON.stringify(result),
+      outputRefs: [descriptor.outputRef],
+      outputRef: descriptor.outputRef,
+      outputDigest: descriptor.outputDigest,
+      evidenceRefs,
+    };
+  } catch (error) {
+    if (error instanceof FileWriteEffectUncertainError) throw error;
+    throw new FileWriteEffectUncertainError(
+      `file.write failed after durable intent: ${error instanceof Error ? error.message : 'unknown error'}`,
+      error,
+    );
+  }
 }
 
 async function executeFileEdit(request: ToolExecRequest, params: { readonly workspaceRoot: string }): Promise<ToolExecResult> {
@@ -811,16 +1213,20 @@ async function executeBash(request: ToolExecRequest, params: { readonly workspac
       timedOut = true;
       child.kill('SIGTERM');
     }, timeoutMs);
-    request.signal.addEventListener('abort', () => {
+    const abort = () => {
       aborted = true;
       child.kill('SIGTERM');
-    }, { once: true });
+    };
+    request.signal.addEventListener('abort', abort, { once: true });
+    if (request.signal.aborted) abort();
     child.on('error', (error) => {
       clearTimeout(timeout);
+      request.signal.removeEventListener('abort', abort);
       reject(error);
     });
     child.on('close', (exitCode, signal) => {
       clearTimeout(timeout);
+      request.signal.removeEventListener('abort', abort);
       resolve({ exitCode, signal, timedOut, aborted, stdout: { text: stdout, truncated: stdoutTruncated }, stderr: { text: stderr, truncated: stderrTruncated } });
     });
   });

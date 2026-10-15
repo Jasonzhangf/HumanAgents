@@ -1,3 +1,7 @@
+import type { ContextBuildInput } from '../../../contracts/src/index.js';
+
+export type { ContextBuildInput };
+
 export class ContextIndexError extends Error {
   constructor(message: string) {
     super(message);
@@ -139,13 +143,6 @@ export class ContextCache<T = unknown> {
   }
 }
 
-export interface ContextBuildInput<T> {
-  readonly stablePrefix: readonly T[];
-  readonly indexRefs: readonly T[];
-  readonly dynamicHead: readonly T[];
-  readonly repairRefs: readonly T[];
-}
-
 export interface BuiltContext<T> extends ContextBuildInput<T> {
   readonly messages: readonly T[];
 }
@@ -162,6 +159,45 @@ export function buildContext<T>(input: ContextBuildInput<T>): BuiltContext<T> {
     repairRefs,
     messages: [...stablePrefix, ...indexRefs, ...dynamicHead, ...repairRefs],
   };
+}
+
+/**
+ * A one-shot instruction for the current request only. It must never enter the durable
+ * or next-turn context, so it is assembled separately from the durable window.
+ */
+export interface TransientContextInstruction<T> {
+  readonly ref: string;
+  readonly content: T;
+}
+
+export interface RequestContextInput<T> {
+  readonly durable: ContextBuildInput<T>;
+  readonly transient?: TransientContextInstruction<T>;
+}
+
+export interface RequestContext<T> {
+  /** Messages for the current request, including any transient instruction. */
+  readonly request: BuiltContext<T>;
+  /** The durable window that becomes the next turn's context; excludes the transient instruction. */
+  readonly durable: BuiltContext<T>;
+  readonly transientRefs: readonly string[];
+}
+
+/**
+ * Assemble the current request context without leaking a transient orientation
+ * instruction into the durable/next-turn context. The transient instruction is only
+ * consumed by `request.messages`; `durable.messages` never contains it.
+ */
+export function buildRequestContext<T>(input: RequestContextInput<T>): RequestContext<T> {
+  const durable = buildContext(input.durable);
+  if (!input.transient) return { request: durable, durable, transientRefs: [] };
+  const ref = input.transient.ref;
+  if (!ref.trim()) throw new ContextIndexError('transient context ref is required');
+  const request = buildContext({
+    ...input.durable,
+    repairRefs: [...input.durable.repairRefs, input.transient.content],
+  });
+  return { request, durable, transientRefs: [ref] };
 }
 
 function isPathWithin(path: string, root: string): boolean {
@@ -452,3 +488,5 @@ export class ContextCommitter<T = unknown> {
     }
   }
 }
+
+export * from './active-turn-materializer.js';

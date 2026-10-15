@@ -146,6 +146,7 @@ export interface ResumeAgentOperationInput {
   readonly directiveRevision: number;
   readonly agentId: string;
   readonly driverRef: AgentDriverRef;
+  readonly prepareAgentProvider?: OpenAgentOperationInput['prepareAgentProvider'];
 }
 
 export interface ResumeAgentOperationResult {
@@ -226,6 +227,7 @@ export async function resumeAgentOperation(input: ResumeAgentOperationInput): Pr
     executionEpoch: nextEpoch,
     directiveRevision: input.directiveRevision,
     agent,
+    ...(input.prepareAgentProvider === undefined ? {} : { prepareAgentProvider: input.prepareAgentProvider }),
     // A cross-operation resume is a new checkpoint chain; the recovered
     // checkpoint is the recovery evidence, not a predecessor link.
     newChain: true,

@@ -43,6 +43,7 @@ import {
   type MemoryAnalysisWakeBinding,
   type MemoryTaskAnalysisWakeBinding,
   type MemoryAgentOutcome,
+  type MemoryAgentOptions,
   type MemoryProjectUpdateOwnerPort,
   type MemorySourceUpdateReceipt,
 } from '../../runtime/src/memory/index.js';
@@ -182,13 +183,7 @@ export interface MemoryCompositionInput {
   readonly patchReader?: MemoryProjectPatchReader;
   readonly projectSourceUpdatePublisher?: MemoryProjectSourceUpdatePublisher;
   readonly driver?: AgentDriver;
-  readonly driverFor?: (input: {
-    readonly taskId: import('../../contracts/src/index.js').TaskId;
-    readonly operationId: import('../../contracts/src/index.js').OperationId;
-    readonly executionEpoch: number;
-    readonly assignmentId: string;
-    readonly scope: CanonicalMemoryScope;
-  }) => AgentDriver;
+  readonly driverFor?: MemoryAgentOptions['driverFor'];
   readonly externalOperations?: EventExternalOperationPort & {
     commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
   };

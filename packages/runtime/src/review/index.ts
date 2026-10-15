@@ -1,30 +1,40 @@
-import type {
-  EvidenceRef,
-  WorkAssignment,
-  WorkResult,
-} from '../../../contracts/src/index.js';
 import {
   validateWorkResult,
+  type EvidenceRef,
+  type WorkAssignment,
+  type WorkResult,
+} from '../../../contracts/src/index.js';
+import {
+  assertReviewResultMatchesAssignment as assertReviewResultMatchesAssignmentData,
+  validateReviewAssignment as validateReviewAssignmentData,
+  validateReviewResult as validateReviewResultData,
+  REVIEW_KIND_WHITELIST,
+  type ReviewAssignment,
+  type ReviewFinding,
+  type ReviewKind,
+  type ReviewResult,
+  type ReviewSeverity,
+  type ReviewStatus,
 } from '../../../contracts/src/index.js';
 
-const REVIEW_KIND_VALUES = [
-  'architecture',
-  'baseline',
-  'quality',
-  'security',
-  'delivery',
-] as const;
+export {
+  REVIEW_KIND_VALUES,
+  REVIEW_STATUS_VALUES,
+  REVIEW_SEVERITY_VALUES,
+  REVIEW_KIND_WHITELIST,
+  REVIEW_STATUS_WHITELIST,
+  REVIEW_SEVERITY_WHITELIST,
+  validateReviewAssignment,
+  validateReviewResult,
+  assertReviewAssignmentsMatch,
+  type ReviewAssignment,
+  type ReviewFinding,
+  type ReviewKind,
+  type ReviewResult,
+  type ReviewSeverity,
+  type ReviewStatus,
+} from '../../../contracts/src/index.js';
 
-export type ReviewKind = (typeof REVIEW_KIND_VALUES)[number];
-const REVIEW_STATUS_VALUES = ['passed', 'failed', 'inconclusive'] as const;
-const REVIEW_SEVERITY_VALUES = ['P0', 'P1', 'blocker', 'important', 'advisory'] as const;
-
-export type ReviewSeverity = (typeof REVIEW_SEVERITY_VALUES)[number];
-export type ReviewStatus = (typeof REVIEW_STATUS_VALUES)[number];
-
-export const REVIEW_KIND_WHITELIST: readonly ReviewKind[] = Object.freeze([...REVIEW_KIND_VALUES]);
-export const REVIEW_STATUS_WHITELIST: readonly ReviewStatus[] = Object.freeze([...REVIEW_STATUS_VALUES]);
-export const REVIEW_SEVERITY_WHITELIST: readonly ReviewSeverity[] = Object.freeze([...REVIEW_SEVERITY_VALUES]);
 export const DEFAULT_REVIEW_KINDS: readonly ReviewKind[] = REVIEW_KIND_WHITELIST;
 
 export const REVIEW_CAPABILITIES: readonly string[] = [
@@ -45,48 +55,6 @@ const REVIEW_CAPABILITY_BY_KIND: Readonly<Record<ReviewKind, string>> = {
   security: 'security.review',
   delivery: 'delivery.review',
 };
-
-export interface ReviewFinding {
-  readonly findingId: string;
-  readonly severity: ReviewSeverity;
-  readonly locationRef: string;
-  readonly problem: string;
-  readonly expected: string;
-  readonly evidenceRefs: readonly EvidenceRef[];
-}
-
-export interface ReviewAssignment {
-  readonly assignmentId: string;
-  readonly taskId: string;
-  readonly workerAgentId: string;
-  readonly reviewKind: ReviewKind;
-  readonly attempt: number;
-  readonly executionEpoch: number;
-  readonly inputRevision: number;
-  readonly acceptanceCriteriaDigest: string;
-  readonly subjectRefs: readonly string[];
-  readonly subjectDigests: readonly string[];
-  readonly workerCapabilities: readonly string[];
-  readonly requiredCapabilities: readonly string[];
-  readonly mergeGate: WorkAssignment['mergeGate'];
-}
-
-export interface ReviewResult {
-  readonly resultId: string;
-  readonly assignmentId: string;
-  readonly taskId: string;
-  readonly workerAgentId: string;
-  readonly reviewKind: ReviewKind;
-  readonly attempt: number;
-  readonly executionEpoch: number;
-  readonly inputRevision: number;
-  readonly acceptanceCriteriaDigest: string;
-  readonly subjectRefs: readonly string[];
-  readonly subjectDigests: readonly string[];
-  readonly status: ReviewStatus;
-  readonly findings: readonly ReviewFinding[];
-  readonly evidenceRefs: readonly EvidenceRef[];
-}
 
 export interface ReviewAssignmentInput {
   readonly workerAssignment: WorkAssignment;
@@ -212,21 +180,14 @@ function isReviewCapability(capability: string): boolean {
   return REVIEW_CAPABILITIES.includes(capability);
 }
 
+function asReviewCoordinatorError(error: unknown): ReviewCoordinatorError {
+  if (error instanceof ReviewCoordinatorError) return error;
+  return new ReviewCoordinatorError(error instanceof Error ? error.message : String(error));
+}
+
 function assertReviewKind(kind: unknown): asserts kind is ReviewKind {
   if (typeof kind !== 'string' || !REVIEW_KIND_WHITELIST.includes(kind as ReviewKind)) {
     throw new ReviewCoordinatorError(`unregistered review kind: ${String(kind)}`);
-  }
-}
-
-function assertReviewStatus(status: unknown): asserts status is ReviewStatus {
-  if (typeof status !== 'string' || !REVIEW_STATUS_WHITELIST.includes(status as ReviewStatus)) {
-    throw new ReviewCoordinatorError(`unregistered review status: ${String(status)}`);
-  }
-}
-
-function assertReviewSeverity(severity: unknown): asserts severity is ReviewSeverity {
-  if (typeof severity !== 'string' || !REVIEW_SEVERITY_WHITELIST.includes(severity as ReviewSeverity)) {
-    throw new ReviewCoordinatorError(`unregistered review severity: ${String(severity)}`);
   }
 }
 
@@ -239,25 +200,10 @@ function reviewCapabilityFor(kind: ReviewKind): string {
 }
 
 export function assertReviewAssignment(input: ReviewAssignment): void {
-  assertReviewKind(input.reviewKind);
-  nonEmpty(input.assignmentId, 'review assignment id');
-  nonEmpty(input.taskId, 'review task id');
-  nonEmpty(input.workerAgentId, 'review worker agent id');
-  nonEmpty(input.acceptanceCriteriaDigest, 'review acceptance criteria digest');
-  assertSafeInteger(input.attempt, 'review attempt');
-  assertSafeInteger(input.executionEpoch, 'review execution epoch');
-  assertSafeInteger(input.inputRevision, 'review input revision');
-  assertNonEmptyRefs(input.subjectRefs, 'review subject ref');
-  assertNonEmptyRefs(input.subjectDigests, 'review subject digest');
-  assertUniqueRefs(input.subjectRefs, 'review subject ref');
-  assertUniqueRefs(input.subjectDigests, 'review subject digest');
-  if (input.subjectRefs.length !== input.subjectDigests.length) {
-    throw new ReviewCoordinatorError('review subject and digest counts must match');
-  }
-  assertUniqueRefs(input.workerCapabilities, 'review worker capability');
-  assertUniqueRefs(input.requiredCapabilities, 'review required capability');
-  if (input.requiredCapabilities.length === 0) {
-    throw new ReviewCoordinatorError('review required capability is required');
+  try {
+    validateReviewAssignmentData(input);
+  } catch (error) {
+    throw asReviewCoordinatorError(error);
   }
   assertNoReviewCapabilities(input.workerCapabilities, 'review worker capabilities');
   if (!input.requiredCapabilities.some((capability) => capability === reviewCapabilityFor(input.reviewKind))) {
@@ -266,35 +212,13 @@ export function assertReviewAssignment(input: ReviewAssignment): void {
 }
 
 export function assertReviewResult(input: ReviewResult): void {
-  assertReviewKind(input.reviewKind);
-  assertReviewStatus(input.status);
-  nonEmpty(input.resultId, 'review result id');
-  nonEmpty(input.assignmentId, 'review result assignment id');
-  nonEmpty(input.taskId, 'review result task id');
-  nonEmpty(input.workerAgentId, 'review result worker agent id');
-  nonEmpty(input.acceptanceCriteriaDigest, 'review result acceptance criteria digest');
-  assertSafeInteger(input.attempt, 'review result attempt');
-  assertSafeInteger(input.executionEpoch, 'review result execution epoch');
-  assertSafeInteger(input.inputRevision, 'review result input revision');
-  assertNonEmptyRefs(input.subjectRefs, 'review result subject ref');
-  assertNonEmptyRefs(input.subjectDigests, 'review result subject digest');
-  assertUniqueRefs(input.subjectRefs, 'review result subject ref');
-  assertUniqueRefs(input.subjectDigests, 'review result subject digest');
-  if (input.subjectRefs.length !== input.subjectDigests.length) {
-    throw new ReviewCoordinatorError('review result subject and digest counts must match');
+  try {
+    validateReviewResultData(input);
+  } catch (error) {
+    throw asReviewCoordinatorError(error);
   }
-  assertEvidence(input.evidenceRefs, 'review result');
   if (input.findings.length === 0 && input.status !== 'passed') {
     throw new ReviewCoordinatorError('non-passed review result requires findings');
-  }
-  assertNonEmptyRefs(input.findings.map((finding) => finding.findingId), 'review finding id');
-  assertUniqueRefs(input.findings.map((finding) => finding.findingId), 'review finding id');
-  for (const finding of input.findings) {
-    assertReviewSeverity(finding.severity);
-    nonEmpty(finding.locationRef, 'review finding location');
-    nonEmpty(finding.problem, 'review finding problem');
-    nonEmpty(finding.expected, 'review finding expected');
-    assertEvidence(finding.evidenceRefs, 'review finding');
   }
   const remediationFindings = input.findings.filter(hasRemediationSeverity);
   if (input.status === 'passed' && remediationFindings.length > 0) {
@@ -309,45 +233,12 @@ export function assertReviewResultMatchesAssignment(
   assignment: ReviewAssignment,
   result: ReviewResult,
 ): void {
-  assertReviewAssignment(assignment);
-  assertReviewResult(result);
-  if (result.assignmentId !== assignment.assignmentId) {
-    throw new ReviewCoordinatorError('review result does not match assignment');
-  }
-  if (result.taskId !== assignment.taskId) {
-    throw new ReviewCoordinatorError('stale review result: task mismatch');
-  }
-  if (result.workerAgentId !== assignment.workerAgentId) {
-    throw new ReviewCoordinatorError('review result worker does not match assignment');
-  }
-  if (result.reviewKind !== assignment.reviewKind) {
-    throw new ReviewCoordinatorError('review result kind does not match assignment');
-  }
-  if (result.attempt !== assignment.attempt) {
-    throw new ReviewCoordinatorError('stale review result: attempt mismatch');
-  }
-  if (result.executionEpoch !== assignment.executionEpoch) {
-    throw new ReviewCoordinatorError('stale review result: epoch mismatch');
-  }
-  if (result.inputRevision !== assignment.inputRevision) {
-    throw new ReviewCoordinatorError('stale review result: input revision mismatch');
-  }
-  if (result.acceptanceCriteriaDigest !== assignment.acceptanceCriteriaDigest) {
-    throw new ReviewCoordinatorError('stale review result: acceptance criteria mismatch');
-  }
-  if (result.subjectRefs.length !== assignment.subjectRefs.length) {
-    throw new ReviewCoordinatorError('review result subject refs do not match assignment');
-  }
-  if (result.subjectDigests.length !== assignment.subjectDigests.length) {
-    throw new ReviewCoordinatorError('review result subject digests do not match assignment');
-  }
-  for (let i = 0; i < assignment.subjectRefs.length; i++) {
-    if (result.subjectRefs[i] !== assignment.subjectRefs[i]) {
-      throw new ReviewCoordinatorError('review result subject refs do not match assignment');
-    }
-    if (result.subjectDigests[i] !== assignment.subjectDigests[i]) {
-      throw new ReviewCoordinatorError('review result subject digests do not match assignment');
-    }
+  try {
+    assertReviewAssignment(assignment);
+    assertReviewResult(result);
+    assertReviewResultMatchesAssignmentData(assignment, result);
+  } catch (error) {
+    throw asReviewCoordinatorError(error);
   }
 }
 

@@ -56,6 +56,20 @@ export interface RuntimeBinding {
   readonly bindingDigest: string;
 }
 
+/**
+ * Actual bounded execution instance identity. Display labels, Provider
+ * sessions, PIDs, and worker identity are not instance identity.
+ */
+export interface TaskRuntimeIncarnation {
+  readonly runtimeId: string;
+  readonly generation: number;
+  readonly agentInstanceId: string;
+  readonly roleId: string;
+  readonly taskId: TaskId;
+  readonly assignmentId: string;
+  readonly executionEpoch: number;
+}
+
 export interface AgentProviderBinding {
   readonly bindingId: string;
   readonly providerId: string;
@@ -699,7 +713,13 @@ export interface CheckpointClosureRecord {
 export interface CheckpointReentryRecord {
   readonly checkpointId: CheckpointId;
   readonly reentryId: string;
-  readonly executionEpoch: number;
+  /** Historical target epoch of the selected committed checkpoint. */
+  readonly checkpointExecutionEpoch: number;
+  /** Execution epoch this reentry displaces; the reentry must fence it. */
+  readonly previousExecutionEpoch: number;
+  /** New execution epoch, greater than every committed execution epoch in the task. */
+  readonly newExecutionEpoch: number;
+  /** Every displaced admitted epoch, including the target source and previous current epoch. */
   readonly fencedEpochs: readonly number[];
   readonly permissionRevision: string;
   readonly contextViewRef: string;
@@ -1224,16 +1244,27 @@ export function validateCheckpointClosureRecord(input: CheckpointClosureRecord):
 export function validateCheckpointReentryRecord(input: CheckpointReentryRecord): void {
   if (input.checkpointId.scope !== 'checkpoint' || !input.checkpointId.value.trim()) throw new ContractError('checkpointId must be a non-empty checkpoint scoped id');
   nonEmpty(input.reentryId, 'reentryId');
-  assertPositiveSafeInteger(input.executionEpoch, 'executionEpoch');
+  assertPositiveSafeInteger(input.checkpointExecutionEpoch, 'checkpointExecutionEpoch');
+  assertPositiveSafeInteger(input.previousExecutionEpoch, 'previousExecutionEpoch');
+  assertPositiveSafeInteger(input.newExecutionEpoch, 'newExecutionEpoch');
+  if (input.newExecutionEpoch <= input.checkpointExecutionEpoch) {
+    throw new ContractError('reentry must create a new execution epoch after the target checkpoint epoch');
+  }
+  if (input.newExecutionEpoch <= input.previousExecutionEpoch) {
+    throw new ContractError('reentry must create a new execution epoch after the displaced current epoch');
+  }
   nonEmpty(input.permissionRevision, 'permissionRevision');
   nonEmpty(input.contextViewRef, 'contextViewRef');
   nonEmpty(input.entryPhase, 'entryPhase');
   nonEmpty(input.nextAction, 'nextAction');
   nonEmpty(input.reentryRef, 'reentryRef');
+  const fenced = new Set<number>();
   for (const epoch of input.fencedEpochs) {
-    if (!Number.isSafeInteger(epoch) || epoch < 1 || epoch >= input.executionEpoch) {
+    if (!Number.isSafeInteger(epoch) || epoch < 1 || epoch >= input.newExecutionEpoch) {
       throw new ContractError('fencedEpochs must precede the reentry execution epoch');
     }
+    if (fenced.has(epoch)) throw new ContractError('fencedEpochs must not contain duplicates');
+    fenced.add(epoch);
   }
 }
 

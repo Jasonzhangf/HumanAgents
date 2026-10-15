@@ -1,8 +1,11 @@
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import type { AgentRole } from '../../config/src/index.js';
+import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 import {
   id,
   type AgentEvent,
   type EvidenceRef,
+  type ReviewOutput,
   type ExecutionRuntimePort,
   type ProviderBinding,
   type ProviderSettlement,
@@ -26,6 +29,10 @@ export interface ServeOrchestrationPorts {
 export interface ProviderServeOrchestrationOptions {
   readonly port: ExecutionRuntimePort;
   readonly binding: ProviderBinding;
+  readonly prepareAgentProvider?: (input: {
+    readonly roleId: AgentRole;
+    readonly configuredAgentId?: string;
+  }) => Promise<AgentProviderComposition>;
   readonly promptSegments: { readonly review: readonly string[] };
 }
 
@@ -53,47 +60,64 @@ function outputDigests(input: Parameters<ExecutionAgentPort['execute']>[0]): rea
  * boundary. They do not pretend to be a provider or a production worker.
  */
 export function createDeterministicServeOrchestrationPorts(): ServeOrchestrationPorts {
+  const execute = async (input: Parameters<ExecutionAgentPort['execute']>[0]): Promise<WorkResult> => {
+    const refs = [evidence(input.scope, `work-${input.assignment.assignmentId}`)];
+    return {
+      taskId: input.assignment.taskId,
+      pipelineNodeId: input.assignment.pipelineNodeId,
+      agentId: input.agentId,
+      assignmentId: input.assignment.assignmentId,
+      attempt: input.assignment.attempt,
+      executionEpoch: input.assignment.executionEpoch,
+      inputRevision: input.assignment.inputRevision,
+      producedArtifactRefs: [...input.assignment.expectedOutputRefs],
+      producedArtifactDigests: [...outputDigests(input)],
+      status: 'succeeded',
+      summary: `fake worker completed ${input.assignment.objective}`,
+      outputRefs: [...input.assignment.expectedOutputRefs],
+      evidenceRefs: refs,
+      nextAction: 'review',
+    };
+  };
+  const review = async (input: Parameters<ReviewAgentPort['review']>[0]): Promise<ReviewResult> => ({
+    resultId: `serve-review-${input.reviewAssignment.assignmentId}`,
+    assignmentId: input.reviewAssignment.assignmentId,
+    taskId: input.reviewAssignment.taskId,
+    workerAgentId: input.reviewAssignment.workerAgentId,
+    reviewKind: input.reviewAssignment.reviewKind,
+    attempt: input.reviewAssignment.attempt,
+    executionEpoch: input.reviewAssignment.executionEpoch,
+    inputRevision: input.reviewAssignment.inputRevision,
+    acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+    subjectRefs: [...input.reviewAssignment.subjectRefs],
+    subjectDigests: [...input.reviewAssignment.subjectDigests],
+    status: 'passed',
+    findings: [],
+    evidenceRefs: [evidence(input.scope, `review-${input.reviewAssignment.assignmentId}`)],
+  });
+
   const executionAgent: ExecutionAgentPort = {
-    async execute(input): Promise<WorkResult> {
-      const refs = [evidence(input.scope, `work-${input.assignment.assignmentId}`)];
-      return {
-        taskId: input.assignment.taskId,
-        pipelineNodeId: input.assignment.pipelineNodeId,
-        agentId: input.agentId,
-        assignmentId: input.assignment.assignmentId,
-        attempt: input.assignment.attempt,
-        executionEpoch: input.assignment.executionEpoch,
-        inputRevision: input.assignment.inputRevision,
-        producedArtifactRefs: [...input.assignment.expectedOutputRefs],
-        producedArtifactDigests: [...outputDigests(input)],
-        status: 'succeeded',
-        summary: `fake worker completed ${input.assignment.objective}`,
-        outputRefs: [...input.assignment.expectedOutputRefs],
-        evidenceRefs: refs,
-        nextAction: 'review',
-      };
-    },
+    roleId: 'serve-fake-execution',
+    createInstance: (create) => ({
+      incarnation: create.incarnation,
+      execute,
+      dispose: async () => {},
+    }),
+    execute,
   };
 
   const reviewAgent: ReviewAgentPort = {
-    async review(input): Promise<ReviewResult> {
-      return {
-        resultId: `serve-review-${input.reviewAssignment.assignmentId}`,
-        assignmentId: input.reviewAssignment.assignmentId,
-        taskId: input.reviewAssignment.taskId,
-        workerAgentId: input.reviewAssignment.workerAgentId,
-        reviewKind: input.reviewAssignment.reviewKind,
-        attempt: input.reviewAssignment.attempt,
-        executionEpoch: input.reviewAssignment.executionEpoch,
-        inputRevision: input.reviewAssignment.inputRevision,
-        acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
-        subjectRefs: [...input.reviewAssignment.subjectRefs],
-        subjectDigests: [...input.reviewAssignment.subjectDigests],
-        status: 'passed',
-        findings: [],
-        evidenceRefs: [evidence(input.scope, `review-${input.reviewAssignment.assignmentId}`)],
-      };
-    },
+    roleId: 'serve-fake-review',
+    createInstance: (create) => ({
+      incarnation: create.incarnation,
+      review: async (input) => ({
+        result: await review(input),
+        output: { text: `fake review ${input.reviewAssignment.assignmentId}`, artifactRef: null, artifactDigest: null },
+        completedAt: new Date().toISOString(),
+      }),
+      dispose: async () => {},
+    }),
+    review,
   };
 
   const mergeCoordinator: MergeCoordinatorPort = {
@@ -251,8 +275,10 @@ const REVIEW_ATTEMPTS = 3;
  * Merge remains Harness-owned and never becomes a model tool call.
  */
 export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrationOptions): ServeOrchestrationPorts {
-  const reviewAgent: ReviewAgentPort = {
-    async review(request): Promise<ReviewResult> {
+  const runReview = async (request: Parameters<ReviewAgentPort['review']>[0]): Promise<{
+    readonly result: ReviewResult;
+    readonly output: ReviewOutput;
+  }> => {
       // Fail closed before the reviewer runs: a request without real
       // acceptance criteria and subject bodies could only check identity.
       const material = assertReviewMaterial(request.reviewMaterial);
@@ -272,18 +298,33 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
       let provider!: Awaited<ReturnType<typeof runProviderAgent>>;
       let marker: ReturnType<typeof reviewMarker>;
       for (let attemptIndex = 0; attemptIndex < REVIEW_ATTEMPTS; attemptIndex += 1) {
-        provider = await runProviderAgent({
-          role: 'review',
-          port: input.port,
-          binding: input.binding,
-          taskId: id('task', request.reviewAssignment.taskId),
-          assignmentId: request.reviewAssignment.assignmentId,
-          attempt: request.reviewAssignment.attempt + attemptIndex,
-          executionEpoch: request.reviewAssignment.executionEpoch,
-          scope: request.scope,
-          inputRefs: request.reviewAssignment.subjectRefs,
-          prompt,
-        });
+        const composition = input.prepareAgentProvider === undefined
+          ? undefined
+          : await input.prepareAgentProvider({ roleId: 'review' });
+        try {
+          provider = await runProviderAgent({
+            role: 'review',
+            port: composition?.port ?? input.port,
+            binding: composition?.binding ?? input.binding,
+            taskId: id('task', request.reviewAssignment.taskId),
+            assignmentId: request.reviewAssignment.assignmentId,
+            attempt: request.reviewAssignment.attempt + attemptIndex,
+            executionEpoch: request.reviewAssignment.executionEpoch,
+            scope: request.scope,
+            inputRefs: request.reviewAssignment.subjectRefs,
+            prompt,
+          });
+        } catch (error) {
+          if (composition !== undefined) {
+            try {
+              await closeAgentProvider(composition);
+            } catch (closeError) {
+              throw new AggregateError([error, closeError], 'provider review failed and close also failed');
+            }
+          }
+          throw error;
+        }
+        if (composition !== undefined) await closeAgentProvider(composition);
         marker = provider.settlement.state === 'succeeded' ? reviewMarker(provider.events) : undefined;
         if (marker === 'passed' || marker === 'failed' || provider.settlement.state !== 'succeeded') break;
       }
@@ -320,22 +361,42 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
           }]
         : [];
       return {
-        resultId: `serve-review-${request.reviewAssignment.assignmentId}`,
-        assignmentId: request.reviewAssignment.assignmentId,
-        taskId: request.reviewAssignment.taskId,
-        workerAgentId: request.reviewAssignment.workerAgentId,
-        reviewKind: request.reviewAssignment.reviewKind,
-        attempt: request.reviewAssignment.attempt,
-        executionEpoch: request.reviewAssignment.executionEpoch,
-        inputRevision: request.reviewAssignment.inputRevision,
-        acceptanceCriteriaDigest: request.reviewAssignment.acceptanceCriteriaDigest,
-        subjectRefs: [...request.reviewAssignment.subjectRefs],
-        subjectDigests: [...request.reviewAssignment.subjectDigests],
-        status,
-        findings,
-        evidenceRefs,
+        result: {
+          resultId: `serve-review-${request.reviewAssignment.assignmentId}`,
+          assignmentId: request.reviewAssignment.assignmentId,
+          taskId: request.reviewAssignment.taskId,
+          workerAgentId: request.reviewAssignment.workerAgentId,
+          reviewKind: request.reviewAssignment.reviewKind,
+          attempt: request.reviewAssignment.attempt,
+          executionEpoch: request.reviewAssignment.executionEpoch,
+          inputRevision: request.reviewAssignment.inputRevision,
+          acceptanceCriteriaDigest: request.reviewAssignment.acceptanceCriteriaDigest,
+          subjectRefs: [...request.reviewAssignment.subjectRefs],
+          subjectDigests: [...request.reviewAssignment.subjectDigests],
+          status,
+          findings,
+          evidenceRefs,
+        },
+        output: {
+          text: reviewerText(provider.events),
+          artifactRef: null,
+          artifactDigest: null,
+        },
       };
-    },
+  };
+  const review = async (request: Parameters<ReviewAgentPort['review']>[0]): Promise<ReviewResult> =>
+    (await runReview(request)).result;
+  const reviewAgent: ReviewAgentPort = {
+    roleId: 'serve-rcc-review',
+    createInstance: (create) => ({
+      incarnation: create.incarnation,
+      review: async (handleInput) => {
+        const { result, output } = await runReview(handleInput);
+        return { result, output, completedAt: new Date().toISOString() };
+      },
+      dispose: async () => {},
+    }),
+    review,
   };
 
   const mergeCoordinator: MergeCoordinatorPort = {

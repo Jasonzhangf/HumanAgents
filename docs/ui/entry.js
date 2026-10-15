@@ -11,6 +11,7 @@ import {
   renderRuntimeStatus,
   stateTone,
   taskDashboardHref,
+  technicalDetailTrigger,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
 import {
@@ -25,8 +26,15 @@ const { main, status, interactionCardHosts } = makePageShell(
   '接受用户任务、展示只读整理反馈，并在提交后进入执行观测。',
 )
 const interactionCardHost = interactionCardHosts[0]
-const interactionCard = interactionCardHost ? mountInteractionWorkCard(interactionCardHost) : null
-interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
+let interactionCard = null
+
+// The shared work card mounts on the first real event or snapshot update. Until
+// then the host stays genuinely empty, so first entry claims no work.
+function presentInteractionCard(projection) {
+  if (!interactionCardHost) return
+  if (!interactionCard) interactionCard = mountInteractionWorkCard(interactionCardHost)
+  interactionCard.update(projection)
+}
 
 let interactionId
 let confirmation
@@ -34,6 +42,17 @@ let latestState = 'received'
 let submitting = false
 let pendingSubmission
 const cardState = { sequence: 0, entries: [] }
+
+// The explicit task type is chosen by the human and never inferred from the
+// goal text or the execution trigger. It reuses the existing TaskFlowBinding
+// shape and definition version 1.
+const TASK_FLOW_DEFINITION_VERSION = 1
+const TASK_FLOW_TYPES = [
+  ['one-shot', '单次'],
+  ['inspection', '巡检'],
+  ['long-running', '长程'],
+]
+const TASK_FLOW_KINDS = new Set(TASK_FLOW_TYPES.map(([kind]) => kind))
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   cardState.sequence += 1
@@ -50,24 +69,16 @@ function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
       ...detail,
     },
   ]
-  interactionCard?.update(projectInteractionCardFromEntries(cardState.entries, latestState))
-}
-
-function appendCardError(error) {
-  appendCardEvent('failure', error.message || String(error), 'error', {
-    eventKey: 'request-failed',
-    error: { code: error.code, message: error.message || String(error), ownerId: error.ownerId || 'humanagent.app' },
-    evidenceRefs: error.evidenceRefs || [],
-  })
+  presentInteractionCard(projectInteractionCardFromEntries(cardState.entries, latestState))
 }
 
 function updateCardFromSnapshot(snapshot) {
   cardState.sequence = 0
   cardState.entries = []
   const projection = projectInteractionCardFromSnapshot(snapshot)
-  // The entry form submit is the only authorization point. The work card
-  // therefore never exposes a second confirmation action on this page.
-  interactionCard?.update({ ...projection, actions: [] })
+  // The entry form submit is this new requirement's business confirmation. The
+  // work card therefore never exposes a second confirmation action on this page.
+  presentInteractionCard({ ...projection, actions: [] })
 }
 
 function liveArea() {
@@ -85,12 +96,15 @@ function renderField(section, label, value) {
   section.append(row)
 }
 
-function renderDraftContainer() {
+// The draft region exists only once a real interaction snapshot supplies
+// content. It takes the place the old always-rendered container occupied.
+function ensureDraftSection() {
+  const existing = document.querySelector('#entry-draft')
+  if (existing) return existing
   const section = element('section', undefined, 'section')
   section.id = 'entry-draft'
-  const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '整理反馈（只读）'), element('span', '提交后自动进入执行观测', 'section-meta'))
-  section.append(head)
+  const live = document.querySelector('#entry-live')
+  if (live && live.parentNode) live.parentNode.insertBefore(section, live)
   return section
 }
 
@@ -112,7 +126,7 @@ function setEntryError(error) {
 }
 
 function renderDraft(snapshot) {
-  const section = document.querySelector('#entry-draft')
+  const section = ensureDraftSection()
   if (!section) return
   clearNode(section)
   if (snapshot.state === 'awaiting-clarification') {
@@ -263,6 +277,54 @@ function value(form, name) {
   return control ? String(control.value).trim() : ''
 }
 
+// The task type is optional. An empty selection means the human declared no
+// type, so the request reaches the original explicit brain unchanged and the
+// brain keeps owning simple-question vs complex-task routing. A non-empty
+// selection must be one of the existing kinds; it is never inferred.
+function selectedTaskFlow(form) {
+  const kind = value(form, 'taskFlowKind')
+  if (!kind) return undefined
+  if (!TASK_FLOW_KINDS.has(kind)) {
+    throw Object.assign(new Error('无效的任务类型。'), {
+      code: 'request.invalid-field',
+      ownerId: 'humanagent.app.ui',
+      nextAction: 'choose one of 单次 / 巡检 / 长程, or leave the task type empty',
+    })
+  }
+  return { kind, definitionVersion: TASK_FLOW_DEFINITION_VERSION }
+}
+
+// Every user-selected input that must stay fixed for one attempted submission:
+// the goal text, the explicit task type, and the execution trigger. The trigger
+// feeds the execution policy and stays separate from the task type.
+function executionInputs(form) {
+  return {
+    executionMode: value(form, 'executionMode'),
+    timezone: value(form, 'timezone'),
+    scheduledStartAt: value(form, 'scheduledStartAt'),
+    scheduledEndAt: value(form, 'scheduledEndAt'),
+    maxOccurrences: value(form, 'maxOccurrences'),
+    recurringFrequency: value(form, 'recurringFrequency'),
+    intervalMinutes: value(form, 'intervalMinutes'),
+    timeOfDay: value(form, 'timeOfDay'),
+    weekDays: value(form, 'weekDays'),
+  }
+}
+
+function selectionInputs(rawInput, form) {
+  return { rawInput, taskFlowKind: value(form, 'taskFlowKind'), execution: executionInputs(form) }
+}
+
+// Text equality alone must not reuse a prepared submission: a retry reuses the
+// same receipt identity only when the goal, the task type and the trigger are
+// all unchanged.
+function selectionsEqual(left, right) {
+  if (!left || !right) return false
+  return left.rawInput === right.rawInput
+    && left.taskFlowKind === right.taskFlowKind
+    && JSON.stringify(left.execution) === JSON.stringify(right.execution)
+}
+
 function timeZone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
@@ -392,61 +454,91 @@ function buildExecutionPolicy(form, submissionId) {
   throw new Error(`不支持周期类型：${frequency}`)
 }
 
-async function prepareSubmission(rawInput, form) {
+function prepareSubmission(rawInput, form) {
   const submissionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-  const knownTaskIds = new Set(taskRows(await api.listTasks().catch(() => ({}))).map((row) => row.taskId?.value).filter(Boolean))
+  const taskFlow = selectedTaskFlow(form)
   return {
     rawInput,
+    taskFlow,
     executionPolicy: buildExecutionPolicy(form, submissionId),
     confirmationRef: `confirmation:ui:${submissionId}`,
     confirmedAt: new Date().toISOString(),
     payloadRef: `asset://requirements/ui:${submissionId}`,
     idempotencyKey: `ui-entry:${submissionId}`,
-    knownTaskIds,
+    selection: selectionInputs(rawInput, form),
   }
 }
 
-async function waitForTask(submission) {
-  const deadline = Date.now() + 20_000
-  while (Date.now() < deadline) {
-    const tasks = await api.listTasks()
-    const rows = taskRows(tasks)
-    const candidate = rows.find((row) => {
-      const taskIdValue = row.taskId?.value
-      if (!taskIdValue || submission.knownTaskIds.has(taskIdValue)) return false
-      return !submission.normalizedInput || row.title === submission.normalizedInput || row.title === submission.rawInput
-    }) ?? rows.find((row) => {
-      const taskIdValue = row.taskId?.value
-      return taskIdValue && !submission.knownTaskIds.has(taskIdValue)
-    })
-    if (candidate?.taskId?.value) return candidate.taskId.value
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-  throw Object.assign(new Error('任务已提交，但执行观测任务尚未就绪。'), {
-    code: 'observation.task-not-ready',
+function observationUnresolved(code, message) {
+  return Object.assign(new Error(message), {
+    code,
     ownerId: 'humanagent.app.ui',
     nextAction: 'open the task list and retry observation',
   })
 }
 
-// The explicit-intake states the runtime records once the human authorization is
-// done. Only these may drive the card after the confirmation request.
-const POST_CONFIRMATION_STATES = new Set(['confirmed', 'dispatched'])
+// Exact correlation only. Every key in `identity` must be present and equal on
+// the row's committed identitySource, so a missing field on either side can
+// never match and two absent values can never form a successful selection.
+function rowMatchesIdentitySource(identitySource, identity) {
+  if (!identitySource || !identity) return false
+  const keys = Object.keys(identity)
+  if (keys.length === 0) return false
+  return keys.every((key) => {
+    const expected = identity[key]
+    if (expected === undefined || expected === null || expected === '') return false
+    return identitySource[key] === expected
+  })
+}
 
-/**
- * The interaction state the work card may project once the runtime accepted the
- * requirement.
- *
- * The caller only reaches this after the runtime returned the typed confirmation
- * receipt for the exact revision, so the interaction is at least `confirmed`.
- * The interaction is re-read so the card reports the state the runtime owns now
- * — for example `dispatched` once the coordinator consumed the requirement. The
- * snapshot the page read before the submit is read-only draft history and never
- * drives this projection. No state name is minted here.
- */
-async function postConfirmationState() {
-  const current = await api.inspectExplicitInteraction(interactionId).catch(() => undefined)
-  return POST_CONFIRMATION_STATES.has(current?.state) ? current.state : 'confirmed'
+// The normal receipt is the only source for this identity. It carries exactly
+// requirementId, draftId and inputRevision; all three must be nonmissing.
+function identityFromReceipt(requirement) {
+  const requirementId = requirement?.requirementId
+  const draftId = requirement?.draftId
+  const inputRevision = requirement?.inputRevision
+  if (!requirementId || !draftId || inputRevision === undefined || inputRevision === null) return null
+  return { requirementId, draftId, inputRevision }
+}
+
+// A confirmed retry reads the backend snapshot, never the outbound submission.
+// The snapshot confirmation carries draftId, inputRevision and confirmationRef;
+// revision fields are added only when the same snapshot proves they belong to
+// that same confirmed draft.
+function identityFromConfirmedSnapshot(snapshot) {
+  const confirmed = snapshot?.confirmation
+  const draftId = confirmed?.draftId
+  const inputRevision = confirmed?.inputRevision
+  const confirmationRef = confirmed?.confirmationRef
+  if (!draftId || inputRevision === undefined || inputRevision === null || !confirmationRef) return null
+  const identity = { draftId, inputRevision, confirmationRef }
+  const recorded = (snapshot.confirmations || []).find(
+    (item) => item?.draftId === draftId && item?.confirmationRef === confirmationRef,
+  )
+  const revision = snapshot.revision
+  const revisionBelongs = Boolean(revision) && revision.draftId === draftId && revision.inputRevision === inputRevision
+  const draftRevisionVersion = recorded?.draftRevisionVersion ?? (revisionBelongs ? revision.revisionVersion : undefined)
+  const draftRevisionHash = recorded?.draftRevisionHash ?? (revisionBelongs ? revision.revisionHash : undefined)
+  if (draftRevisionVersion !== undefined && draftRevisionHash !== undefined) {
+    identity.draftRevisionVersion = draftRevisionVersion
+    identity.draftRevisionHash = draftRevisionHash
+  }
+  return identity
+}
+
+async function waitForTask(identity) {
+  if (!identity) {
+    throw observationUnresolved('observation.identity-unresolved', '需求已接收，但返回的执行身份不完整，无法定位精确观测任务。')
+  }
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    const tasks = await api.listTasks()
+    const rows = taskRows(tasks)
+    const candidate = rows.find((row) => row.taskId?.value && rowMatchesIdentitySource(row.identitySource, identity))
+    if (candidate?.taskId?.value) return candidate.taskId.value
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw observationUnresolved('observation.task-not-ready', '任务已提交，但执行观测任务尚未就绪。')
 }
 
 async function executeSubmission(submission, clarificationAnswer) {
@@ -483,7 +575,11 @@ async function executeSubmission(submission, clarificationAnswer) {
     return snapshot
   }
   if (snapshot.state === 'confirmed') {
-    const taskIdValue = await waitForTask(submission)
+    // The backend snapshot already proves the business confirmation. Keep that
+    // fact so a later observation read failure still reports the accepted
+    // demand instead of downgrading to an unfinished input.
+    confirmation = snapshot.confirmation || confirmation || snapshot
+    const taskIdValue = await waitForTask(identityFromConfirmedSnapshot(snapshot))
     window.location.assign(observationHref(taskIdValue))
     return snapshot
   }
@@ -495,7 +591,6 @@ async function executeSubmission(submission, clarificationAnswer) {
     })
   }
 
-  submission.normalizedInput = snapshot.draft.normalizedInput
   const receipt = await api.confirmExplicitRequirement(interactionId, {
     draftId: snapshot.draft.draftId,
     inputRevision: snapshot.draft.inputRevision,
@@ -507,30 +602,51 @@ async function executeSubmission(submission, clarificationAnswer) {
     goal: snapshot.draft.proposal,
     scope: snapshot.draft.normalizedInput,
     executionPolicy: submission.executionPolicy,
+    taskFlow: submission.taskFlow,
   })
   confirmation = receipt.requirement
-  // The submit is the confirmation. `latestState` still holds the
-  // pre-confirmation snapshot the read-only draft above was rendered from, so
-  // the card must project the runtime's post-confirmation state from here on.
-  latestState = await postConfirmationState()
-  appendCardEvent('decision', '任务已提交，正在打开执行观测', 'decision', { eventKey: 'explicit.confirmation-submitted' })
+  appendCardEvent('decision', '需求已提交，正在打开执行观测', 'decision', { eventKey: 'explicit.confirmation-submitted' })
   status.dataset.tone = 'success'
   if (submission.executionPolicy.executionMode !== 'once') {
     status.textContent = '执行计划已保存，等待真实 occurrence 进入执行观测。'
     await refreshQueue()
     return snapshot
   }
-  status.textContent = '任务已提交，正在打开执行观测…'
-  const taskIdValue = await waitForTask(submission)
+  status.textContent = '需求已提交，正在打开执行观测…'
+  const taskIdValue = await waitForTask(identityFromReceipt(receipt.requirement))
   window.location.assign(observationHref(taskIdValue))
   return snapshot
 }
 
+function submissionFailureSummary() {
+  if (confirmation) return '需求已接收，任务观测尚未打开。'
+  if (interactionId) return '输入已接收，本次处理未完成。'
+  return '本次提交未获接收确认。'
+}
+
 function handleSubmissionError(error, button) {
-  appendCardError(error)
-  setEntryError(error)
-  renderPageError(status, error, 'inspect the runtime error')
-  if (button) button.textContent = interactionId ? '重试本次提交' : '重试提交'
+  clearNode(status)
+  status.dataset.tone = 'danger'
+  const recovered = confirmation
+    ? '需求已接收；保留已返回内容，继续打开任务观测。'
+    : interactionId
+      ? '输入已接收；保留已返回内容，继续本次处理。'
+      : '输入保留，可修正后重试本次提交。'
+  status.append(
+    element('strong', submissionFailureSummary()),
+    element('p', `${recovered} 技术详情保留原始诊断。`),
+    technicalDetailTrigger(() => ({
+      title: '技术详情',
+      entries: [
+        ['code', error?.code, 'data-detail-code'],
+        ['owner', error?.ownerId, 'data-detail-owner'],
+        ['message', error?.message, 'data-detail-message'],
+        ['nextAction', error?.nextAction, 'data-detail-next'],
+      ],
+    })),
+  )
+  appendPairingEntry(status, error)
+  if (button) button.textContent = confirmation ? '重试打开任务观测' : interactionId ? '重试本次提交' : '重试提交'
 }
 
 function field(labelText, control) {
@@ -542,7 +658,7 @@ function field(labelText, control) {
 function renderForm() {
   const section = element('section', undefined, 'section')
   const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '用户任务'), element('span', '提交即授权创建并执行', 'section-meta'))
+  head.append(element('h2', '用户任务'), element('span', '提交即确认本次新任务需求', 'section-meta'))
   section.append(head)
 
   const panel = element('div', undefined, 'panel')
@@ -553,6 +669,22 @@ function renderForm() {
   textarea.required = true
   textarea.placeholder = '描述要处理的一个任务'
   form.append(field('任务输入', textarea))
+
+  // Optional task type. The placeholder keeps the initial value empty and the
+  // control is not `required`, so a simple question reaches the explicit brain
+  // without a preclassification gate. The type is never derived from the goal
+  // text or from the execution trigger.
+  const taskType = element('select')
+  taskType.name = 'taskFlowKind'
+  const taskTypePlaceholder = element('option', '简单问答可不选；复杂任务请选择')
+  taskTypePlaceholder.value = ''
+  taskType.append(taskTypePlaceholder)
+  for (const [kind, label] of TASK_FLOW_TYPES) {
+    const option = element('option', label)
+    option.value = kind
+    taskType.append(option)
+  }
+  form.append(field('任务类型（可选）', taskType))
 
   const mode = element('select')
   mode.name = 'executionMode'
@@ -640,7 +772,7 @@ function renderForm() {
   form.append(errorPanel)
 
   const actions = element('div', undefined, 'actions')
-  const submitButton = element('button', '创建并执行', 'button button--primary')
+  const submitButton = element('button', '提交任务', 'button button--primary')
   submitButton.type = 'submit'
   actions.append(submitButton)
   form.append(actions)
@@ -661,11 +793,20 @@ function renderForm() {
     const rendered = (control) => !control.closest('[hidden]')
     timezone.required = rendered(timezone)
     startAt.required = rendered(startAt)
-    submitButton.textContent = modeValue === 'once' ? '创建并执行' : '保存执行计划'
+    submitButton.textContent = modeValue === 'once' ? '提交任务' : '保存执行计划'
   }
   mode.addEventListener('change', syncExecutionFields)
   frequency.addEventListener('change', syncExecutionFields)
   syncExecutionFields()
+
+  // Once a real interaction exists, this attempt's identity is fixed. The type
+  // and the execution trigger are disabled with the goal text so a retry cannot
+  // rebind the same receipt to a different task type or execution strategy.
+  const freezeCreationInputs = () => {
+    for (const control of [taskType, mode, timezone, startAt, endAt, maxOccurrences, frequency, intervalMinutes, timeOfDay, weekDays]) {
+      control.disabled = true
+    }
+  }
 
   form.addEventListener('submit', (event) => {
     event.preventDefault()
@@ -686,14 +827,19 @@ function renderForm() {
     status.dataset.tone = 'warning'
     status.textContent = '正在整理并提交任务…'
     void (async () => {
-      if (!pendingSubmission || pendingSubmission.rawInput !== rawInput) {
+      const selection = selectionInputs(rawInput, form)
+      if (!pendingSubmission || !selectionsEqual(pendingSubmission.selection, selection)) {
         pendingSubmission = await prepareSubmission(rawInput, form)
       }
       await executeSubmission(pendingSubmission)
     })().catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
       submitting = false
       submitButton.disabled = false
-      if (!interactionId) textarea.readOnly = false
+      if (interactionId) {
+        freezeCreationInputs()
+      } else {
+        textarea.readOnly = false
+      }
     })
   })
 
@@ -709,7 +855,7 @@ async function load() {
   const left = element('div')
   left.append(renderForm())
   if (interactionCardHost) left.append(interactionCardHost)
-  left.append(renderDraftContainer(), liveArea())
+  left.append(liveArea())
   layout.append(left)
   main.append(layout)
   await refreshQueue()

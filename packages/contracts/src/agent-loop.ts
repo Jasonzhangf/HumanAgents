@@ -1,5 +1,6 @@
-import type { CheckpointId, ScopeRef } from './index.js';
+import type { CheckpointId, JsonValue, ScopeRef } from './index.js';
 import { ContractError } from './errors.js';
+import { validateJournalCommitRef, type JournalCommitRef } from './i2-history.js';
 
 export type AgentMode = 'observation' | 'orchestration';
 export type AgentLoopRole = 'interaction' | 'orchestration' | 'execution' | 'review' | 'memory';
@@ -125,6 +126,18 @@ export interface ObservationDelta {
   readonly summaryRef: string;
 }
 
+/**
+ * Four-category durable window. The arrays preserve category and entry order; the
+ * ordered concatenation is the message stream. Runtime owns assembly; this contract
+ * only fixes the shared shape so a durable body is not flattened into a single array.
+ */
+export interface ContextBuildInput<T> {
+  readonly stablePrefix: readonly T[];
+  readonly indexRefs: readonly T[];
+  readonly dynamicHead: readonly T[];
+  readonly repairRefs: readonly T[];
+}
+
 export interface ContextView {
   readonly contextViewRef: string;
   readonly executionEpoch: number;
@@ -145,6 +158,55 @@ export interface ContextReplacement {
   readonly deltaIds: readonly string[];
   readonly reason: ContextReplacementReason;
   readonly replacementDigest: string;
+}
+
+/**
+ * Typed successor processing position carried with a context-history record. It is
+ * explicit control data, never a JSON control envelope, and it excludes lease
+ * identity, permission revisions and credentials. Inbox and delta watermarks are
+ * independent of the loop checkpoint watermark: a merged batch may await delta
+ * application.
+ */
+export interface ContextLoopControl {
+  readonly mode: AgentMode;
+  readonly transitionSeq: number;
+  readonly observationScopeId: string;
+  readonly observationScope: ObservationScope | null;
+  readonly inboxStreamId: string;
+  readonly inboxExecutionEpoch: number;
+  readonly inboxCheckpoint: AgentLoopCheckpointRef;
+  readonly inboxObservationScopeId: string;
+  readonly inboxWatermark: number;
+  readonly handledEventIds: readonly string[];
+  readonly handledBatchKeys: readonly string[];
+  readonly deltaExecutionEpoch: number;
+  readonly deltaCheckpoint: AgentLoopCheckpointRef;
+  readonly deltaObservationScopeId: string;
+  readonly deltaWatermark: AgentLoopEventWatermark;
+  readonly appliedDeltaIds: readonly string[];
+  readonly appliedDeltaKeys: readonly string[];
+  readonly closedObservationScopeIds: readonly string[];
+  readonly budgetUsage: AgentLoopBudgetUsage;
+}
+
+/**
+ * Durable pre-transient context publication. `durableContext` carries the complete
+ * four-part body (JSON entries); `durableContextDigest` covers that full body
+ * separately from the refs-only `contextView.contextDigest`. `previousContextCommitRef`
+ * binds successive control publications of one view to the actual predecessor receipt.
+ */
+export interface ContextHistoryRecord {
+  readonly kind: 'context-history';
+  readonly schemaVersion: 1;
+  readonly scope: ScopeRef;
+  readonly agentRuntimeId: string;
+  readonly contextView: ContextView;
+  readonly loopCheckpoint: AgentLoopCheckpoint;
+  readonly replacement: ContextReplacement | null;
+  readonly previousContextCommitRef: JournalCommitRef | null;
+  readonly durableContext: ContextBuildInput<JsonValue>;
+  readonly durableContextDigest: string;
+  readonly loopControl: ContextLoopControl;
 }
 
 export interface AgentLoopBudget {
@@ -444,4 +506,123 @@ export function validateAgentLoopBudgetUsage(input: AgentLoopBudgetUsage): void 
   nonNegativeSafeInteger(input.observationScopes, 'observation scope usage');
   nonNegativeSafeInteger(input.contextReplacements, 'context replacement usage');
   nonNegativeSafeInteger(input.deferredEvents, 'deferred event usage');
+}
+
+function assertSerializableJsonValue(value: unknown, label: string, ancestors = new WeakSet<object>()): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new ContractError(`${label} must contain only JSON values`);
+    return;
+  }
+  if (typeof value !== 'object') throw new ContractError(`${label} must contain only JSON values`);
+  if (ancestors.has(value)) throw new ContractError(`${label} must not contain cyclic references`);
+  if (typeof (value as { toJSON?: unknown }).toJSON === 'function') {
+    throw new ContractError(`${label} must not contain custom toJSON`);
+  }
+  ancestors.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) assertSerializableJsonValue(item, label, ancestors);
+  } else {
+    for (const nested of Object.values(value)) assertSerializableJsonValue(nested, label, ancestors);
+  }
+  ancestors.delete(value);
+}
+
+function validateDurableContextBody(input: ContextBuildInput<JsonValue>): void {
+  if (input === null || typeof input !== 'object') {
+    throw new ContractError('context history durableContext must be an object');
+  }
+  const categories = [
+    ['stablePrefix', input.stablePrefix],
+    ['indexRefs', input.indexRefs],
+    ['dynamicHead', input.dynamicHead],
+    ['repairRefs', input.repairRefs],
+  ] as const;
+  for (const [label, entries] of categories) {
+    if (!Array.isArray(entries)) throw new ContractError(`context history durableContext ${label} must be an array`);
+    for (const entry of entries) assertSerializableJsonValue(entry, `context history durableContext ${label}`);
+  }
+}
+
+export function validateContextLoopControl(input: ContextLoopControl): void {
+  if (input === null || typeof input !== 'object') throw new ContractError('context loop control must be an object');
+  assertMember(input.mode, AGENT_MODES, 'context loop control mode');
+  positiveSafeInteger(input.transitionSeq, 'context loop control transitionSeq');
+  nonEmpty(input.observationScopeId, 'context loop control observationScopeId');
+  if (input.observationScope !== null) {
+    validateObservationScope(input.observationScope);
+    if (input.observationScope.observationScopeId !== input.observationScopeId) {
+      throw new ContractError('context loop control observation scope must match its scope id');
+    }
+  }
+  nonEmpty(input.inboxStreamId, 'context loop control inboxStreamId');
+  positiveSafeInteger(input.inboxExecutionEpoch, 'context loop control inboxExecutionEpoch');
+  validateAgentLoopCheckpointRef(input.inboxCheckpoint, 'context loop control inbox checkpoint');
+  nonEmpty(input.inboxObservationScopeId, 'context loop control inboxObservationScopeId');
+  nonNegativeSafeInteger(input.inboxWatermark, 'context loop control inbox watermark');
+  uniqueRefs(input.handledEventIds, 'context loop control handledEventIds');
+  uniqueRefs(input.handledBatchKeys, 'context loop control handledBatchKeys');
+  positiveSafeInteger(input.deltaExecutionEpoch, 'context loop control deltaExecutionEpoch');
+  validateAgentLoopCheckpointRef(input.deltaCheckpoint, 'context loop control delta checkpoint');
+  nonEmpty(input.deltaObservationScopeId, 'context loop control deltaObservationScopeId');
+  validateAgentLoopEventWatermark(input.deltaWatermark);
+  uniqueRefs(input.appliedDeltaIds, 'context loop control appliedDeltaIds');
+  uniqueRefs(input.appliedDeltaKeys, 'context loop control appliedDeltaKeys');
+  uniqueRefs(input.closedObservationScopeIds, 'context loop control closedObservationScopeIds');
+  validateAgentLoopBudgetUsage(input.budgetUsage);
+}
+
+function validateContextHistoryBindings(input: ContextHistoryRecord): void {
+  if (input.contextView.executionEpoch !== input.loopCheckpoint.executionEpoch) {
+    throw new ContractError('context history context view and loop checkpoint execution epochs must match');
+  }
+  if (input.contextView.checkpoint.checkpointId.value !== input.loopCheckpoint.checkpointId.value
+    || input.contextView.checkpoint.digest !== input.loopCheckpoint.digest) {
+    throw new ContractError('context history context view must reference the loop checkpoint');
+  }
+  if (input.loopCheckpoint.contextViewRef !== input.contextView.contextViewRef) {
+    throw new ContractError('context history loop checkpoint must reference the context view');
+  }
+  if (input.loopControl.inboxExecutionEpoch !== input.loopCheckpoint.executionEpoch
+    || input.loopControl.deltaExecutionEpoch !== input.loopCheckpoint.executionEpoch) {
+    throw new ContractError('context history processing state execution epochs must match the loop checkpoint');
+  }
+  if (input.loopControl.observationScope !== null
+    && input.loopControl.observationScope.executionEpoch !== input.loopCheckpoint.executionEpoch) {
+    throw new ContractError('context history observation scope execution epoch must match the loop checkpoint');
+  }
+  if (input.replacement === null) return;
+  if (input.replacement.executionEpoch !== input.loopCheckpoint.executionEpoch) {
+    throw new ContractError('context history replacement execution epoch must match the loop checkpoint');
+  }
+  if (input.replacement.successorCheckpoint.checkpointId.value !== input.loopCheckpoint.checkpointId.value
+    || input.replacement.successorCheckpoint.digest !== input.loopCheckpoint.digest) {
+    throw new ContractError('context history replacement must advance to the loop checkpoint');
+  }
+  if (input.replacement.toContextViewRef !== input.contextView.contextViewRef
+    || input.replacement.toContextDigest !== input.contextView.contextDigest) {
+    throw new ContractError('context history replacement must link to the context view');
+  }
+  const predecessor = input.loopCheckpoint.predecessor;
+  if (predecessor === null) throw new ContractError('context history replacement requires a predecessor checkpoint');
+  if (input.replacement.baseCheckpoint.checkpointId.value !== predecessor.checkpointId.value
+    || input.replacement.baseCheckpoint.digest !== predecessor.digest) {
+    throw new ContractError('context history replacement must link to the loop checkpoint predecessor');
+  }
+}
+
+export function validateContextHistoryRecord(input: ContextHistoryRecord): void {
+  if (input === null || typeof input !== 'object') throw new ContractError('context history record must be an object');
+  if (input.kind !== 'context-history') throw new ContractError('context history record kind is invalid');
+  if (input.schemaVersion !== 1) throw new ContractError('context history record schemaVersion must be 1');
+  validateAgentLoopScopeRef(input.scope, 'context history scope');
+  nonEmpty(input.agentRuntimeId, 'context history agentRuntimeId');
+  validateContextView(input.contextView);
+  validateAgentLoopCheckpointShape(input.loopCheckpoint);
+  if (input.previousContextCommitRef !== null) validateJournalCommitRef(input.previousContextCommitRef);
+  if (input.replacement !== null) validateContextReplacement(input.replacement);
+  validateDurableContextBody(input.durableContext);
+  nonEmpty(input.durableContextDigest, 'context history durableContextDigest');
+  validateContextLoopControl(input.loopControl);
+  validateContextHistoryBindings(input);
 }

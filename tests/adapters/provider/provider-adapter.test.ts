@@ -8,12 +8,14 @@ import { ImmutableAssetStore } from '../../../packages/adapters/filesystem/src/i
 import {
   ContractError,
   id,
+  validateProviderEvent,
   type EvidenceRef,
   type ProviderBinding,
   type ProviderCapabilities,
   type ProviderCloseResult,
   type ProviderEvent,
   type ProviderReadiness,
+  type ProviderRawFact,
   type ProviderRecoveryResult,
   type ProviderResumeInput,
   type ProviderSettlement,
@@ -39,6 +41,7 @@ import {
   type ProviderWireEvent,
   type ResponsesWireTool,
 } from '../../../packages/adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../../packages/adapters/provider/src/evidence.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
@@ -1280,6 +1283,335 @@ test('filesystem provider evidence sink writes immutable readable content', asyn
     content: 'hello',
   });
   assert.equal(new TextDecoder().decode(await store.readEvidence(ref)), 'hello');
+});
+
+function contentFactOf(facts: readonly ProviderRawFact[]): Extract<ProviderRawFact, { kind: 'content' }> {
+  const fact = facts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'content' }> => candidate.kind === 'content');
+  assert.ok(fact, 'expected a content raw fact');
+  return fact;
+}
+
+test('responses codec emits ordered typed raw facts for parts, arguments, tool calls, and completion', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const reader = providerRawContentReader(context.evidence);
+  const readContent = async (fact: Extract<ProviderRawFact, { kind: 'content' }>): Promise<string> =>
+    new TextDecoder().decode(await reader.read({ scope: operationScope, content: fact.content }));
+
+  const partAdded = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.content_part.added',
+    item_id: 'item-1',
+    output_index: 0,
+    content_index: 0,
+    part: { type: 'output_text', text: 'hel' },
+  }, context);
+  const partFact = contentFactOf(partAdded.rawFacts);
+  assert.equal(partFact.channel, 'assistant-text');
+  assert.equal(partFact.update, 'full');
+  assert.equal(partFact.complete, false);
+  assert.equal(partFact.contentUnitId, 'responses:assistant-text:item-1:0');
+  assert.equal(await readContent(partFact), 'hel');
+
+  const delta = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_text.delta',
+    item_id: 'item-1',
+    delta: 'lo',
+  }, context);
+  const deltaFact = contentFactOf(delta.rawFacts);
+  assert.equal(deltaFact.update, 'delta');
+  assert.equal(deltaFact.complete, false);
+  // No content_index on the wire -> item-scoped unit, never a default part 0.
+  assert.equal(deltaFact.contentUnitId, 'responses:assistant-text:item-1');
+  assert.equal(await readContent(deltaFact), 'lo');
+
+  const done = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_text.done',
+    item_id: 'item-1',
+    text: 'hello',
+  }, context);
+  const doneFact = contentFactOf(done.rawFacts);
+  assert.equal(doneFact.update, 'full');
+  assert.equal(doneFact.complete, true);
+  assert.equal(doneFact.contentUnitId, 'responses:assistant-text:item-1');
+  assert.equal(await readContent(doneFact), 'hello');
+
+  const itemDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'message', id: 'item-1', role: 'assistant', content: [{ type: 'output_text', text: 'hello' }] },
+  }, context);
+  const itemFact = contentFactOf(itemDone.rawFacts);
+  assert.equal(itemFact.update, 'full');
+  assert.equal(itemFact.complete, true);
+  assert.deepEqual(itemFact.replacesUnitIds, ['responses:assistant-text:item-1:0']);
+  assert.equal(await readContent(itemFact), 'hello');
+
+  const argDelta = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.function_call_arguments.delta',
+    call_id: 'call-1',
+    delta: '{"path":',
+  }, context);
+  const argDeltaFact = contentFactOf(argDelta.rawFacts);
+  assert.equal(argDeltaFact.channel, 'tool-arguments');
+  assert.equal(argDeltaFact.update, 'delta');
+  assert.equal(argDeltaFact.contentUnitId, 'responses:tool-arguments:call-1');
+  assert.equal(await readContent(argDeltaFact), '{"path":');
+
+  const argDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.function_call_arguments.done',
+    call_id: 'call-1',
+    arguments: '{"path":"README.md"}',
+  }, context);
+  const argDoneFact = contentFactOf(argDone.rawFacts);
+  assert.equal(argDoneFact.update, 'full');
+  assert.equal(argDoneFact.complete, true);
+  assert.equal(await readContent(argDoneFact), '{"path":"README.md"}');
+
+  await codec.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'resp-tool' } }, context);
+  const toolDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'file_read', arguments: '{"path":"README.md"}' },
+  }, context);
+  const toolFact = toolDone.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'tool-call' }> => candidate.kind === 'tool-call');
+  assert.ok(toolFact, 'expected a tool-call raw fact');
+  assert.equal(toolFact.contentUnitId, 'responses:tool-arguments:call-1');
+  assert.equal(toolFact.call.callId, 'call-1');
+  assert.equal(toolFact.call.toolId, 'file.read');
+  assert.equal(toolFact.call.continuationRef, 'resp-tool');
+  assert.equal(new TextDecoder().decode(await reader.read({ scope: operationScope, content: toolFact.rawArguments })), '{"path":"README.md"}');
+});
+
+test('anthropic codec keeps block channels separate and closes units and tool calls on block stop', async () => {
+  const codec = new AnthropicProviderCodec(4096);
+  const context = codecContext();
+  const reader = providerRawContentReader(context.evidence);
+  const readAsset = async (asset: Extract<ProviderRawFact, { kind: 'content' }>['content']): Promise<string> =>
+    new TextDecoder().decode(await reader.read({ scope: operationScope, content: asset }));
+
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'msg-1', model: 'm', role: 'assistant' } }, context);
+
+  const thinking = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'thinking', thinking: 'think', signature: 'sig' },
+  }, context);
+  assert.equal(thinking.rawFacts.length, 2);
+  const thinkFact = contentFactOf(thinking.rawFacts);
+  const sigFact = thinking.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'content' }> => candidate.kind === 'content' && candidate.channel === 'reasoning-signature');
+  assert.ok(sigFact, 'expected a reasoning-signature fact');
+  assert.equal(thinkFact.channel, 'reasoning-text');
+  assert.equal(thinkFact.complete, false);
+  assert.equal(await readAsset(thinkFact.content), 'think');
+  assert.equal(sigFact.complete, false);
+  assert.equal(await readAsset(sigFact.content), 'sig');
+
+  const thinkingStop = await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, context);
+  assert.deepEqual(thinkingStop.rawFacts.map((fact) => fact.kind), ['content-complete', 'content-complete']);
+  assert.deepEqual(
+    thinkingStop.rawFacts.map((fact) => (fact.kind === 'content-complete' ? fact.contentUnitId : '')),
+    ['anthropic:reasoning-text:0', 'anthropic:reasoning-signature:0'],
+  );
+
+  const toolStart = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_start',
+    index: 1,
+    content_block: { type: 'tool_use', id: 'tool-1', name: 'lookup', input: {} },
+  }, context);
+  const toolStartFact = contentFactOf(toolStart.rawFacts);
+  assert.equal(toolStartFact.channel, 'tool-arguments');
+  assert.equal(toolStartFact.complete, false);
+  assert.equal(await readAsset(toolStartFact.content), '{}');
+
+  const frag1 = await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"q":' } }, context);
+  const frag2 = await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '"x"}' } }, context);
+  const frag1Fact = contentFactOf(frag1.rawFacts);
+  const frag2Fact = contentFactOf(frag2.rawFacts);
+  assert.equal(frag1Fact.contentUnitId, 'anthropic:tool-arguments:1');
+  assert.equal(frag2Fact.contentUnitId, 'anthropic:tool-arguments:1');
+  assert.equal((await readAsset(frag1Fact.content)) + (await readAsset(frag2Fact.content)), '{"q":"x"}');
+
+  const toolStop = await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 1 }, context);
+  const toolCall = toolStop.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'tool-call' }> => candidate.kind === 'tool-call');
+  assert.ok(toolCall, 'expected a completed tool call');
+  assert.deepEqual(toolCall.call.arguments, { q: 'x' });
+  assert.equal(toolCall.call.callId, 'tool-1');
+  assert.equal(toolCall.call.toolId, 'lookup');
+  assert.equal(toolCall.call.continuationRef, 'msg-1');
+  assert.equal(new TextDecoder().decode(await reader.read({ scope: operationScope, content: toolCall.rawArguments })), '{"q":"x"}');
+});
+
+test('openai chat codec keeps tool argument fragments in one unit across a late call id', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const context = codecContext();
+  const reader = providerRawContentReader(context.evidence);
+  const readContent = async (fact: Extract<ProviderRawFact, { kind: 'content' }>): Promise<string> =>
+    new TextDecoder().decode(await reader.read({ scope: operationScope, content: fact.content }));
+
+  const first = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-1',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { name: 'lookup', arguments: '{"q":' } }] }, finish_reason: null }],
+  }, context);
+  const firstFact = contentFactOf(first.rawFacts);
+
+  const second = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-1',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-1', function: { arguments: '"x"}' } }] }, finish_reason: null }],
+  }, context);
+  const secondFact = contentFactOf(second.rawFacts);
+
+  assert.equal(firstFact.contentUnitId, 'openai:tool-arguments:chat-1:0:0');
+  assert.equal(secondFact.contentUnitId, firstFact.contentUnitId);
+  assert.equal((await readContent(firstFact)) + (await readContent(secondFact)), '{"q":"x"}');
+
+  const finish = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-1',
+    choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+  }, context);
+  const terminal = finish.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'request-complete' }> => candidate.kind === 'request-complete');
+  assert.equal(terminal?.terminal, 'completed');
+});
+
+test('openai chat codec assembles fragments into one executable typed tool call with a legal phase', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const context = codecContext();
+
+  const first = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-typed',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { name: 'file_read', arguments: '{"path":' } }] }, finish_reason: null }],
+  }, context);
+  assert.equal(first.events[0].kind, 'tool');
+  assert.equal(first.events[0].toolPhase, 'invoke');
+  assert.equal(first.events[0].toolCall, undefined);
+  for (const event of first.events) validateProviderEvent(event);
+
+  const second = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-typed',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-typed', function: { arguments: '"README.md"}' } }] }, finish_reason: null }],
+  }, context);
+  assert.equal(second.events[0].toolPhase, 'invoke');
+
+  const finish = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-typed',
+    choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+  }, context);
+  const executable = finish.events.filter((event) => event.toolCall !== undefined);
+  assert.equal(executable.length, 1);
+  assert.deepEqual(executable[0]?.toolCall, { callId: 'call-typed', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'chat-typed' });
+  assert.equal(executable[0]?.toolPhase, undefined);
+  for (const event of finish.events) validateProviderEvent(event);
+  const rawCall = finish.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'tool-call' }> => candidate.kind === 'tool-call');
+  assert.ok(rawCall, 'expected a typed tool-call raw fact');
+  assert.equal(rawCall.contentUnitId, 'openai:tool-arguments:chat-typed:0:0');
+  assert.deepEqual(rawCall.call.arguments, { path: 'README.md' });
+});
+
+test('openai chat codec fails closed on incomplete fragmented tool arguments', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const context = codecContext();
+  await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-bad',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-bad', function: { name: 'file_read', arguments: '{"path":' } }] }, finish_reason: null }],
+  }, context);
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'openai',
+      type: 'openai.chat.completion',
+      id: 'chat-bad',
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+    }, context),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'tool.arguments.invalid-json',
+  );
+});
+
+test('anthropic codec emits one executable typed tool call with a legal phase on block stop', async () => {
+  const codec = new AnthropicProviderCodec(4096);
+  const context = codecContext();
+
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'msg-typed', model: 'm', role: 'assistant' } }, context);
+  const start = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'tool_use', id: 'call-typed', name: 'file_read', input: {} },
+  }, context);
+  assert.equal(start.events[0].kind, 'tool');
+  assert.equal(start.events[0].toolPhase, 'invoke');
+  assert.equal(start.events[0].toolCall, undefined);
+  for (const event of start.events) validateProviderEvent(event);
+
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"README.md"}' } }, context);
+
+  const stop = await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, context);
+  const executable = stop.events.filter((event) => event.toolCall !== undefined);
+  assert.equal(executable.length, 1);
+  assert.deepEqual(executable[0]?.toolCall, { callId: 'call-typed', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'msg-typed' });
+  for (const event of stop.events) validateProviderEvent(event);
+  const rawCall = stop.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'tool-call' }> => candidate.kind === 'tool-call');
+  assert.ok(rawCall, 'expected a typed tool-call raw fact');
+  assert.equal(rawCall.call.toolId, 'file.read');
+  assert.equal(rawCall.call.continuationRef, 'msg-typed');
+});
+
+test('anthropic codec fails closed on incomplete tool arguments at block stop', async () => {
+  const codec = new AnthropicProviderCodec(4096);
+  const context = codecContext();
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'msg-bad', model: 'm', role: 'assistant' } }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-bad', name: 'file_read', input: {} } }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } }, context);
+  await assert.rejects(
+    () => codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, context),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'tool.arguments.invalid-json',
+  );
+});
+
+test('provider raw reader cold-reads an immutable asset from a fresh store object and rejects scope mismatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-raw-'));
+  const store = new ImmutableAssetStore(root);
+  const sink = filesystemProviderEvidenceSink(store);
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext({ evidence: sink });
+
+  const decoded = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_text.delta',
+    item_id: 'item-1',
+    delta: 'line-1\nline-2',
+  }, context);
+  const fact = contentFactOf(decoded.rawFacts);
+
+  // Drop the producer store/sink and rebuild from the same root.
+  const freshStore = new ImmutableAssetStore(root);
+  const reader = providerRawContentReader(filesystemProviderEvidenceSink(freshStore));
+  const bytes = await reader.read({ scope: operationScope, content: fact.content });
+  assert.equal(new TextDecoder().decode(bytes), 'line-1\nline-2');
+
+  const otherScope: ScopeRef = { organId: id('organ', 'organ-b'), taskId: id('task', 'task-b'), operationId: id('operation', 'operation-b') };
+  await assert.rejects(() => reader.read({ scope: otherScope, content: fact.content }), /scope/i);
 });
 
 test('protocol mismatch, missing readiness evidence, unknown event, and missing fields fail explicitly', async () => {

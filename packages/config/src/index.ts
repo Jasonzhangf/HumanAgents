@@ -1,9 +1,21 @@
 import { lstatSync } from 'node:fs';
-import { chmod, mkdir, open as openFile, readFile, realpath, stat } from 'node:fs/promises';
+import { chmod, mkdir, open as openFile, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { ENABLED_AGENT_DRIVER_REFS, loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole, type LoadedAgentPromptSegments } from '../../agent-templates/src/index.js';
+import { DEFAULT_UI_DISPLAY_PREFERENCE, UiPreferenceError, validateUiDisplayPreference, type UiDisplayPreference } from './ui-preferences.js';
+
+declare module 'node:fs/promises' {
+  export interface Dirent {
+    readonly name: string;
+    isDirectory(): boolean;
+  }
+  export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
+}
+
+export * from './ui-preferences.js';
+export { saveUiDisplayPreference } from './ui-preference-store.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;
@@ -14,8 +26,10 @@ export const AGENT_ROLES = ['interaction', 'orchestration', 'execution', 'review
 export type AgentRole = (typeof AGENT_ROLES)[number];
 export const PROVIDER_PROTOCOLS = ['responses', 'openai', 'anthropic'] as const;
 export type ProviderProtocol = (typeof PROVIDER_PROTOCOLS)[number];
-export const PROVIDERS = ['rcc'] as const;
+export const PROVIDERS = ['rcc', 'http'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
+export const PROVIDER_SOURCES = ['rcc', 'http'] as const;
+export type ProviderSource = (typeof PROVIDER_SOURCES)[number];
 
 export interface AgentConfig {
   readonly agentId: string;
@@ -72,8 +86,14 @@ export interface AcpExecutionConfig {
 }
 
 
+export type ProviderCredentialRef = `env:${string}`;
+
 export interface ProviderConfig {
+  /** Local binding label; it does not select a source strategy or upstream provider. */
   readonly provider: ProviderId;
+  /** Source strategy. Omitting it preserves the legacy RCC meaning. */
+  readonly source?: ProviderSource;
+  readonly credentialRef?: ProviderCredentialRef;
   readonly binding: string;
   readonly protocol: ProviderProtocol;
   readonly model: string;
@@ -119,6 +139,14 @@ export interface UserConfig {
     readonly opencode?: AcpExecutionConfig;
     readonly antigravity?: AcpExecutionConfig;
     readonly dshAcp?: AcpExecutionConfig;
+  };
+  /**
+   * Versioned display/reading preference only. It never carries task, organ,
+   * checkpoint, session or runtime state. Defaults to the cold-start
+   * `current` view when absent.
+   */
+  readonly ui?: {
+    readonly display: UiDisplayPreference;
   };
 }
 
@@ -169,6 +197,25 @@ export interface ProjectSourceManifest {
   };
 }
 
+export interface ConfiguredProjectReadSource {
+  readonly projectKey: string;
+  readonly workspaceCwd: string;
+  readonly projectRoot: string;
+  readonly checkpointsRoot: string;
+}
+
+export interface ConfiguredProjectCatalog {
+  readonly projects: readonly ConfiguredProjectReadSource[];
+  readonly failures: readonly ConfiguredProjectFailure[];
+}
+
+interface ConfiguredProjectFailure {
+  readonly code: string;
+  readonly ownerId: 'humanagent.config';
+  readonly message: string;
+  readonly nextAction: string;
+}
+
 export interface LoadedConfiguration {
   readonly paths: RuntimePaths;
   readonly internal: InternalConfig;
@@ -215,7 +262,7 @@ function validateProjectSourceManifestShape(value: unknown, paths: RuntimePaths)
     fail('project-manifest-corrupt', 'project manifest schema version is unsupported', '修复 project.json schemaVersion 后重试');
   }
   if (manifest.projectKey !== paths.projectKey || manifest.workspaceCwd !== paths.workspaceCwd) {
-    fail('project-identity-mismatch', 'project manifest does not match canonical workspace');
+    fail('project-identity-mismatch', `project manifest does not match configured project: ${paths.projectManifest}`);
   }
   if (manifest.sources === undefined) {
     return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd };
@@ -286,6 +333,126 @@ export async function resolveProjectSourceManifest(paths: RuntimePaths): Promise
     return { ...manifest, sources: { localSkill: { root: canonicalRoot, name: localSkill.name } } };
   }
   return manifest;
+}
+
+export async function listConfiguredProjects(paths: RuntimePaths): Promise<ConfiguredProjectCatalog> {
+  const projects: ConfiguredProjectReadSource[] = [];
+  const failures: ConfiguredProjectFailure[] = [];
+  const sessionRoot = dirname(paths.projectRoot);
+  const projectDirs: string[] = [];
+  try {
+    for (const entry of await readdir(sessionRoot, { withFileTypes: true })) {
+      if (entry.isDirectory()) projectDirs.push(join(sessionRoot, entry.name));
+    }
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return { projects, failures };
+    throw error;
+  }
+  for (const projectDir of projectDirs) {
+    const manifestPath = join(projectDir, 'project.json');
+    let raw: string;
+    try {
+      raw = await readFile(manifestPath, 'utf8');
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      failures.push({
+        code: code === 'ENOENT' ? 'project-manifest-missing' : 'project-manifest-unreadable',
+        ownerId: 'humanagent.config',
+        message: `project manifest is unavailable: ${manifestPath}`,
+        nextAction: '修复或移除该 project 记录后重试',
+      });
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      failures.push({
+        code: 'project-manifest-corrupt',
+        ownerId: 'humanagent.config',
+        message: `project manifest is not valid JSON: ${manifestPath}`,
+        nextAction: '保留原文件并修复 project.json 后重试',
+      });
+      continue;
+    }
+    const workspaceCwd = manifestWorkspaceCwd(parsed);
+    if (workspaceCwd === undefined) {
+      failures.push({
+        code: 'project-manifest-corrupt',
+        ownerId: 'humanagent.config',
+        message: `project manifest workspace is unavailable: ${manifestPath}`,
+        nextAction: '修复 project.json workspaceCwd 后重试',
+      });
+      continue;
+    }
+    try {
+      rejectSymlinkComponents(manifestPath, paths.controlRoot);
+    } catch (error) {
+      failures.push({
+        code: error instanceof ConfigurationError ? error.code : 'path-policy',
+        ownerId: 'humanagent.config',
+        message: error instanceof Error ? error.message : String(error),
+        nextAction: '移除 control root 下的 symlink 后重试',
+      });
+      continue;
+    }
+    const candidateProjectKey = normalizeProjectDirectory(projectDir, sessionRoot);
+    const { readableProjectKey, collisionProjectKey } = canonicalProjectKeyCandidates(workspaceCwd);
+    if (candidateProjectKey !== readableProjectKey && candidateProjectKey !== collisionProjectKey) {
+      failures.push({
+        code: 'project-identity-mismatch',
+        ownerId: 'humanagent.config',
+        message: `project manifest projectKey does not match its workspace identity: ${manifestPath}`,
+        nextAction: '修复 project.json projectKey/workspaceCwd 后重试',
+      });
+      continue;
+    }
+    const candidatePaths: RuntimePaths = {
+      ...paths,
+      workspaceCwd,
+      projectKey: candidateProjectKey,
+      projectRoot: projectDir,
+      projectManifest: manifestPath,
+      sessionsRoot: projectDir,
+      journalRoot: join(projectDir, 'journal'),
+      checkpointsRoot: join(projectDir, 'checkpoints'),
+      indexRoot: join(projectDir, 'index'),
+      artifactsRoot: join(projectDir, 'artifacts'),
+      memoryRoot: join(projectDir, 'memory'),
+      locksRoot: join(projectDir, 'locks'),
+      runNotesRoot: join(projectDir, 'run-notes'),
+    };
+    try {
+      const manifest = validateProjectSourceManifestShape(parsed, candidatePaths);
+      projects.push({
+        projectKey: manifest.projectKey,
+        workspaceCwd: manifest.workspaceCwd,
+        projectRoot: projectDir,
+        checkpointsRoot: join(projectDir, 'checkpoints'),
+      });
+    } catch (error) {
+      failures.push({
+        code: error instanceof ConfigurationError ? error.code : 'project-manifest-corrupt',
+        ownerId: 'humanagent.config',
+        message: error instanceof Error ? error.message : String(error),
+        nextAction: '修复 project.json 后重试',
+      });
+    }
+  }
+  return { projects, failures };
+}
+
+function manifestWorkspaceCwd(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const workspaceCwd = (value as { workspaceCwd?: unknown }).workspaceCwd;
+  return typeof workspaceCwd === 'string' && workspaceCwd ? workspaceCwd : undefined;
+}
+
+function normalizeProjectDirectory(projectDir: string, sessionRoot: string): string {
+  const normalizedRoot = normalize(sessionRoot);
+  const normalizedDir = normalize(projectDir);
+  const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+  return normalizedDir.startsWith(prefix) ? normalizedDir.slice(prefix.length) : normalize(projectDir).split(sep).pop() ?? projectDir;
 }
 
 function stripComment(line: string): string {
@@ -521,12 +688,40 @@ function validateAcpExecution(value: unknown, label: string): AcpExecutionConfig
   };
 }
 
+function validateProviderCredentialRef(value: unknown): ProviderCredentialRef {
+  if (typeof value !== 'string' || !/^env:[A-Za-z_][A-Za-z0-9_]*(?![\s\S])/.test(value)) {
+    fail('config-invalid', 'credentialRef has invalid syntax');
+  }
+  return value as ProviderCredentialRef;
+}
+
+export function resolveProviderCredential(
+  credentialRef: ProviderCredentialRef | undefined,
+  env?: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  if (credentialRef === undefined) return undefined;
+  const ref = validateProviderCredentialRef(credentialRef);
+  const value = (env ?? process.env)[ref.slice(4)];
+  if (value === undefined || value.trim().length === 0) {
+    fail('config-credential-unavailable', 'provider credential is unavailable', 'provide a non-empty value for the declared credential variable');
+  }
+  return value;
+}
+
 function validateProviderConfig(value: unknown, label = 'provider'): ProviderConfig {
   const provider = asRecord(value, label);
-  rejectUnknownKeys(provider, ['provider', 'binding', 'protocol', 'model', 'route', 'baseUrl'], label);
+  rejectUnknownKeys(provider, ['provider', 'source', 'credentialRef', 'binding', 'protocol', 'model', 'route', 'baseUrl'], label);
   const providerId = asString(provider.provider, `${label}.provider`);
   if (!(PROVIDERS as readonly string[]).includes(providerId)) {
-    fail('config-capability', `unknown provider: ${providerId}`, 'choose the configured RCC provider');
+    fail('config-capability', `unknown provider: ${providerId}`, 'choose a supported provider');
+  }
+  const source = provider.source === undefined ? undefined : asString(provider.source, `${label}.source`);
+  if (source !== undefined && !(PROVIDER_SOURCES as readonly string[]).includes(source)) {
+    fail('config-invalid', `unsupported provider source: ${source}`, 'choose rcc or http');
+  }
+  const credentialRef = provider.credentialRef === undefined ? undefined : validateProviderCredentialRef(provider.credentialRef);
+  if (credentialRef !== undefined && source !== 'http') {
+    fail('config-invalid', 'credentialRef requires source = "http"');
   }
   const protocol = asString(provider.protocol, `${label}.protocol`);
   if (!(PROVIDER_PROTOCOLS as readonly string[]).includes(protocol)) {
@@ -534,12 +729,29 @@ function validateProviderConfig(value: unknown, label = 'provider'): ProviderCon
   }
   return {
     provider: providerId as ProviderId,
+    ...(source === undefined ? {} : { source: source as ProviderSource }),
+    ...(credentialRef === undefined ? {} : { credentialRef }),
     binding: asString(provider.binding, `${label}.binding`),
     protocol: protocol as ProviderProtocol,
     model: asString(provider.model, `${label}.model`),
     route: asString(provider.route, `${label}.route`),
     baseUrl: asString(provider.baseUrl, `${label}.baseUrl`),
   };
+}
+
+export function compileAgentProviderBindings(user: UserConfig): EffectiveAgentProviderBinding[] {
+  return user.agents.map((agent) => {
+    const provider = agent.provider ?? user.provider;
+    if (provider === undefined) {
+      return { agentId: agent.agentId, roleId: agent.roleId, source: 'unconfigured' };
+    }
+    return {
+      agentId: agent.agentId,
+      roleId: agent.roleId,
+      source: agent.provider === undefined ? 'inherited' : 'agent',
+      provider: agent.model === undefined ? provider : { ...provider, model: agent.model },
+    };
+  });
 }
 
 function validateProviderRetryExecution(value: unknown, label: string): ProviderRetryExecutionConfig {
@@ -550,28 +762,6 @@ function validateProviderRetryExecution(value: unknown, label: string): Provider
   return {
     candidates: retry.candidates.map((candidate, index) => validateProviderConfig(candidate, `${label}.candidates[${index}]`)),
   };
-}
-
-/**
- * Resolve the effective provider binding for every configured agent so the App
- * layer can consume a typed selection without re-parsing TOML. An agent's own
- * `provider` block wins over the shared top-level `[provider]`; the agent's own
- * `model` overrides the selected binding's model.
- */
-export function compileAgentProviderBindings(config: UserConfig): readonly EffectiveAgentProviderBinding[] {
-  return config.agents.map((agent) => {
-    const selected = agent.provider ?? config.provider;
-    if (selected === undefined) {
-      return { agentId: agent.agentId, roleId: agent.roleId, source: 'unconfigured' };
-    }
-    const provider = agent.model === undefined ? selected : { ...selected, model: agent.model };
-    return {
-      agentId: agent.agentId,
-      roleId: agent.roleId,
-      source: agent.provider === undefined ? 'inherited' : 'agent',
-      provider,
-    };
-  });
 }
 
 function validateMemoryConfig(value: unknown): NonNullable<UserConfig['memory']> {
@@ -594,7 +784,7 @@ function validateMemoryConfig(value: unknown): NonNullable<UserConfig['memory']>
 
 export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   for (const key of INTERNAL_CONFIG_KEYS) if (key in value) fail('config-policy', `user config cannot define internal key: ${key}`);
-  rejectUnknownKeys(value, ['schemaVersion', 'agents', 'provider', 'project', 'memory', 'execution'], 'user config');
+  rejectUnknownKeys(value, ['schemaVersion', 'agents', 'provider', 'project', 'memory', 'execution', 'ui'], 'user config');
   if (value.schemaVersion !== CONFIG_SCHEMA_VERSION) fail('config-version', `unsupported user config schema: ${String(value.schemaVersion)}`);
   if (!Array.isArray(value.agents) || value.agents.length === 0) fail('config-invalid', 'at least one agent is required');
   const agents = value.agents.map(validateAgent);
@@ -610,8 +800,17 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   const project = value.project === undefined ? undefined : asRecord(value.project, 'project');
   const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
+  const ui = value.ui === undefined ? undefined : asRecord(value.ui, 'ui');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'user project config');
   if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh', 'providerRetry', 'opencode', 'antigravity', 'dshAcp'], 'user execution config');
+  if (ui) rejectUnknownKeys(ui, ['display'], 'user ui config');
+  let display: UiDisplayPreference;
+  try {
+    display = validateUiDisplayPreference(ui?.display ?? DEFAULT_UI_DISPLAY_PREFERENCE);
+  } catch (error) {
+    if (error instanceof UiPreferenceError) fail('config-invalid', error.message);
+    throw error;
+  }
   const maxConcurrentTasks = execution?.maxConcurrentTasks as unknown;
   const stopTimeoutMs = execution?.stopTimeoutMs as unknown;
   const providerRetry = execution?.providerRetry === undefined
@@ -637,6 +836,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
       ...(execution.antigravity === undefined ? {} : { antigravity: validateAcpExecution(execution.antigravity, 'execution.antigravity') }),
       ...(execution.dshAcp === undefined ? {} : { dshAcp: validateAcpExecution(execution.dshAcp, 'execution.dshAcp') }),
     }}),
+    ui: { display },
   };
 }
 
@@ -840,7 +1040,7 @@ export async function resolveRuntimePaths(options: { readonly workspace: string;
     if (error instanceof ConfigurationError) throw error;
     fail('workspace-invalid', `workspace does not exist or is inaccessible: ${workspaceInput}`, '指定一个可访问的 workspace 目录');
   }
-  const readableProjectKey = workspaceCwd.replaceAll(sep, '/').replaceAll('/', '-') || '-';
+  const { readableProjectKey } = canonicalProjectKeyCandidates(workspaceCwd);
   const projectKey = await resolveProjectKey(sessionRoot, controlRoot, readableProjectKey, workspaceCwd);
   const projectRoot = join(sessionRoot, projectKey);
   return {
@@ -878,8 +1078,13 @@ async function resolveProjectKey(sessionRoot: string, controlRoot: string, reada
     return readableProjectKey;
   }
   if (existing.workspaceCwd === workspaceCwd) return readableProjectKey;
+  return canonicalProjectKeyCandidates(workspaceCwd).collisionProjectKey;
+}
+
+function canonicalProjectKeyCandidates(workspaceCwd: string): { readonly readableProjectKey: string; readonly collisionProjectKey: string } {
+  const readableProjectKey = workspaceCwd.replaceAll(sep, '/').replaceAll('/', '-') || '-';
   const suffix = createHash('sha256').update(workspaceCwd).digest('hex').slice(0, 16);
-  return `${readableProjectKey}--${suffix}`;
+  return { readableProjectKey, collisionProjectKey: `${readableProjectKey}--${suffix}` };
 }
 
 export async function ensureControlLayout(paths: RuntimePaths): Promise<void> {
@@ -1013,6 +1218,7 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
     project: { ...user.project, ...projectOverride?.project },
     memory: projectOverride?.memory ?? user.memory,
     execution: { ...user.execution, ...projectOverride?.execution },
+    ...(user.ui === undefined ? {} : { ui: user.ui }),
   };
   const templateRoot = configuredTemplateRoot();
   const promptCatalog: Partial<Record<AgentRole, LoadedAgentPromptSegments>> = {};
@@ -1028,7 +1234,11 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
     }
   }
   return {
-    paths, internal, user, projectOverride, effective,
+    paths,
+    internal,
+    user,
+    projectOverride,
+    effective,
     agentRoster: [...effective.agents],
     agentProviderBindings: compileAgentProviderBindings(effective),
     promptCatalog,

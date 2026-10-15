@@ -11,9 +11,19 @@ import {
   dshBaselineLock,
   type DshProfileDescriptor,
 } from '../../adapters/dsh/src/index.js';
-import type { AgentConfig, AcpExecutionConfig, DshExecutionConfig, RuntimePaths } from '../../config/src/index.js';
+import type {
+  AgentConfig,
+  AgentRole,
+  AcpExecutionConfig,
+  DshExecutionConfig,
+  EffectiveAgentProviderBinding,
+  ProviderConfig,
+  ProviderSource,
+  RuntimePaths,
+} from '../../config/src/index.js';
 import { FakeAgentDriver } from '../../adapters/testing/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import { assembleProviderExecutionPort, type ProviderAssemblyInput } from './provider-assembly.js';
 import {
   createAcpClientDriver,
   createAntigravityRuntime,
@@ -34,8 +44,10 @@ import {
   type TaskId,
 } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
+import { admitAgentProvider } from './agent-provider-admission.js';
 
 const DSH_OWNER = 'humanagent.app.dsh-composition';
+const AGENT_PROVIDER_OWNER = 'humanagent.app.agent-provider-binding';
 const DSH_SETTINGS_FILE = 'settings.yaml';
 const DSH_RCC_BASE_URL = 'http://127.0.0.1:4444/v1';
 const DSH_REQUIRED_PATCHES = [
@@ -210,6 +222,230 @@ export function verifyDshPatches(
     digests.push(actualDigest);
   }
   return { refs: [...patchRefs], files, digests };
+}
+
+export interface AgentProviderPortFactoryInput {
+  readonly provider: ProviderConfig;
+  readonly binding: ProviderBinding;
+}
+
+export type AgentProviderPortFactory = (input: AgentProviderPortFactoryInput) => ExecutionRuntimePort;
+
+export interface AgentProviderComposition {
+  readonly configuredAgentId?: string;
+  readonly roleId: AgentRole;
+  readonly provider: ProviderConfig;
+  readonly source: ProviderSource;
+  readonly binding: ProviderBinding;
+  readonly port: ExecutionRuntimePort;
+}
+
+export interface AgentProviderSelectionInput {
+  readonly roleId: AgentRole;
+  readonly agentId?: string;
+  readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
+  readonly legacyProvider?: ProviderConfig;
+  readonly legacyBindingOverrides?: Partial<Pick<ProviderBinding, 'endpointRef' | 'configDigest' | 'capabilityDigest'>>;
+  readonly createPort: AgentProviderPortFactory;
+}
+
+/**
+ * Builds the canonical ProviderBinding for one compiled effective provider
+ * config. The config is already validated and compiled by Config; the App
+ * layer never re-parses TOML or environment here.
+ *
+ * Endpoint provenance stays source-aware: an HTTP binding is never labelled
+ * with the RCC-only `rcc-v3:` scheme. The capability digest is an honest
+ * identity label for this exact config, never a borrowed default binding value
+ * or a bare unhashed string.
+ */
+export function providerBindingFromConfig(provider: ProviderConfig): ProviderBinding {
+  const source = provider.source ?? 'rcc';
+  const endpointHost = provider.baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  return {
+    bindingId: provider.binding,
+    providerId: provider.provider,
+    protocol: provider.protocol,
+    endpointRef: source === 'http' ? `http:${endpointHost}` : `rcc-v3:${endpointHost}`,
+    modelRef: provider.model,
+    configDigest: digest(JSON.stringify({
+      source,
+      binding: provider.binding,
+      provider: provider.provider,
+      protocol: provider.protocol,
+      model: provider.model,
+      route: provider.route,
+      baseUrl: provider.baseUrl,
+    })),
+    capabilityDigest: digest(JSON.stringify({
+      binding: provider.binding,
+      provider: provider.provider,
+      protocol: provider.protocol,
+      model: provider.model,
+      route: provider.route,
+      baseUrl: provider.baseUrl,
+      source,
+    })),
+  };
+}
+
+interface ResolvedAgentProviderSelection {
+  readonly configuredAgentId?: string;
+  readonly roleId: AgentRole;
+  readonly provider: ProviderConfig;
+}
+
+function resolveSelectedInstance(input: AgentProviderSelectionInput): ResolvedAgentProviderSelection {
+  if (input.agentId !== undefined) {
+    const match = input.agentProviderBindings.find((candidate) => candidate.agentId === input.agentId);
+    if (match === undefined) {
+      throw new AppLifecycleError(
+        'agent-provider-binding.unknown',
+        `no configured agent matches the selected id ${input.agentId}`,
+        'select a configured agentId from the compiled roster',
+        AGENT_PROVIDER_OWNER,
+      );
+    }
+    if (match.roleId !== input.roleId) {
+      throw new AppLifecycleError(
+        'agent-provider-binding.role-mismatch',
+        `selected agent ${input.agentId} has role ${match.roleId}, not ${input.roleId}`,
+        'select an agent whose role matches the requested instance role',
+        AGENT_PROVIDER_OWNER,
+      );
+    }
+    if (match.provider === undefined) {
+      throw new AppLifecycleError(
+        'agent-provider-binding.unconfigured',
+        `selected agent ${input.agentId} has no effective provider`,
+        'configure a provider block for the selected agent or its shared top-level provider',
+        AGENT_PROVIDER_OWNER,
+      );
+    }
+    return { configuredAgentId: match.agentId, roleId: match.roleId, provider: match.provider };
+  }
+  const matches = input.agentProviderBindings.filter((candidate) => candidate.roleId === input.roleId);
+  if (matches.length === 0) {
+    if (input.legacyProvider === undefined) {
+      throw new AppLifecycleError(
+        'agent-provider-binding.unconfigured-role',
+        `no roster instance is configured for role ${input.roleId} and no legacy provider is available`,
+        'configure an agent for the role or provide the legacy top-level provider',
+        AGENT_PROVIDER_OWNER,
+      );
+    }
+    return {
+      roleId: input.roleId,
+      provider: input.legacyProvider,
+    };
+  }
+  if (matches.length > 1) {
+    throw new AppLifecycleError(
+      'agent-provider-binding.ambiguous',
+      `role ${input.roleId} matches ${matches.length} roster instances`,
+      'select the intended instance by its stable agentId',
+      AGENT_PROVIDER_OWNER,
+    );
+  }
+  const selected = matches[0]!;
+  if (selected.provider === undefined) {
+    throw new AppLifecycleError(
+      'agent-provider-binding.unconfigured',
+      `agent ${selected.agentId} for role ${input.roleId} has no effective provider`,
+      'configure a provider block for the selected agent or its shared top-level provider',
+      AGENT_PROVIDER_OWNER,
+    );
+  }
+  return { configuredAgentId: selected.agentId, roleId: selected.roleId, provider: selected.provider };
+}
+
+/**
+ * Selects one effective provider composition for a configured agent instance.
+ * Exact agentId is the only explicit instance selector; a role-only selection
+ * must be unique across the full roster, including unconfigured members.
+ * Every rejection happens before any provider port is constructed.
+ */
+export function selectAgentProvider(input: AgentProviderSelectionInput): AgentProviderComposition {
+  const selected = resolveSelectedInstance(input);
+  const provider = selected.provider;
+  const binding = {
+    ...providerBindingFromConfig(provider),
+    ...(selected.configuredAgentId === undefined ? input.legacyBindingOverrides : {}),
+  };
+  return {
+    configuredAgentId: selected.configuredAgentId,
+    roleId: selected.roleId,
+    provider,
+    source: provider.source ?? 'rcc',
+    binding,
+    port: input.createPort({ provider, binding }),
+  };
+}
+
+/**
+ * Actual default provider port producer. Every selected execution instance
+ * gets a freshly assembled port from its own effective provider config. The
+ * source, route and base URL always come from the passed provider, never from
+ * a closure or shared default.
+ */
+export function createAgentProviderPort(
+  input: AgentProviderPortFactoryInput,
+  evidenceRoot: string,
+  maxTokens?: ProviderAssemblyInput['maxTokens'],
+): ExecutionRuntimePort {
+  return assembleProviderExecutionPort({
+    binding: input.binding,
+    routeRef: input.provider.route,
+    baseUrl: input.provider.baseUrl,
+    source: input.provider.source ?? 'rcc',
+    credentialRef: input.provider.credentialRef,
+    maxTokens,
+  }, evidenceRoot);
+}
+
+/** Close an owned composition and require an actual closed receipt. */
+export async function closeAgentProvider(composition: AgentProviderComposition): Promise<void> {
+  const receipt = await composition.port.close(composition.binding);
+  if (receipt.state !== 'closed') {
+    throw new AppLifecycleError(
+      'agent-provider-close-incomplete',
+      `provider ${composition.binding.bindingId} close returned ${receipt.state}`,
+      'complete the selected provider close before releasing its ownership',
+      AGENT_PROVIDER_OWNER,
+      receipt.error,
+    );
+  }
+}
+
+/** Prepare one fresh execution instance and admit only its own provider. */
+export async function prepareAgentProvider(input: {
+  readonly roleId: AgentRole;
+  readonly configuredAgentId?: string;
+  readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
+  readonly legacyProvider?: ProviderConfig;
+  readonly legacyBindingOverrides?: AgentProviderSelectionInput['legacyBindingOverrides'];
+  readonly maxTokens?: ProviderAssemblyInput['maxTokens'];
+  readonly evidenceRoot: string;
+}): Promise<AgentProviderComposition> {
+  const composition = selectAgentProvider({
+    roleId: input.roleId,
+    ...(input.configuredAgentId === undefined ? {} : { agentId: input.configuredAgentId }),
+    agentProviderBindings: input.agentProviderBindings,
+    ...(input.legacyProvider === undefined ? {} : { legacyProvider: input.legacyProvider }),
+    ...(input.legacyBindingOverrides === undefined ? {} : { legacyBindingOverrides: input.legacyBindingOverrides }),
+    createPort: (selected) => createAgentProviderPort(selected, input.evidenceRoot, input.maxTokens),
+  });
+  try {
+    await admitAgentProvider(composition);
+  } catch (error) {
+    try {
+      await closeAgentProvider(composition);
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'selected provider admission and cleanup failed');
+    }
+    throw error;
+  }
+  return composition;
 }
 
 function providerBinding(
