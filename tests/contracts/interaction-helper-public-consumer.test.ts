@@ -3,19 +3,29 @@ import test from 'node:test';
 import {
   ContractError,
   id,
+  assertProviderExecutionIdentityMatch,
+  validateProviderSettlement,
+  validateProviderStartInput,
   type EvidenceRef,
+  type ProviderSettlement,
+  type ProviderStartInput,
   type RawAsset,
   type ScopeRef,
+  type AgentStartRequest,
+  type TaskId,
+  type TasklessProviderExecutionIdentityRef,
 } from '../../packages/contracts/src/index.js';
 import {
   matchesInteractionHelperAssignment,
   validateInteractionHelperAssignment,
   validateInteractionHelperHandoffFact,
+  validateInteractionHelperIncarnation,
   validateInteractionHelperResult,
   validateInteractionLatestTurn,
   validateInteractionSemanticCheckpoint,
   type InteractionHelperAssignment,
   type InteractionHelperDispatchAcceptedFact,
+  type InteractionHelperIncarnation,
   type InteractionHelperOwnerAcceptedFact,
   type InteractionHelperResult,
   type InteractionHelperReturnedFact,
@@ -35,6 +45,13 @@ function evidence(label: string): EvidenceRef {
     locator: `interaction://${label}`,
     digest: `sha256:${'a'.repeat(64)}`,
     scope,
+  };
+}
+
+function tasklessProviderEvidence(label: string, operationId = id('operation', 'operation-helper-a')): EvidenceRef {
+  return {
+    ...evidence(label),
+    scope: { organId, operationId },
   };
 }
 
@@ -107,6 +124,12 @@ const result: InteractionHelperResult = {
   evidenceRefs: [evidence('helper-result'), taskEvidence('task-scoped-helper-result')],
   nextAction: 'settle',
 };
+
+type HasRequiredTaskId<T> = T extends { readonly taskId: TaskId } ? true : false;
+const taskBoundIdentityHasTaskId: HasRequiredTaskId<AgentStartRequest> = true;
+const tasklessIdentityHasTaskId: HasRequiredTaskId<
+  AgentStartRequest<TasklessProviderExecutionIdentityRef>
+> = false;
 
 test('taskless interaction helper contract keeps exact identity and append-only facts', () => {
   validateInteractionHelperAssignment(assignment);
@@ -206,4 +229,119 @@ test('taskless interaction helper contract keeps exact identity and append-only 
   validateInteractionHelperHandoffFact(running);
   validateInteractionHelperHandoffFact(returned);
   validateInteractionHelperHandoffFact(ownerAccepted);
+});
+
+test('taskless provider execution reuses the existing provider contracts without leaking Task identity', () => {
+  const operationId = id('operation', 'operation-helper-a');
+  const executionEpoch = 1;
+  const tasklessIdentity: TasklessProviderExecutionIdentityRef = {
+    runtimeId: 'runtime-helper-a',
+    organId,
+    operationId,
+    executionEpoch,
+    helper: assignment,
+  };
+
+  const startInput: ProviderStartInput<TasklessProviderExecutionIdentityRef> = {
+    ...tasklessIdentity,
+    inputRefs: ['interaction://interaction-a/helper-call-a'],
+    evidenceRefs: [tasklessProviderEvidence('taskless-provider-start', operationId)],
+  };
+  validateProviderStartInput(startInput);
+
+  const settlement: ProviderSettlement<TasklessProviderExecutionIdentityRef> = {
+    ...tasklessIdentity,
+    state: 'succeeded',
+    evidenceRefs: [tasklessProviderEvidence('taskless-provider-settlement', operationId)],
+    resourceRelease: {
+      state: 'released',
+      evidenceRefs: [tasklessProviderEvidence('taskless-provider-resource-release', operationId)],
+    },
+    persistence: {
+      state: 'committed',
+      evidenceRefs: [tasklessProviderEvidence('taskless-provider-persistence', operationId)],
+    },
+  };
+  validateProviderSettlement(settlement);
+
+  assertProviderExecutionIdentityMatch(tasklessIdentity, settlement);
+  assert.throws(
+    () => assertProviderExecutionIdentityMatch(tasklessIdentity, {
+      ...tasklessIdentity,
+      helper: { ...assignment, helperCallId: 'call-b' },
+    }),
+    ContractError,
+  );
+
+  const mismatchedOrganIdentity: TasklessProviderExecutionIdentityRef = {
+    ...tasklessIdentity,
+    helper: { ...assignment, organId: id('organ', 'organ-b') },
+  };
+  assert.throws(
+    () => validateProviderStartInput({
+      ...startInput,
+      ...mismatchedOrganIdentity,
+    }),
+    ContractError,
+  );
+
+  const leakedTaskIdentity: TasklessProviderExecutionIdentityRef = { ...tasklessIdentity };
+  Object.assign(leakedTaskIdentity, { taskId: id('task', 'task-leak') });
+  assert.throws(
+    () => validateProviderStartInput({
+      ...startInput,
+      ...leakedTaskIdentity,
+    }),
+    ContractError,
+  );
+
+  const leakedCycleIdentity: TasklessProviderExecutionIdentityRef = { ...tasklessIdentity };
+  Object.assign(leakedCycleIdentity, { cycleId: id('cycle', 'cycle-leak') });
+  assert.throws(
+    () => validateProviderStartInput({
+      ...startInput,
+      ...leakedCycleIdentity,
+    }),
+    ContractError,
+  );
+});
+
+test('helper incarnation binds dispatch facts to the real provider and execution identity', () => {
+  const incarnation: InteractionHelperIncarnation = {
+    ...assignment,
+    runtimeId: 'runtime-helper-a',
+    operationId: id('operation', 'operation-helper-a'),
+    executionEpoch: 1,
+    bindingId: 'binding-helper-a',
+    providerId: 'provider-helper-a',
+    protocol: 'responses',
+    modelRef: 'model-helper-a',
+    capabilityDigest: 'sha256:helper-capabilities',
+  };
+  validateInteractionHelperIncarnation(incarnation, assignment);
+
+  const dispatchAccepted: InteractionHelperDispatchAcceptedFact = {
+    kind: 'dispatch-accepted',
+    assignment,
+    incarnation,
+    dispatchAcceptedAt: '2026-10-15T00:00:01.000Z',
+    evidenceRefs: [evidence('dispatch-accepted-incarnation')],
+  };
+  validateInteractionHelperHandoffFact(dispatchAccepted);
+
+  assert.throws(
+    () => validateInteractionHelperIncarnation({ ...incarnation, helperCallId: 'call-b' }, assignment),
+    ContractError,
+  );
+  assert.throws(
+    () => validateInteractionHelperIncarnation({ ...incarnation, modelRef: '   ' }, assignment),
+    ContractError,
+  );
+  assert.throws(
+    () => validateInteractionHelperHandoffFact({
+      ...dispatchAccepted,
+      incarnation: { ...incarnation, bindingId: '' },
+    }),
+    ContractError,
+  );
 });

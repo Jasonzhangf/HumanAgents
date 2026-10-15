@@ -2,11 +2,14 @@ export type ScopeKind = 'organ' | 'task' | 'cycle' | 'operation' | 'checkpoint' 
 
 export * from './hand-services.js';
 export * from './web-search.js';
+export * from './interaction-helper.js';
 export * from './task-flow.js';
 export * from './task-plan-revision.js';
 export * from './task-identity.js';
 export * from './turn-closure.js';
 export * from './standard-turn-end.js';
+import type { InteractionHelperIdentity } from './interaction-helper.js';
+import { validateInteractionHelperIdentity } from './interaction-helper.js';
 import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';
 
 export interface ScopedId<K extends ScopeKind = ScopeKind> {
@@ -141,45 +144,58 @@ export interface AgentDefinition {
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
 }
-export interface AgentStartRequest {
-  readonly runtimeId: string;
-  readonly taskId: TaskId;
-  readonly executionEpoch: number;
+type TaskBoundAgentStartIdentity<
+  TIdentity extends AnyProviderExecutionIdentityRef,
+> = TIdentity extends TasklessProviderExecutionIdentityRef
+  ? TIdentity
+  : {
+      readonly runtimeId: string;
+      readonly taskId: TaskId;
+      readonly executionEpoch: number;
+      readonly organId?: OrganId;
+      readonly cycleId?: CycleId;
+      readonly operationId?: OperationId;
+    };
+type TaskBoundAgentEnvelopeIdentity<
+  TIdentity extends AnyProviderExecutionIdentityRef,
+> = TIdentity extends TasklessProviderExecutionIdentityRef
+  ? TIdentity
+  : {
+      readonly taskId: TaskId;
+      readonly executionEpoch: number;
+    };
+export type AgentStartRequest<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TaskBoundAgentStartIdentity<TIdentity> & {
   readonly assignmentId?: string;
-  /** HumanAgent-owned organ identity; adapters must not mint their own. */
-  readonly organId?: OrganId;
-  /** HumanAgent-owned cycle identity; adapters must not mint their own. */
-  readonly cycleId?: CycleId;
-  /** HumanAgent-owned operation identity; adapters must not mint their own. */
-  readonly operationId?: OperationId;
-}
-export interface AgentResumeRequest extends AgentStartRequest {
+};
+export type AgentResumeRequest = AgentStartRequest<ProviderExecutionIdentityRef> & {
   readonly checkpointId: CheckpointId;
-}
-export interface AgentInput {
-  readonly taskId: TaskId;
-  readonly executionEpoch: number;
+};
+export type AgentInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TaskBoundAgentEnvelopeIdentity<TIdentity> & {
   readonly assignmentId: string;
   readonly payload: BusinessPayload;
   readonly imageContents?: readonly ProviderImageContent[];
-}
-export interface AgentOutput {
-  readonly taskId: TaskId;
-  readonly executionEpoch: number;
+};
+export type AgentOutput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TaskBoundAgentEnvelopeIdentity<TIdentity> & {
   readonly assignmentId: string;
   readonly payload: BusinessPayload;
   readonly outputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
-}
+};
 export interface AgentHandle { readonly runtimeId: string; readonly executionEpoch: number; }
-export interface AgentEvent {
-  readonly taskId: TaskId;
-  readonly executionEpoch: number;
+export type AgentEvent<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TaskBoundAgentEnvelopeIdentity<TIdentity> & {
   readonly kind: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly summary?: string;
   readonly terminalState?: ProviderTerminalState;
-}
+};
 /**
  * Provider-neutral semantic lifecycle event. The standalone `run` entry and
  * `serve --mode fake` expose this projection for equivalent entry evidence.
@@ -205,13 +221,15 @@ export interface AgentSemanticEvent {
 }
 export interface StopRequestReceipt { readonly requested: boolean; readonly operationId: OperationId; }
 export interface AgentClosure { readonly state: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown'; readonly evidenceRefs: readonly EvidenceRef[]; }
-export interface AgentDriver {
+export interface AgentDriver<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly kind: string;
   capabilities(): Promise<AgentCapabilities>;
-  start(input: AgentStartRequest): Promise<AgentHandle>;
+  start(input: AgentStartRequest<TIdentity>): Promise<AgentHandle>;
   resume(input: AgentResumeRequest): Promise<AgentHandle>;
-  submit(input: AgentInput): Promise<AgentOutput>;
-  observe(input: { readonly runtimeId: string }): AsyncIterable<AgentEvent>;
+  submit(input: AgentInput<TIdentity>): Promise<AgentOutput<TIdentity>>;
+  observe(input: { readonly runtimeId: string }): AsyncIterable<AgentEvent<TIdentity>>;
   requestStop(input: { readonly runtimeId: string; readonly executionEpoch: number; readonly operationId: OperationId }): Promise<StopRequestReceipt>;
   settle(input: { readonly runtimeId: string; readonly executionEpoch: number }): Promise<AgentClosure>;
 }
@@ -962,12 +980,28 @@ export interface ProviderExecutionIdentityRef {
   readonly executionEpoch: number;
 }
 
+export interface TasklessProviderExecutionIdentityRef {
+  readonly runtimeId: AgentRuntimeId;
+  readonly organId: OrganId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly helper: InteractionHelperIdentity;
+  readonly taskId?: undefined;
+  readonly cycleId?: undefined;
+}
+
+export type AnyProviderExecutionIdentityRef =
+  | ProviderExecutionIdentityRef
+  | TasklessProviderExecutionIdentityRef;
+
 export interface ProviderImageContent {
   readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp';
   readonly dataBase64: string;
 }
 
-export interface ProviderExecutionInput extends ProviderExecutionIdentityRef {
+export type ProviderExecutionInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly inputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly payload?: BusinessPayload;
@@ -977,7 +1011,7 @@ export interface ProviderExecutionInput extends ProviderExecutionIdentityRef {
   readonly requestContext?: ProviderRequestContext;
   /** Transient request-scoped orientation. It enters this request only. */
   readonly instructions?: RequestScopedInstructions;
-}
+};
 
 export interface ProviderToolDefinition {
   readonly toolId: string;
@@ -1000,19 +1034,27 @@ export interface ProviderToolContinuation {
   readonly output: string;
 }
 
-export interface ProviderStartInput extends ProviderExecutionInput {}
-export interface ProviderResumeInput extends ProviderExecutionInput {
+export type ProviderStartInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = ProviderExecutionInput<TIdentity>;
+export type ProviderResumeInput = ProviderExecutionInput<ProviderExecutionIdentityRef> & {
   readonly checkpointId: CheckpointId;
   readonly checkpointExecutionEpoch: number;
-}
-export interface ProviderSubmitInput extends ProviderExecutionInput {
+};
+export type ProviderSubmitInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = ProviderExecutionInput<TIdentity> & {
   readonly payload: BusinessPayload;
   readonly toolContinuations?: readonly ProviderToolContinuation[];
-}
-export interface ProviderObserveInput extends ProviderExecutionIdentityRef, Partial<ProviderRequestIdentityRef> {}
-export interface ProviderSettleInput extends ProviderExecutionIdentityRef {
+};
+export type ProviderObserveInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & Partial<ProviderRequestIdentityRef>;
+export type ProviderSettleInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly evidenceRefs?: readonly EvidenceRef[];
-}
+};
 
 export type ProviderRequestPhase =
   | 'dispatching'
@@ -1028,22 +1070,26 @@ export interface ProviderRequestIdentityRef {
   readonly parentRequestId?: string;
 }
 
-export interface ProviderRequestLifecycleEvent extends ProviderExecutionIdentityRef, ProviderRequestIdentityRef {
+export type ProviderRequestLifecycleEvent<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & ProviderRequestIdentityRef & {
   readonly phase: ProviderRequestPhase;
   readonly occurredAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   /** Provider wire identity is diagnostic evidence only, never Harness control identity. */
   readonly externalResponseId?: string;
   readonly error?: ProviderError;
-}
+};
 
-export interface ProviderStartReceipt extends ProviderExecutionIdentityRef {
+export type ProviderStartReceipt<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly startedAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly externalExecutionRef?: EvidenceRef;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
-}
+};
 
 export interface ProviderRecoveryResult extends ProviderExecutionIdentityRef {
   readonly checkpointId: CheckpointId;
@@ -1057,7 +1103,9 @@ export interface ProviderRecoveryResult extends ProviderExecutionIdentityRef {
   readonly nextAction?: NextAction;
 }
 
-export interface ProviderSubmitResult extends ProviderExecutionIdentityRef {
+export type ProviderSubmitResult<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly status: ProviderSubmitStatus;
   readonly outputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
@@ -1065,9 +1113,11 @@ export interface ProviderSubmitResult extends ProviderExecutionIdentityRef {
   readonly error?: ProviderError;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
-}
+};
 
-export interface ProviderEvent extends ProviderExecutionIdentityRef {
+export type ProviderEvent<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly eventId: string;
   readonly kind: ProviderEventKind;
   readonly turnId?: string;
@@ -1087,10 +1137,12 @@ export interface ProviderEvent extends ProviderExecutionIdentityRef {
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
   readonly toolCall?: ProviderToolCall;
-  readonly toolResult?: ProviderToolResult;
-}
+  readonly toolResult?: ProviderToolResult<TIdentity>;
+};
 
-export interface ProviderToolResult extends ProviderExecutionIdentityRef {
+export type ProviderToolResult<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly toolId: string;
   readonly callId: string;
   readonly status: ProviderToolStatus;
@@ -1102,7 +1154,7 @@ export interface ProviderToolResult extends ProviderExecutionIdentityRef {
   readonly error?: ProviderError;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
-}
+};
 
 export interface ProviderError {
   readonly errorId: string;
@@ -1118,20 +1170,24 @@ export interface ProviderError {
   readonly nextAction: NextAction;
 }
 
-export interface ProviderStopRequest extends ProviderExecutionIdentityRef {
+export type ProviderStopRequest<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly reason: string;
   readonly ownerId: string;
   readonly evidenceRefs?: readonly EvidenceRef[];
-}
+};
 
-export interface ProviderStopReceipt extends ProviderExecutionIdentityRef {
+export type ProviderStopReceipt<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly status: ProviderStopReceiptStatus;
   readonly receivedAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly error?: ProviderError;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
-}
+};
 
 export interface ProviderResourceResult {
   readonly state: ProviderResourceState;
@@ -1145,7 +1201,9 @@ export interface ProviderPersistenceResult {
   readonly failure?: ProviderError;
 }
 
-export interface ProviderSettlement extends ProviderExecutionIdentityRef {
+export type ProviderSettlement<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & {
   readonly state: ProviderSettleState;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly resourceRelease: ProviderResourceResult;
@@ -1153,7 +1211,7 @@ export interface ProviderSettlement extends ProviderExecutionIdentityRef {
   readonly error?: ProviderError;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
-}
+};
 
 export interface ProviderCloseResult {
   readonly bindingId: string;
@@ -1172,16 +1230,18 @@ export interface ProviderBindingMatchTarget {
   readonly protocol?: ProviderProtocol;
 }
 
-export interface ExecutionRuntimePort {
+export interface ExecutionRuntimePort<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly kind: 'humanagent.execution-runtime-port';
   probe(binding: ProviderBinding): Promise<ProviderReadiness>;
   capabilities(binding: ProviderBinding): Promise<ProviderCapabilities>;
-  start(input: ProviderStartInput): Promise<ProviderStartReceipt>;
+  start(input: ProviderStartInput<TIdentity>): Promise<ProviderStartReceipt<TIdentity>>;
   resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult>;
-  submit(input: ProviderSubmitInput): Promise<ProviderSubmitResult>;
-  observe(input: ProviderObserveInput): AsyncIterable<ProviderEvent>;
-  requestStop(input: ProviderStopRequest): Promise<ProviderStopReceipt>;
-  settle(input: ProviderSettleInput): Promise<ProviderSettlement>;
+  submit(input: ProviderSubmitInput<TIdentity>): Promise<ProviderSubmitResult<TIdentity>>;
+  observe(input: ProviderObserveInput<TIdentity>): AsyncIterable<ProviderEvent<TIdentity>>;
+  requestStop(input: ProviderStopRequest<TIdentity>): Promise<ProviderStopReceipt<TIdentity>>;
+  settle(input: ProviderSettleInput<TIdentity>): Promise<ProviderSettlement<TIdentity>>;
   close(binding: ProviderBinding): Promise<ProviderCloseResult>;
 }
 
@@ -1249,21 +1309,66 @@ function assertExternalEvidenceRef(ref: EvidenceRef, runtimeIdValue: AgentRuntim
   if (ref.kind !== 'external') throw new ContractError(`${label} must use external evidence`);
   if (ref.locator === runtimeIdValue || ref.evidenceId.value === runtimeIdValue) throw new ContractError(`${label} cannot be used as runtime identity`);
 }
-function assertProviderExecutionIdentity(input: ProviderExecutionIdentityRef): void {
+function isTasklessProviderExecutionIdentity(
+  input: AnyProviderExecutionIdentityRef,
+): input is TasklessProviderExecutionIdentityRef {
+  return 'helper' in input && input.helper !== undefined;
+}
+function sameInteractionHelperExecutionIdentity(
+  left: InteractionHelperIdentity,
+  right: InteractionHelperIdentity,
+): boolean {
+  return sameScopedId(left.organId, right.organId)
+    && left.interactionScopeId === right.interactionScopeId
+    && left.interactionId === right.interactionId
+    && left.inputRevision === right.inputRevision
+    && left.parentTurnId === right.parentTurnId
+    && left.assignmentId === right.assignmentId
+    && left.helperCallId === right.helperCallId
+    && left.attempt === right.attempt;
+}
+function assertProviderExecutionIdentity(input: AnyProviderExecutionIdentityRef): void {
   assertAgentRuntimeId(input.runtimeId);
-  assertScope(input.taskId, 'task');
   assertScope(input.operationId, 'operation');
+  assertExecutionEpoch(input.executionEpoch);
+  if (isTasklessProviderExecutionIdentity(input)) {
+    if (input.taskId !== undefined || input.cycleId !== undefined) {
+      throw new ContractError('taskless provider execution identity cannot carry task or cycle identity');
+    }
+    assertScope(input.organId, 'organ');
+    validateInteractionHelperIdentity(input.helper);
+    if (!sameScopedId(input.organId, input.helper.organId)) {
+      throw new ContractError('taskless provider execution identity organ mismatch');
+    }
+    return;
+  }
+  assertScope(input.taskId, 'task');
   if (input.organId) assertScope(input.organId, 'organ');
   if (input.cycleId) assertScope(input.cycleId, 'cycle');
-  assertExecutionEpoch(input.executionEpoch);
 }
-function assertProviderEvidenceMatchesExecution(ref: EvidenceRef, execution: ProviderExecutionIdentityRef, label: string): void {
-  if (ref.scope.taskId && !sameScopedId(ref.scope.taskId, execution.taskId)) throw new ContractError(`${label} task scope mismatch`);
+function assertProviderEvidenceMatchesExecution(
+  ref: EvidenceRef,
+  execution: AnyProviderExecutionIdentityRef,
+  label: string,
+): void {
+  if (isTasklessProviderExecutionIdentity(execution)) {
+    if (ref.scope.taskId !== undefined) throw new ContractError(`${label} task scope is not allowed for taskless execution`);
+    if (ref.scope.cycleId !== undefined) throw new ContractError(`${label} cycle scope is not allowed for taskless execution`);
+  } else if (ref.scope.taskId && !sameScopedId(ref.scope.taskId, execution.taskId)) {
+    throw new ContractError(`${label} task scope mismatch`);
+  }
   if (ref.scope.operationId && !sameScopedId(ref.scope.operationId, execution.operationId)) throw new ContractError(`${label} operation scope mismatch`);
   if (execution.organId && ref.scope.organId && !sameScopedId(ref.scope.organId, execution.organId)) throw new ContractError(`${label} organ scope mismatch`);
-  if (execution.cycleId && ref.scope.cycleId && !sameScopedId(ref.scope.cycleId, execution.cycleId)) throw new ContractError(`${label} cycle scope mismatch`);
+  if (!isTasklessProviderExecutionIdentity(execution)
+    && execution.cycleId
+    && ref.scope.cycleId
+    && !sameScopedId(ref.scope.cycleId, execution.cycleId)) throw new ContractError(`${label} cycle scope mismatch`);
 }
-function assertProviderCompletionEvidenceRefs(refs: readonly EvidenceRef[], execution: ProviderExecutionIdentityRef, label: string): void {
+function assertProviderCompletionEvidenceRefs<TIdentity extends AnyProviderExecutionIdentityRef>(
+  refs: readonly EvidenceRef[],
+  execution: TIdentity,
+  label: string,
+): void {
   for (const ref of refs) assertProviderEvidenceMatchesExecution(ref, execution, label);
 }
 function assertOptionalProviderOwner(input: { readonly ownerId?: string; readonly nextAction?: NextAction }): void {
@@ -1343,7 +1448,9 @@ export function validateProviderError(input: ProviderError): void {
   if (input.externalRef) assertEvidenceRef(input.externalRef);
   assertNextAction(input.nextAction);
 }
-function validateProviderExecutionInput(input: ProviderExecutionInput): void {
+function validateProviderExecutionInput<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderExecutionInput<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   assertRefList(input.inputRefs, 'provider inputRefs');
   assertProviderEvidenceRefs(input.evidenceRefs, 'provider execution evidenceRefs');
@@ -1358,7 +1465,9 @@ function validateProviderExecutionInput(input: ProviderExecutionInput): void {
     throw new ContractError('provider tool definitions must be unique');
   }
 }
-export function validateProviderStartInput(input: ProviderStartInput): void {
+export function validateProviderStartInput<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderStartInput<TIdentity>,
+): void {
   validateProviderExecutionInput(input);
 }
 export function validateProviderResumeInput(input: ProviderResumeInput): void {
@@ -1368,7 +1477,9 @@ export function validateProviderResumeInput(input: ProviderResumeInput): void {
   assertExecutionEpoch(input.checkpointExecutionEpoch);
   if (input.checkpointExecutionEpoch !== input.executionEpoch) throw new ContractError('provider resume checkpoint epoch is stale');
 }
-export function validateProviderSubmitInput(input: ProviderSubmitInput): void {
+export function validateProviderSubmitInput<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderSubmitInput<TIdentity>,
+): void {
   validateProviderExecutionInput(input);
   if (!input.payload) throw new ContractError('provider submit payload is required');
   assertBusinessPayload(input.payload);
@@ -1389,15 +1500,21 @@ export function validateProviderSubmitInput(input: ProviderSubmitInput): void {
     }
   }
 }
-export function validateProviderObserveInput(input: ProviderObserveInput): void {
+export function validateProviderObserveInput<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderObserveInput<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   assertOptionalProviderRequestIdentity(input, 'provider observe');
 }
-export function validateProviderSettleInput(input: ProviderSettleInput): void {
+export function validateProviderSettleInput<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderSettleInput<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   if (input.evidenceRefs !== undefined) assertProviderEvidenceRefs(input.evidenceRefs, 'provider settle evidenceRefs');
 }
-export function validateProviderStartReceipt(input: ProviderStartReceipt): void {
+export function validateProviderStartReceipt<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderStartReceipt<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   assertValidTime(input.startedAt, 'provider start startedAt');
   assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider start');
@@ -1420,7 +1537,9 @@ export function validateProviderRecoveryResult(input: ProviderRecoveryResult): v
   if (input.error) validateProviderError(input.error);
   assertOptionalProviderOwner(input);
 }
-export function validateProviderSubmitResult(input: ProviderSubmitResult): void {
+export function validateProviderSubmitResult<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderSubmitResult<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   if (!PROVIDER_SUBMIT_STATES.has(input.status)) throw new ContractError('provider submit status is invalid');
   assertRefList(input.outputRefs, 'provider outputRefs');
@@ -1442,7 +1561,10 @@ export function validateProviderSubmitResult(input: ProviderSubmitResult): void 
   }
   assertOptionalProviderOwner(input);
 }
-export function validateProviderEvent(input: ProviderEvent, expectedToolIdentity?: ToolIdentity): void {
+export function validateProviderEvent<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderEvent<TIdentity>,
+  expectedToolIdentity?: ToolIdentity,
+): void {
   assertProviderExecutionIdentity(input);
   assertNonEmptyReference(input.eventId, 'provider eventId');
   assertOptionalProviderRequestIdentity(input, 'provider event');
@@ -1491,7 +1613,9 @@ export function validateProviderEvent(input: ProviderEvent, expectedToolIdentity
   }
   assertOptionalProviderOwner(input);
 }
-export function validateProviderRequestLifecycleEvent(input: ProviderRequestLifecycleEvent): void {
+export function validateProviderRequestLifecycleEvent<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderRequestLifecycleEvent<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   assertProviderRequestIdentity(input, 'provider request lifecycle');
   if (!PROVIDER_REQUEST_PHASES.has(input.phase)) throw new ContractError('provider request phase is invalid');
@@ -1504,17 +1628,23 @@ export function validateProviderRequestLifecycleEvent(input: ProviderRequestLife
   if (input.phase === 'failed' && !input.error) throw new ContractError('failed provider request requires error');
   if (input.phase !== 'failed' && input.error) throw new ContractError('provider request error requires failed phase');
 }
-export function checkProviderEventEpoch(event: ProviderEvent, expectedExecutionEpoch: number): ProviderEventEpochDecision {
+export function checkProviderEventEpoch<TIdentity extends AnyProviderExecutionIdentityRef>(
+  event: ProviderEvent<TIdentity>,
+  expectedExecutionEpoch: number,
+): ProviderEventEpochDecision {
   if (event.executionEpoch === expectedExecutionEpoch) return { accepted: true };
   const reason = event.executionEpoch < expectedExecutionEpoch ? 'stale' : 'future';
   return { accepted: false, rejected: true, reason, expectedExecutionEpoch, receivedExecutionEpoch: event.executionEpoch };
 }
-export function assertProviderEventEpoch(event: ProviderEvent, expectedExecutionEpoch: number): void {
+export function assertProviderEventEpoch<TIdentity extends AnyProviderExecutionIdentityRef>(
+  event: ProviderEvent<TIdentity>,
+  expectedExecutionEpoch: number,
+): void {
   const decision = checkProviderEventEpoch(event, expectedExecutionEpoch);
   if (!decision.accepted) throw new ContractError(`provider event epoch is ${decision.reason}`);
 }
-export function validateProviderToolResult(
-  input: ProviderToolResult,
+export function validateProviderToolResult<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderToolResult<TIdentity>,
   expectedToolIdentity?: ToolIdentity,
   expectedRequestRef?: string,
 ): void {
@@ -1539,8 +1669,8 @@ export function validateProviderToolResult(
 }
 
 /** Validate the relation between a provider result envelope and its optional native fact. */
-export function assertProviderToolExecutionFactBinding(
-  result: ProviderToolResult,
+export function assertProviderToolExecutionFactBinding<TIdentity extends AnyProviderExecutionIdentityRef>(
+  result: ProviderToolResult<TIdentity>,
   expectedToolIdentity?: ToolIdentity,
   expectedRequestRef?: string,
 ): void {
@@ -1570,13 +1700,17 @@ export function assertProviderToolExecutionFactBinding(
     throw new ContractError('provider tool result descriptor mismatch');
   }
 }
-export function validateProviderStopRequest(input: ProviderStopRequest): void {
+export function validateProviderStopRequest<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderStopRequest<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   assertNonEmptyReference(input.reason, 'provider stop reason');
   assertNonEmptyReference(input.ownerId, 'provider stop ownerId');
   if (input.evidenceRefs !== undefined) assertProviderEvidenceRefs(input.evidenceRefs, 'provider stop evidenceRefs');
 }
-export function validateProviderStopReceipt(input: ProviderStopReceipt): void {
+export function validateProviderStopReceipt<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderStopReceipt<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   if ('state' in input || 'settled' in input) throw new ContractError('provider stop receipt cannot carry settled state');
   if (!PROVIDER_STOP_RECEIPT_STATES.has(input.status)) throw new ContractError('provider stop receipt status is invalid');
@@ -1601,7 +1735,9 @@ function validateProviderPersistenceResult(input: ProviderPersistenceResult): vo
   if ((input.state === 'failed' || input.state === 'blocked') && !input.failure) throw new ContractError('provider persistence failure requires error');
   if (input.failure && input.state !== 'failed' && input.state !== 'blocked') throw new ContractError('provider persistence error requires failed or blocked state');
 }
-export function validateProviderSettlement(input: ProviderSettlement): void {
+export function validateProviderSettlement<TIdentity extends AnyProviderExecutionIdentityRef>(
+  input: ProviderSettlement<TIdentity>,
+): void {
   assertProviderExecutionIdentity(input);
   if (!PROVIDER_TERMINAL_STATES.has(input.state)) throw new ContractError('provider settlement state is invalid');
   assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider settlement');
@@ -1645,7 +1781,10 @@ export function assertProviderReadinessBinding(readiness: ProviderReadiness, bin
   assertProviderBindingMatch(binding, { bindingId: readiness.bindingId, providerId: readiness.providerId, protocol: readiness.protocol });
   if (readiness.capabilityDigest !== binding.capabilityDigest) throw new ContractError('provider readiness capability digest mismatch');
 }
-export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionIdentityRef, expected: ProviderExecutionIdentityRef): void {
+export function assertProviderExecutionIdentityMatch(
+  actual: AnyProviderExecutionIdentityRef,
+  expected: AnyProviderExecutionIdentityRef,
+): void {
   assertProviderExecutionIdentity(actual);
   assertProviderExecutionIdentity(expected);
   const sameOptionalScope = (
@@ -1655,13 +1794,25 @@ export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionId
     ? right === undefined
     : right !== undefined && left.scope === right.scope && left.value === right.value;
   if (actual.runtimeId !== expected.runtimeId
-    || actual.taskId.scope !== expected.taskId.scope
-    || actual.taskId.value !== expected.taskId.value
     || actual.operationId.scope !== expected.operationId.scope
     || actual.operationId.value !== expected.operationId.value
+    || actual.executionEpoch !== expected.executionEpoch
+    || isTasklessProviderExecutionIdentity(actual) !== isTasklessProviderExecutionIdentity(expected)) {
+    throw new ContractError('provider execution identity mismatch');
+  }
+  if (isTasklessProviderExecutionIdentity(actual)) {
+    if (!isTasklessProviderExecutionIdentity(expected)
+      || !sameScopedId(actual.organId, expected.organId)
+      || !sameInteractionHelperExecutionIdentity(actual.helper, expected.helper)) {
+      throw new ContractError('provider execution identity mismatch');
+    }
+    return;
+  }
+  if (isTasklessProviderExecutionIdentity(expected)
+    || actual.taskId.scope !== expected.taskId.scope
+    || actual.taskId.value !== expected.taskId.value
     || !sameOptionalScope(actual.organId, expected.organId)
-    || !sameOptionalScope(actual.cycleId, expected.cycleId)
-    || actual.executionEpoch !== expected.executionEpoch) {
+    || !sameOptionalScope(actual.cycleId, expected.cycleId)) {
     throw new ContractError('provider execution identity mismatch');
   }
 }
