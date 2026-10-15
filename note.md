@@ -7,6 +7,7 @@
 - 崩溃探针的原始 RED、生命周期和 source 补丁保留在 `/private/tmp/humanagent-ux-remaining-20261015/cold-crash-c8-r2`；两个子进程和自有 listener 已关闭，含未决义务的专属 fixture 保留。探针还把“控制状态和请求数不推进”无条件用于未来成功恢复，这与恢复需要新 epoch 相冲突，因此未加入正式回归集。其临时源码和 helper 改动已撤出；必要的恢复验收没有取消，须在正确恢复合同确定后补齐。
 - **G14 资产正文未接通。** 完整 RawAsset 已到达 UI 回调，但 TaskDashboard 的引用层只展示 evidenceId/view.kind，未使用已有 scope/digest 校验的 RawContentReadPort；现有 tool-output 路由不是 checkpoint capture 的读取入口。需要正确的任务内公共读取边，不能把文件 locator 直接变成 URL。只读源链记录：`/private/tmp/humanagent-ux-remaining-20261015/checkpoint-asset-read-observe-r1/observation.md`。
 - 显式交互尚无 Task 时，页面伪造 task/operation 身份的合成反例已执行；该显示缺陷仍未修复。C4 Runtime/Journal 基础有冻结来源 `faa6a131`，完整 Context 排除挂载、C7 可信确认/公共控制入口和上述恢复缺口仍未交付。未取得本增量整体 Review PASS，未 merge main、restart 或 push。
+- C4 冻结八文件已通过标准 Git 合流为 `d1c1d2b0`，保留 C3 语义只读工厂。当前组合的正常 App build0、原 C4 focused compile0、原 C4 公共 consumer1/1、原 checkpoint HTTP consumer1/1 均通过。只证明已挂基础与读边的组合，不能替代尚未接线的后续 Context、HTTP 控制和崩溃恢复。证据：`/private/tmp/humanagent-ux-remaining-20261015/c4-composition-r1/receipt.md`。
 
 - **当前阶段**：`MVP-IMPLEMENTATION`（`I1–I5` / `G1–G14` / `F01–F20` 纵切片合流收口中，状态 `ACTIVE / INCOMPLETE`）。
 - **权威需求与进度入口**：
