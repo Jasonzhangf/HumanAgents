@@ -108,6 +108,18 @@ function agentSelectionQuery(agentQuery) {
   return appendAgentSelection(new URLSearchParams(), agentQuery).toString()
 }
 
+/**
+ * A checkpoint selection is URL view state owned by ./checkpoint-history.js. The
+ * API layer only forwards the four keys the caller already encoded: it never
+ * parses, defaults, or invents a checkpoint target, and it never imports the UI
+ * renderer. The keys ride on the same task-scoped checkpoint GET.
+ */
+function appendCheckpointSelection(query, checkpointQuery) {
+  if (!checkpointQuery) return query
+  for (const [key, value] of new URLSearchParams(checkpointQuery)) query.append(key, value)
+  return query
+}
+
 export function createRuntimeApi(options = {}) {
   const baseUrl = (options.baseUrl || '').replace(/\/$/, '')
   const fetchImpl = options.fetchImpl || globalThis.fetch.bind(globalThis)
@@ -252,12 +264,12 @@ export function createRuntimeApi(options = {}) {
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/context-history?${query}`, { method: 'GET' })
     },
     // Independent AND filters: each present filter is its own query field and
-    // the builder never merges revision/cycle/occurrence identities. `viewed`
-    // carries the selected old checkpoint so the read resolves current and
-    // viewed separately.
-    taskCheckpointHistory: (taskId, { projectKey, mode, viewed, directiveRevision, executionEpoch, cycleId, occurrenceRef, cursor, limit = 20 } = {}) => {
+    // the builder never merges revision/cycle/occurrence identities. The
+    // four-key `checkpointQuery` carries the selected old checkpoint so the read
+    // resolves current and viewed separately; the API never encodes it itself.
+    taskCheckpointHistory: (taskId, { projectKey, mode, checkpointQuery, directiveRevision, executionEpoch, cycleId, occurrenceRef, cursor, limit = 20 } = {}) => {
       const query = new URLSearchParams({ projectKey, mode, limit: String(limit) })
-      if (viewed) query.set('viewed', viewed)
+      appendCheckpointSelection(query, checkpointQuery)
       if (cursor) query.set('cursor', cursor)
       for (const [name, value] of Object.entries({ directiveRevision, executionEpoch, cycleId, occurrenceRef })) {
         if (value === undefined || value === null || value === '') continue
@@ -331,8 +343,10 @@ export function readScopeKey(scope) {
   if (scope.kind === 'project') return `project:${scope.projectKey}`
   if (scope.kind === 'task') {
     // The canonical filter identity joins the key so two different AND-filter
-    // sets are never treated as the same scope. `viewed` is a selection, not a
-    // scope: it stays out of the key so a failed re-selection keeps the
+    // sets are never treated as the same scope. An explicit instance or
+    // checkpoint selection is also part of the identity, so a failed new
+    // selection has no prior content to re-publish as stale. The legacy I2
+    // `viewed` cursor stays out of the key so a failed re-selection keeps the
     // confirmed list for the same task/view/cursor/filters.
     const filters = scope.filters && typeof scope.filters === 'object'
       ? Object.keys(scope.filters).sort().map((key) => [key, scope.filters[key]])
@@ -342,6 +356,9 @@ export function readScopeKey(scope) {
     // read and an exact-instance read are different reads, so a failed instance
     // read never re-publishes the previous selection's content as "stale".
     if (scope.agentQuery) identity.push([...new URLSearchParams(scope.agentQuery)].sort())
+    // The same rule for an exact checkpoint selection: current, ck-a and ck-b
+    // are three distinct reads with three distinct identities.
+    if (scope.checkpointQuery) identity.push([...new URLSearchParams(scope.checkpointQuery)].sort())
     return JSON.stringify(identity)
   }
   return ''

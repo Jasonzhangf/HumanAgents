@@ -676,13 +676,6 @@ export function renderTaskRecords(projection, options = {}) {
   return section
 }
 
-const HISTORY_FILTER_LABELS = Object.freeze({
-  directiveRevision: '任务版本',
-  executionEpoch: '执行轮次',
-  cycleId: '任务周期',
-  occurrenceRef: '巡检轮次',
-})
-
 // Typed enums are mapped for display only. An unrecognized raw value keeps a
 // truthful "not yet determined" default here, and the raw value moves to the
 // evidence detail instead of being guessed or treated as success/failure.
@@ -692,18 +685,8 @@ const REPLACEMENT_REASON_LABELS = Object.freeze({
   recovery: '恢复任务',
 })
 
-const CAPABILITY_STATE_LABELS = Object.freeze({
-  available: '可筛选',
-  unavailable: '暂不能筛选',
-  unknown: '尚未确定',
-})
-
 function replacementReasonLabel(reason) {
   return REPLACEMENT_REASON_LABELS[reason] || '未说明原因'
-}
-
-function capabilityStateLabel(state) {
-  return CAPABILITY_STATE_LABELS[state] || '尚未确定'
 }
 
 // Evidence-only detail level. Raw commit IDs, digests and cursors stay here so
@@ -720,23 +703,6 @@ function historyRawDetail(pairs) {
   }
   details.append(list)
   return details
-}
-
-function historyPositionCell(label, cursor, checkpoints) {
-  const cell = element('div', undefined, 'detail-cell')
-  cell.dataset.position = label
-  cell.append(element('dt', label))
-  const value = element('dd')
-  if (!cursor) {
-    value.textContent = label === '正在查看' ? '未选择旧点' : '未提供'
-  } else {
-    const match = (checkpoints || []).find((checkpoint) => checkpoint.checkpointId === cursor.checkpointId)
-    value.textContent = match && match.summary
-      ? `${match.summary} · 执行轮次 ${cursor.executionEpoch}`
-      : `执行轮次 ${cursor.executionEpoch}`
-  }
-  cell.append(value)
-  return cell
 }
 
 function historyActions(projection, options) {
@@ -818,99 +784,7 @@ export function renderContextHistory(projection, options = {}) {
   return section
 }
 
-export function renderCheckpointHistory(projection, options = {}) {
-  const section = element('section', undefined, 'history-section')
-  const head = element('header', undefined, 'section-head')
-  head.append(
-    element('h2', '阶段记录'),
-    element('span', `${projection.checkpoints?.length || 0} 条 · ${projection.nextCursor ? '还有更多' : '已到末尾'}`, 'section-meta'),
-  )
-  section.append(head)
-  section.append(historyRawDetail([
-    ['mode', projection.mode],
-    ['taskId', taskIdValue(projection.taskId)],
-  ]))
-
-  const positions = element('dl', undefined, 'detail-grid history-positions')
-  positions.append(historyPositionCell('当前执行点', projection.current, projection.checkpoints))
-  positions.append(historyPositionCell('正在查看', projection.viewed, projection.checkpoints))
-  section.append(positions)
-
-  const capabilities = Object.entries(projection.capabilities || {})
-  if (capabilities.length > 0) {
-    const list = element('ul', undefined, 'history-capabilities')
-    for (const [name, value] of capabilities) {
-      const row = element('li')
-      row.dataset.capability = name
-      row.dataset.capabilityState = value?.state || 'unknown'
-      row.append(
-        element('strong', HISTORY_FILTER_LABELS[name] || name),
-        element('span', ` · ${capabilityStateLabel(value?.state)}`),
-        historyRawDetail([
-          ['state', value?.state],
-          ['reason', value?.reason],
-        ]),
-      )
-      list.append(row)
-    }
-    section.append(list)
-  }
-
-  const available = Object.keys(HISTORY_FILTER_LABELS)
-    .filter((name) => projection.capabilities?.[name]?.state === 'available')
-  if (available.length > 0) {
-    const filters = element('div', undefined, 'history-filters')
-    for (const name of available) {
-      const label = element('label', undefined, 'history-filter')
-      label.append(element('span', HISTORY_FILTER_LABELS[name]))
-      const input = element('input')
-      input.type = name === 'executionEpoch' ? 'number' : 'text'
-      input.value = options.filters?.[name] ?? ''
-      input.dataset.filter = name
-      label.append(input)
-      filters.append(label)
-    }
-    const apply = element('button', '应用筛选', 'button button--quiet')
-    apply.type = 'button'
-    apply.addEventListener('click', () => options.onFilter?.(readHistoryFilters(filters)))
-    filters.append(apply)
-    section.append(filters)
-  }
-
-  const list = element('div', undefined, 'history-list')
-  for (const checkpoint of projection.checkpoints || []) {
-    const viewed = projection.viewed?.checkpointId === checkpoint.checkpointId
-    const item = element('article', undefined, 'history-item')
-    item.dataset.checkpoint = checkpoint.checkpointId
-    item.dataset.viewed = String(viewed)
-    item.append(
-      element('p', checkpoint.summary || '未提供摘要', 'history-item-title'),
-      element('p', `执行轮次 ${checkpoint.executionEpoch} · 序号 ${checkpoint.seq}${checkpoint.committedAt ? ` · ${formatTime(checkpoint.committedAt)}` : ''}`, 'muted'),
-    )
-    if (viewed) item.append(element('span', '正在查看', 'history-viewed-tag'))
-    const select = element('button', viewed ? '正在查看此点' : '查看此旧点', 'button button--quiet')
-    select.type = 'button'
-    select.disabled = viewed
-    select.addEventListener('click', () => options.onSelect?.(checkpoint.checkpointId))
-    item.append(select)
-    item.append(historyRawDetail([
-      ['checkpointId', checkpoint.checkpointId],
-      ['directiveRevision', checkpoint.directiveRevision],
-      ['cycleId', checkpoint.cycleId],
-      ['occurrenceRef', checkpoint.occurrenceRef],
-      ['commitId', checkpoint.commitRef?.commitId],
-      ['journalSeq', checkpoint.commitRef === undefined ? undefined : checkpoint.commitRef.journalSeq],
-      ['recordDigest', checkpoint.commitRef?.recordDigest],
-    ]))
-    list.append(item)
-  }
-  if (list.children.length === 0) list.append(element('p', '这个任务还没有记录到阶段。', 'empty'))
-  section.append(list)
-  section.append(historyActions(projection, options))
-  return section
-}
-
-function readHistoryFilters(host) {
+export function readHistoryFilters(host) {
   const filters = {}
   for (const input of host.querySelectorAll('[data-filter]')) {
     const value = String(input.value ?? '').trim()
