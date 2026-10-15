@@ -943,6 +943,7 @@ async function runNativeTask(input: {
     },
   });
   const serveRuntime = createServeRuntimeComposition({
+    maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
     eventBusPorts: memoryRuntime.ports,
     feedbackPorts: {
       journal: memoryRuntime.ports.journal,
@@ -1648,6 +1649,7 @@ export async function main(args: readonly string[]): Promise<void> {
         nextAction: 'repair the serve runtime composition before retrying',
         start: async () => {
           serveRuntime = createServeRuntimeComposition({
+            maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
             eventBusPorts: memoryRuntime.ports,
             feedbackPorts: {
               journal: memoryRuntime.ports.journal,
