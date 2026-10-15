@@ -13,6 +13,7 @@ import {
   validateMemorySubmission,
   type Checkpoint,
   type EvidenceRef,
+  type MemoryScope,
   type MemorySubmission,
   type ScopeRef,
 } from '../../contracts/src/index.js';
@@ -26,15 +27,17 @@ import {
 } from '../../runtime/src/memory/index.js';
 import { createJsonlEventJournal, type JsonlEventJournal } from './event-journal.js';
 import {
+  checkpointClosureEvidenceText,
   checkpointClosureEvidenceDigest,
   checkpointClosureEvidenceLocator,
   checkpointEvidenceDigest,
   checkpointEvidenceLocator,
+  createJsonlCheckpointClosurePort,
   readCheckpointEvidence,
   readCommittedCheckpoint,
 } from './checkpoint-journal.js';
 import type { ClosureRecord } from '../../runtime/src/checkpoints/closure.js';
-import type { MemoryRewindChain } from '../../runtime/src/memory/index.js';
+import type { MemoryAnalysisInputs, MemoryRewindChain } from '../../runtime/src/memory/index.js';
 import {
   composeMemory,
   createMemoryBoundaryPatchProducer,
@@ -246,6 +249,11 @@ export interface MemoryRuntimeCheckpointEvidencePort {
   }): Promise<{ readonly sourceRef: string; readonly sourceDigest: string; readonly text: string }>;
 }
 
+export interface MemoryRuntimeRewindEvidence {
+  readonly evidence: EvidenceRef;
+  readonly fingerprint: string;
+}
+
 export interface MemoryRuntimeBoundaryPublisher {
   publish(input: {
     readonly checkpoint: Checkpoint;
@@ -255,9 +263,16 @@ export interface MemoryRuntimeBoundaryPublisher {
     readonly rewind?: {
       readonly failedCheckpoint: Checkpoint;
       readonly failedCheckpointRecordDigest: string;
+      readonly selectedCheckpoint?: Checkpoint;
+      readonly selectedCheckpointRecordDigest?: string;
       readonly recoveryCheckpoint: Checkpoint;
       readonly recoveryCheckpointRecordDigest: string;
       readonly reentry: ClosureRecord;
+      readonly actualPaths?: readonly EvidenceRef[];
+      readonly declaredPaths?: readonly EvidenceRef[];
+      readonly corrections?: readonly MemoryRuntimeRewindEvidence[];
+      readonly errors?: readonly MemoryRuntimeRewindEvidence[];
+      readonly successEvidence?: readonly EvidenceRef[];
     };
   }): Promise<void>;
   publishTask(input: {
@@ -873,10 +888,153 @@ function closureEvidenceRef(closure: ClosureRecord, scope: ScopeRef): EvidenceRe
   };
 }
 
+function sameOrganTaskScope(left: ScopeRef, right: ScopeRef): boolean {
+  return left.organId.value === right.organId.value
+    && left.taskId?.value === right.taskId?.value;
+}
+
+function memoryScopeForEvidence(evidence: EvidenceRef): MemoryScope {
+  return evidence.scope.taskId === undefined
+    ? { kind: 'organ', organId: evidence.scope.organId }
+    : { kind: 'task', organId: evidence.scope.organId, taskId: evidence.scope.taskId };
+}
+
+async function resolvePublisherEvidence(input: {
+  readonly evidence: EvidenceRef;
+  readonly evidenceSource: MemoryEvidenceSourcePort;
+  readonly projectKey: string;
+  readonly boundaryScope: ScopeRef;
+  readonly role: string;
+}): Promise<{ readonly sourceRef: string; readonly sourceDigest: string }> {
+  if (!input.evidence.digest?.trim()) {
+    throw new AppLifecycleError(
+      'memory-boundary-rewind-evidence-incomplete',
+      `${input.role} evidence is missing a digest: ${input.evidence.locator}`,
+      'publish the exact committed locator and digest through the rewind boundary',
+      OWNER,
+    );
+  }
+  if (!sameOrganTaskScope(input.boundaryScope, input.evidence.scope)) {
+    throw new AppLifecycleError(
+      'memory-boundary-rewind-evidence-scope-mismatch',
+      `${input.role} evidence does not belong to the committed task/organ boundary: ${input.evidence.locator}`,
+      'read the evidence from the same committed task and organ before publishing the rewind boundary',
+      OWNER,
+    );
+  }
+  let source: { readonly sourceRef: string; readonly sourceDigest: string; readonly text: string };
+  try {
+    source = await input.evidenceSource.read({
+      projectKey: input.projectKey,
+      scope: memoryScopeForEvidence(input.evidence),
+      evidence: input.evidence,
+    });
+  } catch (error) {
+    if (error instanceof AppLifecycleError) throw error;
+    throw new AppLifecycleError(
+      'memory-boundary-rewind-evidence-unavailable',
+      `${input.role} evidence is unavailable: ${input.evidence.locator}: ${error instanceof Error ? error.message : String(error)}`,
+      'read the exact committed owner record again before publishing the rewind boundary',
+      OWNER,
+    );
+  }
+  const textDigest = `sha256:${createHash('sha256').update(source.text).digest('hex')}`;
+  if (
+    source.sourceRef !== input.evidence.locator
+    || source.sourceDigest !== input.evidence.digest
+    || textDigest !== source.sourceDigest
+    || !source.text.trim()
+  ) {
+    throw new AppLifecycleError(
+      'memory-boundary-rewind-evidence-mismatch',
+      `${input.role} evidence identity or digest does not match the committed source: ${input.evidence.locator}`,
+      'read the exact committed owner record and publish its unchanged locator and digest',
+      OWNER,
+    );
+  }
+  return { sourceRef: source.sourceRef, sourceDigest: source.sourceDigest };
+}
+
+async function resolveCommittedRewindCheckpoint(input: {
+  readonly checkpoint: Checkpoint;
+  readonly recordDigest: string;
+  readonly checkpointEvidence: MemoryRuntimeCheckpointEvidencePort;
+  readonly boundaryScope: ScopeRef;
+  readonly role: string;
+}): Promise<{ readonly checkpoint: Checkpoint; readonly recordDigest: string }> {
+  if (!sameOrganTaskScope(input.boundaryScope, input.checkpoint.scope)) {
+    throw new AppLifecycleError(
+      'memory-boundary-rewind-evidence-scope-mismatch',
+      `${input.role} checkpoint does not belong to the committed task/organ boundary: ${input.checkpoint.id.value}`,
+      'read the checkpoint from the same committed task and organ before publishing the rewind boundary',
+      OWNER,
+    );
+  }
+  const committed = await input.checkpointEvidence.readCommitted({ checkpoint: input.checkpoint });
+  if (committed.recordDigest !== input.recordDigest) {
+    throw new AppLifecycleError(
+      'memory-boundary-rewind-checkpoint-digest-mismatch',
+      `${input.role} checkpoint record digest does not match its committed record: ${input.checkpoint.id.value}`,
+      'read the exact committed checkpoint record before publishing the rewind boundary',
+      OWNER,
+    );
+  }
+  if (
+    committed.checkpoint.id.value !== input.checkpoint.id.value
+    || !sameScope(committed.checkpoint.scope, input.checkpoint.scope)
+  ) {
+    throw new AppLifecycleError(
+      'memory-boundary-rewind-checkpoint-identity-mismatch',
+      `${input.role} checkpoint identity does not match its committed record: ${input.checkpoint.id.value}`,
+      'publish the exact committed checkpoint identity through the rewind boundary',
+      OWNER,
+    );
+  }
+  return committed;
+}
+
+function mergeEvidenceRefs(...groups: readonly (readonly EvidenceRef[])[]): EvidenceRef[] {
+  const byLocator = new Map<string, EvidenceRef>();
+  for (const group of groups) {
+    for (const evidence of group) {
+      const existing = byLocator.get(evidence.locator);
+      if (existing !== undefined && (existing.digest !== evidence.digest || !sameScope(existing.scope, evidence.scope))) {
+        throw new AppLifecycleError(
+          'memory-boundary-rewind-evidence-conflict',
+          `rewind evidence locator has conflicting committed identity: ${evidence.locator}`,
+          'preserve one exact committed locator, digest and scope in the rewind boundary',
+          OWNER,
+        );
+      }
+      if (existing === undefined) byLocator.set(evidence.locator, evidence);
+    }
+  }
+  return [...byLocator.values()];
+}
+
+function uniqueRefs(...groups: readonly (readonly string[])[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const group of groups) {
+    for (const ref of group) {
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      result.push(ref);
+    }
+  }
+  return result;
+}
+
 function rewindAnalysisInputs(input: {
   readonly failedCheckpoint: Checkpoint;
+  readonly rewindCheckpoint: Checkpoint;
   readonly recoveryCheckpoint: Checkpoint;
   readonly reentry: ClosureRecord;
+  readonly corrections: readonly { readonly sourceRef: string; readonly sourceDigest: string; readonly fingerprint: string }[];
+  readonly errors: readonly { readonly sourceRef: string; readonly sourceDigest: string; readonly fingerprint: string }[];
+  readonly actualPathRefs: readonly string[];
+  readonly declaredPathRefs: readonly string[];
+  readonly successEvidenceRefs: readonly string[];
 }): MemoryRewindChain {
   if (!('closureKind' in input.reentry) || input.reentry.closureKind !== 'reentry') {
     throw new AppLifecycleError(
@@ -887,18 +1045,27 @@ function rewindAnalysisInputs(input: {
     );
   }
   const reentryId = input.reentry.closureId;
+  const reentryFactRef = checkpointClosureEvidenceLocator(reentryId);
   return {
     failedBranchRef: checkpointEvidenceLocator(input.failedCheckpoint),
-    rewindCheckpointRef: checkpointEvidenceLocator(input.failedCheckpoint),
+    rewindCheckpointRef: checkpointEvidenceLocator(input.rewindCheckpoint),
     recoveryCheckpointRef: checkpointEvidenceLocator(input.recoveryCheckpoint),
-    reentryFactRef: checkpointClosureEvidenceLocator(reentryId),
-    successfulBranchRefs: [checkpointEvidenceLocator(input.recoveryCheckpoint)],
-    successEvidenceRefs: input.recoveryCheckpoint.evidenceRefs.map((evidence) => evidence.locator),
-    absoluteJournalRefs: [
-      checkpointEvidenceLocator(input.failedCheckpoint),
-      checkpointEvidenceLocator(input.recoveryCheckpoint),
-      checkpointClosureEvidenceLocator(reentryId),
-    ],
+    reentryFactRef,
+    successfulBranchRefs: input.successEvidenceRefs.length === 0 ? [] : [reentryFactRef],
+    successEvidenceRefs: [...input.successEvidenceRefs],
+    absoluteJournalRefs: uniqueRefs(
+      [
+        checkpointEvidenceLocator(input.failedCheckpoint),
+        checkpointEvidenceLocator(input.rewindCheckpoint),
+        checkpointEvidenceLocator(input.recoveryCheckpoint),
+        reentryFactRef,
+      ],
+      input.actualPathRefs,
+      input.declaredPathRefs,
+      input.successEvidenceRefs,
+      input.corrections.map((entry) => entry.sourceRef),
+      input.errors.map((entry) => entry.sourceRef),
+    ),
   };
 }
 
@@ -1137,17 +1304,38 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     destinationRoot: input.auditPromptRoot,
   });
   const checkpointFile = join(input.paths.journalRoot, 'checkpoints.jsonl');
+  const checkpointClosureEvidence = createJsonlCheckpointClosurePort({ filePath: checkpointFile });
   const checkpointEvidence: MemoryRuntimeCheckpointEvidencePort = input.checkpointEvidence ?? {
     readCommitted: ({ checkpoint }) => readCommittedCheckpoint({
       filePath: checkpointFile,
       scope: checkpoint.scope,
       checkpointId: checkpoint.id,
     }),
-    readEvidence: ({ evidence }) => readCheckpointEvidence({
-      filePath: checkpointFile,
-      scope: evidence.scope,
-      evidence,
-    }),
+    readEvidence: async ({ evidence }) => {
+      const closurePrefix = 'humanagent://checkpoint-closure/';
+      if (!evidence.locator.startsWith(closurePrefix)) {
+        return readCheckpointEvidence({
+          filePath: checkpointFile,
+          scope: evidence.scope,
+          evidence,
+        });
+      }
+      const closureId = evidence.locator.slice(closurePrefix.length);
+      const closure = await checkpointClosureEvidence.read(closureId);
+      if (!closure) {
+        throw new AppLifecycleError(
+          'checkpoint-closure-evidence-missing',
+          `checkpoint closure evidence is unavailable: ${evidence.locator}`,
+          'commit the reentry closure before publishing the rewind boundary',
+          'app-checkpoint-journal',
+        );
+      }
+      return {
+        sourceRef: checkpointClosureEvidenceLocator(closureId),
+        sourceDigest: checkpointClosureEvidenceDigest(closure),
+        text: checkpointClosureEvidenceText(closure),
+      };
+    },
   };
   const journal = createJsonlEventJournal({
     filePath: join(input.paths.journalRoot, 'events.jsonl'),
@@ -1374,16 +1562,231 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
             OWNER,
           );
         }
-        const rewindChain = rewind === undefined
-          ? undefined
-          : rewindAnalysisInputs({
-              failedCheckpoint: rewind.failedCheckpoint,
-              recoveryCheckpoint: rewind.recoveryCheckpoint,
-              reentry: rewind.reentry,
+        let eventEvidenceRefs: EvidenceRef[] = [
+          primaryEvidence,
+          ...related.map((candidate) => checkpointEvidenceRef(candidate.checkpoint)),
+        ];
+        let analysisInputs: MemoryAnalysisInputs | undefined;
+        if (rewind !== undefined) {
+          if (rewind.selectedCheckpoint === undefined || rewind.selectedCheckpointRecordDigest === undefined) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-incomplete',
+              'rewind boundary is missing the selected destination checkpoint and its committed record digest',
+              'publish the selected destination read from the committed checkpoint owner',
+              OWNER,
+            );
+          }
+          if (rewind.actualPaths === undefined || rewind.actualPaths.length === 0) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-incomplete',
+              'rewind boundary is missing the actual old/new path evidence',
+              'publish committed actual path refs from the checkpoint owner',
+              OWNER,
+            );
+          }
+          if (rewind.declaredPaths === undefined || rewind.declaredPaths.length === 0) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-incomplete',
+              'rewind boundary is missing the declared Task and accepted-plan evidence',
+              'publish committed declared path refs from the Task and plan owner',
+              OWNER,
+            );
+          }
+          if (rewind.corrections === undefined || rewind.corrections.length === 0) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-incomplete',
+              'rewind boundary is missing correction evidence',
+              'publish committed correction refs from the path owner',
+              OWNER,
+            );
+          }
+          if (rewind.errors === undefined || rewind.errors.length === 0) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-incomplete',
+              'rewind boundary is missing error evidence',
+              'publish committed error refs from the path owner',
+              OWNER,
+            );
+          }
+          const boundaryScope = committed.checkpoint.scope;
+          const failed = await resolveCommittedRewindCheckpoint({
+            checkpoint: rewind.failedCheckpoint,
+            recordDigest: rewind.failedCheckpointRecordDigest,
+            checkpointEvidence,
+            boundaryScope,
+            role: 'failed',
+          });
+          const selected = await resolveCommittedRewindCheckpoint({
+            checkpoint: rewind.selectedCheckpoint,
+            recordDigest: rewind.selectedCheckpointRecordDigest,
+            checkpointEvidence,
+            boundaryScope,
+            role: 'selected destination',
+          });
+          const recovery = await resolveCommittedRewindCheckpoint({
+            checkpoint: rewind.recoveryCheckpoint,
+            recordDigest: rewind.recoveryCheckpointRecordDigest,
+            checkpointEvidence,
+            boundaryScope,
+            role: 'recovery',
+          });
+          if (selected.checkpoint.id.value === failed.checkpoint.id.value) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-destination-invalid',
+              'rewind selected destination must differ from the failed checkpoint',
+              'select the real recovery destination before publishing the rewind boundary',
+              OWNER,
+            );
+          }
+          if (selected.checkpoint.id.value === recovery.checkpoint.id.value) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-destination-invalid',
+              'rewind selected destination must differ from the recovery checkpoint',
+              'select the real recovery destination before publishing the rewind boundary',
+              OWNER,
+            );
+          }
+          if (!('closureKind' in rewind.reentry) || rewind.reentry.closureKind !== 'reentry') {
+            throw new AppLifecycleError(
+              'memory-boundary-reentry-invalid',
+              'rewind boundary requires a committed reentry closure',
+              'commit the reentry fact before publishing the rewind boundary',
+              OWNER,
+            );
+          }
+          if (rewind.reentry.checkpointId.value !== selected.checkpoint.id.value) {
+            throw new AppLifecycleError(
+              'memory-boundary-reentry-destination-mismatch',
+              'reentry closure does not reference the selected rewind destination',
+              'publish the reentry closure and selected destination from the same committed checkpoint owner',
+              OWNER,
+            );
+          }
+          const failedEvidence = checkpointEvidenceRef(failed.checkpoint);
+          const selectedEvidence = checkpointEvidenceRef(selected.checkpoint);
+          const recoveryEvidence = checkpointEvidenceRef(recovery.checkpoint);
+          const reentryEvidence = closureEvidenceRef(rewind.reentry, selected.checkpoint.scope);
+          for (const [role, evidence] of [
+            ['primary', primaryEvidence],
+            ['failed', failedEvidence],
+            ['selected destination', selectedEvidence],
+            ['recovery', recoveryEvidence],
+            ['reentry', reentryEvidence],
+          ] as const) {
+            await resolvePublisherEvidence({
+              evidence,
+              evidenceSource: explicitSubmissionEvidenceSource,
+              projectKey: input.paths.projectKey,
+              boundaryScope,
+              role,
             });
-        const reentryEvidence = rewind === undefined
-          ? undefined
-          : closureEvidenceRef(rewind.reentry, rewind.failedCheckpoint.scope);
+          }
+          const actual = await Promise.all(rewind.actualPaths.map((evidence) => resolvePublisherEvidence({
+            evidence,
+            evidenceSource: explicitSubmissionEvidenceSource,
+            projectKey: input.paths.projectKey,
+            boundaryScope,
+            role: 'actual path',
+          })));
+          const declared = await Promise.all(rewind.declaredPaths.map((evidence) => resolvePublisherEvidence({
+            evidence,
+            evidenceSource: explicitSubmissionEvidenceSource,
+            projectKey: input.paths.projectKey,
+            boundaryScope,
+            role: 'declared path',
+          })));
+          const success = await Promise.all((rewind.successEvidence ?? []).map((evidence) => resolvePublisherEvidence({
+            evidence,
+            evidenceSource: explicitSubmissionEvidenceSource,
+            projectKey: input.paths.projectKey,
+            boundaryScope,
+            role: 'success',
+          })));
+          const resolveCorrection = async (
+            entry: MemoryRuntimeRewindEvidence,
+            role: 'correction' | 'error',
+          ): Promise<{
+            readonly evidence: EvidenceRef;
+            readonly sourceRef: string;
+            readonly sourceDigest: string;
+            readonly fingerprint: string;
+          }> => {
+            if (!entry.fingerprint.trim()) {
+              throw new AppLifecycleError(
+                'memory-boundary-rewind-evidence-incomplete',
+                `${role} fingerprint is required: ${entry.evidence.locator}`,
+                'publish an explicit correction/error fingerprint with its committed evidence',
+                OWNER,
+              );
+            }
+            const resolved = await resolvePublisherEvidence({
+              evidence: entry.evidence,
+              evidenceSource: explicitSubmissionEvidenceSource,
+              projectKey: input.paths.projectKey,
+              boundaryScope,
+              role,
+            });
+            return {
+              evidence: entry.evidence,
+              sourceRef: resolved.sourceRef,
+              sourceDigest: resolved.sourceDigest,
+              fingerprint: entry.fingerprint,
+            };
+          };
+          const corrections = await Promise.all(rewind.corrections.map((entry) =>
+            resolveCorrection(entry, 'correction')));
+          const errors = await Promise.all(rewind.errors.map((entry) =>
+            resolveCorrection(entry, 'error')));
+          const actualPathRefs = rewind.actualPaths.map((evidence) => evidence.locator);
+          const declaredPathRefs = rewind.declaredPaths.map((evidence) => evidence.locator);
+          const successEvidenceRefs = (rewind.successEvidence ?? []).map((evidence) => evidence.locator);
+          const actualPathSet = new Set(actualPathRefs);
+          if (declaredPathRefs.some((ref) => actualPathSet.has(ref))) {
+            throw new AppLifecycleError(
+              'memory-boundary-rewind-path-identity-conflict',
+              'actual and declared path evidence cannot use the same committed locator',
+              'publish actual path refs and declared Task/plan refs from their separate owners',
+              OWNER,
+            );
+          }
+          eventEvidenceRefs = mergeEvidenceRefs(
+            [
+              primaryEvidence,
+              ...related.map((candidate) => checkpointEvidenceRef(candidate.checkpoint)),
+            ],
+            [failedEvidence, selectedEvidence, recoveryEvidence, reentryEvidence],
+            rewind.actualPaths,
+            rewind.declaredPaths,
+            rewind.successEvidence ?? [],
+            corrections.map((entry) => entry.evidence),
+            errors.map((entry) => entry.evidence),
+          );
+          analysisInputs = {
+            corrections: corrections.map((entry) => ({
+              sourceRef: entry.sourceRef,
+              sourceDigest: entry.sourceDigest,
+              fingerprint: entry.fingerprint,
+            })),
+            errors: errors.map((entry) => ({
+              sourceRef: entry.sourceRef,
+              sourceDigest: entry.sourceDigest,
+              fingerprint: entry.fingerprint,
+            })),
+            rewindChains: [rewindAnalysisInputs({
+              failedCheckpoint: failed.checkpoint,
+              rewindCheckpoint: selected.checkpoint,
+              recoveryCheckpoint: recovery.checkpoint,
+              reentry: rewind.reentry,
+              corrections,
+              errors,
+              actualPathRefs,
+              declaredPathRefs,
+              successEvidenceRefs,
+            })],
+            actualPathRefs,
+            declaredPathRefs,
+          };
+        }
         const event = createMemoryAnalysisRequestedEvent({
           messageId: `checkpoint-${committed.checkpoint.id.value}-${trigger}`,
           streamId: consumer.streamIds[0]!,
@@ -1392,26 +1795,12 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
           summary: trigger === 'rewind' && related.length > 0
             ? `checkpoint ${committed.checkpoint.id.value} reentered at ${related[0]!.checkpoint.id.value}`
             : `checkpoint ${committed.checkpoint.outcome} for task ${committed.checkpoint.scope.taskId?.value ?? 'unknown'}`,
-          evidenceRefs: [
-            primaryEvidence,
-            ...related.map((candidate) => checkpointEvidenceRef(candidate.checkpoint)),
-            ...(reentryEvidence === undefined ? [] : [reentryEvidence]),
-          ],
+          evidenceRefs: eventEvidenceRefs,
           executionEpoch: committed.checkpoint.executionEpoch,
           trigger,
           requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',
           candidateCategory: trigger === 'completion' || trigger === 'rewind' ? 'project-experience' : 'project-fact',
-          ...(rewindChain === undefined
-            ? {}
-            : {
-                analysisInputs: {
-                  corrections: [],
-                  errors: [],
-                  rewindChains: [rewindChain],
-                  actualPathRefs: [],
-                  declaredPathRefs: [],
-                },
-              }),
+          ...(analysisInputs === undefined ? {} : { analysisInputs }),
           ...(trigger !== 'rewind'
             && input.binding.interactionScopeId === undefined
             && committed.checkpoint.scope.taskId
