@@ -96,11 +96,11 @@ function identity({ value, seq, summary, outcome, epoch, journalSeq, previousChe
 // and viewed B (committed epoch 6). A newer checkpoint B is retained in history
 // but is NOT the current position.
 const A = identity({
-  value: 'ck-a', seq: 3, summary: 'A 已完成阶段一', outcome: 'succeeded', epoch: 4,
+  value: 'ck-a', seq: 3, summary: 'CURRENT-SUMMARY-SENTINEL', outcome: 'succeeded', epoch: 4,
   journalSeq: 31, committedAt: '2026-10-15T03:00:00.000Z',
 })
 const B = identity({
-  value: 'ck-b', seq: 5, summary: 'B 等待审查', outcome: 'waiting', epoch: 6,
+  value: 'ck-b', seq: 5, summary: 'VIEWED-SUMMARY-SENTINEL', outcome: 'waiting', epoch: 6,
   journalSeq: 57, committedAtUnavailableReason: '旧记录没有 Harness 时间权威。',
 })
 
@@ -135,7 +135,7 @@ const semanticKnown = {
   version: 1,
   turn: { turnId: 'turn-2' },
   savedAt: '2026-10-15T03:05:00.000Z',
-  description: '阶段二等待审查',
+  description: 'SEMANTIC-DESCRIPTION-SENTINEL',
   semantics: {
     goal: '交付 C5 模块',
     actions: '实现渲染与查询',
@@ -243,18 +243,32 @@ test('main layer keeps current authority and viewed target separate and wires on
   assert.ok(current, 'current section is rendered')
   assert.ok(viewedNode, 'viewed section is rendered')
 
+  // current only states the authoritative position: no stored summary, no
+  // unqualified outcome chip and no saved next action. The record-vs-task scope
+  // note must be explicit.
   assert.match(text(current), /检查点 3/)
-  assert.match(text(current), /A 已完成阶段一/)
-  assert.match(text(current), /已完成/)
   assert.match(text(current), /当前生效执行轮 5/)
   assert.match(text(current), /该检查点提交轮 4/)
-  assert.doesNotMatch(text(current), /B 等待审查/)
+  assert.match(text(current), /记录保存时状态与建议不代表任务当前业务状态/)
+  assert.doesNotMatch(text(current), /CURRENT-SUMMARY-SENTINEL/)
+  assert.doesNotMatch(text(current), /VIEWED-SUMMARY-SENTINEL/)
+  assert.doesNotMatch(text(current), /下一步/)
 
+  // viewed shows the four DTO semantics directly under the saved-time
+  // qualification, and never borrows the raw summary or description.
   assert.match(text(viewedNode), /检查点 5/)
-  assert.match(text(viewedNode), /B 等待审查/)
-  assert.match(text(viewedNode), /等待中/)
+  assert.match(text(viewedNode), /记录保存时状态：等待中/)
+  assert.match(text(viewedNode), /记录保存时的下一动作：继续执行/)
+  assert.match(text(role(viewedNode, 'semantic-goal')[0]), /交付 C5 模块/)
+  assert.match(text(role(viewedNode, 'semantic-actions')[0]), /实现渲染与查询/)
+  assert.match(text(role(viewedNode, 'semantic-result')[0]), /已实现，等待审查/)
+  assert.match(text(role(viewedNode, 'semantic-next-step')[0]), /进入组合验收/)
   assert.match(text(viewedNode), /这不是当前执行位置/)
-  assert.doesNotMatch(text(viewedNode), /A 已完成阶段一/)
+
+  // None of the three sentinels leaks into the human main layer.
+  assert.doesNotMatch(text(root), /CURRENT-SUMMARY-SENTINEL/)
+  assert.doesNotMatch(text(root), /VIEWED-SUMMARY-SENTINEL/)
+  assert.doesNotMatch(text(root), /SEMANTIC-DESCRIPTION-SENTINEL/)
 
   // Technical receipts stay in the detail layer, not the main layer.
   assert.doesNotMatch(text(root), /commit-31/)
@@ -264,6 +278,17 @@ test('main layer keeps current authority and viewed target separate and wires on
   assert.equal(entries.length, 2, 'retained history keeps both checkpoints')
   assert.equal(entries[0].getAttribute('data-checkpoint-journal-seq'), '31')
   assert.equal(entries[1].getAttribute('data-checkpoint-journal-seq'), '57')
+
+  // The list is navigation only: number, saved-time status and the original
+  // select trigger. No flattened summary or next line is repeated per entry.
+  assert.match(text(entries[0]), /保存时状态：已完成/)
+  assert.match(text(entries[1]), /保存时状态：等待中/)
+  for (const entry of entries) {
+    assert.ok(buttons(entry).some((button) => text(button).includes('查看此检查点')))
+    assert.doesNotMatch(text(entry), /CURRENT-SUMMARY-SENTINEL/)
+    assert.doesNotMatch(text(entry), /VIEWED-SUMMARY-SENTINEL/)
+    assert.doesNotMatch(text(entry), /下一步/)
+  }
 
   const selectButtons = buttons(entries[1])
   assert.equal(selectButtons.length, 1)
@@ -288,6 +313,46 @@ test('main layer keeps current authority and viewed target separate and wires on
   assert.equal(calls.returnCurrent, 1, 'dispose removes own return listener')
 })
 
+test('legacy viewed states the real gap and never parses the raw summary into semantics', () => {
+  // The raw summary looks like "goal: ... | next: ..." but carries no structure.
+  // The renderer must not split it into a fabricated four-part semantics block.
+  const rawSummary = 'goal: 伪造目标 | actions: 伪造行动 | next: 伪造下一步'
+  const legacyRead = {
+    ok: true,
+    value: {
+      ...read.value,
+      viewed: {
+        ...read.value.viewed,
+        identity: { ...B, summary: rawSummary },
+        semantic: { state: 'unavailable', reason: '旧记录没有结构化阶段说明。' },
+      },
+    },
+  }
+
+  const main = renderCheckpointHistory(legacyRead, {
+    element: createElement,
+    onSelect: () => {},
+    onReturnToCurrent: () => {},
+  })
+  const root = main.element
+  const viewedNode = role(root, 'viewed')[0]
+
+  assert.match(text(viewedNode), /未提供结构化阶段说明/)
+  assert.match(text(viewedNode), /原始摘要可在技术详情查看/)
+  assert.match(text(viewedNode), /记录保存时状态：等待中/)
+  assert.equal(role(viewedNode, 'semantic-goal').length, 0, 'no fabricated four-part semantics')
+  assert.doesNotMatch(text(root), /伪造目标/)
+  assert.doesNotMatch(text(root), /伪造行动/)
+  assert.doesNotMatch(text(root), /伪造下一步/)
+  main.dispose()
+
+  // The technical layer keeps the exact raw summary, not the semantic description.
+  const detail = renderCheckpointHistoryDetail(legacyRead, { element: createElement })
+  assert.match(text(role(detail.element, 'detail-viewed')[0]), /原始摘要/)
+  assert.match(text(detail.element), /goal: 伪造目标 \| actions: 伪造行动 \| next: 伪造下一步/)
+  detail.dispose()
+})
+
 test('detail layer renders four-part semantics, epoch facts, exact refs and explicit unavailable', () => {
   const references = []
   const detail = renderCheckpointHistoryDetail(read, {
@@ -300,6 +365,19 @@ test('detail layer renders four-part semantics, epoch facts, exact refs and expl
   assert.match(text(role(root, 'semantic-actions')[0]), /实现渲染与查询/)
   assert.match(text(role(root, 'semantic-result')[0]), /已实现，等待审查/)
   assert.match(text(role(root, 'semantic-next-step')[0]), /进入组合验收/)
+
+  // Raw identity summaries stay reachable in the technical layer, each kept
+  // distinct from the semantic description that must not stand in for them.
+  const currentDetail = role(root, 'detail-current')[0]
+  const viewedDetail = role(root, 'detail-viewed')[0]
+  assert.match(text(currentDetail), /原始摘要/)
+  assert.match(text(currentDetail), /CURRENT-SUMMARY-SENTINEL/)
+  assert.match(text(viewedDetail), /原始摘要/)
+  assert.match(text(viewedDetail), /VIEWED-SUMMARY-SENTINEL/)
+  assert.match(text(root), /SEMANTIC-DESCRIPTION-SENTINEL/)
+  // The detail rows name the saved-time context instead of bare 结果 / 下一步.
+  assert.match(text(currentDetail), /记录保存时状态/)
+  assert.match(text(viewedDetail), /记录保存时下一动作/)
 
   assert.match(text(role(root, 'capture-unavailable')[0]), /没有可验证的 capture 版本关联/)
   assert.match(text(role(root, 'context-unavailable')[0]), /历史 Context 未保留/)
