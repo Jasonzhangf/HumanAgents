@@ -755,10 +755,10 @@ export function renderCheckpointAssetBody(result, options = {}) {
   }
 
   const value = result.value
-  const head = ui.make('div', undefined, 'section-head')
+  const head = ui.make('div', undefined, 'stack')
   head.append(ui.make('h3', checkpointAssetLabel(value.selector)))
   head.append(ui.make('p', `检查点 ${value.checkpoint?.seq ?? '未提供'}`, 'muted'))
-  const actions = ui.make('div', undefined, 'section-head')
+  const actions = ui.make('div', undefined, 'history-actions')
   ui.action(actions, '返回检查点详情', options.onBack, undefined, 'button button--quiet')
   head.append(actions)
   ui.root.append(head)
