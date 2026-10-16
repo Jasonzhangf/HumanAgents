@@ -18,6 +18,7 @@ import {
 } from '../../../contracts/src/active-turn-segments.js';
 import { canonicalJsonStringify } from '../../../contracts/src/explicit-brain.js';
 import type { SemanticHistoryPersistencePort } from '../checkpoints/ports.js';
+import type { DeadEndRecord } from '../checkpoints/closure.js';
 import {
   validateSemanticHistoryExactLookupV1,
   type CommittedSemanticCheckpoint,
@@ -73,6 +74,19 @@ export class SemanticTurnContextReaderError extends Error {
     super(message);
     this.name = 'SemanticTurnContextReaderError';
   }
+}
+
+/**
+ * Request-scoped active-reasoning filter. It is derived by the App journal owner
+ * from the committed active reasoning lineage; the reader only applies it to the
+ * already-materialized current turn and never selects history itself.
+ *
+ * `omittedRefs` are the exact context refs the active lineage no longer carries.
+ * `verifiedDeadEnds` are conclusions that remain valid for the active lineage.
+ */
+export interface SemanticReasoningLineageFilterV1 {
+  readonly omittedRefs: readonly string[];
+  readonly verifiedDeadEnds?: readonly DeadEndRecord[];
 }
 
 /**
@@ -133,6 +147,8 @@ export interface SemanticTurnContextReaderInput {
   readonly rules?: readonly string[];
   /** Request-scoped orientation. It is transient and never enters canonical history. */
   readonly orientation?: string;
+  /** Active-reasoning filter derived by the App journal owner. */
+  readonly reasoningLineage?: SemanticReasoningLineageFilterV1;
 }
 
 /**
@@ -165,6 +181,8 @@ export interface SemanticTurnSegmentContextReaderInput {
   readonly rules?: readonly string[];
   /** Request-scoped orientation. It is transient and never enters canonical history. */
   readonly orientation?: string;
+  /** Active-reasoning filter derived by the App journal owner. */
+  readonly reasoningLineage?: SemanticReasoningLineageFilterV1;
 }
 
 export interface ResolvedSemanticTurnContext {
@@ -172,6 +190,8 @@ export interface ResolvedSemanticTurnContext {
   readonly watermark: ActiveTurnLivePrefixWatermark;
   readonly obligations: readonly ActiveTurnProductionObligationRef[];
   readonly instructions?: { readonly text: string };
+  /** Verified negative conclusions retained for the active reasoning lineage. */
+  readonly verifiedDeadEnds?: readonly DeadEndRecord[];
 }
 
 function cloneScope(scope: ScopeRef): ScopeRef {
@@ -387,6 +407,135 @@ function mapActiveTurn(
   return mapActiveTurnCore(resolved, true);
 }
 
+function omittedToolUnit(
+  unit: Extract<SemanticCurrentTurnUnit, { kind: 'tool-call' | 'tool-result' }>,
+  omitted: ReadonlySet<string>,
+): boolean {
+  if (omitted.has(unit.callId) || omitted.has(unit.continuationRef)) return true;
+  if (unit.kind !== 'tool-result') return false;
+  if (omitted.has(unit.rawOutputRef.evidenceId.value) || omitted.has(unit.rawOutputRef.locator)) return true;
+  return unit.evidenceRefs.some((ref) => omitted.has(ref.evidenceId.value) || omitted.has(ref.locator));
+}
+
+function omittedDelivery(
+  delivery: RefinedChildSemanticDelivery,
+  omitted: ReadonlySet<string>,
+): boolean {
+  if (omitted.has(delivery.childTurnId) || omitted.has(delivery.assignmentId)) return true;
+  if (omitted.has(delivery.content.ref.evidenceId.value) || omitted.has(delivery.content.ref.locator)) return true;
+  return delivery.evidenceRefs.some((ref) => omitted.has(ref.evidenceId.value) || omitted.has(ref.locator));
+}
+
+function failLineage(code: string, message: string): never {
+  throw new SemanticTurnContextReaderError(`semantic-turn-context.reasoning-lineage.${code}`, message);
+}
+
+/**
+ * An open production duty may never be hidden by a reasoning-lineage filter. A
+ * request or child that is still owed keeps its raw current-turn state and is
+ * reported through the existing obligations instead of being silently dropped.
+ */
+function assertOmittedUnitsAreSettled(input: {
+  readonly activeTurn: readonly SemanticTurnInputEntry<SemanticCurrentTurnUnit>[];
+  readonly obligations: readonly ActiveTurnProductionObligationRef[];
+  readonly omitted: ReadonlySet<string>;
+}): void {
+  const openRequests = new Set<string>();
+  for (const obligation of input.obligations) {
+    const identity = obligation.kind === 'request' ? obligation.requestId : obligation.invocationId;
+    if (input.omitted.has(identity)) {
+      failLineage('unresolved-obligation', `open ${obligation.kind} obligation ${identity} cannot be omitted from the active turn`);
+    }
+    if (obligation.kind === 'request') openRequests.add(obligation.requestId);
+  }
+  for (const entry of input.activeTurn) {
+    if (entry.kind !== 'message') continue;
+    const unit = entry.message;
+    if (unit.kind !== 'tool-call' && unit.kind !== 'tool-result') continue;
+    if (!omittedToolUnit(unit, input.omitted)) continue;
+    if (openRequests.has(unit.request.requestId)) {
+      failLineage('unresolved-obligation', `tool ${unit.callId} of open request ${unit.request.requestId} cannot be omitted`);
+    }
+  }
+}
+
+/**
+ * Removes exactly the confirmed wrong refs from the already-materialized current
+ * turn. A settled tool result and its same-call tool call leave together; the
+ * original user input and every other accepted unit stay in order. The Raw fact
+ * ledger is untouched because this is a request projection, not a Journal write.
+ */
+function applyReasoningLineageFilter(
+  activeTurn: readonly SemanticTurnInputEntry<SemanticCurrentTurnUnit>[],
+  obligations: readonly ActiveTurnProductionObligationRef[],
+  filter: SemanticReasoningLineageFilterV1 | undefined,
+): readonly SemanticTurnInputEntry<SemanticCurrentTurnUnit>[] {
+  if (filter === undefined || filter.omittedRefs.length === 0) return activeTurn;
+  const omitted = new Set(filter.omittedRefs);
+  assertOmittedUnitsAreSettled({ activeTurn, obligations, omitted });
+  const omittedCalls = new Set<string>();
+  for (const entry of activeTurn) {
+    if (entry.kind !== 'message') continue;
+    const unit = entry.message;
+    if (unit.kind !== 'tool-call' && unit.kind !== 'tool-result') continue;
+    if (omittedToolUnit(unit, omitted)) omittedCalls.add(unit.callId);
+  }
+  const retained: SemanticTurnInputEntry<SemanticCurrentTurnUnit>[] = [];
+  for (const entry of activeTurn) {
+    if (entry.kind === 'refined-child') {
+      if (!omittedDelivery(entry.delivery, omitted)) retained.push(entry);
+      continue;
+    }
+    const unit = entry.message;
+    if (unit.kind === 'initial-input') retained.push(entry);
+    else if (unit.kind === 'content') { if (!omitted.has(unit.contentUnitId)) retained.push(entry); }
+    else if (!omittedCalls.has(unit.callId)) retained.push(entry);
+  }
+  return retained;
+}
+
+function retainedCheckpoints(
+  checkpoints: readonly CommittedSemanticCheckpointProjection[],
+  filter: SemanticReasoningLineageFilterV1 | undefined,
+): readonly CommittedSemanticCheckpointProjection[] {
+  if (filter === undefined || filter.omittedRefs.length === 0) return checkpoints;
+  const omitted = new Set(filter.omittedRefs);
+  const retained: CommittedSemanticCheckpointProjection[] = [];
+  for (const checkpoint of checkpoints) {
+    if (omitted.has(checkpoint.checkpointId.value)) continue;
+    const evidenceRefs = checkpoint.evidenceRefs.filter((ref) =>
+      !omitted.has(ref.evidenceId.value) && !omitted.has(ref.locator));
+    retained.push({ ...checkpoint, evidenceRefs });
+  }
+  return retained;
+}
+
+function retainedDeadEnds(
+  filter: SemanticReasoningLineageFilterV1 | undefined,
+): readonly DeadEndRecord[] {
+  if (filter?.verifiedDeadEnds === undefined) return [];
+  const omitted = new Set(filter.omittedRefs);
+  const retained: DeadEndRecord[] = [];
+  for (const deadEnd of filter.verifiedDeadEnds) {
+    if (omitted.has(deadEnd.deadEndRef)) continue;
+    const evidenceRefs = deadEnd.evidenceRefs
+      .filter((ref) => !omitted.has(ref.evidenceId.value) && !omitted.has(ref.locator))
+      .map(cloneEvidenceRef);
+    if (evidenceRefs.length === 0) continue;
+    retained.push({
+      deadEndRef: deadEnd.deadEndRef,
+      scope: cloneScope(deadEnd.scope),
+      failedPathRefs: [...deadEnd.failedPathRefs],
+      conclusion: deadEnd.conclusion,
+      invalidatedAssumptions: [...deadEnd.invalidatedAssumptions],
+      evidenceRefs,
+      ...(deadEnd.suggestedAlternatives === undefined
+        ? {} : { suggestedAlternatives: [...deadEnd.suggestedAlternatives] }),
+    });
+  }
+  return retained;
+}
+
 async function resolvePriorCompletedTurns(
   history: Pick<SemanticHistoryPersistencePort, 'readCommittedSemanticCheckpoint'>,
   lookups: readonly SemanticHistoryExactLookupV1[],
@@ -424,6 +573,7 @@ function buildResolvedSemanticTurnContext(input: {
   readonly activeTurn: readonly SemanticTurnInputEntry<SemanticCurrentTurnUnit>[];
   readonly watermark: ActiveTurnLivePrefixWatermark;
   readonly obligations: readonly ActiveTurnProductionObligationRef[];
+  readonly verifiedDeadEnds: readonly DeadEndRecord[];
 }): ResolvedSemanticTurnContext {
   const context = buildSemanticTurnContext<SemanticCurrentTurnUnit>({
     runtimeId: input.runtimeId,
@@ -442,6 +592,7 @@ function buildResolvedSemanticTurnContext(input: {
     },
     obligations: contextInput.obligations.map(cloneObligation),
     ...(input.orientation === undefined ? {} : { instructions: { text: input.orientation } }),
+    ...(contextInput.verifiedDeadEnds.length === 0 ? {} : { verifiedDeadEnds: contextInput.verifiedDeadEnds }),
   };
 }
 
@@ -611,16 +762,18 @@ export async function readSemanticTurnContext(
     prefix: input.live.prefix,
     rawContent: input.live.rawContent,
   });
-  const activeTurn = mapActiveTurn(resolved);
+  const activeTurn = applyReasoningLineageFilter(
+    mapActiveTurn(resolved), input.live.prefix.obligations, input.reasoningLineage);
 
   return buildResolvedSemanticTurnContext(input, {
-    semanticCheckpoints,
+    semanticCheckpoints: retainedCheckpoints(semanticCheckpoints, input.reasoningLineage),
     activeTurn,
     watermark: {
       lastAcceptedSeq: resolved.cut.lastAcceptedSeq,
       controlRecordCount: resolved.cut.controlRecordCount,
     },
     obligations: input.live.prefix.obligations,
+    verifiedDeadEnds: retainedDeadEnds(input.reasoningLineage),
   });
 }
 
@@ -683,17 +836,20 @@ export async function readResumedSegmentSemanticTurnContext(
   }
   activeTurn.push(...mapActiveTurnCore(live, false));
 
+  const obligations = mergeSegmentObligations([
+    ...initialGroups.map((group) => ({ segmentId: group.segmentId, obligations: segmentObligations(group.core) })),
+    ...priorSegments.map((segment) => ({ segmentId: segment.segmentId, obligations: segmentObligations(segment.core) })),
+    { segmentId: live.segment.segmentId, obligations: input.segment.live.prefix.obligations },
+  ]);
+
   return buildResolvedSemanticTurnContext(input, {
-    semanticCheckpoints,
-    activeTurn,
+    semanticCheckpoints: retainedCheckpoints(semanticCheckpoints, input.reasoningLineage),
+    activeTurn: applyReasoningLineageFilter(activeTurn, obligations, input.reasoningLineage),
     watermark: {
       lastAcceptedSeq: live.cut.lastAcceptedSeq,
       controlRecordCount: live.cut.controlRecordCount,
     },
-    obligations: mergeSegmentObligations([
-      ...initialGroups.map((group) => ({ segmentId: group.segmentId, obligations: segmentObligations(group.core) })),
-      ...priorSegments.map((segment) => ({ segmentId: segment.segmentId, obligations: segmentObligations(segment.core) })),
-      { segmentId: live.segment.segmentId, obligations: input.segment.live.prefix.obligations },
-    ]),
+    obligations,
+    verifiedDeadEnds: retainedDeadEnds(input.reasoningLineage),
   });
 }

@@ -1,4 +1,5 @@
 import type {
+  CheckpointClosureRecord,
   ContextHistoryRecord,
   JournalCommitRef,
   NextAction,
@@ -29,18 +30,27 @@ import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-ident
 import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
 import { projectTaskGrantAuthority } from '../../../runtime/src/admission/task-grant.js';
 import {
+  assertConfirmedReentryCommand,
   buildContextCorrection,
   assertConfirmedContextCorrectionCommand,
+  buildConditionalReentry,
+  conditionalReentryIdentity,
   contextCorrectionIdentity,
+  sameConditionalReentryCommand,
   sameContextCorrectionCommand,
+  type ConditionalReentryReadback,
+  type ConditionalReentryRecord,
+  type ConfirmedReentryCommand,
   type ConfirmedContextCorrectionCommand,
   type ContextCorrectionReadback,
   type ContextCorrectionRecord,
 } from '../../../runtime/src/checkpoints/conditional-reentry.js';
 import type {
+  ConditionalReentrySubmissionPort,
   ContextCorrectionSubmissionPort,
   ExecutionPosition,
 } from '../../../runtime/src/checkpoints/ports.js';
+import type { CheckpointClosureRecord as RuntimeCheckpointClosureRecord } from '../../../runtime/src/checkpoints/closure.js';
 import type {
   ReentryCurrentFacts,
   ReentryCurrentRead,
@@ -58,6 +68,8 @@ import type {
 import { readRuntimeTaskCurrentStateFromRecords } from '../runtime-current-state-journal.js';
 import { readOperationControlFromRecords } from '../operation-control-journal.js';
 import {
+  acceptedContextCorrectionBasesFromRecords,
+  assertRecoveryBinding,
   baseExecutionPositionFromRecords,
   closureFromRecord,
   commitConditionalTransitionRecord,
@@ -819,6 +831,213 @@ export function createJsonlContextCorrectionSubmissionPort(input: {
         };
       }
       return null;
+    },
+  };
+}
+
+function readReentryFromRecords(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+  commandId: string,
+): ConditionalReentryReadback | null {
+  for (const record of records) {
+    const transition = conditionalReentryFromRecord(record);
+    if (!transition || transition.command.commandId !== commandId) continue;
+    if (!inTaskScope(transition.scope, taskScope)) continue;
+    if (!record.commitId) throw new Error('conditional reentry record has no physical commit identity');
+    return {
+      record: transition,
+      commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
+    };
+  }
+  return null;
+}
+
+function boundCheckpointClosureFromRecords(
+  records: readonly JournalRecord[],
+  command: ConfirmedReentryCommand,
+): { readonly closure: RuntimeCheckpointClosureRecord } {
+  const taskScope: ScopeRef = {
+    organId: command.taskScope.organId,
+    taskId: command.taskScope.taskId,
+  };
+  for (const record of [...records].reverse()) {
+    const closure = closureFromRecord(record);
+    if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') continue;
+    if (closure.recoveryBinding === undefined) continue;
+    if (!inTaskScope(record.scope, taskScope)) continue;
+    if (!sameCommit(closure.recoveryBinding.checkpointCommitRef, command.targetCheckpointCommitRef)) continue;
+    assertRecoveryBinding(records, record, closure);
+    return { closure };
+  }
+  throw new Error('conditional reentry target checkpoint has no bound closure in the confirmed task');
+}
+
+function maxExecutionEpochForReentry(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+  current: ReentryCurrentFacts,
+  targetClosure: CheckpointClosureRecord,
+): number {
+  let maxExecutionEpoch = Math.max(
+    current.position.executionEpoch,
+    current.context.contextView.executionEpoch,
+    current.context.loopCheckpoint.executionEpoch,
+    targetClosure.executionEpoch,
+    ...current.fencedBindings.map((fence) => fence.executionEpoch),
+  );
+  for (const record of records) {
+    if (!inTaskScope(record.scope, taskScope)) continue;
+    if (record.checkpoint) {
+      maxExecutionEpoch = Math.max(maxExecutionEpoch, record.checkpoint.executionEpoch);
+    }
+    const context = contextHistoryFromRecord(record);
+    if (context !== null) {
+      maxExecutionEpoch = Math.max(
+        maxExecutionEpoch,
+        context.contextView.executionEpoch,
+        context.loopCheckpoint.executionEpoch,
+      );
+    }
+    const reentry = conditionalReentryFromRecord(record);
+    if (reentry !== null) {
+      maxExecutionEpoch = Math.max(
+        maxExecutionEpoch,
+        reentry.previousExecutionEpoch,
+        reentry.checkpointExecutionEpoch,
+        reentry.newExecutionEpoch,
+      );
+    }
+    const correction = contextCorrectionFromRecord(record);
+    if (correction !== null) {
+      maxExecutionEpoch = Math.max(
+        maxExecutionEpoch,
+        correction.previousExecutionEpoch,
+        correction.newExecutionEpoch,
+      );
+    }
+  }
+  return maxExecutionEpoch;
+}
+
+function buildReentryFromRecords(
+  records: readonly JournalRecord[],
+  command: ConfirmedReentryCommand,
+): ConditionalReentryRecord {
+  assertConfirmedReentryCommand(command);
+  const taskScope: ScopeRef = {
+    organId: command.taskScope.organId,
+    taskId: command.taskScope.taskId,
+  };
+  const existing = readReentryFromRecords(records, taskScope, command.commandId);
+  if (existing !== null) {
+    if (!sameConditionalReentryCommand(existing.record.command, command)) {
+      throw new Error('conditional reentry command id is already committed with different confirmed facts');
+    }
+    return existing.record;
+  }
+  const current = readCurrentFromRecords(records, taskScope);
+  if (current.state !== 'known') {
+    throw new Error(`conditional reentry current facts are unknown: ${current.reason}`);
+  }
+  if (current.unresolvedDisplacedRefs.length > 0) {
+    throw new Error('conditional reentry requires a settled current incarnation with no unresolved displaced work');
+  }
+  if (current.position.executionEpoch !== command.expectedExecutionEpoch
+    || !sameCommit(current.position.controlCommitRef, command.expectedCurrentControlCommitRef)) {
+    throw new Error('conditional reentry current control token is stale');
+  }
+  const operationControl = readOperationControlFromRecords(records, {
+    scope: current.context.scope,
+    agentRuntimeId: current.context.agentRuntimeId,
+    harnessExecutionEpoch: current.position.executionEpoch,
+  });
+  if (operationControl.state !== 'complete') {
+    throw new Error(`conditional reentry operation control is unknown: ${operationControl.reason}`);
+  }
+  if (!sameCommit(operationControl.currentControlCommitRef, command.expectedOperationControlCommitRef)) {
+    throw new Error('conditional reentry operation control token changed');
+  }
+  const grant = readTaskGrantFromRecords(records, taskScope);
+  if (!grant || grant.grant.state !== 'granted'
+    || grant.grant.owner !== command.principalOwner
+    || String(grant.grant.revision) !== command.permissionRevision
+    || !sameCommit(grant.commitRef, command.expectedGrantCommitRef)) {
+    throw new Error('conditional reentry grant token or permission revision changed');
+  }
+  const target = boundCheckpointClosureFromRecords(records, command);
+  const targetContextRecord = exactJournalRecord(records, target.closure.recoveryBinding!.contextCommitRef);
+  const targetContext = contextHistoryFromRecord(targetContextRecord);
+  if (targetContext === null) {
+    throw new Error('conditional reentry target context is unreadable');
+  }
+  const targetCoreClosure = target.closure.recoveryBinding!.coreClosure;
+  const acceptedCorrectionBases = acceptedContextCorrectionBasesFromRecords(records, taskScope);
+  return buildConditionalReentry({
+    command,
+    targetScope: targetContext.scope,
+    targetContext,
+    targetClosure: targetCoreClosure,
+    sourceContextCommitRef: target.closure.recoveryBinding!.contextCommitRef,
+    sourceClosureRef: target.closure.closureId,
+    current,
+    maxExecutionEpoch: maxExecutionEpochForReentry(records, taskScope, current, targetCoreClosure),
+    acceptedCorrectionBases,
+  });
+}
+
+/**
+ * App-owned conditional reentry submission over the authoritative Organ
+ * Journal. Preparation and the locked CAS rebuild both use the same owner
+ * builders; the port adds no second control store or state machine.
+ */
+export function createJsonlConditionalReentrySubmissionPort(input: {
+  readonly filePath: string;
+  readonly journal?: JsonlOrganJournal;
+}): ConditionalReentrySubmissionPort {
+  if (!input.filePath.trim()) throw new Error('conditional reentry journal path is required');
+  const journal = input.journal ?? new JsonlOrganJournal(input.filePath);
+
+  async function records(): Promise<readonly JournalRecord[]> {
+    const verification = await journal.verify();
+    if (!verification.valid) throw new Error(verification.error ?? 'conditional reentry Journal is invalid');
+    return verification.records;
+  }
+
+  return {
+    async prepare(command: ConfirmedReentryCommand): Promise<ConditionalReentryRecord> {
+      return buildReentryFromRecords(await records(), command);
+    },
+
+    async commitReentryRecord(
+      record: ConditionalReentryRecord,
+      expectedCurrentControlCommitRef: JournalCommitRef,
+    ): Promise<JournalCommitRef> {
+      assertConfirmedReentryCommand(record.command);
+      if (record.closureId !== conditionalReentryIdentity(record.command)) {
+        throw new Error('conditional reentry record does not match its confirmed command');
+      }
+      if (!sameCommit(record.expectedCurrentControlCommitRef, expectedCurrentControlCommitRef)) {
+        throw new Error('conditional reentry expected current control token does not match the record');
+      }
+      return commitConditionalTransitionRecord({
+        journal,
+        record,
+        expectedCurrentControlCommitRef,
+        validateLocked: (lockedRecords) => {
+          const rebuilt = buildReentryFromRecords(lockedRecords, record.command);
+          if (JSON.stringify(rebuilt) !== JSON.stringify(record)) {
+            throw new Error('conditional reentry transition conflicts with locked authoritative facts');
+          }
+        },
+      });
+    },
+
+    async readReentry(
+      taskScope: ScopeRef,
+      commandId: string,
+    ): Promise<ConditionalReentryReadback | null> {
+      return readReentryFromRecords(await records(), taskScope, commandId);
     },
   };
 }

@@ -815,13 +815,19 @@ export function createDefaultExecutionComposition(input: {
       const history = createJsonlSemanticHistoryJournal({ filePath: input.filePath, journal: input.journal,
         artifactsRoot: input.artifactsRoot, activeTurnJournal, rawContent, timeAuthority,
         ...(segment === undefined ? {} : { segmentJournal: resume!.source.segmentJournal }) });
-      const priorCompletedTurns = await history.listCompletedTurnLookups(allocation.scope);
+      const activeLineage = await history.selectActiveReasoningLineage(allocation.scope);
+      const priorCompletedTurns = activeLineage.priorCompletedTurns;
       native = retainedIntent ? createNativeBoundaryContinuation({ intent: retainedIntent, segmentJournal: resume!.source.segmentJournal,
         journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot, activeTurnJournal,
         rawContent, timeAuthority, completionJournal: completion }) : createNativeExecution({ admitted: nativeAdmission!,
         journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot, activeTurnJournal,
         rawEvidence, rawContent, fullContext: context, completionJournal: completion, now: input.now, rules: [],
         priorCompletedTurns, timeAuthority,
+        ...(activeLineage.activeExecutionPosition === null
+          ? {} : { activeContextCommitRef: activeLineage.activeExecutionPosition.contextCommitRef }),
+        ...(activeLineage.omittedRefs.length === 0 && activeLineage.verifiedDeadEnds.length === 0
+          ? {} : { reasoningLineage: { omittedRefs: activeLineage.omittedRefs,
+            ...(activeLineage.verifiedDeadEnds.length === 0 ? {} : { verifiedDeadEnds: activeLineage.verifiedDeadEnds }) } }),
         orientation: async () => undefined,
         owners: owners!,
         provider: { ...input.providerOptions, ...providerToolExecution,

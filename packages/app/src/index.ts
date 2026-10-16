@@ -219,5 +219,6 @@ export {
   UiRuntimeService,
 } from './ui-runtime/index.js';
 export { AccessControlError, AccessControlService } from './ui-runtime/access-control.js';
+export { createJsonlConditionalReentrySubmissionPort } from './ui-runtime/reentry-current-facts.js';
 export type { UiRuntimeMemoryComposition } from './ui-runtime/index.js';
 export type { RccModeConfig, UiRuntime, UiRuntimeLaunchOptions } from './ui-runtime/index.js';
