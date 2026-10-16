@@ -7,6 +7,8 @@ import {
   validateInteractionSemanticCheckpoint,
   validateInteractionLatestTurn,
   validateInteractionTurnIdentity,
+  validateProviderBinding,
+  validateProviderCloseResult,
   validateRawFactEnvelope,
   type AcceptedRawFact,
   type EvidenceRef,
@@ -16,6 +18,8 @@ import {
   type JournalCommitRef,
   type NativeRequestRegistration,
   type OrganId,
+  type ProviderBinding,
+  type ProviderCloseResult,
   type ProviderRequestIdentityRef,
   type RawAsset,
   type RawContentReadPort,
@@ -62,6 +66,13 @@ export interface InteractionParentTurnInputFact {
   /** The parent raw scope: organ plus operation, with no task or cycle. */
   readonly scope: ScopeRef;
   readonly initialInput: RawAsset;
+  /**
+   * The actual Provider binding the original owner used for this turn. It is
+   * optional only so older Journal records without it stay honestly readable;
+   * every new turn commits the real binding, and a resource close can never be
+   * recorded for a legacy turn that is missing it.
+   */
+  readonly providerBinding?: ProviderBinding;
   /** Caller-selected committed semantic checkpoints of completed prior turns. */
   readonly priorCheckpoints: readonly InteractionSemanticCheckpoint[];
 }
@@ -72,6 +83,20 @@ export interface InteractionParentCommittedFact<TFact> {
   readonly commit: JournalCommitRef;
 }
 
+/**
+ * The durable fact that the original parent Provider owner returned an actual
+ * `closed` receipt for the original turn binding, and that the fact committed
+ * to the Journal. This proves physical resource release only: it never claims a
+ * semantic success, and it is separate from the terminal settled output.
+ */
+export interface InteractionParentResourceCloseFact {
+  readonly turn: InteractionTurnIdentity;
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+  readonly providerBinding: ProviderBinding;
+  readonly result: ProviderCloseResult;
+  readonly closedAt: string;
+}
+
 /** The consistent durable read of exactly one parent turn. */
 export interface InteractionParentTurnSnapshot {
   readonly turnInput: InteractionParentCommittedFact<InteractionParentTurnInputFact> | null;
@@ -79,6 +104,7 @@ export interface InteractionParentTurnSnapshot {
   readonly acceptedFacts: readonly InteractionParentCommittedFact<
     AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>
   >[];
+  readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null;
 }
 
 /** The single append a transactional turn plan may stage. */
@@ -98,6 +124,12 @@ export type InteractionParentTurnAppend =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly entry: AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>;
+    }
+  | {
+      readonly kind: 'resource-close';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentResourceCloseFact;
     };
 
 /**
@@ -162,6 +194,27 @@ export interface InteractionParentTurnRawOwner {
     envelope: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef>,
   ): Promise<AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>>;
   readFinalTurnOutput(): Promise<InteractionParentFinalTurnOutput>;
+  /**
+   * Commit the original owner's actual `closed` Provider receipt exactly once.
+   * It does not require a successful semantic output: a real close during error
+   * cleanup is already enough. An exact repeat returns the first committed fact.
+   */
+  recordProviderClose(input: {
+    readonly providerBinding: ProviderBinding;
+    readonly result: ProviderCloseResult;
+    readonly closedAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentResourceCloseFact>>;
+  readResourceClose(): Promise<InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null>;
+  /**
+   * The terminal settled output only when an exact durable resource close also
+   * exists for this turn. It reads one consistent snapshot, so a close and an
+   * output from different moments can never be combined into a false success.
+   */
+  readClosedTurnOutput(): Promise<
+    InteractionParentFinalTurnOutput & {
+      readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact>;
+    }
+  >;
   readonly requestContext: ProviderRequestContextHook<InteractionParentProviderExecutionIdentityRef>;
   inspectTurnRequests(): Promise<InteractionParentUnsettledRequests>;
 }
@@ -171,6 +224,8 @@ export interface InteractionParentTurnRawOwnerInput {
   readonly execution: InteractionParentProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
   readonly initialInput: RawAsset;
+  /** The actual Provider binding this turn uses; it is committed with the input. */
+  readonly providerBinding: ProviderBinding;
   readonly priorCheckpoints?: readonly InteractionSemanticCheckpoint[];
   readonly journal: InteractionParentTurnRawJournalPort;
   readonly rawContent: RawContentReadPort;
@@ -260,6 +315,37 @@ function isInteractionParentExecution(
   return execution.interactionTurn !== undefined;
 }
 
+function cloneProviderBinding(binding: ProviderBinding): ProviderBinding {
+  return {
+    bindingId: binding.bindingId,
+    providerId: binding.providerId,
+    protocol: binding.protocol,
+    endpointRef: binding.endpointRef,
+    modelRef: binding.modelRef,
+    configDigest: binding.configDigest,
+    capabilityDigest: binding.capabilityDigest,
+  };
+}
+
+function sameProviderBinding(left: ProviderBinding, right: ProviderBinding): boolean {
+  return left.bindingId === right.bindingId
+    && left.providerId === right.providerId
+    && left.protocol === right.protocol
+    && left.endpointRef === right.endpointRef
+    && left.modelRef === right.modelRef
+    && left.configDigest === right.configDigest
+    && left.capabilityDigest === right.capabilityDigest;
+}
+
+/**
+ * The idempotency core of a resource close: everything except the first
+ * `closedAt`. An exact retry preserves the first time and commit; a different
+ * binding or result is a conflict.
+ */
+function resourceCloseCore(fact: InteractionParentResourceCloseFact): unknown {
+  return { turn: fact.turn, execution: fact.execution, providerBinding: fact.providerBinding, result: fact.result };
+}
+
 /**
  * Reuse the existing latest-turn validator to check the initial input asset, so
  * RawAsset, view and organ-scope rules keep a single owner instead of a second
@@ -299,12 +385,14 @@ export function createInteractionParentTurnRawOwner(
     throw new ContractError('interaction parent scope operation does not match the owner execution');
   }
   assertInitialInput(input.turn, input.initialInput);
+  validateProviderBinding(input.providerBinding);
   const priorCheckpoints = [...(input.priorCheckpoints ?? [])];
   for (const checkpoint of priorCheckpoints) validateInteractionSemanticCheckpoint(checkpoint);
 
   const turn = cloneTurnIdentity(input.turn);
   const execution = cloneExecution(input.execution);
   const scope = cloneScope(input.scope);
+  const providerBinding = cloneProviderBinding(input.providerBinding);
   const journal = input.journal;
   const rawContent = input.rawContent;
   const turnInputFact: InteractionParentTurnInputFact = {
@@ -312,6 +400,7 @@ export function createInteractionParentTurnRawOwner(
     execution: cloneExecution(execution),
     scope: cloneScope(scope),
     initialInput: input.initialInput,
+    providerBinding: cloneProviderBinding(providerBinding),
     priorCheckpoints,
   };
 
@@ -331,6 +420,121 @@ export function createInteractionParentTurnRawOwner(
       throw new ContractError(`interaction parent raw history requires the registered request ${request.requestId}`);
     }
     return registered.fact;
+  }
+
+  /**
+   * The shared, snapshot-based final-output reader. Both `readFinalTurnOutput`
+   * and `readClosedTurnOutput` use it, so a closed-output read never combines a
+   * close and an output from two different moments.
+   */
+  async function finalOutputFromSnapshot(
+    snapshot: InteractionParentTurnSnapshot,
+  ): Promise<InteractionParentFinalTurnOutput> {
+    if (snapshot.turnInput === null) {
+      throw new ContractError('interaction parent final output requires the committed turn input');
+    }
+    const latest = new Map<string, RuntimeRequestRecord>();
+    for (const committed of snapshot.requests) {
+      latest.set(committed.fact.request.requestId, committed.fact);
+    }
+    const requests = [...latest.values()];
+    if (requests.length === 0) {
+      throw new ContractError('interaction parent final output requires at least one registered request');
+    }
+    const unsettled = requests.filter((record) =>
+      (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
+    if (unsettled.length > 0) {
+      throw new ContractError(
+        'interaction parent final output requires every request to leave dispatching, dispatched and waiting',
+      );
+    }
+    // The terminal request is the settled request that no other registered
+    // request continues. A settled parent that still has a live continuation
+    // is not final, and two independent settled leaves are ambiguous.
+    const parentRequestIds = new Set(
+      requests
+        .map((record) => record.request.parentRequestId)
+        .filter((parentRequestId): parentRequestId is string => parentRequestId !== undefined),
+    );
+    const terminals = requests.filter((record) =>
+      record.phase === 'settled' && !parentRequestIds.has(record.request.requestId));
+    if (terminals.length !== 1) {
+      throw new ContractError(
+        `interaction parent final output requires exactly one settled terminal request, found ${terminals.length}`,
+      );
+    }
+    const terminalRequest = terminals[0]!;
+    const completions = snapshot.acceptedFacts.filter((committed) =>
+      sameRequestIdentity(committed.fact.envelope.request, terminalRequest.request)
+      && committed.fact.envelope.fact.kind === 'request-complete');
+    if (completions.length !== 1) {
+      throw new ContractError(
+        `interaction parent final output requires exactly one request-complete fact for ${terminalRequest.request.requestId}`,
+      );
+    }
+    const completion = completions[0]!;
+    if (completion.fact.envelope.fact.kind !== 'request-complete'
+      || completion.fact.envelope.fact.terminal !== 'completed') {
+      throw new ContractError('interaction parent final output requires a completed terminal request');
+    }
+    const requestCompleteCommit = completion.commit;
+
+    const folded = await foldActiveTurn<
+      { readonly requestId: string },
+      { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: ScopeRef },
+      InteractionParentProviderExecutionIdentityRef
+    >({
+      binding: { execution, scope },
+      initialInput: snapshot.turnInput.fact.initialInput,
+      entries: snapshot.acceptedFacts.map((committed) => committed.fact),
+      requests: snapshot.requests.map((committed) => committed.fact),
+      childInvocations: [],
+      cut: { requestId: terminalRequest.request.requestId },
+      checkpointPath: [],
+      completionRefs: [],
+      rawContent,
+    });
+
+    const finalUnits = folded.contentUnits.filter((unit) =>
+      unit.request.requestId === terminalRequest.request.requestId
+      && unit.request.turnId === terminalRequest.request.turnId
+      && unit.channel === 'assistant-text'
+      && unit.supersededBy === undefined);
+    if (finalUnits.length === 0) {
+      throw new ContractError('interaction parent final output requires at least one assistant-text unit');
+    }
+    for (const unit of finalUnits) {
+      if (!unit.complete) {
+        throw new ContractError('interaction parent final output requires every assistant-text unit to be complete');
+      }
+    }
+    const sourceSeqs = new Set<number>();
+    for (const unit of finalUnits) for (const seq of unit.sourceSeqs) sourceSeqs.add(seq);
+    const assistantContentRefs: EvidenceRef[] = [];
+    const seenRefs = new Set<string>();
+    for (const entry of folded.entries) {
+      if (entry.kind !== 'content' || !sourceSeqs.has(entry.accepted.seq)) continue;
+      const ref = entry.accepted.envelope.fact.content.ref;
+      const key = canonicalJsonStringify(ref);
+      if (seenRefs.has(key)) continue;
+      seenRefs.add(key);
+      assistantContentRefs.push(ref);
+    }
+    if (assistantContentRefs.length === 0) {
+      throw new ContractError('interaction parent final output requires assistant content evidence refs');
+    }
+    const assistantText = decodeUtf8(concatBytes(finalUnits.map((unit) => unit.bytes)));
+    if (assistantText.trim() === '') {
+      throw new ContractError('interaction parent final output requires non-empty assistant text');
+    }
+    return {
+      turnInput: snapshot.turnInput,
+      initialInputText: decodeUtf8(folded.initialInput.bytes),
+      terminalRequest,
+      requestCompleteCommit,
+      assistantText,
+      assistantContentRefs,
+    };
   }
 
   return {
@@ -375,10 +579,23 @@ export function createInteractionParentTurnRawOwner(
         }
         const samePhase = snapshot.requests.find((committed) =>
           sameRequestIdentity(committed.fact.request, record.request) && committed.fact.phase === record.phase);
-        // The same request phase is an idempotent replay; an advanced phase is a
-        // new durable lifecycle record, so the latest phase stays observable.
+        // The same request identity and phase is an idempotent replay only when
+        // the whole record matches. A different payload under the same phase is
+        // a conflict, not a silent overwrite.
         if (samePhase !== undefined) {
+          if (canonicalJsonStringify(samePhase.fact) !== canonicalJsonStringify(record)) {
+            throw new ContractError(
+              `interaction parent request ${record.request.requestId}@${record.phase} conflicts with a different payload`,
+            );
+          }
           return { result: { kind: 'existing', record: samePhase.fact } };
+        }
+        // After a durable resource close the request history is frozen: only
+        // exact replays above are allowed, because the physical owner is gone.
+        if (snapshot.resourceClose !== null) {
+          throw new ContractError(
+            'interaction parent resource close is committed; a new request lifecycle record is rejected',
+          );
         }
         if (byId === undefined && record.phase !== 'dispatching') {
           throw new ContractError('a new interaction parent request must register as dispatching');
@@ -426,6 +643,13 @@ export function createInteractionParentTurnRawOwner(
           }
           return { result: { kind: 'existing', entry: duplicate.fact } };
         }
+        // After a durable resource close the raw history is frozen: only the
+        // exact replay above is allowed, never a new producer sequence.
+        if (snapshot.resourceClose !== null) {
+          throw new ContractError(
+            'interaction parent resource close is committed; a new raw fact is rejected',
+          );
+        }
         const entry: AcceptedRawFact<InteractionParentProviderExecutionIdentityRef> = {
           seq: snapshot.acceptedFacts.length + 1,
           envelope,
@@ -441,112 +665,96 @@ export function createInteractionParentTurnRawOwner(
     },
 
     async readFinalTurnOutput(): Promise<InteractionParentFinalTurnOutput> {
-      const snapshot = await journal.readTurnSnapshot(turn);
-      if (snapshot.turnInput === null) {
-        throw new ContractError('interaction parent final output requires the committed turn input');
-      }
-      const latest = new Map<string, RuntimeRequestRecord>();
-      for (const committed of snapshot.requests) {
-        latest.set(committed.fact.request.requestId, committed.fact);
-      }
-      const requests = [...latest.values()];
-      if (requests.length === 0) {
-        throw new ContractError('interaction parent final output requires at least one registered request');
-      }
-      const unsettled = requests.filter((record) =>
-        (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
-      if (unsettled.length > 0) {
-        throw new ContractError(
-          'interaction parent final output requires every request to leave dispatching, dispatched and waiting',
-        );
-      }
-      // The terminal request is the settled request that no other registered
-      // request continues. A settled parent that still has a live continuation
-      // is not final, and two independent settled leaves are ambiguous.
-      const parentRequestIds = new Set(
-        requests
-          .map((record) => record.request.parentRequestId)
-          .filter((parentRequestId): parentRequestId is string => parentRequestId !== undefined),
-      );
-      const terminals = requests.filter((record) =>
-        record.phase === 'settled' && !parentRequestIds.has(record.request.requestId));
-      if (terminals.length !== 1) {
-        throw new ContractError(
-          `interaction parent final output requires exactly one settled terminal request, found ${terminals.length}`,
-        );
-      }
-      const terminalRequest = terminals[0]!;
-      const completions = snapshot.acceptedFacts.filter((committed) =>
-        sameRequestIdentity(committed.fact.envelope.request, terminalRequest.request)
-        && committed.fact.envelope.fact.kind === 'request-complete');
-      if (completions.length !== 1) {
-        throw new ContractError(
-          `interaction parent final output requires exactly one request-complete fact for ${terminalRequest.request.requestId}`,
-        );
-      }
-      const completion = completions[0]!;
-      if (completion.fact.envelope.fact.kind !== 'request-complete'
-        || completion.fact.envelope.fact.terminal !== 'completed') {
-        throw new ContractError('interaction parent final output requires a completed terminal request');
-      }
-      const requestCompleteCommit = completion.commit;
+      return finalOutputFromSnapshot(await journal.readTurnSnapshot(turn));
+    },
 
-      const folded = await foldActiveTurn<
-        { readonly requestId: string },
-        { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: ScopeRef },
-        InteractionParentProviderExecutionIdentityRef
-      >({
-        binding: { execution, scope },
-        initialInput: snapshot.turnInput.fact.initialInput,
-        entries: snapshot.acceptedFacts.map((committed) => committed.fact),
-        requests: snapshot.requests.map((committed) => committed.fact),
-        childInvocations: [],
-        cut: { requestId: terminalRequest.request.requestId },
-        checkpointPath: [],
-        completionRefs: [],
-        rawContent,
-      });
-
-      const finalUnits = folded.contentUnits.filter((unit) =>
-        unit.request.requestId === terminalRequest.request.requestId
-        && unit.request.turnId === terminalRequest.request.turnId
-        && unit.channel === 'assistant-text'
-        && unit.supersededBy === undefined);
-      if (finalUnits.length === 0) {
-        throw new ContractError('interaction parent final output requires at least one assistant-text unit');
+    async recordProviderClose(input: {
+      readonly providerBinding: ProviderBinding;
+      readonly result: ProviderCloseResult;
+      readonly closedAt: string;
+    }): Promise<InteractionParentCommittedFact<InteractionParentResourceCloseFact>> {
+      validateProviderBinding(input.providerBinding);
+      validateProviderCloseResult(input.result);
+      if (input.result.state !== 'closed') {
+        throw new ContractError('interaction parent resource close requires an actual closed receipt');
       }
-      for (const unit of finalUnits) {
-        if (!unit.complete) {
-          throw new ContractError('interaction parent final output requires every assistant-text unit to be complete');
+      if (input.closedAt.trim() === '') {
+        throw new ContractError('interaction parent resource close requires a closedAt timestamp');
+      }
+      const { committed, result } = await journal.transactTurn<
+        | {
+            readonly kind: 'existing';
+            readonly committed: InteractionParentCommittedFact<InteractionParentResourceCloseFact>;
+          }
+        | { readonly kind: 'new'; readonly fact: InteractionParentResourceCloseFact }
+      >(turn, (snapshot) => {
+        if (snapshot.turnInput === null) {
+          throw new ContractError('interaction parent resource close requires the committed turn input');
         }
+        const committedBinding = snapshot.turnInput.fact.providerBinding;
+        if (committedBinding === undefined) {
+          throw new ContractError(
+            'interaction parent resource close requires the original committed provider binding',
+          );
+        }
+        // The close must belong to the original turn and execution, and it must
+        // match the full committed binding, never just the binding id.
+        if (canonicalJsonStringify(snapshot.turnInput.fact.turn) !== canonicalJsonStringify(turn)
+          || canonicalJsonStringify(snapshot.turnInput.fact.execution) !== canonicalJsonStringify(execution)) {
+          throw new ContractError('interaction parent resource close requires the original parent execution');
+        }
+        if (!sameProviderBinding(committedBinding, input.providerBinding)) {
+          throw new ContractError(
+            'interaction parent resource close binding does not match the committed turn input binding',
+          );
+        }
+        if (input.result.bindingId !== committedBinding.bindingId
+          || input.result.providerId !== committedBinding.providerId
+          || input.result.protocol !== committedBinding.protocol) {
+          throw new ContractError('interaction parent resource close receipt does not match the original binding');
+        }
+        const fact: InteractionParentResourceCloseFact = {
+          turn: cloneTurnIdentity(turn),
+          execution: cloneExecution(execution),
+          providerBinding: cloneProviderBinding(committedBinding),
+          result: input.result,
+          closedAt: input.closedAt,
+        };
+        if (snapshot.resourceClose !== null) {
+          if (canonicalJsonStringify(resourceCloseCore(snapshot.resourceClose.fact))
+            !== canonicalJsonStringify(resourceCloseCore(fact))) {
+            throw new ContractError(
+              'interaction parent resource close conflicts with the committed resource close',
+            );
+          }
+          return { result: { kind: 'existing', committed: snapshot.resourceClose } };
+        }
+        return { append: { kind: 'resource-close', turn, execution, fact }, result: { kind: 'new', fact } };
+      });
+      if (result.kind === 'existing') return result.committed;
+      if (committed === undefined) {
+        throw new ContractError('interaction parent resource close append did not commit');
       }
-      const sourceSeqs = new Set<number>();
-      for (const unit of finalUnits) for (const seq of unit.sourceSeqs) sourceSeqs.add(seq);
-      const assistantContentRefs: EvidenceRef[] = [];
-      const seenRefs = new Set<string>();
-      for (const entry of folded.entries) {
-        if (entry.kind !== 'content' || !sourceSeqs.has(entry.accepted.seq)) continue;
-        const ref = entry.accepted.envelope.fact.content.ref;
-        const key = canonicalJsonStringify(ref);
-        if (seenRefs.has(key)) continue;
-        seenRefs.add(key);
-        assistantContentRefs.push(ref);
+      return { fact: result.fact, commit: committed };
+    },
+
+    async readResourceClose(): Promise<InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null> {
+      const snapshot = await journal.readTurnSnapshot(turn);
+      return snapshot.resourceClose;
+    },
+
+    async readClosedTurnOutput(): Promise<
+      InteractionParentFinalTurnOutput & {
+        readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact>;
       }
-      if (assistantContentRefs.length === 0) {
-        throw new ContractError('interaction parent final output requires assistant content evidence refs');
+    > {
+      const snapshot = await journal.readTurnSnapshot(turn);
+      const resourceClose = snapshot.resourceClose;
+      if (resourceClose === null) {
+        throw new ContractError('interaction parent closed turn output requires the committed resource close');
       }
-      const assistantText = decodeUtf8(concatBytes(finalUnits.map((unit) => unit.bytes)));
-      if (assistantText.trim() === '') {
-        throw new ContractError('interaction parent final output requires non-empty assistant text');
-      }
-      return {
-        turnInput: snapshot.turnInput,
-        initialInputText: decodeUtf8(folded.initialInput.bytes),
-        terminalRequest,
-        requestCompleteCommit,
-        assistantText,
-        assistantContentRefs,
-      };
+      const output = await finalOutputFromSnapshot(snapshot);
+      return { ...output, resourceClose };
     },
 
     requestContext: async (hookInput) => {
