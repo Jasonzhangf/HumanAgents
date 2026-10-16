@@ -219,11 +219,11 @@ export async function resumeColdExecution(
   const lifecycle = owner.lifecycle;
   if (!lifecycle) hold('cold-execution.lifecycle-unbound',
     'the accepted C3 native save/current/close lifecycle is absent; acquisition and segment commit remain held');
+  const assembly = lifecycle.assemblyFor(record, operation, source.scope);
   if (preparation.kind !== 'generation-ready') {
     // No new physical identity or execution resource exists on this path.
     return lifecycle.releaseToLifecycle(record, operation, { source, ...preparation });
   }
-  const assembly = lifecycle.assemblyFor(record, operation, source.scope);
   const binding = await producer.readIncarnationBinding(source);
   const executionEpoch = successorEpoch(source);
   const acquired = await assembly.orchestration.acquireExecutionInstance({

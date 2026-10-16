@@ -53,6 +53,7 @@ import {
   type RuntimeExecutionRelease,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../packages/runtime/src/ui-runtime/cold-execution-resume.js';
+import type { ClosedTurnPlannerCallRecord } from '../../packages/runtime/src/orchestration/closed-turn-planner-call.js';
 import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui-runtime/journal.js';
 import {
   createJsonlCheckpointJournal,
@@ -147,6 +148,12 @@ const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
 interface ResumeAssembly {
   readonly orchestration: OrchestrationManager;
   readonly runtimePool: AgentRuntimePoolManager;
+}
+
+interface ResumeRuntimeOptions {
+  readonly beforeProvider?: (roleId: string) => void;
+  readonly onExecutionInstance?: () => void;
+  readonly omitAssemblyFactory?: boolean;
 }
 
 type ColdResumeSelector = (input: {
@@ -1365,7 +1372,8 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
  * cold producer ports; the coordinator owns the actual assembly/pool/lifecycle
  * transfer and exposes the public `resumeExecution` selector.
  */
-function resumeProviderPreparer(fixture: ColdFixture, upstreamBaseUrl: string, model: string) {
+function resumeProviderPreparer(fixture: ColdFixture, upstreamBaseUrl: string, model: string,
+  options: ResumeRuntimeOptions = {}) {
   const httpProvider: ProviderConfig = { source: 'http', provider: 'http', binding: 'cold-resume-binding',
     protocol: 'responses', model, route: 'cold-resume-route', baseUrl: upstreamBaseUrl };
   const entries: EffectiveAgentProviderBinding[] = [
@@ -1375,22 +1383,31 @@ function resumeProviderPreparer(fixture: ColdFixture, upstreamBaseUrl: string, m
     // the fresh pool incarnation and its own Provider driver, not a new model.
     { agentId: 'cold-resume-planner', roleId: 'orchestration', source: 'agent', provider: httpProvider }];
   return async (selection: { readonly roleId: 'execution' | 'orchestration' | 'interaction' | 'review' | 'memory';
-    readonly configuredAgentId?: string }): Promise<AgentProviderComposition> =>
-    prepareAgentProvider({ roleId: selection.roleId,
+    readonly configuredAgentId?: string }): Promise<AgentProviderComposition> => {
+    options.beforeProvider?.(selection.roleId);
+    return prepareAgentProvider({ roleId: selection.roleId,
       ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
       agentProviderBindings: entries, legacyProvider: httpProvider, evidenceRoot: fixture.artifactsRoot });
+  };
 }
 
 function resumeTaskAssembly(
   fixture: ColdFixture,
   assemblies: ResumeAssembly[],
+  options: ResumeRuntimeOptions = {},
 ): NonNullable<UiRuntimeServiceOptions['runtimeComposition']>['createTaskAssembly'] {
   return ({ scope, executionAgent, maxAttempts }) => {
     const pool = new AgentRuntimePoolManager({ maxRuntimes: 4, ownerId: fixture.allocation.ownerId,
       factory: { async start(request) { return { runtimeId: request.runtimeId, generation: request.generation,
         capabilities: [...request.requiredCapabilities] }; }, async dispose() {} } });
     const orchestration = new OrchestrationManager({ ownerId: fixture.allocation.ownerId, runtimePool: pool,
-      ...(executionAgent === undefined ? {} : { executionAgent }),
+      ...(executionAgent === undefined ? {} : { executionAgent: options.onExecutionInstance === undefined ? executionAgent : {
+        ...executionAgent,
+        createInstance(input: Parameters<typeof executionAgent.createInstance>[0]) {
+          options.onExecutionInstance?.();
+          return executionAgent.createInstance(input);
+        },
+      } }),
       reviewAgent: passingReviewAgent(scope), mergeCoordinator: mergeCoordinator(scope),
       maxAttempts: maxAttempts ?? 1 });
     const assembly = { orchestration, runtimePool: pool };
@@ -1404,6 +1421,7 @@ function createResumeComposition(
   upstreamBaseUrl: string,
   model: string,
   callbacks: ResumeCompositionCallbacks,
+  options: ResumeRuntimeOptions = {},
 ) {
   const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal });
   const composition = createDefaultExecutionComposition({
@@ -1413,7 +1431,7 @@ function createResumeComposition(
     artifactsRoot: fixture.artifactsRoot,
     preparedJournal: fixture.preparedJournal,
     resourceBoundary: createPreparedOperationBoundary(fixture.preparedJournal),
-    prepareAgentProvider: resumeProviderPreparer(fixture, upstreamBaseUrl, model),
+    prepareAgentProvider: resumeProviderPreparer(fixture, upstreamBaseUrl, model, options),
     providerOptions: {},
     now: () => new Date(at),
     currentState,
@@ -1426,14 +1444,15 @@ function createResumeComposition(
   return { composition, currentState };
 }
 
-function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model: string) {
+function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model: string,
+  options: ResumeRuntimeOptions = {}) {
   const now = () => new Date(at);
   let coordinator: RuntimeTaskCoordinator;
   const assemblies: ResumeAssembly[] = [];
   const { composition, currentState } = createResumeComposition(fixture, upstreamBaseUrl, model, {
     publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
     closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
-  });
+  }, options);
   coordinator = new RuntimeTaskCoordinator({
     organId,
     checkpointStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
@@ -1444,7 +1463,7 @@ function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model
     currentStateFacts: composition.currentStateFacts,
     admitExecution: composition.admitExecution,
     createDriver: composition.createExecutionDriver,
-    createTaskAssembly: resumeTaskAssembly(fixture, assemblies),
+    ...(options.omitAssemblyFactory ? {} : { createTaskAssembly: resumeTaskAssembly(fixture, assemblies, options) }),
     // The cold producer is the only new coordinator binding. The coordinator
     // owns the matching ColdExecutionLifecycleBinding internally.
     coldExecution: composition,
@@ -2098,6 +2117,126 @@ async function runHttpResumeAssertions(
 }
 
 function registerPublicConsumers(): void {
+  // Observed live 409 task.assembly.missing strands an already saved turn.
+  // Cost: one existing fixture, one preparation run and one boundary resume.
+  test('public cold boundary resume creates the real Planner assembly without acquiring an executor or replaying saved work', async () => {
+    const fixture = await buildColdFixture('boundary-planner-assembly');
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator);
+    const owned: ResumeAssembly[] = [];
+    let succeeded = false;
+    try {
+      const stopBeforePlanner = new Error('boundary fixture: refuse orchestration provider before Planner duty');
+      const preparation = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', {
+        beforeProvider(roleId) { if (roleId === 'orchestration') throw stopBeforePlanner; },
+      });
+      const preparationRequest = await preparation.composition.resolveColdExecutionResumeRequest({ taskId: fixture.taskId,
+        operationId: fixture.allocation.operationId });
+      try {
+        await assert.rejects(() => preparation.coordinator.resumeExecution(fixture.taskId, fixture.allocation.operationId,
+          preparationRequest), (error: unknown) => error === stopBeforePlanner);
+      } finally {
+        // The factory is called during resume, after construction.
+        owned.push(...preparation.assemblies);
+      }
+      for (const assembly of preparation.assemblies) await assembly.runtimePool.dispose();
+
+      const beforeBytes = await readFile(fixture.journalPath, 'utf8');
+      const beforeRecords = (await fixture.journal.verify()).records;
+      assert.equal(beforeRecords.filter((record) => record.payload?.type === 'closed-turn-planner-call').length, 0,
+        'preparation must stop before any prepared or invoked Planner duty');
+      const beforeProgress = latestNativeSaveProgress(beforeRecords);
+      assert.ok(beforeProgress);
+      assert.deepEqual(beforeProgress!.phases.filter((phase) => phase.state === 'committed').map((phase) => phase.phase).sort(),
+        [...NATIVE_SAVE_PHASES].sort());
+      const beforeSegments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+      const beforeFile = await readFile(fixture.effectPath, 'utf8');
+      assert.equal(beforeFile, fixture.output);
+      const beforeEffects = effectRecordCount(beforeRecords, fixture.effect.effectId);
+      const savedRecords = (records: readonly JournalRecord[]) => records.filter((record) =>
+        record.kind === 'checkpoint' || record.payload?.kind === 'checkpoint-closure'
+          && (record.payload.closure as { closureKind?: string })?.closureKind !== 'planner-alignment'
+          || record.payload?.progress !== undefined);
+      const wireOffset = http.wires.length;
+      const selectedRoles: string[] = [];
+      let executorInstances = 0;
+      const runtime = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', {
+        beforeProvider(roleId) { selectedRoles.push(roleId); },
+        onExecutionInstance() { executorInstances += 1; },
+      });
+      assert.equal(runtime.assemblies.length, 0, 'the cold coordinator starts without a live assembly');
+      const beforeTaskIds = runtime.coordinator.taskSnapshots().map((task) => task.taskId.value);
+      const selected = await runtime.composition.resolveColdExecutionResumeRequest({ taskId: fixture.taskId,
+        operationId: fixture.allocation.operationId });
+      const source = await runtime.composition.readColdExecutionSource({ allocation: fixture.allocation, request: selected });
+      const boundary = await runtime.composition.recoverOriginalTurn({ source });
+      assert.equal(boundary.kind, 'committed-close-alignment');
+      if (boundary.kind === 'committed-close-alignment') {
+        assert.equal(boundary.stage, 'closure-committed-alignment-absent');
+      }
+
+      try {
+        const release = await runtime.coordinator.resumeExecution(fixture.taskId, fixture.allocation.operationId, selected);
+        assert.equal(release.state, 'released');
+      } finally {
+        owned.push(...runtime.assemblies);
+      }
+      assert.equal(runtime.assemblies.length, 1, 'the real factory supplies the Planner pool once');
+      assert.equal(executorInstances, 0, 'boundary resume must not acquire a new executor instance');
+      assert.deepEqual(selectedRoles, ['orchestration'], 'only the independent Planner selects a Provider');
+      const wires = http.wires.slice(wireOffset);
+      assert.equal(wires.length, 1, 'exactly one independent Planner POST and no executor generation');
+      assert.ok(plannerPayload(wires[0]!.body));
+      assert.deepEqual(await fixture.segmentJournal.readSegments(fixture.businessTurnId), beforeSegments,
+        'boundary resume preserves all physical segments and epochs');
+      assert.equal(await readFile(fixture.effectPath, 'utf8'), beforeFile);
+      assert.equal(digest(await readFile(fixture.effectPath, 'utf8')), digest(fixture.output));
+      assert.ok((await readFile(fixture.journalPath, 'utf8')).startsWith(beforeBytes));
+      const afterRecords = (await fixture.journal.verify()).records;
+      assert.equal(effectRecordCount(afterRecords, fixture.effect.effectId), beforeEffects);
+      assert.deepEqual(savedRecords(afterRecords), savedRecords(beforeRecords),
+        'native progress, original checkpoints and closures must not be recommitted');
+      const duties = afterRecords.filter((record) => record.payload?.type === 'closed-turn-planner-call')
+        .map((record) => record.payload!.record as ClosedTurnPlannerCallRecord);
+      assert.deepEqual(duties.map((duty) => duty.stage), ['prepared', 'invoked', 'returned']);
+      const returned = duties[2]!;
+      assert.equal(returned.stage, 'returned');
+      if (returned.stage === 'returned') assert.equal(returned.decision, 'complete');
+      assert.ok(duties.every((duty) => duty.duty.taskId.value === fixture.taskId.value
+        && duty.duty.closureRef === duties[0]!.duty.closureRef
+        && duty.duty.checkpointId.value === beforeProgress!.key.checkpoint.id.value));
+      const aligned = await runtime.composition.recoverOriginalTurn({ source: await runtime.composition.readColdExecutionSource({
+        allocation: fixture.allocation, request: selected }) });
+      assert.equal(aligned.kind, 'committed-close-alignment');
+      if (aligned.kind === 'committed-close-alignment') assert.equal(aligned.stage, 'alignment-committed');
+      const facts = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal })
+        .read({ organId, taskId: fixture.taskId });
+      assert.equal(facts.state, 'known');
+      if (facts.state === 'known') assert.ok(facts.value.currentPlan, 'published plan must read back');
+      assert.equal(runtime.coordinator.taskSnapshot(fixture.taskId).currentState, '已完成');
+      assert.deepEqual(runtime.coordinator.taskSnapshots().map((task) => task.taskId.value), beforeTaskIds);
+      assert.equal(runtime.coordinator.taskSnapshot(fixture.taskId).executionEpoch,
+        beforeSegments.at(-1)!.binding.execution.executionEpoch);
+      const unbound = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', { omitAssemblyFactory: true });
+      await assert.rejects(() => unbound.coordinator.resumeExecution(fixture.taskId, fixture.allocation.operationId, selected),
+        (error: unknown) => (error as { code?: string }).code === 'orchestration.unavailable');
+      assert.equal(http.wires.length, wireOffset + 1, 'missing factory must not invoke any Provider');
+      const receipt = { boundaryAssembly: 1, executorInstances, plannerPosts: wires.length,
+        originalSegments: beforeSegments.length, effectRecords: beforeEffects, fileDigest: digest(beforeFile) };
+      await mkdir(EVIDENCE_ROOT, { recursive: true });
+      const archiveRoot = await mkdtemp(join(EVIDENCE_ROOT, 'passed-boundary-receipts-'));
+      await writeFile(join(archiveRoot, 'receipt.json'), JSON.stringify(receipt, null, 2), 'utf8');
+      await writeFile(join(archiveRoot, 'upstream-wires.json'), JSON.stringify(wires, null, 2), 'utf8');
+      await writeFile(join(archiveRoot, 'organ-journal.jsonl'), await readFile(fixture.journalPath, 'utf8'), 'utf8');
+      console.log(`cold-boundary passed receipt archive: ${archiveRoot}`);
+      succeeded = true;
+    } finally {
+      await http.close();
+      for (const assembly of new Set(owned)) await assembly.runtimePool.dispose();
+      if (succeeded) await rm(fixture.root, { recursive: true, force: true });
+      else console.error(`boundary Planner fixture retained for evidence at ${fixture.root}`);
+    }
+  });
+
   test('HTTP resume releases the retained v1 turn and rejects extra body and unbound selector', async () => {
     await runHttpResumeAssertions(await buildColdFixture('http-v1'), false);
   });
