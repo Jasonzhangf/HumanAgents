@@ -10,31 +10,37 @@
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
       "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "装配显式交互与前序语义"
+      "plannedOwnerPath": "packages/runtime/src/explicit-brain/interaction-parent-turn-raw.ts",
+      "plannedOwnerStatus": "planned-not-implemented",
+      "designNote": "装配显式交互轮次：写入当前原文 RawAsset，绑定 InteractionTurnIdentity、前序已提交语义检查点与 ExplicitTurnHelperSession；不伪造 Task 准入，也不向业务字段镜像控制真相。"
     },
     "route": {
-      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerPath": "packages/runtime/src/context/active-turn-materializer.ts",
+      "ownerRel": "packages/runtime/src/context/active-turn-materializer.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "显式大脑形成直接回答或标准任务模板"
+      "plannedOwnerPath": "packages/runtime/src/explicit-brain/interaction-parent-turn-raw.ts",
+      "plannedOwnerStatus": "planned-not-implemented",
+      "designNote": "登记父规范请求并物化规范上下文：在外部 ProviderAgentDriver 请求迭代边界内经 registerRequest 与 requestContext(foldActiveTurn) 汇集前序语义检查点、当前原文与请求记录；外部迭代不在本 DAG 内构成环路。"
     },
     "outcome": {
       "ownerPath": "packages/runtime/src/explicit-brain/index.ts",
       "ownerRel": "packages/runtime/src/explicit-brain/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "按明确分流形成交互答案或既有派发业务结果"
+      "designNote": "接纳父原始事实并区分派发返回与显式采纳：dispatch_helper 只产生物理 dispatch-accepted 与 returned；只有 accept_helper 才产生物理 owner-accepted 并追加 latestTurn；返回结论不自动采纳。"
     },
     "history": {
-      "ownerPath": "packages/runtime/src/explicit-brain/index.ts",
-      "ownerRel": "packages/runtime/src/explicit-brain/index.ts",
+      "ownerPath": "packages/runtime/src/context/interaction-semantic-context.ts",
+      "ownerRel": "packages/runtime/src/context/interaction-semantic-context.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "保存交互业务结果及关联的独立执行收拢凭证"
+      "plannedOwnerPath": "packages/adapters/jsonl/src/interaction-parent-turn-journal.ts",
+      "plannedOwnerStatus": "planned-not-implemented",
+      "designNote": "语义历史只取前序已提交语义检查点；当前轮次完整上下文按原始资产单独物化。helper 使用独立上下文，历史与当前 raw 分离，无隐藏前次响应链。"
     },
     "return": {
       "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
       "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "返回本次交互答案完成或复杂需求派发结果"
+      "designNote": "返回 ExplicitBrainInterpretation（answer/clarification/status-query/requirement）或显式错误；失败、未决请求与 ProviderSettlement 证据独立保留。"
     }
   }
 }
