@@ -144,6 +144,47 @@ function isInteractionParentIdentity(
   return 'interactionTurn' in execution && execution.interactionTurn !== undefined;
 }
 
+interface ObserveFailureCause {
+  readonly name: string;
+  readonly code?: string;
+  readonly message: string;
+}
+
+interface ObserveFailureDetail {
+  readonly message: string;
+  readonly causes: readonly ObserveFailureCause[];
+}
+
+/**
+ * Reduce a stream read failure to its minimal cause chain. Node fetch hides the
+ * real socket failure on `Error.cause` (for example
+ * `TypeError('terminated')` -> `Error code UND_ERR_SOCKET`). Only name, code and
+ * message are kept: never headers, payload, credentials or whole socket objects.
+ */
+function observeFailureDetail(error: unknown): ObserveFailureDetail {
+  const causes: ObserveFailureCause[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    const code = (current as { readonly code?: unknown }).code;
+    causes.push({
+      name: current.name,
+      message: current.message,
+      ...(typeof code === 'string' ? { code } : {}),
+    });
+    current = current.cause;
+  }
+  if (causes.length === 0) return { message: 'RCC v3 stream failed', causes };
+  const [headline, ...chain] = causes;
+  const message = chain.length === 0
+    ? headline.message
+    : `${headline.message} (cause: ${chain
+      .map((entry) => `${entry.name}${entry.code === undefined ? '' : ` [${entry.code}]`}: ${entry.message}`)
+      .join('; ')})`;
+  return { message, causes };
+}
+
 function executionKey(execution: AnyProviderExecutionIdentityRef): string {
   if ('helper' in execution && execution.helper !== undefined) {
     // Full helper identity, collision-free across independent helper calls.
@@ -800,13 +841,57 @@ export class RccV3ProviderTransport<
       // after that point only releases the stream: it must not overwrite the
       // observed outcome or surface a fabricated failure to the consumer.
       if (observedTerminal && !active.terminalError) return;
-      if (!active.terminalError) {
+      let thrown = cause;
+      if (!active.terminalError && !(cause instanceof ProviderAdapterError)) {
+        // A raw stream read failure (for example Node fetch's
+        // TypeError('terminated')) hides the real socket cause on its `cause`
+        // chain. Persist a request-scoped observe-error artifact, keep the
+        // chain on the terminal error, and surface a typed ProviderAdapterError
+        // so the adapter does not re-wrap it and drop the cause.
+        const detail = observeFailureDetail(cause);
+        const baseError = this.providerError(active.evidenceScope, 'observe', 'transport.failure', detail.message, 'transport');
+        active.terminalError = baseError;
+        active.terminalState = 'failed';
+        let evidenceRef: EvidenceRef;
+        try {
+          evidenceRef = await this.writeEvidence(active.evidenceScope, 'observe-error', {
+            execution: active.identity,
+            route: active.route,
+            model: active.model,
+            aborted: active.controller.signal.aborted,
+            message: detail.message,
+            causes: detail.causes,
+          });
+        } catch (writeError) {
+          // The evidence sink failed. Surface both failures; never fall back to
+          // a synthesized evidence ref as if the artifact was saved.
+          failed = true;
+          throw new ProviderAdapterError({
+            code: 'transport.failure',
+            category: 'transport',
+            phase: 'observe',
+            message: `${detail.message}; RCC v3 observe-error evidence write failed: ${writeError instanceof Error ? writeError.message : 'unknown error'}`,
+            scope: active.evidenceScope,
+            cause: new AggregateError([cause, writeError], 'RCC v3 observe transport and observe-error evidence write both failed'),
+          });
+        }
+        active.terminalError = { ...baseError, evidenceRefs: [evidenceRef] };
+        thrown = new ProviderAdapterError({
+          code: 'transport.failure',
+          category: 'transport',
+          phase: 'observe',
+          message: detail.message,
+          scope: active.evidenceScope,
+          cause,
+          evidenceRefs: [evidenceRef],
+        });
+      } else if (!active.terminalError) {
         const errorMessage = cause instanceof Error ? cause.message : 'RCC v3 stream failed';
         active.terminalError = this.providerError(active.evidenceScope, 'observe', 'transport.failure', errorMessage, 'transport');
         active.terminalState = 'failed';
       }
       failed = true;
-      throw cause;
+      throw thrown;
     } finally {
       resolveStreamCompletion();
       if (!completed) {
