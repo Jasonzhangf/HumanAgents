@@ -273,6 +273,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     assert.notEqual(unknownChildResponse.status, 200);
     assert.ok(!('text' in unknownChildBody), 'unknown adopted-child selector must not return a body text');
     assert.ok('error' in unknownChildBody, 'unknown adopted-child selector must return an explicit failure');
+    const oversizedChildUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/adopted-child/`
+      + `${f.children[0].invocationId}/${f.children[0].childTurnId}/9007199254740993?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA) });
+    const oversizedChildResponse = await fetch(oversizedChildUrl, { headers: { cookie } });
+    const oversizedChildBody = await oversizedChildResponse.json();
+    console.log(JSON.stringify({ url: oversizedChildUrl, status: oversizedChildResponse.status, body: oversizedChildBody }));
+    assert.equal(oversizedChildResponse.status, 400);
+    assert.equal(oversizedChildBody.error.code, 'checkpoint-asset.selector-invalid');
+    assert.ok(!('text' in oversizedChildBody), 'invalid adopted-child selector must not return a body text');
     assert.deepEqual(await snapshot(f.paths.projectRoot), before, 'GET changed durable Journal/asset bytes or file set');
     assert.deepEqual(await f.checkpoints.readExecutionPosition(taskScope), position);
     assert.equal(f.effects(), 0);

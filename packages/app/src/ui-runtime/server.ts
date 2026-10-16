@@ -220,12 +220,14 @@ function checkpointAssetBodyQuery(url: URL, selector: RuntimeCheckpointAssetSele
 }
 
 function adoptedChildSelector(invocationId: string, childTurnId: string, deliverySeq: string): RuntimeCheckpointAssetSelector {
-  if (invocationId.trim() === '' || childTurnId.trim() === '' || !/^[1-9]\d*$/.test(deliverySeq)) {
+  const deliverySequence = Number(deliverySeq);
+  if (invocationId.trim() === '' || childTurnId.trim() === '' || !/^[1-9]\d*$/.test(deliverySeq)
+    || !Number.isSafeInteger(deliverySequence)) {
     throw new UiRuntimeApiError('checkpoint-asset.selector-invalid', APP_OWNER,
       'adopted child selector needs a non-empty invocation and child turn and a positive delivery sequence',
       'send the exact committed invocation, child turn and delivery sequence', 400);
   }
-  return { kind: 'adopted-child', invocationId, childTurnId, deliverySeq: Number(deliverySeq) };
+  return { kind: 'adopted-child', invocationId, childTurnId, deliverySeq: deliverySequence };
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
