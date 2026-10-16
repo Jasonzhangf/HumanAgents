@@ -1035,6 +1035,7 @@ export interface ProviderToolContinuation {
   readonly arguments: BusinessPayload;
   readonly continuationRef: string;
   readonly output: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
 }
 
 export type ProviderStartInput<
