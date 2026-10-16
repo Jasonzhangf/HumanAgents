@@ -6468,37 +6468,80 @@ test('stop racing a startup failure leaves a terminal failed task instead of ret
   assert.equal(service.eventsSince(started.operationId).some((event) => event.state === 'blocked'), false);
 });
 
-test('driver construction failure releases startup waiters and leaves the task terminally failed', async () => {
+test('driver construction failure rejects release waiters and retains prepared recovery responsibility', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-driver-factory-'));
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const constructionError = new Error('driver assembly failed');
   const coordinator = new RuntimeTaskCoordinator({
     organId,
     admitExecution: async () => {},
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
-    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    journal,
     createDriver: () => {
-      throw new Error('driver assembly failed');
+      throw constructionError;
     },
   });
   const task = coordinator.createTask({ title: 'driver factory failure' });
-  const started = coordinator.startExecution(task.taskId, { prompt: 'construct driver' });
+  const originalPrompt = 'construct driver';
+  const allocation = coordinator.prepareExecution(task.taskId, { prompt: originalPrompt });
+  const release = coordinator.releaseExecution(task.taskId, allocation.operationId);
+  const pendingObserver = coordinator.releaseExecution(task.taskId, allocation.operationId);
+  assert.equal(pendingObserver, release, 'a second release while the first is pending must reuse the same promise');
 
-  await waitFor(() => assert.equal(coordinator.taskSnapshot(task.taskId).state, 'failed'));
+  // Bound both observers with the existing 3-second local budget: a missing
+  // release rejection must fail here instead of waiting indefinitely.
+  const bounded = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`release observers were not released within ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+  await assert.rejects(() => bounded(release, 3000), (error: unknown) => error === constructionError);
+  await assert.rejects(() => bounded(pendingObserver, 3000), (error: unknown) => error === constructionError);
+
   const dashboard = coordinator.taskSnapshot(task.taskId);
+  assert.equal(dashboard.state, 'blocked');
   assert.equal(dashboard.error?.ownerId, 'humanagent.runtime');
   assert.equal(dashboard.error?.message, 'driver assembly failed');
-  assert.deepEqual(dashboard.allowedActions, ['start']);
-  await assert.rejects(
-    () => coordinator.stop(task.taskId),
-    (error: unknown) => error instanceof RuntimeTaskControlError && error.code === 'task.not.running',
+  assert.deepEqual(dashboard.allowedActions, ['stop']);
+  assert.equal(dashboard.operationId, allocation.operationId.value);
+  assert.equal(dashboard.executionEpoch, allocation.executionEpoch);
+  assert.equal(dashboard.checkpoint, undefined);
+  assert.deepEqual(coordinator.eventsSince(allocation.operationId).map((event) => event.kind), ['execution.terminal']);
+
+  assert.equal(
+    coordinator.prepareExecution(task.taskId, { operationId: allocation.operationId, prompt: originalPrompt }),
+    allocation,
+    'an exact operation retry must reuse the retained prepared allocation',
   );
-  assert.deepEqual(coordinator.eventsSince(started.operationId).map((event) => event.kind), [
-    'execution.started',
-    'provider.error',
-    'checkpoint.committed',
-    'execution.terminal',
-  ]);
-  assert.equal(coordinator.taskSnapshot(task.taskId).checkpoint?.outcome, 'failed');
+  assert.throws(
+    () => coordinator.prepareExecution(task.taskId, { prompt: originalPrompt }),
+    (error: unknown) => error instanceof RuntimeTaskControlError && error.code === 'task.busy',
+  );
+
+  const prepared = journal.replay().filter((record) => record.kind === 'operation.prepared');
+  assert.equal(prepared.length, 1, 'a rejected re-preparation must not append a second prepared operation');
+
+  const operationEvents = journal.replay().filter((record) => record.kind === 'operation.event');
+  assert.equal(operationEvents.length, 1);
+  const blockedEvent = operationEvents[0];
+  if (!blockedEvent || blockedEvent.kind !== 'operation.event') throw new Error('expected one persisted operation event');
+  assert.equal(blockedEvent.event.kind, 'execution.terminal');
+  assert.equal(blockedEvent.event.state, 'blocked');
+  assert.equal(blockedEvent.event.ownerId, 'humanagent.runtime');
+  assert.equal(blockedEvent.event.operationId, allocation.operationId.value);
+  assert.equal(blockedEvent.event.executionEpoch, allocation.executionEpoch);
+  assert.equal(blockedEvent.error?.ownerId, 'humanagent.runtime');
+  assert.equal(blockedEvent.error?.message, 'driver assembly failed');
+  assert.equal(blockedEvent.zeroEffectAdmissionDenial, undefined);
 });
 
 test('restart hydration rejects a checkpoint copied under another task scope', async () => {
