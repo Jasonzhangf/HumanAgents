@@ -1,11 +1,15 @@
-import type { ExecutionRuntimePort, ProviderBinding } from '../../contracts/src/index.js';
+import type {
+  AnyProviderExecutionIdentityRef,
+  ExecutionRuntimePort,
+  ProviderBinding,
+  ProviderExecutionIdentityRef,
+} from '../../contracts/src/index.js';
 import {
   AnthropicProviderCodec,
   OpenAIChatProviderCodec,
   ProviderAdapter,
   ResponsesProviderCodec,
   V3ProviderHttpTransport,
-  createHttpProviderTransport,
   filesystemProviderEvidenceSink,
   type ProviderTransportSource,
 } from '../../adapters/provider/src/index.js';
@@ -35,16 +39,22 @@ export interface ProviderAssemblyInput {
  * independent protocol codec. The transport, codec, evidence sink and adapter
  * are each constructed exactly once.
  */
-export function assembleProviderExecutionPort(input: ProviderAssemblyInput, evidenceRoot: string): ExecutionRuntimePort {
+export function assembleProviderExecutionPort<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(input: ProviderAssemblyInput, evidenceRoot: string): ExecutionRuntimePort<TIdentity> {
   const credential = resolveProviderCredential(input.credentialRef);
   const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot));
-  const transport = input.source === 'http'
-    ? createHttpProviderTransport({ binding: input.binding, baseUrl: input.baseUrl, evidence, credential })
-    : new V3ProviderHttpTransport({ binding: input.binding, baseUrl: input.baseUrl, evidence, source: 'rcc' });
+  const transport = new V3ProviderHttpTransport<TIdentity>({
+    binding: input.binding,
+    baseUrl: input.baseUrl,
+    evidence,
+    credential,
+    source: input.source,
+  });
   const codec = input.binding.protocol === 'anthropic'
     ? new AnthropicProviderCodec(input.maxTokens ?? DEFAULT_MAX_TOKENS)
     : input.binding.protocol === 'openai'
       ? new OpenAIChatProviderCodec()
       : new ResponsesProviderCodec();
-  return new ProviderAdapter({ binding: input.binding, routeRef: input.routeRef, codec, transport, evidence });
+  return new ProviderAdapter<TIdentity>({ binding: input.binding, routeRef: input.routeRef, codec, transport, evidence });
 }

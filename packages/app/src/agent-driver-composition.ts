@@ -35,11 +35,13 @@ import {
 } from '../../adapters/acp/index.js';
 import {
   id,
+  type AnyProviderExecutionIdentityRef,
   type AgentDriver,
   type ExecutionBinding,
   type ExecutionRuntimePort,
   type OperationId,
   type ProviderBinding,
+  type ProviderExecutionIdentityRef,
   type ScopeRef,
   type TaskId,
 } from '../../contracts/src/index.js';
@@ -229,24 +231,30 @@ export interface AgentProviderPortFactoryInput {
   readonly binding: ProviderBinding;
 }
 
-export type AgentProviderPortFactory = (input: AgentProviderPortFactoryInput) => ExecutionRuntimePort;
+export type AgentProviderPortFactory<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = (input: AgentProviderPortFactoryInput) => ExecutionRuntimePort<TIdentity>;
 
-export interface AgentProviderComposition {
+export interface AgentProviderComposition<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly configuredAgentId?: string;
   readonly roleId: AgentRole;
   readonly provider: ProviderConfig;
   readonly source: ProviderSource;
   readonly binding: ProviderBinding;
-  readonly port: ExecutionRuntimePort;
+  readonly port: ExecutionRuntimePort<TIdentity>;
 }
 
-export interface AgentProviderSelectionInput {
+export interface AgentProviderSelectionInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly roleId: AgentRole;
   readonly agentId?: string;
   readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
   readonly legacyProvider?: ProviderConfig;
   readonly legacyBindingOverrides?: Partial<Pick<ProviderBinding, 'endpointRef' | 'configDigest' | 'capabilityDigest'>>;
-  readonly createPort: AgentProviderPortFactory;
+  readonly createPort: AgentProviderPortFactory<TIdentity>;
 }
 
 /**
@@ -295,7 +303,9 @@ interface ResolvedAgentProviderSelection {
   readonly provider: ProviderConfig;
 }
 
-function resolveSelectedInstance(input: AgentProviderSelectionInput): ResolvedAgentProviderSelection {
+function resolveSelectedInstance<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(input: AgentProviderSelectionInput<TIdentity>): ResolvedAgentProviderSelection {
   if (input.agentId !== undefined) {
     const match = input.agentProviderBindings.find((candidate) => candidate.agentId === input.agentId);
     if (match === undefined) {
@@ -365,7 +375,9 @@ function resolveSelectedInstance(input: AgentProviderSelectionInput): ResolvedAg
  * must be unique across the full roster, including unconfigured members.
  * Every rejection happens before any provider port is constructed.
  */
-export function selectAgentProvider(input: AgentProviderSelectionInput): AgentProviderComposition {
+export function selectAgentProvider<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(input: AgentProviderSelectionInput<TIdentity>): AgentProviderComposition<TIdentity> {
   const selected = resolveSelectedInstance(input);
   const provider = selected.provider;
   const binding = {
@@ -388,12 +400,14 @@ export function selectAgentProvider(input: AgentProviderSelectionInput): AgentPr
  * source, route and base URL always come from the passed provider, never from
  * a closure or shared default.
  */
-export function createAgentProviderPort(
+export function createAgentProviderPort<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(
   input: AgentProviderPortFactoryInput,
   evidenceRoot: string,
   maxTokens?: ProviderAssemblyInput['maxTokens'],
-): ExecutionRuntimePort {
-  return assembleProviderExecutionPort({
+): ExecutionRuntimePort<TIdentity> {
+  return assembleProviderExecutionPort<TIdentity>({
     binding: input.binding,
     routeRef: input.provider.route,
     baseUrl: input.provider.baseUrl,
@@ -404,7 +418,9 @@ export function createAgentProviderPort(
 }
 
 /** Close an owned composition and require an actual closed receipt. */
-export async function closeAgentProvider(composition: AgentProviderComposition): Promise<void> {
+export async function closeAgentProvider<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(composition: AgentProviderComposition<TIdentity>): Promise<void> {
   const receipt = await composition.port.close(composition.binding);
   if (receipt.state !== 'closed') {
     throw new AppLifecycleError(
@@ -418,7 +434,9 @@ export async function closeAgentProvider(composition: AgentProviderComposition):
 }
 
 /** Prepare one fresh execution instance and admit only its own provider. */
-export async function prepareAgentProvider(input: {
+export async function prepareAgentProvider<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(input: {
   readonly roleId: AgentRole;
   readonly configuredAgentId?: string;
   readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
@@ -426,20 +444,20 @@ export async function prepareAgentProvider(input: {
   readonly legacyBindingOverrides?: AgentProviderSelectionInput['legacyBindingOverrides'];
   readonly maxTokens?: ProviderAssemblyInput['maxTokens'];
   readonly evidenceRoot: string;
-}): Promise<AgentProviderComposition> {
-  const composition = selectAgentProvider({
+}): Promise<AgentProviderComposition<TIdentity>> {
+  const composition = selectAgentProvider<TIdentity>({
     roleId: input.roleId,
     ...(input.configuredAgentId === undefined ? {} : { agentId: input.configuredAgentId }),
     agentProviderBindings: input.agentProviderBindings,
     ...(input.legacyProvider === undefined ? {} : { legacyProvider: input.legacyProvider }),
     ...(input.legacyBindingOverrides === undefined ? {} : { legacyBindingOverrides: input.legacyBindingOverrides }),
-    createPort: (selected) => createAgentProviderPort(selected, input.evidenceRoot, input.maxTokens),
+    createPort: (selected) => createAgentProviderPort<TIdentity>(selected, input.evidenceRoot, input.maxTokens),
   });
   try {
-    await admitAgentProvider(composition);
+    await admitAgentProvider<TIdentity>(composition);
   } catch (error) {
     try {
-      await closeAgentProvider(composition);
+      await closeAgentProvider<TIdentity>(composition);
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], 'selected provider admission and cleanup failed');
     }
