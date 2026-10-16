@@ -5,6 +5,7 @@ import type {
   ScopeRef,
   TaskIdentityRecord,
 } from '../../../contracts/src/index.js';
+import type { ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
 import type {
   ConfirmedContextCorrectionBasis,
   ContextCorrectionBasisFacts,
@@ -65,6 +66,7 @@ import {
   contextHistoryFromRecord,
   exactJournalRecord,
   foldExecutionPositionFromRecords,
+  segmentOpenedFromRecord,
 } from '../checkpoint-journal.js';
 
 /**
@@ -97,10 +99,21 @@ function coldCurrentUnknown(reason: string): ColdCurrentRead {
   return { state: 'unknown', reason };
 }
 
+/**
+ * App-local proof that the exact resumed segment tail is committed. The source
+ * resolver owns segment resolution and supplies this value; the reader
+ * re-decodes the carrier from its own verified records before using it.
+ */
+export interface ColdPhysicalTailProof {
+  readonly segment: ResumedTurnSegmentOpened;
+  readonly commitRef: JournalCommitRef;
+}
+
 export async function readColdCurrentFromJournal(
   journal: JsonlOrganJournal,
   input: ColdCurrentReadInput,
   principalOwner: string,
+  physicalTail?: ColdPhysicalTailProof,
 ): Promise<ColdCurrentRead> {
   try {
     const verification = await journal.verify();
@@ -212,28 +225,52 @@ export async function readColdCurrentFromJournal(
     if (recordsThroughCommitRef === undefined) {
       return coldCurrentUnknown('the active turn has no committed carrier records');
     }
+    const targetRuntimeId = physicalTail?.segment.binding.execution.runtimeId
+      ?? binding.execution.runtimeId;
+    const targetExecutionEpoch = physicalTail?.segment.binding.execution.executionEpoch
+      ?? binding.execution.executionEpoch;
+    if (physicalTail !== undefined) {
+      const carrier = exactJournalRecord(records, physicalTail.commitRef);
+      const decoded = segmentOpenedFromRecord(carrier);
+      if (decoded === null) {
+        return coldCurrentUnknown('the physical tail proof carrier is not a committed resumed segment record');
+      }
+      if (JSON.stringify(decoded) !== JSON.stringify(physicalTail.segment)) {
+        return coldCurrentUnknown('the physical tail proof does not match its committed segment record');
+      }
+      if (decoded.binding.businessTurnRef.businessTurnId !== input.businessTurnId) {
+        return coldCurrentUnknown('the physical tail segment belongs to another business turn');
+      }
+      if (!sameScope(decoded.binding.scope, binding.scope)) {
+        return coldCurrentUnknown('the physical tail segment scope does not match the original active turn binding');
+      }
+      if (decoded.binding.assignment.assignmentId !== binding.assignment.assignmentId) {
+        return coldCurrentUnknown('the physical tail segment assignment does not match the original active turn binding');
+      }
+    }
     let context: ContextHistoryRecord | null = null;
     let contextCommitRef: JournalCommitRef | undefined;
     for (const record of records) {
       if (record.kind !== 'event' || record.commitId === undefined) continue;
       const candidate = contextHistoryFromRecord(record);
       if (candidate === null) continue;
-      if (candidate.previousContextCommitRef !== null) continue;
-      if (candidate.agentRuntimeId !== binding.execution.runtimeId
-        || candidate.loopCheckpoint.executionEpoch !== binding.execution.executionEpoch
-        || candidate.contextView.executionEpoch !== binding.execution.executionEpoch) continue;
-      if (candidate.scope.organId.value !== binding.scope.organId.value
-        || candidate.scope.taskId?.value !== binding.scope.taskId?.value
-        || candidate.scope.cycleId?.value !== binding.scope.cycleId?.value
-        || candidate.scope.operationId?.value !== binding.scope.operationId?.value) continue;
+      if (physicalTail === undefined && candidate.previousContextCommitRef !== null) continue;
+      if (candidate.agentRuntimeId !== targetRuntimeId
+        || candidate.loopCheckpoint.executionEpoch !== targetExecutionEpoch
+        || candidate.contextView.executionEpoch !== targetExecutionEpoch) continue;
+      if (!sameScope(candidate.scope, binding.scope)) continue;
       if (contextCommitRef !== undefined) {
-        return coldCurrentUnknown('more than one unambiguous initial root context matches this active turn binding');
+        return coldCurrentUnknown(physicalTail === undefined
+          ? 'more than one unambiguous initial root context matches this active turn binding'
+          : 'more than one unambiguous context matches the proven physical tail');
       }
       context = candidate;
       contextCommitRef = { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
     }
     if (context === null || contextCommitRef === undefined) {
-      return coldCurrentUnknown('no unambiguous initial root context matches this active turn binding');
+      return coldCurrentUnknown(physicalTail === undefined
+        ? 'no unambiguous initial root context matches this active turn binding'
+        : 'no unambiguous context matches the proven physical tail');
     }
     const control = readOperationControlFromRecords(records, {
       scope: taskScope,
@@ -254,7 +291,7 @@ export async function readColdCurrentFromJournal(
     }
     const position: ColdInitialOpenPosition = {
       contextCommitRef,
-      executionEpoch: binding.execution.executionEpoch,
+      executionEpoch: targetExecutionEpoch,
     };
     const initial: ColdInitialOpenSource = {
       binding,
