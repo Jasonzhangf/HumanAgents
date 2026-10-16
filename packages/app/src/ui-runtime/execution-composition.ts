@@ -564,6 +564,13 @@ export function createDefaultExecutionComposition(input: {
             const fact = entry.envelope.fact;
             if (fact.kind !== 'tool-result') continue;
             for (const ref of fact.result.evidenceRefs) candidates.push(ref);
+            // The accepted raw-output citation is parent-scoped by construction.
+            // It is admitted only when its accepted scope is exactly this admitted
+            // turn's scope; no task equality or path alias stands in for scope.
+            if (canonicalJsonStringify(fact.rawOutput.ref.scope) === canonicalJsonStringify(entry.envelope.scope)
+              && canonicalJsonStringify(fact.rawOutput.ref.scope) === canonicalJsonStringify(allocation.scope)) {
+              candidates.push(fact.rawOutput.ref);
+            }
           }
           const byReference = new Map<string, EvidenceRef>();
           for (const ref of candidates) {
