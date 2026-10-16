@@ -6,6 +6,60 @@
 
 ### 续接增量（2026-10-16）
 
+- 新socket观察已返回：根因仍UNKNOWN；指定RCCrequestrecords同窗无可关联记录不等于RCC未收到，taskCandidates含既有任务也不证明问答语义冲突。Root不接受这两类过度推断。fresh独立复杂局部Gemini4 `provider-a0-socket-plan-gemini-r1-20261016`（PID61019）按新body/cause/原receipt规划最小关联取证或唯一owner修复，不新Task/换Provider/盲retry。UX最终回执报告gen14准确loaded、原Journalprefix不变仅追加722–726、原文件1820/hash04cfc5和UiRuntimeJournal不变、双端checkpoint语义展示通过；Root直接核seq717/722/726真实binding/closedAt，最终全部UI证据未扩大为A0PASS。
+
+- N2-S已验收并普通提交 `2d4405f`（六files，J22f95c0上续同树），本轮J/S/C内部进度2/3。Root亲读targetApp1/Runtime2 GREEN、deadEnd修前RED、id-only可编译selector反例Missingexpectedrejection与恢复hash；same-scope冲突由原producer先拒，未冒该场景selectorRED。UI全history/chronologicalpreviousId/canonicalfold保留。C须补真实下一request的context/epoch接线，尤其S的activeContextCommitRef与新runtime绑定；未合livecandidate/main，不声称完整N2。N2树clean保留原地续C，无新tree/leafreview。
+
+- 并行后继已安排：childwiring只读GCM已结束，B2缺admitExecution装配是源码事实，B1第一次偏离仍UNKNOWN；不接受“当前dist mtime证明e489源码”或“已证实产品根因”的报告推断。fresh独立复杂局部Gemini4 `provider-child-wiring-plan-gemini-r1-20261016` 已启动（PID66653），不改断言/不新增A0门禁。N2-C r1意图准入但精确接线不足：实际Service无options.checkpointJournalPath/principalOwner，其memory也非直接MemoryRuntime；已同Planner续r2（PID47945）只补typed注入/caller，不重做N2。C任务合同预备在/private/tmp/provider-n2-c-compose-execute-gcm-r1-20261016.md，未派实现，须S冻结+r2精确接口准入。
+
+- 真实采用后A0仍失败：UX正式restart为gen14/PID78926，采用5ef9158d；原interaction-2/revision1仅一次interpret retry409约566.8ms，logicalturn不变、physicalepoch2、新request74006521-14a0-49d2-b4f5-8377604a2843。Root已直接读start/observe-error/settle-error三个原asset：实际requestReceipt.body已取得，cause明确UND_ERR_SOCKET/other side closed；无成功settlement/答案4，不宣称原断流已修。Task仍仅原1项/交付hash不变为UX回执，完整最终receipt待接。fresh只读GCM `provider-a0-socket-observe-gcm-r1-20261016` 最多6批查新asset/时间对应RCC窄窗，不新请求/restart/切Provider；N2-S与childwiring观察继续。gen13已是历史运行快照。
+
+- A0恢复已验收内部源码：普通commit `25327468d125b2dec31cb602ccdb6dc91811304c`，标准合流候选 `5ef9158d0c20f286a897a84103820ec6137ac758`；fresh fetch remote仍2981230。Root亲读原source RED3及恢复11PASS原命令，组合Appbuild0/Apptesttsc0/公开same-owner、replacement-owner、partial-hold三case3/3 exit0。零facts failed+真实closed同turn新epoch可恢复，partial/cancelled/unpaired/unreturned不放开；不宣称原上游断流根因已修。已给UX唯一正式restart/原interaction-2 revision1一次interpret retry采用窗口，真实settlement/body/answer待回；Root不操作现场。来源clean、author exit0、无源树进程引用后normalremove/prune/pathabsent，注册5→4；回执在A0 run/owner-close-receipt.json。未整体Review/main/push。
+
+- 续接调度：A0恢复与N2-S修正两路GCM继续；N2-C独立计划已返回，Root已读公共控制/coverage/next-request/Memory接线方案，C执行仍等S冻结。新增只读fresh GCM `provider-child-wiring-observe-gcm-r1-20261016`，仅对原两个childwiring FAIL定位首次偏离，最多6读取批次、不重跑测试或开树、不作为A0额外门禁。当前3路GCM分别实现A0、修正S、观察已有child缺口。A0作者报告build0/scopedtsc0/定向11PASS，最终证据接收未完成，尚不计验收、未采用运行版本。
+
+- N2-S r1自然exit0，目标App1/reader2 GREEN及可编译反例已回，但Root实核未准入两点：publication仅按IDjoin而未比bound完整payload；deadEndRef明确omitted时仍可回填（reader还可能保空证据结论）。fresh GCM `provider-n2-s-binding-finish-gcm-r2-20261016` 同树定向修正原4files/原consumer，不新状态/分支审批。已接受的跨探索结论应保留，不能为分支隔离删掉；明确失效结论不能回填。J仍1/3，S未验收。
+- 另2个旧childwiring失败，Root用候选保留pre-S编译产物对照也同断言2FAIL（非精确22f重建），r1报告HEAD重建同失败；作为既有完整goal问题保留，不当S新回归/不删断言。Root对照日志owner-pre-s-wiring.log保留，自有空fixture目录已rmdir，不再扩查该历史pipeline。
+
+- Provider exactbody证据包已验收、正常提交并FF唯一candidate `e4890862443979124eb5d824a8a262b4bf981dc8`，三文件276+/22-。Root直接定向4个原submit+1个Responses exactstring consumer全部PASS；新增回执字段造成的原3FAIL已以四原exact预期补齐，未删旧断言/新增case。source树clean/作者已exit、normalremove/prune/pathabsent，原证据外置保留。未build/restart/请求，loaded仍3b/gen13。旧I1 actualbody仍UNVERIFIED，新合法retry只能证明实际覆盖边界。
+- N2-C独立复杂局部Planner `provider-n2-c-compose-plan-gemini-r1-20261016` / PID45387已提前并行，仅补公共控制入口+Memory实际接线合同，不重复大阶段规划；C代码仍以J已验收、S接口冻结及验证为前提，不新增N1门禁或新worktree。A0恢复/N2-S两GCM继续。
+
+- outbound正文包r1返回但未准入：Root核source后实际选跑原Responses/OpenAI/Anthropic typed-submit三case，3/3 FAIL/exit1，均为原exactevidence预期缺新增requestReceipt；另同file legacyResponses fourthassert同类受影响。这是本改动必要兼容，不是新增协议矩阵。fresh GCM `provider-outbound-evidence-compat-gcm-r2-20261016` 同原tree只补4个精确预期并保留旧断言，再选4+原bodycase1；不回滚source、不改无关历史phase问题。原receipt缺失RED与stalephase基线FAIL分开记录，livebody仍未取得。
+
+- accepted诊断f9已source-only标准合candidate `05418249c60791e9b72459f8c209094e37b8f52b`，未build/restart，loaded仍3b/gen13。N1实际body小plan已接受：精确string只serialize一次，在既有HTTPsuccess证据追加本地body/identity，不能用prepared/status冒生成完成，不记录headers/凭据，不改公开schema/拓扑。fresh GCM `provider-outbound-evidence-execute-gcm-r1-20261016` 从唯一集成新建独立Provider证据domain clean树，onlytransport+原Responsesconsumer；A0恢复worker禁Provider文件，N2-S另owner，三路GCM并行。旧I1body仍UNVERIFIED，下一真实retry仅证明实际覆盖边界，不造新问题/任务。
+
+- A0诊断纠正已验收并正常提交 `f9c4029904f7dd0cf2193f44c81ec58487943855`：两个文件165+/2-，删重复identity映射/静默evidence失败回落，流错误与保存失败均显式保留。r1实际cause丢失RED复用，r2定向7/7/Appbuild/scopedtsc0，Root直接原cause-chain consumer1/1 exit0。真实原断流原因仍UNKNOWN。fresh GCM `provider-a0-parent-recovery-execute-gcm-r1-20261016` 已同A0树/basef9续做零accepted failedclosed同turn恢复，图meta/binding校正及一次必要校验在Runtime改动前，不新节点/新树。
+- 旧N1 outbound恢复报告已接收，仅对其检查过的run/tar/原Task资产断言未找到actualbody，不接受全盘“绝无副本”。response facts/start-submit200不当body证明。独立小Planner `provider-n1-outbound-proof-plan-oauth-r1-20261016` 已启动，选择原N1实际请求/历史raw排除契约的最小补证方式，优先既有入口/设施，不默认新增永久日志/矩阵/业务任务；不将旧I1证据伪造补齐。
+
+- UX peer本轮默认模型连续两次capacity失败、无新操作；既有d5d8源码合流/11pass与源树清理仍有效。Root临时同chat改用gpt-6.1-sol/medium恢复owner接既有outbound GCM，不新建身份/不重启worker；gen13/p3原interaction保持，正式采用仍单一owner。A0diagnostic纠正与N2-S两GCM未受影响。
+
+- UX checkpoint主层源码已标准合为candidate `d5d8e4a431d97331576a49a22dc4e153579feba6`（源c57c5c30），peer组合原两consumer11/11 PASS。仅源码合流：合前确认运行defaultUiRoot优先packaged dist且无HUMANAGENT_UI_ROOT覆盖；未build/restart/reload，实际loaded仍3b7/gen13/PID16676。源树normalremove/prune/pathabsent，Root progress dirty保留未提交。N1实际outbound既有证据溯源由peer fresh GCM只读，无新请求。
+
+- N2-S已派fresh GCM `provider-n2-s-lineage-execute-gcm-r1-20261016`，同N2树/base22f95，按真实ResolvedSemanticTurnContext与exactlookup接线。计划中重写canonical execution-position fold的扩面已消融，执行selection只读派生reasoningparent，保UI全历史/当前恢复真源/待收拢责任。J仍1/3已验收，S在做，C未做。
+- A0诊断r1未接收：Root实核其catch静默吞evidence写失败并回退合成ref，另有重复identity投影。原有效cause丢失RED保留，fresh GCM `provider-a0-observe-error-finish-gcm-r2-20261016` 同A0树最小纠正，显式保流错误与保存失败，不新增fallback/框架。恢复plan r2方向已准入（仅closedfailed零accepted请求可续，partial/cancelled责任hold），待此作者freeze后同树续实现。真实原断流根因仍UNKNOWN。
+
+- N2-J底层已验收并正常提交 `22f95c015feb64c4966c1b97cb3d927c6f215d92`，三allowed文件，author Appbuild/scopedtsc0，Root直接真实JSONL公开consumer1/1 exit0。Root已核原events实际wrongRef反例ERR_ASSERTION，恢复后GREEN。N2本轮内部已验收1/3（J），S/C未完成；未合冻结集成/main或push。N2树clean保留续S/C。S阶段描述仍含不存在的reader函数/测试路径，已同独立Planner r4按真实exactlookup端口定向修正，不按假ABI下发代码、不重跑J。
+
+- A0 plan r1已部分准入并派实现：新唯一树 `a0-provider-recovery-20261016` clean基于3b7，fresh GCM `provider-a0-observe-error-execute-gcm-r1-20261016` 仅transport.ts+原consumer，补真实typed cause/observe-error evidence，不宣称修复上游断流。adapter已有typederror保留，不重复改。恢复方案把所有failed/cancelled忽略的泛化未接受，已回同Planner r2/PID31900核精确eligibility、partial事实/副作用责任和同interaction新epoch；不得盲放开。Root只读lsof被执行器当进程终止链拒绝，未执行，不绕通道、不据此判RCC状态。外部日志dateglob无匹配仅说明文件名非日期，不证明日志缺失。
+
+- A最终额外误清反例已PROVEN，替代下方UNVERIFIED临时状态：Root直接读取 `ux-current-error-negative-r2-20261016/{result.md,source-ready.md,mutant-compiled-snippet.log,mutant-case.log,restored-case.log}`。编译产物330–334确含early-clear，原case实际exit1，断言“closed checkpoint without accepted alignment does not resolve current error”actual undefined/expected runtime.execution.failure；精确恢复blob22c5440后同case1/1 exit0。产品delta零，原6+7未重复。A根因RED、误清反例和gen13真实验收均成立，来源树由UX owner正常关闭。
+
+- A0补证GCM已因范围漂移由Root精确停止PID86086：约定6批次却执行15命令并扫描旧worker目录，无accepted final/rootcause，不把主动停止当后端不可用。原events保留。fresh独立复杂局部Planner `provider-a0-transport-plan-gemini-r1-20261016`（Gemini4medium/PID82910）沿原请求决定唯一owner最小诊断或修复及同interaction恢复；N2-J GCM独立继续，不等A0。
+
+- N2-J已实际开工：修正plan r3只准入首个JSONL reentry端口，Root将错误的origin/main基线绑定改为唯一集成3b7、伪submitConditionalReentry改为真实commitReentry，去掉不存在build:core及自比较冗余校验。新唯一N2树 `/Volumes/Intel/playground/humanagent/n2-rewind-forward-memory-20261016` 已clean创建，fresh GCM `provider-n2-j-port-execute-gcm-r1-20261016` 已派；只写reentry-current-facts/App index/原public consumer。N2本轮3任务（J/S/C）实现验收0/3，J在做，S/C同树按依赖串行；A0close-cause GCM独立并行。无N2代码合流/新测试PASS宣称。
+- A修复RED证据已消歧：Root直接读取外置 `ux-current-error-technical-r2-20261016/{red.log,green-cold.log,green-errors.log,root-command-receipts.json}`。red.log原Node exit1/1FAIL，hot空而fresh+inventory残留runtime.execution.failure触发deepStrictEqual失败；恢复后原cold6/6、保留真实错误原7/7，均exit0。故“已解决错误冷读复活”具真实RED→GREEN。另一个“不能误清未解决错误”的独立mutant第一次仍GREEN，仍UNVERIFIED，不能混同；UX后继单次反例仍由其owner接收。
+
+- A回归抓错证据纠正：UX owner明确首指定mutant实际仍GREEN，先前笼统“已有error前置RED”不能证明该原case能抓错；真实gen13行为PASS仍有效，测试抓错能力暂UNVERIFIED。UX仅续一次更直接的既有helper反例，由fresh GCM907在原source树执行原case/核编译产物/恢复hash，不新增测试、不重复6+7。若仍GREEN，停止试mutant并交独立小plan修原case；不以现场PASS代替断言敏感性。
+
+- A0首轮GCM采证已接收，wire身份 `explicit-interpret-9d150a9f-ccc3-4c5b-ac86-cd1272aae6bb` 绑定原interaction-2/revision1。Root直读两个已定位asset：observe transport.failure/terminated；settle failed/streamDone=true/stopRequested=false，route rcc:default、model MiniMax-M3。无底层cause/HTTP原始响应可证明根因。后继fresh GCM `provider-a0-close-cause-observe-gcm-r1-20261016` 仅补原请求已有HTTP/close-cause记录，最多6采证批次，无请求/trace/配置修改；与UX已通信避免重复派单。N1仍未准入整体Review。
+
+- N2阶段plan r2已返回但未准入实现：Root核对发现不存在的需求ID、错误的Journal提交签名、不存在的测试路径，以及把previousCheckpointId流水账关系当作推理路径关系；两任务也共享checkpoint-journal.ts，不能当独立并发。已回同Planner r3作局部修正（PID95792），保留有效方向，不重做全仓观察，不开新源码树。disposition见外置run `provider-native-n2-stage-plan-gemini-r2-20261016/owner-disposition.md`。下条“最终计划尚未接受”继续成立。
+
+- 最新现场（优先于以下历史条目）：候选 `3b7eeab9da9783276a54bf95b9bb7c862f569f2a` 已build exit0，UX唯一操作者正式采用到generation13/PID16676。Root直接读取 `run-notes/ux-current-error-20261016/{receipt,browser}.json`：原Task succeeded/physical epoch3/公开正文不变，当前error与cleanup消失；两Journal与1820byte交付文件hash均不变，历史错误保留。Root scoped cold compile0、首受影响consumer1/1；startup/App ACK/两旧fixture组合原三case已3/3，来源a4dc409/36c4dcf/e984937。UI B/C在150/gen12已有真实双端有效证据，3b7未改UI。
+- A0真实入口仍失败，N1未放行：UX仅提交一次 `interaction-2/inputRevision1`，实际 `transport.failure` / owner `humanagent.provider-adapter` / message `terminated`，未获得成功ProviderSettlement；原Task列表仍1项，未新增Task。根因未知，保留原interaction，不切Provider、不第二次submit绕行。原样本在既有control-root `run-notes/ux-simple-answer-20261016/`；UX GCM只读采证，本侧接Provider独立规划与修复。Root读interaction-2.json确认API200但业务state仍matching，不能把HTTP200当成功；attempt.json是提交前快照，submitCount0不是最终提交次数。gen13保留，整体Review/main集成/push仍未开始。
+- 并发与后继：fresh GCM `provider-n1-evidence-gap-observe-gcm-r1-20261016` 只整理已有证据；N2独立Opus实际429配额耗尽且空plan，已按规则启用fresh Gemini4 medium `provider-native-n2-stage-plan-gemini-r2-20261016`，最终计划尚未接受。N2不新增为N1门禁。完整goal仍包含N2/N3/N4，不因原I1成功而关闭。
+- 集成基线：Root fresh fetch exit0，`origin/main=298123095032bcb6b552ea88c84ca889290e43b1`；实际remote..candidate ancestry436提交（含merge），三点diff488文件，后续整体Review绑定准确base/HEAD，不使用旧113提交表述缩小范围。源码/build保持冻结；本次只更新进度文档，不改运行产物。
+
 - **原 I1 候选闭环真实成功，标准交付仍未完成。** 冻结源码 `2d203bdf6880e5b2ca28b875e77ee62ee24f3097` 正式 restart 到 generation10/PID3587；唯一原 resume `resume-1792181390901` 返回202 released，原 Task `ui-task-implicit-draft-2` 最终 succeeded。Journal715 `public-output.committed` 绑定原 operation `ui-operation-1` / physical epoch3，正文为实际 accepted deliveryText。再次正式 restart 到 **generation11/PID13853/port53007**，fresh GET 仍 succeeded、同epoch3、同公开正文。新 executor/Planner 均0；原613 accepted facts、2 segments、1CP、1save intent、2save progress、3Planner records不增，prefix保留。Root已读 `epoch-handoff/{command,fresh-hydrate-receipt,public-commit-record}.json`；直接读取原 ux-handoff.md 确认1820bytes/SHA256 `04cfc565…3d9` 与四项内容不变。现不再重复resume；后续restart由UX协调唯一操作者。
 - **parent恢复包已接收并收口。** `258ac78` 正常提交7文件并标准合流；Runtime2/Provider1/App真实双进程1共4个选定用例通过，省略App parent wire实际 found2 RED，恢复同hash后GREEN。Root组合App build/App-test compile0，独立双进程consumer1/1：old79994→new79894，同turn/op，epoch2 prepare/request/close各1、helper0、semanticCP成功；旧upstream facts明确seeded，不冒vendor断线证明。来源clean/已合/作者及测试PID absent后normal remove/prune/pathabsent，注册6→5。三项明确归属fixture已不存在；13项历史来源未核明目录保留，不称全局清理完成。证据 `provider-parent-ancestry-finish-gcm-r2-20261016/owner-acceptance.md`。
 - **epoch包及回归闭合。** production `5f514e5` 已合并且正式采用；test-only `0abfe5e` 已标准合为 `0e4f12b`。Root scopedtsc0、原cold consumer完整 **6/6 PASS**，两个旧epoch source/readback反例均有实际RED/恢复证据。首Root Node路径写错仅notfound，纠正到tsconfig真实 `dist/tests-cold-source` 后通过，不当产品错误。candidate目前仅新增测试，运行代码仍2d203。原alias+text测试前置的refs/digests不一致已由独立Planner校正初始合法绑定，未改生产Review约束。
