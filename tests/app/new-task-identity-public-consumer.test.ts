@@ -38,7 +38,11 @@ import {
   type UiRuntimeLaunchOptions,
 } from '../../packages/app/src/ui-runtime/index.js';
 import { assembleProviderExecutionPort } from '../../packages/app/src/provider-assembly.js';
-import { prepareAgentProvider as assembleAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
+import {
+  prepareAgentProvider as assembleAgentProvider,
+  createAgentProviderPort,
+  prepareExecutionAgentProvider,
+} from '../../packages/app/src/agent-driver-composition.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import {
   uiRuntimeCheckpointRoot,
@@ -754,23 +758,37 @@ test('G-A HTTP source public Task admission', async () => {
     { agentId: 'ga-http-execution', roleId: 'execution', source: 'agent', provider: httpProvider },
     { agentId: 'ga-http-orchestration', roleId: 'orchestration', source: 'agent', provider: httpProvider },
   ];
-  const runtime = await startRuntime(root, probePort, {
-    projectKey: 'project-ga-http',
-    mode: 'rcc',
-    providerSource: 'http',
-    binding: gaHttpBinding,
-    taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path, undefined, committedTaskFlow),
-    runtimeComposition: {
-      prepareAgentProvider: async (selection) => assembleAgentProvider({
-        roleId: selection.roleId,
-        ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
-        agentProviderBindings: entries,
-        legacyProvider: httpProvider,
-        evidenceRoot,
-      }),
-    },
-  });
+  // The native launch requires both preparers. The neutral preparer keeps the
+  // taskless parent/helper path; the Task-scoped preparer hands the selected
+  // composition's custody to the prepared-stop owner exactly as the real serve
+  // caller wires it, so the public Task path keeps its real custody. It starts
+  // inside this try so a launch failure still releases the case's own capture.
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
   try {
+    runtime = await startRuntime(root, probePort, {
+      projectKey: 'project-ga-http',
+      mode: 'rcc',
+      providerSource: 'http',
+      binding: gaHttpBinding,
+      taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path, undefined, committedTaskFlow),
+      runtimeComposition: {
+        prepareAgentProvider: async (selection) => assembleAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          evidenceRoot,
+        }),
+        prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          createPort: (selected) => createAgentProviderPort(selected, evidenceRoot),
+        }, owner, lease),
+      },
+    });
+
     // The real probe reached no network and the runtime kept the honest unknown;
     // it must not be rewritten to degraded just to make the Task requestable.
     assert.deepEqual(capture.requests, []);
@@ -816,10 +834,14 @@ test('G-A HTTP source public Task admission', async () => {
       'the HTTP source must not run RCC discovery',
     );
   } finally {
-    await runtime.close();
+    // The captured launch/admission error is only rethrown after this case's
+    // own runtime, fetch capture and fixture root are all released; the error
+    // is never swallowed here. A start failure must not leak the fixture the
+    // same way it used to leak the process-wide capture.
+    await runtime?.close();
     capture.restore();
+    await rm(root, { recursive: true, force: true });
   }
-  await rm(root, { recursive: true, force: true });
 });
 
 test('a real identity append failure stops execution and retries the same Task and source', async () => {
