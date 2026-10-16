@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- 下一动作已派：parent ancestry Gemini4 r2 完整 replacement plan 已接收，`owner-acceptance.md` 删除重复 eligibility 校验，保留单一 continuation-anchor 判定；真实 mode/API/测试路径已校正，foldSnapshot 不改。fresh GCM `provider-parent-ancestry-execute-gcm-r1-20261016` 复用原 dirty parent 树实现 Runtime→Driver→App typed local parent，Git 只读；不重放 helper、不继承远端 response 链。coordinator 独占窗口归 UX epoch-fix 小计划/实现，release 三项基线候该来源冻结后再续；不新建同域树。
+
 - generation 9 后续精确证据已由 Root 直接读取原 Journal：**709 prepared、710 invoked、711 returned** 的独立 closed-turn Planner、**712 task-plan-revision.published、713 alignment closure、714 runtime-task-current-state.currentPlan** 均已持久化。故本次已推进到真实 Planner 返回和目标对齐，失败发生在其后 delivery-source gate；业务最终交付仍未完成，下一次不得重复 Planner。UX 已定位 coordinator 将原 allocation epoch1 用于校验实际收口 epoch3，正独立小 plan 校正调用方使用已验证 expectedExecutionEpoch，不改原 operation 身份。Root 为关键链精确停止无源码 delta 的 release GCM r2，最终 PID absent/exit1/treeclean 后释放 coordinator 与原 App 测试写窗口给 UX；三项基线修复随后续派。
 
 - 最新真实 I1：boundary assembly `62241d6` 已标准合为 `6adfeed323309b653eabe4298e8d45c296c3afda`，Root App build exit 0 后立即交 UX 正式 restart。generation **9 / PID 22189** 实际加载该 SHA，单次原 resume `resume-1792177926741` 返回 **409 `standard-turn-delivery.source-conflict`**；未完成 live Planner/业务闭环。1820-byte 原文件/hash、effect intent/completion **1/1**、613 facts、2 segments、1 checkpoint、1 save intent、2 save progress 均不变，prefix preserved。UX 保持下一次恢复唯一 owner，正查历史 inspect epoch1 与收口 epoch3 的准确来源合同；不重复 POST、不重标身份。boundary controlled consumer **6/6 PASS**、旧位置 `task.assembly.missing` 行为 RED 均已接收；其成功不外推本次真实 delivery-source 失败。
