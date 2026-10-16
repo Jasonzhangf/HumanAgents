@@ -3,6 +3,7 @@ import type {
   JournalCommitRef,
   NextAction,
   ScopeRef,
+  TaskIdentityRecord,
 } from '../../../contracts/src/index.js';
 import type {
   ConfirmedContextCorrectionBasis,
@@ -13,13 +14,19 @@ import {
   validateCheckpointControlGrant,
   type CheckpointControlGrant,
 } from '../../../contracts/src/checkpoint-controls.js';
+import { validateTaskIdentityRecord } from '../../../contracts/src/task-identity.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../../adapters/jsonl/src/index.js';
 import { decodeActiveTurnRecords } from '../../../adapters/jsonl/src/active-turn.js';
 import { activeTurnCommitId } from '../../../runtime/src/context/active-turn-journal.js';
+import type { ActiveTurnJournalRecord } from '../../../runtime/src/context/active-turn-journal.js';
 import {
   buildConfirmedContextCorrectionBasis,
   sameCorrectionTaskScope,
 } from '../../../core/src/context-correction.js';
+import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
+import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
+import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
+import { projectTaskGrantAuthority } from '../../../runtime/src/admission/task-grant.js';
 import {
   buildContextCorrection,
   assertConfirmedContextCorrectionCommand,
@@ -39,6 +46,14 @@ import type {
   ReentryFence,
   RetainedReentryDuty,
 } from '../../../runtime/src/checkpoints/conditional-reentry.js';
+import type { TaskGrantAuthority } from '../../../runtime/src/admission/task-grant.js';
+import type {
+  ColdCurrentRead,
+  ColdCurrentReadInput,
+  ColdInitialOpenCurrentFacts,
+  ColdInitialOpenPosition,
+  ColdInitialOpenSource,
+} from '../../../runtime/src/ui-runtime/cold-current.js';
 import { readRuntimeTaskCurrentStateFromRecords } from '../runtime-current-state-journal.js';
 import { readOperationControlFromRecords } from '../operation-control-journal.js';
 import {
@@ -51,6 +66,230 @@ import {
   exactJournalRecord,
   foldExecutionPositionFromRecords,
 } from '../checkpoint-journal.js';
+
+/**
+ * Cold-only current-facts read over the authoritative Organ Journal.
+ *
+ * This reader answers the question the existing `readCurrentFromRecords()`
+ * cannot: what the current turn is when the task has no committed checkpoint
+ * closure and no v1 recovery capture, so there is no execution position to
+ * fold. It reuses the existing canonical owners for every durable fact and
+ * adds no second parser.
+ *
+ * - Task identity comes from the Runtime consumer over `JsonlTaskIdentityJournal`.
+ * - Grant authority comes from `JsonlTaskGrantJournal` projected through
+ *   `projectTaskGrantAuthority()`, so the same validation the admission path
+ *   uses also applies here. Preserved state is the observed grant, not an
+ *   authorization for new work.
+ * - Binding, initial input, requests and accepted facts come from the owner
+ *   codec `decodeActiveTurnRecords()`.
+ * - Current state comes from `readRuntimeTaskCurrentStateFromRecords()`.
+ * - Root context comes from `contextHistoryFromRecord()`.
+ * - Physical operation control comes from `readOperationControlFromRecords()`.
+ *
+ * `cold-current` is a facts read, not an authorization and not a capture. It
+ * never constructs `producersDrained`, `cut`, a checkpoint ref or a synthetic
+ * control receipt. Missing, malformed, conflicting or unsupported facts return
+ * `unknown` with a concrete reason. There is no fallback path: a known fact
+ * cannot be invented by reinterpreting another branch.
+ */
+function coldCurrentUnknown(reason: string): ColdCurrentRead {
+  return { state: 'unknown', reason };
+}
+
+export async function readColdCurrentFromJournal(
+  journal: JsonlOrganJournal,
+  input: ColdCurrentReadInput,
+  principalOwner: string,
+): Promise<ColdCurrentRead> {
+  try {
+    const verification = await journal.verify();
+    if (!verification.valid) {
+      return coldCurrentUnknown(verification.error ?? 'Organ Journal verification failed');
+    }
+    const records = verification.records;
+    const taskScope: ScopeRef = {
+      organId: input.allocation.scope.organId,
+      taskId: input.allocation.taskId,
+    };
+    // A committed bound checkpoint closure means the unchanged checkpoint
+    // reader already owns this task's current facts. That branch is selected
+    // here and delegated without reinterpretation; only a task with no base
+    // position continues into the initial-open read below.
+    if (baseExecutionPositionFromRecords(records, taskScope) !== null) {
+      const current = readCurrentFromRecords(records, taskScope);
+      if (current.state === 'known') {
+        return { state: 'known', kind: 'checkpoint-bound', current };
+      }
+      return coldCurrentUnknown(current.reason);
+    }
+    const { allocation } = input;
+    const currentState = readRuntimeTaskCurrentStateFromRecords(records, taskScope);
+    if (currentState.state !== 'known') {
+      return coldCurrentUnknown(currentState.reason);
+    }
+    if (currentState.value.processing.entryPhase !== 'open') {
+      return coldCurrentUnknown('the current task processing phase is not open, so this is not an initial open turn');
+    }
+    const grantReadback = await new JsonlTaskGrantJournal(journal).readTaskGrant(allocation.taskId);
+    if (grantReadback.grant === null || grantReadback.commit === null) {
+      return coldCurrentUnknown('no committed task grant authority is readable for this task');
+    }
+    let grant: TaskGrantAuthority;
+    try {
+      grant = projectTaskGrantAuthority({ readback: grantReadback, principalOwner });
+    } catch (error) {
+      return coldCurrentUnknown(`canonical task grant authority cannot be projected: ${message(error)}`);
+    }
+    let identity: TaskIdentityRecord | undefined;
+    try {
+      identity = await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(journal)).read(taskScope);
+      if (identity !== undefined) validateTaskIdentityRecord(identity);
+    } catch (error) {
+      return coldCurrentUnknown(`canonical task identity cannot be read: ${message(error)}`);
+    }
+    if (identity === undefined) {
+      return coldCurrentUnknown('no committed task identity record is readable for this task');
+    }
+    if (identity.scope.taskId.value !== allocation.taskId.value
+      || identity.scope.organId.value !== allocation.scope.organId.value) {
+      return coldCurrentUnknown('canonical task identity does not match the retained allocation');
+    }
+    if (grant.grant.task.value !== allocation.taskId.value
+      || grant.grant.capability.scope.organId.value !== allocation.scope.organId.value
+      || grant.grant.capability.scope.taskId?.value !== allocation.taskId.value) {
+      return coldCurrentUnknown('canonical task grant does not match the retained allocation');
+    }
+    let activeRecords: readonly ActiveTurnJournalRecord[];
+    try {
+      activeRecords = decodeActiveTurnRecords(records, input.businessTurnId);
+    } catch (error) {
+      return coldCurrentUnknown(`active turn records cannot be decoded: ${message(error)}`);
+    }
+    const bindingRecord = activeRecords.find(
+      (record): record is Extract<ActiveTurnJournalRecord, { readonly kind: 'binding-opened' }> => record.kind === 'binding-opened',
+    );
+    if (bindingRecord === undefined) {
+      return coldCurrentUnknown('the active turn binding is not committed for this business turn');
+    }
+    const initialInputRecord = activeRecords.find(
+      (record): record is Extract<ActiveTurnJournalRecord, { readonly kind: 'initial-input' }> => record.kind === 'initial-input',
+    );
+    if (initialInputRecord === undefined) {
+      return coldCurrentUnknown('the active turn initial input is not committed for this business turn');
+    }
+    const binding = bindingRecord.binding;
+    if (binding.scope.organId.value !== allocation.scope.organId.value
+      || binding.scope.taskId?.value !== allocation.taskId.value
+      || binding.scope.cycleId?.value !== allocation.scope.cycleId?.value
+      || binding.scope.operationId?.value !== allocation.operationId.value) {
+      return coldCurrentUnknown('the active turn binding scope does not match the retained allocation');
+    }
+    if (binding.assignment.assignmentId !== allocation.assignmentId
+      || binding.admittedTurn.inputRevision !== allocation.inputRevision
+      || binding.admittedTurn.turnId !== input.businessTurnId) {
+      return coldCurrentUnknown('the active turn binding assignment or input revision does not match the retained allocation');
+    }
+    if (binding.execution.runtimeId !== allocation.runtimeId
+      || binding.execution.executionEpoch !== allocation.executionEpoch) {
+      return coldCurrentUnknown('the active turn binding execution does not match the retained allocation');
+    }
+    const expectedBindingCommitId = activeTurnCommitId(input.businessTurnId, 'binding-opened');
+    let bindingCommitRef: JournalCommitRef | undefined;
+    let recordsThroughCommitRef: JournalCommitRef | undefined;
+    for (const record of records) {
+      if (record.kind !== 'event' || record.commitId === undefined) continue;
+      if (!record.commitId.startsWith(`active-turn:${input.businessTurnId}:`)) continue;
+      if (record.payload?.type !== 'active-turn.record') continue;
+      recordsThroughCommitRef = { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
+      if (record.commitId === expectedBindingCommitId) {
+        bindingCommitRef = { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
+      }
+    }
+    if (bindingCommitRef === undefined) {
+      return coldCurrentUnknown('the active turn binding has no physical Journal commit identity');
+    }
+    if (recordsThroughCommitRef === undefined) {
+      return coldCurrentUnknown('the active turn has no committed carrier records');
+    }
+    let context: ContextHistoryRecord | null = null;
+    let contextCommitRef: JournalCommitRef | undefined;
+    for (const record of records) {
+      if (record.kind !== 'event' || record.commitId === undefined) continue;
+      const candidate = contextHistoryFromRecord(record);
+      if (candidate === null) continue;
+      if (candidate.previousContextCommitRef !== null) continue;
+      if (candidate.agentRuntimeId !== binding.execution.runtimeId
+        || candidate.loopCheckpoint.executionEpoch !== binding.execution.executionEpoch
+        || candidate.contextView.executionEpoch !== binding.execution.executionEpoch) continue;
+      if (candidate.scope.organId.value !== binding.scope.organId.value
+        || candidate.scope.taskId?.value !== binding.scope.taskId?.value
+        || candidate.scope.cycleId?.value !== binding.scope.cycleId?.value
+        || candidate.scope.operationId?.value !== binding.scope.operationId?.value) continue;
+      if (contextCommitRef !== undefined) {
+        return coldCurrentUnknown('more than one unambiguous initial root context matches this active turn binding');
+      }
+      context = candidate;
+      contextCommitRef = { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
+    }
+    if (context === null || contextCommitRef === undefined) {
+      return coldCurrentUnknown('no unambiguous initial root context matches this active turn binding');
+    }
+    const control = readOperationControlFromRecords(records, {
+      scope: taskScope,
+      agentRuntimeId: context.agentRuntimeId,
+      harnessExecutionEpoch: context.loopCheckpoint.executionEpoch,
+    });
+    if (control.state !== 'complete') {
+      return coldCurrentUnknown(`physical operation control is unknown: ${control.reason}`);
+    }
+    const retainedParentOperation = control.operations.find(
+      (record) => record.intent.operationId.value === allocation.operationId.value);
+    if (retainedParentOperation === undefined) {
+      return coldCurrentUnknown('the physical operation-control namespace has no retained parent operation');
+    }
+    if (retainedParentOperation.binding.agentRuntimeId !== context.agentRuntimeId
+      || retainedParentOperation.binding.harnessExecutionEpoch !== context.loopCheckpoint.executionEpoch) {
+      return coldCurrentUnknown('the retained parent operation does not belong to the physical operation-control namespace');
+    }
+    const position: ColdInitialOpenPosition = {
+      contextCommitRef,
+      executionEpoch: binding.execution.executionEpoch,
+    };
+    const initial: ColdInitialOpenSource = {
+      binding,
+      bindingCommitRef,
+      recordsThroughCommitRef,
+      records: activeRecords,
+    };
+    const fences = fencedBindings(records, taskScope, context);
+    const unresolvedDisplacedRefs = displacedObligationRefs(records, taskScope, fences);
+    const retainedDuties: readonly RetainedReentryDuty[] = currentState.value.retainedDuties.map((duty) => ({
+      operationRef: duty.operationRef,
+      owner: duty.owner,
+    }));
+    const facts: ColdInitialOpenCurrentFacts = {
+      state: 'known',
+      kind: 'initial-turn-open',
+      stateCommitRef: currentState.stateCommitRef,
+      task: currentState.value.task,
+      identity,
+      grant,
+      initial,
+      position,
+      context,
+      operationControl: control,
+      entryPhase: currentState.value.processing.entryPhase,
+      nextAction: currentState.value.processing.nextAction,
+      fencedBindings: fences,
+      retainedDuties,
+      unresolvedDisplacedRefs,
+    };
+    return facts;
+  } catch (error) {
+    return coldCurrentUnknown(`cold current-facts composition failed: ${message(error)}`);
+  }
+}
 
 /**
  * Pure locked composition of the existing `ReentryCurrentFacts` from verified
