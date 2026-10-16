@@ -212,7 +212,7 @@ test('taskless helper execution keeps dispatch, return and owner acceptance sepa
     const payload = driver.submitPayloads[0]!;
     assert.deepEqual(payload, {
       objective: assignment.objective,
-      targetRefs: assignment.targetRefs,
+      targetRefs: [...assignment.targetRefs],
       inputs: { request: 'bounded helper request' },
     });
 
