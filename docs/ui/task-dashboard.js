@@ -1620,9 +1620,9 @@ function renderDashboard() {
     breadcrumbs.setAttribute('aria-label', '范围面包屑')
     const system = element('a', '全部项目')
     system.href = './tasks.html'
-    const project = element('a', explicitScope.projectKey)
+    const project = element('a', '所属项目')
     project.href = `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}`
-    breadcrumbs.append(system, project, element('span', taskId))
+    breadcrumbs.append(system, project, element('span', '当前任务'))
     copy.append(breadcrumbs)
   }
   heading.append(copy, status, refreshButton)
@@ -1640,10 +1640,24 @@ function renderDashboard() {
   }
   main.append(statuses)
 
+  const technicalDetail = element('button', '技术详情', 'button button--quiet')
+  technicalDetail.type = 'button'
+  technicalDetail.addEventListener('click', () => openTechnicalDetail({
+    title: '任务技术详情',
+    entries: [
+      ['当前执行节点', dashboard.currentNode],
+      ['projectKey', explicitScope?.projectKey],
+      ['taskId', taskId],
+      ['mode', dashboard.mode],
+      ['checkpoint.outcome', dashboard.checkpoint?.outcome],
+      ['checkpoint.seq', dashboard.checkpoint?.seq],
+    ].filter(([, value]) => value !== undefined && value !== null),
+  }))
+  main.append(technicalDetail)
+
   const facts = element('dl', undefined, 'detail-grid')
   for (const [label, value] of [
     ['当前状态', dashboard.stateLabel],
-    ['当前执行节点', dashboard.currentNode],
     ['模式', dashboard.mode],
     ['最近下一步', dashboard.nextStep],
     ['输入', dashboard.input || '尚未输入'],

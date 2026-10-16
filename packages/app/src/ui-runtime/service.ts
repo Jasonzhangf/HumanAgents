@@ -236,6 +236,7 @@ import {
   projectRuntimeSemanticObservation,
   projectRuntimeContextHistory,
   projectRuntimeTaskDashboard,
+  projectRuntimeTaskWaitingStatus,
   projectRuntimeTaskList,
 } from '../../../ui/projection/runtime.js';
 import {
@@ -1094,19 +1095,7 @@ function runtimeTaskDashboard(
           : hasCheckpoint
             ? `${stateLabel} · checkpoint 已提交`
             : stateLabel,
-      waiting: hasCheckpoint
-        ? `已收拢：${task.checkpoint!.outcome} · checkpoint seq=${task.checkpoint!.seq}`
-        : task.state === 'running'
-          ? `等待执行结果：${task.currentNode}`
-          : task.state === 'settling'
-            ? `等待 checkpoint 收拢：${task.currentNode}`
-            : task.state === 'blocked'
-              ? '等待资源或人工处理后才能继续'
-              : task.state === 'failed'
-                ? '执行失败；等待错误证据和资源收拢'
-                : task.state === 'stopped' || task.state === 'cancelled'
-                  ? `停止/取消请求已受理；等待收拢 receipt（当前节点：${task.currentNode}）`
-                  : `当前节点：${task.currentNode}`,
+      waiting: projectRuntimeTaskWaitingStatus(projected),
       connection: '由浏览器 SSE 连接状态呈现',
     },
   };
