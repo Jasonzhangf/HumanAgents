@@ -219,6 +219,16 @@ export {
   UiRuntimeService,
 } from './ui-runtime/index.js';
 export { AccessControlError, AccessControlService } from './ui-runtime/access-control.js';
-export { createJsonlConditionalReentrySubmissionPort } from './ui-runtime/reentry-current-facts.js';
+export {
+  createJsonlConditionalReentrySubmissionPort,
+  executeConfirmedTaskCheckpointReentry,
+  executeConfirmedTaskContextCorrection,
+} from './ui-runtime/reentry-current-facts.js';
+export type {
+  CommittedTaskCheckpointReentryReceipt,
+  CommittedTaskContextCorrectionReceipt,
+  ExecuteConfirmedTaskCheckpointReentryInput,
+  ExecuteConfirmedTaskContextCorrectionInput,
+} from './ui-runtime/reentry-current-facts.js';
 export type { UiRuntimeMemoryComposition } from './ui-runtime/index.js';
 export type { RccModeConfig, UiRuntime, UiRuntimeLaunchOptions } from './ui-runtime/index.js';

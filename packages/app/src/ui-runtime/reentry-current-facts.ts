@@ -66,7 +66,13 @@ import type {
   ColdInitialOpenSource,
 } from '../../../runtime/src/ui-runtime/cold-current.js';
 import { readRuntimeTaskCurrentStateFromRecords } from '../runtime-current-state-journal.js';
-import { readOperationControlFromRecords } from '../operation-control-journal.js';
+import { createJsonlOperationControlJournal, readOperationControlFromRecords } from '../operation-control-journal.js';
+import {
+  commitContextCorrection,
+  commitReentry,
+  type CommittedContextCorrection,
+  type CommittedReentry,
+} from '../../../runtime/src/checkpoints/submission.js';
 import {
   acceptedContextCorrectionBasesFromRecords,
   assertRecoveryBinding,
@@ -853,6 +859,24 @@ function readReentryFromRecords(
   return null;
 }
 
+function readContextCorrectionFromRecords(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+  commandId: string,
+): ContextCorrectionReadback | null {
+  for (const record of records) {
+    const correction = contextCorrectionFromRecord(record);
+    if (!correction || correction.basis.commandId !== commandId) continue;
+    if (!inTaskScope(correction.scope, taskScope)) continue;
+    if (!record.commitId) throw new Error('context correction record has no physical commit identity');
+    return {
+      record: correction,
+      commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
+    };
+  }
+  return null;
+}
+
 function boundCheckpointClosureFromRecords(
   records: readonly JournalRecord[],
   command: ConfirmedReentryCommand,
@@ -1040,4 +1064,277 @@ export function createJsonlConditionalReentrySubmissionPort(input: {
       return readReentryFromRecords(await records(), taskScope, commandId);
     },
   };
+}
+
+export interface ExecuteConfirmedTaskContextCorrectionInput {
+  readonly filePath: string;
+  readonly journal?: JsonlOrganJournal;
+  readonly taskScope: ScopeRef;
+  readonly principalOwner: string;
+  readonly commandId: string;
+  readonly wrongRefs: readonly ContextCorrectionRef[];
+  readonly repairText: string;
+  readonly confirmationRef: string;
+  readonly sourceCheckpointReceipt?: JournalCommitRef;
+  readonly expectedControlReceipt?: JournalCommitRef;
+}
+
+export interface ExecuteConfirmedTaskCheckpointReentryInput {
+  readonly filePath: string;
+  readonly journal?: JsonlOrganJournal;
+  readonly taskScope: ScopeRef;
+  readonly principalOwner: string;
+  readonly commandId: string;
+  readonly targetCheckpointCommitRef: JournalCommitRef;
+  readonly confirmationRef: string;
+  readonly expectedCurrentControlCommitRef?: JournalCommitRef;
+}
+
+export type CommittedTaskContextCorrectionReceipt = CommittedContextCorrection & {
+  readonly coverageCommitRef: JournalCommitRef;
+};
+
+export type CommittedTaskCheckpointReentryReceipt = CommittedReentry & {
+  readonly coverageCommitRef: JournalCommitRef;
+};
+
+/**
+ * Shared composition for the two confirmed-transition facades. The locked
+ * current facts, grant and physical operation control all come from the same
+ * verified Journal records; the facades add no second control store, validator
+ * or CAS. A caller that has not confirmed an organ/task scope is rejected
+ * before any owner is invoked.
+ */
+function correctionTaskScopeOf(taskScope: ScopeRef): {
+  readonly organId: ScopeRef['organId'];
+  readonly taskId: NonNullable<ScopeRef['taskId']>;
+} {
+  if (!taskScope.taskId) throw new Error('confirmed transition requires an organ and task scope');
+  return { organId: taskScope.organId, taskId: taskScope.taskId };
+}
+
+async function verifiedJournalRecords(journal: JsonlOrganJournal): Promise<readonly JournalRecord[]> {
+  const verification = await journal.verify();
+  if (!verification.valid) throw new Error(verification.error ?? 'Organ Journal is invalid');
+  return verification.records;
+}
+
+function requireSettledCurrentFacts(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+): ReentryCurrentFacts {
+  const current = readCurrentFromRecords(records, taskScope);
+  if (current.state !== 'known') {
+    throw new Error(`confirmed transition current facts are unknown: ${current.reason}`);
+  }
+  if (current.unresolvedDisplacedRefs.length > 0) {
+    throw new Error('confirmed transition requires a settled current incarnation with no unresolved displaced work');
+  }
+  return current;
+}
+
+function requireGrantedTaskGrant(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+  principalOwner: string,
+): TaskGrantRecordRead {
+  const grant = readTaskGrantFromRecords(records, taskScope);
+  if (!grant || grant.grant.state !== 'granted' || grant.grant.owner !== principalOwner) {
+    throw new Error('confirmed transition requires a granted task grant owned by the verified principal');
+  }
+  return grant;
+}
+
+function requireOperationControlCommitRef(
+  records: readonly JournalRecord[],
+  current: ReentryCurrentFacts,
+): JournalCommitRef {
+  const control = readOperationControlFromRecords(records, {
+    scope: current.context.scope,
+    agentRuntimeId: current.context.agentRuntimeId,
+    harnessExecutionEpoch: current.position.executionEpoch,
+  });
+  if (control.state !== 'complete') {
+    throw new Error(`confirmed transition operation control is unknown: ${control.reason}`);
+  }
+  return control.currentControlCommitRef;
+}
+
+function confirmedCommandOfCorrectionRecord(record: ContextCorrectionRecord): ConfirmedContextCorrectionCommand {
+  return {
+    basis: record.basis,
+    expectedOperationControlCommitRef: record.expectedOperationControlCommitRef,
+    expectedGrantCommitRef: record.expectedGrantCommitRef,
+    permissionRevision: record.permissionRevision,
+  };
+}
+
+function sameCorrectionCallerFacts(
+  record: ContextCorrectionRecord,
+  input: ExecuteConfirmedTaskContextCorrectionInput,
+): boolean {
+  const basis = record.basis;
+  if (basis.commandId !== input.commandId
+    || basis.principalOwner !== input.principalOwner
+    || basis.repairText !== input.repairText
+    || basis.confirmationRef !== input.confirmationRef
+    || basis.taskScope.organId.value !== input.taskScope.organId.value
+    || basis.taskScope.taskId.value !== input.taskScope.taskId?.value
+    || JSON.stringify(basis.wrongRefs) !== JSON.stringify(input.wrongRefs)) {
+    return false;
+  }
+  if (input.sourceCheckpointReceipt !== undefined
+    && !sameCommit(basis.sourceCheckpointReceipt, input.sourceCheckpointReceipt)) {
+    return false;
+  }
+  if (input.expectedControlReceipt !== undefined
+    && !sameCommit(basis.expectedControlReceipt, input.expectedControlReceipt)) {
+    return false;
+  }
+  return true;
+}
+
+function sameReentryCallerFacts(
+  record: ConditionalReentryRecord,
+  input: ExecuteConfirmedTaskCheckpointReentryInput,
+): boolean {
+  const command = record.command;
+  return command.commandId === input.commandId
+    && command.principalOwner === input.principalOwner
+    && command.confirmationRef === input.confirmationRef
+    && command.taskScope.organId.value === input.taskScope.organId.value
+    && command.taskScope.taskId?.value === input.taskScope.taskId?.value
+    && sameCommit(command.targetCheckpointCommitRef, input.targetCheckpointCommitRef)
+    && (input.expectedCurrentControlCommitRef === undefined
+      || sameCommit(command.expectedCurrentControlCommitRef, input.expectedCurrentControlCommitRef));
+}
+
+/**
+ * Public App control facade for a confirmed Context correction.
+ *
+ * The caller supplies only the confirmed business intent. The facade resolves
+ * the authoritative current position, grant and physical operation control from
+ * the verified Journal, delegates the append-only commit and exact readback to
+ * the existing `commitContextCorrection` owner, then initializes the successor
+ * operation-control coverage at the committed `newExecutionEpoch`. A retry of an
+ * already-committed command reuses the committed confirmed facts and only
+ * re-initializes coverage, so an advanced current epoch is never mistaken for a
+ * new command and no effect is duplicated.
+ */
+export async function executeConfirmedTaskContextCorrection(
+  input: ExecuteConfirmedTaskContextCorrectionInput,
+): Promise<CommittedTaskContextCorrectionReceipt> {
+  if (!input.filePath.trim()) throw new Error('context correction journal path is required');
+  const journal = input.journal ?? new JsonlOrganJournal(input.filePath);
+  const port = createJsonlContextCorrectionSubmissionPort({ filePath: input.filePath, journal });
+
+  const records = await verifiedJournalRecords(journal);
+  const existing = readContextCorrectionFromRecords(records, input.taskScope, input.commandId);
+  let command: ConfirmedContextCorrectionCommand;
+  let coverageScope: ScopeRef;
+  let coverageAgentRuntimeId: string;
+  if (existing !== null) {
+    if (!sameCorrectionCallerFacts(existing.record, input)) {
+      throw new Error('context correction command id is already committed with different confirmed facts');
+    }
+    command = confirmedCommandOfCorrectionRecord(existing.record);
+    coverageScope = existing.record.correctedContext.scope;
+    coverageAgentRuntimeId = existing.record.correctedContext.agentRuntimeId;
+  } else {
+    const current = requireSettledCurrentFacts(records, input.taskScope);
+    const grant = requireGrantedTaskGrant(records, input.taskScope, input.principalOwner);
+    const operationControlCommitRef = requireOperationControlCommitRef(records, current);
+    command = {
+      basis: {
+        commandId: input.commandId,
+        taskScope: correctionTaskScopeOf(input.taskScope),
+        sourceCheckpointReceipt: input.sourceCheckpointReceipt ?? current.position.checkpointCommitRef,
+        expectedControlReceipt: input.expectedControlReceipt ?? current.position.controlCommitRef,
+        expectedContextReceipt: current.position.contextCommitRef,
+        expectedExecutionEpoch: current.position.executionEpoch,
+        wrongRefs: input.wrongRefs,
+        repairText: input.repairText,
+        confirmationRef: input.confirmationRef,
+        principalOwner: input.principalOwner,
+      },
+      expectedOperationControlCommitRef: operationControlCommitRef,
+      expectedGrantCommitRef: grant.commitRef,
+      permissionRevision: String(grant.grant.revision),
+    };
+    coverageScope = current.context.scope;
+    coverageAgentRuntimeId = current.context.agentRuntimeId;
+  }
+
+  const committed = await commitContextCorrection({
+    ownerId: input.principalOwner,
+    correction: { port, command },
+  });
+  const coverageCommitRef = await createJsonlOperationControlJournal({ journal }).initializeCoverage({
+    scope: coverageScope,
+    agentRuntimeId: coverageAgentRuntimeId,
+    harnessExecutionEpoch: committed.record.newExecutionEpoch,
+    admissionCommitRef: committed.commitRef,
+  });
+  return { ...committed, coverageCommitRef };
+}
+
+/**
+ * Public App control facade for a confirmed checkpoint reentry (rewind or
+ * forward). It mirrors `executeConfirmedTaskContextCorrection`: authoritative
+ * current facts, grant and operation control come from the verified Journal,
+ * `commitReentry` owns the append-only conditional transition and exact
+ * readback, and the successor coverage is initialized at the committed
+ * `newExecutionEpoch`. Retrying an already-committed command reuses the
+ * committed confirmed facts and only tops up coverage.
+ */
+export async function executeConfirmedTaskCheckpointReentry(
+  input: ExecuteConfirmedTaskCheckpointReentryInput,
+): Promise<CommittedTaskCheckpointReentryReceipt> {
+  if (!input.filePath.trim()) throw new Error('conditional reentry journal path is required');
+  const journal = input.journal ?? new JsonlOrganJournal(input.filePath);
+  const port = createJsonlConditionalReentrySubmissionPort({ filePath: input.filePath, journal });
+
+  const records = await verifiedJournalRecords(journal);
+  const existing = readReentryFromRecords(records, input.taskScope, input.commandId);
+  let command: ConfirmedReentryCommand;
+  let coverageScope: ScopeRef;
+  let coverageAgentRuntimeId: string;
+  if (existing !== null) {
+    if (!sameReentryCallerFacts(existing.record, input)) {
+      throw new Error('conditional reentry command id is already committed with different confirmed facts');
+    }
+    command = existing.record.command;
+    coverageScope = existing.record.restoredContext.scope;
+    coverageAgentRuntimeId = existing.record.restoredContext.agentRuntimeId;
+  } else {
+    const current = requireSettledCurrentFacts(records, input.taskScope);
+    const grant = requireGrantedTaskGrant(records, input.taskScope, input.principalOwner);
+    const operationControlCommitRef = requireOperationControlCommitRef(records, current);
+    command = {
+      commandId: input.commandId,
+      taskScope: { organId: input.taskScope.organId, taskId: input.taskScope.taskId },
+      targetCheckpointCommitRef: input.targetCheckpointCommitRef,
+      expectedCurrentControlCommitRef: input.expectedCurrentControlCommitRef ?? current.position.controlCommitRef,
+      expectedExecutionEpoch: current.position.executionEpoch,
+      expectedOperationControlCommitRef: operationControlCommitRef,
+      expectedGrantCommitRef: grant.commitRef,
+      permissionRevision: String(grant.grant.revision),
+      confirmationRef: input.confirmationRef,
+      principalOwner: input.principalOwner,
+    };
+    coverageScope = current.context.scope;
+    coverageAgentRuntimeId = current.context.agentRuntimeId;
+  }
+
+  const committed = await commitReentry({
+    ownerId: input.principalOwner,
+    conditional: { port, command },
+  });
+  const coverageCommitRef = await createJsonlOperationControlJournal({ journal }).initializeCoverage({
+    scope: coverageScope,
+    agentRuntimeId: coverageAgentRuntimeId,
+    harnessExecutionEpoch: committed.record.newExecutionEpoch,
+    admissionCommitRef: committed.commitRef,
+  });
+  return { ...committed, coverageCommitRef };
 }
