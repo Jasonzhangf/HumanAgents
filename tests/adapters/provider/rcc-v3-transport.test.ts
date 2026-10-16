@@ -1278,6 +1278,84 @@ test('RCC v3 still reports failed when the SSE stream closes without any termina
   assert.equal(settled.resourceRelease.state, 'released');
 });
 
+test('RCC v3 preserves the transport cause chain and records request-scoped observe-error evidence', async () => {
+  // Real A0 wire: Node's fetch rejects the pending SSE read with
+  // TypeError('terminated') and hangs the actual socket failure off
+  // `error.cause`. The typed observe error must keep that chain and record
+  // request-scoped evidence so the socket cause is not lost.
+  const socketError = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' });
+  const terminatedError = new TypeError('terminated', { cause: socketError });
+  const closingBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      yield new TextEncoder().encode('event: response.created\ndata: {"type":"response.created","response":{"id":"resp-cause-chain"}}\n\n');
+      throw terminatedError;
+    },
+  };
+  const built = adapter(async () => response(closingBody));
+  await built.adapter.start(startInput());
+
+  let thrown: unknown;
+  await assert.rejects(async () => {
+    for await (const _event of built.adapter.observe(execution)) void _event;
+  }, (error: unknown) => {
+    thrown = error;
+    return true;
+  });
+
+  assert.ok(thrown instanceof ProviderAdapterError);
+  const adapterError = thrown as ProviderAdapterError;
+  assert.equal(adapterError.providerError.code, 'transport.failure');
+  assert.equal(adapterError.providerError.category, 'transport');
+  assert.equal(adapterError.providerError.phase, 'observe');
+  assert.equal(adapterError.cause, terminatedError);
+  assert.match(adapterError.message, /UND_ERR_SOCKET/);
+
+  const observeErrorWrites = built.writes.filter((write) => write.type === 'observe-error');
+  assert.equal(observeErrorWrites.length, 1);
+  const content = observeErrorWrites[0].content as Record<string, unknown>;
+  const recordedExecution = content.execution as Record<string, unknown>;
+  assert.equal(recordedExecution.runtimeId, execution.runtimeId);
+  assert.deepEqual(recordedExecution.operationId, execution.operationId);
+  assert.equal(recordedExecution.executionEpoch, execution.executionEpoch);
+  assert.deepEqual(recordedExecution.taskId, execution.taskId);
+  assert.equal(content.aborted, false);
+  const startContent = built.writes.find((write) => write.type === 'start')!.content as Record<string, unknown>;
+  assert.equal(content.route, startContent.route);
+  assert.equal(content.model, startContent.model);
+  assert.deepEqual(content.causes, [
+    { name: 'TypeError', message: 'terminated' },
+    { name: 'Error', code: 'UND_ERR_SOCKET', message: 'other side closed' },
+  ]);
+  assert.equal(adapterError.providerError.evidenceRefs.length, 1);
+
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.error?.code, 'transport.failure');
+
+  const writeFailure = new Error('observe-error sink unavailable');
+  const failing = adapter(async () => response(closingBody));
+  await failing.adapter.start(startInput());
+  const mutableEvidence = failing.evidence as unknown as { write: ProviderEvidenceSink['write'] };
+  const writeEvidence = mutableEvidence.write;
+  mutableEvidence.write = async (write) => {
+    if (write.type === 'observe-error') throw writeFailure;
+    return writeEvidence(write);
+  };
+  await assert.rejects(async () => {
+    for await (const _event of failing.adapter.observe(execution)) void _event;
+  }, (error: unknown) => {
+    assert.ok(error instanceof ProviderAdapterError);
+    assert.ok(error.cause instanceof AggregateError);
+    assert.deepEqual(error.cause.errors, [terminatedError, writeFailure]);
+    assert.match(error.message, /observe-error evidence write failed/);
+    assert.notEqual(error.providerError.evidenceRefs[0]?.locator, 'rcc-v3://observe-error');
+    return true;
+  });
+  const failedSettlement = await failing.adapter.settle(execution);
+  assert.equal(failedSettlement.state, 'failed');
+  assert.equal(failedSettlement.error?.code, 'transport.failure');
+});
+
 test('RCC v3 fully observed waiting settlement releases the session and allows close', async () => {
   // The provider finished the round with tool calls pending and the stream is
   // fully consumed. Continuation is unavailable for RCC v3, so the settlement
