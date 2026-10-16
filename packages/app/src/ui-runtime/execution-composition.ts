@@ -444,7 +444,8 @@ export function createDefaultExecutionComposition(input: {
       if (typeof objective !== 'string') missing('prepared execution input has no immutable prompt');
       const assignment: WorkAssignment = resume?.source.assignment ?? { assignmentId: allocation.assignmentId, taskId: allocation.taskId,
         pipelineNodeId: 'pipeline.execute', attempt: 1, executionEpoch: allocation.attemptExecutionEpoch,
-        inputRevision: allocation.inputRevision, objective, targetRefs: allocation.inputRefs, expectedOutputRefs: [],
+        inputRevision: allocation.inputRevision, objective, targetRefs: allocation.inputRefs,
+        expectedOutputRefs: [`operation://${allocation.operationId.value}/output`],
         acceptanceCriteriaDigest: executionAdmissionInputDigest(identity, prepared),
         successCriteria: ['standard turn closure and canonical Planner alignment'],
         failureCriteria: ['execution error'], incompleteCriteria: ['standard turn or Planner alignment remains pending'],
