@@ -177,6 +177,8 @@ export async function readColdExecutionSource(
         ...initial.binding.execution,
         taskId: allocation.taskId,
         operationId: allocation.operationId,
+        organId: initial.binding.scope.organId,
+        ...(initial.binding.scope.cycleId === undefined ? {} : { cycleId: initial.binding.scope.cycleId }),
       },
     });
     if (segments.length > 0) {

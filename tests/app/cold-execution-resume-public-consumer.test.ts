@@ -1631,8 +1631,10 @@ async function buildInterruptedColdFixture(name: string): Promise<InterruptedCol
     i2Journal: createJsonlI2JournalPort({ filePath: fixture.journalPath, journal: fixture.journal }),
     retryJournal: createJsonlRetryCycleJournalPort({ filePath: fixture.retryPath }),
   });
-  const initial = await fixture.segmentJournal.readInitialSegmentCapture(fixture.businessTurnId);
-  if (initial === null) throw new Error('the interrupted fixture has no original v1 capture');
+  const initial = await fixture.segmentJournal.readInitialSegmentSource(fixture.businessTurnId);
+  if (initial === null || initial.kind !== 'captured') {
+    throw new Error('the interrupted fixture has no original v1 capture');
+  }
   const segmentId = 'interrupted-v2';
   const requestId = 'interrupted-v2-request';
   const incarnation: TaskRuntimeIncarnation = {
@@ -1791,6 +1793,9 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
       'every resumed request must carry the selected provider model');
 
     // The accepted effect is retained exactly; resume never replays it.
+    if (fixture.originalV1ReceiptRef === undefined) {
+      throw new Error('the captured resume fixture must retain its original v1 receipt reference');
+    }
     const readback = await fixture.native.readRecoveryAssetsExact(fixture.originalV1ReceiptRef);
     assert.equal(readback.receipt.turnId, fixture.businessTurnId);
     assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output,
