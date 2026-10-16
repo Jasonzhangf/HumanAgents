@@ -952,7 +952,17 @@ test('prepared execution stop recovers acquisition and left append failures with
       }
       const selector = { taskId: allocation.taskId, operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
       await producer.request({ allocation, checkpoint: preparedStopCheckpoint(allocation) });
-      assert.equal((await producer.settle(selector)).state, 'pending');
+      // A retained failed preparation keeps the original cleanup error and its
+      // custody. Settling such an execution drives the real cleanup retry, so a
+      // still-unavailable persistence must surface the typed retry failure
+      // instead of a silent pending. A fresh producer with no retained
+      // preparation has nothing to retry and correctly stays pending.
+      await assert.rejects(() => producer.settle(selector), (error: unknown) => {
+        assert.ok(error instanceof PreparedExecutionStopPreparationFailure, 'settle must surface the retained preparation retry failure');
+        if (!(error instanceof PreparedExecutionStopPreparationFailure)) return false;
+        assert.ok(error.errors.some((entry) => entry === closeFailure || entry === appendFailure), 'the retry must keep the original cleanup error');
+        return true;
+      });
       assert.equal((await new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission }).settle(selector)).state, 'pending');
       allowClose = true;
       await assert.rejects(() => producer.retryFailedPreparation(failure!.lease));
@@ -1253,6 +1263,136 @@ test('Runtime prepared stop commits exact history with actual cancelled parent a
 
 test('Runtime prepared stop retries committed append acknowledgement failure with original errors and identity', async () => {
   await runtimePreparedStopConsumer(true);
+});
+
+// The default App composition is the only real consumer of the frozen
+// prepared-stop binder: one producer owns fresh Task custody, the Gateway
+// stop-settlement callback and the public stop port. This consumer drives the
+// real startUiRuntime launch instead of a hand-built coordinator, so a fresh
+// Task whose selected Provider preparation fails after custody and admission
+// still keeps its stop responsibility, reaches a real durable stopped
+// checkpoint, cancels the actual parent and closes its resource exactly once.
+test('Runtime prepared stop through the default composition settles a failed Task preparation once', async () => {
+  const root = await preparedStopFixture('runtime-prepared-stop-default-');
+  try {
+    const checkpointRoot = join(root, 'checkpoints');
+    const modeRoot = join(checkpointRoot, 'rcc');
+    const controlJournalPath = uiRuntimeControlJournalPath(modeRoot);
+    const preparedJournalPath = join(modeRoot, 'ui-runtime-journal.jsonl');
+    const preparationError = new Error('selected Task provider preparation failed after custody');
+    let selectedProbes = 0;
+    let selectedCloses = 0;
+    let selectedReceipt: ProviderCloseResult | undefined;
+    const selectedPort = (): ExecutionRuntimePort => {
+      const base = new FakeReplayExecutionRuntimePort({ binding });
+      return {
+        kind: 'humanagent.execution-runtime-port',
+        probe: async () => { selectedProbes += 1; throw preparationError; },
+        capabilities: (value) => base.capabilities(value),
+        start: (value) => base.start(value),
+        resume: (value) => base.resume(value),
+        submit: (value) => base.submit(value),
+        observe: (value) => base.observe(value),
+        requestStop: (value) => base.requestStop(value),
+        settle: (value) => base.settle(value),
+        close: async (value) => { selectedCloses += 1; selectedReceipt = await base.close(value); return selectedReceipt; },
+      };
+    };
+    const runtime = await startUiRuntime({
+      mode: 'rcc',
+      organId,
+      binding,
+      // The shared launch readiness uses a healthy instance; only the selected
+      // Task composition fails, so the failure lands after the Task admission.
+      port: new FakeReplayExecutionRuntimePort({ binding }),
+      checkpointRoot,
+      evidenceRoot: join(root, 'evidence'),
+      uiRoot: join(process.cwd(), 'docs', 'ui'),
+      portNumber: 0,
+      memory: testMemory('project-ui-prepared-stop-default'),
+      runtimeComposition: {
+        prepareAgentProvider: async () => {
+          throw new Error('a fresh Task execution must select through the Task-scoped custody preparer');
+        },
+        prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+          agentProviderBindings: [],
+          legacyProvider: preparedStopComposition(buildFakeExecutionPort(binding, 1)).provider,
+          createPort: () => selectedPort(),
+        }, owner, lease),
+      },
+    });
+    try {
+      const task = runtime.service.createTask({ title: 'default composition failed preparation' });
+      await grantRuntimeTask(runtime, task.taskId, checkpointRoot, 'rcc');
+      await assert.rejects(
+        () => runtime.service.startExecution(task.taskId, { prompt: 'fail the selected preparation' }),
+        (error: unknown) => {
+          assert.ok(error instanceof UiRuntimeApiError, 'the public start surfaces the preparation failure');
+          if (!(error instanceof UiRuntimeApiError)) return false;
+          assert.equal(error.message, preparationError.message);
+          return true;
+        },
+      );
+      const blocked = runtime.service.taskDashboard(task.taskId);
+      assert.equal(blocked.state, 'blocked');
+      assert.ok(blocked.allowedActions.includes('stop'), 'a failed fresh preparation keeps the public stop responsibility');
+      assert.equal(selectedProbes, 1, 'the selected composition is admitted once and then fails');
+      assert.equal(selectedCloses, 1, 'the retained failed preparation closes its own resource exactly once');
+      assert.ok(selectedReceipt, 'the retained close returns the real receipt');
+
+      const stopped = await runtime.service.stop(task.taskId);
+      assert.equal(stopped.state, 'stopped');
+      const dashboard = runtime.service.taskDashboard(task.taskId);
+      assert.equal(dashboard.state, 'stopped');
+      assert.equal(dashboard.checkpoint?.outcome, 'stopped');
+      assert.ok(dashboard.checkpoint?.committedAt, 'the stopped checkpoint has a durable native commit time');
+      assert.equal(selectedCloses, 1, 'settlement reuses the retained closure and never closes twice');
+
+      const journal = new JsonlOrganJournal(controlJournalPath);
+      const records = await journal.replay();
+      const facts = records
+        .map((record) => (record.payload as { readonly fact?: { readonly kind?: string } } | undefined)?.fact)
+        .filter((fact): fact is { readonly kind: string } => fact !== undefined && typeof fact.kind === 'string');
+      const ofKind = (kind: string) => facts.filter((fact) => fact.kind === kind);
+      const requested = ofKind('requested')[0] as unknown as { readonly allocation: RuntimeExecutionAllocation } | undefined;
+      assert.ok(requested, 'the public stop persisted one prepared-stop request');
+      assert.equal(ofKind('preparation-entered').length, 1);
+      assert.equal(ofKind('resource-acquired').length, 1);
+      assert.equal(ofKind('resource-closed').length, 1);
+      const left = ofKind('preparation-left')[0] as unknown as { readonly outcome?: string } | undefined;
+      assert.equal(left?.outcome, 'failed', 'the failed preparation leaves the same cleanup owner');
+      const settled = records.find((record) =>
+        (record.payload as { readonly fact?: { readonly kind?: string } } | undefined)?.fact?.kind === 'settled');
+      assert.equal(ofKind('settled').length, 1, 'the public stop persisted exactly one settlement');
+      assert.ok(settled, 'the settled fact is durably present');
+
+      const checkpointRecords = records.filter((record) => record.kind === 'checkpoint');
+      assert.equal(checkpointRecords.length, 1);
+      const committed = checkpointRecords[0]!.checkpoint as Checkpoint;
+      assert.equal(committed.outcome, 'stopped');
+      assert.equal(committed.recoveryStateRef.locator, settled!.commitId, 'the checkpoint points at the real settlement');
+
+      const preparedJournal = new UiRuntimeJournal(preparedJournalPath);
+      const admission = preparedStopAdmission(journal, preparedJournal);
+      const control = await admission.gateway.readControl({
+        scope: requested!.allocation.scope,
+        agentRuntimeId: requested!.allocation.runtimeId,
+        harnessExecutionEpoch: requested!.allocation.executionEpoch,
+      });
+      assert.equal(control.state, 'complete');
+      if (control.state !== 'complete') throw new Error('actual control readback is required');
+      assert.equal(control.operations.length, 1);
+      assert.equal(control.operations[0]!.status, 'cancelled', 'the actual parent is cancelled');
+
+      const store = new ServiceExecutionCheckpointStore(controlJournalPath, journal, () => new Date());
+      const exact = await store.readCommitted(committed.scope, committed.id);
+      assert.ok(exact, 'the stopped checkpoint is durably readable');
+      assert.equal(exact!.checkpoint.id.value, dashboard.checkpoint!.checkpointId);
+      assert.equal(records.some((record) => record.commitId?.startsWith('active-turn:')), false, 'no invented admitted turn');
+    } finally { await runtime.server.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 class CountingFakeReplayExecutionRuntimePort extends FakeReplayExecutionRuntimePort {
@@ -8169,6 +8309,19 @@ test('rcc startup projects provider readiness failure instead of claiming ready'
       prepareAgentProvider: async () => {
         throw new Error('the readiness gate must reject before provider preparation');
       },
+      // A real non-fake launch requires the Task-scoped custody preparer. This
+      // wires the same prepareExecutionAgentProvider seam the serve caller uses,
+      // but the readiness gate must reject before either preparer runs, so the
+      // selected Task port factory never prepares anything.
+      prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
+        roleId: selection.roleId,
+        ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+        agentProviderBindings: [],
+        legacyProvider: preparedStopComposition(buildFakeExecutionPort(binding, 1)).provider,
+        createPort: () => {
+          throw new Error('the readiness gate must reject before Task provider preparation');
+        },
+      }, owner, lease),
     },
   });
   try {
