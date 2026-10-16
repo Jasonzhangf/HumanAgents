@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-15 晚）
 
+- F13图/治理前置已接收为`e5d8664`：6→5节点，移除恢复前强制save/drain，区分captured receipt与interrupted anchor，修正真实owner。原worker单轮validate/inspect/binding均exit0，Root读diff/回执后接管整理并收拢PID93412，未重复校验；`provider-cold-recovery-graph-gcm-r1-20261015/parent-acceptance.md`保留范围。新唯一F13树`provider-interrupted-segment-recovery-20261015`从此候选创建，fresh GCM `provider-interrupted-contract-gcm-r1-20261015`只接Step2 contracts/Runtime ports，App/Jsonl/reader顺序后续；首次无capture的I1仍另OPEN。
+- U2进度纠正：当前source并未完成Journal validator和完整冷路径，不能沿交接声称只差prepared catch。Root正常tsc实际exit1：`coordinator.ts(1134,7) Cannot find name applyZeroEffectAdmissionDenial`；Journal当前无控制字段校验。r2已有catch改动保留，Root冻结其PID82306，fresh GCM `provider-denial-complete-gcm-r3-20261015`在同一原树按既有r3完整计划补三个原allowed paths。既有行为RED有效，当前未GREEN、未接收、未main。其余任务继续并行。
 - 最新接收 `3156248` → 唯一候选 `fbfceff`：仅原 native consumer typed admission fixture。Root 正常宿主原10例实际9 PASS / 1 FAIL，exit1。原#6同真实HOME通过；原#7保留 `blocked != failed` 红测，暴露工具失败后settle/close未收拢，完整行为验收仍开放。证据 `provider-native-fixture-gcm-r2-20261015/parent-{normal-native.log,acceptance.md}`；原来源树已clean/remove/prune/absent，注册数7→6，回执 `native-fixture-close-receipt.json`。这不是新增功能完成计数。
 - 当前本轮跟踪增量共15项，14项源码已接收，G-A行为验收1项开放。公开grant已补齐，G-A内的冷恢复与工具失败收拢仍开放；不把源码接收算行为完成。仅restart切片已交远端main。此计数不覆盖完整goal，也不是产品完成率。
 - 最新功能候选`a693534`，已接收driver工具异常收拢`f721829`、T5 A preparer类型接线`571a6a9`、引用基础`957ccc2`→`a693534`；本轮内部接收仍不是main交付。引用基础仅保留accepted tool evidenceRefs，原rawOutput不变；真实reader consumer编译成功后实际RED（refs为undefined）→GREEN 1/1，Root正常宿主1/1。App/codec/driver引用接线仍OPEN。同来源树续派wire任务，不重复建树。此前publicgrant`887251b`原semantic4/4、Source S`f358054`原7/7、UX`91a8d90`unit36/homepage48/entry39继续有效，三来源树均关闭。最新有效远端main为`2981230`，完整milestone Review/main/push未到条件。
