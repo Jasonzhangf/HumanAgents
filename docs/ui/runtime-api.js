@@ -120,6 +120,25 @@ function appendCheckpointSelection(query, checkpointQuery) {
   return query
 }
 
+// A checkpoint asset body is addressed only by its role, or by the exact adopted
+// child triple. The four checkpoint selection keys on the query already name the
+// exact checkpoint; nothing else may be sent as authority.
+function checkpointAssetBodyPath(selector) {
+  if (!selector || typeof selector !== 'object') return null
+  if (selector.kind === 'capture') return 'capture'
+  if (selector.kind === 'adopted-child') {
+    const { invocationId, childTurnId, deliverySeq } = selector
+    if (typeof invocationId !== 'string' || !invocationId.trim()
+      || typeof childTurnId !== 'string' || !childTurnId.trim()
+      || !Number.isSafeInteger(deliverySeq) || deliverySeq < 0) {
+      return null
+    }
+    const encode = (value) => encodeURIComponent(value)
+    return `adopted-child/${encode(invocationId)}/${encode(childTurnId)}/${encode(String(deliverySeq))}`
+  }
+  return null
+}
+
 export function createRuntimeApi(options = {}) {
   const baseUrl = (options.baseUrl || '').replace(/\/$/, '')
   const fetchImpl = options.fetchImpl || globalThis.fetch.bind(globalThis)
@@ -276,6 +295,23 @@ export function createRuntimeApi(options = {}) {
         query.set(name, String(value))
       }
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/checkpoints?${query}`, { method: 'GET' })
+    },
+    // The body read names the exact checkpoint with the same four selection keys
+    // and names the asset only by role or adopted-child triple. The descriptor,
+    // scope and locator stay with the service; the browser never authorizes them.
+    taskCheckpointAssetBody: (taskId, { projectKey, mode, checkpointQuery, selector } = {}) => {
+      const path = checkpointAssetBodyPath(selector)
+      if (!path) {
+        throw new RuntimeApiError({
+          code: 'checkpoint-asset.invalid-selector',
+          ownerId: 'humanagent.ui.runtime-api',
+          message: 'checkpoint 资产正文读取选择器无效。',
+          nextAction: '从检查点详情重新打开对应资产正文。',
+        })
+      }
+      const query = new URLSearchParams({ projectKey, mode })
+      appendCheckpointSelection(query, checkpointQuery)
+      return request(`/api/tasks/${encodeURIComponent(taskId.value)}/checkpoints/assets/${path}?${query}`, { method: 'GET' })
     },
     // I2 readonly history reads. These are explicit task GET builders. The
     // injected I2 authority is service-scoped, so the builder carries only the
@@ -528,6 +564,34 @@ export function stateTone(state) {
 
 export function queryParam(name) {
   return new URLSearchParams(location.search).get(name)
+}
+
+/**
+ * Whether one returned body projection is exactly the checkpoint and asset a
+ * body read asked for: the checkpoint identity, its full physical receipt and the
+ * selector. A response for another checkpoint, another receipt or another asset
+ * role is refused instead of published, so a late or mismatched response can
+ * never present itself as the opened body. Callers keep their own serial to
+ * decide whether the read is still current at all; this only compares identity.
+ */
+export function sameCheckpointAssetBodyAddress(projection, address) {
+  if (!projection || typeof projection !== 'object') return false
+  if (!address || typeof address !== 'object') return false
+  if (projection.surface !== 'runtime-checkpoint-asset-body') return false
+  if (projection.checkpoint?.checkpointId?.value !== address.target?.checkpointId) return false
+  const receipt = projection.checkpoint?.commitRef
+  const wanted = address.target?.commitRef
+  if (!receipt || !wanted) return false
+  if (receipt.commitId !== wanted.commitId) return false
+  if (receipt.journalSeq !== wanted.journalSeq) return false
+  if (receipt.recordDigest !== wanted.recordDigest) return false
+  const selector = projection.selector
+  const wantedSelector = address.selector
+  if (!selector || !wantedSelector || selector.kind !== wantedSelector.kind) return false
+  if (selector.kind === 'capture') return true
+  return selector.invocationId === wantedSelector.invocationId
+    && selector.childTurnId === wantedSelector.childTurnId
+    && selector.deliverySeq === wantedSelector.deliverySeq
 }
 
 export function clearNode(node) {

@@ -23,9 +23,11 @@ import {
   taskIdFromQuery,
   taskReadScopeFromQuery,
 } from './runtime-shell.js'
+import { sameCheckpointAssetBodyAddress } from './runtime-api.js'
 import {
   checkpointQuery,
   checkpointSelectionFromQuery,
+  renderCheckpointAssetBody,
   renderCheckpointHistory,
   renderCheckpointHistoryDetail,
 } from './checkpoint-history.js'
@@ -648,6 +650,93 @@ function checkpointReadFailure(content, requestedViewed) {
   return null
 }
 
+// ── exact checkpoint asset body read ───────────────────────────────────────
+// The body read is bound to the exact clicked checkpoint identity, receipt and
+// selector before any await. Only the serial decides whether a late response may
+// still publish: back, close, level leave or a newer body read invalidates it, so
+// a response can never land in a target it was not asked for.
+let checkpointAssetBodySerial = 0
+
+const CHECKPOINT_ASSET_BODY_IDENTITY_MISMATCH = Object.freeze({
+  code: 'checkpoint-asset.identity-mismatch',
+  ownerId: 'humanagent.ui.task-dashboard',
+  message: '正文读取返回了其他检查点或资产角色的投影。',
+  nextAction: '重试这次读取，或返回检查点详情核对来源。',
+})
+
+function invalidateCheckpointAssetBody() {
+  checkpointAssetBodySerial += 1
+}
+
+function checkpointAssetBodyFailure(error) {
+  return {
+    code: error?.code ?? 'checkpoint-asset.read-failed',
+    ownerId: error?.ownerId ?? 'humanagent.ui.task-dashboard',
+    message: error?.message ?? '资产正文读取失败。',
+    nextAction: error?.nextAction ?? '重试这次读取，或返回检查点详情核对来源。',
+  }
+}
+
+function checkpointAssetBodyOptions(address) {
+  return {
+    element,
+    onBack: () => openCheckpointDetail(),
+    onRetry: () => openCheckpointAssetBody(address),
+  }
+}
+
+function showCheckpointAssetBody(state, address) {
+  const view = renderCheckpointAssetBody(state, checkpointAssetBodyOptions(address))
+  showCheckpointDetail('资产正文', view.element, view.dispose)
+}
+
+function openCheckpointAssetBody(address) {
+  if (!explicitScope || !address?.target?.commitRef || address.selector === undefined) return
+  // Snapshot the clicked address so a later mutation cannot change the request.
+  const frozen = {
+    target: {
+      checkpointId: address.target.checkpointId,
+      commitRef: {
+        commitId: address.target.commitRef.commitId,
+        journalSeq: address.target.commitRef.journalSeq,
+        recordDigest: address.target.commitRef.recordDigest,
+      },
+    },
+    selector: address.selector,
+  }
+  const serial = ++checkpointAssetBodySerial
+  showCheckpointAssetBody({ pending: true }, frozen)
+  void readCheckpointAssetBody(frozen, serial)
+}
+
+async function readCheckpointAssetBody(address, serial) {
+  const encoded = checkpointQuery(new URLSearchParams(), { viewed: address.target })
+  let result
+  if (!encoded.ok) {
+    result = { ok: false, failure: encoded.failure }
+  } else {
+    try {
+      const projection = await api.taskCheckpointAssetBody(explicitScope.taskId, {
+        projectKey: explicitScope.projectKey,
+        mode: explicitScope.mode,
+        checkpointQuery: encoded.value,
+        selector: address.selector,
+      })
+      result = { ok: true, value: projection }
+    } catch (error) {
+      result = { ok: false, failure: checkpointAssetBodyFailure(error) }
+    }
+  }
+  // A closed, switched or replaced layer must not receive this response. The
+  // serial covers staleness; the address check refuses a payload for another
+  // checkpoint, receipt or asset role.
+  if (serial !== checkpointAssetBodySerial) return
+  if (result.ok && !sameCheckpointAssetBodyAddress(result.value, address)) {
+    result = { ok: false, failure: CHECKPOINT_ASSET_BODY_IDENTITY_MISMATCH }
+  }
+  showCheckpointAssetBody(result.ok ? result : { ok: false, failure: result.failure }, address)
+}
+
 function disposeCheckpointView() {
   if (checkpointViewDispose) {
     checkpointViewDispose()
@@ -656,6 +745,7 @@ function disposeCheckpointView() {
 }
 
 function closeCheckpointDetail() {
+  invalidateCheckpointAssetBody()
   if (checkpointDetailDispose) {
     checkpointDetailDispose()
     checkpointDetailDispose = null
@@ -707,6 +797,7 @@ function checkpointReferenceRows(reference) {
 // link yet, so the layer shows the exact typed reference and says so plainly
 // instead of fabricating a URL.
 function openCheckpointReference(reference) {
+  invalidateCheckpointAssetBody()
   const wrap = element('div', undefined, 'checkpoint-reference')
   const back = element('button', '返回检查点详情', 'button button--quiet')
   back.type = 'button'
@@ -725,9 +816,16 @@ function openCheckpointReference(reference) {
 
 function openCheckpointDetail() {
   if (!checkpointRenderRead) return
+  invalidateCheckpointAssetBody()
   const detail = renderCheckpointHistoryDetail(checkpointRenderRead, {
     element,
     onOpenReference: openCheckpointReference,
+    // A body read is bound to the exact checkpoint this detail renders, so a body
+    // opened from an older read can never re-read the currently selected one.
+    onReadAssetBody: (request) => openCheckpointAssetBody({
+      target: request.target,
+      selector: request.selector,
+    }),
   })
   appendCheckpointCapabilityDiagnostics(detail.element, checkpointRenderRead)
   showCheckpointDetail('检查点精确详情', detail.element, detail.dispose)

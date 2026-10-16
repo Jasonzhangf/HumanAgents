@@ -7,6 +7,7 @@ import {
   checkpointQuery,
   renderCheckpointHistory,
   renderCheckpointHistoryDetail,
+  renderCheckpointAssetBody,
 } from '../../docs/ui/checkpoint-history.js'
 
 // Minimal element adapter. No DOM framework, no dependency install. It records
@@ -467,4 +468,262 @@ test('unknown current stays unknown and optional sources show their real reasons
   assert.match(text(role(empty.element, 'semantic-goal')[0]), /未提供/)
   assert.match(text(role(empty.element, 'semantic-next-step')[0]), /未提供/)
   empty.dispose()
+})
+
+// The concrete asset descriptors the detail layer must offer a body read for.
+const captureAsset = {
+  ref: {
+    evidenceId: { scope: 'evidence', value: 'ev-capture-1' },
+    kind: 'execution',
+    source: 'runtime',
+    locator: 'artifacts/ui-provider-evidence/ev-capture-1',
+    digest: 'sha256:capture-1',
+    scope: {
+      organId: { scope: 'organ', value: 'organ-1' },
+      taskId: { scope: 'task', value: 'task-1' },
+    },
+  },
+  view: { kind: 'reasoning-item', selector: 'summary' },
+}
+const refinedDeliveryAsset = {
+  ref: {
+    evidenceId: { scope: 'evidence', value: 'ev-child-1' },
+    kind: 'execution',
+    source: 'runtime',
+    locator: 'artifacts/ui-provider-evidence/ev-child-1',
+    digest: 'sha256:child-1',
+    scope: {
+      organId: { scope: 'organ', value: 'organ-1' },
+      taskId: { scope: 'task', value: 'task-1' },
+    },
+  },
+  view: { kind: 'text-field', field: 'delta' },
+}
+const adoptedChild = {
+  invocationId: 'inv-9',
+  childTurnId: 'child-turn-9',
+  deliverySeq: 2,
+  kind: 'execution',
+  refinedDelivery: refinedDeliveryAsset,
+  preCallCheckpointRef: 'ck-pre',
+}
+
+// A read whose viewed checkpoint carries one known capture and one adopted child.
+const bodyRead = {
+  ok: true,
+  value: {
+    ...read.value,
+    viewed: {
+      ...read.value.viewed,
+      capture: {
+        state: 'known',
+        turnRecoveryRef: 'turn-recovery-1',
+        capture: captureAsset,
+        controlRecordCount: 2,
+        recovery: { recoveryResponsibilityRef: 'responsibility-1', unresolvedOperationRefs: [] },
+      },
+      semantic: { ...semanticKnown, adoptedChildren: [adoptedChild] },
+    },
+  },
+}
+
+function bodyProjection(text, selector = { kind: 'capture' }) {
+  return {
+    surface: 'runtime-checkpoint-asset-body',
+    scope: { kind: 'task', projectKey: 'project-1', mode: 'read', taskId },
+    checkpoint: B,
+    selector,
+    asset: captureAsset,
+    text,
+  }
+}
+
+// Text of a subtree, excluding every node under `excluded`.
+function textExcept(root, excluded) {
+  const skip = new Set(walk(excluded))
+  return walk(root)
+    .filter((node) => !skip.has(node))
+    .map((node) => node.textContent)
+    .filter(Boolean)
+    .join(' ')
+}
+
+// Failure mode: the detail layer keeps only the descriptor dead end, so a real
+// capture or refined-delivery body is never read. Basis: the observed
+// checkpoint-asset-read gap (detail shows evidenceId/view.kind only). Impact:
+// the user cannot read the exact durable artifact; high. Cost: low, one
+// element-adapter test over the real exported renderer.
+test('G14 capture and adopted-child assets offer an exact body read bound to the clicked checkpoint receipt', () => {
+  const requests = []
+  const detail = renderCheckpointHistoryDetail(bodyRead, {
+    element: createElement,
+    onOpenReference: () => {},
+    onReadAssetBody: (request) => requests.push(request),
+  })
+  const root = detail.element
+
+  const triggers = walk(root).filter((node) => node.getAttribute('data-checkpoint-role') === 'asset-body-trigger')
+  assert.equal(triggers.length, 2, 'one capture trigger and one adopted-child trigger')
+
+  const captureTrigger = triggers.find((node) => node.getAttribute('data-asset-body-selector') === 'capture')
+  const childTrigger = triggers.find((node) => node.getAttribute('data-asset-body-selector') === 'adopted-child')
+  assert.ok(captureTrigger, 'capture body trigger is rendered')
+  assert.ok(childTrigger, 'adopted-child body trigger is rendered')
+  assert.match(text(captureTrigger), /捕获正文/)
+  assert.match(text(childTrigger), /精炼交付/)
+
+  click(captureTrigger)
+  click(childTrigger)
+  assert.equal(requests.length, 2)
+
+  // The target is the exact clicked checkpoint identity plus its full physical
+  // receipt, never a re-read "current selection".
+  assert.deepEqual(requests[0].target, {
+    checkpointId: 'ck-b',
+    commitRef: { commitId: 'commit-57', journalSeq: 57, recordDigest: 'digest-57' },
+  })
+  assert.deepEqual(requests[0].selector, { kind: 'capture' })
+  assert.deepEqual(requests[1].selector, {
+    kind: 'adopted-child', invocationId: 'inv-9', childTurnId: 'child-turn-9', deliverySeq: 2,
+  })
+
+  // The exact target is fixed at click time: a second render for another read
+  // keeps its own identity, and the first trigger is unaffected.
+  const otherRead = {
+    ok: true,
+    value: {
+      ...bodyRead.value,
+      viewed: { ...bodyRead.value.viewed, identity: A },
+    },
+  }
+  const other = renderCheckpointHistoryDetail(otherRead, {
+    element: createElement,
+    onOpenReference: () => {},
+    onReadAssetBody: (request) => requests.push(request),
+  })
+  click(walk(other.element).filter((node) => node.getAttribute('data-asset-body-selector') === 'capture')[0])
+  assert.equal(requests[2].target.checkpointId, 'ck-a')
+  assert.equal(requests[2].target.commitRef.journalSeq, 31)
+  click(captureTrigger)
+  assert.equal(requests[3].target.checkpointId, 'ck-b')
+
+  // Only the real asset body path drops the dead-end descriptor-only copy;
+  // evidence and commit references keep their existing exact reference actions.
+  assert.equal(buttons(root).some((button) => text(button).includes('打开精确资产引用')), false)
+  assert.ok(buttons(root).some((button) => text(button).includes('打开精确')))
+  assert.ok(walk(root).every((node) => node.getAttribute('href') === null))
+
+  detail.dispose()
+  other.dispose()
+  click(captureTrigger)
+  assert.equal(requests.length, 4, 'dispose removes the body trigger listener')
+})
+
+// Failure mode: a body read is rendered as a descriptor dump, collapses the
+// whitespace of provider text, or reports an empty body as loading/failure.
+// Basis: the frozen projection carries `text` plus the exact asset descriptor.
+// Impact: the user misreads the durable artifact; high. Cost: low, the real
+// renderer on the existing element adapter.
+test('G14 asset body layer reads the exact text, keeps whitespace and folds provenance', () => {
+  const bodyText = '第一行\n\n  缩进的第二行\t结束'
+  const body = renderCheckpointAssetBody({ ok: true, value: bodyProjection(bodyText) }, { element: createElement })
+  const root = body.element
+
+  const textNode = role(root, 'asset-body-text')[0]
+  assert.ok(textNode, 'the decoded body is a text node')
+  assert.equal(textNode.textContent, bodyText, 'provider whitespace is preserved exactly')
+
+  const provenance = role(root, 'asset-body-provenance')[0]
+  assert.ok(provenance, 'provenance is folded into source details')
+  assert.equal(provenance.tagName, 'DETAILS')
+  assert.equal(provenance.children[0].tagName, 'SUMMARY')
+  assert.match(text(provenance), /ck-b/)
+  assert.match(text(provenance), /commit-57/)
+  assert.match(text(provenance), /digest-57/)
+  assert.match(text(provenance), /ev-capture-1/)
+  assert.match(text(provenance), /sha256:capture-1/)
+  assert.match(text(provenance), /reasoning-item/)
+  assert.match(text(provenance), /artifacts\/ui-provider-evidence\/ev-capture-1/)
+  assert.equal(role(provenance, 'asset-body-text').length, 0)
+
+  // The primary layer keeps the human body and the checkpoint it belongs to; the
+  // descriptor is not the primary machine dump.
+  const outside = textExcept(root, provenance)
+  assert.match(outside, /检查点 5/)
+  assert.doesNotMatch(outside, /ev-capture-1/)
+  assert.doesNotMatch(outside, /sha256:capture-1/)
+  assert.doesNotMatch(outside, /reasoning-item/)
+  assert.ok(walk(root).every((node) => node.getAttribute('href') === null && node.getAttribute('src') === null))
+  assert.ok(walk(root).every((node) => node.tagName !== 'A'))
+  body.dispose()
+
+  // A legitimate empty body is its own explicit feedback, not loading or failure.
+  const empty = renderCheckpointAssetBody({ ok: true, value: bodyProjection('') }, { element: createElement })
+  assert.ok(role(empty.element, 'asset-body-empty')[0], 'empty body is explicit')
+  assert.equal(role(empty.element, 'asset-body-text').length, 0)
+  assert.equal(role(empty.element, 'asset-body-failure').length, 0)
+  empty.dispose()
+
+  // The adopted-child body names its exact triple in the folded provenance.
+  const child = renderCheckpointAssetBody({
+    ok: true,
+    value: bodyProjection('child body', {
+      kind: 'adopted-child', invocationId: 'inv-9', childTurnId: 'child-turn-9', deliverySeq: 2,
+    }),
+  }, { element: createElement })
+  assert.match(text(role(child.element, 'asset-body-provenance')[0]), /inv-9/)
+  assert.match(text(role(child.element, 'asset-body-provenance')[0]), /child-turn-9/)
+  child.dispose()
+})
+
+// Failure mode: a failed or pending body read has no readable impact/next action,
+// no same-read retry, or publishes a body over a closed/switched layer. Basis:
+// the read is a new async drill-down inside the shared shell layer. Impact:
+// the user is stuck or misreads another target's content; high. Cost: low, the
+// real renderer plus the real dispose contract.
+test('G14 asset body layer separates loading, failure with same-read retry, and dispose', () => {
+  const calls = { back: 0, retry: 0 }
+  const options = {
+    element: createElement,
+    onBack: () => { calls.back += 1 },
+    onRetry: () => { calls.retry += 1 },
+  }
+  const byLabel = (root, label) => buttons(root).find((button) => text(button).includes(label))
+
+  const loading = renderCheckpointAssetBody({ pending: true }, options)
+  assert.ok(role(loading.element, 'asset-body-loading')[0], 'loading state is explicit')
+  assert.match(text(loading.element), /正在读取/)
+  assert.equal(role(loading.element, 'asset-body-text').length, 0)
+  assert.ok(byLabel(loading.element, '重试这次读取'), 'the loading layer can retry the same read')
+  const loadingBack = byLabel(loading.element, '返回检查点详情')
+  assert.ok(loadingBack, 'the loading layer keeps a back-to-checkpoint entry')
+  click(loadingBack)
+  assert.equal(calls.back, 1, 'the loading layer keeps a back-to-checkpoint entry')
+  loading.dispose()
+  click(loadingBack)
+  assert.equal(calls.back, 1, 'dispose removes the loading back listener')
+
+  const failure = {
+    code: 'checkpoint-asset.read-failed',
+    ownerId: 'humanagent.app',
+    message: '资产正文读取失败。',
+    nextAction: '重试这次读取，或返回检查点详情。',
+  }
+  const failed = renderCheckpointAssetBody({ ok: false, failure }, options)
+  const block = role(failed.element, 'asset-body-failure')[0]
+  assert.ok(block, 'failure is explicit')
+  assert.match(text(block), /资产正文读取失败。/)
+  assert.match(text(block), /重试这次读取/)
+  assert.match(text(block), /checkpoint-asset.read-failed/)
+  const retry = byLabel(failed.element, '重试这次读取')
+  const back = byLabel(failed.element, '返回检查点详情')
+  click(retry)
+  click(back)
+  assert.equal(calls.retry, 1, 'retry re-reads the same target')
+  assert.equal(calls.back, 2)
+  failed.dispose()
+  click(retry)
+  click(back)
+  assert.equal(calls.retry, 1, 'dispose removes the failure listeners')
+  assert.equal(calls.back, 2)
 })

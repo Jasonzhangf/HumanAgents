@@ -36,6 +36,7 @@ if (!evidenceRoot?.trim()) {
 }
 
 const taskIdentityOnly = process.argv.includes('--task-identity-only');
+const checkpointAssetsOnly = process.argv.includes('--checkpoint-assets-only');
 
 const playwrightModule = await import(
   process.env.INTERACTION_CARD_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js',
@@ -194,7 +195,7 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
 
-  for (const target of (taskIdentityOnly ? [] : [
+  for (const target of (taskIdentityOnly || checkpointAssetsOnly ? [] : [
     { file: 'dashboard.html', entry: 'dashboard' },
     { file: 'task.html', query: '?task=new', entry: 'task' },
     { file: 'index.html', entry: 'entry' },
@@ -247,6 +248,7 @@ try {
   // card's technical source reference with no invented Operation, so an admitted
   // Task is not mislabelled as a running execution and no `pending-input` scope
   // is minted.
+  if (!checkpointAssetsOnly) {
   const TASK_WIRING_ID = 'task-wiring-proof';
   const taskPage = await context.newPage();
   const taskPageErrors = [];
@@ -318,8 +320,9 @@ try {
   record('task.html identity forwarding raises no page error', taskPageErrors.length === 0, [...taskPageErrors]);
   await taskPage.screenshot({ path: join(artifactDir, 'task-identity-forwarding.png'), fullPage: true });
   await taskPage.close();
+  }
 
-  if (!taskIdentityOnly) {
+  if (!taskIdentityOnly && !checkpointAssetsOnly) {
   // GAP B proof: the bounded original cause the runtime reports must reach the
   // human, not just a status code. The runtime stub answers the real
   // explicit-interaction read with a 500 body shaped exactly like the one
@@ -545,6 +548,172 @@ try {
   if (eventErrors.length) {
     await writeFile(join(evidenceRoot, 'dashboard-event-driven.errors.txt'), eventErrors.join('\n'), 'utf8');
   }
+  }
+  if (checkpointAssetsOnly) {
+    // Raw external projections exercise the real page controller. The known
+    // raw/envelope mismatch loses readable bodies (observed source defect);
+    // this bounded browser case also protects return navigation at low cost.
+    const fixtureRoot = '/private/tmp/humanagent-g14-body-plan-20261015/ui-page-red/fixtures';
+    const history = JSON.parse(await readFile(join(fixtureRoot, 'history.json'), 'utf8'));
+    const capture = JSON.parse(await readFile(join(fixtureRoot, 'capture.json'), 'utf8'));
+    const children = JSON.parse(await readFile(join(fixtureRoot, 'children.json'), 'utf8'));
+    observe('fixture provenance', JSON.parse(await readFile(join(fixtureRoot, 'provenance.json'), 'utf8')));
+    const scope = history.scope;
+    const task = scope.taskId.value;
+    const selected = history.viewed.identity;
+    const prefix = `/api/tasks/${task}`;
+    const receipt = {
+      checkpointId: selected.checkpointId.value,
+      checkpointCommitId: selected.commitRef.commitId,
+      checkpointJournalSeq: String(selected.commitRef.journalSeq),
+      checkpointRecordDigest: selected.commitRef.recordDigest,
+    };
+    const fixturePage = await context.newPage();
+    const viewport = process.env.INTERACTION_PAGE_VIEWPORT === 'mobile'
+      ? { width: 390, height: 844 } : { width: 1280, height: 800 };
+    await fixturePage.setViewportSize(viewport);
+    observe('viewport', viewport);
+    const requests = [];
+    const errors = [];
+    fixturePage.on('pageerror', (error) => errors.push(error.message));
+    let held = false;
+    let releaseBody;
+    let heldRequest;
+    const heldStarted = new Promise((resolveHeld) => { heldRequest = resolveHeld; });
+    await fixturePage.route('**/api/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const query = Object.fromEntries(url.searchParams);
+      requests.push({ method: request.method(), pathname: url.pathname, query });
+      const scoped = query.projectKey === scope.projectKey && query.mode === scope.mode;
+      const exact = Object.entries(receipt).every(([key, value]) => query[key] === value);
+      let body;
+      if (request.method() === 'GET') {
+        if (url.pathname === '/api/runtime/status') body = { state: 'ready', mode: 'fake', connected: true };
+        if (url.pathname === '/api/ui/display-preference') body = { preference: { mode: 'current' }, defaultMode: 'current' };
+        if (url.pathname === `${prefix}/dashboard` && scoped) body = {
+          taskId: scope.taskId, taskTitle: 'checkpoint asset body fixture', state: 'waiting', stateLabel: '等待中',
+          statusSections: { business: '等待中', waiting: '无待收拢操作' }, allowedActions: [], recentEvents: [],
+        };
+        if (url.pathname === `${prefix}/checkpoints` && scoped
+          && (exact || (!query.checkpointId && query.limit === '20'))) body = history;
+        if (url.pathname === `${prefix}/checkpoints/assets/capture` && scoped && exact) body = capture;
+        for (const child of children) {
+          const selector = child.selector;
+          if (url.pathname === `${prefix}/checkpoints/assets/adopted-child/${encodeURIComponent(selector.invocationId)}/${encodeURIComponent(selector.childTurnId)}/${selector.deliverySeq}`
+            && scoped && exact) body = child;
+        }
+      }
+      if (body && held && url.pathname.includes('/checkpoints/assets/')) {
+        held = false;
+        await new Promise((resolveBody) => { releaseBody = resolveBody; heldRequest(); });
+      }
+      await route.fulfill({ status: body ? 200 : 404, contentType: 'application/json',
+        body: JSON.stringify(body ?? { error: { code: 'fixture.unexpected-request', message: 'Unexpected fixture request' } }) });
+    });
+    const dialog = fixturePage.locator('dialog[data-technical-detail="true"][open]');
+    const bodySelector = 'dialog[data-technical-detail="true"][open] [data-checkpoint-role="asset-body-text"]';
+    let stage = 'boot';
+    try {
+      const preference = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === '/api/ui/display-preference');
+      await fixturePage.goto(`${server.url}/task-dashboard.html?${new URLSearchParams({ task, projectKey: scope.projectKey, mode: scope.mode })}`, { waitUntil: 'domcontentloaded' });
+      await preference;
+      await fixturePage.getByRole('heading', { name: 'checkpoint asset body fixture', exact: true }).waitFor();
+      stage = 'history navigation';
+      await fixturePage.locator('button[data-shell-section="view"]').click();
+      await fixturePage.locator('button[data-history-view="checkpoints"]').click();
+      const entry = fixturePage.locator('[data-shell-records-host] [data-checkpoint-role="history-entry"][data-checkpoint-journal-seq="9"]');
+      const exactHistory = fixturePage.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname === `${prefix}/checkpoints` && url.searchParams.get('checkpointJournalSeq') === '9';
+      });
+      await entry.getByRole('button', { name: '查看此检查点', exact: true }).click();
+      await exactHistory;
+      await fixturePage.locator('[data-shell-records-host] .history-actions').getByRole('button', { name: '技术详情', exact: true }).click();
+      const trigger = (kind) => dialog.locator(`button[data-checkpoint-role="asset-body-trigger"][data-asset-body-selector="${kind}"]`);
+      const readBody = async (projection, index) => {
+        const kind = projection.selector.kind;
+        stage = `${kind} body`;
+        const responsePromise = fixturePage.waitForResponse((response) => response.request().method() === 'GET'
+          && new URL(response.url()).pathname.includes('/checkpoints/assets/'));
+        await trigger(kind).nth(index).click();
+        const response = await responsePromise;
+        const actual = await response.json();
+        const query = Object.fromEntries(new URL(response.url()).searchParams);
+        record(`${kind} raw HTTP receipt ${index}`, response.status() === 200
+          && JSON.stringify(actual) === JSON.stringify(projection) && !('ok' in actual)
+          && query.projectKey === scope.projectKey && query.mode === scope.mode
+          && Object.entries(receipt).every(([key, value]) => query[key] === value),
+        { status: response.status(), query, projection: actual });
+        const rendered = await fixturePage.waitForFunction(({ selector, expected }) => document.querySelector(selector)?.textContent === expected,
+          { selector: bodySelector, expected: projection.text }, { timeout: 5000 }).then(() => true).catch(() => false);
+        const observation = await dialog.evaluate((node) => ({
+          text: node.querySelector('[data-checkpoint-role="asset-body-text"]')?.textContent ?? null,
+          failure: node.querySelector('[data-checkpoint-role="asset-body-failure"]')?.textContent ?? null,
+          identity: Object.fromEntries(Array.from(node.querySelectorAll('[data-checkpoint-role="asset-body-provenance"] .detail-cell'),
+            (cell) => [cell.querySelector('dt')?.textContent, cell.querySelector('dd')?.textContent])),
+        }));
+        record(`task-dashboard renders exact ${kind} body ${index}`, rendered, { expectedText: projection.text, ...observation });
+        const expectedIdentity = {
+          '检查点 ID': selected.checkpointId.value,
+          '物理 Journal 序号': String(selected.commitRef.journalSeq),
+          '提交 ID': selected.commitRef.commitId,
+          '记录摘要': selected.commitRef.recordDigest,
+          '资产角色': kind,
+          '资产证据 ID': projection.asset.ref.evidenceId.value,
+          '资产定位': projection.asset.ref.locator,
+          '资产摘要': projection.asset.ref.digest,
+          ...(kind === 'adopted-child' ? {
+            '调用 ID': projection.selector.invocationId,
+            '子回合 ID': projection.selector.childTurnId,
+            '交付序号': String(projection.selector.deliverySeq),
+          } : {}),
+        };
+        record(`task-dashboard renders exact ${kind} identity ${index}`,
+          Object.entries(expectedIdentity).every(([key, value]) => observation.identity[key] === value),
+          { expected: expectedIdentity, actual: observation.identity });
+        await fixturePage.screenshot({ path: join(artifactDir, `${kind}-${index}.png`), fullPage: true });
+        await dialog.getByRole('button', { name: '返回检查点详情', exact: true }).click();
+        await trigger('capture').waitFor();
+        record(`return from ${kind} body ${index} to checkpoint detail`, await trigger('capture').isVisible());
+        return rendered;
+      };
+      // The first positive assertion is the RED endpoint. Keep the same path
+      // for GREEN, then exercise only the two prepared distinct children.
+      if (await readBody(capture, 0)) {
+        record('checkpoint fixture contains two distinct child bodies', children.length === 2
+          && children[0].text !== children[1].text
+          && JSON.stringify(children[0].selector) !== JSON.stringify(children[1].selector));
+        for (let index = 0; index < children.length; index += 1) await readBody(children[index], index);
+        stage = 'held body return';
+        held = true;
+        const responsePromise = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === `${prefix}/checkpoints/assets/capture`);
+        await trigger('capture').click();
+        await heldStarted;
+        await dialog.locator('[data-checkpoint-role="asset-body-loading"]').waitFor();
+        await dialog.getByRole('button', { name: '返回检查点详情', exact: true }).click();
+        await trigger('capture').waitFor();
+        const before = await dialog.innerText();
+        releaseBody();
+        await (await responsePromise).finished();
+        // Drain the browser fetch continuation before checking retained detail.
+        await fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        record('late body response preserves returned checkpoint detail',
+          await trigger('capture').isVisible() && await dialog.innerText() === before
+          && await dialog.locator('[data-checkpoint-role="asset-body-text"]').count() === 0,
+          { before, after: await dialog.innerText() });
+        await fixturePage.screenshot({ path: join(artifactDir, 'late-response-return.png'), fullPage: true });
+      }
+      record('checkpoint fixture raises no page error', errors.length === 0, errors);
+    } catch (error) {
+      record(`checkpoint fixture ${stage}`, false, { message: error.message, errors, pageText: await fixturePage.locator('body').innerText() });
+      await fixturePage.screenshot({ path: join(artifactDir, 'fixture-failure.png'), fullPage: true });
+    } finally {
+      releaseBody?.();
+      await writeFile(join(evidenceRoot, 'requests.json'), JSON.stringify(requests, null, 2), 'utf8');
+      observe('checkpoint fixture stage', stage);
+      await fixturePage.close();
+    }
   }
   await context.close();
 
