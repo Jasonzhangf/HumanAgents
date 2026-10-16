@@ -4,6 +4,8 @@ import {
   id,
   type Checkpoint,
   type EvidenceRef,
+  type JournalCommitRef,
+  type ReviewOutput,
   type ScopeRef,
   type Task,
   type WorkAssignment,
@@ -32,6 +34,10 @@ import {
   type MergeCoordinatorPort,
   type OrchestrationRuntimeFactoryPort,
   type ReviewAgentPort,
+  type TaskExecutionHandle,
+  type TaskExecutionInstanceCreateInput,
+  type TaskReviewHandle,
+  type TaskReviewInstanceCreateInput,
   acceptanceCriteriaContent,
   digestOf,
 } from '../../../packages/runtime/src/orchestration/index.js';
@@ -46,6 +52,11 @@ import type {
   CheckpointAppendRequest,
   CheckpointChainVerification,
   CheckpointJournalPort,
+  CheckpointListQuery,
+  CheckpointListResult,
+  CheckpointRecoveryBinding,
+  CommittedCheckpointRecord,
+  ExecutionPosition,
   LatestCheckpointRecord,
 } from '../../../packages/runtime/src/checkpoints/ports.js';
 
@@ -189,6 +200,12 @@ class MemoryCheckpointJournal implements CheckpointJournalPort {
     };
     return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq };
   }
+  // Mutation-only in-memory journal: it stores no commit receipts, control facts or
+  // recovery bindings, so the exact-read seams truthfully report absence.
+  async readCommitted(_scope: ScopeRef, _checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null> { return null; }
+  async listCommitted(_query: CheckpointListQuery): Promise<CheckpointListResult> { return { checkpoints: [] }; }
+  async readExecutionPosition(_taskScope: ScopeRef): Promise<ExecutionPosition | null> { return null; }
+  async readCheckpointRecoveryBinding(_scope: ScopeRef, _checkpointCommitRef: JournalCommitRef): Promise<CheckpointRecoveryBinding | null> { return null; }
 }
 
 class RuntimeFactory implements OrchestrationRuntimeFactoryPort {
@@ -198,30 +215,62 @@ class RuntimeFactory implements OrchestrationRuntimeFactoryPort {
   async dispose(_input: Parameters<OrchestrationRuntimeFactoryPort['dispose']>[0]): Promise<void> {}
 }
 
+function reviewerResult(input: Parameters<ReviewAgentPort['review']>[0]): ReviewResult {
+  return {
+    resultId: 'm3-review-result',
+    assignmentId: input.reviewAssignment.assignmentId,
+    taskId: input.reviewAssignment.taskId,
+    workerAgentId: input.reviewAssignment.workerAgentId,
+    reviewKind: input.reviewAssignment.reviewKind,
+    attempt: input.reviewAssignment.attempt,
+    executionEpoch: input.reviewAssignment.executionEpoch,
+    inputRevision: input.reviewAssignment.inputRevision,
+    acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+    subjectRefs: input.reviewAssignment.subjectRefs,
+    subjectDigests: input.reviewAssignment.subjectDigests,
+    status: 'passed',
+    findings: [],
+    evidenceRefs: [evidence('review')],
+  };
+}
+
+function reviewerOutput(): ReviewOutput {
+  return { text: 'M3 reviewer approved the assembled modules', artifactRef: null, artifactDigest: null };
+}
+
 class Worker implements ExecutionAgentPort {
+  readonly roleId = 'execution';
+
+  createInstance(input: TaskExecutionInstanceCreateInput): TaskExecutionHandle {
+    return {
+      incarnation: input.incarnation,
+      dispose: async () => {},
+      execute: async () => workResult(),
+    };
+  }
+
   async execute(_input: Parameters<ExecutionAgentPort['execute']>[0]): Promise<WorkResult> {
     return workResult();
   }
 }
 
 class Reviewer implements ReviewAgentPort {
-  async review(input: Parameters<ReviewAgentPort['review']>[0]): Promise<ReviewResult> {
+  readonly roleId = 'review';
+
+  createInstance(input: TaskReviewInstanceCreateInput): TaskReviewHandle {
     return {
-      resultId: 'm3-review-result',
-      assignmentId: input.reviewAssignment.assignmentId,
-      taskId: input.reviewAssignment.taskId,
-      workerAgentId: input.reviewAssignment.workerAgentId,
-      reviewKind: input.reviewAssignment.reviewKind,
-      attempt: input.reviewAssignment.attempt,
-      executionEpoch: input.reviewAssignment.executionEpoch,
-      inputRevision: input.reviewAssignment.inputRevision,
-      acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
-      subjectRefs: input.reviewAssignment.subjectRefs,
-      subjectDigests: input.reviewAssignment.subjectDigests,
-      status: 'passed',
-      findings: [],
-      evidenceRefs: [evidence('review')],
+      incarnation: input.incarnation,
+      dispose: async () => {},
+      review: async (reviewInput) => ({
+        result: reviewerResult(reviewInput),
+        output: reviewerOutput(),
+        completedAt: '2026-09-18T00:00:00.000Z',
+      }),
     };
+  }
+
+  async review(input: Parameters<ReviewAgentPort['review']>[0]): Promise<ReviewResult> {
+    return reviewerResult(input);
   }
 }
 

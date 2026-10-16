@@ -44,6 +44,12 @@ import {
   CheckpointCompletionError,
   type CheckpointCommitPort,
   type CheckpointJournalPort,
+  type CheckpointListQuery,
+  type CheckpointListResult,
+  type CheckpointRecoveryBinding,
+  type CommittedCheckpointRecord,
+  type ExecutionPosition,
+  type JournalCommitRef,
   type LatestCheckpointRecord,
   type NodeStepResult,
 } from '../../../packages/runtime/src/index.js';
@@ -94,6 +100,12 @@ class TestCheckpointJournal implements CheckpointJournalPort {
     this.latest = { checkpoint: input.checkpoint, previous: this.latest?.checkpoint ?? null };
     return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq };
   }
+  // Mutation-only in-memory journal: it stores no commit receipts, control facts or
+  // recovery bindings, so the exact-read seams truthfully report absence.
+  async readCommitted(_scope: ScopeRef, _checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null> { return null; }
+  async listCommitted(_query: CheckpointListQuery): Promise<CheckpointListResult> { return { checkpoints: [] }; }
+  async readExecutionPosition(_taskScope: ScopeRef): Promise<ExecutionPosition | null> { return null; }
+  async readCheckpointRecoveryBinding(_scope: ScopeRef, _checkpointCommitRef: JournalCommitRef): Promise<CheckpointRecoveryBinding | null> { return null; }
 }
 
 function checkpointPort(): { readonly port: CheckpointCommitPort; readonly commits: Checkpoint[] } {

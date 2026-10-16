@@ -5,12 +5,19 @@ import {
   id,
   type AgentLoopCheckpointRef,
   type AgentModeCapabilityProfile,
+  type ContextHistoryRecord,
+  type JournalCommitRef,
   type ObservationBatch,
   type ObservationDelta,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
 import { AgentLoopRuntime, type AgentLoopActor, type AgentLoopStartRequest } from '../../../packages/runtime/src/agent-loop/runtime.js';
 import { AgentLoopRuntimeError } from '../../../packages/runtime/src/agent-loop/errors.js';
+import type {
+  ContextHistoryPort,
+  ContextHistoryReadQuery,
+  ContextHistoryReadResult,
+} from '../../../packages/runtime/src/checkpoints/ports.js';
 
 const scope: ScopeRef = {
   organId: id('organ', 'organ-agent-loop'),
@@ -44,6 +51,54 @@ function digest(value: unknown): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 }
 
+function durableContext() {
+  return {
+    stablePrefix: [{ ref: 'stable:goal' }],
+    indexRefs: [{ ref: 'index:task' }],
+    dynamicHead: [{ ref: 'head:latest-turn' }],
+    repairRefs: [{ responsibility: 'recover:original' }],
+  };
+}
+
+/**
+ * Real in-memory ContextHistoryPort. `commit` mints a physical receipt and stores the
+ * record; `readContextCommit` returns the exact committed body so the runtime readback
+ * check runs against genuine state instead of a stubbed value.
+ */
+class MemoryContextHistory implements ContextHistoryPort {
+  private sequence = 0;
+  private readonly committed = new Map<string, { readonly ref: JournalCommitRef; readonly record: ContextHistoryRecord }>();
+
+  async commit(record: ContextHistoryRecord, _expected: JournalCommitRef | null): Promise<JournalCommitRef> {
+    this.sequence += 1;
+    const ref: JournalCommitRef = {
+      commitId: `context:${record.agentRuntimeId}:${this.sequence}`,
+      journalSeq: this.sequence,
+      recordDigest: digest(record),
+    };
+    this.committed.set(ref.commitId, { ref, record });
+    return ref;
+  }
+
+  async readContextCommit(_scope: ScopeRef, ref: JournalCommitRef): Promise<ContextHistoryRecord> {
+    const entry = this.committed.get(ref.commitId);
+    if (!entry) throw new Error('exact context commit is missing');
+    return entry.record;
+  }
+
+  async readContextHistory(query: ContextHistoryReadQuery): Promise<ContextHistoryReadResult> {
+    const entries = [...this.committed.values()].filter(
+      (entry) => query.agentRuntimeId === undefined || entry.record.agentRuntimeId === query.agentRuntimeId,
+    );
+    const tail = entries.at(-1);
+    return {
+      views: entries.map((entry) => entry.record.contextView),
+      replacements: entries.flatMap((entry) => (entry.record.replacement ? [entry.record.replacement] : [])),
+      currentContextCommitRef: tail ? tail.ref : null,
+    };
+  }
+}
+
 function createRuntimeRequest(): AgentLoopStartRequest {
   return {
     agentRuntimeId: 'runtime-agent-loop',
@@ -60,12 +115,13 @@ function createRuntimeRequest(): AgentLoopStartRequest {
     executionEpoch: 3,
     permissionRevision: 'permissions-1',
     observationStreamId: 'stream-agent-loop',
+    durableContext: durableContext(),
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   };
 }
 
-function createRuntime(): AgentLoopRuntime {
-  return new AgentLoopRuntime(createRuntimeRequest());
+async function createRuntime(): Promise<AgentLoopRuntime> {
+  return AgentLoopRuntime.start(createRuntimeRequest(), new MemoryContextHistory());
 }
 
 function actor(runtime: AgentLoopRuntime): AgentLoopActor {
@@ -75,9 +131,9 @@ function actor(runtime: AgentLoopRuntime): AgentLoopActor {
   };
 }
 
-function open(runtime: AgentLoopRuntime): AgentLoopActor {
+async function open(runtime: AgentLoopRuntime): Promise<AgentLoopActor> {
   const currentActor = actor(runtime);
-  runtime.openObservationScope({
+  await runtime.openObservationScope({
     actor: currentActor,
     kind: 'task',
     scope,
@@ -120,11 +176,11 @@ function delta(runtime: AgentLoopRuntime): ObservationDelta {
   };
 }
 
-test('runtime loop performs observation batch, delta replacement, and checkpoint reentry', () => {
-  const runtime = createRuntime();
-  const currentActor = open(runtime);
-  runtime.mergeObservationBatch(currentActor, batch(runtime));
-  const result = runtime.applyObservationDelta(currentActor, delta(runtime));
+test('runtime loop performs observation batch, delta replacement, and checkpoint reentry', async () => {
+  const runtime = await createRuntime();
+  const currentActor = await open(runtime);
+  await runtime.mergeObservationBatch(currentActor, batch(runtime));
+  const result = await runtime.applyObservationDelta(currentActor, delta(runtime), { durableContext: durableContext() });
   const snapshot = runtime.snapshot();
 
   assert.equal(result.checkpoint.sequence, 2);
@@ -138,13 +194,13 @@ test('runtime loop performs observation batch, delta replacement, and checkpoint
   assert.equal(snapshot.checkpoint.predecessor?.checkpointId.value, 'runtime-agent-loop-1');
 });
 
-test('runtime loop transitions observation into orchestration with a new lease', () => {
-  const runtime = createRuntime();
-  const observationActor = open(runtime);
-  runtime.mergeObservationBatch(observationActor, batch(runtime));
-  runtime.applyObservationDelta(observationActor, delta(runtime));
+test('runtime loop transitions observation into orchestration with a new lease', async () => {
+  const runtime = await createRuntime();
+  const observationActor = await open(runtime);
+  await runtime.mergeObservationBatch(observationActor, batch(runtime));
+  await runtime.applyObservationDelta(observationActor, delta(runtime), { durableContext: durableContext() });
   const before = runtime.snapshot();
-  const transition = runtime.transitionMode({
+  const transition = await runtime.transitionMode({
     actor: actor(runtime),
     toMode: 'orchestration',
     reason: 'observation-complete',
@@ -154,6 +210,7 @@ test('runtime loop transitions observation into orchestration with a new lease',
     contextDigest: digest(['observation:task-state']),
     activeRefs: ['observation:task-state', 'plan:input'],
     omittedRefs: ['raw:event-1'],
+    durableContext: durableContext(),
   });
   const after = runtime.snapshot();
 
@@ -166,29 +223,29 @@ test('runtime loop transitions observation into orchestration with a new lease',
   assert.equal(after.budgetUsage.modeTransitions, 1);
 });
 
-test('runtime loop fences unknown owners, stale leases, duplicates, and closed scopes', () => {
-  const runtime = createRuntime();
-  const currentActor = open(runtime);
-  assert.throws(
+test('runtime loop fences unknown owners, stale leases, duplicates, and closed scopes', async () => {
+  const runtime = await createRuntime();
+  const currentActor = await open(runtime);
+  await assert.rejects(
     () => runtime.mergeObservationBatch({ ...currentActor, agentRuntimeId: 'other-runtime' }, batch(runtime)),
     (error: unknown) => error instanceof AgentLoopRuntimeError && error.code === 'unknown-owner',
   );
-  runtime.mergeObservationBatch(currentActor, batch(runtime));
-  assert.throws(
+  await runtime.mergeObservationBatch(currentActor, batch(runtime));
+  await assert.rejects(
     () => runtime.mergeObservationBatch(currentActor, batch(runtime)),
     /unaccounted event gap|duplicate observation batch/,
   );
-  const result = runtime.applyObservationDelta(currentActor, delta(runtime));
+  const result = await runtime.applyObservationDelta(currentActor, delta(runtime), { durableContext: durableContext() });
   assert.equal(result.checkpoint.sequence, 2);
-  assert.throws(
+  await assert.rejects(
     () => runtime.closeObservationScope(currentActor),
     /stale/,
   );
-  assert.throws(
+  await assert.rejects(
     () => runtime.closeObservationScope(actor(runtime)),
     /unknown observation scope|observation scope is closed/,
   );
-  assert.throws(
+  await assert.rejects(
     () => runtime.replaceContext(currentActor, {
       deltaIds: ['delta-2'],
       summary: 'stale context replacement',
@@ -196,13 +253,14 @@ test('runtime loop fences unknown owners, stale leases, duplicates, and closed s
       contextDigest: 'digest:stale',
       activeRefs: ['x'],
       omittedRefs: [],
+      durableContext: durableContext(),
     }),
     /stale|expired|mismatch/,
   );
 });
 
-test('runtime loop enforces deferred-event and scope budgets', () => {
-  const runtime = new AgentLoopRuntime({
+test('runtime loop enforces deferred-event and scope budgets', async () => {
+  const runtime = await AgentLoopRuntime.start({
     agentRuntimeId: 'runtime-budget',
     role: 'orchestration',
     mode: 'observation',
@@ -212,23 +270,24 @@ test('runtime loop enforces deferred-event and scope budgets', () => {
     executionEpoch: 1,
     permissionRevision: 'permissions-1',
     observationStreamId: 'stream-budget',
+    durableContext: durableContext(),
     now: () => new Date('2026-09-20T00:00:00.000Z'),
-  });
+  }, new MemoryContextHistory());
   const currentActor = actor(runtime);
-  runtime.openObservationScope({ actor: currentActor, kind: 'task', scope, readableRefs: [], capabilities: ['read-task'] });
+  await runtime.openObservationScope({ actor: currentActor, kind: 'task', scope, readableRefs: [], capabilities: ['read-task'] });
   const batchInput = batch(runtime);
   const deferred = { ...batchInput, batchId: 'deferred', priority: 'deferred' as const, idempotencyKey: 'deferred-key' };
-  assert.throws(() => runtime.mergeObservationBatch(currentActor, { ...deferred, eventIds: ['event-1', 'event-2'], eventSequences: [1, 2], watermark: { streamId: 'stream-budget', sequence: 2 } }), /budget exhausted/);
-  assert.throws(() => runtime.openObservationScope({ actor: currentActor, kind: 'task', scope, readableRefs: [], capabilities: ['read-task'] }), /already open/);
+  await assert.rejects(() => runtime.mergeObservationBatch(currentActor, { ...deferred, eventIds: ['event-1', 'event-2'], eventSequences: [1, 2], watermark: { streamId: 'stream-budget', sequence: 2 } }), /budget exhausted/);
+  await assert.rejects(() => runtime.openObservationScope({ actor: currentActor, kind: 'task', scope, readableRefs: [], capabilities: ['read-task'] }), /already open/);
 });
 
-test('runtime loop never reopens a closed scope identity', () => {
-  const runtime = createRuntime();
-  const firstActor = open(runtime);
+test('runtime loop never reopens a closed scope identity', async () => {
+  const runtime = await createRuntime();
+  const firstActor = await open(runtime);
   const closedScopeId = runtime.snapshot().modeState.observationScopeId;
-  runtime.closeObservationScope(firstActor, closedScopeId);
+  await runtime.closeObservationScope(firstActor, closedScopeId);
 
-  runtime.openObservationScope({
+  await runtime.openObservationScope({
     actor: actor(runtime),
     kind: 'task',
     scope,
@@ -237,7 +296,7 @@ test('runtime loop never reopens a closed scope identity', () => {
   });
   const reopened = runtime.snapshot();
   assert.notEqual(reopened.modeState.observationScopeId, closedScopeId);
-  assert.throws(
+  await assert.rejects(
     () => runtime.mergeObservationBatch(actor(runtime), {
       ...batch(runtime),
       observationScopeId: closedScopeId,
@@ -246,38 +305,39 @@ test('runtime loop never reopens a closed scope identity', () => {
   );
 });
 
-test('runtime loop keeps observation cursors aligned after context replacement', () => {
-  const runtime = createRuntime();
-  const firstActor = open(runtime);
-  runtime.replaceContext(firstActor, {
+test('runtime loop keeps observation cursors aligned after context replacement', async () => {
+  const runtime = await createRuntime();
+  const firstActor = await open(runtime);
+  await runtime.replaceContext(firstActor, {
     deltaIds: ['manual-delta-1'],
     summary: 'compact observed context',
     contextViewRef: 'runtime-agent-loop:context:compact',
     contextDigest: digest(['task:state']),
     activeRefs: ['task:state'],
     omittedRefs: ['raw:event-0'],
+    durableContext: durableContext(),
   });
 
   const currentActor = actor(runtime);
-  runtime.mergeObservationBatch(currentActor, batch(runtime));
+  await runtime.mergeObservationBatch(currentActor, batch(runtime));
   const nextDelta = { ...delta(runtime), deltaId: 'delta-after-replacement', idempotencyKey: 'delta-after-replacement-key' };
-  const result = runtime.applyObservationDelta(currentActor, nextDelta);
+  const result = await runtime.applyObservationDelta(currentActor, nextDelta, { durableContext: durableContext() });
   assert.equal(result.replacement.baseCheckpoint.checkpointId.value, 'runtime-agent-loop-2');
   assert.equal(runtime.snapshot().checkpoint.sequence, 3);
 });
 
-test('runtime loop rejects a delta that does not consume the complete observed batch', () => {
-  const runtime = createRuntime();
-  const currentActor = open(runtime);
+test('runtime loop rejects a delta that does not consume the complete observed batch', async () => {
+  const runtime = await createRuntime();
+  const currentActor = await open(runtime);
   const observed = batch(runtime);
-  runtime.mergeObservationBatch(currentActor, {
+  await runtime.mergeObservationBatch(currentActor, {
     ...observed,
     eventIds: ['event-1', 'event-2', 'event-3', 'event-4', 'event-5'],
     eventSequences: [1, 2, 3, 4, 5],
     watermark: { streamId: 'stream-agent-loop', sequence: 5 },
   });
-  assert.throws(
-    () => runtime.applyObservationDelta(currentActor, delta(runtime)),
+  await assert.rejects(
+    () => runtime.applyObservationDelta(currentActor, delta(runtime), { durableContext: durableContext() }),
     /current observed batch watermark/,
   );
   const snapshot = runtime.snapshot();
@@ -286,11 +346,11 @@ test('runtime loop rejects a delta that does not consume the complete observed b
   assert.equal(snapshot.budgetUsage.contextReplacements, 0);
 });
 
-test('runtime loop leaves no orphan checkpoint after a rejected replacement', () => {
-  const runtime = createRuntime();
-  const currentActor = open(runtime);
+test('runtime loop leaves no orphan checkpoint after a rejected replacement', async () => {
+  const runtime = await createRuntime();
+  const currentActor = await open(runtime);
   const before = runtime.snapshot();
-  assert.throws(
+  await assert.rejects(
     () => runtime.replaceContext(currentActor, {
       deltaIds: ['invalid-replacement'],
       summary: 'invalid same context replacement',
@@ -298,6 +358,7 @@ test('runtime loop leaves no orphan checkpoint after a rejected replacement', ()
       contextDigest: 'digest:invalid',
       activeRefs: ['task:state'],
       omittedRefs: [],
+      durableContext: durableContext(),
     }),
     /must change the active context view/,
   );
@@ -307,11 +368,11 @@ test('runtime loop leaves no orphan checkpoint after a rejected replacement', ()
   assert.deepEqual(after.budgetUsage, before.budgetUsage);
 });
 
-test('runtime loop does not commit replacement state when transition validation fails', () => {
-  const runtime = createRuntime();
+test('runtime loop does not commit replacement state when transition validation fails', async () => {
+  const runtime = await createRuntime();
   const currentActor = actor(runtime);
   const before = runtime.snapshot();
-  assert.throws(
+  await assert.rejects(
     () => runtime.transitionMode({
       actor: currentActor,
       toMode: 'orchestration',
@@ -322,6 +383,7 @@ test('runtime loop does not commit replacement state when transition validation 
       contextDigest: 'digest:invalid',
       activeRefs: ['plan:input'],
       omittedRefs: [],
+      durableContext: durableContext(),
     }),
     /agent mode transition reason is invalid/,
   );
@@ -332,38 +394,38 @@ test('runtime loop does not commit replacement state when transition validation 
   assert.equal(after.modeState.mode, before.modeState.mode);
 });
 
-test('runtime loop validates profiles and budgets before issuing a lease', () => {
-  assert.throws(
-    () => new AgentLoopRuntime({
+test('runtime loop validates profiles and budgets before issuing a lease', async () => {
+  await assert.rejects(
+    () => AgentLoopRuntime.start({
       ...createRuntimeRequest(),
       profiles: [{ ...observationProfile, capabilityDigest: '' }],
-    }),
+    }, new MemoryContextHistory()),
     /mode capability digest is required/,
   );
-  assert.throws(
-    () => new AgentLoopRuntime({
+  await assert.rejects(
+    () => AgentLoopRuntime.start({
       ...createRuntimeRequest(),
       budget: { ...createRuntimeRequest().budget, maxModeTransitions: -1 },
-    }),
+    }, new MemoryContextHistory()),
     /maxModeTransitions must be a non-negative safe integer/,
   );
 });
 
-test('runtime loop validates scope identity and rejects close with pending observation events', () => {
-  assert.throws(
-    () => new AgentLoopRuntime({
+test('runtime loop validates scope identity and rejects close with pending observation events', async () => {
+  await assert.rejects(
+    () => AgentLoopRuntime.start({
       ...createRuntimeRequest(),
       scope: {
         ...scope,
         organId: { scope: 'task', value: 'malformed-organ' },
       } as unknown as ScopeRef,
-    }),
+    }, new MemoryContextHistory()),
     /runtime scope organ id is invalid/,
   );
 
-  const runtime = createRuntime();
+  const runtime = await createRuntime();
   const currentActor = actor(runtime);
-  assert.throws(
+  await assert.rejects(
     () => runtime.openObservationScope({
       actor: currentActor,
       kind: 'task',
@@ -376,24 +438,24 @@ test('runtime loop validates scope identity and rejects close with pending obser
     }),
     /observation scope task id is invalid/,
   );
-  runtime.openObservationScope({
+  await runtime.openObservationScope({
     actor: currentActor,
     kind: 'task',
     scope,
     readableRefs: ['task:state'],
     capabilities: ['read-task'],
   });
-  runtime.mergeObservationBatch(currentActor, batch(runtime));
-  assert.throws(
+  await runtime.mergeObservationBatch(currentActor, batch(runtime));
+  await assert.rejects(
     () => runtime.closeObservationScope(currentActor),
     /pending observation events/,
   );
   assert.equal(runtime.snapshot().observationScope?.observationScopeId, runtime.snapshot().modeState.observationScopeId);
 });
 
-test('runtime loop authorizes scope kind even when no capability is requested', () => {
-  const runtime = createRuntime();
-  assert.throws(
+test('runtime loop authorizes scope kind even when no capability is requested', async () => {
+  const runtime = await createRuntime();
+  await assert.rejects(
     () => runtime.openObservationScope({
       actor: actor(runtime),
       kind: 'memory',
@@ -406,12 +468,12 @@ test('runtime loop authorizes scope kind even when no capability is requested', 
   assert.equal(runtime.snapshot().lease.leaseId, 'runtime-agent-loop:lease:1');
 });
 
-test('runtime loop does not rotate a lease when a reopened scope request is rejected', () => {
-  const runtime = createRuntime();
-  const firstActor = open(runtime);
-  runtime.closeObservationScope(firstActor);
+test('runtime loop does not rotate a lease when a reopened scope request is rejected', async () => {
+  const runtime = await createRuntime();
+  const firstActor = await open(runtime);
+  await runtime.closeObservationScope(firstActor);
   const before = runtime.snapshot();
-  assert.throws(
+  await assert.rejects(
     () => runtime.openObservationScope({
       actor: actor(runtime),
       kind: 'task',
@@ -427,12 +489,12 @@ test('runtime loop does not rotate a lease when a reopened scope request is reje
   assert.deepEqual(after.budgetUsage, before.budgetUsage);
 });
 
-test('runtime loop rejects a mode transition with an unconsumed observation batch', () => {
-  const runtime = createRuntime();
-  const currentActor = open(runtime);
-  runtime.mergeObservationBatch(currentActor, batch(runtime));
+test('runtime loop rejects a mode transition with an unconsumed observation batch', async () => {
+  const runtime = await createRuntime();
+  const currentActor = await open(runtime);
+  await runtime.mergeObservationBatch(currentActor, batch(runtime));
   const before = runtime.snapshot();
-  assert.throws(
+  await assert.rejects(
     () => runtime.transitionMode({
       actor: currentActor,
       toMode: 'orchestration',
@@ -443,6 +505,7 @@ test('runtime loop rejects a mode transition with an unconsumed observation batc
       contextDigest: 'digest:pending',
       activeRefs: ['task:state'],
       omittedRefs: [],
+      durableContext: durableContext(),
     }),
     /pending observation events/,
   );
