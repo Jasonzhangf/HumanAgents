@@ -7069,7 +7069,20 @@ test('stop goes through the formal stop operation and only reports stopped after
   assert.ok(checkpointIndex > settlingIndex);
   assert.ok(terminalIndex > checkpointIndex);
 
-  const journal = await readFile(join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`), 'utf8');
+  const checkpointPath = join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`);
+  const checkpointStore = new FileCheckpointStore(checkpointPath);
+  const committed = await checkpointStore.readCommitted({
+    organId,
+    taskId: task.taskId,
+    cycleId: id('cycle', 'ui-cycle-1'),
+    operationId: started.operationId,
+  }, id('checkpoint', dashboard.checkpoint!.checkpointId));
+  if (!committed) throw new Error('expected the exact dashboard stopped checkpoint');
+  const relationship = await checkpointStore.readNativeCheckpoint({ checkpoint: committed.checkpoint });
+  if (!relationship) throw new Error('expected a durable native receipt for the stopped checkpoint');
+  assert.equal(dashboard.checkpoint?.committedAt, relationship.receipt.committedAt);
+  assert.equal(dashboard.checkpoint?.committedAtUnavailableReason, undefined);
+  const journal = await readFile(checkpointPath, 'utf8');
   assert.match(journal, /"outcome":"stopped"/);
 });
 
@@ -8896,6 +8909,19 @@ test('formal stop with committed stopped checkpoint and context hook failure sta
   if (!failedDashboard.checkpoint) throw new Error('expected durable stopped checkpoint identity');
   assert.equal(failedDashboard.state, 'blocked');
   assert.equal(failedDashboard.checkpoint.outcome, 'stopped');
+  const checkpointPath = join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`);
+  const checkpointStore = new FileCheckpointStore(checkpointPath);
+  const committed = await checkpointStore.readCommitted({
+    organId,
+    taskId: task.taskId,
+    cycleId: id('cycle', 'ui-cycle-1'),
+    operationId: started.operationId,
+  }, id('checkpoint', failedDashboard.checkpoint.checkpointId));
+  if (!committed) throw new Error('expected the exact dashboard stopped checkpoint');
+  const relationship = await checkpointStore.readNativeCheckpoint({ checkpoint: committed.checkpoint });
+  if (!relationship) throw new Error('committed stopped checkpoint keeps its durable native receipt');
+  assert.equal(failedDashboard.checkpoint.committedAt, relationship.receipt.committedAt);
+  assert.equal(failedDashboard.checkpoint.committedAtUnavailableReason, undefined);
   assert.equal(failedDashboard.error?.code, 'execution.context-commit-hook.blocked');
   assert.equal(failedDashboard.error?.ownerId, 'ui-stop-context-commit-gate');
   assert.equal(failedDashboard.error?.nextAction, 'reconcile stopped checkpoint');
@@ -8909,6 +8935,7 @@ test('formal stop with committed stopped checkpoint and context hook failure sta
   assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
   assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
   assert.equal(recovered.checkpoint?.outcome, 'stopped');
+  assert.equal(recovered.checkpoint?.committedAt, failedDashboard.checkpoint.committedAt);
   assert.equal(recovered.error?.code, 'execution.context-commit-hook.blocked');
   assert.equal(recovered.error?.ownerId, 'ui-stop-context-commit-gate');
   assert.equal(recovered.error?.nextAction, 'reconcile stopped checkpoint');
