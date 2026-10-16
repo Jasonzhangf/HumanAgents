@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { canonicalJsonStringify, id, operationIdempotencyKey, operationSemanticFingerprint,
   operationSemanticFingerprintKey, type ToolRegistration } from '../../../contracts/src/index.js';
-import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
+import { JsonlTaskGrantJournal, readTaskBusinessRegistration } from '../../../adapters/jsonl/src/task-grants.js';
+import { createJsonlOperationControlJournal } from '../operation-control-journal.js';
 import type { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeExecutionAllocation, RuntimeTaskJournalPort } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { OperationStopSettlementPort, OperationTaskBoundaryPort } from '../../../runtime/src/gateway/ports.js';
@@ -102,7 +103,7 @@ import { createPublishedTaskPlanRevision, assertTaskPlanRevisionRetryMatches,
 import { readReviewedMilestoneBoundary } from '../../../runtime/src/agent-loop/reviewed-milestone-boundary.js';
 import { distinctReviewCommitRefs, sameReviewCommitRefs, turnBoundaryRecordRefs } from '../../../runtime/src/checkpoints/closure.js';
 import { readStandardTurnDelivery,
-  type StandardTurnDeliveryReadback } from '../../../runtime/src/ui-runtime/standard-turn-delivery.js';
+  type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadback } from '../../../runtime/src/ui-runtime/standard-turn-delivery.js';
 
 /** Public-output and checkpoints share the same physical native Journal. */
 export class ServiceExecutionCheckpointStore extends FileCheckpointStore {
@@ -571,10 +572,10 @@ export function createDefaultExecutionComposition(input: {
       const activeTurnJournal = createJsonlActiveTurnJournal({ filePath: input.filePath, turnId });
       // A boundary-only continuation owns no live Provider and opens no new
       // active-turn/segment context; only generation installs one.
-      const active = segment !== undefined
+      const active = retainedIntent !== undefined ? undefined : segment !== undefined
         ? await ActiveTurnSegmentContext.open({ port: resume!.source.segmentJournal, segment,
           initialInput: initialInputOf(resume!.source.initial) })
-        : retainedIntent !== undefined ? undefined : await ActiveTurnContext.open({ journal: activeTurnJournal, currentTurnRef,
+        : await ActiveTurnContext.open({ journal: activeTurnJournal, currentTurnRef,
           binding: { admittedTurn, assignment, execution: { runtimeId: allocation.runtimeId,
             executionEpoch: allocation.attemptExecutionEpoch }, scope: allocation.scope } });
       const recovery = createNativeRecoveryAssets({ journalPath: input.filePath, journal: input.journal, assetRoot: input.artifactsRoot });
@@ -588,7 +589,7 @@ export function createDefaultExecutionComposition(input: {
       // the live prefix adds the current epoch's accepted facts. Both keep
       // their own physical scope, so a foreign namespace is never relabelled.
       const currentEntries = async (): Promise<readonly AcceptedRawFact[]> => {
-        const prefix = await readLivePrefix();
+        const liveEntries = active === undefined ? undefined : (await readLivePrefix()).entries;
         const captured = resume === undefined ? []
           : [
               ...resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries),
@@ -597,7 +598,8 @@ export function createDefaultExecutionComposition(input: {
             ];
         const seen = new Set<string>();
         const entries: AcceptedRawFact[] = [];
-        for (const entry of [...captured, ...prefix.entries]) {
+        if (liveEntries === undefined && captured.length === 0) missing('delivery has no immutable or live accepted source');
+        for (const entry of liveEntries === undefined ? captured : [...captured, ...liveEntries]) {
           if (!('envelope' in entry)) continue;
           const key = canonicalJsonStringify(entry.envelope);
           if (seen.has(key)) continue;
@@ -605,6 +607,43 @@ export function createDefaultExecutionComposition(input: {
           entries.push(entry);
         }
         return entries;
+      };
+      const currentInspectCompletions = async (entries: readonly AcceptedRawFact[]): Promise<readonly InspectToolCompletionDescriptor[]> => {
+        const journal = createJsonlOperationControlJournal({ journal: input.journal });
+        const verification = await input.journal.verify();
+        if (!verification.valid) missing(verification.error ?? 'inspect completion Journal verification failed');
+        const records = verification.records;
+        const namespaces = new Map<string, AcceptedRawFact['envelope']>();
+        for (const { envelope } of entries) {
+          namespaces.set(canonicalJsonStringify({ scope: envelope.scope, execution: envelope.execution }), envelope);
+        }
+        const completions: InspectToolCompletionDescriptor[] = [];
+        for (const namespace of namespaces.values()) {
+          const read = await journal.readControl({ scope: namespace.scope,
+            agentRuntimeId: namespace.execution.runtimeId, harnessExecutionEpoch: namespace.execution.executionEpoch });
+          if (read.state !== 'complete') missing('inspect completion historical operation-control namespace is unknown');
+          for (const control of read.operations) {
+            if (control.intent.kind !== 'inspect' || !control.registration.supportedKinds.includes('inspect')
+              || control.status !== 'succeeded' || control.result?.status !== 'succeeded'
+              || control.observation?.sideEffectState !== 'none') continue;
+            if (!control.childAdmission) missing('inspect completion lacks exact child admission');
+            const child = await journal.readChildAdmission!({ binding: control.binding, intent: control.intent,
+              admission: control.childAdmission });
+            if (child.state !== 'verified') missing('inspect completion child admission provenance is unknown');
+            const business = readTaskBusinessRegistration({ records,
+              commitId: control.childAdmission.businessRegistrationCommitRef.commitId });
+            const provenance = business?.registration.operationProvenance;
+            if (provenance?.kind !== 'provider-tool'
+              || provenance.operationId.value !== control.intent.operationId.value) missing('inspect completion lacks committed provider-tool provenance');
+            completions.push({ execution: { runtimeId: control.binding.agentRuntimeId,
+              executionEpoch: control.binding.harnessExecutionEpoch, taskId: control.intent.taskId,
+              operationId: control.binding.parentOperationId }, scope: control.binding.scope,
+              toolOperationId: control.intent.operationId, requestId: provenance.providerRequestId,
+              callId: provenance.toolCallId, toolId: control.registration.toolName, intentKind: 'inspect',
+              status: 'succeeded', evidenceRefs: control.result.evidenceRefs });
+          }
+        }
+        return completions;
       };
       const currentCompletionLookups = async (): Promise<readonly CompletionReadInput[]> => {
         const captured = resume === undefined ? []
@@ -652,9 +691,9 @@ export function createDefaultExecutionComposition(input: {
             || execution.operationId.value !== allocation.operationId.value) return null;
           return projectAdmittedTurnIdentityV1(admittedTurn);
         },
-        ...(segment === undefined ? {} : { async resolveSegmentBinding({ requestId, call }: Parameters<NonNullable<StandardTurnEndOwnerPort['resolveSegmentBinding']>>[0]) {
+        ...(segmentSource === undefined ? {} : { async resolveSegmentBinding({ requestId, call }: Parameters<NonNullable<StandardTurnEndOwnerPort['resolveSegmentBinding']>>[0]) {
           const records = await resume!.source.segmentJournal.readSegmentRecords({ businessTurnId: turnId,
-            segmentId: segment.segmentId });
+            segmentId: segmentSource.opened.segmentId });
           const record = records.find((entry) => entry.kind === 'request'
             && entry.record.request.requestId === requestId);
           if (record?.kind !== 'request') return null;
@@ -671,14 +710,8 @@ export function createDefaultExecutionComposition(input: {
           // resolve to real evidence scoped to this admitted turn. The admission
           // evidence and every accepted tool-result evidence are the actual
           // candidates; a foreign or missing reference rejects.
-          const prefix = await readLivePrefix();
           const candidates: EvidenceRef[] = [admitted.evidence(allocation, binding.admissionCommitRef.commitId)];
-          const entries = resume === undefined ? prefix.entries : [
-            ...resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries),
-            ...resume.source.interruptedSegments.flatMap((read) => read.prefix.entries),
-            ...(resume.source.initialOpenPrefix?.prefix.entries ?? []),
-            ...prefix.entries,
-          ];
+          const entries = await currentEntries();
           for (const entry of entries) {
             if (!('envelope' in entry)) continue;
             const fact = entry.envelope.fact;
@@ -715,6 +748,34 @@ export function createDefaultExecutionComposition(input: {
         owner: endOwner,
         route: (command) => { acceptedEnd = command; },
       }));
+      if (retainedIntent) {
+        // Re-resolve the actual successful end call from immutable accepted
+        // facts. This runs only the local standard-end resolver, never a
+        // Provider generation or an external tool effect.
+        const entries = await currentEntries();
+        const ends = entries.filter((entry) => {
+          const fact = entry.envelope.fact;
+          return fact.kind === 'tool-call' && isStandardTurnEndCall(fact.call.toolId)
+            && entries.some((result) => result.envelope.fact.kind === 'tool-result'
+              && result.envelope.fact.callId === fact.call.callId
+              && result.envelope.fact.result.toolId === fact.call.toolId
+              && result.envelope.fact.result.status === 'succeeded'
+              && canonicalJsonStringify(result.envelope.request) === canonicalJsonStringify(entry.envelope.request)
+              && canonicalJsonStringify(result.envelope.execution) === canonicalJsonStringify(entry.envelope.execution)
+              && canonicalJsonStringify(result.envelope.scope) === canonicalJsonStringify(entry.envelope.scope));
+        });
+        if (ends.length !== 1) missing('retained boundary lacks one exact successful accepted standard-end call');
+        const { envelope } = ends[0]!;
+        if (envelope.fact.kind !== 'tool-call') missing('retained standard-end source is not a tool call');
+        const resolved = await endExecutor.execute({ execution: { ...envelope.execution,
+          taskId: envelope.scope.taskId!, operationId: envelope.scope.operationId! },
+          scope: envelope.scope, requestId: envelope.request.requestId, call: envelope.fact.call,
+          signal: new AbortController().signal });
+        if (resolved.status !== 'succeeded' || !acceptedEnd
+          || canonicalJsonStringify(acceptedEnd.summary) !== canonicalJsonStringify(loop.retainedTurnClose()!.inputs.summary)) {
+          missing('retained accepted standard-end conflicts with the exact frozen close');
+        }
+      }
       const providerToolExecution = {
             tools: [...(toolScope?.tools ?? input.providerOptions.tools ?? []), ADVERTISED_STANDARD_TURN_END_TOOL],
             executeTool: {
@@ -1153,6 +1214,7 @@ export function createDefaultExecutionComposition(input: {
             const readback = await readStandardTurnDelivery({
               assignment, acceptedEnd, entries,
               completionLookups: await currentCompletionLookups(),
+              inspectCompletions: await currentInspectCompletions(entries),
               ...(deliveryTextBody === undefined ? {} : { deliveryTextBody }),
             }, { completion, rawContent });
             return readback;
