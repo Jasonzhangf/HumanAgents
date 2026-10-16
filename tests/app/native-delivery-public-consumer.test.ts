@@ -15,7 +15,10 @@ import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui-runtime/index.js';
-import { ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import { createDefaultExecutionComposition, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
+import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
+import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-cycle-journal.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { RuntimeTaskCoordinator, type RuntimeExecutionDriver } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
@@ -336,8 +339,11 @@ async function textOnlyResponsesUpstream(input: {
   readonly model: string;
   readonly organFilePath: string;
   readonly journal: JsonlOrganJournal;
+  readonly inspect?: boolean;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; close(): Promise<void> }> {
   const wires: Wire[] = [];
+  let plannerAttempts = 0;
+  let readIssued = false;
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -355,8 +361,13 @@ async function textOnlyResponsesUpstream(input: {
       }
       const planner = plannerPayload(body);
       if (planner !== undefined) {
+        plannerAttempts += 1;
         response.writeHead(200, { 'content-type': 'text/event-stream' });
-        response.end(frame(plannerFrames(input.model, planner)));
+        response.end(frame(input.inspect && plannerAttempts === 1 ? [
+          { type: 'response.created', response: { id: 'planner-refused' } },
+          { type: 'response.output_text.done', item_id: 'planner-refused-text', text: '{}' },
+          { type: 'response.completed', response: { id: 'planner-refused' } },
+        ] : plannerFrames(input.model, planner)));
         return;
       }
       if (declaresTurnEnd(body)) {
@@ -371,6 +382,17 @@ async function textOnlyResponsesUpstream(input: {
       if (!hasTurnEndSurface(body)) {
         throw new Error('the controlled upstream could not identify a lawful Responses stage');
       }
+      if (input.inspect && !readIssued) {
+        readIssued = true;
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(frame([
+          { type: 'response.created', response: { id: 'inspect-read' } },
+          { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call',
+            call_id: 'call-inspect-read', name: 'file_read', arguments: JSON.stringify({ path: 'read-delivery.txt' }) } },
+          { type: 'response.completed', response: { id: 'inspect-read' } },
+        ]));
+        return;
+      }
       const verified = await input.journal.verify();
       const coverage = [...verified.records].reverse()
         .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
@@ -378,6 +400,15 @@ async function textOnlyResponsesUpstream(input: {
       const admissionCommitId = payload?.admissionCommitRef?.commitId;
       if (!admissionCommitId) throw new Error('text-only run has no admitted operation coverage');
       const section = (text: string) => ({ text, evidenceRefs: [admissionCommitId] });
+      const activeEntries = input.inspect ? await createJsonlActiveTurnJournal({ filePath: input.organFilePath,
+        journal: input.journal, turnId: newActiveTurnId(coverage!.scope.operationId!.value) }).replay() : [];
+      const readFact = activeEntries.find((entry) => entry.kind === 'accepted-fact'
+        && entry.entry.envelope.fact.kind === 'tool-result' && entry.entry.envelope.fact.callId === 'call-inspect-read');
+      if (input.inspect && (readFact?.kind !== 'accepted-fact'
+        || readFact.entry.envelope.fact.kind !== 'tool-result'
+        || readFact.entry.envelope.fact.result.status !== 'succeeded')) throw new Error('real inspect result is absent');
+      const deliveryRefs = readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result'
+        ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
       const toolCall = [
         { type: 'response.created', response: { id: 'text-end' } },
         { type: 'response.output_item.added', output_index: 0,
@@ -388,8 +419,8 @@ async function textOnlyResponsesUpstream(input: {
               goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
               result: section(SUMMARY_RESULT), expectedNextStep: section('Close this turn'),
             },
-            deliveryText: EXACT_BODY,
-            deliveryRefs: [],
+            ...(input.inspect ? {} : { deliveryText: EXACT_BODY }),
+            deliveryRefs,
           }) } },
         { type: 'response.completed', response: { id: 'text-end' } },
       ];
@@ -417,19 +448,20 @@ async function textOnlyResponsesUpstream(input: {
 }
 
 /** Canonical fixture: real workspace, real native control layout, controlled Provider. */
-async function textOnlyFixture() {
+async function textOnlyFixture(inspect = false) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
   const controlRoot = join(root, 'control');
   const workspace = join(root, 'workspace');
   await mkdir(workspace);
+  if (inspect) await writeFile(join(workspace, 'read-delivery.txt'), EXACT_BODY, 'utf8');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   const layout = nativeRuntimeLayout(paths);
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal });
+    organFilePath: layout.organJournalPath, journal, inspect });
   const configPath = join(controlRoot, 'config.toml');
   // Both the default execution agent and the independent orchestration agent
   // select this real local Provider through the normal compiled roster.
@@ -535,6 +567,98 @@ async function startServe(input: {
  * independent Planner closure, Core success and a cold read of the same
  * original asset with no additional Provider POST.
  */
+// Failure basis: the observed missing inspect completion and boundary-only live
+// prefix/end gaps. Impact: a saved turn cannot reach Planner alignment. Cost:
+// one real CLI/HTTP fixture using the existing local upstream and asset store.
+test('native inspect producer and cold saved boundary preserve facts without executor replay', async () => {
+  const fixture = await textOnlyFixture(true);
+  let passed = false;
+  try {
+    const organId = id('organ', 'humanagent-ui');
+    const taskId = id('task', 'native-inspect-retained');
+    const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
+    const session = await access.consumePairingCode(access.createPairingChallenge('inspect-lease', 1).code);
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    const caller = await access.verifyProductPrincipal(cookie);
+    if (caller.state !== 'valid') throw new Error('fixture principal unavailable');
+    const controlFile = join(fixture.root, 'control-session.txt');
+    await writeFile(controlFile, `${cookie}\n`, 'utf8');
+    const seed = new RuntimeTaskCoordinator({ organId, taskIdPrefix: 'native-inspect',
+      journal: new UiRuntimeJournal(fixture.layout.preparedJournalPath),
+      checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
+      attentionPort: { async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
+        async resolve(value) { return { attentionId: value.attentionId, delivered: true }; } },
+      async createDriver() { throw new Error('seed cannot execute'); } });
+    seed.createTask({ taskId, title: 'inspect delivery', directive: 'read the delivery file' });
+    await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)).establish({ scope: { organId, taskId }, source: {
+      requirementId: 'inspect-requirement', inputRevision: 1, draftId: 'inspect-draft', draftRevisionVersion: 1,
+      draftRevisionHash: 'inspect-draft-hash', confirmationRef: 'inspect-confirmation' } });
+    await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: 'inspect-grant', taskId,
+      owner: caller.principal.owner, capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } }, expectedRevision: 0 });
+    const cli = join(process.cwd(), 'dist/app/app/src/cli.js');
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [cli, 'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
+        '--plan', 'default', '--session', 'inspect-run', '--task', taskId.value, '--prompt', 'read delivery', '--control-session-file', controlFile],
+      { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = ''; let stderr = '';
+      child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+      child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+      child.once('error', reject);
+      child.once('exit', (code) => resolve({ code, stdout, stderr }));
+    });
+    const plannerPosts = () => fixture.upstream.wires.filter((wire) => wire.method === 'POST' && plannerPayload(wire.body) !== undefined);
+    const executionPosts = () => fixture.upstream.wires.filter((wire) => wire.method === 'POST' && plannerPayload(wire.body) === undefined);
+    assert.equal(plannerPosts().length, 1, `inspect delivery must reach the deliberately refused Planner: ${result.stdout} ${result.stderr}`);
+    const before = (await fixture.journal.verify()).records;
+    const retained = before.find((record) => record.payload?.['type'] === 'native-save-intent');
+    if (!retained) throw new Error('the canonical save intent must be committed');
+    const operationId = retained.scope.operationId!.value;
+    const saveRecords = before.filter((record) => record.commitId?.startsWith('native-') || record.kind === 'checkpoint');
+    const journalPrefix = await readFile(fixture.layout.organJournalPath, 'utf8');
+    const executorCount = executionPosts().length;
+    const preparedJournal = new UiRuntimeJournal(fixture.layout.preparedJournalPath);
+    const composition = createDefaultExecutionComposition({ principalOwner: caller.principal.owner,
+      journal: fixture.journal, filePath: fixture.layout.organJournalPath,
+      artifactsRoot: join(fixture.paths.artifactsRoot, 'ui-provider-evidence'), preparedJournal,
+      resourceBoundary: createPreparedOperationBoundary(preparedJournal),
+      async prepareAgentProvider() { throw new Error('boundary read must not prepare a Provider'); },
+      providerOptions: {}, now: () => new Date(),
+      currentState: createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }),
+      async publishCurrentTurnState() {}, closedTurnPlannerPool() { throw new Error('Planner remains a separate duty'); },
+      taskIdentity: new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)),
+      retryJournal: createJsonlRetryCycleJournalPort({ filePath: join(fixture.root, 'retry.jsonl') }),
+      i2Journal: createJsonlI2JournalPort({ filePath: fixture.layout.organJournalPath, journal: fixture.journal }) });
+    const selected = await composition.resolveColdExecutionResumeRequest({ taskId, operationId: id('operation', operationId) });
+    const prepared = preparedJournal.replay().find((entry) => entry.kind === 'operation.prepared' && entry.allocation.taskId.value === taskId.value);
+    if (prepared?.kind !== 'operation.prepared') throw new Error('exact prepared allocation absent');
+    const source = await composition.readColdExecutionSource({ allocation: prepared.allocation, request: selected });
+    const boundary = await composition.recoverOriginalTurn({ source });
+    if (boundary.kind !== 'committed-close-alignment' && boundary.kind !== 'exact-pending-boundary') {
+      throw new Error(`expected retained boundary, got ${boundary.kind}`);
+    }
+    await boundary.finishBoundary();
+    const readback = await boundary.standardTurn.readDelivery!();
+    assert.equal(readback.materials[0]?.kind, 'inspect-tool-report');
+    const delivery = bindAssignmentDelivery({ assignment: source.assignment, readback });
+    assert.ok(delivery.producedArtifactBodies[0]?.includes(EXACT_BODY.split('\n')[0]!));
+    assert.equal(executionPosts().length, executorCount, 'boundary continuation must issue zero executor generation requests');
+    assert.equal(plannerPosts().length, 1, 'boundary readback must not duplicate the independent Planner duty');
+    const after = (await fixture.journal.verify()).records;
+    assert.equal((await readFile(fixture.layout.organJournalPath, 'utf8')).slice(0, journalPrefix.length), journalPrefix);
+    assert.deepEqual(after.filter((record) => record.commitId?.startsWith('native-') || record.kind === 'checkpoint'), saveRecords,
+      'committed native save/checkpoint facts must be reused exactly');
+    assert.equal(await readFile(join(fixture.workspace, 'read-delivery.txt'), 'utf8'), EXACT_BODY);
+    const current = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }).read({ organId, taskId });
+    assert.equal(current.state, 'known');
+    if (current.state === 'known') assert.equal(current.value.currentPlan, undefined, 'save/readback cannot claim the pending Planner duty is complete');
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`inspect fixture retained: ${fixture.root}`);
+  }
+});
+
 test('native text-only delivery advertised end, independent Planner closure and exact asset readback', async () => {
   const fixture = await textOnlyFixture();
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
