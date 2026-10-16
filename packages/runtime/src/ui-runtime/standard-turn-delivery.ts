@@ -7,6 +7,7 @@ import {
   type CompletionReadback,
   type DurableCompletionReceipt,
   type EvidenceRef,
+  type OperationId,
   type ProviderExecutionIdentityRef,
   type ProviderRawFact,
   type RawAsset,
@@ -58,6 +59,31 @@ export interface StandardTurnDeliveryReportMaterial {
   readonly sourceEvidence: readonly EvidenceRef[];
 }
 
+/** Positive committed inspect control, supplied by the authoritative owner. */
+export interface InspectToolCompletionDescriptor {
+  readonly execution: ProviderExecutionIdentityRef;
+  readonly scope: ScopeRef;
+  readonly toolOperationId: OperationId;
+  readonly requestId: string;
+  readonly callId: string;
+  readonly toolId: string;
+  readonly intentKind: 'inspect';
+  readonly status: 'succeeded';
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface StandardTurnDeliveryInspectMaterial {
+  readonly kind: 'inspect-tool-report';
+  readonly deliveryEvidence: EvidenceRef;
+  readonly acceptedToolResult: AcceptedRawFact;
+  readonly inspectCompletion: InspectToolCompletionDescriptor;
+  readonly rawOutput: RawAsset;
+  readonly bytes: Uint8Array;
+  readonly outputRef: string;
+  readonly outputDigest: string;
+  readonly sourceEvidence: readonly EvidenceRef[];
+}
+
 /**
  * One accepted pure-text material: the standard end's own `deliveryText`, read
  * back byte-exact from the actual accepted end call's persisted raw arguments
@@ -80,6 +106,7 @@ export interface StandardTurnDeliveryTextMaterial {
 /** One accepted delivery material, resolved from exact sources only. */
 export type StandardTurnDeliveryMaterial =
   | StandardTurnDeliveryReportMaterial
+  | StandardTurnDeliveryInspectMaterial
   | StandardTurnDeliveryTextMaterial;
 
 export interface StandardTurnDeliveryReadback {
@@ -111,6 +138,7 @@ export interface StandardTurnDeliveryReadInput {
   readonly acceptedEnd: StandardTurnEndCommand;
   readonly entries: readonly AcceptedRawFact[];
   readonly completionLookups: readonly CompletionReadInput[];
+  readonly inspectCompletions?: readonly InspectToolCompletionDescriptor[];
   readonly initialInput?: RawAsset;
   readonly exactSegments?: readonly (ActiveTurnCaptureBody | ActiveTurnSegmentCaptureV2)[];
   /**
@@ -284,7 +312,7 @@ function actualArtifactRefs(fact: ToolResultFact): readonly string[] {
  * operation id is not carried by the fact, so it stays a typed dependency on the
  * capture owner's committed lookup and is never fabricated or self-proven here.
  */
-function lookupForFact(fact: ToolResultFact, lookups: readonly CompletionReadInput[]): CompletionReadInput {
+function lookupsForFact(fact: ToolResultFact, lookups: readonly CompletionReadInput[]): readonly CompletionReadInput[] {
   const source = factExecution(fact);
   const matches = lookups.filter((lookup) => {
     const binding = lookup.binding;
@@ -307,15 +335,26 @@ function lookupForFact(fact: ToolResultFact, lookups: readonly CompletionReadInp
       && binding.continuationRef === fact.envelope.fact.continuationRef;
     return sameExecution && sameScope && sameCall;
   });
-  if (matches.length === 0) {
-    throw new StandardTurnDeliveryError('standard-turn-delivery.completion-unknown',
-      `the accepted call ${fact.envelope.fact.callId} has no exact committed completion lookup`);
-  }
-  if (matches.length > 1) {
-    throw new StandardTurnDeliveryError('standard-turn-delivery.completion-conflict',
-      `the accepted call ${fact.envelope.fact.callId} matches ${matches.length} committed completion lookups`);
-  }
-  return matches[0]!;
+  return matches;
+}
+
+function inspectionsForFact(fact: ToolResultFact, descriptors: readonly InspectToolCompletionDescriptor[]): readonly InspectToolCompletionDescriptor[] {
+  const source = factExecution(fact);
+  return descriptors.filter((descriptor) =>
+    descriptor.intentKind === 'inspect'
+    && descriptor.status === 'succeeded'
+    && descriptor.execution.runtimeId === source.runtimeId
+    && descriptor.execution.taskId.value === source.taskId.value
+    && descriptor.execution.operationId.value === source.operationId.value
+    && descriptor.execution.organId?.value === source.organId?.value
+    && descriptor.execution.cycleId?.value === source.cycleId?.value
+    && descriptor.execution.executionEpoch === source.executionEpoch
+    && descriptor.scope.organId.value === fact.envelope.scope.organId.value
+    && descriptor.scope.taskId?.value === fact.envelope.scope.taskId?.value
+    && descriptor.scope.cycleId?.value === fact.envelope.scope.cycleId?.value
+    && descriptor.requestId === fact.envelope.request.requestId
+    && descriptor.callId === fact.envelope.fact.callId
+    && descriptor.toolId === fact.envelope.fact.result.toolId);
 }
 
 async function readAssetBytes(reader: StandardTurnDeliveryReaderPort, scope: ScopeRef, content: RawAsset): Promise<Uint8Array> {
@@ -414,7 +453,51 @@ export async function readStandardTurnDelivery(
     const rawOutput = fact.envelope.fact.rawOutput;
     const bytes = await readAssetBytes(reader, fact.envelope.scope, rawOutput);
     decodeUtf8(bytes, `delivery ${delivery.locator}`);
-    const lookup = lookupForFact(fact, input.completionLookups);
+    const lookups = lookupsForFact(fact, input.completionLookups);
+    const inspections = inspectionsForFact(fact, input.inspectCompletions ?? []);
+    const completionCount = lookups.length + inspections.length;
+    if (completionCount === 0) {
+      throw new StandardTurnDeliveryError('standard-turn-delivery.completion-unknown',
+        `the accepted call ${fact.envelope.fact.callId} has no exact committed completion lookup or inspect completion`);
+    }
+    if (completionCount > 1) {
+      throw new StandardTurnDeliveryError('standard-turn-delivery.completion-conflict',
+        `the accepted call ${fact.envelope.fact.callId} matches ${completionCount} committed completions`);
+    }
+    const inspectCompletion = inspections[0];
+    if (inspectCompletion !== undefined) {
+      const result = fact.envelope.fact.result;
+      if (result.status !== 'succeeded' || result.executionFact !== undefined) {
+        throw new StandardTurnDeliveryError('standard-turn-delivery.completion-conflict',
+          `the accepted inspect result for ${inspectCompletion.callId} must succeed without an execution fact`);
+      }
+      const bytesDigest = await digestOf(bytes);
+      if (result.outputDigest !== bytesDigest || rawOutput.ref.digest !== bytesDigest) {
+        throw new StandardTurnDeliveryError('standard-turn-delivery.artifact-conflict',
+          `the accepted inspect output and raw reference must match the read bytes for ${inspectCompletion.callId}`);
+      }
+      const outputRef = result.outputRef;
+      if (outputRef === undefined || !outputRef.trim() || !actualArtifactRefs(fact).includes(outputRef)) {
+        throw new StandardTurnDeliveryError('standard-turn-delivery.artifact-conflict',
+          `the accepted inspect result for ${inspectCompletion.callId} has no actual output reference`);
+      }
+      if (!inspectCompletion.evidenceRefs.some((evidence) => evidence.kind === 'tool'
+        && evidence.scope.organId.value === inspectCompletion.scope.organId.value
+        && evidence.scope.taskId?.value === inspectCompletion.scope.taskId?.value
+        && evidence.scope.cycleId?.value === inspectCompletion.scope.cycleId?.value
+        && evidence.scope.operationId?.value === inspectCompletion.toolOperationId.value
+        && evidence.digest === bytesDigest)) {
+        throw new StandardTurnDeliveryError('standard-turn-delivery.completion-conflict',
+          `the inspect completion for ${inspectCompletion.callId} has no matching tool-scoped output evidence`);
+      }
+      materials.push({
+        kind: 'inspect-tool-report', deliveryEvidence: delivery, acceptedToolResult: fact,
+        inspectCompletion, rawOutput, bytes, outputRef, outputDigest: bytesDigest,
+        sourceEvidence: [...result.evidenceRefs, ...inspectCompletion.evidenceRefs],
+      });
+      continue;
+    }
+    const lookup = lookups[0]!;
     const readback: CompletionReadback = await reader.completion.readExact(lookup);
     if (readback.state !== 'confirmed') {
       throw new StandardTurnDeliveryError('standard-turn-delivery.completion-unknown',
@@ -508,9 +591,9 @@ export async function readStandardTurnDelivery(
 
 export function bindAssignmentDelivery(input: StandardTurnDeliveryBindInput): StandardTurnDeliveryBinding {
   const { assignment, readback } = input;
-  if (assignment.expectedOutputRefs.length !== 1) {
+  if (assignment.expectedOutputRefs.length > 1) {
     throw new StandardTurnDeliveryError('standard-turn-delivery.binding-invalid',
-      'this increment binds exactly one assignment-level logical output');
+      'this increment binds at most one declared assignment-level logical output');
   }
   if (canonicalJsonStringify(readback.assignment) !== canonicalJsonStringify(assignment)) {
     throw new StandardTurnDeliveryError('standard-turn-delivery.binding-invalid',
@@ -537,20 +620,20 @@ export function bindAssignmentDelivery(input: StandardTurnDeliveryBindInput): St
     }
   }
 
-  // One material is exactly one produced artifact. A text delivery emits the
-  // immutable body asset as its single artifact with the digest of the exact
-  // bytes; a tool report emits its confirmed completion identity. The two
-  // sources stay separate by construction: no text material carries a
-  // completion receipt and no report material carries a text body.
+  // Each material emits its verified artifact identity. Only effect reports
+  // carry an effect completion receipt; inspect reports use accepted output.
   const producedArtifactRefs = readback.materials.map((material) => material.kind === 'delivery-text'
     ? textArtifactRef(material.bodyAsset)
+    : material.kind === 'inspect-tool-report' ? material.outputRef
     : material.completion.fact.result.outputRef);
   const producedArtifactDigests = readback.materials.map((material) => material.kind === 'delivery-text'
     ? material.digest
+    : material.kind === 'inspect-tool-report' ? material.outputDigest
     : material.completion.fact.result.outputDigest);
   return {
     assignment,
-    outputRefs: [...assignment.expectedOutputRefs],
+    outputRefs: assignment.expectedOutputRefs.length === 0
+      ? [...producedArtifactRefs] : [...assignment.expectedOutputRefs],
     producedArtifactRefs,
     producedArtifactDigests,
     producedArtifactBodies: readback.materials.map((material) => decodeUtf8(material.bytes, 'bound delivery body')),
