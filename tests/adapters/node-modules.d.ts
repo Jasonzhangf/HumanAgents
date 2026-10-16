@@ -69,6 +69,7 @@ declare module "node:test" {
 declare module "node:crypto" {
   interface Hash {
     update(data: string | Uint8Array, encoding?: string): Hash;
+    digest(encoding: 'hex'): string;
     digest(encoding?: string): string | Uint8Array;
   }
 
