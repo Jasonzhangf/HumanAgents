@@ -30,17 +30,26 @@ import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/i
 import {
   createResponsesFileToolExecutor,
   RESPONSES_FILE_SEARCH_TOOL,
+  type ProviderToolAdmissionInput,
 } from '../../packages/app/src/provider-tool-execution.js';
 import {
   FileCheckpointStore,
   UiRuntimeJournal,
   UiRuntimeService,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
+import { createServiceExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import {
+  TASK_EXECUTION_ACTION_ID,
+  TASK_EXECUTION_CAPABILITY,
+} from '../../packages/app/src/ui-runtime/task-control.js';
 import { validatePersistedToolExecutionFact } from '../../packages/app/src/ui-runtime/tool-fact-validation.js';
 import { AccessControlService as FileAccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { UiRuntimeApiError } from '../../packages/app/src/ui-runtime/errors.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
+import type { RuntimeExecutionAllocation } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import {
   deriveFileSearchObservation,
   type FileSearchSemanticInput,
@@ -217,6 +226,146 @@ function providerAdapter(root: string, failSearch = false): ProviderAdapter {
   return new ProviderAdapter({ binding, routeRef: 'fixture-route', codec: new ResponsesProviderCodec(), transport, evidence });
 }
 
+const nativeConsumerPrincipal = 'native-file-search-consumer';
+
+/**
+ * Resolve the exact retained R1 allocation for one Provider tool request and
+ * return its real durable control binding. The fixture never fabricates the
+ * parent identity: it reads the prepared journal the owner already wrote.
+ */
+function toolBindingFor(
+  preparedJournal: UiRuntimeJournal,
+  serviceAdmission: ReturnType<typeof createServiceExecutionAdmission>,
+) {
+  return async (request: Parameters<ProviderToolAdmissionInput['bindingFor']>[0]) => {
+    const prepared = preparedJournal.replay().filter((record) => record.kind === 'operation.prepared'
+      && record.allocation.operationId.value === request.execution.operationId.value);
+    if (prepared.length !== 1 || prepared[0].kind !== 'operation.prepared') {
+      throw new Error('native consumer fixture has no single retained prepared allocation for the tool request');
+    }
+    return await serviceAdmission.bindingFor(prepared[0].allocation);
+  };
+}
+
+/**
+ * One real typed admission owner over the same control Journal and prepared
+ * journal the service and its executor read. The service's own admission edge
+ * issues the task grant and parent admission through the production library,
+ * and the executor resolves the real tool control source from the same owner.
+ */
+function nativeConsumerAdmission(input: {
+  readonly root: string;
+  readonly preparedJournal: UiRuntimeJournal;
+  readonly now: () => Date;
+}) {
+  const controlJournal = new JsonlOrganJournal(join(input.root, 'task-control.jsonl'));
+  const serviceAdmission = createServiceExecutionAdmission({
+    journal: controlJournal,
+    preparedJournal: input.preparedJournal,
+    principalOwner: nativeConsumerPrincipal,
+    resourceBoundary: createPreparedOperationBoundary(input.preparedJournal),
+    now: input.now,
+  });
+  const toolAdmission: ProviderToolAdmissionInput = {
+    organJournal: controlJournal,
+    currentTaskGrantPort: serviceAdmission.permissions,
+    principalOwner: nativeConsumerPrincipal,
+    resourceBoundary: serviceAdmission.resourceBoundary,
+    bindingFor: toolBindingFor(input.preparedJournal, serviceAdmission),
+    admitToolOperation: serviceAdmission.admitToolOperation,
+    now: input.now,
+  };
+  const runtimeComposition = {
+    admitExecution: async (allocation: RuntimeExecutionAllocation): Promise<void> => {
+      const current = await serviceAdmission.grants.readTaskGrant(allocation.taskId);
+      if (current.grant === null || current.grant.state !== 'granted') {
+        await serviceAdmission.grants.grant({
+          requestId: `fixture-task-execution:${allocation.taskId.value}`,
+          taskId: allocation.taskId,
+          owner: nativeConsumerPrincipal,
+          capability: {
+            actionId: TASK_EXECUTION_ACTION_ID,
+            capabilities: [TASK_EXECUTION_CAPABILITY],
+            scope: { organId: allocation.scope.organId, taskId: allocation.taskId },
+          },
+          expectedRevision: current.grant?.revision ?? 0,
+        });
+      }
+      await serviceAdmission.admitExecution(allocation);
+    },
+  };
+  return { controlJournal, serviceAdmission, toolAdmission, runtimeComposition };
+}
+
+/**
+ * Direct `executor.executor.execute` fixture. It retains one legal prepared
+ * allocation for the exact request execution/scope, issues the task grant and
+ * parent admission, then returns the real ProviderToolAdmissionInput so the
+ * standalone executor has a true control source.
+ */
+async function directToolAdmission(input: {
+  readonly root: string;
+  readonly execution: {
+    readonly runtimeId: string;
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+  };
+  readonly scope: RuntimeExecutionAllocation['scope'];
+}): Promise<ProviderToolAdmissionInput> {
+  const now = () => new Date();
+  const preparedJournal = new UiRuntimeJournal(join(input.root, `prepared-${input.execution.operationId.value}.jsonl`));
+  const allocation: RuntimeExecutionAllocation = {
+    runtimeId: input.execution.runtimeId,
+    taskId: input.execution.taskId,
+    operationId: input.execution.operationId,
+    executionEpoch: input.execution.executionEpoch,
+    assignmentId: `assignment-${input.execution.operationId.value}`,
+    scope: input.scope,
+    inputRefs: [`task://${input.execution.taskId.value}/input/1`],
+    ownerId: nativeConsumerPrincipal,
+    directiveRevision: 1,
+    inputRevision: 1,
+    orchestrated: false,
+  };
+  preparedJournal.append({
+    kind: 'operation.prepared',
+    allocation,
+    input: 'native file search direct consumer fixture',
+    operationCounter: 1,
+    cycleCounter: 1,
+  });
+  const controlJournal = new JsonlOrganJournal(join(input.root, `control-${input.execution.operationId.value}.jsonl`));
+  const serviceAdmission = createServiceExecutionAdmission({
+    journal: controlJournal,
+    preparedJournal,
+    principalOwner: nativeConsumerPrincipal,
+    resourceBoundary: createPreparedOperationBoundary(preparedJournal),
+    now,
+  });
+  await serviceAdmission.grants.grant({
+    requestId: `fixture-task-grant:${allocation.taskId.value}`,
+    taskId: allocation.taskId,
+    owner: nativeConsumerPrincipal,
+    capability: {
+      actionId: TASK_EXECUTION_ACTION_ID,
+      capabilities: [TASK_EXECUTION_CAPABILITY],
+      scope: { organId: allocation.scope.organId, taskId: allocation.taskId },
+    },
+    expectedRevision: 0,
+  });
+  await serviceAdmission.admitExecution(allocation);
+  return {
+    organJournal: controlJournal,
+    currentTaskGrantPort: serviceAdmission.permissions,
+    principalOwner: nativeConsumerPrincipal,
+    resourceBoundary: serviceAdmission.resourceBoundary,
+    bindingFor: toolBindingFor(preparedJournal, serviceAdmission),
+    admitToolOperation: serviceAdmission.admitToolOperation,
+    now,
+  };
+}
+
 function service(input: {
   root: string;
   adapter: ProviderAdapter;
@@ -225,6 +374,7 @@ function service(input: {
   toolOutputs: ReturnType<typeof createResponsesFileToolExecutor>['toolOutputs'];
   workspaceRoot: string;
   projectKey: string;
+  runtimeComposition?: { readonly admitExecution: (allocation: RuntimeExecutionAllocation) => Promise<void> };
 }): UiRuntimeService {
   return new UiRuntimeService({
     mode: 'rcc',
@@ -256,7 +406,7 @@ function service(input: {
         return { kind: 'clarification', normalizedInput: '', knownFacts: [], question: 'unused', decisionRefs: [] };
       },
     },
-    runtimeComposition: { admitExecution: async () => {} },
+    runtimeComposition: input.runtimeComposition ?? { admitExecution: async () => {} },
   });
 }
 
@@ -431,26 +581,30 @@ async function executeAndReadSearchReport(input: {
 }): Promise<Record<string, unknown>> {
   const workspaceRoot = join(input.root, 'workspace');
   const artifactRoot = join(input.root, 'evidence');
-  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey: input.projectKey, artifactRoot });
+  const execution = {
+    runtimeId: `runtime-${input.callId}`,
+    taskId: id('task', input.taskId),
+    operationId: id('operation', input.operationId),
+    executionEpoch: 1,
+  };
+  const scope = {
+    organId,
+    taskId: id('task', input.taskId),
+    cycleId: id('cycle', `cycle-${input.operationId}`),
+    operationId: id('operation', input.operationId),
+  };
+  const admission = await directToolAdmission({ root: input.root, execution, scope });
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey: input.projectKey, artifactRoot, admission });
   const result = await executor.executor.execute({
-    execution: {
-      runtimeId: `runtime-${input.callId}`,
-      taskId: id('task', input.taskId),
-      operationId: id('operation', input.operationId),
-      executionEpoch: 1,
-    },
-    scope: {
-      organId,
-      taskId: id('task', input.taskId),
-      cycleId: id('cycle', `cycle-${input.operationId}`),
-      operationId: id('operation', input.operationId),
-    },
+    execution,
+    scope,
     call: {
       callId: input.callId,
       toolId: 'file.search',
       arguments: input.arguments,
       continuationRef: `response-${input.callId}`,
     },
+    requestId: `request-${input.callId}`,
     signal: new AbortController().signal,
   });
   if (result.outputRef === undefined || result.outputDigest === undefined) throw new Error('file.search report descriptor is missing');
@@ -663,8 +817,14 @@ test('local Responses file.search fact and report survive disk projection recons
   const projectKey = 'native-file-search-project';
   const adapter = providerAdapter(root);
   const firstJournal = new UiRuntimeJournal(journalPath);
-  const firstExecutor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot: evidenceRoot });
-  const firstService = service({ root, adapter, journal: firstJournal, executor: firstExecutor.executor, toolOutputs: firstExecutor.toolOutputs, workspaceRoot, projectKey });
+  const firstAdmission = nativeConsumerAdmission({ root, preparedJournal: firstJournal, now: () => new Date() });
+  const firstExecutor = createResponsesFileToolExecutor({
+    workspaceRoot, projectKey, artifactRoot: evidenceRoot, admission: firstAdmission.toolAdmission,
+  });
+  const firstService = service({
+    root, adapter, journal: firstJournal, executor: firstExecutor.executor, toolOutputs: firstExecutor.toolOutputs,
+    workspaceRoot, projectKey, runtimeComposition: firstAdmission.runtimeComposition,
+  });
   const diagnostics: Record<string, unknown> = {};
   const accessControl = await FileAccessControlService.open({ credentialPath, create: true });
   const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('file-search-test', 1).code);
@@ -894,8 +1054,14 @@ test('a real local file.search tool failure does not create a succeeded executio
   await writeFile(join(workspaceRoot, 'source.txt'), 'semantic-needle\n', 'utf8');
   const projectKey = 'native-file-search-failure-project';
   const journal = new UiRuntimeJournal(join(root, 'projection', 'ui-runtime-journal.jsonl'));
-  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot: join(root, 'evidence') });
-  const runtime = service({ root, adapter: providerAdapter(root, true), journal, executor: executor.executor, toolOutputs: executor.toolOutputs, workspaceRoot, projectKey });
+  const admission = nativeConsumerAdmission({ root, preparedJournal: journal, now: () => new Date() });
+  const executor = createResponsesFileToolExecutor({
+    workspaceRoot, projectKey, artifactRoot: join(root, 'evidence'), admission: admission.toolAdmission,
+  });
+  const runtime = service({
+    root, adapter: providerAdapter(root, true), journal, executor: executor.executor, toolOutputs: executor.toolOutputs,
+    workspaceRoot, projectKey, runtimeComposition: admission.runtimeComposition,
+  });
   try {
     const task = runtime.createTask({ title: 'invalid local file search', directive: 'search with invalid path' });
     const started = await runtime.startExecution(task.taskId, { prompt: 'search for semantic-needle' });
@@ -920,27 +1086,31 @@ test('a failed service report is persisted unchanged with its original failure f
   const artifactRoot = join(root, 'evidence');
   const projectKey = 'native-file-search-failed-report-project';
   await mkdir(workspaceRoot, { recursive: true });
-  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot });
+  const execution = {
+    runtimeId: 'runtime-failed-search-report',
+    taskId: id('task', 'task-failed-search-report'),
+    operationId: id('operation', 'operation-failed-search-report'),
+    executionEpoch: 1,
+  };
+  const scope = {
+    organId,
+    taskId: id('task', 'task-failed-search-report'),
+    cycleId: id('cycle', 'cycle-failed-search-report'),
+    operationId: id('operation', 'operation-failed-search-report'),
+  };
+  const admission = await directToolAdmission({ root, execution, scope });
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot, admission });
   try {
     const result = await executor.executor.execute({
-      execution: {
-        runtimeId: 'runtime-failed-search-report',
-        taskId: id('task', 'task-failed-search-report'),
-        operationId: id('operation', 'operation-failed-search-report'),
-        executionEpoch: 1,
-      },
-      scope: {
-        organId,
-        taskId: id('task', 'task-failed-search-report'),
-        cycleId: id('cycle', 'cycle-failed-search-report'),
-        operationId: id('operation', 'operation-failed-search-report'),
-      },
+      execution,
+      scope,
       call: {
         callId: 'call-failed-search-report',
         toolId: 'file.search',
         arguments: { path: 'missing-file.txt', query: 'semantic-needle', queryKind: 'literal' },
         continuationRef: 'response-failed-search-report',
       },
+      requestId: 'request-failed-search-report',
       signal: new AbortController().signal,
     });
     if (result.outputRef === undefined || result.outputDigest === undefined) {
@@ -965,27 +1135,31 @@ test('an incomplete search keeps its partial scope and failure fields after pers
   await writeFile(join(workspaceRoot, 'readable.txt'), 'semantic-needle\n', 'utf8');
   const artifactRoot = join(root, 'evidence');
   const projectKey = 'native-file-search-incomplete-project';
-  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot });
+  const execution = {
+    runtimeId: 'runtime-incomplete-search',
+    taskId: id('task', 'task-incomplete-search'),
+    operationId: id('operation', 'operation-incomplete-search'),
+    executionEpoch: 1,
+  };
+  const scope = {
+    organId,
+    taskId: id('task', 'task-incomplete-search'),
+    cycleId: id('cycle', 'cycle-incomplete-search'),
+    operationId: id('operation', 'operation-incomplete-search'),
+  };
+  const admission = await directToolAdmission({ root, execution, scope });
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot, admission });
   try {
     const result = await executor.executor.execute({
-      execution: {
-        runtimeId: 'runtime-incomplete-search',
-        taskId: id('task', 'task-incomplete-search'),
-        operationId: id('operation', 'operation-incomplete-search'),
-        executionEpoch: 1,
-      },
-      scope: {
-        organId,
-        taskId: id('task', 'task-incomplete-search'),
-        cycleId: id('cycle', 'cycle-incomplete-search'),
-        operationId: id('operation', 'operation-incomplete-search'),
-      },
+      execution,
+      scope,
       call: {
         callId: 'call-incomplete-search',
         toolId: 'file.search',
         arguments: { path: 'missing-file.txt', query: 'semantic-needle', queryKind: 'literal', requireComplete: true },
         continuationRef: 'response-incomplete-search',
       },
+      requestId: 'request-incomplete-search',
       signal: new AbortController().signal,
     });
     if (result.outputRef === undefined || result.outputDigest === undefined) throw new Error('incomplete file.search report descriptor is missing');
