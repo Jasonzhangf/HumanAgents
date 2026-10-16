@@ -15,6 +15,8 @@ import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
 import type { CheckpointHistoryReadInput } from './checkpoint-history.js';
 import type { RuntimeReadResult, RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
+import type { RuntimeCheckpointAssetSelector } from '../../../ui/contracts/checkpoint-history.js';
+import type { TaskCheckpointAssetBodyQuery } from './service.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import { AppLifecycleError } from '../errors.js';
 import {
@@ -192,6 +194,40 @@ function checkpointViewedTarget(url: URL): CheckpointHistoryReadInput['viewed'] 
     ...(checkpointId === null ? {} : { checkpointId: id('checkpoint', checkpointId) }),
     ...(hasReceipt ? { commitRef: { commitId: commitId!, journalSeq: Number(journalSeq), recordDigest: recordDigest! } } : {}),
   };
+}
+
+/**
+ * Exact checkpoint target and selector for one asset body read. Only the read
+ * scope and the four checkpoint receipt keys are accepted; no list filter,
+ * cursor, limit or client descriptor reaches the asset read.
+ */
+function checkpointAssetBodyQuery(url: URL, selector: RuntimeCheckpointAssetSelector): TaskCheckpointAssetBodyQuery {
+  const { projectKey, mode } = requireReadScope(url);
+  const allowed = new Set(['projectKey', 'mode', 'checkpointId', 'checkpointCommitId', 'checkpointJournalSeq', 'checkpointRecordDigest']);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+      throw new UiRuntimeApiError('checkpoint-asset.query-invalid', APP_OWNER,
+        `unsupported or repeated checkpoint asset query key: ${key}`, 'send the checkpoint query keys exactly once', 400);
+    }
+  }
+  const viewed = checkpointViewedTarget(url);
+  if (viewed === undefined || viewed.checkpointId === undefined || viewed.commitRef === undefined) {
+    throw new UiRuntimeApiError('checkpoint-history.viewed-partial', APP_OWNER,
+      'checkpoint asset read requires the checkpoint identity and its complete physical receipt',
+      'send checkpointId and the complete checkpointCommitId/checkpointJournalSeq/checkpointRecordDigest receipt', 400);
+  }
+  return { projectKey, mode, viewed: { checkpointId: viewed.checkpointId, commitRef: viewed.commitRef }, selector };
+}
+
+function adoptedChildSelector(invocationId: string, childTurnId: string, deliverySeq: string): RuntimeCheckpointAssetSelector {
+  const deliverySequence = Number(deliverySeq);
+  if (invocationId.trim() === '' || childTurnId.trim() === '' || !/^[1-9]\d*$/.test(deliverySeq)
+    || !Number.isSafeInteger(deliverySequence)) {
+    throw new UiRuntimeApiError('checkpoint-asset.selector-invalid', APP_OWNER,
+      'adopted child selector needs a non-empty invocation and child turn and a positive delivery sequence',
+      'send the exact committed invocation, child turn and delivery sequence', 400);
+  }
+  return { kind: 'adopted-child', invocationId, childTurnId, deliverySeq: deliverySequence };
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
@@ -1370,6 +1406,26 @@ async function handleRequest(
         ...(cycleId === undefined ? {} : { cycleId }),
         ...(occurrenceRef === undefined ? {} : { occurrenceRef }),
       }));
+      return;
+    }
+    // Read-only checkpoint asset bodies. These routes read the exact committed
+    // asset named by the canonical checkpoint; they never serve a file path,
+    // commit, publish, retry or steer.
+    const taskCheckpointCaptureBody = /^\/api\/tasks\/([^/]+)\/checkpoints\/assets\/capture$/.exec(path);
+    if (taskCheckpointCaptureBody && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskCheckpointCaptureBody[1]!));
+      writeReadResult(response, await service.taskCheckpointAssetBody(taskId,
+        checkpointAssetBodyQuery(url, { kind: 'capture' })));
+      return;
+    }
+    const taskCheckpointAdoptedChildBody =
+      /^\/api\/tasks\/([^/]+)\/checkpoints\/assets\/adopted-child\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(path);
+    if (taskCheckpointAdoptedChildBody && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskCheckpointAdoptedChildBody[1]!));
+      const selector = adoptedChildSelector(decodeURIComponent(taskCheckpointAdoptedChildBody[2]!),
+        decodeURIComponent(taskCheckpointAdoptedChildBody[3]!), decodeURIComponent(taskCheckpointAdoptedChildBody[4]!));
+      writeReadResult(response, await service.taskCheckpointAssetBody(taskId,
+        checkpointAssetBodyQuery(url, selector)));
       return;
     }
     // I2 read-only history. These routes never invoke execution, modify the

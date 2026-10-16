@@ -678,6 +678,7 @@ export class ProviderAgentDriver<
                   callId: call.callId,
                   toolId: call.toolId,
                   arguments: call.arguments,
+                evidenceRefs: result.evidenceRefs,
                   continuationRef: call.continuationRef,
                   output: result.output,
                 })),
