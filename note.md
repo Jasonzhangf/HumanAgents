@@ -6,7 +6,7 @@
 - **F13 仍有已复现的生产缺口。** 活动子进程42804在真实本地 HTTP 请求及非空 dispatching 义务下被 SIGKILL；确认死亡后，新进程43040读到同一 Task/turn/checkpoint/Context，原 effect 的一次 intent、一次 completion 和字节不变。公共 `resumeExecution` 在 `cold-execution-source.ts` 读取活动 tail 的 capture receipt 时返回 `cold-execution.source-unavailable`，没有建立后续执行实例。旧 v1 返回向 v2 的实际重投已拒绝；被杀 v2 到后续 v3 的 fencing 尚未验证。原正常退出 cold2/2 不能代替该缺口。
 - 崩溃探针的原始 RED、生命周期和 source 补丁保留在 `/private/tmp/humanagent-ux-remaining-20261015/cold-crash-c8-r2`；两个子进程和自有 listener 已关闭，含未决义务的专属 fixture 保留。探针还把“控制状态和请求数不推进”无条件用于未来成功恢复，这与恢复需要新 epoch 相冲突，因此未加入正式回归集。其临时源码和 helper 改动已撤出；必要的恢复验收没有取消，须在正确恢复合同确定后补齐。
 - **G14 资产正文未接通。** 完整 RawAsset 已到达 UI 回调，但 TaskDashboard 的引用层只展示 evidenceId/view.kind，未使用已有 scope/digest 校验的 RawContentReadPort；现有 tool-output 路由不是 checkpoint capture 的读取入口。需要正确的任务内公共读取边，不能把文件 locator 直接变成 URL。只读源链记录：`/private/tmp/humanagent-ux-remaining-20261015/checkpoint-asset-read-observe-r1/observation.md`。
-- 显式交互尚无 Task 时，页面伪造 task/operation 身份的合成反例已执行；该显示缺陷仍未修复。C4 Runtime/Journal 基础有冻结来源 `faa6a131`，完整 Context 排除挂载、C7 可信确认/公共控制入口和上述恢复缺口仍未交付。未取得本增量整体 Review PASS，未 merge main、restart 或 push。
+- 显式交互的伪造 Task/Operation 身份及确认后提前显示 running 已修复并进入唯一候选：来源 `676f78d` → `0875478c`，11 个路径与来源一致，卡片浏览器 39 项、Task 页面 4 项作者验收通过。来源工作树已正常关闭，证据归档 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-card-identity-20261015/`。原 8 个旧 UI 失败及默认 page 旧 selector 失败仍开放，由 UX peer 继续最小审计/消融。C4/C7 后续 Context、公共控制和崩溃恢复仍未完整交付；整体 I1 Review/main/restart/push 未完成，不用该内部切片代替整体验收。
 - C4 冻结八文件已通过标准 Git 合流为 `d1c1d2b0`，保留 C3 语义只读工厂。当前组合的正常 App build0、原 C4 focused compile0、原 C4 公共 consumer1/1、原 checkpoint HTTP consumer1/1 均通过。只证明已挂基础与读边的组合，不能替代尚未接线的后续 Context、HTTP 控制和崩溃恢复。证据：`/private/tmp/humanagent-ux-remaining-20261015/c4-composition-r1/receipt.md`。
 
 - **当前阶段**：`MVP-IMPLEMENTATION`（`I1–I5` / `G1–G14` / `F01–F20` 纵切片合流收口中，状态 `ACTIVE / INCOMPLETE`）。
@@ -17,13 +17,17 @@
 
 ## 1. Worktree SESE 治理与存量核销回执（2026-10-15）
 
+本节数量和路径为清理任务结束时的历史快照，不是后续恢复与正常派发后的实时存量。当前候选及本侧资源回执以唯一进度记录为准。
+
 - **全局 SESE 规则已生效**：新建或续派 worktree 严格执行「先关旧树再开新树（Close-Before-Open）」，多子任务合流统一通过标准 Git 分支合并，禁止跨树文件级手工拼装。
 - **存量清理结果**：
   - 清理前：`git worktree list` **798 个**，`/Volumes/Intel/playground/humanagent` **1,081 个**条目，仓库内 `playground/` **7 个**旧目录。
   - 本轮核销：共归档并移除 **791 个**非活动工作树（438 个 clean 树 + 281 个历史未提交树快照归档至 `refs/archive/wt-dirty/*` + 72 个已完成 `20261014/15` 候选树直接提交至各自 `codex/<name>` 分支后移除），并移出 290 个未注册孤儿条目与仓库内 `playground/` 目录。
   - 当前保留：仅 **6 个**注册工作树（主树 `main` + 5 个当前有活动进程占用的 `PROTECTED_HOLD` 工作树：`provider-context-correction-r1-20261015`、`provider-native-public-composition-r1-20261014`、`provider-production-task-identity-r1-20261014`、`provider-ux-served-composition-r1-20261014`、`runtime-reload-r1-20261015`）。
 
-## 2. 当前候选分支与待交付切片
+## 2. 历史候选基线与待交付切片
+
+下列基线保留用于追溯，不作为续派入口。最新唯一候选、远端交付与活动任务见上述 Native Reasoning 进度记录顶部。
 
 - **主干与候选基线**：
   - `origin/main` (`db915e7a`)：含 `task-flow` 与 `task-plan-revision` 契约/Core/JSONL 实现。
