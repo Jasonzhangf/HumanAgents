@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- precloseABI r2未准入源码：Planner给出不存在的测试路径，并建议瞬时将旧accepted raw envelope epoch改成新epoch以满足fold，这会混淆原身份；“任意completed请求即terminal”也未区分工具续接。Root已退回同独立Gemini4 plan r3，只纠正精确historicalconfirmedfact装配、final-output资格、重复crash epoch及F1 returned-unaccepted语义；不让实现者猜合同。defaultstop两caller已作者GREEN，实际defaultentry consumer仍进行中；receiptport代码/定向验证进行中；G-A proof consumer仍执行中，均未计验收。
+
 - ownerattestation基础sourcebc3bfff（含b4f2f02）已标准合fec3e3f：RootAppbuild/Apptestcompile/Runtimeexplicitcompile0，raw2/2+Supervisor2/2exit0。首Node命令误用dist/tests路径报notfound，按实际tsconfig改为dist/tests-explicit-brain后通过；不当产品RED。原Taskguard顺序保持在同leaseguard内，legacyowner不回填。源worker自然终态，treeclean；原树暂留立即后继reconciliationfoundation，独立Gemini4同plan上下文ABI补正r2运行中，不另开同域树。尚无App注入/新epoch恢复/remoteclose证明。
 - G只读观察已终态：当前http来源与三协议typedtool/submit已有实现，旧gap源码描述不能当待实现。独立OAuth小plan已核实际new-task-identitypublicconsumer，GCM `provider-http-admission-proof-gcm-r1-20261016`只在该既有测试绑定httpunknownhealth→实际Task准入（先查等价断言，无充分缺口不加测）；不声称真实非RCCvendor。另GCM `provider-stop-receipt-port-gcm-r1-20261016`只写steering.ts+原controlconsumer补durablereceipt透传，coordinator上层窗口待与UX协调。3路实现并行（defaultstop/receiptport/httpadmission），parent后继在独立ABIplan；当前候选未整体review/未push，完整goal持续OPEN。
 
