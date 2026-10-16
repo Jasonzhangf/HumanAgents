@@ -4270,7 +4270,7 @@ export class UiRuntimeService {
         );
       }
       const task = existing ?? this.coordinator.createTask({ taskId: input.binding.taskId, title, directive: prompt });
-      const started = this.coordinator.startExecution(task.taskId, {
+      const started = this.coordinator.prepareExecution(task.taskId, {
         prompt,
         operationId: input.binding.operationId,
         ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
@@ -4284,6 +4284,7 @@ export class UiRuntimeService {
           409,
         );
       }
+      await this.coordinator.releaseExecution(task.taskId, started.operationId);
       await this.awaitScheduledOccurrenceTerminal(started.operationId);
       const snapshot = this.coordinator.taskSnapshot(task.taskId);
       const committed = snapshot.checkpoint;
@@ -5581,12 +5582,13 @@ export class UiRuntimeService {
         const pending = this.coordinator.pendingTaskInput(task.taskId);
         const prompt = pending ? pending.envelope.normalizedInput : consumed.normalizedInput;
         if (autoStart) {
-          const execution = this.coordinator.startExecution(task.taskId, {
+          const execution = this.coordinator.prepareExecution(task.taskId, {
             prompt,
             ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
             operationId,
             ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
           });
+          await this.coordinator.releaseExecution(task.taskId, execution.operationId);
           if (pending) this.coordinator.consumeTaskInput(task.taskId, pending.inputRevision);
           executionEpoch = execution.executionEpoch;
         }
@@ -5602,13 +5604,18 @@ export class UiRuntimeService {
       if (task.operationId === operationId.value && task.executionEpoch !== undefined) {
         executionEpoch = task.executionEpoch;
       } else if (autoStart) {
-        const execution = this.coordinator.startExecution(task.taskId, {
+        const execution = this.coordinator.prepareExecution(task.taskId, {
           prompt: consumed.normalizedInput,
           ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
           operationId,
           ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
         });
         executionEpoch = execution.executionEpoch;
+      }
+      // A retained operation epoch proves allocation, not durable startup.
+      // Retry its release before recording dispatch completion or acknowledging.
+      if (executionEpoch !== undefined) {
+        await this.coordinator.releaseExecution(task.taskId, operationId);
       }
       const started: DispatchLedgerEntry = {
         ...prepared,
