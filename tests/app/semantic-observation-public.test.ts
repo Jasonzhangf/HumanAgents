@@ -103,7 +103,7 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
           assert.ok(wire.includes('second-current-input'));
           assert.ok(wire.includes('second-source'));
           assert.ok(wire.includes(refinedText), 'second outbound must contain accepted refined helper semantics');
-          for (const part of ['goal:', 'what-done', 'outcome(', 'next-step:']) assert.ok(wire.includes(part), part);
+          for (const part of ['goal:', 'what-done', 'outcome(', 'next:']) assert.ok(wire.includes(part), part);
           for (const raw of ['parent-private-input', finalText, 'dispatch-call', 'accept-call', 'child-summary-is-not-parent-json-or-refined-text']) {
             assert.equal(wire.includes(raw), false, `prior raw must not enter history: ${raw}`);
           }
@@ -228,7 +228,7 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
     assert.ok(firstCommit, 'default parent must publish semantic closure');
     if (firstCommit === null) throw new Error('missing semantic commit');
     const claims = firstCommit.checkpoint.claims.map((claim) => claim.fact).join('\n');
-    for (const part of ['goal:', 'what-done', 'outcome(', 'next-step:', refinedText]) assert.ok(claims.includes(part), part);
+    for (const part of ['goal:', 'what-done', 'outcome(', 'next:', refinedText]) assert.ok(claims.includes(part), part);
     const nextInput = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ channel: 'business', sourceRef: 'second-source', rawInput: 'second-current-input' }),
