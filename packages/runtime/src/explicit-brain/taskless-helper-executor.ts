@@ -164,37 +164,61 @@ export async function executeTasklessInteractionHelper(
   });
 
   const identity = tasklessIdentity(assignment, execution);
-  await input.driver.start({ ...identity, assignmentId: assignment.assignmentId });
-  const output = await input.driver.submit({
-    ...identity,
-    assignmentId: assignment.assignmentId,
-    payload: helperRequestPayload(assignment, input.inputs),
-  });
+  let started = false;
+  let settleAttempted = false;
+  try {
+    await input.driver.start({ ...identity, assignmentId: assignment.assignmentId });
+    started = true;
+    const output = await input.driver.submit({
+      ...identity,
+      assignmentId: assignment.assignmentId,
+      payload: helperRequestPayload(assignment, input.inputs),
+    });
 
-  const events: AgentEvent<TasklessProviderExecutionIdentityRef>[] = [];
-  for await (const event of input.driver.observe({ runtimeId: execution.runtimeId })) {
-    events.push(event);
+    const events: AgentEvent<TasklessProviderExecutionIdentityRef>[] = [];
+    for await (const event of input.driver.observe({ runtimeId: execution.runtimeId })) {
+      events.push(event);
+    }
+
+    settleAttempted = true;
+    const closure = await input.driver.settle({
+      runtimeId: execution.runtimeId,
+      executionEpoch: execution.executionEpoch,
+    });
+
+    const result: InteractionHelperResult = {
+      ...assignmentIdentity(assignment),
+      ...input.conclude({ output, closure, events }),
+    };
+    validateInteractionHelperResult(result, assignment);
+
+    const returnedCommit = await input.journal.appendReturned({
+      kind: 'returned',
+      result,
+      returnedAt: input.returnedAt,
+      evidenceRefs: input.evidenceRefs,
+    });
+
+    return { dispatchCommit, returnedCommit, incarnation, result, closure };
+  } catch (error) {
+    let failure = error;
+    // A started execution owns a live provider request. If submit/observe throws
+    // before the normal settle, collapse it once so no recovery obligation leaks.
+    if (started && !settleAttempted) {
+      try {
+        await input.driver.settle({
+          runtimeId: execution.runtimeId,
+          executionEpoch: execution.executionEpoch,
+        });
+      } catch (settleError) {
+        failure = new AggregateError(
+          [failure, settleError],
+          'taskless helper execution and settlement failed',
+        );
+      }
+    }
+    throw failure;
   }
-
-  const closure = await input.driver.settle({
-    runtimeId: execution.runtimeId,
-    executionEpoch: execution.executionEpoch,
-  });
-
-  const result: InteractionHelperResult = {
-    ...assignmentIdentity(assignment),
-    ...input.conclude({ output, closure, events }),
-  };
-  validateInteractionHelperResult(result, assignment);
-
-  const returnedCommit = await input.journal.appendReturned({
-    kind: 'returned',
-    result,
-    returnedAt: input.returnedAt,
-    evidenceRefs: input.evidenceRefs,
-  });
-
-  return { dispatchCommit, returnedCommit, incarnation, result, closure };
 }
 
 export interface AcceptTasklessInteractionHelperInput {

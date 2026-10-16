@@ -7,4 +7,5 @@ export * from './memory-submission.js';
 export * from './memory-tools.js';
 export * from './operational-tools.js';
 export * from './router.js';
+export * from './taskless-helper-executor.js';
 export * from './tool-registry.js';

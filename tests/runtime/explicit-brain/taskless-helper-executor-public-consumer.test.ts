@@ -99,6 +99,7 @@ const execution: TasklessHelperExecutionBinding = {
 interface RecordingDriver extends AgentDriver<TasklessProviderExecutionIdentityRef> {
   readonly startRequests: AgentStartRequest<TasklessProviderExecutionIdentityRef>[];
   readonly submitPayloads: BusinessPayload[];
+  readonly settleCalls: { readonly runtimeId: string; readonly executionEpoch: number }[];
 }
 
 function tasklessIdentityRef(): TasklessProviderExecutionIdentityRef {
@@ -113,9 +114,13 @@ function tasklessIdentityRef(): TasklessProviderExecutionIdentityRef {
   };
 }
 
-function recordingDriver(closureState: AgentClosure['state'] = 'succeeded'): RecordingDriver {
+function recordingDriver(
+  closureState: AgentClosure['state'] = 'succeeded',
+  options: { readonly observeError?: Error } = {},
+): RecordingDriver {
   const startRequests: AgentStartRequest<TasklessProviderExecutionIdentityRef>[] = [];
   const submitPayloads: BusinessPayload[] = [];
+  const settleCalls: { runtimeId: string; executionEpoch: number }[] = [];
   const output: AgentOutput<TasklessProviderExecutionIdentityRef> = {
     ...tasklessIdentityRef(),
     assignmentId: assignment.assignmentId,
@@ -128,6 +133,7 @@ function recordingDriver(closureState: AgentClosure['state'] = 'succeeded'): Rec
     kind: 'taskless-helper-recording-driver',
     startRequests,
     submitPayloads,
+    settleCalls,
     capabilities: async () => ({
       driverKind: 'taskless-helper-recording-driver',
       capabilities: ['text-generation'],
@@ -145,6 +151,7 @@ function recordingDriver(closureState: AgentClosure['state'] = 'succeeded'): Rec
       return output;
     },
     observe: async function* () {
+      if (options.observeError !== undefined) throw options.observeError;
       yield {
         ...tasklessIdentityRef(),
         kind: 'provider.output',
@@ -152,7 +159,10 @@ function recordingDriver(closureState: AgentClosure['state'] = 'succeeded'): Rec
       } satisfies AgentEvent<TasklessProviderExecutionIdentityRef>;
     },
     requestStop: async () => ({ requested: false, operationId }),
-    settle: async () => closure,
+    settle: async (request) => {
+      settleCalls.push({ runtimeId: request.runtimeId, executionEpoch: request.executionEpoch });
+      return closure;
+    },
   };
 }
 
@@ -261,6 +271,55 @@ test('a taskless helper dispatch append failure prevents any driver start or sub
 
     assert.equal(driver.startRequests.length, 0);
     assert.equal(driver.submitPayloads.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a taskless helper observe failure still settles the started driver exactly once', async () => {
+  const { file, cleanup } = await fixture();
+  try {
+    const journal = journalFor(file);
+    const observeFailure = new Error('helper observe stream failed');
+    const driver = recordingDriver('unknown', { observeError: observeFailure });
+
+    await assert.rejects(
+      () =>
+        executeTasklessInteractionHelper({
+          journal,
+          driver,
+          assignment,
+          binding,
+          execution,
+          inputs: { request: 'bounded helper request' },
+          dispatchAcceptedAt: '2026-10-15T00:00:13.000Z',
+          returnedAt: '2026-10-15T00:00:14.000Z',
+          evidenceRefs: [evidence('dispatch-observe-fail-taskless')],
+          conclude: () => {
+            throw new Error('conclude must not run when observation fails');
+          },
+        }),
+      (error: unknown) => {
+        // The original first error survives because settle itself succeeded.
+        assert.equal(error, observeFailure);
+        return true;
+      },
+    );
+
+    // A started execution must be collapsed exactly once even when observe throws.
+    assert.equal(driver.startRequests.length, 1);
+    assert.equal(driver.submitPayloads.length, 1);
+    assert.equal(driver.settleCalls.length, 1);
+    assert.deepEqual(driver.settleCalls[0], {
+      runtimeId: execution.runtimeId,
+      executionEpoch: execution.executionEpoch,
+    });
+
+    // The durable dispatch fact stands, but no returned fact is fabricated.
+    const readback = await journal.readExact(identity);
+    assert.notEqual(readback.dispatchAccepted, null);
+    assert.equal(readback.returned, null);
+    assert.equal(readback.ownerAccepted, null);
   } finally {
     await cleanup();
   }
