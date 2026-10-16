@@ -6,6 +6,7 @@
 
 ### 续接增量（2026-10-15 晚）
 
+- F13 Contracts r3实际只完成65行单文件partial：XOR/anchor/receiptRead类型和共享validator已写，但三原validator未接共享函数、原consumer未补、无RED/GREEN；worker正常exit0不代表完成，未接收。fresh同树`provider-interrupted-finish-gcm-r4-20261015`只完成这三调用与契约consumer及实际RED/GREEN，不再返计划。误写树内`RUN/work.md`已移交原r3独占run的`in-tree-work.md`，旧RUN目录核销，不提交笔记。App引用四producer已有实际patch，CLIconsumer和行为仍由r5继续，未接收。
 - Anthropic声明已实核接收：来源`e020db7`→候选`dbe6d15`，两文件+11/-1。原新增声明断言compile0后RED（actualundefined/expectednonempty），修复后原publicconsumer6/6；Root最新组合tsc0/6of6exit0，证据`provider-anthropic-tools-gcm-r1-20261015/parent-acceptance.md`和直接日志。worker正常终态0，来源无cwd占用，standardremove/prune/absent注册9→8，回执`/private/tmp/ha-worktree-sese-inventory-20261015/anthropic-tools-close-receipt.json`。不冒真实Anthropic服务验收。
 - interaction父owner Gemini r1已终态但执行合同拒收：start/resume仅task限制会回归既有helper泛型；ToolCall/ToolExecutionResult被写成不存在泛型、未存在session方法、循环图却称DAG、graph companion和测试命令错误，并误称实际canonicalplan文件不存在。方向保留，未交实现；同conversation`24a20f30-ac36-4afb-af6c-336e54fda6ed`续派`provider-interaction-parent-plan-agy4-r2-20261015`只纠正真实ABI/命令/图，B/C仍OPEN，不另造Task桥接或legacy历史。
 - G14 numeric来源`d47b85851fc61ea35cdc20abac6447eef5089578`→唯一候选`906d105`，仅server选择器Number转换一次+safeinteger与原ONEconsumer大序号反例。peer原直接RED1（409!=400）→GREEN0/1of1，Root组合build:app0/HTTPconsumer1/1，`numeric-http/provider-composed-{build,consumers}.log`。service/server短窗口已RELEASE，未新增传输安全或其他校验矩阵。
