@@ -17,6 +17,7 @@ import {
   type InteractionHelperAssignment,
   type InteractionHelperIdentity,
   type InteractionHelperOwnerAcceptedFact,
+  type InteractionHelperResult,
   type InteractionHelperReturnedFact,
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
@@ -73,6 +74,16 @@ const assignment: InteractionHelperAssignment = {
 };
 
 const identity: InteractionHelperIdentity = assignment;
+const helperIdentity: InteractionHelperIdentity = {
+  organId: assignment.organId,
+  interactionScopeId: assignment.interactionScopeId,
+  interactionId: assignment.interactionId,
+  inputRevision: assignment.inputRevision,
+  parentTurnId: assignment.parentTurnId,
+  assignmentId: assignment.assignmentId,
+  helperCallId: assignment.helperCallId,
+  attempt: assignment.attempt,
+};
 const turnIdentity: InteractionTurnIdentity = {
   organId,
   interactionScopeId: assignment.interactionScopeId,
@@ -113,6 +124,7 @@ const returned: InteractionHelperReturnedFact = {
 const ownerAccepted: InteractionHelperOwnerAcceptedFact = {
   kind: 'owner-accepted',
   result,
+  refinedResult: { ref: evidence('refined-public', taskEvidenceScope), view: { kind: 'utf8-text' } },
   acceptedBy: 'runtime-intake-owner',
   acceptanceRef: 'acceptance://helper-public',
   acceptedAt: '2026-10-15T00:00:03.000Z',
@@ -195,6 +207,19 @@ test('public adapter keeps dispatch, return, owner acceptance, and semantic comm
       returned: returnedCommit,
       ownerAccepted: accepted,
     });
+    // Failure basis: turn-scoped helper enumeration was unexposed on the adapter.
+    // Impact: cold session recovery cannot discover which helpers belong to a turn.
+    // Cost: one assertion reusing the existing physical journal fixture.
+    assert.deepEqual(await finalReader.readTurnHelpers(turnIdentity), [
+      {
+        identity: helperIdentity,
+        readback: {
+          dispatchAccepted: dispatch,
+          returned: returnedCommit,
+          ownerAccepted: accepted,
+        },
+      },
+    ]);
     assert.deepEqual(await finalReader.readSemanticCheckpointExact(turnIdentity), checkpointCommit);
     assert.deepEqual(
       await finalReader.readExact({ ...identity, helperCallId: 'call-other' }),
@@ -239,6 +264,58 @@ test('public adapter keeps dispatch, return, owner acceptance, and semantic comm
     assert.equal('taskId' in assignment, false);
     assert.equal('taskId' in result, false);
     assert.equal('entries' in semanticCheckpoint, false);
+
+    // Failure basis: historical legacy records in the journal lack refinedResult.
+    // Impact: if legacy records break decoding unconditionally, old completed
+    // checkpoints cannot be read. If legacy unclosed records are accepted,
+    // cold recovery invents or misses required refined semantics.
+    // Cost: minimal append to the existing test journal.
+    const legacyTurn: InteractionTurnIdentity = {
+      ...turnIdentity,
+      turnId: 'turn-legacy-unclosed',
+    };
+    const legacyResult: InteractionHelperResult = {
+      ...result,
+      parentTurnId: 'turn-legacy-unclosed',
+      helperCallId: 'call-legacy',
+    };
+    await new JsonlOrganJournal(file).append({
+      commitId: 'legacy-unclosed-accept',
+      kind: 'event',
+      scope: organScope,
+      payload: {
+        kind: 'interaction-helper.handoff.v1',
+        fact: {
+          kind: 'owner-accepted',
+          result: legacyResult,
+          acceptedBy: 'legacy-owner',
+          acceptanceRef: 'acceptance://legacy',
+          acceptedAt: '2026-10-15T00:00:10.000Z',
+          evidenceRefs: [],
+        },
+      },
+    });
+
+    const legacyReader = new JsonlInteractionHelperJournal(new JsonlOrganJournal(file));
+    // Old completed checkpoints remain readable
+    const scopeCheckpoints = await legacyReader.readScopeSemanticCheckpoints({
+      organId,
+      interactionScopeId: 'interaction-scope-public',
+    });
+    assert.equal(scopeCheckpoints.length, 1);
+    assert.deepEqual(scopeCheckpoints[0], checkpointCommit);
+
+    // Legacy unclosed missing refined semantics is honestly unavailable
+    await assert.rejects(
+      () => legacyReader.readExact(legacyResult),
+      (err: unknown) => err instanceof JournalIntegrityError
+        && /owner-accepted helper fact is missing refinedResult/.test((err as Error).message),
+    );
+    await assert.rejects(
+      () => legacyReader.readTurnHelpers(legacyTurn),
+      (err: unknown) => err instanceof JournalIntegrityError
+        && /owner-accepted helper fact is missing refinedResult/.test((err as Error).message),
+    );
   } finally {
     await cleanup();
   }

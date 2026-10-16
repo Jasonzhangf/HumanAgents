@@ -217,6 +217,7 @@ test('taskless interaction helper contract keeps exact identity and append-only 
   const ownerAccepted: InteractionHelperOwnerAcceptedFact = {
     kind: 'owner-accepted',
     result,
+    refinedResult: taskRawAsset('task-scoped-refined-helper-result'),
     acceptedBy: 'runtime-intake-owner',
     acceptanceRef: 'acceptance://helper-a',
     acceptedAt: '2026-10-15T00:00:04.000Z',
