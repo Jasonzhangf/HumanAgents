@@ -9,9 +9,11 @@ import {
   type ActiveTurnCaptureBody,
   type ActiveTurnProviderExecutionIdentityRef,
   type ActiveTurnProviderRequestIdentityRef,
+  type AnyProviderExecutionIdentityRef,
   type ChildInvocationRecord,
   type CompletionRef,
   type ContentUnitChannel,
+  type ProviderExecutionIdentityRef,
   type ProviderRawFact,
   type RawAsset,
   type RawContentReadPort,
@@ -31,40 +33,65 @@ import { sameActiveTurnScope } from './active-turn-live-prefix.js';
  * explicitly". A `producersDrained` boolean on the cut is not re-certified here.
  */
 
-type ContentFact = Extract<ProviderRawFact, { kind: 'content' }>;
-type ContentCompleteFact = Extract<ProviderRawFact, { kind: 'content-complete' }>;
-type ToolCallFact = Extract<ProviderRawFact, { kind: 'tool-call' }>;
-type ToolResultFact = Extract<ProviderRawFact, { kind: 'tool-result' }>;
-type RequestCompleteFact = Extract<ProviderRawFact, { kind: 'request-complete' }>;
+type ContentFactOf<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef> = Extract<
+  ProviderRawFact<TIdentity>,
+  { kind: 'content' }
+>;
+type ContentCompleteFactOf<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef> = Extract<
+  ProviderRawFact<TIdentity>,
+  { kind: 'content-complete' }
+>;
+type ToolCallFactOf<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef> = Extract<
+  ProviderRawFact<TIdentity>,
+  { kind: 'tool-call' }
+>;
+type ToolResultFactOf<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef> = Extract<
+  ProviderRawFact<TIdentity>,
+  { kind: 'tool-result' }
+>;
+type RequestCompleteFactOf<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef> = Extract<
+  ProviderRawFact<TIdentity>,
+  { kind: 'request-complete' }
+>;
 
-/** An accepted raw fact narrowed to one existing `ProviderRawFact` variant. */
-type AcceptedFactOf<F extends ProviderRawFact> = AcceptedRawFact & {
-  readonly envelope: RawFactEnvelope & { readonly fact: F };
+/**
+ * An accepted raw fact narrowed to one existing `ProviderRawFact` variant. The
+ * execution identity stays generic so the same fold serves a Task turn, a
+ * taskless helper call and a neutral interaction-parent turn; the default is
+ * the Task-bound identity, so no existing consumer changes shape.
+ */
+type AcceptedFactOf<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+  F extends ProviderRawFact<TIdentity> = ProviderRawFact<TIdentity>,
+> = AcceptedRawFact<TIdentity> & {
+  readonly envelope: RawFactEnvelope<TIdentity> & { readonly fact: F };
 };
 
-export type ResolvedProviderFact =
+export type ResolvedProviderFact<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> =
   | {
       readonly kind: 'content';
-      readonly accepted: AcceptedFactOf<ContentFact>;
+      readonly accepted: AcceptedFactOf<TIdentity, ContentFactOf<TIdentity>>;
       readonly bytes: Uint8Array;
     }
   | {
       readonly kind: 'content-complete';
-      readonly accepted: AcceptedFactOf<ContentCompleteFact>;
+      readonly accepted: AcceptedFactOf<TIdentity, ContentCompleteFactOf<TIdentity>>;
     }
   | {
       readonly kind: 'tool-call';
-      readonly accepted: AcceptedFactOf<ToolCallFact>;
+      readonly accepted: AcceptedFactOf<TIdentity, ToolCallFactOf<TIdentity>>;
       readonly rawArguments: Uint8Array;
     }
   | {
       readonly kind: 'tool-result';
-      readonly accepted: AcceptedFactOf<ToolResultFact>;
+      readonly accepted: AcceptedFactOf<TIdentity, ToolResultFactOf<TIdentity>>;
       readonly rawOutput: Uint8Array;
     }
   | {
       readonly kind: 'request-complete';
-      readonly accepted: AcceptedFactOf<RequestCompleteFact>;
+      readonly accepted: AcceptedFactOf<TIdentity, RequestCompleteFactOf<TIdentity>>;
     };
 
 export interface ResolvedAdoptedChildDelivery {
@@ -74,8 +101,10 @@ export interface ResolvedAdoptedChildDelivery {
   readonly bytes: Uint8Array;
 }
 
-export type ResolvedActiveTurnEntry =
-  | ResolvedProviderFact
+export type ResolvedActiveTurnEntry<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> =
+  | ResolvedProviderFact<TIdentity>
   | ResolvedAdoptedChildDelivery;
 
 export interface ResolvedContentUnit {
@@ -103,14 +132,17 @@ export interface ActiveTurnFoldBinding {
   readonly scope: ScopeRef;
 }
 
-export interface ResolvedActiveTurnCore<Binding extends ActiveTurnFoldBinding = ActiveTurnBinding> {
+export interface ResolvedActiveTurnCore<
+  Binding extends ActiveTurnFoldBinding = ActiveTurnBinding,
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly version: 1;
   readonly binding: Binding;
   readonly initialInput: {
     readonly content: RawAsset;
     readonly bytes: Uint8Array;
   };
-  readonly entries: readonly ResolvedActiveTurnEntry[];
+  readonly entries: readonly ResolvedActiveTurnEntry<TIdentity>[];
   readonly contentUnits: readonly ResolvedContentUnit[];
   readonly requests: readonly RuntimeRequestRecord[];
   readonly childInvocations: readonly ChildInvocationRecord[];
@@ -126,10 +158,14 @@ export interface ResolvedActiveTurn extends ResolvedActiveTurnCore<ActiveTurnBin
  * Shared live/capture input. Both entries are already durable accepted records;
  * the caller owns the cut and validates its own boundary before calling.
  */
-export interface ActiveTurnFoldInput<Cut, Binding extends ActiveTurnFoldBinding = ActiveTurnBinding> {
+export interface ActiveTurnFoldInput<
+  Cut,
+  Binding extends ActiveTurnFoldBinding = ActiveTurnBinding,
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly binding: Binding;
   readonly initialInput: RawAsset;
-  readonly entries: readonly AcceptedTurnEntry[];
+  readonly entries: readonly AcceptedTurnEntry<TIdentity>[];
   readonly requests: readonly RuntimeRequestRecord[];
   readonly childInvocations: readonly ChildInvocationRecord[];
   readonly cut: Cut;
@@ -142,9 +178,14 @@ export interface ActiveTurnFoldInput<Cut, Binding extends ActiveTurnFoldBinding 
  * The common result fields of a live prefix and a drained capture. Both
  * materializers share this shape and differ only by their cut.
  */
-export type ResolvedActiveTurnFold<Cut, Binding extends ActiveTurnFoldBinding = ActiveTurnBinding> = ResolvedActiveTurnCore<Binding> & {
+export type ResolvedActiveTurnFold<
+  Cut,
+  Binding extends ActiveTurnFoldBinding = ActiveTurnBinding,
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = ResolvedActiveTurnCore<Binding, TIdentity> & {
   readonly cut: Cut;
 };
+
 
 function fail(code: string, message: string): never {
   throw new RuntimeActiveTurnError(code, message);
@@ -181,8 +222,11 @@ function concat(left: Uint8Array, right: Uint8Array): Uint8Array {
   return merged;
 }
 
-function acceptedAs<F extends ProviderRawFact>(entry: AcceptedRawFact): AcceptedFactOf<F> {
-  return structuredClone(entry) as AcceptedFactOf<F>;
+function acceptedAs<
+  TIdentity extends AnyProviderExecutionIdentityRef,
+  F extends ProviderRawFact<TIdentity>,
+>(entry: AcceptedRawFact<TIdentity>): AcceptedFactOf<TIdentity, F> {
+  return structuredClone(entry) as AcceptedFactOf<TIdentity, F>;
 }
 
 interface MutableUnit {
@@ -232,9 +276,13 @@ export async function materializeActiveTurn(input: {
  * The caller owns validation of its own boundary (a drained v1 body or a live
  * committed prefix) and the cut it supplies. This function makes no drain claim.
  */
-export async function foldActiveTurn<Cut, Binding extends ActiveTurnFoldBinding = ActiveTurnBinding>(
-  input: ActiveTurnFoldInput<Cut, Binding>,
-): Promise<ResolvedActiveTurnFold<Cut, Binding>> {
+export async function foldActiveTurn<
+  Cut,
+  Binding extends ActiveTurnFoldBinding = ActiveTurnBinding,
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(
+  input: ActiveTurnFoldInput<Cut, Binding, TIdentity>,
+): Promise<ResolvedActiveTurnFold<Cut, Binding, TIdentity>> {
   const {
     binding,
     initialInput,
@@ -282,7 +330,7 @@ export async function foldActiveTurn<Cut, Binding extends ActiveTurnFoldBinding 
     return new Uint8Array(bytes);
   };
 
-  const resolvedEntries: ResolvedActiveTurnEntry[] = [];
+  const resolvedEntries: ResolvedActiveTurnEntry<TIdentity>[] = [];
   const units: MutableUnit[] = [];
   const unitByKey = new Map<string, MutableUnit>();
   const unitsByRequestUnit = new Map<string, MutableUnit[]>();
@@ -368,7 +416,7 @@ export async function foldActiveTurn<Cut, Binding extends ActiveTurnFoldBinding 
             }
           }
         }
-        resolvedEntries.push({ kind: 'content', accepted: acceptedAs<ContentFact>(entry), bytes });
+        resolvedEntries.push({ kind: 'content', accepted: acceptedAs<TIdentity, ContentFactOf<TIdentity>>(entry), bytes });
         break;
       }
       case 'content-complete': {
@@ -386,12 +434,12 @@ export async function foldActiveTurn<Cut, Binding extends ActiveTurnFoldBinding 
         unit.complete = true;
         unit.lastSeq = entry.seq;
         unit.sourceSeqs.push(entry.seq);
-        resolvedEntries.push({ kind: 'content-complete', accepted: acceptedAs<ContentCompleteFact>(entry) });
+        resolvedEntries.push({ kind: 'content-complete', accepted: acceptedAs<TIdentity, ContentCompleteFactOf<TIdentity>>(entry) });
         break;
       }
       case 'tool-call': {
         const rawArguments = await readBytes(binding.scope, fact.rawArguments);
-        resolvedEntries.push({ kind: 'tool-call', accepted: acceptedAs<ToolCallFact>(entry), rawArguments });
+        resolvedEntries.push({ kind: 'tool-call', accepted: acceptedAs<TIdentity, ToolCallFactOf<TIdentity>>(entry), rawArguments });
         break;
       }
       case 'tool-result': {
@@ -399,11 +447,11 @@ export async function foldActiveTurn<Cut, Binding extends ActiveTurnFoldBinding 
           fail('active-turn.materialize.tool-result-unpaired', `tool result ${fact.callId} has no captured call in its request`);
         }
         const rawOutput = await readBytes(binding.scope, fact.rawOutput);
-        resolvedEntries.push({ kind: 'tool-result', accepted: acceptedAs<ToolResultFact>(entry), rawOutput });
+        resolvedEntries.push({ kind: 'tool-result', accepted: acceptedAs<TIdentity, ToolResultFactOf<TIdentity>>(entry), rawOutput });
         break;
       }
       case 'request-complete': {
-        resolvedEntries.push({ kind: 'request-complete', accepted: acceptedAs<RequestCompleteFact>(entry) });
+        resolvedEntries.push({ kind: 'request-complete', accepted: acceptedAs<TIdentity, RequestCompleteFactOf<TIdentity>>(entry) });
         break;
       }
       default:

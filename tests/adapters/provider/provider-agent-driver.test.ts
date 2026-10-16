@@ -11,6 +11,8 @@ import {
   type EvidenceRef,
   type ExecutionRuntimePort,
   type InteractionHelperIdentity,
+  type InteractionParentProviderExecutionIdentityRef,
+  type InteractionTurnIdentity,
   type ProviderBinding,
   type ProviderCapabilities,
   type ProviderCloseResult,
@@ -29,6 +31,7 @@ import {
   type ProviderToolCall,
   type ProviderToolStatus,
   type NativeRequestRegistration,
+  type RawAsset,
   type RawFactEnvelope,
   type RuntimeRequestRecord,
   type ScopeRef,
@@ -61,6 +64,7 @@ import {
 import { providerRawContentReader } from '../../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../../packages/adapters/filesystem/src/index.js';
 import { ActiveTurnContext } from '../../../packages/runtime/src/context/active-turn-context.js';
+import { foldActiveTurn } from '../../../packages/runtime/src/context/active-turn-materializer.js';
 import type {
   ActiveTurnJournalPort,
   ActiveTurnJournalRecord,
@@ -438,12 +442,14 @@ test('provider agent driver executes a complete Responses tool call once and con
     toolId: 'file.read',
     arguments: { path: 'README.md' },
     continuationRef: 'response-round-1',
+    evidenceRefs: [evidence],
     output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }),
   }, {
     callId: 'call-package',
     toolId: 'file.read',
     arguments: { path: 'package.json' },
     continuationRef: 'response-round-1',
+    evidenceRefs: [evidence],
     output: JSON.stringify({ path: 'package.json', content: 'REAL_PACKAGE_CONTENT' }),
   }]);
   assert.deepEqual(events.map((event) => [event.kind, event.summary, event.terminalState]), [
@@ -1752,6 +1758,222 @@ test('provider agent driver runs a taskless helper through the real adapter tool
   const mismatch = new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>(options);
   await assert.rejects(
     () => mismatch.start({ ...helperExecution, helper: { ...helper, helperCallId: 'helper-call-other' } }),
+    (error) => error instanceof ProviderAdapterError && error.providerError.code === 'runtime.identity.mismatch',
+  );
+});
+
+test('provider agent driver runs a neutral interaction-parent turn through the real adapter tool round without a task or helper', async () => {
+  // The neutral interaction parent is the third identity shape: a real
+  // interaction turn and no Task, cycle or helper. This consumer drives the same
+  // adapter tool round the Task and taskless-helper paths use, then folds the
+  // durable parent facts through the shared Runtime materializer.
+  const parentOrgan = id('organ', 'organ-interaction-parent');
+  const parentOperation = id('operation', 'operation-interaction-parent');
+  const parentScope: ScopeRef = { organId: parentOrgan, operationId: parentOperation };
+  const parentEvidence: EvidenceRef = {
+    evidenceId: id('evidence', 'interaction-parent-scope'),
+    kind: 'operation',
+    source: 'provider-agent-driver-test',
+    locator: `operation/${parentOperation.value}/scope`,
+    scope: parentScope,
+  };
+  const interactionTurn: InteractionTurnIdentity = {
+    organId: parentOrgan,
+    interactionScopeId: 'interaction-parent-1',
+    interactionId: 'interaction-parent-1',
+    inputRevision: 1,
+    turnId: 'turn-interaction-parent-1',
+  };
+  const parentExecution: InteractionParentProviderExecutionIdentityRef = {
+    runtimeId: identity.runtimeId,
+    organId: parentOrgan,
+    operationId: parentOperation,
+    executionEpoch: 1,
+    interactionTurn,
+  };
+  let round = 0;
+  const fetch: V3ProviderFetch = async () => {
+    round += 1;
+    if (round === 1) {
+      return delayedResponse(chunks([
+        `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-parent-1' } })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { type: 'function_call', call_id: 'call-parent-read', name: 'file_read', arguments: '' },
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'function_call', call_id: 'call-parent-read', name: 'file_read', arguments: '{"path":"README.md"}' },
+        })}\n\n`,
+        `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-parent-1' } })}\n\n`,
+      ]));
+    }
+    return delayedResponse(chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-parent-2' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'final-message', text: 'README.md read' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-parent-2' } })}\n\n`,
+    ]));
+  };
+  const captured = recordingEvidenceSink();
+  const accepted: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef>[] = [];
+  const registrations: NativeRequestRegistration[] = [];
+  const lifecycle: ProviderRequestLifecycleEvent<InteractionParentProviderExecutionIdentityRef>[] = [];
+  const adapter = new ProviderAdapter<InteractionParentProviderExecutionIdentityRef>({
+    binding,
+    routeRef: 'test-route',
+    codec: new ResponsesProviderCodec(),
+    transport: createV3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+      binding,
+      baseUrl: 'http://127.0.0.1:4444',
+      evidence: captured.sink,
+      fetch,
+    }),
+    evidence: captured.sink,
+  });
+  const options: ProviderAgentDriverOptions<InteractionParentProviderExecutionIdentityRef> = {
+    port: adapter,
+    binding,
+    runtimeId: identity.runtimeId,
+    organId: parentOrgan,
+    interactionTurn,
+    operationId: parentOperation,
+    executionEpoch: 1,
+    assignmentId: 'assignment-interaction-parent-1',
+    scope: parentScope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    rawEvidence: captured.sink,
+    acceptRawFact: async (envelope) => {
+      validateRawFactEnvelope(envelope);
+      accepted.push(envelope);
+      return { seq: accepted.length, envelope };
+    },
+    registerRequest: async (registration) => {
+      registrations.push(registration);
+      return registration.record;
+    },
+    onRequestLifecycle(event) {
+      lifecycle.push(event);
+    },
+    executeTool: {
+      async execute() {
+        return {
+          output: JSON.stringify({ path: 'README.md', content: 'README_CONTENT' }),
+          outputRefs: ['asset://provider-tool/readme'],
+          evidenceRefs: [parentEvidence],
+        };
+      },
+    },
+  };
+  const instance = new ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef>(options);
+  await instance.start({ ...parentExecution });
+  const submitted = await instance.submit({
+    ...parentExecution,
+    assignmentId: 'assignment-interaction-parent-1',
+    payload: { prompt: 'read README.md' },
+  });
+  assert.equal(submitted.payload.status, 'accepted');
+
+  const observed: ProviderAgentEvent<InteractionParentProviderExecutionIdentityRef>[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) observed.push(event);
+  const settled = await instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 });
+  assert.equal(settled.state, 'succeeded');
+  assert.deepEqual(observed.map((event) => event.kind), [
+    'provider.model',
+    'provider.model',
+    'provider.tool',
+    'provider.tool-result',
+    'provider.model',
+    'provider.output',
+    'provider.terminal',
+  ]);
+
+  // Every event carries the real interaction turn and no Task or helper.
+  for (const event of observed) {
+    assert.deepEqual(event.interactionTurn, interactionTurn);
+    assert.deepEqual(event.providerEvent.interactionTurn, interactionTurn);
+    assert.equal('taskId' in event, false);
+    assert.equal('helper' in event, false);
+  }
+  assert.equal(lifecycle.length > 0, true);
+  for (const event of lifecycle) {
+    assert.deepEqual(event.interactionTurn, interactionTurn);
+    assert.equal('taskId' in event, false);
+    assert.equal('helper' in event, false);
+  }
+  assert.equal(lifecycle.find((event) => event.phase === 'waiting')?.externalResponseId, 'resp-parent-1');
+  assert.equal(lifecycle.at(-1)?.externalResponseId, 'resp-parent-2');
+
+  const settlement = instance.settlement();
+  assert.ok(settlement);
+  const scopeRefs = [...settled.evidenceRefs, ...settlement.evidenceRefs];
+  assert.ok(scopeRefs.length > 0);
+  for (const ref of scopeRefs) {
+    assert.equal(ref.scope.organId.value, parentOrgan.value);
+    assert.equal(ref.scope.operationId?.value, parentOperation.value);
+    assert.equal(ref.scope.taskId, undefined);
+  }
+
+  const toolResultEnvelope = accepted.find((envelope) => envelope.fact.kind === 'tool-result');
+  assert.ok(toolResultEnvelope, 'expected a durably accepted parent tool-result raw fact');
+  if (toolResultEnvelope.fact.kind !== 'tool-result') throw new Error('expected a tool-result raw fact');
+  const toolResult = toolResultEnvelope.fact.result;
+  assert.deepEqual(toolResult.interactionTurn, interactionTurn);
+  assert.equal('taskId' in toolResult, false);
+  assert.equal('helper' in toolResult, false);
+  assert.equal(toolResult.runtimeId, parentExecution.runtimeId);
+  assert.equal(toolResult.executionEpoch, parentExecution.executionEpoch);
+  assert.equal(
+    captured.writes.find((write) => write.type === 'tool-result-output')?.content,
+    JSON.stringify({ path: 'README.md', content: 'README_CONTENT' }),
+  );
+  assert.ok(registrations.length > 0);
+  assert.equal(registrations.every(({ record }) => record.scope.taskId === undefined), true);
+  assert.equal(registrations.every(({ record }) => record.scope.operationId?.value === parentOperation.value), true);
+
+  // The shared Runtime materializer folds the durable parent facts: the tool
+  // result resolves and still carries the real interaction turn.
+  const inputRef = await captured.sink.write({
+    scope: parentScope,
+    kind: 'operation',
+    type: 'interaction-parent-input',
+    locator: `operation/${parentOperation.value}/input`,
+    content: 'read README.md',
+  });
+  const initialInput: RawAsset = { ref: inputRef, view: { kind: 'utf8-text' } };
+  const folded = await foldActiveTurn<{ readonly producersDrained: true }, { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: ScopeRef }, InteractionParentProviderExecutionIdentityRef>({
+    binding: { execution: parentExecution, scope: parentScope },
+    initialInput,
+    entries: accepted.map((envelope, index) => ({ seq: index + 1, envelope })),
+    requests: registrations.map(({ record }) => record),
+    childInvocations: [],
+    cut: { producersDrained: true },
+    checkpointPath: [],
+    completionRefs: [],
+    rawContent: providerRawContentReader(captured.sink),
+  });
+  const foldedToolResult = folded.entries.find((entry) => entry.kind === 'tool-result');
+  assert.ok(foldedToolResult, 'expected the shared materializer to fold the parent tool-result');
+  if (!foldedToolResult || foldedToolResult.kind !== 'tool-result') throw new Error('expected a folded tool-result');
+  assert.deepEqual(foldedToolResult.accepted.envelope.fact.result.interactionTurn, interactionTurn);
+
+  const wrongEpoch: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef> = {
+    ...toolResultEnvelope,
+    fact: {
+      ...toolResultEnvelope.fact,
+      result: { ...toolResult, executionEpoch: toolResult.executionEpoch + 1 },
+    },
+  };
+  assert.throws(
+    () => validateRawFactEnvelope(wrongEpoch),
+    (error) => error instanceof ContractError,
+  );
+
+  const mismatch = new ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef>(options);
+  await assert.rejects(
+    () => mismatch.start({ ...parentExecution, interactionTurn: { ...interactionTurn, turnId: 'turn-interaction-parent-other' } }),
     (error) => error instanceof ProviderAdapterError && error.providerError.code === 'runtime.identity.mismatch',
   );
 });

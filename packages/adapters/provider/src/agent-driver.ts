@@ -31,6 +31,8 @@ import {
   type ProviderExecutionIdentityRef,
   type TasklessProviderExecutionIdentityRef,
   type InteractionHelperIdentity,
+  type InteractionParentProviderExecutionIdentityRef,
+  type InteractionTurnIdentity,
   type OrganId,
   type ProviderSettlement,
   type ProviderStartInput,
@@ -84,6 +86,7 @@ export interface ProviderAgentDriverCommonOptions<TIdentity extends AnyProviderE
   readonly taskId?: TaskId;
   readonly organId?: OrganId;
   readonly helper?: InteractionHelperIdentity;
+  readonly interactionTurn?: InteractionTurnIdentity;
   readonly operationId: OperationId;
   readonly executionEpoch: number;
   readonly assignmentId: string;
@@ -125,7 +128,14 @@ export type ProviderAgentDriverOptions<
 > = ProviderAgentDriverCommonOptions<TIdentity> & (
   TIdentity extends TasklessProviderExecutionIdentityRef
     ? { readonly taskId?: never; readonly organId: OrganId; readonly helper: InteractionHelperIdentity }
-    : { readonly taskId: TaskId; readonly helper?: never }
+    : TIdentity extends InteractionParentProviderExecutionIdentityRef
+      ? {
+          readonly taskId?: never;
+          readonly helper?: never;
+          readonly organId: OrganId;
+          readonly interactionTurn: InteractionTurnIdentity;
+        }
+      : { readonly taskId: TaskId; readonly helper?: never }
 );
 
 export interface ProviderToolExecutionResult {
@@ -197,8 +207,9 @@ function mergeRequestScopedInstructions(
 
 /**
  * The single execution identity this driver runs under: a Task identity for
- * legacy callers, or a taskless helper identity when the caller binds a helper.
- * Both flow through the same lifecycle and ports.
+ * legacy callers, a taskless helper identity when the caller binds a helper,
+ * or a neutral interaction-parent identity when the caller binds the real
+ * interaction turn. All three flow through the same lifecycle and ports.
  */
 function resolveExecutionIdentity<TIdentity extends AnyProviderExecutionIdentityRef>(
   options: ProviderAgentDriverOptions<TIdentity>,
@@ -212,6 +223,14 @@ function resolveExecutionIdentity<TIdentity extends AnyProviderExecutionIdentity
       executionEpoch: options.executionEpoch,
       helper: options.helper,
     };
+  } else if (options.interactionTurn !== undefined && options.organId !== undefined && options.taskId === undefined) {
+    candidate = {
+      runtimeId: options.runtimeId,
+      organId: options.organId,
+      operationId: options.operationId,
+      executionEpoch: options.executionEpoch,
+      interactionTurn: options.interactionTurn,
+    };
   } else if (options.taskId !== undefined) {
     candidate = {
       runtimeId: options.runtimeId,
@@ -224,7 +243,7 @@ function resolveExecutionIdentity<TIdentity extends AnyProviderExecutionIdentity
       code: 'runtime.identity.missing',
       category: 'runtime',
       phase: 'start',
-      message: 'provider agent driver requires either a task identity or a helper identity',
+      message: 'provider agent driver requires a task identity, a helper identity, or an interaction turn identity',
       scope: options.scope,
     });
   }
@@ -233,6 +252,8 @@ function resolveExecutionIdentity<TIdentity extends AnyProviderExecutionIdentity
     // assembled identity before it becomes the driver's execution. A taskless
     // helper identity must carry a full helper and no task/cycle; a legacy Task
     // identity must carry a task. Nothing downstream re-checks with a bare cast.
+    // An interaction-parent identity must carry the real interaction turn and
+    // no task, cycle or helper.
     assertProviderExecutionIdentity(candidate);
   } catch (error) {
     throw new ProviderAdapterError({
@@ -1312,7 +1333,7 @@ export class ProviderAgentDriver<
   }
 
   private assertIdentity(input: AgentStartRequest<TIdentity>): void {
-    if (isTasklessIdentity(input)) {
+    if (isTasklessIdentity(input) || this.isInteractionParentIdentity(input)) {
       if (!sameExecution(this.execution, input)) {
         throw this.error('runtime.identity.mismatch', 'provider agent driver received another execution identity', 'start', 'runtime');
       }
@@ -1328,7 +1349,7 @@ export class ProviderAgentDriver<
   }
 
   private sameEnvelope(input: AgentInput<TIdentity>): boolean {
-    if (isTasklessIdentity(input)) {
+    if (isTasklessIdentity(input) || this.isInteractionParentIdentity(input)) {
       return sameExecution(this.execution, input);
     }
     const expected: Partial<ProviderExecutionIdentityRef> = this.execution;
@@ -1346,6 +1367,10 @@ export class ProviderAgentDriver<
     if (!sameExecution(this.execution, input)) {
       throw this.error('runtime.identity.mismatch', `${label} belongs to another execution`, phase, 'runtime');
     }
+  }
+
+  private isInteractionParentIdentity(input: object): input is InteractionParentProviderExecutionIdentityRef {
+    return 'interactionTurn' in input && input.interactionTurn !== undefined;
   }
 
   private error(
