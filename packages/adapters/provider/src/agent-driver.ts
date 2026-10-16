@@ -88,6 +88,13 @@ export interface ProviderAgentDriverCommonOptions<TIdentity extends AnyProviderE
   readonly organId?: OrganId;
   readonly helper?: InteractionHelperIdentity;
   readonly interactionTurn?: InteractionTurnIdentity;
+  /**
+   * Optional settled local request parent for the first request of a new driver
+   * instance continuing an existing turn in a new executionEpoch. Preserves
+   * `turnId` and sets `parentRequestId` on the initial request without reusing
+   * any remote provider response id.
+   */
+  readonly parentRequest?: ActiveTurnProviderRequestIdentityRef;
   readonly operationId: OperationId;
   readonly executionEpoch: number;
   readonly assignmentId: string;
@@ -366,6 +373,7 @@ export class ProviderAgentDriver<
   private continuationCompletion?: Promise<void>;
   private initialPayload?: BusinessPayload;
   private turnId?: string;
+  private readonly initialParentRequest?: ActiveTurnProviderRequestIdentityRef;
   private activeRequest?: RequestAttempt;
   private readonly requests: RequestAttempt[] = [];
   private readonly inflight = new Set<Promise<unknown>>();
@@ -395,6 +403,28 @@ export class ProviderAgentDriver<
         'start',
         'runtime',
       );
+    }
+    if (options.parentRequest !== undefined) {
+      const parent = options.parentRequest;
+      if (typeof parent.turnId !== 'string' || parent.turnId.trim() === ''
+        || typeof parent.requestId !== 'string' || parent.requestId.trim() === ''
+        || (parent.parentRequestId !== undefined
+          && (typeof parent.parentRequestId !== 'string'
+            || parent.parentRequestId.trim() === ''
+            || parent.parentRequestId === parent.requestId))) {
+        throw this.error(
+          'runtime.identity.invalid',
+          'provider agent driver received an invalid parent request identity',
+          'start',
+          'runtime',
+        );
+      }
+      this.initialParentRequest = {
+        turnId: parent.turnId,
+        requestId: parent.requestId,
+        ...(parent.parentRequestId === undefined ? {} : { parentRequestId: parent.parentRequestId }),
+      };
+      this.turnId = this.initialParentRequest.turnId;
     }
     this.evidenceRef = operationEvidence(options.scope, options.operationId);
     this.now = options.now ?? (() => new Date());
@@ -1102,7 +1132,10 @@ export class ProviderAgentDriver<
   }
 
   private nextRequest(): RequestAttempt {
-    const parentRequestId = this.activeRequest?.requestId;
+    // A new driver instance continuing a reconciled turn must anchor its first
+    // request to the settled parent leaf instead of becoming a second root.
+    const parentRequestId = this.activeRequest?.requestId
+      ?? (this.requests.length === 0 ? this.initialParentRequest?.requestId : undefined);
     const request: RequestAttempt = {
       turnId: this.turnId ?? requestIdentity('turn'),
       requestId: requestIdentity('request'),
