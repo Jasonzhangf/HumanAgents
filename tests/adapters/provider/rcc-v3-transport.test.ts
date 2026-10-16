@@ -987,8 +987,9 @@ test('RCC v3 failed settlement persists and returns the configured error evidenc
   assert.equal(failed.state, 'failed');
   const errorEvidenceIndex = built.writes.findIndex((write) => write.type === 'settle-error');
   assert.ok(errorEvidenceIndex >= 0);
-  assert.deepEqual(failed.error?.evidenceRefs, [built.refs[errorEvidenceIndex]]);
-  assert.equal(failed.error?.evidenceRefs[0]?.locator, 'rcc-v3://settle-error');
+  assert.deepEqual(failed.error?.evidenceRefs.map((ref) => ref.locator), ['rcc-v3://observe-overloaded', 'rcc-v3://settle-error']);
+  assert.deepEqual(failed.error?.evidenceRefs.at(-1), built.refs[errorEvidenceIndex]);
+  assert.equal(failed.error?.evidenceRefs.at(-1)?.locator, 'rcc-v3://settle-error');
 
   const incomplete = transportHarness();
   seedActive(incomplete.transport, chunks(['data: {"type":"response.created"}']));
@@ -997,7 +998,7 @@ test('RCC v3 failed settlement persists and returns the configured error evidenc
   }, /incomplete|terminal/);
   const incompleteSettlement = await incomplete.transport.settle(execution);
   assert.equal(incompleteSettlement.state, 'failed');
-  assert.equal(incompleteSettlement.error?.evidenceRefs[0]?.locator, 'rcc-v3://settle-error');
+  assert.equal(incompleteSettlement.error?.evidenceRefs.at(-1)?.locator, 'rcc-v3://settle-error');
 });
 
 for (const stopReason of ['tool_use', 'max_tokens', 'pause_turn'] as const) {
@@ -1021,7 +1022,8 @@ for (const stopReason of ['tool_use', 'max_tokens', 'pause_turn'] as const) {
     assert.equal(settled.nextAction?.kind, 'recover');
     const errorEvidenceIndex = built.writes.findIndex((write) => write.type === 'settle-error');
     assert.ok(errorEvidenceIndex >= 0);
-    assert.deepEqual(settled.error?.evidenceRefs, [built.refs[errorEvidenceIndex]]);
+    assert.deepEqual(settled.error?.evidenceRefs.map((ref) => ref.locator), ['rcc-v3://settle-capability.continuation-unavailable', 'rcc-v3://settle-error']);
+    assert.deepEqual(settled.error?.evidenceRefs.at(-1), built.refs[errorEvidenceIndex]);
   });
 }
 
@@ -1161,7 +1163,7 @@ test('RCC v3 provider failure remains failed when exact stop abort closes observ
   assert.equal(settled.persistence.state, 'pending');
   assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), false);
   assert.equal((await built.transport.close(binding)).state, 'closed');
-  const errorRef = settled.error?.evidenceRefs[0];
+  const errorRef = settled.error?.evidenceRefs.at(-1);
   assert.ok(errorRef);
   const readable = await built.evidence.read(errorRef);
   assert.match(new TextDecoder().decode(readable), /overloaded/);
@@ -1389,6 +1391,18 @@ test('RCC v3 preserves the transport cause chain and records request-scoped obse
   const settled = await built.adapter.settle(execution);
   assert.equal(settled.state, 'failed');
   assert.equal(settled.error?.code, 'transport.failure');
+  // Settling must not drop the request-scoped observe-error reference. Both the
+  // settled artifact and the returned error keep the prior refs and add the new
+  // settle-error ref.
+  const observeErrorRef = adapterError.providerError.evidenceRefs[0];
+  const settleErrorWrites = built.writes.filter((write) => write.type === 'settle-error');
+  assert.equal(settleErrorWrites.length, 1);
+  const settleContent = settleErrorWrites[0].content as Record<string, unknown>;
+  assert.deepEqual(settleContent.evidenceRefs, [observeErrorRef]);
+  const settledEvidenceRefs = settled.error?.evidenceRefs ?? [];
+  assert.equal(settledEvidenceRefs.length, 2);
+  assert.deepEqual(settledEvidenceRefs[0], observeErrorRef);
+  assert.equal(settledEvidenceRefs[1]?.locator, 'rcc-v3://settle-error');
 
   const writeFailure = new Error('observe-error sink unavailable');
   const failing = adapter(async () => response(closingBody));
