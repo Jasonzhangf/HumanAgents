@@ -42,7 +42,8 @@ import {
 import { SessionStore } from './session-store.js';
 import { startUiRuntime } from './ui-runtime/index.js';
 import { assembleProviderExecutionPort } from './provider-assembly.js';
-import { closeAgentProvider, prepareAgentProvider, providerBindingFromConfig, type AgentProviderComposition } from './agent-driver-composition.js';
+import { closeAgentProvider, createAgentProviderPort, prepareAgentProvider, prepareExecutionAgentProvider,
+  providerBindingFromConfig, type AgentProviderComposition } from './agent-driver-composition.js';
 import type { MemoryAgentOptions } from '../../runtime/src/memory/agent.js';
 import { AccessControlService, deriveSupervisorToken } from './ui-runtime/access-control.js';
 import type { ProductPrincipalVerification, VerifiedProductPrincipal } from './ui-runtime/access-control.js';
@@ -1727,7 +1728,35 @@ export async function main(args: readonly string[]): Promise<void> {
               },
             },
             runtimeComposition: {
-              ...(mode === 'fake' ? {} : { prepareAgentProvider: prepareSelectedAgentProvider }),
+              ...(mode === 'fake' ? {} : {
+                prepareAgentProvider: prepareSelectedAgentProvider,
+                // The Task-scoped preparer hands the selected execution
+                // composition's custody to the prepared-stop owner before the
+                // fallible acquisition append. It reuses the same compiled
+                // bindings, effective legacy provider and port factory as the
+                // neutral preparer; it never re-parses config or substitutes
+                // the default Provider.
+                prepareTaskAgentProvider: (
+                  selection: { readonly roleId: import('../../config/src/index.js').AgentRole; readonly configuredAgentId?: string },
+                  owner: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStop,
+                  lease: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStopPreparationLease,
+                ) => prepareExecutionAgentProvider({
+                  roleId: selection.roleId,
+                  ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+                  agentProviderBindings: configuration.agentProviderBindings,
+                  legacyProvider: effectiveLegacyProvider,
+                  legacyBindingOverrides: {
+                    endpointRef: binding.endpointRef,
+                    configDigest: binding.configDigest,
+                    capabilityDigest: binding.capabilityDigest,
+                  },
+                  createPort: (selected) => createAgentProviderPort(
+                    selected,
+                    evidenceRoot,
+                    option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+                  ),
+                }, owner, lease),
+              }),
               ...(orchestrationPorts === undefined ? {} : {
                 createTaskAssembly: serveRuntime!.createTaskAssembly,
               }),
