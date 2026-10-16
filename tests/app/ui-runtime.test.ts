@@ -4174,6 +4174,13 @@ test('runtime close quiesces pending implicit consumption before settling active
     await first.close().catch(() => undefined);
   }
 
+  // The durable requirement keeps its visible queued row after close has
+  // settled the retired runtime. Grant that exact queued task before the
+  // replacement runtime starts, so its FIFO dispatch can pass admission.
+  const queuedTask = first.service.listTasks().draft.find((row) => row.requirementAdmission === 'queued');
+  if (!queuedTask) throw new Error('confirmed requirement must remain visibly queued for the replacement grant');
+  await grantRuntimeTask(first, queuedTask.taskId, join(root, 'checkpoints'), 'fake');
+
   const replacement = await startUiRuntime(options);
   try {
     await waitFor(() => assert.equal(port.startPayloads.length, 1));
@@ -5265,6 +5272,12 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
       }),
     });
     assert.equal(confirmationResponse.status, 200);
+    // Grant the exact confirmed requirement's queued task before the 100ms FIFO
+    // visibility window drains it, so implicit admission succeeds on the same
+    // task identity that the confirmation response just created.
+    const queuedTask = runtime.service.listTasks().draft.find((row) => row.requirementAdmission === 'queued');
+    if (!queuedTask) throw new Error('confirmed HTTP requirement must be visibly queued before the implicit grant');
+    await grantRuntimeTask(runtime, queuedTask.taskId, join(root, 'checkpoints'), 'fake');
     await waitFor(() => assert.equal(runtime.service.listTasks().counts.total, 1));
     await waitFor(() => assert.equal(runtime.service.listTasks().counts.completed, 1));
 
