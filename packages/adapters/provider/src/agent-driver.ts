@@ -2,6 +2,7 @@ import {
   assertProviderExecutionIdentity,
   assertProviderExecutionIdentityMatch,
   id,
+  isStandardTurnEndToolId,
   validateProviderToolResult,
   validateProviderRequestLifecycleEvent,
   type AnyProviderExecutionIdentityRef,
@@ -679,6 +680,10 @@ export class ProviderAgentDriver<
         if (this.stopping) return;
         if (status !== 'succeeded') {
           yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} ${status}`);
+          if (result.status === 'failed' && isStandardTurnEndToolId(call.toolId)) {
+            toolHistory.push({ call, result });
+            continue;
+          }
           throw this.toolResultFailure(toolResult);
         }
         yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} succeeded`);

@@ -35,6 +35,7 @@ import {
   type RawFactEnvelope,
   type RuntimeRequestRecord,
   type ScopeRef,
+  STANDARD_TURN_END_WIRE_TOOL_ID,
   type WorkAssignment,
 } from '../../../packages/contracts/src/index.js';
 import type { ProviderRequestContextHook } from '../../../packages/contracts/src/provider-request-context.js';
@@ -693,6 +694,170 @@ test('provider driver preserves explicit non-success executor states without emi
   assert.equal(observed.every((result, index) => result.errorMessage?.includes(statuses[index]!)), true);
   assert.deepEqual(observed.map((result) => result.summary), statuses.map((status) => `file.search ${status}`));
   assert.deepEqual(observed.map((result) => result.fact), statuses.map(() => undefined));
+});
+
+test('provider agent driver continues after a persisted reserved standard-turn-end refusal', async () => {
+  const refusedOutput = JSON.stringify({
+    owner: 'humanagent.app',
+    kind: 'standard-turn-end',
+    turnId: 'active-turn-ui-operation-1',
+    accepted: false,
+    error: {
+      code: 'standard-turn-end.delivery-unresolved',
+      message: 'delivery reference ux-handoff.md does not resolve to evidence scoped to this admitted turn',
+    },
+  });
+  const correctedOutput = JSON.stringify({
+    owner: 'humanagent.app',
+    kind: 'standard-turn-end',
+    turnId: 'active-turn-ui-operation-1',
+    accepted: true,
+  });
+  const refusal: ProviderError = {
+    errorId: 'provider.turn-end.refused',
+    code: 'standard-turn-end.delivery-unresolved',
+    category: 'provider',
+    phase: 'tool',
+    message: 'delivery reference ux-handoff.md does not resolve to evidence scoped to this admitted turn',
+    ownerId: 'humanagent.app',
+    retryable: 'manual',
+    attention: 'foreground',
+    evidenceRefs: [evidence],
+    nextAction: { kind: 'recover', ref: 'standard-turn-end.delivery-unresolved' },
+  };
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const executedCallIds: string[] = [];
+  const acceptedFacts: RawFactEnvelope[] = [];
+  const acceptedToolResults: Array<{ readonly status: string; readonly code: string | undefined }> = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round <= 2) {
+        const refused = round === 1;
+        yield {
+          ...identity,
+          eventId: refused ? 'event-turn-end-refused' : 'event-turn-end-corrected',
+          kind: 'tool',
+          summary: STANDARD_TURN_END_WIRE_TOOL_ID,
+          outputRefs: [`artifact://turn-end-${round}`],
+          evidenceRefs: [evidence],
+          toolCall: {
+            callId: refused ? 'call-turn-end-refused' : 'call-turn-end-corrected',
+            toolId: STANDARD_TURN_END_WIRE_TOOL_ID,
+            arguments: {
+              summary: { result: refused ? 'refuse invalid delivery' : 'deliver corrected result' },
+              deliveryRefs: [refused ? 'ux-handoff.md' : 'provider-scoped-evidence'],
+            },
+            continuationRef: `response-round-${round}`,
+          },
+        };
+        yield {
+          ...identity,
+          eventId: `event-waiting-${round}`,
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-turn-end-complete', kind: 'output', summary: 'turn ended', outputRefs: ['output-final'], evidenceRefs: [evidence] };
+      yield { ...identity, eventId: 'event-turn-end-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const captured = recordingEvidenceSink();
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: STANDARD_TURN_END_WIRE_TOOL_ID, description: 'end the current turn', inputSchema: { type: 'object' } }],
+    rawEvidence: captured.sink,
+    acceptRawFact: async (envelope) => {
+      acceptedFacts.push(envelope);
+      if (envelope.fact.kind === 'tool-result') {
+        acceptedToolResults.push({
+          status: envelope.fact.result.status,
+          code: envelope.fact.result.error?.code,
+        });
+      }
+      return { seq: acceptedFacts.length, acceptedAt: '2026-10-16T00:00:00.000Z', envelope };
+    },
+    registerRequest: async (registration) => registration.record,
+    executeTool: {
+      async execute({ call }) {
+        executedCallIds.push(call.callId);
+        if (call.callId === 'call-turn-end-refused') {
+          return {
+            output: refusedOutput,
+            outputRefs: ['asset://provider-tool/refused'],
+            evidenceRefs: [evidence],
+            status: 'failed',
+            error: refusal,
+          };
+        }
+        return {
+          output: correctedOutput,
+          outputRefs: ['asset://provider-tool/corrected'],
+          evidenceRefs: [evidence],
+          status: 'succeeded',
+        };
+      },
+    },
+  });
+
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'end the turn' } });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  assert.deepEqual(executedCallIds, ['call-turn-end-refused', 'call-turn-end-corrected']);
+  assert.equal(submissions.length, 2);
+  assert.equal(submissions[0]?.toolContinuations?.[0]?.output, refusedOutput);
+  assert.equal(submissions[0]?.toolContinuations?.[0]?.callId, 'call-turn-end-refused');
+  assert.deepEqual(
+    submissions[1]?.toolContinuations?.map((continuation) => [continuation.callId, continuation.output]),
+    [
+      ['call-turn-end-refused', refusedOutput],
+      ['call-turn-end-corrected', correctedOutput],
+    ],
+  );
+  assert.deepEqual(
+    submissions.map((submission) => ({
+      runtimeId: submission.runtimeId,
+      taskId: submission.taskId,
+      operationId: submission.operationId,
+      executionEpoch: submission.executionEpoch,
+    })),
+    submissions.map(() => ({
+      runtimeId: identity.runtimeId,
+      taskId,
+      operationId,
+      executionEpoch: identity.executionEpoch,
+    })),
+  );
+  const refusedWrite = captured.writes.find((write) => write.locator === 'provider/tool-result/call-turn-end-refused');
+  assert.equal(refusedWrite?.type, 'tool-result-output');
+  assert.equal(refusedWrite?.content, refusedOutput);
+  assert.deepEqual(acceptedToolResults, [
+    { status: 'failed', code: refusal.code },
+    { status: 'succeeded', code: undefined },
+  ]);
+  assert.deepEqual(events.flatMap((event) => event.providerEvent.toolResult === undefined ? [] : [[event.providerEvent.toolResult.status, event.providerEvent.toolResult.callId]]), [
+    ['failed', 'call-turn-end-refused'],
+    ['succeeded', 'call-turn-end-corrected'],
+  ]);
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
 });
 
 test('preserves prior results and stops a Responses tool batch at the first owned-tool failure', async () => {
