@@ -9,12 +9,14 @@ import {
   type AcceptedRawFact,
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionTurnIdentity,
+  type OrganId,
   type RuntimeRequestLifecyclePhase,
   type RuntimeRequestRecord,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
 import type {
   InteractionParentCommittedFact,
+  InteractionParentOpenedTurnScopeReadPort,
   InteractionParentTurnAppend,
   InteractionParentTurnInputFact,
   InteractionParentTurnRawJournalPort,
@@ -331,7 +333,8 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
   };
 }
 
-export class JsonlInteractionParentTurnJournal implements InteractionParentTurnRawJournalPort {
+export class JsonlInteractionParentTurnJournal
+  implements InteractionParentTurnRawJournalPort, InteractionParentOpenedTurnScopeReadPort {
   constructor(private readonly journal: JsonlOrganJournal) {}
 
   async transactTurn<TResult>(
@@ -355,5 +358,28 @@ export class JsonlInteractionParentTurnJournal implements InteractionParentTurnR
   async readTurnSnapshot(turn: InteractionTurnIdentity): Promise<InteractionParentTurnSnapshot> {
     validateInteractionTurnIdentity(turn);
     return decodeTurn(await this.journal.replay(), turn);
+  }
+
+  async readScopeOpenedTurns(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnInputFact>[]> {
+    if (scope.organId === null || typeof scope.organId !== 'object'
+      || scope.organId.scope !== 'organ' || !scope.organId.value.trim()) {
+      throw new JournalIntegrityError('interaction parent scope read requires a valid organ id');
+    }
+    if (typeof scope.interactionScopeId !== 'string' || scope.interactionScopeId.trim() === '') {
+      throw new JournalIntegrityError('interaction parent scope read requires an interactionScopeId');
+    }
+    const opened: InteractionParentCommittedFact<InteractionParentTurnInputFact>[] = [];
+    for (const record of await this.journal.replay()) {
+      const payload = readParentRawPayload(record);
+      if (payload === null || payload.discriminant !== 'turn-input') continue;
+      if (!sameScopedId(payload.fact.turn.organId, scope.organId)) continue;
+      if (payload.fact.turn.interactionScopeId !== scope.interactionScopeId) continue;
+      assertRecordScope(record, payload.fact.turn, payload.fact.execution);
+      opened.push({ fact: payload.fact, commit: commitRef(record) });
+    }
+    return opened;
   }
 }

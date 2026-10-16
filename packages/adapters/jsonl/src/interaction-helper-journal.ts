@@ -18,11 +18,16 @@ import {
   type InteractionTurnIdentity,
 } from '../../../contracts/src/interaction-helper.js';
 import type { OrganId, ScopeRef } from '../../../contracts/src/index.js';
+import type { InteractionSemanticCheckpointCommit } from '../../../runtime/src/explicit-brain/interaction-turn-session.js';
 import {
   JournalIntegrityError,
   type JournalRecord,
   type JsonlOrganJournal,
 } from './index.js';
+
+// The Runtime owns the semantic checkpoint receipt shape; the adapter keeps its
+// public name so downstream importers do not change.
+export type { InteractionSemanticCheckpointCommit } from '../../../runtime/src/explicit-brain/interaction-turn-session.js';
 
 const HANDOFF_RECORD_TYPE = 'interaction-helper.handoff.v1';
 const SEMANTIC_CHECKPOINT_RECORD_TYPE = 'interaction-helper.semantic-checkpoint.v1';
@@ -46,11 +51,6 @@ export interface InteractionHelperJournalReadback {
     InteractionHelperCommittedFact<InteractionHelperReturnedFact> | null;
   readonly ownerAccepted:
     InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact> | null;
-}
-
-export interface InteractionSemanticCheckpointCommit {
-  readonly checkpoint: InteractionSemanticCheckpoint;
-  readonly commit: JournalCommitRef;
 }
 
 interface DecodedInteractionHelperJournal {
@@ -397,5 +397,23 @@ export class JsonlInteractionHelperJournal {
     validateInteractionTurnIdentity(identity);
     const decoded = decodeJournal(await this.journal.replay());
     return decoded.semanticCheckpoints.get(turnIdentityKey(identity)) ?? null;
+  }
+
+  async readScopeSemanticCheckpoints(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionSemanticCheckpointCommit[]> {
+    if (scope.organId === null || typeof scope.organId !== 'object'
+      || scope.organId.scope !== 'organ' || !scope.organId.value.trim()) {
+      throw new JournalIntegrityError('interaction semantic checkpoint scope requires a valid organ id');
+    }
+    if (typeof scope.interactionScopeId !== 'string' || scope.interactionScopeId.trim() === '') {
+      throw new JournalIntegrityError('interaction semantic checkpoint scope requires an interactionScopeId');
+    }
+    const decoded = decodeJournal(await this.journal.replay());
+    return [...decoded.semanticCheckpoints.values()]
+      .filter((entry) => sameOrganId(entry.checkpoint.organId, scope.organId)
+        && entry.checkpoint.interactionScopeId === scope.interactionScopeId)
+      .sort((left, right) => left.commit.journalSeq - right.commit.journalSeq);
   }
 }
