@@ -1,9 +1,10 @@
-import type {
-  EvidenceRef,
-  OrganId,
-  RawAsset,
-  ScopeRef,
-  SemanticClaim,
+import {
+  ContractError,
+  type EvidenceRef,
+  type OrganId,
+  type RawAsset,
+  type ScopeRef,
+  type SemanticClaim,
 } from '../../../contracts/src/index.js';
 import {
   validateInteractionLatestTurn,
@@ -15,6 +16,8 @@ import {
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
 } from '../../../contracts/src/interaction-helper.js';
+import type { InteractionParentOpenedTurnScopeReadPort } from '../explicit-brain/interaction-parent-turn-raw.js';
+import type { InteractionSemanticCheckpointJournalPort } from '../explicit-brain/interaction-turn-session.js';
 
 /**
  * Pure explicit interaction semantic-context assembler.
@@ -217,12 +220,25 @@ function sameInteractionScope(
     && identity.interactionId === candidate.interactionId;
 }
 
+/**
+ * Broader historical scope used only to accept committed history. Prior turns in
+ * the same interaction scope may come from a different interaction or revision;
+ * the current turn still requires the exact full identity.
+ */
+function sameHistoricalScope(
+  identity: InteractionTurnIdentity,
+  candidate: { readonly organId: OrganId; readonly interactionScopeId: string },
+): boolean {
+  return sameOrganId(identity.organId, candidate.organId)
+    && identity.interactionScopeId === candidate.interactionScopeId;
+}
+
 function assertInput(input: InteractionSemanticContextInput): void {
   validateInteractionTurnIdentity(input.identity);
 
   input.semanticHistory.forEach((checkpoint, index) => {
     validateInteractionSemanticCheckpoint(checkpoint);
-    if (!sameInteractionScope(input.identity, checkpoint)) {
+    if (!sameHistoricalScope(input.identity, checkpoint)) {
       throw new InteractionSemanticContextError(
         `semantic history[${index}] scope does not match the explicit interaction`,
       );
@@ -280,4 +296,59 @@ export function buildInteractionSemanticContext(
     currentInput: copyRawAsset(input.currentInput),
     clarifications: input.clarifications.map(copyClarification),
   };
+}
+
+function sameInteractionTurnIdentity(
+  left: InteractionTurnIdentity,
+  right: InteractionTurnIdentity,
+): boolean {
+  return left.organId.scope === right.organId.scope
+    && left.organId.value === right.organId.value
+    && left.interactionScopeId === right.interactionScopeId
+    && left.interactionId === right.interactionId
+    && left.inputRevision === right.inputRevision
+    && left.turnId === right.turnId;
+}
+
+/**
+ * Select the committed semantic history for the next turn in one interaction
+ * scope, and refuse to advance over an unclosed prior parent turn.
+ *
+ * A turn that opened its durable raw history without a committed semantic
+ * checkpoint still owns its recovery responsibility, so history selection fails
+ * explicitly instead of silently dropping it. History may cross interactionId
+ * and inputRevision inside the same organ and interactionScopeId; the current
+ * turn itself is excluded, so a retry of the same identity does not read its own
+ * partial history back.
+ */
+export async function prepareScopeSemanticHistory(input: {
+  readonly activeTurn: InteractionTurnIdentity;
+  readonly parentJournal: Pick<InteractionParentOpenedTurnScopeReadPort, 'readScopeOpenedTurns'>;
+  readonly checkpointJournal: Pick<
+    InteractionSemanticCheckpointJournalPort,
+    'readScopeSemanticCheckpoints'
+  >;
+}): Promise<readonly InteractionSemanticCheckpoint[]> {
+  validateInteractionTurnIdentity(input.activeTurn);
+  const scope = {
+    organId: input.activeTurn.organId,
+    interactionScopeId: input.activeTurn.interactionScopeId,
+  };
+  const commits = await input.checkpointJournal.readScopeSemanticCheckpoints(scope);
+  const openedTurns = await input.parentJournal.readScopeOpenedTurns(scope);
+  const committed = [...commits].sort((left, right) => left.commit.journalSeq - right.commit.journalSeq);
+  const history: InteractionSemanticCheckpoint[] = [];
+  for (const opened of openedTurns) {
+    // The active turn and any turn opened after it are not committed history.
+    if (sameInteractionTurnIdentity(opened.fact.turn, input.activeTurn)) break;
+    const entry = committed.find((candidate) =>
+      sameInteractionTurnIdentity(candidate.checkpoint, opened.fact.turn));
+    if (entry === undefined) {
+      throw new ContractError(
+        `unclosed interaction parent turn ${opened.fact.turn.turnId} requires recovery or semantic closure before opening ${input.activeTurn.turnId}`,
+      );
+    }
+    history.push(entry.checkpoint);
+  }
+  return history;
 }

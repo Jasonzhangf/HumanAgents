@@ -2,6 +2,9 @@ import { join } from 'node:path';
 import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
 import type {
   Attention,
+  AnyProviderExecutionIdentityRef,
+  InteractionParentProviderExecutionIdentityRef,
+  ProviderExecutionIdentityRef,
   CycleId,
   ExecutionRuntimePort,
   OrganId,
@@ -12,6 +15,12 @@ import type {
   TasklessProviderExecutionIdentityRef,
 } from '../../../contracts/src/index.js';
 import type { AgentProviderComposition } from '../agent-driver-composition.js';
+import { closeAgentProvider } from '../agent-driver-composition.js';
+import { AGENT_ROLES } from '../../../config/src/index.js';
+import { ProviderAgentDriver } from '../../../adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
+import { JsonlInteractionHelperJournal } from '../../../adapters/jsonl/src/interaction-helper-journal.js';
+import { JsonlInteractionParentTurnJournal } from '../../../adapters/jsonl/src/interaction-parent-turn-journal.js';
 import type { AgentRole } from '../../../config/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import type { RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
@@ -157,7 +166,12 @@ export interface UiRuntimeLaunchOptions {
    */
   readonly taskIdentity?: TaskIdentityConsumer;
   readonly memory: UiRuntimeMemoryComposition;
-  readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
+  readonly runtimeComposition?: Omit<NonNullable<UiRuntimeServiceOptions['runtimeComposition']>, 'prepareAgentProvider'> & {
+    readonly prepareAgentProvider?: <TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(selection: {
+      readonly roleId: AgentRole;
+      readonly configuredAgentId?: string;
+    }) => Promise<AgentProviderComposition<TIdentity>>;
+  };
   readonly i2CurrentPosition?: import('./i2-history.js').I2CurrentPositionPort;
   readonly restart?: (input: {
     readonly leaseId: string;
@@ -302,22 +316,6 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
       'humanagent.app.ui-runtime',
     );
   }
-  const explicitBrainInterpreter = options.explicitBrainInterpreter ?? (() => {
-    const templateRoot = options.explicitBrainTemplateRoot?.trim();
-    if (!templateRoot) {
-      throw new AppLifecycleError(
-        'explicit-brain-prompt-unavailable',
-        'builtin interaction prompt root is not configured',
-        'configure the locked builtin template root before starting the UI runtime',
-        'humanagent.app.ui-runtime',
-      );
-    }
-    return createProviderExplicitBrainInterpreter({
-      port: options.port,
-      binding: options.binding,
-      templateRoot,
-    });
-  })();
   const readiness = options.mode === 'rcc' ? await options.port.probe(options.binding) : undefined;
   const providerState = readiness ? providerStateFromReadiness(readiness) : options.providerState ?? 'ready';
   const providerError = readiness ? providerErrorFromReadiness(readiness) : undefined;
@@ -369,6 +367,46 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   // owns, so the read layer reuses that authority instead of introducing a second store.
   const taskControlJournalPath = uiRuntimeControlJournalPath(modeRoot);
   const taskControlJournal = new JsonlOrganJournal(taskControlJournalPath);
+  const explicitBrainInterpreter = options.explicitBrainInterpreter ?? (() => {
+    const templateRoot = options.explicitBrainTemplateRoot?.trim();
+    if (!templateRoot) {
+      throw new AppLifecycleError('explicit-brain-prompt-unavailable', 'builtin interaction prompt root is not configured',
+        'configure the locked builtin template root before starting the UI runtime', 'humanagent.app.ui-runtime');
+    }
+    const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(options.evidenceRoot));
+    return createProviderExplicitBrainInterpreter({
+      binding: options.binding, templateRoot, organId: options.organId,
+      interactionScopeId: `runtime:${options.projectKey ?? options.organId.value}`,
+      parentJournal: new JsonlInteractionParentTurnJournal(taskControlJournal),
+      helperJournal: new JsonlInteractionHelperJournal(taskControlJournal),
+      rawEvidence, rawContent: providerRawContentReader(rawEvidence),
+      clock: { now: () => (clock?.() ?? new Date()).toISOString() },
+      prepareAgentProvider: async (selection) => {
+        const prepare = options.runtimeComposition?.prepareAgentProvider;
+        if (!prepare) throw new AppLifecycleError('explicit-brain-provider-unavailable', 'neutral interaction parent provider preparation is not configured',
+          'inject the configured provider preparer', 'humanagent.app.ui-runtime');
+        return prepare<InteractionParentProviderExecutionIdentityRef>(selection);
+      },
+      helperFactory: async ({ selection, assignment, execution }) => {
+        const roleId = AGENT_ROLES.find((role) => role === selection.roleId);
+        if (!roleId || !options.explicitBrainHelperProviderPreparer) {
+          throw new AppLifecycleError('explicit-brain-helper-unavailable', 'selected helper role or provider preparation is unavailable',
+            'select a configured helper role', 'humanagent.app.ui-runtime');
+        }
+        const owned = await options.explicitBrainHelperProviderPreparer({ ...selection, roleId });
+        return {
+          binding: owned.binding,
+          driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({
+            port: owned.port, binding: owned.binding, ...execution, organId: assignment.organId,
+            helper: assignment, assignmentId: assignment.assignmentId,
+            scope: { organId: assignment.organId, operationId: execution.operationId },
+            inputRefs: [], ownerId: 'humanagent.runtime.explicit-brain.helper',
+          }),
+          close: () => closeAgentProvider(owned),
+        };
+      },
+    });
+  })();
   // The Task identity owner commits onto that same control Organ Journal the
   // runtime already owns, so a producer and a cold reader resolve one authority
   // instead of a second identity store.

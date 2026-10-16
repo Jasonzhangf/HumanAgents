@@ -12,19 +12,29 @@ import {
   id,
   type EvidenceRef,
   type AcceptedRawFact,
+  type ProviderBinding,
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
+  type AgentClosure,
+  type AgentDriver,
+  type AgentEvent,
+  type AgentOutput,
+  type AgentStartRequest,
+  type InteractionHelperIdentity,
+  type OperationId,
   type ProviderToolResult,
   type RawAsset,
   type RawContentReadPort,
   type RawFactEnvelope,
   type RuntimeRequestRecord,
   type ScopeRef,
+  type TasklessProviderExecutionIdentityRef,
 } from '../../../packages/contracts/src/index.js';
 import type {
   InteractionHelperAssignment,
   InteractionHelperResult,
+  InteractionLatestTurn,
 } from '../../../packages/contracts/src/interaction-helper.js';
 import { ImmutableAssetStore } from '../../../packages/adapters/filesystem/src/index.js';
 import { JsonlInteractionHelperJournal } from '../../../packages/adapters/jsonl/src/interaction-helper-journal.js';
@@ -36,6 +46,15 @@ import {
   type ProviderEvidenceSink,
 } from '../../../packages/adapters/provider/src/evidence.js';
 import { createInteractionParentTurnRawOwner } from '../../../packages/runtime/src/explicit-brain/index.js';
+import {
+  prepareScopeSemanticHistory,
+} from '../../../packages/runtime/src/context/interaction-semantic-context.js';
+import {
+  ExplicitTurnHelperSession,
+  type ExplicitTurnHelperClock,
+  type ExplicitTurnHelperFactory,
+  type ExplicitTurnInterpretedOutcome,
+} from '../../../packages/runtime/src/explicit-brain/interaction-turn-session.js';
 
 // Failure mode: the neutral interaction parent raw owner is wired to the wrong
 // authority. A refined child helper record is read back as parent raw history, a
@@ -434,5 +453,664 @@ test('neutral interaction parent raw owner keeps one durable, parent-only raw hi
     assert.equal(rendered.includes('CHILD-ONLY'), false);
   } finally {
     await cleanup();
+  }
+});
+
+// Failure mode: the explicit-parent semantic closure chain is wired to the wrong
+// evidence direction. A returned-but-unaccepted helper is promoted to accepted
+// work, a raw child summary or raw parent prompt is committed as semantic
+// content, a raw asset is relabeled as a semantic asset, a retry silently
+// accepts a changed outcome under the same turn identity, or an unclosed parent
+// turn advances history. The probability is unknown because the seam is new. The
+// impact is lost recovery responsibility, fabricated semantic history or a
+// leaked raw transcript. The cost is two local Journal-backed public consumers
+// in the existing explicit-brain test file.
+
+const semanticCloseOrganId = id('organ', 'organ-semantic-close');
+const semanticCloseScope: ScopeRef = { organId: semanticCloseOrganId };
+
+function semanticCloseEvidence(label: string, scope: ScopeRef = semanticCloseScope): EvidenceRef {
+  return {
+    evidenceId: id('evidence', label),
+    kind: 'operation',
+    source: 'runtime-explicit-brain-test',
+    locator: `interaction://${label}`,
+    scope,
+  };
+}
+
+function semanticCloseTurn(
+  interactionId: string,
+  turnId: string,
+  interactionScopeId = 'semantic-close-scope',
+  inputRevision = 1,
+): InteractionTurnIdentity {
+  return { organId: semanticCloseOrganId, interactionScopeId, interactionId, inputRevision, turnId };
+}
+
+async function semanticCloseFixtureHome(): Promise<string> {
+  const root = process.env.HUMANAGENT_TEST_ROOT
+    ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-explicit-semantic-close-20261016');
+  await mkdir(root, { recursive: true });
+  return mkdtemp(join(root, 'semantic-close-'));
+}
+
+async function semanticCloseAsset(
+  sink: ProviderEvidenceSink,
+  scope: ScopeRef,
+  label: string,
+  content: string,
+): Promise<RawAsset> {
+  const ref = await sink.write({
+    scope,
+    kind: 'operation',
+    type: label,
+    locator: `${scope.organId.value}/${label}`,
+    content,
+  });
+  return { ref, view: { kind: 'utf8-text' } };
+}
+
+function parentExecution(
+  turn: InteractionTurnIdentity,
+  operationId: OperationId,
+): InteractionParentProviderExecutionIdentityRef {
+  return {
+    runtimeId: `runtime-${turn.turnId}`,
+    organId: semanticCloseOrganId,
+    operationId,
+    executionEpoch: 1,
+    interactionTurn: turn,
+  };
+}
+
+function parentExecutionRef(
+  execution: InteractionParentProviderExecutionIdentityRef,
+): { readonly runtimeId: string; readonly executionEpoch: number } {
+  return { runtimeId: execution.runtimeId, executionEpoch: execution.executionEpoch };
+}
+
+function parentRequestRecord(
+  turn: InteractionTurnIdentity,
+  scope: ScopeRef,
+  requestId: string,
+  phase: RuntimeRequestRecord['phase'],
+  parentRequestId?: string,
+): RuntimeRequestRecord {
+  return {
+    request: {
+      turnId: `provider-${turn.turnId}`,
+      requestId,
+      ...(parentRequestId === undefined ? {} : { parentRequestId }),
+    },
+    ...(parentRequestId === undefined ? {} : { parentRequestId }),
+    scope,
+    phase,
+  };
+}
+
+function parentRequestIdentity(record: RuntimeRequestRecord) {
+  return {
+    turnId: record.request.turnId,
+    requestId: record.request.requestId,
+    ...(record.request.parentRequestId === undefined
+      ? {}
+      : { parentRequestId: record.request.parentRequestId }),
+  };
+}
+
+function helperIdentityOfAssignment(assignment: InteractionHelperAssignment): InteractionHelperIdentity {
+  return {
+    organId: assignment.organId,
+    interactionScopeId: assignment.interactionScopeId,
+    interactionId: assignment.interactionId,
+    inputRevision: assignment.inputRevision,
+    parentTurnId: assignment.parentTurnId,
+    assignmentId: assignment.assignmentId,
+    helperCallId: assignment.helperCallId,
+    attempt: assignment.attempt,
+  };
+}
+
+function countingClock(times: readonly string[]): {
+  readonly clock: ExplicitTurnHelperClock;
+  readonly calls: () => number;
+} {
+  let calls = 0;
+  return {
+    clock: { now: () => times[Math.min(calls++, times.length - 1)]! },
+    calls: () => calls,
+  };
+}
+
+/** A minimal real AgentDriver double for the helper dispatch seam only. */
+function semanticCloseHelperFactory(): ExplicitTurnHelperFactory {
+  return async ({ assignment, execution }) => {
+    const evidence = semanticCloseEvidence(`driver-${assignment.helperCallId}`, {
+      organId: assignment.organId,
+    });
+    const helper = helperIdentityOfAssignment(assignment);
+    const identity: TasklessProviderExecutionIdentityRef = {
+      runtimeId: execution.runtimeId,
+      organId: assignment.organId,
+      operationId: execution.operationId,
+      executionEpoch: execution.executionEpoch,
+      helper,
+      taskId: undefined,
+      cycleId: undefined,
+    };
+    const output: AgentOutput<TasklessProviderExecutionIdentityRef> = {
+      ...identity,
+      assignmentId: assignment.assignmentId,
+      payload: { summary: `driver-summary-${assignment.helperCallId}` },
+      outputRefs: [...assignment.expectedOutputRefs],
+      evidenceRefs: [evidence],
+    };
+    const closure: AgentClosure = { state: 'succeeded', evidenceRefs: [evidence] };
+    const driver: AgentDriver<TasklessProviderExecutionIdentityRef> = {
+      kind: 'semantic-close-recording-driver',
+      capabilities: async () => ({
+        driverKind: 'semantic-close-recording-driver',
+        capabilities: ['text-generation'],
+        version: '1',
+      }),
+      start: async (_request: AgentStartRequest<TasklessProviderExecutionIdentityRef>) => ({
+        runtimeId: execution.runtimeId,
+        executionEpoch: execution.executionEpoch,
+      }),
+      resume: async () => {
+        throw new Error('semantic close helper never resumes a checkpoint');
+      },
+      submit: async () => output,
+      observe: async function* () {
+        yield {
+          ...identity,
+          kind: 'provider.output',
+          evidenceRefs: [evidence],
+        } satisfies AgentEvent<TasklessProviderExecutionIdentityRef>;
+      },
+      requestStop: async () => ({ requested: false, operationId: execution.operationId }),
+      settle: async () => closure,
+    };
+    const binding: ProviderBinding = {
+      bindingId: `binding-${assignment.helperCallId}`,
+      providerId: 'rcc-semantic-close',
+      protocol: 'responses',
+      endpointRef: 'endpoint://rcc-semantic-close',
+      modelRef: 'rcc-semantic-close-model',
+      configDigest: 'sha256:semantic-close-config',
+      capabilityDigest: 'sha256:semantic-close-capabilities',
+    };
+    return { binding, driver, close: async () => {} };
+  };
+}
+
+function helperResultFields(input: {
+  readonly agentId: string;
+  readonly summary: string;
+  readonly outputRefs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+}): Omit<InteractionHelperResult, keyof InteractionHelperIdentity> {
+  return {
+    agentId: input.agentId,
+    producedArtifactRefs: [],
+    producedArtifactDigests: [],
+    status: 'succeeded',
+    summary: input.summary,
+    outputRefs: [...input.outputRefs],
+    evidenceRefs: [...input.evidenceRefs],
+    nextAction: 'settle',
+  };
+}
+
+test('explicit semantic close folds the settled parent turn and separates accepted from returned helpers', async () => {
+  const directory = await semanticCloseFixtureHome();
+  const store = new ImmutableAssetStore(join(directory, 'assets'));
+  const sink = filesystemProviderEvidenceSink(store);
+  const journal = new JsonlOrganJournal(join(directory, 'organ.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const rawContent = providerRawContentReader(sink);
+  try {
+    const turn = semanticCloseTurn('interaction-a', 'turn-a');
+    const operationId = id('operation', 'operation-semantic-close-a');
+    const scope: ScopeRef = { organId: semanticCloseOrganId, operationId };
+    const execution = parentExecution(turn, operationId);
+    const initialInput = await semanticCloseAsset(sink, scope, 'turn-a-input', 'summarize the bounded question');
+    const deltaOne = await semanticCloseAsset(sink, scope, 'turn-a-delta-1', 'The ');
+    const deltaTwo = await semanticCloseAsset(sink, scope, 'turn-a-delta-2', 'answer is 42.');
+    const owner = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope,
+      initialInput,
+      journal: parentJournal,
+      rawContent,
+    });
+    await owner.openTurnInput();
+    const record = parentRequestRecord(turn, scope, 'request-a', 'dispatching');
+    await owner.registerRequest({ execution: parentExecutionRef(execution), record });
+    const request = parentRequestIdentity(record);
+    const facts: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef>[] = [
+      {
+        execution: parentExecutionRef(execution),
+        scope,
+        request,
+        producerSeq: 1,
+        fact: {
+          kind: 'content',
+          contentUnitId: 'assistant-a',
+          channel: 'assistant-text',
+          update: 'delta',
+          content: deltaOne,
+          complete: false,
+        },
+      },
+      {
+        execution: parentExecutionRef(execution),
+        scope,
+        request,
+        producerSeq: 2,
+        fact: {
+          kind: 'content',
+          contentUnitId: 'assistant-a',
+          channel: 'assistant-text',
+          update: 'delta',
+          content: deltaTwo,
+          complete: false,
+        },
+      },
+      {
+        execution: parentExecutionRef(execution),
+        scope,
+        request,
+        producerSeq: 3,
+        fact: { kind: 'content-complete', contentUnitId: 'assistant-a' },
+      },
+      {
+        execution: parentExecutionRef(execution),
+        scope,
+        request,
+        producerSeq: 4,
+        fact: { kind: 'request-complete', terminal: 'completed' },
+      },
+    ];
+    for (const fact of facts) await owner.acceptRawFact(fact);
+    await owner.registerRequest({
+      execution: parentExecutionRef(execution),
+      record: parentRequestRecord(turn, scope, 'request-a', 'settled'),
+    });
+    const finalOutput = await owner.readFinalTurnOutput();
+    assert.equal(finalOutput.assistantText, 'The answer is 42.');
+    assert.equal(finalOutput.initialInputText, 'summarize the bounded question');
+    assert.deepEqual(
+      finalOutput.assistantContentRefs.map((ref) => ref.locator),
+      [deltaOne.ref.locator, deltaTwo.ref.locator],
+    );
+
+    const { clock, calls } = countingClock([
+      '2026-10-16T01:00:00.000Z',
+      '2026-10-16T02:00:00.000Z',
+      '2026-10-16T03:00:00.000Z',
+      '2026-10-16T04:00:00.000Z',
+      '2026-10-16T05:00:00.000Z',
+      '2026-10-16T06:00:00.000Z',
+      '2026-10-16T07:00:00.000Z',
+    ]);
+    const latestTurn: InteractionLatestTurn = {
+      ...turn,
+      entries: [{ kind: 'user-input', content: initialInput }],
+    };
+    const session = new ExplicitTurnHelperSession({
+      identity: turn,
+      latestTurn,
+      journal: helperJournal,
+      clock,
+      factory: semanticCloseHelperFactory(),
+      checkpointJournal: helperJournal,
+      rawContent,
+    });
+    const accepted = await session.dispatchHelper({
+      selection: { roleId: 'observer' },
+      assignmentFields: {
+        objective: 'Return the bounded observation',
+        targetRefs: ['interaction://helper-a'],
+        expectedOutputRefs: ['output://helper-a'],
+        acceptanceCriteriaDigest: 'sha256:criteria-a',
+        successCriteria: ['Return the observation'],
+        failureCriteria: [],
+        incompleteCriteria: [],
+        requiredCapabilities: [],
+        mergeGate: 'not-required',
+      },
+      inputs: { request: 'bounded helper-a request' },
+      evidenceRefs: [semanticCloseEvidence('dispatch-a')],
+      conclude: ({ output }) => helperResultFields({
+        agentId: 'agent-helper-a',
+        summary: 'RAW-SUMMARY-A-MUST-NOT-APPEAR',
+        outputRefs: output.outputRefs,
+        evidenceRefs: output.evidenceRefs,
+      }),
+    });
+    const returned = await session.dispatchHelper({
+      selection: { roleId: 'observer' },
+      assignmentFields: {
+        objective: 'Return the bounded observation',
+        targetRefs: ['interaction://helper-b'],
+        expectedOutputRefs: ['output://helper-b'],
+        acceptanceCriteriaDigest: 'sha256:criteria-b',
+        successCriteria: ['Return the observation'],
+        failureCriteria: [],
+        incompleteCriteria: [],
+        requiredCapabilities: [],
+        mergeGate: 'not-required',
+      },
+      inputs: { request: 'bounded helper-b request' },
+      evidenceRefs: [semanticCloseEvidence('dispatch-b')],
+      conclude: ({ output }) => helperResultFields({
+        agentId: 'agent-helper-b',
+        summary: 'RAW-SUMMARY-B-MUST-NOT-APPEAR',
+        outputRefs: output.outputRefs,
+        evidenceRefs: output.evidenceRefs,
+      }),
+    });
+    const refinedScope: ScopeRef = { organId: semanticCloseOrganId, taskId: id('task', 'task-helper-a') };
+    const refinedA = await semanticCloseAsset(sink, refinedScope, 'helper-a-refined', 'REFINED-A-SEMANTIC-TEXT');
+    const acceptEvidence = semanticCloseEvidence('owner-accepted-a');
+    await session.acceptHelper({
+      helperCallId: accepted.identity.helperCallId,
+      refinedResult: refinedA,
+      acceptedBy: 'parent-owner',
+      acceptanceRef: 'acceptance://helper-a',
+      evidenceRefs: [acceptEvidence],
+    });
+
+    const outcome: ExplicitTurnInterpretedOutcome = {
+      kind: 'requirement',
+      normalizedInput: 'summarize the bounded question',
+      knownFacts: ['the bounded question is about the README'],
+      decisionRefs: ['decision://explicit-brain/route'],
+      structuredProposal: {
+        revision: 1,
+        intent: 'create',
+        title: 'Summarize the bounded question',
+        objective: 'Summarize the bounded question for the user',
+        deliverable: 'A concise summary',
+        deliveryConditions: ['Keep the summary inside the interaction organ'],
+        evidenceRefs: ['evidence://structured/proposal'],
+        blockingGaps: ['The downstream task is not admitted yet'],
+      },
+    };
+    // Dispatch, return and owner acceptance already sampled the shared clock.
+    // Closure must sample its own save time, rather than reuse a helper time.
+    const samplesBeforeClose = calls();
+    assert.equal(samplesBeforeClose, 5);
+    const first = await session.closeTurnSemanticCheckpoint({
+      finalParentOutput: finalOutput,
+      outcome,
+    });
+    assert.equal(first.checkpoint.committedAt, '2026-10-16T06:00:00.000Z');
+    assert.equal(calls(), samplesBeforeClose + 1);
+    assert.equal(first.checkpoint.interactionId, 'interaction-a');
+    assert.equal(first.checkpoint.turnId, 'turn-a');
+
+    const factsText = first.checkpoint.claims.map((claim) => claim.fact);
+    const goal = factsText.find((fact) => fact.startsWith('goal: '));
+    assert.ok(goal?.includes('Summarize the bounded question for the user'));
+    assert.ok(goal?.includes('intent: create'));
+    const acceptedClaim = first.checkpoint.claims.find((claim) =>
+      claim.fact.startsWith('what-done(owner-accepted): [agent-helper-a:'));
+    assert.ok(acceptedClaim?.fact.includes('REFINED-A-SEMANTIC-TEXT'));
+    assert.ok(!acceptedClaim?.fact.includes('RAW-SUMMARY-A-MUST-NOT-APPEAR'));
+    assert.ok(acceptedClaim?.sourceRefs.includes('acceptance://helper-a'));
+    const returnedClaim = first.checkpoint.claims.find((claim) =>
+      claim.fact.startsWith('helper-unaccepted(returned-only): [agent-helper-b:'));
+    assert.ok(returnedClaim?.fact.includes('not accepted by parent owner'));
+    assert.ok(!returnedClaim?.fact.includes('RAW-SUMMARY-B-MUST-NOT-APPEAR'));
+    assert.ok(returnedClaim?.sourceRefs.includes(returned.returnedCommitId));
+    assert.ok(factsText.includes('outcome(requirement:create): A concise summary'));
+    assert.ok(factsText.includes('next: route confirmed requirement proposal to FIFO intake'));
+    assert.ok(factsText.includes('unknown: The downstream task is not admitted yet'));
+    assert.ok(first.checkpoint.constraints.some((claim) =>
+      claim.fact === 'Keep the summary inside the interaction organ' && claim.certainty === 'confirmed'));
+
+    // The refined asset is the only semantic asset; neither the raw initial input
+    // nor the terminal assistant bytes are relabeled as semantic content.
+    assert.deepEqual(first.checkpoint.semanticAssetRefs, [refinedA.ref]);
+    assert.ok(first.checkpoint.evidenceRefs.some((ref) =>
+      ref.locator === initialInput.ref.locator));
+    assert.ok(first.checkpoint.evidenceRefs.some((ref) => ref.locator === deltaOne.ref.locator));
+    assert.ok(first.checkpoint.evidenceRefs.some((ref) => ref.locator === deltaTwo.ref.locator));
+    assert.ok(first.checkpoint.evidenceRefs.some((ref) => ref.locator === acceptEvidence.locator));
+    assert.ok(!first.checkpoint.evidenceRefs.some((ref) => ref.locator === refinedA.ref.locator));
+
+    // A same-identity retry reproduces the frozen content, returns the first
+    // commit and never samples a new clock value.
+    const retry = await session.closeTurnSemanticCheckpoint({
+      finalParentOutput: finalOutput,
+      outcome,
+    });
+    assert.deepEqual(retry, first);
+    assert.equal(calls(), samplesBeforeClose + 1);
+    const changed: ExplicitTurnInterpretedOutcome = {
+      ...outcome,
+      structuredProposal: { ...outcome.structuredProposal, deliverable: 'A changed summary' },
+    };
+    await assert.rejects(
+      async () => { await session.closeTurnSemanticCheckpoint({ finalParentOutput: finalOutput, outcome: changed }); },
+      (error: unknown) => error instanceof ContractError
+        && /conflicts with the committed checkpoint/.test((error as Error).message),
+    );
+    const checkpointRecords = (await journal.replay())
+      .filter((record) => record.payload?.kind === 'interaction-helper.semantic-checkpoint.v1');
+    assert.equal(checkpointRecords.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an unclosed parent turn blocks next-turn history until its semantic checkpoint commits', async () => {
+  const directory = await semanticCloseFixtureHome();
+  const store = new ImmutableAssetStore(join(directory, 'assets'));
+  const sink = filesystemProviderEvidenceSink(store);
+  const journal = new JsonlOrganJournal(join(directory, 'organ.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const rawContent = providerRawContentReader(sink);
+  try {
+    const scopeId = 'semantic-close-history-scope';
+    const turnOne = semanticCloseTurn('interaction-one', 'turn-one', scopeId, 1);
+    const turnTwo = semanticCloseTurn('interaction-two', 'turn-two', scopeId, 1);
+    const turnOtherScope = semanticCloseTurn('interaction-other', 'turn-other', 'other-scope', 1);
+    const operationOne = id('operation', 'operation-semantic-close-one');
+    const operationTwo = id('operation', 'operation-semantic-close-two');
+    const scopeOne: ScopeRef = { organId: semanticCloseOrganId, operationId: operationOne };
+    const scopeTwo: ScopeRef = { organId: semanticCloseOrganId, operationId: operationTwo };
+    const executionOne = parentExecution(turnOne, operationOne);
+    const executionTwo = parentExecution(turnTwo, operationTwo);
+    const rawSentinel = 'TURN-ONE-RAW-ASSISTANT-SENTINEL';
+    const rawInputSentinel = 'TURN-ONE-RAW-INPUT-SENTINEL';
+    const semanticGoal = 'Explain the bounded README question';
+    const inputOne = await semanticCloseAsset(
+      sink, scopeOne, 'turn-one-input', `${semanticGoal}\n${rawInputSentinel}`,
+    );
+    const assistantOne = await semanticCloseAsset(sink, scopeOne, 'turn-one-assistant', rawSentinel);
+    const ownerOne = createInteractionParentTurnRawOwner({
+      turn: turnOne,
+      execution: executionOne,
+      scope: scopeOne,
+      initialInput: inputOne,
+      journal: parentJournal,
+      rawContent,
+    });
+    await ownerOne.openTurnInput();
+    const recordOne = parentRequestRecord(turnOne, scopeOne, 'request-one', 'dispatching');
+    await ownerOne.registerRequest({ execution: parentExecutionRef(executionOne), record: recordOne });
+    await ownerOne.acceptRawFact({
+      execution: parentExecutionRef(executionOne),
+      scope: scopeOne,
+      request: parentRequestIdentity(recordOne),
+      producerSeq: 1,
+      fact: {
+        kind: 'content',
+        contentUnitId: 'assistant-one',
+        channel: 'assistant-text',
+        update: 'full',
+        content: assistantOne,
+        complete: true,
+      },
+    });
+    await ownerOne.acceptRawFact({
+      execution: parentExecutionRef(executionOne),
+      scope: scopeOne,
+      request: parentRequestIdentity(recordOne),
+      producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await ownerOne.registerRequest({
+      execution: parentExecutionRef(executionOne),
+      record: parentRequestRecord(turnOne, scopeOne, 'request-one', 'settled'),
+    });
+    const finalOutputOne = await ownerOne.readFinalTurnOutput();
+    const outcome: ExplicitTurnInterpretedOutcome = {
+      kind: 'answer',
+      normalizedInput: semanticGoal,
+      knownFacts: [],
+      answer: 'TURN-ONE-ANSWER',
+      decisionRefs: ['decision://turn-one'],
+    };
+    const latestTurnOne: InteractionLatestTurn = {
+      ...turnOne,
+      entries: [{ kind: 'user-input', content: inputOne }],
+    };
+    const { clock } = countingClock(['2026-10-16T04:00:00.000Z']);
+    // The failed closure: the session is real but its semantic close dependency
+    // is unbound, so no checkpoint becomes durable and turn-one keeps its
+    // recovery responsibility.
+    const unbound = new ExplicitTurnHelperSession({
+      identity: turnOne,
+      latestTurn: latestTurnOne,
+      journal: helperJournal,
+      clock,
+      factory: semanticCloseHelperFactory(),
+    });
+    await assert.rejects(
+      async () => { await unbound.closeTurnSemanticCheckpoint({ finalParentOutput: finalOutputOne, outcome }); },
+      (error: unknown) => error instanceof ContractError
+        && /bound semantic checkpoint journal/.test((error as Error).message),
+    );
+    assert.equal(await helperJournal.readSemanticCheckpointExact(turnOne), null);
+    await assert.rejects(
+      async () => {
+        await prepareScopeSemanticHistory({
+          activeTurn: turnTwo,
+          parentJournal,
+          checkpointJournal: helperJournal,
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /unclosed interaction parent turn turn-one/.test((error as Error).message),
+    );
+
+    const bound = new ExplicitTurnHelperSession({
+      identity: turnOne,
+      latestTurn: latestTurnOne,
+      journal: helperJournal,
+      clock,
+      factory: semanticCloseHelperFactory(),
+      checkpointJournal: helperJournal,
+      rawContent,
+    });
+    const closedOne = await bound.closeTurnSemanticCheckpoint({
+      finalParentOutput: finalOutputOne,
+      outcome,
+    });
+    assert.equal(closedOne.checkpoint.turnId, 'turn-one');
+    assert.deepEqual(
+      await helperJournal.readScopeSemanticCheckpoints({
+        organId: semanticCloseOrganId,
+        interactionScopeId: 'other-scope',
+      }),
+      [],
+    );
+
+    const history = await prepareScopeSemanticHistory({
+      activeTurn: turnTwo,
+      parentJournal,
+      checkpointJournal: helperJournal,
+    });
+    assert.equal(history.length, 1);
+    // History crosses interactionId inside the same interactionScopeId.
+    assert.equal(history[0]?.interactionId, 'interaction-one');
+    assert.equal(history[0]?.turnId, 'turn-one');
+    // A different interactionScopeId stays isolated: no history is selected and
+    // no foreign turn can block or feed the active turn.
+    assert.deepEqual(
+      await prepareScopeSemanticHistory({
+        activeTurn: turnOtherScope,
+        parentJournal,
+        checkpointJournal: helperJournal,
+      }),
+      [],
+    );
+
+    const inputTwo = await semanticCloseAsset(sink, scopeTwo, 'turn-two-input', 'TURN-TWO-INPUT');
+    const ownerTwo = createInteractionParentTurnRawOwner({
+      turn: turnTwo,
+      execution: executionTwo,
+      scope: scopeTwo,
+      initialInput: inputTwo,
+      priorCheckpoints: history,
+      journal: parentJournal,
+      rawContent,
+    });
+    await ownerTwo.openTurnInput();
+    const recordTwo = parentRequestRecord(turnTwo, scopeTwo, 'request-two', 'dispatching');
+    await ownerTwo.registerRequest({ execution: parentExecutionRef(executionTwo), record: recordTwo });
+    const contextTwo = await ownerTwo.requestContext({
+      execution: executionTwo,
+      request: parentRequestIdentity(recordTwo),
+      phase: 'continuation',
+    });
+    assert.deepEqual(contextTwo.canonical.units[0], {
+      kind: 'message',
+      role: 'assistant',
+      text: canonicalJsonStringify({
+        claims: closedOne.checkpoint.claims,
+        constraints: closedOne.checkpoint.constraints,
+      }),
+    });
+    assert.deepEqual(contextTwo.canonical.units[1], {
+      kind: 'message',
+      role: 'user',
+      text: 'TURN-TWO-INPUT',
+    });
+    const rendered = JSON.stringify(contextTwo.canonical.units);
+    assert.equal(rendered.includes(rawSentinel), false);
+    assert.equal(rendered.includes(rawInputSentinel), false);
+    assert.ok(rendered.includes(`goal: ${semanticGoal}`));
+    assert.ok(rendered.includes('outcome(answer): TURN-ONE-ANSWER'));
+
+    // Raw parent history stays durable even though it never enters next-turn
+    // context, and the latest identity still rejects a foreign parent output.
+    assert.equal((await parentJournal.readTurnSnapshot(turnOne)).acceptedFacts.length, 2);
+    await assert.rejects(
+      async () => {
+        await bound.closeTurnSemanticCheckpoint({
+          finalParentOutput: {
+            ...finalOutputOne,
+            turnInput: {
+              ...finalOutputOne.turnInput,
+              fact: { ...finalOutputOne.turnInput.fact, turn: turnTwo },
+            },
+          },
+          outcome,
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /final parent output does not match the session turn/.test((error as Error).message),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });

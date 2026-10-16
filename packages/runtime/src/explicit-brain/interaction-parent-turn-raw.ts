@@ -9,11 +9,13 @@ import {
   validateInteractionTurnIdentity,
   validateRawFactEnvelope,
   type AcceptedRawFact,
+  type EvidenceRef,
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
   type JournalCommitRef,
   type NativeRequestRegistration,
+  type OrganId,
   type ProviderRequestIdentityRef,
   type RawAsset,
   type RawContentReadPort,
@@ -113,6 +115,37 @@ export interface InteractionParentTurnRawJournalPort {
   readTurnSnapshot(turn: InteractionTurnIdentity): Promise<InteractionParentTurnSnapshot>;
 }
 
+/**
+ * Narrow scoped-read capability over the committed parent turn inputs.
+ *
+ * It is intentionally separate from `InteractionParentTurnRawJournalPort`: the
+ * register/append path does not need it, so only the storage that serves
+ * next-turn history selection must implement it.
+ */
+export interface InteractionParentOpenedTurnScopeReadPort {
+  readScopeOpenedTurns(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnInputFact>[]>;
+}
+
+/**
+ * The exact folded final output of one settled parent turn.
+ *
+ * The bytes are decoded from the durable accepted facts through the shared
+ * active-turn fold; the Runtime never synthesizes a whole-output asset or
+ * parses wire JSON. `requestCompleteCommit` is the durable completion fact, so
+ * a semantic close idempotency check can freeze the real final request.
+ */
+export interface InteractionParentFinalTurnOutput {
+  readonly turnInput: InteractionParentCommittedFact<InteractionParentTurnInputFact>;
+  readonly initialInputText: string;
+  readonly terminalRequest: RuntimeRequestRecord;
+  readonly requestCompleteCommit: JournalCommitRef;
+  readonly assistantText: string;
+  readonly assistantContentRefs: readonly EvidenceRef[];
+}
+
 export interface InteractionParentUnsettledRequests {
   readonly requests: readonly RuntimeRequestRecord[];
   readonly unsettledRequests: readonly RuntimeRequestRecord[];
@@ -128,6 +161,7 @@ export interface InteractionParentTurnRawOwner {
   acceptRawFact(
     envelope: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef>,
   ): Promise<AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>>;
+  readFinalTurnOutput(): Promise<InteractionParentFinalTurnOutput>;
   readonly requestContext: ProviderRequestContextHook<InteractionParentProviderExecutionIdentityRef>;
   inspectTurnRequests(): Promise<InteractionParentUnsettledRequests>;
 }
@@ -146,6 +180,22 @@ export interface InteractionParentTurnRawOwnerInput {
 }
 
 const UNSETTLED_PHASES = ['dispatching', 'dispatched', 'waiting'] as const;
+
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const chunk of chunks) length += chunk.length;
+  const merged = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return merged;
+}
 
 function sameScopedId(
   left: { readonly scope: string; readonly value: string } | undefined,
@@ -388,6 +438,115 @@ export function createInteractionParentTurnRawOwner(
         throw new ContractError('interaction parent raw fact append did not commit');
       }
       return result.entry;
+    },
+
+    async readFinalTurnOutput(): Promise<InteractionParentFinalTurnOutput> {
+      const snapshot = await journal.readTurnSnapshot(turn);
+      if (snapshot.turnInput === null) {
+        throw new ContractError('interaction parent final output requires the committed turn input');
+      }
+      const latest = new Map<string, RuntimeRequestRecord>();
+      for (const committed of snapshot.requests) {
+        latest.set(committed.fact.request.requestId, committed.fact);
+      }
+      const requests = [...latest.values()];
+      if (requests.length === 0) {
+        throw new ContractError('interaction parent final output requires at least one registered request');
+      }
+      const unsettled = requests.filter((record) =>
+        (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
+      if (unsettled.length > 0) {
+        throw new ContractError(
+          'interaction parent final output requires every request to leave dispatching, dispatched and waiting',
+        );
+      }
+      // The terminal request is the settled request that no other registered
+      // request continues. A settled parent that still has a live continuation
+      // is not final, and two independent settled leaves are ambiguous.
+      const parentRequestIds = new Set(
+        requests
+          .map((record) => record.request.parentRequestId)
+          .filter((parentRequestId): parentRequestId is string => parentRequestId !== undefined),
+      );
+      const terminals = requests.filter((record) =>
+        record.phase === 'settled' && !parentRequestIds.has(record.request.requestId));
+      if (terminals.length !== 1) {
+        throw new ContractError(
+          `interaction parent final output requires exactly one settled terminal request, found ${terminals.length}`,
+        );
+      }
+      const terminalRequest = terminals[0]!;
+      const completions = snapshot.acceptedFacts.filter((committed) =>
+        sameRequestIdentity(committed.fact.envelope.request, terminalRequest.request)
+        && committed.fact.envelope.fact.kind === 'request-complete');
+      if (completions.length !== 1) {
+        throw new ContractError(
+          `interaction parent final output requires exactly one request-complete fact for ${terminalRequest.request.requestId}`,
+        );
+      }
+      const completion = completions[0]!;
+      if (completion.fact.envelope.fact.kind !== 'request-complete'
+        || completion.fact.envelope.fact.terminal !== 'completed') {
+        throw new ContractError('interaction parent final output requires a completed terminal request');
+      }
+      const requestCompleteCommit = completion.commit;
+
+      const folded = await foldActiveTurn<
+        { readonly requestId: string },
+        { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: ScopeRef },
+        InteractionParentProviderExecutionIdentityRef
+      >({
+        binding: { execution, scope },
+        initialInput: snapshot.turnInput.fact.initialInput,
+        entries: snapshot.acceptedFacts.map((committed) => committed.fact),
+        requests: snapshot.requests.map((committed) => committed.fact),
+        childInvocations: [],
+        cut: { requestId: terminalRequest.request.requestId },
+        checkpointPath: [],
+        completionRefs: [],
+        rawContent,
+      });
+
+      const finalUnits = folded.contentUnits.filter((unit) =>
+        unit.request.requestId === terminalRequest.request.requestId
+        && unit.request.turnId === terminalRequest.request.turnId
+        && unit.channel === 'assistant-text'
+        && unit.supersededBy === undefined);
+      if (finalUnits.length === 0) {
+        throw new ContractError('interaction parent final output requires at least one assistant-text unit');
+      }
+      for (const unit of finalUnits) {
+        if (!unit.complete) {
+          throw new ContractError('interaction parent final output requires every assistant-text unit to be complete');
+        }
+      }
+      const sourceSeqs = new Set<number>();
+      for (const unit of finalUnits) for (const seq of unit.sourceSeqs) sourceSeqs.add(seq);
+      const assistantContentRefs: EvidenceRef[] = [];
+      const seenRefs = new Set<string>();
+      for (const entry of folded.entries) {
+        if (entry.kind !== 'content' || !sourceSeqs.has(entry.accepted.seq)) continue;
+        const ref = entry.accepted.envelope.fact.content.ref;
+        const key = canonicalJsonStringify(ref);
+        if (seenRefs.has(key)) continue;
+        seenRefs.add(key);
+        assistantContentRefs.push(ref);
+      }
+      if (assistantContentRefs.length === 0) {
+        throw new ContractError('interaction parent final output requires assistant content evidence refs');
+      }
+      const assistantText = decodeUtf8(concatBytes(finalUnits.map((unit) => unit.bytes)));
+      if (assistantText.trim() === '') {
+        throw new ContractError('interaction parent final output requires non-empty assistant text');
+      }
+      return {
+        turnInput: snapshot.turnInput,
+        initialInputText: decodeUtf8(folded.initialInput.bytes),
+        terminalRequest,
+        requestCompleteCommit,
+        assistantText,
+        assistantContentRefs,
+      };
     },
 
     requestContext: async (hookInput) => {

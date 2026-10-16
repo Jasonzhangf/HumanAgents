@@ -15,6 +15,7 @@ import {
   type Checkpoint,
   type EvidenceRef,
   type ExecutionRuntimePort,
+  type InteractionParentProviderExecutionIdentityRef,
   type MemoryActorContext,
   type MemoryScope,
   type MemorySubmission,
@@ -37,9 +38,11 @@ import {
   ProviderAdapter,
   ProviderAdapterError,
   ResponsesProviderCodec,
+  V3ProviderHttpTransport,
   filesystemProviderEvidenceSink,
   type ProviderTransport,
 } from '../../packages/adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { DEFAULT_AGENT_IO_POLICY } from '../../packages/runtime/src/agent-io/types.js';
 import type { RuntimeLivenessProjection } from '../../packages/ui/contracts/runtime.js';
@@ -105,6 +108,8 @@ import { AccessControlError, AccessControlService } from '../../packages/app/src
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
+import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import {
   TASK_EXECUTION_ACTION_ID,
@@ -5051,6 +5056,7 @@ test('explicit brain interprets create, query, append, change, and clarification
 
 test('explicit brain persists a live-shaped structured provider proposal after successful settlement', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-live-proposal-'));
+  const parentRoot = await mkdtemp(join('/Users/fanzhang/.humanagent/test-fixtures/provider-explicit-parent-wiring-20261016', 'ui-intake-'));
   const journalPath = join(root, 'ui-runtime-journal.jsonl');
   const providerOutput = JSON.stringify({
     interactionId: 'interaction-live-shaped',
@@ -5077,30 +5083,58 @@ test('explicit brain persists a live-shaped structured provider proposal after s
       blockingGaps: ['缺少三条链路的只读投影来源'],
     },
   });
-  class SettlementTrackingPort extends FakeReplayExecutionRuntimePort {
+  const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentRoot, 'assets')));
+  const parentJournal = new JsonlOrganJournal(join(parentRoot, 'parent.jsonl'));
+  const transport = new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+    binding,
+    baseUrl: 'http://recorded.test',
+    source: 'http',
+    evidence: rawEvidence,
+    fetch: async () => ({
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: (async function* () {
+        const frames = [
+          { type: 'response.created', response: { id: 'live-proposal' } },
+          { type: 'response.output_text.done', item_id: 'proposal', text: providerOutput },
+          { type: 'response.completed', response: { id: 'live-proposal' } },
+        ];
+        yield new TextEncoder().encode(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+      })(),
+      text: async () => '',
+    }),
+  });
+  class SettlementTrackingPort extends ProviderAdapter<InteractionParentProviderExecutionIdentityRef> {
     settleCalls = 0;
 
-    override async settle(input: Parameters<ExecutionRuntimePort['settle']>[0]): Promise<ProviderSettlement> {
+    override async settle(input: Parameters<ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>['settle']>[0]): Promise<ProviderSettlement<InteractionParentProviderExecutionIdentityRef>> {
       this.settleCalls += 1;
       return super.settle(input);
     }
   }
   const port = new SettlementTrackingPort({
     binding,
-    stepDelayMs: 0,
-    replay: [
-      { kind: 'output', state: 'output', summary: providerOutput },
-      { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
-    ],
+    routeRef: 'recorded',
+    codec: new ResponsesProviderCodec(),
+    transport,
+    evidence: rawEvidence,
   });
   const interpreter = createProviderExplicitBrainInterpreter({
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
     port,
+    organId,
+    interactionScopeId: 'runtime:ui-live-proposal',
+    parentJournal: new JsonlInteractionParentTurnJournal(parentJournal),
+    helperJournal: new JsonlInteractionHelperJournal(parentJournal),
+    rawEvidence,
+    rawContent: providerRawContentReader(rawEvidence),
+    clock: { now: () => new Date().toISOString() },
+    helperFactory: async () => { throw new Error('unexpected helper dispatch in no-helper intake'); },
   });
   const service = serviceFor(
     root,
-    port,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 0 }),
     'rcc',
     'ready',
     new UiRuntimeJournal(journalPath),
@@ -5133,6 +5167,7 @@ test('explicit brain persists a live-shaped structured provider proposal after s
   const persisted = await restored.inspectExplicitInteraction(interactionId);
   assert.equal(persisted.state, 'awaiting-confirmation');
   assert.equal(persisted.draft?.proposal, interpreted.draft?.proposal);
+  await rm(parentRoot, { recursive: true, force: true });
 });
 
 test('explicit brain rejects create interpretations that also select an existing task', async () => {

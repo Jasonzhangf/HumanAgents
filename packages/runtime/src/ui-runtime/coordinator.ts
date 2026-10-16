@@ -1164,6 +1164,12 @@ export async function projectDurableTaskInventory(input: {
       if (latest && sameCheckpointBusinessScope(scope, latest.checkpoint.scope)) {
         record.checkpoint = latest.checkpoint;
         record.checkpointSeq = latest.checkpoint.seq;
+        // The committed checkpoint is the authoritative physical position for
+        // this operation. Adopt its epoch so a cold read cannot fall back to the
+        // original allocation epoch.
+        if (latest.checkpoint.scope.operationId && sameId(latest.checkpoint.scope.operationId, record.operationId)) {
+          record.executionEpoch = latest.checkpoint.executionEpoch;
+        }
         const committed = checkpointRead.readCommitted
           ? await checkpointRead.readCommitted(latest.checkpoint.scope, latest.checkpoint.id)
           : null;
@@ -2341,6 +2347,11 @@ export class RuntimeTaskCoordinator {
     const scope = this.coldScopeFor(operation);
     const assembly = prepared.assembly;
     record.taskAssembly = assembly;
+    // The prepared successor segment is the actual physical execution this
+    // generation runs under. Adopt its epoch on the task projection before any
+    // release action; the operation, allocation and journal event identity keep
+    // their original business epoch.
+    record.executionEpoch = prepared.segment.binding.execution.executionEpoch;
     // Bind the real resumed driver before dispatch: the retained handle the
     // cold module already acquired executes through the assembly's shared
     // executor, which resolves the driver from this record instead of a second
@@ -2432,6 +2443,9 @@ export class RuntimeTaskCoordinator {
     prepared: Extract<PreparedColdExecution, { kind: 'exact-pending-boundary' | 'committed-close-alignment' }>,
   ): Promise<RuntimeExecutionRelease> {
     const scope = this.coldScopeFor(operation);
+    // The retained boundary keeps its historical physical epoch. Report that
+    // exact epoch instead of the original allocation epoch.
+    record.executionEpoch = prepared.execution.executionEpoch;
     await prepared.finishBoundary();
     record.running = false;
     record.currentState = '收拢中';
@@ -4794,7 +4808,10 @@ export class RuntimeTaskCoordinator {
   private async hydratePublicOutput(task: TaskRecord, scope: ScopeRef): Promise<void> {
     const storeFor = this.options.publicOutputStoreFor;
     if (storeFor === undefined || !scope.cycleId) return;
-    const executionEpoch = task.executionEpoch ?? this.operations.get(task.operationId!.value)?.executionEpoch;
+    // Public output binds to the original operation/assignment identity, not to
+    // the physical successor epoch projected on the task.
+    const operation = task.operationId === undefined ? undefined : this.operations.get(task.operationId.value);
+    const executionEpoch = operation?.executionEpoch;
     if (executionEpoch === undefined) {
       task.publicOutput = this.unknownPublicOutput(task.publicOutput);
       return;
@@ -5345,6 +5362,11 @@ export class RuntimeTaskCoordinator {
         const checkpoint = recalled.checkpoint;
         task.checkpoint = checkpoint;
         task.checkpointSeq = checkpoint.seq;
+        // The committed checkpoint is the authoritative physical position for
+        // this operation. Adopt its epoch before any later task snapshot read.
+        if (checkpoint.scope.operationId && sameId(checkpoint.scope.operationId, task.operationId)) {
+          task.executionEpoch = checkpoint.executionEpoch;
+        }
         if (task.error?.code === 'execution.context-commit-hook.blocked') {
           this.markCommittedCheckpointRecovery(task, task.error.nextAction);
           continue;
