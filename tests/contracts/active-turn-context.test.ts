@@ -30,6 +30,8 @@ import {
   type WorkAssignment,
   type WorkResult,
 } from '@humanagent/contracts';
+import { validateActiveTurnSegmentPredecessorRef } from '../../packages/contracts/src/active-turn-segments.js';
+import { ContractError as SourceContractError } from '../../packages/contracts/src/errors.js';
 
 const organId = id('organ', 'organ-a');
 const taskId = id('task', 'task-a');
@@ -287,6 +289,31 @@ test('public consumer names the active-turn raw identity apart from the Provider
   // @ts-expect-error the narrow raw fact identity cannot satisfy the Provider-wide identity
   const rawIsNotProviderWide: ProviderExecutionIdentityRef = rawExecution;
   void rawIsNotProviderWide;
+});
+
+test('active turn segment predecessor accepts captured or interrupted and rejects invalid unions', () => {
+  const interruptedAnchor = {
+    openedCommitRef: { commitId: 'commit-opened-a', journalSeq: 1, recordDigest: 'sha256:' + 'a'.repeat(64) },
+    recordsThroughCommitRef: { commitId: 'commit-records-a', journalSeq: 2, recordDigest: 'sha256:' + 'a'.repeat(64) },
+  };
+  assert.doesNotThrow(() => validateActiveTurnSegmentPredecessorRef({
+    segmentId: 'segment-a',
+    recoveryAssetsReceiptRef: 'receipt-a',
+  }));
+  assert.doesNotThrow(() => validateActiveTurnSegmentPredecessorRef({
+    segmentId: 'segment-a',
+    interrupted: interruptedAnchor,
+  }));
+  assert.throws(() => validateActiveTurnSegmentPredecessorRef({
+    segmentId: 'segment-a',
+    recoveryAssetsReceiptRef: 'receipt-a',
+    interrupted: interruptedAnchor,
+  }), SourceContractError);
+  assert.throws(() => validateActiveTurnSegmentPredecessorRef({ segmentId: 'segment-a' }), SourceContractError);
+  assert.throws(() => validateActiveTurnSegmentPredecessorRef({
+    segmentId: 'segment-a',
+    interrupted: { openedCommitRef: {}, recordsThroughCommitRef: interruptedAnchor.recordsThroughCommitRef },
+  }), SourceContractError);
 });
 
 test('an unadopted child invocation keeps a real checkpoint receipt without a fabricated adopted seq', () => {

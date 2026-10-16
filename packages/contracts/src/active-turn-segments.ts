@@ -58,12 +58,38 @@ export interface OriginalBusinessTurnRef {
   readonly execution: ActiveTurnProviderExecutionIdentityRef;
 }
 
-/** Exact predecessor link: the segment this one resumes and its recovery receipt. */
-export interface ActiveTurnSegmentPredecessorRef {
-  readonly segmentId: string;
-  /** Exact J1 recovery-assets receipt that closed the predecessor segment. */
-  readonly recoveryAssetsReceiptRef: string;
+/**
+ * Durable anchor of a predecessor segment that was opened and appended records
+ * but never committed a v2 recovery-assets receipt. `openedCommitRef` is the real
+ * `segment-opened` commit of that segment; `recordsThroughCommitRef` is its last
+ * committed record, or the opened commit itself when it committed no record yet.
+ * The anchor is a location, not a capture: it carries no pause, drain or freeze
+ * fact, and it never claims the segment was saved.
+ */
+export interface ActiveTurnSegmentInterruptedAnchor {
+  readonly openedCommitRef: JournalCommitRef;
+  readonly recordsThroughCommitRef: JournalCommitRef;
 }
+
+/**
+ * Exact predecessor link: the segment this one resumes, closed by exactly one
+ * real fact. Field presence expresses the exclusive-or, so the captured branch
+ * keeps its original byte shape and gains no discriminator. The runtime validator,
+ * not the `never` fields, rejects a record that carries both facts or neither.
+ */
+export type ActiveTurnSegmentPredecessorRef =
+  | {
+      readonly segmentId: string;
+      /** Exact J1 recovery-assets receipt that closed the predecessor segment. */
+      readonly recoveryAssetsReceiptRef: string;
+      readonly interrupted?: never;
+    }
+  | {
+      readonly segmentId: string;
+      readonly recoveryAssetsReceiptRef?: never;
+      /** Durable anchor of an opened but unsaved predecessor segment. */
+      readonly interrupted: ActiveTurnSegmentInterruptedAnchor;
+    };
 
 /** Real binding of one execution segment. The incarnation is the actual handle. */
 export interface ActiveTurnSegmentBinding {
@@ -98,6 +124,7 @@ export interface ActiveTurnSegmentOpenIntent {
  */
 export type ActiveTurnSegmentRecoveryReceiptRead =
   | { readonly status: 'exact'; readonly recoveryAssetsReceiptRef: string }
+  | { readonly status: 'interrupted'; readonly anchor: ActiveTurnSegmentInterruptedAnchor }
   | { readonly status: 'failed'; readonly reason: string }
   | { readonly status: 'unknown'; readonly reason: string };
 
@@ -215,6 +242,34 @@ export function validateActiveTurnSegmentIdentity(input: unknown): asserts input
   assertPositiveSafeInteger(input.executionEpoch, 'segment identity executionEpoch');
 }
 
+/**
+ * Enforce the exclusive-or predecessor link. The captured branch carries the exact
+ * J1 recovery-assets receipt that closed the predecessor; the interrupted branch
+ * carries the durable anchor of an opened but unsaved predecessor. Field presence
+ * is the only discriminator, so a record holding both facts or neither is rejected
+ * here rather than resolved downstream. Commit refs use the existing Journal
+ * validator. This never reinterprets the initial binding.
+ */
+export function validateActiveTurnSegmentPredecessorRef(input: unknown): asserts input is ActiveTurnSegmentPredecessorRef {
+  assertPlainObject(input, 'segment predecessor');
+  assertNonEmptyString(input.segmentId, 'segment predecessor segmentId');
+  const hasReceipt = input.recoveryAssetsReceiptRef !== undefined;
+  const hasInterrupted = input.interrupted !== undefined;
+  if (hasReceipt && hasInterrupted) {
+    throw new ContractError('segment predecessor cannot carry both a recovery receipt and an interrupted anchor');
+  }
+  if (!hasReceipt && !hasInterrupted) {
+    throw new ContractError('segment predecessor requires a recovery receipt or an interrupted anchor');
+  }
+  if (hasReceipt) {
+    assertNonEmptyString(input.recoveryAssetsReceiptRef, 'segment predecessor recoveryAssetsReceiptRef');
+    return;
+  }
+  assertPlainObject(input.interrupted, 'segment predecessor interrupted anchor');
+  validateJournalCommitRef(input.interrupted.openedCommitRef as JournalCommitRef);
+  validateJournalCommitRef(input.interrupted.recordsThroughCommitRef as JournalCommitRef);
+}
+
 export function validateOriginalBusinessTurnRef(input: unknown): asserts input is OriginalBusinessTurnRef {
   assertPlainObject(input, 'original business turn ref');
   assertNonEmptyString(input.businessTurnId, 'original business turn businessTurnId');
@@ -260,9 +315,7 @@ export function validateActiveTurnSegmentOpenIntent(input: unknown): asserts inp
   assertPlainObject(input, 'segment open intent');
   validateOriginalBusinessTurnRef(input.businessTurnRef);
   assertNonEmptyString(input.segmentId, 'segment open intent segmentId');
-  assertPlainObject(input.predecessor, 'segment open intent predecessor');
-  assertNonEmptyString(input.predecessor.segmentId, 'segment open intent predecessor segmentId');
-  assertNonEmptyString(input.predecessor.recoveryAssetsReceiptRef, 'segment open intent predecessor recoveryAssetsReceiptRef');
+  validateActiveTurnSegmentPredecessorRef(input.predecessor);
   if (input.predecessor.segmentId === input.segmentId) {
     throw new ContractError('segment open intent cannot precede itself');
   }
@@ -278,9 +331,7 @@ export function validateResumedTurnSegmentOpened(input: unknown): asserts input 
   if (input.kind !== 'segment-opened') throw new ContractError('resumed segment kind must be segment-opened');
   assertNonEmptyString(input.segmentId, 'resumed segment segmentId');
   validateOriginalBusinessTurnRef(input.businessTurnRef);
-  assertPlainObject(input.predecessor, 'resumed segment predecessor');
-  assertNonEmptyString(input.predecessor.segmentId, 'resumed segment predecessor segmentId');
-  assertNonEmptyString(input.predecessor.recoveryAssetsReceiptRef, 'resumed segment predecessor recoveryAssetsReceiptRef');
+  validateActiveTurnSegmentPredecessorRef(input.predecessor);
   if (input.predecessor.segmentId === input.segmentId) {
     throw new ContractError('resumed segment cannot precede itself');
   }
@@ -352,9 +403,7 @@ export function validateActiveTurnSegmentCaptureV2(input: unknown): asserts inpu
   const maxEntrySeq = entries.length === 0 ? 0 : entries[entries.length - 1]!.seq;
   if (cut.lastSeq !== maxEntrySeq) throw new ContractError('segment capture cut lastSeq must equal the last entry seq');
 
-  assertPlainObject(input.predecessor, 'segment capture predecessor');
-  assertNonEmptyString(input.predecessor.segmentId, 'segment capture predecessor segmentId');
-  assertNonEmptyString(input.predecessor.recoveryAssetsReceiptRef, 'segment capture predecessor recoveryAssetsReceiptRef');
+  validateActiveTurnSegmentPredecessorRef(input.predecessor);
   if (input.predecessor.segmentId === input.segmentId) {
     throw new ContractError('segment capture cannot precede itself');
   }
