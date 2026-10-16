@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
@@ -69,6 +69,7 @@ import {
   type RuntimeTaskJournalRecord,
   type RuntimeTaskSnapshot,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import type { RuntimeExecutionAllocation } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import {
   FileCheckpointStore,
   FakeReplayExecutionRuntimePort,
@@ -82,6 +83,12 @@ import {
   uiRuntimeControlJournalPath,
   type UiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { PreparedExecutionStop } from '../../packages/app/src/ui-runtime/prepared-execution-stop.js';
+import { createExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-admission.js';
+import { readPreparedExecutionInput } from '../../packages/app/src/prepared-execution-input.js';
+import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
+import type { AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import { createToolExecutionGateway } from '../../packages/app/src/tool-execution-gateway.js';
 import {
   AgentRuntimePoolManager,
   OrchestrationManager,
@@ -627,6 +634,239 @@ function serviceFor(
     runtimeComposition: { admitExecution: async () => {} },
   });
 }
+
+function preparedStopAdmission(
+  journal: JsonlOrganJournal,
+  preparedJournal: UiRuntimeJournal,
+) {
+  return createExecutionAdmission({
+    organJournal: journal,
+    taskGrantPort: new JsonlTaskGrantJournal(journal),
+    principalOwner: 'humanagent.prepared-stop-test',
+    capabilityFor: ({ intent }) => ({
+      actionId: TASK_EXECUTION_ACTION_ID,
+      capabilities: [TASK_EXECUTION_CAPABILITY],
+      scope: { organId: intent.requestedScope.organId, taskId: intent.taskId },
+    }),
+    resourceBoundary: createPreparedOperationBoundary(preparedJournal),
+    resolveAdmittedInput: async (allocation) => readPreparedExecutionInput(preparedJournal, allocation),
+    createGateway: (ports) => createToolExecutionGateway({
+      ...ports,
+      now: () => new Date('2026-10-16T00:00:00.000Z'),
+    }),
+  });
+}
+
+function preparedStopAllocation(): RuntimeExecutionAllocation {
+  const taskId = id('task', 'prepared-stop-task');
+  const cycleId = id('cycle', 'prepared-stop-cycle');
+  const operationId = id('operation', 'prepared-stop-operation');
+  return {
+    runtimeId: 'prepared-stop-runtime',
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'prepared-stop-assignment',
+    scope: { organId, taskId, cycleId, operationId },
+    inputRefs: ['asset://prepared-stop/input'],
+    ownerId: 'humanagent.runtime',
+    directiveRevision: 1,
+    inputRevision: 1,
+    orchestrated: false,
+  };
+}
+
+function preparedStopCheckpoint(allocation: RuntimeExecutionAllocation) {
+  return {
+    id: id('checkpoint', 'prepared-stop-checkpoint'),
+    scope: allocation.scope,
+    cycleId: allocation.scope.cycleId!,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: allocation.directiveRevision,
+    executionEpoch: allocation.executionEpoch,
+    outcome: 'stopped' as const,
+    summary: 'prepared execution stop',
+    next: { kind: 'stop' as const },
+  };
+}
+
+function preparedStopComposition(
+  port: ExecutionRuntimePort,
+): AgentProviderComposition {
+  return {
+    roleId: 'execution',
+    provider: {
+      provider: 'rcc',
+      source: 'http',
+      binding: binding.bindingId,
+      protocol: 'responses',
+      model: binding.modelRef,
+      route: 'prepared-stop-route',
+      baseUrl: 'http://127.0.0.1:4599',
+    },
+    source: 'http',
+    binding,
+    port,
+  };
+}
+
+// The prepared-stop producer persists durable facts through the canonical
+// product fixture root, not the process temp directory.
+const preparedStopFixtureRoot = join(
+  homedir(),
+  '.humanagent',
+  'test-fixtures',
+  'provider-prepared-stop-producer-20261016',
+);
+
+async function preparedStopFixture(prefix: string): Promise<string> {
+  await mkdir(preparedStopFixtureRoot, { recursive: true });
+  return await mkdtemp(join(preparedStopFixtureRoot, prefix));
+}
+
+test('prepared execution stop request is cold-readable and rejects changed frozen input', async () => {
+  const root = await preparedStopFixture('humanagent-prepared-stop-request-');
+  try {
+    const journal = new JsonlOrganJournal(join(root, 'organ-journal.jsonl'));
+    const preparedJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+    const allocation = preparedStopAllocation();
+    preparedJournal.append({
+      kind: 'operation.prepared',
+      allocation,
+      input: 'retain this exact prepared input',
+      operationCounter: 1,
+      cycleCounter: 1,
+    });
+    const admission = preparedStopAdmission(journal, preparedJournal);
+    const checkpoint = preparedStopCheckpoint(allocation);
+    const selector = {
+      taskId: allocation.taskId,
+      operationId: allocation.operationId,
+      executionEpoch: allocation.executionEpoch,
+    };
+
+    const first = new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission });
+    const requested = await first.request({ allocation, checkpoint });
+    const reconstructed = new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission });
+    const read = await reconstructed.read(selector);
+    assert.equal(read.state, 'pending');
+    if (read.state !== 'pending') throw new Error('expected a pending prepared-stop request');
+    assert.equal(read.request.commitId, requested.commitId);
+    assert.deepEqual(read.facts.map((entry) => entry.fact.kind), ['requested']);
+    assert.deepEqual(
+      await reconstructed.request({ allocation, checkpoint }),
+      requested,
+      'an identical request must reuse the durable receipt',
+    );
+    await assert.rejects(() => reconstructed.request({
+      allocation,
+      checkpoint: { ...checkpoint, summary: 'changed candidate' },
+    }));
+    await assert.rejects(() => reconstructed.request({
+      allocation: { ...allocation, inputRefs: [...allocation.inputRefs, 'asset://prepared-stop/other'] },
+      checkpoint,
+    }));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('prepared execution stop waits for gated preparation and a real close receipt', async () => {
+  const root = await preparedStopFixture('humanagent-prepared-stop-close-');
+  try {
+    const journal = new JsonlOrganJournal(join(root, 'organ-journal.jsonl'));
+    const preparedJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+    const allocation = preparedStopAllocation();
+    preparedJournal.append({
+      kind: 'operation.prepared',
+      allocation,
+      input: 'retain this exact prepared input',
+      operationCounter: 1,
+      cycleCounter: 1,
+    });
+    const admission = preparedStopAdmission(journal, preparedJournal);
+    const checkpoint = preparedStopCheckpoint(allocation);
+    const selector = {
+      taskId: allocation.taskId,
+      operationId: allocation.operationId,
+      executionEpoch: allocation.executionEpoch,
+    };
+    const producer = new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission });
+
+    let releasePreparation!: () => void;
+    const preparationGate = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const base = new FakeReplayExecutionRuntimePort({ binding });
+    let closeAttempts = 0;
+    const port: ExecutionRuntimePort = {
+      kind: 'humanagent.execution-runtime-port',
+      probe: (value) => base.probe(value),
+      capabilities: (value) => base.capabilities(value),
+      start: (value) => base.start(value),
+      resume: (value) => base.resume(value),
+      submit: (value) => base.submit(value),
+      observe: (value) => base.observe(value),
+      requestStop: (value) => base.requestStop(value),
+      settle: (value) => base.settle(value),
+      close: async (value) => {
+        closeAttempts += 1;
+        if (closeAttempts === 1) {
+          return {
+            bindingId: value.bindingId,
+            providerId: value.providerId,
+            protocol: value.protocol,
+            state: 'failed',
+            evidenceRefs: [],
+          };
+        }
+        return base.close(value);
+      },
+    };
+    const preparation = producer.withPreparation(allocation, async (lease) => {
+      markEntered();
+      await preparationGate;
+      return await producer.takeProvider(lease, preparedStopComposition(port));
+    });
+
+    await entered;
+    const requested = await producer.request({ allocation, checkpoint });
+    const gated = await producer.settle(selector);
+    assert.equal(gated.state, 'pending');
+    if (gated.state !== 'pending') throw new Error('expected settlement to wait for preparation');
+    assert.equal(gated.reason, 'preparation-active');
+
+    releasePreparation();
+    const acquisition = await preparation;
+    const unresolved = await producer.settle(selector);
+    assert.equal(unresolved.state, 'pending');
+    if (unresolved.state !== 'pending') throw new Error('expected settlement to wait for resource close');
+    assert.equal(unresolved.reason, 'resource-unresolved');
+
+    await assert.rejects(() => producer.closeProvider(acquisition));
+    const afterFailedClose = await producer.settle(selector);
+    assert.equal(afterFailedClose.state, 'pending');
+    if (afterFailedClose.state !== 'pending') throw new Error('failed close must retain ownership');
+    assert.equal(afterFailedClose.reason, 'resource-unresolved');
+
+    const closed = await producer.closeProvider(acquisition);
+    const settled = await producer.settle(selector);
+    assert.equal(settled.state, 'settled');
+    if (settled.state !== 'settled') throw new Error('actual close must permit settlement');
+    assert.equal(settled.fact.request.commitId, requested.commitId);
+    assert.ok(settled.settlement.commitId !== requested.commitId);
+
+    const reconstructed = new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission });
+    const readback = await reconstructed.read(selector);
+    assert.equal(readback.state, 'settled');
+    if (readback.state !== 'settled') throw new Error('settlement must survive reconstruction');
+    assert.equal(readback.recoveryStateRef.locator, readback.settlement.commitId);
+    assert.deepEqual(await reconstructed.closeProvider(acquisition), closed);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 class CountingFakeReplayExecutionRuntimePort extends FakeReplayExecutionRuntimePort {
   startCount = 0;
