@@ -1227,8 +1227,8 @@ export class RccV3ProviderTransport<
   }
 
   private async persistError(scope: ScopeRef, error: ProviderError): Promise<ProviderError> {
-    const ref = await this.writeEvidence(scope, 'settle-error', { ...error, evidenceRefs: [] });
-    return { ...error, evidenceRefs: [ref] };
+    const ref = await this.writeEvidence(scope, 'settle-error', { ...error, evidenceRefs: error.evidenceRefs });
+    return { ...error, evidenceRefs: [...error.evidenceRefs, ref] };
   }
 
   private assertBinding(binding: ProviderBinding): void {
