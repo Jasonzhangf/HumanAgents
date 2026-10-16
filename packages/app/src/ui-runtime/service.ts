@@ -396,7 +396,7 @@ export interface UiRuntimeMemoryComposition {
  */
 type ServiceExecutionPorts = Pick<
   RuntimeTaskCoordinatorOptions,
-  'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts'
+  'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts' | 'preparedExecutionStop'
 > & {
   /**
    * The one canonical cold-resume selector. The launch execution composition

@@ -765,6 +765,8 @@ test('prepared execution stop request is cold-readable and rejects changed froze
     assert.equal(read.state, 'pending');
     if (read.state !== 'pending') throw new Error('expected a pending prepared-stop request');
     assert.equal(read.request.commitId, requested.commitId);
+    assert.deepEqual(read.allocation, allocation);
+    assert.deepEqual(read.checkpoint, checkpoint);
     assert.deepEqual(read.facts.map((entry) => entry.fact.kind), ['requested']);
     assert.deepEqual(
       await reconstructed.request({ allocation, checkpoint }),
@@ -1047,6 +1049,8 @@ test('prepared execution stop settles the actual admitted parent without an open
     const settled = await producer.settle(selector);
     assert.equal(settled.state, 'settled', 'real admitted parent with no opened turn must settle');
     if (settled.state !== 'settled') throw new Error('expected settled parent');
+    assert.deepEqual(settled.allocation, allocation);
+    assert.deepEqual(settled.checkpoint, preparedStopCheckpoint(allocation));
     assert.equal(callbacks, 1, 'actual Gateway callback must execute once');
     const controlInput = { scope: allocation.scope, agentRuntimeId: allocation.runtimeId, harnessExecutionEpoch: allocation.executionEpoch };
     const control = await admission.gateway.readControl(controlInput);
@@ -1067,6 +1071,174 @@ test('prepared execution stop settles the actual admitted parent without an open
     assert.equal(callbacks, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
   }
+});
+
+// Failure basis: the original public stop reported stopped without a checkpoint.
+// Impact: lost recovery responsibility. Cost: one local file-backed fixture per proof.
+// Ack loss likelihood is unknown; one append wrapper checks the ambiguous durable cut.
+async function runtimePreparedStopConsumer(loseAppendAcknowledgement: boolean): Promise<void> {
+  const root = await preparedStopFixture('runtime-prepared-stop-');
+  try {
+    const journal = new JsonlOrganJournal(join(root, 'organ.jsonl'));
+    const taskJournal = new UiRuntimeJournal(join(root, 'tasks.jsonl'));
+    const checkpointPath = join(root, 'checkpoints.jsonl');
+    const store = new FileCheckpointStore(checkpointPath);
+    const originalAppend = store.append.bind(store);
+    const acknowledgementError = new Error('checkpoint committed but append acknowledgement lost');
+    let appends = 0;
+    store.append = async (input) => {
+      const receipt = await originalAppend(input);
+      appends += 1;
+      if (loseAppendAcknowledgement && appends === 1) throw acknowledgementError;
+      return receipt;
+    };
+    let producer!: PreparedExecutionStop;
+    let cancellations = 0;
+    const admission = preparedStopAdmission(journal, taskJournal, { settle: async (request) => {
+      cancellations += 1;
+      return producer.settleParentStop(request);
+    } });
+    producer = new PreparedExecutionStop({ journal, taskJournal, admission });
+    const preparationError = new Error('original provider preparation failed after resource closure');
+    let closes = 0;
+    let factories = 0;
+    let admissions = 0;
+    const port = new FakeReplayExecutionRuntimePort({ binding });
+    port.close = async (value) => { closes += 1; return new FakeReplayExecutionRuntimePort({ binding: value }).close(value); };
+    let publications = 0;
+    const options = {
+      organId, journal: taskJournal, checkpointStoreFor: () => store, preparedExecutionStop: producer,
+      attentionPort: {
+        async publish(value: Attention) { return { attentionId: value.attentionId, delivered: true as const }; },
+        async resolve(value: { attentionId: Attention['attentionId'] }) { return { attentionId: value.attentionId, delivered: true as const }; },
+      },
+      checkpointBoundary: { async publish(value: RuntimeCheckpointBoundary) {
+        const exact = await store.readCommitted(value.checkpoint.scope, value.checkpoint.id);
+        assert.deepEqual(exact?.checkpoint, value.checkpoint);
+        assert.equal(exact?.commitRef.recordDigest, value.recordDigest);
+        assert.equal(taskJournal.replay().some((entry) => entry.kind === 'operation.event'
+          && entry.event.kind === 'checkpoint.committed'), false, 'callback precedes task checkpoint publication');
+        publications += 1;
+      } },
+      admitExecution: async (allocation: RuntimeExecutionAllocation) => {
+        admissions += 1;
+        const registration: PreparedParentLifecycle['control']['registration'] = {
+          toolName: TASK_EXECUTION_ACTION_ID, contractVersion: '1.0.0', supportedKinds: ['run'],
+          routeId: 'harness-provider-controller', routeVersion: '1', mode: 'gateway', acceptedScopes: [{}],
+          inputContract: 'humanagent://task-execution/input/v1', outputContract: 'humanagent://task-execution/output/v1',
+          verifier: 'humanagent://task-execution/standard-end', capabilities: [TASK_EXECUTION_CAPABILITY],
+          retryPolicy: 'humanagent://task-execution/retry', owner: 'humanagent.runtime',
+        };
+        const intent: PreparedParentLifecycle['control']['intent'] = {
+          operationId: allocation.operationId, taskId: allocation.taskId, cycleId: allocation.scope.cycleId!,
+          requestedBy: 'humanagent.prepared-stop-test', intentRevision: '1', kind: 'run', toolName: registration.toolName,
+          inputRef: allocation.inputRefs[0]!, inputDigest: executionAdmissionInputDigest(allocation, readPreparedExecutionInput(taskJournal, allocation)),
+          requestedScope: allocation.scope, idempotencyKey: allocation.operationId.value,
+          expectedOutput: { schemaRef: registration.outputContract, requiredEvidenceKinds: ['operation'] },
+        };
+        const route: PreparedParentLifecycle['control']['route'] = {
+          operationId: allocation.operationId, routeId: registration.routeId, routeVersion: registration.routeVersion,
+          mode: registration.mode, contractVersion: registration.contractVersion, effectiveScope: allocation.scope,
+          selectionReason: 'Runtime prepared-stop public consumer', selectedAt: '2026-10-16T00:00:00.000Z',
+        };
+        const capability = { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY], scope: { organId, taskId: allocation.taskId } };
+        await new JsonlTaskGrantJournal(journal).grant({ requestId: 'runtime-prepared-stop-grant', taskId: allocation.taskId,
+          owner: 'humanagent.prepared-stop-test', capability, expectedRevision: 0 });
+        await admission.admitExecution({ allocation, requestRef: `execution:${allocation.operationId.value}`, capability,
+          parentLifecycle: {
+            event: { eventId: 'runtime-prepared-parent-admitted', schemaVersion: 1, kind: 'operation.accepted', operationId: allocation.operationId,
+              taskId: allocation.taskId, executionEpoch: allocation.executionEpoch, status: 'accepted', occurredAt: route.selectedAt, evidenceRefs: [] },
+            control: { intent, registration, route, status: 'accepted', executionEpoch: allocation.executionEpoch,
+              namespaceKey: operationIdempotencyKey(intent), fingerprintKey: operationSemanticFingerprintKey(operationSemanticFingerprint(intent, registration)) },
+          } });
+      },
+      createDriver: async () => {
+        factories += 1;
+        const resource = await producer.withPreparation(allocation, (lease) => producer.takeProvider(lease, preparedStopComposition(port)));
+        await producer.closeProvider(resource);
+        throw preparationError;
+      },
+    };
+    const coordinator = new RuntimeTaskCoordinator(options);
+    const task = coordinator.createTask({ title: 'prepared stop public observation' });
+    const allocation = coordinator.prepareExecution(task.taskId, { prompt: 'retain preparation failure responsibility' });
+    await assert.rejects(() => coordinator.releaseExecution(task.taskId, allocation.operationId), (error: unknown) => error === preparationError);
+    assert.equal(coordinator.taskSnapshot(task.taskId).state, 'blocked');
+    const selector = { taskId: task.taskId, operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
+    let frozen: Awaited<ReturnType<PreparedExecutionStop['read']>> | undefined;
+    if (loseAppendAcknowledgement) {
+      await assert.rejects(() => coordinator.stop(task.taskId), (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        if (!(error instanceof AggregateError)) return false;
+        assert.equal(error.errors[0], preparationError);
+        assert.equal(error.cause, error.errors[1]);
+        assert.equal((error.errors[1] as Error).name, 'CheckpointCompletionError');
+        assert.equal((error.errors[1] as Error).cause, acknowledgementError);
+        return true;
+      });
+      assert.ok(coordinator.taskSnapshot(task.taskId).state !== 'stopped');
+      assert.deepEqual(coordinator.taskSnapshot(task.taskId).allowedActions, ['retry-stop']);
+      assert.equal(publications, 0);
+      assert.equal(taskJournal.replay().some((entry) => entry.kind === 'operation.event'
+        && entry.event.kind === 'execution.terminal' && entry.event.state === 'stopped'), false);
+      frozen = await producer.read(selector);
+      assert.equal(frozen.state, 'settled');
+      assert.equal((await coordinator.retryStop(task.taskId)).state, 'stopped');
+    } else {
+      assert.equal((await coordinator.stop(task.taskId)).state, 'stopped');
+    }
+    const snapshot = coordinator.taskSnapshot(task.taskId);
+    assert.equal(snapshot.state, 'stopped');
+    assert.ok(snapshot.checkpoint, 'stopped implies checkpoint');
+    const exact = await store.readCommitted(allocation.scope, id('checkpoint', snapshot.checkpoint!.checkpointId));
+    assert.ok(exact);
+    const checkpoint = exact!.checkpoint;
+    assert.deepEqual(checkpoint.scope, allocation.scope);
+    assert.equal(checkpoint.executionEpoch, allocation.executionEpoch);
+    assert.equal(checkpoint.id.value, snapshot.checkpoint!.checkpointId);
+    assert.equal(exact?.commitRef.commitId, checkpointCommitId(checkpoint));
+    assert.equal(exact?.previous, null);
+    assert.deepEqual((await store.listCommitted({ scope: allocation.scope, limit: 10 })).checkpoints, [exact]);
+    const bytes = await readFile(checkpointPath, 'utf8');
+    assert.ok(bytes.includes(checkpoint.id.value));
+    const settled = await producer.read(selector);
+    assert.equal(settled.state, 'settled');
+    if (settled.state !== 'settled') throw new Error('settlement is required');
+    assert.deepEqual(checkpoint.recoveryStateRef, settled.recoveryStateRef);
+    assert.deepEqual(checkpoint.evidenceRefs, [settled.recoveryStateRef]);
+    assert.deepEqual(settled.allocation, allocation);
+    const { recoveryStateRef: _recovery, evidenceRefs: _evidence, ...candidate } = checkpoint;
+    assert.deepEqual(settled.checkpoint, candidate);
+    if (frozen) assert.deepEqual(settled, frozen, 'retry reads the original durable candidate and settlement');
+    const control = await admission.gateway.readControl({ scope: allocation.scope, agentRuntimeId: allocation.runtimeId, harnessExecutionEpoch: allocation.executionEpoch });
+    assert.equal(control.state, 'complete');
+    if (control.state !== 'complete') throw new Error('actual control readback is required');
+    assert.equal(control.operations.length, 1);
+    assert.equal(control.operations[0]!.status, 'cancelled');
+    assert.deepEqual(settled.fact.owners.parent, control.operationCommits[0]);
+    assert.equal(settled.fact.preparations.length, 1);
+    assert.equal(settled.fact.resourceClosures.length, 1);
+    assert.equal(appends, 1, 'retry must not append another checkpoint');
+    assert.equal(cancellations, 1);
+    assert.equal(closes, 1);
+    assert.equal(admissions, 1);
+    assert.equal(factories, 1, 'no repeated parent, preparation, or dispatch');
+    assert.equal(publications, 1);
+    const rebuilt = new RuntimeTaskCoordinator({ ...options, checkpointStoreFor: () => new FileCheckpointStore(checkpointPath) });
+    await rebuilt.hydrate();
+    assert.deepEqual(rebuilt.taskSnapshot(task.taskId).checkpoint, snapshot.checkpoint);
+    assert.deepEqual(await new FileCheckpointStore(checkpointPath).readCommitted(allocation.scope, checkpoint.id), exact);
+    const records = await journal.replay();
+    assert.equal(records.some((record) => record.commitId?.startsWith('active-turn:')), false, 'no invented admitted turn');
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
+
+test('Runtime prepared stop commits exact history with actual cancelled parent and custody', async () => {
+  await runtimePreparedStopConsumer(false);
+});
+
+test('Runtime prepared stop retries committed append acknowledgement failure with original errors and identity', async () => {
+  await runtimePreparedStopConsumer(true);
 });
 
 class CountingFakeReplayExecutionRuntimePort extends FakeReplayExecutionRuntimePort {

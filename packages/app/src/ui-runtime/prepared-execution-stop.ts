@@ -82,6 +82,8 @@ export type PreparedExecutionStopReadback =
   | {
       readonly state: 'pending';
       readonly request: JournalCommitRef;
+      readonly allocation: RuntimeExecutionAllocation;
+      readonly checkpoint: PreparedExecutionStopCheckpointCandidate;
       readonly facts: readonly {
         readonly ref: JournalCommitRef;
         readonly fact: PreparedExecutionStopFact;
@@ -90,6 +92,8 @@ export type PreparedExecutionStopReadback =
   | {
       readonly state: 'settled';
       readonly request: JournalCommitRef;
+      readonly allocation: RuntimeExecutionAllocation;
+      readonly checkpoint: PreparedExecutionStopCheckpointCandidate;
       readonly settlement: JournalCommitRef;
       readonly fact: Extract<PreparedExecutionStopFact, { readonly kind: 'settled' }>;
       readonly recoveryStateRef: EvidenceRef;
@@ -526,6 +530,8 @@ export class PreparedExecutionStop {
       return {
         state: 'settled',
         request: bundle.settled.fact.request,
+        allocation: requested.fact.allocation,
+        checkpoint: requested.fact.checkpoint,
         settlement: bundle.settled.ref,
         fact: bundle.settled.fact,
         recoveryStateRef: evidenceFor(bundle.settled.ref, requested.fact.allocation.scope),
@@ -534,6 +540,8 @@ export class PreparedExecutionStop {
     return {
       state: 'pending',
       request: requested.ref,
+      allocation: requested.fact.allocation,
+      checkpoint: requested.fact.checkpoint,
       facts: bundle.entries.map((entry) => ({ ref: entry.ref, fact: entry.fact })),
     };
   }
@@ -565,6 +573,8 @@ export class PreparedExecutionStop {
         return {
           state: 'settled',
           request: bundle.settled.fact.request,
+          allocation: currentRequested.fact.allocation,
+          checkpoint: currentRequested.fact.checkpoint,
           settlement: bundle.settled.ref,
           fact: bundle.settled.fact,
           recoveryStateRef: evidenceFor(bundle.settled.ref, currentRequested.fact.allocation.scope),

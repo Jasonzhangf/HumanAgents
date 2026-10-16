@@ -44,7 +44,7 @@ import {
   type StandardTurnDeliveryBinding,
   type StandardTurnDeliveryReadback,
 } from './standard-turn-delivery.js';
-import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
+import { checkpointCommitId, completeCheckpoint, recallCheckpoint, sameJournalCommitRef } from '../checkpoints/coordinator.js';
 import type { CommittedCheckpointRecord, LatestCheckpointRecord } from '../checkpoints/ports.js';
 import type { AdvanceTurnResult } from '../agent-loop/runtime.js';
 import { selectRuntimeTaskCurrentState } from './current-state.js';
@@ -507,6 +507,48 @@ const RUNTIME_OWNER = 'humanagent.runtime';
 
 export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCommitPort {}
 
+export type RuntimePreparedStopCheckpointCandidate = Omit<Checkpoint, 'recoveryStateRef' | 'evidenceRefs'>;
+
+export interface RuntimePreparedStopSelector {
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+}
+
+/** Values read from the original durable requested fact. */
+export interface RuntimePreparedStopRequested {
+  readonly request: JournalCommitRef;
+  readonly allocation: RuntimeExecutionAllocation;
+  readonly checkpoint: RuntimePreparedStopCheckpointCandidate;
+}
+
+export interface RuntimePreparedStopSettled extends RuntimePreparedStopRequested {
+  readonly state: 'settled';
+  readonly settlement: JournalCommitRef;
+  readonly recoveryStateRef: EvidenceRef;
+}
+
+export type RuntimePreparedStopReadback =
+  | { readonly state: 'absent' }
+  | (RuntimePreparedStopRequested & { readonly state: 'pending' })
+  | RuntimePreparedStopSettled;
+
+export type RuntimePreparedStopSettleResult = RuntimePreparedStopSettled | {
+  readonly state: 'pending';
+  readonly request: JournalCommitRef;
+  readonly reason: 'preparation-active' | 'resource-unresolved' | 'admission-incomplete' | 'turn-input-incomplete' | 'effects-present';
+  readonly evidenceRefs: readonly EvidenceRef[];
+};
+
+export interface RuntimePreparedExecutionStopPort {
+  request(input: {
+    readonly allocation: RuntimeExecutionAllocation;
+    readonly checkpoint: RuntimePreparedStopCheckpointCandidate;
+  }): Promise<JournalCommitRef>;
+  read(selector: RuntimePreparedStopSelector): Promise<RuntimePreparedStopReadback>;
+  settle(selector: RuntimePreparedStopSelector): Promise<RuntimePreparedStopSettleResult>;
+}
+
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
@@ -517,6 +559,7 @@ export interface RuntimeTaskCoordinatorOptions {
    */
   readonly coldExecution?: RuntimeColdExecutionProducer;
   readonly admitExecution?: RuntimeExecutionAdmission;
+  readonly preparedExecutionStop?: RuntimePreparedExecutionStopPort;
   /**
    * Reads back the files an execution produced, so the quality reviewer is
    * handed the artifact itself. A provider text summary cannot be verified
@@ -706,6 +749,8 @@ export interface OperationRecord {
   readonly input: string;
   readonly orchestrated: boolean;
   zeroEffectAdmissionDenial?: true;
+  /** Original in-process preparation error, for diagnostics only. */
+  preparationFailure?: { readonly cause: unknown };
   /**
    * The coordinator-owned allocation for this operation, once it has been
    * persisted. An exact retry of the same operation reuses this identity
@@ -1345,6 +1390,7 @@ function recoveryProjection(recovery: StopSettlementRecovery): RuntimeTaskError 
 }
 
 class RuntimeContextCommitError extends RuntimeTaskControlError {
+  readonly cause: unknown;
   constructor(
     readonly committed: RuntimeContextCommitResult,
     cause: unknown,
@@ -1356,6 +1402,7 @@ class RuntimeContextCommitError extends RuntimeTaskControlError {
       projection.message,
       projection.nextAction,
     );
+    this.cause = cause;
   }
 }
 
@@ -1391,6 +1438,39 @@ const EXECUTION_CAPABILITIES: RuntimeExecutionCapabilities = {
 
 class ContextCheckpointBoundary {
   constructor(private readonly checkpointStore: TaskCheckpointStore) {}
+
+  async readCommitted(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<CommittedCheckpointRecord | null> {
+    const verification = await this.checkpointStore.verify(checkpoint.scope);
+    if (!verification.valid) throw new Error(`checkpoint chain is invalid: ${verification.reason}`);
+    const exact = await this.checkpointStore.readCommitted(checkpoint.scope, checkpoint.id);
+    if (exact === null) return null;
+    if (canonicalJsonStringify(exact.checkpoint) !== canonicalJsonStringify(checkpoint)
+      || canonicalJsonStringify(exact.previous) !== canonicalJsonStringify(previous)
+      || exact.commitRef.commitId !== checkpointCommitId(checkpoint)) {
+      throw new Error('prepared-stop exact checkpoint or predecessor does not match');
+    }
+    return exact;
+  }
+
+  async publish(
+    committed: RuntimeContextCommitResult,
+    previous: Checkpoint | null,
+    publication?: RuntimeCheckpointBoundaryPort,
+  ): Promise<CommittedCheckpointRecord> {
+    const exact = await this.readCommitted(committed.checkpoint, previous);
+    if (exact === null) throw new Error('prepared-stop committed checkpoint is absent');
+    if (committed.recordDigest !== undefined && committed.recordDigest !== exact.commitRef.recordDigest) {
+      throw new Error('prepared-stop checkpoint digest does not match');
+    }
+    if (publication) {
+      try {
+        await publication.publish({ checkpoint: exact.checkpoint, previous: exact.previous, recordDigest: exact.commitRef.recordDigest });
+      } catch (error) {
+        throw new RuntimeContextCommitError(committed, error);
+      }
+    }
+    return exact;
+  }
 
   async commit(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<RuntimeContextCommitResult> {
     let recordDigest: string | undefined;
@@ -2861,11 +2941,13 @@ export class RuntimeTaskCoordinator {
     }
     record.stopping = true;
     if (record.release?.state === 'prepared' && !record.releasePending) {
-      await this.stopPreparedExecution(record, this.operations.get(record.operationId.value)!);
+      const state = await this.stopPreparedExecution(record, this.operations.get(record.operationId.value)!);
+      return { state: state === 'pending' ? 'settling' : 'stopped', operationId: record.operationId.value };
     }
     const executionReady = await record.executionReady;
     if (!executionReady) {
       if (record.state === 'stopped') return { state: 'stopped', operationId: record.operationId.value };
+      if (record.release?.state === 'prepared' && record.stopping) return { state: 'settling', operationId: record.operationId.value };
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'execution ended before stop control could start', 'start an execution first');
     }
     if (!record.running || !record.runtime || !record.driver || !record.composition || !record.operationId || !record.executionEpoch) {
@@ -2960,8 +3042,8 @@ export class RuntimeTaskCoordinator {
     const record = this.requireTask(taskId);
     if (record.stopping && record.release?.state === 'prepared' && record.operationId) {
       const prepared = this.operations.get(record.operationId.value)!;
-      await this.stopPreparedExecution(record, prepared, record.driver);
-      return { state: 'stopped', operationId: record.operationId.value };
+      const state = await this.stopPreparedExecution(record, prepared);
+      return { state: state === 'pending' ? 'settling' : 'stopped', operationId: record.operationId.value };
     }
     if (!record.stopping || !record.operationId || !record.driver || !record.runtime || !record.composition || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.recoverable', RUNTIME_OWNER, 'task has no pending stop recovery', 'start an execution first');
@@ -3729,14 +3811,94 @@ export class RuntimeTaskCoordinator {
   private async stopPreparedExecution(
     record: TaskRecord,
     operation: OperationRecord,
-    driver?: RuntimeExecutionDriver,
-  ): Promise<void> {
-    // This driver belongs to this preparation. Another task's execution does
-    // not retain it, unlike the legacy shared-provider close path.
-    const close = driver ? await driver.close() : undefined;
-    if (close && close.state !== 'closed') {
-      throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER,
-        `prepared provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'release the prepared provider resource');
+  ): Promise<'stopped' | 'pending'> {
+    try {
+      const producer = this.options.preparedExecutionStop;
+      if (!producer) throw new RuntimeTaskControlError('execution.prepared-stop.unavailable', RUNTIME_OWNER,
+        'prepared execution stop owner is not bound', 'bind the same preparation custody and stop owner');
+      const allocation = operation.allocation;
+      const scope = this.scopes.get(operation.operationId.value);
+      if (!allocation || !sameId(allocation.taskId, record.taskId)
+        || !sameId(allocation.operationId, record.operationId) || allocation.executionEpoch !== record.executionEpoch
+        || !scope || !sameScope(allocation.scope, scope)
+        || allocation.directiveRevision !== record.directiveRevision) {
+        throw new Error('prepared-stop retained allocation does not match the current operation');
+      }
+      const selector: RuntimePreparedStopSelector = {
+        taskId: allocation.taskId, operationId: allocation.operationId, executionEpoch: allocation.executionEpoch,
+      };
+      const store = this.options.checkpointStoreFor(allocation.taskId, allocation.scope.cycleId!);
+      const boundary = record.checkpointBoundary ?? new ContextCheckpointBoundary(store);
+      record.checkpointBoundary = boundary;
+      let requested = await producer.read(selector);
+      if (requested.state === 'absent') {
+        const previous = record.checkpoint ?? null;
+        const candidate: RuntimePreparedStopCheckpointCandidate = {
+          id: id('checkpoint', `checkpoint-${allocation.taskId.value}-${allocation.executionEpoch}-${record.checkpointSeq + 1}`),
+          scope: allocation.scope,
+          cycleId: allocation.scope.cycleId!,
+          seq: record.checkpointSeq + 1,
+          previousCheckpointId: previous?.id ?? null,
+          directiveRevision: allocation.directiveRevision,
+          executionEpoch: allocation.executionEpoch,
+          outcome: 'stopped',
+          summary: 'execution stopped before provider start',
+          next: { kind: 'stop', ref: 'prepared-stop' },
+        };
+        const request = await producer.request({ allocation, checkpoint: candidate });
+        requested = await producer.read(selector);
+        if (requested.state === 'absent' || !sameJournalCommitRef(request, requested.request)) {
+          throw new Error('prepared-stop request readback does not match');
+        }
+      }
+      if (canonicalJsonStringify(requested.allocation) !== canonicalJsonStringify(allocation)) {
+        throw new Error('prepared-stop durable allocation does not match');
+      }
+      const settled = requested.state === 'settled' ? requested : await producer.settle(selector);
+      if (!sameJournalCommitRef(requested.request, settled.request)) throw new Error('prepared-stop settlement request does not match');
+      if (settled.state === 'pending') {
+        record.state = 'settling';
+        record.allowedActions = ['retry-stop'];
+        record.nextStep = settled.reason;
+        this.pushEvent(record, operation, 'execution.settling', 'settling', settled.reason, settled.evidenceRefs);
+        record.resolveExecutionReady?.(false);
+        return 'pending';
+      }
+      if (canonicalJsonStringify(settled.allocation) !== canonicalJsonStringify(requested.allocation)
+        || canonicalJsonStringify(settled.checkpoint) !== canonicalJsonStringify(requested.checkpoint)) {
+        throw new Error('prepared-stop settlement changed the frozen candidate');
+      }
+      const checkpoint: Checkpoint = {
+        ...requested.checkpoint, recoveryStateRef: settled.recoveryStateRef, evidenceRefs: [settled.recoveryStateRef],
+      };
+      let previous: Checkpoint | null = null;
+      if (checkpoint.previousCheckpointId !== null) {
+        // Ordinary business checkpoints omit operationId; use the store's same stopped-predecessor rule.
+        const prior = await store.readCommitted(checkpoint.scope, checkpoint.previousCheckpointId)
+          ?? await store.readCommitted({ organId: checkpoint.scope.organId, taskId: checkpoint.scope.taskId, cycleId: checkpoint.scope.cycleId }, checkpoint.previousCheckpointId);
+        if (prior === null) throw new Error('prepared-stop frozen predecessor is absent');
+        previous = prior.checkpoint;
+      }
+      const exact = await boundary.readCommitted(checkpoint, previous);
+      if (exact !== null) {
+        const latest = await store.readLatest(checkpoint.scope);
+        if (latest === null || !sameId(latest.checkpoint.id, checkpoint.id)) {
+          throw new Error('prepared-stop checkpoint is no longer the latest checkpoint');
+        }
+      }
+      const committed = await boundary.commit(checkpoint, previous);
+      await boundary.publish(committed, previous, this.options.checkpointBoundary);
+      this.recordCommittedCheckpoint(record, committed, 'stopped');
+    } catch (stopFailure) {
+      record.state = 'settling';
+      record.allowedActions = ['retry-stop'];
+      record.nextStep = 'retry prepared execution stop with the original allocation';
+      record.resolveExecutionReady?.(false);
+      if (operation.preparationFailure) {
+        throw new AggregateError([operation.preparationFailure.cause, stopFailure],
+          'prepared execution stop failed after preparation failure', { cause: stopFailure });
+      }
+      throw stopFailure;
     }
     const error = new RuntimeTaskControlError('execution.preparation.stopped', RUNTIME_OWNER,
       'execution stopped before provider start', 'start a new execution');
@@ -3746,9 +3908,11 @@ export class RuntimeTaskCoordinator {
     record.resolveExecutionReady?.(false);
     record.resolveExecutionReady = undefined;
     record.release = undefined;
+    record.releasePending = undefined;
     this.pushEvent(record, operation, 'execution.terminal', 'stopped', error.message,
-      close?.evidenceRefs ?? [], error.ownerId, false, error.nextAction, undefined, 'final');
+      record.checkpoint!.evidenceRefs, error.ownerId, false, error.nextAction, undefined, 'final');
     this.finalize(record, 'stopped');
+    return 'stopped';
   }
 
   /**
@@ -3794,6 +3958,7 @@ export class RuntimeTaskCoordinator {
     // catch below tell that zero-effect denial apart from a failure after the
     // admission already registered a durable recovery obligation.
     let inAdmitExecution = false;
+    let stoppingPreparation = false;
     try {
       if (!this.options.admitExecution) {
         throw new RuntimeTaskControlError('execution.admission.missing', RUNTIME_OWNER,
@@ -3803,6 +3968,7 @@ export class RuntimeTaskCoordinator {
       await this.options.admitExecution(allocation);
       inAdmitExecution = false;
       if (record.stopping) {
+        stoppingPreparation = true;
         await this.stopPreparedExecution(record, operation);
         return;
       }
@@ -3849,7 +4015,8 @@ export class RuntimeTaskCoordinator {
         driver = prepared;
         record.driver = prepared;
         if (record.stopping) {
-          await this.stopPreparedExecution(record, operation, prepared);
+          stoppingPreparation = true;
+          await this.stopPreparedExecution(record, operation);
           return;
         }
         composition = new HarnessExecutionComposition({
@@ -3952,7 +4119,8 @@ export class RuntimeTaskCoordinator {
                 record.driver = attemptDriver;
                 coordinator.bindChildCallManager(attemptDriver, record.taskAssembly);
                 if (record.stopping) {
-                  await coordinator.stopPreparedExecution(record, operation, attemptDriver);
+                  stoppingPreparation = true;
+                  await coordinator.stopPreparedExecution(record, operation);
                   return {
                     taskId: input.assignment.taskId,
                     pipelineNodeId: input.assignment.pipelineNodeId,
@@ -4282,6 +4450,7 @@ export class RuntimeTaskCoordinator {
       this.finalize(record, closure.state);
     } catch (error) {
       if (record.release?.state === 'prepared') {
+        if (!stoppingPreparation) operation.preparationFailure ??= { cause: error };
         const projection = errorFromUnknown(error);
         // A denial inside the admission edge runs before any business
         // registration, active turn, driver or Provider call, so it has zero
@@ -4551,10 +4720,12 @@ export class RuntimeTaskCoordinator {
       );
       this.finalize(record, outcome);
     } finally {
-      record.rejectRelease?.(new RuntimeTaskControlError('execution.not.released', RUNTIME_OWNER,
-        'execution ended without release', 'inspect execution admission responsibility'));
-      record.rejectRelease = undefined;
-      record.resolveRelease = undefined;
+      if (!(record.stopping && record.release?.state === 'prepared')) {
+        record.rejectRelease?.(new RuntimeTaskControlError('execution.not.released', RUNTIME_OWNER,
+          'execution ended without release', 'inspect execution admission responsibility'));
+        record.rejectRelease = undefined;
+        record.resolveRelease = undefined;
+      }
       record.resolveExecutionReady?.(false);
       record.resolveExecutionReady = undefined;
       this.activeExecutions.delete(operation.operationId.value);

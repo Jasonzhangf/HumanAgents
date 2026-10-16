@@ -130,7 +130,7 @@ function asRecallError(error: unknown): CheckpointRecallError {
 
 function asCompletionError(error: unknown): CheckpointCompletionError {
   if (error instanceof CheckpointCompletionError) return error;
-  return new CheckpointCompletionError(error instanceof Error ? error.message : String(error));
+  return new CheckpointCompletionError(error instanceof Error ? error.message : String(error), { cause: error });
 }
 
 export async function recallCheckpoint(

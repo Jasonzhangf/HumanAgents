@@ -18,6 +18,7 @@ import {
   type RuntimeExecutionDriverInput,
   type RuntimeExecutionAdmission,
   type RuntimeExecutionPreparationInput,
+  type RuntimeTaskCoordinatorOptions,
   type RuntimeTaskJournalPort,
   type RuntimeTaskJournalRecord,
 } from '../../../packages/runtime/src/ui-runtime/coordinator.js';
@@ -341,6 +342,7 @@ function preparedCoordinator(
   journal: MemoryTaskJournal,
   factory: (input: RuntimeExecutionPreparationInput) => Promise<PreparedExecutionDriver>,
   admitExecution?: RuntimeExecutionAdmission,
+  overrides: Partial<RuntimeTaskCoordinatorOptions> = {},
 ): RuntimeTaskCoordinator {
   return new RuntimeTaskCoordinator({
     organId,
@@ -363,6 +365,7 @@ function preparedCoordinator(
       async resolve(attention) { return { attentionId: attention.attentionId, delivered: true }; },
     },
     journal,
+    ...overrides,
   });
 }
 
@@ -536,7 +539,9 @@ test('prepared admission holds effects until release and retains denial or stop 
     'no provider request/effect exists after denial',
   );
   assert.equal(deniedFactoryCalls, 0, 'denial releases no driver construction');
-  assert.equal((await denied.stop(deniedTask.taskId)).state, 'stopped');
+  await assert.rejects(denied.stop(deniedTask.taskId), (error: unknown) => error instanceof AggregateError
+    && (error.errors[1] as RuntimeTaskControlError).code === 'execution.prepared-stop.unavailable');
+  assert.deepEqual(denied.taskSnapshot(deniedTask.taskId).allowedActions, ['retry-stop']);
 
   const missingJournal = new MemoryTaskJournal();
   const missing = preparedCoordinator(missingJournal, async (input) => {
@@ -550,16 +555,58 @@ test('prepared admission holds effects until release and retains denial or stop 
   assert.equal(missing.taskSnapshot(missingTask.taskId).state, 'blocked');
   assert.equal(missing.taskSnapshot(missingTask.taskId).error?.code, 'execution.admission.missing');
   assert.equal(deniedFactoryCalls, 0, 'missing source releases no driver construction');
-  assert.equal((await missing.stop(missingTask.taskId)).state, 'stopped');
+  await assert.rejects(missing.stop(missingTask.taskId), (error: unknown) => error instanceof RuntimeTaskControlError
+    && error.code === 'task.not.running');
 
   const stopJournal = new MemoryTaskJournal();
   let finishStoppedFactory!: (driver: PreparedExecutionDriver) => void;
   const stoppedGate = new Promise<PreparedExecutionDriver>((resolve) => {
     finishStoppedFactory = resolve;
   });
-  const stopped = preparedCoordinator(stopJournal, async () => stoppedGate, async () => {});
+  // Observed checkpoint-free stopped loses recovery. Cost: one local real producer/store.
+  // This structural consumer has no admitted parent; the App consumer proves that boundary.
+  // Load the actual App build without importing App declarations into Runtime's isolated tsconfig.
+  const loadModule = (path: string): Promise<any> => import(path);
+  const { mkdir, mkdtemp, rm } = await loadModule('node:fs/promises');
+  const { homedir } = await loadModule('node:os');
+  const { join } = await loadModule('node:path');
+  const appModule = (path: string) => loadModule(new URL(`../../../../../packages/${path}`, import.meta.url).href);
+  const { PreparedExecutionStop } = await appModule('app/src/ui-runtime/prepared-execution-stop.js');
+  const { FileCheckpointStore, UiRuntimeJournal } = await appModule('app/src/ui-runtime/journal.js');
+  const { createExecutionAdmission } = await appModule('app/src/ui-runtime/execution-admission.js');
+  const { createPreparedOperationBoundary } = await appModule('app/src/prepared-operation-boundary.js');
+  const { createToolExecutionGateway } = await appModule('app/src/tool-execution-gateway.js');
+  const { JsonlOrganJournal } = await appModule('adapters/jsonl/src/index.js');
+  const { JsonlTaskGrantJournal } = await appModule('adapters/jsonl/src/task-grants.js');
+  const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures', 'provider-prepared-stop-producer-20261016');
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, 'runtime-consumer-'));
+  try {
+  const organJournal = new JsonlOrganJournal(join(root, 'organ.jsonl'));
+  const taskJournal = new UiRuntimeJournal(join(root, 'tasks.jsonl'));
+  const admissionOwner = createExecutionAdmission({
+    organJournal, taskGrantPort: new JsonlTaskGrantJournal(organJournal), principalOwner: 'test.prepared',
+    capabilityFor: () => { throw new Error('no business admission in structural consumer'); },
+    resourceBoundary: createPreparedOperationBoundary(taskJournal),
+    resolveAdmittedInput: async () => { throw new Error('no business admission in structural consumer'); },
+    createGateway: createToolExecutionGateway,
+  });
+  const producer = new PreparedExecutionStop({ journal: organJournal, taskJournal, admission: admissionOwner });
+  const store = new FileCheckpointStore(join(root, 'checkpoints.jsonl'));
+  const stopped = preparedCoordinator(stopJournal,
+    async () => stoppedGate, async () => {}, {
+      journal: taskJournal, checkpointStoreFor: () => store, preparedExecutionStop: producer,
+    });
   const stoppedTask = stopped.createTask({ title: 'stop held preparation', directive: 'stop before release' });
   const stoppedAllocation = stopped.prepareExecution(stoppedTask.taskId, { prompt: 'held input' });
+  let finishPreparation!: () => void;
+  let enteredPreparation!: () => void;
+  const entered = new Promise<void>((resolve) => { enteredPreparation = resolve; });
+  const preparation = producer.withPreparation(stoppedAllocation, async () => {
+    enteredPreparation();
+    await new Promise<void>((resolve) => { finishPreparation = resolve; });
+  });
+  await entered;
   const heldDriver = new PreparedExecutionDriver(stoppedAllocation);
   const stoppedRelease = assert.rejects(stopped.releaseExecution(stoppedTask.taskId, stoppedAllocation.operationId),
     (error: unknown) => error instanceof RuntimeTaskControlError && error.code === 'execution.preparation.stopped');
@@ -567,21 +614,29 @@ test('prepared admission holds effects until release and retains denial or stop 
   const stopPromise = stopped.stop(stoppedTask.taskId);
   await tick();
   finishStoppedFactory(heldDriver);
+  assert.equal((await stopPromise).state, 'settling', 'actual active preparation retains stop duty');
+  assert.deepEqual(stopped.taskSnapshot(stoppedTask.taskId).allowedActions, ['retry-stop']);
+  assert.equal((await stopped.retryStop(stoppedTask.taskId)).state, 'settling', 'pending retry must not claim stopped');
+  finishPreparation();
+  await preparation;
+  assert.equal((await stopped.retryStop(stoppedTask.taskId)).state, 'stopped');
   await stoppedRelease;
-  assert.equal((await stopPromise).state, 'stopped', 'stop acknowledges actual prepared-resource release');
   const stoppedSnapshot = stopped.taskSnapshot(stoppedTask.taskId);
   assert.equal(heldDriver.startCalls, 0, 'no late provider start after stop while held');
   assert.deepEqual(heldDriver.requests, [], 'stop releases no late model request');
-  assert.equal(heldDriver.closeCalls, 1, 'stop closes its actual prepared driver exactly once');
+  assert.equal(heldDriver.closeCalls, 0, 'Runtime must not independently close producer-owned custody');
+  const committed = await store.readCommitted(stoppedAllocation.scope, id('checkpoint', stoppedSnapshot.checkpoint!.checkpointId));
+  assert.equal(committed?.checkpoint.id.value, stoppedSnapshot.checkpoint!.checkpointId);
   assert.equal(stoppedSnapshot.state, 'stopped');
   assert.deepEqual(stoppedSnapshot.allowedActions, ['start']);
   assert.equal(
-    stopJournal.records.some((record) => record.kind === 'operation.event'
+    taskJournal.replay().some((record: RuntimeTaskJournalRecord) => record.kind === 'operation.event'
       && record.event.terminalPhase === 'final'
       && record.event.kind === 'execution.terminal'),
     true,
     'the held execution records a visible terminal event without any provider request',
   );
-  assert.equal(stopJournal.records.some((record) => record.kind === 'operation.event'
+  assert.equal(taskJournal.replay().some((record: RuntimeTaskJournalRecord) => record.kind === 'operation.event'
     && record.event.kind === 'execution.started'), false, 'stopped preparation never reports a running Provider');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
