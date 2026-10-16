@@ -436,21 +436,24 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       resourceClose = { fact: payload.fact, commit };
       continue;
     }
-    // Every other discriminant appends request or raw history, so it can never
-    // physically follow a committed resource close.
-    if (resourceClose !== null) {
-      throw new JournalIntegrityError('interaction parent raw append follows the committed resource close');
-    }
+    // An owner reconciliation is the only record that may follow a committed
+    // close. A post-close reconciliation must be a `continue` that opens the
+    // next physical epoch: the previous epoch's provider is already released,
+    // so the same owner may resume, while every other append stays frozen.
     if (payload.discriminant === 'owner-reconciliation') {
       if (turnInput === null || turnInput.fact.executionOwner === undefined
         || turnInput.fact.providerBinding === undefined) {
         throw new JournalIntegrityError('interaction parent reconciliation requires the attested turn input');
       }
+      const closed = resourceClose !== null;
+      if (closed && payload.fact.mode !== 'continue') {
+        throw new JournalIntegrityError('interaction parent raw append follows the committed resource close');
+      }
       const latest = ownerReconciliations.at(-1)?.fact;
       const previousOwner = latest?.replacementOwner ?? turnInput.fact.executionOwner;
       const activeEpoch = latest?.effectiveExecutionEpoch ?? turnInput.fact.execution.executionEpoch;
       if (canonicalJsonStringify(previousOwner) !== canonicalJsonStringify(payload.fact.previousOwner)
-        || canonicalJsonStringify(previousOwner) === canonicalJsonStringify(payload.fact.replacementOwner)
+        || (!closed && canonicalJsonStringify(previousOwner) === canonicalJsonStringify(payload.fact.replacementOwner))
         || canonicalJsonStringify(turnInput.fact.providerBinding) !== canonicalJsonStringify(payload.fact.providerBinding)
         || !sameParentExecutionBusinessIdentity(turnInput.fact.execution, payload.execution)
         || payload.execution.executionEpoch !== payload.fact.effectiveExecutionEpoch
@@ -458,7 +461,15 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
         throw new JournalIntegrityError('interaction parent reconciliation does not match the active owner and epoch');
       }
       ownerReconciliations.push({ fact: payload.fact, commit });
+      // Opening the next epoch clears the prior close, so the new epoch's
+      // request, raw facts and its own single close may append again.
+      if (closed) resourceClose = null;
       continue;
+    }
+    // Every other discriminant appends request or raw history, so it can never
+    // physically follow a committed resource close.
+    if (resourceClose !== null) {
+      throw new JournalIntegrityError('interaction parent raw append follows the committed resource close');
     }
     if (payload.discriminant === 'request') {
       const phaseKey = `${payload.record.request.requestId}\u0000${payload.record.phase}`;
@@ -504,7 +515,11 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
   }
   if (append.kind === 'resource-close') {
     return {
-      commitId: parentRawCommitId(append.turn, 'resource-close'),
+      // The original epoch keeps the exact `resource-close` commit id so every
+      // persisted epoch-1 receipt stays byte-for-byte compatible. A later epoch
+      // scopes its own close identity to the real execution epoch.
+      commitId: parentRawCommitId(append.turn,
+        append.execution.executionEpoch === 1 ? 'resource-close' : `resource-close:${append.execution.executionEpoch}`),
       kind: 'event',
       scope: parentScope(append.turn, append.execution),
       payload: {
@@ -517,9 +532,16 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
     };
   }
   if (append.kind === 'owner-reconciliation') {
+    const generationPair =
+      `owner-reconciliation:${append.fact.previousOwner.daemonGeneration}->${append.fact.replacementOwner.daemonGeneration}`;
+    // A same-generation re-entry (a closed failed epoch resumed by its own
+    // owner) needs the effective epoch in the id so the commit stays idempotent
+    // and distinct from the original distinct-owner takeover.
+    const discriminant = append.fact.previousOwner.daemonGeneration === append.fact.replacementOwner.daemonGeneration
+      ? `${generationPair}:${append.fact.effectiveExecutionEpoch}`
+      : generationPair;
     return {
-      commitId: parentRawCommitId(append.turn,
-        `owner-reconciliation:${append.fact.previousOwner.daemonGeneration}->${append.fact.replacementOwner.daemonGeneration}`),
+      commitId: parentRawCommitId(append.turn, discriminant),
       kind: 'event',
       scope: parentScope(append.turn, append.execution),
       payload: {
