@@ -79,6 +79,24 @@ function evidence(label: string): EvidenceRef {
   return { evidenceId: id('evidence', `ev-${label}`), kind: 'execution', source: 'test', locator: label, scope };
 }
 
+// The footer the wire must render after the original tool output when a result
+// carries accepted evidence refs. The resolver accepts an evidenceId value or a
+// locator, so both are rendered.
+function expectedFooter(refs: readonly EvidenceRef[]): string {
+  return [
+    '',
+    '[HumanAgent evidence refs]',
+    'Cite one exact evidenceId value below when you finish the turn.',
+    ...refs.map((ref) => [
+      `- evidenceId=${ref.evidenceId.value}`,
+      `kind=${ref.kind}`,
+      `locator=${ref.locator}`,
+      ...(ref.digest === undefined ? [] : [`digest=${ref.digest}`]),
+    ].join(' ')),
+    '[/HumanAgent evidence refs]',
+  ].join('\n');
+}
+
 function memoryEvidenceSink(): ProviderEvidenceSink {
   const assets = new Map<string, Uint8Array>();
   return {
@@ -159,7 +177,7 @@ function contextUnits(phase: ProviderRequestContextHookInput['phase']) {
       units: [
         { kind: 'message' as const, role: 'user' as const, text: 'CURRENT_TURN_INPUT' },
         { kind: 'tool-call' as const, callId: 'call-1', toolId: 'file.read', arguments: { path: 'README.md' } },
-        { kind: 'tool-result' as const, callId: 'call-1', toolId: 'file.read', output: 'TOOL_OUTPUT', status: 'succeeded' as const },
+        { kind: 'tool-result' as const, callId: 'call-1', toolId: 'file.read', output: 'TOOL_OUTPUT', evidenceRefs: [evidence('tool-result')], status: 'succeeded' as const },
       ],
     },
     instructions: { text: 'ORIENTATION_TWO' },
@@ -167,6 +185,7 @@ function contextUnits(phase: ProviderRequestContextHookInput['phase']) {
 }
 
 test('provider driver materializes fresh typed context and encodes each protocol once', async () => {
+  const toolOutput = `TOOL_OUTPUT${expectedFooter([evidence('tool-result')])}`;
   const captured: Captured = { order: [], starts: [], submits: [] };
   const sink = memoryEvidenceSink();
   const adapter = new ProviderAdapter({
@@ -261,7 +280,7 @@ test('provider driver materializes fresh typed context and encodes each protocol
   assert.equal(functionCalls.length, 1);
   assert.equal(functionOutputs.length, 1);
   assert.deepEqual(functionCalls[0], { type: 'function_call', call_id: 'call-1', name: 'file_read', arguments: '{"path":"README.md"}' });
-  assert.deepEqual(functionOutputs[0], { type: 'function_call_output', call_id: 'call-1', output: 'TOOL_OUTPUT' });
+  assert.deepEqual(functionOutputs[0], { type: 'function_call_output', call_id: 'call-1', output: toolOutput });
   assert.deepEqual(
     continuationWire.input.filter((item) => item.type === 'message'),
     [{ type: 'message', role: 'user', content: 'CURRENT_TURN_INPUT' }],
@@ -281,7 +300,7 @@ test('provider driver materializes fresh typed context and encodes each protocol
   const blocks = anthropicContinuation.messages.flatMap((message) => message.content);
   assert.deepEqual(blocks.filter((block) => block.type === 'text'), [{ type: 'text', text: 'CURRENT_TURN_INPUT' }]);
   assert.deepEqual(blocks.filter((block) => block.type === 'tool_use'), [{ type: 'tool_use', id: 'call-1', name: 'file.read', input: { path: 'README.md' } }]);
-  assert.deepEqual(blocks.filter((block) => block.type === 'tool_result'), [{ type: 'tool_result', tool_use_id: 'call-1', content: 'TOOL_OUTPUT' }]);
+  assert.deepEqual(blocks.filter((block) => block.type === 'tool_result'), [{ type: 'tool_result', tool_use_id: 'call-1', content: toolOutput }]);
   assert.equal(blocks.some((block) => block.type === 'thinking'), false);
 
   const chatCodec = new OpenAIChatProviderCodec();
@@ -306,7 +325,7 @@ test('provider driver materializes fresh typed context and encodes each protocol
       content: '',
       tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'file_read', arguments: '{"path":"README.md"}' } }],
     },
-    { role: 'tool', tool_call_id: 'call-1', content: 'TOOL_OUTPUT' },
+    { role: 'tool', tool_call_id: 'call-1', content: toolOutput },
   ]);
   assert.equal(JSON.stringify(chatContinuation).includes('PRIOR_TURN_RAW_MARKER'), false);
 
@@ -648,6 +667,7 @@ function assertRealSettlement(settlement: ProviderSettlement): void {
 
 test('J: typed Responses tool loop runs one real transport round trip with fresh continuation context', async () => {
   const output = 'RESPONSES_TOOL_OUTPUT\n{"token":"R_ONLY"}';
+  const wireOutput = `${output}${expectedFooter([evidence('tool-result')])}`;
   const harness = nativeLoopHarness({
     binding: responsesBinding,
     codec: new ResponsesProviderCodec(),
@@ -671,7 +691,7 @@ test('J: typed Responses tool loop runs one real transport round trip with fresh
             units: [
               { kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' },
               { kind: 'tool-call', callId: 'call-resp', toolId: 'file.read', arguments: { path: 'README.md' } },
-              { kind: 'tool-result', callId: 'call-resp', toolId: 'file.read', output, status: 'succeeded' },
+              { kind: 'tool-result', callId: 'call-resp', toolId: 'file.read', output, evidenceRefs: [evidence('tool-result')], status: 'succeeded' },
             ],
           },
           instructions: { text: 'ORIENTATION_TWO' },
@@ -739,7 +759,7 @@ test('J: typed Responses tool loop runs one real transport round trip with fresh
     { type: 'function_call', call_id: 'call-resp', name: 'file_read', arguments: '{"path":"README.md"}' },
   ]);
   assert.deepEqual(continuationInput.filter((item) => item.type === 'function_call_output'), [
-    { type: 'function_call_output', call_id: 'call-resp', output },
+    { type: 'function_call_output', call_id: 'call-resp', output: wireOutput },
   ]);
   assert.equal(continuationInput.filter((item) => item.type === 'message').length, 1);
 
@@ -753,6 +773,7 @@ test('J: typed Responses tool loop runs one real transport round trip with fresh
 
 test('J: typed Anthropic tool loop runs one real transport round trip with fresh continuation context', async () => {
   const output = 'ANTHROPIC_TOOL_OUTPUT\n{"token":"A_ONLY"}';
+  const wireOutput = `${output}${expectedFooter([evidence('tool-result')])}`;
   const harness = nativeLoopHarness({
     binding: anthropicBinding,
     codec: new AnthropicProviderCodec(1024),
@@ -781,7 +802,7 @@ test('J: typed Anthropic tool loop runs one real transport round trip with fresh
             units: [
               { kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' },
               { kind: 'tool-call', callId: 'call-anthropic', toolId: 'file.read', arguments: { path: 'README.md' } },
-              { kind: 'tool-result', callId: 'call-anthropic', toolId: 'file.read', output, status: 'succeeded' },
+              { kind: 'tool-result', callId: 'call-anthropic', toolId: 'file.read', output, evidenceRefs: [evidence('tool-result')], status: 'succeeded' },
             ],
           },
           instructions: { text: 'ORIENTATION_TWO' },
@@ -838,7 +859,7 @@ test('J: typed Anthropic tool loop runs one real transport round trip with fresh
   const blocks = (harness.calls[1]!.body.messages as readonly { content: readonly Record<string, unknown>[] }[]).flatMap((message) => message.content);
   assert.deepEqual(blocks.filter((block) => block.type === 'text'), [{ type: 'text', text: 'CURRENT_TURN_INPUT' }]);
   assert.deepEqual(blocks.filter((block) => block.type === 'tool_use'), [{ type: 'tool_use', id: 'call-anthropic', name: 'file.read', input: { path: 'README.md' } }]);
-  assert.deepEqual(blocks.filter((block) => block.type === 'tool_result'), [{ type: 'tool_result', tool_use_id: 'call-anthropic', content: output }]);
+  assert.deepEqual(blocks.filter((block) => block.type === 'tool_result'), [{ type: 'tool_result', tool_use_id: 'call-anthropic', content: wireOutput }]);
 
   assert.equal(harness.consumed[1], true);
   assertRealSettlement(settlement);
@@ -849,6 +870,8 @@ test('J: typed Anthropic tool loop runs one real transport round trip with fresh
 test('J: typed Chat tool loop runs one real transport round trip with two tools in one assistant group', async () => {
   const readOutput = 'CHAT_READ_OUTPUT\n{"token":"C_READ"}';
   const listOutput = 'CHAT_LIST_OUTPUT\n{"token":"C_LIST"}';
+  const readWire = `${readOutput}${expectedFooter([evidence('tool-result')])}`;
+  const listWire = `${listOutput}${expectedFooter([evidence('tool-result')])}`;
   const outputs = new Map([['call-chat-read', readOutput], ['call-chat-list', listOutput]]);
   const harness = nativeLoopHarness({
     binding: openaiBinding,
@@ -878,8 +901,8 @@ test('J: typed Chat tool loop runs one real transport round trip with two tools 
               { kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' },
               { kind: 'tool-call', callId: 'call-chat-read', toolId: 'file.read', arguments: { path: 'README.md' } },
               { kind: 'tool-call', callId: 'call-chat-list', toolId: 'file.list', arguments: { dir: '.' } },
-              { kind: 'tool-result', callId: 'call-chat-read', toolId: 'file.read', output: readOutput, status: 'succeeded' },
-              { kind: 'tool-result', callId: 'call-chat-list', toolId: 'file.list', output: listOutput, status: 'succeeded' },
+              { kind: 'tool-result', callId: 'call-chat-read', toolId: 'file.read', output: readOutput, evidenceRefs: [evidence('tool-result')], status: 'succeeded' },
+              { kind: 'tool-result', callId: 'call-chat-list', toolId: 'file.list', output: listOutput, evidenceRefs: [evidence('tool-result')], status: 'succeeded' },
             ],
           },
           instructions: { text: 'ORIENTATION_TWO' },
@@ -942,8 +965,8 @@ test('J: typed Chat tool loop runs one real transport round trip with two tools 
       { id: 'call-chat-read', type: 'function', function: { name: 'file_read', arguments: '{"path":"README.md"}' } },
       { id: 'call-chat-list', type: 'function', function: { name: 'file_list', arguments: '{"dir":"."}' } },
     ] },
-    { role: 'tool', tool_call_id: 'call-chat-read', content: readOutput },
-    { role: 'tool', tool_call_id: 'call-chat-list', content: listOutput },
+    { role: 'tool', tool_call_id: 'call-chat-read', content: readWire },
+    { role: 'tool', tool_call_id: 'call-chat-list', content: listWire },
   ]);
   assert.equal(continuationMessages.filter((message) => message.role === 'assistant' && Array.isArray(message.tool_calls)).length, 1);
   assert.equal(JSON.stringify(harness.calls[1]!.body).includes(NATIVE_LOOP_LEGACY_SENTINEL), false);
