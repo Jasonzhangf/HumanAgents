@@ -491,6 +491,36 @@ function nativeRoute(providerId: string): string {
 interface RecordedFetchCall {
   readonly url: string;
   readonly body: Record<string, unknown>;
+  readonly rawBody: string;
+}
+
+interface LocalRequestReceiptView {
+  readonly body: string;
+  readonly identity: {
+    readonly runtimeId: string;
+    readonly taskId?: { readonly value: string };
+    readonly operationId: { readonly value: string };
+    readonly executionEpoch: number;
+  };
+  readonly turnId?: string;
+  readonly requestId?: string;
+  readonly parentRequestId?: string;
+  readonly protocol: string;
+  readonly endpoint: string;
+  readonly model: string;
+  readonly route: string;
+  readonly status: number;
+  readonly callIds?: readonly string[];
+  readonly continuationRef?: string;
+}
+
+interface HttpEvidenceReceipt {
+  readonly status: number;
+  readonly endpoint: string;
+  readonly protocol: string;
+  readonly model: string;
+  readonly route: string;
+  readonly requestReceipt: LocalRequestReceiptView;
 }
 
 interface NativeLoopHarnessInput {
@@ -551,7 +581,11 @@ function nativeLoopHarness(input: NativeLoopHarnessInput): NativeLoopHarness {
     round += 1;
     const events = input.rounds[index];
     if (events === undefined) throw new Error(`unexpected provider fetch #${index + 1}`);
-    calls.push({ url, body: JSON.parse(init.body ?? '{}') as Record<string, unknown> });
+    calls.push({
+      url,
+      body: JSON.parse(init.body ?? '{}') as Record<string, unknown>,
+      rawBody: init.body ?? '',
+    });
     order.push(`fetch:${index + 1}`);
     return {
       status: 200,
@@ -717,14 +751,14 @@ test('J: typed Responses tool loop runs one real transport round trip with fresh
   assertBefore(harness.order, 'register:dispatching:child', 'hook:continuation');
   assertBefore(harness.order, 'hook:continuation', 'fetch:2');
 
-  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'settled', 'dispatching', 'dispatched', 'settled']);
   const rootRequestId = harness.registrations[0]!.record.request.requestId;
   const childDispatch = harness.registrations.find((entry) => entry.record.phase === 'dispatching' && entry.record.parentRequestId === rootRequestId);
   assert.ok(childDispatch, 'expected a continuation dispatching registration bound to the root request');
   assert.notEqual(childDispatch!.record.request.requestId, rootRequestId);
   assert.equal(harness.registrations.every((entry) => entry.execution.runtimeId === identity.runtimeId), true);
   assert.equal(harness.registrations.every((entry) => entry.record.scope.organId.value === organ.value), true);
-  assert.deepEqual(harness.lifecycle.map((event) => event.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  assert.deepEqual(harness.lifecycle.map((event) => event.phase), ['dispatching', 'dispatched', 'waiting', 'settled', 'dispatching', 'dispatched', 'settled']);
   assert.equal(harness.lifecycle.every((event) => event.turnId === harness.lifecycle[0]!.turnId), true);
   assert.equal(harness.lifecycle[2]!.externalResponseId, 'resp-loop-1');
   assert.equal(harness.lifecycle.at(-1)!.externalResponseId, 'resp-loop-2');
@@ -746,12 +780,52 @@ test('J: typed Responses tool loop runs one real transport round trip with fresh
   assert.equal(harness.calls[0]!.url, `${NATIVE_LOOP_BASE_URL}/v1/responses`);
   assert.equal(harness.calls[1]!.url, `${NATIVE_LOOP_BASE_URL}/v1/responses`);
   const startEvidence = harness.evidence.find((write) => write.type === 'start');
-  assert.deepEqual(startEvidence?.content, { status: 200, endpoint: '/v1/responses', protocol: 'responses', model: 'model-p', route: nativeRoute('cc') });
   assert.equal(startEvidence?.locator, 'http://start');
-  assert.deepEqual(
-    harness.evidence.find((write) => write.type === 'submit')?.content,
-    { status: 200, endpoint: '/v1/responses', protocol: 'responses', model: 'model-p', route: nativeRoute('cc') },
-  );
+  const startContent = startEvidence?.content as HttpEvidenceReceipt;
+  assert.equal(startContent.status, 200);
+  assert.equal(startContent.endpoint, '/v1/responses');
+  assert.equal(startContent.protocol, 'responses');
+  assert.equal(startContent.model, 'model-p');
+  assert.equal(startContent.route, nativeRoute('cc'));
+  assert.equal(startContent.requestReceipt.body, harness.calls[0]!.rawBody);
+  assert.equal(startContent.requestReceipt.identity.runtimeId, identity.runtimeId);
+  assert.equal(startContent.requestReceipt.identity.taskId?.value, taskId.value);
+  assert.equal(startContent.requestReceipt.identity.operationId.value, operationId.value);
+  assert.equal(startContent.requestReceipt.identity.executionEpoch, identity.executionEpoch);
+  assert.equal(startContent.requestReceipt.turnId, harness.registrations[0]!.record.request.turnId);
+  assert.equal(startContent.requestReceipt.requestId, rootRequestId);
+  assert.equal(startContent.requestReceipt.parentRequestId, undefined);
+  assert.equal(startContent.requestReceipt.protocol, 'responses');
+  assert.equal(startContent.requestReceipt.endpoint, '/v1/responses');
+  assert.equal(startContent.requestReceipt.model, 'model-p');
+  assert.equal(startContent.requestReceipt.route, nativeRoute('cc'));
+  assert.equal(startContent.requestReceipt.status, 200);
+
+  const submitEvidence = harness.evidence.find((write) => write.type === 'submit');
+  const submitContent = submitEvidence?.content as HttpEvidenceReceipt;
+  assert.equal(submitContent.status, 200);
+  assert.equal(submitContent.endpoint, '/v1/responses');
+  assert.equal(submitContent.protocol, 'responses');
+  assert.equal(submitContent.model, 'model-p');
+  assert.equal(submitContent.route, nativeRoute('cc'));
+  assert.equal(submitContent.requestReceipt.body, harness.calls[1]!.rawBody);
+  assert.equal(submitContent.requestReceipt.identity.runtimeId, identity.runtimeId);
+  assert.equal(submitContent.requestReceipt.identity.taskId?.value, taskId.value);
+  assert.equal(submitContent.requestReceipt.identity.operationId.value, operationId.value);
+  assert.equal(submitContent.requestReceipt.identity.executionEpoch, identity.executionEpoch);
+  assert.equal(submitContent.requestReceipt.turnId, childDispatch!.record.request.turnId);
+  assert.equal(submitContent.requestReceipt.requestId, childDispatch!.record.request.requestId);
+  assert.equal(submitContent.requestReceipt.parentRequestId, rootRequestId);
+  assert.equal(submitContent.requestReceipt.protocol, 'responses');
+  assert.equal(submitContent.requestReceipt.endpoint, '/v1/responses');
+  assert.equal(submitContent.requestReceipt.model, 'model-p');
+  assert.equal(submitContent.requestReceipt.route, nativeRoute('cc'));
+  assert.equal(submitContent.requestReceipt.status, 200);
+  // This consumer carries the continuation through typed requestContext, so the
+  // transport has no toolContinuations identity to record and must not derive
+  // callIds or continuationRef from the business payload.
+  assert.equal(submitContent.requestReceipt.callIds, undefined);
+  assert.equal(submitContent.requestReceipt.continuationRef, undefined);
 
   // The Responses wire carries the stable harness tool-surface guidance plus the
   // transient request-scoped orientation.
