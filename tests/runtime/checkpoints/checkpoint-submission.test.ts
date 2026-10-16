@@ -13,8 +13,14 @@ import type {
   CheckpointChainVerification,
   CheckpointClosurePort,
   CheckpointJournalPort,
+  CheckpointListQuery,
+  CheckpointListResult,
+  CheckpointRecoveryBinding,
   CheckpointReentryAdmissionDecision,
   CheckpointReentryAdmissionPort,
+  CommittedCheckpointRecord,
+  ExecutionPosition,
+  JournalCommitRef,
   LatestCheckpointRecord,
 } from '../../../packages/runtime/src/checkpoints/ports.js';
 import type {
@@ -89,6 +95,13 @@ function checkpoint(
   };
 }
 
+function committedRefFor(checkpoint: Checkpoint): JournalCommitRef {
+  // This double records committed checkpoints, not Journal receipts. It exposes the
+  // canonical checkpoint commit id as a stable exact reference for readback parity.
+  const commitId = checkpointCommitId(checkpoint);
+  return { commitId, journalSeq: checkpoint.seq, recordDigest: commitId };
+}
+
 class FakeJournal implements CheckpointJournalPort {
   verification: CheckpointChainVerification = { valid: true };
   readonly latestByScope = new Map<string, LatestCheckpointRecord>();
@@ -124,6 +137,36 @@ class FakeJournal implements CheckpointJournalPort {
     });
     return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq };
   }
+
+  // Submission paths use verify/readLatest/append only. The exact readers below are
+  // implemented over this double's committed state so the port stays honest. They are
+  // instance properties so a spread of this journal keeps the full read surface.
+  readCommitted = async (scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null> => {
+    const record = this.latestByScope.get(this.scopeKey(scope));
+    if (!record) return null;
+    if (record.checkpoint.id.scope !== checkpointId.scope || record.checkpoint.id.value !== checkpointId.value) return null;
+    return { checkpoint: record.checkpoint, previous: record.previous, commitRef: committedRefFor(record.checkpoint) };
+  };
+
+  listCommitted = async (query: CheckpointListQuery): Promise<CheckpointListResult> => {
+    const record = this.latestByScope.get(this.scopeKey(query.scope));
+    if (!record) return { checkpoints: [] };
+    const { checkpoint } = record;
+    if (query.directiveRevision !== undefined && checkpoint.directiveRevision !== query.directiveRevision) return { checkpoints: [] };
+    if (query.executionEpoch !== undefined && checkpoint.executionEpoch !== query.executionEpoch) return { checkpoints: [] };
+    if (query.cycleId !== undefined && (checkpoint.cycleId.scope !== query.cycleId.scope || checkpoint.cycleId.value !== query.cycleId.value)) return { checkpoints: [] };
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1) return { checkpoints: [] };
+    return { checkpoints: [{ checkpoint, previous: record.previous, commitRef: committedRefFor(checkpoint) }] };
+  };
+
+  // This double records checkpoint commits only; no recovery binding or execution
+  // position is committed here, so the exact lookup returns the honest absent result.
+  readExecutionPosition = async (_taskScope: ScopeRef): Promise<ExecutionPosition | null> => null;
+
+  readCheckpointRecoveryBinding = async (
+    _scope: ScopeRef,
+    _checkpointCommitRef: JournalCommitRef,
+  ): Promise<CheckpointRecoveryBinding | null> => null;
 }
 
 class FakeClosurePort implements CheckpointClosurePort {

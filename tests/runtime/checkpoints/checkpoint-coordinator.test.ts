@@ -9,6 +9,7 @@ import {
 } from '../../../packages/contracts/src/index.js';
 import {
   completeCheckpoint,
+  checkpointCommitId,
   recallCheckpoint,
 } from '../../../packages/runtime/src/checkpoints/coordinator.js';
 import {
@@ -21,6 +22,12 @@ import type {
   CheckpointAppendReceipt,
   CheckpointChainVerification,
   CheckpointJournalPort,
+  CheckpointListQuery,
+  CheckpointListResult,
+  CheckpointRecoveryBinding,
+  CommittedCheckpointRecord,
+  ExecutionPosition,
+  JournalCommitRef,
   LatestCheckpointRecord,
 } from '../../../packages/runtime/src/checkpoints/ports.js';
 import { assembleCheckpointWindows } from '../../../packages/runtime/src/checkpoints/windows.js';
@@ -51,6 +58,20 @@ function outOfScope(dimension: 'organ' | 'task' | 'cycle' | 'operation'): ScopeR
     case 'operation':
       return { ...scope, operationId: id('operation', 'operation-b') };
   }
+}
+
+function sameScope(left: ScopeRef, right: ScopeRef): boolean {
+  return left.organId.scope === right.organId.scope && left.organId.value === right.organId.value
+    && left.taskId?.scope === right.taskId?.scope && left.taskId?.value === right.taskId?.value
+    && left.cycleId?.scope === right.cycleId?.scope && left.cycleId?.value === right.cycleId?.value
+    && left.operationId?.scope === right.operationId?.scope && left.operationId?.value === right.operationId?.value;
+}
+
+function committedRefFor(checkpoint: Checkpoint): JournalCommitRef {
+  // This double records committed checkpoints, not Journal receipts. It exposes the
+  // canonical checkpoint commit id as a stable exact reference for readback parity.
+  const commitId = checkpointCommitId(checkpoint);
+  return { commitId, journalSeq: checkpoint.seq, recordDigest: commitId };
 }
 
 function checkpoint(
@@ -97,6 +118,35 @@ class FakeJournal implements CheckpointJournalPort {
     this.appended.push(input);
     return this.appendReceipt ?? { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq };
   }
+
+  // Coordinator paths use verify/readLatest/append only. The exact readers below are
+  // implemented over this double's committed state so the port stays honest.
+  readCommitted = async (scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null> => {
+    const record = this.latest;
+    if (!record || !sameScope(record.checkpoint.scope, scope)) return null;
+    if (record.checkpoint.id.scope !== checkpointId.scope || record.checkpoint.id.value !== checkpointId.value) return null;
+    return { checkpoint: record.checkpoint, previous: record.previous, commitRef: committedRefFor(record.checkpoint) };
+  };
+
+  listCommitted = async (query: CheckpointListQuery): Promise<CheckpointListResult> => {
+    const record = this.latest;
+    if (!record || !sameScope(record.checkpoint.scope, query.scope)) return { checkpoints: [] };
+    const { checkpoint } = record;
+    if (query.directiveRevision !== undefined && checkpoint.directiveRevision !== query.directiveRevision) return { checkpoints: [] };
+    if (query.executionEpoch !== undefined && checkpoint.executionEpoch !== query.executionEpoch) return { checkpoints: [] };
+    if (query.cycleId !== undefined && (checkpoint.cycleId.scope !== query.cycleId.scope || checkpoint.cycleId.value !== query.cycleId.value)) return { checkpoints: [] };
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1) return { checkpoints: [] };
+    return { checkpoints: [{ checkpoint, previous: record.previous, commitRef: committedRefFor(checkpoint) }] };
+  };
+
+  // This double records checkpoint commits only; no recovery binding or execution
+  // position is committed here, so the exact lookup returns the honest absent result.
+  readExecutionPosition = async (_taskScope: ScopeRef): Promise<ExecutionPosition | null> => null;
+
+  readCheckpointRecoveryBinding = async (
+    _scope: ScopeRef,
+    _checkpointCommitRef: JournalCommitRef,
+  ): Promise<CheckpointRecoveryBinding | null> => null;
 }
 
 test('recall verifies the latest checkpoint, preserves recovery state, and bounds both windows', async () => {

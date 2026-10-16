@@ -390,7 +390,7 @@ const coreClosure = (overrides: Partial<CheckpointClosureRecord> = {}): Checkpoi
   nextAction: { kind: 'stop', ref: 'stopped' }, closedAt: '2099-01-01T00:00:00Z', ...overrides,
 });
 const coreReentry = (overrides: Partial<CheckpointReentryRecord> = {}): CheckpointReentryRecord => ({
-  checkpointId: id('checkpoint', 'checkpoint-a'), reentryId: 'reentry-a', executionEpoch: 5, fencedEpochs: [4],
+  checkpointId: id('checkpoint', 'checkpoint-a'), reentryId: 'reentry-a', checkpointExecutionEpoch: 4, previousExecutionEpoch: 4, newExecutionEpoch: 5, fencedEpochs: [4],
   permissionRevision: 'permission-r2', contextViewRef: 'context://view-a', entryPhase: 'recovery', nextAction: 'continue',
   reentryRef: 'fact://reentry-a', ...overrides,
 });
