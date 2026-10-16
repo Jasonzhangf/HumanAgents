@@ -19,6 +19,9 @@ import {
   type HarnessPlugin,
   type ProviderBinding,
   type TaskId,
+  type AnyProviderExecutionIdentityRef,
+  type ProviderExecutionIdentityRef,
+  type TasklessProviderExecutionIdentityRef,
 } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 import {
@@ -1473,10 +1476,12 @@ export async function main(args: readonly string[]): Promise<void> {
       route: option(args, '--route') ?? configuredProvider.route,
       baseUrl,
     };
-    const prepareSelectedAgentProvider = (input: {
+    const prepareSelectedAgentProvider = <
+      TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+    >(input: {
       readonly roleId: import('../../config/src/index.js').AgentRole;
       readonly configuredAgentId?: string;
-    }) => prepareAgentProvider({
+    }) => prepareAgentProvider<TIdentity>({
       ...input,
       agentProviderBindings: configuration.agentProviderBindings,
       legacyProvider: effectiveLegacyProvider,
@@ -1727,6 +1732,12 @@ export async function main(args: readonly string[]): Promise<void> {
                 createTaskAssembly: serveRuntime!.createTaskAssembly,
               }),
             },
+            ...(mode === 'fake' ? {} : {
+              explicitBrainHelperProviderPreparer: (selection: {
+                readonly roleId: import('../../config/src/index.js').AgentRole;
+                readonly configuredAgentId?: string;
+              }) => prepareSelectedAgentProvider<TasklessProviderExecutionIdentityRef>(selection),
+            }),
             host,
             portNumber: boundPortNumber,
             projectKey: paths.projectKey,
