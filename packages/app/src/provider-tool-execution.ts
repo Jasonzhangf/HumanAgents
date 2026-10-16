@@ -1094,7 +1094,7 @@ async function executeFileList(
   return {
     output: JSON.stringify(report),
     outputRefs: [],
-    evidenceRefs: [evidence(scope, 'file-list')],
+    evidenceRefs: [taskEvidence(request, 'file-list')],
   };
 }
 
@@ -1139,7 +1139,7 @@ async function executeFileSearch(
     outputRef: descriptor.outputRef,
     outputDigest: descriptor.outputDigest,
     executorRoute: 'app.file-search.local',
-    evidenceRefs: [evidence(scope, 'file-search')],
+    evidenceRefs: [taskEvidence(request, 'file-search')],
   };
 }
 

@@ -160,7 +160,8 @@ function isToolResultFact(value: AcceptedRawFact): value is ToolResultFact {
 }
 
 function carriesEvidence(fact: ToolResultFact, delivery: EvidenceRef): boolean {
-  return fact.envelope.fact.result.evidenceRefs.some((evidence) => sameEvidenceIdentity(evidence, delivery));
+  return fact.envelope.fact.result.evidenceRefs.some((evidence) => sameEvidenceIdentity(evidence, delivery))
+    || sameEvidenceIdentity(fact.envelope.fact.rawOutput.ref, delivery);
 }
 
 /**

@@ -319,7 +319,7 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
           if (unit.kind === 'initial-input') units.push({ kind: 'message', role: 'user', text: text(unit.bytes) });
           else if (unit.kind === 'content') units.push({ kind: 'message', role: 'assistant', text: text(unit.bytes) });
           else if (unit.kind === 'tool-call') units.push({ kind: 'tool-call', callId: unit.callId, toolId: unit.toolId, arguments: unit.arguments });
-          else units.push({ kind: 'tool-result', callId: unit.callId, toolId: unit.toolId, output: text(unit.rawOutput), status: unit.status });
+          else units.push({ kind: 'tool-result', callId: unit.callId, toolId: unit.toolId, output: text(unit.rawOutput), status: unit.status, evidenceRefs: [unit.rawOutputRef] });
         }
       }
       return { canonical: { units }, ...(resolved.instructions === undefined ? {} : { instructions: resolved.instructions }) };
@@ -341,6 +341,13 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
           const fact = entry.envelope.fact;
           if (fact.kind !== 'tool-result') continue;
           for (const ref of fact.result.evidenceRefs) candidates.push(ref);
+          // The parent-scoped accepted raw-output citation is also a legal delivery
+          // reference. It is added only when its accepted scope exactly matches the
+          // child's own admitted scope; no task equality or alias substitutes for it.
+          if (canonicalJsonStringify(fact.rawOutput.ref.scope) === canonicalJsonStringify(entry.envelope.scope)
+            && canonicalJsonStringify(fact.rawOutput.ref.scope) === canonicalJsonStringify(childScope)) {
+            candidates.push(fact.rawOutput.ref);
+          }
         }
         const byReference = new Map<string, EvidenceRef>();
         for (const ref of candidates) {
