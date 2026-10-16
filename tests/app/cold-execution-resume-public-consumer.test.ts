@@ -972,7 +972,8 @@ async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
  */
 async function buildColdFixture(name: string,
   expectedOutputRefs: readonly string[] = ['original-output'],
-  targetRefs: readonly string[] = ['original-target']): Promise<ColdFixture> {
+  targetRefs: readonly string[] = ['original-target'],
+  failInitialRelease = false): Promise<ColdFixture> {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, `${name}-`));
   const preparedPath = join(root, 'prepared.jsonl');
@@ -982,6 +983,7 @@ async function buildColdFixture(name: string,
 
   const preparedJournal = new UiRuntimeJournal(preparedPath);
   const seed = new RuntimeTaskCoordinator({ organId, journal: preparedJournal,
+    ...(failInitialRelease ? { admitExecution: async () => {} } : {}),
     createDriver: async () => { throw new Error('the fixture must not start a driver'); },
     checkpointStoreFor: () => new FileCheckpointStore(join(root, 'unused-checkpoints.jsonl')),
     attentionPort: {
@@ -1080,6 +1082,14 @@ async function buildColdFixture(name: string,
     },
   });
   const allocation = seed.prepareExecution(task.taskId, { prompt, configuredAgentId: 'cold-resume-agent' });
+  if (failInitialRelease) {
+    // Exercise the public release boundary. The real coordinator persists the
+    // driver construction failure; no error or Journal event is fabricated.
+    await assert.rejects(() => seed.releaseExecution(task.taskId, allocation.operationId),
+      /the fixture must not start a driver/);
+    assert.equal(seed.taskSnapshot(task.taskId).state, 'blocked');
+    assert.equal(seed.taskSnapshot(task.taskId).error?.code, 'runtime.execution.failure');
+  }
   const { scope, taskId, operationId } = allocation;
   const criteria = {
     objective: 'retain full assignment',
@@ -2128,7 +2138,7 @@ function registerPublicConsumers(): void {
   // same case with real Journal publication/readback and one fresh hydrate.
   test('public cold boundary resume creates the real Planner assembly without acquiring an executor or replaying saved work', async () => {
     const fixture = await buildColdFixture('boundary-planner-assembly', ['original-output'],
-      ['original-target', 'original-delivery-text-target']);
+      ['original-target', 'original-delivery-text-target'], true);
     assert.deepEqual(fixture.assignment.expectedOutputRefs, ['original-output']);
     assert.deepEqual(fixture.assignment.targetRefs, ['original-target', 'original-delivery-text-target']);
     const deliveryText = '已恢复原任务。确认的文件与副作用保持不变。\n最终业务结果：冷恢复交付完成。';
@@ -2150,6 +2160,19 @@ function registerPublicConsumers(): void {
         owned.push(...preparation.assemblies);
       }
       for (const assembly of preparation.assemblies) await assembly.runtimePool.dispose();
+
+      const pending = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model');
+      await pending.coordinator.hydrate();
+      assert.equal(pending.coordinator.taskSnapshot(fixture.taskId).error?.code, 'runtime.execution.failure',
+        'a closed checkpoint without accepted alignment does not resolve the current error');
+      const pendingInventory = await projectDurableTaskInventory({
+        records: fixture.preparedJournal.replay(),
+        checkpointFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
+        currentStateFor: () => createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }),
+      });
+      assert.deepEqual(pendingInventory.failures, []);
+      assert.equal(pendingInventory.entries.find((entry) => entry.snapshot.taskId.value === fixture.taskId.value)
+        ?.snapshot.error?.code, 'runtime.execution.failure', 'inventory retains the unaligned error too');
 
       const beforeBytes = await readFile(fixture.journalPath, 'utf8');
       const beforeRecords = (await fixture.journal.verify()).records;
@@ -2248,6 +2271,7 @@ function registerPublicConsumers(): void {
       assert.equal(runtime.coordinator.taskSnapshot(fixture.taskId).executionEpoch,
         beforeSegments.at(-1)!.binding.execution.executionEpoch);
       const completed = runtime.coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(completed.error, undefined, 'accepted alignment clears the hot current error');
       assert.equal(completed.operationId, fixture.allocation.operationId.value);
       assert.equal(completed.output, deliveryText);
       const publicStore = new ServiceExecutionCheckpointStore(fixture.journalPath,
@@ -2268,6 +2292,20 @@ function registerPublicConsumers(): void {
       assert.equal(hydrated.executionEpoch, 2);
       assert.equal(hydrated.state, 'succeeded');
       assert.deepEqual(hydrated.publicOutput, publication, 'fresh hydration must retain the exact text and commit');
+      const inventory = await projectDurableTaskInventory({
+        records: fixture.preparedJournal.replay(),
+        checkpointFor: () => publicStore,
+        currentStateFor: () => createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }),
+      });
+      assert.deepEqual(inventory.failures, []);
+      const durable = inventory.entries.find((entry) => entry.snapshot.taskId.value === fixture.taskId.value);
+      if (!durable) throw new Error('durable inventory must contain the recovered task');
+      assert.equal(durable.snapshot.state, hydrated.state);
+      assert.equal(durable.snapshot.executionEpoch, hydrated.executionEpoch);
+      assert.deepEqual([hydrated.error, durable.snapshot.error], [undefined, undefined],
+        'fresh hydrate and durable inventory must revoke the resolved execution error');
+      assert.ok(fixture.preparedJournal.replay().some((record) => record.kind === 'operation.event'
+        && record.error?.code === 'runtime.execution.failure'), 'the historical failure remains readable');
       assert.equal(refreshed.assemblies.length, 0, 'refresh does not acquire an assembly');
       const unbound = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', { omitAssemblyFactory: true });
       await assert.rejects(() => unbound.coordinator.resumeExecution(fixture.taskId, fixture.allocation.operationId, selected),

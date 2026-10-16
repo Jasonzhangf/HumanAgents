@@ -1161,6 +1161,25 @@ export interface DurableTaskCurrentStateReadPort {
   read(taskScope: ScopeRef): Promise<RuntimeTaskCurrentStateRead>;
 }
 
+function reconcileSelectedCurrentError(record: TaskRecord, selection: RuntimeTaskCurrentStateSelection | null): void {
+  if (selection?.basis !== 'terminal') return;
+  const { processing, retainedDuties } = selection.currentState;
+  // Only accepted alignment with known completed stages and no retained error
+  // responsibility revokes a replayed error. The stable recovery owner and a
+  // continue action alone do not imply either failure or recovery completion.
+  if ((selection.lifecycle === 'succeeded' || selection.lifecycle === 'waiting')
+    && processing.entryPhase === 'aligned'
+    && processing.nextAction.kind === 'continue'
+    && processing.firstErrorRef === undefined
+    && processing.hardBlockers.length === 0
+    && processing.laterErrorRefs.length === 0
+    && retainedDuties.length === 0
+    && processing.stages.length > 0
+    && processing.stages.every((stage) => stage.state === 'succeeded')) {
+    record.error = undefined;
+  }
+}
+
 /**
  * Rebuilds task inventory from task Journal records and reconciles each task's
  * durable state with its authoritative checkpoint. It reuses the coordinator's
@@ -1241,6 +1260,7 @@ export async function projectDurableTaskInventory(input: {
               currentState: currentStateRead,
             })
           : null;
+        reconcileSelectedCurrentError(record, selection);
         record.state = selection?.basis === 'terminal'
           ? selection.lifecycle
           : latest.checkpoint.outcome;
@@ -5677,6 +5697,7 @@ export class RuntimeTaskCoordinator {
             checkpointCommitRef: committed.commitRef,
             currentState: currentStateRead,
           });
+          reconcileSelectedCurrentError(task, selection);
           if (selection.basis === 'terminal') {
             task.state = selection.lifecycle;
             task.currentStateCommitRef = currentStateRead.state === 'known'
