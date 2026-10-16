@@ -1561,6 +1561,31 @@ async function handleRequest(
       writeJson(response, 202, { operationId: started.operationId.value, executionEpoch: started.executionEpoch });
       return;
     }
+    // Public cold resume: the caller selects only the retained operation. Every
+    // business identity, source and control fact comes from the bound owner, so
+    // the body accepts exactly one field. The common /api/ guard already
+    // verified the session; Runtime retains the task-scoped grant decision.
+    const taskResume = /^\/api\/tasks\/([^/]+)\/resume$/.exec(path);
+    if (taskResume && method === 'POST') {
+      const body = await readBody(request);
+      const keys = Object.keys(body);
+      if (keys.length !== 1 || keys[0] !== 'operationId') {
+        throw new UiRuntimeApiError(
+          'execution.resume.invalid-request',
+          APP_OWNER,
+          'resume request body must contain only operationId',
+          'send { "operationId": "<operation-id>" }',
+          400,
+        );
+      }
+      const operationId = id('operation', requireString(body, 'operationId'));
+      const resumed = await service.resumeExecution(
+        id('task', decodeURIComponent(taskResume[1]!)),
+        { operationId },
+      );
+      writeJson(response, 202, resumed);
+      return;
+    }
     const taskStop = /^\/api\/tasks\/([^/]+)\/stop$/.exec(path);
     if (taskStop && method === 'POST') {
       const result = await service.stop(id('task', decodeURIComponent(taskStop[1]!)));
