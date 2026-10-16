@@ -12,10 +12,10 @@ import { JsonlTaskIdentityJournal } from '../../dist/app/adapters/jsonl/src/task
 import { JsonlTaskGrantJournal } from '../../dist/app/adapters/jsonl/src/task-grants.js';
 import { createJsonlActiveTurnJournal } from '../../dist/app/adapters/jsonl/src/active-turn.js';
 import { JsonlOperationCompletionJournal } from '../../dist/app/adapters/jsonl/src/operation-completion.js';
-import { ImmutableAssetStore } from '../../dist/app/adapters/filesystem/src/index.js';
+import { ImmutableAssetStore, evidenceReference } from '../../dist/app/adapters/filesystem/src/index.js';
 import { MemoryCoordinator } from '../../dist/app/runtime/src/memory/index.js';
 import { ActiveTurnContext } from '../../dist/app/runtime/src/context/active-turn-context.js';
-import { contextViewIdentityV1, projectAdmittedTurnIdentityV1 } from '../../dist/app/runtime/src/context/semantic-history.js';
+import { adoptedChildAdoptionCommitIdV1, adoptedChildDeliveryCommitIdV1, contextViewIdentityV1, projectAdmittedTurnIdentityV1 } from '../../dist/app/runtime/src/context/semantic-history.js';
 import { commitSemanticContextViewV1, commitSemanticHistoryPublicationV1 } from '../../dist/app/runtime/src/checkpoints/semantic-history.js';
 import { DeterministicMemoryBackend } from '../../dist/app/adapters/memory/src/index.js';
 import { admitTaskGrantBusiness } from '../../dist/app/runtime/src/admission/task-grant.js';
@@ -126,13 +126,40 @@ export async function fixture() {
     completionJournal: new JsonlOperationCompletionJournal({ journal }) });
   const initialInput = await nativeAssets.writeInitialInput({ scope, turnId: turn.turnId, rawInput: 'read exact history' });
   await active.registerInitialInput(initialInput);
+  const nativeA = await checkpoints.commitNativeCheckpoint({ ownerId: owner, checkpoint: a, timeAuthority });
+  const assets = new ImmutableAssetStore(artifactsRoot);
+  const turnIdentity = projectAdmittedTurnIdentityV1(turn);
+  // Legal adopted-child producer chain. Two distinct refined deliveries are written to the
+  // real store, returned through the real child lifecycle, then adopted by the owner.
+  // This runs before capture freezes the active turn; the semantic publication below only
+  // cites these durable relationships. Nothing is seeded as a DTO.
+  const childInvocationIds = ['c3-child-alpha', 'c3-child-beta'];
+  const childTexts = { [childInvocationIds[0]]: 'refined alpha delivery body', [childInvocationIds[1]]: 'refined beta delivery body' };
+  const adoptedSources = [];
+  for (const [index, invocationId] of childInvocationIds.entries()) {
+    const childTurnId = `c3-child-turn-${index}`;
+    const reference = await assets.write(`c3-child-${index}`, new TextEncoder().encode(childTexts[invocationId]));
+    const refinedDelivery = { ref: evidenceReference(reference, scope, 'operation', `c3-child-body-${index}`), view: { kind: 'utf8-text' } };
+    await active.openChildInvocation({ invocationId, childTurnId, checkpointReceiptRef: nativeA.receipt.journalReceiptRef,
+      binding: { kind: 'execution', assignment } });
+    const returnedDelivery = await active.recordChildReturn({ kind: 'execution', invocationId, refinedDelivery, assignment,
+      result: { taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: owner, assignmentId: assignment.assignmentId,
+        attempt: assignment.attempt, executionEpoch: assignment.executionEpoch, inputRevision: assignment.inputRevision,
+        producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: `refined child ${index}`,
+        outputRefs: [], evidenceRefs: [evidence(`child-result-${index}`)], nextAction: 'continue' } });
+    await active.recordChildAdoption(invocationId, returnedDelivery);
+    adoptedSources.push({ parentTurn: turnIdentity, invocationId, childTurnId, deliverySeq: returnedDelivery.seq,
+      adoptionCommitId: adoptedChildAdoptionCommitIdV1(turn.turnId, invocationId),
+      deliveryCommitId: adoptedChildDeliveryCommitIdV1(turn.turnId, invocationId), kind: 'execution',
+      refinedDelivery, preCallCheckpointRef: nativeA.receipt.journalReceiptRef });
+  }
+  assert.equal(new Set(adoptedSources.map((child) => child.deliverySeq)).size, 2);
   const captureBody = await active.prepareCapture({ pauseId: 'c3-boundary', frozenAt: at, initialInput,
     checkpointPath: [], completionRefs: [] });
   const capture = await nativeAssets.commitCapturePhase({ turnId: turn.turnId, boundaryId: captureBody.cut.pauseId,
     prepared: { body: captureBody, controlRecordCount: active.controlRecordCount(), producerDrains: [], completionLookups: [],
       recovery: { commitIdentity: 'c3-hold', laterErrorRefs: [], rawTurnRefs: [turn.currentTurnRef], unresolvedOperationRefs: [],
         stages: [], durablePhases: [], durableReceiptRefs: [], recoveryResponsibilityRef: owner } } });
-  const nativeA = await checkpoints.commitNativeCheckpoint({ ownerId: owner, checkpoint: a, timeAuthority });
   const preparation = await prepareCheckpointClosure({ checkpoint: a, source: 'harness-control', closureReason: 'empty boundary',
     contextCommitRef: contextCommit.commitRef, contextHistory: contexts, operationSelector: selector,
     operationControl: await control.readControl(selector), permission: { permissionRevision: admitted.authority.permissionRevision,
@@ -140,15 +167,13 @@ export async function fixture() {
     unresolvedOperationRefs: [], closurePort: closures, now: () => new Date(at) });
   await submitCheckpoint({ ownerId: owner, source: 'harness-control', checkpoint: a, previous: null,
     journal: checkpoints, closurePort: closures, preparation, turnRecoveryRef: capture.commitIdentity });
-  const assets = new ImmutableAssetStore(artifactsRoot);
   const semantic = createJsonlSemanticHistoryJournal({ filePath, journal, artifactsRoot,
     activeTurnJournal, rawContent: { read: async ({ content }) => assets.readEvidence(content.ref) }, timeAuthority });
   const semantics = { goal: 'read exact history', actions: 'inspect Journal', result: 'A remains current', nextStep: 'inspect A' };
   const view = await commitSemanticContextViewV1({ port: semantic, accepted: { version: 1,
     admittedTurn: turn, checkpoint: nativeA, acceptance: { ownerId: owner, acceptanceRef: 'c3-semantic-accepted',
-      sourceEvidenceRefs: [evidence('semantic-accepted')] }, semantics, adoptedChildren: [],
+      sourceEvidenceRefs: [evidence('semantic-accepted')] }, semantics, adoptedChildren: adoptedSources,
     recovery: { recoveryStateRef: turn.recoveryStateRef, recoveryResponsibilityRef: owner, unresolvedOperationRefs: [], laterErrorRefs: [] } } });
-  const turnIdentity = projectAdmittedTurnIdentityV1(turn);
   const publication = await commitSemanticHistoryPublicationV1({ port: semantic, ownerId: owner, turn: turnIdentity,
     checkpoint: nativeA, contextView: { identity: await contextViewIdentityV1({ turn: turnIdentity, checkpoint: a }), receipt: view } });
   const b = checkpoint(2, a);
@@ -170,7 +195,10 @@ export async function fixture() {
     projectCatalog: async () => ({ projects: [{ projectKey: paths.projectKey, projectRoot: paths.projectRoot,
       workspaceCwd: paths.workspaceCwd, checkpointsRoot: paths.checkpointsRoot }], failures: [] }),
   });
-  return { root, paths, service, checkpoints, contextCommit, recordA, recordB, semantics, publication, capture, effects: () => effects };
+  const children = adoptedSources.map((source) => ({ invocationId: source.invocationId, childTurnId: source.childTurnId,
+    deliverySeq: source.deliverySeq, refinedDelivery: source.refinedDelivery, text: childTexts[source.invocationId] }));
+  return { root, paths, service, checkpoints, contextCommit, recordA, recordB, semantics, publication, capture, children,
+    effects: () => effects };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) test('production checkpoint GET preserves canonical current and exact viewed receipts without writes', async () => {
@@ -207,10 +235,55 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const unknown = await get({ ...identity(f.recordA), checkpointRecordDigest: 'sha256:' + '0'.repeat(64) });
     const wrongTask = await get(identity(f.recordA), 'c3-other-task');
     const unauthenticated = await get({}, taskId.value, false);
+    const captureAssetStore = new ImmutableAssetStore(join(f.paths.artifactsRoot, 'ui-provider-evidence'));
+    const captureBytes = await captureAssetStore.readEvidence(f.capture.capture.ref);
+    const captureText = new TextDecoder('utf-8', { fatal: true }).decode(captureBytes);
+    const captureBodyUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/capture?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA) });
+    const captureBodyResponse = await fetch(captureBodyUrl, { headers: { cookie } });
+    const captureBody = await captureBodyResponse.json();
+    console.log(JSON.stringify({ url: captureBodyUrl, status: captureBodyResponse.status, body: captureBody }));
+    // Two legal adopted-child bodies from the same committed A, then one unknown triple.
+    // The unknown triple must fail explicitly and carry no body text.
+    const childBodies = [];
+    for (const child of f.children) {
+      const childBodyUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/adopted-child/`
+        + `${child.invocationId}/${child.childTurnId}/${child.deliverySeq}?`
+        + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA) });
+      const childResponse = await fetch(childBodyUrl, { headers: { cookie } });
+      const childBody = await childResponse.json();
+      console.log(JSON.stringify({ url: childBodyUrl, status: childResponse.status, body: childBody }));
+      assert.equal(childResponse.status, 200);
+      assert.equal(childBody.surface, 'runtime-checkpoint-asset-body');
+      assert.deepEqual(childBody.scope, { kind: 'task', projectKey: f.paths.projectKey, mode: 'fake', taskId });
+      assert.deepEqual(childBody.checkpoint, viewed.body.viewed.identity);
+      assert.deepEqual(childBody.selector, { kind: 'adopted-child', invocationId: child.invocationId,
+        childTurnId: child.childTurnId, deliverySeq: child.deliverySeq });
+      assert.deepEqual(childBody.asset, child.refinedDelivery);
+      assert.equal(childBody.text, child.text);
+      childBodies.push(childBody);
+    }
+    assert.equal(new Set(childBodies.map((body) => body.text)).size, 2, 'adopted child bodies must differ');
+    const unknownChildUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/adopted-child/`
+      + `c3-child-unknown/c3-child-turn-unknown/999?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA) });
+    const unknownChildResponse = await fetch(unknownChildUrl, { headers: { cookie } });
+    const unknownChildBody = await unknownChildResponse.json();
+    console.log(JSON.stringify({ url: unknownChildUrl, status: unknownChildResponse.status, body: unknownChildBody }));
+    assert.notEqual(unknownChildResponse.status, 200);
+    assert.ok(!('text' in unknownChildBody), 'unknown adopted-child selector must not return a body text');
+    assert.ok('error' in unknownChildBody, 'unknown adopted-child selector must return an explicit failure');
     assert.deepEqual(await snapshot(f.paths.projectRoot), before, 'GET changed durable Journal/asset bytes or file set');
     assert.deepEqual(await f.checkpoints.readExecutionPosition(taskScope), position);
     assert.equal(f.effects(), 0);
     console.log(JSON.stringify({ noWrite: true, position, effects: f.effects() }));
+    assert.equal(captureBodyResponse.status, 200);
+    assert.equal(captureBody.surface, 'runtime-checkpoint-asset-body');
+    assert.deepEqual(captureBody.scope, { kind: 'task', projectKey: f.paths.projectKey, mode: 'fake', taskId });
+    assert.deepEqual(captureBody.checkpoint, viewed.body.viewed.identity);
+    assert.deepEqual(captureBody.selector, { kind: 'capture' });
+    assert.deepEqual(captureBody.asset, f.capture.capture);
+    assert.equal(captureBody.text, captureText);
     assert.equal(current.status, 200);
     assert.deepEqual({ current: current.body.current?.state, viewed: viewed.body.viewed?.identity?.commitRef,
       malformed: malformed.status, unknown: unknown.status },
