@@ -61,11 +61,12 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
   const parentStarts: ProviderStartInput<InteractionParentProviderExecutionIdentityRef>[] = [];
   const childStarts: AnyProviderExecutionIdentityRef[] = [];
   const requests: any[] = [];
+  const lifecycle: string[] = [];
   let turn: InteractionTurnIdentity | undefined;
   let helperCallId = '';
   const refinedText = '精炼后采纳的正文，保留 helper 的 incomplete 判断。';
   const answer = `父最终回答：${'完整语义与字节。'.repeat(120)}`;
-  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'parent-private-input',
+  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'bounded parent question',
     knownFacts: ['accepted refined helper'], answer, decisionRefs: ['final-parent'] });
   const fields = {
     objective: 'bounded helper question', targetRefs: [], expectedOutputRefs: [],
@@ -97,7 +98,21 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
       } else {
         assert.equal(body.model, 'parent-model');
         const results = body.input.filter((item: any) => item.type === 'function_call_output');
-        if (results.length === 0) {
+        if (parentStarts.length === 2) {
+          const wire = JSON.stringify(body);
+          assert.ok(wire.includes('second-current-input'));
+          assert.ok(wire.includes('second-source'));
+          assert.ok(wire.includes(refinedText), 'second outbound must contain accepted refined helper semantics');
+          for (const part of ['goal:', 'what-done', 'outcome(', 'next-step:']) assert.ok(wire.includes(part), part);
+          for (const raw of ['parent-private-input', finalText, 'dispatch-call', 'accept-call', 'child-summary-is-not-parent-json-or-refined-text']) {
+            assert.equal(wire.includes(raw), false, `prior raw must not enter history: ${raw}`);
+          }
+          assert.deepEqual(lifecycle, ['parent:closed']);
+          assert.ok(await helperJournal.readSemanticCheckpointExact(parentStarts[0].interactionTurn));
+          frames.push({ type: 'response.output_text.done', item_id: 'second-final', text: JSON.stringify({
+            kind: 'answer', normalizedInput: 'second question', knownFacts: [], answer: 'second answer', decisionRefs: [],
+          }) });
+        } else if (results.length === 0) {
           assert.ok(turn);
           const snapshot = await parentJournal.readTurnSnapshot(turn!);
           assert.ok(snapshot.turnInput, 'initial input must be durable before external parent start');
@@ -167,6 +182,12 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
         }
         return start(input);
       };
+      const close = owned.port.close.bind(owned.port);
+      owned.port.close = async (binding) => {
+        const receipt = await close(binding);
+        if (selection.roleId === 'interaction') lifecycle.push('parent:closed');
+        return receipt;
+      };
       return owned;
     };
     const auth = await testAccessControl(root);
@@ -201,6 +222,27 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
       assert.equal(new TextDecoder().decode(stored), wireResult.output, 'tool continuation must preserve exact committed output bytes');
     }
     assert.ok(helperCallId);
+    // Observed missing default checkpoint wiring loses cross-turn history.
+    // One added parent request below checks the actual wire, not assembly args.
+    const firstCommit = await helperJournal.readSemanticCheckpointExact(turn!);
+    assert.ok(firstCommit, 'default parent must publish semantic closure');
+    if (firstCommit === null) throw new Error('missing semantic commit');
+    const claims = firstCommit.checkpoint.claims.map((claim) => claim.fact).join('\n');
+    for (const part of ['goal:', 'what-done', 'outcome(', 'next-step:', refinedText]) assert.ok(claims.includes(part), part);
+    const nextInput = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: 'business', sourceRef: 'second-source', rawInput: 'second-current-input' }),
+    });
+    assert.equal(nextInput.status, 201);
+    const secondId = ((await nextInput.json()) as { interactionId: string }).interactionId;
+    const next = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(secondId)}/interpret`, { method: 'POST' });
+    const nextReceipt = await next.text();
+    assert.equal(next.status, 200, nextReceipt);
+    assert.ok(nextReceipt.includes('second answer'));
+    assert.equal(parentStarts.length, 2); assert.equal(childStarts.length, 1);
+    assert.equal(parentStarts[1].interactionTurn.interactionId, secondId);
+    assert.ok(parentStarts[0].interactionTurn.turnId !== parentStarts[1].interactionTurn.turnId);
+    assert.ok(await helperJournal.readSemanticCheckpointExact(parentStarts[1].interactionTurn));
   } finally {
     if (runtime) { testSessionByOrigin.delete(new URL(runtime.server.url).origin); await runtime.close(); }
     server.closeIdleConnections?.();
@@ -650,6 +692,8 @@ test('public confirmation passes exact existing-task-change target and rejects s
           knownFacts: [],
           intent: 'change',
           proposal: 'change this task',
+          structuredProposal: { revision: input.inputRevision, intent: 'change', title: 'change this task',
+            objective: 'change this task', deliverable: 'changed task', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
           decisionRefs: [],
         };
       },

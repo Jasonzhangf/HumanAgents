@@ -20,7 +20,7 @@ import {
 } from '../../contracts/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
-import { foldActiveTurn } from '../../runtime/src/context/active-turn-materializer.js';
+import { prepareScopeSemanticHistory } from '../../runtime/src/context/interaction-semantic-context.js';
 import { loadBuiltinPromptSegments, type AgentPromptSegment } from '../../agent-templates/src/index.js';
 import { WorkspaceCodeSearchFunctions } from '../../adapters/operations/src/index.js';
 import {
@@ -31,6 +31,9 @@ import {
   type ExplicitTurnHelperFactory,
   type InteractionHelperJournalPort,
   type InteractionParentTurnRawJournalPort,
+  type InteractionParentOpenedTurnScopeReadPort,
+  type InteractionSemanticCheckpointJournalPort,
+  type InteractionParentTurnRawOwner,
   createExplicitBrainToolRegistry,
   type ExplicitBrainAgentToolPort,
   type ExplicitBrainOperationalToolPorts,
@@ -126,6 +129,7 @@ export type ExplicitBrainInterpretation =
       readonly knownFacts: readonly string[];
       readonly intent: RequirementIntent;
       readonly proposal: string;
+      readonly structuredProposal: StructuredRequirementProposal;
       readonly decisionRefs: readonly string[];
     }
   | {
@@ -347,6 +351,7 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
     ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
     intent: proposal.intent,
     proposal: renderBusinessProposal(proposal),
+    structuredProposal: proposal,
   };
 }
 
@@ -354,7 +359,8 @@ export function createProviderExplicitBrainInterpreter(input: {
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
   readonly organId: OrganId;
   readonly interactionScopeId: string;
-  readonly parentJournal: InteractionParentTurnRawJournalPort;
+  readonly parentJournal: InteractionParentTurnRawJournalPort & InteractionParentOpenedTurnScopeReadPort;
+  readonly checkpointJournal: InteractionSemanticCheckpointJournalPort;
   readonly helperJournal: InteractionHelperJournalPort;
   readonly rawEvidence: ProviderEvidenceSink;
   readonly rawContent: RawContentReadPort;
@@ -385,22 +391,61 @@ export function createProviderExplicitBrainInterpreter(input: {
       .then((loaded) => selectIntakePromptSegments(loaded.segments));
     return promptSegments;
   };
+  // Retain the actual live owners only. Scoped Journal reads select every retry.
+  let retained: {
+    readonly owner: InteractionParentTurnRawOwner;
+    readonly helpers: ExplicitTurnHelperSession;
+    owned: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> | undefined;
+  } | undefined;
+  const finish = async (live: NonNullable<typeof retained>, request: ExplicitBrainInterpretationInput) => {
+    const finalParentOutput = await live.owner.readFinalTurnOutput();
+    const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+    if (live.owned !== undefined) {
+      await closeAgentProvider(live.owned);
+      live.owned = undefined;
+    }
+    await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+    retained = undefined;
+    return interpretation;
+  };
   return {
     async interpret(request) {
+      const scopeKey = { organId: input.organId, interactionScopeId: input.interactionScopeId };
+      const opened = await input.parentJournal.readScopeOpenedTurns(scopeKey);
+      const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
+      const pending = opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
+        checkpoint.organId.scope === fact.turn.organId.scope
+        && checkpoint.organId.value === fact.turn.organId.value
+        && checkpoint.interactionScopeId === fact.turn.interactionScopeId
+        && checkpoint.interactionId === fact.turn.interactionId
+        && checkpoint.inputRevision === fact.turn.inputRevision
+        && checkpoint.turnId === fact.turn.turnId));
+      if (pending !== undefined) {
+        const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
+        if (new TextDecoder('utf-8', { fatal: true }).decode(original) !== JSON.stringify(request)) {
+          throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires its exact prior input before new input`);
+        }
+        if (retained === undefined || retained.owner.turn.turnId !== pending.fact.turn.turnId) {
+          throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires original physical parent ownership/close attestation and complete helper collection recovery`);
+        }
+        await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
+        return finish(retained, request);
+      }
       const identity = randomUUID();
       const runtimeId = `explicit-interpret-${identity}`;
+      const turn: InteractionTurnIdentity = {
+        organId: input.organId, interactionScopeId: input.interactionScopeId,
+        interactionId: request.interactionId, inputRevision: request.inputRevision, turnId: runtimeId,
+      };
+      const priorCheckpoints = await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
       const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
       let driver: ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef> | undefined;
       let submitted = false;
       let settleAttempted = false;
       let interpretation: ExplicitBrainInterpretation;
+      let live: NonNullable<typeof retained>;
       try {
         const operationId = id('operation', `explicit-interpret-${identity}`);
-        const turn: InteractionTurnIdentity = {
-          organId: input.organId, interactionScopeId: input.interactionScopeId,
-          interactionId: request.interactionId, inputRevision: request.inputRevision,
-          turnId: runtimeId,
-        };
         const execution = { runtimeId, organId: input.organId, operationId, executionEpoch: 1, interactionTurn: turn };
         const scope = { organId: input.organId, operationId };
         const initialInput = {
@@ -408,13 +453,14 @@ export function createProviderExplicitBrainInterpreter(input: {
           view: { kind: 'utf8-text' as const },
         };
         const owner = createInteractionParentTurnRawOwner({
-          turn, execution, scope, initialInput, journal: input.parentJournal, rawContent: input.rawContent,
+          turn, execution, scope, initialInput, journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
           instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()) }),
         });
         await owner.openTurnInput();
         const helpers = new ExplicitTurnHelperSession({
           identity: turn, latestTurn: { ...turn, entries: [{ kind: 'user-input', content: initialInput }] },
           journal: input.helperJournal, clock: input.clock, factory: input.helperFactory,
+          checkpointJournal: input.checkpointJournal, rawContent: input.rawContent,
         });
         const port = owned?.port ?? input.port;
         if (port === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent provider is not configured');
@@ -522,26 +568,8 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (closure.state !== 'succeeded') {
           throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
         }
-        const snapshot = await input.parentJournal.readTurnSnapshot(turn);
-        const final = snapshot.requests.at(-1)?.fact;
-        if (final?.phase !== 'settled' || !snapshot.acceptedFacts.some(({ fact: accepted }) =>
-          accepted.envelope.request.requestId === final.request.requestId
-          && accepted.envelope.fact.kind === 'request-complete' && accepted.envelope.fact.terminal === 'completed')) {
-          throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent has no successful terminal raw request');
-        }
-        const folded = await foldActiveTurn<
-          { readonly requestId: string },
-          { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: typeof scope },
-          InteractionParentProviderExecutionIdentityRef
-        >({ binding: { execution, scope }, initialInput, entries: snapshot.acceptedFacts.map(({ fact }) => fact),
-          requests: snapshot.requests.map(({ fact }) => fact), childInvocations: [],
-          cut: { requestId: final.request.requestId }, checkpointPath: [], completionRefs: [], rawContent: input.rawContent });
-        const units = folded.contentUnits.filter((unit) => unit.request.requestId === final.request.requestId
-          && unit.channel === 'assistant-text' && unit.supersededBy === undefined);
-        if (units.length === 0 || units.some((unit) => !unit.complete)) {
-          throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent final raw content is missing or incomplete');
-        }
-        interpretation = parseInterpreterOutput(units.map((unit) => new TextDecoder('utf-8', { fatal: true }).decode(unit.bytes)).join(''), request);
+        const finalParentOutput = await owner.readFinalTurnOutput();
+        interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
         // Only the simple-answer path carries the authoritative settlement receipt;
         // complex requirement routing keeps its existing behavior.
         if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
@@ -555,6 +583,8 @@ export function createProviderExplicitBrainInterpreter(input: {
             settlement,
           });
         }
+        live = { owner, helpers, owned };
+        retained = live;
       } catch (error) {
         let failure = error;
         if (submitted && !settleAttempted && driver !== undefined) {
@@ -574,8 +604,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         }
         throw failure;
       }
-      if (owned !== undefined) await closeAgentProvider(owned);
-      return interpretation;
+      return finish(live, request);
     },
   };
 }

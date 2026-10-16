@@ -95,6 +95,16 @@ export function requirementInterpreter(): ExplicitBrainInputInterpreter {
         knownFacts: [],
         intent: 'create',
         proposal: `create:${input.rawInput}`,
+        structuredProposal: {
+          revision: input.inputRevision,
+          intent: 'create',
+          title: input.rawInput,
+          objective: input.rawInput,
+          deliverable: `create:${input.rawInput}`,
+          deliveryConditions: [],
+          evidenceRefs: [],
+          blockingGaps: [],
+        },
         decisionRefs: ['decision:scheduler-production'],
       };
     },

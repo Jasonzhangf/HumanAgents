@@ -131,6 +131,16 @@ const createInterpreter: ExplicitBrainInputInterpreter = {
       knownFacts: [],
       intent: 'create',
       proposal: `create a task for ${input.rawInput}`,
+      structuredProposal: {
+        revision: input.inputRevision,
+        intent: 'create',
+        title: input.rawInput,
+        objective: input.rawInput,
+        deliverable: `create a task for ${input.rawInput}`,
+        deliveryConditions: [],
+        evidenceRefs: [],
+        blockingGaps: [],
+      },
       decisionRefs: [],
     };
   },

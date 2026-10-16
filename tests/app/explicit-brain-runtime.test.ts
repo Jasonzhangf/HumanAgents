@@ -24,10 +24,12 @@ const parentFixtureRoot = join(process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzh
 const parentEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentFixtureRoot, 'assets')));
 function parentDependencies() {
   const journal = new JsonlOrganJournal(join(parentFixtureRoot, `${randomUUID()}.jsonl`));
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
   return {
     organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test',
     parentJournal: new JsonlInteractionParentTurnJournal(journal),
-    helperJournal: new JsonlInteractionHelperJournal(journal),
+    helperJournal,
+    checkpointJournal: helperJournal,
     rawEvidence: parentEvidence, rawContent: providerRawContentReader(parentEvidence),
     clock: { now: () => new Date().toISOString() },
     helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
@@ -392,10 +394,21 @@ test('provider explicit brain interpreter loads the interaction template and val
   const starts: Parameters<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>['port']['start']>[0][] = [];
   const observations: Parameters<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>['port']['observe']>[0][] = [];
   let borrowedStarts = 0;
+  const appendError = new Error('semantic checkpoint append rejected');
+  let rejectCheckpoint = true;
   const primaryStart = options.port.start.bind(options.port);
   options.port.start = async (request) => { borrowedStarts += 1; return primaryStart(request); };
   const selectedOptions = {
     ...options,
+    checkpointJournal: {
+      readSemanticCheckpointExact: (turn: Parameters<typeof options.checkpointJournal.readSemanticCheckpointExact>[0]) => options.checkpointJournal.readSemanticCheckpointExact(turn),
+      readScopeSemanticCheckpoints: (scope: Parameters<typeof options.checkpointJournal.readScopeSemanticCheckpoints>[0]) => options.checkpointJournal.readScopeSemanticCheckpoints(scope),
+      appendSemanticCheckpoint: async (checkpoint: Parameters<typeof options.checkpointJournal.appendSemanticCheckpoint>[0]) => {
+        assert.ok(lifecycle.includes(`${compositions.length - 1}:closed`), 'physical parent close must precede semantic append');
+        if (rejectCheckpoint) { rejectCheckpoint = false; throw appendError; }
+        return options.checkpointJournal.appendSemanticCheckpoint(checkpoint);
+      },
+    },
     prepareAgentProvider: async (selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string }) => {
       assert.deepEqual(selection, { roleId: 'interaction' });
       const own = await prepareAgentProvider<InteractionParentProviderExecutionIdentityRef>({ ...selection, agentProviderBindings: entries, evidenceRoot: join(parentFixtureRoot, 'assets') });
@@ -425,19 +438,45 @@ test('provider explicit brain interpreter loads the interaction template and val
 
   try {
 
-  const result = await interpreter.interpret({
+  const firstInput = {
     interactionId: 'interaction-provider-test',
     inputRevision: 1,
     sourceRef: 'ui:new-task',
     rawInput: '帮我整理启动步骤',
     clarifications: [],
     taskCandidates: [],
-  });
+  };
+  // Confirmed missing closure wiring; impact is duplicated generation and lost
+  // recovery responsibility. Cost: one rejected append and a no-generation retry.
+  await assert.rejects(() => interpreter.interpret(firstInput), (error: unknown) => error === appendError);
+  const pending = (await options.parentJournal.readScopeOpenedTurns(options))[0].fact;
+  const durable = await options.parentJournal.readTurnSnapshot(pending.turn);
+  assert.ok(durable.turnInput); assert.ok(durable.requests.length > 0); assert.ok(durable.acceptedFacts.length > 0);
+  assert.equal(await options.checkpointJournal.readSemanticCheckpointExact(pending.turn), null);
+  await assert.rejects(() => interpreter.interpret({ ...firstInput, rawInput: 'different next input' }),
+    (error: unknown) => error instanceof Error && error.message.includes(pending.turn.turnId) && error.message.includes('exact prior input'));
+  assert.equal(compositions.length, 1); assert.equal(starts.length, 1); assert.equal(posts.length, 1);
+  const result = await interpreter.interpret(firstInput);
+  assert.equal(compositions.length, 1); assert.equal(starts.length, 1); assert.equal(posts.length, 1);
+  const committed = await options.checkpointJournal.readSemanticCheckpointExact(pending.turn);
+  assert.ok(committed);
+  if (committed === null) throw new Error('missing semantic commit');
+  const semantic = committed.checkpoint.claims.map((claim) => claim.fact).join('\n');
+  assert.ok(semantic.includes('整理项目启动步骤')); assert.ok(semantic.includes('可执行的启动步骤清单'));
+  assert.ok(committed.checkpoint.constraints.some((claim) => claim.fact.includes('启动步骤完整并有证据')));
 
   assert.equal(result.kind, 'requirement');
   if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
   assert.equal(result.normalizedInput, '整理启动步骤');
   assert.equal(result.intent, 'create');
+  // Missing structured output loses the semantic producer's validated fields.
+  // Impact: raw JSON history or no closure. Cost: extend this real consumer.
+  assert.ok('structuredProposal' in result);
+  assert.deepEqual(Reflect.get(result, 'structuredProposal'), {
+    revision: 1, intent: 'create', title: '整理启动步骤', objective: '整理项目启动步骤',
+    deliverable: '可执行的启动步骤清单', deliveryConditions: ['启动步骤完整并有证据'],
+    evidenceRefs: ['README'], blockingGaps: [],
+  });
   assert.match(result.proposal, /可执行的启动步骤清单/);
   assert.equal(result.proposal.includes('awaiting-user-confirmation'), false);
   assert.equal(compositions.length, 1, 'selected interaction callback must run');
@@ -495,6 +534,7 @@ test('provider explicit brain interpreter loads the interaction template and val
       ...selectedOptions.parentJournal,
       transactTurn: async () => { throw inputCommitError; },
       readTurnSnapshot: (turn) => selectedOptions.parentJournal.readTurnSnapshot(turn),
+      readScopeOpenedTurns: (scope) => selectedOptions.parentJournal.readScopeOpenedTurns(scope),
     },
   });
   await assert.rejects(() => commitBlocked.interpret({ interactionId: 'blocked-input', inputRevision: 1,
@@ -546,11 +586,12 @@ test('provider explicit brain interpreter loads the interaction template and val
     malformedLifecycle.push('close');
     return malformedClose(binding);
   };
-  const arbitraryProposal = createProviderExplicitBrainInterpreter({
-    ...malformedOptions,
+  const freshMalformedInterpreter = () => createProviderExplicitBrainInterpreter({
+    ...malformedOptions, ...parentDependencies(),
     prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
       provider: entries[0].provider!, binding, port: malformedOptions.port }),
   });
+  let arbitraryProposal = freshMalformedInterpreter();
   const malformedInput = {
     interactionId: 'interaction-arbitrary-proposal', inputRevision: 1, sourceRef: 'ui:new-task',
     rawInput: '帮我整理启动步骤', clarifications: [], taskCandidates: [],
@@ -569,6 +610,7 @@ test('provider explicit brain interpreter loads the interaction template and val
   malformedLifecycle.length = 0;
   malformedOptions.port.start = async () => { malformedLifecycle.push('start'); throw startError; };
   malformedOptions.port.close = async () => { malformedLifecycle.push('close'); throw closeError; };
+  arbitraryProposal = freshMalformedInterpreter();
   await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => {
     assert.ok(error instanceof AggregateError);
     if (!(error instanceof AggregateError)) throw error;
@@ -593,6 +635,7 @@ test('provider explicit brain interpreter loads the interaction template and val
     malformedLifecycle.push('close'); return malformedClose(binding);
   };
   malformedLifecycle.length = 0;
+  arbitraryProposal = freshMalformedInterpreter();
   await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => error === observationError);
   assert.deepEqual(malformedLifecycle, ['settle', 'close']);
 
@@ -604,6 +647,7 @@ test('provider explicit brain interpreter loads the interaction template and val
     malformedLifecycle.push('close'); await malformedClose(binding); throw closeError;
   };
   malformedLifecycle.length = 0;
+  arbitraryProposal = freshMalformedInterpreter();
   await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => {
     if (!(error instanceof AggregateError)) throw error;
     const executionError: unknown = error.errors[0];
@@ -618,6 +662,7 @@ test('provider explicit brain interpreter loads the interaction template and val
   // A normal settle rejection is not retried by error cleanup.
   malformedOptions.port.observe = originalObserve;
   malformedLifecycle.length = 0;
+  arbitraryProposal = freshMalformedInterpreter();
   await assert.rejects(() => arbitraryProposal.interpret(malformedInput), (error: unknown) => {
     if (!(error instanceof AggregateError)) throw error;
     assert.equal(error.errors[0], settleError);

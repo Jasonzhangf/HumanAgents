@@ -3084,7 +3084,7 @@ test('typed existing-task-change fails closed on a missing or mismatched target 
   const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 });
   let matchedTaskId = '';
   const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, undefined, undefined, {
-    async interpret() {
+    async interpret(input) {
       return {
         kind: 'requirement',
         normalizedInput: 'change this task',
@@ -3092,6 +3092,16 @@ test('typed existing-task-change fails closed on a missing or mismatched target 
         knownFacts: [],
         intent: 'change',
         proposal: 'change the existing task',
+        structuredProposal: {
+          revision: input.inputRevision,
+          intent: 'change',
+          title: 'change this task',
+          objective: 'change this task',
+          deliverable: 'change the existing task',
+          deliveryConditions: [],
+          evidenceRefs: [],
+          blockingGaps: [],
+        },
         decisionRefs: [],
       };
     },
@@ -5019,6 +5029,16 @@ test('explicit brain interprets create, query, append, change, and clarification
           knownFacts: [],
           intent,
           proposal: `${intent}:${input.rawInput}`,
+          structuredProposal: {
+            revision: input.inputRevision,
+            intent,
+            title: input.rawInput.replace(/^(新建|追加|修改)/, '').trim(),
+            objective: input.rawInput.replace(/^(新建|追加|修改)/, '').trim(),
+            deliverable: `${intent}:${input.rawInput}`,
+            deliveryConditions: [],
+            evidenceRefs: [],
+            blockingGaps: [],
+          },
           decisionRefs: [`decision:test-${intent}`],
         };
       },
@@ -5085,6 +5105,7 @@ test('explicit brain persists a live-shaped structured provider proposal after s
   });
   const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentRoot, 'assets')));
   const parentJournal = new JsonlOrganJournal(join(parentRoot, 'parent.jsonl'));
+  const helperJournal = new JsonlInteractionHelperJournal(parentJournal);
   const transport = new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
     binding,
     baseUrl: 'http://recorded.test',
@@ -5126,7 +5147,8 @@ test('explicit brain persists a live-shaped structured provider proposal after s
     organId,
     interactionScopeId: 'runtime:ui-live-proposal',
     parentJournal: new JsonlInteractionParentTurnJournal(parentJournal),
-    helperJournal: new JsonlInteractionHelperJournal(parentJournal),
+    helperJournal,
+    checkpointJournal: helperJournal,
     rawEvidence,
     rawContent: providerRawContentReader(rawEvidence),
     clock: { now: () => new Date().toISOString() },
@@ -5190,6 +5212,16 @@ test('explicit brain rejects create interpretations that also select an existing
           knownFacts: ['已有任务存在'],
           intent: 'create',
           proposal: 'create:修改已有任务的验收范围',
+          structuredProposal: {
+            revision: input.inputRevision,
+            intent: 'create',
+            title: '修改已有任务的验收范围',
+            objective: '修改已有任务的验收范围',
+            deliverable: '修改已有任务的验收范围',
+            deliveryConditions: [],
+            evidenceRefs: [],
+            blockingGaps: [],
+          },
           decisionRefs: ['decision:test-create-match-conflict'],
         };
       },
@@ -5237,6 +5269,16 @@ test('explicit brain retries matching with the same interaction after interpreta
             knownFacts: [],
             intent: 'create',
             proposal: 'create:首次解释失败后重试',
+            structuredProposal: {
+              revision: input.inputRevision,
+              intent: 'create',
+              title: '首次解释失败后重试',
+              objective: '首次解释失败后重试',
+              deliverable: '首次解释失败后重试',
+              deliveryConditions: [],
+              evidenceRefs: [],
+              blockingGaps: [],
+            },
             decisionRefs: ['decision:test-interpret-retry'],
           };
         }
@@ -5254,6 +5296,16 @@ test('explicit brain retries matching with the same interaction after interpreta
           knownFacts: ['范围已补充'],
           intent: 'create',
           proposal: 'create:澄清后重试',
+          structuredProposal: {
+            revision: input.inputRevision,
+            intent: 'create',
+            title: '澄清后重试',
+            objective: '澄清后重试',
+            deliverable: '澄清后重试',
+            deliveryConditions: [],
+            evidenceRefs: [],
+            blockingGaps: [],
+          },
           decisionRefs: ['decision:test-after-clarification-retry'],
         };
       },
@@ -5327,6 +5379,16 @@ test('explicit brain accepts a clarification answer over HTTP and re-enters inte
           knownFacts: ['用户补充了验收范围'],
           intent: 'create',
           proposal: 'create:修改现有任务的验收范围',
+          structuredProposal: {
+            revision: input.inputRevision,
+            intent: 'create',
+            title: '修改现有任务的验收范围',
+            objective: '修改现有任务的验收范围',
+            deliverable: '修改现有任务的验收范围',
+            deliveryConditions: [],
+            evidenceRefs: [],
+            blockingGaps: [],
+          },
           decisionRefs: ['decision:http-after-clarification'],
         };
       },
@@ -5415,6 +5477,16 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
           knownFacts: [],
           intent: 'create',
           proposal: `create:${input.rawInput}`,
+          structuredProposal: {
+            revision: input.inputRevision,
+            intent: 'create',
+            title: input.rawInput.toUpperCase(),
+            objective: input.rawInput.toUpperCase(),
+            deliverable: `create:${input.rawInput}`,
+            deliveryConditions: [],
+            evidenceRefs: [],
+            blockingGaps: [],
+          },
           decisionRefs: ['decision:http-interpret'],
         };
       },

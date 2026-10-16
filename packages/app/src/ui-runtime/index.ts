@@ -374,11 +374,13 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         'configure the locked builtin template root before starting the UI runtime', 'humanagent.app.ui-runtime');
     }
     const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(options.evidenceRoot));
+    const helperJournal = new JsonlInteractionHelperJournal(taskControlJournal);
     return createProviderExplicitBrainInterpreter({
       binding: options.binding, templateRoot, organId: options.organId,
       interactionScopeId: `runtime:${options.projectKey ?? options.organId.value}`,
       parentJournal: new JsonlInteractionParentTurnJournal(taskControlJournal),
-      helperJournal: new JsonlInteractionHelperJournal(taskControlJournal),
+      helperJournal,
+      checkpointJournal: helperJournal,
       rawEvidence, rawContent: providerRawContentReader(rawEvidence),
       clock: { now: () => (clock?.() ?? new Date()).toISOString() },
       prepareAgentProvider: async (selection) => {
