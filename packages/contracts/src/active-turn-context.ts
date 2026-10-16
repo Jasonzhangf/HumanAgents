@@ -411,7 +411,7 @@ const CONTENT_CHANNELS: readonly ContentUnitChannel[] = [
   'assistant-text', 'reasoning-text', 'reasoning-summary', 'reasoning-signature', 'tool-arguments',
 ];
 
-function validateRawFact(fact: unknown, label: string): asserts fact is ProviderRawFact {
+function validateRawFact(fact: unknown, label: string): asserts fact is ProviderRawFact<AnyProviderExecutionIdentityRef> {
   assertPlainObject(fact, label);
   switch (fact.kind) {
     case 'content': {
@@ -472,7 +472,7 @@ function validateRawFact(fact: unknown, label: string): asserts fact is Provider
   }
 }
 
-export function validateRawFactEnvelope(input: unknown): asserts input is RawFactEnvelope {
+export function validateRawFactEnvelope(input: unknown): asserts input is RawFactEnvelope<AnyProviderExecutionIdentityRef> {
   assertPlainObject(input, 'raw fact envelope');
   assertNoBusinessMirror(input, 'raw fact envelope');
   assertProviderExecution(input.execution, 'raw fact execution');
@@ -491,7 +491,7 @@ export function validateRawFactEnvelope(input: unknown): asserts input is RawFac
   }
 }
 
-export function validateAcceptedRawFact(input: unknown): asserts input is AcceptedRawFact {
+export function validateAcceptedRawFact(input: unknown): asserts input is AcceptedRawFact<AnyProviderExecutionIdentityRef> {
   assertPlainObject(input, 'accepted raw fact');
   assertPositiveSafeInteger(input.seq, 'accepted raw fact seq');
   validateRawFactEnvelope(input.envelope);
