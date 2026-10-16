@@ -18,16 +18,27 @@
     "humanagent-provider-work-order-ablate-graph-governance-code"
   ],
   "designInput": {
-    "plan": "/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/provider-segment-admission-integration-plan-r2-20261013/plan.md",
-    "planSections": "§1 目标图；§3 实际端口与 corrective 缺口；§4 三 commit 职责与 reservation 输入；§5 v2 backing；§6 单元 owner/allowlist",
-    "reuseNodeSchema": "docs/dagpipe/native-turn-checkpoint.graph.json"
+    "plan": "/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/provider-cold-source-oauth-plan-r3-20261015/plan.md",
+    "acceptance": "/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/provider-cold-source-oauth-plan-r3-20261015/acceptance.md",
+    "planSections": "§1 目标图；§3 interrupted 分类与唯一 owner；§4 锁内保障；§5 语义与旧义务；§6 顺序与 allowed paths"
   },
+  "reuseNodeSchema": "docs/dagpipe/native-turn-checkpoint.graph.json",
   "ownerDomains": {
-    "D-S Runtime domain": "packages/runtime/src/context/active-turn-segments.ts",
+    "D-S Runtime segment contract": "packages/runtime/src/context/active-turn-segments.ts",
+    "D-M Runtime semantic reader": "packages/runtime/src/context/semantic-turn-context-reader.ts",
+    "Runtime cold resume (epoch/window)": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+    "Runtime coordinator (public resume entry + typed release)": "packages/runtime/src/ui-runtime/coordinator.ts",
     "TG1 grant/registration adapter": "packages/runtime/src/admission/task-grant.ts",
     "J1 JSONL/immutable assets": "packages/adapters/jsonl/src/active-turn.ts + packages/app/src/native-recovery-assets.ts",
-    "A shared final App": "packages/app/src/ui-runtime/task-control.ts"
+    "App cold composition": "packages/app/src/ui-runtime/execution-composition.ts + packages/app/src/ui-runtime/cold-execution-source.ts"
   },
+  "unverifiedTargets": [
+    "contracts/src/active-turn-segments.ts ActiveTurnSegmentPredecessorRef interrupted branch: target, not implemented",
+    "contracts/src/active-turn-segments.ts ActiveTurnSegmentRecoveryReceiptRead interrupted classification: target, not implemented",
+    "runtime/src/context/active-turn-journal.ts ActiveTurnSegmentInterruptedExactRead narrow port: target, not implemented",
+    "adapters/jsonl/src/active-turn.ts appendSegmentOpened interrupted-anchor lock-time recheck: target, not implemented",
+    "runtime/src/context/active-turn-live-prefix.ts ActiveTurnProductionObligationRef segmentId cross-segment attribution: target, not implemented"
+  ],
   "candidates": {
     "TG1": {
       "sha": "864f8e2a0e73ea11ef1291a8f6d68e5710464909",
@@ -72,17 +83,25 @@
     "D-L: 当前 segment 的 live prefix、execution 归属与真实 drain 已内部验收；仍待 J1 真实记录端口和 A 冷恢复组合，不能把 owner-injected port 用例当作生产证明。",
     "D-M: Runtime 跨段 reader 已验收 5/5；按 chain 和 segment-local seq 装配一个逻辑 turn，原始输入一次、HP v1/v2 exact prior history。实际 App request hook 和完整冷恢复消费者尚未验收。",
     "A: 需要真实 TG1 reservation adapter、exact cold lookup、真实新 handle、NS phase/progress backing 注入、barrier 与逐业务准入、真实 request mapper 消费。",
-    "TG1: readBusinessRegistration 目前是 JsonlTaskGrantJournal 具体方法，不是 TaskGrantPort 成员；A 需注入窄 typed read seam，不扩展通用 TaskGrantPort。"
+    "interrupted: 原 fixture 只有 seq15 v1 receipt、seq22 epoch2 segment-opened、seq26 dispatching 且无 v2 receipt；interrupted anchor 分类、锁内复核、旧段语义读取与跨段义务归属均未落地，标 UNVERIFIED target。"
   ],
   "nodes": {
     "read_exact_predecessor_facts": {
       "ownerPath": "packages/runtime/src/context/active-turn-segments.ts",
       "ownerRel": "packages/runtime/src/context/active-turn-segments.ts",
-      "ownerDomain": "D-S Runtime domain",
-      "readBackingOwnerPath": "packages/adapters/jsonl/src/active-turn.ts",
-      "readBackingOwnerRel": "packages/adapters/jsonl/src/active-turn.ts",
-      "implementationStatus": "runtime-contract-and-Journal-factory-accepted; App-callers-pending",
-      "designNote": "消费 J1 提供的 readInitialSegmentCapture/readSegments/readSegmentRecoveryReceipt；必须使用 exact receipt，不扫描 latest。失败/unknown/非法 epoch/身份不符在登记前结束，不留新 registration。"
+      "ownerDomain": "D-S Runtime segment contract",
+      "classificationOwnerPath": "packages/app/src/native-recovery-assets.ts",
+      "classificationOwnerRel": "packages/app/src/native-recovery-assets.ts",
+      "physicalReadOwnerPath": "packages/adapters/jsonl/src/active-turn.ts",
+      "physicalReadOwnerRel": "packages/adapters/jsonl/src/active-turn.ts",
+      "implementationStatus": "captured-exact-receipt-path-accepted; interrupted-anchor-classification-UNVERIFIED-target",
+      "codeSymbols": [
+        "packages/runtime/src/context/active-turn-segments.ts:ActiveTurnSegmentReadPort",
+        "packages/runtime/src/context/active-turn-segments.ts:resumeActiveTurnSegment",
+        "packages/app/src/native-recovery-assets.ts:createActiveTurnSegmentJournal",
+        "packages/adapters/jsonl/src/active-turn.ts:JsonlActiveTurnSegmentJournal"
+      ],
+      "designNote": "读取原 v1 capture、已提交 segment chain 与 predecessor 的真实事实：已提交 captured recovery receipt，或 typed interrupted anchor（segment-opened commit 与 records-through commit）。分类唯一 owner 是 App native-recovery-assets 组合读取端口；Runtime 只消费 typed 结果。必须 exact 读取，不扫描 latest。interrupted 分支不得改名成 capture；未保存不等于 capture。"
     },
     "register_current_grant_business": {
       "ownerPath": "packages/runtime/src/admission/task-grant.ts",
@@ -90,7 +109,14 @@
       "ownerDomain": "TG1 grant/registration adapter",
       "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
       "journalWriterOwnerRel": "packages/adapters/jsonl/src/index.ts",
+      "registrationPortOwnerPath": "packages/adapters/jsonl/src/task-grants.ts",
+      "registrationPortOwnerRel": "packages/adapters/jsonl/src/task-grants.ts",
       "implementationStatus": "pending-reservation-intent-binding-and-registration-receipt",
+      "codeSymbols": [
+        "packages/runtime/src/admission/task-grant.ts:TaskGrantPort.registerBusiness",
+        "packages/runtime/src/admission/task-grant.ts:admitTaskGrantBusiness",
+        "packages/adapters/jsonl/src/task-grants.ts:JsonlTaskGrantJournal.registerBusiness"
+      ],
       "designNote": "在同一 held 事务内完成授权检查与 business reservation 登记，产出 grant commit 与 business registration commit 两个独立回执。authorized:true 只在 registerBusiness() 返回真实 commit 后成立；只读 readTaskGrant() 不满足。"
     },
     "append_segment_opened": {
@@ -99,35 +125,45 @@
       "ownerDomain": "J1 JSONL/immutable assets",
       "runtimePortOwnerPath": "packages/runtime/src/context/active-turn-journal.ts",
       "runtimePortOwnerRel": "packages/runtime/src/context/active-turn-journal.ts",
-      "implementationStatus": "typed-Journal-factory-and-exact-append-accepted; App-callers-pending",
-      "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内不读网络、不执行工具。"
+      "implementationStatus": "typed-Journal-factory-and-exact-append-accepted; interrupted-anchor-lock-recheck-UNVERIFIED-target",
+      "codeSymbols": [
+        "packages/adapters/jsonl/src/active-turn.ts:JsonlActiveTurnSegmentJournal.appendSegmentOpened",
+        "packages/runtime/src/context/active-turn-journal.ts:ActiveTurnSegmentAppendPort"
+      ],
+      "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内复核 captured receipt 分支与 interrupted anchor 分支（opened commit、records-through、当前 chain tail、仍无相关 receipt）；锁内不读网络、不执行工具。interrupted 分支复核尚未落地，标 UNVERIFIED target。"
     },
     "establish_epoch_window": {
-      "ownerPath": "packages/app/src/ui-runtime/task-control.ts",
-      "ownerRel": "packages/app/src/ui-runtime/task-control.ts",
-      "ownerDomain": "A shared final App",
-      "admissionBackingOwnerPath": "packages/runtime/src/admission/task-grant.ts",
-      "admissionBackingOwnerRel": "packages/runtime/src/admission/task-grant.ts",
-      "implementationStatus": "pending-epoch-barrier-and-per-work-admission",
-      "designNote": "segment-opened 后建立本 epoch context/barrier；新 request、child、effect 各自按当前 grant 逐次准入。segment reservation 不授予后续无限执行。"
-    },
-    "persist_segment_recovery_assets": {
-      "ownerPath": "packages/app/src/native-recovery-assets.ts",
-      "ownerRel": "packages/app/src/native-recovery-assets.ts",
-      "ownerDomain": "J1 JSONL/immutable assets",
-      "journalWriterOwnerPath": "packages/adapters/jsonl/src/active-turn.ts",
-      "journalWriterOwnerRel": "packages/adapters/jsonl/src/active-turn.ts",
-      "immutableAssetOwnerPath": "packages/adapters/filesystem/src/index.ts",
-      "immutableAssetOwnerRel": "packages/adapters/filesystem/src/index.ts",
-      "implementationStatus": "prepared-drain-and-v2-asset-factory-accepted; actual-save-phase-composition-pending",
-      "designNote": "保存本 segment 的真实 v2 capture、producer drains 与 recovery-assets receipt；producersDrained:true 只是结构条件，不能替代实际 drain/请求/completion 关系。v1 资产与 v1 receipt 保持原样。"
+      "ownerPath": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "ownerDomain": "Runtime cold resume (epoch/window)",
+      "semanticOwnerPath": "packages/runtime/src/context/semantic-turn-context-reader.ts",
+      "semanticOwnerRel": "packages/runtime/src/context/semantic-turn-context-reader.ts",
+      "semanticPortOwnerPath": "packages/runtime/src/context/active-turn-journal.ts",
+      "semanticPortOwnerRel": "packages/runtime/src/context/active-turn-journal.ts",
+      "driverCompositionOwnerPath": "packages/app/src/ui-runtime/execution-composition.ts",
+      "driverCompositionOwnerRel": "packages/app/src/ui-runtime/execution-composition.ts",
+      "implementationStatus": "epoch-floor-and-resume-wiring-present; interrupted-segment-semantic-read-UNVERIFIED-target",
+      "codeSymbols": [
+        "packages/runtime/src/ui-runtime/cold-execution-resume.ts:successorEpoch",
+        "packages/runtime/src/ui-runtime/cold-execution-resume.ts:resumeColdExecution",
+        "packages/runtime/src/context/semantic-turn-context-reader.ts:readResumedSegmentSemanticTurnContext",
+        "packages/app/src/ui-runtime/execution-composition.ts:createResumedExecutionDriver"
+      ],
+      "designNote": "按全部真实 durable floor facts 计算 successor epoch，取得真实 handle 后恢复 incarnation 执行窗口，并恢复当前语义与旧段未决义务。旧 epoch 迟到写按 fencing 拒绝；不重投旧 request/child，不自动 settle。interrupted 段语义读取（readSegmentInterruptedExact）与跨段义务 segmentId 归属尚未落地，标 UNVERIFIED target。"
     },
     "resolve_resume_outcome": {
-      "ownerPath": "packages/app/src/ui-runtime/task-control.ts",
-      "ownerRel": "packages/app/src/ui-runtime/task-control.ts",
-      "ownerDomain": "A shared final App",
-      "implementationStatus": "pending-typed-outcome-projection",
-      "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）。failed/unknown completion 保留责任，不伪造成 complete。"
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerDomain": "Runtime coordinator (public resume entry + typed release)",
+      "resumeResolutionOwnerPath": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "resumeResolutionOwnerRel": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "implementationStatus": "public-entry-and-typed-release-present; full-F13-outcome-UNVERIFIED",
+      "codeSymbols": [
+        "packages/runtime/src/ui-runtime/coordinator.ts:RuntimeTaskCoordinator.resumeExecution",
+        "packages/runtime/src/ui-runtime/coordinator.ts:RuntimeExecutionRelease",
+        "packages/runtime/src/ui-runtime/cold-execution-resume.ts:resumeColdExecution"
+      ],
+      "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）的 typed outcome。failed/unknown completion 保留责任，不伪造成 complete。公开入口在 RuntimeTaskCoordinator.resumeExecution；分支判定与 hold 在 cold-execution-resume。"
     }
   }
 }

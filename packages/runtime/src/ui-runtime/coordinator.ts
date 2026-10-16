@@ -480,6 +480,7 @@ export type RuntimeTaskJournalRecord =
       readonly event: RuntimeTaskEvent;
       readonly taskOutput?: string;
       readonly error?: RuntimeTaskError;
+      readonly zeroEffectAdmissionDenial?: true;
     }
   | {
       readonly kind: 'explicit-brain.state';
@@ -704,6 +705,7 @@ export interface OperationRecord {
   readonly executionEpoch: number;
   readonly input: string;
   readonly orchestrated: boolean;
+  zeroEffectAdmissionDenial?: true;
   /**
    * The coordinator-owned allocation for this operation, once it has been
    * persisted. An exact retry of the same operation reuses this identity
@@ -990,6 +992,9 @@ export function replayTaskJournalRecords(
         }
         if (record.taskOutput !== undefined) task.output = record.taskOutput;
         if (record.error) task.error = record.error;
+        if (record.zeroEffectAdmissionDenial === true) {
+          operation.zeroEffectAdmissionDenial = true;
+        }
         if (record.event.kind === 'provider.tool') task.currentNode = RUNTIME_NODE_MARKERS.providerTool;
         if (record.event.kind === 'provider.model') task.currentNode = RUNTIME_NODE_MARKERS.providerModel;
         break;
@@ -1040,6 +1045,25 @@ function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, 
   };
 }
 
+/**
+ * The durable zero-effect admission denial control fact. The refused operation
+ * released its prepared slot before any business effect, so the task keeps the
+ * blocked denial diagnostics and its operation/epoch history, carries no
+ * checkpoint, and is startable again. Unknown or post-admission failures never
+ * reach this helper, so their recovery duty survives.
+ */
+function applyZeroEffectAdmissionDenial(record: TaskRecord): void {
+  record.state = 'blocked';
+  record.running = false;
+  record.stopping = false;
+  record.currentState = '执行准入受阻';
+  record.nextStep = record.error?.nextAction ?? '确认准入拒绝后再发起新的执行';
+  record.release = undefined;
+  record.allowedActions = ['start'];
+  record.checkpoint = undefined;
+  record.checkpointSeq = 0;
+}
+
 export interface DurableTaskInventoryFailure {
   readonly code: string;
   readonly ownerId: string;
@@ -1053,8 +1077,11 @@ export interface DurableTaskInventoryEntry {
    * `checkpoint` means a real committed checkpoint confirmed the state.
    * `recovery-required` means the durable record alone cannot confirm a live
    * or terminal state; a persisted running event is never treated as live.
+   * `admission-denied` means the current operation carries the durable
+   * zero-effect admission denial control fact, so no checkpoint exists and the
+   * task is startable again. `unstarted` means no operation was ever allocated.
    */
-  readonly durableState: 'checkpoint' | 'recovery-required';
+  readonly durableState: 'checkpoint' | 'admission-denied' | 'unstarted' | 'recovery-required';
 }
 
 export interface DurableTaskInventory {
@@ -1116,10 +1143,19 @@ export async function projectDurableTaskInventory(input: {
   const entries: DurableTaskInventoryEntry[] = [];
   const failures: DurableTaskInventoryFailure[] = [];
   for (const record of state.tasks.values()) {
-    const operation = record.operationId === undefined ? undefined : state.operations.get(record.operationId.value);
-    const scope = record.operationId === undefined ? undefined : state.scopes.get(record.operationId.value);
+    if (record.operationId === undefined) {
+      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'unstarted' });
+      continue;
+    }
+    const operation = state.operations.get(record.operationId.value);
+    const scope = state.scopes.get(record.operationId.value);
     if (!operation || !scope?.cycleId) {
-      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'checkpoint' });
+      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'recovery-required' });
+      continue;
+    }
+    if (operation.zeroEffectAdmissionDenial === true && record.executionEpoch === operation.executionEpoch) {
+      applyZeroEffectAdmissionDenial(record);
+      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'admission-denied' });
       continue;
     }
     try {
@@ -4254,13 +4290,32 @@ export class RuntimeTaskCoordinator {
         record.running = false;
         record.currentState = '执行准入受阻';
         record.nextStep = projection.nextAction;
-        this.pushEvent(record, operation, 'execution.terminal', 'blocked', projection.message,
-          [], projection.ownerId, projection.retryable, projection.nextAction, { error: projection }, 'final');
-        record.rejectRelease?.(error);
-        record.rejectRelease = undefined;
-        record.resolveRelease = undefined;
-        record.releasePending = undefined;
+        // The denial control fact travels only when the typed judgement says
+        // the admission edge refused before any durable business effect, and
+        // only when that fact reached the durable Journal. A persistence
+        // failure keeps the prepared allocation and its stop action alive,
+        // because an unrecorded denial keeps its recovery duty.
+        try {
+          this.pushEvent(record, operation, 'execution.terminal', 'blocked', projection.message,
+            [], projection.ownerId, projection.retryable, projection.nextAction,
+            zeroEffectAdmissionDenial
+              ? { error: projection, zeroEffectAdmissionDenial: true }
+              : { error: projection },
+            'final');
+          record.rejectRelease?.(error);
+        } catch (persistenceError) {
+          record.rejectRelease?.(new AggregateError([error, persistenceError],
+            'a zero-effect admission denial failed to persist its control fact'));
+          record.release = { state: 'prepared' };
+          record.allowedActions = record.stopping ? ['retry-stop'] : ['stop'];
+          return;
+        } finally {
+          record.rejectRelease = undefined;
+          record.resolveRelease = undefined;
+          record.releasePending = undefined;
+        }
         if (zeroEffectAdmissionDenial) {
+          operation.zeroEffectAdmissionDenial = true;
           record.release = undefined;
           record.allowedActions = record.stopping ? ['retry-stop'] : ['start'];
         } else {
@@ -4989,6 +5044,7 @@ export class RuntimeTaskCoordinator {
       readonly externalResponseId?: string;
       readonly responseModel?: string;
       readonly outputRefs?: readonly string[];
+      readonly zeroEffectAdmissionDenial?: true;
     },
     terminalPhase?: 'provider' | 'final',
   ): void {
@@ -5035,6 +5091,7 @@ export class RuntimeTaskCoordinator {
       event,
       taskOutput: details?.taskOutput,
       error: details?.error,
+      ...(details?.zeroEffectAdmissionDenial === undefined ? {} : { zeroEffectAdmissionDenial: details.zeroEffectAdmissionDenial }),
     });
     this.listeners.emit(operation.operationId.value, event);
   }
@@ -5219,6 +5276,9 @@ export class RuntimeTaskCoordinator {
           }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;
           if (record.error) task.error = record.error;
+          if (record.zeroEffectAdmissionDenial === true) {
+            operation.zeroEffectAdmissionDenial = true;
+          }
           if (record.event.kind === 'provider.tool') task.currentNode = RUNTIME_NODE_MARKERS.providerTool;
           if (record.event.kind === 'provider.model') task.currentNode = RUNTIME_NODE_MARKERS.providerModel;
           break;
@@ -5233,6 +5293,11 @@ export class RuntimeTaskCoordinator {
     // authoritative checkpoint journal by hydrate().
     for (const task of this.tasks.values()) {
       if (!task.operationId) continue;
+      const operation = this.operations.get(task.operationId.value);
+      if (operation?.zeroEffectAdmissionDenial === true && task.executionEpoch === operation.executionEpoch) {
+        applyZeroEffectAdmissionDenial(task);
+        continue;
+      }
       task.state = 'unknown';
       task.running = false;
       task.stopping = false;
@@ -5245,7 +5310,12 @@ export class RuntimeTaskCoordinator {
   async hydrate(): Promise<void> {
     for (const task of this.tasks.values()) {
       if (!task.operationId) continue;
+      const operation = this.operations.get(task.operationId.value);
       const scope = this.scopes.get(task.operationId.value);
+      if (operation?.zeroEffectAdmissionDenial === true && task.executionEpoch === operation.executionEpoch) {
+        applyZeroEffectAdmissionDenial(task);
+        continue;
+      }
       if (!scope?.cycleId) {
         this.markRecoveryRequired(task);
         continue;

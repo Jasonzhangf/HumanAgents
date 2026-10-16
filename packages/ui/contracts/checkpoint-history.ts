@@ -231,3 +231,41 @@ export interface RuntimeCheckpointReadProjection {
   readonly nextCursor?: string;
   readonly capabilities: Partial<Record<RuntimeCheckpointFilter, RuntimeCheckpointCapabilityProjection>>;
 }
+
+/**
+ * Exact checkpoint a body read addresses: the checkpoint identity plus its full physical Journal
+ * receipt. A body read never locates a checkpoint from a list position or a partial selection.
+ */
+export interface RuntimeCheckpointAssetTarget {
+  readonly checkpointId:
+    RuntimeCheckpointIdentityProjection['checkpointId'];
+  readonly commitRef: RuntimeCommitRefProjection;
+}
+
+/**
+ * Which persisted asset of a checkpoint to read. `adopted-child` matches the exact
+ * invocation/child-turn/delivery triple; a zero or multiple match is an explicit failure.
+ */
+export type RuntimeCheckpointAssetSelector =
+  | {
+      readonly kind: 'capture';
+    }
+  | {
+      readonly kind: 'adopted-child';
+      readonly invocationId: string;
+      readonly childTurnId: string;
+      readonly deliverySeq: number;
+    };
+
+/**
+ * Actual persisted body of one checkpoint asset, decoded as strict UTF-8 text, with the exact
+ * provenance the read used: the checkpoint identity, the request selector and the descriptor.
+ */
+export interface RuntimeCheckpointAssetBodyProjection {
+  readonly surface: 'runtime-checkpoint-asset-body';
+  readonly scope: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+  readonly checkpoint: RuntimeCheckpointIdentityProjection;
+  readonly selector: RuntimeCheckpointAssetSelector;
+  readonly asset: RawAsset;
+  readonly text: string;
+}
