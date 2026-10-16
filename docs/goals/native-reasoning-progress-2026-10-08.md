@@ -6,6 +6,15 @@
 
 ### 续接增量（2026-10-16）
 
+- C调度纠正：整包GCM已133commands但源码零delta，Root精确SIGINT17701/确认absent/exit1，未把停单当后端不可用。保持已接受方案，执行拆C1（三files控制facade+原consumer）/C2（两filesMemoryproducer+原consumer）并行，C3待两真实ABI冻结后单writer接Service/Coordinator/CLI/nextrequest。J/S标准merge唯一candidate为 `379b0d61443bfe53990b55b58a72003158dd0cd9`，组合Appbuild0，N2原树cleanFF同候选；source-only未restart。freshGCM control-r2复用N2树，memory-r1新唯一独立domain n2-memory-producer-20261016（同candidatebase），边界不重叠；注册4→5。C总验收仍未完成，N2本轮2/3不变。
+
+- A0新服务窗证据改变下一动作：Root直接读server-v3-7777.log18872–18877（内容server_id实际4444），23:16:44.371Z的唯一MiniMax样本exec651802/conn23025/seq3，received->prepared200->write150->http_connection_end(error from user's Body stream)->socketclosed；无上游归因证据。已按白名单字段归档6row及原行hash于server窗口run/owner-selected-server-evidence.json。不采“唯一方案是加header再retry”，已同独立Planner续r2/PID67020，先判断既有direct-handler/非敏感路由真源是否足以定位；不改RCC/不盲retry。N2-C唯一GCM实现继续，childsource已闭。
+
+- Childwiring两旧FAIL已最小修正并普通提交/FF候选 `51a1e5b879536798dab2a2405c974fc3c37012ae`，只原testfile23+/3-，无新case/产品源码/放宽断言。实际采样B1waiting:waiting提前返回、B2execution.admission.missing均有原日志；作者原file真实5/5，Root规范TMPDIR根原两case2/2，再组合tsc0/两case2/2exit0。freshremote仍2981230，不重跑未变Appbuild或扩大旧25基线计数。来源clean/exit0/无占用后normalremove/prune/pathabsent，本轮注册5→4；规范空fixture root已rmdir。证据run/owner-acceptance.md。N2-C GCM与A0精确server窗口GCM继续，不leafreview/不mainpush。
+
+- 新轮已启动两路fresh GCM：`provider-n2-c-compose-execute-gcm-r1-20261016` 在原N2 clean2d4405f树接C；Root已完整读r2plan并纠正实际taskCheckpointHistory签名/distoutDir/重复epoch同步，不新增Service直存principal或Journal。`provider-child-wiring-execute-gcm-r1-20261016` 在唯一新域child-wiring-fixtures-20261016（basedb6fdaf）仅改原consumer，先证实waiting提前采样/admission缺失，再最小修复；不改产品或断言，产品缺边须回报，不与C并写。开树前4项均active/shared/protectedhold，无可回收clean项；本轮注册4→5。socket独立PlannerPID61019仍在途。
+- Root已亲读UX最终receipt与receipt-bindings：gen14/5ef9158准确loaded、submitCount1/interpretAttempts2、原turnepoch2/body8621UTF8bytes/SHAe100ebdd、原前缀保持仅722–726追加/Task总数1、三文件UI只读hash保持、双端展示证据分别接受；单checkpoint现场不冒跨历史点真实验证。A0无答案4/成功settlement，继续INCOMPLETE。
+
 - 新socket观察已返回：根因仍UNKNOWN；指定RCCrequestrecords同窗无可关联记录不等于RCC未收到，taskCandidates含既有任务也不证明问答语义冲突。Root不接受这两类过度推断。fresh独立复杂局部Gemini4 `provider-a0-socket-plan-gemini-r1-20261016`（PID61019）按新body/cause/原receipt规划最小关联取证或唯一owner修复，不新Task/换Provider/盲retry。UX最终回执报告gen14准确loaded、原Journalprefix不变仅追加722–726、原文件1820/hash04cfc5和UiRuntimeJournal不变、双端checkpoint语义展示通过；Root直接核seq717/722/726真实binding/closedAt，最终全部UI证据未扩大为A0PASS。
 
 - N2-S已验收并普通提交 `2d4405f`（六files，J22f95c0上续同树），本轮J/S/C内部进度2/3。Root亲读targetApp1/Runtime2 GREEN、deadEnd修前RED、id-only可编译selector反例Missingexpectedrejection与恢复hash；same-scope冲突由原producer先拒，未冒该场景selectorRED。UI全history/chronologicalpreviousId/canonicalfold保留。C须补真实下一request的context/epoch接线，尤其S的activeContextCommitRef与新runtime绑定；未合livecandidate/main，不声称完整N2。N2树clean保留原地续C，无新tree/leafreview。
