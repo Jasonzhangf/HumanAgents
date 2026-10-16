@@ -22,6 +22,13 @@
     "acceptance": "/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/provider-cold-source-oauth-plan-r3-20261015/acceptance.md",
     "planSections": "§1 目标图；§3 interrupted 分类与唯一 owner；§4 锁内保障；§5 语义与旧义务；§6 顺序与 allowed paths"
   },
+  "publicResumeSelector": {
+    "symbol": "resolveColdExecutionResumeRequest",
+    "ownerPath": "packages/app/src/ui-runtime/cold-execution-source.ts",
+    "input": "{ taskId: TaskId; operationId: OperationId }",
+    "returns": "RuntimeColdExecutionResumeRequest",
+    "status": "DESIGN-PLANNED/UNVERIFIED-target; composition/index expose this single owner, no parallel select/fallback path; HTTP caller provides operationId only"
+  },
   "reuseNodeSchema": "docs/dagpipe/native-turn-checkpoint.graph.json",
   "ownerDomains": {
     "D-S Runtime segment contract": "packages/runtime/src/context/active-turn-segments.ts",
@@ -33,11 +40,13 @@
     "App cold composition": "packages/app/src/ui-runtime/execution-composition.ts + packages/app/src/ui-runtime/cold-execution-source.ts"
   },
   "unverifiedTargets": [
-    "contracts/src/active-turn-segments.ts ActiveTurnSegmentPredecessorRef interrupted branch: target, not implemented",
-    "contracts/src/active-turn-segments.ts ActiveTurnSegmentRecoveryReceiptRead interrupted classification: target, not implemented",
-    "runtime/src/context/active-turn-journal.ts ActiveTurnSegmentInterruptedExactRead narrow port: target, not implemented",
-    "adapters/jsonl/src/active-turn.ts appendSegmentOpened interrupted-anchor lock-time recheck: target, not implemented",
-    "runtime/src/context/active-turn-live-prefix.ts ActiveTurnProductionObligationRef segmentId cross-segment attribution: target, not implemented"
+    "contracts/src/active-turn-segments.ts ActiveTurnSegmentPredecessorRef interrupted and initialOpen union branches (initialOpen anchor: bindingCommitRef + recordsThroughCommitRef): DESIGN-PLANNED/UNVERIFIED target, not implemented",
+    "contracts/src/active-turn-segments.ts ActiveTurnSegmentRecoveryReceiptRead interrupted and initial-open classification with explicit ActiveTurnInitialSegmentSource kind union: DESIGN-PLANNED/UNVERIFIED target, not implemented",
+    "runtime/src/context/active-turn-journal.ts readInitialOpenExact/readInitialSegmentSource narrow ports: DESIGN-PLANNED/UNVERIFIED target, not implemented",
+    "adapters/jsonl/src/active-turn.ts readInitialOpenAnchor/readInitialOpenExact, appendSegmentOpened initial-open lock-time recheck, and JsonlActiveTurnJournal late-epoch fence: DESIGN-PLANNED/UNVERIFIED target, not implemented",
+    "app/src/native-recovery-assets.ts readInitialOpenExact and readSegmentRecoveryReceipt initial-open mapping: DESIGN-PLANNED/UNVERIFIED target, not implemented",
+    "app/src/ui-runtime/cold-execution-source.ts resolveColdExecutionResumeRequest canonical public selector: DESIGN-PLANNED/UNVERIFIED target, not implemented",
+    "runtime/src/context/active-turn-live-prefix.ts ActiveTurnProductionObligationRef segmentId cross-segment attribution: DESIGN-PLANNED/UNVERIFIED target, not implemented"
   ],
   "candidates": {
     "TG1": {
@@ -83,7 +92,8 @@
     "D-L: 当前 segment 的 live prefix、execution 归属与真实 drain 已内部验收；仍待 J1 真实记录端口和 A 冷恢复组合，不能把 owner-injected port 用例当作生产证明。",
     "D-M: Runtime 跨段 reader 已验收 5/5；按 chain 和 segment-local seq 装配一个逻辑 turn，原始输入一次、HP v1/v2 exact prior history。实际 App request hook 和完整冷恢复消费者尚未验收。",
     "A: 需要真实 TG1 reservation adapter、exact cold lookup、真实新 handle、NS phase/progress backing 注入、barrier 与逐业务准入、真实 request mapper 消费。",
-    "interrupted: 原 fixture 只有 seq15 v1 receipt、seq22 epoch2 segment-opened、seq26 dispatching 且无 v2 receipt；interrupted anchor 分类、锁内复核、旧段语义读取与跨段义务归属均未落地，标 UNVERIFIED target。"
+    "interrupted: 原 fixture 只有 seq15 v1 receipt、seq22 epoch2 segment-opened、seq26 dispatching 且无 v2 receipt；interrupted anchor 分类、锁内复核、旧段语义读取与跨段义务归属均未落地，标 UNVERIFIED target。",
+    "initial-open: 无 v1 receipt、无 recovery-assets.phase、无 segment-opened 的原始 open turn（binding-opened + initial-input + root context-history + 已 settle 的 file.write + 多个 waiting request）只有两支历史事实，缺少第三支 initial-open anchor 分类、锁内 anchor 复核、一次 initialInput 与旧 request/已完成 effect 保留，均未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
   ],
   "nodes": {
     "read_exact_predecessor_facts": {
@@ -94,14 +104,14 @@
       "classificationOwnerRel": "packages/app/src/native-recovery-assets.ts",
       "physicalReadOwnerPath": "packages/adapters/jsonl/src/active-turn.ts",
       "physicalReadOwnerRel": "packages/adapters/jsonl/src/active-turn.ts",
-      "implementationStatus": "captured-exact-receipt-path-accepted; interrupted-anchor-classification-UNVERIFIED-target",
+      "implementationStatus": "captured-exact-receipt-path-accepted; interrupted-anchor-and-initial-open-anchor-classification-UNVERIFIED-target",
       "codeSymbols": [
         "packages/runtime/src/context/active-turn-segments.ts:ActiveTurnSegmentReadPort",
         "packages/runtime/src/context/active-turn-segments.ts:resumeActiveTurnSegment",
         "packages/app/src/native-recovery-assets.ts:createActiveTurnSegmentJournal",
         "packages/adapters/jsonl/src/active-turn.ts:JsonlActiveTurnSegmentJournal"
       ],
-      "designNote": "读取原 v1 capture、已提交 segment chain 与 predecessor 的真实事实：已提交 captured recovery receipt，或 typed interrupted anchor（segment-opened commit 与 records-through commit）。分类唯一 owner 是 App native-recovery-assets 组合读取端口；Runtime 只消费 typed 结果。必须 exact 读取，不扫描 latest。interrupted 分支不得改名成 capture；未保存不等于 capture。"
+      "designNote": "读取原 v1 capture、已提交 segment chain 与 predecessor 的真实事实，并在同一节点内按三类分类：已提交 captured recovery receipt；已打开但未保存的 typed interrupted anchor（segment-opened commit 与 records-through commit）；无任何已提交 receipt/中断段的 initial-open 原 turn anchor（bindingCommitRef 与 recordsThroughCommitRef）。必须 exact 读取，不扫描 latest，并核验同一业务 turn 身份（originalBusinessIdentity）。interrupted 与 initial-open 分支都不得改名成 capture，未保存不等于 capture。分类唯一 owner 是 App native-recovery-assets 组合读取端口；Runtime 只消费 typed 结果。readInitialOpenAnchor/readInitialOpenExact/readInitialSegmentSource 为 DESIGN-PLANNED/UNVERIFIED target。"
     },
     "register_current_grant_business": {
       "ownerPath": "packages/runtime/src/admission/task-grant.ts",
@@ -125,12 +135,12 @@
       "ownerDomain": "J1 JSONL/immutable assets",
       "runtimePortOwnerPath": "packages/runtime/src/context/active-turn-journal.ts",
       "runtimePortOwnerRel": "packages/runtime/src/context/active-turn-journal.ts",
-      "implementationStatus": "typed-Journal-factory-and-exact-append-accepted; interrupted-anchor-lock-recheck-UNVERIFIED-target",
+      "implementationStatus": "typed-Journal-factory-and-exact-append-accepted; interrupted-and-initial-open-anchor-lock-recheck-and-late-epoch-fence-UNVERIFIED-target",
       "codeSymbols": [
         "packages/adapters/jsonl/src/active-turn.ts:JsonlActiveTurnSegmentJournal.appendSegmentOpened",
         "packages/runtime/src/context/active-turn-journal.ts:ActiveTurnSegmentAppendPort"
       ],
-      "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内复核 captured receipt 分支与 interrupted anchor 分支（opened commit、records-through、当前 chain tail、仍无相关 receipt）；锁内不读网络、不执行工具。interrupted 分支复核尚未落地，标 UNVERIFIED target。"
+      "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内复核三类 predecessor：captured receipt；interrupted anchor（opened commit、records-through、当前 chain tail、仍无相关 receipt）；initial-open anchor（chain.length===0、predecessor.segmentId===businessTurnId、零 v1 recovery-assets.phase commit、按锁内 records 重算 anchor 并 exact 相等）。旧 epoch 迟到写按 fencing 拒绝：append 在 journal.transaction 内，已存在同 commit 的相同 payload/scope 返回原记录（exact 幂等），已存在 successor segment-opened 时拒绝新 epoch-1 append 并抛 JournalIntegrityError。锁内不读网络、不执行工具。initial-open 复核与迟到写 fencing 尚未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
     },
     "establish_epoch_window": {
       "ownerPath": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
@@ -142,14 +152,14 @@
       "semanticPortOwnerRel": "packages/runtime/src/context/active-turn-journal.ts",
       "driverCompositionOwnerPath": "packages/app/src/ui-runtime/execution-composition.ts",
       "driverCompositionOwnerRel": "packages/app/src/ui-runtime/execution-composition.ts",
-      "implementationStatus": "epoch-floor-and-resume-wiring-present; interrupted-segment-semantic-read-UNVERIFIED-target",
+      "implementationStatus": "epoch-floor-and-resume-wiring-present; interrupted-and-initial-open-segment-semantic-read-and-obligation-retention-UNVERIFIED-target",
       "codeSymbols": [
         "packages/runtime/src/ui-runtime/cold-execution-resume.ts:successorEpoch",
         "packages/runtime/src/ui-runtime/cold-execution-resume.ts:resumeColdExecution",
         "packages/runtime/src/context/semantic-turn-context-reader.ts:readResumedSegmentSemanticTurnContext",
         "packages/app/src/ui-runtime/execution-composition.ts:createResumedExecutionDriver"
       ],
-      "designNote": "按全部真实 durable floor facts 计算 successor epoch，取得真实 handle 后恢复 incarnation 执行窗口，并恢复当前语义与旧段未决义务。旧 epoch 迟到写按 fencing 拒绝；不重投旧 request/child，不自动 settle。interrupted 段语义读取（readSegmentInterruptedExact）与跨段义务 segmentId 归属尚未落地，标 UNVERIFIED target。"
+      "designNote": "按全部真实 durable floor facts 计算 successor epoch，取得真实 handle 后恢复 incarnation 执行窗口，并恢复当前语义与旧段未决义务。旧 epoch 迟到写按 fencing 拒绝；不重投旧 request/child，不自动 settle。initial-open 分支只发一次 initialInput，保留全部 open request/child obligation（segmentId 归属 businessTurnId），并保留已完成 effect（已 settle 的 file.write 不重放）。interrupted 段语义读取（readSegmentInterruptedExact）、initial-open 语义读取（readInitialOpenExact + materializeLiveAcceptedPrefix）与跨段义务 segmentId 归属尚未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
     },
     "resolve_resume_outcome": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
