@@ -95,6 +95,7 @@ export interface RequirementAdmissionInput {
   readonly requiredCapabilities: readonly string[];
   readonly availableCapabilities: readonly string[];
   readonly health: HealthState;
+  readonly unknownHealthRequestable?: boolean;
   readonly requiredInputRefs: readonly string[];
   readonly providedInputRefs: readonly string[];
   readonly checkpoint: CheckpointRecoveryFacts;
@@ -124,6 +125,7 @@ export function admitRequirement(input: RequirementAdmissionInput): RequirementA
     requiredCapabilities: input.requiredCapabilities,
     availableCapabilities: input.availableCapabilities,
     health: input.health,
+    ...(input.unknownHealthRequestable === undefined ? {} : { unknownHealthRequestable: input.unknownHealthRequestable }),
     requiredInputRefs: input.requiredInputRefs,
     providedInputRefs: input.providedInputRefs,
     checkpoint: input.checkpoint,
@@ -192,7 +194,7 @@ export function checkAdmission(input: AdmissionCheckInput): AdmissionDecision {
   if (input.health === 'attention') {
     return waiting(input.queue.kind, ownerId, 'health.attention', 'organ health requires attention');
   }
-  if (input.health === 'unknown') {
+  if (input.health === 'unknown' && !input.unknownHealthRequestable) {
     return waiting(input.queue.kind, ownerId, 'health.known', 'organ health is unknown');
   }
 

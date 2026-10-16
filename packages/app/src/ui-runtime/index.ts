@@ -23,6 +23,7 @@ import {
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
+import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
 import { createJsonlI2JournalPort } from '../i2-journal.js';
 import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
@@ -476,6 +477,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     attentionPort,
     providerState,
     providerError,
+    ...(readiness === undefined ? {} : { providerReadiness: readiness }),
+    // A configured native launch binds the real task-scoped grant journal, so
+    // confirmation only confirms intent and execution waits for a real grant.
+    ...(configuredNativeLaunch ? { taskGrantPort: new JsonlTaskGrantJournal(taskControlJournal) } : {}),
     ...(options.providerSource === undefined ? {} : { providerSource: options.providerSource }),
     journal,
     closurePort: interactionJournal ?? journal,

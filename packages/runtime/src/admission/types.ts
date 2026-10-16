@@ -33,6 +33,7 @@ export interface AdmissionCheckInput {
   readonly requiredCapabilities: readonly string[];
   readonly availableCapabilities: readonly string[];
   readonly health: HealthState;
+  readonly unknownHealthRequestable?: boolean;
   readonly requiredInputRefs: readonly string[];
   readonly providedInputRefs: readonly string[];
   readonly checkpoint: CheckpointRecoveryFacts;

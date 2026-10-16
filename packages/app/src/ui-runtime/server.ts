@@ -1433,7 +1433,7 @@ async function handleRequest(
       if (mode !== service.status().mode) {
         throw new UiRuntimeApiError('execution.mode.mismatch', APP_OWNER, `runtime is running in ${service.status().mode} mode`, `restart the runtime in ${mode} mode`);
       }
-      const started = service.startExecution(id('task', decodeURIComponent(taskExecutions[1]!)), { prompt: requirePrompt(body) });
+      const started = await service.startExecution(id('task', decodeURIComponent(taskExecutions[1]!)), { prompt: requirePrompt(body) });
       writeJson(response, 202, { operationId: started.operationId.value, executionEpoch: started.executionEpoch });
       return;
     }

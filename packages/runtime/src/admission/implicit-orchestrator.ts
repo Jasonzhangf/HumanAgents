@@ -84,6 +84,7 @@ export interface ImplicitBrainFifoDrainOptions {
   readonly requiredCapabilities: readonly string[];
   readonly availableCapabilities: readonly string[];
   readonly health: HealthState;
+  readonly unknownHealthRequestable?: boolean;
   readonly requiredInputRefs: readonly string[];
   readonly providedInputRefs: readonly string[];
   readonly checkpoint: CheckpointRecoveryFacts;
@@ -342,6 +343,7 @@ export class ImplicitBrainFifo {
       requiredCapabilities: input.requiredCapabilities,
       availableCapabilities: input.availableCapabilities,
       health: input.health,
+      ...(input.unknownHealthRequestable === undefined ? {} : { unknownHealthRequestable: input.unknownHealthRequestable }),
       requiredInputRefs: input.requiredInputRefs,
       providedInputRefs: input.providedInputRefs,
       checkpoint: input.checkpoint,
@@ -423,6 +425,7 @@ function defaultAdmit(input: {
   readonly requiredCapabilities: readonly string[];
   readonly availableCapabilities: readonly string[];
   readonly health: HealthState;
+  readonly unknownHealthRequestable?: boolean;
   readonly requiredInputRefs: readonly string[];
   readonly providedInputRefs: readonly string[];
   readonly checkpoint: CheckpointRecoveryFacts;
@@ -437,6 +440,7 @@ function defaultAdmit(input: {
     requiredCapabilities: input.requiredCapabilities,
     availableCapabilities: input.availableCapabilities,
     health: input.health,
+    ...(input.unknownHealthRequestable === undefined ? {} : { unknownHealthRequestable: input.unknownHealthRequestable }),
     requiredInputRefs: input.requiredInputRefs,
     providedInputRefs: input.providedInputRefs,
     checkpoint: input.checkpoint,

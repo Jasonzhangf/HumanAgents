@@ -43,6 +43,7 @@ import {
   type ScopeRef,
   type ProviderBinding,
   type ProviderCloseResult,
+  type ProviderReadiness,
   type ProviderEvent,
   type StopRequestReceipt,
   type TaskId,
@@ -118,6 +119,7 @@ import {
   type AdmissionQueueKind,
   type RequirementAdmissionReceipt,
 } from '../../../runtime/src/admission/index.js';
+import type { TaskGrantPort } from '../../../runtime/src/admission/task-grant.js';
 import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
@@ -247,6 +249,7 @@ import type {
   PublicOutputPublication,
 } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
+import { canStartProviderRequest } from '../provider-admission.js';
 import { readProducedArtifacts, RESPONSES_FILE_SEARCH_TOOL } from '../provider-tool-execution.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import {
@@ -402,6 +405,14 @@ export interface UiRuntimeServiceOptions {
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => PublicOutputCheckpointStore;
   readonly attentionPort: AttentionPort;
   readonly providerState: string;
+  readonly providerReadiness?: ProviderReadiness;
+  /**
+   * The single task-scoped execution authority. When bound, a confirmed Task is
+   * only materialized and acknowledged: execution auto-starts only after the
+   * verified origin holds a `granted` task grant. The explicit `fake` launch
+   * binds none and keeps its fixture simulation.
+   */
+  readonly taskGrantPort?: TaskGrantPort;
   readonly providerSource?: ProviderTransportSource;
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly hookRegistry?: AgentHookRegistry;
@@ -3930,10 +3941,19 @@ export class UiRuntimeService {
     }
   }
 
-  startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): { readonly operationId: OperationId; readonly executionEpoch: number } {
+  private canStartProviderExecution(status: RuntimeStatusProjection): boolean {
+    if (!this.connected) return false;
+    const readiness = this.options.providerReadiness;
+    if (readiness !== undefined) {
+      return canStartProviderRequest(this.options.providerSource ?? 'rcc', readiness);
+    }
+    return status.state === 'ready' || status.state === 'degraded';
+  }
+
+  async startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): Promise<{ readonly operationId: OperationId; readonly executionEpoch: number }> {
     try {
       const status = this.status();
-      if (status.state !== 'ready' && status.state !== 'degraded') {
+      if (!this.canStartProviderExecution(status)) {
         const providerError = this.options.providerError;
         throw new UiRuntimeApiError(
           providerError?.code ?? `provider.readiness.${status.providerState}`,
@@ -3943,9 +3963,13 @@ export class UiRuntimeService {
           409,
         );
       }
-      const started = this.coordinator.startExecution(taskId, input);
-      this.watchExecutionForImplicitWakeup(started.operationId);
-      return started;
+      // Wait for the real admission/release edge before reporting the start, so
+      // a denied start returns its typed error instead of a false 202. The
+      // driver/Provider factory is created only after admission authorizes.
+      const allocation = this.coordinator.prepareExecution(taskId, input);
+      await this.coordinator.releaseExecution(taskId, allocation.operationId);
+      this.watchExecutionForImplicitWakeup(allocation.operationId);
+      return { operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
     } catch (error) {
       throw apiError(error);
     }
@@ -3971,7 +3995,7 @@ export class UiRuntimeService {
   }): Promise<OccurrenceTerminalProduction> {
     try {
       const status = this.status();
-      if (status.state !== 'ready' && status.state !== 'degraded') {
+      if (!this.canStartProviderExecution(status)) {
         const providerError = this.options.providerError;
         throw new UiRuntimeApiError(
           providerError?.code ?? `provider.readiness.${status.providerState}`,
@@ -5238,6 +5262,19 @@ export class UiRuntimeService {
     };
   }
 
+  /**
+   * A real Task submission only confirms intent, so the task-scoped grant is
+   * the single execution authority: an ungranted Task is materialized and
+   * acknowledged without auto-starting. The explicit `fake` launch binds no
+   * real grant port and keeps its historical fixture simulation.
+   */
+  private async executionAutoStartAllowed(taskId: TaskId): Promise<boolean> {
+    const port = this.options.taskGrantPort;
+    if (port === undefined) return true;
+    const readback = await port.readTaskGrant(taskId);
+    return readback.grant?.state === 'granted';
+  }
+
   private async completePreparedDispatch(
     consumed: RequirementEnvelope,
     prepared: DispatchLedgerEntry,
@@ -5266,6 +5303,10 @@ export class UiRuntimeService {
     if (!isTaskInputUpdate && consumed.intent === 'create') {
       await this.establishNewTaskIdentity(consumed, task.taskId);
     }
+    // Confirmation only confirms intent. Execution auto-starts only when the
+    // bound task-scoped grant already authorizes the verified origin; otherwise
+    // the materialized Task waits for an independent, granted start.
+    const autoStart = await this.executionAutoStartAllowed(task.taskId);
     if (isTaskInputUpdate) {
       // Route `append`/`change` intents to this task's input mailbox instead of
       // overwriting its directive with a fresh execution. `appendTaskRevision`
@@ -5291,14 +5332,16 @@ export class UiRuntimeService {
         }
         const pending = this.coordinator.pendingTaskInput(task.taskId);
         const prompt = pending ? pending.envelope.normalizedInput : consumed.normalizedInput;
-        const execution = this.coordinator.startExecution(task.taskId, {
-          prompt,
-          ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
-          operationId,
-          ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
-        });
-        if (pending) this.coordinator.consumeTaskInput(task.taskId, pending.inputRevision);
-        executionEpoch = execution.executionEpoch;
+        if (autoStart) {
+          const execution = this.coordinator.startExecution(task.taskId, {
+            prompt,
+            ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+            operationId,
+            ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
+          });
+          if (pending) this.coordinator.consumeTaskInput(task.taskId, pending.inputRevision);
+          executionEpoch = execution.executionEpoch;
+        }
       }
       const started: DispatchLedgerEntry = {
         ...prepared,
@@ -5310,7 +5353,7 @@ export class UiRuntimeService {
     } else if (executionEpoch === undefined) {
       if (task.operationId === operationId.value && task.executionEpoch !== undefined) {
         executionEpoch = task.executionEpoch;
-      } else {
+      } else if (autoStart) {
         const execution = this.coordinator.startExecution(task.taskId, {
           prompt: consumed.normalizedInput,
           ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
@@ -5327,7 +5370,9 @@ export class UiRuntimeService {
       this.dispatchLedger.set(consumed.draftId, started);
       this.persistExplicitBrainState();
     }
-    this.watchExecutionForImplicitWakeup(operationId);
+    // Only a really started execution has an operation to watch; an ungranted
+    // dispatch is materialized and acknowledged without one.
+    if (executionEpoch !== undefined) this.watchExecutionForImplicitWakeup(operationId);
     await this.explicitIntake.markDraftDispatched(consumed.draftId);
     this.persistExplicitBrainState();
     const requirement: InboxReceipt = {
@@ -5349,7 +5394,7 @@ export class UiRuntimeService {
       requirement,
       taskId: task.taskId,
       operationId,
-      executionEpoch,
+      executionEpoch: executionEpoch ?? 0,
     };
   }
 
@@ -5419,6 +5464,7 @@ export class UiRuntimeService {
 
   private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {
     const status = this.status();
+    const providerRequestable = this.canStartProviderExecution(status);
     const health = status.state === 'ready'
       ? 'healthy'
       : status.state === 'degraded'
@@ -5426,9 +5472,10 @@ export class UiRuntimeService {
         : status.state === 'unknown'
           ? 'unknown'
           : 'unhealthy';
-    const availableCapabilities = status.state === 'ready' || status.state === 'degraded'
+    const availableCapabilities = providerRequestable
       ? [PROVIDER_EXECUTION_CAPABILITY]
       : [];
+    const unknownHealthRequestable = status.state === 'unknown' && providerRequestable;
     const queue = classifyConfirmedRequirement(envelope);
     const tasks = this.coordinator.taskSnapshots();
     const isTaskInputUpdate = envelope.taskRef !== undefined
@@ -5452,6 +5499,7 @@ export class UiRuntimeService {
       requiredCapabilities: [PROVIDER_EXECUTION_CAPABILITY],
       availableCapabilities,
       health,
+      unknownHealthRequestable,
       requiredInputRefs: [envelope.payloadRef],
       providedInputRefs: [envelope.payloadRef],
       checkpoint: { recoverable: true },
@@ -5486,6 +5534,7 @@ export class UiRuntimeService {
     while (this.implicitConsumerEnabled) {
       try {
         const status = this.status();
+        const providerRequestable = this.canStartProviderExecution(status);
         const health = status.state === 'ready'
           ? 'healthy'
           : status.state === 'degraded'
@@ -5493,9 +5542,10 @@ export class UiRuntimeService {
             : status.state === 'unknown'
               ? 'unknown'
               : 'unhealthy';
-        const availableCapabilities = status.state === 'ready' || status.state === 'degraded'
+        const availableCapabilities = providerRequestable
           ? [PROVIDER_EXECUTION_CAPABILITY]
           : [];
+        const unknownHealthRequestable = status.state === 'unknown' && providerRequestable;
         // Share the explicit dispatch mutex so a manual /api/explicit/dispatch-next
         // cannot interleave with the background FIFO drain on the same head.
         const attempt = await this.withDispatchLock(() => this.implicitBrain.drainNext({
@@ -5506,6 +5556,7 @@ export class UiRuntimeService {
           requiredCapabilities: [PROVIDER_EXECUTION_CAPABILITY],
           availableCapabilities,
           health,
+          unknownHealthRequestable,
           requiredInputRefs: ['task://pending'],
           providedInputRefs: ['task://pending'],
           checkpoint: { recoverable: true },

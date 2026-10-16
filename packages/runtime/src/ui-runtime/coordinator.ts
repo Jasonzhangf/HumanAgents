@@ -4224,20 +4224,24 @@ export class RuntimeTaskCoordinator {
     } catch (error) {
       if (record.release?.state === 'prepared') {
         const projection = errorFromUnknown(error);
-        // No model/tool has started. Keep the allocation and its typed duty;
-        // a projection checkpoint cannot claim that admission completed.
+        // The admission edge runs before any business registration, driver or
+        // Provider call, so a rejection here has zero business effect. Record
+        // the exact rejected operation terminal durably, keep its operation and
+        // execution epoch in history, and release the prepared slot so a later
+        // independent start prepares a new operation instead of staying busy.
         record.error = projection;
         record.state = 'blocked';
         record.running = false;
         record.currentState = '执行准入受阻';
         record.nextStep = projection.nextAction;
-        record.allowedActions = record.stopping ? ['retry-stop'] : ['stop'];
         this.pushEvent(record, operation, 'execution.terminal', 'blocked', projection.message,
           [], projection.ownerId, projection.retryable, projection.nextAction, { error: projection }, 'final');
         record.rejectRelease?.(error);
         record.rejectRelease = undefined;
         record.resolveRelease = undefined;
         record.releasePending = undefined;
+        record.release = undefined;
+        record.allowedActions = record.stopping ? ['retry-stop'] : ['start'];
         return;
       }
       if (record.postCommitRecoveryPending) return;
@@ -4255,20 +4259,26 @@ export class RuntimeTaskCoordinator {
       if (driver?.standardTurn) {
         // Canonical turn failure retains its own checkpoint/recovery stage. The
         // generic terminal path must not append a second projection checkpoint.
-        record.error = projection;
+        // The primary typed Provider error already recorded during observe()
+        // stays the task error; the settle/close failure is attached as its
+        // typed cleanupError instead of overwriting the first cause.
+        const primaryError: MutableRuntimeTaskError | undefined = record.error;
+        const effectiveError: MutableRuntimeTaskError = primaryError ?? projection;
+        if (primaryError !== undefined) primaryError.cleanupError = projection;
+        record.error = effectiveError;
         record.running = false;
         record.state = 'blocked';
         record.allowedActions = [];
-        record.nextStep = projection.nextAction;
+        record.nextStep = effectiveError.nextAction;
         try {
           await this.closeForExecution(operation.operationId, driver, []);
         } catch (cleanupError) {
           projection.cleanupError = errorFromUnknown(cleanupError);
         }
         await this.tryPersistCurrentState(record,
-          `turn-pending:${record.taskId.value}:${operation.operationId.value}:${projection.code}`, scope);
-        this.pushEvent(record, operation, 'execution.terminal', 'blocked', projection.message,
-          [], projection.ownerId, true, projection.nextAction, { error: projection }, 'final');
+          `turn-pending:${record.taskId.value}:${operation.operationId.value}:${effectiveError.code}`, scope);
+        this.pushEvent(record, operation, 'execution.terminal', 'blocked', effectiveError.message,
+          [], effectiveError.ownerId, true, effectiveError.nextAction, { error: effectiveError }, 'final');
         return;
       }
       const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: scope.cycleId };
