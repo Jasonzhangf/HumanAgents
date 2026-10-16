@@ -4,6 +4,11 @@
 
 ## 1. 当前目标与总体进度（截至 2026-10-15）
 
+### 续接增量（2026-10-16）
+
+- 引用App r5作者终态0但未实际运行Node/CLI，build/tsc均经tail，文字testpasses不采纳。Root正常直接build:app0、tsc0、原CLIconsumer实际exit1，保留fixture`provider-cli-native-process-r1-20261013/native-process-h2eKpZ`。文件write/parentwirefooter已发生，工具引用属于真实toolchildoperation，summary要求parentoperation导致`turn summary goal evidence: scope mismatch`，Taskblocked/open/无checkpoint；posts>=3只是后续失败断言，不能改计数冒GREEN。独立OAuth `provider-ref-scope-plan-oauth-r1-20261016`冻结真实引用scope补链与业务成功断言，不放宽scope/alias，不重标子operation、不动原I1。证据`provider-ref-app-gcm-r5-20261015/{report-limits.md,parent-scope-observation.md,parent-cli-consumer.log}`。这批五文件未接收。
+- neutralinteraction父owner r2分层方向已接收并落`acceptance.md`，真实Task/helper兼容、Runtime durablefacts+canonical/materializer、Jsonl事务port、T5B/C依赖冻结。Graph/governance前置移至F0前，fresh docs-only GCM `provider-parent-graph-gcm-r1-20261015`只改原explicit-semantic-turn三companion，保留5节点/外部迭代、planned新module明确UNVERIFIED；图接收后才派F0代码。F0新contracts测试必须先真实tsc，不用staledist。此图/计划不证明父循环运行完成。
+
 ### 续接增量（2026-10-15 晚）
 
 - F13 Contracts r3实际只完成65行单文件partial：XOR/anchor/receiptRead类型和共享validator已写，但三原validator未接共享函数、原consumer未补、无RED/GREEN；worker正常exit0不代表完成，未接收。fresh同树`provider-interrupted-finish-gcm-r4-20261015`只完成这三调用与契约consumer及实际RED/GREEN，不再返计划。误写树内`RUN/work.md`已移交原r3独占run的`in-tree-work.md`，旧RUN目录核销，不提交笔记。App引用四producer已有实际patch，CLIconsumer和行为仍由r5继续，未接收。
