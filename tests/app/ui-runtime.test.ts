@@ -10,6 +10,9 @@ import {
   PIPELINE_ROWS,
   ContractError,
   id,
+  operationIdempotencyKey,
+  operationSemanticFingerprint,
+  operationSemanticFingerprintKey,
   validateInteractionTraceEntry,
   type Attention,
   type Checkpoint,
@@ -86,11 +89,12 @@ import {
   uiRuntimeControlJournalPath,
   type UiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
-import { PreparedExecutionStop } from '../../packages/app/src/ui-runtime/prepared-execution-stop.js';
-import { createExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-admission.js';
+import { PreparedExecutionStop, PreparedExecutionStopPreparationFailure } from '../../packages/app/src/ui-runtime/prepared-execution-stop.js';
+import { createExecutionAdmission, executionAdmissionInputDigest, type PreparedParentLifecycle } from '../../packages/app/src/ui-runtime/execution-admission.js';
 import { readPreparedExecutionInput } from '../../packages/app/src/prepared-execution-input.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
 import type { AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import { prepareExecutionAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
 import { createToolExecutionGateway } from '../../packages/app/src/tool-execution-gateway.js';
 import {
   AgentRuntimePoolManager,
@@ -108,6 +112,7 @@ import { AccessControlError, AccessControlService } from '../../packages/app/src
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import type { JournalAppendInput, JournalRecord, JournalTransactionContext } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
 import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
@@ -643,6 +648,7 @@ function serviceFor(
 function preparedStopAdmission(
   journal: JsonlOrganJournal,
   preparedJournal: UiRuntimeJournal,
+  stopSettlement?: { settle: PreparedExecutionStop['settleParentStop'] },
 ) {
   return createExecutionAdmission({
     organJournal: journal,
@@ -657,6 +663,7 @@ function preparedStopAdmission(
     resolveAdmittedInput: async (allocation) => readPreparedExecutionInput(preparedJournal, allocation),
     createGateway: (ports) => createToolExecutionGateway({
       ...ports,
+      ...(stopSettlement === undefined ? {} : { stopSettlement }),
       now: () => new Date('2026-10-16T00:00:00.000Z'),
     }),
   });
@@ -870,6 +877,195 @@ test('prepared execution stop waits for gated preparation and a real close recei
     assert.deepEqual(await reconstructed.closeProvider(acquisition), closed);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('prepared execution stop recovers acquisition and left append failures without replay', async () => {
+  for (const cut of ['resource-acquired', 'preparation-left'] as const) {
+    const root = await preparedStopFixture(`humanagent-prepared-stop-retry-${cut}-`);
+    try {
+      const appendFailure = new Error(`controlled ${cut} append failure`);
+      class FailingJournal extends JsonlOrganJournal {
+        failed = true;
+        override async transaction<T, R>(
+          read: (context: JournalTransactionContext) => T | Promise<T>,
+          apply: (input: T, append: (input: JournalAppendInput) => Promise<JournalRecord>) => Promise<R>,
+        ): Promise<R> {
+          return super.transaction(read, (input, append) => apply(input, async (next) => {
+            const fact = next.payload?.fact as { kind?: string } | undefined;
+            if (this.failed && fact?.kind === cut) throw appendFailure;
+            return append(next);
+          }));
+        }
+      }
+      const journal = new FailingJournal(join(root, 'organ-journal.jsonl'));
+      const preparedJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+      const allocation = preparedStopAllocation();
+      preparedJournal.append({ kind: 'operation.prepared', allocation, input: 'retained input', operationCounter: 1, cycleCounter: 1 });
+      const admission = preparedStopAdmission(journal, preparedJournal);
+      const producer = new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission });
+      let selected = 0;
+      let probes = 0;
+      let closes = 0;
+      let dispatches = 0;
+      let physicallyClosed = false;
+      let allowClose = cut === 'preparation-left';
+      const closeFailure = new Error('controlled actual close failure');
+      let actualReceipt: ProviderCloseResult | undefined;
+      let retainedBinding: ProviderBinding | undefined;
+      let failure: PreparedExecutionStopPreparationFailure | undefined;
+      await assert.rejects(() => producer.withPreparation(allocation, (lease) => prepareExecutionAgentProvider({
+        roleId: 'execution', agentProviderBindings: [], legacyProvider: preparedStopComposition(new FakeReplayExecutionRuntimePort({ binding })).provider,
+        createPort: (selection) => {
+          selected += 1;
+          retainedBinding = selection.binding;
+          const base = new FakeReplayExecutionRuntimePort({ binding: selection.binding });
+          base.probe = async (value) => { probes += 1; return new FakeReplayExecutionRuntimePort({ binding: value }).probe(value); };
+          base.start = async () => { dispatches += 1; throw new Error('business dispatch forbidden'); };
+          base.close = async (value) => {
+            closes += 1;
+            if (!allowClose) throw closeFailure;
+            physicallyClosed = true;
+            actualReceipt = await new FakeReplayExecutionRuntimePort({ binding: value }).close(value);
+            return actualReceipt;
+          };
+          return base;
+        },
+      }, producer, lease)), (error: unknown) => {
+        if (cut === 'resource-acquired') assert.equal(closes, 1, 'failed acquisition must retain and attempt actual resource close');
+        assert.ok(error instanceof PreparedExecutionStopPreparationFailure);
+        if (!(error instanceof PreparedExecutionStopPreparationFailure)) throw error;
+        failure = error;
+        assert.ok(error.errors.includes(appendFailure));
+        return true;
+      });
+      assert.ok(failure);
+      if (failure === undefined) throw new Error('expected retained preparation failure');
+      assert.equal(probes, cut === 'resource-acquired' ? 0 : 1, 'failed acquisition must not admit');
+      if (cut === 'resource-acquired') {
+        assert.equal(closes, 1, 'failed acquisition must retain and attempt actual resource close');
+        assert.equal(physicallyClosed, false, 'failed close retains the actual resource');
+        assert.ok(failure.errors.includes(closeFailure));
+      }
+      const selector = { taskId: allocation.taskId, operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
+      await producer.request({ allocation, checkpoint: preparedStopCheckpoint(allocation) });
+      assert.equal((await producer.settle(selector)).state, 'pending');
+      assert.equal((await new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission }).settle(selector)).state, 'pending');
+      allowClose = true;
+      await assert.rejects(() => producer.retryFailedPreparation(failure!.lease));
+      assert.equal(physicallyClosed, true, 'retry closes retained resource even while persistence is unavailable');
+      const physicalCloseCount = closes;
+      journal.failed = false;
+      await producer.retryFailedPreparation(failure.lease);
+      assert.equal(closes, physicalCloseCount, 'persistence retry must not repeat physical close');
+      assert.equal(selected, 1);
+      assert.equal(dispatches, 0);
+      const read = await producer.read(selector);
+      assert.equal(read.state, 'pending');
+      if (read.state !== 'pending') throw new Error('expected pending request');
+      const acquired = read.facts.filter((entry) => entry.fact.kind === 'resource-acquired');
+      const closed = read.facts.filter((entry) => entry.fact.kind === 'resource-closed');
+      const left = read.facts.filter((entry) => entry.fact.kind === 'preparation-left');
+      assert.equal(acquired.length, 1); assert.equal(closed.length, 1); assert.equal(left.length, 1);
+      assert.equal(acquired[0]!.fact.kind, 'resource-acquired');
+      if (acquired[0]!.fact.kind !== 'resource-acquired' || closed[0]!.fact.kind !== 'resource-closed' || left[0]!.fact.kind !== 'preparation-left') throw new Error('wrong facts');
+      assert.deepEqual(acquired[0]!.fact.resource.binding, retainedBinding);
+      assert.deepEqual(closed[0]!.fact.acquisition, acquired[0]!.ref);
+      assert.deepEqual(closed[0]!.fact.receipt, actualReceipt);
+      assert.equal(left[0]!.fact.outcome, 'failed');
+      assert.equal((await producer.settle(selector)).state, 'settled');
+      assert.equal((await new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission }).read(selector)).state, 'settled');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('prepared execution stop settles the actual admitted parent without an opened turn', async () => {
+  for (const pendingChild of [false, true]) {
+  const root = await preparedStopFixture('humanagent-prepared-stop-parent-');
+  try {
+    const journal = new JsonlOrganJournal(join(root, 'organ-journal.jsonl'));
+    const preparedJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+    const allocation = preparedStopAllocation();
+    preparedJournal.append({ kind: 'operation.prepared', allocation, input: 'retained input', operationCounter: 1, cycleCounter: 1 });
+    let producer!: PreparedExecutionStop;
+    let callbacks = 0;
+    const admission = preparedStopAdmission(journal, preparedJournal, { settle: async (request) => {
+      callbacks += 1;
+      return producer.settleParentStop(request);
+    } });
+    producer = new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission });
+    const registration: PreparedParentLifecycle['control']['registration'] = {
+      toolName: TASK_EXECUTION_ACTION_ID, contractVersion: '1.0.0', supportedKinds: ['run'],
+      routeId: 'harness-provider-controller', routeVersion: '1', mode: 'gateway', acceptedScopes: [{}],
+      inputContract: 'humanagent://task-execution/input/v1', outputContract: 'humanagent://task-execution/output/v1',
+      verifier: 'humanagent://task-execution/standard-end', capabilities: [TASK_EXECUTION_CAPABILITY],
+      retryPolicy: 'humanagent://task-execution/retry', owner: 'humanagent.runtime',
+    };
+    const intent: PreparedParentLifecycle['control']['intent'] = {
+      operationId: allocation.operationId, taskId: allocation.taskId, cycleId: allocation.scope.cycleId!,
+      requestedBy: 'humanagent.prepared-stop-test', intentRevision: '1', kind: 'run', toolName: registration.toolName,
+      inputRef: allocation.inputRefs[0]!, inputDigest: executionAdmissionInputDigest(allocation, readPreparedExecutionInput(preparedJournal, allocation)),
+      requestedScope: allocation.scope, idempotencyKey: allocation.operationId.value,
+      expectedOutput: { schemaRef: registration.outputContract, requiredEvidenceKinds: ['operation'] },
+    };
+    const route: PreparedParentLifecycle['control']['route'] = {
+      operationId: allocation.operationId, routeId: registration.routeId, routeVersion: registration.routeVersion,
+      mode: registration.mode, contractVersion: registration.contractVersion, effectiveScope: allocation.scope,
+      selectionReason: 'real admitted no-turn consumer', selectedAt: '2026-10-16T00:00:00.000Z',
+    };
+    const capability = { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY], scope: { organId, taskId: allocation.taskId } };
+    await new JsonlTaskGrantJournal(journal).grant({ requestId: 'prepared-stop-grant', taskId: allocation.taskId, owner: 'humanagent.prepared-stop-test', capability, expectedRevision: 0 });
+    const admitted = await admission.admitExecution({ allocation, requestRef: `execution:${allocation.operationId.value}`, capability,
+      parentLifecycle: {
+        event: { eventId: 'prepared-parent-admitted', schemaVersion: 1, kind: 'operation.accepted', operationId: allocation.operationId,
+          taskId: allocation.taskId, executionEpoch: 1, status: 'accepted', occurredAt: route.selectedAt, evidenceRefs: [] },
+        control: { intent, registration, route, status: 'accepted', executionEpoch: 1,
+          namespaceKey: operationIdempotencyKey(intent), fingerprintKey: operationSemanticFingerprintKey(operationSemanticFingerprint(intent, registration)) },
+      } });
+    let closes = 0;
+    const port = new FakeReplayExecutionRuntimePort({ binding });
+    port.close = async (value) => { closes += 1; return new FakeReplayExecutionRuntimePort({ binding: value }).close(value); };
+    const acquired = await producer.withPreparation(allocation, (lease) => producer.takeProvider(lease, preparedStopComposition(port)));
+    await producer.closeProvider(acquired);
+    await producer.request({ allocation, checkpoint: preparedStopCheckpoint(allocation) });
+    const selector = { taskId: allocation.taskId, operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
+    if (pendingChild) {
+      const childId = id('operation', 'prepared-stop-pending-child');
+      await admission.admitToolOperation({ binding: admitted.binding, registration,
+        intent: { ...intent, operationId: childId, requestedScope: { ...allocation.scope, operationId: childId }, idempotencyKey: childId.value },
+        providerRequestId: 'prepared-stop-child-request', toolCallId: 'prepared-stop-child-call' });
+      const control = await admission.gateway.readControl({ scope: allocation.scope, agentRuntimeId: allocation.runtimeId, harnessExecutionEpoch: allocation.executionEpoch });
+      assert.equal(control.state, 'unknown', 'pending child registration is not empty coverage');
+      const pending = await producer.settle(selector);
+      assert.equal(pending.state, 'pending');
+      if (pending.state !== 'pending') throw new Error('pending child must retain parent responsibility');
+      assert.equal(pending.reason, 'admission-incomplete');
+      assert.equal(callbacks, 0, 'unknown control must not request cancellation');
+      assert.equal((await producer.read(selector)).state, 'pending');
+      continue;
+    }
+    const settled = await producer.settle(selector);
+    assert.equal(settled.state, 'settled', 'real admitted parent with no opened turn must settle');
+    if (settled.state !== 'settled') throw new Error('expected settled parent');
+    assert.equal(callbacks, 1, 'actual Gateway callback must execute once');
+    const controlInput = { scope: allocation.scope, agentRuntimeId: allocation.runtimeId, harnessExecutionEpoch: allocation.executionEpoch };
+    const control = await admission.gateway.readControl(controlInput);
+    assert.equal(control.state, 'complete');
+    if (control.state !== 'complete') throw new Error('control unknown');
+    assert.equal(control.operations.length, 1);
+    assert.equal(control.operations[0]!.status, 'cancelled');
+    assert.deepEqual(settled.fact.owners.parent, control.operationCommits[0], 'settlement must reference the current cancelled parent');
+    assert.ok(settled.fact.cut.journalSeq >= control.operationCommits[0]!.journalSeq);
+    assert.equal(closes, 1);
+    const coldAdmission = preparedStopAdmission(journal, preparedJournal, { settle: async () => { throw new Error('cold read must not cancel again'); } });
+    const cold = new PreparedExecutionStop({ journal, taskJournal: preparedJournal, admission: coldAdmission });
+    assert.deepEqual(await cold.settle(selector), settled);
+    const coldControl = await coldAdmission.gateway.readControl(controlInput);
+    assert.equal(coldControl.state, 'complete');
+    if (coldControl.state !== 'complete') throw new Error('cold control unknown');
+    assert.equal(coldControl.operations[0]!.status, 'cancelled');
+    assert.equal(callbacks, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
 
