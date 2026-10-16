@@ -159,6 +159,7 @@ export interface InteractionHelperReturnedFact {
 export interface InteractionHelperOwnerAcceptedFact {
   readonly kind: 'owner-accepted';
   readonly result: InteractionHelperResult;
+  readonly refinedResult: RawAsset;
   readonly acceptedBy: string;
   readonly acceptanceRef: string;
   readonly acceptedAt: string;
@@ -510,6 +511,7 @@ export function validateInteractionHelperHandoffFact(
       return;
     case 'owner-accepted':
       validateInteractionHelperResult(input.result);
+      assertRawAsset(input.refinedResult, input.result.organId, 'helper owner accepted refinedResult');
       assertNonEmptyString(input.acceptedBy, 'helper owner acceptedBy');
       assertNonEmptyString(input.acceptanceRef, 'helper owner acceptanceRef');
       assertValidTimestamp(input.acceptedAt, 'helper owner acceptedAt');

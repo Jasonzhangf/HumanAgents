@@ -32,6 +32,7 @@ import {
   acceptTasklessInteractionHelperResult,
   executeTasklessInteractionHelper,
   type InteractionHelperJournalPort,
+  type InteractionHelperJournalReadback,
   type TasklessHelperExecutionBinding,
   type TasklessHelperExecutionResult,
   type TasklessInteractionHelperAcceptance,
@@ -94,6 +95,17 @@ export interface InteractionSemanticCheckpointJournalPort {
     readonly organId: OrganId;
     readonly interactionScopeId: string;
   }): Promise<readonly InteractionSemanticCheckpointCommit[]>;
+}
+
+export interface InteractionHelperTurnReadbackEntry {
+  readonly identity: InteractionHelperIdentity;
+  readonly readback: InteractionHelperJournalReadback;
+}
+
+export interface InteractionHelperTurnReadPort {
+  readTurnHelpers(
+    turn: InteractionTurnIdentity,
+  ): Promise<readonly InteractionHelperTurnReadbackEntry[]>;
 }
 
 /** The bounded, dynamic role selection for one helper dispatch. */
@@ -208,6 +220,7 @@ export interface ExplicitTurnHelperSessionInput {
   readonly factory: ExplicitTurnHelperFactory;
   readonly checkpointJournal?: InteractionSemanticCheckpointJournalPort;
   readonly rawContent?: RawContentReadPort;
+  readonly turnHelperJournal?: InteractionHelperTurnReadPort;
 }
 
 function helperIdentityOf(assignment: InteractionHelperAssignment): InteractionHelperIdentity {
@@ -319,6 +332,7 @@ export class ExplicitTurnHelperSession {
   private readonly factory: ExplicitTurnHelperFactory;
   private readonly checkpointJournal: InteractionSemanticCheckpointJournalPort | undefined;
   private readonly rawContent: RawContentReadPort | undefined;
+  private readonly turnHelperJournal: InteractionHelperTurnReadPort | undefined;
   private readonly entries: InteractionLatestTurnEntry[];
   private readonly dispatched = new Map<string, DispatchedExplicitTurnHelper>();
   private sequence = 0;
@@ -335,6 +349,7 @@ export class ExplicitTurnHelperSession {
     this.factory = input.factory;
     this.checkpointJournal = input.checkpointJournal;
     this.rawContent = input.rawContent;
+    this.turnHelperJournal = input.turnHelperJournal;
     this.entries = [...input.latestTurn.entries];
   }
 
@@ -497,6 +512,7 @@ export class ExplicitTurnHelperSession {
       rawContent,
       entries: this.entries,
       dispatched: this.dispatched,
+      turnHelperJournal: this.turnHelperJournal,
     });
 
     const existing = await checkpointJournal.readSemanticCheckpointExact(this.identity);
@@ -535,6 +551,7 @@ async function buildExplicitTurnSemanticContent(input: {
   readonly rawContent: RawContentReadPort;
   readonly entries: readonly InteractionLatestTurnEntry[];
   readonly dispatched: ReadonlyMap<string, DispatchedExplicitTurnHelper>;
+  readonly turnHelperJournal?: InteractionHelperTurnReadPort;
 }): Promise<ExplicitTurnSemanticContent> {
   const { identity, finalParentOutput, outcome } = input;
   const claims: SemanticClaim[] = [];
@@ -569,6 +586,12 @@ async function buildExplicitTurnSemanticContent(input: {
     if (entry.kind !== 'helper-result') continue;
     helperIdentities.set(helperIdentityKey(entry.result), entry.result);
   }
+  if (input.turnHelperJournal !== undefined) {
+    const journalHelpers = await input.turnHelperJournal.readTurnHelpers(input.identity);
+    for (const helper of journalHelpers) {
+      helperIdentities.set(helperIdentityKey(helper.identity), helper.identity);
+    }
+  }
 
   let ownerAcceptedCount = 0;
   const orderedKeys = [...helperIdentities.keys()].sort();
@@ -585,28 +608,34 @@ async function buildExplicitTurnSemanticContent(input: {
       { readonly kind: 'helper-result' }
     > => entry.kind === 'helper-result' && sameHelperIdentity(entry.result, helper));
     if (readback.ownerAccepted !== null) {
-      if (acceptedEntry === undefined) {
-        throw new ContractError(
-          `owner-accepted helper ${helper.helperCallId} has no refined result entry in this turn`,
-        );
+      const refinedResult = acceptedEntry?.refinedResult ?? readback.ownerAccepted.fact.refinedResult;
+      if (acceptedEntry !== undefined) {
+        if (canonicalJsonStringify(acceptedEntry.refinedResult) !== canonicalJsonStringify(readback.ownerAccepted.fact.refinedResult)) {
+          throw new ContractError(
+            `owner-accepted helper ${helper.helperCallId} in-memory refined result conflicts with durable acceptance`,
+          );
+        }
       }
       const refinedText = decodeUtf8(await input.rawContent.read({
-        scope: acceptedEntry.refinedResult.ref.scope,
-        content: acceptedEntry.refinedResult,
+        scope: refinedResult.ref.scope,
+        content: refinedResult,
       }));
       claims.push({
-        fact: `what-done(owner-accepted): [${acceptedEntry.result.agentId}:${acceptedEntry.result.helperCallId}:${acceptedEntry.result.status}] ${refinedText}`,
+        fact: `what-done(owner-accepted): [${readback.ownerAccepted.fact.result.agentId}:${readback.ownerAccepted.fact.result.helperCallId}:${readback.ownerAccepted.fact.result.status}] ${refinedText}`,
         certainty: 'confirmed',
         sourceRefs: dedupeStrings([
           readback.ownerAccepted.commit.commitId,
           readback.ownerAccepted.fact.acceptanceRef,
-          acceptedEntry.refinedResult.ref.locator,
-          ...acceptedEntry.result.outputRefs,
+          refinedResult.ref.locator,
+          ...readback.ownerAccepted.fact.result.outputRefs,
         ]),
       });
       ownerAcceptedCount += 1;
-      semanticAssetRefs.push(acceptedEntry.refinedResult.ref);
-      evidenceRefs.push(...acceptedEntry.result.evidenceRefs, ...readback.ownerAccepted.fact.evidenceRefs);
+      semanticAssetRefs.push(refinedResult.ref);
+      evidenceRefs.push(
+        ...readback.ownerAccepted.fact.result.evidenceRefs,
+        ...readback.ownerAccepted.fact.evidenceRefs,
+      );
       continue;
     }
     // Returned but not owner-accepted: keep the partial attribution and never

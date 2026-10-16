@@ -259,6 +259,7 @@ export async function acceptTasklessInteractionHelperResult(
   const ownerAcceptedCommit = await input.journal.appendOwnerAccepted({
     kind: 'owner-accepted',
     result: durableReturned.fact.result,
+    refinedResult: input.refinedResult,
     acceptedBy: input.acceptedBy,
     acceptanceRef: input.acceptanceRef,
     acceptedAt: input.acceptedAt,
