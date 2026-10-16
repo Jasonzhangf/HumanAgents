@@ -2741,7 +2741,8 @@ export class RuntimeTaskCoordinator {
     // finish as a success with no delivered body. The orchestrated lane keeps
     // its existing WorkResult delivery binding (`bindAssignmentDelivery`).
     if (!operation.orchestrated && advance.state === 'terminal' && advance.decision === 'complete') {
-      await this.commitStandardTurnDelivery(record, operation, scope, standardTurn);
+      await this.commitStandardTurnDelivery(record, operation, scope, standardTurn,
+        input.expectedExecutionEpoch);
     }
     await this.applyStandardTurnAdvance(record, operation, scope, advance);
     if (advance.state === 'advancing') await this.startNextStandardTurn(record, operation, advance);
@@ -2771,6 +2772,7 @@ export class RuntimeTaskCoordinator {
     operation: OperationRecord,
     scope: ScopeRef,
     standardTurn: NonNullable<RuntimeExecutionDriver['standardTurn']>,
+    expectedExecutionEpoch: number,
   ): Promise<void> {
     if (standardTurn.readDelivery === undefined) {
       throw new RuntimeTaskControlError('standard-turn-delivery.unavailable', RUNTIME_OWNER,
@@ -2802,7 +2804,7 @@ export class RuntimeTaskCoordinator {
     }
     const endCall = material.acceptedEndCall.envelope.fact;
     if (endCall.kind !== 'tool-call'
-      || material.acceptedEndCall.envelope.execution.executionEpoch !== operation.executionEpoch
+      || material.acceptedEndCall.envelope.execution.executionEpoch !== expectedExecutionEpoch
       || material.acceptedEndCall.envelope.request.requestId.length === 0
       || canonicalJsonStringify(material.acceptedEndCall.envelope.scope) !== canonicalJsonStringify(scope)) {
       throw new RuntimeTaskControlError('standard-turn-delivery.source-conflict', RUNTIME_OWNER,
@@ -2827,7 +2829,7 @@ export class RuntimeTaskCoordinator {
         'the accepted delivery scope carries no cycle identity',
         'resolve the execution cycle before accepting a terminal complete turn');
     }
-    const binding = this.publicOutputSelection(scope, operation.executionEpoch);
+    const binding = this.publicOutputSelection(scope, expectedExecutionEpoch);
     const candidate: PublicOutputCandidate = {
       binding,
       sourceId: `standard-turn-delivery:${material.acceptedEndCall.envelope.request.requestId}:${endCall.call.callId}`,
@@ -5076,13 +5078,13 @@ export class RuntimeTaskCoordinator {
     return { scope, executionEpoch };
   }
 
-  private async hydratePublicOutput(task: TaskRecord, scope: ScopeRef): Promise<void> {
+  private async hydratePublicOutput(task: TaskRecord, scope: ScopeRef, checkpointEpoch?: number): Promise<void> {
     const storeFor = this.options.publicOutputStoreFor;
     if (storeFor === undefined || !scope.cycleId) return;
-    // Public output binds to the original operation/assignment identity, not to
-    // the physical successor epoch projected on the task.
+    // Keep the original business scope. A validated current-operation checkpoint
+    // selects its physical epoch; otherwise retain the typed allocation binding.
     const operation = task.operationId === undefined ? undefined : this.operations.get(task.operationId.value);
-    const executionEpoch = operation?.executionEpoch;
+    const executionEpoch = checkpointEpoch ?? operation?.executionEpoch;
     if (executionEpoch === undefined) {
       task.publicOutput = this.unknownPublicOutput(task.publicOutput);
       return;
@@ -5610,7 +5612,6 @@ export class RuntimeTaskCoordinator {
         this.markRecoveryRequired(task);
         continue;
       }
-      await this.hydratePublicOutput(task, scope);
       try {
         const store = this.options.checkpointStoreFor(task.taskId, scope.cycleId);
         const businessScope: ScopeRef = {
@@ -5620,6 +5621,7 @@ export class RuntimeTaskCoordinator {
         };
         const latest = await store.readLatest(scope) ?? await store.readLatest(businessScope);
         if (!latest || !sameCheckpointBusinessScope(scope, latest.checkpoint.scope)) {
+          await this.hydratePublicOutput(task, scope);
           this.markRecoveryRequired(task);
           continue;
         }
@@ -5643,9 +5645,13 @@ export class RuntimeTaskCoordinator {
           : (await readDurableCheckpointReceipt(store, exactRecord)) ?? undefined;
         // The committed checkpoint is the authoritative physical position for
         // this operation. Adopt its epoch before any later task snapshot read.
-        if (checkpoint.scope.operationId && sameId(checkpoint.scope.operationId, task.operationId)) {
+        const currentOperationCheckpoint = checkpoint.scope.operationId !== undefined
+          && sameId(checkpoint.scope.operationId, task.operationId);
+        if (currentOperationCheckpoint) {
           task.executionEpoch = checkpoint.executionEpoch;
         }
+        await this.hydratePublicOutput(task, scope,
+          currentOperationCheckpoint ? checkpoint.executionEpoch : undefined);
         if (task.error?.code === 'execution.context-commit-hook.blocked') {
           this.markCommittedCheckpointRecovery(task, task.error.nextAction);
           continue;
