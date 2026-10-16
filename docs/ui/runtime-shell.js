@@ -12,6 +12,7 @@ import {
 } from './runtime-api.js'
 import {
   createDisplayPreferenceController,
+  DISPLAY_ORIGINS,
   DISPLAY_MODES,
   DISPLAY_PREFERENCE_MODES,
 } from './display-preferences.js'
@@ -152,6 +153,26 @@ export const RUNTIME_READ_MODES = Object.freeze(['fake', 'rcc'])
 
 function taskIdValue(taskId) {
   return taskId && typeof taskId === 'object' ? taskId.value : taskId
+}
+
+const TASK_RECORD_REF_KEYS = Object.freeze([
+  'projectKey',
+  'mode',
+  'source',
+  'ordinal',
+  'operationId',
+  'executionEpoch',
+  'checkpointId',
+])
+
+/**
+ * Exact stored-record identity shared by the scoped pagination check and the
+ * raw renderer.
+ */
+export function sameStoredRecordRef(left, right) {
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  return TASK_RECORD_REF_KEYS.every((key) => left[key] === right[key])
+    && taskIdValue(left.taskId) === taskIdValue(right.taskId)
 }
 
 export function readScopeLabel(scope) {
@@ -633,12 +654,23 @@ export function renderTaskRecords(projection, options = {}) {
   section.append(element('p', `范围：${readScopeLabel(projection.scope)}`, 'muted'))
   const list = element('div', undefined, 'record-list')
   if (options.view === 'raw') {
+    let selectionMarked = false
     for (const record of projection.raw || []) {
-      const item = element('article', undefined, 'record-item')
+      const selected = !selectionMarked && sameStoredRecordRef(record.ref, options.selectedRef)
+      if (selected) selectionMarked = true
+      const item = element('article', undefined, selected ? 'record-item record-item--selected' : 'record-item')
       item.dataset.source = record.ref.source
       item.dataset.ordinal = String(record.ref.ordinal)
+      if (selected) {
+        item.dataset.recordSelected = 'true'
+        item.setAttribute('aria-current', 'true')
+        item.tabIndex = -1
+      }
       item.append(
         element('p', `${record.ref.source} · ordinal=${record.ref.ordinal} · ${record.body?.kind || 'unknown'}`, 'record-kind'),
+      )
+      if (selected) item.append(element('p', '正在查看这条记录', 'record-selected-tag'))
+      item.append(
         element('time', formatTime(record.occurredAt), 'record-time'),
         element('pre', JSON.stringify(record.body, null, 2), 'record-body'),
       )
@@ -658,7 +690,7 @@ export function renderTaskRecords(projection, options = {}) {
       if (action.rawRef && options.onRawRef) {
         const raw = element('button', '查看这条原始记录', 'button button--quiet')
         raw.type = 'button'
-        raw.addEventListener('click', () => options.onRawRef(action.rawRef))
+        raw.addEventListener('click', (event) => options.onRawRef(action.rawRef, event.currentTarget))
         item.append(raw)
       }
       list.append(item)
@@ -1667,6 +1699,14 @@ export function mountShellLayer(context = {}) {
     await displayController.selectMode(mode)
   }
 
+  // Page-owned navigation uses the existing controller instead of replacing a
+  // page host directly. The origin stays programmatic, so no manual preference
+  // write is triggered by an in-page reference jump.
+  function applyDisplayMode(mode) {
+    if (!displayController) return Promise.resolve({ ok: false, failure: displayMountFailure() })
+    return displayController.applyMode(mode, { origin: DISPLAY_ORIGINS.programmatic })
+  }
+
   async function saveDisplayDefault() {
     if (!displayController) return
     const state = displayController.getState()
@@ -1790,7 +1830,7 @@ export function mountShellLayer(context = {}) {
     currentContext = { ...currentContext, capabilities }
   }
 
-  return { open, setScope, setCapabilities, initializeDisplayPreference, disposeDisplayPreference }
+  return { open, setScope, setCapabilities, applyDisplayMode, initializeDisplayPreference, disposeDisplayPreference }
 }
 
 export function makePageShell(active, eyebrow, title, lede, options = {}) {
@@ -1834,6 +1874,7 @@ export function makePageShell(active, eyebrow, title, lede, options = {}) {
     openShellSection: shellLayer.open,
     setShellScope: shellLayer.setScope,
     setShellCapabilities: shellLayer.setCapabilities,
+    applyDisplayMode: shellLayer.applyDisplayMode,
     initializeDisplayPreference: shellLayer.initializeDisplayPreference,
     disposeDisplayPreference: shellLayer.disposeDisplayPreference,
   }

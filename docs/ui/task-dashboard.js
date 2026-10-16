@@ -18,6 +18,7 @@ import {
   renderPageError,
   renderRuntimeStatus,
   renderTaskRecords,
+  sameStoredRecordRef,
   stateTone,
   taskDetailHref,
   taskIdFromQuery,
@@ -203,6 +204,7 @@ function evidenceTrigger(ref) {
 const {
   main,
   status,
+  applyDisplayMode,
   initializeDisplayPreference,
   disposeDisplayPreference,
 } = makePageShell(
@@ -289,10 +291,18 @@ const inspectionComparisonRead = createScopedReadPublication((scope) => api.task
 }))
 
 function leaveRecords() {
+  recordsNavigationVersion += 1
   void recordsRead.refresh({ kind: 'closed' })
 }
 
 const displayModeHosts = new Map()
+let recordsNavigationVersion = 0
+
+// One-level source return for the raw reference jump. The actions host stays
+// retained while raw is shown, so returning reuses its confirmed page and the
+// exact trigger the user left.
+let pendingRawRecordRef = null
+let rawActionsReturn = null
 
 function mountDisplayModeHost(mode) {
   const host = element('section', undefined, 'display-mode-host')
@@ -319,6 +329,9 @@ function staleReadFailure() {
 }
 
 async function applyTaskDisplayMode({ mode, origin }) {
+  const navigationVersion = ++recordsNavigationVersion
+  if (mode !== 'raw' || origin !== 'programmatic') pendingRawRecordRef = null
+  if (origin !== 'programmatic' || mode === 'current' || mode === 'semantic') rawActionsReturn = null
   if (mode === 'current') {
     if (!dashboard) return { ok: false, failure: currentUnavailableFailure() }
     if (dashboardStale) return { ok: false, failure: staleReadFailure() }
@@ -374,11 +387,33 @@ async function applyTaskDisplayMode({ mode, origin }) {
   }
   const host = displayModeHosts.get(mode) || mountDisplayModeHost(mode)
   displayModeHosts.set(mode, host)
-  const receipt = await loadRecords(mode, host)
-  if (!receipt.ok) return receipt
+  // Returning from a raw reference jump is a view switch over the confirmed
+  // actions host, not a new read, so the page the user left stays intact.
+  if (mode === 'actions' && origin === 'programmatic'
+    && rawActionsReturn && host.dataset.recordsState === 'confirmed') {
+    displayMode = 'actions'
+    renderRecordsView('actions', host)
+    updatePlanViewUrl({ display: 'actions', selection: null })
+    return { ok: true, mode: 'actions' }
+  }
+  const selectedRef = mode === 'raw' ? pendingRawRecordRef : undefined
+  const receipt = await loadRecords(mode, host, { selectedRef, navigationVersion })
+  if (navigationVersion !== recordsNavigationVersion) return { ok: false, superseded: true }
+  if (!receipt.ok) {
+    pendingRawRecordRef = null
+    return receipt
+  }
   displayMode = mode
   renderRecordsView(mode, host)
-  if (origin === 'manual') updatePlanViewUrl({ display: mode, selection: null })
+  if (mode === 'raw' && selectedRef) {
+    const selected = host.querySelector('[data-record-selected="true"]')
+    selected?.focus({ preventScroll: true })
+    selected?.scrollIntoView({ block: 'start', behavior: 'instant' })
+  }
+  if (mode === 'raw') pendingRawRecordRef = null
+  if (origin === 'manual' || origin === 'programmatic') {
+    updatePlanViewUrl({ display: mode, selection: null })
+  }
   return { ok: true, mode }
 }
 
@@ -411,8 +446,40 @@ function renderRecordsView(mode, host) {
   )
   heading.append(copy, status, refreshButton)
   const section = element('section', undefined, 'section')
+  if (mode === 'raw' && rawActionsReturn) {
+    const back = element('button', '返回动作轨迹', 'button button--quiet')
+    back.type = 'button'
+    back.dataset.recordsReturn = 'actions'
+    back.addEventListener('click', () => void returnToActionsSource())
+    section.append(back)
+  }
   section.append(host)
   main.append(heading, section)
+}
+
+async function openRawRecord(ref, trigger) {
+  const sourceHost = displayModeHosts.get('actions')
+  sourceHost?.querySelector('[data-records-navigation-failure]')?.remove()
+  pendingRawRecordRef = ref
+  rawActionsReturn = { trigger: trigger?.focus ? trigger : null }
+  const result = await applyDisplayMode('raw')
+  if (!result?.ok && !result?.superseded) {
+    rawActionsReturn = null
+    if (sourceHost?.isConnected) {
+      const notice = element('div', undefined, 'records-navigation-failure')
+      notice.dataset.recordsNavigationFailure = 'true'
+      notice.setAttribute('role', 'alert')
+      renderPageError(notice, result.failure)
+      sourceHost.prepend(notice)
+    }
+  }
+}
+
+async function returnToActionsSource() {
+  if (!rawActionsReturn) return
+  const result = await applyDisplayMode('actions')
+  if (result?.ok && rawActionsReturn?.trigger?.isConnected) rawActionsReturn.trigger.focus()
+  if (result?.ok) rawActionsReturn = null
 }
 
 /**
@@ -447,28 +514,28 @@ function renderActiveReadingMode() {
 }
 
 function recordsContentHasRef(content, selectedRef) {
-  return (content?.raw || []).some((record) => (
-    ['projectKey', 'mode', 'source', 'ordinal', 'operationId', 'executionEpoch', 'checkpointId']
-      .every((key) => record.ref[key] === selectedRef[key])
-    && record.ref.taskId.value === selectedRef.taskId.value
-  ))
+  return (content?.raw || []).some((record) => sameStoredRecordRef(record.ref, selectedRef))
 }
 
-async function readRecordsUntilRef(view, cursor, selectedRef) {
+async function readRecordsUntilRef(view, cursor, selectedRef, navigationVersion) {
   let read = await recordsRead.refresh({
     ...explicitScope,
     view,
     ...(cursor ? { cursor } : {}),
   })
+  if (navigationVersion !== recordsNavigationVersion) return { published: false }
   while (selectedRef && read.published && read.state?.content && !recordsContentHasRef(read.state.content, selectedRef)) {
+    if (read.state.stale || read.state.failure) break
     if (!read.state.content.hasMore || !read.state.content.nextCursor) break
     read = await recordsRead.refresh({
       ...explicitScope,
       view,
       cursor: read.state.content.nextCursor,
     })
+    if (navigationVersion !== recordsNavigationVersion) return { published: false }
   }
-  if (selectedRef && read.published && read.state?.content && !recordsContentHasRef(read.state.content, selectedRef)) {
+  if (selectedRef && read.published && !read.state?.stale && !read.state?.failure
+    && read.state?.content && !recordsContentHasRef(read.state.content, selectedRef)) {
     return {
       published: true,
       reason: 'read-failed',
@@ -487,7 +554,7 @@ async function readRecordsUntilRef(view, cursor, selectedRef) {
   return read
 }
 
-async function loadRecords(view, host, { cursor, selectedRef } = {}) {
+async function loadRecords(view, host, { cursor, selectedRef, navigationVersion = recordsNavigationVersion } = {}) {
   if (!explicitScope) {
     return {
       ok: false,
@@ -500,11 +567,12 @@ async function loadRecords(view, host, { cursor, selectedRef } = {}) {
     }
   }
   const receipt = await commitScopedReadTransition({
-    read: () => readRecordsUntilRef(view, cursor, selectedRef),
+    read: () => readRecordsUntilRef(view, cursor, selectedRef, navigationVersion),
     build: (content) => renderTaskRecords(content, {
       view,
+      ...(selectedRef ? { selectedRef } : {}),
       onNext: (nextCursor) => void loadRecords(view, host, { cursor: nextCursor }),
-      onRawRef: (ref) => void loadRecords('raw', host, { selectedRef: ref }),
+      onRawRef: (ref, trigger) => void openRawRecord(ref, trigger),
     }),
     commit: (staged) => {
       clearNode(host)
@@ -1610,8 +1678,16 @@ function renderDashboard() {
   clearNode(main)
 
   const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
-  copy.append(element('p', '当前任务', 'eyebrow'), element('h1', dashboard.taskTitle))
+  const copy = element('div', undefined, 'page-heading-copy')
+  const titleBlock = element('div', undefined, 'task-title-block')
+  titleBlock.append(element('h1', dashboard.taskTitle, 'task-title'))
+  const fullTitle = element('details', undefined, 'task-title-full')
+  fullTitle.append(
+    element('summary', '查看完整标题'),
+    element('p', dashboard.taskTitle, 'task-title-full-text'),
+  )
+  titleBlock.append(fullTitle)
+  copy.append(element('p', '当前任务', 'eyebrow'), titleBlock)
   const stateChip = element('span', businessStateLabel(), 'state-chip')
   stateChip.dataset.tone = stateTone(dashboard.state)
   copy.append(stateChip)

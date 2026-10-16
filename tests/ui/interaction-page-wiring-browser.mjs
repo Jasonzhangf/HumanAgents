@@ -16,6 +16,8 @@
  * no fabricated Operation, queued label, no page error) plus the shared
  * evidence/assertion/cleanup path, so the accepted public consumer can be
  * selected without the obsolete full-page fixtures.
+ * `--raw-focus-title-only` selects the bounded raw-reference/title fixture at
+ * desktop and mobile sizes. It uses controlled API projections, no live Task.
  *
  * Set INTERACTION_PAGE_EVIDENCE to the execution-owned evidence root and
  * INTERACTION_PAGE_UI_ROOT (optional) to a directory whose layout mirrors
@@ -37,6 +39,7 @@ if (!evidenceRoot?.trim()) {
 
 const taskIdentityOnly = process.argv.includes('--task-identity-only');
 const checkpointAssetsOnly = process.argv.includes('--checkpoint-assets-only');
+const rawFocusTitleOnly = process.argv.includes('--raw-focus-title-only');
 
 const playwrightModule = await import(
   process.env.INTERACTION_CARD_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js',
@@ -195,7 +198,7 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
 
-  for (const target of (taskIdentityOnly || checkpointAssetsOnly ? [] : [
+  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly ? [] : [
     { file: 'dashboard.html', entry: 'dashboard' },
     { file: 'task.html', query: '?task=new', entry: 'task' },
     { file: 'index.html', entry: 'entry' },
@@ -248,7 +251,7 @@ try {
   // card's technical source reference with no invented Operation, so an admitted
   // Task is not mislabelled as a running execution and no `pending-input` scope
   // is minted.
-  if (!checkpointAssetsOnly) {
+  if (!checkpointAssetsOnly && !rawFocusTitleOnly) {
   const TASK_WIRING_ID = 'task-wiring-proof';
   const taskPage = await context.newPage();
   const taskPageErrors = [];
@@ -322,7 +325,7 @@ try {
   await taskPage.close();
   }
 
-  if (!taskIdentityOnly && !checkpointAssetsOnly) {
+  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly) {
   // GAP B proof: the bounded original cause the runtime reports must reach the
   // human, not just a status code. The runtime stub answers the real
   // explicit-interaction read with a 500 body shaped exactly like the one
@@ -713,6 +716,152 @@ try {
       await writeFile(join(evidenceRoot, 'requests.json'), JSON.stringify(requests, null, 2), 'utf8');
       observe('checkpoint fixture stage', stage);
       await fixturePage.close();
+    }
+  }
+  if (rawFocusTitleOnly) {
+    // Observed RED: raw137 was 46225px below the viewport, with actions URL
+    // and no selection; the title exceeded 900px. These two small fixtures
+    // cover evidence identity/navigation and both layouts without live writes.
+    const scope = { kind: 'task', projectKey: 'raw-focus-fixture', mode: 'fake', taskId: { scope: 'task', value: 'raw-focus-title' } };
+    const title = '原始需求标题，保留全文与换行。\n' + '读取并核对任务执行记录，不改变任务内容。'.repeat(100);
+    const targetRef = { projectKey: scope.projectKey, mode: scope.mode, taskId: scope.taskId,
+      source: 'task-journal', ordinal: 137, operationId: 'operation-target', executionEpoch: 2 };
+    const rawRecord = (ref, body = 'record') => ({ ref, occurredAt: '2026-10-16T00:00:00Z', body: { kind: 'fixture', text: body } });
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+      const fixturePage = await context.newPage();
+      await fixturePage.setViewportSize(viewport);
+      const errors = [];
+      const requests = [];
+      let behavior = 'found';
+      let releaseRead;
+      let signalHeld;
+      let heldStarted;
+      const label = `${viewport.width}px`;
+      fixturePage.on('pageerror', (error) => errors.push(error.message));
+      await fixturePage.route('**/api/**', async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        const query = Object.fromEntries(url.searchParams);
+        requests.push({ method: request.method(), path: url.pathname, query });
+        let body;
+        let status = 200;
+        if (url.pathname === '/api/runtime/status') body = { state: 'ready', mode: 'fake', connected: true };
+        if (url.pathname === '/api/ui/display-preference') body = { preference: { mode: 'follow-last', lastManual: 'current' }, defaultMode: 'current' };
+        if (url.pathname.endsWith('/dashboard')) body = {
+          taskId: scope.taskId, taskTitle: title, state: 'waiting', stateLabel: '等待中',
+          statusSections: { business: '等待中', waiting: '无待收拢操作' }, allowedActions: [], recentEvents: [],
+        };
+        if (url.pathname.endsWith('/records')) {
+          const cursor = query.cursor;
+          if (query.view === 'actions') body = { scope, actions: [{ entry: { seq: cursor ? 135 : 1, kind: 'fixture', summary: cursor ? '来源动作页' : '第一页' }, rawRef: targetRef }], hasMore: !cursor, nextCursor: cursor ? undefined : 'actions-page-2' };
+          else {
+            if (behavior === 'held' && !cursor) {
+              await new Promise((done) => { releaseRead = done; signalHeld(); });
+            }
+            if (behavior === 'failed') {
+              status = 503;
+              body = { error: { code: 'fixture.read-failed', message: '原始记录读取失败', ownerId: 'test', nextAction: '重试读取' } };
+            } else {
+              const raw = !cursor ? [rawRecord({ ...targetRef, ordinal: 1 })]
+                : cursor === 'raw-page-2' ? [rawRecord({ ...targetRef, ordinal: 101 })]
+                : [rawRecord({ ...targetRef, source: 'operation-journal' }), rawRecord({ ...targetRef, operationId: 'other-operation' }),
+                  ...Array.from({ length: 8 }, (_, index) => rawRecord({ ...targetRef, ordinal: 120 + index }, 'long record\n'.repeat(150))),
+                  ...(behavior === 'missing' ? [] : [rawRecord(targetRef, 'EXACT TARGET')])];
+              body = { scope, raw, hasMore: cursor !== 'raw-page-3', nextCursor: !cursor ? 'raw-page-2' : cursor === 'raw-page-2' ? 'raw-page-3' : undefined };
+            }
+          }
+        }
+        await route.fulfill({ status: body ? status : 404, contentType: 'application/json', body: JSON.stringify(body ?? { error: { code: 'fixture.unexpected', message: url.pathname } }) });
+      });
+      const settle = () => fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      const selectMode = async (mode) => {
+        await fixturePage.locator('button[data-shell-section="view"]').click();
+        const manualSave = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === '/api/ui/display-preference' && response.request().method() === 'PUT');
+        await fixturePage.locator(`button[data-display-mode="${mode}"]`).click();
+        await fixturePage.locator(`button[data-display-mode="${mode}"][aria-pressed="true"]`).waitFor();
+        await manualSave;
+        await fixturePage.locator('.shell-layer-close:visible').click();
+      };
+      const source = fixturePage.getByRole('button', { name: '查看这条原始记录', exact: true });
+      try {
+        const preferenceRead = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === '/api/ui/display-preference');
+        await fixturePage.goto(`${server.url}/task-dashboard.html?${new URLSearchParams({ task: scope.taskId.value, projectKey: scope.projectKey, mode: scope.mode, display: 'current' })}`);
+        await preferenceRead;
+        await fixturePage.locator('main h1').waitFor();
+        const layout = () => fixturePage.locator('main h1').evaluate((node) => ({
+          text: node.textContent, height: node.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(node).lineHeight),
+          fits: document.documentElement.scrollWidth <= innerWidth,
+        }));
+        const folded = await layout();
+        record(`${label} title preserves text and clamps to three lines`, folded.text === title && folded.height <= folded.lineHeight * 3 + 1 && folded.fits, folded);
+        if (await fixturePage.getByText('查看完整标题', { exact: true }).count()) {
+          await fixturePage.getByText('查看完整标题', { exact: true }).click();
+          const full = await fixturePage.locator('.task-title-full-text').evaluate((node) => ({ text: node.textContent, size: parseFloat(getComputedStyle(node).fontSize), visible: node.getBoundingClientRect().height > 0 }));
+          record(`${label} native details exposes exact full title in body size`, full.text === title && full.size <= 18 && full.visible, full);
+          await fixturePage.getByText('查看完整标题', { exact: true }).click();
+          record(`${label} title folds again`, (await layout()).height <= folded.lineHeight * 3 + 1);
+        } else record(`${label} native full-title details exists`, false);
+        await selectMode('actions');
+        await fixturePage.getByRole('button', { name: '继续读取下一页', exact: true }).click();
+        await fixturePage.getByText('来源动作页', { exact: true }).waitFor();
+        await source.evaluate((node) => { window.__rawSource = node; });
+        const writesBefore = requests.filter((request) => request.method !== 'GET').length;
+        const actionsReads = () => requests.filter((request) => request.query.view === 'actions').length;
+        const readsBefore = actionsReads();
+        await source.click();
+        await fixturePage.locator('[data-record-selected="true"]').waitFor({ timeout: 5000 }).catch(() => {});
+        const selected = await fixturePage.evaluate(() => {
+          const nodes = [...document.querySelectorAll('[data-record-selected="true"]')];
+          const node = nodes[0];
+          const rect = node?.getBoundingClientRect();
+          return { count: nodes.length, text: node?.textContent, current: node?.getAttribute('aria-current'), focused: document.activeElement === node,
+            top: rect?.top, visible: rect?.top >= 0 && rect.top < innerHeight,
+            headings: [...document.querySelectorAll('main h1, main h2')].map((item) => item.textContent), display: new URL(location.href).searchParams.get('display') };
+        });
+        record(`${label} exact raw137 uniquely selected, focused and visible with synced mode`, selected.count === 1 && selected.text.includes('EXACT TARGET') && selected.current === 'true' && selected.focused && selected.visible && selected.display === 'raw' && selected.headings.every((heading) => heading === '原始记录'), selected);
+        // A baseline can fail both independent defects in this same run.
+        // Return/error/race assertions require the corrected raw navigation.
+        if (selected.count !== 1 || selected.display !== 'raw') continue;
+        await fixturePage.locator('button[data-shell-section="view"]').click();
+        record(`${label} chooser agrees with raw URL and headings`, await fixturePage.locator('[data-display-mode="raw"][aria-pressed="true"]').count() === 1);
+        await fixturePage.locator('.shell-layer-close:visible').click();
+        await fixturePage.screenshot({ path: join(artifactDir, `raw-focus-${viewport.width}.png`) });
+        await fixturePage.getByRole('button', { name: '返回动作轨迹', exact: true }).click();
+        const returned = await fixturePage.evaluate(() => ({ same: window.__rawSource === document.activeElement, connected: window.__rawSource.isConnected, display: new URL(location.href).searchParams.get('display') }));
+        record(`${label} return preserves action page and trigger without reread or preference write`, returned.same && returned.connected && returned.display === 'actions' && actionsReads() === readsBefore && requests.filter((request) => request.method !== 'GET').length === writesBefore, returned);
+        for (const failure of ['missing', 'failed']) {
+          behavior = failure;
+          await source.click();
+          const notice = fixturePage.locator('[data-records-navigation-failure]');
+          await notice.waitFor();
+          record(`${label} ${failure} shows a recoverable read failure`, await notice.isVisible());
+          await notice.getByRole('button', { name: '技术详情', exact: true }).click();
+          await fixturePage.getByText(failure === 'missing' ? '所选原始记录不在返回的记录页中。' : '原始记录读取失败', { exact: true }).first().waitFor();
+          record(`${label} ${failure} keeps confirmed actions and URL with visible failure`, new URL(fixturePage.url()).searchParams.get('display') === 'actions' && await fixturePage.getByText('来源动作页', { exact: true }).count() === 1);
+          await fixturePage.locator('.shell-layer-close:visible').click();
+        }
+        behavior = 'held';
+        heldStarted = new Promise((done) => { signalHeld = done; });
+        await source.click();
+        await heldStarted;
+        await selectMode('current');
+        const rawRequests = requests.filter((request) => request.query.view === 'raw').length;
+        const lateResponse = fixturePage.waitForResponse((response) => new URL(response.url()).searchParams.get('view') === 'raw');
+        releaseRead();
+        await (await lateResponse).finished();
+        await settle();
+        record(`${label} late raw read cannot paginate or overwrite current`, new URL(fixturePage.url()).searchParams.get('display') === 'current' && await fixturePage.locator('main h1').textContent() === title && requests.filter((request) => request.query.view === 'raw').length === rawRequests);
+        record(`${label} record reads preserve scope and never mutate Task`, requests.filter((request) => request.path.endsWith('/records')).every((request) => request.method === 'GET' && request.query.projectKey === scope.projectKey && request.query.mode === scope.mode)
+          && requests.filter((request) => request.method !== 'GET').every((request) => request.path === '/api/ui/display-preference'));
+        record(`${label} no page error`, errors.length === 0, errors);
+      } catch (error) {
+        record(`${label} raw/title fixture completed`, false, { message: error.message, errors });
+        await fixturePage.screenshot({ path: join(artifactDir, `raw-title-failure-${viewport.width}.png`) });
+      } finally {
+        releaseRead?.();
+        observe(`${label} requests`, requests);
+        await fixturePage.close();
+      }
     }
   }
   await context.close();

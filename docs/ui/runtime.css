@@ -122,6 +122,46 @@ a {
   margin-bottom: 28px;
 }
 
+.page-heading-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.task-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.task-title-full {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.task-title-full summary {
+  cursor: pointer;
+}
+
+.task-title-full-text {
+  font-size: 16px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.record-item--selected {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+  scroll-margin-top: 24px;
+}
+
+.record-selected-tag {
+  font-weight: 700;
+  color: var(--accent);
+}
+
 .eyebrow {
   margin: 0 0 6px;
   color: var(--muted);
