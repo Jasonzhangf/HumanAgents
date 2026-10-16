@@ -15,6 +15,7 @@ import {
   type InteractionHelperResultFields,
   type InteractionDecision,
   type ProviderBinding,
+  type ProviderCloseResult,
   type ProviderSettlement,
   type RequirementIntent,
 } from '../../contracts/src/index.js';
@@ -396,15 +397,39 @@ export function createProviderExplicitBrainInterpreter(input: {
     readonly owner: InteractionParentTurnRawOwner;
     readonly helpers: ExplicitTurnHelperSession;
     owned: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> | undefined;
+    /**
+     * The original physical close receipt, retained across same-process retries
+     * so a Journal ack-loss after a real close never triggers a second physical
+     * close of the same original owner.
+     */
+    closed?:
+      | {
+          readonly composition: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>;
+          readonly receipt: ProviderCloseResult;
+        }
+      | undefined;
   } | undefined;
   const finish = async (live: NonNullable<typeof retained>, request: ExplicitBrainInterpretationInput) => {
     const finalParentOutput = await live.owner.readFinalTurnOutput();
     const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
     if (live.owned !== undefined) {
-      await closeAgentProvider(live.owned);
+      const receipt = await closeAgentProvider(live.owned, { returnReceipt: true });
+      live.closed = { composition: live.owned, receipt };
       live.owned = undefined;
     }
-    await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+    if (live.closed !== undefined) {
+      // Durable, idempotent commit of the real receipt. A retry after a lost
+      // acknowledgement reuses the retained receipt instead of closing again.
+      await live.owner.recordProviderClose({
+        providerBinding: live.closed.composition.binding,
+        result: live.closed.receipt,
+        closedAt: input.clock.now(),
+      });
+    }
+    const checkpointOutput = live.closed === undefined
+      ? finalParentOutput
+      : await live.owner.readClosedTurnOutput();
+    await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput: checkpointOutput, outcome: interpretation });
     retained = undefined;
     return interpretation;
   };
@@ -439,7 +464,13 @@ export function createProviderExplicitBrainInterpreter(input: {
       };
       const priorCheckpoints = await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
       const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
+      // One selected binding for the whole turn: the raw owner freezes it, and
+      // the driver uses the same value. A borrowed provider keeps its existing
+      // non-closing ownership; only the original owner records a close fact.
+      const turnProviderBinding = owned === undefined ? input.binding : owned.binding;
       let driver: ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef> | undefined;
+      let owner: InteractionParentTurnRawOwner | undefined;
+      let committedInput = false;
       let submitted = false;
       let settleAttempted = false;
       let interpretation: ExplicitBrainInterpretation;
@@ -452,11 +483,14 @@ export function createProviderExplicitBrainInterpreter(input: {
           ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(request) }),
           view: { kind: 'utf8-text' as const },
         };
-        const owner = createInteractionParentTurnRawOwner({
-          turn, execution, scope, initialInput, journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
+        const createdOwner = createInteractionParentTurnRawOwner({
+          turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
+          journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
           instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()) }),
         });
-        await owner.openTurnInput();
+        owner = createdOwner;
+        await createdOwner.openTurnInput();
+        committedInput = true;
         const helpers = new ExplicitTurnHelperSession({
           identity: turn, latestTurn: { ...turn, entries: [{ kind: 'user-input', content: initialInput }] },
           journal: input.helperJournal, clock: input.clock, factory: input.helperFactory,
@@ -466,7 +500,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (port === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent provider is not configured');
         driver = new ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef>({
           port,
-          binding: owned === undefined ? input.binding : owned.binding,
+          binding: turnProviderBinding,
           runtimeId,
           organId: input.organId,
           interactionTurn: turn,
@@ -477,9 +511,9 @@ export function createProviderExplicitBrainInterpreter(input: {
           inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
           ownerId: 'humanagent.runtime.explicit-brain',
           rawEvidence: input.rawEvidence,
-          registerRequest: (registration) => owner.registerRequest(registration),
-          acceptRawFact: (envelope) => owner.acceptRawFact(envelope),
-          requestContext: owner.requestContext,
+          registerRequest: (registration) => createdOwner.registerRequest(registration),
+          acceptRawFact: (envelope) => createdOwner.acceptRawFact(envelope),
+          requestContext: createdOwner.requestContext,
           tools: [
             { toolId: 'dispatch_helper', description: 'Dispatch independent bounded helper work. Return is not acceptance. Include the required structured helper result contract in the bounded inputs.', inputSchema: {
               type: 'object', properties: {
@@ -568,7 +602,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (closure.state !== 'succeeded') {
           throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
         }
-        const finalParentOutput = await owner.readFinalTurnOutput();
+        const finalParentOutput = await createdOwner.readFinalTurnOutput();
         interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
         // Only the simple-answer path carries the authoritative settlement receipt;
         // complex requirement routing keeps its existing behavior.
@@ -583,7 +617,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             settlement,
           });
         }
-        live = { owner, helpers, owned };
+        live = { owner: createdOwner, helpers, owned };
         retained = live;
       } catch (error) {
         let failure = error;
@@ -597,7 +631,17 @@ export function createProviderExplicitBrainInterpreter(input: {
         }
         if (owned !== undefined) {
           try {
-            await closeAgentProvider(owned);
+            const receipt = await closeAgentProvider(owned, { returnReceipt: true });
+            // Record the real close even without a successful semantic output.
+            // The turn input must already be committed; a failed input commit
+            // keeps the original error and records no fabricated fact.
+            if (owner !== undefined && committedInput) {
+              await owner.recordProviderClose({
+                providerBinding: owned.binding,
+                result: receipt,
+                closedAt: input.clock.now(),
+              });
+            }
           } catch (closeError) {
             throw new AggregateError([failure, closeError], 'interaction execution and provider close failed');
           }

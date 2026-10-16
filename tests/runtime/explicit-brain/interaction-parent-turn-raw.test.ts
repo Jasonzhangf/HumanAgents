@@ -13,6 +13,7 @@ import {
   type EvidenceRef,
   type AcceptedRawFact,
   type ProviderBinding,
+  type ProviderCloseResult,
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
@@ -83,6 +84,19 @@ const execution: InteractionParentProviderExecutionIdentityRef = {
   interactionTurn: turn,
 };
 const committedAt = '2026-10-15T00:00:00.000Z';
+
+// The actual binding every owner in this file freezes on its committed turn
+// input. A new turn must commit a real binding; a resource close can never be
+// recorded for a turn that has none.
+const parentProviderBinding: ProviderBinding = {
+  bindingId: 'binding-parent-raw-owner',
+  providerId: 'provider-parent-raw-owner',
+  protocol: 'responses',
+  endpointRef: 'endpoint://parent-raw-owner',
+  modelRef: 'model-parent-raw-owner',
+  configDigest: 'sha256:parent-raw-owner-config',
+  capabilityDigest: 'sha256:parent-raw-owner-capability',
+};
 
 interface Fixture {
   readonly journal: JsonlOrganJournal;
@@ -167,6 +181,7 @@ test('neutral interaction parent raw owner keeps one durable, parent-only raw hi
       execution,
       scope,
       initialInput,
+      providerBinding: parentProviderBinding,
       priorCheckpoints: [checkpoint],
       journal: parentJournal,
       rawContent,
@@ -685,6 +700,7 @@ test('explicit semantic close folds the settled parent turn and separates accept
       execution,
       scope,
       initialInput,
+      providerBinding: parentProviderBinding,
       journal: parentJournal,
       rawContent,
     });
@@ -929,6 +945,205 @@ test('explicit semantic close folds the settled parent turn and separates accept
   }
 });
 
+// Failure mode: the neutral parent raw owner has no durable resource-close fact,
+// so an exact retry can append a second close or drift the first close time, a
+// closed-output read can succeed without a real close, and the writer fence is
+// missing so request or raw history keeps changing after the physical owner is
+// gone. The probability is unknown because the seam is new. The impact is
+// fabricated recovery evidence or post-close history mutation. The cost is one
+// local Journal-backed public consumer in this existing explicit-brain file.
+test('neutral parent raw owner records one real resource close, gates closed output, and fences later history', async () => {
+  const root = process.env.HUMANAGENT_TEST_ROOT
+    ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-parent-close-fact-20261016');
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(join(root, 'parent-close-raw-'));
+  const store = new ImmutableAssetStore(join(directory, 'assets'));
+  const sink = filesystemProviderEvidenceSink(store);
+  const journalFile = join(directory, 'organ.jsonl');
+  const journal = new JsonlOrganJournal(journalFile);
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const rawContent = providerRawContentReader(sink);
+  try {
+    const turn = semanticCloseTurn('interaction-close', 'turn-close');
+    const operationId = id('operation', 'operation-semantic-close');
+    const scope: ScopeRef = { organId: semanticCloseOrganId, operationId };
+    const execution = parentExecution(turn, operationId);
+    const initialInput = await semanticCloseAsset(sink, scope, 'turn-close-input', 'close the bounded question');
+    const owner = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope,
+      initialInput,
+      providerBinding: parentProviderBinding,
+      journal: parentJournal,
+      rawContent,
+    });
+    await owner.openTurnInput();
+
+    // The whole binding is frozen on the committed turn input, all seven fields.
+    const committedInput = (await parentJournal.readTurnSnapshot(turn)).turnInput!.fact;
+    assert.deepEqual(committedInput.providerBinding, parentProviderBinding);
+
+    const record = parentRequestRecord(turn, scope, 'request-close', 'dispatching');
+    await owner.registerRequest({ execution: parentExecutionRef(execution), record });
+    const request = parentRequestIdentity(record);
+    const answer = await semanticCloseAsset(sink, scope, 'turn-close-answer', 'closed answer');
+    const answerFact: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef> = {
+      execution: parentExecutionRef(execution),
+      scope,
+      request,
+      producerSeq: 1,
+      fact: {
+        kind: 'content',
+        contentUnitId: 'assistant-close',
+        channel: 'assistant-text',
+        update: 'full',
+        content: answer,
+        complete: true,
+      },
+    };
+    await owner.acceptRawFact(answerFact);
+    await owner.acceptRawFact({
+      execution: parentExecutionRef(execution),
+      scope,
+      request,
+      producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await owner.registerRequest({
+      execution: parentExecutionRef(execution),
+      record: parentRequestRecord(turn, scope, 'request-close', 'settled'),
+    });
+    assert.equal((await owner.readFinalTurnOutput()).assistantText, 'closed answer');
+
+    // A settled output without a durable close is not a closed output.
+    await assert.rejects(
+      async () => { await owner.readClosedTurnOutput(); },
+      (error: unknown) => error instanceof ContractError
+        && /requires the committed resource close/.test((error as Error).message),
+    );
+    assert.equal(await owner.readResourceClose(), null);
+
+    const closedReceipt: ProviderCloseResult = {
+      bindingId: parentProviderBinding.bindingId,
+      providerId: parentProviderBinding.providerId,
+      protocol: parentProviderBinding.protocol,
+      state: 'closed',
+      evidenceRefs: [semanticCloseEvidence('parent-close-receipt')],
+    };
+    // A real non-closed receipt never becomes a durable close.
+    await assert.rejects(
+      async () => {
+        await owner.recordProviderClose({
+          providerBinding: parentProviderBinding,
+          result: {
+            bindingId: parentProviderBinding.bindingId,
+            providerId: parentProviderBinding.providerId,
+            protocol: parentProviderBinding.protocol,
+            state: 'pending',
+            evidenceRefs: [semanticCloseEvidence('parent-close-pending')],
+            ownerId: 'parent-close-owner',
+            nextAction: { kind: 'wait', ref: 'cleanup' },
+          },
+          closedAt: committedAt,
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /requires an actual closed receipt/.test((error as Error).message),
+    );
+    // A close whose binding differs only by digest from the committed binding is
+    // rejected, so the seven-field binding is compared, not just the id.
+    await assert.rejects(
+      async () => {
+        await owner.recordProviderClose({
+          providerBinding: { ...parentProviderBinding, configDigest: 'sha256:other-config' },
+          result: closedReceipt,
+          closedAt: committedAt,
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /does not match the committed turn input binding/.test((error as Error).message),
+    );
+    assert.equal(await owner.readResourceClose(), null);
+
+    // The real close commits once. An exact retry keeps the first time and
+    // commit and appends no second record; a changed receipt is a conflict.
+    const firstClose = await owner.recordProviderClose({
+      providerBinding: parentProviderBinding,
+      result: closedReceipt,
+      closedAt: committedAt,
+    });
+    const retryClose = await owner.recordProviderClose({
+      providerBinding: parentProviderBinding,
+      result: closedReceipt,
+      closedAt: '2099-01-01T00:00:00.000Z',
+    });
+    assert.equal(retryClose.fact.closedAt, committedAt);
+    assert.deepEqual(retryClose.commit, firstClose.commit);
+    const closeRecords = (await journal.replay())
+      .filter((entry) => (entry.payload as { discriminant?: string } | undefined)?.discriminant === 'resource-close');
+    assert.equal(closeRecords.length, 1);
+    await assert.rejects(
+      async () => {
+        await owner.recordProviderClose({
+          providerBinding: parentProviderBinding,
+          result: { ...closedReceipt, evidenceRefs: [semanticCloseEvidence('changed-receipt')] },
+          closedAt: committedAt,
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /conflicts with the committed resource close/.test((error as Error).message),
+    );
+
+    // The closed output is available only now, from one consistent snapshot.
+    const closedOutput = await owner.readClosedTurnOutput();
+    assert.equal(closedOutput.assistantText, 'closed answer');
+    assert.deepEqual(closedOutput.resourceClose.fact.result, closedReceipt);
+
+    // Writer fence: exact request and raw replays still return the committed
+    // record with zero append; any new lifecycle record is rejected.
+    const requestsBefore = (await parentJournal.readTurnSnapshot(turn)).requests.length;
+    const rawBefore = (await parentJournal.readTurnSnapshot(turn)).acceptedFacts.length;
+    await owner.registerRequest({ execution: parentExecutionRef(execution), record });
+    await owner.acceptRawFact(answerFact);
+    assert.equal((await parentJournal.readTurnSnapshot(turn)).requests.length, requestsBefore);
+    assert.equal((await parentJournal.readTurnSnapshot(turn)).acceptedFacts.length, rawBefore);
+    await assert.rejects(
+      async () => {
+        await owner.registerRequest({
+          execution: parentExecutionRef(execution),
+          record: parentRequestRecord(turn, scope, 'request-close-2', 'dispatching'),
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /new request lifecycle record is rejected/.test((error as Error).message),
+    );
+    await assert.rejects(
+      async () => { await owner.acceptRawFact({ ...answerFact, producerSeq: 3 }); },
+      (error: unknown) => error instanceof ContractError
+        && /new raw fact is rejected/.test((error as Error).message),
+    );
+
+    // Durable replay: a fresh journal and a fresh owner read the same one close.
+    const replayedJournal = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const reopened = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope,
+      initialInput,
+      providerBinding: parentProviderBinding,
+      journal: replayedJournal,
+      rawContent,
+    });
+    const reopenedClose = await reopened.readResourceClose();
+    assert.ok(reopenedClose);
+    assert.equal(reopenedClose!.fact.closedAt, committedAt);
+    assert.equal((await reopened.readClosedTurnOutput()).assistantText, 'closed answer');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('an unclosed parent turn blocks next-turn history until its semantic checkpoint commits', async () => {
   const directory = await semanticCloseFixtureHome();
   const store = new ImmutableAssetStore(join(directory, 'assets'));
@@ -960,6 +1175,7 @@ test('an unclosed parent turn blocks next-turn history until its semantic checkp
       execution: executionOne,
       scope: scopeOne,
       initialInput: inputOne,
+      providerBinding: parentProviderBinding,
       journal: parentJournal,
       rawContent,
     });
@@ -1080,6 +1296,7 @@ test('an unclosed parent turn blocks next-turn history until its semantic checkp
       execution: executionTwo,
       scope: scopeTwo,
       initialInput: inputTwo,
+      providerBinding: parentProviderBinding,
       priorCheckpoints: history,
       journal: parentJournal,
       rawContent,

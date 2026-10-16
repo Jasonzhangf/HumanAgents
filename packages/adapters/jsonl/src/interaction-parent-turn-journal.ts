@@ -6,6 +6,8 @@ import {
   validateAcceptedRawFact,
   validateInteractionSemanticCheckpoint,
   validateInteractionTurnIdentity,
+  validateProviderBinding,
+  validateProviderCloseResult,
   type AcceptedRawFact,
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionTurnIdentity,
@@ -17,6 +19,7 @@ import {
 import type {
   InteractionParentCommittedFact,
   InteractionParentOpenedTurnScopeReadPort,
+  InteractionParentResourceCloseFact,
   InteractionParentTurnAppend,
   InteractionParentTurnInputFact,
   InteractionParentTurnRawJournalPort,
@@ -70,6 +73,13 @@ type ParentRawPayload =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly entry: AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>;
+    }
+  | {
+      readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
+      readonly discriminant: 'resource-close';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentResourceCloseFact;
     };
 
 function sameScopedId(
@@ -166,6 +176,7 @@ function assertTurnInputFact(fact: InteractionParentTurnInputFact): void {
   assertTurn(fact.turn);
   assertInteractionParentExecution(fact.execution, fact.turn);
   assertParentScope(fact.scope, fact.turn, fact.execution);
+  if (fact.providerBinding !== undefined) validateProviderBinding(fact.providerBinding);
   if (!Array.isArray(fact.priorCheckpoints)) {
     throw new JournalIntegrityError('interaction parent turn input prior checkpoints must be an array');
   }
@@ -174,6 +185,38 @@ function assertTurnInputFact(fact: InteractionParentTurnInputFact): void {
     if (sameTurnIdentity(checkpoint, fact.turn)) {
       throw new JournalIntegrityError('interaction parent turn input carries the current turn as prior history');
     }
+  }
+}
+
+/**
+ * Validate one durable resource-close fact. It must carry a real closed
+ * receipt for its own binding; a legacy turn without the original binding is
+ * rejected elsewhere, where the turn input is available.
+ */
+function assertResourceCloseFact(
+  fact: InteractionParentResourceCloseFact,
+  turn: InteractionTurnIdentity,
+): void {
+  if (fact === null || typeof fact !== 'object') {
+    throw new JournalIntegrityError('interaction parent resource close fact is invalid');
+  }
+  assertTurn(fact.turn);
+  if (!sameTurnIdentity(fact.turn, turn)) {
+    throw new JournalIntegrityError('interaction parent resource close turn does not match its record turn');
+  }
+  assertInteractionParentExecution(fact.execution, fact.turn);
+  validateProviderBinding(fact.providerBinding);
+  validateProviderCloseResult(fact.result);
+  if (fact.result.state !== 'closed') {
+    throw new JournalIntegrityError('interaction parent resource close fact requires a closed receipt');
+  }
+  if (fact.result.bindingId !== fact.providerBinding.bindingId
+    || fact.result.providerId !== fact.providerBinding.providerId
+    || fact.result.protocol !== fact.providerBinding.protocol) {
+    throw new JournalIntegrityError('interaction parent resource close receipt does not match its binding');
+  }
+  if (typeof fact.closedAt !== 'string' || fact.closedAt.trim() === '') {
+    throw new JournalIntegrityError('interaction parent resource close requires a closedAt timestamp');
   }
 }
 
@@ -234,6 +277,18 @@ function readParentRawPayload(record: JournalRecord): ParentRawPayload | null {
     assertParentScope(entry.envelope.scope, turn, execution);
     return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, entry };
   }
+  if (discriminant === 'resource-close') {
+    const turn = payload.turn as InteractionTurnIdentity;
+    const execution = payload.execution as InteractionParentProviderExecutionIdentityRef;
+    const fact = payload.fact as InteractionParentResourceCloseFact;
+    assertTurn(turn);
+    assertInteractionParentExecution(execution, turn);
+    assertResourceCloseFact(fact, turn);
+    if (canonicalJsonStringify(fact.execution) !== canonicalJsonStringify(execution)) {
+      throw new JournalIntegrityError('interaction parent resource close execution does not match its record execution');
+    }
+    return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
+  }
   throw new JournalIntegrityError('interaction parent raw record discriminant is invalid');
 }
 
@@ -258,6 +313,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>
   >[] = [];
   const seenRequestPhases = new Set<string>();
+  let resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null = null;
 
   for (const record of records) {
     const payload = readParentRawPayload(record);
@@ -273,6 +329,39 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       turnInput = { fact: payload.fact, commit };
       continue;
     }
+    if (payload.discriminant === 'resource-close') {
+      if (resourceClose !== null) {
+        throw new JournalIntegrityError('interaction parent turn has more than one committed resource close');
+      }
+      if (turnInput === null) {
+        throw new JournalIntegrityError(
+          'interaction parent resource close requires the committed turn input before it',
+        );
+      }
+      const committedBinding = turnInput.fact.providerBinding;
+      if (committedBinding === undefined) {
+        throw new JournalIntegrityError(
+          'interaction parent resource close requires the original committed provider binding',
+        );
+      }
+      if (canonicalJsonStringify(committedBinding) !== canonicalJsonStringify(payload.fact.providerBinding)) {
+        throw new JournalIntegrityError(
+          'interaction parent resource close binding does not match the committed turn input binding',
+        );
+      }
+      if (canonicalJsonStringify(turnInput.fact.execution) !== canonicalJsonStringify(payload.fact.execution)) {
+        throw new JournalIntegrityError(
+          'interaction parent resource close execution does not match the committed turn input execution',
+        );
+      }
+      resourceClose = { fact: payload.fact, commit };
+      continue;
+    }
+    // Every other discriminant appends request or raw history, so it can never
+    // physically follow a committed resource close.
+    if (resourceClose !== null) {
+      throw new JournalIntegrityError('interaction parent raw append follows the committed resource close');
+    }
     if (payload.discriminant === 'request') {
       const phaseKey = `${payload.record.request.requestId}\u0000${payload.record.phase}`;
       if (seenRequestPhases.has(phaseKey)) {
@@ -285,7 +374,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     acceptedFacts.push({ fact: payload.entry, commit });
   }
 
-  return { turnInput, requests, acceptedFacts };
+  return { turnInput, requests, acceptedFacts, resourceClose };
 }
 
 function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput {
@@ -312,6 +401,20 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
         turn: append.turn,
         execution: append.execution,
         record: append.record,
+      },
+    };
+  }
+  if (append.kind === 'resource-close') {
+    return {
+      commitId: parentRawCommitId(append.turn, 'resource-close'),
+      kind: 'event',
+      scope: parentScope(append.turn, append.execution),
+      payload: {
+        kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
+        discriminant: 'resource-close',
+        turn: append.turn,
+        execution: append.execution,
+        fact: append.fact,
       },
     };
   }

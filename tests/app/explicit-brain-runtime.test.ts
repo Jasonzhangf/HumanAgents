@@ -10,7 +10,8 @@ import {
   createProviderExplicitBrainInterpreter,
 } from '../../packages/app/src/explicit-brain-runtime.js';
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
-import { id, type ProviderBinding, type InteractionParentProviderExecutionIdentityRef, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
+import { createInteractionParentTurnRawOwner, type InteractionSemanticCheckpointJournalPort } from '../../packages/runtime/src/explicit-brain/index.js';
+import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
 import { ProviderAgentDriver, ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -20,13 +21,14 @@ import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl
 import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
 
-const parentFixtureRoot = join(process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-explicit-parent-wiring-20261016', `app-${randomUUID()}`);
+const parentFixtureRoot = join(process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-parent-close-fact-20261016', `app-${randomUUID()}`);
 const parentEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentFixtureRoot, 'assets')));
 function parentDependencies() {
   const journal = new JsonlOrganJournal(join(parentFixtureRoot, `${randomUUID()}.jsonl`));
   const helperJournal = new JsonlInteractionHelperJournal(journal);
   return {
     organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test',
+    journal,
     parentJournal: new JsonlInteractionParentTurnJournal(journal),
     helperJournal,
     checkpointJournal: helperJournal,
@@ -843,6 +845,180 @@ test('provider explicit brain interpreter accepts the live requirement contract 
   assert.equal(ownCloses, 1);
 });
 
+test('provider explicit brain interpreter persists the original owner close receipt and reuses it on an exact retry', async () => {
+  // Failure basis: the App discards the real close receipt, so a physical close
+  // is not durable and a retry could close the same owner twice. Impact: lost
+  // recovery evidence and a duplicated physical close. Cost: one extra owned
+  // close on the existing real JSONL consumer, no new fixture framework.
+  await mkdir(parentFixtureRoot, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parent-close', providerId: 'provider-parent-close', protocol: 'responses',
+    endpointRef: 'fake://parent-close', modelRef: 'model-parent-close',
+    configDigest: 'sha256:parent-close-config', capabilityDigest: 'sha256:parent-close-capability',
+  };
+  const fixedNow = '2026-10-16T00:00:00.000Z';
+  const journalFile = join(parentFixtureRoot, `parent-close-${randomUUID()}.jsonl`);
+  const journal = new JsonlOrganJournal(journalFile);
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+  const base = parentDependencies();
+  const options = {
+    ...base, binding, parentJournal, helperJournal, checkpointJournal: helperJournal,
+    clock: { now: () => fixedNow },
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+  };
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
+    { kind: 'output', state: 'output', summary: JSON.stringify({ kind: 'answer', normalizedInput: 'echo', knownFacts: [], answer: 'original-answer', decisionRefs: [] }) },
+    { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+  ] });
+  const receipts: ProviderCloseResult[] = [];
+  const close = port.close.bind(port);
+  port.close = async (bind) => { const receipt = await close(bind); receipts.push(receipt); return receipt; };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...options, port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'parent-close-fixture', baseUrl: binding.endpointRef },
+      binding, port }),
+  });
+
+  const result = await interpreter.interpret({
+    interactionId: 'parent-close-1', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: 'answer this', clarifications: [], taskCandidates: [],
+  });
+  assert.equal(result.kind, 'answer');
+  assert.equal(receipts.length, 1, 'the owned provider is closed exactly once');
+
+  const opened = await parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(opened.length, 1);
+  const committedInput = opened[0]!.fact;
+  assert.deepEqual(committedInput.providerBinding, binding, 'the new turn freezes the actual binding');
+  const snapshot = await parentJournal.readTurnSnapshot(committedInput.turn);
+  assert.ok(snapshot.resourceClose, 'the real owner close must be durably recorded');
+  if (snapshot.resourceClose === null) throw new Error('missing resource close');
+  // The receipt is read back from the Journal, so it is a durable value copy:
+  // compare it by value, never by object reference identity.
+  assert.deepEqual(snapshot.resourceClose.fact.result, receipts[0], 'the exact original receipt must be persisted');
+  assert.deepEqual(snapshot.resourceClose.fact.providerBinding, binding);
+  assert.deepEqual(snapshot.resourceClose.fact.turn, committedInput.turn);
+  assert.equal(snapshot.resourceClose.fact.closedAt, fixedNow);
+
+  // Durable replay through a fresh journal instance and a fresh owner: an exact
+  // retry returns the first closedAt and commit and appends no second record.
+  const replayedParentJournal = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+  const turnInputFact = snapshot.turnInput!.fact;
+  const reopened = createInteractionParentTurnRawOwner({
+    turn: turnInputFact.turn, execution: turnInputFact.execution, scope: turnInputFact.scope,
+    initialInput: turnInputFact.initialInput, providerBinding: binding,
+    priorCheckpoints: turnInputFact.priorCheckpoints,
+    journal: replayedParentJournal, rawContent: base.rawContent,
+  });
+  const retried = await reopened.recordProviderClose({
+    providerBinding: binding, result: receipts[0]!, closedAt: '2099-01-01T00:00:00.000Z',
+  });
+  assert.equal(retried.fact.closedAt, fixedNow, 'an exact retry preserves the first closedAt');
+  assert.deepEqual(retried.commit, snapshot.resourceClose.commit);
+  const closeRecords = (await new JsonlOrganJournal(journalFile).replay())
+    .filter((record) => (record.payload as { discriminant?: string } | undefined)?.discriminant === 'resource-close');
+  assert.equal(closeRecords.length, 1, 'a retry must not append a second close record');
+});
+
+test('provider explicit brain interpreter keeps resource close independent of semantic success and leaves a borrowed provider open', async () => {
+  // Failure basis: the error path records no close and a borrowed provider is
+  // never closed, so a real physical close on an error is lost while a borrowed
+  // owner must stay open. Impact: missing close evidence or an illegal close of
+  // someone else's owner. Cost: three owned runs on the real JSONL consumer.
+  await mkdir(parentFixtureRoot, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parent-close-2', providerId: 'provider-parent-close-2', protocol: 'responses',
+    endpointRef: 'fake://parent-close-2', modelRef: 'model-parent-close-2',
+    configDigest: 'sha256:parent-close-2-config', capabilityDigest: 'sha256:parent-close-2-capability',
+  };
+  const templateRoot = join(process.cwd(), 'packages', 'agent-templates', 'templates');
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+  const ownedProvider = {
+    source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses' as const,
+    model: binding.modelRef, route: 'parent-close-fixture-2', baseUrl: binding.endpointRef,
+  };
+  const answerReplay = [
+    { kind: 'output', state: 'output', summary: JSON.stringify({ kind: 'answer', normalizedInput: 'echo', knownFacts: [], answer: 'ok', decisionRefs: [] }) },
+    { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+  ];
+
+  // (a) A real close during a failed interpretation still commits the close.
+  const failJournal = new JsonlOrganJournal(join(parentFixtureRoot, `parent-close-fail-${randomUUID()}.jsonl`));
+  const failParent = new JsonlInteractionParentTurnJournal(failJournal);
+  const failHelper = new JsonlInteractionHelperJournal(failJournal);
+  const failPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
+    { kind: 'output', state: 'output', summary: 'this is not a json decision' },
+    { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+  ] });
+  const failReceipts: ProviderCloseResult[] = [];
+  const failClose = failPort.close.bind(failPort);
+  failPort.close = async (bind) => { const receipt = await failClose(bind); failReceipts.push(receipt); return receipt; };
+  const failInterpreter = createProviderExplicitBrainInterpreter({
+    ...parentDependencies(), binding, parentJournal: failParent, helperJournal: failHelper,
+    checkpointJournal: failHelper, clock: { now: () => '2026-10-16T00:00:00.000Z' }, templateRoot, port: failPort,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', provider: ownedProvider, binding, port: failPort }),
+  });
+  await assert.rejects(
+    () => failInterpreter.interpret({ interactionId: 'parent-close-fail', inputRevision: 1, sourceRef: 'ui:new-task', rawInput: 'answer this', clarifications: [], taskCandidates: [] }),
+    /invalid JSON/,
+  );
+  assert.equal(failReceipts.length, 1);
+  const failTurn = (await failParent.readScopeOpenedTurns(scope))[0]!.fact.turn;
+  const failSnapshot = await failParent.readTurnSnapshot(failTurn);
+  assert.ok(failSnapshot.resourceClose, 'a real close must be recorded without a successful semantic output');
+  assert.deepEqual(
+    failSnapshot.resourceClose!.fact.result,
+    failReceipts[0],
+    'the persisted close must equal the real receipt by value',
+  );
+  assert.equal(await failHelper.readSemanticCheckpointExact(failTurn), null, 'a failed interpretation commits no checkpoint');
+
+  // (b) A borrowed provider is never closed and manufactures no close fact.
+  const borrowJournal = new JsonlOrganJournal(join(parentFixtureRoot, `parent-close-borrow-${randomUUID()}.jsonl`));
+  const borrowParent = new JsonlInteractionParentTurnJournal(borrowJournal);
+  const borrowHelper = new JsonlInteractionHelperJournal(borrowJournal);
+  const borrowPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: answerReplay });
+  let borrowedCloses = 0;
+  const borrowClose = borrowPort.close.bind(borrowPort);
+  borrowPort.close = async (bind) => { borrowedCloses += 1; return borrowClose(bind); };
+  const borrowInterpreter = createProviderExplicitBrainInterpreter({
+    ...parentDependencies(), binding, parentJournal: borrowParent, helperJournal: borrowHelper,
+    checkpointJournal: borrowHelper, clock: { now: () => '2026-10-16T00:00:00.000Z' }, templateRoot, port: borrowPort,
+  });
+  const borrowResult = await borrowInterpreter.interpret({
+    interactionId: 'parent-close-borrow', inputRevision: 1, sourceRef: 'ui:new-task', rawInput: 'answer this', clarifications: [], taskCandidates: [],
+  });
+  assert.equal(borrowResult.kind, 'answer');
+  assert.equal(borrowedCloses, 0, 'a borrowed provider must not be closed');
+  const borrowTurn = (await borrowParent.readScopeOpenedTurns(scope))[0]!.fact;
+  assert.deepEqual(borrowTurn.providerBinding, binding, 'a borrowed turn still freezes its actual binding');
+  assert.equal((await borrowParent.readTurnSnapshot(borrowTurn.turn)).resourceClose, null, 'a borrowed turn records no close fact');
+
+  // (c) A failed close keeps the original error and records no success.
+  const rejectJournal = new JsonlOrganJournal(join(parentFixtureRoot, `parent-close-reject-${randomUUID()}.jsonl`));
+  const rejectParent = new JsonlInteractionParentTurnJournal(rejectJournal);
+  const rejectHelper = new JsonlInteractionHelperJournal(rejectJournal);
+  const rejectPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: answerReplay });
+  const rejectError = new Error('owned close rejection');
+  rejectPort.close = async () => { throw rejectError; };
+  const rejectInterpreter = createProviderExplicitBrainInterpreter({
+    ...parentDependencies(), binding, parentJournal: rejectParent, helperJournal: rejectHelper,
+    checkpointJournal: rejectHelper, clock: { now: () => '2026-10-16T00:00:00.000Z' }, templateRoot, port: rejectPort,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', provider: ownedProvider, binding, port: rejectPort }),
+  });
+  await assert.rejects(
+    () => rejectInterpreter.interpret({ interactionId: 'parent-close-reject', inputRevision: 1, sourceRef: 'ui:new-task', rawInput: 'answer this', clarifications: [], taskCandidates: [] }),
+    (error: unknown) => error === rejectError,
+  );
+  const rejectTurn = (await rejectParent.readScopeOpenedTurns(scope))[0]!.fact.turn;
+  assert.equal((await rejectParent.readTurnSnapshot(rejectTurn)).resourceClose, null, 'a failed close records no close fact');
+  assert.equal(await rejectHelper.readSemanticCheckpointExact(rejectTurn), null);
+});
+
 // Real recorded RCC intake output (business output only) from the
 // provider-candidate-live-entry-r2 scene. The model nested the decision under a
 // `decision` object and left no top-level `kind`. The strict intake parser must
@@ -947,4 +1123,72 @@ test('provider explicit brain interpreter strictly rejects a recorded nested-dec
     await rm(parentFixtureRoot, { recursive: true, force: true });
     await assert.rejects(() => realpath(parentFixtureRoot), /ENOENT/);
   }
+});
+
+test('provider explicit brain interpreter reuses the retained close on a same-process retry without a second physical close', async () => {
+  // Failure basis: a Journal acknowledgement loss after a real close must not
+  // make a same-process retry close the original owner a second time. Impact: a
+  // duplicated physical close of an owner that is already closed. Cost: one
+  // injected checkpoint append fault and one retry on the real JSONL consumer.
+  await mkdir(parentFixtureRoot, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parent-close-retry', providerId: 'provider-parent-close-retry', protocol: 'responses',
+    endpointRef: 'fake://parent-close-retry', modelRef: 'model-parent-close-retry',
+    configDigest: 'sha256:parent-close-retry-config', capabilityDigest: 'sha256:parent-close-retry-capability',
+  };
+  const journalFile = join(parentFixtureRoot, `parent-close-retry-${randomUUID()}.jsonl`);
+  const journal = new JsonlOrganJournal(journalFile);
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  // A one-shot checkpoint append fault models a lost acknowledgement after the
+  // physical close has already happened and its fact has committed.
+  let appendAttempts = 0;
+  const flakyCheckpointJournal: InteractionSemanticCheckpointJournalPort = {
+    appendSemanticCheckpoint: async (checkpoint) => {
+      appendAttempts += 1;
+      if (appendAttempts === 1) throw new Error('semantic checkpoint ack lost');
+      return helperJournal.appendSemanticCheckpoint(checkpoint);
+    },
+    readSemanticCheckpointExact: (identity) => helperJournal.readSemanticCheckpointExact(identity),
+    readScopeSemanticCheckpoints: (scopeKey) => helperJournal.readScopeSemanticCheckpoints(scopeKey),
+  };
+  const options = {
+    ...parentDependencies(), binding, parentJournal, helperJournal, checkpointJournal: flakyCheckpointJournal,
+    clock: { now: () => '2026-10-16T00:00:00.000Z' },
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+  };
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
+    { kind: 'output', state: 'output', summary: JSON.stringify({ kind: 'answer', normalizedInput: 'echo', knownFacts: [], answer: 'retry-answer', decisionRefs: [] }) },
+    { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+  ] });
+  let closes = 0;
+  const close = port.close.bind(port);
+  port.close = async (bind) => { closes += 1; return close(bind); };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...options, port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'parent-close-retry', baseUrl: binding.endpointRef },
+      binding, port }),
+  });
+  const request = {
+    interactionId: 'parent-close-retry', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: 'answer this', clarifications: [], taskCandidates: [],
+  };
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+
+  await assert.rejects(() => interpreter.interpret(request), /semantic checkpoint ack lost/);
+  assert.equal(closes, 1, 'the first attempt closes the original owner once');
+  const opened = await parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(opened.length, 1);
+  const turn = opened[0]!.fact.turn;
+  assert.ok((await parentJournal.readTurnSnapshot(turn)).resourceClose, 'the close is durable before the checkpoint failure');
+
+  // The same-process retry reuses the retained receipt and never re-closes.
+  const retried = await interpreter.interpret(request);
+  assert.equal(retried.kind, 'answer');
+  assert.equal(closes, 1, 'a same-process retry must not close the owner a second time');
+  const closeRecords = (await new JsonlOrganJournal(journalFile).replay())
+    .filter((record) => (record.payload as { discriminant?: string } | undefined)?.discriminant === 'resource-close');
+  assert.equal(closeRecords.length, 1, 'a same-process retry must not append a second close record');
 });

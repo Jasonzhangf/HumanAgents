@@ -41,6 +41,7 @@ import {
   type ExecutionRuntimePort,
   type OperationId,
   type ProviderBinding,
+  type ProviderCloseResult,
   type ProviderExecutionIdentityRef,
   type ScopeRef,
   type TaskId,
@@ -421,10 +422,29 @@ export function createAgentProviderPort<
   }, evidenceRoot);
 }
 
-/** Close an owned composition and require an actual closed receipt. */
+/**
+ * Close an owned composition and require an actual closed receipt.
+ *
+ * The default signature keeps returning `void` for the existing
+ * `close`/`release` consumers. Passing `{ returnReceipt: true }` returns the
+ * one real receipt object from the same single `port.close` call; it is a
+ * return-value overload, never a second close path.
+ */
 export async function closeAgentProvider<
   TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
->(composition: AgentProviderComposition<TIdentity>): Promise<void> {
+>(composition: AgentProviderComposition<TIdentity>): Promise<void>;
+export async function closeAgentProvider<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(
+  composition: AgentProviderComposition<TIdentity>,
+  options: { readonly returnReceipt: true },
+): Promise<ProviderCloseResult>;
+export async function closeAgentProvider<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(
+  composition: AgentProviderComposition<TIdentity>,
+  options?: { readonly returnReceipt?: boolean },
+): Promise<void | ProviderCloseResult> {
   const receipt = await composition.port.close(composition.binding);
   if (receipt.state !== 'closed') {
     throw new AppLifecycleError(
@@ -435,6 +455,7 @@ export async function closeAgentProvider<
       receipt.error,
     );
   }
+  return options?.returnReceipt === true ? receipt : undefined;
 }
 
 /** Prepare one fresh execution instance and admit only its own provider. */
