@@ -13,13 +13,17 @@ import {
 import type { JournalRecord } from '../../../adapters/jsonl/src/index.js';
 import type { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import { readTaskBusinessRegistration } from '../../../adapters/jsonl/src/task-grants.js';
-import { listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
+import { decodeActiveTurnRecords, listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
 import type { ActiveTurnBinding } from '../../../contracts/src/active-turn-context.js';
 import { activeTurnCommitId } from '../../../runtime/src/context/active-turn-journal.js';
 import type {
   RuntimeExecutionAllocation,
   RuntimeTaskJournalPort,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+import type {
+  OperationStopSettlementReceipt,
+  OperationStopSettlementRequest,
+} from '../../../runtime/src/gateway/ports.js';
 import type { AgentProviderComposition } from '../agent-driver-composition.js';
 import { AppLifecycleError } from '../errors.js';
 import { readPreparedExecutionInput } from '../prepared-execution-input.js';
@@ -78,6 +82,8 @@ export type PreparedExecutionStopReadback =
   | {
       readonly state: 'pending';
       readonly request: JournalCommitRef;
+      readonly allocation: RuntimeExecutionAllocation;
+      readonly checkpoint: PreparedExecutionStopCheckpointCandidate;
       readonly facts: readonly {
         readonly ref: JournalCommitRef;
         readonly fact: PreparedExecutionStopFact;
@@ -86,6 +92,8 @@ export type PreparedExecutionStopReadback =
   | {
       readonly state: 'settled';
       readonly request: JournalCommitRef;
+      readonly allocation: RuntimeExecutionAllocation;
+      readonly checkpoint: PreparedExecutionStopCheckpointCandidate;
       readonly settlement: JournalCommitRef;
       readonly fact: Extract<PreparedExecutionStopFact, { readonly kind: 'settled' }>;
       readonly recoveryStateRef: EvidenceRef;
@@ -149,6 +157,30 @@ interface OwnerRefs {
 
 interface ActivePreparation {
   readonly lease: PreparedExecutionStopPreparationLease;
+  failed: boolean;
+}
+
+/**
+ * Physical custody of one acquired Provider resource, held under the
+ * deterministic acquisition commit identity. The custody map is the same
+ * live-composition entry extended for stop settlement; a custody value is
+ * created before the fallible acquisition append and is deleted only after
+ * its actual close and its durable closure fact both exist.
+ */
+interface ProviderCustody {
+  readonly lease: PreparedExecutionStopPreparationLease;
+  readonly composition: AgentProviderComposition;
+  acquisition?: JournalCommitRef;
+  receipt?: Awaited<ReturnType<AgentProviderComposition['port']['close']>>;
+}
+
+/** Failed preparation retaining unpublished custody, for explicit recovery. */
+export class PreparedExecutionStopPreparationFailure extends AggregateError {
+  readonly lease: PreparedExecutionStopPreparationLease;
+  constructor(lease: PreparedExecutionStopPreparationLease, errors: readonly unknown[]) {
+    super([...errors], 'prepared execution preparation and cleanup failed');
+    this.lease = lease;
+  }
 }
 
 function stopError(
@@ -266,6 +298,27 @@ function findRequestedByCommit(
     );
   }
   return entry as FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'requested' }>>;
+}
+
+function findRequestedByOperation(
+  records: readonly JournalRecord[],
+  taskId: TaskId,
+  operationId: OperationId,
+): FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'requested' }>> | null {
+  const matches = records
+    .map(factEntry)
+    .filter((entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'requested' }>> =>
+      entry?.fact.kind === 'requested'
+      && sameScopedId(entry.fact.allocation.taskId, taskId)
+      && sameScopedId(entry.fact.allocation.operationId, operationId));
+  if (matches.length > 1) {
+    throw stopError(
+      'prepared-execution-stop.request-conflict',
+      'the Organ Journal contains more than one prepared-stop request for the same parent operation',
+      'reconcile the duplicate request before settling it',
+    );
+  }
+  return matches[0] ?? null;
 }
 
 function collectBundle(
@@ -391,7 +444,7 @@ export class PreparedExecutionStop {
   private readonly admission: ReturnType<typeof createExecutionAdmission>;
   private readonly gates = new Map<string, Promise<void>>();
   private readonly activePreparations = new Map<string, ActivePreparation>();
-  private readonly liveCompositions = new Map<string, AgentProviderComposition>();
+  private readonly liveCustody = new Map<string, ProviderCustody>();
 
   constructor(input: {
     readonly journal: JsonlOrganJournal;
@@ -477,6 +530,8 @@ export class PreparedExecutionStop {
       return {
         state: 'settled',
         request: bundle.settled.fact.request,
+        allocation: requested.fact.allocation,
+        checkpoint: requested.fact.checkpoint,
         settlement: bundle.settled.ref,
         fact: bundle.settled.fact,
         recoveryStateRef: evidenceFor(bundle.settled.ref, requested.fact.allocation.scope),
@@ -485,6 +540,8 @@ export class PreparedExecutionStop {
     return {
       state: 'pending',
       request: requested.ref,
+      allocation: requested.fact.allocation,
+      checkpoint: requested.fact.checkpoint,
       facts: bundle.entries.map((entry) => ({ ref: entry.ref, fact: entry.fact })),
     };
   }
@@ -516,12 +573,16 @@ export class PreparedExecutionStop {
         return {
           state: 'settled',
           request: bundle.settled.fact.request,
+          allocation: currentRequested.fact.allocation,
+          checkpoint: currentRequested.fact.checkpoint,
           settlement: bundle.settled.ref,
           fact: bundle.settled.fact,
           recoveryStateRef: evidenceFor(bundle.settled.ref, currentRequested.fact.allocation.scope),
         };
       }
-      if (this.activePreparations.has(key) || bundle.preparationEntered.length !== bundle.preparationLeft.length) {
+      if (this.activePreparations.has(key)
+        || this.hasUnpublishedCustody(currentRequested.fact.allocation) !== null
+        || bundle.preparationEntered.length !== bundle.preparationLeft.length) {
         return pending(
           currentRequested.ref,
           'preparation-active',
@@ -539,7 +600,7 @@ export class PreparedExecutionStop {
           currentRequested.fact.allocation.scope,
         );
       }
-      const owners = await this.resolveOwners(currentRequested.fact.allocation, records);
+      let owners = await this.resolveOwners(currentRequested.fact.allocation, records);
       const ownerRefs = [owners.registration, owners.coverage, owners.parent, owners.turnBinding, owners.initialInput]
         .filter((ref): ref is JournalCommitRef => ref !== null);
       if (owners.registration !== null && (owners.coverage === null || owners.parent === null)) {
@@ -548,70 +609,143 @@ export class PreparedExecutionStop {
       if (owners.coverage !== null && owners.parent === null) {
         return pending(currentRequested.ref, 'admission-incomplete', ownerRefs, currentRequested.fact.allocation.scope);
       }
-      if (owners.coverage !== null && owners.parent !== null && owners.turnBinding === null) {
-        return pending(currentRequested.ref, 'admission-incomplete', ownerRefs, currentRequested.fact.allocation.scope);
-      }
       if (owners.turnBinding !== null && owners.initialInput === null) {
         return pending(currentRequested.ref, 'turn-input-incomplete', ownerRefs, currentRequested.fact.allocation.scope);
       }
       if (owners.turnBinding !== null && owners.initialInput !== null) {
         return pending(currentRequested.ref, 'effects-present', ownerRefs, currentRequested.fact.allocation.scope);
       }
-
-      const last = records.at(-1);
-      const cut = { journalSeq: last?.seq ?? 0, recordDigest: last?.recordDigest ?? null };
-      const fact: Extract<PreparedExecutionStopFact, { readonly kind: 'settled' }> = {
-        kind: 'settled',
-        request: currentRequested.ref,
-        cut,
-        owners,
-        preparations: bundle.preparationEntered.map((entry) => entry.ref),
-        resourceClosures: bundle.resourceClosed.map((entry) => entry.ref),
-      };
-      await this.journal.transaction(
-        ({ records: current }) => {
-          const existingRequested = findRequestedByCommit(current, currentRequested.ref);
-          if (existingRequested === null) {
-            throw stopError(
-              'prepared-execution-stop.request-missing',
-              'the prepared-stop request disappeared before settlement append',
-              'recover the Organ Journal before retrying settlement',
-            );
-          }
-          const existingSettlement = collectBundle(current, existingRequested).settled;
-          if (existingSettlement !== null) return { kind: 'existing' as const, ref: existingSettlement.ref };
-          const currentLast = current.at(-1);
-          if ((currentLast?.seq ?? 0) !== cut.journalSeq
-            || (currentLast?.recordDigest ?? null) !== cut.recordDigest) {
-            throw stopError(
-              'prepared-execution-stop.retry',
-              'the Organ Journal advanced while the prepared-stop settlement was being prepared',
-              'retry settlement against the verified prefix',
-            );
-          }
-          return { kind: 'append' as const, commitId: commitIdFor(currentRequested.fact.allocation, 'settled') };
-        },
-        async (plan, append) => {
-          if (plan.kind === 'existing') return plan.ref;
-          const record = await append({
-            commitId: plan.commitId,
-            kind: 'event',
-            scope: currentRequested.fact.allocation.scope,
-            payload: { kind: PAYLOAD_KIND, fact } satisfies { readonly kind: typeof PAYLOAD_KIND; readonly fact: PreparedExecutionStopFact },
-          });
-          return commitRef(record);
-        },
-      );
-      const readback = await this.read(selector);
-      if (readback.state !== 'settled') {
-        throw stopError(
-          'prepared-execution-stop.settlement-readback-missing',
-          'the prepared-stop settlement was appended but cannot be read back',
-          'recover the Organ Journal and read the exact settlement before publication',
-        );
+      if (owners.parent !== null) {
+        const control = await this.admission.gateway.readControl({
+          scope: currentRequested.fact.allocation.scope,
+          agentRuntimeId: currentRequested.fact.allocation.runtimeId,
+          harnessExecutionEpoch: currentRequested.fact.allocation.executionEpoch,
+        });
+        if (control.state !== 'complete') {
+          return pending(currentRequested.ref, 'admission-incomplete', ownerRefs, currentRequested.fact.allocation.scope);
+        }
+        if (control.operations.length !== 1) {
+          return pending(currentRequested.ref, 'effects-present', ownerRefs, currentRequested.fact.allocation.scope);
+        }
+        await this.cancelParentControl(currentRequested.fact.allocation, owners.parent);
+        owners = await this.resolveOwners(currentRequested.fact.allocation, await this.journal.replay());
       }
-      return readback;
+      return await this.commitSettlement(selector, currentRequested.ref, owners, bundle);
     });
+  }
+
+  /**
+   * Requests and settles cancellation of one admitted parent through the same
+   * Gateway control path, then reads back the actual cancelled parent and its
+   * refreshed commit. The trusted settlement callback is invoked only by
+   * `settleCancellation`; the callback verifies proof without reentering this
+   * producer gate or requesting cancellation again.
+   */
+  private async cancelParentControl(
+    allocation: RuntimeExecutionAllocation,
+    parent: JournalCommitRef,
+  ): Promise<void> {
+    const control = await this.admission.gateway.readControl({
+      scope: allocation.scope,
+      agentRuntimeId: allocation.runtimeId,
+      harnessExecutionEpoch: allocation.executionEpoch,
+    });
+    if (control.state !== 'complete') {
+      throw stopError(
+        'prepared-execution-stop.control-unknown',
+        `operation control coverage is unknown: ${control.reason}`,
+        'complete the physical operation-control coverage before cancelling the admitted parent',
+      );
+    }
+    const index = control.operations.findIndex((operation) => sameScopedId(operation.intent.operationId, allocation.operationId));
+    if (index < 0 || !sameRef(control.operationCommits[index]!, parent)) {
+      throw stopError(
+        'prepared-execution-stop.parent-stale',
+        'the admitted parent control advanced beyond the settled parent commit',
+        're-read the actual parent control before cancelling the admitted parent',
+      );
+    }
+    const status = control.operations[index]!.status;
+    if (status === 'accepted') await this.admission.gateway.requestCancel(allocation.operationId);
+    if (status === 'accepted' || status === 'cancel_requested') {
+      await this.admission.gateway.settleCancellation(allocation.operationId);
+    }
+    const snapshot = await this.admission.gateway.readControl({
+      scope: allocation.scope,
+      agentRuntimeId: allocation.runtimeId,
+      harnessExecutionEpoch: allocation.executionEpoch,
+    });
+    if (snapshot.state !== 'complete' || snapshot.operations.length !== 1
+      || !sameScopedId(snapshot.operations[0]!.intent.operationId, allocation.operationId)
+      || snapshot.operations[0]!.status !== 'cancelled') {
+      throw stopError(
+        'prepared-execution-stop.cancel-readback-missing',
+        `the admitted parent did not read back as cancelled (prior status: ${status})`,
+        'recover the operation control and read the actual cancelled parent before settling',
+      );
+    }
+  }
+
+  private async commitSettlement(
+    selector: PreparedExecutionStopSelector,
+    request: JournalCommitRef,
+    owners: OwnerRefs,
+    bundle: PreparedStopBundle,
+  ): Promise<PreparedExecutionStopSettleResult> {
+    const allocation = bundle.requested.fact.allocation;
+    const last = await this.journal.replay().then((records) => records.at(-1));
+    const cut = { journalSeq: last?.seq ?? 0, recordDigest: last?.recordDigest ?? null };
+    const fact: Extract<PreparedExecutionStopFact, { readonly kind: 'settled' }> = {
+      kind: 'settled',
+      request,
+      cut,
+      owners,
+      preparations: bundle.preparationEntered.map((entry) => entry.ref),
+      resourceClosures: bundle.resourceClosed.map((entry) => entry.ref),
+    };
+    await this.journal.transaction(
+      ({ records: current }) => {
+        const existingRequested = findRequestedByCommit(current, request);
+        if (existingRequested === null) {
+          throw stopError(
+            'prepared-execution-stop.request-missing',
+            'the prepared-stop request disappeared before settlement append',
+            'recover the Organ Journal before retrying settlement',
+          );
+        }
+        const existingSettlement = collectBundle(current, existingRequested).settled;
+        if (existingSettlement !== null) return { kind: 'existing' as const, ref: existingSettlement.ref };
+        const currentLast = current.at(-1);
+        if ((currentLast?.seq ?? 0) !== cut.journalSeq
+          || (currentLast?.recordDigest ?? null) !== cut.recordDigest) {
+          throw stopError(
+            'prepared-execution-stop.retry',
+            'the Organ Journal advanced while the prepared-stop settlement was being prepared',
+            'retry settlement against the verified prefix',
+          );
+        }
+        return { kind: 'append' as const, commitId: commitIdFor(allocation, 'settled') };
+      },
+      async (plan, append) => {
+        if (plan.kind === 'existing') return plan.ref;
+        const record = await append({
+          commitId: plan.commitId,
+          kind: 'event',
+          scope: allocation.scope,
+          payload: { kind: PAYLOAD_KIND, fact } satisfies { readonly kind: typeof PAYLOAD_KIND; readonly fact: PreparedExecutionStopFact },
+        });
+        return commitRef(record);
+      },
+    );
+    const readback = await this.read(selector);
+    if (readback.state !== 'settled') {
+      throw stopError(
+        'prepared-execution-stop.settlement-readback-missing',
+        'the prepared-stop settlement was appended but cannot be read back',
+        'recover the Organ Journal and read the exact settlement before publication',
+      );
+    }
+    return readback;
   }
 
   async withPreparation<T>(
@@ -670,19 +804,23 @@ export class PreparedExecutionStop {
       );
       lease = new PreparedExecutionStopPreparationLease(allocation, entered);
       leaseOwnership.set(lease, { producer: this, executionKey: key });
-      this.activePreparations.set(key, { lease });
+      this.activePreparations.set(key, { lease, failed: false });
     });
 
     let result: T;
     try {
       result = await prepare(lease);
     } catch (error) {
-      const cleanup = await this.finishPreparation(lease, 'failed');
-      if (cleanup !== null) throw new AggregateError([error, cleanup], 'prepared execution preparation and retention failed');
+      this.activePreparations.get(key)!.failed = true;
+      const cleanup = await this.attemptFailedCleanup(lease);
+      if (cleanup !== null) throw new PreparedExecutionStopPreparationFailure(lease, [error, cleanup]);
       throw error;
     }
     const cleanup = await this.finishPreparation(lease, 'prepared');
-    if (cleanup !== null) throw cleanup;
+    if (cleanup !== null) {
+      this.activePreparations.get(key)!.failed = true;
+      throw new PreparedExecutionStopPreparationFailure(lease, [cleanup]);
+    }
     return result;
   }
 
@@ -708,35 +846,352 @@ export class PreparedExecutionStop {
     }
     return await runExclusive(this.gates, ownership.executionKey, async () => {
       const commitId = commitIdFor(lease.allocation, `resource-acquired:${composition.binding.bindingId}`);
-      const ref = await this.journal.transaction(
-        ({ records }) => {
-          const existing = records
-            .map(factEntry)
-            .find((entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'resource-acquired' }>> =>
-              entry?.fact.kind === 'resource-acquired' && entry.ref.commitId === commitId);
-          if (existing !== undefined) return { kind: 'existing' as const, ref: existing.ref };
-          return { kind: 'append' as const, commitId };
-        },
-        async (plan, append) => {
-          if (plan.kind === 'existing') return plan.ref;
-          const record = await append({
-            commitId: plan.commitId,
-            kind: 'event',
-            scope: lease.allocation.scope,
-            payload: {
-              kind: PAYLOAD_KIND,
-              fact: {
-                kind: 'resource-acquired',
-                resource: { preparation: lease.preparation, binding: composition.binding },
-              } satisfies PreparedExecutionStopFact,
-            },
-          });
-          return commitRef(record);
-        },
-      );
-      this.liveCompositions.set(ref.commitId, composition);
-      return ref;
+      // Physical custody is installed before the fallible acquisition append,
+      // so a failed append still leaves the exact retained resource owned here.
+      const existingCustody = this.liveCustody.get(commitId);
+      if (existingCustody !== undefined
+        && (existingCustody.composition !== composition || existingCustody.lease !== lease)) {
+        throw stopError(
+          'prepared-execution-stop.custody-conflict',
+          'a different Provider composition already retains this acquisition identity',
+          'resolve the existing retained resource through its actual owner before retrying',
+        );
+      }
+      const custody = existingCustody ?? { lease, composition };
+      this.liveCustody.set(commitId, custody);
+      return await this.commitAcquisition(lease, commitId, custody);
     });
+  }
+
+  /**
+   * Recovers one failed preparation whose physical custody is retained but
+   * whose acquisition/closure/left facts were never durably committed. It
+   * closes the actual retained Provider even while the Organ Journal is
+   * unavailable, records the real acquisition, the real closed receipt and the
+   * durable `preparation-left` once each becomes possible, and never runs a
+   * second physical close or a second business dispatch.
+   */
+  async retryFailedPreparation(lease: PreparedExecutionStopPreparationLease): Promise<void> {
+    const ownership = leaseOwnership.get(lease);
+    if (ownership?.producer !== this || this.activePreparations.get(ownership.executionKey)?.failed !== true) {
+      throw stopError('prepared-execution-stop.lease-inactive',
+        'cleanup retry requires the retained lease of an exited failed preparation',
+        'wait for preparation failure before explicitly retrying cleanup');
+    }
+    const cleanup = await this.attemptFailedCleanup(lease);
+    if (cleanup !== null) throw new PreparedExecutionStopPreparationFailure(lease, [cleanup]);
+  }
+
+  private async attemptFailedCleanup(lease: PreparedExecutionStopPreparationLease): Promise<unknown | null> {
+    const ownership = leaseOwnership.get(lease);
+    if (ownership === undefined || ownership.producer !== this) {
+      return stopError(
+        'prepared-execution-stop.lease-invalid',
+        'the preparation lease was not issued by this producer',
+        'retain the actual preparation lease before retrying its failed preparation',
+      );
+    }
+    const active = this.activePreparations.get(ownership.executionKey);
+    if (active === undefined || active.lease !== lease) {
+      return stopError(
+        'prepared-execution-stop.lease-inactive',
+        'the preparation lease is no longer joined to a live preparation',
+        'recover the retained preparation through its actual owner',
+      );
+    }
+    try {
+      await runExclusive(this.gates, ownership.executionKey, async () => {
+        await this.cleanupFailedCustody(lease);
+        await this.commitLeft(lease, 'failed');
+        this.activePreparations.delete(ownership.executionKey);
+        leaseOwnership.delete(lease);
+      });
+      return null;
+    } catch (error) {
+      return error;
+    }
+  }
+
+  /**
+   * Closes the retained physical custody for one failed preparation and commits
+   * its real acquisition and closure facts once each, without a second physical
+   * close or business dispatch. It deliberately closes the actual Provider
+   * before the acquisition append, so a Journal outage still releases the
+   * resource and the retry only has to persist the already-real facts.
+   */
+  private async cleanupFailedCustody(lease: PreparedExecutionStopPreparationLease): Promise<void> {
+    for (const [commitId, custody] of [...this.liveCustody.entries()]) {
+      if (custody.lease !== lease) continue;
+      await this.closePhysical(custody);
+      if (custody.acquisition === undefined) await this.commitAcquisition(lease, commitId, custody);
+      await this.commitClosure(lease, custody.acquisition!, custody);
+      this.liveCustody.delete(commitId);
+    }
+  }
+
+  private async closePhysical(
+    custody: ProviderCustody,
+  ): Promise<Awaited<ReturnType<AgentProviderComposition['port']['close']>>> {
+    if (custody.receipt !== undefined) return custody.receipt;
+    const receipt = await custody.composition.port.close(custody.composition.binding);
+    if (receipt.state !== 'closed') {
+      throw stopError(
+        'prepared-execution-stop.close-incomplete',
+        `provider ${custody.composition.binding.bindingId} close returned ${receipt.state}`,
+        'complete the actual Provider close before releasing ownership',
+        receipt.error,
+      );
+    }
+    custody.receipt = receipt;
+    return receipt;
+  }
+
+  private async commitAcquisition(
+    lease: PreparedExecutionStopPreparationLease,
+    commitId: string,
+    custody: ProviderCustody,
+  ): Promise<JournalCommitRef> {
+    const ref = await this.journal.transaction(
+      () => ({ commitId }),
+      async (plan, append) => {
+        const record = await append({
+          commitId: plan.commitId,
+          kind: 'event',
+          scope: lease.allocation.scope,
+          payload: {
+            kind: PAYLOAD_KIND,
+            fact: {
+              kind: 'resource-acquired',
+              resource: { preparation: lease.preparation, binding: custody.composition.binding },
+            } satisfies PreparedExecutionStopFact,
+          },
+        });
+        return commitRef(record);
+      },
+    );
+    custody.acquisition = ref;
+    return ref;
+  }
+
+  private async commitClosure(
+    lease: PreparedExecutionStopPreparationLease,
+    acquisition: JournalCommitRef,
+    custody: ProviderCustody,
+  ): Promise<JournalCommitRef> {
+    const closedCommitId = commitIdFor(lease.allocation, `resource-closed:${acquisition.commitId}`);
+    const receipt = await this.closePhysical(custody);
+    const ref = await this.journal.transaction(
+      () => ({ commitId: closedCommitId }),
+      async (plan, append) => {
+        const record = await append({
+          commitId: plan.commitId,
+          kind: 'event',
+          scope: lease.allocation.scope,
+          payload: {
+            kind: PAYLOAD_KIND,
+            fact: { kind: 'resource-closed', acquisition, receipt } satisfies PreparedExecutionStopFact,
+          },
+        });
+        return commitRef(record);
+      },
+    );
+    return ref;
+  }
+
+  private async commitLeft(
+    lease: PreparedExecutionStopPreparationLease,
+    outcome: 'failed' | 'prepared',
+  ): Promise<void> {
+    await this.journal.transaction(
+      ({ records }) => {
+        const commitId = commitIdFor(lease.allocation, 'preparation-left');
+        const existing = records.find((record) => record.commitId === commitId);
+        if (existing === undefined) return { kind: 'append' as const, commitId };
+        const entry = factEntry(existing);
+        if (entry?.fact.kind !== 'preparation-left'
+          || !sameRef(entry.fact.preparation, lease.preparation)
+          || (entry.fact.outcome !== 'prepared' && entry.fact.outcome !== 'failed')) {
+          throw stopError('prepared-execution-stop.preparation-mismatch',
+            'the existing preparation-left does not resolve to this exact preparation',
+            'reconcile the durable preparation before releasing its lease');
+        }
+        // A prior successful append can lose its acknowledgement. Preserve its
+        // actual outcome instead of replacing a prepared fact with failed.
+        return { kind: 'existing' as const };
+      },
+      async (plan, append) => {
+        if (plan.kind === 'existing') return;
+        await append({
+          commitId: plan.commitId,
+          kind: 'event',
+          scope: lease.allocation.scope,
+          payload: {
+            kind: PAYLOAD_KIND,
+            fact: { kind: 'preparation-left', preparation: lease.preparation, outcome } satisfies PreparedExecutionStopFact,
+          },
+        });
+      },
+    );
+  }
+
+  private hasUnpublishedCustody(allocation: RuntimeExecutionAllocation): ProviderCustody | null {
+    for (const custody of this.liveCustody.values()) {
+      if (!sameAllocation(custody.lease.allocation, allocation)) continue;
+      if (custody.acquisition === undefined) return custody;
+    }
+    return null;
+  }
+
+  /**
+   * Trusted Gateway stop settlement for one exact admitted parent operation.
+   * It reads the exact durable operation control, validates the request
+   * identity/epoch/owner/lease, requires only actually closed prepared
+   * resources, and requires full physical control coverage with no turn. It
+   * never invokes Gateway cancellation itself, so the outer caller owns the
+   * real cancel/readback sequence.
+   */
+  async settleParentStop(request: OperationStopSettlementRequest): Promise<OperationStopSettlementReceipt> {
+    const records = await this.journal.replay();
+    const requested = findRequestedByOperation(records, request.intent.taskId, request.intent.operationId);
+    if (requested === null) {
+      throw stopError(
+        'prepared-execution-stop.absent',
+        'no durable prepared-stop request exists for the admitted parent operation',
+        'persist the prepared-stop request before settling the admitted parent',
+      );
+    }
+    const allocation = requested.fact.allocation;
+    if (!sameScopedId(allocation.taskId, request.intent.taskId)
+      || !sameScopedId(allocation.operationId, request.intent.operationId)
+      || request.intent.inputDigest !== requested.fact.inputDigest
+      || !allocation.inputRefs.includes(request.intent.inputRef)
+      || canonicalJsonStringify(request.intent.requestedScope) !== canonicalJsonStringify(allocation.scope)
+      || canonicalJsonStringify(request.route.effectiveScope) !== canonicalJsonStringify(allocation.scope)
+      || !sameScopedId(request.route.operationId, allocation.operationId)) {
+      throw stopError(
+        'prepared-execution-stop.request-mismatch',
+        'the stop settlement request identity does not match its durable prepared allocation',
+        'settle only the exact retained admitted parent operation',
+      );
+    }
+    const bundle = collectBundle(records, requested);
+    this.assertBundle(records, bundle);
+    const unclosed = bundle.resourceAcquired.filter((acquired) =>
+      !bundle.resourceClosed.some((closed) => closed.fact.acquisition.commitId === acquired.ref.commitId));
+    if (this.activePreparations.has(executionKey(allocation))
+      || this.hasUnpublishedCustody(allocation) !== null
+      || bundle.preparationEntered.length !== bundle.preparationLeft.length || unclosed.length > 0) {
+      throw stopError(
+        'prepared-execution-stop.resource-unresolved',
+        'the prepared stop cannot settle while a preparation or Provider resource is unresolved',
+        'close every acquired Provider resource before settling the admitted parent',
+      );
+    }
+    const control = await this.admission.gateway.readControl({
+      scope: allocation.scope,
+      agentRuntimeId: allocation.runtimeId,
+      harnessExecutionEpoch: allocation.executionEpoch,
+    });
+    if (control.state !== 'complete') {
+      throw stopError(
+        'prepared-execution-stop.control-unknown',
+        `operation control coverage is unknown: ${control.reason}`,
+        'complete the physical operation-control coverage before settling the admitted parent',
+      );
+    }
+    const index = control.operations.findIndex((operation) =>
+      sameScopedId(operation.intent.operationId, allocation.operationId));
+    if (index < 0) {
+      throw stopError(
+        'prepared-execution-stop.parent-missing',
+        'the exact admitted parent is absent from operation control',
+        're-admit the parent through its actual owner before settling',
+      );
+    }
+    if (control.operations.length !== 1) {
+      throw stopError(
+        'prepared-execution-stop.control-unbounded',
+        'operation control coverage contains operations beyond the exact admitted parent',
+        'settle child or additional operations through their own owners before the parent',
+      );
+    }
+    const record = control.operations[index]!;
+    const operationCommit = control.operationCommits[index]!;
+    const registration = findRegistration(records, allocation);
+    if (registration === null || !sameRef(record.binding.admissionCommitRef, registration)
+      || record.status !== 'cancel_requested') {
+      throw stopError('prepared-execution-stop.admission-mismatch',
+        'the parent must be cancellation-requested under its exact durable business registration',
+        'request cancellation through the admitted parent Gateway before settlement');
+    }
+    if (record.binding.agentRuntimeId !== allocation.runtimeId
+      || record.binding.harnessExecutionEpoch !== allocation.executionEpoch
+      || !sameScopedId(record.binding.parentOperationId, allocation.operationId)
+      || canonicalJsonStringify(record.binding.scope) !== canonicalJsonStringify(allocation.scope)) {
+      throw stopError(
+        'prepared-execution-stop.admission-mismatch',
+        'the operation-control binding does not match the retained admitted allocation',
+        'repair the admission binding before settling the admitted parent',
+      );
+    }
+    if (record.executionEpoch !== request.executionEpoch) {
+      throw stopError(
+        'prepared-execution-stop.stale-epoch',
+        'the stop settlement epoch is not the current Gateway operation epoch',
+        'settle the admitted parent at its current operation epoch',
+      );
+    }
+    if (canonicalJsonStringify(record.intent) !== canonicalJsonStringify(request.intent)
+      || canonicalJsonStringify(record.registration) !== canonicalJsonStringify(request.registration)
+      || canonicalJsonStringify(record.route) !== canonicalJsonStringify(request.route)) {
+      throw stopError(
+        'prepared-execution-stop.intent-mismatch',
+        'the stop settlement request does not match the durable admitted control',
+        'settle only the exact durable admitted parent control',
+      );
+    }
+    if (request.owner !== record.registration.owner) {
+      throw stopError(
+        'prepared-execution-stop.owner-mismatch',
+        'the stop settlement owner does not match the admitted parent registration owner',
+        'settle with the exact registration owner',
+      );
+    }
+    if (canonicalJsonStringify(request.lease ?? null) !== canonicalJsonStringify(record.lease ?? null)) {
+      throw stopError(
+        'prepared-execution-stop.lease-mismatch',
+        'the stop settlement lease does not match the admitted parent lease',
+        'settle with the exact admitted lease or none',
+      );
+    }
+    const taskScope = { organId: allocation.scope.organId, taskId: allocation.taskId };
+    const activeBindings = await listTaskActiveTurnBindings({ journal: this.journal, scope: taskScope });
+    const turn = activeBindings.find((entry) => activeTurnMatches(entry.binding, allocation));
+    if (turn !== undefined) {
+      decodeActiveTurnRecords(records, turn.binding.admittedTurn.turnId);
+      throw stopError(
+        'prepared-execution-stop.turn-open',
+        'the admitted parent has an opened turn owned by another settlement path',
+        'settle the opened turn through its actual initial-input or driver owner first',
+      );
+    }
+    const evidenceRefs = [
+      requested.ref,
+      ...bundle.resourceClosed.map((entry) => entry.ref),
+      control.coverageCommitRef,
+      operationCommit,
+    ].map((ref) => evidenceFor(ref, allocation.scope));
+    return {
+      receiptId: `prepared-stop-settle:${allocation.operationId.value}:${request.executionEpoch}`,
+      operationId: request.intent.operationId,
+      taskId: request.intent.taskId,
+      executionEpoch: request.executionEpoch,
+      owner: request.owner,
+      ...(request.lease === undefined ? {} : { leaseId: request.lease.leaseId }),
+      stopped: true,
+      sideEffectState: 'none',
+      evidenceRefs,
+    };
   }
 
   async closeProvider(acquisition: JournalCommitRef): Promise<JournalCommitRef> {
@@ -778,23 +1233,16 @@ export class PreparedExecutionStop {
         .find((entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'resource-closed' }>> =>
           entry?.fact.kind === 'resource-closed' && entry.fact.acquisition.commitId === acquisition.commitId);
       if (existing !== undefined) return existing.ref;
-      const composition = this.liveCompositions.get(acquisition.commitId);
-      if (composition === undefined) {
+      const custody = this.liveCustody.get(acquisition.commitId);
+      if (custody === undefined) {
         throw stopError(
           'prepared-execution-stop.close-unresolved',
           'the live Provider composition is not owned by this producer instance',
           'join the original preparation owner or retain the unresolved resource responsibility',
         );
       }
-      const receipt = await composition.port.close(composition.binding);
-      if (receipt.state !== 'closed') {
-        throw stopError(
-          'prepared-execution-stop.close-incomplete',
-          `provider ${composition.binding.bindingId} close returned ${receipt.state}`,
-          'complete the actual Provider close before releasing ownership',
-          receipt.error,
-        );
-      }
+      custody.acquisition ??= acquisition;
+      const receipt = await this.closePhysical(custody);
       const commitId = commitIdFor(prepared.fact.allocation, `resource-closed:${acquisition.commitId}`);
       const ref = await this.journal.transaction(
         ({ records: currentRecords }) => {
@@ -819,7 +1267,7 @@ export class PreparedExecutionStop {
           return commitRef(record);
         },
       );
-      this.liveCompositions.delete(acquisition.commitId);
+      this.liveCustody.delete(acquisition.commitId);
       return ref;
     });
   }
@@ -828,6 +1276,13 @@ export class PreparedExecutionStop {
     lease: PreparedExecutionStopPreparationLease,
     outcome: 'failed' | 'prepared',
   ): Promise<unknown | null> {
+    if (this.hasUnpublishedCustody(lease.allocation) !== null) {
+      return stopError(
+        'prepared-execution-stop.custody-unresolved',
+        'the preparation retains an unpublished Provider resource and cannot commit preparation-left',
+        'recover the retained custody through its actual owner before finishing the preparation',
+      );
+    }
     const ownership = leaseOwnership.get(lease);
     if (ownership === undefined || ownership.producer !== this) {
       return stopError(
@@ -838,36 +1293,13 @@ export class PreparedExecutionStop {
     }
     try {
       await runExclusive(this.gates, ownership.executionKey, async () => {
-        await this.journal.transaction(
-          ({ records }) => {
-            const existing = records
-              .map(factEntry)
-              .find((entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'preparation-left' }>> =>
-                entry?.fact.kind === 'preparation-left'
-                && entry.fact.preparation.commitId === lease.preparation.commitId);
-            if (existing !== undefined) return { kind: 'existing' as const };
-            return { kind: 'append' as const, commitId: commitIdFor(lease.allocation, 'preparation-left') };
-          },
-          async (plan, append) => {
-            if (plan.kind === 'existing') return;
-            await append({
-              commitId: plan.commitId,
-              kind: 'event',
-              scope: lease.allocation.scope,
-              payload: {
-                kind: PAYLOAD_KIND,
-                fact: { kind: 'preparation-left', preparation: lease.preparation, outcome } satisfies PreparedExecutionStopFact,
-              },
-            });
-          },
-        );
+        await this.commitLeft(lease, outcome);
         this.activePreparations.delete(ownership.executionKey);
+        leaseOwnership.delete(lease);
       });
       return null;
     } catch (error) {
       return error;
-    } finally {
-      leaseOwnership.delete(lease);
     }
   }
 

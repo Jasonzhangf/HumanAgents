@@ -461,6 +461,7 @@ test('continueCurrentTurn refuses an unknown terminal and never dispatches when 
     );
     assert.equal(unknownRequests.length, 1, 'an unknown terminal allowed an extra dispatch');
     assert.equal(unknown.context.requests().some((record) => record.phase === 'settled'), false, 'an unknown terminal was recorded as normal completion');
+    assert.equal(unknown.context.requests().filter((record) => record.phase === 'dispatching').length, 1, 'an unknown terminal must not register continuation dispatching');
     assert.equal(unknown.settleCalls(), 0);
     await unknown.instance.settle({ runtimeId, executionEpoch });
     await unknown.instance.close();
