@@ -3,6 +3,7 @@ export * from './bug-intake.js';
 export * from './bug-actions.js';
 export * from './decision-executor.js';
 export * from './interaction-turn-session.js';
+export * from './interaction-parent-turn-raw.js';
 export * from './memory-status.js';
 export * from './memory-submission.js';
 export * from './memory-tools.js';

@@ -133,12 +133,14 @@ import {
   type DurableTaskInventoryEntry,
   type RuntimeExecutionDriver,
   type RuntimeExecutionDriverInput,
+  type RuntimeExecutionRelease,
   type RuntimeExplicitBrainJournalState,
   type RuntimeExecutionCapabilities,
   type RuntimeTaskCoordinatorOptions,
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import { createDefaultExecutionComposition } from './execution-composition.js';
 import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
 import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
@@ -395,7 +397,18 @@ export interface UiRuntimeMemoryComposition {
 type ServiceExecutionPorts = Pick<
   RuntimeTaskCoordinatorOptions,
   'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts'
->;
+> & {
+  /**
+   * The one canonical cold-resume selector. The launch execution composition
+   * binds it from the retained allocation and the canonical source owners, so
+   * the public consumer never supplies a business turn or a predecessor. It is
+   * an App adapter port, not a Runtime coordinator option.
+   */
+  readonly resolveColdExecutionResumeRequest?: (input: {
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+  }) => Promise<RuntimeColdExecutionResumeRequest>;
+};
 
 /**
  * The original coordinator callbacks the native composition needs. They are
@@ -406,6 +419,19 @@ type ServiceCoordinatorCallbacks = Pick<
   RuntimeTaskCoordinator,
   'publishCurrentTurnState' | 'closedTurnPlannerPool' | 'recordProviderRequestIdentity'
 >;
+
+/**
+ * The public cold-resume receipt. It carries only the identities the bound
+ * selector and the Runtime snapshot actually read back; it never invents a
+ * capture, receipt or control field.
+ */
+export interface UiRuntimeExecutionResumeReceipt {
+  readonly state: RuntimeExecutionRelease['state'];
+  readonly taskId: string;
+  readonly operationId: string;
+  readonly businessTurnId: string;
+  readonly executionEpoch?: number;
+}
 
 export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
@@ -1182,6 +1208,20 @@ function apiError(error: unknown): UiRuntimeApiError {
     const status = error.code.endsWith('.not.found') ? 404 : error.code === 'execution.input.required' ? 400 : 409;
     return new UiRuntimeApiError(error.code, error.ownerId, error.message, error.nextAction, status);
   }
+  if (error instanceof AppLifecycleError) {
+    // App lifecycle refusals (for example a missing cold-execution source) are
+    // typed conflicts: the durable recovery responsibility is retained and the
+    // original cause is preserved so the caller can inspect the exact truth.
+    return new UiRuntimeApiError(
+      error.code,
+      error.ownerId,
+      error.message,
+      error.nextAction,
+      409,
+      undefined,
+      error.cause,
+    );
+  }
   if (error instanceof MemoryCoordinatorError) {
     const bindingMissing = error.message.startsWith('memory-binding-missing')
       || error.message.startsWith('memory interaction binding is not registered');
@@ -1817,6 +1857,7 @@ export class UiRuntimeService {
   private readonly implicitWatchedOperations = new Set<string>();
   private readonly implicitBrain: ImplicitBrainFifo;
   private readonly i2Reader?: I2HistoryReader;
+  private readonly resolveColdExecutionResumeRequest?: ServiceExecutionPorts['resolveColdExecutionResumeRequest'];
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
@@ -1881,6 +1922,7 @@ export class UiRuntimeService {
       closedTurnPlannerPool: (taskId) => this.coordinator.closedTurnPlannerPool(taskId),
       recordProviderRequestIdentity: (event) => this.coordinator.recordProviderRequestIdentity(event),
     });
+    this.resolveColdExecutionResumeRequest = executionPorts?.resolveColdExecutionResumeRequest;
     const nativeDriverBound = executionPorts?.createDriver !== undefined;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
@@ -4131,6 +4173,66 @@ export class UiRuntimeService {
       await this.coordinator.releaseExecution(taskId, allocation.operationId);
       this.watchExecutionForImplicitWakeup(allocation.operationId);
       return { operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Public cold-resume selector for one retained operation. The App adapter
+   * checks Provider readiness and that the retained task exists, then delegates
+   * business identity to the one canonical source selector. Runtime retains the
+   * task-scoped admission/grant decision and the recovery responsibility on
+   * every refusal: this method never mints a task, operation, effect or
+   * fabricated capture, and reports success only after an actual release.
+   */
+  async resumeExecution(
+    taskId: TaskId,
+    input: { readonly operationId: OperationId },
+  ): Promise<UiRuntimeExecutionResumeReceipt> {
+    try {
+      const status = this.status();
+      if (!this.canStartProviderExecution(status)) {
+        const providerError = this.options.providerError;
+        throw new UiRuntimeApiError(
+          providerError?.code ?? `provider.readiness.${status.providerState}`,
+          providerError?.ownerId ?? 'humanagent.provider-adapter',
+          providerError?.message ?? `provider readiness is ${status.providerState}`,
+          providerError?.nextAction ?? 'inspect provider readiness',
+          409,
+        );
+      }
+      // The retained task must exist before any selector runs; a missing task is
+      // an explicit refusal, not a new allocation.
+      this.coordinator.taskSnapshot(taskId);
+      const resolveRequest = this.resolveColdExecutionResumeRequest;
+      if (resolveRequest === undefined) {
+        throw new RuntimeTaskControlError(
+          'cold-execution.selector-unbound',
+          RUNTIME_OWNER,
+          'the canonical cold execution resume selector is not bound',
+          'bind resolveColdExecutionResumeRequest in the launch execution composition before resuming',
+        );
+      }
+      const request = await resolveRequest({ taskId, operationId: input.operationId });
+      this.watchExecutionForImplicitWakeup(input.operationId);
+      const release = await this.coordinator.resumeExecution(taskId, input.operationId, request);
+      if (release.state !== 'released') {
+        throw new RuntimeTaskControlError(
+          'cold-execution.resume-not-released',
+          RUNTIME_OWNER,
+          'the retained operation was not released; no Provider may start',
+          'retain the recovery responsibility and resolve the original owner binding before resuming',
+        );
+      }
+      const snapshot = this.coordinator.taskSnapshot(taskId);
+      return {
+        state: release.state,
+        taskId: snapshot.taskId.value,
+        operationId: input.operationId.value,
+        businessTurnId: request.businessTurnId,
+        ...(snapshot.executionEpoch === undefined ? {} : { executionEpoch: snapshot.executionEpoch }),
+      };
     } catch (error) {
       throw apiError(error);
     }
