@@ -1,6 +1,7 @@
 import type {
   AnyProviderExecutionIdentityRef,
   BusinessPayload,
+  EvidenceRef,
   ProviderExecutionIdentityRef,
   ProviderRequestIdentityRef,
   ProviderToolStatus,
@@ -39,6 +40,8 @@ export interface ProviderRequestContextToolResultUnit {
   readonly toolId: string;
   readonly output: string;
   readonly status: ProviderToolStatus;
+  /** The accepted evidence refs of this result, copied by the materializer. Empty when there are none. */
+  readonly evidenceRefs?: readonly EvidenceRef[];
 }
 
 export type ProviderRequestContextUnit =

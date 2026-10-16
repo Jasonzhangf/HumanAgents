@@ -109,6 +109,8 @@ export type SemanticCurrentTurnUnit =
       readonly continuationRef: string;
       readonly status: ProviderToolStatus;
       readonly rawOutput: Uint8Array;
+      /** The accepted result refs, cloned from the fact so the reader shares no mutable reference. */
+      readonly evidenceRefs: readonly EvidenceRef[];
     };
 
 export interface SemanticTurnContextReaderInput {
@@ -346,6 +348,7 @@ function mapActiveTurnCore(
             toolId: fact.result.toolId,
             continuationRef: fact.continuationRef,
             status: fact.result.status,
+          evidenceRefs: fact.result.evidenceRefs.map(cloneEvidenceRef),
             rawOutput: new Uint8Array(entry.rawOutput),
           },
         },
