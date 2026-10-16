@@ -381,6 +381,7 @@ test('neutral interaction parent raw owner keeps one durable, parent-only raw hi
     await helperJournal.appendOwnerAccepted({
       kind: 'owner-accepted',
       result: childResult,
+      refinedResult: { ref: childEvidence, view: { kind: 'utf8-text' } },
       acceptedBy: 'owner',
       acceptanceRef: 'acceptance://child-only',
       acceptedAt: committedAt,
@@ -845,7 +846,26 @@ test('explicit semantic close folds the settled parent turn and separates accept
     // Closure must sample its own save time, rather than reuse a helper time.
     const samplesBeforeClose = calls();
     assert.equal(samplesBeforeClose, 5);
-    const first = await session.closeTurnSemanticCheckpoint({
+
+    // Failure basis: after memory loss or process restart, in-memory helper
+    // dispatched and entries arrays are empty. If cold reconstruction does not
+    // enumerate durable helpers via turnHelperJournal, accepted refined work and
+    // unaccepted returns are silently omitted from the semantic checkpoint.
+    // Impact: silent omission of accepted child work from the turn semantic checkpoint.
+    // Cost: minimal in-memory reconstruction from the existing fixture directory.
+    const coldJournal = new JsonlOrganJournal(join(directory, 'organ.jsonl'));
+    const coldHelperJournal = new JsonlInteractionHelperJournal(coldJournal);
+    const coldSession = new ExplicitTurnHelperSession({
+      identity: turn,
+      latestTurn,
+      journal: coldHelperJournal,
+      clock,
+      factory: semanticCloseHelperFactory(),
+      checkpointJournal: coldHelperJournal,
+      rawContent,
+      turnHelperJournal: coldHelperJournal,
+    });
+    const first = await coldSession.closeTurnSemanticCheckpoint({
       finalParentOutput: finalOutput,
       outcome,
     });
