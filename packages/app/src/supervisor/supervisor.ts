@@ -735,18 +735,20 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
     },
     withCurrentLeaseOwner,
     async withCurrentDaemonOwner(binding, operation) {
-      try {
-        validateOccurrenceTaskBinding(binding);
-      } catch (error) {
-        throw new AppLifecycleError(
-          'daemon-lease-owner-binding-invalid',
-          error instanceof Error ? error.message : String(error),
-          'repair the immutable occurrence binding before retrying the guarded mutation',
-          'supervisor',
-          error,
-        );
-      }
-      return withCurrentLeaseOwner(operation);
+      return withCurrentLeaseOwner(async (authenticatedCaller, isCommittedReplacement) => {
+        try {
+          validateOccurrenceTaskBinding(binding);
+        } catch (error) {
+          throw new AppLifecycleError(
+            'daemon-lease-owner-binding-invalid',
+            error instanceof Error ? error.message : String(error),
+            'repair the immutable occurrence binding before retrying the guarded mutation',
+            'supervisor',
+            error,
+          );
+        }
+        return operation(authenticatedCaller, isCommittedReplacement);
+      });
     },
     async release(input) {
       if (released) return record;
