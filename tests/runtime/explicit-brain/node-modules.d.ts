@@ -18,5 +18,18 @@ declare module 'node:test' {
 }
 
 declare module 'node:process' {
+  const process: { env: Record<string, string | undefined> };
+  export default process;
   export function cwd(): string;
+}
+
+declare module 'node:os' {
+  function homedir(): string;
+  function tmpdir(): string;
+}
+
+declare module 'node:fs/promises' {
+  function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
+  function mkdtemp(prefix: string): Promise<string>;
+  function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 }
