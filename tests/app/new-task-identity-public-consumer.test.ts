@@ -7,6 +7,7 @@ import {
   id,
   TASK_FLOW_DEFINITION_VERSION,
   type EvidenceRef,
+  type ExecutionRuntimePort,
   type ExecutionPolicyDefinition,
   type JournalCommitRef,
   type ProviderBinding,
@@ -31,7 +32,17 @@ import { TaskPlanRevisionConsumer } from '../../packages/runtime/src/orchestrati
 import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
 import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
-import { FakeReplayExecutionRuntimePort, startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import {
+  FakeReplayExecutionRuntimePort,
+  startUiRuntime,
+  type UiRuntimeLaunchOptions,
+} from '../../packages/app/src/ui-runtime/index.js';
+import { assembleProviderExecutionPort } from '../../packages/app/src/provider-assembly.js';
+import {
+  prepareAgentProvider as assembleAgentProvider,
+  createAgentProviderPort,
+  prepareExecutionAgentProvider,
+} from '../../packages/app/src/agent-driver-composition.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import {
   uiRuntimeCheckpointRoot,
@@ -44,7 +55,12 @@ import type {
   RuntimeTaskDashboardProjection,
   RuntimeTaskListProjection,
 } from '../../packages/ui/contracts/runtime.js';
-import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
+import {
+  ensureControlLayout,
+  resolveRuntimePaths,
+  type EffectiveAgentProviderBinding,
+  type ProviderConfig,
+} from '../../packages/config/src/index.js';
 
 // A real public new-task submission must bind the confirmed typed requirement
 // source to the Task it creates before execution starts. The current product
@@ -57,6 +73,18 @@ const ROOT = process.env.HUMANAGENT_TEST_ROOT
   ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-production-task-identity-r1-20261014');
 
 const organId = id('organ', 'organ-task-identity-consumer');
+const gaHttpBinding: ProviderBinding = {
+  bindingId: 'binding-ga-http-source',
+  // The local label is unrelated to the source strategy, exactly as in the
+  // existing source consumer. Only the typed source selects the transport.
+  providerId: 'rcc',
+  protocol: 'responses',
+  endpointRef: 'http:127.0.0.1:4599',
+  modelRef: 'ga.http.model',
+  configDigest: 'sha256:ga-http-config',
+  capabilityDigest: 'sha256:ga-http-capability',
+};
+
 const binding: ProviderBinding = {
   bindingId: 'binding-task-identity',
   providerId: 'provider-task-identity',
@@ -102,6 +130,50 @@ async function rawNoOrigin(
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
+}
+
+interface CapturedUpstreamRequest {
+  readonly method: string;
+  readonly url: string;
+  readonly body: string;
+}
+
+function sseResponse(frames: readonly unknown[]): Response {
+  const payload = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(payload));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+}
+
+/**
+ * Intercepts only the configured non-RCC upstream origin. The real HTTP
+ * transport still builds the request URL, headers and body; only the OS socket
+ * is replaced. Every other origin (the local UI API) delegates to the existing
+ * wrapper, so the public submission path stays real.
+ */
+function captureUpstream(origin: string) {
+  const requests: CapturedUpstreamRequest[] = [];
+  const original = globalThis.fetch;
+  const capture = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (new URL(url).origin !== origin) return original(input, init);
+    requests.push({
+      method: (init.method ?? 'GET').toUpperCase(),
+      url,
+      body: typeof init.body === 'string' ? init.body : '',
+    });
+    return sseResponse([
+      { type: 'response.created', response: { id: 'response-ga-http' } },
+      { type: 'response.output_text.done', item_id: 'message-final', text: 'GA_HTTP_SOURCE_OK' },
+      { type: 'response.completed', response: { id: 'response-ga-http' } },
+    ]);
+  }) as typeof fetch;
+  globalThis.fetch = capture;
+  return { requests, restore: () => { globalThis.fetch = original; } };
 }
 
 async function accessControlFor(root: string) {
@@ -255,22 +327,27 @@ function identityWithFixtureGrant(
   ));
 }
 
-function taskControlPathFor(root: string): string {
-  return join(root, 'checkpoints', 'fake', 'task-control.jsonl');
+function taskControlPathFor(root: string, mode: 'fake' | 'rcc' = 'fake'): string {
+  return join(root, 'checkpoints', mode, 'task-control.jsonl');
 }
 
-async function startRuntime(root: string, port: FakeReplayExecutionRuntimePort, extra: {
+async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
   readonly projectKey: string;
+  readonly mode?: 'fake' | 'rcc';
+  readonly providerSource?: 'rcc' | 'http';
+  readonly binding?: ProviderBinding;
+  readonly runtimeComposition?: UiRuntimeLaunchOptions['runtimeComposition'];
   readonly taskIdentity?: (principalOwner: string, taskControlPath: string) => TaskIdentityConsumer;
 }) {
+  const mode = extra.mode ?? 'fake';
   const auth = await accessControlFor(root);
   const principalOwner = auth.accessControl.readProductPrincipalOwner();
-  const taskControlPath = taskControlPathFor(root);
+  const taskControlPath = taskControlPathFor(root, mode);
   const taskIdentity = extra.taskIdentity?.(principalOwner, taskControlPath);
   const runtime = await startUiRuntime({
-    mode: 'fake',
+    mode,
     organId,
-    binding,
+    binding: extra.binding ?? binding,
     port,
     checkpointRoot: join(root, 'checkpoints'),
     evidenceRoot: join(root, 'evidence'),
@@ -280,6 +357,8 @@ async function startRuntime(root: string, port: FakeReplayExecutionRuntimePort, 
     memory: memoryFor(extra.projectKey),
     accessControl: auth.accessControl,
     explicitBrainInterpreter: createInterpreter,
+    ...(extra.providerSource === undefined ? {} : { providerSource: extra.providerSource }),
+    ...(extra.runtimeComposition === undefined ? {} : { runtimeComposition: extra.runtimeComposition }),
     ...(taskIdentity === undefined ? {} : { taskIdentity }),
   });
   sessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
@@ -634,6 +713,135 @@ test('public new-task submit binds the real typed source and cold-reads before a
   }
 
   await rm(root, { recursive: true, force: true });
+});
+
+/**
+ * Component failure basis for this focused consumer.
+ *
+ * Failure mode: a validated `source: 'http'` binding whose real probe is the
+ * honest `unknown` with `continue -> http.start` still fails Task admission,
+ * because the readiness gate drops the source-aware requestability and the Task
+ * is never created. Impact: an HTTP-configured Task can probe and submit but
+ * never becomes an executable Task. Probability: unquantified. Cost: one
+ * continuous case inside the existing consumer plus one type-safe source
+ * counterexample; no new harness, matrix, credential or service.
+ */
+test('G-A HTTP source public Task admission', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-ga-'));
+  const taskControlPath = taskControlPathFor(root, 'rcc');
+  const evidenceRoot = join(root, 'evidence');
+  const upstreamOrigin = 'http://127.0.0.1:4599';
+  const committedTaskFlow: TaskFlowBinding = {
+    kind: 'long-running',
+    definitionVersion: TASK_FLOW_DEFINITION_VERSION,
+  };
+  const capture = captureUpstream(upstreamOrigin);
+  // The probe owner is the real assembled HTTP-source port: it never performs
+  // RCC discovery and returns the typed `unknown`/`http.start` readiness.
+  const probePort = assembleProviderExecutionPort({
+    binding: gaHttpBinding,
+    routeRef: 'ga-http-route',
+    baseUrl: upstreamOrigin,
+    source: 'http',
+  }, evidenceRoot);
+  const httpProvider: ProviderConfig = {
+    source: 'http',
+    provider: 'http',
+    binding: gaHttpBinding.bindingId,
+    protocol: 'responses',
+    model: gaHttpBinding.modelRef,
+    route: 'ga-http-route',
+    baseUrl: upstreamOrigin,
+  };
+  const entries: EffectiveAgentProviderBinding[] = [
+    { agentId: 'ga-http-execution', roleId: 'execution', source: 'agent', provider: httpProvider },
+    { agentId: 'ga-http-orchestration', roleId: 'orchestration', source: 'agent', provider: httpProvider },
+  ];
+  // The native launch requires both preparers. The neutral preparer keeps the
+  // taskless parent/helper path; the Task-scoped preparer hands the selected
+  // composition's custody to the prepared-stop owner exactly as the real serve
+  // caller wires it, so the public Task path keeps its real custody. It starts
+  // inside this try so a launch failure still releases the case's own capture.
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  try {
+    runtime = await startRuntime(root, probePort, {
+      projectKey: 'project-ga-http',
+      mode: 'rcc',
+      providerSource: 'http',
+      binding: gaHttpBinding,
+      taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path, undefined, committedTaskFlow),
+      runtimeComposition: {
+        prepareAgentProvider: async (selection) => assembleAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          evidenceRoot,
+        }),
+        prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          createPort: (selected) => createAgentProviderPort(selected, evidenceRoot),
+        }, owner, lease),
+      },
+    });
+
+    // The real probe reached no network and the runtime kept the honest unknown;
+    // it must not be rewritten to degraded just to make the Task requestable.
+    assert.deepEqual(capture.requests, []);
+    assert.equal(runtime.service.status().providerState, 'unknown');
+    assert.equal(runtime.service.status().state, 'unknown');
+
+    const submission = await submitNewTask(runtime, 'public-ga-http');
+
+    // The confirmed requirement flows through the real FIFO and the real Organ
+    // Journal identity owner before execution, so the exact Task identity is the
+    // one the submission confirmed.
+    await waitForAsync(async () => {
+      assert.equal((await identityRecords(taskControlPath)).length, 1);
+    });
+    const committed = (await identityRecords(taskControlPath))[0]!;
+    assert.equal(committed.source.requirementId, submission.receipt.requirement.requirementId);
+    assert.equal(committed.source.draftId, submission.draftId);
+
+    // The public read returns that same Task, bound to the confirmed source.
+    const listResponse = await fetch(`${runtime.server.url}/api/tasks`);
+    assert.equal(listResponse.status, 200);
+    const list = await listResponse.json() as RuntimeTaskListProjection;
+    const rows = [
+      ...list.running, ...list.waiting, ...list.completed,
+      ...list.stopped, ...list.draft, ...list.failed,
+    ];
+    const row = rows.find((candidate) => candidate.taskId.value === committed.scope.taskId.value);
+    assert.ok(row, 'the admitted HTTP-source Task must appear in the public task list');
+    assert.deepEqual(row!.identitySource, committed.source);
+    assert.equal(runtime.service.status().providerState, 'unknown', 'unknown health stays unknown under the HTTP source');
+
+    // The admission edge really released an execution, which reached the
+    // configured origin exactly once through the Responses protocol. No RCC
+    // discovery probe (`/health`, `/v1/models`) may have been sent.
+    await waitFor(() => assert.equal(capture.requests.length, 1), 8000);
+    assert.equal(capture.requests[0]!.method, 'POST');
+    assert.equal(new URL(capture.requests[0]!.url).pathname, '/v1/responses');
+    const sent = JSON.parse(capture.requests[0]!.body) as { readonly model?: string };
+    assert.equal(sent.model, gaHttpBinding.modelRef);
+    assert.equal(
+      capture.requests.some((request) => request.url.endsWith('/health') || request.url.endsWith('/v1/models')),
+      false,
+      'the HTTP source must not run RCC discovery',
+    );
+  } finally {
+    // The captured launch/admission error is only rethrown after this case's
+    // own runtime, fetch capture and fixture root are all released; the error
+    // is never swallowed here. A start failure must not leak the fixture the
+    // same way it used to leak the process-wide capture.
+    await runtime?.close();
+    capture.restore();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('a real identity append failure stops execution and retries the same Task and source', async () => {
