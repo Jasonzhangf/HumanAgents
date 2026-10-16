@@ -745,6 +745,7 @@ test('preserves prior results and stops a Responses tool batch at the first owne
     return delayedResponse(chunks(wireEvents.map((event) => `data: ${JSON.stringify(event)}\n\n`)));
   };
   const executions: Array<{ callId: string; toolId: string; arguments: unknown; continuationRef: string }> = [];
+  const registrations: NativeRequestRegistration[] = [];
   const instance = new ProviderAgentDriver({
     port: realProviderAdapter(fetch),
     binding,
@@ -760,6 +761,10 @@ test('preserves prior results and stops a Responses tool batch at the first owne
       { toolId: 'file.write', description: 'write a file', inputSchema: { type: 'object' } },
       { toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } },
     ],
+    registerRequest: async (registration) => {
+      registrations.push(structuredClone(registration));
+      return registration.record;
+    },
     executeTool: {
       async execute({ call }) {
         executions.push({ callId: call.callId, toolId: call.toolId, arguments: call.arguments, continuationRef: call.continuationRef });
@@ -852,6 +857,16 @@ test('preserves prior results and stops a Responses tool batch at the first owne
   assert.deepEqual(observationFailure.providerError.evidenceRefs, failure.evidenceRefs);
 
   assert.equal(requests.length, 1, 'a partial tool continuation request was sent after B failed');
+  assert.equal(
+    registrations.some((entry) => entry.record.phase === 'settled'),
+    false,
+    'a partial batch failure must not commit normal settled for the request',
+  );
+  assert.equal(
+    registrations.filter((entry) => entry.record.phase === 'dispatching').length,
+    1,
+    'a partial batch failure must not register a continuation dispatch',
+  );
   assert.equal(requests[0]?.init.method, 'POST');
   assert.equal(stopReceipt?.requested, true);
   assert.equal('state' in (stopReceipt ?? {}), false, 'stop receipt must not claim settlement');
@@ -903,6 +918,16 @@ test('provider agent driver reports an unowned tool call as an observation inste
       return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
     },
   });
+  const acceptedOrder: string[] = [];
+  const writes: Array<{ type: string; content?: string }> = [];
+  const fakeSink: ProviderEvidenceSink = {
+    async write(writeInput) {
+      writes.push({ type: writeInput.type, content: typeof writeInput.content === 'string' ? writeInput.content : undefined });
+      return evidence;
+    },
+    async read() { throw new Error('unused'); },
+  };
+  const registrations: NativeRequestRegistration[] = [];
   const instance = new ProviderAgentDriver({
     port: runtimePort,
     binding,
@@ -914,6 +939,16 @@ test('provider agent driver reports an unowned tool call as an observation inste
     scope,
     inputRefs: ['input-1'],
     tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    rawEvidence: fakeSink,
+    acceptRawFact: async (envelope) => {
+      acceptedOrder.push(`raw:${envelope.fact.kind}`);
+      return { seq: acceptedOrder.length, acceptedAt: '2026-10-16T00:00:00.000Z', envelope };
+    },
+    registerRequest: async (registration) => {
+      registrations.push(structuredClone(registration));
+      acceptedOrder.push(`register:${registration.record.phase}`);
+      return registration.record;
+    },
     executeTool: {
       async execute({ call }) {
         executions.push(call.toolId);
@@ -938,6 +973,43 @@ test('provider agent driver reports an unowned tool call as an observation inste
   // The observation reaches the model on the continuation instead of a fatal error.
   assert.deepEqual(submissions[0]?.toolContinuations?.map((continuation) => continuation.callId), ['call-unowned']);
   assert.match(String(submissions[0]?.toolContinuations?.[0]?.output ?? ''), /not available in this Harness/);
+
+  const initialRequestId = registrations[0]!.record.request.requestId;
+  const initialSettledIndex = acceptedOrder.indexOf('register:settled');
+  const toolResultIndex = acceptedOrder.indexOf('raw:tool-result');
+  const continuationDispatchIndex = acceptedOrder.lastIndexOf('register:dispatching');
+
+  assert.ok(
+    toolResultIndex !== -1,
+    'unowned negative tool result must be durably accepted through raw fact acceptance',
+  );
+  assert.ok(
+    toolResultIndex < initialSettledIndex,
+    'unowned negative tool result acceptance must occur before request settled',
+  );
+  assert.ok(
+    initialSettledIndex < continuationDispatchIndex,
+    'request settled must be registered before continuation dispatching',
+  );
+  assert.deepEqual(
+    registrations.map((entry) => [
+      entry.record.request.requestId === initialRequestId ? 'R1' : 'R2',
+      entry.record.phase,
+    ]),
+    [
+      ['R1', 'dispatching'],
+      ['R1', 'dispatched'],
+      ['R1', 'waiting'],
+      ['R1', 'settled'],
+      ['R2', 'dispatching'],
+      ['R2', 'dispatched'],
+      ['R2', 'settled'],
+    ],
+  );
+  assert.equal(
+    writes.find((w) => w.type === 'tool-result-output')?.content,
+    'exec_command is not available in this Harness; only these function tools can be called: file.read',
+  );
 });
 
 test('provider agent driver replays the whole tool history into every continuation', async () => {  // The provider has no server-side conversation state, so a continuation that
@@ -1568,6 +1640,7 @@ test('provider agent driver mints one stable turn id across a real request lifec
     'dispatching',
     'dispatched',
     'waiting',
+    'settled',
     'dispatching',
     'dispatched',
     'settled',
@@ -2288,6 +2361,20 @@ test('R1-A: provider driver forwards codec raw facts and persists the exact exec
     assert.equal(fact.result.callId, 'call-r1');
     assert.equal(fact.result.status, 'succeeded');
     assert.equal(await coldRead(harness, fact), rawOutput);
+
+    const requestPhases = harness.context.requests().map((record) => [
+      record.request.requestId === firstRequestId ? 'R1' : 'R2',
+      record.phase,
+    ]);
+    assert.deepEqual(requestPhases, [
+      ['R1', 'dispatching'],
+      ['R1', 'dispatched'],
+      ['R1', 'waiting'],
+      ['R1', 'settled'],
+      ['R2', 'dispatching'],
+      ['R2', 'dispatched'],
+      ['R2', 'settled'],
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -2657,6 +2744,8 @@ test('R1-C: non-success output stays evidence and save, accept and ack failures 
         (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === failure.code,
       );
       assert.equal(harness.submissions.length, 0);
+      assert.equal(harness.context.requests().some((record) => record.phase === 'settled'), false, 'non-success tool result must not settle the request');
+      assert.equal(harness.context.requests().filter((record) => record.phase === 'dispatching').length, 1, 'non-success tool result must not dispatch continuation');
       const fact = durableToolResultFact(harness.context);
       assert.equal(fact.result.status, 'failed');
       assert.equal(fact.result.error?.code, failure.code);
@@ -2688,6 +2777,8 @@ test('R1-C: non-success output stays evidence and save, accept and ack failures 
       );
       assert.equal(harness.submissions.length, 0);
       assert.equal(acceptedRawFacts(harness.context).some((entry) => entry.envelope.fact.kind === 'tool-result'), false);
+      assert.equal(harness.context.requests().some((record) => record.phase === 'settled'), false, 'save failure must not settle the request');
+      assert.equal(harness.context.requests().filter((record) => record.phase === 'dispatching').length, 1, 'save failure must not dispatch continuation');
       await assert.rejects(
         () => harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch }),
         (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.output.save.failed',
@@ -2714,6 +2805,8 @@ test('R1-C: non-success output stays evidence and save, accept and ack failures 
         (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.accept.failed',
       );
       assert.equal(harness.submissions.length, 0);
+      assert.equal(harness.context.requests().some((record) => record.phase === 'settled'), false, 'accept failure must not settle the request');
+      assert.equal(harness.context.requests().filter((record) => record.phase === 'dispatching').length, 1, 'accept failure must not dispatch continuation');
       await assert.rejects(
         () => harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch }),
         (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.accept.failed',
@@ -2741,6 +2834,8 @@ test('R1-C: non-success output stays evidence and save, accept and ack failures 
         (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.ack.mismatch',
       );
       assert.equal(harness.submissions.length, 0);
+      assert.equal(harness.context.requests().some((record) => record.phase === 'settled'), false, 'ack mismatch must not settle the request');
+      assert.equal(harness.context.requests().filter((record) => record.phase === 'dispatching').length, 1, 'ack mismatch must not dispatch continuation');
       await assert.rejects(
         () => harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch }),
         (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.ack.mismatch',
@@ -2888,13 +2983,19 @@ test('P1-L1: continuation registration carries the parent request id and both di
 
   assert.deepEqual(
     registrations.map((entry) => entry.record.phase),
-    ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled'],
+    ['dispatching', 'dispatched', 'waiting', 'settled', 'dispatching', 'dispatched', 'settled'],
   );
   const initialRequestId = registrations[0]!.record.request.requestId;
+  const initialSettled = registrations.find((entry) => entry.record.phase === 'settled')!;
+  assert.equal(initialSettled.record.request.requestId, initialRequestId);
   const continuationDispatch = registrations.filter((entry) => entry.record.phase === 'dispatching')[1]!;
   assert.equal(continuationDispatch.record.request.parentRequestId, initialRequestId);
   assert.equal(continuationDispatch.record.parentRequestId, initialRequestId);
   assert.notEqual(continuationDispatch.record.request.requestId, initialRequestId);
+  assert.ok(
+    registrations.indexOf(initialSettled) < registrations.indexOf(continuationDispatch),
+    'parent request must be settled before continuation dispatching is registered',
+  );
 });
 
 test('P1-L2: closeProductionAndDrain waits for the exact-output write and durable ack of a late tool result', async () => {

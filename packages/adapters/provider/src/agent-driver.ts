@@ -605,7 +605,15 @@ export class ProviderAgentDriver<
         // correct, not as a fatal error that strands the execution.
         if (!(this.options.tools ?? []).some((tool) => tool.toolId === call.toolId)) {
           const unowned = this.unownedToolResult(call);
-          yield* this.toolResultEvents(request, call, this.toolResult(request, call, unowned, 'failed'), `${call.toolId} unavailable`);
+          const toolResult = this.toolResult(request, call, unowned, 'failed');
+          try {
+            await this.track(this.persistToolResult(request, call, unowned, toolResult));
+          } catch (cause) {
+            this.recordProducerFailure(cause);
+            throw cause;
+          }
+          if (this.stopping) return;
+          yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} unavailable`);
           toolHistory.push({ call, result: unowned });
           continue;
         }
@@ -676,6 +684,8 @@ export class ProviderAgentDriver<
         yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} succeeded`);
         toolHistory.push({ call, result });
       }
+      if (this.stopping) return;
+      await this.commitObservedCompletion(request);
       if (this.stopping) return;
       let completeContinuation!: () => void;
       const continuationCompletion = new Promise<void>((resolve) => { completeContinuation = resolve; });
