@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- receiptport source d2e7f69已标准合候选，Rootcontroltsc0/原normal+postcommitrecovery2/2PASS；可编译omission使两个committedAt断言undefined的作者RED/恢复hash有效。只证明steering透传；runtime-stop pendingrebuild/catch存储、AgentRuntime pendingtype及coordinator仍丢receipt，独立原Planner续r2冻结该后继，不把2/2外推全stop/time。parentpreclose r3已纠正原epoch保真、leaf无toolfinaloutput与repeatcrash规则，GCM `provider-parent-reconciliation-gcm-r1-20261016`复用原树，仅raw/JSONL/原consumer三文件；App/freshOS后继仍未验。当前4路GCM（defaultstop/receiptport已终态待后继/httpadmission/parentreconciliation）按实际进程区分，不冒称4路均运行。
+
 - precloseABI r2未准入源码：Planner给出不存在的测试路径，并建议瞬时将旧accepted raw envelope epoch改成新epoch以满足fold，这会混淆原身份；“任意completed请求即terminal”也未区分工具续接。Root已退回同独立Gemini4 plan r3，只纠正精确historicalconfirmedfact装配、final-output资格、重复crash epoch及F1 returned-unaccepted语义；不让实现者猜合同。defaultstop两caller已作者GREEN，实际defaultentry consumer仍进行中；receiptport代码/定向验证进行中；G-A proof consumer仍执行中，均未计验收。
 
 - ownerattestation基础sourcebc3bfff（含b4f2f02）已标准合fec3e3f：RootAppbuild/Apptestcompile/Runtimeexplicitcompile0，raw2/2+Supervisor2/2exit0。首Node命令误用dist/tests路径报notfound，按实际tsconfig改为dist/tests-explicit-brain后通过；不当产品RED。原Taskguard顺序保持在同leaseguard内，legacyowner不回填。源worker自然终态，treeclean；原树暂留立即后继reconciliationfoundation，独立Gemini4同plan上下文ABI补正r2运行中，不另开同域树。尚无App注入/新epoch恢复/remoteclose证明。
