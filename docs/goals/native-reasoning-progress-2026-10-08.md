@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- A0独立r2plan已返回并接受只读动作A：取消盲加关联header/responseHeaders再撞一次；新GCM `provider-a0-direct-owner-observe-gcm-r1-20261016` 只从installedRCC入口/非敏感映射追directBody首个Err。Root不接受JSONSchema items/properties是通用必需或只读必100%定因的表述，须实际RCC契约/可归属样本；时间吻合证据不扩大成MiniMax上游拒绝。另已源码实核persistError两行覆盖前置refs，按r2已接受独立修正项派GCM `provider-error-evidence-execute-gcm-r1-20261016`，只transport/原causechainconsumer，不新字段/矩阵，不称socket修好。新唯一provider-error-evidence树baseeab06d5，注册5→6；C1/C2/只读direct/错误refs共4路GCM，无其他ready不冲突实现待派。
+
 - C调度纠正：整包GCM已133commands但源码零delta，Root精确SIGINT17701/确认absent/exit1，未把停单当后端不可用。保持已接受方案，执行拆C1（三files控制facade+原consumer）/C2（两filesMemoryproducer+原consumer）并行，C3待两真实ABI冻结后单writer接Service/Coordinator/CLI/nextrequest。J/S标准merge唯一candidate为 `379b0d61443bfe53990b55b58a72003158dd0cd9`，组合Appbuild0，N2原树cleanFF同候选；source-only未restart。freshGCM control-r2复用N2树，memory-r1新唯一独立domain n2-memory-producer-20261016（同candidatebase），边界不重叠；注册4→5。C总验收仍未完成，N2本轮2/3不变。
 
 - A0新服务窗证据改变下一动作：Root直接读server-v3-7777.log18872–18877（内容server_id实际4444），23:16:44.371Z的唯一MiniMax样本exec651802/conn23025/seq3，received->prepared200->write150->http_connection_end(error from user's Body stream)->socketclosed；无上游归因证据。已按白名单字段归档6row及原行hash于server窗口run/owner-selected-server-evidence.json。不采“唯一方案是加header再retry”，已同独立Planner续r2/PID67020，先判断既有direct-handler/非敏感路由真源是否足以定位；不改RCC/不盲retry。N2-C唯一GCM实现继续，childsource已闭。
