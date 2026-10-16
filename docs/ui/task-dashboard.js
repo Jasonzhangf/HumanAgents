@@ -1725,8 +1725,17 @@ function renderDashboard() {
       ['projectKey', explicitScope?.projectKey],
       ['taskId', taskId],
       ['mode', dashboard.mode],
+      ['error.ownerId', dashboard.error?.ownerId],
+      ['error.code', dashboard.error?.code],
+      ['error.message', dashboard.error?.message],
+      ['error.nextAction', dashboard.error?.nextAction],
+      ['error.cleanupError（清理错误链）', dashboard.error?.cleanupError === undefined
+        ? undefined
+        : JSON.stringify(dashboard.error.cleanupError, null, 2)],
+      ['保留的 checkpoint 记录', dashboard.checkpoint ? '以下为保留记录，不表示任务当前受阻。' : undefined],
       ['checkpoint.outcome', dashboard.checkpoint?.outcome],
       ['checkpoint.seq', dashboard.checkpoint?.seq],
+      ['checkpoint.summary', dashboard.checkpoint?.summary],
     ].filter(([, value]) => value !== undefined && value !== null),
   }))
   main.append(technicalDetail)
@@ -1738,8 +1747,6 @@ function renderDashboard() {
     ['最近下一步', dashboard.nextStep],
     ['输入', dashboard.input || '尚未输入'],
     ['输出', dashboard.output || '尚无输出'],
-    ['错误 owner', dashboard.error ? `${dashboard.error.ownerId} · ${dashboard.error.nextAction}` : '无错误'],
-    ['Checkpoint', dashboard.checkpoint ? `${dashboard.checkpoint.outcome} · seq=${dashboard.checkpoint.seq} · ${dashboard.checkpoint.summary}` : '本任务尚无 checkpoint'],
     ['最近业务事件', lastEventAt ? formatPreciseTime(lastEventAt) : '尚无业务事件'],
   ]) {
     const cell = element('div', undefined, 'detail-cell')
@@ -1747,6 +1754,16 @@ function renderDashboard() {
     facts.append(cell)
   }
   main.append(facts)
+  if (dashboard.error) {
+    const errorNotice = element('div', undefined, 'status-banner')
+    errorNotice.dataset.tone = 'danger'
+    errorNotice.setAttribute('role', 'status')
+    errorNotice.append(
+      element('strong', '任务执行遇到问题，需要处理。'),
+      element('p', '请打开技术详情，按错误记录中的处理建议处理，再检查任务状态。'),
+    )
+    main.append(errorNotice)
+  }
 
   const execution = element('section', undefined, 'section')
   execution.append(element('h2', '任务控制'))
