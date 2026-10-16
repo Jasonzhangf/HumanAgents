@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-15 晚）
 
+- 最新接收 `3156248` → 唯一候选 `fbfceff`：仅原 native consumer typed admission fixture。Root 正常宿主原10例实际9 PASS / 1 FAIL，exit1。原#6同真实HOME通过；原#7保留 `blocked != failed` 红测，暴露工具失败后settle/close未收拢，完整行为验收仍开放。证据 `provider-native-fixture-gcm-r2-20261015/parent-{normal-native.log,acceptance.md}`；原来源树已clean/remove/prune/absent，注册数7→6，回执 `native-fixture-close-receipt.json`。这不是新增功能完成计数。
+- 公开grant r1已返回，原4例完整宿主验证尚缺；同树fresh GCM r2只消融重复session验证。Source S原7目标已GREEN，child再次全文件挂起由Root核实显式PID收拢；同树r2仅交精确3行结果和清理自有store，不重复全文件测试。UI fixture r2继续编译/实现，Root组合后补行为。
+- T5 App Gemini r2因虚构输入/assignment/返回字段及组装API未接受。fresh OAuth局部ABI纠偏 `provider-helper-app-abi-plan-r3-20261015` 进行中，未派实现。U2冷恢复Gemini r1方向保留但退回纠正无checkpoint却标checkpoint、虚构build命令及概率数字，r2同会话续问；真实工具失败收拢已派独立Gemini计划 `provider-tool-failure-settle-plan-r1-20261015`。均不新开代码树。
 - 当前本轮跟踪增量共 15 项，13 项源码已接收，G-A 验收和公开 grant 接线 2 项开放；其中 G-A 按实际依赖拆为源码、fixture 与顺序证明三路。仅 restart 切片已交远端 main。此计数不覆盖完整 goal，也不是产品完成率。
 - 唯一功能候选 `43256a7a12ef78a69fb69ead0c47a14e6a870ba3`。最新接收 Runtime session 来源 `4aa333b28b346df5606a0d85c4af9c87516364d5`，四路径与来源一致，组合 App build0。原 6 个公开 consumer 在 Root 宿主默认 HOME fixture root 实际 6/6；returnedAt 时序断言已从错误时间实际 RED 到正确时间 GREEN。原 3 个 mutant 证明分别抓错状态覆盖、身份复用与自动采纳。仅保留必要 Node ambient 声明补齐，不增运行时机制。来源树已 clean/remove/prune/absent，回执 `turn-helper-session-close-receipt.json`。
 - G-A 当前有效行为基线仍是 `1f9c9c7` 的原 148 例 118 PASS / 30 FAIL；后续只有 Runtime explicit-brain 基础和文档接收，未冒称这些失败已消失。独立 Opus 计划 `provider-ga-failures-opus-plan-r1-20261015/plan.md` 已接收。三个 fresh GCM：`runtime-release-replay-gcm-r1-20261015` 修 coordinator 回放 release/空白丢失；`runtime-ui-fixtures-gcm-r1-20261015` 补 grant/Journal 格式并对齐原6/99构造失败断言；`admission-order-proof-gcm-r1-20261015` 做真实 activeTurnJournal 顺序反例和既有失败消融。6/99 沿已批准的准入后保留恢复义务契约验证原错、blocked 与 stop，不改需求或伪造已收拢失败。其余失败不能只凭历史标签忽略完整目标。
