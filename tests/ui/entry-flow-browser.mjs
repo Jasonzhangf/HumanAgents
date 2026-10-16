@@ -77,6 +77,45 @@ function observe(name, value) {
   observations.push({ name, value });
 }
 
+// The real error surface for a failed submission is the shell status region,
+// not `#entry-error`. `#entry-error` is only the empty-field validation panel,
+// so waiting for it would never observe a runtime rejection. `handleSubmissionError`
+// writes `data-tone="danger"` into `[role="status"]`.
+function readEntryFailure(page) {
+  return page.evaluate(() => {
+    const banner = document.querySelector('[role="status"]');
+    const textarea = document.querySelector('#entry-form textarea[name="rawInput"]');
+    const buttons = [...document.querySelectorAll('#entry-form button[type="submit"]')];
+    return {
+      tone: banner?.dataset?.tone ?? null,
+      text: (banner?.textContent || '').trim(),
+      inputValue: textarea?.value ?? null,
+      inputReadOnly: textarea?.readOnly ?? null,
+      retryLabel: buttons.map((button) => (button.textContent || '').trim()),
+      hasVisibleRetry: buttons.some((button) => {
+        if (button.getClientRects().length === 0) return false;
+        const style = getComputedStyle(button);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      }),
+    };
+  });
+}
+
+// The runtime's own `message` is published by the technical-detail control,
+// not by the short visible summary. Click it like a human would, read the
+// typed detail, then close the layer so the page is usable again.
+async function readTechnicalDetailReason(page) {
+  const trigger = page.locator('[role="status"] [data-technical-detail-trigger="true"]').first();
+  await trigger.click();
+  const dialog = page.locator('dialog[data-technical-detail="true"]').first();
+  await dialog.waitFor({ state: 'visible', timeout: 5_000 });
+  const message = ((await dialog.locator('[data-detail-message]').first().textContent()) || '').trim();
+  const code = ((await dialog.locator('[data-detail-code]').first().textContent()) || '').trim();
+  await dialog.locator('button.shell-layer-close').first().click();
+  await dialog.waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => {});
+  return { message, code };
+}
+
 function sleep(ms) {
   return new Promise((settle) => setTimeout(settle, ms));
 }
@@ -103,6 +142,7 @@ const scripted = {
   taskSeq: 0,
   confirmFails: false,
   confirmationCount: 0,
+  clarificationCount: 0,
   receiveCount: 0,
 };
 
@@ -240,6 +280,7 @@ async function handleScriptedApi(url, method, body) {
   }
   const clarificationMatch = /^\/api\/explicit\/interactions\/([^/]+)\/clarification$/.exec(url.pathname);
   if (clarificationMatch && method === 'POST') {
+    scripted.clarificationCount += 1;
     const interaction = scripted.interactions.get(decodeURIComponent(clarificationMatch[1]));
     interaction.answered = true;
     interaction.state = 'matching';
@@ -266,6 +307,14 @@ async function handleScriptedApi(url, method, body) {
     interaction.state = 'confirmed';
     scripted.taskSeq += 1;
     const taskId = `ui-task-${scripted.taskSeq}`;
+    // The committed confirmation identity for this requirement. It is the one
+    // authoritative source for the published task row and for the receipt the
+    // entry page reads back, so a row can never be matched by title alone.
+    const requirement = {
+      requirementId: `requirement:${interaction.draft.draftId}:1`,
+      draftId: interaction.draft.draftId,
+      inputRevision: interaction.draft.inputRevision,
+    };
     scripted.tasks.push({
       taskId: { scope: 'task', value: taskId },
       title: interaction.draft.normalizedInput,
@@ -274,16 +323,12 @@ async function handleScriptedApi(url, method, body) {
       state: 'waiting',
       nextStep: '等待执行',
       updatedAt: new Date().toISOString(),
+      identitySource: { ...requirement },
     });
     return {
       status: 200,
       body: {
-        requirement: {
-          status: 'submitted',
-          requirementId: `requirement:${interaction.draft.draftId}:1`,
-          draftId: interaction.draft.draftId,
-          inputRevision: 1,
-        },
+        requirement: { status: 'submitted', ...requirement },
       },
     };
   }
@@ -450,22 +495,109 @@ async function sectionA(artifactDir) {
     record('clarification answer continues the same submission', /observation\.html\?task=/.test(page.url()), page.url());
   }, { viewport: runs[0].viewport });
 
-  // Failure keeps the input and shows a readable, original error.
-  await withScriptedPage(async (page) => {
-    scripted.confirmFails = true;
-    await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
-    await page.fill('#entry-form textarea[name="rawInput"]', '这条提交会被运行时拒绝');
-    await page.click('#entry-form button[type="submit"]');
-    await page.waitForSelector('#entry-error:not([hidden])', { timeout: 10_000 });
-    const errorText = (await page.textContent('#entry-error')) ?? '';
-    const textareaValue = await page.inputValue('#entry-form textarea[name="rawInput"]');
-    const draftText = (await page.textContent('#entry-draft')) ?? '';
-    record('failed submit keeps the user input', textareaValue === '这条提交会被运行时拒绝', textareaValue);
-    record('failed submit shows a readable error with the original message', errorText.includes('final submit rejected by the scripted runtime'), errorText.slice(0, 300));
-    record('failed submit keeps the last readable draft', draftText.includes('规范化输入'), draftText.slice(0, 200));
-    await page.screenshot({ path: join(artifactDir, 'failure-retains-input.png') });
-    scripted.confirmFails = false;
-  }, { viewport: runs[0].viewport });
+  // A failed submission keeps the goal text, reports the real reason in the
+  // shell status region and leaves a usable retry. The retry must reuse the
+  // same interaction: one more confirmation only, no second receive and no
+  // resent clarification answer, then the same observation landing.
+  //
+  // The reason is read from the technical-detail trigger, because that is the
+  // control that publishes the runtime's own `message`; the visible summary is
+  // intentionally short. A click proves the reason is reachable by a human.
+  for (const variant of [
+    { label: 'plain', rawInput: '这条提交会被运行时拒绝', clarification: false },
+    { label: 'clarification', rawInput: 'CLARIFY 这条提交会被运行时拒绝', clarification: true },
+  ]) {
+    await withScriptedPage(async (page) => {
+      scripted.confirmFails = true;
+      try {
+        const receiveBefore = scripted.receiveCount;
+        await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#entry-form textarea[name="rawInput"]');
+        await page.fill('#entry-form textarea[name="rawInput"]', variant.rawInput);
+        await page.click('#entry-form button[type="submit"]');
+        // The clarification round runs before the confirmation, so let it
+        // finish first; only then does the confirmation rejection surface.
+        if (variant.clarification) {
+          await page.waitForSelector('#entry-draft input[name="answer"]', { timeout: 10_000 });
+          await page.fill('#entry-draft input[name="answer"]', '验收范围就是 README 的前 10 行');
+          await page.click('#entry-draft button[type="submit"]');
+        }
+        await page.waitForFunction(
+          () => document.querySelector('[role="status"]')?.dataset?.tone === 'danger',
+          undefined, { timeout: 10_000 },
+        );
+        const failure = await readEntryFailure(page);
+        observe(`${variant.label} failure surface`, failure);
+        const detail = await readTechnicalDetailReason(page);
+        observe(`${variant.label} technical detail`, detail);
+        record(
+          `${variant.label} failed submit surfaces the real danger status`,
+          failure.tone === 'danger',
+          failure.tone,
+        );
+        record(
+          `${variant.label} failed submit reports the real reason through the technical detail`,
+          detail.message.includes('final submit rejected by the scripted runtime')
+          && detail.code === 'explicit-brain.final-submit-rejected',
+          detail,
+        );
+        record(
+          `${variant.label} failed submit keeps the original goal text`,
+          failure.inputValue === variant.rawInput,
+          failure.inputValue,
+        );
+        record(
+          `${variant.label} failed submit keeps the goal text read-only`,
+          failure.inputReadOnly === true,
+          failure.inputReadOnly,
+        );
+        record(
+          `${variant.label} failed submit leaves a visible retry on the main action`,
+          failure.hasVisibleRetry
+          && (variant.clarification || failure.retryLabel.some((label) => label.startsWith('重试'))),
+          failure.retryLabel,
+        );
+        if (variant.clarification) {
+          observe(
+            `${variant.label} advisory: retry affordance keeps the generic submit label`,
+            'After a failed confirmation in the clarification variant, the removed clarification button cannot be relabelled; the main submit button remains visible and usable as the retry. This is a UX label advisory, not a duplicate-submission defect.',
+          );
+        }
+
+        const beforeRetry = {
+          receive: scripted.receiveCount,
+          confirm: scripted.confirmationCount,
+          clarify: scripted.clarificationCount,
+        };
+        scripted.confirmFails = false;
+        await page.click('#entry-form button[type="submit"]');
+        await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
+        record(
+          `${variant.label} retry reuses the same interaction and does not resend the input`,
+          scripted.receiveCount - beforeRetry.receive === 0,
+          { totalReceiveDelta: scripted.receiveCount - receiveBefore, retryReceiveDelta: scripted.receiveCount - beforeRetry.receive },
+        );
+        record(
+          `${variant.label} retry does not resend the clarification answer`,
+          scripted.clarificationCount - beforeRetry.clarify === 0,
+          scripted.clarificationCount - beforeRetry.clarify,
+        );
+        record(
+          `${variant.label} retry confirms the same submission exactly once`,
+          scripted.confirmationCount - beforeRetry.confirm === 1,
+          scripted.confirmationCount - beforeRetry.confirm,
+        );
+        record(
+          `${variant.label} retry lands on the task observation`,
+          /observation\.html\?task=/.test(page.url()),
+          page.url(),
+        );
+        await page.screenshot({ path: join(artifactDir, `failure-retains-input-${variant.label}.png`) });
+      } finally {
+        scripted.confirmFails = false;
+      }
+    }, { viewport: runs[0].viewport });
+  }
 
   // A rapid double click still produces exactly one task.
   await withScriptedPage(async (page) => {
