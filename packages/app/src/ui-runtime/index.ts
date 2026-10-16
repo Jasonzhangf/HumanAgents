@@ -514,6 +514,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           },
           currentStatePort: currentState,
           currentStateFacts: composition.currentStateFacts,
+          resolveColdExecutionResumeRequest: composition.resolveColdExecutionResumeRequest,
         };
       },
     } : fakeAdmission === undefined ? {} : {
