@@ -37,13 +37,39 @@ import { createResponsesFileToolExecutor } from '../provider-tool-execution.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
 import type { NativeSaveIntent, NativeSaveIntentV1, NativeSegmentSaveIntentV2 } from '../../../runtime/src/checkpoints/native-save-contract.js';
-import type { NativeSegmentSaveSourceV2, ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
+import type { ActiveTurnInitialSegmentSource, NativeSegmentSaveSourceV2, ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
 import { activeTurnSegmentCommitId } from '../../../contracts/src/active-turn-segments.js';
-import type { RuntimeColdExecutionSource } from './cold-execution-source.js';
-import { readColdExecutionSource as readColdSource, type RuntimeColdExecutionSourceRequest } from './cold-execution-source.js';
-import type { RuntimeColdExecutionProducer, RuntimeColdTurnPreparation } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
+import type { ColdCurrentFacts } from '../../../runtime/src/ui-runtime/cold-current.js';
+import {
+  readColdExecutionSource as readColdSource,
+  resolveColdExecutionResumeRequest as resolveColdResumeRequest,
+  type RuntimeColdExecutionSource,
+  type RuntimeColdExecutionSourceRequest,
+} from './cold-execution-source.js';
+export { resolveColdExecutionResumeRequest } from './cold-execution-source.js';
+import type {
+  RuntimeColdExecutionProducer,
+  RuntimeColdExecutionResumeRequest,
+  RuntimeColdTurnPreparation,
+} from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import type { RetryCycleJournalPort } from '../../../runtime/src/orchestration/retry-cycle.js';
 import type { ResumeActiveTurnSegmentInput } from '../../../runtime/src/context/active-turn-segments.js';
+
+function initialBindingOf(initial: ActiveTurnInitialSegmentSource) {
+  return initial.kind === 'captured' ? initial.body.binding : initial.binding;
+}
+
+function initialInputOf(initial: ActiveTurnInitialSegmentSource) {
+  return initial.kind === 'captured' ? initial.body.initialInput : initial.initialInput;
+}
+
+function currentContextOf(current: ColdCurrentFacts) {
+  return current.kind === 'checkpoint-bound' ? current.current.context : current.context;
+}
+
+function currentPositionOf(current: ColdCurrentFacts) {
+  return current.kind === 'checkpoint-bound' ? current.current.position : current.position;
+}
 import { TaskGrantDeniedError } from '../../../runtime/src/admission/task-grant.js';
 import { FileCheckpointStore } from './journal.js';
 import { renderTaskReorientation } from '../../../runtime/src/orchestration/task-dispatch-template.js';
@@ -209,7 +235,22 @@ export function createDefaultExecutionComposition(input: {
     await owner(value.allocation.taskId);
     if (!input.retryJournal) missing('the actual retry-cycle journal owner is unbound for cold source resolution');
     return readColdSource({ preparedJournal: input.preparedJournal, journalPath: input.filePath, journal: input.journal,
-      artifactsRoot: input.artifactsRoot, retryJournal: input.retryJournal }, value);
+      artifactsRoot: input.artifactsRoot, retryJournal: input.retryJournal, principalOwner: input.principalOwner }, value);
+  }
+  async function resolveColdExecutionResumeRequest(inputArgs: {
+    readonly taskId: RuntimeExecutionAllocation['taskId'];
+    readonly operationId: RuntimeExecutionAllocation['operationId'];
+  }): Promise<RuntimeColdExecutionResumeRequest> {
+    await owner(inputArgs.taskId);
+    if (!input.retryJournal) missing('the actual retry-cycle journal owner is unbound for cold source resolution');
+    return resolveColdResumeRequest({
+      preparedJournal: input.preparedJournal,
+      journalPath: input.filePath,
+      journal: input.journal,
+      artifactsRoot: input.artifactsRoot,
+      retryJournal: input.retryJournal,
+      principalOwner: input.principalOwner,
+    }, inputArgs);
   }
   const admitSegment: ResumeActiveTurnSegmentInput['admit'] = async (intent) => {
     try {
@@ -236,18 +277,20 @@ export function createDefaultExecutionComposition(input: {
     if (!grant.grant || !grant.commit || grant.grant.state !== 'granted' || grant.grant.owner !== input.principalOwner) {
       missing('current grant cannot authorize the actual cold incarnation');
     }
-    if (source.current.context.loopControl.mode !== 'observation') missing('actual execution factory does not support the retained first mode');
+    const currentContext = currentContextOf(source.current);
+    if (currentContext.loopControl.mode !== 'observation') missing('actual execution factory does not support the retained first mode');
     const selected = await input.prepareAgentProvider({ roleId: source.allocation.role ?? 'execution',
       ...(source.allocation.configuredAgentId === undefined ? {} : { configuredAgentId: source.allocation.configuredAgentId }) });
     try {
       if (selected.roleId !== 'execution') missing('actual cold Provider selection does not bind the execution role');
+      const initialBinding = initialBindingOf(source.initial);
       return { contextHistory: context, request: { role: 'execution', mode: 'observation',
         profiles: [{ profileId: 'task-execution-context', role: 'execution', mode: 'observation',
           observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
           orchestrationCapabilities: [], capabilityDigest: selected.binding.capabilityDigest }],
         budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
-        permissionRevision: String(grant.grant.revision), observationStreamId: source.current.context.loopControl.inboxStreamId,
-        now: input.now, turn: { identity: projectAdmittedTurnIdentityV1(source.initial.body.binding.admittedTurn),
+        permissionRevision: String(grant.grant.revision), observationStreamId: currentContext.loopControl.inboxStreamId,
+        now: input.now, turn: { identity: projectAdmittedTurnIdentityV1(initialBinding.admittedTurn),
           cycleId: source.allocation.scope.cycleId!, directiveRevision: source.allocation.directiveRevision,
           ownerId: source.allocation.ownerId, journal: nativeCheckpoints, closurePort: closures } } };
     } finally { await closeAgentProvider(selected); }
@@ -273,13 +316,20 @@ export function createDefaultExecutionComposition(input: {
     executionEpoch: number): Promise<HistoricalRestoreBinding | null> {
     const matching = source.segments.filter((segment) => segment.binding.execution.executionEpoch === executionEpoch);
     if (matching.length > 1) return null;
+    const initialBinding = initialBindingOf(source.initial);
     if (matching.length === 1) {
       const segmentSource = await readCommittedNativeSegmentSource({ journal: input.journal,
-        originalAdmittedTurn: source.initial.body.binding.admittedTurn, opened: matching[0]! });
+        originalAdmittedTurn: initialBinding.admittedTurn, opened: matching[0]! });
       return { binding: { kind: 'segment', segment: matching[0]! }, segmentSource,
         execution: segmentSource.opened.binding.execution };
     }
     if (executionEpoch !== identity.executionEpoch) return null;
+    if (source.initial.kind === 'initial-open') {
+      return {
+        binding: { kind: 'initial-open', initial: source.initial } as unknown as HistoricalTurnBinding,
+        execution: source.initial.binding.execution,
+      };
+    }
     return { binding: { kind: 'initial', initial: source.initial },
       execution: source.initial.body.binding.execution };
   }
@@ -296,14 +346,16 @@ export function createDefaultExecutionComposition(input: {
     readonly historical: HistoricalRestoreBinding } | null> {
     const historical = await readHistoricalRestoreBinding(source, identity, executionEpoch);
     if (!historical) return null;
-    if (source.current.position.executionEpoch !== executionEpoch
-      || source.current.context.agentRuntimeId !== historical.execution.runtimeId
-      || source.current.context.loopCheckpoint.executionEpoch !== executionEpoch) return null;
+    const currentContext = currentContextOf(source.current);
+    const currentPosition = currentPositionOf(source.current);
+    if (currentPosition.executionEpoch !== executionEpoch
+      || currentContext.agentRuntimeId !== historical.execution.runtimeId
+      || currentContext.loopCheckpoint.executionEpoch !== executionEpoch) return null;
     const grant = await grants.readTaskGrant(source.allocation.taskId);
     if (!grant.grant || !grant.commit || grant.grant.owner !== input.principalOwner) {
       missing('the current grant does not authorize the original durable turn');
     }
-    const mode = source.current.context.loopControl.mode;
+    const mode = currentContext.loopControl.mode;
     // The read-only historical loop issues no Provider work. Its capability
     // digest hashes this exact declared read-only profile through the existing
     // template profile owner; it never borrows the current grant record digest.
@@ -315,26 +367,35 @@ export function createDefaultExecutionComposition(input: {
       profiles: [{ ...historicalProfile, capabilityDigest: digestModeCapabilityProfile(historicalProfile) }],
       budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
       permissionRevision: String(grant.grant.revision),
-      observationStreamId: source.current.context.loopControl.inboxStreamId, now: input.now,
+      observationStreamId: currentContext.loopControl.inboxStreamId, now: input.now,
       turn: { identity, cycleId: source.allocation.scope.cycleId!, directiveRevision: source.allocation.directiveRevision,
         ownerId: source.allocation.ownerId, journal: nativeCheckpoints, closurePort: closures } },
-      context, { binding: historical.binding, contextCommitRef: source.current.position.contextCommitRef,
+      context, { binding: historical.binding, contextCommitRef: currentPosition.contextCommitRef,
         exact: { checkpointId } });
     return { ...restored, historical };
   }
   async function recoverOriginalTurn(value: { readonly source: RuntimeColdExecutionSource }): Promise<RuntimeColdTurnPreparation> {
     const source = value.source;
-    const identity = projectAdmittedTurnIdentityV1(source.initial.body.binding.admittedTurn);
+    const initialBinding = initialBindingOf(source.initial);
+    const identity = projectAdmittedTurnIdentityV1(initialBinding.admittedTurn);
     const retained = await closures.read(frozenTurnCloseRef(identity));
     const verification = await input.journal.verify();
     if (!verification.valid) missing(verification.error ?? 'exact recovery Journal verification failed');
-    const position = verification.records.find((entry) => entry.commitId === source.current.position.checkpointCommitRef.commitId);
+    const checkpointPosition = source.current.kind === 'checkpoint-bound'
+      ? source.current.current.position
+      : undefined;
+    const position = checkpointPosition
+      ? verification.records.find((entry) => entry.commitId === checkpointPosition.checkpointCommitRef.commitId)
+      : undefined;
     const retainedRecovery = retained && 'closureKind' in retained && retained.closureKind === 'turn-recovery'
       ? retained : null;
-    const selected = retainedRecovery
-      ? retainedRecovery.checkpointId : (position?.checkpoint?.id ?? null);
-    const executionEpoch = retainedRecovery?.frozenClose?.checkpoint.executionEpoch
-      ?? source.current.position.executionEpoch;
+    const selected = source.current.kind === 'initial-turn-open'
+      ? null
+      : retainedRecovery
+        ? retainedRecovery.checkpointId : (position?.checkpoint?.id ?? null);
+    const executionEpoch = source.current.kind === 'initial-turn-open'
+      ? source.current.position.executionEpoch
+      : (retainedRecovery?.frozenClose?.checkpoint.executionEpoch ?? checkpointPosition?.executionEpoch ?? 1);
     const restored = await coldLoop(source, identity, executionEpoch, selected);
     if (!restored) {
       const recovery: RecoverTurnResult = { stage: 'unknown', turnId: identity.turnId, advance: 'paused' };
@@ -398,7 +459,7 @@ export function createDefaultExecutionComposition(input: {
     const segmentSource: NativeSegmentSaveSourceV2 | undefined = retainedIntent
       ? 'source' in retainedIntent ? retainedIntent.source : undefined : segment === undefined ? undefined
       : await readCommittedNativeSegmentSource({ journal: input.journal,
-        originalAdmittedTurn: resume!.source.initial.body.binding.admittedTurn, opened: segment });
+        originalAdmittedTurn: initialBindingOf(resume!.source.initial).admittedTurn, opened: segment });
     const physical = segmentSource?.opened.binding.execution ?? { runtimeId: allocation.runtimeId, executionEpoch: allocation.attemptExecutionEpoch };
     const binding = segmentSource && !retainedIntent ? await admitted.bindCommittedSegment(identity, segmentSource, input.now().toISOString())
       : await admitted.bindingFor(allocation);
@@ -450,10 +511,11 @@ export function createDefaultExecutionComposition(input: {
         successCriteria: ['standard turn closure and canonical Planner alignment'],
         failureCriteria: ['execution error'], incompleteCriteria: ['standard turn or Planner alignment remains pending'],
         requiredCapabilities: grant.grant.capability.capabilities, mergeGate: 'not-required' };
-      const turnId = resume?.source.initial.body.binding.admittedTurn.turnId ?? newActiveTurnId(allocation.operationId.value);
+      const initialBinding = resume ? initialBindingOf(resume.source.initial) : undefined;
+      const turnId = initialBinding?.admittedTurn.turnId ?? newActiveTurnId(allocation.operationId.value);
       const currentTurnRef = `active-turn://${turnId}`;
       const recoveryStateRef = admitted.evidence(allocation, binding.admissionCommitRef.commitId);
-      const admittedTurn = resume?.source.initial.body.binding.admittedTurn ?? produceAdmittedTurn({ runtime: { runtimeId: allocation.runtimeId,
+      const admittedTurn = initialBinding?.admittedTurn ?? produceAdmittedTurn({ runtime: { runtimeId: allocation.runtimeId,
         executionEpoch: allocation.attemptExecutionEpoch, ownerRef: grant.grant.owner,
         permissionRevision: String(grant.grant.revision) }, taskId: allocation.taskId, scope: allocation.scope,
         assignment, directiveRevision: allocation.directiveRevision, turnId, currentTurnRef,
@@ -463,7 +525,7 @@ export function createDefaultExecutionComposition(input: {
       // active-turn/segment context; only generation installs one.
       const active = segment !== undefined
         ? await ActiveTurnSegmentContext.open({ port: resume!.source.segmentJournal, segment,
-          initialInput: resume!.source.initial.body.initialInput })
+          initialInput: initialInputOf(resume!.source.initial) })
         : retainedIntent !== undefined ? undefined : await ActiveTurnContext.open({ journal: activeTurnJournal, currentTurnRef,
           binding: { admittedTurn, assignment, execution: { runtimeId: allocation.runtimeId,
             executionEpoch: allocation.attemptExecutionEpoch }, scope: allocation.scope } });
@@ -483,6 +545,7 @@ export function createDefaultExecutionComposition(input: {
           : [
               ...resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries),
               ...resume.source.interruptedSegments.flatMap((read) => read.prefix.entries),
+              ...(resume.source.initialOpenPrefix?.prefix.entries ?? []),
             ];
         const seen = new Set<string>();
         const entries: AcceptedRawFact[] = [];
@@ -497,7 +560,10 @@ export function createDefaultExecutionComposition(input: {
       };
       const currentCompletionLookups = async (): Promise<readonly CompletionReadInput[]> => {
         const captured = resume === undefined ? []
-          : resume.source.captures.flatMap((capture) => capture.source.prepared.completionLookups);
+          : [
+              ...resume.source.captures.flatMap((capture) => capture.source.prepared.completionLookups),
+              ...resume.source.initialCompletions,
+            ];
         const live = await completion.discoverExactExecution({ execution: { ...physical, taskId: allocation.taskId,
           operationId: allocation.operationId } });
         const seen = new Set<string>();
@@ -562,6 +628,7 @@ export function createDefaultExecutionComposition(input: {
           const entries = resume === undefined ? prefix.entries : [
             ...resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries),
             ...resume.source.interruptedSegments.flatMap((read) => read.prefix.entries),
+            ...(resume.source.initialOpenPrefix?.prefix.entries ?? []),
             ...prefix.entries,
           ];
           for (const entry of entries) {
@@ -1143,7 +1210,7 @@ export function createDefaultExecutionComposition(input: {
   // keeps the App composition from drifting from `RuntimeColdExecutionProducer`.
   const coldProducer: RuntimeColdExecutionProducer = { readColdExecutionSource, admitSegment,
     readIncarnationBinding, recoverOriginalTurn, createResumedExecutionDriver };
-  return { currentStateFacts, admitExecution, createExecutionDriver, ...coldProducer, grants, context, checkpoints,
+  return { currentStateFacts, admitExecution, createExecutionDriver, ...coldProducer, resolveColdExecutionResumeRequest, grants, context, checkpoints,
     async admitNewBusiness(value: Parameters<import('./task-control.js').TaskControlAdmissionPort['admitNewBusiness']>[0]) {
       return (await owner(value.request.taskId)).admitNewBusiness(value);
     },

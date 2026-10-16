@@ -448,8 +448,9 @@ test('J1 v2 backing: original v1 capture, real TG1 reservation to S1/S2, fresh c
 
     // Exact read of the original v1 capture: real binding record seq/digest/commitId.
     const port = createActiveTurnSegmentJournal({ journalPath, assetRoot, completionJournalPath, businessTurnId: turnId });
-    const initial = await port.readInitialSegmentCapture(turnId);
+    const initial = await port.readInitialSegmentSource(turnId);
     if (initial === null) throw new Error('the original v1 capture must be readable');
+    if (initial.kind !== 'captured') throw new Error('the original v1 source must be captured');
     assert.equal(initial.bindingCommitRef.commitId, `active-turn:${turnId}:binding-opened`);
     assert.deepEqual(initial.body, body);
     const bindingRecord = (await new JsonlOrganJournal(journalPath).replay())
@@ -750,7 +751,7 @@ test('J1 v2 backing: an opened-but-unsaved predecessor resumes from its exact an
     const resolved = await readResumedSegmentSemanticTurnContext({
       history: { async readCommittedSemanticCheckpoint() { return null; } },
       priorCompletedTurns: [],
-      segment: { chain: { businessTurnRef: s2.segment.businessTurnRef, initial: body, segments: [s1.segment, s2.segment] },
+      segment: { chain: { businessTurnRef: s2.segment.businessTurnRef, initial: { kind: 'captured', body }, segments: [s1.segment, s2.segment] },
         exactReads: port, live: { prefix: live, rawContent } },
       runtimeId: value.runtime.runtimeId, scope: value.scope, assignment: value.assignment,
     });

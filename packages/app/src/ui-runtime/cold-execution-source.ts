@@ -1,23 +1,37 @@
-import { canonicalJsonStringify, type JournalCommitRef, type ScopeRef, type WorkAssignment } from '../../../contracts/src/index.js';
-import type { ActiveTurnInitialSegmentCapture, ActiveTurnSegmentPredecessorRef,
-  ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
+import {
+  canonicalJsonStringify,
+  type CompletionReadInput,
+  type JournalCommitRef,
+  type OperationId,
+  type ScopeRef,
+  type TaskId,
+  type WorkAssignment,
+} from '../../../contracts/src/index.js';
+import type {
+  ActiveTurnInitialSegmentSource,
+  ActiveTurnSegmentPredecessorRef,
+  ResumedTurnSegmentOpened,
+} from '../../../contracts/src/active-turn-segments.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
 import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import type {
+  ActiveTurnInitialOpenExactRead,
   ActiveTurnSegmentCaptureExactRead,
   ActiveTurnSegmentInterruptedExactRead,
   ActiveTurnSegmentJournalPort,
 } from '../../../runtime/src/context/active-turn-journal.js';
-import type { ReentryCurrentFacts } from '../../../runtime/src/checkpoints/conditional-reentry.js';
+import type { ColdCurrentFacts } from '../../../runtime/src/ui-runtime/cold-current.js';
 import { retryCycleId, type RetryCycleControlRecord, type RetryCycleJournalPort } from '../../../runtime/src/orchestration/retry-cycle.js';
 import type { RuntimeExecutionAllocation, RuntimeTaskJournalPort } from '../../../runtime/src/ui-runtime/coordinator.js';
+import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import { AppLifecycleError } from '../errors.js';
 import { contextHistoryFromRecord, conditionalReentryFromRecord, closureFromRecord, segmentOpenedFromRecord } from '../checkpoint-journal.js';
 import { createActiveTurnSegmentJournal, createNativeRecoveryAssets, type NativeRecoveryAssetsReadback } from '../native-recovery-assets.js';
 import { readOperationControlFromRecords } from '../operation-control-journal.js';
 import { readPreparedExecutionInput, type AdmittedExecutionInput } from '../prepared-execution-input.js';
-import { readCurrentFromRecords } from './reentry-current-facts.js';
+import { readColdCurrentFromJournal } from './reentry-current-facts.js';
 
 /** Selectors only. The Runtime caller retains the allocation; no new business admission is made. */
 export interface RuntimeColdExecutionSourceRequest {
@@ -39,7 +53,7 @@ export interface ColdExecutionEpochFact {
 export interface RuntimeColdExecutionSource {
   readonly allocation: RuntimeExecutionAllocation;
   readonly preparedInput: AdmittedExecutionInput;
-  readonly initial: ActiveTurnInitialSegmentCapture;
+  readonly initial: ActiveTurnInitialSegmentSource;
   readonly assignment: WorkAssignment;
   readonly scope: ScopeRef;
   readonly segments: readonly ResumedTurnSegmentOpened[];
@@ -53,7 +67,9 @@ export interface RuntimeColdExecutionSource {
    * save.
    */
   readonly interruptedSegments: readonly ActiveTurnSegmentInterruptedExactRead[];
-  readonly current: ReentryCurrentFacts;
+  readonly initialOpenPrefix: ActiveTurnInitialOpenExactRead | null;
+  readonly initialCompletions: readonly CompletionReadInput[];
+  readonly current: ColdCurrentFacts;
   readonly durableEpochs: readonly ColdExecutionEpochFact[];
   readonly retryCycle: RetryCycleControlRecord | null;
   readonly segmentJournal: ActiveTurnSegmentJournalPort;
@@ -66,6 +82,7 @@ export interface ColdExecutionSourceOwners {
   readonly journal: JsonlOrganJournal;
   readonly artifactsRoot: string;
   readonly retryJournal: RetryCycleJournalPort;
+  readonly principalOwner: string;
 }
 
 function missing(reason: string): never {
@@ -89,16 +106,26 @@ export async function readColdExecutionSource(
   if (!verification.valid) missing(verification.error ?? 'Organ Journal verification failed');
   const records = verification.records;
   const taskScope = { organId: allocation.scope.organId, taskId: allocation.taskId };
-  const current = readCurrentFromRecords(records, taskScope);
-  if (current.state !== 'known') missing(current.reason);
+  const coldCurrent = await readColdCurrentFromJournal(
+    owners.journal,
+    { allocation, businessTurnId: request.businessTurnId },
+    owners.principalOwner,
+  );
+  if (coldCurrent.state !== 'known') missing(coldCurrent.reason);
+  const current: ColdCurrentFacts = coldCurrent;
+
   const completion = new JsonlOperationCompletionJournal({ journal: owners.journal });
   const native = createNativeRecoveryAssets({ journalPath: owners.journalPath,
     journal: owners.journal, assetRoot: owners.artifactsRoot, completionJournal: completion });
   const segmentJournal = createActiveTurnSegmentJournal({ journalPath: owners.journalPath,
     assetRoot: owners.artifactsRoot, completionJournal: completion, businessTurnId: request.businessTurnId });
-  const initial = await segmentJournal.readInitialSegmentCapture(request.businessTurnId);
-  if (!initial) missing('the original v1 capture is missing');
-  const binding = initial.body.binding;
+
+  const initial = await segmentJournal.readInitialSegmentSource(request.businessTurnId);
+  if (!initial) missing('the original initial segment source is missing');
+
+  const binding = initial.kind === 'captured' ? initial.body.binding : initial.binding;
+  const initialInputAsset = initial.kind === 'captured' ? initial.body.initialInput : initial.initialInput;
+
   if (!same(binding.scope, allocation.scope) || !same(binding.assignment.taskId, allocation.taskId)
     || binding.assignment.assignmentId !== allocation.assignmentId
     || binding.assignment.inputRevision !== preparedInput.inputRevision
@@ -106,10 +133,12 @@ export async function readColdExecutionSource(
     || !same(allocation.scope.operationId, allocation.operationId)) {
     missing('the original assignment, scope or input revision does not match the retained allocation');
   }
-  const rawInput = await new ImmutableAssetStore(owners.artifactsRoot).readEvidence(initial.body.initialInput.ref);
+
+  const rawInput = await new ImmutableAssetStore(owners.artifactsRoot).readEvidence(initialInputAsset.ref);
   if (new TextDecoder('utf-8', { fatal: true }).decode(rawInput) !== preparedInput.input['prompt']) {
     missing('the original immutable input differs from the retained prepared input');
   }
+
   const segments = await segmentJournal.readSegments(request.businessTurnId);
   const tailSegment = segments.at(-1);
   const tailId = tailSegment?.segmentId ?? request.businessTurnId;
@@ -117,43 +146,97 @@ export async function readColdExecutionSource(
   if (receipt.status === 'failed' || receipt.status === 'unknown') missing(receipt.reason);
   const tail: ActiveTurnSegmentPredecessorRef = receipt.status === 'exact'
     ? { segmentId: tailId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef }
-    : { segmentId: tailId, interrupted: receipt.anchor };
+    : receipt.status === 'interrupted'
+      ? { segmentId: tailId, interrupted: receipt.anchor }
+      : { segmentId: tailId, initialOpen: receipt.anchor };
   if (!same(tail, request.predecessor)) missing('the exact predecessor selector does not match the committed segment tail');
+
   const tailBinding = tailSegment?.binding ?? binding;
-  if (!same(current.context.scope, binding.scope)
-    || current.context.agentRuntimeId !== tailBinding.execution.runtimeId
-    || current.position.executionEpoch !== tailBinding.execution.executionEpoch
-    || current.context.loopCheckpoint.executionEpoch !== tailBinding.execution.executionEpoch) {
+  const currentContext = current.kind === 'checkpoint-bound' ? current.current.context : current.context;
+  const currentPositionEpoch = current.kind === 'checkpoint-bound' ? current.current.position.executionEpoch : current.position.executionEpoch;
+
+  if (!same(currentContext.scope, binding.scope)
+    || currentContext.agentRuntimeId !== tailBinding.execution.runtimeId
+    || currentPositionEpoch !== tailBinding.execution.executionEpoch
+    || currentContext.loopCheckpoint.executionEpoch !== tailBinding.execution.executionEpoch) {
     missing('the canonical current context does not match the committed segment tail incarnation');
   }
-  // The original immutable v1 capture is closed by the first resumed segment's
-  // exact predecessor receipt, or by the tail receipt when no resumed segment
-  // exists yet. The v1 base is always a saved predecessor.
-  const initialClosing: ActiveTurnSegmentPredecessorRef = segments.length > 0 ? segments[0]!.predecessor : tail;
-  if (initialClosing.interrupted !== undefined) missing('the original v1 base is not a saved predecessor');
-  const original = await native.readRecoveryAssetsExact(initialClosing.recoveryAssetsReceiptRef);
-  if (original.receipt.turnId !== request.businessTurnId || !same(original.prepared.body, initial.body)) {
-    missing('the exact v1 predecessor receipt does not bind the original capture');
-  }
-  const captures: ColdExecutionCapture[] = [{ version: 1, source: original }];
+
+  let initialOpenPrefix: ActiveTurnInitialOpenExactRead | null = null;
+  let initialCompletions: readonly CompletionReadInput[] = [];
+  const captures: ColdExecutionCapture[] = [];
   const interruptedSegments: ActiveTurnSegmentInterruptedExactRead[] = [];
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index]!;
-    // The closing fact of this segment is its successor's predecessor, or the
-    // tail receipt when this is the last committed segment.
-    const closing: ActiveTurnSegmentPredecessorRef = index + 1 < segments.length ? segments[index + 1]!.predecessor : tail;
-    if (closing.interrupted !== undefined) {
-      interruptedSegments.push(await segmentJournal.readSegmentInterruptedExact({
-        businessTurnId: request.businessTurnId,
-        predecessor: { segmentId: segment.segmentId, interrupted: closing.interrupted },
-      }));
-    } else {
-      captures.push({ version: 2, source: await segmentJournal.readSegmentCaptureExact({
-        businessTurnId: request.businessTurnId, segmentId: segment.segmentId,
-        recoveryAssetsReceiptRef: closing.recoveryAssetsReceiptRef,
-      }) });
+
+  if (initial.kind === 'initial-open') {
+    initialOpenPrefix = await segmentJournal.readInitialOpenExact({
+      businessTurnId: request.businessTurnId,
+      anchor: initial.anchor,
+    });
+    initialCompletions = await completion.discoverExactExecution({
+      execution: {
+        ...initial.binding.execution,
+        taskId: allocation.taskId,
+        operationId: allocation.operationId,
+        organId: initial.binding.scope.organId,
+        ...(initial.binding.scope.cycleId === undefined ? {} : { cycleId: initial.binding.scope.cycleId }),
+      },
+    });
+    if (segments.length > 0) {
+      const firstSegment = segments[0]!;
+      if (firstSegment.predecessor.initialOpen === undefined
+        || !same(firstSegment.predecessor.initialOpen, initial.anchor)) {
+        missing('the first resumed segment does not bind the original initial-open anchor');
+      }
+    }
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index]!;
+      const closing: ActiveTurnSegmentPredecessorRef = index + 1 < segments.length ? segments[index + 1]!.predecessor : tail;
+      if (closing.interrupted !== undefined) {
+        interruptedSegments.push(await segmentJournal.readSegmentInterruptedExact({
+          businessTurnId: request.businessTurnId,
+          predecessor: { segmentId: segment.segmentId, interrupted: closing.interrupted },
+        }));
+      } else if (closing.initialOpen !== undefined) {
+        missing('a successor segment cannot have an initialOpen predecessor');
+      } else {
+        captures.push({ version: 2, source: await segmentJournal.readSegmentCaptureExact({
+          businessTurnId: request.businessTurnId, segmentId: segment.segmentId,
+          recoveryAssetsReceiptRef: closing.recoveryAssetsReceiptRef,
+        }) });
+      }
+    }
+  } else {
+    // The original immutable v1 capture is closed by the first resumed segment's
+    // exact predecessor receipt, or by the tail receipt when no resumed segment
+    // exists yet. The v1 base is always a saved predecessor.
+    const initialClosing: ActiveTurnSegmentPredecessorRef = segments.length > 0 ? segments[0]!.predecessor : tail;
+    if (initialClosing.interrupted !== undefined || initialClosing.initialOpen !== undefined) {
+      missing('the original v1 base is not a saved predecessor');
+    }
+    const original = await native.readRecoveryAssetsExact(initialClosing.recoveryAssetsReceiptRef);
+    if (original.receipt.turnId !== request.businessTurnId || !same(original.prepared.body, initial.body)) {
+      missing('the exact v1 predecessor receipt does not bind the original capture');
+    }
+    captures.push({ version: 1, source: original });
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index]!;
+      const closing: ActiveTurnSegmentPredecessorRef = index + 1 < segments.length ? segments[index + 1]!.predecessor : tail;
+      if (closing.interrupted !== undefined) {
+        interruptedSegments.push(await segmentJournal.readSegmentInterruptedExact({
+          businessTurnId: request.businessTurnId,
+          predecessor: { segmentId: segment.segmentId, interrupted: closing.interrupted },
+        }));
+      } else if (closing.initialOpen !== undefined) {
+        missing('a successor segment cannot have an initialOpen predecessor');
+      } else {
+        captures.push({ version: 2, source: await segmentJournal.readSegmentCaptureExact({
+          businessTurnId: request.businessTurnId, segmentId: segment.segmentId,
+          recoveryAssetsReceiptRef: closing.recoveryAssetsReceiptRef,
+        }) });
+      }
     }
   }
+
   // The current operation-control namespace is the exact physical incarnation
   // the canonical position/context already bound to the committed segment tail.
   const control = readOperationControlFromRecords(records, { scope: taskScope,
@@ -197,5 +280,81 @@ export async function readColdExecutionSource(
     missing('the durable retry cycle does not match the retained assignment and initial epoch');
   }
   return { allocation, preparedInput, initial, assignment: binding.assignment, scope: binding.scope,
-    segments, tail, captures, interruptedSegments, current, durableEpochs, retryCycle, segmentJournal };
+    segments, tail, captures, interruptedSegments, initialOpenPrefix, initialCompletions,
+    current, durableEpochs, retryCycle, segmentJournal };
+}
+
+/**
+ * Canonical cold-resume request selector.
+ *
+ * It discovers the unique retained prepared allocation from `owners.preparedJournal`,
+ * resolves the matching committed `active-turn:*:binding-opened` record in `owners.journal`,
+ * reads the committed segment tail and its recovery receipt via `createActiveTurnSegmentJournal`,
+ * and validates the full source with `readColdExecutionSource` before returning.
+ */
+export async function resolveColdExecutionResumeRequest(
+  owners: ColdExecutionSourceOwners,
+  input: {
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+  },
+): Promise<RuntimeColdExecutionResumeRequest> {
+  if (!input.taskId?.value || !input.operationId?.value) {
+    missing('the taskId and operationId are required to resolve a cold execution resume request');
+  }
+  const preparedRecords = owners.preparedJournal.replay().filter(
+    (record): record is Extract<ReturnType<typeof owners.preparedJournal.replay>[number], { kind: 'operation.prepared' }> =>
+      record.kind === 'operation.prepared'
+      && record.allocation.taskId.value === input.taskId.value
+      && record.allocation.operationId.value === input.operationId.value,
+  );
+  if (preparedRecords.length !== 1) {
+    missing('the retained execution has no single prepared allocation for the task and operation');
+  }
+  const allocation = preparedRecords[0]!.allocation;
+  const taskScope = { organId: allocation.scope.organId, taskId: allocation.taskId };
+  const taskBindings = await listTaskActiveTurnBindings({
+    journal: owners.journal,
+    scope: taskScope,
+  });
+  const preparedInput = readPreparedExecutionInput(owners.preparedJournal, allocation);
+  const matching = taskBindings.filter((entry) => {
+    return same(entry.binding.scope, allocation.scope)
+      && entry.binding.assignment.assignmentId === allocation.assignmentId
+      && same(entry.binding.assignment.taskId, allocation.taskId)
+      && entry.binding.assignment.inputRevision === preparedInput.inputRevision;
+  });
+  if (matching.length !== 1) {
+    missing('the retained execution allocation has no single committed active-turn binding');
+  }
+  const businessTurnId = matching[0]!.binding.admittedTurn.turnId;
+  const completion = new JsonlOperationCompletionJournal({ journal: owners.journal });
+  const segmentJournal = createActiveTurnSegmentJournal({
+    journalPath: owners.journalPath,
+    assetRoot: owners.artifactsRoot,
+    completionJournal: completion,
+    businessTurnId,
+  });
+  const segments = await segmentJournal.readSegments(businessTurnId);
+  const tailSegment = segments.at(-1);
+  const tailId = tailSegment?.segmentId ?? businessTurnId;
+  const receipt = await segmentJournal.readSegmentRecoveryReceipt(tailId);
+  if (receipt.status === 'failed' || receipt.status === 'unknown') {
+    missing(receipt.reason);
+  }
+  const predecessor: ActiveTurnSegmentPredecessorRef = receipt.status === 'exact'
+    ? { segmentId: tailId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef }
+    : receipt.status === 'interrupted'
+      ? { segmentId: tailId, interrupted: receipt.anchor }
+      : { segmentId: tailId, initialOpen: receipt.anchor };
+
+  await readColdExecutionSource(owners, {
+    allocation,
+    request: { businessTurnId, predecessor },
+  });
+
+  return {
+    businessTurnId,
+    predecessor,
+  };
 }

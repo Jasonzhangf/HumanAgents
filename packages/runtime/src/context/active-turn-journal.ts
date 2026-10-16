@@ -10,6 +10,7 @@ import type {
 } from '../../../contracts/src/index.js';
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import type {
+  ActiveTurnInitialOpenAnchor,
   ActiveTurnInitialSegmentCapture,
   ActiveTurnSegmentInterruptedAnchor,
   ActiveTurnSegmentPredecessorRef,
@@ -21,7 +22,7 @@ import type {
   ActiveTurnSegmentAppendPort,
   ActiveTurnSegmentReadPort,
 } from './active-turn-segments.js';
-import type { ActiveTurnSegmentLivePrefix } from './active-turn-live-prefix.js';
+import type { ActiveTurnLivePrefix, ActiveTurnSegmentLivePrefix } from './active-turn-live-prefix.js';
 
 /**
  * Narrow durable boundary for the Runtime-owned active turn. The logical owner
@@ -126,6 +127,18 @@ export interface ActiveTurnSegmentInterruptedExactRead {
 }
 
 /**
+ * Exact cold read of an original turn that opened in v1 and never committed a
+ * v1 capture. The `anchor` is the real `binding-opened` commit plus the last
+ * committed `active-turn:<businessTurnId>:*` record; the `prefix` is the
+ * committed v1 live prefix cut at that anchor. It is not a frozen capture and
+ * carries no pause, drain or save fact.
+ */
+export interface ActiveTurnInitialOpenExactRead {
+  readonly anchor: ActiveTurnInitialOpenAnchor;
+  readonly prefix: ActiveTurnLivePrefix;
+}
+
+/**
  * The named segment-journal port. It extends the Runtime read/append ports that
  * `resumeActiveTurnSegment` consumes with the exact segment-record and capture
  * reads that D-L/D-M consume. The physical commit and immutable-asset backing
@@ -146,6 +159,20 @@ export interface ActiveTurnSegmentJournalPort extends ActiveTurnSegmentReadPort,
     readonly businessTurnId: string;
     readonly predecessor: ActiveTurnSegmentInterruptedExactRead['predecessor'];
   }): Promise<ActiveTurnSegmentInterruptedExactRead>;
+  /**
+   * The durable anchor of the original turn when it opened but never captured,
+   * or null when no binding-opened record exists for the bound business turn.
+   */
+  readInitialOpenAnchor(): Promise<ActiveTurnInitialOpenAnchor | null>;
+  /**
+   * Exact cold read of the original turn's committed v1 live prefix, re-checked
+   * against the supplied anchor so a stale or forged anchor fails instead of
+   * reading a changed tail. The original input is referenced, never copied.
+   */
+  readInitialOpenExact(input: {
+    readonly businessTurnId: string;
+    readonly anchor: ActiveTurnInitialOpenAnchor;
+  }): Promise<ActiveTurnInitialOpenExactRead>;
 }
 
 /** Re-exported so consumers can name the exact opened record without a deep import. */

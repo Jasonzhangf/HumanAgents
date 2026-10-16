@@ -18,9 +18,21 @@ import {
 } from '../../../packages/contracts/src/index.js';
 import {
   readSemanticTurnContext,
+  readResumedSegmentSemanticTurnContext,
   type ResolvedSemanticTurnContext,
   type SemanticCurrentTurnUnit,
 } from '../../../packages/runtime/src/context/semantic-turn-context-reader.js';
+import {
+  originalBusinessTurnRefFromBinding,
+  type ActiveTurnInitialOpenAnchor,
+  type ResumedTurnSegmentOpened,
+} from '../../../packages/contracts/src/active-turn-segments.js';
+import type { JournalCommitRef } from '../../../packages/contracts/src/i2-history.js';
+import type { TaskRuntimeIncarnation } from '../../../packages/contracts/src/framework.js';
+import type {
+  ActiveTurnLivePrefix,
+  ActiveTurnSegmentLivePrefix,
+} from '../../../packages/runtime/src/context/active-turn-live-prefix.js';
 
 /**
  * Real public consumer for `readSemanticTurnContext`. It drives the v1 reader
@@ -272,4 +284,139 @@ test('delivery refs: reader keeps accepted tool-result evidence refs and exact r
   const second = await readFixture(fixture);
   assert.deepEqual(refsOf(toolResultUnit(second, 'call-1')), resultRefs);
   assert.equal(resultRefs[0]!.scope.taskId?.value, taskId.value);
+});
+
+const openTurnId = 'business-turn-refs';
+const openRuntimeId = execution.runtimeId;
+
+function initialOpenBinding(): ActiveTurnBinding {
+  const base = activeBinding();
+  return {
+    execution: { runtimeId: openRuntimeId, executionEpoch: 1 },
+    scope,
+    admittedTurn: { ...base.admittedTurn, executionEpoch: 1 },
+    assignment: { ...assignment, executionEpoch: 1 },
+  };
+}
+
+function initialOpenSegment(
+  binding: ActiveTurnBinding,
+  anchor: ActiveTurnInitialOpenAnchor,
+  businessTurnRef: ReturnType<typeof originalBusinessTurnRefFromBinding>,
+): ResumedTurnSegmentOpened {
+  const segmentExecution = { runtimeId: openRuntimeId, executionEpoch: 2 };
+  const incarnation: TaskRuntimeIncarnation = {
+    runtimeId: segmentExecution.runtimeId,
+    generation: segmentExecution.executionEpoch,
+    agentInstanceId: 'segment-agent-refs',
+    roleId: 'role-executor',
+    taskId,
+    assignmentId: assignment.assignmentId,
+    executionEpoch: segmentExecution.executionEpoch,
+  };
+  assert.equal(binding.execution.executionEpoch, 1);
+  return {
+    kind: 'segment-opened',
+    segmentId: 'segment-refs-1',
+    businessTurnRef,
+    predecessor: { segmentId: openTurnId, initialOpen: anchor },
+    binding: {
+      businessTurnRef,
+      assignment: { ...assignment, executionEpoch: segmentExecution.executionEpoch },
+      execution: segmentExecution,
+      incarnation,
+      scope,
+    },
+    authorityCommitRef: { commitId: 'grant-refs', journalSeq: 21, recordDigest: `sha256:${'1'.repeat(64)}` },
+    businessRegistrationCommitRef: { commitId: 'registration-refs', journalSeq: 22, recordDigest: `sha256:${'2'.repeat(64)}` },
+    requestRef: `segment-open:${openTurnId}:segment-refs-1`,
+    inputIdentity: { requestRef: `segment-open:${openTurnId}:segment-refs-1`, digest: `sha256:${'3'.repeat(64)}` },
+  };
+}
+
+test('initial-open segment chain: original input once and pending obligations preserved', async () => {
+  const registry = new Map<string, Uint8Array>();
+  registry.set('refs-initial-input', encoder.encode('ORIGINAL USER INPUT'));
+  const read: RawContentReadPort = {
+    async read({ content }) {
+      const bytes = registry.get(content.ref.evidenceId.value);
+      if (!bytes) throw new Error(`missing raw asset ${content.ref.evidenceId.value}`);
+      return new Uint8Array(bytes);
+    },
+  };
+
+  const anchor: ActiveTurnInitialOpenAnchor = {
+    bindingCommitRef: { commitId: `active-turn:${openTurnId}:binding-opened`, journalSeq: 6, recordDigest: `sha256:${'a'.repeat(64)}` },
+    recordsThroughCommitRef: { commitId: `active-turn:${openTurnId}:request:request-refs-1:waiting`, journalSeq: 12, recordDigest: `sha256:${'b'.repeat(64)}` },
+  };
+  const initialInput = asset('refs-initial-input');
+  const binding = initialOpenBinding();
+  const businessTurnRef = originalBusinessTurnRefFromBinding(anchor.bindingCommitRef, binding);
+  const segment = initialOpenSegment(binding, anchor, businessTurnRef);
+
+  const initialPrefix: ActiveTurnLivePrefix = {
+    kind: 'live-accepted-prefix',
+    source: openTurnId,
+    binding,
+    initialInput,
+    entries: [],
+    requests: [{ request, scope, phase: 'waiting' }],
+    childInvocations: [],
+    watermark: { lastAcceptedSeq: 0, controlRecordCount: 2 },
+    obligations: [],
+  };
+  const livePrefix: ActiveTurnSegmentLivePrefix = {
+    kind: 'segment-live-accepted-prefix',
+    segment,
+    binding: segment.binding,
+    initialInput,
+    entries: [],
+    requests: [],
+    childInvocations: [],
+    watermark: { lastAcceptedSeq: 0, controlRecordCount: 1 },
+    obligations: [],
+  };
+
+  const result = await readResumedSegmentSemanticTurnContext({
+    history: {
+      async readCommittedSemanticCheckpoint() {
+        throw new Error('the reader must not read history without an exact lookup');
+      },
+    },
+    priorCompletedTurns: [],
+    segment: {
+      chain: { businessTurnRef, initial: { kind: 'initial-open', anchor, binding, initialInput }, segments: [segment] },
+      exactReads: {
+        async readInitialOpenExact({ businessTurnId: requested, anchor: requestedAnchor }) {
+          assert.equal(requested, openTurnId);
+          assert.deepEqual(requestedAnchor, anchor);
+          return { anchor, prefix: initialPrefix };
+        },
+        async readSegmentCaptureExact() {
+          throw new Error('a single-segment chain has no earlier exact capture');
+        },
+        async readSegmentInterruptedExact() {
+          throw new Error('a single-segment chain has no earlier interrupted segment');
+        },
+      },
+      live: { prefix: livePrefix, rawContent: read },
+    },
+    runtimeId: execution.runtimeId,
+    scope,
+    assignment,
+  });
+
+  const initialUnits = result.context.activeTurn.filter((entry) => (
+    entry.kind === 'message' && entry.message.kind === 'initial-input'
+  ));
+  assert.equal(initialUnits.length, 1, 'the original input is emitted exactly once');
+  const only = initialUnits[0]!;
+  if (only.kind === 'message' && only.message.kind === 'initial-input') {
+    assert.equal(decoder.decode(only.message.bytes), 'ORIGINAL USER INPUT');
+  }
+  // The opened-but-unsaved original turn keeps its pending request as an
+  // obligation tagged with its own business turn identity.
+  assert.deepEqual(result.obligations, [
+    { kind: 'request', requestId: request.requestId, phase: 'waiting', segmentId: openTurnId },
+  ]);
 });

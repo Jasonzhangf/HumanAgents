@@ -1,17 +1,25 @@
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../../contracts/src/framework.js';
-import { assertSameScope, type ScopeRef, type WorkAssignment } from '../../../contracts/src/index.js';
+import {
+  assertSameScope,
+  type ActiveTurnBinding,
+  type RawAsset,
+  type ScopeRef,
+  type WorkAssignment,
+} from '../../../contracts/src/index.js';
 import { validateActiveTurnCaptureBody, type ActiveTurnCaptureBody } from '../../../contracts/src/index.js';
 import { canonicalJsonStringify } from '../../../contracts/src/explicit-brain.js';
 import type { CheckpointControlInputIdentity } from '../../../contracts/src/checkpoint-controls.js';
 import {
   activeTurnSegmentCommitId,
   originalBusinessTurnRef,
+  originalBusinessTurnRefFromBinding,
   validateActiveTurnSegmentChainRead,
   validateActiveTurnSegmentOpenIntent,
   validateResumedTurnSegmentOpened,
-  type ActiveTurnInitialSegmentCapture,
+  type ActiveTurnInitialSegmentSource,
   type ActiveTurnSegmentBinding,
+  type ActiveTurnSegmentChainInitial,
   type ActiveTurnSegmentChainRead,
   type ActiveTurnSegmentOpenIntent,
   type ActiveTurnSegmentPredecessorRef,
@@ -30,8 +38,13 @@ import { RuntimeActiveTurnError } from './active-turn-context.js';
  */
 
 export interface ActiveTurnSegmentReadPort {
-  /** Exact read of the immutable first (v1) capture for one business turn. */
-  readInitialSegmentCapture(businessTurnId: string): Promise<ActiveTurnInitialSegmentCapture | null>;
+  /**
+   * Exact read of one business turn's initial segment source: the immutable v1
+   * capture (`kind: 'captured'`) or the durable initial-open anchor of a turn
+   * that opened in v1 but never captured (`kind: 'initial-open'`). Null when the
+   * business turn has no committed initial segment at all.
+   */
+  readInitialSegmentSource(businessTurnId: string): Promise<ActiveTurnInitialSegmentSource | null>;
   /** Exact read of every appended segment for one business turn, in append order. */
   readSegments(businessTurnId: string): Promise<readonly ResumedTurnSegmentOpened[]>;
   /** Exact read of one segment's recovery-assets receipt. */
@@ -167,19 +180,32 @@ function sameSegmentIntentIdentity(
 export async function resumeActiveTurnSegment(
   input: ResumeActiveTurnSegmentInput,
 ): Promise<ResumeActiveTurnSegmentResult> {
-  const capture = await input.ports.read.readInitialSegmentCapture(input.businessTurnId);
-  if (!capture) {
-    fail('active-turn.segment.initial-missing', `no immutable first capture for business turn ${input.businessTurnId}`);
+  const initialSource = await input.ports.read.readInitialSegmentSource(input.businessTurnId);
+  if (!initialSource) {
+    fail('active-turn.segment.initial-missing', `no initial segment source for business turn ${input.businessTurnId}`);
   }
-  const initial: ActiveTurnInitialSegmentCapture = capture;
-  validateActiveTurnCaptureBody(initial.body);
-  assertSameAssignmentIdentity(input.assignment, initial.body.binding.assignment);
-  const businessTurnRef = originalBusinessTurnRef(initial.bindingCommitRef, initial.body);
+  let businessTurnRef: OriginalBusinessTurnRef;
+  let initialBinding: ActiveTurnBinding;
+  let chainInitial: ActiveTurnSegmentChainInitial;
+  let initialInput: RawAsset;
+  if (initialSource.kind === 'captured') {
+    validateActiveTurnCaptureBody(initialSource.body);
+    businessTurnRef = originalBusinessTurnRef(initialSource.bindingCommitRef, initialSource.body);
+    initialBinding = initialSource.body.binding;
+    chainInitial = { kind: 'captured', body: initialSource.body };
+    initialInput = initialSource.body.initialInput;
+  } else {
+    businessTurnRef = originalBusinessTurnRefFromBinding(initialSource.anchor.bindingCommitRef, initialSource.binding);
+    initialBinding = initialSource.binding;
+    chainInitial = initialSource;
+    initialInput = initialSource.initialInput;
+  }
+  assertSameAssignmentIdentity(input.assignment, initialBinding.assignment);
   if (businessTurnRef.businessTurnId !== input.businessTurnId) {
-    fail('active-turn.segment.business-turn-mismatch', 'immutable first capture does not belong to the requested business turn');
+    fail('active-turn.segment.business-turn-mismatch', 'the initial segment source does not belong to the requested business turn');
   }
   // The resumed segment keeps the original business scope.
-  assertSameScope(input.scope, initial.body.binding.scope);
+  assertSameScope(input.scope, initialBinding.scope);
   assertSegmentIdentityRelations({ incarnation: input.incarnation, assignment: input.assignment });
 
   const execution = {
@@ -196,7 +222,7 @@ export async function resumeActiveTurnSegment(
 
   // Read and validate the committed chain before creating anything.
   const appended = await input.ports.read.readSegments(input.businessTurnId);
-  const chain: ActiveTurnSegmentChainRead = { businessTurnRef, initial: initial.body, segments: appended };
+  const chain: ActiveTurnSegmentChainRead = { businessTurnRef, initial: chainInitial, segments: appended };
   validateActiveTurnSegmentChainRead(chain);
 
   // Exact retry: the target may already be committed. Reuse its content and the
@@ -241,13 +267,15 @@ export async function resumeActiveTurnSegment(
 
   const predecessor: ActiveTurnSegmentPredecessorRef = receipt.status === 'exact'
     ? { segmentId: predecessorSegmentId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef }
-    : { segmentId: predecessorSegmentId, interrupted: receipt.anchor };
+    : receipt.status === 'interrupted'
+      ? { segmentId: predecessorSegmentId, interrupted: receipt.anchor }
+      : { segmentId: predecessorSegmentId, initialOpen: receipt.anchor };
   const intent: ActiveTurnSegmentOpenIntent = {
     businessTurnRef,
     segmentId: input.segmentId,
     predecessor,
     binding: candidateBinding,
-    initialInput: initial.body.initialInput,
+    initialInput,
   };
   validateActiveTurnSegmentOpenIntent(intent);
 
@@ -278,7 +306,7 @@ export async function resumeActiveTurnSegment(
 
   // Exact cold re-read: the durable record must equal what we appended.
   const reopened = await input.ports.read.readSegments(input.businessTurnId);
-  const committed: ActiveTurnSegmentChainRead = { businessTurnRef, initial: initial.body, segments: reopened };
+  const committed: ActiveTurnSegmentChainRead = { businessTurnRef, initial: chainInitial, segments: reopened };
   validateActiveTurnSegmentChainRead(committed);
   const persisted = committed.segments.find((candidate) => candidate.segmentId === input.segmentId);
   if (!persisted) fail('active-turn.segment.append-missing', 'the appended segment is absent from the durable chain');

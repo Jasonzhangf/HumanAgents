@@ -22,11 +22,19 @@ import {
   type TaskId,
   type WorkAssignment,
 } from '../../packages/contracts/src/index.js';
-import type { ActiveTurnSegmentPredecessorRef } from '../../packages/contracts/src/active-turn-segments.js';
+import type {
+  ActiveTurnInitialOpenAnchor,
+  ActiveTurnInitialSegmentSource,
+  ActiveTurnSegmentPredecessorRef,
+} from '../../packages/contracts/src/active-turn-segments.js';
 import type { JournalCommitRef } from '../../packages/contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../packages/contracts/src/framework.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../packages/adapters/jsonl/src/index.js';
-import { createJsonlActiveTurnJournal, decodeActiveTurnRecords } from '../../packages/adapters/jsonl/src/active-turn.js';
+import {
+  createJsonlActiveTurnJournal,
+  decodeActiveTurnRecords,
+} from '../../packages/adapters/jsonl/src/active-turn.js';
+import type { ActiveTurnJournalRecord } from '../../packages/runtime/src/context/active-turn-journal.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { ImmutableAssetStore, evidenceReference } from '../../packages/adapters/filesystem/src/index.js';
@@ -105,11 +113,12 @@ import {
  */
 
 const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
-  ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-d-cold-consumer-r1-20261014');
+  ?? join(homedir(), '.humanagent', 'test-fixtures', 'i1-initial-source-20261016');
 const EVIDENCE_ROOT = process.env.HUMANAGENT_TEST_EVIDENCE_ROOT ?? PERSISTENCE_ROOT;
 const at = '2026-10-14T00:00:00.000Z';
 const organId = id('organ', 'cold-resume-organ');
 const processMode = process.argv.find((arg) => arg.startsWith('--cold-process='))?.split('=', 2)[1];
+const processKind = process.argv.find((arg) => arg.startsWith('--fixture-kind='))?.split('=', 2)[1] ?? 'captured';
 const processRoot = process.argv.find((arg) => arg === '--fixture-root') === undefined
   ? undefined
   : process.argv[process.argv.indexOf('--fixture-root') + 1];
@@ -222,6 +231,7 @@ interface ColdProcessReceipt {
   readonly root: string;
   readonly taskId: string;
   readonly archiveRoot?: string;
+  readonly fixtureKind?: 'captured' | 'interrupted' | 'initial-open';
 }
 
 function emitReceipt(receipt: ColdProcessReceipt): void {
@@ -272,9 +282,11 @@ async function collectColdProcess(child: ChildProcess): Promise<ColdProcessRun> 
 }
 
 async function runSeedProcess(): Promise<void> {
-  const fixture = await buildColdFixture('resume-endpoint');
+  const fixture = processKind === 'initial-open'
+    ? await buildInitialOpenColdFixture('seed-initial-open')
+    : await buildColdFixture('resume-endpoint');
   emitReceipt({ phase: 'seed', pid: process.pid, ppid: processPpid,
-    root: fixture.root, taskId: fixture.taskId.value });
+    root: fixture.root, taskId: fixture.taskId.value, fixtureKind: processKind as 'captured' | 'interrupted' | 'initial-open' });
 }
 
 async function runResumeProcess(): Promise<void> {
@@ -282,9 +294,14 @@ async function runResumeProcess(): Promise<void> {
     throw new Error('the resume child requires --fixture-root and --task-id');
   }
   const fixture = await reopenColdFixture(processRoot, processTask);
-  const archiveRoot = await runResumeAssertions(fixture, 'cold-resume.model');
+  let archiveRoot: string;
+  if (processKind === 'initial-open') {
+    archiveRoot = await runHttpResumeAssertions(fixture, 'initial-open', true);
+  } else {
+    archiveRoot = await runResumeAssertions(fixture, 'cold-resume.model');
+  }
   emitReceipt({ phase: 'resume', pid: process.pid, ppid: processPpid,
-    root: processRoot, taskId: processTask, archiveRoot });
+    root: processRoot, taskId: processTask, archiveRoot, fixtureKind: processKind as 'captured' | 'interrupted' | 'initial-open' });
 }
 
 /** One real Responses HTTP request, decoded only as far as its cold-resume stage. */
@@ -552,8 +569,8 @@ interface ColdFixture {
   readonly taskScope: ScopeRef;
   readonly businessTurnId: string;
   readonly predecessor: ActiveTurnSegmentPredecessorRef;
-  /** The exact original v1 recovery receipt; always present for the retained base. */
-  readonly originalV1ReceiptRef: string;
+  /** The exact original v1 recovery receipt; present for the captured base. */
+  readonly originalV1ReceiptRef?: string;
   readonly effect: FileWriteEffect;
   readonly effectPath: string;
   readonly output: string;
@@ -567,12 +584,377 @@ interface ColdFixture {
   readonly native: ReturnType<typeof createNativeRecoveryAssets>;
   readonly segmentJournal: ReturnType<typeof createActiveTurnSegmentJournal>;
   readonly taskId: TaskId;
+  readonly initialOpenAnchor?: ActiveTurnInitialOpenAnchor;
+  readonly fixtureKind?: 'captured' | 'interrupted' | 'initial-open';
+  readonly pendingRequestId?: string;
 }
 
 interface InterruptedColdFixture extends ColdFixture {
   readonly interruptedSegmentId: string;
   readonly interruptedRequestId: string;
   readonly interruptedPredecessor: ActiveTurnSegmentPredecessorRef;
+}
+
+/**
+ * ONE physical uncaptured initial-turn fixture:
+ * A legal initial turn that opened and appended records (binding, initial-input,
+ * root context, completed effect, pending request, and runtime-task-current-state)
+ * but ZERO checkpoints, ZERO checkpoint closures, ZERO recovery-assets.phase
+ * commits, and ZERO segment-opened records.
+ */
+async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
+  await mkdir(PERSISTENCE_ROOT, { recursive: true });
+  const root = await mkdtemp(join(PERSISTENCE_ROOT, `${name}-`));
+  const preparedPath = join(root, 'prepared.jsonl');
+  const journalPath = join(root, 'organ.jsonl');
+  const artifactsRoot = join(root, 'assets');
+  const retryPath = join(root, 'retry.jsonl');
+
+  const preparedJournal = new UiRuntimeJournal(preparedPath);
+  const seed = new RuntimeTaskCoordinator({
+    organId,
+    journal: preparedJournal,
+    createDriver: async () => { throw new Error('the fixture must not start a driver'); },
+    checkpointStoreFor: () => new FileCheckpointStore(join(root, 'unused-checkpoints.jsonl')),
+    attentionPort: {
+      async publish(attention) { return { attentionId: attention.attentionId, delivered: true }; },
+      async resolve(attention) { return { attentionId: attention.attentionId, delivered: true }; },
+    },
+  });
+  const task = seed.createTask({ title: 'cold resume initial open', directive: 'original directive' });
+  const prompt = 'original canonical input\n保持输入';
+  const taskScope = { organId, taskId: task.taskId };
+  const journal = new JsonlOrganJournal(journalPath);
+
+  const explicitIntake = new ExplicitIntake();
+  const confirmationLedger = new ConfirmationLedger();
+  const requirementSubmissions = new RequirementSubmissionOwner(
+    confirmationLedger,
+    new RequirementInbox(),
+    { async submit(envelope) { return { requirementId: envelope.requirementId }; } },
+  );
+  const interactionId = await explicitIntake.receive({
+    sourceRef: 'cold-resume-consumer',
+    rawInput: prompt,
+    channel: 'business',
+    requestKind: 'new-task-create',
+    occurredAt: at,
+  }, 1);
+  await explicitIntake.beginMatching(interactionId);
+  await explicitIntake.recordMatch(interactionId, {
+    normalizedInput: prompt,
+    matchedTasks: [{ taskId: task.taskId, relation: 'current', status: 'created' }],
+    knownFacts: [],
+  });
+  await explicitIntake.propose(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'original directive',
+  });
+  await explicitIntake.createDraft(interactionId, {
+    goal: 'original directive',
+    scope: prompt,
+    normalizedInput: prompt,
+    proposedIntent: 'create',
+    proposal: 'original directive',
+  });
+  const draftRevision = explicitIntake.currentDraftRevision(interactionId);
+  if (draftRevision === undefined) {
+    throw new Error('the fixture must own a typed draft revision before confirmation');
+  }
+  const confirmationRef = 'cold-resume-confirmation-initial';
+  const payloadRef = `draft-payload:${draftRevision.draftId}`;
+  confirmationLedger.registerRevision({
+    interactionId,
+    draftId: draftRevision.draftId,
+    inputRevision: draftRevision.inputRevision,
+    draftRevisionVersion: draftRevision.revisionVersion,
+    draftRevisionHash: draftRevision.revisionHash,
+    normalizedInput: draftRevision.normalizedInput,
+    intent: draftRevision.proposedIntent,
+    payloadRef,
+    requestKind: 'new-task-create',
+  });
+  const draftConfirmation = await explicitIntake.confirmDraftRevision({
+    interactionId,
+    draftId: draftRevision.draftId,
+    draftRevisionVersion: draftRevision.revisionVersion,
+    draftRevisionHash: draftRevision.revisionHash,
+    confirmationRef,
+    confirmedBy: 'cold-resume-owner',
+    confirmedAt: at,
+    payloadRef,
+  });
+  confirmationLedger.confirmRevision(draftConfirmation);
+  const submitted = await requirementSubmissions.submitFinal({
+    interactionId,
+    draftId: draftRevision.draftId,
+    inputRevision: draftRevision.inputRevision,
+    draftRevisionVersion: draftRevision.revisionVersion,
+    draftRevisionHash: draftRevision.revisionHash,
+    confirmationRef,
+    idempotencyKey: `cold-resume-final:${draftRevision.draftId}`,
+    requestKind: 'new-task-create',
+  });
+  const authorized = submitted.requirement;
+  await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(journal)).establish({
+    scope: taskScope,
+    source: {
+      requirementId: authorized.requirementId,
+      inputRevision: authorized.inputRevision,
+      draftId: authorized.draftId,
+      draftRevisionVersion: authorized.draftRevisionVersion,
+      draftRevisionHash: authorized.draftRevisionHash,
+      confirmationRef: authorized.confirmationRef,
+    },
+  });
+
+  const allocation = seed.prepareExecution(task.taskId, { prompt, configuredAgentId: 'cold-resume-agent' });
+  const { scope, taskId, operationId } = allocation;
+  const criteria = {
+    objective: 'retain full assignment',
+    successCriteria: ['source exact'],
+    failureCriteria: ['wrong source'],
+    incompleteCriteria: ['missing context'],
+  };
+  const assignment: WorkAssignment = {
+    assignmentId: allocation.assignmentId,
+    taskId,
+    pipelineNodeId: 'cold-resume-node',
+    attempt: 1,
+    executionEpoch: allocation.executionEpoch,
+    inputRevision: allocation.inputRevision,
+    ...criteria,
+    targetRefs: ['original-target'],
+    expectedOutputRefs: ['original-output'],
+    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
+    requiredCapabilities: ['provider.execution'],
+    mergeGate: 'not-required',
+  };
+  const businessTurnId = 'original-business-turn';
+  const grants = new JsonlTaskGrantJournal(journal);
+  const capability = { actionId: 'task.execute', capabilities: ['provider.execution'], scope: taskScope };
+  const grant = await grants.grant({
+    requestId: 'cold-resume-grant-initial',
+    taskId,
+    owner: allocation.ownerId,
+    capability,
+    expectedRevision: 0,
+  });
+
+  const admission = createServiceExecutionAdmission({
+    journal,
+    preparedJournal,
+    principalOwner: allocation.ownerId,
+    resourceBoundary: createPreparedOperationBoundary(preparedJournal),
+    now: () => new Date(at),
+  });
+  const admissionReceipt = await admission.admitExecution(allocation);
+  const admittedTurn = produceAdmittedTurn({
+    runtime: {
+      runtimeId: allocation.runtimeId,
+      executionEpoch: allocation.executionEpoch,
+      ownerRef: allocation.ownerId,
+      permissionRevision: String(grant.grant!.revision),
+    },
+    taskId,
+    scope,
+    assignment,
+    directiveRevision: allocation.directiveRevision,
+    turnId: businessTurnId,
+    currentTurnRef: `active-turn://${businessTurnId}`,
+    admissionEvidence: [evidence(scope, 'admission')],
+    recoveryStateRef: evidence(scope, 'recovery'),
+  });
+  const binding = {
+    admittedTurn,
+    assignment,
+    execution: {
+      runtimeId: admissionReceipt.binding.agentRuntimeId,
+      executionEpoch: admissionReceipt.binding.harnessExecutionEpoch,
+    },
+    scope,
+  };
+  const active = await ActiveTurnContext.open({
+    journal: createJsonlActiveTurnJournal({ filePath: journalPath, turnId: businessTurnId }),
+    binding,
+    currentTurnRef: admittedTurn.currentTurnRef,
+  });
+  const completion = new JsonlOperationCompletionJournal({ journal });
+  const native = createNativeRecoveryAssets({ journalPath, journal, assetRoot: artifactsRoot, completionJournal: completion });
+  const initialInput = await native.writeInitialInput({ scope, turnId: businessTurnId, rawInput: prompt });
+  await active.registerInitialInput(initialInput);
+
+  // Commit root context-history record
+  const history = createJsonlContextHistoryPort({ filePath: journalPath, journal });
+  const sourceContext = contextRecord(scope, allocation.runtimeId, allocation.executionEpoch);
+  const sourceContextCommit = (await produceContextHistory(history, {
+    record: sourceContext,
+    expectedCurrentContextCommitRef: null,
+  })).commitRef;
+
+  // Real completed file effect under original identity
+  const requestId = 'accepted-tool-request';
+  await active.registerRequest({ request: { turnId: businessTurnId, requestId }, scope, phase: 'dispatching' });
+  await active.registerRequest({ request: { turnId: businessTurnId, requestId }, scope, phase: 'dispatched' });
+  const toolOperationId = id('operation', 'accepted-tool-operation');
+  const execution = { ...binding.execution, organId, taskId, operationId, cycleId: scope.cycleId! };
+  const effectBinding = {
+    execution,
+    scope: { ...scope, operationId: toolOperationId },
+    toolOperationId,
+    requestId,
+    callId: 'accepted-call',
+    continuationRef: 'accepted-continuation',
+  };
+  const output = 'accepted output bytes';
+  const effect: FileWriteEffect = {
+    kind: 'file.write',
+    effectId: await fileWriteEffectId(effectBinding),
+    workspaceRef: root,
+    relativePath: 'accepted-output.txt',
+    inputDigest: digest(output),
+    expectedContentDigest: digest(output),
+  };
+  const callArguments = { path: effect.relativePath, content: output };
+  const rawArguments = {
+    ref: evidenceReference(
+      await new ImmutableAssetStore(artifactsRoot).write('accepted-call-arguments', new TextEncoder().encode(JSON.stringify(callArguments))),
+      scope,
+      'operation',
+    ),
+    view: { kind: 'utf8-text' as const },
+  };
+  await active.acceptRawFact({
+    execution: binding.execution,
+    scope,
+    request: { turnId: businessTurnId, requestId },
+    producerSeq: 1,
+    fact: {
+      kind: 'tool-call',
+      contentUnitId: 'accepted-call-args-unit',
+      call: { callId: effectBinding.callId, toolId: 'file.write', arguments: callArguments, continuationRef: effectBinding.continuationRef },
+      rawArguments,
+      complete: true,
+    },
+  });
+  await completion.commitIntent({ kind: 'operation-effect-intent', version: 1, binding: effectBinding, effect });
+  await writeFile(join(root, effect.relativePath), output, 'utf8');
+  assert.equal(digest(await readFile(join(root, effect.relativePath), 'utf8')), effect.expectedContentDigest);
+  await completion.commitCompletion({
+    kind: 'operation-completion',
+    version: 1,
+    binding: effectBinding,
+    effect,
+    confirmation: { ownerId: allocation.ownerId, method: 'file-readback-digest', observedContentDigest: digest(output) },
+    result: {
+      operationId: toolOperationId,
+      status: 'succeeded',
+      outputRef: 'artifact://accepted-output',
+      outputDigest: digest(output),
+      evidenceRefs: [evidence(scope, 'accepted-output')],
+      verifier: { name: 'file-readback', version: '1', decision: 'accepted' },
+      completedAt: at,
+    },
+  });
+  const rawOutput = {
+    ref: evidenceReference(
+      await new ImmutableAssetStore(artifactsRoot).write('accepted-output-raw', new TextEncoder().encode(output)),
+      scope,
+      'operation',
+    ),
+    view: { kind: 'utf8-text' as const },
+  };
+  await active.acceptRawFact({
+    execution: binding.execution,
+    scope,
+    request: { turnId: businessTurnId, requestId },
+    producerSeq: 2,
+    fact: {
+      kind: 'tool-result',
+      contentUnitId: 'accepted-result-unit',
+      callId: effectBinding.callId,
+      continuationRef: effectBinding.continuationRef,
+      complete: true,
+      rawOutput,
+      result: {
+        ...execution,
+        toolId: 'file.write',
+        callId: effectBinding.callId,
+        status: 'succeeded',
+        outputRefs: ['artifact://accepted-output'],
+        evidenceRefs: [evidence(scope, 'accepted-output')],
+      },
+    },
+  });
+  await active.registerRequest({ request: { turnId: businessTurnId, requestId }, scope, phase: 'settled' });
+
+  // Seed pending request ending in waiting
+  const pendingRequestId = 'pending-initial-request';
+  await active.registerRequest({ request: { turnId: businessTurnId, requestId: pendingRequestId }, scope, phase: 'dispatching' });
+  await active.registerRequest({ request: { turnId: businessTurnId, requestId: pendingRequestId }, scope, phase: 'dispatched' });
+  await active.registerRequest({ request: { turnId: businessTurnId, requestId: pendingRequestId }, scope, phase: 'waiting' });
+
+  // Commit RuntimeTaskCurrentState in entryPhase: 'open', nextAction: { kind: 'continue' }
+  await createJsonlRuntimeTaskCurrentStateJournal({ journal }).commit({
+    transitionId: 'current-state',
+    taskScope,
+    expectedStateCommitRef: null,
+    state: {
+      task: {
+        id: taskId,
+        organId,
+        title: task.title,
+        directive: task.directive,
+        directiveRevision: allocation.directiveRevision,
+        state: 'running',
+        memoryScope: 'task',
+      },
+      processing: {
+        entryPhase: 'open',
+        nextAction: { kind: 'continue' },
+        hardBlockers: [],
+        recoveryResponsibilityRef: 'original-recovery-owner',
+        laterErrorRefs: [],
+        stages: [],
+      },
+      retainedDuties: [{ operationRef: operationId.value, owner: allocation.ownerId }],
+      sourceCommitRefs: [],
+    },
+  });
+
+  await journal.verify();
+  const segmentJournal = createActiveTurnSegmentJournal({ journalPath, assetRoot: artifactsRoot, completionJournal: completion, businessTurnId });
+  const anchor = await segmentJournal.readInitialOpenAnchor();
+  if (anchor === null) throw new Error('failed to read initial open anchor from segment journal');
+  await segmentJournal.readInitialOpenExact({ businessTurnId, anchor });
+  const predecessor: ActiveTurnSegmentPredecessorRef = { segmentId: businessTurnId, initialOpen: anchor };
+
+  return {
+    root,
+    preparedPath,
+    journalPath,
+    artifactsRoot,
+    retryPath,
+    allocation,
+    assignment,
+    taskScope,
+    businessTurnId,
+    predecessor,
+    effect,
+    effectPath: join(root, effect.relativePath),
+    output,
+    journal,
+    acceptedEvidenceLocator: evidence(scope, 'accepted-output').locator,
+    contextCommitRef: sourceContextCommit,
+    preparedJournal: new UiRuntimeJournal(preparedPath),
+    completion,
+    native,
+    segmentJournal,
+    taskId,
+    initialOpenAnchor: anchor,
+    fixtureKind: 'initial-open',
+    pendingRequestId,
+  };
 }
 
 /**
@@ -842,50 +1224,117 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
   if (allocation === undefined) throw new Error('the retained prepared allocation is not readable');
   const completion = new JsonlOperationCompletionJournal({ journal });
   const native = createNativeRecoveryAssets({ journalPath, journal, assetRoot: artifactsRoot, completionJournal: completion });
-  // The v1 recovery receipt is the committed predecessor selector; it is
-  // discovered from the Journal, never handed to this process.
+  // The v1 recovery receipt is the committed predecessor selector for a captured turn.
+  // An uncaptured initial turn carries zero v1 recovery receipts.
   const v1Receipts = records.filter((record) => record.kind === 'event'
     && record.payload?.['type'] === 'recovery-assets.phase' && record.payload?.['version'] === 1);
-  if (v1Receipts.length !== 1) throw new Error('the committed fixture does not carry exactly one v1 recovery receipt');
-  const receipt = (v1Receipts[0]!.payload as { readonly receipt: { readonly turnId?: unknown } }).receipt;
-  const businessTurnId = receipt?.turnId;
-  if (typeof businessTurnId !== 'string' || businessTurnId.length === 0) {
-    throw new Error('the committed v1 recovery receipt does not name the original business turn');
+  if (v1Receipts.length > 1) {
+    throw new Error('the committed fixture carries multiple v1 recovery receipts');
   }
-  const predecessor: ActiveTurnSegmentPredecessorRef = {
-    segmentId: businessTurnId, recoveryAssetsReceiptRef: v1Receipts[0]!.commitId!,
-  };
-  const segmentJournal = createActiveTurnSegmentJournal({ journalPath, assetRoot: artifactsRoot,
-    completionJournal: completion, businessTurnId });
-  const initial = await segmentJournal.readInitialSegmentCapture(businessTurnId);
-  if (initial === null) throw new Error('the committed fixture does not carry the original v1 capture');
-  const assignment = initial.body.binding.assignment;
-  if (assignment.taskId.value !== taskIdValue) {
-    throw new Error('the committed original assignment does not carry the requested Task ID');
-  }
-  // The confirmed effect and its exact bytes come from the committed completion
-  // and its immutable raw asset, never from the post-resume file value.
-  const original = await native.readRecoveryAssetsExact(predecessor.recoveryAssetsReceiptRef);
+
+  let businessTurnId: string;
+  let predecessor: ActiveTurnSegmentPredecessorRef;
+  let assignment: WorkAssignment;
   let effect: FileWriteEffect | undefined;
   let acceptedEvidenceLocator: string | undefined;
-  for (const lookup of original.prepared.completionLookups) {
-    const readback = await completion.readExact(lookup);
-    if (readback.state !== 'confirmed') throw new Error('the committed effect completion is not confirmed');
-    effect = readback.receipt.fact.effect;
-    acceptedEvidenceLocator = readback.receipt.fact.result.evidenceRefs[0]?.locator;
-  }
-  if (effect === undefined || acceptedEvidenceLocator === undefined) {
-    throw new Error('the committed fixture does not carry the confirmed effect');
-  }
-  const rawOutputs = decodeActiveTurnRecords(records, businessTurnId)
-    .flatMap((record) => record.kind === 'accepted-fact'
-      ? [record.entry.envelope.fact.kind === 'tool-result' ? record.entry.envelope.fact.rawOutput : undefined] : []);
-  const rawOutput = rawOutputs.find((candidate) => candidate !== undefined);
-  if (rawOutput === undefined) throw new Error('the committed fixture does not carry the confirmed raw output asset');
-  const output = new TextDecoder('utf-8', { fatal: true })
-    .decode(await new ImmutableAssetStore(artifactsRoot).readEvidence(rawOutput.ref));
-  if (digest(output) !== effect.expectedContentDigest) {
-    throw new Error('the committed raw output asset does not match the confirmed effect digest');
+  let output: string;
+  let initialOpenAnchor: ActiveTurnInitialOpenAnchor | undefined;
+  let fixtureKind: 'captured' | 'initial-open' = 'captured';
+
+  let segmentJournal: ReturnType<typeof createActiveTurnSegmentJournal>;
+
+  if (v1Receipts.length === 1) {
+    const receipt = (v1Receipts[0]!.payload as { readonly receipt: { readonly turnId?: unknown } }).receipt;
+    businessTurnId = receipt?.turnId as string;
+    if (typeof businessTurnId !== 'string' || businessTurnId.length === 0) {
+      throw new Error('the committed v1 recovery receipt does not name the original business turn');
+    }
+    predecessor = {
+      segmentId: businessTurnId, recoveryAssetsReceiptRef: v1Receipts[0]!.commitId!,
+    };
+    segmentJournal = createActiveTurnSegmentJournal({ journalPath, assetRoot: artifactsRoot,
+      completionJournal: completion, businessTurnId });
+    const initial = await segmentJournal.readInitialSegmentSource(businessTurnId);
+    if (initial === null || initial.kind !== 'captured') throw new Error('the committed fixture does not carry the original v1 capture');
+    assignment = initial.body.binding.assignment;
+    if (assignment.taskId.value !== taskIdValue) {
+      throw new Error('the committed original assignment does not carry the requested Task ID');
+    }
+    const original = await native.readRecoveryAssetsExact(predecessor.recoveryAssetsReceiptRef);
+    for (const lookup of original.prepared.completionLookups) {
+      const readback = await completion.readExact(lookup);
+      if (readback.state !== 'confirmed') throw new Error('the committed effect completion is not confirmed');
+      effect = readback.receipt.fact.effect;
+      acceptedEvidenceLocator = readback.receipt.fact.result.evidenceRefs[0]?.locator;
+    }
+    if (effect === undefined || acceptedEvidenceLocator === undefined) {
+      throw new Error('the committed fixture does not carry the confirmed effect');
+    }
+    const rawOutputs = decodeActiveTurnRecords(records, businessTurnId)
+      .flatMap((record) => record.kind === 'accepted-fact'
+        ? [record.entry.envelope.fact.kind === 'tool-result' ? record.entry.envelope.fact.rawOutput : undefined] : []);
+    const rawOutput = rawOutputs.find((candidate) => candidate !== undefined);
+    if (rawOutput === undefined) throw new Error('the committed fixture does not carry the confirmed raw output asset');
+    output = new TextDecoder('utf-8', { fatal: true })
+      .decode(await new ImmutableAssetStore(artifactsRoot).readEvidence(rawOutput.ref));
+    if (digest(output) !== effect.expectedContentDigest) {
+      throw new Error('the committed raw output asset does not match the confirmed effect digest');
+    }
+  } else {
+    fixtureKind = 'initial-open';
+    const bindingOpened = records.find((record) => record.commitId?.startsWith('active-turn:')
+      && record.commitId.endsWith(':binding-opened'));
+    if (!bindingOpened || bindingOpened.commitId === undefined) {
+      throw new Error('the committed fixture carries no active-turn binding-opened record');
+    }
+    businessTurnId = bindingOpened.commitId.split(':')[1]!;
+    segmentJournal = createActiveTurnSegmentJournal({ journalPath, assetRoot: artifactsRoot,
+      completionJournal: completion, businessTurnId });
+    initialOpenAnchor = (await segmentJournal.readInitialOpenAnchor()) ?? undefined;
+    if (initialOpenAnchor === undefined) {
+      throw new Error('the committed initial-open fixture has no readable initial-open anchor');
+    }
+    await segmentJournal.readInitialOpenExact({ businessTurnId, anchor: initialOpenAnchor });
+    predecessor = {
+      segmentId: businessTurnId,
+      initialOpen: initialOpenAnchor,
+    };
+    const activeRecords = decodeActiveTurnRecords(records, businessTurnId);
+    const bindingRecord = activeRecords.find(
+      (r): r is Extract<ActiveTurnJournalRecord, { readonly kind: 'binding-opened' }> => r.kind === 'binding-opened',
+    );
+    if (!bindingRecord) {
+      throw new Error('the committed fixture active turn binding is not decodable');
+    }
+    assignment = bindingRecord.binding.assignment;
+    if (assignment.taskId.value !== taskIdValue) {
+      throw new Error('the committed original assignment does not carry the requested Task ID');
+    }
+    const completionRecords = records.filter((r) => r.kind === 'event' && r.payload?.['completion'] !== undefined);
+    for (const record of completionRecords) {
+      const comp = (record.payload as { readonly completion?: { readonly effect?: FileWriteEffect; readonly result?: { readonly evidenceRefs?: readonly EvidenceRef[] } } }).completion;
+      if (comp?.effect && comp.result?.evidenceRefs?.[0]?.locator) {
+        effect = comp.effect;
+        acceptedEvidenceLocator = comp.result.evidenceRefs[0].locator;
+        break;
+      }
+    }
+    if (effect === undefined || acceptedEvidenceLocator === undefined) {
+      throw new Error('the committed initial-open fixture does not carry the confirmed effect');
+    }
+    const rawOutputs = activeRecords
+      .flatMap((record) => record.kind === 'accepted-fact'
+        ? [record.entry.envelope.fact.kind === 'tool-result' ? record.entry.envelope.fact.rawOutput : undefined] : []);
+    const rawOutput = rawOutputs.find((candidate) => candidate !== undefined);
+    if (rawOutput !== undefined) {
+      output = new TextDecoder('utf-8', { fatal: true })
+        .decode(await new ImmutableAssetStore(artifactsRoot).readEvidence(rawOutput.ref));
+    } else {
+      output = await readFile(join(root, effect.relativePath), 'utf8');
+    }
+    if (digest(output) !== effect.expectedContentDigest) {
+      throw new Error('the committed raw output asset does not match the confirmed effect digest');
+    }
   }
   const epochOneContext = [...records].reverse().find((record) => {
     const context = contextHistoryFromRecord(record);
@@ -903,10 +1352,11 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
   return {
     root, preparedPath, journalPath, artifactsRoot, retryPath, allocation,
     assignment, taskScope: allocation.scope, businessTurnId, predecessor,
-    originalV1ReceiptRef: v1Receipts[0]!.commitId!,
+    ...(v1Receipts[0]?.commitId ? { originalV1ReceiptRef: v1Receipts[0].commitId } : {}),
     effect,
     effectPath: join(root, effect.relativePath), output, journal, acceptedEvidenceLocator,
     contextCommitRef, preparedJournal, completion, native, segmentJournal, taskId: allocation.taskId,
+    initialOpenAnchor, fixtureKind,
   };
 }
 
@@ -1022,6 +1472,12 @@ function controlledColdResumeSelector(fixture: ColdFixture): ColdResumeSelector 
     const tailId = segments.at(-1)?.segmentId ?? fixture.businessTurnId;
     const receipt = await fixture.segmentJournal.readSegmentRecoveryReceipt(tailId);
     if (receipt.status === 'failed' || receipt.status === 'unknown') {
+      if (receipt.status === 'unknown' && tailId === fixture.businessTurnId && fixture.initialOpenAnchor) {
+        return {
+          businessTurnId: fixture.businessTurnId,
+          predecessor: { segmentId: tailId, initialOpen: fixture.initialOpenAnchor },
+        };
+      }
       throw new AppLifecycleError(
         'cold-execution.source-unavailable',
         receipt.reason,
@@ -1033,7 +1489,9 @@ function controlledColdResumeSelector(fixture: ColdFixture): ColdResumeSelector 
       businessTurnId: fixture.businessTurnId,
       predecessor: receipt.status === 'exact'
         ? { segmentId: tailId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef }
-        : { segmentId: tailId, interrupted: receipt.anchor },
+        : receipt.status === 'interrupted'
+          ? { segmentId: tailId, interrupted: receipt.anchor }
+          : { segmentId: tailId, initialOpen: receipt.anchor },
     };
   };
 }
@@ -1047,6 +1505,7 @@ async function buildResumeService(
   upstreamBaseUrl: string,
   model: string,
   selector: ColdResumeSelector | undefined,
+  useCompositionSelector = false,
 ) {
   const assemblies: ResumeAssembly[] = [];
   let selectorCalls = 0;
@@ -1066,6 +1525,9 @@ async function buildResumeService(
       createTaskAssembly: resumeTaskAssembly(fixture, assemblies),
       createExecutionPorts: (callbacks) => {
         const { composition, currentState } = createResumeComposition(fixture, upstreamBaseUrl, model, callbacks);
+        const resolvedSelector = useCompositionSelector
+          ? composition.resolveColdExecutionResumeRequest
+          : selector;
         return {
           admitExecution: composition.admitExecution,
           createDriver: composition.createExecutionDriver,
@@ -1078,10 +1540,10 @@ async function buildResumeService(
           },
           currentStatePort: currentState,
           currentStateFacts: composition.currentStateFacts,
-          ...(selector === undefined ? {} : {
+          ...(resolvedSelector === undefined ? {} : {
             resolveColdExecutionResumeRequest: async (input: { readonly taskId: TaskId; readonly operationId: OperationId }) => {
               selectorCalls += 1;
-              return await selector(input);
+              return await resolvedSelector(input);
             },
           }),
         };
@@ -1169,8 +1631,10 @@ async function buildInterruptedColdFixture(name: string): Promise<InterruptedCol
     i2Journal: createJsonlI2JournalPort({ filePath: fixture.journalPath, journal: fixture.journal }),
     retryJournal: createJsonlRetryCycleJournalPort({ filePath: fixture.retryPath }),
   });
-  const initial = await fixture.segmentJournal.readInitialSegmentCapture(fixture.businessTurnId);
-  if (initial === null) throw new Error('the interrupted fixture has no original v1 capture');
+  const initial = await fixture.segmentJournal.readInitialSegmentSource(fixture.businessTurnId);
+  if (initial === null || initial.kind !== 'captured') {
+    throw new Error('the interrupted fixture has no original v1 capture');
+  }
   const segmentId = 'interrupted-v2';
   const requestId = 'interrupted-v2-request';
   const incarnation: TaskRuntimeIncarnation = {
@@ -1329,6 +1793,9 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
       'every resumed request must carry the selected provider model');
 
     // The accepted effect is retained exactly; resume never replays it.
+    if (fixture.originalV1ReceiptRef === undefined) {
+      throw new Error('the captured resume fixture must retain its original v1 receipt reference');
+    }
     const readback = await fixture.native.readRecoveryAssetsExact(fixture.originalV1ReceiptRef);
     assert.equal(readback.receipt.turnId, fixture.businessTurnId);
     assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output,
@@ -1488,7 +1955,13 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
 }
 
 /** Same persisted fixture, real service, HTTP dispatcher and Runtime; no method substitution. */
-async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolean): Promise<void> {
+async function runHttpResumeAssertions(
+  fixture: ColdFixture,
+  mode: boolean | 'initial-open',
+  useCompositionSelector = false,
+): Promise<string> {
+  const interrupted = mode === true;
+  const initialOpen = mode === 'initial-open';
   const provider = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator);
   const prefix = await readFile(fixture.journalPath, 'utf8');
   const before = (await fixture.journal.verify()).records;
@@ -1496,21 +1969,30 @@ async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolea
   const selector = controlledColdResumeSelector(fixture);
   const selected = await selector({ taskId: fixture.taskId, operationId: fixture.allocation.operationId });
   let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+  let succeeded = false;
   try {
-    app = await buildResumeService(fixture, provider.baseUrl, 'cold-resume.model', undefined);
-    const refused = await postResume(app.url, app.cookie, fixture.taskId.value,
-      { operationId: fixture.allocation.operationId.value });
-    assert.equal(refused.status, 409, JSON.stringify(refused.body));
-    assert.equal(requireRecord(requireRecord(refused.body, 'refusal').error, 'typed refusal').code,
-      'cold-execution.selector-unbound');
-    assert.equal(provider.wires.length, 0, 'unbound resume must not start a Provider');
-    assert.equal(await readFile(fixture.journalPath, 'utf8'), prefix,
-      'refusal preserves all durable recovery responsibility');
-    assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
-    await app.close();
-    app = undefined;
+    if (!initialOpen) {
+      app = await buildResumeService(fixture, provider.baseUrl, 'cold-resume.model', undefined);
+      const refused = await postResume(app.url, app.cookie, fixture.taskId.value,
+        { operationId: fixture.allocation.operationId.value });
+      assert.equal(refused.status, 409, JSON.stringify(refused.body));
+      assert.equal(requireRecord(requireRecord(refused.body, 'refusal').error, 'typed refusal').code,
+        'cold-execution.selector-unbound');
+      assert.equal(provider.wires.length, 0, 'unbound resume must not start a Provider');
+      assert.equal(await readFile(fixture.journalPath, 'utf8'), prefix,
+        'refusal preserves all durable recovery responsibility');
+      assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
+      await app.close();
+      app = undefined;
+    }
 
-    app = await buildResumeService(fixture, provider.baseUrl, 'cold-resume.model', selector);
+    app = await buildResumeService(
+      fixture,
+      provider.baseUrl,
+      'cold-resume.model',
+      useCompositionSelector ? undefined : selector,
+      useCompositionSelector,
+    );
     const invalid = await postResume(app.url, app.cookie, fixture.taskId.value,
       { operationId: fixture.allocation.operationId.value, prompt: 'injected input' });
     assert.equal(invalid.status, 400, JSON.stringify(invalid.body));
@@ -1531,6 +2013,12 @@ async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolea
     assert.equal(effectRecordCount(before, fixture.effect.effectId), 2);
     assert.equal(effectRecordCount(after, fixture.effect.effectId), 2);
     assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
+
+    // Initial input registered exactly once across the business turn
+    const initialInputRecords = after.filter((r) =>
+      r.commitId?.startsWith(`active-turn:${fixture.businessTurnId}:`) && r.commitId.endsWith(':initial-input'));
+    assert.equal(initialInputRecords.length, 1, 'initial input must be registered exactly once across the business turn');
+
     const segments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
     assert.equal(segments.length, priorSegments.length + 1);
     const successor = segments.at(-1)!;
@@ -1538,7 +2026,8 @@ async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolea
     assert.equal(successor.binding.businessTurnRef.businessTurnId, fixture.businessTurnId);
     assert.equal(successor.binding.scope.operationId?.value, fixture.allocation.operationId.value);
     assert.equal(successor.binding.assignment.taskId.value, fixture.taskId.value);
-    assert.equal(successor.binding.execution.executionEpoch, interrupted ? 3 : 2);
+    const successorEpoch = interrupted ? 3 : 2;
+    assert.equal(successor.binding.execution.executionEpoch, successorEpoch);
     if (interrupted) {
       if (selected.predecessor.interrupted === undefined) throw new Error('expected the real interrupted anchor');
       const retained = await fixture.segmentJournal.readSegmentInterruptedExact({
@@ -1549,10 +2038,17 @@ async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolea
         && duty.requestId === 'interrupted-v2-request' && duty.phase === 'dispatched'),
       'the original interrupted request remains pending under its original segment');
     }
-    console.log(JSON.stringify({ publicResume: interrupted ? 'interrupted-v2' : 'v1', ...receipt,
+    if (initialOpen && fixture.pendingRequestId) {
+      const decodedTurnRecords = decodeActiveTurnRecords(after, fixture.businessTurnId);
+      const pendingRequestRecord = decodedTurnRecords.find(
+        (r) => r.kind === 'request' && r.record.request.requestId === fixture.pendingRequestId,
+      );
+      assert.ok(pendingRequestRecord !== undefined, 'the original pending request responsibility must be preserved');
+    }
+    console.log(JSON.stringify({ publicResume: initialOpen ? 'initial-open' : interrupted ? 'interrupted-v2' : 'v1', ...receipt,
       completedEffectRecords: 2, prefixPreserved: true }));
-    const successorEpoch = interrupted ? 3 : 2;
-    assert.equal(receipt.executionEpoch, successorEpoch,
+    const successorEpochVal = interrupted ? 3 : 2;
+    assert.equal(receipt.executionEpoch, successorEpochVal,
       'the public release receipt must expose the actual successor epoch');
 
     // Reopen the same durable owners without issuing another resume. The fresh
@@ -1565,7 +2061,7 @@ async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolea
     const hydrated = reopened.coordinator.taskSnapshot(fixture.taskId);
     assert.equal(hydrated.operationId, fixture.allocation.operationId.value,
       'fresh hydrate must preserve the original operation identity');
-    assert.equal(hydrated.executionEpoch, successorEpoch,
+    assert.equal(hydrated.executionEpoch, successorEpochVal,
       'fresh hydrate must read the actual successor epoch');
 
     const inventory = await projectDurableTaskInventory({
@@ -1577,9 +2073,21 @@ async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolea
     if (durable === undefined) throw new Error('durable inventory must contain the resumed task');
     assert.equal(durable.snapshot.operationId, fixture.allocation.operationId.value,
       'durable inventory must preserve the original operation identity');
-    assert.equal(durable.snapshot.executionEpoch, successorEpoch,
+    assert.equal(durable.snapshot.executionEpoch, successorEpochVal,
       'durable inventory must read the actual successor epoch');
     assert.equal(durable.durableState, 'checkpoint');
+
+    await mkdir(EVIDENCE_ROOT, { recursive: true });
+    const archiveRoot = await mkdtemp(join(EVIDENCE_ROOT, 'passed-http-receipts-'));
+    try {
+      await writeFile(join(archiveRoot, 'upstream-wires.json'), JSON.stringify(provider.wires, null, 2), 'utf8');
+      await writeFile(join(archiveRoot, 'organ-journal.jsonl'), await readFile(fixture.journalPath, 'utf8'), 'utf8');
+    } catch (error) {
+      await rm(archiveRoot, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+    succeeded = true;
+    return archiveRoot;
   } finally {
     await app?.close();
     await provider.close();
@@ -1677,6 +2185,45 @@ function registerPublicConsumers(): void {
     }
   }
 });
+
+  test('fresh-process HTTP resume continues an uncaptured initial open turn using canonical composition selector without replaying confirmed effects', async () => {
+    const moduleUrl = import.meta.url;
+    const compiledPath = moduleUrl.startsWith('file://') ? decodeURIComponent(moduleUrl.slice('file://'.length)) : moduleUrl;
+    const seed = spawnColdProcess([compiledPath, '--cold-process=seed', '--fixture-kind=initial-open']);
+    const seedRun = await collectColdProcess(seed);
+    assert.equal(seedRun.close.code, 0, 'the seed child must exit normally');
+    assert.equal(seedRun.close.signal, null, 'the seed child must not be signaled');
+    assert.equal(seed.pid, seedRun.receipt.pid, 'the seed receipt PID must be the actual ChildProcess pid');
+    assert.ok(seed.pid !== process.pid, 'the seed must run in an independent child process');
+
+    // The resume process starts only after the seed child has closed.
+    const root = seedRun.receipt.root;
+    const taskId = seedRun.receipt.taskId;
+    const resume = spawnColdProcess([compiledPath, '--cold-process=resume', '--fixture-kind=initial-open', '--fixture-root', root, '--task-id', taskId]);
+    const resumeRun = await collectColdProcess(resume);
+    assert.equal(resumeRun.close.code, 0, 'the resume child must exit normally');
+    assert.equal(resumeRun.close.signal, null, 'the resume child must not be signaled');
+    assert.equal(resume.pid, resumeRun.receipt.pid, 'the resume receipt PID must be the actual ChildProcess pid');
+    assert.ok(resume.pid !== process.pid, 'the resume must run in an independent child process');
+    assert.ok(resume.pid !== seed.pid, 'the resume must run in a second independent child process');
+
+    const archiveRoot = resumeRun.receipt.archiveRoot;
+    assert.ok(archiveRoot !== undefined, 'the resume child must publish the passed receipt archive');
+    await writeFile(join(archiveRoot!, 'process-evidence.json'), JSON.stringify({
+      parentPid: process.pid,
+      seed: { pid: seed.pid, receiptPid: seedRun.receipt.pid, ppid: seedRun.receipt.ppid,
+        code: seedRun.close.code, signal: seedRun.close.signal },
+      resume: { pid: resume.pid, receiptPid: resumeRun.receipt.pid, ppid: resumeRun.receipt.ppid,
+        code: resumeRun.close.code, signal: resumeRun.close.signal },
+      ordering: { seedClosedBeforeResumeSpawned: true },
+      fixtureKind: 'initial-open',
+    }, null, 2), 'utf8');
+    await writeFile(join(archiveRoot!, 'seed-child.log'), seedRun.stdout, 'utf8');
+    await writeFile(join(archiveRoot!, 'resume-child.log'), resumeRun.stdout, 'utf8');
+    if (seedRun.stderr.length > 0) await writeFile(join(archiveRoot!, 'seed-child.stderr.log'), seedRun.stderr, 'utf8');
+    if (resumeRun.stderr.length > 0) await writeFile(join(archiveRoot!, 'resume-child.stderr.log'), resumeRun.stderr, 'utf8');
+    await rm(root, { recursive: true, force: true });
+  });
 }
 
 if (processMode === 'seed' || processMode === 'resume') {

@@ -14,7 +14,8 @@ import {
   type NativeSegmentSaveIntentV2,
 } from '../../runtime/src/checkpoints/native-save-contract.js';
 import { activeTurnSegmentCommitId, validateResumedTurnSegmentOpened, type ResumedTurnSegmentOpened,
-  type NativeSegmentSaveSourceV2, type PreparedActiveTurnSegmentCaptureV2 } from '../../contracts/src/active-turn-segments.js';
+  type NativeSegmentSaveSourceV2, type PreparedActiveTurnSegmentCaptureV2,
+  type ActiveTurnSegmentChainInitial } from '../../contracts/src/active-turn-segments.js';
 import {
   createNativeRecoveryAssets,
   segmentRecoveryAssetsReceiptRef,
@@ -1075,14 +1076,22 @@ export function createJsonlNativeSegmentSave(input: {
   return { ports, progress, semantic, controller: {
     async run(value: NativeSaveIntent) {
       const intent = segmentIntent(value);
-      const initial = await input.segmentJournal.readInitialSegmentCapture(intent.key.turn.turnId);
+      const initialSource = await input.segmentJournal.readInitialSegmentSource(intent.key.turn.turnId);
       const opened = (await input.segmentJournal.readSegments(intent.key.turn.turnId))
         .find((record) => record.segmentId === intent.key.segment.segmentId);
       const openedRecord = (await verifiedJournalRecords(journal)).find((record) =>
         record.commitId === activeTurnSegmentCommitId(intent.key.segment.segmentId, 'segment-opened'));
-      if (!initial || !opened || !openedRecord
-        || canonicalJsonStringify(initial.body.binding.admittedTurn) !== canonicalJsonStringify(intent.source.originalAdmittedTurn)
-        || canonicalJsonStringify(initial.bindingCommitRef) !== canonicalJsonStringify(intent.source.originalBusinessTurnRef.bindingCommitRef)
+      if (!initialSource || !opened || !openedRecord) {
+        throw new Error('native save source does not match the actual original binding and opened segment');
+      }
+      const initialAdmittedTurn = initialSource.kind === 'captured'
+        ? initialSource.body.binding.admittedTurn
+        : initialSource.binding.admittedTurn;
+      const initialBindingCommitRef = initialSource.kind === 'captured'
+        ? initialSource.bindingCommitRef
+        : initialSource.anchor.bindingCommitRef;
+      if (canonicalJsonStringify(initialAdmittedTurn) !== canonicalJsonStringify(intent.source.originalAdmittedTurn)
+        || canonicalJsonStringify(initialBindingCommitRef) !== canonicalJsonStringify(intent.source.originalBusinessTurnRef.bindingCommitRef)
         || canonicalJsonStringify(opened) !== canonicalJsonStringify(intent.source.opened)
         || canonicalJsonStringify(journalCommitRef(openedRecord)) !== canonicalJsonStringify(intent.source.openedCommitRef)) {
         throw new Error('native save source does not match the actual original binding and opened segment');
@@ -1117,12 +1126,15 @@ export function createNativeSegmentRequestContext(input: {
       throw new Error('request context execution does not match the live segment');
     }
     const turnId = binding.businessTurnRef.businessTurnId;
-    const initial = await input.segmentJournal.readInitialSegmentCapture(turnId);
-    if (!initial) throw new Error('request context requires the actual original capture');
+    const initialSource = await input.segmentJournal.readInitialSegmentSource(turnId);
+    if (!initialSource) throw new Error('request context requires the actual original initial source');
+    const initial: ActiveTurnSegmentChainInitial = initialSource.kind === 'captured'
+      ? { kind: 'captured', body: initialSource.body }
+      : initialSource;
     const resolved = await readResumedSegmentSemanticTurnContext({
       history: input.history,
       priorCompletedTurns: input.priorCompletedTurns,
-      segment: { chain: { businessTurnRef: binding.businessTurnRef, initial: initial.body,
+      segment: { chain: { businessTurnRef: binding.businessTurnRef, initial,
         segments: await input.segmentJournal.readSegments(turnId) },
         exactReads: input.segmentJournal,
         live: { prefix: await input.activeTurn.readLivePrefix(), rawContent: input.rawContent } },
