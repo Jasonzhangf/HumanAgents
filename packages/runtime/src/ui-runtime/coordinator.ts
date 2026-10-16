@@ -1706,6 +1706,7 @@ class HarnessExecutionComposition implements RuntimeExecutionComposition {
             checkpointId: checkpoint.id,
             committed: true,
             ...(committed.recordDigest === undefined ? {} : { recordDigest: committed.recordDigest }),
+            ...(committed.receipt === undefined ? {} : { receipt: committed.receipt }),
           };
         } catch (error) {
           if (error instanceof RuntimeContextCommitError) {
@@ -1714,6 +1715,7 @@ class HarnessExecutionComposition implements RuntimeExecutionComposition {
               checkpointId: error.committed.checkpoint.id,
               committed: true,
               ...(error.committed.recordDigest === undefined ? {} : { recordDigest: error.committed.recordDigest }),
+              ...(error.committed.receipt === undefined ? {} : { receipt: error.committed.receipt }),
               recovery: {
                 code: 'execution.context-commit-hook.blocked',
                 ownerId: recovery.ownerId,
@@ -3099,7 +3101,7 @@ export class RuntimeTaskCoordinator {
       if (result.state === 'stopped') {
         record.checkpoint = result.checkpoint;
         record.checkpointSeq = result.checkpoint.seq;
-        record.checkpointReceipt = undefined;
+        record.checkpointReceipt = result.receipt;
         this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'stopped checkpoint committed', result.checkpoint.evidenceRefs);
         const close = await this.closeForExecution(operation.operationId, record.driver, result.closure.evidenceRefs);
         if (close.state !== 'closed') {
@@ -3191,7 +3193,7 @@ export class RuntimeTaskCoordinator {
       if (result.state === 'stopped') {
         record.checkpoint = result.checkpoint;
         record.checkpointSeq = result.checkpoint.seq;
-        record.checkpointReceipt = undefined;
+        record.checkpointReceipt = result.receipt;
         this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'stopped checkpoint committed', result.checkpoint.evidenceRefs);
         const close = await this.closeForExecution(operation.operationId, record.driver, result.closure.evidenceRefs);
         if (close.state !== 'closed') {
@@ -4911,7 +4913,7 @@ export class RuntimeTaskCoordinator {
       }
       record.checkpoint = result.checkpoint;
       record.checkpointSeq = result.checkpoint.seq;
-      record.checkpointReceipt = undefined;
+      record.checkpointReceipt = result.receipt;
       this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'failure cleanup released the abandoned provider execution', result.checkpoint.evidenceRefs);
       return { checkpoint: result.checkpoint, evidenceRefs: result.closure.evidenceRefs };
     } catch (error) {
@@ -5218,7 +5220,7 @@ export class RuntimeTaskCoordinator {
     const committedProjection: MutableRuntimeTaskError = projection;
     record.checkpoint = error.prepared.checkpoint;
     record.checkpointSeq = error.prepared.checkpoint.seq;
-    record.checkpointReceipt = undefined;
+    record.checkpointReceipt = error.receipt;
     record.error = committedProjection;
     this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
     this.pushEvent(
