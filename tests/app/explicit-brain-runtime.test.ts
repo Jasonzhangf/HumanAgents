@@ -43,9 +43,10 @@ function parentDependencies() {
 // weaken the compiling synthetic-Task RED assertions below.
 class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = InteractionParentProviderExecutionIdentityRef> extends ProviderAdapter<T> {
   constructor(options: { binding: ProviderBinding; stepDelayMs: number; replay: readonly { kind: string; summary: string; state: string; terminalState?: string }[];
-    respond?: (wire: any) => Promise<readonly unknown[]> }) {
+    respond?: (wire: any) => Promise<readonly unknown[]>; evidence?: typeof parentEvidence }) {
+    const evidence = options.evidence ?? parentEvidence;
     const transport = new V3ProviderHttpTransport<T>({
-      binding: options.binding, baseUrl: 'http://recorded.test', source: 'http', evidence: parentEvidence,
+      binding: options.binding, baseUrl: 'http://recorded.test', source: 'http', evidence,
       fetch: async (_url, init) => ({ status: 200, headers: new Headers({ 'content-type': 'text/event-stream' }),
         body: (async function* () {
           const frames = [
@@ -58,7 +59,7 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
           yield new TextEncoder().encode(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
         })(), text: async () => '' }),
     });
-    super({ binding: options.binding, routeRef: 'recorded', codec: new ResponsesProviderCodec(), transport, evidence: parentEvidence });
+    super({ binding: options.binding, routeRef: 'recorded', codec: new ResponsesProviderCodec(), transport, evidence });
   }
 }
 
@@ -1191,4 +1192,227 @@ test('provider explicit brain interpreter reuses the retained close on a same-pr
   const closeRecords = (await new JsonlOrganJournal(journalFile).replay())
     .filter((record) => (record.payload as { discriminant?: string } | undefined)?.discriminant === 'resource-close');
   assert.equal(closeRecords.length, 1, 'a same-process retry must not append a second close record');
+});
+
+test('provider explicit brain interpreter recovers a physically closed parent turn from a fresh consumer', async () => {
+  // Failure basis: the retained-only gate rejects a turn with a committed close
+  // and complete durable helper collection after the producer interpreter is
+  // gone. Impact: a physically closed turn cannot form its semantic checkpoint
+  // from a fresh consumer. Cost: one controlled fresh-consumer run on the real
+  // JSONL consumer with one semantic append fault.
+  const recoveryRoot = join(parentFixtureRoot, `cold-recovery-${randomUUID()}`);
+  await mkdir(recoveryRoot, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parent-cold-recovery', providerId: 'provider-parent-cold-recovery', protocol: 'responses',
+    endpointRef: 'fake://parent-cold-recovery', modelRef: 'model-parent-cold-recovery',
+    configDigest: 'sha256:parent-cold-recovery-config', capabilityDigest: 'sha256:parent-cold-recovery-capability',
+  };
+  const journalFile = join(recoveryRoot, 'parent-cold-recovery.jsonl');
+  const producerOrgan = new JsonlOrganJournal(journalFile);
+  const producerParent = new JsonlInteractionParentTurnJournal(producerOrgan);
+  const producerHelper = new JsonlInteractionHelperJournal(producerOrgan);
+  const producerEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(recoveryRoot, 'assets')));
+  let appendAttempts = 0;
+  const flakyCheckpointJournal: InteractionSemanticCheckpointJournalPort = {
+    appendSemanticCheckpoint: async (checkpoint) => {
+      appendAttempts += 1;
+      if (appendAttempts === 1) throw new Error('semantic checkpoint ack lost after close');
+      return producerHelper.appendSemanticCheckpoint(checkpoint);
+    },
+    readSemanticCheckpointExact: (identity) => producerHelper.readSemanticCheckpointExact(identity),
+    readScopeSemanticCheckpoints: (scopeKey) => producerHelper.readScopeSemanticCheckpoints(scopeKey),
+  };
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+  const request = {
+    interactionId: 'parent-cold-recovery', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: 'recover this closed turn', clarifications: [], taskCandidates: [],
+  };
+  const acceptedChildAgentId = 'helper-accepted';
+  const unacceptedChildAgentId = 'helper-unaccepted';
+  const refinedText = 'accepted refined cold recovery result';
+  const finalAnswer = `recovered ${'answer body '.repeat(80)}`;
+  const finalText = JSON.stringify({
+    kind: 'answer', normalizedInput: 'recover this closed turn', knownFacts: [], answer: finalAnswer, decisionRefs: [],
+  });
+  const parentPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence: producerEvidence, respond: async (wire) => {
+    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
+    if (results.length === 0) {
+      const dispatch = (callId: string, configuredAgentId: string) => ({
+        type: 'response.output_item.done',
+        output_index: callId === 'dispatch-accepted' ? 0 : 1,
+        item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify({
+          selection: { roleId: 'review', configuredAgentId },
+          assignmentFields: {
+            objective: `bounded ${configuredAgentId}`, targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
+            acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: ['complete'], failureCriteria: ['none'],
+            incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required',
+          },
+          inputs: { slot: configuredAgentId }, evidenceRefs: [],
+        }) },
+      });
+      return [dispatch('dispatch-accepted', acceptedChildAgentId), dispatch('dispatch-unaccepted', unacceptedChildAgentId)];
+    }
+    if (results.length === 2) {
+      const accepted = results.find((result: any) => result.call_id === 'dispatch-accepted');
+      assert.ok(accepted, 'the accepted helper dispatch must return');
+      const dispatched = JSON.parse(accepted.output);
+      return [{
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: { type: 'function_call', call_id: 'accept-accepted', name: 'accept_helper', arguments: JSON.stringify({
+          helperCallId: dispatched.identity.helperCallId,
+          refinedText,
+          acceptanceRef: 'acceptance:cold-recovery',
+          evidenceRefs: [],
+        }) },
+      }];
+    }
+    if (results.length === 3) {
+      return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
+    }
+    throw new Error(`unexpected parent response round with ${results.length} tool results`);
+  } });
+  const producerInterpreter = createProviderExplicitBrainInterpreter({
+    organId: scope.organId,
+    interactionScopeId: scope.interactionScopeId,
+    parentJournal: producerParent,
+    checkpointJournal: flakyCheckpointJournal,
+    helperJournal: producerHelper,
+    rawEvidence: producerEvidence,
+    rawContent: providerRawContentReader(producerEvidence),
+    helperFactory: async ({ selection, assignment, execution }) => {
+      const configuredAgentId = selection.configuredAgentId;
+      assert.ok(configuredAgentId === acceptedChildAgentId || configuredAgentId === unacceptedChildAgentId);
+      const childBinding = { ...binding, bindingId: `child-${configuredAgentId}`, modelRef: `model-${configuredAgentId}` };
+      const childPort = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], evidence: producerEvidence, respond: async () => [{
+        type: 'response.output_text.done',
+        item_id: 'child',
+        text: JSON.stringify({
+          agentId: configuredAgentId,
+          producedArtifactRefs: [],
+          producedArtifactDigests: [],
+          status: configuredAgentId === acceptedChildAgentId ? 'succeeded' : 'incomplete',
+          summary: `${configuredAgentId} summary`,
+          outputRefs: [],
+          evidenceRefs: [],
+          nextAction: 'wait',
+          conditionRef: `condition:${configuredAgentId}`,
+        }),
+      }] });
+      return {
+        binding: childBinding,
+        driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({
+          port: childPort,
+          binding: childBinding,
+          ...execution,
+          organId: assignment.organId,
+          helper: assignment,
+          assignmentId: assignment.assignmentId,
+          scope: { organId: assignment.organId, operationId: execution.operationId },
+          inputRefs: [],
+        }),
+        close: async () => { await childPort.close(childBinding); },
+      };
+    },
+    clock: { now: () => '2026-10-16T00:00:00.000Z' },
+    binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: parentPort,
+    prepareAgentProvider: async () => ({
+      roleId: 'interaction',
+      source: 'http',
+      provider: {
+        source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'parent-cold-recovery', baseUrl: binding.endpointRef,
+      },
+      binding,
+      port: parentPort,
+    }),
+  });
+
+  try {
+    await assert.rejects(
+      () => producerInterpreter.interpret(request),
+      /semantic checkpoint ack lost after close/,
+    );
+    const opened = await producerParent.readScopeOpenedTurns(scope);
+    assert.equal(opened.length, 1);
+    const turn = opened[0]!.fact.turn;
+    const beforeSnapshot = await producerParent.readTurnSnapshot(turn);
+    assert.ok(beforeSnapshot.turnInput, 'the original turn input must be durable');
+    assert.ok(beforeSnapshot.requests.length > 0, 'the original parent request must be durable');
+    assert.ok(beforeSnapshot.acceptedFacts.length > 0, 'the original raw facts must be durable');
+    assert.ok(beforeSnapshot.resourceClose, 'the original physical close must be durable');
+    assert.equal(await producerHelper.readSemanticCheckpointExact(turn), null, 'the fault leaves no semantic checkpoint');
+    const beforeReplay = await new JsonlOrganJournal(journalFile).replay();
+
+    // Drop every producer interpreter/session reference above. The consumer
+    // below reads only the same physical journal and asset store.
+    const readerOrgan = new JsonlOrganJournal(journalFile);
+    const readerParent = new JsonlInteractionParentTurnJournal(readerOrgan);
+    const readerHelper = new JsonlInteractionHelperJournal(readerOrgan);
+    const readerEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(recoveryRoot, 'assets')));
+    const externalCalls: string[] = [];
+    const deadPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence: readerEvidence });
+    deadPort.start = async () => { externalCalls.push('start'); throw new Error('unexpected provider start'); };
+    deadPort.observe = (() => { externalCalls.push('observe'); throw new Error('unexpected provider observe'); }) as typeof deadPort.observe;
+    deadPort.settle = async () => { externalCalls.push('settle'); throw new Error('unexpected provider settle'); };
+    deadPort.close = async () => { externalCalls.push('close'); throw new Error('unexpected provider close'); };
+    const consumerOptions = {
+      organId: scope.organId,
+      interactionScopeId: scope.interactionScopeId,
+      parentJournal: readerParent,
+      checkpointJournal: readerHelper,
+      helperJournal: readerHelper,
+      rawEvidence: readerEvidence,
+      rawContent: providerRawContentReader(readerEvidence),
+      helperFactory: async () => { externalCalls.push('helperFactory'); throw new Error('unexpected helper dispatch'); },
+      clock: { now: () => '2026-10-16T00:00:01.000Z' },
+      binding,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      port: deadPort,
+      prepareAgentProvider: async () => { externalCalls.push('prepareAgentProvider'); throw new Error('unexpected provider preparation'); },
+    };
+    // Failure basis: a missing new read port could be mistaken for an empty
+    // helper collection. Impact: false completion without durable helper
+    // evidence. Cost: one no-generation cold call on the same fixture.
+    const missingPortInterpreter = createProviderExplicitBrainInterpreter(consumerOptions);
+    await assert.rejects(
+      () => missingPortInterpreter.interpret(request),
+      /requires the durable helper turn read port for cold recovery/,
+    );
+    assert.equal(await readerHelper.readSemanticCheckpointExact(turn), null);
+    assert.deepEqual(externalCalls, []);
+
+    const consumerInterpreter = createProviderExplicitBrainInterpreter({
+      ...consumerOptions,
+      turnHelperJournal: readerHelper,
+    });
+    const result = await consumerInterpreter.interpret(request);
+    assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected recovered answer');
+    assert.equal(result.answer, finalAnswer);
+    assert.deepEqual(externalCalls, [], 'cold recovery must not replay external work');
+
+    const afterSnapshot = await readerParent.readTurnSnapshot(turn);
+    assert.deepEqual(afterSnapshot, beforeSnapshot, 'recovery must not change the original turn facts');
+    const afterReplay = await new JsonlOrganJournal(journalFile).replay();
+    assert.equal(afterReplay.length, beforeReplay.length + 1, 'recovery must add only the semantic checkpoint record');
+    assert.deepEqual(afterReplay.slice(0, beforeReplay.length), beforeReplay);
+
+    const committed = await readerHelper.readSemanticCheckpointExact(turn);
+    assert.ok(committed, 'cold recovery must commit the semantic checkpoint');
+    if (committed === null) throw new Error('missing cold recovery semantic checkpoint');
+    const semantic = committed.checkpoint.claims.map((claim) => claim.fact).join('\n');
+    assert.ok(semantic.includes(refinedText), 'accepted helper refinement must reach the checkpoint');
+    assert.ok(semantic.includes(unacceptedChildAgentId), 'returned-unaccepted helper must remain attributed');
+    assert.ok(semantic.includes('returned-only'), 'returned-unaccepted helper must remain partial');
+    assert.equal(
+      committed.checkpoint.claims.some((claim) => claim.fact.includes(unacceptedChildAgentId) && claim.certainty === 'confirmed'),
+      false,
+      'returned-unaccepted helper must not become owner-accepted work',
+    );
+  } finally {
+    await rm(recoveryRoot, { recursive: true, force: true });
+  }
 });
