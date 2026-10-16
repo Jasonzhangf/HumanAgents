@@ -391,6 +391,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(options.evidenceRoot));
     const helperJournal = new JsonlInteractionHelperJournal(taskControlJournal);
     return createProviderExplicitBrainInterpreter({
+      lease: resolveLease,
       binding: options.binding, templateRoot, organId: options.organId,
       interactionScopeId: `runtime:${options.projectKey ?? options.organId.value}`,
       parentJournal: new JsonlInteractionParentTurnJournal(taskControlJournal),

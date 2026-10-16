@@ -17,6 +17,7 @@ import {
   type ProviderBinding,
   type ProviderCloseResult,
   type ProviderSettlement,
+  type OccurrenceExecutionOwner,
   type RequirementIntent,
 } from '../../contracts/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
@@ -44,6 +45,7 @@ import {
 } from '../../runtime/src/explicit-brain/index.js';
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
+import type { SupervisorLease } from './supervisor/supervisor.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -358,6 +360,7 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
 }
 
 export function createProviderExplicitBrainInterpreter(input: {
+  readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
   readonly organId: OrganId;
   readonly interactionScopeId: string;
@@ -398,6 +401,8 @@ export function createProviderExplicitBrainInterpreter(input: {
   let retained: {
     readonly owner: InteractionParentTurnRawOwner;
     readonly helpers: ExplicitTurnHelperSession;
+    readonly reconciled: boolean;
+    readonly settlement: ProviderSettlement<InteractionParentProviderExecutionIdentityRef> | undefined;
     owned: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> | undefined;
     /**
      * The original physical close receipt, retained across same-process retries
@@ -412,8 +417,6 @@ export function createProviderExplicitBrainInterpreter(input: {
       | undefined;
   } | undefined;
   const finish = async (live: NonNullable<typeof retained>, request: ExplicitBrainInterpretationInput) => {
-    const finalParentOutput = await live.owner.readFinalTurnOutput();
-    const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
     if (live.owned !== undefined) {
       const receipt = await closeAgentProvider(live.owned, { returnReceipt: true });
       live.closed = { composition: live.owned, receipt };
@@ -428,7 +431,21 @@ export function createProviderExplicitBrainInterpreter(input: {
         closedAt: input.clock.now(),
       });
     }
-    const checkpointOutput = live.closed === undefined
+    const finalParentOutput = live.reconciled
+      ? await live.owner.readReconciledTurnOutput()
+      : await live.owner.readFinalTurnOutput();
+    const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+    if (live.reconciled && interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
+      if (live.settlement === undefined) {
+        throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
+      }
+      await input.publishProviderSettlement({
+        interactionId: request.interactionId, inputRevision: request.inputRevision, settlement: live.settlement,
+      });
+    }
+    const checkpointOutput = live.reconciled
+      ? finalParentOutput
+      : live.closed === undefined
       ? finalParentOutput
       : await live.owner.readClosedTurnOutput();
     await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput: checkpointOutput, outcome: interpretation });
@@ -437,6 +454,12 @@ export function createProviderExplicitBrainInterpreter(input: {
   };
   return {
     async interpret(request) {
+      const activeLease = typeof input.lease === 'function' ? input.lease() : input.lease;
+      let continuation: {
+        readonly fact: NonNullable<Awaited<ReturnType<typeof input.parentJournal.readTurnSnapshot>>['turnInput']>['fact'];
+        readonly executionEpoch: number;
+        readonly executionOwner: OccurrenceExecutionOwner;
+      } | undefined;
       const scopeKey = { organId: input.organId, interactionScopeId: input.interactionScopeId };
       const opened = await input.parentJournal.readScopeOpenedTurns(scopeKey);
       const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
@@ -469,8 +492,6 @@ export function createProviderExplicitBrainInterpreter(input: {
             journal: input.parentJournal,
             rawContent: input.rawContent,
           });
-          const finalParentOutput = await coldOwner.readClosedTurnOutput();
-          const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
           const helpers = new ExplicitTurnHelperSession({
             identity: pending.fact.turn,
             latestTurn: { ...pending.fact.turn, entries: [{ kind: 'user-input', content: pending.fact.initialInput }] },
@@ -481,19 +502,63 @@ export function createProviderExplicitBrainInterpreter(input: {
             rawContent: input.rawContent,
             turnHelperJournal: input.turnHelperJournal,
           });
-          await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
-          return interpretation;
+          if (await coldOwner.readResourceClose() !== null) {
+            const finalParentOutput = await coldOwner.readClosedTurnOutput();
+            const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+            return interpretation;
+          }
+          const durableHelpers = await input.turnHelperJournal.readTurnHelpers(pending.fact.turn);
+          for (const entry of durableHelpers) {
+            if (entry.readback.dispatchAccepted === null || entry.readback.returned === null) {
+              throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} holds on unreturned helper ${entry.identity.helperCallId}`);
+            }
+          }
+          const snapshot = await input.parentJournal.readTurnSnapshot(pending.fact.turn);
+          const priorReconciliation = snapshot.ownerReconciliations.at(-1);
+          const activeOwner = priorReconciliation?.fact.replacementOwner ?? pending.fact.executionOwner;
+          if (activeOwner === undefined) {
+            throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} cannot recover without an attested execution owner`);
+          }
+          if (activeLease === undefined) throw new Error('interaction parent recovery requires active supervisor lease authority');
+          const reconciliation = await activeLease.withCurrentLeaseOwner(async (authenticatedCaller, isCommittedReplacement) => {
+            if (priorReconciliation !== undefined
+              && authenticatedCaller.daemonLeaseId === activeOwner.daemonLeaseId
+              && authenticatedCaller.daemonGeneration === activeOwner.daemonGeneration
+              && authenticatedCaller.processStartToken === activeOwner.processStartToken) return priorReconciliation;
+            return coldOwner.reconcileTurnOwner({
+              previousOwner: activeOwner, replacementOwner: authenticatedCaller,
+              isCommittedReplacement: await isCommittedReplacement(activeOwner), reconciledAt: input.clock.now(),
+            });
+          });
+          if (reconciliation.fact.mode === 'terminal-output') {
+            const finalParentOutput = await coldOwner.readReconciledTurnOutput();
+            const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+            return interpretation;
+          }
+          if (input.prepareAgentProvider === undefined) {
+            throw new Error('interaction parent continuation requires an owned provider preparer');
+          }
+          continuation = { fact: pending.fact, executionEpoch: reconciliation.fact.effectiveExecutionEpoch,
+            executionOwner: reconciliation.fact.replacementOwner };
+        } else {
+          await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
+          return finish(retained, request);
         }
-        await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
-        return finish(retained, request);
+      }
+      if (input.lease !== undefined && activeLease === undefined) {
+        throw new Error('interaction parent turn requires active supervisor lease authority');
       }
       const identity = randomUUID();
-      const runtimeId = `explicit-interpret-${identity}`;
-      const turn: InteractionTurnIdentity = {
+      const runtimeId = continuation?.fact.execution.runtimeId ?? `explicit-interpret-${identity}`;
+      const executionEpoch = continuation?.executionEpoch ?? 1;
+      const turn: InteractionTurnIdentity = continuation?.fact.turn ?? {
         organId: input.organId, interactionScopeId: input.interactionScopeId,
         interactionId: request.interactionId, inputRevision: request.inputRevision, turnId: runtimeId,
       };
-      const priorCheckpoints = await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
+      const priorCheckpoints = continuation?.fact.priorCheckpoints
+        ?? await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
       const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
       // One selected binding for the whole turn: the raw owner freezes it, and
       // the driver uses the same value. A borrowed provider keeps its existing
@@ -507,21 +572,39 @@ export function createProviderExplicitBrainInterpreter(input: {
       let interpretation: ExplicitBrainInterpretation;
       let live: NonNullable<typeof retained>;
       try {
-        const operationId = id('operation', `explicit-interpret-${identity}`);
-        const execution = { runtimeId, organId: input.organId, operationId, executionEpoch: 1, interactionTurn: turn };
-        const scope = { organId: input.organId, operationId };
-        const initialInput = {
+        if (continuation !== undefined && (owned === undefined
+          || (['bindingId', 'providerId', 'protocol', 'endpointRef', 'modelRef', 'configDigest', 'capabilityDigest'] as const)
+            .some((key) => turnProviderBinding[key] !== continuation.fact.providerBinding![key]))) {
+          throw new Error('interaction parent continuation requires the original full provider binding on an owned composition');
+        }
+        const operationId = continuation?.fact.execution.operationId ?? id('operation', `explicit-interpret-${identity}`);
+        const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
+        const scope = continuation?.fact.scope ?? { organId: input.organId, operationId };
+        const initialInput = continuation?.fact.initialInput ?? {
           ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(request) }),
           view: { kind: 'utf8-text' as const },
         };
-        const createdOwner = createInteractionParentTurnRawOwner({
-          turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
-          journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
-          instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()) }),
-        });
-        owner = createdOwner;
-        await createdOwner.openTurnInput();
-        committedInput = true;
+        const openOwner = async (executionOwner?: OccurrenceExecutionOwner) => {
+          const createdOwner = createInteractionParentTurnRawOwner({
+            turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
+            ...(executionOwner === undefined ? {} : { executionOwner }),
+            journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
+            instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()) }),
+          });
+          owner = createdOwner;
+          await createdOwner.openTurnInput();
+          committedInput = true;
+          return createdOwner;
+        };
+        const createdOwner = continuation !== undefined
+          ? await openOwner(continuation.executionOwner)
+          : activeLease === undefined ? await openOwner()
+            : await activeLease.withCurrentLeaseOwner((authenticatedCaller) => openOwner(authenticatedCaller));
+        // A continued turn anchors its first epoch request to the settled
+        // parent leaf so the recovered Provider run is not a second root.
+        const parentRequest = continuation === undefined
+          ? undefined
+          : await createdOwner.readContinuationParentRequest();
         const helpers = new ExplicitTurnHelperSession({
           identity: turn, latestTurn: { ...turn, entries: [{ kind: 'user-input', content: initialInput }] },
           journal: input.helperJournal, clock: input.clock, factory: input.helperFactory,
@@ -537,7 +620,8 @@ export function createProviderExplicitBrainInterpreter(input: {
           organId: input.organId,
           interactionTurn: turn,
           operationId,
-          executionEpoch: 1,
+          executionEpoch,
+          ...(parentRequest === undefined ? {} : { parentRequest }),
           assignmentId: `explicit-interpret-${identity}`,
           scope,
           inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
@@ -621,7 +705,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         await driver.start({ ...execution, assignmentId: `explicit-interpret-${identity}` });
         await driver.submit({
           ...execution,
-          executionEpoch: 1,
+          executionEpoch,
           assignmentId: `explicit-interpret-${identity}`,
           payload: {},
         });
@@ -630,33 +714,35 @@ export function createProviderExplicitBrainInterpreter(input: {
           if (event.terminalState !== undefined) break;
         }
         settleAttempted = true;
-        const closure = await driver.settle({ runtimeId, executionEpoch: 1 });
+        const closure = await driver.settle({ runtimeId, executionEpoch });
         if (closure.state !== 'succeeded') {
           throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
         }
-        const finalParentOutput = await createdOwner.readFinalTurnOutput();
-        interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
-        // Only the simple-answer path carries the authoritative settlement receipt;
-        // complex requirement routing keeps its existing behavior.
-        if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
-          const settlement = driver.settlement();
-          if (settlement === undefined) {
-            throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
+        if (continuation === undefined) {
+          const finalParentOutput = await createdOwner.readFinalTurnOutput();
+          interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+          // Only the simple-answer path carries the authoritative settlement receipt;
+          // complex requirement routing keeps its existing behavior.
+          if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
+            const settlement = driver.settlement();
+            if (settlement === undefined) {
+              throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
+            }
+            await input.publishProviderSettlement({
+              interactionId: request.interactionId,
+              inputRevision: request.inputRevision,
+              settlement,
+            });
           }
-          await input.publishProviderSettlement({
-            interactionId: request.interactionId,
-            inputRevision: request.inputRevision,
-            settlement,
-          });
         }
-        live = { owner: createdOwner, helpers, owned };
+        live = { owner: createdOwner, helpers, owned, reconciled: continuation !== undefined, settlement: driver.settlement() };
         retained = live;
       } catch (error) {
         let failure = error;
         if (submitted && !settleAttempted && driver !== undefined) {
           settleAttempted = true;
           try {
-            await driver.settle({ runtimeId, executionEpoch: 1 });
+            await driver.settle({ runtimeId, executionEpoch });
           } catch (settleError) {
             failure = new AggregateError([failure, settleError], 'interaction observation and settlement failed');
           }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,13 @@ import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src
 import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
 import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import { startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
+import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
+import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
+import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 
 const parentFixtureRoot = join(process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-parent-close-fact-20261016', `app-${randomUUID()}`);
 const parentEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentFixtureRoot, 'assets')));
@@ -1192,6 +1200,271 @@ test('provider explicit brain interpreter reuses the retained close on a same-pr
   const closeRecords = (await new JsonlOrganJournal(journalFile).replay())
     .filter((record) => (record.payload as { discriminant?: string } | undefined)?.discriminant === 'resource-close');
   assert.equal(closeRecords.length, 1, 'a same-process retry must not append a second close record');
+});
+
+// Failure basis: default DI currently omits the lease, and the cold App reader
+// requires a physical close before it can reconcile. Impact: wedged intake or
+// repeated helper effects. Cost: one child seed process, one real UI consumer,
+// and terminal/hold/cleanup calls on the same isolated durable fixture.
+test('provider explicit brain interpreter fresh OS default DI recovers preclose without helper replay', async () => {
+  const root = join(parentFixtureRoot, `preclose-os-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-preclose', providerId: 'provider-preclose', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'model-preclose',
+    configDigest: 'sha256:preclose-config', capabilityDigest: 'sha256:preclose-capability',
+  };
+  const moduleUrl = (path: string) => new URL(`../../packages/${path}`, import.meta.url).href;
+  // Old requests are deliberately SEEDED via public Runtime/JSONL APIs. They
+  // are not represented as real old upstream generations. Lease/PID, explicit
+  // intake persistence, takeover and the new Provider execution are real.
+  const script = `
+    import { startUiRuntime } from ${JSON.stringify(moduleUrl('app/src/ui-runtime/index.js'))};
+    import { AccessControlService } from ${JSON.stringify(moduleUrl('app/src/ui-runtime/access-control.js'))};
+    import { uiRuntimeControlJournalPath } from ${JSON.stringify(moduleUrl('app/src/ui-runtime/journal.js'))};
+    import { acquireDaemonLease } from ${JSON.stringify(moduleUrl('app/src/supervisor/index.js'))};
+    import { ensureControlLayout, resolveRuntimePaths } from ${JSON.stringify(moduleUrl('config/src/index.js'))};
+    import { MemoryCoordinator } from ${JSON.stringify(moduleUrl('runtime/src/memory/index.js'))};
+    import { DeterministicMemoryBackend } from ${JSON.stringify(moduleUrl('adapters/memory/src/index.js'))};
+    import { createInteractionParentTurnRawOwner } from ${JSON.stringify(moduleUrl('runtime/src/explicit-brain/index.js'))};
+    import { JsonlOrganJournal } from ${JSON.stringify(moduleUrl('adapters/jsonl/src/index.js'))};
+    import { JsonlInteractionParentTurnJournal } from ${JSON.stringify(moduleUrl('adapters/jsonl/src/interaction-parent-turn-journal.js'))};
+    import { JsonlInteractionHelperJournal } from ${JSON.stringify(moduleUrl('adapters/jsonl/src/interaction-helper-journal.js'))};
+    import { ImmutableAssetStore } from ${JSON.stringify(moduleUrl('adapters/filesystem/src/index.js'))};
+    import { ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from ${JSON.stringify(moduleUrl('adapters/provider/src/index.js'))};
+    import { providerRawContentReader } from ${JSON.stringify(moduleUrl('adapters/provider/src/evidence.js'))};
+    import { id } from ${JSON.stringify(moduleUrl('contracts/src/index.js'))};
+    import { join } from 'node:path';
+    const root = ${JSON.stringify(root)}, binding = ${JSON.stringify(binding)};
+    const paths = await resolveRuntimePaths({controlRoot: join(root, 'control'), workspace: process.cwd()});
+    await ensureControlLayout(paths);
+    const lease = await acquireDaemonLease(paths);
+    const parentEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+    ${RecordedParentPort.toString()}
+    const port = new RecordedParentPort({binding, stepDelayMs: 0, replay: [], evidence: parentEvidence});
+    const runtime = await startUiRuntime({
+      mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port,
+      checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
+      uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
+      accessControl: await AccessControlService.open({credentialPath: join(root, 'security/web-access.json'), create: true}),
+      explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      memory: {coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'preclose'},
+      runtimeComposition: {
+        prepareAgentProvider: async () => { throw new Error('seed must not prepare Provider'); },
+        prepareTaskAgentProvider: async () => { throw new Error('seed must not prepare Task'); },
+      },
+    });
+    const interactionId = await runtime.service.receiveExplicitInput({sourceRef: 'ui:preclose', rawInput: 'recover the exact input', channel: 'business'});
+    const persisted = await runtime.service.inspectExplicitInteraction(interactionId);
+    const request = {interactionId, inputRevision: 1, sourceRef: persisted.sourceRef, rawInput: persisted.rawInput, clarifications: [], taskCandidates: []};
+    const journal = new JsonlOrganJournal(uiRuntimeControlJournalPath(join(root, 'checkpoints/rcc')));
+    const parent = new JsonlInteractionParentTurnJournal(journal), helpers = new JsonlInteractionHelperJournal(journal);
+    const rawContent = providerRawContentReader(parentEvidence);
+    const asset = async (scope, type, content) => ({ref: await parentEvidence.write({scope, kind: 'execution', type, locator: type, content}), view: {kind: 'utf8-text'}});
+    const ownerIdentity = await lease.withCurrentLeaseOwner(async owner => owner);
+    const seeded = {};
+    for (const mode of ['continue', 'terminal', 'legacy', 'unreturned']) {
+      const turn = {organId: id('organ','explicit-test'), interactionScopeId: mode === 'continue' ? 'runtime:explicit-test' : 'runtime:' + mode,
+        interactionId: mode === 'continue' ? interactionId : mode, inputRevision: 1, turnId: 'seed-' + mode};
+      const turnRequest = {...request, interactionId: turn.interactionId};
+      const scope = {organId: turn.organId, operationId: id('operation','op-' + mode)};
+      const execution = {runtimeId: 'runtime-' + mode, ...scope, executionEpoch: 1, interactionTurn: turn};
+      const initialInput = await asset(scope, 'input-' + mode, JSON.stringify(turnRequest));
+      const owner = createInteractionParentTurnRawOwner({turn, execution, scope, initialInput, providerBinding: binding,
+        ...(mode === 'legacy' ? {} : {executionOwner: ownerIdentity}), journal: parent, rawContent});
+      await owner.openTurnInput();
+      if (mode === 'continue' || mode === 'unreturned') {
+        const identity = {organId: turn.organId, interactionScopeId: turn.interactionScopeId, interactionId: turn.interactionId,
+          inputRevision: 1, parentTurnId: turn.turnId, assignmentId: 'helper-assignment-' + mode, helperCallId: 'helper-' + mode, attempt: 1};
+        const assignment = {...identity, objective: 'seed returned helper', targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
+          acceptanceCriteriaDigest: 'sha256:' + 'a'.repeat(64), successCriteria: ['complete'], failureCriteria: ['none'],
+          incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required'};
+        await helpers.appendDispatchAccepted({kind: 'dispatch-accepted', assignment, dispatchAcceptedAt: new Date().toISOString(), evidenceRefs: []});
+        if (mode === 'continue') await helpers.appendReturned({kind: 'returned', result: {...identity, agentId: 'seed-helper',
+          producedArtifactRefs: [], producedArtifactDigests: [], status: 'incomplete', summary: 'seeded returned helper', outputRefs: [], evidenceRefs: [],
+          nextAction: 'wait', conditionRef: 'condition:seed'}, returnedAt: new Date().toISOString(), evidenceRefs: []});
+      }
+      if (mode === 'continue' || mode === 'terminal') {
+        const req = {turnId: 'provider-' + mode, requestId: 'req-1-' + mode};
+        await owner.registerRequest({execution, record: {request: req, scope, phase: 'dispatching'}});
+        if (mode === 'continue') {
+          await owner.acceptRawFact({execution, scope, request: req, producerSeq: 1, fact: {kind: 'tool-call', contentUnitId: 'call',
+            call: {callId: 'old-call', toolId: 'dispatch_helper', arguments: {seed: true}, continuationRef: 'old-continuation'},
+            rawArguments: await asset(scope, 'args', '{"seed":true}'), complete: true}});
+          await owner.acceptRawFact({execution, scope, request: req, producerSeq: 2, fact: {kind: 'tool-result', contentUnitId: 'result',
+            callId: 'old-call', continuationRef: 'old-continuation', result: {...execution, toolId: 'dispatch_helper', callId: 'old-call',
+              status: 'succeeded', outputRefs: [], evidenceRefs: []}, rawOutput: await asset(scope,'output','SEEDED_RETURNED_HELPER'), complete: true}});
+        } else {
+          const text = JSON.stringify({kind: 'answer', normalizedInput: turnRequest.rawInput, knownFacts: [], answer: 'terminal recovered', decisionRefs: []});
+          await owner.acceptRawFact({execution, scope, request: req, producerSeq: 1, fact: {kind: 'content', channel: 'assistant-text', update: 'full', contentUnitId: 'text',
+            content: await asset(scope, 'terminal-text', text), complete: true}});
+        }
+        await owner.acceptRawFact({execution, scope, request: req, producerSeq: 3, fact: {kind: 'request-complete', terminal: 'completed'}});
+        await owner.registerRequest({execution, record: {request: req, scope, phase: 'settled'}});
+        if (mode === 'continue') {
+          const next = {turnId: req.turnId, requestId: 'req-2', parentRequestId: req.requestId};
+          await owner.registerRequest({execution, record: {request: next, parentRequestId: req.requestId, scope, phase: 'dispatching'}});
+          await owner.registerRequest({execution, record: {request: next, parentRequestId: req.requestId, scope, phase: 'waiting'}});
+        }
+      }
+      seeded[mode] = {turn, request: turnRequest};
+    }
+    console.log(JSON.stringify({pid: process.pid, ownerIdentity, seeded}));
+    process.exit(0); // deliberate crash boundary: no runtime.close or lease.release
+  `;
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    const exit = await new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    assert.equal(exit, 0, stderr);
+    const receipt = JSON.parse(stdout.trim());
+    assert.equal(receipt.pid, child.pid);
+    assert.ok(receipt.pid !== process.pid);
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    lease = await acquireDaemonLease(paths, { takeover: { reason: 'preclose test dead child takeover', allowed: () => true } });
+    assert.equal(lease.record.generation, 2);
+    console.log(JSON.stringify({ event: 'fresh-os-takeover', oldPid: child.pid, newPid: process.pid,
+      oldOwner: receipt.ownerIdentity, newGeneration: lease.record.generation, seededOldRequests: true }));
+    const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+    const journal = new JsonlOrganJournal(uiRuntimeControlJournalPath(join(root, 'checkpoints/rcc')));
+    const parent = new JsonlInteractionParentTurnJournal(journal);
+    const helpers = new JsonlInteractionHelperJournal(journal);
+    const rawContent = providerRawContentReader(evidence);
+    let prepares = 0, providerRequests = 0, physicalCloses = 0, helperPrepares = 0;
+    const parentPort = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [], respond: async (wire) => {
+      providerRequests += 1;
+      assert.ok(wire.input.some((item: any) => item.type === 'function_call' && item.call_id === 'old-call'));
+      assert.ok(wire.input.some((item: any) => item.type === 'function_call_output' && item.output === 'SEEDED_RETURNED_HELPER'));
+      // Re-entering the real lease proves no Provider work holds its guard.
+      await lease!.withCurrentLeaseOwner(async () => undefined);
+      return [{ type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+        kind: 'answer', normalizedInput: 'recover the exact input', knownFacts: [], answer: 'continued after OS takeover', decisionRefs: [],
+      }) }];
+    } });
+    const originalClose = parentPort.close.bind(parentPort);
+    parentPort.close = async (selectedBinding) => { physicalCloses += 1; return originalClose(selectedBinding); };
+    const composition = { roleId: 'interaction' as const, source: 'http' as const,
+      provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses' as const,
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef }, binding, port: parentPort };
+    const interpreterOptions = {
+      organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test',
+      parentJournal: parent, checkpointJournal: helpers, helperJournal: helpers, turnHelperJournal: helpers,
+      rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() }, binding,
+      templateRoot: join(process.cwd(), 'packages/agent-templates/templates'), lease,
+      helperFactory: async () => { helperPrepares += 1; throw new Error('old helper must not replay'); },
+      prepareAgentProvider: async () => { prepares += 1; return composition; },
+    };
+    for (const mode of ['legacy', 'unreturned'] as const) {
+      const interpreter = createProviderExplicitBrainInterpreter({ ...interpreterOptions, interactionScopeId: `runtime:${mode}` });
+      await assert.rejects(() => interpreter.interpret(receipt.seeded[mode].request), mode === 'legacy'
+        ? /cannot recover without an attested execution owner/ : /holds on unreturned helper/);
+    }
+    const terminal = createProviderExplicitBrainInterpreter({ ...interpreterOptions, interactionScopeId: 'runtime:terminal' });
+    assert.equal((await terminal.interpret(receipt.seeded.terminal.request)).kind, 'answer');
+    const terminalSnapshot = await parent.readTurnSnapshot(receipt.seeded.terminal.turn);
+    assert.equal(terminalSnapshot.resourceClose, null);
+    assert.equal(terminalSnapshot.ownerReconciliations[0]?.fact.remoteProviderState, 'unknown');
+    assert.equal(terminalSnapshot.ownerReconciliations[0]?.fact.mode, 'terminal-output');
+    assert.ok(await helpers.readSemanticCheckpointExact(receipt.seeded.terminal.turn));
+    assert.equal(prepares, 0);
+    assert.equal(providerRequests, 0);
+    assert.equal(helperPrepares, 0);
+
+    const pendingRequest = receipt.seeded.continue.request;
+    const freshScope = 'runtime:fresh-missing-lease';
+    await assert.rejects(() => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+      interactionScopeId: freshScope, lease: () => undefined }).interpret({ ...pendingRequest, interactionId: 'fresh-missing-lease' }),
+    /turn requires active supervisor lease authority/);
+    assert.equal((await parent.readScopeOpenedTurns({ organId: interpreterOptions.organId, interactionScopeId: freshScope })).length, 0);
+    assert.equal(prepares, 0, 'missing configured lease must hold before preparation or turn creation');
+    await assert.rejects(() => createProviderExplicitBrainInterpreter({ ...interpreterOptions, lease: () => undefined })
+      .interpret(pendingRequest), /requires active supervisor lease authority/);
+    await assert.rejects(() => createProviderExplicitBrainInterpreter({ ...interpreterOptions, prepareAgentProvider: undefined,
+      port: parentPort }).interpret(pendingRequest), /requires an owned provider preparer/);
+    // A committed same-replacement reconciliation can be reused after a local
+    // failure. A mismatched full binding closes the new owned composition once.
+    let mismatchedCloses = 0;
+    const wrongBinding = { ...binding, configDigest: 'sha256:wrong' };
+    const wrongPort = new RecordedParentPort({ binding: wrongBinding, evidence, stepDelayMs: 0, replay: [] });
+    const wrongClose = wrongPort.close.bind(wrongPort);
+    wrongPort.close = async (selectedBinding) => { mismatchedCloses += 1; return wrongClose(selectedBinding); };
+    await assert.rejects(() => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+      prepareAgentProvider: async () => ({ ...composition, binding: wrongBinding, port: wrongPort }),
+    }).interpret(pendingRequest), /requires the original full provider binding/);
+    assert.equal(mismatchedCloses, 1);
+    assert.equal(providerRequests, 0);
+
+    runtime = await startUiRuntime({
+      mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port: parentPort as any,
+      checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
+      uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
+      accessControl: await AccessControlService.open({ credentialPath: join(root, 'security/web-access.json'), create: false }),
+      explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      explicitBrainHelperProviderPreparer: async () => { helperPrepares += 1; throw new Error('old helper must not replay'); },
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'preclose' },
+      runtimeComposition: {
+        prepareAgentProvider: async () => { prepares += 1; return composition as any; },
+        prepareTaskAgentProvider: async () => { throw new Error('simple answer must not prepare Task'); },
+      },
+    });
+    const persisted = await runtime.service.inspectExplicitInteraction(pendingRequest.interactionId);
+    assert.equal(persisted.rawInput, pendingRequest.rawInput);
+    assert.equal(persisted.sourceRef, pendingRequest.sourceRef);
+    let result;
+    try {
+      result = await runtime.service.interpretExplicitInput({ interactionId: pendingRequest.interactionId });
+    } catch (error) {
+      const failed = await parent.readTurnSnapshot(receipt.seeded.continue.turn);
+      console.log(JSON.stringify({ event: 'fresh-os-preclose-failure', error: String(error),
+        requests: failed.requests.map(({ fact }) => ({ request: fact.request, phase: fact.phase })),
+        reconciliations: failed.ownerReconciliations.map(({ fact }) => fact), resourceClose: failed.resourceClose?.fact,
+        semanticCheckpoint: await helpers.readSemanticCheckpointExact(receipt.seeded.continue.turn),
+        prepares, providerRequests, physicalCloses, helperPrepares }));
+      throw error;
+    }
+    assert.ok(JSON.stringify(result).includes('continued after OS takeover'));
+    const snapshot = await parent.readTurnSnapshot(receipt.seeded.continue.turn);
+    assert.equal(snapshot.turnInput?.fact.turn.turnId, 'seed-continue');
+    assert.equal(snapshot.turnInput?.fact.execution.operationId.value, 'op-continue');
+    assert.deepEqual(snapshot.turnInput?.fact.providerBinding, binding);
+    assert.deepEqual(snapshot.turnInput?.fact.executionOwner, receipt.ownerIdentity);
+    assert.equal(snapshot.ownerReconciliations.length, 1);
+    assert.equal(snapshot.ownerReconciliations[0]?.fact.effectiveExecutionEpoch, 2);
+    assert.equal(snapshot.resourceClose?.fact.execution.executionEpoch, 2);
+    assert.equal(snapshot.resourceClose?.fact.result.state, 'closed');
+    // The epoch-2 Provider request must anchor to the settled parent leaf, so
+    // the abandoned req-2 no longer leaves two settled terminal requests.
+    const epochTwoRequest = snapshot.requests
+      .map((entry) => entry.fact.request)
+      .filter((request) => request.requestId !== 'req-1-continue' && request.requestId !== 'req-2')
+      .at(-1);
+    assert.equal(epochTwoRequest?.turnId, 'provider-continue');
+    assert.equal(epochTwoRequest?.parentRequestId, 'req-1-continue');
+    assert.equal(prepares, 1);
+    assert.equal(providerRequests, 1);
+    assert.equal(physicalCloses, 1);
+    assert.equal(helperPrepares, 0);
+    const checkpoint = await helpers.readSemanticCheckpointExact(receipt.seeded.continue.turn);
+    assert.ok(checkpoint);
+    if (checkpoint === null) throw new Error('missing preclose semantic checkpoint');
+    assert.ok(checkpoint.checkpoint.claims.some((claim) => claim.fact.includes('returned-only')));
+    console.log(JSON.stringify({ event: 'fresh-os-preclose-receipt', oldPid: child.pid, newPid: process.pid,
+      oldGeneration: receipt.ownerIdentity.daemonGeneration, newGeneration: lease.record.generation,
+      turnId: snapshot.turnInput?.fact.turn.turnId, operationId: snapshot.turnInput?.fact.execution.operationId.value,
+      executionEpoch: snapshot.resourceClose?.fact.execution.executionEpoch, prepares, providerRequests, physicalCloses, helperPrepares,
+      seededOldRequests: true, semanticCheckpoint: checkpoint.commit.commitId }));
+  } finally {
+    await runtime?.close();
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('provider explicit brain interpreter recovers a physically closed parent turn from a fresh consumer', async () => {

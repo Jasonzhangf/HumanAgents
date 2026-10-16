@@ -7,6 +7,7 @@ import {
   validateRawFactEnvelope,
   type AcceptedRawFact,
   type ActiveTurnBinding,
+  type ActiveTurnProviderRequestIdentityRef,
   type AdmittedTurn,
   type EvidenceRef,
   type ExecutionRuntimePort,
@@ -2336,6 +2337,7 @@ interface RawPersistenceHarnessInput {
     inner: (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>,
   ) => (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>;
   readonly registerRequest?: (registration: NativeRequestRegistration) => Promise<RuntimeRequestRecord>;
+  readonly parentRequest?: ActiveTurnProviderRequestIdentityRef;
 }
 
 function sseResponseReturning(onClose: () => void): V3ProviderFetch {
@@ -2402,6 +2404,19 @@ async function rawPersistenceHarness(input: RawPersistenceHarnessInput): Promise
   const acceptRawFact = input.accept === undefined ? acceptBase : input.accept(acceptBase);
   const registerRequest = input.registerRequest
     ?? ((registration: NativeRequestRegistration) => context.registerRequest(registration.record));
+  // A seeded continuation parent must be durably registered in the same active
+  // turn, because the Runtime rejects a new request whose parent is unknown.
+  if (input.parentRequest !== undefined) {
+    const parentIdentity = {
+      turnId: input.parentRequest.turnId,
+      requestId: input.parentRequest.requestId,
+      ...(input.parentRequest.parentRequestId === undefined
+        ? {}
+        : { parentRequestId: input.parentRequest.parentRequestId }),
+    };
+    await context.registerRequest({ request: parentIdentity, scope, phase: 'dispatching' });
+    await context.registerRequest({ request: parentIdentity, scope, phase: 'settled' });
+  }
   const instance = new ProviderAgentDriver({
     port,
     binding,
@@ -2412,6 +2427,7 @@ async function rawPersistenceHarness(input: RawPersistenceHarnessInput): Promise
     assignmentId: 'assignment-r1',
     scope,
     inputRefs: ['input-1'],
+    ...(input.parentRequest === undefined ? {} : { parentRequest: input.parentRequest }),
     tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
     rawEvidence: input.sink ?? baseSink,
     acceptRawFact,
@@ -2481,6 +2497,7 @@ test('R1-A: provider driver forwards codec raw facts and persists the exact exec
     const harness = await rawPersistenceHarness({
       root,
       fetch,
+      parentRequest: { turnId: 'turn-seeded', requestId: 'req-0' },
       executeTool: {
         async execute() {
           return { output: rawOutput, outputRefs: [], evidenceRefs: [evidence] };
@@ -2496,9 +2513,14 @@ test('R1-A: provider driver forwards codec raw facts and persists the exact exec
 
     const accepted = acceptedRawFacts(harness.context);
     const firstRequestId = accepted[0]!.envelope.request.requestId;
-    const continuation = accepted.find((entry) => entry.envelope.request.parentRequestId !== undefined);
+    // The seeded settled parent anchors the first request of this new driver
+    // instance, so the recovered turn is one lineage instead of two roots.
+    assert.equal(accepted[0]!.envelope.request.turnId, 'turn-seeded');
+    assert.equal(accepted[0]!.envelope.request.parentRequestId, 'req-0');
+    const continuation = accepted.find((entry) => entry.envelope.request.parentRequestId === firstRequestId);
     assert.ok(continuation, 'expected a continuation request identity');
     assert.equal(continuation.envelope.request.parentRequestId, firstRequestId);
+    assert.equal(continuation.envelope.request.turnId, 'turn-seeded');
     assert.notEqual(continuation.envelope.request.requestId, firstRequestId);
 
     assert.deepEqual(
@@ -2528,10 +2550,12 @@ test('R1-A: provider driver forwards codec raw facts and persists the exact exec
     assert.equal(await coldRead(harness, fact), rawOutput);
 
     const requestPhases = harness.context.requests().map((record) => [
-      record.request.requestId === firstRequestId ? 'R1' : 'R2',
+      record.request.requestId === 'req-0' ? 'R0' : record.request.requestId === firstRequestId ? 'R1' : 'R2',
       record.phase,
     ]);
     assert.deepEqual(requestPhases, [
+      ['R0', 'dispatching'],
+      ['R0', 'settled'],
       ['R1', 'dispatching'],
       ['R1', 'dispatched'],
       ['R1', 'waiting'],

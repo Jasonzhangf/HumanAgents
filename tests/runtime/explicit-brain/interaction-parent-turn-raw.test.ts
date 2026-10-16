@@ -1559,7 +1559,11 @@ test('parent reconciliation continues original confirmed tool facts across repea
     await assert.rejects(ownerOne.registerRequest({
       execution: executionOne, record: parentRequestRecord(turn, scope, 'stale-request', 'dispatching'),
     }), /active execution owner/);
-    const reqThree = parentRequestRecord(turn, scope, 'request-red-3', 'dispatching', 'request-red-1');
+    // The continuation anchor must come from the Runtime owner, not a
+    // hand-supplied chain: the reconciled settled leaf is request-red-1.
+    const continuationAnchorTwo = await ownerTwo.readContinuationParentRequest();
+    assert.equal(continuationAnchorTwo?.requestId, 'request-red-1');
+    const reqThree = parentRequestRecord(turn, scope, 'request-red-3', 'dispatching', continuationAnchorTwo!.requestId);
     const executionTwo = { ...executionOne, executionEpoch: 2 };
     await ownerTwo.registerRequest({ execution: executionTwo, record: reqThree });
     const contextTwo = await ownerTwo.requestContext({
@@ -1578,7 +1582,11 @@ test('parent reconciliation continues original confirmed tool facts across repea
     });
     assert.equal(third.fact.effectiveExecutionEpoch, 3);
     assert.deepEqual(third.fact.unsettledRequestIds, ['request-red-3']);
-    const reqFour = parentRequestRecord(turn, scope, 'request-red-4', 'dispatching', 'request-red-1');
+    // request-red-3 is now the abandoned unsettled request, so the red-1 leaf
+    // remains the single settled continuation anchor for the third epoch.
+    const continuationAnchorThree = await ownerThree.readContinuationParentRequest();
+    assert.equal(continuationAnchorThree?.requestId, 'request-red-1');
+    const reqFour = parentRequestRecord(turn, scope, 'request-red-4', 'dispatching', continuationAnchorThree!.requestId);
     const executionThree = { ...executionOne, executionEpoch: 3 };
     await ownerThree.openTurnInput();
     await ownerThree.registerRequest({ execution: executionThree, record: reqFour });
@@ -1668,7 +1676,11 @@ test('parent reconciliation reserves terminal output for complete non-tool leave
     assert.deepEqual(continued.fact.unsettledRequestIds, []);
     await ownerTwo.openTurnInput();
     const executionTwo = { ...execution, executionEpoch: 2 };
-    const reqTwo = requestRecord('terminal-answer', 'terminal-tool');
+    // The reconciled settled tool request is the continuation anchor read back
+    // from the Runtime owner rather than a hardcoded parent id.
+    const continuationAnchorTwo = await ownerTwo.readContinuationParentRequest();
+    assert.equal(continuationAnchorTwo?.requestId, 'terminal-tool');
+    const reqTwo = requestRecord('terminal-answer', continuationAnchorTwo!.requestId);
     await ownerTwo.registerRequest({ execution: executionTwo, record: reqTwo });
     const answer = await writeAsset(sink, 'terminal-answer', 'Final answer');
     await ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: reqTwo.request, producerSeq: 1,
@@ -1688,7 +1700,9 @@ test('parent reconciliation reserves terminal output for complete non-tool leave
     const ownerThree = ownerAt(incomplete.fact.effectiveExecutionEpoch, 3);
     await ownerThree.openTurnInput();
     const executionThree = { ...execution, executionEpoch: 3 };
-    const reqThree = requestRecord('terminal-complete-answer', 'terminal-answer');
+    const continuationAnchorThree = await ownerThree.readContinuationParentRequest();
+    assert.equal(continuationAnchorThree?.requestId, 'terminal-answer');
+    const reqThree = requestRecord('terminal-complete-answer', continuationAnchorThree!.requestId);
     await ownerThree.registerRequest({ execution: executionThree, record: reqThree });
     await ownerThree.acceptRawFact({ execution: executionThree, scope, request: reqThree.request, producerSeq: 1,
       fact: { kind: 'content', contentUnitId: 'complete-answer', channel: 'assistant-text', content: answer,

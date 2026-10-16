@@ -252,6 +252,12 @@ export interface InteractionParentTurnRawOwner {
     }
   >;
   /**
+   * Read the settled request identity that a reconciled `continue` epoch must
+   * chain its first request from, or `undefined` when no settled request exists
+   * prior to the continuation.
+   */
+  readContinuationParentRequest(): Promise<ProviderRequestIdentityRef | undefined>;
+  /**
    * Commit the original owner's actual `closed` Provider receipt exactly once.
    * It does not require a successful semantic output: a real close during error
    * cleanup is already enough. An exact repeat returns the first committed fact.
@@ -757,6 +763,32 @@ export function createInteractionParentTurnRawOwner(
     return [...new Set(snapshot.ownerReconciliations.flatMap((entry) => entry.fact.unsettledRequestIds))];
   }
 
+  /**
+   * The latest record of every request that the reconciliation has not already
+   * abandoned. Both reconciliation eligibility and continuation-anchor reading
+   * share this exact scope so they cannot disagree about which requests count.
+   */
+  function nonIgnoredRequestRecords(
+    snapshot: InteractionParentTurnSnapshot,
+    ignored: ReadonlySet<string>,
+  ): readonly RuntimeRequestRecord[] {
+    const latest = new Map<string, RuntimeRequestRecord>();
+    for (const committed of snapshot.requests) {
+      if (ignored.has(committed.fact.request.requestId)) continue;
+      latest.set(committed.fact.request.requestId, committed.fact);
+    }
+    return [...latest.values()];
+  }
+
+  function hasCommittedRequestCompletion(
+    snapshot: InteractionParentTurnSnapshot,
+    record: RuntimeRequestRecord,
+  ): boolean {
+    return snapshot.acceptedFacts.some((committed) =>
+      sameRequestIdentity(committed.fact.envelope.request, record.request)
+      && committed.fact.envelope.fact.kind === 'request-complete');
+  }
+
   function assertActiveOwner(snapshot: InteractionParentTurnSnapshot): void {
     const active = activeExecutionState(snapshot);
     if (canonicalJsonStringify(active.execution) !== canonicalJsonStringify(execution)
@@ -779,20 +811,12 @@ export function createInteractionParentTurnRawOwner(
     }
     const active = activeExecutionState(snapshot);
     const ignored = new Set(ignoredRequests(snapshot));
-    const latest = new Map<string, RuntimeRequestRecord>();
-    for (const committed of snapshot.requests) {
-      if (ignored.has(committed.fact.request.requestId)) continue;
-      latest.set(committed.fact.request.requestId, committed.fact);
-    }
-    const requests = [...latest.values()];
+    const requests = nonIgnoredRequestRecords(snapshot, ignored);
     const unsettledRequests = requests.filter((record) =>
       (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
     const unsettledRequestIds = requests
       .filter((record) => (UNSETTLED_PHASES as readonly string[]).includes(record.phase)
-        || (record.phase === 'settled'
-          && !snapshot.acceptedFacts.some((committed) =>
-            sameRequestIdentity(committed.fact.envelope.request, record.request)
-            && committed.fact.envelope.fact.kind === 'request-complete')))
+        || (record.phase === 'settled' && !hasCommittedRequestCompletion(snapshot, record)))
       .map((record) => record.request.requestId);
 
     // An unpaired tool call is an unknown physical side effect: it holds the
@@ -1154,6 +1178,53 @@ export function createInteractionParentTurnRawOwner(
       }
       const output = await finalOutputFromSnapshot(snapshot, ignoredRequestIds);
       return { ...output, reconciliation, resourceClose: null };
+    },
+
+    async readContinuationParentRequest(): Promise<ProviderRequestIdentityRef | undefined> {
+      const snapshot = await journal.readTurnSnapshot(turn);
+      if (snapshot.turnInput === null) {
+        throw new ContractError('interaction parent continuation requires the committed turn input');
+      }
+      if (snapshot.resourceClose !== null) {
+        throw new ContractError(
+          'interaction parent resource close is committed; continuation parent is closed',
+        );
+      }
+      const reconciliation = snapshot.ownerReconciliations.at(-1);
+      if (reconciliation === undefined || reconciliation.fact.mode !== 'continue') {
+        throw new ContractError(
+          'interaction parent continuation parent requires a committed continue reconciliation',
+        );
+      }
+      assertActiveOwner(snapshot);
+      const requests = nonIgnoredRequestRecords(snapshot, new Set(ignoredRequests(snapshot)));
+      const unsettled = requests.filter((record) =>
+        (UNSETTLED_PHASES as readonly string[]).includes(record.phase)
+        || !hasCommittedRequestCompletion(snapshot, record));
+      if (unsettled.length > 0) {
+        throw new ContractError(
+          'interaction parent continuation requires every non-ignored request to be settled',
+        );
+      }
+      if (requests.length === 0) return undefined;
+      const parentRequestIds = new Set(
+        requests
+          .map((record) => record.request.parentRequestId)
+          .filter((parentRequestId): parentRequestId is string => parentRequestId !== undefined),
+      );
+      const leaves = requests.filter((record) =>
+        record.phase === 'settled' && !parentRequestIds.has(record.request.requestId));
+      if (leaves.length !== 1) {
+        throw new ContractError(
+          `interaction parent continuation requires at most one settled terminal request, found ${leaves.length}`,
+        );
+      }
+      const leaf = leaves[0]!.request;
+      return {
+        turnId: leaf.turnId,
+        requestId: leaf.requestId,
+        ...(leaf.parentRequestId === undefined ? {} : { parentRequestId: leaf.parentRequestId }),
+      };
     },
 
     async recordProviderClose(input: {
