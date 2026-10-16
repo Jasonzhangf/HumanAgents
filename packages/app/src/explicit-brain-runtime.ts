@@ -31,6 +31,7 @@ import {
   createInteractionParentTurnRawOwner,
   type ExplicitTurnHelperFactory,
   type InteractionHelperJournalPort,
+  type InteractionHelperTurnReadPort,
   type InteractionParentTurnRawJournalPort,
   type InteractionParentOpenedTurnScopeReadPort,
   type InteractionSemanticCheckpointJournalPort,
@@ -363,6 +364,7 @@ export function createProviderExplicitBrainInterpreter(input: {
   readonly parentJournal: InteractionParentTurnRawJournalPort & InteractionParentOpenedTurnScopeReadPort;
   readonly checkpointJournal: InteractionSemanticCheckpointJournalPort;
   readonly helperJournal: InteractionHelperJournalPort;
+  readonly turnHelperJournal?: InteractionHelperTurnReadPort;
   readonly rawEvidence: ProviderEvidenceSink;
   readonly rawContent: RawContentReadPort;
   readonly helperFactory: ExplicitTurnHelperFactory;
@@ -451,7 +453,36 @@ export function createProviderExplicitBrainInterpreter(input: {
           throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires its exact prior input before new input`);
         }
         if (retained === undefined || retained.owner.turn.turnId !== pending.fact.turn.turnId) {
-          throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires original physical parent ownership/close attestation and complete helper collection recovery`);
+          if (pending.fact.providerBinding === undefined) {
+            throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} cannot recover without the original committed provider binding`);
+          }
+          if (input.turnHelperJournal === undefined) {
+            throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires the durable helper turn read port for cold recovery`);
+          }
+          const coldOwner = createInteractionParentTurnRawOwner({
+            turn: pending.fact.turn,
+            execution: pending.fact.execution,
+            scope: pending.fact.scope,
+            initialInput: pending.fact.initialInput,
+            providerBinding: pending.fact.providerBinding,
+            priorCheckpoints: pending.fact.priorCheckpoints,
+            journal: input.parentJournal,
+            rawContent: input.rawContent,
+          });
+          const finalParentOutput = await coldOwner.readClosedTurnOutput();
+          const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+          const helpers = new ExplicitTurnHelperSession({
+            identity: pending.fact.turn,
+            latestTurn: { ...pending.fact.turn, entries: [{ kind: 'user-input', content: pending.fact.initialInput }] },
+            journal: input.helperJournal,
+            clock: input.clock,
+            factory: input.helperFactory,
+            checkpointJournal: input.checkpointJournal,
+            rawContent: input.rawContent,
+            turnHelperJournal: input.turnHelperJournal,
+          });
+          await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+          return interpretation;
         }
         await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
         return finish(retained, request);
@@ -495,6 +526,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           identity: turn, latestTurn: { ...turn, entries: [{ kind: 'user-input', content: initialInput }] },
           journal: input.helperJournal, clock: input.clock, factory: input.helperFactory,
           checkpointJournal: input.checkpointJournal, rawContent: input.rawContent,
+          turnHelperJournal: input.turnHelperJournal,
         });
         const port = owned?.port ?? input.port;
         if (port === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent provider is not configured');

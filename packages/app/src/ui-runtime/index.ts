@@ -380,6 +380,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
       interactionScopeId: `runtime:${options.projectKey ?? options.organId.value}`,
       parentJournal: new JsonlInteractionParentTurnJournal(taskControlJournal),
       helperJournal,
+      turnHelperJournal: helperJournal,
       checkpointJournal: helperJournal,
       rawEvidence, rawContent: providerRawContentReader(rawEvidence),
       clock: { now: () => (clock?.() ?? new Date()).toISOString() },
