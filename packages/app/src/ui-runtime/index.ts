@@ -9,7 +9,10 @@ import type {
   ProviderReadiness,
   ScopeRef,
   TaskId,
+  TasklessProviderExecutionIdentityRef,
 } from '../../../contracts/src/index.js';
+import type { AgentProviderComposition } from '../agent-driver-composition.js';
+import type { AgentRole } from '../../../config/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import type { RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import {
@@ -136,6 +139,16 @@ export interface UiRuntimeLaunchOptions {
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
   readonly explicitBrainTemplateRoot?: string;
+  /**
+   * Taskless Provider preparation for the explicit Brain helper. The helper
+   * runs outside any Task, so its execution identity is the taskless variant
+   * and the serving entry - the owner of configuration - prepares the same
+   * composition it already selects for every other role.
+   */
+  readonly explicitBrainHelperProviderPreparer?: (selection: {
+    readonly roleId: AgentRole;
+    readonly configuredAgentId?: string;
+  }) => Promise<AgentProviderComposition<TasklessProviderExecutionIdentityRef>>;
   /**
    * Override for the Task identity owner. Production always assembles the real
    * `TaskIdentityConsumer` over the runtime control Organ Journal; this option
