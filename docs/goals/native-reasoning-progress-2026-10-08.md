@@ -6,6 +6,7 @@
 
 ### 续接增量（2026-10-16）
 
+- parentclose r1 Appconsumer因tail遮挡长时间未退出，Root只SIGINT已核Node21964释放TAP（GCM不动），实际13case7PASS6FAIL。旧nesteddecision反例后来查明AggregateError内含fixture mkdir EPERM和providerclose transport EPERM，不能认定产品错误链回归或泛化其余5项。root-observation.md保原错/中断事实。r1沿旧workspacewrite启动；精确SIGINT99920→absent后保全5文件delta，freshGCM `provider-parent-close-finish-gcm-r2-20261016`同树用已授权执行参数继续，获rawconsumer写窗口并标准合F1；禁止换fixture root或弱化断言。
 - retryJournal真实缺边sourceccb0fdc（index两处，仅从Config runtimePaths派生canonical Journal，不启retry策略）已标准合b5f1e96；作者直接Appbuild/coldtsc0，Root组合build/coldtsc无诊断，source冻结后UX正式restart gen5/PID63887/source匹配。原POST终态409 `orchestration.dispatch.failed`：deliveryreference ux-handoff.md未解析为本admittedturn scoped证据。receipt `/private/tmp/humanagent-i1-recovery-owner-20261016/resume-1792165909612`；原file1820/hash04cfc…与intent1/completion1不变。不是恢复PASS；UX核原证据与恢复身份，禁止重放/放宽scope/伪造证据，下一次控制仍UX独占。
 - UX释放helper-app原树/index窗口后，Root复用该树FFb5f派stopbinder GCM。首派producer路径漏ui-runtime已在任何tracked改动前精确SIGINT3914并确认absent；fresh `provider-stop-binder-gcm-r2-20261016`按实际四App生产path继续，不新树。Runtime ui-runtime.test归checkpointboundary暂不并写；agent-drivercomp归parentclose不碰。三实现域并行，未验delta不进候选；当前没有ready而无文件冲突的其余已规划实现，不为并发新增功能。
 - F1helper source58fd+消融fc2ce45已标准合候选d70b6c5；消融净删46行，只枚举durabledispatch并按既有返回/验收关联取值。Root原路径JSONL/Runtime compile0、adapter1/1、raw3/3、Appbuild0；组合Appbuild/Runtimecompile0/raw3/3。原GCM旧sandboxfixtureEPERM与Root首次漏HUMANAGENT_TEST_ROOT原错保留，修准确入口后GREEN，不改root绕过。旧GCM38987SIGINT后及bridge39739已absent；来源clean，worktree普通remove/prune/pathabsent完成。父close原rawtest写窗口释放，后续标准组合F1，不跨树拷贝。
