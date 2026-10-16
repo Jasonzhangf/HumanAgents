@@ -11,7 +11,7 @@ import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type Agent
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
 import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
-import { canonicalJsonStringify } from '../../packages/contracts/src/index.js';
+import { canonicalJsonStringify, checkpointCommitIdentityV2 } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -4933,6 +4933,118 @@ test('real JSONL checkpoint journal deduplicates retries by stable commit identi
     }),
     (error: unknown) => error instanceof JournalCommitConflictError,
   );
+});
+
+test('FileCheckpointStore delegates native checkpoint commits and reads to the canonical journal', async () => {
+  const fixtureRoot = process.env.HUMANAGENT_TEST_ROOT
+    ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-checkpoint-native-port-20261016');
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, 'file-checkpoint-native-port-'));
+  try {
+    const filePath = join(root, 'checkpoints.jsonl');
+    const store = new FileCheckpointStore(filePath);
+    const scope = {
+      organId: id('organ', 'file-checkpoint-native-port-organ'),
+      taskId: id('task', 'file-checkpoint-native-port-task'),
+      cycleId: id('cycle', 'file-checkpoint-native-port-cycle'),
+    };
+    const recoveryStateRef: EvidenceRef = {
+      evidenceId: id('evidence', 'file-checkpoint-native-port-recovery'),
+      kind: 'operation',
+      source: 'test',
+      locator: 'records/recovery',
+      scope,
+    };
+    const checkpoint = (
+      value: string,
+      seq: number,
+      previousCheckpointId: Checkpoint['previousCheckpointId'],
+      summary: string,
+    ): Checkpoint => ({
+      id: id('checkpoint', value),
+      scope,
+      cycleId: scope.cycleId,
+      seq,
+      previousCheckpointId,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+      summary,
+      recoveryStateRef: { ...recoveryStateRef, evidenceId: id('evidence', `${value}-recovery`) },
+      evidenceRefs: [{
+        evidenceId: id('evidence', `${value}-evidence`),
+        kind: 'operation',
+        source: 'test',
+        locator: `records/${value}`,
+        scope,
+      }],
+      next: { kind: 'continue', ref: 'next' },
+    });
+
+    const firstCheckpoint = checkpoint('file-checkpoint-native-port-1', 1, null, 'first durable native checkpoint');
+    let samples = 0;
+    const firstTimeAuthority = {
+      source: 'harness' as const,
+      owner: 'runtime-checkpoint-control-owner' as const,
+      authorityRef: checkpointCommitId(firstCheckpoint),
+      sampleCommittedAt: async () => {
+        samples += 1;
+        return samples === 1 ? '2026-10-16T08:00:00.000Z' : '2026-10-16T08:05:00.000Z';
+      },
+    };
+    const first = await store.commitNativeCheckpoint({
+      ownerId: 'file-checkpoint-native-port-test',
+      checkpoint: firstCheckpoint,
+      timeAuthority: firstTimeAuthority,
+    });
+    assert.equal(first.receipt.commitIdentity, await checkpointCommitIdentityV2({ checkpoint: firstCheckpoint }));
+    assert.equal(first.receipt.committedAt, '2026-10-16T08:00:00.000Z');
+    assert.equal(samples, 1);
+
+    const retry = await store.commitNativeCheckpoint({
+      ownerId: 'file-checkpoint-native-port-test',
+      checkpoint: firstCheckpoint,
+      timeAuthority: {
+        ...firstTimeAuthority,
+        sampleCommittedAt: async () => {
+          samples += 1;
+          return '2026-10-16T08:05:00.000Z';
+        },
+      },
+    });
+    assert.deepEqual(retry, first);
+    assert.equal(samples, 1, 'retry must reuse the first durable clock sample');
+
+    const secondCheckpoint = checkpoint('file-checkpoint-native-port-2', 2, firstCheckpoint.id, 'second durable native checkpoint');
+    const second = await store.commitNativeCheckpoint({
+      ownerId: 'file-checkpoint-native-port-test',
+      checkpoint: secondCheckpoint,
+      timeAuthority: {
+        source: 'harness',
+        owner: 'runtime-checkpoint-control-owner',
+        authorityRef: checkpointCommitId(secondCheckpoint),
+        sampleCommittedAt: async () => '2026-10-16T07:55:00.000Z',
+      },
+    });
+    assert.equal(second.receipt.committedAt, '2026-10-16T07:55:00.000Z');
+    assert.ok(second.journalSeq > first.journalSeq, 'the next checkpoint must get a later Journal sequence even when its UTC clock is earlier');
+
+    const canonicalRead = await createJsonlCheckpointJournal({ filePath }).readNativeCheckpoint({ checkpoint: secondCheckpoint });
+    assert.deepEqual(await store.readNativeCheckpoint({ checkpoint: secondCheckpoint }), canonicalRead);
+
+    const legacyCheckpoint = checkpoint('file-checkpoint-native-port-legacy', 3, secondCheckpoint.id, 'legacy v1 checkpoint');
+    const legacyCommitId = checkpointCommitId(legacyCheckpoint);
+    await store.append({ ownerId: 'file-checkpoint-native-port-test', commitId: legacyCommitId, checkpoint: legacyCheckpoint });
+    await assert.rejects(
+      () => store.readNativeCheckpoint({ checkpoint: legacyCheckpoint }),
+      (error: unknown) => error instanceof AppLifecycleError && error.code === 'checkpoint-native-envelope-missing',
+    );
+    const legacyReadback = await store.readCommitted(scope, legacyCheckpoint.id);
+    assert.equal(legacyReadback?.commitRef.commitId, legacyCommitId);
+    assert.equal(legacyReadback?.checkpoint.id.value, legacyCheckpoint.id.value);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('run manifest rejects tampered or cross-session identity fields', async () => {
