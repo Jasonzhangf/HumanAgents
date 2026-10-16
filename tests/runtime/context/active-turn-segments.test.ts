@@ -18,8 +18,10 @@ import type {
 import type { JournalCommitRef } from '../../../packages/contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../../packages/contracts/src/framework.js';
 import type {
-  ActiveTurnInitialSegmentCapture,
+  ActiveTurnInitialOpenAnchor,
+  ActiveTurnInitialSegmentSource,
   ActiveTurnSegmentCaptureV2,
+  ActiveTurnSegmentChainRead,
   ActiveTurnSegmentOpenIntent,
   ActiveTurnSegmentRecoveryReceiptRead,
   PreparedActiveTurnSegmentCaptureV2,
@@ -28,6 +30,7 @@ import type {
 import {
   activeTurnSegmentCommitId,
   originalBusinessTurnRef,
+  originalBusinessTurnRefFromBinding,
   validateActiveTurnSegmentCaptureV2,
   validateActiveTurnSegmentChainRead,
   validateActiveTurnSegmentOpenIntent,
@@ -72,6 +75,12 @@ async function expectRejects(fn: () => Promise<unknown>, substring: string): Pro
   }
   assert.ok(caught instanceof Error, `expected a rejection containing "${substring}"`);
   assert.ok((caught as Error).message.includes(substring), `expected "${(caught as Error).message}" to contain "${substring}"`);
+}
+
+function capturedInitial(chain: ActiveTurnSegmentChainRead): ActiveTurnCaptureBody {
+  assert.equal(chain.initial.kind, 'captured');
+  if (chain.initial.kind !== 'captured') throw new Error('expected a captured initial segment');
+  return chain.initial.body;
 }
 
 const organId = id('organ', 'segment-organ');
@@ -218,6 +227,7 @@ interface SegmentWorld {
   readonly segments: ResumedTurnSegmentOpened[];
   lastIntent(): ActiveTurnSegmentOpenIntent | undefined;
   setReceipt(segmentId: string, receipt: ActiveTurnSegmentRecoveryReceiptRead): void;
+  setInitialSource(source: ActiveTurnInitialSegmentSource): void;
   setAdmitMode(mode: 'authorize' | 'deny'): void;
 }
 
@@ -233,10 +243,11 @@ async function makeWorld(): Promise<SegmentWorld> {
   const counters = { appends: 0, admitCalls: 0 };
   let admitMode: 'authorize' | 'deny' = 'authorize';
   let lastIntent: ActiveTurnSegmentOpenIntent | undefined;
+  let initialSource: ActiveTurnInitialSegmentSource = { kind: 'captured', bindingCommitRef, body };
 
   const read: ActiveTurnSegmentReadPort = {
-    async readInitialSegmentCapture(turnId): Promise<ActiveTurnInitialSegmentCapture | null> {
-      return turnId === businessTurnId ? { bindingCommitRef, body } : null;
+    async readInitialSegmentSource(turnId): Promise<ActiveTurnInitialSegmentSource | null> {
+      return turnId === businessTurnId ? structuredClone(initialSource) : null;
     },
     async readSegments(turnId) {
       return turnId === businessTurnId ? structuredClone(segments) : [];
@@ -287,6 +298,7 @@ async function makeWorld(): Promise<SegmentWorld> {
     segments,
     lastIntent: () => lastIntent,
     setReceipt: (segmentId, receipt) => { receipts.set(segmentId, receipt); },
+    setInitialSource: (source) => { initialSource = source; },
     setAdmitMode: (mode) => { admitMode = mode; },
   };
 }
@@ -341,10 +353,10 @@ test('cold resume chains initial -> S1 -> S2 with real distinct receipts and the
 
   // The immutable first capture is unchanged and still holds epoch E raw.
   assert.equal(JSON.stringify(world.body), initialBytes);
-  assert.equal(s1.chain.initial.binding.execution.executionEpoch, 1);
-  assert.equal(s1.chain.initial.entries[0]!.seq, 1);
+  assert.equal(capturedInitial(s1.chain).binding.execution.executionEpoch, 1);
+  assert.equal(capturedInitial(s1.chain).entries[0]!.seq, 1);
   assert.equal(s1.chain.segments.length, 1);
-  assert.equal(JSON.stringify(s1.chain.initial.initialInput), JSON.stringify(initialInput));
+  assert.equal(JSON.stringify(capturedInitial(s1.chain).initialInput), JSON.stringify(initialInput));
 
   // Second resumption: predecessor is the real S1 and its real receipt.
   world.setReceipt('segment-e2', { status: 'exact', recoveryAssetsReceiptRef: 'receipt-s1' });
@@ -357,7 +369,36 @@ test('cold resume chains initial -> S1 -> S2 with real distinct receipts and the
   assert.equal(s2.segment.predecessor.recoveryAssetsReceiptRef, 'receipt-s1', 'the second segment links the real S1 receipt');
   assert.equal(s2.segment.binding.execution.executionEpoch, 3);
   assert.deepEqual(s2.chain.segments.map((segment) => segment.segmentId), ['segment-e2', 'segment-e3']);
-  assert.equal(s2.chain.initial.binding.execution.executionEpoch, 1);
+  assert.equal(capturedInitial(s2.chain).binding.execution.executionEpoch, 1);
+});
+
+test('an initial-open turn resumes from its exact anchor into a new epoch on the same task and turn', async () => {
+  const world = await makeWorld();
+  const anchor: ActiveTurnInitialOpenAnchor = {
+    bindingCommitRef: world.bindingCommitRef,
+    recordsThroughCommitRef: { commitId: 'active-turn:business-turn:request:request-a:dispatching', journalSeq: 12, recordDigest: digestB },
+  };
+  world.setInitialSource({ kind: 'initial-open', anchor, binding: world.body.binding, initialInput });
+  world.setReceipt(businessTurnId, { status: 'initial-open', anchor });
+
+  const resumed = await resumeActiveTurnSegment(resumeInput(world, { segmentId: 'segment-open-2', executionEpoch: 2 }));
+  assert.equal(resumed.status, 'resumed');
+  if (resumed.status !== 'resumed') return;
+
+  // Same business turn and task identity; only the execution epoch advances.
+  assert.equal(resumed.segment.businessTurnRef.businessTurnId, businessTurnId);
+  assert.deepEqual(resumed.segment.businessTurnRef.bindingCommitRef, world.bindingCommitRef);
+  assert.equal(resumed.segment.binding.assignment.taskId.value, taskId.value);
+  assert.equal(resumed.segment.binding.execution.executionEpoch, 2);
+
+  // The chain's initial branch is the exact initial-open source, not a fabricated capture.
+  assert.equal(resumed.chain.initial.kind, 'initial-open');
+  if (resumed.chain.initial.kind !== 'initial-open') return;
+  assert.deepEqual(resumed.chain.initial.anchor, anchor);
+  assert.deepEqual(resumed.chain.initial.binding, world.body.binding);
+  assert.equal(resumed.segment.predecessor.segmentId, businessTurnId);
+  assert.deepEqual(resumed.segment.predecessor.initialOpen, anchor);
+  assert.equal(JSON.stringify(world.lastIntent()?.initialInput), JSON.stringify(initialInput));
 });
 
 test('exact retry reuses the original receipt and content; a changed intent conflicts', async () => {
@@ -472,12 +513,12 @@ test('contract guards reject fabricated registration identity and mislinked chai
     cut: { ...world.body.cut, lastSeq: 0 },
   };
   expectThrows(
-    () => validateActiveTurnSegmentChainRead({ businessTurnRef: segment.businessTurnRef, initial: rewritten, segments: [] }),
+    () => validateActiveTurnSegmentChainRead({ businessTurnRef: segment.businessTurnRef, initial: { kind: 'captured', body: rewritten }, segments: [] }),
     'original execution does not match',
   );
   // A segment that drops its predecessor link is rejected.
   expectThrows(
-    () => validateActiveTurnSegmentChainRead({ businessTurnRef: segment.businessTurnRef, initial: world.body, segments: [{ ...segment, predecessor: { ...segment.predecessor, segmentId: 'not-the-initial' } }] }),
+    () => validateActiveTurnSegmentChainRead({ businessTurnRef: segment.businessTurnRef, initial: { kind: 'captured', body: world.body }, segments: [{ ...segment, predecessor: { ...segment.predecessor, segmentId: 'not-the-initial' } }] }),
     'precede-link the derived initial segment',
   );
 

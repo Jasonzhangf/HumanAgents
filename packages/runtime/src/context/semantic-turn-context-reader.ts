@@ -12,6 +12,7 @@ import {
 import {
   validateActiveTurnSegmentChainRead,
   validatePreparedActiveTurnSegmentCaptureV2,
+  type ActiveTurnSegmentChainInitial,
   type ActiveTurnSegmentChainRead,
   type ResumedTurnSegmentOpened,
 } from '../../../contracts/src/active-turn-segments.js';
@@ -39,6 +40,7 @@ import {
   type ResolvedAdoptedChildDelivery,
 } from './active-turn-materializer.js';
 import type {
+  ActiveTurnInitialOpenExactRead,
   ActiveTurnSegmentCaptureExactRead,
   ActiveTurnSegmentJournalPort,
 } from './active-turn-journal.js';
@@ -151,7 +153,7 @@ export interface SemanticTurnSegmentContextReaderInput {
    */
   readonly segment: {
     readonly chain: ActiveTurnSegmentChainRead;
-    readonly exactReads: Pick<ActiveTurnSegmentJournalPort, 'readSegmentCaptureExact' | 'readSegmentInterruptedExact'>;
+    readonly exactReads: Pick<ActiveTurnSegmentJournalPort, 'readSegmentCaptureExact' | 'readSegmentInterruptedExact' | 'readInitialOpenExact'>;
     readonly live: {
       readonly prefix: ActiveTurnSegmentLivePrefix;
       readonly rawContent: RawContentReadPort;
@@ -234,6 +236,16 @@ function assertSameSegmentValue(label: string, actual: unknown, expected: unknow
   if (!sameCanonical(actual, expected)) {
     failSegment('semantic-turn-context.segment.identity-mismatch', `${label} does not match`);
   }
+}
+
+/**
+ * The unique original input asset of one business turn's initial segment,
+ * whether it was captured (`kind: 'captured'`) or is only an initial-open
+ * source. Both branches reference the same immutable asset; this never copies
+ * or relabels it.
+ */
+function chainInitialInput(initial: ActiveTurnSegmentChainInitial): RawAsset {
+  return initial.kind === 'captured' ? initial.body.initialInput : initial.initialInput;
 }
 
 /**
@@ -444,7 +456,7 @@ function validateSegmentExactCapture(input: {
   assertSameSegmentValue('exact segment capture business turn', body.businessTurnRef, input.chain.businessTurnRef);
   assertSameSegmentValue('exact segment capture binding', body.binding, input.segment.binding);
   assertSameSegmentValue('exact segment capture predecessor', body.predecessor, input.segment.predecessor);
-  assertSameSegmentValue('exact segment capture original input', body.initialInput, input.chain.initial.initialInput);
+  assertSameSegmentValue('exact segment capture original input', body.initialInput, chainInitialInput(input.chain.initial));
   assertSameSegmentValue('exact segment capture receipt business turn', input.exact.receipt.businessTurnId, input.chain.businessTurnRef.businessTurnId);
   assertSameSegmentValue('exact segment capture receipt segment id', input.exact.receipt.segmentId, input.segment.segmentId);
   assertSameSegmentValue('exact segment capture receipt boundary', input.exact.receipt.boundaryId, body.cut.pauseId);
@@ -528,7 +540,7 @@ async function resolvePriorSegmentCores(input: {
   }
   assertSameSegmentValue('live segment record', liveSegment, tail);
   assertSameSegmentValue('live segment binding', input.live.prefix.binding, tail.binding);
-  assertSameSegmentValue('live segment original input', input.live.prefix.initialInput, chain.initial.initialInput);
+  assertSameSegmentValue('live segment original input', input.live.prefix.initialInput, chainInitialInput(chain.initial));
 
   const resolved: PriorSegmentResolution[] = [];
   for (let index = 0; index < chain.segments.length - 1; index += 1) {
@@ -551,11 +563,11 @@ async function resolvePriorSegmentCores(input: {
       });
       assertSameSegmentValue('interrupted segment record', interrupted.prefix.segment, segment);
       assertSameSegmentValue('interrupted segment binding', interrupted.prefix.binding, segment.binding);
-      assertSameSegmentValue('interrupted segment original input', interrupted.prefix.initialInput, chain.initial.initialInput);
+      assertSameSegmentValue('interrupted segment original input', interrupted.prefix.initialInput, chainInitialInput(chain.initial));
       resolved.push({ segmentId: segment.segmentId, core: await materializeActiveTurnSegmentLivePrefix({
         prefix: interrupted.prefix, rawContent: input.live.rawContent,
       }) });
-    } else {
+    } else if (predecessor.recoveryAssetsReceiptRef !== undefined) {
       const exact = await input.exactReads.readSegmentCaptureExact({
         businessTurnId: chain.businessTurnRef.businessTurnId,
         segmentId: segment.segmentId,
@@ -573,6 +585,13 @@ async function resolvePriorSegmentCores(input: {
         completionRefs: [],
         rawContent: input.live.rawContent,
       }) });
+    } else {
+      // Only the first resumed segment may precede-link the original
+      // initial-open anchor; a later segment always links a committed segment.
+      failSegment(
+        'semantic-turn-context.segment.predecessor-invalid',
+        `segment ${segment.segmentId} has neither an exact receipt nor an interrupted anchor`,
+      );
     }
   }
   return resolved;
@@ -623,10 +642,30 @@ export async function readResumedSegmentSemanticTurnContext(
     currentTurnId,
   );
 
-  const initial = await materializeActiveTurn({
-    capture: chain.initial,
-    rawContent: input.segment.live.rawContent,
-  });
+  // The original segment is either the immutable v1 capture or the committed
+  // initial-open live prefix. The initial-open branch is folded through the same
+  // live-prefix materializer and keeps the original turn's open obligations.
+  const initialGroups: PriorSegmentResolution[] = [];
+  let initialCore: ResolvedActiveTurnCore<ActiveTurnFoldBinding>;
+  if (chain.initial.kind === 'captured') {
+    initialCore = await materializeActiveTurn({
+      capture: chain.initial.body,
+      rawContent: input.segment.live.rawContent,
+    });
+  } else {
+    const exactOpen: ActiveTurnInitialOpenExactRead = await input.segment.exactReads.readInitialOpenExact({
+      businessTurnId: chain.businessTurnRef.businessTurnId,
+      anchor: chain.initial.anchor,
+    });
+    assertSameSegmentValue('initial-open anchor', exactOpen.anchor, chain.initial.anchor);
+    assertSameSegmentValue('initial-open prefix binding', exactOpen.prefix.binding, chain.initial.binding);
+    assertSameSegmentValue('initial-open prefix original input', exactOpen.prefix.initialInput, chain.initial.initialInput);
+    initialCore = await materializeLiveAcceptedPrefix({
+      prefix: exactOpen.prefix,
+      rawContent: input.segment.live.rawContent,
+    });
+    initialGroups.push({ segmentId: chain.businessTurnRef.businessTurnId, core: initialCore });
+  }
   const priorSegments = await resolvePriorSegmentCores({
     chain,
     live: input.segment.live,
@@ -638,7 +677,7 @@ export async function readResumedSegmentSemanticTurnContext(
   });
 
   const activeTurn: SemanticTurnInputEntry<SemanticCurrentTurnUnit>[] = [];
-  activeTurn.push(...mapActiveTurnCore(initial, true));
+  activeTurn.push(...mapActiveTurnCore(initialCore, true));
   for (const segment of priorSegments) {
     activeTurn.push(...mapActiveTurnCore(segment.core, false));
   }
@@ -652,6 +691,7 @@ export async function readResumedSegmentSemanticTurnContext(
       controlRecordCount: live.cut.controlRecordCount,
     },
     obligations: mergeSegmentObligations([
+      ...initialGroups.map((group) => ({ segmentId: group.segmentId, obligations: segmentObligations(group.core) })),
       ...priorSegments.map((segment) => ({ segmentId: segment.segmentId, obligations: segmentObligations(segment.core) })),
       { segmentId: live.segment.segmentId, obligations: input.segment.live.prefix.obligations },
     ]),
