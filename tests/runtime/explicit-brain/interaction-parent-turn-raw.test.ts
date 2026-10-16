@@ -1427,6 +1427,291 @@ test('parent turn input persists the authenticated owner exactly and keeps legac
       rawContent,
     });
     assert.equal((await legacyReopened.openTurnInput()).fact.executionOwner, undefined);
+    await assert.rejects(legacyReopened.reconcileTurnOwner({
+      previousOwner: executionOwner,
+      replacementOwner: { ...executionOwner, daemonGeneration: 8 },
+      isCommittedReplacement: true, reconciledAt: committedAt,
+    }), /authenticated original turn owner/);
+    assert.equal((await legacyReopenedJournal.readTurnSnapshot(legacyTurn)).ownerReconciliations.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+// Failure basis: the recorded epoch-2 reopen RED and the partially implemented
+// reconciliation omitted context/close wiring. Impact: lost confirmed tool
+// effects or duplicate effects after crash. Cost: one local durable consumer.
+test('parent reconciliation continues original confirmed tool facts across repeated crashes', async () => {
+  const directory = await semanticCloseFixtureHome();
+  const store = new ImmutableAssetStore(join(directory, 'assets'));
+  const sink = filesystemProviderEvidenceSink(store);
+  const journalFile = join(directory, 'organ.jsonl');
+  const journal = new JsonlOrganJournal(journalFile);
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const rawContent = providerRawContentReader(sink);
+  try {
+    const turn = semanticCloseTurn('interaction-reconcile-red', 'turn-reconcile-red');
+    const operationId = id('operation', 'operation-reconcile-red');
+    const scope: ScopeRef = { organId: semanticCloseOrganId, operationId };
+    const executionOne = parentExecution(turn, operationId);
+    const firstOwner: OccurrenceExecutionOwner = {
+      daemonLeaseId: 'reconcile-lease', daemonGeneration: 1, processStartToken: 'reconcile-process-1',
+    };
+    const secondOwner = { ...firstOwner, daemonGeneration: 2, processStartToken: 'reconcile-process-2' };
+    const initialInput = await semanticCloseAsset(sink, scope, 'reconcile-red-input', 'continue the bounded question');
+    const ownerOne = createInteractionParentTurnRawOwner({
+      turn,
+      execution: executionOne,
+      executionOwner: firstOwner,
+      scope,
+      initialInput,
+      providerBinding: parentProviderBinding,
+      journal: parentJournal,
+      rawContent,
+    });
+    await ownerOne.openTurnInput();
+    const reqOne = parentRequestRecord(turn, scope, 'request-red-1', 'dispatching');
+    await ownerOne.registerRequest({ execution: parentExecutionRef(executionOne), record: reqOne });
+    const reqOneIdentity = parentRequestIdentity(reqOne);
+    const rawArguments = await semanticCloseAsset(sink, scope, 'reconcile-red-arguments', '{"path":"README.md"}');
+    const rawOutput = await semanticCloseAsset(sink, scope, 'reconcile-red-output', 'README_CONTENT');
+    await ownerOne.acceptRawFact({
+      execution: parentExecutionRef(executionOne),
+      scope,
+      request: reqOneIdentity,
+      producerSeq: 1,
+      fact: {
+        kind: 'tool-call',
+        contentUnitId: 'reconcile-red-call',
+        call: {
+          callId: 'call-red-1',
+          toolId: 'file.read',
+          arguments: { path: 'README.md' },
+          continuationRef: 'continuation-red-1',
+        },
+        rawArguments,
+        complete: true,
+      },
+    });
+    const replacement = (epoch: number, executionOwner: OccurrenceExecutionOwner) =>
+      createInteractionParentTurnRawOwner({
+        turn, execution: { ...executionOne, executionEpoch: epoch }, executionOwner,
+        scope, initialInput, providerBinding: parentProviderBinding,
+        journal: new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile)), rawContent,
+      });
+    const ownerTwo = replacement(2, secondOwner);
+    const reconcileTwo = {
+      previousOwner: firstOwner, replacementOwner: secondOwner,
+      isCommittedReplacement: true, reconciledAt: committedAt,
+    };
+    await assert.rejects(ownerTwo.reconcileTurnOwner(reconcileTwo), /side effect is unknown/);
+    await ownerOne.acceptRawFact({
+      execution: parentExecutionRef(executionOne),
+      scope,
+      request: reqOneIdentity,
+      producerSeq: 2,
+      fact: {
+        kind: 'tool-result',
+        contentUnitId: 'reconcile-red-result',
+        callId: 'call-red-1',
+        continuationRef: 'continuation-red-1',
+        result: {
+          ...executionOne,
+          toolId: 'file.read',
+          callId: 'call-red-1',
+          status: 'succeeded',
+          outputRefs: ['asset://reconcile-red-output'],
+          evidenceRefs: [rawOutput.ref],
+        },
+        rawOutput,
+        complete: true,
+      },
+    });
+    await ownerOne.acceptRawFact({
+      execution: parentExecutionRef(executionOne),
+      scope,
+      request: reqOneIdentity,
+      producerSeq: 3,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await ownerOne.registerRequest({
+      execution: parentExecutionRef(executionOne),
+      record: parentRequestRecord(turn, scope, 'request-red-1', 'settled'),
+    });
+    await ownerOne.registerRequest({
+      execution: parentExecutionRef(executionOne),
+      record: parentRequestRecord(turn, scope, 'request-red-2', 'dispatching', 'request-red-1'),
+    });
+    await ownerOne.registerRequest({
+      execution: parentExecutionRef(executionOne),
+      record: parentRequestRecord(turn, scope, 'request-red-2', 'waiting', 'request-red-1'),
+    });
+
+    const before = await parentJournal.readTurnSnapshot(turn);
+    await assert.rejects(ownerTwo.openTurnInput(), /conflicts with the committed turn input/);
+    const reconciled = await ownerTwo.reconcileTurnOwner(reconcileTwo);
+    assert.equal(reconciled.fact.mode, 'continue');
+    assert.equal(reconciled.fact.effectiveExecutionEpoch, 2);
+    assert.equal(reconciled.fact.remoteProviderState, 'unknown');
+    assert.deepEqual(reconciled.fact.unsettledRequestIds, ['request-red-2']);
+    assert.deepEqual(await ownerTwo.reconcileTurnOwner(reconcileTwo), reconciled);
+    assert.deepEqual(await ownerTwo.openTurnInput(), before.turnInput);
+    await assert.rejects(ownerOne.registerRequest({
+      execution: executionOne, record: parentRequestRecord(turn, scope, 'stale-request', 'dispatching'),
+    }), /active execution owner/);
+    const reqThree = parentRequestRecord(turn, scope, 'request-red-3', 'dispatching', 'request-red-1');
+    const executionTwo = { ...executionOne, executionEpoch: 2 };
+    await ownerTwo.registerRequest({ execution: executionTwo, record: reqThree });
+    const contextTwo = await ownerTwo.requestContext({
+      execution: executionTwo, request: parentRequestIdentity(reqThree), phase: 'continuation',
+    });
+    assert.deepEqual(contextTwo.canonical.units.filter((unit) => unit.kind === 'tool-call'), [{
+      kind: 'tool-call', callId: 'call-red-1', toolId: 'file.read', arguments: { path: 'README.md' },
+    }]);
+    assert.equal(contextTwo.canonical.units.filter((unit) => unit.kind === 'tool-result').length, 1);
+    assert.ok(JSON.stringify(contextTwo).includes('README_CONTENT'));
+    const thirdOwner = { ...firstOwner, daemonGeneration: 3, processStartToken: 'reconcile-process-3' };
+    const ownerThree = replacement(3, thirdOwner);
+    const third = await ownerThree.reconcileTurnOwner({
+      previousOwner: secondOwner, replacementOwner: thirdOwner,
+      isCommittedReplacement: true, reconciledAt: committedAt,
+    });
+    assert.equal(third.fact.effectiveExecutionEpoch, 3);
+    assert.deepEqual(third.fact.unsettledRequestIds, ['request-red-3']);
+    const reqFour = parentRequestRecord(turn, scope, 'request-red-4', 'dispatching', 'request-red-1');
+    const executionThree = { ...executionOne, executionEpoch: 3 };
+    await ownerThree.openTurnInput();
+    await ownerThree.registerRequest({ execution: executionThree, record: reqFour });
+    const contextThree = await ownerThree.requestContext({
+      execution: executionThree, request: parentRequestIdentity(reqFour), phase: 'continuation',
+    });
+    assert.deepEqual(contextThree.canonical, contextTwo.canonical);
+    const assistant = await semanticCloseAsset(sink, scope, 'reconciled-answer', 'Recovered answer');
+    await ownerThree.acceptRawFact({
+      execution: executionThree, scope, request: parentRequestIdentity(reqFour), producerSeq: 1,
+      fact: { kind: 'content', channel: 'assistant-text', contentUnitId: 'reconciled-answer',
+        content: assistant, update: 'full', complete: true },
+    });
+    await ownerThree.acceptRawFact({
+      execution: executionThree, scope, request: parentRequestIdentity(reqFour), producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await ownerThree.registerRequest({ execution: executionThree,
+      record: { ...reqFour, phase: 'settled' } });
+    await assert.rejects(ownerThree.readReconciledTurnOutput(), /effective epoch provider close/);
+    const closeEvidence = await semanticCloseAsset(sink, scope, 'reconciled-close-receipt', 'fixture provider closed epoch 3');
+    const close = await ownerThree.recordProviderClose({
+      providerBinding: parentProviderBinding,
+      result: { state: 'closed', bindingId: parentProviderBinding.bindingId,
+        providerId: parentProviderBinding.providerId, protocol: parentProviderBinding.protocol,
+        evidenceRefs: [closeEvidence.ref] },
+      closedAt: committedAt,
+    });
+    const output = await ownerThree.readReconciledTurnOutput();
+    assert.equal(output.assistantText, 'Recovered answer');
+    assert.deepEqual(output.resourceClose, close);
+    const after = await parentJournal.readTurnSnapshot(turn);
+    assert.deepEqual(after.acceptedFacts.slice(0, before.acceptedFacts.length), before.acceptedFacts);
+    assert.deepEqual(after.acceptedFacts.map((entry) => entry.fact.envelope.execution.executionEpoch), [1, 1, 1, 3, 3]);
+    assert.deepEqual(after.acceptedFacts.map((entry) => entry.fact.seq), [1, 2, 3, 4, 5]);
+    assert.deepEqual(after.turnInput, before.turnInput);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: r3 excludes completed tool leaves from parent-final eligibility
+// and the first implementation did not verify complete assistant text. Impact:
+// false final output or epoch reset on repeated takeover. Cost: one local fixture.
+test('parent reconciliation reserves terminal output for complete non-tool leaves and retains the latest epoch', async () => {
+  const { parentJournal, journalFile, sink, rawContent, cleanup } = await fixture();
+  try {
+    const initialInput = await writeAsset(sink, 'terminal-reconcile-input', 'bounded question');
+    const firstOwner: OccurrenceExecutionOwner = {
+      daemonLeaseId: 'terminal-lease', daemonGeneration: 1, processStartToken: 'terminal-process-1',
+    };
+    const ownerAt = (epoch: number, generation: number) => createInteractionParentTurnRawOwner({
+      turn, execution: { ...execution, executionEpoch: epoch }, scope, initialInput,
+      executionOwner: { ...firstOwner, daemonGeneration: generation, processStartToken: `terminal-process-${generation}` },
+      providerBinding: parentProviderBinding,
+      journal: new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile)), rawContent,
+    });
+    const reconcile = (previous: number, replacement: number) => ({
+      previousOwner: { ...firstOwner, daemonGeneration: previous, processStartToken: `terminal-process-${previous}` },
+      replacementOwner: { ...firstOwner, daemonGeneration: replacement, processStartToken: `terminal-process-${replacement}` },
+      isCommittedReplacement: true, reconciledAt: committedAt,
+    });
+    const ownerOne = ownerAt(1, 1);
+    await ownerOne.openTurnInput();
+    const reqOne = requestRecord('terminal-tool');
+    await ownerOne.registerRequest({ execution, record: reqOne });
+    const rawArguments = await writeAsset(sink, 'terminal-arguments', '{}');
+    const rawOutput = await writeAsset(sink, 'terminal-output', 'confirmed');
+    await ownerOne.acceptRawFact({ execution, scope, request: reqOne.request, producerSeq: 1,
+      fact: { kind: 'tool-call', contentUnitId: 'terminal-call',
+        call: { callId: 'terminal-call', toolId: 'file.read', arguments: {}, continuationRef: 'terminal-continuation' },
+        rawArguments, complete: true } });
+    await ownerOne.acceptRawFact({ execution, scope, request: reqOne.request, producerSeq: 2,
+      fact: { kind: 'tool-result', contentUnitId: 'terminal-result', callId: 'terminal-call', continuationRef: 'terminal-continuation',
+        result: { ...execution, callId: 'terminal-call', toolId: 'file.read', status: 'succeeded',
+          outputRefs: [], evidenceRefs: [rawOutput.ref] }, rawOutput, complete: true } });
+    const intermediateText = await writeAsset(sink, 'terminal-intermediate', 'I will read the file.');
+    await ownerOne.acceptRawFact({ execution, scope, request: reqOne.request, producerSeq: 3,
+      fact: { kind: 'content', contentUnitId: 'intermediate', channel: 'assistant-text', content: intermediateText,
+        update: 'full', complete: true } });
+    await ownerOne.acceptRawFact({ execution, scope, request: reqOne.request, producerSeq: 4,
+      fact: { kind: 'request-complete', terminal: 'completed' } });
+    await ownerOne.registerRequest({ execution, record: { ...reqOne, phase: 'settled' } });
+    const ownerTwo = ownerAt(2, 2);
+    const continued = await ownerTwo.reconcileTurnOwner(reconcile(1, 2));
+    assert.equal(continued.fact.mode, 'continue');
+    assert.deepEqual(continued.fact.unsettledRequestIds, []);
+    await ownerTwo.openTurnInput();
+    const executionTwo = { ...execution, executionEpoch: 2 };
+    const reqTwo = requestRecord('terminal-answer', 'terminal-tool');
+    await ownerTwo.registerRequest({ execution: executionTwo, record: reqTwo });
+    const answer = await writeAsset(sink, 'terminal-answer', 'Final answer');
+    await ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: reqTwo.request, producerSeq: 1,
+      fact: { kind: 'content', contentUnitId: 'answer', channel: 'assistant-text', content: answer,
+        update: 'full', complete: false } });
+    await ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: reqTwo.request, producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' } });
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...reqTwo, phase: 'settled' } });
+    await assert.rejects(ownerTwo.reconcileTurnOwner({ ...reconcile(2, 3), isCommittedReplacement: false }),
+      /committed replacement owner/);
+    await assert.rejects(ownerTwo.reconcileTurnOwner(reconcile(2, 2)), /distinct replacement owner/);
+    // The ABI computes the next epoch; the caller does not guess it first.
+    // Incomplete text requires continuation, never a zero-replay final.
+    const incomplete = await ownerTwo.reconcileTurnOwner(reconcile(2, 3));
+    assert.equal(incomplete.fact.mode, 'continue');
+    assert.equal(incomplete.fact.effectiveExecutionEpoch, 3);
+    const ownerThree = ownerAt(incomplete.fact.effectiveExecutionEpoch, 3);
+    await ownerThree.openTurnInput();
+    const executionThree = { ...execution, executionEpoch: 3 };
+    const reqThree = requestRecord('terminal-complete-answer', 'terminal-answer');
+    await ownerThree.registerRequest({ execution: executionThree, record: reqThree });
+    await ownerThree.acceptRawFact({ execution: executionThree, scope, request: reqThree.request, producerSeq: 1,
+      fact: { kind: 'content', contentUnitId: 'complete-answer', channel: 'assistant-text', content: answer,
+        update: 'full', complete: true } });
+    await ownerThree.acceptRawFact({ execution: executionThree, scope, request: reqThree.request, producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' } });
+    await ownerThree.registerRequest({ execution: executionThree, record: { ...reqThree, phase: 'settled' } });
+    const terminal = await ownerThree.reconcileTurnOwner(reconcile(3, 4));
+    assert.equal(terminal.fact.mode, 'terminal-output');
+    assert.equal(terminal.fact.effectiveExecutionEpoch, 3);
+    assert.equal(terminal.fact.remoteProviderState, 'unknown');
+    const ownerFour = ownerAt(3, 4);
+    const repeated = await ownerFour.reconcileTurnOwner(reconcile(4, 5));
+    assert.equal(repeated.fact.mode, 'terminal-output');
+    assert.equal(repeated.fact.effectiveExecutionEpoch, 3);
+    const output = await ownerFour.readReconciledTurnOutput();
+    assert.equal(output.assistantText, 'Final answer');
+    assert.equal(output.resourceClose, null);
+    assert.deepEqual(output.reconciliation, repeated);
+    const snapshot = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(snapshot.resourceClose, null);
+    assert.deepEqual(snapshot.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch), [2, 3, 3, 3]);
+    assert.deepEqual(snapshot.acceptedFacts.map((entry) => entry.fact.envelope.execution.executionEpoch), [1, 1, 1, 1, 2, 2, 3, 3]);
   } finally {
     await cleanup();
   }

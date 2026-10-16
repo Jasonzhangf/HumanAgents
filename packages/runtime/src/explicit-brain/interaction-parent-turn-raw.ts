@@ -36,7 +36,11 @@ import type {
   ProviderRequestContextUnit,
   RequestScopedInstructions,
 } from '../../../contracts/src/provider-request-context.js';
-import { foldActiveTurn } from '../context/active-turn-materializer.js';
+import {
+  foldActiveTurn,
+  type ResolvedActiveTurnEntry,
+  type ResolvedContentUnit,
+} from '../context/active-turn-materializer.js';
 
 /**
  * Runtime-owned durable raw history of one neutral interaction parent turn.
@@ -101,12 +105,33 @@ export interface InteractionParentResourceCloseFact {
   readonly closedAt: string;
 }
 
+/**
+ * The durable fact that a committed replacement owner reconciled the original
+ * parent turn before any physical provider close. It records only the local
+ * owner transition and the remote provider state stays honestly `unknown`.
+ */
+export interface InteractionParentOwnerReconciliationFact {
+  readonly turn: InteractionTurnIdentity;
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+  readonly providerBinding: ProviderBinding;
+  readonly previousOwner: OccurrenceExecutionOwner;
+  readonly replacementOwner: OccurrenceExecutionOwner;
+  readonly mode: 'terminal-output' | 'continue';
+  readonly effectiveExecutionEpoch: number;
+  readonly unsettledRequestIds: readonly string[];
+  readonly remoteProviderState: 'unknown';
+  readonly reconciledAt: string;
+}
+
 /** The consistent durable read of exactly one parent turn. */
 export interface InteractionParentTurnSnapshot {
   readonly turnInput: InteractionParentCommittedFact<InteractionParentTurnInputFact> | null;
   readonly requests: readonly InteractionParentCommittedFact<RuntimeRequestRecord>[];
   readonly acceptedFacts: readonly InteractionParentCommittedFact<
     AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>
+  >[];
+  readonly ownerReconciliations: readonly InteractionParentCommittedFact<
+    InteractionParentOwnerReconciliationFact
   >[];
   readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null;
 }
@@ -134,6 +159,12 @@ export type InteractionParentTurnAppend =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentResourceCloseFact;
+    }
+  | {
+      readonly kind: 'owner-reconciliation';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentOwnerReconciliationFact;
     };
 
 /**
@@ -198,6 +229,28 @@ export interface InteractionParentTurnRawOwner {
     envelope: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef>,
   ): Promise<AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>>;
   readFinalTurnOutput(): Promise<InteractionParentFinalTurnOutput>;
+  /**
+   * Commit one local, distinct-owner reconciliation of this turn. The caller
+   * attests that the replacement owner was actually committed, and the method
+   * holds when the old owner is unattested, the turn is already closed, or an
+   * unknown tool side effect is unpaired. It never fabricates a provider close.
+   */
+  reconcileTurnOwner(input: {
+    readonly previousOwner: OccurrenceExecutionOwner;
+    readonly replacementOwner: OccurrenceExecutionOwner;
+    readonly isCommittedReplacement: boolean;
+    readonly reconciledAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>>;
+  /**
+   * Read the reconciled output of this turn. A `continue` reconciliation also
+   * requires the new effective epoch's real provider close.
+   */
+  readReconciledTurnOutput(): Promise<
+    InteractionParentFinalTurnOutput & {
+      readonly reconciliation: InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>;
+      readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null;
+    }
+  >;
   /**
    * Commit the original owner's actual `closed` Provider receipt exactly once.
    * It does not require a successful semantic output: a real close during error
@@ -324,9 +377,9 @@ function cloneExecutionOwner(owner: OccurrenceExecutionOwner): OccurrenceExecuti
 }
 
 function isInteractionParentExecution(
-  execution: { readonly interactionTurn?: InteractionTurnIdentity },
+  execution: object,
 ): execution is InteractionParentProviderExecutionIdentityRef {
-  return execution.interactionTurn !== undefined;
+  return 'interactionTurn' in execution && execution.interactionTurn !== undefined;
 }
 
 function cloneProviderBinding(binding: ProviderBinding): ProviderBinding {
@@ -349,6 +402,68 @@ function sameProviderBinding(left: ProviderBinding, right: ProviderBinding): boo
     && left.modelRef === right.modelRef
     && left.configDigest === right.configDigest
     && left.capabilityDigest === right.capabilityDigest;
+}
+
+function sameOccurrenceExecutionOwner(
+  left: OccurrenceExecutionOwner,
+  right: OccurrenceExecutionOwner,
+): boolean {
+  return left.daemonLeaseId === right.daemonLeaseId
+    && left.daemonGeneration === right.daemonGeneration
+    && left.processStartToken === right.processStartToken;
+}
+
+/**
+ * The business identity a new physical epoch keeps. Only `executionEpoch` may
+ * change across one turn; the runtime, organ, operation and business turn stay
+ * the same, and the original turn input is never rewritten.
+ */
+function sameParentExecutionBusinessIdentity(
+  left: InteractionParentProviderExecutionIdentityRef,
+  right: InteractionParentProviderExecutionIdentityRef,
+): boolean {
+  return left.runtimeId === right.runtimeId
+    && sameScopedId(left.organId, right.organId)
+    && sameScopedId(left.operationId, right.operationId)
+    && sameTurnIdentity(left.interactionTurn, right.interactionTurn);
+}
+
+function ownerReconciliationPair(
+  left: OccurrenceExecutionOwner,
+  right: OccurrenceExecutionOwner,
+): string {
+  return `${left.daemonGeneration}->${right.daemonGeneration}`;
+}
+
+/**
+ * The exact commit set one snapshot exposes. A reconciliation stages its append
+ * only against the same durable commit set it planned, so a concurrent write is
+ * an explicit conflict instead of a silently recomputed mode.
+ */
+function snapshotCommitFingerprint(snapshot: InteractionParentTurnSnapshot): string {
+  return canonicalJsonStringify({
+    turnInput: snapshot.turnInput?.commit ?? null,
+    requests: snapshot.requests.map((committed) => committed.commit),
+    acceptedFacts: snapshot.acceptedFacts.map((committed) => committed.commit),
+    ownerReconciliations: snapshot.ownerReconciliations.map((committed) => committed.commit),
+    resourceClose: snapshot.resourceClose?.commit ?? null,
+  });
+}
+
+function toolPairKey(
+  request: ProviderRequestIdentityRef,
+  executionEpoch: number,
+  callId: string,
+  continuationRef: string,
+): string {
+  return canonicalJsonStringify([
+    executionEpoch,
+    request.turnId,
+    request.requestId,
+    request.parentRequestId ?? null,
+    callId,
+    continuationRef,
+  ]);
 }
 
 /**
@@ -441,18 +556,85 @@ export function createInteractionParentTurnRawOwner(
   }
 
   /**
+   * Fold confirmed history under its original physical epochs. Request identity
+   * and original sequence remain unchanged across a local owner replacement.
+   */
+  async function foldSnapshot(
+    snapshot: InteractionParentTurnSnapshot,
+    requestId: string,
+    ignoredRequestIds: readonly string[],
+  ) {
+    if (snapshot.turnInput === null) {
+      throw new ContractError('interaction parent fold requires the committed turn input');
+    }
+    const ignored = new Set(ignoredRequestIds);
+    const groups = new Map<number, {
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly entries: AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>[];
+    }>();
+    for (const committed of snapshot.acceptedFacts) {
+      if (ignored.has(committed.fact.envelope.request.requestId)) continue;
+      const entryExecution = committed.fact.envelope.execution;
+      if (entryExecution.runtimeId !== execution.runtimeId
+        || (isInteractionParentExecution(entryExecution)
+          && !sameParentExecutionBusinessIdentity(entryExecution, execution))) {
+        throw new ContractError('interaction parent raw fact has a foreign execution identity');
+      }
+      const group = groups.get(entryExecution.executionEpoch);
+      if (group === undefined) {
+        groups.set(entryExecution.executionEpoch, {
+          execution: { ...snapshot.turnInput.fact.execution, executionEpoch: entryExecution.executionEpoch },
+          entries: [committed.fact],
+        });
+      } else {
+        group.entries.push(committed.fact);
+      }
+    }
+    if (groups.size === 0) groups.set(execution.executionEpoch, { execution, entries: [] });
+    const entries: ResolvedActiveTurnEntry<InteractionParentProviderExecutionIdentityRef>[] = [];
+    const contentUnits: ResolvedContentUnit[] = [];
+    let initialInputText = '';
+    for (const group of groups.values()) {
+      const folded = await foldActiveTurn<
+        { readonly requestId: string },
+        { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: ScopeRef },
+        InteractionParentProviderExecutionIdentityRef
+      >({
+        binding: { execution: group.execution, scope },
+        initialInput: snapshot.turnInput.fact.initialInput,
+        entries: group.entries,
+        requests: snapshot.requests.map((committed) => committed.fact),
+        childInvocations: [],
+        cut: { requestId },
+        checkpointPath: [],
+        completionRefs: [],
+        rawContent,
+      });
+      initialInputText = decodeUtf8(folded.initialInput.bytes);
+      entries.push(...folded.entries);
+      contentUnits.push(...folded.contentUnits);
+    }
+    entries.sort((left, right) => left.accepted.seq - right.accepted.seq);
+    contentUnits.sort((left, right) => left.firstSeq - right.firstSeq);
+    return { entries, contentUnits, initialInputText };
+  }
+
+  /**
    * The shared, snapshot-based final-output reader. Both `readFinalTurnOutput`
    * and `readClosedTurnOutput` use it, so a closed-output read never combines a
    * close and an output from two different moments.
    */
   async function finalOutputFromSnapshot(
     snapshot: InteractionParentTurnSnapshot,
+    ignoredRequestIds: readonly string[] = [],
   ): Promise<InteractionParentFinalTurnOutput> {
     if (snapshot.turnInput === null) {
       throw new ContractError('interaction parent final output requires the committed turn input');
     }
+    const ignored = new Set(ignoredRequestIds);
     const latest = new Map<string, RuntimeRequestRecord>();
     for (const committed of snapshot.requests) {
+      if (ignored.has(committed.fact.request.requestId)) continue;
       latest.set(committed.fact.request.requestId, committed.fact);
     }
     const requests = [...latest.values()];
@@ -483,7 +665,8 @@ export function createInteractionParentTurnRawOwner(
     }
     const terminalRequest = terminals[0]!;
     const completions = snapshot.acceptedFacts.filter((committed) =>
-      sameRequestIdentity(committed.fact.envelope.request, terminalRequest.request)
+      !ignored.has(committed.fact.envelope.request.requestId)
+      && sameRequestIdentity(committed.fact.envelope.request, terminalRequest.request)
       && committed.fact.envelope.fact.kind === 'request-complete');
     if (completions.length !== 1) {
       throw new ContractError(
@@ -497,23 +680,11 @@ export function createInteractionParentTurnRawOwner(
     }
     const requestCompleteCommit = completion.commit;
 
-    const folded = await foldActiveTurn<
-      { readonly requestId: string },
-      { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: ScopeRef },
-      InteractionParentProviderExecutionIdentityRef
-    >({
-      binding: { execution, scope },
-      initialInput: snapshot.turnInput.fact.initialInput,
-      entries: snapshot.acceptedFacts.map((committed) => committed.fact),
-      requests: snapshot.requests.map((committed) => committed.fact),
-      childInvocations: [],
-      cut: { requestId: terminalRequest.request.requestId },
-      checkpointPath: [],
-      completionRefs: [],
-      rawContent,
-    });
+    const { entries: mergedEntries, contentUnits: mergedUnits, initialInputText } = await foldSnapshot(
+      snapshot, terminalRequest.request.requestId, ignoredRequestIds,
+    );
 
-    const finalUnits = folded.contentUnits.filter((unit) =>
+    const finalUnits = mergedUnits.filter((unit) =>
       unit.request.requestId === terminalRequest.request.requestId
       && unit.request.turnId === terminalRequest.request.turnId
       && unit.channel === 'assistant-text'
@@ -530,7 +701,7 @@ export function createInteractionParentTurnRawOwner(
     for (const unit of finalUnits) for (const seq of unit.sourceSeqs) sourceSeqs.add(seq);
     const assistantContentRefs: EvidenceRef[] = [];
     const seenRefs = new Set<string>();
-    for (const entry of folded.entries) {
+    for (const entry of mergedEntries) {
       if (entry.kind !== 'content' || !sourceSeqs.has(entry.accepted.seq)) continue;
       const ref = entry.accepted.envelope.fact.content.ref;
       const key = canonicalJsonStringify(ref);
@@ -547,12 +718,251 @@ export function createInteractionParentTurnRawOwner(
     }
     return {
       turnInput: snapshot.turnInput,
-      initialInputText: decodeUtf8(folded.initialInput.bytes),
+      initialInputText,
       terminalRequest,
       requestCompleteCommit,
       assistantText,
       assistantContentRefs,
     };
+  }
+
+  /**
+   * The latest durable physical epoch and owner of this business turn. A
+   * reconciliation only advances the epoch; a repeated crash keeps the latest
+   * effective epoch instead of restarting at the opening epoch.
+   */
+  function activeExecutionState(
+    snapshot: InteractionParentTurnSnapshot,
+  ): {
+    readonly execution: InteractionParentProviderExecutionIdentityRef;
+    readonly executionOwner: OccurrenceExecutionOwner | null;
+  } {
+    if (snapshot.turnInput === null) {
+      throw new ContractError('interaction parent reconciliation requires the committed turn input');
+    }
+    const latest = snapshot.ownerReconciliations.at(-1);
+    if (latest === undefined) {
+      return {
+        execution: snapshot.turnInput.fact.execution,
+        executionOwner: snapshot.turnInput.fact.executionOwner ?? null,
+      };
+    }
+    return {
+      execution: { ...snapshot.turnInput.fact.execution, executionEpoch: latest.fact.effectiveExecutionEpoch },
+      executionOwner: latest.fact.replacementOwner,
+    };
+  }
+
+  function ignoredRequests(snapshot: InteractionParentTurnSnapshot): readonly string[] {
+    return [...new Set(snapshot.ownerReconciliations.flatMap((entry) => entry.fact.unsettledRequestIds))];
+  }
+
+  function assertActiveOwner(snapshot: InteractionParentTurnSnapshot): void {
+    const active = activeExecutionState(snapshot);
+    if (canonicalJsonStringify(active.execution) !== canonicalJsonStringify(execution)
+      || (active.executionOwner !== null
+        && (input.executionOwner === undefined
+          || !sameOccurrenceExecutionOwner(active.executionOwner, input.executionOwner)))) {
+      throw new ContractError('interaction parent write requires the active execution owner');
+    }
+  }
+
+  async function requestEligibility(
+    snapshot: InteractionParentTurnSnapshot,
+  ): Promise<{
+    readonly mode: 'terminal-output' | 'continue';
+    readonly unsettledRequestIds: readonly string[];
+    readonly effectiveExecutionEpoch: number;
+  }> {
+    if (snapshot.turnInput === null) {
+      throw new ContractError('interaction parent reconciliation requires the committed turn input');
+    }
+    const active = activeExecutionState(snapshot);
+    const ignored = new Set(ignoredRequests(snapshot));
+    const latest = new Map<string, RuntimeRequestRecord>();
+    for (const committed of snapshot.requests) {
+      if (ignored.has(committed.fact.request.requestId)) continue;
+      latest.set(committed.fact.request.requestId, committed.fact);
+    }
+    const requests = [...latest.values()];
+    const unsettledRequests = requests.filter((record) =>
+      (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
+    const unsettledRequestIds = requests
+      .filter((record) => (UNSETTLED_PHASES as readonly string[]).includes(record.phase)
+        || (record.phase === 'settled'
+          && !snapshot.acceptedFacts.some((committed) =>
+            sameRequestIdentity(committed.fact.envelope.request, record.request)
+            && committed.fact.envelope.fact.kind === 'request-complete')))
+      .map((record) => record.request.requestId);
+
+    // An unpaired tool call is an unknown physical side effect: it holds the
+    // reconciliation instead of being replayed or silently dropped.
+    const toolCalls = snapshot.acceptedFacts.filter((committed) =>
+      committed.fact.envelope.fact.kind === 'tool-call');
+    const toolResults = new Set(
+      snapshot.acceptedFacts
+        .filter((committed) => committed.fact.envelope.fact.kind === 'tool-result')
+        .map((committed) => {
+          const fact = committed.fact.envelope.fact;
+          if (fact.kind !== 'tool-result') return '';
+          return toolPairKey(committed.fact.envelope.request, committed.fact.envelope.execution.executionEpoch,
+            fact.callId, fact.continuationRef);
+        }),
+    );
+    for (const committed of toolCalls) {
+      const fact = committed.fact.envelope.fact;
+      if (fact.kind !== 'tool-call') continue;
+      if (!toolResults.has(toolPairKey(committed.fact.envelope.request, committed.fact.envelope.execution.executionEpoch,
+        fact.call.callId, fact.call.continuationRef))) {
+        throw new ContractError(
+          `interaction parent tool call ${fact.call.callId} has no committed result; its side effect is unknown`,
+        );
+      }
+    }
+
+    if (unsettledRequests.length > 0) {
+      return {
+        mode: 'continue',
+        unsettledRequestIds,
+        effectiveExecutionEpoch: active.execution.executionEpoch + 1,
+      };
+    }
+
+    if (requests.length === 0) {
+      return {
+        mode: 'continue',
+        unsettledRequestIds,
+        effectiveExecutionEpoch: active.execution.executionEpoch + 1,
+      };
+    }
+
+    // The settled leaf request is the settled request no registered request
+    // continues. A settled request that produced tool calls is an intermediate
+    // step awaiting continuation, never final output.
+    const parentRequestIds = new Set(
+      requests
+        .map((record) => record.request.parentRequestId)
+        .filter((parentRequestId): parentRequestId is string => parentRequestId !== undefined),
+    );
+    const leaves = requests.filter((record) =>
+      record.phase === 'settled' && !parentRequestIds.has(record.request.requestId));
+    if (leaves.length === 1) {
+      const leaf = leaves[0]!;
+      const leafToolCalls = toolCalls.filter((committed) =>
+        sameRequestIdentity(committed.fact.envelope.request, leaf.request));
+      const leafCompletion = snapshot.acceptedFacts.find((committed) =>
+        sameRequestIdentity(committed.fact.envelope.request, leaf.request)
+        && committed.fact.envelope.fact.kind === 'request-complete');
+      if (leafToolCalls.length === 0
+        && leafCompletion !== undefined
+        && leafCompletion.fact.envelope.fact.kind === 'request-complete'
+        && leafCompletion.fact.envelope.fact.terminal === 'completed') {
+        const folded = await foldSnapshot(snapshot, leaf.request.requestId, [...ignored]);
+        const finalUnits = folded.contentUnits.filter((unit) =>
+          sameRequestIdentity(unit.request, leaf.request)
+          && unit.channel === 'assistant-text' && unit.supersededBy === undefined);
+        if (finalUnits.length > 0 && finalUnits.every((unit) => unit.complete)
+          && decodeUtf8(concatBytes(finalUnits.map((unit) => unit.bytes))).trim() !== '') {
+          return {
+            mode: 'terminal-output',
+            unsettledRequestIds,
+            effectiveExecutionEpoch: active.execution.executionEpoch,
+          };
+        }
+      }
+    }
+
+    return {
+      mode: 'continue',
+      unsettledRequestIds,
+      effectiveExecutionEpoch: active.execution.executionEpoch + 1,
+    };
+  }
+
+  /**
+   * Commit one local owner reconciliation. The eligibility decision and the
+   * append are staged in one transaction against one commit fingerprint, so the
+   * mode is never recomputed after a concurrent write.
+   */
+  async function commitReconciliation(
+    previousOwner: OccurrenceExecutionOwner,
+    replacementOwner: OccurrenceExecutionOwner,
+    reconciledAt: string,
+  ): Promise<InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>> {
+    if (reconciledAt.trim() === '') {
+      throw new ContractError('interaction parent owner reconciliation requires a reconciledAt timestamp');
+    }
+    validateOccurrenceExecutionOwner(previousOwner);
+    validateOccurrenceExecutionOwner(replacementOwner);
+    if (sameOccurrenceExecutionOwner(previousOwner, replacementOwner)) {
+      throw new ContractError('interaction parent owner reconciliation requires a distinct replacement owner');
+    }
+    const planSnapshot = await journal.readTurnSnapshot(turn);
+    if (planSnapshot.turnInput === null) {
+      throw new ContractError('interaction parent owner reconciliation requires the committed turn input');
+    }
+    if (planSnapshot.resourceClose !== null) {
+      throw new ContractError(
+        'interaction parent owner reconciliation requires a turn without a committed resource close',
+      );
+    }
+    const active = activeExecutionState(planSnapshot);
+    if (active.executionOwner === null) {
+      throw new ContractError(
+        'interaction parent owner reconciliation requires the authenticated original turn owner',
+      );
+    }
+    const committedBinding = planSnapshot.turnInput.fact.providerBinding;
+    if (committedBinding === undefined
+      || !sameParentExecutionBusinessIdentity(planSnapshot.turnInput.fact.execution, execution)
+      || !sameProviderBinding(committedBinding, providerBinding)) {
+      throw new ContractError('interaction parent reconciliation requires the committed execution identity and provider');
+    }
+    const existingPair = planSnapshot.ownerReconciliations.find((entry) =>
+      ownerReconciliationPair(entry.fact.previousOwner, entry.fact.replacementOwner)
+        === ownerReconciliationPair(previousOwner, replacementOwner));
+    if (existingPair !== undefined) {
+      if (!sameOccurrenceExecutionOwner(existingPair.fact.previousOwner, previousOwner)
+        || !sameOccurrenceExecutionOwner(existingPair.fact.replacementOwner, replacementOwner)) {
+        throw new ContractError('interaction parent owner reconciliation conflicts with the committed owner pair');
+      }
+      return existingPair;
+    }
+    if (!sameOccurrenceExecutionOwner(active.executionOwner, previousOwner)) {
+      throw new ContractError('interaction parent owner reconciliation previous owner is not the committed turn owner');
+    }
+    const eligibility = await requestEligibility(planSnapshot);
+    if (eligibility.mode === 'terminal-output') {
+      await finalOutputFromSnapshot(planSnapshot, ignoredRequests(planSnapshot));
+    }
+    const fact: InteractionParentOwnerReconciliationFact = {
+      turn: cloneTurnIdentity(turn),
+      execution: {
+        ...cloneExecution(planSnapshot.turnInput.fact.execution),
+        executionEpoch: eligibility.effectiveExecutionEpoch,
+      },
+      providerBinding: cloneProviderBinding(committedBinding),
+      previousOwner: cloneExecutionOwner(previousOwner),
+      replacementOwner: cloneExecutionOwner(replacementOwner),
+      mode: eligibility.mode,
+      effectiveExecutionEpoch: eligibility.effectiveExecutionEpoch,
+      unsettledRequestIds: eligibility.unsettledRequestIds,
+      remoteProviderState: 'unknown',
+      reconciledAt,
+    };
+    const fingerprint = snapshotCommitFingerprint(planSnapshot);
+    const { committed } = await journal.transactTurn(turn, (snapshot) => {
+      if (snapshotCommitFingerprint(snapshot) !== fingerprint) {
+        throw new ContractError(
+          'interaction parent owner reconciliation conflicts with a concurrent durable write',
+        );
+      }
+      return { append: { kind: 'owner-reconciliation', turn, execution: fact.execution, fact }, result: undefined };
+    });
+    if (committed === undefined) {
+      throw new ContractError('interaction parent owner reconciliation append did not commit');
+    }
+    return { fact, commit: committed };
   }
 
   return {
@@ -569,7 +979,16 @@ export function createInteractionParentTurnRawOwner(
           return { append: { kind: 'turn-input', fact: turnInputFact }, result: { kind: 'new' } };
         }
         if (canonicalJsonStringify(snapshot.turnInput.fact) !== canonicalJsonStringify(turnInputFact)) {
-          throw new ContractError('interaction parent turn input conflicts with the committed turn input');
+          const latest = snapshot.ownerReconciliations.at(-1);
+          if (latest === undefined) {
+            throw new ContractError('interaction parent turn input conflicts with the committed turn input');
+          }
+          assertActiveOwner(snapshot);
+          const { execution: _execution, executionOwner: _owner, ...committedInput } = snapshot.turnInput.fact;
+          const { execution: _newExecution, executionOwner: _newOwner, ...replacementInput } = turnInputFact;
+          if (canonicalJsonStringify(committedInput) !== canonicalJsonStringify(replacementInput)) {
+            throw new ContractError('interaction parent turn input conflicts with the committed turn input');
+          }
         }
         return { result: { kind: 'existing', committed: snapshot.turnInput } };
       });
@@ -614,6 +1033,10 @@ export function createInteractionParentTurnRawOwner(
           throw new ContractError(
             'interaction parent resource close is committed; a new request lifecycle record is rejected',
           );
+        }
+        assertActiveOwner(snapshot);
+        if (ignoredRequests(snapshot).includes(record.request.requestId)) {
+          throw new ContractError('interaction parent abandoned request cannot be resumed');
         }
         if (byId === undefined && record.phase !== 'dispatching') {
           throw new ContractError('a new interaction parent request must register as dispatching');
@@ -668,6 +1091,10 @@ export function createInteractionParentTurnRawOwner(
             'interaction parent resource close is committed; a new raw fact is rejected',
           );
         }
+        assertActiveOwner(snapshot);
+        if (ignoredRequests(snapshot).includes(envelope.request.requestId)) {
+          throw new ContractError('interaction parent abandoned request cannot accept new facts');
+        }
         const entry: AcceptedRawFact<InteractionParentProviderExecutionIdentityRef> = {
           seq: snapshot.acceptedFacts.length + 1,
           envelope,
@@ -684,6 +1111,49 @@ export function createInteractionParentTurnRawOwner(
 
     async readFinalTurnOutput(): Promise<InteractionParentFinalTurnOutput> {
       return finalOutputFromSnapshot(await journal.readTurnSnapshot(turn));
+    },
+
+    reconcileTurnOwner: (input: {
+      readonly previousOwner: OccurrenceExecutionOwner;
+      readonly replacementOwner: OccurrenceExecutionOwner;
+      readonly isCommittedReplacement: boolean;
+      readonly reconciledAt: string;
+    }): Promise<InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>> => {
+      if (!input.isCommittedReplacement) {
+        return Promise.reject(new ContractError(
+          'interaction parent owner reconciliation requires a committed replacement owner',
+        ));
+      }
+      return commitReconciliation(input.previousOwner, input.replacementOwner, input.reconciledAt);
+    },
+
+    async readReconciledTurnOutput(): Promise<
+      InteractionParentFinalTurnOutput & {
+        readonly reconciliation: InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>;
+        readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null;
+      }
+    > {
+      const snapshot = await journal.readTurnSnapshot(turn);
+      const reconciliation = snapshot.ownerReconciliations.at(-1);
+      if (reconciliation === undefined) {
+        throw new ContractError('interaction parent reconciled output requires a committed owner reconciliation');
+      }
+      const ignoredRequestIds = ignoredRequests(snapshot);
+      if (reconciliation.fact.mode === 'continue') {
+        const resourceClose = snapshot.resourceClose;
+        if (resourceClose === null) {
+          throw new ContractError(
+            'interaction parent continued reconciliation requires the effective epoch provider close',
+          );
+        }
+        if (resourceClose.fact.execution.executionEpoch !== reconciliation.fact.effectiveExecutionEpoch) {
+          throw new ContractError('interaction parent reconciled output requires the effective epoch provider close');
+        }
+        const output = await finalOutputFromSnapshot(snapshot, ignoredRequestIds);
+        return { ...output, reconciliation, resourceClose };
+      }
+      const output = await finalOutputFromSnapshot(snapshot, ignoredRequestIds);
+      return { ...output, reconciliation, resourceClose: null };
     },
 
     async recordProviderClose(input: {
@@ -718,9 +1188,10 @@ export function createInteractionParentTurnRawOwner(
         // The close must belong to the original turn and execution, and it must
         // match the full committed binding, never just the binding id.
         if (canonicalJsonStringify(snapshot.turnInput.fact.turn) !== canonicalJsonStringify(turn)
-          || canonicalJsonStringify(snapshot.turnInput.fact.execution) !== canonicalJsonStringify(execution)) {
+          || canonicalJsonStringify(activeExecutionState(snapshot).execution) !== canonicalJsonStringify(execution)) {
           throw new ContractError('interaction parent resource close requires the original parent execution');
         }
+        assertActiveOwner(snapshot);
         if (!sameProviderBinding(committedBinding, input.providerBinding)) {
           throw new ContractError(
             'interaction parent resource close binding does not match the committed turn input binding',
@@ -782,21 +1253,8 @@ export function createInteractionParentTurnRawOwner(
         throw new ContractError('interaction parent request context requires the committed turn input');
       }
       assertRegisteredRequest(snapshot, hookInput.request);
-      const folded = await foldActiveTurn<
-        { readonly requestId: string },
-        { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: ScopeRef },
-        InteractionParentProviderExecutionIdentityRef
-      >({
-        binding: { execution, scope },
-        initialInput: snapshot.turnInput.fact.initialInput,
-        entries: snapshot.acceptedFacts.map((committed) => committed.fact),
-        requests: snapshot.requests.map((committed) => committed.fact),
-        childInvocations: [],
-        cut: { requestId: hookInput.request.requestId },
-        checkpointPath: [],
-        completionRefs: [],
-        rawContent,
-      });
+      assertActiveOwner(snapshot);
+      const folded = await foldSnapshot(snapshot, hookInput.request.requestId, ignoredRequests(snapshot));
       const decode = (bytes: Uint8Array): string => new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       const units: ProviderRequestContextUnit[] = [];
       // Historical semantic checkpoints enter as messages only. The prior raw
@@ -808,7 +1266,7 @@ export function createInteractionParentTurnRawOwner(
           text: canonicalJsonStringify({ claims: checkpoint.claims, constraints: checkpoint.constraints }),
         });
       }
-      units.push({ kind: 'message', role: 'user', text: decode(folded.initialInput.bytes) });
+      units.push({ kind: 'message', role: 'user', text: folded.initialInputText });
       const ordered: { readonly seq: number; readonly unit: ProviderRequestContextUnit }[] = [];
       for (const unit of folded.contentUnits) {
         if (unit.channel !== 'assistant-text' || unit.supersededBy !== undefined) continue;
@@ -850,6 +1308,7 @@ export function createInteractionParentTurnRawOwner(
       const snapshot = await journal.readTurnSnapshot(turn);
       const latest = new Map<string, RuntimeRequestRecord>();
       for (const committed of snapshot.requests) {
+        if (ignoredRequests(snapshot).includes(committed.fact.request.requestId)) continue;
         latest.set(committed.fact.request.requestId, committed.fact);
       }
       const requests = [...latest.values()];
