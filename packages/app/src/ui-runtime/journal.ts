@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type {
   Checkpoint,
+  CheckpointReceiptRelationshipV1,
   CycleId,
   ScopeRef,
   TaskId,
@@ -12,7 +13,6 @@ import type {
   CheckpointAppendReceipt,
   CheckpointAppendRequest,
   CheckpointChainVerification,
-  CheckpointJournalPort,
   CheckpointListQuery,
   CheckpointListResult,
   CheckpointRecoveryBinding,
@@ -20,6 +20,8 @@ import type {
   ExecutionPosition,
   JournalCommitRef,
   LatestCheckpointRecord,
+  NativeCheckpointCommitRequest,
+  NativeCheckpointJournalPort,
 } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
 import type { ClosureRecord, InteractionClosureRecord } from '../../../runtime/src/checkpoints/closure.js';
@@ -637,7 +639,7 @@ function publicOutputRefFromRecord(record: import('../../../adapters/jsonl/src/i
   };
 }
 
-export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCommitPort, PublicOutputJournalPort {
+export class FileCheckpointStore implements NativeCheckpointJournalPort, CheckpointCommitPort, PublicOutputJournalPort {
   constructor(private readonly filePath: string) {}
 
   async verify(_scope: ScopeRef): Promise<CheckpointChainVerification> {
@@ -702,6 +704,18 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
     };
   }
 
+  async commitNativeCheckpoint(
+    input: NativeCheckpointCommitRequest,
+  ): Promise<CheckpointReceiptRelationshipV1> {
+    return this.checkpointPort().commitNativeCheckpoint(input);
+  }
+
+  async readNativeCheckpoint(input: {
+    readonly checkpoint: Pick<Checkpoint, 'id' | 'scope'>;
+  }): Promise<CheckpointReceiptRelationshipV1 | null> {
+    return this.checkpointPort().readNativeCheckpoint(input);
+  }
+
   async commit(checkpoint: Checkpoint): Promise<{
     readonly checkpointId: Checkpoint['id'];
     readonly committed: true;
@@ -739,7 +753,7 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
     return this.checkpointPort().readCheckpointRecoveryBinding(scope, checkpointCommitRef);
   }
 
-  private checkpointPort(): CheckpointJournalPort {
+  private checkpointPort(): NativeCheckpointJournalPort {
     return createJsonlCheckpointJournal({ filePath: this.filePath });
   }
 
