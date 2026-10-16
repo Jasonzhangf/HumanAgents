@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,7 +8,20 @@ import {
   id,
   type EvidenceRef,
   type ScopeRef,
+  type AnyProviderExecutionIdentityRef,
+  type InteractionParentProviderExecutionIdentityRef,
+  type InteractionTurnIdentity,
+  type ProviderStartInput,
 } from '../../packages/contracts/src/index.js';
+import { prepareAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
+import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
+import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
+import { filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
+import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
+import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import {
   buildFakeExecutionPort,
   FakeReplayExecutionRuntimePort,
@@ -29,6 +43,171 @@ const binding = {
   configDigest: 'sha256:semantic-public-config',
   capabilityDigest: 'sha256:semantic-public-capability',
 };
+
+test('default explicit parent persists raw tool loop and explicitly accepts an independent helper', async () => {
+  // Confirmed old default wiring omitted the parent owner and helper session.
+  // Impact: fabricated Task identity and lost continuation context. Bounded
+  // cost: three parent requests and one child, on one local HTTP server.
+  const fixtureBase = process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-explicit-parent-wiring-20261016';
+  await mkdir(fixtureBase, { recursive: true });
+  const root = await mkdtemp(join(fixtureBase, 'default-parent-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  const evidenceRoot = join(root, 'assets');
+  const journalPath = uiRuntimeControlJournalPath(join(checkpointRoot, 'fake'));
+  const controlJournal = new JsonlOrganJournal(journalPath);
+  const parentJournal = new JsonlInteractionParentTurnJournal(controlJournal);
+  const helperJournal = new JsonlInteractionHelperJournal(controlJournal);
+  const rawContent = providerRawContentReader(filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot)));
+  const parentStarts: ProviderStartInput<InteractionParentProviderExecutionIdentityRef>[] = [];
+  const childStarts: AnyProviderExecutionIdentityRef[] = [];
+  const requests: any[] = [];
+  let turn: InteractionTurnIdentity | undefined;
+  let helperCallId = '';
+  const refinedText = '精炼后采纳的正文，保留 helper 的 incomplete 判断。';
+  const answer = `父最终回答：${'完整语义与字节。'.repeat(120)}`;
+  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'parent-private-input',
+    knownFacts: ['accepted refined helper'], answer, decisionRefs: ['final-parent'] });
+  const fields = {
+    objective: 'bounded helper question', targetRefs: [], expectedOutputRefs: [],
+    expectedArtifactDigests: [], acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`,
+    successCriteria: ['complete conclusion'], failureCriteria: ['no conclusion'],
+    incompleteCriteria: ['partial conclusion'], requiredCapabilities: ['text-generation'], mergeGate: 'not-required',
+  };
+  const server = createServer((request, response) => {
+    void (async () => {
+      if (request.method !== 'POST') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(request.url?.includes('models')
+          ? { data: [{ id: 'parent-model' }, { id: 'child-model' }] } : { status: 'ok' }));
+        return;
+      }
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      requests.push(body);
+      const frames: unknown[] = [{ type: 'response.created', response: { id: `local-${requests.length}` } }];
+      if (body.model === 'child-model') {
+        assert.equal(JSON.stringify(body).includes('parent-private-input'), false, 'helper must not inherit parent transcript');
+        assert.ok(JSON.stringify(body).includes('bounded-only-input'));
+        frames.push({ type: 'response.output_text.done', item_id: 'child-final', text: JSON.stringify({
+          agentId: 'configured-child', producedArtifactRefs: [], producedArtifactDigests: [],
+          status: 'incomplete', summary: 'child-summary-is-not-parent-json-or-refined-text', outputRefs: [],
+          evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:more-evidence',
+        }) });
+      } else {
+        assert.equal(body.model, 'parent-model');
+        const results = body.input.filter((item: any) => item.type === 'function_call_output');
+        if (results.length === 0) {
+          assert.ok(turn);
+          const snapshot = await parentJournal.readTurnSnapshot(turn!);
+          assert.ok(snapshot.turnInput, 'initial input must be durable before external parent start');
+          assert.equal(snapshot.requests[0].fact.phase, 'dispatching');
+          const initial = await rawContent.read({ scope: snapshot.turnInput!.fact.scope, content: snapshot.turnInput!.fact.initialInput });
+          assert.ok(new TextDecoder().decode(initial).includes('parent-private-input'));
+          // A prior-request JSON-looking output must never enter final parsing.
+          frames.push({ type: 'response.output_text.done', item_id: 'parent-draft', text: '{"kind":"not-final"}' });
+          frames.push({ type: 'response.output_item.done', output_index: 1, item: { type: 'function_call',
+            id: 'dispatch-item', call_id: 'dispatch-call', name: 'dispatch_helper',
+            arguments: JSON.stringify({ selection: { roleId: 'review', configuredAgentId: 'configured-child' },
+              assignmentFields: fields, inputs: { question: 'bounded-only-input' }, evidenceRefs: [] }) } });
+        } else if (results.length === 1) {
+          assert.equal(results[0].call_id, 'dispatch-call');
+          const dispatched = JSON.parse(results[0].output);
+          helperCallId = dispatched.identity.helperCallId;
+          const handoff = await helperJournal.readExact(dispatched.identity);
+          assert.ok(handoff.returned);
+          assert.equal(handoff.ownerAccepted, null, 'returned must not be automatically accepted');
+          assert.equal(handoff.returned!.fact.result.status, 'incomplete');
+          frames.push({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call',
+            id: 'accept-item', call_id: 'accept-call', name: 'accept_helper',
+            arguments: JSON.stringify({ helperCallId, refinedText, acceptanceRef: 'acceptance:explicit-parent', evidenceRefs: [] }) } });
+        } else {
+          assert.deepEqual(results.map((item: any) => item.call_id), ['dispatch-call', 'accept-call']);
+          const calls = body.input.filter((item: any) => item.type === 'function_call');
+          assert.deepEqual(calls.map((item: any) => item.call_id), ['dispatch-call', 'accept-call']);
+          const accepted = JSON.parse(results[1].output);
+          assert.equal(accepted.latestTurnEntry.result.status, 'incomplete');
+          const asset = accepted.latestTurnEntry.refinedResult;
+          assert.equal(new TextDecoder().decode(await rawContent.read({ scope: asset.ref.scope, content: asset })), refinedText);
+          const handoff = await helperJournal.readExact(accepted.latestTurnEntry.result);
+          assert.ok(handoff.ownerAccepted);
+          frames.push({ type: 'response.output_text.delta', item_id: 'parent-final', delta: '{"incorrect":"partial"}' });
+          frames.push({ type: 'response.output_text.done', item_id: 'parent-final', text: finalText });
+        }
+      }
+      frames.push({ type: 'response.completed', response: { id: `local-${requests.length}` } });
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+    })().catch((error: unknown) => { response.writeHead(500); response.end(String(error)); });
+  });
+  let runtime: Awaited<ReturnType<typeof startUiRuntimeOwner>> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('missing local server address');
+    const entries: EffectiveAgentProviderBinding[] = [
+      { agentId: 'configured-parent', roleId: 'interaction', source: 'agent', provider: {
+        source: 'http', provider: 'http', binding: 'local-parent', protocol: 'responses', model: 'parent-model',
+        route: 'parent-route', baseUrl: `http://127.0.0.1:${address.port}` } },
+      { agentId: 'configured-child', roleId: 'review', source: 'agent', provider: {
+        source: 'http', provider: 'http', binding: 'local-child', protocol: 'responses', model: 'child-model',
+        route: 'child-route', baseUrl: `http://127.0.0.1:${address.port}` } },
+    ];
+    const prepare = async <T extends AnyProviderExecutionIdentityRef>(selection: { roleId: AgentRole; configuredAgentId?: string }) => {
+      const owned = await prepareAgentProvider<T>({ ...selection, agentProviderBindings: entries, evidenceRoot });
+      const start = owned.port.start.bind(owned.port);
+      owned.port.start = async (input) => {
+        if ('interactionTurn' in input && input.interactionTurn) {
+          assert.equal('taskId' in input, false); assert.equal('helper' in input, false);
+          turn = input.interactionTurn;
+          parentStarts.push(input as ProviderStartInput<InteractionParentProviderExecutionIdentityRef>);
+        } else {
+          assert.equal('taskId' in input, false); assert.ok('helper' in input);
+          childStarts.push(input);
+        }
+        return start(input);
+      };
+      return owned;
+    };
+    const auth = await testAccessControl(root);
+    runtime = await startUiRuntimeOwner({
+      mode: 'fake', organId, binding, port: buildFakeExecutionPort(binding, 0), checkpointRoot, evidenceRoot,
+      uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0, memory: memory('default-parent'),
+      accessControl: auth.accessControl, explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      runtimeComposition: { prepareAgentProvider: prepare }, explicitBrainHelperProviderPreparer: prepare,
+    });
+    testSessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
+    const received = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: 'business', sourceRef: 'test:default-parent', rawInput: 'parent-private-input' }),
+    });
+    assert.equal(received.status, 201);
+    const interactionId = ((await received.json()) as { interactionId: string }).interactionId;
+    const interpreted = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, { method: 'POST' });
+    const receipt = await interpreted.text();
+    assert.equal(interpreted.status, 200, receipt);
+    assert.ok(receipt.includes(answer), receipt);
+    assert.equal(parentStarts.length, 1); assert.equal(childStarts.length, 1);
+    assert.deepEqual(requests.map((body) => body.model), ['parent-model', 'child-model', 'parent-model', 'parent-model']);
+    const snapshot = await parentJournal.readTurnSnapshot(turn!);
+    const calls = snapshot.acceptedFacts.filter(({ fact }) => fact.envelope.fact.kind === 'tool-call');
+    const results = snapshot.acceptedFacts.filter(({ fact }) => fact.envelope.fact.kind === 'tool-result');
+    assert.equal(calls.length, 2); assert.equal(results.length, 2);
+    for (const { fact } of results) {
+      if (fact.envelope.fact.kind !== 'tool-result') throw new Error('expected tool-result');
+      const callId = fact.envelope.fact.callId;
+      const stored = await rawContent.read({ scope: fact.envelope.scope, content: fact.envelope.fact.rawOutput });
+      const wireResult = requests.at(-1).input.find((item: any) => item.type === 'function_call_output' && item.call_id === callId);
+      assert.equal(new TextDecoder().decode(stored), wireResult.output, 'tool continuation must preserve exact committed output bytes');
+    }
+    assert.ok(helperCallId);
+  } finally {
+    if (runtime) { testSessionByOrigin.delete(new URL(runtime.server.url).origin); await runtime.close(); }
+    server.closeIdleConnections?.();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 const rawFetch = globalThis.fetch.bind(globalThis);
 const testSessionByOrigin = new Map<string, string>();
 

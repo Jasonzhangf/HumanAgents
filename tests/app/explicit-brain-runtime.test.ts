@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,10 +10,53 @@ import {
   createProviderExplicitBrainInterpreter,
 } from '../../packages/app/src/explicit-brain-runtime.js';
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
-import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/fake-port.js';
-import type { ProviderBinding } from '../../packages/contracts/src/index.js';
+import { id, type ProviderBinding, type InteractionParentProviderExecutionIdentityRef, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
+import { ProviderAgentDriver, ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
+import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
+import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
 import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+
+const parentFixtureRoot = join(process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-explicit-parent-wiring-20261016', `app-${randomUUID()}`);
+const parentEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentFixtureRoot, 'assets')));
+function parentDependencies() {
+  const journal = new JsonlOrganJournal(join(parentFixtureRoot, `${randomUUID()}.jsonl`));
+  return {
+    organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test',
+    parentJournal: new JsonlInteractionParentTurnJournal(journal),
+    helperJournal: new JsonlInteractionHelperJournal(journal),
+    rawEvidence: parentEvidence, rawContent: providerRawContentReader(parentEvidence),
+    clock: { now: () => new Date().toISOString() },
+    helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+  };
+}
+
+// Exercise the real neutral adapter/raw codec. The old Task-only fake cannot
+// represent this identity or deliver raw facts; changing the fixture does not
+// weaken the compiling synthetic-Task RED assertions below.
+class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = InteractionParentProviderExecutionIdentityRef> extends ProviderAdapter<T> {
+  constructor(options: { binding: ProviderBinding; stepDelayMs: number; replay: readonly { kind: string; summary: string; state: string; terminalState?: string }[];
+    respond?: (wire: any) => Promise<readonly unknown[]> }) {
+    const transport = new V3ProviderHttpTransport<T>({
+      binding: options.binding, baseUrl: 'http://recorded.test', source: 'http', evidence: parentEvidence,
+      fetch: async (_url, init) => ({ status: 200, headers: new Headers({ 'content-type': 'text/event-stream' }),
+        body: (async function* () {
+          const frames = [
+            { type: 'response.created', response: { id: 'recorded' } },
+            ...(options.respond ? await options.respond(JSON.parse(init.body!)) : options.replay.filter((step) => step.kind === 'output').map((step, index) => ({
+              type: 'response.output_text.done', item_id: `text-${index}`, text: step.summary,
+            }))),
+            { type: 'response.completed', response: { id: 'recorded' } },
+          ];
+          yield new TextEncoder().encode(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+        })(), text: async () => '' }),
+    });
+    super({ binding: options.binding, routeRef: 'recorded', codec: new ResponsesProviderCodec(), transport, evidence: parentEvidence });
+  }
+}
 
 function digest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
@@ -276,9 +319,10 @@ test('provider explicit brain interpreter loads the interaction template and val
     capabilityDigest: 'sha256:explicit-interpret-capability',
   };
   const options = {
+    ...parentDependencies(),
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
-    port: new FakeReplayExecutionRuntimePort({
+    port: new RecordedParentPort({
       binding,
       stepDelayMs: 0,
       replay: [
@@ -336,16 +380,17 @@ test('provider explicit brain interpreter loads the interaction template and val
   });
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('missing socket address');
-  const root = await mkdtemp(join(tmpdir(), 'interaction-selected-'));
+  await mkdir(parentFixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(parentFixtureRoot, 'interaction-selected-'));
   const entries: EffectiveAgentProviderBinding[] = [{
     agentId: 'configured-interaction', roleId: 'interaction', source: 'agent',
     provider: { source: 'http', provider: 'http', binding: 'selected-interaction', protocol: 'responses',
       model: 'selected.interaction.model', route: 'selected-route', baseUrl: `http://127.0.0.1:${address.port}` },
   }];
-  const compositions: AgentProviderComposition[] = [];
+  const compositions: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>[] = [];
   const lifecycle: string[] = [];
-  const starts: Parameters<AgentProviderComposition['port']['start']>[0][] = [];
-  const observations: Parameters<AgentProviderComposition['port']['observe']>[0][] = [];
+  const starts: Parameters<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>['port']['start']>[0][] = [];
+  const observations: Parameters<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>['port']['observe']>[0][] = [];
   let borrowedStarts = 0;
   const primaryStart = options.port.start.bind(options.port);
   options.port.start = async (request) => { borrowedStarts += 1; return primaryStart(request); };
@@ -353,7 +398,7 @@ test('provider explicit brain interpreter loads the interaction template and val
     ...options,
     prepareAgentProvider: async (selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string }) => {
       assert.deepEqual(selection, { roleId: 'interaction' });
-      const own = await prepareAgentProvider({ ...selection, agentProviderBindings: entries, evidenceRoot: root });
+      const own = await prepareAgentProvider<InteractionParentProviderExecutionIdentityRef>({ ...selection, agentProviderBindings: entries, evidenceRoot: join(parentFixtureRoot, 'assets') });
       assert.equal(own.configuredAgentId, 'configured-interaction');
       assert.equal(own.source, 'http');
       assert.equal(own.binding.modelRef, 'selected.interaction.model');
@@ -402,7 +447,10 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.equal(compositions.length, 2);
   assert.ok(compositions[0].port !== compositions[1].port);
   assert.ok(starts[0].runtimeId !== starts[1].runtimeId);
-  assert.ok(starts[0].taskId.value !== starts[1].taskId.value);
+  // Existing wire creates a synthetic Task for a parent interaction. This
+  // counterexample costs two local requests and detects identity contamination.
+  assert.equal('taskId' in starts[0], false, 'interaction parent must not fabricate a Task');
+  assert.equal('helper' in starts[0], false, 'interaction parent must not use helper identity');
   assert.ok(observations[0].requestId !== undefined);
   assert.ok(observations[1].requestId !== undefined);
   assert.ok(observations[0].requestId !== observations[1].requestId);
@@ -419,9 +467,9 @@ test('provider explicit brain interpreter loads the interaction template and val
   // that require a nested decision envelope, selected actions, or typed tool
   // intents. These assertions are RED under the previous full-segment assembly.
   const wire = JSON.parse(posts[0]) as {
-    readonly input: readonly { readonly content: readonly { readonly text: string }[] }[];
+    readonly instructions: string;
   };
-  const sentPrompt = (JSON.parse(wire.input[0].content[0].text) as { readonly prompt: string }).prompt;
+  const sentPrompt = wire.instructions;
   assert.ok(sentPrompt.includes('# Control Boundaries'));
   assert.ok(sentPrompt.includes('# Explicit Brain'));
   assert.ok(sentPrompt.includes('# Explicit intake decision output'));
@@ -438,6 +486,23 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.ok(posts[1].includes('ui:second'));
   assert.equal(posts[1].includes('帮我整理启动步骤'), false);
   assert.deepEqual(lifecycle, ['0:settled', '0:closed', '1:settled', '1:closed']);
+  // A failed durable initial-input commit must prevent the external start.
+  // Existing missing durability is the failure basis; impact is an orphaned
+  // parent request. Cost: one rejected commit and no network request.
+  const inputCommitError = new Error('initial input commit rejected');
+  const commitBlocked = createProviderExplicitBrainInterpreter({ ...selectedOptions,
+    parentJournal: {
+      ...selectedOptions.parentJournal,
+      transactTurn: async () => { throw inputCommitError; },
+      readTurnSnapshot: (turn) => selectedOptions.parentJournal.readTurnSnapshot(turn),
+    },
+  });
+  await assert.rejects(() => commitBlocked.interpret({ interactionId: 'blocked-input', inputRevision: 1,
+    sourceRef: 'ui:blocked', rawInput: 'must not start', clarifications: [], taskCandidates: [] }),
+  (error: unknown) => error === inputCommitError);
+  assert.equal(starts.length, 2);
+  assert.equal(posts.length, 2);
+  assert.deepEqual(lifecycle, ['0:settled', '0:closed', '1:settled', '1:closed', '2:closed']);
   } finally {
     server.closeIdleConnections?.();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -447,9 +512,10 @@ test('provider explicit brain interpreter loads the interaction template and val
   }
 
   const malformedOptions = {
+    ...parentDependencies(),
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
-    port: new FakeReplayExecutionRuntimePort({
+    port: new RecordedParentPort({
       binding,
       stepDelayMs: 0,
       replay: [
@@ -531,7 +597,9 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.deepEqual(malformedLifecycle, ['settle', 'close']);
 
   const settleError = new Error('settlement rejection');
-  malformedOptions.port.settle = async () => { malformedLifecycle.push('settle'); throw settleError; };
+  malformedOptions.port.settle = async (request) => {
+    malformedLifecycle.push('settle'); await malformedSettle(request); throw settleError;
+  };
   malformedOptions.port.close = async (binding) => {
     malformedLifecycle.push('close'); await malformedClose(binding); throw closeError;
   };
@@ -559,6 +627,100 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.deepEqual(malformedLifecycle, ['settle', 'close']);
 });
 
+test('neutral parent loops over exact raw tool pairs, with returned helper separate from explicit acceptance', async () => {
+  // The old path could not dispatch helpers at all. One bounded local replay
+  // catches parent/child identity pollution, autoacceptance and summary parsing.
+  const dependencies = parentDependencies();
+  const binding: ProviderBinding = { bindingId: 'parent-loop', providerId: 'recorded', protocol: 'responses',
+    modelRef: 'parent-model', endpointRef: 'http:recorded.test', configDigest: 'sha256:parent', capabilityDigest: 'sha256:parent' };
+  const childBinding = { ...binding, bindingId: 'child-loop', modelRef: 'independent-child-model' };
+  const refinedText = 'parent explicitly refined the partial result';
+  const answer = `exact final ${'原始正文。'.repeat(120)}`;
+  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'parent-private', knownFacts: [], answer, decisionRefs: [] });
+  const wires: any[] = [];
+  let helperIdentity: Parameters<typeof dependencies.helperJournal.readExact>[0] | undefined;
+  let childClosed = 0;
+  let settlementPublished = 0;
+  const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
+    wires.push(wire);
+    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
+    if (results.length === 0) return [
+      { type: 'response.output_text.done', item_id: 'draft', text: '{"kind":"invalid-draft"}' },
+      { type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', call_id: 'dispatch', name: 'dispatch_helper', arguments: JSON.stringify({
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
+        assignmentFields: { objective: 'bounded', targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
+          acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: ['complete'], failureCriteria: ['none'], incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required' },
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      }) } },
+    ];
+    if (results.length === 1) {
+      const dispatched = JSON.parse(results[0].output);
+      helperIdentity = dispatched.identity;
+      const handoff = await dependencies.helperJournal.readExact(dispatched.identity);
+      assert.ok(handoff.returned); assert.equal(handoff.ownerAccepted, null);
+      assert.equal(dispatched.result.status, 'incomplete');
+      return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept', name: 'accept_helper',
+        arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText, acceptanceRef: 'acceptance:parent-loop', evidenceRefs: [] }) } }];
+    }
+    assert.deepEqual(results.map((item: any) => item.call_id), ['dispatch', 'accept']);
+    const acceptance = JSON.parse(results[1].output);
+    const refined = acceptance.latestTurnEntry.refinedResult;
+    assert.equal(new TextDecoder().decode(await dependencies.rawContent.read({ scope: refined.ref.scope, content: refined })), refinedText);
+    assert.equal(acceptance.latestTurnEntry.result.status, 'incomplete');
+    return [
+      { type: 'response.output_text.delta', item_id: 'final', delta: '{"partial":"discard"}' },
+      { type: 'response.output_text.done', item_id: 'final', text: finalText },
+    ];
+  } });
+  const starts: Parameters<typeof parent.start>[0][] = [];
+  const start = parent.start.bind(parent);
+  parent.start = async (input) => {
+    const snapshot = await dependencies.parentJournal.readTurnSnapshot(input.interactionTurn);
+    assert.ok(snapshot.turnInput, 'input must commit before Provider start');
+    assert.equal(snapshot.requests[0].fact.phase, 'dispatching');
+    starts.push(input); return start(input);
+  };
+  const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    helperFactory: async ({ selection, assignment, execution }) => {
+      assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
+      const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async (wire) => {
+        assert.equal(wire.model, childBinding.modelRef);
+        assert.ok(JSON.stringify(wire).includes('child-only-input'));
+        assert.equal(JSON.stringify(wire).includes('parent-private'), false);
+        return [{ type: 'response.output_text.done', item_id: 'child', text: JSON.stringify({ agentId: 'independent-child', producedArtifactRefs: [], producedArtifactDigests: [],
+          status: 'incomplete', summary: 'unrefined child summary', outputRefs: [], evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:partial' }) }];
+      } });
+      const childStart = child.start.bind(child);
+      child.start = async (input) => { assert.equal('taskId' in input, false); assert.equal('interactionTurn' in input, false); assert.equal(input.helper.helperCallId, assignment.helperCallId); return childStart(input); };
+      return { binding: childBinding, driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({ port: child, binding: childBinding,
+        ...execution, organId: assignment.organId, helper: assignment, assignmentId: assignment.assignmentId,
+        scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
+      close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); childClosed += 1; } };
+    },
+    publishProviderSettlement: async ({ settlement }) => { assert.equal('taskId' in settlement, false); assert.equal(settlement.state, 'succeeded'); settlementPublished += 1; },
+  });
+  try {
+    const result = await interpreter.interpret({ interactionId: 'loop', inputRevision: 1, sourceRef: 'test:loop', rawInput: 'parent-private', clarifications: [], taskCandidates: [] });
+    assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected parent answer');
+    assert.equal(result.answer, answer);
+    assert.equal(starts.length, 1); assert.equal('taskId' in starts[0], false); assert.equal('helper' in starts[0], false);
+    assert.equal(childClosed, 1); assert.equal(settlementPublished, 1); assert.equal(wires.length, 3);
+    assert.ok(helperIdentity);
+    assert.ok((await dependencies.helperJournal.readExact(helperIdentity!)).ownerAccepted);
+    const snapshot = await dependencies.parentJournal.readTurnSnapshot(starts[0].interactionTurn);
+    for (const { fact } of snapshot.acceptedFacts) {
+      if (fact.envelope.fact.kind !== 'tool-result') continue;
+      const tool = fact.envelope.fact;
+      const expected = wires[2].input.find((item: any) => item.type === 'function_call_output' && item.call_id === tool.callId);
+      assert.equal(new TextDecoder().decode(await dependencies.rawContent.read({ scope: fact.envelope.scope, content: tool.rawOutput })), expected.output);
+    }
+  } finally {
+    const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
+  }
+});
+
 test('provider explicit brain interpreter accepts the live requirement contract with intent owned by proposal', async () => {
   const binding: ProviderBinding = {
     bindingId: 'binding-explicit-live-requirement',
@@ -570,9 +732,10 @@ test('provider explicit brain interpreter accepts the live requirement contract 
     capabilityDigest: 'sha256:explicit-live-requirement-capability',
   };
   const options = {
+    ...parentDependencies(),
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
-    port: new FakeReplayExecutionRuntimePort({
+    port: new RecordedParentPort({
       binding,
       stepDelayMs: 0,
       replay: [
@@ -702,9 +865,10 @@ test('provider explicit brain interpreter strictly rejects a recorded nested-dec
     capabilityDigest: 'sha256:explicit-recorded-nested-capability',
   };
   const options = {
+    ...parentDependencies(),
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
-    port: new FakeReplayExecutionRuntimePort({
+    port: new RecordedParentPort({
       binding,
       stepDelayMs: 0,
       replay: [
@@ -725,6 +889,7 @@ test('provider explicit brain interpreter strictly rejects a recorded nested-dec
         model: binding.modelRef, route: 'recorded-nested-fixture', baseUrl: binding.endpointRef },
       binding, port: options.port }),
   });
+  try {
   await assert.rejects(
     () => interpreter.interpret({
       interactionId: 'interaction-recorded-nested', inputRevision: 1, sourceRef: 'ui:entry',
@@ -733,4 +898,8 @@ test('provider explicit brain interpreter strictly rejects a recorded nested-dec
     /interaction agent decision does not match the explicit intake contract/,
   );
   assert.deepEqual(lifecycle, ['settle', 'close']);
+  } finally {
+    await rm(parentFixtureRoot, { recursive: true, force: true });
+    await assert.rejects(() => realpath(parentFixtureRoot), /ENOENT/);
+  }
 });

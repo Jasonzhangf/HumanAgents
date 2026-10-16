@@ -3,18 +3,34 @@ import {
   EXPLICIT_BRAIN_MODEL_TOOLS,
   EXPLICIT_BRAIN_TEMPLATE_REF,
   id,
+  assertEvidenceRef,
+  type BusinessPayload,
+  type EvidenceRef,
   type ExecutionRuntimePort,
+  type InteractionParentProviderExecutionIdentityRef,
+  type InteractionTurnIdentity,
+  type OrganId,
+  type RawContentReadPort,
+  type InteractionHelperAssignmentFields,
+  type InteractionHelperResultFields,
   type InteractionDecision,
   type ProviderBinding,
   type ProviderSettlement,
   type RequirementIntent,
 } from '../../contracts/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
+import { foldActiveTurn } from '../../runtime/src/context/active-turn-materializer.js';
 import { loadBuiltinPromptSegments, type AgentPromptSegment } from '../../agent-templates/src/index.js';
 import { WorkspaceCodeSearchFunctions } from '../../adapters/operations/src/index.js';
 import {
   ExplicitBrainDecisionExecutor,
   ExplicitBrainOperationalToolError,
+  ExplicitTurnHelperSession,
+  createInteractionParentTurnRawOwner,
+  type ExplicitTurnHelperFactory,
+  type InteractionHelperJournalPort,
+  type InteractionParentTurnRawJournalPort,
   createExplicitBrainToolRegistry,
   type ExplicitBrainAgentToolPort,
   type ExplicitBrainOperationalToolPorts,
@@ -27,8 +43,8 @@ import { closeAgentProvider, type AgentProviderComposition } from './agent-drive
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
 /**
- * The bounded intake call carries no tools, so it assembles only the identity and
- * control-boundary segments of the full `interaction` role. The remaining segments
+ * The bounded intake call carries only helper dispatch and acceptance. It uses
+ * the identity and control-boundary segments of the full `interaction` role. The remaining segments
  * of the same verified template require a nested decision envelope, selected
  * actions, typed tool intents, and a submit-only-after-confirmation path that this
  * intake contract does not accept.
@@ -178,7 +194,9 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
   return [
     ...promptSegments,
     '# Explicit intake decision output',
-    'Return one JSON object only. Do not call tools and do not claim execution.',
+    'Return one final JSON object only. You may dispatch_helper for bounded independent work and accept_helper to explicitly adopt a returned result. Do not claim task execution.',
+    'dispatch_helper takes selection (roleId and optional configuredAgentId), assignmentFields, inputs, and evidenceRefs. Helpers must return JSON with agentId, producedArtifactRefs, producedArtifactDigests, status, summary, outputRefs, evidenceRefs, nextAction, and optional conditionRef/failureRef. Returned does not mean accepted.',
+    'accept_helper takes helperCallId, refinedText, acceptanceRef, and evidenceRefs. Refine the actual returned conclusion before accepting it.',
     'The object is flat at the top level. kind must be requirement, status-query, clarification, or answer.',
     'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal and the optional matchedTaskId for requirement, answer for status-query and answer, and question for clarification.',
     'Never nest a decision wrapper, and never emit a selected-action, summary, user-input flag, tool-result flag, or tool-intents field.',
@@ -187,13 +205,12 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
     'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
     'Submitting the new-task form is already the user confirmation. For proposal.intent=create, do not write a second-confirmation blocker into objective, deliveryConditions, or blockingGaps.',
-    'Do not choose an execution owner, worker, provider, or runtime.',
+    'Do not choose a task execution owner, worker, provider, or runtime in the intake decision.',
     'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
     'Use answer only for a general question you can answer directly from the current input and provided context, with no execution, exploration, external retrieval, or deliverable. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
     'For clarification, ask one concrete question and do not invent a task match.',
     `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
     'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Answer requires a non-empty answer. Clarification requires question.',
-    JSON.stringify(input),
   ].join('\n\n');
 }
 
@@ -334,13 +351,21 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
 }
 
 export function createProviderExplicitBrainInterpreter(input: {
-  readonly port: ExecutionRuntimePort;
+  readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
+  readonly organId: OrganId;
+  readonly interactionScopeId: string;
+  readonly parentJournal: InteractionParentTurnRawJournalPort;
+  readonly helperJournal: InteractionHelperJournalPort;
+  readonly rawEvidence: ProviderEvidenceSink;
+  readonly rawContent: RawContentReadPort;
+  readonly helperFactory: ExplicitTurnHelperFactory;
+  readonly clock: { now(): string };
   readonly binding: ProviderBinding;
   readonly templateRoot: string;
   readonly prepareAgentProvider?: (input: {
     readonly roleId: import('../../config/src/index.js').AgentRole;
     readonly configuredAgentId?: string;
-  }) => Promise<AgentProviderComposition>;
+  }) => Promise<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>>;
   /**
    * Private App callback for the authoritative Provider settlement receipt.
    * The App assembly points it at the existing interaction journal; the
@@ -349,7 +374,7 @@ export function createProviderExplicitBrainInterpreter(input: {
   readonly publishProviderSettlement?: (receipt: {
     readonly interactionId: string;
     readonly inputRevision: number;
-    readonly settlement: ProviderSettlement;
+    readonly settlement: ProviderSettlement<InteractionParentProviderExecutionIdentityRef>;
   }) => void | Promise<void>;
 }): ExplicitBrainInputInterpreter {
   let promptSegments: Promise<readonly string[]> | undefined;
@@ -365,36 +390,131 @@ export function createProviderExplicitBrainInterpreter(input: {
       const identity = randomUUID();
       const runtimeId = `explicit-interpret-${identity}`;
       const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
-      let driver: ProviderAgentDriver | undefined;
+      let driver: ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef> | undefined;
       let submitted = false;
       let settleAttempted = false;
       let interpretation: ExplicitBrainInterpretation;
       try {
-        const taskId = id('task', `explicit-interpret-${identity}`);
         const operationId = id('operation', `explicit-interpret-${identity}`);
-        driver = new ProviderAgentDriver({
-          port: owned === undefined ? input.port : owned.port,
+        const turn: InteractionTurnIdentity = {
+          organId: input.organId, interactionScopeId: input.interactionScopeId,
+          interactionId: request.interactionId, inputRevision: request.inputRevision,
+          turnId: runtimeId,
+        };
+        const execution = { runtimeId, organId: input.organId, operationId, executionEpoch: 1, interactionTurn: turn };
+        const scope = { organId: input.organId, operationId };
+        const initialInput = {
+          ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(request) }),
+          view: { kind: 'utf8-text' as const },
+        };
+        const owner = createInteractionParentTurnRawOwner({
+          turn, execution, scope, initialInput, journal: input.parentJournal, rawContent: input.rawContent,
+          instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()) }),
+        });
+        await owner.openTurnInput();
+        const helpers = new ExplicitTurnHelperSession({
+          identity: turn, latestTurn: { ...turn, entries: [{ kind: 'user-input', content: initialInput }] },
+          journal: input.helperJournal, clock: input.clock, factory: input.helperFactory,
+        });
+        const port = owned?.port ?? input.port;
+        if (port === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent provider is not configured');
+        driver = new ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef>({
+          port,
           binding: owned === undefined ? input.binding : owned.binding,
           runtimeId,
-          taskId,
+          organId: input.organId,
+          interactionTurn: turn,
           operationId,
           executionEpoch: 1,
           assignmentId: `explicit-interpret-${identity}`,
-          scope: { organId: id('organ', 'humanagent-explicit-brain'), taskId, operationId },
+          scope,
           inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
           ownerId: 'humanagent.runtime.explicit-brain',
+          rawEvidence: input.rawEvidence,
+          registerRequest: (registration) => owner.registerRequest(registration),
+          acceptRawFact: (envelope) => owner.acceptRawFact(envelope),
+          requestContext: owner.requestContext,
+          tools: [
+            { toolId: 'dispatch_helper', description: 'Dispatch independent bounded helper work. Return is not acceptance. Include the required structured helper result contract in the bounded inputs.', inputSchema: {
+              type: 'object', properties: {
+                selection: { type: 'object', properties: { roleId: { type: 'string' }, configuredAgentId: { type: 'string' } }, required: ['roleId'] },
+                assignmentFields: {
+                  type: 'object', properties: {
+                    objective: { type: 'string' }, targetRefs: { type: 'array', items: { type: 'string' } },
+                    expectedOutputRefs: { type: 'array', items: { type: 'string' } },
+                    expectedArtifactDigests: { type: 'array', items: { type: 'string' } },
+                    acceptanceCriteriaDigest: { type: 'string' }, successCriteria: { type: 'array', items: { type: 'string' } },
+                    failureCriteria: { type: 'array', items: { type: 'string' } }, incompleteCriteria: { type: 'array', items: { type: 'string' } },
+                    requiredCapabilities: { type: 'array', items: { type: 'string' } }, mergeGate: { type: 'string', enum: ['required', 'not-required'] },
+                  }, required: ['objective', 'targetRefs', 'expectedOutputRefs', 'acceptanceCriteriaDigest', 'successCriteria', 'failureCriteria', 'incompleteCriteria', 'requiredCapabilities', 'mergeGate'],
+                },
+                inputs: { type: 'object' }, evidenceRefs: { type: 'array', items: { type: 'object' } },
+              }, required: ['selection', 'assignmentFields', 'inputs', 'evidenceRefs'],
+            } },
+            { toolId: 'accept_helper', description: 'Explicitly accept a returned helper with refined text.', inputSchema: { type: 'object', properties: { helperCallId: { type: 'string' }, refinedText: { type: 'string' }, acceptanceRef: { type: 'string' }, evidenceRefs: { type: 'array' } }, required: ['helperCallId', 'refinedText', 'acceptanceRef', 'evidenceRefs'] } },
+          ],
+          executeTool: {
+            async execute({ call }) {
+              const args = call.arguments;
+              if (!Array.isArray(args.evidenceRefs)) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'helper evidenceRefs must be an array');
+              const evidenceRefs = args.evidenceRefs.map((ref) => { const evidence = ref as unknown as EvidenceRef; assertEvidenceRef(evidence); return evidence; });
+              let result: unknown;
+              if (call.toolId === 'dispatch_helper') {
+                const selection = args.selection as { roleId?: unknown; configuredAgentId?: unknown } | undefined;
+                if (!selection || typeof selection.roleId !== 'string'
+                  || (selection.configuredAgentId !== undefined && typeof selection.configuredAgentId !== 'string')
+                  || !args.assignmentFields || !args.inputs || !Array.isArray(args.evidenceRefs)) {
+                  throw new ExplicitBrainOperationalToolError('unsupported-tool', 'invalid dispatch_helper arguments');
+                }
+                result = await helpers.dispatchHelper({
+                  selection: { roleId: selection.roleId, ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }) },
+                  assignmentFields: args.assignmentFields as unknown as InteractionHelperAssignmentFields,
+                  inputs: args.inputs as BusinessPayload,
+                  evidenceRefs,
+                  conclude: ({ events }) => {
+                    const raw = events.filter((event) => event.kind === 'provider.output')
+                      .map((event) => ('summary' in event ? event.summary : '')).join('');
+                    const result = JSON.parse(raw) as InteractionHelperResultFields;
+                    // Runtime validates these fields against its assignment. Do
+                    // not let returned JSON replace Runtime's helper identity.
+                    return {
+                      agentId: result.agentId, producedArtifactRefs: result.producedArtifactRefs,
+                      producedArtifactDigests: result.producedArtifactDigests,
+                      ...(result.producedArtifactBodies === undefined ? {} : { producedArtifactBodies: result.producedArtifactBodies }),
+                      status: result.status, summary: result.summary, outputRefs: result.outputRefs,
+                      evidenceRefs: result.evidenceRefs, nextAction: result.nextAction,
+                      ...(result.conditionRef === undefined ? {} : { conditionRef: result.conditionRef }),
+                      ...(result.failureRef === undefined ? {} : { failureRef: result.failureRef }),
+                    };
+                  },
+                });
+              } else if (call.toolId === 'accept_helper') {
+                const helperCallId = nonEmptyString(args, 'helperCallId');
+                const refinedText = nonEmptyString(args, 'refinedText');
+                const acceptanceRef = nonEmptyString(args, 'acceptanceRef');
+                if (!Array.isArray(args.evidenceRefs)) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'accept_helper evidenceRefs must be an array');
+                const refinedResult = {
+                  ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'accepted-helper', locator: helperCallId, content: refinedText }),
+                  view: { kind: 'utf8-text' as const },
+                };
+                result = await helpers.acceptHelper({ helperCallId, refinedResult, acceptanceRef,
+                  acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs });
+              } else {
+                throw new ExplicitBrainOperationalToolError('unsupported-tool', `unknown interaction tool ${call.toolId}`);
+              }
+              return { output: JSON.stringify(result), outputRefs: [], evidenceRefs: [] };
+            },
+          },
         });
-        const output: string[] = [];
-        await driver.start({ runtimeId, taskId, operationId, organId: id('organ', 'humanagent-explicit-brain'), executionEpoch: 1, assignmentId: `explicit-interpret-${identity}` });
+        await driver.start({ ...execution, assignmentId: `explicit-interpret-${identity}` });
         await driver.submit({
-          taskId,
+          ...execution,
           executionEpoch: 1,
           assignmentId: `explicit-interpret-${identity}`,
-          payload: { prompt: interpreterPrompt(request, await loadPromptSegments()) },
+          payload: {},
         });
         submitted = true;
         for await (const event of driver.observe({ runtimeId })) {
-          if (event.kind === 'provider.output' && event.summary) output.push(event.summary);
           if (event.terminalState !== undefined) break;
         }
         settleAttempted = true;
@@ -402,7 +522,26 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (closure.state !== 'succeeded') {
           throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
         }
-        interpretation = parseInterpreterOutput(output.join(''), request);
+        const snapshot = await input.parentJournal.readTurnSnapshot(turn);
+        const final = snapshot.requests.at(-1)?.fact;
+        if (final?.phase !== 'settled' || !snapshot.acceptedFacts.some(({ fact: accepted }) =>
+          accepted.envelope.request.requestId === final.request.requestId
+          && accepted.envelope.fact.kind === 'request-complete' && accepted.envelope.fact.terminal === 'completed')) {
+          throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent has no successful terminal raw request');
+        }
+        const folded = await foldActiveTurn<
+          { readonly requestId: string },
+          { readonly execution: InteractionParentProviderExecutionIdentityRef; readonly scope: typeof scope },
+          InteractionParentProviderExecutionIdentityRef
+        >({ binding: { execution, scope }, initialInput, entries: snapshot.acceptedFacts.map(({ fact }) => fact),
+          requests: snapshot.requests.map(({ fact }) => fact), childInvocations: [],
+          cut: { requestId: final.request.requestId }, checkpointPath: [], completionRefs: [], rawContent: input.rawContent });
+        const units = folded.contentUnits.filter((unit) => unit.request.requestId === final.request.requestId
+          && unit.channel === 'assistant-text' && unit.supersededBy === undefined);
+        if (units.length === 0 || units.some((unit) => !unit.complete)) {
+          throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent final raw content is missing or incomplete');
+        }
+        interpretation = parseInterpreterOutput(units.map((unit) => new TextDecoder('utf-8', { fatal: true }).decode(unit.bytes)).join(''), request);
         // Only the simple-answer path carries the authoritative settlement receipt;
         // complex requirement routing keeps its existing behavior.
         if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
