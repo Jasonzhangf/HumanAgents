@@ -578,6 +578,7 @@ function serviceFor(
     ...(now ? { now } : {}),
     ...(hookRegistry ? { hookRegistry } : {}),
     explicitBrainInterpreter: explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
+    runtimeComposition: { admitExecution: async () => {} },
   });
 }
 
@@ -934,6 +935,7 @@ test('ui runtime rejects stale memory epoch recall after the task advances', asy
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal: runtimeJournal,
     closurePort: runtimeJournal,
+    runtimeComposition: { admitExecution: async () => {} },
     memory: {
       coordinator: new MemoryCoordinator(),
       backend: new DeterministicMemoryBackend(),
@@ -2093,6 +2095,7 @@ test('observation pairs provider tool calls with results by callId and uses tool
     journal: runtimeJournal,
     closurePort: runtimeJournal,
     memory: testMemory('project-ui-tool-result'),
+    runtimeComposition: { admitExecution: async () => {} },
     providerTools: [RESPONSES_FILE_SEARCH_TOOL],
     providerToolExecutor: {
       async execute() {
@@ -3052,6 +3055,7 @@ test('orchestrated confirmed requirement dispatches implicit executor agents thr
     closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     memory: testMemory('project-ui-implicit-executor-dispatch'),
     runtimeComposition: {
+      admitExecution: async () => {},
       createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
         const runtimePool = new AgentRuntimePoolManager({
           maxRuntimes: 4,
@@ -5960,6 +5964,7 @@ test('stop does not wait forever when orchestration fails before provider readin
     closurePort: journal,
     memory: testMemory('project-ui-orchestration-startup-failure'),
     runtimeComposition: {
+      admitExecution: async () => {},
       createTaskAssembly() {
         throw new Error('orchestration assembly failed before provider readiness');
       },
@@ -6162,6 +6167,7 @@ test('a failed tool execution releases the provider session and reports the real
     journal: runtimeJournal,
     closurePort: runtimeJournal,
     memory: testMemory('project-ui-abandoned-tool'),
+    runtimeComposition: { admitExecution: async () => {} },
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     providerTools: [RESPONSES_FILE_READ_TOOL],
     providerToolExecutor: {
@@ -6228,6 +6234,7 @@ test('failure cleanup does not report a clean failure while the shared provider 
     journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     memory: testMemory('project-ui-retained-cleanup'),
+    runtimeComposition: { admitExecution: async () => {} },
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     providerTools: [RESPONSES_FILE_READ_TOOL],
     providerToolExecutor: {
@@ -6284,6 +6291,7 @@ test('a terminal provider failure does not advertise a stop the provider will re
     journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     memory: testMemory('project-ui-terminal-failure'),
+    runtimeComposition: { admitExecution: async () => {} },
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
   });
   const task = service.createTask({ title: 'terminal provider failure' });
@@ -6326,6 +6334,7 @@ test('failure cleanup does not advertise a retry-stop fenced by a failed attenti
     journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     memory: testMemory('project-ui-fenced-stop-claim'),
+    runtimeComposition: { admitExecution: async () => {} },
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     providerTools: [RESPONSES_FILE_READ_TOOL],
     providerToolExecutor: {
@@ -7291,6 +7300,11 @@ test('rcc startup projects provider readiness failure instead of claiming ready'
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     portNumber: 0,
     memory: testMemory('project-ui-readiness'),
+    runtimeComposition: {
+      prepareAgentProvider: async () => {
+        throw new Error('the readiness gate must reject before provider preparation');
+      },
+    },
   });
   try {
     const status = await fetch(`${runtime.server.url}/api/runtime/status`);
@@ -7598,6 +7612,7 @@ test('UI checkpoint boundary publishes the committed journal digest and consumes
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal: runtimeJournal,
     closurePort: runtimeJournal,
+    runtimeComposition: { admitExecution: async () => {} },
     memory: {
       ...testMemory('project-ui-boundary-success'),
       checkpointBoundary: boundary,
@@ -7633,6 +7648,7 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal,
     closurePort: journal,
+    runtimeComposition: { admitExecution: async () => {} },
     memory: {
       ...testMemory('project-ui-boundary-failure'),
       checkpointBoundary: {
@@ -8360,6 +8376,7 @@ test('orchestrated review is handed the produced file bodies, not only the execu
     closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     memory: testMemory('project-ui-produced-artifacts'),
     runtimeComposition: {
+      admitExecution: async () => {},
       createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
         const runtimePool = new AgentRuntimePoolManager({
           maxRuntimes: 4,
