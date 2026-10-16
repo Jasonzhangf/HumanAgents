@@ -1,4 +1,4 @@
-import { element as defaultElement, stateTone } from './runtime-api.js'
+import { element as defaultElement } from './runtime-api.js'
 
 // C5 shared checkpoint-history renderer and query-syntax helper.
 //
@@ -225,12 +225,6 @@ function heading(ui, text, detail = false) {
   return head
 }
 
-function chip(ui, text, tone) {
-  const node = ui.make('span', text, 'state-chip')
-  if (tone) node.dataset.tone = tone
-  return node
-}
-
 function failureBlock(ui, failure, technical) {
   const block = ui.make('div', undefined, 'status-banner')
   block.setAttribute('data-tone', 'danger')
@@ -384,6 +378,27 @@ function recoveryBindingBlock(ui, binding, onOpenReference) {
   return box
 }
 
+// One rendered semantics field. An empty or missing value is explicit ("未提供")
+// and is never filled from the raw summary or description.
+function semanticPart(ui, label, role, value) {
+  const part = ui.make('div', undefined, 'item')
+  part.setAttribute('data-checkpoint-role', role)
+  part.append(ui.make('strong', label))
+  part.append(ui.make('p', typeof value === 'string' && value.trim() ? value : '未提供', 'muted'))
+  return part
+}
+
+// The four DTO semantics fields in their existing order. Shared by the human
+// main layer and the technical layer so both render the same exact values and
+// keep the same `semantic-*` roles. The main layer names the last field as a
+// saved-time suggestion; the technical layer keeps the shorter label.
+function appendSemanticParts(ui, parent, semantics, nextStepLabel = '下一步') {
+  parent.append(semanticPart(ui, '目标', 'semantic-goal', semantics?.goal))
+  parent.append(semanticPart(ui, '做了什么', 'semantic-actions', semantics?.actions))
+  parent.append(semanticPart(ui, '结果', 'semantic-result', semantics?.result))
+  parent.append(semanticPart(ui, nextStepLabel, 'semantic-next-step', semantics?.nextStep))
+}
+
 function semanticBlock(ui, semantic, onOpenReference, bodyTarget, readOptions) {
   const box = ui.make('div', undefined, 'item')
   box.append(ui.make('strong', '语义（目标 / 行动 / 结果 / 下一步）'))
@@ -395,19 +410,7 @@ function semanticBlock(ui, semantic, onOpenReference, bodyTarget, readOptions) {
   // The version is the real DTO field. No version is inferred from any string.
   if (semantic.version !== undefined) box.append(ui.make('p', `语义版本 ${semantic.version}`, 'muted'))
   if (semantic.description) box.append(ui.make('p', semantic.description, 'muted'))
-  const fourPart = [
-    ['目标', 'semantic-goal', semantic.semantics?.goal],
-    ['做了什么', 'semantic-actions', semantic.semantics?.actions],
-    ['结果', 'semantic-result', semantic.semantics?.result],
-    ['下一步', 'semantic-next-step', semantic.semantics?.nextStep],
-  ]
-  for (const [label, role, value] of fourPart) {
-    const part = ui.make('div', undefined, 'item')
-    part.setAttribute('data-checkpoint-role', role)
-    part.append(ui.make('strong', label))
-    part.append(ui.make('p', typeof value === 'string' && value.trim() ? value : '未提供', 'muted'))
-    box.append(part)
-  }
+  appendSemanticParts(ui, box, semantic.semantics)
   if (semantic.save) {
     box.append(ui.make('p', `保存提交：${semantic.save.checkpoint?.checkpointRef ?? '未提供'}`, 'muted'))
     box.append(ui.make('p', `Context 阶段提交：Journal #${semantic.save.contextView?.journalSeq ?? '未提供'}`, 'muted'))
@@ -489,10 +492,10 @@ function currentSection(ui, current) {
   const identity = current.identity
   const head = ui.make('div', undefined, 'section-head')
   head.append(ui.make('h4', `检查点 ${identity.seq}`))
-  head.append(chip(ui, outcomeText(identity.outcome), stateTone(identity.outcome)))
   section.append(head)
-  section.append(ui.make('p', identity.summary))
-  section.append(ui.make('p', `下一步：${nextActionText(identity.next)}`, 'muted'))
+  // The authority is the position, not the saved record's outcome or next
+  // action. The saved summary and next action stay in the technical layer.
+  section.append(ui.make('p', '此处表示当前执行关联的检查点位置。记录保存时状态与建议不代表任务当前业务状态。', 'muted'))
   section.append(ui.make('p', `当前生效执行轮 ${current.position.effectiveExecutionEpoch} · 该检查点提交轮 ${identity.originalExecutionEpoch}`, 'muted'))
   return section
 }
@@ -520,10 +523,18 @@ function viewedSection(ui, current, viewed, options) {
   const identity = viewed.identity
   const chipRow = ui.make('div', undefined, 'section-head')
   chipRow.append(ui.make('h4', `检查点 ${identity.seq}`))
-  chipRow.append(chip(ui, outcomeText(identity.outcome), stateTone(identity.outcome)))
   section.append(chipRow)
-  section.append(ui.make('p', identity.summary))
-  section.append(ui.make('p', `下一步：${nextActionText(identity.next)}`, 'muted'))
+  // The saved record's outcome and typed next action are shown as saved-time
+  // facts. They are never a recovery control and never a task's current status.
+  section.append(ui.make('p', `记录保存时状态：${outcomeText(identity.outcome)}`, 'muted'))
+  section.append(ui.make('p', `记录保存时的下一动作：${nextActionText(identity.next)}`, 'muted'))
+  const semantic = viewed.semantic
+  if (!semantic || semantic.state === 'unavailable') {
+    section.append(ui.make('p', '此记录未提供结构化阶段说明。原始摘要可在技术详情查看。', 'muted'))
+  } else {
+    // The structured Chinese four-part semantics come straight from the DTO.
+    appendSemanticParts(ui, section, semantic.semantics, '下一步（保存时建议）')
+  }
   section.append(ui.make('p', `该检查点提交轮 ${identity.originalExecutionEpoch}`, 'muted'))
   if (!isCurrent) section.append(ui.make('p', '这不是当前执行位置。', 'muted'))
   return section
@@ -544,14 +555,15 @@ function historySection(ui, value, options) {
       card.setAttribute('data-checkpoint-role', 'history-entry')
       card.setAttribute('data-checkpoint-journal-seq', String(entry.commitRef.journalSeq))
       const head = ui.make('div', undefined, 'section-head')
-      head.append(ui.make('strong', `检查点 ${entry.seq} · ${outcomeText(entry.outcome)}`))
+      head.append(ui.make('strong', `检查点 ${entry.seq}`))
       ui.action(head, '查看此检查点', options.onSelect, {
         checkpointId: entry.checkpointId.value,
         commitRef: entry.commitRef,
       }, 'button button--sm')
       card.append(head)
-      card.append(ui.make('p', entry.summary))
-      card.append(ui.make('p', `下一步：${nextActionText(entry.next)}`, 'muted'))
+      // The list carries only navigation facts: number, saved-time status and
+      // the original select trigger. No flattened summary or next line repeats.
+      card.append(ui.make('p', `保存时状态：${outcomeText(entry.outcome)}`, 'muted'))
       list.append(card)
     }
     section.append(list)
@@ -614,8 +626,9 @@ export function renderCheckpointHistoryDetail(read, options = {}) {
       ['指令修订', identity.directiveRevision],
       ['该检查点提交轮', identity.originalExecutionEpoch],
       ['当前生效执行轮', value.current.position.effectiveExecutionEpoch],
-      ['结果', outcomeText(identity.outcome)],
-      ['下一步', nextActionText(identity.next)],
+      ['原始摘要', identity.summary],
+      ['记录保存时状态', outcomeText(identity.outcome)],
+      ['记录保存时下一动作', nextActionText(identity.next)],
       ['提交时间', identity.committedAt],
       ['提交时间不可用原因', identity.committedAtUnavailableReason],
       ['时间权威', identity.timeAuthority?.authorityRef],
@@ -640,8 +653,9 @@ export function renderCheckpointHistoryDetail(read, options = {}) {
       ['前序检查点', identity.previousCheckpointId?.value ?? '无'],
       ['指令修订', identity.directiveRevision],
       ['该检查点提交轮', identity.originalExecutionEpoch],
-      ['结果', outcomeText(identity.outcome)],
-      ['下一步', nextActionText(identity.next)],
+      ['原始摘要', identity.summary],
+      ['记录保存时状态', outcomeText(identity.outcome)],
+      ['记录保存时下一动作', nextActionText(identity.next)],
       ['提交时间', identity.committedAt],
       ['提交时间不可用原因', identity.committedAtUnavailableReason],
       ['时间权威', identity.timeAuthority?.authorityRef],
