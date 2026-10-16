@@ -2,11 +2,11 @@
   "graph": "humanagent-explicit-semantic-turn",
   "requirements_version": 14,
   "labels": {
-    "assemble": "装配显式交互与前序语义",
-    "route": "显式大脑形成直接回答或标准任务模板",
-    "outcome": "按明确分流形成交互答案或既有派发业务结果",
-    "history": "保存交互业务结果及关联的独立执行收拢凭证",
-    "return": "返回本次交互答案完成或复杂需求派发结果"
+    "assemble": "装配显式交互轮次与前序语义检查点",
+    "route": "登记父规范请求并物化规范上下文",
+    "outcome": "接纳父原始事实并区分派发返回与显式采纳",
+    "history": "分离前序语义检查点与当前原始资产",
+    "return": "返回显式解释或显式错误"
   },
   "owners": {
     "assemble": "packages/runtime",
@@ -19,8 +19,14 @@
     "inputs": "一次用户提交携带 interactionId、inputRevision、本次输入和可用前序语义。",
     "outputs": "一次返回携带本次交互业务结果或既有复杂需求派发结果，并保持单入口、单出口。",
     "ablation": "assemble、route、outcome、history、return 均有独立产品责任；本图未删除节点，物理删除数为 0。",
+    "identityBoundary": "父轮次使用中立 interaction-parent execution identity（runtimeId、organId、operationId、executionEpoch、interactionTurn）；不伪造 taskId 或 cycleId，也不把身份镜像到业务 payload 或 metadata。",
+    "dispatchReturnBoundary": "dispatch_helper 只记录 dispatch-accepted 与 returned，返回结论不自动采纳；只有 accept_helper 才产生 owner-accepted 并追加当前 latestTurn。",
+    "iterationBoundary": "initial、tool-call、tool-result、continuation 由外部 ProviderAgentDriver 按真实请求循环驱动；本 DAG 保持无环，不在图内表达工具请求环。",
+    "helperBoundary": "每个 helper dispatch 使用独立上下文与身份；helper 数量由调用方动态选择，本图不绑定固定角色集合。",
+    "historyBoundary": "历史语义只取前序已提交 InteractionSemanticCheckpoint；当前轮次完整上下文由当前原文 RawAsset 与本轮 accepted raw facts 单独物化，二者不混用，也不形成隐藏的前次响应链。",
     "settlementEvidence": "Provider adapter 拥有 settlement 语义；原 typed 成功 Provider settlement receipt 作为独立控制证据关联同一 interactionId 与 inputRevision。explicit-brain.state、trace、非空 reply 或任务 payload 均不能替代该凭证。",
     "businessSeparation": "答案文本、任务模板、任务 checkpoint 与执行收拢凭证保持分离；简单问答不创建 Draft、FIFO、产品 Task 或任务 checkpoint。",
+    "plannedOwnerBoundary": "plannedOwnerPath 记录的 interaction-parent-turn-raw.ts 与 interaction-parent-turn-journal.ts 尚不存在；现有 ownerPath 是真实责任入口，不声明 Operator 注册或已实现。",
     "statusBoundary": "implementationStatus 仍为 UNVERIFIED；本图不声明 receipt 记录、Operator 注册、运行执行或验收已完成。"
   },
   "implementationStatus": "UNVERIFIED"
