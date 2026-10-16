@@ -4,6 +4,12 @@
 
 ## 1. 当前目标与总体进度（截至 2026-10-15）
 
+- **本轮恢复快照**：用户在 Provider 聊天明确“继续”，goal 实际由 paused 恢复 active。本轮 **9 个工作项，0 个新验收完成**：restart（UX peer 唯一 writer）、explicit intake、RC-1～RC-5 五路原 fixture 修复、G-A/TG1 缺边、T4b 类型合同纠正。已启动 6 路 fresh GCM（intake + RC-1～RC-5）和 2 路独立 AGY Gemini 4 Medium 规划；restart 由 UX peer 已启动的 GCM 独占，不重复派发。启动回执不计完成。
+- **最新 Git 边界**：原代码冻结候选为 `dc19a784a75e1179152de59bb5c85d9c91febb58`，已包含本地 main `2ea11c0c`，另 37 个 Git 提交；远端 main 仍为 `db915e7a`，本地 main 领先远端 **114 个提交**。这些数字是提交数。完整待推闭包未有整体 Review PASS、真实新任务交付或 push。下文 `4ba88f40` / 113 是恢复前历史快照，不能替代本条。
+- **新收到但未接收的来源**：T4b 原作者 exit 0，返回同一泛型生命周期和原用例结果；存在泛型/RawFact 的强制类型转换及原 allowlist 外 replay 注解变更，交独立窄规划，尚未采用。G-A r2 原 consumer 仍 **0/3**，新首错位于 TG1 owner/自动启动边界，不再是 Task 创建前；5 路径 frozen dirty 保留，不能计修复完成。相关新规划为 `provider-{taskless-types,generic-tg1}-plan-agy4-r1-20261015`。
+- **本轮文件窗口与资源**：intake 独占 `explicit-brain-runtime.ts` 及两个原 App fixture，并收拢 RC-5 在 `ui-runtime.test.ts` 的两处旧 ABI 错误；RC-5 只写其他 4 个原 App 测试。5 路 RC 基于原 **143 错 / 17 文件**规划，保原断言，不新增测试矩阵或产品能力。新树为一个 intake 域和 RC-1～RC-5 各一个域，receipt：`/private/tmp/ha-worktree-sese-inventory-20261015/release-fixture-open-receipt.json`；接收并标准 Git 合流后当轮 remove/prune/absent，不重派开第二树。
+- **UX 协同最新边界**：peer 固定候选 `2204469c` 已组合 C3/C5/C6/shell 和 C4 基础来源；尚未由 Provider 唯一候选采用。C4/C7 公开控制与后续有效 Context 挂载未交付。peer 新 SIGKILL 观察暴露无 capture 的 active tail 返回 `cold-execution.source-unavailable`；原双进程正常退出证据不能据此关闭 F13。两侧 53007/p1 原 interaction 现场保持，正式 restart 和原意图重试需先协调。
+
 - **Provider/native 当前核验状态**：完整 goal ACTIVE；Provider main **0/7**。原25例组合基线仍 **22 PASS / 3 FAIL**，不以局部结果覆盖。唯一集成分支 `codex/native-delivery-candidate-20261015` clean HEAD `4ba88f40`：已接原UX22/native25/terminal6/T1/T2/T3/G-P/App17/Config/cold/Memory、reload `ee0be443`、117行重复路由消融 `38f4ca25`、T6两行预算 `9567b413`、T4a `b9b22190`、验收文档 `75a53b3`、v14/SESE `33fca9f`，再接A4为 `08961ab1`，最后正常无冲突merge localmain `27532680`。localmain领先remote `db915e7a` 的113提交属于清理保存的待推闭包，尚未整体Review；不能当已验收。该合流保留退役删除，新增运行差异是coordinator13行，App正常重建0。首I1整体Review须覆盖remote→完整组合闭包，不能只审最近leaf。未整体PASS、未安装/正式发布或push。
 - **N3 最新纠正**：T2旧turn/revision混用已实际RED→GREEN，正常compile0/原一case1PASS，final source `f83e6ddb…`、consumer `3809e434…`。已接受基础为 **T1/T2/T3 = 3/6**；T4a合同子包已正常提交 `af033dff`，contracts及原consumer均正常compile0、原3case PASS。T4b Provider driver、T4c Runtime helper已取得同一Git依赖并并行执行；完整T4、T5生产组装、T6真实CLI预算仍未验。T3是真实Journal基础，不是helper执行。
 - **资源纠正**：用户说明清理已经停止，历史大量worktree源于本目标未及时收口。Root接受该执行偏差；不新增长期规则。下文全量清理数字属于该清理任务；最初本侧回执仅1项，后续自有来源核销见当前回执，不混为全量清理成果。现按同域单树、标准Git合流、接受且无后续用途后当轮核销。关键284份归档另存 `/private/tmp/humanagent-provider-recovery-evidence-20261015.tar.gz`；恢复不计新功能进度。
@@ -30,7 +36,7 @@
 
 ## 3. 下一阶段收敛步骤
 
-当前4路fresh GCM：T4b Provider driver、T4c Runtime executor、G-A准入r2、restart进程寿命修复；另有独立AGY Gemini4显式intake真实失败计划。G-A r4 amendment已获用户明确授权并READY/exit0，拒绝伪造health=degraded，改用typed admission requestability；r2复用原树，原3case保留。C4、A4、入口准备作者均已exit0。T4b/T4c的pnpm frozen依赖已由Root正常补齐。C6由UX peer原树修，C7待真实HTTP ABI；二者不扣首I1。
+本轮按第一节恢复快照并行推进：6 路 GCM 实现 + 2 路独立规划；restart 另由 UX peer 唯一 GCM writer 负责。T4c 已正常合流为 `dc19a784`，原来源树已核销，receipt 为 `taskless-executor-close-receipt.json`。T4b、G-A 各自作者已退出，结果未接收；在原树修正计划，不另开同域树。C6/C3 只读 UX 结果复用 peer 接收记录，C7 待独立公开控制 ABI，均不强加为首 I1 的额外依赖。
 
 - **当前两个真实交付缺口**：① restart CLI回completed/exit0，generation1 PID14046→generation2 PID36889后，新PID与65517监听随即消失，lease却未disposed；已撤回PASS。r1正式serve恢复又被`daemon-takeover.previous-close-unverified`拒绝，原控制根和无Task证据保留，未改lease绕保护。独立READY计划 `provider-restart-lifetime-plan-agy4-r1-20261015/plan.md`；GCM同名实现原树从4ba创建，只修spawn寿命与原consumer，先证实caller/PTY反例，不向负PID或整个进程组发信号、不用/tmp持久化。② 新鲜r2同源RCC服务 `53007`、PID85589已实际存活；UX单次submit创建ux-handoff.md需求后，真实输出把kind放在decision.kind，而App严格parser要求顶层kind，报`interaction agent decision does not match the explicit intake contract`。实际无typed Task，interaction-1不是TaskId；保当前服务，不重试/不restart。输出还带确认等待文本，实际二次确认路径尚未走到，不能冒推定已发生。计划 `provider-explicit-intake-plan-agy4-r1-20261015` 正在独立核对模板/唯一输出合同，禁止双格式fallback或切model。
 - **真实入口证据**：`provider-candidate-live-entry-gcm-r1-20261015/{post-main-official-restart.*,parent-restart-lifetime-failure.json,crash-recovery-serve.log,parent-fresh-entry-r2-handoff.json}`；UX单次输入/页面/公开interaction在 `/private/tmp/humanagent-ux-remaining-20261015/live-i1-*`。旧62411/65517不可用，当前53007保恢复责任。用户已授权全部本范围动作；每个可用增量验收后整体Review→main→push，不等完整goal；当前113提交闭包未审，不先push其中所谓文档。
