@@ -2401,13 +2401,13 @@ export class RuntimeTaskCoordinator {
   }
 
   private markExecutionReleased(record: TaskRecord, operation: OperationRecord): void {
+    this.pushEvent(record, operation, 'execution.started', 'running', 'execution admitted and released', []);
     record.release = { state: 'released' };
     record.running = true;
     record.state = 'running';
     record.currentState = '运行中';
     record.nextStep = '等待 Provider 事件';
     this.activeExecutions.add(operation.operationId.value);
-    this.pushEvent(record, operation, 'execution.started', 'running', 'execution admitted and released', []);
     record.resolveRelease?.(record.release);
     record.resolveRelease = undefined;
     record.rejectRelease = undefined;
