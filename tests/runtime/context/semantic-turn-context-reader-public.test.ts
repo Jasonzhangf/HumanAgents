@@ -21,7 +21,10 @@ import {
   readResumedSegmentSemanticTurnContext,
   type ResolvedSemanticTurnContext,
   type SemanticCurrentTurnUnit,
+  type SemanticReasoningLineageFilterV1,
+  SemanticTurnContextReaderError,
 } from '../../../packages/runtime/src/context/semantic-turn-context-reader.js';
+import type { DeadEndRecord } from '../../../packages/runtime/src/checkpoints/closure.js';
 import {
   originalBusinessTurnRefFromBinding,
   type ActiveTurnInitialOpenAnchor,
@@ -31,6 +34,7 @@ import type { JournalCommitRef } from '../../../packages/contracts/src/i2-histor
 import type { TaskRuntimeIncarnation } from '../../../packages/contracts/src/framework.js';
 import type {
   ActiveTurnLivePrefix,
+  ActiveTurnProductionObligationRef,
   ActiveTurnSegmentLivePrefix,
 } from '../../../packages/runtime/src/context/active-turn-live-prefix.js';
 
@@ -419,4 +423,203 @@ test('initial-open segment chain: original input once and pending obligations pr
   assert.deepEqual(result.obligations, [
     { kind: 'request', requestId: request.requestId, phase: 'waiting', segmentId: openTurnId },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// N2-S active-reasoning filter. Failure mode: after a confirmed context
+// correction, a settled wrong tool pair must leave the request context while the
+// original input, the good pair and the verified conclusion stay. An open duty
+// must never be hidden. Failure probability is unknown; impact is a wrong result
+// polluting the model request or a dropped recovery duty. Cost is this one
+// existing consumer extension. Recorded in the accepted plan §4.2 and the r4 note.
+
+const RAW_BAD = '{"kind":"file-search","hits":0}';
+const RAW_GOOD = '{"kind":"file-list","entries":2}';
+
+function lineageFixture(obligations: readonly ActiveTurnProductionObligationRef[]): Fixture {
+  const registry = new Map<string, Uint8Array>();
+  const register = (assetId: string, text: string): void => {
+    registry.set(assetId, encoder.encode(text));
+  };
+  const read: RawContentReadPort = {
+    async read({ content }) {
+      const bytes = registry.get(content.ref.evidenceId.value);
+      if (!bytes) throw new Error(`missing raw asset ${content.ref.evidenceId.value}`);
+      return new Uint8Array(bytes);
+    },
+  };
+
+  register('lineage-initial', 'ORIGINAL USER INPUT');
+  register('lineage-args-bad', '{"query":"bad"}');
+  register('lineage-output-bad', RAW_BAD);
+  register('lineage-args-good', '{"query":"good"}');
+  register('lineage-output-good', RAW_GOOD);
+
+  const entries: AcceptedTurnEntry[] = [];
+  const pushFact = (seq: number, producerSeq: number, fact: ProviderRawFact): void => {
+    entries.push({ seq, envelope: { execution, scope, request, producerSeq, fact } });
+  };
+  pushFact(1, 1, {
+    kind: 'tool-call',
+    contentUnitId: 'args-bad',
+    call: { callId: 'call-bad', toolId: 'file.search', arguments: { query: 'bad' }, continuationRef: 'cont-bad' },
+    rawArguments: asset('lineage-args-bad', { kind: 'arguments' }),
+    complete: true,
+  });
+  pushFact(2, 2, {
+    kind: 'tool-result',
+    contentUnitId: 'result-bad',
+    callId: 'call-bad',
+    continuationRef: 'cont-bad',
+    result: toolResult('call-bad', 'file.search', [{
+      evidenceId: id('evidence', 'lineage-evidence-bad'),
+      kind: 'tool',
+      source: 'lineage-fixture',
+      locator: 'test://lineage-evidence-bad',
+      scope,
+    }]),
+    rawOutput: asset('lineage-output-bad'),
+    complete: true,
+  });
+  pushFact(3, 3, {
+    kind: 'tool-call',
+    contentUnitId: 'args-good',
+    call: { callId: 'call-good', toolId: 'file.list', arguments: { query: 'good' }, continuationRef: 'cont-good' },
+    rawArguments: asset('lineage-args-good', { kind: 'arguments' }),
+    complete: true,
+  });
+  pushFact(4, 4, {
+    kind: 'tool-result',
+    contentUnitId: 'result-good',
+    callId: 'call-good',
+    continuationRef: 'cont-good',
+    result: toolResult('call-good', 'file.list', []),
+    rawOutput: asset('lineage-output-good'),
+    complete: true,
+  });
+
+  const prefix: Fixture['prefix'] = {
+    kind: 'live-accepted-prefix',
+    source: 'active-turn://refs/lineage',
+    binding: activeBinding(),
+    initialInput: asset('lineage-initial'),
+    entries,
+    requests: [{ request, scope, phase: 'settled' }],
+    childInvocations: [],
+    watermark: { lastAcceptedSeq: 4, controlRecordCount: 0 },
+    obligations: [...obligations],
+  };
+  return { prefix, read };
+}
+
+async function readLineageFixture(
+  fixture: Fixture,
+  reasoningLineage: SemanticReasoningLineageFilterV1,
+): Promise<ResolvedSemanticTurnContext> {
+  return readSemanticTurnContext({
+    history: {
+      async readCommittedSemanticCheckpoint() {
+        throw new Error('the reader must not read history without an exact lookup');
+      },
+    },
+    priorCompletedTurns: [],
+    live: { prefix: fixture.prefix, rawContent: fixture.read },
+    runtimeId: execution.runtimeId,
+    scope,
+    assignment,
+    reasoningLineage,
+  });
+}
+
+const retainedDeadEnd: DeadEndRecord = {
+  deadEndRef: 'dead-end://lineage/bad-search',
+  scope,
+  failedPathRefs: ['cont-bad'],
+  conclusion: 'the bad search path returned no usable hits',
+  invalidatedAssumptions: ['file.search covers the target directory'],
+  evidenceRefs: [{
+    evidenceId: id('evidence', 'lineage-dead-end'),
+    kind: 'tool',
+    source: 'lineage-fixture',
+    locator: 'test://lineage-dead-end',
+    scope,
+  }],
+  suggestedAlternatives: ['use file.list first'],
+};
+
+function currentUnits(result: ResolvedSemanticTurnContext): readonly SemanticCurrentTurnUnit[] {
+  return result.context.activeTurn.flatMap((entry) => (entry.kind === 'message' ? [entry.message] : []));
+}
+
+async function lineageFailureCode(
+  fixture: Fixture,
+  reasoningLineage: SemanticReasoningLineageFilterV1,
+): Promise<string | null> {
+  try {
+    await readLineageFixture(fixture, reasoningLineage);
+    return null;
+  } catch (error) {
+    return error instanceof SemanticTurnContextReaderError ? error.code : null;
+  }
+}
+
+test('active reasoning lineage: settled wrong tool pair leaves the request while good pair, input and verified conclusion stay', async () => {
+  const fixture = lineageFixture([]);
+  // Control: without the lineage filter the same committed prefix still carries
+  // the wrong pair. The omission below is therefore caused by the filter, not by
+  // a fixture that never produced the unit.
+  const unfiltered = await readFixture(fixture);
+  assert.equal(currentUnits(unfiltered).some((unit) => unit.kind === 'tool-result' && unit.callId === 'call-bad'), true);
+
+  const result = await readLineageFixture(fixture, {
+    omittedRefs: ['lineage-output-bad'],
+    verifiedDeadEnds: [retainedDeadEnd],
+  });
+  const units = currentUnits(result);
+
+  // The confirmed wrong result and its same-call tool call both leave.
+  assert.equal(units.some((unit) => unit.kind === 'tool-call' && unit.callId === 'call-bad'), false);
+  assert.equal(units.some((unit) => unit.kind === 'tool-result' && unit.callId === 'call-bad'), false);
+
+  // The good pair stays with its exact raw bytes.
+  assert.equal(units.some((unit) => unit.kind === 'tool-call' && unit.callId === 'call-good'), true);
+  assert.equal(decoder.decode(toolResultUnit(result, 'call-good').rawOutput), RAW_GOOD);
+
+  // The original user input is never dropped by a reasoning filter.
+  const initialBytes = units.flatMap((unit) => (unit.kind === 'initial-input' ? [unit.bytes] : []));
+  assert.equal(initialBytes.length, 1);
+  assert.equal(decoder.decode(initialBytes[0]!), 'ORIGINAL USER INPUT');
+
+  // The verified conclusion stays, with its certainty and evidence.
+  assert.deepEqual(result.verifiedDeadEnds, [retainedDeadEnd]);
+
+  // An explicitly omitted dead-end ref is not replayed.
+  const omittedDeadEnd = await readLineageFixture(fixture, {
+    omittedRefs: ['lineage-output-bad', retainedDeadEnd.deadEndRef],
+    verifiedDeadEnds: [retainedDeadEnd],
+  });
+  assert.equal(omittedDeadEnd.verifiedDeadEnds, undefined);
+
+  // A conclusion whose supporting evidence is fully omitted is not replayed with
+  // an empty evidence list; its certainty cannot be preserved.
+  const evidenceOmitted: DeadEndRecord = {
+    ...retainedDeadEnd,
+    deadEndRef: 'dead-end://lineage/evidence-omitted',
+    evidenceRefs: [{ ...retainedDeadEnd.evidenceRefs[0]!, evidenceId: id('evidence', 'lineage-output-bad') }],
+  };
+  const evidenceOmittedResult = await readLineageFixture(fixture, {
+    omittedRefs: ['lineage-output-bad'],
+    verifiedDeadEnds: [evidenceOmitted],
+  });
+  assert.equal(evidenceOmittedResult.verifiedDeadEnds, undefined);
+});
+
+test('active reasoning lineage: an open obligation matching a wrong ref is reported instead of hidden', async () => {
+  const identityOpen = lineageFixture([{ kind: 'request', requestId: 'lineage-output-bad', phase: 'waiting' }]);
+  assert.equal(await lineageFailureCode(identityOpen, { omittedRefs: ['lineage-output-bad'] }),
+    'semantic-turn-context.reasoning-lineage.unresolved-obligation');
+
+  const toolOpen = lineageFixture([{ kind: 'request', requestId: request.requestId, phase: 'waiting' }]);
+  assert.equal(await lineageFailureCode(toolOpen, { omittedRefs: ['lineage-output-bad'] }),
+    'semantic-turn-context.reasoning-lineage.unresolved-obligation');
 });

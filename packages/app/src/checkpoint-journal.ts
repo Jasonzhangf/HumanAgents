@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { ImmutableAssetStore } from '../../adapters/filesystem/src/index.js';
 import { createJsonlNativeSaveProgressPort } from '../../adapters/jsonl/src/native-save-progress.js';
 import { createNativeBoundarySaveController } from '../../runtime/src/checkpoints/boundary-save.js';
-import { readResumedSegmentSemanticTurnContext } from '../../runtime/src/context/semantic-turn-context-reader.js';
+import { readResumedSegmentSemanticTurnContext,
+  type SemanticReasoningLineageFilterV1 } from '../../runtime/src/context/semantic-turn-context-reader.js';
 import type { ActiveTurnSegmentContext } from '../../runtime/src/context/active-turn-context.js';
 import type { ProviderRequestContextHook, ProviderRequestContextUnit } from '../../contracts/src/provider-request-context.js';
 import {
@@ -127,6 +128,7 @@ import {
   checkpointClosurePreparationId,
   type ClosureRecord,
   type CheckpointClosureRecord,
+  type DeadEndRecord,
 } from '../../runtime/src/checkpoints/closure.js';
 import {
   assertContextCorrectionRecord,
@@ -311,11 +313,28 @@ interface SemanticHistoryReadDependencies {
   readonly rawContent: RawContentReadPort;
 }
 
+/**
+ * The exact execution selection of one active reasoning lineage. The
+ * chronological checkpoint ledger (`Checkpoint.previousCheckpointId`) is left
+ * untouched: `priorCompletedTurns` follows the committed bound-closure and
+ * accepted reentry/correction path instead. UI history inspection keeps using
+ * the complete `listCompletedTurnLookups` enumeration.
+ */
+export interface ActiveSemanticReasoningLineage {
+  readonly scope: ScopeRef;
+  readonly activeExecutionPosition: ExecutionPosition | null;
+  readonly activeContextRecord: ContextHistoryRecord | null;
+  readonly priorCompletedTurns: readonly SemanticHistoryExactLookupV1[];
+  readonly omittedRefs: readonly string[];
+  readonly verifiedDeadEnds: readonly DeadEndRecord[];
+}
+
 /** The same verified history reads, without a clock or any publication capability. */
 export function createJsonlSemanticHistoryReader(input: SemanticHistoryReadDependencies) {
   const port = semanticHistoryJournal(input);
   return {
     listCompletedTurnLookups: port.listCompletedTurnLookups,
+    selectActiveReasoningLineage: port.selectActiveReasoningLineage,
     readCommittedSemanticCheckpoint: port.readCommittedSemanticCheckpoint,
   };
 }
@@ -330,6 +349,7 @@ export function createJsonlSemanticHistoryJournal(input: {
   readonly timeAuthority: CheckpointTimeAuthority;
 }): SemanticHistoryPersistencePort & {
   listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]>;
+  selectActiveReasoningLineage(scope: ScopeRef): Promise<ActiveSemanticReasoningLineage>;
 } {
   return semanticHistoryJournal({ ...input,
     activeTurnJournalFor: () => input.activeTurnJournal,
@@ -341,6 +361,7 @@ function semanticHistoryJournal(input: SemanticHistoryReadDependencies & {
   readonly timeAuthority?: CheckpointTimeAuthority;
 }): SemanticHistoryPersistencePort & {
   listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]>;
+  selectActiveReasoningLineage(scope: ScopeRef): Promise<ActiveSemanticReasoningLineage>;
 } {
   if (!input.filePath.trim()) {
     throw new AppLifecycleError(
@@ -457,21 +478,117 @@ function semanticHistoryJournal(input: SemanticHistoryReadDependencies & {
     return body;
   }
 
-  const port = {
-    /** Verified owner enumeration for cold context; absence is established by Journal verification. */
-    async listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]> {
-      const result: SemanticHistoryExactLookupV1[] = [];
-      for (const record of await verifiedRecords()) {
-        if (!sameScope(record.scope, scope) || record.kind !== 'event'
-          || record.payload?.['kind'] !== SEMANTIC_HISTORY_PUBLICATION_KIND) continue;
-        const body = await publicationBody(record);
-        const receipt = await phaseReceipt({ record, phase: 'history-publication', identity: body.identity,
-          committedAt: body.committedAt, authority: body.timeAuthority, scope });
-        result.push({ scope, checkpoint: body.checkpoint.checkpoint,
-          publicationReceiptRef: receipt.journalReceiptRef });
+  /**
+   * Verified owner enumeration of the semantic publications for one exact scope,
+   * ordered by Journal sequence. Each entry keeps the exact checkpoint payload
+   * and publication receipt so callers can select the active path by payload,
+   * not by checkpoint id alone. The publication body validator already checks
+   * its own envelope identity; this reader does not repeat that self-check.
+   */
+  async function publicationEntries(scope: ScopeRef): Promise<readonly {
+    readonly lookup: SemanticHistoryExactLookupV1;
+    readonly checkpoint: Checkpoint;
+  }[]> {
+    const result: { lookup: SemanticHistoryExactLookupV1; checkpoint: Checkpoint }[] = [];
+    for (const record of await verifiedRecords()) {
+      if (!sameScope(record.scope, scope) || record.kind !== 'event'
+        || record.payload?.['kind'] !== SEMANTIC_HISTORY_PUBLICATION_KIND) continue;
+      const body = await publicationBody(record);
+      const receipt = await phaseReceipt({ record, phase: 'history-publication', identity: body.identity,
+        committedAt: body.committedAt, authority: body.timeAuthority, scope });
+      result.push({
+        lookup: { scope, checkpoint: body.checkpoint.checkpoint, publicationReceiptRef: receipt.journalReceiptRef },
+        checkpoint: body.checkpoint.checkpoint,
+      });
+    }
+    return result;
+  }
+
+  /** Verified owner enumeration for cold context; absence is established by Journal verification. */
+  async function listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]> {
+    return (await publicationEntries(scope)).map((entry) => entry.lookup);
+  }
+
+  /**
+   * Exact execution selection of one active reasoning lineage. It reuses the
+   * canonical execution-position fold for the current position and context, then
+   * independently walks the committed bound-closure and accepted reentry path.
+   * Only publications bound to a checkpoint on that path are returned. A missing
+   * base binding is an explicit error: it never falls back to the full history.
+   */
+  async function selectActiveReasoningLineage(scope: ScopeRef): Promise<ActiveSemanticReasoningLineage> {
+    const records = await verifiedRecords();
+    const taskScope: ScopeRef = { organId: scope.organId, taskId: scope.taskId };
+    const base = baseExecutionPositionFromRecords(records, taskScope);
+    const activeExecutionPosition = base === null ? null : foldExecutionPositionFromRecords(records, taskScope, base);
+    const activeContextRecord = activeExecutionPosition === null ? null
+      : contextHistoryFromRecord(exactJournalRecord(records, activeExecutionPosition.contextCommitRef));
+    if (activeExecutionPosition !== null && activeContextRecord === null) {
+      throw bindingCorrupt('active execution position has no committed context-history record');
+    }
+    const publications = await publicationEntries(scope);
+    const activePath = activeExecutionPosition === null
+      ? []
+      : activeReasoningCheckpointPath(records, taskScope, activeExecutionPosition.checkpointCommitRef);
+    if (activePath.length === 0 && publications.length > 0) {
+      throw new AppLifecycleError(
+        'checkpoint-active-reasoning-lineage-missing',
+        `scope ${scope.taskId?.value ?? scope.organId.value} has committed semantic history without a bound active reasoning checkpoint`,
+        'bind the active checkpoint closure before reading the active reasoning lineage',
+        'app-checkpoint-journal',
+      );
+    }
+    const publicationsByCheckpoint = new Map<string, {
+      readonly lookup: SemanticHistoryExactLookupV1;
+      readonly checkpoint: Checkpoint;
+    }[]>();
+    for (const entry of publications) {
+      if (!sameScope(entry.checkpoint.scope, scope)) {
+        throw new AppLifecycleError(
+          'semantic-history-publication-scope-mismatch',
+          'semantic publication checkpoint scope does not match its record scope',
+          'preserve the committed journal and repair the publication record before reading semantic history',
+          'app-checkpoint-journal',
+        );
       }
-      return result;
-    },
+      const key = checkpointLineageKey(entry.checkpoint.id);
+      const candidates = publicationsByCheckpoint.get(key);
+      if (candidates === undefined) publicationsByCheckpoint.set(key, [entry]);
+      else candidates.push(entry);
+    }
+    const priorCompletedTurns: SemanticHistoryExactLookupV1[] = [];
+    for (const bound of activePath) {
+      const candidates = publicationsByCheckpoint.get(bound.key);
+      if (candidates === undefined) continue;
+      const exact = candidates.find((entry) =>
+        canonicalJsonStringify(entry.checkpoint) === canonicalJsonStringify(bound.checkpoint));
+      if (exact === undefined) {
+        throw new AppLifecycleError(
+          'checkpoint-active-reasoning-lineage-binding-mismatch',
+          `semantic publication for checkpoint ${bound.checkpoint.id.value} does not bind the active reasoning checkpoint payload ${bound.commitRef.commitId}`,
+          'preserve the committed journal and repair the active reasoning binding before reading the lineage',
+          'app-checkpoint-journal',
+        );
+      }
+      priorCompletedTurns.push(exact.lookup);
+    }
+    const omitted = new Set<string>(activeContextRecord?.contextView.omittedRefs ?? []);
+    for (const basis of acceptedContextCorrectionBasesFromRecords(records, taskScope)) {
+      for (const wrongRef of basis.wrongRefs) omitted.add(wrongRef.ref);
+    }
+    return {
+      scope,
+      activeExecutionPosition,
+      activeContextRecord,
+      priorCompletedTurns,
+      omittedRefs: [...omitted],
+      verifiedDeadEnds: activeVerifiedDeadEnds(records, taskScope, omitted),
+    };
+  }
+
+  const port = {
+    listCompletedTurnLookups,
+    selectActiveReasoningLineage,
     async commitContextView(request: SemanticContextViewCommitRequest | SemanticContextViewCommitRequestV2): Promise<SemanticPhaseReceiptV1> {
       const authority = writeAuthority();
       const timeAuthority: CheckpointTimeAuthorityMetadata = {
@@ -1108,12 +1225,35 @@ export function createJsonlNativeSegmentSave(input: {
   } };
 }
 
+/**
+ * Provider units for the verified negative conclusions of the active lineage.
+ * The App journal owner supplies only real committed dead ends whose evidence
+ * the active wrong refs did not exclude; nothing is fabricated here.
+ */
+export function verifiedDeadEndContextUnits(
+  deadEnds: readonly DeadEndRecord[] | undefined,
+): readonly ProviderRequestContextUnit[] {
+  return (deadEnds ?? []).map((deadEnd) => ({
+    kind: 'message' as const,
+    role: 'user' as const,
+    text: canonicalJsonStringify({
+      kind: 'verified-dead-end',
+      ref: deadEnd.deadEndRef,
+      conclusion: deadEnd.conclusion,
+      invalidatedAssumptions: deadEnd.invalidatedAssumptions,
+      ...(deadEnd.suggestedAlternatives === undefined
+        ? {} : { suggestedAlternatives: deadEnd.suggestedAlternatives }),
+    }),
+  }));
+}
+
 /** Fresh async hook over the live Runtime owner plus exact Journal history. */
 export function createNativeSegmentRequestContext(input: {
   readonly activeTurn: ActiveTurnSegmentContext;
   readonly segmentJournal: ActiveTurnSegmentJournalPort;
   readonly history: SemanticHistoryPersistencePort;
   readonly priorCompletedTurns: readonly SemanticHistoryExactLookupV1[];
+  readonly reasoningLineage?: SemanticReasoningLineageFilterV1;
   readonly rawContent: RawContentReadPort;
   readonly rules: readonly string[];
   readonly orientation: (request: Parameters<ProviderRequestContextHook>[0]) => Promise<string | undefined>;
@@ -1134,6 +1274,7 @@ export function createNativeSegmentRequestContext(input: {
     const resolved = await readResumedSegmentSemanticTurnContext({
       history: input.history,
       priorCompletedTurns: input.priorCompletedTurns,
+      ...(input.reasoningLineage === undefined ? {} : { reasoningLineage: input.reasoningLineage }),
       segment: { chain: { businessTurnRef: binding.businessTurnRef, initial,
         segments: await input.segmentJournal.readSegments(turnId) },
         exactReads: input.segmentJournal,
@@ -1164,6 +1305,7 @@ export function createNativeSegmentRequestContext(input: {
         else units.push({ kind: 'tool-result', callId: unit.callId, toolId: unit.toolId, output: text(unit.rawOutput), status: unit.status, evidenceRefs: [unit.rawOutputRef] });
       }
     }
+    units.push(...verifiedDeadEndContextUnits(resolved.verifiedDeadEnds));
     return { canonical: { units }, ...(resolved.instructions === undefined ? {} : { instructions: resolved.instructions }) };
   };
 }
@@ -1474,6 +1616,139 @@ export function baseExecutionPositionFromRecords(
     executionEpoch: binding.coreClosure.executionEpoch,
     controlCommitRef: journalCommitRef(bindingRecord),
   };
+}
+
+/** Stable reasoning-lineage key of one exact committed checkpoint identity. */
+function checkpointLineageKey(checkpointId: Checkpoint['id']): string {
+  return `${checkpointId.scope}:${checkpointId.value}`;
+}
+
+/** One bound reasoning checkpoint with the exact committed payload and receipt. */
+interface BoundReasoningCheckpoint {
+  readonly key: string;
+  readonly checkpoint: Checkpoint;
+  readonly commitRef: JournalCommitRef;
+}
+
+interface ReasoningCheckpointBinding {
+  readonly parentKey: string | null;
+  readonly bound: BoundReasoningCheckpoint;
+}
+
+/**
+ * Independent read-only derivation of the active reasoning ancestry. The
+ * chronological `Checkpoint.previousCheckpointId` ledger stays untouched: a
+ * bound checkpoint closure records the reasoning-parent edge to the then-active
+ * checkpoint, and an accepted conditional reentry moves the active checkpoint
+ * to its target. A context correction keeps the active reasoning checkpoint
+ * unchanged because it only replaces the active context. The result maps each
+ * committed checkpoint key to its reasoning parent and exact bound payload; a
+ * `null` parent is the root.
+ */
+function reasoningParentByCheckpoint(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+): ReadonlyMap<string, ReasoningCheckpointBinding> {
+  const parent = new Map<string, ReasoningCheckpointBinding>();
+  let activeKey: string | null = null;
+  for (const record of records) {
+    if (!inTask(record.scope, taskScope)) continue;
+    const closure = closureFromRecord(record);
+    if (closure !== null && 'closureKind' in closure && closure.closureKind === 'checkpoint'
+      && closure.recoveryBinding !== undefined) {
+      const boundRecord = exactJournalRecord(records, closure.recoveryBinding.checkpointCommitRef);
+      const bound = boundRecord.checkpoint;
+      if (bound === undefined) {
+        throw bindingCorrupt(`bound checkpoint closure ${closure.closureId} has no committed checkpoint payload`);
+      }
+      const key = checkpointLineageKey(bound.id);
+      if (!parent.has(key)) {
+        parent.set(key, {
+          parentKey: activeKey,
+          bound: { key, checkpoint: bound, commitRef: journalCommitRef(boundRecord) },
+        });
+      }
+      activeKey = key;
+      continue;
+    }
+    const transition = conditionalReentryFromRecord(record);
+    if (transition !== null) {
+      const target = exactJournalRecord(records, transition.sourceCheckpointCommitRef).checkpoint;
+      if (target === undefined) {
+        throw bindingCorrupt(`conditional reentry ${transition.closureId} target has no committed checkpoint payload`);
+      }
+      activeKey = checkpointLineageKey(target.id);
+    }
+  }
+  return parent;
+}
+
+/**
+ * Ordered `[root, ..., active]` reasoning-path checkpoints, each with the exact
+ * bound payload and receipt. The active checkpoint comes from the canonical
+ * execution-position fold; the ancestry comes from the independent
+ * reasoning-parent scan. A missing binding is an explicit error, never a
+ * fallback to the chronological ledger.
+ */
+function activeReasoningCheckpointPath(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+  activeCheckpointCommitRef: JournalCommitRef,
+): readonly BoundReasoningCheckpoint[] {
+  const parent = reasoningParentByCheckpoint(records, taskScope);
+  const active = exactJournalRecord(records, activeCheckpointCommitRef).checkpoint;
+  if (active === undefined) {
+    throw bindingCorrupt('active execution position has no committed checkpoint payload');
+  }
+  const activeKey = checkpointLineageKey(active.id);
+  const activeBinding = parent.get(activeKey);
+  if (activeBinding === undefined) {
+    throw bindingCorrupt(`active checkpoint ${active.id.value} has no committed reasoning binding`);
+  }
+  const path: BoundReasoningCheckpoint[] = [];
+  const seen = new Set<string>();
+  let cursor: ReasoningCheckpointBinding | null = activeBinding;
+  while (cursor !== null) {
+    const { bound } = cursor;
+    if (seen.has(bound.key)) throw bindingCorrupt('active reasoning lineage contains a cycle');
+    seen.add(bound.key);
+    path.unshift(bound);
+    cursor = cursor.parentKey === null ? null : parent.get(cursor.parentKey) ?? null;
+  }
+  return path;
+}
+
+/**
+ * Verified negative conclusions that still hold for the active lineage. Only
+ * real committed dead ends qualify, and a dead end whose evidence the active
+ * wrong-ref correction fully excluded is not re-injected. Evidence refs that
+ * match an omitted ref are stripped; no evidence or certainty is fabricated.
+ */
+function activeVerifiedDeadEnds(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+  omitted: ReadonlySet<string>,
+): readonly DeadEndRecord[] {
+  const result: DeadEndRecord[] = [];
+  for (const record of records) {
+    if (!inTask(record.scope, taskScope)) continue;
+    const closure = closureFromRecord(record);
+    if (closure === null || 'closureKind' in closure) continue;
+    if (omitted.has(closure.deadEndRef)) continue;
+    const evidenceRefs = closure.evidenceRefs.filter((ref) =>
+      !omitted.has(ref.evidenceId.value) && !omitted.has(ref.locator));
+    if (evidenceRefs.length === 0) continue;
+    result.push({
+      deadEndRef: closure.deadEndRef,
+      scope: { ...closure.scope },
+      failedPathRefs: [...closure.failedPathRefs],
+      conclusion: closure.conclusion,
+      invalidatedAssumptions: [...closure.invalidatedAssumptions],
+      evidenceRefs: [...evidenceRefs],
+      ...(closure.suggestedAlternatives === undefined ? {} : { suggestedAlternatives: [...closure.suggestedAlternatives] }),
+    });
+  }
+  return result;
 }
 
 export function contextHistoryFromRecord(record: JournalRecord): ContextHistoryRecord | null {

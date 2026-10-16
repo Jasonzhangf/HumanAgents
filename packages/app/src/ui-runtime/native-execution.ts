@@ -16,7 +16,8 @@ import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
 import { ActiveTurnSegmentRecoveryCapture } from '../../../runtime/src/context/active-turn-capture.js';
 import type { ActiveTurnJournalPort, ActiveTurnSegmentJournalPort } from '../../../runtime/src/context/active-turn-journal.js';
-import { readSemanticTurnContext } from '../../../runtime/src/context/semantic-turn-context-reader.js';
+import { readSemanticTurnContext,
+  type SemanticReasoningLineageFilterV1 } from '../../../runtime/src/context/semantic-turn-context-reader.js';
 import type { SemanticHistoryExactLookupV1 } from '../../../runtime/src/context/semantic-history.js';
 import { prepareCheckpointClosure, type CheckpointClosurePermissionEvidence } from '../../../runtime/src/checkpoints/closure.js';
 import { submitCheckpoint } from '../../../runtime/src/checkpoints/submission.js';
@@ -28,7 +29,8 @@ import type { OperationCompletionJournalPort } from '../../../runtime/src/gatewa
 import { createJsonlNativeTurnSave } from '../native-default-composition.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
 import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlNativeSegmentSave,
-  createJsonlSemanticHistoryJournal, createNativeSegmentRequestContext } from '../checkpoint-journal.js';
+  createJsonlSemanticHistoryJournal, createNativeSegmentRequestContext,
+  verifiedDeadEndContextUnits } from '../checkpoint-journal.js';
 
 export type NativeAdmittedExecution =
   | { readonly version: 1; readonly activeTurn: ActiveTurnContext }
@@ -69,6 +71,10 @@ export interface NativeExecutionInput {
   readonly now: () => Date;
   readonly rules: readonly string[];
   readonly priorCompletedTurns: readonly SemanticHistoryExactLookupV1[];
+  /** Exact canonical active context receipt; absent only before any bound closure. */
+  readonly activeContextCommitRef?: JournalCommitRef;
+  /** Active-reasoning filter derived by the App journal owner. */
+  readonly reasoningLineage?: SemanticReasoningLineageFilterV1;
   readonly orientation: (request: Parameters<ProviderRequestContextHook>[0]) => Promise<string | undefined>;
 }
 
@@ -95,6 +101,14 @@ export function createNativeExecution(input: NativeExecutionInput) {
     rawContent: input.rawContent, timeAuthority: input.timeAuthority });
 
   async function latestFullContext() {
+    if (input.activeContextCommitRef !== undefined) {
+      const record = await input.fullContext.readContextCommit(binding.scope, input.activeContextCommitRef);
+      if (record.agentRuntimeId !== binding.execution.runtimeId
+        || record.loopCheckpoint.executionEpoch !== binding.execution.executionEpoch) {
+        throw new Error('native full I5 context does not match the admitted runtime epoch');
+      }
+      return { record, commitRef: input.activeContextCommitRef };
+    }
     const head = await input.fullContext.readContextHistory({ scope: binding.scope, agentRuntimeId: binding.execution.runtimeId, limit: 1 });
     if (!head.currentContextCommitRef) throw new Error('native request requires committed full I5 context');
     const record = await input.fullContext.readContextCommit(binding.scope, head.currentContextCommitRef);
@@ -107,12 +121,14 @@ export function createNativeExecution(input: NativeExecutionInput) {
   const nativeContext: ProviderRequestContextHook = admitted.version === 2
     ? createNativeSegmentRequestContext({ activeTurn: admitted.activeTurn, segmentJournal: admitted.segmentJournal,
       history: semantic, priorCompletedTurns: input.priorCompletedTurns, rawContent: input.rawContent,
+      ...(input.reasoningLineage === undefined ? {} : { reasoningLineage: input.reasoningLineage }),
       rules: input.rules, orientation: input.orientation })
     : async (request) => {
       const resolved = await readSemanticTurnContext({ history: semantic, priorCompletedTurns: input.priorCompletedTurns,
         live: { prefix: await admitted.activeTurn.readLivePrefix(admitted.activeTurn.currentBindingRef()), rawContent: input.rawContent },
         runtimeId: binding.execution.runtimeId, scope: binding.scope, assignment: binding.assignment,
-        rules: input.rules, orientation: await input.orientation(request) });
+        rules: input.rules, orientation: await input.orientation(request),
+        ...(input.reasoningLineage === undefined ? {} : { reasoningLineage: input.reasoningLineage }) });
       const units: ProviderRequestContextUnit[] = [];
       const text = (bytes: Uint8Array) => new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       for (const message of resolved.context.messages) {
@@ -130,6 +146,7 @@ export function createNativeExecution(input: NativeExecutionInput) {
           else units.push({ kind: 'tool-result', callId: unit.callId, toolId: unit.toolId, output: text(unit.rawOutput), status: unit.status, evidenceRefs: [unit.rawOutputRef] });
         }
       }
+      units.push(...verifiedDeadEndContextUnits(resolved.verifiedDeadEnds));
       return { canonical: { units }, ...(resolved.instructions === undefined ? {} : { instructions: resolved.instructions }) };
     };
 

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { id, type AdmittedTurn, type WorkAssignment, type PreparedRecoveryCapture,
   type Checkpoint, type ContextHistoryRecord, type EvidenceRef,
+  type CheckpointReceiptRelationshipV1, type JournalCommitRef,
   type ScopeRef, type TaskIdentityScope } from '../../packages/contracts/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
@@ -17,10 +18,11 @@ import { commitSemanticContextViewV1, commitSemanticHistoryPublicationV1 } from 
 import { buildConditionalReentry } from '../../packages/runtime/src/checkpoints/conditional-reentry.js';
 import { admitTaskGrantBusiness } from '../../packages/runtime/src/admission/task-grant.js';
 import { durableContextDigest, produceContextHistory } from '../../packages/runtime/src/checkpoints/coordinator.js';
-import { prepareCheckpointClosure } from '../../packages/runtime/src/checkpoints/closure.js';
-import { submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
+import { prepareCheckpointClosure, type DeadEndRecord } from '../../packages/runtime/src/checkpoints/closure.js';
+import { commitDeadEnd, submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
 import { createJsonlCheckpointJournal, createJsonlCheckpointClosurePort, createJsonlSemanticHistoryJournal,
-  createJsonlContextHistoryPort } from '../../packages/app/src/checkpoint-journal.js';
+  createJsonlContextHistoryPort, commitConditionalTransitionRecord } from '../../packages/app/src/checkpoint-journal.js';
+import type { OperationControlSelector } from '../../packages/runtime/src/gateway/ports.js';
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
 import { createNativeRecoveryAssets } from '../../packages/app/src/native-recovery-assets.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
@@ -355,6 +357,211 @@ test('public checkpoint identities reject unknown and mismatched receipts and di
   assert.equal(await readFile(f.filePath, 'utf8'), before);
   assert.deepEqual(await fileSnapshot(f.root), files);
   assert.deepEqual(await f.readerCheckpoints.readExecutionPosition(taskScope), position);
+});
+
+test('active reasoning lineage follows bound closures across rewind and forward while UI history stays complete', async () => {
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, 'lineage-'));
+  const filePath = join(root, 'organ.jsonl');
+  const journal = new JsonlOrganJournal(filePath);
+  const grants = new JsonlTaskGrantJournal(journal);
+  const control = createJsonlOperationControlJournal({ journal });
+  const history = createJsonlContextHistoryPort({ filePath, journal });
+  const checkpoints = createJsonlCheckpointJournal({ filePath, journal });
+  const closures = createJsonlCheckpointClosurePort({ filePath, journal });
+  const currentStates = createJsonlRuntimeTaskCurrentStateJournal({ journal });
+  const capability = { actionId: 'checkpoint.save', capabilities: ['provider.execution'], scope: taskScope };
+  await grants.grant({ requestId: 'lineage-grant', taskId, owner, capability, expectedRevision: 0 });
+  const request = { requestRef: 'lineage-business', taskId, owner, capability,
+    inputIdentity: { requestRef: 'lineage-business', digest: 'lineage-fixture-intent' } };
+  const admitted = await admitTaskGrantBusiness({ port: grants, request, principalOwner: owner,
+    register: async (authority, registration) => ({ authority, registrationCommitRef:
+      await registration.registerBusiness({ ...request, grantRevision: authority.grant.revision }) }) });
+  const selectorAt = (harnessExecutionEpoch: number): OperationControlSelector =>
+    ({ scope, agentRuntimeId: runtimeId, harnessExecutionEpoch });
+  await control.initializeCoverage({ ...selectorAt(epoch), admissionCommitRef: admitted.registrationCommitRef });
+  const context = contextRecord();
+  const contextCommit = await produceContextHistory(history, { record: context, expectedCurrentContextCommitRef: null });
+  const turnAt = (executionEpoch: number): AdmittedTurn => ({ turnId: 'history-turn',
+    workAssignmentRef: 'history-assignment', taskRef: taskId, scopeRef: scope, cycleRef: cycleId,
+    inputRevision: 1, directiveRevision: 1, executionEpoch, runtimeBindingRef: runtimeId,
+    permissionRevision: admitted.authority.permissionRevision,
+    admissionEvidenceRefs: [admitted.registrationCommitRef.commitId], currentTurnRef: 'active-turn://history-turn',
+    recoveryStateRef: 'history-recovery' });
+  const activeTurnJournal = createJsonlActiveTurnJournal({ filePath, turnId: 'history-turn' });
+  const artifactsRoot = join(root, 'artifacts');
+  const store = new ImmutableAssetStore(artifactsRoot);
+  const timeAuthority = { source: 'harness' as const, owner: 'runtime-checkpoint-control-owner' as const,
+    authorityRef: 'lineage-clock', sampleCommittedAt: async () => at };
+  const semantic = createJsonlSemanticHistoryJournal({ filePath, artifactsRoot, activeTurnJournal,
+    rawContent: { read: async ({ content }) => store.readEvidence(content.ref) }, timeAuthority });
+  const checkpointAt = (seq: number, previous: Checkpoint | null, executionEpoch: number): Checkpoint => ({
+    id: id('checkpoint', `checkpoint-history-${seq}`), scope, cycleId, seq,
+    previousCheckpointId: previous?.id ?? null, directiveRevision: 1, executionEpoch,
+    outcome: 'waiting', summary: `checkpoint ${seq}`, recoveryStateRef: evidence(`recovery-${seq}`),
+    evidenceRefs: [evidence(`settled-${seq}`)], next: { kind: 'wait', ref: 'history-owner' } });
+  // Every bound closure uses the real public preparation and submission writers.
+  async function bind(checkpoint: Checkpoint, previous: Checkpoint | null,
+    contextCommitRef: JournalCommitRef, harnessExecutionEpoch: number) {
+    const native = await checkpoints.commitNativeCheckpoint({ ownerId: owner, checkpoint, timeAuthority });
+    const preparation = await prepareCheckpointClosure({ checkpoint, source: 'harness-control',
+      closureReason: 'lineage bound checkpoint', contextCommitRef, contextHistory: history,
+      operationSelector: selectorAt(harnessExecutionEpoch),
+      operationControl: await control.readControl(selectorAt(harnessExecutionEpoch)),
+      permission: { permissionRevision: admitted.authority.permissionRevision,
+        grantCommitRef: admitted.authority.commit, revoked: false },
+      hardBlockers: [], unreturnedCallRefs: [], unresolvedOperationRefs: [], closurePort: closures,
+      now: () => new Date(at) });
+    await submitCheckpoint({ ownerId: owner, source: 'harness-control', checkpoint, previous,
+      journal: checkpoints, closurePort: closures, preparation });
+    const record = await checkpoints.readCommitted(scope, checkpoint.id);
+    if (record === null) throw new Error(`bound checkpoint ${checkpoint.id.value} readback missing`);
+    const binding = await checkpoints.readCheckpointRecoveryBinding(taskScope, record.commitRef);
+    if (binding === null) throw new Error(`bound checkpoint ${checkpoint.id.value} binding missing`);
+    return { native, record, binding, preparation };
+  }
+  async function publish(label: string, checkpoint: Checkpoint,
+    relationship: CheckpointReceiptRelationshipV1, executionEpoch: number) {
+    const admittedTurn = turnAt(executionEpoch);
+    const turn = projectAdmittedTurnIdentityV1(admittedTurn);
+    const view = await commitSemanticContextViewV1({ port: semantic, accepted: { version: 1,
+      admittedTurn, checkpoint: relationship, acceptance: { ownerId: owner,
+        acceptanceRef: `lineage-acceptance-${label}`, sourceEvidenceRefs: [evidence(`lineage-acceptance-${label}`)] },
+      semantics: { goal: `goal ${label}`, actions: `actions ${label}`, result: `result ${label}`,
+        nextStep: `next ${label}` }, adoptedChildren: [],
+      recovery: { recoveryStateRef: admittedTurn.recoveryStateRef, recoveryResponsibilityRef: 'history-owner',
+        unresolvedOperationRefs: [], laterErrorRefs: [] } } });
+    const publication = await commitSemanticHistoryPublicationV1({ port: semantic, ownerId: owner, turn,
+      checkpoint: relationship,
+      contextView: { identity: await contextViewIdentityV1({ turn, checkpoint }), receipt: view } });
+    return { view, publication };
+  }
+  const c1 = checkpointAt(1, null, epoch);
+  const bound1 = await bind(c1, null, contextCommit.commitRef, epoch);
+  const p1 = await publish('p1', c1, bound1.native, epoch);
+  // Supported native writers key checkpoint identity by id and scope and compare
+  // the full intent digest, so a second payload under the same id/scope is rejected
+  // before it can produce an impersonating semantic publication. The selector-level
+  // counterexample is therefore UNVERIFIED; this assertion records the producer guard.
+  const conflictingCheckpoint: Checkpoint = { ...c1, summary: `${c1.summary} conflicting` };
+  await assert.rejects(
+    () => checkpoints.commitNativeCheckpoint({ ownerId: owner, checkpoint: conflictingCheckpoint, timeAuthority }),
+    (error: unknown) => (error as { readonly code?: string }).code === 'checkpoint-native-conflict',
+  );
+  const c2 = checkpointAt(2, c1, epoch);
+  const bound2 = await bind(c2, c1, contextCommit.commitRef, epoch);
+  const p2 = await publish('p2', c2, bound2.native, epoch);
+  const deadEnd: DeadEndRecord = { deadEndRef: 'dead-end:displaced-branch', scope,
+    failedPathRefs: ['business-ref:dead-path'], conclusion: 'the displaced branch failed',
+    invalidatedAssumptions: ['assumption-x'], evidenceRefs: [evidence('dead-end-displaced')] };
+  await commitDeadEnd({ ownerId: owner, record: deadEnd, closurePort: closures });
+  const omittedDeadEnd: DeadEndRecord = { deadEndRef: 'older-view', scope,
+    failedPathRefs: ['business-ref:omitted-path'], conclusion: 'the omitted path failed',
+    invalidatedAssumptions: ['assumption-y'], evidenceRefs: [evidence('omitted-dead-end')] };
+  await commitDeadEnd({ ownerId: owner, record: omittedDeadEnd, closurePort: closures });
+  await currentStates.commit({ transitionId: 'lineage-current-state', taskScope,
+    expectedStateCommitRef: null, state: { task: { id: taskId, organId, title: 'lineage fixture',
+      directive: 'read lineage', directiveRevision: 1, state: 'running', memoryScope: 'task' },
+      processing: { entryPhase: 'executing', nextAction: c2.next, hardBlockers: [],
+        recoveryResponsibilityRef: 'history-owner', laterErrorRefs: [], stages: [] },
+      retainedDuties: [], sourceCommitRefs: [] } });
+  // Chronological ledger before any rewind: C1 -> C2 with P1, P2 published.
+  assert.deepEqual((await semantic.listCompletedTurnLookups(scope)).map((entry) => entry.checkpoint.id.value),
+    [c1.id.value, c2.id.value]);
+  const forwardLineage = await semantic.selectActiveReasoningLineage(scope);
+  assert.deepEqual(forwardLineage.priorCompletedTurns.map((entry) => entry.checkpoint.id.value),
+    [c1.id.value, c2.id.value]);
+  // Rewind to C1 and bind a new C3 whose chronological predecessor is still C2.
+  const beforeRewind = readCurrentFromRecords(await journal.replay(), taskScope);
+  if (beforeRewind.state !== 'known') throw new Error(beforeRewind.reason);
+  const controlBefore = await control.readControl(selectorAt(beforeRewind.position.executionEpoch));
+  if (controlBefore.state !== 'complete') throw new Error(controlBefore.reason);
+  const rewind = buildConditionalReentry({ command: { commandId: 'lineage-rewind-to-c1', taskScope,
+    targetCheckpointCommitRef: bound1.record.commitRef,
+    expectedCurrentControlCommitRef: beforeRewind.position.controlCommitRef,
+    expectedExecutionEpoch: beforeRewind.position.executionEpoch,
+    expectedOperationControlCommitRef: controlBefore.currentControlCommitRef,
+    expectedGrantCommitRef: admitted.authority.commit, permissionRevision: admitted.authority.permissionRevision,
+    confirmationRef: 'lineage-rewind-confirmed', principalOwner: owner }, targetScope: scope,
+    targetContext: context, targetClosure: bound1.binding.coreClosure,
+    sourceContextCommitRef: contextCommit.commitRef, sourceClosureRef: bound1.preparation.closureId,
+    current: beforeRewind, maxExecutionEpoch: epoch });
+  const rewindRef = await commitConditionalTransitionRecord({ journal, record: rewind,
+    expectedCurrentControlCommitRef: beforeRewind.position.controlCommitRef });
+  const rewoundEpoch = rewind.newExecutionEpoch;
+  await control.initializeCoverage({ ...selectorAt(rewoundEpoch), admissionCommitRef: rewindRef });
+  const c3 = checkpointAt(3, c2, rewoundEpoch);
+  const bound3 = await bind(c3, c2, rewindRef, rewoundEpoch);
+  const p3 = await publish('p3', c3, bound3.native, rewoundEpoch);
+  assert.deepEqual(bound3.record.checkpoint.previousCheckpointId, c2.id);
+  // UI history inspection still sees every committed publication in Journal order.
+  assert.deepEqual((await semantic.listCompletedTurnLookups(scope)).map((entry) => entry.checkpoint.id.value),
+    [c1.id.value, c2.id.value, c3.id.value]);
+  const rewoundLineage = await semantic.selectActiveReasoningLineage(scope);
+  assert.deepEqual(rewoundLineage.priorCompletedTurns.map((entry) => entry.checkpoint.id.value),
+    [c1.id.value, c3.id.value]);
+  assert.deepEqual(rewoundLineage.priorCompletedTurns.map((entry) => entry.publicationReceiptRef),
+    [p1.publication.journalReceiptRef, p3.publication.journalReceiptRef]);
+  assert.deepEqual(rewoundLineage.activeExecutionPosition?.checkpointCommitRef, bound3.record.commitRef);
+  assert.deepEqual(rewoundLineage.activeContextRecord?.contextView.activeRefs,
+    rewind.restoredContext.contextView.activeRefs);
+  // A verified dead end whose evidence the active wrong refs did not exclude stays a conclusion;
+  // the explicitly omitted deadEndRef does not come back.
+  assert.deepEqual(rewoundLineage.verifiedDeadEnds.map((entry) => entry.deadEndRef), [deadEnd.deadEndRef]);
+  // Forward reentry to C2 restores the displaced branch and drops P3.
+  const beforeForward = readCurrentFromRecords(await journal.replay(), taskScope);
+  if (beforeForward.state !== 'known') throw new Error(beforeForward.reason);
+  const controlForward = await control.readControl(selectorAt(beforeForward.position.executionEpoch));
+  if (controlForward.state !== 'complete') throw new Error(controlForward.reason);
+  const forward = buildConditionalReentry({ command: { commandId: 'lineage-forward-to-c2', taskScope,
+    targetCheckpointCommitRef: bound2.record.commitRef,
+    expectedCurrentControlCommitRef: beforeForward.position.controlCommitRef,
+    expectedExecutionEpoch: beforeForward.position.executionEpoch,
+    expectedOperationControlCommitRef: controlForward.currentControlCommitRef,
+    expectedGrantCommitRef: admitted.authority.commit, permissionRevision: admitted.authority.permissionRevision,
+    confirmationRef: 'lineage-forward-confirmed', principalOwner: owner }, targetScope: scope,
+    targetContext: context, targetClosure: bound2.binding.coreClosure,
+    sourceContextCommitRef: rewindRef, sourceClosureRef: bound3.preparation.closureId,
+    current: beforeForward, maxExecutionEpoch: rewoundEpoch });
+  await commitConditionalTransitionRecord({ journal, record: forward,
+    expectedCurrentControlCommitRef: beforeForward.position.controlCommitRef });
+  const forwardLineage2 = await semantic.selectActiveReasoningLineage(scope);
+  assert.deepEqual(forwardLineage2.priorCompletedTurns.map((entry) => entry.checkpoint.id.value),
+    [c1.id.value, c2.id.value]);
+  assert.deepEqual((await semantic.listCompletedTurnLookups(scope)).map((entry) => entry.checkpoint.id.value),
+    [c1.id.value, c2.id.value, c3.id.value]);
+  assert.deepEqual(forwardLineage2.activeExecutionPosition?.checkpointCommitRef, bound2.record.commitRef);
+
+  // A publication with the same checkpoint id but a different cycle and payload
+  // cannot satisfy the active bound payload. The real native publication writer
+  // accepts the other-cycle checkpoint because its scope and turn differ; the
+  // selector must reject it by canonical payload instead of joining on id alone.
+  const otherCycle = id('cycle', 'history-other-cycle');
+  const otherScope: ScopeRef = { ...taskScope, cycleId: otherCycle };
+  const duplicate: Checkpoint = { ...c1, scope: otherScope, cycleId: otherCycle,
+    recoveryStateRef: evidence('other-recovery', otherScope),
+    evidenceRefs: [evidence('other-settled', otherScope)] };
+  const duplicateNative = await checkpoints.commitNativeCheckpoint({ ownerId: owner,
+    checkpoint: duplicate, timeAuthority });
+  const otherAdmittedTurn: AdmittedTurn = { ...turnAt(epoch), scopeRef: otherScope, cycleRef: otherCycle };
+  const otherTurn = projectAdmittedTurnIdentityV1(otherAdmittedTurn);
+  const otherView = await commitSemanticContextViewV1({ port: semantic, accepted: { version: 1,
+    admittedTurn: otherAdmittedTurn, checkpoint: duplicateNative, acceptance: { ownerId: owner,
+      acceptanceRef: 'lineage-acceptance-other-cycle',
+      sourceEvidenceRefs: [evidence('lineage-acceptance-other-cycle', otherScope)] },
+    semantics: { goal: 'goal other', actions: 'actions other', result: 'result other',
+      nextStep: 'next other' }, adoptedChildren: [],
+    recovery: { recoveryStateRef: otherAdmittedTurn.recoveryStateRef,
+      recoveryResponsibilityRef: 'history-owner', unresolvedOperationRefs: [], laterErrorRefs: [] } } });
+  await commitSemanticHistoryPublicationV1({ port: semantic, ownerId: owner, turn: otherTurn,
+    checkpoint: duplicateNative,
+    contextView: { identity: await contextViewIdentityV1({ turn: otherTurn, checkpoint: duplicate }),
+      receipt: otherView } });
+  await assert.rejects(
+    () => semantic.selectActiveReasoningLineage(otherScope),
+    (error: unknown) => (error as { readonly code?: string }).code
+      === 'checkpoint-active-reasoning-lineage-binding-mismatch',
+  );
 });
 
 async function fileSnapshot(root: string): Promise<readonly string[]> {
