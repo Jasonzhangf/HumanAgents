@@ -1688,9 +1688,14 @@ test('runtime task dashboard is observational and has no second execution-input 
 });
 
 type InteractionCardPageAdapter = {
-  readonly projectInteractionCardFromEntries: (entries: readonly unknown[], state?: string) => {
+  readonly projectInteractionCardFromEntries: (
+    entries: readonly unknown[],
+    state?: string,
+    context?: unknown,
+  ) => {
     readonly surface: string;
     readonly taskState: string;
+    readonly stateLabel?: string;
     readonly actions: readonly unknown[];
     readonly conversation: {
       readonly summary: { readonly missing?: true; readonly goal?: { readonly text: string } };
@@ -1698,7 +1703,16 @@ type InteractionCardPageAdapter = {
     };
     readonly trace: { readonly items: readonly { readonly requestId: string }[] };
     readonly history: { readonly result: string };
-    readonly cardMetadata: { readonly nextAction?: string; readonly waitingOn?: string };
+    readonly cardMetadata: {
+      readonly nextAction?: string;
+      readonly waitingOn?: string;
+      readonly source: {
+        readonly interactionId?: string;
+        readonly taskId?: { readonly scope: string; readonly value: string };
+        readonly operationId?: { readonly scope: string; readonly value: string };
+        readonly executionEpoch?: number;
+      };
+    };
   };
   readonly projectInteractionCardFromSnapshot: (snapshot: unknown) => {
     readonly conversation: {
@@ -1745,6 +1759,10 @@ test('interaction card page adapter keeps technical identifiers in trace details
 });
 
 test('interaction card page adapter preserves draft facts without leaking decision refs', () => {
+  assert.equal(
+    interactionCardPage.projectInteractionCardFromSnapshot({ state: 'received' }) as unknown,
+    undefined,
+  );
   const projection = interactionCardPage.projectInteractionCardFromSnapshot({
     interactionId: 'interaction-2',
     state: 'awaiting-confirmation',
@@ -1797,16 +1815,24 @@ const confirmedCardEntries = [
   },
 ];
 
-test('interaction card projects the confirmed and dispatched lifecycle onto a declared card state', () => {
+// Failure mode (basis: known served defect, docs/ui/interaction-card-page.js
+// L43-86 on the base): an interaction-only `confirmed`/`dispatched` card
+// reported `running` and synthesized a Task/Operation id from the interaction
+// id, so the user saw a running Task before any execution existed. Impact is
+// high (false task existence and progress); cost is one ~2s JSDOM test. The
+// counterexample is the same projection on the base, which returns
+// `taskState: 'running'` and a fabricated `source.taskId.value`.
+test('interaction card keeps confirmed and dispatched as an interaction-only waiting state', () => {
   for (const state of ['confirmed', 'dispatched']) {
     const projection = interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, state);
-    // A declared `LifecycleState`, never the `unknown` fallback whose label is
-    // the empty "未知".
-    assert.equal(projection.taskState, 'running');
-    // The runtime owns the next step once the human authorization is recorded,
-    // so the card must not fall back to the human-waiting projection or its
-    // second-confirmation copy.
+    // A confirmation hands the next step to the runtime: the card is waiting,
+    // never running.
+    assert.equal(projection.taskState, 'waiting');
     assert.equal(projection.cardMetadata.waitingOn, 'runtime');
+    // The card keeps the real interaction identity and mints no Task/Operation.
+    assert.equal(projection.cardMetadata.source.interactionId, 'interaction-confirmed');
+    assert.equal(projection.cardMetadata.source.taskId, undefined);
+    assert.equal(projection.cardMetadata.source.operationId, undefined);
     assert.deepEqual(projection.actions, []);
     const serialized = JSON.stringify(projection);
     assert.equal(serialized.includes('等待决策'), false);
@@ -1818,6 +1844,59 @@ test('interaction card projects the confirmed and dispatched lifecycle onto a de
   const waiting = interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, 'awaiting-confirmation');
   assert.equal(waiting.taskState, 'waiting');
   assert.equal(waiting.cardMetadata.waitingOn, 'human');
+});
+
+// Failure mode (basis: docs/ui/task.js omitted dashboard.taskId/operationId and
+// the projector derived identity from the interaction): a real admitted Task or
+// running Task was labelled with a fabricated `pending-input` scope. Impact is
+// high (identity and execution truth are wrong); cost is one ~2s JSDOM test.
+test('interaction card forwards a genuine dashboard task identity and fabricates none', () => {
+  // No real interaction or Task identity is a no-mount projection, not a
+  // source-less card.
+  assert.equal(
+    interactionCardPage.projectInteractionCardFromEntries([], 'received') as unknown,
+    undefined,
+  );
+  // A real admitted Task without an operation stays a real waiting task with its
+  // real TaskId and no invented Operation or interaction.
+  const admitted = interactionCardPage.projectInteractionCardFromEntries([], 'awaiting-confirmation', {
+    execution: {
+      taskId: { scope: 'task', value: 'task-real-admitted' },
+      state: 'waiting',
+      stateLabel: '已入队，等待执行',
+    },
+  });
+  assert.equal(admitted.taskState, 'waiting');
+  assert.equal(admitted.cardMetadata.source.taskId?.value, 'task-real-admitted');
+  assert.equal(admitted.cardMetadata.source.operationId, undefined);
+  assert.equal(admitted.cardMetadata.source.interactionId, undefined);
+  // A genuine running execution keeps the real Task, Operation and epoch, and
+  // the runtime's own localized state governs the card.
+  const running = interactionCardPage.projectInteractionCardFromEntries([], 'received', {
+    execution: {
+      taskId: { scope: 'task', value: 'task-real-1' },
+      operationId: 'op-real-1',
+      executionEpoch: 1,
+      state: 'running',
+      stateLabel: '运行中',
+    },
+  });
+  assert.equal(running.taskState, 'running');
+  assert.equal(running.stateLabel, '运行中');
+  assert.equal(running.cardMetadata.source.taskId?.value, 'task-real-1');
+  assert.equal(running.cardMetadata.source.operationId?.value, 'op-real-1');
+  assert.equal(running.cardMetadata.source.executionEpoch, 1);
+  // A supplied invalid epoch stays supplied, so the existing contract validator
+  // can reject it instead of the page silently laundering it into absent.
+  const invalidEpoch = interactionCardPage.projectInteractionCardFromEntries([], 'received', {
+    execution: {
+      taskId: { scope: 'task', value: 'task-real-invalid-epoch' },
+      executionEpoch: 0,
+      state: 'running',
+      stateLabel: '运行中',
+    },
+  });
+  assert.equal(invalidEpoch.cardMetadata.source.executionEpoch, 0);
 });
 
 type InteractionWorkCardAdapter = {
@@ -1901,6 +1980,18 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
   };
 
   const fakeText = (node: FakeNode): string => node.textContent + node.children.map(fakeText).join('');
+  // The lifecycle chip is the first `交互`/`任务`/`节点` state chip in the card.
+  const lifecycleChip = (node: FakeNode): string => {
+    let found = '';
+    const walk = (current: FakeNode): void => {
+      if (current.className.split(/\s+/).includes('iwc-state-chip') && /^(交互|任务|节点) /.test(current.textContent)) {
+        found = current.textContent;
+      }
+      for (const child of current.children) walk(child);
+    };
+    walk(node);
+    return found;
+  };
 
   const scope = globalThis as unknown as { document?: unknown };
   const previousDocument = scope.document;
@@ -1917,15 +2008,41 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
     const host = new FakeNode('div');
     const card = mountInteractionWorkCard(host);
     card.update({ ...interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, 'confirmed'), actions: [] });
-    assert.equal(host.querySelector('.iwc-lifecycle-label')?.textContent, '运行中');
+    // An interaction-only card is labelled as an interaction and reads as
+    // waiting for the runtime, not as a running task.
+    assert.equal(host.querySelector('.iwc-lifecycle-label')?.textContent, '已确认，等待调度');
+    assert.equal(lifecycleChip(host), '交互 已确认，等待调度');
+    assert.equal(host.querySelector('.iwc-source-ref')?.textContent?.includes('interaction=interaction-confirmed'), true);
+    assert.equal(host.querySelector('.iwc-source-ref')?.textContent?.includes('operation=未提供'), true);
     const text = fakeText(host);
+    assert.equal(text.includes('运行中'), false);
     assert.equal(text.includes('未知'), false);
     assert.equal(text.includes('等待决策'), false);
+    // The raw interaction enum must not be the card's state reading. The
+    // technical source reference legitimately shows the real interaction id
+    // (which embeds the state word), so the human state surfaces are checked on
+    // their own.
+    assert.equal(host.querySelector('.iwc-lifecycle-label')?.textContent?.includes('confirmed'), false);
+    assert.equal(host.querySelector('.iwc-status-detail')?.textContent?.includes('confirmed'), false);
     assert.equal(text.includes('等待你确认任务草案'), false);
     assert.equal(text.includes('确认并进入队列'), false);
     // The card carries no second authorization control after the confirmed
     // projection.
     assert.equal(host.querySelector('.iwc-button--primary'), null);
+
+    // A genuine running execution keeps its real task identity and running label.
+    const runningHost = new FakeNode('div');
+    mountInteractionWorkCard(runningHost).update(interactionCardPage.projectInteractionCardFromEntries([], 'received', {
+      execution: {
+        taskId: { scope: 'task', value: 'task-real-1' },
+        operationId: 'op-real-1',
+        executionEpoch: 1,
+        state: 'running',
+        stateLabel: '运行中',
+      },
+    }));
+    assert.equal(lifecycleChip(runningHost), '任务 运行中');
+    assert.equal(runningHost.querySelector('.iwc-source-ref')?.textContent?.includes('task=task:task-real-1'), true);
   } finally {
     scope.document = previousDocument;
   }

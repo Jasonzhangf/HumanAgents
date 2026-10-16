@@ -440,6 +440,14 @@ test('public contract consumer validates the complete interaction and execution 
   assert.doesNotThrow(() => validateInteractionHistoryQuery(historyQuery));
   assert.doesNotThrow(() => validateInteractionHistoryResult(historyResult));
   assert.doesNotThrow(() => validateInteractionWorkCard(workCard));
+  assert.doesNotThrow(() => validateInteractionWorkCard({
+    ...workCard,
+    source: { interactionId: 'interaction-a' },
+  }));
+  assert.doesNotThrow(() => validateInteractionWorkCard({
+    ...workCard,
+    source: { taskId: task },
+  }));
 });
 
 test('public contract consumer rejects invalid policy and control shapes', () => {
@@ -514,6 +522,20 @@ test('public contract consumer rejects incomplete revisions, tool identities, an
     failure: { code: 'stale-cursor', message: 'cursor expired', retryable: true },
   }));
   assert.throws(() => validateInteractionHistoryResult({ ok: false } as never), ContractError);
+  assert.throws(() => validateInteractionWorkCard({ ...workCard, source: {} }), ContractError);
+  assert.throws(() => validateInteractionWorkCard({ ...workCard, source: { interactionId: '' } }), ContractError);
+  assert.throws(() => validateInteractionWorkCard({
+    ...workCard,
+    source: { interactionId: 'interaction-a', operationId: operation },
+  }), ContractError);
+  assert.throws(() => validateInteractionWorkCard({
+    ...workCard,
+    source: { interactionId: 'interaction-a', executionEpoch: 1 },
+  }), ContractError);
+  assert.throws(() => validateInteractionWorkCard({
+    ...workCard,
+    source: { taskId: task, executionEpoch: 0 },
+  }), ContractError);
 });
 
 test('public consumer rejects a tool-call without a typed descriptor', () => {

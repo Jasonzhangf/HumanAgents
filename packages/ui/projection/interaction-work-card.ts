@@ -106,6 +106,7 @@ export interface InteractionHistorySource {
 
 export interface InteractionCardInput {
   readonly taskState: LifecycleState;
+  readonly stateLabel?: string;
   readonly source: UiDataSource;
   readonly card: InteractionWorkCard;
   readonly conversation?: InteractionCardConversationInput;
@@ -202,6 +203,7 @@ export interface InteractionNodeCardProjection {
 export interface InteractionWorkCardProjection {
   readonly surface: InteractionCardSurface;
   readonly taskState: LifecycleState;
+  readonly stateLabel?: string;
   readonly statusbar: UiDataSource;
   readonly cardMetadata: InteractionCardMetadataProjection;
   readonly conversation: InteractionConversationProjection;
@@ -232,6 +234,7 @@ export function projectInteractionWorkCard(input: InteractionCardInput): Interac
   return {
     surface: INTERACTION_CARD_SURFACE,
     taskState: input.taskState,
+    ...(input.stateLabel === undefined ? {} : { stateLabel: input.stateLabel }),
     statusbar: input.source,
     cardMetadata: {
       source: input.card.source,

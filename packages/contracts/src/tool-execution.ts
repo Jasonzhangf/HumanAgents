@@ -703,8 +703,9 @@ export type InteractionHistoryResult =
 
 export interface InteractionWorkCard {
   readonly source: {
-    readonly taskId: TaskId;
-    readonly operationId: OperationId;
+    readonly interactionId?: string;
+    readonly taskId?: TaskId;
+    readonly operationId?: OperationId;
     /** Runtime execution epoch; absent only when the source reported none. */
     readonly executionEpoch?: number;
     /** Real request identity; absent only when the source reported none. */
@@ -2125,11 +2126,29 @@ export function validateInteractionHistoryResult(input: InteractionHistoryResult
 }
 
 export function validateInteractionWorkCard(input: InteractionWorkCard): void {
-  assertScope(input.source.taskId, 'task');
-  assertNonEmpty(input.source.taskId.value, 'work card taskId');
-  assertScope(input.source.operationId, 'operation');
-  assertNonEmpty(input.source.operationId.value, 'work card operationId');
-  if (input.source.executionEpoch !== undefined) assertExecutionEpoch(input.source.executionEpoch);
+  if (input.source.taskId === undefined && input.source.interactionId === undefined) {
+    throw new ContractError('work card source requires taskId or interactionId');
+  }
+  if (input.source.interactionId !== undefined) {
+    assertNonEmpty(input.source.interactionId, 'work card interactionId');
+  }
+  if (input.source.taskId !== undefined) {
+    assertScope(input.source.taskId, 'task');
+    assertNonEmpty(input.source.taskId.value, 'work card taskId');
+  }
+  if (input.source.operationId !== undefined) {
+    if (input.source.taskId === undefined) {
+      throw new ContractError('work card operationId requires taskId');
+    }
+    assertScope(input.source.operationId, 'operation');
+    assertNonEmpty(input.source.operationId.value, 'work card operationId');
+  }
+  if (input.source.executionEpoch !== undefined) {
+    if (input.source.taskId === undefined) {
+      throw new ContractError('work card executionEpoch requires taskId');
+    }
+    assertExecutionEpoch(input.source.executionEpoch);
+  }
   if (input.source.requestId !== undefined) assertNonEmpty(input.source.requestId, 'work card requestId');
   if (input.source.turnId !== undefined) assertNonEmpty(input.source.turnId, 'work card turnId');
   assertNonEmpty(input.currentNode, 'work card currentNode');

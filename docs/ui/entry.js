@@ -31,7 +31,7 @@ let interactionCard = null
 // The shared work card mounts on the first real event or snapshot update. Until
 // then the host stays genuinely empty, so first entry claims no work.
 function presentInteractionCard(projection) {
-  if (!interactionCardHost) return
+  if (!interactionCardHost || !projection) return
   if (!interactionCard) interactionCard = mountInteractionWorkCard(interactionCardHost)
   interactionCard.update(projection)
 }
@@ -56,7 +56,9 @@ const TASK_FLOW_KINDS = new Set(TASK_FLOW_TYPES.map(([kind]) => kind))
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   cardState.sequence += 1
-  const activeInteractionId = detail.interactionId || interactionId || 'pending-input'
+  // The interaction id is only the one the runtime reported. The page never
+  // mints a placeholder identity for an event that carries none.
+  const activeInteractionId = detail.interactionId || interactionId
   cardState.entries = [
     ...cardState.entries,
     {
@@ -76,6 +78,7 @@ function updateCardFromSnapshot(snapshot) {
   cardState.sequence = 0
   cardState.entries = []
   const projection = projectInteractionCardFromSnapshot(snapshot)
+  if (!projection) return
   // The entry form submit is this new requirement's business confirmation. The
   // work card therefore never exposes a second confirmation action on this page.
   presentInteractionCard({ ...projection, actions: [] })

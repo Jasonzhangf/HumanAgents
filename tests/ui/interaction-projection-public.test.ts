@@ -179,6 +179,21 @@ test('interaction projection keeps technical metadata in cardMetadata and trace 
   assert.equal(projection.history.result, 'ok');
   assert.equal(projection.history.result === 'ok' && projection.history.hasMore, true);
   assert.equal(projection.trace.items[2].tool?.callId, 'call-3');
+
+  const interactionOnly = projectInteractionWorkCard({
+    ...cardSource,
+    stateLabel: '已确认，等待调度',
+    card: { ...card, source: { interactionId: 'interaction-ui' } },
+  });
+  assert.deepEqual(interactionOnly.cardMetadata.source, { interactionId: 'interaction-ui' });
+  assert.equal(interactionOnly.stateLabel, '已确认，等待调度');
+
+  const taskWithoutOperation = projectInteractionWorkCard({
+    ...cardSource,
+    card: { ...card, source: { taskId: task } },
+  });
+  assert.deepEqual(taskWithoutOperation.cardMetadata.source, { taskId: task });
+  assert.equal(taskWithoutOperation.stateLabel, undefined);
 });
 
 test('interaction projection rejects entries that violate typed history scope', () => {

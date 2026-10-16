@@ -1,6 +1,24 @@
 const TASK_SCOPE = 'task'
 const OPERATION_SCOPE = 'operation'
 
+// The declared task-lifecycle vocabulary (`LifecycleState`). `toLifecycleState`
+// passes these values through untouched; every other value it recognizes is an
+// explicit-interaction state that it maps onto this vocabulary.
+const LIFECYCLE_STATES = new Set([
+  'created',
+  'admitted',
+  'waiting',
+  'running',
+  'settling',
+  'succeeded',
+  'blocked',
+  'failed',
+  'cancelled',
+  'stopped',
+  'stale',
+  'unknown',
+])
+
 export function scopedId(scope, value) {
   return { scope, value }
 }
@@ -18,9 +36,10 @@ function fallbackText(value, fallback) {
 }
 
 // A real interaction event carries only what the explicit-intake owner reported:
-// its key, kind, text and the interaction's own occurrence time. Anything the
-// owner did not report stays absent; the page never mints a turn id, a request
-// id, a tool call, an authorization record or an event time.
+// its key, kind, text, the interaction's own id and its occurrence time.
+// Anything the owner did not report stays absent; the page never mints a turn
+// id, a request id, a tool call, an authorization record, an event time or an
+// interaction id.
 function interactiveEntry(entry) {
   return {
     kind: entry.kind,
@@ -29,17 +48,20 @@ function interactiveEntry(entry) {
     sequence: entry.sequence,
     ...(entry.occurredAt === undefined ? {} : { occurredAt: entry.occurredAt }),
     ...(entry.error === undefined ? {} : { error: entry.error }),
+    ...(typeof entry.interactionId === 'string' && entry.interactionId.trim() !== ''
+      ? { interactionId: entry.interactionId }
+      : {}),
   }
 }
 
 // The explicit-intake lifecycle is not a task lifecycle, so this page projects
 // it onto the card's declared `LifecycleState` vocabulary and never mints a
-// state of its own. `confirmed` and `dispatched` are the states the runtime
-// records once the human authorization is done and the requirement is handed to
-// the runtime: from there the runtime owns the next step, so the card shows the
-// running lifecycle instead of falling through to `unknown` (which would render
-// the empty "未知" label). This matches `taskStateFor`, which projects the same
-// post-confirmation states from a runtime snapshot.
+// state of its own. `confirmed` and `dispatched` mean the human authorization is
+// recorded and the requirement is handed to the runtime: the runtime owns the
+// next step, so they are a real `waiting` state, not a running one. A
+// confirmation never claims execution progress. A value that is already a
+// declared `LifecycleState` passes through untouched; anything else stays the
+// explicit `unknown` instead of being guessed.
 function toLifecycleState(state) {
   switch (state) {
     case 'awaiting-clarification':
@@ -50,47 +72,82 @@ function toLifecycleState(state) {
       return 'created'
     case 'confirmed':
     case 'dispatched':
-      return 'running'
+      return 'waiting'
     case 'status-only':
     case 'submitted':
       return 'succeeded'
     default:
-      return 'unknown'
+      return LIFECYCLE_STATES.has(state) ? state : 'unknown'
   }
 }
 
-function taskStateFor(state) {
+// The human label for an explicit-interaction state. The raw enum never reaches
+// the card, and a confirmation reads as waiting for the runtime instead of as a
+// running task or a second human decision.
+function interactionStateLabel(state) {
   switch (state) {
-    case 'awaiting-clarification':
-    case 'awaiting-confirmation':
-      return 'waiting'
-    case 'submitted':
-      return 'succeeded'
     case 'received':
+      return '已收到'
     case 'matching':
-      return 'created'
+      return '正在处理'
+    case 'awaiting-clarification':
+      return '等待补充信息'
+    case 'awaiting-confirmation':
+      return '等待确认'
+    case 'confirmed':
+      return '已确认，等待调度'
+    case 'dispatched':
+      return '已入队，等待执行'
+    case 'status-only':
+      return '状态已回执'
+    case 'submitted':
+      return '已提交'
     default:
-      return 'running'
+      return undefined
   }
+}
+
+// A scoped id is only ever the value the source reported. A non-empty string is
+// wrapped with the scope it is declared under; a missing or empty value stays
+// absent instead of being invented.
+function normalizeScopedId(scope, raw) {
+  if (typeof raw === 'string') return raw.trim() === '' ? undefined : scopedId(scope, raw)
+  if (raw && typeof raw === 'object' && typeof raw.value === 'string' && raw.value.trim() !== '') {
+    return scopedId(scope, raw.value)
+  }
+  return undefined
 }
 
 // The interaction id is the only real scope an explicit interaction has. The
-// operation id is the interaction's runtime operation; it is derived from the
-// interaction id so both scoped ids identify the same real owner.
-function sourceFor(entry) {
-  const interactionId = entry?.interactionId || 'pending-input'
+// card reports it when the interaction owner reported it, and it never derives a
+// Task or Operation identity from it. Real Task/Operation/epoch identity comes
+// only from the runtime execution facts (`execution`), and a reported operation
+// or epoch must belong to a real task.
+function sourceFor(entry, execution) {
+  const interactionId = typeof entry?.interactionId === 'string' && entry.interactionId.trim() !== ''
+    ? entry.interactionId
+    : undefined
+  const taskId = normalizeScopedId(TASK_SCOPE, execution?.taskId)
+  const operationId = taskId === undefined ? undefined : normalizeScopedId(OPERATION_SCOPE, execution?.operationId)
+  const executionEpoch = taskId === undefined || execution?.executionEpoch === undefined
+    ? undefined
+    : execution.executionEpoch
   return {
-    taskId: scopedId(TASK_SCOPE, interactionId),
-    operationId: scopedId(OPERATION_SCOPE, interactionId),
+    ...(interactionId === undefined ? {} : { interactionId }),
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(operationId === undefined ? {} : { operationId }),
+    ...(executionEpoch === undefined ? {} : { executionEpoch }),
   }
 }
 
 // The card status is built from the interaction facts the runtime reported. The
 // only timestamp used is the occurrence time the interaction owner stamped, and
-// it stays absent when the owner reported none.
-function cardFromEntries(entries, state = 'received', latestOccurredAt) {
+// it stays absent when the owner reported none. The waiting target follows the
+// interaction's own awaiting-* states; the runtime execution facts a page
+// forwards may override it.
+function cardFromEntries(entries, state = 'received', latestOccurredAt, execution) {
   const latest = entries.at(-1)
-  const source = sourceFor(latest)
+  const source = sourceFor(latest, execution)
   const reportedAt = latestOccurredAt ?? latest?.occurredAt
   return {
     source,
@@ -98,7 +155,7 @@ function cardFromEntries(entries, state = 'received', latestOccurredAt) {
     ownerId: 'humanagent.runtime.explicit-brain',
     nextStep: fallbackText(latest?.text, '等待交互事件'),
     nextAction: latest?.eventKey || 'inspect-explicit-interaction',
-    waitingOn: state.includes('awaiting') ? 'human' : 'runtime',
+    waitingOn: execution?.waitingOn ?? (state.includes('awaiting') ? 'human' : 'runtime'),
     ...(reportedAt === undefined ? {} : { startedAt: reportedAt }),
   }
 }
@@ -158,15 +215,19 @@ function livenessCopy(liveness) {
 function projectInteractionCard(input) {
   const liveCopy = livenessCopy(input.liveness)
   const executionTurn = executionErrorTurn(input.execution?.error)
+  // The runtime's own localized label wins when this page observed the real
+  // execution (`input.execution.stateLabel`). Otherwise the interaction's own
+  // human label is used, so a raw interaction enum never reaches the card.
+  const stateLabel = input.execution?.stateLabel ?? input.stateLabel
   return {
     surface: 'interaction-work-card',
     // When the page observed the real execution, its state is the truth this
     // card must show. The interaction's own lifecycle only supplies the state
-    // while there is no execution to observe.
-    taskState: input.execution?.state ?? input.taskState,
-    // The runtime already localizes its lifecycle state (`RuntimeTaskDashboardProjection.stateLabel`).
-    // Forwarding it is what keeps a raw `LifecycleState` enum out of the card.
-    ...(input.execution?.stateLabel === undefined ? {} : { stateLabel: input.execution.stateLabel }),
+    // while there is no execution to observe. `toLifecycleState` passes a real
+    // lifecycle state through unchanged, so a genuine dashboard state is never
+    // replaced by the interaction's.
+    taskState: toLifecycleState(input.execution?.state ?? input.taskState),
+    ...(stateLabel === undefined ? {} : { stateLabel }),
     statusbar: liveCopy === undefined
       ? input.source
       : {
@@ -223,8 +284,13 @@ function projectInteractionCard(input) {
  * inventing a turn id, and the conversation carries only the occurrence times
  * the snapshot itself reported.
  */
-export function projectInteractionCardFromSnapshot(snapshot, state) {
-  const interactionId = snapshot?.interactionId || 'pending-input'
+export function projectInteractionCardFromSnapshot(snapshot) {
+  const interactionId = typeof snapshot?.interactionId === 'string' && snapshot.interactionId.trim() !== ''
+    ? snapshot.interactionId
+    : undefined
+  // A snapshot is an interaction-owned source. Without its real interaction id
+  // there is no card to mount.
+  if (interactionId === undefined) return undefined
   const draft = snapshot?.draft || null
   const enteredAt = snapshot?.occurredAt
   const userTurn = {
@@ -279,17 +345,19 @@ export function projectInteractionCardFromSnapshot(snapshot, state) {
   const turnText = draft
     ? draft.proposal || draft.normalizedInput || '草稿已生成'
     : snapshot?.reply || snapshot?.nextAction || '交互处理中'
-  const stateLabel = snapshot?.state || state
+  const interactionState = snapshot?.state
+  const stateLabel = interactionStateLabel(interactionState)
 
   return projectInteractionCard({
-    taskState: taskStateFor(stateLabel),
+    taskState: toLifecycleState(interactionState),
+    ...(stateLabel === undefined ? {} : { stateLabel }),
     source: {
       state: 'ready',
       label: '显式大脑',
       detail: stateLabel,
       ...(enteredAt === undefined ? {} : { updatedAt: enteredAt }),
     },
-    card: cardFromEntries(entries, stateLabel, enteredAt),
+    card: cardFromEntries(entries, interactionState, enteredAt),
     conversation: {
       summary: {
         goal: { text: snapshot?.rawInput || '尚未收到输入' },
@@ -328,11 +396,17 @@ export function projectInteractionCardFromSnapshot(snapshot, state) {
  * neither is derived here. They stay absent when the read reported none.
  */
 export function projectInteractionCardFromEntries(entries, state = 'received', context = {}) {
+  const latest = entries.at(-1)
+  const hasInteractionId = typeof latest?.interactionId === 'string' && latest.interactionId.trim() !== ''
+  const hasTaskId = normalizeScopedId(TASK_SCOPE, context.execution?.taskId) !== undefined
+  // Without a real interaction id or a real Task id there is no source to
+  // report, so the page must leave the card host empty instead of projecting a
+  // source-less card.
+  if (!hasInteractionId && !hasTaskId) return undefined
   const effectiveEntries = entries.length > 0
     ? entries
     : [{
         sequence: 1,
-        interactionId: 'pending-input',
         kind: 'status',
         sourceKind: 'progress',
         eventKey: 'explicit.ready',
@@ -342,15 +416,20 @@ export function projectInteractionCardFromEntries(entries, state = 'received', c
     (found, entry) => entry.occurredAt ?? found,
     undefined,
   )
+  // The runtime's own localized label wins when this page observed the real
+  // execution. Otherwise the interaction's own human label is used, so a raw
+  // interaction enum never reaches the card.
+  const stateLabel = context.execution?.stateLabel ?? interactionStateLabel(state)
   return projectInteractionCard({
     taskState: toLifecycleState(state),
+    ...(stateLabel === undefined ? {} : { stateLabel }),
     source: {
       state: 'ready',
       label: '显式大脑',
-      detail: state,
+      detail: stateLabel,
       ...(latestOccurredAt === undefined ? {} : { updatedAt: latestOccurredAt }),
     },
-    card: cardFromEntries(effectiveEntries, state, latestOccurredAt),
+    card: cardFromEntries(effectiveEntries, state, latestOccurredAt, context.execution),
     conversation: {
       summary: { missing: true },
       turns: effectiveEntries.map((entry) => ({
@@ -403,15 +482,24 @@ export function withTaskHistory(projection, query, result) {
   // `execution.terminal`) must not erase a real turn or request id.
   const turnCarrier = [...items].reverse().find((item) => item.turnId !== undefined && item.turnId !== null)
   const requestCarrier = [...items].reverse().find((item) => item.requestId !== undefined && item.requestId !== null)
+  // The interaction id the card already carries is a real reported fact too, so
+  // the trace's own identity is layered on top of it instead of replacing it.
+  // Task/Operation/epoch are included only when a real value was reported.
+  const currentSource = projection.cardMetadata?.source
+  const interactionId = currentSource?.interactionId
+  const taskId = latest?.taskId ?? currentSource?.taskId
+  const operationId = latest?.operationId ?? currentSource?.operationId
+  const executionEpoch = latest?.executionEpoch ?? currentSource?.executionEpoch
   return {
     ...projection,
     cardMetadata: latest
       ? {
           ...projection.cardMetadata,
           source: {
-            taskId: latest.taskId,
-            operationId: latest.operationId,
-            executionEpoch: latest.executionEpoch,
+            ...(interactionId === undefined ? {} : { interactionId }),
+            ...(taskId === undefined ? {} : { taskId }),
+            ...(operationId === undefined ? {} : { operationId }),
+            ...(executionEpoch === undefined ? {} : { executionEpoch }),
             ...(requestCarrier === undefined ? {} : { requestId: requestCarrier.requestId }),
             ...(turnCarrier === undefined ? {} : { turnId: turnCarrier.turnId }),
           },

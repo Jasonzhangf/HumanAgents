@@ -11,6 +11,12 @@
  * - F09: card re-render restores focus to the stable trigger node identity
  *   (`data-focus-key`) instead of dropping focus to body.
  *
+ * Default mode is the full page proof above. `--task-identity-only` runs only
+ * the controlled Task identity fixture below (real Task dashboard read model,
+ * no fabricated Operation, queued label, no page error) plus the shared
+ * evidence/assertion/cleanup path, so the accepted public consumer can be
+ * selected without the obsolete full-page fixtures.
+ *
  * Set INTERACTION_PAGE_EVIDENCE to the execution-owned evidence root and
  * INTERACTION_PAGE_UI_ROOT (optional) to a directory whose layout mirrors
  * `dist/app/ui` (used for red-base reproduction).
@@ -28,6 +34,8 @@ const evidenceRoot = process.env.INTERACTION_PAGE_EVIDENCE;
 if (!evidenceRoot?.trim()) {
   throw new Error('INTERACTION_PAGE_EVIDENCE is required; point it at an execution-owned directory');
 }
+
+const taskIdentityOnly = process.argv.includes('--task-identity-only');
 
 const playwrightModule = await import(
   process.env.INTERACTION_CARD_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js',
@@ -186,11 +194,11 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
 
-  for (const target of [
+  for (const target of (taskIdentityOnly ? [] : [
     { file: 'dashboard.html', entry: 'dashboard' },
     { file: 'task.html', query: '?task=new', entry: 'task' },
     { file: 'index.html', entry: 'entry' },
-  ]) {
+  ])) {
     pageErrors.length = 0;
     await page.goto(`${server.url}/${target.file}${target.query ?? ''}`, { waitUntil: 'domcontentloaded' });
     await waitForCard(page, target.entry);
@@ -233,6 +241,85 @@ try {
     }
   }
 
+  // --- task.js forwards the real dashboard identity, never a fabricated one ---
+  // The Task page is the product caller that turns the runtime dashboard read
+  // into the shared card. This proves the real dashboard TaskId reaches the
+  // card's technical source reference with no invented Operation, so an admitted
+  // Task is not mislabelled as a running execution and no `pending-input` scope
+  // is minted.
+  const TASK_WIRING_ID = 'task-wiring-proof';
+  const taskPage = await context.newPage();
+  const taskPageErrors = [];
+  taskPage.on('pageerror', (error) => taskPageErrors.push(`pageerror: ${error.message}`));
+  await taskPage.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const body = (payload, status = 200) => route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(payload),
+    });
+    if (path === '/api/runtime/status') {
+      return body({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true });
+    }
+    if (path === `/api/tasks/${TASK_WIRING_ID}`) {
+      // `renderTask` reads `detail.data.updatedAt`, so the read model must carry
+      // its `data` object; the real task-detail surface always does.
+      return body({
+        taskId: TASK_WIRING_ID,
+        title: 'identity forwarding proof',
+        state: 'waiting',
+        priorInput: '读取 README',
+        data: { updatedAt: '2026-10-15T12:00:00Z' },
+      });
+    }
+    if (path === `/api/tasks/${TASK_WIRING_ID}/dashboard`) {
+      return body({
+        taskId: { scope: 'task', value: TASK_WIRING_ID },
+        title: 'identity forwarding proof',
+        state: 'waiting',
+        stateLabel: '已入队，等待执行',
+        currentNode: 'runtime.queue',
+        input: '读取 README',
+        output: '',
+        nextStep: '等待隐式大脑调度',
+        updatedAt: '2026-10-15T12:00:00Z',
+        allowedActions: [],
+        recentEvents: [],
+        publicOutput: { state: 'absent', commits: [] },
+      });
+    }
+    if (path === `/api/tasks/${TASK_WIRING_ID}/history`) {
+      return body({ ok: true, page: { items: [], hasMore: false } });
+    }
+    return body({ error: { code: 'not-found', message: `unexpected route ${path}`, ownerId: 'test', nextAction: 'none' } }, 404);
+  });
+  await taskPage.goto(`${server.url}/task.html?task=${TASK_WIRING_ID}`, { waitUntil: 'domcontentloaded' });
+  const taskForwarding = await taskPage.waitForFunction(() => {
+    const card = document.querySelector('[data-interaction-work-card-host][data-entry="task"] .iwc-card');
+    if (!card) return null;
+    const sourceRef = card.querySelector('.iwc-source-ref')?.textContent ?? '';
+    if (!sourceRef) return null;
+    const chip = [...card.querySelectorAll('.iwc-state-chip')]
+      .find((node) => /^(交互|任务|节点) /.test(node.textContent ?? ''))?.textContent ?? '';
+    return { chip, sourceRef, statusText: card.querySelector('.iwc-status')?.innerText ?? '' };
+  }, undefined, { timeout: 20000 }).then((handle) => handle.jsonValue()).catch(() => null);
+  observe('task.html dashboard identity forwarding', taskForwarding);
+  record('task.js forwards the real dashboard TaskId into the card source',
+    Boolean(taskForwarding?.sourceRef?.includes(`task=task:${TASK_WIRING_ID}`)),
+    taskForwarding);
+  record('task.js forwards no fabricated Operation for an admitted Task',
+    Boolean(taskForwarding?.sourceRef?.includes('operation=未提供'))
+      && !taskForwarding.sourceRef.includes('pending-input'),
+    taskForwarding);
+  record('admitted Task card is labelled as a waiting task, not running',
+    taskForwarding?.chip === '任务 已入队，等待执行' && !taskForwarding.statusText.includes('运行中'),
+    taskForwarding);
+  record('task.html identity forwarding raises no page error', taskPageErrors.length === 0, [...taskPageErrors]);
+  await taskPage.screenshot({ path: join(artifactDir, 'task-identity-forwarding.png'), fullPage: true });
+  await taskPage.close();
+
+  if (!taskIdentityOnly) {
   // GAP B proof: the bounded original cause the runtime reports must reach the
   // human, not just a status code. The runtime stub answers the real
   // explicit-interaction read with a 500 body shaped exactly like the one
@@ -458,6 +545,7 @@ try {
   if (eventErrors.length) {
     await writeFile(join(evidenceRoot, 'dashboard-event-driven.errors.txt'), eventErrors.join('\n'), 'utf8');
   }
+  }
   await context.close();
 
   await writeFile(join(evidenceRoot, 'checks.json'), JSON.stringify({ checks, observations }, null, 2), 'utf8');
@@ -465,7 +553,11 @@ try {
   if (failures > 0) {
     throw new Error(`${failures}/${checks.length} page wiring browser checks failed:\n${checks.filter((check) => !check.pass).map((check) => `  - ${check.name}: ${JSON.stringify(check.detail)}`).join('\n')}`);
   }
-  console.log(`interaction page wiring browser proof: ${checks.length} checks passed`);
+  console.log(
+    taskIdentityOnly
+      ? `interaction page wiring browser proof (task-identity-only): ${checks.length} checks passed`
+      : `interaction page wiring browser proof: ${checks.length} checks passed`,
+  );
 } finally {
   await browser.close().catch(() => {});
   await closeServer(server).catch(() => {});
