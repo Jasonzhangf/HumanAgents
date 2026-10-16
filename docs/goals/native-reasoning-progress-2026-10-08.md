@@ -26,6 +26,7 @@
 - Grant fresh r8 已接收 A/B/C 最小方向；Root 纠正 `read` 方法、async product principal、真实 taskDetail/receipt 形状，删未使用 admission 接线及多余 StartedUiRuntime 字段。两路 fresh GCM 已并发：`provider-grant-public-entry-gcm-r1-20261015` 独占 App index/server + 原 semantic consumer；`provider-native-fixture-gcm-r2-20261015` 复用原 async 树，仅原 native consumer。后者已正常 Git merge 唯一候选 `4bea7b8`，树内容与该候选一致；未跨树复制源码。公开入口与 fixture 两个域分别独占，接收后当轮收口。
 - Runtime session 原基础 normal compile0/5例5PASS 已复用；新场景 baseline 因缺少新 session module 出现实际 TypeScript RED（仅证明缺模块，不能冒称行为断言已抓错）。实现仍进行中，未计新增验收完成。
 - UX peer 已继续负责原8个旧UI失败的最小审计/消融；无 App/Runtime 重叠 writer，基线 `4bea7b8`，不重复本侧 Opus 的 App consumer 失败分析，不降低真实行为验收。
+- Runtime session r1 已终态：normal compile/typecheck0，原5+新场景共6/6，邻49/49；实际三个 mutant 分别触发 status/incomplete 断言失败、durable identity conflict、自动 append 的 entries 长度断言失败。原 `/tmp/ab1-test.log`～`ab3-test.log` 已归档至其 r1 RUN。仍未接收源码：Root发现 returnedAt 在执行前采样，新场景复用了 tmpdir Journal fixture。fresh GCM r2 已复用同树，只修真实返回时钟采样和新场景规范 root，不新增case/matrix，不重跑未变邻49/原3mutants。
 
 以下为此前批次记录，出现旧 HEAD 或旧计数时以上述续接增量为准。
 
