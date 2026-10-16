@@ -6405,6 +6405,7 @@ test('driver construction failure releases startup waiters and leaves the task t
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-driver-factory-'));
   const coordinator = new RuntimeTaskCoordinator({
     organId,
+    admitExecution: async () => {},
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
@@ -7578,7 +7579,11 @@ test('post-commit context hook failure preserves checkpoint identity and recover
   assert.equal(failedDashboard.error?.nextAction, 'reconcile committed checkpoint');
   const checkpointPath = join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`);
   const checkpointJournal = await readFile(checkpointPath, 'utf8');
-  assert.equal(checkpointJournal.trim().split('\n').length, 1);
+  const checkpointRecords = checkpointJournal
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { readonly kind?: string });
+  assert.equal(checkpointRecords.filter((record) => record.kind === 'checkpoint').length, 1);
   assert.match(checkpointJournal, new RegExp(`checkpoint-${task.taskId.value}-1`));
 
   const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
@@ -7630,8 +7635,13 @@ test('UI checkpoint boundary publishes the committed journal digest and consumes
     join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
     'utf8',
   );
-  const record = JSON.parse(journal.trim()) as { readonly recordDigest: string };
-  assert.equal(published[0]?.recordDigest, record.recordDigest);
+  const checkpointRecords = journal
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { readonly kind?: string; readonly recordDigest?: string })
+    .filter((record) => record.kind === 'checkpoint');
+  assert.equal(checkpointRecords.length, 1);
+  assert.equal(published[0]?.recordDigest, checkpointRecords[0]?.recordDigest);
 });
 
 test('UI checkpoint boundary failure leaves the committed checkpoint explicitly blocked for recovery', async () => {
@@ -7678,7 +7688,11 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
     join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
     'utf8',
   );
-  assert.equal(checkpointJournal.trim().split('\n').length, 1);
+  const checkpointRecords = checkpointJournal
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { readonly kind?: string });
+  assert.equal(checkpointRecords.filter((record) => record.kind === 'checkpoint').length, 1);
 });
 
 test('post-commit context hook failure keeps non-succeeded checkpoints blocked after coordinator rebuild', async () => {

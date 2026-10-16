@@ -350,6 +350,7 @@ export class ProviderAgentDriver<
   private observeIterator?: AsyncIterator<ProviderEvent<TIdentity>>;
   private productionClosed = false;
   private producerFailure?: unknown;
+  private unconsumedToolFailure?: unknown;
   private executionSettled = false;
   private continuationInFlight = false;
   private readonly now: () => Date;
@@ -618,12 +619,15 @@ export class ProviderAgentDriver<
             yield* this.toolFailedEvents(request, call, cause, 'cancelled');
             return;
           }
-          // Record the real executor failure before releasing the barrier and
-          // yielding, so a later settle()/drain surfaces it instead of reading
-          // the stopped producer as a normal result.
-          this.recordProducerFailure(cause);
+          // Latch the real executor failure before releasing the barrier and
+          // yielding, so a consumer that stops resuming here leaves
+          // settle()/drain reporting it instead of a normal result. It is not
+          // a durable producer failure: once this throw reaches the caller the
+          // latch is cleared and settle() must still reach the port.
+          if (this.unconsumedToolFailure === undefined) this.unconsumedToolFailure = cause;
           releaseBarrier();
           yield* this.toolFailedEvents(request, call, cause, 'failed');
+          if (this.unconsumedToolFailure === cause) this.unconsumedToolFailure = undefined;
           throw cause;
         }
         const status: ProviderToolStatus = result.error !== undefined
@@ -735,7 +739,7 @@ export class ProviderAgentDriver<
     // A failed exact-output save or durable acceptance must surface on settle;
     // the released barrier must never turn a producer failure into a normal
     // stopped result.
-    if (this.producerFailure !== undefined) throw this.producerFailure;
+    if (this.outstandingFailure() !== undefined) throw this.outstandingFailure();
     let settlement: ProviderSettlement<TIdentity>;
     try {
       settlement = await this.port.settle({
@@ -802,7 +806,7 @@ export class ProviderAgentDriver<
       await Promise.allSettled(batch);
       if (this.inflight.size === batch.length) break;
     }
-    if (this.producerFailure !== undefined) throw this.producerFailure;
+    if (this.outstandingFailure() !== undefined) throw this.outstandingFailure();
     return {
       execution: { runtimeId: this.options.runtimeId, executionEpoch: this.options.executionEpoch },
       boundaryId: input.boundaryId,
@@ -895,6 +899,17 @@ export class ProviderAgentDriver<
 
   private recordProducerFailure(cause: unknown): void {
     if (this.producerFailure === undefined) this.producerFailure = cause;
+  }
+
+  /**
+   * The failure a close/settle must surface before it can report success. A
+   * durable producer failure (exact-output save, raw-fact acceptance, iterator
+   * close) is permanent. An unconsumed tool-execution rejection is only latched
+   * while observe() is suspended in the failed tool events before `throw`; once
+   * that throw reaches the caller it is cleared so the port settle still runs.
+   */
+  private outstandingFailure(): unknown {
+    return this.producerFailure ?? this.unconsumedToolFailure;
   }
 
   /**
