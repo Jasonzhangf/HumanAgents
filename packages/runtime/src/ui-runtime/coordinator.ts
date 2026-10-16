@@ -985,6 +985,7 @@ export function replayTaskJournalRecords(
           task.executionEpoch = operation.executionEpoch;
           task.input = operation.input;
           task.orchestrated = operation.orchestrated;
+          task.release = { state: 'released' };
           task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
         }
         if (record.taskOutput !== undefined) task.output = record.taskOutput;
@@ -4688,7 +4689,7 @@ export class RuntimeTaskCoordinator {
     if (event.kind !== 'output') return;
     if (record.driver?.standardTurn !== undefined) return;
     const text = event.summary;
-    if (text === undefined || text.trim().length === 0) return;
+    if (text === undefined || text.length === 0) return;
     const storeFor = this.options.publicOutputStoreFor;
     if (storeFor === undefined) return;
     const scope = this.scopes.get(operation.operationId.value);
@@ -5213,6 +5214,7 @@ export class RuntimeTaskCoordinator {
             task.executionEpoch = operation.executionEpoch;
             task.input = operation.input;
             task.orchestrated = operation.orchestrated;
+            task.release = { state: 'released' };
             task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
           }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;
