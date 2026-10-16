@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- generation 9 后续精确证据已由 Root 直接读取原 Journal：**709 prepared、710 invoked、711 returned** 的独立 closed-turn Planner、**712 task-plan-revision.published、713 alignment closure、714 runtime-task-current-state.currentPlan** 均已持久化。故本次已推进到真实 Planner 返回和目标对齐，失败发生在其后 delivery-source gate；业务最终交付仍未完成，下一次不得重复 Planner。UX 已定位 coordinator 将原 allocation epoch1 用于校验实际收口 epoch3，正独立小 plan 校正调用方使用已验证 expectedExecutionEpoch，不改原 operation 身份。Root 为关键链精确停止无源码 delta 的 release GCM r2，最终 PID absent/exit1/treeclean 后释放 coordinator 与原 App 测试写窗口给 UX；三项基线修复随后续派。
+
 - 最新真实 I1：boundary assembly `62241d6` 已标准合为 `6adfeed323309b653eabe4298e8d45c296c3afda`，Root App build exit 0 后立即交 UX 正式 restart。generation **9 / PID 22189** 实际加载该 SHA，单次原 resume `resume-1792177926741` 返回 **409 `standard-turn-delivery.source-conflict`**；未完成 live Planner/业务闭环。1820-byte 原文件/hash、effect intent/completion **1/1**、613 facts、2 segments、1 checkpoint、1 save intent、2 save progress 均不变，prefix preserved。UX 保持下一次恢复唯一 owner，正查历史 inspect epoch1 与收口 epoch3 的准确来源合同；不重复 POST、不重标身份。boundary controlled consumer **6/6 PASS**、旧位置 `task.assembly.missing` 行为 RED 均已接收；其成功不外推本次真实 delivery-source 失败。
 - 调度纠正：release GCM r1 在 28 次读取后仍无源码改动，Root 精确 SIGINT/确认退出，原树保持 clean，fresh GCM r2 以更窄派单直接复用；两个只读 GCM 超出窄观察范围且未返回报告，均精确停止/absent，原 events 保留，均不计完成。parent ancestry 独立 Gemini4 r1 含错误 mode/API/测试路径及错误 foldSnapshot 描述，未准入实现；已退回同会话 r2 只纠正实际 ABI，保留 valid typed lineage 方案方向。其他 producer 缺边仍 UNVERIFIED，不用读文件次数充进度。
 
