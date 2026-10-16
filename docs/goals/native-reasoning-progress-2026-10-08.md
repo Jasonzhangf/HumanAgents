@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- ownerattestation基础sourcebc3bfff（含b4f2f02）已标准合fec3e3f：RootAppbuild/Apptestcompile/Runtimeexplicitcompile0，raw2/2+Supervisor2/2exit0。首Node命令误用dist/tests路径报notfound，按实际tsconfig改为dist/tests-explicit-brain后通过；不当产品RED。原Taskguard顺序保持在同leaseguard内，legacyowner不回填。源worker自然终态，treeclean；原树暂留立即后继reconciliationfoundation，独立Gemini4同plan上下文ABI补正r2运行中，不另开同域树。尚无App注入/新epoch恢复/remoteclose证明。
+- G只读观察已终态：当前http来源与三协议typedtool/submit已有实现，旧gap源码描述不能当待实现。独立OAuth小plan已核实际new-task-identitypublicconsumer，GCM `provider-http-admission-proof-gcm-r1-20261016`只在该既有测试绑定httpunknownhealth→实际Task准入（先查等价断言，无充分缺口不加测）；不声称真实非RCCvendor。另GCM `provider-stop-receipt-port-gcm-r1-20261016`只写steering.ts+原controlconsumer补durablereceipt透传，coordinator上层窗口待与UX协调。3路实现并行（defaultstop/receiptport/httpadmission），parent后继在独立ABIplan；当前候选未整体review/未push，完整goal持续OPEN。
+
 - Root续接：postclose cb244b8+DI01a474、checkpointnative/time4be918已标准合b2704fe；组合Appbuild/Apptestcompile0、explicit15/15、checkpoint选定4/4exit0。coldtail ab27407已标准合fa910f64，组合Appbuild0。UX正式restartgen7/PID16394/53007，单次原resume已开epoch3；实际failedend纠错后第二次end成功，证明App/Provider续推接线生效；最终仍409：原seq84 file.read call_00_04gbpop0rfcz5ntw5ypcws8n缺exactcommittedcompletionlookup。已提交checkpoint698/native-save-intent702与部分publication，未完成capture/Planner；必须续pending保存，不新模型epoch、不重放effect。receipt `resume-1792170052520`，Journal706、原file/effect1+1不变（UX回执）。实际运行仍归UX独占，candidate窗口已释放；完整goal/main0/7不变。
 - 已补位3路GCM：`provider-stop-default-proof-gcm-r3-20261016`复用preparedstop树验证默认binder+两个caller；`provider-owner-attestation-gcm-r1-20261016`复用parent树只做Supervisor中性owner入口与turn-input持久化基础；`provider-g-evidence-observe-gcm-r1-20261016`只读当前G来源/三协议已有证据，不重复实现。另独立Gemini4medium `provider-checkpoint-receipt-tail-plan-agy4-r1-20261016`计划CheckpointCommitPort后续receipt丢失与producer最小迁移，不重做已验boundary。source/本地组合不冒远端交付；wholemilestone review仍未启动。
 
