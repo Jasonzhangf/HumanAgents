@@ -23,6 +23,9 @@
 - 最新候选原 UI runtime consumer 实际 148 例 118 PASS / 30 FAIL，日志 `provider-generic-tg1-gcm-r5-20261015/parent-candidate-ui-runtime.log`。不是旧混合树的 119/29。全部 case 输出后仍有句柄，Root 核 runner37604/child39531 后仅收拢自有 PID，未替换 watcher。失败包括 grant 缺失、执行事件/失败收口、checkpoint 格式/恢复及输出空格差异；根因未全部分类，不宣称环境或历史问题。fresh Opus 5.5 medium `provider-ga-failures-opus-plan-r1-20261015` 已按实际源码与失败日志规划最小修正，actual model 已核。
 - T5 fresh r6 仅 Runtime session 基础部分已接受；纠正其不得从传输成功推业务成功、不得凭摘要伪造 RawAsset。fresh GCM `provider-turn-helper-session-gcm-r1-20261015` 在唯一同域新树执行，仅 new session module/Runtime index/原 helper consumer 三文件。App 接线、父身份与跨 turn 恢复未接受完成。
 - UX 来源收口已核：证据 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-card-identity-20261015/ux-intake-cleanup.json`，来源树 clean、remove/prune/absent；peer 自有活动树 1→0。候选已组合，运行现场未动。
+- Grant fresh r8 已接收 A/B/C 最小方向；Root 纠正 `read` 方法、async product principal、真实 taskDetail/receipt 形状，删未使用 admission 接线及多余 StartedUiRuntime 字段。两路 fresh GCM 已并发：`provider-grant-public-entry-gcm-r1-20261015` 独占 App index/server + 原 semantic consumer；`provider-native-fixture-gcm-r2-20261015` 复用原 async 树，仅原 native consumer。后者已正常 Git merge 唯一候选 `4bea7b8`，树内容与该候选一致；未跨树复制源码。公开入口与 fixture 两个域分别独占，接收后当轮收口。
+- Runtime session 原基础 normal compile0/5例5PASS 已复用；新场景 baseline 因缺少新 session module 出现实际 TypeScript RED（仅证明缺模块，不能冒称行为断言已抓错）。实现仍进行中，未计新增验收完成。
+- UX peer 已继续负责原8个旧UI失败的最小审计/消融；无 App/Runtime 重叠 writer，基线 `4bea7b8`，不重复本侧 Opus 的 App consumer 失败分析，不降低真实行为验收。
 
 以下为此前批次记录，出现旧 HEAD 或旧计数时以上述续接增量为准。
 
