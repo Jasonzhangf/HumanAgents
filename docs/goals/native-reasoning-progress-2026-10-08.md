@@ -4,9 +4,9 @@
 
 ## 1. 当前目标与总体进度（截至 2026-10-15）
 
-- **本轮当前进度**：完整 goal ACTIVE / INCOMPLETE。本轮 **9 个工作项，6 个源码节点已接收、1 个已交付远端 main**。已接 restart、explicit intake、RC-1、RC-2、RC-4、RC-5；RC-3 的四文件修复已接，但孤立 Node 类型声明仍在收尾，暂不计整个节点完成。G-A/TG1 与 T4b 继续原树实现。当前 3 路 fresh GCM 并行，另有独立 AGY Gemini 4 Medium 规划 T5；不为凑并发增加任务。
+- **本轮当前进度**：完整 goal ACTIVE / INCOMPLETE。原 9 项中 **8 项源码已接收、1 项已交付远端 main**：restart、explicit intake、RC-1～RC-5、T4b 已接；G-A/TG1 仍未完成。正式 Runtime 分层构建新暴露 checkpoint suite 的 42 条 Node 声明诊断，增加 1 个必要修复项，故当前为 **10 项 / 8 项源码已接收 / 1 项远端 main 交付**。该项 fresh GCM 正在执行；G-A 窄修正和 T5 真实生产接线由两个独立 AGY Gemini 4 Medium Planner 并行补齐。无 ready 实现时不造任务凑并发。
 - **最新 Git 边界**：restart 独立切片经 PR [#1](https://github.com/Jasonzhangf/HumanAgents/pull/1) 合入远端 main **`298123095032bcb6b552ea88c84ca889290e43b1`**。本地主树正常 merge 为 `77d27265411ab818c6b43dba957f565f4499646d`，App build exit 0；唯一完整候选组合为 `1d6fab55`，再接 RC-4 `648c8eb`、RC-3 `e46f7ad`、RC-1 `fdc9aa4` / **`8b3b61e93df003d14b7fb56eb6bd18f750dc9485`**。历史候选整批仍未整体 Review，不直接推本地主树。
-- **未接收来源与纠偏**：T4b r2 已去除主要宽泛转换，但 exit 0 后交回未完成思考文本，没有最终测试证据，不算完成；fresh r3 在原树限定收尾。G-A r3 独立 amendment 已接受，真实 Task 不以提交代 grant；沿 typed 首错和现有 cleanupError 保存恢复责任；无业务效果的准入拒绝持久收拢后，才允许新 operation。GCM 正在原混合保护树实现原 Case 1/2；Case 3 原测试缺 scheduled-task 的真实 grant，保持未验收，不自行造授权。
+- **T4b 与 G-A 当前事实**：T4b r3 正常 contracts/runtime/provider 编译 exit 0、原 Provider **126/126 PASS**，r4 仅修三个 validator 谓词；真实临时 tsc 反例从错误 Task 假设可编译 exit 0 → 正确拒绝 exit 2，typed Task/Helper 正例 exit 0，无新增运行时校验。来源 `a2a441f` / `61898bd` → 候选 `1d82347` / `be8de26`；组合后的 contracts/provider/App 正常编译均 exit 0，来源树已关闭。G-A r3 原入口 **0/3 → 2/3**，Case 3 缺 scheduled-task grant，保持未验收；限定 hunk 来源 `93d6e79a` → 候选 `779e20f`，未带入混合树其他 owner 的 dirty。接收检查新发现 `openActiveTurn` 在 admission 前写入，且无执行 receipt 用 epoch 0、async API 原 caller 未迁移，原 Planner 正在补最小必要修正，不能计 G-A 完成或部署此中间状态。
 - **本轮文件窗口与资源**：intake 独占 `explicit-brain-runtime.ts` 及两个原 App fixture，并收拢 RC-5 在 `ui-runtime.test.ts` 的两处旧 ABI 错误；RC-5 只写其他 4 个原 App 测试。5 路 RC 基于原 **143 错 / 17 文件**规划，保原断言，不新增测试矩阵或产品能力。新树为一个 intake 域和 RC-1～RC-5 各一个域，receipt：`/private/tmp/ha-worktree-sese-inventory-20261015/release-fixture-open-receipt.json`；接收并标准 Git 合流后当轮 remove/prune/absent，不重派开第二树。
 - **UX 协同最新边界**：`2204469c` 的 C3/C5/C6/shell 与 C4 基础来源已由唯一候选采用；完整 C4/C7 公开控制与未来 Context 挂载仍未交。peer 在 `8b3b61e` 正常 build:contracts/build:app exit 0 后，已完成 53007 正式 restart：85589/generation 1 → **44364/generation 2**。caller 退出后新进程 PPID 1、PGID 44364，typed identity PASS、HTTP 200、原 PID 消失。`interaction-1` / revision 1 / matching 经公开 GET 恢复，admissionCount 仍 0。现场保留，未重投任务或全局安装。原 SIGKILL 的 `cold-execution.source-unavailable` 仍使 F13 开放，不把这次干净 restart 扩大为崩溃恢复证明。
 
@@ -21,7 +21,7 @@
 - 本轮 source 关闭回执均在 `/private/tmp/ha-worktree-sese-inventory-20261015/`：`restart-lifetime-owner-transfer-close-receipt.json`、`explicit-intake-close-receipt.json`、`release-rc2-close-receipt.json`、`release-rc5-close-receipt.json`。证据及未收拢 fixture 保留，未冒称所有资源清理完成。
 
 - **Provider/native 当前核验状态**：完整 goal ACTIVE；Provider 业务 A–G main **0/7**，不把 supervisor 独立交付计为这些生产能力。原 25 例组合基线仍 **22 PASS / 3 FAIL**，未重跑全组，不以局部结果覆盖。完整候选以本节最新 Git 边界为准；早期 `4ba88f40` / `08961ab1` / `dc19a784` 是来源历史。完整剩余 milestone 的一次整体 Review 必须覆盖最新远端 main → 剩余闭包；restart 独立 PASS 不覆盖其余功能。
-- **N3 最新纠正**：T2旧turn/revision混用已实际RED→GREEN，正常compile0/原一case1PASS，final source `f83e6ddb…`、consumer `3809e434…`。已接受基础为 **T1/T2/T3 = 3/6**；T4a合同子包已正常提交 `af033dff`，contracts及原consumer均正常compile0、原3case PASS。T4b Provider driver、T4c Runtime helper已取得同一Git依赖并并行执行；完整T4、T5生产组装、T6真实CLI预算仍未验。T3是真实Journal基础，不是helper执行。
+- **N3 最新纠正**：T2 旧 turn/revision 混用已有实际 RED→GREEN；T1/T2/T3 基础原为 **3/6**。T4a contracts、T4b Provider driver、T4c Runtime helper 的作者公开 consumer 与类型证据现已接收并标准 Git 合流；这仍不等于 T5 真实编排入口已经会派 helper。T5 初版计划虚构若干 API、给出不存在的 Vitest 命令，并只增加无人调用的 App methods，已退回原 Planner 按真实 caller 补齐。完整 N3 生产验收仍开放，不能用叶模块相加冒称双脑长程运行成立。
 - **资源纠正**：用户说明清理已经停止，历史大量worktree源于本目标未及时收口。Root接受该执行偏差；不新增长期规则。下文全量清理数字属于该清理任务；最初本侧回执仅1项，后续自有来源核销见当前回执，不混为全量清理成果。现按同域单树、标准Git合流、接受且无后续用途后当轮核销。关键284份归档另存 `/private/tmp/humanagent-provider-recovery-evidence-20261015.tar.gz`；恢复不计新功能进度。
 - **正常Git来源**：宿主原树正常提交 native25 `d8b9a0ec`、terminal6 `38c2e368`、reload7 `1d0b697d`。未采纳worker在`.git`拒绝后另建metadata所得 `a6236644`/`2ed2345e`；后续worker不绕该限制，由宿主执行合法Git动作。
 - **权威需求版本**：[`.appsdk/requirements.json`](../../.appsdk/requirements.json) `version: 14`（10 条用户需求）。
@@ -46,7 +46,7 @@
 
 ## 3. 下一阶段收敛步骤
 
-当前按第一节最新快照并行推进 RC-3、T4b、G-A，并提前规划 T5。T4c 已在唯一候选，原来源树已核销。53007 正式 restart 完成，现场恢复为同一个 interaction；G-A 准入修复组合前不重投原意图。C7 待独立公开控制 ABI，不强加为未受影响切片的额外依赖。以下旧故障与早期交付步骤保留为历史证据，不覆盖本节最新完成状态。
+当前先闭合 checkpoint suite 的真实分层编译，G-A 完成已发现的最小顺序/receipt/caller 修正，再恢复同一个 53007 interaction 的原意图。T4b/T4c 源码已在唯一候选，原来源树均已核销；T5 只在真实生产调用边和类型输入 ready 后派实现。C7 待独立公开控制 ABI，不强加为未受影响切片的额外依赖。以下旧故障与早期交付步骤保留为历史证据，不覆盖本节最新完成状态。
 
 - **当前两个真实交付缺口**：① restart CLI回completed/exit0，generation1 PID14046→generation2 PID36889后，新PID与65517监听随即消失，lease却未disposed；已撤回PASS。r1正式serve恢复又被`daemon-takeover.previous-close-unverified`拒绝，原控制根和无Task证据保留，未改lease绕保护。独立READY计划 `provider-restart-lifetime-plan-agy4-r1-20261015/plan.md`；GCM同名实现原树从4ba创建，只修spawn寿命与原consumer，先证实caller/PTY反例，不向负PID或整个进程组发信号、不用/tmp持久化。② 新鲜r2同源RCC服务 `53007`、PID85589已实际存活；UX单次submit创建ux-handoff.md需求后，真实输出把kind放在decision.kind，而App严格parser要求顶层kind，报`interaction agent decision does not match the explicit intake contract`。实际无typed Task，interaction-1不是TaskId；保当前服务，不重试/不restart。输出还带确认等待文本，实际二次确认路径尚未走到，不能冒推定已发生。计划 `provider-explicit-intake-plan-agy4-r1-20261015` 正在独立核对模板/唯一输出合同，禁止双格式fallback或切model。
 - **真实入口证据**：`provider-candidate-live-entry-gcm-r1-20261015/{post-main-official-restart.*,parent-restart-lifetime-failure.json,crash-recovery-serve.log,parent-fresh-entry-r2-handoff.json}`；UX单次输入/页面/公开interaction在 `/private/tmp/humanagent-ux-remaining-20261015/live-i1-*`。旧62411/65517不可用，当前53007保恢复责任。用户已授权全部本范围动作；每个可用增量验收后整体Review→main→push，不等完整goal；当前113提交闭包未审，不先push其中所谓文档。
