@@ -4,6 +4,7 @@ import {
   type AgentClosure,
   type AgentDriver,
   type Checkpoint,
+  type DurableCheckpointReceipt,
   type EvidenceRef,
   type ScopeRef,
   type StopRequestReceipt,
@@ -43,6 +44,8 @@ export interface StoppedCheckpointReceipt {
   readonly closure: AgentClosure;
   readonly ownerId: string;
   readonly nextAction: Checkpoint['next'];
+  readonly recordDigest?: string;
+  readonly receipt?: DurableCheckpointReceipt;
 }
 
 export interface PreparedStopSettlement {
@@ -66,6 +69,8 @@ export interface StopSettlementRecovery {
 export class StopSettlementCommitError extends ControlError {
   readonly prepared: PreparedStopSettlement;
   readonly checkpointCommitted: boolean;
+  readonly recordDigest?: string;
+  readonly receipt?: DurableCheckpointReceipt;
   readonly recovery?: StopSettlementRecovery;
 
   constructor(
@@ -74,6 +79,8 @@ export class StopSettlementCommitError extends ControlError {
     cause: unknown,
     options: {
       readonly checkpointCommitted?: boolean;
+      readonly recordDigest?: string;
+      readonly receipt?: DurableCheckpointReceipt;
       readonly recovery?: StopSettlementRecovery;
     } = {},
   ) {
@@ -81,6 +88,8 @@ export class StopSettlementCommitError extends ControlError {
     this.name = 'StopSettlementCommitError';
     this.prepared = structuredClone(prepared);
     this.checkpointCommitted = options.checkpointCommitted ?? false;
+    this.recordDigest = options.recordDigest;
+    this.receipt = options.receipt ? structuredClone(options.receipt) : undefined;
     this.recovery = options.recovery ? structuredClone(options.recovery) : undefined;
   }
 }
@@ -92,6 +101,7 @@ export interface CheckpointCommitPort {
     readonly checkpointId: Checkpoint['id'];
     readonly committed: true;
     readonly recordDigest?: string;
+    readonly receipt?: DurableCheckpointReceipt;
     readonly recovery?: StopSettlementRecovery;
   }>;
 }
@@ -357,7 +367,12 @@ async function commitPreparedStopSettlement(
       'stopped checkpoint committed but post-commit recovery failed',
       canonicalPrepared,
       undefined,
-      { checkpointCommitted: true, recovery: commit.recovery },
+      {
+        checkpointCommitted: true,
+        ...(commit.recordDigest === undefined ? {} : { recordDigest: commit.recordDigest }),
+        ...(commit.receipt === undefined ? {} : { receipt: commit.receipt }),
+        recovery: commit.recovery,
+      },
     );
   }
   return {
@@ -366,5 +381,7 @@ async function commitPreparedStopSettlement(
     closure: structuredClone(canonicalPrepared.closure),
     ownerId,
     nextAction: structuredClone(canonicalPrepared.checkpoint.next),
+    ...(commit.recordDigest === undefined ? {} : { recordDigest: commit.recordDigest }),
+    ...(commit.receipt === undefined ? {} : { receipt: commit.receipt }),
   };
 }
