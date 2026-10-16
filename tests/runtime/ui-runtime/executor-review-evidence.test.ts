@@ -14,6 +14,17 @@ import {
   type RuntimeExecutionDriverInput,
 } from '../../../packages/runtime/src/ui-runtime/coordinator.js';
 
+// The combined root program resolves `node:assert/strict` to another
+// directory's ambient declaration, and no ambient in the tree declares either
+// signature below. Merging them into the real module keeps both assertions
+// typed instead of widening `assert` to any.
+declare module 'node:assert/strict' {
+  interface Assert {
+    doesNotMatch(actual: string, expected: RegExp, message?: string): void;
+    strictEqual<T>(actual: unknown, expected: T, message?: string): void;
+  }
+}
+
 const coordinatorOrganId = id('organ', 'organ-executor-evidence');
 
 interface CapturedExecutorEvidence {
@@ -146,9 +157,15 @@ function evidenceCoordinator(
     organId: coordinatorOrganId,
     taskIdPrefix: 'executor-evidence',
     createDriver: (input) => new EvidenceDriver(input, events, settleState),
+    admitExecution: async () => {},
     checkpointStoreFor: () => ({
       async verify() { return { valid: true as const }; },
       async readLatest() { return null; },
+      // Stateless fake: nothing is persisted, so every committed read reports absence.
+      async readCommitted() { return null; },
+      async listCommitted() { return { checkpoints: [] }; },
+      async readExecutionPosition() { return null; },
+      async readCheckpointRecoveryBinding() { return null; },
       async append(input) { return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq }; },
       async commit(checkpoint) { return { checkpointId: checkpoint.id, committed: true as const }; },
     }),

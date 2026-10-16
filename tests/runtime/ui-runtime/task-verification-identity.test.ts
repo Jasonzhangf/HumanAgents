@@ -274,9 +274,15 @@ function runtimeFacetCoordinator(
       drivers.push(driver);
       return driver;
     },
+    admitExecution: async () => {},
     checkpointStoreFor: () => ({
       async verify() { return { valid: true as const }; },
       async readLatest() { return null; },
+      // Stateless fake: nothing is persisted, so every committed read reports absence.
+      async readCommitted() { return null; },
+      async listCommitted() { return { checkpoints: [] }; },
+      async readExecutionPosition() { return null; },
+      async readCheckpointRecoveryBinding() { return null; },
       async append(input) { return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq }; },
       async commit(checkpoint) { return { checkpointId: checkpoint.id, committed: true as const }; },
     }),
