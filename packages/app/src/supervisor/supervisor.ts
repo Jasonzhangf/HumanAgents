@@ -30,6 +30,40 @@ export interface SupervisorCleanupFailure {
   readonly message: string;
 }
 
+export interface SupervisorSourceReceipt {
+  readonly entryPath: string;
+  readonly entryDigest: string;
+  readonly packageVersion: string;
+  readonly releaseVersion?: string;
+}
+
+export interface SupervisorStartupDeclaration {
+  readonly launcherPath: string;
+  readonly cwd: string;
+  readonly args: readonly string[];
+  readonly source: SupervisorSourceReceipt;
+}
+
+export interface SupervisorRestartFailure {
+  readonly errorCode: string;
+  readonly ownerId: string;
+  readonly nextAction: string;
+  readonly message: string;
+  readonly occurredAt: string;
+}
+
+export interface SupervisorRestartTransition {
+  readonly requestId: string;
+  readonly requestedAt: string;
+  readonly previousLeaseId: string;
+  readonly previousGeneration: number;
+  readonly previousProcessStartToken: string;
+  readonly targetEntryPath: string;
+  readonly targetEntryDigest: string;
+  readonly completedAt?: string;
+  readonly failure?: SupervisorRestartFailure;
+}
+
 export interface SupervisorTakeoverRecord {
   readonly previousLeaseId: string;
   readonly previousGeneration: number;
@@ -50,6 +84,8 @@ export interface SupervisorLeaseRecord {
   readonly readyAt?: string;
   readonly disposedAt?: string;
   readonly controlEndpoint?: SupervisorControlEndpoint;
+  readonly startup?: SupervisorStartupDeclaration;
+  readonly restart?: SupervisorRestartTransition;
   readonly takeover?: SupervisorTakeoverRecord;
   readonly failure?: SupervisorFailureRecord;
 }
@@ -106,6 +142,7 @@ export interface SupervisorTakeoverStopOptions {
 
 export interface AcquireDaemonLeaseOptions {
   readonly ownerId?: string;
+  readonly startup?: SupervisorStartupDeclaration;
   readonly takeover?: SupervisorTakeoverOptions;
 }
 
@@ -183,6 +220,55 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
       || endpoint.port > 65535
     ) {
       throw supervisorError('daemon-lease-corrupt', 'daemon lease control endpoint is invalid', 'inspect and repair the daemon lease');
+    }
+  }
+  if (value.startup !== undefined) {
+    const startup = value.startup;
+    if (
+      typeof startup.launcherPath !== 'string'
+      || !startup.launcherPath
+      || typeof startup.cwd !== 'string'
+      || !startup.cwd
+      || !Array.isArray(startup.args)
+      || startup.args.some((argument) => typeof argument !== 'string')
+      || typeof startup.source?.entryPath !== 'string'
+      || !startup.source.entryPath
+      || typeof startup.source.entryDigest !== 'string'
+      || !startup.source.entryDigest
+      || typeof startup.source.packageVersion !== 'string'
+      || !startup.source.packageVersion
+      || (startup.source.releaseVersion !== undefined && typeof startup.source.releaseVersion !== 'string')
+    ) {
+      throw supervisorError('daemon-lease-corrupt', 'daemon lease startup declaration is invalid', 'inspect and repair the daemon lease');
+    }
+  }
+  if (value.restart !== undefined) {
+    const restart = value.restart;
+    if (
+      typeof restart.requestId !== 'string'
+      || !restart.requestId
+      || typeof restart.requestedAt !== 'string'
+      || !restart.requestedAt
+      || typeof restart.previousLeaseId !== 'string'
+      || !restart.previousLeaseId
+      || !Number.isSafeInteger(restart.previousGeneration)
+      || restart.previousGeneration < 1
+      || typeof restart.previousProcessStartToken !== 'string'
+      || !restart.previousProcessStartToken
+      || typeof restart.targetEntryPath !== 'string'
+      || !restart.targetEntryPath
+      || typeof restart.targetEntryDigest !== 'string'
+      || !restart.targetEntryDigest
+      || (restart.completedAt !== undefined && typeof restart.completedAt !== 'string')
+      || (restart.failure !== undefined && (
+        typeof restart.failure.errorCode !== 'string'
+        || typeof restart.failure.ownerId !== 'string'
+        || typeof restart.failure.nextAction !== 'string'
+        || typeof restart.failure.message !== 'string'
+        || typeof restart.failure.occurredAt !== 'string'
+      ))
+    ) {
+      throw supervisorError('daemon-lease-corrupt', 'daemon lease restart transition is invalid', 'inspect and repair the daemon lease');
     }
   }
   if (value.takeover !== undefined) {
@@ -395,7 +481,6 @@ async function stopActiveDaemon(
   paths: RuntimePaths,
   existing: SupervisorLeaseRecord,
   options: SupervisorTakeoverStopOptions,
-  onGracefulSignal?: () => Promise<void>,
 ): Promise<TakeoverTerminationReceipt> {
   const pid = existing.pid;
   const gracefulTimeoutMs = assertStopTimeout(options.gracefulTimeoutMs, 'gracefulTimeoutMs', DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
@@ -417,7 +502,6 @@ async function stopActiveDaemon(
       'inspect the exact daemon PID and retry takeover after confirming the active owner is reachable',
     );
   }
-  await onGracefulSignal?.();
   if (await waitForProcessExit(pid, gracefulTimeoutMs, pollIntervalMs)) {
     return {
       termination: 'graceful',
@@ -440,7 +524,16 @@ function leaseOwnedError(record: SupervisorLeaseRecord): AppLifecycleError {
   );
 }
 
-function newLeaseRecord(paths: RuntimePaths, generation: number, options: { readonly takeover?: SupervisorTakeoverRecord; readonly ownerId?: string }): SupervisorLeaseRecord {
+function newLeaseRecord(
+  paths: RuntimePaths,
+  generation: number,
+  options: {
+    readonly takeover?: SupervisorTakeoverRecord;
+    readonly ownerId?: string;
+    readonly startup?: SupervisorStartupDeclaration;
+    readonly restart?: SupervisorRestartTransition;
+  },
+): SupervisorLeaseRecord {
   return {
     schemaVersion: LEASE_SCHEMA_VERSION,
     leaseId: randomUUID(),
@@ -449,6 +542,8 @@ function newLeaseRecord(paths: RuntimePaths, generation: number, options: { read
     pid: process.pid,
     processStartToken: PROCESS_START_TOKEN,
     acquiredAt: new Date().toISOString(),
+    ...(options.startup === undefined ? {} : { startup: options.startup }),
+    ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.takeover === undefined ? {} : { takeover: options.takeover }),
   };
 }
@@ -512,7 +607,7 @@ async function assertTakeoverProcessIdentity(paths: RuntimePaths, existing: Supe
   }
 }
 
-interface SupervisorLeaseIdentity {
+export interface SupervisorLeaseIdentity {
   readonly leaseId: string;
   readonly generation: number;
   readonly processStartToken: string;
@@ -588,7 +683,13 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
       record = await assertLeaseIdentity(paths, leaseIdentity);
     },
     async markReady() {
-      return update((current) => ({ ...current, readyAt: new Date().toISOString() }));
+      return update((current) => ({
+        ...current,
+        readyAt: new Date().toISOString(),
+        ...(current.restart === undefined || current.restart.completedAt !== undefined
+          ? {}
+          : { restart: { ...current.restart, completedAt: new Date().toISOString() } }),
+      }));
     },
     async setControlEndpoint(endpoint) {
       if (!Number.isSafeInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) {
@@ -652,65 +753,113 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
 export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDaemonLeaseOptions = {}): Promise<SupervisorLease> {
   const leasePath = daemonLeasePath(paths);
   await mkdir(dirname(leasePath), { recursive: true });
-  return withLeaseGuard(leasePath, async () => {
-    const existing = await readLeaseRecord(paths);
-    if (existing && !existing.disposedAt) {
-      if (!options.takeover) throw leaseOwnedError(existing);
+
+  if (options.takeover?.stop !== undefined) {
+    const existing = await withLeaseGuard(leasePath, async () => {
+      const current = await readLeaseRecord(paths);
+      if (!current || current.disposedAt) return current;
+      if (!options.takeover) throw leaseOwnedError(current);
       const allowed = options.takeover.allowed === undefined
-        ? options.takeover.stop !== undefined || !processIsAlive(existing.pid)
-        : await options.takeover.allowed(existing);
-      if (!allowed) throw leaseOwnedError(existing);
-      let replacement: SupervisorLeaseRecord | undefined;
-      const writeReplacement = async (): Promise<void> => {
-        if (replacement !== undefined) return;
-        replacement = newLeaseRecord(paths, existing.generation + 1, {
-          ownerId: options.ownerId,
-          takeover: {
-            previousLeaseId: existing.leaseId,
-            previousGeneration: existing.generation,
-            reason: options.takeover!.reason,
-            detectedAt: new Date().toISOString(),
-          },
-        });
-        await writeLeaseRecord(paths, replacement);
-      };
-      let termination: TakeoverTerminationReceipt | undefined;
+        ? true
+        : await options.takeover.allowed(current);
+      if (!allowed) throw leaseOwnedError(current);
+      return current;
+    }, { allowStaleTakeover: true });
+
+    let termination: TakeoverTerminationReceipt | undefined;
+    if (existing !== undefined && !existing.disposedAt) {
       try {
-        termination = options.takeover.stop === undefined
-          ? undefined
-          : await stopActiveDaemon(paths, existing, options.takeover.stop, writeReplacement);
+        termination = await stopActiveDaemon(paths, existing, options.takeover.stop);
       } catch (error) {
-        if (replacement !== undefined) {
-          const failure = {
-            phase: 'daemon-takeover.stop',
-            ownerId: options.ownerId ?? 'supervisor',
+        if (existing.restart !== undefined) {
+          await recordDaemonRestartFailure(paths, existing.restart.requestId, {
             errorCode: error instanceof AppLifecycleError ? error.code : 'daemon-takeover.failed',
+            ownerId: error instanceof AppLifecycleError ? error.ownerId : options.ownerId ?? 'supervisor',
             nextAction: error instanceof AppLifecycleError
               ? error.nextAction
               : 'inspect the previous daemon and retry takeover after confirming the replacement owner is stopped',
             message: error instanceof Error ? error.message : String(error),
             occurredAt: new Date().toISOString(),
-          } satisfies SupervisorFailureRecord;
-          await writeLeaseRecord(paths, {
-            ...replacement,
-            failure,
-            disposedAt: new Date().toISOString(),
           }).catch(() => undefined);
         }
         throw error;
       }
-      if (replacement === undefined) await writeReplacement();
-      const record = {
-        ...replacement!,
+    }
+
+    const closed = await readLeaseRecord(paths);
+    if (
+      existing?.startup !== undefined
+      && (
+        closed === undefined
+        || closed.leaseId !== existing.leaseId
+        || closed.disposedAt === undefined
+        || closed.failure?.cleanupFailure !== undefined
+      )
+    ) {
+      throw supervisorError(
+        'daemon-takeover.previous-close-unverified',
+        `previous owner ${existing.leaseId} did not publish a clean disposal receipt`,
+        'inspect the previous owner cleanup failure and recovery responsibility before retrying restart',
+        existing.ownerId,
+      );
+    }
+
+    return withLeaseGuard(leasePath, async () => {
+      const latest = await readLeaseRecord(paths);
+      if (
+        latest !== undefined
+        && !latest.disposedAt
+        && (existing === undefined || latest.leaseId !== existing.leaseId)
+      ) {
+        throw leaseOwnedError(latest);
+      }
+      const previous = latest ?? existing;
+      const record = newLeaseRecord(paths, (previous?.generation ?? 0) + 1, {
+        ownerId: options.ownerId,
+        ...(options.startup === undefined ? {} : { startup: options.startup }),
+        ...(previous?.restart === undefined ? {} : { restart: previous.restart }),
+        ...(existing === undefined || termination === undefined ? {} : {
+          takeover: {
+            previousLeaseId: existing.leaseId,
+            previousGeneration: existing.generation,
+            reason: options.takeover!.reason,
+            detectedAt: new Date().toISOString(),
+            ...termination,
+          },
+        }),
+      });
+      await writeLeaseRecord(paths, record);
+      return createLease(paths, record);
+    }, { allowStaleTakeover: true });
+  }
+
+  return withLeaseGuard(leasePath, async () => {
+    const existing = await readLeaseRecord(paths);
+    if (existing && !existing.disposedAt) {
+      if (!options.takeover) throw leaseOwnedError(existing);
+      const allowed = options.takeover.allowed === undefined
+        ? !processIsAlive(existing.pid)
+        : await options.takeover.allowed(existing);
+      if (!allowed) throw leaseOwnedError(existing);
+      const record = newLeaseRecord(paths, existing.generation + 1, {
+        ownerId: options.ownerId,
+        ...(options.startup === undefined ? {} : { startup: options.startup }),
+        ...(existing.restart === undefined ? {} : { restart: existing.restart }),
         takeover: {
-          ...replacement!.takeover!,
-          ...(termination === undefined ? {} : termination),
+          previousLeaseId: existing.leaseId,
+          previousGeneration: existing.generation,
+          reason: options.takeover.reason,
+          detectedAt: new Date().toISOString(),
         },
-      };
+      });
       await writeLeaseRecord(paths, record);
       return createLease(paths, record);
     }
-    const record = newLeaseRecord(paths, existing ? existing.generation + 1 : 1, { ownerId: options.ownerId });
+    const record = newLeaseRecord(paths, existing ? existing.generation + 1 : 1, {
+      ownerId: options.ownerId,
+      ...(options.startup === undefined ? {} : { startup: options.startup }),
+      ...(existing?.restart === undefined ? {} : { restart: existing.restart }),
+    });
     await writeLeaseRecord(paths, record);
     return createLease(paths, record);
   }, { allowStaleTakeover: options.takeover !== undefined });
@@ -718,6 +867,53 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
 
 export async function readDaemonLease(paths: RuntimePaths): Promise<SupervisorLeaseRecord | undefined> {
   return readLeaseRecord(paths);
+}
+
+export async function assertDaemonLeaseIdentity(paths: RuntimePaths, record: SupervisorLeaseRecord): Promise<void> {
+  if (!processIsAlive(record.pid)) {
+    throw supervisorError(
+      'daemon-takeover.identity-mismatch',
+      `daemon PID ${record.pid} is no longer running for lease ${record.leaseId}`,
+      'start a new daemon owner and retry from its active lease',
+      record.ownerId,
+    );
+  }
+  return assertTakeoverProcessIdentity(paths, record);
+}
+
+export async function recordDaemonRestartTransition(
+  paths: RuntimePaths,
+  expected: SupervisorLeaseIdentity,
+  transition: SupervisorRestartTransition,
+): Promise<SupervisorLeaseRecord> {
+  return withLeaseGuard(daemonLeasePath(paths), async () => {
+    const latest = await assertLeaseIdentity(paths, expected);
+    const next = { ...latest, restart: transition };
+    validateLeaseRecord(next);
+    await writeLeaseRecord(paths, next);
+    return next;
+  });
+}
+
+export async function recordDaemonRestartFailure(
+  paths: RuntimePaths,
+  requestId: string,
+  failure: SupervisorRestartFailure,
+): Promise<SupervisorLeaseRecord | undefined> {
+  return withLeaseGuard(daemonLeasePath(paths), async () => {
+    const latest = await readLeaseRecord(paths);
+    if (latest?.restart?.requestId !== requestId) return undefined;
+    const next = {
+      ...latest,
+      restart: {
+        ...latest.restart,
+        failure,
+      },
+    };
+    validateLeaseRecord(next);
+    await writeLeaseRecord(paths, next);
+    return next;
+  });
 }
 
 /**
@@ -883,7 +1079,19 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
       async dispose() {
         if (disposeReceipt !== undefined) return disposeReceipt;
         const cleanup = await disposeStagesReverse(started);
-        const released = await lease.release();
+        const cleanupError = cleanup.cleanupFailure === undefined
+          ? undefined
+          : new AppLifecycleError(
+              'supervisor-dispose.cleanup-failed',
+              `supervisor dispose cleanup failed: ${cleanup.cleanupFailure.message}`,
+              'repair the failed stage disposal before relying on the released daemon lease',
+              cleanup.cleanupFailure.ownerId,
+            );
+        const released = await lease.release(
+          cleanupError === undefined
+            ? undefined
+            : { failure: failureRecordFor(cleanupError, undefined) },
+        );
         disposeReceipt = {
           lease: released,
           disposedStages: cleanup.disposedStages,

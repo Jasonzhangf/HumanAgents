@@ -1,8 +1,11 @@
 export {
   acquireDaemonLease,
+  assertDaemonLeaseIdentity,
   daemonLeasePath,
   isDaemonLeaseHandoffCommitted,
   readDaemonLease,
+  recordDaemonRestartFailure,
+  recordDaemonRestartTransition,
   runSupervisorStartup,
   waitForDaemonLeaseHandoff,
 } from './supervisor.js';
@@ -15,12 +18,28 @@ export type {
   SupervisorFailureRecord,
   SupervisorControlEndpoint,
   SupervisorLease,
+  SupervisorLeaseIdentity,
   SupervisorLeaseRecord,
   SupervisorRestartReceipt,
+  SupervisorRestartFailure,
+  SupervisorRestartTransition,
   SupervisorStartup,
+  SupervisorStartupDeclaration,
   SupervisorStartupOptions,
   SupervisorStage,
+  SupervisorSourceReceipt,
   SupervisorTakeoverOptions,
   SupervisorTakeoverRecord,
   SupervisorTakeoverStopOptions,
 } from './supervisor.js';
+export {
+  captureLoadedSourceReceipt,
+  restartDaemonWithCodeHandoff,
+  startDaemonCodeHandoff,
+} from './restart-client.js';
+export type {
+  DaemonCodeHandoff,
+  DaemonCodeHandoffInput,
+  DaemonRestartCompletionReceipt,
+  DaemonRestartReceipt,
+} from './restart-client.js';
