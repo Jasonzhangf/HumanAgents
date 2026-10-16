@@ -12,6 +12,7 @@ import {
   type BusinessPayload,
   type CheckpointId,
   type Checkpoint,
+  type DurableCheckpointReceipt,
   type EvidenceRef,
   type CycleId,
   type LifecycleState,
@@ -110,6 +111,8 @@ export interface PendingStopSettlement {
   readonly closure: AgentClosure;
   readonly checkpoint: Checkpoint;
   readonly checkpointCommitted: boolean;
+  readonly recordDigest?: string;
+  readonly receipt?: DurableCheckpointReceipt;
   readonly recovery?: StopSettlementRecovery;
 }
 

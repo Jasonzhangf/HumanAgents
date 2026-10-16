@@ -1266,6 +1266,7 @@ test('checkpoint commit retry reuses the completed stop settlement without repea
   };
   bindAgentDriver(session.runtime, driver);
   const canonicalEvidenceLocator = session.evidenceRefs[0]?.locator;
+  const committedReceipt = durableReceipt();
   let commitAttempts = 0;
   const checkpointPort: CheckpointCommitPort = {
     async commit(checkpoint) {
@@ -1276,7 +1277,7 @@ test('checkpoint commit retry reuses the completed stop settlement without repea
         try { (checkpoint.evidenceRefs[0] as { locator: string }).locator = 'port-forged'; } catch {}
         (session.evidenceRefs[0] as { locator: string }).locator = 'mutated-during-commit';
       }
-      return { checkpointId: checkpoint.id, committed: true };
+      return { checkpointId: checkpoint.id, committed: true, recordDigest: 'digest:commit-retry', receipt: committedReceipt };
     },
   };
   const attention = attentionPort();
@@ -1313,10 +1314,12 @@ test('checkpoint commit retry reuses the completed stop settlement without repea
   assert.equal(first.state, 'settling');
   const second = await executeStopControl(input);
   assert.equal(second.state, 'stopped');
+  if (second.state !== 'stopped') throw new Error('expected stopped retry result');
+  assert.equal(second.receipt?.committedAt, committedReceipt.committedAt);
+  assert.equal(second.recordDigest, 'digest:commit-retry');
   assert.equal(requestStopCalls, 1);
   assert.equal(settleCalls, 1);
   assert.equal(commitAttempts, 2);
-  if (second.state !== 'stopped') throw new Error('expected stopped retry result');
   assert.equal(second.checkpoint.next.kind, 'stop');
   assert.equal(second.checkpoint.evidenceRefs[0]?.locator, canonicalEvidenceLocator);
   assert.equal(session.runtime.snapshot().state, 'stopped');

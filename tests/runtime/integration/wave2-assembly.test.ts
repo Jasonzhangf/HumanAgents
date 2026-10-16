@@ -6,6 +6,7 @@ import {
   type AgentDriver,
   type Attention,
   type Checkpoint,
+  type DurableCheckpointReceipt,
   type EvidenceRef,
   type CanonicalMemoryScope,
   type OperationId,
@@ -1101,6 +1102,17 @@ test('post-commit AgentRuntime close failure tracks and resolves a retry attenti
   };
   bindAgentDriver(runtime, driver);
   const commits: Checkpoint[] = [];
+  const firstReceipt: DurableCheckpointReceipt = {
+    commitIdentity: 'commit:stopped-checkpoint',
+    checkpointRef: 'checkpoint:stopped',
+    journalReceiptRef: 'journal-receipt:stopped',
+    committedAt: '2026-01-01T00:00:24.000Z',
+    timeAuthority: {
+      source: 'harness',
+      owner: 'runtime-checkpoint-control-owner',
+      authorityRef: 'checkpoint:stopped',
+    },
+  };
   let failFirstCommit = true;
   const store: CheckpointCommitPort = {
     async commit(checkpoint) {
@@ -1109,7 +1121,7 @@ test('post-commit AgentRuntime close failure tracks and resolves a retry attenti
         throw new Error('forced initial stopped checkpoint commit failure');
       }
       commits.push(checkpoint);
-      return { checkpointId: checkpoint.id, committed: true };
+      return { checkpointId: checkpoint.id, committed: true, recordDigest: 'digest:post-commit', receipt: firstReceipt };
     },
   };
   const attention = attentionPort();
@@ -1163,6 +1175,8 @@ test('post-commit AgentRuntime close failure tracks and resolves a retry attenti
   const committed = runtime.pendingStopSettlement(operation.operationId);
   assert.ok(committed);
   assert.equal(committed.checkpointCommitted, true);
+  assert.deepEqual(committed.receipt, firstReceipt);
+  assert.equal(committed.recordDigest, 'digest:post-commit');
   assert.equal(settleCalls, 1);
   assert.equal(commits.length, 1);
   assert.deepEqual(attention.published.map((item) => item.attentionId), [originalAttentionId, originalAttentionId]);
@@ -1179,6 +1193,10 @@ test('post-commit AgentRuntime close failure tracks and resolves a retry attenti
 
   const retry = await executeStopControl(stopInput);
   assert.equal(retry.state, 'stopped');
+  if (retry.state !== 'stopped') throw new Error('expected stopped retry result');
+  assert.deepEqual(retry.receipt, firstReceipt);
+  assert.equal(retry.receipt?.committedAt, firstReceipt.committedAt);
+  assert.equal(retry.recordDigest, 'digest:post-commit');
   assert.equal(runtime.snapshot().state, 'stopped');
   assert.equal(settleCalls, 1);
   assert.equal(commits.length, 1);

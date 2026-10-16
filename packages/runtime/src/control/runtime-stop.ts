@@ -344,7 +344,12 @@ export async function executeStopControl(input: StopControlInput): Promise<StopC
         'stopped checkpoint committed but post-commit recovery failed',
         pendingSettlement,
         undefined,
-        { checkpointCommitted: true, recovery: pendingSettlement.recovery },
+        {
+          checkpointCommitted: true,
+          recovery: pendingSettlement.recovery,
+          ...(pendingSettlement.recordDigest === undefined ? {} : { recordDigest: pendingSettlement.recordDigest }),
+          ...(pendingSettlement.receipt === undefined ? {} : { receipt: pendingSettlement.receipt }),
+        },
       );
     }
     receipt = {
@@ -353,6 +358,8 @@ export async function executeStopControl(input: StopControlInput): Promise<StopC
       closure: structuredClone(pendingSettlement.closure),
       ownerId: pendingSettlement.ownerId,
       nextAction: structuredClone(pendingSettlement.checkpoint.next),
+      ...(pendingSettlement.recordDigest === undefined ? {} : { recordDigest: pendingSettlement.recordDigest }),
+      ...(pendingSettlement.receipt === undefined ? {} : { receipt: structuredClone(pendingSettlement.receipt) }),
     };
   } else try {
       receipt = await settleAgentStop({
@@ -369,7 +376,12 @@ export async function executeStopControl(input: StopControlInput): Promise<StopC
         if (failure.checkpointCommitted) {
           boundInput.runtime.recordStopSettlement(
             boundInput.operationId,
-            { ...failure.prepared, ...(failure.recovery ? { recovery: failure.recovery } : {}) },
+            {
+              ...failure.prepared,
+              ...(failure.recordDigest === undefined ? {} : { recordDigest: failure.recordDigest }),
+              ...(failure.receipt === undefined ? {} : { receipt: failure.receipt }),
+              ...(failure.recovery ? { recovery: failure.recovery } : {}),
+            },
             true,
           );
           if (!failure.recovery) throw new ControlError('committed stop settlement is missing post-commit recovery');
@@ -414,6 +426,8 @@ export async function executeStopControl(input: StopControlInput): Promise<StopC
       stopReceipt: request.receipt,
       closure: receipt.closure,
       checkpoint: receipt.checkpoint,
+      ...(receipt.recordDigest === undefined ? {} : { recordDigest: receipt.recordDigest }),
+      ...(receipt.receipt === undefined ? {} : { receipt: receipt.receipt }),
     }, true);
     const attentionId = previousAttentionId ?? `stop-runtime-mismatch-${boundInput.operationId.value}`;
     const attention = {
