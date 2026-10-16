@@ -39,6 +39,7 @@ import { durableContextDigest, produceContextHistory } from '../../packages/runt
 import { prepareCheckpointClosure } from '../../packages/runtime/src/checkpoints/closure.js';
 import { submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
 import {
+  projectDurableTaskInventory,
   RuntimeTaskCoordinator,
   type RuntimeExecutionAllocation,
   type RuntimeExecutionRelease,
@@ -56,7 +57,7 @@ import { createJsonlOperationControlJournal } from '../../packages/app/src/opera
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-cycle-journal.js';
 import { readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
-import { createDefaultExecutionComposition, createServiceExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import { createDefaultExecutionComposition, createServiceExecutionAdmission, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { UiRuntimeService, FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/index.js';
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
@@ -985,7 +986,7 @@ function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model
   });
   coordinator = new RuntimeTaskCoordinator({
     organId,
-    checkpointStoreFor: () => new FileCheckpointStore(join(fixture.root, 'checkpoints.jsonl')),
+    checkpointStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
     attentionPort: attentionPort(),
     journal: fixture.preparedJournal,
     now,
@@ -1054,7 +1055,7 @@ async function buildResumeService(
     organId,
     binding: serviceBinding,
     port: new FakeReplayExecutionRuntimePort({ binding: serviceBinding, stepDelayMs: 1 }),
-    checkpointStoreFor: () => new FileCheckpointStore(join(fixture.root, 'checkpoints.jsonl')),
+    checkpointStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
     attentionPort: attentionPort(),
     providerState: 'ready',
     journal: fixture.preparedJournal,
@@ -1550,8 +1551,35 @@ async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolea
     }
     console.log(JSON.stringify({ publicResume: interrupted ? 'interrupted-v2' : 'v1', ...receipt,
       completedEffectRecords: 2, prefixPreserved: true }));
-    assert.equal(receipt.executionEpoch, interrupted ? 3 : 2,
+    const successorEpoch = interrupted ? 3 : 2;
+    assert.equal(receipt.executionEpoch, successorEpoch,
       'the public release receipt must expose the actual successor epoch');
+
+    // Reopen the same durable owners without issuing another resume. The fresh
+    // hydrate and the independent inventory must both read the actual physical
+    // epoch committed by the standard-end checkpoint.
+    await app.close();
+    app = undefined;
+    const reopened = buildResumeRuntime(fixture, provider.baseUrl, 'cold-resume.model');
+    await reopened.coordinator.hydrate();
+    const hydrated = reopened.coordinator.taskSnapshot(fixture.taskId);
+    assert.equal(hydrated.operationId, fixture.allocation.operationId.value,
+      'fresh hydrate must preserve the original operation identity');
+    assert.equal(hydrated.executionEpoch, successorEpoch,
+      'fresh hydrate must read the actual successor epoch');
+
+    const inventory = await projectDurableTaskInventory({
+      records: fixture.preparedJournal.replay(),
+      checkpointFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
+    });
+    assert.deepEqual(inventory.failures, []);
+    const durable = inventory.entries.find((entry) => entry.snapshot.taskId.value === fixture.taskId.value);
+    if (durable === undefined) throw new Error('durable inventory must contain the resumed task');
+    assert.equal(durable.snapshot.operationId, fixture.allocation.operationId.value,
+      'durable inventory must preserve the original operation identity');
+    assert.equal(durable.snapshot.executionEpoch, successorEpoch,
+      'durable inventory must read the actual successor epoch');
+    assert.equal(durable.durableState, 'checkpoint');
   } finally {
     await app?.close();
     await provider.close();
