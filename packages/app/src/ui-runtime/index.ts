@@ -496,9 +496,9 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
           taskIdentity,
           i2Journal,
-          ...(options.providerRetryConfig === undefined ? {} : {
+          ...(options.runtimePaths === undefined ? {} : {
             retryJournal: createJsonlRetryCycleJournalPort({
-              filePath: retryCycleJournalFilePath({ journalRoot: options.providerRetryConfig.journalRoot }),
+              filePath: retryCycleJournalFilePath({ journalRoot: join(options.runtimePaths.journalRoot, 'ui-runtime') }),
             }),
           }),
         });
