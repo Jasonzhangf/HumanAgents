@@ -479,7 +479,10 @@ export function createDefaultExecutionComposition(input: {
       const currentEntries = async (): Promise<readonly AcceptedRawFact[]> => {
         const prefix = await readLivePrefix();
         const captured = resume === undefined ? []
-          : resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries);
+          : [
+              ...resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries),
+              ...resume.source.interruptedSegments.flatMap((read) => read.prefix.entries),
+            ];
         const seen = new Set<string>();
         const entries: AcceptedRawFact[] = [];
         for (const entry of [...captured, ...prefix.entries]) {
@@ -557,6 +560,7 @@ export function createDefaultExecutionComposition(input: {
           const candidates: EvidenceRef[] = [admitted.evidence(allocation, binding.admissionCommitRef.commitId)];
           const entries = resume === undefined ? prefix.entries : [
             ...resume.source.captures.flatMap((capture) => capture.source.prepared.body.entries),
+            ...resume.source.interruptedSegments.flatMap((read) => read.prefix.entries),
             ...prefix.entries,
           ];
           for (const entry of entries) {

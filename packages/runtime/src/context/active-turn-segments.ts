@@ -227,19 +227,21 @@ export async function resumeActiveTurnSegment(
     fail('active-turn.segment.self-predecessor', 'a resumed segment cannot be its own predecessor');
   }
 
-  // Exact read of the predecessor's recovery receipt; use the real returned ref.
+  // Exact read of the predecessor's recovery receipt. An `exact` receipt links
+  // the closed predecessor; a strict `interrupted` read links the real opened
+  // anchor of a segment that appended records but never committed a receipt.
+  // A failed or unknown receipt keeps the recovery obligation and appends nothing.
   const receipt = await input.ports.read.readSegmentRecoveryReceipt(predecessorSegmentId);
-  if (receipt.status !== 'exact') {
+  if (receipt.status === 'failed' || receipt.status === 'unknown') {
     return { status: 'receipt-held', segmentId: predecessorSegmentId, receipt };
   }
   if (execution.executionEpoch <= predecessorEpoch) {
     fail('active-turn.segment.epoch-not-advanced', 'a resumed segment must advance to a new execution epoch');
   }
 
-  const predecessor: ActiveTurnSegmentPredecessorRef = {
-    segmentId: predecessorSegmentId,
-    recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef,
-  };
+  const predecessor: ActiveTurnSegmentPredecessorRef = receipt.status === 'exact'
+    ? { segmentId: predecessorSegmentId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef }
+    : { segmentId: predecessorSegmentId, interrupted: receipt.anchor };
   const intent: ActiveTurnSegmentOpenIntent = {
     businessTurnRef,
     segmentId: input.segmentId,

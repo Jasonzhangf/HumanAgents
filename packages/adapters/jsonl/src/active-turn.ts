@@ -21,6 +21,8 @@ import {
   activeTurnSegmentCommitId,
   validateResumedTurnSegmentOpened,
   type ActiveTurnSegmentBinding,
+  type ActiveTurnSegmentInterruptedAnchor,
+  type ActiveTurnSegmentPredecessorRef,
   type ResumedTurnSegmentOpened,
 } from '../../../contracts/src/active-turn-segments.js';
 import {
@@ -28,9 +30,11 @@ import {
   type ActiveTurnJournalAppendRequest,
   type ActiveTurnJournalPort,
   type ActiveTurnJournalRecord,
+  type ActiveTurnSegmentInterruptedExactRead,
   type ActiveTurnSegmentJournalRecord,
   type ActiveTurnSegmentRecordAppendRequest,
 } from '../../../runtime/src/context/active-turn-journal.js';
+import { ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
 import { JournalCommitConflictError, JournalIntegrityError, JsonlOrganJournal, type JournalRecord } from './index.js';
 import { readTaskBusinessRegistration } from './task-grants.js';
 
@@ -778,6 +782,58 @@ function assertPredecessorReceiptRef(records: readonly JournalRecord[], receiptR
   }
 }
 
+function sameCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean {
+  return left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest;
+}
+
+/**
+ * The durable anchor of one opened-but-unsaved segment: the real
+ * `segment-opened` commit and the last committed owned record (the opened commit
+ * itself when the segment committed no record yet). It returns null when the
+ * segment is not a committed member of this business turn, so a caller never
+ * invents an anchor for an unopened segment.
+ */
+function segmentAnchorOf(
+  records: readonly JournalRecord[],
+  businessTurnId: string,
+  segmentId: string,
+): { readonly openedCommitRef: JournalCommitRef; readonly recordsThroughCommitRef: JournalCommitRef } | null {
+  const openedRecord = records.find((candidate) => candidate.commitId === activeTurnSegmentCommitId(segmentId, 'segment-opened'));
+  if (openedRecord === undefined) return null;
+  const opened = decodeSegmentOpened(openedRecord);
+  if (opened.businessTurnRef.businessTurnId !== businessTurnId) return null;
+  const prefix = `${ACTIVE_TURN_SEGMENT_COMMIT_PREFIX}${segmentId}:`;
+  const owned = records.filter((record) => isSegmentCarrier(record)
+    && record.commitId !== openedRecord.commitId
+    && record.commitId.startsWith(prefix));
+  const last = owned.length === 0 ? openedRecord : owned[owned.length - 1]!;
+  return { openedCommitRef: journalCommitRef(openedRecord), recordsThroughCommitRef: journalCommitRef(last) };
+}
+
+/** The unique original input asset, read from the committed `initial-input` record. */
+function initialInputAssetOf(records: readonly JournalRecord[], businessTurnId: string): RawAsset {
+  const expected = activeTurnCommitId(businessTurnId, 'initial-input');
+  const record = records.find((candidate) => candidate.commitId === expected);
+  if (record === undefined) {
+    throw new JournalIntegrityError(`active turn initial input is not committed: ${businessTurnId}`);
+  }
+  const typed = payloadOf(record);
+  if (typed.kind !== 'initial-input') {
+    throw new JournalIntegrityError('active turn initial-input commit does not carry the initial input payload');
+  }
+  return typed.content;
+}
+
+/** The predecessor segments that a committed chain already retired. */
+function retiredSegmentIds(records: readonly JournalRecord[], businessTurnId: string): ReadonlySet<string> {
+  const retired = new Set<string>();
+  const chain = decodeSegmentChain(records, businessTurnId);
+  for (const segment of chain) retired.add(segment.predecessor.segmentId);
+  return retired;
+}
+
 export interface JsonlActiveTurnSegmentJournalOptions {
   readonly filePath?: string;
   /** Actual shared Organ Journal object; preferred over a second path handle. */
@@ -836,6 +892,48 @@ export class JsonlActiveTurnSegmentJournal {
 
   async readSegmentOpened(segmentId: string): Promise<ResumedTurnSegmentOpened | null> {
     return findSegmentOpened(await this.journal.replay(), this.businessTurnId, nonEmpty(segmentId, 'segmentId'));
+  }
+
+  /**
+   * The durable anchor of one opened-but-unsaved segment, or null when the
+   * segment is not a committed member of this business turn. The App uses it to
+   * classify a strict-absence receipt as `interrupted`; it carries no receipt
+   * and claims no save.
+   */
+  async readSegmentAnchor(segmentId: string): Promise<ActiveTurnSegmentInterruptedAnchor | null> {
+    return segmentAnchorOf(await this.journal.replay(), this.businessTurnId, nonEmpty(segmentId, 'segmentId'));
+  }
+
+  /**
+   * Exact cold read of an opened-but-unsaved predecessor segment. It re-checks
+   * the supplied anchor against the committed facts before it projects the
+   * prefix, so a stale or forged anchor fails instead of reading a changed
+   * tail. The projection reuses the live-segment context; the original input is
+   * referenced from the committed `initial-input` record, never copied.
+   */
+  async readSegmentInterruptedExact(input: {
+    readonly businessTurnId: string;
+    readonly predecessor: ActiveTurnSegmentInterruptedExactRead['predecessor'];
+  }): Promise<ActiveTurnSegmentInterruptedExactRead> {
+    this.assertBoundBusinessTurn(input.businessTurnId);
+    const records = await this.journal.replay();
+    const anchor = segmentAnchorOf(records, this.businessTurnId, input.predecessor.segmentId);
+    if (anchor === null) {
+      throw new JournalIntegrityError(`interrupted predecessor segment is not opened: ${input.predecessor.segmentId}`);
+    }
+    if (!sameCommitRef(anchor.openedCommitRef, input.predecessor.interrupted.openedCommitRef)
+      || !sameCommitRef(anchor.recordsThroughCommitRef, input.predecessor.interrupted.recordsThroughCommitRef)) {
+      throw new JournalIntegrityError('interrupted predecessor anchor does not match the committed segment facts');
+    }
+    const openedRecord = records.find((candidate) => candidate.commitId === anchor.openedCommitRef.commitId);
+    if (openedRecord === undefined) {
+      throw new JournalIntegrityError('interrupted predecessor opened record is missing');
+    }
+    const opened = decodeSegmentOpened(openedRecord);
+    const initialInput = initialInputAssetOf(records, this.businessTurnId);
+    const context = await ActiveTurnSegmentContext.open({ port: this, segment: opened, initialInput });
+    const prefix = await context.readLivePrefix();
+    return { predecessor: input.predecessor, prefix };
   }
 
   async appendSegmentOpened(input: {
@@ -907,7 +1005,21 @@ export class JsonlActiveTurnSegmentJournal {
         if (record.predecessor.segmentId !== expectedPredecessor) {
           throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
         }
-        assertPredecessorReceiptRef(records, record.predecessor.recoveryAssetsReceiptRef);
+        const predecessor = record.predecessor;
+        if (predecessor.interrupted !== undefined) {
+          // An interrupted predecessor must still name the real opened segment
+          // and its exact record tail; the anchor is re-derived under the lock.
+          const anchor = segmentAnchorOf(records, this.businessTurnId, predecessor.segmentId);
+          if (anchor === null) {
+            throw new JournalIntegrityError('segment-opened interrupted predecessor is not an opened committed segment');
+          }
+          if (!sameCommitRef(anchor.openedCommitRef, predecessor.interrupted.openedCommitRef)
+            || !sameCommitRef(anchor.recordsThroughCommitRef, predecessor.interrupted.recordsThroughCommitRef)) {
+            throw new JournalIntegrityError('segment-opened interrupted anchor does not match the committed predecessor facts');
+          }
+        } else {
+          assertPredecessorReceiptRef(records, predecessor.recoveryAssetsReceiptRef);
+        }
         this.verifyPredecessorReceipt?.(records, record.predecessor);
         return { kind: 'append' as const, scope: record.binding.scope, commitId: input.commitId };
       },
@@ -945,6 +1057,12 @@ export class JsonlActiveTurnSegmentJournal {
         const opened = findSegmentOpened(records, this.businessTurnId, input.segmentId);
         if (opened === null) {
           throw new JournalIntegrityError(`active turn segment is not opened: ${input.segmentId}`);
+        }
+        // A successor already retired this predecessor, so it accepts no new
+        // record. An exact idempotent re-commit of an existing record returned
+        // above and never reaches this fence.
+        if (retiredSegmentIds(records, this.businessTurnId).has(input.segmentId)) {
+          throw new JournalIntegrityError('active turn segment append is fenced: a successor retired this predecessor');
         }
         const { fold } = validateSegmentRecordsInOrder(records, input.segmentId, opened.binding);
         validateSegmentRecordIdentity(input.commitId, input.record, input.segmentId, opened.binding, fold);

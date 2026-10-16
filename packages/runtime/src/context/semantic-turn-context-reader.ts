@@ -151,7 +151,7 @@ export interface SemanticTurnSegmentContextReaderInput {
    */
   readonly segment: {
     readonly chain: ActiveTurnSegmentChainRead;
-    readonly exactReads: Pick<ActiveTurnSegmentJournalPort, 'readSegmentCaptureExact'>;
+    readonly exactReads: Pick<ActiveTurnSegmentJournalPort, 'readSegmentCaptureExact' | 'readSegmentInterruptedExact'>;
     readonly live: {
       readonly prefix: ActiveTurnSegmentLivePrefix;
       readonly rawContent: RawContentReadPort;
@@ -216,8 +216,10 @@ function cloneObligation(
   obligation: ActiveTurnProductionObligationRef,
 ): ActiveTurnProductionObligationRef {
   return obligation.kind === 'request'
-    ? { kind: 'request', requestId: obligation.requestId, phase: obligation.phase }
-    : { kind: 'child-invocation', invocationId: obligation.invocationId, phase: obligation.phase };
+    ? { kind: 'request', requestId: obligation.requestId, phase: obligation.phase,
+        ...(obligation.segmentId === undefined ? {} : { segmentId: obligation.segmentId }) }
+    : { kind: 'child-invocation', invocationId: obligation.invocationId, phase: obligation.phase,
+        ...(obligation.segmentId === undefined ? {} : { segmentId: obligation.segmentId }) };
 }
 
 function sameCanonical(left: unknown, right: unknown): boolean {
@@ -448,14 +450,71 @@ function validateSegmentExactCapture(input: {
   assertSameSegmentValue('exact segment capture receipt boundary', input.exact.receipt.boundaryId, body.cut.pauseId);
 }
 
+/** One prior segment resolution, kept with its segment identity for obligations. */
+interface PriorSegmentResolution {
+  readonly segmentId: string;
+  readonly core: ResolvedActiveTurnCore<ActiveTurnFoldBinding>;
+}
+
+/**
+ * The outstanding production duties of one folded segment: dispatching,
+ * dispatched and waiting requests, plus child invocations whose decision duty
+ * is still open. It mirrors the live segment's own projection so a historical
+ * segment keeps exactly the duties its committed records still owe.
+ */
+function segmentObligations(core: ResolvedActiveTurnCore<ActiveTurnFoldBinding>): ActiveTurnProductionObligationRef[] {
+  const obligations: ActiveTurnProductionObligationRef[] = [];
+  for (const record of core.requests) {
+    if (record.phase === 'dispatching' || record.phase === 'dispatched' || record.phase === 'waiting') {
+      obligations.push({ kind: 'request', requestId: record.request.requestId, phase: record.phase });
+    }
+  }
+  const returned = new Set(core.entries
+    .filter((entry): entry is ResolvedAdoptedChildDelivery => entry.kind === 'adopted-child-delivery')
+    .map((entry) => entry.invocation.invocationId));
+  for (const invocation of core.childInvocations) {
+    const decided = invocation.adoptedResultSeq !== undefined || invocation.notSelectedResultSeq !== undefined;
+    const openReview = invocation.binding.kind === 'review' && invocation.postReviewCheckpointRef === undefined;
+    if (!returned.has(invocation.invocationId) || !decided || openReview) {
+      obligations.push({ kind: 'child-invocation', invocationId: invocation.invocationId, phase: 'pending' });
+    }
+  }
+  return obligations;
+}
+
+/**
+ * Merge per-segment obligations in chain order, tagging each duty with the
+ * segment that still owes it and de-duplicating by segment and identity. No
+ * duty is settled, cancelled or re-issued by a new epoch.
+ */
+function mergeSegmentObligations(groups: readonly {
+  readonly segmentId: string;
+  readonly obligations: readonly ActiveTurnProductionObligationRef[];
+}[]): ActiveTurnProductionObligationRef[] {
+  const merged: ActiveTurnProductionObligationRef[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const obligation of group.obligations) {
+      const entry: ActiveTurnProductionObligationRef = obligation.kind === 'request'
+        ? { kind: 'request', requestId: obligation.requestId, phase: obligation.phase, segmentId: group.segmentId }
+        : { kind: 'child-invocation', invocationId: obligation.invocationId, phase: 'pending', segmentId: group.segmentId };
+      const key = canonicalJsonStringify(entry);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry);
+    }
+  }
+  return merged;
+}
+
 async function resolvePriorSegmentCores(input: {
   readonly chain: ActiveTurnSegmentChainRead;
   readonly live: {
     readonly prefix: ActiveTurnSegmentLivePrefix;
     readonly rawContent: RawContentReadPort;
   };
-  readonly exactReads: Pick<ActiveTurnSegmentJournalPort, 'readSegmentCaptureExact'>;
-}): Promise<readonly ResolvedActiveTurnCore<ActiveTurnFoldBinding>[]> {
+  readonly exactReads: Pick<ActiveTurnSegmentJournalPort, 'readSegmentCaptureExact' | 'readSegmentInterruptedExact'>;
+}): Promise<readonly PriorSegmentResolution[]> {
   const { chain } = input;
   validateActiveTurnSegmentChainRead(chain);
 
@@ -471,7 +530,7 @@ async function resolvePriorSegmentCores(input: {
   assertSameSegmentValue('live segment binding', input.live.prefix.binding, tail.binding);
   assertSameSegmentValue('live segment original input', input.live.prefix.initialInput, chain.initial.initialInput);
 
-  const resolved: ResolvedActiveTurnCore<ActiveTurnFoldBinding>[] = [];
+  const resolved: PriorSegmentResolution[] = [];
   for (let index = 0; index < chain.segments.length - 1; index += 1) {
     const segment = chain.segments[index]!;
     const successor = chain.segments[index + 1]!;
@@ -481,23 +540,40 @@ async function resolvePriorSegmentCores(input: {
         `segment ${successor.segmentId} does not precede-link ${segment.segmentId}`,
       );
     }
-    const exact = await input.exactReads.readSegmentCaptureExact({
-      businessTurnId: chain.businessTurnRef.businessTurnId,
-      segmentId: segment.segmentId,
-      recoveryAssetsReceiptRef: successor.predecessor.recoveryAssetsReceiptRef,
-    });
-    validateSegmentExactCapture({ chain, segment, exact });
-    resolved.push(await foldActiveTurn({
-      binding: exact.prepared.body.binding,
-      initialInput: exact.prepared.body.initialInput,
-      entries: exact.prepared.body.entries,
-      requests: exact.prepared.body.requests,
-      childInvocations: exact.prepared.body.childInvocations,
-      cut: exact.prepared.body.cut,
-      checkpointPath: [],
-      completionRefs: [],
-      rawContent: input.live.rawContent,
-    }));
+    const predecessor = successor.predecessor;
+    if (predecessor.interrupted !== undefined) {
+      // The predecessor was opened and appended records but never committed a
+      // receipt. Read its committed live prefix at the exact anchor; it is a
+      // live cut, not a frozen capture, and claims no save.
+      const interrupted = await input.exactReads.readSegmentInterruptedExact({
+        businessTurnId: chain.businessTurnRef.businessTurnId,
+        predecessor: { segmentId: segment.segmentId, interrupted: predecessor.interrupted },
+      });
+      assertSameSegmentValue('interrupted segment record', interrupted.prefix.segment, segment);
+      assertSameSegmentValue('interrupted segment binding', interrupted.prefix.binding, segment.binding);
+      assertSameSegmentValue('interrupted segment original input', interrupted.prefix.initialInput, chain.initial.initialInput);
+      resolved.push({ segmentId: segment.segmentId, core: await materializeActiveTurnSegmentLivePrefix({
+        prefix: interrupted.prefix, rawContent: input.live.rawContent,
+      }) });
+    } else {
+      const exact = await input.exactReads.readSegmentCaptureExact({
+        businessTurnId: chain.businessTurnRef.businessTurnId,
+        segmentId: segment.segmentId,
+        recoveryAssetsReceiptRef: predecessor.recoveryAssetsReceiptRef,
+      });
+      validateSegmentExactCapture({ chain, segment, exact });
+      resolved.push({ segmentId: segment.segmentId, core: await foldActiveTurn({
+        binding: exact.prepared.body.binding,
+        initialInput: exact.prepared.body.initialInput,
+        entries: exact.prepared.body.entries,
+        requests: exact.prepared.body.requests,
+        childInvocations: exact.prepared.body.childInvocations,
+        cut: exact.prepared.body.cut,
+        checkpointPath: [],
+        completionRefs: [],
+        rawContent: input.live.rawContent,
+      }) });
+    }
   }
   return resolved;
 }
@@ -564,7 +640,7 @@ export async function readResumedSegmentSemanticTurnContext(
   const activeTurn: SemanticTurnInputEntry<SemanticCurrentTurnUnit>[] = [];
   activeTurn.push(...mapActiveTurnCore(initial, true));
   for (const segment of priorSegments) {
-    activeTurn.push(...mapActiveTurnCore(segment, false));
+    activeTurn.push(...mapActiveTurnCore(segment.core, false));
   }
   activeTurn.push(...mapActiveTurnCore(live, false));
 
@@ -575,6 +651,9 @@ export async function readResumedSegmentSemanticTurnContext(
       lastAcceptedSeq: live.cut.lastAcceptedSeq,
       controlRecordCount: live.cut.controlRecordCount,
     },
-    obligations: input.segment.live.prefix.obligations,
+    obligations: mergeSegmentObligations([
+      ...priorSegments.map((segment) => ({ segmentId: segment.segmentId, obligations: segmentObligations(segment.core) })),
+      { segmentId: live.segment.segmentId, obligations: input.segment.live.prefix.obligations },
+    ]),
   });
 }
