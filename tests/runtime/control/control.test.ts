@@ -6,6 +6,7 @@ import {
   type AgentDriver,
   type Attention,
   type Checkpoint,
+  type DurableCheckpointReceipt,
   type EvidenceRef,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
@@ -24,6 +25,7 @@ import {
   fenceControlEvent,
   requestAgentStop,
   settleAgentStop,
+  StopSettlementCommitError,
   type CheckpointCommitPort,
 } from '../../../packages/runtime/src/control/steering.js';
 import { publishRequiredAttention, resolveAttention } from '../../../packages/runtime/src/control/attention.js';
@@ -48,6 +50,20 @@ function evidence(label: string, scopeRef: ScopeRef): EvidenceRef {
     source: 'test',
     locator: label,
     scope: scopeRef,
+  };
+}
+
+function durableReceipt(): DurableCheckpointReceipt {
+  return {
+    commitIdentity: 'commit:stopped-checkpoint',
+    checkpointRef: 'checkpoint:stopped',
+    journalReceiptRef: 'journal-receipt:stopped',
+    committedAt: '2026-01-01T00:00:24.000Z',
+    timeAuthority: {
+      source: 'harness',
+      owner: 'runtime-checkpoint-control-owner',
+      authorityRef: 'checkpoint:stopped',
+    },
   };
 }
 
@@ -96,14 +112,14 @@ async function stoppedSession(outcome: 'stopped' | 'succeeded' = 'stopped') {
   };
 }
 
-function checkpointPort(): { readonly port: CheckpointCommitPort; readonly commits: Checkpoint[] } {
+function checkpointPort(options: { readonly recordDigest?: string; readonly receipt?: DurableCheckpointReceipt } = {}): { readonly port: CheckpointCommitPort; readonly commits: Checkpoint[] } {
   const commits: Checkpoint[] = [];
   return {
     commits,
     port: {
       async commit(checkpoint) {
         commits.push(checkpoint);
-        return { checkpointId: checkpoint.id, committed: true };
+        return { checkpointId: checkpoint.id, committed: true, ...options };
       },
     },
   };
@@ -360,7 +376,8 @@ test('steer request rejects stale epoch and driver receipt mismatch', async () =
 test('settle commits stopped checkpoint only after actual stopped AgentClosure', async () => {
   const session = await stoppedSession();
   const operationScope: ScopeRef = { ...scope, operationId: session.operationId };
-  const checkpointStore = checkpointPort();
+  const firstReceipt = durableReceipt();
+  const checkpointStore = checkpointPort({ recordDigest: 'digest:stopped', receipt: firstReceipt });
   const command = {
     source: 'control' as const,
     command: 'steer.settle-stop' as const,
@@ -406,6 +423,8 @@ test('settle commits stopped checkpoint only after actual stopped AgentClosure',
   assert.equal(receipt.state, 'stopped');
   assert.equal(receipt.checkpoint.outcome, 'stopped');
   assert.deepEqual(receipt.nextAction, { kind: 'stop', ref: 'operator-steer' });
+  assert.equal(receipt.receipt?.committedAt, firstReceipt.committedAt);
+  assert.equal(receipt.recordDigest, 'digest:stopped');
   assert.equal(checkpointStore.commits.length, 1);
   assert.equal(checkpointStore.commits[0]?.evidenceRefs.length, 1);
 
@@ -450,6 +469,83 @@ test('settle commits stopped checkpoint only after actual stopped AgentClosure',
     }),
     ControlError,
   );
+});
+
+test('post-commit stop recovery preserves the committed durable receipt', async () => {
+  const session = await stoppedSession();
+  const operationScope: ScopeRef = { ...scope, operationId: session.operationId };
+  const firstReceipt = durableReceipt();
+  const recovery = {
+    code: 'runtime-close-failed',
+    ownerId: 'control-owner',
+    message: 'runtime close failed after checkpoint commit',
+    retryable: true,
+    nextAction: 'retry-runtime-close',
+  };
+  const command = {
+    source: 'control' as const,
+    command: 'steer.settle-stop' as const,
+    runtimeId: session.runtimeId,
+    executionEpoch: 4,
+    operationId: session.operationId,
+    scope: operationScope,
+    cycleId: cycle,
+    ownerId: 'control-owner',
+    previousCheckpoint: null,
+    checkpointSeq: 1,
+    directiveRevision: 2,
+    stopReason: 'operator-steer',
+  };
+  const request = await requestAgentStop({
+    command: { ...command, command: 'steer.request-stop', actorKind: 'human-operator', hasStopPermission: true, organId: organ, taskId: task, currentState: 'running' },
+    driver: session.driver,
+    currentOrganId: organ,
+    currentTaskId: task,
+    currentEpoch: 4,
+    operationId: session.operationId,
+    ownerId: 'control-owner',
+  });
+  const checkpointPort: CheckpointCommitPort = {
+    async commit(checkpoint) {
+      return {
+        checkpointId: checkpoint.id,
+        committed: true,
+        recordDigest: 'digest:post-commit',
+        receipt: firstReceipt,
+        recovery,
+      };
+    },
+  };
+
+  let failure: unknown;
+  try {
+    await settleAgentStop({
+      command,
+      driver: session.driver,
+      stopRequestCommand: {
+        source: 'control',
+        command: 'steer.request-stop',
+        actorKind: 'human-operator',
+        hasStopPermission: true,
+        organId: organ,
+        taskId: task,
+        executionEpoch: 4,
+        currentState: 'running',
+        runtimeId: session.runtimeId,
+      },
+      stopReceipt: request.receipt,
+      checkpointPort,
+      recoveryStateRef: evidence('post-commit-recovery', operationScope),
+    });
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure instanceof StopSettlementCommitError);
+  assert.equal(failure.checkpointCommitted, true);
+  assert.equal(failure.receipt?.committedAt, firstReceipt.committedAt);
+  assert.equal(failure.recordDigest, 'digest:post-commit');
+  assert.deepEqual(failure.recovery, recovery);
+  assert.equal(failure.cause, undefined);
 });
 
 test('stop scope rejects organ, task, cycle, and operation mismatches with original request before commit', async () => {
