@@ -1173,7 +1173,7 @@ async function handleRequest(
       writeJson(response, 202, {
         ...dispatched,
         taskId: dispatched.taskId.value,
-        operationId: dispatched.operationId.value,
+        ...(dispatched.operationId === undefined ? {} : { operationId: dispatched.operationId.value }),
       });
       return;
     }

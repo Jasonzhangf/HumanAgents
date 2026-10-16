@@ -94,8 +94,9 @@ export interface ImplicitBrainFifoDrainOptions {
 export type ImplicitBrainFifoDrainResult =
   | { readonly kind: 'empty' }
   | { readonly kind: 'retired' }
-  | (ImplicitExecutorDispatchResult & {
+  | (Omit<ImplicitExecutorDispatchResult, 'executionEpoch'> & {
       readonly kind: 'succeeded' | ImplicitExecutorTerminalStatus;
+      readonly executionEpoch?: number;
     });
 
 export interface ImplicitRequirementRetireInput {
@@ -108,7 +109,7 @@ export interface ImplicitRequirementDispatchInput {
   readonly admission: RequirementAdmissionReceipt;
   readonly ownerId: string;
   readonly scope: ScopeRef;
-  readonly executionEpoch: number;
+  readonly executionEpoch?: number;
   readonly inputRevision: number;
 }
 
@@ -355,7 +356,7 @@ export class ImplicitBrainFifo {
         admission,
         ownerId: this.ownerId,
         scope: input.scope ?? { organId: id('organ', 'implicit-fifo') },
-        executionEpoch: input.executionEpoch ?? 0,
+        ...(input.executionEpoch === undefined ? {} : { executionEpoch: input.executionEpoch }),
         inputRevision: input.inputRevision ?? 0,
       });
       if (result.status === 'succeeded') {
@@ -370,7 +371,7 @@ export class ImplicitBrainFifo {
           admission,
           taskId: result.taskId,
           scope: result.scope,
-          executionEpoch: result.executionEpoch,
+          ...(result.executionEpoch === undefined ? {} : { executionEpoch: result.executionEpoch }),
           inputRevision: result.inputRevision,
           dispatches: [],
           evidenceRefs: result.evidenceRefs ?? [],
@@ -383,7 +384,7 @@ export class ImplicitBrainFifo {
         admission,
         taskId: result.taskId ?? input.taskId ?? id('task', 'implicit-fifo'),
         scope: result.scope,
-        executionEpoch: result.executionEpoch,
+        ...(result.executionEpoch === undefined ? {} : { executionEpoch: result.executionEpoch }),
         inputRevision: result.inputRevision,
         dispatches: [],
         evidenceRefs: result.evidenceRefs ?? [],

@@ -789,7 +789,7 @@ test('ui runtime binds memory to the real operation identity and exposes determi
       summary: 'deterministic memory binding evidence',
     });
 
-    const started = runtime.service.startExecution(task.taskId, { prompt: 'recall memory' });
+    const started = await runtime.service.startExecution(task.taskId, { prompt: 'recall memory' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
 
     const receipt = runtime.service.memoryContextReceipt(started.operationId);
@@ -844,7 +844,7 @@ test('ui runtime recalls approved long-term memory approved by an earlier task',
     });
 
     const task = runtime.service.createTask({ title: 'later task recalls approved memory' });
-    const started = runtime.service.startExecution(task.taskId, { prompt: 'recall approved long-term memory' });
+    const started = await runtime.service.startExecution(task.taskId, { prompt: 'recall approved long-term memory' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
 
     const receipt = runtime.service.memoryContextReceipt(started.operationId);
@@ -907,7 +907,7 @@ test('ui runtime never requests a recall layer the loaded execution template doe
     });
 
     const task = runtime.service.createTask({ title: 'narrow template grant' });
-    const started = runtime.service.startExecution(task.taskId, { prompt: 'recall with a narrowed grant' });
+    const started = await runtime.service.startExecution(task.taskId, { prompt: 'recall with a narrowed grant' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
 
     const receipt = runtime.service.memoryContextReceipt(started.operationId);
@@ -942,9 +942,9 @@ test('ui runtime rejects stale memory epoch recall after the task advances', asy
     },
   });
   const task = service.createTask({ title: 'stale memory epoch' });
-  const first = service.startExecution(task.taskId, { prompt: 'first epoch' });
+  const first = await service.startExecution(task.taskId, { prompt: 'first epoch' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
-  const second = service.startExecution(task.taskId, { prompt: 'second epoch' });
+  const second = await service.startExecution(task.taskId, { prompt: 'second epoch' });
   assert.equal(second.executionEpoch, first.executionEpoch + 1);
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).error, undefined);
@@ -1960,7 +1960,7 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-fake-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   const task = service.createTask({ title: 'fake lifecycle', directive: 'verify fake replay' });
-  const started = service.startExecution(task.taskId, { prompt: 'run fake replay' });
+  const started = await service.startExecution(task.taskId, { prompt: 'run fake replay' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
@@ -2047,7 +2047,7 @@ test('provider tool-result output stays out of task output while remaining visib
     ],
   }));
   const task = service.createTask({ title: 'provider tool result', directive: 'keep tool completions out of task output' });
-  const started = service.startExecution(task.taskId, { prompt: 'read a file and return it' });
+  const started = await service.startExecution(task.taskId, { prompt: 'read a file and return it' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
@@ -2108,7 +2108,7 @@ test('observation pairs provider tool calls with results by callId and uses tool
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
   });
   const task = service.createTask({ title: 'tool call pairing', directive: 'pair call and result' });
-  service.startExecution(task.taskId, { prompt: 'pair the tool round' });
+  await service.startExecution(task.taskId, { prompt: 'pair the tool round' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const executeNode = service.observation(task.taskId).nodes.find((node) => node.nodeId === 'pipeline.execute');
@@ -2134,7 +2134,7 @@ test('task dashboard exposes full history with hasMore and no status-layer contr
     ],
   }));
   const task = service.createTask({ title: 'dashboard history', directive: 'show all history windows' });
-  service.startExecution(task.taskId, { prompt: 'show history' });
+  await service.startExecution(task.taskId, { prompt: 'show history' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const dashboard = service.taskDashboard(task.taskId);
@@ -2163,7 +2163,7 @@ test('observation projects all thirteen registry nodes in registry order with ag
     ],
   }));
   const task = service.createTask({ title: 'thirteen nodes', directive: 'project every registry node' });
-  service.startExecution(task.taskId, { prompt: 'observe thirteen nodes' });
+  await service.startExecution(task.taskId, { prompt: 'observe thirteen nodes' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const observation = service.observation(task.taskId);
@@ -2763,7 +2763,9 @@ test('explicit brain confirmation is the only path from input to FIFO execution'
   assert.match(service.taskDashboard(dispatched.taskId).output, /fake replay/);
   assert.deepEqual(port.startPayloads, [{ prompt: 'summarize the current task evidence' }]);
   assert.equal(JSON.stringify(port.startPayloads).includes('asset://requirements/explicit-brain'), false);
-  const events = service.eventsSince(dispatched.operationId);
+  const dispatchedOperationId = dispatched.operationId;
+  if (dispatchedOperationId === undefined) throw new Error('the dispatched requirement carries no operation identity');
+  const events = service.eventsSince(dispatchedOperationId);
   assert.deepEqual(events.map((event) => event.kind), [
     'execution.started',
     'provider.model',
@@ -2920,7 +2922,7 @@ test('public semantic observation preserves typed scope and reports unsupported 
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-semantic-observation-'));
   const service = serviceFor(root, new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 }));
   const task = service.createTask({ title: 'semantic observation scope' });
-  const started = service.startExecution(task.taskId, { prompt: 'semantic observation scope' });
+  const started = await service.startExecution(task.taskId, { prompt: 'semantic observation scope' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const semantic = service.semanticObservation(task.taskId);
@@ -3450,7 +3452,7 @@ test('active implicit admission state takes precedence over historical retiremen
 
   const laterTask = service.createTask({ title: 'later task', directive: 'later task' });
   const occupying = service.createTask({ title: 'occupy capacity', directive: 'occupy capacity' });
-  service.startExecution(occupying.taskId, { prompt: 'occupy capacity' });
+  await service.startExecution(occupying.taskId, { prompt: 'occupy capacity' });
   await port.firstStarted;
   await confirmAppend('missing-task-head', missingTaskId);
   await confirmAppend('later-append', laterTask.taskId);
@@ -3482,7 +3484,7 @@ test('confirmed append against a running task queues an input revision instead o
   const service = serviceFor(root, port, 'fake', 'ready', journal);
 
   const task = service.createTask({ title: 'running append target' });
-  service.startExecution(task.taskId, { prompt: 'baseline input' });
+  await service.startExecution(task.taskId, { prompt: 'baseline input' });
   await port.firstStarted;
 
   const confirmAppend = async (suffix: string, normalizedInput: string): Promise<string> => {
@@ -3682,7 +3684,7 @@ test('implicit consumer attaches to an existing running task and wakes pending w
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-rebind-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }));
   const occupying = service.createTask({ title: 'occupy capacity', directive: 'occupy capacity' });
-  service.startExecution(occupying.taskId, { prompt: 'occupy capacity' });
+  await service.startExecution(occupying.taskId, { prompt: 'occupy capacity' });
 
   const interactionId = await service.receiveExplicitInput({
     sourceRef: 'ui:implicit-rebind',
@@ -4151,7 +4153,7 @@ test('server close releases the single tracked auth expiry timer after active SS
   });
   const streams: Array<{ controller: AbortController; closed: Promise<void> }> = [];
   let ownedTaskId: TaskId | undefined;
-  let ownedStart: ReturnType<UiRuntimeService['startExecution']> | undefined;
+  let ownedStart: Awaited<ReturnType<UiRuntimeService['startExecution']>> | undefined;
   let completionVerified = false;
   let primaryError: unknown;
   // Phase 1: the original close assertions. A failure here is preserved, but the
@@ -4159,7 +4161,7 @@ test('server close releases the single tracked auth expiry timer after active SS
   try {
     const task = service.createTask({ title: 'auth timer lifecycle' });
     ownedTaskId = task.taskId;
-    const started = service.startExecution(task.taskId, { prompt: 'hold three SSE streams open' });
+    const started = await service.startExecution(task.taskId, { prompt: 'hold three SSE streams open' });
     ownedStart = started;
     for (let index = 0; index < 3; index += 1) {
       const controller = new AbortController();
@@ -4445,7 +4447,7 @@ test('runtime close settles active executions before propagating a credential wa
   let closeStarted = false;
   try {
     const task = runtime.service.createTask({ title: 'watch failure close' });
-    runtime.service.startExecution(task.taskId, { prompt: 'hold open until watch failure' });
+    await runtime.service.startExecution(task.taskId, { prompt: 'hold open until watch failure' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'running'));
 
     closeStarted = true;
@@ -5408,7 +5410,7 @@ test('runtime output concatenates repeated provider deltas without suffix dedupe
     ],
   }));
   const task = service.createTask({ title: 'repeated output deltas' });
-  service.startExecution(task.taskId, { prompt: 'run repeated deltas' });
+  await service.startExecution(task.taskId, { prompt: 'run repeated deltas' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).output, 'aa');
 });
@@ -5447,7 +5449,7 @@ test('provider output summaries remain journalable when provider text is blank',
       ],
     }), 'fake', 'ready', journal);
     const task = service.createTask({ title: 'provider artifact ref', directive: 'keep the task output readable' });
-    service.startExecution(task.taskId, { prompt: 'read the marker and reply' });
+    await service.startExecution(task.taskId, { prompt: 'read the marker and reply' });
     await waitFor(() => assert.equal(
       journal.appendErrors.length > 0 || service.taskDashboard(task.taskId).state === 'succeeded',
       true,
@@ -5519,7 +5521,7 @@ test('responses delta and completion replay projects output text exactly once', 
     ],
   }));
   const task = service.createTask({ title: 'responses output projection' });
-  service.startExecution(task.taskId, { prompt: 'run responses replay' });
+  await service.startExecution(task.taskId, { prompt: 'run responses replay' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).output, 'hello world');
 });
@@ -5537,7 +5539,7 @@ test('observation preserves waiting and blocked terminal states instead of repor
     });
     const service = serviceFor(root, port);
     const task = service.createTask({ title: `observation ${terminalState}` });
-    service.startExecution(task.taskId, { prompt: `observe ${terminalState}` });
+    await service.startExecution(task.taskId, { prompt: `observe ${terminalState}` });
     await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, terminalState));
     assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, terminalState);
 
@@ -5565,7 +5567,7 @@ test('fake replay terminal state drives settlement instead of defaulting to succ
     });
     const service = serviceFor(root, port);
     const task = service.createTask({ title: `fake ${terminalState}` });
-    service.startExecution(task.taskId, { prompt: `run ${terminalState}` });
+    await service.startExecution(task.taskId, { prompt: `run ${terminalState}` });
 
     await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, terminalState));
     assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, terminalState);
@@ -5581,7 +5583,7 @@ test('fake replay without a terminal event fails explicitly instead of reporting
   });
   const service = serviceFor(root, port);
   const task = service.createTask({ title: 'fake missing terminal' });
-  service.startExecution(task.taskId, { prompt: 'run without terminal' });
+  await service.startExecution(task.taskId, { prompt: 'run without terminal' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
   assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'failed');
@@ -5625,7 +5627,7 @@ test('provider identity mismatch fails the execution without surfacing a foreign
   };
   const service = serviceFor(root, stalePort);
   const task = service.createTask({ title: 'observation stale' });
-  service.startExecution(task.taskId, { prompt: 'observe stale event' });
+  await service.startExecution(task.taskId, { prompt: 'observe stale event' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
 
   const dashboard = service.taskDashboard(task.taskId);
@@ -5640,7 +5642,7 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-restart-'));
   const first = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   const firstTask = first.createTask({ title: 'first process' });
-  const firstStarted = first.startExecution(firstTask.taskId, { prompt: 'first process' });
+  const firstStarted = await first.startExecution(firstTask.taskId, { prompt: 'first process' });
   await waitFor(() => assert.equal(first.taskDashboard(firstTask.taskId).state, 'succeeded'));
   const firstEvents = first.eventsSince(firstStarted.operationId);
 
@@ -5664,7 +5666,7 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
 
   const secondTask = second.createTask({ title: 'second process' });
   assert.equal(secondTask.taskId.value === firstTask.taskId.value, false);
-  second.startExecution(secondTask.taskId, { prompt: 'second process' });
+  await second.startExecution(secondTask.taskId, { prompt: 'second process' });
   await waitFor(() => assert.equal(second.taskDashboard(secondTask.taskId).state, 'succeeded'));
   assert.equal(second.taskDashboard(secondTask.taskId).error, undefined);
 
@@ -5672,7 +5674,7 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
   await third.hydrate();
   assert.equal(third.taskDashboard(firstTask.taskId).state, 'succeeded');
   assert.equal(third.taskDashboard(secondTask.taskId).state, 'succeeded');
-  const resumed = third.startExecution(firstTask.taskId, { prompt: 'new epoch after restart' });
+  const resumed = await third.startExecution(firstTask.taskId, { prompt: 'new epoch after restart' });
   assert.equal(resumed.executionEpoch, 2);
   await waitFor(() => assert.equal(third.taskDashboard(firstTask.taskId).state, 'succeeded'));
 });
@@ -5694,7 +5696,7 @@ test('memory context receipt is process-local across serve restart and fresh ope
 
   const first = await launch();
   const task = first.service.createTask({ title: 'memory receipt restart' });
-  const firstStarted = first.service.startExecution(task.taskId, { prompt: 'first memory receipt' });
+  const firstStarted = await first.service.startExecution(task.taskId, { prompt: 'first memory receipt' });
   try {
     await waitFor(() => assert.equal(first.service.taskDashboard(task.taskId).state, 'succeeded'));
     assert.equal(first.service.memoryContextReceipt(firstStarted.operationId).executionEpoch, firstStarted.executionEpoch);
@@ -5711,7 +5713,7 @@ test('memory context receipt is process-local across serve restart and fresh ope
         && error.httpStatus === 404,
     );
 
-    const secondStarted = second.service.startExecution(task.taskId, { prompt: 'fresh memory receipt' });
+    const secondStarted = await second.service.startExecution(task.taskId, { prompt: 'fresh memory receipt' });
     assert.equal(secondStarted.executionEpoch, firstStarted.executionEpoch + 1);
     await waitFor(() => assert.equal(second.service.taskDashboard(task.taskId).state, 'succeeded'));
     assert.equal(second.service.memoryContextReceipt(secondStarted.operationId).executionEpoch, secondStarted.executionEpoch);
@@ -5964,7 +5966,7 @@ test('stop does not wait forever when orchestration fails before provider readin
     },
   });
   const task = service.createTask({ title: 'orchestration startup failure' });
-  service.startExecution(task.taskId, { prompt: 'start orchestration', orchestrate: true });
+  await service.startExecution(task.taskId, { prompt: 'start orchestration', orchestrate: true });
   let stopError: unknown;
   let stopSettled = false;
   void service.stop(task.taskId).catch((error: unknown) => {
@@ -6006,7 +6008,7 @@ test('restart restores a failed task error owner and next action from the app jo
   };
   const first = serviceFor(root, failing);
   const task = first.createTask({ title: 'failure restart' });
-  first.startExecution(task.taskId, { prompt: 'fail' });
+  await first.startExecution(task.taskId, { prompt: 'fail' });
   await waitFor(() => assert.equal(first.taskDashboard(task.taskId).state, 'failed'));
   assert.equal(first.taskDashboard(task.taskId).error?.ownerId, 'humanagent.provider-adapter');
 
@@ -6038,7 +6040,7 @@ test('restart projects an orphaned running execution as blocked instead of prete
   };
   const first = serviceFor(root, hanging);
   const task = first.createTask({ title: 'orphaned execution' });
-  const started = first.startExecution(task.taskId, { prompt: 'leave this running' });
+  const started = await first.startExecution(task.taskId, { prompt: 'leave this running' });
   assert.equal(first.taskDashboard(task.taskId).state, 'running');
   assert.equal(first.eventsSince(started.operationId).length, 1);
 
@@ -6059,8 +6061,8 @@ test('one completed task does not close the shared provider while another task i
   const first = service.createTask({ title: 'first concurrent task' });
   const second = service.createTask({ title: 'second concurrent task' });
 
-  service.startExecution(first.taskId, { prompt: 'first' });
-  service.startExecution(second.taskId, { prompt: 'second' });
+  await service.startExecution(first.taskId, { prompt: 'first' });
+  await service.startExecution(second.taskId, { prompt: 'second' });
   await waitFor(() => assert.equal(service.taskDashboard(first.taskId).state, 'succeeded'));
   await waitFor(() => assert.equal(service.taskDashboard(second.taskId).state, 'succeeded'));
 
@@ -6075,8 +6077,8 @@ test('stopping one task does not close the shared provider while another task is
   const stoppedTask = service.createTask({ title: 'stop concurrent task' });
   const continuingTask = service.createTask({ title: 'continue concurrent task' });
 
-  service.startExecution(stoppedTask.taskId, { prompt: 'stop this task' });
-  service.startExecution(continuingTask.taskId, { prompt: 'finish this task' });
+  await service.startExecution(stoppedTask.taskId, { prompt: 'stop this task' });
+  await service.startExecution(continuingTask.taskId, { prompt: 'finish this task' });
   const stopped = await service.stop(stoppedTask.taskId);
   assert.equal(stopped.state, 'stopped');
   await waitFor(() => assert.equal(service.taskDashboard(continuingTask.taskId).state, 'succeeded'));
@@ -6090,11 +6092,11 @@ test('second execution starts a new checkpoint cycle for the same task', async (
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   const task = service.createTask({ title: 'second cycle' });
 
-  const first = service.startExecution(task.taskId, { prompt: 'first cycle' });
+  const first = await service.startExecution(task.taskId, { prompt: 'first cycle' });
   assert.equal(first.executionEpoch, 1);
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
-  const second = service.startExecution(task.taskId, { prompt: 'second cycle' });
+  const second = await service.startExecution(task.taskId, { prompt: 'second cycle' });
   assert.equal(second.executionEpoch, 2);
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   const dashboard = service.taskDashboard(task.taskId);
@@ -6106,7 +6108,7 @@ test('stop goes through the formal stop operation and only reports stopped after
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stop-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 40 }));
   const task = service.createTask({ title: 'stop lifecycle' });
-  const started = service.startExecution(task.taskId, { prompt: 'stop this execution' });
+  const started = await service.startExecution(task.taskId, { prompt: 'stop this execution' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
   const result = await service.stop(task.taskId);
@@ -6134,7 +6136,7 @@ test('a stopped task remains stopped after restart hydration', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stopped-restart-'));
   const first = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 40 }));
   const task = first.createTask({ title: 'stopped restart' });
-  first.startExecution(task.taskId, { prompt: 'stop before restart' });
+  await first.startExecution(task.taskId, { prompt: 'stop before restart' });
   assert.equal((await first.stop(task.taskId)).state, 'stopped');
 
   const second = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
@@ -6169,7 +6171,7 @@ test('a failed tool execution releases the provider session and reports the real
     },
   });
   const task = service.createTask({ title: 'failed tool execution' });
-  const started = service.startExecution(task.taskId, { prompt: 'read the directory' });
+  const started = await service.startExecution(task.taskId, { prompt: 'read the directory' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
 
@@ -6236,13 +6238,13 @@ test('failure cleanup does not report a clean failure while the shared provider 
   });
   const other = service.createTask({ title: 'retained cleanup other' });
   port.hold(other.taskId.value);
-  service.startExecution(other.taskId, { prompt: 'stay running' });
+  await service.startExecution(other.taskId, { prompt: 'stay running' });
   // The other execution stays active, which is what makes the failed task's
   // close see a retained shared provider.
   await waitFor(() => assert.equal(service.taskDashboard(other.taskId).state, 'running'));
 
   const task = service.createTask({ title: 'retained cleanup failure' });
-  service.startExecution(task.taskId, { prompt: 'read the directory' });
+  await service.startExecution(task.taskId, { prompt: 'read the directory' });
 
   // The stop could not release the abandoned provider execution and the shared
   // provider was retained, so the task must stay blocked with retry-stop
@@ -6285,7 +6287,7 @@ test('a terminal provider failure does not advertise a stop the provider will re
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
   });
   const task = service.createTask({ title: 'terminal provider failure' });
-  service.startExecution(task.taskId, { prompt: 'fail the transport' });
+  await service.startExecution(task.taskId, { prompt: 'fail the transport' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'), 5000);
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'blocked'), 5000);
@@ -6333,7 +6335,7 @@ test('failure cleanup does not advertise a retry-stop fenced by a failed attenti
     },
   });
   const task = service.createTask({ title: 'fenced stop claim' });
-  service.startExecution(task.taskId, { prompt: 'read the directory' });
+  await service.startExecution(task.taskId, { prompt: 'read the directory' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'), 5000);
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'blocked'), 5000);
@@ -6379,7 +6381,7 @@ test('stop racing a startup failure leaves a terminal failed task instead of ret
   };
   const service = serviceFor(root, failing);
   const task = service.createTask({ title: 'startup failure during stop' });
-  const started = service.startExecution(task.taskId, { prompt: 'fail while stopping' });
+  const started = await service.startExecution(task.taskId, { prompt: 'fail while stopping' });
 
   await assert.rejects(
     () => service.stop(task.taskId),
@@ -6447,14 +6449,14 @@ test('restart hydration rejects a checkpoint copied under another task scope', a
   };
   const first = serviceFor(root, failing);
   const failedTask = first.createTask({ title: 'failed source' });
-  first.startExecution(failedTask.taskId, { prompt: 'fail source' });
+  await first.startExecution(failedTask.taskId, { prompt: 'fail source' });
   await waitFor(() => assert.equal(first.taskDashboard(failedTask.taskId).state, 'failed'));
   const failedCheckpointFile = join(root, `task-${failedTask.taskId.value}-cycle-ui-cycle-1.jsonl`);
 
   const second = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   await second.hydrate();
   const targetTask = second.createTask({ title: 'scope mismatch target' });
-  second.startExecution(targetTask.taskId, { prompt: 'succeed target' });
+  await second.startExecution(targetTask.taskId, { prompt: 'succeed target' });
   await waitFor(() => assert.equal(second.taskDashboard(targetTask.taskId).state, 'succeeded'));
   const targetCheckpointFile = join(root, `task-${targetTask.taskId.value}-cycle-ui-cycle-2.jsonl`);
   await writeFile(targetCheckpointFile, await readFile(failedCheckpointFile, 'utf8'), 'utf8');
@@ -6659,7 +6661,7 @@ test('stop during provider observation keeps the stopped projection free of late
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stop-observed-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 60 }));
   const task = service.createTask({ title: 'stop during observation' });
-  const started = service.startExecution(task.taskId, { prompt: 'observe before stop' });
+  const started = await service.startExecution(task.taskId, { prompt: 'observe before stop' });
 
   await waitFor(() => assert.equal(service.eventsSince(started.operationId).some((event) => event.kind === 'provider.model'), true));
   const result = await service.stop(task.taskId);
@@ -6676,7 +6678,7 @@ test('stop immediately after start waits for provider readiness and settles thro
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stop-startup-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 40 }));
   const task = service.createTask({ title: 'immediate stop' });
-  const started = service.startExecution(task.taskId, { prompt: 'stop before first event' });
+  const started = await service.startExecution(task.taskId, { prompt: 'stop before first event' });
 
   const result = await service.stop(task.taskId);
   assert.equal(result.state, 'stopped');
@@ -6689,7 +6691,7 @@ test('SSE replay honors Last-Event-ID without returning already delivered events
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-replay-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   const task = service.createTask({ title: 'replay lifecycle' });
-  const started = service.startExecution(task.taskId, { prompt: 'replay' });
+  const started = await service.startExecution(task.taskId, { prompt: 'replay' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const all = service.eventsSince(started.operationId);
@@ -6986,7 +6988,7 @@ test('runtime API task detail uses the task-detail projection surface', async ()
     const detail = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
     assert.equal(detail.status, 200);
     const taskId = id('task', task.taskId.value);
-    runtime.service.startExecution(taskId, { prompt: 'typed task detail output' });
+    await runtime.service.startExecution(taskId, { prompt: 'typed task detail output' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded'));
     const completedDetail = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
     assert.equal(completedDetail.status, 200);
@@ -7033,7 +7035,7 @@ test('runtime task API supports update, delete, and grouped task actions', async
       body: JSON.stringify({ title: 'executed task', directive: 'executed directive' }),
     });
     const executed = await executedResponse.json() as { readonly taskId: { readonly value: string } };
-    runtime.service.startExecution(id('task', executed.taskId.value), { prompt: 'complete before delete' });
+    await runtime.service.startExecution(id('task', executed.taskId.value), { prompt: 'complete before delete' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(id('task', executed.taskId.value)).state, 'succeeded'));
     const updated = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(tasks[0]!.taskId.value)}`, {
       method: 'PATCH',
@@ -7164,7 +7166,7 @@ test('HTTP SSE keeps the first connection open through settling, checkpoint, and
   });
   try {
     const task = runtime.service.createTask({ title: 'http sse lifecycle' });
-    const started = runtime.service.startExecution(task.taskId, { prompt: 'stream the full lifecycle' });
+    const started = await runtime.service.startExecution(task.taskId, { prompt: 'stream the full lifecycle' });
     const events = await fetch(`${runtime.server.url}/api/executions/${encodeURIComponent(started.operationId.value)}/events`);
     assert.equal(events.status, 200);
     const text = await events.text();
@@ -7194,7 +7196,7 @@ test('checkpoint committedAt binds to the checkpoint event instead of later term
     () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)),
   );
   const task = service.createTask({ title: 'checkpoint timestamp' });
-  const started = service.startExecution(task.taskId, { prompt: 'timestamp' });
+  const started = await service.startExecution(task.taskId, { prompt: 'timestamp' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const events = service.eventsSince(started.operationId);
@@ -7356,7 +7358,7 @@ test('provider failures are projected with owner, retryability, and next action'
   };
   const service = serviceFor(root, failing);
   const task = service.createTask({ title: 'failure lifecycle' });
-  service.startExecution(task.taskId, { prompt: 'fail explicitly' });
+  await service.startExecution(task.taskId, { prompt: 'fail explicitly' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
   const dashboard = service.taskDashboard(task.taskId);
@@ -7394,7 +7396,7 @@ test('startExecution rejects a task that is not allowed to start after stop-cont
   };
   const service = serviceFor(root, failingStop);
   const task = service.createTask({ title: 'start guard' });
-  service.startExecution(task.taskId, { prompt: 'start guard' });
+  await service.startExecution(task.taskId, { prompt: 'start guard' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
   const stopResult = await service.stop(task.taskId);
   assert.equal(stopResult.state, 'settling');
@@ -7406,7 +7408,7 @@ test('startExecution rejects a task that is not allowed to start after stop-cont
     () => service.deleteTask(task.taskId),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
   );
-  assert.throws(
+  await assert.rejects(
     () => service.startExecution(task.taskId, { prompt: 'should reject' }),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
   );
@@ -7416,7 +7418,7 @@ test('stop control rejects a second stop and preserves the original operation id
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stop-race-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }));
   const task = service.createTask({ title: 'stop race' });
-  service.startExecution(task.taskId, { prompt: 'stop race' });
+  await service.startExecution(task.taskId, { prompt: 'stop race' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
   const first = await service.stop(task.taskId);
   assert.equal(first.state, 'stopped');
@@ -7450,7 +7452,7 @@ test('ordinary settlement removes stop eligibility before awaiting provider sett
   };
   const service = serviceFor(root, delayedSettle);
   const task = service.createTask({ title: 'settle stop race' });
-  service.startExecution(task.taskId, { prompt: 'settle stop race' });
+  await service.startExecution(task.taskId, { prompt: 'settle stop race' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'settling'));
   assert.deepEqual(service.taskDashboard(task.taskId).allowedActions, []);
   await assert.rejects(
@@ -7494,7 +7496,7 @@ test('UI admission and decoded-control core hooks gate the real execution entry'
   }]);
   const admissionService = serviceFor(admissionRoot, admissionPort, 'fake', 'ready', undefined, undefined, admissionHooks);
   const admissionTask = admissionService.createTask({ title: 'admission gate' });
-  const admissionStarted = admissionService.startExecution(admissionTask.taskId, { prompt: 'must not dispatch' });
+  const admissionStarted = await admissionService.startExecution(admissionTask.taskId, { prompt: 'must not dispatch' });
   await waitFor(() => assert.equal(admissionService.taskDashboard(admissionTask.taskId).state, 'failed'));
   assert.equal(admissionStarts, 0);
   assert.equal(admissionService.taskDashboard(admissionTask.taskId).error?.ownerId, 'ui-admission-gate');
@@ -7523,7 +7525,7 @@ test('UI admission and decoded-control core hooks gate the real execution entry'
     controlHooks,
   );
   const controlTask = controlService.createTask({ title: 'control gate' });
-  const controlStarted = controlService.startExecution(controlTask.taskId, { prompt: 'must not succeed' });
+  const controlStarted = await controlService.startExecution(controlTask.taskId, { prompt: 'must not succeed' });
   await waitFor(() => assert.equal(controlService.taskDashboard(controlTask.taskId).state, 'failed'));
   assert.equal(controlService.taskDashboard(controlTask.taskId).error?.ownerId, 'ui-control-gate');
   assert.equal(controlService.eventsSince(controlStarted.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded'), false);
@@ -7553,7 +7555,7 @@ test('post-commit context hook failure preserves checkpoint identity and recover
     hooks,
   );
   const task = failingService.createTask({ title: 'context commit recovery' });
-  const started = failingService.startExecution(task.taskId, { prompt: 'commit once' });
+  const started = await failingService.startExecution(task.taskId, { prompt: 'commit once' });
   await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
   const failedDashboard = failingService.taskDashboard(task.taskId);
   if (!failedDashboard.checkpoint) throw new Error('expected durable checkpoint identity');
@@ -7602,7 +7604,7 @@ test('UI checkpoint boundary publishes the committed journal digest and consumes
     },
   });
   const task = service.createTask({ title: 'durable memory boundary' });
-  service.startExecution(task.taskId, { prompt: 'complete once' });
+  await service.startExecution(task.taskId, { prompt: 'complete once' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   assert.equal(published.length, 1);
@@ -7641,7 +7643,7 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
     },
   });
   const task = service.createTask({ title: 'memory boundary recovery' });
-  const started = service.startExecution(task.taskId, { prompt: 'commit once' });
+  const started = await service.startExecution(task.taskId, { prompt: 'commit once' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'));
 
   const dashboard = service.taskDashboard(task.taskId);
@@ -7694,7 +7696,7 @@ test('post-commit context hook failure keeps non-succeeded checkpoints blocked a
       hooks,
     );
     const task = failingService.createTask({ title: `context commit recovery ${checkpointOutcome}` });
-    const started = failingService.startExecution(task.taskId, { prompt: `commit ${checkpointOutcome}` });
+    const started = await failingService.startExecution(task.taskId, { prompt: `commit ${checkpointOutcome}` });
     await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
     const failedDashboard = failingService.taskDashboard(task.taskId);
     if (!failedDashboard.checkpoint) throw new Error(`expected durable ${checkpointOutcome} checkpoint identity`);
@@ -7712,7 +7714,7 @@ test('post-commit context hook failure keeps non-succeeded checkpoints blocked a
     assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
     assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
     assert.deepEqual(recovered.allowedActions, []);
-    assert.throws(
+    await assert.rejects(
       () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked' }),
       (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
     );
@@ -7760,7 +7762,7 @@ test('post-commit context hook failure with provider close failure preserves hoo
   };
   const failingService = serviceFor(root, closeFailure, 'fake', 'ready', undefined, undefined, hooks);
   const task = failingService.createTask({ title: 'context commit close recovery' });
-  const started = failingService.startExecution(task.taskId, { prompt: 'commit once with close failure' });
+  const started = await failingService.startExecution(task.taskId, { prompt: 'commit once with close failure' });
   await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
   const failedDashboard = failingService.taskDashboard(task.taskId);
   if (!failedDashboard.checkpoint) throw new Error('expected durable checkpoint identity');
@@ -7786,7 +7788,7 @@ test('post-commit context hook failure with provider close failure preserves hoo
   assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
   assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
   assert.deepEqual(recovered.allowedActions, []);
-  assert.throws(
+  await assert.rejects(
     () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked' }),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
   );
@@ -7837,7 +7839,7 @@ test('formal stop with committed stopped checkpoint and context hook failure sta
     hooks,
   );
   const task = service.createTask({ title: 'formal stop context recovery' });
-  const started = service.startExecution(task.taskId, { prompt: 'stop with post-commit hook failure' });
+  const started = await service.startExecution(task.taskId, { prompt: 'stop with post-commit hook failure' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
   await assert.rejects(
     () => service.stop(task.taskId),
@@ -7864,7 +7866,7 @@ test('formal stop with committed stopped checkpoint and context hook failure sta
   assert.equal(recovered.error?.ownerId, 'ui-stop-context-commit-gate');
   assert.equal(recovered.error?.nextAction, 'reconcile stopped checkpoint');
   assert.deepEqual(recovered.allowedActions, []);
-  assert.throws(
+  await assert.rejects(
     () => rebuilt.startExecution(task.taskId, { prompt: 'must not start' }),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
   );
@@ -7934,7 +7936,7 @@ test('post-commit stop recovery fences a late observation and closes the provide
   };
   const service = serviceFor(root, driver, 'fake', 'ready', undefined, undefined, hooks);
   const task = service.createTask({ title: 'late observation fence' });
-  const started = service.startExecution(task.taskId, { prompt: 'stop before late event' });
+  const started = await service.startExecution(task.taskId, { prompt: 'stop before late event' });
   await waitFor(() => assert.equal(service.eventsSince(started.operationId).some((event) => event.kind === 'provider.model'), true));
 
   const stopping = service.stop(task.taskId);
@@ -7972,7 +7974,7 @@ test('post-commit stop recovery fences a late observation and closes the provide
   assert.equal(recovered.checkpoint?.checkpointId, dashboard.checkpoint?.checkpointId);
   assert.equal(recovered.error?.ownerId, 'ui-stop-late-context-commit-gate');
   assert.deepEqual(recovered.allowedActions, []);
-  assert.throws(
+  await assert.rejects(
     () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked after late event' }),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
   );
@@ -8022,7 +8024,7 @@ test('post-commit recovery is durable before a suspended provider close can fini
   };
   const service = serviceFor(root, driver, 'fake', 'ready', undefined, undefined, hooks);
   const task = service.createTask({ title: 'close suspended recovery' });
-  const started = service.startExecution(task.taskId, { prompt: 'persist recovery before close' });
+  const started = await service.startExecution(task.taskId, { prompt: 'persist recovery before close' });
   await waitFor(() => {
     const dashboard = service.taskDashboard(task.taskId);
     assert.equal(dashboard.state, 'blocked');
@@ -8044,7 +8046,7 @@ test('post-commit recovery is durable before a suspended provider close can fini
   assert.equal(recovered.error?.ownerId, 'ui-close-suspended-context-commit-gate');
   assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
   assert.deepEqual(recovered.allowedActions, []);
-  assert.throws(
+  await assert.rejects(
     () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked while close is pending' }),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
   );
@@ -8083,7 +8085,7 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
   const port = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
   const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, hooks);
   const task = service.createTask({ title: 'composition' });
-  const started = service.startExecution(task.taskId, { prompt: 'composition' });
+  const started = await service.startExecution(task.taskId, { prompt: 'composition' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const events = service.eventsSince(started.operationId);
@@ -8135,7 +8137,7 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
     failingHooks,
   );
   const failedTask = failingService.createTask({ title: 'composition failure' });
-  const failedStart = failingService.startExecution(failedTask.taskId, { prompt: 'must fail visibly' });
+  const failedStart = await failingService.startExecution(failedTask.taskId, { prompt: 'must fail visibly' });
   await waitFor(() => assert.equal(failingService.taskDashboard(failedTask.taskId).state, 'failed'));
   const failedDashboard = failingService.taskDashboard(failedTask.taskId);
   assert.match(failedDashboard.statusSections.business, /失败/);
@@ -8161,7 +8163,7 @@ test('multiple appended inputs drain FIFO across successive executions of one ta
   const port = new GatedPayloadCapturingReplayPort({ binding, stepDelayMs: 1 }, firstGate);
   const service = serviceFor(root, port, 'fake', 'ready', journal);
   const task = service.createTask({ title: 'fifo tmp target' });
-  service.startExecution(task.taskId, { prompt: 'baseline input' });
+  await service.startExecution(task.taskId, { prompt: 'baseline input' });
   await port.firstStarted;
   const confirmAppend = async (suffix: string, normalizedInput: string): Promise<string> => {
     const interactionId = await service.receiveExplicitInput({ sourceRef: `ui:${suffix}`, rawInput: normalizedInput, channel: 'business' });
@@ -8523,7 +8525,7 @@ test('runtime history reports the provider-reported turn identity and event time
   const port = new TurnIdentityCapturingReplayPort({ binding, stepDelayMs: 1 });
   const service = serviceFor(root, port, 'fake', 'ready', journal);
   const task = service.createTask({ title: 'turn identity projection' });
-  service.startExecution(task.taskId, { prompt: 'project the real turn identity' });
+  await service.startExecution(task.taskId, { prompt: 'project the real turn identity' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   // The execution port is the only boundary that sees the provider binding's own
@@ -8983,7 +8985,7 @@ test('task dashboard states no-activity only past the declared silence budget an
   const service = serviceFor(root, port, 'fake', 'ready', undefined, () => now);
 
   const task = service.createTask({ title: 'liveness target', directive: 'observe real activity' });
-  service.startExecution(task.taskId, { prompt: 'observe real activity' });
+  await service.startExecution(task.taskId, { prompt: 'observe real activity' });
   await port.firstStarted;
   // The execution started and reported a real event, then the provider stream
   // stays silent: this is the stalled case, produced by a real gate.

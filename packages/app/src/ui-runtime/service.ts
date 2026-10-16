@@ -553,8 +553,8 @@ export interface RefineExplicitDraftInput {
 export interface ExplicitBrainDispatchReceipt {
   readonly requirement: InboxReceipt;
   readonly taskId: TaskId;
-  readonly operationId: OperationId;
-  readonly executionEpoch: number;
+  readonly operationId?: OperationId;
+  readonly executionEpoch?: number;
 }
 
 type ExplicitBrainDispatchAttempt =
@@ -5181,8 +5181,6 @@ export class UiRuntimeService {
               fifoSeq: consumed.fifoSeq,
             },
             taskId: dispatchEntry.taskId,
-            operationId: dispatchEntry.operationId,
-            executionEpoch: 0,
           },
         };
       }
@@ -5240,10 +5238,8 @@ export class UiRuntimeService {
         admission,
         ownerId: RUNTIME_OWNER,
         scope,
-        executionEpoch: 0,
         inputRevision,
         taskId: dispatchEntry.taskId,
-        operationId: dispatchEntry.operationId.value,
         evidenceRefs: [],
       };
     }
@@ -5254,10 +5250,10 @@ export class UiRuntimeService {
       admission,
       ownerId: RUNTIME_OWNER,
       scope,
-      executionEpoch: receipt.executionEpoch,
+      ...(receipt.executionEpoch === undefined ? {} : { executionEpoch: receipt.executionEpoch }),
       inputRevision,
       taskId: receipt.taskId,
-      operationId: receipt.operationId.value,
+      ...(receipt.operationId === undefined ? {} : { operationId: receipt.operationId.value }),
       evidenceRefs: [],
     };
   }
@@ -5393,8 +5389,7 @@ export class UiRuntimeService {
     return {
       requirement,
       taskId: task.taskId,
-      operationId,
-      executionEpoch: executionEpoch ?? 0,
+      ...(executionEpoch === undefined ? {} : { operationId, executionEpoch }),
     };
   }
 

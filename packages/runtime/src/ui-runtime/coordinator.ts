@@ -55,6 +55,7 @@ import { computeReentryDecision, type CheckpointReentryDecision } from '../check
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { InteractionClosureRecord } from '../checkpoints/closure.js';
 import { produceAdmittedTurn, newActiveTurnId, type RuntimeBindingSnapshot } from '../admission/admitted-turn.js';
+import { TaskGrantDeniedError } from '../admission/task-grant.js';
 import { ActiveTurnContext, RuntimeActiveTurnError, childInvocationId } from '../context/active-turn-context.js';
 import type { ActiveTurnJournalPort } from '../context/active-turn-journal.js';
 import { ActiveTurnRecoveryCapture, type ActiveTurnProviderProducer, type RecoveryCaptureReferences } from '../context/recovery-assets.js';
@@ -3737,17 +3738,24 @@ export class RuntimeTaskCoordinator {
     let selectedExecutionEpoch: number | undefined;
     let retryCycle: ReturnType<typeof createRetryCycleManager> | undefined;
     const closedRetryDrivers = new Map<RuntimeExecutionDriver, ProviderCloseResult>();
+    // The admission edge runs before the active turn opens, so a rejected
+    // admission writes no turn or business record. `inAdmitExecution` lets the
+    // catch below tell that zero-effect denial apart from a failure after the
+    // admission already registered a durable recovery obligation.
+    let inAdmitExecution = false;
     try {
-      await this.openActiveTurn(record, operation, scope);
       if (!this.options.admitExecution) {
         throw new RuntimeTaskControlError('execution.admission.missing', RUNTIME_OWNER,
           'execution admission source is not bound', 'bind the actual task admission owner before release');
       }
+      inAdmitExecution = true;
       await this.options.admitExecution(allocation);
+      inAdmitExecution = false;
       if (record.stopping) {
         await this.stopPreparedExecution(record, operation);
         return;
       }
+      await this.openActiveTurn(record, operation, scope);
       if (this.options.providerRetry) {
         retryCycle = createRetryCycleManager({
           config: this.options.providerRetry.config,
@@ -4224,11 +4232,22 @@ export class RuntimeTaskCoordinator {
     } catch (error) {
       if (record.release?.state === 'prepared') {
         const projection = errorFromUnknown(error);
-        // The admission edge runs before any business registration, driver or
-        // Provider call, so a rejection here has zero business effect. Record
-        // the exact rejected operation terminal durably, keep its operation and
-        // execution epoch in history, and release the prepared slot so a later
-        // independent start prepares a new operation instead of staying busy.
+        // A denial inside the admission edge runs before any business
+        // registration, active turn, driver or Provider call, so it has zero
+        // effect: record the exact rejected operation terminal durably, keep
+        // its operation and execution epoch in history, and release the
+        // prepared slot so a later independent start prepares a new operation
+        // instead of staying busy. A failure after the admission registered
+        // durable business/turn control is different: the registered recovery
+        // obligation must survive, so the prepared slot and its stop action are
+        // retained rather than released.
+        const code = (error as { readonly code?: unknown } | undefined)?.code;
+        const zeroEffectAdmissionDenial = (error instanceof RuntimeTaskControlError && error.code === 'execution.admission.missing')
+          || (inAdmitExecution && (
+            error instanceof TaskGrantDeniedError
+            || code === 'execution-composition.owner-source-missing'
+            || code === 'execution-admission-input-conflict'
+          ));
         record.error = projection;
         record.state = 'blocked';
         record.running = false;
@@ -4240,8 +4259,13 @@ export class RuntimeTaskCoordinator {
         record.rejectRelease = undefined;
         record.resolveRelease = undefined;
         record.releasePending = undefined;
-        record.release = undefined;
-        record.allowedActions = record.stopping ? ['retry-stop'] : ['start'];
+        if (zeroEffectAdmissionDenial) {
+          record.release = undefined;
+          record.allowedActions = record.stopping ? ['retry-stop'] : ['start'];
+        } else {
+          record.release = { state: 'prepared' };
+          record.allowedActions = record.stopping ? ['retry-stop'] : ['stop'];
+        }
         return;
       }
       if (record.postCommitRecoveryPending) return;
