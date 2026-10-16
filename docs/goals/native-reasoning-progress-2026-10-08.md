@@ -4,11 +4,21 @@
 
 ## 1. 当前目标与总体进度（截至 2026-10-15）
 
-- **本轮恢复快照**：用户在 Provider 聊天明确“继续”，goal 实际由 paused 恢复 active。本轮 **9 个工作项，0 个新验收完成**：restart（UX peer 唯一 writer）、explicit intake、RC-1～RC-5 五路原 fixture 修复、G-A/TG1 缺边、T4b 类型合同纠正。已启动 6 路 fresh GCM（intake + RC-1～RC-5）和 2 路独立 AGY Gemini 4 Medium 规划；restart 由 UX peer 已启动的 GCM 独占，不重复派发。启动回执不计完成。
+- **本轮恢复快照**：用户在 Provider 聊天明确“继续”，goal 实际由 paused 恢复 active。本轮 **9 个工作项，4 个源码节点已接收、0 个 main 交付**：已接 restart fix、explicit intake、RC-2、RC-5；RC-1、RC-3、RC-4（主体已接，补 1 条 T4c fixture 类型错误）、G-A/TG1、T4b 类型纠正仍开放。先并发启动 6 路 GCM + 2 路独立 AGY Gemini 4 Medium，后续同域续派均复用原树；restart 由 UX peer 唯一负责。启动回执不计完成。
 - **最新 Git 边界**：原代码冻结候选为 `dc19a784a75e1179152de59bb5c85d9c91febb58`，已包含本地 main `2ea11c0c`，另 37 个 Git 提交；远端 main 仍为 `db915e7a`，本地 main 领先远端 **114 个提交**。这些数字是提交数。完整待推闭包未有整体 Review PASS、真实新任务交付或 push。下文 `4ba88f40` / 113 是恢复前历史快照，不能替代本条。
 - **新收到但未接收的来源**：T4b 原作者 exit 0，返回同一泛型生命周期和原用例结果；存在泛型/RawFact 的强制类型转换及原 allowlist 外 replay 注解变更，交独立窄规划，尚未采用。G-A r2 原 consumer 仍 **0/3**，新首错位于 TG1 owner/自动启动边界，不再是 Task 创建前；5 路径 frozen dirty 保留，不能计修复完成。相关新规划为 `provider-{taskless-types,generic-tg1}-plan-agy4-r1-20261015`。
 - **本轮文件窗口与资源**：intake 独占 `explicit-brain-runtime.ts` 及两个原 App fixture，并收拢 RC-5 在 `ui-runtime.test.ts` 的两处旧 ABI 错误；RC-5 只写其他 4 个原 App 测试。5 路 RC 基于原 **143 错 / 17 文件**规划，保原断言，不新增测试矩阵或产品能力。新树为一个 intake 域和 RC-1～RC-5 各一个域，receipt：`/private/tmp/ha-worktree-sese-inventory-20261015/release-fixture-open-receipt.json`；接收并标准 Git 合流后当轮 remove/prune/absent，不重派开第二树。
 - **UX 协同最新边界**：peer 固定候选 `2204469c` 已组合 C3/C5/C6/shell 和 C4 基础来源；尚未由 Provider 唯一候选采用。C4/C7 公开控制与后续有效 Context 挂载未交付。peer 新 SIGKILL 观察暴露无 capture 的 active tail 返回 `cold-execution.source-unavailable`；原双进程正常退出证据不能据此关闭 F13。两侧 53007/p1 原 interaction 现场保持，正式 restart 和原意图重试需先协调。
+
+### 本轮已发生的代码推进
+
+- 唯一候选已正常 Git 合入 UX 固定来源 `2204469c` 为 `86766d4b`（复用同源 C3/C4 与浏览器有效证据，不扩为恢复控制或 raw 正文已交付）。随后接 intake `30a07d41` → `1b69b34`、restart `0e66485e` → `4a7e538`、RC-2 `27ea5f5` → `ed98fc3`、RC-4 主体 `32ec810` → `4d93ce8`、RC-5 `2a9de8e` → **`ea0756077ecae5c6d436b2d775c75a26c1cf8ac7`**。均为候选内部来源接收；未将本地 main 的 114 提交整批推送。
+- intake 原 wire 断言实际 **9 PASS / 1 FAIL → 10/10 PASS**；完整角色模板 **17/17**、显式 Brain **49/49** 保留。Root 在实际宿主对同份原 new-task consumer **4/4 PASS / exit 0**，撤回 child 据 `EMFILE` 推定整机资源耗尽的结论。真实 RCC 原 interaction 尚未重试，不冒真实任务完成。原 intake 树已正常 remove/prune/absent。
+- RC-2 原 Gateway/Hand 两组正常编译 **0**、原 **27/27 PASS**；RC-5 scoped 编译 **0**、原 **19/19 PASS**。两来源已正常合流并当轮核销各自源码树。组合 intake + RC-5 后，唯一候选的 **`pnpm exec tsc -p tests/app/tsconfig.json` 实际 exit 0**；候选 App 正常 build 也为 **0**。这不是全仓 typecheck PASS。
+- RC-1 正常编译、Core **31/31**、coordinator **7/7**，submission **33/38**；原 5 个运行失败未掩盖。已找到归档中实际迁移来源 `7350e1e`，在原树标准 cherry-pick，两个 fixture 冲突冻结；独立窄计划 READY 后 fresh r2 依明确双侧语义继续。旧无绑定重入 gate 不放宽，旧格式可读不等于允许无绑定写入。
+- RC-4 主体正常编译 **0**、原 **17/17 PASS**；真实 scoped/root 复现纠正了 Planner 的 ambient merge 假设，采用实际模块 augmentation，未改其他 owner 的声明。新增 T4c 原 consumer 的 readonly refs → JsonValue 一条 fixture 错误另由原树 r2 最小收拢，不新增 case。
+- restart 真正宿主生命周期对照与原 consumer 的 PGID 断言均有实际 RED/GREEN，独立三文件 fix Review PASS（不覆盖原 reload feature）。接受短依赖计划 `provider-reload-slice-plan-agy4-r1-20261015/plan.md`：在 origin/main 仅组合 `ee0be443` + `0e66485e` 的 **8 文件闭包**，不等 taskless/intake/G-A 整包；UX peer 原树切独立 slice、作者验证及补完整闭包审查，Provider Root 唯一负责 PR/CI/main 合流与发布。当前仍未 main/push。
+- 本轮 source 关闭回执均在 `/private/tmp/ha-worktree-sese-inventory-20261015/`：`restart-lifetime-owner-transfer-close-receipt.json`、`explicit-intake-close-receipt.json`、`release-rc2-close-receipt.json`、`release-rc5-close-receipt.json`。证据及未收拢 fixture 保留，未冒称所有资源清理完成。
 
 - **Provider/native 当前核验状态**：完整 goal ACTIVE；Provider main **0/7**。原25例组合基线仍 **22 PASS / 3 FAIL**，不以局部结果覆盖。唯一集成分支 `codex/native-delivery-candidate-20261015` clean HEAD `4ba88f40`：已接原UX22/native25/terminal6/T1/T2/T3/G-P/App17/Config/cold/Memory、reload `ee0be443`、117行重复路由消融 `38f4ca25`、T6两行预算 `9567b413`、T4a `b9b22190`、验收文档 `75a53b3`、v14/SESE `33fca9f`，再接A4为 `08961ab1`，最后正常无冲突merge localmain `27532680`。localmain领先remote `db915e7a` 的113提交属于清理保存的待推闭包，尚未整体Review；不能当已验收。该合流保留退役删除，新增运行差异是coordinator13行，App正常重建0。首I1整体Review须覆盖remote→完整组合闭包，不能只审最近leaf。未整体PASS、未安装/正式发布或push。
 - **N3 最新纠正**：T2旧turn/revision混用已实际RED→GREEN，正常compile0/原一case1PASS，final source `f83e6ddb…`、consumer `3809e434…`。已接受基础为 **T1/T2/T3 = 3/6**；T4a合同子包已正常提交 `af033dff`，contracts及原consumer均正常compile0、原3case PASS。T4b Provider driver、T4c Runtime helper已取得同一Git依赖并并行执行；完整T4、T5生产组装、T6真实CLI预算仍未验。T3是真实Journal基础，不是helper执行。
