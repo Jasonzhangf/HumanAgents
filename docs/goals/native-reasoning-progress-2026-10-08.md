@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- UI raw/title 包 `52f4ee8` 已标准合为 `375b9fb`。受控双端同 runner GREEN26/26，旧基线资产同路径 RED6；修复 raw 精确定位、路径同步与长标题展示。尚未加载到原任务，不单独重启；待 epoch 包一起 build/adopt。本轮 fetch 核最新 `origin/main=298123095032bcb6b552ea88c84ca889290e43b1` 已为候选祖先，无新增上游 delta。当前三路 GCM：本侧 parent ancestry；本侧 `provider-native-release-service-gcm-r3-20261016` 只改 service 三处启动接线；UX `i1-delivery-epoch-20261016` 独占 coordinator+原 cold consumer。service packet先编译，行为等 Runtime/fixture 组合后验，不冒三红测已修。
+
 - 下一动作已派：parent ancestry Gemini4 r2 完整 replacement plan 已接收，`owner-acceptance.md` 删除重复 eligibility 校验，保留单一 continuation-anchor 判定；真实 mode/API/测试路径已校正，foldSnapshot 不改。fresh GCM `provider-parent-ancestry-execute-gcm-r1-20261016` 复用原 dirty parent 树实现 Runtime→Driver→App typed local parent，Git 只读；不重放 helper、不继承远端 response 链。coordinator 独占窗口归 UX epoch-fix 小计划/实现，release 三项基线候该来源冻结后再续；不新建同域树。
 
 - generation 9 后续精确证据已由 Root 直接读取原 Journal：**709 prepared、710 invoked、711 returned** 的独立 closed-turn Planner、**712 task-plan-revision.published、713 alignment closure、714 runtime-task-current-state.currentPlan** 均已持久化。故本次已推进到真实 Planner 返回和目标对齐，失败发生在其后 delivery-source gate；业务最终交付仍未完成，下一次不得重复 Planner。UX 已定位 coordinator 将原 allocation epoch1 用于校验实际收口 epoch3，正独立小 plan 校正调用方使用已验证 expectedExecutionEpoch，不改原 operation 身份。Root 为关键链精确停止无源码 delta 的 release GCM r2，最终 PID absent/exit1/treeclean 后释放 coordinator 与原 App 测试写窗口给 UX；三项基线修复随后续派。
