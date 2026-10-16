@@ -40,6 +40,7 @@ import {
   type OrganHealthSnapshot,
   type OperationId,
   type OrganId,
+  type RawAsset,
   type ScopeRef,
   type ProviderBinding,
   type ProviderCloseResult,
@@ -149,7 +150,14 @@ import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/ope
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
 import { createCheckpointHistoryReader, type CheckpointHistoryReadInput } from './checkpoint-history.js';
-import type { RuntimeCheckpointReadProjection } from '../../../ui/contracts/checkpoint-history.js';
+import type {
+  RuntimeCheckpointAssetBodyProjection,
+  RuntimeCheckpointAssetSelector,
+  RuntimeCheckpointAssetTarget,
+  RuntimeCheckpointDetailProjection,
+  RuntimeCheckpointReadProjection,
+} from '../../../ui/contracts/checkpoint-history.js';
+import type { CheckpointHistoryReader } from './checkpoint-history.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
 import { createTaskPlanHistoryReader, type TaskPlanHistoryCurrentRead } from './task-plan-history.js';
 import type { RuntimeTaskPlanHistoryProjection } from '../../../ui/contracts/task-plan-history.js';
@@ -202,8 +210,9 @@ import {
   type RuntimeSystemReadProjection,
   type RuntimeTaskRecordsProjection,
   type RuntimeTaskRowProjection,
-  type RuntimeMode,
   type RuntimeReadResult,
+  type RuntimeMode,
+  type RuntimeReadScope,
   type RuntimeReadFailure,
   type RuntimeContextHistoryProjection,
   type RuntimeCommitRefProjection,
@@ -287,6 +296,7 @@ import {
 import type { OccurrenceTerminalProduction } from './occurrence-consumer.js';
 
 const APP_OWNER = 'humanagent.app';
+const CHECKPOINT_ASSET_OWNER = 'humanagent.app.ui-runtime.checkpoint-asset';
 const TASK_PLAN_HISTORY_OWNER = 'humanagent.app.ui-runtime.task-plan-history';
 const RUNTIME_OWNER = 'humanagent.runtime';
 const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
@@ -1322,6 +1332,18 @@ export interface TaskCheckpointHistoryQuery {
   readonly occurrenceRef?: string;
 }
 
+/**
+ * Exact checkpoint and asset role a body read addresses. The caller never
+ * supplies a descriptor, locator, digest or scope; those come from the
+ * canonical committed checkpoint.
+ */
+export interface TaskCheckpointAssetBodyQuery {
+  readonly projectKey: TaskCheckpointHistoryQuery['projectKey'];
+  readonly mode: TaskCheckpointHistoryQuery['mode'];
+  readonly viewed: RuntimeCheckpointAssetTarget;
+  readonly selector: RuntimeCheckpointAssetSelector;
+}
+
 /** Read-only I2 history queries. Scope is the exact task; there is no write path. */
 export interface I2HistoryListQuery {
   readonly limit: number;
@@ -1680,6 +1702,87 @@ function paginateRecords<T extends { readonly ref: RuntimeStoredRecordRef }>(
     hasMore,
     ...(hasMore && last !== undefined ? { nextCursor: encodeRecordsCursor({ view, ref: last.ref }) } : {}),
   };
+}
+
+/**
+ * Assemble the canonical checkpoint history reader for one project source and
+ * mode. History reads and asset body reads share this single assembly so both
+ * resolve committed checkpoints and evidence through the same owners.
+ */
+function checkpointHistoryReaderAssembly(
+  runtimePaths: RuntimePaths | undefined,
+  source: ConfiguredProjectReadSource,
+  mode: RuntimeMode,
+  journal: JsonlOrganJournal,
+): CheckpointHistoryReader {
+  const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode));
+  const checkpoints = createJsonlCheckpointJournal({ filePath, journal });
+  // Match the native launch/CLI evidence root beneath the Config-owned project root.
+  const artifactsRoot = join(source.projectRoot, 'artifacts', 'ui-provider-evidence');
+  const assets = new ImmutableAssetStore(artifactsRoot);
+  return createCheckpointHistoryReader({
+    checkpoints, native: checkpoints,
+    contexts: createJsonlContextHistoryPort({ filePath, journal }),
+    semantic: createJsonlSemanticHistoryReader({ filePath, journal, artifactsRoot,
+      activeTurnJournalFor: (turnId) => createJsonlActiveTurnJournal({ journal, turnId }),
+      segmentJournalFor: (businessTurnId) => createJsonlActiveTurnSegmentJournal({ journal, businessTurnId }),
+      rawContent: providerRawContentReader(filesystemProviderEvidenceSink(assets)),
+    }),
+    capture: createNativeRecoveryAssets({ journalPath: filePath, journal, assetRoot: artifactsRoot,
+      completionJournal: new JsonlOperationCompletionJournal({ journal }) }),
+  });
+}
+
+function sameTypedId(
+  left: { readonly scope: string; readonly value: string } | undefined,
+  right: { readonly scope: string; readonly value: string } | undefined,
+): boolean {
+  return left?.scope === right?.scope && left?.value === right?.value;
+}
+
+/**
+ * Select the exact committed asset a body read addresses. A capture read needs
+ * the committed capture descriptor; an adopted-child read needs exactly one
+ * committed delivery matching the full triple. Zero or multiple matches are an
+ * explicit failure, never a first-item or latest-delivery substitution.
+ */
+function checkpointAssetForSelector(
+  viewed: RuntimeCheckpointDetailProjection,
+  selector: RuntimeCheckpointAssetSelector,
+  taskScope: TaskIdentityScope,
+): RuntimeReadResult<RawAsset> {
+  if (selector.kind === 'capture') {
+    if (viewed.capture.state !== 'known') {
+      return { ok: false, failure: {
+        code: 'checkpoint-asset.unavailable',
+        ownerId: CHECKPOINT_ASSET_OWNER,
+        message: `checkpoint has no committed capture asset: ${viewed.capture.reason}`,
+        nextAction: 'read a checkpoint that has a committed capture',
+      } };
+    }
+    return { ok: true, value: viewed.capture.capture };
+  }
+  if (viewed.semantic.state !== 'known') {
+    return { ok: false, failure: {
+      code: 'checkpoint-asset.unavailable',
+      ownerId: CHECKPOINT_ASSET_OWNER,
+      message: `checkpoint has no committed adopted children: ${viewed.semantic.reason}`,
+      nextAction: 'read a checkpoint with committed semantic publication',
+    } };
+  }
+  const matches = viewed.semantic.adoptedChildren.filter((child) => child.invocationId === selector.invocationId
+    && child.childTurnId === selector.childTurnId && child.deliverySeq === selector.deliverySeq);
+  if (matches.length !== 1) {
+    return { ok: false, failure: {
+      code: matches.length === 0 ? 'checkpoint-asset.not-found' : 'checkpoint-asset.ambiguous',
+      ownerId: CHECKPOINT_ASSET_OWNER,
+      message: matches.length === 0
+        ? `no committed adopted delivery for invocation ${selector.invocationId}, child turn ${selector.childTurnId}, delivery ${selector.deliverySeq} in task ${taskScope.taskId.value}`
+        : `${matches.length} committed adopted deliveries match invocation ${selector.invocationId}, child turn ${selector.childTurnId}, delivery ${selector.deliverySeq} in task ${taskScope.taskId.value}`,
+      nextAction: 'supply the exact committed invocation, child turn and delivery sequence of one adopted delivery',
+    } };
+  }
+  return { ok: true, value: matches[0]!.refinedDelivery };
 }
 
 export class UiRuntimeService {
@@ -3834,7 +3937,11 @@ export class UiRuntimeService {
     }
   }
 
-  /** Canonical readonly checkpoint composition. List filters never select current or viewed. */
+  /**
+   * Canonical readonly checkpoint composition. The canonical committed Journal
+   * stays the only source of checkpoint identity and asset descriptors; the
+   * reader never derives them from a UI request.
+   */
   async taskCheckpointHistory(
     taskId: TaskId,
     input: TaskCheckpointHistoryQuery,
@@ -3846,22 +3953,7 @@ export class UiRuntimeService {
     const identity = await this.canonicalTaskIdentityScope(journal, taskId);
     if (!identity.ok) return identity;
     try {
-      const checkpoints = createJsonlCheckpointJournal({ filePath, journal });
-      // Match the native launch/CLI evidence root beneath the Config-owned project root.
-      const artifactsRoot = join(source.projectRoot, 'artifacts', 'ui-provider-evidence');
-      const assets = new ImmutableAssetStore(artifactsRoot);
-      const reader = createCheckpointHistoryReader({
-        checkpoints, native: checkpoints,
-        contexts: createJsonlContextHistoryPort({ filePath, journal }),
-        semantic: createJsonlSemanticHistoryReader({ filePath, journal, artifactsRoot,
-          activeTurnJournalFor: (turnId) => createJsonlActiveTurnJournal({ journal, turnId }),
-          segmentJournalFor: (businessTurnId) => createJsonlActiveTurnSegmentJournal({ journal, businessTurnId }),
-          rawContent: providerRawContentReader(filesystemProviderEvidenceSink(assets)),
-        }),
-        capture: createNativeRecoveryAssets({ journalPath: filePath, journal, assetRoot: artifactsRoot,
-          completionJournal: new JsonlOperationCompletionJournal({ journal }) }),
-      });
-      return await reader.read({
+      return await checkpointHistoryReaderAssembly(this.options.runtimePaths, source, input.mode, journal).read({
         scope: { kind: 'task', projectKey: input.projectKey, mode: input.mode, taskId },
         taskScope: identity.value,
         list: { limit: input.limit,
@@ -3873,6 +3965,75 @@ export class UiRuntimeService {
         },
         ...(input.viewed === undefined ? {} : { viewed: input.viewed }),
       });
+    } catch (error) {
+      return { ok: false, failure: readFailureFromError(error) };
+    }
+  }
+
+  /**
+   * Read the actual body of one committed checkpoint asset. The method reads the
+   * canonical committed checkpoint first and only then reads the exact asset the
+   * committed descriptor names, so no caller can select an arbitrary file.
+   */
+  async taskCheckpointAssetBody(
+    taskId: TaskId,
+    input: TaskCheckpointAssetBodyQuery,
+  ): Promise<RuntimeReadResult<RuntimeCheckpointAssetBodyProjection>> {
+    const source = await this.findProjectSource(input.projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
+    const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, input.mode));
+    const journal = new JsonlOrganJournal(filePath);
+    const identity = await this.canonicalTaskIdentityScope(journal, taskId);
+    if (!identity.ok) return identity;
+    const artifactsRoot = join(source.projectRoot, 'artifacts', 'ui-provider-evidence');
+    try {
+      const history = await checkpointHistoryReaderAssembly(this.options.runtimePaths, source, input.mode, journal).read({
+        scope: { kind: 'task', projectKey: input.projectKey, mode: input.mode, taskId },
+        taskScope: identity.value,
+        list: { limit: 1 },
+        viewed: {
+          checkpointId: input.viewed.checkpointId,
+          commitRef: { ...input.viewed.commitRef },
+        },
+      });
+      if (!history.ok) return history;
+      const viewed = history.value.viewed;
+      if (viewed === null) {
+        return { ok: false, failure: {
+          code: 'checkpoint-asset.viewed-unavailable',
+          ownerId: CHECKPOINT_ASSET_OWNER,
+          message: `checkpoint ${input.viewed.checkpointId.value} has no canonical committed detail in this task`,
+          nextAction: 'supply the exact committed checkpoint receipt and restore the canonical checkpoint detail reader',
+        } };
+      }
+      const scope: Extract<RuntimeReadScope, { readonly kind: 'task' }> = {
+        kind: 'task', projectKey: input.projectKey, mode: input.mode, taskId,
+      };
+      const asset = checkpointAssetForSelector(viewed, input.selector, identity.value);
+      if (!asset.ok) return asset;
+      // Reject a descriptor whose own task scope is not the canonical identity of
+      // this task. The scope kept on the descriptor is the authority for the read.
+      const assetTaskScope = asset.value.ref.scope;
+      if (!sameTypedId(assetTaskScope.organId, identity.value.organId)
+        || !sameTypedId(assetTaskScope.taskId, identity.value.taskId)) {
+        return { ok: false, failure: {
+          code: 'checkpoint-asset.scope-mismatch',
+          ownerId: CHECKPOINT_ASSET_OWNER,
+          message: `checkpoint asset belongs to task ${assetTaskScope.taskId?.value ?? '(unscoped)'} in ${assetTaskScope.organId.value}, not to ${taskId.value} in ${identity.value.organId.value}`,
+          nextAction: 'read the asset from the task scope that owns it',
+        } };
+      }
+      const bytes = await providerRawContentReader(filesystemProviderEvidenceSink(new ImmutableAssetStore(artifactsRoot))).read({
+        scope: assetTaskScope, content: asset.value,
+      });
+      return { ok: true, value: {
+        surface: 'runtime-checkpoint-asset-body',
+        scope,
+        checkpoint: viewed.identity,
+        selector: input.selector,
+        asset: asset.value,
+        text: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+      } };
     } catch (error) {
       return { ok: false, failure: readFailureFromError(error) };
     }

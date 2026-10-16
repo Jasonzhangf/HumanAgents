@@ -431,6 +431,17 @@ function validateJournalRecord(
       if (typeof taskError.retryable !== 'boolean') throw new Error(`corrupt UI runtime journal ${filePath}:${line}: error.retryable is invalid`);
       requireRecordString(taskError, 'nextAction', filePath, line);
     }
+    if (record.zeroEffectAdmissionDenial !== undefined) {
+      if (record.zeroEffectAdmissionDenial !== true) {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${line}: zeroEffectAdmissionDenial must be true when present`);
+      }
+      const denialEvent = eventRecord.event;
+      if (denialEvent.kind !== 'execution.terminal'
+        || denialEvent.state !== 'blocked'
+        || denialEvent.terminalPhase !== 'final') {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${line}: zeroEffectAdmissionDenial is only valid on a final blocked execution terminal`);
+      }
+    }
     const identityKey = JSON.stringify([eventRecord.operationId.value, eventRecord.event.eventId]);
     const duplicate = context.eventIdentities.get(identityKey);
     if (duplicate) {

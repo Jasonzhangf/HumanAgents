@@ -92,6 +92,45 @@ function requestInstructions(
     .join('\n\n');
 }
 
+/**
+ * The model-visible evidence footer for one accepted tool result.
+ *
+ * The model submits delivery references at standard turn end, and the existing
+ * resolver matches a reference against `evidenceId.value` or `locator` of real
+ * accepted evidence. Without the accepted refs on the wire the model can only
+ * guess, and its guess is rejected. The footer renders the refs of exactly the
+ * result it is attached to, and returns an empty string when there are none so
+ * a result without accepted evidence keeps its original output byte for byte.
+ * It never carries control state, and it is only ever produced for the wire:
+ * `result.output`, the raw asset, the report and every digest input stay on the
+ * original bytes.
+ */
+function evidenceFooter(refs: readonly EvidenceRef[] | undefined): string {
+  if (refs === undefined || refs.length === 0) return '';
+  const entries = refs.map((ref) => {
+    const fields = [
+      `evidenceId=${ref.evidenceId.value}`,
+      `kind=${ref.kind}`,
+      `locator=${ref.locator}`,
+      ...(ref.digest === undefined ? [] : [`digest=${ref.digest}`]),
+    ];
+    return `- ${fields.join(' ')}`;
+  });
+  return [
+    '',
+    '[HumanAgent evidence refs]',
+    'Cite one exact evidenceId value below when you finish the turn.',
+    ...entries,
+    '[/HumanAgent evidence refs]',
+  ].join('\n');
+}
+
+/** The wire text of one tool result: the original output, plus its evidence footer when it has refs. */
+function wireToolResultOutput(output: string, refs: readonly EvidenceRef[] | undefined): string {
+  const footer = evidenceFooter(refs);
+  return footer === '' ? output : `${output}${footer}`;
+}
+
 /** Maps canonical units to Responses input items. Tool units keep their real call identity. */
 function responsesContextInput(context: ProviderRequestContext): readonly ResponsesWireInputItem[] {
   return context.units.map((unit): ResponsesWireInputItem => {
@@ -106,7 +145,7 @@ function responsesContextInput(context: ProviderRequestContext): readonly Respon
           arguments: JSON.stringify(unit.arguments),
         };
       case 'tool-result':
-        return { type: 'function_call_output', call_id: unit.callId, output: unit.output };
+        return { type: 'function_call_output', call_id: unit.callId, output: wireToolResultOutput(unit.output, unit.evidenceRefs) };
     }
   });
 }
@@ -135,7 +174,7 @@ function anthropicContextMessages(context: ProviderRequestContext): readonly Ant
         append('assistant', { type: 'tool_use', id: unit.callId, name: unit.toolId, input: unit.arguments });
         break;
       case 'tool-result':
-        append('user', { type: 'tool_result', tool_use_id: unit.callId, content: unit.output });
+        append('user', { type: 'tool_result', tool_use_id: unit.callId, content: wireToolResultOutput(unit.output, unit.evidenceRefs) });
         break;
     }
   }
@@ -179,7 +218,7 @@ function openaiChatContextMessages(context: ProviderRequestContext): readonly Op
         break;
       case 'tool-result':
         flushToolCalls();
-        messages.push({ role: 'tool', tool_call_id: unit.callId, content: unit.output });
+        messages.push({ role: 'tool', tool_call_id: unit.callId, content: wireToolResultOutput(unit.output, unit.evidenceRefs) });
         break;
     }
   }
@@ -888,7 +927,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           }, {
             type: 'function_call_output' as const,
             call_id: continuation.callId,
-            output: continuation.output,
+            output: wireToolResultOutput(continuation.output, continuation.evidenceRefs),
           }])),
         ],
         execution: executionIdentity(input),
@@ -2157,7 +2196,11 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     const messages: AnthropicWireMessage[] = execution.requestContext === undefined
       ? [{ role: 'user', content: [{ type: 'text', text: businessText(execution, payload) }] }]
       : [...anthropicContextMessages(execution.requestContext)];
-    const tools: AnthropicWireTool[] = [];
+    const tools: AnthropicWireTool[] = (execution.tools ?? []).map((tool) => ({
+      name: tool.toolId,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }));
     return {
       protocol: 'anthropic',
       type: 'anthropic.request',
