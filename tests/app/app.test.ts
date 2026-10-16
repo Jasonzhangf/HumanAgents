@@ -11,6 +11,7 @@ import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type Agent
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
 import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
+import { canonicalJsonStringify } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -29,9 +30,9 @@ import { RuntimeTaskCoordinator } from '../../packages/runtime/src/ui-runtime/co
 import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
-import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
-import { newActiveTurnId } from '../../packages/runtime/src/admission/admitted-turn.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
+import { createJsonlNativeSaveProgressPort } from '../../packages/adapters/jsonl/src/native-save-progress.js';
+import { createJsonlClosedTurnPlannerCallJournal } from '../../packages/app/src/ui-runtime/planner-call-journal.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -301,6 +302,141 @@ interface NativeUpstreamWire {
   readonly body: string;
 }
 
+function nativeRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`native Planner request is missing ${label}`);
+  return value as Record<string, unknown>;
+}
+
+function nativeText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`native Planner request is missing ${label}`);
+  return value;
+}
+
+function nativeLocators(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  const locators: string[] = [];
+  for (const ref of value) {
+    const locator = (ref as { readonly locator?: unknown } | null)?.locator;
+    if (typeof locator === 'string' && locator.length > 0) locators.push(locator);
+  }
+  return locators;
+}
+
+/**
+ * The independent Planner sends exactly one user message whose `input_text` is
+ * the JSON business payload (see `turn-planner.ts` `plannerRequestPayload`). The
+ * stage is read from the actual request body, never a request ordinal or model
+ * string, so the write/end/drain interactions keep their own path.
+ */
+function nativePlannerPayload(raw: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const input = (parsed as { readonly input?: readonly { readonly type?: string; readonly role?: string;
+    readonly content?: readonly { readonly type?: string; readonly text?: string }[] }[] }).input ?? [];
+  for (const item of input) {
+    if (item.type !== 'message' || item.role !== 'user') continue;
+    for (const part of item.content ?? []) {
+      if (part.type !== 'input_text' || typeof part.text !== 'string') continue;
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(part.text);
+      } catch {
+        continue;
+      }
+      if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+        && (candidate as Record<string, unknown>).role === 'planner') {
+        return candidate as Record<string, unknown>;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The lawful whole-task Planner response, built only from the actual received
+ * business payload. The owner still derives the publication id, sequence,
+ * digest, source binding, Journal commit and run state; this text carries only
+ * the alignment decision and the whole-task snapshot the Planner is asked for.
+ */
+function nativePlannerFrames(payload: Record<string, unknown>, taskId: string): readonly Record<string, unknown>[] {
+  const task = nativeRecord(payload.task, 'the task');
+  if (nativeRecord(task.taskId, 'the task id').value !== taskId) throw new Error('native Planner request task id does not match the retained Task');
+  const closure = nativeRecord(payload.closure, 'the closure');
+  const summary = nativeRecord(closure.summary, 'the closure summary');
+  const section = (value: unknown, label: string) => {
+    const part = nativeRecord(value, `the closure ${label}`);
+    return { text: nativeText(part.text, `the closure ${label} text`), locators: nativeLocators(part.evidenceRefs) };
+  };
+  const title = nativeText(task.title, 'the task title');
+  const directive = nativeText(task.directive, 'the task directive');
+  if (payload.priorPlan !== null) throw new Error('native Planner request did not carry the expected null priorPlan');
+  const confirmed = nativeRecord(payload.confirmedSource, 'the confirmed source');
+  const goal = section(summary.goal, 'goal');
+  const actions = section(summary.actions, 'actions');
+  const result = section(summary.result, 'result');
+  const expectedNextStep = section(summary.expectedNextStep, 'expectedNextStep');
+  const refined = (Array.isArray(payload.refinedResults) ? payload.refinedResults : []).map((entry) => {
+    const record = nativeRecord(entry, 'a refined result');
+    return {
+      role: nativeText(record.role, 'a refined result role'),
+      assignmentId: nativeText(record.assignmentId, 'a refined result assignment id'),
+      status: nativeText(record.status, 'a refined result status'),
+      evidenceLocators: nativeLocators(record.evidenceRefs),
+    };
+  });
+  const text = JSON.stringify({
+    decision: 'complete',
+    snapshot: {
+      title,
+      summary: `Whole-task plan for "${title}": the directive is "${directive}". The closed turn records the goal "${goal.text}", the actions "${actions.text}", the result "${result.text}", and the expected next step "${expectedNextStep.text}".`,
+      completeness: { scope: 'whole-task', status: 'complete' },
+      acceptanceCriteria: [{
+        criterionId: 'original-directive-satisfied',
+        description: `Satisfy the original directive "${directive}" and preserve the confirmed effect cited by the closed turn.`,
+      }],
+      nodes: [{
+        nodeId: 'whole-task',
+        kind: 'task',
+        title,
+        intent: directive,
+        definition: {
+          directive,
+          goal: goal.text,
+          actions: actions.text,
+          result: result.text,
+          expectedNextStep: expectedNextStep.text,
+          confirmedSource: {
+            requirementId: nativeText(confirmed.requirementId, 'the confirmed requirement id'),
+            inputRevision: confirmed.inputRevision,
+            draftId: nativeText(confirmed.draftId, 'the confirmed draft id'),
+            draftRevisionVersion: confirmed.draftRevisionVersion,
+            draftRevisionHash: nativeText(confirmed.draftRevisionHash, 'the confirmed draft revision hash'),
+            confirmationRef: nativeText(confirmed.confirmationRef, 'the confirmed confirmation reference'),
+            evidenceLocators: nativeLocators(confirmed.evidenceRefs),
+          },
+          refinedResults: refined,
+          evidenceLocators: [...new Set([
+            ...goal.locators, ...actions.locators, ...result.locators, ...expectedNextStep.locators,
+            ...nativeLocators(confirmed.evidenceRefs), ...refined.flatMap((entry) => entry.evidenceLocators),
+          ])],
+        },
+      }],
+      phases: [],
+      relations: [],
+    },
+    reasonText: 'first whole-task plan aligned to the original directive and the confirmed closed turn',
+  });
+  return [
+    { type: 'response.created', response: { id: 'native-planner' } },
+    { type: 'response.output_text.done', item_id: 'native-planner-text', text },
+    { type: 'response.completed', response: { id: 'native-planner' } },
+  ];
+}
+
 /**
  * Controlled local upstream for the native CLI run. It answers the real RCC
  * readiness probes and serves the real Responses standard-end sequence: one
@@ -310,8 +446,7 @@ interface NativeUpstreamWire {
  */
 async function nativeResponsesUpstream(input: {
   readonly model: string;
-  readonly organFilePath: string;
-  readonly journal: JsonlOrganJournal;
+  readonly taskId: string;
 }): Promise<{ readonly wires: NativeUpstreamWire[]; readonly baseUrl: string; close(): Promise<void> }> {
   const wires: NativeUpstreamWire[] = [];
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
@@ -337,6 +472,15 @@ async function nativeResponsesUpstream(input: {
           : { data: [{ id: input.model }] }));
         return;
       }
+      // The independent Planner is recognized from the actual payload, before
+      // the write/end/drain interaction ordinals, so the Planner stage never
+      // participates in the write/end/drain request counting.
+      const planner = nativePlannerPayload(body);
+      if (planner !== undefined) {
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(frame(nativePlannerFrames(planner, input.taskId)));
+        return;
+      }
       const posts = wires.filter((wire) => wire.method === 'POST');
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       if (posts.length === 1) {
@@ -345,20 +489,17 @@ async function nativeResponsesUpstream(input: {
         return;
       }
       if (posts.length === 2) {
-        const verified = await input.journal.verify();
-        const coverage = [...verified.records].reverse()
-          .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
-        const operationId = coverage?.scope?.operationId?.value;
-        if (!operationId) throw new Error('native run has no admitted operation coverage');
-        const active = await createJsonlActiveTurnJournal({ filePath: input.organFilePath,
-          journal: input.journal, turnId: newActiveTurnId(operationId) }).replay();
-        const completed = active.find((record) => record.kind === 'accepted-fact'
-          && record.entry.envelope.fact.kind === 'tool-result'
-          && record.entry.envelope.fact.result.toolId === 'file.write');
-        const ref = completed?.kind === 'accepted-fact' && completed.entry.envelope.fact.kind === 'tool-result'
-          ? completed.entry.envelope.fact.result.evidenceRefs[0]?.locator
-          : undefined;
-        if (!ref) throw new Error('native run file-write evidence missing');
+        const requestBody = JSON.parse(body) as {
+          readonly input?: readonly { readonly type?: string; readonly call_id?: string; readonly output?: unknown }[];
+        };
+        const toolResult = requestBody.input?.find((item) => item.type === 'function_call_output'
+          && item.call_id === 'call-native-write');
+        if (toolResult === undefined || typeof toolResult.output !== 'string') {
+          throw new Error('native wire file-write tool result is missing');
+        }
+        const footerEntry = toolResult.output.split('\n').find((line) => line.startsWith('- evidenceId='));
+        const ref = footerEntry?.match(/^- evidenceId=([^ ]+)/)?.[1];
+        if (!ref) throw new Error('native wire file-write evidence footer is missing');
         const section = (text: string) => ({ text, evidenceRefs: [ref] });
         response.end(frame(toolCall('native-end', 'humanagent_turn_end', { summary: {
           goal: section('Run the native CLI task'), actions: section('Wrote the native process result'),
@@ -393,7 +534,7 @@ async function nativeResponsesUpstream(input: {
 }
 
 /** Canonical fixture: real workspace, real RCC agent config and a controlled Provider. */
-async function nativeProcessFixture() {
+async function nativeProcessFixture(taskId: string) {
   await mkdir(nativeProcessFixtureRoot, { recursive: true });
   const root = await mkdtemp(join(nativeProcessFixtureRoot, 'native-process-'));
   const controlRoot = join(root, 'control');
@@ -404,18 +545,35 @@ async function nativeProcessFixture() {
   const layout = nativeRuntimeLayout(paths);
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
-  const upstream = await nativeResponsesUpstream({ model: 'native.process.model',
-    organFilePath: layout.organJournalPath, journal });
+  const upstream = await nativeResponsesUpstream({ model: 'native.process.model', taskId });
   const configPath = join(controlRoot, 'config.toml');
-  const config = (await readFile(configPath, 'utf8')).replace('driverRef = "fake"', [
-    'driverRef = "rcc"',
+  // The real native consumer selects two configured agents: the default
+  // interaction agent and the independent turn Planner's `orchestration` role.
+  // Both must reach the same controlled Responses endpoint, model, route and
+  // binding. A single unanchored `driverRef = "fake"` replacement only rewrote
+  // the first (interaction) block, leaving the Planner on the fake driver, so
+  // each selected agent is configured explicitly here.
+  const providerLines = [
     'provider.provider = "rcc"',
     'provider.binding = "native-process-binding"',
     'provider.protocol = "responses"',
     'provider.model = "native.process.model"',
     'provider.route = "native-process-route"',
     `provider.baseUrl = "${upstream.baseUrl}"`,
-  ].join('\n'));
+  ];
+  const configureAgent = (source: string, agentId: string): string => {
+    const marker = `agentId = "${agentId}"`;
+    const start = source.indexOf(marker);
+    if (start < 0) throw new Error(`native fixture config has no agent ${agentId}`);
+    const driverIndex = source.indexOf('driverRef = "fake"', start);
+    if (driverIndex < 0) throw new Error(`native fixture agent ${agentId} has no fake driver`);
+    return source.slice(0, driverIndex)
+      + ['driverRef = "rcc"', ...providerLines].join('\n')
+      + source.slice(driverIndex + 'driverRef = "fake"'.length);
+  };
+  const config = configureAgent(
+    configureAgent(await readFile(configPath, 'utf8'), 'interaction-default'),
+    'orchestration-default');
   await writeFile(configPath, config, 'utf8');
   const configuration = await loadConfiguration(paths);
   return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration };
@@ -434,7 +592,7 @@ async function nativeProcessFixture() {
  * Task completion; the receipt must carry the real Task disposition.
  */
 test('native CLI preparation control input', async () => {
-  const fixture = await nativeProcessFixture();
+  const fixture = await nativeProcessFixture('native-cli-retained-task');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const sessionId = 'native-cli-control';
   const legacyTaskId = 'native-cli-control-task';
@@ -466,7 +624,7 @@ test('native CLI preparation control input', async () => {
     assert.equal(caller.state, 'valid');
     if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
     // A second, independent credential gives a distinct owner for the foreign grant.
-    const otherAccess = await AccessControlService.open({ credentialPath: join(fixture.root, 'other-access.json'), create: true });
+  const otherAccess = await AccessControlService.open({ credentialPath: join(fixture.root, 'other-access.json'), create: true });
     const otherSession = await otherAccess.consumePairingCode(otherAccess.createPairingChallenge('cli-control-other', 1).code);
     const other = await otherAccess.verifyProductPrincipal(otherAccess.sessionCookie(otherSession).split(';')[0]!);
     assert.equal(other.state, 'valid');
@@ -558,16 +716,95 @@ test('native CLI preparation control input', async () => {
     const receiptEnd = validRun.stdout.lastIndexOf('}');
     assert.ok(receiptStart >= 0 && receiptEnd > receiptStart, `the native run prints its receipt: ${validRun.stdout}`);
     const receipt = JSON.parse(validRun.stdout.slice(receiptStart, receiptEnd + 1)) as {
-      readonly command?: string; readonly taskId?: string; readonly state?: string;
+      readonly command?: string; readonly taskId?: string; readonly operationId?: string; readonly state?: string;
+      readonly error?: unknown; readonly checkpoint?: { readonly checkpointId?: string; readonly outcome?: string };
+      readonly terminal?: { readonly kind?: string; readonly phase?: string; readonly status?: string };
     };
     assert.equal(receipt.command, 'run');
     assert.equal(receipt.taskId, retainedTaskId.value);
-    assert.ok(typeof receipt.state === 'string' && receipt.state.length > 0, 'the receipt carries the real Task disposition');
-    const terminal = preparedJournal.replay().some((record) => record.kind === 'operation.event'
-      && record.event.kind === 'execution.terminal');
-    assert.equal(terminal, true, 'the real runtime published its terminal event');
+    // The receipt must report the real Task disposition, not a Provider terminal
+    // or a released execution: the same operation reached final success and
+    // carries no failure error.
+    assert.equal(receipt.state, 'succeeded', 'the receipt must carry the succeeded Task disposition');
+    assert.equal(receipt.error, undefined, 'a succeeded receipt carries no failure error');
+    assert.equal(receipt.terminal?.kind, 'execution.terminal');
+    assert.equal(receipt.terminal?.phase, 'final');
+    const operationId = receipt.operationId;
+    assert.ok(typeof operationId === 'string' && operationId.length > 0, 'the receipt carries the real operation id');
+
+    // The terminal event belongs to the receipt's exact operation and is the
+    // final success, not any operation's terminal.
+    const terminalEvent = preparedJournal.replay().find((record) => record.kind === 'operation.event'
+      && record.event.kind === 'execution.terminal' && record.operationId.value === operationId
+      && record.event.terminalPhase === 'final');
+    assert.ok(terminalEvent, 'the receipt operation must publish its final terminal event');
+    if (terminalEvent === undefined || terminalEvent.kind !== 'operation.event') throw new Error('no final terminal event');
+    assert.equal(terminalEvent.event.state, 'succeeded', 'the same operation must reach final success');
+    const preparedRecord = preparedJournal.replay().find((record) => record.kind === 'operation.prepared'
+      && record.allocation.operationId.value === operationId);
+    const allocation = preparedRecord?.kind === 'operation.prepared' ? preparedRecord.allocation : undefined;
+    assert.ok(allocation, 'the operation allocation with its exact cycle scope is retained');
+    if (allocation === undefined) throw new Error('no operation allocation');
+    const scope = allocation.scope;
+
+    // Input and wire: the prepared prompt still enters execution, the write
+    // result carries its real footer, the end cites exactly that footer, and the
+    // drain replays the accepted end tool result.
+    const writeResult = posts[1]!.body;
+    const footerRef = writeResult.match(/- evidenceId=([^ \\"]+)/)?.[1];
+    assert.ok(footerRef, 'the write result carries a real evidence footer');
+    assert.ok(posts[2]!.body.includes('humanagent_turn_end'), 'the bound end is requested after the write');
+    assert.ok(posts[2]!.body.includes(footerRef!), 'the standard end cites the exact write footer ref');
+    assert.ok(posts[2]!.body.includes('call-native-end'), 'the drain request carries the accepted end tool result');
+
+    // Real standard end -> physically committed checkpoint -> five native save
+    // phases bound to that same checkpoint, all read from the durable owners.
+    const checkpointId = receipt.checkpoint?.checkpointId;
+    assert.ok(checkpointId, 'the receipt returns the real checkpoint');
+    const checkpoints = createJsonlCheckpointJournal({ filePath: fixture.layout.organJournalPath });
+    const committed = scope.cycleId ? await checkpoints.readCommitted(scope, { scope: 'checkpoint', value: checkpointId! }) : null;
+    assert.ok(committed, 'the receipt checkpoint must be exactly committed under the same operation scope');
+    const readback = await readCommittedCheckpoint({ filePath: fixture.layout.organJournalPath, scope,
+      checkpointId: { scope: 'checkpoint', value: checkpointId! } });
+    assert.equal(readback.checkpoint.id.value, checkpointId);
+    assert.equal(readback.checkpoint.outcome, 'waiting', 'the pre-Planner history checkpoint keeps its waiting outcome');
+    const native = await checkpoints.readNativeCheckpoint({ checkpoint: readback.checkpoint });
+    assert.ok(native, 'the same checkpoint has its native save relationship');
+    const save = [...(await fixture.journal.verify()).records].reverse().map((record) =>
+      record.payload?.['progress'] as { readonly progress?: {
+        readonly key: { readonly checkpoint: { readonly id: { readonly value: string } } };
+        readonly phases: readonly { readonly phase?: string; readonly state?: string }[] } } | undefined)
+      .find((entry) => entry?.progress !== undefined)?.progress;
+    assert.ok(save, 'the native save progress record is committed');
+    assert.equal(save!.key.checkpoint.id.value, checkpointId, 'the native save binds the same checkpoint identity');
+    assert.deepEqual([...save!.phases.filter((phase) => phase.state === 'committed').map((phase) => phase.phase)].sort(),
+      ['checkpoint', 'closure', 'context-view', 'history-publication', 'recovery-assets'],
+      'every one of the five native save phases must commit for this checkpoint');
+
+    // The same post-close independent Planner returned and published, and the
+    // duty's exact plan revision is the one current state carries.
+    const plannerReturned = [...(await fixture.journal.verify()).records]
+      .map((record) => record.payload?.['record'] as { readonly stage?: string; readonly duty?: { readonly dutyKey?: string } } | undefined)
+      .find((record) => record?.stage === 'returned' && record.duty?.dutyKey !== undefined);
+    assert.ok(plannerReturned, 'the independent Planner must commit a returned stage');
+    const planner = await createJsonlClosedTurnPlannerCallJournal({ journal: fixture.journal })
+      .read(scope, plannerReturned!.duty!.dutyKey!);
+    assert.equal(planner?.record.stage, 'returned', 'the same duty must be read back as returned by the owner');
+    if (planner === null || planner === undefined || planner.record.stage !== 'returned') throw new Error('planner not returned');
+    assert.equal(planner.record.decision, 'complete');
+    assert.ok(planner.record.publication.revisionId.length > 0, 'the Planner response produced the real publication');
+
     const current = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }).read({ organId, taskId: retainedTaskId });
     assert.equal(current.state, 'known', 'exact current-state readback uses the same Organ Journal owner');
+    if (current.state !== 'known') throw new Error('current state is not known');
+    assert.equal(current.value.task.state, 'succeeded', 'the final Task owner must mark this Task succeeded');
+    assert.ok(current.value.currentPlan, 'the succeeded Task carries the exact published current plan');
+    if (current.value.currentPlan) {
+      assert.equal(current.value.currentPlan.revisionId, planner.record.publication.revisionId,
+        'the current plan must bind the exact Planner publication revision');
+    }
+    assert.equal(current.value.processing.entryPhase === 'awaiting-planner-alignment', false,
+      'the succeeded Task no longer awaits Planner alignment');
     assert.equal(await readFile(join(fixture.workspace, 'native-process-result.txt'), 'utf8'), 'native process physical effect');
 
     // The unchanged cold resume branch keeps its own boundary.
@@ -578,7 +815,7 @@ test('native CLI preparation control input', async () => {
     assert.match(invalidResume.stderr, /auth\.session\.invalid/);
     const validResume = await run([...resumeArgs, '--control-session-file', controlFile]);
     assert.ok(validResume.code !== 0, 'valid resume session must reach the real native unbound error');
-    assert.match(validResume.stderr, /rcc-config-missing/);
+    assert.match(validResume.stderr, /legacy unbound reentry is read-only/);
     const mismatchResume = await run(['resume', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--session', sessionId, '--task', 'native-cli-other-task', '--prompt', 'control resume probe', '--control-session-file', controlFile]);
     assert.ok(mismatchResume.code !== 0, 'mismatched native selector must not rebind the recovered task');
     assert.match(mismatchResume.stderr, /native-control\.task-mismatch/);
