@@ -8,8 +8,8 @@ export * from './task-plan-revision.js';
 export * from './task-identity.js';
 export * from './turn-closure.js';
 export * from './standard-turn-end.js';
-import type { InteractionHelperIdentity } from './interaction-helper.js';
-import { validateInteractionHelperIdentity } from './interaction-helper.js';
+import type { InteractionHelperIdentity, InteractionTurnIdentity } from './interaction-helper.js';
+import { validateInteractionHelperIdentity, validateInteractionTurnIdentity } from './interaction-helper.js';
 import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';
 
 export interface ScopedId<K extends ScopeKind = ScopeKind> {
@@ -146,7 +146,7 @@ export interface AgentDefinition {
 }
 type TaskBoundAgentStartIdentity<
   TIdentity extends AnyProviderExecutionIdentityRef,
-> = TIdentity extends TasklessProviderExecutionIdentityRef
+> = TIdentity extends NonTaskProviderExecutionIdentityRef
   ? TIdentity
   : {
       readonly runtimeId: string;
@@ -160,7 +160,7 @@ type TaskBoundAgentEnvelopeIdentity<
   TIdentity extends AnyProviderExecutionIdentityRef,
 > =
   | TIdentity
-  | (TIdentity extends TasklessProviderExecutionIdentityRef
+  | (TIdentity extends NonTaskProviderExecutionIdentityRef
       ? never
       : {
           readonly taskId: TaskId;
@@ -992,9 +992,30 @@ export interface TasklessProviderExecutionIdentityRef {
   readonly cycleId?: undefined;
 }
 
+/**
+ * Neutral interaction parent execution identity. This is the explicit-brain
+ * parent turn that owns a multi-turn interaction. It is bound to the real
+ * `InteractionTurnIdentity`, and carries no Task, cycle, or helper identity.
+ */
+export interface InteractionParentProviderExecutionIdentityRef {
+  readonly runtimeId: AgentRuntimeId;
+  readonly organId: OrganId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly interactionTurn: InteractionTurnIdentity;
+  readonly taskId?: undefined;
+  readonly cycleId?: undefined;
+  readonly helper?: undefined;
+}
+
+/** Execution identities that never carry a Task or cycle: helper or neutral interaction parent. */
+export type NonTaskProviderExecutionIdentityRef =
+  | TasklessProviderExecutionIdentityRef
+  | InteractionParentProviderExecutionIdentityRef;
+
 export type AnyProviderExecutionIdentityRef =
   | ProviderExecutionIdentityRef
-  | TasklessProviderExecutionIdentityRef;
+  | NonTaskProviderExecutionIdentityRef;
 
 export interface ProviderImageContent {
   readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp';
@@ -1331,6 +1352,16 @@ function isTasklessProviderExecutionIdentity(
 ): input is TasklessProviderExecutionIdentityRef {
   return 'helper' in input && input.helper !== undefined;
 }
+function isInteractionParentProviderExecutionIdentity(
+  input: AnyProviderExecutionIdentityRef,
+): input is InteractionParentProviderExecutionIdentityRef {
+  return 'interactionTurn' in input && input.interactionTurn !== undefined;
+}
+function isNonTaskProviderExecutionIdentity(
+  input: AnyProviderExecutionIdentityRef,
+): input is NonTaskProviderExecutionIdentityRef {
+  return isTasklessProviderExecutionIdentity(input) || isInteractionParentProviderExecutionIdentity(input);
+}
 function sameInteractionHelperExecutionIdentity(
   left: InteractionHelperIdentity,
   right: InteractionHelperIdentity,
@@ -1344,10 +1375,31 @@ function sameInteractionHelperExecutionIdentity(
     && left.helperCallId === right.helperCallId
     && left.attempt === right.attempt;
 }
+function sameInteractionTurnIdentity(
+  left: InteractionTurnIdentity,
+  right: InteractionTurnIdentity,
+): boolean {
+  return sameScopedId(left.organId, right.organId)
+    && left.interactionScopeId === right.interactionScopeId
+    && left.interactionId === right.interactionId
+    && left.inputRevision === right.inputRevision
+    && left.turnId === right.turnId;
+}
 export function assertProviderExecutionIdentity(input: AnyProviderExecutionIdentityRef): void {
   assertAgentRuntimeId(input.runtimeId);
   assertScope(input.operationId, 'operation');
   assertExecutionEpoch(input.executionEpoch);
+  if (isInteractionParentProviderExecutionIdentity(input)) {
+    if (input.taskId !== undefined || input.cycleId !== undefined || input.helper !== undefined) {
+      throw new ContractError('interaction parent provider execution identity cannot carry task, cycle, or helper identity');
+    }
+    assertScope(input.organId, 'organ');
+    validateInteractionTurnIdentity(input.interactionTurn);
+    if (!sameScopedId(input.organId, input.interactionTurn.organId)) {
+      throw new ContractError('interaction parent provider execution identity organ mismatch');
+    }
+    return;
+  }
   if (isTasklessProviderExecutionIdentity(input)) {
     if (input.taskId !== undefined || input.cycleId !== undefined) {
       throw new ContractError('taskless provider execution identity cannot carry task or cycle identity');
@@ -1368,7 +1420,7 @@ function assertProviderEvidenceMatchesExecution(
   execution: AnyProviderExecutionIdentityRef,
   label: string,
 ): void {
-  if (isTasklessProviderExecutionIdentity(execution)) {
+  if (isNonTaskProviderExecutionIdentity(execution)) {
     if (ref.scope.taskId !== undefined) throw new ContractError(`${label} task scope is not allowed for taskless execution`);
     if (ref.scope.cycleId !== undefined) throw new ContractError(`${label} cycle scope is not allowed for taskless execution`);
   } else if (ref.scope.taskId && !sameScopedId(ref.scope.taskId, execution.taskId)) {
@@ -1376,7 +1428,7 @@ function assertProviderEvidenceMatchesExecution(
   }
   if (ref.scope.operationId && !sameScopedId(ref.scope.operationId, execution.operationId)) throw new ContractError(`${label} operation scope mismatch`);
   if (execution.organId && ref.scope.organId && !sameScopedId(ref.scope.organId, execution.organId)) throw new ContractError(`${label} organ scope mismatch`);
-  if (!isTasklessProviderExecutionIdentity(execution)
+  if (!isNonTaskProviderExecutionIdentity(execution)
     && execution.cycleId
     && ref.scope.cycleId
     && !sameScopedId(ref.scope.cycleId, execution.cycleId)) throw new ContractError(`${label} cycle scope mismatch`);
@@ -1814,8 +1866,17 @@ export function assertProviderExecutionIdentityMatch(
     || actual.operationId.scope !== expected.operationId.scope
     || actual.operationId.value !== expected.operationId.value
     || actual.executionEpoch !== expected.executionEpoch
+    || isInteractionParentProviderExecutionIdentity(actual) !== isInteractionParentProviderExecutionIdentity(expected)
     || isTasklessProviderExecutionIdentity(actual) !== isTasklessProviderExecutionIdentity(expected)) {
     throw new ContractError('provider execution identity mismatch');
+  }
+  if (isInteractionParentProviderExecutionIdentity(actual)) {
+    if (!isInteractionParentProviderExecutionIdentity(expected)
+      || !sameScopedId(actual.organId, expected.organId)
+      || !sameInteractionTurnIdentity(actual.interactionTurn, expected.interactionTurn)) {
+      throw new ContractError('provider execution identity mismatch');
+    }
+    return;
   }
   if (isTasklessProviderExecutionIdentity(actual)) {
     if (!isTasklessProviderExecutionIdentity(expected)
@@ -1825,7 +1886,8 @@ export function assertProviderExecutionIdentityMatch(
     }
     return;
   }
-  if (isTasklessProviderExecutionIdentity(expected)
+  if (isInteractionParentProviderExecutionIdentity(expected)
+    || isTasklessProviderExecutionIdentity(expected)
     || actual.taskId.scope !== expected.taskId.scope
     || actual.taskId.value !== expected.taskId.value
     || !sameOptionalScope(actual.organId, expected.organId)

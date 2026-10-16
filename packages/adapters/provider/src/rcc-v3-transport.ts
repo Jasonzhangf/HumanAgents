@@ -3,6 +3,7 @@ import {
   id,
   type AnyProviderExecutionIdentityRef,
   type EvidenceRef,
+  type InteractionParentProviderExecutionIdentityRef,
   type ProviderBinding,
   type ProviderCapabilities,
   type ProviderCloseResult,
@@ -137,8 +138,14 @@ async function* readableStreamToAsyncIterable(stream: ReadableStream<Uint8Array>
   }
 }
 
+function isInteractionParentIdentity(
+  execution: AnyProviderExecutionIdentityRef,
+): execution is InteractionParentProviderExecutionIdentityRef {
+  return 'interactionTurn' in execution && execution.interactionTurn !== undefined;
+}
+
 function executionKey(execution: AnyProviderExecutionIdentityRef): string {
-  if ('helper' in execution) {
+  if ('helper' in execution && execution.helper !== undefined) {
     // Full helper identity, collision-free across independent helper calls.
     return canonicalJsonStringify([
       'taskless-helper',
@@ -156,14 +163,32 @@ function executionKey(execution: AnyProviderExecutionIdentityRef): string {
       execution.helper.attempt,
     ]);
   }
+  if (isInteractionParentIdentity(execution)) {
+    // Neutral interaction parent: keyed by the real interaction turn.
+    return canonicalJsonStringify([
+      'interaction-parent',
+      execution.runtimeId,
+      execution.operationId.value,
+      execution.executionEpoch,
+      execution.organId.scope,
+      execution.organId.value,
+      execution.interactionTurn.interactionScopeId,
+      execution.interactionTurn.interactionId,
+      execution.interactionTurn.inputRevision,
+      execution.interactionTurn.turnId,
+    ]);
+  }
   return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
 }
 
 function scopeFor(execution: AnyProviderExecutionIdentityRef, scope?: ScopeRef): ScopeRef {
+  const nonTask = ('helper' in execution && execution.helper !== undefined)
+    || ('interactionTurn' in execution && execution.interactionTurn !== undefined);
   return {
     ...(scope ?? { organId: id('organ', 'provider-adapter') }),
-    // Taskless helper evidence stays organ+operation; never invent a Task.
-    ...('helper' in execution ? {} : { taskId: execution.taskId }),
+    // Taskless helper and neutral interaction-parent evidence stay organ+operation;
+    // never invent a Task for a non-task execution.
+    ...(nonTask ? {} : { taskId: execution.taskId }),
     operationId: execution.operationId,
   };
 }

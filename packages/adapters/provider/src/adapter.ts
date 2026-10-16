@@ -26,6 +26,7 @@ import {
   type ProviderCloseResult,
   type ProviderEvent,
   type EvidenceRef,
+  type InteractionParentProviderExecutionIdentityRef,
   type ProviderExecutionIdentityRef,
   type ProviderObserveInput,
   type ProviderReadiness,
@@ -42,6 +43,7 @@ import {
   type ProviderErrorPhase,
   type ProviderRawFact,
   type ScopeRef,
+  type TasklessProviderExecutionIdentityRef,
 } from '../../../contracts/src/index.js';
 import { type DecodeContext, type ProviderCodec, type ProviderDecodedEvent } from './codecs.js';
 import type { ProviderEvidenceSink } from './evidence.js';
@@ -118,8 +120,33 @@ function sameExecutionIdentity(a: AnyProviderExecutionIdentityRef, b: AnyProvide
   }
 }
 
+/**
+ * A taskless helper carries a full `helper`; a neutral interaction parent
+ * carries the real `interactionTurn`. The frozen contracts declare the opposite
+ * field as optional-undefined on each shape, so membership alone is not a safe
+ * discriminator: the value must be non-undefined.
+ */
+function isTasklessHelperExecution(
+  execution: AnyProviderExecutionIdentityRef,
+): execution is TasklessProviderExecutionIdentityRef {
+  return 'helper' in execution && execution.helper !== undefined;
+}
+
+function isInteractionParentExecution(
+  execution: AnyProviderExecutionIdentityRef,
+): execution is InteractionParentProviderExecutionIdentityRef {
+  return 'interactionTurn' in execution && execution.interactionTurn !== undefined;
+}
+
+/** True for every execution that never carries a Task or cycle. */
+function isNonTaskExecution(
+  execution: AnyProviderExecutionIdentityRef,
+): execution is TasklessProviderExecutionIdentityRef | InteractionParentProviderExecutionIdentityRef {
+  return isTasklessHelperExecution(execution) || isInteractionParentExecution(execution);
+}
+
 function executionKey(execution: AnyProviderExecutionIdentityRef): string {
-  if ('helper' in execution) {
+  if (isTasklessHelperExecution(execution)) {
     // Full helper identity: collision-free across independent helper calls.
     return canonicalJsonStringify([
       'taskless-helper',
@@ -135,6 +162,22 @@ function executionKey(execution: AnyProviderExecutionIdentityRef): string {
       execution.helper.assignmentId,
       execution.helper.helperCallId,
       execution.helper.attempt,
+    ]);
+  }
+  if (isInteractionParentExecution(execution)) {
+    // Neutral interaction parent: keyed by the real interaction turn, so it can
+    // never collide with a Task session or a helper call.
+    return canonicalJsonStringify([
+      'interaction-parent',
+      execution.runtimeId,
+      execution.operationId.value,
+      execution.executionEpoch,
+      execution.organId.scope,
+      execution.organId.value,
+      execution.interactionTurn.interactionScopeId,
+      execution.interactionTurn.interactionId,
+      execution.interactionTurn.inputRevision,
+      execution.interactionTurn.turnId,
     ]);
   }
   return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
@@ -169,8 +212,11 @@ function scopeFromEvidence(input: ProviderStartInput<AnyProviderExecutionIdentit
       scope: input,
     });
   }
-  // Taskless helper evidence stays organ+operation; never invent a Task.
-  if ('helper' in input) return { organId: ref.scope.organId, operationId: input.operationId };
+  // Taskless helper and neutral interaction-parent evidence stay organ+operation;
+  // never invent a Task for either non-task execution.
+  if ('helper' in input || 'interactionTurn' in input) {
+    return { organId: ref.scope.organId, operationId: input.operationId };
+  }
   return { ...ref.scope, taskId: input.taskId, operationId: input.operationId };
 }
 
@@ -660,14 +706,15 @@ export class ProviderAdapter<
         scope: execution,
       });
     }
-    if ('helper' in execution) {
-      // Taskless helper evidence must not borrow a Task or cycle scope.
+    if (isNonTaskExecution(execution)) {
+      // Taskless helper or neutral interaction-parent evidence must not borrow a
+      // Task or cycle scope.
       if (ref.scope.taskId !== undefined || ref.scope.cycleId !== undefined) {
         throw new ProviderAdapterError({
           code: 'external.binding.scope.mismatch',
           category: 'protocol',
           phase,
-          message: 'provider external execution binding carries Task scope for a taskless helper',
+          message: 'provider external execution binding carries Task scope for a non-task execution',
           scope: execution,
         });
       }
@@ -689,7 +736,7 @@ export class ProviderAdapter<
         scope: execution,
       });
     }
-    if (!('helper' in execution) && ref.scope.cycleId && scope.cycleId && ref.scope.cycleId.value !== scope.cycleId.value) {
+    if (!isNonTaskExecution(execution) && ref.scope.cycleId && scope.cycleId && ref.scope.cycleId.value !== scope.cycleId.value) {
       throw new ProviderAdapterError({
         code: 'external.binding.scope.mismatch',
         category: 'protocol',
@@ -716,14 +763,15 @@ export class ProviderAdapter<
         scope: execution,
       });
     }
-    if ('helper' in execution) {
-      // Taskless helper evidence must not borrow a Task or cycle scope.
+    if (isNonTaskExecution(execution)) {
+      // Taskless helper or neutral interaction-parent evidence must not borrow a
+      // Task or cycle scope.
       if (ref.scope.taskId !== undefined || ref.scope.cycleId !== undefined) {
         throw new ProviderAdapterError({
           code: 'evidence.binding.scope.mismatch',
           category: 'protocol',
           phase,
-          message: `${label} carries Task scope for a taskless helper`,
+          message: `${label} carries Task scope for a non-task execution`,
           scope: execution,
         });
       }

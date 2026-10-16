@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   ContractError, assertAgentRuntimeId, assertBusinessPayload, assertCapabilities, assertCheckpointLink, assertContextBudget, assertExecutionEpoch,
   assertAgentLoopCheckpointLink,
-  assertNotExpired, assertPermissionRevisionMatches, assertProviderBindingMatch, assertProviderEventEpoch, assertProviderExecutionIdentityMatch, assertProviderReadinessBinding,
+  assertNotExpired, assertPermissionRevisionMatches, assertProviderBindingMatch, assertProviderEventEpoch, assertProviderExecutionIdentity, assertProviderExecutionIdentityMatch, assertProviderReadinessBinding,
   assertScopeAcl,
   assertSameScope, assertScope, checkProviderEventEpoch, checkScopeAcl, classifyOperationSubmission, consumerKey, effectiveOperationScope, id,
   occurrenceIdempotencyKey, operationIdempotencyKey, operationSemanticFingerprint, operationSemanticFingerprintKey, runtimeId,
@@ -40,6 +40,7 @@ import {
   type Occurrence, type Reminder, type RuntimeBinding, type SchedulerLease, type ScopeAcl, type Subscription,
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderImageContent, type ProviderReadiness,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
+  type AnyProviderExecutionIdentityRef,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
   type DraftRevision, type EvidenceRef, type ExecutionPolicyDefinition,
   type OperationIdempotencyRecord, type OperationIntent, type RequirementEnvelope, type ScopeRef, type ToolRegistration,
@@ -639,6 +640,112 @@ test('provider execution identity carries and matches HumanAgent organ and cycle
   );
   assert.throws(
     () => assertProviderExecutionIdentityMatch({ ...identity, cycleId: id('cycle', 'other-cycle') }, identity),
+    ContractError,
+  );
+});
+
+test('neutral interaction parent provider execution identity validates and rejects mixed identity', () => {
+  const parentOrgan = id('organ', 'organ-parent');
+  const parentOperation = id('operation', 'operation-parent');
+  const interactionTurn = {
+    organId: parentOrgan,
+    interactionScopeId: 'interaction-scope-parent',
+    interactionId: 'interaction-parent',
+    inputRevision: 1,
+    turnId: 'turn-parent-1',
+  } as const;
+  const parentIdentity = {
+    runtimeId: 'runtime-parent-a',
+    organId: parentOrgan,
+    operationId: parentOperation,
+    executionEpoch: 1,
+    interactionTurn,
+  };
+  const parentEvidence = providerEvidence('parent-evidence');
+  const asIdentity = (value: unknown): AnyProviderExecutionIdentityRef => value as AnyProviderExecutionIdentityRef;
+
+  assert.doesNotThrow(() => assertProviderExecutionIdentity(asIdentity(parentIdentity)));
+  assert.throws(
+    () => assertProviderExecutionIdentity(asIdentity({ ...parentIdentity, organId: id('organ', 'organ-other') })),
+    ContractError,
+  );
+  assert.throws(
+    () => assertProviderExecutionIdentity(asIdentity({ ...parentIdentity, taskId: id('task', 'task-parent-leak') })),
+    ContractError,
+  );
+  assert.throws(
+    () => assertProviderExecutionIdentity(asIdentity({ ...parentIdentity, cycleId: id('cycle', 'cycle-parent-leak') })),
+    ContractError,
+  );
+  assert.throws(
+    () => assertProviderExecutionIdentity(asIdentity({
+      ...parentIdentity,
+      helper: {
+        organId: parentOrgan,
+        interactionScopeId: 'interaction-scope-helper',
+        interactionId: 'interaction-helper',
+        inputRevision: 1,
+        parentTurnId: 'turn-helper',
+        assignmentId: 'assignment-helper',
+        helperCallId: 'call-helper',
+        attempt: 1,
+      },
+    })),
+    ContractError,
+  );
+
+  assert.doesNotThrow(() => assertProviderExecutionIdentityMatch(asIdentity(parentIdentity), asIdentity(parentIdentity)));
+  assert.throws(
+    () => assertProviderExecutionIdentityMatch(
+      asIdentity(parentIdentity),
+      asIdentity({ ...parentIdentity, interactionTurn: { ...interactionTurn, turnId: 'turn-parent-2' } }),
+    ),
+    ContractError,
+  );
+  assert.throws(
+    () => assertProviderExecutionIdentityMatch(
+      asIdentity(parentIdentity),
+      asIdentity({ ...parentIdentity, interactionTurn: { ...interactionTurn, interactionScopeId: 'interaction-scope-other' } }),
+    ),
+    ContractError,
+  );
+  const parentSettlement = (evidence: EvidenceRef): ProviderSettlement => ({
+    ...parentIdentity,
+    state: 'succeeded',
+    evidenceRefs: [evidence],
+    resourceRelease: { state: 'released', evidenceRefs: [evidence] },
+    persistence: { state: 'committed', evidenceRefs: [evidence] },
+  } as unknown as ProviderSettlement);
+  assert.doesNotThrow(() => validateProviderSettlement(parentSettlement({
+    ...parentEvidence,
+    scope: { organId: parentOrgan, operationId: parentOperation },
+  })));
+  assert.throws(
+    () => validateProviderSettlement(parentSettlement({
+      ...parentEvidence,
+      scope: { organId: parentOrgan, operationId: parentOperation, taskId: id('task', 'task-parent-leak') },
+    })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateProviderSettlement(parentSettlement({
+      ...parentEvidence,
+      scope: { organId: parentOrgan, operationId: parentOperation, cycleId: id('cycle', 'cycle-parent-leak') },
+    })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateProviderSettlement(parentSettlement({
+      ...parentEvidence,
+      scope: { organId: id('organ', 'organ-other'), operationId: parentOperation },
+    })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateProviderSettlement(parentSettlement({
+      ...parentEvidence,
+      scope: { organId: parentOrgan, operationId: id('operation', 'operation-other') },
+    })),
     ContractError,
   );
 });
