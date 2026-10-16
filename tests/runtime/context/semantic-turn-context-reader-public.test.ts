@@ -92,6 +92,10 @@ function refsOf(unit: ToolResultUnit): readonly EvidenceRef[] | undefined {
   return (unit as MaybeReaderRefs).evidenceRefs;
 }
 
+function rawOutputRefOf(unit: ToolResultUnit): EvidenceRef {
+  return unit.rawOutputRef;
+}
+
 function toolResultUnit(result: ResolvedSemanticTurnContext, callId: string): ToolResultUnit {
   const units = result.context.activeTurn.flatMap((entry) => (
     entry.kind === 'message' && entry.message.kind === 'tool-result' ? [entry.message] : []
@@ -252,6 +256,14 @@ test('delivery refs: reader keeps accepted tool-result evidence refs and exact r
   const withoutRefs = toolResultUnit(first, 'call-2');
   assert.deepEqual(refsOf(withoutRefs), []);
   assert.equal(decoder.decode(withoutRefs.rawOutput), RAW_OUTPUT_WITHOUT_REFS);
+
+  // The parent-scoped raw-output citation is projected separately and never
+  // replaces the accepted child effect refs or the raw bytes.
+  assert.equal(rawOutputRefOf(withRefs).locator, 'test://refs-output-1');
+  assert.equal(rawOutputRefOf(withRefs).evidenceId.value, 'refs-output-1');
+  assert.equal(rawOutputRefOf(withRefs).scope.operationId?.value, operationId.value);
+  assert.equal(rawOutputRefOf(withoutRefs).evidenceId.value, 'refs-output-2');
+  assert.equal(rawOutputRefOf(withoutRefs).locator, 'test://refs-output-2');
 
   // The reader copies accepted refs: mutating a returned unit cannot change the
   // accepted fact or a later read of the same prefix.

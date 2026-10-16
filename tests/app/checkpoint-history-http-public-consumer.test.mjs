@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -38,6 +38,8 @@ const taskId = id('task', 'c3-http-task');
 const taskScope = { organId, taskId };
 const cycleId = id('cycle', 'c3-http-cycle');
 const scope = { ...taskScope, cycleId };
+const otherTaskId = id('task', 'c3-other-task');
+const otherTaskScope = { organId, taskId: otherTaskId };
 const at = '2026-10-15T02:00:00.000Z';
 const owner = 'c3-http-consumer';
 
@@ -154,6 +156,27 @@ export async function fixture() {
       refinedDelivery, preCallCheckpointRef: nativeA.receipt.journalReceiptRef });
   }
   assert.equal(new Set(adoptedSources.map((child) => child.deliverySeq)).size, 2);
+  // Third adopted delivery: real return, adoption and matching source, but its refined
+  // asset carries another canonical task scope. The parent assignment and result stay
+  // legitimate; only the delivered asset scope crosses to c3-other-task.
+  const crossTaskIndex = childInvocationIds.length;
+  const crossInvocationId = 'c3-child-cross-task';
+  const crossTurnId = `c3-child-turn-${crossTaskIndex}`;
+  const crossText = 'refined cross-task delivery body';
+  const crossReference = await assets.write(`c3-child-${crossTaskIndex}`, new TextEncoder().encode(crossText));
+  const crossRefinedDelivery = { ref: evidenceReference(crossReference, otherTaskScope, 'operation', `c3-child-body-${crossTaskIndex}`), view: { kind: 'utf8-text' } };
+  await active.openChildInvocation({ invocationId: crossInvocationId, childTurnId: crossTurnId, checkpointReceiptRef: nativeA.receipt.journalReceiptRef,
+    binding: { kind: 'execution', assignment } });
+  const crossReturned = await active.recordChildReturn({ kind: 'execution', invocationId: crossInvocationId, refinedDelivery: crossRefinedDelivery, assignment,
+    result: { taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: owner, assignmentId: assignment.assignmentId,
+      attempt: assignment.attempt, executionEpoch: assignment.executionEpoch, inputRevision: assignment.inputRevision,
+      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: `refined child ${crossTaskIndex}`,
+      outputRefs: [], evidenceRefs: [evidence(`child-result-${crossTaskIndex}`)], nextAction: 'continue' } });
+  await active.recordChildAdoption(crossInvocationId, crossReturned);
+  const crossSource = { parentTurn: turnIdentity, invocationId: crossInvocationId, childTurnId: crossTurnId, deliverySeq: crossReturned.seq,
+    adoptionCommitId: adoptedChildAdoptionCommitIdV1(turn.turnId, crossInvocationId),
+    deliveryCommitId: adoptedChildDeliveryCommitIdV1(turn.turnId, crossInvocationId), kind: 'execution',
+    refinedDelivery: crossRefinedDelivery, preCallCheckpointRef: nativeA.receipt.journalReceiptRef };
   const captureBody = await active.prepareCapture({ pauseId: 'c3-boundary', frozenAt: at, initialInput,
     checkpointPath: [], completionRefs: [] });
   const capture = await nativeAssets.commitCapturePhase({ turnId: turn.turnId, boundaryId: captureBody.cut.pauseId,
@@ -172,7 +195,7 @@ export async function fixture() {
   const semantics = { goal: 'read exact history', actions: 'inspect Journal', result: 'A remains current', nextStep: 'inspect A' };
   const view = await commitSemanticContextViewV1({ port: semantic, accepted: { version: 1,
     admittedTurn: turn, checkpoint: nativeA, acceptance: { ownerId: owner, acceptanceRef: 'c3-semantic-accepted',
-      sourceEvidenceRefs: [evidence('semantic-accepted')] }, semantics, adoptedChildren: adoptedSources,
+      sourceEvidenceRefs: [evidence('semantic-accepted')] }, semantics, adoptedChildren: [...adoptedSources, crossSource],
     recovery: { recoveryStateRef: turn.recoveryStateRef, recoveryResponsibilityRef: owner, unresolvedOperationRefs: [], laterErrorRefs: [] } } });
   const publication = await commitSemanticHistoryPublicationV1({ port: semantic, ownerId: owner, turn: turnIdentity,
     checkpoint: nativeA, contextView: { identity: await contextViewIdentityV1({ turn: turnIdentity, checkpoint: a }), receipt: view } });
@@ -197,7 +220,9 @@ export async function fixture() {
   });
   const children = adoptedSources.map((source) => ({ invocationId: source.invocationId, childTurnId: source.childTurnId,
     deliverySeq: source.deliverySeq, refinedDelivery: source.refinedDelivery, text: childTexts[source.invocationId] }));
-  return { root, paths, service, checkpoints, contextCommit, recordA, recordB, semantics, publication, capture, children,
+  const crossChild = { invocationId: crossInvocationId, childTurnId: crossTurnId, deliverySeq: crossReturned.seq,
+    refinedDelivery: crossRefinedDelivery, text: crossText, preCallCheckpointRef: crossSource.preCallCheckpointRef };
+  return { root, paths, service, checkpoints, contextCommit, recordA, recordB, semantics, publication, capture, children, crossChild,
     effects: () => effects };
 }
 
@@ -243,6 +268,90 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const captureBodyResponse = await fetch(captureBodyUrl, { headers: { cookie } });
     const captureBody = await captureBodyResponse.json();
     console.log(JSON.stringify({ url: captureBodyUrl, status: captureBodyResponse.status, body: captureBody }));
+    const materializedChildren = viewed.body.viewed.semantic.adoptedChildren;
+    assert.equal(materializedChildren.length, 3, 'history GET must materialize all adopted sources');
+    assert.deepEqual(materializedChildren.find((child) => child.invocationId === f.crossChild.invocationId), {
+      invocationId: f.crossChild.invocationId, childTurnId: f.crossChild.childTurnId, deliverySeq: f.crossChild.deliverySeq,
+      kind: 'execution', refinedDelivery: f.crossChild.refinedDelivery, preCallCheckpointRef: f.crossChild.preCallCheckpointRef,
+    });
+    // Exact checkpoint A carries the capture; exact checkpoint B has none. B must fail
+    // explicitly, so no capture from A can fill it in.
+    const captureBodyUrlB = `${url}/api/tasks/${taskId.value}/checkpoints/assets/capture?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordB) });
+    const captureBodyResponseB = await fetch(captureBodyUrlB, { headers: { cookie } });
+    const captureBodyB = await captureBodyResponseB.json();
+    console.log(JSON.stringify({ url: captureBodyUrlB, status: captureBodyResponseB.status, body: captureBodyB }));
+    assert.notEqual(captureBodyResponseB.status, 200);
+    assert.ok(!('text' in captureBodyB), 'capture body read for B must not serve a text body');
+    const captureBodyWrongTaskUrl = `${url}/api/tasks/${otherTaskId.value}/checkpoints/assets/capture?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA) });
+    const captureBodyWrongTaskResponse = await fetch(captureBodyWrongTaskUrl, { headers: { cookie } });
+    const captureBodyWrongTask = await captureBodyWrongTaskResponse.json();
+    console.log(JSON.stringify({ url: captureBodyWrongTaskUrl, status: captureBodyWrongTaskResponse.status, body: captureBodyWrongTask }));
+    assert.notEqual(captureBodyWrongTaskResponse.status, 200);
+    assert.ok(!('text' in captureBodyWrongTask), 'capture body read for a wrong task must not serve a text body');
+    // New capture route input boundary. One representative each: a missing
+    // physical receipt, a repeated scope key, and an extra locator query. Each
+    // must be rejected before any asset read, carrying no body text.
+    const missingReceiptUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/capture?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', checkpointId: f.recordA.checkpoint.id.value });
+    const missingReceiptResponse = await fetch(missingReceiptUrl, { headers: { cookie } });
+    const missingReceipt = await missingReceiptResponse.json();
+    console.log(JSON.stringify({ url: missingReceiptUrl, status: missingReceiptResponse.status, body: missingReceipt }));
+    assert.equal(missingReceiptResponse.status, 400);
+    assert.equal(missingReceipt.error.code, 'checkpoint-history.viewed-partial');
+    assert.ok(!('text' in missingReceipt), 'missing receipt must not return a body text');
+    const duplicateModeQuery = new URLSearchParams({ projectKey: f.paths.projectKey, ...identity(f.recordA) });
+    duplicateModeQuery.append('mode', 'fake');
+    duplicateModeQuery.append('mode', 'fake');
+    const duplicateModeUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/capture?${duplicateModeQuery}`;
+    const duplicateModeResponse = await fetch(duplicateModeUrl, { headers: { cookie } });
+    const duplicateMode = await duplicateModeResponse.json();
+    console.log(JSON.stringify({ url: duplicateModeUrl, status: duplicateModeResponse.status, body: duplicateMode }));
+    assert.equal(duplicateModeResponse.status, 400);
+    assert.equal(duplicateMode.error.code, 'checkpoint-asset.query-invalid');
+    assert.ok(!('text' in duplicateMode), 'a repeated mode key must not return a body text');
+    const extraLocatorUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/capture?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA),
+        locator: f.capture.capture.ref.locator });
+    const extraLocatorResponse = await fetch(extraLocatorUrl, { headers: { cookie } });
+    const extraLocator = await extraLocatorResponse.json();
+    console.log(JSON.stringify({ url: extraLocatorUrl, status: extraLocatorResponse.status, body: extraLocator }));
+    assert.equal(extraLocatorResponse.status, 400);
+    assert.equal(extraLocator.error.code, 'checkpoint-asset.query-invalid');
+    assert.ok(!('text' in extraLocator), 'an extra locator query key must not return a body text');
+    // Integrity sensitivity: corrupt the real capture backing bytes in this own
+    // fixture once. The same exact body GET must fail explicitly with no text,
+    // and restoring the original bytes must make the identical GET succeed.
+    const captureFilePath = join(f.paths.artifactsRoot, 'ui-provider-evidence', f.capture.capture.ref.evidenceId.value);
+    const originalCaptureBytes = await readFile(captureFilePath);
+    assert.deepEqual(new Uint8Array(originalCaptureBytes), captureBytes, 'fixture capture file must back the served bytes');
+    let corruptedFailure;
+    try {
+      const corrupted = Buffer.from(originalCaptureBytes);
+      corrupted[0] ^= 0xff;
+      await writeFile(captureFilePath, corrupted);
+      const corruptedResponse = await fetch(captureBodyUrl, { headers: { cookie } });
+      corruptedFailure = await corruptedResponse.json();
+      console.log(JSON.stringify({ url: captureBodyUrl, corrupted: true, status: corruptedResponse.status, body: corruptedFailure }));
+      assert.notEqual(corruptedResponse.status, 200);
+      // The canonical capture cold read detects the digest break before the body
+      // read starts, so the failure travels as an unavailable capture, not as a
+      // successful read. Either way the request must fail and carry no body.
+      assert.equal(corruptedFailure.error.code, 'checkpoint-asset.unavailable');
+      assert.ok(corruptedFailure.error.message.includes('digest mismatch'),
+        'the corrupted capture must fail with its actual digest failure reason');
+      assert.ok(!('text' in corruptedFailure), 'a corrupted capture backing file must not return a body text');
+    } finally {
+      await writeFile(captureFilePath, originalCaptureBytes);
+    }
+    assert.deepEqual(new Uint8Array(await readFile(captureFilePath)), new Uint8Array(originalCaptureBytes),
+      'capture backing bytes must be restored');
+    const restoredResponse = await fetch(captureBodyUrl, { headers: { cookie } });
+    const restoredBody = await restoredResponse.json();
+    console.log(JSON.stringify({ url: captureBodyUrl, restored: true, status: restoredResponse.status, body: restoredBody }));
+    assert.equal(restoredResponse.status, 200);
+    assert.equal(restoredBody.text, captureText);
     // Two legal adopted-child bodies from the same committed A, then one unknown triple.
     // The unknown triple must fail explicitly and carry no body text.
     const childBodies = [];
@@ -264,6 +373,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       childBodies.push(childBody);
     }
     assert.equal(new Set(childBodies.map((body) => body.text)).size, 2, 'adopted child bodies must differ');
+    const crossChildUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/adopted-child/`
+      + `${f.crossChild.invocationId}/${f.crossChild.childTurnId}/${f.crossChild.deliverySeq}?`
+      + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA) });
+    const crossChildResponse = await fetch(crossChildUrl, { headers: { cookie } });
+    const crossChildBody = await crossChildResponse.json();
+    console.log(JSON.stringify({ url: crossChildUrl, status: crossChildResponse.status, body: crossChildBody }));
+    assert.equal(crossChildResponse.status, 409);
+    assert.equal(crossChildBody.error.code, 'checkpoint-asset.scope-mismatch');
+    assert.ok(!('text' in crossChildBody), 'cross-task adopted source must not return body text');
     const unknownChildUrl = `${url}/api/tasks/${taskId.value}/checkpoints/assets/adopted-child/`
       + `c3-child-unknown/c3-child-turn-unknown/999?`
       + new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake', ...identity(f.recordA) });

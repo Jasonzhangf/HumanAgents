@@ -24,7 +24,7 @@ import { createJsonlCheckpointJournal, createJsonlCheckpointClosurePort, createJ
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
 import { createNativeRecoveryAssets } from '../../packages/app/src/native-recovery-assets.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
-import { readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
+import { readColdCurrentFromJournal, readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
 import { createCheckpointHistoryReader } from '../../packages/app/src/ui-runtime/checkpoint-history.js';
 
 // Failure modes/cost are recorded in the accepted plan §6 and r4 note before this test.
@@ -261,6 +261,20 @@ test('public owners supply semantic/capture references and a distinct effective 
       retainedDuties: [], sourceCommitRefs: [] } });
   const current = readCurrentFromRecords(await f.journal.replay(), taskScope);
   if (current.state !== 'known') throw new Error(current.reason);
+  // The same committed checkpoint fixture, read through the cold-current entry,
+  // must delegate to the unchanged reader and wrap it as the checkpoint-bound
+  // branch. It must never fall through to an initial open turn.
+  const cold = await readColdCurrentFromJournal(f.journal, {
+    allocation: { runtimeId: f.turn.runtimeBindingRef, taskId, operationId: id('operation', 'checkpoint-history-operation'),
+      executionEpoch: epoch, assignmentId: f.turn.workAssignmentRef, scope, inputRefs: [], ownerId: owner,
+      directiveRevision: 1, inputRevision: 1, orchestrated: false },
+    businessTurnId: f.turn.turnId,
+  }, owner);
+  assert.equal(cold.state, 'known');
+  if (cold.state !== 'known') throw new Error(`cold current unknown: ${cold.reason}`);
+  assert.equal(cold.kind, 'checkpoint-bound');
+  if (cold.kind !== 'checkpoint-bound') throw new Error(`cold current selected ${cold.kind}`);
+  assert.deepEqual(cold.current, current);
   const control = await f.control.readControl({ scope: taskScope });
   if (control.state !== 'complete') throw new Error(control.reason);
   const relation = buildConditionalReentry({ command: { commandId: 'history-reentry', taskScope,

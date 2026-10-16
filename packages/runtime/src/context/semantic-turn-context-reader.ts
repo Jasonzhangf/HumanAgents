@@ -111,6 +111,8 @@ export type SemanticCurrentTurnUnit =
       readonly rawOutput: Uint8Array;
       /** The accepted result refs, cloned from the fact so the reader shares no mutable reference. */
       readonly evidenceRefs: readonly EvidenceRef[];
+      /** The parent-scoped accepted raw-output citation. Its scope is the accepted envelope's own scope, so it is the citation the model may legally use in a parent-scoped summary. */
+      readonly rawOutputRef: EvidenceRef;
     };
 
 export interface SemanticTurnContextReaderInput {
@@ -348,8 +350,9 @@ function mapActiveTurnCore(
             toolId: fact.result.toolId,
             continuationRef: fact.continuationRef,
             status: fact.result.status,
-          evidenceRefs: fact.result.evidenceRefs.map(cloneEvidenceRef),
+            evidenceRefs: fact.result.evidenceRefs.map(cloneEvidenceRef),
             rawOutput: new Uint8Array(entry.rawOutput),
+            rawOutputRef: cloneEvidenceRef(fact.rawOutput.ref),
           },
         },
       });
