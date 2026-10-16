@@ -20,6 +20,7 @@ import {
 import type {
   InteractionParentCommittedFact,
   InteractionParentOpenedTurnScopeReadPort,
+  InteractionParentOwnerReconciliationFact,
   InteractionParentResourceCloseFact,
   InteractionParentTurnAppend,
   InteractionParentTurnInputFact,
@@ -81,6 +82,13 @@ type ParentRawPayload =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentResourceCloseFact;
+    }
+  | {
+      readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
+      readonly discriminant: 'owner-reconciliation';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentOwnerReconciliationFact;
     };
 
 function sameScopedId(
@@ -96,6 +104,16 @@ function sameTurnIdentity(left: InteractionTurnIdentity, right: InteractionTurnI
     && left.interactionId === right.interactionId
     && left.inputRevision === right.inputRevision
     && left.turnId === right.turnId;
+}
+
+function sameParentExecutionBusinessIdentity(
+  left: InteractionParentProviderExecutionIdentityRef,
+  right: InteractionParentProviderExecutionIdentityRef,
+): boolean {
+  return left.runtimeId === right.runtimeId
+    && sameScopedId(left.organId, right.organId)
+    && sameScopedId(left.operationId, right.operationId)
+    && sameTurnIdentity(left.interactionTurn, right.interactionTurn);
 }
 
 function parentScope(
@@ -222,6 +240,47 @@ function assertResourceCloseFact(
   }
 }
 
+/**
+ * Validate one durable owner-reconciliation fact. It is a local owner
+ * transition only: the remote provider state must stay `unknown`, and no
+ * resource-close claim may be smuggled through it.
+ */
+function assertOwnerReconciliationFact(
+  fact: InteractionParentOwnerReconciliationFact,
+  turn: InteractionTurnIdentity,
+): void {
+  if (fact === null || typeof fact !== 'object') {
+    throw new JournalIntegrityError('interaction parent owner reconciliation fact is invalid');
+  }
+  assertTurn(fact.turn);
+  if (!sameTurnIdentity(fact.turn, turn)) {
+    throw new JournalIntegrityError('interaction parent owner reconciliation turn does not match its record turn');
+  }
+  assertInteractionParentExecution(fact.execution, fact.turn);
+  validateProviderBinding(fact.providerBinding);
+  validateOccurrenceExecutionOwner(fact.previousOwner);
+  validateOccurrenceExecutionOwner(fact.replacementOwner);
+  if (fact.mode !== 'terminal-output' && fact.mode !== 'continue') {
+    throw new JournalIntegrityError('interaction parent owner reconciliation mode is invalid');
+  }
+  if (!Number.isSafeInteger(fact.effectiveExecutionEpoch) || fact.effectiveExecutionEpoch < 1) {
+    throw new JournalIntegrityError('interaction parent owner reconciliation effective epoch is invalid');
+  }
+  if (!Array.isArray(fact.unsettledRequestIds)
+    || fact.unsettledRequestIds.some((requestId) => typeof requestId !== 'string' || requestId.trim() === '')) {
+    throw new JournalIntegrityError('interaction parent owner reconciliation unsettled request ids are invalid');
+  }
+  if (new Set(fact.unsettledRequestIds).size !== fact.unsettledRequestIds.length) {
+    throw new JournalIntegrityError('interaction parent owner reconciliation unsettled request ids repeat');
+  }
+  if (fact.remoteProviderState !== 'unknown') {
+    throw new JournalIntegrityError('interaction parent owner reconciliation cannot claim the remote provider state');
+  }
+  if (typeof fact.reconciledAt !== 'string' || fact.reconciledAt.trim() === '') {
+    throw new JournalIntegrityError('interaction parent owner reconciliation requires a reconciledAt timestamp');
+  }
+}
+
 function assertRequestRecord(
   record: RuntimeRequestRecord,
   turn: InteractionTurnIdentity,
@@ -291,6 +350,20 @@ function readParentRawPayload(record: JournalRecord): ParentRawPayload | null {
     }
     return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
   }
+  if (discriminant === 'owner-reconciliation') {
+    const turn = payload.turn as InteractionTurnIdentity;
+    const execution = payload.execution as InteractionParentProviderExecutionIdentityRef;
+    const fact = payload.fact as InteractionParentOwnerReconciliationFact;
+    assertTurn(turn);
+    assertInteractionParentExecution(execution, turn);
+    assertOwnerReconciliationFact(fact, turn);
+    if (canonicalJsonStringify(fact.execution) !== canonicalJsonStringify(execution)) {
+      throw new JournalIntegrityError(
+        'interaction parent owner reconciliation execution does not match its record execution',
+      );
+    }
+    return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
+  }
   throw new JournalIntegrityError('interaction parent raw record discriminant is invalid');
 }
 
@@ -315,6 +388,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>
   >[] = [];
   const seenRequestPhases = new Set<string>();
+  const ownerReconciliations: InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>[] = [];
   let resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null = null;
 
   for (const record of records) {
@@ -351,7 +425,10 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
           'interaction parent resource close binding does not match the committed turn input binding',
         );
       }
-      if (canonicalJsonStringify(turnInput.fact.execution) !== canonicalJsonStringify(payload.fact.execution)) {
+      const activeEpoch = ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch
+        ?? turnInput.fact.execution.executionEpoch;
+      if (!sameParentExecutionBusinessIdentity(turnInput.fact.execution, payload.fact.execution)
+        || payload.fact.execution.executionEpoch !== activeEpoch) {
         throw new JournalIntegrityError(
           'interaction parent resource close execution does not match the committed turn input execution',
         );
@@ -363,6 +440,25 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     // physically follow a committed resource close.
     if (resourceClose !== null) {
       throw new JournalIntegrityError('interaction parent raw append follows the committed resource close');
+    }
+    if (payload.discriminant === 'owner-reconciliation') {
+      if (turnInput === null || turnInput.fact.executionOwner === undefined
+        || turnInput.fact.providerBinding === undefined) {
+        throw new JournalIntegrityError('interaction parent reconciliation requires the attested turn input');
+      }
+      const latest = ownerReconciliations.at(-1)?.fact;
+      const previousOwner = latest?.replacementOwner ?? turnInput.fact.executionOwner;
+      const activeEpoch = latest?.effectiveExecutionEpoch ?? turnInput.fact.execution.executionEpoch;
+      if (canonicalJsonStringify(previousOwner) !== canonicalJsonStringify(payload.fact.previousOwner)
+        || canonicalJsonStringify(previousOwner) === canonicalJsonStringify(payload.fact.replacementOwner)
+        || canonicalJsonStringify(turnInput.fact.providerBinding) !== canonicalJsonStringify(payload.fact.providerBinding)
+        || !sameParentExecutionBusinessIdentity(turnInput.fact.execution, payload.execution)
+        || payload.execution.executionEpoch !== payload.fact.effectiveExecutionEpoch
+        || payload.fact.effectiveExecutionEpoch !== activeEpoch + (payload.fact.mode === 'continue' ? 1 : 0)) {
+        throw new JournalIntegrityError('interaction parent reconciliation does not match the active owner and epoch');
+      }
+      ownerReconciliations.push({ fact: payload.fact, commit });
+      continue;
     }
     if (payload.discriminant === 'request') {
       const phaseKey = `${payload.record.request.requestId}\u0000${payload.record.phase}`;
@@ -376,7 +472,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     acceptedFacts.push({ fact: payload.entry, commit });
   }
 
-  return { turnInput, requests, acceptedFacts, resourceClose };
+  return { turnInput, requests, acceptedFacts, ownerReconciliations, resourceClose };
 }
 
 function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput {
@@ -414,6 +510,21 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
       payload: {
         kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
         discriminant: 'resource-close',
+        turn: append.turn,
+        execution: append.execution,
+        fact: append.fact,
+      },
+    };
+  }
+  if (append.kind === 'owner-reconciliation') {
+    return {
+      commitId: parentRawCommitId(append.turn,
+        `owner-reconciliation:${append.fact.previousOwner.daemonGeneration}->${append.fact.replacementOwner.daemonGeneration}`),
+      kind: 'event',
+      scope: parentScope(append.turn, append.execution),
+      payload: {
+        kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
+        discriminant: 'owner-reconciliation',
         turn: append.turn,
         execution: append.execution,
         fact: append.fact,
