@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- G-A publicproof source846428d已作者freeze：只new-task-identity原consumer，正常compile0/新1/1+整文件5/5，sourcehttp→rcc可编译反例在实际Taskidentity断言0≠1失败，恢复GREEN。Root核test仍用旧prepareAgentProvider；即将接受的defaultstopbinder改为Taskscopedpreparer后需在同G树标准Git组合并迁移该caller/复验，故暂不接受为最终组合证据、不关闭来源树。fixturefetch只截获配置上游，公开UI/FIFO/Journal真实；不证明非RCCvendor。作者回执分支名写错，实际来源branch为codex/provider-http-admission-proof-20261016，以GitSHA为准。
+- receipt后继planr2已冻结AgentRuntime pendingtype/runtime-stop四处持有点/coordinator转发；GCM `provider-pending-stop-receipt-gcm-r2-20261016`复用receipt树先只做nodes+runtime-stop+原Runtimecontrolconsumer，避开defaultstop App测试独占窗口，coordinator另批。defaultstop实际正常入口已跑，首oldsource回退只编译RED不接受；作者已恢复并取得可编译behaviorRED，最终组合仍待freeze。UX已并行GCM Runtime readonlydelivery与Appproducer观察，原I1gen7/partialsave仍不重发。
+
 - receiptport source d2e7f69已标准合候选，Rootcontroltsc0/原normal+postcommitrecovery2/2PASS；可编译omission使两个committedAt断言undefined的作者RED/恢复hash有效。只证明steering透传；runtime-stop pendingrebuild/catch存储、AgentRuntime pendingtype及coordinator仍丢receipt，独立原Planner续r2冻结该后继，不把2/2外推全stop/time。parentpreclose r3已纠正原epoch保真、leaf无toolfinaloutput与repeatcrash规则，GCM `provider-parent-reconciliation-gcm-r1-20261016`复用原树，仅raw/JSONL/原consumer三文件；App/freshOS后继仍未验。当前4路GCM（defaultstop/receiptport已终态待后继/httpadmission/parentreconciliation）按实际进程区分，不冒称4路均运行。
 
 - precloseABI r2未准入源码：Planner给出不存在的测试路径，并建议瞬时将旧accepted raw envelope epoch改成新epoch以满足fold，这会混淆原身份；“任意completed请求即terminal”也未区分工具续接。Root已退回同独立Gemini4 plan r3，只纠正精确historicalconfirmedfact装配、final-output资格、重复crash epoch及F1 returned-unaccepted语义；不让实现者猜合同。defaultstop两caller已作者GREEN，实际defaultentry consumer仍进行中；receiptport代码/定向验证进行中；G-A proof consumer仍执行中，均未计验收。
