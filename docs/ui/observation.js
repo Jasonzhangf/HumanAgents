@@ -587,7 +587,7 @@ function renderNodeDrawer(node, handoffs, detail) {
   const sheets = element('div', undefined, 'drawer-sheets')
   const definitions = [
     { sheetId: 'handoff', label: '跨 agent 交接', render: renderHandoffPane },
-    { sheetId: 'refs', label: '输入 / 输出 / evidence', render: renderReferences },
+    { sheetId: 'refs', label: '输入 / 输出 / evidence', render: (_node, _handoffs, detail) => renderReferences(detail) },
   ]
   const tabButtons = []
   const tabSheets = []
