@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -1084,14 +1084,21 @@ async function runtimePreparedStopConsumer(loseAppendAcknowledgement: boolean): 
     const journal = new JsonlOrganJournal(checkpointPath);
     const taskJournal = new UiRuntimeJournal(join(root, 'tasks.jsonl'));
     const store = new ServiceExecutionCheckpointStore(checkpointPath, journal, () => new Date());
-    const originalAppend = store.append.bind(store);
+    const originalCommitNative = store.commitNativeCheckpoint.bind(store);
     const acknowledgementError = new Error('checkpoint committed but append acknowledgement lost');
-    let appends = 0;
-    store.append = async (input) => {
-      const receipt = await originalAppend(input);
-      appends += 1;
-      if (loseAppendAcknowledgement && appends === 1) throw acknowledgementError;
-      return receipt;
+    let nativeCommits = 0;
+    let firstCommittedAt: string | undefined;
+    store.commitNativeCheckpoint = async (input) => {
+      const relationship = await originalCommitNative(input);
+      nativeCommits += 1;
+      if (loseAppendAcknowledgement && nativeCommits === 1) {
+        firstCommittedAt = relationship.receipt.committedAt;
+        throw acknowledgementError;
+      }
+      if (loseAppendAcknowledgement && nativeCommits > 1) {
+        assert.equal(relationship.receipt.committedAt, firstCommittedAt, 'retry reuses the first durable receipt time');
+      }
+      return relationship;
     };
     let producer!: PreparedExecutionStop;
     let cancellations = 0;
@@ -1197,7 +1204,12 @@ async function runtimePreparedStopConsumer(loseAppendAcknowledgement: boolean): 
     assert.deepEqual(checkpoint.scope, allocation.scope);
     assert.equal(checkpoint.executionEpoch, allocation.executionEpoch);
     assert.equal(checkpoint.id.value, snapshot.checkpoint!.checkpointId);
-    assert.equal(exact?.commitRef.commitId, checkpointCommitId(checkpoint));
+    const relationship = await store.readNativeCheckpoint({ checkpoint });
+    assert.ok(relationship, 'stopped implies a durable native relationship');
+    assert.equal(exact?.commitRef.commitId, relationship!.receipt.commitIdentity);
+    assert.ok(relationship!.receipt.commitIdentity !== checkpointCommitId(checkpoint), 'native v2 identity is not the legacy v1 identity');
+    assert.equal(snapshot.checkpoint!.committedAt, relationship!.receipt.committedAt);
+    assert.equal(snapshot.checkpoint!.committedAtUnavailableReason, undefined);
     assert.equal(exact?.previous, null);
     assert.deepEqual((await store.listCommitted({ scope: allocation.scope, limit: 10 })).checkpoints, [exact]);
     const bytes = await readFile(checkpointPath, 'utf8');
@@ -1219,13 +1231,14 @@ async function runtimePreparedStopConsumer(loseAppendAcknowledgement: boolean): 
     assert.deepEqual(settled.fact.owners.parent, control.operationCommits[0]);
     assert.equal(settled.fact.preparations.length, 1);
     assert.equal(settled.fact.resourceClosures.length, 1);
-    assert.equal(appends, 1, 'retry must not append another checkpoint');
+    assert.equal(nativeCommits, loseAppendAcknowledgement ? 2 : 1, 'retry re-commits through the idempotent native identity');
+    assert.equal((await journal.replay()).filter((record) => record.kind === 'checkpoint').length, 1, 'retry must not append another checkpoint');
     assert.equal(cancellations, 1);
     assert.equal(closes, 1);
     assert.equal(admissions, 1);
     assert.equal(factories, 1, 'no repeated parent, preparation, or dispatch');
     assert.equal(publications, 1);
-    const rebuilt = new RuntimeTaskCoordinator({ ...options, checkpointStoreFor: () => new FileCheckpointStore(checkpointPath) });
+    const rebuilt = new RuntimeTaskCoordinator({ ...options, checkpointStoreFor: () => new ServiceExecutionCheckpointStore(checkpointPath, journal, () => new Date()) });
     await rebuilt.hydrate();
     assert.deepEqual(rebuilt.taskSnapshot(task.taskId).checkpoint, snapshot.checkpoint);
     assert.deepEqual(await new FileCheckpointStore(checkpointPath).readCommitted(allocation.scope, checkpoint.id), exact);
@@ -7491,6 +7504,8 @@ test('hydration restores a business predecessor for an operation-scoped stopped 
   assert.equal(dashboard.state, 'stopped');
   assert.equal(dashboard.checkpoint?.outcome, 'stopped');
   assert.equal(dashboard.checkpoint?.checkpointId, stoppedCheckpoint.id.value);
+  assert.equal(dashboard.checkpoint?.committedAt, undefined, 'legacy checkpoint has no durable commit time');
+  assert.equal(dashboard.checkpoint?.committedAtUnavailableReason, 'no durable native checkpoint receipt for this checkpoint identity');
 });
 
 test('stop during provider observation keeps the stopped projection free of late errors', async () => {
@@ -8024,7 +8039,7 @@ test('HTTP SSE keeps the first connection open through settling, checkpoint, and
   }
 });
 
-test('checkpoint committedAt binds to the checkpoint event instead of later terminal updates', async () => {
+test('checkpoint committedAt binds to the first durable receipt instead of later terminal updates', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-time-'));
   let tick = 0;
   const service = serviceFor(
@@ -8035,18 +8050,37 @@ test('checkpoint committedAt binds to the checkpoint event instead of later term
     undefined,
     () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)),
   );
-  const task = service.createTask({ title: 'checkpoint timestamp' });
-  const started = await service.startExecution(task.taskId, { prompt: 'timestamp' });
-  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  try {
+    const task = service.createTask({ title: 'checkpoint timestamp' });
+    const started = await service.startExecution(task.taskId, { prompt: 'timestamp' });
+    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
-  const events = service.eventsSince(started.operationId);
-  const checkpointEvent = events.find((event) => event.kind === 'checkpoint.committed');
-  const terminalEvent = events.at(-1);
-  if (!checkpointEvent || !terminalEvent) throw new Error('expected checkpoint and terminal events');
-  assert.equal(checkpointEvent.kind, 'checkpoint.committed');
-  assert.equal(terminalEvent.kind, 'execution.terminal');
-  assert.equal(checkpointEvent.occurredAt === terminalEvent.occurredAt, false);
-  assert.equal(service.taskDashboard(task.taskId).checkpoint?.committedAt, checkpointEvent.occurredAt);
+    const events = service.eventsSince(started.operationId);
+    const checkpointEvent = events.find((event) => event.kind === 'checkpoint.committed');
+    const terminalEvent = events.at(-1);
+    if (!checkpointEvent || !terminalEvent) throw new Error('expected checkpoint and terminal events');
+    assert.equal(checkpointEvent.kind, 'checkpoint.committed');
+    assert.equal(terminalEvent.kind, 'execution.terminal');
+    assert.equal(checkpointEvent.occurredAt === terminalEvent.occurredAt, false);
+
+    const checkpoint = service.taskDashboard(task.taskId).checkpoint;
+    if (!checkpoint) throw new Error('succeeded implies a checkpoint');
+    const prefix = `task-${task.taskId.value}-cycle-`;
+    const file = (await readdir(root)).find((name) => name.startsWith(prefix) && name.endsWith('.jsonl'));
+    if (!file) throw new Error('expected the physical checkpoint file');
+    const store = new FileCheckpointStore(join(root, file));
+    const relationship = await store.readNativeCheckpoint({ checkpoint: {
+      id: id('checkpoint', checkpoint.checkpointId),
+      scope: { organId, taskId: task.taskId, cycleId: id('cycle', file.slice(prefix.length, -'.jsonl'.length)) },
+    } });
+    assert.ok(relationship, 'the success checkpoint has a durable native receipt');
+    assert.equal(checkpoint.committedAt, relationship!.receipt.committedAt);
+    assert.equal(checkpoint.committedAtUnavailableReason, undefined);
+    assert.equal(checkpoint.committedAt === checkpointEvent.occurredAt, false, 'the commit time is not the checkpoint event time');
+    assert.equal(checkpoint.committedAt === terminalEvent.occurredAt, false, 'the commit time is not the terminal event time');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('fake and rcc modes do not hydrate each other through a shared checkpoint root', async () => {

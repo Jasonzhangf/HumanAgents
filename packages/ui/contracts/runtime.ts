@@ -202,7 +202,13 @@ export interface RuntimeTaskCheckpointProjection {
   readonly seq: number;
   readonly outcome: string;
   readonly summary: string;
-  readonly committedAt: string;
+  /**
+   * First durable commit time. Present only when the committed checkpoint has
+   * a native receipt; a legacy v1 record never invents one.
+   */
+  readonly committedAt?: string;
+  /** Why no durable commit time exists. Present only when `committedAt` is absent. */
+  readonly committedAtUnavailableReason?: string;
 }
 
 export interface RuntimeReadFailure {

@@ -11,6 +11,7 @@ import {
   type Checkpoint,
   type CycleId,
   type DecisionTraceRecord,
+  type DurableCheckpointReceipt,
   type EvidenceRef,
   type JournalCommitRef,
   type LifecycleState,
@@ -44,8 +45,8 @@ import {
   type StandardTurnDeliveryBinding,
   type StandardTurnDeliveryReadback,
 } from './standard-turn-delivery.js';
-import { checkpointCommitId, completeCheckpoint, recallCheckpoint, sameJournalCommitRef } from '../checkpoints/coordinator.js';
-import type { CommittedCheckpointRecord, LatestCheckpointRecord } from '../checkpoints/ports.js';
+import { checkpointCommitId, completeCheckpoint, completeNativeCheckpoint, recallCheckpoint, sameJournalCommitRef } from '../checkpoints/coordinator.js';
+import type { CommittedCheckpointRecord, LatestCheckpointRecord, NativeCheckpointJournalPort } from '../checkpoints/ports.js';
 import type { AdvanceTurnResult } from '../agent-loop/runtime.js';
 import { selectRuntimeTaskCurrentState } from './current-state.js';
 import type { RuntimeTaskCurrentState, RuntimeTaskCurrentStateFacts, RuntimeTaskCurrentStateFactsPort,
@@ -217,7 +218,8 @@ export interface RuntimeTaskSnapshot {
     readonly seq: number;
     readonly outcome: string;
     readonly summary: string;
-    readonly committedAt: string;
+    readonly committedAt?: string;
+    readonly committedAtUnavailableReason?: string;
     readonly evidenceRefs: readonly EvidenceRef[];
   };
   /**
@@ -381,6 +383,8 @@ export interface RuntimeContextCommitResult {
   readonly context: PublishedContext<Checkpoint>;
   readonly reentry: CheckpointReentryDecision;
   readonly recordDigest?: string;
+  /** First durable native commit receipt, when the store owns the native protocol. */
+  readonly receipt?: DurableCheckpointReceipt;
 }
 
 export interface RuntimeExecutionComposition {
@@ -731,6 +735,11 @@ export interface TaskRecord {
   publicOutput?: PublicOutputPublication;
   checkpoint?: Checkpoint;
   checkpointSeq: number;
+  /**
+   * First durable native receipt projected with `checkpoint`. Absent for a
+   * legacy v1 checkpoint or before cold hydrate reads the native relationship.
+   */
+  checkpointReceipt?: DurableCheckpointReceipt;
   currentStateCommitRef?: JournalCommitRef;
   currentPlan?: RuntimeTaskCurrentPlan;
   error?: RuntimeTaskError;
@@ -1053,7 +1062,6 @@ export function replayTaskJournalRecords(
 
 /** Durable task projection built only from persisted task Journal records. */
 function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, ScopeRef>): RuntimeTaskSnapshot {
-  const checkpointEvent = record.events.slice().reverse().find((event) => event.kind === 'checkpoint.committed');
   return {
     taskId: record.taskId,
     title: record.title,
@@ -1082,7 +1090,9 @@ function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, 
           seq: record.checkpoint.seq,
           outcome: record.checkpoint.outcome,
           summary: record.checkpoint.summary,
-          committedAt: checkpointEvent?.occurredAt ?? record.updatedAt,
+          ...(record.checkpointReceipt === undefined
+            ? { committedAtUnavailableReason: 'no durable native checkpoint receipt for this checkpoint identity' }
+            : { committedAt: record.checkpointReceipt.committedAt }),
           evidenceRefs: record.checkpoint.evidenceRefs,
         }
       : undefined,
@@ -1107,6 +1117,7 @@ function applyZeroEffectAdmissionDenial(record: TaskRecord): void {
   record.allowedActions = ['start'];
   record.checkpoint = undefined;
   record.checkpointSeq = 0;
+  record.checkpointReceipt = undefined;
 }
 
 export interface DurableTaskInventoryFailure {
@@ -1436,8 +1447,51 @@ const EXECUTION_CAPABILITIES: RuntimeExecutionCapabilities = {
   },
 };
 
+/**
+ * The native protocol is a distinct capability of the owned store, not an
+ * optional fallback. A store exposes it only when it can both commit and read
+ * the typed native identity.
+ */
+function nativeCheckpointPort(store: TaskCheckpointStore): NativeCheckpointJournalPort | null {
+  const candidate = store as Partial<NativeCheckpointJournalPort>;
+  return typeof candidate.commitNativeCheckpoint === 'function'
+    && typeof candidate.readNativeCheckpoint === 'function'
+    ? (candidate as NativeCheckpointJournalPort)
+    : null;
+}
+
+/**
+ * Exact durable receipt for one committed checkpoint record. A legacy v1
+ * record has no native envelope, so it has no trustworthy commit time. A
+ * native record without a matching relationship fails explicitly; it never
+ * falls back to the legacy identity.
+ */
+async function readDurableCheckpointReceipt(
+  store: TaskCheckpointStore,
+  exact: CommittedCheckpointRecord,
+): Promise<DurableCheckpointReceipt | null> {
+  if (exact.commitRef.commitId === checkpointCommitId(exact.checkpoint)) return null;
+  const native = nativeCheckpointPort(store);
+  if (native === null) {
+    throw new Error('native checkpoint record cannot be verified without a native checkpoint reader');
+  }
+  const relationship = await native.readNativeCheckpoint({ checkpoint: exact.checkpoint });
+  if (relationship === null) {
+    throw new Error('native checkpoint record is missing its durable receipt relationship');
+  }
+  if (relationship.receipt.commitIdentity !== exact.commitRef.commitId
+    || relationship.journalSeq !== exact.commitRef.journalSeq
+    || relationship.recordDigest !== exact.commitRef.recordDigest) {
+    throw new Error('native checkpoint relationship does not match the committed record');
+  }
+  return relationship.receipt;
+}
+
 class ContextCheckpointBoundary {
-  constructor(private readonly checkpointStore: TaskCheckpointStore) {}
+  constructor(
+    private readonly checkpointStore: TaskCheckpointStore,
+    private readonly now: () => Date,
+  ) {}
 
   async readCommitted(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<CommittedCheckpointRecord | null> {
     const verification = await this.checkpointStore.verify(checkpoint.scope);
@@ -1445,10 +1499,10 @@ class ContextCheckpointBoundary {
     const exact = await this.checkpointStore.readCommitted(checkpoint.scope, checkpoint.id);
     if (exact === null) return null;
     if (canonicalJsonStringify(exact.checkpoint) !== canonicalJsonStringify(checkpoint)
-      || canonicalJsonStringify(exact.previous) !== canonicalJsonStringify(previous)
-      || exact.commitRef.commitId !== checkpointCommitId(checkpoint)) {
+      || canonicalJsonStringify(exact.previous) !== canonicalJsonStringify(previous)) {
       throw new Error('prepared-stop exact checkpoint or predecessor does not match');
     }
+    await readDurableCheckpointReceipt(this.checkpointStore, exact);
     return exact;
   }
 
@@ -1474,8 +1528,43 @@ class ContextCheckpointBoundary {
 
   async commit(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<RuntimeContextCommitResult> {
     let recordDigest: string | undefined;
+    let receipt: DurableCheckpointReceipt | undefined;
     const committer = new ContextCommitter<Checkpoint>({
       commit: async (prepared) => {
+        const native = nativeCheckpointPort(this.checkpointStore);
+        if (native !== null) {
+          const relationship = await completeNativeCheckpoint(native, {
+            ownerId: RUNTIME_OWNER,
+            context: {
+              scope: prepared.value.scope,
+              cycleId: prepared.value.cycleId,
+              executionEpoch: prepared.value.executionEpoch,
+              directiveRevision: prepared.value.directiveRevision,
+            },
+            previous,
+            checkpoint: prepared.value,
+            timeAuthority: {
+              source: 'harness',
+              owner: 'runtime-checkpoint-control-owner',
+              authorityRef: checkpointCommitId(prepared.value),
+              sampleCommittedAt: () => this.now().toISOString(),
+            },
+          });
+          if (
+            relationship.checkpoint.id.value !== prepared.value.id.value
+            || relationship.checkpointSeq !== prepared.value.seq
+          ) {
+            throw new RuntimeTaskControlError(
+              'checkpoint.commit.receipt.mismatch',
+              'humanagent.runtime.checkpoints',
+              'checkpoint commit receipt does not match the prepared context',
+              'inspect the checkpoint journal and retry the operation',
+            );
+          }
+          recordDigest = relationship.recordDigest;
+          receipt = relationship.receipt;
+          return;
+        }
         const completed = await completeCheckpoint(this.checkpointStore, {
           ownerId: RUNTIME_OWNER,
           context: {
@@ -1513,6 +1602,7 @@ class ContextCheckpointBoundary {
       context: published,
       reentry: computeReentryDecision({ outcome: checkpoint.outcome }),
       ...(recordDigest === undefined ? {} : { recordDigest }),
+      ...(receipt === undefined ? {} : { receipt }),
     };
   }
 }
@@ -2262,6 +2352,7 @@ export class RuntimeTaskCoordinator {
     record.cycleId = scope?.cycleId;
     record.checkpoint = undefined;
     record.checkpointSeq = 0;
+    record.checkpointReceipt = undefined;
     record.composition = undefined;
     record.checkpointBoundary = undefined;
     record.taskAssembly = undefined;
@@ -2567,6 +2658,7 @@ export class RuntimeTaskCoordinator {
     const lease = input.lease;
     const checkpointBoundary = new ContextCheckpointBoundary(
       this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+      this.now,
     );
     record.checkpointBoundary = checkpointBoundary;
     const composition = new HarnessExecutionComposition({
@@ -3828,7 +3920,7 @@ export class RuntimeTaskCoordinator {
         taskId: allocation.taskId, operationId: allocation.operationId, executionEpoch: allocation.executionEpoch,
       };
       const store = this.options.checkpointStoreFor(allocation.taskId, allocation.scope.cycleId!);
-      const boundary = record.checkpointBoundary ?? new ContextCheckpointBoundary(store);
+      const boundary = record.checkpointBoundary ?? new ContextCheckpointBoundary(store, this.now);
       record.checkpointBoundary = boundary;
       let requested = await producer.read(selector);
       if (requested.state === 'absent') {
@@ -3997,6 +4089,7 @@ export class RuntimeTaskCoordinator {
       if (!this.options.providerRetry) {
         const checkpointBoundary = new ContextCheckpointBoundary(
           this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+          this.now,
         );
         record.checkpointBoundary = checkpointBoundary;
         const preparationInput: RuntimeExecutionPreparationInput = {
@@ -4100,6 +4193,7 @@ export class RuntimeTaskCoordinator {
               if (coordinator.options.providerRetry && retryCycle && attemptBindingId) {
                 const checkpointBoundary = new ContextCheckpointBoundary(
                   coordinator.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+                  coordinator.now,
                 );
                 record.checkpointBoundary = checkpointBoundary;
                 const attemptPreparationInput: RuntimeExecutionPreparationInput = {
@@ -5093,6 +5187,7 @@ export class RuntimeTaskCoordinator {
   ): void {
     record.checkpoint = committed.checkpoint;
     record.checkpointSeq = committed.checkpoint.seq;
+    record.checkpointReceipt = committed.receipt;
     const operation = record.operationId ? this.operations.get(record.operationId.value) : undefined;
     if (operation) this.pushEvent(record, operation, 'checkpoint.committed', outcome, committed.checkpoint.summary, committed.checkpoint.evidenceRefs);
   }
@@ -5533,6 +5628,12 @@ export class RuntimeTaskCoordinator {
         const checkpoint = recalled.checkpoint;
         task.checkpoint = checkpoint;
         task.checkpointSeq = checkpoint.seq;
+        // Restore the first durable receipt before any recovery early return so
+        // a cold snapshot never invents a commit time from a later event.
+        const exactRecord = await store.readCommitted(checkpoint.scope, checkpoint.id);
+        task.checkpointReceipt = exactRecord === null
+          ? undefined
+          : (await readDurableCheckpointReceipt(store, exactRecord)) ?? undefined;
         // The committed checkpoint is the authoritative physical position for
         // this operation. Adopt its epoch before any later task snapshot read.
         if (checkpoint.scope.operationId && sameId(checkpoint.scope.operationId, task.operationId)) {
@@ -5614,7 +5715,6 @@ export class RuntimeTaskCoordinator {
   }
 
   private snapshot(record: TaskRecord): RuntimeTaskSnapshot {
-    const checkpointEvent = record.events.slice().reverse().find((event) => event.kind === 'checkpoint.committed');
     return {
       taskId: record.taskId,
       title: record.title,
@@ -5642,7 +5742,9 @@ export class RuntimeTaskCoordinator {
             seq: record.checkpoint.seq,
             outcome: record.checkpoint.outcome,
             summary: record.checkpoint.summary,
-            committedAt: checkpointEvent?.occurredAt ?? record.updatedAt,
+            ...(record.checkpointReceipt === undefined
+              ? { committedAtUnavailableReason: 'no durable native checkpoint receipt for this checkpoint identity' }
+              : { committedAt: record.checkpointReceipt.committedAt }),
             evidenceRefs: record.checkpoint.evidenceRefs,
           }
         : undefined,
