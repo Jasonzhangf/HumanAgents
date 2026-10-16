@@ -6,6 +6,7 @@
 
 ### 续接增量（2026-10-16）
 
+- parentclose最终回执已收：作者自然exit0，fixture root已删除、无node/tsc、trackedclean；Root拟SIGINT时PID已不存在，未实际中断。准确postcloseOAuth计划已接，freshGCM `provider-explicit-postclose-gcm-r1-20261016`复用同域原树FF355b，只写Appinterpreter/原consumer；durableclose+finaloutput前提，完整helper集合→semanticcheckpoint，零外部重放。index一行turnHelperJournal注入仍stopbinder唯一writer，sourcefreeze后协调，不并写。测试复用Runtime已验guards，不扩重复负向矩阵；preclosecrash责任仍OPEN。
 - parentclose sourcef4bb8b9已标准合c6933f8，Root组合Appbuild/App+Runtimecompile0、原App14+raw4共18/18。两实际可编译omission反例及精确恢复hash沿作者证据有效。实际关闭事实/原binding、physical≠semantic、exactreplayfence、sameprocessretry一次physicalclose已验；作者finalcleanup仍待，preclosecrash/neutral完整cold未冒完成。下游独立OAuth `provider-explicit-postclose-plan-oauth-r1-20261016`只计划已durableclose后的memoryloss语义收口+F1完整helper集合接线，factory/Provider零重放；不另造owner或用epoch证明死亡。
 - Provider standard-end纠正续推sourcee9fb794已标准合候选107cdc9：实际生产仅5行，复用isStandardTurnEndToolId，只对已persist/accepted的failed reservedend入toolHistory继续，不动3829requestphase顺序。作者focusedcompile0/selected1/1与原四文件128/128；Root组合Providercompile0/同selected1/1/Appbuild0。原同consumer行为RED保留。App typedrefusal来源仍待，原I1gen5不提前重试；UX负责source树/home收口。
 - parentclose Runtime正常raw4/4与App14/14、恢复hash一致已观察。此前raw3/4输出其实RED1主动移除fence后的counterexample，不是正常source回归，Root已纠正按完整命令/恢复记录解读；最终source/cleanup仍未交不合流。stopbinder及checkpointnative/time三域实现保持独占，不为局部GREEN启动leafreview。

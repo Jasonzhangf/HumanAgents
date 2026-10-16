@@ -1,10 +1,11 @@
 import { canonicalJsonStringify, type AcceptedRawFact, type BusinessPayload,
-  type EvidenceRef, type ProviderExecutionIdentityRef, type ProviderToolCall,
+  id, type EvidenceRef, type ProviderExecutionIdentityRef, type ProviderToolCall,
   type ProviderToolDefinition, type RuntimeRequestRecord } from '../../../contracts/src/index.js';
 import type { AdmittedTurnIdentity } from '../../../contracts/src/native-reasoning.js';
 import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
 import type { TurnCloseSummary } from '../../../contracts/src/turn-closure.js';
+import { ContractError } from '../../../contracts/src/errors.js';
 import {
   STANDARD_TURN_END_TOOL_ID,
   isStandardTurnEndToolId,
@@ -103,6 +104,64 @@ export class StandardTurnEndError extends Error {
   }
 }
 
+/**
+ * Classify the only model-owned refusals the bound standard-end action may turn
+ * into a visible failed tool result: `standard-turn-end.arguments` and
+ * `standard-turn-end.delivery-unresolved`. Local argument validation converts
+ * its own `ContractError` before calling this classifier. Everything else
+ * (binding, route, owner/IO) stays a thrown error. Returns the exact preserved
+ * code/message, or `null` to rethrow.
+ */
+export function standardTurnEndModelInputRefusal(error: unknown): { code: string; message: string } | null {
+  if (error instanceof StandardTurnEndError
+    && (error.code === 'standard-turn-end.arguments' || error.code === 'standard-turn-end.delivery-unresolved')) {
+    return { code: error.code, message: error.message };
+  }
+  return null;
+}
+
+/**
+ * Build the honest failed tool result for a refused standard-turn end. It
+ * carries the verified turn identity and the exact preserved code/message, and
+ * never marks the Task accepted. There is no fallback and no fake success.
+ */
+export function createRefusedStandardTurnEndResult(
+  identity: AdmittedTurnIdentity,
+  error: { readonly code: string; readonly message: string },
+): ProviderToolExecutionResult {
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', `standard-turn-end-refusal-${identity.turnId}-${error.code}`),
+    kind: 'operation',
+    source: OWNER,
+    locator: `standard-turn-end://${identity.turnId}/${error.code}`,
+    scope: identity.scopeRef,
+  };
+  return {
+    output: canonicalJsonStringify({
+      kind: 'standard-turn-end',
+      turnId: identity.turnId,
+      accepted: false,
+      error: { code: error.code, message: error.message },
+    }),
+    outputRefs: [],
+    evidenceRefs: [evidence],
+    status: 'failed',
+    error: {
+      errorId: `${OWNER}.${error.code}`,
+      code: error.code,
+      category: 'validation',
+      phase: 'tool',
+      message: error.message,
+      ownerId: OWNER,
+      retryable: 'manual',
+      attention: 'foreground',
+      evidenceRefs: [evidence],
+      nextAction: { kind: 'recover', ref: STANDARD_TURN_END_TOOL_ID },
+    },
+    executorRoute: STANDARD_TURN_END_TOOL_ID,
+  };
+}
+
 export interface StandardTurnEndControlInput {
   readonly owner: StandardTurnEndOwnerPort;
   /**
@@ -156,7 +215,6 @@ function assertBoundExecution(identity: AdmittedTurnIdentity, execution: Provide
 export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput): ProviderToolExecutionPort {
   return {
     async execute({ execution, scope, requestId, call }): Promise<ProviderToolExecutionResult> {
-      const parsed = parseStandardTurnEndArguments(call);
       const identity = await input.owner.resolveBoundTurn({
         execution,
         ...(requestId === undefined ? {} : { requestId }),
@@ -206,9 +264,26 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
           );
         }
       }
-      validateStandardTurnEndInput(parsed, identity.scopeRef);
-      const resolvedEvidenceRefs = parsed.deliveryRefs.length === 0 ? []
-        : await input.owner.resolveDelivery({ identity, deliveryRefs: parsed.deliveryRefs });
+      let parsed: StandardTurnEndInput;
+      try {
+        parsed = parseStandardTurnEndArguments(call);
+        validateStandardTurnEndInput(parsed, identity.scopeRef);
+      } catch (error) {
+        const refusal = error instanceof ContractError
+          ? { code: 'standard-turn-end.arguments', message: error.message }
+          : standardTurnEndModelInputRefusal(error);
+        if (refusal) return createRefusedStandardTurnEndResult(identity, refusal);
+        throw error;
+      }
+      let resolvedEvidenceRefs: readonly EvidenceRef[];
+      try {
+        resolvedEvidenceRefs = parsed.deliveryRefs.length === 0 ? []
+          : await input.owner.resolveDelivery({ identity, deliveryRefs: parsed.deliveryRefs });
+      } catch (error) {
+        const refusal = standardTurnEndModelInputRefusal(error);
+        if (refusal) return createRefusedStandardTurnEndResult(identity, refusal);
+        throw error;
+      }
       const command: StandardTurnEndCommand = {
         kind: 'standard-turn-end',
         identity,
