@@ -122,6 +122,25 @@ function scope(organValue: string, taskValue: string, operationValue = 'operatio
   };
 }
 
+async function readPublicTaskGrant(baseUrl: string, taskId: string): Promise<any> {
+  const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/control/grant`);
+  assert.equal(response.status, 200);
+  return await response.json() as any;
+}
+
+async function grantTaskThroughPublicApi(baseUrl: string, taskId: string): Promise<void> {
+  const before = await readPublicTaskGrant(baseUrl, taskId);
+  const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/control/grant`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      requestId: `grant:${taskId}`,
+      expectedRevision: before.readback?.grant?.revision ?? 0,
+    }),
+  });
+  assert.equal(response.status, 200);
+}
+
 function evidence(label: string, taskScope: ScopeRef): EvidenceRef {
   return {
     evidenceId: id('evidence', `semantic-public-${label}`),
@@ -242,6 +261,7 @@ test('public semantic HTTP/SSE preserves canonical pairing, unknown states, refs
   });
   try {
     const task = runtime.service.createTask({ title: 'semantic public success' });
+    await grantTaskThroughPublicApi(runtime.server.url, task.taskId.value);
     const started = await runtime.service.startExecution(task.taskId, { prompt: 'semantic public lifecycle' });
 
     await waitFor(() => runtime.service.taskDashboard(task.taskId).state === 'succeeded');
@@ -282,6 +302,30 @@ test('public semantic HTTP/SSE preserves canonical pairing, unknown states, refs
     assert.equal(frames.length >= 1, true);
     assert.equal(frames.at(-1)?.events.some((event) => event.type === 'operation.completed'), true);
     assert.equal(frames.at(-1)?.pairing.some((group) => group.kind === 'operation' && group.state === 'closed'), true);
+
+    // The same public control interface must revoke the durable grant, expose
+    // the revoked readback, and invalidate further execution authorization.
+    const grantRead = await readPublicTaskGrant(runtime.server.url, task.taskId.value);
+    assert.ok(grantRead.readback?.grant, 'the granted task must expose a persisted readback');
+    const revoke = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/control/revoke`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        requestId: `revoke:${task.taskId.value}`,
+        expectedRevision: grantRead.readback.grant.revision,
+      }),
+    });
+    assert.equal(revoke.status, 200);
+    const revokedRead = await readPublicTaskGrant(runtime.server.url, task.taskId.value);
+    assert.equal(revokedRead.readback?.grant?.state, 'revoked');
+    const denied = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt: 'semantic public denied after revoke' }),
+    });
+    assert.ok(denied.status >= 400);
+    const deniedBody = (await denied.json()) as { readonly error?: { readonly message?: string } };
+    assert.match(deniedBody.error?.message ?? '', /task grant denied/);
   } finally {
     await runtime.server.close();
     await rm(root, { recursive: true, force: true });
@@ -312,6 +356,7 @@ test('public semantic SSE stays bound to the active second operation and closes 
   let stream: Awaited<ReturnType<typeof openSemanticStream>> | undefined;
   try {
     const task = runtime.service.createTask({ title: 'two operation semantic stream' });
+    await grantTaskThroughPublicApi(runtime.server.url, task.taskId.value);
     const first = await runtime.service.startExecution(task.taskId, { prompt: 'first semantic operation' });
     await waitFor(() => runtime.service.taskDashboard(task.taskId).state === 'succeeded');
 

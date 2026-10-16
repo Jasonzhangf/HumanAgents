@@ -28,6 +28,10 @@ import {
   UI_DISPLAY_PREFERENCE_ROUTE,
   type UiDisplayPreferenceResourceHandler,
 } from './display-preferences.js';
+import type {
+  TaskControlCapabilityDeclaration,
+  UiTaskGrantControl,
+} from './task-control.js';
 
 const APP_OWNER = 'humanagent.app';
 
@@ -35,6 +39,11 @@ export interface UiRuntimeServerOptions {
   readonly service: UiRuntimeService;
   readonly accessControl: AccessControlService;
   readonly uiRoot: string;
+  /**
+   * Task-scoped grant control over the same control Organ Journal. Absent
+   * means this server cannot answer the task grant/revoke control routes.
+   */
+  readonly taskControl?: UiTaskGrantControl;
   readonly displayPreference?: UiDisplayPreferenceResourceHandler;
   readonly host?: string;
   readonly port?: number;
@@ -323,6 +332,23 @@ function requirePositiveInteger(body: Record<string, unknown>, key: string): num
   return value as number;
 }
 
+function requireNonNegativeInteger(body: Record<string, unknown>, key: string): number {
+  const value = body[key];
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be a non-negative safe integer`, `provide a non-negative ${key}`);
+  }
+  return value as number;
+}
+
+function optionalTaskCapability(body: Record<string, unknown>): TaskControlCapabilityDeclaration | undefined {
+  if (body.capability === undefined) return undefined;
+  const capability = requireRecord(body, 'capability');
+  return {
+    actionId: requireString(capability, 'actionId'),
+    capabilities: requireStringArray(capability, 'capabilities'),
+  };
+}
+
 function requireStringArray(body: Record<string, unknown>, key: string): readonly string[] {
   const value = body[key];
   if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) {
@@ -529,6 +555,7 @@ export function createUiRuntimeRequestDispatcher(options: {
   readonly accessControl: AccessControlService;
   readonly uiRoot: string;
   readonly isClosing: () => boolean;
+  readonly taskControl?: UiRuntimeServerOptions['taskControl'];
   readonly displayPreference?: UiRuntimeServerOptions['displayPreference'];
   readonly restart?: UiRuntimeServerOptions['restart'];
   readonly identity?: UiRuntimeServerOptions['identity'];
@@ -544,6 +571,7 @@ export function createUiRuntimeRequestDispatcher(options: {
       sseRegistry,
       options.isClosing,
       options.uiRoot,
+      options.taskControl,
       options.restart,
       options.identity,
       options.schedulerStatus,
@@ -568,6 +596,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
     accessControl,
     uiRoot: options.uiRoot,
     isClosing: () => closing,
+    ...(options.taskControl === undefined ? {} : { taskControl: options.taskControl }),
     ...(options.displayPreference === undefined ? {} : { displayPreference: options.displayPreference }),
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
@@ -649,6 +678,7 @@ async function handleRequest(
   sseRegistry: ReturnType<typeof createSseRegistry>,
   isClosing: () => boolean,
   uiRoot: string,
+  taskControl?: UiTaskGrantControl,
   restart?: UiRuntimeServerOptions['restart'],
   identity?: UiRuntimeServerOptions['identity'],
   schedulerStatus?: UiRuntimeServerOptions['schedulerStatus'],
@@ -741,6 +771,44 @@ async function handleRequest(
         if (isClosing()) {
           throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
         }
+      }
+    }
+    // The existing client task-grant control paths. The common /api/ guard has
+    // already verified the session; the product principal owner comes from the
+    // same persisted credential and the client never supplies it.
+    const taskGrantControl = /^\/api\/tasks\/([^/]+)\/control\/grant$/.exec(path);
+    const taskRevokeControl = /^\/api\/tasks\/([^/]+)\/control\/revoke$/.exec(path);
+    if (taskGrantControl || taskRevokeControl) {
+      if (taskControl === undefined) {
+        throw new UiRuntimeApiError(
+          'task-control.unavailable',
+          APP_OWNER,
+          'this runtime was started without task-scoped grant control',
+          'start the runtime through startUiRuntime',
+          503,
+        );
+      }
+      const principalOwner = accessControl.readProductPrincipalOwner();
+      const taskId = id('task', decodeURIComponent((taskGrantControl ?? taskRevokeControl)![1]!));
+      if (taskGrantControl && method === 'GET') {
+        writeJson(response, 200, await taskControl.read(taskId, principalOwner));
+        return;
+      }
+      if ((taskGrantControl && method === 'POST') || (taskRevokeControl && method === 'POST')) {
+        const body = await readBody(request);
+        const input = {
+          requestId: requireString(body, 'requestId'),
+          taskId,
+          principalOwner,
+          expectedRevision: requireNonNegativeInteger(body, 'expectedRevision'),
+          ...(taskGrantControl && body.capability !== undefined
+            ? { capability: optionalTaskCapability(body) }
+            : {}),
+        };
+        writeJson(response, 200, taskGrantControl
+          ? await taskControl.grant(input)
+          : await taskControl.revoke(input));
+        return;
       }
     }
     // The single public display-preference resource, reached only after the

@@ -49,6 +49,11 @@ import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-st
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import type { RuntimeExecutionAllocation } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
+import {
+  UiTaskGrantControl,
+  TASK_EXECUTION_ACTION_ID,
+  TASK_EXECUTION_CAPABILITY,
+} from './task-control.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import type { SupervisorLease } from '../supervisor/index.js';
 import { OccurrenceConsumerRouter } from './occurrence-router.js';
@@ -528,12 +533,30 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const displayPreference = options.runtimePaths === undefined
     ? undefined
     : bindUiDisplayPreferenceResource(options.runtimePaths, resetUiDisplayPreference);
+  // Task-scoped grant control is the single execution authority for a real
+  // Task. It reuses the same control Organ Journal, declared capability, clock
+  // and standard stop path the rest of this assembly already owns; the server
+  // supplies the verified product principal on every HTTP control request.
+  const taskControl = new UiTaskGrantControl({
+    journal: taskControlJournal,
+    organId: options.organId,
+    capability: { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY] },
+    now: executionNow,
+    taskScope: (taskId) => {
+      // The service is the existence authority: an unknown task throws here
+      // before any grant fact is written.
+      const detail = runtimeService.taskDetail(taskId);
+      return { organId: options.organId, taskId: detail.taskId };
+    },
+    stopTask: (taskId) => runtimeService.stop(taskId),
+  });
   const server = await startUiRuntimeServer({
     service: runtimeService,
     accessControl: options.accessControl,
     uiRoot: options.uiRoot,
     host: options.host,
     port: options.portNumber,
+    taskControl,
     ...(displayPreference === undefined ? {} : { displayPreference }),
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
