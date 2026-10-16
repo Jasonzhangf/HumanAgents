@@ -80,6 +80,7 @@ declare module 'node:child_process' {
   interface SpawnOptions {
     readonly cwd?: string;
     readonly env?: Record<string, string | undefined>;
+    readonly detached?: boolean;
     readonly stdio?: readonly string[];
   }
 
