@@ -10,7 +10,7 @@ import {
   type RequirementIntent,
 } from '../../contracts/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
-import { loadBuiltinPromptSegments } from '../../agent-templates/src/index.js';
+import { loadBuiltinPromptSegments, type AgentPromptSegment } from '../../agent-templates/src/index.js';
 import { WorkspaceCodeSearchFunctions } from '../../adapters/operations/src/index.js';
 import {
   ExplicitBrainDecisionExecutor,
@@ -25,6 +25,32 @@ import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attenti
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
+
+/**
+ * The bounded intake call carries no tools, so it assembles only the identity and
+ * control-boundary segments of the full `interaction` role. The remaining segments
+ * of the same verified template require a nested decision envelope, selected
+ * actions, typed tool intents, and a submit-only-after-confirmation path that this
+ * intake contract does not accept.
+ */
+const INTAKE_PROMPT_SEGMENT_REFS = [
+  'common/control-boundaries.md',
+  'interaction/profiles/explicit-brain/identity.md',
+] as const;
+
+function selectIntakePromptSegments(segments: readonly AgentPromptSegment[]): readonly string[] {
+  const byRef = new Map(segments.map((segment) => [segment.ref, segment.content]));
+  return INTAKE_PROMPT_SEGMENT_REFS.map((ref) => {
+    const content = byRef.get(ref);
+    if (content === undefined) {
+      throw new ExplicitBrainOperationalToolError(
+        'unsupported-tool',
+        `interaction template is missing the required intake prompt segment: ${ref}`,
+      );
+    }
+    return content;
+  });
+}
 
 function digestArguments(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
@@ -115,16 +141,11 @@ export interface ExplicitBrainInputInterpreter {
 
 const STRUCTURED_REQUIREMENT_PROPOSAL_FIELDS = [
   'blockingGaps',
-  'confirmationPrompt',
   'deliverable',
   'deliveryConditions',
   'evidenceRefs',
   'intent',
-  'lifecycle',
   'objective',
-  'owner',
-  'ownerNote',
-  'requiresUserConfirmation',
   'revision',
   'title',
 ] as const;
@@ -135,14 +156,9 @@ interface StructuredRequirementProposal {
   readonly title: string;
   readonly objective: string;
   readonly deliverable: string;
-  readonly owner: null;
-  readonly ownerNote: string;
   readonly deliveryConditions: readonly string[];
   readonly evidenceRefs: readonly string[];
   readonly blockingGaps: readonly string[];
-  readonly lifecycle: string;
-  readonly requiresUserConfirmation: true;
-  readonly confirmationPrompt: string;
 }
 
 function structuredProposalContract(inputRevision: number): string {
@@ -152,14 +168,9 @@ function structuredProposalContract(inputRevision: number): string {
     title: 'non-empty string',
     objective: 'non-empty string',
     deliverable: 'non-empty string',
-    owner: null,
-    ownerNote: 'non-empty string',
     deliveryConditions: ['non-empty string'],
     evidenceRefs: ['string'],
     blockingGaps: ['string'],
-    lifecycle: 'non-empty string',
-    requiresUserConfirmation: true,
-    confirmationPrompt: 'non-empty string',
   });
 }
 
@@ -168,14 +179,18 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     ...promptSegments,
     '# Explicit intake decision output',
     'Return one JSON object only. Do not call tools and do not claim execution.',
-    'kind must be requirement, status-query, clarification, or answer.',
+    'The object is flat at the top level. kind must be requirement, status-query, clarification, or answer.',
+    'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal and the optional matchedTaskId for requirement, answer for status-query and answer, and question for clarification.',
+    'Never nest a decision wrapper, and never emit a selected-action, summary, user-input flag, tool-result flag, or tool-intents field.',
+    'Never echo the input envelope back as output fields: interactionId, inputRevision, sourceRef, rawInput, clarifications, and taskCandidates are input only.',
     'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
     'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
     'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
+    'Submitting the new-task form is already the user confirmation. For proposal.intent=create, do not write a second-confirmation blocker into objective, deliveryConditions, or blockingGaps.',
+    'Do not choose an execution owner, worker, provider, or runtime.',
     'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
     'Use answer only for a general question you can answer directly from the current input and provided context, with no execution, exploration, external retrieval, or deliverable. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
     'For clarification, ask one concrete question and do not invent a task match.',
-    'All variants require normalizedInput, knownFacts string array, and decisionRefs string array.',
     `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
     'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Answer requires a non-empty answer. Clarification requires question.',
     JSON.stringify(input),
@@ -217,26 +232,15 @@ function parseStructuredRequirementProposal(
   if (record.intent !== 'create' && record.intent !== 'append' && record.intent !== 'change') {
     throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal requires a typed intent');
   }
-  if (record.owner !== null) {
-    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal cannot select an execution owner');
-  }
-  if (record.requiresUserConfirmation !== true) {
-    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal must preserve explicit user confirmation');
-  }
   return {
     revision: inputRevision,
     intent: record.intent,
     title: nonEmptyString(record, 'title'),
     objective: nonEmptyString(record, 'objective'),
     deliverable: nonEmptyString(record, 'deliverable'),
-    owner: null,
-    ownerNote: nonEmptyString(record, 'ownerNote'),
     deliveryConditions: stringArray(record, 'deliveryConditions'),
     evidenceRefs: stringArray(record, 'evidenceRefs'),
     blockingGaps: stringArray(record, 'blockingGaps'),
-    lifecycle: nonEmptyString(record, 'lifecycle'),
-    requiresUserConfirmation: true,
-    confirmationPrompt: nonEmptyString(record, 'confirmationPrompt'),
   };
 }
 
@@ -353,7 +357,7 @@ export function createProviderExplicitBrainInterpreter(input: {
     if (promptSegments !== undefined) return promptSegments;
     const version = EXPLICIT_BRAIN_TEMPLATE_REF.slice('builtin/interaction@'.length);
     promptSegments = loadBuiltinPromptSegments('interaction', input.templateRoot, version)
-      .then((loaded) => loaded.segments.map((segment) => segment.content));
+      .then((loaded) => selectIntakePromptSegments(loaded.segments));
     return promptSegments;
   };
   return {

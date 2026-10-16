@@ -4766,14 +4766,9 @@ test('explicit brain persists a live-shaped structured provider proposal after s
       title: '项目集成状态梳理',
       objective: '梳理项目当前集成状态，并等待用户确认后再进入后台执行。',
       deliverable: '三条集成链路的现状、风险和证据清单',
-      owner: null,
-      ownerNote: '不选择 worker、provider、runtime 或资源实例。',
       deliveryConditions: ['三条链路逐条列出', '每条风险附带证据引用'],
       evidenceRefs: [],
       blockingGaps: ['缺少三条链路的只读投影来源'],
-      lifecycle: 'draft -> awaiting-user-confirmation -> requirement.submit',
-      requiresUserConfirmation: true,
-      confirmationPrompt: '是否确认当前草稿并提交后台执行？',
     },
   });
   class SettlementTrackingPort extends FakeReplayExecutionRuntimePort {
@@ -8243,6 +8238,15 @@ test('implicit executor produced output excludes provider semantic model summari
         leaseId: 'lease-implicit-output-summary',
         runtimeId: 'runtime-implicit-output-summary',
         generation: 1,
+        incarnation: {
+          runtimeId: 'runtime-implicit-output-summary',
+          generation: 1,
+          agentInstanceId: 'agent-implicit-output-summary',
+          roleId: 'execution',
+          taskId,
+          assignmentId: 'assignment-implicit-output-summary',
+          executionEpoch: 1,
+        },
         executionEpoch: 1,
         ownerId: 'ui-runtime-test',
         assignmentId: 'assignment-implicit-output-summary',
@@ -8740,6 +8744,12 @@ test('public tool readback fails closed for a mismatched persisted fact and pres
           throw new Error('writeReport is not used by readback tests');
         },
         readReport,
+        async writeArtifact() {
+          throw new Error('writeArtifact is not used by readback tests');
+        },
+        async readArtifact() {
+          throw new Error('readArtifact is not used by readback tests');
+        },
       },
     });
     return service;

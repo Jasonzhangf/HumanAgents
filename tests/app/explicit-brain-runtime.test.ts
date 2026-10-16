@@ -295,14 +295,9 @@ test('provider explicit brain interpreter loads the interaction template and val
               title: '整理启动步骤',
               objective: '整理项目启动步骤',
               deliverable: '可执行的启动步骤清单',
-              owner: null,
-              ownerNote: '运行时将在确认后决定执行 owner。',
               deliveryConditions: ['启动步骤完整并有证据'],
               evidenceRefs: ['README'],
               blockingGaps: [],
-              lifecycle: 'draft -> awaiting-user-confirmation -> requirement.submit',
-              requiresUserConfirmation: true,
-              confirmationPrompt: '是否确认并提交该需求？',
             },
             decisionRefs: ['decision:provider-test'],
           }),
@@ -327,10 +322,8 @@ test('provider explicit brain interpreter loads the interaction template and val
           kind: 'requirement', normalizedInput: '整理启动步骤', knownFacts: ['README exists'],
           proposal: {
             revision: 1, intent: 'create', title: '整理启动步骤', objective: '整理项目启动步骤',
-            deliverable: '可执行的启动步骤清单', owner: null, ownerNote: '运行时决定 owner。',
+            deliverable: '可执行的启动步骤清单',
             deliveryConditions: ['启动步骤完整并有证据'], evidenceRefs: ['README'], blockingGaps: [],
-            lifecycle: 'draft -> awaiting-user-confirmation -> requirement.submit',
-            requiresUserConfirmation: true, confirmationPrompt: '是否确认并提交该需求？',
           }, decisionRefs: ['decision:provider-test'],
         }) },
         { type: 'response.completed', response: { id: `selected-${posts.length}` } },
@@ -421,6 +414,25 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.equal(borrowedStarts, 0);
   assert.equal(posts.length, 2);
   for (const body of posts) assert.equal(JSON.parse(body).model, 'selected.interaction.model');
+  // The bounded intake wire carries the verified identity and control-boundary
+  // segments plus one flat intake contract, and none of the full-role segments
+  // that require a nested decision envelope, selected actions, or typed tool
+  // intents. These assertions are RED under the previous full-segment assembly.
+  const wire = JSON.parse(posts[0]) as {
+    readonly input: readonly { readonly content: readonly { readonly text: string }[] }[];
+  };
+  const sentPrompt = (JSON.parse(wire.input[0].content[0].text) as { readonly prompt: string }).prompt;
+  assert.ok(sentPrompt.includes('# Control Boundaries'));
+  assert.ok(sentPrompt.includes('# Explicit Brain'));
+  assert.ok(sentPrompt.includes('# Explicit intake decision output'));
+  for (const field of ['blockingGaps', 'deliverable', 'deliveryConditions', 'evidenceRefs', 'intent', 'objective', 'revision', 'title']) {
+    assert.ok(sentPrompt.includes(`"${field}"`), `intake proposal contract must include ${field}`);
+  }
+  for (const absent of ['structured decision', 'selected action', 'needsUserInput', 'needsToolResult',
+    'typed Tool Intents', 'Call `requirement.submit` only after', 'requiresUserConfirmation',
+    'confirmationPrompt', 'awaiting-user-confirmation']) {
+    assert.equal(sentPrompt.includes(absent), false, `intake prompt must not carry conflicting instruction: ${absent}`);
+  }
   assert.ok(posts[0].includes('帮我整理启动步骤'));
   assert.ok(posts[1].includes('第二次独立输入'));
   assert.ok(posts[1].includes('ui:second'));
@@ -577,14 +589,9 @@ test('provider explicit brain interpreter accepts the live requirement contract 
               title: 'HumanAgent 项目中文启动检查清单',
               objective: '读取项目文档并整理有来源的启动检查清单',
               deliverable: '一份可查看的中文 Markdown 启动检查清单',
-              owner: null,
-              ownerNote: '运行时在需求确认后决定执行 owner。',
               deliveryConditions: ['每条命令和结论均标注文件路径与行号'],
               evidenceRefs: ['ui:new-task', 'interaction-1#inputRevision=1'],
               blockingGaps: ['尚未读取 README.md 与 package.json'],
-              lifecycle: 'draft-awaiting-user-confirmation',
-              requiresUserConfirmation: true,
-              confirmationPrompt: '请确认 revision 1 的需求草案。',
             },
             decisionRefs: ['interaction-1#sourceRef=ui:new-task'],
           }),
@@ -626,4 +633,104 @@ test('provider explicit brain interpreter accepts the live requirement contract 
     sourceRef: 'ui:new-task', rawInput: '整理项目启动检查清单', clarifications: [], taskCandidates: [] }),
   (error: unknown) => error === closeError);
   assert.equal(ownCloses, 1);
+});
+
+// Real recorded RCC intake output (business output only) from the
+// provider-candidate-live-entry-r2 scene. The model nested the decision under a
+// `decision` object and left no top-level `kind`. The strict intake parser must
+// keep rejecting it with no `decision.kind` fallback.
+const RECORDED_NESTED_DECISION_OUTPUT = `{
+  "interactionId": "interaction-1",
+  "inputRevision": 1,
+  "sourceRef": "ui:entry",
+  "rawInput": "请完成一次 HumanAgent UX 文档交接任务：在当前工作区创建 ux-handoff.md，然后读回核对。文件用中文写给实际使用者，内容包括：1. 简单问答由显式大脑直接回答，复杂需求整理为任务；2. 默认只显示当前层必要的语义信息，技术细节按需展开；3. 桌面使用侧面板，手机使用底部抽屉，主动配置入口位于四角；4. 浏览旧 checkpoint 只改变查看位置，不改变当前执行位置。最后在回复中给出文件路径、内容摘要和实际核对结果。不要修改其他文件。",
+  "normalizedInput": "用户要求在当前工作区创建 ux-handoff.md，文件用中文写给实际使用者，内容包含四条明确的 UX 约定：直接回答与任务化、分层语义展示、响应式面板与配置入口、checkpoint 浏览语义；创建后读回核对，并回复文件路径、内容摘要和核对结果；不得修改其他文件。",
+  "knownFacts": [
+    "请求来自 UI 入口，期望交付 ux-handoff.md 文件及核对结果",
+    "当前 taskCandidates 为空，没有可匹配的既有任务",
+    "需求明确限定不修改其他文件",
+    "文件语言为中文，内容包含四条指定约定"
+  ],
+  "decisionRefs": [
+    "sourceRef:ui:entry"
+  ],
+  "decision": {
+    "kind": "requirement",
+    "selectedAction": "propose create（待用户确认后通过 requirement.submit 提交）",
+    "summary": "将创建 ux-handoff.md 并读回核对的需求整理为创建型任务提案，等待用户确认后提交执行",
+    "evidenceRefs": [
+      "sourceRef:ui:entry"
+    ],
+    "needsUserInput": true,
+    "needsToolResult": false
+  },
+  "clarifications": [],
+  "taskCandidates": [],
+  "proposal": {
+    "revision": 1,
+    "intent": "create",
+    "title": "创建 HumanAgent UX 交接文档 ux-handoff.md",
+    "objective": "在当前工作区创建 ux-handoff.md，用中文写给实际使用者，写入指定的四条 UX 约定，并读回核对，最后返回文件路径、内容摘要和核对结果。",
+    "deliverable": "ux-handoff.md 文件、内容摘要、实际读回核对结果；不修改其他文件。",
+    "owner": null,
+    "ownerNote": "需求已明确文件路径、语言、内容要点和交付形式，确认后即可按此提案执行。",
+    "deliveryConditions": [
+      "仅创建/写入 ux-handoff.md，不修改其他文件",
+      "文件内容为中文且包含用户指定的四条约定",
+      "完成读回核对，并在回复中给出文件路径、内容摘要和核对结果"
+    ],
+    "evidenceRefs": [
+      "sourceRef:ui:entry"
+    ],
+    "blockingGaps": [
+      "taskCandidates 为空，尚无已匹配的既有任务，需用户确认后新建任务"
+    ],
+    "lifecycle": "proposal -> user confirmation -> requirement.submit -> implicit-brain FIFO",
+    "requiresUserConfirmation": true,
+    "confirmationPrompt": "确认将以下需求提交为任务：在当前工作区创建 ux-handoff.md（中文写给实际使用者，含四条 UX 约定），并读回核对后返回文件路径、内容摘要和核对结果；不修改其他文件。"
+  }
+}`;
+
+test('provider explicit brain interpreter strictly rejects a recorded nested-decision intake output', async () => {
+  const binding: ProviderBinding = {
+    bindingId: 'binding-explicit-recorded-nested',
+    providerId: 'provider-explicit-recorded-nested',
+    protocol: 'responses',
+    endpointRef: 'fake://explicit-recorded-nested',
+    modelRef: 'model-explicit-recorded-nested',
+    configDigest: 'sha256:explicit-recorded-nested-config',
+    capabilityDigest: 'sha256:explicit-recorded-nested-capability',
+  };
+  const options = {
+    binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new FakeReplayExecutionRuntimePort({
+      binding,
+      stepDelayMs: 0,
+      replay: [
+        { kind: 'output', state: 'output', summary: RECORDED_NESTED_DECISION_OUTPUT },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ],
+    }),
+  };
+  const lifecycle: string[] = [];
+  const settle = options.port.settle.bind(options.port);
+  const close = options.port.close.bind(options.port);
+  options.port.settle = async (request) => { lifecycle.push('settle'); return settle(request); };
+  options.port.close = async (bind) => { lifecycle.push('close'); return close(bind); };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...options,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded-nested-fixture', baseUrl: binding.endpointRef },
+      binding, port: options.port }),
+  });
+  await assert.rejects(
+    () => interpreter.interpret({
+      interactionId: 'interaction-recorded-nested', inputRevision: 1, sourceRef: 'ui:entry',
+      rawInput: '请完成一次 HumanAgent UX 文档交接任务', clarifications: [], taskCandidates: [],
+    }),
+    /interaction agent decision does not match the explicit intake contract/,
+  );
+  assert.deepEqual(lifecycle, ['settle', 'close']);
 });
