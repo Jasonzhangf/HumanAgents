@@ -8237,48 +8237,64 @@ test('checkpoint committedAt binds to the first durable receipt instead of later
 });
 
 test('fake and rcc modes do not hydrate each other through a shared checkpoint root', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-mode-isolation-'));
-  const checkpointRoot = join(root, 'checkpoints');
-  const fake = await startUiRuntime({
-    mode: 'fake',
-    organId,
-    binding,
-    port: buildFakeExecutionPort(binding, 1),
-    checkpointRoot,
-    evidenceRoot: join(root, 'evidence'),
-    uiRoot: join(process.cwd(), 'docs', 'ui'),
-    providerState: 'ready',
-    portNumber: 0,
-    memory: testMemory('project-ui-mode-fake'),
-  });
+  const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures');
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, 'humanagent-ui-mode-isolation-'));
   try {
-    const created = await fetch(`${fake.server.url}/api/tasks`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'fake-only task' }),
+    const checkpointRoot = join(root, 'checkpoints');
+    const fake = await startUiRuntime({
+      mode: 'fake',
+      organId,
+      binding,
+      port: buildFakeExecutionPort(binding, 1),
+      checkpointRoot,
+      evidenceRoot: join(root, 'evidence'),
+      uiRoot: join(process.cwd(), 'docs', 'ui'),
+      providerState: 'ready',
+      portNumber: 0,
+      memory: testMemory('project-ui-mode-fake'),
     });
-    assert.equal(created.status, 201);
-  } finally {
-    await fake.server.close();
-  }
+    try {
+      const created = await fetch(`${fake.server.url}/api/tasks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'fake-only task' }),
+      });
+      assert.equal(created.status, 201);
+    } finally {
+      await fake.server.close();
+    }
 
-  const rcc = await startUiRuntime({
-    mode: 'rcc',
-    organId,
-    binding,
-    port: buildFakeExecutionPort(binding, 1),
-    checkpointRoot,
-    evidenceRoot: join(root, 'evidence'),
-    uiRoot: join(process.cwd(), 'docs', 'ui'),
-    portNumber: 0,
-    memory: testMemory('project-ui-mode-rcc'),
-  });
-  try {
-    const tasks = await fetch(`${rcc.server.url}/api/tasks`);
-    const body = await tasks.json() as { readonly counts: { readonly total: number } };
-    assert.equal(body.counts.total, 0);
+    const rcc = await startUiRuntime({
+      mode: 'rcc',
+      organId,
+      binding,
+      port: buildFakeExecutionPort(binding, 1),
+      checkpointRoot,
+      evidenceRoot: join(root, 'evidence'),
+      uiRoot: join(process.cwd(), 'docs', 'ui'),
+      portNumber: 0,
+      memory: testMemory('project-ui-mode-rcc'),
+      runtimeComposition: {
+        // This start only reads the checkpoint root the fake launch wrote. The
+        // read-only mode-isolation check must never reach either real preparer.
+        prepareAgentProvider: async () => {
+          throw new Error('read-only mode isolation must not prepare a launch provider');
+        },
+        prepareTaskAgentProvider: async () => {
+          throw new Error('read-only mode isolation must not prepare a Task provider');
+        },
+      },
+    });
+    try {
+      const tasks = await fetch(`${rcc.server.url}/api/tasks`);
+      const body = await tasks.json() as { readonly counts: { readonly total: number } };
+      assert.equal(body.counts.total, 0);
+    } finally {
+      await rcc.server.close();
+    }
   } finally {
-    await rcc.server.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -9383,7 +9399,9 @@ test('produced artifact body carries the produced files so a reviewer can check 
 });
 
 test('orchestrated review is handed the produced file bodies, not only the executor summary', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-produced-artifacts-'));
+  const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures');
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, 'humanagent-ui-produced-artifacts-'));
   const workspaceRoot = join(root, 'workspace');
   await mkdir(workspaceRoot, { recursive: true });
   await writeFile(join(workspaceRoot, 'artifact.svg'), '<svg id="pelican">animated</svg>', 'utf8');
@@ -9404,7 +9422,7 @@ test('orchestrated review is handed the produced file bodies, not only the execu
           continuationRef: 'response-1',
         },
       },
-      { kind: 'terminal', state: 'tool-waiting', summary: 'provider awaits the tool result', terminalState: 'waiting', nextAction: { kind: 'wait', ref: 'responses-tool-call' } },
+      { kind: 'terminal', state: 'tool-waiting', summary: 'provider awaits the tool result', terminalState: 'waiting', nextAction: { kind: 'continue', ref: 'responses-tool-call' } },
       { kind: 'output', state: 'output', summary: 'fake replay: final output chunk 2', outputRefs: ['fake://output/2'] },
       { kind: 'terminal', state: 'succeeded', summary: 'fake replay: execution succeeded', terminalState: 'succeeded' },
     ],
@@ -9514,42 +9532,47 @@ test('orchestrated review is handed the produced file bodies, not only the execu
       },
     },
   });
-  service.startImplicitConsumer();
-  const interactionId = await service.receiveExplicitInput({
-    sourceRef: 'ui:produced-artifacts',
-    rawInput: 'produce the animated artifact',
-    channel: 'business',
-  });
-  await service.beginExplicitMatching(interactionId);
-  await service.recordExplicitMatch(interactionId, {
-    normalizedInput: 'produce the animated artifact',
-    matchedTasks: [],
-    knownFacts: [],
-  });
-  await service.proposeExplicitRequirement(interactionId, {
-    proposedIntent: 'create',
-    proposal: 'produce the animated artifact',
-  });
-  const proposed = await service.inspectExplicitInteraction(interactionId);
-  await service.confirmExplicitRequirement({
-    draftId: proposed.draft!.draftId,
-    inputRevision: 1,
-    confirmationRef: 'confirmation:produced-artifacts',
-    confirmedBy: 'human:operator',
-    confirmedAt: '2026-10-02T00:00:00.000Z',
-    payloadRef: 'asset://requirements/produced-artifacts',
-  });
-  await waitFor(() => assert.equal(
-    service.listTasks().completed[0]?.state,
-    'succeeded',
-    JSON.stringify(service.listTasks().counts),
-  ));
-  assert.ok(subjectBodies.length > 0, 'the review agent was invoked');
-  // The reviewer must see the artifact itself: the executor summary alone
-  // cannot be checked against acceptance criteria that describe file content.
-  assert.match(subjectBodies[0]!, /--- file: artifact\.svg ---/);
-  assert.match(subjectBodies[0]!, /<svg id="pelican">animated<\/svg>/);
-  assert.match(subjectBodies[0]!, /fake replay: final output chunk 2/);
+  try {
+    service.startImplicitConsumer();
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:produced-artifacts',
+      rawInput: 'produce the animated artifact',
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: 'produce the animated artifact',
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'create',
+      proposal: 'produce the animated artifact',
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:produced-artifacts',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-02T00:00:00.000Z',
+      payloadRef: 'asset://requirements/produced-artifacts',
+    });
+    await waitFor(() => assert.equal(
+      service.listTasks().completed[0]?.state,
+      'succeeded',
+      JSON.stringify(service.listTasks().counts),
+    ));
+    assert.ok(subjectBodies.length > 0, 'the review agent was invoked');
+    // The reviewer must see the artifact itself: the executor summary alone
+    // cannot be checked against acceptance criteria that describe file content.
+    assert.match(subjectBodies[0]!, /--- file: artifact\.svg ---/);
+    assert.match(subjectBodies[0]!, /<svg id="pelican">animated<\/svg>/);
+    assert.match(subjectBodies[0]!, /fake replay: final output chunk 2/);
+  } finally {
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('produced artifact reader returns written files and reports paths it cannot hand over', async () => {
