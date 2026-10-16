@@ -721,11 +721,16 @@ async function runBlockedDispatch(
     service.startImplicitConsumer();
     await confirmRequirement(service, `active-turn-blocked-${failure}`);
     // A blocked dispatch settles into `failed` when no child ran, and into
-    // `blocked` (waiting) when a legitimate child call already completed.
+    // `blocked` (waiting) when a legitimate child call already completed. The
+    // waiting bucket also carries the pre-admission `state === 'waiting'` row
+    // that prepareExecution writes synchronously, so only the terminal
+    // `state === 'blocked'` row may satisfy the settlement wait.
     try {
       await waitFor(() => {
         const tasks = service.listTasks();
-        const settled = expected === 'failed' ? tasks.failed.length : tasks.waiting.length;
+        const settled = expected === 'failed'
+          ? tasks.failed.length
+          : tasks.waiting.filter((row) => row.state === 'blocked').length;
         assert.equal(settled, 1, `the blocked dispatch must settle into ${expected}`);
       });
     } catch (error) {
@@ -824,6 +829,7 @@ test('behavior 1 red: a failed call checkpoint or invocation association blocks 
 
 test('behavior 2: refined child delivery is returned, then adopted, and never pollutes the parent with raw facts', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-active-turn-child-'));
+  const { preparedJournal, admission } = fixtureExecutionAdmission(root);
   const activeTurnJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
   const refinedDeliveryStore = new MemoryRefinedDeliveryStore();
   const port = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
@@ -836,7 +842,7 @@ test('behavior 2: refined child delivery is returned, then adopted, and never po
       checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
       attentionPort: attentionPort(),
       providerState: 'ready',
-      journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+      journal: preparedJournal,
       closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
       memory: testMemory('project-active-turn-child'),
       explicitBrainInterpreter: unusedExplicitBrainInterpreter,
@@ -845,6 +851,20 @@ test('behavior 2: refined child delivery is returned, then adopted, and never po
       permissionSnapshot,
       refinedDeliveryStore,
       runtimeComposition: {
+        admitExecution: async (allocation) => {
+          await admission.grants.grant({
+            taskId: allocation.taskId,
+            requestId: `fixture-task-execution:${allocation.taskId.value}`,
+            expectedRevision: 0,
+            owner: fixtureControlOwner,
+            capability: {
+              actionId: TASK_EXECUTION_ACTION_ID,
+              capabilities: [TASK_EXECUTION_CAPABILITY],
+              scope: { organId: allocation.scope.organId, taskId: allocation.taskId },
+            },
+          });
+          await admission.admitExecution(allocation);
+        },
         createTaskAssembly({ scope, checkpointJournal, executionAgent, maxAttempts, childCallPort }) {
           const pool = runtimePool();
           const orchestration = new OrchestrationManager({
