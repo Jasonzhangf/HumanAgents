@@ -10,6 +10,7 @@ import {
   canonicalJsonStringify,
   fileWriteEffectId,
   id,
+  isStandardTurnEndToolId,
   type AcceptedRawFact,
   type ContextHistoryRecord,
   type EvidenceRef,
@@ -500,7 +501,7 @@ function plannerFrames(model: string, payload: Record<string, unknown>): readonl
  * accepted end result as a transport-only text answer. A transport-only text
  * answer is never a standard end, and an unrecognized request fails closed.
  */
-async function upstream(model: string, deliveryRef: string): Promise<Upstream> {
+async function upstream(model: string, deliveryRef: string, deliveryText?: string): Promise<Upstream> {
   const wires: { path: string; body: string }[] = [];
   const section = (text: string) => ({ text, evidenceRefs: [deliveryRef] });
   const frames = [
@@ -513,7 +514,7 @@ async function upstream(model: string, deliveryRef: string): Promise<Upstream> {
           goal: section('resume the original business turn'), actions: section('retained the confirmed effect'),
           result: section('standard end accepted on the resumed incarnation'),
           expectedNextStep: section('planner aligns the exact current plan') },
-          deliveryRefs: [deliveryRef] }) } },
+          deliveryRefs: [deliveryRef], ...(deliveryText === undefined ? {} : { deliveryText }) }) } },
     { type: 'response.completed', response: { id: `response-${model}` } },
   ];
   const server = createServer((request, response) => {
@@ -969,7 +970,9 @@ async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
  * its original assignment/input/capture, and the exact committed predecessor.
  * Every durable record is written through the real owner.
  */
-async function buildColdFixture(name: string): Promise<ColdFixture> {
+async function buildColdFixture(name: string,
+  expectedOutputRefs: readonly string[] = ['original-output'],
+  targetRefs: readonly string[] = ['original-target']): Promise<ColdFixture> {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, `${name}-`));
   const preparedPath = join(root, 'prepared.jsonl');
@@ -1086,8 +1089,8 @@ async function buildColdFixture(name: string): Promise<ColdFixture> {
   };
   const assignment: WorkAssignment = { assignmentId: allocation.assignmentId, taskId,
     pipelineNodeId: 'cold-resume-node', attempt: 1, executionEpoch: allocation.executionEpoch,
-    inputRevision: allocation.inputRevision, ...criteria, targetRefs: ['original-target'],
-    expectedOutputRefs: ['original-output'],
+    inputRevision: allocation.inputRevision, ...criteria, targetRefs,
+    expectedOutputRefs,
     acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     requiredCapabilities: ['provider.execution'], mergeGate: 'not-required' };
   const businessTurnId = 'original-business-turn';
@@ -1456,6 +1459,7 @@ function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model
   coordinator = new RuntimeTaskCoordinator({
     organId,
     checkpointStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
+    publicOutputStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, now),
     attentionPort: attentionPort(),
     journal: fixture.preparedJournal,
     now,
@@ -2119,9 +2123,16 @@ async function runHttpResumeAssertions(
 function registerPublicConsumers(): void {
   // Observed live 409 task.assembly.missing strands an already saved turn.
   // Cost: one existing fixture, one preparation run and one boundary resume.
+  // Observed source-conflict: allocation epoch 1 differs from closing epoch 2.
+  // Impact: accepted text is rejected or lost on refresh. Cost: strengthen this
+  // same case with real Journal publication/readback and one fresh hydrate.
   test('public cold boundary resume creates the real Planner assembly without acquiring an executor or replaying saved work', async () => {
-    const fixture = await buildColdFixture('boundary-planner-assembly');
-    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator);
+    const fixture = await buildColdFixture('boundary-planner-assembly', ['original-output'],
+      ['original-target', 'original-delivery-text-target']);
+    assert.deepEqual(fixture.assignment.expectedOutputRefs, ['original-output']);
+    assert.deepEqual(fixture.assignment.targetRefs, ['original-target', 'original-delivery-text-target']);
+    const deliveryText = '已恢复原任务。确认的文件与副作用保持不变。\n最终业务结果：冷恢复交付完成。';
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, deliveryText);
     const owned: ResumeAssembly[] = [];
     let succeeded = false;
     try {
@@ -2149,6 +2160,26 @@ function registerPublicConsumers(): void {
       assert.deepEqual(beforeProgress!.phases.filter((phase) => phase.state === 'committed').map((phase) => phase.phase).sort(),
         [...NATIVE_SAVE_PHASES].sort());
       const beforeSegments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+      assert.equal(fixture.allocation.executionEpoch, 1);
+      const closingSegment = beforeSegments.at(-1)!;
+      assert.equal(closingSegment.binding.execution.executionEpoch, 2);
+      assert.deepEqual(closingSegment.binding.assignment, fixture.assignment);
+      assert.equal(closingSegment.binding.scope.operationId?.value, fixture.allocation.operationId.value);
+      assert.equal(closingSegment.binding.businessTurnRef.businessTurnId, fixture.businessTurnId);
+      const acceptedEnds = (await fixture.segmentJournal.readSegmentRecords({
+        businessTurnId: fixture.businessTurnId,
+        segmentId: closingSegment.segmentId,
+      }))
+        .flatMap((record) => record.kind === 'accepted-fact'
+          && record.entry.envelope.fact.kind === 'tool-call'
+          && isStandardTurnEndToolId(record.entry.envelope.fact.call.toolId) ? [record.entry] : []);
+      assert.equal(acceptedEnds.length, 1);
+      assert.equal(acceptedEnds[0]!.envelope.execution.executionEpoch, 2);
+      assert.deepEqual(acceptedEnds[0]!.envelope.scope, closingSegment.binding.scope);
+      const closingCheckpoint = await new ServiceExecutionCheckpointStore(fixture.journalPath,
+        fixture.journal, () => new Date(at)).readLatest(closingSegment.binding.scope);
+      assert.equal(closingCheckpoint?.checkpoint.executionEpoch, 2);
+      assert.equal(closingCheckpoint?.checkpoint.scope.operationId?.value, fixture.allocation.operationId.value);
       const beforeFile = await readFile(fixture.effectPath, 'utf8');
       assert.equal(beforeFile, fixture.output);
       const beforeEffects = effectRecordCount(beforeRecords, fixture.effect.effectId);
@@ -2216,12 +2247,37 @@ function registerPublicConsumers(): void {
       assert.deepEqual(runtime.coordinator.taskSnapshots().map((task) => task.taskId.value), beforeTaskIds);
       assert.equal(runtime.coordinator.taskSnapshot(fixture.taskId).executionEpoch,
         beforeSegments.at(-1)!.binding.execution.executionEpoch);
+      const completed = runtime.coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(completed.operationId, fixture.allocation.operationId.value);
+      assert.equal(completed.output, deliveryText);
+      const publicStore = new ServiceExecutionCheckpointStore(fixture.journalPath,
+        new JsonlOrganJournal(fixture.journalPath), () => new Date(at));
+      const publication = await publicStore.readPublicOutputs({ scope: closingSegment.binding.scope, executionEpoch: 2 });
+      assert.equal(publication.state, 'committed');
+      assert.equal(publication.commits.length, 1);
+      assert.equal(publication.commits[0]!.text, deliveryText);
+      assert.equal(publication.commits[0]!.ref.binding.executionEpoch, 2);
+      assert.deepEqual(completed.publicOutput, publication);
+      const oldPublication = await publicStore.readPublicOutputs({ scope: closingSegment.binding.scope, executionEpoch: 1 });
+      assert.deepEqual(oldPublication.commits, [], 'allocation epoch cannot impersonate the closing publication');
+      const refreshed = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model');
+      await refreshed.coordinator.hydrate();
+      const hydrated = refreshed.coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(hydrated.taskId.value, fixture.taskId.value);
+      assert.equal(hydrated.operationId, fixture.allocation.operationId.value);
+      assert.equal(hydrated.executionEpoch, 2);
+      assert.equal(hydrated.state, 'succeeded');
+      assert.deepEqual(hydrated.publicOutput, publication, 'fresh hydration must retain the exact text and commit');
+      assert.equal(refreshed.assemblies.length, 0, 'refresh does not acquire an assembly');
       const unbound = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', { omitAssemblyFactory: true });
       await assert.rejects(() => unbound.coordinator.resumeExecution(fixture.taskId, fixture.allocation.operationId, selected),
         (error: unknown) => (error as { code?: string }).code === 'orchestration.unavailable');
       assert.equal(http.wires.length, wireOffset + 1, 'missing factory must not invoke any Provider');
       const receipt = { boundaryAssembly: 1, executorInstances, plannerPosts: wires.length,
-        originalSegments: beforeSegments.length, effectRecords: beforeEffects, fileDigest: digest(beforeFile) };
+        originalSegments: beforeSegments.length, effectRecords: beforeEffects, fileDigest: digest(beforeFile),
+        allocationEpoch: fixture.allocation.executionEpoch, closingEpoch: hydrated.executionEpoch,
+        publicCommit: publication.commits[0]!.ref, deliveryDigest: digest(deliveryText),
+        hydratedPublicOutput: hydrated.publicOutput };
       await mkdir(EVIDENCE_ROOT, { recursive: true });
       const archiveRoot = await mkdtemp(join(EVIDENCE_ROOT, 'passed-boundary-receipts-'));
       await writeFile(join(archiveRoot, 'receipt.json'), JSON.stringify(receipt, null, 2), 'utf8');
