@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- defaultstop binderc952+consumer8e14fd9已标准合，Root组合Appbuild/Apptestcompile0、8选定case8/8exit0。默认非fake装配经selectedprepare失败→publicstop→durablenativecheckpoint→actualparentcancelled→physicalcloseonce已验；编译型oldsourceRED不计，最小stopSettlementwireomission可编译behaviorRED有效。worker最终44d0f20与8e14内容diff为空，最终正常commit ancestry已另标准merge，不重验同内容。作者先用hooksPathoverride再softreset/普通commit的过程不合合同；Root核该仓库两hook均不存在，未省略实际hook，两个commit均已保留在候选，无main改写。共享Appui-runtime.test窗口已freeze释放，源worker实际退出后回收其干净树。
+
 - G-A846428d final回执已收，sourceworker自然exit/clean。Root未等无关milestone：同G树已标准merge候选d51a176+冻结c952binder，freshGCM `provider-http-admission-compose-gcm-r2-20261016`只迁移该用例Taskpreparer并补startRuntime抛错时fetch/fixturefinally收口，不新增场景、不重做已验sourceflipRED。defaultstop作者已纠正首编译型RED、取得可编译behaviorRED并恢复，最终sourcefreeze/回执仍待，暂不合c952进唯一候选；该来源只用于独立开发组合，不冒生产验收。当前4路实际GCM进程（defaultstop58321、pendingreceipt88102、HTTPcompose79091、parentreconcile2525）已核，UX另两路保持自身owner。
 
 - G-A publicproof source846428d已作者freeze：只new-task-identity原consumer，正常compile0/新1/1+整文件5/5，sourcehttp→rcc可编译反例在实际Taskidentity断言0≠1失败，恢复GREEN。Root核test仍用旧prepareAgentProvider；即将接受的defaultstopbinder改为Taskscopedpreparer后需在同G树标准Git组合并迁移该caller/复验，故暂不接受为最终组合证据、不关闭来源树。fixturefetch只截获配置上游，公开UI/FIFO/Journal真实；不证明非RCCvendor。作者回执分支名写错，实际来源branch为codex/provider-http-admission-proof-20261016，以GitSHA为准。
