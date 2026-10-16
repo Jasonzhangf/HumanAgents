@@ -2,9 +2,15 @@
 
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
-## 1. 当前目标与总体进度（截至 2026-10-15）
+## 1. 当前目标与总体进度（更新至 2026-10-16）
 
 ### 续接增量（2026-10-16）
+
+- **原 I1 候选闭环真实成功，标准交付仍未完成。** 冻结源码 `2d203bdf6880e5b2ca28b875e77ee62ee24f3097` 正式 restart 到 generation10/PID3587；唯一原 resume `resume-1792181390901` 返回202 released，原 Task `ui-task-implicit-draft-2` 最终 succeeded。Journal715 `public-output.committed` 绑定原 operation `ui-operation-1` / physical epoch3，正文为实际 accepted deliveryText。再次正式 restart 到 **generation11/PID13853/port53007**，fresh GET 仍 succeeded、同epoch3、同公开正文。新 executor/Planner 均0；原613 accepted facts、2 segments、1CP、1save intent、2save progress、3Planner records不增，prefix保留。Root已读 `epoch-handoff/{command,fresh-hydrate-receipt,public-commit-record}.json`；直接读取原 ux-handoff.md 确认1820bytes/SHA256 `04cfc565…3d9` 与四项内容不变。现不再重复resume；后续restart由UX协调唯一操作者。
+- **parent恢复包已接收并收口。** `258ac78` 正常提交7文件并标准合流；Runtime2/Provider1/App真实双进程1共4个选定用例通过，省略App parent wire实际 found2 RED，恢复同hash后GREEN。Root组合App build/App-test compile0，独立双进程consumer1/1：old79994→new79894，同turn/op，epoch2 prepare/request/close各1、helper0、semanticCP成功；旧upstream facts明确seeded，不冒vendor断线证明。来源clean/已合/作者及测试PID absent后normal remove/prune/pathabsent，注册6→5。三项明确归属fixture已不存在；13项历史来源未核明目录保留，不称全局清理完成。证据 `provider-parent-ancestry-finish-gcm-r2-20261016/owner-acceptance.md`。
+- **epoch包及回归闭合。** production `5f514e5` 已合并且正式采用；test-only `0abfe5e` 已标准合为 `0e4f12b`。Root scopedtsc0、原cold consumer完整 **6/6 PASS**，两个旧epoch source/readback反例均有实际RED/恢复证据。首Root Node路径写错仅notfound，纠正到tsconfig真实 `dist/tests-cold-source` 后通过，不当产品错误。candidate目前仅新增测试，运行代码仍2d203。原alias+text测试前置的refs/digests不一致已由独立Planner校正初始合法绑定，未改生产Review约束。
+- **当前剩余主线。** Runtime-start GCM `provider-runtime-start-release-gcm-r1-20261016` 独占原receipt树的coordinator+原startup case；只把execution.started持久化移到发布running/released之前，已观察原case GREEN与旧顺序RED，final恢复/fixture收口仍待接收，不先记完成。UX独立计划 `ux-terminal-mobile-plan-r2-20261016/plan.md` 的A为冷重建旧error残留，须按typed current-state processing/retained duties协调，不能按succeeded/有正文吞错；A等startup freeze后串行。B/C当前层与手机min-content修复由UX GCM并行，仅JS/CSS/既有consumer。完整milestone Review、main集成、正式main运行复验和push均未开始。
+- **下层后继证据。** bounded child观察确认 `createAppChildProducer` 当前无实际调用/测试绑定；本地port不直接含trusted time不等于端到端缺失，独立complex plan `provider-child-checkpoint-gap-plan-agy4-r1-20261016` 只决定真实caller/最小foundation是否有可执行缺边，不为unused port堆字段。旧helper23MiB cache虽无注册树共享引用，creator仍UNKNOWN，继续PROTECTED_HOLD，非当前代码阻塞。
 
 - 两个过期基线 fixture 已正常提交 `e984937` 并标准合为 `cb7c9a5`。Root 组合 App-test tsc exit0、直接 Node 原 cross-mode/produced-file-bodies **2/2 PASS**，断言保留；两类 canonical fixture 目录均无残留。作者误放树内的 `run/result.md` 已移交外置 run/source-tree-notes，未提交。原第三项 startup-event failure 仍待 Runtime counterpart。另 UX 的 alias+text 受控用例已发生 **Review subject digest mismatch FAIL**，与本侧两例分开；原真实 Task expectedOutputRefs=[]，其 epoch 用例按真实初始声明构造，未修或豁免 Review 生产校验。该 alias+text FAIL 由 UX 只读观察定位，root cause/owner 待证，不记已修。
 
