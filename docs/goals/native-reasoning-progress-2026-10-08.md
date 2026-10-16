@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- defaultstop来源收口完成：PID58321 absent、treeclean，原prepared-stop-producer树已普通remove/prune/pathabsent，接收与流程偏差回执见该run/owner-acceptance.md；helper-app-wiring旧树仍有归属未核销.pnpm-store，PROTECTED_HOLD不强删。共享App测试窗口已释放。genericG最小真实来源验收独立planr1区分“通用HTTP机制”与“宣称外部厂商”，实际非RCC本机HTTPserver可证明机制，不能冒具体vendor；Root要求r2冻结实际config/credential/consumer/receipt字段并复用已验G-A准入，避免猜字段、重复Taskharness或额外安全测试。既有真实RCC同入口门禁不变，未宣称任何新vendor。
+
 - defaultstop binderc952+consumer8e14fd9已标准合，Root组合Appbuild/Apptestcompile0、8选定case8/8exit0。默认非fake装配经selectedprepare失败→publicstop→durablenativecheckpoint→actualparentcancelled→physicalcloseonce已验；编译型oldsourceRED不计，最小stopSettlementwireomission可编译behaviorRED有效。worker最终44d0f20与8e14内容diff为空，最终正常commit ancestry已另标准merge，不重验同内容。作者先用hooksPathoverride再softreset/普通commit的过程不合合同；Root核该仓库两hook均不存在，未省略实际hook，两个commit均已保留在候选，无main改写。共享Appui-runtime.test窗口已freeze释放，源worker实际退出后回收其干净树。
 
 - G-A846428d final回执已收，sourceworker自然exit/clean。Root未等无关milestone：同G树已标准merge候选d51a176+冻结c952binder，freshGCM `provider-http-admission-compose-gcm-r2-20261016`只迁移该用例Taskpreparer并补startRuntime抛错时fetch/fixturefinally收口，不新增场景、不重做已验sourceflipRED。defaultstop作者已纠正首编译型RED、取得可编译behaviorRED并恢复，最终sourcefreeze/回执仍待，暂不合c952进唯一候选；该来源只用于独立开发组合，不冒生产验收。当前4路实际GCM进程（defaultstop58321、pendingreceipt88102、HTTPcompose79091、parentreconcile2525）已核，UX另两路保持自身owner。
