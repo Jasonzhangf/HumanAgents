@@ -31,7 +31,7 @@ import { contextHistoryFromRecord, conditionalReentryFromRecord, closureFromReco
 import { createActiveTurnSegmentJournal, createNativeRecoveryAssets, type NativeRecoveryAssetsReadback } from '../native-recovery-assets.js';
 import { readOperationControlFromRecords } from '../operation-control-journal.js';
 import { readPreparedExecutionInput, type AdmittedExecutionInput } from '../prepared-execution-input.js';
-import { readColdCurrentFromJournal } from './reentry-current-facts.js';
+import { readColdCurrentFromJournal, type ColdPhysicalTailProof } from './reentry-current-facts.js';
 
 /** Selectors only. The Runtime caller retains the allocation; no new business admission is made. */
 export interface RuntimeColdExecutionSourceRequest {
@@ -106,13 +106,6 @@ export async function readColdExecutionSource(
   if (!verification.valid) missing(verification.error ?? 'Organ Journal verification failed');
   const records = verification.records;
   const taskScope = { organId: allocation.scope.organId, taskId: allocation.taskId };
-  const coldCurrent = await readColdCurrentFromJournal(
-    owners.journal,
-    { allocation, businessTurnId: request.businessTurnId },
-    owners.principalOwner,
-  );
-  if (coldCurrent.state !== 'known') missing(coldCurrent.reason);
-  const current: ColdCurrentFacts = coldCurrent;
 
   const completion = new JsonlOperationCompletionJournal({ journal: owners.journal });
   const native = createNativeRecoveryAssets({ journalPath: owners.journalPath,
@@ -150,6 +143,34 @@ export async function readColdExecutionSource(
       ? { segmentId: tailId, interrupted: receipt.anchor }
       : { segmentId: tailId, initialOpen: receipt.anchor };
   if (!same(tail, request.predecessor)) missing('the exact predecessor selector does not match the committed segment tail');
+
+  let physicalTail: ColdPhysicalTailProof | undefined;
+  if (tailSegment !== undefined) {
+    const carrier = records.find((record) => {
+      const segment = segmentOpenedFromRecord(record);
+      return segment !== null && segment.segmentId === tailSegment.segmentId;
+    });
+    if (carrier === undefined || carrier.commitId === undefined) {
+      missing('the committed segment tail has no physical Journal commit identity');
+    }
+    physicalTail = {
+      segment: tailSegment,
+      commitRef: {
+        commitId: carrier.commitId,
+        journalSeq: carrier.seq,
+        recordDigest: carrier.recordDigest,
+      },
+    };
+  }
+
+  const coldCurrent = await readColdCurrentFromJournal(
+    owners.journal,
+    { allocation, businessTurnId: request.businessTurnId },
+    owners.principalOwner,
+    physicalTail,
+  );
+  if (coldCurrent.state !== 'known') missing(coldCurrent.reason);
+  const current: ColdCurrentFacts = coldCurrent;
 
   const tailBinding = tailSegment?.binding ?? binding;
   const currentContext = current.kind === 'checkpoint-bound' ? current.current.context : current.context;
