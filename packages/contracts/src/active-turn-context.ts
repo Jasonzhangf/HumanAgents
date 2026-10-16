@@ -188,8 +188,14 @@ export interface AcceptedReviewChildDelivery {
 
 export type AcceptedChildDelivery = AcceptedExecutionChildDelivery | AcceptedReviewChildDelivery;
 
-/** One Runtime-accepted entry: a Provider raw fact or a refined child delivery. */
-export type AcceptedTurnEntry = AcceptedRawFact | AcceptedChildDelivery;
+/**
+ * One Runtime-accepted entry: a Provider raw fact or a refined child delivery.
+ * The raw fact carries the producing execution identity, so this stays generic
+ * over the neutral identity union while the default preserves the Task-bound shape.
+ */
+export type AcceptedTurnEntry<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = AcceptedRawFact<TIdentity> | AcceptedChildDelivery;
 
 export type RuntimeRequestLifecyclePhase = 'dispatching' | 'dispatched' | 'waiting' | 'settled' | 'failed' | 'cancelled';
 
