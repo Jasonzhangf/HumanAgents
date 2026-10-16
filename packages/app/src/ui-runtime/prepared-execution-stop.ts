@@ -7,6 +7,7 @@ import {
   type EvidenceRef,
   type OperationId,
   type ProviderBinding,
+  type ProviderCloseResult,
   type ScopeRef,
   type TaskId,
 } from '../../../contracts/src/index.js';
@@ -441,7 +442,7 @@ function runExclusive<T>(
 export class PreparedExecutionStop {
   private readonly journal: JsonlOrganJournal;
   private readonly taskJournal: RuntimeTaskJournalPort;
-  private readonly admission: ReturnType<typeof createExecutionAdmission>;
+  private readonly admission: Pick<ReturnType<typeof createExecutionAdmission>, 'gateway'>;
   private readonly gates = new Map<string, Promise<void>>();
   private readonly activePreparations = new Map<string, ActivePreparation>();
   private readonly liveCustody = new Map<string, ProviderCustody>();
@@ -449,7 +450,10 @@ export class PreparedExecutionStop {
   constructor(input: {
     readonly journal: JsonlOrganJournal;
     readonly taskJournal: RuntimeTaskJournalPort;
-    readonly admission: ReturnType<typeof createExecutionAdmission>;
+    // The producer only ever drives the Gateway control owner. Typing the
+    // dependency as its exact gateway keeps one admission instance shared with
+    // the service-level admission instead of requiring a second owner.
+    readonly admission: Pick<ReturnType<typeof createExecutionAdmission>, 'gateway'>;
   }) {
     this.journal = input.journal;
     this.taskJournal = input.taskJournal;
@@ -557,6 +561,17 @@ export class PreparedExecutionStop {
       );
     }
     const key = executionKey(requested.fact.allocation);
+    // A fresh preparation that failed while its cleanup could not complete
+    // retains its lease and custody in `activePreparations`. Recover that exact
+    // preparation through the existing cleanup retry before entering the
+    // settlement gate; the retry reuses the original lease and never reselects
+    // a Provider, re-runs admission, or repeats an effect. A preparation whose
+    // callback is still active (not yet failed) falls through to the gate and
+    // stays `preparation-active`.
+    const retained = this.activePreparations.get(key);
+    if (retained !== undefined && retained.failed) {
+      await this.retryFailedPreparation(retained.lease);
+    }
     return await runExclusive(this.gates, key, async () => {
       const records = await this.journal.replay();
       const currentRequested = findRequestedByCommit(records, requested.ref);
@@ -1270,6 +1285,52 @@ export class PreparedExecutionStop {
       this.liveCustody.delete(acquisition.commitId);
       return ref;
     });
+  }
+
+  /**
+   * Close the exact Provider composition acquired under one preparation lease
+   * and return the same durable closed receipt. It reuses the deterministic
+   * acquisition identity and the existing `closeProvider` closure path, so a
+   * retry reads the original closure instead of running a second physical
+   * close. It never mints an acquisition reference, adds a custody entry, or
+   * accepts an external "already closed" declaration.
+   */
+  async closePreparationProvider(
+    lease: PreparedExecutionStopPreparationLease,
+    composition: AgentProviderComposition,
+  ): Promise<ProviderCloseResult> {
+    const acquisitionCommitId = commitIdFor(lease.allocation, `resource-acquired:${composition.binding.bindingId}`);
+    const custody = this.liveCustody.get(acquisitionCommitId);
+    if (custody !== undefined && (custody.composition !== composition || custody.lease !== lease)) {
+      throw stopError(
+        'prepared-execution-stop.custody-conflict',
+        'a different Provider composition retains this acquisition identity',
+        'resolve the retained resource through its actual owner before closing',
+      );
+    }
+    const acquisitionRecord = (await this.journal.replay())
+      .find((record) => record.commitId === acquisitionCommitId);
+    if (acquisitionRecord === undefined) {
+      throw stopError(
+        'prepared-execution-stop.acquisition-missing',
+        'the preparation has no committed Provider acquisition to close',
+        'retain the actual Provider custody until its acquisition fact is durable',
+      );
+    }
+    const acquisition = commitRef(acquisitionRecord);
+    await this.closeProvider(acquisition);
+    const closed = (await this.journal.replay())
+      .map(factEntry)
+      .find((entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'resource-closed' }>> =>
+        entry?.fact.kind === 'resource-closed' && sameRef(entry.fact.acquisition, acquisition));
+    if (closed === undefined) {
+      throw stopError(
+        'prepared-execution-stop.close-missing',
+        'the Provider close did not commit its durable closed receipt',
+        'recover the Organ Journal and read the actual closure before returning',
+      );
+    }
+    return closed.fact.receipt;
   }
 
   private async finishPreparation(

@@ -56,6 +56,10 @@ import {
   createDefaultExecutionComposition,
   createServiceExecutionAdmission,
 } from './execution-composition.js';
+import type {
+  PreparedExecutionStop,
+  PreparedExecutionStopPreparationLease,
+} from './prepared-execution-stop.js';
 import { createPreparedOperationBoundary } from '../prepared-operation-boundary.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
@@ -171,6 +175,17 @@ export interface UiRuntimeLaunchOptions {
       readonly roleId: AgentRole;
       readonly configuredAgentId?: string;
     }) => Promise<AgentProviderComposition<TIdentity>>;
+    /**
+     * Task-scoped Provider preparation that hands the selected composition's
+     * custody to the prepared-stop owner under one preparation lease. A native
+     * launch requires it so the public stop path owns the real Task custody;
+     * the neutral preparer above stays for taskless parent/helper and Planner.
+     */
+    readonly prepareTaskAgentProvider?: (
+      selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string },
+      owner: PreparedExecutionStop,
+      lease: PreparedExecutionStopPreparationLease,
+    ) => Promise<AgentProviderComposition>;
   };
   readonly i2CurrentPosition?: import('./i2-history.js').I2CurrentPositionPort;
   readonly restart?: (input: {
@@ -461,6 +476,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
       })
     : undefined;
   const prepareAgentProvider = options.runtimeComposition?.prepareAgentProvider;
+  const prepareTaskAgentProvider = options.runtimeComposition?.prepareTaskAgentProvider;
   // Fake mode keeps its fixture driver and still uses the real admission path.
   // Every non-fake launch is configured native and requires the actual preparer.
   const configuredNativeLaunch = options.mode !== 'fake';
@@ -469,6 +485,17 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
       'ui-runtime.native-preparer-missing',
       'the configured rcc launch requires the actual native Provider preparer',
       'assemble the configured Provider preparation before starting the UI runtime',
+      'humanagent.app.ui-runtime',
+    );
+  }
+  // The neutral preparer alone leaves the fresh Task custody gap open. A native
+  // launch without the Task-scoped custody preparer cannot bind the public stop
+  // owner, so it fails explicitly instead of silently keeping the gap.
+  if (configuredNativeLaunch && prepareTaskAgentProvider === undefined) {
+    throw new AppLifecycleError(
+      'ui-runtime.task-preparer-missing',
+      'the configured rcc launch requires the Task-scoped Provider preparer that transfers preparation custody to the stop owner',
+      'inject the prepared-stop custody preparer before starting the UI runtime',
       'humanagent.app.ui-runtime',
     );
   }
@@ -486,6 +513,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           preparedJournal: journal,
           resourceBoundary,
           prepareAgentProvider: prepareAgentProvider!,
+          prepareTaskAgentProvider: prepareTaskAgentProvider!,
           providerOptions: {
             onRequestLifecycle: (event) => coordinator.recordProviderRequestIdentity(event),
           },
@@ -505,6 +533,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         return {
           admitExecution: composition.admitExecution,
           createDriver: composition.createExecutionDriver,
+          preparedExecutionStop: composition.preparedExecutionStop,
           coldExecution: {
             readColdExecutionSource: composition.readColdExecutionSource,
             admitSegment: composition.admitSegment,
