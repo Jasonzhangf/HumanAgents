@@ -446,8 +446,11 @@ export class JsonlInteractionHelperJournal implements InteractionHelperTurnReadP
         throw new JournalIntegrityError('owner-accepted helper fact is missing refinedResult');
       }
     }
-    const matchingHelpers = new Map<string, InteractionHelperIdentity>();
-    for (const dispatch of decoded.dispatchAccepted.values()) {
+    const entries: InteractionHelperTurnReadbackEntry[] = [];
+    // decodeJournal already requires every returned to carry a matching dispatch fact and every
+    // owner acceptance a matching returned fact, so the dispatch-accepted collection is the
+    // authoritative identity and ordering set for a turn.
+    for (const [key, dispatch] of decoded.dispatchAccepted) {
       const assignment = dispatch.fact.assignment;
       if (
         sameOrganId(assignment.organId, turn.organId)
@@ -466,64 +469,15 @@ export class JsonlInteractionHelperJournal implements InteractionHelperTurnReadP
           helperCallId: assignment.helperCallId,
           attempt: assignment.attempt,
         };
-        matchingHelpers.set(helperIdentityKey(identity), identity);
+        entries.push({
+          identity,
+          readback: {
+            dispatchAccepted: dispatch,
+            returned: decoded.returned.get(key) ?? null,
+            ownerAccepted: decoded.ownerAccepted.get(key) ?? null,
+          },
+        });
       }
-    }
-    for (const returned of decoded.returned.values()) {
-      const result = returned.fact.result;
-      if (
-        sameOrganId(result.organId, turn.organId)
-        && result.interactionScopeId === turn.interactionScopeId
-        && result.interactionId === turn.interactionId
-        && result.inputRevision === turn.inputRevision
-        && result.parentTurnId === turn.turnId
-      ) {
-        const identity: InteractionHelperIdentity = {
-          organId: result.organId,
-          interactionScopeId: result.interactionScopeId,
-          interactionId: result.interactionId,
-          inputRevision: result.inputRevision,
-          parentTurnId: result.parentTurnId,
-          assignmentId: result.assignmentId,
-          helperCallId: result.helperCallId,
-          attempt: result.attempt,
-        };
-        matchingHelpers.set(helperIdentityKey(identity), identity);
-      }
-    }
-    for (const accepted of decoded.ownerAccepted.values()) {
-      const result = accepted.fact.result;
-      if (
-        sameOrganId(result.organId, turn.organId)
-        && result.interactionScopeId === turn.interactionScopeId
-        && result.interactionId === turn.interactionId
-        && result.inputRevision === turn.inputRevision
-        && result.parentTurnId === turn.turnId
-      ) {
-        const identity: InteractionHelperIdentity = {
-          organId: result.organId,
-          interactionScopeId: result.interactionScopeId,
-          interactionId: result.interactionId,
-          inputRevision: result.inputRevision,
-          parentTurnId: result.parentTurnId,
-          assignmentId: result.assignmentId,
-          helperCallId: result.helperCallId,
-          attempt: result.attempt,
-        };
-        matchingHelpers.set(helperIdentityKey(identity), identity);
-      }
-    }
-
-    const entries: InteractionHelperTurnReadbackEntry[] = [];
-    for (const [key, identity] of matchingHelpers) {
-      entries.push({
-        identity,
-        readback: {
-          dispatchAccepted: decoded.dispatchAccepted.get(key) ?? null,
-          returned: decoded.returned.get(key) ?? null,
-          ownerAccepted: decoded.ownerAccepted.get(key) ?? null,
-        },
-      });
     }
 
     entries.sort((left, right) => {
