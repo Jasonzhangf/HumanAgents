@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- App release 接线已由独立技术收尾正常提交 `36c4dcf`、标准合为 `419ca590`：service 单文件 10+/3-，三处 prepare→await release，保留原 operation ledger，失败不 consume/ACK；App build 与 App-test compile 均 exit0。公共行为仍未验，Runtime durable-start/retry 对应修复未做。源树 clean FF 后直接复用于 fresh GCM `provider-native-baseline-fixtures-gcm-r1-20261016`，只修原 cross-mode/review 两个过期 fixture 并跑这两个原 case；不占 UX coordinator/cold consumer 窗口，不新增测试。service GCM r3 最终 absent/exit1/treeclean，无源码贡献；未把读取计为完成。
+
 - UI raw/title 包 `52f4ee8` 已标准合为 `375b9fb`。受控双端同 runner GREEN26/26，旧基线资产同路径 RED6；修复 raw 精确定位、路径同步与长标题展示。尚未加载到原任务，不单独重启；待 epoch 包一起 build/adopt。本轮 fetch 核最新 `origin/main=298123095032bcb6b552ea88c84ca889290e43b1` 已为候选祖先，无新增上游 delta。当前三路 GCM：本侧 parent ancestry；本侧 `provider-native-release-service-gcm-r3-20261016` 只改 service 三处启动接线；UX `i1-delivery-epoch-20261016` 独占 coordinator+原 cold consumer。service packet先编译，行为等 Runtime/fixture 组合后验，不冒三红测已修。
 
 - parent ancestry 当前作者为 fresh GCM `provider-parent-ancestry-finish-gcm-r2-20261016`，直接复用原 dirty parent 树。前任 r1 已退出；它在最后状态读取后实际写入 Runtime continuation-parent 接口，Root 已保留并冻结 diff/hash，不记零产出。当前新增 Runtime 源码未验，Driver/App 接线及原用例待 r2 收尾。依据仍是已接受的 Gemini4 r2 完整计划及 `owner-acceptance.md`；不加重复 eligibility 校验，不改 foldSnapshot，不重放 helper 或远端 response 链。coordinator 独占窗口归 UX epoch-fix；release 的独立 service 阶段并行，其余部分等该来源冻结，不新建同域树。
