@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- helper F1作者终态 source `58fd4d7`，adapter1/1、raw3/3、Appbuild0及compile0有效，原omission runtime RED命中accepted refined claim缺失；Root发现三段重复枚举，freshGCM `provider-helper-cold-finish-gcm-r2-20261016`复用同树消融，未合候选。准确parent关闭ABI OAuth计划已接（保RawAsset/真实类型、完整binding、首次closedAt、physical≠semantic、exact replay fence），GCM `provider-parent-close-fact-gcm-r1-20261016`复用已验cold原树FFdd747ef，只写四生产/Appconsumer；Runtime raw test暂等F1窗口，不并写。
+- checkpointnativeport GCM r1 build/Apptesttsc0/selected1/1，但Gitmetadata index.lock被workspace-write拒绝，未提交；原错保留，missing-method counterexample只证明ABI缺失，不冒时间故障mutation。Root发现新test用tmpdir无cleanup，GCM r2复用原树只修约定fixture root/cleanup再选测提交。已按现Skill修任务launcher执行角色用获授权完整执行参数；Planner保持只读，未改全局配置/绕hook。UXresolver仍未冻结，已要求最小indexdelta优先，不造新harness；原I1由UX独占未动。
 - 用户纠正worker路由后，新执行已恢复freshGCM：`provider-checkpoint-native-port-gcm-r1-20261016`复用prepared-stop树标准FF666b599，只写FileCheckpointStore原生commit/read委托及原App consumer；不加下游未用typeguard、不重复保存协议。UXresolver34859也是freshGCM，另由UX只读worker核原I1启动基线。本侧不重复采证。已有Flashhelper仍继续，其旧GCM故障不作为新任务长期后备依据。AGY headless权限缺失已修唯一Skill正文：已有任务授权时修任务级漏参，不重复申请、不改全局或绕OS拒绝。
 - 父resource-close Gemini r4仍虚构initialInput:string和不存在类型/graph，未接受/未派代码；独立OAuth局部ABI计划 `provider-parent-close-abi-plan-oauth-r1-20261016`只校准实际Runtime/JSONL关闭事实和最小caller迁移，pre-close崩溃责任仍单列。helper F1与checkpoint lower两实现无重叠，接口验收后补GCM下游。checkpoint时间r2仅FileCheckpointStore lower委托被接受，宽泛下游计划和编译诊断RED不冒行为证据。
 - Intel卷恢复后实核唯一候选 `2aa716d` tracked clean，已标准合入冷恢复来源 `1611ec1`。Root组合验收：App build0、cold-execution-source tsc0，原cold public5+segment4共9/9 PASS；此前segment2摘要被实际4项更新，不冒原I1真实RCC恢复。UX source树已remove/prune/absent；默认resolver单透传由UX peer复用helper-app原树/index单writer，完成后才交原I1正式restart/resume窗口。
