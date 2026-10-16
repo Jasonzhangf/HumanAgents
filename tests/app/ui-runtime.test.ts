@@ -4813,65 +4813,73 @@ test('operation start journal failure retries from the durable dispatch intent w
 });
 
 test('execution start event failure resumes the committed operation intent before acknowledging the requirement', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-execution-start-failure-'));
+  const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures');
+  await mkdir(fixtureRoot, { recursive: true });
+  const root = await mkdtemp(join(fixtureRoot, 'humanagent-ui-implicit-execution-start-failure-'));
   const journal = new FailOnceProjectionJournal(join(root, 'ui-runtime-journal.jsonl'));
   const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });
   const service = serviceFor(root, port, 'fake', 'ready', journal);
-  const interactionId = await service.receiveExplicitInput({
-    sourceRef: 'ui:implicit-execution-start-failure',
-    rawInput: 'resume the committed operation intent before dispatch',
-    channel: 'business',
-  });
-  await service.beginExplicitMatching(interactionId);
-  await service.recordExplicitMatch(interactionId, {
-    normalizedInput: 'resume the committed operation intent before dispatch',
-    matchedTasks: [],
-    knownFacts: [],
-  });
-  await service.proposeExplicitRequirement(interactionId, {
-    proposedIntent: 'create',
-    proposal: 'create execution event journal retry work',
-  });
-  const proposed = await service.inspectExplicitInteraction(interactionId);
-  assert.ok(proposed.draft);
-  await service.confirmExplicitRequirement({
-    draftId: proposed.draft!.draftId,
-    inputRevision: 1,
-    confirmationRef: 'confirmation:implicit-execution-start-failure',
-    confirmedBy: 'human:operator',
-    confirmedAt: '2026-09-22T00:00:00.000Z',
-    payloadRef: 'asset://requirements/implicit-execution-start-failure',
-  });
+  try {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:implicit-execution-start-failure',
+      rawInput: 'resume the committed operation intent before dispatch',
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: 'resume the committed operation intent before dispatch',
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'create',
+      proposal: 'create execution event journal retry work',
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:implicit-execution-start-failure',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: 'asset://requirements/implicit-execution-start-failure',
+    });
 
-  journal.failNextExecutionStarted = true;
-  service.startImplicitConsumer();
-  await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
-  assert.equal(service.listTasks().counts.total, 1);
-  assert.equal(service.listTasks().counts.running, 0);
-  assert.equal(port.startPayloads.length, 0);
-  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+    journal.failNextExecutionStarted = true;
+    service.startImplicitConsumer();
+    await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
+    assert.equal(service.listTasks().counts.total, 1);
+    assert.equal(service.listTasks().counts.running, 0);
+    assert.equal(port.startPayloads.length, 0);
+    assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 
-  service.markConnected();
-  await waitFor(() => assert.equal(port.startPayloads.length, 1));
-  await waitFor(() => {
-    const state = journal.replay()
-      .filter((record): record is Extract<ReturnType<UiRuntimeJournal['replay']>[number], { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
-      .at(-1)?.state;
-    assert.deepEqual(state?.inbox.pendingDraftIds, []);
-    assert.deepEqual(state?.dispatchLedger, []);
-  });
-  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+    service.markConnected();
+    await waitFor(() => assert.equal(port.startPayloads.length, 1));
+    await waitFor(() => {
+      const state = journal.replay()
+        .filter((record): record is Extract<ReturnType<UiRuntimeJournal['replay']>[number], { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
+        .at(-1)?.state;
+      assert.deepEqual(state?.inbox.pendingDraftIds, []);
+      assert.deepEqual(state?.dispatchLedger, []);
+    });
+    assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 
-  const restarted = serviceFor(root, port);
-  await restarted.hydrate();
-  await assert.rejects(
-    () => restarted.dispatchNextExplicitRequirement(),
-    (error: unknown) => error instanceof UiRuntimeApiError
-      && error.code === 'explicit-brain.inbox.empty',
-  );
-  assert.equal(port.startPayloads.length, 1);
-  assert.equal(restarted.listTasks().counts.total, 1);
-  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+    const restarted = serviceFor(root, port);
+    await restarted.hydrate();
+    await assert.rejects(
+      () => restarted.dispatchNextExplicitRequirement(),
+      (error: unknown) => error instanceof UiRuntimeApiError
+        && error.code === 'explicit-brain.inbox.empty',
+    );
+    assert.equal(port.startPayloads.length, 1);
+    assert.equal(restarted.listTasks().counts.total, 1);
+    assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+  } finally {
+    await waitFor(() => assert.equal(service.listTasks().counts.running, 0));
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('runtime restart hydrates dispatched state without starting the requirement twice', async () => {
