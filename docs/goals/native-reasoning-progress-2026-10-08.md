@@ -6,12 +6,15 @@
 
 ### 续接增量（2026-10-15 晚）
 
-- 当前明确节点共 12 项，11 项源码已接收，G-A 作者验证仍开放；仅 restart 切片已交远端 main。此计数不是完整 goal 完成率。
-- 唯一候选 HEAD `3005bb328fbee362cdf654d93a2e7673d37ad87f`。Runtime helper 异常 settle 来源 `c49dde3` → `5ce09ec`，真实原反例 4 PASS / 1 FAIL → 5/5；App factory taskless 泛型来源 `eca3831` → `3005bb3`，类型反例 exit 2 → 0，原公开 consumer 15/15。两来源树均已正常关闭。
-- G-A r4 已合 `48729bb`，但未完成作者验收。旧 UI fixture 缺 admitExecution，失败后部分 watcher 未关闭；两个其他旧 consumer 尚未 await async API。不能以此前 typecheck0 覆盖本次新输入。
-- fresh GCM 已并发启动：`provider-generic-tg1-gcm-r5-20261015` 复用 G-A 混合树，仅改 fixture 并建立真实顺序反例；`provider-async-consumers-gcm-r1-20261015` 独占新树，仅迁移原两个消费者。独立依据为 `provider-generic-tg1-plan-agy4-r6-20261015/plan.md`，已纠正其虚构 API、无效编译路径与全 skip pattern。
-- UX peer 继续独占身份展示纠正和原 renderer/browser 验收。53007 保留原 interaction，不擅自重投。最新磁盘候选尚未 restart，当前运行实例不能视为已加载 `3005bb3`。
-- 下一步：接收两路作者验证与 UX 候选，标准 Git 合流；完成最新候选真实入口验收，再对完整 milestone 做一次整体独立 Review，合 main 并 push。完整 T5 生产 helper loop、跨 turn 恢复和 scheduled grant 等仍开放。
+- 当前本轮跟踪增量共 15 项，13 项源码已接收，G-A 验收和公开 grant 接线 2 项开放；其中 G-A 按实际依赖拆为源码、fixture 与顺序证明三路。仅 restart 切片已交远端 main。此计数不覆盖完整 goal，也不是产品完成率。
+- 唯一功能候选 `43256a7a12ef78a69fb69ead0c47a14e6a870ba3`。最新接收 Runtime session 来源 `4aa333b28b346df5606a0d85c4af9c87516364d5`，四路径与来源一致，组合 App build0。原 6 个公开 consumer 在 Root 宿主默认 HOME fixture root 实际 6/6；returnedAt 时序断言已从错误时间实际 RED 到正确时间 GREEN。原 3 个 mutant 证明分别抓错状态覆盖、身份复用与自动采纳。仅保留必要 Node ambient 声明补齐，不增运行时机制。来源树已 clean/remove/prune/absent，回执 `turn-helper-session-close-receipt.json`。
+- G-A 当前有效行为基线仍是 `1f9c9c7` 的原 148 例 118 PASS / 30 FAIL；后续只有 Runtime explicit-brain 基础和文档接收，未冒称这些失败已消失。独立 Opus 计划 `provider-ga-failures-opus-plan-r1-20261015/plan.md` 已接收。三个 fresh GCM：`runtime-release-replay-gcm-r1-20261015` 修 coordinator 回放 release/空白丢失；`runtime-ui-fixtures-gcm-r1-20261015` 补 grant/Journal 格式并对齐原6/99构造失败断言；`admission-order-proof-gcm-r1-20261015` 做真实 activeTurnJournal 顺序反例和既有失败消融。6/99 沿已批准的准入后保留恢复义务契约验证原错、blocked 与 stop，不改需求或伪造已收拢失败。其余失败不能只凭历史标签忽略完整目标。
+- 公开 grant 路由与原 native fixture 由两个不重叠 fresh GCM 继续：`provider-grant-public-entry-gcm-r1-20261015` 只 App index/server 与原 semantic consumer；`provider-native-fixture-gcm-r2-20261015` 只原 native consumer。复用现有控制类、同 Journal 和真实 principal，不新增授权策略、搜索能力或传输安全。
+- T5 Runtime 基础已冻结；App 动态 helper 接线仍未实现。原 App Planner Opus 实际 `RESOURCE_EXHAUSTED/Individual quota reached`，没有完整计划，已拒收；按新分类为单个跨模块复杂计划，fresh `provider-helper-app-wiring-gemini-plan-r2-20261015` 用 Gemini4/medium 规划，明确依赖公开 grant 组装接收。父身份、跨 turn 恢复、完整 checkpoint/Memory 路径与 scheduled grant 等仍开放。
+- UX 身份修正已接收并关闭来源树；peer 当前负责原 8 个 UI 失败最小审计/消融及已确认的 entry 确认后刷新回归。缺 Task34 capture 的 observation 保障保持 UNVERIFIED，不猜 fixture、不阻未受影响主线。
+- 53007 保留原 interaction-1/revision1，未重投、未加载上述新候选。下一步接收各路结果并标准 Git 合流，补组合后的受影响验证与同源真实入口验收；完整 milestone 达到条件后才做一次整体 Review、main/restart/push。已有有效计划与证据不因模型规则变化重做。
+
+#### 本批次前序记录（仅追溯；当前状态以上述摘要为准）
 - 正常消费者复验：Root 在 async-consumers 树补标准 offline frozen install，正常 contracts/App/test 编译均 exit 0。原两个文件实际 14 例 7 PASS / 7 FAIL；不是完成。semantic 两例缺 task grant，native 两例 blocked，另三例缺完整工具 control source。原日志 `provider-async-consumers-gcm-r1-20261015/parent-normal-consumers.log`。已交原独立 Planner `provider-consumer-grant-plan-agy4-r7-20261015` 核对最小 test-only fixture 修正，禁止修改生产授权语义。
 - T5 原独立 Planner `provider-taskless-app-plan-agy4-r5-20261015` 正在纠正真实 helper acceptance、latest-turn 与 nextAction 接口；actual model 已核 Gemini 4 Medium。只读 GCM `provider-i1-entry-observe-gcm-r1-20261015` 并发核对同次 interaction 的公开继续入口和真实 task-scoped grant 来源，不发 POST、不动 53007。
 - I1 入口观察已完成，并经 Root 对冲突源码核对：`UiTaskGrantControl` 只有库实现，`index.ts` 未实例化，`server.ts` 未挂载客户端已声明的 `/control/grant`、`/control/revoke`。这是实际生产缺边，不能用测试直接写 grant 冒公开入口闭合。fresh 独立 `provider-grant-entry-plan-fresh-agy4-r8-20261015` 规划最小接线及原 fixture 修正；r7 声称已有 HTTP grant 路由及若干 typed 签名错误，已拒收，未据此实现。
