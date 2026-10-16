@@ -179,6 +179,9 @@ function spawnReplacement(startup: SupervisorStartupDeclaration): ChildProcessLi
   const child = spawn(process.execPath, [startup.launcherPath, 'serve', ...startup.args], {
     cwd: startup.cwd,
     env: process.env,
+    // Own session and process group so the restart caller's terminal/session
+    // teardown cannot reap the replacement serve after the handoff completes.
+    detached: true,
     stdio: ['ignore', 'ignore', 'ignore'],
   });
   child.once('error', (error) => {
