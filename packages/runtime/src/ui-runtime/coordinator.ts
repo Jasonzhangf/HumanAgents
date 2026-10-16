@@ -2728,6 +2728,7 @@ export class RuntimeTaskCoordinator {
     }
     record.checkpoint = committed.checkpoint;
     record.checkpointSeq = committed.checkpoint.seq;
+    record.checkpointReceipt = undefined;
     this.pushEvent(record, operation, 'checkpoint.committed', committed.checkpoint.outcome,
       committed.checkpoint.summary, committed.checkpoint.evidenceRefs);
     await input.closeOwned();
@@ -3098,6 +3099,7 @@ export class RuntimeTaskCoordinator {
       if (result.state === 'stopped') {
         record.checkpoint = result.checkpoint;
         record.checkpointSeq = result.checkpoint.seq;
+        record.checkpointReceipt = undefined;
         this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'stopped checkpoint committed', result.checkpoint.evidenceRefs);
         const close = await this.closeForExecution(operation.operationId, record.driver, result.closure.evidenceRefs);
         if (close.state !== 'closed') {
@@ -3189,6 +3191,7 @@ export class RuntimeTaskCoordinator {
       if (result.state === 'stopped') {
         record.checkpoint = result.checkpoint;
         record.checkpointSeq = result.checkpoint.seq;
+        record.checkpointReceipt = undefined;
         this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'stopped checkpoint committed', result.checkpoint.evidenceRefs);
         const close = await this.closeForExecution(operation.operationId, record.driver, result.closure.evidenceRefs);
         if (close.state !== 'closed') {
@@ -4908,6 +4911,7 @@ export class RuntimeTaskCoordinator {
       }
       record.checkpoint = result.checkpoint;
       record.checkpointSeq = result.checkpoint.seq;
+      record.checkpointReceipt = undefined;
       this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'failure cleanup released the abandoned provider execution', result.checkpoint.evidenceRefs);
       return { checkpoint: result.checkpoint, evidenceRefs: result.closure.evidenceRefs };
     } catch (error) {
@@ -5214,6 +5218,7 @@ export class RuntimeTaskCoordinator {
     const committedProjection: MutableRuntimeTaskError = projection;
     record.checkpoint = error.prepared.checkpoint;
     record.checkpointSeq = error.prepared.checkpoint.seq;
+    record.checkpointReceipt = undefined;
     record.error = committedProjection;
     this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
     this.pushEvent(
