@@ -14,20 +14,27 @@ import {
   type ContextHistoryRecord,
   type EvidenceRef,
   type FileWriteEffect,
+  type OperationId,
   type PreparedRecoveryCapture,
+  type ProviderBinding,
   type RecoveryHoldFacts,
   type ScopeRef,
   type TaskId,
   type WorkAssignment,
 } from '../../packages/contracts/src/index.js';
 import type { ActiveTurnSegmentPredecessorRef } from '../../packages/contracts/src/active-turn-segments.js';
+import type { JournalCommitRef } from '../../packages/contracts/src/i2-history.js';
+import type { TaskRuntimeIncarnation } from '../../packages/contracts/src/framework.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../packages/adapters/jsonl/src/index.js';
 import { createJsonlActiveTurnJournal, decodeActiveTurnRecords } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { ImmutableAssetStore, evidenceReference } from '../../packages/adapters/filesystem/src/index.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { produceAdmittedTurn } from '../../packages/runtime/src/admission/admitted-turn.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import { ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import { resumeActiveTurnSegment } from '../../packages/runtime/src/context/active-turn-segments.js';
 import { durableContextDigest, produceContextHistory } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import { prepareCheckpointClosure } from '../../packages/runtime/src/checkpoints/closure.js';
 import { submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
@@ -36,11 +43,13 @@ import {
   type RuntimeExecutionAllocation,
   type RuntimeExecutionRelease,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import type { RuntimeColdExecutionResumeRequest } from '../../packages/runtime/src/ui-runtime/cold-execution-resume.js';
 import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui-runtime/journal.js';
 import {
   createJsonlCheckpointJournal,
   createJsonlCheckpointClosurePort,
   createJsonlContextHistoryPort,
+  contextHistoryFromRecord,
 } from '../../packages/app/src/checkpoint-journal.js';
 import { createNativeRecoveryAssets, createActiveTurnSegmentJournal } from '../../packages/app/src/native-recovery-assets.js';
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
@@ -48,11 +57,15 @@ import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/sr
 import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-cycle-journal.js';
 import { readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
 import { createDefaultExecutionComposition, createServiceExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import { UiRuntimeService, FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/index.js';
+import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import type { UiRuntimeServiceOptions } from '../../packages/app/src/ui-runtime/service.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/index.js';
-import { ExplicitIntake, RequirementInbox } from '../../packages/runtime/src/index.js';
+import { ExplicitIntake, MemoryCoordinator, RequirementInbox, type AttentionPort } from '../../packages/runtime/src/index.js';
 import { ConfirmationLedger, RequirementSubmissionOwner } from '../../packages/runtime/src/explicit-brain/router.js';
 import { createJsonlNativeSaveProgressPort } from '../../packages/adapters/jsonl/src/native-save-progress.js';
 import {
@@ -61,6 +74,8 @@ import {
   type NativeSaveProgress,
 } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
 import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
+import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import type { ProviderConfig, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import {
   AgentRuntimePoolManager,
@@ -90,6 +105,7 @@ import {
 
 const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
   ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-d-cold-consumer-r1-20261014');
+const EVIDENCE_ROOT = process.env.HUMANAGENT_TEST_EVIDENCE_ROOT ?? PERSISTENCE_ROOT;
 const at = '2026-10-14T00:00:00.000Z';
 const organId = id('organ', 'cold-resume-organ');
 const processMode = process.argv.find((arg) => arg.startsWith('--cold-process='))?.split('=', 2)[1];
@@ -101,6 +117,57 @@ const processTask = process.argv.find((arg) => arg === '--task-id') === undefine
   : process.argv[process.argv.indexOf('--task-id') + 1];
 /** The ambient frozen surface does not declare ppid; read it through one typed cast. */
 const processPpid = (process as unknown as { readonly ppid: number }).ppid;
+
+const serviceBinding: ProviderBinding = {
+  bindingId: 'cold-resume-service-binding',
+  providerId: 'http',
+  protocol: 'responses',
+  endpointRef: 'cold-resume-route',
+  modelRef: 'cold-resume.model',
+  configDigest: 'sha256:cold-resume-service-config',
+  capabilityDigest: 'sha256:cold-resume-service-capability',
+};
+
+const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
+  async interpret() {
+    throw new Error('explicit brain interpretation is not configured for this consumer');
+  },
+};
+
+interface ResumeAssembly {
+  readonly orchestration: OrchestrationManager;
+  readonly runtimePool: AgentRuntimePoolManager;
+}
+
+type ColdResumeSelector = (input: {
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+}) => Promise<RuntimeColdExecutionResumeRequest>;
+
+type ResumeCompositionCallbacks = Pick<
+  Parameters<typeof createDefaultExecutionComposition>[0],
+  'publishCurrentTurnState' | 'closedTurnPlannerPool'
+>;
+
+function attentionPort(): AttentionPort {
+  return {
+    async publish(attention) {
+      return { attentionId: attention.attentionId, delivered: true };
+    },
+    async resolve(attention) {
+      return { attentionId: attention.attentionId, delivered: true };
+    },
+  };
+}
+
+function testMemory(projectKey: string) {
+  return {
+    coordinator: new MemoryCoordinator(),
+    backend: new DeterministicMemoryBackend(),
+    projectKey,
+    roleId: 'execution',
+  };
+}
 
 function digest(text: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
@@ -491,12 +558,20 @@ interface ColdFixture {
   readonly output: string;
   /** Exact locator of the confirmed effect evidence the model may cite as delivery. */
   readonly acceptedEvidenceLocator: string;
+  /** Exact committed epoch-1 context record; the legal predecessor for a v2 context. */
+  readonly contextCommitRef: JournalCommitRef;
   readonly journal: JsonlOrganJournal;
   readonly preparedJournal: UiRuntimeJournal;
   readonly completion: JsonlOperationCompletionJournal;
   readonly native: ReturnType<typeof createNativeRecoveryAssets>;
   readonly segmentJournal: ReturnType<typeof createActiveTurnSegmentJournal>;
   readonly taskId: TaskId;
+}
+
+interface InterruptedColdFixture extends ColdFixture {
+  readonly interruptedSegmentId: string;
+  readonly interruptedRequestId: string;
+  readonly interruptedPredecessor: ActiveTurnSegmentPredecessorRef;
 }
 
 /**
@@ -738,6 +813,7 @@ async function buildColdFixture(name: string): Promise<ColdFixture> {
     businessTurnId, predecessor, originalV1ReceiptRef: v1Receipt.commitIdentity,
     effect, effectPath: join(root, effect.relativePath), output, journal,
     acceptedEvidenceLocator: evidence(scope, 'accepted-output').locator,
+    contextCommitRef: sourceContextCommit,
     preparedJournal: new UiRuntimeJournal(preparedPath), completion, native, segmentJournal, taskId };
 }
 
@@ -810,13 +886,26 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
   if (digest(output) !== effect.expectedContentDigest) {
     throw new Error('the committed raw output asset does not match the confirmed effect digest');
   }
+  const epochOneContext = [...records].reverse().find((record) => {
+    const context = contextHistoryFromRecord(record);
+    return context?.agentRuntimeId === allocation.runtimeId
+      && context.loopCheckpoint.executionEpoch === allocation.executionEpoch;
+  });
+  if (epochOneContext?.commitId === undefined) {
+    throw new Error('the committed fixture does not carry the original epoch-1 context');
+  }
+  const contextCommitRef: JournalCommitRef = {
+    commitId: epochOneContext.commitId,
+    journalSeq: epochOneContext.seq,
+    recordDigest: epochOneContext.recordDigest,
+  };
   return {
     root, preparedPath, journalPath, artifactsRoot, retryPath, allocation,
     assignment, taskScope: allocation.scope, businessTurnId, predecessor,
     originalV1ReceiptRef: v1Receipts[0]!.commitId!,
     effect,
     effectPath: join(root, effect.relativePath), output, journal, acceptedEvidenceLocator,
-    preparedJournal, completion, native, segmentJournal, taskId: allocation.taskId,
+    contextCommitRef, preparedJournal, completion, native, segmentJournal, taskId: allocation.taskId,
   };
 }
 
@@ -825,11 +914,7 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
  * cold producer ports; the coordinator owns the actual assembly/pool/lifecycle
  * transfer and exposes the public `resumeExecution` selector.
  */
-function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model: string) {
-  const now = () => new Date(at);
-  const principal = { owner: fixture.allocation.ownerId,
-    session: { sessionId: 'cold-resume-session', sessionGeneration: 1, issuedAt: 0, expiresAt: Number.MAX_SAFE_INTEGER } };
-  const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal });
+function resumeProviderPreparer(fixture: ColdFixture, upstreamBaseUrl: string, model: string) {
   const httpProvider: ProviderConfig = { source: 'http', provider: 'http', binding: 'cold-resume-binding',
     protocol: 'responses', model, route: 'cold-resume-route', baseUrl: upstreamBaseUrl };
   const entries: EffectiveAgentProviderBinding[] = [
@@ -838,62 +923,322 @@ function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model
     // The same provider/model/route is reused; Planner independence comes from
     // the fresh pool incarnation and its own Provider driver, not a new model.
     { agentId: 'cold-resume-planner', roleId: 'orchestration', source: 'agent', provider: httpProvider }];
-  const prepare = async (selection: { readonly roleId: 'execution' | 'orchestration' | 'interaction' | 'review' | 'memory';
+  return async (selection: { readonly roleId: 'execution' | 'orchestration' | 'interaction' | 'review' | 'memory';
     readonly configuredAgentId?: string }): Promise<AgentProviderComposition> =>
     prepareAgentProvider({ roleId: selection.roleId,
       ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
       agentProviderBindings: entries, legacyProvider: httpProvider, evidenceRoot: fixture.artifactsRoot });
+}
 
-  let coordinator: RuntimeTaskCoordinator;
-  const assemblies: { readonly orchestration: OrchestrationManager;
-    readonly runtimePool: AgentRuntimePoolManager }[] = [];
+function resumeTaskAssembly(
+  fixture: ColdFixture,
+  assemblies: ResumeAssembly[],
+): NonNullable<UiRuntimeServiceOptions['runtimeComposition']>['createTaskAssembly'] {
+  return ({ scope, executionAgent, maxAttempts }) => {
+    const pool = new AgentRuntimePoolManager({ maxRuntimes: 4, ownerId: fixture.allocation.ownerId,
+      factory: { async start(request) { return { runtimeId: request.runtimeId, generation: request.generation,
+        capabilities: [...request.requiredCapabilities] }; }, async dispose() {} } });
+    const orchestration = new OrchestrationManager({ ownerId: fixture.allocation.ownerId, runtimePool: pool,
+      ...(executionAgent === undefined ? {} : { executionAgent }),
+      reviewAgent: passingReviewAgent(scope), mergeCoordinator: mergeCoordinator(scope),
+      maxAttempts: maxAttempts ?? 1 });
+    const assembly = { orchestration, runtimePool: pool };
+    assemblies.push(assembly);
+    return assembly;
+  };
+}
+
+function createResumeComposition(
+  fixture: ColdFixture,
+  upstreamBaseUrl: string,
+  model: string,
+  callbacks: ResumeCompositionCallbacks,
+) {
+  const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal });
   const composition = createDefaultExecutionComposition({
-    principalOwner: principal.owner,
+    principalOwner: fixture.allocation.ownerId,
     journal: fixture.journal,
     filePath: fixture.journalPath,
     artifactsRoot: fixture.artifactsRoot,
     preparedJournal: fixture.preparedJournal,
     resourceBoundary: createPreparedOperationBoundary(fixture.preparedJournal),
-    prepareAgentProvider: prepare,
+    prepareAgentProvider: resumeProviderPreparer(fixture, upstreamBaseUrl, model),
     providerOptions: {},
-    now,
+    now: () => new Date(at),
     currentState,
-    publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
-    closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
+    publishCurrentTurnState: callbacks.publishCurrentTurnState,
+    closedTurnPlannerPool: callbacks.closedTurnPlannerPool,
     taskIdentity: new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)),
     i2Journal: createJsonlI2JournalPort({ filePath: fixture.journalPath, journal: fixture.journal }),
     retryJournal: createJsonlRetryCycleJournalPort({ filePath: fixture.retryPath }),
   });
+  return { composition, currentState };
+}
+
+function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model: string) {
+  const now = () => new Date(at);
+  let coordinator: RuntimeTaskCoordinator;
+  const assemblies: ResumeAssembly[] = [];
+  const { composition, currentState } = createResumeComposition(fixture, upstreamBaseUrl, model, {
+    publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
+    closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
+  });
   coordinator = new RuntimeTaskCoordinator({
     organId,
     checkpointStoreFor: () => new FileCheckpointStore(join(fixture.root, 'checkpoints.jsonl')),
-    attentionPort: {
-      async publish(attention) { return { attentionId: attention.attentionId, delivered: true }; },
-      async resolve(attention) { return { attentionId: attention.attentionId, delivered: true }; },
-    },
+    attentionPort: attentionPort(),
     journal: fixture.preparedJournal,
     now,
     currentStatePort: currentState,
     currentStateFacts: composition.currentStateFacts,
     admitExecution: composition.admitExecution,
     createDriver: composition.createExecutionDriver,
-    createTaskAssembly: ({ scope, checkpointJournal, executionAgent, maxAttempts }) => {
-      const pool = new AgentRuntimePoolManager({ maxRuntimes: 4, ownerId: fixture.allocation.ownerId,
-        factory: { async start(request) { return { runtimeId: request.runtimeId, generation: request.generation,
-          capabilities: [...request.requiredCapabilities] }; }, async dispose() {} } });
-      const orchestration = new OrchestrationManager({ ownerId: fixture.allocation.ownerId, runtimePool: pool,
-        ...(executionAgent === undefined ? {} : { executionAgent }),
-        reviewAgent: passingReviewAgent(scope), mergeCoordinator: mergeCoordinator(scope),
-        maxAttempts: maxAttempts ?? 1 });
-      const assembly = { orchestration, runtimePool: pool };
-      assemblies.push(assembly);
-      return assembly;
-    },
+    createTaskAssembly: resumeTaskAssembly(fixture, assemblies),
     // The cold producer is the only new coordinator binding. The coordinator
     // owns the matching ColdExecutionLifecycleBinding internally.
     coldExecution: composition,
   });
   return { coordinator, composition, assemblies };
+}
+
+/**
+ * Controlled fixture selector. This is the frozen production callback shape,
+ * but the production composition binding that derives the same fact from the
+ * canonical source owner remains pending. The selector reads only the real
+ * committed segment chain and its exact recovery receipt.
+ */
+function controlledColdResumeSelector(fixture: ColdFixture): ColdResumeSelector {
+  return async ({ taskId, operationId }) => {
+    if (taskId.value !== fixture.taskId.value || operationId.value !== fixture.allocation.operationId.value) {
+      throw new AppLifecycleError(
+        'cold-execution.source-unavailable',
+        'controlled selector received a task or operation outside the persisted fixture',
+        'retain the recovery responsibility and resolve the exact physical owner source before resuming',
+        'humanagent.app.cold-execution-source',
+      );
+    }
+    const segments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+    const tailId = segments.at(-1)?.segmentId ?? fixture.businessTurnId;
+    const receipt = await fixture.segmentJournal.readSegmentRecoveryReceipt(tailId);
+    if (receipt.status === 'failed' || receipt.status === 'unknown') {
+      throw new AppLifecycleError(
+        'cold-execution.source-unavailable',
+        receipt.reason,
+        'retain the recovery responsibility and resolve the exact physical owner source before resuming',
+        'humanagent.app.cold-execution-source',
+      );
+    }
+    return {
+      businessTurnId: fixture.businessTurnId,
+      predecessor: receipt.status === 'exact'
+        ? { segmentId: tailId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef }
+        : { segmentId: tailId, interrupted: receipt.anchor },
+    };
+  };
+}
+
+/**
+ * Actual in-process HTTP listener plus the actual UiRuntimeService route. The
+ * only controlled edge is the canonical selector callback above.
+ */
+async function buildResumeService(
+  fixture: ColdFixture,
+  upstreamBaseUrl: string,
+  model: string,
+  selector: ColdResumeSelector | undefined,
+) {
+  const assemblies: ResumeAssembly[] = [];
+  let selectorCalls = 0;
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding: serviceBinding,
+    port: new FakeReplayExecutionRuntimePort({ binding: serviceBinding, stepDelayMs: 1 }),
+    checkpointStoreFor: () => new FileCheckpointStore(join(fixture.root, 'checkpoints.jsonl')),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: fixture.preparedJournal,
+    closurePort: fixture.preparedJournal,
+    memory: testMemory('project-cold-resume-http'),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    runtimeComposition: {
+      createTaskAssembly: resumeTaskAssembly(fixture, assemblies),
+      createExecutionPorts: (callbacks) => {
+        const { composition, currentState } = createResumeComposition(fixture, upstreamBaseUrl, model, callbacks);
+        return {
+          admitExecution: composition.admitExecution,
+          createDriver: composition.createExecutionDriver,
+          coldExecution: {
+            readColdExecutionSource: composition.readColdExecutionSource,
+            admitSegment: composition.admitSegment,
+            readIncarnationBinding: composition.readIncarnationBinding,
+            recoverOriginalTurn: composition.recoverOriginalTurn,
+            createResumedExecutionDriver: composition.createResumedExecutionDriver,
+          },
+          currentStatePort: currentState,
+          currentStateFacts: composition.currentStateFacts,
+          ...(selector === undefined ? {} : {
+            resolveColdExecutionResumeRequest: async (input: { readonly taskId: TaskId; readonly operationId: OperationId }) => {
+              selectorCalls += 1;
+              return await selector(input);
+            },
+          }),
+        };
+      },
+    },
+  });
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(fixture.root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('cold-resume-http', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const dispatcher = createUiRuntimeRequestDispatcher({
+    service,
+    accessControl,
+    uiRoot: join(fixture.root, 'ui'),
+    isClosing: () => false,
+  });
+  const server = createServer(dispatcher.listener);
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('cold-resume HTTP fixture did not bind a socket');
+  return {
+    service,
+    accessControl,
+    server,
+    url: `http://127.0.0.1:${address.port}`,
+    cookie,
+    assemblies,
+    selectorCallCount: () => selectorCalls,
+    close: async () => {
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await accessControl.closeCredentialWatch().catch(() => undefined);
+      for (const assembly of assemblies) await assembly.runtimePool.dispose();
+    },
+  };
+}
+
+async function postResume(
+  url: string,
+  cookie: string,
+  taskId: string,
+  body: Readonly<Record<string, unknown>>,
+): Promise<{ readonly status: number; readonly body: unknown }> {
+  const response = await fetch(`${url}/api/tasks/${encodeURIComponent(taskId)}/resume`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() as unknown };
+}
+
+/**
+ * Extends the same legal fixture through the real segment APIs: one opened v2
+ * segment with accepted requests, a matching epoch-2 context and coverage, and
+ * deliberately no v2 capture. This is the accepted F13 interrupted-v2 state,
+ * not a reader-only classification.
+ */
+async function buildInterruptedColdFixture(name: string): Promise<InterruptedColdFixture> {
+  const fixture = await buildColdFixture(name);
+  const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal });
+  const admissionComposition = createDefaultExecutionComposition({
+    principalOwner: fixture.allocation.ownerId,
+    journal: fixture.journal,
+    filePath: fixture.journalPath,
+    artifactsRoot: fixture.artifactsRoot,
+    preparedJournal: fixture.preparedJournal,
+    resourceBoundary: createPreparedOperationBoundary(fixture.preparedJournal),
+    prepareAgentProvider: async () => {
+      throw new Error('the interrupted fixture admission path must not prepare a Provider');
+    },
+    providerOptions: {},
+    now: () => new Date(at),
+    currentState,
+    publishCurrentTurnState: async () => undefined,
+    closedTurnPlannerPool: () => {
+      throw new Error('the interrupted fixture admission path must not read the planner pool');
+    },
+    taskIdentity: new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)),
+    i2Journal: createJsonlI2JournalPort({ filePath: fixture.journalPath, journal: fixture.journal }),
+    retryJournal: createJsonlRetryCycleJournalPort({ filePath: fixture.retryPath }),
+  });
+  const initial = await fixture.segmentJournal.readInitialSegmentCapture(fixture.businessTurnId);
+  if (initial === null) throw new Error('the interrupted fixture has no original v1 capture');
+  const segmentId = 'interrupted-v2';
+  const requestId = 'interrupted-v2-request';
+  const incarnation: TaskRuntimeIncarnation = {
+    runtimeId: fixture.allocation.runtimeId,
+    generation: 2,
+    agentInstanceId: 'cold-resume-agent-2',
+    roleId: 'execution',
+    taskId: fixture.taskId,
+    assignmentId: fixture.assignment.assignmentId,
+    executionEpoch: 2,
+  };
+  const resumed = await resumeActiveTurnSegment({
+    businessTurnId: fixture.businessTurnId,
+    segmentId,
+    assignment: fixture.assignment,
+    scope: initial.body.binding.scope,
+    incarnation,
+    ports: { read: fixture.segmentJournal, append: fixture.segmentJournal },
+    admit: admissionComposition.admitSegment,
+  });
+  if (resumed.status !== 'resumed') {
+    throw new Error(`the interrupted fixture could not open v2: ${resumed.status}`);
+  }
+  const segment = await ActiveTurnSegmentContext.open({
+    segment: resumed.segment,
+    initialInput: initial.body.initialInput,
+    port: fixture.segmentJournal,
+  });
+  await segment.registerRequest({
+    request: { turnId: fixture.businessTurnId, requestId },
+    scope: initial.body.binding.scope,
+    phase: 'dispatching',
+  });
+  await segment.registerRequest({
+    request: { turnId: fixture.businessTurnId, requestId },
+    scope: initial.body.binding.scope,
+    phase: 'dispatched',
+  });
+  const history = createJsonlContextHistoryPort({ filePath: fixture.journalPath, journal: fixture.journal });
+  const epochOne = await history.readContextCommit(initial.body.binding.scope, fixture.contextCommitRef);
+  const epochTwoBase = contextRecord(initial.body.binding.scope, fixture.allocation.runtimeId, 2);
+  const epochTwo: ContextHistoryRecord = {
+    ...epochTwoBase,
+    previousContextCommitRef: fixture.contextCommitRef,
+    loopCheckpoint: {
+      ...epochTwoBase.loopCheckpoint,
+      predecessor: {
+        checkpointId: epochOne.loopCheckpoint.checkpointId,
+        digest: epochOne.loopCheckpoint.digest,
+      },
+    },
+  };
+  await produceContextHistory(history, { record: epochTwo, expectedCurrentContextCommitRef: fixture.contextCommitRef });
+  await createJsonlOperationControlJournal({ journal: fixture.journal }).initializeCoverage({
+    scope: initial.body.binding.scope,
+    agentRuntimeId: fixture.allocation.runtimeId,
+    harnessExecutionEpoch: 2,
+    admissionCommitRef: resumed.segment.businessRegistrationCommitRef,
+  });
+  const receipt = await fixture.segmentJournal.readSegmentRecoveryReceipt(segmentId);
+  if (receipt.status !== 'interrupted') {
+    throw new Error(`the interrupted fixture v2 did not classify as interrupted: ${receipt.status}`);
+  }
+  return {
+    ...fixture,
+    interruptedSegmentId: segmentId,
+    interruptedRequestId: requestId,
+    interruptedPredecessor: { segmentId, interrupted: receipt.anchor },
+  };
 }
 
 function passingReviewAgent(scope: ScopeRef): ReviewAgentPort {
@@ -956,6 +1301,10 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
   const journalBytesBefore = await readFile(fixture.journalPath, 'utf8');
   const recordsBefore = (await fixture.journal.verify()).records;
   const effectRecordsBefore = effectRecordCount(recordsBefore, fixture.effect.effectId);
+  const priorSegments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+  const selected = await controlledColdResumeSelector(fixture)({
+    taskId: fixture.taskId, operationId: fixture.allocation.operationId,
+  });
   const http = await upstream(model, fixture.acceptedEvidenceLocator);
   let assemblies: ReturnType<typeof buildResumeRuntime>['assemblies'] = [];
   let succeeded = false;
@@ -965,7 +1314,7 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
     assemblies = runtime.assemblies;
     const release: RuntimeExecutionRelease = await coordinator.resumeExecution(
       fixture.taskId, fixture.allocation.operationId,
-      { businessTurnId: fixture.businessTurnId, predecessor: fixture.predecessor });
+      selected);
     assert.equal(release.state, 'released', 'the public endpoint must reach an owned lease release');
 
     // Original business identity is preserved; the physical binding is new.
@@ -997,9 +1346,10 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
     // A real new physical incarnation/epoch was opened while the business
     // identity, assignment, allocation and input stay the original ones.
     const segments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
-    assert.equal(segments.length, 1, 'a generation-ready resume opens exactly one new execution segment');
-    const resumed = segments[0]!;
-    const successorEpoch = fixture.allocation.executionEpoch + 1;
+    assert.equal(segments.length, priorSegments.length + 1, 'a generation-ready resume opens exactly one new execution segment');
+    const resumed = segments.at(-1)!;
+    const successorEpoch = Math.max(fixture.allocation.executionEpoch,
+      ...priorSegments.map((segment) => segment.binding.execution.executionEpoch)) + 1;
     assert.ok(resumed.segmentId !== fixture.businessTurnId, 'the resumed segment is a new physical incarnation');
     assert.equal(resumed.binding.execution.executionEpoch, successorEpoch,
       'the resumed incarnation advances past the single original epoch floor');
@@ -1014,13 +1364,8 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
       'the original business turn is preserved');
     assert.equal(resumed.binding.scope.operationId?.value, fixture.allocation.operationId.value,
       'the original operation identity is preserved');
-    assert.equal(resumed.predecessor.segmentId, fixture.businessTurnId,
-      'the resumed segment continues the original business turn');
-    if (fixture.predecessor.interrupted !== undefined) {
-      throw new Error('the retained coordinator fixture must resume an exact v1 predecessor');
-    }
-    assert.equal(resumed.predecessor.recoveryAssetsReceiptRef, fixture.predecessor.recoveryAssetsReceiptRef,
-      'the resumed segment links the exact original v1 receipt');
+    assert.deepEqual(resumed.predecessor, selected.predecessor,
+      'the resumed segment links the exact captured or interrupted predecessor');
 
     // The canonical physical position/context carry the successor epoch, not the
     // old one, and keep the four-part durable summary with its real digest.
@@ -1118,7 +1463,8 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
     // exact Organ Journal copy already carries the committed Task identity,
     // checkpoint, closure, native-save progress, Planner duty, plan
     // publication, alignment and current-plan references asserted above.
-    const archiveRoot = await mkdtemp(join(PERSISTENCE_ROOT, 'passed-receipts-'));
+    await mkdir(EVIDENCE_ROOT, { recursive: true });
+    const archiveRoot = await mkdtemp(join(EVIDENCE_ROOT, 'passed-receipts-'));
     try {
       await writeFile(join(archiveRoot, 'upstream-wires.json'), JSON.stringify(http.wires, null, 2), 'utf8');
       await writeFile(join(archiveRoot, 'organ-journal.jsonl'), await readFile(fixture.journalPath, 'utf8'), 'utf8');
@@ -1133,14 +1479,97 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
     await http.close();
     for (const assembly of assemblies) await assembly.runtimePool.dispose();
     if (!succeeded) {
-      await writeFile(join(fixture.root, 'upstream-wires.json'), JSON.stringify(http.wires, null, 2), 'utf8')
+      await writeFile(join(EVIDENCE_ROOT, `failed-${fixture.root.split('/').at(-1)}-wires.json`), JSON.stringify(http.wires, null, 2), 'utf8')
         .catch(() => undefined);
       console.error(`cold-resume fixture retained for evidence at ${fixture.root}`);
     }
   }
 }
 
+/** Same persisted fixture, real service, HTTP dispatcher and Runtime; no method substitution. */
+async function runHttpResumeAssertions(fixture: ColdFixture, interrupted: boolean): Promise<void> {
+  const provider = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator);
+  const prefix = await readFile(fixture.journalPath, 'utf8');
+  const before = (await fixture.journal.verify()).records;
+  const priorSegments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+  const selector = controlledColdResumeSelector(fixture);
+  const selected = await selector({ taskId: fixture.taskId, operationId: fixture.allocation.operationId });
+  let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+  try {
+    app = await buildResumeService(fixture, provider.baseUrl, 'cold-resume.model', undefined);
+    const refused = await postResume(app.url, app.cookie, fixture.taskId.value,
+      { operationId: fixture.allocation.operationId.value });
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.equal(requireRecord(requireRecord(refused.body, 'refusal').error, 'typed refusal').code,
+      'cold-execution.selector-unbound');
+    assert.equal(provider.wires.length, 0, 'unbound resume must not start a Provider');
+    assert.equal(await readFile(fixture.journalPath, 'utf8'), prefix,
+      'refusal preserves all durable recovery responsibility');
+    assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
+    await app.close();
+    app = undefined;
+
+    app = await buildResumeService(fixture, provider.baseUrl, 'cold-resume.model', selector);
+    const invalid = await postResume(app.url, app.cookie, fixture.taskId.value,
+      { operationId: fixture.allocation.operationId.value, prompt: 'injected input' });
+    assert.equal(invalid.status, 400, JSON.stringify(invalid.body));
+    assert.equal(app.selectorCallCount(), 0, 'invalid body must not reach the source selector');
+    assert.equal(provider.wires.length, 0);
+    const response = await postResume(app.url, app.cookie, fixture.taskId.value,
+      { operationId: fixture.allocation.operationId.value });
+    assert.equal(response.status, 202, JSON.stringify(response.body));
+    const receipt = requireRecord(response.body, 'release receipt');
+    assert.equal(receipt.state, 'released');
+    assert.equal(receipt.taskId, fixture.taskId.value);
+    assert.equal(receipt.operationId, fixture.allocation.operationId.value);
+    assert.equal(receipt.businessTurnId, fixture.businessTurnId);
+    assert.equal(app.selectorCallCount(), 1);
+    assert.ok(provider.wires.length > 0, 'real resumed driver must reach the controlled HTTP Provider');
+    const after = (await fixture.journal.verify()).records;
+    assert.equal((await readFile(fixture.journalPath, 'utf8')).slice(0, prefix.length), prefix);
+    assert.equal(effectRecordCount(before, fixture.effect.effectId), 2);
+    assert.equal(effectRecordCount(after, fixture.effect.effectId), 2);
+    assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
+    const segments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+    assert.equal(segments.length, priorSegments.length + 1);
+    const successor = segments.at(-1)!;
+    assert.deepEqual(successor.predecessor, selected.predecessor);
+    assert.equal(successor.binding.businessTurnRef.businessTurnId, fixture.businessTurnId);
+    assert.equal(successor.binding.scope.operationId?.value, fixture.allocation.operationId.value);
+    assert.equal(successor.binding.assignment.taskId.value, fixture.taskId.value);
+    assert.equal(successor.binding.execution.executionEpoch, interrupted ? 3 : 2);
+    if (interrupted) {
+      if (selected.predecessor.interrupted === undefined) throw new Error('expected the real interrupted anchor');
+      const retained = await fixture.segmentJournal.readSegmentInterruptedExact({
+        businessTurnId: fixture.businessTurnId,
+        predecessor: selected.predecessor,
+      });
+      assert.ok(retained.prefix.obligations.some((duty) => duty.kind === 'request'
+        && duty.requestId === 'interrupted-v2-request' && duty.phase === 'dispatched'),
+      'the original interrupted request remains pending under its original segment');
+    }
+    console.log(JSON.stringify({ publicResume: interrupted ? 'interrupted-v2' : 'v1', ...receipt,
+      completedEffectRecords: 2, prefixPreserved: true }));
+    assert.equal(receipt.executionEpoch, interrupted ? 3 : 2,
+      'the public release receipt must expose the actual successor epoch');
+  } finally {
+    await app?.close();
+    await provider.close();
+    await mkdir(EVIDENCE_ROOT, { recursive: true });
+    await writeFile(join(EVIDENCE_ROOT, `http-${fixture.root.split('/').at(-1)}-wires.json`),
+      JSON.stringify(provider.wires, null, 2), 'utf8');
+  }
+}
+
 function registerPublicConsumers(): void {
+  test('HTTP resume releases the retained v1 turn and rejects extra body and unbound selector', async () => {
+    await runHttpResumeAssertions(await buildColdFixture('http-v1'), false);
+  });
+
+  test('HTTP resume continues an opened unsaved v2 predecessor with its pending request', async () => {
+    await runHttpResumeAssertions(await buildInterruptedColdFixture('http-interrupted-v2'), true);
+  });
+
   test('public resumeExecution preserves business identity and reaches the standard-end endpoint without replaying the confirmed effect', async () => {
     const moduleUrl = import.meta.url;
     const compiledPath = moduleUrl.startsWith('file://') ? decodeURIComponent(moduleUrl.slice('file://'.length)) : moduleUrl;
@@ -1214,7 +1643,7 @@ function registerPublicConsumers(): void {
     if (succeeded) {
       await rm(fixture.root, { recursive: true, force: true });
     } else {
-      await writeFile(join(fixture.root, 'upstream-wires.json'), JSON.stringify(http.wires, null, 2), 'utf8')
+      await writeFile(join(EVIDENCE_ROOT, `failed-${fixture.root.split('/').at(-1)}-wires.json`), JSON.stringify(http.wires, null, 2), 'utf8')
         .catch(() => undefined);
       console.error(`cold-resume fixture retained for evidence at ${fixture.root}`);
     }
