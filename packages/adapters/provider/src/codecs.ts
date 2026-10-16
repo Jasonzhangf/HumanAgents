@@ -5,6 +5,7 @@ import {
   type BusinessPayload,
   type ContentUnitChannel,
   type EvidenceRef,
+  type InteractionParentProviderExecutionIdentityRef,
   type NextAction,
   type ProviderBinding,
   type ProviderError,
@@ -231,12 +232,18 @@ function openaiChatContextMessages(context: ProviderRequestContext): readonly Op
  * payload and request-scoped context never belong on it, so the codec emits a
  * plain identity ref instead of the whole execution input object.
  */
+function isInteractionParentIdentity(
+  execution: AnyProviderExecutionIdentityRef,
+): execution is InteractionParentProviderExecutionIdentityRef {
+  return 'interactionTurn' in execution && execution.interactionTurn !== undefined;
+}
+
 function executionIdentity<TIdentity extends AnyProviderExecutionIdentityRef>(execution: TIdentity): TIdentity {
   // A taskless helper execution is keyed by its full helper identity, so the
   // wire identity carries `helper` and never a `taskId`/`cycleId`. The input may
   // be a wider request object (identity plus request fields), so this normalises
   // it back to the canonical identity the caller passed.
-  const identity: AnyProviderExecutionIdentityRef = 'helper' in execution
+  const identity: AnyProviderExecutionIdentityRef = 'helper' in execution && execution.helper !== undefined
     ? {
         runtimeId: execution.runtimeId,
         organId: execution.organId,
@@ -244,6 +251,14 @@ function executionIdentity<TIdentity extends AnyProviderExecutionIdentityRef>(ex
         executionEpoch: execution.executionEpoch,
         helper: execution.helper,
       }
+    : isInteractionParentIdentity(execution)
+      ? {
+          runtimeId: execution.runtimeId,
+          organId: execution.organId,
+          operationId: execution.operationId,
+          executionEpoch: execution.executionEpoch,
+          interactionTurn: execution.interactionTurn,
+        }
     : {
         runtimeId: execution.runtimeId,
         taskId: execution.taskId,
@@ -740,7 +755,7 @@ function parseToolArguments(json: string, execution: AnyProviderExecutionIdentit
 
 /** One provider execution's request-local state key; shared by codec maps. */
 function executionKey(execution: AnyProviderExecutionIdentityRef): string {
-  if ('helper' in execution) {
+  if ('helper' in execution && execution.helper !== undefined) {
     // A taskless helper has no Task to key on. The full helper identity is the
     // collision-free key, so two helpers can never share request-local state.
     return canonicalJsonStringify([
@@ -757,6 +772,22 @@ function executionKey(execution: AnyProviderExecutionIdentityRef): string {
       execution.helper.assignmentId,
       execution.helper.helperCallId,
       execution.helper.attempt,
+    ]);
+  }
+  if (isInteractionParentIdentity(execution)) {
+    // A neutral interaction parent has no Task either; the real interaction turn
+    // is the collision-free key.
+    return canonicalJsonStringify([
+      'interaction-parent',
+      execution.runtimeId,
+      execution.operationId.value,
+      execution.executionEpoch,
+      execution.organId.scope,
+      execution.organId.value,
+      execution.interactionTurn.interactionScopeId,
+      execution.interactionTurn.interactionId,
+      execution.interactionTurn.inputRevision,
+      execution.interactionTurn.turnId,
     ]);
   }
   return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;

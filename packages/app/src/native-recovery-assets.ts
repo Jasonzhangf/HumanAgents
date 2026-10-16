@@ -33,11 +33,14 @@ import { JsonlOperationCompletionJournal } from '../../adapters/jsonl/src/operat
 import type { OperationCompletionJournalPort } from '../../runtime/src/gateway/operation-completion.js';
 import type {
   ActiveTurnSegmentCaptureExactRead,
+  ActiveTurnSegmentInterruptedExactRead,
   ActiveTurnSegmentJournalPort,
   ActiveTurnSegmentJournalRecord,
 } from '../../runtime/src/context/active-turn-journal.js';
 import type {
   ActiveTurnInitialSegmentCapture,
+  ActiveTurnSegmentInterruptedAnchor,
+  ActiveTurnSegmentPredecessorRef,
   ActiveTurnSegmentRecoveryReceiptRead,
 } from '../../contracts/src/active-turn-segments.js';
 import type {
@@ -690,6 +693,10 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
     journal,
     businessTurnId,
     verifyPredecessorReceipt: (records, predecessor) => {
+      // An interrupted predecessor carries a durable anchor, not a receipt; the
+      // journal re-derives and re-checks that anchor under the same held
+      // transaction, so only the captured branch is verified here.
+      if (predecessor.interrupted !== undefined) return;
       const record = records.find((candidate) => candidate.commitId === predecessor.recoveryAssetsReceiptRef);
       if (record === undefined) {
         throw new RecoveryAssetsIntegrityError('segment predecessor recovery receipt is not committed');
@@ -721,20 +728,6 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
     return matches[0]!.commitId ?? null;
   }
 
-  async function segmentRecoveryReceiptRef(segmentId: string): Promise<string | null> {
-    const matches = (await journal.replay()).filter((record) => {
-      if (record.kind !== 'event' || record.payload?.type !== RECOVERY_ASSETS_PAYLOAD_TYPE) return false;
-      if (record.payload.version !== 2) return false;
-      const receipt = storedPhaseReceipt(record);
-      return receipt?.businessTurnId === businessTurnId && receipt?.segmentId === segmentId;
-    });
-    if (matches.length === 0) return null;
-    if (matches.length > 1) {
-      throw new RecoveryAssetsIntegrityError(`multiple v2 recovery receipts exist for segment ${segmentId}`);
-    }
-    return matches[0]!.commitId ?? null;
-  }
-
   async function readInitialSegmentCapture(requested: string): Promise<ActiveTurnInitialSegmentCapture | null> {
     if (requested !== businessTurnId) {
       throw new RecoveryAssetsIntegrityError(`segment journal is bound to business turn ${businessTurnId}`);
@@ -747,12 +740,53 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
   }
 
   async function readSegmentRecoveryReceipt(segmentId: string): Promise<ActiveTurnSegmentRecoveryReceiptRead> {
-    const ref = segmentId === businessTurnId
-      ? await initialRecoveryReceiptRef()
-      : await segmentRecoveryReceiptRef(segmentId);
-    return ref === null
-      ? { status: 'unknown', reason: `no recovery receipt for segment ${segmentId}` }
-      : { status: 'exact', recoveryAssetsReceiptRef: ref };
+    if (segmentId === businessTurnId) {
+      const ref = await initialRecoveryReceiptRef();
+      return ref === null
+        ? { status: 'unknown', reason: `no recovery receipt for segment ${segmentId}` }
+        : { status: 'exact', recoveryAssetsReceiptRef: ref };
+    }
+    // Strict absence only. Every v2 phase commit in this business turn is
+    // inspected: a present but unreadable or partial receipt must fail here
+    // instead of being folded into the "never saved" interrupted branch.
+    const attributed: string[] = [];
+    for (const record of await journal.replay()) {
+      if (record.kind !== 'event' || record.payload?.type !== RECOVERY_ASSETS_PAYLOAD_TYPE
+        || record.payload.version !== 2) continue;
+      const receipt = storedPhaseReceipt(record);
+      if (receipt === null) {
+        throw new RecoveryAssetsIntegrityError('a v2 recovery phase commit does not carry a readable receipt payload');
+      }
+      if (receipt.businessTurnId !== businessTurnId) continue;
+      if (typeof receipt.segmentId !== 'string' || receipt.segmentId.length === 0) {
+        throw new RecoveryAssetsIntegrityError('a v2 recovery phase in this business turn names no readable segment');
+      }
+      if (receipt.segmentId !== segmentId) continue;
+      if (record.commitId === undefined) {
+        throw new RecoveryAssetsIntegrityError('a matching v2 recovery receipt has no commit identity');
+      }
+      attributed.push(record.commitId);
+    }
+    if (attributed.length > 1) {
+      throw new RecoveryAssetsIntegrityError(`multiple v2 recovery receipts exist for segment ${segmentId}`);
+    }
+    if (attributed.length === 1) {
+      return { status: 'exact', recoveryAssetsReceiptRef: attributed[0]! };
+    }
+    const anchor = await segmentJournal.readSegmentAnchor(segmentId);
+    return anchor === null
+      ? { status: 'unknown', reason: `segment ${segmentId} is not an opened committed segment` }
+      : { status: 'interrupted', anchor };
+  }
+
+  async function readSegmentInterruptedExact(input: {
+    readonly businessTurnId: string;
+    readonly predecessor: Extract<
+      ActiveTurnSegmentPredecessorRef,
+      { readonly interrupted: ActiveTurnSegmentInterruptedAnchor }
+    >;
+  }): Promise<ActiveTurnSegmentInterruptedExactRead> {
+    return await segmentJournal.readSegmentInterruptedExact(input);
   }
 
   async function readSegmentCaptureExact(request: {
@@ -807,6 +841,7 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
     readInitialSegmentCapture,
     readSegments: async (requested) => await segmentJournal.readSegments(requested),
     readSegmentRecoveryReceipt,
+    readSegmentInterruptedExact,
     appendSegmentOpened: async (request) => await segmentJournal.appendSegmentOpened(request),
     appendSegmentRecord: async (request) => await segmentJournal.appendSegmentRecord(request),
     readSegmentRecords,

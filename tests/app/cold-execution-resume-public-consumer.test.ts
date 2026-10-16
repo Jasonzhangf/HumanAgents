@@ -484,6 +484,8 @@ interface ColdFixture {
   readonly taskScope: ScopeRef;
   readonly businessTurnId: string;
   readonly predecessor: ActiveTurnSegmentPredecessorRef;
+  /** The exact original v1 recovery receipt; always present for the retained base. */
+  readonly originalV1ReceiptRef: string;
   readonly effect: FileWriteEffect;
   readonly effectPath: string;
   readonly output: string;
@@ -733,7 +735,8 @@ async function buildColdFixture(name: string): Promise<ColdFixture> {
   const predecessor: ActiveTurnSegmentPredecessorRef = { segmentId: businessTurnId, recoveryAssetsReceiptRef: v1Receipt.commitIdentity };
 
   return { root, preparedPath, journalPath, artifactsRoot, retryPath, allocation, assignment, taskScope,
-    businessTurnId, predecessor, effect, effectPath: join(root, effect.relativePath), output, journal,
+    businessTurnId, predecessor, originalV1ReceiptRef: v1Receipt.commitIdentity,
+    effect, effectPath: join(root, effect.relativePath), output, journal,
     acceptedEvidenceLocator: evidence(scope, 'accepted-output').locator,
     preparedJournal: new UiRuntimeJournal(preparedPath), completion, native, segmentJournal, taskId };
 }
@@ -809,7 +812,9 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
   }
   return {
     root, preparedPath, journalPath, artifactsRoot, retryPath, allocation,
-    assignment, taskScope: allocation.scope, businessTurnId, predecessor, effect,
+    assignment, taskScope: allocation.scope, businessTurnId, predecessor,
+    originalV1ReceiptRef: v1Receipts[0]!.commitId!,
+    effect,
     effectPath: join(root, effect.relativePath), output, journal, acceptedEvidenceLocator,
     preparedJournal, completion, native, segmentJournal, taskId: allocation.taskId,
   };
@@ -974,7 +979,7 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
       'every resumed request must carry the selected provider model');
 
     // The accepted effect is retained exactly; resume never replays it.
-    const readback = await fixture.native.readRecoveryAssetsExact(fixture.predecessor.recoveryAssetsReceiptRef);
+    const readback = await fixture.native.readRecoveryAssetsExact(fixture.originalV1ReceiptRef);
     assert.equal(readback.receipt.turnId, fixture.businessTurnId);
     assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output,
       'the confirmed effect bytes remain intact and are not rewritten');
@@ -1011,6 +1016,9 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
       'the original operation identity is preserved');
     assert.equal(resumed.predecessor.segmentId, fixture.businessTurnId,
       'the resumed segment continues the original business turn');
+    if (fixture.predecessor.interrupted !== undefined) {
+      throw new Error('the retained coordinator fixture must resume an exact v1 predecessor');
+    }
     assert.equal(resumed.predecessor.recoveryAssetsReceiptRef, fixture.predecessor.recoveryAssetsReceiptRef,
       'the resumed segment links the exact original v1 receipt');
 

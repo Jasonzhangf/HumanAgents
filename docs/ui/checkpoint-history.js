@@ -291,7 +291,11 @@ function commitRef(ui, parent, label, ref, options, role) {
   parent.append(box)
 }
 
-function assetDescriptor(ui, parent, label, asset, options, role) {
+// `body` is the exact body-read address for this descriptor: the clicked
+// checkpoint identity plus full receipt (`target`) and the selector (`selector`).
+// It is undefined when the caller cannot read the asset body, and then the
+// descriptor keeps its existing reference action.
+function assetDescriptor(ui, parent, label, asset, options, role, body) {
   const box = ui.make('div', undefined, 'item')
   if (role) box.setAttribute('data-checkpoint-role', role)
   box.append(ui.make('strong', label))
@@ -302,7 +306,21 @@ function assetDescriptor(ui, parent, label, asset, options, role) {
       ['资产证据 ID', asset.ref?.evidenceId?.value],
       ['读取视图', asset.view?.kind],
     ])
-    ui.action(box, '打开精确资产引用', options.onOpenReference, { kind: 'asset', ref: asset }, 'button button--sm')
+    // A persisted asset descriptor now has an exact body read. The descriptor-only
+    // deep link stays dead, so this trigger replaces it instead of adding a second
+    // path to the same descriptor.
+    if (body?.selector !== undefined) {
+      const trigger = ui.action(box, body.label, options.onReadAssetBody, {
+        target: body.target,
+        selector: body.selector,
+      }, 'button button--sm')
+      if (trigger) {
+        trigger.setAttribute('data-checkpoint-role', 'asset-body-trigger')
+        trigger.setAttribute('data-asset-body-selector', String(body.selector.kind))
+      }
+    } else {
+      ui.action(box, '打开精确资产引用', options.onOpenReference, { kind: 'asset', ref: asset }, 'button button--sm')
+    }
   }
   parent.append(box)
 }
@@ -366,7 +384,7 @@ function recoveryBindingBlock(ui, binding, onOpenReference) {
   return box
 }
 
-function semanticBlock(ui, semantic, onOpenReference) {
+function semanticBlock(ui, semantic, onOpenReference, bodyTarget, readOptions) {
   const box = ui.make('div', undefined, 'item')
   box.append(ui.make('strong', '语义（目标 / 行动 / 结果 / 下一步）'))
   if (!semantic || semantic.state === 'unavailable') {
@@ -407,7 +425,21 @@ function semanticBlock(ui, semantic, onOpenReference) {
       ['审查后检查点', child.postReviewCheckpointRef],
       ['分段 ID', child.segmentId],
     ])
-    assetDescriptor(ui, adopted, '精炼交付', child.refinedDelivery, { onOpenReference })
+    // The exact adopted-child triple plus the exact clicked checkpoint receipt
+    // are bound when this row is rendered, before any body read starts.
+    assetDescriptor(ui, adopted, '精炼交付', child.refinedDelivery, {
+      onOpenReference,
+      onReadAssetBody: readOptions?.onReadAssetBody,
+    }, undefined, {
+      label: '查看精炼交付正文',
+      target: bodyTarget,
+      selector: {
+        kind: 'adopted-child',
+        invocationId: child.invocationId,
+        childTurnId: child.childTurnId,
+        deliverySeq: child.deliverySeq,
+      },
+    })
     box.append(adopted)
   }
   if (semantic.recovery) {
@@ -417,7 +449,7 @@ function semanticBlock(ui, semantic, onOpenReference) {
   return box
 }
 
-function captureBlock(ui, capture, onOpenReference) {
+function captureBlock(ui, capture, onOpenReference, bodyTarget, readOptions) {
   const box = ui.make('div', undefined, 'item')
   box.append(ui.make('strong', '恢复捕获'))
   if (!capture || capture.state === 'unavailable') {
@@ -431,7 +463,14 @@ function captureBlock(ui, capture, onOpenReference) {
     ['恢复责任', capture.recovery?.recoveryResponsibilityRef],
     ['未决操作数', capture.recovery?.unresolvedOperationRefs?.length],
   ])
-  assetDescriptor(ui, box, '捕获资产描述', capture.capture, { onOpenReference }, 'capture-asset')
+  assetDescriptor(ui, box, '捕获资产描述', capture.capture, {
+    onOpenReference,
+    onReadAssetBody: readOptions?.onReadAssetBody,
+  }, 'capture-asset', {
+    label: '查看捕获正文',
+    target: bodyTarget,
+    selector: { kind: 'capture' },
+  })
   return box
 }
 
@@ -608,10 +647,17 @@ export function renderCheckpointHistoryDetail(read, options = {}) {
       ['时间权威', identity.timeAuthority?.authorityRef],
     ])
     commitRef(ui, viewedDetail, '查看目标提交凭据', identity.commitRef, options, 'viewed-commit-ref')
+    // The body read addresses this exact checkpoint identity plus its full
+    // physical receipt. It is bound here, before any async body read starts, so a
+    // late response can only ever be about the checkpoint the user opened.
+    const bodyTarget = {
+      checkpointId: identity.checkpointId?.value,
+      commitRef: identity.commitRef,
+    }
     viewedDetail.append(recoveryBindingBlock(ui, value.viewed.recoveryBinding, options.onOpenReference))
     viewedDetail.append(contextBlock(ui, value.viewed.context, '该检查点的历史 Context', options.onOpenReference))
-    viewedDetail.append(semanticBlock(ui, value.viewed.semantic, options.onOpenReference))
-    viewedDetail.append(captureBlock(ui, value.viewed.capture, options.onOpenReference))
+    viewedDetail.append(semanticBlock(ui, value.viewed.semantic, options.onOpenReference, bodyTarget, options))
+    viewedDetail.append(captureBlock(ui, value.viewed.capture, options.onOpenReference, bodyTarget, options))
     for (const ref of identity.evidenceRefs ?? []) evidenceRef(ui, viewedDetail, '检查点证据引用', ref, options)
     evidenceRef(ui, viewedDetail, '检查点恢复状态引用', identity.recoveryStateRef, options)
   }
@@ -619,5 +665,117 @@ export function renderCheckpointHistoryDetail(read, options = {}) {
 
   const capabilities = capabilitySection(ui, value.capabilities)
   if (capabilities) ui.root.append(capabilities)
+  return ui.result
+}
+
+function assetViewText(view) {
+  if (!view || typeof view !== 'object') return '未提供'
+  return view.kind === 'text-field' || view.kind === 'thinking-field'
+    ? `${view.kind} · ${view.field}`
+    : view.kind === 'content-part'
+      ? `${view.kind} · ${view.partIndex}`
+      : view.kind === 'reasoning-item'
+        ? `${view.kind} · ${view.selector}`
+        : String(view.kind)
+}
+
+function checkpointAssetLabel(selector) {
+  if (selector?.kind === 'adopted-child') {
+    return `已采用子交付 ${selector.invocationId} · ${selector.childTurnId} · 交付 ${selector.deliverySeq}`
+  }
+  return '恢复捕获'
+}
+
+// The folded provenance of one body read. Every identity and machine field the
+// service actually returned stays here as exact text: the checkpoint and its
+// full physical receipt, the selector, and the durable descriptor (evidence id,
+// locator, digest and view). The primary body layer never shows this as a dump.
+function assetBodyProvenance(ui, value) {
+  const details = ui.make('details', undefined, 'history-detail')
+  details.setAttribute('data-checkpoint-role', 'asset-body-provenance')
+  details.append(ui.make('summary', '来源详情'))
+  const body = ui.make('div', undefined, 'item')
+  const identity = value.checkpoint
+  const receipt = identity?.commitRef
+  const asset = value.asset
+  facts(ui, body, [
+    ['检查点 ID', identity?.checkpointId?.value],
+    ['业务序号', identity?.seq],
+    ['物理 Journal 序号', receipt?.journalSeq],
+    ['提交 ID', receipt?.commitId],
+    ['记录摘要', receipt?.recordDigest],
+    ['资产角色', value.selector?.kind],
+    ['调用 ID', value.selector?.invocationId],
+    ['子回合 ID', value.selector?.childTurnId],
+    ['交付序号', value.selector?.deliverySeq],
+    ['资产证据 ID', asset?.ref?.evidenceId?.value],
+    ['资产类型', asset?.ref?.kind],
+    ['资产来源', asset?.ref?.source],
+    ['资产定位', asset?.ref?.locator],
+    ['资产摘要', asset?.ref?.digest],
+    ['读取视图', assetViewText(asset?.view)],
+  ])
+  details.append(body)
+  return details
+}
+
+/**
+ * The exact asset body of one checkpoint. The body is the service's decoded
+ * text and is rendered as text only: no HTML execution, no re-interpretation of
+ * the view, and no invented fallback. `onBack` returns to the checkpoint detail,
+ * `onRetry` re-reads this same target.
+ */
+export function renderCheckpointAssetBody(result, options = {}) {
+  const ui = rendering(options, '资产正文')
+  if (result?.pending) {
+    const pending = ui.make('div', undefined, 'item')
+    pending.setAttribute('data-checkpoint-role', 'asset-body-loading')
+    pending.append(ui.make('strong', '正在读取资产正文…'))
+    const actions = ui.make('div', undefined, 'section-head')
+    ui.action(actions, '重试这次读取', options.onRetry, undefined, 'button button--sm')
+    ui.action(actions, '返回检查点详情', options.onBack, undefined, 'button button--quiet')
+    pending.append(actions)
+    ui.root.append(pending)
+    return ui.result
+  }
+  if (!result?.ok) {
+    const failure = result?.failure ?? { message: '资产正文读取失败。', nextAction: '请重试这次读取，或返回检查点详情。' }
+    const block = ui.make('div', undefined, 'status-banner')
+    block.setAttribute('data-tone', 'danger')
+    block.setAttribute('data-checkpoint-role', 'asset-body-failure')
+    block.append(ui.make('p', failure.message))
+    block.append(ui.make('p', failure.nextAction, 'muted'))
+    block.append(ui.make('p', `${failure.code} · ${failure.ownerId}`, 'muted'))
+    const actions = ui.make('div', undefined, 'section-head')
+    ui.action(actions, '重试这次读取', options.onRetry, undefined, 'button button--sm')
+    ui.action(actions, '返回检查点详情', options.onBack, undefined, 'button button--quiet')
+    block.append(actions)
+    ui.root.append(block)
+    return ui.result
+  }
+
+  const value = result.value
+  const head = ui.make('div', undefined, 'stack')
+  head.append(ui.make('h3', checkpointAssetLabel(value.selector)))
+  head.append(ui.make('p', `检查点 ${value.checkpoint?.seq ?? '未提供'}`, 'muted'))
+  const actions = ui.make('div', undefined, 'history-actions')
+  ui.action(actions, '返回检查点详情', options.onBack, undefined, 'button button--quiet')
+  head.append(actions)
+  ui.root.append(head)
+
+  // Provider text keeps its own whitespace. `pre` renders it verbatim while
+  // still wrapping inside the side panel and the bottom drawer.
+  const bodyText = typeof value.text === 'string' ? value.text : ''
+  if (bodyText.length === 0) {
+    const empty = ui.make('div', undefined, 'item')
+    empty.setAttribute('data-checkpoint-role', 'asset-body-empty')
+    empty.append(ui.make('p', '该资产的正文为空，本次读取没有返回任何字符。'))
+    ui.root.append(empty)
+  } else {
+    const body = ui.make('pre', bodyText)
+    body.setAttribute('data-checkpoint-role', 'asset-body-text')
+    ui.root.append(body)
+  }
+  ui.root.append(assetBodyProvenance(ui, value))
   return ui.result
 }
