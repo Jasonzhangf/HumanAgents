@@ -324,6 +324,27 @@ test('public incarnation handoff preserves the exact same-turn context with a fr
   assert.equal(port.reads.length, readsBeforeV1 + 1, 'v1 historical restore must read exactly one committed context');
   assert.deepEqual((await journal.verify()).records, journalAfterHistorical.records, 'v1 historical restore must not change the journal');
 
+  const readsBeforeInitialOpen = port.reads.length;
+  const initialOpen = await AgentLoopRuntime.restoreHistoricalTurn(historicalRequest, port, {
+    binding: {
+      kind: 'initial-open',
+      initial: {
+        kind: 'initial-open',
+        anchor: { bindingCommitRef: bindingRef, recordsThroughCommitRef: bindingRef },
+        binding: initialBody.binding,
+        initialInput: initialBody.initialInput,
+      },
+    },
+    contextCommitRef: sourceRef,
+    exact: { checkpointId: null },
+  });
+  assert.equal(initialOpen.recovery.stage, 'closure-absent');
+  assert.equal(initialOpen.recovery.advance, 'resume-same-turn');
+  assert.equal(initialOpen.loop.snapshot().modeState.executionEpoch, 1);
+  assert.equal(initialOpen.loop.snapshot().lease.executionEpoch, 1);
+  assert.equal(port.reads.length, readsBeforeInitialOpen + 1, 'initial-open historical restore must read exactly one committed context');
+  assert.deepEqual((await journal.verify()).records, journalAfterHistorical.records, 'initial-open historical restore must not change the journal');
+
   const historicalActor = { agentRuntimeId: historical.loop.snapshot().modeState.agentRuntimeId, leaseId: historical.loop.snapshot().lease.leaseId };
   const closedScope = await historical.loop.closeObservationScope(historicalActor);
   assert.equal(closedScope.executionEpoch, 2);

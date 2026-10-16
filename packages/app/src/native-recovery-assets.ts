@@ -32,17 +32,20 @@ import { createJsonlActiveTurnSegmentJournal } from '../../adapters/jsonl/src/ac
 import { JsonlOperationCompletionJournal } from '../../adapters/jsonl/src/operation-completion.js';
 import type { OperationCompletionJournalPort } from '../../runtime/src/gateway/operation-completion.js';
 import type {
+  ActiveTurnInitialOpenAnchor,
+  ActiveTurnInitialSegmentCapture,
+  ActiveTurnInitialSegmentSource,
+  ActiveTurnSegmentInterruptedAnchor,
+  ActiveTurnSegmentPredecessorRef,
+  ActiveTurnSegmentRecoveryReceiptRead,
+} from '../../contracts/src/active-turn-segments.js';
+import type {
+  ActiveTurnInitialOpenExactRead,
   ActiveTurnSegmentCaptureExactRead,
   ActiveTurnSegmentInterruptedExactRead,
   ActiveTurnSegmentJournalPort,
   ActiveTurnSegmentJournalRecord,
 } from '../../runtime/src/context/active-turn-journal.js';
-import type {
-  ActiveTurnInitialSegmentCapture,
-  ActiveTurnSegmentInterruptedAnchor,
-  ActiveTurnSegmentPredecessorRef,
-  ActiveTurnSegmentRecoveryReceiptRead,
-} from '../../contracts/src/active-turn-segments.js';
 import type {
   OperationCompletionLookupDescriptor,
 } from '../../runtime/src/gateway/operation-completion.js';
@@ -697,6 +700,21 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
       // journal re-derives and re-checks that anchor under the same held
       // transaction, so only the captured branch is verified here.
       if (predecessor.interrupted !== undefined) return;
+      if (predecessor.initialOpen !== undefined) {
+        for (const record of records) {
+          if (record.kind !== 'event' || record.payload?.type !== RECOVERY_ASSETS_PAYLOAD_TYPE) continue;
+          if ((record.payload.version ?? 1) === 1) {
+            const receipt = storedPhaseReceipt(record);
+            if (receipt === null) {
+              throw new RecoveryAssetsIntegrityError('a v1 recovery phase commit does not carry a readable receipt payload');
+            }
+            if (receipt.turnId === businessTurnId) {
+              throw new RecoveryAssetsIntegrityError('v1 recovery assets receipt exists for business turn; initialOpen predecessor is invalid');
+            }
+          }
+        }
+        return;
+      }
       const record = records.find((candidate) => candidate.commitId === predecessor.recoveryAssetsReceiptRef);
       if (record === undefined) {
         throw new RecoveryAssetsIntegrityError('segment predecessor recovery receipt is not committed');
@@ -739,12 +757,61 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
     return { bindingCommitRef, body: readback.prepared.body };
   }
 
+  async function readInitialSegmentSource(requested: string): Promise<ActiveTurnInitialSegmentSource | null> {
+    if (requested !== businessTurnId) {
+      throw new RecoveryAssetsIntegrityError(`segment journal is bound to business turn ${businessTurnId}`);
+    }
+    const receiptRef = await initialRecoveryReceiptRef();
+    if (receiptRef !== null) {
+      const readback = await native.readRecoveryAssetsExact(receiptRef);
+      const bindingCommitRef = await segmentJournal.readInitialBindingCommit();
+      return { kind: 'captured', bindingCommitRef, body: readback.prepared.body };
+    }
+    const anchor = await segmentJournal.readInitialOpenAnchor();
+    if (anchor !== null) {
+      const exact = await segmentJournal.readInitialOpenExact({ businessTurnId, anchor });
+      if (!exact.prefix.initialInput) {
+        throw new RecoveryAssetsIntegrityError(`initial-open turn has no initial input asset: ${businessTurnId}`);
+      }
+      return {
+        kind: 'initial-open',
+        anchor,
+        binding: exact.prefix.binding,
+        initialInput: exact.prefix.initialInput,
+      };
+    }
+    return null;
+  }
+
   async function readSegmentRecoveryReceipt(segmentId: string): Promise<ActiveTurnSegmentRecoveryReceiptRead> {
     if (segmentId === businessTurnId) {
-      const ref = await initialRecoveryReceiptRef();
-      return ref === null
-        ? { status: 'unknown', reason: `no recovery receipt for segment ${segmentId}` }
-        : { status: 'exact', recoveryAssetsReceiptRef: ref };
+      const records = await journal.replay();
+      const attributed: string[] = [];
+      for (const record of records) {
+        if (record.kind !== 'event' || record.payload?.type !== RECOVERY_ASSETS_PAYLOAD_TYPE) continue;
+        if ((record.payload.version ?? 1) === 1) {
+          const receipt = storedPhaseReceipt(record);
+          if (receipt === null) {
+            return { status: 'failed', reason: 'unreadable v1 recovery phase commit' };
+          }
+          if (receipt.turnId === businessTurnId) {
+            if (record.commitId === undefined) {
+              throw new RecoveryAssetsIntegrityError('a matching v1 recovery receipt has no commit identity');
+            }
+            attributed.push(record.commitId);
+          }
+        }
+      }
+      if (attributed.length > 1) {
+        throw new RecoveryAssetsIntegrityError('multiple v1 recovery receipts exist for the business turn');
+      }
+      if (attributed.length === 1) {
+        return { status: 'exact', recoveryAssetsReceiptRef: attributed[0]! };
+      }
+      const anchor = await segmentJournal.readInitialOpenAnchor();
+      return anchor === null
+        ? { status: 'unknown', reason: `no recovery receipt or initial open anchor for segment ${segmentId}` }
+        : { status: 'initial-open', anchor };
     }
     // Strict absence only. Every v2 phase commit in this business turn is
     // inspected: a present but unreadable or partial receipt must fail here
@@ -810,11 +877,14 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
       || canonicalJsonStringify(opened.predecessor) !== canonicalJsonStringify(readback.prepared.body.predecessor)) {
       throw new RecoveryAssetsIntegrityError('segment capture does not match its committed segment-opened record');
     }
-    const initial = await readInitialSegmentCapture(businessTurnId);
+    const initial = await readInitialSegmentSource(businessTurnId);
     if (initial === null) {
-      throw new RecoveryAssetsIntegrityError('the original immutable v1 capture is missing');
+      throw new RecoveryAssetsIntegrityError('the original initial segment source is missing');
     }
-    if (canonicalJsonStringify(initial.body.initialInput) !== canonicalJsonStringify(readback.prepared.body.initialInput)) {
+    const expectedInitialInput = initial.kind === 'captured'
+      ? initial.body.initialInput
+      : initial.initialInput;
+    if (canonicalJsonStringify(expectedInitialInput) !== canonicalJsonStringify(readback.prepared.body.initialInput)) {
       throw new RecoveryAssetsIntegrityError('segment capture does not reference the original immutable input');
     }
 
@@ -838,10 +908,12 @@ export function createActiveTurnSegmentJournal(input: ActiveTurnSegmentJournalIn
   }
 
   return {
-    readInitialSegmentCapture,
+    readInitialSegmentSource,
     readSegments: async (requested) => await segmentJournal.readSegments(requested),
     readSegmentRecoveryReceipt,
     readSegmentInterruptedExact,
+    readInitialOpenAnchor: async () => await segmentJournal.readInitialOpenAnchor(),
+    readInitialOpenExact: async (req) => await segmentJournal.readInitialOpenExact(req),
     appendSegmentOpened: async (request) => await segmentJournal.appendSegmentOpened(request),
     appendSegmentRecord: async (request) => await segmentJournal.appendSegmentRecord(request),
     readSegmentRecords,
