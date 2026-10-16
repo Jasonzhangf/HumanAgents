@@ -79,6 +79,8 @@ import {
   UiRuntimeService,
   buildFakeExecutionPort,
   startUiRuntime as startUiRuntimeOwner,
+  uiRuntimeControlJournalPath,
+  type UiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
 import {
   AgentRuntimePoolManager,
@@ -89,11 +91,18 @@ import {
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
+import { createJsonlCheckpointJournal } from '../../packages/app/src/checkpoint-journal.js';
 import { projectRuntimeTaskHistory } from '../../packages/app/src/ui-runtime/turn-history.js';
 import { validatePersistedToolExecutionFact } from '../../packages/app/src/ui-runtime/tool-fact-validation.js';
 import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
+import {
+  TASK_EXECUTION_ACTION_ID,
+  TASK_EXECUTION_CAPABILITY,
+} from '../../packages/app/src/ui-runtime/task-control.js';
 import {
   createProviderExplicitBrainInterpreter,
   type ExplicitBrainInputInterpreter,
@@ -140,6 +149,11 @@ const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
   },
 };
 
+// The wrapper-launched runtime must record the exact access-control owner it
+// started with. A grant fixture reads `readProductPrincipalOwner` from this
+// same owner so the durable grant and the runtime admission agree.
+const runtimeAccessControl = new WeakMap<UiRuntime, AccessControlService>();
+
 async function startUiRuntime(
   options: Parameters<typeof startUiRuntimeOwner>[0],
 ): ReturnType<typeof startUiRuntimeOwner> {
@@ -150,8 +164,40 @@ async function startUiRuntime(
     ...(auth === undefined ? {} : { accessControl: auth.accessControl }),
     explicitBrainInterpreter: options.explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
   });
+  runtimeAccessControl.set(runtime, options.accessControl ?? auth!.accessControl);
   if (auth) testSessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
   return runtime;
+}
+
+/**
+ * Commit the real task-scoped execution grant on the same physical control
+ * Organ Journal the started runtime already reads. Admission requires the
+ * durable grant, so a fixture issues it after task creation and before start.
+ */
+async function grantRuntimeTask(
+  runtime: UiRuntime,
+  taskId: TaskId,
+  checkpointRoot: string,
+  mode: Parameters<typeof startUiRuntimeOwner>[0]['mode'],
+): Promise<void> {
+  const accessControl = runtimeAccessControl.get(runtime);
+  if (accessControl === undefined) {
+    throw new Error('ui runtime fixture has no recorded access-control owner for the task grant');
+  }
+  const grants = new JsonlTaskGrantJournal(
+    new JsonlOrganJournal(uiRuntimeControlJournalPath(join(checkpointRoot, mode))),
+  );
+  await grants.grant({
+    requestId: `fixture-task-execution:${taskId.value}`,
+    taskId,
+    owner: accessControl.readProductPrincipalOwner(),
+    capability: {
+      actionId: TASK_EXECUTION_ACTION_ID,
+      capabilities: [TASK_EXECUTION_CAPABILITY],
+      scope: { organId, taskId },
+    },
+    expectedRevision: 0,
+  });
 }
 
 function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
@@ -781,6 +827,7 @@ test('ui runtime binds memory to the real operation identity and exposes determi
   });
   try {
     const task = runtime.service.createTask({ title: 'memory binding' });
+    await grantRuntimeTask(runtime, task.taskId, join(root, 'checkpoints'), 'fake');
     memory.addContextEntry({
       scope: { kind: 'task', organId, taskId: task.taskId },
       sourceRef: 'journal://ui-memory/current',
@@ -845,6 +892,7 @@ test('ui runtime recalls approved long-term memory approved by an earlier task',
     });
 
     const task = runtime.service.createTask({ title: 'later task recalls approved memory' });
+    await grantRuntimeTask(runtime, task.taskId, join(root, 'checkpoints'), 'fake');
     const started = await runtime.service.startExecution(task.taskId, { prompt: 'recall approved long-term memory' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
 
@@ -908,6 +956,7 @@ test('ui runtime never requests a recall layer the loaded execution template doe
     });
 
     const task = runtime.service.createTask({ title: 'narrow template grant' });
+    await grantRuntimeTask(runtime, task.taskId, join(root, 'checkpoints'), 'fake');
     const started = await runtime.service.startExecution(task.taskId, { prompt: 'recall with a narrowed grant' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
 
@@ -996,6 +1045,7 @@ test('memory context HTTP route reports pending while the accepted execution is 
       body: JSON.stringify({ title: 'pending memory binding' }),
     });
     const task = await created.json() as { readonly taskId: { readonly value: string } };
+    await grantRuntimeTask(runtime, id('task', task.taskId.value), join(root, 'checkpoints'), 'fake');
     const startedResponse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1050,6 +1100,7 @@ test('memory context HTTP route exposes terminal memory binding failure instead 
       body: JSON.stringify({ title: 'failed memory binding' }),
     });
     const task = await created.json() as { readonly taskId: { readonly value: string } };
+    await grantRuntimeTask(runtime, id('task', task.taskId.value), join(root, 'checkpoints'), 'fake');
     const startedResponse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -4448,9 +4499,11 @@ test('runtime close settles active executions before propagating a credential wa
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     memory: testMemory('project-ui-close-watch-failure'),
   });
+  runtimeAccessControl.set(runtime, failingAccessControl);
   let closeStarted = false;
   try {
     const task = runtime.service.createTask({ title: 'watch failure close' });
+    await grantRuntimeTask(runtime, task.taskId, checkpointRoot, 'fake');
     await runtime.service.startExecution(task.taskId, { prompt: 'hold open until watch failure' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'running'));
 
@@ -4478,18 +4531,18 @@ test('runtime close settles active executions before propagating a credential wa
 
     const checkpoint = runtime.service.taskDashboard(task.taskId).checkpoint;
     assert.equal(checkpoint?.outcome, 'stopped');
-    const checkpointFile = await readFile(
-      join(checkpointRoot, 'fake', `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
-      'utf8',
-    );
-    const records = checkpointFile
-      .split('\n')
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as { readonly kind?: string; readonly checkpoint?: { readonly outcome?: string } });
-    const stoppedCheckpoint = records.find(
-      (record) => record.kind === 'checkpoint' && record.checkpoint?.outcome === 'stopped',
-    );
-    assert.ok(stoppedCheckpoint, 'close must commit the stopped checkpoint before the original error is observable');
+    const checkpointJournal = createJsonlCheckpointJournal({
+      filePath: uiRuntimeControlJournalPath(join(checkpointRoot, 'fake')),
+    });
+    const { checkpoints } = await checkpointJournal.listCommitted({
+      scope: { organId, taskId: task.taskId },
+      limit: 1,
+    });
+    const stoppedCheckpoint = checkpoints[0];
+    if (!stoppedCheckpoint) throw new Error('close must commit the stopped checkpoint before the original error is observable');
+    if (!checkpoint) throw new Error('dashboard must project the committed stopped checkpoint');
+    assert.equal(stoppedCheckpoint.checkpoint.outcome, 'stopped');
+    assert.equal(stoppedCheckpoint.checkpoint.id.value, checkpoint.checkpointId);
 
     let retryError: unknown;
     try {
@@ -5700,6 +5753,7 @@ test('memory context receipt is process-local across serve restart and fresh ope
 
   const first = await launch();
   const task = first.service.createTask({ title: 'memory receipt restart' });
+  await grantRuntimeTask(first, task.taskId, join(root, 'checkpoints'), 'fake');
   const firstStarted = await first.service.startExecution(task.taskId, { prompt: 'first memory receipt' });
   try {
     await waitFor(() => assert.equal(first.service.taskDashboard(task.taskId).state, 'succeeded'));
@@ -6998,6 +7052,7 @@ test('runtime API task detail uses the task-detail projection surface', async ()
     const detail = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
     assert.equal(detail.status, 200);
     const taskId = id('task', task.taskId.value);
+    await grantRuntimeTask(runtime, taskId, join(root, 'checkpoints'), 'fake');
     await runtime.service.startExecution(taskId, { prompt: 'typed task detail output' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded'));
     const completedDetail = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
@@ -7045,6 +7100,7 @@ test('runtime task API supports update, delete, and grouped task actions', async
       body: JSON.stringify({ title: 'executed task', directive: 'executed directive' }),
     });
     const executed = await executedResponse.json() as { readonly taskId: { readonly value: string } };
+    await grantRuntimeTask(runtime, id('task', executed.taskId.value), join(root, 'checkpoints'), 'fake');
     await runtime.service.startExecution(id('task', executed.taskId.value), { prompt: 'complete before delete' });
     await waitFor(() => assert.equal(runtime.service.taskDashboard(id('task', executed.taskId.value)).state, 'succeeded'));
     const updated = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(tasks[0]!.taskId.value)}`, {
@@ -7122,6 +7178,7 @@ test('runtime HTTP API reconstructs task state and SSE replay after a server res
     });
     const task = await created.json() as { readonly taskId: { readonly value: string } };
     taskId = task.taskId.value;
+    await grantRuntimeTask(first, id('task', taskId), checkpointRoot, 'fake');
     const started = await fetch(`${first.server.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -7176,6 +7233,7 @@ test('HTTP SSE keeps the first connection open through settling, checkpoint, and
   });
   try {
     const task = runtime.service.createTask({ title: 'http sse lifecycle' });
+    await grantRuntimeTask(runtime, task.taskId, join(root, 'checkpoints'), 'fake');
     const started = await runtime.service.startExecution(task.taskId, { prompt: 'stream the full lifecycle' });
     const events = await fetch(`${runtime.server.url}/api/executions/${encodeURIComponent(started.operationId.value)}/events`);
     assert.equal(events.status, 200);
