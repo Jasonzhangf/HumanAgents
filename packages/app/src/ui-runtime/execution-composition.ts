@@ -4,13 +4,14 @@ import { canonicalJsonStringify, id, operationIdempotencyKey, operationSemanticF
 import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
 import type { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeExecutionAllocation, RuntimeTaskJournalPort } from '../../../runtime/src/ui-runtime/coordinator.js';
-import type { OperationTaskBoundaryPort } from '../../../runtime/src/gateway/ports.js';
+import type { OperationStopSettlementPort, OperationTaskBoundaryPort } from '../../../runtime/src/gateway/ports.js';
 import { createToolExecutionGateway } from '../tool-execution-gateway.js';
 import { AppLifecycleError } from '../errors.js';
 import { createExecutionAdmission, executionAdmissionInputDigest,
   type PreparedParentLifecycle } from './execution-admission.js';
 import { readPreparedExecutionInput } from '../prepared-execution-input.js';
 export { readPreparedExecutionInput } from '../prepared-execution-input.js';
+import { PreparedExecutionStop, type PreparedExecutionStopPreparationLease } from './prepared-execution-stop.js';
 import { TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from './task-control.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
@@ -160,6 +161,17 @@ export function createDefaultExecutionComposition(input: {
   readonly resourceBoundary: OperationTaskBoundaryPort;
   readonly prepareAgentProvider: (selection: { readonly roleId: import('../../../config/src/index.js').AgentRole;
     readonly configuredAgentId?: string }) => Promise<AgentProviderComposition>;
+  /**
+   * Task-scoped Provider preparation that transfers the selected composition's
+   * custody to one prepared-stop lease before the fallible acquisition append.
+   * It is present only for the launch that also returns the prepared-stop port;
+   * absent keeps the neutral preparer path for callers that bind no stop owner.
+   */
+  readonly prepareTaskAgentProvider?: (
+    selection: { readonly roleId: import('../../../config/src/index.js').AgentRole; readonly configuredAgentId?: string },
+    owner: PreparedExecutionStop,
+    lease: PreparedExecutionStopPreparationLease,
+  ) => Promise<AgentProviderComposition>;
   readonly providerOptions: Pick<ProviderAgentDriverOptions, 'tools' | 'executeTool' | 'maxToolRounds' | 'onRequestLifecycle'>;
   /**
    * Actual admitted Provider-tool scope. When present, the composition builds
@@ -208,7 +220,21 @@ export function createDefaultExecutionComposition(input: {
         ...(retained.currentPlan === undefined ? {} : { currentPlan: retained.currentPlan }) } };
     },
   };
-  const admission = createServiceExecutionAdmission({ ...input, principalOwner: input.principalOwner });
+  // One prepared-stop producer owns the fresh Task preparation custody, the
+  // Gateway stop-settlement callback and the returned public stop port. The
+  // callback only installs a lazy delegate, so constructing the admission never
+  // settles a stop and never reenters the producer.
+  let preparedExecutionStop!: PreparedExecutionStop;
+  const admission = createServiceExecutionAdmission({
+    ...input,
+    principalOwner: input.principalOwner,
+    stopSettlement: { settle: (request) => preparedExecutionStop.settleParentStop(request) },
+  });
+  preparedExecutionStop = new PreparedExecutionStop({
+    journal: input.journal,
+    taskJournal: input.preparedJournal,
+    admission,
+  });
   async function owner(taskId: RuntimeExecutionAllocation['taskId']) {
     const read = await grants.readTaskGrant(taskId);
     if (!read.grant || !read.commit) missing('verified TG1 owner is absent; no Provider factory can run');
@@ -296,7 +322,19 @@ export function createDefaultExecutionComposition(input: {
     } finally { await closeAgentProvider(selected); }
   }
   async function createExecutionDriver(allocation: RuntimeExecutionPreparationInput): Promise<RuntimeExecutionDriver> {
-    const execution = await prepareExecution(allocation);
+    const prepareTask = input.prepareTaskAgentProvider;
+    if (prepareTask === undefined) {
+      const execution = await prepareExecution(allocation);
+      if ('finishBoundary' in execution) missing('normal generation cannot resolve a boundary-only lifecycle');
+      return execution;
+    }
+    // The lease identity is the Runtime's frozen allocation, never the
+    // per-attempt binding/epoch this particular preparation selected. The whole
+    // fallible driver construction runs under the lease so a later failure
+    // keeps the same cleanup owner and cannot close the Provider twice.
+    const { attemptExecutionEpoch: _attemptExecutionEpoch, attemptBindingId: _attemptBindingId, ...identity } = allocation;
+    const execution = await preparedExecutionStop.withPreparation(identity, (lease) =>
+      prepareExecution(allocation, undefined, { lease, prepareProvider: prepareTask }));
     if ('finishBoundary' in execution) missing('normal generation cannot resolve a boundary-only lifecycle');
     return execution;
   }
@@ -451,6 +489,9 @@ export function createDefaultExecutionComposition(input: {
   async function prepareExecution(allocation: RuntimeExecutionPreparationInput, resume?: {
     readonly source: RuntimeColdExecutionSource; readonly loop: AgentLoopRuntime;
     readonly segment?: ResumedTurnSegmentOpened; readonly retainedIntent?: NativeSaveIntent;
+  }, taskPreparation?: {
+    readonly lease: PreparedExecutionStopPreparationLease;
+    readonly prepareProvider: NonNullable<typeof input.prepareTaskAgentProvider>;
   }): Promise<RuntimeExecutionDriver | StandardTurnBoundaryLifecycle> {
     const { attemptExecutionEpoch: _attemptEpoch, attemptBindingId: _attemptBinding, ...identity } = allocation;
     const retainedIntent = resume?.retainedIntent;
@@ -472,8 +513,15 @@ export function createDefaultExecutionComposition(input: {
     // The declared authority scope is the grant's own scope, not the physical
     // closure scope (which also carries the cycle and operation).
     const declaredCapabilityScope = grant.grant.capability.scope;
-    const composition = retainedIntent ? undefined : await input.prepareAgentProvider({ roleId: allocation.role ?? 'execution',
-      ...(allocation.configuredAgentId === undefined ? {} : { configuredAgentId: allocation.configuredAgentId }) });
+    // A fresh Task preparation selects through the prepared-stop custody seam
+    // when one is bound; cold resume, historical boundary and Planner keep the
+    // neutral preparer and never fabricate a fresh preparation fact.
+    const composition = retainedIntent ? undefined : taskPreparation === undefined
+      ? await input.prepareAgentProvider({ roleId: allocation.role ?? 'execution',
+          ...(allocation.configuredAgentId === undefined ? {} : { configuredAgentId: allocation.configuredAgentId }) })
+      : await taskPreparation.prepareProvider({ roleId: allocation.role ?? 'execution',
+          ...(allocation.configuredAgentId === undefined ? {} : { configuredAgentId: allocation.configuredAgentId }) },
+          preparedExecutionStop, taskPreparation.lease);
     try {
       // The admitted executor is built only after the durable A2 release edge:
       // the verified principal, current grant adapter, real boundary and clock
@@ -838,6 +886,14 @@ export function createDefaultExecutionComposition(input: {
       let providerClosed: Promise<import('../../../contracts/src/index.js').ProviderCloseResult> | undefined;
       function closeOwnedProvider() {
         if (!('driver' in native)) missing('historical boundary has no owned live Provider');
+        // A fresh Task Provider is owned by the prepared-stop producer, so its
+        // close reads the durable closure through the same lease instead of
+        // running a second physical transport close. Cold and boundary paths
+        // keep the driver-owned close.
+        if (taskPreparation !== undefined && composition !== undefined) {
+          const owned = composition;
+          return providerClosed ??= preparedExecutionStop.closePreparationProvider(taskPreparation.lease, owned);
+        }
         return providerClosed ??= native.driver.close();
       }
       let plannerInput: ClosedTurnPlannerCallInput | undefined;
@@ -1201,8 +1257,15 @@ export function createDefaultExecutionComposition(input: {
       };
       return driver;
     } catch (error) {
-      try { if (composition) await closeAgentProvider(composition); }
-      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'native preparation and owned Provider close failed'); }
+      // A fresh Task preparation keeps its Provider custody under the
+      // prepared-stop lease, so the failure must leave through
+      // `withPreparation` for the single cleanup owner to close the real
+      // resource. Only the neutral (no-lease) paths close their own
+      // composition here.
+      if (taskPreparation === undefined) {
+        try { if (composition) await closeAgentProvider(composition); }
+        catch (cleanupError) { throw new AggregateError([error, cleanupError], 'native preparation and owned Provider close failed'); }
+      }
       throw error;
     }
   }
@@ -1210,7 +1273,7 @@ export function createDefaultExecutionComposition(input: {
   // keeps the App composition from drifting from `RuntimeColdExecutionProducer`.
   const coldProducer: RuntimeColdExecutionProducer = { readColdExecutionSource, admitSegment,
     readIncarnationBinding, recoverOriginalTurn, createResumedExecutionDriver };
-  return { currentStateFacts, admitExecution, createExecutionDriver, ...coldProducer, resolveColdExecutionResumeRequest, grants, context, checkpoints,
+  return { currentStateFacts, admitExecution, createExecutionDriver, preparedExecutionStop, ...coldProducer, resolveColdExecutionResumeRequest, grants, context, checkpoints,
     async admitNewBusiness(value: Parameters<import('./task-control.js').TaskControlAdmissionPort['admitNewBusiness']>[0]) {
       return (await owner(value.request.taskId)).admitNewBusiness(value);
     },
@@ -1224,6 +1287,7 @@ export function createServiceExecutionAdmission(input: {
   readonly principalOwner: string;
   readonly resourceBoundary: OperationTaskBoundaryPort;
   readonly now: () => Date;
+  readonly stopSettlement?: OperationStopSettlementPort;
 }) {
   const grants = new JsonlTaskGrantJournal(input.journal);
   const admission = createExecutionAdmission({
@@ -1232,7 +1296,8 @@ export function createServiceExecutionAdmission(input: {
       capabilities: [TASK_EXECUTION_CAPABILITY], scope: { organId: intent.requestedScope.organId, taskId: intent.taskId } }),
     resourceBoundary: input.resourceBoundary,
     resolveAdmittedInput: async (allocation) => readPreparedExecutionInput(input.preparedJournal, allocation),
-    createGateway: (ports) => createToolExecutionGateway({ ...ports, now: input.now }),
+    createGateway: (ports) => createToolExecutionGateway({ ...ports,
+      ...(input.stopSettlement === undefined ? {} : { stopSettlement: input.stopSettlement }), now: input.now }),
   });
 
   async function admitExecution(allocation: RuntimeExecutionAllocation) {
