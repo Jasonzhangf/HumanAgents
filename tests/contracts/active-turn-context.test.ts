@@ -30,7 +30,16 @@ import {
   type WorkAssignment,
   type WorkResult,
 } from '@humanagent/contracts';
-import { validateActiveTurnSegmentPredecessorRef } from '../../packages/contracts/src/active-turn-segments.js';
+import {
+  originalBusinessTurnRefFromBinding,
+  validateActiveTurnInitialOpenAnchor,
+  validateActiveTurnInitialSegmentSource,
+  validateActiveTurnSegmentChainInitial,
+  validateActiveTurnSegmentChainRead,
+  validateActiveTurnSegmentOpenIntent,
+  validateActiveTurnSegmentPredecessorRef,
+  validateActiveTurnSegmentRecoveryReceiptRead,
+} from '../../packages/contracts/src/active-turn-segments.js';
 import { ContractError as SourceContractError } from '../../packages/contracts/src/errors.js';
 
 const organId = id('organ', 'organ-a');
@@ -291,10 +300,14 @@ test('public consumer names the active-turn raw identity apart from the Provider
   void rawIsNotProviderWide;
 });
 
-test('active turn segment predecessor accepts captured or interrupted and rejects invalid unions', () => {
+test('active turn segment predecessor accepts captured, interrupted, or initial-open and rejects invalid unions', () => {
   const interruptedAnchor = {
     openedCommitRef: { commitId: 'commit-opened-a', journalSeq: 1, recordDigest: 'sha256:' + 'a'.repeat(64) },
     recordsThroughCommitRef: { commitId: 'commit-records-a', journalSeq: 2, recordDigest: 'sha256:' + 'a'.repeat(64) },
+  };
+  const initialOpenAnchor = {
+    bindingCommitRef: { commitId: 'commit-binding-a', journalSeq: 6, recordDigest: 'sha256:' + 'b'.repeat(64) },
+    recordsThroughCommitRef: { commitId: 'commit-through-a', journalSeq: 113, recordDigest: 'sha256:' + 'c'.repeat(64) },
   };
   assert.doesNotThrow(() => validateActiveTurnSegmentPredecessorRef({
     segmentId: 'segment-a',
@@ -304,15 +317,156 @@ test('active turn segment predecessor accepts captured or interrupted and reject
     segmentId: 'segment-a',
     interrupted: interruptedAnchor,
   }));
+  assert.doesNotThrow(() => validateActiveTurnSegmentPredecessorRef({
+    segmentId: 'segment-a',
+    initialOpen: initialOpenAnchor,
+  }));
   assert.throws(() => validateActiveTurnSegmentPredecessorRef({
     segmentId: 'segment-a',
     recoveryAssetsReceiptRef: 'receipt-a',
     interrupted: interruptedAnchor,
   }), SourceContractError);
+  assert.throws(() => validateActiveTurnSegmentPredecessorRef({
+    segmentId: 'segment-a',
+    recoveryAssetsReceiptRef: 'receipt-a',
+    initialOpen: initialOpenAnchor,
+  }), SourceContractError);
+  assert.throws(() => validateActiveTurnSegmentPredecessorRef({
+    segmentId: 'segment-a',
+    interrupted: interruptedAnchor,
+    initialOpen: initialOpenAnchor,
+  }), SourceContractError);
   assert.throws(() => validateActiveTurnSegmentPredecessorRef({ segmentId: 'segment-a' }), SourceContractError);
   assert.throws(() => validateActiveTurnSegmentPredecessorRef({
     segmentId: 'segment-a',
     interrupted: { openedCommitRef: {}, recordsThroughCommitRef: interruptedAnchor.recordsThroughCommitRef },
+  }), SourceContractError);
+});
+
+test('initial-open anchor validates real Journal refs and never becomes a fake capture', () => {
+  const bindingCommitRef = { commitId: 'commit-binding-a', journalSeq: 6, recordDigest: 'sha256:' + 'b'.repeat(64) };
+  const recordsThroughCommitRef = { commitId: 'commit-through-a', journalSeq: 113, recordDigest: 'sha256:' + 'c'.repeat(64) };
+  const initialOpen = { bindingCommitRef, recordsThroughCommitRef };
+  assert.doesNotThrow(() => validateActiveTurnInitialOpenAnchor(initialOpen));
+  assert.throws(() => validateActiveTurnInitialOpenAnchor({
+    bindingCommitRef: { ...bindingCommitRef, commitId: '' },
+    recordsThroughCommitRef,
+  }), SourceContractError);
+  assert.throws(() => validateActiveTurnInitialOpenAnchor({
+    bindingCommitRef,
+    recordsThroughCommitRef: { ...recordsThroughCommitRef, journalSeq: 5 },
+  }), SourceContractError);
+
+  const businessTurnRef = originalBusinessTurnRefFromBinding(bindingCommitRef, baseBody.binding);
+  assert.equal(businessTurnRef.businessTurnId, admittedTurn.turnId);
+  assert.equal(businessTurnRef.bindingCommitRef.journalSeq, bindingCommitRef.journalSeq);
+  assert.equal(businessTurnRef.execution.executionEpoch, execution.executionEpoch);
+  assert.throws(() => originalBusinessTurnRefFromBinding(
+    { ...bindingCommitRef, recordDigest: '' },
+    baseBody.binding,
+  ), SourceContractError);
+  assert.throws(() => originalBusinessTurnRefFromBinding(
+    bindingCommitRef,
+    { ...baseBody.binding, execution: { ...baseBody.binding.execution, executionEpoch: 4 } },
+  ), SourceContractError);
+});
+
+test('initial-open predecessor opens a successor and rejects a self predecessor', () => {
+  const bindingCommitRef = { commitId: 'commit-binding-a', journalSeq: 6, recordDigest: 'sha256:' + 'b'.repeat(64) };
+  const recordsThroughCommitRef = { commitId: 'commit-through-a', journalSeq: 113, recordDigest: 'sha256:' + 'c'.repeat(64) };
+  const businessTurnRef = originalBusinessTurnRefFromBinding(bindingCommitRef, baseBody.binding);
+  const segmentBinding = {
+    businessTurnRef,
+    assignment,
+    execution,
+    incarnation: {
+      runtimeId: execution.runtimeId,
+      generation: 1,
+      agentInstanceId: 'agent-a',
+      roleId: 'role-a',
+      taskId,
+      assignmentId: assignment.assignmentId,
+      executionEpoch: execution.executionEpoch,
+    },
+    scope,
+  };
+  const intent = {
+    businessTurnRef,
+    segmentId: 'segment-b',
+    predecessor: { segmentId: businessTurnRef.businessTurnId, initialOpen: { bindingCommitRef, recordsThroughCommitRef } },
+    binding: segmentBinding,
+    initialInput: baseBody.initialInput,
+  };
+  assert.doesNotThrow(() => validateActiveTurnSegmentOpenIntent(intent));
+  assert.throws(() => validateActiveTurnSegmentOpenIntent({ ...intent, segmentId: businessTurnRef.businessTurnId }), SourceContractError);
+});
+
+test('initial-open receipt stays explicit and failed or unknown classifications keep their reasons', () => {
+  const anchor = {
+    bindingCommitRef: { commitId: 'commit-binding-a', journalSeq: 6, recordDigest: 'sha256:' + 'b'.repeat(64) },
+    recordsThroughCommitRef: { commitId: 'commit-through-a', journalSeq: 113, recordDigest: 'sha256:' + 'c'.repeat(64) },
+  };
+  assert.doesNotThrow(() => validateActiveTurnSegmentRecoveryReceiptRead({ status: 'initial-open', anchor }));
+  assert.doesNotThrow(() => validateActiveTurnSegmentRecoveryReceiptRead({ status: 'failed', reason: 'read failed' }));
+  assert.doesNotThrow(() => validateActiveTurnSegmentRecoveryReceiptRead({ status: 'unknown', reason: 'not found' }));
+  assert.throws(() => validateActiveTurnSegmentRecoveryReceiptRead({ status: 'failed', reason: '' }), SourceContractError);
+  assert.throws(() => validateActiveTurnSegmentRecoveryReceiptRead({ status: 'legacy', anchor }), SourceContractError);
+});
+
+test('segment chain initial source is explicit and rejects a captured body or drifted anchor', () => {
+  const anchor = {
+    bindingCommitRef: { commitId: 'commit-binding-a', journalSeq: 6, recordDigest: 'sha256:' + 'b'.repeat(64) },
+    recordsThroughCommitRef: { commitId: 'commit-through-a', journalSeq: 113, recordDigest: 'sha256:' + 'c'.repeat(64) },
+  };
+  const source = {
+    kind: 'initial-open' as const,
+    anchor,
+    binding: baseBody.binding,
+    initialInput: baseBody.initialInput,
+  };
+  const businessTurnRef = originalBusinessTurnRefFromBinding(anchor.bindingCommitRef, baseBody.binding);
+  assert.doesNotThrow(() => validateActiveTurnInitialSegmentSource(source));
+  assert.doesNotThrow(() => validateActiveTurnInitialSegmentSource({
+    kind: 'captured',
+    bindingCommitRef: anchor.bindingCommitRef,
+    body: baseBody,
+  }));
+  assert.doesNotThrow(() => validateActiveTurnSegmentChainInitial({ kind: 'captured', body: baseBody }));
+  assert.doesNotThrow(() => validateActiveTurnSegmentChainInitial(source));
+  assert.doesNotThrow(() => validateActiveTurnSegmentChainRead({
+    businessTurnRef,
+    initial: { kind: 'captured', body: baseBody },
+    segments: [],
+  }));
+  assert.doesNotThrow(() => validateActiveTurnSegmentChainRead({
+    businessTurnRef,
+    initial: source,
+    segments: [],
+  }));
+  assert.throws(() => validateActiveTurnSegmentChainRead({
+    businessTurnRef,
+    initial: {
+      ...source,
+      anchor: {
+        ...anchor,
+        bindingCommitRef: { ...anchor.bindingCommitRef, commitId: 'commit-other' },
+      },
+    },
+    segments: [],
+  }), SourceContractError);
+  assert.throws(() => validateActiveTurnSegmentChainRead({
+    businessTurnRef,
+    initial: {
+      kind: 'captured',
+      body: {
+        ...baseBody,
+        binding: {
+          ...baseBody.binding,
+          admittedTurn: { ...baseBody.binding.admittedTurn, turnId: 'turn-other' },
+        },
+      },
+    },
+    segments: [],
   }), SourceContractError);
 });
 

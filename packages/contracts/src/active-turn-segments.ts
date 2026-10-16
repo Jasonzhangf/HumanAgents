@@ -5,7 +5,7 @@ import type { TaskRuntimeIncarnation } from './framework.js';
 import type { CompletionReadInput } from './operation-completion.js';
 import type { RecoveryHoldFacts } from './native-reasoning.js';
 import type { AdmittedTurn, EvidenceRef, ScopeRef, WorkAssignment } from './index.js';
-import { assertEvidenceRef, assertScope, validateAdmittedTurn, validateWorkAssignment } from './index.js';
+import { assertEvidenceRef, assertSameScope, assertScope, validateAdmittedTurn, validateWorkAssignment } from './index.js';
 import {
   validateAcceptedChildDelivery,
   validateAcceptedRawFact,
@@ -13,6 +13,7 @@ import {
   validateChildInvocationReferences,
   type AcceptedRawFact,
   type AcceptedTurnEntry,
+  type ActiveTurnBinding,
   type ActiveTurnCaptureBody,
   type ActiveTurnProviderExecutionIdentityRef,
   type ActiveTurnProviderRequestIdentityRef,
@@ -72,10 +73,21 @@ export interface ActiveTurnSegmentInterruptedAnchor {
 }
 
 /**
+ * Durable anchor of an original turn that opened and appended records but never
+ * committed a v1 capture. `bindingCommitRef` is the real `binding-opened` commit;
+ * `recordsThroughCommitRef` is the last committed `active-turn:<businessTurnId>:*`
+ * record. The anchor is a location, not a capture, and never claims a save.
+ */
+export interface ActiveTurnInitialOpenAnchor {
+  readonly bindingCommitRef: JournalCommitRef;
+  readonly recordsThroughCommitRef: JournalCommitRef;
+}
+
+/**
  * Exact predecessor link: the segment this one resumes, closed by exactly one
  * real fact. Field presence expresses the exclusive-or, so the captured branch
  * keeps its original byte shape and gains no discriminator. The runtime validator,
- * not the `never` fields, rejects a record that carries both facts or neither.
+ * not the `never` fields, rejects a record that carries more than one fact or none.
  */
 export type ActiveTurnSegmentPredecessorRef =
   | {
@@ -83,12 +95,21 @@ export type ActiveTurnSegmentPredecessorRef =
       /** Exact J1 recovery-assets receipt that closed the predecessor segment. */
       readonly recoveryAssetsReceiptRef: string;
       readonly interrupted?: never;
+      readonly initialOpen?: never;
     }
   | {
       readonly segmentId: string;
       readonly recoveryAssetsReceiptRef?: never;
       /** Durable anchor of an opened but unsaved predecessor segment. */
       readonly interrupted: ActiveTurnSegmentInterruptedAnchor;
+      readonly initialOpen?: never;
+    }
+  | {
+      readonly segmentId: string;
+      readonly recoveryAssetsReceiptRef?: never;
+      readonly interrupted?: never;
+      /** Durable anchor of the original turn that was never captured. */
+      readonly initialOpen: ActiveTurnInitialOpenAnchor;
     };
 
 /** Real binding of one execution segment. The incarnation is the actual handle. */
@@ -125,6 +146,7 @@ export interface ActiveTurnSegmentOpenIntent {
 export type ActiveTurnSegmentRecoveryReceiptRead =
   | { readonly status: 'exact'; readonly recoveryAssetsReceiptRef: string }
   | { readonly status: 'interrupted'; readonly anchor: ActiveTurnSegmentInterruptedAnchor }
+  | { readonly status: 'initial-open'; readonly anchor: ActiveTurnInitialOpenAnchor }
   | { readonly status: 'failed'; readonly reason: string }
   | { readonly status: 'unknown'; readonly reason: string };
 
@@ -185,6 +207,38 @@ export interface ActiveTurnInitialSegmentCapture {
   readonly body: ActiveTurnCaptureBody;
 }
 
+/** Exact read of the immutable first (v1) capture, tagged for the source union. */
+export interface ActiveTurnCapturedInitialSource extends ActiveTurnInitialSegmentCapture {
+  readonly kind: 'captured';
+}
+
+/**
+ * Root source for a turn that opened in v1 but never captured. The binding and
+ * initial input come from the exact active-turn prefix; the anchor locates that
+ * prefix in the Journal and is never a synthetic capture.
+ */
+export interface ActiveTurnInitialOpenSegmentSource {
+  readonly kind: 'initial-open';
+  readonly anchor: ActiveTurnInitialOpenAnchor;
+  readonly binding: ActiveTurnBinding;
+  readonly initialInput: RawAsset;
+}
+
+/** Explicit source of one business turn's initial segment. */
+export type ActiveTurnInitialSegmentSource =
+  | ActiveTurnCapturedInitialSource
+  | ActiveTurnInitialOpenSegmentSource;
+
+/**
+ * Initial segment form carried by the ordered chain read. The captured branch
+ * carries only the body because the chain's `businessTurnRef` already names the
+ * binding commit. The initial-open branch carries its full source because no
+ * v1 capture exists.
+ */
+export type ActiveTurnSegmentChainInitial =
+  | { readonly kind: 'captured'; readonly body: ActiveTurnCaptureBody }
+  | ActiveTurnInitialOpenSegmentSource;
+
 /**
  * Canonical source bundle for one resumed-segment native save. It is a read
  * result assembled by the App/Journal owner, not a grant, permission or second
@@ -201,7 +255,7 @@ export interface NativeSegmentSaveSourceV2 {
 /** Immutable cold read of one business turn's ordered segment chain. */
 export interface ActiveTurnSegmentChainRead {
   readonly businessTurnRef: OriginalBusinessTurnRef;
-  readonly initial: ActiveTurnCaptureBody;
+  readonly initial: ActiveTurnSegmentChainInitial;
   readonly segments: readonly ResumedTurnSegmentOpened[];
 }
 
@@ -235,6 +289,24 @@ export function originalBusinessTurnRef(
   };
 }
 
+/**
+ * Derive the original business turn reference from an exact v1 binding read.
+ * The binding commit is the real `binding-opened` receipt; this function never
+ * writes a second admission or capture.
+ */
+export function originalBusinessTurnRefFromBinding(
+  bindingCommitRef: JournalCommitRef,
+  binding: ActiveTurnBinding,
+): OriginalBusinessTurnRef {
+  validateJournalCommitRef(bindingCommitRef);
+  assertActiveTurnBinding(binding, 'original business turn binding');
+  return {
+    businessTurnId: binding.admittedTurn.turnId,
+    bindingCommitRef: { ...bindingCommitRef },
+    execution: { ...binding.execution },
+  };
+}
+
 export function validateActiveTurnSegmentIdentity(input: unknown): asserts input is ActiveTurnSegmentIdentity {
   assertPlainObject(input, 'segment identity');
   assertNonEmptyString(input.businessTurnId, 'segment identity businessTurnId');
@@ -242,32 +314,108 @@ export function validateActiveTurnSegmentIdentity(input: unknown): asserts input
   assertPositiveSafeInteger(input.executionEpoch, 'segment identity executionEpoch');
 }
 
+export function validateActiveTurnInitialOpenAnchor(input: unknown): asserts input is ActiveTurnInitialOpenAnchor {
+  assertPlainObject(input, 'initial-open anchor');
+  validateJournalCommitRef(input.bindingCommitRef as JournalCommitRef);
+  validateJournalCommitRef(input.recordsThroughCommitRef as JournalCommitRef);
+  const bindingCommitRef = input.bindingCommitRef as JournalCommitRef;
+  const recordsThroughCommitRef = input.recordsThroughCommitRef as JournalCommitRef;
+  if (recordsThroughCommitRef.journalSeq < bindingCommitRef.journalSeq) {
+    throw new ContractError('initial-open anchor recordsThroughCommitRef cannot precede its bindingCommitRef');
+  }
+}
+
 /**
  * Enforce the exclusive-or predecessor link. The captured branch carries the exact
  * J1 recovery-assets receipt that closed the predecessor; the interrupted branch
- * carries the durable anchor of an opened but unsaved predecessor. Field presence
- * is the only discriminator, so a record holding both facts or neither is rejected
- * here rather than resolved downstream. Commit refs use the existing Journal
- * validator. This never reinterprets the initial binding.
+ * carries the durable anchor of an opened but unsaved v2 segment; the initial-open
+ * branch carries the durable anchor of an original turn with no capture. Field
+ * presence is the only discriminator, so a record holding more than one fact or
+ * none is rejected here rather than resolved downstream. Commit refs use the
+ * existing Journal validator. This never reinterprets the initial binding.
  */
 export function validateActiveTurnSegmentPredecessorRef(input: unknown): asserts input is ActiveTurnSegmentPredecessorRef {
   assertPlainObject(input, 'segment predecessor');
   assertNonEmptyString(input.segmentId, 'segment predecessor segmentId');
   const hasReceipt = input.recoveryAssetsReceiptRef !== undefined;
   const hasInterrupted = input.interrupted !== undefined;
-  if (hasReceipt && hasInterrupted) {
-    throw new ContractError('segment predecessor cannot carry both a recovery receipt and an interrupted anchor');
-  }
-  if (!hasReceipt && !hasInterrupted) {
-    throw new ContractError('segment predecessor requires a recovery receipt or an interrupted anchor');
+  const hasInitialOpen = input.initialOpen !== undefined;
+  const predecessorFacts = [hasReceipt, hasInterrupted, hasInitialOpen].filter(Boolean).length;
+  if (predecessorFacts !== 1) {
+    throw new ContractError('segment predecessor requires exactly one of a recovery receipt, interrupted anchor, or initial-open anchor');
   }
   if (hasReceipt) {
     assertNonEmptyString(input.recoveryAssetsReceiptRef, 'segment predecessor recoveryAssetsReceiptRef');
     return;
   }
-  assertPlainObject(input.interrupted, 'segment predecessor interrupted anchor');
-  validateJournalCommitRef(input.interrupted.openedCommitRef as JournalCommitRef);
-  validateJournalCommitRef(input.interrupted.recordsThroughCommitRef as JournalCommitRef);
+  if (hasInterrupted) {
+    assertPlainObject(input.interrupted, 'segment predecessor interrupted anchor');
+    validateJournalCommitRef(input.interrupted.openedCommitRef as JournalCommitRef);
+    validateJournalCommitRef(input.interrupted.recordsThroughCommitRef as JournalCommitRef);
+    return;
+  }
+  validateActiveTurnInitialOpenAnchor(input.initialOpen);
+}
+
+/** Validate one explicit recovery-receipt classification without widening it. */
+export function validateActiveTurnSegmentRecoveryReceiptRead(input: unknown): asserts input is ActiveTurnSegmentRecoveryReceiptRead {
+  assertPlainObject(input, 'segment recovery receipt read');
+  if (input.status === 'exact') {
+    assertNonEmptyString(input.recoveryAssetsReceiptRef, 'segment recovery receipt recoveryAssetsReceiptRef');
+    return;
+  }
+  if (input.status === 'interrupted') {
+    assertPlainObject(input.anchor, 'segment recovery receipt interrupted anchor');
+    validateJournalCommitRef(input.anchor.openedCommitRef as JournalCommitRef);
+    validateJournalCommitRef(input.anchor.recordsThroughCommitRef as JournalCommitRef);
+    return;
+  }
+  if (input.status === 'initial-open') {
+    validateActiveTurnInitialOpenAnchor(input.anchor);
+    return;
+  }
+  if (input.status === 'failed' || input.status === 'unknown') {
+    assertNonEmptyString(input.reason, `segment recovery receipt ${input.status} reason`);
+    return;
+  }
+  throw new ContractError('segment recovery receipt status is invalid');
+}
+
+export function validateActiveTurnInitialOpenSegmentSource(input: unknown): asserts input is ActiveTurnInitialOpenSegmentSource {
+  assertPlainObject(input, 'initial-open segment source');
+  if (input.kind !== 'initial-open') throw new ContractError('initial-open segment source kind must be initial-open');
+  validateActiveTurnInitialOpenAnchor(input.anchor);
+  assertActiveTurnBinding(input.binding, 'initial-open segment source binding');
+  assertRawAsset(input.initialInput, 'initial-open segment source initialInput');
+}
+
+/** Validate an explicit initial-segment source. */
+export function validateActiveTurnInitialSegmentSource(input: unknown): asserts input is ActiveTurnInitialSegmentSource {
+  assertPlainObject(input, 'initial segment source');
+  if (input.kind === 'captured') {
+    validateJournalCommitRef(input.bindingCommitRef as JournalCommitRef);
+    validateActiveTurnCaptureBody(input.body);
+    return;
+  }
+  if (input.kind === 'initial-open') {
+    validateActiveTurnInitialOpenSegmentSource(input);
+    return;
+  }
+  throw new ContractError('initial segment source kind is invalid');
+}
+
+/** Validate the initial segment form carried by a segment chain read. */
+export function validateActiveTurnSegmentChainInitial(input: unknown): asserts input is ActiveTurnSegmentChainInitial {
+  assertPlainObject(input, 'segment chain initial');
+  if (input.kind === 'captured') {
+    validateActiveTurnCaptureBody(input.body);
+    return;
+  }
+  if (input.kind === 'initial-open') {
+    validateActiveTurnInitialOpenSegmentSource(input);
+    return;
+  }
+  throw new ContractError('segment chain initial kind is invalid');
 }
 
 export function validateOriginalBusinessTurnRef(input: unknown): asserts input is OriginalBusinessTurnRef {
@@ -467,15 +615,28 @@ export function validatePreparedActiveTurnSegmentCaptureV2(input: PreparedActive
 export function validateActiveTurnSegmentChainRead(input: unknown): asserts input is ActiveTurnSegmentChainRead {
   assertPlainObject(input, 'segment chain read');
   validateOriginalBusinessTurnRef(input.businessTurnRef);
-  validateActiveTurnCaptureBody(input.initial);
+  validateActiveTurnSegmentChainInitial(input.initial);
   const original = input.businessTurnRef as OriginalBusinessTurnRef;
-  const initial = input.initial as ActiveTurnCaptureBody;
-  if (initial.binding.admittedTurn.turnId !== original.businessTurnId) {
-    throw new ContractError('segment chain initial capture does not belong to the original business turn');
-  }
-  if (initial.binding.execution.runtimeId !== original.execution.runtimeId
-    || initial.binding.execution.executionEpoch !== original.execution.executionEpoch) {
-    throw new ContractError('segment chain original execution does not match the initial capture');
+  const initial = input.initial as ActiveTurnSegmentChainInitial;
+  if (initial.kind === 'captured') {
+    if (initial.body.binding.admittedTurn.turnId !== original.businessTurnId) {
+      throw new ContractError('segment chain initial capture does not belong to the original business turn');
+    }
+    if (initial.body.binding.execution.runtimeId !== original.execution.runtimeId
+      || initial.body.binding.execution.executionEpoch !== original.execution.executionEpoch) {
+      throw new ContractError('segment chain original execution does not match the initial capture');
+    }
+  } else {
+    if (!sameJournalCommitRef(initial.anchor.bindingCommitRef, original.bindingCommitRef)) {
+      throw new ContractError('segment chain initial-open anchor does not match the original binding commit');
+    }
+    if (initial.binding.admittedTurn.turnId !== original.businessTurnId) {
+      throw new ContractError('segment chain initial-open binding does not belong to the original business turn');
+    }
+    if (initial.binding.execution.runtimeId !== original.execution.runtimeId
+      || initial.binding.execution.executionEpoch !== original.execution.executionEpoch) {
+      throw new ContractError('segment chain original execution does not match the initial-open binding');
+    }
   }
 
   if (!Array.isArray(input.segments)) throw new ContractError('segment chain segments must be an array');
@@ -500,8 +661,19 @@ export function validateActiveTurnSegmentChainRead(input: unknown): asserts inpu
       if (segment.predecessor.segmentId !== original.businessTurnId) {
         throw new ContractError('the first resumed segment must precede-link the derived initial segment');
       }
+      if (initial.kind === 'initial-open') {
+        if (segment.predecessor.initialOpen === undefined
+          || !sameJournalCommitRef(segment.predecessor.initialOpen.bindingCommitRef, initial.anchor.bindingCommitRef)
+          || !sameJournalCommitRef(segment.predecessor.initialOpen.recordsThroughCommitRef, initial.anchor.recordsThroughCommitRef)) {
+          throw new ContractError('the first resumed segment must precede-link the exact initial-open anchor');
+        }
+      } else if (segment.predecessor.initialOpen !== undefined) {
+        throw new ContractError('a captured segment chain cannot begin from an initial-open anchor');
+      }
     } else if (segment.predecessor.segmentId !== previousSegmentId) {
       throw new ContractError('resumed segment predecessor must be the previously appended segment');
+    } else if (segment.predecessor.initialOpen !== undefined) {
+      throw new ContractError('only the first resumed segment can precede-link an initial-open anchor');
     }
     if (seenSegmentIds.has(segment.segmentId)) throw new ContractError('segment chain repeats a segment id');
     seenSegmentIds.add(segment.segmentId);
@@ -564,9 +736,45 @@ function assertProviderExecution(value: unknown, label: string): asserts value i
   assertPositiveSafeInteger(value.executionEpoch, `${label} executionEpoch`);
 }
 
+function assertActiveTurnBinding(value: unknown, label: string): asserts value is ActiveTurnBinding {
+  assertPlainObject(value, label);
+  const binding = value as unknown as ActiveTurnBinding;
+  validateAdmittedTurn(binding.admittedTurn);
+  validateWorkAssignment(binding.assignment);
+  assertProviderExecution(binding.execution, `${label} execution`);
+  assertPlainObject(binding.scope, `${label} scope`);
+  assertScope(binding.scope.organId, 'organ');
+  if (binding.scope.taskId !== undefined) {
+    assertScope(binding.scope.taskId, 'task');
+  }
+  if (binding.scope.cycleId !== undefined) {
+    assertScope(binding.scope.cycleId, 'cycle');
+  }
+  if (binding.scope.operationId !== undefined) {
+    assertScope(binding.scope.operationId, 'operation');
+  }
+  assertSameScope(binding.admittedTurn.scopeRef, binding.scope);
+  if (binding.admittedTurn.workAssignmentRef !== binding.assignment.assignmentId) {
+    throw new ContractError(`${label} assignment does not match its admitted turn workAssignmentRef`);
+  }
+  if (binding.admittedTurn.taskRef.value !== binding.assignment.taskId.value) {
+    throw new ContractError(`${label} task does not match its admitted turn taskRef`);
+  }
+  if (binding.admittedTurn.executionEpoch !== binding.execution.executionEpoch
+    || binding.assignment.executionEpoch !== binding.execution.executionEpoch) {
+    throw new ContractError(`${label} execution epoch mismatch`);
+  }
+}
+
 function assertRawAsset(value: unknown, label: string): asserts value is RawAsset {
   assertPlainObject(value, label);
   assertEvidenceRef(value.ref as EvidenceRef);
   assertPlainObject(value.view, `${label} view`);
   assertNonEmptyString(value.view.kind, `${label} view kind`);
+}
+
+function sameJournalCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean {
+  return left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest;
 }
