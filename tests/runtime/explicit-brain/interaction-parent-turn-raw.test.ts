@@ -17,6 +17,7 @@ import {
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
+  type OccurrenceExecutionOwner,
   type AgentClosure,
   type AgentDriver,
   type AgentEvent,
@@ -100,6 +101,7 @@ const parentProviderBinding: ProviderBinding = {
 
 interface Fixture {
   readonly journal: JsonlOrganJournal;
+  readonly journalFile: string;
   readonly parentJournal: JsonlInteractionParentTurnJournal;
   readonly sink: ProviderEvidenceSink;
   readonly rawContent: RawContentReadPort;
@@ -113,9 +115,11 @@ async function fixture(): Promise<Fixture> {
   const directory = await mkdtemp(join(root, 'parent-raw-owner-'));
   const store = new ImmutableAssetStore(join(directory, 'assets'));
   const sink = filesystemProviderEvidenceSink(store);
-  const journal = new JsonlOrganJournal(join(directory, 'organ.jsonl'));
+  const journalFile = join(directory, 'organ.jsonl');
+  const journal = new JsonlOrganJournal(journalFile);
   return {
     journal,
+    journalFile,
     parentJournal: new JsonlInteractionParentTurnJournal(journal),
     sink,
     rawContent: providerRawContentReader(sink),
@@ -1349,5 +1353,81 @@ test('an unclosed parent turn blocks next-turn history until its semantic checkp
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('parent turn input persists the authenticated owner exactly and keeps legacy records readable', async () => {
+  const { journalFile, parentJournal, sink, rawContent, cleanup } = await fixture();
+  try {
+    const executionOwner: OccurrenceExecutionOwner = {
+      daemonLeaseId: 'lease-parent-owner-attestation',
+      daemonGeneration: 7,
+      processStartToken: 'process-start-parent-owner-attestation',
+    };
+    const initialInput = await writeAsset(sink, 'interaction-parent-owner-input', 'owned input');
+    const owner = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope,
+      initialInput,
+      executionOwner,
+      providerBinding: parentProviderBinding,
+      journal: parentJournal,
+      rawContent,
+    });
+    const opened = await owner.openTurnInput();
+    assert.deepEqual(opened.fact.executionOwner, executionOwner);
+
+    const reopenedJournal = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const reopened = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope,
+      initialInput,
+      executionOwner,
+      providerBinding: parentProviderBinding,
+      journal: reopenedJournal,
+      rawContent,
+    });
+    const replayed = await reopened.openTurnInput();
+    assert.deepEqual(replayed.fact.executionOwner, executionOwner);
+    assert.deepEqual(replayed.commit, opened.commit);
+
+    const legacyTurn: InteractionTurnIdentity = {
+      ...turn,
+      interactionId: 'interaction-parent-legacy',
+      turnId: 'turn-parent-legacy',
+    };
+    const legacyExecution: InteractionParentProviderExecutionIdentityRef = {
+      ...execution,
+      runtimeId: 'runtime-parent-legacy',
+      interactionTurn: legacyTurn,
+    };
+    const legacyInput = await writeAsset(sink, 'interaction-parent-legacy-input', 'legacy input');
+    const legacyOwner = createInteractionParentTurnRawOwner({
+      turn: legacyTurn,
+      execution: legacyExecution,
+      scope,
+      initialInput: legacyInput,
+      providerBinding: parentProviderBinding,
+      journal: parentJournal,
+      rawContent,
+    });
+    const legacyOpened = await legacyOwner.openTurnInput();
+    assert.equal(legacyOpened.fact.executionOwner, undefined);
+
+    const legacyReopenedJournal = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const legacyReopened = createInteractionParentTurnRawOwner({
+      turn: legacyTurn,
+      execution: legacyExecution,
+      scope,
+      initialInput: legacyInput,
+      providerBinding: parentProviderBinding,
+      journal: legacyReopenedJournal,
+      rawContent,
+    });
+    assert.equal((await legacyReopened.openTurnInput()).fact.executionOwner, undefined);
+  } finally {
+    await cleanup();
   }
 });
