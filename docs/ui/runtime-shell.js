@@ -676,13 +676,6 @@ export function renderTaskRecords(projection, options = {}) {
   return section
 }
 
-const HISTORY_FILTER_LABELS = Object.freeze({
-  directiveRevision: '任务版本',
-  executionEpoch: '执行轮次',
-  cycleId: '任务周期',
-  occurrenceRef: '巡检轮次',
-})
-
 // Typed enums are mapped for display only. An unrecognized raw value keeps a
 // truthful "not yet determined" default here, and the raw value moves to the
 // evidence detail instead of being guessed or treated as success/failure.
@@ -692,18 +685,8 @@ const REPLACEMENT_REASON_LABELS = Object.freeze({
   recovery: '恢复任务',
 })
 
-const CAPABILITY_STATE_LABELS = Object.freeze({
-  available: '可筛选',
-  unavailable: '暂不能筛选',
-  unknown: '尚未确定',
-})
-
 function replacementReasonLabel(reason) {
   return REPLACEMENT_REASON_LABELS[reason] || '未说明原因'
-}
-
-function capabilityStateLabel(state) {
-  return CAPABILITY_STATE_LABELS[state] || '尚未确定'
 }
 
 // Evidence-only detail level. Raw commit IDs, digests and cursors stay here so
@@ -720,23 +703,6 @@ function historyRawDetail(pairs) {
   }
   details.append(list)
   return details
-}
-
-function historyPositionCell(label, cursor, checkpoints) {
-  const cell = element('div', undefined, 'detail-cell')
-  cell.dataset.position = label
-  cell.append(element('dt', label))
-  const value = element('dd')
-  if (!cursor) {
-    value.textContent = label === '正在查看' ? '未选择旧点' : '未提供'
-  } else {
-    const match = (checkpoints || []).find((checkpoint) => checkpoint.checkpointId === cursor.checkpointId)
-    value.textContent = match && match.summary
-      ? `${match.summary} · 执行轮次 ${cursor.executionEpoch}`
-      : `执行轮次 ${cursor.executionEpoch}`
-  }
-  cell.append(value)
-  return cell
 }
 
 function historyActions(projection, options) {
@@ -818,99 +784,7 @@ export function renderContextHistory(projection, options = {}) {
   return section
 }
 
-export function renderCheckpointHistory(projection, options = {}) {
-  const section = element('section', undefined, 'history-section')
-  const head = element('header', undefined, 'section-head')
-  head.append(
-    element('h2', '阶段记录'),
-    element('span', `${projection.checkpoints?.length || 0} 条 · ${projection.nextCursor ? '还有更多' : '已到末尾'}`, 'section-meta'),
-  )
-  section.append(head)
-  section.append(historyRawDetail([
-    ['mode', projection.mode],
-    ['taskId', taskIdValue(projection.taskId)],
-  ]))
-
-  const positions = element('dl', undefined, 'detail-grid history-positions')
-  positions.append(historyPositionCell('当前执行点', projection.current, projection.checkpoints))
-  positions.append(historyPositionCell('正在查看', projection.viewed, projection.checkpoints))
-  section.append(positions)
-
-  const capabilities = Object.entries(projection.capabilities || {})
-  if (capabilities.length > 0) {
-    const list = element('ul', undefined, 'history-capabilities')
-    for (const [name, value] of capabilities) {
-      const row = element('li')
-      row.dataset.capability = name
-      row.dataset.capabilityState = value?.state || 'unknown'
-      row.append(
-        element('strong', HISTORY_FILTER_LABELS[name] || name),
-        element('span', ` · ${capabilityStateLabel(value?.state)}`),
-        historyRawDetail([
-          ['state', value?.state],
-          ['reason', value?.reason],
-        ]),
-      )
-      list.append(row)
-    }
-    section.append(list)
-  }
-
-  const available = Object.keys(HISTORY_FILTER_LABELS)
-    .filter((name) => projection.capabilities?.[name]?.state === 'available')
-  if (available.length > 0) {
-    const filters = element('div', undefined, 'history-filters')
-    for (const name of available) {
-      const label = element('label', undefined, 'history-filter')
-      label.append(element('span', HISTORY_FILTER_LABELS[name]))
-      const input = element('input')
-      input.type = name === 'executionEpoch' ? 'number' : 'text'
-      input.value = options.filters?.[name] ?? ''
-      input.dataset.filter = name
-      label.append(input)
-      filters.append(label)
-    }
-    const apply = element('button', '应用筛选', 'button button--quiet')
-    apply.type = 'button'
-    apply.addEventListener('click', () => options.onFilter?.(readHistoryFilters(filters)))
-    filters.append(apply)
-    section.append(filters)
-  }
-
-  const list = element('div', undefined, 'history-list')
-  for (const checkpoint of projection.checkpoints || []) {
-    const viewed = projection.viewed?.checkpointId === checkpoint.checkpointId
-    const item = element('article', undefined, 'history-item')
-    item.dataset.checkpoint = checkpoint.checkpointId
-    item.dataset.viewed = String(viewed)
-    item.append(
-      element('p', checkpoint.summary || '未提供摘要', 'history-item-title'),
-      element('p', `执行轮次 ${checkpoint.executionEpoch} · 序号 ${checkpoint.seq}${checkpoint.committedAt ? ` · ${formatTime(checkpoint.committedAt)}` : ''}`, 'muted'),
-    )
-    if (viewed) item.append(element('span', '正在查看', 'history-viewed-tag'))
-    const select = element('button', viewed ? '正在查看此点' : '查看此旧点', 'button button--quiet')
-    select.type = 'button'
-    select.disabled = viewed
-    select.addEventListener('click', () => options.onSelect?.(checkpoint.checkpointId))
-    item.append(select)
-    item.append(historyRawDetail([
-      ['checkpointId', checkpoint.checkpointId],
-      ['directiveRevision', checkpoint.directiveRevision],
-      ['cycleId', checkpoint.cycleId],
-      ['occurrenceRef', checkpoint.occurrenceRef],
-      ['commitId', checkpoint.commitRef?.commitId],
-      ['journalSeq', checkpoint.commitRef === undefined ? undefined : checkpoint.commitRef.journalSeq],
-      ['recordDigest', checkpoint.commitRef?.recordDigest],
-    ]))
-    list.append(item)
-  }
-  if (list.children.length === 0) list.append(element('p', '这个任务还没有记录到阶段。', 'empty'))
-  section.append(list)
-  section.append(historyActions(projection, options))
-  return section
-}
-
-function readHistoryFilters(host) {
+export function readHistoryFilters(host) {
   const filters = {}
   for (const input of host.querySelectorAll('[data-filter]')) {
     const value = String(input.value ?? '').trim()
@@ -1372,6 +1246,9 @@ function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) 
 // document only ever has one open shell layer: opening the detail closes any other open layer,
 // and closing it returns focus to the trigger.
 let technicalDetailLayer = null
+// Register the drawer's lifetime owner before any handoff. The technical frame
+// retains that same owner until the replacement layer actually leaves.
+const shellLayerLeaves = new WeakMap()
 // `content` lets a page module host its own read-only drill-down (for example the
 // shared agent-activity detail) in this same shell layer. Either way the layer stays
 // the one desktop side panel / mobile bottom drawer: the header, close button, single
@@ -1385,12 +1262,25 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
       titleId: 'technical-detail-title',
     })
     frame.layer.dataset.technicalDetail = 'true'
+    frame.layer.addEventListener('close', () => {
+      // A queued close from an earlier opening cannot close a reopened frame.
+      if (!frame.layer.open) closeTechnicalDetailLayer()
+    })
     document.body.append(frame.layer)
     technicalDetailLayer = frame
   }
   const { layer, title: titleNode, body, close } = technicalDetailLayer
+  if (!technicalDetailLayer.active) {
+    technicalDetailLayer.returnFocus = document.activeElement
+    technicalDetailLayer.active = true
+  }
+  technicalDetailLayer.onClose = onClose
   for (const openLayer of document.querySelectorAll('dialog.shell-layer[open]')) {
-    if (openLayer !== layer) openLayer.close()
+    if (openLayer !== layer) {
+      // Transfer before close() queues the drawer's native close event.
+      technicalDetailLayer.leaveDrawer = shellLayerLeaves.get(openLayer)
+      openLayer.close()
+    }
   }
   titleNode.textContent = title
   clearNode(body)
@@ -1411,14 +1301,24 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
     body.append(list)
   }
   if (footer) body.append(element('p', footer))
-  const opener = document.activeElement
-  layer.addEventListener('close', () => {
-    if (typeof onClose === 'function') onClose()
-    if (opener && opener.isConnected) opener.focus()
-  }, { once: true })
   if (!layer.open) layer.showModal()
   close.focus()
   return layer
+}
+
+// Native close, section changes and page leave all consume this one lifetime.
+// Clear ownership before callbacks, which can themselves close the same dialog.
+function closeTechnicalDetailLayer() {
+  if (!technicalDetailLayer?.active) return
+  const { layer, onClose, leaveDrawer, returnFocus } = technicalDetailLayer
+  technicalDetailLayer.active = false
+  technicalDetailLayer.onClose = null
+  technicalDetailLayer.leaveDrawer = null
+  technicalDetailLayer.returnFocus = null
+  if (layer.open) layer.close()
+  if (typeof onClose === 'function') onClose()
+  if (leaveDrawer) leaveDrawer()
+  else if (returnFocus?.isConnected && !returnFocus.closest('dialog:not([open]), [hidden]')) returnFocus.focus()
 }
 
 // A contextual trigger for the technical-detail layer. It is not a global configuration
@@ -1606,6 +1506,7 @@ export function mountShellLayer(context = {}) {
   let returnFocus = null
   let currentContext = { ...context }
   let openPanelId = null
+  let drawerReadsActive = false
   let displayController = null
   let displayUnsubscribe = null
   let draftDefault = null
@@ -1646,9 +1547,17 @@ export function mountShellLayer(context = {}) {
     }
     if (id === 'view') {
       const content = viewSectionContent(currentContext)
-      for (const text of content.paragraphs) section.append(element('p', text))
+      const parentNodes = []
+      for (const text of content.paragraphs) {
+        const paragraph = element('p', text)
+        parentNodes.push(paragraph)
+        section.append(paragraph)
+      }
+      // The chooser's own display:grid rule overrides [hidden], so the parent
+      // visibility switch owns this plain wrapper instead.
+      const parentChoice = element('div')
       if (currentContext.displaySurface) {
-        section.append(renderDisplayModeChooser({
+        parentChoice.append(renderDisplayModeChooser({
           surface: currentContext.displaySurface,
           state: displayController?.getState(),
           onSelect: (mode) => void selectDisplayMode(mode),
@@ -1660,8 +1569,10 @@ export function mountShellLayer(context = {}) {
           element('strong', '阅读方式未接入'),
           element('p', '这个页面没有可切换的阅读层。', 'muted'),
         )
-        section.append(missing)
+        parentChoice.append(missing)
       }
+      parentNodes.push(parentChoice)
+      section.append(parentChoice)
       if (!content.showHistory) {
         restorePanelFocus(section, focusKey)
         return
@@ -1676,10 +1587,14 @@ export function mountShellLayer(context = {}) {
         focusTarget?.focus()
       }
       const openLevel = (run) => {
+        // The records/history sublayer owns the view panel while active: the
+        // parent mode copy stays hidden until the back entry rebuilds it.
+        for (const node of parentNodes) node.hidden = true
         const back = element('button', '返回查看方式', 'button button--quiet')
         back.type = 'button'
         back.addEventListener('click', backToView)
         actions.replaceChildren(back)
+        drawerReadsActive = true
         void run()
       }
       for (const [view, label] of [
@@ -1818,9 +1733,11 @@ export function mountShellLayer(context = {}) {
   function open(id) {
     const item = SHELL_SECTIONS.find((entry) => entry.id === id)
     if (!item) return
+    closeTechnicalDetailLayer()
     leaveDrawerReads()
     returnFocus = triggers.get(id) || null
     openPanelId = id
+    drawerReadsActive = true
     title.textContent = item.title
     for (const [key, section] of panels) {
       section.hidden = key !== id
@@ -1834,18 +1751,34 @@ export function mountShellLayer(context = {}) {
   // read that belonged to the departed level, so a late response cannot publish
   // into a level the user already left.
   function leaveDrawerReads() {
+    if (!drawerReadsActive) return
+    drawerReadsActive = false
     currentContext.capabilities?.onLeaveRecords?.()
     currentContext.capabilities?.onLeaveHistory?.()
   }
 
-  // Return/close restores focus to the triggering corner when that button still exists.
-  layer.addEventListener('close', () => {
-    leaveDrawerReads()
+  // Return/close restores focus to the visible corner, including after a detail
+  // handoff where the original opener now belongs to the closed drawer.
+  function leaveDrawer() {
+    if (openPanelId === null) return
     openPanelId = null
+    if (layer.open) layer.close()
+    leaveDrawerReads()
     const target = returnFocus
     returnFocus = null
     for (const section of panels.values()) section.hidden = true
     if (target && target.isConnected) target.focus()
+  }
+  shellLayerLeaves.set(layer, leaveDrawer)
+  layer.addEventListener('close', () => {
+    // The technical frame owns the departed drawer until its final close. A
+    // queued close also cannot tear down a section that has already reopened.
+    if (layer.open || technicalDetailLayer?.leaveDrawer === leaveDrawer) return
+    leaveDrawer()
+  })
+  window.addEventListener('pagehide', () => {
+    closeTechnicalDetailLayer()
+    leaveDrawer()
   })
   for (const [id, button] of triggers) button.addEventListener('click', () => open(id))
 

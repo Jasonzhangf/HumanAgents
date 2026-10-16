@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
 import {
   assertNotExpired,
   ContractError,
@@ -68,7 +69,7 @@ import {
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
-import type { CheckpointJournalPort, CommittedCheckpointRecord } from '../../../runtime/src/checkpoints/ports.js';
+import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { submitInteractionClosure, type SubmittedInteractionClosure } from '../../../runtime/src/checkpoints/submission.js';
 import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
@@ -141,6 +142,12 @@ import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-id
 import { TaskPlanRevisionConsumer } from '../../../runtime/src/orchestration/task-plan-revisions.js';
 import { JsonlTaskPlanRevisionJournal } from '../../../adapters/jsonl/src/task-plan-revisions.js';
 import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
+import { createJsonlActiveTurnJournal, createJsonlActiveTurnSegmentJournal } from '../../../adapters/jsonl/src/active-turn.js';
+import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
+import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
+import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
+import { createCheckpointHistoryReader, type CheckpointHistoryReadInput } from './checkpoint-history.js';
+import type { RuntimeCheckpointReadProjection } from '../../../ui/contracts/checkpoint-history.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
 import { createTaskPlanHistoryReader, type TaskPlanHistoryCurrentRead } from './task-plan-history.js';
 import type { RuntimeTaskPlanHistoryProjection } from '../../../ui/contracts/task-plan-history.js';
@@ -170,6 +177,7 @@ import { validatePersistedToolExecutionFact } from './tool-fact-validation.js';
 import {
   ProviderAgentDriver,
   ProviderAdapterError,
+  filesystemProviderEvidenceSink,
   type ProviderToolExecutionPort,
   type ProviderEvidenceSink,
 } from '../../../adapters/provider/src/index.js';
@@ -200,9 +208,6 @@ import {
   type RuntimeContextReplacementProjection,
   type RuntimeBusinessCycleHistoryProjection,
   type RuntimeBusinessCycleEntryProjection,
-  type RuntimeCheckpointFilter,
-  type RuntimeCheckpointHistoryProjection,
-  type RuntimeCheckpointProjection,
   type RuntimeInspectionOccurrenceHistoryProjection,
   type RuntimeInspectionOccurrenceEntryProjection,
   type RuntimeInspectionComparisonProjection,
@@ -217,7 +222,6 @@ import {
   projectRuntimeStatus,
   projectRuntimeSemanticObservation,
   projectRuntimeContextHistory,
-  projectRuntimeCheckpointHistory,
   projectRuntimeTaskDashboard,
   projectRuntimeTaskList,
 } from '../../../ui/projection/runtime.js';
@@ -266,7 +270,7 @@ import type {
 } from '../../../config/src/index.js';
 import { digestOf, type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
-import { createJsonlCheckpointJournal, createJsonlContextHistoryPort } from '../checkpoint-journal.js';
+import { createJsonlCheckpointJournal, createJsonlContextHistoryPort, createJsonlSemanticHistoryReader } from '../checkpoint-journal.js';
 import { AppLifecycleError } from '../errors.js';
 import {
   createExplicitBrainRuntime,
@@ -1300,7 +1304,7 @@ export interface TaskCheckpointHistoryQuery {
   readonly mode: RuntimeMode;
   readonly limit: number;
   readonly cursor?: string;
-  readonly viewed?: string;
+  readonly viewed?: CheckpointHistoryReadInput['viewed'];
   readonly directiveRevision?: number;
   readonly executionEpoch?: number;
   readonly cycleId?: CycleId;
@@ -1460,18 +1464,6 @@ function toRuntimeReplacement(replacement: ContextReplacement): RuntimeContextRe
     deltaIds: [...replacement.deltaIds],
     reason: replacement.reason,
     replacementDigest: replacement.replacementDigest,
-  };
-}
-
-function toRuntimeCheckpoint(record: CommittedCheckpointRecord): RuntimeCheckpointProjection {
-  return {
-    checkpointId: record.checkpoint.id.value,
-    seq: record.checkpoint.seq,
-    executionEpoch: record.checkpoint.executionEpoch,
-    summary: record.checkpoint.summary,
-    directiveRevision: String(record.checkpoint.directiveRevision),
-    cycleId: record.checkpoint.cycleId.value,
-    commitRef: toRuntimeCommitRef(record.commitRef),
   };
 }
 
@@ -3809,112 +3801,67 @@ export class UiRuntimeService {
     }
   }
 
-  /**
-   * Public scoped checkpoint history read. It enumerates exact committed
-   * checkpoints from the task's cycle journals with every supplied filter as an
-   * independent AND predicate. `viewed` resolves one exact committed target and
-   * never substitutes the latest checkpoint. `current` stays undefined because
-   * no verified checkpoint/recovery binding producer exists yet; the history is
-   * still readable and the occurrence filter advertises its own capability.
-   */
+  /** Resolve only the committed Task identity in this source's canonical control Journal. */
+  private async canonicalTaskIdentityScope(
+    journal: JsonlOrganJournal,
+    taskId: TaskId,
+  ): Promise<RuntimeReadResult<TaskIdentityScope>> {
+    try {
+      const identities = (await new JsonlTaskIdentityJournal(journal).replay())
+        .filter((identity) => identity.scope.taskId.value === taskId.value);
+      if (identities.length === 0 || new Set(identities.map((identity) => identity.scope.organId.value)).size !== 1) {
+        return { ok: false, failure: {
+          code: identities.length === 0 ? 'checkpoint-history.scope-unavailable' : 'checkpoint-history.scope-mismatch',
+          ownerId: APP_OWNER,
+          message: `task ${taskId.value} has no unique committed Task identity in this canonical Journal`,
+          nextAction: 'restore the canonical Task identity before reading this task checkpoint history',
+        } };
+      }
+      return { ok: true, value: identities[0]!.scope };
+    } catch (error) {
+      return { ok: false, failure: readFailureFromError(error) };
+    }
+  }
+
+  /** Canonical readonly checkpoint composition. List filters never select current or viewed. */
   async taskCheckpointHistory(
     taskId: TaskId,
     input: TaskCheckpointHistoryQuery,
-  ): Promise<RuntimeReadResult<RuntimeCheckpointHistoryProjection>> {
-    const resolved = await this.resolveTaskHistoryJournals(taskId, input.projectKey, input.mode);
-    if (!resolved.ok) return { ok: false, failure: resolved.failure };
-    const fingerprint = historyFingerprint([
-      'checkpoints',
-      input.projectKey,
-      input.mode,
-      taskId.value,
-      input.directiveRevision === undefined ? '' : String(input.directiveRevision),
-      input.executionEpoch === undefined ? '' : String(input.executionEpoch),
-      input.cycleId?.value ?? '',
-      input.occurrenceRef ?? '',
-    ]);
-    let cursor: HistoryCursor | undefined;
-    if (input.cursor !== undefined) {
-      cursor = decodeHistoryCursor(input.cursor);
-      if (cursor === undefined) return { ok: false, failure: historyCursorFailure('checkpoints', 'invalid') };
-      if (cursor.fp !== fingerprint) return { ok: false, failure: historyCursorFailure('checkpoints', 'scope') };
-    }
+  ): Promise<RuntimeReadResult<RuntimeCheckpointReadProjection>> {
+    const source = await this.findProjectSource(input.projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
+    const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, input.mode));
+    const journal = new JsonlOrganJournal(filePath);
+    const identity = await this.canonicalTaskIdentityScope(journal, taskId);
+    if (!identity.ok) return identity;
     try {
-      const scope: ScopeRef = { organId: resolved.organId, taskId };
-      const enumerate = async (applyFilters: boolean): Promise<{
-        readonly f: number;
-        readonly i: number;
-        readonly record: CommittedCheckpointRecord;
-      }[]> => {
-        const ordered: { readonly f: number; readonly i: number; readonly record: CommittedCheckpointRecord }[] = [];
-        for (let f = 0; f < resolved.files.length; f += 1) {
-          const port = createJsonlCheckpointJournal({ filePath: resolved.files[f]! });
-          const result = await port.listCommitted({
-            scope,
-            limit: HISTORY_ENUMERATION_LIMIT,
-            ...(applyFilters && input.directiveRevision !== undefined ? { directiveRevision: input.directiveRevision } : {}),
-            ...(applyFilters && input.executionEpoch !== undefined ? { executionEpoch: input.executionEpoch } : {}),
-            ...(applyFilters && input.cycleId !== undefined ? { cycleId: input.cycleId } : {}),
-            ...(applyFilters && input.occurrenceRef !== undefined ? { occurrenceRef: input.occurrenceRef } : {}),
-          });
-          result.checkpoints.forEach((record, i) => ordered.push({ f, i, record }));
-        }
-        return ordered;
-      };
-      // `viewed` resolves against every committed checkpoint of the task, so a
-      // list filter can never hide or substitute the selected target.
-      const all = await enumerate(false);
-      let viewed: { readonly checkpointId: string; readonly executionEpoch: number } | undefined;
-      if (input.viewed !== undefined) {
-        const target = all.find((entry) => entry.record.checkpoint.id.value === input.viewed);
-        if (target === undefined) {
-          return {
-            ok: false,
-            failure: {
-              code: 'checkpoints.viewed.unknown',
-              ownerId: APP_OWNER,
-              message: `no committed checkpoint ${input.viewed} in this task scope`,
-              nextAction: 'select a committed checkpoint of this task',
-            },
-          };
-        }
-        viewed = {
-          checkpointId: target.record.checkpoint.id.value,
-          executionEpoch: target.record.checkpoint.executionEpoch,
-        };
-      }
-      const hasFilter = input.directiveRevision !== undefined
-        || input.executionEpoch !== undefined
-        || input.cycleId !== undefined
-        || input.occurrenceRef !== undefined;
-      const selected = hasFilter ? await enumerate(true) : all;
-      let start = 0;
-      if (cursor !== undefined) {
-        const index = selected.findIndex((entry) => entry.f === cursor!.f && entry.i === cursor!.i);
-        if (index < 0) return { ok: false, failure: historyCursorFailure('checkpoints', 'not-found') };
-        start = index + 1;
-      }
-      const page = selected.slice(start, start + input.limit);
-      const hasMore = start + page.length < selected.length;
-      const last = page.at(-1);
-      const capabilities: Partial<Record<RuntimeCheckpointFilter, RuntimePoolAvailabilityProjection>> = {
-        directiveRevision: { state: 'available' },
-        executionEpoch: { state: 'available' },
-        cycleId: { state: 'available' },
-        occurrenceRef: { state: 'unavailable', reason: 'no occurrence binding producer exists yet' },
-      };
-      const value = projectRuntimeCheckpointHistory({
-        mode: input.mode,
-        taskId,
-        current: undefined,
-        ...(viewed === undefined ? {} : { viewed }),
-        checkpoints: page.map((entry) => toRuntimeCheckpoint(entry.record)),
-        ...(hasMore && last !== undefined
-          ? { nextCursor: encodeHistoryCursor({ f: last.f, i: last.i, fp: fingerprint }) }
-          : {}),
-        capabilities,
+      const checkpoints = createJsonlCheckpointJournal({ filePath, journal });
+      // Match the native launch/CLI evidence root beneath the Config-owned project root.
+      const artifactsRoot = join(source.projectRoot, 'artifacts', 'ui-provider-evidence');
+      const assets = new ImmutableAssetStore(artifactsRoot);
+      const reader = createCheckpointHistoryReader({
+        checkpoints, native: checkpoints,
+        contexts: createJsonlContextHistoryPort({ filePath, journal }),
+        semantic: createJsonlSemanticHistoryReader({ filePath, journal, artifactsRoot,
+          activeTurnJournalFor: (turnId) => createJsonlActiveTurnJournal({ journal, turnId }),
+          segmentJournalFor: (businessTurnId) => createJsonlActiveTurnSegmentJournal({ journal, businessTurnId }),
+          rawContent: providerRawContentReader(filesystemProviderEvidenceSink(assets)),
+        }),
+        capture: createNativeRecoveryAssets({ journalPath: filePath, journal, assetRoot: artifactsRoot,
+          completionJournal: new JsonlOperationCompletionJournal({ journal }) }),
       });
-      return { ok: true, value };
+      return await reader.read({
+        scope: { kind: 'task', projectKey: input.projectKey, mode: input.mode, taskId },
+        taskScope: identity.value,
+        list: { limit: input.limit,
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.directiveRevision === undefined ? {} : { directiveRevision: input.directiveRevision }),
+          ...(input.executionEpoch === undefined ? {} : { executionEpoch: input.executionEpoch }),
+          ...(input.cycleId === undefined ? {} : { cycleId: input.cycleId }),
+          ...(input.occurrenceRef === undefined ? {} : { occurrenceRef: input.occurrenceRef }),
+        },
+        ...(input.viewed === undefined ? {} : { viewed: input.viewed }),
+      });
     } catch (error) {
       return { ok: false, failure: readFailureFromError(error) };
     }

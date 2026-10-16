@@ -31,7 +31,10 @@ import type { CheckpointClosureRecord, ClosureRecord } from './closure.js';
 import type {
   ConditionalReentryPort,
   ConditionalReentryRecord,
+  ConfirmedContextCorrectionCommand,
   ConfirmedReentryCommand,
+  ContextCorrectionPort,
+  ContextCorrectionRecord,
 } from './conditional-reentry.js';
 
 export type { ContextHistoryRecord, ContextLoopControl, JournalCommitRef };
@@ -112,6 +115,11 @@ export interface ExecutionIncarnationRef {
  */
 export interface ConditionalReentrySubmissionPort extends ConditionalReentryPort {
   prepare(command: ConfirmedReentryCommand): Promise<ConditionalReentryRecord>;
+}
+
+/** App-owned preparation over the same locked Journal and append-only carrier. */
+export interface ContextCorrectionSubmissionPort extends ContextCorrectionPort {
+  prepare(command: ConfirmedContextCorrectionCommand): Promise<ContextCorrectionRecord>;
 }
 
 /** Recovery binding written with a newly produced Runtime checkpoint closure. */

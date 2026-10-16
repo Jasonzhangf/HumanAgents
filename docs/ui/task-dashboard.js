@@ -8,8 +8,8 @@ import {
   observationHref,
   openTechnicalDetail,
   queryParam,
+  readHistoryFilters,
   readScopeLabel,
-  renderCheckpointHistory,
   renderContextHistory,
   renderI2BusinessCycles,
   renderI2InspectionComparison,
@@ -23,6 +23,12 @@ import {
   taskIdFromQuery,
   taskReadScopeFromQuery,
 } from './runtime-shell.js'
+import {
+  checkpointQuery,
+  checkpointSelectionFromQuery,
+  renderCheckpointHistory,
+  renderCheckpointHistoryDetail,
+} from './checkpoint-history.js'
 import {
   planControlErrorMessage,
   planControlKey,
@@ -260,8 +266,8 @@ const checkpointHistoryRead = createScopedReadPublication((scope) => api.taskChe
   projectKey: scope.projectKey,
   mode: scope.mode,
   ...(scope.filters || {}),
-  ...(scope.viewed ? { viewed: scope.viewed } : {}),
   ...(scope.cursor ? { cursor: scope.cursor } : {}),
+  ...(scope.checkpointQuery ? { checkpointQuery: scope.checkpointQuery } : {}),
 }))
 const businessCyclesRead = createScopedReadPublication((scope) => api.taskBusinessCycles(scope.taskId, {
   ...(scope.viewed ? { viewed: scope.viewed } : {}),
@@ -509,15 +515,16 @@ async function loadRecords(view, host, { cursor, selectedRef } = {}) {
 }
 
 // ── I5 readonly history navigation ─────────────────────────────────────────
-// Checkpoint and Context history are separate scoped reads. The user's viewed
-// old point is a local selection sent as the read-only `viewed` query; the
-// current execution point is whatever the read returns and is never written by
-// selecting, filtering, paginating, returning or closing.
+// Checkpoint and Context history are separate scoped reads. A viewed old point
+// is a read-only selection (the checkpoint target rides on the URL four-key
+// query, the context target on its own `viewed` query); the current execution
+// point is whatever the read returns and is never written by selecting,
+// paginating, returning or closing.
 let historyView = ''
+let historyHost = null
 let contextHistoryCursor = ''
 let checkpointHistoryCursor = ''
 let checkpointHistoryFilters = {}
-let viewedCheckpointId = ''
 let businessCycleCursor = ''
 let viewedCycleId = ''
 let milestoneReviewCursor = ''
@@ -526,12 +533,23 @@ let inspectionCursor = ''
 let viewedInspectionId = ''
 let comparisonLeft = ''
 
+// The checkpoint selection lives in the URL only: the old local
+// `viewedCheckpointId` is gone. The frozen C5 helper encodes and decodes the four
+// keys, so reload and popstate restore the exact target. The main layer and the
+// shared shell detail layer each own a disposer so replacing a renderer cannot
+// leave a stale listener behind.
+let checkpointViewDispose = null
+let checkpointRenderRead = null
+let checkpointDetailDispose = null
+let checkpointDetailLayer = null
+
 function leaveHistory() {
   historyView = ''
+  historyHost = null
+  checkpointRenderRead = null
   contextHistoryCursor = ''
   checkpointHistoryCursor = ''
   checkpointHistoryFilters = {}
-  viewedCheckpointId = ''
   businessCycleCursor = ''
   viewedCycleId = ''
   milestoneReviewCursor = ''
@@ -539,6 +557,8 @@ function leaveHistory() {
   inspectionCursor = ''
   viewedInspectionId = ''
   comparisonLeft = ''
+  closeCheckpointDetail()
+  disposeCheckpointView()
   void contextHistoryRead.refresh({ kind: 'closed' })
   void checkpointHistoryRead.refresh({ kind: 'closed' })
   void businessCyclesRead.refresh({ kind: 'closed' })
@@ -577,12 +597,225 @@ function i2IdentityFailure(projection, expectedSurface) {
   return null
 }
 
+const CHECKPOINT_SELECTION_NOT_CONFIRMED = Object.freeze({
+  code: 'checkpoint-history.selection-not-confirmed',
+  ownerId: 'humanagent.ui.checkpoint-history',
+  message: '这次读取没有返回所选 checkpoint，不能把当前执行点当作该选择。',
+  nextAction: '重试所选 checkpoint 读取，或清除选择并返回当前执行位置。',
+})
+
+const CHECKPOINT_HISTORY_FILTER_LABELS = Object.freeze({
+  directiveRevision: '任务版本',
+  executionEpoch: '执行轮次',
+  cycleId: '任务周期',
+  occurrenceRef: '巡检轮次',
+})
+
+function sameCommitReceipt(left, right) {
+  return Boolean(left && right)
+    && left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest
+}
+
+// The checkpoint projection carries its scope in `projection.scope`, not at the
+// top level. A projection for another project/mode/task, or one that does not
+// confirm the exact requested target, is refused as a typed failure; it is never
+// rendered as this selection's content.
+function checkpointReadFailure(content, requestedViewed) {
+  if (content.surface !== 'runtime-checkpoint-history'
+    || content.scope?.kind !== 'task'
+    || content.scope.projectKey !== explicitScope.projectKey
+    || content.scope.mode !== explicitScope.mode
+    || content.scope.taskId?.value !== explicitScope.taskId?.value) {
+    return {
+      code: 'history.identity.mismatch',
+      ownerId: 'humanagent.ui',
+      message: '历史读取返回了其他任务、模式或 surface 的投影',
+      nextAction: '重新打开该任务的历史',
+    }
+  }
+  if (requestedViewed === undefined) return null
+  const identity = content.viewed?.identity
+  if (requestedViewed.checkpointId !== undefined
+    && identity?.checkpointId?.value !== requestedViewed.checkpointId) {
+    return CHECKPOINT_SELECTION_NOT_CONFIRMED
+  }
+  if (requestedViewed.commitRef !== undefined
+    && !sameCommitReceipt(identity?.commitRef, requestedViewed.commitRef)) {
+    return CHECKPOINT_SELECTION_NOT_CONFIRMED
+  }
+  return null
+}
+
+function disposeCheckpointView() {
+  if (checkpointViewDispose) {
+    checkpointViewDispose()
+    checkpointViewDispose = null
+  }
+}
+
+function closeCheckpointDetail() {
+  if (checkpointDetailDispose) {
+    checkpointDetailDispose()
+    checkpointDetailDispose = null
+  }
+  if (checkpointDetailLayer?.open) checkpointDetailLayer.close()
+  checkpointDetailLayer = null
+}
+
+// Every drill-down reuses the one shell layer, so the exact checkpoint detail and
+// a chosen reference share the same desktop side panel / mobile bottom drawer.
+// There is no second overlay and no page-owned store.
+function showCheckpointDetail(title, content, dispose) {
+  if (checkpointDetailDispose) {
+    checkpointDetailDispose()
+    checkpointDetailDispose = null
+  }
+  checkpointDetailDispose = dispose ?? null
+  checkpointDetailLayer = openTechnicalDetail({
+    title,
+    content,
+    onClose: closeCheckpointDetail,
+  })
+}
+
+function checkpointReferenceRows(reference) {
+  const ref = reference.ref
+  const rows = reference.kind === 'commit'
+    ? [
+        ['commitId', ref?.commitId],
+        ['journalSeq', ref?.journalSeq],
+        ['recordDigest', ref?.recordDigest],
+      ]
+    : reference.kind === 'asset'
+      ? [
+          ['evidenceId', ref?.ref?.evidenceId?.value],
+          ['view.kind', ref?.view?.kind],
+        ]
+      : [
+          ['evidenceId', ref?.evidenceId?.value],
+          ['kind', ref?.kind],
+          ['source', ref?.source],
+          ['locator', ref?.locator],
+          ['digest', ref?.digest],
+        ]
+  return rows.filter(([, value]) => value !== undefined && value !== null && value !== '')
+}
+
+// Node, commit and evidence references have no supported exact task-scoped deep
+// link yet, so the layer shows the exact typed reference and says so plainly
+// instead of fabricating a URL.
+function openCheckpointReference(reference) {
+  const wrap = element('div', undefined, 'checkpoint-reference')
+  const back = element('button', '返回检查点详情', 'button button--quiet')
+  back.type = 'button'
+  back.addEventListener('click', () => openCheckpointDetail())
+  const list = element('dl', undefined, 'draft-receipt')
+  for (const [label, value] of checkpointReferenceRows(reference)) {
+    const row = element('div')
+    const detail = element('dd', String(value))
+    detail.setAttribute('data-detail-label', label)
+    row.append(element('dt', label), detail)
+    list.append(row)
+  }
+  wrap.append(back, list, element('p', '没有可用的任务内深链；上面是该引用的精确内容。', 'muted'))
+  showCheckpointDetail('关联引用', wrap)
+}
+
+function openCheckpointDetail() {
+  if (!checkpointRenderRead) return
+  const detail = renderCheckpointHistoryDetail(checkpointRenderRead, {
+    element,
+    onOpenReference: openCheckpointReference,
+  })
+  appendCheckpointCapabilityDiagnostics(detail.element, checkpointRenderRead)
+  showCheckpointDetail('检查点精确详情', detail.element, detail.dispose)
+}
+
+function checkpointDetailTrigger() {
+  const button = element('button', '技术详情', 'button button--quiet')
+  button.type = 'button'
+  button.addEventListener('click', () => openCheckpointDetail())
+  return button
+}
+
+function checkpointHistoryFiltersView(host, capabilities) {
+  const filters = element('div', undefined, 'history-filters')
+  for (const [name, labelText] of Object.entries(CHECKPOINT_HISTORY_FILTER_LABELS)) {
+    if (capabilities?.[name]?.state !== 'available') continue
+    const label = element('label', undefined, 'history-filter')
+    label.append(element('span', labelText))
+    const input = element('input')
+    input.type = name === 'executionEpoch' ? 'number' : 'text'
+    input.value = checkpointHistoryFilters[name] ?? ''
+    input.dataset.filter = name
+    label.append(input)
+    filters.append(label)
+  }
+  if (filters.children.length === 0) return null
+  const apply = element('button', '应用筛选', 'button button--quiet')
+  apply.type = 'button'
+  apply.addEventListener('click', () => {
+    checkpointHistoryFilters = readHistoryFilters(filters)
+    checkpointHistoryCursor = ''
+    void renderCheckpointHistoryView(host, true)
+  })
+  filters.append(apply)
+  return filters
+}
+
+function checkpointHistoryActions(host, read) {
+  const actions = element('div', undefined, 'history-actions')
+  const refresh = element('button', '重新读取历史', 'button button--quiet')
+  refresh.type = 'button'
+  refresh.addEventListener('click', () => void renderCheckpointHistoryView(host, true))
+  actions.append(refresh)
+  const nextCursor = read?.ok ? read.value.nextCursor : undefined
+  if (nextCursor !== undefined && nextCursor !== null && nextCursor !== '') {
+    const next = element('button', '继续读取下一页', 'button button--quiet')
+    next.type = 'button'
+    next.dataset.nextCursor = String(nextCursor)
+    next.addEventListener('click', () => {
+      checkpointHistoryCursor = nextCursor
+      void renderCheckpointHistoryView(host, true)
+    })
+    actions.append(next)
+  }
+  return actions
+}
+
+// C5 already renders unavailable capability reasons in the shared detail.
+// Unknown or malformed states stay out of the main layer and remain diagnosable here.
+function appendCheckpointCapabilityDiagnostics(root, read) {
+  if (!read?.ok) return
+  const entries = Object.entries(read.value.capabilities ?? {})
+    .filter(([, capability]) => capability?.state !== 'available' && capability?.state !== 'unavailable')
+  if (entries.length === 0) return
+  const section = element('section', undefined, 'history-section')
+  section.append(element('h3', '筛选能力尚未确定'))
+  const list = element('ul', undefined, 'history-capabilities')
+  for (const [name, capability] of entries) {
+    const row = element('li')
+    row.dataset.capability = name
+    row.dataset.capabilityState = capability?.state || 'unknown'
+    row.append(
+      element('strong', CHECKPOINT_HISTORY_FILTER_LABELS[name] || name),
+      element('span', ` · ${capability?.reason || '读取结果未提供原因'}`),
+    )
+    list.append(row)
+  }
+  section.append(list)
+  root.append(section)
+}
+
 async function loadHistory(view, host) {
   if (!explicitScope) {
     host.append(element('p', '当前页面没有已确认的 task scope，无法读取历史。', 'empty'))
     return
   }
   historyView = view
+  historyHost = host
   if (view === 'context') {
     contextHistoryCursor = ''
     await renderContextHistoryView(host)
@@ -609,7 +842,6 @@ async function loadHistory(view, host) {
   }
   checkpointHistoryCursor = ''
   checkpointHistoryFilters = {}
-  viewedCheckpointId = ''
   await renderCheckpointHistoryView(host)
 }
 
@@ -653,19 +885,70 @@ async function renderContextHistoryView(host, keep = false) {
   }))
 }
 
+// Selecting or leaving a checkpoint writes the four keys into the URL and re-reads
+// the same task. It is URL view state only: the call never writes current, a
+// preference, or another scope's read.
+function pushCheckpointSelection(viewed) {
+  const encoded = checkpointQuery(new URLSearchParams(location.search), { viewed })
+  if (!encoded.ok) {
+    void checkpointHistoryRead.refresh({ kind: 'closed' })
+    if (historyHost) mountCheckpointView(historyHost, { ok: false, failure: encoded.failure })
+    return
+  }
+  window.history.pushState(null, '', `${location.pathname}?${encoded.value}${location.hash}`)
+  if (historyHost) void renderCheckpointHistoryView(historyHost, true)
+}
+
+function mountCheckpointView(host, read) {
+  disposeCheckpointView()
+  checkpointRenderRead = read
+  const view = renderCheckpointHistory(read, {
+    element,
+    onSelect: (selection) => pushCheckpointSelection(selection),
+    onReturnToCurrent: () => pushCheckpointSelection(undefined),
+  })
+  checkpointViewDispose = view.dispose
+  clearNode(host)
+  const filters = read.ok ? checkpointHistoryFiltersView(host, read.value.capabilities) : null
+  if (filters) host.append(filters)
+  host.append(view.element)
+  const actions = checkpointHistoryActions(host, read)
+  actions.append(checkpointDetailTrigger())
+  host.append(actions)
+  // An open detail layer belongs to the previous read. Refresh it so it can never
+  // show content for a selection the page no longer displays.
+  if (checkpointDetailLayer?.open) openCheckpointDetail()
+}
+
 async function renderCheckpointHistoryView(host, keep = false) {
+  closeCheckpointDetail()
+  checkpointRenderRead = null
+  disposeCheckpointView()
   if (!keep) {
     clearNode(host)
     host.append(element('p', '正在读取 Checkpoint 历史…', 'muted'))
   }
+  // The URL is the single source of the viewed target. A malformed four-key
+  // deep link is its own failure; the page keeps the URL and never issues a
+  // fallback read that would silently show the authoritative current.
+  const selection = checkpointSelectionFromQuery(new URLSearchParams(location.search))
+  const encoded = selection.ok
+    ? checkpointQuery(new URLSearchParams(), { viewed: selection.value.viewed })
+    : selection
+  if (!encoded.ok) {
+    await checkpointHistoryRead.refresh({ kind: 'closed' })
+    mountCheckpointView(host, { ok: false, failure: encoded.failure })
+    return
+  }
+  const requestedViewed = selection.value.viewed
   let read
   try {
     read = await checkpointHistoryRead.refresh({
       ...explicitScope,
       view: 'checkpoint-history',
       ...(Object.keys(checkpointHistoryFilters).length ? { filters: checkpointHistoryFilters } : {}),
-      ...(viewedCheckpointId ? { viewed: viewedCheckpointId } : {}),
       ...(checkpointHistoryCursor ? { cursor: checkpointHistoryCursor } : {}),
+      ...(encoded.value.size ? { checkpointQuery: encoded.value } : {}),
     })
   } catch (error) {
     clearNode(host)
@@ -674,34 +957,12 @@ async function renderCheckpointHistoryView(host, keep = false) {
   }
   // A late read from a departed level or an older selection must not publish.
   if (!read.published) return
-  clearNode(host)
-  if (!read.state.content) {
-    renderPageError(host, read.state.failure)
-    return
-  }
-  const mismatch = historyIdentityFailure(read.state.content, 'runtime-checkpoint-history')
-  if (mismatch) {
-    renderPageError(host, mismatch)
-    return
-  }
-  if (read.state.stale) renderPageError(host, read.state.failure)
-  host.append(renderCheckpointHistory(read.state.content, {
-    filters: checkpointHistoryFilters,
-    onRefresh: () => void renderCheckpointHistoryView(host, true),
-    onSelect: (checkpointId) => {
-      viewedCheckpointId = checkpointId
-      void renderCheckpointHistoryView(host, true)
-    },
-    onFilter: (filters) => {
-      checkpointHistoryFilters = filters
-      checkpointHistoryCursor = ''
-      void renderCheckpointHistoryView(host, true)
-    },
-    onNext: (next) => {
-      checkpointHistoryCursor = next
-      void renderCheckpointHistoryView(host, true)
-    },
-  }))
+  // A failed, stale or unconfirmed read must not let older content impersonate
+  // the requested selection: the renderer receives the typed failure instead.
+  const failure = read.state.stale || read.state.failure || !read.state.content
+    ? read.state.failure
+    : checkpointReadFailure(read.state.content, requestedViewed)
+  mountCheckpointView(host, failure ? { ok: false, failure } : { ok: true, value: read.state.content })
 }
 
 async function renderBusinessCyclesView(host, keep = false) {
@@ -1666,6 +1927,15 @@ const refreshButton = element('button', '刷新当前范围', 'button button--qu
 refreshButton.type = 'button'
 refreshButton.addEventListener('click', () => void refresh().catch(setRefreshError))
 status.after(refreshButton)
+
+// Back and forward re-read the exact target the URL now names. Only the open
+// checkpoint level reacts; leaving the level or closing the drawer clears it, so
+// a late popstate cannot publish into a departed host.
+window.addEventListener('popstate', () => {
+  if (historyView === 'checkpoints' && historyHost?.isConnected) {
+    void renderCheckpointHistoryView(historyHost, true)
+  }
+})
 
 window.addEventListener('pagehide', () => {
   disposeDisplayPreference()

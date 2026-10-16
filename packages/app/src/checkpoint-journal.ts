@@ -94,6 +94,7 @@ import type {
   EvidenceRef,
   ScopeRef,
 } from '../../contracts/src/index.js';
+import type { ConfirmedContextCorrectionBasis } from '../../contracts/src/context-correction.js';
 import type {
   CheckpointAppendRequest,
   CheckpointAppendReceipt,
@@ -127,10 +128,14 @@ import {
   type CheckpointClosureRecord,
 } from '../../runtime/src/checkpoints/closure.js';
 import {
+  assertContextCorrectionRecord,
   assertConditionalReentryRecord,
   CONDITIONAL_REENTRY_SCHEMA_VERSION,
+  CONTEXT_CORRECTION_SCHEMA_VERSION,
+  contextCorrectionIdentity,
   conditionalReentryIdentity,
   type ConditionalReentryRecord,
+  type ContextCorrectionRecord,
   type ReentryFence,
 } from '../../runtime/src/checkpoints/conditional-reentry.js';
 import { scopeContains } from '../../runtime/src/events/index.js';
@@ -296,6 +301,24 @@ function decodeSemanticAssetBody(bytes: Uint8Array): FourPartSemanticViewV1 {
  * derives publication from the latest checkpoint or from an asset that exists
  * without a durable adoption.
  */
+interface SemanticHistoryReadDependencies {
+  readonly filePath: string;
+  readonly journal?: JsonlOrganJournal;
+  readonly artifactsRoot: string;
+  readonly activeTurnJournalFor: (turnId: string) => Pick<ActiveTurnJournalPort, 'replay'>;
+  readonly segmentJournalFor?: (turnId: string) => Pick<ActiveTurnSegmentJournalPort, 'readSegmentRecords'>;
+  readonly rawContent: RawContentReadPort;
+}
+
+/** The same verified history reads, without a clock or any publication capability. */
+export function createJsonlSemanticHistoryReader(input: SemanticHistoryReadDependencies) {
+  const port = semanticHistoryJournal(input);
+  return {
+    listCompletedTurnLookups: port.listCompletedTurnLookups,
+    readCommittedSemanticCheckpoint: port.readCommittedSemanticCheckpoint,
+  };
+}
+
 export function createJsonlSemanticHistoryJournal(input: {
   readonly filePath: string;
   readonly journal?: JsonlOrganJournal;
@@ -304,6 +327,17 @@ export function createJsonlSemanticHistoryJournal(input: {
   readonly segmentJournal?: ActiveTurnSegmentJournalPort;
   readonly rawContent: RawContentReadPort;
   readonly timeAuthority: CheckpointTimeAuthority;
+}): SemanticHistoryPersistencePort & {
+  listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]>;
+} {
+  return semanticHistoryJournal({ ...input,
+    activeTurnJournalFor: () => input.activeTurnJournal,
+    ...(input.segmentJournal === undefined ? {} : { segmentJournalFor: () => input.segmentJournal! }),
+  });
+}
+
+function semanticHistoryJournal(input: SemanticHistoryReadDependencies & {
+  readonly timeAuthority?: CheckpointTimeAuthority;
 }): SemanticHistoryPersistencePort & {
   listCompletedTurnLookups(scope: ScopeRef): Promise<readonly SemanticHistoryExactLookupV1[]>;
 } {
@@ -326,11 +360,10 @@ export function createJsonlSemanticHistoryJournal(input: {
   const journal = input.journal ?? new JsonlOrganJournal(input.filePath);
   const assets = new ImmutableAssetStore(input.artifactsRoot);
   const checkpoints = createJsonlCheckpointJournal({ filePath: input.filePath, journal });
-  const timeAuthority: CheckpointTimeAuthorityMetadata = {
-    source: input.timeAuthority.source,
-    owner: input.timeAuthority.owner,
-    authorityRef: input.timeAuthority.authorityRef,
-  };
+  function writeAuthority(): CheckpointTimeAuthority {
+    if (input.timeAuthority === undefined) throw new Error('readonly semantic history has no publication authority');
+    return input.timeAuthority;
+  }
 
   async function verifiedRecords(): Promise<readonly JournalRecord[]> {
     const verification = await journal.verify();
@@ -439,6 +472,10 @@ export function createJsonlSemanticHistoryJournal(input: {
       return result;
     },
     async commitContextView(request: SemanticContextViewCommitRequest | SemanticContextViewCommitRequestV2): Promise<SemanticPhaseReceiptV1> {
+      const authority = writeAuthority();
+      const timeAuthority: CheckpointTimeAuthorityMetadata = {
+        source: authority.source, owner: authority.owner, authorityRef: authority.authorityRef,
+      };
       if (!request.ownerId.trim()) {
         throw new AppLifecycleError(
           'semantic-history-owner-missing',
@@ -510,7 +547,7 @@ export function createJsonlSemanticHistoryJournal(input: {
               scope,
             });
           }
-          const committedAt = await input.timeAuthority.sampleCommittedAt();
+          const committedAt = await authority.sampleCommittedAt();
           const body = accepted.version === 2
             ? await buildSemanticContextViewBodyV2({ accepted, semanticAsset: descriptor, committedAt, timeAuthority })
             : await buildSemanticContextViewBodyV1({ accepted, semanticAsset: descriptor, committedAt, timeAuthority });
@@ -631,7 +668,11 @@ export function createJsonlSemanticHistoryJournal(input: {
               scope,
             });
           }
-          const committedAt = await input.timeAuthority.sampleCommittedAt();
+          const authority = writeAuthority();
+          const timeAuthority: CheckpointTimeAuthorityMetadata = {
+            source: authority.source, owner: authority.owner, authorityRef: authority.authorityRef,
+          };
+          const committedAt = await authority.sampleCommittedAt();
           const body = 'segment' in request
             ? await buildSemanticHistoryPublicationBodyV2({ ...request, committedAt, timeAuthority })
             : await buildSemanticHistoryPublicationBodyV1({ ...request, committedAt, timeAuthority });
@@ -819,8 +860,8 @@ export function createJsonlSemanticHistoryJournal(input: {
         if (publication.version !== 2 || canonicalJsonStringify(publication.segment) !== canonicalJsonStringify(view.segment)) {
           throw new Error('semantic publication segment mismatch');
         }
-        if (!input.segmentJournal) throw new Error('segment Journal is required for semantic v2 cold read');
-        const segmentRecords = await input.segmentJournal.readSegmentRecords({
+        if (!input.segmentJournalFor) throw new Error('segment Journal is required for semantic v2 cold read');
+        const segmentRecords = await input.segmentJournalFor(view.turn.turnId).readSegmentRecords({
           businessTurnId: view.turn.turnId,
           segmentId: view.segment.opened.segmentId,
         });
@@ -842,7 +883,7 @@ export function createJsonlSemanticHistoryJournal(input: {
       }
       if (publication.version !== 1) throw new Error('semantic publication version mismatch');
       const adoptedChildren: AdoptedChildSourceV1[] = [];
-      const activeTurnRecords = await input.activeTurnJournal.replay();
+      const activeTurnRecords = await input.activeTurnJournalFor(view.turn.turnId).replay();
       for (const source of view.adoptedChildren) {
         const materialized = await materializeAdoptedChildSource({
           source,
@@ -1208,8 +1249,43 @@ function resolvePreviousCheckpoint(index: Map<string, Checkpoint>, checkpoint: C
 export function conditionalReentryFromRecord(record: JournalRecord): ConditionalReentryRecord | null {
   const closure = closureFromRecord(record);
   if (!closure || !('closureKind' in closure) || closure.closureKind !== 'reentry') return null;
-  if (!('schemaVersion' in closure) || closure.schemaVersion !== CONDITIONAL_REENTRY_SCHEMA_VERSION) return null;
+  if (closureSchemaVersion(closure) !== CONDITIONAL_REENTRY_SCHEMA_VERSION) return null;
   return closure as ConditionalReentryRecord;
+}
+
+export function contextCorrectionFromRecord(record: JournalRecord): ContextCorrectionRecord | null {
+  const closure = closureFromRecord(record);
+  if (!closure || !('closureKind' in closure) || closure.closureKind !== 'reentry') return null;
+  if (closureSchemaVersion(closure) !== CONTEXT_CORRECTION_SCHEMA_VERSION) return null;
+  return closure as ContextCorrectionRecord;
+}
+
+/**
+ * Accepted correction bases committed for one exact Task scope. The returned
+ * facts remain ordered by Journal sequence so later assembly can reuse the
+ * exact Core exclusion fold without a second correction ledger.
+ */
+export function acceptedContextCorrectionBasesFromRecords(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+): readonly ConfirmedContextCorrectionBasis[] {
+  const bases: ConfirmedContextCorrectionBasis[] = [];
+  for (const record of records) {
+    const correction = contextCorrectionFromRecord(record);
+    if (!correction || !inTask(correction.scope, taskScope)) continue;
+    bases.push(correction.basis);
+  }
+  return Object.freeze(bases);
+}
+
+/**
+ * The frozen `ReentryRecord` union currently exposes only the schema-1 member.
+ * Read the optional version without narrowing to that member so the schema-2
+ * correction variant can be checked at this compatibility boundary.
+ */
+function closureSchemaVersion(closure: ClosureRecord): number | undefined {
+  const value = (closure as { readonly schemaVersion?: unknown }).schemaVersion;
+  return typeof value === 'number' ? value : undefined;
 }
 
 function inTask(scope: ScopeRef, taskScope: ScopeRef): boolean {
@@ -1307,6 +1383,23 @@ export function foldExecutionPositionFromRecords(
       context = transition.restoredContext;
       continue;
     }
+    const correction = contextCorrectionFromRecord(record);
+    if (correction) {
+      if (pending) throw bindingCorrupt('successor segment context is pending before context correction');
+      if (!sameCommitRef(correction.basis.expectedControlReceipt, position.controlCommitRef)
+        || correction.previousExecutionEpoch !== position.executionEpoch) {
+        throw bindingCorrupt('context correction execution-position chain conflicts');
+      }
+      const ref = journalCommitRef(record);
+      position = {
+        ...position,
+        contextCommitRef: ref,
+        controlCommitRef: ref,
+        executionEpoch: correction.newExecutionEpoch,
+      };
+      context = correction.correctedContext;
+      continue;
+    }
     const candidate = contextHistoryFromRecord(record);
     if (!candidate) continue;
     if (pending) {
@@ -1339,9 +1432,43 @@ export function foldExecutionPositionFromRecords(
   return position;
 }
 
+/**
+ * Exact committed control anchor for one task scope. The latest bound checkpoint
+ * closure supplies the physical checkpoint/context/control receipts and epoch;
+ * committed transitions are applied only by `foldExecutionPositionFromRecords`.
+ */
+export function baseExecutionPositionFromRecords(
+  records: readonly JournalRecord[],
+  taskScope: ScopeRef,
+): ExecutionPosition | null {
+  const bindingRecord = [...records].reverse().find((record) => {
+    const closure = closureFromRecord(record);
+    return closure !== null
+      && 'closureKind' in closure
+      && closure.closureKind === 'checkpoint'
+      && closure.recoveryBinding !== undefined
+      && scopeContains(taskScope, record.scope);
+  });
+  if (!bindingRecord) return null;
+  const closure = closureFromRecord(bindingRecord);
+  if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint' || !closure.recoveryBinding) {
+    return null;
+  }
+  const binding = closure.recoveryBinding;
+  assertRecoveryBinding(records, bindingRecord, closure);
+  return {
+    checkpointCommitRef: binding.checkpointCommitRef,
+    contextCommitRef: binding.contextCommitRef,
+    executionEpoch: binding.coreClosure.executionEpoch,
+    controlCommitRef: journalCommitRef(bindingRecord),
+  };
+}
+
 export function contextHistoryFromRecord(record: JournalRecord): ContextHistoryRecord | null {
   const transition = conditionalReentryFromRecord(record);
   if (transition) return transition.restoredContext;
+  const correction = contextCorrectionFromRecord(record);
+  if (correction) return correction.correctedContext;
   const payload = record.payload;
   if (payload?.['kind'] !== CONTEXT_HISTORY_PAYLOAD_KIND) return null;
   const value = payload['record'];
@@ -1785,27 +1912,8 @@ export function createJsonlCheckpointJournal(input: {
 
     async readExecutionPosition(taskScope: ScopeRef): Promise<ExecutionPosition | null> {
       const records = await verifiedJournalRecords(journal);
-      const bindingRecord = [...records].reverse().find((record) => {
-        const closure = closureFromRecord(record);
-        return closure !== null
-          && 'closureKind' in closure
-          && closure.closureKind === 'checkpoint'
-          && closure.recoveryBinding !== undefined
-          && scopeContains(taskScope, record.scope);
-      });
-      if (!bindingRecord) return null;
-      const closure = closureFromRecord(bindingRecord);
-      if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint' || !closure.recoveryBinding) {
-        return null;
-      }
-      const binding = closure.recoveryBinding;
-      assertRecoveryBinding(records, bindingRecord, closure);
-      return foldExecutionPositionFromRecords(records, taskScope, {
-        checkpointCommitRef: binding.checkpointCommitRef,
-        contextCommitRef: binding.contextCommitRef,
-        executionEpoch: binding.coreClosure.executionEpoch,
-        controlCommitRef: journalCommitRef(bindingRecord),
-      });
+      const base = baseExecutionPositionFromRecords(records, taskScope);
+      return base === null ? null : foldExecutionPositionFromRecords(records, taskScope, base);
     },
 
     async readCheckpointRecoveryBinding(
@@ -1879,6 +1987,19 @@ function assertClosureRecord(closure: ClosureRecord): void {
       return;
     }
     if (closure.closureKind === 'reentry') {
+      if (closureSchemaVersion(closure) === CONTEXT_CORRECTION_SCHEMA_VERSION) {
+        const correction = closure as unknown as ContextCorrectionRecord;
+        if (correction.closureId !== contextCorrectionIdentity({
+          basis: correction.basis,
+          expectedOperationControlCommitRef: correction.expectedOperationControlCommitRef,
+          expectedGrantCommitRef: correction.expectedGrantCommitRef,
+          permissionRevision: correction.permissionRevision,
+        })) {
+          throw new Error('context correction command identity conflicts');
+        }
+        assertContextCorrectionRecord({ record: correction });
+        return;
+      }
       assertReentryRecord(closure);
       if ('schemaVersion' in closure) {
         if (closure.schemaVersion !== CONDITIONAL_REENTRY_SCHEMA_VERSION) {
@@ -1962,6 +2083,12 @@ function closureMatches(left: ClosureRecord, right: ClosureRecord): boolean {
     return sameCheckpointClosureRecord(left, right);
   }
   if (left.closureKind === 'reentry' && right.closureKind === 'reentry') {
+    const leftVersion = closureSchemaVersion(left);
+    const rightVersion = closureSchemaVersion(right);
+    if (leftVersion === CONTEXT_CORRECTION_SCHEMA_VERSION
+      || rightVersion === CONTEXT_CORRECTION_SCHEMA_VERSION) {
+      return leftVersion === rightVersion && JSON.stringify(left) === JSON.stringify(right);
+    }
     return sameReentryRecord(left, right);
   }
   if (left.closureKind === 'interaction' && right.closureKind === 'interaction') {
@@ -2032,6 +2159,69 @@ export function exactJournalRecord(records: readonly JournalRecord[], ref: Journ
     throw bindingCorrupt(`exact Journal receipt is unavailable or conflicts: ${ref.commitId}`);
   }
   return record;
+}
+
+export async function commitConditionalTransitionRecord(input: {
+  readonly journal: JsonlOrganJournal;
+  readonly record: ConditionalReentryRecord | ContextCorrectionRecord;
+  readonly expectedCurrentControlCommitRef: JournalCommitRef;
+  readonly validateLocked?: (records: readonly JournalRecord[]) => void;
+}): Promise<JournalCommitRef> {
+  const carrier = input.record as unknown as ClosureRecord;
+  assertClosureRecord(carrier);
+  const identity = identityOfClosure(carrier);
+  const taskScope: ScopeRef = { organId: input.record.scope.organId, taskId: input.record.scope.taskId };
+  return input.journal.transaction<{ readonly existing?: JournalRecord }, JournalCommitRef>(
+    ({ records }) => {
+      const existing = records.find((record) => {
+        const stored = closureFromRecord(record);
+        return stored !== null && identityOfClosure(stored) === identity;
+      });
+      if (existing) {
+        const stored = closureFromRecord(existing);
+        if (!stored || !closureMatches(stored, carrier)) {
+          throw new AppLifecycleError(
+            'checkpoint-closure-conflict',
+            `conditional transition id is already committed with different content: ${identity}`,
+            'reconcile the existing transition before retrying',
+            'app-checkpoint-journal',
+          );
+        }
+        return { existing };
+      }
+      const base = baseExecutionPositionFromRecords(records, taskScope);
+      if (base === null) {
+        throw new AppLifecycleError(
+          'checkpoint-current-missing',
+          'conditional transition has no committed related execution position',
+          'commit a bound checkpoint before retrying the conditional transition',
+          'app-checkpoint-journal',
+        );
+      }
+      const position = foldExecutionPositionFromRecords(records, taskScope, base);
+      if (!sameCommitRef(position.controlCommitRef, input.expectedCurrentControlCommitRef)
+        || position.executionEpoch !== input.record.previousExecutionEpoch) {
+        throw new AppLifecycleError(
+          'checkpoint-current-control-conflict',
+          'conditional transition expected current control token is stale',
+          'read the current control position and confirm the transition again',
+          'app-checkpoint-journal',
+        );
+      }
+      input.validateLocked?.(records);
+      return {};
+    },
+    async (plan, append) => {
+      if (plan.existing) return journalCommitRef(plan.existing);
+      const appended = await append({
+        commitId: closureJournalCommitId(identity),
+        kind: 'event',
+        scope: input.record.scope,
+        payload: { kind: CHECKPOINT_CLOSURE_PAYLOAD_KIND, closure: carrier },
+      });
+      return journalCommitRef(appended);
+    },
+  );
 }
 
 /** Frozen P4 relation validation. Latest records never supply missing facts. */
