@@ -1,5 +1,6 @@
 import {
   assertNotExpired,
+  canonicalJsonStringify,
   assertProviderEventEpoch,
   assertProviderExecutionIdentityMatch,
   assertProviderReadinessBinding,
@@ -18,6 +19,7 @@ import {
   validateProviderStopRequest,
   validateProviderSubmitInput,
   validateProviderSubmitResult,
+  type AnyProviderExecutionIdentityRef,
   type ExecutionRuntimePort,
   type ProviderBinding,
   type ProviderCapabilities,
@@ -41,21 +43,28 @@ import {
   type ProviderRawFact,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
-import { type ProviderCodec, type ProviderDecodedEvent } from './codecs.js';
+import { type DecodeContext, type ProviderCodec, type ProviderDecodedEvent } from './codecs.js';
 import type { ProviderEvidenceSink } from './evidence.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderWireEvent, ProviderWireRequest, ProviderWireStopRequest } from './wire.js';
 
-export interface ProviderTransport {
+/**
+ * One transport serves both Task-bound executions and taskless helper
+ * executions. The identity generic is the shared owner of the wire path, so
+ * there is no second lifecycle or validator for helpers.
+ */
+export interface ProviderTransport<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly readiness?: ProviderReadiness;
   readonly capabilities?: ProviderCapabilities;
   readonly probe?: (binding: ProviderBinding) => Promise<ProviderProbeResult>;
-  start(input: ProviderStartInput, request: ProviderWireRequest): Promise<ProviderStartReceipt>;
+  start(input: ProviderStartInput<TIdentity>, request: ProviderWireRequest): Promise<ProviderStartReceipt<TIdentity>>;
   resume(input: ProviderResumeInput, request: ProviderWireRequest): Promise<ProviderRecoveryResult>;
-  submit(input: ProviderSubmitInput, request: ProviderWireRequest): Promise<ProviderSubmitResult>;
-  observe(input: ProviderObserveInput): AsyncIterable<ProviderWireEvent>;
-  requestStop(input: ProviderStopRequest, request: ProviderWireStopRequest): Promise<ProviderStopReceipt>;
-  settle(input: ProviderSettleInput): Promise<ProviderSettlement>;
+  submit(input: ProviderSubmitInput<TIdentity>, request: ProviderWireRequest): Promise<ProviderSubmitResult<TIdentity>>;
+  observe(input: ProviderObserveInput<TIdentity>): AsyncIterable<ProviderWireEvent>;
+  requestStop(input: ProviderStopRequest<TIdentity>, request: ProviderWireStopRequest): Promise<ProviderStopReceipt<TIdentity>>;
+  settle(input: ProviderSettleInput<TIdentity>): Promise<ProviderSettlement<TIdentity>>;
   close(binding: ProviderBinding): Promise<ProviderCloseResult>;
 }
 
@@ -69,17 +78,23 @@ export interface ProviderProbeResult {
  * the observe call so codec facts reach the driver's Runtime acceptance edge.
  * Callers that omit it keep the previous event-only projection.
  */
-export type ProviderRawFactReceiver = (rawFacts: readonly ProviderRawFact[]) => Promise<void>;
+export type ProviderRawFactReceiver<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = (rawFacts: readonly ProviderRawFact<TIdentity>[]) => Promise<void>;
 
-export interface ProviderObserveInputWithRawFacts extends ProviderObserveInput {
-  readonly onRawFacts?: ProviderRawFactReceiver;
-}
+export type ProviderObserveInputWithRawFacts<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = ProviderObserveInput<TIdentity> & {
+  readonly onRawFacts?: ProviderRawFactReceiver<TIdentity>;
+};
 
-export interface ProviderAdapterOptions {
+export interface ProviderAdapterOptions<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly binding: ProviderBinding;
   readonly routeRef: string;
   readonly codec: ProviderCodec;
-  readonly transport: ProviderTransport;
+  readonly transport: ProviderTransport<TIdentity>;
   readonly evidence: ProviderEvidenceSink;
 }
 
@@ -93,14 +108,35 @@ function sameProviderBinding(a: ProviderBinding, b: ProviderBinding): boolean {
     && a.capabilityDigest === b.capabilityDigest;
 }
 
-function sameExecutionIdentity(a: ProviderExecutionIdentityRef, b: ProviderExecutionIdentityRef): boolean {
-  return a.runtimeId === b.runtimeId
-    && a.taskId.value === b.taskId.value
-    && a.operationId.value === b.operationId.value
-    && a.executionEpoch === b.executionEpoch;
+function sameExecutionIdentity(a: AnyProviderExecutionIdentityRef, b: AnyProviderExecutionIdentityRef): boolean {
+  // Reuse the contract identity-match validator instead of a second comparison.
+  try {
+    assertProviderExecutionIdentityMatch(a, b);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function executionKey(execution: ProviderExecutionIdentityRef): string {
+function executionKey(execution: AnyProviderExecutionIdentityRef): string {
+  if ('helper' in execution) {
+    // Full helper identity: collision-free across independent helper calls.
+    return canonicalJsonStringify([
+      'taskless-helper',
+      execution.runtimeId,
+      execution.operationId.value,
+      execution.executionEpoch,
+      execution.helper.organId.scope,
+      execution.helper.organId.value,
+      execution.helper.interactionScopeId,
+      execution.helper.interactionId,
+      execution.helper.inputRevision,
+      execution.helper.parentTurnId,
+      execution.helper.assignmentId,
+      execution.helper.helperCallId,
+      execution.helper.attempt,
+    ]);
+  }
   return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
 }
 
@@ -115,14 +151,14 @@ function probeExpired(result: ProviderProbeResult): boolean {
 }
 
 interface ActiveExecution {
-  readonly identity: ProviderExecutionIdentityRef;
+  readonly identity: AnyProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
   externalExecutionRef?: EvidenceRef;
   stopRequested: boolean;
   pendingStart: boolean;
 }
 
-function scopeFromEvidence(input: ProviderStartInput | ProviderResumeInput, phase: ProviderErrorPhase): ScopeRef {
+function scopeFromEvidence(input: ProviderStartInput<AnyProviderExecutionIdentityRef> | ProviderResumeInput, phase: ProviderErrorPhase): ScopeRef {
   const ref = input.evidenceRefs[0];
   if (!ref) {
     throw new ProviderAdapterError({
@@ -133,16 +169,20 @@ function scopeFromEvidence(input: ProviderStartInput | ProviderResumeInput, phas
       scope: input,
     });
   }
+  // Taskless helper evidence stays organ+operation; never invent a Task.
+  if ('helper' in input) return { organId: ref.scope.organId, operationId: input.operationId };
   return { ...ref.scope, taskId: input.taskId, operationId: input.operationId };
 }
 
-export class ProviderAdapter implements ExecutionRuntimePort {
+export class ProviderAdapter<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> implements ExecutionRuntimePort<TIdentity> {
   readonly kind = 'humanagent.execution-runtime-port' as const;
 
   private readonly sessions = new Map<string, ActiveExecution>();
   private lastProbe?: { readonly binding: ProviderBinding; readonly result: ProviderProbeResult };
 
-  constructor(private readonly options: ProviderAdapterOptions) {
+  constructor(private readonly options: ProviderAdapterOptions<TIdentity>) {
     try {
       validateProviderBinding(options.binding);
     } catch (error) {
@@ -289,7 +329,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     return { readiness, capabilities: this.options.transport.capabilities };
   }
 
-  async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+  async start(input: ProviderStartInput<TIdentity>): Promise<ProviderStartReceipt<TIdentity>> {
     return this.guard('start', input, async () => {
       validateProviderStartInput(input);
       const key = executionKey(input);
@@ -378,7 +418,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     });
   }
 
-  async submit(input: ProviderSubmitInput): Promise<ProviderSubmitResult> {
+  async submit(input: ProviderSubmitInput<TIdentity>): Promise<ProviderSubmitResult<TIdentity>> {
     return this.guard('submit', input, async () => {
       validateProviderSubmitInput(input);
       this.requireActive(input, 'submit');
@@ -390,7 +430,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     });
   }
 
-  async *observe(input: ProviderObserveInputWithRawFacts): AsyncIterable<ProviderEvent> {
+  async *observe(input: ProviderObserveInputWithRawFacts<TIdentity>): AsyncIterable<ProviderEvent<TIdentity>> {
     this.guardSync('observe', input, () => validateProviderObserveInput(input));
     const active = this.requireActive(input, 'observe');
     if (!this.options.transport.observe) {
@@ -403,8 +443,10 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       });
     }
     let sequence = 0;
-    const context = {
-      execution: active.identity,
+    // The observe input carries the concrete identity generic; the codec
+    // normalises it back to the canonical identity before building events.
+    const context: DecodeContext<TIdentity> = {
+      execution: input,
       scope: active.scope,
       evidence: this.options.evidence,
       responsesOutputText: new Map<string, string>(),
@@ -415,7 +457,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     };
     try {
       for await (const raw of this.options.transport.observe(input)) {
-        const decoded: ProviderDecodedEvent = await this.guard('observe', active.identity, async () => this.options.codec.decodeEvent(raw, context));
+        const decoded: ProviderDecodedEvent<TIdentity> = await this.guard('observe', active.identity, async () => this.options.codec.decodeEvent(raw, context));
         if (input.onRawFacts !== undefined && decoded.rawFacts.length > 0) {
           await input.onRawFacts(decoded.rawFacts);
         }
@@ -443,7 +485,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     }
   }
 
-  async requestStop(input: ProviderStopRequest): Promise<ProviderStopReceipt> {
+  async requestStop(input: ProviderStopRequest<TIdentity>): Promise<ProviderStopReceipt<TIdentity>> {
     return this.guard('stop', input, async () => {
       validateProviderStopRequest(input);
       const active = this.requireActive(input, 'stop');
@@ -456,7 +498,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     });
   }
 
-  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+  async settle(input: ProviderSettleInput<TIdentity>): Promise<ProviderSettlement<TIdentity>> {
     return this.guard('settle', input, async () => {
       validateProviderSettleInput(input);
       const active = this.requireActive(input, 'settle');
@@ -497,7 +539,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     });
   }
 
-  private requireActive(input: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): ActiveExecution {
+  private requireActive(input: AnyProviderExecutionIdentityRef, phase: ProviderErrorPhase): ActiveExecution {
     const active = this.sessions.get(executionKey(input));
     if (!active) {
       const hasRuntimeInstance = [...this.sessions.values()].some((candidate) => candidate.identity.runtimeId === input.runtimeId);
@@ -532,7 +574,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
 
   private guardSync<T>(
     phase: ProviderErrorPhase,
-    scope: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef,
+    scope: ProviderBinding | AnyProviderExecutionIdentityRef | ScopeRef,
     fn: () => T,
   ): T {
     try {
@@ -552,7 +594,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
 
   private async guard<T>(
     phase: ProviderErrorPhase,
-    scope: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef,
+    scope: ProviderBinding | AnyProviderExecutionIdentityRef | ScopeRef,
     fn: () => Promise<T>,
   ): Promise<T> {
     try {
@@ -570,14 +612,14 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     }
   }
 
-  private isFinalSettlement(result: ProviderSettlement): boolean {
+  private isFinalSettlement(result: ProviderSettlement<TIdentity>): boolean {
     if (result.state === 'succeeded' || result.state === 'stopped' || result.state === 'cancelled') {
       return result.resourceRelease.state === 'released' && result.persistence.state === 'committed';
     }
     return result.resourceRelease.state === 'released';
   }
 
-  private stampObservedEvent(event: ProviderEvent, input: ProviderObserveInput): ProviderEvent {
+  private stampObservedEvent(event: ProviderEvent<TIdentity>, input: ProviderObserveInput<TIdentity>): ProviderEvent<TIdentity> {
     const receivedAt = new Date().toISOString();
     return {
       ...event,
@@ -590,7 +632,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
 
   private async callTransport<T>(
     phase: ProviderErrorPhase,
-    scope: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef,
+    scope: ProviderBinding | AnyProviderExecutionIdentityRef | ScopeRef,
     fn: () => Promise<T>,
   ): Promise<T> {
     try {
@@ -608,7 +650,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     }
   }
 
-  private assertExternalEvidenceMatches(ref: EvidenceRef, execution: ProviderExecutionIdentityRef, scope: ScopeRef, phase: ProviderErrorPhase): void {
+  private assertExternalEvidenceMatches(ref: EvidenceRef, execution: AnyProviderExecutionIdentityRef, scope: ScopeRef, phase: ProviderErrorPhase): void {
     if (ref.scope.organId.value !== scope.organId.value) {
       throw new ProviderAdapterError({
         code: 'external.binding.scope.mismatch',
@@ -618,7 +660,18 @@ export class ProviderAdapter implements ExecutionRuntimePort {
         scope: execution,
       });
     }
-    if (ref.scope.taskId && ref.scope.taskId.value !== execution.taskId.value) {
+    if ('helper' in execution) {
+      // Taskless helper evidence must not borrow a Task or cycle scope.
+      if (ref.scope.taskId !== undefined || ref.scope.cycleId !== undefined) {
+        throw new ProviderAdapterError({
+          code: 'external.binding.scope.mismatch',
+          category: 'protocol',
+          phase,
+          message: 'provider external execution binding carries Task scope for a taskless helper',
+          scope: execution,
+        });
+      }
+    } else if (ref.scope.taskId && ref.scope.taskId.value !== execution.taskId.value) {
       throw new ProviderAdapterError({
         code: 'external.binding.scope.mismatch',
         category: 'protocol',
@@ -636,7 +689,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
         scope: execution,
       });
     }
-    if (ref.scope.cycleId && scope.cycleId && ref.scope.cycleId.value !== scope.cycleId.value) {
+    if (!('helper' in execution) && ref.scope.cycleId && scope.cycleId && ref.scope.cycleId.value !== scope.cycleId.value) {
       throw new ProviderAdapterError({
         code: 'external.binding.scope.mismatch',
         category: 'protocol',
@@ -649,7 +702,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
 
   private assertEvidenceScopeMatchesExecution(
     ref: EvidenceRef,
-    execution: ProviderExecutionIdentityRef,
+    execution: AnyProviderExecutionIdentityRef,
     scope: ScopeRef,
     phase: ProviderErrorPhase,
     label: string,
@@ -663,7 +716,18 @@ export class ProviderAdapter implements ExecutionRuntimePort {
         scope: execution,
       });
     }
-    if (ref.scope.taskId && ref.scope.taskId.value !== execution.taskId.value) {
+    if ('helper' in execution) {
+      // Taskless helper evidence must not borrow a Task or cycle scope.
+      if (ref.scope.taskId !== undefined || ref.scope.cycleId !== undefined) {
+        throw new ProviderAdapterError({
+          code: 'evidence.binding.scope.mismatch',
+          category: 'protocol',
+          phase,
+          message: `${label} carries Task scope for a taskless helper`,
+          scope: execution,
+        });
+      }
+    } else if (ref.scope.taskId && ref.scope.taskId.value !== execution.taskId.value) {
       throw new ProviderAdapterError({
         code: 'evidence.binding.scope.mismatch',
         category: 'protocol',

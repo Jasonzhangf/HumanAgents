@@ -1,12 +1,12 @@
 import {
   id,
+  type AnyProviderExecutionIdentityRef,
   type EvidenceRef,
   type NextAction,
   type ProviderAttentionClass,
   type ProviderError,
   type ProviderErrorCategory,
   type ProviderErrorPhase,
-  type ProviderExecutionIdentityRef,
   type ProviderBinding,
   type ProviderRetryability,
   type ScopeRef,
@@ -14,10 +14,16 @@ import {
 
 const OWNER_ID = 'humanagent.provider-adapter';
 
-function toScope(scopeOrExecution: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef | undefined): ScopeRef {
+function toScope(scopeOrExecution: ProviderBinding | AnyProviderExecutionIdentityRef | ScopeRef | undefined): ScopeRef {
   if (!scopeOrExecution) return { organId: id('organ', 'provider-adapter') };
   if ('providerId' in scopeOrExecution) return { organId: id('organ', 'provider-adapter') };
   if ('runtimeId' in scopeOrExecution) {
+    // A taskless helper execution carries no Task identity, so its error scope
+    // is the organ plus operation only. Emitting a synthetic taskId would mix
+    // the helper error into a Task that never ran.
+    if ('helper' in scopeOrExecution) {
+      return { organId: scopeOrExecution.organId, operationId: scopeOrExecution.operationId };
+    }
     return {
       organId: scopeOrExecution.organId ?? id('organ', 'provider-adapter'),
       taskId: scopeOrExecution.taskId,
@@ -27,7 +33,7 @@ function toScope(scopeOrExecution: ProviderBinding | ProviderExecutionIdentityRe
   return scopeOrExecution;
 }
 
-function errorEvidence(scopeOrExecution: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef | undefined, label: string): EvidenceRef {
+function errorEvidence(scopeOrExecution: ProviderBinding | AnyProviderExecutionIdentityRef | ScopeRef | undefined, label: string): EvidenceRef {
   return {
     evidenceId: id('evidence', `provider-${label.replace(/[^A-Za-z0-9._-]/g, '-')}`),
     kind: 'external',
@@ -42,7 +48,7 @@ export interface ProviderAdapterErrorInput {
   readonly category: ProviderErrorCategory;
   readonly phase: ProviderErrorPhase;
   readonly message: string;
-  readonly scope?: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef;
+  readonly scope?: ProviderBinding | AnyProviderExecutionIdentityRef | ScopeRef;
   readonly retryable?: ProviderRetryability;
   readonly attention?: ProviderAttentionClass;
   readonly nextAction?: NextAction;

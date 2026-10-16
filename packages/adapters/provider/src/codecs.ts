@@ -1,5 +1,7 @@
 import {
+  canonicalJsonStringify,
   id,
+  type AnyProviderExecutionIdentityRef,
   type BusinessPayload,
   type ContentUnitChannel,
   type EvidenceRef,
@@ -190,19 +192,35 @@ function openaiChatContextMessages(context: ProviderRequestContext): readonly Op
  * payload and request-scoped context never belong on it, so the codec emits a
  * plain identity ref instead of the whole execution input object.
  */
-function executionIdentity(execution: ProviderExecutionIdentityRef): ProviderExecutionIdentityRef {
-  return {
-    runtimeId: execution.runtimeId,
-    taskId: execution.taskId,
-    operationId: execution.operationId,
-    ...(execution.organId === undefined ? {} : { organId: execution.organId }),
-    ...(execution.cycleId === undefined ? {} : { cycleId: execution.cycleId }),
-    executionEpoch: execution.executionEpoch,
-  };
+function executionIdentity<TIdentity extends AnyProviderExecutionIdentityRef>(execution: TIdentity): TIdentity {
+  // A taskless helper execution is keyed by its full helper identity, so the
+  // wire identity carries `helper` and never a `taskId`/`cycleId`. The input may
+  // be a wider request object (identity plus request fields), so this normalises
+  // it back to the canonical identity the caller passed.
+  const identity: AnyProviderExecutionIdentityRef = 'helper' in execution
+    ? {
+        runtimeId: execution.runtimeId,
+        organId: execution.organId,
+        operationId: execution.operationId,
+        executionEpoch: execution.executionEpoch,
+        helper: execution.helper,
+      }
+    : {
+        runtimeId: execution.runtimeId,
+        taskId: execution.taskId,
+        operationId: execution.operationId,
+        ...(execution.organId === undefined ? {} : { organId: execution.organId }),
+        ...(execution.cycleId === undefined ? {} : { cycleId: execution.cycleId }),
+        executionEpoch: execution.executionEpoch,
+      };
+  // Construction boundary: `identity` is the canonical form of the caller's
+  // identity. It is validated by assertProviderExecutionIdentity before any
+  // control use, so the generic narrowing carries no unchecked field.
+  return identity as TIdentity;
 }
 
 function businessText(
-  execution: ProviderExecutionIdentityRef,
+  execution: AnyProviderExecutionIdentityRef,
   payload: ProviderStartInput['payload'],
 ): string {
   if (payload === undefined) {
@@ -263,8 +281,10 @@ function responsesToolId(wireName: string): string {
   return RESPONSES_WIRE_NAME_TO_TOOL_ID.get(wireName) ?? wireName;
 }
 
-export interface DecodeContext {
-  readonly execution: ProviderExecutionIdentityRef;
+export interface DecodeContext<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
+  readonly execution: TIdentity;
   readonly scope: ScopeRef;
   readonly evidence: ProviderEvidenceSink;
   readonly nextEventId: (type: string, locator: string) => string;
@@ -276,14 +296,16 @@ export interface DecodeContext {
 
 const REQUEST_START_SUMMARY = 'provider requested model work';
 
-export interface ProviderDecodedEvent {
-  readonly events: readonly ProviderEvent[];
+export interface ProviderDecodedEvent<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
+  readonly events: readonly ProviderEvent<TIdentity>[];
   /**
    * Ordered typed raw facts produced from the same wire decode. The Runtime
    * (W1-3) assigns the exact-request `producerSeq` and acceptance order; the
    * codec only emits the fact content.
    */
-  readonly rawFacts: readonly ProviderRawFact[];
+  readonly rawFacts: readonly ProviderRawFact<TIdentity>[];
 }
 
 /**
@@ -291,9 +313,11 @@ export interface ProviderDecodedEvent {
  * branches without raw content leave it undefined. `decodeEvent` normalises the
  * public shape so `rawFacts` is always present.
  */
-interface DecodedWire {
-  readonly events: readonly ProviderEvent[];
-  readonly rawFacts?: readonly ProviderRawFact[];
+interface DecodedWire<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
+  readonly events: readonly ProviderEvent<TIdentity>[];
+  readonly rawFacts?: readonly ProviderRawFact<TIdentity>[];
 }
 
 /** Request-local Anthropic block state used to close declared units on block stop. */
@@ -313,13 +337,22 @@ interface OpenAIChatPendingToolCall {
   readonly arguments: string;
 }
 
+/** Task-bound and taskless-helper requests share one codec/wire path. */
+type AnyProviderStartInput = ProviderStartInput<AnyProviderExecutionIdentityRef>;
+type AnyProviderSubmitInput = ProviderSubmitInput<AnyProviderExecutionIdentityRef>;
+type AnyProviderStopRequest = ProviderStopRequest<AnyProviderExecutionIdentityRef>;
+type AnyProviderRequestInput = AnyProviderStartInput | ProviderResumeInput | AnyProviderSubmitInput;
+
 export interface ProviderCodec<W extends ProviderWireRequest = ProviderWireRequest> {
   readonly protocol: 'responses' | 'anthropic' | 'openai';
-  encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): W;
+  encodeStart(input: AnyProviderStartInput, binding: ProviderBinding, routeRef: string): W;
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): W;
-  encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): W;
-  encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): ProviderWireStopRequest;
-  decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent>;
+  encodeSubmit(input: AnyProviderSubmitInput, binding: ProviderBinding, routeRef: string): W;
+  encodeStop(input: AnyProviderStopRequest, binding: ProviderBinding, routeRef: string): ProviderWireStopRequest;
+  decodeEvent<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(
+    raw: ProviderWireEvent,
+    context: DecodeContext<TIdentity>,
+  ): Promise<ProviderDecodedEvent<TIdentity>>;
 }
 
 function evidence(scope: ScopeRef, label: string, kind: EvidenceRef['kind'] = 'execution'): EvidenceRef {
@@ -340,7 +373,7 @@ function artifactRef(type: string, locator: string, digest?: string): string {
   return `${SOURCE}:${type}:${sanitizeRefPart(locator)}${digest ? `:${digest.slice(0, 12)}` : ''}`;
 }
 
-function responsesTextSummary(context: DecodeContext, itemId: string, text: string, kind: 'delta' | 'snapshot'): string | undefined {
+function responsesTextSummary<TIdentity extends AnyProviderExecutionIdentityRef>(context: DecodeContext<TIdentity>, itemId: string, text: string, kind: 'delta' | 'snapshot'): string | undefined {
   if (text.length === 0) return undefined;
   const seen = context.responsesOutputText.get(itemId) ?? '';
   if (kind === 'delta') {
@@ -371,7 +404,7 @@ function responsesReasoningSummaryText(record: Record<string, unknown>): string 
   return '';
 }
 
-async function captureEvidence(context: DecodeContext, type: string, locator: string, value?: unknown, kind: EvidenceRef['kind'] = 'execution'): Promise<EvidenceRef> {
+async function captureEvidence<TIdentity extends AnyProviderExecutionIdentityRef>(context: DecodeContext<TIdentity>, type: string, locator: string, value?: unknown, kind: EvidenceRef['kind'] = 'execution'): Promise<EvidenceRef> {
   return context.evidence.write({
     scope: context.scope,
     kind,
@@ -389,6 +422,17 @@ function rawAsset(ref: EvidenceRef, view: RawAssetView): RawAsset {
   return { ref, view };
 }
 
+/**
+ * The raw-fact kinds a codec emits never carry an execution identity. The
+ * `tool-result` fact, which does, is produced by the driver from the real
+ * `ProviderToolResult<TIdentity>`. So a codec fact is assignable to
+ * `ProviderRawFact` for any identity generic.
+ */
+type ProviderRawFactContent = Extract<
+  ProviderRawFact<AnyProviderExecutionIdentityRef>,
+  { kind: 'content' | 'content-complete' | 'tool-call' | 'request-complete' }
+>;
+
 function contentFact(input: {
   readonly contentUnitId: string;
   readonly channel: ContentUnitChannel;
@@ -396,7 +440,7 @@ function contentFact(input: {
   readonly content: RawAsset;
   readonly complete: boolean;
   readonly replacesUnitIds?: readonly string[];
-}): ProviderRawFact {
+}): ProviderRawFactContent {
   return {
     kind: 'content',
     contentUnitId: input.contentUnitId,
@@ -408,23 +452,23 @@ function contentFact(input: {
   };
 }
 
-function contentCompleteFact(contentUnitId: string): ProviderRawFact {
+function contentCompleteFact(contentUnitId: string): ProviderRawFactContent {
   return { kind: 'content-complete', contentUnitId };
 }
 
 function requestCompleteFact(
   terminal: 'completed' | 'incomplete' | 'failed' | 'cancelled',
   error?: ProviderError,
-): ProviderRawFact {
+): ProviderRawFactContent {
   return { kind: 'request-complete', terminal, ...(error === undefined ? {} : { error }) };
 }
 
-function toolCallFact(contentUnitId: string, call: ProviderToolCall, rawArguments: RawAsset): ProviderRawFact {
+function toolCallFact(contentUnitId: string, call: ProviderToolCall, rawArguments: RawAsset): ProviderRawFactContent {
   return { kind: 'tool-call', contentUnitId, call, rawArguments, complete: true };
 }
 
 function providerError(
-  execution: ProviderExecutionIdentityRef,
+  execution: AnyProviderExecutionIdentityRef,
   scope: ScopeRef,
   code: string,
   message: string,
@@ -445,24 +489,28 @@ function providerError(
   };
 }
 
-function eventId(context: DecodeContext, type: string, locator: string): string {
+function eventId<TIdentity extends AnyProviderExecutionIdentityRef>(context: DecodeContext<TIdentity>, type: string, locator: string): string {
   return context.nextEventId(type, locator);
 }
 
-function eventBase(
-  execution: ProviderExecutionIdentityRef,
+/** Identity plus the fields every decoded Provider event carries before `kind`. */
+type ProviderEventBase<TIdentity extends AnyProviderExecutionIdentityRef> = TIdentity & {
+  readonly eventId: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly externalResponseId?: string;
+};
+
+function eventBase<TIdentity extends AnyProviderExecutionIdentityRef>(
+  execution: TIdentity,
   scope: ScopeRef,
   type: string,
   eventId: string,
   label: string,
   evidenceRefs?: readonly EvidenceRef[],
   externalResponseId?: string,
-): Omit<ProviderEvent, 'kind'> {
+): ProviderEventBase<TIdentity> {
   return {
-    runtimeId: execution.runtimeId,
-    taskId: execution.taskId,
-    operationId: execution.operationId,
-    executionEpoch: execution.executionEpoch,
+    ...executionIdentity(execution),
     eventId,
     evidenceRefs: evidenceRefs ?? [evidence(scope, label)],
     ...(externalResponseId === undefined ? {} : { externalResponseId }),
@@ -502,15 +550,15 @@ function semanticModelSummary(type: string): string {
   }
 }
 
-function modelEvent(
-  execution: ProviderExecutionIdentityRef,
+function modelEvent<TIdentity extends AnyProviderExecutionIdentityRef>(
+  execution: TIdentity,
   scope: ScopeRef,
   type: string,
   eventId: string,
   evidenceRefs?: readonly EvidenceRef[],
   summary?: string,
   externalResponseId?: string,
-): ProviderEvent {
+): ProviderEvent<TIdentity> {
   return {
     ...eventBase(execution, scope, type, eventId, type, evidenceRefs, externalResponseId),
     kind: 'model',
@@ -518,8 +566,8 @@ function modelEvent(
   };
 }
 
-function outputEvent(
-  execution: ProviderExecutionIdentityRef,
+function outputEvent<TIdentity extends AnyProviderExecutionIdentityRef>(
+  execution: TIdentity,
   scope: ScopeRef,
   type: string,
   eventId: string,
@@ -527,7 +575,7 @@ function outputEvent(
   evidenceRefs?: readonly EvidenceRef[],
   summary?: string,
   externalResponseId?: string,
-): ProviderEvent {
+): ProviderEvent<TIdentity> {
   return {
     ...eventBase(execution, scope, type, eventId, type, evidenceRefs, externalResponseId),
     kind: 'output',
@@ -536,8 +584,8 @@ function outputEvent(
   };
 }
 
-function ownedEvent(
-  execution: ProviderExecutionIdentityRef,
+function ownedEvent<TIdentity extends AnyProviderExecutionIdentityRef>(
+  execution: TIdentity,
   scope: ScopeRef,
   kind: ProviderEvent['kind'],
   type: string,
@@ -554,7 +602,7 @@ function ownedEvent(
     readonly toolPhase?: ProviderEvent['toolPhase'];
     readonly externalResponseId?: string;
   } = {},
-): ProviderEvent {
+): ProviderEvent<TIdentity> {
   return {
     ...eventBase(execution, scope, type, eventId, label, undefined, extra.externalResponseId),
     kind,
@@ -626,7 +674,7 @@ function anthropicTerminal(stopReason: string | undefined): 'completed' | 'incom
  * then fails closed on invalid JSON or a non-object shape, so a malformed call
  * never becomes an executable tool call.
  */
-function parseToolArguments(json: string, execution: ProviderExecutionIdentityRef): BusinessPayload {
+function parseToolArguments(json: string, execution: AnyProviderExecutionIdentityRef): BusinessPayload {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json || '{}');
@@ -652,11 +700,30 @@ function parseToolArguments(json: string, execution: ProviderExecutionIdentityRe
 }
 
 /** One provider execution's request-local state key; shared by codec maps. */
-function executionKey(execution: ProviderExecutionIdentityRef): string {
+function executionKey(execution: AnyProviderExecutionIdentityRef): string {
+  if ('helper' in execution) {
+    // A taskless helper has no Task to key on. The full helper identity is the
+    // collision-free key, so two helpers can never share request-local state.
+    return canonicalJsonStringify([
+      'taskless-helper',
+      execution.runtimeId,
+      execution.operationId.value,
+      execution.executionEpoch,
+      execution.helper.organId.scope,
+      execution.helper.organId.value,
+      execution.helper.interactionScopeId,
+      execution.helper.interactionId,
+      execution.helper.inputRevision,
+      execution.helper.parentTurnId,
+      execution.helper.assignmentId,
+      execution.helper.helperCallId,
+      execution.helper.attempt,
+    ]);
+  }
   return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
 }
 
-function requireString(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): string {
+function requireString(record: Record<string, unknown>, key: string, execution: AnyProviderExecutionIdentityRef, type: string): string {
   const value = record[key];
   if (typeof value !== 'string' || value.trim() === '') {
     throw new ProviderAdapterError({
@@ -673,7 +740,7 @@ function requireString(record: Record<string, unknown>, key: string, execution: 
 function requireStringOrGenerated(
   record: Record<string, unknown>,
   key: string,
-  execution: ProviderExecutionIdentityRef,
+  execution: AnyProviderExecutionIdentityRef,
   type: string,
   generated: string,
 ): string {
@@ -695,7 +762,7 @@ function stringOrGenerated(record: Record<string, unknown>, key: string, generat
   return typeof value === 'string' && value.trim() !== '' ? value : generated;
 }
 
-function requireStringValue(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): string {
+function requireStringValue(record: Record<string, unknown>, key: string, execution: AnyProviderExecutionIdentityRef, type: string): string {
   const value = record[key];
   if (typeof value !== 'string') {
     throw new ProviderAdapterError({
@@ -714,7 +781,7 @@ function requireStringValue(record: Record<string, unknown>, key: string, execut
  * may omit the item id entirely. Accept either, in that order, and still fail
  * closed when neither identity is present.
  */
-function requireToolEventIdentity(record: Record<string, unknown>, execution: ProviderExecutionIdentityRef, type: string): string {
+function requireToolEventIdentity(record: Record<string, unknown>, execution: AnyProviderExecutionIdentityRef, type: string): string {
   for (const key of ['item_id', 'call_id'] as const) {
     const value = record[key];
     if (typeof value === 'string' && value.trim() !== '') return value;
@@ -728,7 +795,7 @@ function requireToolEventIdentity(record: Record<string, unknown>, execution: Pr
   });
 }
 
-function requireNumber(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): number {
+function requireNumber(record: Record<string, unknown>, key: string, execution: AnyProviderExecutionIdentityRef, type: string): number {
   const value = record[key];
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new ProviderAdapterError({
@@ -742,7 +809,7 @@ function requireNumber(record: Record<string, unknown>, key: string, execution: 
   return value;
 }
 
-function requireObject(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): Record<string, unknown> {
+function requireObject(record: Record<string, unknown>, key: string, execution: AnyProviderExecutionIdentityRef, type: string): Record<string, unknown> {
   const value = record[key];
   if (!value || typeof value !== 'object') {
     throw new ProviderAdapterError({
@@ -795,7 +862,7 @@ function asRecord(raw: ProviderWireEvent): Record<string, unknown> {
 export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireRequest> {
   readonly protocol = 'responses' as const;
 
-  encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
+  encodeStart(input: AnyProviderStartInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
@@ -803,7 +870,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
   }
 
-  encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
+  encodeSubmit(input: AnyProviderSubmitInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
     if (input.requestContext === undefined && input.toolContinuations !== undefined) {
       return {
         protocol: 'responses',
@@ -838,7 +905,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
-  encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): ResponsesWireCancelRequest {
+  encodeStop(input: AnyProviderStopRequest, binding: ProviderBinding, routeRef: string): ResponsesWireCancelRequest {
     return {
       protocol: 'responses',
       type: 'responses.cancel',
@@ -849,12 +916,18 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     };
   }
 
-  async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
+  async decodeEvent<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(
+    raw: ProviderWireEvent,
+    context: DecodeContext<TIdentity>,
+  ): Promise<ProviderDecodedEvent<TIdentity>> {
     const decoded = await this.decodeWire(raw, context);
     return { events: decoded.events, rawFacts: decoded.rawFacts ?? [] };
   }
 
-  private async decodeWire(raw: ProviderWireEvent, context: DecodeContext): Promise<DecodedWire> {
+  private async decodeWire<TIdentity extends AnyProviderExecutionIdentityRef>(
+    raw: ProviderWireEvent,
+    context: DecodeContext<TIdentity>,
+  ): Promise<DecodedWire<TIdentity>> {
     if (raw.protocol !== 'responses') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -1330,7 +1403,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
+    execution: AnyProviderRequestInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): ResponsesWireRequest {
@@ -1368,7 +1441,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
    */
   private readonly pendingToolCalls = new Map<string, Map<number, OpenAIChatPendingToolCall>>();
 
-  encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
+  encodeStart(input: AnyProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
@@ -1376,11 +1449,11 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
     return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
   }
 
-  encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
+  encodeSubmit(input: AnyProviderSubmitInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
-  encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): OpenAIChatCancelRequest {
+  encodeStop(input: AnyProviderStopRequest, binding: ProviderBinding, routeRef: string): OpenAIChatCancelRequest {
     return {
       protocol: 'openai',
       type: 'openai.cancel',
@@ -1391,12 +1464,18 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
     };
   }
 
-  async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
+  async decodeEvent<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(
+    raw: ProviderWireEvent,
+    context: DecodeContext<TIdentity>,
+  ): Promise<ProviderDecodedEvent<TIdentity>> {
     const decoded = await this.decodeWire(raw, context);
     return { events: decoded.events, rawFacts: decoded.rawFacts ?? [] };
   }
 
-  private async decodeWire(raw: ProviderWireEvent, context: DecodeContext): Promise<DecodedWire> {
+  private async decodeWire<TIdentity extends AnyProviderExecutionIdentityRef>(
+    raw: ProviderWireEvent,
+    context: DecodeContext<TIdentity>,
+  ): Promise<DecodedWire<TIdentity>> {
     if (raw.protocol !== 'openai') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -1421,8 +1500,8 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
           });
         }
         if (choices.length === 0) return { events: [], rawFacts: [] };
-        const events: ProviderEvent[] = [];
-        const rawFacts: ProviderRawFact[] = [];
+        const events: ProviderEvent<TIdentity>[] = [];
+        const rawFacts: ProviderRawFact<TIdentity>[] = [];
         for (const candidate of choices) {
           if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
             throw new ProviderAdapterError({
@@ -1680,7 +1759,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
+    execution: AnyProviderRequestInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): OpenAIChatWireRequest {
@@ -1736,7 +1815,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     }
   }
 
-  encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): AnthropicWireRequest {
+  encodeStart(input: AnyProviderStartInput, binding: ProviderBinding, routeRef: string): AnthropicWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
@@ -1744,11 +1823,11 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
   }
 
-  encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): AnthropicWireRequest {
+  encodeSubmit(input: AnyProviderSubmitInput, binding: ProviderBinding, routeRef: string): AnthropicWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
-  encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): AnthropicWireCancelRequest {
+  encodeStop(input: AnyProviderStopRequest, binding: ProviderBinding, routeRef: string): AnthropicWireCancelRequest {
     return {
       protocol: 'anthropic',
       type: 'anthropic.cancel',
@@ -1759,12 +1838,18 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     };
   }
 
-  async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
+  async decodeEvent<TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(
+    raw: ProviderWireEvent,
+    context: DecodeContext<TIdentity>,
+  ): Promise<ProviderDecodedEvent<TIdentity>> {
     const decoded = await this.decodeWire(raw, context);
     return { events: decoded.events, rawFacts: decoded.rawFacts ?? [] };
   }
 
-  private async decodeWire(raw: ProviderWireEvent, context: DecodeContext): Promise<DecodedWire> {
+  private async decodeWire<TIdentity extends AnyProviderExecutionIdentityRef>(
+    raw: ProviderWireEvent,
+    context: DecodeContext<TIdentity>,
+  ): Promise<DecodedWire<TIdentity>> {
     if (raw.protocol !== 'anthropic') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -1848,7 +1933,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
             argumentsDelta: '',
           });
           const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(index)}`, { thinking, ...(signature === undefined ? {} : { signature }) })];
-          const rawFacts: ProviderRawFact[] = [contentFact({
+          const rawFacts: ProviderRawFact<TIdentity>[] = [contentFact({
             contentUnitId: unitId('anthropic', 'reasoning-text', String(index)),
             channel: 'reasoning-text',
             update: 'full',
@@ -1953,8 +2038,8 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const blockKey = this.blockKey(context.execution, index);
         const block = this.blocks.get(blockKey);
         this.blocks.delete(blockKey);
-        const rawFacts: ProviderRawFact[] = [];
-        const events: ProviderEvent[] = [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(index)}`), [await captureEvidence(context, raw.type, `block/${String(index)}`)])];
+        const rawFacts: ProviderRawFact<TIdentity>[] = [];
+        const events: ProviderEvent<TIdentity>[] = [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(index)}`), [await captureEvidence(context, raw.type, `block/${String(index)}`)])];
         if (block) {
           for (const channel of block.channels) rawFacts.push(contentCompleteFact(unitId('anthropic', channel, String(index))));
           if (block.type === 'tool_use' && block.callId !== undefined && block.toolId !== undefined) {
@@ -2054,18 +2139,18 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     }
   }
 
-  private stopReasonKey(execution: ProviderExecutionIdentityRef): string {
+  private stopReasonKey(execution: AnyProviderExecutionIdentityRef): string {
     return executionKey(execution);
   }
 
-  private blockKey(execution: ProviderExecutionIdentityRef, index: number): string {
+  private blockKey(execution: AnyProviderExecutionIdentityRef, index: number): string {
     return `${this.stopReasonKey(execution)}:${index}`;
   }
 
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
+    execution: AnyProviderRequestInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): AnthropicWireRequest {

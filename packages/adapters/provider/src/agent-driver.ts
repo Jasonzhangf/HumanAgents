@@ -1,7 +1,10 @@
 import {
+  assertProviderExecutionIdentity,
+  assertProviderExecutionIdentityMatch,
   id,
   validateProviderToolResult,
   validateProviderRequestLifecycleEvent,
+  type AnyProviderExecutionIdentityRef,
   type AcceptedRawFact,
   type AgentCapabilities,
   type AgentClosure,
@@ -12,6 +15,7 @@ import {
   type AgentOutput,
   type AgentResumeRequest,
   type AgentStartRequest,
+  type BusinessPayload,
   type ActiveTurnProviderExecutionIdentityRef,
   type ActiveTurnProviderRequestIdentityRef,
   type EvidenceRef,
@@ -25,8 +29,14 @@ import {
   type ProviderProducerDrainResult,
   type ProviderRequestLifecycleEvent,
   type ProviderExecutionIdentityRef,
+  type TasklessProviderExecutionIdentityRef,
+  type InteractionHelperIdentity,
+  type OrganId,
   type ProviderSettlement,
   type ProviderStartInput,
+  type ProviderSubmitInput,
+  type ProviderStopRequest,
+  type ProviderSettleInput,
   type ProviderSubmitResult,
   type ProviderStartReceipt,
   type ProviderStopReceipt,
@@ -67,11 +77,13 @@ function createToolBarrier(): ToolBarrier {
   return { promise, release };
 }
 
-export interface ProviderAgentDriverOptions {
-  readonly port: ExecutionRuntimePort;
+export interface ProviderAgentDriverCommonOptions<TIdentity extends AnyProviderExecutionIdentityRef> {
+  readonly port: ExecutionRuntimePort<TIdentity>;
   readonly binding: ProviderBinding;
   readonly runtimeId: string;
-  readonly taskId: TaskId;
+  readonly taskId?: TaskId;
+  readonly organId?: OrganId;
+  readonly helper?: InteractionHelperIdentity;
   readonly operationId: OperationId;
   readonly executionEpoch: number;
   readonly assignmentId: string;
@@ -79,16 +91,16 @@ export interface ProviderAgentDriverOptions {
   readonly inputRefs: readonly string[];
   readonly ownerId?: string;
   readonly tools?: ProviderStartInput['tools'];
-  readonly executeTool?: ProviderToolExecutionPort;
+  readonly executeTool?: ProviderToolExecutionPort<TIdentity>;
   readonly maxToolRounds?: number;
-  readonly onRequestLifecycle?: (event: ProviderRequestLifecycleEvent) => void;
+  readonly onRequestLifecycle?: (event: ProviderRequestLifecycleEvent<TIdentity>) => void;
   /**
    * Native raw path. `rawEvidence` saves the exact executor output and
    * `acceptRawFact` durably accepts each request-local raw fact. Both must be
    * bound together; older callers omit both and keep the event-only path.
    */
   readonly rawEvidence?: ProviderEvidenceSink;
-  readonly acceptRawFact?: (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>;
+  readonly acceptRawFact?: (envelope: RawFactEnvelope<TIdentity>) => Promise<AcceptedRawFact<TIdentity>>;
   /**
    * Native causal registration. When raw acceptance is enabled this port is
    * required: the driver awaits the 'dispatching' commit before the external
@@ -104,9 +116,17 @@ export interface ProviderAgentDriverOptions {
    * payload string and the driver-local tool history. The Runtime owns the
    * materialization; the driver never invents or caches context.
    */
-  readonly requestContext?: ProviderRequestContextHook;
+  readonly requestContext?: ProviderRequestContextHook<TIdentity>;
   readonly now?: () => Date;
 }
+
+export type ProviderAgentDriverOptions<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = ProviderAgentDriverCommonOptions<TIdentity> & (
+  TIdentity extends TasklessProviderExecutionIdentityRef
+    ? { readonly taskId?: never; readonly organId: OrganId; readonly helper: InteractionHelperIdentity }
+    : { readonly taskId: TaskId; readonly helper?: never }
+);
 
 export interface ProviderToolExecutionResult {
   readonly output: string;
@@ -120,9 +140,16 @@ export interface ProviderToolExecutionResult {
   readonly executorRoute?: string;
 }
 
-export interface ProviderToolExecutionPort {
+/**
+ * The tool executor is bound to the same identity generic as the driver, so a
+ * legacy Task caller keeps receiving a Task identity and a taskless helper
+ * caller receives the helper identity. No second executor shape is introduced.
+ */
+export interface ProviderToolExecutionPort<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   execute(input: {
-    readonly execution: ProviderExecutionIdentityRef;
+    readonly execution: TIdentity;
     readonly scope: ScopeRef;
     readonly requestId?: string;
     readonly call: ProviderToolCall;
@@ -130,16 +157,20 @@ export interface ProviderToolExecutionPort {
   }): Promise<ProviderToolExecutionResult>;
 }
 
-export interface ProviderAgentEvent extends AgentEvent {
+export type ProviderAgentEvent<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = AgentEvent<TIdentity> & {
   readonly summary?: string;
-  readonly providerEvent: ProviderRequestScopedEvent;
-}
+  readonly providerEvent: ProviderRequestScopedEvent<TIdentity>;
+};
 
-export interface ProviderRequestScopedEvent extends ProviderEvent {
+export type ProviderRequestScopedEvent<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = ProviderEvent<TIdentity> & {
   readonly turnId: string;
   readonly requestId: string;
   readonly occurredAt: string;
-}
+};
 
 function operationEvidence(scope: ScopeRef, operationId: OperationId): EvidenceRef {
   return {
@@ -164,25 +195,71 @@ function mergeRequestScopedInstructions(
   return { text: `${hook.text}\n${caller.text}` };
 }
 
-function sameExecution(
-  expected: ProviderAgentDriverOptions,
-  actual: ProviderExecutionIdentityRef,
-): boolean {
-  return expected.runtimeId === actual.runtimeId
-    && expected.taskId.value === actual.taskId.value
-    && expected.operationId.value === actual.operationId.value
-    && expected.executionEpoch === actual.executionEpoch;
+/**
+ * The single execution identity this driver runs under: a Task identity for
+ * legacy callers, or a taskless helper identity when the caller binds a helper.
+ * Both flow through the same lifecycle and ports.
+ */
+function resolveExecutionIdentity<TIdentity extends AnyProviderExecutionIdentityRef>(
+  options: ProviderAgentDriverOptions<TIdentity>,
+): TIdentity {
+  let candidate: AnyProviderExecutionIdentityRef;
+  if (options.helper !== undefined && options.organId !== undefined) {
+    candidate = {
+      runtimeId: options.runtimeId,
+      organId: options.organId,
+      operationId: options.operationId,
+      executionEpoch: options.executionEpoch,
+      helper: options.helper,
+    };
+  } else if (options.taskId !== undefined) {
+    candidate = {
+      runtimeId: options.runtimeId,
+      taskId: options.taskId,
+      operationId: options.operationId,
+      executionEpoch: options.executionEpoch,
+    };
+  } else {
+    throw new ProviderAdapterError({
+      code: 'runtime.identity.missing',
+      category: 'runtime',
+      phase: 'start',
+      message: 'provider agent driver requires either a task identity or a helper identity',
+      scope: options.scope,
+    });
+  }
+  try {
+    // The single construction boundary: the shared contract validator proves the
+    // assembled identity before it becomes the driver's execution. A taskless
+    // helper identity must carry a full helper and no task/cycle; a legacy Task
+    // identity must carry a task. Nothing downstream re-checks with a bare cast.
+    assertProviderExecutionIdentity(candidate);
+  } catch (error) {
+    throw new ProviderAdapterError({
+      code: 'runtime.identity.invalid',
+      category: 'runtime',
+      phase: 'start',
+      message: error instanceof Error ? error.message : 'provider agent driver received an invalid execution identity',
+      scope: options.scope,
+    });
+  }
+  return candidate as TIdentity;
 }
 
-function identity(options: ProviderAgentDriverOptions): ProviderExecutionIdentityRef {
-  return {
-    runtimeId: options.runtimeId,
-    taskId: options.taskId,
-    operationId: options.operationId,
-    executionEpoch: options.executionEpoch,
-  };
+function sameExecution(expected: AnyProviderExecutionIdentityRef, actual: AnyProviderExecutionIdentityRef): boolean {
+  // Reuse the contract identity-match validator instead of a second comparison.
+  try {
+    assertProviderExecutionIdentityMatch(actual, expected);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
+/**
+ * Identity fields a provider-side result/event must echo. Keeping this in one
+ * place means the Task and taskless shapes share the same projection.
+ */
 function isProviderError(value: unknown): value is ProviderError {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<ProviderError>;
@@ -192,13 +269,21 @@ function isProviderError(value: unknown): value is ProviderError {
     && Array.isArray(candidate.evidenceRefs);
 }
 
+/** True only for the taskless helper identity (a bound `helper`, never a Task). */
+function isTasklessIdentity(value: object): value is TasklessProviderExecutionIdentityRef {
+  return 'helper' in value && value.helper !== undefined;
+}
+
 /**
  * A tool-waiting terminal is a real typed executable call (at least one decoded
  * `toolCall`) plus a `waiting` terminal whose next action continues. It is not
  * tied to one protocol's continuation ref, so Responses, Chat and Anthropic all
  * qualify without inferring control from `outputRefs` or payload text.
  */
-function isToolWaiting(event: ProviderEvent | undefined, toolCalls: readonly ProviderToolCall[]): boolean {
+function isToolWaiting<TIdentity extends AnyProviderExecutionIdentityRef>(
+  event: ProviderEvent<TIdentity> | undefined,
+  toolCalls: readonly ProviderToolCall[],
+): boolean {
   return event !== undefined
     && event.terminalState === 'waiting'
     && toolCalls.length > 0
@@ -242,30 +327,36 @@ function requestIdentity(kind: 'turn' | 'request'): string {
   return `${kind}-${randomUUID()}`;
 }
 
-export class ProviderAgentDriver implements AgentDriver {
+export class ProviderAgentDriver<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> implements AgentDriver<TIdentity> {
   readonly kind = 'humanagent.provider-agent-driver';
 
   private handle?: AgentHandle;
   private providerStarted = false;
-  private providerSettlement?: ProviderSettlement;
+  private providerSettlement?: ProviderSettlement<TIdentity>;
+  private readonly port: ExecutionRuntimePort<TIdentity>;
+  private readonly execution: TIdentity;
   private readonly evidenceRef: EvidenceRef;
   private stopping = false;
   private toolController?: AbortController;
   private toolBarrier?: ToolBarrier;
   private continuationCompletion?: Promise<void>;
-  private initialPayload?: AgentInput['payload'];
+  private initialPayload?: BusinessPayload;
   private turnId?: string;
   private activeRequest?: RequestAttempt;
   private readonly requests: RequestAttempt[] = [];
   private readonly inflight = new Set<Promise<unknown>>();
-  private observeIterator?: AsyncIterator<ProviderEvent>;
+  private observeIterator?: AsyncIterator<ProviderEvent<TIdentity>>;
   private productionClosed = false;
   private producerFailure?: unknown;
   private executionSettled = false;
   private continuationInFlight = false;
   private readonly now: () => Date;
 
-  constructor(private readonly options: ProviderAgentDriverOptions) {
+  constructor(private readonly options: ProviderAgentDriverOptions<TIdentity>) {
+    this.execution = resolveExecutionIdentity(options);
+    this.port = options.port;
     if ((options.rawEvidence === undefined) !== (options.acceptRawFact === undefined)) {
       throw this.error(
         'raw.persistence.incomplete',
@@ -287,7 +378,7 @@ export class ProviderAgentDriver implements AgentDriver {
   }
 
   async capabilities(): Promise<AgentCapabilities> {
-    const capabilities = await this.options.port.capabilities(this.options.binding);
+    const capabilities = await this.port.capabilities(this.options.binding);
     return {
       driverKind: this.kind,
       capabilities: capabilities.capabilities,
@@ -295,7 +386,7 @@ export class ProviderAgentDriver implements AgentDriver {
     };
   }
 
-  async start(input: AgentStartRequest): Promise<AgentHandle> {
+  async start(input: AgentStartRequest<TIdentity>): Promise<AgentHandle> {
     this.assertIdentity(input);
     if (this.handle) throw this.error('runtime.already.started', 'provider agent driver is already started', 'start');
     this.handle = { runtimeId: input.runtimeId, executionEpoch: input.executionEpoch };
@@ -311,23 +402,23 @@ export class ProviderAgentDriver implements AgentDriver {
     );
   }
 
-  async submit(input: AgentInput): Promise<AgentOutput> {
+  async submit(input: AgentInput<TIdentity>): Promise<AgentOutput<TIdentity>> {
     if (!this.handle) throw this.error('runtime.not.started', 'provider agent driver has not started', 'submit');
     if (this.providerStarted) throw this.error('runtime.already.submitted', 'provider execution was already submitted', 'submit');
     if (this.productionClosed) {
       throw this.error('provider.production.closed', 'provider production was closed; no new request can be dispatched', 'submit', 'runtime');
     }
-    if (input.taskId.value !== this.options.taskId.value || input.executionEpoch !== this.options.executionEpoch) {
+    if (!this.sameEnvelope(input)) {
       throw this.error('runtime.identity.mismatch', 'provider submit is not bound to the current execution', 'submit', 'runtime');
     }
     const request = this.nextRequest();
     await this.commitRequestPhase(request, 'dispatching');
     this.publishLifecycle(request, 'dispatching');
-    let receipt: ProviderStartReceipt;
+    let receipt: ProviderStartReceipt<TIdentity>;
     try {
       const context = await this.materializeRequestContext(request, 'initial');
-      receipt = await this.track(this.options.port.start({
-        ...identity(this.options),
+      receipt = await this.track(this.port.start({
+        ...this.execution,
         ...this.currentRequestIdentity(),
         inputRefs: [...this.options.inputRefs],
         evidenceRefs: [this.evidenceRef],
@@ -344,14 +435,14 @@ export class ProviderAgentDriver implements AgentDriver {
     this.initialPayload = input.payload;
     await this.commitRequestPhase(request, 'dispatched');
     this.publishLifecycle(request, 'dispatched', [], receipt.evidenceRefs);
-    return {
-      taskId: input.taskId,
-      executionEpoch: input.executionEpoch,
+    const output: AgentOutput<TIdentity> = {
+      ...input,
       assignmentId: input.assignmentId,
-      payload: { mode: 'provider', status: 'accepted' },
+      payload: { mode: 'provider', status: 'accepted' } as BusinessPayload,
       outputRefs: [],
       evidenceRefs: [...receipt.evidenceRefs],
     };
+    return output;
   }
 
   /**
@@ -363,7 +454,7 @@ export class ProviderAgentDriver implements AgentDriver {
    */
   async continueCurrentTurn(input: {
     readonly instructions: RequestScopedInstructions;
-  }): Promise<ProviderSubmitResult> {
+  }): Promise<ProviderSubmitResult<TIdentity>> {
     if (!this.handle) throw this.error('runtime.not.started', 'provider agent driver has not started', 'submit');
     if (!this.providerStarted) throw this.error('runtime.not.submitted', 'provider execution has not been submitted', 'submit', 'runtime');
     if (this.productionClosed) throw this.error('provider.production.closed', 'provider production was closed; no continuation can be dispatched', 'submit', 'runtime');
@@ -382,7 +473,7 @@ export class ProviderAgentDriver implements AgentDriver {
     // register the same continuation turn concurrently.
     this.continuationInFlight = true;
     const request = this.nextRequest();
-    const work = (async (): Promise<ProviderSubmitResult> => {
+    const work = (async (): Promise<ProviderSubmitResult<TIdentity>> => {
       await this.commitRequestPhase(request, 'dispatching');
       this.publishLifecycle(request, 'dispatching');
       this.assertDispatchOpen();
@@ -393,8 +484,8 @@ export class ProviderAgentDriver implements AgentDriver {
       // A stop or drain can begin while registration or the context hook was
       // awaited; never dispatch across that boundary.
       this.assertDispatchOpen();
-      const submitted = await this.options.port.submit({
-        ...identity(this.options),
+        const submitted = await this.port.submit({
+        ...this.execution,
         ...this.continuationRequestIdentity(request),
         inputRefs: [...this.options.inputRefs],
         evidenceRefs: [this.evidenceRef],
@@ -418,7 +509,7 @@ export class ProviderAgentDriver implements AgentDriver {
     }
   }
 
-  async *observe(input: { readonly runtimeId: string }): AsyncIterable<ProviderAgentEvent> {
+  async *observe(input: { readonly runtimeId: string }): AsyncIterable<ProviderAgentEvent<TIdentity>> {
     if (!this.providerStarted) throw this.error('runtime.not.submitted', 'provider execution has not been submitted', 'observe', 'runtime');
     if (this.productionClosed) {
       throw this.error('provider.production.closed', 'provider production was closed; the stream cannot be re-entered', 'observe', 'runtime');
@@ -434,15 +525,15 @@ export class ProviderAgentDriver implements AgentDriver {
     const toolHistory: Array<{ readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }> = [];
     while (true) {
       const toolCalls: ProviderToolCall[] = [];
-      let terminal: ProviderEvent | undefined;
+      let terminal: ProviderEvent<TIdentity> | undefined;
       const request = this.activeRequest;
       const onRawFacts = this.rawFactReceiver(request);
-      const observeInput: ProviderObserveInputWithRawFacts = {
-        ...identity(this.options),
+      const observeInput: ProviderObserveInputWithRawFacts<TIdentity> = {
+        ...this.execution,
         ...this.currentRequestIdentity(),
         ...(onRawFacts === undefined ? {} : { onRawFacts }),
       };
-      const providerIterator = this.options.port.observe(observeInput)[Symbol.asyncIterator]();
+      const providerIterator = this.port.observe(observeInput)[Symbol.asyncIterator]();
       this.observeIterator = providerIterator;
       try {
         while (true) {
@@ -508,7 +599,7 @@ export class ProviderAgentDriver implements AgentDriver {
         let result: ProviderToolExecutionResult;
         try {
           result = await this.track(this.options.executeTool.execute({
-            execution: identity(this.options),
+            execution: this.execution,
             scope: this.options.scope,
             ...(this.activeRequest === undefined ? {} : { requestId: this.activeRequest.requestId }),
             call,
@@ -540,7 +631,7 @@ export class ProviderAgentDriver implements AgentDriver {
           : result.status === 'cancelled'
             ? 'cancelled'
             : result.status ?? 'succeeded';
-        const toolResult: ProviderToolResult = this.toolResult(request, call, result, status);
+        const toolResult: ProviderToolResult<TIdentity> = this.toolResult(request, call, result, status);
         // Save and durably accept the exact output before any projection, early
         // stop return or continuation: a late result must still reach the
         // Runtime, and a failing acceptance must not read as a normal stop.
@@ -564,19 +655,19 @@ export class ProviderAgentDriver implements AgentDriver {
       let completeContinuation!: () => void;
       const continuationCompletion = new Promise<void>((resolve) => { completeContinuation = resolve; });
       this.continuationCompletion = continuationCompletion;
-      let submitted: ProviderSubmitResult;
+      let submitted: ProviderSubmitResult<TIdentity>;
       const continuation = this.nextRequest();
       await this.commitRequestPhase(continuation, 'dispatching');
       this.publishLifecycle(continuation, 'dispatching');
       try {
         const context = await this.materializeRequestContext(continuation, 'continuation');
-        submitted = await this.track(this.options.port.submit({
-          ...identity(this.options),
+        submitted = await this.track(this.port.submit({
+          ...this.execution,
           ...this.continuationRequestIdentity(continuation),
           inputRefs: [...this.options.inputRefs],
           evidenceRefs: toolHistory.flatMap(({ result }) => result.evidenceRefs),
           payload: this.initialPayload ?? inputPayloadMissing(),
-          tools: this.options.tools,
+          ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
           ...(context === undefined
             ? {
                 toolContinuations: toolHistory.map(({ call, result }) => ({
@@ -616,12 +707,11 @@ export class ProviderAgentDriver implements AgentDriver {
     }
     this.stopping = true;
     this.toolController?.abort(new DOMException('operator requested stop', 'AbortError'));
-    let receipt: ProviderStopReceipt;
+    let receipt: ProviderStopReceipt<TIdentity>;
     try {
-      receipt = await this.options.port.requestStop({
-        ...identity(this.options),
+      receipt = await this.port.requestStop({
+        ...this.execution,
         ...this.currentRequestIdentity(),
-        operationId: input.operationId,
         reason: 'operator requested stop',
         ownerId: this.options.ownerId ?? 'humanagent.app',
       });
@@ -646,10 +736,10 @@ export class ProviderAgentDriver implements AgentDriver {
     // the released barrier must never turn a producer failure into a normal
     // stopped result.
     if (this.producerFailure !== undefined) throw this.producerFailure;
-    let settlement: ProviderSettlement;
+    let settlement: ProviderSettlement<TIdentity>;
     try {
-      settlement = await this.options.port.settle({
-        ...identity(this.options),
+      settlement = await this.port.settle({
+        ...this.execution,
         ...this.currentRequestIdentity(),
       });
     } catch (cause) {
@@ -674,10 +764,10 @@ export class ProviderAgentDriver implements AgentDriver {
   }
 
   async close(): Promise<ProviderCloseResult> {
-    return this.options.port.close(this.options.binding);
+    return this.port.close(this.options.binding);
   }
 
-  settlement(): ProviderSettlement | undefined {
+  settlement(): ProviderSettlement<TIdentity> | undefined {
     return this.providerSettlement ? structuredClone(this.providerSettlement) : undefined;
   }
 
@@ -776,7 +866,7 @@ export class ProviderAgentDriver implements AgentDriver {
     const hook = this.options.requestContext;
     if (hook === undefined) return undefined;
     return hook({
-      execution: identity(this.options),
+      execution: this.execution,
       request: requestIdentityRef(request),
       phase,
     });
@@ -813,7 +903,7 @@ export class ProviderAgentDriver implements AgentDriver {
    * decode/raw-ack work before reporting a drain; a close failure is recorded
    * so an incomplete teardown surfaces instead of reading as a clean drain.
    */
-  private async closeProviderIterator(iterator: AsyncIterator<ProviderEvent>): Promise<void> {
+  private async closeProviderIterator(iterator: AsyncIterator<ProviderEvent<TIdentity>>): Promise<void> {
     if (iterator.return === undefined) return;
     try {
       await iterator.return();
@@ -828,11 +918,10 @@ export class ProviderAgentDriver implements AgentDriver {
     }
   }
 
-  private agentEvent(providerEvent: ProviderEvent, request: RequestAttempt | undefined): ProviderAgentEvent {
+  private agentEvent(providerEvent: ProviderEvent<TIdentity>, request: RequestAttempt | undefined): ProviderAgentEvent<TIdentity> {
     const scoped = this.scopeProviderEvent(providerEvent, request);
-    return {
-      taskId: providerEvent.taskId,
-      executionEpoch: providerEvent.executionEpoch,
+    const event = {
+      ...providerEvent,
       kind: providerEvent.kind === 'tool' && providerEvent.toolPhase === 'result'
         ? 'provider.tool-result'
         : `provider.${providerEvent.kind}`,
@@ -841,9 +930,10 @@ export class ProviderAgentDriver implements AgentDriver {
       ...(providerEvent.terminalState === undefined ? {} : { terminalState: providerEvent.terminalState }),
       providerEvent: scoped,
     };
+    return event;
   }
 
-  private scopeProviderEvent(providerEvent: ProviderEvent, request: RequestAttempt | undefined): ProviderRequestScopedEvent {
+  private scopeProviderEvent(providerEvent: ProviderEvent<TIdentity>, request: RequestAttempt | undefined): ProviderRequestScopedEvent<TIdentity> {
     if (request === undefined) {
       throw this.error('runtime.request.missing', 'provider event arrived outside a request scope', 'observe', 'runtime');
     }
@@ -863,10 +953,10 @@ export class ProviderAgentDriver implements AgentDriver {
       ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
       occurredAt: providerEvent.occurredAt ?? this.now().toISOString(),
       ...(providerEvent.externalResponseId === undefined ? {} : { externalResponseId: providerEvent.externalResponseId }),
-    } as ProviderRequestScopedEvent;
+    };
   }
 
-  private rawFactReceiver(request: RequestAttempt | undefined): ProviderRawFactReceiver | undefined {
+  private rawFactReceiver(request: RequestAttempt | undefined): ProviderRawFactReceiver<TIdentity> | undefined {
     if (this.options.acceptRawFact === undefined) return undefined;
     return async (rawFacts) => {
       for (const fact of rawFacts) {
@@ -875,13 +965,13 @@ export class ProviderAgentDriver implements AgentDriver {
     };
   }
 
-  private async acceptRawFact(request: RequestAttempt | undefined, fact: ProviderRawFact): Promise<void> {
+  private async acceptRawFact(request: RequestAttempt | undefined, fact: ProviderRawFact<TIdentity>): Promise<void> {
     const accept = this.options.acceptRawFact;
     if (accept === undefined) return;
     if (request === undefined) {
       throw this.error('runtime.request.missing', 'provider raw fact arrived outside a request scope', 'observe', 'runtime');
     }
-    const envelope: RawFactEnvelope = {
+    const envelope: RawFactEnvelope<TIdentity> = {
       execution: { runtimeId: this.options.runtimeId, executionEpoch: this.options.executionEpoch },
       scope: this.options.scope,
       request: {
@@ -892,7 +982,7 @@ export class ProviderAgentDriver implements AgentDriver {
       producerSeq: this.nextProducerSeq(request),
       fact,
     };
-    let accepted: AcceptedRawFact;
+    let accepted: AcceptedRawFact<TIdentity>;
     try {
       accepted = await accept(envelope);
     } catch (cause) {
@@ -924,7 +1014,7 @@ export class ProviderAgentDriver implements AgentDriver {
     request: RequestAttempt,
     call: ProviderToolCall,
     result: ProviderToolExecutionResult,
-    toolResult: ProviderToolResult,
+    toolResult: ProviderToolResult<TIdentity>,
   ): Promise<void> {
     const sink = this.options.rawEvidence;
     if (sink === undefined) return;
@@ -947,7 +1037,7 @@ export class ProviderAgentDriver implements AgentDriver {
       );
     }
     const rawOutput: RawAsset = { ref, view: { kind: 'utf8-text' } };
-    const fact: ProviderRawFact = {
+    const fact: ProviderRawFact<TIdentity> = {
       kind: 'tool-result',
       contentUnitId: `provider:tool-result:${call.callId}`,
       callId: call.callId,
@@ -1004,16 +1094,19 @@ export class ProviderAgentDriver implements AgentDriver {
     if (phase === 'failed' || phase === 'cancelled' || phase === 'settled') request.terminalPhase = phase;
     if (this.options.onRequestLifecycle === undefined) return;
     const evidenceRefs = [...baseEvidenceRefs, ...extraEvidenceRefs];
-    const event: ProviderRequestLifecycleEvent = {
-      ...identity(this.options),
-      ...request,
+    const responseId = externalResponseId ?? request.externalResponseId;
+    const event = {
+      ...this.execution,
+      turnId: request.turnId,
+      requestId: request.requestId,
+      ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
       phase,
       occurredAt: this.now().toISOString(),
       evidenceRefs: evidenceRefs.length === 0 ? [{ ...this.evidenceRef }] : evidenceRefs,
-      ...(externalResponseId === undefined ? {} : { externalResponseId }),
+      ...(responseId === undefined ? {} : { externalResponseId: responseId }),
       ...(error === undefined ? {} : { error }),
     };
-    validateProviderRequestLifecycleEvent(event);
+    validateProviderRequestLifecycleEvent(event as ProviderRequestLifecycleEvent<TIdentity>);
     this.options.onRequestLifecycle(event);
   }
 
@@ -1058,7 +1151,7 @@ export class ProviderAgentDriver implements AgentDriver {
     if (this.executionSettled) throw this.error('provider.execution.settled', 'provider execution settlement started before dispatch', 'submit', 'runtime');
   }
 
-  private async publishObservedLifecycle(event: ProviderEvent): Promise<void> {
+  private async publishObservedLifecycle(event: ProviderEvent<TIdentity>): Promise<void> {
     if (this.activeRequest === undefined) return;
     if (event.externalResponseId !== undefined) this.activeRequest.externalResponseId = event.externalResponseId;
     if (event.kind === 'terminal' && event.terminalState === 'waiting') {
@@ -1072,11 +1165,11 @@ export class ProviderAgentDriver implements AgentDriver {
   private toolResultEvents(
     request: RequestAttempt,
     call: ProviderToolCall,
-    result: ProviderToolResult,
+    result: ProviderToolResult<TIdentity>,
     summary: string,
-  ): Iterable<ProviderAgentEvent> {
-    return [this.agentEvent({
-      ...identity(this.options),
+  ): Iterable<ProviderAgentEvent<TIdentity>> {
+    const event: ProviderEvent<TIdentity> = {
+      ...this.execution,
       eventId: `event-tool-result-${call.callId}`,
       kind: 'tool',
       toolPhase: 'result',
@@ -1086,7 +1179,8 @@ export class ProviderAgentDriver implements AgentDriver {
       ownerId: this.options.ownerId ?? 'humanagent.provider-agent-driver',
       nextAction: { kind: 'continue', ref: call.continuationRef },
       toolResult: result,
-    }, request)];
+    };
+    return [this.agentEvent(event, request)];
   }
 
   private toolFailedEvents(
@@ -1094,16 +1188,16 @@ export class ProviderAgentDriver implements AgentDriver {
     call: ProviderToolCall,
     cause: unknown,
     status: 'failed' | 'cancelled',
-  ): Iterable<ProviderAgentEvent> {
+  ): Iterable<ProviderAgentEvent<TIdentity>> {
     return this.toolResultEvents(request, call, this.toolFailureResult(call, cause, status), `${call.toolId} ${status}`);
   }
 
-  private toolResult(request: RequestAttempt, call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult {
+  private toolResult(request: RequestAttempt, call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult<TIdentity> {
     const error = result.error ?? (status === 'succeeded'
       ? undefined
       : this.error('tool.result.failed', `${call.toolId} executor reported ${status} without an error`, 'observe').providerError);
-    const toolResult: ProviderToolResult = {
-      ...identity(this.options),
+    const toolResult: ProviderToolResult<TIdentity> = {
+      ...this.execution,
       toolId: call.toolId,
       callId: call.callId,
       status,
@@ -1156,7 +1250,7 @@ export class ProviderAgentDriver implements AgentDriver {
    * would degrade the task terminal to String(plainObject) and lose the code,
    * category, retryability and next action of the actual failure.
    */
-  private toolResultFailure(toolResult: ProviderToolResult): ProviderAdapterError {
+  private toolResultFailure(toolResult: ProviderToolResult<TIdentity>): ProviderAdapterError {
     const failure = toolResult.error;
     if (failure === undefined) {
       return this.error('tool.result.failed', 'provider tool executor returned a failed result', 'observe', 'runtime');
@@ -1174,12 +1268,12 @@ export class ProviderAgentDriver implements AgentDriver {
     });
   }
 
-  private toolFailureResult(call: ProviderToolCall, cause: unknown, status: 'failed' | 'cancelled'): ProviderToolResult {
+  private toolFailureResult(call: ProviderToolCall, cause: unknown, status: 'failed' | 'cancelled'): ProviderToolResult<TIdentity> {
     const error = cause instanceof ProviderAdapterError
       ? cause.providerError
       : this.error('tool.result.failure', cause instanceof Error ? cause.message : 'provider tool execution failed', 'observe').providerError;
     return {
-      ...identity(this.options),
+      ...this.execution,
       toolId: call.toolId,
       callId: call.callId,
       status,
@@ -1201,20 +1295,39 @@ export class ProviderAgentDriver implements AgentDriver {
     };
   }
 
-  private assertIdentity(input: AgentStartRequest): void {
-    if (this.options.runtimeId !== input.runtimeId
-      || this.options.taskId.value !== input.taskId.value
-      || this.options.executionEpoch !== input.executionEpoch) {
+  private assertIdentity(input: AgentStartRequest<TIdentity>): void {
+    if (isTasklessIdentity(input)) {
+      if (!sameExecution(this.execution, input)) {
+        throw this.error('runtime.identity.mismatch', 'provider agent driver received another execution identity', 'start', 'runtime');
+      }
+      return;
+    }
+    const expected: Partial<ProviderExecutionIdentityRef> = this.execution;
+    if (input.runtimeId !== expected.runtimeId
+      || input.taskId === undefined || expected.taskId === undefined
+      || input.taskId.value !== expected.taskId.value
+      || input.executionEpoch !== expected.executionEpoch) {
       throw this.error('runtime.identity.mismatch', 'provider agent driver received another execution identity', 'start', 'runtime');
     }
   }
 
+  private sameEnvelope(input: AgentInput<TIdentity>): boolean {
+    if (isTasklessIdentity(input)) {
+      return sameExecution(this.execution, input);
+    }
+    const expected: Partial<ProviderExecutionIdentityRef> = this.execution;
+    return input.executionEpoch === expected.executionEpoch
+      && input.taskId !== undefined
+      && expected.taskId !== undefined
+      && input.taskId.value === expected.taskId.value;
+  }
+
   private assertProviderIdentity(
-    input: ProviderExecutionIdentityRef,
+    input: AnyProviderExecutionIdentityRef,
     label: string,
     phase: 'start' | 'submit' | 'observe' | 'stop' | 'settle',
   ): void {
-    if (!sameExecution(this.options, input)) {
+    if (!sameExecution(this.execution, input)) {
       throw this.error('runtime.identity.mismatch', `${label} belongs to another execution`, phase, 'runtime');
     }
   }

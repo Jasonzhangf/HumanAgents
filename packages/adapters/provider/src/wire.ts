@@ -1,4 +1,4 @@
-import type { BusinessPayload, CheckpointId, ProviderExecutionIdentityRef } from '../../../contracts/src/index.js';
+import type { AnyProviderExecutionIdentityRef, BusinessPayload, CheckpointId } from '../../../contracts/src/index.js';
 
 export type ProviderProtocol = 'responses' | 'anthropic' | 'openai' | 'other-explicit';
 
@@ -10,7 +10,7 @@ export interface ResponsesWireRequest {
   readonly instructions: string;
   readonly input: readonly ResponsesWireInputItem[];
   readonly tools?: readonly ResponsesWireTool[];
-  readonly execution: ProviderExecutionIdentityRef;
+  readonly execution: AnyProviderExecutionIdentityRef;
   readonly checkpointId?: CheckpointId;
 }
 
@@ -85,7 +85,7 @@ export interface ResponsesWireCancelRequest {
   readonly route: string;
   readonly model: string;
   readonly reason: string;
-  readonly execution: ProviderExecutionIdentityRef;
+  readonly execution: AnyProviderExecutionIdentityRef;
 }
 
 export interface OpenAIChatWireRequest {
@@ -95,7 +95,7 @@ export interface OpenAIChatWireRequest {
   readonly model: string;
   readonly messages: readonly OpenAIChatWireMessage[];
   readonly tools?: readonly OpenAIChatWireTool[];
-  readonly execution: ProviderExecutionIdentityRef;
+  readonly execution: AnyProviderExecutionIdentityRef;
   readonly checkpointId?: CheckpointId;
 }
 
@@ -178,7 +178,7 @@ export interface OpenAIChatCancelRequest {
   readonly route: string;
   readonly model: string;
   readonly reason: string;
-  readonly execution: ProviderExecutionIdentityRef;
+  readonly execution: AnyProviderExecutionIdentityRef;
 }
 
 export interface AnthropicWireRequest {
@@ -190,7 +190,7 @@ export interface AnthropicWireRequest {
   readonly system: string;
   readonly messages: readonly AnthropicWireMessage[];
   readonly tools?: readonly AnthropicWireTool[];
-  readonly execution: ProviderExecutionIdentityRef;
+  readonly execution: AnyProviderExecutionIdentityRef;
   readonly checkpointId?: CheckpointId;
 }
 
@@ -242,7 +242,7 @@ export interface AnthropicWireCancelRequest {
   readonly route: string;
   readonly model: string;
   readonly reason: string;
-  readonly execution: ProviderExecutionIdentityRef;
+  readonly execution: AnyProviderExecutionIdentityRef;
 }
 
 export type ProviderWireRequest = ResponsesWireRequest | OpenAIChatWireRequest | AnthropicWireRequest;

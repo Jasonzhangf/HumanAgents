@@ -158,12 +158,14 @@ type TaskBoundAgentStartIdentity<
     };
 type TaskBoundAgentEnvelopeIdentity<
   TIdentity extends AnyProviderExecutionIdentityRef,
-> = TIdentity extends TasklessProviderExecutionIdentityRef
-  ? TIdentity
-  : {
-      readonly taskId: TaskId;
-      readonly executionEpoch: number;
-    };
+> =
+  | TIdentity
+  | (TIdentity extends TasklessProviderExecutionIdentityRef
+      ? never
+      : {
+          readonly taskId: TaskId;
+          readonly executionEpoch: number;
+        });
 export type AgentStartRequest<
   TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
 > = TaskBoundAgentStartIdentity<TIdentity> & {
@@ -999,9 +1001,7 @@ export interface ProviderImageContent {
   readonly dataBase64: string;
 }
 
-export type ProviderExecutionInput<
-  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
-> = TIdentity & {
+export interface ProviderExecutionFields {
   readonly inputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly payload?: BusinessPayload;
@@ -1011,7 +1011,10 @@ export type ProviderExecutionInput<
   readonly requestContext?: ProviderRequestContext;
   /** Transient request-scoped orientation. It enters this request only. */
   readonly instructions?: RequestScopedInstructions;
-};
+}
+export type ProviderExecutionInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & ProviderExecutionFields;
 
 export interface ProviderToolDefinition {
   readonly toolId: string;
@@ -1041,20 +1044,33 @@ export type ProviderResumeInput = ProviderExecutionInput<ProviderExecutionIdenti
   readonly checkpointId: CheckpointId;
   readonly checkpointExecutionEpoch: number;
 };
-export type ProviderSubmitInput<
-  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
-> = ProviderExecutionInput<TIdentity> & {
+/**
+ * The submit-only fields stay in one object type alongside the identity. A
+ * generic caller builds `TIdentity & {...}`; an extra intersection layer makes
+ * TypeScript unable to relate the two generic intersections, which forces a
+ * wide cast. One flattened interface keeps the real types without the cast.
+ */
+export interface ProviderSubmitFields extends ProviderExecutionFields {
   readonly payload: BusinessPayload;
   readonly toolContinuations?: readonly ProviderToolContinuation[];
-};
+}
+export type ProviderSubmitInput<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> = TIdentity & ProviderSubmitFields;
 export type ProviderObserveInput<
   TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
 > = TIdentity & Partial<ProviderRequestIdentityRef>;
+/**
+ * Settlement is a request-scoped terminal, so it carries the same optional
+ * request identity the driver already passes. Declaring it keeps the generic
+ * `TIdentity & {...}` input assignable without widening the identity.
+ */
+export interface ProviderSettleFields extends Partial<ProviderRequestIdentityRef> {
+  readonly evidenceRefs?: readonly EvidenceRef[];
+}
 export type ProviderSettleInput<
   TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
-> = TIdentity & {
-  readonly evidenceRefs?: readonly EvidenceRef[];
-};
+> = TIdentity & ProviderSettleFields;
 
 export type ProviderRequestPhase =
   | 'dispatching'
@@ -1327,7 +1343,7 @@ function sameInteractionHelperExecutionIdentity(
     && left.helperCallId === right.helperCallId
     && left.attempt === right.attempt;
 }
-function assertProviderExecutionIdentity(input: AnyProviderExecutionIdentityRef): void {
+export function assertProviderExecutionIdentity(input: AnyProviderExecutionIdentityRef): void {
   assertAgentRuntimeId(input.runtimeId);
   assertScope(input.operationId, 'operation');
   assertExecutionEpoch(input.executionEpoch);

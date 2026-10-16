@@ -1,5 +1,7 @@
 import {
+  canonicalJsonStringify,
   id,
+  type AnyProviderExecutionIdentityRef,
   type EvidenceRef,
   type ProviderBinding,
   type ProviderCapabilities,
@@ -19,6 +21,7 @@ import {
   type ProviderSubmitInput,
   type ProviderSubmitResult,
   type ScopeRef,
+  type TasklessProviderExecutionIdentityRef,
 } from '../../../contracts/src/index.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderEvidenceSink } from './evidence.js';
@@ -63,7 +66,9 @@ export interface RccV3FetchResponse {
 
 export type RccV3Fetch = (url: string, init: RccV3FetchInit) => Promise<RccV3FetchResponse>;
 
-export interface RccV3ProviderTransportOptions {
+export interface RccV3ProviderTransportOptions<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly binding: ProviderBinding;
   readonly baseUrl: string;
   readonly evidence: ProviderEvidenceSink;
@@ -77,7 +82,7 @@ export interface RccV3ProviderTransportOptions {
 }
 
 interface ActiveExecution {
-  readonly identity: ProviderExecutionIdentityRef;
+  readonly identity: AnyProviderExecutionIdentityRef;
   controller: AbortController;
   body: AsyncIterable<Uint8Array>;
   readonly protocol: 'responses' | 'anthropic' | 'openai';
@@ -132,14 +137,33 @@ async function* readableStreamToAsyncIterable(stream: ReadableStream<Uint8Array>
   }
 }
 
-function executionKey(execution: ProviderExecutionIdentityRef): string {
+function executionKey(execution: AnyProviderExecutionIdentityRef): string {
+  if ('helper' in execution) {
+    // Full helper identity, collision-free across independent helper calls.
+    return canonicalJsonStringify([
+      'taskless-helper',
+      execution.runtimeId,
+      execution.operationId.value,
+      execution.executionEpoch,
+      execution.helper.organId.scope,
+      execution.helper.organId.value,
+      execution.helper.interactionScopeId,
+      execution.helper.interactionId,
+      execution.helper.inputRevision,
+      execution.helper.parentTurnId,
+      execution.helper.assignmentId,
+      execution.helper.helperCallId,
+      execution.helper.attempt,
+    ]);
+  }
   return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
 }
 
-function scopeFor(execution: ProviderExecutionIdentityRef, scope?: ScopeRef): ScopeRef {
+function scopeFor(execution: AnyProviderExecutionIdentityRef, scope?: ScopeRef): ScopeRef {
   return {
     ...(scope ?? { organId: id('organ', 'provider-adapter') }),
-    taskId: execution.taskId,
+    // Taskless helper evidence stays organ+operation; never invent a Task.
+    ...('helper' in execution ? {} : { taskId: execution.taskId }),
     operationId: execution.operationId,
   };
 }
@@ -403,7 +427,9 @@ function urlFor(baseUrl: string, path: string): string {
   return new URL(path, `${baseUrl.replace(/\/$/, '')}/`).toString();
 }
 
-export class RccV3ProviderTransport implements ProviderTransport {
+export class RccV3ProviderTransport<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> implements ProviderTransport<TIdentity> {
   readonly readiness?: ProviderReadiness;
   readonly capabilities?: ProviderCapabilities;
   private readonly fetcher: RccV3Fetch;
@@ -415,11 +441,11 @@ export class RccV3ProviderTransport implements ProviderTransport {
   private readonly owner: string;
   private readonly scheme: string;
   private readonly executions = new Map<string, ActiveExecution>();
-  private readonly stopReasons = new Map<ProviderExecutionIdentityRef, string>();
-  private readonly options: Omit<RccV3ProviderTransportOptions, 'credential'>;
+  private readonly stopReasons = new Map<AnyProviderExecutionIdentityRef, string>();
+  private readonly options: Omit<RccV3ProviderTransportOptions<TIdentity>, 'credential'>;
   private credential: string | undefined;
 
-  constructor({ credential, ...options }: RccV3ProviderTransportOptions) {
+  constructor({ credential, ...options }: RccV3ProviderTransportOptions<TIdentity>) {
     this.options = options;
     if (options.binding.protocol !== 'responses' && options.binding.protocol !== 'anthropic' && options.binding.protocol !== 'openai') {
       throw new ProviderAdapterError({
@@ -504,7 +530,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return { readiness: readiness(binding, 'ready', checkedAt, expiresAt, evidenceRefs, this.owner, undefined, health.version) };
   }
 
-  async start(input: ProviderStartInput, request: ProviderWireRequest): Promise<ProviderStartReceipt> {
+  async start(input: ProviderStartInput<TIdentity>, request: ProviderWireRequest): Promise<ProviderStartReceipt<TIdentity>> {
     const key = executionKey(input);
     if (this.executions.has(key)) {
       throw new ProviderAdapterError({ code: 'runtime.already.started', category: 'runtime', phase: 'start', message: 'RCC v3 execution is already active', scope: input });
@@ -568,7 +594,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     };
   }
 
-  async submit(input: ProviderSubmitInput, request: ProviderWireRequest): Promise<ProviderSubmitResult> {
+  async submit(input: ProviderSubmitInput<TIdentity>, request: ProviderWireRequest): Promise<ProviderSubmitResult<TIdentity>> {
     const active = this.active(input);
     const scope = active.evidenceScope;
     const protocol = protocolOf(request);
@@ -627,7 +653,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return { ...input, status: 'accepted', outputRefs: [], evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'continue', ref: 'rcc-v3.observe' } };
   }
 
-  async *observe(input: ProviderObserveInput): AsyncIterable<ProviderWireEvent> {
+  async *observe(input: ProviderObserveInput<TIdentity>): AsyncIterable<ProviderWireEvent> {
     const active = this.active(input);
     if (active.observed) throw new ProviderAdapterError({ code: 'runtime.observe.repeated', category: 'runtime', phase: 'observe', message: 'RCC v3 stream can only be observed once', scope: input });
     active.observed = true;
@@ -780,7 +806,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     }
   }
 
-  async requestStop(input: ProviderStopRequest, _request: ProviderWireStopRequest): Promise<ProviderStopReceipt> {
+  async requestStop(input: ProviderStopRequest<TIdentity>, _request: ProviderWireStopRequest): Promise<ProviderStopReceipt<TIdentity>> {
     const active = this.active(input);
     const scope = active.evidenceScope;
     if (active.streamDone) {
@@ -816,7 +842,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return { ...input, status: 'accepted', receivedAt: new Date().toISOString(), evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'wait', ref: 'rcc-v3.settle' } };
   }
 
-  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+  async settle(input: ProviderSettleInput<TIdentity>): Promise<ProviderSettlement<TIdentity>> {
     const active = this.active(input);
     const scope = active.evidenceScope;
     // A stop receipt only aborts the RCC stream; settle must wait for that
@@ -888,7 +914,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
         nextAction: { kind: 'recover' as const, ref: this.owner },
       };
     }
-    const settlement: ProviderSettlement = {
+    const settlement: ProviderSettlement<TIdentity> = {
       ...input,
       state,
       evidenceRefs: [evidenceRef],
@@ -910,7 +936,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'closed', evidenceRefs: [ref] };
   }
 
-  private active(input: ProviderExecutionIdentityRef): ActiveExecution {
+  private active(input: AnyProviderExecutionIdentityRef): ActiveExecution {
     const active = this.executions.get(executionKey(input));
     if (!active) throw new ProviderAdapterError({ code: 'missing.active.execution', category: 'runtime', phase: 'observe', message: 'RCC v3 execution is not active', scope: input });
     return active;
@@ -1107,6 +1133,10 @@ function readiness(
   };
 }
 
-export function createRccV3ProviderTransport(options: RccV3ProviderTransportOptions): RccV3ProviderTransport {
+export function createRccV3ProviderTransport<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(
+  options: RccV3ProviderTransportOptions<TIdentity>,
+): RccV3ProviderTransport<TIdentity> {
   return new RccV3ProviderTransport(options);
 }

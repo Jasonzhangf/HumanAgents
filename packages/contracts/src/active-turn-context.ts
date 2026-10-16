@@ -1,12 +1,15 @@
 import {
+  assertProviderExecutionIdentity,
   assertEvidenceRef,
   assertSameScope,
   assertScope,
   validateWorkAssignment,
   validateWorkResult,
+  type AnyProviderExecutionIdentityRef,
   type AdmittedTurn,
   type EvidenceRef,
   type ProviderError,
+  type ProviderExecutionIdentityRef,
   type ProviderToolCall,
   type ProviderToolResult,
   type ScopeRef,
@@ -78,7 +81,9 @@ export interface RawContentReadPort {
   }): Promise<Uint8Array>;
 }
 
-export type ProviderRawFact =
+export type ProviderRawFact<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> =
   | {
       readonly kind: 'content';
       readonly contentUnitId: string;
@@ -104,7 +109,7 @@ export type ProviderRawFact =
       readonly contentUnitId: string;
       readonly callId: string;
       readonly continuationRef: string;
-      readonly result: ProviderToolResult;
+      readonly result: ProviderToolResult<TIdentity>;
       readonly rawOutput: RawAsset;
       readonly complete: true;
     }
@@ -114,18 +119,22 @@ export type ProviderRawFact =
       readonly error?: ProviderError;
     };
 
-export interface RawFactEnvelope {
+export interface RawFactEnvelope<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly execution: ActiveTurnProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
   readonly request: ActiveTurnProviderRequestIdentityRef;
   readonly producerSeq: number;
-  readonly fact: ProviderRawFact;
+  readonly fact: ProviderRawFact<TIdentity>;
 }
 
 /** A fact accepted by the Runtime, carrying the Runtime-assigned instance sequence. */
-export interface AcceptedRawFact {
+export interface AcceptedRawFact<
+  TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+> {
   readonly seq: number;
-  readonly envelope: RawFactEnvelope;
+  readonly envelope: RawFactEnvelope<TIdentity>;
 }
 
 /** The kind of child call a review or execution invocation is bound to. */
@@ -437,6 +446,11 @@ function validateRawFact(fact: unknown, label: string): asserts fact is Provider
       assertNonEmptyString(fact.callId, `${label} callId`);
       assertNonEmptyString(fact.continuationRef, `${label} continuationRef`);
       assertPlainObject(fact.result, `${label} result`);
+      // The tool result carries the producing execution identity. Validate it with
+      // the single contract identity validator so a taskless helper result (full
+      // helper identity, no task/cycle) and a legacy Task result both pass, while a
+      // half-formed or mixed identity is rejected before the fact is accepted.
+      assertProviderExecutionIdentity(fact.result as unknown as AnyProviderExecutionIdentityRef);
       assertNonEmptyString(fact.result.callId, `${label} result.callId`);
       if (fact.result.callId !== fact.callId) throw new ContractError(`${label} result.callId must match callId`);
       assertRawAsset(fact.rawOutput, `${label} rawOutput`);
@@ -467,6 +481,14 @@ export function validateRawFactEnvelope(input: unknown): asserts input is RawFac
   assertProviderRequestIdentity(input.request, 'raw fact request');
   assertPositiveSafeInteger(input.producerSeq, 'raw fact producerSeq');
   validateRawFact(input.fact, 'raw fact');
+  // A tool-result fact must belong to the same runtime instance and epoch as its
+  // envelope. Otherwise a result produced by another execution could be durably
+  // persisted under this request's acceptance order.
+  if (input.fact.kind === 'tool-result'
+    && (input.fact.result.runtimeId !== input.execution.runtimeId
+      || input.fact.result.executionEpoch !== input.execution.executionEpoch)) {
+    throw new ContractError('raw fact tool result execution does not match envelope execution');
+  }
 }
 
 export function validateAcceptedRawFact(input: unknown): asserts input is AcceptedRawFact {

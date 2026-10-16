@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  ContractError,
   id,
   validateProviderEvent,
+  validateRawFactEnvelope,
   type AcceptedRawFact,
   type ActiveTurnBinding,
   type AdmittedTurn,
   type EvidenceRef,
   type ExecutionRuntimePort,
+  type InteractionHelperIdentity,
   type ProviderBinding,
   type ProviderCapabilities,
   type ProviderCloseResult,
@@ -16,6 +19,7 @@ import {
   type ProviderRequestLifecycleEvent,
   type ProviderReadiness,
   type ProviderRecoveryResult,
+  type TasklessProviderExecutionIdentityRef,
   type ProviderSettlement,
   type ProviderStartInput,
   type ProviderStartReceipt,
@@ -40,6 +44,7 @@ import {
   ProviderAdapterError,
   createV3ProviderHttpTransport,
   filesystemProviderEvidenceSink,
+  type ProviderAgentDriverOptions,
   type ProviderAgentEvent,
   type ProviderEvidenceSink,
   type ProviderEvidenceWrite,
@@ -1576,6 +1581,179 @@ test('provider agent driver mints one stable turn id across a real request lifec
   assert.equal(initialEvent.providerEvent.occurredAt.endsWith('Z'), true);
   assert.equal(continuationEvent.providerEvent.parentRequestId, initialRequestId);
   assert.equal(requests.length, 2);
+});
+
+test('provider agent driver runs a taskless helper through the real adapter tool round and settles without a task', async () => {
+  const helperOrgan = id('organ', 'organ-taskless');
+  const helperOperation = id('operation', 'operation-taskless');
+  const helperScope: ScopeRef = { organId: helperOrgan, operationId: helperOperation };
+  const helperEvidence: EvidenceRef = {
+    evidenceId: id('evidence', 'taskless-helper-scope'),
+    kind: 'operation',
+    source: 'provider-agent-driver-test',
+    locator: `operation/${helperOperation.value}/scope`,
+    scope: helperScope,
+  };
+  const helper: InteractionHelperIdentity = {
+    organId: helperOrgan,
+    interactionScopeId: 'interaction-taskless-1',
+    interactionId: 'interaction-taskless-1',
+    inputRevision: 1,
+    parentTurnId: 'turn-parent-1',
+    assignmentId: 'assignment-taskless-1',
+    helperCallId: 'helper-call-1',
+    attempt: 1,
+  };
+  const helperExecution: TasklessProviderExecutionIdentityRef = {
+    runtimeId: identity.runtimeId,
+    organId: helperOrgan,
+    operationId: helperOperation,
+    executionEpoch: 1,
+    helper,
+  };
+  let round = 0;
+  const fetch: V3ProviderFetch = async () => {
+    round += 1;
+    if (round === 1) {
+      return delayedResponse(chunks([
+        `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-taskless-1' } })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { type: 'function_call', call_id: 'call-taskless-read', name: 'file_read', arguments: '' },
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'function_call', call_id: 'call-taskless-read', name: 'file_read', arguments: '{"path":"README.md"}' },
+        })}\n\n`,
+        `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-taskless-1' } })}\n\n`,
+      ]));
+    }
+    return delayedResponse(chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-taskless-2' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'final-message', text: 'README.md read' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-taskless-2' } })}\n\n`,
+    ]));
+  };
+  const captured = recordingEvidenceSink();
+  const accepted: RawFactEnvelope<TasklessProviderExecutionIdentityRef>[] = [];
+  const registrations: NativeRequestRegistration[] = [];
+  const lifecycle: ProviderRequestLifecycleEvent<TasklessProviderExecutionIdentityRef>[] = [];
+  const adapter = new ProviderAdapter<TasklessProviderExecutionIdentityRef>({
+    binding,
+    routeRef: 'test-route',
+    codec: new ResponsesProviderCodec(),
+    transport: createV3ProviderHttpTransport<TasklessProviderExecutionIdentityRef>({
+      binding,
+      baseUrl: 'http://127.0.0.1:4444',
+      evidence: captured.sink,
+      fetch,
+    }),
+    evidence: captured.sink,
+  });
+  const options: ProviderAgentDriverOptions<TasklessProviderExecutionIdentityRef> = {
+    port: adapter,
+    binding,
+    runtimeId: identity.runtimeId,
+    organId: helperOrgan,
+    helper,
+    operationId: helperOperation,
+    executionEpoch: 1,
+    assignmentId: helper.assignmentId,
+    scope: helperScope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    rawEvidence: captured.sink,
+    acceptRawFact: async (envelope) => {
+      validateRawFactEnvelope(envelope);
+      accepted.push(envelope);
+      return { seq: accepted.length, envelope };
+    },
+    registerRequest: async (registration) => {
+      registrations.push(registration);
+      return registration.record;
+    },
+    onRequestLifecycle(event) {
+      lifecycle.push(event);
+    },
+    executeTool: {
+      async execute() {
+        return {
+          output: JSON.stringify({ path: 'README.md', content: 'README_CONTENT' }),
+          outputRefs: ['asset://provider-tool/readme'],
+          evidenceRefs: [helperEvidence],
+        };
+      },
+    },
+  };
+  const instance = new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>(options);
+  await instance.start({ ...helperExecution });
+  const submitted = await instance.submit({
+    ...helperExecution,
+    assignmentId: helper.assignmentId,
+    payload: { prompt: 'read README.md' },
+  });
+  assert.equal(submitted.payload.status, 'accepted');
+
+  const observed: string[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) observed.push(event.kind);
+  const settled = await instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 });
+  assert.equal(settled.state, 'succeeded');
+  assert.deepEqual(observed, [
+    'provider.model',
+    'provider.model',
+    'provider.tool',
+    'provider.tool-result',
+    'provider.model',
+    'provider.output',
+    'provider.terminal',
+  ]);
+
+  const settlement = instance.settlement();
+  assert.ok(settlement);
+  const scopeRefs = [...settled.evidenceRefs, ...settlement.evidenceRefs];
+  assert.ok(scopeRefs.length > 0);
+  for (const ref of scopeRefs) {
+    assert.equal(ref.scope.organId.value, helperOrgan.value);
+    assert.equal(ref.scope.operationId?.value, helperOperation.value);
+    assert.equal(ref.scope.taskId, undefined);
+  }
+
+  const toolResultEnvelope = accepted.find((envelope) => envelope.fact.kind === 'tool-result');
+  assert.ok(toolResultEnvelope, 'expected a durably accepted tool-result raw fact');
+  if (toolResultEnvelope.fact.kind !== 'tool-result') throw new Error('expected a tool-result raw fact');
+  const toolResult = toolResultEnvelope.fact.result;
+  assert.deepEqual(toolResult.helper, helper);
+  assert.equal('taskId' in toolResult, false);
+  assert.equal(toolResult.runtimeId, helperExecution.runtimeId);
+  assert.equal(toolResult.executionEpoch, helperExecution.executionEpoch);
+  assert.equal(
+    captured.writes.find((write) => write.type === 'tool-result-output')?.content,
+    JSON.stringify({ path: 'README.md', content: 'README_CONTENT' }),
+  );
+  assert.ok(registrations.length > 0);
+  assert.equal(registrations.every(({ record }) => record.scope.taskId === undefined), true);
+  assert.equal(lifecycle.find((event) => event.phase === 'waiting')?.externalResponseId, 'resp-taskless-1');
+  assert.equal(lifecycle.at(-1)?.externalResponseId, 'resp-taskless-2');
+
+  const wrongEpoch: RawFactEnvelope<TasklessProviderExecutionIdentityRef> = {
+    ...toolResultEnvelope,
+    fact: {
+      ...toolResultEnvelope.fact,
+      result: { ...toolResult, executionEpoch: toolResult.executionEpoch + 1 },
+    },
+  };
+  assert.throws(
+    () => validateRawFactEnvelope(wrongEpoch),
+    (error) => error instanceof ContractError,
+  );
+
+  const mismatch = new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>(options);
+  await assert.rejects(
+    () => mismatch.start({ ...helperExecution, helper: { ...helper, helperCallId: 'helper-call-other' } }),
+    (error) => error instanceof ProviderAdapterError && error.providerError.code === 'runtime.identity.mismatch',
+  );
 });
 
 test('provider agent driver publishes a failed lifecycle endpoint when the initial fetch fails', async () => {
