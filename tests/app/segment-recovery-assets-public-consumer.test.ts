@@ -18,6 +18,7 @@ import {
   type FileWriteEffectIntent,
   type PreparedRecoveryCapture,
   type RawAsset,
+  type RawContentReadPort,
   type RawFactEnvelope,
   type RecoveryHoldFacts,
   type ScopeRef,
@@ -46,7 +47,12 @@ import { resumeActiveTurnSegment, type ActiveTurnSegmentAdmission } from '../../
 import {
   createActiveTurnSegmentJournal,
   createNativeRecoveryAssets,
+  segmentCaptureAssetId,
 } from '../../packages/app/src/native-recovery-assets.js';
+import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
+import { ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import type { ActiveTurnProductionObligationRef } from '../../packages/runtime/src/context/active-turn-live-prefix.js';
+import { readResumedSegmentSemanticTurnContext } from '../../packages/runtime/src/context/semantic-turn-context-reader.js';
 
 /**
  * Project rule: durable artifacts live under `~/.humanagent`. This variable is
@@ -656,5 +662,188 @@ test('J1 v2 backing: original v1 capture, real TG1 reservation to S1/S2, fresh c
     assert.equal(finalBytes.slice(0, journalBytesBeforeSegments.length), journalBytesBeforeSegments, 'the original v1 journal prefix is byte-stable');
     const rereadOriginal = await initialNative.readRecoveryAssetsExact(originalV1Receipt.commitIdentity);
     assert.deepEqual(rereadOriginal.prepared.body, body, 'the original v1 capture is unchanged');
+  });
+});
+
+test('J1 v2 backing: an opened-but-unsaved predecessor resumes from its exact anchor and keeps the pending obligation', async () => {
+  await withFixture('segment-interrupted', async ({ journalPath, assetRoot, completionJournalPath }) => {
+    const turnId = 'business-turn-interrupted-1';
+    const value = identity(turnId);
+    const rawInput = 'interrupted raw input \u4e16\u754c';
+    const native = createNativeRecoveryAssets({ journalPath, assetRoot, completionJournalPath });
+    const initialInput = await native.writeInitialInput({ scope: value.scope, turnId, rawInput });
+    const initialJournal = createJsonlActiveTurnJournal({ filePath: journalPath, turnId });
+    await initialJournal.append({ commitId: activeTurnCommitId(turnId, 'binding-opened'),
+      record: { kind: 'binding-opened', binding: value.binding, currentTurnRef: value.binding.admittedTurn.currentTurnRef } });
+    await initialJournal.append({ commitId: activeTurnCommitId(turnId, 'initial-input'), record: { kind: 'initial-input', content: initialInput } });
+    const requestId = `j1-segment-request-${turnId}`;
+    const body = captureBody({ binding: value.binding, initialInput, pauseId: `boundary-original-${turnId}`,
+      frozenAt: '2026-10-13T00:00:00.000Z',
+      requests: [{ request: { turnId, requestId }, scope: value.scope, phase: 'dispatched' }],
+      entries: [acceptedFact({ binding: value.binding, requestId, producerSeq: 1, seq: 1 })] });
+    await native.commitCapturePhase({ turnId, boundaryId: `boundary-original-${turnId}`,
+      prepared: { body, controlRecordCount: 3,
+        producerDrains: [{ execution: value.binding.execution, boundaryId: `boundary-original-${turnId}`,
+          requests: [{ request: { turnId, requestId }, lastProducerSeq: 1 }] }],
+        completionLookups: [], recovery: recoveryFacts({ binding: value.binding, unresolvedOperationRefs: [] }) } });
+    const grantJournal = new JsonlTaskGrantJournal(new JsonlOrganJournal(journalPath));
+    await grantJournal.grant({ requestId: `grant-${turnId}-1`, taskId: value.taskId, owner: 'j1-segment-owner',
+      capability: { actionId: 'checkpoint.save', capabilities: ['provider.execution'], scope: value.scope }, expectedRevision: 0 });
+    const admit = segmentAdmission({ taskId: value.taskId, scope: value.scope, grantJournal });
+    const port = createActiveTurnSegmentJournal({ journalPath, assetRoot, completionJournalPath, businessTurnId: turnId });
+
+    // S1 opens against the real v1 receipt and appends one pending dispatch
+    // record. It never commits a v2 recovery receipt, so the segment stays open.
+    const s1 = await resumeActiveTurnSegment({ businessTurnId: turnId, segmentId: 'segment-s1',
+      assignment: value.assignment, scope: value.scope, incarnation: incarnationFor(2, value.assignment),
+      ports: { read: port, append: port }, admit });
+    assert.equal(s1.status, 'resumed');
+    if (s1.status !== 'resumed') return;
+    const pendingCommit = activeTurnSegmentCommitId('segment-s1', `request:${requestId}:dispatching`);
+    await port.appendSegmentRecord({ businessTurnId: turnId, segmentId: 'segment-s1', commitId: pendingCommit,
+      record: { kind: 'request', record: { request: { turnId, requestId }, scope: value.scope, phase: 'dispatching' } } });
+
+    // Strict absence: no v2 receipt exists, so S1 classifies as interrupted at
+    // its real opened commit and last committed record, not as a saved capture.
+    const classified = await port.readSegmentRecoveryReceipt('segment-s1');
+    assert.equal(classified.status, 'interrupted');
+    if (classified.status !== 'interrupted') return;
+    const records = await new JsonlOrganJournal(journalPath).replay();
+    const openedRecord = records.find((record) => record.commitId === activeTurnSegmentCommitId('segment-s1', 'segment-opened'));
+    const pendingRecord = records.find((record) => record.commitId === pendingCommit);
+    if (openedRecord === undefined || pendingRecord === undefined) throw new Error('S1 records must be committed');
+    assert.equal(classified.anchor.openedCommitRef.commitId, openedRecord.commitId);
+    assert.equal(classified.anchor.openedCommitRef.journalSeq, openedRecord.seq);
+    assert.equal(classified.anchor.recordsThroughCommitRef.commitId, pendingRecord.commitId);
+
+    // S2 resumes S1 through the exact interrupted anchor, not a receipt.
+    const s2 = await resumeActiveTurnSegment({ businessTurnId: turnId, segmentId: 'segment-s2',
+      assignment: value.assignment, scope: value.scope, incarnation: incarnationFor(3, value.assignment),
+      ports: { read: port, append: port }, admit });
+    assert.equal(s2.status, 'resumed');
+    if (s2.status !== 'resumed') return;
+    assert.equal(s2.segment.predecessor.segmentId, 'segment-s1');
+    assert.equal(s2.segment.binding.execution.executionEpoch, 3);
+    assert.deepEqual(s2.segment.predecessor.interrupted, classified.anchor,
+      'S2 links the real interrupted anchor rather than a fabricated receipt');
+    assert.deepEqual((await port.readSegments(turnId)).map((segment) => segment.segmentId), ['segment-s1', 'segment-s2']);
+
+    // A retired predecessor accepts no new record; the successor epoch never
+    // re-opens or re-issues the pending dispatch.
+    await assert.rejects(() => port.appendSegmentRecord({ businessTurnId: turnId, segmentId: 'segment-s1',
+      commitId: activeTurnSegmentCommitId('segment-s1', 'request:late:dispatching'),
+      record: { kind: 'request', record: { request: { turnId, requestId: 'late' }, scope: value.scope, phase: 'dispatching' } } }),
+      /fenced/);
+
+    // A stale anchor that does not name the committed record tail rejects.
+    await assert.rejects(() => port.readSegmentInterruptedExact({ businessTurnId: turnId,
+      predecessor: { segmentId: 'segment-s1', interrupted: { openedCommitRef: classified.anchor.openedCommitRef,
+        recordsThroughCommitRef: classified.anchor.openedCommitRef } } }),
+      /anchor does not match/);
+
+    // The reader folds the original v1, the interrupted S1 and the live S2, and
+    // keeps S1's pending request as a segment-scoped obligation.
+    const rawContent: RawContentReadPort = { async read({ content }) {
+      return await new ImmutableAssetStore(assetRoot).readEvidence(content.ref);
+    } };
+    const live = await (await ActiveTurnSegmentContext.open({ port, segment: s2.segment, initialInput })).readLivePrefix();
+    const resolved = await readResumedSegmentSemanticTurnContext({
+      history: { async readCommittedSemanticCheckpoint() { return null; } },
+      priorCompletedTurns: [],
+      segment: { chain: { businessTurnRef: s2.segment.businessTurnRef, initial: body, segments: [s1.segment, s2.segment] },
+        exactReads: port, live: { prefix: live, rawContent } },
+      runtimeId: value.runtime.runtimeId, scope: value.scope, assignment: value.assignment,
+    });
+    const pending = resolved.obligations.filter(
+      (obligation): obligation is Extract<ActiveTurnProductionObligationRef, { readonly kind: 'request' }> =>
+        obligation.kind === 'request');
+    assert.equal(pending.length, 1, 'the interrupted segment keeps exactly one pending request');
+    assert.equal(pending[0]?.requestId, requestId);
+    assert.equal(pending[0]?.segmentId, 'segment-s1', 'the obligation keeps its originating segment');
+    assert.equal(live.obligations.length, 0, 'the successor live prefix owes nothing of its own');
+  });
+});
+
+test('J1 v2 backing: a partial v2 phase never classifies as interrupted', async () => {
+  await withFixture('segment-partial-receipt', async ({ journalPath, assetRoot, completionJournalPath }) => {
+    const turnId = 'business-turn-partial-1';
+    const value = identity(turnId);
+    const native = createNativeRecoveryAssets({ journalPath, assetRoot, completionJournalPath });
+    const initialInput = await native.writeInitialInput({ scope: value.scope, turnId, rawInput: 'partial raw input' });
+    const initialJournal = createJsonlActiveTurnJournal({ filePath: journalPath, turnId });
+    await initialJournal.append({ commitId: activeTurnCommitId(turnId, 'binding-opened'),
+      record: { kind: 'binding-opened', binding: value.binding, currentTurnRef: value.binding.admittedTurn.currentTurnRef } });
+    await initialJournal.append({ commitId: activeTurnCommitId(turnId, 'initial-input'), record: { kind: 'initial-input', content: initialInput } });
+    const body = captureBody({ binding: value.binding, initialInput, pauseId: `boundary-original-${turnId}`,
+      frozenAt: '2026-10-13T00:00:00.000Z', requests: [], entries: [] });
+    await native.commitCapturePhase({ turnId, boundaryId: `boundary-original-${turnId}`,
+      prepared: { body, controlRecordCount: 2, producerDrains: [], completionLookups: [],
+        recovery: recoveryFacts({ binding: value.binding, unresolvedOperationRefs: [] }) } });
+    const grantJournal = new JsonlTaskGrantJournal(new JsonlOrganJournal(journalPath));
+    await grantJournal.grant({ requestId: `grant-${turnId}-1`, taskId: value.taskId, owner: 'j1-segment-owner',
+      capability: { actionId: 'checkpoint.save', capabilities: ['provider.execution'], scope: value.scope }, expectedRevision: 0 });
+    const admit = segmentAdmission({ taskId: value.taskId, scope: value.scope, grantJournal });
+    const port = createActiveTurnSegmentJournal({ journalPath, assetRoot, completionJournalPath, businessTurnId: turnId });
+    const s1 = await resumeActiveTurnSegment({ businessTurnId: turnId, segmentId: 'segment-s1',
+      assignment: value.assignment, scope: value.scope, incarnation: incarnationFor(2, value.assignment),
+      ports: { read: port, append: port }, admit });
+    assert.equal(s1.status, 'resumed');
+    if (s1.status !== 'resumed') return;
+
+    // A v2 phase record in this business turn that names no readable segment
+    // cannot be attributed, so it fails instead of classifying S1 as unsaved.
+    await new JsonlOrganJournal(journalPath).append({ commitId: 'recovery-assets:v2:partial', kind: 'event', scope: value.scope,
+      payload: { type: 'recovery-assets.phase', version: 2,
+        receipt: { receiptRef: 'recovery-assets:v2:partial', businessTurnId: turnId } } });
+    await assert.rejects(() => port.readSegmentRecoveryReceipt('segment-s1'),
+      /names no readable segment|readable receipt payload/);
+  });
+});
+
+test('J1 v2 backing: a valid receipt whose capture asset is gone is exact, never interrupted', async () => {
+  await withFixture('segment-missing-asset', async ({ journalPath, assetRoot, completionJournalPath }) => {
+    const turnId = 'business-turn-missing-asset-1';
+    const value = identity(turnId);
+    const native = createNativeRecoveryAssets({ journalPath, assetRoot, completionJournalPath });
+    const initialInput = await native.writeInitialInput({ scope: value.scope, turnId, rawInput: 'missing asset raw input' });
+    const initialJournal = createJsonlActiveTurnJournal({ filePath: journalPath, turnId });
+    await initialJournal.append({ commitId: activeTurnCommitId(turnId, 'binding-opened'),
+      record: { kind: 'binding-opened', binding: value.binding, currentTurnRef: value.binding.admittedTurn.currentTurnRef } });
+    await initialJournal.append({ commitId: activeTurnCommitId(turnId, 'initial-input'), record: { kind: 'initial-input', content: initialInput } });
+    const body = captureBody({ binding: value.binding, initialInput, pauseId: `boundary-original-${turnId}`,
+      frozenAt: '2026-10-13T00:00:00.000Z', requests: [], entries: [] });
+    await native.commitCapturePhase({ turnId, boundaryId: `boundary-original-${turnId}`,
+      prepared: { body, controlRecordCount: 2, producerDrains: [], completionLookups: [],
+        recovery: recoveryFacts({ binding: value.binding, unresolvedOperationRefs: [] }) } });
+    const grantJournal = new JsonlTaskGrantJournal(new JsonlOrganJournal(journalPath));
+    await grantJournal.grant({ requestId: `grant-${turnId}-1`, taskId: value.taskId, owner: 'j1-segment-owner',
+      capability: { actionId: 'checkpoint.save', capabilities: ['provider.execution'], scope: value.scope }, expectedRevision: 0 });
+    const admit = segmentAdmission({ taskId: value.taskId, scope: value.scope, grantJournal });
+    const port = createActiveTurnSegmentJournal({ journalPath, assetRoot, completionJournalPath, businessTurnId: turnId });
+    const s1 = await resumeActiveTurnSegment({ businessTurnId: turnId, segmentId: 'segment-s1',
+      assignment: value.assignment, scope: value.scope, incarnation: incarnationFor(2, value.assignment),
+      ports: { read: port, append: port }, admit });
+    assert.equal(s1.status, 'resumed');
+    if (s1.status !== 'resumed') return;
+
+    const boundaryId = `boundary-s1-${turnId}`;
+    const s1Body: ActiveTurnSegmentCaptureV2 = { version: 2, segmentId: 'segment-s1',
+      businessTurnRef: s1.segment.businessTurnRef, binding: s1.segment.binding, initialInput,
+      entries: [], requests: [], childInvocations: [],
+      cut: { pauseId: boundaryId, lastSeq: 0, producersDrained: true, frozenAt: '2026-10-13T00:01:00.000Z' },
+      predecessor: s1.segment.predecessor };
+    const s1Receipt = await native.writeSegmentCapturePhase({ businessTurnId: turnId, segmentId: 'segment-s1', boundaryId,
+      prepared: { body: s1Body, controlRecordCount: 4, producerDrains: [], completionLookups: [],
+        recovery: recoveryFacts({ binding: value.binding, unresolvedOperationRefs: [] }) } });
+    await rm(join(assetRoot, segmentCaptureAssetId(turnId, 'segment-s1', boundaryId)), { force: true });
+
+    // The receipt exists, so the segment is exact; the exact asset read then
+    // fails closed instead of downgrading to the interrupted branch.
+    const classified = await port.readSegmentRecoveryReceipt('segment-s1');
+    assert.equal(classified.status, 'exact');
+    if (classified.status !== 'exact') return;
+    assert.equal(classified.recoveryAssetsReceiptRef, s1Receipt.commitIdentity);
+    await assert.rejects(() => port.readSegmentCaptureExact({ businessTurnId: turnId, segmentId: 'segment-s1',
+      recoveryAssetsReceiptRef: classified.recoveryAssetsReceiptRef }), /ENOENT|no such file/);
   });
 });

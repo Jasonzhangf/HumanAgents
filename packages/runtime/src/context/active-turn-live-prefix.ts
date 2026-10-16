@@ -38,11 +38,15 @@ export type ActiveTurnProductionObligationRef =
       readonly kind: 'request';
       readonly requestId: string;
       readonly phase: RuntimeRequestLifecyclePhase;
+      /** The segment that still owes this request; empty only for a single-segment turn. */
+      readonly segmentId?: string;
     }
   | {
       readonly kind: 'child-invocation';
       readonly invocationId: string;
       readonly phase: 'pending';
+      /** The segment that still owes this child invocation. */
+      readonly segmentId?: string;
     };
 
 /**

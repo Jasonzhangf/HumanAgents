@@ -4,7 +4,11 @@ import type { ActiveTurnInitialSegmentCapture, ActiveTurnSegmentPredecessorRef,
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
-import type { ActiveTurnSegmentCaptureExactRead, ActiveTurnSegmentJournalPort } from '../../../runtime/src/context/active-turn-journal.js';
+import type {
+  ActiveTurnSegmentCaptureExactRead,
+  ActiveTurnSegmentInterruptedExactRead,
+  ActiveTurnSegmentJournalPort,
+} from '../../../runtime/src/context/active-turn-journal.js';
 import type { ReentryCurrentFacts } from '../../../runtime/src/checkpoints/conditional-reentry.js';
 import { retryCycleId, type RetryCycleControlRecord, type RetryCycleJournalPort } from '../../../runtime/src/orchestration/retry-cycle.js';
 import type { RuntimeExecutionAllocation, RuntimeTaskJournalPort } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -42,7 +46,13 @@ export interface RuntimeColdExecutionSource {
   readonly tail: ActiveTurnSegmentPredecessorRef;
   /** Ordered exact captures, retaining original input, accepted prefix, completions and recovery holds. */
   readonly captures: readonly ColdExecutionCapture[];
-  readonly predecessor: ColdExecutionCapture;
+  /**
+   * Ordered exact reads of predecessor segments that were opened and appended
+   * records but never committed a recovery receipt. Each carries the committed
+   * live prefix cut at its real anchor; it is not a frozen capture and claims no
+   * save.
+   */
+  readonly interruptedSegments: readonly ActiveTurnSegmentInterruptedExactRead[];
   readonly current: ReentryCurrentFacts;
   readonly durableEpochs: readonly ColdExecutionEpochFact[];
   readonly retryCycle: RetryCycleControlRecord | null;
@@ -104,8 +114,10 @@ export async function readColdExecutionSource(
   const tailSegment = segments.at(-1);
   const tailId = tailSegment?.segmentId ?? request.businessTurnId;
   const receipt = await segmentJournal.readSegmentRecoveryReceipt(tailId);
-  if (receipt.status !== 'exact') missing(receipt.reason);
-  const tail = { segmentId: tailId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef };
+  if (receipt.status === 'failed' || receipt.status === 'unknown') missing(receipt.reason);
+  const tail: ActiveTurnSegmentPredecessorRef = receipt.status === 'exact'
+    ? { segmentId: tailId, recoveryAssetsReceiptRef: receipt.recoveryAssetsReceiptRef }
+    : { segmentId: tailId, interrupted: receipt.anchor };
   if (!same(tail, request.predecessor)) missing('the exact predecessor selector does not match the committed segment tail');
   const tailBinding = tailSegment?.binding ?? binding;
   if (!same(current.context.scope, binding.scope)
@@ -114,18 +126,33 @@ export async function readColdExecutionSource(
     || current.context.loopCheckpoint.executionEpoch !== tailBinding.execution.executionEpoch) {
     missing('the canonical current context does not match the committed segment tail incarnation');
   }
-  const initialReceipt = segments[0]?.predecessor.recoveryAssetsReceiptRef ?? tail.recoveryAssetsReceiptRef;
-  const original = await native.readRecoveryAssetsExact(initialReceipt);
+  // The original immutable v1 capture is closed by the first resumed segment's
+  // exact predecessor receipt, or by the tail receipt when no resumed segment
+  // exists yet. The v1 base is always a saved predecessor.
+  const initialClosing: ActiveTurnSegmentPredecessorRef = segments.length > 0 ? segments[0]!.predecessor : tail;
+  if (initialClosing.interrupted !== undefined) missing('the original v1 base is not a saved predecessor');
+  const original = await native.readRecoveryAssetsExact(initialClosing.recoveryAssetsReceiptRef);
   if (original.receipt.turnId !== request.businessTurnId || !same(original.prepared.body, initial.body)) {
     missing('the exact v1 predecessor receipt does not bind the original capture');
   }
   const captures: ColdExecutionCapture[] = [{ version: 1, source: original }];
+  const interruptedSegments: ActiveTurnSegmentInterruptedExactRead[] = [];
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index]!;
-    const exactReceipt = segments[index + 1]?.predecessor.recoveryAssetsReceiptRef ?? tail.recoveryAssetsReceiptRef;
-    captures.push({ version: 2, source: await segmentJournal.readSegmentCaptureExact({
-      businessTurnId: request.businessTurnId, segmentId: segment.segmentId, recoveryAssetsReceiptRef: exactReceipt,
-    }) });
+    // The closing fact of this segment is its successor's predecessor, or the
+    // tail receipt when this is the last committed segment.
+    const closing: ActiveTurnSegmentPredecessorRef = index + 1 < segments.length ? segments[index + 1]!.predecessor : tail;
+    if (closing.interrupted !== undefined) {
+      interruptedSegments.push(await segmentJournal.readSegmentInterruptedExact({
+        businessTurnId: request.businessTurnId,
+        predecessor: { segmentId: segment.segmentId, interrupted: closing.interrupted },
+      }));
+    } else {
+      captures.push({ version: 2, source: await segmentJournal.readSegmentCaptureExact({
+        businessTurnId: request.businessTurnId, segmentId: segment.segmentId,
+        recoveryAssetsReceiptRef: closing.recoveryAssetsReceiptRef,
+      }) });
+    }
   }
   // The current operation-control namespace is the exact physical incarnation
   // the canonical position/context already bound to the committed segment tail.
@@ -170,5 +197,5 @@ export async function readColdExecutionSource(
     missing('the durable retry cycle does not match the retained assignment and initial epoch');
   }
   return { allocation, preparedInput, initial, assignment: binding.assignment, scope: binding.scope,
-    segments, tail, captures, predecessor: captures[captures.length - 1]!, current, durableEpochs, retryCycle, segmentJournal };
+    segments, tail, captures, interruptedSegments, current, durableEpochs, retryCycle, segmentJournal };
 }

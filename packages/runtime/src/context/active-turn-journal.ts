@@ -11,6 +11,8 @@ import type {
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import type {
   ActiveTurnInitialSegmentCapture,
+  ActiveTurnSegmentInterruptedAnchor,
+  ActiveTurnSegmentPredecessorRef,
   ActiveTurnSegmentRecoveryReceiptRead,
   PreparedActiveTurnSegmentCaptureV2,
   ResumedTurnSegmentOpened,
@@ -19,6 +21,7 @@ import type {
   ActiveTurnSegmentAppendPort,
   ActiveTurnSegmentReadPort,
 } from './active-turn-segments.js';
+import type { ActiveTurnSegmentLivePrefix } from './active-turn-live-prefix.js';
 
 /**
  * Narrow durable boundary for the Runtime-owned active turn. The logical owner
@@ -108,6 +111,21 @@ export interface ActiveTurnSegmentCaptureExactRead {
 }
 
 /**
+ * Exact cold read of one opened-but-unsaved predecessor segment. The
+ * `predecessor` is the interrupted anchor that names the real `segment-opened`
+ * commit and the last committed record; the `prefix` is the committed live
+ * prefix cut at that anchor. It is not a frozen capture and carries no pause,
+ * drain or save fact.
+ */
+export interface ActiveTurnSegmentInterruptedExactRead {
+  readonly predecessor: Extract<
+    ActiveTurnSegmentPredecessorRef,
+    { readonly interrupted: ActiveTurnSegmentInterruptedAnchor }
+  >;
+  readonly prefix: ActiveTurnSegmentLivePrefix;
+}
+
+/**
  * The named segment-journal port. It extends the Runtime read/append ports that
  * `resumeActiveTurnSegment` consumes with the exact segment-record and capture
  * reads that D-L/D-M consume. The physical commit and immutable-asset backing
@@ -124,6 +142,10 @@ export interface ActiveTurnSegmentJournalPort extends ActiveTurnSegmentReadPort,
     readonly segmentId: string;
     readonly recoveryAssetsReceiptRef: string;
   }): Promise<ActiveTurnSegmentCaptureExactRead>;
+  readSegmentInterruptedExact(input: {
+    readonly businessTurnId: string;
+    readonly predecessor: ActiveTurnSegmentInterruptedExactRead['predecessor'];
+  }): Promise<ActiveTurnSegmentInterruptedExactRead>;
 }
 
 /** Re-exported so consumers can name the exact opened record without a deep import. */
