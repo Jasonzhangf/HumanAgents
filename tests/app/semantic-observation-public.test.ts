@@ -242,7 +242,7 @@ test('public semantic HTTP/SSE preserves canonical pairing, unknown states, refs
   });
   try {
     const task = runtime.service.createTask({ title: 'semantic public success' });
-    const started = runtime.service.startExecution(task.taskId, { prompt: 'semantic public lifecycle' });
+    const started = await runtime.service.startExecution(task.taskId, { prompt: 'semantic public lifecycle' });
 
     await waitFor(() => runtime.service.taskDashboard(task.taskId).state === 'succeeded');
     const semantic = await (await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/semantic`)).json() as RuntimeSemanticObservationEnvelope;
@@ -312,10 +312,10 @@ test('public semantic SSE stays bound to the active second operation and closes 
   let stream: Awaited<ReturnType<typeof openSemanticStream>> | undefined;
   try {
     const task = runtime.service.createTask({ title: 'two operation semantic stream' });
-    const first = runtime.service.startExecution(task.taskId, { prompt: 'first semantic operation' });
+    const first = await runtime.service.startExecution(task.taskId, { prompt: 'first semantic operation' });
     await waitFor(() => runtime.service.taskDashboard(task.taskId).state === 'succeeded');
 
-    const second = runtime.service.startExecution(task.taskId, { prompt: 'second semantic operation' });
+    const second = await runtime.service.startExecution(task.taskId, { prompt: 'second semantic operation' });
     await port.secondObserveStarted;
     stream = await openSemanticStream(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/semantic/stream`);
 

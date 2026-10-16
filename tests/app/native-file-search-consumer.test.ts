@@ -256,6 +256,7 @@ function service(input: {
         return { kind: 'clarification', normalizedInput: '', knownFacts: [], question: 'unused', decisionRefs: [] };
       },
     },
+    runtimeComposition: { admitExecution: async () => {} },
   });
 }
 
@@ -670,7 +671,7 @@ test('local Responses file.search fact and report survive disk projection recons
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   try {
     const task = firstService.createTask({ title: 'local file search', directive: 'find semantic-needle' });
-    const started = firstService.startExecution(task.taskId, { prompt: 'search for semantic-needle' });
+    const started = await firstService.startExecution(task.taskId, { prompt: 'search for semantic-needle' });
     await waitForTerminal(firstService, task.taskId);
     assert.equal(firstService.taskDashboard(task.taskId).state, 'succeeded');
     const toolEvent = firstJournal.replay().find((record) => (
@@ -897,7 +898,7 @@ test('a real local file.search tool failure does not create a succeeded executio
   const runtime = service({ root, adapter: providerAdapter(root, true), journal, executor: executor.executor, toolOutputs: executor.toolOutputs, workspaceRoot, projectKey });
   try {
     const task = runtime.createTask({ title: 'invalid local file search', directive: 'search with invalid path' });
-    const started = runtime.startExecution(task.taskId, { prompt: 'search for semantic-needle' });
+    const started = await runtime.startExecution(task.taskId, { prompt: 'search for semantic-needle' });
     await waitForTerminal(runtime, task.taskId);
     assert.equal(runtime.taskDashboard(task.taskId).state, 'failed');
     const result = journal.replay().find((record) => record.kind === 'operation.event'
