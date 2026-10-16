@@ -47,6 +47,10 @@ import {
 } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 import { admitAgentProvider } from './agent-provider-admission.js';
+import type {
+  PreparedExecutionStop,
+  PreparedExecutionStopPreparationLease,
+} from './ui-runtime/prepared-execution-stop.js';
 
 const DSH_OWNER = 'humanagent.app.dsh-composition';
 const AGENT_PROVIDER_OWNER = 'humanagent.app.agent-provider-binding';
@@ -463,6 +467,28 @@ export async function prepareAgentProvider<
     }
     throw error;
   }
+  return composition;
+}
+
+/**
+ * Prepares one fresh execution instance under an active prepared-stop
+ * preparation. It selects the real composition, transfers the actual Provider
+ * custody to the producer before the fallible acquisition append, and admits
+ * the Provider only after that custody exists. It owns no cleanup path of its
+ * own: every acquisition or admission failure propagates to the single
+ * `withPreparation` cleanup owner, so a failed append can never be followed by
+ * admission or a second close.
+ */
+export async function prepareExecutionAgentProvider<
+  TIdentity extends ProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+>(
+  input: AgentProviderSelectionInput<TIdentity>,
+  owner: PreparedExecutionStop,
+  lease: PreparedExecutionStopPreparationLease,
+): Promise<AgentProviderComposition<TIdentity>> {
+  const composition = selectAgentProvider<TIdentity>(input);
+  await owner.takeProvider(lease, composition);
+  await admitAgentProvider<TIdentity>(composition);
   return composition;
 }
 
