@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
@@ -21,6 +21,11 @@ function isProcessAlive(pid) {
   } catch {
     return false;
   }
+}
+
+function readPgid(pid) {
+  const out = execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+  return Number.parseInt(out.trim(), 10);
 }
 
 async function waitFor(check, timeoutMs, label) {
@@ -242,6 +247,11 @@ test('official restart loads the selected new package through one graceful hando
     assert.equal(replacement.identity.leaseId, completion.current.leaseId);
     assert.equal(replacement.lease.startup.source.entryDigest, completion.source.entryDigest);
     newPid = replacement.lease.pid;
+    assert.equal(
+      readPgid(newPid),
+      newPid,
+      `replacement ${newPid} must lead its own process group so caller teardown cannot reap it`,
+    );
 
     const newAuth = await pair(newRuntimeRoot, newEntry, workspace, controlRoot, env);
     const dashboardResponse = await newAuth.request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`);
