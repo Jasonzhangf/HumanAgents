@@ -13,9 +13,14 @@ import {
   type ScopeRef,
   type Task,
 } from '../../../packages/contracts/src/index.js';
-import { createJsonlContextCorrectionSubmissionPort, readCurrentFromRecords } from '../../../packages/app/src/ui-runtime/reentry-current-facts.js';
+import {
+  createJsonlConditionalReentrySubmissionPort,
+  createJsonlContextCorrectionSubmissionPort,
+  readCurrentFromRecords,
+} from '../../../packages/app/src/ui-runtime/reentry-current-facts.js';
 import {
   acceptedContextCorrectionBasesFromRecords,
+  conditionalReentryFromRecord,
   contextCorrectionFromRecord,
   createJsonlCheckpointClosurePort,
   createJsonlCheckpointJournal,
@@ -29,8 +34,14 @@ import { JsonlTaskGrantJournal } from '../../../packages/adapters/jsonl/src/task
 import { applyContextCorrectionExclusions } from '../../../packages/core/src/context-correction.js';
 import { AgentLoopRuntime } from '../../../packages/runtime/src/agent-loop/runtime.js';
 import { prepareCheckpointClosure } from '../../../packages/runtime/src/checkpoints/closure.js';
-import { commitContextCorrection, submitCheckpoint } from '../../../packages/runtime/src/checkpoints/submission.js';
+import {
+  commitContextCorrection,
+  commitReentry,
+  submitCheckpoint,
+} from '../../../packages/runtime/src/checkpoints/submission.js';
 import type {
+  ConditionalReentryRecord,
+  ConfirmedReentryCommand,
   ConfirmedContextCorrectionCommand,
   ContextCorrectionRecord,
   ReentryCurrentFacts,
@@ -247,6 +258,56 @@ test('context correction persists exact exclusions over the real Journal carrier
   const viewedContext = await contexts.readContextCommit(scope, viewedHead.currentContextCommitRef);
   assert.deepEqual(viewedContext.contextView.activeRefs, [inactiveWrongB, viewedOnlyRef]);
 
+  await operationControl.initializeCoverage({
+    scope,
+    agentRuntimeId: runtimeId,
+    harnessExecutionEpoch: 1,
+    admissionCommitRef: grantCommit,
+  });
+  const epoch1Control = completeOperationControl(
+    readOperationControlFromRecords(await journal.replay(), {
+      scope,
+      agentRuntimeId: runtimeId,
+      harnessExecutionEpoch: 1,
+    }),
+  );
+  const firstCheckpoint = checkpoint(2, sourceCheckpoint.id, 1);
+  const firstPreparation = await prepareCheckpointClosure({
+    checkpoint: firstCheckpoint,
+    source: 'agent-tool',
+    closureReason: 'first bound reentry target',
+    contextCommitRef: viewedHead.currentContextCommitRef,
+    contextHistory: contexts,
+    operationSelector: {
+      scope,
+      agentRuntimeId: runtimeId,
+      harnessExecutionEpoch: 1,
+    },
+    operationControl: epoch1Control,
+    permission: {
+      permissionRevision: '1',
+      grantCommitRef: grantCommit,
+      revoked: false,
+    },
+    hardBlockers: [],
+    unreturnedCallRefs: [],
+    unresolvedOperationRefs: [],
+    closurePort: closures,
+    now: () => new Date('2026-10-15T11:00:00.000Z'),
+  });
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId,
+    checkpoint: firstCheckpoint,
+    previous: sourceCheckpoint,
+    journal: checkpoints,
+    closurePort: closures,
+    preparation: firstPreparation,
+  });
+  const firstCheckpointCommit = await checkpoints.readCommitted(scope, firstCheckpoint.id);
+  assert.ok(firstCheckpointCommit);
+  const firstCheckpointReceipt = firstCheckpointCommit.commitRef;
+
   const currentActiveRefs = [wrongA, similarA2, correctRef];
   const currentOmittedRefs: string[] = [];
   const currentContextViewRef = `${runtimeId}:context:2`;
@@ -327,7 +388,7 @@ test('context correction persists exact exclusions over the real Journal carrier
     },
   });
 
-  const currentCheckpoint = checkpoint(2, sourceCheckpoint.id, 2);
+  const currentCheckpoint = checkpoint(3, firstCheckpoint.id, 2);
   const currentControl = completeOperationControl(
     readOperationControlFromRecords(await journal.replay(), {
       scope,
@@ -363,11 +424,14 @@ test('context correction persists exact exclusions over the real Journal carrier
     source: 'agent-tool',
     ownerId,
     checkpoint: currentCheckpoint,
-    previous: sourceCheckpoint,
+    previous: firstCheckpoint,
     journal: checkpoints,
     closurePort: closures,
     preparation,
   });
+  const currentCheckpointCommit = await checkpoints.readCommitted(scope, currentCheckpoint.id);
+  assert.ok(currentCheckpointCommit);
+  const currentCheckpointReceipt = currentCheckpointCommit.commitRef;
 
   const stateReceipt = await currentStates.commit(currentStateTransition());
   assert.equal(stateReceipt.commitId.length > 0, true);
@@ -511,5 +575,153 @@ test('context correction persists exact exclusions over the real Journal carrier
   await assert.rejects(
     () => commitContextCorrection({ ownerId, correction: { port, command: stale } }),
     /stale|changed before context correction|current control token/,
+  );
+
+  const reentryPort = createJsonlConditionalReentrySubmissionPort({ filePath: journalPath, journal });
+  const rewindControl = completeOperationControl(
+    readOperationControlFromRecords(afterAdmissionRecords, {
+      scope,
+      agentRuntimeId: runtimeId,
+      harnessExecutionEpoch: freshKnown.position.executionEpoch,
+    }),
+  );
+  const rewindCommand: ConfirmedReentryCommand = {
+    commandId: 'conditional-reentry-rewind-1',
+    taskScope: { organId, taskId },
+    targetCheckpointCommitRef: firstCheckpointReceipt,
+    expectedCurrentControlCommitRef: freshKnown.position.controlCommitRef,
+    expectedExecutionEpoch: freshKnown.position.executionEpoch,
+    expectedOperationControlCommitRef: rewindControl.currentControlCommitRef,
+    expectedGrantCommitRef: grantCommit,
+    permissionRevision: '1',
+    confirmationRef: 'confirmation:conditional-reentry-rewind',
+    principalOwner: ownerId,
+  };
+  const rewind = await commitReentry({
+    ownerId,
+    conditional: { port: reentryPort, command: rewindCommand },
+  });
+  assert.equal(rewind.state, 'committed');
+  const afterRewindCommitRecords = await journal.replay();
+  assert.equal(afterRewindCommitRecords.length, afterAdmissionRecords.length + 1);
+  assert.deepEqual(afterRewindCommitRecords.slice(0, afterAdmissionRecords.length), afterAdmissionRecords);
+  const rewindCarrier: ConditionalReentryRecord | null = conditionalReentryFromRecord(
+    exactJournalRecord(afterRewindCommitRecords, rewind.commitRef),
+  );
+  assert.ok(rewindCarrier);
+  assert.deepEqual(rewindCarrier, rewind.record);
+  assert.deepEqual(rewind.record.currentTask, task());
+  assert.deepEqual(rewind.record.retainedDuties, currentState().retainedDuties);
+  assert.equal(rewind.record.checkpointId.value, firstCheckpoint.id.value);
+  assert.equal(rewind.record.sourceCheckpointCommitRef.commitId, firstCheckpointReceipt.commitId);
+  assert.equal(rewind.record.previousExecutionEpoch, freshKnown.position.executionEpoch);
+  assert.equal(rewind.record.newExecutionEpoch > freshKnown.position.executionEpoch, true);
+  assert.equal(rewind.record.restoredContext.contextView.activeRefs.includes(inactiveWrongB), false);
+  assert.equal(rewind.record.restoredContext.contextView.activeRefs.includes(wrongA), false);
+  assert.equal(rewind.record.restoredContext.contextView.omittedRefs.includes(wrongA), true);
+  assert.equal(rewind.record.restoredContext.contextView.omittedRefs.includes(inactiveWrongB), true);
+  assert.deepEqual(rewind.record.restoredContext.contextView.activeRefs, [viewedOnlyRef]);
+  assert.deepEqual(rewind.record.restoredContext.durableContext.indexRefs, [viewedOnlyRef]);
+  const rewindReadback = await reentryPort.readReentry(taskScope, rewindCommand.commandId);
+  assert.ok(rewindReadback);
+  assert.deepEqual(rewindReadback.commitRef, rewind.commitRef);
+  assert.deepEqual(rewindReadback.record, rewind.record);
+
+  await operationControl.initializeCoverage({
+    scope,
+    agentRuntimeId: runtimeId,
+    harnessExecutionEpoch: rewind.record.newExecutionEpoch,
+    admissionCommitRef: rewind.commitRef,
+  });
+  const afterRewindCoverageRecords = await journal.replay();
+  const rewindFacts = knownCurrentFacts(readCurrentFromRecords(afterRewindCoverageRecords, taskScope));
+  assert.equal(rewindFacts.position.checkpointCommitRef.commitId, firstCheckpointReceipt.commitId);
+  assert.equal(rewindFacts.position.controlCommitRef.commitId, rewind.commitRef.commitId);
+  assert.equal(rewindFacts.position.executionEpoch, rewind.record.newExecutionEpoch);
+  assert.deepEqual(rewindFacts.context.contextView.activeRefs, [viewedOnlyRef]);
+
+  const forwardControl = completeOperationControl(
+    readOperationControlFromRecords(afterRewindCoverageRecords, {
+      scope,
+      agentRuntimeId: runtimeId,
+      harnessExecutionEpoch: rewindFacts.position.executionEpoch,
+    }),
+  );
+  const forwardCommand: ConfirmedReentryCommand = {
+    commandId: 'conditional-reentry-forward-1',
+    taskScope: { organId, taskId },
+    targetCheckpointCommitRef: currentCheckpointReceipt,
+    expectedCurrentControlCommitRef: rewindFacts.position.controlCommitRef,
+    expectedExecutionEpoch: rewindFacts.position.executionEpoch,
+    expectedOperationControlCommitRef: forwardControl.currentControlCommitRef,
+    expectedGrantCommitRef: grantCommit,
+    permissionRevision: '1',
+    confirmationRef: 'confirmation:conditional-reentry-forward',
+    principalOwner: ownerId,
+  };
+  const forward = await commitReentry({
+    ownerId,
+    conditional: { port: reentryPort, command: forwardCommand },
+  });
+  assert.equal(forward.state, 'committed');
+  const afterForwardCommitRecords = await journal.replay();
+  assert.equal(afterForwardCommitRecords.length, afterRewindCoverageRecords.length + 1);
+  assert.deepEqual(
+    afterForwardCommitRecords.slice(0, afterRewindCoverageRecords.length),
+    afterRewindCoverageRecords,
+  );
+  assert.deepEqual(forward.record.currentTask, task());
+  assert.deepEqual(forward.record.retainedDuties, currentState().retainedDuties);
+  assert.equal(forward.record.checkpointId.value, currentCheckpoint.id.value);
+  assert.equal(forward.record.sourceCheckpointCommitRef.commitId, currentCheckpointReceipt.commitId);
+  assert.equal(forward.record.previousExecutionEpoch, rewindFacts.position.executionEpoch);
+  assert.equal(forward.record.newExecutionEpoch > rewind.record.newExecutionEpoch, true);
+  assert.deepEqual(forward.record.restoredContext.contextView.activeRefs, [similarA2, correctRef]);
+  assert.equal(forward.record.restoredContext.contextView.activeRefs.includes(wrongA), false);
+  assert.equal(forward.record.restoredContext.contextView.omittedRefs.includes(wrongA), true);
+  assert.deepEqual(forward.record.restoredContext.durableContext.indexRefs, [similarA2, correctRef]);
+  const forwardReadback = await reentryPort.readReentry(taskScope, forwardCommand.commandId);
+  assert.ok(forwardReadback);
+  assert.deepEqual(forwardReadback.commitRef, forward.commitRef);
+  assert.deepEqual(forwardReadback.record, forward.record);
+
+  await operationControl.initializeCoverage({
+    scope,
+    agentRuntimeId: runtimeId,
+    harnessExecutionEpoch: forward.record.newExecutionEpoch,
+    admissionCommitRef: forward.commitRef,
+  });
+  const afterForwardCoverageRecords = await journal.replay();
+  const forwardFacts = knownCurrentFacts(readCurrentFromRecords(afterForwardCoverageRecords, taskScope));
+  assert.equal(forwardFacts.position.checkpointCommitRef.commitId, currentCheckpointReceipt.commitId);
+  assert.equal(forwardFacts.position.controlCommitRef.commitId, forward.commitRef.commitId);
+  assert.equal(forwardFacts.position.executionEpoch, forward.record.newExecutionEpoch);
+  assert.deepEqual(forwardFacts.context.contextView.activeRefs, [similarA2, correctRef]);
+  assert.deepEqual(forwardFacts.task, task());
+  assert.deepEqual(forwardFacts.retainedDuties, currentState().retainedDuties);
+
+  const rewindRetry = await commitReentry({
+    ownerId,
+    conditional: { port: reentryPort, command: rewindCommand },
+  });
+  assert.deepEqual(rewindRetry.commitRef, rewind.commitRef);
+  assert.deepEqual(rewindRetry.record, rewind.record);
+
+  const conflictingReentry: ConfirmedReentryCommand = {
+    ...rewindCommand,
+    confirmationRef: 'confirmation:conditional-reentry-conflict',
+  };
+  await assert.rejects(
+    () => commitReentry({ ownerId, conditional: { port: reentryPort, command: conflictingReentry } }),
+    /already committed with different confirmed facts/,
+  );
+
+  const staleReentry: ConfirmedReentryCommand = {
+    ...rewindCommand,
+    commandId: 'conditional-reentry-stale-1',
+  };
+  await assert.rejects(
+    () => commitReentry({ ownerId, conditional: { port: reentryPort, command: staleReentry } }),
+    /stale|changed/,
   );
 });
