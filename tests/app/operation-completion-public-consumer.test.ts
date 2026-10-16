@@ -8,20 +8,43 @@ import {
   completionCommitIdentity,
   fileWriteEffectId,
   id,
+  operationIdempotencyKey,
+  operationSemanticFingerprint,
+  operationSemanticFingerprintKey,
   type CompletionReadback,
   type EffectExecutionBinding,
   type FileWriteCompletionFact,
   type FileWriteCompletionResult,
   type FileWriteEffect,
   type FileWriteEffectIntent,
+  type OperationIntent,
+  type ScopeRef,
+  type ToolRegistration,
 } from '../../packages/contracts/src/index.js';
-import { JournalCommitConflictError, JournalIntegrityError } from '../../packages/adapters/jsonl/src/index.js';
+import {
+  JournalCommitConflictError,
+  JournalIntegrityError,
+  JsonlOrganJournal,
+  type JournalAppendInput,
+  type JournalRecord,
+  type JournalTransactionContext,
+} from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
 import {
   OperationCompletionOwner,
-  type OperationCompletionCommitPort,
 } from '../../packages/runtime/src/gateway/operation-completion.js';
-import { createResponsesFileToolExecutor } from '../../packages/app/src/provider-tool-execution.js';
+import type { RuntimeExecutionAllocation } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import { createToolExecutionGateway } from '../../packages/app/src/index.js';
+import {
+  createExecutionAdmission,
+  executionAdmissionInputDigest,
+  type AdmittedExecutionInput,
+} from '../../packages/app/src/ui-runtime/execution-admission.js';
+import {
+  createResponsesFileToolExecutor,
+  type ProviderToolAdmissionInput,
+} from '../../packages/app/src/provider-tool-execution.js';
 
 const organId = id('organ', 'f2-w2-organ');
 const taskId = id('task', 'f2-w2-task');
@@ -31,6 +54,11 @@ const toolOperationId = id('operation', 'provider-tool-provider-execution-parent
 const requestId = 'request-f2-w2-file-write';
 const callId = 'call-file-write';
 const projectKey = 'f2-w2-project';
+const ownerId = 'f2-w2-owner';
+const runtimeId = 'runtime-f2-w2';
+const executionEpoch = 7;
+const parentInputRef = 'artifact://f2-w2-parent-input';
+const parentScope: ScopeRef = { organId, taskId, cycleId, operationId: parentOperationId };
 
 /**
  * The project requires every durable artifact to live under `~/.humanagent`.
@@ -71,12 +99,12 @@ function binding(overrides: { readonly callId?: string; readonly toolOperationId
     : id('operation', overrides.toolOperationId);
   return {
     execution: {
-      runtimeId: 'runtime-f2-w2',
+      runtimeId,
       taskId,
       operationId: parentOperationId,
       organId,
       cycleId,
-      executionEpoch: 7,
+      executionEpoch,
     },
     scope: {
       organId,
@@ -120,14 +148,14 @@ function completionFact(bindingValue: EffectExecutionBinding, effect: FileWriteE
 function fileWriteRequest(content: string, requestCallId: string = callId) {
   return {
     execution: {
-      runtimeId: 'runtime-f2-w2',
+      runtimeId,
       taskId,
       operationId: parentOperationId,
       organId,
       cycleId,
-      executionEpoch: 7,
+      executionEpoch,
     },
-    scope: { organId, taskId, cycleId },
+    scope: parentScope,
     requestId,
     call: {
       callId: requestCallId,
@@ -139,21 +167,162 @@ function fileWriteRequest(content: string, requestCallId: string = callId) {
   };
 }
 
+class FailingCompletionJournal extends JsonlOrganJournal {
+  override async transaction<T, R>(
+    read: (context: JournalTransactionContext) => T | Promise<T>,
+    apply: (input: T, append: (input: JournalAppendInput) => Promise<JournalRecord>) => Promise<R>,
+  ): Promise<R> {
+    return await super.transaction(read, async (input, append) => await apply(input, async (next) => {
+      if (next.payload?.kind === 'operation-completion') {
+        throw new Error('injected completion commit failure');
+      }
+      return await append(next);
+    }));
+  }
+}
+
+async function providerToolAdmission(input: {
+  readonly journalPath: string;
+  readonly journal?: JsonlOrganJournal;
+}): Promise<ProviderToolAdmissionInput> {
+  const journal = input.journal ?? new JsonlOrganJournal(input.journalPath);
+  const grants = new JsonlTaskGrantJournal(journal);
+  const now = () => new Date('2026-10-15T12:00:00.000Z');
+  const allocation: RuntimeExecutionAllocation = {
+    runtimeId,
+    taskId,
+    operationId: parentOperationId,
+    executionEpoch,
+    assignmentId: 'assignment-f2-w2',
+    scope: parentScope,
+    inputRefs: [parentInputRef],
+    ownerId,
+    directiveRevision: 1,
+    inputRevision: 1,
+    orchestrated: false,
+  };
+  const admittedInput: AdmittedExecutionInput = {
+    inputRevision: allocation.inputRevision,
+    inputRefs: allocation.inputRefs,
+    input: Object.freeze({ prompt: 'f2-w2 provider tool fixture' }),
+  };
+  const inputDigest = executionAdmissionInputDigest(allocation, admittedInput);
+  const capability = {
+    actionId: 'task.execute',
+    capabilities: ['provider.execution'],
+    scope: { organId, taskId },
+  };
+  await grants.grant({
+    requestId: 'grant-f2-w2',
+    taskId,
+    owner: ownerId,
+    capability,
+    expectedRevision: 0,
+  });
+  const registration: ToolRegistration = {
+    toolName: 'provider.execution',
+    contractVersion: '1.0.0',
+    supportedKinds: ['run'],
+    routeId: 'provider-execution',
+    routeVersion: 'provider-execution.v1',
+    mode: 'gateway',
+    acceptedScopes: [{}],
+    inputContract: 'schema://provider.execution.input/v1',
+    outputContract: 'schema://provider.execution.output/v1',
+    verifier: 'verifier://provider.execution/v1',
+    capabilities: ['provider.execution'],
+    retryPolicy: 'retry://explicit-reconciliation/v1',
+    owner: ownerId,
+  };
+  const admission = createExecutionAdmission({
+    organJournal: journal,
+    taskGrantPort: grants,
+    principalOwner: ownerId,
+    capabilityFor: ({ intent }) => ({
+      actionId: 'task.execute',
+      capabilities: ['provider.execution'],
+      scope: { organId: intent.requestedScope.organId, taskId: intent.taskId },
+    }),
+    resourceBoundary: {
+      async readBoundary({ intent }) {
+        return { scope: intent.requestedScope, evidenceRefs: [] };
+      },
+    },
+    resolveAdmittedInput: async () => admittedInput,
+    createGateway: (ports) => createToolExecutionGateway({ ...ports, now }),
+  });
+  const intent: OperationIntent = {
+    operationId: parentOperationId,
+    taskId,
+    cycleId,
+    requestedBy: ownerId,
+    intentRevision: '1',
+    kind: 'run',
+    toolName: registration.toolName,
+    inputRef: allocation.inputRefs[0]!,
+    inputDigest,
+    requestedScope: parentScope,
+    idempotencyKey: parentOperationId.value,
+    expectedOutput: { schemaRef: registration.outputContract, requiredEvidenceKinds: ['operation'] },
+  };
+  const route = {
+    operationId: parentOperationId,
+    routeId: registration.routeId,
+    routeVersion: registration.routeVersion,
+    mode: registration.mode,
+    contractVersion: registration.contractVersion,
+    effectiveScope: parentScope,
+    selectionReason: 'f2-w2 provider tool fixture',
+    selectedAt: now().toISOString(),
+  };
+  await admission.admitExecution({
+    allocation,
+    requestRef: `execution:${parentOperationId.value}`,
+    capability,
+    parentLifecycle: {
+      event: {
+        eventId: `parent-admitted:${parentOperationId.value}`,
+        schemaVersion: 1,
+        kind: 'operation.accepted',
+        operationId: parentOperationId,
+        taskId,
+        executionEpoch: 1,
+        status: 'accepted',
+        occurredAt: now().toISOString(),
+        evidenceRefs: [],
+      },
+      control: {
+        intent,
+        registration,
+        route,
+        status: 'accepted',
+        executionEpoch: 1,
+        namespaceKey: operationIdempotencyKey(intent),
+        fingerprintKey: operationSemanticFingerprintKey(operationSemanticFingerprint(intent, registration)),
+      },
+    },
+  });
+  return {
+    organJournal: journal,
+    currentTaskGrantPort: admission.permissions,
+    principalOwner: ownerId,
+    resourceBoundary: admission.resourceBoundary,
+    bindingFor: async () => await admission.bindingFor(allocation),
+    admitToolOperation: admission.admitToolOperation,
+    now,
+  };
+}
+
 test('F2 W2 T1 keeps effect intent unknown/reconcile and forbids replay after completion failure', async () => {
   await withFixture('t1', async ({ workspaceRoot, artifactRoot, journalPath }) => {
     const content = 'side effect then failed commit';
-    const realCompletion = new JsonlOperationCompletionJournal(journalPath);
-    const failingCompletion: OperationCompletionCommitPort = {
-      commitIntent: (input: FileWriteEffectIntent) => realCompletion.commitIntent(input),
-      async commitCompletion() {
-        throw new Error('injected completion commit failure');
-      },
-    };
+    const journal = new FailingCompletionJournal(journalPath);
+    const admission = await providerToolAdmission({ journalPath, journal });
     const built = createResponsesFileToolExecutor({
       workspaceRoot,
       projectKey,
       artifactRoot,
-      operationCompletionPortFor: () => failingCompletion,
+      admission,
     });
     let executions = 0;
     const executor = {
@@ -200,11 +369,12 @@ test('F2 W2 T1 keeps effect intent unknown/reconcile and forbids replay after co
 test('F2 W2 T2 reads the same completion receipt after destroying the writer object/process state', async () => {
   await withFixture('t2', async ({ workspaceRoot, artifactRoot, journalPath }) => {
     const content = 'confirmed file write';
+    const admission = await providerToolAdmission({ journalPath });
     const writer = createResponsesFileToolExecutor({
       workspaceRoot,
       projectKey,
       artifactRoot,
-      operationCompletionPortFor: () => new JsonlOperationCompletionJournal(journalPath),
+      admission,
     });
     const returned = await writer.executor.execute(fileWriteRequest(content));
 
@@ -270,11 +440,12 @@ test('F2 W2 T2 reads the same completion receipt after destroying the writer obj
 test('F2 W2 keeps the first completion and rejects a conflicting fact for the same identity', async () => {
   await withFixture('conflict', async ({ workspaceRoot, artifactRoot, journalPath }) => {
     const content = 'commit integrity';
+    const admission = await providerToolAdmission({ journalPath });
     const writer = createResponsesFileToolExecutor({
       workspaceRoot,
       projectKey,
       artifactRoot,
-      operationCompletionPortFor: () => new JsonlOperationCompletionJournal(journalPath),
+      admission,
     });
     await writer.executor.execute(fileWriteRequest(content));
 
@@ -309,11 +480,12 @@ test('F2 W2 keeps the first completion and rejects a conflicting fact for the sa
 
 test('F2 W2 surfaces journal corruption instead of a confirmed receipt', async () => {
   await withFixture('corrupt', async ({ workspaceRoot, artifactRoot, journalPath }) => {
+    const admission = await providerToolAdmission({ journalPath });
     const writer = createResponsesFileToolExecutor({
       workspaceRoot,
       projectKey,
       artifactRoot,
-      operationCompletionPortFor: () => new JsonlOperationCompletionJournal(journalPath),
+      admission,
     });
     await writer.executor.execute(fileWriteRequest('corruption probe'));
 
@@ -386,11 +558,12 @@ function runColdRead(input: {
 test('F2 W2 cold-reads the exact receipt and output bytes from a fresh process', async () => {
   await withFixture('fresh', async ({ workspaceRoot, artifactRoot, journalPath }) => {
     const content = 'fresh process cold read';
+    const admission = await providerToolAdmission({ journalPath });
     const writer = createResponsesFileToolExecutor({
       workspaceRoot,
       projectKey,
       artifactRoot,
-      operationCompletionPortFor: () => new JsonlOperationCompletionJournal(journalPath),
+      admission,
     });
     const returned = await writer.executor.execute(fileWriteRequest(content));
 

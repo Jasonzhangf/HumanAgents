@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHandOperationRuntime } from '../../packages/app/src/index.js';
 import { CodeSearchRoute, WebSearchRoute, webSearchRegistration, type CodeSearchArtifactStore, type WebSearchArtifactStore } from '../../packages/adapters/operations/src/index.js';
-import { id, type EvidenceRef, type OperationEvent, type OperationIntent, type Scope, type WebSearchReport, type WebSearchRequest } from '../../packages/contracts/src/index.js';
-import type { OperationJournalPort } from '../../packages/runtime/src/gateway/index.js';
+import { id, type EvidenceRef, type JournalCommitRef, type OperationEvent, type OperationIntent, type Scope, type WebSearchReport, type WebSearchRequest } from '../../packages/contracts/src/index.js';
+import type { OperationControlBinding, OperationControlRecord, OperationControlSelector, OperationCoverageInitialization, OperationJournalPort } from '../../packages/runtime/src/gateway/index.js';
 import type { CodeSearchFunctions, WebSearchProvider } from '../../packages/runtime/src/hand/index.js';
 
 const organ = id('organ', 'web-search-app-organ');
@@ -12,7 +12,46 @@ const cycle = id('cycle', 'web-search-app-cycle');
 const operation = id('operation', 'web-search-app-operation');
 const scope: Scope = { organId: organ, taskId: task, cycleId: cycle };
 const evidence = (label: string): EvidenceRef => ({ evidenceId: id('evidence', `web-search-${label}`), kind: 'operation', source: 'web-search-test', locator: `test://${label}`, scope });
-const journal: OperationJournalPort = { async commit(_event: OperationEvent) {}, async publishCommitted(_event: OperationEvent) {} };
+const admissionCommitRef: JournalCommitRef = { commitId: 'app-admission:web-search', journalSeq: 1, recordDigest: 'sha256:app-admission-web-search' };
+const controlBinding: OperationControlBinding = {
+  scope,
+  agentRuntimeId: 'runtime-web-search-app',
+  harnessExecutionEpoch: 1,
+  parentOperationId: operation,
+  admissionCommitRef,
+};
+
+class MemoryOperationJournal implements OperationJournalPort {
+  private sequence = 1;
+  private coverageInitialized = false;
+  private readonly controls: { readonly record: OperationControlRecord; readonly ref: JournalCommitRef }[] = [];
+  async commit(_event: OperationEvent, control: OperationControlRecord): Promise<JournalCommitRef> {
+    const ref: JournalCommitRef = { commitId: `app-web-search-control:${this.sequence}`, journalSeq: this.sequence++, recordDigest: `sha256:app-web-search-control:${this.sequence}` };
+    this.controls.push({ record: control, ref });
+    return ref;
+  }
+  async readControl(selector: OperationControlSelector) {
+    if (!this.coverageInitialized) {
+      return { state: 'unknown' as const, scope: selector.scope, reason: 'coverage not initialized', missingRefs: [] };
+    }
+    const matches = this.controls.filter((entry) => entry.record.binding.scope.taskId?.value === selector.scope.taskId?.value);
+    return {
+      state: 'complete' as const,
+      scope: selector.scope,
+      coverageCommitRef: admissionCommitRef,
+      currentControlCommitRef: matches.at(-1)?.ref ?? admissionCommitRef,
+      operations: matches.map((entry) => entry.record),
+      operationCommits: matches.map((entry) => entry.ref),
+    };
+  }
+  async initializeCoverage(_input: OperationCoverageInitialization): Promise<JournalCommitRef> {
+    this.coverageInitialized = true;
+    return admissionCommitRef;
+  }
+  async publishCommitted(_event: OperationEvent): Promise<void> {}
+}
+
+const journal = new MemoryOperationJournal();
 
 test('app assembly registers web.search as one provider-backed gateway operation', async () => {
   const request: WebSearchRequest = { serviceId: 'web.search', contractVersion: '1.0.0', query: 'gateway', domains: ['example.com'], maxResults: 2 };
@@ -47,7 +86,7 @@ test('app assembly registers web.search as one provider-backed gateway operation
     idempotencyKey: 'web-search-idempotency',
     expectedOutput: { schemaRef: 'schema://web.search.report/v1', requiredEvidenceKinds: ['tool'] },
   };
-  const result = await hand.execute({ intent });
+  const result = await hand.execute({ intent, binding: controlBinding });
   assert.equal(result.operation.status, 'succeeded');
   assert.equal(result.operation.route?.routeId, 'web-search');
   const outputRef = 'artifact://web-search/web-search-app-operation';

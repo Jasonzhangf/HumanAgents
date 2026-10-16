@@ -24,7 +24,8 @@ import {
 import { composeMemoryRuntime, filesystemTaskEvidence } from '../../packages/app/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 
-const FIXTURE_ROOT = '/Users/fanzhang/.humanagent/test-fixtures/provider-memory-path-producer-r1-20261015';
+const FIXTURE_ROOT = process.env.HUMANAGENT_TEST_ROOT
+  ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-release-rc5-r1-20261015';
 
 function digest(text: string): string {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
@@ -238,6 +239,9 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
     const selectedPathRef = checkpointEvidenceRef({ checkpoint: selectedCommitted.checkpoint, evidenceId: 'actual-old' });
     const recoveryPathRef = checkpointEvidenceRef({ checkpoint: recoveryCommitted.checkpoint, evidenceId: 'actual-new' });
     const successEvidenceRef = checkpointEvidenceRef({ checkpoint: recoveryCommitted.checkpoint, evidenceId: 'success-result' });
+    if (correctionRef.digest === undefined || errorRef.digest === undefined) {
+      throw new Error('resolved correction and error evidence must carry a source digest');
+    }
 
     const memory = await composeMemoryRuntime({
       paths,

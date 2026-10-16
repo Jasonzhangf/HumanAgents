@@ -7,17 +7,49 @@ import {
   createResponsesFileToolExecutor,
   createToolExecutionGateway,
 } from '../../packages/app/src/index.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
+import type { ProviderToolAdmissionInput } from '../../packages/app/src/provider-tool-execution.js';
+import {
+  createExecutionAdmission,
+  executionAdmissionInputDigest,
+  type AdmittedExecutionInput,
+} from '../../packages/app/src/ui-runtime/execution-admission.js';
 import { DeterministicInspectRoute } from '../../packages/adapters/operations/src/index.js';
 import { CodeSearchRoute, type CodeSearchArtifactStore } from '../../packages/adapters/operations/src/index.js';
-import { id, type BusinessPayload, type CodeSearchReport, type EvidenceRef, type OperationEvent, type OperationIntent, type Scope } from '../../packages/contracts/src/index.js';
+import {
+  id,
+  operationIdempotencyKey,
+  operationSemanticFingerprint,
+  operationSemanticFingerprintKey,
+  type BusinessPayload,
+  type CodeSearchReport,
+  type EvidenceRef,
+  type JournalCommitRef,
+  type OperationEvent,
+  type OperationId,
+  type OperationIntent,
+  type Scope,
+  type ScopeRef,
+  type ToolRegistration,
+} from '../../packages/contracts/src/index.js';
 import { type CodeSearchFileContent, type CodeSearchFileList, type CodeSearchFunctions } from '../../packages/runtime/src/hand/index.js';
-import type { OperationJournalPort } from '../../packages/runtime/src/gateway/index.js';
+import type { RuntimeExecutionAllocation } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import type {
+  OperationControlBinding,
+  OperationControlReadback,
+  OperationControlRecord,
+  OperationControlSelector,
+  OperationCoverageInitialization,
+  OperationJournalPort,
+} from '../../packages/runtime/src/gateway/index.js';
 
 const organ = id('organ', 'app-gateway-organ');
 const task = id('task', 'app-gateway-task');
 const cycle = id('cycle', 'app-gateway-cycle');
 const operation = id('operation', 'app-gateway-operation');
 const scope: Scope = { organId: organ, taskId: task, cycleId: cycle };
+const providerExecutionScope: Scope = { ...scope, operationId: operation };
 
 function evidence(label: string): EvidenceRef {
   return {
@@ -49,19 +81,206 @@ function intent(): OperationIntent {
   };
 }
 
-const journal: OperationJournalPort = {
-  async commit(_event: OperationEvent): Promise<void> {},
-  async publishCommitted(_event: OperationEvent): Promise<void> {},
+const admissionCommitRef: JournalCommitRef = {
+  commitId: 'app-gateway-admission',
+  journalSeq: 1,
+  recordDigest: 'sha256:app-gateway-admission',
 };
 
-function recordingJournal(): OperationJournalPort & { readonly committed: OperationEvent[] } {
-  const committed: OperationEvent[] = [];
+function operationControlBinding(intentValue: OperationIntent): OperationControlBinding {
   return {
-    committed,
-    async commit(event) {
-      committed.push(event);
+    scope: intentValue.requestedScope,
+    agentRuntimeId: 'runtime-app-gateway',
+    harnessExecutionEpoch: 1,
+    parentOperationId: intentValue.operationId,
+    admissionCommitRef,
+  };
+}
+
+class MemoryOperationJournal implements OperationJournalPort {
+  readonly committed: OperationEvent[] = [];
+  private sequence = 1;
+  private readonly controls: { readonly record: OperationControlRecord; readonly ref: JournalCommitRef }[] = [];
+  private coverageInitialized = false;
+
+  async commit(event: OperationEvent, control: OperationControlRecord): Promise<JournalCommitRef> {
+    const ref: JournalCommitRef = {
+      commitId: `app-gateway-control:${this.sequence}`,
+      journalSeq: this.sequence++,
+      recordDigest: `sha256:app-gateway-control:${this.sequence}`,
+    };
+    this.committed.push(event);
+    this.controls.push({ record: control, ref });
+    return ref;
+  }
+
+  async readControl(selector: OperationControlSelector): Promise<OperationControlReadback> {
+    if (!this.coverageInitialized) {
+      return { state: 'unknown', scope: selector.scope, reason: 'coverage not initialized', missingRefs: [] };
+    }
+    const matches = this.controls.filter((entry) => (
+      entry.record.binding.scope.taskId?.value === selector.scope.taskId?.value
+      && entry.record.binding.agentRuntimeId === selector.agentRuntimeId
+      && entry.record.binding.harnessExecutionEpoch === selector.harnessExecutionEpoch
+    ));
+    return {
+      state: 'complete',
+      scope: selector.scope,
+      coverageCommitRef: admissionCommitRef,
+      currentControlCommitRef: matches.at(-1)?.ref ?? admissionCommitRef,
+      operations: matches.map((entry) => entry.record),
+      operationCommits: matches.map((entry) => entry.ref),
+    };
+  }
+
+  async initializeCoverage(_input: OperationCoverageInitialization): Promise<JournalCommitRef> {
+    this.coverageInitialized = true;
+    return admissionCommitRef;
+  }
+
+  async publishCommitted(_event: OperationEvent): Promise<void> {}
+}
+
+const journal = new MemoryOperationJournal();
+
+function recordingJournal(): MemoryOperationJournal {
+  return new MemoryOperationJournal();
+}
+
+async function createProviderToolAdmission(input: {
+  readonly journalPath: string;
+  readonly runtimeId: string;
+  readonly executionEpoch: number;
+  readonly parentOperationId: OperationId;
+  readonly parentScope: ScopeRef;
+  readonly inputRef: string;
+}): Promise<ProviderToolAdmissionInput> {
+  const principalOwner = 'app-gateway-owner';
+  const now = () => new Date('2026-09-20T00:00:00.000Z');
+  const journal = new JsonlOrganJournal(input.journalPath);
+  const grants = new JsonlTaskGrantJournal(journal);
+  const allocation: RuntimeExecutionAllocation = {
+    runtimeId: input.runtimeId,
+    taskId: task,
+    operationId: input.parentOperationId,
+    executionEpoch: input.executionEpoch,
+    assignmentId: `assignment-${input.parentOperationId.value}`,
+    scope: input.parentScope,
+    inputRefs: [input.inputRef],
+    ownerId: principalOwner,
+    directiveRevision: 1,
+    inputRevision: 1,
+    orchestrated: false,
+  };
+  const admittedInput: AdmittedExecutionInput = {
+    inputRevision: allocation.inputRevision,
+    inputRefs: allocation.inputRefs,
+    input: Object.freeze({ prompt: 'app gateway provider tool fixture' }),
+  };
+  const inputDigest = executionAdmissionInputDigest(allocation, admittedInput);
+  const capability = {
+    actionId: 'task.execute',
+    capabilities: ['provider.execution'],
+    scope: { organId: input.parentScope.organId, taskId: task },
+  };
+  await grants.grant({
+    requestId: `grant-${input.parentOperationId.value}`,
+    taskId: task,
+    owner: principalOwner,
+    capability,
+    expectedRevision: 0,
+  });
+  const registration: ToolRegistration = {
+    toolName: 'provider.execution',
+    contractVersion: '1.0.0',
+    supportedKinds: ['run'],
+    routeId: 'provider-execution',
+    routeVersion: 'provider-execution.v1',
+    mode: 'gateway',
+    acceptedScopes: [{}],
+    inputContract: 'schema://provider.execution.input/v1',
+    outputContract: 'schema://provider.execution.output/v1',
+    verifier: 'verifier://provider.execution/v1',
+    capabilities: ['provider.execution'],
+    retryPolicy: 'retry://explicit-reconciliation/v1',
+    owner: principalOwner,
+  };
+  const admission = createExecutionAdmission({
+    organJournal: journal,
+    taskGrantPort: grants,
+    principalOwner,
+    capabilityFor: ({ intent }) => ({
+      actionId: 'task.execute',
+      capabilities: ['provider.execution'],
+      scope: { organId: intent.requestedScope.organId, taskId: intent.taskId },
+    }),
+    resourceBoundary: {
+      async readBoundary({ intent }) {
+        return { scope: intent.requestedScope, evidenceRefs: [] };
+      },
     },
-    async publishCommitted(_event) {},
+    resolveAdmittedInput: async () => admittedInput,
+    createGateway: (ports) => createToolExecutionGateway({ ...ports, now }),
+  });
+  const intent: OperationIntent = {
+    operationId: input.parentOperationId,
+    taskId: task,
+    cycleId: cycle,
+    requestedBy: principalOwner,
+    intentRevision: '1',
+    kind: 'run',
+    toolName: registration.toolName,
+    inputRef: allocation.inputRefs[0]!,
+    inputDigest,
+    requestedScope: input.parentScope,
+    idempotencyKey: input.parentOperationId.value,
+    expectedOutput: { schemaRef: registration.outputContract, requiredEvidenceKinds: ['operation'] },
+  };
+  const route = {
+    operationId: input.parentOperationId,
+    routeId: registration.routeId,
+    routeVersion: registration.routeVersion,
+    mode: registration.mode,
+    contractVersion: registration.contractVersion,
+    effectiveScope: input.parentScope,
+    selectionReason: 'app gateway provider tool fixture',
+    selectedAt: now().toISOString(),
+  };
+  await admission.admitExecution({
+    allocation,
+    requestRef: `execution:${input.parentOperationId.value}`,
+    capability,
+    parentLifecycle: {
+      event: {
+        eventId: `parent-admitted:${input.parentOperationId.value}`,
+        schemaVersion: 1,
+        kind: 'operation.accepted',
+        operationId: input.parentOperationId,
+        taskId: task,
+        executionEpoch: 1,
+        status: 'accepted',
+        occurredAt: now().toISOString(),
+        evidenceRefs: [],
+      },
+      control: {
+        intent,
+        registration,
+        route,
+        status: 'accepted',
+        executionEpoch: 1,
+        namespaceKey: operationIdempotencyKey(intent),
+        fingerprintKey: operationSemanticFingerprintKey(operationSemanticFingerprint(intent, registration)),
+      },
+    },
+  });
+  return {
+    organJournal: journal,
+    currentTaskGrantPort: admission.permissions,
+    principalOwner,
+    resourceBoundary: admission.resourceBoundary,
+    bindingFor: async () => await admission.bindingFor(allocation),
+    admitToolOperation: admission.admitToolOperation,
+    now,
   };
 }
 
@@ -81,7 +300,7 @@ test('app assembly registers the deterministic operations route in the execution
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   });
 
-  const submitted = await gateway.submit(intent());
+  const submitted = await gateway.submit(intent(), operationControlBinding(intent()));
   const result = await gateway.execute(operation);
 
   assert.equal(submitted.operation.route?.routeId, 'deterministic-inspect');
@@ -143,7 +362,7 @@ test('app assembly exposes code.search as one gateway operation over multiple in
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   });
 
-  const result = await hand.execute({ intent: searchIntent });
+  const result = await hand.execute({ intent: searchIntent, binding: operationControlBinding(searchIntent) });
   assert.equal(result.operation.status, 'succeeded');
   assert.equal(result.operation.route?.routeId, 'code-search');
   assert.equal(result.operation.result?.outputRef, 'artifact://code-search/app-code-search-operation');
@@ -154,15 +373,25 @@ test('Responses built-in tools execute write, edit, bash, todo, goal, and presen
   const root = await mkdtemp(join(process.cwd(), 'tmp-provider-builtin-tools-'));
   const workspaceRoot = join(root, 'workspace');
   await mkdir(workspaceRoot, { recursive: true });
+  const admission = await createProviderToolAdmission({
+    journalPath: join(root, 'operation-control.jsonl'),
+    runtimeId: 'runtime-builtin-tools',
+    executionEpoch: 1,
+    parentOperationId: operation,
+    parentScope: providerExecutionScope,
+    inputRef: 'artifact://input/app-gateway',
+  });
   const { executor } = createResponsesFileToolExecutor({
     workspaceRoot,
     projectKey: 'builtin-tools-project',
     artifactRoot: join(root, 'artifacts'),
+    admission,
   });
   try {
     const run = async (toolId: string, arguments_: BusinessPayload, callId: string) => executor.execute({
       execution: { runtimeId: 'runtime-builtin-tools', taskId: task, operationId: operation, executionEpoch: 1 },
-      scope,
+      scope: providerExecutionScope,
+      requestId: `request-${callId}`,
       call: { callId, toolId, arguments: arguments_, continuationRef: 'response-builtin' },
       signal: new AbortController().signal,
     });
@@ -236,7 +465,7 @@ test('app assembly exposes Hand as a thin semantic-intent boundary', async () =>
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   });
 
-  const result = await hand.execute({ intent: intent() });
+  const result = await hand.execute({ intent: intent(), binding: operationControlBinding(intent()) });
 
   assert.equal(result.operation.status, 'succeeded');
   assert.equal(result.operation.route?.routeId, 'deterministic-inspect');
@@ -247,15 +476,25 @@ test('Responses file.read executes through Hand and returns actual bound-workspa
   const workspaceRoot = join(root, 'workspace');
   await mkdir(workspaceRoot, { recursive: true });
   await writeFile(join(workspaceRoot, 'README.md'), 'REAL_README_CONTENT\n', 'utf8');
+  const admission = await createProviderToolAdmission({
+    journalPath: join(root, 'operation-control.jsonl'),
+    runtimeId: 'runtime-file-tool',
+    executionEpoch: 1,
+    parentOperationId: operation,
+    parentScope: providerExecutionScope,
+    inputRef: 'artifact://input/app-gateway',
+  });
   const { executor } = createResponsesFileToolExecutor({
     workspaceRoot,
     projectKey: 'fixture-project',
     artifactRoot: join(root, 'artifacts'),
+    admission,
   });
   try {
     const result = await executor.execute({
       execution: { runtimeId: 'runtime-file-tool', taskId: task, operationId: operation, executionEpoch: 1 },
-      scope,
+      scope: providerExecutionScope,
+      requestId: 'request-call-readme',
       call: {
         callId: 'call-readme',
         toolId: 'file.read',
@@ -283,11 +522,20 @@ test('every provider tool report reads back from its descriptor alone, so a rest
   await mkdir(workspaceRoot, { recursive: true });
   await writeFile(join(workspaceRoot, 'README.md'), 'REPORT_MARKER\n', 'utf8');
   const artifactRoot = join(root, 'artifacts');
-  const first = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'report-project', artifactRoot });
+  const admission = await createProviderToolAdmission({
+    journalPath: join(root, 'operation-control.jsonl'),
+    runtimeId: 'runtime-tool-report',
+    executionEpoch: 1,
+    parentOperationId: operation,
+    parentScope: providerExecutionScope,
+    inputRef: 'artifact://input/app-gateway',
+  });
+  const first = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'report-project', artifactRoot, admission });
   try {
     const run = (toolId: string, arguments_: BusinessPayload, callId: string) => first.executor.execute({
       execution: { runtimeId: 'runtime-tool-report', taskId: task, operationId: operation, executionEpoch: 1 },
-      scope,
+      scope: providerExecutionScope,
+      requestId: `request-${callId}`,
       call: { callId, toolId, arguments: arguments_, continuationRef: 'response-report' },
       signal: new AbortController().signal,
     });
@@ -365,7 +613,8 @@ test('app assembly rejects an adapter observation with a different operation ide
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   });
 
-  await gateway.submit({ ...intent(), idempotencyKey: 'app-gateway-mismatch-idempotency' });
+  const mismatchIntent = { ...intent(), idempotencyKey: 'app-gateway-mismatch-idempotency' };
+  await gateway.submit(mismatchIntent, operationControlBinding(mismatchIntent));
   const result = await gateway.execute(operation);
 
   assert.equal(result.status, 'failed');
@@ -404,7 +653,8 @@ test('app assembly rejects an adapter verification result with a different opera
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   });
 
-  await gateway.submit({ ...intent(), idempotencyKey: 'app-gateway-verification-mismatch-idempotency' });
+  const verificationMismatchIntent = { ...intent(), idempotencyKey: 'app-gateway-verification-mismatch-idempotency' };
+  await gateway.submit(verificationMismatchIntent, operationControlBinding(verificationMismatchIntent));
   const result = await gateway.execute(operation);
 
   assert.equal(result.status, 'failed');
