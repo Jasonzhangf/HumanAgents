@@ -3,15 +3,22 @@ import test from 'node:test';
 import {
   id,
   type EvidenceRef,
+  type JournalCommitRef,
   type OperationEvent,
   type OperationIntent,
   type Scope,
+  type ScopeRef,
   type ToolRegistration,
 } from '../../../packages/contracts/src/index.js';
 import {
   HandOperationRuntime,
   ToolExecutionGateway,
   ToolRegistry,
+  type OperationControlBinding,
+  type OperationControlReadback,
+  type OperationControlRecord,
+  type OperationControlSelector,
+  type OperationCoverageInitialization,
   type OperationExecutorPort,
   type OperationExecutorObservation,
   type OperationJournalPort,
@@ -33,6 +40,35 @@ function evidence(label: string): EvidenceRef {
     source: 'hand-runtime-test',
     locator: `hand-runtime://${label}`,
     scope: { ...scope, operationId: operation },
+  };
+}
+
+function commitRef(label: string, journalSeq: number): JournalCommitRef {
+  return { commitId: `commit-${label}`, journalSeq, recordDigest: `sha256:${label}` };
+}
+
+function scopeRefKey(target: ScopeRef): string {
+  return [
+    target.organId.value,
+    target.taskId?.value ?? '',
+    target.cycleId?.value ?? '',
+    target.operationId?.value ?? '',
+  ].join('|');
+}
+
+/**
+ * Parent Harness runtime admission binding for one Hand operation. The parent
+ * operation identity and admission receipt name this operation's own admission,
+ * matching the real Harness binding construction.
+ */
+function controlBinding(overrides: Partial<OperationControlBinding> = {}): OperationControlBinding {
+  return {
+    scope,
+    agentRuntimeId: 'hand-runtime-agent',
+    harnessExecutionEpoch: 1,
+    parentOperationId: operation,
+    admissionCommitRef: commitRef('hand-runtime-admission', 1),
+    ...overrides,
   };
 }
 
@@ -87,9 +123,56 @@ class Permissions implements OperationPermissionPort, OperationTaskBoundaryPort 
 
 class Journal implements OperationJournalPort {
   readonly events: OperationEvent[] = [];
+  readonly controls: OperationControlRecord[] = [];
+  readonly controlCommits: JournalCommitRef[] = [];
+  readonly coverage = new Map<string, JournalCommitRef>();
+  private sequence = 0;
 
-  async commit(event: OperationEvent): Promise<void> {
+  private append(digest: string): JournalCommitRef {
+    this.sequence += 1;
+    return {
+      commitId: `journal-commit-${this.sequence}`,
+      journalSeq: this.sequence,
+      recordDigest: `sha256:${digest}`,
+    };
+  }
+
+  async commit(event: OperationEvent, control: OperationControlRecord): Promise<JournalCommitRef> {
+    const ref = this.append(`control-${event.kind}`);
     this.events.push(event);
+    this.controls.push(control);
+    this.controlCommits.push(ref);
+    return ref;
+  }
+
+  async readControl(input: OperationControlSelector): Promise<OperationControlReadback> {
+    const key = scopeRefKey(input.scope);
+    const coverageRef = this.coverage.get(key);
+    if (coverageRef === undefined) {
+      return {
+        state: 'unknown',
+        scope: input.scope,
+        reason: 'operation control coverage was never initialized for this scope',
+        missingRefs: [],
+      };
+    }
+    const scoped = this.controls
+      .map((control, index) => ({ control, commit: this.controlCommits[index] }))
+      .filter(({ control }) => scopeRefKey(control.binding.scope) === key);
+    return {
+      state: 'complete',
+      scope: input.scope,
+      coverageCommitRef: coverageRef,
+      currentControlCommitRef: scoped.at(-1)?.commit ?? coverageRef,
+      operations: scoped.map(({ control }) => control),
+      operationCommits: scoped.map(({ commit }) => commit),
+    };
+  }
+
+  async initializeCoverage(input: OperationCoverageInitialization): Promise<JournalCommitRef> {
+    const ref = this.append(`coverage-${input.scope.taskId?.value ?? 'scope'}`);
+    this.coverage.set(scopeRefKey(input.scope), ref);
+    return ref;
   }
 }
 
@@ -155,7 +238,7 @@ function setup(route = new SemanticRoute()) {
 
 test('Hand sends one complete semantic operation to the virtual tool gateway', async () => {
   const context = setup();
-  const result = await context.hand.execute({ intent: intent() });
+  const result = await context.hand.execute({ intent: intent(), binding: controlBinding() });
 
   assert.equal(result.operation.status, 'succeeded');
   assert.equal(result.operation.result?.outputRef, 'artifact://hand/search-report');
@@ -171,7 +254,7 @@ test('Hand returns a virtual route failure without claiming success or inventing
   const route = new SemanticRoute();
   route.outcome = 'blocked';
   const context = setup(route);
-  const result = await context.hand.execute({ intent: intent({ idempotencyKey: 'hand-runtime-blocked' }) });
+  const result = await context.hand.execute({ intent: intent({ idempotencyKey: 'hand-runtime-blocked' }), binding: controlBinding() });
 
   assert.equal(result.operation.status, 'blocked');
   assert.equal(result.operation.blocked?.nextAction.ref, 'code-symbol-search');
@@ -182,8 +265,8 @@ test('Hand returns a virtual route failure without claiming success or inventing
 
 test('terminal replay does not re-enter the semantic route', async () => {
   const context = setup();
-  const first = await context.hand.execute({ intent: intent() });
-  const second = await context.hand.execute({ intent: intent() });
+  const first = await context.hand.execute({ intent: intent(), binding: controlBinding() });
+  const second = await context.hand.execute({ intent: intent(), binding: controlBinding() });
 
   assert.equal(first.operation.status, 'succeeded');
   assert.equal(second.submission.decision, 'replay');
@@ -194,8 +277,8 @@ test('terminal replay does not re-enter the semantic route', async () => {
 test('concurrent replay does not start a second gateway execution or throw', async () => {
   const context = setup();
   const [first, second] = await Promise.all([
-    context.hand.execute({ intent: intent() }),
-    context.hand.execute({ intent: intent() }),
+    context.hand.execute({ intent: intent(), binding: controlBinding() }),
+    context.hand.execute({ intent: intent(), binding: controlBinding() }),
   ]);
 
   assert.equal(first.operation.status, 'succeeded');
@@ -208,8 +291,8 @@ test('blocked replay is returned to the orchestrator and is not silently retried
   const route = new SemanticRoute();
   route.outcome = 'blocked';
   const context = setup(route);
-  const first = await context.hand.execute({ intent: intent({ idempotencyKey: 'hand-runtime-blocked-replay' }) });
-  const second = await context.hand.execute({ intent: intent({ idempotencyKey: 'hand-runtime-blocked-replay' }) });
+  const first = await context.hand.execute({ intent: intent({ idempotencyKey: 'hand-runtime-blocked-replay' }), binding: controlBinding() });
+  const second = await context.hand.execute({ intent: intent({ idempotencyKey: 'hand-runtime-blocked-replay' }), binding: controlBinding() });
 
   assert.equal(first.operation.status, 'blocked');
   assert.equal(second.submission.decision, 'replay');

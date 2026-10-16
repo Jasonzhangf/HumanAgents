@@ -3,9 +3,11 @@ import test from 'node:test';
 import {
   id,
   type EvidenceRef,
+  type JournalCommitRef,
   type OperationEvent,
   type OperationIntent,
   type Scope,
+  type ScopeRef,
   type ToolRegistration,
 } from '../../../packages/contracts/src/index.js';
 import {
@@ -13,6 +15,11 @@ import {
   OperationNotificationError,
   ToolExecutionGateway,
   ToolRegistry,
+  type OperationControlBinding,
+  type OperationControlReadback,
+  type OperationControlRecord,
+  type OperationControlSelector,
+  type OperationCoverageInitialization,
   type OperationExecutorObservation,
   type OperationExecutorPort,
   type OperationJournalPort,
@@ -37,6 +44,35 @@ function evidence(label: string, scope: Scope = requestedScope): EvidenceRef {
     source: 'gateway-test',
     locator: `records/${label}`,
     scope,
+  };
+}
+
+function commitRef(label: string, journalSeq: number): JournalCommitRef {
+  return { commitId: `commit-${label}`, journalSeq, recordDigest: `sha256:${label}` };
+}
+
+function scopeRefKey(scope: ScopeRef): string {
+  return [
+    scope.organId.value,
+    scope.taskId?.value ?? '',
+    scope.cycleId?.value ?? '',
+    scope.operationId?.value ?? '',
+  ].join('|');
+}
+
+/**
+ * Parent Harness runtime admission binding for one Gateway operation. The
+ * parent operation identity and admission receipt name this operation's own
+ * admission, matching the real Harness binding construction.
+ */
+function controlBinding(overrides: Partial<OperationControlBinding> = {}): OperationControlBinding {
+  return {
+    scope: requestedScope,
+    agentRuntimeId: 'runtime-g3',
+    harnessExecutionEpoch: 1,
+    parentOperationId: operation,
+    admissionCommitRef: commitRef('admission-g3', 1),
+    ...overrides,
   };
 }
 
@@ -145,11 +181,58 @@ class Verifier implements OperationVerifierPort {
 class Journal implements OperationJournalPort {
   readonly committed: OperationEvent[] = [];
   readonly published: OperationEvent[] = [];
+  readonly controls: OperationControlRecord[] = [];
+  readonly controlCommits: JournalCommitRef[] = [];
+  readonly coverage = new Map<string, JournalCommitRef>();
   failPublishOnceFor?: OperationEvent['kind'];
   failPublishError?: Error;
+  private sequence = 0;
 
-  async commit(event: OperationEvent): Promise<void> {
+  private append(digest: string): JournalCommitRef {
+    this.sequence += 1;
+    return {
+      commitId: `journal-commit-${this.sequence}`,
+      journalSeq: this.sequence,
+      recordDigest: `sha256:${digest}`,
+    };
+  }
+
+  async commit(event: OperationEvent, control: OperationControlRecord): Promise<JournalCommitRef> {
+    const ref = this.append(`control-${event.kind}`);
     this.committed.push(event);
+    this.controls.push(control);
+    this.controlCommits.push(ref);
+    return ref;
+  }
+
+  async readControl(input: OperationControlSelector): Promise<OperationControlReadback> {
+    const key = scopeRefKey(input.scope);
+    const coverageRef = this.coverage.get(key);
+    if (coverageRef === undefined) {
+      return {
+        state: 'unknown',
+        scope: input.scope,
+        reason: 'operation control coverage was never initialized for this scope',
+        missingRefs: [],
+      };
+    }
+    const scoped = this.controls
+      .map((control, index) => ({ control, commit: this.controlCommits[index] }))
+      .filter(({ control }) => scopeRefKey(control.binding.scope) === key);
+    return {
+      state: 'complete',
+      scope: input.scope,
+      coverageCommitRef: coverageRef,
+      currentControlCommitRef: scoped.at(-1)?.commit ?? coverageRef,
+      operations: scoped.map(({ control }) => control),
+      operationCommits: scoped.map(({ commit }) => commit),
+    };
+  }
+
+  async initializeCoverage(input: OperationCoverageInitialization): Promise<JournalCommitRef> {
+    const ref = this.append(`coverage-${input.scope.taskId?.value ?? 'scope'}`);
+    this.coverage.set(scopeRefKey(input.scope), ref);
+    return ref;
   }
 
   async publishCommitted(event: OperationEvent): Promise<void> {
@@ -212,7 +295,7 @@ function setup(overrides: {
 
 test('normal inspect operation follows accepted to terminal and commits before publishing', async () => {
   const context = setup();
-  const submitted = await context.gateway.submit(intent());
+  const submitted = await context.gateway.submit(intent(), controlBinding());
 
   assert.equal(submitted.decision, 'new');
   assert.equal(submitted.operation.status, 'accepted');
@@ -249,15 +332,15 @@ test('normal inspect operation follows accepted to terminal and commits before p
 
 test('duplicate same fingerprint replays without executor and different fingerprint conflicts', async () => {
   const context = setup();
-  const first = await context.gateway.submit(intent());
-  const replay = await context.gateway.submit(intent());
+  const first = await context.gateway.submit(intent(), controlBinding());
+  const replay = await context.gateway.submit(intent(), controlBinding());
 
   assert.equal(first.decision, 'new');
   assert.equal(replay.decision, 'replay');
   assert.equal(replay.operation.operationId.value, operation.value);
   assert.equal(context.executor.requests.length, 0);
   await assert.rejects(
-    () => context.gateway.submit(intent({ inputDigest: 'sha256:changed' })),
+    () => context.gateway.submit(intent({ inputDigest: 'sha256:changed' }), controlBinding()),
     (error: unknown) => error instanceof GatewayError && error.code === 'idempotency-conflict',
   );
 });
@@ -268,7 +351,7 @@ test('post-commit publish failure keeps accepted operation and idempotency stabl
   const context = setup({ journal });
 
   await assert.rejects(
-    () => context.gateway.submit(intent()),
+    () => context.gateway.submit(intent(), controlBinding()),
     (error: unknown) => {
       assert.ok(error instanceof OperationNotificationError);
       assert.equal(error.code, 'notification-failed');
@@ -277,7 +360,7 @@ test('post-commit publish failure keeps accepted operation and idempotency stabl
     },
   );
 
-  const replay = await context.gateway.submit(intent());
+  const replay = await context.gateway.submit(intent(), controlBinding());
   assert.equal(replay.decision, 'replay');
   assert.equal(replay.operation.status, 'accepted');
   assert.equal(context.journal.committed.length, 1);
@@ -299,7 +382,7 @@ test('concurrent execute leases and invokes executor once', async () => {
     return originalExecute(input);
   };
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const first = context.gateway.execute(operation);
   const second = context.gateway.execute(operation);
@@ -334,7 +417,7 @@ test('in-flight execution can be cancelled and settled without waiting for execu
     return originalExecute(input);
   };
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const running = context.gateway.execute(operation);
   await startedPromise;
@@ -359,7 +442,7 @@ test('stop failure fences late execution events and preserves reconcile_required
   };
   const stopSettlement = new StopSettlement();
   const context = setup({ executor, stopSettlement });
-  await context.gateway.submit(intent({ idempotencyKey: 'late-event-fence' }));
+  await context.gateway.submit(intent({ idempotencyKey: 'late-event-fence' }), controlBinding());
   const running = context.gateway.execute(operation);
   await startedPromise;
   await context.gateway.requestCancel(operation);
@@ -394,7 +477,7 @@ test('stale executor epoch becomes a durable blocked recovery state', async () =
   const executor = new Executor();
   executor.next = observation({ executionEpoch: 99 });
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const result = await context.gateway.execute(operation);
   assert.equal(result.status, 'blocked');
@@ -416,7 +499,7 @@ test('stale verifier epoch becomes a durable blocked recovery state', async () =
     evidenceRefs: [evidence('verifier-stale')],
   };
   const context = setup({ verifier });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const result = await context.gateway.execute(operation);
   assert.equal(result.status, 'blocked');
@@ -429,8 +512,8 @@ test('stale verifier epoch becomes a durable blocked recovery state', async () =
 test('gateway durable identifiers are unique across runtime instances', async () => {
   const first = setup();
   const second = setup();
-  await first.gateway.submit(intent());
-  await second.gateway.submit(intent());
+  await first.gateway.submit(intent(), controlBinding());
+  await second.gateway.submit(intent(), controlBinding());
   await first.gateway.execute(operation);
   await second.gateway.execute(operation);
 
@@ -452,7 +535,7 @@ test('verifier failure records owner, failure evidence, and failed result', asyn
     message: 'output digest does not match contract',
   };
   const context = setup({ verifier });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const result = await context.gateway.execute(operation);
 
@@ -486,7 +569,7 @@ test('structured adapter failures with mismatched identity or phase fall back to
     };
   };
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const result = await context.gateway.execute(operation);
 
@@ -518,7 +601,7 @@ test('structured verifier failures with the wrong phase fall back to synthesized
     };
   };
   const context = setup({ verifier });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const result = await context.gateway.execute(operation);
 
@@ -541,7 +624,7 @@ test('malformed structured failures fall back to synthesized failures', async ()
     };
   };
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const result = await context.gateway.execute(operation);
 
@@ -561,7 +644,7 @@ test('blocked after execution resumes verify-only without double execution', asy
     message: 'verification evidence is pending',
   });
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const blocked = await context.gateway.execute(operation);
   assert.equal(blocked.status, 'blocked');
@@ -606,7 +689,7 @@ test('blocked execution recovery can be cancelled while the resumed executor is 
     return observation({ executionEpoch: input.lease.executionEpoch });
   };
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const blocked = await context.gateway.execute(operation);
   assert.equal(blocked.status, 'blocked');
@@ -650,7 +733,7 @@ test('reconcile_required does not execute again and can resolve through blocked 
     message: 'external effect state is unknown',
   });
   const context = setup({ executor });
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   const reconciled = await context.gateway.execute(operation);
   assert.equal(reconciled.status, 'reconcile_required');
@@ -674,7 +757,7 @@ test('reconcile_required does not execute again and can resolve through blocked 
 
 test('forged cancellation settlement cannot reach cancelled', async () => {
   const context = setup();
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
   const requested = await context.gateway.requestCancel(operation);
   assert.equal(requested.status, 'cancel_requested');
 
@@ -698,7 +781,7 @@ test('forged cancellation settlement cannot reach cancelled', async () => {
 
 test('cancellation settlement rejects invalid lifecycle status without stop request', async () => {
   const context = setup();
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
 
   await assert.rejects(
     () => context.gateway.settleCancellation(operation),
@@ -711,7 +794,7 @@ test('cancellation settlement rejects invalid lifecycle status without stop requ
 
 test('trusted stop settlement reaches cancelled and positive reconcile', async () => {
   const context = setup();
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
   await context.gateway.requestCancel(operation);
 
   const settled = await context.gateway.settleCancellation(operation);
@@ -721,7 +804,7 @@ test('trusted stop settlement reaches cancelled and positive reconcile', async (
   assert.equal(context.journal.committed.at(-1)?.kind, 'operation.cancelled');
 
   const reconcile = setup();
-  await reconcile.gateway.submit(intent());
+  await reconcile.gateway.submit(intent(), controlBinding());
   await reconcile.gateway.requestCancel(operation);
   reconcile.stopSettlement.receipt = {
     receiptId: 'stop-receipt-possible',
@@ -746,7 +829,7 @@ test('trusted stop settlement reaches cancelled and positive reconcile', async (
 
 test('pre-execution cancellation settles without fabricating a lease', async () => {
   const context = setup();
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
   await context.gateway.requestCancel(operation);
 
   const settled = await context.gateway.settleCancellation(operation);
@@ -759,7 +842,7 @@ test('pre-execution cancellation settles without fabricating a lease', async () 
 
 test('permission revocation prevents lease and records failure without execution', async () => {
   const context = setup();
-  await context.gateway.submit(intent());
+  await context.gateway.submit(intent(), controlBinding());
   context.permissions.revoked = true;
 
   const failed = await context.gateway.execute(operation);
