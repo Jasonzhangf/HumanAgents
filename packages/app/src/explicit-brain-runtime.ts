@@ -502,7 +502,14 @@ export function createProviderExplicitBrainInterpreter(input: {
             rawContent: input.rawContent,
             turnHelperJournal: input.turnHelperJournal,
           });
-          if (await coldOwner.readResourceClose() !== null) {
+          const snapshot = await input.parentJournal.readTurnSnapshot(pending.fact.turn);
+          // A closed turn only delivers its already-settled output when the
+          // Runtime owner decides it is a terminal output. A closed failed
+          // epoch with zero accepted facts decides `continue` instead, so it
+          // falls through to the new physical epoch below rather than being
+          // read as a false success.
+          if (snapshot.resourceClose !== null
+            && (await coldOwner.readReconciliationEligibility()).mode === 'terminal-output') {
             const finalParentOutput = await coldOwner.readClosedTurnOutput();
             const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
@@ -514,7 +521,6 @@ export function createProviderExplicitBrainInterpreter(input: {
               throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} holds on unreturned helper ${entry.identity.helperCallId}`);
             }
           }
-          const snapshot = await input.parentJournal.readTurnSnapshot(pending.fact.turn);
           const priorReconciliation = snapshot.ownerReconciliations.at(-1);
           const activeOwner = priorReconciliation?.fact.replacementOwner ?? pending.fact.executionOwner;
           if (activeOwner === undefined) {
@@ -523,6 +529,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           if (activeLease === undefined) throw new Error('interaction parent recovery requires active supervisor lease authority');
           const reconciliation = await activeLease.withCurrentLeaseOwner(async (authenticatedCaller, isCommittedReplacement) => {
             if (priorReconciliation !== undefined
+              && snapshot.resourceClose === null
               && authenticatedCaller.daemonLeaseId === activeOwner.daemonLeaseId
               && authenticatedCaller.daemonGeneration === activeOwner.daemonGeneration
               && authenticatedCaller.processStartToken === activeOwner.processStartToken) return priorReconciliation;

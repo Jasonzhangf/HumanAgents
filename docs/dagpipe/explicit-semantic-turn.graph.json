@@ -13,7 +13,7 @@
     ],
     "designStatus": "USER-REQUIREMENT-DESIGN",
     "implementationStatus": "UNVERIFIED",
-    "bindingBoundary": "现有 ownerPath 为真实责任入口；plannedOwnerPath 记录 interaction-parent-turn-raw.ts 与 interaction-parent-turn-journal.ts 尚不存在。不声明 Operator 已注册或 runtime 执行。",
+    "bindingBoundary": "现有 ownerPath 为真实责任入口；interaction-parent-turn-raw.ts 与 interaction-parent-turn-journal.ts 已存在。closed Provider epoch 不等于 logical turn complete；零 acceptedFacts 的 failed 请求在 epoch 真实 closed 后可同 turn 新 epoch 重入。不声明 Operator 已注册或整体已验收。",
     "outcomeBoundary": "返回 ExplicitBrainInterpretation（answer/clarification/status-query/requirement）或显式错误；dispatch 返回不自动采纳，只有 accept 产生 owner-accepted。",
     "identityBoundary": "父轮次使用中立 interaction-parent execution identity（runtimeId、organId、operationId、executionEpoch、interactionTurn）；不伪造 taskId 或 cycleId，身份不进入业务 payload 或 metadata。",
     "iterationBoundary": "initial、tool-call、tool-result、continuation 由外部 ProviderAgentDriver 驱动；本 DAG 保持无环，不把请求循环展开成图内环路。",

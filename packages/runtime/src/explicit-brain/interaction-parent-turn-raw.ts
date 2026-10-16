@@ -218,6 +218,21 @@ export interface InteractionParentUnsettledRequests {
   readonly unsettledRequests: readonly RuntimeRequestRecord[];
 }
 
+/**
+ * The single durable reconciliation decision of one turn.
+ *
+ * `terminal-output` means the turn already has a real settled final output and
+ * is delivered without an executor; `continue` means the business turn must
+ * resume in a new physical epoch under the same identity. Held shapes
+ * (cancelled, partial failed, unpaired tool, unknown side effect) surface as the
+ * existing typed `ContractError`.
+ */
+export interface InteractionParentReconciliationEligibility {
+  readonly mode: 'terminal-output' | 'continue';
+  readonly unsettledRequestIds: readonly string[];
+  readonly effectiveExecutionEpoch: number;
+}
+
 export interface InteractionParentTurnRawOwner {
   readonly turn: InteractionTurnIdentity;
   readonly execution: InteractionParentProviderExecutionIdentityRef;
@@ -280,6 +295,12 @@ export interface InteractionParentTurnRawOwner {
   >;
   readonly requestContext: ProviderRequestContextHook<InteractionParentProviderExecutionIdentityRef>;
   inspectTurnRequests(): Promise<InteractionParentUnsettledRequests>;
+  /**
+   * Read this turn's single durable reconciliation decision from one snapshot.
+   * The App consumes this decision instead of re-deriving request state, so the
+   * eligibility, ignored-request and continuation rules keep one owner.
+   */
+  readReconciliationEligibility(): Promise<InteractionParentReconciliationEligibility>;
 }
 
 export interface InteractionParentTurnRawOwnerInput {
@@ -789,6 +810,19 @@ export function createInteractionParentTurnRawOwner(
       && committed.fact.envelope.fact.kind === 'request-complete');
   }
 
+  /**
+   * Whether a request committed any raw fact. A failed request with zero
+   * accepted facts left no partial output or tool side effect to replay, so it
+   * is the only failed shape a closed epoch may abandon and retry.
+   */
+  function hasAcceptedFacts(
+    snapshot: InteractionParentTurnSnapshot,
+    record: RuntimeRequestRecord,
+  ): boolean {
+    return snapshot.acceptedFacts.some((committed) =>
+      sameRequestIdentity(committed.fact.envelope.request, record.request));
+  }
+
   function assertActiveOwner(snapshot: InteractionParentTurnSnapshot): void {
     const active = activeExecutionState(snapshot);
     if (canonicalJsonStringify(active.execution) !== canonicalJsonStringify(execution)
@@ -812,11 +846,20 @@ export function createInteractionParentTurnRawOwner(
     const active = activeExecutionState(snapshot);
     const ignored = new Set(ignoredRequests(snapshot));
     const requests = nonIgnoredRequestRecords(snapshot, ignored);
+    // The active epoch's provider is physically released only when its own
+    // close is committed. A failed request in that closed epoch may resume in a
+    // new epoch, but only when it left zero accepted facts.
+    const hasActiveEpochClose = snapshot.resourceClose !== null
+      && snapshot.resourceClose.fact.execution.executionEpoch === active.execution.executionEpoch;
+    const failedClosedZeroFactRequests = hasActiveEpochClose
+      ? requests.filter((record) => record.phase === 'failed' && !hasAcceptedFacts(snapshot, record))
+      : [];
     const unsettledRequests = requests.filter((record) =>
       (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
     const unsettledRequestIds = requests
       .filter((record) => (UNSETTLED_PHASES as readonly string[]).includes(record.phase)
-        || (record.phase === 'settled' && !hasCommittedRequestCompletion(snapshot, record)))
+        || (record.phase === 'settled' && !hasCommittedRequestCompletion(snapshot, record))
+        || (hasActiveEpochClose && record.phase === 'failed' && !hasAcceptedFacts(snapshot, record)))
       .map((record) => record.request.requestId);
 
     // An unpaired tool call is an unknown physical side effect: it holds the
@@ -844,7 +887,18 @@ export function createInteractionParentTurnRawOwner(
       }
     }
 
-    if (unsettledRequests.length > 0) {
+    // Hold every cancelled request and every failed request that is not the
+    // proven closed-failed-zero-fact shape: their side effects are unknown and
+    // must never be replayed or silently dropped.
+    if (requests.some((record) =>
+      record.phase === 'cancelled'
+      || (record.phase === 'failed' && (!hasActiveEpochClose || hasAcceptedFacts(snapshot, record))))) {
+      throw new ContractError(
+        'interaction parent continuation requires every non-ignored request to be settled',
+      );
+    }
+
+    if (unsettledRequests.length > 0 || failedClosedZeroFactRequests.length > 0) {
       return {
         mode: 'continue',
         unsettledRequestIds,
@@ -911,6 +965,7 @@ export function createInteractionParentTurnRawOwner(
   async function commitReconciliation(
     previousOwner: OccurrenceExecutionOwner,
     replacementOwner: OccurrenceExecutionOwner,
+    isCommittedReplacement: boolean,
     reconciledAt: string,
   ): Promise<InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>> {
     if (reconciledAt.trim() === '') {
@@ -918,17 +973,16 @@ export function createInteractionParentTurnRawOwner(
     }
     validateOccurrenceExecutionOwner(previousOwner);
     validateOccurrenceExecutionOwner(replacementOwner);
-    if (sameOccurrenceExecutionOwner(previousOwner, replacementOwner)) {
-      throw new ContractError('interaction parent owner reconciliation requires a distinct replacement owner');
+    const sameOwner = sameOccurrenceExecutionOwner(previousOwner, replacementOwner);
+    // A distinct owner needs the authoritative committed-replacement proof. A
+    // same owner is only the post-close failed-epoch re-entry below, so it is
+    // authorized by the durable close and eligibility, never by this flag.
+    if (!sameOwner && !isCommittedReplacement) {
+      throw new ContractError('interaction parent owner reconciliation requires a committed replacement owner');
     }
     const planSnapshot = await journal.readTurnSnapshot(turn);
     if (planSnapshot.turnInput === null) {
       throw new ContractError('interaction parent owner reconciliation requires the committed turn input');
-    }
-    if (planSnapshot.resourceClose !== null) {
-      throw new ContractError(
-        'interaction parent owner reconciliation requires a turn without a committed resource close',
-      );
     }
     const active = activeExecutionState(planSnapshot);
     if (active.executionOwner === null) {
@@ -942,20 +996,45 @@ export function createInteractionParentTurnRawOwner(
       || !sameProviderBinding(committedBinding, providerBinding)) {
       throw new ContractError('interaction parent reconciliation requires the committed execution identity and provider');
     }
-    const existingPair = planSnapshot.ownerReconciliations.find((entry) =>
-      ownerReconciliationPair(entry.fact.previousOwner, entry.fact.replacementOwner)
-        === ownerReconciliationPair(previousOwner, replacementOwner));
-    if (existingPair !== undefined) {
-      if (!sameOccurrenceExecutionOwner(existingPair.fact.previousOwner, previousOwner)
-        || !sameOccurrenceExecutionOwner(existingPair.fact.replacementOwner, replacementOwner)) {
-        throw new ContractError('interaction parent owner reconciliation conflicts with the committed owner pair');
+    const closedEpoch = planSnapshot.resourceClose !== null;
+    if (closedEpoch) {
+      // A committed close is the only way a same owner may open the next epoch.
+      // The previous owner must be the active owner, and the closed epoch must
+      // prove the failed-zero-fact continuation below.
+      if (!sameOccurrenceExecutionOwner(active.executionOwner, previousOwner)) {
+        throw new ContractError(
+          'interaction parent owner reconciliation previous owner is not the committed turn owner',
+        );
       }
-      return existingPair;
-    }
-    if (!sameOccurrenceExecutionOwner(active.executionOwner, previousOwner)) {
-      throw new ContractError('interaction parent owner reconciliation previous owner is not the committed turn owner');
+    } else {
+      if (sameOwner) {
+        throw new ContractError('interaction parent owner reconciliation requires a distinct replacement owner');
+      }
+      const existingPair = planSnapshot.ownerReconciliations.find((entry) =>
+        ownerReconciliationPair(entry.fact.previousOwner, entry.fact.replacementOwner)
+          === ownerReconciliationPair(previousOwner, replacementOwner));
+      if (existingPair !== undefined) {
+        if (!sameOccurrenceExecutionOwner(existingPair.fact.previousOwner, previousOwner)
+          || !sameOccurrenceExecutionOwner(existingPair.fact.replacementOwner, replacementOwner)) {
+          throw new ContractError('interaction parent owner reconciliation conflicts with the committed owner pair');
+        }
+        return existingPair;
+      }
+      if (!sameOccurrenceExecutionOwner(active.executionOwner, previousOwner)) {
+        throw new ContractError(
+          'interaction parent owner reconciliation previous owner is not the committed turn owner',
+        );
+      }
     }
     const eligibility = await requestEligibility(planSnapshot);
+    // A post-close reconciliation is only ever the failed-zero-fact
+    // continuation; any other closed shape stays held on its own typed error.
+    if (closedEpoch
+      && (eligibility.mode !== 'continue' || eligibility.unsettledRequestIds.length === 0)) {
+      throw new ContractError(
+        'interaction parent owner reconciliation requires a turn without a committed resource close',
+      );
+    }
     if (eligibility.mode === 'terminal-output') {
       await finalOutputFromSnapshot(planSnapshot, ignoredRequests(planSnapshot));
     }
@@ -1142,14 +1221,9 @@ export function createInteractionParentTurnRawOwner(
       readonly replacementOwner: OccurrenceExecutionOwner;
       readonly isCommittedReplacement: boolean;
       readonly reconciledAt: string;
-    }): Promise<InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>> => {
-      if (!input.isCommittedReplacement) {
-        return Promise.reject(new ContractError(
-          'interaction parent owner reconciliation requires a committed replacement owner',
-        ));
-      }
-      return commitReconciliation(input.previousOwner, input.replacementOwner, input.reconciledAt);
-    },
+    }): Promise<InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>> => commitReconciliation(
+      input.previousOwner, input.replacementOwner, input.isCommittedReplacement, input.reconciledAt,
+    ),
 
     async readReconciledTurnOutput(): Promise<
       InteractionParentFinalTurnOutput & {
@@ -1388,6 +1462,10 @@ export function createInteractionParentTurnRawOwner(
         unsettledRequests: requests.filter((record) =>
           (UNSETTLED_PHASES as readonly string[]).includes(record.phase)),
       };
+    },
+
+    async readReconciliationEligibility(): Promise<InteractionParentReconciliationEligibility> {
+      return requestEligibility(await journal.readTurnSnapshot(turn));
     },
   };
 }

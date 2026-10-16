@@ -1467,6 +1467,219 @@ test('provider explicit brain interpreter fresh OS default DI recovers preclose 
   }
 });
 
+// Failure basis: a closed failed epoch that already committed raw facts has
+// unknown side effects, so it must stay held instead of resuming. Impact:
+// replaying partial provider output or tool side effects. Cost: one
+// no-generation cold read on a seeded durable turn with a dead executor port.
+test('provider explicit brain interpreter holds a closed failed epoch with accepted facts', async () => {
+  const root = join(parentFixtureRoot, `partial-failed-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-partial-failed', providerId: 'provider-partial-failed', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'model-partial-failed',
+    configDigest: 'sha256:partial-failed-config', capabilityDigest: 'sha256:partial-failed-capability',
+  };
+  const rawInput = '2 + 2 等于几？请只回答数字。';
+  const request = { interactionId: 'partial-failed', inputRevision: 1, sourceRef: 'ui:partial-failed', rawInput, clarifications: [], taskCandidates: [] };
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const parent = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(join(root, 'parent-partial-failed.jsonl')));
+  const helpers = new JsonlInteractionHelperJournal(new JsonlOrganJournal(join(root, 'parent-partial-failed.jsonl')));
+  const externalCalls: string[] = [];
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths);
+    const ownerIdentity = await lease.withCurrentLeaseOwner(async (owner) => owner);
+    const turn = { ...scope, interactionId: request.interactionId, inputRevision: 1, turnId: 'seed-partial-failed' };
+    const operationScope = { organId: scope.organId, operationId: id('operation', 'op-partial-failed') };
+    const execution = { runtimeId: 'runtime-partial-failed', ...operationScope, executionEpoch: 1, interactionTurn: turn };
+    const initialInput = {
+      ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(request) }),
+      view: { kind: 'utf8-text' as const },
+    };
+    const owner = createInteractionParentTurnRawOwner({ turn, execution, scope: operationScope, initialInput, providerBinding: binding,
+      executionOwner: ownerIdentity, journal: parent, rawContent: providerRawContentReader(evidence) });
+    await owner.openTurnInput();
+    const req = { turnId: 'provider-partial-failed', requestId: 'req-1-partial-failed' };
+    await owner.registerRequest({ execution, record: { request: req, scope: operationScope, phase: 'dispatching' } });
+    await owner.registerRequest({ execution, record: { request: req, scope: operationScope, phase: 'dispatched' } });
+    await owner.acceptRawFact({ execution, scope: operationScope, request: req, producerSeq: 1, fact: { kind: 'content', channel: 'assistant-text', update: 'full', contentUnitId: 'text',
+      content: { ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'partial-text', locator: 'partial-text', content: 'partial' }), view: { kind: 'utf8-text' as const } }, complete: true } });
+    await owner.registerRequest({ execution, record: { request: req, scope: operationScope, phase: 'failed' } });
+    const closeEvidence = await evidence.write({ scope: operationScope, kind: 'execution', type: 'seed-close', locator: 'seed-close', content: 'seed-closed' });
+    await owner.recordProviderClose({ providerBinding: binding, result: { bindingId: binding.bindingId, providerId: binding.providerId,
+      protocol: binding.protocol, state: 'closed', evidenceRefs: [closeEvidence] }, closedAt: new Date().toISOString() });
+    const deadPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence });
+    deadPort.start = async () => { externalCalls.push('start'); throw new Error('unexpected provider start'); };
+    deadPort.observe = (() => { externalCalls.push('observe'); throw new Error('unexpected provider observe'); }) as typeof deadPort.observe;
+    deadPort.settle = async () => { externalCalls.push('settle'); throw new Error('unexpected provider settle'); };
+    const interpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal: parent, checkpointJournal: helpers, helperJournal: helpers, turnHelperJournal: helpers,
+      rawEvidence: evidence, rawContent: providerRawContentReader(evidence), clock: { now: () => new Date().toISOString() },
+      binding, templateRoot: join(process.cwd(), 'packages/agent-templates/templates'), port: deadPort,
+      helperFactory: async () => { externalCalls.push('helperFactory'); throw new Error('unexpected helper dispatch'); },
+      prepareAgentProvider: async () => { externalCalls.push('prepareAgentProvider'); throw new Error('unexpected provider preparation'); },
+    });
+    await assert.rejects(() => interpreter.interpret(request), /requires every non-ignored request to be settled/);
+    assert.deepEqual(externalCalls, [], 'a held partial failure must not acquire an executor');
+    assert.equal((await parent.readTurnSnapshot(turn)).resourceClose?.fact.execution.executionEpoch, 1);
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the A0 recovery runs under a new daemon generation after the
+// original owner exits, so the failed-closed epoch must also resume under a
+// distinct committed replacement owner. Impact: a recovery that only accepts a
+// same-owner retry cannot reopen the turn after a real restart. Cost: one
+// child seed process, one real UI consumer run, and one takeover on the same
+// isolated durable fixture.
+test('provider explicit brain interpreter resumes a failed closed epoch under a replacement owner', async () => {
+  const root = join(parentFixtureRoot, `failed-closed-cold-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-failed-closed-cold', providerId: 'provider-failed-closed-cold', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'model-failed-closed-cold',
+    configDigest: 'sha256:failed-closed-cold-config', capabilityDigest: 'sha256:failed-closed-cold-capability',
+  };
+  const rawInput = '2 + 2 等于几？请只回答数字。';
+  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: rawInput, knownFacts: [], answer: '4', decisionRefs: [] });
+  const moduleUrl = (path: string) => new URL(`../../packages/${path}`, import.meta.url).href;
+  // The seed writes the A0 failed-closed epoch through the public Runtime/JSONL
+  // owners under generation 1, then exits without releasing the lease.
+  const script = `
+    import { startUiRuntime } from ${JSON.stringify(moduleUrl('app/src/ui-runtime/index.js'))};
+    import { AccessControlService } from ${JSON.stringify(moduleUrl('app/src/ui-runtime/access-control.js'))};
+    import { uiRuntimeControlJournalPath } from ${JSON.stringify(moduleUrl('app/src/ui-runtime/journal.js'))};
+    import { acquireDaemonLease } from ${JSON.stringify(moduleUrl('app/src/supervisor/index.js'))};
+    import { ensureControlLayout, resolveRuntimePaths } from ${JSON.stringify(moduleUrl('config/src/index.js'))};
+    import { MemoryCoordinator } from ${JSON.stringify(moduleUrl('runtime/src/memory/index.js'))};
+    import { DeterministicMemoryBackend } from ${JSON.stringify(moduleUrl('adapters/memory/src/index.js'))};
+    import { createInteractionParentTurnRawOwner } from ${JSON.stringify(moduleUrl('runtime/src/explicit-brain/index.js'))};
+    import { JsonlOrganJournal } from ${JSON.stringify(moduleUrl('adapters/jsonl/src/index.js'))};
+    import { JsonlInteractionParentTurnJournal } from ${JSON.stringify(moduleUrl('adapters/jsonl/src/interaction-parent-turn-journal.js'))};
+    import { ImmutableAssetStore } from ${JSON.stringify(moduleUrl('adapters/filesystem/src/index.js'))};
+    import { ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from ${JSON.stringify(moduleUrl('adapters/provider/src/index.js'))};
+    import { providerRawContentReader } from ${JSON.stringify(moduleUrl('adapters/provider/src/evidence.js'))};
+    import { id } from ${JSON.stringify(moduleUrl('contracts/src/index.js'))};
+    import { join } from 'node:path';
+    const root = ${JSON.stringify(root)}, binding = ${JSON.stringify(binding)};
+    const paths = await resolveRuntimePaths({controlRoot: join(root, 'control'), workspace: process.cwd()});
+    await ensureControlLayout(paths);
+    const lease = await acquireDaemonLease(paths);
+    const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+    ${RecordedParentPort.toString()}
+    const runtime = await startUiRuntime({
+      mode: 'rcc', organId: id('organ', 'explicit-test'), binding,
+      port: new RecordedParentPort({binding, stepDelayMs: 0, replay: [], evidence}),
+      checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
+      uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
+      accessControl: await AccessControlService.open({credentialPath: join(root, 'security/web-access.json'), create: true}),
+      explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      memory: {coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'failed-closed-cold'},
+      runtimeComposition: {
+        prepareAgentProvider: async () => { throw new Error('seed must not prepare Provider'); },
+        prepareTaskAgentProvider: async () => { throw new Error('seed must not prepare Task'); },
+      },
+    });
+    const interactionId = await runtime.service.receiveExplicitInput({sourceRef: 'ui:failed-closed-cold', rawInput: ${JSON.stringify(rawInput)}, channel: 'business'});
+    const persisted = await runtime.service.inspectExplicitInteraction(interactionId);
+    const request = {interactionId, inputRevision: 1, sourceRef: persisted.sourceRef, rawInput: persisted.rawInput, clarifications: [], taskCandidates: []};
+    const journal = new JsonlOrganJournal(uiRuntimeControlJournalPath(join(root, 'checkpoints/rcc')));
+    const parent = new JsonlInteractionParentTurnJournal(journal);
+    const rawContent = providerRawContentReader(evidence);
+    const ownerIdentity = await lease.withCurrentLeaseOwner(async owner => owner);
+    const turn = {organId: id('organ','explicit-test'), interactionScopeId: 'runtime:explicit-test', interactionId, inputRevision: 1, turnId: 'seed-failed-closed'};
+    const scope = {organId: turn.organId, operationId: id('operation','op-seed-failed-closed')};
+    const execution = {runtimeId: 'runtime-seed-failed-closed', ...scope, executionEpoch: 1, interactionTurn: turn};
+    const initialInput = {ref: await evidence.write({scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(request)}), view: {kind: 'utf8-text'}};
+    const owner = createInteractionParentTurnRawOwner({turn, execution, scope, initialInput, providerBinding: binding, executionOwner: ownerIdentity, journal: parent, rawContent});
+    await owner.openTurnInput();
+    const req = {turnId: 'provider-seed-failed-closed', requestId: 'req-1-seed-failed-closed'};
+    await owner.registerRequest({execution, record: {request: req, scope, phase: 'dispatching'}});
+    await owner.registerRequest({execution, record: {request: req, scope, phase: 'dispatched'}});
+    await owner.registerRequest({execution, record: {request: req, scope, phase: 'failed'}});
+    const closeEvidence = await evidence.write({scope, kind: 'execution', type: 'seed-close', locator: 'seed-close', content: 'seed-closed'});
+    await owner.recordProviderClose({providerBinding: binding, result: {bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'closed', evidenceRefs: [closeEvidence]}, closedAt: new Date().toISOString()});
+    console.log(JSON.stringify({pid: process.pid, ownerIdentity, interactionId}));
+    process.exit(0); // deliberate crash boundary: no runtime.close or lease.release
+  `;
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    const exit = await new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    assert.equal(exit, 0, stderr);
+    const receipt = JSON.parse(stdout.trim());
+    assert.equal(receipt.pid, child.pid);
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    lease = await acquireDaemonLease(paths, { takeover: { reason: 'failed-closed cold test takeover', allowed: () => true } });
+    assert.equal(lease.record.generation, 2);
+    const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+    let providerRequests = 0;
+    const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence, respond: async () => {
+      providerRequests += 1;
+      return [{ type: 'response.output_text.done', item_id: 'final', text: answerText }];
+    } });
+    runtime = await startUiRuntime({
+      mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port: port as any,
+      checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
+      uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
+      accessControl: await AccessControlService.open({ credentialPath: join(root, 'security/web-access.json'), create: false }),
+      explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'failed-closed-cold' },
+      runtimeComposition: {
+        prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+          provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+            model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef },
+          binding, port } as any),
+        prepareTaskAgentProvider: async () => { throw new Error('a simple answer must not prepare a Task'); },
+      },
+    });
+    const journalFile = uiRuntimeControlJournalPath(join(root, 'checkpoints/rcc'));
+    const parent = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const helpers = new JsonlInteractionHelperJournal(new JsonlOrganJournal(journalFile));
+    const beforeReplay = await new JsonlOrganJournal(journalFile).replay();
+
+    const answered = await runtime.service.interpretExplicitInput({ interactionId: receipt.interactionId });
+    assert.equal(answered.state, 'answered');
+    assert.equal(answered.reply, '4');
+    assert.equal(providerRequests, 1);
+    const opened = await parent.readScopeOpenedTurns({ organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' });
+    assert.equal(opened.length, 1);
+    const turn = opened[0]!.fact.turn;
+    assert.equal(turn.turnId, 'seed-failed-closed');
+    const resumed = await parent.readTurnSnapshot(turn);
+    assert.equal(resumed.ownerReconciliations.length, 1);
+    const reconciliation = resumed.ownerReconciliations[0]!.fact;
+    assert.equal(reconciliation.previousOwner.daemonGeneration, 1);
+    assert.equal(reconciliation.replacementOwner.daemonGeneration, 2);
+    assert.ok(JSON.stringify(reconciliation.previousOwner) !== JSON.stringify(reconciliation.replacementOwner),
+      'the replacement owner must differ from the original owner');
+    assert.equal(reconciliation.mode, 'continue');
+    assert.equal(reconciliation.effectiveExecutionEpoch, 2);
+    assert.equal(resumed.resourceClose?.fact.execution.executionEpoch, 2);
+    assert.ok(await helpers.readSemanticCheckpointExact(turn));
+    const afterReplay = await new JsonlOrganJournal(journalFile).replay();
+    assert.ok(afterReplay.length > beforeReplay.length);
+    assert.deepEqual(afterReplay.slice(0, beforeReplay.length), beforeReplay);
+  } finally {
+    await runtime?.close();
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('provider explicit brain interpreter recovers a physically closed parent turn from a fresh consumer', async () => {
   // Failure basis: the retained-only gate rejects a turn with a committed close
   // and complete durable helper collection after the producer interpreter is
@@ -1687,5 +1900,116 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
     );
   } finally {
     await rm(recoveryRoot, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: live A0 interaction-2 committed a Provider observe transport
+// failure and a real epoch-1 resource close with zero accepted facts. The cold
+// reader treated that committed close as terminal output and threw
+// `found 0`, so the same durable turn could never resume. Impact: the
+// interaction wedges in `matching` after any transport observe failure that
+// closes its epoch, or a broader fix would replay partial side effects. Cost:
+// one real UI consumer run with one failing Provider observation and one retry
+// on the same JSONL fixture.
+test('provider explicit brain interpreter resumes a failed closed epoch on the same identity', async () => {
+  const root = join(parentFixtureRoot, `failed-closed-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-failed-closed', providerId: 'provider-failed-closed', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'model-failed-closed',
+    configDigest: 'sha256:failed-closed-config', capabilityDigest: 'sha256:failed-closed-capability',
+  };
+  const rawInput = '2 + 2 等于几？请只回答数字。';
+  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: rawInput, knownFacts: [], answer: '4', decisionRefs: [] });
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  let providerRequests = 0;
+  // The first physical epoch terminates mid-stream, exactly like the live A0
+  // `transport.failure` observe error. The retry settles on the same port.
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence, respond: async () => {
+    providerRequests += 1;
+    if (providerRequests === 1) throw new TypeError('terminated');
+    return [{ type: 'response.output_text.done', item_id: 'final', text: answerText }];
+  } });
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths);
+    runtime = await startUiRuntime({
+      mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port: port as any,
+      checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
+      uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
+      accessControl: await AccessControlService.open({ credentialPath: join(root, 'security/web-access.json'), create: true }),
+      explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'failed-closed' },
+      runtimeComposition: {
+        prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+          provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+            model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef },
+          binding, port } as any),
+        prepareTaskAgentProvider: async () => { throw new Error('a simple answer must not prepare a Task'); },
+      },
+    });
+    const interactionId = await runtime.service.receiveExplicitInput({ sourceRef: 'ui:failed-closed', rawInput, channel: 'business' });
+    const journalFile = uiRuntimeControlJournalPath(join(root, 'checkpoints/rcc'));
+    const parent = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const helpers = new JsonlInteractionHelperJournal(new JsonlOrganJournal(journalFile));
+    const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+    const tasksBefore = runtime.service.listTasks().counts.total;
+
+    // First attempt: the Provider stream terminates during observe. The App
+    // records the request failure and the real epoch-1 close, then rejects.
+    await assert.rejects(() => runtime!.service.interpretExplicitInput({ interactionId }), /terminated/);
+    const opened = await parent.readScopeOpenedTurns(scope);
+    assert.equal(opened.length, 1);
+    const turn = opened[0]!.fact.turn;
+    assert.equal(turn.interactionId, interactionId);
+    assert.equal(turn.inputRevision, 1);
+    const failed = await parent.readTurnSnapshot(turn);
+    assert.equal(failed.turnInput?.fact.execution.executionEpoch, 1);
+    assert.deepEqual(failed.requests.map(({ fact }) => fact.phase), ['dispatching', 'dispatched', 'failed']);
+    assert.equal(failed.acceptedFacts.length, 0, 'the transport failure accepts no raw fact');
+    assert.equal(failed.resourceClose?.fact.execution.executionEpoch, 1);
+    assert.equal(failed.resourceClose?.fact.result.state, 'closed');
+    assert.equal(await helpers.readSemanticCheckpointExact(turn), null);
+    assert.equal((await runtime.service.inspectExplicitInteraction(interactionId)).state, 'matching');
+    assert.equal(providerRequests, 1);
+    const beforeReplay = await new JsonlOrganJournal(journalFile).replay();
+
+    // Second attempt: the same interaction/revision resumes the same durable
+    // turn in a new physical epoch instead of reading the close as success.
+    const answered = await runtime.service.interpretExplicitInput({ interactionId });
+    assert.equal(answered.state, 'answered');
+    assert.equal(answered.reply, '4');
+    assert.deepEqual(answered.history, ['received', 'matching', 'answered']);
+    assert.equal(providerRequests, 2);
+    const resumed = await parent.readTurnSnapshot(turn);
+    assert.equal(resumed.turnInput?.fact.execution.executionEpoch, 1, 'the business identity keeps its original epoch');
+    assert.equal(resumed.ownerReconciliations.length, 1);
+    const reconciliation = resumed.ownerReconciliations[0]!.fact;
+    assert.deepEqual(reconciliation.previousOwner, reconciliation.replacementOwner,
+      'the same live daemon lease resumes its own failed closed epoch');
+    assert.equal(reconciliation.mode, 'continue');
+    assert.equal(reconciliation.effectiveExecutionEpoch, 2);
+    assert.deepEqual(reconciliation.unsettledRequestIds, [failed.requests[0]!.fact.request.requestId]);
+    assert.equal(resumed.resourceClose?.fact.execution.executionEpoch, 2);
+    const epochTwoRequestId = resumed.requests
+      .map(({ fact }) => fact.request.requestId)
+      .find((requestId) => requestId !== failed.requests[0]!.fact.request.requestId);
+    assert.ok(epochTwoRequestId !== undefined, 'the retry must register a new request');
+    assert.equal(resumed.requests.filter(({ fact }) => fact.request.requestId === epochTwoRequestId).at(-1)?.fact.phase, 'settled');
+    assert.ok(resumed.acceptedFacts.some(({ fact }) =>
+      fact.envelope.request.requestId === epochTwoRequestId && fact.envelope.fact.kind === 'request-complete'));
+    assert.ok(await helpers.readSemanticCheckpointExact(turn));
+    // Only appended facts; the original epoch-1 records stay byte-identical.
+    const afterReplay = await new JsonlOrganJournal(journalFile).replay();
+    assert.ok(afterReplay.length > beforeReplay.length);
+    assert.deepEqual(afterReplay.slice(0, beforeReplay.length), beforeReplay);
+    assert.equal(runtime.service.listTasks().counts.total, tasksBefore, 'a simple answer must not create a Task or FIFO entry');
+  } finally {
+    await runtime?.close();
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
   }
 });
