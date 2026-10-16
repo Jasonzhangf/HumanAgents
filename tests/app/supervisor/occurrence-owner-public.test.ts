@@ -150,6 +150,13 @@ test('genuine acquired lease authorizes an occurrence mutation visible on disk',
 
     assert.equal(result, 'authorized');
     assert.deepEqual(JSON.parse(await readFile(outputPath, 'utf8')), ownerFromRecord(lease.record));
+
+    const neutralResult = await lease.withCurrentLeaseOwner(async (authenticatedCaller, isCommittedReplacement) => {
+      assert.deepEqual(authenticatedCaller, ownerFromRecord(lease.record));
+      assert.equal(await isCommittedReplacement(authenticatedCaller), false);
+      return 'neutral-authorized';
+    });
+    assert.equal(neutralResult, 'neutral-authorized');
   } finally {
     await lease.release().catch(() => undefined);
     await fx.cleanup();

@@ -6,6 +6,7 @@ import {
   validateAcceptedRawFact,
   validateInteractionSemanticCheckpoint,
   validateInteractionTurnIdentity,
+  validateOccurrenceExecutionOwner,
   validateProviderBinding,
   validateProviderCloseResult,
   type AcceptedRawFact,
@@ -176,6 +177,7 @@ function assertTurnInputFact(fact: InteractionParentTurnInputFact): void {
   assertTurn(fact.turn);
   assertInteractionParentExecution(fact.execution, fact.turn);
   assertParentScope(fact.scope, fact.turn, fact.execution);
+  if (fact.executionOwner !== undefined) validateOccurrenceExecutionOwner(fact.executionOwner);
   if (fact.providerBinding !== undefined) validateProviderBinding(fact.providerBinding);
   if (!Array.isArray(fact.priorCheckpoints)) {
     throw new JournalIntegrityError('interaction parent turn input prior checkpoints must be an array');

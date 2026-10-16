@@ -7,6 +7,7 @@ import {
   validateInteractionSemanticCheckpoint,
   validateInteractionLatestTurn,
   validateInteractionTurnIdentity,
+  validateOccurrenceExecutionOwner,
   validateProviderBinding,
   validateProviderCloseResult,
   validateRawFactEnvelope,
@@ -18,6 +19,7 @@ import {
   type JournalCommitRef,
   type NativeRequestRegistration,
   type OrganId,
+  type OccurrenceExecutionOwner,
   type ProviderBinding,
   type ProviderCloseResult,
   type ProviderRequestIdentityRef,
@@ -66,6 +68,8 @@ export interface InteractionParentTurnInputFact {
   /** The parent raw scope: organ plus operation, with no task or cycle. */
   readonly scope: ScopeRef;
   readonly initialInput: RawAsset;
+  /** Present only when the opening caller has authenticated a physical owner. */
+  readonly executionOwner?: OccurrenceExecutionOwner;
   /**
    * The actual Provider binding the original owner used for this turn. It is
    * optional only so older Journal records without it stay honestly readable;
@@ -224,6 +228,8 @@ export interface InteractionParentTurnRawOwnerInput {
   readonly execution: InteractionParentProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
   readonly initialInput: RawAsset;
+  /** The physical owner authenticated by the caller when this turn is opened. */
+  readonly executionOwner?: OccurrenceExecutionOwner;
   /** The actual Provider binding this turn uses; it is committed with the input. */
   readonly providerBinding: ProviderBinding;
   readonly priorCheckpoints?: readonly InteractionSemanticCheckpoint[];
@@ -309,6 +315,14 @@ function cloneExecution(
   };
 }
 
+function cloneExecutionOwner(owner: OccurrenceExecutionOwner): OccurrenceExecutionOwner {
+  return {
+    daemonLeaseId: owner.daemonLeaseId,
+    daemonGeneration: owner.daemonGeneration,
+    processStartToken: owner.processStartToken,
+  };
+}
+
 function isInteractionParentExecution(
   execution: { readonly interactionTurn?: InteractionTurnIdentity },
 ): execution is InteractionParentProviderExecutionIdentityRef {
@@ -386,6 +400,7 @@ export function createInteractionParentTurnRawOwner(
   }
   assertInitialInput(input.turn, input.initialInput);
   validateProviderBinding(input.providerBinding);
+  if (input.executionOwner !== undefined) validateOccurrenceExecutionOwner(input.executionOwner);
   const priorCheckpoints = [...(input.priorCheckpoints ?? [])];
   for (const checkpoint of priorCheckpoints) validateInteractionSemanticCheckpoint(checkpoint);
 
@@ -400,6 +415,9 @@ export function createInteractionParentTurnRawOwner(
     execution: cloneExecution(execution),
     scope: cloneScope(scope),
     initialInput: input.initialInput,
+    ...(input.executionOwner === undefined
+      ? {}
+      : { executionOwner: cloneExecutionOwner(input.executionOwner) }),
     providerBinding: cloneProviderBinding(providerBinding),
     priorCheckpoints,
   };

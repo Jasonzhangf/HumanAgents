@@ -119,6 +119,12 @@ export interface SupervisorLease {
   assertActive(): Promise<void>;
   markReady(): Promise<SupervisorLeaseRecord>;
   setControlEndpoint(endpoint: SupervisorControlEndpoint): Promise<SupervisorLeaseRecord>;
+  withCurrentLeaseOwner<T>(
+    operation: (
+      authenticatedCaller: OccurrenceExecutionOwner,
+      isCommittedReplacement: SupervisorCommittedReplacementPredicate,
+    ) => Promise<T>,
+  ): Promise<T>;
   withCurrentDaemonOwner<T>(
     binding: OccurrenceTaskBinding,
     operation: (
@@ -670,6 +676,36 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
     });
   }
 
+  const withCurrentLeaseOwner: SupervisorLease['withCurrentLeaseOwner'] = async (operation) => {
+    return withLeaseGuard(daemonLeasePath(paths), async () => {
+      if (released) {
+        throw supervisorError(
+          'daemon-lease-disposed',
+          'daemon lease has been disposed',
+          'acquire a new daemon lease before continuing',
+        );
+      }
+      const latest = await assertLeaseIdentity(paths, leaseIdentity);
+      if (latest.pid !== process.pid) {
+        throw supervisorError(
+          'daemon-lease-authority-not-local',
+          'daemon lease authority does not belong to the current process',
+          'use the SupervisorLease acquired by this process',
+        );
+      }
+      const authenticatedCaller = executionOwnerFromLease(latest);
+      const isCommittedReplacement: SupervisorCommittedReplacementPredicate = async (previous) => {
+        validateOccurrenceExecutionOwner(previous);
+        return isCommittedLeaseReplacement(latest, {
+          leaseId: previous.daemonLeaseId,
+          generation: previous.daemonGeneration,
+          processStartToken: previous.processStartToken,
+        });
+      };
+      return operation(authenticatedCaller, isCommittedReplacement);
+    });
+  };
+
   return {
     paths,
     get record() {
@@ -697,45 +733,20 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
       }
       return update((current) => ({ ...current, controlEndpoint: endpoint }));
     },
+    withCurrentLeaseOwner,
     async withCurrentDaemonOwner(binding, operation) {
-      return withLeaseGuard(daemonLeasePath(paths), async () => {
-        if (released) {
-          throw supervisorError(
-            'daemon-lease-disposed',
-            'daemon lease has been disposed',
-            'acquire a new daemon lease before continuing',
-          );
-        }
-        const latest = await assertLeaseIdentity(paths, leaseIdentity);
-        if (latest.pid !== process.pid) {
-          throw supervisorError(
-            'daemon-lease-authority-not-local',
-            'daemon lease authority does not belong to the current process',
-            'use the SupervisorLease acquired by this process',
-          );
-        }
-        try {
-          validateOccurrenceTaskBinding(binding);
-        } catch (error) {
-          throw new AppLifecycleError(
-            'daemon-lease-owner-binding-invalid',
-            error instanceof Error ? error.message : String(error),
-            'repair the immutable occurrence binding before retrying the guarded mutation',
-            'supervisor',
-            error,
-          );
-        }
-        const authenticatedCaller = executionOwnerFromLease(latest);
-        const isCommittedReplacement: SupervisorCommittedReplacementPredicate = async (previous) => {
-          validateOccurrenceExecutionOwner(previous);
-          return isCommittedLeaseReplacement(latest, {
-            leaseId: previous.daemonLeaseId,
-            generation: previous.daemonGeneration,
-            processStartToken: previous.processStartToken,
-          });
-        };
-        return operation(authenticatedCaller, isCommittedReplacement);
-      });
+      try {
+        validateOccurrenceTaskBinding(binding);
+      } catch (error) {
+        throw new AppLifecycleError(
+          'daemon-lease-owner-binding-invalid',
+          error instanceof Error ? error.message : String(error),
+          'repair the immutable occurrence binding before retrying the guarded mutation',
+          'supervisor',
+          error,
+        );
+      }
+      return withCurrentLeaseOwner(operation);
     },
     async release(input) {
       if (released) return record;
