@@ -89,6 +89,7 @@ import {
   uiRuntimeControlJournalPath,
   type UiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { PreparedExecutionStop, PreparedExecutionStopPreparationFailure } from '../../packages/app/src/ui-runtime/prepared-execution-stop.js';
 import { createExecutionAdmission, executionAdmissionInputDigest, type PreparedParentLifecycle } from '../../packages/app/src/ui-runtime/execution-admission.js';
 import { readPreparedExecutionInput } from '../../packages/app/src/prepared-execution-input.js';
@@ -1079,10 +1080,10 @@ test('prepared execution stop settles the actual admitted parent without an open
 async function runtimePreparedStopConsumer(loseAppendAcknowledgement: boolean): Promise<void> {
   const root = await preparedStopFixture('runtime-prepared-stop-');
   try {
-    const journal = new JsonlOrganJournal(join(root, 'organ.jsonl'));
+    const checkpointPath = join(root, 'organ.jsonl');
+    const journal = new JsonlOrganJournal(checkpointPath);
     const taskJournal = new UiRuntimeJournal(join(root, 'tasks.jsonl'));
-    const checkpointPath = join(root, 'checkpoints.jsonl');
-    const store = new FileCheckpointStore(checkpointPath);
+    const store = new ServiceExecutionCheckpointStore(checkpointPath, journal, () => new Date());
     const originalAppend = store.append.bind(store);
     const acknowledgementError = new Error('checkpoint committed but append acknowledgement lost');
     let appends = 0;
