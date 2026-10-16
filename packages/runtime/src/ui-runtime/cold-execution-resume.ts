@@ -2,11 +2,11 @@ import {
   assertExecutionEpoch, canonicalJsonStringify,
   type ScopeRef, type WorkAssignment,
 } from '../../../contracts/src/index.js';
-import type { ActiveTurnInitialSegmentCapture, ActiveTurnSegmentPredecessorRef,
+import type { ActiveTurnInitialSegmentSource, ActiveTurnSegmentPredecessorRef,
   ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
 import { AgentLoopRuntime, type RecoverTurnResult } from '../agent-loop/runtime.js';
 import type { ContextHistoryPort } from '../checkpoints/ports.js';
-import type { ReentryCurrentFacts } from '../checkpoints/conditional-reentry.js';
+import type { ColdCurrentFacts } from './cold-current.js';
 import type { NativeSaveKey } from '../checkpoints/native-save-contract.js';
 import type { ActiveTurnSegmentJournalPort } from '../context/active-turn-journal.js';
 import { resumeActiveTurnSegment, type ResumeActiveTurnSegmentInput } from '../context/active-turn-segments.js';
@@ -25,12 +25,12 @@ export interface RuntimeColdExecutionResumeRequest {
 /** Only the existing typed C facts consumed here; its App DTO stays App-owned. */
 export interface RuntimeColdExecutionFacts {
   readonly allocation: RuntimeExecutionAllocation;
-  readonly initial: ActiveTurnInitialSegmentCapture;
+  readonly initial: ActiveTurnInitialSegmentSource;
   readonly assignment: WorkAssignment;
   readonly scope: ScopeRef;
   readonly segments: readonly ResumedTurnSegmentOpened[];
   readonly tail: ActiveTurnSegmentPredecessorRef;
-  readonly current: ReentryCurrentFacts;
+  readonly current: ColdCurrentFacts;
   readonly durableEpochs: readonly { readonly executionEpoch: number }[];
   readonly retryCycle: RetryCycleControlRecord | null;
   readonly segmentJournal: ActiveTurnSegmentJournalPort;
@@ -121,15 +121,34 @@ function same(left: unknown, right: unknown): boolean {
 
 /** Runtime alone chooses a successor over all actual C floor facts. */
 function successorEpoch(source: RuntimeColdExecutionFacts): number {
-  const epochs = [source.allocation.executionEpoch,
-    source.initial.body.binding.execution.executionEpoch,
+  const initialEpoch = source.initial.kind === 'captured'
+    ? source.initial.body.binding.execution.executionEpoch
+    : source.initial.binding.execution.executionEpoch;
+
+  const currentEpochs: number[] = [];
+  if (source.current.kind === 'checkpoint-bound') {
+    currentEpochs.push(
+      source.current.current.position.executionEpoch,
+      source.current.current.context.loopCheckpoint.executionEpoch,
+      ...source.current.current.fencedBindings.map((fence) => fence.executionEpoch),
+    );
+  } else if (source.current.kind === 'initial-turn-open') {
+    currentEpochs.push(
+      source.current.position.executionEpoch,
+      source.current.context.loopCheckpoint.executionEpoch,
+      ...source.current.fencedBindings.map((fence) => fence.executionEpoch),
+    );
+  }
+
+  const epochs = [
+    source.allocation.executionEpoch,
+    initialEpoch,
     source.assignment.executionEpoch,
-    source.current.position.executionEpoch,
-    source.current.context.loopCheckpoint.executionEpoch,
+    ...currentEpochs,
     ...source.segments.map((segment) => segment.binding.execution.executionEpoch),
-    ...source.current.fencedBindings.map((fence) => fence.executionEpoch),
     ...source.durableEpochs.map((fact) => fact.executionEpoch),
-    ...(source.retryCycle?.attempts.map((attempt) => attempt.executionEpoch) ?? [])];
+    ...(source.retryCycle?.attempts.map((attempt) => attempt.executionEpoch) ?? []),
+  ];
   let floor = 0;
   for (const epoch of epochs) {
     assertExecutionEpoch(epoch);
@@ -163,7 +182,22 @@ export async function resumeColdExecution(
   if (!producer) hold('cold-execution.producer-unbound',
     'the actual source, grant, incarnation config, original turn recovery and native v2 composition are not bound');
   const source = await producer.readColdExecutionSource({ allocation, request });
-  const initial = source.initial.body.binding;
+  const initial = source.initial.kind === 'captured'
+    ? source.initial.body.binding
+    : source.initial.binding;
+
+  const currentTaskId = source.current.kind === 'checkpoint-bound'
+    ? source.current.current.task.id
+    : source.current.task.id;
+
+  if (source.current.kind === 'initial-turn-open') {
+    if (source.current.entryPhase !== 'open'
+      || source.current.nextAction.kind !== 'continue'
+      || source.current.grant.grant.state !== 'granted') {
+      hold('cold-execution.initial-turn-not-open', 'initial-turn-open facts must be open/continue with a granted task authority');
+    }
+  }
+
   if (!same(source.allocation, allocation) || !same(source.scope, allocation.scope)
     || !same(source.assignment, initial.assignment)
     || !same(source.scope, initial.scope)
@@ -172,7 +206,7 @@ export async function resumeColdExecution(
     || source.assignment.inputRevision !== allocation.inputRevision
     || initial.admittedTurn.turnId !== request.businessTurnId
     || !same(source.tail, request.predecessor)
-    || !same(source.current.task.id, taskId)) {
+    || !same(currentTaskId, taskId)) {
     hold('cold-execution.source-identity-mismatch', 'verified source conflicts with the retained original business identity');
   }
   const preparation = await producer.recoverOriginalTurn({ source });
@@ -222,8 +256,11 @@ export async function resumeColdExecution(
     if (!same(resumed.segment.predecessor, request.predecessor)) {
       hold('cold-execution.predecessor-changed', 'committed segment no longer names the selected exact predecessor');
     }
+    const sourceContextCommitRef = source.current.kind === 'checkpoint-bound'
+      ? source.current.current.position.contextCommitRef
+      : source.current.position.contextCommitRef;
     const loop = await AgentLoopRuntime.resumeIncarnation(binding.request, binding.contextHistory, {
-      segment: resumed.segment, sourceContextCommitRef: source.current.position.contextCommitRef,
+      segment: resumed.segment, sourceContextCommitRef,
     });
     const driver = await producer.createResumedExecutionDriver({ source, allocation, segment: resumed.segment, loop });
     const prepared: PreparedColdExecution = {

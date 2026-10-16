@@ -49,6 +49,7 @@ import { validateContextHistoryRecord } from '../../../contracts/src/agent-loop.
 import { validateActiveTurnCaptureBody } from '../../../contracts/src/active-turn-context.js';
 import {
   validateResumedTurnSegmentOpened,
+  type ActiveTurnInitialOpenSegmentSource,
   type ActiveTurnInitialSegmentCapture,
   type ResumedTurnSegmentOpened,
 } from '../../../contracts/src/active-turn-segments.js';
@@ -148,6 +149,10 @@ export type HistoricalTurnBinding =
   | {
       readonly kind: 'initial';
       readonly initial: ActiveTurnInitialSegmentCapture;
+    }
+  | {
+      readonly kind: 'initial-open';
+      readonly initial: ActiveTurnInitialOpenSegmentSource;
     }
   | {
       readonly kind: 'segment';
@@ -437,6 +442,30 @@ function historicalPhysicalBinding(
       || capture.assignment.inputRevision !== identity.inputRevision
       || capture.execution.executionEpoch !== identity.executionEpoch) {
       throw new AgentLoopRuntimeError('conflict', 'historical initial capture does not bind the original business turn and execution');
+    }
+    return {
+      agentRuntimeId: capture.execution.runtimeId,
+      executionEpoch: capture.execution.executionEpoch,
+      scope: capture.scope,
+    };
+  }
+
+  if (binding.kind === 'initial-open') {
+    const { initial } = binding;
+    validateJournalCommitRef(initial.anchor.bindingCommitRef);
+    validateJournalCommitRef(initial.anchor.recordsThroughCommitRef);
+    const capture = initial.binding;
+    try {
+      validateAdmittedTurn(capture.admittedTurn, identity);
+    } catch {
+      throw new AgentLoopRuntimeError('conflict', 'historical initial open does not bind the original admitted turn');
+    }
+    if (!sameScope(capture.scope, identity.scopeRef)
+      || !sameId(capture.assignment.taskId, identity.taskRef)
+      || capture.assignment.assignmentId !== identity.workAssignmentRef
+      || capture.assignment.inputRevision !== identity.inputRevision
+      || capture.execution.executionEpoch !== identity.executionEpoch) {
+      throw new AgentLoopRuntimeError('conflict', 'historical initial open does not bind the original business turn and execution');
     }
     return {
       agentRuntimeId: capture.execution.runtimeId,
