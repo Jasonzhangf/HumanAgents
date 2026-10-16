@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- F13 Contracts已冻结source`8910c63`，Root直接build:contracts0、原consumer28/28；实际interruptedvalid被旧receipt-only逻辑拒绝的编译后RED成立，重复moduleContractError测试setup错误不作产品RED。未合主候选：Runtime/Jsonl/App组合未完成。原树merge8c9d6d2至`17b6192`，r5Runtime/backing刚启动但与新scopefix的reader/composition冲突，Root收拢2977，sourceclean保留，待引用修复后同树接续，不开新F13树。
+- 引用scope修复计划已接收，Root核对保留CLI样本rawOutput.ref.scope与parentenvelope完全一致，effectref仍真实toolchildoperation。`provider-ref-scope-fix-gcm-r6-20261016`复用原refs树：模型只拿parentacceptedrawOutputcitation，保留childrefs，解析与delivery仍精确同acceptedfact+completion/digest/artifact；不放宽scope/Task-only/alias。原5文件dirty保留，现阶段未GREEN未接收，原I1不动。
+- neutralparent图/治理已接收`589b9f3`，仅三companion+34/-18，5节点4边；worker单轮validate/inspect/binding均0，Root读diff/回执不重验。真实已有owner与planned新owner明确区分，不假称实现。retainedT5树标准merge589b9f3后fresh`provider-parent-identity-contract-gcm-r1-20261016`只接F0Contracts身份/泛型兼容/原consumer；Provider/materializer兼容与durableowner后续串行，Task/helper既有能力不削弱，无fakeTask桥接。
 - 引用App r5作者终态0但未实际运行Node/CLI，build/tsc均经tail，文字testpasses不采纳。Root正常直接build:app0、tsc0、原CLIconsumer实际exit1，保留fixture`provider-cli-native-process-r1-20261013/native-process-h2eKpZ`。文件write/parentwirefooter已发生，工具引用属于真实toolchildoperation，summary要求parentoperation导致`turn summary goal evidence: scope mismatch`，Taskblocked/open/无checkpoint；posts>=3只是后续失败断言，不能改计数冒GREEN。独立OAuth `provider-ref-scope-plan-oauth-r1-20261016`冻结真实引用scope补链与业务成功断言，不放宽scope/alias，不重标子operation、不动原I1。证据`provider-ref-app-gcm-r5-20261015/{report-limits.md,parent-scope-observation.md,parent-cli-consumer.log}`。这批五文件未接收。
 - neutralinteraction父owner r2分层方向已接收并落`acceptance.md`，真实Task/helper兼容、Runtime durablefacts+canonical/materializer、Jsonl事务port、T5B/C依赖冻结。Graph/governance前置移至F0前，fresh docs-only GCM `provider-parent-graph-gcm-r1-20261015`只改原explicit-semantic-turn三companion，保留5节点/外部迭代、planned新module明确UNVERIFIED；图接收后才派F0代码。F0新contracts测试必须先真实tsc，不用staledist。此图/计划不证明父循环运行完成。
 
