@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- G-A846428d final回执已收，sourceworker自然exit/clean。Root未等无关milestone：同G树已标准merge候选d51a176+冻结c952binder，freshGCM `provider-http-admission-compose-gcm-r2-20261016`只迁移该用例Taskpreparer并补startRuntime抛错时fetch/fixturefinally收口，不新增场景、不重做已验sourceflipRED。defaultstop作者已纠正首编译型RED、取得可编译behaviorRED并恢复，最终sourcefreeze/回执仍待，暂不合c952进唯一候选；该来源只用于独立开发组合，不冒生产验收。当前4路实际GCM进程（defaultstop58321、pendingreceipt88102、HTTPcompose79091、parentreconcile2525）已核，UX另两路保持自身owner。
+
 - G-A publicproof source846428d已作者freeze：只new-task-identity原consumer，正常compile0/新1/1+整文件5/5，sourcehttp→rcc可编译反例在实际Taskidentity断言0≠1失败，恢复GREEN。Root核test仍用旧prepareAgentProvider；即将接受的defaultstopbinder改为Taskscopedpreparer后需在同G树标准Git组合并迁移该caller/复验，故暂不接受为最终组合证据、不关闭来源树。fixturefetch只截获配置上游，公开UI/FIFO/Journal真实；不证明非RCCvendor。作者回执分支名写错，实际来源branch为codex/provider-http-admission-proof-20261016，以GitSHA为准。
 - receipt后继planr2已冻结AgentRuntime pendingtype/runtime-stop四处持有点/coordinator转发；GCM `provider-pending-stop-receipt-gcm-r2-20261016`复用receipt树先只做nodes+runtime-stop+原Runtimecontrolconsumer，避开defaultstop App测试独占窗口，coordinator另批。defaultstop实际正常入口已跑，首oldsource回退只编译RED不接受；作者已恢复并取得可编译behaviorRED，最终组合仍待freeze。UX已并行GCM Runtime readonlydelivery与Appproducer观察，原I1gen7/partialsave仍不重发。
 
