@@ -6,7 +6,8 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type ScopeRef } from '../../packages/contracts/src/index.js';
+import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef } from '../../packages/contracts/src/index.js';
+import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
@@ -37,6 +38,61 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
  */
 const EXACT_BODY = 'EXACT\u4f53 single logical delivery \ud83d\ude80\nline two';
 const SUMMARY_RESULT = 'summary result is a different material';
+
+// Observed failure: a committed inspect result strands settling without an
+// effect completion. Impact: delivery cannot close. Cost: one in-memory public
+// consumer fixture; other boundary failure probabilities are unknown.
+test('direct Runtime inspect delivery consumes verified raw bytes without an effect receipt', async () => {
+  const scope: ScopeRef = { organId: id('organ', 'inspect-organ'), taskId: id('task', 'inspect-task'), cycleId: id('cycle', 'inspect-cycle'), operationId: id('operation', 'parent') };
+  const toolOperationId = id('operation', 'inspect-operation');
+  const bytes = new TextEncoder().encode('accepted read output 體\n');
+  const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const evidence: EvidenceRef = { evidenceId: id('evidence', 'read-output'), kind: 'tool', source: 'inspect-consumer', locator: 'asset://read-output', digest, scope: { ...scope, operationId: toolOperationId } };
+  const execution = { runtimeId: 'inspect-runtime', taskId: scope.taskId!, operationId: scope.operationId!, organId: scope.organId, cycleId: scope.cycleId!, executionEpoch: 3 };
+  const outputRef = 'asset://provider-tool/output/inspect-operation';
+  const fact: AcceptedRawFact = { seq: 96, envelope: { execution, scope, request: { turnId: 'turn', requestId: 'request' }, producerSeq: 1, fact: {
+    kind: 'tool-result', contentUnitId: 'result', callId: 'read-call', continuationRef: 'continuation', complete: true,
+    result: { ...execution, toolId: 'file.read', callId: 'read-call', status: 'succeeded', outputRefs: [outputRef], outputRef, outputDigest: digest, evidenceRefs: [evidence] },
+    rawOutput: { ref: evidence, view: { kind: 'utf8-text' } },
+  } } };
+  const assignment: WorkAssignment = { assignmentId: 'assignment', taskId: scope.taskId!, pipelineNodeId: 'node', attempt: 1, executionEpoch: 3, inputRevision: 1, objective: 'deliver read output', targetRefs: [], expectedOutputRefs: [], acceptanceCriteriaDigest: digest, successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' };
+  const section = { text: 'read output', evidenceRefs: [evidence] };
+  const acceptedEnd: StandardTurnEndCommand = { kind: 'standard-turn-end', identity: { turnId: 'turn', workAssignmentRef: assignment.assignmentId, taskRef: assignment.taskId, scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 3, runtimeBindingRef: 'binding', permissionRevision: 'permission' }, summary: { goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [evidence.locator], resolvedEvidenceRefs: [evidence] };
+  const inspect: InspectToolCompletionDescriptor = { execution, scope: evidence.scope, toolOperationId, requestId: 'request', callId: 'read-call', toolId: 'file.read', intentKind: 'inspect', status: 'succeeded', evidenceRefs: [evidence] };
+  const input: StandardTurnDeliveryReadInput = { assignment, acceptedEnd, entries: [fact], completionLookups: [], inspectCompletions: [inspect] };
+  const unexpectedEffect = async (): Promise<never> => { throw new Error('inspect must not read or invent effect completion'); };
+  const rawContent: RawContentReadPort = { async read(request) { assert.deepEqual(request, { scope, content: fact.envelope.fact.kind === 'tool-result' ? fact.envelope.fact.rawOutput : undefined }); return bytes; } };
+  const reader: StandardTurnDeliveryReaderPort = { rawContent, completion: { readExact: unexpectedEffect, commitIntent: unexpectedEffect, commitCompletion: unexpectedEffect, discoverExactExecution: unexpectedEffect } };
+  const readback = await readStandardTurnDelivery(input, reader);
+  assert.equal(readback.materials[0]?.kind, 'inspect-tool-report');
+  assert.deepEqual(readback.materials[0]?.bytes, bytes);
+  assert.equal('completion' in readback.materials[0]!, false);
+  const binding = bindAssignmentDelivery({ assignment, readback });
+  assert.deepEqual(binding.outputRefs, [outputRef]);
+  assert.deepEqual(binding.producedArtifactRefs, [outputRef]);
+  assert.deepEqual(binding.producedArtifactDigests, [digest]);
+  assert.deepEqual(binding.producedArtifactBodies, [new TextDecoder().decode(bytes)]);
+
+  const rejects = async (candidate: StandardTurnDeliveryReadInput, code: StandardTurnDeliveryError['code']): Promise<void> => {
+    await assert.rejects(() => readStandardTurnDelivery(candidate, reader), (error: unknown) => error instanceof StandardTurnDeliveryError && error.code === code);
+  };
+  // Missing positive control must never turn a mutating tool into inspect.
+  assert.equal(fact.envelope.fact.kind, 'tool-result');
+  if (fact.envelope.fact.kind !== 'tool-result') throw new Error('fixture must be a tool result');
+  const resultFact = fact.envelope.fact;
+  const withResult = (result: typeof resultFact.result): AcceptedRawFact => ({ ...fact, envelope: { ...fact.envelope, fact: { ...resultFact, result } } });
+  await rejects({ ...input, inspectCompletions: [], entries: [withResult({ ...resultFact.result, toolId: 'file.write' })] }, 'standard-turn-delivery.completion-unknown');
+  await rejects({ ...input, entries: [withResult({ ...resultFact.result, outputDigest: `sha256:${'0'.repeat(64)}` })] }, 'standard-turn-delivery.artifact-conflict');
+  await rejects({ ...input, entries: [withResult({ ...resultFact.result, status: 'failed' })] }, 'standard-turn-delivery.completion-conflict');
+  await rejects({ ...input, entries: [withResult({ ...resultFact.result, executionFact: { identity: { surface: 'native', toolId: 'file.read', bindingRef: 'binding', route: 'native' }, requestRef: 'request', state: 'succeeded', rawEvidenceRefs: [evidence.locator] } })] }, 'standard-turn-delivery.completion-conflict');
+  await rejects({ ...input, inspectCompletions: [{ ...inspect, evidenceRefs: [{ ...evidence, scope }] }] }, 'standard-turn-delivery.completion-conflict');
+  await rejects({ ...input, completionLookups: [{ commitIdentity: `operation-completion:v1:${'1'.repeat(64)}`, effectId: `file-write-effect:v1:${'2'.repeat(64)}`, binding: { execution, scope: evidence.scope, toolOperationId, requestId: 'request', callId: 'read-call', continuationRef: 'continuation' } }] }, 'standard-turn-delivery.completion-conflict');
+  const logicalAssignment = { ...assignment, expectedOutputRefs: ['logical-output'] };
+  assert.deepEqual(bindAssignmentDelivery({ assignment: logicalAssignment, readback: { ...readback, assignment: logicalAssignment } }).outputRefs, ['logical-output']);
+  assert.throws(() => bindAssignmentDelivery({ assignment, readback: { ...readback, materials: [] } }), (error: unknown) => error instanceof StandardTurnDeliveryError && error.code === 'standard-turn-delivery.binding-invalid');
+  const overdeclared = { ...assignment, expectedOutputRefs: ['first', 'second'] };
+  assert.throws(() => bindAssignmentDelivery({ assignment: overdeclared, readback: { ...readback, assignment: overdeclared } }), (error: unknown) => error instanceof StandardTurnDeliveryError && error.code === 'standard-turn-delivery.binding-invalid');
+});
 
 /**
  * Verbatim model reply from the real live Task that the harness blocked. It is
