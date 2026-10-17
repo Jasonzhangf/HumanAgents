@@ -61,6 +61,7 @@ export interface NativeExecutionInput {
   readonly filePath: string;
   readonly artifactsRoot: string;
   readonly activeTurnJournal: ActiveTurnJournalPort;
+  readonly activeTurnJournalFor?: (turnId: string) => Pick<ActiveTurnJournalPort, 'replay'>;
   /** Per-turn segment reader for prior completed v2 turns; the query's turn ID is the authority. */
   readonly segmentJournalFor?: (businessTurnId: string) => Pick<ActiveTurnSegmentJournalPort, 'readSegmentRecords'>;
   /** Actual shared completion port. Recovery-assets cold reads resolve completion truth through it. */
@@ -100,6 +101,7 @@ export function createNativeExecution(input: NativeExecutionInput) {
     ...(input.completionJournal === undefined ? {} : { completionJournal: input.completionJournal }) });
   const semantic = createJsonlSemanticHistoryJournal({ filePath: input.filePath, journal: input.journal,
     artifactsRoot: input.artifactsRoot, activeTurnJournal: input.activeTurnJournal,
+    ...(input.activeTurnJournalFor === undefined ? {} : { activeTurnJournalFor: input.activeTurnJournalFor }),
     ...(input.segmentJournalFor === undefined ? {} : { segmentJournalFor: input.segmentJournalFor }),
     rawContent: input.rawContent, timeAuthority: input.timeAuthority });
 
@@ -139,7 +141,14 @@ export function createNativeExecution(input: NativeExecutionInput) {
           objective: message.objective, rules: message.rules, successCriteria: message.successCriteria,
           failureCriteria: message.failureCriteria, incompleteCriteria: message.incompleteCriteria }) });
         else if (message.kind === 'semantic-checkpoint') units.push({ kind: 'message', role: 'assistant', text: canonicalJsonStringify({
-          goal: message.checkpoint.goal, actions: message.checkpoint.did, result: message.checkpoint.result, nextStep: message.checkpoint.next }) });
+          goal: message.checkpoint.goal, actions: message.checkpoint.did, result: message.checkpoint.result, nextStep: message.checkpoint.next,
+          adoptedChildren: message.checkpoint.adoptedChildren.map((child) => ({
+            childTurnId: child.childTurnId,
+            scope: child.scope,
+            content: child.content,
+            text: text(child.bytes),
+          })),
+        }) });
         else if (message.kind === 'refined-child') units.push({ kind: 'message', role: 'assistant', text: text(message.bytes) });
         else {
           const unit = message.message;
@@ -280,6 +289,7 @@ export function createNativeExecution(input: NativeExecutionInput) {
   }
   const common = { filePath: input.filePath, journal: input.journal, artifactsRoot: input.artifactsRoot,
     activeTurnJournal: input.activeTurnJournal, rawContent: input.rawContent, timeAuthority: input.timeAuthority, prepareClosure,
+    ...(input.activeTurnJournalFor === undefined ? {} : { activeTurnJournalFor: input.activeTurnJournalFor }),
     ...(input.completionJournal === undefined ? {} : { completionJournal: input.completionJournal }) };
   const saveOwner = admitted.version === 1
     ? createJsonlNativeTurnSave({ ...common, readPreparedCapture: async (ref) => (await recovery.readRecoveryAssetsExact(ref)).prepared })

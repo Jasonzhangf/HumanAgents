@@ -721,10 +721,15 @@ export function createDefaultExecutionComposition(input: {
       // One per-turn reader serves both the active-lineage history and the
       // native request context. The queried prior business turn ID, not the
       // current allocation, is the binding authority.
+      const activeTurnJournalFor = (businessTurnId: string) => createJsonlActiveTurnJournal({
+        filePath: input.filePath, journal: input.journal, turnId: businessTurnId,
+      });
       const segmentJournalFor = (businessTurnId: string) =>
         createJsonlActiveTurnSegmentJournal({ journal: input.journal, businessTurnId });
       const history = createJsonlSemanticHistoryJournal({ filePath: input.filePath, journal: input.journal,
-        artifactsRoot: input.artifactsRoot, activeTurnJournal, rawContent, timeAuthority,
+        artifactsRoot: input.artifactsRoot, rawContent, timeAuthority,
+        activeTurnJournal,
+        activeTurnJournalFor,
         segmentJournalFor });
       // The active seed and the source context come from the canonical committed
       // position, read before the loop installs its own root context. The
@@ -904,6 +909,7 @@ export function createDefaultExecutionComposition(input: {
         journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot, activeTurnJournal,
         rawContent, timeAuthority, completionJournal: completion }) : createNativeExecution({ admitted: nativeAdmission!,
         journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot, activeTurnJournal,
+        activeTurnJournalFor,
         segmentJournalFor,
         rawEvidence, rawContent, fullContext: context, completionJournal: completion, now: input.now, rules: [],
         priorCompletedTurns: exactCompletedTurnLookups(activeLineage?.priorCompletedTurns ?? []), timeAuthority,
@@ -978,7 +984,7 @@ export function createDefaultExecutionComposition(input: {
         if (!acceptedEnd) missing('native semantic view has no accepted four-part turn end');
         const adoptedChildren: AdoptedChildSourceV1[] = [];
         const childRecords = segment ? await resume!.source.segmentJournal.readSegmentRecords({ businessTurnId: turnId,
-          segmentId: segment.segmentId }) : await activeTurnJournal.replay();
+          segmentId: segment.segmentId }) : await activeTurnJournalFor(turnId).replay();
         for (const entry of captured.prepared.body.entries) {
           if ('envelope' in entry) continue;
           const invocation = captured.prepared.body.childInvocations.find((item) => item.invocationId === entry.invocationId

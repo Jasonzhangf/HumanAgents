@@ -404,7 +404,14 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
           objective: message.objective, rules: message.rules, successCriteria: message.successCriteria,
           failureCriteria: message.failureCriteria, incompleteCriteria: message.incompleteCriteria }) });
         else if (message.kind === 'semantic-checkpoint') units.push({ kind: 'message', role: 'assistant', text: canonicalJsonStringify({
-          goal: message.checkpoint.goal, actions: message.checkpoint.did, result: message.checkpoint.result, nextStep: message.checkpoint.next }) });
+          goal: message.checkpoint.goal, actions: message.checkpoint.did, result: message.checkpoint.result, nextStep: message.checkpoint.next,
+          adoptedChildren: message.checkpoint.adoptedChildren.map((child) => ({
+            childTurnId: child.childTurnId,
+            scope: child.scope,
+            content: child.content,
+            text: text(child.bytes),
+          })),
+        }) });
         else if (message.kind === 'refined-child') units.push({ kind: 'message', role: 'assistant', text: text(message.bytes) });
         else {
           const unit = message.message;

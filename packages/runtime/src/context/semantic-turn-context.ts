@@ -65,6 +65,7 @@ export interface CommittedSemanticCheckpointProjection {
   readonly claims: readonly SemanticClaim[];
   readonly constraints: readonly SemanticClaim[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly adoptedChildren: readonly AdoptedChildSemanticDelivery[];
 }
 
 export interface SemanticCheckpointHistoryEntry {
@@ -80,6 +81,7 @@ export interface SemanticCheckpointHistoryEntry {
   readonly claims: readonly SemanticClaim[];
   readonly constraints: readonly SemanticClaim[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly adoptedChildren: readonly AdoptedChildSemanticContext[];
 }
 
 /**
@@ -106,6 +108,17 @@ export interface RefinedChildContext {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly content: RawAsset;
   readonly bytes: Uint8Array;
+}
+
+export interface AdoptedChildSemanticDelivery {
+  readonly childTurnId: string;
+  readonly scope: ScopeRef;
+  readonly content: RawAsset;
+  readonly bytes: Uint8Array;
+}
+
+export interface AdoptedChildSemanticContext extends AdoptedChildSemanticDelivery {
+  readonly kind: 'adopted-child-semantic';
 }
 
 export type SemanticTurnInputEntry<T> =
@@ -240,6 +253,7 @@ function projectCheckpoint(
     claims: copyClaims(checkpoint.claims),
     constraints: copyClaims(checkpoint.constraints),
     evidenceRefs: copyEvidenceRefs(checkpoint.evidenceRefs),
+    adoptedChildren: checkpoint.adoptedChildren.map(projectAdoptedChild),
   };
 }
 
@@ -252,6 +266,16 @@ function projectChild(delivery: RefinedChildSemanticDelivery): RefinedChildConte
     assignmentId: required(delivery.assignmentId, 'refined child assignment id'),
     executionEpoch: delivery.executionEpoch,
     evidenceRefs: copyEvidenceRefs(delivery.evidenceRefs),
+    content: copyRawAsset(delivery.content),
+    bytes: new Uint8Array(delivery.bytes),
+  };
+}
+
+function projectAdoptedChild(delivery: AdoptedChildSemanticDelivery): AdoptedChildSemanticContext {
+  return {
+    kind: 'adopted-child-semantic',
+    childTurnId: required(delivery.childTurnId, 'adopted child turn id'),
+    scope: copyScope(delivery.scope),
     content: copyRawAsset(delivery.content),
     bytes: new Uint8Array(delivery.bytes),
   };
@@ -288,6 +312,9 @@ function assertInput<T>(input: SemanticTurnContextInput<T>): void {
     assertTaskCompatibleScope(input.scope, checkpoint.scope, 'semantic checkpoint');
     for (const ref of checkpoint.evidenceRefs) {
       assertCompatibleScope(checkpoint.scope, ref.scope, 'checkpoint evidence');
+    }
+    for (const child of checkpoint.adoptedChildren) {
+      assertTaskCompatibleScope(checkpoint.scope, child.scope, 'checkpoint adopted child');
     }
   }
   for (const entry of input.activeTurn) {
