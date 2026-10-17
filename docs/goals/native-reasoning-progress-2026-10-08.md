@@ -56,6 +56,8 @@ wire设计状态更新已提交 `62b0c5b5`：5docs/graphmetadata改为v1真实ve
 
 M4既有consumer已接候选 `67507112`（标准FF）：只修改原agent-activity-http-public-consumer。组合dedicatedtsconfig compile0，原TCPconsumer1/1 PASS；actual cross-scope-assertion-rejected，11files unchanged。正式catalog双项目带Task聚合、正文identity隔离和unknown404为受控读取证明，不扩为双活跃项目/浏览器/安装/RCC。已通知UXowner当轮收M4来源树，run证据保留。
 
+正确第三轮恢复当前首错：r216已移除无独立保证的firstTurnFacts固定总数块，保留真实完成与无重放条件，compile0。宿主原case（fixture `text-only-Aa0CoO`）前两轮完成、第三轮dispatched、第二OSchild正式resume返回409 `cold-execution.source-unavailable`，原因为canonical current context与committed segment tail incarnation不匹配。故障边界为App `cold-execution-source.ts` 的scope/runtimeId/positionEpoch/loopCheckpointEpoch联合比较。独立OAuth小Plan r217定位实际左右值与唯一producer/selector根因，未放宽predicate、未产品patch。旧turn1role409不是本次第三轮首错。M4来源已回正常remove/prune/pathabsent。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
