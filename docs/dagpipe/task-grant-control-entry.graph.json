@@ -1,0 +1,139 @@
+{
+  "id": "humanagent-task-grant-control-entry",
+  "version": "1",
+  "meta": {
+    "title": "正式任务入口到任务控制回执与最新读回收敛",
+    "status": "DESIGN-PLANNED",
+    "scope": "只表达正式任务导航、实际控制目标验证、scoped grant/revoke 请求及回执与最新读回收敛；不包含只读 Observation、agent 编排、重试回边或 legacy 无 scope 写路径。",
+    "navigationContract": "正式任务导航保留 task、projectKey、mode。默认打开只读任务页；只有显式 control=1 才表达进入任务控制面的意图。",
+    "requestContract": "控制读写沿用 GET/POST /api/tasks/:taskId/control/grant 与 POST /api/tasks/:taskId/control/revoke。projectKey 与 mode 只作为成对 query scope；body 保持 requestId、expectedRevision 与原可选 capability。",
+    "verificationContract": "后端在实际绑定配置来源中解析并验证当前 live Task，返回实际 targetScope。scope 缺失、非法或目标不属于当前绑定范围时，在控制读写与 release 前拒绝，不回退到无 scope 路径。",
+    "resultContract": "UI 只在 readback.taskId 与请求相符且 readback.targetScope 与请求 projectKey/mode 匹配时启用 grant/revoke。POST 回执与最新 GET 读回分开保存；最新状态无法确认时保留已记录回执，不显示 denied，也不自动重提。",
+    "terminalContract": {
+      "success": "返回已记录控制回执与匹配的最新读回结论",
+      "unconfirmed": "返回已记录控制回执，并明确最新控制状态暂不能确认",
+      "rejected": "返回实际 typed apiError 或 blocked current.error/current.nextStep，不改写 Task 成功或停止完成状态"
+    },
+    "operatorStatus": "本图是实施前设计。除已有 API 与 UI owner 外，目标验证绑定到待实施的后端 owner；拓扑校验不代表产品行为或运行时接线已通过。"
+  },
+  "inputs": [
+    {
+      "id": "formal_task_navigation_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "open_formal_task_navigation",
+      "operator": "humanagent-task-grant-open-navigation",
+      "operator_version": "1",
+      "inputs": [
+        "formal_task_navigation_request"
+      ],
+      "output": {
+        "id": "explicit_task_control_intent",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_controllable_task_target",
+      "operator": "humanagent-task-grant-verify-target",
+      "operator_version": "1",
+      "inputs": [
+        "explicit_task_control_intent"
+      ],
+      "output": {
+        "id": "verified_task_control_target",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "submit_scoped_task_control",
+      "operator": "humanagent-task-grant-submit-control",
+      "operator_version": "1",
+      "inputs": [
+        "verified_task_control_target"
+      ],
+      "output": {
+        "id": "recorded_task_control_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "converge_control_receipt_and_readback",
+      "operator": "humanagent-task-grant-converge-result",
+      "operator_version": "1",
+      "inputs": [
+        "recorded_task_control_receipt"
+      ],
+      "output": {
+        "id": "task_control_outcome",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "open_formal_task_navigation",
+      "to": "verify_controllable_task_target",
+      "arc_id": "explicit_task_control_intent"
+    },
+    {
+      "from": "verify_controllable_task_target",
+      "to": "submit_scoped_task_control",
+      "arc_id": "verified_task_control_target"
+    },
+    {
+      "from": "submit_scoped_task_control",
+      "to": "converge_control_receipt_and_readback",
+      "arc_id": "recorded_task_control_receipt"
+    }
+  ],
+  "outputs": [
+    "task_control_outcome"
+  ]
+}

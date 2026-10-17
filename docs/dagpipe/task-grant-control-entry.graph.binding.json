@@ -1,0 +1,34 @@
+{
+  "graph": "humanagent-task-grant-control-entry",
+  "operator": {
+    "operator": "humanagent-task-grant-control-entry",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-PLANNED",
+  "nodes": {
+    "open_formal_task_navigation": {
+      "ownerPath": "docs/ui/runtime-shell.js",
+      "ownerRel": "docs/ui/runtime-shell.js",
+      "ownerSymbol": "taskDashboardHref",
+      "implementationStatus": "planned-formal-control-navigation"
+    },
+    "verify_controllable_task_target": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService.verifyControllableTaskTarget",
+      "implementationStatus": "pending-backend-owner-implementation"
+    },
+    "submit_scoped_task_control": {
+      "ownerPath": "docs/ui/runtime-api.js",
+      "ownerRel": "docs/ui/runtime-api.js",
+      "ownerSymbol": "readTaskGrant/grantTaskControl/revokeTaskGrant",
+      "implementationStatus": "planned-scoped-control-client"
+    },
+    "converge_control_receipt_and_readback": {
+      "ownerPath": "docs/ui/task-dashboard.js",
+      "ownerRel": "docs/ui/task-dashboard.js",
+      "ownerSymbol": "taskGrantControl refresh/grant/revoke convergence",
+      "implementationStatus": "planned-control-result-convergence"
+    }
+  }
+}
