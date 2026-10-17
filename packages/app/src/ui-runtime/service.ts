@@ -1950,7 +1950,7 @@ export class UiRuntimeService {
       taskIdPrefix: randomUUID(),
       now: options.now,
       createDriver: (input) => this.createMemoryBoundDriver(input),
-      ...(options.providerRetryConfig === undefined
+      ...(options.providerRetryConfig === undefined || executionPorts !== undefined
         ? {}
         : {
             providerRetry: {
@@ -4210,6 +4210,17 @@ export class UiRuntimeService {
     return status.state === 'ready' || status.state === 'degraded';
   }
 
+  async releaseExecution(taskId: TaskId, operationId: OperationId): ReturnType<RuntimeTaskCoordinator['releaseExecution']> {
+    // Waiting for an independent grant must retain the prepared allocation.
+    // The coordinator still performs the full TG1 admission on actual release.
+    if (!await this.executionAutoStartAllowed(taskId)) {
+      throw new UiRuntimeApiError('execution-composition.owner-source-missing', APP_OWNER,
+        'verified TG1 owner is absent; no Provider factory can run',
+        'grant this Task before releasing its prepared operation', 409);
+    }
+    return this.coordinator.releaseExecution(taskId, operationId);
+  }
+
   async startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): Promise<{ readonly operationId: OperationId; readonly executionEpoch: number }> {
     try {
       const status = this.status();
@@ -5639,8 +5650,8 @@ export class UiRuntimeService {
 
   /**
    * A real Task submission only confirms intent, so the task-scoped grant is
-   * the single execution authority: an ungranted Task is materialized and
-   * acknowledged without auto-starting. The explicit `fake` launch binds no
+   * the single execution authority: an ungranted Task retains its prepared
+   * operation without auto-starting. The explicit `fake` launch binds no
    * real grant port and keeps its historical fixture simulation.
    */
   private async executionAutoStartAllowed(taskId: TaskId): Promise<boolean> {
@@ -5729,7 +5740,7 @@ export class UiRuntimeService {
     } else if (executionEpoch === undefined) {
       if (task.operationId === operationId.value && task.executionEpoch !== undefined) {
         executionEpoch = task.executionEpoch;
-      } else if (autoStart) {
+      } else {
         const execution = this.coordinator.prepareExecution(task.taskId, {
           prompt: consumed.normalizedInput,
           ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
@@ -5740,7 +5751,7 @@ export class UiRuntimeService {
       }
       // A retained operation epoch proves allocation, not durable startup.
       // Retry its release before recording dispatch completion or acknowledging.
-      if (executionEpoch !== undefined) {
+      if (autoStart && executionEpoch !== undefined) {
         await this.coordinator.releaseExecution(task.taskId, operationId);
       }
       const started: DispatchLedgerEntry = {
@@ -5751,9 +5762,8 @@ export class UiRuntimeService {
       this.dispatchLedger.set(consumed.draftId, started);
       this.persistExplicitBrainState();
     }
-    // Only a really started execution has an operation to watch; an ungranted
-    // dispatch is materialized and acknowledged without one.
-    if (executionEpoch !== undefined) this.watchExecutionForImplicitWakeup(operationId);
+    // Allocation alone does not start execution. Only a released operation is watched.
+    if (autoStart && executionEpoch !== undefined) this.watchExecutionForImplicitWakeup(operationId);
     await this.explicitIntake.markDraftDispatched(consumed.draftId);
     this.persistExplicitBrainState();
     const requirement: InboxReceipt = {
@@ -5827,14 +5837,21 @@ export class UiRuntimeService {
       .filter((requirement) => requirement.requirementId === consumed.requirementId
         && requirement.draftId === consumed.draftId
         && requirement.inputRevision === consumed.inputRevision);
-    if (candidates.length === 0) return undefined;
+    if (candidates.length === 0) {
+      if (this.options.taskIdentity === undefined) return undefined;
+      throw new UiRuntimeApiError(
+        'explicit-brain.task-identity-source-missing', APP_OWNER,
+        `requirement ${consumed.requirementId} has no exact typed final-submit source for this FIFO entry`,
+        'inspect the final-submit receipt before retrying dispatch', 409,
+      );
+    }
     const exact = candidates.find((requirement) => requirement.fifoSeq === consumed.fifoSeq
       && requirement.payloadRef === consumed.payloadRef);
     if (exact === undefined) {
       throw new UiRuntimeApiError(
         'explicit-brain.task-identity-source-conflict',
         APP_OWNER,
-        `typed requirement ${consumed.requirementId} does not match the consumed FIFO identity`,
+        `requirement ${consumed.requirementId} has no exact typed final-submit source for this FIFO entry`,
         'inspect the persisted final-submit receipt before retrying dispatch',
         409,
       );

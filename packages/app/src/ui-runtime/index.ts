@@ -452,7 +452,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         return { executor: built.executor, toolOutputs: built.toolOutputs };
       })()
     : undefined;
-  const principalOwner = options.accessControl.readProductPrincipalOwner();
+  const runtimeIdentity = options.accessControl.readRuntimeProductIdentity();
+  const principalOwner = runtimeIdentity.owner;
   const resourceBoundary = createPreparedOperationBoundary(journal);
   const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: taskControlJournal });
   const executionNow = clock ?? (() => new Date());

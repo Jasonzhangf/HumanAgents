@@ -26,6 +26,7 @@ import {
   type AccessControlService,
   type AccessSession,
   type SessionVerification,
+  type ProductPrincipalVerification,
 } from './access-control.js';
 import {
   UI_DISPLAY_PREFERENCE_ROUTE,
@@ -272,7 +273,7 @@ function writeError(response: ServerResponse, error: unknown): void {
   });
 }
 
-function sessionError(verification: SessionVerification): AccessControlError {
+function sessionError(verification: SessionVerification | ProductPrincipalVerification): AccessControlError {
   if (verification.state === 'missing') {
     return new AccessControlError('auth.session.missing', 'browser session is required', 'open the login page and pair this browser', 401);
   }
@@ -818,14 +819,17 @@ async function handleRequest(
     if (taskGrantControl || taskRevokeControl) {
       if (taskControl === undefined) {
         throw new UiRuntimeApiError(
-          'task-control.unavailable',
+          'task-control.source.unavailable',
           APP_OWNER,
           'this runtime was started without task-scoped grant control',
           'start the runtime through startUiRuntime',
           503,
         );
       }
-      const principalOwner = accessControl.readProductPrincipalOwner();
+      const cookie = request.headers.cookie;
+      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
+      if (verification.state !== 'valid') throw sessionError(verification);
+      const principalOwner = verification.principal.owner;
       const taskId = id('task', decodeURIComponent((taskGrantControl ?? taskRevokeControl)![1]!));
       if (taskGrantControl && method === 'GET') {
         writeJson(response, 200, await taskControl.read(taskId, principalOwner));

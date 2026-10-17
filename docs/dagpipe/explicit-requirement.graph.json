@@ -1,6 +1,6 @@
 {
   "id": "humanagent-explicit-requirement",
-  "version": "2",
+  "version": "3",
   "meta": {
     "title": "用户新任务从可读草稿、修订、精确确认到单次最终提交并进入需求队列与执行计划",
     "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
@@ -13,7 +13,9 @@
       "W4": "UI consumers require W1 exports and W3 runtime/projection handoff"
     },
     "terminalContract": {
-      "success": "persisted_execution_plan",
+      "success": "requirement_processing_result",
+      "immediateDispatch": "真实 final receipt 按 requirementId/draftId/inputRevision/fifoSeq/payloadRef 匹配 FIFO，建立 TaskIdentity 后才进入独立 TaskGrant 准入；失败保留未确认消费责任",
+      "runtimeIdentity": "AccessControl 稳定产品身份只提供 owner；不表示 session 或 grant；实际 allocation 经同一 coordinator release 原子准入",
       "failure": "draft revision or authorization failure returns explicit error and preserves input",
       "cancel": "rejected closure before dispatch; in-flight stop is separate",
       "blocked": "clarification required; draft remains editable",
@@ -141,6 +143,36 @@
       "iterator": "Whole"
     },
     {
+      "id": "establish_task_identity",
+      "operator": "humanagent-task-identity",
+      "operator_version": "1",
+      "inputs": ["authorized_requirement"],
+      "output": { "id": "identity_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "admit_task_execution",
+      "operator": "humanagent-task-admission",
+      "operator_version": "1",
+      "inputs": ["identity_result"],
+      "output": { "id": "dispatch_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "requirement_result",
+      "operator": "humanagent-requirement-result",
+      "operator_version": "1",
+      "inputs": ["dispatch_result", "persisted_execution_plan"],
+      "output": { "id": "requirement_processing_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "compile_execution_policy",
       "operator": "humanagent-execution-policy",
       "operator_version": "1",
@@ -172,6 +204,10 @@
     }
   ],
   "edges": [
+    { "from": "submit_single_authorization", "to": "establish_task_identity", "arc_id": "authorized_requirement" },
+    { "from": "establish_task_identity", "to": "admit_task_execution", "arc_id": "identity_result" },
+    { "from": "admit_task_execution", "to": "requirement_result", "arc_id": "dispatch_result" },
+    { "from": "persist_authorized_plan", "to": "requirement_result", "arc_id": "persisted_execution_plan" },
     {
       "from": "sensory_inbox",
       "to": "explicit_normalize",
@@ -214,6 +250,6 @@
     }
   ],
   "outputs": [
-    "persisted_execution_plan"
+    "requirement_processing_result"
   ]
 }

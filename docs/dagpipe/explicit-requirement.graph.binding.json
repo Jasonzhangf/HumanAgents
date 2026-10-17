@@ -5,6 +5,21 @@
     "operator_version": "1"
   },
   "nodes": {
+    "establish_task_identity": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService.completePreparedDispatch"
+    },
+    "admit_task_execution": {
+      "ownerPath": "packages/app/src/ui-runtime/execution-composition.ts",
+      "ownerRel": "packages/app/src/ui-runtime/execution-composition.ts",
+      "ownerSymbol": "createDefaultExecutionComposition"
+    },
+    "requirement_result": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService"
+    },
     "sensory_inbox": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
