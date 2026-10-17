@@ -41,6 +41,10 @@ import {
   validateActiveTurnSegmentRecoveryReceiptRead,
 } from '../../packages/contracts/src/active-turn-segments.js';
 import { ContractError as SourceContractError } from '../../packages/contracts/src/errors.js';
+import {
+  type InspectionExecutableCheck,
+  type InspectionExecutionBinding,
+} from '../../packages/contracts/src/i2-history.js';
 
 const organId = id('organ', 'organ-a');
 const taskId = id('task', 'task-a');
@@ -141,6 +145,49 @@ const baseBody: ActiveTurnCaptureBody = {
   cut: { pauseId: 'pause-a', lastSeq: 6, producersDrained: true, frozenAt: '2026-10-12T00:00:00.000Z' },
   completionRefs: [{ requestId: 'request-a', producerSeq: 4, effectRef: 'effect-a' }],
 };
+
+function inspectionBody(
+  binding: ActiveTurnCaptureBody['childInvocations'][number]['binding'],
+): ActiveTurnCaptureBody {
+  return {
+    ...baseBody,
+    childInvocations: [
+      { invocationId: 'invocation-a', childTurnId: 'turn-child', checkpointReceiptRef: 'checkpoint-receipt-a', binding },
+      baseBody.childInvocations[1]!,
+    ],
+  };
+}
+
+test('inspection child binding accepts typed inspection and rejects an incomplete nested check', () => {
+  const inspectionBinding: InspectionExecutionBinding = {
+    occurrence: { scope: { organId, taskId }, occurrenceId: 'occurrence-a' },
+    executionScope: scope,
+    cycleId: 'cycle-a',
+    executionEpoch: 3,
+    definition: { definitionId: 'definition-a', definitionVersion: 'v1' },
+    definitionCommitRef: { commitId: 'commit-definition', journalSeq: 1, recordDigest: 'sha256:definition' },
+    definitionDigest: 'sha256:inspection-definition',
+    cycleOpenedCommitRef: { commitId: 'commit-cycle-open', journalSeq: 2, recordDigest: 'sha256:cycle-open' },
+    scheduleOccurrenceRef: null,
+  };
+  const inspectionCheck: InspectionExecutableCheck = {
+    checkId: 'check-a',
+    criterion: 'Observe the child result',
+    inputRefs: [],
+  };
+
+  assert.doesNotThrow(() => validateActiveTurnCaptureBody(inspectionBody({
+    kind: 'execution',
+    assignment,
+    inspection: { binding: inspectionBinding, check: inspectionCheck },
+  })));
+  assert.doesNotThrow(() => validateActiveTurnCaptureBody(inspectionBody({ kind: 'execution', assignment })));
+  assert.throws(() => validateActiveTurnCaptureBody(inspectionBody({
+    kind: 'execution',
+    assignment,
+    inspection: { binding: inspectionBinding, check: { ...inspectionCheck, criterion: '' } },
+  })), ContractError);
+});
 
 test('production capture proof binds the actual producer boundary and durable raw sequence', () => {
   const prepared: PreparedRecoveryCapture = {

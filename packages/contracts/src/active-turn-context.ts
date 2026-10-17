@@ -28,6 +28,12 @@ import {
 import { ContractError } from './errors.js';
 import type { CompletionReadInput } from './operation-completion.js';
 import type { RecoveryHoldFacts } from './native-reasoning.js';
+import {
+  validateInspectionExecutableCheck,
+  validateInspectionExecutionBinding,
+  type InspectionExecutionBinding,
+  type InspectionExecutableCheck,
+} from './i2-history.js';
 
 /**
  * W1 raw boundary. A Provider produces ordered raw facts. The Runtime owns the
@@ -143,6 +149,10 @@ export type ChildCallKind = 'execution' | 'review';
 export interface ExecutionChildCallBinding {
   readonly kind: 'execution';
   readonly assignment: WorkAssignment;
+  readonly inspection?: {
+    readonly binding: InspectionExecutionBinding;
+    readonly check: InspectionExecutableCheck;
+  };
 }
 
 export interface ReviewChildCallBinding {
@@ -514,6 +524,13 @@ function assertChildCallBinding(value: unknown, label: string): asserts value is
   assertPlainObject(value, label);
   if (value.kind === 'execution') {
     assertWorkAssignmentShape(value.assignment, `${label} assignment`);
+    if (value.inspection !== undefined) {
+      assertPlainObject(value.inspection, `${label} inspection`);
+      assertPlainObject(value.inspection.binding, `${label} inspection binding`);
+      assertPlainObject(value.inspection.check, `${label} inspection check`);
+      validateInspectionExecutionBinding(value.inspection.binding as unknown as InspectionExecutionBinding);
+      validateInspectionExecutableCheck(value.inspection.check as unknown as InspectionExecutableCheck);
+    }
     return;
   }
   if (value.kind === 'review') {
