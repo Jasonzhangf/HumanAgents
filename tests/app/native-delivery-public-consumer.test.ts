@@ -1514,6 +1514,8 @@ async function runHeldColdConsumer(input: {
       assert.equal(resumedWire.body.includes(raw), false,
         `the resumed third turn excludes ${raw}`);
     }
+    await assertPriorSemanticCheckpointWire(fixture, resumedWire.body, started.taskId, TURN_ONE_GOAL);
+    await assertPriorSemanticCheckpointWire(fixture, resumedWire.body, started.taskId, TURN_TWO_GOAL);
     return { seed, receipt, resumedPid, interruption, resumedWireIndex, acceptedEffectCount };
   } finally {
     if (!seedSettled && started.child.exitCode === null && started.child.signalCode === null) {
