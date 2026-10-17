@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
+
+- r278 独立 Gemini 修订计划已接收：N2 当前不需要新增代码、测试或 DAG 编辑。现有四节点 reentry 图及 Memory owner 绑定有效；现有 C3a 已是两个 OS 进程的 seed/next consumer，不复制 harness。源码存在不等于本轮运行通过；真实 RCC model-mode Memory 语义质量仍 UNVERIFIED，DAG Operator factory 未注册声明继续保留。依据：`native-path-memory-amend-r278-20261017/plan.md`。
+- r277 已终止，但最后结果只有准备运行 App consumer 的意图，不算交付。原树仍有 Runtime session 与 helper consumer 两文件改动。已 fresh GCM r279 复用 `explicit-helper-recovery-20261017` 同树续派，要求分别核实 durable adoption / ordinal 两项 RED，完成原 Runtime 与 App 公开 consumer 后正常来源提交；不新建同域树，不额外 leaf Review。
+- fresh GCM r280 并行只读检查显式 Brain prior checkpoint 的 wire metadata。只确认 time/description/identity 是否在其他 formatter 中传递；未确认前不认定缺陷，不增加描述查询。两个启动 PID 分别 20594、20632，启动时已核实存活；PID 仅为本次启动回执，不作持续运行声明。
+- 本轮仍无新产品 main 交付。上述两任务证据目录位于 `.worker-runs/native-reasoning-d0-20261012/` 下同名 run；总目标保持 ACTIVE / INCOMPLETE。
+
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
 - App新turn准入b52cbd65+b1e32b2b已正常合candidate；contracts/Appbuild、app testtsc均0，原inspect/cold受影响两个consumer2/2PASS（session78014，inspection-turn-plan-admission-composed-20261017.txt）。本次candidate sourceCLI，未冒installed新product；真实RED来自acceptedPlan缺字段及boundary-only误读currentPlan，原holdtimeout不当RED。最终producer/helper接线仍OPEN，源码生命周期回执由peer负责。
