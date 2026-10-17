@@ -66,6 +66,14 @@ export const SEMANTIC_OBSERVATION_CONTRACT_VERSION = 'semantic-observation-view@
 const INSTANCE_IDS = new WeakMap()
 let nextInstanceId = 1
 
+// The projection owns capability names; the component only renders the typed
+// three-state availability in plain Chinese.
+const CAPABILITY_STATE_LABELS = Object.freeze({
+  available: '可用',
+  unavailable: '不可用',
+  unknown: '尚未确认',
+})
+
 function element(tag, className, text) {
   const node = document.createElement(tag)
   if (className) node.className = className
@@ -111,7 +119,7 @@ function renderNotice(notice) {
   node.dataset.noticeKind = tone
   if (tone === 'error') node.setAttribute('role', 'alert')
   node.append(
-    element('strong', undefined, text(notice?.title, '观测状态未投影')),
+    element('strong', undefined, text(notice?.title, '观测状态未说明')),
   )
   if (notice?.detail) node.append(element('p', undefined, text(notice.detail)))
   if (notice?.nextAction) node.append(element('p', 'so-next-action', `下一步：${text(notice.nextAction)}`))
@@ -193,7 +201,7 @@ function renderSummary(summary) {
     if (entry?.tone) cell.dataset.tone = text(entry.tone)
     cell.append(
       element('dt', undefined, text(entry?.label, '状态')),
-      element('dd', undefined, text(entry?.value, '未投影')),
+      element('dd', undefined, text(entry?.value, '暂无')),
     )
     list.append(cell)
   })
@@ -208,11 +216,14 @@ function renderCapabilities(capabilities) {
   const list = element('ul', 'so-capability-list')
   array(capabilities).forEach((capability) => {
     const state = text(capability?.state, 'unknown')
+    const stateLabel = CAPABILITY_STATE_LABELS[state] ?? '尚未确认'
+    const reason = text(capability?.reason)
+    const note = reason || (state === 'available' ? '' : '原因尚未说明')
     const item = element('li', 'so-capability')
     item.dataset.capabilityState = state
     item.append(
       element('span', 'so-capability-name', text(capability?.capability, '未命名能力')),
-      element('span', 'so-capability-state', `${state}${capability?.reason ? ` · ${capability.reason}` : ''}`),
+      element('span', 'so-capability-state', note ? `${stateLabel} · ${note}` : stateLabel),
     )
     list.append(item)
   })
@@ -416,10 +427,12 @@ export function mountSemanticObservation(host, options = {}) {
 
     const status = element('div', 'so-state')
     const stateLabel = text(projection.stateLabel, viewState)
-    status.append(
-      element('span', 'so-state-label', `状态：${stateLabel}`),
-      element('span', 'so-projection-version', `投影 ${text(projection.projectionVersion, '未标注')}`),
-    )
+    status.append(element('span', 'so-state-label', `状态：${stateLabel}`))
+    // The projection version is diagnostic detail; it belongs to the actively
+    // opened raw mode, not to the default business text.
+    if (mode === 'raw') {
+      status.append(element('span', 'so-projection-version', `投影 ${text(projection.projectionVersion, '未标注')}`))
+    }
     if (projection.summary) status.append(renderSummary(projection.summary))
     content.append(status)
 

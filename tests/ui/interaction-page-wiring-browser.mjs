@@ -11,6 +11,18 @@
  * - F09: card re-render restores focus to the stable trigger node identity
  *   (`data-focus-key`) instead of dropping focus to body.
  *
+ * Default mode is the full page proof above. `--task-identity-only` runs only
+ * the controlled Task identity fixture below (real Task dashboard read model,
+ * no fabricated Operation, queued label, no page error) plus the shared
+ * evidence/assertion/cleanup path, so the accepted public consumer can be
+ * selected without the obsolete full-page fixtures.
+ * `--raw-focus-title-only` selects the bounded raw-reference/title fixture at
+ * desktop and mobile sizes. It uses controlled API projections, no live Task.
+ * `--project-breadcrumb-only` selects one controlled project task-list read
+ * that proves the last breadcrumb names the current scope in human terms: it
+ * starts as 当前项目, becomes the published DTO label, keeps the full
+ * projectKey in 工作范围, and never issues a business write.
+ *
  * Set INTERACTION_PAGE_EVIDENCE to the execution-owned evidence root and
  * INTERACTION_PAGE_UI_ROOT (optional) to a directory whose layout mirrors
  * `dist/app/ui` (used for red-base reproduction).
@@ -28,6 +40,11 @@ const evidenceRoot = process.env.INTERACTION_PAGE_EVIDENCE;
 if (!evidenceRoot?.trim()) {
   throw new Error('INTERACTION_PAGE_EVIDENCE is required; point it at an execution-owned directory');
 }
+
+const taskIdentityOnly = process.argv.includes('--task-identity-only');
+const checkpointAssetsOnly = process.argv.includes('--checkpoint-assets-only');
+const rawFocusTitleOnly = process.argv.includes('--raw-focus-title-only');
+const projectBreadcrumbOnly = process.argv.includes('--project-breadcrumb-only');
 
 const playwrightModule = await import(
   process.env.INTERACTION_CARD_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js',
@@ -186,11 +203,11 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
 
-  for (const target of [
+  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly || projectBreadcrumbOnly ? [] : [
     { file: 'dashboard.html', entry: 'dashboard' },
     { file: 'task.html', query: '?task=new', entry: 'task' },
     { file: 'index.html', entry: 'entry' },
-  ]) {
+  ])) {
     pageErrors.length = 0;
     await page.goto(`${server.url}/${target.file}${target.query ?? ''}`, { waitUntil: 'domcontentloaded' });
     await waitForCard(page, target.entry);
@@ -233,6 +250,87 @@ try {
     }
   }
 
+  // --- task.js forwards the real dashboard identity, never a fabricated one ---
+  // The Task page is the product caller that turns the runtime dashboard read
+  // into the shared card. This proves the real dashboard TaskId reaches the
+  // card's technical source reference with no invented Operation, so an admitted
+  // Task is not mislabelled as a running execution and no `pending-input` scope
+  // is minted.
+  if (!checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly) {
+  const TASK_WIRING_ID = 'task-wiring-proof';
+  const taskPage = await context.newPage();
+  const taskPageErrors = [];
+  taskPage.on('pageerror', (error) => taskPageErrors.push(`pageerror: ${error.message}`));
+  await taskPage.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const body = (payload, status = 200) => route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(payload),
+    });
+    if (path === '/api/runtime/status') {
+      return body({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true });
+    }
+    if (path === `/api/tasks/${TASK_WIRING_ID}`) {
+      // `renderTask` reads `detail.data.updatedAt`, so the read model must carry
+      // its `data` object; the real task-detail surface always does.
+      return body({
+        taskId: TASK_WIRING_ID,
+        title: 'identity forwarding proof',
+        state: 'waiting',
+        priorInput: '读取 README',
+        data: { updatedAt: '2026-10-15T12:00:00Z' },
+      });
+    }
+    if (path === `/api/tasks/${TASK_WIRING_ID}/dashboard`) {
+      return body({
+        taskId: { scope: 'task', value: TASK_WIRING_ID },
+        title: 'identity forwarding proof',
+        state: 'waiting',
+        stateLabel: '已入队，等待执行',
+        currentNode: 'runtime.queue',
+        input: '读取 README',
+        output: '',
+        nextStep: '等待隐式大脑调度',
+        updatedAt: '2026-10-15T12:00:00Z',
+        allowedActions: [],
+        recentEvents: [],
+        publicOutput: { state: 'absent', commits: [] },
+      });
+    }
+    if (path === `/api/tasks/${TASK_WIRING_ID}/history`) {
+      return body({ ok: true, page: { items: [], hasMore: false } });
+    }
+    return body({ error: { code: 'not-found', message: `unexpected route ${path}`, ownerId: 'test', nextAction: 'none' } }, 404);
+  });
+  await taskPage.goto(`${server.url}/task.html?task=${TASK_WIRING_ID}`, { waitUntil: 'domcontentloaded' });
+  const taskForwarding = await taskPage.waitForFunction(() => {
+    const card = document.querySelector('[data-interaction-work-card-host][data-entry="task"] .iwc-card');
+    if (!card) return null;
+    const sourceRef = card.querySelector('.iwc-source-ref')?.textContent ?? '';
+    if (!sourceRef) return null;
+    const chip = [...card.querySelectorAll('.iwc-state-chip')]
+      .find((node) => /^(交互|任务|节点) /.test(node.textContent ?? ''))?.textContent ?? '';
+    return { chip, sourceRef, statusText: card.querySelector('.iwc-status')?.innerText ?? '' };
+  }, undefined, { timeout: 20000 }).then((handle) => handle.jsonValue()).catch(() => null);
+  observe('task.html dashboard identity forwarding', taskForwarding);
+  record('task.js forwards the real dashboard TaskId into the card source',
+    Boolean(taskForwarding?.sourceRef?.includes(`task=task:${TASK_WIRING_ID}`)),
+    taskForwarding);
+  record('task.js forwards no fabricated Operation for an admitted Task',
+    Boolean(taskForwarding?.sourceRef?.includes('operation=未提供'))
+      && !taskForwarding.sourceRef.includes('pending-input'),
+    taskForwarding);
+  record('admitted Task card is labelled as a waiting task, not running',
+    taskForwarding?.chip === '任务 已入队，等待执行' && !taskForwarding.statusText.includes('运行中'),
+    taskForwarding);
+  record('task.html identity forwarding raises no page error', taskPageErrors.length === 0, [...taskPageErrors]);
+  await taskPage.screenshot({ path: join(artifactDir, 'task-identity-forwarding.png'), fullPage: true });
+  await taskPage.close();
+  }
+
+  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly) {
   // GAP B proof: the bounded original cause the runtime reports must reach the
   // human, not just a status code. The runtime stub answers the real
   // explicit-interaction read with a 500 body shaped exactly like the one
@@ -458,6 +556,511 @@ try {
   if (eventErrors.length) {
     await writeFile(join(evidenceRoot, 'dashboard-event-driven.errors.txt'), eventErrors.join('\n'), 'utf8');
   }
+  }
+  if (checkpointAssetsOnly) {
+    // Raw external projections exercise the real page controller. The known
+    // raw/envelope mismatch loses readable bodies (observed source defect);
+    // this bounded browser case also protects return navigation at low cost.
+    const fixtureRoot = '/private/tmp/humanagent-g14-body-plan-20261015/ui-page-red/fixtures';
+    const history = JSON.parse(await readFile(join(fixtureRoot, 'history.json'), 'utf8'));
+    const capture = JSON.parse(await readFile(join(fixtureRoot, 'capture.json'), 'utf8'));
+    const children = JSON.parse(await readFile(join(fixtureRoot, 'children.json'), 'utf8'));
+    observe('fixture provenance', JSON.parse(await readFile(join(fixtureRoot, 'provenance.json'), 'utf8')));
+    const scope = history.scope;
+    const task = scope.taskId.value;
+    const selected = history.viewed.identity;
+    const prefix = `/api/tasks/${task}`;
+    const receipt = {
+      checkpointId: selected.checkpointId.value,
+      checkpointCommitId: selected.commitRef.commitId,
+      checkpointJournalSeq: String(selected.commitRef.journalSeq),
+      checkpointRecordDigest: selected.commitRef.recordDigest,
+    };
+    const fixturePage = await context.newPage();
+    const viewport = process.env.INTERACTION_PAGE_VIEWPORT === 'mobile'
+      ? { width: 390, height: 844 } : { width: 1280, height: 800 };
+    await fixturePage.setViewportSize(viewport);
+    observe('viewport', viewport);
+    const requests = [];
+    const errors = [];
+    fixturePage.on('pageerror', (error) => errors.push(error.message));
+    let held = false;
+    let releaseBody;
+    let heldRequest;
+    const heldStarted = new Promise((resolveHeld) => { heldRequest = resolveHeld; });
+    await fixturePage.route('**/api/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const query = Object.fromEntries(url.searchParams);
+      requests.push({ method: request.method(), pathname: url.pathname, query });
+      const scoped = query.projectKey === scope.projectKey && query.mode === scope.mode;
+      const exact = Object.entries(receipt).every(([key, value]) => query[key] === value);
+      let body;
+      if (request.method() === 'GET') {
+        if (url.pathname === '/api/runtime/status') body = { state: 'ready', mode: 'fake', connected: true };
+        if (url.pathname === '/api/ui/display-preference') body = { preference: { mode: 'current' }, defaultMode: 'current' };
+        if (url.pathname === `${prefix}/dashboard` && scoped) body = {
+          taskId: scope.taskId, taskTitle: 'checkpoint asset body fixture', state: 'waiting', stateLabel: '等待中',
+          statusSections: { business: '等待中', waiting: '无待收拢操作' }, allowedActions: [], recentEvents: [],
+        };
+        if (url.pathname === `${prefix}/checkpoints` && scoped
+          && (exact || (!query.checkpointId && query.limit === '20'))) body = history;
+        if (url.pathname === `${prefix}/checkpoints/assets/capture` && scoped && exact) body = capture;
+        for (const child of children) {
+          const selector = child.selector;
+          if (url.pathname === `${prefix}/checkpoints/assets/adopted-child/${encodeURIComponent(selector.invocationId)}/${encodeURIComponent(selector.childTurnId)}/${selector.deliverySeq}`
+            && scoped && exact) body = child;
+        }
+      }
+      if (body && held && url.pathname.includes('/checkpoints/assets/')) {
+        held = false;
+        await new Promise((resolveBody) => { releaseBody = resolveBody; heldRequest(); });
+      }
+      await route.fulfill({ status: body ? 200 : 404, contentType: 'application/json',
+        body: JSON.stringify(body ?? { error: { code: 'fixture.unexpected-request', message: 'Unexpected fixture request' } }) });
+    });
+    const dialog = fixturePage.locator('dialog[data-technical-detail="true"][open]');
+    const bodySelector = 'dialog[data-technical-detail="true"][open] [data-checkpoint-role="asset-body-text"]';
+    let stage = 'boot';
+    try {
+      const preference = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === '/api/ui/display-preference');
+      await fixturePage.goto(`${server.url}/task-dashboard.html?${new URLSearchParams({ task, projectKey: scope.projectKey, mode: scope.mode })}`, { waitUntil: 'domcontentloaded' });
+      await preference;
+      await fixturePage.getByRole('heading', { name: 'checkpoint asset body fixture', exact: true }).waitFor();
+      stage = 'history navigation';
+      await fixturePage.locator('button[data-shell-section="view"]').click();
+      await fixturePage.locator('button[data-history-view="checkpoints"]').click();
+      const entry = fixturePage.locator('[data-shell-records-host] [data-checkpoint-role="history-entry"][data-checkpoint-journal-seq="9"]');
+      const exactHistory = fixturePage.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname === `${prefix}/checkpoints` && url.searchParams.get('checkpointJournalSeq') === '9';
+      });
+      await entry.getByRole('button', { name: '查看此检查点', exact: true }).click();
+      await exactHistory;
+      await fixturePage.locator('[data-shell-records-host] .history-actions').getByRole('button', { name: '技术详情', exact: true }).click();
+      const trigger = (kind) => dialog.locator(`button[data-checkpoint-role="asset-body-trigger"][data-asset-body-selector="${kind}"]`);
+      const readBody = async (projection, index) => {
+        const kind = projection.selector.kind;
+        stage = `${kind} body`;
+        const responsePromise = fixturePage.waitForResponse((response) => response.request().method() === 'GET'
+          && new URL(response.url()).pathname.includes('/checkpoints/assets/'));
+        await trigger(kind).nth(index).click();
+        const response = await responsePromise;
+        const actual = await response.json();
+        const query = Object.fromEntries(new URL(response.url()).searchParams);
+        record(`${kind} raw HTTP receipt ${index}`, response.status() === 200
+          && JSON.stringify(actual) === JSON.stringify(projection) && !('ok' in actual)
+          && query.projectKey === scope.projectKey && query.mode === scope.mode
+          && Object.entries(receipt).every(([key, value]) => query[key] === value),
+        { status: response.status(), query, projection: actual });
+        const rendered = await fixturePage.waitForFunction(({ selector, expected }) => document.querySelector(selector)?.textContent === expected,
+          { selector: bodySelector, expected: projection.text }, { timeout: 5000 }).then(() => true).catch(() => false);
+        const observation = await dialog.evaluate((node) => ({
+          text: node.querySelector('[data-checkpoint-role="asset-body-text"]')?.textContent ?? null,
+          failure: node.querySelector('[data-checkpoint-role="asset-body-failure"]')?.textContent ?? null,
+          identity: Object.fromEntries(Array.from(node.querySelectorAll('[data-checkpoint-role="asset-body-provenance"] .detail-cell'),
+            (cell) => [cell.querySelector('dt')?.textContent, cell.querySelector('dd')?.textContent])),
+        }));
+        record(`task-dashboard renders exact ${kind} body ${index}`, rendered, { expectedText: projection.text, ...observation });
+        const expectedIdentity = {
+          '检查点 ID': selected.checkpointId.value,
+          '物理 Journal 序号': String(selected.commitRef.journalSeq),
+          '提交 ID': selected.commitRef.commitId,
+          '记录摘要': selected.commitRef.recordDigest,
+          '资产角色': kind,
+          '资产证据 ID': projection.asset.ref.evidenceId.value,
+          '资产定位': projection.asset.ref.locator,
+          '资产摘要': projection.asset.ref.digest,
+          ...(kind === 'adopted-child' ? {
+            '调用 ID': projection.selector.invocationId,
+            '子回合 ID': projection.selector.childTurnId,
+            '交付序号': String(projection.selector.deliverySeq),
+          } : {}),
+        };
+        record(`task-dashboard renders exact ${kind} identity ${index}`,
+          Object.entries(expectedIdentity).every(([key, value]) => observation.identity[key] === value),
+          { expected: expectedIdentity, actual: observation.identity });
+        await fixturePage.screenshot({ path: join(artifactDir, `${kind}-${index}.png`), fullPage: true });
+        await dialog.getByRole('button', { name: '返回检查点详情', exact: true }).click();
+        await trigger('capture').waitFor();
+        record(`return from ${kind} body ${index} to checkpoint detail`, await trigger('capture').isVisible());
+        return rendered;
+      };
+      // The first positive assertion is the RED endpoint. Keep the same path
+      // for GREEN, then exercise only the two prepared distinct children.
+      if (await readBody(capture, 0)) {
+        record('checkpoint fixture contains two distinct child bodies', children.length === 2
+          && children[0].text !== children[1].text
+          && JSON.stringify(children[0].selector) !== JSON.stringify(children[1].selector));
+        for (let index = 0; index < children.length; index += 1) await readBody(children[index], index);
+        stage = 'held body return';
+        held = true;
+        const responsePromise = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === `${prefix}/checkpoints/assets/capture`);
+        await trigger('capture').click();
+        await heldStarted;
+        await dialog.locator('[data-checkpoint-role="asset-body-loading"]').waitFor();
+        await dialog.getByRole('button', { name: '返回检查点详情', exact: true }).click();
+        await trigger('capture').waitFor();
+        const before = await dialog.innerText();
+        releaseBody();
+        await (await responsePromise).finished();
+        // Drain the browser fetch continuation before checking retained detail.
+        await fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        record('late body response preserves returned checkpoint detail',
+          await trigger('capture').isVisible() && await dialog.innerText() === before
+          && await dialog.locator('[data-checkpoint-role="asset-body-text"]').count() === 0,
+          { before, after: await dialog.innerText() });
+        await fixturePage.screenshot({ path: join(artifactDir, 'late-response-return.png'), fullPage: true });
+      }
+      record('checkpoint fixture raises no page error', errors.length === 0, errors);
+    } catch (error) {
+      record(`checkpoint fixture ${stage}`, false, { message: error.message, errors, pageText: await fixturePage.locator('body').innerText() });
+      await fixturePage.screenshot({ path: join(artifactDir, 'fixture-failure.png'), fullPage: true });
+    } finally {
+      releaseBody?.();
+      await writeFile(join(evidenceRoot, 'requests.json'), JSON.stringify(requests, null, 2), 'utf8');
+      observe('checkpoint fixture stage', stage);
+      await fixturePage.close();
+    }
+  }
+  if (rawFocusTitleOnly) {
+    // Observed RED: raw137 was 46225px below the viewport, with actions URL
+    // and no selection; the title exceeded 900px. These two small fixtures
+    // cover evidence identity/navigation and both layouts without live writes.
+    const scope = { kind: 'task', projectKey: 'raw-focus-fixture', mode: 'fake', taskId: { scope: 'task', value: 'raw-focus-title' } };
+    const title = '原始需求标题，保留全文与换行。\n' + '读取并核对任务执行记录，不改变任务内容。'.repeat(100);
+    const targetRef = { projectKey: scope.projectKey, mode: scope.mode, taskId: scope.taskId,
+      source: 'task-journal', ordinal: 137, operationId: 'operation-target', executionEpoch: 2 };
+    const semanticScope = { organId: { scope: 'organ', value: 'organ-raw-focus' },
+      taskId: scope.taskId, operationId: { scope: 'operation', value: targetRef.operationId } };
+    const semanticSummary = '已核对来源动作，等待查看权威记录';
+    const semanticEnvelope = {
+      scope: semanticScope, projectionVersion: 'runtime-semantic-v1', sourceWatermark: 1,
+      events: [{ eventId: 'semantic-raw-focus-1', sourceId: 'source-raw-focus-1', type: 'task.created',
+        scope: semanticScope, occurredAt: '2026-10-16T00:00:00Z', status: 'completed',
+        summary: semanticSummary, payloadRef: 'asset://raw-focus-1', dataDigest: 'fixture-raw-focus-1', evidenceRefs: [] }],
+      coverageIssues: [],
+      pairing: [{ groupId: 'raw-focus-operation', kind: 'operation', scope: semanticScope,
+        executionEpoch: 2, state: 'closed', eventRefs: [] }],
+      capabilities: [{ capability: 'runtime-task-events', state: 'available' }],
+    };
+    const rawRecord = (ref, body = 'record') => ({ ref, occurredAt: '2026-10-16T00:00:00Z', body: { kind: 'fixture', text: body } });
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+      const fixturePage = await context.newPage();
+      await fixturePage.setViewportSize(viewport);
+      const errors = [];
+      const requests = [];
+      let behavior = 'found';
+      let releaseRead;
+      let signalHeld;
+      let heldStarted;
+      const label = `${viewport.width}px`;
+      fixturePage.on('pageerror', (error) => errors.push(error.message));
+      await fixturePage.route('**/api/**', async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        const query = Object.fromEntries(url.searchParams);
+        requests.push({ method: request.method(), path: url.pathname, query });
+        let body;
+        let status = 200;
+        if (url.pathname === '/api/runtime/status') body = { state: 'ready', mode: 'fake', connected: true };
+        if (url.pathname === '/api/ui/display-preference') body = { preference: { mode: 'follow-last', lastManual: 'current' }, defaultMode: 'current' };
+        if (url.pathname.endsWith('/dashboard')) body = {
+          taskId: scope.taskId, taskTitle: title, state: 'waiting', stateLabel: '等待中',
+          statusSections: { business: '等待中', waiting: '无待收拢操作' }, allowedActions: [], recentEvents: [],
+        };
+        if (url.pathname === `/api/tasks/${scope.taskId.value}/semantic`) body = semanticEnvelope;
+        if (url.pathname.endsWith('/records')) {
+          const cursor = query.cursor;
+          if (query.view === 'actions') body = { scope, actions: [{ entry: { seq: cursor ? 135 : 1, kind: 'fixture', summary: cursor ? '来源动作页' : '第一页' }, rawRef: targetRef }], hasMore: !cursor, nextCursor: cursor ? undefined : 'actions-page-2' };
+          else {
+            if (behavior === 'held' && !cursor) {
+              await new Promise((done) => { releaseRead = done; signalHeld(); });
+            }
+            if (behavior === 'failed') {
+              status = 503;
+              body = { error: { code: 'fixture.read-failed', message: '原始记录读取失败', ownerId: 'test', nextAction: '重试读取' } };
+            } else {
+              const raw = !cursor ? [rawRecord({ ...targetRef, ordinal: 1 })]
+                : cursor === 'raw-page-2' ? [rawRecord({ ...targetRef, ordinal: 101 })]
+                : [rawRecord({ ...targetRef, source: 'operation-journal' }), rawRecord({ ...targetRef, operationId: 'other-operation' }),
+                  ...Array.from({ length: 8 }, (_, index) => rawRecord({ ...targetRef, ordinal: 120 + index }, 'long record\n'.repeat(150))),
+                  ...(behavior === 'missing' ? [] : [rawRecord(targetRef, 'EXACT TARGET')])];
+              body = { scope, raw, hasMore: cursor !== 'raw-page-3', nextCursor: !cursor ? 'raw-page-2' : cursor === 'raw-page-2' ? 'raw-page-3' : undefined };
+            }
+          }
+        }
+        await route.fulfill({ status: body ? status : 404, contentType: 'application/json', body: JSON.stringify(body ?? { error: { code: 'fixture.unexpected', message: url.pathname } }) });
+      });
+      const settle = () => fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      const selectMode = async (mode) => {
+        await fixturePage.locator('button[data-shell-section="view"]').click();
+        const manualSave = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === '/api/ui/display-preference' && response.request().method() === 'PUT');
+        await fixturePage.locator(`button[data-display-mode="${mode}"]`).click();
+        await fixturePage.locator(`button[data-display-mode="${mode}"][aria-pressed="true"]`).waitFor();
+        await manualSave;
+        await fixturePage.locator('.shell-layer-close:visible').click();
+      };
+      const panel = fixturePage.locator('.semantic-observation');
+      const actionsDetail = fixturePage.locator('[data-records-detail="open"]').filter({ has: fixturePage.locator('[data-records-detail-toggle="actions"]') });
+      const source = actionsDetail.getByRole('button', { name: '查看这条原始记录', exact: true });
+      try {
+        const preferenceRead = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === '/api/ui/display-preference');
+        await fixturePage.goto(`${server.url}/task-dashboard.html?${new URLSearchParams({ task: scope.taskId.value, projectKey: scope.projectKey, mode: scope.mode, display: 'current' })}`);
+        await preferenceRead;
+        await fixturePage.locator('main h1').waitFor();
+        await panel.locator('[data-section-id="stable"]').getByText(semanticSummary, { exact: true }).waitFor();
+        const layout = () => fixturePage.locator('main h1').evaluate((node) => ({
+          text: node.textContent, height: node.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(node).lineHeight),
+          fits: document.documentElement.scrollWidth <= innerWidth,
+        }));
+        const folded = await layout();
+        record(`${label} title preserves text and clamps to three lines`, folded.text === title && folded.height <= folded.lineHeight * 3 + 1 && folded.fits, folded);
+        if (await fixturePage.getByText('查看完整标题', { exact: true }).count()) {
+          await fixturePage.getByText('查看完整标题', { exact: true }).click();
+          const full = await fixturePage.locator('.task-title-full-text').evaluate((node) => ({ text: node.textContent, size: parseFloat(getComputedStyle(node).fontSize), visible: node.getBoundingClientRect().height > 0 }));
+          record(`${label} native details exposes exact full title in body size`, full.text === title && full.size <= 18 && full.visible, full);
+          await fixturePage.getByText('查看完整标题', { exact: true }).click();
+          record(`${label} title folds again`, (await layout()).height <= folded.lineHeight * 3 + 1);
+        } else record(`${label} native full-title details exists`, false);
+        const modeGetBaseline = requests.filter((request) => request.method === 'GET').length;
+        await panel.evaluate((node) => { window.__semanticPanel = node; });
+        for (const [mode, section, text] of [['semantic', 'semantic', semanticSummary], ['raw', 'raw', 'source-raw-focus-1'], ['actions', 'actions', semanticSummary]]) {
+          await selectMode(mode);
+          const body = panel.locator(`[data-section-id="${section}"]`);
+          await body.getByText(text, { exact: true }).waitFor();
+          record(`${label} ${mode} switches the retained panel and actual body without GET`,
+            await panel.getAttribute('data-mode') === mode
+            && await panel.evaluate((node) => node === window.__semanticPanel)
+            && new URL(fixturePage.url()).searchParams.get('display') === mode
+            && await body.isVisible()
+            && requests.filter((request) => request.method === 'GET').length === modeGetBaseline
+            && requests.filter((request) => request.path.endsWith('/records')).length === 0,
+            { mode, requests: requests.slice(modeGetBaseline) });
+        }
+        await fixturePage.locator('[data-records-detail-toggle="actions"]').click();
+        await actionsDetail.getByText('第一页', { exact: true }).waitFor();
+        await actionsDetail.getByRole('button', { name: '继续读取下一页', exact: true }).click();
+        await actionsDetail.getByText('来源动作页', { exact: true }).waitFor();
+        await source.evaluate((node) => { window.__rawSource = node; });
+        const writesBefore = requests.filter((request) => request.method !== 'GET').length;
+        const actionsReads = () => requests.filter((request) => request.query.view === 'actions').length;
+        const readsBefore = actionsReads();
+        await source.click();
+        await fixturePage.locator('[data-record-selected="true"]').waitFor({ timeout: 5000 }).catch(() => {});
+        const selected = await fixturePage.evaluate(() => {
+          const nodes = [...document.querySelectorAll('[data-record-selected="true"]')];
+          const node = nodes[0];
+          const rect = node?.getBoundingClientRect();
+          return { count: nodes.length, text: node?.textContent, current: node?.getAttribute('aria-current'), focused: document.activeElement === node,
+            top: rect?.top, visible: rect?.top >= 0 && rect.top < innerHeight,
+            heading: document.querySelector('main h1')?.textContent,
+            detailHeading: document.querySelector('[data-records-detail="open"] h2')?.textContent,
+            rawDetailOpen: document.querySelector('[data-records-detail-toggle="raw"]')?.getAttribute('aria-expanded'),
+            panelMode: document.querySelector('.semantic-observation')?.dataset.mode,
+            display: new URL(location.href).searchParams.get('display') };
+        });
+        record(`${label} exact raw137 uniquely selected, focused and visible with synced mode`, selected.count === 1 && selected.text.includes('EXACT TARGET') && selected.current === 'true' && selected.focused && selected.visible && selected.display === 'raw' && selected.heading === '原始记录' && selected.detailHeading === '权威原始记录' && selected.rawDetailOpen === 'true' && selected.panelMode === 'raw' && await panel.isVisible(), selected);
+        // A baseline can fail both independent defects in this same run.
+        // Return/error/race assertions require the corrected raw navigation.
+        if (selected.count !== 1 || selected.display !== 'raw') continue;
+        await fixturePage.locator('button[data-shell-section="view"]').click();
+        record(`${label} chooser agrees with raw URL and headings`, await fixturePage.locator('[data-display-mode="raw"][aria-pressed="true"]').count() === 1);
+        await fixturePage.locator('.shell-layer-close:visible').click();
+        await fixturePage.screenshot({ path: join(artifactDir, `raw-focus-${viewport.width}.png`) });
+        await fixturePage.getByRole('button', { name: '返回动作轨迹', exact: true }).click();
+        const returned = await fixturePage.evaluate(() => ({ same: window.__rawSource === document.activeElement, connected: window.__rawSource.isConnected, display: new URL(location.href).searchParams.get('display') }));
+        record(`${label} return preserves action page and trigger without reread or preference write`, returned.same && returned.connected && returned.display === 'actions' && await actionsDetail.getByText('来源动作页', { exact: true }).isVisible() && actionsReads() === readsBefore && requests.filter((request) => request.method !== 'GET').length === writesBefore, returned);
+        for (const failure of ['missing', 'failed']) {
+          behavior = failure;
+          await source.click();
+          const notice = fixturePage.locator('[data-records-navigation-failure]');
+          await notice.waitFor();
+          record(`${label} ${failure} shows a recoverable read failure`, await notice.isVisible());
+          await notice.getByRole('button', { name: '技术详情', exact: true }).click();
+          await fixturePage.getByText(failure === 'missing' ? '所选原始记录不在返回的记录页中。' : '原始记录读取失败', { exact: true }).first().waitFor();
+          record(`${label} ${failure} keeps confirmed actions and URL with visible failure`, new URL(fixturePage.url()).searchParams.get('display') === 'actions' && await actionsDetail.getByText('来源动作页', { exact: true }).isVisible());
+          await fixturePage.locator('.shell-layer-close:visible').click();
+          await fixturePage.locator('.shell-layer-close:visible').waitFor({ state: 'hidden' });
+        }
+        behavior = 'held';
+        heldStarted = new Promise((done) => { signalHeld = done; });
+        await source.click();
+        await heldStarted;
+        await selectMode('current');
+        await panel.locator('[data-section-id="stable"]').getByText(semanticSummary, { exact: true }).waitFor();
+        const rawRequests = requests.filter((request) => request.query.view === 'raw').length;
+        const lateResponse = fixturePage.waitForResponse((response) => new URL(response.url()).searchParams.get('view') === 'raw');
+        releaseRead();
+        await (await lateResponse).finished();
+        await settle();
+        record(`${label} late raw read cannot paginate or overwrite current`, new URL(fixturePage.url()).searchParams.get('display') === 'current' && await fixturePage.locator('main h1').textContent() === title && await panel.getAttribute('data-mode') === 'current' && await fixturePage.locator('[data-record-selected="true"]').count() === 0 && requests.filter((request) => request.query.view === 'raw').length === rawRequests);
+        record(`${label} record reads preserve scope and never mutate Task`, requests.filter((request) => request.path.endsWith('/records')).every((request) => request.method === 'GET' && request.path === `/api/tasks/${scope.taskId.value}/records` && request.query.projectKey === scope.projectKey && request.query.mode === scope.mode)
+          && requests.filter((request) => request.method !== 'GET').every((request) => request.path === '/api/ui/display-preference'));
+        record(`${label} no page error`, errors.length === 0, errors);
+      } catch (error) {
+        record(`${label} raw/title fixture completed`, false, { message: error.message, errors });
+        await fixturePage.screenshot({ path: join(artifactDir, `raw-title-failure-${viewport.width}.png`) });
+      } finally {
+        releaseRead?.();
+        observe(`${label} requests`, requests);
+        await fixturePage.close();
+      }
+    }
+  }
+  if (projectBreadcrumbOnly) {
+    // Failure evidence: the pre-fix project breadcrumb used the mechanical
+    // projectKey as its last label and never replaced it after publication.
+    // Impact: the primary scope navigation exposes an identifier and disagrees
+    // with the project name in the body. Probability is unknown. Cost: reuse
+    // this consumer's controlled GET and the shared page shell only.
+    const projectKey = 'project/workspace-20261016';
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+      const fixturePage = await context.newPage();
+      await fixturePage.setViewportSize(viewport);
+      const label = `${viewport.width}px`;
+      const requests = [];
+      const errors = [];
+      let releaseProjectRead;
+      let signalProjectReadStarted;
+      const projectReadStarted = new Promise((resolveStarted) => {
+        signalProjectReadStarted = resolveStarted;
+      });
+      fixturePage.on('pageerror', (error) => errors.push(error.message));
+      await fixturePage.route('**/api/**', async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        const query = Object.fromEntries(url.searchParams);
+        requests.push({ method: request.method(), path: url.pathname, query });
+        const fulfill = (payload, status = 200) => route.fulfill({
+          status,
+          contentType: 'application/json',
+          body: JSON.stringify(payload),
+        });
+        if (request.method() === 'GET' && url.pathname === '/api/runtime/status') {
+          return fulfill({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true });
+        }
+        if (request.method() === 'GET'
+          && url.pathname === '/api/dashboard'
+          && query.scope === 'project'
+          && query.projectKey === projectKey) {
+          signalProjectReadStarted();
+          await new Promise((resolveRelease) => { releaseProjectRead = resolveRelease; });
+          return fulfill({
+            surface: 'runtime-project',
+            scope: { kind: 'project', projectKey },
+            label: 'workspace',
+            observedAt: '2026-10-16T00:00:00Z',
+            tasks: [],
+            taskCount: 0,
+            complete: true,
+            failures: [],
+          });
+        }
+        return fulfill({
+          error: {
+            code: 'fixture.unexpected-request',
+            ownerId: 'test',
+            message: `unexpected ${request.method()} ${url.pathname}`,
+            nextAction: 'use the controlled project read',
+          },
+        }, 404);
+      });
+      const breadcrumbState = () => fixturePage.locator('.breadcrumbs').evaluate((nav) => ({
+        labels: [...nav.children].map((child) => child.textContent.trim()),
+        hrefs: [...nav.querySelectorAll('a')].map((link) => link.getAttribute('href')),
+        last: nav.lastElementChild?.textContent?.trim() ?? null,
+      }));
+      const settle = () => fixturePage.evaluate(() => new Promise((done) => {
+        requestAnimationFrame(() => requestAnimationFrame(done));
+      }));
+      const pageUrl = `${server.url}/tasks.html?${new URLSearchParams({ projectKey })}`;
+      try {
+        await fixturePage.goto(pageUrl, { waitUntil: 'domcontentloaded' });
+        const started = await Promise.race([
+          projectReadStarted.then(() => true),
+          sleep(5000).then(() => false),
+        ]);
+        if (!started) throw new Error('project dashboard GET did not start');
+        await fixturePage.locator('.breadcrumbs').waitFor();
+        const initial = await breadcrumbState();
+        record(`${label} initial last breadcrumb names the current project`, initial.last === '当前项目', initial);
+        await fixturePage.screenshot({
+          path: join(artifactDir, `project-breadcrumb-initial-${viewport.width}.png`),
+          fullPage: true,
+        });
+
+        const projectRead = fixturePage.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname === '/api/dashboard'
+            && url.searchParams.get('scope') === 'project'
+            && url.searchParams.get('projectKey') === projectKey;
+        });
+        releaseProjectRead();
+        await (await projectRead).finished();
+        await fixturePage.locator('main h2').waitFor();
+        await settle();
+
+        const published = await breadcrumbState();
+        const bodyTitle = (await fixturePage.locator('main h2').first().textContent())?.trim() ?? null;
+        record(`${label} published DTO label names the last breadcrumb and body`,
+          published.last === 'workspace' && bodyTitle === 'workspace',
+          { published, bodyTitle });
+        const currentUrl = new URL(fixturePage.url());
+        record(`${label} breadcrumb navigation keeps the system/project links and URL scope`,
+          published.labels[0] === '系统'
+            && published.labels[1] === '项目'
+            && published.hrefs[0] === './dashboard.html'
+            && published.hrefs[1] === './tasks.html'
+            && currentUrl.pathname.endsWith('/tasks.html')
+            && currentUrl.searchParams.get('projectKey') === projectKey,
+          { published, currentUrl: currentUrl.href });
+
+        const scopeTrigger = fixturePage.locator('button[data-shell-section="scope"]');
+        await scopeTrigger.click();
+        const scopePanel = fixturePage.locator('[data-shell-panel="scope"]');
+        await scopePanel.waitFor({ state: 'visible' });
+        const scopeText = await scopePanel.innerText();
+        await fixturePage.locator('.shell-layer-close:visible').click();
+        const focusRestored = await fixturePage.waitForFunction(
+          () => document.activeElement?.dataset?.shellSection === 'scope',
+          undefined,
+          { timeout: 5000 },
+        ).then(() => true).catch(() => false);
+        record(`${label} work scope keeps the full project identity and restores focus`,
+          scopeText.includes(`项目 ${projectKey}`) && focusRestored,
+          { projectKey, scopeText, focusRestored });
+
+        const dashboardReads = requests.filter((request) => request.path === '/api/dashboard');
+        record(`${label} project breadcrumb read issues only the scoped GET`,
+          dashboardReads.length === 1
+            && dashboardReads[0].method === 'GET'
+            && dashboardReads[0].query.scope === 'project'
+            && dashboardReads[0].query.projectKey === projectKey
+            && requests.every((request) => request.method === 'GET'),
+          { requests });
+        record(`${label} project breadcrumb fixture raises no page error`, errors.length === 0, errors);
+        await fixturePage.screenshot({
+          path: join(artifactDir, `project-breadcrumb-published-${viewport.width}.png`),
+          fullPage: true,
+        });
+      } catch (error) {
+        record(`${label} project breadcrumb fixture completed`, false, {
+          message: error.message,
+          errors,
+          pageText: await fixturePage.locator('body').innerText().catch(() => ''),
+        });
+        await fixturePage.screenshot({
+          path: join(artifactDir, `project-breadcrumb-failure-${viewport.width}.png`),
+          fullPage: true,
+        }).catch(() => {});
+      } finally {
+        releaseProjectRead?.();
+        observe(`${label} project breadcrumb requests`, requests);
+        await fixturePage.close();
+      }
+    }
+  }
   await context.close();
 
   await writeFile(join(evidenceRoot, 'checks.json'), JSON.stringify({ checks, observations }, null, 2), 'utf8');
@@ -465,7 +1068,11 @@ try {
   if (failures > 0) {
     throw new Error(`${failures}/${checks.length} page wiring browser checks failed:\n${checks.filter((check) => !check.pass).map((check) => `  - ${check.name}: ${JSON.stringify(check.detail)}`).join('\n')}`);
   }
-  console.log(`interaction page wiring browser proof: ${checks.length} checks passed`);
+  console.log(
+    taskIdentityOnly
+      ? `interaction page wiring browser proof (task-identity-only): ${checks.length} checks passed`
+      : `interaction page wiring browser proof: ${checks.length} checks passed`,
+  );
 } finally {
   await browser.close().catch(() => {});
   await closeServer(server).catch(() => {});
