@@ -1,0 +1,39 @@
+{
+  "id": "humanagent-daemon-restart",
+  "version": "1",
+  "meta": {
+    "title": "正式重启：真实关闭与已退出 owner 恢复",
+    "status": "candidate-design",
+    "outcomeContract": "每一步传递本次结果或原始失败；失败不继续副作用，统一进入最终结果。ready只表示服务可用，不证明旧业务已收拢。",
+    "previousOwnerCases": {
+      "closed": "同一旧 lease 已 disposed 且无 cleanupFailure：使用真实关闭证据。",
+      "live": "核对进程身份，正式 SIGTERM，等待退出及同一 owner 的 clean disposal；身份不符、拒绝、超时、无 receipt 或 cleanupFailure 都失败。",
+      "already-dead": "分类时确认 PID 已退出且无已知 cleanupFailure：记录 typed crash recovery；旧关闭仍未验证，不补 disposedAt，不推断 clean。",
+      "race": "原本活着的 owner 在后续检查/信号期间退出，仍须真实关闭回执，不能降为 already-dead。"
+    },
+    "recoveryBoundary": "保留旧错误与恢复责任、PID/lease fence和业务授权。未知副作用不重放；Journal/Task/checkpoint不改写。图中分类分支由 supervisor 唯一 owner 内部完成，不新增第二套恢复编排。"
+  },
+  "inputs": [{"id":"restart_request","schema":"Object"}],
+  "nodes": [
+    {"id":"validate_request","operator":"humanagent-restart-validate","operator_version":"1","inputs":["restart_request"],"output":{"id":"validated_request","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"record_transition","operator":"humanagent-restart-record","operator_version":"1","inputs":["validated_request"],"output":{"id":"restart_transition","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"spawn_replacement","operator":"humanagent-restart-spawn","operator_version":"1","inputs":["restart_transition"],"output":{"id":"replacement_started","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"classify_previous","operator":"humanagent-restart-classify-owner","operator_version":"1","inputs":["replacement_started"],"output":{"id":"previous_owner_state","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"resolve_previous","operator":"humanagent-restart-resolve-owner","operator_version":"1","inputs":["previous_owner_state"],"output":{"id":"previous_owner_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"commit_generation","operator":"humanagent-restart-commit-generation","operator_version":"1","inputs":["previous_owner_outcome"],"output":{"id":"replacement_lease","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"start_stages","operator":"humanagent-restart-start-stages","operator_version":"1","inputs":["replacement_lease"],"output":{"id":"startup_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"publish_ready","operator":"humanagent-restart-ready","operator_version":"1","inputs":["startup_outcome"],"output":{"id":"replacement_ready","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"restart_result","operator":"humanagent-restart-result","operator_version":"1","inputs":["replacement_ready"],"output":{"id":"restart_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges": [
+    {"from":"validate_request","to":"record_transition","arc_id":"validated_request"},
+    {"from":"record_transition","to":"spawn_replacement","arc_id":"restart_transition"},
+    {"from":"spawn_replacement","to":"classify_previous","arc_id":"replacement_started"},
+    {"from":"classify_previous","to":"resolve_previous","arc_id":"previous_owner_state"},
+    {"from":"resolve_previous","to":"commit_generation","arc_id":"previous_owner_outcome"},
+    {"from":"commit_generation","to":"start_stages","arc_id":"replacement_lease"},
+    {"from":"start_stages","to":"publish_ready","arc_id":"startup_outcome"},
+    {"from":"publish_ready","to":"restart_result","arc_id":"replacement_ready"}
+  ],
+  "outputs": ["restart_outcome"]
+}
