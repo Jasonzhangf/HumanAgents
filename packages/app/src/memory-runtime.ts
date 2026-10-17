@@ -313,6 +313,8 @@ export interface MemoryReviewState {
   readonly analysis: MemoryAnalysisStatus;
   readonly autoUpdate: boolean;
   readonly candidates: readonly MemoryReviewCandidateState[];
+  readonly boundaryAttentions?: readonly import('../../contracts/src/index.js').Attention[];
+  readonly boundaryError?: AppLifecycleError;
 }
 
 export interface MemoryRuntime {

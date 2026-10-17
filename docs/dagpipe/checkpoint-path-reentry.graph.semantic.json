@@ -21,7 +21,7 @@
     "memoryConsumption": {
       "consumerGraph": "humanagent-memory-curation",
       "boundaryOwner": "packages/app/src/memory-runtime.ts",
-      "crossGraphEdge": "本图出口的 committed typed outcome 是既有记忆沉淀边界的输入。Memory 只消费已提交的旧/新路径与纠正证据并产出候选，不决定当前路径、恢复许可或规则发布。此处只引用既有边界，不把整条 Memory 流复制进本图。"
+      "crossGraphEdge": "committed outcome 提供路径事实；完整审计须等待首个实际恢复 checkpoint/closure，由标准收口或 startup canonical 补审触发。Memory 只消费已提交的路径与纠正证据并产出候选，不决定恢复许可或规则发布。未知副作用与收拢责任仍属原 operation owner。"
     },
     "separateSameTurnRecovery": "同一业务 turn 的冷恢复是另一张独立图；本图只表达任意历史/前向保存点的条件重入。",
     "notAdded": [
