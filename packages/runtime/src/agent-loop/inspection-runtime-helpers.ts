@@ -1,6 +1,7 @@
 import type {
   AcceptedExecutionChildDelivery,
   AcceptedTurnEntry,
+  AdmittedTurnIdentity,
   ActiveTurnBinding,
   BusinessCycleClosedRecord,
   BusinessCycleOpenedRecord,
@@ -34,6 +35,7 @@ import {
 import type {
   ActiveTurnInitialSegmentSource,
   ActiveTurnSegmentPredecessorRef,
+  NativeSegmentSaveSourceV2,
 } from '../../../contracts/src/active-turn-segments.js';
 import type {
   ActiveTurnJournalRecord,
@@ -42,7 +44,6 @@ import type {
   ActiveTurnSegmentJournalPort,
 } from '../context/active-turn-journal.js';
 import type { CheckpointRecoveryBinding, CommittedCheckpointRecord } from '../checkpoints/ports.js';
-import type { NativeSaveIntent } from '../checkpoints/native-save-contract.js';
 import {
   readCurrentTaskPlan,
   type TaskPlanRevisionConsumerPort,
@@ -84,8 +85,10 @@ export interface InspectionTurnResources {
 }
 
 export interface InspectionStopCaptureSource {
-  readonly intent: NativeSaveIntent;
-  /** Committed receipt for this frozen intent, distinct from its prepared selector. */
+  readonly turn: AdmittedTurnIdentity;
+  readonly boundaryId: string;
+  readonly segmentSource?: NativeSegmentSaveSourceV2;
+  /** Committed receipt for this frozen capture, distinct from its prepared selector. */
   readonly recoveryAssetsReceiptRef: string;
   readonly assets: ReviewedBoundaryRecoveryAssetsPort;
   readonly segments: Pick<
@@ -685,25 +688,32 @@ async function readOccurrenceFactsForStop(
     checkpoint,
     await dependencies.checkpoints.readCommitted(checkpoint.checkpoint.scope, checkpoint.checkpoint.id),
   );
+  const taskScope = taskScopeOf(committed.checkpoint.scope);
+  const applicable = (await listAll(dependencies.journal, {
+    taskScope,
+    kinds: ['inspection-occurrence-opened'],
+    cycleId: committed.checkpoint.cycleId.value,
+    limit: PAGE_LIMIT,
+  })).some((entry) => entry.record.kind === 'inspection-occurrence-opened'
+    && sameScope(entry.record.executionScope, committed.checkpoint.scope));
+  if (!applicable) return [];
+
   const binding = await dependencies.checkpoints.readCheckpointRecoveryBinding(
     committed.checkpoint.scope,
     committed.commitRef,
   );
   const source = await dependencies.resources.forCheckpoint(committed);
-  if (source === null || (binding !== null && source.recoveryAssetsReceiptRef !== binding.turnRecoveryRef)) {
+  if (source === null) {
     throw fail('invalid-state', 'inspection stop capture relationship is recovery-required');
   }
-  if (source.intent.key.checkpoint.id.value !== committed.checkpoint.id.value
-    || !sameScope(source.intent.key.checkpoint.scope, committed.checkpoint.scope)
-    || JSON.stringify(source.intent.checkpoint.checkpoint) !== JSON.stringify(committed.checkpoint)) {
-    throw fail('conflict', 'inspection stop intent does not match the exact committed checkpoint');
+  if (binding !== null && source.recoveryAssetsReceiptRef !== binding.turnRecoveryRef) {
+    throw fail('conflict', 'inspection stop receipt does not match its checkpoint binding');
   }
   const reader = source.assets.readBoundaryRecoveryAssetsExact;
   if (reader === undefined) {
     throw fail('invalid-state', 'inspection stop has no exact typed recovery-assets reader');
   }
   const readback = await reader.call(source.assets, source.recoveryAssetsReceiptRef);
-  let turnId: string;
   let executionEpoch: number;
   let cut: InspectionTurnExactRecords;
   let currentSegmentId: string | undefined;
@@ -712,20 +722,18 @@ async function readOccurrenceFactsForStop(
     const receipt = readback.assets.receipt;
     const body = readback.assets.prepared.body;
     if (receipt.commitIdentity !== source.recoveryAssetsReceiptRef
-      || receipt.businessTurnId !== source.intent.key.turn.turnId
+      || receipt.businessTurnId !== source.turn.turnId
       || receipt.segmentId !== body.segmentId
-      || !('version' in source.intent.key)
-      || source.intent.key.segment.segmentId !== body.segmentId
-      || !sameRef(source.intent.key.segment.openedCommitRef, readback.source.openedCommitRef)
+      || source.segmentSource === undefined
+      || source.segmentSource.opened.segmentId !== body.segmentId
+      || !sameRef(source.segmentSource.openedCommitRef, readback.source.openedCommitRef)
       || !sameScope(body.binding.scope, committed.checkpoint.scope)
-      || receipt.boundaryId !== source.intent.key.boundaryId
+      || receipt.boundaryId !== source.boundaryId
       || body.cut.pauseId !== receipt.boundaryId
-      || !('source' in source.intent)
-      || JSON.stringify(source.intent.source) !== JSON.stringify(readback.source)
-      || body.binding.businessTurnRef.businessTurnId !== source.intent.key.turn.turnId) {
-      throw fail('conflict', 'inspection stop capture does not match its native save intent');
+      || JSON.stringify(source.segmentSource) !== JSON.stringify(readback.source)
+      || body.binding.businessTurnRef.businessTurnId !== source.turn.turnId) {
+      throw fail('conflict', 'inspection stop capture does not match its committed source');
     }
-    turnId = receipt.businessTurnId;
     executionEpoch = body.binding.execution.executionEpoch;
     currentSegmentId = body.segmentId;
     predecessor = body.predecessor;
@@ -734,15 +742,14 @@ async function readOccurrenceFactsForStop(
     const receipt = readback.assets.receipt;
     const body = readback.assets.prepared.body;
     if (receipt.commitIdentity !== source.recoveryAssetsReceiptRef
-      || receipt.turnId !== source.intent.key.turn.turnId
-      || 'version' in source.intent.key
+      || receipt.turnId !== source.turn.turnId
+      || source.segmentSource !== undefined
       || !sameScope(body.binding.scope, committed.checkpoint.scope)
-      || receipt.boundaryId !== source.intent.key.boundaryId
+      || receipt.boundaryId !== source.boundaryId
       || body.cut.pauseId !== receipt.boundaryId
-      || body.binding.admittedTurn.turnId !== source.intent.key.turn.turnId) {
-      throw fail('conflict', 'inspection stop capture does not match its native save intent');
+      || body.binding.admittedTurn.turnId !== source.turn.turnId) {
+      throw fail('conflict', 'inspection stop capture does not match its committed source');
     }
-    turnId = receipt.turnId;
     executionEpoch = body.binding.execution.executionEpoch;
     cut = exactCaptureRecords(body);
   }
@@ -763,14 +770,14 @@ async function readOccurrenceFactsForStop(
           throw fail('conflict', 'inspection stop predecessor capture does not match its chain link');
         }
         if (exact.version === 1) {
-          if (exact.assets.receipt.turnId !== turnId
-            || exact.assets.prepared.body.binding.admittedTurn.turnId !== turnId) {
+          if (exact.assets.receipt.turnId !== source.turn.turnId
+            || exact.assets.prepared.body.binding.admittedTurn.turnId !== source.turn.turnId) {
             throw fail('conflict', 'inspection stop original capture belongs to a different turn');
           }
           prior.push(exactCaptureRecords(exact.assets.prepared.body));
           predecessor = undefined;
         } else {
-          if (exact.assets.receipt.businessTurnId !== turnId
+          if (exact.assets.receipt.businessTurnId !== source.turn.turnId
             || exact.assets.receipt.segmentId !== predecessor.segmentId) {
             throw fail('conflict', 'inspection stop predecessor capture does not match its chain link');
           }
@@ -779,7 +786,7 @@ async function readOccurrenceFactsForStop(
         }
       } else if (predecessor.interrupted !== undefined) {
         const exact = await source.segments.readSegmentInterruptedExact({
-          businessTurnId: turnId,
+          businessTurnId: source.turn.turnId,
           predecessor: { segmentId: predecessor.segmentId, interrupted: predecessor.interrupted },
         });
         prior.push({
@@ -789,7 +796,7 @@ async function readOccurrenceFactsForStop(
         predecessor = exact.prefix.segment.predecessor;
       } else {
         const exact = await source.segments.readInitialOpenExact({
-          businessTurnId: turnId,
+          businessTurnId: source.turn.turnId,
           anchor: predecessor.initialOpen,
         });
         prior.push({
@@ -801,7 +808,7 @@ async function readOccurrenceFactsForStop(
     }
   }
   const merged = mergeRecords([...prior, cut]);
-  const facts = await readOccurrenceFactsForTurn(dependencies, turnId, taskScopeOf(committed.checkpoint.scope), merged);
+  const facts = await readOccurrenceFactsForTurn(dependencies, source.turn.turnId, taskScope, merged);
   if (facts === null) return [];
   const deliveries = merged.entries.flatMap((delivery) => {
     const invocation = merged.childInvocations.find((candidate) => candidate.invocationId === delivery.invocationId);

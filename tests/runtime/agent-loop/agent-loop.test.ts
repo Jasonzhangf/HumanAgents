@@ -33,7 +33,6 @@ import type {
   PublishedTaskPlanRevision,
   TurnCloseSummary,
 } from '../../../packages/contracts/src/index.js';
-import type { NativeSaveIntent, NativeSegmentSaveIntentV2 } from '../../../packages/runtime/src/checkpoints/native-save-contract.js';
 import type {
   CommittedCheckpointRecord,
   ContextHistoryPort,
@@ -85,6 +84,7 @@ function inspectionHelperConsumer() {
   let stopSource: Awaited<ReturnType<InspectionRuntimeHelperDependencies['resources']['forCheckpoint']>> = null;
   let committedCheckpoint: CommittedCheckpointRecord | null = null;
   let forbiddenTail = false;
+  let failForCheckpoint = false;
   const resources = {
     logicalTurnId: admittedTurn.turnId, identity: { scope: taskScope, source, journalCommitRef: 'jsonl:identity' },
     journal: { replay: async () => { if (forbiddenTail) throw new Error('stop read mutable tail'); return []; } },
@@ -93,7 +93,11 @@ function inspectionHelperConsumer() {
   };
   const dependencies: InspectionRuntimeHelperDependencies = {
     resources: { forTurn: async (turnId) => turnId === resources.logicalTurnId ? resources : null,
-      forInvocation: async () => resources, forCheckpoint: async () => stopSource },
+      forInvocation: async () => resources,
+      forCheckpoint: async () => {
+        if (failForCheckpoint) throw new Error('ordinary stop must not read a physical capture');
+        return stopSource;
+      } },
     journal: { commit: async (record) => { const commitRef = receipt(`i2:${entries.length}`, entries.length + 1); entries.push({ record, commitRef }); return commitRef; },
       read: async (_scope, ref) => { const entry = entries.find((entry) => entry.commitRef.commitId === ref.commitId); if (!entry) throw new Error('missing exact record'); return entry.record; },
       list: async (query) => ({ entries: entries.filter(({ record }) => query.kinds?.includes(record.kind) ?? true) }) },
@@ -104,6 +108,8 @@ function inspectionHelperConsumer() {
   };
   return { dependencies, resources, entries, plan, plans, receipt, assignment, raw, time,
     capture: () => capture, setCapture: (value: ActiveTurnCaptureBody) => { capture = value; },
+    commitCheckpoint: (checkpoint: CommittedCheckpointRecord) => { committedCheckpoint = checkpoint; },
+    failForCheckpoint: () => { failForCheckpoint = true; },
     stop: (checkpoint: CommittedCheckpointRecord, value: NonNullable<typeof stopSource>) => { committedCheckpoint = checkpoint; stopSource = value; forbiddenTail = true; },
     helpers: () => createInspectionRuntimeHelpers(dependencies) };
 }
@@ -189,7 +195,7 @@ test('inspection runtime helpers stop follows exact v2 receipt to original v1 an
   const opened = { kind: 'segment-opened' as const, segmentId: 'resumed', businessTurnRef, predecessor,
     binding: segmentBinding, authorityCommitRef: f.receipt('authority'), businessRegistrationCommitRef: f.receipt('registration'),
     requestRef: 'open-resumed', inputIdentity: { requestRef: 'open-resumed', digest: 'input' } };
-  const source = { originalAdmittedTurn: original.binding.admittedTurn, originalBusinessTurnRef: businessTurnRef,
+  const segmentSource = { originalAdmittedTurn: original.binding.admittedTurn, originalBusinessTurnRef: businessTurnRef,
     opened, openedCommitRef: f.receipt('opened') };
   const recovery = { recoveryResponsibilityRef: 'recovery', unresolvedOperationRefs: [], rawTurnRefs: [], laterErrorRefs: [],
     commitIdentity: 'save', stages: [], durablePhases: [], durableReceiptRefs: [] };
@@ -205,19 +211,11 @@ test('inspection runtime helpers stop follows exact v2 receipt to original v1 an
   const assets = { readRecoveryAssetsExact: async () => originalRead,
     readBoundaryRecoveryAssetsExact: async (ref: string) => {
       reads.push(ref);
-      if (ref === 'committed:v2') return { version: 2 as const, assets: { receipt, prepared }, source };
+      if (ref === 'committed:v2') return { version: 2 as const, assets: { receipt, prepared }, source: segmentSource };
       if (ref === 'committed:v1' && !missing) return { version: 1 as const, assets: originalRead };
       throw new Error('exact capture missing');
     } };
-  const intent: NativeSegmentSaveIntentV2 = { key: { version: 2, turn: context.turn, segment: { segmentId: 'resumed', openedCommitRef: source.openedCommitRef },
-    boundaryId: 'boundary', checkpoint: checkpoint.checkpoint }, source, ownerId: 'native', inputIntentDigest: 'input', ...recovery,
-    recoveryAssets: { source, boundaryId: 'boundary', captureRef: 'prepared-selector' },
-    checkpoint: { checkpoint: checkpoint.checkpoint, timeAuthority: checkpointTimeAuthority, previousCheckpointId: null, acceptedAt: f.time },
-    closure: { closureId: 'closure', checkpoint: checkpoint.checkpoint, source: 'harness-control', closureSummary: 'stop', closureEvidenceRefs: [] },
-    contextView: { source, acceptance: { ownerId: 'native', acceptanceRef: 'acceptance', sourceEvidenceRefs: [] },
-      semantics: { goal: 'stop', actions: 'stop', result: 'stopped', nextStep: 'recover' }, adoptedChildren: [],
-      recovery: { ...recovery, recoveryStateRef: 'recovery-state' } } };
-  f.stop(checkpoint, { intent, recoveryAssetsReceiptRef: 'committed:v2', assets,
+  f.stop(checkpoint, { turn: context.turn, boundaryId: 'boundary', segmentSource, recoveryAssetsReceiptRef: 'committed:v2', assets,
     segments: { readInitialOpenExact: async () => { throw new Error('unexpected initial-open'); },
       readSegmentInterruptedExact: async () => { throw new Error('unexpected interrupted'); } } });
   const facts = await f.helpers().occurrences.readOccurrencesForStop({ checkpoint });
@@ -226,9 +224,23 @@ test('inspection runtime helpers stop follows exact v2 receipt to original v1 an
   assert.deepEqual(facts[0]!.deliveries, [{ invocation, delivery }]);
   missing = true;
   await assert.rejects(f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), /exact capture missing/);
-  f.stop(checkpoint, { intent: { ...intent, key: { ...intent.key, checkpoint: { ...checkpoint.checkpoint, id: id('checkpoint', 'wrong') } } },
+  f.stop(checkpoint, { turn: context.turn, boundaryId: 'wrong-boundary', segmentSource,
     recoveryAssetsReceiptRef: 'committed:v2', assets, segments: { readInitialOpenExact: async () => { throw new Error('unexpected'); }, readSegmentInterruptedExact: async () => { throw new Error('unexpected'); } } });
-  await assert.rejects(f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), /intent does not match/);
+  await assert.rejects(f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), /committed source/);
+});
+
+test('inspection runtime helpers treat a stop without an opened occurrence as not applicable', async () => {
+  // Failure basis: stop applicability required a physical capture before checking the durable occurrence.
+  // Impact: an ordinary prepared stop is falsely blocked. Probability: unknown. Cost: one existing fixture assertion.
+  const f = inspectionHelperConsumer();
+  const checkpoint: CommittedCheckpointRecord = { checkpoint: { id: id('checkpoint', 'ordinary-stop'), scope,
+    cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 1,
+    outcome: 'stopped', summary: 'ordinary stop', recoveryStateRef: f.raw.ref, evidenceRefs: [], next: { kind: 'stop' } },
+    previous: null, commitRef: f.receipt('ordinary-stop-checkpoint') };
+  f.commitCheckpoint(checkpoint);
+  f.failForCheckpoint();
+
+  assert.deepEqual(await f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), []);
 });
 
 const observationProfile: AgentModeCapabilityProfile = {
@@ -1528,7 +1540,6 @@ test('inspection turn boundary consumer only settles a committed stopped checkpo
     previous: null,
     commitRef: { commitId: 'checkpoint:inspection-stop', journalSeq: 8, recordDigest: digest('stop') },
   } as const;
-  let recoveryReads = 0;
   const boundary = new InspectionTurnBoundary({
     selectionReader: { readSelectionContext: async () => { throw new Error('stop must not select'); } },
     journal: {
@@ -1545,14 +1556,7 @@ test('inspection turn boundary consumer only settles a committed stopped checkpo
     },
     checkpoints: {
       readCommitted: async () => stopped,
-      readCheckpointRecoveryBinding: async () => {
-        recoveryReads += 1;
-        return {
-          checkpointCommitRef: stopped.commitRef,
-          contextCommitRef: { commitId: 'context:inspection-stop', journalSeq: 8, recordDigest: digest('context') },
-          coreClosure: {} as never,
-        };
-      },
+      readCheckpointRecoveryBinding: async () => { throw new Error('stop helper owns receipt verification'); },
       readNativeCheckpoint: async () => checkpointRelationship(stopped, '2026-09-20T00:00:00.000Z'),
     },
     clock: { now: () => new Date('2026-09-20T00:00:00.000Z') },
@@ -1561,7 +1565,6 @@ test('inspection turn boundary consumer only settles a committed stopped checkpo
   const receipt = await boundary.settleStop({ checkpoint: stopped });
 
   assert.deepEqual(receipt, { settlementCommitRefs: [] });
-  assert.equal(recoveryReads, 1);
   await assert.rejects(
     () => boundary.settleStop({ checkpoint: { ...stopped, checkpoint: { ...stopped.checkpoint, outcome: 'succeeded' } } }),
     /exact committed checkpoint/,
