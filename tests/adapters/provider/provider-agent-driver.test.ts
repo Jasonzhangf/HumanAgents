@@ -577,6 +577,185 @@ test('parallel batch: provider agent driver runs declared generic tools concurre
   ]);
 });
 
+test('provider agent driver continues a retryable blocked tool wait with sibling output', async () => {
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round === 1) {
+        for (const call of [
+          { callId: 'call-wait', toolId: 'child.call', arguments: { work: 'wait' }, continuationRef: 'response-capacity-wait' },
+          { callId: 'call-sibling', toolId: 'child.call', arguments: { work: 'sibling' }, continuationRef: 'response-capacity-wait' },
+        ]) {
+          yield {
+            ...identity,
+            eventId: `event-${call.callId}`,
+            kind: 'tool',
+            summary: call.toolId,
+            outputRefs: [],
+            evidenceRefs: [evidence],
+            toolCall: call,
+          };
+        }
+        yield {
+          ...identity,
+          eventId: 'event-capacity-waiting',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-capacity-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const waitError: ProviderError = {
+    errorId: 'orchestration-runtime-manager:orchestration.runtime.max:work-call-wait',
+    code: 'orchestration.runtime.max',
+    category: 'runtime',
+    phase: 'tool',
+    message: 'orchestration runtime pool is at capacity',
+    ownerId: 'orchestration-runtime-manager',
+    retryable: 'retryable',
+    attention: 'background',
+    evidenceRefs: [evidence],
+    nextAction: { kind: 'wait', ref: 'orchestration.runtime.max' },
+  };
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'child.call', description: 'delegate child work', inputSchema: { type: 'object' } }],
+    executeTool: {
+      canRunConcurrently: () => true,
+      async execute({ call }) {
+        if (call.callId === 'call-wait') {
+          return {
+            output: JSON.stringify({ state: 'waiting', invocationId: 'work-call-wait' }),
+            outputRefs: [],
+            evidenceRefs: [evidence],
+            status: 'blocked',
+            error: waitError,
+          };
+        }
+        return {
+          output: JSON.stringify({ state: 'returned', invocationId: 'work-call-sibling' }),
+          outputRefs: [],
+          evidenceRefs: [evidence],
+        };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-a', payload: { prompt: 'delegate both children' } });
+
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  const results = events.filter((event) => event.kind === 'provider.tool-result');
+  assert.deepEqual(results.map((event) => [event.providerEvent.toolResult?.callId, event.providerEvent.toolResult?.status]), [
+    ['call-wait', 'blocked'],
+    ['call-sibling', 'succeeded'],
+  ]);
+  const waiting = results[0]?.providerEvent.toolResult;
+  assert.equal(waiting?.error?.ownerId, 'orchestration-runtime-manager');
+  assert.equal(waiting?.error?.retryable, 'retryable');
+  assert.deepEqual(waiting?.error?.nextAction, { kind: 'wait', ref: 'orchestration.runtime.max' });
+  assert.equal(submissions.length, 1);
+  assert.deepEqual(submissions[0]?.toolContinuations?.map((item) => [item.callId, item.output]), [
+    ['call-wait', JSON.stringify({ state: 'waiting', invocationId: 'work-call-wait' })],
+    ['call-sibling', JSON.stringify({ state: 'returned', invocationId: 'work-call-sibling' })],
+  ]);
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
+});
+
+test('provider agent driver rejects a blocked tool result without retryable wait semantics', async () => {
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      yield {
+        ...identity,
+        eventId: 'event-manual-block-call',
+        kind: 'tool',
+        summary: 'child.call',
+        outputRefs: [],
+        evidenceRefs: [evidence],
+        toolCall: { callId: 'call-manual-block', toolId: 'child.call', arguments: { work: 'blocked' }, continuationRef: 'response-manual-block' },
+      };
+      yield {
+        ...identity,
+        eventId: 'event-manual-block-waiting',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+  });
+  const blockError: ProviderError = {
+    errorId: 'child-runtime:child.manual-block:work-call-blocked',
+    code: 'child.manual-block',
+    category: 'runtime',
+    phase: 'tool',
+    message: 'child work requires manual recovery',
+    ownerId: 'child-runtime',
+    retryable: 'manual',
+    attention: 'recovery',
+    evidenceRefs: [evidence],
+    nextAction: { kind: 'recover', ref: 'child.manual-block' },
+  };
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'child.call', description: 'delegate child work', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute() {
+        return {
+          output: JSON.stringify({ state: 'blocked', invocationId: 'work-call-blocked' }),
+          outputRefs: [],
+          evidenceRefs: [evidence],
+          status: 'blocked',
+          error: blockError,
+        };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-a', payload: { prompt: 'delegate blocked work' } });
+
+  const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+  const resultEvent = (await iterator.next()).value;
+  assert.equal(resultEvent?.kind, 'provider.tool-result');
+  assert.equal(resultEvent?.providerEvent.toolResult?.status, 'blocked');
+  assert.equal(resultEvent?.providerEvent.toolResult?.error?.ownerId, 'child-runtime');
+  await assert.rejects(
+    () => iterator.next(),
+    (error: unknown) => error instanceof ProviderAdapterError
+      && error.providerError.code === blockError.code
+      && error.providerError.retryable === 'manual'
+      && error.providerError.nextAction.kind === 'recover',
+  );
+});
+
 test('parallel batch: stop retains a completed sibling outcome and settles without a failed-result projection', async () => {
   // Observed r104 gap: stopping after the first persisted result drops a
   // successful sibling outcome. Probability is unknown; impact is durable

@@ -995,7 +995,14 @@ export class ProviderAgentDriver<
         if (this.stopping) continue;
         if (toolResult.status !== 'succeeded') {
           yield* this.toolResultEvents(request, outcome.call, toolResult.result, `${outcome.call.toolId} ${toolResult.status}`);
-          if (outcome.result.status === 'failed' && isStandardTurnEndToolId(outcome.call.toolId)) {
+          if (
+            (outcome.result.status === 'failed' && isStandardTurnEndToolId(outcome.call.toolId))
+            || (
+              toolResult.result.status === 'blocked'
+              && toolResult.result.error?.retryable === 'retryable'
+              && toolResult.result.error.nextAction.kind === 'wait'
+            )
+          ) {
             toolHistory.push({ call: outcome.call, result: outcome.result });
             continue;
           }
@@ -1319,9 +1326,9 @@ export class ProviderAgentDriver<
   }
 
   private toolStatus(result: ProviderToolExecutionResult): ProviderToolStatus {
-    if (result.error !== undefined) return result.status === 'cancelled' ? 'cancelled' : 'failed';
-    if (result.status === 'cancelled') return 'cancelled';
-    return result.status ?? 'succeeded';
+    if (result.status !== undefined && result.status !== 'succeeded') return result.status;
+    if (result.error !== undefined) return 'failed';
+    return 'succeeded';
   }
 
   private toolResult(request: RequestAttempt, call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult<TIdentity> {
