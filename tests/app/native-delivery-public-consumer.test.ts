@@ -51,6 +51,11 @@ const TURN_ONE_GOAL = 'Adopt the independent child result for the first turn';
 const TURN_ONE_ACTIONS = 'Call the child, adopt its returned result, and close the first turn';
 const TURN_ONE_RESULT = 'The child result is adopted and the first turn is closed';
 const TURN_ONE_NEXT = 'Continue with the adopted child conclusion in the second turn';
+const TURN_TWO_GOAL = 'Close the second standard turn from the committed first-turn checkpoint';
+const TURN_TWO_ACTIONS = 'Consume the first-turn checkpoint and close the second turn';
+const TURN_TWO_RESULT = 'The second-turn checkpoint is committed for the third standard turn';
+const TURN_TWO_NEXT = 'Continue in the third standard turn and deliver the exact final text body';
+const TURN_TWO_DELIVERY = 'Native second-turn delivery body: intermediate progress.';
 
 // Missing adapter and the legacy/native append split can lose recovery anchors.
 // Impact: false committed success or an old-epoch anchor. Cost: one local Journal
@@ -423,7 +428,8 @@ function closureSection(value: unknown, label: string): { readonly text: string;
 function plannerFrames(
   model: string,
   payload: Record<string, unknown>,
-  twoTurnAttempt?: number,
+  multiTurnAttempt?: number,
+  turnCount: 2 | 3 = 2,
 ): readonly Record<string, unknown>[] {
   const task = requireRecord(payload.task, 'the task');
   const closure = requireRecord(payload.closure, 'the closure');
@@ -437,15 +443,15 @@ function plannerFrames(
   let snapshot: Record<string, unknown>;
   let decision: 'continue' | 'complete';
   const firstPublication = payload.priorPlan === null;
-  if (twoTurnAttempt === undefined && !firstPublication) {
+  if (multiTurnAttempt === undefined && !firstPublication) {
     throw new Error('the Planner request did not carry the expected null priorPlan for the first publication');
   }
-  if (twoTurnAttempt === 1 && !firstPublication) {
-    throw new Error('the first two-turn Planner request must carry null priorPlan');
+  if (multiTurnAttempt === 1 && !firstPublication) {
+    throw new Error('the first multi-turn Planner request must carry null priorPlan');
   }
-  if (twoTurnAttempt === 2) {
-    const priorPlan = requireRecord(payload.priorPlan, 'the prior two-turn plan');
-    assert.equal(requireNumber(priorPlan.sequence, 'the prior two-turn plan sequence'), 1);
+  if (multiTurnAttempt !== undefined && multiTurnAttempt > 1) {
+    const priorPlan = requireRecord(payload.priorPlan, 'the prior multi-turn plan');
+    assert.equal(requireNumber(priorPlan.sequence, 'the prior multi-turn plan sequence'), multiTurnAttempt - 1);
   }
   if (firstPublication) {
     const confirmedSource = requireRecord(payload.confirmedSource, 'the confirmed source');
@@ -497,15 +503,15 @@ function plannerFrames(
       phases: [],
       relations: [],
     };
-    decision = twoTurnAttempt === 1 ? 'continue' : 'complete';
+    decision = multiTurnAttempt !== undefined && multiTurnAttempt < turnCount ? 'continue' : 'complete';
   } else {
     snapshot = requireRecord(requireRecord(payload.priorPlan, 'the prior plan').snapshot, 'the prior plan snapshot');
-    decision = 'complete';
+    decision = multiTurnAttempt !== undefined && multiTurnAttempt < turnCount ? 'continue' : 'complete';
   }
   const text = JSON.stringify({
     decision,
     snapshot,
-    reasonText: twoTurnAttempt === 1
+    reasonText: decision === 'continue'
       ? 'the first closed turn adopted a child and requires the next standard turn'
       : 'the whole-task plan is aligned to the closed turn',
   });
@@ -541,7 +547,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly inspect?: boolean;
   readonly child?: boolean;
   readonly parallelChild?: boolean;
-  readonly twoTurn?: boolean;
+  readonly turnCount?: 2 | 3;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; close(): Promise<void> }> {
   const wires: Wire[] = [];
@@ -575,7 +581,8 @@ async function textOnlyResponsesUpstream(input: {
           { type: 'response.created', response: { id: 'planner-refused' } },
           { type: 'response.output_text.done', item_id: 'planner-refused-text', text: '{}' },
           { type: 'response.completed', response: { id: 'planner-refused' } },
-        ] : plannerFrames(input.model, planner, input.twoTurn ? plannerAttempts : undefined)));
+        ] : plannerFrames(input.model, planner, input.turnCount === undefined ? undefined : plannerAttempts,
+          input.turnCount ?? 2)));
         return;
       }
       if (declaresTurnEnd(body)) {
@@ -591,7 +598,7 @@ async function textOnlyResponsesUpstream(input: {
       if (!hasTurnEndSurface(body)) {
         throw new Error('the controlled upstream could not identify a lawful Responses stage');
       }
-      if ((input.child || input.parallelChild) && !(input.twoTurn && plannerAttempts > 0)) {
+      if ((input.child || input.parallelChild) && !(input.turnCount !== undefined && plannerAttempts > 0)) {
         const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
           input?: { type: string; call_id?: string; output?: string; name?: string }[] };
         const invoke = (callId: string, name: string, args: unknown) => {
@@ -716,7 +723,7 @@ async function textOnlyResponsesUpstream(input: {
       const verified = await input.journal.verify();
       const coverageRecords = verified.records
         .filter((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
-      const coverage = input.twoTurn ? coverageRecords.at(-1) : coverageRecords[0];
+      const coverage = input.turnCount === undefined ? coverageRecords[0] : coverageRecords.at(-1);
       const payload = coverage?.payload as { admissionCommitRef?: { commitId?: string } } | undefined;
       const admissionCommitId = payload?.admissionCommitRef?.commitId;
       if (!admissionCommitId) throw new Error('text-only run has no admitted operation coverage');
@@ -730,15 +737,27 @@ async function textOnlyResponsesUpstream(input: {
         || readFact.entry.envelope.fact.result.status !== 'succeeded')) throw new Error('real inspect result is absent');
       const deliveryRefs = readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result'
         ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
-      const twoTurnFirst = input.twoTurn && plannerAttempts === 0;
-      const endCallId = input.twoTurn ? (twoTurnFirst ? 'call-turn-1-end' : 'call-turn-2-end') : 'call-text-end';
-      const endSummary = input.twoTurn ? {
+      const multiTurn = input.turnCount !== undefined;
+      const endCallId = multiTurn ? `call-turn-${plannerAttempts + 1}-end` : 'call-text-end';
+      const endSummary = multiTurn ? (plannerAttempts === 0 ? {
         goal: section(TURN_ONE_GOAL), actions: section(TURN_ONE_ACTIONS),
         result: section(TURN_ONE_RESULT), expectedNextStep: section(TURN_ONE_NEXT),
+      } : input.turnCount === 3 && plannerAttempts === 1 ? {
+        goal: section(TURN_TWO_GOAL), actions: section(TURN_TWO_ACTIONS),
+        result: section(TURN_TWO_RESULT), expectedNextStep: section(TURN_TWO_NEXT),
+      } : input.turnCount === 3 && plannerAttempts === 2 ? {
+        goal: section('Complete the third standard turn from committed multi-turn semantic history'),
+        actions: section('Consume both prior semantic checkpoints and close the third turn'),
+        result: section(SUMMARY_RESULT), expectedNextStep: section('Close the final third turn'),
       } : {
+        goal: section(TURN_ONE_GOAL), actions: section(TURN_ONE_ACTIONS),
+        result: section(TURN_ONE_RESULT), expectedNextStep: section(TURN_ONE_NEXT),
+      }) : {
         goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
         result: section(SUMMARY_RESULT), expectedNextStep: section('Close this turn'),
       };
+      const deliveryText = multiTurn ? (plannerAttempts === 0 ? CHILD_BODY
+        : input.turnCount === 3 && plannerAttempts === 1 ? TURN_TWO_DELIVERY : EXACT_BODY) : EXACT_BODY;
       const toolCall = [
         { type: 'response.created', response: { id: 'text-end' } },
         { type: 'response.output_item.added', output_index: 0,
@@ -746,7 +765,7 @@ async function textOnlyResponsesUpstream(input: {
         { type: 'response.output_item.done', output_index: 0,
           item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: JSON.stringify({
             summary: endSummary,
-            ...(input.inspect ? {} : { deliveryText: twoTurnFirst ? CHILD_BODY : EXACT_BODY }),
+            ...(input.inspect ? {} : { deliveryText }),
             deliveryRefs,
           }) } },
         { type: 'response.completed', response: { id: 'text-end' } },
@@ -777,7 +796,7 @@ async function textOnlyResponsesUpstream(input: {
 }
 
 /** Canonical fixture: real workspace, real native control layout, controlled Provider. */
-async function textOnlyFixture(inspect = false, child = false, parallelChild = false, twoTurn = false) {
+async function textOnlyFixture(inspect = false, child = false, parallelChild = false, turnCount?: 2 | 3) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
   const controlRoot = join(root, 'control');
@@ -790,7 +809,7 @@ async function textOnlyFixture(inspect = false, child = false, parallelChild = f
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, twoTurn });
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, turnCount });
   const configPath = join(controlRoot, 'config.toml');
   // Both the default execution agent and the independent orchestration agent
   // select this real local Provider through the normal compiled roster.
@@ -811,6 +830,60 @@ async function textOnlyFixture(inspect = false, child = false, parallelChild = f
   await writeFile(configPath, config, 'utf8');
   const configuration = await loadConfiguration(paths);
   return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration };
+}
+
+async function runNativeMultiTurnConsumer(
+  fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
+  turnCount: 2 | 3,
+) {
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const organId = id('organ', 'humanagent-ui');
+  const label = turnCount === 2 ? 'two-turn' : 'three-turn';
+  const taskId = id('task', `native-${label}-consumer`);
+  const controlFile = join(fixture.root, 'control-session.txt');
+  const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
+  const session = await access.consumePairingCode(access.createPairingChallenge(`${label}-lease`, 1).code);
+  const cookie = access.sessionCookie(session).split(';')[0]!;
+  await writeFile(controlFile, `${cookie}\n`, 'utf8');
+  const caller = await access.verifyProductPrincipal(cookie);
+  if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
+
+  const seed = new RuntimeTaskCoordinator({
+    organId, taskIdPrefix: `native-${label}`, journal: new UiRuntimeJournal(fixture.layout.preparedJournalPath),
+    checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
+    attentionPort: {
+      async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
+      async resolve(value) { return { attentionId: value.attentionId, delivered: true }; },
+    },
+    async createDriver() { throw new Error('seed coordinator never releases execution'); },
+  });
+  seed.createTask({ taskId, title: `native ${label} task`, directive: `complete the ${label} delivery` });
+  await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)).establish({
+    scope: { organId, taskId }, source: {
+      requirementId: `requirement:${taskId.value}`, inputRevision: 1, draftId: `draft:${taskId.value}`,
+      draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`,
+      confirmationRef: `confirmation:${taskId.value}`,
+    },
+  });
+  await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
+    owner: caller.principal.owner,
+    capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
+    expectedRevision: 0 });
+
+  const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const processChild = spawn(process.execPath, [cli,
+      'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
+      '--plan', 'default', '--session', `native-${label}-run`, '--task', taskId.value,
+      '--prompt', `${label} delivery probe`, '--control-session-file', controlFile],
+    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    processChild.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    processChild.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    processChild.once('error', reject);
+    processChild.once('exit', (code) => resolve({ code, stdout, stderr }));
+  });
+  return { taskId, result };
 }
 
 interface PublicOutputCommitView {
@@ -1075,55 +1148,10 @@ test('native parallel child calls overlap and retain ordered refined results and
 });
 
 test('native two.turn public CLI consumer retains adopted child context and completes the prior plan', async () => {
-  const fixture = await textOnlyFixture(false, true, false, true);
-  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
-  const organId = id('organ', 'humanagent-ui');
-  const taskId = id('task', 'native-two-turn-consumer');
-  const controlFile = join(fixture.root, 'control-session.txt');
+  const fixture = await textOnlyFixture(false, true, false, 2);
   let passed = false;
   try {
-    const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-    const session = await access.consumePairingCode(access.createPairingChallenge('two-turn-lease', 1).code);
-    const cookie = access.sessionCookie(session).split(';')[0]!;
-    await writeFile(controlFile, `${cookie}\n`, 'utf8');
-    const caller = await access.verifyProductPrincipal(cookie);
-    if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
-
-    const seed = new RuntimeTaskCoordinator({
-      organId, taskIdPrefix: 'native-two-turn', journal: new UiRuntimeJournal(fixture.layout.preparedJournalPath),
-      checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
-      attentionPort: {
-        async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
-        async resolve(value) { return { attentionId: value.attentionId, delivered: true }; },
-      },
-      async createDriver() { throw new Error('seed coordinator never releases execution'); },
-    });
-    seed.createTask({ taskId, title: 'native two-turn task', directive: 'complete the two-turn delivery' });
-    await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)).establish({
-      scope: { organId, taskId }, source: {
-        requirementId: `requirement:${taskId.value}`, inputRevision: 1, draftId: `draft:${taskId.value}`,
-        draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`,
-        confirmationRef: `confirmation:${taskId.value}`,
-      },
-    });
-    await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
-      owner: caller.principal.owner,
-      capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
-      expectedRevision: 0 });
-
-    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const processChild = spawn(process.execPath, [cli,
-        'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
-        '--plan', 'default', '--session', 'native-two-turn-run', '--task', taskId.value,
-        '--prompt', 'two-turn delivery probe', '--control-session-file', controlFile],
-      { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
-      let stdout = '';
-      let stderr = '';
-      processChild.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
-      processChild.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
-      processChild.once('error', reject);
-      processChild.once('exit', (code) => resolve({ code, stdout, stderr }));
-    });
+    const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
     assert.equal(result.code, 0, `the real two-turn CLI run must exit cleanly: ${result.stderr}`);
     const receiptStart = result.stdout.indexOf('{');
     const receiptEnd = result.stdout.lastIndexOf('}');
@@ -1206,6 +1234,101 @@ test('native two.turn public CLI consumer retains adopted child context and comp
     await fixture.upstream.close();
     if (passed) await rm(fixture.root, { recursive: true });
     else console.error(`two-turn fixture retained: ${fixture.root}`);
+  }
+});
+
+// A three-turn publication can silently retain only the latest prior scope.
+// Frequency is unknown; impact is loss of the first-turn semantic checkpoint.
+// Cost: one real single-child CLI/HTTP consumer reusing the two-turn fixture.
+test('native three.turn public CLI consumer retains multi-turn semantic history and adopted child context', async () => {
+  const fixture = await textOnlyFixture(false, true, false, 3);
+  let passed = false;
+  try {
+    const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 3);
+    assert.equal(result.code, 0, `the real three-turn CLI run must exit cleanly: ${result.stderr}`);
+    const receiptStart = result.stdout.indexOf('{');
+    const receiptEnd = result.stdout.lastIndexOf('}');
+    assert.ok(receiptStart >= 0 && receiptEnd > receiptStart, `the three-turn run prints a receipt: ${result.stdout}`);
+    const receipt = JSON.parse(result.stdout.slice(receiptStart, receiptEnd + 1)) as {
+      readonly command?: string;
+      readonly taskId?: string;
+      readonly state?: string;
+      readonly output?: string;
+      readonly error?: unknown;
+      readonly terminal?: Record<string, unknown>;
+    };
+    assert.equal(receipt.command, 'run');
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt.error));
+    assert.equal(receipt.output, EXACT_BODY);
+    assert.equal(receipt.error, undefined);
+    const terminal = requireRecord(receipt.terminal, 'the three-turn terminal');
+
+    const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    const plannerPosts = posts.filter((wire) => plannerPayload(wire.body) !== undefined);
+    assert.equal(plannerPosts.length, 3, 'the three-turn run reaches exactly three independent Planner requests');
+    const firstPlanner = plannerPayload(plannerPosts[0]!.body);
+    const secondPlanner = plannerPayload(plannerPosts[1]!.body);
+    const thirdPlanner = plannerPayload(plannerPosts[2]!.body);
+    if (!firstPlanner || !secondPlanner || !thirdPlanner) throw new Error('all Planner requests carry business payloads');
+    assert.equal(firstPlanner.priorPlan, null);
+    assert.equal(requireNumber(requireRecord(secondPlanner.priorPlan, 'the second Planner priorPlan').sequence,
+      'the second Planner priorPlan sequence'), 1);
+    assert.equal(requireNumber(requireRecord(thirdPlanner.priorPlan, 'the third Planner priorPlan').sequence,
+      'the third Planner priorPlan sequence'), 2);
+
+    const secondPlannerIndex = fixture.upstream.wires.findIndex((wire) => wire === plannerPosts[1]);
+    const thirdPlannerIndex = fixture.upstream.wires.findIndex((wire) => wire === plannerPosts[2]);
+    assert.ok(secondPlannerIndex >= 0 && thirdPlannerIndex > secondPlannerIndex);
+    const turnThreeWire = fixture.upstream.wires.slice(secondPlannerIndex + 1, thirdPlannerIndex)
+      .find((wire) => wire.method === 'POST' && plannerPayload(wire.body) === undefined && hasTurnEndSurface(wire.body));
+    assert.ok(turnThreeWire, 'the third turn sends a real parent execution request before its Planner call');
+    if (!turnThreeWire) throw new Error('the third turn execution wire is absent');
+    const turnThreeBody = JSON.parse(turnThreeWire.body) as ResponsesWireBody;
+    const turnThreeContext = (turnThreeBody.input ?? []).flatMap((item) =>
+      (item.content ?? []).flatMap((part) => typeof part.text === 'string' ? [part.text] : [])).join('\n');
+    for (const expected of [TURN_ONE_GOAL, TURN_ONE_ACTIONS, TURN_ONE_RESULT, TURN_ONE_NEXT, CHILD_BODY,
+      TURN_TWO_GOAL, TURN_TWO_ACTIONS, TURN_TWO_RESULT, TURN_TWO_NEXT]) {
+      assert.ok(turnThreeContext.includes(expected), `the third turn retains the ordered semantic fact: ${expected}`);
+    }
+    assert.ok(turnThreeContext.indexOf(TURN_ONE_GOAL) < turnThreeContext.indexOf(TURN_TWO_GOAL),
+      'the third turn retains Turn 1 semantics before Turn 2 semantics');
+    for (const rawCallId of ['call-parent-child', 'call-parent-adopt', 'call-child-delivery', 'call-child-end',
+      'call-turn-1-end', 'call-turn-2-end']) {
+      assert.equal(turnThreeWire.body.includes(rawCallId), false,
+        `the third turn excludes prior raw execution history: ${rawCallId}`);
+    }
+    assert.equal(turnThreeWire.body.includes(TURN_TWO_DELIVERY), false,
+      'the third turn excludes the prior turn delivery body from semantic history');
+
+    const verified = await fixture.journal.verify();
+    const parentCoverageRecords = verified.records
+      .filter((record) => record.payload?.['kind'] === 'operation-control-coverage/v1'
+        && record.scope.taskId?.value === taskId.value);
+    const operationIds = parentCoverageRecords
+      .map((record) => record.scope.operationId?.value)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    assert.ok(operationIds.length >= 3, 'the three turns commit distinct parent operation identities');
+    assert.equal(new Set(operationIds).size, operationIds.length, 'the three turns do not reuse an operation identity');
+    const activeTurnIds = verified.records
+      .filter((record) => record.commitId?.startsWith('active-turn:') && record.commitId.endsWith(':binding-opened')
+        && record.scope.taskId?.value === taskId.value)
+      .map((record) => record.commitId!.slice('active-turn:'.length, -':binding-opened'.length));
+    assert.ok(activeTurnIds.length >= 3, 'the three turns commit distinct active-turn identities');
+    assert.equal(new Set(activeTurnIds).size, activeTurnIds.length, 'the three turns do not reuse an active-turn identity');
+    console.log('three.turn evidence', JSON.stringify({
+      operationIds,
+      activeTurnIds,
+      plannerPosts: plannerPosts.length,
+      providerPosts: posts.length,
+      terminal,
+      fixture: fixture.root,
+    }));
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`three-turn fixture retained: ${fixture.root}`);
   }
 });
 
