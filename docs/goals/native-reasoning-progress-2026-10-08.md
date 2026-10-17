@@ -28,6 +28,10 @@ r187 作者报告已在并发屏障取得两实例，但宿主实际运行虽 1/
 
 语义图/规则前置已提交 `001c634f`，五文件 diff 与现有图 validate 通过（8nodes/8edges/7waves）。r198 最终回复不含实际检查，宿主补足检查后才接受。r199 正实施现有模板与工具描述；发现 child delivery 广告真实 owner 在 child-producer.ts，后续只修准确文案 owner，不复制控制定义。wire投影仍OPEN。UX正式grant入口两源按最小target合同推进，不与本侧source冲突。
 
+容量反例与合流已完成：r201 child 在 baseline 因 `EMFILE/watch` teardown 失败，未做 mutation，未当产品故障。宿主只把生成测试的 maxConcurrentTasks2改3，原用例真实 RED：第三 Task 在前两占用时启动，断言 `third Task must not run while two Tasks occupy capacity 2` 失败（fixture `provider-two-top-tasks-bX9tW2`）；恢复2后同用例 GREEN1/1。来源 `ba711a9c` 已正常合入唯一候选；候选重新 tests/app compile0、同例1/1 PASS，3Task/3Planner/maxActive2、两真实runtime身份及第三先等待后启动均保留。原来源树 clean/无进程后正常 remove/prune/path absent。此为受控 upstream 公开入口证据，不扩为真实 RCC 或整目标 main 交付。
+
+r199 实际 App build/strict compile0、standard-turn9/9、模板17/17，但模板文字修改因现有registry内容锁不在派单范围被恢复。因此新模板规则尚未生效，模板GREEN不算新指令证明。当前仅两App工具描述dirty；独立小Plan r202处理真实 child-producer owner 和现有template registry最小绑定，不放宽原gate、不新增治理hash包装。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
