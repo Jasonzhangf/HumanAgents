@@ -183,18 +183,6 @@ async function requireSession(accessControl: AccessControlService, request: Inco
   return verification.session;
 }
 
-function requireOrigin(accessControl: AccessControlService, request: IncomingMessage): void {
-  const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin;
-  const host = Array.isArray(request.headers.host) ? request.headers.host[0] : request.headers.host;
-  if (!accessControl.validateOrigin(origin, host)) {
-    throw new AccessControlError('auth.origin.invalid', 'request Origin does not match the listener origin', 'retry the mutation from the same UI origin', 403);
-  }
-}
-
-function isMutation(method: string): boolean {
-  return method === 'POST' || method === 'PATCH' || method === 'DELETE';
-}
-
 function bearerToken(request: IncomingMessage): string | undefined {
   const header = request.headers.authorization;
   if (Array.isArray(header)) return undefined;
@@ -202,18 +190,11 @@ function bearerToken(request: IncomingMessage): string | undefined {
   return header.slice('Bearer '.length).trim() || undefined;
 }
 
-function isLoopbackAddress(address: string | undefined): boolean {
-  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
-}
-
 function requireSupervisor(
   accessControl: AccessControlService,
   request: IncomingMessage,
   identity: UiRuntimeServerOptions['identity'],
 ): { readonly leaseId: string; readonly generation: number } {
-  if (!isLoopbackAddress(request.socket.remoteAddress)) {
-    throw new AccessControlError('auth.supervisor.forbidden', 'supervisor endpoints are loopback-only', 'run the command on the serve host', 403);
-  }
   if (!identity) {
     throw new UiRuntimeApiError(
       'daemon-identity.unsupported',
@@ -600,7 +581,6 @@ async function handleRequest(
       return;
     }
     if (path === '/api/auth/pair' && method === 'POST') {
-      requireOrigin(accessControl, request);
       const body = await readBody(request);
       const session = await accessControl.consumePairingCode(requireString(body, 'code'));
       writeJson(response, 200, {
@@ -611,7 +591,6 @@ async function handleRequest(
     }
     if (path === '/api/auth/logout' && method === 'POST') {
       await requireSession(accessControl, request);
-      requireOrigin(accessControl, request);
       await accessControl.logout();
       await sseRegistry.revalidateNow(accessControl);
       writeJson(response, 200, { authenticated: false }, { 'set-cookie': accessControl.clearSessionCookie() });
@@ -623,7 +602,7 @@ async function handleRequest(
           code: 'request.method-not-allowed',
           ownerId: APP_OWNER,
           message: 'health probe requires POST',
-          nextAction: 'send an authenticated same-origin POST request',
+          nextAction: 'send an authenticated POST request',
         },
       }, { allow: 'POST' });
       return;
@@ -655,8 +634,7 @@ async function handleRequest(
       requireSupervisor(accessControl, request, identity);
     }
     if (path.startsWith('/api/') && !supervisorControlled) {
-      const session = await requireSession(accessControl, request);
-      if (isMutation(method)) requireOrigin(accessControl, request);
+      await requireSession(accessControl, request);
       if (path === '/api/executions/' || path.startsWith('/api/executions/')) {
         if (isClosing()) {
           throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
