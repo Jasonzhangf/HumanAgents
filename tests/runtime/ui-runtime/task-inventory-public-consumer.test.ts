@@ -4,12 +4,12 @@ import { id, type Checkpoint } from '../../../packages/contracts/src/index.js';
 import type { JournalRecord } from '../../../packages/adapters/jsonl/src/index.js';
 import { readRuntimeTaskCurrentStateFromRecords } from '../../../packages/app/src/runtime-current-state-journal.js';
 import type { RuntimeTaskCurrentState } from '../../../packages/runtime/src/ui-runtime/current-state.js';
-import { projectDurableTaskInventory, type RuntimeTaskJournalRecord,
-  type DurableTaskCurrentStateReadPort } from '../../../packages/runtime/src/ui-runtime/coordinator.js';
+import { RuntimeTaskCoordinator, projectDurableTaskInventory, type RuntimeTaskJournalRecord,
+  type DurableTaskCurrentStateReadPort, type RuntimeTaskHydrateReadSource } from '../../../packages/runtime/src/ui-runtime/coordinator.js';
 
 // A cold-read error resurrection has occurred. This small public consumer binds
-// only read ports; it tests retained errors and false-live status without a
-// coordinator, execution fixture, Provider, or durable writes.
+// only read ports; it tests retained errors and false-live status without an
+// execution fixture, Provider, or durable writes.
 test('durable inventory never claims live and only clears fully aligned errors', async () => {
   const taskId = id('task', 'inventory');
   const cycleId = id('cycle', 'inventory');
@@ -76,6 +76,84 @@ test('durable inventory never claims live and only clears fully aligned errors',
     assert.deepEqual(result.failures, []);
     assert.equal(result.entries[0].snapshot.state, 'succeeded');
     assert.equal(result.entries[0].snapshot.error?.code, variant === 'aligned' ? undefined : error.code);
+    if (variant === 'aligned' || variant === 'retained-error') {
+      // Failure has occurred on cold hydration: an older blocked checkpoint
+      // wins over a newer succeeded owner record. These two read-only cases
+      // catch that regression and enforce the existing strict error policy.
+      const blockedCheckpoint: Checkpoint = { ...checkpoint, outcome: 'blocked',
+        evidenceRefs: [checkpoint.recoveryStateRef], next: { kind: 'recover', ref: 'runtime' } };
+      const checkpointCommitRef = { ...commitRef, journalSeq: 698 };
+      const newerSourceRecord = { ...sourceRecord, seq: 699 } as JournalRecord;
+      const failWrite = () => { throw new Error('cold hydration must not execute or write'); };
+      const store = {
+        readLatest: async () => ({ checkpoint: blockedCheckpoint, previous: null }),
+        readCommitted: async () => ({ checkpoint: blockedCheckpoint, previous: null, commitRef: checkpointCommitRef }),
+        verify: async () => ({ valid: true as const }),
+        append: failWrite,
+        commit: failWrite,
+        listCommitted: failWrite,
+        readExecutionPosition: failWrite,
+        readCheckpointRecoveryBinding: failWrite,
+      };
+      const currentStatePort = {
+        read: async (taskScope: Parameters<typeof port.read>[0]) =>
+          readRuntimeTaskCurrentStateFromRecords([newerSourceRecord], taskScope),
+        commit: failWrite,
+      };
+      const inventory = await projectDurableTaskInventory({ records,
+        checkpointFor: () => store, currentStateFor: () => currentStatePort });
+      assert.equal(inventory.entries[0].snapshot.state, 'succeeded');
+      const source: RuntimeTaskHydrateReadSource = {
+        checkpoint: { verify: store.verify, readLatest: store.readLatest, readCommitted: store.readCommitted },
+        currentState: { read: currentStatePort.read },
+      };
+      let legacyReads = 0;
+      let resolverReads = 0;
+      const coordinator = new RuntimeTaskCoordinator({
+        organId: scope.organId, createDriver: failWrite,
+        checkpointStoreFor: () => {
+          assert.ok(retainedError, 'selected pair must not access the per-cycle reader');
+          legacyReads += 1;
+          return store;
+        },
+        attentionPort: { publish: failWrite, resolve: failWrite },
+        journal: { replay: () => records, append: failWrite },
+        currentStatePort: retainedError ? currentStatePort : { read: failWrite, commit: failWrite },
+        hydrateReadFor: async (requestedScope) => {
+          assert.deepEqual(requestedScope, scope);
+          resolverReads += 1;
+          return retainedError ? undefined : source;
+        },
+      });
+      await coordinator.hydrate();
+      assert.equal(resolverReads, 1);
+      assert.equal(legacyReads, retainedError ? 1 : 0);
+      const snapshot = coordinator.taskSnapshots()[0];
+      assert.equal(snapshot.state, 'succeeded');
+      assert.equal(snapshot.error?.code, retainedError ? error.code : undefined);
+      assert.deepEqual(snapshot.checkpoint && {
+        id: snapshot.checkpoint.checkpointId, seq: snapshot.checkpoint.seq,
+        outcome: snapshot.checkpoint.outcome,
+      }, { id: checkpoint.id.value, seq: 1, outcome: 'blocked' });
+      assert.deepEqual(snapshot.allowedActions, ['start']);
+      if (!retainedError) {
+        const hookError = { ...error, code: 'execution.context-commit-hook.blocked', nextAction: 'repair context hook' };
+        const hookRecords = records.map((record) => record.kind === 'operation.event'
+          ? { ...record, error: hookError } : record);
+        const guarded = new RuntimeTaskCoordinator({
+          organId: scope.organId, createDriver: failWrite,
+          checkpointStoreFor: () => store,
+          attentionPort: { publish: failWrite, resolve: failWrite },
+          journal: { replay: () => hookRecords, append: failWrite }, currentStatePort,
+        });
+        await guarded.hydrate();
+        const guardedSnapshot = guarded.taskSnapshots()[0];
+        assert.equal(guardedSnapshot.state, 'blocked');
+        assert.equal(guardedSnapshot.error?.code, hookError.code);
+        assert.equal(guardedSnapshot.nextStep, hookError.nextAction);
+        assert.deepEqual(guardedSnapshot.allowedActions, []);
+      }
+    }
   }
   const unreadable = await projectDurableTaskInventory({ records,
     checkpointFor: () => ({ readLatest: async () => { throw new Error('unreadable'); } }) });

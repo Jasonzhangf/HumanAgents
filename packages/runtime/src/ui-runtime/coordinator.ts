@@ -476,6 +476,11 @@ const RUNTIME_OWNER = 'humanagent.runtime';
 
 export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCommitPort {}
 
+export interface RuntimeTaskHydrateReadSource {
+  readonly checkpoint: Pick<CheckpointJournalPort, 'verify' | 'readLatest' | 'readCommitted'>;
+  readonly currentState: Pick<RuntimeTaskCurrentStatePort, 'read'>;
+}
+
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
@@ -508,6 +513,7 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly attentionPort: AttentionPort;
   readonly journal?: RuntimeTaskJournalPort;
   readonly currentStatePort?: RuntimeTaskCurrentStatePort;
+  readonly hydrateReadFor?: (scope: ScopeRef) => Promise<RuntimeTaskHydrateReadSource | undefined>;
   /** Actual AgentLoop and native-save facts; unknown never becomes an empty recovery. */
   readonly currentStateFacts?: RuntimeTaskCurrentStateFactsPort;
   readonly hookRegistry?: AgentHookRegistry;
@@ -4773,7 +4779,8 @@ export class RuntimeTaskCoordinator {
         continue;
       }
       try {
-        const store = this.options.checkpointStoreFor(task.taskId, scope.cycleId);
+        const source = await this.options.hydrateReadFor?.(scope);
+        const store = source ? source.checkpoint : this.options.checkpointStoreFor(task.taskId, scope.cycleId);
         const businessScope: ScopeRef = {
           organId: this.options.organId,
           taskId: task.taskId,
@@ -4800,20 +4807,37 @@ export class RuntimeTaskCoordinator {
           this.markCommittedCheckpointRecovery(task, task.error.nextAction);
           continue;
         }
-        task.state = checkpoint.outcome;
+        const currentStatePort = source ? source.currentState : this.options.currentStatePort;
+        const committed = currentStatePort
+          ? await store.readCommitted(checkpoint.scope, checkpoint.id) : null;
+        const currentStateRead = committed && currentStatePort
+          ? await currentStatePort.read(scope)
+          : { state: 'unknown' as const, reason: 'no current-state read is bound to this task' };
+        const selection = committed && currentStatePort
+          ? selectRuntimeTaskCurrentState({ checkpointOutcome: checkpoint.outcome, scope,
+              checkpointCommitRef: committed.commitRef, currentState: currentStateRead }) : null;
+        reconcileSelectedCurrentError(task, selection);
+        task.state = selection?.basis === 'terminal' ? selection.lifecycle : checkpoint.outcome;
         task.running = false;
         task.stopping = false;
-        task.currentState = lifecycleStateLabel(checkpoint.outcome);
-        task.nextStep = checkpoint.next.kind === 'continue'
+        task.currentState = lifecycleStateLabel(task.state);
+        task.nextStep = selection?.basis === 'terminal'
+          ? task.state === 'succeeded' ? '可发起新的执行或停止'
+            : task.state === 'stopped' ? '已收拢；可发起新的执行' : '检查错误 owner 与 next action'
+          : checkpoint.next.kind === 'continue'
           ? '可发起新的执行'
           : `${checkpoint.next.kind}${checkpoint.next.ref ? `:${checkpoint.next.ref}` : ''}`;
-        task.allowedActions = checkpoint.outcome === 'succeeded'
-          || checkpoint.outcome === 'stopped'
-          || checkpoint.outcome === 'failed'
-          || checkpoint.outcome === 'cancelled'
+        task.allowedActions = task.state === 'succeeded'
+          || task.state === 'stopped'
+          || task.state === 'failed'
+          || task.state === 'cancelled'
           ? ['start']
           : [];
-        task.currentNode = checkpoint.outcome === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
+        task.currentNode = task.state === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
+        if (selection?.basis === 'terminal' && currentStateRead.state === 'known') {
+          task.currentStateCommitRef = currentStateRead.stateCommitRef;
+          if (currentStateRead.value.currentPlan) task.currentPlan = currentStateRead.value.currentPlan;
+        }
         task.updatedAt = task.events.at(-1)?.occurredAt ?? task.updatedAt;
       } catch {
         this.markRecoveryRequired(task);
