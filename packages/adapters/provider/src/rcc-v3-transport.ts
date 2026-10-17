@@ -9,6 +9,7 @@ import {
   type ProviderCloseResult,
   type ProviderError,
   type ProviderExecutionIdentityRef,
+  type ProviderRequestIdentityRef,
   type ProviderReadiness,
   type ProviderRecoveryResult,
   type ProviderObserveInput,
@@ -201,19 +202,12 @@ function executionIdentityReceipt(
   };
 }
 
-function optionalRequestIdentityField(input: object, field: string): string | undefined {
-  const value = (input as Record<string, unknown>)[field];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function requestIdentityReceipt(input: object): {
+function requestIdentityReceipt(input: Partial<ProviderRequestIdentityRef>): {
   readonly turnId?: string;
   readonly requestId?: string;
   readonly parentRequestId?: string;
 } {
-  const turnId = optionalRequestIdentityField(input, 'turnId');
-  const requestId = optionalRequestIdentityField(input, 'requestId');
-  const parentRequestId = optionalRequestIdentityField(input, 'parentRequestId');
+  const { turnId, requestId, parentRequestId } = input;
   return {
     ...(turnId === undefined ? {} : { turnId }),
     ...(requestId === undefined ? {} : { requestId }),
@@ -1187,7 +1181,7 @@ export class RccV3ProviderTransport<
   }
 
   private requestReceipt(
-    input: AnyProviderExecutionIdentityRef,
+    input: AnyProviderExecutionIdentityRef & Partial<ProviderRequestIdentityRef>,
     body: string,
     wire: {
       readonly protocol: 'responses' | 'anthropic' | 'openai';

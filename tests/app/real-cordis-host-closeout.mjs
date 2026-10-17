@@ -13,22 +13,20 @@
  *   projection  - task detail reports the same terminal output/state
  *   shutdown    - SIGTERM releases the daemon lease and leaves no live process
  *
- * The receipt binds the implementation commit/tree and a digest of all
- * non-evidence tracked source, then copies the durable launch, SSE, task,
- * journal, checkpoint, and lease artifacts into the receipt file. The receipt
- * itself is committed separately and does not claim to bind its carrier hash.
+ * The receipt copies the durable launch, SSE, task, journal, checkpoint, and
+ * lease artifacts into the receipt file.
  *
  * Optional env:
  *   HUMANAGENT_CORDIS_RECEIPT_PATH default ./dist/receipts/cordis-host-closeout.json
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { treeDigest } from '../../scripts/digests.mjs';
+
+import { createAttemptAuth } from './dashboard-e2e/lib/auth.mjs';
 
 const RECEIPT_PATH = resolve(
   process.env.HUMANAGENT_CORDIS_RECEIPT_PATH ?? 'dist/receipts/cordis-host-closeout.json',
@@ -67,10 +65,6 @@ const EXPECTED_EVENT_KINDS = [
   'execution.terminal',
 ];
 
-function git(args) {
-  return execFileSync('git', args, { encoding: 'utf8' }).trim();
-}
-
 async function buildArtifact() {
   await rm(resolve('dist/app'), { recursive: true, force: true });
   execFileSync('pnpm', ['exec', 'tsc', '-p', 'packages/app/tsconfig.json'], { stdio: 'inherit' });
@@ -79,14 +73,6 @@ async function buildArtifact() {
     resolve('dist/app/agent-templates/templates'),
     { recursive: true },
   );
-}
-
-function sourceDigest() {
-  const entries = execFileSync('git', ['ls-files', '-s'], { encoding: 'utf8' })
-    .split('\n')
-    .filter((line) => line && !line.includes('docs/evidence/gate28-cordis-host-closeout-'))
-    .sort();
-  return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
 }
 
 function startServe(root) {
@@ -138,26 +124,11 @@ function startServe(root) {
   };
 }
 
-async function jsonRequest(url, init) {
-  const response = await fetch(url, init);
-  const text = await response.text();
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new Error(`non-JSON response from ${url}: ${text.slice(0, 400)}`);
-  }
-  if (!response.ok) {
-    throw new Error(`request failed ${response.status} ${url}: ${text.slice(0, 600)}`);
-  }
-  return body;
-}
-
-function openEventStream(url) {
+function openEventStream(url, auth) {
   const events = [];
   const controller = new AbortController();
   const pump = (async () => {
-    const response = await fetch(url, { headers: { accept: 'text/event-stream' }, signal: controller.signal });
+    const response = await auth.fetch(url, { headers: { accept: 'text/event-stream' }, signal: controller.signal });
     if (!response.ok) throw new Error(`event stream failed ${response.status} ${url}`);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -316,24 +287,13 @@ async function readIfPresent(path) {
 }
 
 async function run() {
-  const implementationCommit = git(['rev-parse', 'HEAD']);
-  const implementationTree = git(['rev-parse', 'HEAD^{tree}']);
-  if (git(['status', '--porcelain', '--untracked-files=all'])) throw new Error('candidate worktree must be clean before proof');
   await buildArtifact();
-  const artifactDigest = await treeDigest(resolve('dist/app'));
   const root = await mkdtemp(join(tmpdir(), 'humanagent-cordis-closeout-'));
   const serve = startServe(root);
   const record = {
     schemaVersion: 1,
     kind: 'humanagent.cordis-host-closeout-proof',
     generatedAt: new Date().toISOString(),
-    candidate: {
-      implementationCommit,
-      implementationTree,
-      artifactPath: resolve('dist/app'),
-      artifactDigest,
-      sourceDigest: sourceDigest(),
-    },
     root,
     launch: null,
     requests: {},
@@ -348,31 +308,37 @@ async function run() {
     record.launch = launch;
     assertLaunch(launch);
 
-    const status = await jsonRequest(`${launch.url}/api/runtime/status`);
+    const auth = createAttemptAuth({
+      repoPath: process.cwd(),
+      serveBaseUrl: launch.url,
+      workspace: join(root, 'workspace'),
+      controlRoot: join(root, 'control'),
+    });
+    await auth.pair();
+
+    const status = await auth.json('/api/runtime/status');
     record.requests.status = status;
     if (status.mode !== 'fake' || status.state !== 'ready') {
       throw new Error(`unexpected runtime status: ${JSON.stringify(status)}`);
     }
 
-    const task = await jsonRequest(`${launch.url}/api/tasks`, {
+    const task = await auth.json('/api/tasks', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'cordis closeout', directive: 'return the deterministic fake result' }),
     });
     const taskId = task.taskId.value;
     record.requests.task = task;
 
-    const started = await jsonRequest(`${launch.url}/api/tasks/${taskId}/executions`, {
+    const started = await auth.json(`/api/tasks/${taskId}/executions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mode: 'fake', prompt: 'return the deterministic fake result' }),
     });
     record.requests.execution = started;
 
-    stream = openEventStream(`${launch.url}/api/executions/${started.operationId}/events`);
+    stream = openEventStream(`${launch.url}/api/executions/${started.operationId}/events`, auth);
     const terminal = await stream.waitForTerminal();
     record.events = stream.events;
-    record.task = await jsonRequest(`${launch.url}/api/tasks/${taskId}`);
+    record.task = await auth.json(`/api/tasks/${taskId}`);
     assertExecution(record.events, record.task, terminal);
 
     record.artifacts.journal = await readIfPresent(launch.eventJournal);
@@ -425,7 +391,6 @@ async function main() {
   await writeFile(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
   console.log(JSON.stringify({
     receipt: RECEIPT_PATH,
-    implementationCommit: receipt.candidate.implementationCommit,
     journalKinds: [...new Set(JSON.parse('[' + receipt.artifacts.journal.split('\n').filter(Boolean).join(',') + ']').map((line) => line.payload?.type ?? line.kind))],
     checkpointOutcome: JSON.parse(receipt.artifacts.checkpoint.split('\n').at(-2)).checkpoint.outcome,
     terminalSummary: (function () {

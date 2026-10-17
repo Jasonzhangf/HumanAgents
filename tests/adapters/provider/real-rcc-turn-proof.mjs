@@ -3,13 +3,38 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, sep } from 'node:path';
-import { validateUserConfig, compileAgentProviderBindings, resolveRuntimePaths } from '../../../dist/app/config/src/index.js';
-import { selectAgentProvider, providerBindingFromConfig, createAgentProviderPort } from '../../../dist/app/app/src/agent-driver-composition.js';
-import { admitAgentProvider } from '../../../dist/app/app/src/agent-provider-admission.js';
-import { ProviderAgentDriver, filesystemProviderEvidenceSink } from '../../../dist/app/adapters/provider/src/index.js';
-import { ImmutableAssetStore } from '../../../dist/app/adapters/filesystem/src/index.js';
-import { id } from '../../../dist/app/contracts/src/index.js';
+import { join, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const proofRuntimeRoot = process.env.HUMANAGENT_PROVIDER_PROOF_RUNTIME_ROOT
+  ?? fileURLToPath(new URL('../../../dist/app/', import.meta.url));
+
+const proofModuleUrl = (relativePath) =>
+  pathToFileURL(resolve(proofRuntimeRoot, relativePath)).href;
+
+const {
+  validateUserConfig,
+  compileAgentProviderBindings,
+  resolveRuntimePaths,
+} = await import(proofModuleUrl('config/src/index.js'));
+const {
+  selectAgentProvider,
+  providerBindingFromConfig,
+  createAgentProviderPort,
+} = await import(proofModuleUrl('app/src/agent-driver-composition.js'));
+const {
+  admitAgentProvider,
+} = await import(proofModuleUrl('app/src/agent-provider-admission.js'));
+const {
+  ProviderAgentDriver,
+  filesystemProviderEvidenceSink,
+} = await import(proofModuleUrl('adapters/provider/src/index.js'));
+const {
+  ImmutableAssetStore,
+} = await import(proofModuleUrl('adapters/filesystem/src/index.js'));
+const {
+  id,
+} = await import(proofModuleUrl('contracts/src/index.js'));
 
 const BASE_URL = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
 const MODEL = process.env.HUMANAGENT_RCC_MODEL ?? 'gpt-5.5';
@@ -113,11 +138,11 @@ async function run() {
   };
   const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(artifactRoot));
   const { createJsonlActiveTurnJournal } = NATIVE_TURN
-    ? await import('../../../dist/app/adapters/jsonl/src/active-turn.js') : {};
+    ? await import(proofModuleUrl('adapters/jsonl/src/active-turn.js')) : {};
   const { ActiveTurnContext } = NATIVE_TURN
-    ? await import('../../../dist/app/runtime/src/context/active-turn-context.js') : {};
+    ? await import(proofModuleUrl('runtime/src/context/active-turn-context.js')) : {};
   const { providerRawContentReader } = NATIVE_TURN
-    ? await import('../../../dist/app/adapters/provider/src/evidence.js') : {};
+    ? await import(proofModuleUrl('adapters/provider/src/evidence.js')) : {};
   const transientInstructions = { text: `Continuation proof ${runId}: reply with the single word CONTINUED.` };
   let turn;
   let journal;

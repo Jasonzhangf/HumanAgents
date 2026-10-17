@@ -2,13 +2,26 @@
 
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
-## 1. 当前目标与总体进度（更新至 2026-10-16）
+## 1. 当前目标与总体进度（更新至 2026-10-17）
 
-### 当前交付（2026-10-17）
+完整 goal 仍为 ACTIVE / INCOMPLETE。本轮独立 Provider 组件增量已完成 1/1 项标准交付；这不代表 A–G 全部生产闭环、App Task 或完整原生框架已完成。
 
-- 独立 Provider 组件增量已完成 1/1 项标准交付：生产 `69854637`、原 proof 安装依赖根 `80b18b1f`、main 最新进度 `c8892016` 均已正常推送 origin/main。整体 Review controller PASS；source 三协议工具循环 3/3；canonical 安装全部9模块的 Responses 完整工具循环 PASS/Node0/2request，receipt `provider-installed-component-r28-20261017/run-adE3Yx`。组件交付不代表 App Task 或完整 goal 完成。
-- canonical0.1.0031 正式构建/安装与官方restart通过。隔离50341随后走正式SIGINT→supervisor.dispose，PID52264 absent、lease disposedAt已写；codec和delivery两树normalremove/prune/pathabsent，证据保留。原53007/Task/A0未动，安装/main窗口已交还peer。main已发布的同路径进度是该增量交付摘要。
-- 完整 goal 继续 ACTIVE：App新Task identity/grant/defaultadmission计划r26因伪接口/未决no-op绕行/重复确认/过宽命令未接受，原Gemini会话r27按真实合同重编；Memory hook候选f1dea48c后scope修复GCMr22；child accepted-evidence mapper已解除缺body引用，7execution通过但缺child committed control导致父收口unknown，独立r35定界；stop边界08e2c15a两处实际RED→GREEN及27个不同消费者证据已接收并正常合唯一candidate，原clean来源树已normalremove/prune/pathabsent。完整stop/resume产品验收和已准入submit的停止分类仍OPEN。不得把这些局部状态计作完整生产节点通过。
+- 已正常合入并推送 `origin/main`：生产增量 `69854637`（Anthropic 工具声明、同一次序列化的实际出站 body receipt、typed 请求链）和原 proof 安装依赖根 `80b18b1f`。未合入整个 native candidate。
+- 作者证据：原公开 consumer 实际 RED→GREEN；严格 source/Provider 编译与 config/App build 通过；公开请求 consumer 6/6、transport focused 6/6、fake contract 9/9、录制 Responses/Anthropic replay 5/5。原 contracts 整文件仍有两处旧 fixture TS2561，未冒其通过；本次公开 validator 从严格 source dist 取得反例和恢复证据。
+- 真实入口：main 派生组合三协议工具循环 3/3 PASS；canonical 安装根下全部 9 模块的 Responses 完整工具循环另一次 PASS，2 requests、真实工具结果、settlement succeeded、资源 released、persistence committed、close/cleanup closed。安装消费 receipt 为 `~/.humanagent/test-fixtures/provider-installed-component-r28-20261017/run-adE3Yx/proof-receipt.json`。未证明厂商身份。
+- 整体 Review：独立 Gemini 4 medium SUCCESS/exit0；现有 controller 的 schema/classify 返回 pass、findings 为空。main 正式构建、打包、canonical 安装与隔离实例官方 restart 均成功，版本 `0.1.0031`。审查、红绿和交付原证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/` 对应 r15–r28 记录。
+- 正式 App 新 Task 验收仍 INCOMPLETE：隔离公开入口创建 201、执行 202，随后同 operation final blocked，`execution admission source is not bound`，零 Provider 请求。独立 r24 已确认 main 缺新意图到 Task identity/grant/default admission 的闭包，不是本七文件新增回归。该 Task 失败不被组件 PASS 覆盖；App 接线计划 r26 继续推进。
+- 已收口本增量自有资源：codec 来源树和 Provider delivery 树均正常 remove/prune/path absent；隔离实例通过正式 CLI 的 SIGINT→supervisor.dispose 处理器关闭，PID52264 absent，lease disposedAt 已写入。保留 fixture/receipt 供后继；原 53007/Task/A0 未动，安装与 main Git 窗口已交还 UX peer。
+- 剩余主线：App 正式准入闭包；Memory 生产 group 的共同 Task scope；默认 child 的父生命周期收口；Provider 停止边界；随后组合完整双脑/N runtime 和最终交付。各局部候选不提前计为全目标完成。
+
+### 唯一候选后继状态（2026-10-17）
+
+- Memory hook 与 group scope 源码已正常合入候选 `c5a196af`，原来源 2/2 有效；本轮 hot/fresh 两个组合 case 2/2 通过。Memory 真模型 GCM r28 在途，未计为通过。
+- child 源码已正常提交 `bbcef714`，原 consumer 7 execution、1 Planner GREEN 1/1、准入 2/2；尚未集成候选，由父后续合入。本轮不抢合 child。
+- HTTP `a3f894d9` 原 404 RED→GREEN 1/1；App r29/r32 合同 READY，grant 技术 r33 后继与 App 组装 GCM r34 在途。App 生产准入闭包仍待组合验收。
+- stop 边界 `08e2c15a` 已正常合候选，原两处 RED→GREEN 与 27 个消费者证据有效；完整 stop/resume 产品验收和已准入 submit 的停止分类仍 OPEN。
+- 原 53007 restart 由 peer 查 previous-close-unverified；本侧不安装、不重启。完整候选和完整 goal 均未交付。
+- r29 续接当前 main merge：保留 taskless 泛型、实际出站 body、typed 请求链、stop 边界及全部 9 proof imports 的统一 runtime root。受影响 Responses consumer 1/1、transport 20/20 通过；公开 consumer 整文件 4/6，Anthropic/Chat 原状态序列断言因多一个 settled 失败，未改断言或扩大修复范围。原错与组合证据保留在外置 r29 RUN。
 
 ### 续接记录（历史，截至 2026-10-17）
 

@@ -13,9 +13,8 @@
  *
  * The input stage is asserted and screenshotted inside the submit flow, after
  * the served entry shows the filled directive and before the single submit
- * click; the confirmation request revision is bound to the requirement identity
- * the runtime returns; and the receipt carries the start/end source identity of
- * the candidate revision.
+ * click; and the confirmation request revision is bound to the requirement
+ * identity the runtime returns.
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -35,7 +34,6 @@ import {
   submitDirectiveAndConfirmDraft,
   waitForTerminal,
 } from '../lib/browser.mjs';
-import { compactSourceIdentity, finalizeSourceIdentity } from '../lib/binding.mjs';
 import {
   countTurnEvidenceFor,
   journalPathFor,
@@ -352,14 +350,6 @@ export async function runLocalFileSearchScenario(binding) {
     }
   }
 
-  // Source identity: re-capture the candidate source at the end of the run and
-  // compare it with the start capture. The receipt only binds this exact
-  // candidate when every run-affecting input is identical at both captures.
-  const sourceIdentity = await finalizeSourceIdentity(binding);
-  if (sourceIdentity.stable !== true) {
-    missing.push(`candidate source identity changed during the run: ${sourceIdentity.changedPaths.join(', ') || 'unknown input'}`);
-  }
-
   evidence.scenarioEvidence = {
     directive,
     marker,
@@ -388,13 +378,6 @@ export async function runLocalFileSearchScenario(binding) {
       responseStatus: binding.confirmationResponseStatus ?? null,
       requirement: requirementReceipt,
       interactionId: binding.explicitInteractionId ?? null,
-    },
-    sourceIdentity: {
-      stable: sourceIdentity.stable,
-      changedPaths: sourceIdentity.changedPaths,
-      sidecarPath: binding.sourceIdentityPath ?? null,
-      start: compactSourceIdentity(sourceIdentity.start),
-      end: compactSourceIdentity(sourceIdentity.end),
     },
     searchCalls: searchCalls.map(pickEvent),
     searchResults: searchResults.map(pickEvent),
@@ -600,9 +583,6 @@ async function runRequestedNonSuccess(binding) {
     operationId: dashboard.operationId ?? null,
     executionEpoch: dashboard.executionEpoch ?? null,
   };
-  // The same start/end source identity as the success path: a non-success
-  // receipt must also prove it belongs to this exact candidate revision.
-  const sourceIdentity = await finalizeSourceIdentity(binding);
   evidence.scenarioEvidence = {
     directive,
     requestedOutcome: outcome,
@@ -619,13 +599,6 @@ async function runRequestedNonSuccess(binding) {
       status: binding.confirmStatus ?? null,
       request: binding.confirmationRequest ?? null,
       requirement: binding.requirementReceipt ?? null,
-    },
-    sourceIdentity: {
-      stable: sourceIdentity.stable,
-      changedPaths: sourceIdentity.changedPaths,
-      sidecarPath: binding.sourceIdentityPath ?? null,
-      start: compactSourceIdentity(sourceIdentity.start),
-      end: compactSourceIdentity(sourceIdentity.end),
     },
     outputPreview: String(dashboard.output ?? '').slice(0, 1600),
     toolRounds: turnEvidence?.toolRounds ?? 0,

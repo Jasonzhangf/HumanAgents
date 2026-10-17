@@ -580,6 +580,12 @@ test('provider-neutral execution runtime fixtures validate and expose a typed fa
   validateProviderStartInput(startInput());
   validateProviderResumeInput(resumeInput());
   validateProviderSubmitInput(submitInput());
+  const requestIdentity = { turnId: 'turn-provider', requestId: 'request-provider', parentRequestId: 'request-parent' };
+  assert.doesNotThrow(() => validateProviderStartInput({ ...startInput(), ...requestIdentity }));
+  assert.doesNotThrow(() => validateProviderSubmitInput({ ...submitInput(), ...requestIdentity }));
+  const incompleteIdentity = { requestId: 'request-provider' };
+  assert.throws(() => validateProviderStartInput({ ...startInput(), ...incompleteIdentity }), ContractError);
+  assert.throws(() => validateProviderSubmitInput({ ...submitInput(), ...incompleteIdentity }), ContractError);
   validateProviderSettleInput(executionIdentity);
   validateProviderStartReceipt(startReceipt());
   validateProviderRecoveryResult(recoveryResult());

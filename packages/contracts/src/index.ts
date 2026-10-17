@@ -1022,7 +1022,7 @@ export interface ProviderImageContent {
   readonly dataBase64: string;
 }
 
-export interface ProviderExecutionFields {
+export interface ProviderExecutionFields extends Partial<ProviderRequestIdentityRef> {
   readonly inputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly payload?: BusinessPayload;
@@ -1538,6 +1538,7 @@ export function validateProviderStartInput<TIdentity extends AnyProviderExecutio
   input: ProviderStartInput<TIdentity>,
 ): void {
   validateProviderExecutionInput(input);
+  assertOptionalProviderRequestIdentity(input, 'provider start');
 }
 export function validateProviderResumeInput(input: ProviderResumeInput): void {
   validateProviderExecutionInput(input);
@@ -1550,6 +1551,7 @@ export function validateProviderSubmitInput<TIdentity extends AnyProviderExecuti
   input: ProviderSubmitInput<TIdentity>,
 ): void {
   validateProviderExecutionInput(input);
+  assertOptionalProviderRequestIdentity(input, 'provider submit');
   if (!input.payload) throw new ContractError('provider submit payload is required');
   assertBusinessPayload(input.payload);
   if (input.toolContinuations !== undefined) {

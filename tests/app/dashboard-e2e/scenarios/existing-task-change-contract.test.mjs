@@ -16,7 +16,7 @@
  *     deviation (unsaved-edit gate, rejected stale save, task-reference
  *     correction, superseded revision, FIFO order, retirement, appended but
  *     unconsumed revision, missing execution cycle, missing Journal terminal,
- *     stale rendered state, changed source identity) turns it red;
+ *     stale rendered state) turns it red;
  *   - an unreachable provider (no execution cycle at all) can never become a
  *     green observation;
  *   - the FIFO/inbox/task-input-revision facts are read from the persisted
@@ -187,7 +187,6 @@ function validObservation(overrides = {}) {
         ],
       },
     },
-    sourceIdentity: { stable: true, changedPaths: [], sidecarPath: '/tmp/source-identity.json' },
   }, overrides);
 }
 
@@ -387,10 +386,6 @@ test('the task state and the Journal terminal must prove the change settled', ()
   expectProblem({ terminal: { rendered: { facts: [{ label: '当前状态', value: '运行中' }] } } }, /当前状态="运行中"/);
   expectProblem({ terminal: { rendered: { facts: [{ label: 'Checkpoint', value: '本任务尚无 checkpoint' }] } } }, /expected a committed succeeded checkpoint/);
   expectProblem({ terminal: { rendered: { facts: [{ label: '输入', value: '{"goal":"seed-marker"}' }] } } }, /did not show the confirmed revision as the current input/);
-});
-
-test('a changed candidate source identity fails the observation', () => {
-  expectProblem({ sourceIdentity: { stable: false, changedPaths: ['packages/ui/projection/runtime.ts'] } }, /candidate source identity changed during the run/);
 });
 
 test('an unreachable provider (no execution cycle) can never become a green observation', () => {

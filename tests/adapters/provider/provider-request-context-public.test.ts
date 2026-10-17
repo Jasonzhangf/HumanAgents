@@ -780,6 +780,10 @@ test('J: typed Responses tool loop runs one real transport round trip with fresh
   assert.equal(harness.calls[0]!.url, `${NATIVE_LOOP_BASE_URL}/v1/responses`);
   assert.equal(harness.calls[1]!.url, `${NATIVE_LOOP_BASE_URL}/v1/responses`);
   const startEvidence = harness.evidence.find((write) => write.type === 'start');
+  const rootRequest = harness.registrations[0]!.record.request;
+  const childRequest = childDispatch!.record.request;
+  assert.equal(childRequest.turnId, rootRequest.turnId);
+  assert.equal(childRequest.parentRequestId, rootRequest.requestId);
   assert.equal(startEvidence?.locator, 'http://start');
   const startContent = startEvidence?.content as HttpEvidenceReceipt;
   assert.equal(startContent.status, 200);
@@ -826,6 +830,11 @@ test('J: typed Responses tool loop runs one real transport round trip with fresh
   // callIds or continuationRef from the business payload.
   assert.equal(submitContent.requestReceipt.callIds, undefined);
   assert.equal(submitContent.requestReceipt.continuationRef, undefined);
+  for (const call of harness.calls) {
+    assert.equal('turnId' in call.body, false);
+    assert.equal('requestId' in call.body, false);
+    assert.equal('parentRequestId' in call.body, false);
+  }
 
   // The Responses wire carries the stable harness tool-surface guidance plus the
   // transient request-scoped orientation.
@@ -927,7 +936,14 @@ test('J: typed Anthropic tool loop runs one real transport round trip with fresh
   assert.equal(harness.calls[0]!.url, `${NATIVE_LOOP_BASE_URL}/v1/messages`);
   assert.equal(harness.calls[1]!.url, `${NATIVE_LOOP_BASE_URL}/v1/messages`);
   const startEvidence = harness.evidence.find((write) => write.type === 'start');
-  assert.deepEqual(startEvidence?.content, { status: 200, endpoint: '/v1/messages', protocol: 'anthropic', model: 'model-p', route: nativeRoute('goaichat') });
+  assert.deepEqual(startEvidence?.content, {
+    status: 200, endpoint: '/v1/messages', protocol: 'anthropic', model: 'model-p', route: nativeRoute('goaichat'),
+    requestReceipt: {
+      body: JSON.stringify(harness.calls[0]!.body), identity,
+      turnId: harness.registrations[0]!.record.request.turnId, requestId: rootRequestId,
+      status: 200, endpoint: '/v1/messages', protocol: 'anthropic', model: 'model-p', route: nativeRoute('goaichat'),
+    },
+  });
   assert.equal(startEvidence?.locator, 'http://start');
 
   assert.equal(harness.calls[0]!.body.system, 'ORIENTATION_ONE');
@@ -1032,7 +1048,14 @@ test('J: typed Chat tool loop runs one real transport round trip with two tools 
   assert.equal(harness.calls[0]!.url, `${NATIVE_LOOP_BASE_URL}/v1/chat/completions`);
   assert.equal(harness.calls[1]!.url, `${NATIVE_LOOP_BASE_URL}/v1/chat/completions`);
   const startEvidence = harness.evidence.find((write) => write.type === 'start');
-  assert.deepEqual(startEvidence?.content, { status: 200, endpoint: '/v1/chat/completions', protocol: 'openai', model: 'model-p', route: nativeRoute('openai-chat') });
+  assert.deepEqual(startEvidence?.content, {
+    status: 200, endpoint: '/v1/chat/completions', protocol: 'openai', model: 'model-p', route: nativeRoute('openai-chat'),
+    requestReceipt: {
+      body: JSON.stringify(harness.calls[0]!.body), identity,
+      turnId: harness.registrations[0]!.record.request.turnId, requestId: rootRequestId,
+      status: 200, endpoint: '/v1/chat/completions', protocol: 'openai', model: 'model-p', route: nativeRoute('openai-chat'),
+    },
+  });
   assert.equal(startEvidence?.locator, 'http://start');
 
   const continuationMessages = harness.calls[1]!.body.messages as readonly Record<string, unknown>[];
