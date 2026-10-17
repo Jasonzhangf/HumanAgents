@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 该Explicit增量远端交付已完成：`342f5d43..512e8bce main -> main` 正常push回执成功，不再待push。canonical窗口已释放并通知UX。唯一candidate正常合入最新origin/main，只带已记录文档变化。
+- 下一N3观察 r289 fresh GCM：仅核对隐式runtime实际总推理上限、预算耗尽后的continuation/wait/恢复行为及动态委派剩余缺口。区分合理单请求/实例预算与永久截断未完成任务；不重复r265全Provider审计，不重发RCC，不碰UX inspection writer。观察前不新增代码或测试，完整goal ACTIVE。
+
 - Explicit完整增量已本地main交付 `7f868b12`（两来源1af06f3b/f93992e8，6文件）。r287 Opus实际quota429、未执行审查；按后备r288 Gemini4medium SUCCESS/exit0、有效JSON/findings空，现有原classifier裁决pass，证据 `native-explicit-milestone-review-r288-20261017/classification.json`。交付分支正常组合最新origin/main后FF main，无未完inspection混入。
 - main正式contracts/config/App重建、package:candidate、install:global全部exit0（session51021），canonical官方restart exit0（session81315）：generation25/PID92806 → generation26/PID87116，port53007，legacyCloseReceipt clean。新PID实际存活、installed launcher、页面入口HTTP200。main原Runtime4/4+AppHTTP/wire2/2复验PASS（session66534）；这些行为证据仍为JSONL/受控上游公开consumer，不扩称live RCC或新OS helper恢复验收。完整goal仍INCOMPLETE。
 - 作者/Reviewer均terminal，交付树clean；`explicit-checkpoint-metadata-20261017` 已正常remove/prune/testabsent。旧helper来源亦已关闭。此增量后续只剩本轮main push回执记录；inspection后继由peer继续，RCC原UNKNOWN边界不变。
