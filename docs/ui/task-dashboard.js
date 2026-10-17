@@ -370,6 +370,7 @@ async function applyTaskDisplayMode({ mode, origin }) {
       const current = resolveCurrentPlanRevision(planHistoryState.value, { explicitScope })
       if (!current.ok) return { ok: false, failure: current.failure }
     }
+    leaveRecords()
     displayMode = 'current'
     if (origin === 'manual') updatePlanViewUrl({ display: 'current', selection: null })
     renderDashboard()
@@ -380,6 +381,7 @@ async function applyTaskDisplayMode({ mode, origin }) {
   // Every panel-backed perspective keeps the same live panel and its exact
   // range. Only the panel's own reading mode changes; the page re-presents the
   // content it already holds, and no records GET happens here.
+  leaveRecords()
   displayMode = mode
   try {
     if (!syncPanelMode(mode)) return { ok: false, failure: panelUnavailableFailure() }
@@ -398,6 +400,7 @@ async function applyTaskDisplayMode({ mode, origin }) {
   if (rawJump) {
     recordsDetailOpen.raw = true
     receipt = await openRecordsDetail('raw', { selectedRef: rawJump })
+    if (receipt.superseded) return receipt
   }
   if (origin === 'manual' || origin === 'programmatic') {
     updatePlanViewUrl({ display: mode, selection: mode === 'semantic' ? undefined : null })
