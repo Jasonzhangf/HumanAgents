@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 N3 资源核查已由 owner 接收：旧 helper 提交是当前 candidate 祖先，tracked clean，只有 `.pnpm-store/` 保留。只读 GCM 已精确停止 PID96438、exit1/absent；不是模型不可用，也未冒最终报告。原树正常 FF 到 `af0d755a`，fresh GCM `provider-n3-default-mount-gcm-r28-20261017` 已原地接手 r26 挂载计划，无新增同域树。当前四路均为实现者，N3 的 CLI/index 仅 roster hunks，Memory 只写 Memory hunks；正常 Git 合流由父负责。接收证据为 r27/owner-reception.md。
+
 - 2026-10-17 接收：C3a source `4a996234` 已正常合候选 `482270c5`；唯一冲突只合并 native-delivery consumer 双方 imports。组合 App build 与 App 测试编译均 exit0；原 hot 1/1、fresh 双进程 1/1（seed 自然退出后启动不同 PID 的 next）、两个受影响 native consumer 2/2，原 source Runtime 两个受影响 case 2/2。真实链覆盖 correction/rewind/forward 后 epoch6、保留语义/排除错误引用、工具 drain、标准收口、独立 Planner 返回和零已确认副作用重放。纠正下方历史“fresh 尚无 GREEN”；这些是候选作者证据，尚未整体 Review/main/正式运行交付。
 - 当前并发：fresh GCM `provider-main-codec-gcm-r16-20261017`、`provider-main-transport-gcm-r16-20261017` 从最新 origin/main 独立实现 N4 小增量；`provider-memory-hook-gcm-r17-20261017` 复用原 N2 树落实已接受 r16 生产挂载计划；`provider-child-tree-observe-gcm-r27-20261017` 只读核清旧 helper 树，为 N3 默认挂载准备资源。三份计划 r15/r16/r26 已返回并接收。原 N2 树因继续承担同域 Memory 工作保留，不重复开树；旧 helper 的 `.pnpm-store/` 归属未决，未删除。canonical/53007 安装窗口仍由 UX peer 持有。本轮只记 4 项已启动，不计完成，不改变总体 main 完成数。证据统一位于 `.worker-runs/native-reasoning-d0-20261012/` 对应目录。
 
