@@ -1,6 +1,10 @@
 import type { EvidenceRef, LifecycleState, TaskId } from '@humanagent/contracts';
 import type { SemanticObservationEnvelope } from '@humanagent/contracts';
 import {
+  type RuntimeCommitRefProjection,
+  type RuntimeContextHistoryProjection,
+  type RuntimeContextReplacementProjection,
+  type RuntimeContextViewProjection,
   type RuntimeDashboardProjection,
   type RuntimeMode,
   type RuntimeModeStatus,
@@ -102,6 +106,41 @@ export interface RuntimeSemanticObservationInput {
 
 export type RuntimeSemanticObservationProjection = RuntimeSemanticObservationEnvelope;
 
+export interface RuntimeCommitRefInput {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+export interface RuntimeContextViewInput {
+  readonly contextViewRef: string;
+  readonly executionEpoch: number;
+  readonly contextDigest: string;
+  readonly checkpointId: string;
+  readonly activeRefs: readonly string[];
+  readonly omittedRefs: readonly string[];
+}
+
+export interface RuntimeContextReplacementInput {
+  readonly replacementId: string;
+  readonly executionEpoch: number;
+  readonly fromContextViewRef: string;
+  readonly toContextViewRef: string;
+  readonly toContextDigest: string;
+  readonly deltaIds: readonly string[];
+  readonly reason: RuntimeContextReplacementProjection['reason'];
+  readonly replacementDigest: string;
+}
+
+export interface RuntimeContextHistoryInput {
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly currentContextCommitRef?: RuntimeCommitRefInput;
+  readonly views: readonly RuntimeContextViewInput[];
+  readonly replacements: readonly RuntimeContextReplacementInput[];
+  readonly nextCursor?: string;
+}
+
 function stateLabel(state: LifecycleState): string {
   return STATE_LABELS[state];
 }
@@ -144,6 +183,10 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
     updatedAt: source.updatedAt,
     entry: 'task-dashboard',
   };
+}
+
+function projectCommitRef(ref: RuntimeCommitRefInput): RuntimeCommitRefProjection {
+  return { ...ref };
 }
 
 export function projectRuntimeStatus(input: RuntimeStatusInput): RuntimeStatusProjection {
@@ -233,6 +276,22 @@ export function projectRuntimeSemanticObservation(
     );
   }
   return input.semantic;
+}
+
+export function projectRuntimeContextHistory(
+  input: RuntimeContextHistoryInput,
+): RuntimeContextHistoryProjection {
+  return {
+    surface: 'runtime-context-history',
+    mode: input.mode,
+    taskId: input.taskId,
+    currentContextCommitRef: input.currentContextCommitRef
+      ? projectCommitRef(input.currentContextCommitRef)
+      : undefined,
+    views: input.views.map((view) => ({ ...view })),
+    replacements: input.replacements.map((replacement) => ({ ...replacement })),
+    ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
+  };
 }
 
 /** Waiting copy describes recorded state, never activity inferred from a node. */
