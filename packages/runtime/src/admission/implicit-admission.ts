@@ -70,11 +70,18 @@ export function classifyConfirmedRequirement(envelope: RequirementEnvelope): Adm
   return envelope.taskRef ? 'interactive' : 'execution';
 }
 
-export function defaultAdmissionQueueConfig(kind: AdmissionQueueKind): AdmissionQueueConfig {
+export function defaultAdmissionQueueConfig(kind: AdmissionQueueKind, maxConcurrentTasks?: number): AdmissionQueueConfig {
   if (!ACTIVE_ADMISSION_QUEUE_KINDS.includes(kind as (typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number])) {
     throw new AdmissionError(`admission queue is not active: ${kind}`);
   }
-  return { ...DEFAULT_QUEUE_CONFIGS[kind as (typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number]] };
+  if (maxConcurrentTasks !== undefined) {
+    assertNonNegativeSafeInteger(maxConcurrentTasks, 'max concurrent tasks');
+    if (maxConcurrentTasks < 1) throw new AdmissionError('max concurrent tasks must be positive');
+  }
+  const config = { ...DEFAULT_QUEUE_CONFIGS[kind as (typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number]] };
+  return kind === 'execution' && maxConcurrentTasks !== undefined
+    ? { ...config, concurrencyLimit: maxConcurrentTasks }
+    : config;
 }
 
 export class RequirementAdmissionError extends Error {

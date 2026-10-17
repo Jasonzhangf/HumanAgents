@@ -102,6 +102,38 @@ test('runtime classification separates new execution from correlated task input 
   });
 });
 
+test('defaultAdmissionQueueConfig binds an execution budget into existing admission concurrency', () => {
+  const executionQueue = defaultAdmissionQueueConfig('execution', 2);
+  assert.deepEqual(executionQueue, {
+    kind: 'execution',
+    concurrencyLimit: 2,
+    maxBacklog: 32,
+  });
+
+  assert.equal(checkAdmission(admissionCheck({ queue: executionQueue, queueLoad: { running: 1, queued: 0 } })).status, 'admitted');
+  const exhausted = checkAdmission(admissionCheck({ queue: executionQueue, queueLoad: { running: 2, queued: 0 } }));
+  assert.equal(exhausted.status, 'waiting');
+  assert.equal(exhausted.condition, 'queue.execution.concurrency');
+  assert.equal(checkAdmission(admissionCheck({ queue: executionQueue, queueLoad: { running: 1, queued: 0 } })).status, 'admitted');
+
+  assert.deepEqual(defaultAdmissionQueueConfig('execution'), {
+    kind: 'execution',
+    concurrencyLimit: 1,
+    maxBacklog: 32,
+  });
+  assert.deepEqual(defaultAdmissionQueueConfig('interactive'), {
+    kind: 'interactive',
+    concurrencyLimit: 1,
+    maxBacklog: 32,
+  });
+  assert.deepEqual(defaultAdmissionQueueConfig('interactive', 2), {
+    kind: 'interactive',
+    concurrencyLimit: 1,
+    maxBacklog: 32,
+  });
+  assert.throws(() => defaultAdmissionQueueConfig('execution', 0), AdmissionError);
+});
+
 test('admits only when capability, health, input, checkpoint and quota pass', () => {
   assert.deepEqual(checkAdmission(admissionCheck()), {
     status: 'admitted',
