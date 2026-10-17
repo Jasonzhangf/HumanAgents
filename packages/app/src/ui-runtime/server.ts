@@ -13,6 +13,7 @@ import {
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
+import type { UiTaskGrantControl } from './task-control.js';
 import type { RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import { AppLifecycleError } from '../errors.js';
@@ -22,6 +23,7 @@ import {
   type AccessControlService,
   type AccessSession,
   type SessionVerification,
+  type ProductPrincipalVerification,
 } from './access-control.js';
 
 const APP_OWNER = 'humanagent.app';
@@ -29,6 +31,7 @@ const APP_OWNER = 'humanagent.app';
 export interface UiRuntimeServerOptions {
   readonly service: UiRuntimeService;
   readonly accessControl: AccessControlService;
+  readonly taskControl?: UiTaskGrantControl;
   readonly uiRoot: string;
   readonly host?: string;
   readonly port?: number;
@@ -122,7 +125,7 @@ function writeError(response: ServerResponse, error: unknown): void {
   });
 }
 
-function sessionError(verification: SessionVerification): AccessControlError {
+function sessionError(verification: SessionVerification | ProductPrincipalVerification): AccessControlError {
   if (verification.state === 'missing') {
     return new AccessControlError('auth.session.missing', 'browser session is required', 'open the login page and pair this browser', 401);
   }
@@ -234,6 +237,14 @@ function requirePositiveInteger(body: Record<string, unknown>, key: string): num
   const value = body[key];
   if (!Number.isSafeInteger(value) || Number(value) < 1) {
     throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be a positive safe integer`, `provide a positive ${key}`);
+  }
+  return value as number;
+}
+
+function requireNonNegativeInteger(body: Record<string, unknown>, key: string): number {
+  const value = body[key];
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be a non-negative safe integer`, `provide a non-negative ${key}`);
   }
   return value as number;
 }
@@ -448,7 +459,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   let closeReceipt: ListenerShutdownReceipt | undefined;
   let closePromise: Promise<ListenerShutdownReceipt> | undefined;
   const server = createServer((request, response) => {
-    void handleRequest(request, response, service, accessControl, sseRegistry, () => closing, options.uiRoot, options.restart, options.identity, options.schedulerStatus)
+    void handleRequest(request, response, service, accessControl, sseRegistry, () => closing, options.uiRoot, options.restart, options.identity, options.schedulerStatus, options.taskControl)
       .catch((error) => {
         writeError(response, error);
       });
@@ -522,6 +533,7 @@ async function handleRequest(
   restart?: UiRuntimeServerOptions['restart'],
   identity?: UiRuntimeServerOptions['identity'],
   schedulerStatus?: UiRuntimeServerOptions['schedulerStatus'],
+  taskControl?: UiTaskGrantControl,
 ): Promise<void> {
   const method = request.method ?? 'GET';
   try {
@@ -1075,6 +1087,41 @@ async function handleRequest(
     if (taskStopRetry && method === 'POST') {
       const result = await service.retryStop(id('task', decodeURIComponent(taskStopRetry[1]!)));
       writeJson(response, 202, result);
+      return;
+    }
+    const taskGrantControl = /^\/api\/tasks\/([^/]+)\/control\/(grant|revoke)$/.exec(path);
+    if (taskGrantControl && (method === 'POST' || (method === 'GET' && taskGrantControl[2] === 'grant'))) {
+      const cookie = request.headers.cookie;
+      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
+      if (verification.state !== 'valid') throw sessionError(verification);
+      if (taskControl === undefined) {
+        throw new UiRuntimeApiError('task-control.source.unavailable', APP_OWNER, 'task grant control source is unavailable', 'start the runtime with its task grant control source', 503);
+      }
+      const taskId = id('task', decodeURIComponent(taskGrantControl[1]!));
+      const principalOwner = verification.principal.owner;
+      if (method === 'GET') {
+        writeJson(response, 200, await taskControl.read(taskId, principalOwner));
+        return;
+      }
+      const body = await readBody(request);
+      const input = {
+        taskId,
+        principalOwner,
+        requestId: requireString(body, 'requestId'),
+        expectedRevision: requireNonNegativeInteger(body, 'expectedRevision'),
+      };
+      if (taskGrantControl[2] === 'revoke') {
+        writeJson(response, 200, await taskControl.revoke(input));
+      } else {
+        const capability = body.capability === undefined ? undefined : requireRecord(body, 'capability');
+        writeJson(response, 200, await taskControl.grant({
+          ...input,
+          ...(capability === undefined ? {} : { capability: {
+            actionId: requireString(capability, 'actionId'),
+            capabilities: requireStringArray(capability, 'capabilities'),
+          } }),
+        }));
+      }
       return;
     }
     const taskDetail = /^\/api\/tasks\/([^/]+)$/.exec(path);
