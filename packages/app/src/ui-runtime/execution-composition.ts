@@ -904,7 +904,7 @@ export function createDefaultExecutionComposition(input: {
           begin: (value) => native.saveProgress.begin(value),
           recordProgress: (value) => native.saveProgress.recordProgress(value) },
         saveKey: () => {
-          if (!closingCheckpoint) missing('capture has no actual closing checkpoint candidate');
+          if (!closingCheckpoint) return undefined;
           return { turn: projectAdmittedTurnIdentityV1(admittedTurn), boundaryId,
             checkpoint: { scope: closingCheckpoint.scope, id: closingCheckpoint.id },
             ...(segmentSource === undefined ? {} : { version: 2 as const,
@@ -1055,6 +1055,7 @@ export function createDefaultExecutionComposition(input: {
       }
       let closed: Promise<import('../../../contracts/src/index.js').ProviderCloseResult> | undefined;
       let providerClosed: Promise<import('../../../contracts/src/index.js').ProviderCloseResult> | undefined;
+      let capturedStop = false;
       function closeOwnedProvider() {
         if (!('driver' in native)) missing('historical boundary has no owned live Provider');
         // A fresh Task Provider is owned by the prepared-stop producer, so its
@@ -1406,6 +1407,11 @@ export function createDefaultExecutionComposition(input: {
             : status === 'cancelled' ? 'operation.cancelled' : status === 'failed' ? 'operation.failed' : 'operation.blocked', settled.evidenceRefs, controllerResult);
           const outcome = status === 'succeeded' ? 'succeeded' as const : settled.state;
           if (!allocation.scope.cycleId) missing('native checkpoint has no allocated cycle');
+          if (!acceptedEnd && (settled.state === 'stopped' || settled.state === 'cancelled')) {
+            await liveNative.prepareCapture(boundaryId);
+            capturedStop = true;
+            return { state: outcome, evidenceRefs: settled.evidenceRefs };
+          }
           if (!acceptedEnd) missing('the drained execution has no accepted standard-turn end; retain the same logical turn');
           const contextRef = loop.contextCommitRef();
           if (!contextRef) missing('canonical turn closure has no actual full-context commit');
@@ -1430,6 +1436,7 @@ export function createDefaultExecutionComposition(input: {
         close() {
           if (closed) return closed;
           const attempt = (async () => {
+            if (capturedStop) return closeOwnedProvider();
             try { await saveBoundary(); }
             catch (error) {
               try { await closeOwnedProvider(); }
