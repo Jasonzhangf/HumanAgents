@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Runtime aggregate `aee3aebc` 已正常FF candidate；contractsbuild0/agentlooptsc0/原named settlement3/3PASS（session53145，inspection-aggregate-settlement-composed-20261017.txt）。sole summary.inspectionOutcome控制总体判断，缺项不补造；只证明Runtime port，不冒完整native/I2。已通知UX关来源并继续同域stophelper。
+- r289结束但最终观察报告不完整。父核实manager pool未acquired返回waiting、App child-producer约1718将waiting/blocked一律输出ToolExecutionResult blocked、Provider非成功路径；尚未证明该终点不可恢复。r290独立Gemini4medium计划已启动，要求核实实际resume再判断最小必要修改或NONE。32round只列证据缺口，不认定永久总上限；当前不派本侧实现、不碰UX三路writer。
+
 - inspection aggregate Contracts `0b0a8d34` 已正常merge唯一candidate；contractsbuild0、原turn-closure-public-consumer9/9PASS（session17638，inspection-aggregate-contract-composed-20261017.txt）。只证明optional summary.inspectionOutcome既有validator合同，不冒完整aggregate。UX已正常关闭来源，并从含基础candidate并发Appwire/Runtimeboundary两个GCM；本侧不抢写。r289仍原进程只读观察，未终结、不重启；无新预算行为结论。
 
 - 该Explicit增量远端交付已完成：`342f5d43..512e8bce main -> main` 正常push回执成功，不再待push。canonical窗口已释放并通知UX。唯一candidate正常合入最新origin/main，只带已记录文档变化。
