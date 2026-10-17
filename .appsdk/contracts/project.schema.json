@@ -123,7 +123,6 @@
         "active_kind",
         "protected_kinds",
         "generated_kinds",
-        "freeze_requirements",
         "promotion_requires",
         "runtime_forbidden_roots",
         "record_contracts",
@@ -139,7 +138,6 @@
         "active_kind": {"const": "immutable_consumable_library"},
         "protected_kinds": {"type": "array", "items": {"type": "string"}},
         "generated_kinds": {"type": "array", "items": {"type": "string"}},
-        "freeze_requirements": {"type": "array", "items": {"type": "string"}},
         "promotion_requires": {"type": "array", "items": {"type": "string"}},
         "runtime_forbidden_roots": {"type": "array", "items": {"type": "string"}},
         "record_contracts": {"type": "array", "items": {"type": "string"}},
@@ -211,31 +209,22 @@
             "type": "object",
             "required": [
               "previous_active_version",
-              "new_active_version",
-              "base_artifact_hash",
-              "base_source_commit"
+              "new_active_version"
             ],
             "properties": {
               "previous_active_version": {"type": "string"},
-              "new_active_version": {"type": "string"},
-              "base_artifact_hash": {"type": "string"},
-              "base_source_commit": {"type": "string"}
+              "new_active_version": {"type": "string"}
             }
           },
           "regression": {
             "type": "object",
             "required": [
-              "required_before_freeze",
               "suite_id",
               "command",
               "input_paths",
-              "minimum_test_count",
-              "allow_skipped",
-              "ordinary_mode_after_freeze",
-              "reenable_on"
+              "allow_skipped"
             ],
             "properties": {
-              "required_before_freeze": {"type": "boolean"},
               "suite_id": {"type": "string"},
               "command": {
                 "type": "object",
@@ -247,30 +236,10 @@
                 }
               },
               "input_paths": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-              "minimum_test_count": {"type": "integer", "minimum": 1},
-              "allow_skipped": {"type": "boolean"},
-              "ordinary_mode_after_freeze": {"const": "disabled"},
-              "reenable_on": {
-                "type": "array",
-                "items": {
-                  "enum": [
-                    "source_change",
-                    "contract_change",
-                    "public_api_change",
-                    "artifact_change",
-                    "dependency_change"
-                  ]
-                }
-              }
+              "allow_skipped": {"type": "boolean"}
             }
           }
-        },
-        "allOf": [
-          {
-            "if": {"properties": {"stage": {"enum": ["frozen", "retired"]}}},
-            "then": {"required": ["regression"]}
-          }
-        ]
+        }
       }
     },
     "lifecycles": {
