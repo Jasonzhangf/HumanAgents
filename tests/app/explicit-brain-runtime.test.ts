@@ -76,6 +76,11 @@ function digest(args: Readonly<Record<string, unknown>>): string {
   return `sha256:${createHash('sha256').update(stable).digest('hex')}`;
 }
 
+function requirePresent<T>(value: T | null | undefined, label: string): T {
+  if (value === null || value === undefined) throw new Error(`missing ${label}`);
+  return value;
+}
+
 async function runWorkspaceSearch(root: string, query: string, limit: number, scopeRef = 'scope:workspace:project-a') {
   const runtime = createExplicitBrainRuntime({
     workspaceRoot: await realpath(root),
@@ -691,10 +696,16 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
     modelRef: 'parent-model', endpointRef: 'http:recorded.test', configDigest: 'sha256:parent', capabilityDigest: 'sha256:parent' };
   const childBinding = { ...binding, bindingId: 'child-loop', modelRef: 'independent-child-model' };
   const refinedText = 'parent explicitly refined the partial result';
+  const dispatchObjective = 'verify exact helper checkpoint semantics';
+  const dispatchSuccessCriteria = ['report every required checkpoint field'];
   const answer = `exact final ${'原始正文。'.repeat(120)}`;
   const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'parent-private', knownFacts: [], answer, decisionRefs: [] });
   const wires: any[] = [];
   let helperIdentity: Parameters<typeof dependencies.helperJournal.readExact>[0] | undefined;
+  let dispatchAcceptedCommitId: string | undefined;
+  let returnedCommitId: string | undefined;
+  let returnedCheckpointCommitId: string | undefined;
+  let dispatchStageSnapshot: Awaited<ReturnType<typeof dependencies.parentJournal.readTurnSnapshot>> | undefined;
   let childClosed = 0;
   let settlementPublished = 0;
   const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
@@ -704,8 +715,8 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
       { type: 'response.output_text.done', item_id: 'draft', text: '{"kind":"invalid-draft"}' },
       { type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', call_id: 'dispatch', name: 'dispatch_helper', arguments: JSON.stringify({
         selection: { roleId: 'review', configuredAgentId: 'independent-child' },
-        assignmentFields: { objective: 'bounded', targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
-          acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: ['complete'], failureCriteria: ['none'], incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required' },
+        assignmentFields: { objective: dispatchObjective, targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
+          acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: dispatchSuccessCriteria, failureCriteria: ['none'], incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required' },
         inputs: { question: 'child-only-input' }, evidenceRefs: [],
       }) } },
     ];
@@ -713,12 +724,54 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
       const dispatched = JSON.parse(results[0].output);
       helperIdentity = dispatched.identity;
       const handoff = await dependencies.helperJournal.readExact(dispatched.identity);
-      assert.ok(handoff.returned); assert.equal(handoff.ownerAccepted, null);
+      const returned = requirePresent(handoff.returned, 'returned helper fact');
+      assert.equal(handoff.ownerAccepted, null);
+      assert.equal(handoff.adoptedCheckpoint, null);
+      const returnedCheckpoint = requirePresent(handoff.returnedCheckpoint, 'returned helper checkpoint');
+      assert.equal(returnedCheckpoint.checkpoint.phase, 'returned');
+      assert.equal(returnedCheckpoint.checkpoint.recordedAt, returned.fact.returnedAt);
+      assert.equal(returnedCheckpoint.checkpoint.recovery.dispatchAcceptedCommitId, dispatched.dispatchAcceptedCommitId);
+      assert.equal(returnedCheckpoint.checkpoint.recovery.returnedCommitId, dispatched.returnedCommitId);
+      assert.equal(returnedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId, undefined);
+      assert.equal(returnedCheckpoint.commit.commitId, dispatched.returnedCheckpointCommitId);
+      assert.ok(returnedCheckpoint.checkpoint.description.includes(dispatchObjective));
+      for (const criterion of dispatchSuccessCriteria) {
+        assert.ok(returnedCheckpoint.checkpoint.description.includes(criterion));
+      }
+      dispatchAcceptedCommitId = dispatched.dispatchAcceptedCommitId;
+      returnedCommitId = dispatched.returnedCommitId;
+      returnedCheckpointCommitId = dispatched.returnedCheckpointCommitId;
+      const activeTurn = starts[0]!.interactionTurn;
+      const stageSnapshot = await dependencies.parentJournal.readTurnSnapshot(activeTurn);
+      dispatchStageSnapshot = stageSnapshot;
+      assert.ok(stageSnapshot.acceptedFacts.length > 0);
+      assert.equal(await dependencies.checkpointJournal.readSemanticCheckpointExact(activeTurn), null,
+        'returned call checkpoint must not close the active turn');
       assert.equal(dispatched.result.status, 'incomplete');
       return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept', name: 'accept_helper',
         arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText, acceptanceRef: 'acceptance:parent-loop', evidenceRefs: [] }) } }];
     }
     assert.deepEqual(results.map((item: any) => item.call_id), ['dispatch', 'accept']);
+    const identity = requirePresent(helperIdentity, 'helper identity');
+    const acceptedHandoff = await dependencies.helperJournal.readExact(identity);
+    const ownerAccepted = requirePresent(acceptedHandoff.ownerAccepted, 'owner-accepted helper fact');
+    assert.equal(ownerAccepted.fact.acceptanceRef, 'acceptance:parent-loop');
+    assert.equal(ownerAccepted.fact.result.status, 'incomplete');
+    const adoptedCheckpoint = requirePresent(acceptedHandoff.adoptedCheckpoint, 'adopted helper checkpoint');
+    assert.equal(adoptedCheckpoint.checkpoint.phase, 'adopted');
+    assert.equal(adoptedCheckpoint.checkpoint.description, refinedText);
+    assert.equal(adoptedCheckpoint.checkpoint.recordedAt, ownerAccepted.fact.acceptedAt);
+    assert.equal(adoptedCheckpoint.checkpoint.recovery.dispatchAcceptedCommitId, dispatchAcceptedCommitId);
+    assert.equal(adoptedCheckpoint.checkpoint.recovery.returnedCommitId, returnedCommitId);
+    assert.equal(adoptedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId, ownerAccepted.commit.commitId);
+    assert.equal(acceptedHandoff.returnedCheckpoint?.commit.commitId, returnedCheckpointCommitId);
+    const activeTurn = starts[0]!.interactionTurn;
+    const acceptedStageSnapshot = await dependencies.parentJournal.readTurnSnapshot(activeTurn);
+    const stageSnapshot = requirePresent(dispatchStageSnapshot, 'dispatch stage snapshot');
+    assert.deepEqual(acceptedStageSnapshot.acceptedFacts.slice(0, stageSnapshot.acceptedFacts.length), stageSnapshot.acceptedFacts);
+    assert.ok(acceptedStageSnapshot.acceptedFacts.length > stageSnapshot.acceptedFacts.length);
+    assert.equal(await dependencies.checkpointJournal.readSemanticCheckpointExact(activeTurn), null,
+      'owner acceptance must not close the active turn');
     const acceptance = JSON.parse(results[1].output);
     const refined = acceptance.latestTurnEntry.refinedResult;
     assert.equal(new TextDecoder().decode(await dependencies.rawContent.read({ scope: refined.ref.scope, content: refined })), refinedText);
@@ -765,6 +818,8 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
     assert.equal(childClosed, 1); assert.equal(settlementPublished, 1); assert.equal(wires.length, 3);
     assert.ok(helperIdentity);
     assert.ok((await dependencies.helperJournal.readExact(helperIdentity!)).ownerAccepted);
+    const finalCheckpoint = await dependencies.checkpointJournal.readSemanticCheckpointExact(starts[0]!.interactionTurn);
+    assert.ok(finalCheckpoint, 'the normal final close must still commit the semantic checkpoint');
     const snapshot = await dependencies.parentJournal.readTurnSnapshot(starts[0].interactionTurn);
     for (const { fact } of snapshot.acceptedFacts) {
       if (fact.envelope.fact.kind !== 'tool-result') continue;
@@ -1282,7 +1337,8 @@ test('provider explicit brain interpreter fresh OS default DI recovers preclose 
         await helpers.appendDispatchAccepted({kind: 'dispatch-accepted', assignment, dispatchAcceptedAt: new Date().toISOString(), evidenceRefs: []});
         if (mode === 'continue') await helpers.appendReturned({kind: 'returned', result: {...identity, agentId: 'seed-helper',
           producedArtifactRefs: [], producedArtifactDigests: [], status: 'incomplete', summary: 'seeded returned helper', outputRefs: [], evidenceRefs: [],
-          nextAction: 'wait', conditionRef: 'condition:seed'}, returnedAt: new Date().toISOString(), evidenceRefs: []});
+          nextAction: 'wait', conditionRef: 'condition:seed'}, returnedAt: new Date().toISOString(), evidenceRefs: []},
+        { description: 'dispatch seeded returned helper for objective "seed returned helper"; success criteria: complete' });
       }
       if (mode === 'continue' || mode === 'terminal') {
         const req = {turnId: 'provider-' + mode, requestId: 'req-1-' + mode};
@@ -1716,6 +1772,8 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
   const acceptedChildAgentId = 'helper-accepted';
   const unacceptedChildAgentId = 'helper-unaccepted';
   const refinedText = 'accepted refined cold recovery result';
+  let acceptedHelperIdentity: Parameters<typeof producerHelper.readExact>[0] | undefined;
+  let unacceptedHelperIdentity: Parameters<typeof producerHelper.readExact>[0] | undefined;
   const finalAnswer = `recovered ${'answer body '.repeat(80)}`;
   const finalText = JSON.stringify({
     kind: 'answer', normalizedInput: 'recover this closed turn', knownFacts: [], answer: finalAnswer, decisionRefs: [],
@@ -1741,7 +1799,25 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
     if (results.length === 2) {
       const accepted = results.find((result: any) => result.call_id === 'dispatch-accepted');
       assert.ok(accepted, 'the accepted helper dispatch must return');
+      const unaccepted = results.find((result: any) => result.call_id === 'dispatch-unaccepted');
+      assert.ok(unaccepted, 'the returned-only helper dispatch must return');
       const dispatched = JSON.parse(accepted.output);
+      const returnedOnly = JSON.parse(unaccepted.output);
+      acceptedHelperIdentity = dispatched.identity;
+      unacceptedHelperIdentity = returnedOnly.identity;
+      const acceptedIdentity = requirePresent(acceptedHelperIdentity, 'accepted helper identity');
+      const unacceptedIdentity = requirePresent(unacceptedHelperIdentity, 'unaccepted helper identity');
+      const acceptedReadback = await producerHelper.readExact(acceptedIdentity);
+      const acceptedReturnedCheckpoint = requirePresent(acceptedReadback.returnedCheckpoint, 'accepted returned checkpoint');
+      assert.ok(acceptedReadback.returned);
+      assert.equal(acceptedReadback.adoptedCheckpoint, null);
+      assert.equal(acceptedReadback.ownerAccepted, null);
+      assert.ok(acceptedReturnedCheckpoint.checkpoint.description.includes(`bounded ${acceptedChildAgentId}`));
+      const unacceptedReadback = await producerHelper.readExact(unacceptedIdentity);
+      assert.ok(unacceptedReadback.returned);
+      assert.ok(unacceptedReadback.returnedCheckpoint);
+      assert.equal(unacceptedReadback.adoptedCheckpoint, null);
+      assert.equal(unacceptedReadback.ownerAccepted, null);
       return [{
         type: 'response.output_item.done',
         output_index: 0,
@@ -1754,6 +1830,14 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
       }];
     }
     if (results.length === 3) {
+      const acceptedIdentity = requirePresent(acceptedHelperIdentity, 'accepted helper identity');
+      const acceptedReadback = await producerHelper.readExact(acceptedIdentity);
+      const ownerAccepted = requirePresent(acceptedReadback.ownerAccepted, 'owner-accepted helper fact');
+      assert.equal(ownerAccepted.fact.acceptanceRef, 'acceptance:cold-recovery');
+      assert.equal(ownerAccepted.fact.result.status, 'succeeded');
+      const adoptedCheckpoint = requirePresent(acceptedReadback.adoptedCheckpoint, 'adopted helper checkpoint');
+      assert.equal(adoptedCheckpoint.checkpoint.description, refinedText);
+      assert.equal(adoptedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId, ownerAccepted.commit.commitId);
       return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
     }
     throw new Error(`unexpected parent response round with ${results.length} tool results`);
@@ -1838,6 +1922,18 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
     const readerParent = new JsonlInteractionParentTurnJournal(readerOrgan);
     const readerHelper = new JsonlInteractionHelperJournal(readerOrgan);
     const readerEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(recoveryRoot, 'assets')));
+    const acceptedIdentity = requirePresent(acceptedHelperIdentity, 'accepted helper identity');
+    const unacceptedIdentity = requirePresent(unacceptedHelperIdentity, 'unaccepted helper identity');
+    const coldAcceptedReadback = await readerHelper.readExact(acceptedIdentity);
+    const coldAcceptedCheckpoint = requirePresent(coldAcceptedReadback.adoptedCheckpoint, 'cold adopted checkpoint');
+    assert.ok(coldAcceptedReadback.returnedCheckpoint, 'fresh reader must see the returned checkpoint');
+    assert.equal(coldAcceptedCheckpoint.checkpoint.description, refinedText);
+    assert.equal(coldAcceptedReadback.ownerAccepted?.fact.acceptanceRef, 'acceptance:cold-recovery');
+    assert.equal(coldAcceptedReadback.ownerAccepted?.fact.result.status, 'succeeded');
+    const coldUnacceptedReadback = await readerHelper.readExact(unacceptedIdentity);
+    assert.ok(coldUnacceptedReadback.returnedCheckpoint, 'fresh reader must see the returned-only checkpoint');
+    assert.equal(coldUnacceptedReadback.adoptedCheckpoint, null);
+    assert.equal(coldUnacceptedReadback.ownerAccepted, null);
     const externalCalls: string[] = [];
     const deadPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence: readerEvidence });
     deadPort.start = async () => { externalCalls.push('start'); throw new Error('unexpected provider start'); };

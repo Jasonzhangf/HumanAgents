@@ -21,6 +21,8 @@ import type {
   OriginalBusinessTurnRef,
   ResumedTurnSegmentOpened,
 } from '../../../packages/contracts/src/active-turn-segments.js';
+import { validateResumedTurnSegmentOpened } from '../../../packages/contracts/src/active-turn-segments.js';
+import { validateJournalCommitRef } from '../../../packages/contracts/src/i2-history.js';
 import {
   selectTaskAgentActivity,
   type AgentActivityActiveSource,
@@ -111,6 +113,7 @@ const allocationEvidence = evidenceRef('evidence-allocation');
 const activeCommit = commit('commit-active', 3);
 const activeEvidence = evidenceRef('evidence-active');
 const resumedOpenedCommit = commit('commit-resumed-opened', 4);
+const resumedBusinessBindingCommit = commit('commit-resumed-business-binding', 14);
 const resumedEvidence = evidenceRef('evidence-resumed');
 const childCommit = commit('commit-child', 5);
 const childEvidence = evidenceRef('evidence-child');
@@ -217,22 +220,23 @@ const orphanActiveSource: AgentActivityActiveSource = {
   bindingCommitRef: commit('commit-active-orphan', 11),
 };
 
-const resumedIncarnation = incarnation('native-runtime-2', 2, 'agent-instance-resumed', 'assignment-resumed', 2);
+const resumedIncarnation = incarnation('native-runtime-2', 2, 'agent-instance-resumed', 'assignment-resumed', 3);
 const resumedAssignment = workAssignment('assignment-resumed', {
   pipelineNodeId: 'node-resumed',
   attempt: 2,
-  executionEpoch: 2,
+  executionEpoch: 1,
   objective: 'resume epoch two',
+  successCriteria: ['resumed turn completes'],
 });
 const resumedBusinessTurnRef: OriginalBusinessTurnRef = {
   businessTurnId: 'turn-2',
-  bindingCommitRef: activeCommit,
-  execution: { runtimeId: 'native-runtime-2', executionEpoch: 2 },
+  bindingCommitRef: resumedBusinessBindingCommit,
+  execution: { runtimeId: 'native-runtime-1', executionEpoch: 1 },
 };
 const resumedBinding: ActiveTurnSegmentBinding = {
   businessTurnRef: resumedBusinessTurnRef,
   assignment: resumedAssignment,
-  execution: { runtimeId: 'native-runtime-2', executionEpoch: 2 },
+  execution: { runtimeId: 'native-runtime-2', executionEpoch: 3 },
   incarnation: resumedIncarnation,
   scope: SCOPE,
 };
@@ -437,6 +441,35 @@ function recordOf(
   throw new Error(`expected a ${sourceKind} record`);
 }
 
+test('the resumed fixture is a valid typed segment-opened', () => {
+  // This proves the fixture matches the segment contract. It does not claim a
+  // real Journal opened receipt was observed.
+  validateResumedTurnSegmentOpened(resumedOpened);
+  validateJournalCommitRef(resumedBusinessTurnRef.bindingCommitRef);
+  validateJournalCommitRef(resumedOpened.authorityCommitRef);
+  validateJournalCommitRef(resumedOpened.businessRegistrationCommitRef);
+  validateJournalCommitRef(resumedOpenedCommit);
+});
+
+test('a physical execution epoch that differs from the incarnation is a source conflict', () => {
+  const mismatchedOpened: ResumedTurnSegmentOpened = {
+    ...resumedOpened,
+    binding: {
+      ...resumedBinding,
+      execution: { ...resumedBinding.execution, executionEpoch: 4 },
+    },
+  };
+  const input = baseInput({ taskId: TASK });
+  const outcome = selectTaskAgentActivity({
+    ...input,
+    resumedSegments: [{ ...resumedSource, opened: mismatchedOpened }],
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.failure.code, 'agent-activity.source-conflict');
+  assert.equal(outcome.failure.ownerId, SELECTOR_OWNER_ID);
+});
+
 test('catalog keeps the epoch 1 allocation historical and the live handles current', () => {
   const outcome = selectTaskAgentActivity(baseInput({ taskId: TASK }));
   assert.equal(outcome.ok, true);
@@ -474,6 +507,23 @@ test('catalog keeps the epoch 1 allocation historical and the live handles curre
   assert.equal(activeRecord.attempt, 2);
   assert.equal(activeRecord.businessTurnId, 'turn-2');
   assert.equal(activeRecord.nodeId, 'node-implement');
+
+  // The resumed segment keeps the original business epoch 1 and projects the
+  // physical execution epoch 3 without rewriting the original business ref.
+  const resumedRecord = recordOf(outcome.value.current, 'resumed-segment');
+  assert.equal(resumedRecord.executionEpoch, 3);
+  assert.equal(resumedRecord.assignmentId, 'assignment-resumed');
+  assert.equal(resumedRecord.attempt, 2);
+  assert.equal(resumedRecord.businessTurnId, 'turn-2');
+  assert.equal(resumedRecord.segmentId, 'segment-2');
+  assert.equal(resumedRecord.nodeId, 'node-resumed');
+  assert.ok(resumedRecord.commitRefs[0] === resumedOpenedCommit);
+  assert.ok(resumedRecord.instance.kind === 'incarnation');
+  if (resumedRecord.instance.kind === 'incarnation') {
+    assert.equal(resumedRecord.instance.incarnation.executionEpoch, 3);
+  }
+  assert.equal(resumedAssignment.executionEpoch, 1);
+  assert.equal(resumedBusinessTurnRef.execution.executionEpoch, 1);
 
   // The acquired child keeps its own identity and never becomes its parent.
   const childCatalogRecord = recordOf(outcome.value.current, 'child-invocation');
@@ -531,6 +581,9 @@ test('selected matches one exact instance and does not trim the catalog', () => 
   assert.equal(resumedSelected.value.selected?.length, 1);
   assert.equal(resumedSelected.value.selected?.[0]?.sourceKind, 'resumed-segment');
   assert.equal(resumedSelected.value.selected?.[0]?.segmentId, 'segment-2');
+  assert.equal(resumedSelected.value.selected?.[0]?.executionEpoch, 3);
+  assert.equal(resumedSelected.value.selected?.[0]?.businessTurnId, 'turn-2');
+  assert.equal(resumedSelected.value.selected?.[0]?.nodeId, 'node-resumed');
 });
 
 test('a wrong node, attempt or generation fails loud instead of returning catalog', () => {
