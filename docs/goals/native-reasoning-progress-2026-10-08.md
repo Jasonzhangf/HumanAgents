@@ -66,6 +66,8 @@ I2 F0已接候选 `2f92fe91`：source `2f788ad3` 标准Git合流，仅observatio
 
 r222 criteria producer已source提交 `eebc5e30`，build/compile0；保留旧resume.assignment，不重写旧Journal。运行前r223源码确认review无显式roleentry会选legacy4444，且localupstream无review分支；r226仅补原fixture的legacy本地映射及真实criteria/完整subject正文断言后的Responses响应，不请求实际RCC来探测fixture。完整cold尚未GREEN。首milestone交付大阶段Plan r224 Opus5.5实际quotaERROR/exit3/空产物，按默认fallback freshGemini4 r225同scope继续；不得等待后继I2全部完成才交付无关已闭合增量。UX docs-onlymain `b78d23fc` 已fetch并正常合候选，仅进度文档变化，未产品重构建/安装/重启。
 
+r226后宿主原冷恢复用例实际RED（0/1）：第二进程resume返回409 `orchestration.dispatch.failed`，原错 `missing review agent prompt segments`，nextAction `recover:orchestration.review.quality`；fixture `text-only-NggQrO` 保留。尚未执行review正文断言，不将本地路由补齐当cold通过。r227 fresh GCM只读定位真实prompt producer与fixture配置，复用原来源树，不新增worktree或产品writer。r225交付Planner仍活跃；UX两条I2执行独立推进。上次进度回复本身不是开发完成，本轮新增证据为上述真实失败和已启动定位任务。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
