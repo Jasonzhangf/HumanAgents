@@ -12,6 +12,7 @@ import {
   id,
   isStandardTurnEndToolId,
   type AcceptedRawFact,
+  type AgentInput,
   type ContextHistoryRecord,
   type EvidenceRef,
   type FileWriteEffect,
@@ -32,6 +33,7 @@ import type {
 import type { JournalCommitRef } from '../../packages/contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../packages/contracts/src/framework.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../packages/adapters/jsonl/src/index.js';
+import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import {
   createJsonlActiveTurnJournal,
   decodeActiveTurnRecords,
@@ -40,7 +42,7 @@ import type { ActiveTurnJournalRecord } from '../../packages/runtime/src/context
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { ImmutableAssetStore, evidenceReference } from '../../packages/adapters/filesystem/src/index.js';
-import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
+import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
 import { produceAdmittedTurn } from '../../packages/runtime/src/admission/admitted-turn.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import { ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
@@ -72,7 +74,7 @@ import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-c
 import { readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
 import { createDefaultExecutionComposition, createServiceExecutionAdmission, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { UiRuntimeService, FakeReplayExecutionRuntimePort, startUiRuntime, uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/index.js';
-import { composeUiMemoryHooks } from '../../packages/app/src/cli.js';
+import { composeUiMemoryHooks, memoryDriverFactory } from '../../packages/app/src/cli.js';
 import { composeMemoryRuntime, createJournalCheckpointEvidencePort } from '../../packages/app/src/memory-runtime.js';
 import { resolveRuntimePaths, ensureControlLayout, loadConfiguration } from '../../packages/config/src/index.js';
 import { createJsonlAttentionPort, readJsonlAttentions } from '../../packages/app/src/attention-journal.js';
@@ -600,6 +602,8 @@ async function upstream(
   deliveryRef: string,
   fixture: Pick<ColdFixture, 'journal' | 'taskScope'>,
   deliveryText?: string,
+  summaryText?: { readonly original: Readonly<Record<'goal' | 'actions' | 'result' | 'expectedNextStep', string>>;
+    readonly next: Readonly<Record<'goal' | 'actions' | 'result' | 'expectedNextStep', string>> },
 ): Promise<Upstream> {
   const wires: { path: string; body: string }[] = [];
   const errors: Upstream['errors'] = [];
@@ -615,10 +619,10 @@ async function upstream(
       { type: 'response.output_item.done', output_index: 0,
         item: { type: 'function_call', call_id: callId, name: 'humanagent_turn_end',
           arguments: JSON.stringify({ summary: {
-            goal: section(nextDelivery ? 'complete the next execution' : 'resume the original business turn'),
-            actions: section(nextDelivery ? 'used the corrected forward context' : 'retained the confirmed effect'),
-            result: section(nextDelivery ? 'delivered the next execution result' : 'C3A prior-v2 resumed semantic marker'),
-            expectedNextStep: section('planner aligns the exact current plan') },
+            goal: section(summaryText?.[nextDelivery ? 'next' : 'original'].goal ?? (nextDelivery ? 'complete the next execution' : 'resume the original business turn')),
+            actions: section(summaryText?.[nextDelivery ? 'next' : 'original'].actions ?? (nextDelivery ? 'used the corrected forward context' : 'retained the confirmed effect')),
+            result: section(summaryText?.[nextDelivery ? 'next' : 'original'].result ?? (nextDelivery ? 'delivered the next execution result' : 'C3A prior-v2 resumed semantic marker')),
+            expectedNextStep: section(summaryText?.[nextDelivery ? 'next' : 'original'].expectedNextStep ?? 'planner aligns the exact current plan') },
             deliveryRefs: nextDelivery ? [] : [deliveryRef],
             ...(nextDelivery ? { deliveryText: 'Next execution completed from the corrected forward context.' }
               : deliveryText === undefined ? {} : { deliveryText }) }) } },
@@ -1119,7 +1123,7 @@ async function buildColdFixture(name: string,
   contextSeed?: {
     readonly activeRefs: readonly string[];
     readonly omittedRefs: readonly string[];
-  }): Promise<ColdFixture> {
+  }, source?: { readonly assetId: string; readonly text: string }): Promise<ColdFixture> {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, `${name}-`));
   const preparedPath = name.startsWith('c3a-') ? join(root, 'rcc', 'ui-runtime-journal.jsonl') : join(root, 'prepared.jsonl');
@@ -1355,10 +1359,13 @@ async function buildColdFixture(name: string,
     contextSeed?.activeRefs, contextSeed?.omittedRefs);
   const sourceContextCommit = (await produceContextHistory(history, { record: sourceContext,
     expectedCurrentContextCommitRef: null })).commitRef;
+  const sourceEvidence = source === undefined ? undefined : evidenceReference(
+    await new ImmutableAssetStore(artifactsRoot).write(source.assetId, new TextEncoder().encode(source.text)),
+    scope, 'operation', 'provider-p2b-source-material');
   const checkpoint = { id: id('checkpoint', 'original-checkpoint'), scope, cycleId: scope.cycleId!, seq: 1,
     previousCheckpointId: null, directiveRevision: allocation.directiveRevision, executionEpoch: allocation.executionEpoch,
-    outcome: 'waiting' as const, summary: 'retain source', recoveryStateRef: evidence(scope, 'checkpoint-recovery'),
-    evidenceRefs: [evidence(scope, 'checkpoint')], next: { kind: 'wait' as const, ref: 'original-recovery-owner' } };
+    outcome: 'waiting' as const, summary: source?.text ?? 'retain source', recoveryStateRef: evidence(scope, 'checkpoint-recovery'),
+    evidenceRefs: [evidence(scope, 'checkpoint'), ...(sourceEvidence ? [sourceEvidence] : [])], next: { kind: 'wait' as const, ref: 'original-recovery-owner' } };
   const selector = { scope, agentRuntimeId: allocation.runtimeId, harnessExecutionEpoch: allocation.executionEpoch };
   const preparation = await prepareCheckpointClosure({ checkpoint, source: 'harness-control', closureReason: 'source proof',
     contextCommitRef: sourceContextCommit, contextHistory: history, operationSelector: selector,
@@ -1392,11 +1399,11 @@ async function buildColdFixture(name: string,
  * record is the allocation owner; the v1 recovery receipt is discovered from the
  * committed Journal, never passed across the process boundary and never re-created.
  */
-async function reopenColdFixture(root: string, taskIdValue: string): Promise<ColdFixture> {
-  const preparedPath = processMode?.startsWith('c3a-') ? join(root, 'rcc', 'ui-runtime-journal.jsonl') : join(root, 'prepared.jsonl');
-  const journalPath = processMode?.startsWith('c3a-') ? uiRuntimeControlJournalPath(join(root, 'rcc')) : join(root, 'organ.jsonl');
+async function reopenColdFixture(root: string, taskIdValue: string, c3aPaths = processMode?.startsWith('c3a-')): Promise<ColdFixture> {
+  const preparedPath = c3aPaths ? join(root, 'rcc', 'ui-runtime-journal.jsonl') : join(root, 'prepared.jsonl');
+  const journalPath = c3aPaths ? uiRuntimeControlJournalPath(join(root, 'rcc')) : join(root, 'organ.jsonl');
   const artifactsRoot = join(root, 'assets');
-  const retryPath = processMode?.startsWith('c3a-') ? join((await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: root })).journalRoot, 'ui-runtime', 'retry-cycle.jsonl') : join(root, 'retry.jsonl');
+  const retryPath = c3aPaths ? join((await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: root })).journalRoot, 'ui-runtime', 'retry-cycle.jsonl') : join(root, 'retry.jsonl');
   const journal = new JsonlOrganJournal(journalPath);
   const records = (await journal.verify()).records;
   const preparedJournal = new UiRuntimeJournal(preparedPath);
@@ -1538,7 +1545,7 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
   };
   return {
     root, preparedPath, journalPath, artifactsRoot, retryPath, allocation,
-    assignment, taskScope: allocation.scope, businessTurnId, predecessor,
+    assignment, taskScope: { organId: allocation.scope.organId, taskId: allocation.taskId }, businessTurnId, predecessor,
     ...(v1Receipts[0]?.commitId ? { originalV1ReceiptRef: v1Receipts[0].commitId } : {}),
     effect,
     effectPath: join(root, effect.relativePath), output, journal, acceptedEvidenceLocator,
@@ -1708,15 +1715,45 @@ async function buildResumeService(
   useCompositionSelector = false,
   productionMemory = false,
   memoryFault?: { publication: boolean; diagnostics: boolean; consume?: boolean },
+  realMemory?: { readonly configToml: string; readonly calls: unknown[]; readonly beforeSubmit?: (input: AgentInput) => void },
 ) {
   const assemblies: ResumeAssembly[] = [];
   let selectorCalls = 0;
   const paths = productionMemory ? await resolveRuntimePaths({ controlRoot: join(fixture.root, 'control'), workspace: fixture.root }) : undefined;
   if (paths) await ensureControlLayout(paths);
+  if (paths && realMemory) await writeFile(join(paths.controlRoot, 'config.toml'), realMemory.configToml, 'utf8');
+  const configuration = paths ? await loadConfiguration(paths) : undefined;
+  const factory = paths && realMemory ? memoryDriverFactory({
+    paths, configuration: configuration!, workspace: paths.workspaceCwd,
+    prepareAgentProvider: (selection) => prepareAgentProvider({ ...selection,
+      agentProviderBindings: configuration!.agentProviderBindings,
+      legacyProvider: configuration!.effective.provider, evidenceRoot: fixture.artifactsRoot }),
+  }) : undefined;
+  if (realMemory) assert.ok(factory, 'the owned configuration must select a Memory driver');
+  const driverFor: typeof factory = factory && realMemory ? async (request) => {
+    const prepared = await factory(request);
+    assert.ok('driver' in prepared, 'the provider factory must own release');
+    if (!('driver' in prepared)) throw new Error('missing prepared Memory provider');
+    const driver = prepared.driver;
+    const calls = realMemory.calls;
+    return { driver: {
+      kind: driver.kind,
+      capabilities: () => driver.capabilities(),
+      resume: (input) => driver.resume(input),
+      requestStop: (input) => driver.requestStop(input),
+      start: async (input) => { const result = await driver.start(input); calls.push({ kind: 'start', input, result }); return result; },
+      submit: async (input) => { realMemory.beforeSubmit?.(input); calls.push({ kind: 'request', input }); const result = await driver.submit(input); calls.push({ kind: 'output', result }); return result; },
+      observe: async function* (input) {
+        for await (const event of driver.observe(input)) { calls.push({ kind: 'event', event }); yield event; }
+      },
+      settle: async (input) => { const result = await driver.settle(input); calls.push({ kind: 'settle', input, result }); return result; },
+    }, release: async () => { await prepared.release(); calls.push({ kind: 'release', request }); } };
+  } : undefined;
   const memoryRuntime = paths ? await composeMemoryRuntime({
-    paths, configuration: await loadConfiguration(paths), workspaceCwd: paths.workspaceCwd,
+    paths, configuration: configuration!, workspaceCwd: paths.workspaceCwd,
+    ...(driverFor === undefined ? {} : { driverFor }),
     sessionsRoot: paths.sessionsRoot, runNotesRoot: paths.runNotesRoot,
-    auditPromptRoot: join(paths.controlRoot, 'memory-audit'), auditPromptRef: 'project-memory-audit', autoUpdate: true,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'), auditPromptRef: 'project-memory-audit', autoUpdate: realMemory ? false : true,
     checkpointEvidence: createJournalCheckpointEvidencePort({ filePath: fixture.journalPath }),
     binding: { bindingRef: 'memory:c3a', projectKey: paths.projectKey, executionEpoch: 1,
       scope: { namespace: 'project', projectKey: paths.projectKey, organId },
@@ -2095,6 +2132,105 @@ async function archiveC3aReceipts(
   return archiveRoot;
 }
 
+async function assertRealMemoryAudit(
+  fixture: ColdFixture,
+  app: { readonly memoryAnalyses: Awaited<ReturnType<typeof buildResumeService>>['memoryAnalyses'];
+    readonly memoryRuntime?: Pick<NonNullable<Awaited<ReturnType<typeof buildResumeService>>['memoryRuntime']>, 'reviewState'> },
+  calls: readonly unknown[],
+) {
+  const paths = await resolveRuntimePaths({ controlRoot: join(fixture.root, 'control'), workspace: fixture.root });
+  const filePath = join(paths.journalRoot, 'events.jsonl');
+  const cold = createJsonlEventJournal({ filePath });
+  const records = (await new JsonlOrganJournal(filePath).verify()).records;
+  const snapshot = await new RootedMemoryPersistence({ project: join(paths.memoryRoot, 'project'),
+    global: paths.globalMemoryRoot }).load();
+  const boundaries = await cold.readEvents({ streamId: `memory-boundaries:task:${fixture.taskId.value}`,
+    afterSequence: 0, limit: 100 });
+  const feedback = await cold.readEvents({ streamId: `memory-feedback:${fixture.taskId.value}`,
+    afterSequence: 0, limit: 100 });
+  const observed = calls as Array<{ kind: string; input?: AgentInput & { runtimeId?: string; operationId?: OperationId };
+    result?: { state?: string }; request?: { operationId?: OperationId };
+    event?: { kind: string; runtimeId?: string; terminalState?: string } }>;
+  const requests = observed.filter((call) => call.kind === 'request');
+  assert.equal(requests.length, boundaries.length);
+  assert.equal(feedback.length, requests.length);
+  const review = await app.memoryRuntime!.reviewState();
+  assert.equal(review.analysis.mode, 'model');
+  assert.equal(review.analysis.state, 'succeeded');
+  assert.equal(review.autoUpdate, false);
+  const receipts = [];
+  const operations = [];
+  for (const boundary of boundaries) {
+    const consumerKey = `memory-binding:${fixture.taskId.value}`;
+    const operationRef = `memory-analysis:${consumerKey}:${boundary.messageId}`;
+    const receipt = await cold.readReceipt({ consumerKey, messageId: boundary.messageId });
+    assert.equal(receipt?.disposition, 'applied');
+    receipts.push(receipt);
+    const operation = await cold.readExternalOperation({ consumerKey, messageId: boundary.messageId, operationRef });
+    // The normal task consumer commits atomically in the Journal. Only the
+    // external-barrier path has a separate external-operation record.
+    if (operation) assert.ok(operation.state === 'settled' || operation.state === 'reconciled');
+    operations.push(operation);
+    const sourceRefs = boundary.evidenceRefs.map((ref) => ref.locator);
+    const request = requests.find((call) => canonicalJsonStringify(call.input?.payload['sourceRefs'])
+      === canonicalJsonStringify(sourceRefs))?.input;
+    assert.ok(request, 'the boundary must bind its own actual provider request');
+    if (!request) throw new Error('missing operation request');
+    const analysisId = request.assignmentId.slice('memory-analysis:'.length);
+    assert.ok(receipt?.effectRefs.includes(`memory-analysis-request:${analysisId}`));
+    assert.ok(receipt?.effectRefs.includes(`memory-analysis:${analysisId}`));
+    const actual = app.memoryAnalyses.find((analysis) => analysis.status === 'ready'
+      && analysis.value.result?.curation.operationId.value === analysisId);
+    assert.ok(actual?.status === 'ready' && actual.value.result, JSON.stringify(app.memoryAnalyses));
+    if (actual?.status !== 'ready' || !actual.value.result) throw new Error('missing actual curation');
+    const curation = actual.value.result.curation;
+    const persisted = feedback.find((event) => event.payload?.['analysisRef'] === analysisId);
+    assert.ok(persisted, 'a fresh JSONL reader must recover the actual curation');
+    if (!persisted?.payload) throw new Error('missing durable feedback payload');
+    assert.equal(persisted.payload['outcome'], curation.outcome);
+    assert.equal(persisted.payload['explanation'], curation.explanation);
+    assert.ok(curation.explanation.trim().length > 0);
+    assert.deepEqual(persisted.payload['sourceRefs'], curation.sourceRefs);
+    const payload = request.payload as { sourceRefs: string[]; analysisInputs: unknown };
+    assert.deepEqual(curation.sourceRefs, payload.sourceRefs);
+    assert.deepEqual(payload.analysisInputs, boundary.payload?.['analysisInputs']);
+    assert.ok(curation.nextAction.length > 0);
+    assert.ok(observed.some((call) => call.kind === 'event'
+      && call.event?.runtimeId === request.assignmentId
+      && (call.event.kind === 'terminal' || call.event.kind.endsWith('.terminal'))
+      && call.event.terminalState === 'succeeded'), 'each request needs its own successful terminal');
+    assert.ok(observed.some((call) => call.kind === 'settle'
+      && call.input?.runtimeId === request.assignmentId && call.result?.state === 'succeeded'));
+    assert.ok(observed.some((call) => call.kind === 'release' && call.request?.operationId?.value === analysisId));
+    if (curation.outcome === 'candidate') {
+      const candidate = review.candidates.find((entry) => entry.candidateId === curation.candidateId);
+      assert.ok(candidate);
+      if (!candidate) throw new Error('missing durable candidate');
+      assert.equal(candidate.state, 'candidate');
+      assert.equal(candidate.namespace, 'project');
+      assert.equal(candidate.projectKey, paths.projectKey);
+      assert.equal(candidate.taskId, fixture.taskId.value);
+      assert.deepEqual(candidate.sourceRefs, [curation.sourceRefs[0]]);
+      assert.ok(curation.sourceRefs.every((ref) => candidate.evidenceRefs.includes(ref)));
+      assert.ok(candidate.evidenceRefs.length > 0);
+      const durable = snapshot?.candidates.find((entry) => entry.candidateId === candidate.candidateId);
+      assert.ok(durable, 'a fresh persistence owner must recover the candidate');
+      if (!durable) throw new Error('candidate was not persisted');
+      assert.equal(durable.state, 'candidate');
+      assert.equal(durable.submission.projectKey, paths.projectKey);
+      assert.equal(durable.submission.taskId?.value, fixture.taskId.value);
+      assert.equal(durable.submission.operationId?.value, analysisId);
+      assert.deepEqual(durable.submission.evidenceRefs, candidate.evidenceRefs);
+    }
+  }
+  assert.equal(observed.filter((call) => call.kind === 'start').length, requests.length);
+  assert.equal(observed.filter((call) => call.kind === 'release').length, requests.length);
+  assert.equal(await readFile(join(fixture.root, 'AGENTS.md'), 'utf8'), '# C3a project memory\n');
+  await mkdir(EVIDENCE_ROOT, { recursive: true });
+  await writeFile(join(EVIDENCE_ROOT, `memory-events-${fixture.taskId.value}.jsonl`), await readFile(filePath, 'utf8'), 'utf8');
+  return { boundaries, feedback, receipts, operations, snapshot, records };
+}
+
 /**
  * Runs the accepted confirmed-control sequence and starts one real next
  * execution. All targets are exact committed checkpoint receipts. The current
@@ -2313,6 +2449,7 @@ async function runNextExecutionAssertions(
   expectedFloor: number,
   expectedContext: ContextHistoryRecord,
   expectedCheckpointSemantic = 'C3A prior-v2 resumed semantic marker',
+  contextRefs = { accepted: c3aAcceptedRef, wrong: c3aWrongRef },
 ): Promise<{
   readonly operationId: string;
   readonly executionEpoch: number;
@@ -2483,9 +2620,9 @@ async function runNextExecutionAssertions(
   assert.deepEqual(root.context.contextView.omittedRefs, expectedContext.contextView.omittedRefs);
   assert.deepEqual(root.context.durableContext, expectedContext.durableContext);
   assert.equal(root.context.durableContextDigest, expectedContext.durableContextDigest);
-  assert.ok(root.context.contextView.activeRefs.includes(c3aAcceptedRef));
-  assert.ok(!root.context.contextView.activeRefs.includes(c3aWrongRef));
-  assert.ok(root.context.contextView.omittedRefs.includes(c3aWrongRef));
+  assert.ok(root.context.contextView.activeRefs.includes(contextRefs.accepted));
+  assert.ok(!root.context.contextView.activeRefs.includes(contextRefs.wrong));
+  assert.ok(root.context.contextView.omittedRefs.includes(contextRefs.wrong));
 
   const nextWires = http.wires.slice(wireOffset);
   const executionWires = nextWires.filter((wire) => plannerPayload(wire.body) === undefined
@@ -2498,7 +2635,7 @@ async function runNextExecutionAssertions(
   'the actual next wire must retain the accepted context semantics and duty');
   assert.ok(executionText.some((text) => text.includes(expectedCheckpointSemantic)),
     'the actual next wire must consume the resumed v2 checkpoint semantics');
-  assert.ok(!executionText.some((text) => text.includes(c3aWrongRef)),
+  assert.ok(!executionText.some((text) => text.includes(contextRefs.wrong)),
     'the corrected wrong ref must not return as active reasoning');
 
   const closureCandidate = records.flatMap((record) => {
@@ -3472,12 +3609,186 @@ function registerPublicConsumers(): void {
   });
 
   // C3a hot. One live Service must carry the real standard tail through
-  // correction, exact-target rewind and forward, then start and close the next
-  // execution above the committed control floor. Failure mode: the next turn
-  // reuses the predecessor root/request/closure or resurrects the corrected
-  // wrong ref. Probability UNKNOWN. Impact: long-horizon reorientation loses its
-  // current goal or binds the wrong turn identity. Cost: the existing fixture,
-  // controlled Provider and one scoped next execution.
+  // Known failure: production composition without driverFor silently uses deterministic
+  // analysis. One opt-in consumer case detects that false proof; existing scope tests apply.
+  if (process.env.HUMANAGENT_REAL_MEMORY_PROOF === '1') test('C3a production Memory hook audits real-model curation from a confirmed-control boundary', async () => {
+    const fixture = await buildColdFixture('c3a-real-memory', ['original-output'], ['original-target'],
+      false, undefined, c3aContextSeed);
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
+    let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+    let succeeded = false;
+    const calls: unknown[] = [];
+    const configToml = [
+      'schemaVersion = 1',
+      '[[agents]]',
+      'agentId = "memory-real-proof"',
+      'roleId = "memory"',
+      'templateRef = "builtin/memory@1.0.0"',
+      'driverRef = "rcc"',
+      'skills = ["history-search", "novelty-review", "recurrence-review"]',
+      'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+      'permissions = ["task.read", "memory.read", "memory.propose"]',
+      'memoryScopes = ["task", "organ"]',
+      'resourceClass = "background"',
+      'provider.provider = "rcc"',
+      'provider.binding = "memory-real-proof"',
+      'provider.protocol = "responses"',
+      'provider.model = "goaichat.deepseek-v4.1-flash"',
+      'provider.route = "default"',
+      'provider.baseUrl = "http://127.0.0.1:4444"',
+      '',
+    ].join('\n');
+    try {
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true, true,
+        undefined, { configToml, calls });
+      const chain = await runC3aHotChain(app.service, fixture, http);
+      const review = await app.memoryRuntime!.reviewState();
+      const events = await app.memoryRuntime!.journal.readEvents({
+        streamId: `memory-boundaries:task:${fixture.taskId.value}`, afterSequence: 0, limit: 100 });
+      await archiveC3aReceipts(fixture, http, { mode: 'real-memory', chain, review, events, calls, analyses: app.memoryAnalyses });
+      assert.equal(review.analysis.mode, 'model');
+      assert.equal(review.analysis.state, 'succeeded');
+      assert.equal(review.autoUpdate, false);
+      await assertRealMemoryAudit(fixture, app, calls);
+      assert.ok(review.candidates.every((candidate) => candidate.state === 'candidate'));
+      assert.ok(review.candidates.every((candidate) => candidate.namespace === 'project'
+        && candidate.taskId === fixture.taskId.value && candidate.evidenceRefs.length > 0));
+      assert.ok(calls.some((call) => (call as { kind: string }).kind === 'release'));
+      const observed = calls as Array<{ kind: string; result?: { state?: string }; event?: { kind: string; terminalState?: string } }>;
+      assert.ok(observed.some((call) => call.kind === 'event'
+        && (call.event?.kind === 'terminal' || call.event?.kind.endsWith('.terminal'))
+        && call.event.terminalState === 'succeeded'), 'the Memory driver must observe an actual successful terminal');
+      assert.ok(observed.some((call) => call.kind === 'settle' && call.result?.state === 'succeeded'));
+      assert.equal(observed.filter((call) => call.kind === 'release').length,
+        observed.filter((call) => call.kind === 'start').length);
+      assert.ok(app.memoryAnalyses.some((outcome) => outcome.status === 'ready'
+        && outcome.value.result?.curation !== undefined), JSON.stringify(app.memoryAnalyses));
+      assert.equal(await readFile(join(fixture.root, 'AGENTS.md'), 'utf8'), '# C3a project memory\n');
+      succeeded = true;
+    } catch (error) {
+      await archiveC3aReceipts(fixture, http, { mode: 'real-memory', root: fixture.root,
+        failure: String(error), calls, analyses: app?.memoryAnalyses,
+        review: await app?.memoryRuntime?.reviewState() });
+      throw error;
+    } finally {
+      try { await app?.close(); } finally { await http.close(); }
+      if (succeeded) await rm(fixture.root, { recursive: true, force: true });
+      else console.error(`c3a real Memory fixture retained for evidence at ${fixture.root}`);
+    }
+  });
+
+  // Failure basis: the old control fixture contains only placeholder experience.
+  // Impact: false positive proof or repeated paid analysis. Probability unknown.
+  // Cost: one imported real correction, one cold startup, at most one submit.
+  if (process.env.HUMANAGENT_REAL_MEMORY_P2B_PROOF === '1') test('C3a P2-b material reaches one startup Memory analysis', async () => {
+    const origin = '/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/provider-stop-submit-technical-r8-20261017';
+    const documents = await Promise.all(['red.log', 'green.log', 'notes.md', 'result.md'].map(async (name) =>
+      `Origin: ${origin}/${name}\n${await readFile(join(origin, name), 'utf8')}`));
+    const wrongProposition = '通用 continuation rejection 只保留外层 code/message 已足以保留原拒绝的结构化分类';
+    const oldLine = "this.error('tool.continuation.rejected', submitted.error?.message ?? 'provider rejected the tool continuation', 'submit', 'runtime')";
+    const newLine = "this.error('tool.continuation.rejected', submitted.error?.message ?? 'provider rejected the tool continuation', 'submit', 'runtime', submitted.error)";
+    const limits = '这是公开 Provider consumer 发现的源码错误，不是生产线上故障。生产频率未知；未证明远端副作用；typed receipt 对象 identity 未单独断言；未进行生产安装或真实网络证明。';
+    const repairText = `否定命题：${wrongProposition}。621f4014 在 packages/adapters/provider/src/agent-driver.ts 的通用 continuation 拒绝包装中，将 submitted.error 作为 this.error 第五个 cause 参数传递。原代码 ${oldLine}；修复 ${newLine}。原 r8 RED assert.ok(stoppedError) 失败；同入口 GREEN 1 passed、0 failed。适用范围仅此通用拒绝包装。恢复条件：使用已修复的 cause 传递路径；独立 submit/socket 异常仍按原路径抛出；drain、stopped settle、raw 保留及 close 责任继续成立，取消请求不等于停止完成。${limits}\n${documents.join('\n\n')}`;
+    const material = `HumanAgent P2-b 真实纠正材料。被否定命题为本 fixture 明确提出的源码判断，不声称历史 agent 逐字说过。\n${repairText}`;
+    const wrongRef = 'p2b-wrong-continuation-classification';
+    const acceptedRef = 'p2b-621f4014-source-material';
+    const fixture = await buildColdFixture('c3a-p2b-memory-source', ['original-output'], ['original-target'],
+      false, undefined, { activeRefs: [acceptedRef, wrongRef], omittedRefs: [] },
+      { assetId: 'provider-p2b-correction-material', text: material });
+    const summary = { goal: '导入并保留已有 P2-b 纠正材料', actions: material,
+      result: '已保留原 r8 RED/GREEN 与 cause 修复材料，本轮未重新修复或验证 Provider',
+      expectedNextStep: '按正常收口保留纠正依据和恢复责任' };
+    let http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture, undefined,
+      { original: summary, next: summary });
+    let httpClosed = false;
+    let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+    let succeeded = false;
+    let actualSubmits = 0;
+    const calls: unknown[] = [];
+    try {
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true, false);
+      assert.equal((await app.service.resumeExecution(fixture.taskId,
+        { operationId: fixture.allocation.operationId })).state, 'released');
+      const correction = await app.service.executeConfirmedTaskContextCorrection({ taskScope: fixture.taskScope,
+        commandId: 'p2b-memory-source-correction', wrongRefs: [{ taskScope: { organId, taskId: fixture.taskId }, ref: wrongRef }],
+        repairText, confirmationRef: 'p2b-memory-source-fixture-confirmation' });
+      const recovery = await runNextExecutionAssertions(app.service, fixture, http,
+        correction.record.newExecutionEpoch, correction.record.correctedContext, summary.result,
+        { accepted: acceptedRef, wrong: wrongRef });
+      await app.close(); app = undefined;
+      await http.close();
+      httpClosed = true;
+      const reopened = await reopenColdFixture(fixture.root, fixture.taskId.value, true);
+      const committedRecords = (await reopened.journal.verify()).records;
+      http = await upstream('cold-resume.model', reopened.acceptedEvidenceLocator, reopened);
+      httpClosed = false;
+      const configToml = ['schemaVersion = 1', '[[agents]]', 'agentId = "memory-real-proof"',
+        'roleId = "memory"', 'templateRef = "builtin/memory@1.0.0"', 'driverRef = "rcc"',
+        'skills = ["history-search", "novelty-review", "recurrence-review"]',
+        'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+        'permissions = ["task.read", "memory.read", "memory.propose"]', 'memoryScopes = ["task", "organ"]',
+        'resourceClass = "background"', 'provider.provider = "rcc"', 'provider.binding = "memory-real-proof"',
+        'provider.protocol = "responses"', 'provider.model = "goaichat.deepseek-v4.1-flash"',
+        'provider.route = "default"', 'provider.baseUrl = "http://127.0.0.1:4444"', ''].join('\n');
+      app = await buildResumeService(reopened, http.baseUrl, 'cold-resume.model', undefined, true, true,
+        undefined, { configToml, calls, beforeSubmit(input) {
+          assert.equal(actualSubmits, 0, 'a second actual Memory submit is forbidden');
+          assert.deepEqual(input.taskId, fixture.taskId);
+          assert.match(input.assignmentId, /^memory-analysis:/);
+          const payload = input.payload as { projectKey: string; scope: { projectKey: string }; sources: Array<{ text: string; sourceRef: string }>;
+            sourceRefs: string[]; analysisInputs: { corrections: unknown[]; rewindChains: unknown[]; actualPathRefs: string[]; declaredPathRefs: string[] } };
+          assert.equal(payload.projectKey, payload.scope.projectKey);
+          assert.ok(payload.projectKey.length > 0);
+          const strings = (value: unknown): string[] => typeof value === 'string' ? [value]
+            : value !== null && typeof value === 'object' ? Object.values(value).flatMap(strings) : [];
+          const sourceTexts = payload.sources.flatMap((source) => {
+            try { return [source.text, ...strings(JSON.parse(source.text))]; }
+            catch (error) { if (error instanceof SyntaxError) return [source.text]; throw error; }
+          });
+          assert.ok(sourceTexts.some((text) => text.includes(material)), 'committed checkpoint/closure must retain complete material');
+          assert.ok(sourceTexts.some((text) => text.includes(repairText)), 'correction must retain complete repair text');
+          assert.equal(payload.analysisInputs.corrections.length, 1);
+          assert.equal(payload.analysisInputs.rewindChains.length, 1);
+          const chain = payload.analysisInputs.rewindChains[0] as { recoveryCheckpointRef: string; reentryFactRef: string };
+          const recoverySeq = Number(/^humanagent:\/\/checkpoint-receipt\/(\d+)\//.exec(chain.recoveryCheckpointRef)?.[1]);
+          const recoveryRecord = committedRecords.find((record) => record.seq === recoverySeq);
+          assert.equal(recoveryRecord?.checkpoint?.scope.operationId?.value, recovery.operationId);
+          assert.ok(payload.sources.some((source) => source.sourceRef === chain.reentryFactRef
+            && strings(JSON.parse(source.text)).some((text) => text.includes(repairText))));
+          assert.ok(payload.analysisInputs.actualPathRefs.length > 0);
+          assert.ok(payload.analysisInputs.declaredPathRefs.length > 0);
+          assert.ok(payload.analysisInputs.actualPathRefs.every((ref) => !payload.analysisInputs.declaredPathRefs.includes(ref)));
+          for (const text of [wrongProposition, 'assert.ok(stoppedError)', oldLine, newLine, limits,
+            '# pass 1', '# fail 0', 'submit.stopped', 'evidenceRefs', 'ownerId', 'nextAction', ...documents]) {
+            assert.ok(sourceTexts.some((source) => source.includes(text)), `missing source material: ${text.slice(0, 100)}`);
+          }
+          assert.ok(payload.sources.every((source) => payload.sourceRefs.includes(source.sourceRef)));
+          assert.equal(/请生成 candidate|本次应当通过候选验收/.test(material), false);
+          actualSubmits++;
+        } });
+      assert.equal(actualSubmits, 1);
+      const audit = await assertRealMemoryAudit(reopened, app, calls);
+      const review = await app.memoryRuntime!.reviewState();
+      const positive = review.candidates.length > 0;
+      await archiveC3aReceipts(reopened, http, { mode: 'p2b-positive', actualSubmits, positive,
+        correction, recovery, calls, analyses: app.memoryAnalyses, review, audit });
+      console.log(JSON.stringify({ p2bMemory: { actualSubmits, positive, root: fixture.root, review, audit } }));
+      assert.ok(positive, 'actual audit is preserved; positive-candidate capability remains UNVERIFIED without a candidate');
+      succeeded = true;
+    } catch (error) {
+      await archiveC3aReceipts(fixture, http, { mode: 'p2b-positive', actualSubmits,
+        failure: String(error), calls, analyses: app?.memoryAnalyses, review: await app?.memoryRuntime?.reviewState() });
+      throw error;
+    } finally {
+      try { await app?.close(); } finally { if (!httpClosed) await http.close(); }
+      if (succeeded) await rm(fixture.root, { recursive: true, force: true });
+      else console.error(`P2-b Memory fixture retained at ${fixture.root}; actual submits=${actualSubmits}`);
+    }
+  });
+
+  // Correction, exact-target rewind and forward, then close the next execution.
+  // Failure: reusing the predecessor closure or resurrecting the corrected ref.
+  // Probability UNKNOWN; impact: lost reorientation; cost: controlled Provider/fixture.
   test('C3a hot confirmed-control chain starts and closes the next execution with the corrected context', async () => {
     const fixture = await buildColdFixture('c3a-hot', ['original-output'], ['original-target'],
       false, undefined, c3aContextSeed);
@@ -3564,7 +3875,26 @@ function registerPublicConsumers(): void {
   });
 }
 
-if (processMode === 'c3a-seed' || processMode === 'c3a-next') {
+if (processMode === 'p2b-audit') {
+  // Recheck a retained actual run without constructing any Provider or app.
+  // This mode cannot submit, reconcile, publish a boundary or write a Journal.
+  const receiptPath = process.env.HUMANAGENT_MEMORY_RECEIPT;
+  if (!receiptPath || !processRoot || !processTask) throw new Error('offline audit requires the actual receipt and fixture');
+  const saved = JSON.parse(await readFile(receiptPath, 'utf8')) as {
+    actualSubmits: number; calls: unknown[];
+    analyses: Awaited<ReturnType<typeof buildResumeService>>['memoryAnalyses'];
+    review: Awaited<ReturnType<NonNullable<Awaited<ReturnType<typeof buildResumeService>>['memoryRuntime']>['reviewState']>>;
+  };
+  assert.equal(saved.actualSubmits, 1);
+  const fixture = await reopenColdFixture(processRoot, processTask, true);
+  const audit = await assertRealMemoryAudit(fixture, { memoryAnalyses: saved.analyses,
+    memoryRuntime: { reviewState: async () => saved.review } }, saved.calls);
+  assert.ok(audit.snapshot?.candidates.some((candidate) => candidate.state === 'candidate'));
+  await writeFile(join(EVIDENCE_ROOT, 'p2b-offline-audit.json'), JSON.stringify({
+    actualSubmits: saved.actualSubmits, positive: true, receiptPath, fixtureRoot: processRoot, audit,
+  }, null, 2), 'utf8');
+  console.log(JSON.stringify({ actualSubmits: saved.actualSubmits, positive: true, offlineAudit: 'passed', fixtureRoot: processRoot }));
+} else if (processMode === 'c3a-seed' || processMode === 'c3a-next') {
   await runC3aProcess();
 } else if (processMode === 'seed' || processMode === 'resume') {
   await (processMode === 'seed' ? runSeedProcess() : runResumeProcess());
