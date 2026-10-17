@@ -1860,6 +1860,10 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
       };
     }
     const issue = (result as Extract<IndependentChildCallResult, { readonly state: 'waiting' | 'blocked' }>).issue;
+    const evidenceRefs = boundedEvidence(issue.evidenceRefs);
+    const code = issue.conditionRef ?? (
+      result.state === 'waiting' ? 'orchestration.runtime.waiting' : 'orchestration.child-call.blocked'
+    );
     return {
       output: JSON.stringify({
         state: result.state,
@@ -1868,8 +1872,20 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         nextAction: issue.nextAction,
       }),
       outputRefs: [],
-      evidenceRefs: boundedEvidence(issue.evidenceRefs),
+      evidenceRefs,
       status: 'blocked',
+      error: {
+        errorId: `${issue.ownerId}:${code}:${result.invocationId}`,
+        code,
+        category: 'runtime',
+        phase: 'tool',
+        message: issue.reason,
+        ownerId: issue.ownerId,
+        retryable: result.state === 'waiting' ? 'retryable' : 'manual',
+        attention: result.state === 'waiting' ? 'background' : 'recovery',
+        evidenceRefs: evidenceRefs.length > 0 ? evidenceRefs : [scopedEvidence(scope, `child-${result.state}`)],
+        nextAction: issue.nextAction,
+      },
     };
   }
 
