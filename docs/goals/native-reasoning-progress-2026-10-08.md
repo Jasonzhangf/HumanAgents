@@ -22,6 +22,8 @@ r187 作者报告已在并发屏障取得两实例，但宿主实际运行虽 1/
 
 工具语义 r191 只读观察已完成；它提出通用 per-tool mapper，但这不是已接受方案。独立 Gemini4 r195 正判断最小必要机制，须区分模型四项总结、模板、精炼 child adoption 与真正缺失行为，禁止仅为旧文档措辞新增提取框架。r182 多轮冷恢复仍在唯一原树实施；没有启动重复 writer 或新树。
 
+双 Task 有效基线已通过：r196 纠正 typed Journal reader 的 root 层级（fixture 的已派生 `checkpointRoot` 不再交给项目 root helper 多加 `ui-runtime`），宿主原 named consumer **1/1 PASS**。实际 `executionInitials=2`、`maxActiveExecutionInitials=2`、`plannerRequests=2`，两份精确 final 输出，runtime IDs 为 `ui-runtime-ui-operation-implicit-draft-2` 与 `ui-runtime-ui-operation-implicit-draft-4`；非空、互异、实际 allocation/运行状态/请求 barrier 三类证据同在。来源未提交合流；r197 复用同树继续 r192 已规划的预算2第三任务容量反例，不新增产品能力，未把并发基线冒充容量限制证明。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
