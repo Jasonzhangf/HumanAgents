@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- 子agent精炼字节资产适配已接收并标准合候选8bac5d9：仅App薄factory+原behavior3消费者，真实同根newstore冷读原字节1/1；字符串化反例实际TAP0/1抓到deepEqual错误（shell管道0不冒Node1），恢复及组合原1consumer均1/1Node0，App消费者编译0。没有重复错误矩阵/哈希/身份包装。来源正常remove/prune/pathabsent，生产共享挂载仍OPEN。C3a r16已修单test合法新delivery与accepted drain，原resume/Planner成功；新turn被四段summary min1拒绝。r17核需求与当前输入后裁定消融无必要的两处min1，保四段正文和实际refs解析，r18技术执行原树继续hot/fresh。Memory产品GCM继续。原I1成功不重跑，M1/M2未找到证据范围已交UXpeer；用户最新治理消融批次由peer独立向main交付，不等整个goal，当前main文档冲突已停止并在独占交付候选处理，未冒push完成。
+
 - helper返回语义已实际接收：source7f91c87经标准Git组合最新候选与origin/main后合入d56e358。真实行为RED为Runtime7项中3失败，修后Runtime7/7、App原2named2/2、Jsonl原2/2；组合Appbuild/测试编译exit0、原App2/2Node0。returned描述包含真实summary/status/nextAction及既有条件引用，同目标不同结果可区分；adopted/refinedText、missing读null/实际补写幂等、当前turn raw保留。来源正常remove/prune/pathabsent，无哈希/候选包装检查，无leafreview/restart。C3a r14 fixture计划已准入，GCMr15只修旧delivery误用和accepted drain、续hot/fresh；Memory真实链RED已接，GCMr9续产品批次。child refined store只读小计划先补独立资产适配API，不等整个共享挂载才准备基础。首个Slice1仍按原M0/M1/M2行为证据推进，完整goal/main交付未完成。
 
 - C3a r11已terminal exit0：segmentfactory实际读到旧v2segment，Appbuild/tsc0；原hot仍0/1Node1，首错转为旧publication cycle1/op1被当前cycle2/op2的scope guard拒绝，无wire/freshprocess。独立r12亲读fixture与canonical lineage/exactreader责任后已准入，freshGCM r13同树只修Runtime历史checkpoint同task关系及evidence相对原scope、基础consumer与hot/fresh后继，不删历史/重写旧身份。Memory r6累计62读0文件改动，Root精确SIGINT61047→exit1/absent，原树GCM r7收窄到真实facade fixture可编译RED再续产品批次。helper结果r5终态回复无关面试题，只有2测试delta，无Runtime/验证，未接收；原树freshGCM r6继续。childGemini r4仍虚构Coordinator/producer返回/调用API，未准入；独立OAuth r5仅冻结当前named接口，不从错误计划派共享代码。原始证据均外置保留，完整目标未验收，无restart/main/push。
