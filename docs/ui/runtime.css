@@ -136,18 +136,14 @@ a {
   overflow-wrap: anywhere;
 }
 
-.task-title-full {
-  color: var(--muted);
-  font-size: 14px;
+.task-title-current {
+  font-size: 24px;
+  line-height: 1.25;
+  letter-spacing: 0;
+  -webkit-line-clamp: 2;
 }
 
-.task-title-full summary {
-  cursor: pointer;
-}
-
-.task-title-full-text {
-  font-size: 16px;
-  line-height: 1.6;
+.business-output-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
