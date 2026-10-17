@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   id,
   type EvidenceRef,
+  type InspectionItemDelivery,
   type RequirementEnvelope,
   type ScopeRef,
   type WorkAssignment,
@@ -23,6 +24,9 @@ import {
   digestOf,
   type ExecutionAgentInput,
   type ExecutionAgentPort,
+  type ExecutionDelivery,
+  type IndependentChildCallInput,
+  type ChildCallPort,
   type MergeCoordinatorPort,
   type OrchestrationFeedbackEvent,
   type OrchestrationFeedbackPort,
@@ -157,7 +161,7 @@ class FakeRuntimeFactory implements OrchestrationRuntimeFactoryPort {
 class StaticExecutionAgent implements ExecutionAgentPort {
   readonly roleId = 'executor';
   readonly inputs: ExecutionAgentInput[] = [];
-  constructor(private readonly deliveries: readonly (WorkResult | { readonly result: WorkResult; readonly criteria: ReturnType<typeof criteria> })[]) {}
+  constructor(private readonly deliveries: readonly (WorkResult | ExecutionDelivery)[]) {}
 
   createInstance(create: TaskExecutionInstanceCreateInput): TaskExecutionHandle {
     return {
@@ -167,11 +171,34 @@ class StaticExecutionAgent implements ExecutionAgentPort {
     };
   }
 
-  async execute(input: ExecutionAgentInput): Promise<WorkResult> {
+  async execute(input: ExecutionAgentInput): Promise<WorkResult | ExecutionDelivery> {
     this.inputs.push(input);
     const delivery = this.deliveries[Math.min(this.inputs.length - 1, this.deliveries.length - 1)];
     if (!delivery) throw new Error('missing execution delivery');
     return 'result' in delivery ? delivery.result : delivery;
+  }
+}
+
+class RecordingChildCallPort implements ChildCallPort {
+  readonly prepares: Parameters<ChildCallPort['prepare']>[0][] = [];
+  readonly returns: Parameters<ChildCallPort['recordReturn']>[0][] = [];
+
+  async prepare(input: Parameters<ChildCallPort['prepare']>[0]) {
+    this.prepares.push(input);
+    return {
+      invocationId: input.invocationId,
+      checkpointReceiptRef: `checkpoint:${input.invocationId}`,
+    };
+  }
+
+  async recordReturn(input: Parameters<ChildCallPort['recordReturn']>[0]): Promise<void> {
+    this.returns.push(input);
+  }
+
+  async recordAdoption(): Promise<void> {}
+
+  async recordReviewCheckpoint(input: Parameters<ChildCallPort['recordReviewCheckpoint']>[0]) {
+    return { checkpointReceiptRef: `checkpoint:${input.invocationId}` };
   }
 }
 
@@ -409,6 +436,137 @@ test('retained dispatch uses the exact acquired handle without re-acquiring or r
   assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
   assert.equal((await pool.dispose()).status, 'disposed');
   assert.equal(disposes, 1);
+});
+
+test('inspection manager delivery preserves prepare binding, returned delivery and recordReturn payload', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'inspection-runtime', capabilities: ['execute'] }],
+  });
+  const completedAt = '2026-10-17T10:11:12.000Z';
+  const judgment = 'free judgment: inspected body remains body, not control JSON';
+  const inspectionDelivery: InspectionItemDelivery = {
+    checkId: 'check-a',
+    resultId: 'inspection-result:inspection-call',
+    attempt: 1,
+    outcome: { status: 'completed', judgment },
+    evidenceRefs: [evidence('inspection-delivery')],
+    completedAt,
+  };
+  const inspection = {
+    binding: {
+      occurrence: {
+        scope: { organId: organ, taskId: task },
+        occurrenceId: 'occurrence-a',
+      },
+      executionScope: scope,
+      cycleId: 'cycle-a',
+      executionEpoch: 1,
+      definition: { definitionId: 'definition-a', definitionVersion: '1' },
+      definitionCommitRef: {
+        commitId: 'definition-commit',
+        journalSeq: 2,
+        recordDigest: 'definition-digest',
+      },
+      definitionDigest: 'definition-content-digest',
+      cycleOpenedCommitRef: {
+        commitId: 'cycle-opened-commit',
+        journalSeq: 3,
+        recordDigest: 'cycle-opened-digest',
+      },
+      scheduleOccurrenceRef: null,
+    },
+    check: {
+      checkId: 'check-a',
+      criterion: 'criterion-a',
+      inputRefs: ['input-a'],
+    },
+  };
+  const executionDelivery: ExecutionDelivery = {
+    result: result({
+      assignmentId: 'inspection-call',
+      nextAction: 'settle',
+      summary: 'full execution summary',
+      producedArtifactBodies: ['full artifact body'],
+    }),
+    inspectionDelivery,
+  };
+  const executionInputs: ExecutionAgentInput[] = [];
+  const execute = async (input: ExecutionAgentInput) => {
+    executionInputs.push(input);
+    return executionDelivery;
+  };
+  const execution: ExecutionAgentPort = {
+    roleId: 'executor',
+    execute,
+    createInstance: (create) => ({
+      incarnation: create.incarnation,
+      execute,
+      async dispose() {},
+    }),
+  };
+  const childCallPort = new RecordingChildCallPort();
+  const manager = new OrchestrationManager({
+    ownerId: 'inspection-manager',
+    runtimePool: pool,
+    childCallPort,
+  });
+  const input: IndependentChildCallInput & { readonly kind: 'execution' } = {
+    kind: 'execution',
+    assignment: assignment({ assignmentId: 'inspection-call' }),
+    executionAgent: execution,
+    inspection,
+    agentId: 'agent-a',
+    scope,
+    childCallPort,
+    signal: new AbortController().signal,
+    call: {
+      invocationId: 'inspection-call',
+      parentExecution: {
+        runtimeId: 'inspection-parent',
+        taskId: task,
+        operationId: id('operation', 'inspection-parent'),
+        executionEpoch: 1,
+      },
+      providerRequestId: 'request-inspection',
+      toolCallId: 'tool-inspection',
+      businessRegistrationCommitRef: {
+        commitId: 'business-registration',
+        journalSeq: 1,
+        recordDigest: 'business-registration-digest',
+      },
+    },
+  };
+
+  const returned = await manager.callChild(input);
+  assert.equal(returned.state, 'returned');
+  if (returned.state !== 'returned' || returned.kind !== 'execution') {
+    throw new Error(JSON.stringify(returned));
+  }
+  const prepared = childCallPort.prepares[0];
+  const recorded = childCallPort.returns[0];
+  assert.equal(prepared?.kind, 'execution');
+  assert.equal(recorded?.kind, 'execution');
+  if (prepared?.kind !== 'execution' || recorded?.kind !== 'execution') {
+    throw new Error('execution child call was not prepared and recorded');
+  }
+  assert.deepEqual({
+    prepared: prepared.inspection,
+    executed: executionInputs[0]?.inspection,
+    returned: returned.inspectionDelivery,
+    recorded: recorded.inspectionDelivery,
+  }, {
+    prepared: inspection,
+    executed: inspection,
+    returned: inspectionDelivery,
+    recorded: inspectionDelivery,
+  });
+  assert.deepEqual(recorded.result, returned.result);
+  assert.equal(recorded.result.producedArtifactBodies?.[0], 'full artifact body');
+  assert.deepEqual(returned.inspectionDelivery?.outcome, { status: 'completed', judgment });
+  assert.equal(returned.inspectionDelivery?.completedAt, completedAt);
+  assert.deepEqual(returned.inspectionDelivery?.evidenceRefs, inspectionDelivery.evidenceRefs);
+  assert.equal(executionInputs.length, 1, 'inspection delivery must not call the child twice');
 });
 
 test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks unavailable capabilities', async () => {

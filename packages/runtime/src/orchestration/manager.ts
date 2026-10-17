@@ -441,6 +441,7 @@ export class OrchestrationManager {
         call: input.call, kind: input.kind, agentId: input.agentId, scope: input.scope,
         roleId: input.kind === 'execution' ? input.executionAgent.roleId : input.reviewAgent.roleId,
         request: input.kind === 'execution' ? input.assignment : { ...input.input, signal: undefined },
+        inspection: input.kind === 'execution' ? input.inspection ?? null : null,
         milestoneReview: input.kind === 'review' ? input.milestoneReview ?? null : null,
       }));
     } catch (error) { return blocked(error); }
@@ -497,7 +498,7 @@ export class OrchestrationManager {
           ? await input.childCallPort.prepare({
               kind: 'execution', invocationId, assignment: input.assignment, agentId: input.agentId,
               attempt: input.assignment.attempt, executionEpoch: input.assignment.executionEpoch,
-              scope: input.scope, lease,
+              scope: input.scope, inspection: input.inspection, lease,
             })
           : await input.childCallPort.prepare({
               kind: 'review', invocationId, assignment: input.input.reviewAssignment, agentId: input.agentId,
@@ -514,12 +515,13 @@ export class OrchestrationManager {
           const delivery = normalizeDelivery(await (acquired.handle as TaskExecutionHandle).execute({
             assignment: input.assignment, agentId: input.agentId,
             executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt,
-            lease, scope: input.scope, signal: input.signal,
+            lease, scope: input.scope, inspection: input.inspection, signal: input.signal,
           }));
           assertExecutionDelivery(delivery, input.assignment, input.agentId);
           attempt.returned = {
             state: 'returned', kind: 'execution', invocationId, incarnation: acquired.incarnation,
             result: { ...delivery.result, evidenceRefs: scopedEvidenceRefs(input.scope, delivery.result.evidenceRefs) },
+            ...(delivery.inspectionDelivery ? { inspectionDelivery: delivery.inspectionDelivery } : {}),
           };
         } else {
           const delivery = await this.invokeReviewHandle(acquired.handle as TaskReviewHandle, {
@@ -561,6 +563,7 @@ export class OrchestrationManager {
         kind: 'execution', invocationId: returned.invocationId, assignment: input.assignment,
         agentId: input.agentId, attempt: input.assignment.attempt,
         executionEpoch: input.assignment.executionEpoch, scope: input.scope, result: returned.result,
+        ...(returned.inspectionDelivery ? { inspectionDelivery: returned.inspectionDelivery } : {}),
       });
       return returned;
     }
@@ -908,6 +911,7 @@ export class OrchestrationManager {
         executionEpoch: input.assignment.executionEpoch,
         scope: input.scope,
         result,
+        ...(delivery.inspectionDelivery ? { inspectionDelivery: delivery.inspectionDelivery } : {}),
       });
     }
     const accepted = this.graph.acceptResult(input.assignment, {

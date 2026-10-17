@@ -1,6 +1,8 @@
 import type {
   CycleId,
   EvidenceRef,
+  ExecutionChildCallBinding,
+  InspectionItemDelivery,
   JournalCommitRef,
   NextAction,
   ProviderExecutionIdentityRef,
@@ -91,6 +93,7 @@ export interface WorkCriterionEvaluation {
 export interface ExecutionDelivery {
   readonly result: WorkResult;
   readonly criteria?: WorkCriterionEvaluation;
+  readonly inspectionDelivery?: InspectionItemDelivery;
 }
 
 export interface ExecutionAgentInput {
@@ -100,6 +103,7 @@ export interface ExecutionAgentInput {
   readonly attempt: number;
   readonly lease: RuntimePoolLease;
   readonly scope: ScopeRef;
+  readonly inspection?: ExecutionChildCallBinding['inspection'];
   readonly signal?: AbortSignal;
 }
 
@@ -156,6 +160,7 @@ export interface ChildCallPrepareExecutionInput {
   readonly attempt: number;
   readonly executionEpoch: number;
   readonly scope: ScopeRef;
+  readonly inspection?: ExecutionChildCallBinding['inspection'];
   /** Present for execution calls; absent for review calls, which hold no pool lease. */
   readonly lease?: RuntimePoolLease;
 }
@@ -183,6 +188,7 @@ export interface ChildCallReturnExecutionInput {
   readonly executionEpoch: number;
   readonly scope: ScopeRef;
   readonly result: WorkResult;
+  readonly inspectionDelivery?: InspectionItemDelivery;
 }
 
 export interface ChildCallReturnReviewInput {
@@ -277,6 +283,7 @@ export type IndependentChildCallInput =
       readonly kind: 'execution';
       readonly assignment: WorkAssignment;
       readonly executionAgent: ExecutionAgentPort;
+      readonly inspection?: ExecutionChildCallBinding['inspection'];
     })
   | (ChildCallCommon & {
       readonly kind: 'review';
@@ -292,6 +299,7 @@ export type IndependentChildCallResult =
       readonly invocationId: string;
       readonly incarnation: TaskRuntimeIncarnation;
       readonly result: WorkResult;
+      readonly inspectionDelivery?: InspectionItemDelivery;
     }
   | {
       readonly state: 'returned';
