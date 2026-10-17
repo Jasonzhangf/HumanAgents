@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r128实际两turnconsumer已编译0并运行RED，但首错是新fixture Turn1end同时缺deliveryText且deliveryRefs=[]，实际standard-turn-end.arguments拒绝；CLIexit0而Taskblocked，不能当JournalbindingRED或完成。生产未改，失败fixture/stream与close次生错误保留且因果尚未证明。freshGCM r130原树仅先把Turn1真实child产物合法交付，再续实际two-turn验证，不删契约检查。r127顶层runtime观察确认同Task双child不等于2顶层Task，现有singleTaskfixture不足；独立Gemini4medium r129只规划一App/coordinator双Task公开consumer，文件与两turnwriter隔离，尚未准入实施。
+
 - r125两turnGCM已自然exit0，但止于新增consumer断言turnTwoWire可能undefined的编译错误，尚无行为RED、生产0改动；不记业务缺陷/完成。fresh OAuth技术r128原树接手同r122合同，先修测试收窄再实际CLI RED/GREEN，保scope与schema。另一路fresh GCM r127只读核两个顶层Task runtime并行的公开fixture/接线，不以同Task双child当N顶层runtime证据。Pool已main/remote交付不重验，完整goal仍ACTIVE。
 
 - Pool独立增量标准交付DONE：main代码13dab3ac、回执文档0e6ce019，push原始回执beee6bab..0e6ce019 main→main，control/main工作区干净且main...origin/main同步。sourcecontracts/config/App/package/globalinstall0；自有隔离canonical正式restart gen1/PID12468→gen2/PID17889，官方pair+公开/api/runtime/status200、模型请求0；正式dispose后PIDabsent/lease disposedAt14:46:08.691Z。候选9/9、main新case1/1及有效整体ReviewPASS已在r124记录，来源树已关。原gen21/p3不动，main/install窗口交还UX。唯一native候选已标准merge新origin/main，仅note新增，Pool代码/consumer同义合流无冲突。完整goal仍ACTIVE，r125两turnconsumer继续。
