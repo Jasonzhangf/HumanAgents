@@ -1,6 +1,6 @@
 import type { ProviderToolDefinition } from '../../../contracts/src/index.js';
 import { isStandardTurnEndToolId, STANDARD_TURN_END_WIRE_TOOL_ID } from '../../../contracts/src/standard-turn-end.js';
-import { STANDARD_TURN_END_TOOL } from './standard-turn-control.js';
+import { INSPECTION_OUTCOME_SCHEMA, STANDARD_TURN_END_TOOL } from './standard-turn-control.js';
 import {
   createRefusedStandardTurnEndResult,
   standardTurnEndModelInputRefusal,
@@ -26,17 +26,26 @@ export const ADVERTISED_STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
     'For available file read/list/search, write/edit/present, bash, todo/goal, and web search results, state the actual target or query, observed result, evidence scope, and any truncation, failure, or unresolved boundary. A successful action or command exit is not verification of its effect.',
     'If this role has child adoption tools and a child has returned, require an explicit child.adopt or child.not_select decision before this close. Returned is not adopted, and not_select is not child failure.',
     'Put bounded facts and only exact accepted [HumanAgent evidence refs] into goal, actions, result, and expectedNextStep. After this four-part close, the Planner decides continue, complete, or failed; the Task can remain unfinished.',
+    'If an inspection execution occurred, include the optional inspectionOutcome judgment for the executed scope; checks not executed remain missing.',
   ].join(' '),
   inputSchema: {
     type: 'object',
     properties: {
-      summary: { type: 'object', properties: Object.fromEntries(
-        ['goal', 'actions', 'result', 'expectedNextStep'].map((section) => [section, {
-          type: 'object', properties: { text: { type: 'string' },
-            evidenceRefs: { type: 'array', items: { type: 'string' } } },
-          required: ['text', 'evidenceRefs'], additionalProperties: false,
-        }]),
-      ), required: ['goal', 'actions', 'result', 'expectedNextStep'], additionalProperties: false },
+      summary: {
+        type: 'object',
+        properties: {
+          ...Object.fromEntries(
+            ['goal', 'actions', 'result', 'expectedNextStep'].map((section) => [section, {
+              type: 'object', properties: { text: { type: 'string' },
+                evidenceRefs: { type: 'array', items: { type: 'string' } } },
+              required: ['text', 'evidenceRefs'], additionalProperties: false,
+            }]),
+          ),
+          inspectionOutcome: INSPECTION_OUTCOME_SCHEMA,
+        },
+        required: ['goal', 'actions', 'result', 'expectedNextStep'],
+        additionalProperties: false,
+      },
       deliveryText: { type: 'string' },
       deliveryRefs: { type: 'array', items: { type: 'string' } },
     },
@@ -54,13 +63,18 @@ export function createStandardTurnEndWireExecutor(owner: StandardTurnEndOwnerPor
       const identity = await owner.resolveBoundTurn(request);
       if (!identity) throw new StandardTurnEndError('standard-turn-end.unbound', 'no admitted turn is bound to the actual provider request');
       const raw = request.call.arguments.summary;
-      let summary: Record<keyof TurnCloseSummary, TurnCloseSummary['goal']>;
+      let summary: TurnCloseSummary;
       let deliveryText: string | undefined;
       try {
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
           throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end requires a summary object');
         }
-        summary = {} as Record<keyof TurnCloseSummary, TurnCloseSummary['goal']>;
+        const sections = {} as {
+          goal: TurnCloseSummary['goal'];
+          actions: TurnCloseSummary['actions'];
+          result: TurnCloseSummary['result'];
+          expectedNextStep: TurnCloseSummary['expectedNextStep'];
+        };
         for (const key of ['goal', 'actions', 'result', 'expectedNextStep'] as const) {
           const section = raw[key];
           if (!section || typeof section !== 'object' || Array.isArray(section)
@@ -68,9 +82,14 @@ export function createStandardTurnEndWireExecutor(owner: StandardTurnEndOwnerPor
             || !section.evidenceRefs.every((ref) => typeof ref === 'string')) {
             throw new StandardTurnEndError('standard-turn-end.arguments', `${key} requires text and evidence reference strings`);
           }
-          summary[key] = { text: section.text,
+          sections[key] = { text: section.text,
             evidenceRefs: await owner.resolveDelivery({ identity, deliveryRefs: section.evidenceRefs as string[] }) };
         }
+        const inspectionOutcome = raw.inspectionOutcome as TurnCloseSummary['inspectionOutcome'];
+        summary = {
+          ...sections,
+          ...(inspectionOutcome === undefined ? {} : { inspectionOutcome }),
+        };
         const rawArguments = request.call.arguments as Record<string, unknown>;
         const parsedDeliveryText = rawArguments.deliveryText;
         if (parsedDeliveryText !== undefined && typeof parsedDeliveryText !== 'string') {

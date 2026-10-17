@@ -32,6 +32,32 @@ const SUMMARY_SECTION_SCHEMA: BusinessPayload = {
   additionalProperties: false,
 };
 
+/** Advertised wire shape for the existing inspection execution outcome union. */
+export const INSPECTION_OUTCOME_SCHEMA: BusinessPayload = {
+  type: 'object',
+  oneOf: [
+    {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['completed'] },
+        judgment: { type: 'string', minLength: 1 },
+      },
+      required: ['status', 'judgment'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['failed', 'blocked', 'cancelled', 'unknown'] },
+        reason: { type: 'string', minLength: 1 },
+        judgment: { type: 'string', minLength: 1 },
+      },
+      required: ['status', 'reason'],
+      additionalProperties: false,
+    },
+  ],
+};
+
 /**
  * The actual advertised Provider tool definition for the bound standard-turn
  * end action. The tool surface IS the Harness tool surface: a model that calls
@@ -50,6 +76,7 @@ export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
           actions: SUMMARY_SECTION_SCHEMA,
           result: SUMMARY_SECTION_SCHEMA,
           expectedNextStep: SUMMARY_SECTION_SCHEMA,
+          inspectionOutcome: INSPECTION_OUTCOME_SCHEMA,
         },
         required: ['goal', 'actions', 'result', 'expectedNextStep'],
         additionalProperties: false,
