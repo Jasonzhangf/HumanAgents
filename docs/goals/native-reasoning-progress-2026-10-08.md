@@ -16,6 +16,7 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- 预算透传基础增量进入实现：父核实CLI只向pool传maxRuntimes，service/FIFO两个准入helper仍缺maxConcurrentTasks。r68的大计划未整包接受；r71独立OAuth小计划已按真实ImplicitBrainFifo/options、pnpm/tsc/node:test、实际需求和serve-task binding给出4项最小任务并READY。fresh GCM r73在唯一新树 `provider-budget-seam-20261017`（base a5e00e4b）执行binding→公开consumer行为RED→最小透传→同consumerGREEN，当前0/4验收；不改pool/跨轮计数/唤醒/Provider/UX。此增量不证明N物理实例，完整N运行仍OPEN。原stop域树不新增，r70超读取预算未产反例，已核PID51701/clean后精确INT；独立OAuth技术诊断r72仅在仓库外生成确定性反例，无产品实现或上游请求。
 - child 控制记录源码级缺口已复核关闭，复用 r57 `native.log` 和原 `native-delivery-public-consumer.test.ts` 的现有通过证据，不重跑。当前源码已有 `createChildControlLifecycle`、accept/running/settle 调用；原同一 named case 在真实 CLI+受控 localhost 上游下验证7次执行请求、1次独立Planner、child三阶段控制、冷读和公开正文，exit0/1 PASS。历史r34缺control envelope的FAIL不再代表当前候选；r63建议新增父stop接口未采纳。r67只接受“已实现、复用现有GREEN”结论，排除其虚构需求ID/命令/测试名、真实4444假设及100%概率。此关闭只覆盖源码受控consumer，不覆盖真实RCC全任务。
 - interpret schema观察r66未发现规范性合同违例。实际accept_helper数组声明缺items，但不能据此证明schema非法或导致socket断流；不添加修复/校验。r59根因继续UNKNOWN。stop计划r65因虚构需求ID、Vitest和错误typed字段已退回同Planner r69修订，未据此改产品。
 - stop proof source `75be9780` 已标准合入候选 `58d76084`，仅扩展原公开 consumer，未改 Provider 产品代码。r61 正常 build/语法检查通过；共用断言拒绝5个离线反例。唯一一次真实请求HTTP200，正文producerSeq2持久接受后port stop返回accepted；随后收到succeeded终态，但observe未结束，90秒工作和10秒cleanup均超时，drain/settlement/close缺失。真实receipt为 `~/.humanagent/test-fixtures/provider-explicit-stop-r56-20261017/run-3LjPn7/proof-receipt.json`；结果FAIL、资源收口INCOMPLETE，不能记stop通过。预算1次已用完，无重试。独立Gemini4 medium r65正在按实际等待关系规划，源码leaf暂供Planner读取，完成后复用同树或正常关闭，不新增同域树。
