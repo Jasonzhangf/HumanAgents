@@ -47,6 +47,7 @@ import type {
 } from './active-turn-journal.js';
 import {
   buildSemanticTurnContext,
+  type AdoptedChildSemanticDelivery,
   type CommittedSemanticCheckpointProjection,
   type RefinedChildSemanticDelivery,
   type SemanticTurnContext,
@@ -275,10 +276,21 @@ function chainInitialInput(initial: ActiveTurnSegmentChainInitial): RawAsset {
  * added; its recovery, save receipts, native commit identity and turn control
  * fields never enter the projection.
  */
-function projectCommittedCheckpoint(
+async function projectCommittedCheckpoint(
   committed: CommittedSemanticCheckpoint,
-): CommittedSemanticCheckpointProjection {
+  rawContent: RawContentReadPort,
+): Promise<CommittedSemanticCheckpointProjection> {
   const checkpointId = committed.save.checkpoint.checkpoint.id;
+  const adoptedChildren: AdoptedChildSemanticDelivery[] = [];
+  for (const adopted of committed.adoptedChildren) {
+    const bytes = await rawContent.read({ scope: adopted.refinedDelivery.ref.scope, content: adopted.refinedDelivery });
+    adoptedChildren.push({
+      childTurnId: adopted.childTurnId,
+      scope: cloneScope(adopted.refinedDelivery.ref.scope),
+      content: cloneRawAsset(adopted.refinedDelivery),
+      bytes: new Uint8Array(bytes),
+    });
+  }
   return {
     checkpointId: { scope: checkpointId.scope, value: checkpointId.value },
     scope: cloneScope(committed.scope),
@@ -292,6 +304,7 @@ function projectCommittedCheckpoint(
     claims: [],
     constraints: [],
     evidenceRefs: committed.evidenceRefs.map(cloneEvidenceRef),
+    adoptedChildren,
   };
 }
 
@@ -540,6 +553,7 @@ async function resolvePriorCompletedTurns(
   history: Pick<SemanticHistoryPersistencePort, 'readCommittedSemanticCheckpoint'>,
   lookups: readonly SemanticHistoryExactLookupV1[],
   currentTurnId: string,
+  rawContent: RawContentReadPort,
 ): Promise<readonly CommittedSemanticCheckpointProjection[]> {
   const semanticCheckpoints: CommittedSemanticCheckpointProjection[] = [];
   for (const lookup of lookups) {
@@ -557,7 +571,7 @@ async function resolvePriorCompletedTurns(
         `checkpoint ${lookup.publicationReceiptRef} belongs to the current business turn and is not completed prior history`,
       );
     }
-    semanticCheckpoints.push(projectCommittedCheckpoint(committed));
+    semanticCheckpoints.push(await projectCommittedCheckpoint(committed, rawContent));
   }
   return semanticCheckpoints;
 }
@@ -756,6 +770,7 @@ export async function readSemanticTurnContext(
     input.history,
     input.priorCompletedTurns,
     currentTurnId,
+    input.live.rawContent,
   );
 
   const resolved = await materializeLiveAcceptedPrefix({
@@ -793,6 +808,7 @@ export async function readResumedSegmentSemanticTurnContext(
     input.history,
     input.priorCompletedTurns,
     currentTurnId,
+    input.segment.live.rawContent,
   );
 
   // The original segment is either the immutable v1 capture or the committed

@@ -344,6 +344,7 @@ export function createJsonlSemanticHistoryJournal(input: {
   readonly journal?: JsonlOrganJournal;
   readonly artifactsRoot: string;
   readonly activeTurnJournal: ActiveTurnJournalPort;
+  readonly activeTurnJournalFor?: (turnId: string) => Pick<ActiveTurnJournalPort, 'replay'>;
   readonly segmentJournal?: ActiveTurnSegmentJournalPort;
   readonly segmentJournalFor?: (turnId: string) => Pick<ActiveTurnSegmentJournalPort, 'readSegmentRecords'>;
   readonly rawContent: RawContentReadPort;
@@ -353,7 +354,7 @@ export function createJsonlSemanticHistoryJournal(input: {
   selectActiveReasoningLineage(scope: ScopeRef): Promise<ActiveSemanticReasoningLineage>;
 } {
   return semanticHistoryJournal({ ...input,
-    activeTurnJournalFor: () => input.activeTurnJournal,
+    activeTurnJournalFor: input.activeTurnJournalFor ?? (() => input.activeTurnJournal),
     ...(input.segmentJournalFor !== undefined
       ? { segmentJournalFor: input.segmentJournalFor }
       : input.segmentJournal === undefined ? {} : { segmentJournalFor: () => input.segmentJournal! }),
@@ -1054,6 +1055,7 @@ export function createJsonlNativeSegmentSave(input: {
   readonly journal: JsonlOrganJournal;
   readonly artifactsRoot: string;
   readonly activeTurnJournal: ActiveTurnJournalPort;
+  readonly activeTurnJournalFor?: (turnId: string) => Pick<ActiveTurnJournalPort, 'replay'>;
   readonly segmentJournal: ActiveTurnSegmentJournalPort;
   /** Actual shared completion port; recovery-assets cold reads resolve real completion truth through it. */
   readonly completionJournal?: OperationCompletionJournalPort;
@@ -1297,6 +1299,12 @@ export function createNativeSegmentRequestContext(input: {
         units.push({ kind: 'message', role: 'assistant', text: canonicalJsonStringify({
           goal: message.checkpoint.goal, actions: message.checkpoint.did,
           result: message.checkpoint.result, nextStep: message.checkpoint.next,
+          adoptedChildren: message.checkpoint.adoptedChildren.map((child) => ({
+            childTurnId: child.childTurnId,
+            scope: child.scope,
+            content: child.content,
+            text: text(child.bytes),
+          })),
         }) });
       } else if (message.kind === 'refined-child') {
         units.push({ kind: 'message', role: 'assistant', text: text(message.bytes) });

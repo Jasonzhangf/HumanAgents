@@ -47,6 +47,10 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
 const EXACT_BODY = 'EXACT\u4f53 single logical delivery \ud83d\ude80\nline two';
 const SUMMARY_RESULT = 'summary result is a different material';
 const CHILD_BODY = 'Independent child result for adoption';
+const TURN_ONE_GOAL = 'Adopt the independent child result for the first turn';
+const TURN_ONE_ACTIONS = 'Call the child, adopt its returned result, and close the first turn';
+const TURN_ONE_RESULT = 'The child result is adopted and the first turn is closed';
+const TURN_ONE_NEXT = 'Continue with the adopted child conclusion in the second turn';
 
 // Missing adapter and the legacy/native append split can lose recovery anchors.
 // Impact: false committed success or an old-epoch anchor. Cost: one local Journal
@@ -416,72 +420,94 @@ function closureSection(value: unknown, label: string): { readonly text: string;
  * Publication IDs, sequence numbers, digests and alignment remain owned by the
  * product composition; this fixture supplies only the model decision.
  */
-function plannerFrames(model: string, payload: Record<string, unknown>): readonly Record<string, unknown>[] {
+function plannerFrames(
+  model: string,
+  payload: Record<string, unknown>,
+  twoTurnAttempt?: number,
+): readonly Record<string, unknown>[] {
   const task = requireRecord(payload.task, 'the task');
   const closure = requireRecord(payload.closure, 'the closure');
   const summary = requireRecord(closure.summary, 'the closure summary');
   const title = requireText(task.title, 'the task title');
   const directive = requireText(task.directive, 'the task directive');
-  if (payload.priorPlan !== null) {
-    throw new Error('the Planner request did not carry the expected null priorPlan for the first publication');
-  }
-  const confirmedSource = requireRecord(payload.confirmedSource, 'the confirmed source');
   const goal = closureSection(summary.goal, 'goal');
   const actions = closureSection(summary.actions, 'actions');
   const result = closureSection(summary.result, 'result');
   const expectedNextStep = closureSection(summary.expectedNextStep, 'expectedNextStep');
-  const source = {
-    requirementId: requireText(confirmedSource.requirementId, 'the confirmed requirement id'),
-    inputRevision: requireNumber(confirmedSource.inputRevision, 'the confirmed input revision'),
-    draftId: requireText(confirmedSource.draftId, 'the confirmed draft id'),
-    draftRevisionVersion: requireNumber(confirmedSource.draftRevisionVersion, 'the confirmed draft revision version'),
-    draftRevisionHash: requireText(confirmedSource.draftRevisionHash, 'the confirmed draft revision hash'),
-    confirmationRef: requireText(confirmedSource.confirmationRef, 'the confirmed confirmation reference'),
-    evidenceLocators: evidenceLocators(confirmedSource.evidenceRefs),
-  };
-  const refinedResults = (Array.isArray(payload.refinedResults) ? payload.refinedResults : []).map((entry) => {
-    const record = requireRecord(entry, 'a refined result');
-    return {
-      role: requireText(record.role, 'a refined result role'),
-      assignmentId: requireText(record.assignmentId, 'a refined result assignment id'),
-      status: requireText(record.status, 'a refined result status'),
-      evidenceLocators: evidenceLocators(record.evidenceRefs),
+  let snapshot: Record<string, unknown>;
+  let decision: 'continue' | 'complete';
+  const firstPublication = payload.priorPlan === null;
+  if (twoTurnAttempt === undefined && !firstPublication) {
+    throw new Error('the Planner request did not carry the expected null priorPlan for the first publication');
+  }
+  if (twoTurnAttempt === 1 && !firstPublication) {
+    throw new Error('the first two-turn Planner request must carry null priorPlan');
+  }
+  if (twoTurnAttempt === 2) {
+    const priorPlan = requireRecord(payload.priorPlan, 'the prior two-turn plan');
+    assert.equal(requireNumber(priorPlan.sequence, 'the prior two-turn plan sequence'), 1);
+  }
+  if (firstPublication) {
+    const confirmedSource = requireRecord(payload.confirmedSource, 'the confirmed source');
+    const source = {
+      requirementId: requireText(confirmedSource.requirementId, 'the confirmed requirement id'),
+      inputRevision: requireNumber(confirmedSource.inputRevision, 'the confirmed input revision'),
+      draftId: requireText(confirmedSource.draftId, 'the confirmed draft id'),
+      draftRevisionVersion: requireNumber(confirmedSource.draftRevisionVersion, 'the confirmed draft revision version'),
+      draftRevisionHash: requireText(confirmedSource.draftRevisionHash, 'the confirmed draft revision hash'),
+      confirmationRef: requireText(confirmedSource.confirmationRef, 'the confirmed confirmation reference'),
+      evidenceLocators: evidenceLocators(confirmedSource.evidenceRefs),
     };
-  });
-  const snapshot = {
-    title,
-    summary: `Whole-task plan for "${title}": the directive is "${directive}". The closed turn records the goal "${goal.text}", the actions "${actions.text}", the result "${result.text}", and the expected next step "${expectedNextStep.text}".`,
-    completeness: { scope: 'whole-task', status: 'complete' },
-    acceptanceCriteria: [{
-      criterionId: 'original-directive-satisfied',
-      description: `Satisfy the original directive "${directive}" and preserve the confirmed effect cited by the closed turn.`,
-    }],
-    nodes: [{
-      nodeId: 'whole-task',
-      kind: 'task',
+    const refinedResults = (Array.isArray(payload.refinedResults) ? payload.refinedResults : []).map((entry) => {
+      const record = requireRecord(entry, 'a refined result');
+      return {
+        role: requireText(record.role, 'a refined result role'),
+        assignmentId: requireText(record.assignmentId, 'a refined result assignment id'),
+        status: requireText(record.status, 'a refined result status'),
+        evidenceLocators: evidenceLocators(record.evidenceRefs),
+      };
+    });
+    snapshot = {
       title,
-      intent: directive,
-      definition: {
-        directive,
-        goal: goal.text,
-        actions: actions.text,
-        result: result.text,
-        expectedNextStep: expectedNextStep.text,
-        confirmedSource: source,
-        refinedResults,
-        evidenceLocators: [...new Set([
-          ...goal.locators, ...actions.locators, ...result.locators, ...expectedNextStep.locators,
-          ...source.evidenceLocators, ...refinedResults.flatMap((refined) => refined.evidenceLocators),
-        ])],
-      },
-    }],
-    phases: [],
-    relations: [],
-  };
+      summary: `Whole-task plan for "${title}": the directive is "${directive}". The closed turn records the goal "${goal.text}", the actions "${actions.text}", the result "${result.text}", and the expected next step "${expectedNextStep.text}".`,
+      completeness: { scope: 'whole-task', status: 'complete' },
+      acceptanceCriteria: [{
+        criterionId: 'original-directive-satisfied',
+        description: `Satisfy the original directive "${directive}" and preserve the confirmed effect cited by the closed turn.`,
+      }],
+      nodes: [{
+        nodeId: 'whole-task',
+        kind: 'task',
+        title,
+        intent: directive,
+        definition: {
+          directive,
+          goal: goal.text,
+          actions: actions.text,
+          result: result.text,
+          expectedNextStep: expectedNextStep.text,
+          confirmedSource: source,
+          refinedResults,
+          evidenceLocators: [...new Set([
+            ...goal.locators, ...actions.locators, ...result.locators, ...expectedNextStep.locators,
+            ...source.evidenceLocators, ...refinedResults.flatMap((refined) => refined.evidenceLocators),
+          ])],
+        },
+      }],
+      phases: [],
+      relations: [],
+    };
+    decision = twoTurnAttempt === 1 ? 'continue' : 'complete';
+  } else {
+    snapshot = requireRecord(requireRecord(payload.priorPlan, 'the prior plan').snapshot, 'the prior plan snapshot');
+    decision = 'complete';
+  }
   const text = JSON.stringify({
-    decision: 'complete',
+    decision,
     snapshot,
-    reasonText: 'first whole-task plan aligned to the original directive and the confirmed closed turn',
+    reasonText: twoTurnAttempt === 1
+      ? 'the first closed turn adopted a child and requires the next standard turn'
+      : 'the whole-task plan is aligned to the closed turn',
   });
   return [
     { type: 'response.created', response: { id: `response-${model}-planner` } },
@@ -515,6 +541,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly inspect?: boolean;
   readonly child?: boolean;
   readonly parallelChild?: boolean;
+  readonly twoTurn?: boolean;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; close(): Promise<void> }> {
   const wires: Wire[] = [];
@@ -548,7 +575,7 @@ async function textOnlyResponsesUpstream(input: {
           { type: 'response.created', response: { id: 'planner-refused' } },
           { type: 'response.output_text.done', item_id: 'planner-refused-text', text: '{}' },
           { type: 'response.completed', response: { id: 'planner-refused' } },
-        ] : plannerFrames(input.model, planner)));
+        ] : plannerFrames(input.model, planner, input.twoTurn ? plannerAttempts : undefined)));
         return;
       }
       if (declaresTurnEnd(body)) {
@@ -564,7 +591,7 @@ async function textOnlyResponsesUpstream(input: {
       if (!hasTurnEndSurface(body)) {
         throw new Error('the controlled upstream could not identify a lawful Responses stage');
       }
-      if (input.child || input.parallelChild) {
+      if ((input.child || input.parallelChild) && !(input.twoTurn && plannerAttempts > 0)) {
         const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
           input?: { type: string; call_id?: string; output?: string; name?: string }[] };
         const invoke = (callId: string, name: string, args: unknown) => {
@@ -687,8 +714,9 @@ async function textOnlyResponsesUpstream(input: {
         return;
       }
       const verified = await input.journal.verify();
-      const coverage = verified.records
-        .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
+      const coverageRecords = verified.records
+        .filter((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
+      const coverage = input.twoTurn ? coverageRecords.at(-1) : coverageRecords[0];
       const payload = coverage?.payload as { admissionCommitRef?: { commitId?: string } } | undefined;
       const admissionCommitId = payload?.admissionCommitRef?.commitId;
       if (!admissionCommitId) throw new Error('text-only run has no admitted operation coverage');
@@ -702,17 +730,23 @@ async function textOnlyResponsesUpstream(input: {
         || readFact.entry.envelope.fact.result.status !== 'succeeded')) throw new Error('real inspect result is absent');
       const deliveryRefs = readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result'
         ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
+      const twoTurnFirst = input.twoTurn && plannerAttempts === 0;
+      const endCallId = input.twoTurn ? (twoTurnFirst ? 'call-turn-1-end' : 'call-turn-2-end') : 'call-text-end';
+      const endSummary = input.twoTurn ? {
+        goal: section(TURN_ONE_GOAL), actions: section(TURN_ONE_ACTIONS),
+        result: section(TURN_ONE_RESULT), expectedNextStep: section(TURN_ONE_NEXT),
+      } : {
+        goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
+        result: section(SUMMARY_RESULT), expectedNextStep: section('Close this turn'),
+      };
       const toolCall = [
         { type: 'response.created', response: { id: 'text-end' } },
         { type: 'response.output_item.added', output_index: 0,
-          item: { type: 'function_call', call_id: 'call-text-end', name: 'humanagent_turn_end', arguments: '' } },
+          item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: '' } },
         { type: 'response.output_item.done', output_index: 0,
-          item: { type: 'function_call', call_id: 'call-text-end', name: 'humanagent_turn_end', arguments: JSON.stringify({
-            summary: {
-              goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
-              result: section(SUMMARY_RESULT), expectedNextStep: section('Close this turn'),
-            },
-            ...(input.inspect ? {} : { deliveryText: EXACT_BODY }),
+          item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: JSON.stringify({
+            summary: endSummary,
+            ...(input.inspect ? {} : { deliveryText: twoTurnFirst ? CHILD_BODY : EXACT_BODY }),
             deliveryRefs,
           }) } },
         { type: 'response.completed', response: { id: 'text-end' } },
@@ -743,7 +777,7 @@ async function textOnlyResponsesUpstream(input: {
 }
 
 /** Canonical fixture: real workspace, real native control layout, controlled Provider. */
-async function textOnlyFixture(inspect = false, child = false, parallelChild = false) {
+async function textOnlyFixture(inspect = false, child = false, parallelChild = false, twoTurn = false) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
   const controlRoot = join(root, 'control');
@@ -756,7 +790,7 @@ async function textOnlyFixture(inspect = false, child = false, parallelChild = f
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild });
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, twoTurn });
   const configPath = join(controlRoot, 'config.toml');
   // Both the default execution agent and the independent orchestration agent
   // select this real local Provider through the normal compiled roster.
@@ -1037,6 +1071,141 @@ test('native parallel child calls overlap and retain ordered refined results and
   } finally {
     await fixture.upstream.close();
     await rm(fixture.root, { recursive: true });
+  }
+});
+
+test('native two.turn public CLI consumer retains adopted child context and completes the prior plan', async () => {
+  const fixture = await textOnlyFixture(false, true, false, true);
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const organId = id('organ', 'humanagent-ui');
+  const taskId = id('task', 'native-two-turn-consumer');
+  const controlFile = join(fixture.root, 'control-session.txt');
+  let passed = false;
+  try {
+    const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
+    const session = await access.consumePairingCode(access.createPairingChallenge('two-turn-lease', 1).code);
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    await writeFile(controlFile, `${cookie}\n`, 'utf8');
+    const caller = await access.verifyProductPrincipal(cookie);
+    if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
+
+    const seed = new RuntimeTaskCoordinator({
+      organId, taskIdPrefix: 'native-two-turn', journal: new UiRuntimeJournal(fixture.layout.preparedJournalPath),
+      checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
+      attentionPort: {
+        async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
+        async resolve(value) { return { attentionId: value.attentionId, delivered: true }; },
+      },
+      async createDriver() { throw new Error('seed coordinator never releases execution'); },
+    });
+    seed.createTask({ taskId, title: 'native two-turn task', directive: 'complete the two-turn delivery' });
+    await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)).establish({
+      scope: { organId, taskId }, source: {
+        requirementId: `requirement:${taskId.value}`, inputRevision: 1, draftId: `draft:${taskId.value}`,
+        draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`,
+        confirmationRef: `confirmation:${taskId.value}`,
+      },
+    });
+    await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
+      owner: caller.principal.owner,
+      capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
+      expectedRevision: 0 });
+
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const processChild = spawn(process.execPath, [cli,
+        'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
+        '--plan', 'default', '--session', 'native-two-turn-run', '--task', taskId.value,
+        '--prompt', 'two-turn delivery probe', '--control-session-file', controlFile],
+      { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      processChild.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+      processChild.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+      processChild.once('error', reject);
+      processChild.once('exit', (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(result.code, 0, `the real two-turn CLI run must exit cleanly: ${result.stderr}`);
+    const receiptStart = result.stdout.indexOf('{');
+    const receiptEnd = result.stdout.lastIndexOf('}');
+    assert.ok(receiptStart >= 0 && receiptEnd > receiptStart, `the two-turn run prints a receipt: ${result.stdout}`);
+    const receipt = JSON.parse(result.stdout.slice(receiptStart, receiptEnd + 1)) as {
+      readonly command?: string;
+      readonly taskId?: string;
+      readonly state?: string;
+      readonly output?: string;
+      readonly error?: unknown;
+      readonly terminal?: Record<string, unknown>;
+    };
+    console.log('two.turn receipt', JSON.stringify(receipt));
+    assert.equal(receipt.command, 'run');
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt.error));
+    assert.equal(receipt.output, EXACT_BODY);
+    assert.equal(receipt.error, undefined);
+    const terminal = requireRecord(receipt.terminal, 'the two-turn terminal');
+    console.log('two.turn terminal', JSON.stringify(terminal));
+
+    const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    const plannerPosts = posts.filter((wire) => plannerPayload(wire.body) !== undefined);
+    assert.equal(plannerPosts.length, 2, 'the two-turn run reaches exactly two independent Planner requests');
+    const firstPlanner = plannerPayload(plannerPosts[0]!.body);
+    const secondPlanner = plannerPayload(plannerPosts[1]!.body);
+    if (!firstPlanner || !secondPlanner) throw new Error('both Planner requests carry business payloads');
+    assert.equal(firstPlanner.priorPlan, null);
+    const priorPlan = requireRecord(secondPlanner.priorPlan, 'the second Planner priorPlan');
+    assert.equal(requireNumber(priorPlan.sequence, 'the second Planner priorPlan sequence'), 1);
+
+    const firstPlannerIndex = fixture.upstream.wires.findIndex((wire) => wire === plannerPosts[0]);
+    const secondPlannerIndex = fixture.upstream.wires.findIndex((wire) => wire === plannerPosts[1]);
+    assert.ok(firstPlannerIndex >= 0 && secondPlannerIndex > firstPlannerIndex);
+    const turnTwoWire = fixture.upstream.wires.slice(firstPlannerIndex + 1, secondPlannerIndex)
+      .find((wire) => wire.method === 'POST' && plannerPayload(wire.body) === undefined && hasTurnEndSurface(wire.body));
+    assert.ok(turnTwoWire, 'the second turn sends a real parent execution request before its Planner call');
+    if (!turnTwoWire) throw new Error('the second turn execution wire is absent');
+    const turnTwoBody = JSON.parse(turnTwoWire.body) as {
+      readonly input?: readonly {
+        readonly type?: string;
+        readonly role?: string;
+        readonly content?: readonly { readonly type?: string; readonly text?: string }[];
+      }[];
+    };
+    const turnTwoContext = (turnTwoBody.input ?? []).flatMap((item) =>
+      (item.content ?? []).flatMap((part) => typeof part.text === 'string' ? [part.text] : [])).join('\n');
+    for (const expected of [TURN_ONE_GOAL, TURN_ONE_ACTIONS, TURN_ONE_RESULT, TURN_ONE_NEXT, CHILD_BODY]) {
+      assert.ok(turnTwoContext.includes(expected), `the second turn retains the first-turn semantic fact: ${expected}`);
+    }
+    assert.equal(turnTwoWire.body.includes('call-parent-child'), false,
+      'the second turn excludes the first turn raw child-call history');
+    assert.equal(turnTwoWire.body.includes('call-parent-adopt'), false,
+      'the second turn excludes the first turn raw child-adopt history');
+
+    const verified = await fixture.journal.verify();
+    const coverageRecords = verified.records
+      .filter((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
+    const parentCoverageRecords = coverageRecords.filter((record) => record.scope.taskId?.value === taskId.value);
+    const operationIds = parentCoverageRecords
+      .map((record) => record.scope.operationId?.value)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    assert.ok(operationIds.length >= 2, 'the two turns commit distinct parent operation identities');
+    assert.equal(new Set(operationIds).size, operationIds.length, 'the two turns do not reuse an operation identity');
+    const activeTurnIds = verified.records
+      .filter((record) => record.commitId?.startsWith('active-turn:') && record.commitId.endsWith(':binding-opened'))
+      .map((record) => record.commitId!.slice('active-turn:'.length, -':binding-opened'.length));
+    assert.ok(activeTurnIds.length >= 2, 'the two turns commit distinct active-turn identities');
+    assert.equal(new Set(activeTurnIds).size, activeTurnIds.length, 'the two turns do not reuse an active-turn identity');
+    console.log('two.turn evidence', JSON.stringify({
+      operationIds,
+      activeTurnIds,
+      plannerPosts: plannerPosts.length,
+      providerPosts: posts.length,
+      terminal,
+      fixture: fixture.root,
+    }));
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`two-turn fixture retained: ${fixture.root}`);
   }
 });
 

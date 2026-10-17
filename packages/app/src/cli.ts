@@ -17,6 +17,7 @@ import {
   type EvidenceRef,
   type ExecutionRuntimePort,
   type HarnessPlugin,
+  type OperationId,
   type ProviderBinding,
   type TaskId,
   type ScopeRef,
@@ -92,7 +93,7 @@ import type { AttentionPort } from '../../runtime/src/control/attention.js';
 import { createJournalCheckpointEvidencePort, reconcileCommittedReentryMemoryBoundaries, type MemoryRuntime } from './memory-runtime.js';
 import { createJsonlAttentionPort, readJsonlAttentions } from './attention-journal.js';
 import type { UiRuntimeMemoryComposition } from './ui-runtime/service.js';
-import type { RuntimeTaskEvent } from '../../runtime/src/ui-runtime/coordinator.js';
+import type { RuntimeTaskCoordinator, RuntimeTaskEvent } from '../../runtime/src/ui-runtime/coordinator.js';
 import {
   RESPONSES_BASH_TOOL,
   RESPONSES_CREATE_GOAL_TOOL,
@@ -941,6 +942,47 @@ function nativeAttentionPort(): AttentionPort {
   };
 }
 
+async function waitForNativeTaskOutcome(input: {
+  readonly coordinator: Pick<RuntimeTaskCoordinator, 'subscribeReplay' | 'taskSnapshot'>;
+  readonly initialOperationId: OperationId;
+  readonly taskId: TaskId;
+  readonly release: () => Promise<{ readonly state: string }>;
+}): Promise<{
+  readonly terminal: RuntimeTaskEvent;
+  readonly snapshot: ReturnType<RuntimeTaskCoordinator['taskSnapshot']>;
+  readonly releaseState: string;
+}> {
+  let operationId = input.initialOperationId;
+  let releaseResult: { readonly state: string } | undefined;
+  let unsubscribe: (() => void) | undefined;
+  try {
+    for (;;) {
+      const finalEvent = new Promise<RuntimeTaskEvent>((resolve) => {
+        const subscription = input.coordinator.subscribeReplay(operationId, undefined, (event) => {
+          if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') resolve(event);
+        });
+        unsubscribe = subscription.unsubscribe;
+        for (const event of subscription.replay) {
+          if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') resolve(event);
+        }
+      });
+      const released = releaseResult ?? await input.release();
+      releaseResult = released;
+      const terminal = await finalEvent;
+      unsubscribe?.();
+      unsubscribe = undefined;
+      const snapshot = input.coordinator.taskSnapshot(input.taskId);
+      if (snapshot.operationId === undefined || snapshot.operationId === operationId.value) {
+        return { terminal, snapshot, releaseState: released.state };
+      }
+      operationId = id('operation', snapshot.operationId);
+    }
+  } catch (error) {
+    unsubscribe?.();
+    throw error;
+  }
+}
+
 /**
  * Native RCC run. The CLI caller binds the same production owners the serve
  * runtime uses (the prepared UI journal, the Organ Journal control records, the
@@ -1132,38 +1174,20 @@ async function runNativeTask(input: {
     // Subscribe to the exact operation before release. Only the Runtime
     // execution.terminal/final event is a completion candidate; a Provider
     // phase terminal or the release receipt is never completion.
-    let unsubscribe: (() => void) | undefined;
-    const finalEvent = new Promise<RuntimeTaskEvent>((resolve) => {
-      const subscription = preparation.coordinator.subscribeReplay(
-        handle.allocation.operationId,
-        undefined,
-        (event) => {
-          if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') resolve(event);
-        },
-      );
-      unsubscribe = subscription.unsubscribe;
-      for (const event of subscription.replay) {
-        if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') resolve(event);
-      }
+    const { terminal, snapshot, releaseState } = await waitForNativeTaskOutcome({
+      coordinator: preparation.coordinator,
+      initialOperationId: handle.allocation.operationId,
+      taskId: handle.allocation.taskId,
+      release: () => handle.release(),
     });
-    let releaseState: string;
-    try {
-      releaseState = (await handle.release()).state;
-    } catch (error) {
-      unsubscribe?.();
-      throw error;
-    }
-    const terminal = await finalEvent;
-    unsubscribe?.();
     // The event only notifies; the same owner reads the actual Task state back
     // after finalize. The receipt keeps waiting/blocked truth instead of
     // reporting a synthetic success.
-    const snapshot = preparation.coordinator.taskSnapshot(handle.allocation.taskId);
     console.log(JSON.stringify({
       command: 'run',
       entry: 'native',
       taskId: snapshot.taskId.value,
-      operationId: handle.allocation.operationId.value,
+      operationId: snapshot.operationId ?? handle.allocation.operationId.value,
       executionEpoch: snapshot.executionEpoch ?? handle.allocation.executionEpoch,
       release: releaseState,
       state: snapshot.state,

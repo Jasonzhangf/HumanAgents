@@ -90,6 +90,7 @@ export function createJsonlNativeTurnSave(input: {
   readonly journal: JsonlOrganJournal;
   readonly artifactsRoot: string;
   readonly activeTurnJournal: ActiveTurnJournalPort;
+  readonly activeTurnJournalFor?: (turnId: string) => Pick<ActiveTurnJournalPort, 'replay'>;
   /** Actual shared completion port; recovery-assets cold reads resolve real completion truth through it. */
   readonly completionJournal?: OperationCompletionJournalPort;
   readonly rawContent: RawContentReadPort;
@@ -116,6 +117,7 @@ export function createJsonlNativeTurnSave(input: {
     journal,
     artifactsRoot: input.artifactsRoot,
     activeTurnJournal: input.activeTurnJournal,
+    ...(input.activeTurnJournalFor === undefined ? {} : { activeTurnJournalFor: input.activeTurnJournalFor }),
     rawContent: input.rawContent,
     timeAuthority: input.timeAuthority,
   });
