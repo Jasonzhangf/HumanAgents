@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -15,35 +14,23 @@ import {
   type ScopeRef,
 } from '../../packages/contracts/src/index.js';
 import {
+  checkpointClosureEvidenceDigest,
   checkpointClosureEvidenceLocator,
   checkpointEvidenceDigest,
+  checkpointEvidenceLocator,
   createJsonlCheckpointClosurePort,
   createJsonlCheckpointJournal,
   readCommittedCheckpoint,
 } from '../../packages/app/src/checkpoint-journal.js';
-import { composeMemoryRuntime, filesystemTaskEvidence } from '../../packages/app/src/index.js';
+import { composeMemoryRuntime } from '../../packages/app/src/index.js';
+import {
+  createJournalCheckpointEvidencePort,
+  publishRewindMemoryBoundaryFromJournal,
+} from '../../packages/app/src/memory-runtime.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 
 const FIXTURE_ROOT = process.env.HUMANAGENT_TEST_ROOT
-  ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-release-rc5-r1-20261015';
-
-function digest(text: string): string {
-  return `sha256:${createHash('sha256').update(text).digest('hex')}`;
-}
-
-function checkpointEvidenceRef(input: {
-  readonly checkpoint: Checkpoint;
-  readonly evidenceId: string;
-}): EvidenceRef {
-  return {
-    evidenceId: id('evidence', input.evidenceId),
-    kind: 'operation',
-    source: 'memory-path-producer-test',
-    locator: `humanagent://checkpoint/${input.checkpoint.id.value}`,
-    digest: checkpointEvidenceDigest(input.checkpoint),
-    scope: input.checkpoint.scope,
-  };
-}
+  ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-n2-c-memory-finish-20261016';
 
 test('rewind publisher feeds the existing memory consumer committed path and correction evidence', async () => {
   const root = await mkdtemp(join(FIXTURE_ROOT, 'memory-path-producer-'));
@@ -137,11 +124,32 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
       scope: current.scope,
       checkpointId: current.id,
     });
+    const committedRef = async (current: Checkpoint) => {
+      const record = await checkpointJournal.readCommitted(current.scope, current.id);
+      if (record === null) throw new Error(`committed checkpoint record was not readable: ${current.id.value}`);
+      return record.commitRef;
+    };
     const [selectedCommitted, failedCommitted, recoveryCommitted] = await Promise.all([
       committed(selected),
       committed(failed),
       committed(recovery),
     ]);
+
+    const selectedClosure = {
+      closureKind: 'checkpoint' as const,
+      compatibilityVersion: 1 as const,
+      closureId: 'checkpoint-closure:memory-path-producer-selected',
+      checkpointId: selectedCommitted.checkpoint.id,
+      source: 'agent-tool' as const,
+      outcome: selectedCommitted.checkpoint.outcome,
+      summary: 'selected checkpoint closed',
+      next: selectedCommitted.checkpoint.next,
+      evidenceRefs: selectedCommitted.checkpoint.evidenceRefs,
+      reentry: { allowed: true, reason: 'selected checkpoint path admitted' },
+    };
+    await closurePort.commit(selectedClosure);
+    const committedSelectedClosure = await closurePort.read(selectedClosure.closureId);
+    if (!committedSelectedClosure) throw new Error('committed selected closure was not readable');
 
     const reentry = {
       closureKind: 'reentry' as const,
@@ -157,92 +165,6 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
     const committedReentry = await closurePort.read(reentry.closureId);
     if (!committedReentry) throw new Error('committed reentry closure was not readable');
 
-    const taskJournalPath = join(paths.checkpointsRoot, 'ui-runtime', 'fixture', 'ui-runtime-journal.jsonl');
-    await mkdir(join(paths.checkpointsRoot, 'ui-runtime', 'fixture'), { recursive: true });
-    const declaredDirective = 'restore the selected checkpoint path';
-    const declaredInput = 'resume from the accepted plan';
-    const declaredOutput = 'selected path restored';
-    const runEvidence = (locator: string, evidenceId: string): EvidenceRef => ({
-      evidenceId: id('evidence', evidenceId),
-      kind: 'operation',
-      source: 'memory-path-producer-test',
-      locator,
-      scope,
-    });
-    const acceptedPlanEvidence = runEvidence(
-      'humanagent://operation/memory-path-producer/accepted-plan',
-      'memory-path-accepted-plan',
-    );
-    const correctionEvidence = runEvidence(
-      'humanagent://operation/memory-path-producer/correction',
-      'memory-path-correction',
-    );
-    const errorEvidence = runEvidence(
-      'humanagent://operation/memory-path-producer/error',
-      'memory-path-error',
-    );
-    const records = [
-      {
-        kind: 'task.created',
-        taskId,
-        title: 'memory path producer',
-        directive: declaredDirective,
-        directiveRevision: 1,
-        createdAt: '2026-10-15T12:00:00.000Z',
-        taskCounter: 1,
-      },
-      {
-        kind: 'operation.started',
-        taskId,
-        cycleId,
-        operationId,
-        input: declaredInput,
-        executionEpoch: recoveryCommitted.checkpoint.executionEpoch,
-        occurredAt: '2026-10-15T12:00:01.000Z',
-      },
-      {
-        kind: 'operation.event',
-        taskId,
-        operationId,
-        taskOutput: declaredOutput,
-        event: {
-          evidenceRefs: [acceptedPlanEvidence, correctionEvidence, errorEvidence],
-        },
-      },
-    ];
-    await writeFile(
-      taskJournalPath,
-      `${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
-      'utf8',
-    );
-    const taskEvidence = filesystemTaskEvidence({ journalPath: taskJournalPath });
-    const declaredTask = await taskEvidence.readTask({ taskId, scope });
-    const declaredTaskRef: EvidenceRef = {
-      evidenceId: id('evidence', 'memory-path-declared-task'),
-      kind: 'operation',
-      source: 'memory-path-producer-test',
-      locator: `humanagent://task/${taskId.value}`,
-      digest: digest(JSON.stringify({
-        directive: declaredTask.directive,
-        input: declaredTask.input,
-        output: declaredTask.output,
-      })),
-      scope,
-    };
-    const resolveRunEvidence = async (candidate: EvidenceRef): Promise<EvidenceRef> => {
-      const resolved = await taskEvidence.readEvidence!({ evidence: candidate });
-      return { ...candidate, digest: resolved.sourceDigest };
-    };
-    const declaredPlanRef = await resolveRunEvidence(acceptedPlanEvidence);
-    const correctionRef = await resolveRunEvidence(correctionEvidence);
-    const errorRef = await resolveRunEvidence(errorEvidence);
-    const selectedPathRef = checkpointEvidenceRef({ checkpoint: selectedCommitted.checkpoint, evidenceId: 'actual-old' });
-    const recoveryPathRef = checkpointEvidenceRef({ checkpoint: recoveryCommitted.checkpoint, evidenceId: 'actual-new' });
-    const successEvidenceRef = checkpointEvidenceRef({ checkpoint: recoveryCommitted.checkpoint, evidenceId: 'success-result' });
-    if (correctionRef.digest === undefined || errorRef.digest === undefined) {
-      throw new Error('resolved correction and error evidence must carry a source digest');
-    }
-
     const memory = await composeMemoryRuntime({
       paths,
       configuration,
@@ -252,7 +174,7 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
       auditPromptRoot,
       auditPromptRef: 'project-memory-audit',
       autoUpdate: false,
-      taskEvidence,
+      checkpointEvidence: createJournalCheckpointEvidencePort({ filePath: checkpointFile }),
       binding: {
         bindingRef: 'memory-binding:memory-path-producer',
         projectKey: paths.projectKey,
@@ -274,25 +196,15 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
       },
     });
 
-    await memory.boundaryPublisher.publish({
-      checkpoint: recoveryCommitted.checkpoint,
-      recordDigest: recoveryCommitted.recordDigest,
-      trigger: 'rewind',
-      relatedCheckpoints: [failedCommitted.checkpoint],
-      rewind: {
-        failedCheckpoint: failedCommitted.checkpoint,
-        failedCheckpointRecordDigest: failedCommitted.recordDigest,
-        selectedCheckpoint: selectedCommitted.checkpoint,
-        selectedCheckpointRecordDigest: selectedCommitted.recordDigest,
-        recoveryCheckpoint: recoveryCommitted.checkpoint,
-        recoveryCheckpointRecordDigest: recoveryCommitted.recordDigest,
-        reentry: committedReentry,
-        actualPaths: [selectedPathRef, recoveryPathRef],
-        declaredPaths: [declaredTaskRef, declaredPlanRef],
-        corrections: [{ evidence: correctionRef, fingerprint: 'selected-path-correction' }],
-        errors: [{ evidence: errorRef, fingerprint: 'failed-path-error' }],
-        successEvidence: [successEvidenceRef],
-      },
+    const consumed = await publishRewindMemoryBoundaryFromJournal({
+      memory,
+      checkpointJournalPath: checkpointFile,
+      taskScope: { organId, taskId },
+      failedCheckpointId: failedCommitted.checkpoint.id,
+      recoveryCheckpointId: recoveryCommitted.checkpoint.id,
+      failedCheckpointCommitRef: await committedRef(failed),
+      recoveryCheckpointCommitRef: await committedRef(recovery),
+      reentryClosureId: reentry.closureId,
     });
 
     const events = await memory.journal.readEvents({
@@ -321,39 +233,59 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
     } | undefined)?.analysisInputs;
     if (!analysisInputs) throw new Error('rewind analysis inputs were not published');
     assert.deepEqual(analysisInputs.corrections, [{
-      sourceRef: correctionRef.locator,
-      sourceDigest: correctionRef.digest,
-      fingerprint: 'selected-path-correction',
+      sourceRef: checkpointClosureEvidenceLocator(reentry.closureId),
+      sourceDigest: checkpointClosureEvidenceDigest(committedReentry),
+      fingerprint: reentry.closureId,
     }]);
     assert.deepEqual(analysisInputs.errors, [{
-      sourceRef: errorRef.locator,
-      sourceDigest: errorRef.digest,
-      fingerprint: 'failed-path-error',
+      sourceRef: checkpointEvidenceLocator(failedCommitted.checkpoint),
+      sourceDigest: checkpointEvidenceDigest(failedCommitted.checkpoint),
+      fingerprint: failedCommitted.checkpoint.id.value,
     }]);
-    assert.deepEqual(analysisInputs.actualPathRefs, [selectedPathRef.locator, recoveryPathRef.locator]);
-    assert.deepEqual(analysisInputs.declaredPathRefs, [declaredTaskRef.locator, declaredPlanRef.locator]);
+    assert.deepEqual(analysisInputs.actualPathRefs, [
+      checkpointEvidenceLocator(selectedCommitted.checkpoint),
+      checkpointEvidenceLocator(recoveryCommitted.checkpoint),
+    ]);
+    assert.deepEqual(analysisInputs.declaredPathRefs, [
+      checkpointClosureEvidenceLocator(selectedClosure.closureId),
+    ]);
+    assert.equal(
+      analysisInputs.declaredPathRefs.some((ref) => analysisInputs.actualPathRefs.includes(ref)),
+      false,
+    );
     const chain = analysisInputs.rewindChains[0]!;
-    assert.equal(chain.failedBranchRef, `humanagent://checkpoint/${failedCommitted.checkpoint.id.value}`);
-    assert.equal(chain.rewindCheckpointRef, `humanagent://checkpoint/${selectedCommitted.checkpoint.id.value}`);
+    assert.equal(chain.failedBranchRef, checkpointEvidenceLocator(failedCommitted.checkpoint));
+    assert.equal(chain.rewindCheckpointRef, checkpointEvidenceLocator(selectedCommitted.checkpoint));
     assert.equal(chain.rewindCheckpointRef === chain.failedBranchRef, false);
-    assert.equal(chain.recoveryCheckpointRef, `humanagent://checkpoint/${recoveryCommitted.checkpoint.id.value}`);
+    assert.equal(chain.recoveryCheckpointRef, checkpointEvidenceLocator(recoveryCommitted.checkpoint));
     assert.equal(chain.reentryFactRef, checkpointClosureEvidenceLocator(reentry.closureId));
     assert.deepEqual(chain.successfulBranchRefs, [chain.reentryFactRef!]);
-    assert.deepEqual(chain.successEvidenceRefs, [successEvidenceRef.locator]);
-    assert.ok(chain.absoluteJournalRefs.includes(correctionRef.locator));
-    assert.ok(chain.absoluteJournalRefs.includes(errorRef.locator));
-    assert.ok(chain.absoluteJournalRefs.includes(declaredTaskRef.locator));
-    assert.ok(chain.absoluteJournalRefs.includes(declaredPlanRef.locator));
+    assert.deepEqual(chain.successEvidenceRefs, [checkpointEvidenceLocator(recoveryCommitted.checkpoint)]);
+    assert.ok(chain.absoluteJournalRefs.includes(checkpointClosureEvidenceLocator(reentry.closureId)));
+    assert.ok(chain.absoluteJournalRefs.includes(checkpointEvidenceLocator(failedCommitted.checkpoint)));
+    assert.ok(chain.absoluteJournalRefs.includes(checkpointClosureEvidenceLocator(selectedClosure.closureId)));
     const eventEvidence = new Map(event.evidenceRefs.map((evidence) => [evidence.locator, evidence.digest]));
-    assert.equal(eventEvidence.get(correctionRef.locator), correctionRef.digest);
-    assert.equal(eventEvidence.get(errorRef.locator), errorRef.digest);
-    assert.equal(eventEvidence.get(declaredTaskRef.locator), declaredTaskRef.digest);
-    assert.equal(eventEvidence.get(declaredPlanRef.locator), declaredPlanRef.digest);
-    assert.equal(eventEvidence.get(selectedPathRef.locator), selectedPathRef.digest);
-    assert.equal(eventEvidence.get(recoveryPathRef.locator), recoveryPathRef.digest);
-    assert.equal(eventEvidence.get(successEvidenceRef.locator), successEvidenceRef.digest);
+    assert.equal(
+      eventEvidence.get(checkpointClosureEvidenceLocator(reentry.closureId)),
+      checkpointClosureEvidenceDigest(committedReentry),
+    );
+    assert.equal(
+      eventEvidence.get(checkpointEvidenceLocator(failedCommitted.checkpoint)),
+      checkpointEvidenceDigest(failedCommitted.checkpoint),
+    );
+    assert.equal(
+      eventEvidence.get(checkpointClosureEvidenceLocator(selectedClosure.closureId)),
+      checkpointClosureEvidenceDigest(committedSelectedClosure),
+    );
+    assert.equal(
+      eventEvidence.get(checkpointEvidenceLocator(selectedCommitted.checkpoint)),
+      checkpointEvidenceDigest(selectedCommitted.checkpoint),
+    );
+    assert.equal(
+      eventEvidence.get(checkpointEvidenceLocator(recoveryCommitted.checkpoint)),
+      checkpointEvidenceDigest(recoveryCommitted.checkpoint),
+    );
 
-    const consumed = await memory.consume();
     assert.equal(consumed.retries.length, 0, JSON.stringify(consumed));
     assert.equal(consumed.committed.length, 1, JSON.stringify(consumed));
     assert.equal(consumed.committed[0]?.disposition, 'applied', JSON.stringify(consumed));
@@ -362,8 +294,55 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
     assert.equal(reviewState.candidates.length, 1);
     assert.equal(reviewState.candidates[0]?.state, 'candidate');
     assert.equal(reviewState.candidates[0]?.taskId, taskId.value);
+    assert.match(reviewState.candidates[0]!.summary, /reentered at/);
     assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), '# Memory path producer\n');
     assert.equal((await readdir(paths.artifactsRoot)).some((name) => name.startsWith('memory-project-patch-')), false);
+
+    await assert.rejects(
+      async () => { await publishRewindMemoryBoundaryFromJournal({
+        memory,
+        checkpointJournalPath: checkpointFile,
+        taskScope: { organId, taskId },
+        failedCheckpointId: recoveryCommitted.checkpoint.id,
+        recoveryCheckpointId: recoveryCommitted.checkpoint.id,
+        reentryClosureId: reentry.closureId,
+      }); },
+      (error: unknown) => error instanceof Error && /missing error evidence/.test(error.message),
+    );
+
+    const otherCycleId = id('cycle', 'memory-path-producer-other-cycle');
+    const otherScope: ScopeRef = { organId, taskId, cycleId: otherCycleId, operationId };
+    const duplicateFailed: Checkpoint = {
+      ...failed,
+      scope: otherScope,
+      cycleId: otherCycleId,
+      seq: 1,
+      previousCheckpointId: null,
+      summary: `${failed.summary} other cycle`,
+      recoveryStateRef: { ...failed.recoveryStateRef, scope: otherScope },
+      evidenceRefs: failed.evidenceRefs.map((ref) => ({ ...ref, scope: otherScope })),
+    };
+    await checkpointJournal.append({
+      ownerId: 'memory-path-producer-test',
+      commitId: checkpointCommitId(duplicateFailed),
+      checkpoint: duplicateFailed,
+    });
+    await assert.rejects(
+      async () => { await publishRewindMemoryBoundaryFromJournal({
+        memory,
+        checkpointJournalPath: checkpointFile,
+        taskScope: { organId, taskId },
+        failedCheckpointId: failedCommitted.checkpoint.id,
+        recoveryCheckpointId: recoveryCommitted.checkpoint.id,
+        reentryClosureId: reentry.closureId,
+      }); },
+      (error: unknown) => error instanceof Error && /multiple cycles/.test(error.message),
+    );
+    assert.equal((await memory.journal.readEvents({
+      streamId: `memory-boundaries:${taskId.value}`,
+      afterSequence: 0,
+      limit: 10,
+    })).length, 1);
     passed = true;
   } finally {
     if (passed) await rm(root, { recursive: true, force: true });
