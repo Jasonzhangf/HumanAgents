@@ -4,16 +4,19 @@ import test from 'node:test';
 import {
   id,
   type ActiveTurnBinding,
+  type Checkpoint,
   type ChildInvocationRecord,
   type EvidenceRef,
   type JournalCommitRef,
   type MilestoneReviewResultRecord,
+  type ProviderExecutionIdentityRef,
   type ReviewAssignment,
   type ScopeRef,
   type TaskExecutionInstanceIdentity,
   type TaskAgentActivityOwnershipRecord,
   type TaskId,
   type TaskRuntimeIncarnation,
+  type TurnClosureReference,
   type WorkAssignment,
 } from '../../../packages/contracts/src/index.js';
 import type {
@@ -29,11 +32,17 @@ import {
   type AgentActivityChildSource,
   type AgentActivityCurrentAuthority,
   type AgentActivityNativeSource,
+  type AgentActivityPlannerSource,
   type AgentActivityPoolSource,
   type AgentActivityReviewSource,
   type AgentActivityResumedSource,
   type SelectTaskAgentActivityInput,
 } from '../../../packages/runtime/src/index.js';
+import type {
+  ClosedTurnPlannerCallInvocationRecord,
+  ClosedTurnPlannerCallPreparationRecord,
+  ClosedTurnPlannerCallReturnRecord,
+} from '../../../packages/runtime/src/orchestration/closed-turn-planner-call.js';
 
 // The combined root program resolves node:assert/strict to an ambient module
 // with a narrow surface; add the two members this consumer needs.
@@ -395,6 +404,233 @@ const reviewSource: AgentActivityReviewSource = {
   objective: 'reviewed deliverable',
 };
 
+// --- closed-turn Planner call (F09 seventh source) ---------------------------
+// The Planner call carries the closed turn's allocation epoch (1). The Task
+// recovery authority below is at epoch 3, so the cross-domain epoch must not
+// settle a pending Planner call.
+const plannerPreparationCommit = commit('commit-planner-preparation', 30);
+const plannerInvocationCommit = commit('commit-planner-invocation', 31);
+const plannerReturnCommit = commit('commit-planner-return', 32);
+const plannerGrantCommit = commit('commit-planner-grant', 33);
+const plannerAdmissionCommit = commit('commit-planner-admission', 34);
+const plannerCheckpointCommit = commit('commit-planner-checkpoint', 35);
+const plannerEvidence = evidenceRef('evidence-planner');
+const plannerCheckpointId = id('checkpoint', 'checkpoint-planner-closed');
+const plannerOperation = id('operation', 'operation-planner-call');
+const plannerClosureScope: ScopeRef = {
+  organId: ORGAN_ID,
+  taskId: TASK,
+  cycleId: CYCLE,
+  operationId: plannerOperation,
+};
+
+function plannerClosureEvidence(label: string): EvidenceRef {
+  return {
+    evidenceId: id('evidence', `evidence-planner-${label}`),
+    kind: 'operation',
+    source: 'planner-closure-fixture',
+    locator: `planner-closure/${label}`,
+    scope: plannerClosureScope,
+  };
+}
+
+const plannerClosure: TurnClosureReference = {
+  identity: {
+    turnId: 'turn-2',
+    workAssignmentRef: 'assignment-active',
+    taskRef: TASK,
+    scopeRef: plannerClosureScope,
+    cycleRef: CYCLE,
+    inputRevision: 1,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    runtimeBindingRef: 'planner-runtime-binding',
+    permissionRevision: 'permission-1',
+  },
+  checkpointId: plannerCheckpointId,
+  closureRef: 'closure-turn-2',
+  summary: {
+    goal: { text: 'plan the closed turn', evidenceRefs: [plannerClosureEvidence('goal')] },
+    actions: { text: 'planned the turn', evidenceRefs: [plannerClosureEvidence('actions')] },
+    result: { text: 'returned a plan', evidenceRefs: [plannerClosureEvidence('result')] },
+    expectedNextStep: { text: 'apply the plan', evidenceRefs: [plannerClosureEvidence('next')] },
+  },
+  recoveryStateRef: plannerClosureEvidence('recovery'),
+  closedAt: '2026-10-16T00:00:00.000Z',
+};
+
+const plannerIncarnation: TaskRuntimeIncarnation = incarnation(
+  'orchestration-runtime-1',
+  1,
+  'd5b33ff4-ee6a-4b5b-bbff-bd5fe0eb0715',
+  'planner:active-turn-ui-operation-1',
+  1,
+  'orchestration',
+);
+const plannerExecution: ProviderExecutionIdentityRef = {
+  runtimeId: plannerIncarnation.runtimeId,
+  taskId: TASK,
+  operationId: plannerOperation,
+  organId: ORGAN_ID,
+  cycleId: CYCLE,
+  executionEpoch: plannerIncarnation.executionEpoch,
+};
+
+const plannerCheckpoint: Checkpoint = {
+  id: plannerCheckpointId,
+  scope: plannerClosureScope,
+  cycleId: CYCLE,
+  seq: 1,
+  previousCheckpointId: null,
+  directiveRevision: 1,
+  executionEpoch: 3,
+  outcome: 'succeeded',
+  summary: 'closed turn checkpoint',
+  recoveryStateRef: plannerClosureEvidence('checkpoint-recovery'),
+  evidenceRefs: [plannerClosureEvidence('checkpoint')],
+  next: { kind: 'continue', ref: 'task:planner' },
+};
+
+const plannerPreparation: ClosedTurnPlannerCallPreparationRecord = {
+  kind: 'closed-turn-planner-call',
+  stage: 'prepared',
+  duty: {
+    dutyKey: 'closed-turn-planner-call:task-agent-activity:closure-turn-2:checkpoint-planner-closed:plan-revision:task-agent-activity:1',
+    taskId: TASK,
+    scope: plannerClosureScope,
+    closureRef: plannerClosure.closureRef,
+    checkpointId: plannerCheckpointId,
+    checkpointCommitRef: plannerCheckpointCommit,
+    inputDigest: `sha256:${'4'.repeat(64)}`,
+    predecessorRevisionId: 'plan-revision:task-agent-activity:1',
+  },
+  invocationId: 'closed-turn-planner-invocation:planner-1',
+  execution: plannerExecution,
+  incarnation: plannerIncarnation,
+  lease: {
+    leaseId: 'lease-planner-1',
+    runtimeId: plannerIncarnation.runtimeId,
+    generation: plannerIncarnation.generation,
+    incarnation: plannerIncarnation,
+    executionEpoch: plannerIncarnation.executionEpoch,
+    ownerId: 'orchestration-runtime-manager',
+    assignmentId: plannerIncarnation.assignmentId,
+    capabilities: ['provider.execution'],
+  },
+  decision: {
+    action: 'spawn',
+    ownerId: 'orchestration-runtime-manager',
+    condition: 'orchestration.runtime.capacity',
+    nextAction: { kind: 'continue', ref: plannerIncarnation.runtimeId },
+    reason: 'orchestration runtime capacity is available',
+    runtimeId: plannerIncarnation.runtimeId,
+  },
+  grantCommitRef: plannerGrantCommit,
+  admissionCommitRef: plannerAdmissionCommit,
+  checkpoint: { checkpoint: plannerCheckpoint, previous: null, commitRef: plannerCheckpointCommit },
+  preparedAt: '2026-10-16T00:00:00.000Z',
+  configuredAgentId: 'orchestration',
+};
+
+const plannerInvoked: ClosedTurnPlannerCallInvocationRecord = {
+  kind: 'closed-turn-planner-call',
+  stage: 'invoked',
+  duty: plannerPreparation.duty,
+  invocationId: plannerPreparation.invocationId,
+  preparationCommitRef: plannerPreparationCommit,
+  invokedAt: '2026-10-16T00:00:01.000Z',
+};
+
+const plannerReturned: ClosedTurnPlannerCallReturnRecord = {
+  kind: 'closed-turn-planner-call',
+  stage: 'returned',
+  duty: plannerPreparation.duty,
+  invocationId: plannerPreparation.invocationId,
+  publication: {
+    scope: TASK_SCOPE,
+    revisionId: 'plan-revision:task-agent-activity:2',
+    sequence: 2,
+    predecessor: {
+      revisionId: 'plan-revision:task-agent-activity:1',
+      sequence: 1,
+      contentDigest: `sha256:${'5'.repeat(64)}`,
+    },
+    snapshot: {
+      title: 'Planner returned plan',
+      summary: 'One returned whole-task plan.',
+      completeness: { scope: 'whole-task', status: 'complete' },
+      acceptanceCriteria: [{ criterionId: 'criterion-1', description: 'the plan is returned' }],
+      nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Work', intent: 'Do the work', definition: {} }],
+      phases: [],
+      relations: [],
+    },
+    reason: { kind: 'adjustment', text: 'planner return', basisRefs: [] },
+    source: {
+      requirementId: 'requirement-1',
+      inputRevision: 1,
+      draftId: 'draft-1',
+      draftRevisionVersion: 1,
+      draftRevisionHash: 'draft-hash-1',
+      confirmationRef: 'confirmation-1',
+      evidenceRefs: [],
+    },
+    historyCoverage: 'complete-from-task-start',
+    publishedAt: '2026-10-16T00:00:02.000Z',
+    publishedBy: 'planner',
+  },
+  decision: 'continue',
+  returnedAt: '2026-10-16T00:00:02.000Z',
+};
+
+function plannerSource(overrides: Partial<AgentActivityPlannerSource> = {}): AgentActivityPlannerSource {
+  return {
+    sourceId: 'closed-turn-planner-call-1',
+    ownerId: 'humanagent.runtime.orchestration.closed-turn-planner-call',
+    commitRefs: [],
+    evidenceRefs: [plannerEvidence],
+    boundLive: undefined,
+    terminalCommitRefs: [],
+    prepared: plannerPreparation,
+    preparationCommitRef: plannerPreparationCommit,
+    closure: plannerClosure,
+    resumedSegment: resumedOpened,
+    ...overrides,
+  };
+}
+
+// The Planner's own incarnation at the closed turn's allocation epoch 1, under a
+// Task recovery authority at epoch 3.
+const plannerAuthority: AgentActivityCurrentAuthority = {
+  taskId: TASK,
+  executionEpoch: 3,
+  locations: [{
+    instance: incarnationInstance(plannerIncarnation),
+    assignmentId: plannerIncarnation.assignmentId,
+    businessTurnId: 'turn-2',
+    segmentId: 'segment-2',
+  }],
+};
+
+function plannerInput(
+  query: SelectTaskAgentActivityInput['query'],
+  plannerCalls: readonly AgentActivityPlannerSource[],
+  currentAuthority: AgentActivityCurrentAuthority | undefined = plannerAuthority,
+): SelectTaskAgentActivityInput {
+  return {
+    taskId: TASK,
+    query,
+    currentAuthority,
+    nativeAllocations: [],
+    activeTurns: [],
+    resumedSegments: [],
+    childInvocations: [],
+    runtimePoolLeases: [],
+    milestoneReviews: [],
+    plannerCalls,
+    unavailableSources: [],
+  };
+}
+
 // Only the real live handles are authoritative current locations.
 const authority: AgentActivityCurrentAuthority = {
   taskId: TASK,
@@ -699,4 +935,77 @@ test('a live handle with terminal commits is history, not a source conflict', ()
   assert.equal(outcome.value.historical[0]!.sourceKind, 'active-turn');
   assert.equal(outcome.value.historical[0]!.currency, 'historical');
   assert.ok(outcome.value.historical[0]!.commitRefs.includes(activeCommit));
+});
+
+test('a closed-turn planner call keeps pending, returned, live and forged terminal truth apart', () => {
+  // A: pending (invoked, not returned) stays unknown even though the Task
+  // authority epoch 3 is newer than the Planner allocation epoch 1.
+  const pending = selectTaskAgentActivity(plannerInput({ taskId: TASK }, [plannerSource({
+    invoked: plannerInvoked,
+    invocationCommitRef: plannerInvocationCommit,
+  })]));
+  assert.equal(pending.ok, true);
+  if (!pending.ok) return;
+  assert.equal(
+    pending.value.historical.some((record) => record.sourceKind === 'closed-turn-planner-call'),
+    false,
+  );
+  const pendingRecord = recordOf(pending.value.unknown, 'closed-turn-planner-call');
+  assert.equal(pendingRecord.currency, 'unknown');
+  assert.equal(pendingRecord.missingSource, 'live-or-terminal-evidence');
+  assert.equal(pendingRecord.executionEpoch, 1);
+  assert.equal(pendingRecord.businessTurnId, 'turn-2');
+  assert.equal(pendingRecord.segmentId, 'segment-2');
+  assert.equal('objective' in pendingRecord, false);
+  assert.equal('attempt' in pendingRecord, false);
+
+  // B: only the real returned record and its own commit are history.
+  const returned = selectTaskAgentActivity(plannerInput({ taskId: TASK }, [plannerSource({
+    invoked: plannerInvoked,
+    invocationCommitRef: plannerInvocationCommit,
+    returned: plannerReturned,
+    returnCommitRef: plannerReturnCommit,
+    terminalCommitRefs: [plannerReturnCommit],
+  })]));
+  assert.equal(returned.ok, true);
+  if (!returned.ok) return;
+  assert.equal(returned.value.current.length, 0);
+  const returnedRecord = recordOf(returned.value.historical, 'closed-turn-planner-call');
+  assert.equal(returnedRecord.currency, 'historical');
+  for (const ref of [plannerPreparationCommit, plannerInvocationCommit, plannerReturnCommit]) {
+    assert.ok(returnedRecord.commitRefs.includes(ref));
+  }
+
+  // C: a real live Planner at an exact matching location is current, and the
+  // query selects it despite the Task authority epoch 3.
+  const live = selectTaskAgentActivity(plannerInput({
+    taskId: TASK,
+    instance: incarnationInstance(plannerIncarnation),
+    businessTurnId: 'turn-2',
+    segmentId: 'segment-2',
+  }, [plannerSource({
+    invoked: plannerInvoked,
+    invocationCommitRef: plannerInvocationCommit,
+    boundLive: true,
+  })]));
+  assert.equal(live.ok, true);
+  if (!live.ok) return;
+  assert.equal(live.value.mode, 'selected');
+  assert.equal(live.value.selected?.length, 1);
+  assert.equal(live.value.selected?.[0]?.sourceKind, 'closed-turn-planner-call');
+  const liveRecord = recordOf(live.value.current, 'closed-turn-planner-call');
+  assert.equal(liveRecord.currency, 'current');
+  assert.equal(liveRecord.businessTurnId, 'turn-2');
+  assert.equal(liveRecord.segmentId, 'segment-2');
+
+  // D: terminal commits without a returned record cannot claim Planner finality.
+  const forged = selectTaskAgentActivity(plannerInput({ taskId: TASK }, [plannerSource({
+    invoked: plannerInvoked,
+    invocationCommitRef: plannerInvocationCommit,
+    terminalCommitRefs: [plannerCheckpointCommit],
+  })]));
+  assert.equal(forged.ok, false);
+  if (forged.ok) return;
+  assert.equal(forged.failure.code, 'agent-activity.source-conflict');
+  assert.equal(forged.failure.ownerId, SELECTOR_OWNER_ID);
 });

@@ -1826,6 +1826,72 @@ test('agent activity keeps a missing attempt undefined and rejects an illegal at
   assert.throws(() => validateTaskAgentActivityOwnershipRecord(activityRecord({ attempt: 0 })), ContractError);
 });
 
+test('agent activity accepts closed-turn planner-call without objective', () => {
+  const plannerTask = id('task', 'ui-task-implicit-draft-2');
+  const plannerInstance: TaskExecutionInstanceIdentity = {
+    kind: 'incarnation',
+    incarnation: {
+      runtimeId: 'orchestration-runtime-1',
+      generation: 1,
+      agentInstanceId: 'd5b33ff4-ee6a-4b5b-bbff-bd5fe0eb0715',
+      roleId: 'orchestration',
+      taskId: plannerTask,
+      assignmentId: 'planner:active-turn-ui-operation-1',
+      executionEpoch: 1,
+    },
+  };
+  const common = {
+    taskId: plannerTask,
+    instance: plannerInstance,
+    assignmentId: 'planner:active-turn-ui-operation-1',
+    executionEpoch: 1,
+    currency: 'unknown',
+    commitRefs: [],
+    evidenceRefs: [],
+  } as const;
+
+  const plannerRecord = {
+    ...common,
+    sourceKind: 'closed-turn-planner-call',
+  } as unknown as TaskAgentActivityOwnershipRecord;
+  assert.doesNotThrow(() => validateTaskAgentActivityOwnershipRecord(plannerRecord));
+  const validated = validateTaskAgentActivityOwnershipRecord(plannerRecord);
+  assert.equal(validated, plannerRecord);
+  assert.equal(validated.sourceKind, 'closed-turn-planner-call');
+  assert.equal(validated.objective, undefined);
+  assert.equal('objective' in validated, false);
+  assert.equal('attempt' in validated, false);
+  assert.equal(validated.commitRefs.length, 0);
+  assert.equal(validated.evidenceRefs.length, 0);
+
+  const plannerRecordWithObjective = {
+    ...plannerRecord,
+    objective: 'plan the active turn',
+  } as TaskAgentActivityOwnershipRecord;
+  assert.equal(
+    validateTaskAgentActivityOwnershipRecord(plannerRecordWithObjective).objective,
+    'plan the active turn',
+  );
+
+  const assignmentRecordWithoutObjective = {
+    ...common,
+    sourceKind: 'active-turn',
+  } as unknown as TaskAgentActivityOwnershipRecord;
+  assert.throws(
+    () => validateTaskAgentActivityOwnershipRecord(assignmentRecordWithoutObjective),
+    ContractError,
+  );
+
+  const plannerRecordWithEmptyObjective = {
+    ...plannerRecord,
+    objective: '',
+  } as TaskAgentActivityOwnershipRecord;
+  assert.throws(
+    () => validateTaskAgentActivityOwnershipRecord(plannerRecordWithEmptyObjective),
+    ContractError,
+  );
+});
+
 test('agent activity selection query rejects mixed and half-formed selectors', () => {
   // No instance identity, but a narrowing field: rejected.
   assert.throws(() => validateTaskAgentActivitySelectionQuery({ taskId: activityTaskA, attempt: 1 }), ContractError);

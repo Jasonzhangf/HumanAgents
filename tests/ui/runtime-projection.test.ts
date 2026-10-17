@@ -683,6 +683,27 @@ const agentUnknownRecord: TaskAgentActivityOwnershipRecord = {
   evidenceRefs: [agentEvidence('evidence-unknown')],
 };
 
+// The seventh source carries no authoritative Planner objective, so the record
+// omits the key entirely and the projection must keep it absent.
+const agentPlannerRecord: TaskAgentActivityOwnershipRecord = {
+  taskId: agentTaskId,
+  instance: incarnationInstance({
+    runtimeId: 'runtime-planner',
+    executionEpoch: 1,
+    roleId: 'orchestration',
+    generation: 1,
+    agentInstanceId: 'agent-planner',
+    assignmentId: 'planner:active-turn-ui-operation-1',
+  }),
+  assignmentId: 'planner:active-turn-ui-operation-1',
+  executionEpoch: 1,
+  businessTurnId: 'turn-planner',
+  sourceKind: 'closed-turn-planner-call',
+  currency: 'historical',
+  commitRefs: [{ commitId: 'commit-planner', journalSeq: 21, recordDigest: 'digest-commit-planner' }],
+  evidenceRefs: [agentEvidence('evidence-planner')],
+};
+
 const agentActivityScope: RuntimeReadScope = {
   kind: 'task', projectKey: 'project-agent-activity', mode: 'fake', taskId: agentTaskId,
 };
@@ -714,6 +735,16 @@ const agentSelectedValue: AgentActivityValue = {
   unavailableSources: [],
 };
 const agentSelectedOutcome: TaskAgentActivitySelectionOutcome = { ok: true, value: agentSelectedValue };
+
+const agentPlannerValue: AgentActivityValue = {
+  taskId: agentTaskId,
+  mode: 'catalog',
+  current: [],
+  historical: [agentPlannerRecord],
+  unknown: [],
+  unavailableSources: [],
+};
+const agentPlannerOutcome: TaskAgentActivitySelectionOutcome = { ok: true, value: agentPlannerValue };
 
 class AgentActivityPortElement {
   readonly children: AgentActivityPortElement[] = [];
@@ -864,3 +895,37 @@ test('agent activity projection preserves unknown, unavailable and failure meani
   });
 });
 
+test('agent activity projection renders a closed-turn planner call without a fabricated objective', async () => {
+  const result = projectRuntimeAgentActivity(agentPlannerOutcome, agentActivityScope);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.mode, 'catalog');
+  assert.equal(result.value.historical.length, 1);
+  assert.equal(result.value.current.length, 0);
+  assert.equal(result.value.unknown.length, 0);
+
+  const projected = result.value.historical[0];
+  assert.equal(projected.sourceKind, 'closed-turn-planner-call');
+  assert.equal(projected.sourceKindLabel, '回合收口规划');
+  assert.equal(projected.currency, 'historical');
+  assert.equal(projected.currencyLabel, '历史记录');
+  assert.equal(projected.objective, undefined);
+  assert.equal('objective' in projected, false);
+  assert.equal(projected.assignmentId, 'planner:active-turn-ui-operation-1');
+  assert.equal(projected.businessTurnId, 'turn-planner');
+  assert.equal(projected.instance.runtimeId, 'runtime-planner');
+  assert.equal(
+    projected.instance.kind === 'incarnation' ? projected.instance.agentInstanceId : undefined,
+    'agent-planner',
+  );
+  assert.deepEqual(projected.commitRefs, agentPlannerRecord.commitRefs);
+  assert.deepEqual(projected.evidenceRefs, agentPlannerRecord.evidenceRefs);
+
+  const { renderAgentActivity } = await import(agentActivityModuleUrl);
+  const view = renderAgentActivity(result, { element: agentActivityElement });
+  const rendered = agentActivityText(view.element);
+  assert.equal(/回合收口规划/.test(rendered), true, rendered);
+  assert.equal(/closed-turn-planner-call/.test(rendered), false, rendered);
+  assert.equal(/undefined/.test(rendered), false, rendered);
+  view.dispose();
+});

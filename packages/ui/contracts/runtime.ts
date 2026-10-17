@@ -435,18 +435,16 @@ export type RuntimeAgentActivityInstanceProjection =
       readonly agentInstanceId: string;
     };
 
-export interface RuntimeAgentActivityEntryProjection {
+interface RuntimeAgentActivityEntryProjectionCommon {
   readonly taskId: TaskId;
   readonly instance: RuntimeAgentActivityInstanceProjection;
   readonly assignmentId: string;
   /** Present only when the source record carried a real attempt; never defaulted. */
   readonly attempt?: number;
   readonly executionEpoch: number;
-  readonly objective: string;
   readonly businessTurnId?: string;
   readonly segmentId?: string;
   readonly nodeId?: string;
-  readonly sourceKind: TaskAgentActivitySourceKind;
   readonly sourceKindLabel: string;
   readonly currency: TaskAgentActivityCurrency;
   readonly currencyLabel: string;
@@ -454,6 +452,23 @@ export interface RuntimeAgentActivityEntryProjection {
   readonly commitRefs: readonly RuntimeCommitRefProjection[];
   readonly evidenceRefs: readonly EvidenceRef[];
 }
+
+/**
+ * A `closed-turn-planner-call` instance carries no authoritative Planner
+ * `objective` (no persisted `WorkAssignment.objective` for the Planner record),
+ * so `objective` is optional for it only. Every other source kind keeps the
+ * mandatory non-empty `objective`. The projection never fabricates a role name
+ * or placeholder in its place.
+ */
+export type RuntimeAgentActivityEntryProjection =
+  | (RuntimeAgentActivityEntryProjectionCommon & {
+      readonly sourceKind: Exclude<TaskAgentActivitySourceKind, 'closed-turn-planner-call'>;
+      readonly objective: string;
+    })
+  | (RuntimeAgentActivityEntryProjectionCommon & {
+      readonly sourceKind: 'closed-turn-planner-call';
+      readonly objective?: string;
+    });
 
 /**
  * Pure UI projection of the frozen `TaskAgentActivitySelectionOutcome`. The

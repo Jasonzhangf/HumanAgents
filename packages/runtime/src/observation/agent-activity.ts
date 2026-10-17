@@ -1,7 +1,11 @@
 import {
+  assertSameScope,
   sameTaskExecutionInstanceIdentity,
+  validateActiveTurnProviderExecutionIdentityRef,
   validateTaskAgentActivityOwnershipRecord,
   validateTaskAgentActivitySelectionQuery,
+  validateTaskRuntimeIncarnation,
+  validateTurnClosureReference,
 } from '../../../contracts/src/index.js';
 import type {
   ActiveTurnBinding,
@@ -19,9 +23,19 @@ import type {
   TaskExecutionInstanceIdentity,
   TaskId,
   TaskRuntimeIncarnation,
+  TurnClosureReference,
   WorkAssignment,
 } from '../../../contracts/src/index.js';
-import type { ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
+import {
+  validateResumedTurnSegmentOpened,
+  type ResumedTurnSegmentOpened,
+} from '../../../contracts/src/active-turn-segments.js';
+import type {
+  ClosedTurnPlannerCallInvocationRecord,
+  ClosedTurnPlannerCallPreparationRecord,
+  ClosedTurnPlannerCallReturnRecord,
+} from '../orchestration/closed-turn-planner-call.js';
+import { sameJournalCommitRef } from '../checkpoints/coordinator.js';
 import type { RuntimeExecutionAllocation } from '../ui-runtime/coordinator.js';
 import type { AgentRuntimePoolManager } from '../orchestration/runtime-pool.js';
 
@@ -99,6 +113,23 @@ export interface AgentActivityReviewSource extends AgentActivitySourceEvidence {
   readonly objective: WorkAssignment['objective'];
 }
 
+/**
+ * One closed-turn Planner call decoded from its same-Organ-Journal stages. The
+ * preparation is required because it is the only record that carries the real
+ * acquired incarnation. Later stages are optional; a terminal fact exists only
+ * when the `returned` record and its own commit are both present.
+ */
+export interface AgentActivityPlannerSource extends AgentActivitySourceEvidence {
+  readonly prepared: ClosedTurnPlannerCallPreparationRecord;
+  readonly preparationCommitRef: JournalCommitRef;
+  readonly invoked?: ClosedTurnPlannerCallInvocationRecord;
+  readonly invocationCommitRef?: JournalCommitRef;
+  readonly returned?: ClosedTurnPlannerCallReturnRecord;
+  readonly returnCommitRef?: JournalCommitRef;
+  readonly closure?: TurnClosureReference;
+  readonly resumedSegment?: ResumedTurnSegmentOpened;
+}
+
 export interface SelectTaskAgentActivityInput {
   readonly taskId: TaskId;
   readonly query: TaskAgentActivitySelectionQuery;
@@ -109,10 +140,20 @@ export interface SelectTaskAgentActivityInput {
   readonly childInvocations: readonly AgentActivityChildSource[];
   readonly runtimePoolLeases: readonly AgentActivityPoolSource[];
   readonly milestoneReviews: readonly AgentActivityReviewSource[];
+  readonly plannerCalls?: readonly AgentActivityPlannerSource[];
   readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
 }
 
-type RecordBase = Omit<TaskAgentActivityOwnershipRecord, 'currency' | 'missingSource'>;
+// A distributive omit keeps each source variant's own required fields: the six
+// task-execution sources still require an objective, while the closed-turn
+// Planner call may omit it.
+type DistributiveOmit<TRecord, TKey extends PropertyKey> =
+  TRecord extends unknown ? Omit<TRecord, TKey> : never;
+
+type RecordBase = DistributiveOmit<
+  TaskAgentActivityOwnershipRecord,
+  'currency' | 'missingSource'
+>;
 
 type BuildResult =
   | {
@@ -178,7 +219,14 @@ function classify(
 ): { readonly currency: TaskAgentActivityOwnershipRecord['currency']; readonly missingSource?: string } {
   // A record whose epoch is older than the authoritative task epoch is history,
   // even if a live handle still exists. The identity keeps its own epoch.
-  if (authority !== undefined && authority.executionEpoch > base.executionEpoch) {
+  // A closed-turn Planner call carries the closed turn's allocation epoch, not
+  // the resumed segment's physical epoch, so Task epoch supersession cannot
+  // settle it. Planner finality requires a real returned stage commit below.
+  if (
+    base.sourceKind !== 'closed-turn-planner-call'
+    && authority !== undefined
+    && authority.executionEpoch > base.executionEpoch
+  ) {
     return { currency: 'historical' };
   }
   if (terminal) return { currency: 'historical' };
@@ -464,6 +512,177 @@ function buildReview(
   return { kind: 'record', record: makeRecord(base, source.boundLive, true, authority) };
 }
 
+function buildPlanner(
+  source: AgentActivityPlannerSource,
+  taskId: TaskId,
+  authority: AgentActivityCurrentAuthority | undefined,
+): BuildResult {
+  const prepared = source.prepared;
+  validateTaskRuntimeIncarnation(prepared.incarnation, taskId);
+  validateActiveTurnProviderExecutionIdentityRef(prepared.execution);
+  if (prepared.duty.taskId.value !== taskId.value) {
+    return conflict(
+      `planner call ${source.sourceId} duty belongs to task ${prepared.duty.taskId.value}, not ${taskId.value}`,
+    );
+  }
+  if (prepared.duty.scope.taskId?.value !== taskId.value) {
+    return conflict(
+      `planner call ${source.sourceId} duty scope does not name task ${taskId.value}`,
+    );
+  }
+  if (prepared.execution.taskId.value !== taskId.value
+    || prepared.execution.runtimeId !== prepared.incarnation.runtimeId
+    || prepared.incarnation.executionEpoch !== prepared.execution.executionEpoch) {
+    return conflict(
+      `planner call ${source.sourceId} Provider execution does not match its incarnation`,
+    );
+  }
+  if (!sameTaskExecutionInstanceIdentity(
+    { kind: 'incarnation', incarnation: prepared.lease.incarnation },
+    { kind: 'incarnation', incarnation: prepared.incarnation },
+  )) {
+    return conflict(
+      `planner call ${source.sourceId} lease incarnation does not match its prepared incarnation`,
+    );
+  }
+  if (prepared.lease.executionEpoch !== prepared.incarnation.executionEpoch
+    || prepared.lease.assignmentId !== prepared.incarnation.assignmentId) {
+    return conflict(
+      `planner call ${source.sourceId} lease does not match its prepared assignment or physical epoch`,
+    );
+  }
+  if (prepared.checkpoint.checkpoint.id.value !== prepared.duty.checkpointId.value
+    || prepared.checkpoint.checkpoint.scope.taskId?.value !== taskId.value
+    || !sameJournalCommitRef(prepared.checkpoint.commitRef, prepared.duty.checkpointCommitRef)) {
+    return conflict(
+      `planner call ${source.sourceId} checkpoint does not match its duty anchor`,
+    );
+  }
+  const hasInvoked = source.invoked !== undefined;
+  const hasInvocationCommit = source.invocationCommitRef !== undefined;
+  if (hasInvoked !== hasInvocationCommit) {
+    return conflict(
+      `planner call ${source.sourceId} invocation stage and invocation commit must be present together`,
+    );
+  }
+  const hasReturned = source.returned !== undefined;
+  const hasReturnCommit = source.returnCommitRef !== undefined;
+  if (hasReturned !== hasReturnCommit) {
+    return conflict(
+      `planner call ${source.sourceId} return stage and return commit must be present together`,
+    );
+  }
+  if (source.invoked !== undefined) {
+    const invoked = source.invoked;
+    if (invoked.kind !== 'closed-turn-planner-call' || invoked.stage !== 'invoked') {
+      return conflict(`planner call ${source.sourceId} invocation record is not an invoked stage`);
+    }
+    if (invoked.duty.dutyKey !== prepared.duty.dutyKey
+      || invoked.duty.inputDigest !== prepared.duty.inputDigest
+      || invoked.invocationId !== prepared.invocationId
+      || !sameJournalCommitRef(invoked.preparationCommitRef, source.preparationCommitRef)) {
+      return conflict(
+        `planner call ${source.sourceId} invocation record does not match its preparation`,
+      );
+    }
+  }
+  if (source.returned !== undefined) {
+    if (source.invoked === undefined) {
+      return conflict(`planner call ${source.sourceId} returned without an invoked stage`);
+    }
+    const returned = source.returned;
+    if (returned.kind !== 'closed-turn-planner-call' || returned.stage !== 'returned') {
+      return conflict(`planner call ${source.sourceId} return record is not a returned stage`);
+    }
+    if (returned.duty.dutyKey !== prepared.duty.dutyKey
+      || returned.duty.inputDigest !== prepared.duty.inputDigest
+      || returned.invocationId !== prepared.invocationId
+      || returned.publication.scope.taskId.value !== taskId.value) {
+      return conflict(
+        `planner call ${source.sourceId} return record does not match its preparation`,
+      );
+    }
+  }
+  // A checkpoint or any other source's terminal commit cannot stand in for the
+  // Planner's own returned record.
+  if (!hasReturned) {
+    if (source.terminalCommitRefs.length > 0) {
+      return conflict(
+        `planner call ${source.sourceId} cannot claim terminal commits without a returned record`,
+      );
+    }
+  } else if (source.terminalCommitRefs.some(
+    (ref) => !sameJournalCommitRef(ref, source.returnCommitRef!),
+  )) {
+    return conflict(
+      `planner call ${source.sourceId} terminal commit does not match its return commit`,
+    );
+  }
+
+  let businessTurnId: string | undefined;
+  if (source.closure !== undefined) {
+    // The optional second parameter is a TurnSummaryEvidenceContext, never a
+    // scope. This input carries no such context, so validate the real closure
+    // alone and associate only its scope and refs with the duty here.
+    validateTurnClosureReference(source.closure);
+    assertSameScope(source.closure.identity.scopeRef, prepared.duty.scope);
+    if (source.closure.closureRef !== prepared.duty.closureRef
+      || source.closure.checkpointId.value !== prepared.duty.checkpointId.value
+      || source.closure.identity.taskRef.value !== taskId.value
+      || source.closure.identity.executionEpoch !== prepared.incarnation.executionEpoch) {
+      return conflict(
+        `planner call ${source.sourceId} closure does not match its duty`,
+      );
+    }
+    businessTurnId = source.closure.identity.turnId;
+  }
+
+  let segmentId: string | undefined;
+  if (source.resumedSegment !== undefined) {
+    validateResumedTurnSegmentOpened(source.resumedSegment);
+    if (source.resumedSegment.binding.incarnation.taskId.value !== taskId.value
+      || source.resumedSegment.binding.execution.executionEpoch
+        !== prepared.checkpoint.checkpoint.executionEpoch
+      || source.resumedSegment.businessTurnRef.execution.executionEpoch
+        !== prepared.incarnation.executionEpoch) {
+      return conflict(
+        `planner call ${source.sourceId} resumed segment does not match its task or epochs`,
+      );
+    }
+    if (source.closure !== undefined
+      && source.resumedSegment.businessTurnRef.businessTurnId !== source.closure.identity.turnId) {
+      return conflict(
+        `planner call ${source.sourceId} resumed segment does not continue its closed turn`,
+      );
+    }
+    segmentId = source.resumedSegment.segmentId;
+  }
+
+  const base: RecordBase = {
+    taskId: prepared.incarnation.taskId,
+    instance: { kind: 'incarnation', incarnation: prepared.incarnation },
+    assignmentId: prepared.incarnation.assignmentId,
+    executionEpoch: prepared.incarnation.executionEpoch,
+    sourceKind: 'closed-turn-planner-call',
+    ...(businessTurnId === undefined ? {} : { businessTurnId }),
+    ...(segmentId === undefined ? {} : { segmentId }),
+    commitRefs: [
+      source.preparationCommitRef,
+      ...(source.invocationCommitRef === undefined ? [] : [source.invocationCommitRef]),
+      ...(source.returnCommitRef === undefined ? [] : [source.returnCommitRef]),
+      prepared.grantCommitRef,
+      prepared.admissionCommitRef,
+      prepared.duty.checkpointCommitRef,
+      ...source.commitRefs,
+    ],
+    evidenceRefs: [...source.evidenceRefs],
+  };
+  return {
+    kind: 'record',
+    record: makeRecord(base, source.boundLive, hasReturned, authority),
+  };
+}
+
 function safeBuild(build: () => BuildResult): BuildResult {
   try {
     return build();
@@ -579,6 +798,10 @@ export function selectTaskAgentActivity(
   }
   for (const source of input.milestoneReviews) {
     const failure = apply(safeBuild(() => buildReview(source, input.taskId, authority)));
+    if (failure) return { ok: false, failure };
+  }
+  for (const source of input.plannerCalls ?? []) {
+    const failure = apply(safeBuild(() => buildPlanner(source, input.taskId, authority)));
     if (failure) return { ok: false, failure };
   }
 
