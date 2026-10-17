@@ -6,6 +6,99 @@ import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// Failure likelihood is unknown. False stop/drain/resource PASS would hide an
+// unfinished execution; these in-memory counterexamples cost no model request.
+function assertExplicitStop(receipt) {
+  assert.equal(receipt.portStop?.receipt.status, 'accepted', 'intentional port stop accepted');
+  assert.equal(receipt.stop?.requested, true, 'driver stop requested');
+  assert.equal(receipt.submit?.payload.status, 'accepted', 'submit accepted before stop');
+  assert.equal(receipt.generationAttempts, 1, 'one generation attempt');
+  const request = receipt.stopTrigger.request;
+  const execution = receipt.fixture.binding.execution;
+  const scope = receipt.fixture.binding.scope;
+  assert.equal(receipt.stopTrigger.event.kind, 'provider.output');
+  assert.ok(receipt.stopTrigger.event.summary.trim(), 'nonempty output triggers stop');
+  assert.equal(receipt.stopTrigger.terminalSeen, false, 'stop before terminal');
+  assert.ok(receipt.stopTrigger.lifecycle.some((event) => event.phase === 'dispatched'
+    && event.requestId === request.requestId), 'dispatched before stop');
+  assert.equal(new Set(receipt.lifecycle.map((event) => event.requestId)).size, 1);
+  assert.equal(request.parentRequestId, undefined);
+  for (const identity of [receipt.portStop.input, receipt.portStop.receipt, receipt.settlement]) {
+    assert.equal(identity.requestId, request.requestId);
+    assert.equal(identity.turnId, request.turnId);
+    assert.equal(identity.runtimeId, execution.runtimeId);
+    assert.equal(identity.executionEpoch, execution.executionEpoch);
+    assert.deepEqual(identity.operationId, scope.operationId);
+    assert.deepEqual(identity.taskId, scope.taskId);
+  }
+  assert.deepEqual(receipt.stop.operationId, scope.operationId);
+  assert.ok(receipt.drain, 'producer drain exists');
+  assert.deepEqual(receipt.drain.execution, execution);
+  assert.equal(receipt.drain.boundaryId, receipt.drainBoundaryId);
+  assert.equal(receipt.drain.requests.length, 1);
+  assert.deepEqual(receipt.drain.requests[0].request, request);
+  const facts = receipt.acceptedRawFacts.filter((entry) => entry.envelope.request.requestId === request.requestId);
+  assert.ok(facts.length, 'cold accepted raw facts');
+  assert.equal(receipt.drain.requests[0].lastProducerSeq, Math.max(...facts.map((entry) => entry.envelope.producerSeq)), 'final accepted producer sequence');
+  const trigger = facts.find((entry) => entry.envelope.producerSeq === receipt.stopTrigger.producerSeq);
+  assert.equal(trigger?.envelope.fact.kind, 'content', 'trigger content durably accepted before stop');
+  assert.deepEqual(trigger.envelope.scope, scope);
+  assert.deepEqual(trigger.envelope.execution, execution);
+  assert.equal(trigger.envelope.request.requestId, receipt.stopTrigger.event.providerEvent.requestId);
+  assert.equal(trigger.envelope.request.turnId, receipt.stopTrigger.event.providerEvent.turnId);
+  assert.ok(receipt.stopTrigger.rawText.trim(), 'cold raw content readable');
+  assert.equal(receipt.closure?.state, 'stopped');
+  assert.equal(receipt.settlement?.state, 'stopped');
+  assert.equal(receipt.settlement.resourceRelease.state, 'released');
+  assert.equal(receipt.settlement.persistence.state, 'committed');
+  assert.equal(receipt.settlement.error, undefined);
+  // requests() is the durable phase history, not one current row per request.
+  assert.equal(new Set(receipt.durableRequests.map((record) => record.request.requestId)).size, 1);
+  assert.deepEqual(receipt.durableRequests.at(-1).request, request);
+  assert.equal(receipt.durableRequests.at(-1).phase, 'cancelled');
+  assert.equal(receipt.lifecycle.at(-1)?.phase, 'cancelled');
+  assert.equal(receipt.close?.state, 'closed');
+  assert.equal(receipt.pendingStart, false);
+  assert.equal(receipt.cleanupError, undefined);
+  assert.equal(receipt.cleanup, 'closed');
+}
+
+if (process.argv.includes('--assertion-self-test')) {
+  const request = { turnId: 'turn', requestId: 'request' };
+  const execution = { runtimeId: 'runtime', executionEpoch: 1 };
+  const scope = { taskId: { value: 'task' }, operationId: { value: 'operation' } };
+  const identity = { ...request, ...execution, ...scope };
+  const good = {
+    portStop: { input: identity, receipt: { ...identity, status: 'accepted' } },
+    stop: { requested: true, operationId: scope.operationId }, submit: { payload: { status: 'accepted' } },
+    generationAttempts: 1, fixture: { binding: { execution, scope } },
+    stopTrigger: { request, event: { kind: 'provider.output', summary: '1', providerEvent: request }, terminalSeen: false,
+      lifecycle: [{ ...identity, phase: 'dispatched' }], producerSeq: 1, rawText: '1' },
+    drainBoundaryId: 'boundary', drain: { execution, boundaryId: 'boundary', requests: [{ request, lastProducerSeq: 1 }] },
+    acceptedRawFacts: [{ envelope: { request, execution, scope, producerSeq: 1, fact: { kind: 'content' } } }],
+    closure: { state: 'stopped' }, settlement: { ...identity, state: 'stopped', resourceRelease: { state: 'released' }, persistence: { state: 'committed' } },
+    durableRequests: [{ request, phase: 'dispatching' }, { request, phase: 'dispatched' }, { request, phase: 'cancelled' }],
+    lifecycle: [{ ...identity, phase: 'cancelled' }],
+    close: { state: 'closed' }, pendingStart: false, cleanup: 'closed',
+  };
+  assertExplicitStop(good);
+  const cases = [
+    ['missing accepted stop', (r) => { delete r.portStop; r.closure.state = r.settlement.state = 'succeeded'; }, /intentional port stop accepted/],
+    ['missing drain', (r) => { delete r.drain; }, /producer drain exists/],
+    ['wrong final producer sequence', (r) => { r.drain.requests[0].lastProducerSeq = 0; }, /final accepted producer sequence/],
+    ['pending resource release', (r) => { r.settlement.resourceRelease.state = 'pending'; }, /released/],
+    ['nonclosed close', (r) => { r.close.state = 'pending'; }, /closed/],
+  ];
+  for (const [name, mutate, message] of cases) {
+    const bad = structuredClone(good);
+    mutate(bad);
+    assert.throws(() => assertExplicitStop(bad), message);
+    console.log(`counterexample rejected: ${name}`);
+  }
+  console.log('PASS: same stop assertion; 3 failure groups, 5 counterexamples; 0 requests, no fixture/admission');
+  process.exit(0);
+}
+
 const proofRuntimeRoot = process.env.HUMANAGENT_PROVIDER_PROOF_RUNTIME_ROOT
   ?? fileURLToPath(new URL('../../../dist/app/', import.meta.url));
 
@@ -45,11 +138,15 @@ const CREDENTIAL_REF = process.env.HUMANAGENT_PROVIDER_CREDENTIAL_REF;
 const TOOL_LOOP = process.env.HUMANAGENT_RCC_TOOL_LOOP === '1';
 const CONTINUE_CURRENT_TURN = process.env.HUMANAGENT_RCC_CONTINUE_CURRENT_TURN === '1';
 const NATIVE_TURN = TOOL_LOOP || CONTINUE_CURRENT_TURN;
+const EXPLICIT_STOP = process.env.HUMANAGENT_RCC_EXPLICIT_STOP === '1';
+// Durable Runtime/JSONL fixture is shared by native-turn modes and explicit stop.
+const DURABLE = NATIVE_TURN || EXPLICIT_STOP;
 assert.ok(['responses', 'openai', 'anthropic'].includes(PROTOCOL), 'unsupported RCC proof protocol');
 assert.ok(['rcc', 'http'].includes(SOURCE), 'unsupported provider source');
 assert.ok(CREDENTIAL_REF === undefined || SOURCE === 'http', 'credentialRef requires source = "http"');
 assert.ok(CREDENTIAL_REF === undefined || CREDENTIAL_REF.startsWith('env:'), 'credentialRef must be an env reference');
 assert.ok(!(TOOL_LOOP && CONTINUE_CURRENT_TURN), 'tool loop and continue-current-turn are distinct proof modes');
+assert.ok(!(EXPLICIT_STOP && NATIVE_TURN), 'explicit stop is exclusive of tool loop and continue-current-turn');
 const ENDPOINT = { responses: '/v1/responses', openai: '/v1/chat/completions', anthropic: '/v1/messages' }[PROTOCOL];
 
 // Known failure: old proof bypassed default composition and deleted evidence.
@@ -90,7 +187,9 @@ async function run() {
   const paths = await resolveRuntimePaths({ workspace: process.cwd(), controlRoot: join(homedir(), '.humanagent') });
   const ownedRoot = canonicalOwnedRoot(paths.controlRoot, TOOL_LOOP
     ? `provider-n4-protocol-proof/${PROTOCOL}`
-    : CONTINUE_CURRENT_TURN ? 'provider-current-turn-proof-r1-20261013' : 'provider-protocol-live-r1-20261013');
+    : CONTINUE_CURRENT_TURN ? 'provider-current-turn-proof-r1-20261013'
+    : EXPLICIT_STOP ? 'provider-explicit-stop-proof-20261017'
+    : 'provider-protocol-live-r1-20261013');
   await mkdir(ownedRoot, { recursive: true });
   const root = await mkdtemp(join(await realpath(ownedRoot), 'run-'));
   const artifactRoot = join(root, 'evidence');
@@ -131,22 +230,24 @@ async function run() {
       endpoint: `${BASE_URL}${ENDPOINT}`, protocol: PROTOCOL, model: MODEL, source: SOURCE, route: ROUTE,
       prompt: TOOL_LOOP
         ? 'Call the echo_probe tool exactly once with the argument {"probeId":"n4-proof"}, then reply with the final word OK after you receive TOOL_OK.'
-        : 'Reply with the single word OK.',
+        : EXPLICIT_STOP
+          ? 'Print the numbers 1 to 200, one number per line. Do not call any tool.'
+          : 'Reply with the single word OK.',
     },
     generationAttempts: 0, artifactRoot, receiptPath, lifecycle: [], observed: [], assets: [],
     scopeClaim: 'Provider dependency consumer only; no Task/standard turn/native/UI/G5 claim',
   };
   const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(artifactRoot));
-  const { createJsonlActiveTurnJournal } = NATIVE_TURN
+  const { createJsonlActiveTurnJournal } = DURABLE
     ? await import(proofModuleUrl('adapters/jsonl/src/active-turn.js')) : {};
-  const { ActiveTurnContext } = NATIVE_TURN
+  const { ActiveTurnContext } = DURABLE
     ? await import(proofModuleUrl('runtime/src/context/active-turn-context.js')) : {};
-  const { providerRawContentReader } = NATIVE_TURN
+  const { providerRawContentReader } = DURABLE
     ? await import(proofModuleUrl('adapters/provider/src/evidence.js')) : {};
   const transientInstructions = { text: `Continuation proof ${runId}: reply with the single word CONTINUED.` };
   let turn;
   let journal;
-  const rawReader = NATIVE_TURN ? providerRawContentReader(sink) : undefined;
+  const rawReader = DURABLE ? providerRawContentReader(sink) : undefined;
   // This fixture binds real Runtime/JSONL producers, not a production Task admission.
   // Reconstruct before each read so the next request uses committed raw facts.
   async function latestCanonical() {
@@ -176,7 +277,7 @@ async function run() {
     for (const text of content.values()) units.push({ kind: 'message', role: 'assistant', text });
     return { units };
   }
-  const nativeHooks = NATIVE_TURN ? {
+  const nativeHooks = DURABLE ? {
     rawEvidence: sink,
     async registerRequest(registration) {
       if (!turn) {
@@ -210,8 +311,8 @@ async function run() {
       return { canonical };
     },
   } : {};
-  if (NATIVE_TURN) {
-    receipt.mode = TOOL_LOOP ? 'tool-loop' : 'continue-current-turn';
+  if (DURABLE) {
+    receipt.mode = EXPLICIT_STOP ? 'explicit-stop' : TOOL_LOOP ? 'tool-loop' : 'continue-current-turn';
     receipt.contextReads = [];
     receipt.requests = [];
     receipt.transientInstructions = transientInstructions;
@@ -228,8 +329,28 @@ async function run() {
       return { output, outputRefs: [], evidenceRefs: [ref], status: 'succeeded' };
     },
   } : undefined;
+  let intentionalStopInFlight = false;
+  const proofPort = EXPLICIT_STOP ? new Proxy(composition.port, {
+    get(target, key) {
+      if (key === 'requestStop') return async (input) => {
+        const call = { input };
+        // Cleanup stop is diagnostic only; it cannot replace intentional stop.
+        if (intentionalStopInFlight) receipt.portStop = call;
+        else (receipt.cleanupPortStops ??= []).push(call);
+        try {
+          call.receipt = await target.requestStop.call(target, input);
+          return call.receipt;
+        } catch (error) {
+          call.error = errorRecord(error);
+          throw error;
+        }
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) : composition.port;
   const driver = new ProviderAgentDriver({
-    port: composition.port, binding: composition.binding, runtimeId, taskId, operationId, executionEpoch: 1,
+    port: proofPort, binding: composition.binding, runtimeId, taskId, operationId, executionEpoch: 1,
     assignmentId: `assignment-${runId}`, scope, inputRefs: [], ownerId: 'humanagent.provider-proof',
     onRequestLifecycle: (event) => {
       receipt.lifecycle.push(event);
@@ -264,9 +385,41 @@ async function run() {
       // returns only after the final text request completes. That automatic
       // continuation is never a second continueCurrentTurn call.
       const observed = [];
+      let terminalSeen = false;
       for await (const event of driver.observe({ runtimeId })) {
         observed.push(event);
         receipt.observed.push(event);
+        terminalSeen ||= event.kind === 'provider.terminal';
+        if (EXPLICIT_STOP && !receipt.stopTrigger && !receipt.windowMissed && !terminalSeen
+          && event.kind === 'provider.output' && event.summary?.trim()) {
+          const cold = await ActiveTurnContext.reconstruct(journal, turn.admittedTurn.turnId);
+          const content = cold.entries().findLast((entry) => entry.envelope.request.requestId === event.providerEvent.requestId
+            && entry.envelope.fact.kind === 'content' && entry.envelope.fact.channel === 'assistant-text');
+          assert.ok(content, 'output raw content already durably accepted');
+          if (cold.entries().some((entry) => entry.envelope.request.requestId === event.providerEvent.requestId
+            && entry.envelope.fact.kind === 'request-complete')) {
+            receipt.windowMissed = 'raw terminal already accepted before output consumption';
+            continue;
+          }
+          receipt.stopTrigger = { event, request: content.envelope.request, producerSeq: content.envelope.producerSeq,
+            lifecycle: structuredClone(receipt.lifecycle), terminalSeen,
+            rawText: new TextDecoder().decode(await rawReader.read({ scope, content: content.envelope.fact.content })) };
+          assert.equal(receipt.submit.payload.status, 'accepted');
+          assert.ok(receipt.lifecycle.some((entry) => entry.phase === 'dispatched' && entry.requestId === event.providerEvent.requestId));
+          intentionalStopInFlight = true;
+          try {
+            receipt.stop = await driver.requestStop({ runtimeId, executionEpoch: 1, operationId });
+          } finally { intentionalStopInFlight = false; }
+          if (receipt.portStop.receipt.status === 'rejected') {
+            if (receipt.portStop.receipt.error?.code === 'stop.after-terminal') receipt.windowMissed = 'stop.after-terminal';
+            else throw receipt.portStop.receipt.error ?? new Error('intentional stop rejected');
+          }
+        }
+      }
+      if (EXPLICIT_STOP) {
+        if (!receipt.stopTrigger) receipt.windowMissed ??= 'stream ended before an eligible stop window';
+        receipt.drainBoundaryId = `provider-explicit-stop-${runId}`;
+        receipt.drain = await driver.closeProductionAndDrain({ execution: { runtimeId, executionEpoch: 1 }, boundaryId: receipt.drainBoundaryId });
       }
       if (TOOL_LOOP) {
         receipt.requests.push({ submit: receipt.submit, observed });
@@ -305,6 +458,7 @@ async function run() {
       if (NATIVE_TURN) receipt.executionActions.push('settle');
       receipt.closure = await driver.settle({ runtimeId, executionEpoch: 1 });
       receipt.settlement = driver.settlement();
+      if (EXPLICIT_STOP && receipt.settlement?.error) throw receipt.settlement.error;
     })(), 90_000, 'admission/generation');
   } catch (error) {
     expired = true;
@@ -315,7 +469,14 @@ async function run() {
       await bounded((async () => {
         try {
           if (active && !receipt.settlement) {
-            receipt.stop = await driver.requestStop({ runtimeId, executionEpoch: 1, operationId });
+            if (!EXPLICIT_STOP || !receipt.portStop) {
+              const stop = await driver.requestStop({ runtimeId, executionEpoch: 1, operationId });
+              if (EXPLICIT_STOP) receipt.cleanupStop = stop;
+              else receipt.stop = stop;
+            }
+            if (EXPLICIT_STOP) receipt.cleanupDrain = await driver.closeProductionAndDrain({
+              execution: { runtimeId, executionEpoch: 1 }, boundaryId: `cleanup-${runId}`,
+            });
             if (NATIVE_TURN) receipt.executionActions.push('settle');
             receipt.closure = await driver.settle({ runtimeId, executionEpoch: 1 });
             receipt.settlement = driver.settlement();
@@ -330,6 +491,12 @@ async function run() {
     receipt.cleanup = receipt.close?.state === 'closed' && !pendingStart && !receipt.cleanupError ? 'closed' : 'INCOMPLETE';
   }
   try {
+    if (EXPLICIT_STOP && turn) {
+      const cold = await ActiveTurnContext.reconstruct(journal, turn.admittedTurn.turnId);
+      receipt.durableRequests = cold.requests();
+      receipt.acceptedRawFacts = cold.entries();
+      receipt.journalRecords = await journal.replay();
+    }
     const refs = new Map();
     function collect(value) {
       if (!value || typeof value !== 'object') return;
@@ -451,15 +618,22 @@ async function run() {
         assert.deepEqual(event.operationId, operationId);
         assert.equal(event.executionEpoch, 1);
       }
-      assert.ok(receipt.observed.some((event) => event.kind === 'provider.output' && typeof event.summary === 'string' && event.summary.trim().length > 0), 'actual decoded text');
-      assert.ok(receipt.observed.some((event) => event.kind === 'provider.terminal' && event.terminalState === 'succeeded'), 'protocol terminal');
-      assert.equal(receipt.closure?.state, 'succeeded');
+      if (!EXPLICIT_STOP || !receipt.windowMissed) {
+        assert.ok(receipt.observed.some((event) => event.kind === 'provider.output' && typeof event.summary === 'string' && event.summary.trim().length > 0), 'actual decoded text');
+      }
+      if (!EXPLICIT_STOP) {
+        assert.ok(receipt.observed.some((event) => event.kind === 'provider.terminal' && event.terminalState === 'succeeded'), 'protocol terminal');
+        assert.equal(receipt.closure?.state, 'succeeded');
+        assert.equal(receipt.lifecycle.at(-1)?.phase, 'settled');
+      }
       assert.equal(receipt.settlement?.resourceRelease.state, 'released');
-      assert.equal(receipt.lifecycle.at(-1)?.phase, 'settled');
+      if (EXPLICIT_STOP && !receipt.windowMissed) assertExplicitStop(receipt);
     }
     assert.equal(receipt.close?.state, 'closed', 'close state must be the literal closed');
     assert.ok(receipt.close.evidenceRefs.some((ref) => receipt.assets.some((asset) => asset.ref.locator === ref.locator)), 'readable close evidence');
-    receipt.result = receipt.error ? 'FAIL' : receipt.generationAttempts === (NATIVE_TURN ? 2 : 1) ? 'PASS' : 'BLOCKED';
+    receipt.result = receipt.error || receipt.cleanup !== 'closed' ? 'FAIL'
+      : EXPLICIT_STOP && receipt.windowMissed ? 'UNVERIFIED'
+      : receipt.generationAttempts === (NATIVE_TURN ? 2 : 1) ? 'PASS' : 'BLOCKED';
   } catch (error) {
     receipt.assertionError = errorRecord(error);
     receipt.result = 'FAIL';
