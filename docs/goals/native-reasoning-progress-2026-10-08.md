@@ -16,6 +16,9 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- Provider并行基础已接收source `4e2ae409` 并合入 `f165256a`：可选通用并发声明、连续合法批次、顺序保存/continuation、全部在途signal取消，完整批次执行+durable persistence由同一producer覆盖。r112正常compile/原driver+replay46/46，原P1-L2实际RED→GREEN。r113对第二结果漏存做局部可执行反例，corrected sibling原断言实际RED（writes少call-a）→恢复GREEN，未新增测试。组合Provider编译0；来源clean无进程后正常remove/prune/pathabsent。fresh GCM r114已在唯一后继App接线树从f165执行r93/r109组合，不碰cross-turn owner。
+- 跨turn预算/wakeup source `7e8922eb` 已标准合流：原新case编译成功RED（waiting缺失），移除successor订阅再得wake-only RED（completed1非2），恢复后新1/1+受影响7/7。contracts/Appbuild0；原prepared-stop子沙盒EPERM由owner同compiled用例补1/1；组合Apptsc0、新case+prepared-stop2/2。来源clean无进程后正常remove/prune/pathabsent。两组件仅候选基础验收，不等于N物理runtime/完整Task或main交付。UX已释放安装/独占新fixture窗口，原gen20/p3不动。
+
 - r110 跨 turn 已实际编译成功并取得断言 RED：A 卡在第二轮 createDriver 时应为 implicit-admission.waiting，实际 undefined；产品修正进行中。r106 最终44/46，除fixture EPERM外，原P1-L2实际抓到 drain 在exact-output保存前返回，未接收；fresh OAuth技术r112原树已复现同一RED，修完整批次生产屏障，不弱化断言。r111独立入口计划已返回，owner已补读r59实际 requestReceipt.body：model/stream/input/tools结构确实存在，但不能据array无items推出socket根因；仍UNKNOWN。后继使用原真实Task脚本、单次独占fixture预算和正式pair/cleanup，不自动重放。UX正在完成p1只读验收，安装窗口尚未释放，本侧不安装/restart。
 
 - r109 只读接线观察已完成：child-producer 返回的工具 port 与 execution-composition 的包装 port 是并发声明的两处 owner；现有 native public fixture 已有预算2，尚缺双 invocation/latch。既有 r93 组合计划仍适用，不需要改 cross-turn coordinator/service。r107 已100次命令读取且0改动，owner 精确 INT、确认原PID消失后，由独立 OAuth GPT-6.1 medium r110 原树接手既有 r91 计划，避免重复探索；r106 Provider 修正继续，App 接线仍等基础验收后派发。
