@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- r235 READY 实读 `cqZ0gy` 两次真实出站body：epoch3/4均C1先C2、C1含child，key排序为actions/adoptedChildren/goal，旧字符位置断言无契约依据。r237 GCM在原cold树将其替换为checkpoint有序结构与child归属断言，并要求内存交换/删除/移动反例实际失败，原最终条件保持。r234 start/settle计划已接受；另一个独占clean来源树 `provider-review-start-settle-20261017` 从唯一candidate创建，r236 GCM拥有4指定文件，先原consumer RED再driver真实acquisition查询/App镜像消融。两GCM已核实存活，尚未验收、未提交来源、未main交付。其余来源盘点仅control/candidate/cold/UXUI，未清他人资源。
+
 - r233 parser已source/compiled并compile0，worker自身原case遇EMFILE/watch退出，未提交；不当产品错。宿主同case已越过review，最终在 `resumedContext.indexOf(TURN_ONE_GOAL) < resumedContext.indexOf(CHILD_BODY)` 失败，fixture `text-only-cqZ0gy` 保留（0/1）。r235独立OAuth核对结构与真实index命中，不先删断言。r234独立OAuth并行规划生产start/settle finding；无新增worktree、无重叠writer。完整cold仍未GREEN。
 
 - r232 READY 已确认当前最小owner仍是fixture `reviewPayload()`：生产请求为 `{prompt: segments + reviewMaterialJSON}`，原parser误查外层role，纯内存实际反例 recognized=false。现有review Provider composition的start/observe/settle身份一致，不补假scope。r233 fresh GCM仅修原test parser后跑原cold及两/三轮；r231已退出，写权无重叠。另记生产finding：serve-orchestration `runProviderAgent()`在driver本地start后即started=true，真实port.start失败移除session后仍settle，产生次级missing.active.execution；原cause仍挂链。此finding尚未修复，不把它误归冷scope漏接，也不在fixture任务越界修改。
