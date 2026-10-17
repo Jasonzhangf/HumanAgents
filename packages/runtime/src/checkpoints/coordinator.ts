@@ -134,7 +134,7 @@ function asCompletionError(error: unknown): CheckpointCompletionError {
 }
 
 export async function recallCheckpoint(
-  journal: CheckpointJournalPort,
+  journal: Pick<CheckpointJournalPort, 'verify' | 'readLatest'>,
   input: RecallCheckpointInput,
 ): Promise<RecalledCheckpoint | null> {
   try {
