@@ -26,8 +26,12 @@ import {
   groupTaskFlowRows,
   unclassifiedTaskFlowReason,
 } from './task-flow-groups.js'
+import { mountSemanticObservation } from './semantic-observation.js'
+import { buildSemanticObservationProjection } from './semantic-observation-projection.js'
 
 export const api = createRuntimeApi()
+
+export { buildSemanticObservationProjection }
 
 // The path the browser is on now. Pairing must return the user to the entry that
 // actually failed instead of dropping them on a default page.
@@ -1924,6 +1928,200 @@ export function taskIdFromQuery(required = true) {
   const taskId = queryParam('task')
   if (!taskId && required) throw new Error('URL 缺少 task 参数')
   return taskId
+}
+
+/**
+ * Read-only semantic observation panel over the public GET/SSE contract.
+ *
+ * The confirmed envelope is the only cached state. A dropped stream, a
+ * malformed revision or a rejected reload keeps the last confirmed content and
+ * marks it stale: an `open` that delivers no revision is not freshness, and only
+ * a decoded revision restores it. Mode and breadcrumb selection re-project the
+ * envelope already in memory, so no switch issues a request. The panel never
+ * writes a task, consumes a queue, retries an operation or steers an execution.
+ *
+ * @param {HTMLElement} host
+ * @param {{ taskId: string, apiClient?: Object, onModeChange?: (mode: string) => void }} options
+ * @returns {{ reload: () => Promise<void>, setMode: (mode: string) => void, setScopeRef: (scopeRef: string) => void, dispose: () => void }}
+ */
+export function mountSemanticObservationPanel(host, { taskId, apiClient = api, onModeChange } = {}) {
+  if (!(host instanceof HTMLElement)) throw new TypeError('mountSemanticObservationPanel requires an HTMLElement host')
+  if (typeof taskId !== 'string' || !taskId) throw new TypeError('mountSemanticObservationPanel requires a taskId')
+
+  let envelope = null
+  let displayMode = 'current'
+  let scopeRef = ''
+  let streamDisconnected = false
+  let readError = null
+  let source = null
+  let disposed = false
+
+  const view = mountSemanticObservation(host, {
+    onModeChange(nextMode) {
+      displayMode = nextMode
+      onModeChange?.(nextMode)
+      render()
+    },
+    onScopeRequest(nextScopeRef) {
+      scopeRef = nextScopeRef
+      render()
+    },
+    onEvidenceRequest(evidence, trigger) {
+      view.openEvidence(evidence, trigger)
+    },
+  })
+
+  // The public stream serves revisions until the operation it observes is
+  // terminal. Only the operation named by `envelope.scope` decides that, so a
+  // retained earlier closed operation never stops a live one. Admission follows
+  // that typed pairing group instead of one event kind, so a new event kind
+  // cannot silently freeze the panel.
+  function observedOperationGroup(envelope) {
+    const observedOperationId = envelope?.scope?.operationId?.value
+    if (typeof observedOperationId !== 'string' || !observedOperationId) return undefined
+    return (Array.isArray(envelope.pairing) ? envelope.pairing : []).find(
+      (group) => group?.kind === 'operation' && group?.scope?.operationId?.value === observedOperationId,
+    )
+  }
+
+  function canStream(envelope) {
+    if (envelope === null) return false
+    const group = observedOperationGroup(envelope)
+    // No typed group for the observed operation keeps the stream open on
+    // purpose: a not-yet-paired operation still publishes its first revision.
+    if (group === undefined) return true
+    return group.state !== 'closed'
+  }
+
+  function render() {
+    if (disposed) return
+    if (envelope === null) {
+      view.update({
+        contractVersion: 'semantic-observation-view@1',
+        mode: displayMode,
+        modes: [
+          { id: 'current', label: '简洁' },
+          { id: 'semantic', label: '语义' },
+          { id: 'actions', label: '动作' },
+          { id: 'raw', label: '原始' },
+        ],
+        scope: { scopeRef: `task:${taskId}`, title: `任务范围 · ${taskId}`, summary: '', breadcrumbs: [] },
+        state: 'loading',
+        stateLabel: '读取中',
+        projectionVersion: '未标注',
+        summary: [],
+        notices: [{ tone: 'loading', title: '正在读取语义观测', detail: '只读读取任务语义观测信封。' }],
+        emptyMessage: '正在读取语义观测。',
+        capabilities: [],
+        sections: [],
+      })
+      return
+    }
+    view.update(buildSemanticObservationProjection(envelope, {
+      mode: displayMode,
+      ...(scopeRef ? { scopeRef } : {}),
+      stale: streamDisconnected || readError !== null,
+      streamDisconnected,
+      ...(readError ? { error: readError } : {}),
+    }))
+  }
+
+  function closeStream() {
+    if (source) {
+      source.onerror = null
+      source.onmessage = null
+      source.close()
+      source = null
+    }
+  }
+
+  function openStream() {
+    if (disposed || source !== null || typeof EventSource !== 'function') return
+    if (!canStream(envelope)) return
+    const stream = new EventSource(apiClient.semanticEventsUrl(taskId))
+    stream.addEventListener('semantic.observation', (event) => {
+      if (disposed) return
+      let next = null
+      try {
+        next = JSON.parse(event.data)
+      } catch {
+        next = null
+      }
+      if (!next || typeof next !== 'object') {
+        // A malformed revision is not a silent drop: the confirmed content stays
+        // and the typed read failure is shown.
+        readError = {
+          code: 'semantic.stream.malformed',
+          message: '实时语义事件流格式无效',
+          ownerId: 'humanagent.ui',
+          nextAction: '重新读取语义观测',
+        }
+        render()
+        return
+      }
+      envelope = next
+      readError = null
+      streamDisconnected = false
+      render()
+    })
+    // Reconnecting only means the socket opened again. Freshness returns only
+    // with a decoded revision, so `onopen` deliberately changes nothing.
+    stream.onopen = () => {}
+    stream.onerror = () => {
+      if (disposed) return
+      // The transport dropped. The confirmed envelope stays; the stale notice is
+      // explicit, and a decoded revision is the only thing that clears it.
+      streamDisconnected = true
+      render()
+    }
+    source = stream
+  }
+
+  function typedError(error, fallbackCode, fallbackMessage) {
+    return {
+      code: error?.code || fallbackCode,
+      message: error?.message || fallbackMessage,
+      ...(error?.ownerId ? { ownerId: error.ownerId } : {}),
+      ...(error?.nextAction ? { nextAction: error.nextAction } : {}),
+    }
+  }
+
+  async function read() {
+    try {
+      envelope = await apiClient.semanticObservation(taskId)
+      readError = null
+      streamDisconnected = false
+    } catch (error) {
+      // A rejected read keeps the last confirmed envelope and marks it stale. It
+      // never claims a stream disconnection, because a plain GET failure means no
+      // stream was ever involved.
+      readError = typedError(error, 'semantic.read.failed', '语义观测读取失败')
+    }
+    render()
+    openStream()
+  }
+
+  render()
+  void read()
+
+  return {
+    async reload() {
+      await read()
+    },
+    setMode(nextMode) {
+      displayMode = nextMode
+      render()
+    },
+    setScopeRef(nextScopeRef) {
+      scopeRef = nextScopeRef
+      render()
+    },
+    dispose() {
+      disposed = true
+      closeStream()
+      view.dispose()
+    },
+  }
 }
 
 export { clearNode, element, formatTime, queryParam, readScopeKey, stateTone }
