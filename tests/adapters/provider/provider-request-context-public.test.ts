@@ -273,8 +273,14 @@ test('provider driver materializes fresh typed context and encodes each protocol
   assert.match(anthropicInitial.system, /ORIENTATION_ONE/);
   assert.equal(anthropicInitial.system.includes('CURRENT_TURN_INPUT'), false);
   assert.deepEqual(anthropicInitial.messages, [{ role: 'user', content: [{ type: 'text', text: 'CURRENT_TURN_INPUT' }] }]);
+  assert.deepEqual(anthropicInitial.tools, [
+    { name: 'file.read', description: 'read file', input_schema: { type: 'object' } },
+  ]);
 
   const anthropicContinuation = anthropicCodec.encodeSubmit(submitInputs[0]!, anthropicBinding, 'route-p') as AnthropicWireRequest;
+  assert.deepEqual(anthropicContinuation.tools, [
+    { name: 'file.read', description: 'read file', input_schema: { type: 'object' } },
+  ]);
   assert.match(anthropicContinuation.system, /ORIENTATION_TWO/);
   assert.equal(anthropicContinuation.system.includes('ORIENTATION_ONE'), false);
   assert.equal(JSON.stringify(anthropicContinuation).includes('PRIOR_TURN_RAW_MARKER'), false);
