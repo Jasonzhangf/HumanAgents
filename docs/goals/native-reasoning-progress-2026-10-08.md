@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- child 控制记录源码级缺口已复核关闭，复用 r57 `native.log` 和原 `native-delivery-public-consumer.test.ts` 的现有通过证据，不重跑。当前源码已有 `createChildControlLifecycle`、accept/running/settle 调用；原同一 named case 在真实 CLI+受控 localhost 上游下验证7次执行请求、1次独立Planner、child三阶段控制、冷读和公开正文，exit0/1 PASS。历史r34缺control envelope的FAIL不再代表当前候选；r63建议新增父stop接口未采纳。r67只接受“已实现、复用现有GREEN”结论，排除其虚构需求ID/命令/测试名、真实4444假设及100%概率。此关闭只覆盖源码受控consumer，不覆盖真实RCC全任务。
+- interpret schema观察r66未发现规范性合同违例。实际accept_helper数组声明缺items，但不能据此证明schema非法或导致socket断流；不添加修复/校验。r59根因继续UNKNOWN。stop计划r65因虚构需求ID、Vitest和错误typed字段已退回同Planner r69修订，未据此改产品。
 - stop proof source `75be9780` 已标准合入候选 `58d76084`，仅扩展原公开 consumer，未改 Provider 产品代码。r61 正常 build/语法检查通过；共用断言拒绝5个离线反例。唯一一次真实请求HTTP200，正文producerSeq2持久接受后port stop返回accepted；随后收到succeeded终态，但observe未结束，90秒工作和10秒cleanup均超时，drain/settlement/close缺失。真实receipt为 `~/.humanagent/test-fixtures/provider-explicit-stop-r56-20261017/run-3LjPn7/proof-receipt.json`；结果FAIL、资源收口INCOMPLETE，不能记stop通过。预算1次已用完，无重试。独立Gemini4 medium r65正在按实际等待关系规划，源码leaf暂供Planner读取，完成后复用同树或正常关闭，不新增同域树。
 - 并行补查既有缺口：fresh GCM r62定位scheduled收口原失败、r63核默认child父生命周期、r64核预算内N runtime生产接线。均限4批只读，不新增测试或真实请求。r60越界扫描后已精确停止PID98320/exit1，未取得正式定位结论；r59断流根因仍UNKNOWN。canonical窗口归UX peer，本侧未重装/重启，未main/push/整体Review。
 - candidate 已保留 `a02a57e8` 的内部 principal owner、typed Task identity、prepared grant boundary、child、stop、cold 和 current-state 接线。固定 HTTP source `aee69cb1` 正常 merge 为 `9f7eccb3`；固定 Memory feedback source `4d2e8caf` 正常 merge 为 `d1e4ddc6`。重复 readiness 声明清理为 `25ffb505`。这些尚未进入 main。
