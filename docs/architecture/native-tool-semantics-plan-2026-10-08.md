@@ -1,6 +1,6 @@
 # 原生推理逐工具语义规则设计
 
-状态：DESIGN-RULES / NATIVE-SURFACE-17 / INCREMENT-1-DOCS。独立 planner 已确认 12 个基础 Responses 工具、标准 turn close、三个条件 parent child 控制和一个 child delivery 的语义边界。此文档候选只对齐设计、规则和 DAG 元数据；它不实施运行时规则、不证明 Provider wire，也不宣称 live exposure 完成。
+状态：DESIGN-RULES / NATIVE-SURFACE-17 / INCREMENT-1-DOCS / PARTIAL-WIRE-EVIDENCE。独立 planner 已确认 12 个基础 Responses 工具、标准 turn close、三个条件 parent child 控制和一个 child delivery 的语义边界。此文档主体对齐设计、规则和 DAG 元数据；后续状态记录受控 v1 outbound wire evidence。它仍不证明 v2/child runtime、live exposure 或真实模型语义质量。
 
 递进实施步骤与验收以主编排单独维护的实施计划为准；该计划不属于本 docs-only 候选，本文件不复制它。D0-A inventory：`/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261008/d0-a/tool-inventory.md`。本表不能把列出工具解释成每个请求都已启用。
 
@@ -28,7 +28,7 @@
 
 所有语义保留完整工具身份、执行 scope、原始证据引用或 digest、失败与 unresolved 状态、完整或截断边界，以及“执行了动作”与“有证据验证结果”的区别。新增逐工具运行时 parser、强制 `SemanticClaim[]`、强制 `SemanticConstraint[]` 或内部目录迁移不是本增量的要求。
 
-当前 turn 可以保留 raw tool calls 和 results。prior turn 只保留已提交四段语义、可信 checkpoint metadata、verified evidence refs 和 adopted child refined deliveries；不得带入 prior raw tool bodies、call IDs 或 child transcripts。r186/r195 仍 OPEN：App semantic-checkpoint wire encoder 尚未完整投影 checkpoint identity、`committedAt`、`description`、顶层 `evidenceRefs` 和 adopted-child `evidenceRefs`。后续运行时 instruction、wire test 与 public consumer proof 是单独步骤。
+当前 turn 可以保留 raw tool calls 和 results。prior turn 只保留已提交四段语义、可信 checkpoint metadata、verified evidence refs 和 adopted child refined deliveries；不得带入 prior raw tool bodies、call IDs 或 child transcripts。Wire 状态为部分成立：三处现有 App semantic-checkpoint encoders 已投影既有 `checkpointId`、`committedAt`、summary-as-`description` 与顶层 `evidenceRefs`；实际 captured two-turn/three-turn POST 在 v1 上由缺少 `checkpointId` 的 RED 2/2 转为 GREEN 2/2。v2 和 child-run encoder 只完成源码修复，运行仍为 `UNVERIFIED`。adopted-child 投影的 `evidenceRefs` 仍是历史类型 gap：`AdoptedChildSemanticContext`/`AdoptedChildSemanticDelivery` 没有该字段，含该字段的 `RefinedChildSemanticDelivery` 是不同既有类型；本增量未新增 child 字段，也未删除该 gap。refined child body/ref 仍走既有 accepted path。现有受控 fixture 的 inspect、two-turn、three-turn public consumers 为 3/3 PASS；现有 two-turn case 验证 direct `file.read` 的 bounded conclusion、exact accepted ref、prior raw call/result exclusion 和完整 `EXACT_BODY` exclusion 可跨压缩保留。该证据不证明真实模型自动提炼质量，也不验证 v2/child encoder 运行路径。
 
 ## 17 工具提取规则
 
@@ -69,4 +69,4 @@
 - `packages/agent-templates` 可声明 instruction，但不能实现 extractor 或决定验收；`packages/app` 可组装 provider tools 和 semantic-checkpoint encoder，但不能复制第二套语义 checkpoint。
 - Task/pipeline owner 决定 owner acceptance 和 Task completion。Checkpoint/Control Owner 决定 checkpoint、closure、recovery 与 raw-release eligibility。
 
-本文件不新增 public field、tool、feature、runtime behavior 或 provider-wire proof。No-Task helper、独立 typed handoff schema 和 deterministic per-tool mapper 都不是本增量的实现产物。
+本文件不新增 public field、tool、feature 或 runtime behavior；它只记录后续受控 v1 outbound wire evidence 与覆盖限制。No-Task helper、独立 typed handoff schema 和 deterministic per-tool mapper 都不是本增量的实现产物；整体目标仍未完成。

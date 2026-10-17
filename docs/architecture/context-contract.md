@@ -134,7 +134,7 @@ compatibility boundary and not a second submission owner.
 
 沿用现有 Checkpoint `summary` 字段作为人可读的 description，不增加同义的 `description` 字段。它必须说明当前可证实的进展、限制/未决问题，以及可用于判断是否选择该恢复点的下一项决策；用户应能仅凭 description 选择回退点，无需先查询或展开 raw 历史。description 是语义摘要，不代替 recovery state、未决 Operation 状态或证据。
 
-Checkpoint 的保存时间由 Runtime/Checkpoint 提交 owner 在首次 durable commit 时赋可信 UTC 时间及 Harness 来源；不能采信模型时间。相同 commit identity 的重试返回首次提交的事实与时间。Journal seq 和提交关系拥有逻辑顺序；不通过篡改时间掩盖时钟回拨。当前 Runtime semantic-history entry 已提供 `committedAt`、`description`、`evidenceRefs` 和 `adoptedChildren`；App semantic-checkpoint wire encoder 对这些字段的完整投影仍为 OPEN（r186/r195），不能据 Runtime 类型存在而宣称 Provider wire 已验证。
+Checkpoint 的保存时间由 Runtime/Checkpoint 提交 owner 在首次 durable commit 时赋可信 UTC 时间及 Harness 来源；不能采信模型时间。相同 commit identity 的重试返回首次提交的事实与时间。Journal seq 和提交关系拥有逻辑顺序；不通过篡改时间掩盖时钟回拨。三处现有 App semantic-checkpoint encoders 已投影 Runtime entry 已有的 `checkpointId`、`committedAt`、`description`（checkpoint summary）和顶层 `evidenceRefs`。r208 的实际 captured POST 在成功 CLI 后因缺少 `checkpointId` 为 RED 2/2，修复后同例为 GREEN 2/2；实际运行覆盖 v1 主路径。v2（`checkpoint-journal.ts`）与 child-run encoder 仅完成源码修复，运行仍为 `UNVERIFIED`。adopted child 现有投影没有 `evidenceRefs` 字段：`AdoptedChildSemanticContext`/`AdoptedChildSemanticDelivery` 不含该字段，含该字段的 `RefinedChildSemanticDelivery` 是不同既有类型；本增量未新增 child 字段，也没有静默消除这个历史类型 gap。refined child body/ref 仍走既有 accepted path。
 
 保存边界按独立 receipt 记录 recovery asset、checkpoint、closure、Context View 和合格 history publication 阶段。Checkpoint committed 不等于 turn closed；history publication 也不等于 turn closure 或 next-turn eligibility。只有完整 durable turn receipt 才允许把 raw 从 active Context 移出；若任何阶段失败或结果 unknown，则保留 raw、原错、commit identity、已提交阶段及恢复责任。副作用不得因 Context 回退而被假定已撤销。
 

@@ -1,6 +1,6 @@
 # Native Agent Task Handoff Semantics
 
-Status: `DESIGN-RULES / INCREMENT-1-DOCS`. This document defines the semantic interpretation of the existing Task-bound handoff contract. It adds no public field, status, queue, event, or second state machine. Receipt fields not proven by current source are marked `UNKNOWN`; the receipt-boundary observation is recorded separately before any contract change.
+Status: `DESIGN-RULES / INCREMENT-1-DOCS / PARTIAL-WIRE-EVIDENCE`. This document defines the semantic interpretation of the existing Task-bound handoff contract. It adds no public field, status, queue, event, or second state machine. Receipt fields not proven by current source are marked `UNKNOWN`; partial outbound evidence and its runtime limits are recorded below.
 
 ## Existing identity and source of truth
 
@@ -44,7 +44,7 @@ Neither the four-part close nor a refined delivery may claim more than its evide
 - The Runtime Context owner at `packages/runtime/src/context/` owns native semantic turn projection and checkpoint-history assembly. It projects the committed four-part close, verified evidence refs, and adopted child refined deliveries. It does not execute or repeat tools.
 - The Runtime Explicit Brain owner at `packages/runtime/src/explicit-brain/interaction-turn-session.ts` owns Explicit Brain interaction turn checkpoint projection. It remains inside `packages/runtime` and does not create a second semantic-history owner for native turns.
 - `packages/agent-templates` may state the handoff instructions and required sections, but must not implement an extractor or determine acceptance.
-- `packages/app` owns Provider wire composition, the tool surface, and semantic-checkpoint encoding. It must not derive a second semantic checkpoint or duplicate the model-authored four-part summary. Its current semantic-checkpoint encoders still have OPEN r186/r195 field projection work; do not infer Provider-wire retention from the Runtime history type.
+- `packages/app` owns Provider wire composition, the tool surface, and semantic-checkpoint encoding. It must not derive a second semantic checkpoint or duplicate the model-authored four-part summary. Three existing semantic-checkpoint encoders now project the existing `checkpointId`, `committedAt`, summary-as-`description`, and top-level `evidenceRefs`. The actual captured two-turn and three-turn POST cases changed from RED 2/2 for missing `checkpointId` to GREEN 2/2 and exercise v1. The v2 and child-run encoder branches are source-fixed but runtime `UNVERIFIED`. The adopted-child projection has no `evidenceRefs` field because `AdoptedChildSemanticContext` and `AdoptedChildSemanticDelivery` do not define it; `RefinedChildSemanticDelivery.evidenceRefs` is a different existing type. No child field was added, and the refined child body/ref path remains the existing accepted path.
 - The designated task/pipeline owner owns acceptance against the matching `WorkAssignment` criteria. A `WorkResult` is not accepted merely because a child produced it.
 
 The current contracts provide only part of the Task-bound handoff shape. `SemanticClaim` has `fact`, `certainty`, and `sourceRefs`; it has no explicit condition or correction linkage. `SemanticClosureCandidate` has claims, constraints, unresolved questions, semantic/raw refs, and requested outcome. `WorkResult` has output/evidence refs and optional bodies, but does not define its own semantic bundle. Native turn compression does not require every tool result to become a `SemanticClaim`: `humanagent_turn_end` carries the four-part close and `humanagent_child_deliver` carries the independent refined child result. Any new Task-bound typed shape belongs to a future contracts-owned plan after its receipt boundary is observed and reviewed.
@@ -63,6 +63,7 @@ H-O1 establishes these current boundaries:
 - `file.read`, `file.search`, and `web.search` produce immutable report refs/digests, and the inspected public readback path verifies the stored content digest for eligible successful events. `web.search` also retains its report ref/digest on service-reported failure, but the current public readback path requires event status `succeeded`; save/transport failure can leave no descriptor.
 - The other nine Responses tool bodies have no durable report descriptor in the inspected readback path. Their persisted event does not retain the inline body, so that API cannot recover those outputs.
 - The inspected production app composition has callback injection slots for Explicit Brain `agent.query` and `agent.message`, but no production callback producer. Without external injection, the ports report a not-configured error. Test callbacks are test evidence only.
+- Controlled native public consumers now pass 3/3 across the existing inspect, two-turn, and three-turn cases. The existing two-turn case verifies a bounded `file.read` conclusion, the exact accepted evidence ref, and structural exclusion of prior raw call/result entries and the full `EXACT_BODY`. This is controlled-fixture evidence, not real-model semantic-quality evidence.
 
 Still `UNKNOWN`:
 
@@ -70,7 +71,8 @@ Still `UNKNOWN`:
 - whether an external caller injects the Explicit callbacks, its exact result envelope, and whether any callback result means `accepted`, `queued`, `delivered`, `read`, `executed`, or `completed`;
 - the real external-side-effect state and recovery owner when work succeeds but report/event persistence fails;
 - whether owner acceptance has a durable receipt at a production boundary;
-- whether all required semantic-checkpoint metadata reaches the Provider wire; r186/r195 record an open fieldwise projection and outbound-proof gap for checkpoint identity, trusted `committedAt`, description, top-level `evidenceRefs`, and adopted-child `evidenceRefs`;
+- runtime verification of the source-fixed v2 and child-run semantic-checkpoint encoder branches; v1 has captured outbound evidence for checkpoint identity, trusted `committedAt`, description, and top-level `evidenceRefs`;
+- whether the adopted-child projection should ever carry `evidenceRefs`. No such field exists on the current `AdoptedChildSemanticContext`/`AdoptedChildSemanticDelivery`; no new child field was implemented, so this historical type gap remains. `RefinedChildSemanticDelivery.evidenceRefs` is a different existing concept and does not close it;
 - endpoint authorization/deployment behavior outside the inspected app source.
 
 These facts update the source and local consumer evidence, but do not change the semantic rule: absent evidence for a phase or outcome, keep it unknown. `WorkResult` identity/output validation remains distinct from orchestration review/merge and owner acceptance.
@@ -81,4 +83,4 @@ These facts update the source and local consumer evidence, but do not change the
 - `WorkAssignment`, `WorkResult`, and validation: `packages/contracts/src/index.ts:729-735,848-877`.
 - Turn dispatch/result observations and semantic claim contracts: `packages/contracts/src/native-reasoning.ts:37-78`.
 - Acceptance/review decision boundary: `packages/runtime/src/orchestration/manager.ts:526-535`.
-- Native semantic projection owner: `packages/runtime/src/context/`; Explicit Brain interaction checkpoint owner: `packages/runtime/src/explicit-brain/interaction-turn-session.ts`; no new runtime behavior or completed wire projection is claimed here.
+- Native semantic projection owner: `packages/runtime/src/context/`; Explicit Brain interaction checkpoint owner: `packages/runtime/src/explicit-brain/interaction-turn-session.ts`; this document records partial v1 wire evidence and does not claim v2/child runtime verification or overall goal completion.
