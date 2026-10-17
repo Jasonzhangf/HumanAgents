@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 Provider交付树已正常merge codec `be26fdb7`，保body receipt与两proof；request-chain GCM r19约30读0产品delta且在/tmp新增TEMPcase，父未接纳其为RED，精确停止16731→exit1/absent。原树technical r20一次负责公开类型/receipt/原transport与真实Driver消费者，不再等共享文件。Memory GCM r19继续。独立stop/resume Gemini4 medium已真实init（conversation12d380ee-1746-46b4-b73f-9505cad8288e），只读plan在途。
+- N3真实默认入口取得新缺边：technical r29先缺广告RED，完成四文件挂载后Appbuild/tsc0，但出站前报 `tool.name.unsupported: child.call`；Responses双向工具名表缺三个child工具，未发生ProviderPOST，不冒独立child/precheckpoint/adopt GREEN。dirty挂载保原树，未提交或跨树复制。独立小Planner r30只核codec最小映射及原consumer继续合同，后续由Provider owner补齐，不改producer/预算/权限来避错。原nativefile5case为3PASS/2FAIL，两个默认入口同首错。正式运行/main/总goal仍OPEN。
+
 - 2026-10-17 Codec `be26fdb7` 已接收：父核两文件11+/1-，原缺声明RED5PASS/1FAIL→GREEN6/6、strict consumer compile0，作者exit0/PIDabsent/trackedclean后normalremove/prune/pathabsent，分支保留等待请求链writer释放delivery后正常merge。UX peer确认control main仅落后origin、无待夹带native闭包；最终先fetch+FF再合已验收增量，main Git窗口本侧可用，canonical/53007仍归peer。N3 GCM r28约30读0edit已精确INT94819→exit1/absent，原树technical r29续r26真实挂载，不称GCM后端不可用；request-chain与Memory production两路GCM继续。未重开来源树、未放宽验收。
 
 - 2026-10-17 本轮实际源码接收：Transport `43f9fbb4` 同serialized body receipt，父亲读产品diff及GREEN日志，原缺失RED5/5→受影响GREEN12/12，source/consumer严格编译与Appbuild0。原transport树正常切换为唯一delivery分支 `codex/provider-main-increment-delivery-20261017`，proof两提交正常摘入为 `d166a43d`/`ae197d4d`，未新开第三集成树。请求链r18独立计划确认Driver已有runtime字段、缺公开类型与receipt投影；fresh GCM r19在同树补既有ProviderRequestIdentityRef/validator，public共享consumer待codec释放后再接。
