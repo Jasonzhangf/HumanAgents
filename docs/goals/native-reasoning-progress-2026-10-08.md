@@ -16,6 +16,9 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- Pool独立main交付已解耦：origin/main runtime-pool生产diff仅5行，无未交native依赖；46e40f42标准摘入main派生独占provider-pool-delivery-20261017为4990a696。原目录级编译暴露缺workspace链接与既有retry fixture接口错误；owner正常offlinefrozeninstall后，同原tsconfig编译选项仅编译原orchestration公开consumer成功，相关9/9。未改fixture/断言，复用原raceRED。完整独立Pool修复正式集成前整体Review已派，Opus本次quotaERROR原错保留，按序fresh Gemini4medium r124审完整2files。main/install尚未动，安装窗口暂给UX独立G7只读fixture。
+- r119原下一增量计划含不存在API、无执行100%断言及忽略sourceContext.scope，未采纳；同Planner r122修正为一条真实native两turnconsumer，先证Turn1childadopt/Plannercontinue→Turn2语义历史不带raw/Plannercomplete，再仅据实际RED修旧turn Journal绑定，不放宽scope。parent派单纠正残留字段/编译路径，freshGCM r125在唯一provider-two-turn-consumer-20261017从最新candidate执行；不使用虚构planJournal/API，不改需求。两条交付链独立，完整goal仍ACTIVE。
+
 - r120资源归属观察完成：旧helper来源仅133个untracked条目且全部在自身.pnpm-store，非symlink、pnpm.modules.yaml storeDir精确指向该树，不是共享store；creator命令未知但本树install元数据已证明独占缓存。owner补宿主实际进程检查无该树引用；用非force `rm -r` 清自有缓存后标准worktree remove/prune/pathabsent。清理前注册worktree/对应目录3/3，本次核销1/1，当前仅2/2：control/main与唯一active candidate。没有遗留PROTECTED_HOLD helper树或自有实现来源树。独立Gemini4medium r119仍在规划下一增量，不记计划完成或总目标完成。
 
 - App child并行source `a6868eaf` 已接收并标准合流：生产仅childproducer声明+composition转发2行，真实CLI/localProvider预算2的双invocation实际overlap RED→GREEN，B先drain，父按A/B顺序收到精炼结果，两个独立precallcheckpoint，一次Planner且Task succeeded。原4case通过；checkpoint断言曾读错Journal字段而TypeError，已纠正并最终命名1/1；owner组合Appbuild/tsc0、原newcase1/1。未复现brokenpredecessor，不加锁。来源clean无进程后remove/prune/pathabsent。最新origin/main `beee6bab` 已正常合入 `cac04fe2`，保已交付UX/Governance，组合UI4/4。r118裁定当前无原始upstream记录不新发诊断generation。独立Gemini4medium r119只规划下一原生业务增量，完整goal仍ACTIVE；本侧candidate尚未整体Review/main交付。
