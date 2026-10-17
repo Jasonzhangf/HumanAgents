@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- Pool独立增量标准交付DONE：main代码13dab3ac、回执文档0e6ce019，push原始回执beee6bab..0e6ce019 main→main，control/main工作区干净且main...origin/main同步。sourcecontracts/config/App/package/globalinstall0；自有隔离canonical正式restart gen1/PID12468→gen2/PID17889，官方pair+公开/api/runtime/status200、模型请求0；正式dispose后PIDabsent/lease disposedAt14:46:08.691Z。候选9/9、main新case1/1及有效整体ReviewPASS已在r124记录，来源树已关。原gen21/p3不动，main/install窗口交还UX。唯一native候选已标准merge新origin/main，仅note新增，Pool代码/consumer同义合流无冲突。完整goal仍ACTIVE，r125两turnconsumer继续。
+
 - Pool独立修复整体Review有效PASS：Opus实际quotaERROR后按序Gemini4medium SUCCESS/exit0，现有controller classifyReviewOutput裁决pass/findings[]，证据r124。已标准merge至control/main `13dab3ac`；main sourcecontracts/config/Appbuild0、原distinctidleconsumer1/1，完整候选9/9继续有效。GCM作者在目录级旧fixture错误后未收尾，owner补齐正常依赖/定向编译与验收后已精确INT并确认退出；来源clean无进程后remove/prune/pathabsent。尚待UX G7释放安装窗口，再package/install、自有隔离实例正式restart/复验、push；不提前记标准交付完成。r125两turnconsumer在独立树继续。
 
 - Pool独立main交付已解耦：origin/main runtime-pool生产diff仅5行，无未交native依赖；46e40f42标准摘入main派生独占provider-pool-delivery-20261017为4990a696。原目录级编译暴露缺workspace链接与既有retry fixture接口错误；owner正常offlinefrozeninstall后，同原tsconfig编译选项仅编译原orchestration公开consumer成功，相关9/9。未改fixture/断言，复用原raceRED。完整独立Pool修复正式集成前整体Review已派，Opus本次quotaERROR原错保留，按序fresh Gemini4medium r124审完整2files。main/install尚未动，安装窗口暂给UX独立G7只读fixture。
