@@ -60,6 +60,10 @@ M4既有consumer已接候选 `67507112`（标准FF）：只修改原agent-activi
 
 冷生产两项局部修复已在来源：r217核实producer已写thirdroot/currentseq137/138，错误是readColdCurrent按taskScope找到secondcheckpointepoch2而误走checkpoint-bound；r218仅以allocation完整scope选分支，source `4fdf834b`，build/compile0，宿主原例越过context/tail条件但在固定execution role检查409（`text-only-p2Jl17`）。r219核实真实prepareowner已有角色一致性校验，r220只删除重复错误检查，source `d73bda64`，build/compile0。宿主原例再越过角色拒绝，现到 `orchestration.dispatch.failed` / review acceptance criteria content does not match acceptanceCriteriaDigest（`text-only-mt7JxT`）。r221独立小Plan核对cold是否误进M3及实际review材料owner；不删除材料断言，不扩guard/框架。完整coldconsumer仍未GREEN，来源未合候选。
 
+review材料根因已确认：r221读到production assignment producer把整个admission输入的digest误填acceptanceCriteriaDigest，resolver实际校验objective/success/failure/incomplete正文。cold成功Providerattempt返回nextActionreview而触发现有material检查，fixture没有漏一个可注入port。r222只修execution-composition新assignment字段，复用已有criteriaContent/digestOf，保留resume.source.assignment且不修旧Journal，不改review动态条件。待原coldconsumer实际终验。
+
+I2 F0已接候选 `2f92fe91`：source `2f788ad3` 标准Git合流，仅observation图meta、6projection可选scope合同/投影和原projectionconsumer4files。组合tests/ui compile0、指定原例1/1 PASS；缺省不增scope键，匹配scope保真，taskId不匹配抛typed投影错误。原实际RED由UXrun保留。已通知owner当轮收来源树；不冒跨project App/UI已通，后继精确ABI继续由UXpeer负责。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
