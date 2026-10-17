@@ -2,6 +2,9 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- 持久绑定59b95565+11231520已正常合candidate；组合contractsbuild、context/jsonl/admission三目标tsc均0，原named5consumer5/5PASS，session66658/inspection-turn-plan-persistence-composed-20261017.txt。App新turn准入GCM已由peer从含接口候选实际启动，独占execution-composition.ts与原nativeconsumer；不等整层。模板shape补正0399ea4e已合candidate。未将这些内部基础记成完整producer或main产品交付。
+- r269边界源码观察、r270当前工件取证、r271Astra只读攻关均已实际返回：neutral SSE注释对应专用disconnect出口；error_chain/provider_terminal可能重叠，固定pool-exhausted文字不证明实际耗尽。目标工件未保留，内部根因UNKNOWN；无证据支持HumanAgent代码修复。该条installedApp→RCC验收INCOMPLETE，停止重发/旧日志扩搜。需RCC owner提供既存原始原因/可靠关联；已列出实际维护聊天并异步请求用户明确交接目标（通信用法要求目标授权），其余producer/runtime继续，不标整体blocked。
+
 - r268一次新Interpret实际执行完毕，HTTP409/UND_ERR_SOCKET、Task0，预算1/1 consumed。raw capture证明HTTP200的142byteheaders+8raw chunkbody，仅解码SSE注释`:\n\n`3bytes，之后RCC面对EOF先于clientEOF，无modelcontent/terminal；精确请求model/tools/instructions/business均匹配原baseline。不能据此指定内部根因。新RCCrequestId关联未建立，collector的gpt5.5候选无关，不冒归属。worker沙盒ps拒绝清理，父核实exactownedPID54910后SIGTERM，PIDabsent/lease disposedAt21:09:20.776Z；relay关闭，fixture/evidence保留。实际结果与边界见r268/parent-acceptance.md、host-cleanup.json、diag-state.json与relay-wire-capture.redacted.json。根因UNKNOWN；r269 GCM只读至多6个RCC边界源文件定位现有error owner/sink，不发请求/改RCC。
 - planner模板c8abb025已合candidate，复用有效compile不新增镜像string测试；peer发现首轮缺definition具体shape，保同来源补单句字段说明，后继commit待接。manager/App accept来源均由peer确认正常remove/prune/pathabsent。producer完整交付仍INCOMPLETE。
 
