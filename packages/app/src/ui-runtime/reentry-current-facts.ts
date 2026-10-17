@@ -143,11 +143,10 @@ export async function readColdCurrentFromJournal(
       organId: input.allocation.scope.organId,
       taskId: input.allocation.taskId,
     };
-    // A committed bound checkpoint closure means the unchanged checkpoint
-    // reader already owns this task's current facts. That branch is selected
-    // here and delegated without reinterpretation; only a task with no base
-    // position continues into the initial-open read below.
-    if (baseExecutionPositionFromRecords(records, taskScope) !== null) {
+    // A bound checkpoint in the retained allocation scope selects the
+    // checkpoint reader. A checkpoint from an earlier cycle or operation
+    // does not establish a position for this initial-open execution.
+    if (baseExecutionPositionFromRecords(records, input.allocation.scope) !== null) {
       const current = readCurrentFromRecords(records, taskScope);
       if (current.state === 'known') {
         return { state: 'known', kind: 'checkpoint-bound', current };
