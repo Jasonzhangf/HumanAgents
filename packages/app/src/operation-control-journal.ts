@@ -685,13 +685,18 @@ export function readOperationControlFromRecords(
       }
 
       const orderedOperations = [...latestByOperation.values()]
+        .filter((entry) => selector.operationId === undefined
+          || sameScopedId(entry.envelope.control.intent.operationId, selector.operationId))
         .sort((left, right) => left.record.seq - right.record.seq);
       const operations = orderedOperations.map((entry) => entry.envelope.control);
       const operationCommits = orderedOperations.map((entry) => journalCommitRef(entry.record));
-      const currentControlCommitRef = scopedEnvelopes.length > 0
-        ? journalCommitRef(scopedEnvelopes[scopedEnvelopes.length - 1]!.record)
+      const currentControlCommitRef = orderedOperations.length > 0
+        ? journalCommitRef(orderedOperations[orderedOperations.length - 1]!.record)
         : coverageRef;
-      const pendingChildren = pendingChildRegistrations(records, namespace, latestByOperation);
+      // Validate the entire namespace above before projecting one operation.
+      // Its descendants remain namespace obligations, not gaps in its body.
+      const pendingChildren = pendingChildRegistrations(records, namespace, latestByOperation)
+        .filter((child) => selector.operationId === undefined || sameScopedId(child.operationId, selector.operationId));
       if (pendingChildren.length > 0) {
         return {
           state: 'unknown',

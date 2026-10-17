@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { ImmutableAssetStore, evidenceReference } from '../../packages/adapters/filesystem/src/index.js';
+import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import { FileActiveTurnJournal } from '../../packages/app/src/ui-runtime/journal.js';
+import { createAppChildOperationAdmission } from '../../packages/app/src/ui-runtime/child-operation-admission.js';
+import type { AppChildOperationAdmissionInput } from '../../packages/app/src/ui-runtime/child-producer.js';
 import {
   createHandOperationRuntime,
   createResponsesFileToolExecutor,
@@ -154,7 +160,10 @@ async function createProviderToolAdmission(input: {
   readonly parentOperationId: OperationId;
   readonly parentScope: ScopeRef;
   readonly inputRef: string;
-}): Promise<ProviderToolAdmissionInput> {
+}): Promise<ProviderToolAdmissionInput & {
+  readonly childAdmission: ReturnType<typeof createExecutionAdmission>;
+  readonly grants: JsonlTaskGrantJournal;
+}> {
   const principalOwner = 'app-gateway-owner';
   const now = () => new Date('2026-09-20T00:00:00.000Z');
   const journal = new JsonlOrganJournal(input.journalPath);
@@ -274,6 +283,8 @@ async function createProviderToolAdmission(input: {
     },
   });
   return {
+    childAdmission: admission,
+    grants,
     organJournal: journal,
     currentTaskGrantPort: admission.permissions,
     principalOwner,
@@ -283,6 +294,179 @@ async function createProviderToolAdmission(input: {
     now,
   };
 }
+
+// Mapping failure loses child input identity or parent provenance. The existing
+// durable-parent mismatch branch establishes the rejection risk. Two local
+// consumers reuse the Journal/grant harness; execution and maintenance cost is low.
+async function childOperationAdmissionFixture(root: string) {
+  const provider = await createProviderToolAdmission({
+    journalPath: join(root, 'organ.jsonl'), runtimeId: 'child-admission-parent',
+    executionEpoch: 1, parentOperationId: operation, parentScope: providerExecutionScope,
+    inputRef: 'artifact://input/child-admission-parent',
+  });
+  const binding = await provider.bindingFor({
+    execution: { runtimeId: 'child-admission-parent', taskId: task, operationId: operation, executionEpoch: 1 },
+    scope: providerExecutionScope, requestId: 'child-admission-request',
+    call: { callId: 'child-admission-call', toolId: 'child.call', arguments: {}, continuationRef: 'child-response' },
+    signal: new AbortController().signal,
+  });
+  const execution = { runtimeId: binding.agentRuntimeId, executionEpoch: binding.harnessExecutionEpoch };
+  const turnId = 'child-admission-turn';
+  const assignment = {
+    assignmentId: 'child-admission-assignment', taskId: task, pipelineNodeId: 'child-admission-node',
+    attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'admit accepted child call',
+    targetRefs: [], expectedOutputRefs: [], acceptanceCriteriaDigest: 'child-admission-criteria',
+    successCriteria: ['durable parent provenance'], failureCriteria: [], incompleteCriteria: [],
+    requiredCapabilities: ['provider.execution'], mergeGate: 'not-required' as const,
+  };
+  const currentTurnRef = `active-turn://${turnId}`;
+  const activeJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
+  const parent = await ActiveTurnContext.open({
+    journal: activeJournal, currentTurnRef,
+    binding: {
+      execution, scope: binding.scope, assignment,
+      admittedTurn: {
+        turnId, workAssignmentRef: assignment.assignmentId, taskRef: task, scopeRef: binding.scope,
+        cycleRef: cycle, inputRevision: 1, directiveRevision: 1, executionEpoch: 1,
+        runtimeBindingRef: execution.runtimeId, permissionRevision: '1',
+        admissionEvidenceRefs: [binding.admissionCommitRef.commitId], currentTurnRef,
+        recoveryStateRef: 'child-admission-recovery',
+      },
+    },
+  });
+  const request = { turnId, requestId: 'child-admission-request' };
+  await parent.registerProviderRequest({ execution, record: { request, scope: binding.scope, phase: 'dispatching' } });
+  await parent.registerProviderRequest({ execution, record: { request, scope: binding.scope, phase: 'dispatched' } });
+  const arguments_ = { kind: 'execution', agent_id: 'worker', objective: 'do child work' };
+  const assets = new ImmutableAssetStore(join(root, 'assets'));
+  const rawArguments = {
+    ref: evidenceReference(await assets.write('child-arguments', new TextEncoder().encode(JSON.stringify(arguments_))),
+      binding.scope, 'tool', 'child-arguments'),
+    view: { kind: 'arguments' as const },
+  };
+  await parent.acceptRawFact({
+    execution, scope: binding.scope, request, producerSeq: 1,
+    fact: {
+      kind: 'tool-call', contentUnitId: 'child-call-unit', complete: true, rawArguments,
+      call: { callId: 'child-admission-call', toolId: 'child.call', arguments: arguments_, continuationRef: 'child-response' },
+    },
+  });
+  await parent.acceptRawFact({
+    execution, scope: binding.scope, request, producerSeq: 2,
+    fact: {
+      kind: 'tool-call', contentUnitId: 'child-sibling-unit', complete: true, rawArguments,
+      call: { callId: 'child-sibling-call', toolId: 'child.call', arguments: arguments_, continuationRef: 'child-response' },
+    },
+  });
+  // Consume the durable accepted facts, rather than an in-memory parent double.
+  const durableParent = await ActiveTurnContext.reconstruct(activeJournal, turnId);
+  const call: AppChildOperationAdmissionInput = {
+    invocationId: 'child-admission-invocation', childOperationId: id('operation', 'admitted-child'),
+    kind: 'execution', selected: { agentId: 'worker', roleId: 'execution' },
+    parentExecution: { ...execution, taskId: task, operationId: operation },
+    scope: binding.scope, providerRequestId: request.requestId, toolCallId: 'child-admission-call',
+  };
+  const registration: ToolRegistration = {
+    toolName: 'child.call', contractVersion: '1', supportedKinds: ['run'],
+    routeId: 'test-child-producer', routeVersion: '1', mode: 'gateway', acceptedScopes: [binding.scope],
+    inputContract: 'schema://test/child.call/input', outputContract: 'schema://test/child.call/output',
+    verifier: 'verifier://test/child.call', capabilities: ['provider.execution'],
+    retryPolicy: 'retry://explicit-reconciliation/v1', owner: 'humanagent.app.child-operation-admission',
+  };
+  const admit = createAppChildOperationAdmission({
+    admission: provider.childAdmission, binding, parent: durableParent, registration,
+  });
+  return { provider, binding, call, rawArguments, admit };
+}
+
+async function childAdmissionRoot(): Promise<string> {
+  const base = join(homedir(), '.humanagent', 'test-fixtures');
+  await mkdir(base, { recursive: true });
+  return mkdtemp(join(base, 'n3-child-admission-'));
+}
+
+test('child operation admission adapter registers accepted call and reads durable parent provenance', async () => {
+  const root = await childAdmissionRoot();
+  try {
+    const { provider, binding, call, rawArguments, admit } = await childOperationAdmissionFixture(root);
+    const selector = { scope: binding.scope, agentRuntimeId: binding.agentRuntimeId,
+      harnessExecutionEpoch: binding.harnessExecutionEpoch };
+    const beforeControl = await provider.childAdmission.gateway.readControl(selector);
+    assert.equal(beforeControl.state, 'complete');
+    const receipt = await admit(call);
+    // A pending first child must not prevent a second real accepted sibling
+    // from reading the parent body before either child has control.
+    const siblingCall = { ...call, invocationId: 'child-sibling-invocation',
+      childOperationId: id('operation', 'admitted-sibling'), toolCallId: 'child-sibling-call' };
+    const siblingReceipt = await admit(siblingCall);
+    const business = await provider.grants.readBusinessRegistration({ taskId: task,
+      requestRef: ['provider-tool', call.parentExecution.runtimeId, '1', operation.value,
+        call.providerRequestId, call.toolCallId].join(':'),
+    });
+    if (!business) throw new Error('missing durable child business registration');
+    assert.deepEqual(business.commit, receipt.businessRegistrationCommitRef);
+    assert.deepEqual(business.registration.inputIdentity, {
+      requestRef: rawArguments.ref.locator, digest: rawArguments.ref.digest,
+    });
+    assert.equal(business.registration.operationProvenance?.operationId.value, call.childOperationId.value);
+    assert.equal(business.registration.operationProvenance?.providerRequestId, call.providerRequestId);
+    assert.equal(business.registration.operationProvenance?.toolCallId, call.toolCallId);
+    console.log('child operation admission adapter admission readback', JSON.stringify({ receipt,
+      parentControlBefore: beforeControl.state,
+      parentControlAfter: await provider.childAdmission.gateway.readControl(selector),
+      inputIdentity: business.registration.inputIdentity, provenance: business.registration.operationProvenance }));
+    const readback = await provider.childAdmission.readChildToolBinding({
+      call: { ...call, businessRegistrationCommitRef: receipt.businessRegistrationCommitRef }, operation: receipt,
+    });
+    assert.deepEqual(readback, binding);
+    const siblingBusiness = await provider.grants.readBusinessRegistration({ taskId: task,
+      requestRef: ['provider-tool', siblingCall.parentExecution.runtimeId, '1', operation.value,
+        siblingCall.providerRequestId, siblingCall.toolCallId].join(':'),
+    });
+    if (!siblingBusiness) throw new Error('missing durable sibling business registration');
+    assert.deepEqual(siblingBusiness.commit, siblingReceipt.businessRegistrationCommitRef);
+    assert.deepEqual(siblingBusiness.registration.inputIdentity, business.registration.inputIdentity);
+    assert.equal(siblingBusiness.registration.operationProvenance?.operationId.value, siblingCall.childOperationId.value);
+    assert.equal(siblingBusiness.registration.operationProvenance?.toolCallId, siblingCall.toolCallId);
+    assert.deepEqual(await provider.childAdmission.readChildToolBinding({
+      call: { ...siblingCall, businessRegistrationCommitRef: siblingReceipt.businessRegistrationCommitRef },
+      operation: siblingReceipt,
+    }), binding);
+    const namespace = await provider.childAdmission.gateway.readControl(selector);
+    assert.equal(namespace.state, 'unknown');
+    if (namespace.state !== 'unknown') throw new Error('pending children must remain unknown');
+    assert.deepEqual(namespace.pendingChildren, [
+      { operationId: call.childOperationId, businessRegistrationCommitRef: receipt.businessRegistrationCommitRef },
+      { operationId: siblingCall.childOperationId, businessRegistrationCommitRef: siblingReceipt.businessRegistrationCommitRef },
+    ]);
+    assert.deepEqual(namespace.missingRefs, [receipt.businessRegistrationCommitRef.commitId,
+      siblingReceipt.businessRegistrationCommitRef.commitId]);
+    const exactParent = await provider.childAdmission.gateway.readControl({ ...selector, operationId: binding.parentOperationId });
+    assert.deepEqual(exactParent, beforeControl);
+    const pendingChild = await provider.childAdmission.gateway.readControl({ ...selector, operationId: call.childOperationId });
+    assert.equal(pendingChild.state, 'unknown');
+    if (pendingChild.state !== 'unknown') throw new Error('uncontrolled child must remain unknown');
+    assert.deepEqual(pendingChild.pendingChildren, [namespace.pendingChildren![0]]);
+    console.log('child operation admission adapter sibling proof', JSON.stringify({
+      siblingReceipt, namespace, exactParent, pendingChild, bindingReadbacks: 2,
+    }));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('child operation admission adapter rejects parent epoch mismatch without child registration', async () => {
+  const root = await childAdmissionRoot();
+  try {
+    const { provider, call, admit } = await childOperationAdmissionFixture(root);
+    const before = await provider.organJournal.replay();
+    await assert.rejects(() => admit({ ...call, parentExecution: { ...call.parentExecution, executionEpoch: 2 } }),
+      /parent execution/);
+    assert.deepEqual(await provider.organJournal.replay(), before);
+    assert.equal(await provider.grants.readBusinessRegistration({ taskId: task,
+      requestRef: ['provider-tool', call.parentExecution.runtimeId, '2', operation.value,
+        call.providerRequestId, call.toolCallId].join(':'),
+    }), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('app assembly registers the deterministic operations route in the execution gateway', async () => {
   const gateway = createToolExecutionGateway({
