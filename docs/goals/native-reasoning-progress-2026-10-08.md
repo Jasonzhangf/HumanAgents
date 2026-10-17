@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- 当前候选已完成 UX/native merge `e1900ca1` 与 Pool merge `97dc7867`。组合 orchestration 正常编译，原 runtime-pool 7/7，包括同 tick 两 idle 实例不得撞槽。Pool 来源 clean、无活动进程，已正常 remove/prune 并确认路径消失。fresh GCM r107 已在唯一新域 `provider-cross-turn-occupancy-20261017`（base 为合成后的候选）执行已接受 r91 计划，只做跨 turn 预算占用/FIFO 终态唤醒，与 r106 Provider 文件无重叠；不跑完整 UI/release 矩阵。当前两路 GCM，后续 App child 并行接线仍等 r106 基础可用。
+
 - r105 合成去重已完成：仅删除 CLI 重复 import 和 current-state 重复实现，保留有文档的同一 scope/sequence 选择规则。contracts/App build 与 checkpoint/Agent/context 编译均通过；Agent 原 consumer 5/5、context 27/27。子沙盒 checkpoint fixture EPERM 不计通过；owner 在已授权宿主运行同一产物原 consumer 4/4、原 production HTTP consumer 2/2，服务正常关闭、读操作 effects=0。r100 已有 UI 24/24 与导航 3/3 证据继续有效；I2 读取/比较/周期/review 路由与 service owner 保留。当前只完成 UX/native 候选合成验收，不代表整体 milestone/main/install/push。
 - 并行基础 r104 新用例及编译通过，但 owner 原 driver/replay 组合实际 44/45，既有 owned-tool failure 收拢用例失败；当前版本不接收。r104 精确 SIGINT 后进程已退出，fresh GCM r106 复用原树修复该回归和已启动 sibling 结果保存/stop barrier，保持原失败证据，不弱化断言。Pool 46e40f42 仍等当前 merge 完成后标准合流。
 
