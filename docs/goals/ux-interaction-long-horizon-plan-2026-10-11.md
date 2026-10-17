@@ -13,14 +13,14 @@
 
 | 里程碑 | 已完成的实际工作 | 仍需完成的用户结果 |
 | --- | --- | --- |
-| M0 用户任务进入与最小核心 | 已交付的输入、任务关联和读取界面保留真实 receipt、失败与未知；一次表单提交作为业务确认。typed identity、独立 grant、App admission 和原生多轮闭包已合入 main，随首个 native+UX 增量安装。 | 创建/执行状态码仍不能代替任务成功；安装后的新真实 RCC App Task 整链仍未验收。TaskFlow 类型在正式确认入口的保真缺口已定位，Runtime 基础已提交，App 接线仍在实现。 |
+| M0 用户任务进入与最小核心 | typed identity、独立 grant、App admission 和原生多轮闭包已合入 main。TaskFlow 正式 HTTP 确认、草稿、信封到持久身份的保真也已交付；新任务同次提交确认，省略保留原声明，冲突和已有任务未确认注入被拒。 | 创建/执行状态码仍不能代替任务成功；安装后的新真实 RCC App Task 整链仍未验收。当前 TaskFlow 证据证明字段绑定，不扩称三类任务均已实际执行成功。 |
 | M1 语义事实链与观察框架 | 已发布真实 Journal 派生的 semantic/actions/raw 读取、来源与未知呈现、证据导航；共享 payload 在浏览器发布边界原位不可变并由共同控件消费。GET 与 SSE 的独立反例均已证明能抓到内容污染，安装后的共享引用已验收。 | 正在运行的真实任务 live→stable、并行工具、失败/停止与重启恢复仍需在原生入口闭合；历史已收拢读取不代替活跃执行证明。 |
-| M2 统一交互与任务体验 | 四角入口、共用 drawer、任务/执行详情、键盘与返回焦点已发布。正式授权入口、后端目标绑定及 I2 scoped 历史读取已合入 main 并安装；原 Task 页面可见授权入口，公开 HTTP、双端受控消费者及反例证据复用。 | 不同活跃任务及错误/断连的生产组合仍待证明。生产 capture 正文已可读取，但正文块在抽屉内部横向裁切；该实际布局缺陷正在独立小范围修复，不能以整页无溢出宣称正文完整排版通过。 |
-| M3 模板、动态编排与计划演进 | 类型、计划历史及共同展示基础已实现；当前计划、语义历史、证据详情和返回导航的已交付读取证据复用。观察页明确区分系统节点目录与真实任务依赖。 | 三类真实任务、兼容巡检按检查项ID比较、长程循环/复核/重编及实际动态 revision 的生产终点仍待原生组合与真实入口证明。 |
+| M2 统一交互与任务体验 | 四角入口、共用 drawer、任务/执行详情、键盘与返回焦点已发布。正式授权入口、目标绑定及 I2 scoped 历史读取已安装。生产 capture 正文的内部横向裁切已修复：原 165887 字符与精确 HTTP text 全等，桌面侧层和手机底抽屉内均无横溢出，返回和焦点恢复通过。 | 不同活跃任务及错误/断连的生产组合仍待证明；本次 capture 正文不包含真实 adopted-child，不能把其排版通过扩成全部子交付路径完成。 |
+| M3 模板、动态编排与计划演进 | TaskFlow 正式入口声明已进入 main；计划历史和共同展示基础保留。正式 inspectionDefinition 的 Contracts/Core 基础已实现并组合：可选字段复用原校验，同定义版本的内容漂移和静默删除被拒。该基础仍在候选，不冒充 producer。 | 三类真实任务、兼容巡检按检查项 ID 比较、长程循环/复核/重编及动态 revision 的生产终点仍待证明。巡检后继设计原五项阻断已关闭三项；完整 child ABI 和 committed-stop 异常恢复仍须补正。 |
 | M4 多 scope 总览与导航 | 系统/项目/任务聚合和真实实例选择已有读取基础；两次历史执行实例的精确选择及错误选择拒绝已验收。两个正式声明的空项目已通过公开 API 与浏览器切换。带 Task 项目的 Config/TCP 聚合、同 TaskId 下钻隔离及只读副作用证据已随本批源码合入 main。 | 两个生产项目的活跃任务、安装后浏览器及同角色多实例隔离仍待证明；受控读取不代替这些结果。 |
-| M5 Context、checkpoint 与恢复 | checkpoint current/viewed 分离、Context 历史、语义→raw 引用与返回已有读取实现。原生两轮/三轮和新进程冷恢复消费者已组合并进入 main；安装后的原 Task checkpoint 捕获正文已通过实际界面读取，绑定正确，技术来源默认折叠。 | 受控冷恢复不代替 installed deep-cold 生产证明；真实 adopted-child 正文仍缺，当前 capture 无子调用。正文内部布局缺陷、纠错/恢复写链的完整生产结果及 G/F 最终矩阵继续 OPEN。 |
+| M5 Context、checkpoint 与恢复 | checkpoint current/viewed 分离、Context 历史、语义→raw 引用与返回已有读取实现。原生两轮/三轮和新进程冷恢复消费者已进入 main；安装后原 Task capture 的正文、精确来源、双端内部排版与返回已验收，技术来源默认折叠。 | 受控冷恢复不代替 installed deep-cold 生产证明；真实 adopted-child 正文仍缺，当前 capture 无子调用。纠错/恢复写链的完整生产结果及 G/F 最终矩阵继续 OPEN。 |
 
-最近两项独立标准交付如下。完整源码、作者验证、整体审查、安装入口及清理证据见[项目状态汇总](../../note.md)，不在本计划重复建立验收账本。
+早前两项独立标准交付如下。完整源码、作者验证、整体审查、安装入口及清理证据见[项目状态汇总](../../note.md)，不在本计划重复建立验收账本。
 
 - 观察界面分层：源码 `837dc952`，集成 `feaa72cd`，交付记录 `18827bc4`。原状态/引用反例确实失败，恢复及组合浏览器检查通过；已安装双端界面保留受阻/未知/覆盖不完整，13个系统目录节点不再虚构执行边。
 - MVP 传输消融：源码 `519ad633`、测试拆分 `a30c3292`，集成 `e61a6fdf`，交付记录 `c4cef143`。删除生效的 Origin、cookie安全标志及supervisor远端地址拒绝；保留身份、签名、会话过期、generation、grant、token和lease约束。安装后的无Origin配对/登出/探测及LAN授权差异通过。原活跃执行SSE强用例保留为独立待验项，不为它扩实现fake App，也不随本次PASS声称整套执行通过。
@@ -33,7 +33,9 @@
 - I2 App scoped reader：`cb1fd426` 已进入本批 main 安装。六类入口通过正式 Config、mode root、canonical control Journal 和 TaskIdentity 确定归属；未绑定 live runtime 时显示当前位置未知，旧无 scope 入口保持原行为。原 HTTP consumer 在有效跨项目历史读取上取得 404 与预期 200 的红测，实现后及组合后通过。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-i2-app-execute-20261017/root-final-reception.md`。来源树已收口。
 - I2 浏览器 scoped history：来源 `b0520813` 已正常合流并随本批安装。正式 System→Project→Task 路径保留 scope；拒绝其他项目记录和非所选巡检轮次；当前/查看历史分离；技术字段按需展开。源树及组合双端消费者均为 36 项通过；移除配对判断时，两端错误显示 occ-stale 且断言失败，恢复后通过。重复的通用错误技术弹层测试已消融。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-i2-browser-execute-20261017/root-final-reception.md`。来源树已正常 remove/prune 并确认不存在；不扩称真实巡检 producer 已完成。
 
-当前分工：I2 App/UI 已完成本批标准交付和来源树收口。UX owner 继续 TaskFlow intake：独立设计纠正后 READY，Runtime 基础已实际红→绿并提交 `97a2a5e1`，同树 GCM 正补真实 HTTP confirmation 到 TaskIdentity 的 App 接线。巡检 producer 的方案仍因错误 ABI 与静态自动执行设计被拒，原 Planner 正按实际源码和动态动作要求纠正，尚未实现。G14 生产 capture 正文已可读，但内部横向裁切已形成实际失败证据，局部 CSS 计划正在编码前独立审阅；没有新建业务 Task。原生 owner 继续 installed deep-cold 与真实 RCC App Task 未验部分。后续只阻塞真实下游，不追加首 milestone 全局门禁；历史及其他 owner 资源不随本计划宣称清理。
+后续完整 UX 增量也已标准交付：TaskFlow 来源 `97a2a5e1`、`7882933f` 与正文排版 `7f151ccc` 组成八文件闭包，经一次独立整体 Review、main 组合 focused 验证、构建/安装和官方 restart 后推送；集成 `3c684427`，交付记录 `e2c3f040`。当前实例 generation 25、PID 92806、端口 53007。Root 已用原 Task 做生产 capture 双端复验，无新任务或 Provider 执行，p3 未操作；旧失败 attempt 保留。真实 receipt 位于该 control 由 Config 派生的 `run-notes/g14-installed-capture-layout-fixed-20261017/receipt.json`。TaskFlow/CSS 两来源树均已正常 remove/prune 并确认不存在。
+
+当前分工：正式巡检定义基础 `2179cb6b` 已组合并通过同消费者 2/2，来源树收口，尚不称生产执行完成。两路 GCM 按独立设计复核的部分放行，并行实现 occurrence 的可选 logicalTurnId 与 execution child 的 typed inspection binding；不碰未确定的 delivery/manager/stop。独立 GPT6.1 Planner 正补剩余两项合同，不接受旧方案把控制藏入 inputRefs 或给未执行项造 cancelled 记录。原生 owner 独立推进 installed deep-cold 与真实 RCC App Task。局部依赖只约束真实下游，不为已交付增量追加全局门禁；其他 owner 资源保持其责任边界。
 
 ### 2026-10-14 当前执行入口
 
