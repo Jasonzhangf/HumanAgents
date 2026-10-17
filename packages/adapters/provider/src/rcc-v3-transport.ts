@@ -663,6 +663,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     let observedTerminal = false;
     try {
       for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
+        if (active.stopRequested) throw active.stopCause;
         if (!frame.data) continue;
         if (frame.data === '[DONE]') {
           if (active.protocol === 'openai') {
@@ -749,6 +750,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
           if (typeof delta.stop_reason === 'string') this.stopReasons.set(active.identity, delta.stop_reason);
         }
         yield raw;
+        if (active.stopRequested) throw active.stopCause;
       }
       if (!active.terminalState) {
         const error = this.providerError(active.evidenceScope, 'observe', 'stream.missing-terminal', 'RCC v3 SSE stream ended without a terminal event', 'protocol');
@@ -787,7 +789,9 @@ export class RccV3ProviderTransport implements ProviderTransport {
           active.resourceReleased = true;
         }
         active.streamDone = true;
-        if (!active.terminalState && !active.terminalError) {
+        if (active.stopRequested && !active.terminalError) {
+          active.terminalState = 'stopped';
+        } else if (!active.terminalState && !active.terminalError) {
           active.terminalState = 'blocked';
           active.terminalError = this.providerError(
             active.evidenceScope,
