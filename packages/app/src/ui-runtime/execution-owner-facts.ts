@@ -58,8 +58,8 @@ export interface ExecutionOwnerFactsInput {
   readonly completion: OperationCompletionJournalPort;
   /** Exact native-save progress owner for this boundary's key. */
   readonly progress: NativeSaveProgressPort;
-  /** Exact save key this reader resolves progress through. */
-  readonly saveKey: NativeSaveKey | (() => NativeSaveKey);
+  /** Exact save key this reader resolves progress through, or undefined before a standard closing checkpoint candidate exists. */
+  readonly saveKey: NativeSaveKey | undefined | (() => NativeSaveKey | undefined);
   /** Exact native save intent the committed phase receipts are keyed by. */
   readonly saveIntent: NativeSaveIntent | (() => NativeSaveIntent | undefined);
   /** The five exact native phase owners; committed receipts resolve through them. */
@@ -219,36 +219,48 @@ export function createExecutionOwnerReaders(input: ExecutionOwnerFactsInput): Na
       }
       const saveKey = typeof input.saveKey === 'function' ? input.saveKey() : input.saveKey;
       const saveIntent = typeof input.saveIntent === 'function' ? input.saveIntent() : input.saveIntent;
-      const progress = await input.progress.readExact(saveKey);
-      if (progress.state === 'unknown') {
-        throw new ExecutionOwnerFactsError(`native save progress is unknown: ${progress.recoveryRef}`);
-      }
-      const durablePhases = progress.state === 'found' ? progress.progress.phases : notExecutedPhases();
-      // A committed phase receipt is resolved through its own exact phase owner,
-      // never copied from the progress projection. Verified exact absence stays
-      // `not-executed`; a committed phase whose exact receipt is missing is an
-      // explicit unknown that holds the capture.
-      const durableReceiptRefs: string[] = [];
-      if (progress.state === 'found') {
-        for (const phase of progress.progress.phases) {
-          if (phase.state !== 'committed') continue;
-          if (!saveIntent) throw new ExecutionOwnerFactsError('committed native progress has no retained save intent');
-          const receipt = await input.savePorts[phase.phase].readExact(saveIntent);
-          if (!receipt) {
-            throw new ExecutionOwnerFactsError(
-              `committed native save phase ${phase.phase} has no exact owner receipt`,
-            );
-          }
-          if (receipt.phase !== phase.phase) {
-            throw new ExecutionOwnerFactsError(
-              `native save phase ${phase.phase} resolved a ${receipt.phase} receipt`,
-            );
-          }
-          durableReceiptRefs.push(receipt.journalReceiptRef);
+      let durablePhases: readonly DurablePhaseOutcome[];
+      let durableReceiptRefs: string[] = [];
+      let firstErrorRef: string | undefined;
+      let laterErrorRefs: readonly string[];
+      if (saveKey === undefined) {
+        if (saveIntent !== undefined) {
+          throw new ExecutionOwnerFactsError('native capture has a save intent without an actual closing checkpoint key');
         }
+        durablePhases = notExecutedPhases();
+        firstErrorRef = current.processing.firstErrorRef;
+        laterErrorRefs = current.processing.laterErrorRefs;
+      } else {
+        const progress = await input.progress.readExact(saveKey);
+        if (progress.state === 'unknown') {
+          throw new ExecutionOwnerFactsError(`native save progress is unknown: ${progress.recoveryRef}`);
+        }
+        durablePhases = progress.state === 'found' ? progress.progress.phases : notExecutedPhases();
+        // A committed phase receipt is resolved through its own exact phase owner,
+        // never copied from the progress projection. Verified exact absence stays
+        // `not-executed`; a committed phase whose exact receipt is missing is an
+        // explicit unknown that holds the capture.
+        if (progress.state === 'found') {
+          for (const phase of progress.progress.phases) {
+            if (phase.state !== 'committed') continue;
+            if (!saveIntent) throw new ExecutionOwnerFactsError('committed native progress has no retained save intent');
+            const receipt = await input.savePorts[phase.phase].readExact(saveIntent);
+            if (!receipt) {
+              throw new ExecutionOwnerFactsError(
+                `committed native save phase ${phase.phase} has no exact owner receipt`,
+              );
+            }
+            if (receipt.phase !== phase.phase) {
+              throw new ExecutionOwnerFactsError(
+                `native save phase ${phase.phase} resolved a ${receipt.phase} receipt`,
+              );
+            }
+            durableReceiptRefs.push(receipt.journalReceiptRef);
+          }
+        }
+        firstErrorRef = progress.state === 'found' ? progress.progress.firstErrorRef : current.processing.firstErrorRef;
+        laterErrorRefs = progress.state === 'found' ? progress.progress.laterErrorRefs : current.processing.laterErrorRefs;
       }
-      const firstErrorRef = progress.state === 'found' ? progress.progress.firstErrorRef : current.processing.firstErrorRef;
-      const laterErrorRefs = progress.state === 'found' ? progress.progress.laterErrorRefs : current.processing.laterErrorRefs;
       const head = await input.checkpoints.readLatest(binding.scope);
       const recovery: RecoveryHoldFacts = {
         commitIdentity: liveBindingRef(input),

@@ -18,7 +18,7 @@ import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui
 import { createDefaultExecutionComposition, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
 import { createJsonlClosedTurnPlannerCallJournal } from '../../packages/app/src/ui-runtime/planner-call-journal.js';
-import { createActiveTurnSegmentJournal } from '../../packages/app/src/native-recovery-assets.js';
+import { createActiveTurnSegmentJournal, createNativeRecoveryAssets } from '../../packages/app/src/native-recovery-assets.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
@@ -725,6 +725,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly turnCount?: 2 | 3;
   readonly requiredBearer?: string;
   readonly interruptThirdTurnOnce?: () => Promise<void>;
+  readonly holdFirstExecutionOnce?: () => Promise<void>;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean; close(): Promise<void> }> {
   const wires: Wire[] = [];
@@ -737,6 +738,7 @@ async function textOnlyResponsesUpstream(input: {
   let reversedCompletion = false;
   let thirdTurnInterrupted = false;
   let holdTurnThree = false;
+  let firstExecutionHeld = false;
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -796,6 +798,15 @@ async function textOnlyResponsesUpstream(input: {
       }
       if (!hasTurnEndSurface(body)) {
         throw new Error('the controlled upstream could not identify a lawful Responses stage');
+      }
+      if (input.holdFirstExecutionOnce !== undefined && !firstExecutionHeld) {
+        firstExecutionHeld = true;
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        // Keep the actual Provider response open without accepting any model
+        // output. The public stop must settle this dispatched request itself.
+        response.write(': first execution capture-stop hold\n\n');
+        await input.holdFirstExecutionOnce();
+        return;
       }
       if (input.interruptThirdTurnOnce !== undefined && input.turnCount === 3
         && plannerAttempts === 2 && !thirdTurnInterrupted) {
@@ -1025,6 +1036,7 @@ async function textOnlyFixture(
   turnCount?: 2 | 3,
   topLevelHttp?: { readonly credentialRef: string; readonly requiredBearer: string },
   interruptThirdTurnOnce?: () => Promise<void>,
+  holdFirstExecutionOnce?: () => Promise<void>,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1040,6 +1052,7 @@ async function textOnlyFixture(
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
     organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, turnCount,
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
+    ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(topLevelHttp === undefined ? {} : {
       requiredBearer: topLevelHttp.requiredBearer,
     }) });
@@ -1784,6 +1797,139 @@ async function startServe(input: {
     },
   };
 }
+
+async function fetchTaskForCaptureStop(origin: string, taskId: TaskId, cookie: string) {
+  const response = await fetch(`${origin}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`,
+    { headers: { cookie, accept: 'application/json' } });
+  const body = await response.json() as { readonly state?: string;
+    readonly error?: { readonly code?: string; readonly message?: string } };
+  assert.equal(response.status, 200, JSON.stringify(body));
+  return body;
+}
+
+// Stopping before a standard end must persist the actual turn cut, not a
+// fabricated save intent or closure. Probability is unknown; the existing
+// public serve/stop edge fails before the stopped checkpoint if this is absent.
+// Cost is one held request in the existing local Responses fixture.
+if (!coldConsumerMode) test('native public stop before accepted end captures the actual turn before the stopped checkpoint', async () => {
+  const executionHeld = deferred();
+  const releaseExecution = deferred();
+  const fixture = await textOnlyFixture(false, false, false, undefined, undefined, undefined, async () => {
+    executionHeld.resolve();
+    await releaseExecution.promise;
+  });
+  let passed = false;
+  try {
+    const organId = id('organ', 'humanagent-ui');
+    const taskId = id('task', 'native-capture-only-stop');
+    const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
+    const session = await access.consumePairingCode(access.createPairingChallenge('capture-only-stop-lease', 1).code);
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    const caller = await access.verifyProductPrincipal(cookie);
+    if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
+
+    const seed = new RuntimeTaskCoordinator({
+      organId, taskIdPrefix: 'native-capture-only-stop', journal: new UiRuntimeJournal(fixture.layout.preparedJournalPath),
+      checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
+      attentionPort: {
+        async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
+        async resolve(value) { return { attentionId: value.attentionId, delivered: true }; },
+      },
+      async createDriver() { throw new Error('seed coordinator never releases execution'); },
+    });
+    seed.createTask({ taskId, title: 'capture-only stop', directive: 'stop before the standard turn end' });
+    await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)).establish({
+      scope: { organId, taskId }, source: {
+        requirementId: `requirement:${taskId.value}`, inputRevision: 1, draftId: `draft:${taskId.value}`,
+        draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`,
+        confirmationRef: `confirmation:${taskId.value}`,
+      },
+    });
+    await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
+      owner: caller.principal.owner,
+      capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
+      expectedRevision: 0 });
+
+    const serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+    try {
+      const startedResponse = await fetch(`${serve.origin}/api/tasks/${encodeURIComponent(taskId.value)}/executions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ mode: 'rcc', prompt: 'capture the stopped turn' }),
+      });
+      const started = await startedResponse.json() as { readonly operationId?: string; readonly executionEpoch?: number };
+      assert.equal(startedResponse.status, 202, JSON.stringify(started));
+      const operationId = started.operationId;
+      if (operationId === undefined) throw new Error('the public start has no operation identity');
+      await withDeadline(executionHeld.promise, 15_000);
+
+      const stopResponse = await withDeadline(fetch(`${serve.origin}/api/tasks/${encodeURIComponent(taskId.value)}/stop`, {
+        method: 'POST', headers: { cookie },
+      }), 30_000);
+      const stopped = await stopResponse.json() as { readonly state?: string; readonly operationId?: string };
+      assert.equal(stopResponse.status, 202, JSON.stringify(stopped));
+      let taskAfterStop = await fetchTaskForCaptureStop(serve.origin, taskId, cookie);
+      if (stopped.state !== 'stopped') {
+        taskAfterStop = await waitFor(
+          () => fetchTaskForCaptureStop(serve.origin, taskId, cookie),
+          (task) => task.state !== 'settling',
+          'the stop remained settling without a terminal stop result',
+          5_000,
+        ).catch(() => taskAfterStop);
+      }
+      assert.deepEqual(stopped, { state: 'stopped', operationId },
+        `the stop error was ${JSON.stringify(taskAfterStop.error)}`);
+
+      const stoppedCheckpoint = await waitFor(
+        async () => (await fixture.journal.verify()).records.find((record) => record.kind === 'checkpoint'
+          && record.scope.taskId?.value === taskId.value && record.checkpoint?.outcome === 'stopped'),
+        (value) => value !== undefined,
+        'the public stop committed no stopped checkpoint',
+      );
+      if (stoppedCheckpoint?.kind !== 'checkpoint' || !stoppedCheckpoint.checkpoint) {
+        throw new Error('the stopped checkpoint is malformed');
+      }
+      const boundaryId = `execution-close:${operationId}`;
+      const capture = (await fixture.journal.verify()).records.find((record) => record.payload?.['type'] === 'recovery-assets.phase'
+        && record.payload?.['receipt'] && typeof record.payload['receipt'] === 'object'
+        && (record.payload['receipt'] as Record<string, unknown>)['boundaryId'] === boundaryId);
+      assert.ok(capture, 'the stopped turn has its exact execution-close capture');
+      if (!capture) throw new Error('the stopped turn capture is absent');
+      assert.ok(capture.seq < stoppedCheckpoint.seq,
+        'the immutable turn capture commits before the stopped checkpoint');
+      const receipt = (capture.payload as { readonly receipt: {
+        readonly receiptRef: string; readonly boundaryId: string;
+        readonly recovery: { readonly durablePhases: readonly { readonly phase: string; readonly state: string }[];
+          readonly firstErrorRef?: string; readonly laterErrorRefs: readonly string[];
+          readonly stages: readonly unknown[]; readonly recoveryResponsibilityRef: string };
+      } }).receipt;
+      assert.equal(receipt.boundaryId, boundaryId);
+      const readback = await createNativeRecoveryAssets({ journalPath: fixture.layout.organJournalPath,
+        journal: fixture.journal, assetRoot: join(fixture.paths.artifactsRoot, 'ui-provider-evidence') })
+        .readRecoveryAssetsExact(receipt.receiptRef);
+      assert.equal(readback.prepared.body.cut.pauseId, boundaryId);
+      assert.deepEqual(readback.prepared.recovery.durablePhases.map((phase) => phase.state),
+        ['not-executed', 'not-executed', 'not-executed', 'not-executed', 'not-executed']);
+      assert.equal((await fixture.journal.verify()).records.some((record) => record.payload?.['type'] === 'native-save-intent'),
+        false, 'capture-only stop fabricates no native save intent');
+      assert.equal((await fixture.journal.verify()).records.some((record) => record.payload?.['kind'] === 'checkpoint-closure'),
+        false, 'capture-only stop fabricates no standard checkpoint closure');
+      assert.equal(fixture.upstream.wires.filter((wire) => plannerPayload(wire.body) !== undefined).length, 0,
+        'capture-only stop does not run Planner alignment');
+      console.log('native capture-only stop evidence', JSON.stringify({ operationId, boundaryId,
+        captureSeq: capture.seq, stoppedCheckpointSeq: stoppedCheckpoint.seq,
+        durablePhases: readback.prepared.recovery.durablePhases, fixture: fixture.root }));
+      passed = true;
+    } finally {
+      releaseExecution.resolve();
+      await serve.stop();
+    }
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`capture-only stop fixture retained: ${fixture.root}`);
+  }
+});
 
 /**
  * One public App consumer for the pure-text slice. It drives the real native
