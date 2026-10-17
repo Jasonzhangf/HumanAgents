@@ -1,10 +1,24 @@
-# HumanAgent 项目状态汇总（2026-10-15）
+# HumanAgent 项目状态汇总（2026-10-17）
 
 - **当前阶段**：`MVP-IMPLEMENTATION`（`I1–I5` / `G1–G14` / `F01–F20` 纵切片合流收口中，状态 `ACTIVE / INCOMPLETE`）。
 - **权威需求与进度入口**：
-  - 用户需求真源：[`.appsdk/requirements.json`](.appsdk/requirements.json)（`version: 14`，共 10 条核心需求）。
+  - 用户需求真源：[`.appsdk/requirements.json`](.appsdk/requirements.json)（`version: 14`，按当前有效条目执行）。
   - 长期执行计划：[整体执行计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)、[Provider 缺口计划](docs/goals/native-provider-gap-plan-2026-10-11.md)。
   - 进度汇总：[Native Reasoning & UX 进度摘要](docs/goals/native-reasoning-progress-2026-10-08.md)（历史完整流水账已归档至 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/`）。
+
+## 2026-10-17 首个生产 UX 读取切片交付
+
+完整 I1–I5 / G1–G14 / F01–F20 继续 ACTIVE；本节只关闭已有真实任务的这批读取与交互子能力，不宣称新 Task 执行、跨项目隔离或 checkpoint 修正／恢复写链全部完成。
+
+实现已通过标准合并进入 main，集成提交 `5ab51a09`。本轮包括 durable task inventory、当前状态冷读、checkpoint／Context／计划历史与捕获正文、七源 Agent 目录及精确选择、共享四种阅读模式、四角配置、桌面侧面板／手机底部抽屉，以及原实例正式 restart 恢复。当前层保留真实任务和计划语义，完整说明、计划证据和轨迹通过共享抽屉查看。原始 Journal 的 initialOpen／interrupted／receipt 三分合同完整读取；已结束动作不再虚假显示活动，历史失败和未知不被改写为成功。
+
+作者完成 scoped tests、真实公开入口和双端验收后，独立 Gemini 4 medium 完成一次完整 milestone Review；正式结构化结果由现有 classifier 判为 PASS，findings 为空。首选 Opus 本次配额错误保留，不当代码 FAIL；未为本 milestone 的内部节点分别派审。测试仅按受影响行为选取，移除了本轮误增的 Fake DOM harness，未引入 SHA、候选身份包装或冻结校验。UX 核心框架中遗留的基线 SHA 行已删除。
+
+main 上 contracts 源码、config、App 和 package 构建全部通过；正式安装与 `humanagent restart` 成功，原 53007 实例 generation 19 → 20，旧实例 clean 收拢。原任务 `ui-task-implicit-draft-2` dashboard／checkpoint 均为 200，Task 仍 succeeded，历史检查点仍为 seq 1、epoch 3、blocked；Agent 目录可读。捕获正文实际加载 165,887 字符；完整说明及输出保持原文；轨迹 67 → 66 → 67 页切换和焦点返回正确。语义区域保持未知 8 项、已提交事实 22 项，无 live 区域。只读验收未新增业务事件，原 Journal 仍 640 条记录、637 条 operation.event。
+
+同一真实配置的系统 → 项目 → 原任务下钻已在桌面和手机通过，scope、四角入口及无横向溢出正确。该现场只有一个项目和一个任务，因此不作为多项目隔离证明。当前计划详情 → 精确证据 → 返回／关闭及正常刷新后的焦点归还均已通过；最终截图已查看。全部行为证据、Review 原始结果与裁决保存在 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-first-slice-review-20261017/` 和 `ux-original-browser-20261017/`；执行流水继续在 `i1-read-delivery-save-20261016/note.md`。
+
+后续仍按完整计划推进 I2–I5 和 G/F 剩余验收。peer 的预算、Provider 停止及新任务执行候选不在本次集成范围。外部 4444 当前连接失败会影响真实生成和 GCM，不影响这批已验证的只读入口；没有为此修改或重启外部服务。资源只回收我方来源树和集成树，保留原任务及 peer 资源。
 
 ## 1. Worktree SESE 治理与存量核销回执（2026-10-15）
 
