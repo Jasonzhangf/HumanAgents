@@ -464,6 +464,264 @@ test('provider agent driver executes a complete Responses tool call once and con
   ]);
 });
 
+test('parallel batch: provider agent driver runs declared generic tools concurrently and preserves call order', async () => {
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const events: ProviderAgentEvent[] = [];
+  const started: string[] = [];
+  const completed: string[] = [];
+  const decisions: string[] = [];
+  const bStarted = deferred();
+  const bCompleted = deferred();
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round === 1) {
+        for (const call of [
+          { callId: 'call-a', toolId: 'file.read', arguments: { path: 'a.txt' }, continuationRef: 'response-parallel' },
+          { callId: 'call-b', toolId: 'file.write', arguments: { path: 'b.txt' }, continuationRef: 'response-parallel' },
+        ]) {
+          yield {
+            ...identity,
+            eventId: `event-${call.callId}`,
+            kind: 'tool',
+            summary: call.toolId,
+            outputRefs: [`artifact://${call.callId}`],
+            evidenceRefs: [evidence],
+            toolCall: call,
+          };
+        }
+        yield {
+          ...identity,
+          eventId: 'event-parallel-waiting',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-parallel-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const concurrentPort: ProviderToolExecutionPort & {
+    canRunConcurrently(call: ProviderToolCall): boolean;
+  } = {
+    canRunConcurrently(call) {
+      decisions.push(call.callId);
+      return true;
+    },
+    async execute(input) {
+      started.push(input.call.callId);
+      if (input.call.callId === 'call-a') {
+        await bStarted.promise;
+        await bCompleted.promise;
+      } else {
+        bStarted.resolve();
+        bCompleted.resolve();
+      }
+      completed.push(input.call.callId);
+      return {
+        output: `output:${input.call.callId}`,
+        outputRefs: [`asset://provider-tool/${input.call.callId}`],
+        evidenceRefs: [evidence],
+      };
+    },
+  };
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [
+      { toolId: 'file.read', description: 'read a file', inputSchema: { type: 'object' } },
+      { toolId: 'file.write', description: 'write a file', inputSchema: { type: 'object' } },
+    ],
+    executeTool: concurrentPort,
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-a', payload: { prompt: 'run both tools' } });
+  const observation = (async () => {
+    for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+  })();
+  try {
+    await withDeadline(observation, 1_000);
+  } finally {
+    bStarted.resolve();
+    bCompleted.resolve();
+    await observation;
+    await withDeadline(instance.closeProductionAndDrain({ execution: identity, boundaryId: 'parallel-batch-cleanup' }), 1_000);
+    await withDeadline(instance.settle(identity), 1_000);
+    await withDeadline(instance.close(), 1_000);
+  }
+
+  assert.deepEqual(decisions, ['call-a', 'call-b']);
+  assert.deepEqual(started, ['call-a', 'call-b']);
+  assert.deepEqual(completed, ['call-b', 'call-a']);
+  assert.deepEqual(
+    events.flatMap((event) => event.kind === 'provider.tool-result' ? [event.providerEvent.toolResult?.callId] : []),
+    ['call-a', 'call-b'],
+  );
+  assert.deepEqual(submissions[0]?.toolContinuations?.map((item) => [item.callId, item.output]), [
+    ['call-a', 'output:call-a'],
+    ['call-b', 'output:call-b'],
+  ]);
+});
+
+test('parallel batch: stop retains a completed sibling outcome and settles without a failed-result projection', async () => {
+  // Observed r104 gap: stopping after the first persisted result drops a
+  // successful sibling outcome. Probability is unknown; impact is durable
+  // output loss. Cost is one local fixture.
+  let round = 0;
+  const started = deferred<void>();
+  const releaseA = deferred<void>();
+  const startedCalls: string[] = [];
+  const accepted: RawFactEnvelope[] = [];
+  const captured = recordingEvidenceSink();
+  let signalA: AbortSignal | undefined;
+  const failure: ProviderError = {
+    errorId: 'provider.tool.call-b.failed',
+    code: 'tool.call-b.failed',
+    category: 'provider',
+    phase: 'tool',
+    message: 'call B failed after sibling call A started',
+    ownerId: 'humanagent.provider-agent-driver',
+    retryable: 'manual',
+    attention: 'foreground',
+    evidenceRefs: [evidence],
+    nextAction: { kind: 'recover', ref: 'provider.tool.call-b.failed' },
+  };
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round === 1) {
+        for (const call of [
+          { callId: 'call-b', toolId: 'file.write', arguments: { path: 'b.txt' } },
+          { callId: 'call-a', toolId: 'file.read', arguments: { path: 'a.txt' } },
+        ]) {
+          yield {
+            ...identity,
+            eventId: `event-${call.callId}`,
+            kind: 'tool',
+            summary: call.toolId,
+            outputRefs: [`artifact://${call.callId}`],
+            evidenceRefs: [evidence],
+            toolCall: { ...call, continuationRef: 'response-stop-sibling' },
+          };
+        }
+        yield {
+          ...identity,
+          eventId: 'event-stop-sibling-waiting',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-stop-sibling-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (): Promise<ProviderSubmitResult> => ({
+      ...identity,
+      status: 'accepted',
+      outputRefs: [],
+      evidenceRefs: [evidence],
+    }),
+    settle: async () => settlement('stopped'),
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [
+      { toolId: 'file.read', description: 'read a file', inputSchema: { type: 'object' } },
+      { toolId: 'file.write', description: 'write a file', inputSchema: { type: 'object' } },
+    ],
+    rawEvidence: captured.sink,
+    acceptRawFact: async (envelope) => {
+      accepted.push(envelope);
+      return { seq: accepted.length, acceptedAt: '2026-10-16T00:00:00.000Z', envelope };
+    },
+    registerRequest: async (registration) => registration.record,
+    executeTool: {
+      canRunConcurrently: () => true,
+      async execute({ call, signal }) {
+        startedCalls.push(call.callId);
+        if (call.callId === 'call-b') {
+          started.resolve();
+          return {
+            output: 'B_EXACT_OUTPUT',
+            outputRefs: ['asset://provider-tool/call-b'],
+            evidenceRefs: [evidence],
+            status: 'failed',
+            error: failure,
+          };
+        }
+        signalA = signal;
+        await releaseA.promise;
+        return {
+          output: 'A_EXACT_OUTPUT',
+          outputRefs: ['asset://provider-tool/call-a'],
+          evidenceRefs: [evidence],
+        };
+      },
+    },
+  });
+
+  let iterator: AsyncIterator<ProviderAgentEvent> | undefined;
+  let pendingSettlement: Promise<Awaited<ReturnType<typeof instance.settle>>> | undefined;
+  let closed = false;
+  try {
+    await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+    await instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-a', payload: { prompt: 'run both tools' } });
+    iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+    assert.equal((await iterator.next()).value?.providerEvent.toolCall?.callId, 'call-b');
+    assert.equal((await iterator.next()).value?.providerEvent.toolCall?.callId, 'call-a');
+    const pendingResult = iterator.next();
+    await started.promise;
+    await instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch, operationId });
+    assert.equal(signalA?.aborted, true);
+    releaseA.resolve();
+
+    const stoppedObservation = await withDeadline(pendingResult, 1_000);
+    assert.equal(stoppedObservation.done, true);
+
+    pendingSettlement = instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch });
+    assert.equal((await withDeadline(pendingSettlement, 1_000)).state, 'stopped');
+    assert.deepEqual(startedCalls, ['call-b', 'call-a']);
+    assert.deepEqual(captured.writes.map((write) => write.locator), [
+      'provider/tool-result/call-b',
+      'provider/tool-result/call-a',
+    ]);
+    assert.deepEqual(
+      accepted.flatMap((envelope) => envelope.fact.kind === 'tool-result' ? [envelope.fact.callId] : []),
+      ['call-b', 'call-a'],
+    );
+    assert.equal((await instance.close()).state, 'closed');
+    closed = true;
+  } finally {
+    releaseA.resolve();
+    await iterator?.return?.();
+    await pendingSettlement;
+    if (!closed) await instance.close();
+  }
+});
+
 test('provider driver attaches executor-supplied facts to their request, call, binding, route, and report', async () => {
   let round = 0;
   const observedRequestIds: string[] = [];
