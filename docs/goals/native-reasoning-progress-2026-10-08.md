@@ -38,6 +38,8 @@ wire调度已解耦：r204独立计划允许r203交写权后直接用唯一候�
 
 UX B目标绑定已接收：来源 `69c3aa87`（图前置 `7b43d444`）正常merge为候选 `29640090`，仅新增图3文件及service/server/原TaskGrantHTTPconsumer。候选 tests/app compile0，scoped wrong-target拒绝与原unscoped公开consumer **2/2 PASS**。拒绝发生在grant/revoke/release前；目标由actualboundConfig派生，不回显query。此前实际wrong-project200且Journal2→3的RED由peer保留。已通知UXowner当轮正常收口B来源树，A前端继续；未main/install/restart，gen23/p3保护。此consumer不证明正式UI已可操作。
 
+冷恢复 fixture 首次运行无有效产品结论：宿主查到同一 `.test.js --cold-consumer` 的父子递归链，childmode 分流位于顶层 tests 注册之后，子进程再次运行测试并新建 fixture/child。已停止worker23424（exit1）及逐一记录的16个自有node PID，复查无匹配冷恢复node残留；未动canonical实例/UX。所有fixture保留。此为测试入口错误，不是生产恢复RED，不能据超时宣称产品缺陷。独立r206正规划最小childmode分流，原树复用且当前无writer；r205 wire继续独立候选。UX已回B来源树remove/prune/path absent，A树未动。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
