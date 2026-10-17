@@ -2,6 +2,14 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- r261实际16个C1/C2 metadata单字段删除/错值反例均由对应断言拒绝，原cold通过后却未来意图退出，临时循环未删，不计完成；r262复用原树删除临时代码，最终仅两次helper await，专用tsc0、installed原cold1/1 PASS（seed30950/serve32675、同业务turn/epoch3→4/Plannercomplete/effects27）。宿主正常提交9a088896并合唯一candidate。先前候选installed五公开consumer已实际5/5 PASS，session90607，证据installed-cold-composed-20261017.txt。来源clean、worker和上述测试PID消失、成功fixture absent后normal remove/prune/pathabsent完成；无新增来源树。尚未整体producer milestone Review/main产品交付。
+- r260观察扩到无关历史文件搜索，父精确TERM79175并确认退出；不接其未完成观察为根因证据。r263 fresh GCM只准读取r260/r258两个run整理已取得事实，不再外扩搜索、不重发模型请求。RCC断流根因继续UNKNOWN；本次一次Interpret预算已用，未转B或改schema。
+
+- r259 installed冷恢复已完成最终源码compile0及原case1/1 PASS：seed57728、独立official serve59764，同op3/businessTurn、initial-open epoch3→4、C1/C2/child语义、raw排除、原effects不重放、EXACT_BODY与Plannercomplete保持。成功fixture text-only-uz3Rgn已自行删除，宿主核实这两个PID均不存在。删除测试内deep assembly，改走正式serve与公开resume/dashboard。worker Git metadata沙盒拒绝后，宿主正常提交单文件8e9a4283并标准merge唯一candidate；尚未整体Review/main交付。r259 terminal exit0后同树串行启动r261 GCM，仅补已接受r254计划的C1/C2 metadata helper与实际内存反例；无第二writer/新树。
+- UX来源4626965c inspection child binding已正常合唯一candidate，原组合build:contracts及对应公开契约用例1/1 PASS，session90928 exit0；原stdout保存inspection-child-binding-composed-20261017.txt。UX owner已接收并关闭该来源树。仅证明基础合同，不计完整producer或总目标完成。
+
+- r258只完成continue脚本后exit0未运行；父核实原interaction/预算0及无重复input路径后，宿主唯一运行该脚本，Interpret1/1已用完，公开409复现terminated→UND_ERR_SOCKET。实际model/tools/instructions同原，input身份差异待核，Task后读0；ownedPID46597正常SIGTERM退出，lease disposedAt20:36:37.091Z。初次RCCcollector20:36:36.848Z offset38019281至20:36:37.069Z追加0，未取得关联ID，不等于RCC未收到。r260 freshGCM只读新窗口追读/真实listener来源定位，禁重发/转B/改schema。原与当前根因均UNKNOWN，证据r258/continue-state.json。
+
 - 下一UX增量CSS+TaskFlow8files已独立整体Review有效PASS（ux-intake-layout-milestone-review-20261017，首Opusquotaerror后新Gemini；首次多余字段protocolfailure，同Reviewer只改协议后原classifier pass/findings空）。main已FF3c684427、Appbuild/package/install成功；官方restart gen24→25 PID92806 port53007、legacycloseclean。mainRuntime/App taskFlow各1/1复验通过。原Task生产capture双端live receipt g14-installed-capture-layout-fixed-20261017已亲读：165887字符逐字HTTP正文一致，desktop401/500px、mobile276/375px，无横溢出，Task仍完成、dialogs0/焦点返回/观测器移除，p3不动。childInvocation0不扩adoptedchild或全G14完成。
 - Provider后继：r251修订纠正伪事实后已接受最小officialserve probe方向，r255独占provider-installed-cold-20261017只写原native consumer，产品readonly。r254 v2metadataPlan READY，只加原helper两次，等待r255交写权不并写。r253误将input201当失败，已创建interaction但Interpret0；r256只复用该interaction继续同一次预算，不重建input。原RCCrootcauseUNKNOWN、array缺items合法，未改schema。
 
