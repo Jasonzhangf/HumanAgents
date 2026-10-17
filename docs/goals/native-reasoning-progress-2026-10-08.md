@@ -8,7 +8,7 @@
 
 - 独立 Provider 组件增量已完成 1/1 项标准交付：生产 `69854637`、原 proof 安装依赖根 `80b18b1f`、main 最新进度 `c8892016` 均已正常推送 origin/main。整体 Review controller PASS；source 三协议工具循环 3/3；canonical 安装全部9模块的 Responses 完整工具循环 PASS/Node0/2request，receipt `provider-installed-component-r28-20261017/run-adE3Yx`。组件交付不代表 App Task 或完整 goal 完成。
 - canonical0.1.0031 正式构建/安装与官方restart通过。隔离50341随后走正式SIGINT→supervisor.dispose，PID52264 absent、lease disposedAt已写；codec和delivery两树normalremove/prune/pathabsent，证据保留。原53007/Task/A0未动，安装/main窗口已交还peer。main已发布的同路径进度是该增量交付摘要。
-- 完整 goal 继续 ACTIVE：App新Task identity/grant/defaultadmission计划r26在途；Memory hook候选f1dea48c后scope修复GCMr22；child accepted-evidence mapper已解除缺body引用，7execution通过但缺child committed control导致父收口unknown，独立r35定界；stop边界08e2c15a已获条件RED/GREEN27个不同消费者，尚未组合/整体验收。不得把这些局部状态计作完整生产节点通过。
+- 完整 goal 继续 ACTIVE：App新Task identity/grant/defaultadmission计划r26因伪接口/未决no-op绕行/重复确认/过宽命令未接受，原Gemini会话r27按真实合同重编；Memory hook候选f1dea48c后scope修复GCMr22；child accepted-evidence mapper已解除缺body引用，7execution通过但缺child committed control导致父收口unknown，独立r35定界；stop边界08e2c15a两处实际RED→GREEN及27个不同消费者证据已接收并正常合唯一candidate，原clean来源树已normalremove/prune/pathabsent。完整stop/resume产品验收和已准入submit的停止分类仍OPEN。不得把这些局部状态计作完整生产节点通过。
 
 ### 续接记录（历史，截至 2026-10-17）
 
