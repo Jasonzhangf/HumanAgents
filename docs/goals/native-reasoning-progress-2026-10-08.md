@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- helper 来源 `ae72d6a6` 已正常 merge candidate；组合 contracts/Runtime tsc0 + 原 consumer9/9，App build/tsc0 + 原 HTTP consumer1/1（session42984、59190）。父亲读 r277 item65/item68，分别确认 durable adoption ContractError 与 ordinal duplicate append RED，未计模块解析/环境错误。r284 Git沙盒 index.lock 拒绝后，父宿主正常提交；未绕 metadata。来源 clean/无活动执行者后正常 remove/prune/pathabsent，已关闭。
+- r283 方案经 r285 同会话修订后接受：不新增 description，既有四项 claims/constraints 足够；仅修历史请求投影丢 committedAt/turn归属。旧 tsx/全量套件命令已撤回，使用真实 tsc布局和原 Runtime2 + Appwire1 named consumer。r286 fresh GCM 已在唯一新树 `explicit-checkpoint-metadata-20261017` 启动，base为唯一候选，前一 helper树已关闭。完整 Explicit Brain 增量完成后一次整体 Review，当前未 main产品交付。
+
 - Runtime helpers `902ba88f` 已正常 merge candidate；contracts build、agent-loop tsc 均 0，标准 Node 原 helpers/boundary consumer 7/7 PASS（session76769），未用作者 alias。已回传 UX，来源由其确认 clean/terminal 后正常关闭。aggregate / 无 closure stop 合同 / 完整 producer 仍 OPEN。
 - r282 补原 App consumer 真实 lease fixture，生产检查未改。worker 环境仍报 EMFILE，但父宿主对同一编译 consumer 复验 1/1 PASS、exit0（session28884）；不是 cold OS/installed/live RCC 证明。r284 同树只提取两项独立 RED 与来源提交，不重复已通过检查。
 - r281 已找到并复核既有 N2 运行回执：r29 `memory-composition.log` 两项 2/2 PASS，`evidence/c3a-process-boundary.json` 记录 seed PID23124 自然退出后 next PID24486、两者 exit0；r164 `logs/10-checkpoint-history-green.log` 4/4 PASS。证据用于复用原保障，不称本轮新 HEAD 重跑或真实模型质量通过。
