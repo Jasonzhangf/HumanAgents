@@ -361,6 +361,11 @@ export function createRuntimeApi(options = {}) {
       const suffix = query.size ? `?${query}` : ''
       return request(`/api/tasks/${encodeURIComponent(taskId)}/observation${suffix}`)
     },
+    // Read-only semantic observation. The plain GET carries the confirmed
+    // envelope; the SSE URL only names the same task's revision stream. Both are
+    // GET edges, and neither builder derives control state from a raw payload.
+    semanticObservation: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/semantic`),
+    semanticEventsUrl: (taskId) => `${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/semantic/stream`,
     startExecution: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',
       body: JSON.stringify(input),
