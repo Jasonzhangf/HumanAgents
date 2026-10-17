@@ -71,7 +71,7 @@ import type {
   ActiveTurnJournalPort,
   ActiveTurnJournalRecord,
 } from '../../../packages/runtime/src/context/active-turn-journal.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -2470,6 +2470,79 @@ function durableToolResultFact(context: ActiveTurnContext) {
   if (fact.kind !== 'tool-result') throw new Error('expected tool-result raw fact');
   return fact;
 }
+
+test('P-Stop1: accepted stop closes a buffered terminal stream without waiting for its pending tail', async () => {
+  // r61/r72 exposed this resource-release failure; probability is unknown.
+  // One local consumer covers the durable boundary without a live upstream.
+  const base = join(process.env.HOME!, '.humanagent', 'test-fixtures', 'provider-stop-buffered-r78');
+  await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'run-'));
+  const tail = deferred<void>();
+  let tailEntered = false;
+  let bodyExited = false;
+  let closed = false;
+  let harness: RawPersistenceHarness | undefined;
+  let observation: Promise<void> | undefined;
+  try {
+    harness = await rawPersistenceHarness({
+      root,
+      fetch: async () => delayedResponse((async function* (): AsyncIterable<Uint8Array> {
+        try {
+          yield new TextEncoder().encode([
+            { type: 'response.output_text.done', item_id: 'msg-stop-buffered', text: 'retained output' },
+            { type: 'response.completed', response: { id: 'resp-stop-buffered' } },
+          ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''));
+          tailEntered = true;
+          await tail.promise;
+        } finally {
+          bodyExited = true;
+        }
+      })()),
+      executeTool: { async execute() { throw new Error('no tool expected'); } },
+    });
+    const { instance, context } = harness;
+    await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+    await instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-r1', payload: { prompt: 'stop after output' } });
+    const events: ProviderAgentEvent[] = [];
+    observation = (async () => {
+      for await (const event of instance.observe({ runtimeId: identity.runtimeId })) {
+        events.push(event);
+        if (event.kind === 'provider.output') {
+          const receipt = await instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch, operationId });
+          assert.equal(receipt.requested, true);
+        }
+      }
+    })();
+    await withDeadline(observation, 1_000);
+    assert.deepEqual(events.map((event) => event.kind), ['provider.output']);
+    assert.equal(tailEntered, false, 'accepted stop consumed the pending upstream tail');
+    assert.equal(bodyExited, true, 'upstream body was not closed');
+    assert.deepEqual(acceptedRawFacts(context).map((entry) => entry.envelope.producerSeq), [1]);
+    assert.equal(acceptedRawFacts(context).some((entry) => entry.envelope.fact.kind === 'request-complete'), false);
+    const drain = await withDeadline(instance.closeProductionAndDrain({ execution: identity, boundaryId: 'stop-buffered' }), 1_000);
+    assert.equal(drain.requests.length, 1);
+    assert.equal(drain.requests[0]!.lastProducerSeq, 1);
+    assert.equal((await withDeadline(instance.settle(identity), 1_000)).state, 'stopped');
+    const settled = instance.settlement();
+    assert.equal(settled?.state, 'stopped');
+    assert.equal(settled?.resourceRelease.state, 'released');
+    assert.equal(settled?.persistence.state, 'committed');
+    assert.equal(settled?.error, undefined);
+    assert.equal(context.requests().at(-1)?.phase, 'cancelled');
+    assert.equal((await instance.close()).state, 'closed');
+    closed = true;
+  } finally {
+    // Release the fixture even on RED so a failed assertion leaves no reader.
+    tail.resolve();
+    await observation;
+    if (harness && !closed) {
+      await harness.instance.closeProductionAndDrain({ execution: identity, boundaryId: 'stop-buffered-cleanup' });
+      await harness.instance.settle(identity);
+      await harness.instance.close();
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('P-Stop2: stop during continuation context prevents submit and retains the completed raw result', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-stop-context-'));

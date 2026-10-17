@@ -825,6 +825,7 @@ export class RccV3ProviderTransport<
     let observedTerminal = false;
     try {
       for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
+        if (active.stopRequested) throw active.stopCause;
         if (!frame.data) continue;
         if (frame.data === '[DONE]') {
           if (active.protocol === 'openai') {
@@ -911,6 +912,7 @@ export class RccV3ProviderTransport<
           if (typeof delta.stop_reason === 'string') this.stopReasons.set(active.identity, delta.stop_reason);
         }
         yield raw;
+        if (active.stopRequested) throw active.stopCause;
       }
       if (active.protocol === 'openai' && active.stopRequested && active.terminalState === 'succeeded' && !active.terminalError) {
         active.terminalState = 'stopped';
@@ -996,7 +998,9 @@ export class RccV3ProviderTransport<
           active.resourceReleased = true;
         }
         active.streamDone = true;
-        if (!active.terminalState && !active.terminalError) {
+        if (active.stopRequested && !active.terminalError) {
+          active.terminalState = 'stopped';
+        } else if (!active.terminalState && !active.terminalError) {
           active.terminalState = 'blocked';
           active.terminalError = this.providerError(
             active.evidenceScope,
