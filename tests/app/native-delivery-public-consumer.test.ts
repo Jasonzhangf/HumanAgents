@@ -275,6 +275,7 @@ interface ResponsesWireItem {
 }
 
 interface ResponsesWireBody {
+  readonly model?: string;
   readonly input?: readonly ResponsesWireItem[];
   readonly tools?: readonly { readonly name?: string }[];
 }
@@ -283,6 +284,7 @@ interface Wire {
   readonly method: string;
   readonly path: string;
   readonly body: string;
+  readonly authorization?: string;
 }
 
 function deferred(): { readonly promise: Promise<void>; resolve(): void } {
@@ -542,6 +544,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly child?: boolean;
   readonly parallelChild?: boolean;
   readonly twoTurn?: boolean;
+  readonly requiredBearer?: string;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; close(): Promise<void> }> {
   const wires: Wire[] = [];
@@ -559,7 +562,19 @@ async function textOnlyResponsesUpstream(input: {
       for await (const chunk of request) chunks.push(chunk);
       const path = request.url ?? '';
       const body = Buffer.concat(chunks).toString('utf8');
-      wires.push({ method: request.method ?? '', path, body });
+      const authorization = request.headers.authorization;
+      wires.push({
+        method: request.method ?? '',
+        path,
+        body,
+        ...(typeof authorization === 'string' ? { authorization } : {}),
+      });
+      if (input.requiredBearer !== undefined
+        && authorization !== `Bearer ${input.requiredBearer}`) {
+        response.writeHead(401, { 'content-type': 'text/plain' });
+        response.end('fixture bearer mismatch');
+        return;
+      }
       if (path === '/health' || path === '/v1/models') {
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify(path === '/health'
@@ -777,7 +792,13 @@ async function textOnlyResponsesUpstream(input: {
 }
 
 /** Canonical fixture: real workspace, real native control layout, controlled Provider. */
-async function textOnlyFixture(inspect = false, child = false, parallelChild = false, twoTurn = false) {
+async function textOnlyFixture(
+  inspect = false,
+  child = false,
+  parallelChild = false,
+  twoTurn = false,
+  topLevelHttp?: { readonly credentialRef: string; readonly requiredBearer: string },
+) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
   const controlRoot = join(root, 'control');
@@ -790,7 +811,11 @@ async function textOnlyFixture(inspect = false, child = false, parallelChild = f
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, twoTurn });
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild,
+    twoTurn,
+    ...(topLevelHttp === undefined ? {} : {
+      requiredBearer: topLevelHttp.requiredBearer,
+    }) });
   const configPath = join(controlRoot, 'config.toml');
   // Both the default execution agent and the independent orchestration agent
   // select this real local Provider through the normal compiled roster.
@@ -804,13 +829,21 @@ async function textOnlyFixture(inspect = false, child = false, parallelChild = f
     `provider.baseUrl = "${upstream.baseUrl}"`,
   ].join('\n');
   const original = await readFile(configPath, 'utf8');
-  const config = child ? original.replace('driverRef = "fake"', providerBlock)
+  const config = topLevelHttp === undefined ? (child ? original.replace('driverRef = "fake"', providerBlock)
     .replace('driverRef = "fake"', providerBlock.replace('text.only.model', 'child.only.model'))
     .replace('maxConcurrentTasks = 1', 'maxConcurrentTasks = 2')
-    : original.replaceAll('driverRef = "fake"', providerBlock);
+    : original.replaceAll('driverRef = "fake"', providerBlock))
+    : original
+      .replace('provider = "rcc"', 'provider = "rcc"\nsource = "http"\n'
+        + `credentialRef = "${topLevelHttp.credentialRef}"`)
+      .replace('binding = "rcc-entry"', 'binding = "default-http-binding"')
+      .replace('model = "MiniMax-M3"', 'model = "text.only.model"')
+      .replace('route = "default"', 'route = "default-http-route"')
+      .replace('baseUrl = "http://127.0.0.1:4444"', `baseUrl = "${upstream.baseUrl}"`)
+      .replaceAll('driverRef = "fake"', 'driverRef = "rcc"');
   await writeFile(configPath, config, 'utf8');
   const configuration = await loadConfiguration(paths);
-  return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration };
+  return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration, configPath };
 }
 
 interface PublicOutputCommitView {
@@ -1712,6 +1745,194 @@ test('native text-only delivery advertised end, independent Planner closure and 
   } finally {
     await fixture.upstream.close();
     if (passed) await rm(fixture.root, { recursive: true });
+  }
+});
+
+// Failure basis: the native run constructs a top-level Provider port without
+// the configured credentialRef while task preparation uses a separate
+// per-agent path. Impact: an actual HTTP request could lose authentication or
+// silently use another source. Probability: unknown; one local CLI child and
+// one local socket bind the first real request. Cost: one existing text-only
+// fixture, no protocol matrix or external service.
+test('default native CLI inherits top-level HTTP credential into Responses request', async () => {
+  const credentialName = 'HUMANAGENT_TEST_DEFAULT_HTTP_TOKEN';
+  const credentialRef = `env:${credentialName}`;
+  const credentialValue = 'dummy-default-http-token';
+  const fixture = await textOnlyFixture(false, false, false, false, {
+    credentialRef,
+    requiredBearer: credentialValue,
+  });
+  const cli = join(process.cwd(), 'dist/app/app/src/cli.js');
+  const organId = id('organ', 'humanagent-ui');
+  const taskId = id('task', 'native-default-http');
+  const controlFile = join(fixture.root, 'control-session.txt');
+  let passed = false;
+  try {
+    const configuredToml = await readFile(fixture.configPath, 'utf8');
+    assert.match(configuredToml, /^\[provider\]\nprovider = "rcc"\nsource = "http"/m);
+    assert.equal(configuredToml.includes('provider.provider'), false,
+      'agents must not override the top-level Provider');
+    assert.equal(configuredToml.match(/driverRef = "rcc"/g)?.length, 2,
+      'the real roster selects the native driver without per-agent Provider fields');
+
+    const access = await AccessControlService.open({
+      credentialPath: fixture.paths.webAccessCredentialPath,
+      create: true,
+    });
+    const session = await access.consumePairingCode(
+      access.createPairingChallenge('default-http-lease', 1).code,
+    );
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    await writeFile(controlFile, `${cookie}\n`, 'utf8');
+    const caller = await access.verifyProductPrincipal(cookie);
+    assert.equal(caller.state, 'valid');
+    if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
+
+    const seed = new RuntimeTaskCoordinator({
+      organId,
+      taskIdPrefix: 'native-default-http',
+      journal: new UiRuntimeJournal(fixture.layout.preparedJournalPath),
+      checkpointStoreFor: () => new FileCheckpointStore(
+        join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl'),
+      ),
+      attentionPort: {
+        async publish(value) {
+          return { attentionId: value.attentionId, delivered: true };
+        },
+        async resolve(value) {
+          return { attentionId: value.attentionId, delivered: true };
+        },
+      },
+      async createDriver() {
+        throw new Error('seed coordinator never releases execution');
+      },
+    });
+    const retained = seed.createTask({
+      taskId,
+      title: 'default HTTP provider',
+      directive: 'prove top-level HTTP credential inheritance',
+    });
+    await new TaskIdentityConsumer(
+      new JsonlTaskIdentityJournal(fixture.journal),
+    ).establish({
+      scope: { organId, taskId: retained.taskId },
+      source: {
+        requirementId: `requirement:${retained.taskId.value}`,
+        inputRevision: 1,
+        draftId: `draft:${retained.taskId.value}`,
+        draftRevisionVersion: 1,
+        draftRevisionHash: `draft-hash:${retained.taskId.value}`,
+        confirmationRef: `confirmation:${retained.taskId.value}`,
+      },
+    });
+    await new JsonlTaskGrantJournal(fixture.journal).grant({
+      requestId: `grant:${retained.taskId.value}`,
+      taskId: retained.taskId,
+      owner: caller.principal.owner,
+      capability: {
+        actionId: 'task.execute',
+        capabilities: ['provider.execution'],
+        scope: { organId, taskId: retained.taskId },
+      },
+      expectedRevision: 0,
+    });
+
+    const result = await new Promise<{
+      readonly code: number | null;
+      readonly stdout: string;
+      readonly stderr: string;
+    }>((resolve, reject) => {
+      const child = spawn(process.execPath, [
+        cli,
+        'run',
+        '--workspace', fixture.workspace,
+        '--control-root', fixture.controlRoot,
+        '--plan', 'default',
+        '--session', 'native-default-http-run',
+        '--task', retained.taskId.value,
+        '--prompt', 'default HTTP credential probe',
+        '--control-session-file', controlFile,
+      ], {
+        cwd: process.cwd(),
+        env: { ...process.env, [credentialName]: credentialValue },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+      child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+      child.once('error', reject);
+      child.once('exit', (code) => resolve({ code, stdout, stderr }));
+    });
+
+    const receiptStart = result.stdout.indexOf('{');
+    const receiptEnd = result.stdout.lastIndexOf('}');
+    assert.ok(receiptStart >= 0 && receiptEnd > receiptStart,
+      `the native run prints its CLI receipt: ${result.stdout}`);
+    const receipt = JSON.parse(result.stdout.slice(receiptStart, receiptEnd + 1)) as {
+      readonly command?: string;
+      readonly taskId?: string;
+      readonly state?: string;
+      readonly output?: string;
+      readonly error?: unknown;
+    };
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(receipt.command, 'run');
+    assert.equal(receipt.taskId, retained.taskId.value);
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
+    assert.equal(receipt.output, EXACT_BODY);
+    assert.equal(receipt.error, undefined);
+
+    const childExecutionWires = fixture.upstream.wires.filter((wire) =>
+      wire.method === 'POST' && plannerPayload(wire.body) === undefined);
+    const firstRequest = childExecutionWires[0];
+    assert.ok(firstRequest, 'the default native CLI sends a real generation request');
+    assert.equal(firstRequest.path, '/v1/responses');
+    assert.equal(firstRequest.authorization, `Bearer ${credentialValue}`);
+    const body = JSON.parse(firstRequest.body) as ResponsesWireBody;
+    assert.equal(body.model, 'text.only.model');
+    assert.equal(hasTurnEndSurface(firstRequest.body), true,
+      'the request carries the Responses standard-turn end surface');
+    assert.deepEqual(
+      fixture.upstream.wires
+        .filter((wire) => wire.path === '/health' || wire.path === '/v1/models'),
+      [],
+      'HTTP source must not run RCC discovery',
+    );
+
+    const verified = await fixture.journal.verify();
+    const coverage = verified.records.find((record) =>
+      record.payload?.['kind'] === 'operation-control-coverage/v1');
+    const operationId = coverage?.scope.operationId?.value;
+    if (!operationId) throw new Error('native run has admitted operation coverage');
+    const active = await createJsonlActiveTurnJournal({
+      filePath: fixture.layout.organJournalPath,
+      journal: fixture.journal,
+      turnId: newActiveTurnId(operationId),
+    }).replay();
+    const endCalls = active.filter((record) =>
+      record.kind === 'accepted-fact'
+      && record.entry.envelope.fact.kind === 'tool-call'
+      && record.entry.envelope.fact.call.toolId === 'humanagent_turn_end');
+    assert.equal(endCalls.length, 1,
+      'the original standard-turn closure remains the only accepted end');
+
+    console.log('default HTTP native consumer', JSON.stringify({
+      cliExit: result.code,
+      receiptState: receipt.state,
+      requestPath: firstRequest.path,
+      authorizationMatched: firstRequest.authorization === `Bearer ${credentialValue}`,
+      model: body.model,
+      responsesSurface: hasTurnEndSurface(firstRequest.body),
+      discoveryRequests: 0,
+      acceptedEndCalls: endCalls.length,
+      fixture: fixture.root,
+    }));
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`default HTTP fixture retained: ${fixture.root}`);
   }
 });
 
