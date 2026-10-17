@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r154观察未解码operation error前结束，parent补读唯一缺口：本次双Task fixture `WtStir/rcc/ui-runtime-journal.jsonl` 两个execution.terminal/final均为blocked，code `task.assembly.missing`、无live orchestration assembly。错误15:36:40Z在cleanup revoke15:36:53Z之前；journal taskOutput键仅Provider drained文本，不能冒最终交付。r156独立小Planner核fixture是否缺正式assembly接线，未据此盲改Runtime。r152语义投影作者仍活动，r153多turn/cold与r155默认HTTP入口计划独立运行；main/install继续归UX，不写其auth graph2/access-control/server/networktest五路径。
+
 - r141 已terminal exit0；r149独立小计划经parent缩减后交freshGCM r152同树实现：只保必要Runtime adopted精炼正文投影与三处wire编码，复用原two-turn RED及既有scope用例，不加计划内多余新测试/重复校验。r150 fixture修正与严格编译0已接收；host原双Task越过重复release，overlap通过/initial2，但15秒后Task A无精确交付、Planner0，fixture `provider-two-top-tasks-WtStir` 保留。GCM r154只读定位本次首错，未把timeout当并发根因。r151只读核实通用HTTP source/三codec/credentialRef已有基础，默认CLI部分调用疑似遗漏credentialRef；这仍需真实入口定位，不按旧RCC-only文档重造机制。独立Gemini4 r153规划三turn历史与冷重启的后继增量，依赖r152实际验收，不抢先改scope过滤。
 
 - r147 实际工具回执已完成两处冲突标记移除，但最终回复误称未编辑；parent核对实际diff、严格Provider编译及P-Stop原3/3通过后正常完成merge `284b51cc`，保留双方已有语义。r141 CLI等待修复的host原两turn用例已实际进入operation2/epoch2/Task succeeded/Planner2 final，但原断言仍RED：turn2缺 `Independent child result for adoption`；fixture `text-only-zyeN2e` 保留，r149独立小Planner定位首次语义丢失，不放宽scope。r142确认child环境独立watch仍EMFILE，cleanup修正已保留；parent host watch正常，原双Task用例实际RED为HTTPgrant已自动release后fixture重复release。r148独立计划已核实真实API，freshGCM r150仅修原fixture的并发grant/公开release receipt，编译后由host验收。r145只读观察确认存在跨operation历史过滤风险，尚无三turn行为RED；后续复用已成立两turn基础再推进，不预改sameScope。
