@@ -2,6 +2,19 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Runtime stop source `b2bd7f5d` 已正常merge candidate；contractsbuild0/agentlooptsc0/原helpers+boundary9/9PASS（session92762，inspection-runtime-stop-source-composed-20261017.txt）。去NativeSaveIntent依赖、ordinary stop不读capture；Appcapture/fullnative停止仍未验收。UX已正常remove/prune/确认来源不存在。
+- r290独立计划返回并纠正r289：capacity wait并未造成不可恢复cold lock，blocked之后仍generation-ready；真实缺口是正常wait中断当前turn且丢原owner等待语义。初稿未接受执行：父核实toolStatus有error即failed，blocked-only predicate不可达；ProviderToolResult无顶层nextAction；dist-tests命令/毫秒成本编造。已退同Planner r291只修这些局部缺口，继续禁止先改代码/假成功/新waitqueue/背景重放。32round非已证总上限仍不改。
+
+- App aggregate wire `3a0a99b0` 已正常merge candidate；Appbuild0/App-testtsc0/标准原standard-turn-control-public-consumer11/11PASS（session37945，inspection-aggregate-wire-composed-20261017.txt）。只证明accepted summary与shared schema/validator，不冒native durable两occurrence。UX确认sourceclean/terminal后正常关闭；Appcapture与Runtime stopsource继续各自独占。
+
+- Runtime aggregate `aee3aebc` 已正常FF candidate；contractsbuild0/agentlooptsc0/原named settlement3/3PASS（session53145，inspection-aggregate-settlement-composed-20261017.txt）。sole summary.inspectionOutcome控制总体判断，缺项不补造；只证明Runtime port，不冒完整native/I2。已通知UX关来源并继续同域stophelper。
+- r289结束但最终观察报告不完整。父核实manager pool未acquired返回waiting、App child-producer约1718将waiting/blocked一律输出ToolExecutionResult blocked、Provider非成功路径；尚未证明该终点不可恢复。r290独立Gemini4medium计划已启动，要求核实实际resume再判断最小必要修改或NONE。32round只列证据缺口，不认定永久总上限；当前不派本侧实现、不碰UX三路writer。
+
+- inspection aggregate Contracts `0b0a8d34` 已正常merge唯一candidate；contractsbuild0、原turn-closure-public-consumer9/9PASS（session17638，inspection-aggregate-contract-composed-20261017.txt）。只证明optional summary.inspectionOutcome既有validator合同，不冒完整aggregate。UX已正常关闭来源，并从含基础candidate并发Appwire/Runtimeboundary两个GCM；本侧不抢写。r289仍原进程只读观察，未终结、不重启；无新预算行为结论。
+
+- 该Explicit增量远端交付已完成：`342f5d43..512e8bce main -> main` 正常push回执成功，不再待push。canonical窗口已释放并通知UX。唯一candidate正常合入最新origin/main，只带已记录文档变化。
+- 下一N3观察 r289 fresh GCM：仅核对隐式runtime实际总推理上限、预算耗尽后的continuation/wait/恢复行为及动态委派剩余缺口。区分合理单请求/实例预算与永久截断未完成任务；不重复r265全Provider审计，不重发RCC，不碰UX inspection writer。观察前不新增代码或测试，完整goal ACTIVE。
+
 - Explicit完整增量已本地main交付 `7f868b12`（两来源1af06f3b/f93992e8，6文件）。r287 Opus实际quota429、未执行审查；按后备r288 Gemini4medium SUCCESS/exit0、有效JSON/findings空，现有原classifier裁决pass，证据 `native-explicit-milestone-review-r288-20261017/classification.json`。交付分支正常组合最新origin/main后FF main，无未完inspection混入。
 - main正式contracts/config/App重建、package:candidate、install:global全部exit0（session51021），canonical官方restart exit0（session81315）：generation25/PID92806 → generation26/PID87116，port53007，legacyCloseReceipt clean。新PID实际存活、installed launcher、页面入口HTTP200。main原Runtime4/4+AppHTTP/wire2/2复验PASS（session66534）；这些行为证据仍为JSONL/受控上游公开consumer，不扩称live RCC或新OS helper恢复验收。完整goal仍INCOMPLETE。
 - 作者/Reviewer均terminal，交付树clean；`explicit-checkpoint-metadata-20261017` 已正常remove/prune/testabsent。旧helper来源亦已关闭。此增量后续只剩本轮main push回执记录；inspection后继由peer继续，RCC原UNKNOWN边界不变。
