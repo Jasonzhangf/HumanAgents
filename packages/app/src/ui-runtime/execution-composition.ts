@@ -629,7 +629,7 @@ export function createDefaultExecutionComposition(input: {
       const activeTurnJournal = createJsonlActiveTurnJournal({ filePath: input.filePath, turnId });
       // A boundary-only continuation owns no live Provider and opens no new
       // active-turn/segment context; only generation installs one.
-      const acceptedPlan = segment === undefined ? await (async () => {
+      const acceptedPlan = retainedIntent === undefined && segment === undefined ? await (async () => {
         const taskScope = { organId: allocation.scope.organId, taskId: allocation.taskId };
         const current = await input.currentState.read(taskScope);
         if (current.state !== 'known' || current.value.currentPlan === undefined) return undefined;

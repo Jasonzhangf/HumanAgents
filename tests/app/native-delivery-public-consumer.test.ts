@@ -1845,15 +1845,22 @@ if (!coldConsumerMode) test('native inspect producer and cold saved boundary pre
     const journalPrefix = await readFile(fixture.layout.organJournalPath, 'utf8');
     const executorCount = executionPosts().length;
     const preparedJournal = new UiRuntimeJournal(fixture.layout.preparedJournalPath);
+    const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal });
+    const taskIdentity = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal));
+    let currentStateReads = 0;
+    let taskIdentityReads = 0;
+    const readTaskIdentity = taskIdentity.read.bind(taskIdentity);
+    taskIdentity.read = async (scope) => { taskIdentityReads += 1; return readTaskIdentity(scope); };
     const composition = createDefaultExecutionComposition({ principalOwner: caller.principal.owner,
       journal: fixture.journal, filePath: fixture.layout.organJournalPath,
       artifactsRoot: join(fixture.paths.artifactsRoot, 'ui-provider-evidence'), preparedJournal,
       resourceBoundary: createPreparedOperationBoundary(preparedJournal),
       async prepareAgentProvider() { throw new Error('boundary read must not prepare a Provider'); },
       providerOptions: {}, now: () => new Date(),
-      currentState: createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }),
+      currentState: { commit: (transition) => currentState.commit(transition),
+        read: async (scope) => { currentStateReads += 1; return currentState.read(scope); } },
       async publishCurrentTurnState() {}, closedTurnPlannerPool() { throw new Error('Planner remains a separate duty'); },
-      taskIdentity: new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)),
+      taskIdentity,
       retryJournal: createJsonlRetryCycleJournalPort({ filePath: join(fixture.root, 'retry.jsonl') }),
       i2Journal: createJsonlI2JournalPort({ filePath: fixture.layout.organJournalPath, journal: fixture.journal }) });
     const selected = await composition.resolveColdExecutionResumeRequest({ taskId, operationId: id('operation', operationId) });
@@ -1864,6 +1871,8 @@ if (!coldConsumerMode) test('native inspect producer and cold saved boundary pre
     if (boundary.kind !== 'committed-close-alignment' && boundary.kind !== 'exact-pending-boundary') {
       throw new Error(`expected retained boundary, got ${boundary.kind}`);
     }
+    assert.equal(currentStateReads, 0, 'boundary-only recovery must not read the current plan dependencies');
+    assert.equal(taskIdentityReads, 0, 'boundary-only recovery must not read the current identity dependencies');
     await boundary.finishBoundary();
     const readback = await boundary.standardTurn.readDelivery!();
     assert.equal(readback.materials[0]?.kind, 'inspect-tool-report');
