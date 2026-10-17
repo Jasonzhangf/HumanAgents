@@ -10,7 +10,7 @@ import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
-import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlOrganJournal, JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { createJsonlActiveTurnJournal, listTaskActiveTurnBindings } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
@@ -28,6 +28,7 @@ import { RuntimeTaskCoordinator, type RuntimeExecutionDriver } from '../../packa
 import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
 import type { ActiveTurnJournalRecord } from '../../packages/runtime/src/context/active-turn-journal.js';
 import { newActiveTurnId } from '../../packages/runtime/src/admission/admitted-turn.js';
+import { TaskPlanRevisionConsumer } from '../../packages/runtime/src/orchestration/task-plan-revisions.js';
 import { STANDARD_TURN_END_TOOL } from '../../packages/app/src/ui-runtime/standard-turn-control.js';
 import { ADVERTISED_STANDARD_TURN_END_TOOL } from '../../packages/app/src/ui-runtime/standard-turn-composition.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
@@ -2248,10 +2249,10 @@ if (!coldConsumerMode) test('native three.turn public CLI consumer retains multi
   }
 });
 
-// The observed failure risk is a cold reopen that loses the uncaptured Turn 3
-// boundary or replays the accepted C1/C2 effects. Impact: the task cannot
-// resume truthfully. Cost: one existing three-turn CLI fixture, one exact seed
-// interruption, and one fresh HTTP-resume child.
+// Failure basis: the composition does not persist the accepted plan in the
+// new-turn binding, so cold recovery can select the latest plan instead of the
+// original one. Probability: unknown. Impact: recovery may use the wrong plan.
+// Cost: assertions on the existing three-turn CLI/cold-resume fixture.
 if (!coldConsumerMode) test('native three-turn public consumer cold-resumes interrupted third turn', async () => {
   let heldWireIndex = -1;
   let fixture!: Awaited<ReturnType<typeof textOnlyFixture>>;
@@ -2272,6 +2273,56 @@ if (!coldConsumerMode) test('native three-turn public consumer cold-resumes inte
       'the interruption leaves an actual typed current-state record');
     assert.equal(outcome.receipt.binding.operationId, outcome.interruption.operationId.value);
     assert.equal(outcome.receipt.planner.decision, 'complete');
+    const plans = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(fixture.journal));
+    const published = [...await plans.replay(outcome.interruption.taskScope)]
+      .sort((left, right) => left.sequence - right.sequence);
+    assert.ok(published.length >= 3, 'the three-turn run publishes three accepted plans');
+    const accepted = await Promise.all(published.map(async (revision) => ({
+      revisionId: revision.revisionId,
+      revisionCommitRef: await plans.getCommitRef(outcome.interruption.taskScope, revision.revisionId),
+    })));
+    const durableDuties = await createJsonlClosedTurnPlannerCallJournal({ journal: fixture.journal })
+      .readTaskDuties(outcome.interruption.taskScope);
+    const completedParentOperationIds = durableDuties
+      .flatMap((entry) => entry.returned === undefined ? [] : [entry.returned.record.duty.scope.operationId])
+      .flatMap((operationId) => operationId === undefined ? [] : [operationId.value]);
+    const parentOperationIds = new Set<string>([
+      outcome.interruption.operationId.value,
+      ...completedParentOperationIds,
+    ]);
+    assert.equal(parentOperationIds.size, 3,
+      'durable closed-turn duties identify the two completed parent turns and the interrupted third turn');
+    const allBindings = [...outcome.interruption.bindings]
+      .sort((left, right) => left.commitRef.journalSeq - right.commitRef.journalSeq);
+    assert.equal(allBindings.length, 4,
+      'the fixture retains the same-Task child binding alongside the three parent logical bindings');
+    const bindings = allBindings.filter((entry) => entry.binding.scope.operationId !== undefined
+      && parentOperationIds.has(entry.binding.scope.operationId.value));
+    assert.equal(bindings.length, 3, 'the interrupted run opens one binding for each logical turn');
+    assert.equal(bindings[0]!.binding.acceptedPlan, undefined,
+      'the initial turn has no formal current plan to accept');
+    assert.deepEqual(bindings[1]!.binding.acceptedPlan, accepted[0],
+      'the second turn persists the first turn plan publication and exact receipt');
+    assert.deepEqual(bindings[2]!.binding.acceptedPlan, accepted[1],
+      'the third turn persists the successor plan publication and exact receipt');
+    const resumedBindings = [...await listTaskActiveTurnBindings({
+      journal: fixture.journal,
+      scope: outcome.interruption.taskScope,
+    })];
+    const originalThird = resumedBindings.find((entry) =>
+      entry.binding.admittedTurn.turnId === outcome.interruption.businessTurnId);
+    assert.deepEqual(originalThird?.binding.acceptedPlan, accepted[1],
+      'cold resume retains the exact plan accepted by the original third turn');
+    const currentAfterResume = await createJsonlRuntimeTaskCurrentStateJournal({
+      journal: fixture.journal,
+    }).read(outcome.interruption.taskScope);
+    assert.equal(currentAfterResume.state, 'known');
+    if (currentAfterResume.state !== 'known') throw new Error('the resumed task has no current state');
+    assert.equal(currentAfterResume.value.currentPlan?.revisionId, outcome.receipt.planner.revisionId,
+      'the completing successor plan advances task currentPlan');
+    assert.ok(currentAfterResume.value.currentPlan?.revisionId
+      !== originalThird?.binding.acceptedPlan?.revisionId,
+    'the latest currentPlan does not overwrite the original turn binding');
     console.log('cold consumer evidence', JSON.stringify({
       seedPid: started.child.pid,
       resumePid: outcome.resumedPid,
