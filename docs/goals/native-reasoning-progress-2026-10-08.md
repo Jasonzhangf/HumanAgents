@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- A0技术轮已返：Astra源码定位确认fresh protocol-plan自身失败也会经typederror->model_no_response->transportbreak产生同样200后断流，不能限定liveSSEproducer内部错误，亦不能从批量trace缺席推Req04/route未执行。仍缺innercode/当时loadedmanifest+health/policy/installedbinary来源绑定；不改HA schema/模型、不重试。已派freshGCM `provider-a0-manifest-provenance-observe-gcm-r1-20261017` 只收集已有capability/lock/build/manifest声明，缺则明确，不执行外部harness或改RCC。
+- C3r3未准入：虚构C1targetCheckpointId/mode/审批字段、错误J/S路径及R007需求ID等，与已冻结interface矛盾，未派任何依此代码。fresh独立Gemini4 `provider-n2-c3a-plan-fresh-gemini-r4-20261017` /PID5080仅规划实际控制组装，MemoryABI后置；不以换结论放宽需求。C2finish-r2原consumer已再次1/1GREEN但完整RED/exactbinding与最终包未接收。UXpeer另有独立M4导航breadcrumb小修在其独占树，与本侧backend无writer冲突，保持gen14/p3，来源采用另行协调；不混入本侧计数。
+
 - C2 r1目标consumer1/1已GREEN，但未接收：Root确认其又扩跑未派App/uiRuntime全组并追作者报告15FAIL，精确SIGINT50790/absent/exit1，保存2dirtyfiles，同树freshGCM `provider-n2-c-memory-finish-gcm-r2-20261016` 收尾，不把15FAIL新增为C2门禁。Root源码发现id+task倒序latest可误选另一cycle（S已真实证明同ID跨cycle合法），及按caller命名无条件把checkpoint当errors证据；r2只纠正原exact-binding/真实错误依据并补原1consumer可执行RED/接口/清理，不扩面。C2仍未验收，C3MemoryABI仍conditional。
 
 - C1与错误refs模块均已验收：C1提交 `9f71159b101ea0603467539f043f02f1a5ca9abd`，错误refs提交 `b3b09c5`，标准组合candidate3052e773；Root组合Appbuild0/两scopedtsc0/公开C1一case1/1+Provider六affected6/6exit0。C1有实际coverageomissionRED16!=17及真实coverage readback/幂等；Provider新增causechainassert实际[]丢refsRED，五旧exact预期已保语义更新。作者额外129suite只留历史，不新增门禁/不重复。Provider来源clean/exit0/无占用后normalremove/prune/absent，注册6→5，C1Rootfixture已归档Journal并清空目录。
