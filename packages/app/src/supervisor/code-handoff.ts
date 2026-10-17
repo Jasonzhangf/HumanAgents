@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { readFile, realpath } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import type { RuntimePaths } from '../../../config/src/index.js';
 import { AppLifecycleError } from '../errors.js';
 import {
@@ -109,7 +109,6 @@ function assertStartupDeclaration(startup: SupervisorStartupDeclaration): void {
     !startup.launcherPath
     || !startup.cwd
     || !startup.source.entryPath
-    || !startup.source.entryDigest
   ) {
     throw handoffError(
       'daemon-restart.startup-missing',
@@ -218,10 +217,8 @@ export async function captureLoadedSourceReceipt(input: {
   readonly releaseVersion?: string;
 }): Promise<SupervisorSourceReceipt> {
   const entryPath = await realpath(input.entryPath);
-  const digest = createHash('sha256').update(await readFile(entryPath)).digest('hex');
   return {
     entryPath,
-    entryDigest: `sha256:${digest}`,
     packageVersion: input.packageVersion,
     ...(input.releaseVersion === undefined ? {} : { releaseVersion: input.releaseVersion }),
   };
@@ -250,7 +247,6 @@ export function startDaemonCodeHandoff(
       previousGeneration: input.expected.generation,
       previousProcessStartToken: input.expected.processStartToken,
       targetEntryPath: input.startup.source.entryPath,
-      targetEntryDigest: input.startup.source.entryDigest,
     };
     try {
       assertStartupDeclaration(input.startup);
@@ -269,7 +265,6 @@ export function startDaemonCodeHandoff(
         replacement.restart?.requestId !== requestId
         || source === undefined
         || source.entryPath !== input.startup.source.entryPath
-        || source.entryDigest !== input.startup.source.entryDigest
       ) {
         unrefChild(child);
         throw handoffError(
