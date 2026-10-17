@@ -46,8 +46,8 @@ HumanAgent Task/Operation/Checkpoint
 - 固定 `~/.humanagent`、project key、session、checkpoint、artifact、memory 和 profile 路径。
 - 完成 `internal.toml` 与用户 `config.toml` 的加载、校验和最小默认值。
 - 完成 plan/profile 选择、启动前 doctor、provider readiness 和明确错误出口。
-- 复用现有 `scripts/checkpoint-runner.mjs`，不新增第二个 checkpoint 实现。
-- 统一 release manifest、阶段 owner、输入/输出 digest、复用证据和失败续跑。
+- 日常构建使用 `scripts/run-build.mjs`，CI 使用 `scripts/run-ci.mjs`，不调用 release checkpoint runner。
+- 阶段 owner 保存真实行为结果和失败续跑责任，直接复用有效结果，不建立输入/输出摘要或冻结材料；release 专属入口只在准备对外发布时按实际需要使用。
 - 提供开发模式和 release 模式的明确区别。
 
 ### 非目标
@@ -155,10 +155,10 @@ HumanAgent Task
 - 正常、waiting、blocked、failed、cancelled 出口；
 - checkpoint 和 evidence refs；
 - focused tests；
-- 适用的 Astra review；
+- 完整重大 milestone 在作者验收后、集成前的一次独立整体 review；
 - merge/push 前的本地和远端 Git 证据。
 
-阶段重入规则：已通过且输入 digest 未变化的阶段复用；从第一个输入或依赖发生变化的阶段重新执行；不得用跳过掩盖失败。
+阶段重入规则：直接复用仍有效的结果；具体输入或依赖变化时只补受影响验证，不计算摘要。内部节点不单独触发 review，不得用跳过掩盖失败。
 
 ## 8. 顺序
 

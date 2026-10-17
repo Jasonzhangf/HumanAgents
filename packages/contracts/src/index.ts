@@ -999,12 +999,12 @@ export interface ProviderToolContinuation {
   readonly output: string;
 }
 
-export interface ProviderStartInput extends ProviderExecutionInput {}
+export interface ProviderStartInput extends ProviderExecutionInput, Partial<ProviderRequestIdentityRef> {}
 export interface ProviderResumeInput extends ProviderExecutionInput {
   readonly checkpointId: CheckpointId;
   readonly checkpointExecutionEpoch: number;
 }
-export interface ProviderSubmitInput extends ProviderExecutionInput {
+export interface ProviderSubmitInput extends ProviderExecutionInput, Partial<ProviderRequestIdentityRef> {
   readonly payload: BusinessPayload;
   readonly toolContinuations?: readonly ProviderToolContinuation[];
 }
@@ -1359,6 +1359,7 @@ function validateProviderExecutionInput(input: ProviderExecutionInput): void {
 }
 export function validateProviderStartInput(input: ProviderStartInput): void {
   validateProviderExecutionInput(input);
+  assertOptionalProviderRequestIdentity(input, 'provider start');
 }
 export function validateProviderResumeInput(input: ProviderResumeInput): void {
   validateProviderExecutionInput(input);
@@ -1369,6 +1370,7 @@ export function validateProviderResumeInput(input: ProviderResumeInput): void {
 }
 export function validateProviderSubmitInput(input: ProviderSubmitInput): void {
   validateProviderExecutionInput(input);
+  assertOptionalProviderRequestIdentity(input, 'provider submit');
   if (!input.payload) throw new ContractError('provider submit payload is required');
   assertBusinessPayload(input.payload);
   if (input.toolContinuations !== undefined) {

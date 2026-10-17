@@ -172,7 +172,6 @@ async function run() {
   const result = {
     status: 'PASS',
     repoPath,
-    candidateSha: binding.candidateSha,
     serveBaseUrl: binding.serveBaseUrl,
     servePid: binding.servePid,
     screenshots,

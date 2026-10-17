@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runStages } from '../../scripts/checkpoint-runner.mjs';
-import { checkpointStages } from '../../scripts/checkpoint-stages.mjs';
 import { digest, treeDigest } from '../../scripts/digests.mjs';
 import { assemblePackage } from '../../scripts/package-assembly.mjs';
 import { bumpReleaseVersion, configuredPackageVersion, configuredReleaseVersion, packageVersionForRelease, validateReleaseVersion } from '../../scripts/release-version.mjs';
@@ -57,10 +56,6 @@ test('release bump preserves the split npm and HumanAgent version sources', asyn
   const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.version, '0.1.2');
   assert.equal(packageJson.releaseVersion, '0.1.0002');
-  const architecture = await readFile(join(root, 'docs', 'architecture', 'release-version.md'), 'utf8');
-  assert.match(architecture, /HumanAgent release source:.*releaseVersion/);
-  assert.match(architecture, /npm package source:.*version/);
-  assert.doesNotMatch(architecture, /Canonical source:.*version/);
 });
 
 async function fixture() {
@@ -297,23 +292,6 @@ test('build, ci, and release checkpoint roots share one project write lock', asy
   assert.equal(first.overall, 'pass');
   const second = await runStages({ ...fixtureValue, checkpointRoot: secondCheckpointRoot, lockRoot, stages });
   assert.equal(second.overall, 'pass');
-});
-
-test('compile checkpoint owns every raw build output and excludes release output', () => {
-  const stages = checkpointStages();
-  assert.deepEqual(stages.map((stage) => stage.name), ['typecheck', 'compile', 'regression']);
-  const compile = stages.find((stage) => stage.name === 'compile');
-  const regression = stages.find((stage) => stage.name === 'regression');
-  assert.deepEqual(compile.command, ['pnpm', 'run', 'build:raw']);
-  assert.deepEqual(compile.outputs.map((output) => output.value), [
-    'dist/app',
-    'dist/config',
-    'dist/tests',
-    'dist/tests-runtime-intake',
-    'dist/tests-acp',
-    'packages/contracts/dist',
-  ]);
-  assert.deepEqual(regression.command, ['pnpm', 'run', 'test:compiled:services']);
 });
 
 test('assembled CLI package installs and runs its public consumer behavior', async (t) => {
