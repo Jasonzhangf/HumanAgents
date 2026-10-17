@@ -1408,7 +1408,15 @@ export function createInteractionParentTurnRawOwner(
         units.push({
           kind: 'message',
           role: 'assistant',
-          text: canonicalJsonStringify({ claims: checkpoint.claims, constraints: checkpoint.constraints }),
+          text: canonicalJsonStringify({
+            kind: checkpoint.kind,
+            interactionId: checkpoint.interactionId,
+            inputRevision: checkpoint.inputRevision,
+            turnId: checkpoint.turnId,
+            committedAt: checkpoint.committedAt,
+            claims: checkpoint.claims,
+            constraints: checkpoint.constraints,
+          }),
         });
       }
       units.push({ kind: 'message', role: 'user', text: folded.initialInputText });

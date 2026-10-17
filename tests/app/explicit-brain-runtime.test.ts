@@ -1510,6 +1510,35 @@ test('provider explicit brain interpreter loads the interaction template and val
   const wire = JSON.parse(posts[0]) as {
     readonly instructions: string;
   };
+  const secondWire = JSON.parse(posts[1]) as {
+    readonly input: readonly {
+      readonly type: string;
+      readonly role?: string;
+      readonly content?: readonly { readonly type: string; readonly text: string }[];
+    }[];
+  };
+  const priorCheckpoint = JSON.parse(secondWire.input[0]?.content?.[0]?.text ?? '') as {
+    readonly kind: string;
+    readonly interactionId: string;
+    readonly inputRevision: number;
+    readonly turnId: string;
+    readonly committedAt: string;
+    readonly claims: readonly { readonly fact: string }[];
+    readonly constraints: readonly { readonly fact: string }[];
+  };
+  assert.equal(secondWire.input[0]?.type, 'message');
+  assert.equal(secondWire.input[0]?.role, 'assistant');
+  assert.equal(priorCheckpoint.kind, committed.checkpoint.kind);
+  assert.equal(priorCheckpoint.interactionId, 'interaction-provider-test');
+  assert.equal(priorCheckpoint.inputRevision, 1);
+  assert.equal(priorCheckpoint.turnId, committed.checkpoint.turnId);
+  assert.equal(priorCheckpoint.committedAt, committed.checkpoint.committedAt);
+  assert.deepEqual(priorCheckpoint.claims, committed.checkpoint.claims);
+  assert.deepEqual(priorCheckpoint.constraints, committed.checkpoint.constraints);
+  assert.ok(priorCheckpoint.claims.some((claim) => claim.fact.startsWith('goal: ')));
+  assert.ok(priorCheckpoint.claims.some((claim) => claim.fact.startsWith('what-done(parent): ')));
+  assert.ok(priorCheckpoint.claims.some((claim) => claim.fact.startsWith('outcome(requirement:create): ')));
+  assert.ok(priorCheckpoint.claims.some((claim) => claim.fact.startsWith('next: ')));
   const sentPrompt = wire.instructions;
   assert.ok(sentPrompt.includes('# Control Boundaries'));
   assert.ok(sentPrompt.includes('# Explicit Brain'));
