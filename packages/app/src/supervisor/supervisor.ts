@@ -67,8 +67,9 @@ export interface SupervisorTakeoverRecord {
   readonly previousGeneration: number;
   readonly reason: string;
   readonly detectedAt: string;
-  readonly termination?: 'graceful' | 'forced';
+  readonly termination?: 'graceful' | 'forced' | 'already-dead';
   readonly gracefulStopError?: string;
+  readonly previousFailure?: SupervisorFailureRecord;
 }
 
 export interface SupervisorLeaseRecord {
@@ -272,8 +273,16 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
       || typeof takeover.reason !== 'string'
       || typeof takeover.detectedAt !== 'string'
       || !Number.isSafeInteger(takeover.previousGeneration)
-      || (takeover.termination !== undefined && takeover.termination !== 'graceful' && takeover.termination !== 'forced')
+      || (takeover.termination !== undefined && takeover.termination !== 'graceful' && takeover.termination !== 'forced' && takeover.termination !== 'already-dead')
       || (takeover.gracefulStopError !== undefined && typeof takeover.gracefulStopError !== 'string')
+      || (takeover.previousFailure !== undefined && (
+        typeof takeover.previousFailure.phase !== 'string'
+        || typeof takeover.previousFailure.ownerId !== 'string'
+        || typeof takeover.previousFailure.errorCode !== 'string'
+        || typeof takeover.previousFailure.nextAction !== 'string'
+        || typeof takeover.previousFailure.message !== 'string'
+        || typeof takeover.previousFailure.occurredAt !== 'string'
+      ))
     ) {
       throw supervisorError('daemon-lease-corrupt', 'daemon lease takeover record is invalid', 'inspect and repair the daemon lease');
     }
@@ -467,10 +476,21 @@ async function waitForProcessExit(pid: number, timeoutMs: number, pollIntervalMs
 }
 
 interface TakeoverTerminationReceipt {
-  readonly termination: 'graceful' | 'forced';
+  readonly termination: 'graceful' | 'forced' | 'already-dead';
   readonly gracefulStopError?: string;
 }
 
+function hasCleanupFailure(failure: SupervisorFailureRecord | undefined): boolean {
+  return failure?.cleanupFailure !== undefined
+    || failure?.errorCode === 'supervisor-dispose.cleanup-failed'
+    || failure?.errorCode === 'supervisor-restart.cleanup-failed';
+}
+
+/**
+ * A takeover records `already-dead` only when the PID is already gone at the
+ * first classification. An owner that was alive then is never reclassified as
+ * already-dead, even if it exits during the identity check or signaling.
+ */
 async function stopActiveDaemon(
   paths: RuntimePaths,
   existing: SupervisorLeaseRecord,
@@ -480,6 +500,10 @@ async function stopActiveDaemon(
   const gracefulTimeoutMs = assertStopTimeout(options.gracefulTimeoutMs, 'gracefulTimeoutMs', DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
   const pollIntervalMs = assertStopTimeout(options.pollIntervalMs, 'pollIntervalMs', DEFAULT_STOP_POLL_INTERVAL_MS);
   let gracefulStopError: string | undefined;
+
+  if (!processIsAlive(pid)) {
+    return { termination: 'already-dead' };
+  }
 
   await assertTakeoverProcessIdentity(paths, existing);
   try {
@@ -780,34 +804,40 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
       }
     }
 
-    const closed = await readLeaseRecord(paths);
-    if (
-      existing?.startup !== undefined
-      && (
-        closed === undefined
-        || closed.leaseId !== existing.leaseId
-        || closed.disposedAt === undefined
-        || closed.failure?.cleanupFailure !== undefined
-      )
-    ) {
-      throw supervisorError(
-        'daemon-takeover.previous-close-unverified',
-        `previous owner ${existing.leaseId} did not publish a clean disposal receipt`,
-        'inspect the previous owner cleanup failure and recovery responsibility before retrying restart',
-        existing.ownerId,
-      );
-    }
-
     return withLeaseGuard(leasePath, async () => {
       const latest = await readLeaseRecord(paths);
       if (
-        latest !== undefined
-        && !latest.disposedAt
-        && (existing === undefined || latest.leaseId !== existing.leaseId)
+        existing === undefined
+          ? latest !== undefined
+          : latest === undefined
+            || latest.leaseId !== existing.leaseId
+            || latest.generation !== existing.generation
+            || latest.processStartToken !== existing.processStartToken
       ) {
-        throw leaseOwnedError(latest);
+        throw supervisorError(
+          'daemon-lease-stale',
+          'daemon lease changed during takeover',
+          'inspect the current daemon owner before retrying takeover',
+        );
       }
-      const previous = latest ?? existing;
+      if (
+        existing !== undefined
+        && (
+          hasCleanupFailure(existing.failure)
+          || hasCleanupFailure(latest?.failure)
+          || (existing.startup !== undefined
+            && termination?.termination !== 'already-dead'
+            && latest?.disposedAt === undefined)
+        )
+      ) {
+        throw supervisorError(
+          'daemon-takeover.previous-close-unverified',
+          `previous owner ${existing.leaseId} did not publish a clean disposal receipt`,
+          'inspect the previous owner cleanup failure and recovery responsibility before retrying restart',
+          existing.ownerId,
+        );
+      }
+      const previous = latest;
       const record = newLeaseRecord(paths, (previous?.generation ?? 0) + 1, {
         ownerId: options.ownerId,
         ...(options.startup === undefined ? {} : { startup: options.startup }),
@@ -819,6 +849,12 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
             reason: options.takeover!.reason,
             detectedAt: new Date().toISOString(),
             ...termination,
+            // A takeover that carries an unverified close does not invent a
+            // clean one: it keeps the typed previous responsibility here
+            // instead of reconstructing it from a business payload or log.
+            ...((latest?.failure ?? existing.failure) === undefined
+              ? {}
+              : { previousFailure: latest?.failure ?? existing.failure }),
           },
         }),
       });

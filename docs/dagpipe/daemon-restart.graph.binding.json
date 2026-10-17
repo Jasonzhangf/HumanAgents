@@ -1,0 +1,15 @@
+{
+  "graph":"humanagent-daemon-restart",
+  "operator":{"operator":"humanagent-daemon-restart","operator_version":"1"},
+  "nodes":{
+    "validate_request":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"},
+    "record_transition":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"},
+    "spawn_replacement":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"},
+    "classify_previous":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
+    "resolve_previous":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
+    "commit_generation":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
+    "start_stages":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
+    "publish_ready":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
+    "restart_result":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"}
+  }
+}
