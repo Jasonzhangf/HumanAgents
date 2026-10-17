@@ -448,7 +448,15 @@ test('neutral interaction parent raw owner keeps one durable, parent-only raw hi
     assert.deepEqual(units[0], {
       kind: 'message',
       role: 'assistant',
-      text: canonicalJsonStringify({ claims: checkpoint.claims, constraints: checkpoint.constraints }),
+      text: canonicalJsonStringify({
+        kind: checkpoint.kind,
+        interactionId: checkpoint.interactionId,
+        inputRevision: checkpoint.inputRevision,
+        turnId: checkpoint.turnId,
+        committedAt: checkpoint.committedAt,
+        claims: checkpoint.claims,
+        constraints: checkpoint.constraints,
+      }),
     });
     assert.deepEqual(units[1], { kind: 'message', role: 'user', text: 'read README.md' });
     assert.deepEqual(units[2], { kind: 'message', role: 'assistant', text: 'The README says hello.' });
@@ -1326,6 +1334,11 @@ test('an unclosed parent turn blocks next-turn history until its semantic checkp
       kind: 'message',
       role: 'assistant',
       text: canonicalJsonStringify({
+        kind: closedOne.checkpoint.kind,
+        interactionId: closedOne.checkpoint.interactionId,
+        inputRevision: closedOne.checkpoint.inputRevision,
+        turnId: closedOne.checkpoint.turnId,
+        committedAt: closedOne.checkpoint.committedAt,
         claims: closedOne.checkpoint.claims,
         constraints: closedOne.checkpoint.constraints,
       }),
