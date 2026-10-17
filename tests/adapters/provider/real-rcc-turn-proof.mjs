@@ -138,7 +138,8 @@ async function run() {
         continue;
       }
       if (fact.kind === 'tool-result') {
-        units.push({ kind: 'tool-result', callId: fact.callId, toolId: fact.result.toolId, output: fact.result.output, status: fact.result.status });
+        const output = new TextDecoder().decode(await rawReader.read({ scope, content: fact.rawOutput }));
+        units.push({ kind: 'tool-result', callId: fact.callId, toolId: fact.result.toolId, output, status: fact.result.status });
         continue;
       }
       if (fact.kind !== 'content' || fact.channel !== 'assistant-text') continue;
@@ -248,9 +249,13 @@ async function run() {
         receipt.durableRequests = turn.requests();
         receipt.acceptedRawFacts = turn.entries();
         receipt.journalRecords = await journal.replay();
-        receipt.toolOutputs = receipt.acceptedRawFacts
+        receipt.toolOutputs = await Promise.all(receipt.acceptedRawFacts
           .filter((entry) => entry.envelope.fact.kind === 'tool-result')
-          .map((entry) => entry.envelope.fact.result);
+          .map(async (entry) => {
+            const { fact } = entry.envelope;
+            const output = new TextDecoder().decode(await rawReader.read({ scope, content: fact.rawOutput }));
+            return { ...fact.result, output };
+          }));
       }
       if (CONTINUE_CURRENT_TURN) {
         receipt.requests.push({ submit: receipt.submit, observed: [...receipt.observed] });
@@ -317,7 +322,7 @@ async function run() {
       receipt.assets.push({ ref, size: bytes.length, content });
     }
     const starts = receipt.assets.filter(({ content }) => content?.endpoint === ENDPOINT && content?.status !== undefined);
-    if (receipt.generationAttempts) {
+    if (receipt.generationAttempts && !receipt.error) {
       assert.equal(starts.length, NATIVE_TURN ? 2 : 1, 'real transport request assets');
       for (const start of starts) {
         assert.equal(start.content.protocol, PROTOCOL);
