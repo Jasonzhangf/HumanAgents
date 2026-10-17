@@ -826,6 +826,7 @@ async function readOccurrenceFactsForStop(
           childInvocations: exact.prefix.childInvocations,
           entries: executionEntries(exact.prefix.entries),
         });
+        originalBinding = exact.prefix.binding;
         predecessor = undefined;
       }
     }
