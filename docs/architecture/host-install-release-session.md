@@ -300,10 +300,21 @@ release 打包流程。它是显式发布入口，不能作为普通开发或本
 不计算源码、输出目录或候选摘要；CI 不自动执行全图治理或 release 测试。
 业务运行时的 checkpoint、Journal 和恢复状态不受这项消融影响。
 
-本地安装读取 `dist/release/release-manifest.json` 的 `packageArtifactPath`，
-将该路径作为单个参数交给 `npm install --global`。manifest 在这里仅用于选包，
-不执行 `release:check`、摘要重算、候选身份绑定或 ReviewRecord 检查。
-缺少包路径、manifest 无法读取或 npm 失败都显式报错，不声称安装成功。
+本地打包入口是 `pnpm package`，它调用 `package:candidate`，生成
+`dist/release/humanagent-cli-<releaseVersion>.tgz`。这条路径不读取 release
+manifest，也不计算源码、输出目录或候选摘要。显式 `package:release` 保持独立，
+不会由本地打包或安装自动执行。
+
+本地安装默认选择上述 candidate 包，也接受一个本地包位置参数：
+
+```text
+pnpm install:global
+pnpm install:global -- "/path/to/humanagent-cli-<releaseVersion>.tgz"
+```
+
+传入路径时按调用者当前目录解析。选定包作为单个参数交给
+`npm install --global`。包不存在、包不可访问或 npm 失败都显式报错并停止，
+不寻找替代产物，不自动 build 或 release，也不声称安装成功。
 
 对外发布只选实际分发需要的打包、安装及公开入口验证。旧 release 脚本的摘要
 机制目前仍限于显式发布入口；它不构成日常放行条件，也不代表全部旧检查都有

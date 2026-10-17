@@ -1,15 +1,12 @@
 import { chmod, cp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { treeDigest } from './digests.mjs';
 
 export async function assemblePackage({ projectRoot, releaseRoot, version, releaseVersion = version }) {
   const packageRoot = join(releaseRoot, 'package');
   await rm(packageRoot, { recursive: true, force: true });
   await mkdir(join(packageRoot, 'bin'), { recursive: true });
   await cp(join(projectRoot, 'dist', 'app'), join(packageRoot, 'runtime'), { recursive: true });
-  const artifactDigest = await treeDigest(join(projectRoot, 'dist', 'app'));
-  if (await treeDigest(join(packageRoot, 'runtime')) !== artifactDigest) throw new Error('packaged runtime does not match compiled artifact');
   const contractsRoot = join(packageRoot, 'runtime', 'node_modules', '@humanagent', 'contracts');
   await mkdir(contractsRoot, { recursive: true });
   await cp(join(projectRoot, 'packages', 'contracts', 'dist'), join(contractsRoot, 'dist'), { recursive: true });
@@ -55,5 +52,5 @@ export async function assemblePackage({ projectRoot, releaseRoot, version, relea
   const packedPath = join(releaseRoot, packed.split('\n').at(-1));
   const packagePath = join(releaseRoot, `humanagent-cli-${releaseVersion}.tgz`);
   if (packedPath !== packagePath) await rename(packedPath, packagePath);
-  return { packageRoot, packagePath, artifactDigest };
+  return { packageRoot, packagePath };
 }
