@@ -12,6 +12,9 @@ import {
   type ChildCallBinding,
   type ChildInvocationRecord,
   type EvidenceRef,
+  type ExecutionChildCallBinding,
+  type InspectionExecutionOutcome,
+  type InspectionItemDelivery,
   type OperationId,
   type OperationResult,
   type ProviderExecutionIdentityRef,
@@ -30,6 +33,7 @@ import {
   type ProviderProducerDrainResult,
   type WorkAssignment,
   type WorkResult,
+  validateInspectionExecutionOutcome,
 } from '../../../contracts/src/index.js';
 import type { ExecutionRuntimePort, ProviderBinding, ProviderToolCall } from '../../../contracts/src/index.js';
 import type {
@@ -62,6 +66,10 @@ import { createReviewAssignments } from '../../../runtime/src/review/index.js';
 import type { CommittedCheckpointRecord } from '../../../runtime/src/checkpoints/ports.js';
 import type { RefinedDeliveryStore } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ActiveTurnContext, ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
+import type {
+  InspectionBoundaryPort,
+  InspectionSelectionReader,
+} from '../../../runtime/src/agent-loop/inspection-turn-boundary.js';
 import { ProviderAgentDriver } from '../../../adapters/provider/src/index.js';
 import type { ProviderToolExecutionResult } from '../../../adapters/provider/src/index.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/index.js';
@@ -97,6 +105,7 @@ export const APP_CHILD_CALL_TOOL: ProviderToolDefinition = {
     'Dispatch one genuine independent child call in this same task.',
     'Select exactly one configured roster agent by agentId.',
     'Use kind "execution" for bounded work that produces one refined result, or kind "review" to review one previously returned execution result by its invocationId and a registered reviewKind.',
+    'An execution may name one committed inspection checkId; the App owner resolves its binding and the model cannot supply that binding.',
     'The parent chooses every role; no fixed order is imposed and repeated choices are allowed.',
   ].join(' '),
   inputSchema: {
@@ -127,6 +136,7 @@ export const APP_CHILD_CALL_TOOL: ProviderToolDefinition = {
       target: { type: 'string', minLength: 1, maxLength: MAX_TARGET_REF },
       reviewKind: { type: 'string', enum: [...REVIEW_KIND_WHITELIST] },
       subjectInvocationId: { type: 'string', minLength: 1, maxLength: MAX_INVOCATION_REF },
+      checkId: { type: 'string', minLength: 1, maxLength: MAX_INVOCATION_REF },
     },
   },
 };
@@ -183,6 +193,7 @@ export const APP_CHILD_DELIVER_TOOL: ProviderToolDefinition = {
     'Put the complete, independently readable final body in "body". Preserve the actual scope, result, failure, truncation, and unresolved boundary; no summary, ref, or digest substitutes for the body.',
     'Put the evidenceId or locator of each piece of your own accepted evidence from this child turn in "evidenceRefs". Cite only exact accepted references, and state whether an action had a verified effect separately from whether the action itself succeeded.',
     'For a review also state the business "judgment" (passed, failed or inconclusive) and the concrete findings.',
+    'For an inspection execution, report the measured inspectionOutcome separately; completed carries the observed judgment, while failed, blocked, cancelled or unknown carries its reason.',
     'This action records the full delivery only. Ending this turn is a separate action.',
   ].join(' '),
   inputSchema: {
@@ -215,6 +226,16 @@ export const APP_CHILD_DELIVER_TOOL: ProviderToolDefinition = {
         type: 'array',
         minItems: 1,
         items: { type: 'string', minLength: 1, maxLength: MAX_TARGET_REF },
+      },
+      inspectionOutcome: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['status'],
+        properties: {
+          status: { type: 'string', enum: ['completed', 'failed', 'blocked', 'cancelled', 'unknown'] },
+          judgment: { type: 'string', minLength: 1, maxLength: MAX_DELIVERY_CHARS },
+          reason: { type: 'string', minLength: 1, maxLength: MAX_DELIVERY_CHARS },
+        },
       },
     },
   },
@@ -250,6 +271,7 @@ export interface AppChildOperationAdmissionInput {
   readonly invocationId: string;
   readonly childOperationId: OperationId;
   readonly kind: 'execution' | 'review';
+  readonly inspection?: NonNullable<ExecutionChildCallBinding['inspection']>;
   readonly selected: { readonly agentId: string; readonly roleId: AgentRole };
   readonly parentExecution: ProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
@@ -275,6 +297,8 @@ export interface AppChildProducerInput {
   }) => Promise<AgentProviderComposition>;
   readonly roster: readonly { readonly agentId: string; readonly roleId: AgentRole }[];
   readonly admitChildOperation: AppChildOperationAdmissionPort;
+  readonly inspection?: Pick<InspectionBoundaryPort, 'select' | 'acceptDelivery'>;
+  readonly inspectionSelection?: InspectionSelectionReader;
   readonly now?: () => Date;
 }
 
@@ -282,6 +306,7 @@ export interface ConfiguredChildAgentInput {
   readonly call: RegisteredParentChildCall;
   readonly operation: ToolOperationAdmissionReceipt;
   readonly selected: { readonly agentId: string; readonly roleId: AgentRole };
+  readonly inspection?: NonNullable<ExecutionChildCallBinding['inspection']>;
   readonly bodyAssets: ChildBodyAssetPort;
   readonly bindChildRun: BindChildRunPort;
   readonly prepareAgentProvider: (selection: {
@@ -372,6 +397,7 @@ export interface ChildDeliveryRecord {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly judgment?: ReviewStatus;
   readonly findings: readonly ReviewFinding[];
+  readonly inspectionOutcome?: InspectionExecutionOutcome;
 }
 
 /** What one independent child run can honestly end as. */
@@ -451,6 +477,7 @@ type ExecutionCallRequest = {
   readonly failureCriteria: readonly string[];
   readonly incompleteCriteria: readonly string[];
   readonly target: string;
+  readonly checkId?: string;
 };
 
 type ReviewCallRequest = {
@@ -508,9 +535,15 @@ function parseChildCallRequest(args: BusinessPayload): ChildCallRequest {
       failureCriteria: readBoundedStringArray(args.failureCriteria, 'failureCriteria', MAX_CRITERIA_ITEMS, MAX_CRITERIA_ITEM, false),
       incompleteCriteria: readBoundedStringArray(args.incompleteCriteria, 'incompleteCriteria', MAX_CRITERIA_ITEMS, MAX_CRITERIA_ITEM, false),
       target: readBoundedString(args.target, 'target', MAX_TARGET_REF, true),
+      ...(args.checkId === undefined
+        ? {}
+        : { checkId: readBoundedString(args.checkId, 'checkId', MAX_INVOCATION_REF, true) }),
     };
   }
   if (args.kind === 'review') {
+    if (args.checkId !== undefined) {
+      throw new Error('a review child call cannot select an inspection check');
+    }
     const reviewKind = args.reviewKind;
     if (typeof reviewKind !== 'string' || !REVIEW_KIND_WHITELIST.includes(reviewKind as ReviewKind)) {
       throw new Error('child call reviewKind must be a registered review kind');
@@ -737,6 +770,7 @@ function executionPrompt(assignment: WorkAssignment): string {
     'You receive only the bounded instructions and criteria below. Do not assume any parent transcript.',
     `Objective: ${assignment.objective}`,
     `Success criteria: ${assignment.successCriteria.join('; ')}`,
+    'If this assignment names an inspection check, report its measured inspectionOutcome separately from the complete result body. A completed outcome carries the observed judgment; a non-completed outcome keeps its explicit reason.',
     ...(assignment.failureCriteria.length === 0 ? [] : [`Failure criteria: ${assignment.failureCriteria.join('; ')}`]),
     ...(assignment.incompleteCriteria.length === 0 ? [] : [`Incomplete criteria: ${assignment.incompleteCriteria.join('; ')}`]),
     'Use the tools you were given for the real work, then record the complete result with the delivery tool, and end this turn with the standard end action.',
@@ -764,6 +798,7 @@ function reviewPrompt(assignment: ReviewAssignment, material: ReviewMaterial): s
  */
 function createChildDeliveryExecutor(input: {
   readonly kind: 'execution' | 'review';
+  readonly inspection?: NonNullable<ExecutionChildCallBinding['inspection']>;
   readonly state: ChildRunState;
   readonly invocationId: string;
   readonly incarnation: TaskRuntimeIncarnation;
@@ -787,6 +822,18 @@ function createChildDeliveryExecutor(input: {
       const judgment = input.kind === 'review' ? readReviewJudgment(args.judgment) : undefined;
       if (input.kind === 'execution' && (args.judgment !== undefined || args.findings !== undefined)) {
         throw new Error('an execution delivery carries no review judgment or findings');
+      }
+      if (input.kind === 'execution' && input.inspection !== undefined && args.inspectionOutcome === undefined) {
+        throw new Error('an inspection execution delivery requires its independent inspectionOutcome');
+      }
+      if (input.kind === 'review' && args.inspectionOutcome !== undefined) {
+        throw new Error('a review delivery cannot carry an inspection outcome');
+      }
+      const inspectionOutcome = args.inspectionOutcome === undefined
+        ? undefined
+        : readInspectionOutcome(args.inspectionOutcome);
+      if (input.kind === 'execution' && input.inspection === undefined && inspectionOutcome !== undefined) {
+        throw new Error('a non-inspection execution cannot carry an inspection outcome');
       }
       const candidateFindings = input.kind === 'review' ? parseReviewFindingSelectors(args.findings) : [];
       const byReference = new Map<string, EvidenceRef>();
@@ -831,6 +878,7 @@ function createChildDeliveryExecutor(input: {
         evidenceRefs,
         ...(judgment === undefined ? {} : { judgment }),
         findings,
+        ...(inspectionOutcome === undefined ? {} : { inspectionOutcome }),
       };
       return {
         output: JSON.stringify({
@@ -865,6 +913,33 @@ function readReviewJudgment(value: unknown): ReviewStatus {
     throw new Error('child review delivery judgment must be passed, failed or inconclusive');
   }
   return value as ReviewStatus;
+}
+
+function readInspectionOutcome(value: unknown): InspectionExecutionOutcome {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('inspectionOutcome must be an object');
+  }
+  const candidate = value as Record<string, unknown>;
+  const status = candidate.status;
+  if (status !== 'completed' && status !== 'failed' && status !== 'blocked'
+    && status !== 'cancelled' && status !== 'unknown') {
+    throw new Error('inspectionOutcome status must be completed, failed, blocked, cancelled or unknown');
+  }
+  const judgment = candidate.judgment === undefined
+    ? undefined
+    : readBoundedString(candidate.judgment, 'inspectionOutcome judgment', MAX_DELIVERY_CHARS, true);
+  const reason = candidate.reason === undefined
+    ? undefined
+    : readBoundedString(candidate.reason, 'inspectionOutcome reason', MAX_DELIVERY_CHARS, true);
+  const outcome = status === 'completed'
+    ? { status, judgment }
+    : { status, reason, ...(judgment === undefined ? {} : { judgment }) };
+  try {
+    validateInspectionExecutionOutcome(outcome as InspectionExecutionOutcome);
+  } catch (error) {
+    throw new Error(`inspectionOutcome is invalid: ${errorMessage(error)}`);
+  }
+  return outcome as InspectionExecutionOutcome;
 }
 
 function parseReviewFindingSelectors(value: unknown): readonly ReviewFindingSelectors[] {
@@ -966,7 +1041,11 @@ function reviewResult(input: {
  * `returned` carries the real result.
  */
 type RunResolvedOutcome =
-  | { readonly state: 'returned'; readonly result: WorkResult | ReviewAgentDelivery }
+  | {
+      readonly state: 'returned';
+      readonly result: WorkResult | ReviewAgentDelivery;
+      readonly inspectionDelivery?: InspectionItemDelivery;
+    }
   | { readonly state: 'blocked'; readonly reason: string };
 
 /**
@@ -983,6 +1062,7 @@ type RunResolvedOutcome =
  */
 async function resolveRunOutcome(input: {
   readonly kind: 'execution' | 'review';
+  readonly inspection?: NonNullable<ExecutionChildCallBinding['inspection']>;
   readonly state: ChildRunState;
   readonly outcome: ChildRunOutcome;
   readonly assignment: WorkAssignment;
@@ -1018,6 +1098,14 @@ async function resolveRunOutcome(input: {
   if (digestOf(readBack) !== delivery.digest) return blocked('the delivered body digest drifted');
   if (delivery.digest !== digestOf(delivery.body)) return blocked('the delivered body digest does not match its asset');
   if (input.kind === 'execution') {
+    const inspectionDelivery = input.inspection === undefined
+      ? undefined
+      : inspectionItemDelivery({
+          delivery,
+          inspection: input.inspection,
+          attempt: input.assignment.attempt,
+          completedAt: (input.now?.() ?? new Date()).toISOString(),
+        });
     return {
       state: 'returned',
       result: executionResult({
@@ -1026,6 +1114,7 @@ async function resolveRunOutcome(input: {
         agentId: input.agentId,
         events: input.outcome.events,
       }),
+      ...(inspectionDelivery === undefined ? {} : { inspectionDelivery }),
     };
   }
   if (input.reviewAssignment === undefined) return blocked('a review resolution needs its real assignment');
@@ -1047,6 +1136,25 @@ async function resolveRunOutcome(input: {
       },
       completedAt: (input.now?.() ?? new Date()).toISOString(),
     },
+  };
+}
+
+function inspectionItemDelivery(input: {
+  readonly delivery: ChildDeliveryRecord;
+  readonly inspection: NonNullable<ExecutionChildCallBinding['inspection']>;
+  readonly attempt: number;
+  readonly completedAt: string;
+}): InspectionItemDelivery {
+  if (input.delivery.inspectionOutcome === undefined) {
+    throw new Error('an inspection execution resolved without its independent outcome');
+  }
+  return {
+    checkId: input.inspection.check.checkId,
+    resultId: `inspection-result:${input.delivery.invocationId}`,
+    attempt: input.attempt,
+    outcome: input.delivery.inspectionOutcome,
+    evidenceRefs: [...input.delivery.evidenceRefs],
+    completedAt: input.completedAt,
   };
 }
 
@@ -1093,6 +1201,7 @@ function childToolSurface(input: {
   readonly state: ChildRunState;
   readonly invocationId: string;
   readonly kind: 'execution' | 'review';
+  readonly inspection?: NonNullable<ExecutionChildCallBinding['inspection']>;
   readonly scope: ScopeRef;
   readonly incarnation: TaskRuntimeIncarnation;
   readonly bodyAssets: ChildBodyAssetPort;
@@ -1112,6 +1221,7 @@ function childToolSurface(input: {
   );
   const delivery = createChildDeliveryExecutor({
     kind: input.kind,
+    ...(input.inspection === undefined ? {} : { inspection: input.inspection }),
     state: input.state,
     invocationId: input.invocationId,
     incarnation: input.incarnation,
@@ -1141,6 +1251,7 @@ interface ConfiguredChildRunInput {
   readonly state: ChildRunState;
   readonly run: BoundChildRun;
   readonly kind: 'execution' | 'review';
+  readonly inspection?: NonNullable<ExecutionChildCallBinding['inspection']>;
   readonly scope: ScopeRef;
   readonly operationId: OperationId;
   readonly incarnation: TaskRuntimeIncarnation;
@@ -1168,6 +1279,7 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
     state: input.state,
     invocationId: input.invocationId,
     kind: input.kind,
+    ...(input.inspection === undefined ? {} : { inspection: input.inspection }),
     scope: input.scope,
     incarnation: input.incarnation,
     bodyAssets: input.input.bodyAssets,
@@ -1231,6 +1343,7 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
     state: input.state,
     outcome,
     assignment: input.assignment,
+    ...(input.inspection === undefined ? {} : { inspection: input.inspection }),
     ...(input.reviewAssignment === undefined ? {} : { reviewAssignment: input.reviewAssignment }),
     agentId: input.agentId,
     bodyAssets: input.input.bodyAssets,
@@ -1295,7 +1408,7 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
         incarnation: create.incarnation,
         async release() { await closer.close(); },
         async dispose() { await closer.close(); },
-        async execute(execution: ExecutionAgentInput): Promise<WorkResult> {
+        async execute(execution: ExecutionAgentInput) {
           const composition = await prepare();
           closer.hold(composition);
           const operationId = childOperationId(input.call.invocationId);
@@ -1314,6 +1427,7 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
             state: {},
             run,
             kind: 'execution',
+            ...(input.inspection === undefined ? {} : { inspection: input.inspection }),
             scope,
             operationId,
             incarnation: create.incarnation,
@@ -1344,7 +1458,12 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
               failureRef: `child:${execution.assignment.assignmentId}:no-delivery`,
             };
           }
-          return resolved.result as WorkResult;
+          return resolved.inspectionDelivery === undefined
+            ? resolved.result as WorkResult
+            : {
+                result: resolved.result as WorkResult,
+                inspectionDelivery: resolved.inspectionDelivery,
+              };
         },
       };
     },
@@ -1448,7 +1567,12 @@ type ParentChildReturnInput = {
   readonly invocationId: string;
   readonly refinedDelivery: RawAsset;
 } & (
-  | { readonly kind: 'execution'; readonly assignment: WorkAssignment; readonly result: WorkResult }
+  | {
+      readonly kind: 'execution';
+      readonly assignment: WorkAssignment;
+      readonly result: WorkResult;
+      readonly inspectionDelivery?: InspectionItemDelivery;
+    }
   | { readonly kind: 'review'; readonly assignment: ReviewAssignment; readonly result: ReviewResult }
 );
 
@@ -1570,8 +1694,14 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
   const turnId = parentTurnId(input.parent);
   const parentExecutionEpoch = parent.executionIdentity().executionEpoch;
   const roster = input.roster;
+  const inspectionPorts = input.inspection;
+  const inspectionSelectionReader = input.inspectionSelection;
 
-  function makeChildCallPort(call: RegisteredParentChildCall, worker: WorkAssignment): ChildCallPort {
+  function makeChildCallPort(
+    call: RegisteredParentChildCall,
+    worker: WorkAssignment,
+    inspection?: NonNullable<ExecutionChildCallBinding['inspection']>,
+  ): ChildCallPort {
     return {
       async prepare(prepareInput: ChildCallPrepareInput): Promise<PreparedChildCall> {
         parent.assertProductionOpen();
@@ -1582,7 +1712,11 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           childTurnId: prepareInput.invocationId,
           checkpointReceiptRef,
           binding: prepareInput.kind === 'execution'
-            ? { kind: 'execution', assignment: prepareInput.assignment }
+            ? {
+                kind: 'execution',
+                assignment: prepareInput.assignment,
+                ...(inspection === undefined ? {} : { inspection }),
+              }
             : { kind: 'review', assignment: prepareInput.assignment },
         });
         return { invocationId: prepareInput.invocationId, checkpointReceiptRef };
@@ -1601,6 +1735,9 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
               refinedDelivery,
               assignment: returnInput.assignment,
               result: returnInput.result,
+              ...(returnInput.inspectionDelivery === undefined
+                ? {}
+                : { inspectionDelivery: returnInput.inspectionDelivery }),
             });
           } else {
             await parent.recordChildReturn({
@@ -1845,7 +1982,20 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
             worker: source.worker,
           }).then((committed) => parent.recordReviewCheckpoint(invocationId, committed.checkpoint.id.value));
         }
-        return returnResult(delivery, request.scope);
+        const replayed = returnResult(delivery, request.scope);
+        if (existing.binding.kind === 'execution' && existing.binding.inspection !== undefined) {
+          if (inspectionPorts === undefined) {
+            throw new Error('inspection child replay requires the typed inspection boundary port');
+          }
+          if (delivery.kind !== 'execution') {
+            throw new Error('inspection child replay requires its exact execution delivery');
+          }
+          await inspectionPorts.acceptDelivery({
+            invocation: existing,
+            delivery,
+          });
+        }
+        return replayed;
       }
 
       if (parsed.kind === 'execution') {
@@ -1862,10 +2012,19 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
             kind: 'execution',
           }),
         });
+        const inspectionSelection = parsed.checkId === undefined
+          ? undefined
+          : await selectInspection({
+              logicalTurnId: turnId,
+              executionScope: request.scope,
+              assignment,
+              checkId: parsed.checkId,
+            });
         const executionAgent = createConfiguredExecutionAgent({
           call,
           operation: receipt,
           selected,
+          ...(inspectionSelection === undefined ? {} : { inspection: inspectionSelection }),
           bodyAssets: input.bodyAssets,
           bindChildRun: input.bindChildRun,
           prepareAgentProvider: prepareProvider,
@@ -1876,11 +2035,27 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           call,
           agentId: selected.agentId,
           scope: request.scope,
-          childCallPort: makeChildCallPort(call, assignment),
+          childCallPort: makeChildCallPort(call, assignment, inspectionSelection),
           signal: request.signal,
           assignment,
           executionAgent,
+          ...(inspectionSelection === undefined ? {} : { inspection: inspectionSelection }),
         });
+        if (inspectionSelection !== undefined && result.state === 'returned') {
+          const invocation = parent.childInvocations().find((record) => record.invocationId === invocationId);
+          if (invocation === undefined) throw new Error('inspection child return has no durable invocation');
+          if (inspectionPorts === undefined) {
+            throw new Error('inspection child return requires its typed inspection boundary port');
+          }
+          const inspectionDelivery = findDelivery(parent, invocationId);
+          if (inspectionDelivery?.kind !== 'execution') {
+            throw new Error('inspection child return requires its exact durable execution delivery');
+          }
+          await inspectionPorts.acceptDelivery({
+            invocation,
+            delivery: inspectionDelivery,
+          });
+        }
         return callResult(result, request.scope);
       }
 
@@ -1933,6 +2108,25 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         reviewAgent,
       });
       return callResult(result, request.scope);
+    });
+  }
+
+  async function selectInspection(selection: {
+    readonly logicalTurnId: string;
+    readonly executionScope: ScopeRef;
+    readonly assignment: WorkAssignment;
+    readonly checkId: string;
+  }): Promise<NonNullable<ExecutionChildCallBinding['inspection']>> {
+    if (inspectionPorts === undefined || inspectionSelectionReader === undefined) {
+      throw new Error('inspection child call requires typed inspection selection ports');
+    }
+    const context = await inspectionSelectionReader.readSelectionContext(selection.logicalTurnId);
+    return inspectionPorts.select({
+      logicalTurnId: selection.logicalTurnId,
+      context,
+      executionScope: selection.executionScope,
+      assignment: selection.assignment,
+      checkId: selection.checkId,
     });
   }
 
