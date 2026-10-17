@@ -42,6 +42,8 @@ UX B目标绑定已接收：来源 `69c3aa87`（图前置 `7b43d444`）正常mer
 
 冷恢复入口已修：r206计划由r207在同consumer逐处guard10个test注册，mode声明提前；tests/app compile0，无参数child smoke只报 `cold consumer requires --fixture-root`、无subtests，递归入口隔离有效。child跑原例遇EMFILE/watch，不当产品结论。宿主同例实际到第二OS进程HTTPresume，返回409 `execution-composition.owner-source-missing`（actual cold Provider selection does not bind the execution role），fixture `text-only-jvsynV` 保留。独立Gemini4 r209定位fixture生产组装漏项或实际owner保存/选择缺边，尚未授权产品patch。r208接续wire：此前worker退出于意图，当前只校正testhelper publication scope/identity，尚无有效出站metadataRED，不计wire修复完成。
 
+wire主线已接收候选 `00bbfb41`：r208实际双轮/三轮在成功CLI后的capturedPOST缺checkpointId而RED2/2；3Appencoder补现有typed ID、原committedAt、summary-as-description、topEvidenceRefs后同例GREEN2/2，最终恢复optional修改后再2/2。现有语义、childbody、raw排除、Planner和终态断言保留。类型核实：AdoptedChildSemanticContext/Delivery没有evidenceRefs，不能把RefinedChildSemanticDelivery字段当现有projection；未新造child字段。v1实际运行；v2及childencoder仅源码修复，运行UNVERIFIED。directfile_read多轮尝试因fixture real inspect result is absent失败，完整撤回；r210独立小Plan定位最小fixture缺口，不建新工具/框架/矩阵。当前实际模型语义质量、v2/childproof及cold最终结果仍开放。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
