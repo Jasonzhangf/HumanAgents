@@ -1,6 +1,7 @@
-import type { EvidenceRef, HealthState, LifecycleState, OrganId, SemanticObservationEnvelope, TaskId } from '@humanagent/contracts';
+import type { EvidenceRef, HealthState, InteractionTraceEntry, LifecycleState, OrganId, SemanticObservationEnvelope, TaskFlowBinding, TaskId, TaskIdentitySource } from '@humanagent/contracts';
 import type { CanonicalContextEvent } from '../../context-events/src/index.js';
 import type { TaskDetailProjection } from './models.js';
+import type { RuntimeTaskPlanHistoryProjection } from './task-plan-history.js';
 
 export type { TaskDetailProjection };
 
@@ -12,6 +13,97 @@ export type { TaskDetailProjection };
  * 与 `UI -> contracts`，无反向边、无 runtime import、无事件副本或第二 schema。
  */
 export type RuntimeSemanticObservationEnvelope = SemanticObservationEnvelope<CanonicalContextEvent>;
+
+/**
+ * I1 presentation-ready semantic observation view (`semantic-observation-view@1`).
+ *
+ * The typed envelope above is the authoritative read. This contract names the
+ * concrete projection the shared read-only view component consumes, so the
+ * browser never inspects raw event fields to infer semantics and never rebuilds
+ * pairing state from a payload. Human-readable labels lead every field; the
+ * technical identifiers travel as evidence only.
+ */
+export type SemanticObservationDisplayMode = 'current' | 'semantic' | 'actions' | 'raw';
+
+export interface SemanticObservationViewCrumb {
+  readonly scopeRef: string;
+  readonly title: string;
+  readonly current?: boolean;
+}
+
+export interface SemanticObservationViewEvidence {
+  readonly evidenceId: string;
+  readonly title: string;
+  readonly summary?: string;
+  readonly scopeLabel?: string;
+  readonly sourceLabel?: string;
+  readonly inputs?: readonly string[];
+  readonly outputs?: readonly string[];
+  readonly refs?: readonly string[];
+  readonly raw?: {
+    readonly label: string;
+    readonly content: string;
+  };
+}
+
+export interface SemanticObservationViewItem {
+  readonly id: string;
+  readonly title: string;
+  readonly detail?: string;
+  readonly meta?: readonly string[];
+  readonly state?: string;
+  readonly stateLabel?: string;
+  readonly tone?: string;
+  readonly kind?: string;
+  readonly evidence?: SemanticObservationViewEvidence;
+}
+
+export interface SemanticObservationViewSection {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: 'stable' | 'live' | 'semantic' | 'action' | 'raw' | 'capability';
+  readonly description?: string;
+  readonly items: readonly SemanticObservationViewItem[];
+}
+
+export interface SemanticObservationViewNotice {
+  readonly tone: 'info' | 'stale' | 'unknown' | 'unavailable' | 'error' | 'empty' | 'loading';
+  readonly title: string;
+  readonly detail?: string;
+  readonly nextAction?: string;
+}
+
+export interface SemanticObservationViewProjection {
+  readonly contractVersion: 'semantic-observation-view@1';
+  readonly mode: SemanticObservationDisplayMode;
+  readonly modes: readonly {
+    readonly id: SemanticObservationDisplayMode;
+    readonly label: string;
+    readonly available?: boolean;
+    readonly reason?: string;
+  }[];
+  readonly scope: {
+    readonly scopeRef: string;
+    readonly title: string;
+    readonly summary: string;
+    readonly breadcrumbs: readonly SemanticObservationViewCrumb[];
+  };
+  readonly state: string;
+  readonly stateLabel: string;
+  readonly projectionVersion: string;
+  readonly summary: readonly {
+    readonly label: string;
+    readonly value: string;
+    readonly tone?: string;
+  }[];
+  readonly notices: readonly SemanticObservationViewNotice[];
+  readonly capabilities: readonly {
+    readonly capability: string;
+    readonly state: 'available' | 'unavailable' | 'unknown';
+    readonly reason?: string;
+  }[];
+  readonly sections: readonly SemanticObservationViewSection[];
+}
 
 // UI phase-one runtime surface. The browser consumes these typed projections from
 // the HumanAgent Runtime API; it never reads Journal, DSH session, or RCC frames.
@@ -129,9 +221,17 @@ export interface RuntimeTaskRowProjection {
   readonly title: string;
   readonly state: LifecycleState;
   readonly stateLabel: string;
+  readonly taskFlow?: TaskFlowBinding;
   readonly requirementQueue?: string;
   readonly requirementAdmission?: 'queued' | 'admitted' | 'executing' | 'completed' | 'blocked' | 'retired' | 'unknown';
   readonly requirementAdmissionLabel?: string;
+  /**
+   * Exact accepted source of the Task, projected from the committed Task
+   * identity whose scope matches this row. Absent when no identity is committed
+   * for this Task (for example a queued or legacy row). Absence must not be read
+   * as a matching Task.
+   */
+  readonly identitySource?: TaskIdentitySource;
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;
@@ -186,6 +286,158 @@ export interface RuntimeTaskCheckpointProjection {
   readonly committedAt: string;
 }
 
+export interface RuntimeReadFailure {
+  readonly code: string;
+  readonly ownerId: string;
+  readonly message: string;
+  readonly nextAction: string;
+}
+
+export type RuntimeReadResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly failure: RuntimeReadFailure };
+
+export type RuntimeReadScope =
+  | { readonly kind: 'system' }
+  | { readonly kind: 'project'; readonly projectKey: string }
+  | {
+      readonly kind: 'task';
+      readonly projectKey: string;
+      readonly mode: RuntimeMode;
+      readonly taskId: TaskId;
+    };
+
+export interface RuntimeProjectTaskReadRow {
+  readonly scope: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+  readonly task: RuntimeTaskRowProjection;
+  readonly basis: 'live-runtime' | 'durable-history';
+}
+
+export interface RuntimeProjectReadProjection {
+  readonly surface: 'runtime-project';
+  readonly scope: Extract<RuntimeReadScope, { readonly kind: 'project' }>;
+  readonly label: string;
+  readonly observedAt: string;
+  readonly tasks: readonly RuntimeProjectTaskReadRow[];
+  readonly taskCount: number;
+  readonly complete: boolean;
+  readonly failures: readonly RuntimeReadFailure[];
+}
+
+export interface RuntimeSystemReadProjection {
+  readonly surface: 'runtime-system';
+  readonly scope: { readonly kind: 'system' };
+  readonly observedAt: string;
+  readonly runtime: RuntimeStatusProjection;
+  readonly coverage: 'configured-projects-in-current-control-root';
+  readonly projects: readonly RuntimeProjectReadProjection[];
+  readonly taskCount: number;
+  readonly complete: boolean;
+  readonly failures: readonly RuntimeReadFailure[];
+}
+
+export interface RuntimeStoredRecordRef {
+  readonly projectKey: string;
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly source: 'task-journal' | 'checkpoint-journal';
+  readonly ordinal: number;
+  readonly operationId?: string;
+  readonly executionEpoch?: number;
+  readonly checkpointId?: string;
+}
+
+export interface RuntimeRawEventProjection extends RuntimeTaskEventProjection {
+  readonly eventId: string;
+  readonly operationId: string;
+  readonly executionEpoch: number;
+  readonly turnId?: string;
+  readonly requestId?: string;
+  readonly parentRequestId?: string;
+  readonly providerOccurredAt?: string;
+}
+
+export type RuntimeRawRecordBody =
+  | {
+      readonly kind: 'task.created' | 'task.updated';
+      readonly title: string;
+      readonly directive: string;
+      readonly directiveRevision: number;
+    }
+  | { readonly kind: 'task.deleted'; readonly deletedAt: string }
+  | {
+      readonly kind: 'operation.started';
+      readonly operationId: string;
+      readonly executionEpoch: number;
+      readonly input: string;
+      readonly orchestrated: boolean;
+    }
+  | { readonly kind: 'operation.event'; readonly event: RuntimeRawEventProjection }
+  | {
+      readonly kind: 'checkpoint';
+      readonly checkpointId: string;
+      readonly seq: number;
+      readonly outcome: string;
+      readonly summary: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+    };
+
+export interface RuntimeRawRecordProjection {
+  readonly ref: RuntimeStoredRecordRef;
+  readonly occurredAt: string;
+  readonly body: RuntimeRawRecordBody;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface RuntimeTaskRecordsProjection {
+  readonly surface: 'runtime-task-records';
+  readonly scope: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+  readonly observedAt: string;
+  readonly actions: readonly {
+    readonly entry: InteractionTraceEntry;
+    readonly rawRef: RuntimeStoredRecordRef;
+  }[];
+  readonly raw: readonly RuntimeRawRecordProjection[];
+  readonly nextCursor?: string;
+  readonly hasMore: boolean;
+}
+
+export interface RuntimeCommitRefProjection {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+export interface RuntimeContextViewProjection {
+  readonly contextViewRef: string;
+  readonly executionEpoch: number;
+  readonly contextDigest: string;
+  readonly checkpointId: string;
+  readonly activeRefs: readonly string[];
+  readonly omittedRefs: readonly string[];
+}
+
+export interface RuntimeContextReplacementProjection {
+  readonly replacementId: string;
+  readonly executionEpoch: number;
+  readonly fromContextViewRef: string;
+  readonly toContextViewRef: string;
+  readonly toContextDigest: string;
+  readonly deltaIds: readonly string[];
+  readonly reason: 'observation' | 'compaction' | 'recovery';
+  readonly replacementDigest: string;
+}
+
+export interface RuntimeContextHistoryProjection {
+  readonly surface: 'runtime-context-history';
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly currentContextCommitRef: RuntimeCommitRefProjection | undefined;
+  readonly views: readonly RuntimeContextViewProjection[];
+  readonly replacements: readonly RuntimeContextReplacementProjection[];
+  readonly nextCursor?: string;
+}
+
 export interface RuntimeTaskErrorProjection {
   readonly code: string;
   readonly ownerId: string;
@@ -216,6 +468,7 @@ export interface RuntimeTaskDashboardProjection {
   readonly observationRef: string;
   /** Real execution liveness as the runtime observed it; absent when no facts were reported. */
   readonly liveness?: RuntimeLivenessProjection;
+  readonly taskPlanHistory: RuntimeReadResult<RuntimeTaskPlanHistoryProjection>;
 }
 
 /**

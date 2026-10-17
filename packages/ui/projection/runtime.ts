@@ -17,7 +17,9 @@ import {
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
+  type RuntimeReadResult,
 } from '../contracts/runtime.js';
+import type { RuntimeTaskPlanHistoryProjection } from '../contracts/task-plan-history.js';
 import type { RuntimeSemanticObservationEnvelope } from '../contracts/runtime.js';
 import { RuntimeProjectionError } from '../contracts/runtime.js';
 
@@ -60,6 +62,7 @@ export interface RuntimeTaskSnapshotInput {
   readonly requirementQueue?: string;
   readonly requirementAdmission?: RuntimeTaskRowProjection['requirementAdmission'];
   readonly requirementAdmissionLabel?: string;
+  readonly taskPlanHistory?: RuntimeReadResult<RuntimeTaskPlanHistoryProjection>;
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;
@@ -260,6 +263,15 @@ export function projectRuntimeTaskDashboard(
     executionEpoch: source.executionEpoch,
     allowedActions: source.allowedActions,
     observationRef: `task://${source.taskId.value}/observation`,
+    taskPlanHistory: source.taskPlanHistory ?? {
+      ok: false,
+      failure: {
+        code: 'task-plan-history.not-composed',
+        ownerId: 'humanagent.ui.projection.runtime',
+        message: 'no task plan history read was composed for this dashboard projection',
+        nextAction: 'compose the task plan history read through the canonical control Journal before projecting the dashboard',
+      },
+    },
     ...(liveness === undefined ? {} : { liveness }),
   };
 }
