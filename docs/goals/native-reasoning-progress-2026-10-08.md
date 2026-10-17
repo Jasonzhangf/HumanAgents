@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- Pool独立修复整体Review有效PASS：Opus实际quotaERROR后按序Gemini4medium SUCCESS/exit0，现有controller classifyReviewOutput裁决pass/findings[]，证据r124。已标准merge至control/main `13dab3ac`；main sourcecontracts/config/Appbuild0、原distinctidleconsumer1/1，完整候选9/9继续有效。GCM作者在目录级旧fixture错误后未收尾，owner补齐正常依赖/定向编译与验收后已精确INT并确认退出；来源clean无进程后remove/prune/pathabsent。尚待UX G7释放安装窗口，再package/install、自有隔离实例正式restart/复验、push；不提前记标准交付完成。r125两turnconsumer在独立树继续。
+
 - Pool独立main交付已解耦：origin/main runtime-pool生产diff仅5行，无未交native依赖；46e40f42标准摘入main派生独占provider-pool-delivery-20261017为4990a696。原目录级编译暴露缺workspace链接与既有retry fixture接口错误；owner正常offlinefrozeninstall后，同原tsconfig编译选项仅编译原orchestration公开consumer成功，相关9/9。未改fixture/断言，复用原raceRED。完整独立Pool修复正式集成前整体Review已派，Opus本次quotaERROR原错保留，按序fresh Gemini4medium r124审完整2files。main/install尚未动，安装窗口暂给UX独立G7只读fixture。
 - r119原下一增量计划含不存在API、无执行100%断言及忽略sourceContext.scope，未采纳；同Planner r122修正为一条真实native两turnconsumer，先证Turn1childadopt/Plannercontinue→Turn2语义历史不带raw/Plannercomplete，再仅据实际RED修旧turn Journal绑定，不放宽scope。parent派单纠正残留字段/编译路径，freshGCM r125在唯一provider-two-turn-consumer-20261017从最新candidate执行；不使用虚构planJournal/API，不改需求。两条交付链独立，完整goal仍ACTIVE。
 
