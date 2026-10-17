@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
@@ -13,6 +12,9 @@ import {
   type ScopeRef,
   type TaskRuntimeIncarnation,
   type WorkAssignment,
+  type ReviewAssignment,
+  type MilestoneReviewResultRecord,
+  type I2JournalPort,
 } from '../../packages/contracts/src/index.js';
 import { activeTurnSegmentCommitId, originalBusinessTurnRefFromBinding } from '../../packages/contracts/src/active-turn-segments.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
@@ -41,11 +43,13 @@ import {
   assembleTaskAgentActivityCoreSources,
   decodeTaskAgentActivitySelectionQuery,
   readTaskAgentActivityCore,
+  readTaskAgentActivity,
 } from '../../packages/app/src/ui-runtime/agent-activity-read.js';
+import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 
 // Failure modes and cost are recorded in the accepted r2 note before this test.
 // The fixture writes real UI/control JSONL through the owning public writers.
-const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures', 'agent-activity-reader-core-r2');
+const fixtureRoot = '/private/tmp/humanagent-agent-activity-reader-finish';
 
 const organId = id('organ', 'agent-activity-organ');
 const taskId = id('task', 'ui-task-implicit-draft-2');
@@ -160,7 +164,8 @@ async function commitTurnClosure(journal: JsonlOrganJournal, journalPath: string
   });
 }
 
-async function createControlJournal(journalPath: string, withResumedSegment: boolean): Promise<JsonlOrganJournal> {
+async function createControlJournal(journalPath: string, withResumedSegment: boolean,
+  beforeResume?: (journal: JsonlOrganJournal) => Promise<void>): Promise<JsonlOrganJournal> {
   const journal = new JsonlOrganJournal(journalPath);
   const activeTurn = createJsonlActiveTurnJournal({ journal, turnId });
   await activeTurn.append({
@@ -171,6 +176,7 @@ async function createControlJournal(journalPath: string, withResumedSegment: boo
     commitId: activeTurnCommitId(turnId, 'initial-input'),
     record: { kind: 'initial-input', content: rawInitialInput() },
   });
+  await beforeResume?.(journal);
   if (!withResumedSegment) {
     await commitTurnClosure(journal, journalPath);
     return journal;
@@ -241,7 +247,7 @@ async function createControlJournal(journalPath: string, withResumedSegment: boo
   return journal;
 }
 
-async function fixture(withResumedSegment: boolean) {
+async function fixture(withResumedSegment: boolean, beforeResume?: (journal: JsonlOrganJournal) => Promise<void>) {
   await mkdir(fixtureRoot, { recursive: true });
   const root = await mkdtemp(join(fixtureRoot, 'reader-'));
   const checkpointsRoot = join(root, 'checkpoints');
@@ -285,7 +291,7 @@ async function fixture(withResumedSegment: boolean) {
     updatedAt: '2026-10-16T00:00:01.000Z',
   });
   const taskJournal = readUiRuntimeTaskJournal(checkpointsRoot, 'rcc');
-  const controlJournal = await createControlJournal(join(root, 'task-control.jsonl'), withResumedSegment);
+  const controlJournal = await createControlJournal(join(root, 'task-control.jsonl'), withResumedSegment, beforeResume);
   return { root, taskJournal, controlJournal };
 }
 
@@ -361,6 +367,115 @@ test('core reader projects native and active sources through A2/A3', async () =>
     );
     const nativeEntry = read.value.historical.find((entry) => entry.sourceKind === 'native-allocation');
     assert.equal(nativeEntry?.objective, 'read the original task assignment');
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+// Probability unknown; failure loses instances or binds another work target.
+// Extending the existing public-writer fixture has low execution/maintenance cost.
+test('high-level reader retains child instances and original review commits across I2 pages, with explicit missing targets', async () => {
+    const childAssignment = { ...assignment, assignmentId: 'child-work', objective: 'review this exact child work' };
+    const childInstance = { ...incarnationFor(1), runtimeId: 'child-runtime',
+      agentInstanceId: 'child-instance', assignmentId: childAssignment.assignmentId };
+    const artifactDigest = `sha256:${'1'.repeat(64)}`;
+    const reviewAssignment: ReviewAssignment = { assignmentId: 'child-review', taskId: taskId.value,
+      workerAgentId: 'actual-worker', reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
+      acceptanceCriteriaDigest: assignment.acceptanceCriteriaDigest,
+      subjectRefs: ['artifact://exact-child-output'], subjectDigests: [artifactDigest],
+      workerCapabilities: [], requiredCapabilities: [], mergeGate: 'not-required' };
+    const missing = { ...reviewAssignment, assignmentId: 'missing-review', workerAgentId: 'unrelated-worker' };
+    const value = await fixture(true, async (journal) => {
+    const active = createJsonlActiveTurnJournal({ journal, turnId });
+    const invocation = { invocationId: 'work-call', childTurnId: 'child-turn', checkpointReceiptRef: 'pre-call-only',
+      binding: { kind: 'execution' as const, assignment: childAssignment }, incarnation: childInstance };
+    await active.append({ commitId: activeTurnCommitId(turnId, 'invocation:work-call'),
+      record: { kind: 'child-invocation', record: invocation } });
+    await active.append({ commitId: activeTurnCommitId(turnId, 'delivery:work-call'), record: {
+      kind: 'child-delivery', entry: { kind: 'execution', seq: 1, invocationId: 'work-call',
+        refinedDelivery: rawInitialInput(), assignment: childAssignment,
+        result: { taskId, pipelineNodeId: childAssignment.pipelineNodeId, agentId: 'actual-worker',
+          assignmentId: childAssignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
+          producedArtifactRefs: ['artifact://exact-child-output'], producedArtifactDigests: [artifactDigest],
+          status: 'succeeded', summary: 'done', outputRefs: childAssignment.expectedOutputRefs, evidenceRefs: [], nextAction: 'review' } },
+    } });
+    await active.append({ commitId: activeTurnCommitId(turnId, 'invocation:missing-review'), record: {
+      kind: 'child-invocation', record: { invocationId: 'missing-review', childTurnId: 'missing-review-turn',
+        checkpointReceiptRef: 'pre-review-only', binding: { kind: 'review', assignment: missing },
+        incarnation: { ...childInstance, assignmentId: missing.assignmentId, agentInstanceId: 'missing-instance' } },
+    } });
+    });
+  try {
+    const segmentId = 'resumed-orchestration-1';
+    const segment = createJsonlActiveTurnSegmentJournal({ journal: value.controlJournal, businessTurnId: turnId });
+    await segment.appendSegmentRecord({ businessTurnId: turnId, segmentId,
+      commitId: activeTurnSegmentCommitId(segmentId, 'invocation:segment-review'), record: {
+        kind: 'child-invocation', record: { invocationId: 'segment-review', childTurnId: 'review-turn',
+          checkpointReceiptRef: 'pre-review-only', binding: { kind: 'review', assignment: reviewAssignment },
+          incarnation: { ...childInstance, runtimeId: 'review-runtime', agentInstanceId: 'review-instance',
+            assignmentId: reviewAssignment.assignmentId } },
+      } });
+    const journal = createJsonlI2JournalPort({ filePath: join(value.root, 'task-control.jsonl'), journal: value.controlJournal });
+    const milestone = (milestoneId: string, reviewed: ReviewAssignment): MilestoneReviewResultRecord => ({
+      kind: 'milestone-review-result', schemaVersion: 1, milestoneId, cycleId,
+      taskScope: { organId, taskId }, executionScope: scope,
+      planRevisionCommitRef: { commitId: 'external:plan', journalSeq: 1, recordDigest: `sha256:${'0'.repeat(64)}` },
+      reviewAssignment: reviewed, delivery: {
+        reviewer: { ...childInstance, runtimeId: 'milestone-reviewer', assignmentId: reviewed.assignmentId,
+          agentInstanceId: `reviewer-${milestoneId}` },
+        result: { ...reviewed, resultId: `result-${milestoneId}`, status: 'passed', findings: [], evidenceRefs: [] },
+        output: { text: 'passed', artifactRef: null, artifactDigest: null }, completedAt: '2026-10-16T00:01:00.000Z',
+      }, completedAt: '2026-10-16T00:01:00.000Z',
+    });
+    const firstCommit = await journal.commit(milestone('missing-target', missing));
+    const lastCommit = await journal.commit(milestone('exact-target', reviewAssignment));
+    const cursors: (string | undefined)[] = [];
+    const paged: I2JournalPort = { ...journal, list: async (input) => {
+      cursors.push(input.cursor);
+      return journal.list({ ...input, limit: 1 });
+    } };
+    let inspected = 0;
+    const read = await readTaskAgentActivity({ taskId, query: { taskId }, taskJournal: value.taskJournal,
+      controlJournal: value.controlJournal, i2Journal: paged, live: { inspectPool: () => {
+        inspected += 1;
+        const known = { runtimeId: childInstance.runtimeId, generation: 1,
+          state: 'running' as const, capabilities: [], incarnation: childInstance,
+          lease: { leaseId: 'read-only-lease', runtimeId: childInstance.runtimeId, generation: 1,
+            incarnation: childInstance, executionEpoch: 1, ownerId: owner,
+            assignmentId: childInstance.assignmentId, capabilities: [] } };
+        const unknownInstance = { ...childInstance, agentInstanceId: 'unrelated-pool-instance', assignmentId: 'unknown-pool-assignment' };
+        return { disposed: false, runtimes: [known, { ...known, incarnation: unknownInstance,
+          lease: { ...known.lease, leaseId: 'unknown-lease', incarnation: unknownInstance,
+            assignmentId: unknownInstance.assignmentId } }] };
+      } } });
+    assert.equal(read.ok, true);
+    if (!read.ok) return;
+    assert.equal(inspected, 1);
+    assert.equal(cursors.length, 2);
+    assert.equal(cursors[0], undefined);
+    assert.equal(cursors[1], String(firstCommit.journalSeq));
+    const records = [...read.value.historical, ...read.value.unknown, ...read.value.current];
+    const child = records.find((entry) => entry.sourceKind === 'child-invocation'
+      && entry.assignmentId === childAssignment.assignmentId);
+    assert.equal(child?.objective, childAssignment.objective);
+    assert.equal(child?.instance.kind, 'incarnation');
+    assert.equal(child?.instance.runtimeId, childInstance.runtimeId);
+    if (child?.instance.kind === 'incarnation') assert.equal(child.instance.agentInstanceId, childInstance.agentInstanceId);
+    assert.equal(child?.commitRefs[0]?.commitId, activeTurnCommitId(turnId, 'invocation:work-call'));
+    assert.ok(read.value.historical.includes(child!));
+    const review = records.find((entry) => entry.sourceKind === 'milestone-review');
+    assert.deepEqual(review?.commitRefs[0], lastCommit);
+    assert.equal(review?.objective, childAssignment.objective);
+    assert.equal(review?.instance.kind, 'incarnation');
+    if (review?.instance.kind === 'incarnation') assert.equal(review.instance.agentInstanceId, 'reviewer-exact-target');
+    const segmentChild = records.find((entry) => entry.sourceKind === 'child-invocation'
+      && entry.assignmentId === reviewAssignment.assignmentId);
+    assert.equal(segmentChild?.commitRefs[0]?.commitId, activeTurnSegmentCommitId(segmentId, 'invocation:segment-review'));
+    assert.ok(read.value.unknown.includes(segmentChild!), 'pre-call checkpoint must not prove child completion');
+    assert.ok(read.value.unavailableSources.some((entry) => entry.sourceId === 'child-invocation:missing-review'));
+    assert.ok(records.some((entry) => entry.sourceKind === 'runtime-pool-lease' && entry.objective === childAssignment.objective));
+    assert.ok(read.value.unavailableSources.some((entry) => entry.sourceId === 'runtime-pool-lease:unknown-lease'));
+    assert.ok(read.value.unavailableSources.some((entry) => entry.sourceId === `milestone-review:${firstCommit.commitId}`));
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }
