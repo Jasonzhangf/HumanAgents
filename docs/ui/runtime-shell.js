@@ -268,6 +268,16 @@ export function taskDashboardHref(taskId, scope) {
   return `./task-dashboard.html?${params}`
 }
 
+// The control entry is a second explicit intent over the same formal Task
+// navigation. The default link stays readonly; this link never drops the
+// scoped Task identity that the control target resolver must verify.
+export function taskControlHref(taskId, scope) {
+  const params = new URLSearchParams({ task: String(taskIdValue(taskId)) })
+  addTaskScope(params, scope)
+  params.set('control', '1')
+  return `./task-dashboard.html?${params}`
+}
+
 export function taskDetailHref(taskId, scope) {
   const params = new URLSearchParams({ task: String(taskIdValue(taskId)) })
   addTaskScope(params, scope)
@@ -1352,10 +1362,14 @@ function closeTechnicalDetailLayer() {
   technicalDetailLayer.onClose = null
   technicalDetailLayer.leaveDrawer = null
   technicalDetailLayer.returnFocus = null
+  // Native dismissal has already detached the frame. Closing it again here can
+  // dispatch a queued close after a page callback reopens the same frame.
   if (layer.open) layer.close()
-  if (typeof onClose === 'function') onClose()
   if (leaveDrawer) leaveDrawer()
   else if (returnFocus?.isConnected && !returnFocus.closest('dialog:not([open]), [hidden]')) returnFocus.focus()
+  // An explicit page callback owns the final focus destination. Generic
+  // restoration finishes first so it cannot overwrite that destination.
+  if (typeof onClose === 'function') onClose()
 }
 
 // A contextual trigger for the technical-detail layer. It is not a global configuration
