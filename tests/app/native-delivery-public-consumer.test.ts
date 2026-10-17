@@ -6,16 +6,33 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef } from '../../packages/contracts/src/index.js';
+import { id, validateTaskPlanSnapshot, type AnyProviderExecutionIdentityRef, type ProviderExecutionIdentityRef, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
-import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
+import { createJsonlActiveTurnJournal, listTaskActiveTurnBindings } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui-runtime/index.js';
 import { createDefaultExecutionComposition, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import { startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import {
+  closeAgentProvider,
+  prepareAgentProvider,
+  prepareExecutionAgentProvider,
+  createAgentProviderPort,
+} from '../../packages/app/src/agent-driver-composition.js';
+import { createRccServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
+import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
+import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
+import { createJsonlClosedTurnPlannerCallJournal } from '../../packages/app/src/ui-runtime/planner-call-journal.js';
+import { createActiveTurnSegmentJournal } from '../../packages/app/src/native-recovery-assets.js';
+import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
+import type { AgentRole } from '../../packages/config/src/index.js';
+import type { EventBusPorts, EventPublisherRegistryPort } from '../../packages/runtime/src/events/index.js';
+import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-cycle-journal.js';
@@ -34,6 +51,8 @@ import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../packages/runt
 import type { AdmittedTurn, ReviewAssignment, ReviewResult } from '../../packages/contracts/src/index.js';
 import { readCheckpointClosurePreparation } from '../../packages/runtime/src/checkpoints/closure.js';
 import type { NativeSaveIntent } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
+
+const coldConsumerMode = process.argv.includes('--cold-consumer');
 
 /** The one fixture root allowed for this pure-text App slice. */
 const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
@@ -62,7 +81,7 @@ const TURN_TWO_DELIVERY = 'Native second-turn delivery body: intermediate progre
 // fixture, no model/network/process; the same fixture covers replay and failure.
 // Raw input dumps obscure decision semantics. The existing fixture adds readable
 // summary assertions at low cost; the old dump must fail the no-control-key check.
-test('App child checkpoint adapter commits native pre/review post and preserves replay across current segments', async () => {
+if (!coldConsumerMode) test('App child checkpoint adapter commits native pre/review post and preserves replay across current segments', async () => {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'child-checkpoint-'));
   const filePath = join(root, 'organ.jsonl');
@@ -207,7 +226,7 @@ test('App child checkpoint adapter commits native pre/review post and preserves 
 // Observed failure: a committed inspect result strands settling without an
 // effect completion. Impact: delivery cannot close. Cost: one in-memory public
 // consumer fixture; other boundary failure probabilities are unknown.
-test('direct Runtime inspect delivery consumes verified raw bytes without an effect receipt', async () => {
+if (!coldConsumerMode) test('direct Runtime inspect delivery consumes verified raw bytes without an effect receipt', async () => {
   const scope: ScopeRef = { organId: id('organ', 'inspect-organ'), taskId: id('task', 'inspect-task'), cycleId: id('cycle', 'inspect-cycle'), operationId: id('operation', 'parent') };
   const toolOperationId = id('operation', 'inspect-operation');
   const bytes = new TextEncoder().encode('accepted read output 體\n');
@@ -292,6 +311,28 @@ interface Wire {
   readonly authorization?: string;
 }
 
+const coldConsumerRoot = process.argv.find((arg) => arg === '--fixture-root') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--fixture-root') + 1];
+const coldConsumerTask = process.argv.find((arg) => arg === '--task-id') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--task-id') + 1];
+const coldConsumerOperation = process.argv.find((arg) => arg === '--operation-id') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--operation-id') + 1];
+const coldConsumerWorkspace = process.argv.find((arg) => arg === '--workspace') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--workspace') + 1];
+const coldConsumerControlRoot = process.argv.find((arg) => arg === '--control-root') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--control-root') + 1];
+const coldConsumerCookie = process.argv.find((arg) => arg === '--cookie-file') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--cookie-file') + 1];
+const coldConsumerUiRoot = process.argv.find((arg) => arg === '--ui-root') === undefined
+  ? undefined
+  : process.argv[process.argv.indexOf('--ui-root') + 1];
+
 function deferred(): { readonly promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;
   const promise = new Promise<void>((settle) => { resolve = settle; });
@@ -342,6 +383,32 @@ function plannerPayload(raw: string): Record<string, unknown> | undefined {
       if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
         && (candidate as Record<string, unknown>).role === 'planner') {
         return candidate as Record<string, unknown>;
+      }
+    }
+  }
+  return undefined;
+}
+
+function reviewPayload(raw: string): Record<string, unknown> | undefined {
+  for (const item of parseResponsesWire(raw)?.input ?? []) {
+    if (item.type !== 'message' || item.role !== 'user') continue;
+    for (const part of item.content ?? []) {
+      if (part.type !== 'input_text' || typeof part.text !== 'string') continue;
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(part.text);
+      } catch {
+        continue;
+      }
+      if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue;
+      const prompt = (candidate as Record<string, unknown>).prompt;
+      if (typeof prompt !== 'string') continue;
+      const start = prompt.lastIndexOf('\n\n{"role":"review",');
+      if (start < 0) continue;
+      const material = JSON.parse(prompt.slice(start + 2)) as unknown;
+      if (typeof material === 'object' && material !== null && !Array.isArray(material)
+        && (material as Record<string, unknown>).role === 'review') {
+        return material as Record<string, unknown>;
       }
     }
   }
@@ -420,6 +487,38 @@ function evidenceLocators(value: unknown): readonly string[] {
 function closureSection(value: unknown, label: string): { readonly text: string; readonly locators: readonly string[] } {
   const section = requireRecord(value, `the closure ${label}`);
   return { text: requireText(section.text, `the closure ${label} text`), locators: evidenceLocators(section.evidenceRefs) };
+}
+
+function reviewFrames(model: string, payload: Record<string, unknown>): readonly Record<string, unknown>[] {
+  const criteria = requireRecord(JSON.parse(requireText(payload.acceptanceCriteria, 'the review acceptance criteria')),
+    'the review acceptance criteria');
+  const subjects = Array.isArray(payload.subjects) ? payload.subjects.map((subject, index) => {
+    const record = requireRecord(subject, `review subject ${index + 1}`);
+    return { ref: requireText(record.ref, `review subject ${index + 1} ref`),
+      body: requireText(record.body, `review subject ${index + 1} body`) };
+  }) : [];
+  if (subjects.length === 0) throw new Error('the review request carries no subject bodies');
+  const criteriaText = JSON.stringify(criteria);
+  assert.equal(criteriaText, JSON.stringify({
+    objective: 'three-turn delivery probe',
+    successCriteria: ['standard turn closure and canonical Planner alignment'],
+    failureCriteria: ['execution error'],
+    incompleteCriteria: ['standard turn or Planner alignment remains pending'],
+  }), 'the review request must carry the actual execution criteria content');
+  const exact = subjects.filter((subject) => subject.body === EXACT_BODY);
+  assert.equal(exact.length, 1, 'the review request must carry the complete exact delivered body');
+  const text = [
+    `Criteria: ${criteriaText}`,
+    ...subjects.map((subject) => `Subject ${subject.ref}: ${subject.body}`),
+    '',
+    'The actual acceptance criteria and non-empty subject bodies support the exact delivery.',
+    'HUMANAGENT_REVIEW: passed',
+  ].join('\n');
+  return [
+    { type: 'response.created', response: { id: `response-${model}-review` } },
+    { type: 'response.output_text.done', item_id: `review-message-${model}`, text },
+    { type: 'response.completed', response: { id: `response-${model}-review` } },
+  ];
 }
 
 /**
@@ -551,8 +650,9 @@ async function textOnlyResponsesUpstream(input: {
   readonly parallelChild?: boolean;
   readonly turnCount?: 2 | 3;
   readonly requiredBearer?: string;
+  readonly interruptThirdTurnOnce?: () => Promise<void>;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
-  completedInReverse(): boolean; close(): Promise<void> }> {
+  completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean; close(): Promise<void> }> {
   const wires: Wire[] = [];
   let plannerAttempts = 0;
   let readIssued = false;
@@ -561,6 +661,8 @@ async function textOnlyResponsesUpstream(input: {
   const finishChildB = deferred();
   let overlap = false;
   let reversedCompletion = false;
+  let thirdTurnInterrupted = false;
+  let holdTurnThree = false;
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -600,6 +702,14 @@ async function textOnlyResponsesUpstream(input: {
           input.turnCount ?? 2)));
         return;
       }
+      const review = reviewPayload(body);
+      if (review !== undefined) {
+        const wire = parseResponsesWire(body);
+        assert.equal(wire?.model, 'text.only.model', 'review selects the local legacy Provider model');
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(frame(reviewFrames(input.model, review)));
+        return;
+      }
       if (declaresTurnEnd(body)) {
         if (input.parallelChild && body.includes('call-child-1-end')) finishChildB.resolve();
         response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -612,6 +722,17 @@ async function textOnlyResponsesUpstream(input: {
       }
       if (!hasTurnEndSurface(body)) {
         throw new Error('the controlled upstream could not identify a lawful Responses stage');
+      }
+      if (input.interruptThirdTurnOnce !== undefined && input.turnCount === 3
+        && plannerAttempts === 2 && !thirdTurnInterrupted) {
+        thirdTurnInterrupted = true;
+        holdTurnThree = true;
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        // An SSE comment flushes the real headers so the held turn is observably
+        // dispatched before the interrupt, without emitting model output.
+        response.write(': interrupted third-turn hold\n\n');
+        await input.interruptThirdTurnOnce();
+        return;
       }
       if ((input.child || input.parallelChild) && !(input.turnCount !== undefined && plannerAttempts > 0)) {
         const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
@@ -802,6 +923,8 @@ async function textOnlyResponsesUpstream(input: {
     wires,
     overlapped: () => overlap,
     completedInReverse: () => reversedCompletion,
+    interruptedThirdTurn: () => thirdTurnInterrupted,
+    turnThreeHeld: () => holdTurnThree,
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: async () => {
       server.closeIdleConnections?.();
@@ -817,6 +940,7 @@ async function textOnlyFixture(
   parallelChild = false,
   turnCount?: 2 | 3,
   topLevelHttp?: { readonly credentialRef: string; readonly requiredBearer: string },
+  interruptThirdTurnOnce?: () => Promise<void>,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -831,6 +955,7 @@ async function textOnlyFixture(
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
     organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, turnCount,
+    ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(topLevelHttp === undefined ? {} : {
       requiredBearer: topLevelHttp.requiredBearer,
     }) });
@@ -851,6 +976,8 @@ async function textOnlyFixture(
     .replace('driverRef = "fake"', providerBlock.replace('text.only.model', 'child.only.model'))
     .replace('maxConcurrentTasks = 1', 'maxConcurrentTasks = 2')
     : original.replaceAll('driverRef = "fake"', providerBlock))
+      .replace('model = "MiniMax-M3"', 'model = "text.only.model"')
+      .replace('baseUrl = "http://127.0.0.1:4444"', `baseUrl = "${upstream.baseUrl}"`)
     : original
       .replace('provider = "rcc"', 'provider = "rcc"\nsource = "http"\n'
         + `credentialRef = "${topLevelHttp.credentialRef}"`)
@@ -861,10 +988,22 @@ async function textOnlyFixture(
       .replaceAll('driverRef = "fake"', 'driverRef = "rcc"');
   await writeFile(configPath, config, 'utf8');
   const configuration = await loadConfiguration(paths);
+  if (topLevelHttp === undefined) {
+    const bindings = configuration.agentProviderBindings;
+    assert.deepEqual(bindings.map((binding) => [binding.agentId, binding.roleId, binding.provider?.model]), [
+      ['interaction-default', 'interaction', 'text.only.model'],
+      ['orchestration-default', 'orchestration', child ? 'child.only.model' : 'text.only.model'],
+    ], 'the fixture must preserve both explicit agent roles and models');
+    assert.equal(bindings.some((binding) => binding.roleId === 'review'), false,
+      'the fixture must retain the production legacy fallback for review');
+    assert.equal(configuration.effective.provider?.model, 'text.only.model');
+    assert.equal(configuration.effective.provider?.baseUrl, upstream.baseUrl,
+      'the legacy review Provider must resolve to the local upstream');
+  }
   return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration, configPath };
 }
 
-async function runNativeMultiTurnConsumer(
+async function startNativeMultiTurnConsumer(
   fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
   turnCount: 2 | 3,
 ) {
@@ -902,20 +1041,30 @@ async function runNativeMultiTurnConsumer(
     capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
     expectedRevision: 0 });
 
-  const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const processChild = spawn(process.execPath, [cli,
-      'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
-      '--plan', 'default', '--session', `native-${label}-run`, '--task', taskId.value,
-      '--prompt', `${label} delivery probe`, '--control-session-file', controlFile],
-    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    processChild.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
-    processChild.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
-    processChild.once('error', reject);
-    processChild.once('exit', (code) => resolve({ code, stdout, stderr }));
-  });
-  return { taskId, result };
+  const processChild = spawn(process.execPath, [cli,
+    'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
+    '--plan', 'default', '--session', `native-${label}-run`, '--task', taskId.value,
+    '--prompt', `${label} delivery probe`, '--control-session-file', controlFile],
+  { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  processChild.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+  processChild.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  const result = new Promise<{ code: number | null; signal: string | null; stdout: string; stderr: string }>(
+    (resolve, reject) => {
+      processChild.once('error', reject);
+      processChild.once('exit', (code, signal) => resolve({ code, signal, stdout, stderr }));
+    },
+  );
+  return { taskId, result, cookie, child: processChild };
+}
+
+async function runNativeMultiTurnConsumer(
+  fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
+  turnCount: 2 | 3,
+) {
+  const started = await startNativeMultiTurnConsumer(fixture, turnCount);
+  return { taskId: started.taskId, result: await started.result, cookie: started.cookie };
 }
 
 interface PublicOutputCommitView {
@@ -929,6 +1078,601 @@ interface PublicOutputPublicationView {
   readonly state?: string;
   readonly commits?: readonly PublicOutputCommitView[];
   readonly publicCommitWatermark?: number;
+}
+
+async function waitFor<T>(
+  read: () => Promise<T>,
+  accept: (value: T) => boolean,
+  message: string,
+  milliseconds = 15_000,
+): Promise<T> {
+  const deadline = Date.now() + milliseconds;
+  let latest: T | undefined;
+  while (Date.now() < deadline) {
+    latest = await read();
+    if (accept(latest)) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`${message}: ${JSON.stringify(latest)}`);
+}
+
+function coldConsumerArgument(value: string | undefined, label: string): string {
+  if (value === undefined || value.trim().length === 0) throw new Error(`cold consumer requires ${label}`);
+  return value;
+}
+
+type SeedResult = Awaited<Awaited<ReturnType<typeof startNativeMultiTurnConsumer>>['result']>;
+
+async function readHeldThirdTurn(input: {
+  readonly fixture: Awaited<ReturnType<typeof textOnlyFixture>>;
+  readonly taskId: TaskId;
+  readonly heldWireIndex: () => number;
+}) {
+  const { fixture, taskId } = input;
+  const taskScope = { organId: id('organ', 'humanagent-ui'), taskId };
+  const heldWireIndex = await waitFor(
+    async () => input.heldWireIndex(),
+    (value) => value >= 0,
+    'the upstream did not hold the interrupted third-turn request',
+  );
+  const heldWire = fixture.upstream.wires[heldWireIndex];
+  if (heldWire === undefined || heldWire.method !== 'POST' || plannerPayload(heldWire.body) !== undefined
+    || !hasTurnEndSurface(heldWire.body)) {
+    throw new Error(`the held wire ${heldWireIndex} is not a parent execution request`);
+  }
+  assert.equal(fixture.upstream.interruptedThirdTurn(), true,
+    'the upstream interruption must complete before selecting the held business turn');
+  const priorDuties = await waitFor(
+    () => createJsonlClosedTurnPlannerCallJournal({ journal: fixture.journal }).readTaskDuties(taskScope),
+    (duties) => duties.filter((duty) => duty.returned?.record.decision === 'continue').length === 2,
+    'the two prior logical parent turns did not complete',
+  );
+  const completedDuties = priorDuties.filter((duty) => duty.returned?.record.decision === 'continue');
+  const completedOperationIds = new Set(completedDuties.map((duty) => {
+    const operationId = duty.returned!.record.duty.scope.operationId;
+    if (operationId === undefined) throw new Error('a completing Planner duty has no operation scope');
+    return operationId.value;
+  }));
+  const priorTurnBoundary = Math.max(...completedDuties.map((duty) => duty.returned!.commitRef.journalSeq));
+  const configuredAgentId = fixture.configuration.effective.project?.defaultAgent
+    ?? fixture.configuration.agentRoster[0]!.agentId;
+  const configuredAgent = fixture.configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
+  if (configuredAgent === undefined) throw new Error(`no configured agent matches the selected default ${configuredAgentId}`);
+  const selected = await waitFor(
+    async () => {
+      const candidates = [...await listTaskActiveTurnBindings({ journal: fixture.journal, scope: taskScope })]
+        .sort((left, right) => left.commitRef.journalSeq - right.commitRef.journalSeq)
+        .filter((entry) => entry.binding.scope.operationId !== undefined
+          && !completedOperationIds.has(entry.binding.scope.operationId.value)
+          && entry.commitRef.journalSeq > priorTurnBoundary);
+      for (const candidate of candidates.reverse()) {
+        const operationId = candidate.binding.scope.operationId!;
+        const allocation = new UiRuntimeJournal(fixture.layout.preparedJournalPath).replay()
+          .find((record) => record.kind === 'operation.prepared'
+            && record.allocation.taskId.value === taskId.value
+            && record.allocation.operationId.value === operationId.value);
+        if (allocation?.kind !== 'operation.prepared') continue;
+        if (allocation.allocation.role !== configuredAgent.roleId
+          || allocation.allocation.configuredAgentId !== configuredAgent.agentId) continue;
+        const activeJournal = createJsonlActiveTurnJournal({
+          filePath: fixture.layout.organJournalPath,
+          journal: fixture.journal,
+          turnId: candidate.binding.admittedTurn.turnId,
+        });
+        const dispatched = (await activeJournal.replay()).some((record) => record.kind === 'request'
+          && record.record.phase === 'dispatched'
+          && record.record.scope.operationId?.value === operationId.value);
+        if (!dispatched) continue;
+        const segmentJournal = createActiveTurnSegmentJournal({
+          journalPath: fixture.layout.organJournalPath,
+          assetRoot: join(fixture.paths.artifactsRoot, 'ui-provider-evidence'),
+          completionJournal: new JsonlOperationCompletionJournal({ journal: fixture.journal }),
+          businessTurnId: candidate.binding.admittedTurn.turnId,
+        });
+        const recovery = await segmentJournal.readSegmentRecoveryReceipt(candidate.binding.admittedTurn.turnId);
+        if (recovery.status === 'initial-open') return { candidate, allocation, recovery };
+      }
+      return undefined;
+    },
+    (value) => value !== undefined,
+    'the held business turn has no initial-open dispatched allocation',
+  );
+  if (selected === undefined) throw new Error('the held business turn is absent');
+  const { candidate, allocation } = selected;
+  const recovery = selected.recovery;
+  if (recovery.status !== 'initial-open') throw new Error(`held turn recovery receipt is ${recovery.status}`);
+  const bindings = [...await listTaskActiveTurnBindings({ journal: fixture.journal, scope: taskScope })]
+    .sort((left, right) => left.commitRef.journalSeq - right.commitRef.journalSeq);
+  const selectedBinding = candidate.binding;
+  const businessTurnId = selectedBinding.admittedTurn.turnId;
+  const operationId = selectedBinding.scope.operationId!;
+  const activeJournal = createJsonlActiveTurnJournal({
+    filePath: fixture.layout.organJournalPath,
+    journal: fixture.journal,
+    turnId: businessTurnId,
+  });
+  const dispatched = await activeJournal.replay();
+  const dispatchedRecord = dispatched.find((record): record is Extract<ActiveTurnJournalRecord, { kind: 'request' }> =>
+    record.kind === 'request'
+      && record.record.phase === 'dispatched'
+      && record.record.scope.operationId?.value === operationId.value);
+  if (dispatchedRecord === undefined) throw new Error('the dispatched Provider request is absent');
+  const current = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }).read(taskScope);
+  return {
+    taskScope,
+    bindings,
+    binding: selectedBinding,
+    businessTurnId,
+    operationId,
+    allocation: allocation.allocation,
+    dispatched: dispatchedRecord.record,
+    recovery,
+    current,
+  };
+}
+
+interface ColdConsumerReceipt {
+  readonly pid: number;
+  readonly parentPid: number;
+  readonly status: number;
+  readonly response: unknown;
+  readonly task: {
+    readonly state: string;
+    readonly output: string;
+    readonly operationId?: string;
+    readonly executionEpoch?: number;
+  };
+  readonly allocation: {
+    readonly operationId: string;
+    readonly assignmentId: string;
+    readonly inputRevision: number;
+    readonly executionEpoch: number;
+  };
+  readonly binding: {
+    readonly businessTurnId: string;
+    readonly operationId?: string;
+  };
+  readonly successor: {
+    readonly segmentId: string;
+    readonly executionEpoch: number;
+    readonly predecessor: {
+      readonly kind: 'initial-open';
+      readonly initialOpen: {
+        readonly bindingCommitRef: JournalCommitView;
+        readonly recordsThroughCommitRef: JournalCommitView;
+      };
+    };
+    readonly assignmentId: string;
+    readonly inputRevision: number;
+  };
+  readonly planner: {
+    readonly dutyKey: string;
+    readonly decision: string;
+    readonly revisionId: string;
+    readonly sequence: number;
+  };
+  readonly publicOutput: PublicOutputPublicationView;
+}
+
+interface JournalCommitView {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+async function runHeldColdConsumer(input: {
+  readonly fixture: Awaited<ReturnType<typeof textOnlyFixture>>;
+  readonly started: Awaited<ReturnType<typeof startNativeMultiTurnConsumer>>;
+  readonly heldWireIndex: () => number;
+}): Promise<{
+  readonly seed: SeedResult;
+  readonly receipt: ColdConsumerReceipt;
+  readonly resumedPid: number;
+  readonly interruption: Awaited<ReturnType<typeof readHeldThirdTurn>>;
+  readonly resumedWireIndex: number;
+  readonly acceptedEffectCount: number;
+}> {
+  const { fixture, started, heldWireIndex } = input;
+  const seedPid = started.child.pid;
+  if (seedPid === undefined) throw new Error('the seed CLI child has no exact PID');
+  let seedSettled = false;
+  try {
+    const interruption = await readHeldThirdTurn({ fixture, taskId: started.taskId, heldWireIndex });
+    const signalled = process.kill(seedPid, 'SIGTERM');
+    assert.equal(signalled, true, `the exact seed PID ${seedPid} must accept SIGTERM`);
+    const seed = await withDeadline(started.result, 30_000);
+    seedSettled = true;
+    assert.ok(seed.code !== 0 || seed.signal !== null,
+      `the interrupted seed must not report clean completion: ${JSON.stringify(seed)}`);
+    if (seed.signal !== null) assert.equal(seed.signal, 'SIGTERM');
+
+    const priorTurnIds = new Set(interruption.bindings
+      .filter((entry) => entry.binding.admittedTurn.turnId !== interruption.businessTurnId)
+      .map((entry) => entry.binding.admittedTurn.turnId));
+    const beforeRecords = (await fixture.journal.verify()).records;
+    const acceptedEffectCount = beforeRecords.filter((record) => {
+      const turnId = record.commitId?.startsWith('active-turn:')
+        ? record.commitId.slice('active-turn:'.length).split(':')[0]
+        : undefined;
+      if (turnId === undefined || !priorTurnIds.has(turnId)) return false;
+      const typed = record.payload?.['record'] as ActiveTurnJournalRecord | undefined;
+      return typed?.kind === 'accepted-fact' || typed?.kind === 'child-invocation'
+        || typed?.kind === 'child-delivery';
+    }).length;
+    const journalPrefix = await readFile(fixture.layout.organJournalPath);
+
+    const resumed = spawn(process.execPath, [
+      new URL(import.meta.url).pathname,
+      '--cold-consumer',
+      '--fixture-root', fixture.root,
+      '--task-id', started.taskId.value,
+      '--operation-id', interruption.operationId.value,
+      '--workspace', fixture.workspace,
+      '--control-root', fixture.controlRoot,
+      '--cookie-file', join(fixture.root, 'control-session.txt'),
+      '--ui-root', join(fixture.root, 'ui'),
+    ], {
+      cwd: process.cwd(),
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_OPTIONS')),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const resumedPid = resumed.pid;
+    if (resumedPid === undefined) throw new Error('the cold consumer child has no exact PID');
+    assert.ok(resumedPid !== process.pid);
+    assert.ok(resumedPid !== seedPid);
+    let stdout = '';
+    let stderr = '';
+    resumed.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    resumed.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    const exited = await withDeadline(new Promise<{
+      readonly code: number | null;
+      readonly signal: string | null;
+    }>((resolve, reject) => {
+      resumed.once('error', reject);
+      resumed.once('exit', (code, signal) => resolve({ code, signal }));
+    }), 180_000);
+    assert.equal(exited.signal, null, stderr);
+    assert.equal(exited.code, 0, stderr);
+    const receiptLine = stdout.split('\n').find((line) => line.startsWith('COLD_CONSUMER_RECEIPT '));
+    if (receiptLine === undefined) throw new Error(`the cold consumer child emitted no receipt: ${stderr}`);
+    const receipt = JSON.parse(receiptLine.slice('COLD_CONSUMER_RECEIPT '.length)) as ColdConsumerReceipt;
+    assert.equal(receipt.status, 202);
+    assert.equal(receipt.pid, resumedPid);
+    assert.equal(receipt.task.state, 'succeeded');
+    assert.equal(receipt.task.output, EXACT_BODY);
+    assert.equal(receipt.task.operationId, interruption.operationId.value);
+    assert.equal(receipt.planner.decision, 'complete');
+    assert.equal(receipt.successor.predecessor.kind, 'initial-open');
+    assert.equal(receipt.successor.predecessor.initialOpen.recordsThroughCommitRef.commitId,
+      interruption.recovery.anchor.recordsThroughCommitRef.commitId);
+    assert.equal(receipt.successor.assignmentId, receipt.allocation.assignmentId);
+    assert.equal(receipt.successor.inputRevision, receipt.allocation.inputRevision);
+    assert.equal(receipt.allocation.assignmentId, interruption.allocation.assignmentId);
+    assert.equal(receipt.allocation.inputRevision, interruption.allocation.inputRevision);
+    assert.equal(receipt.allocation.executionEpoch, interruption.allocation.executionEpoch);
+    assert.ok(receipt.successor.executionEpoch > receipt.allocation.executionEpoch);
+    assert.equal(receipt.publicOutput.state, 'committed');
+    assert.ok(receipt.publicOutput.commits?.some((commit) => commit.text === EXACT_BODY));
+
+    const afterBytes = await readFile(fixture.layout.organJournalPath);
+    assert.deepEqual(afterBytes.subarray(0, journalPrefix.length), journalPrefix,
+      'the resume appends after the accepted durable prefix and never rewrites it');
+    const afterRecords = (await fixture.journal.verify()).records;
+    const afterAcceptedEffectCount = afterRecords.filter((record) => {
+      const turnId = record.commitId?.startsWith('active-turn:')
+        ? record.commitId.slice('active-turn:'.length).split(':')[0]
+        : undefined;
+      if (turnId === undefined || !priorTurnIds.has(turnId)) return false;
+      const typed = record.payload?.['record'] as ActiveTurnJournalRecord | undefined;
+      return typed?.kind === 'accepted-fact' || typed?.kind === 'child-invocation'
+        || typed?.kind === 'child-delivery';
+    }).length;
+    assert.equal(afterAcceptedEffectCount, acceptedEffectCount,
+      'the cold resume does not replay accepted prior-turn effects');
+
+    const resumedWireIndex = fixture.upstream.wires.findIndex((wire, index) => index > heldWireIndex()
+      && wire.method === 'POST'
+      && plannerPayload(wire.body) === undefined
+      && hasTurnEndSurface(wire.body));
+    if (resumedWireIndex < 0) throw new Error('the resumed Turn 3 execution wire is absent');
+    const resumedWire = fixture.upstream.wires[resumedWireIndex]!;
+    const resumedContext = (parseResponsesWire(resumedWire.body)?.input ?? [])
+      .flatMap((item) => (item.content ?? [])
+        .flatMap((part) => typeof part.text === 'string' ? [part.text] : []))
+      .join('\n');
+    for (const expected of [TURN_ONE_GOAL, TURN_ONE_ACTIONS, TURN_ONE_RESULT, TURN_ONE_NEXT,
+      CHILD_BODY, TURN_TWO_GOAL, TURN_TWO_ACTIONS, TURN_TWO_RESULT, TURN_TWO_NEXT]) {
+      assert.ok(resumedContext.includes(expected), `the resumed third turn retains ${expected}`);
+    }
+    const checkpoints = (parseResponsesWire(resumedWire.body)?.input ?? []).flatMap((item, index) => {
+      if (item.type !== 'message' || item.role !== 'assistant') return [];
+      return (item.content ?? []).flatMap((part) => {
+        if (part.type !== 'input_text' || typeof part.text !== 'string') return [];
+        const checkpoint = JSON.parse(part.text) as unknown;
+        if (typeof checkpoint !== 'object' || checkpoint === null || Array.isArray(checkpoint)) return [];
+        return [{ checkpoint: checkpoint as Record<string, unknown>, index }];
+      });
+    });
+    const checkpointFor = (goal: string) => {
+      const matches = checkpoints.filter(({ checkpoint }) => checkpoint.goal === goal);
+      assert.equal(matches.length, 1, `the resumed third turn has one checkpoint with goal ${goal}`);
+      return matches[0]!;
+    };
+    const turnOneCheckpoint = checkpointFor(TURN_ONE_GOAL);
+    const turnTwoCheckpoint = checkpointFor(TURN_TWO_GOAL);
+    for (const [label, checkpoint] of [['Turn 1', turnOneCheckpoint], ['Turn 2', turnTwoCheckpoint]] as const) {
+      assert.deepEqual(Object.keys(checkpoint.checkpoint).sort(), ['actions', 'adoptedChildren', 'goal', 'nextStep', 'result'],
+        `the resumed ${label} checkpoint has the exact semantic fields`);
+      assert.equal(typeof checkpoint.checkpoint.actions, 'string');
+      assert.equal(typeof checkpoint.checkpoint.goal, 'string');
+      assert.equal(typeof checkpoint.checkpoint.nextStep, 'string');
+      assert.equal(typeof checkpoint.checkpoint.result, 'string');
+      assert.ok(Array.isArray(checkpoint.checkpoint.adoptedChildren));
+    }
+    assert.ok(turnOneCheckpoint.index < turnTwoCheckpoint.index, 'the resumed Turn 1 checkpoint precedes Turn 2');
+    const adoptedChildren = turnOneCheckpoint.checkpoint.adoptedChildren as unknown[];
+    assert.equal(adoptedChildren.length, 1, 'the resumed Turn 1 checkpoint has one adopted child');
+    const adoptedChild = adoptedChildren[0] as Record<string, unknown>;
+    assert.equal(typeof adoptedChild, 'object');
+    assert.ok(adoptedChild !== null);
+    assert.equal(Array.isArray(adoptedChild), false);
+    assert.equal(typeof adoptedChild.text, 'string');
+    const refined = JSON.parse(adoptedChild.text as string) as Record<string, unknown>;
+    assert.equal(refined.summary, CHILD_BODY, 'the Turn 1 adopted child retains its refined summary');
+    assert.deepEqual(turnTwoCheckpoint.checkpoint.adoptedChildren, [],
+      'the resumed Turn 2 checkpoint has no adopted child');
+    for (const raw of [TURN_TWO_DELIVERY, 'call-parent-child', 'call-parent-adopt',
+      'call-child-delivery', 'call-child-end', 'call-turn-1-end', 'call-turn-2-end']) {
+      assert.equal(resumedWire.body.includes(raw), false,
+        `the resumed third turn excludes ${raw}`);
+    }
+    return { seed, receipt, resumedPid, interruption, resumedWireIndex, acceptedEffectCount };
+  } finally {
+    if (!seedSettled && started.child.exitCode === null && started.child.signalCode === null) {
+      try {
+        process.kill(seedPid, 'SIGTERM');
+      } catch {
+        // The seed may have exited between the liveness read and this exact PID signal.
+      }
+      await withDeadline(started.result.catch(() => undefined), 30_000);
+    }
+  }
+}
+
+async function runColdConsumerChild(): Promise<void> {
+  coldConsumerArgument(coldConsumerRoot, '--fixture-root');
+  const task = coldConsumerArgument(coldConsumerTask, '--task-id');
+  const operation = coldConsumerArgument(coldConsumerOperation, '--operation-id');
+  const workspace = coldConsumerArgument(coldConsumerWorkspace, '--workspace');
+  const controlRoot = coldConsumerArgument(coldConsumerControlRoot, '--control-root');
+  const cookieFile = coldConsumerArgument(coldConsumerCookie, '--cookie-file');
+  const uiRoot = coldConsumerArgument(coldConsumerUiRoot, '--ui-root');
+  const { configureBuiltinPromptRoot } = await import('../../packages/app/src/index.js');
+  configureBuiltinPromptRoot();
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await mkdir(join(paths.journalRoot, 'ui-runtime'), { recursive: true });
+  const configuration = await loadConfiguration(paths);
+  const modeRoot = join(paths.checkpointsRoot, 'ui-runtime', 'rcc');
+  const controlJournalPath = join(modeRoot, 'task-control.jsonl');
+  const journal = new JsonlOrganJournal(controlJournalPath);
+  const preparedJournal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
+  const configuredAgentId = configuration.effective.project?.defaultAgent
+    ?? configuration.agentRoster[0]!.agentId;
+  const configuredAgent = configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
+  if (configuredAgent === undefined) {
+    throw new Error(`no configured agent matches the selected default ${configuredAgentId}`);
+  }
+  const selected = await prepareAgentProvider({
+    roleId: configuredAgent.roleId,
+    configuredAgentId: configuredAgent.agentId,
+    agentProviderBindings: configuration.agentProviderBindings,
+    legacyProvider: configuration.effective.provider,
+    evidenceRoot: join(paths.artifactsRoot, 'ui-provider-evidence'),
+  });
+  const eventJournal = createJsonlEventJournal({ filePath: join(paths.journalRoot, 'ui-runtime', 'events.jsonl') });
+  const publishers: EventPublisherRegistryPort = { async resolvePublisher() { return null; } };
+  const eventBusPorts: EventBusPorts = {
+    journal: eventJournal,
+    publishers,
+    consumers: { async resolveConsumer() { return null; } },
+    externalOperations: eventJournal,
+    barrierIntents: eventJournal,
+  };
+  const prepare = <T extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(
+    selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string },
+  ) => prepareAgentProvider<T>({
+    ...selection,
+    agentProviderBindings: configuration.agentProviderBindings,
+    legacyProvider: configuration.effective.provider,
+    evidenceRoot: join(paths.artifactsRoot, 'ui-provider-evidence'),
+  });
+  const orchestrationPorts = createRccServeOrchestrationPorts({
+    port: selected.port,
+    binding: selected.binding,
+    prepareAgentProvider: prepare,
+    promptSegments: {
+      review: (configuration.promptCatalog.review?.segments ?? []).map((segment) => segment.content),
+    },
+  });
+  const serveRuntime = createServeRuntimeComposition({
+    maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
+    eventBusPorts,
+    feedbackPorts: { journal: eventJournal, publishers },
+    feedbackPublisherId: 'native-cold-consumer',
+    ...orchestrationPorts,
+  });
+  const accessControl = await AccessControlService.open({
+    credentialPath: paths.webAccessCredentialPath,
+    create: false,
+  });
+  const cookie = (await readFile(cookieFile, 'utf8')).split('\n')[0]!.trim();
+  if (cookie.length === 0) throw new Error('cold consumer cookie file is empty');
+  const runtime = await startUiRuntime({
+    mode: 'rcc',
+    maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
+    accessControl,
+    organId: id('organ', 'humanagent-ui'),
+    binding: selected.binding,
+    providerSource: selected.source,
+    port: selected.port,
+    checkpointRoot: join(paths.checkpointsRoot, 'ui-runtime'),
+    interactionRoot: paths.mainRoot,
+    evidenceRoot: join(paths.artifactsRoot, 'ui-provider-evidence'),
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    uiRoot,
+    host: '127.0.0.1',
+    portNumber: 0,
+    agentRoster: configuration.agentRoster,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: paths.projectKey,
+      roleId: configuredAgent.roleId,
+    },
+    explicitBrainInterpreter: {
+      async interpret() {
+        throw new Error('cold consumer does not interpret a new explicit Brain input');
+      },
+    },
+    runtimePaths: paths,
+    runtimeComposition: {
+      createTaskAssembly: serveRuntime.createTaskAssembly,
+      prepareAgentProvider: prepare,
+      prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
+        roleId: selection.roleId,
+        ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+        agentProviderBindings: configuration.agentProviderBindings,
+        legacyProvider: configuration.effective.provider,
+        createPort: (binding) => createAgentProviderPort(
+          binding,
+          join(paths.artifactsRoot, 'ui-provider-evidence'),
+        ),
+      }, owner, lease),
+    },
+  });
+  const taskId = id('task', task);
+  let receipt: ColdConsumerReceipt | undefined;
+  try {
+    const response = await fetch(
+      `${runtime.server.url}/api/tasks/${encodeURIComponent(task)}/resume`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ operationId: operation }),
+      },
+    );
+    const responseBody = await response.json() as unknown;
+    assert.equal(response.status, 202, JSON.stringify(responseBody));
+    const taskScope = { organId: id('organ', 'humanagent-ui'), taskId };
+    const taskFinal = await waitFor(
+      () => runtime.service.taskDashboardWithPlan(taskId),
+      (dashboard) => dashboard.state === 'succeeded' && dashboard.publicOutput?.state === 'committed',
+      'the resumed task did not reach its committed public outcome',
+      60_000,
+    );
+    assert.equal(taskFinal.operationId, operation);
+    const checked = await runtime.service.taskDashboardWithPlan(taskId);
+    const publicOutput = checked.publicOutput;
+    if (publicOutput === undefined) throw new Error('the resumed task has no public output');
+    assert.ok(publicOutput?.commits?.some((commit) => commit.text === EXACT_BODY),
+      `the resumed task did not deliver the exact body: ${JSON.stringify(publicOutput)}`);
+    const planner = await waitFor(
+      () => createJsonlClosedTurnPlannerCallJournal({ journal }).readTaskDuties(taskScope),
+      (duties) => duties.some((duty) => duty.returned?.record.decision === 'complete'),
+      'the resumed task did not commit a completing Planner return',
+      60_000,
+    );
+    const finalPlanner = planner.filter((duty) => duty.returned?.record.decision === 'complete').at(-1);
+    if (finalPlanner?.returned === undefined) throw new Error('the completing Planner return is absent');
+    const plannerReturn = finalPlanner.returned;
+    const allocations = preparedJournal.replay()
+      .filter((record) => record.kind === 'operation.prepared' && record.allocation.taskId.value === task);
+    const allocation = allocations.find((record) => record.kind === 'operation.prepared'
+      && record.allocation.operationId.value === operation);
+    if (allocation?.kind !== 'operation.prepared') {
+      throw new Error('the resumed operation has no retained prepared allocation');
+    }
+    const bindings = await listTaskActiveTurnBindings({ journal, scope: taskScope });
+    const binding = bindings.find((entry) => entry.binding.scope.operationId?.value === operation);
+    if (binding === undefined) throw new Error('the resumed operation has no active-turn binding');
+    const segmentJournal = createActiveTurnSegmentJournal({
+      journalPath: controlJournalPath,
+      assetRoot: join(paths.artifactsRoot, 'ui-provider-evidence'),
+      completionJournal: new JsonlOperationCompletionJournal({ journal }),
+      businessTurnId: binding.binding.admittedTurn.turnId,
+    });
+    const segments = await segmentJournal.readSegments(binding.binding.admittedTurn.turnId);
+    const successor = segments.at(-1);
+    if (successor === undefined) throw new Error('the resumed operation committed no successor segment');
+    const predecessor = successor.predecessor;
+    if (predecessor.initialOpen === undefined) {
+      throw new Error('the resumed operation predecessor was not anchored at initial-open');
+    }
+    const initialOpen = predecessor.initialOpen;
+    assert.equal(successor.binding.scope.operationId?.value, operation,
+      'the successor segment retains the retained operation identity');
+    assert.equal(successor.binding.assignment.assignmentId, allocation.allocation.assignmentId,
+      'the successor segment retains the retained assignment identity');
+    assert.equal(successor.binding.assignment.inputRevision, allocation.allocation.inputRevision,
+      'the successor segment retains the retained input revision');
+    assert.ok(successor.binding.execution.executionEpoch > allocation.allocation.executionEpoch,
+      'the successor epoch must exceed the interrupted allocation epoch');
+    const publication = await new ServiceExecutionCheckpointStore(
+      controlJournalPath,
+      journal,
+      () => new Date(),
+    ).readPublicOutputs({
+      scope: successor.binding.scope,
+      executionEpoch: successor.binding.execution.executionEpoch,
+    });
+    assert.equal(publication.state, 'committed');
+    assert.ok(publication.commits.some((commit) => commit.text === EXACT_BODY));
+    receipt = {
+      pid: process.pid,
+      parentPid: (process as unknown as { readonly ppid: number }).ppid,
+      status: response.status,
+      response: responseBody,
+      task: {
+        state: taskFinal.state,
+        output: taskFinal.output,
+        operationId: taskFinal.operationId,
+        executionEpoch: taskFinal.executionEpoch,
+      },
+      allocation: {
+        operationId: allocation.allocation.operationId.value,
+        assignmentId: allocation.allocation.assignmentId,
+        inputRevision: allocation.allocation.inputRevision,
+        executionEpoch: allocation.allocation.executionEpoch,
+      },
+      binding: {
+        businessTurnId: binding.binding.admittedTurn.turnId,
+        operationId: binding.binding.scope.operationId?.value,
+      },
+      successor: {
+        segmentId: successor.segmentId,
+        executionEpoch: successor.binding.execution.executionEpoch,
+        predecessor: { kind: 'initial-open', initialOpen },
+        assignmentId: successor.binding.assignment.assignmentId,
+        inputRevision: successor.binding.assignment.inputRevision,
+      },
+      planner: {
+        dutyKey: finalPlanner.dutyKey,
+        decision: plannerReturn.record.decision,
+        revisionId: plannerReturn.record.publication.revisionId,
+        sequence: plannerReturn.record.publication.sequence,
+      },
+      publicOutput,
+    };
+  } finally {
+    await runtime.close();
+    await closeAgentProvider(selected);
+    await serveRuntime.dispose();
+    await accessControl.closeCredentialWatch();
+  }
+  if (receipt === undefined) throw new Error('the cold consumer produced no completed receipt');
+  console.log(`COLD_CONSUMER_RECEIPT ${JSON.stringify(receipt)}`);
 }
 
 /**
@@ -1008,7 +1752,7 @@ async function startServe(input: {
 // Failure basis: the observed missing inspect completion and boundary-only live
 // prefix/end gaps. Impact: a saved turn cannot reach Planner alignment. Cost:
 // one real CLI/HTTP fixture using the existing local upstream and asset store.
-test('native inspect producer and cold saved boundary preserve facts without executor replay', async () => {
+if (!coldConsumerMode) test('native inspect producer and cold saved boundary preserve facts without executor replay', async () => {
   const fixture = await textOnlyFixture(true);
   let passed = false;
   try {
@@ -1100,7 +1844,7 @@ test('native inspect producer and cold saved boundary preserve facts without exe
 // Observed missing App concurrency forwarding can serialize independent children.
 // Frequency is unknown; impact is lost overlap/failure isolation. Cost: one existing
 // local CLI consumer with budget two, including durable checkpoints and Planner.
-test('native parallel child calls overlap and retain ordered refined results and checkpoints', async () => {
+if (!coldConsumerMode) test('native parallel child calls overlap and retain ordered refined results and checkpoints', async () => {
   const fixture = await textOnlyFixture(false, true, true);
   try {
     const organId = id('organ', 'humanagent-ui');
@@ -1179,7 +1923,7 @@ test('native parallel child calls overlap and retain ordered refined results and
   }
 });
 
-test('native two.turn public CLI consumer retains adopted child context and completes the prior plan', async () => {
+if (!coldConsumerMode) test('native two.turn public CLI consumer retains adopted child context and completes the prior plan', async () => {
   const fixture = await textOnlyFixture(false, true, false, 2);
   let passed = false;
   try {
@@ -1291,7 +2035,7 @@ test('native two.turn public CLI consumer retains adopted child context and comp
 // A three-turn publication can silently retain only the latest prior scope.
 // Frequency is unknown; impact is loss of the first-turn semantic checkpoint.
 // Cost: one real single-child CLI/HTTP consumer reusing the two-turn fixture.
-test('native three.turn public CLI consumer retains multi-turn semantic history and adopted child context', async () => {
+if (!coldConsumerMode) test('native three.turn public CLI consumer retains multi-turn semantic history and adopted child context', async () => {
   const fixture = await textOnlyFixture(false, true, false, 3);
   let passed = false;
   try {
@@ -1402,7 +2146,52 @@ test('native three.turn public CLI consumer retains multi-turn semantic history 
   }
 });
 
-test('native text-only delivery advertised end, independent Planner closure and exact asset readback', async () => {
+// The observed failure risk is a cold reopen that loses the uncaptured Turn 3
+// boundary or replays the accepted C1/C2 effects. Impact: the task cannot
+// resume truthfully. Cost: one existing three-turn CLI fixture, one exact seed
+// interruption, and one fresh HTTP-resume child.
+if (!coldConsumerMode) test('native three-turn public consumer cold-resumes interrupted third turn', async () => {
+  let heldWireIndex = -1;
+  let fixture!: Awaited<ReturnType<typeof textOnlyFixture>>;
+  fixture = await textOnlyFixture(false, true, false, 3, undefined, async () => {
+    heldWireIndex = fixture.upstream.wires.length - 1;
+  });
+  let passed = false;
+  try {
+    const started = await startNativeMultiTurnConsumer(fixture, 3);
+    const outcome = await runHeldColdConsumer({ fixture, started, heldWireIndex: () => heldWireIndex });
+    assert.equal(outcome.seed.signal, 'SIGTERM');
+    assert.equal(fixture.upstream.interruptedThirdTurn(), true,
+      'the controlled upstream held exactly the interrupted third-turn request');
+    assert.equal(fixture.upstream.turnThreeHeld(), true);
+    assert.equal(outcome.interruption.recovery.status, 'initial-open');
+    assert.ok(outcome.interruption.binding.admittedTurn.turnId.length > 0);
+    assert.equal(outcome.interruption.current.state, 'known',
+      'the interruption leaves an actual typed current-state record');
+    assert.equal(outcome.receipt.binding.operationId, outcome.interruption.operationId.value);
+    assert.equal(outcome.receipt.planner.decision, 'complete');
+    console.log('cold consumer evidence', JSON.stringify({
+      seedPid: started.child.pid,
+      resumePid: outcome.resumedPid,
+      heldWireIndex,
+      resumedWireIndex: outcome.resumedWireIndex,
+      operationId: outcome.interruption.operationId.value,
+      businessTurnId: outcome.interruption.businessTurnId,
+      allocation: outcome.receipt.allocation,
+      successor: outcome.receipt.successor,
+      planner: outcome.receipt.planner,
+      acceptedEffectCount: outcome.acceptedEffectCount,
+      fixture: fixture.root,
+    }));
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`cold consumer fixture retained: ${fixture.root}`);
+  }
+});
+
+if (!coldConsumerMode) test('native text-only delivery advertised end, independent Planner closure and exact asset readback', async () => {
   const fixture = await textOnlyFixture(false, true);
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const organId = id('organ', 'humanagent-ui');
@@ -1914,7 +2703,7 @@ test('native text-only delivery advertised end, independent Planner closure and 
 // silently use another source. Probability: unknown; one local CLI child and
 // one local socket bind the first real request. Cost: one existing text-only
 // fixture, no protocol matrix or external service.
-test('default native CLI inherits top-level HTTP credential into Responses request', async () => {
+if (!coldConsumerMode) test('default native CLI inherits top-level HTTP credential into Responses request', async () => {
   const credentialName = 'HUMANAGENT_TEST_DEFAULT_HTTP_TOKEN';
   const credentialRef = `env:${credentialName}`;
   const credentialValue = 'dummy-default-http-token';
@@ -2109,7 +2898,7 @@ test('default native CLI inherits top-level HTTP credential into Responses reque
  * current-state transition is committed. With no current-state port bound the
  * release boundary must refuse to release and must not start the model.
  */
-test('native standard-turn release refuses and never starts the model when the current-state port is unbound', async () => {
+if (!coldConsumerMode) test('native standard-turn release refuses and never starts the model when the current-state port is unbound', async () => {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'release-guard-'));
   let started = 0;
@@ -2169,3 +2958,8 @@ test('native standard-turn release refuses and never starts the model when the c
     await rm(root, { recursive: true });
   }
 });
+
+if (coldConsumerMode) {
+  await runColdConsumerChild();
+  (process as unknown as { exit(code?: number): never }).exit(0);
+}
