@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- Runtime boundary基础dad3ebb0已正常合candidate；目标agent-loop tsc0、原五namedconsumer5/5PASS（session36302，inspection-turn-boundary-composed-20261017.txt）。证据覆盖共用opening/逐check选择、持久checkpoint时间、重复cycle-close排除、durableitem不重执行、committedstoppedcheckpoint收拢；不覆盖真实productionreader/open/facts helpers。owner已指出aggregate outcome由nextAction粗分仍须纠正，完整milestone前修复并走真实consumer；本基础不main、不leafReview。App新turn准入第三轮holdtimeout尚未到目标字段断言，不算需求RED，由原worker同树定位。
+
 - 持久绑定59b95565+11231520已正常合candidate；组合contractsbuild、context/jsonl/admission三目标tsc均0，原named5consumer5/5PASS，session66658/inspection-turn-plan-persistence-composed-20261017.txt。App新turn准入GCM已由peer从含接口候选实际启动，独占execution-composition.ts与原nativeconsumer；不等整层。模板shape补正0399ea4e已合candidate。未将这些内部基础记成完整producer或main产品交付。
 - r269边界源码观察、r270当前工件取证、r271Astra只读攻关均已实际返回：neutral SSE注释对应专用disconnect出口；error_chain/provider_terminal可能重叠，固定pool-exhausted文字不证明实际耗尽。目标工件未保留，内部根因UNKNOWN；无证据支持HumanAgent代码修复。该条installedApp→RCC验收INCOMPLETE，停止重发/旧日志扩搜。需RCC owner提供既存原始原因/可靠关联；已列出实际维护聊天并异步请求用户明确交接目标（通信用法要求目标授权），其余producer/runtime继续，不标整体blocked。
 
