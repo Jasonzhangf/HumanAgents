@@ -4,7 +4,13 @@
 
 ## 1. 当前目标与总体进度（更新至 2026-10-16）
 
-### 续接增量（2026-10-16）
+### 当前交付（2026-10-17）
+
+- 独立 Provider 组件增量已完成 1/1 项标准交付：生产 `69854637`、原 proof 安装依赖根 `80b18b1f`、main 最新进度 `c8892016` 均已正常推送 origin/main。整体 Review controller PASS；source 三协议工具循环 3/3；canonical 安装全部9模块的 Responses 完整工具循环 PASS/Node0/2request，receipt `provider-installed-component-r28-20261017/run-adE3Yx`。组件交付不代表 App Task 或完整 goal 完成。
+- canonical0.1.0031 正式构建/安装与官方restart通过。隔离50341随后走正式SIGINT→supervisor.dispose，PID52264 absent、lease disposedAt已写；codec和delivery两树normalremove/prune/pathabsent，证据保留。原53007/Task/A0未动，安装/main窗口已交还peer。main已发布的同路径进度是该增量交付摘要。
+- 完整 goal 继续 ACTIVE：App新Task identity/grant/defaultadmission计划r26在途；Memory hook候选f1dea48c后scope修复GCMr22；child accepted-evidence mapper已解除缺body引用，7execution通过但缺child committed control导致父收口unknown，独立r35定界；stop边界08e2c15a已获条件RED/GREEN27个不同消费者，尚未组合/整体验收。不得把这些局部状态计作完整生产节点通过。
+
+### 续接记录（历史，截至 2026-10-17）
 
 - 2026-10-17 后继接线：r24确认main无另一条已闭合新Task入口，UXpeer也未提供不同入口证据；独立Gemini4 medium r26只规划正式identity/grant/defaultadmission闭包，与peer readonly hydrate分hunk，不整candidate入main。独立Provider安装消费r25依赖根机制已接收，但拒绝退为普通单请求：GCM r27将原proof全部9imports统一选canonical根，父随后跑原TOOL_LOOP，AppTask仍单列INCOMPLETE。peer确认暂保当前canonical供此轮消费。
 - Memory hook技术候选 `f1dea48c` 已正常提交，build/tsc0，production缺hook实际RED已取得；hot/fresh现在均在真实跨cycle group发布处RED，`event evidence scope exceeds event scope`。业务epoch6/7继续、原Planner与收口、可选Memory故障原cause/HTTP degraded、启动补审不重播已有实际部分证据；不能冒group/appliedreceipt/curation通过。独立scope小Planner r21核producer共同Task scope最小修复，不放宽Runtime通用scope校验或篡改旧refs。
