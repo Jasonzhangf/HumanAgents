@@ -282,7 +282,7 @@ test('completion rejects scope, cycle, epoch, predecessor, recovery state, evide
         ownerId: 'task-owner',
         context: { scope, cycleId: cycle, executionEpoch: 4 },
         previous: null,
-        checkpoint: { ...base, evidenceRefs: [] },
+        checkpoint: { ...base, evidenceRefs: [{ ...evidence('invalid'), locator: '' }] },
       },
     },
     {

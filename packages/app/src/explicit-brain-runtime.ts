@@ -669,11 +669,15 @@ export function createProviderExplicitBrainInterpreter(input: {
                   || !args.assignmentFields || !args.inputs || !Array.isArray(args.evidenceRefs)) {
                   throw new ExplicitBrainOperationalToolError('unsupported-tool', 'invalid dispatch_helper arguments');
                 }
+                const assignmentFields = args.assignmentFields as Record<string, unknown>;
+                const objective = nonEmptyString(assignmentFields, 'objective');
+                const successCriteria = stringArray(assignmentFields, 'successCriteria');
                 result = await helpers.dispatchHelper({
                   selection: { roleId: selection.roleId, ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }) },
                   assignmentFields: args.assignmentFields as unknown as InteractionHelperAssignmentFields,
                   inputs: args.inputs as BusinessPayload,
                   evidenceRefs,
+                  checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${successCriteria.join('; ')}. Owner acceptance is pending.`,
                   conclude: ({ events }) => {
                     const raw = events.filter((event) => event.kind === 'provider.output')
                       .map((event) => ('summary' in event ? event.summary : '')).join('');
@@ -701,6 +705,7 @@ export function createProviderExplicitBrainInterpreter(input: {
                   view: { kind: 'utf8-text' as const },
                 };
                 result = await helpers.acceptHelper({ helperCallId, refinedResult, acceptanceRef,
+                  checkpointDescription: refinedText,
                   acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs });
               } else {
                 throw new ExplicitBrainOperationalToolError('unsupported-tool', `unknown interaction tool ${call.toolId}`);

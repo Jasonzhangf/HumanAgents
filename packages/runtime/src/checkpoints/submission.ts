@@ -197,7 +197,6 @@ function nonEmpty(value: string, label: string): string {
 }
 
 function requireEvidenceRefs(scope: ScopeRef, evidenceRefs: readonly EvidenceRef[], label: string): void {
-  if (evidenceRefs.length === 0) throw new CheckpointSubmissionError(`${label} evidence is required`);
   for (const evidenceRef of evidenceRefs) {
     try {
       assertEvidenceRef(evidenceRef);

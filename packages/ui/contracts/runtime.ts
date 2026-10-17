@@ -5,6 +5,9 @@ import type {
   LifecycleState,
   OrganId,
   SemanticObservationEnvelope,
+  TaskAgentActivityCurrency,
+  TaskAgentActivitySourceKind,
+  TaskAgentActivityUnavailableSource,
   TaskId,
   TaskIdentitySource,
   TaskFlowBinding,
@@ -393,6 +396,12 @@ export interface RuntimeTaskDashboardProjection {
     readonly incarnations: readonly TaskRuntimeIncarnationProjection[];
     readonly availability: RuntimePoolAvailabilityProjection;
   };
+  /**
+   * Per-task Agent activity read, mounted by the app from the frozen
+   * `TaskAgentActivitySelectionOutcome`. Absent when the app composed no read;
+   * the projection never reclassifies or invents a current instance.
+   */
+  readonly agentActivity?: RuntimeReadResult<RuntimeAgentActivityProjection>;
   readonly taskPlanHistory: RuntimeReadResult<RuntimeTaskPlanHistoryProjection>;
 }
 
@@ -400,6 +409,84 @@ export interface RuntimeCommitRefProjection {
   readonly commitId: string;
   readonly journalSeq: number;
   readonly recordDigest: string;
+}
+
+/**
+ * UI view of one real execution instance. The identity is flattened so the
+ * frozen `docs/ui/agent-activity.js` consumer can read `instance.runtimeId`,
+ * `instance.executionEpoch` and, for a managed incarnation, `instance.roleId`,
+ * `instance.generation` and `instance.agentInstanceId` directly. `label` is a
+ * display name only and never carries the raw identity into the list view.
+ */
+export type RuntimeAgentActivityInstanceProjection =
+  | {
+      readonly kind: 'native-execution';
+      readonly label: string;
+      readonly runtimeId: string;
+      readonly executionEpoch: number;
+    }
+  | {
+      readonly kind: 'incarnation';
+      readonly label: string;
+      readonly runtimeId: string;
+      readonly executionEpoch: number;
+      readonly roleId: string;
+      readonly generation: number;
+      readonly agentInstanceId: string;
+    };
+
+interface RuntimeAgentActivityEntryProjectionCommon {
+  readonly taskId: TaskId;
+  readonly instance: RuntimeAgentActivityInstanceProjection;
+  readonly assignmentId: string;
+  /** Present only when the source record carried a real attempt; never defaulted. */
+  readonly attempt?: number;
+  readonly executionEpoch: number;
+  readonly businessTurnId?: string;
+  readonly segmentId?: string;
+  readonly nodeId?: string;
+  readonly sourceKindLabel: string;
+  readonly currency: TaskAgentActivityCurrency;
+  readonly currencyLabel: string;
+  readonly missingSource?: string;
+  readonly commitRefs: readonly RuntimeCommitRefProjection[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+/**
+ * A `closed-turn-planner-call` instance carries no authoritative Planner
+ * `objective` (no persisted `WorkAssignment.objective` for the Planner record),
+ * so `objective` is optional for it only. Every other source kind keeps the
+ * mandatory non-empty `objective`. The projection never fabricates a role name
+ * or placeholder in its place.
+ */
+export type RuntimeAgentActivityEntryProjection =
+  | (RuntimeAgentActivityEntryProjectionCommon & {
+      readonly sourceKind: Exclude<TaskAgentActivitySourceKind, 'closed-turn-planner-call'>;
+      readonly objective: string;
+    })
+  | (RuntimeAgentActivityEntryProjectionCommon & {
+      readonly sourceKind: 'closed-turn-planner-call';
+      readonly objective?: string;
+    });
+
+/**
+ * Pure UI projection of the frozen `TaskAgentActivitySelectionOutcome`. The
+ * `current` / `historical` / `unknown` / `selected` arrays are carried
+ * independently: this view never reclassifies, deduplicates or selects an
+ * instance. `scope` is display/link context only; it owns no control.
+ */
+export interface RuntimeAgentActivityProjection {
+  readonly surface: 'runtime-agent-activity';
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+  readonly taskId: TaskId;
+  readonly mode: 'catalog' | 'selected';
+  readonly selectedInstance?: RuntimeAgentActivityInstanceProjection;
+  readonly selected?: readonly RuntimeAgentActivityEntryProjection[];
+  readonly current: readonly RuntimeAgentActivityEntryProjection[];
+  readonly historical: readonly RuntimeAgentActivityEntryProjection[];
+  readonly unknown: readonly RuntimeAgentActivityEntryProjection[];
+  readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
 }
 
 export type RuntimeCheckpointFilter =

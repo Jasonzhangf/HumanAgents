@@ -37,7 +37,13 @@ export type TaskAgentActivitySourceKind =
   | 'resumed-segment'
   | 'runtime-pool-lease'
   | 'child-invocation'
-  | 'milestone-review';
+  | 'milestone-review'
+  | 'closed-turn-planner-call';
+
+export type TaskAgentActivityAssignmentSourceKind = Exclude<
+  TaskAgentActivitySourceKind,
+  'closed-turn-planner-call'
+>;
 
 export type TaskAgentActivityCurrency = 'current' | 'historical' | 'unknown';
 
@@ -48,6 +54,7 @@ const TASK_AGENT_ACTIVITY_SOURCE_KINDS: ReadonlySet<string> = new Set<TaskAgentA
   'runtime-pool-lease',
   'child-invocation',
   'milestone-review',
+  'closed-turn-planner-call',
 ]);
 
 const TASK_AGENT_ACTIVITY_CURRENCIES: ReadonlySet<string> = new Set<TaskAgentActivityCurrency>([
@@ -63,23 +70,31 @@ export interface TaskAgentActivityUnavailableSource {
   readonly message: string;
 }
 
-export interface TaskAgentActivityOwnershipRecord {
+interface TaskAgentActivityOwnershipRecordCommon {
   readonly taskId: TaskId;
   readonly instance: TaskExecutionInstanceIdentity;
   readonly assignmentId: string;
   /** Present only when the authoritative source (e.g. WorkAssignment / ReviewAssignment) carries a real attempt. Never defaulted to 1. */
   readonly attempt?: number;
   readonly executionEpoch: number;
-  readonly objective: string;
   readonly businessTurnId?: string;
   readonly segmentId?: string;
   readonly nodeId?: string;
-  readonly sourceKind: TaskAgentActivitySourceKind;
   readonly currency: TaskAgentActivityCurrency;
   readonly missingSource?: string;
   readonly commitRefs: readonly JournalCommitRef[];
   readonly evidenceRefs: readonly EvidenceRef[];
 }
+
+export type TaskAgentActivityOwnershipRecord =
+  | (TaskAgentActivityOwnershipRecordCommon & {
+      readonly sourceKind: TaskAgentActivityAssignmentSourceKind;
+      readonly objective: string;
+    })
+  | (TaskAgentActivityOwnershipRecordCommon & {
+      readonly sourceKind: 'closed-turn-planner-call';
+      readonly objective?: string;
+    });
 
 export interface TaskAgentActivitySelectionQuery {
   readonly taskId: TaskId;
@@ -253,13 +268,19 @@ export function validateTaskAgentActivityOwnershipRecord(
   if (record.instance.kind === 'incarnation' && record.assignmentId !== record.instance.incarnation.assignmentId) {
     throw new ContractError('agent activity record assignment id does not match its incarnation identity');
   }
-  assertNonEmptyString(record.objective, 'agent activity record objective');
-  if (record.businessTurnId !== undefined) assertNonEmptyString(record.businessTurnId, 'agent activity record business turn id');
-  if (record.segmentId !== undefined) assertNonEmptyString(record.segmentId, 'agent activity record segment id');
-  if (record.nodeId !== undefined) assertNonEmptyString(record.nodeId, 'agent activity record node id');
   if (!TASK_AGENT_ACTIVITY_SOURCE_KINDS.has(record.sourceKind)) {
     throw new ContractError('agent activity record source kind is invalid');
   }
+  if (record.sourceKind === 'closed-turn-planner-call') {
+    if (record.objective !== undefined) {
+      assertNonEmptyString(record.objective, 'agent activity record objective');
+    }
+  } else {
+    assertNonEmptyString(record.objective, 'agent activity record objective');
+  }
+  if (record.businessTurnId !== undefined) assertNonEmptyString(record.businessTurnId, 'agent activity record business turn id');
+  if (record.segmentId !== undefined) assertNonEmptyString(record.segmentId, 'agent activity record segment id');
+  if (record.nodeId !== undefined) assertNonEmptyString(record.nodeId, 'agent activity record node id');
   if (!TASK_AGENT_ACTIVITY_CURRENCIES.has(record.currency)) {
     throw new ContractError('agent activity record currency is invalid');
   }

@@ -102,6 +102,22 @@ function captureError(run: () => unknown): unknown {
   throw new Error('expected the call to throw');
 }
 
+// r16 confirmed this failure: direct text was rejected before its delivery asset
+// could exist. One small public-consumer case guards the summary cardinality.
+test('four semantic sections may have empty evidence arrays with a direct text delivery', () => {
+  const section = (text: string) => ({ text, evidenceRefs: [] });
+  assert.doesNotThrow(() => validateStandardTurnEndInput({
+    summary: {
+      goal: section('Complete reasoning from the current input'),
+      actions: section('Formed an answer without external tools'),
+      result: section('Submit the independent delivery text'),
+      expectedNextStep: section('Let Planner align after standard closure'),
+    },
+    deliveryText: 'The independent delivery text.',
+    deliveryRefs: [],
+  }, parentScope));
+});
+
 test('without context the exact parent scope is still required', () => {
   assert.doesNotThrow(() => validateTurnCloseSummary(summaryWith(parentEvidence), parentScope));
   const error = captureError(() => validateTurnCloseSummary(summaryWith(childEvidence), parentScope));

@@ -85,7 +85,6 @@ function assertNonEmpty(value: string, label: string): void {
 
 function assertEvidenceRefs(checkpoint: Pick<Checkpoint, 'scope' | 'recoveryStateRef' | 'evidenceRefs'>): void {
   assertSameScope(checkpoint.scope, checkpoint.recoveryStateRef.scope);
-  if (checkpoint.evidenceRefs.length === 0) throw new CheckpointRecallError('checkpoint evidence is required');
   for (const evidenceRef of checkpoint.evidenceRefs) {
     try {
       assertEvidenceRef(evidenceRef);
