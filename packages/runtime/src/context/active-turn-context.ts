@@ -3,6 +3,7 @@ import {
   assertReviewResultMatchesAssignment,
   assertSameScope,
   validateAcceptedChildDelivery,
+  validateChildInvocationReferences,
   validateChildInvocationIncarnation,
   validateAcceptedRawFact,
   validateActiveTurnCaptureBody,
@@ -18,6 +19,7 @@ import {
   type ChildInvocationRecord,
   type CompletionReadInput,
   type CompletionRef,
+  type InspectionItemDelivery,
   type ProviderProducerDrainResult,
   type RawAsset,
   type RawFactEnvelope,
@@ -55,14 +57,14 @@ import type {
 } from './active-turn-live-prefix.js';
 
 export class RuntimeActiveTurnError extends Error {
-  constructor(readonly code: string, message: string) {
-    super(message);
+  constructor(readonly code: string, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'RuntimeActiveTurnError';
   }
 }
 
-function fail(code: string, message: string): never {
-  throw new RuntimeActiveTurnError(code, message);
+function fail(code: string, message: string, cause?: unknown): never {
+  throw new RuntimeActiveTurnError(code, message, cause === undefined ? undefined : { cause });
 }
 
 function projectRequestObligations(requests: readonly RuntimeRequestRecord[]): ActiveTurnProductionObligationRef[] {
@@ -104,6 +106,7 @@ type RecordChildReturnInput = {
       readonly kind: 'execution';
       readonly assignment: WorkAssignment;
       readonly result: WorkResult;
+      readonly inspectionDelivery?: InspectionItemDelivery;
     }
   | {
       readonly kind: 'review';
@@ -339,6 +342,7 @@ async function recordChildReturnRecord(
       refinedDelivery: input.refinedDelivery,
       assignment: input.assignment,
       result: input.result,
+      ...(input.inspectionDelivery === undefined ? {} : { inspectionDelivery: input.inspectionDelivery }),
     };
   } else {
     entry = {
@@ -351,6 +355,15 @@ async function recordChildReturnRecord(
     };
   }
   validateAcceptedChildDelivery(entry);
+  if (entry.kind === 'execution'
+    && (invocation.binding.kind === 'execution' && invocation.binding.inspection !== undefined
+      || entry.inspectionDelivery !== undefined)) {
+    try {
+      validateChildInvocationReferences([invocation], [entry], 'active-turn');
+    } catch (error) {
+      fail('active-turn.child.references-invalid', error instanceof Error ? error.message : 'child references are invalid');
+    }
+  }
   await state.append(state.commitId(`delivery:${input.invocationId}`), { kind: 'child-delivery', entry });
   return entry;
 }
@@ -620,6 +633,7 @@ export class ActiveTurnContext {
         readonly kind: 'execution';
         readonly assignment: WorkAssignment;
         readonly result: WorkResult;
+        readonly inspectionDelivery?: InspectionItemDelivery;
       }
     | {
         readonly kind: 'review';

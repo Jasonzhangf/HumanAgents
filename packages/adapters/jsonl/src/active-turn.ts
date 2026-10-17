@@ -5,6 +5,7 @@ import {
   validateAcceptedRawFact,
   scopeContains,
   validateTaskIdentityScope,
+  validateTurnPlanBinding,
 } from '../../../contracts/src/index.js';
 import type {
   AcceptedChildDelivery,
@@ -112,6 +113,16 @@ function assertBinding(binding: ActiveTurnBinding): void {
     assertSameScope(binding.admittedTurn.scopeRef, binding.scope);
   } catch (error) {
     throw new JournalIntegrityError('active turn binding scope does not match its admitted turn', { cause: error });
+  }
+  if (binding.acceptedPlan !== undefined) {
+    try {
+      validateTurnPlanBinding(binding.acceptedPlan, 'active turn binding acceptedPlan');
+    } catch (error) {
+      throw new JournalIntegrityError(
+        error instanceof Error ? error.message : 'active turn binding acceptedPlan is invalid',
+        { cause: error },
+      );
+    }
   }
 }
 
