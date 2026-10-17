@@ -180,9 +180,10 @@ export const APP_CHILD_DELIVER_TOOL: ProviderToolDefinition = {
   toolId: 'humanagent_child_deliver',
   description: [
     'Deliver one child result for the bounded assignment you received.',
-    'Put the complete final body in "body", and the evidenceId or locator of each piece of your own accepted evidence that supports it in "evidenceRefs".',
+    'Put the complete, independently readable final body in "body". Preserve the actual scope, result, failure, truncation, and unresolved boundary; no summary, ref, or digest substitutes for the body.',
+    'Put the evidenceId or locator of each piece of your own accepted evidence from this child turn in "evidenceRefs". Cite only exact accepted references, and state whether an action had a verified effect separately from whether the action itself succeeded.',
     'For a review also state the business "judgment" (passed, failed or inconclusive) and the concrete findings.',
-    'The delivery must stand on its own: no summary, ref or digest substitutes for the body. This action records the delivery only; ending this turn is a separate action.',
+    'This action records the full delivery only. Ending this turn is a separate action.',
   ].join(' '),
   inputSchema: {
     type: 'object',

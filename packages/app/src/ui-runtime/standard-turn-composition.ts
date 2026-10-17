@@ -20,6 +20,13 @@ import type { BusinessPayload, TurnCloseSummary } from '../../../contracts/src/i
 export const ADVERTISED_STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
   ...STANDARD_TURN_END_TOOL,
   toolId: STANDARD_TURN_END_WIRE_TOOL_ID,
+  description: [
+    'End this standard turn when the current results and evidence are sufficient.',
+    'Keep the current-turn raw tool call/result loop available. In this close, summarize the latest raw results and relevant semantic history instead of copying raw tool bodies, call IDs, or transcripts.',
+    'For available file read/list/search, write/edit/present, bash, todo/goal, and web search results, state the actual target or query, observed result, evidence scope, and any truncation, failure, or unresolved boundary. A successful action or command exit is not verification of its effect.',
+    'If this role has child adoption tools and a child has returned, require an explicit child.adopt or child.not_select decision before this close. Returned is not adopted, and not_select is not child failure.',
+    'Put bounded facts and only exact accepted [HumanAgent evidence refs] into goal, actions, result, and expectedNextStep. After this four-part close, the Planner decides continue, complete, or failed; the Task can remain unfinished.',
+  ].join(' '),
   inputSchema: {
     type: 'object',
     properties: {
