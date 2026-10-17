@@ -142,6 +142,32 @@ function assertCheckpointDescription(value: string, label: string): void {
   }
 }
 
+/**
+ * Deterministically summarizes a validated returned result into the returned
+ * call-checkpoint description. It keeps the host dispatch semantics and adds
+ * the real typed outcome (status, summary, next action and existing refs)
+ * without copying the raw transcript or the full result body. The output is a
+ * pure function of its inputs, so a repair writer can recompute the exact first
+ * description from the same dispatch input and durable returned result.
+ */
+export function describeReturnedInteractionHelperCheckpoint(
+  dispatchDescription: string,
+  result: InteractionHelperResult,
+): string {
+  const parts = [
+    dispatchDescription,
+    `Helper returned; owner acceptance is pending. Status: ${result.status}. `
+      + `Summary: ${result.summary}. Next action: ${result.nextAction}.`,
+  ];
+  if (result.conditionRef !== undefined) {
+    parts.push(`Condition ref: ${result.conditionRef}.`);
+  }
+  if (result.failureRef !== undefined) {
+    parts.push(`Failure ref: ${result.failureRef}.`);
+  }
+  return parts.join(' ');
+}
+
 function assignmentIdentity(assignment: InteractionHelperAssignment): InteractionHelperIdentity {
   return {
     organId: assignment.organId,
@@ -242,6 +268,10 @@ export async function executeTasklessInteractionHelper(
       ...input.conclude({ output, closure, events }),
     };
     validateInteractionHelperResult(result, assignment);
+    const returnedCheckpointDescription = describeReturnedInteractionHelperCheckpoint(
+      input.checkpointDescription,
+      result,
+    );
 
     const returnedCommit = await input.journal.appendReturned(
       {
@@ -250,7 +280,7 @@ export async function executeTasklessInteractionHelper(
         returnedAt: input.returnedAt,
         evidenceRefs: input.evidenceRefs,
       },
-      { description: input.checkpointDescription },
+      { description: returnedCheckpointDescription },
     );
 
     return { dispatchCommit, returnedCommit, incarnation, result, closure };

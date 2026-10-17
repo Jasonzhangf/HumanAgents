@@ -734,10 +734,16 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
       assert.equal(returnedCheckpoint.checkpoint.recovery.returnedCommitId, dispatched.returnedCommitId);
       assert.equal(returnedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId, undefined);
       assert.equal(returnedCheckpoint.commit.commitId, dispatched.returnedCheckpointCommitId);
-      assert.ok(returnedCheckpoint.checkpoint.description.includes(dispatchObjective));
+      const returnedDescription = returnedCheckpoint.checkpoint.description;
+      assert.ok(returnedDescription.includes(dispatchObjective));
       for (const criterion of dispatchSuccessCriteria) {
-        assert.ok(returnedCheckpoint.checkpoint.description.includes(criterion));
+        assert.ok(returnedDescription.includes(criterion));
       }
+      assert.ok(returnedDescription.includes('owner acceptance is pending'));
+      assert.ok(returnedDescription.includes('incomplete'));
+      assert.ok(returnedDescription.includes('unrefined child summary'));
+      assert.ok(returnedDescription.includes('wait'));
+      assert.ok(returnedDescription.includes('condition:partial'));
       dispatchAcceptedCommitId = dispatched.dispatchAcceptedCommitId;
       returnedCommitId = dispatched.returnedCommitId;
       returnedCheckpointCommitId = dispatched.returnedCheckpointCommitId;
@@ -1787,7 +1793,7 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
         item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify({
           selection: { roleId: 'review', configuredAgentId },
           assignmentFields: {
-            objective: `bounded ${configuredAgentId}`, targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
+            objective: 'bounded helper result', targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
             acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: ['complete'], failureCriteria: ['none'],
             incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required',
           },
@@ -1812,12 +1818,29 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
       assert.ok(acceptedReadback.returned);
       assert.equal(acceptedReadback.adoptedCheckpoint, null);
       assert.equal(acceptedReadback.ownerAccepted, null);
-      assert.ok(acceptedReturnedCheckpoint.checkpoint.description.includes(`bounded ${acceptedChildAgentId}`));
+      const acceptedReturnedDescription = acceptedReturnedCheckpoint.checkpoint.description;
+      assert.ok(acceptedReturnedDescription.includes('bounded helper result'));
+      assert.ok(acceptedReturnedDescription.includes('owner acceptance is pending'));
+      assert.ok(acceptedReturnedDescription.includes('succeeded'));
+      assert.ok(acceptedReturnedDescription.includes(`${acceptedChildAgentId} summary`));
+      assert.ok(acceptedReturnedDescription.includes('wait'));
+      assert.ok(acceptedReturnedDescription.includes(`condition:${acceptedChildAgentId}`));
       const unacceptedReadback = await producerHelper.readExact(unacceptedIdentity);
       assert.ok(unacceptedReadback.returned);
-      assert.ok(unacceptedReadback.returnedCheckpoint);
+      const unacceptedReturnedCheckpoint = requirePresent(
+        unacceptedReadback.returnedCheckpoint,
+        'unaccepted returned checkpoint',
+      );
       assert.equal(unacceptedReadback.adoptedCheckpoint, null);
       assert.equal(unacceptedReadback.ownerAccepted, null);
+      const unacceptedReturnedDescription = unacceptedReturnedCheckpoint.checkpoint.description;
+      assert.ok(unacceptedReturnedDescription.includes('bounded helper result'));
+      assert.ok(unacceptedReturnedDescription.includes('owner acceptance is pending'));
+      assert.ok(unacceptedReturnedDescription.includes('incomplete'));
+      assert.ok(unacceptedReturnedDescription.includes(`${unacceptedChildAgentId} summary`));
+      assert.ok(unacceptedReturnedDescription.includes('wait'));
+      assert.ok(unacceptedReturnedDescription.includes(`condition:${unacceptedChildAgentId}`));
+      assert.ok(unacceptedReturnedDescription !== acceptedReturnedDescription);
       return [{
         type: 'response.output_item.done',
         output_index: 0,
@@ -1926,12 +1949,24 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
     const unacceptedIdentity = requirePresent(unacceptedHelperIdentity, 'unaccepted helper identity');
     const coldAcceptedReadback = await readerHelper.readExact(acceptedIdentity);
     const coldAcceptedCheckpoint = requirePresent(coldAcceptedReadback.adoptedCheckpoint, 'cold adopted checkpoint');
-    assert.ok(coldAcceptedReadback.returnedCheckpoint, 'fresh reader must see the returned checkpoint');
+    const coldAcceptedReturned = requirePresent(
+      coldAcceptedReadback.returnedCheckpoint,
+      'cold accepted returned checkpoint',
+    );
+    assert.ok(coldAcceptedReturned.checkpoint.description.includes('succeeded'));
+    assert.ok(coldAcceptedReturned.checkpoint.description.includes(`${acceptedChildAgentId} summary`));
+    assert.ok(coldAcceptedReturned.checkpoint.description.includes(`condition:${acceptedChildAgentId}`));
     assert.equal(coldAcceptedCheckpoint.checkpoint.description, refinedText);
     assert.equal(coldAcceptedReadback.ownerAccepted?.fact.acceptanceRef, 'acceptance:cold-recovery');
     assert.equal(coldAcceptedReadback.ownerAccepted?.fact.result.status, 'succeeded');
     const coldUnacceptedReadback = await readerHelper.readExact(unacceptedIdentity);
-    assert.ok(coldUnacceptedReadback.returnedCheckpoint, 'fresh reader must see the returned-only checkpoint');
+    const coldUnacceptedReturned = requirePresent(
+      coldUnacceptedReadback.returnedCheckpoint,
+      'cold unaccepted returned checkpoint',
+    );
+    assert.ok(coldUnacceptedReturned.checkpoint.description.includes('incomplete'));
+    assert.ok(coldUnacceptedReturned.checkpoint.description.includes(`${unacceptedChildAgentId} summary`));
+    assert.ok(coldUnacceptedReturned.checkpoint.description.includes(`condition:${unacceptedChildAgentId}`));
     assert.equal(coldUnacceptedReadback.adoptedCheckpoint, null);
     assert.equal(coldUnacceptedReadback.ownerAccepted, null);
     const externalCalls: string[] = [];
