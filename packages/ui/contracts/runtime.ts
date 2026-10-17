@@ -27,6 +27,97 @@ export type { TaskDetailProjection };
  */
 export type RuntimeSemanticObservationEnvelope = SemanticObservationEnvelope<CanonicalContextEvent>;
 
+/**
+ * I1 presentation-ready semantic observation view (`semantic-observation-view@1`).
+ *
+ * The typed envelope above is the authoritative read. This contract names the
+ * concrete projection the shared read-only view component consumes, so the
+ * browser never inspects raw event fields to infer semantics and never rebuilds
+ * pairing state from a payload. Human-readable labels lead every field; the
+ * technical identifiers travel as evidence only.
+ */
+export type SemanticObservationDisplayMode = 'current' | 'semantic' | 'actions' | 'raw';
+
+export interface SemanticObservationViewCrumb {
+  readonly scopeRef: string;
+  readonly title: string;
+  readonly current?: boolean;
+}
+
+export interface SemanticObservationViewEvidence {
+  readonly evidenceId: string;
+  readonly title: string;
+  readonly summary?: string;
+  readonly scopeLabel?: string;
+  readonly sourceLabel?: string;
+  readonly inputs?: readonly string[];
+  readonly outputs?: readonly string[];
+  readonly refs?: readonly string[];
+  readonly raw?: {
+    readonly label: string;
+    readonly content: string;
+  };
+}
+
+export interface SemanticObservationViewItem {
+  readonly id: string;
+  readonly title: string;
+  readonly detail?: string;
+  readonly meta?: readonly string[];
+  readonly state?: string;
+  readonly stateLabel?: string;
+  readonly tone?: string;
+  readonly kind?: string;
+  readonly evidence?: SemanticObservationViewEvidence;
+}
+
+export interface SemanticObservationViewSection {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: 'stable' | 'live' | 'semantic' | 'action' | 'raw' | 'capability';
+  readonly description?: string;
+  readonly items: readonly SemanticObservationViewItem[];
+}
+
+export interface SemanticObservationViewNotice {
+  readonly tone: 'info' | 'stale' | 'unknown' | 'unavailable' | 'error' | 'empty' | 'loading';
+  readonly title: string;
+  readonly detail?: string;
+  readonly nextAction?: string;
+}
+
+export interface SemanticObservationViewProjection {
+  readonly contractVersion: 'semantic-observation-view@1';
+  readonly mode: SemanticObservationDisplayMode;
+  readonly modes: readonly {
+    readonly id: SemanticObservationDisplayMode;
+    readonly label: string;
+    readonly available?: boolean;
+    readonly reason?: string;
+  }[];
+  readonly scope: {
+    readonly scopeRef: string;
+    readonly title: string;
+    readonly summary: string;
+    readonly breadcrumbs: readonly SemanticObservationViewCrumb[];
+  };
+  readonly state: string;
+  readonly stateLabel: string;
+  readonly projectionVersion: string;
+  readonly summary: readonly {
+    readonly label: string;
+    readonly value: string;
+    readonly tone?: string;
+  }[];
+  readonly notices: readonly SemanticObservationViewNotice[];
+  readonly capabilities: readonly {
+    readonly capability: string;
+    readonly state: 'available' | 'unavailable' | 'unknown';
+    readonly reason?: string;
+  }[];
+  readonly sections: readonly SemanticObservationViewSection[];
+}
+
 // UI phase-one runtime surface. The browser consumes these typed projections from
 // the HumanAgent Runtime API; it never reads Journal, DSH session, or RCC frames.
 export type RuntimeMode = 'fake' | 'rcc' | 'dsh';
