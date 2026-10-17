@@ -16,6 +16,8 @@
 
 r188 已完成：现有默认 CLI Memory hooks 在恢复 checkpoint 后调用 reconciler，启动时也补发遗漏 group；facade 本身不直接发布。r52 `non-network.log` 与 `c3a-process-boundary.json` 已有热路径和新进程成功证据。此处无需新 route/Operator 或重复发布代码；这些证据不替代 r182 的多轮实际冷恢复。
 
+r187 作者报告已在并发屏障取得两实例，但宿主实际运行虽 1/1 GREEN，回执为 `runtimeIds: [[], []]`。源码仍在释放后的 waiter 内取 pool，并允许空数组，最终 disjoint 断言为空通过。该 GREEN **不接受为双 runtime 验收**，未提交来源。r190 已复用同树，要求在 releaseGate 前从公开 pool 取得两个非空、逐 Task 绑定且互异的真实实例；不改产品迎合测试。已正常合入 UX docs-only main `ec17a0d3`，没有为文档重复构建或重启。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
