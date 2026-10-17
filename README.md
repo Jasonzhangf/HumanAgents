@@ -67,10 +67,12 @@ node dist/app/app/src/cli.js session list --workspace /absolute/project
 node dist/app/app/src/cli.js session inspect --workspace /absolute/project --session <session-id>
 node dist/app/app/src/cli.js --workspace /absolute/project
 node dist/app/app/src/cli.js serve --workspace /absolute/project --protocol openai
-pnpm build:release
-pnpm release:check
 pnpm run smoke
 ```
+
+日常构建、CI、本地打包和安装不调用 release 检查链。本地分发使用 `pnpm package`
+和 `pnpm install:global`。仅在准备对外 release 时，才按实际发布需要使用
+`pnpm build:release`、`pnpm release:check` 和 release 审查记录入口。
 
 全局安装后不需要从仓库目录启动。任意目录执行：
 

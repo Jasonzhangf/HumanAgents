@@ -194,11 +194,11 @@ R1-X 旧 root 收口与独立新 E1 并行。新 E1 在功能组合和公开消�
 
 - 当前执行以 execution-note 为准：typed outcome/forwarding/projection 已冻结并组合；R1-A App、R1-U 浏览器消费、E1 输入/receipt consumer 作者已结束并冻结为候选，HTTP/served/真实 E1 尚未完成。本轮按用户要求只做审计后的测试消融：基础 7 项与 D1 源码字符串 1 项已删除并组合，补充消费者重复断言/helper 和无用 fixture 状态也已删除并冻结为干净候选。本轮确认的消融项全部落实；后续 runner recovery 消费、App unknown fixture、两个恢复输入已补齐并验证，AItest 既有删除已进入组合；served readback 已通过，当前 task 标题修复和真实 Provider E1 继续推进。完整 UX 功能验收仍 OPEN。不新增测试、不扩功能、不触发内部 Review。独立必要性规划已删除旧 R1-X→新 E1，保留该 attempt 的实际状态和资源责任。
 - R1 Runtime 节点只使用已组合并定向验证的 `1051ce12...` Contracts/Core/JSONL 输入；不得退回缺 TaskPlan author/settle 的旧基线。R1-C/J 的子通过不能替代 R1-R/A/U 闭环。
-- 一个文件/唯一 owner 同时只有一个 writer。共享合同先于消费者；冻结一个节点才释放依赖节点。每次填充并发先检查真正 unblocked、互斥路径的任务；无适用任务就保持空槽，不造 filler work。
+- 一个文件/唯一 owner 同时只有一个 writer。共享合同先于消费者；上游交付满足依赖就释放下游，不建立冻结材料。每次填充并发先检查真正 unblocked、互斥路径的任务；无适用任务就保持空槽，不造 filler work。
 - 每个代码节点必须在外置 `playground/<task>` clean worktree，任务指令包含入口、owner、精确 allowlist/禁止路径、focused 命令、真实 UX 入口、review 条件和自有资源清理条件。父级只组织并行、依赖与验收，不替 peer 实现其 owner 文件。
 - 实现测试只覆盖本节点和里程碑受影响范围，按 [最小充分测试与失败模式](/Users/fanzhang/.codex/skills/coding-principals/references/workflow.md) 同时回答充分性与抓错能力。每项绑定具体失败行为及必须失败的断言；匹配红测或实际执行反例才证明能抓错，未验证明确标记。新增前考虑失败依据（概率可未知）、影响、执行和维护成本；未考虑默认不加。证据充分即停，不按数量/覆盖率/场景类别扩面。完整重大里程碑集成前才做一次独立 Review。
 - 测试消融证据：删去表单 handler 调用后旧源码字符串用例仍绿，已退役；跳过失败 author 的 settle、丢弃 wrapper settlement、移除 once guard 三种反例已在保留用例触发实际断言 RED，恢复后通过。仅这些匹配断言可称抓错已验证，其余仍按独立审计标记。resource-release pending 输入与未知 author 的已提交计划直接 dispatch 仍未验证；App 规划 driver 到达、browser served 接线和 runner recovery 获取仍待补足，不以当前绿测数量关闭 M0。
-- 当前候选被 Git shared index-lock 拒绝或作者没有 candidate SHA 的，保留其 worktree/source/test 证据，不用其他写通道补提交；候选 commit、测试数量、图校验都不改变用户功能进度。依项目 AGENTS 的标准流程完成最新 main 组合、受影响验证、真实实例验证和 push 时再按交付合同推进。
+- Git shared index-lock 拒绝时，保留 worktree 和已有行为结果，解决锁归属后走标准 Git，不用其他写通道补提交。普通 Git 尚未提交不阻断读取实际 diff 和接收有效结果，也不追加候选身份包装；提交、测试数量、图校验都不改变用户功能进度。依项目 AGENTS 完成最新 main 组合、受影响验证、适用真实实例验证和 push。
 
 ## 汇报格式
 

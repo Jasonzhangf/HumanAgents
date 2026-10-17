@@ -47,47 +47,28 @@ start/resume/tool-result/error/requestStop/settle/recovery 闭环。
   代替真实 Provider/DSH 适配完成。
 - 每个小阶段都必须有唯一 owner、输入版本、allowed/forbidden paths、正常/
   waiting/blocked/failed/cancelled 出口、下一动作和 evidence refs。
-- 每个小阶段完成 focused validation 后，必须执行独立 Astra review；没有当前
-  阶段 Astra PASS receipt 不得进入下一阶段。review FAIL 回对应 owner 修复、
-  重验、重审；不得换通道取 PASS。Astra PASS 不自动授权 merge 到 main、push 或
-  release。当前 goal 执行前提已经批准 M1 implementation scope；因此 worker
-  可以在自己的 clean worktree 创建本地 candidate commit，供验证和 Astra 审查
-  使用，但 candidate commit 不等于 main 集成或发布。若执行上下文没有该 scope
-  批准，阶段必须进入 `approval-waiting`，不得用未提交工作树冒充 candidate。
-- 阶段可重入：保存候选 SHA、配置/环境摘要、验证结果和 Astra receipt；输入未
-  变化时复用已通过阶段，发生变化时从最早受影响阶段重跑，不做无关全量重跑。
+- 小阶段完成 focused validation 后即可释放真实下游，不单独触发 review。
+  完整且重大的可交付 milestone 完成作者自检和适用真实入口验收后，正式集成前
+  执行一次独立整体 review；模型沿当前编排 Skill 选择。finding 回唯一 owner
+  修复，只补受影响验证并复核 finding。实现范围已批准，按项目标准流程交付。
+- 阶段可重入：保存实际行为结果、原始失败和恢复责任，直接复用仍有效的结果；
+  具体输入变化时只补受影响验证，不建立摘要、冻结材料或候选身份绑定。
 
-执行与 Astra review：
+执行与 milestone review：
 - 实现任务使用当前宿主允许的独立 worker；Desktop 默认是 `codex exec --profile gcm --json`，其他已声明的协作宿主按其自身路由规则执行。每个 worker
   必须从当前阶段 candidate 创建独立 `playground/<task>` worktree，只写派单中
   的 allowed paths；worker 不能修改 main、其他 worker 的 worktree 或外部 DSH/RCC。
-- 编排 Agent 只负责拆分、资源、worktree、生命周期、验证、Astra review、merge
-  和提交；不直接编写 Provider/DSH/runtime 实现代码。每个派单必须写清输入 SHA、
+- 编排 Agent 只负责拆分、资源、worktree、生命周期、验证、milestone review、merge
+  和提交；不直接编写 Provider/DSH/runtime 实现代码。每个派单必须写清实际入口、
   owner、独占范围、禁止范围、完成 iff、测试命令、证据位置和失败下一动作。
-- 阶段顺序固定为：worker 在独立 worktree 创建 candidate commit → focused
-  validation → native Astra review → 修复/重验（如有）→ 阶段 PASS → 等待或执行
-  用户已授权的 integration merge。候选 commit、main 集成 commit、push 和 release
-  是四个独立事实，不能互相冒充。
-- M1 必须使用宿主批准的独立 Astra review 路由；review 启动方式服从当前宿主
-  和 review skill，不在目标提示词中硬编码 worker/reviewer 工具。无论宿主如何
-  启动，reviewer 都必须只读审查当前 candidate SHA，使用独立上下文并输出
-  P0/P1/P2 findings；普通 review backend 的 PASS 不得冒充 Astra PASS。
-- 每个阶段 focused validation 完成后，按如下协议启动独立 Astra：
-
-  ```text
-  independent Astra reviewer
-    → read-only review of the exact candidate SHA and scoped diff
-    → record reviewer task, candidate SHA, scope, final result, and review time
-  ```
-
-- Native Astra 必须是独立上下文；不得把实现 worker 的上下文、未提交工作树或
-  隐式结论当作审查输入。只能提供明确的 candidate SHA、diff 范围、验证结果和
-  项目规则路径。
-- Astra 返回 P0/P1、缺少最终结果、超时、工具错误或上下文不可用时，阶段状态
-  为 `review-blocked`，不得把它记为 PASS；修复后必须重新 spawn 新的 native
-  Astra agent。只有明确无 P0/P1 的最终审查结果才可生成 `Astra PASS receipt`。
-- 每个 M1 小阶段都必须单独 spawn 一次 native Astra；不能用 M1-5 的一次审查
-  覆盖 M1-0 至 M1-4，也不能用一次 Astra 结果覆盖多个不同 candidate。
+- worker 在独占 worktree 完成修改和 focused validation，保留真实入口结果；
+  依赖满足就释放下游。内部阶段不插入独立 review。完整重大 milestone 在作者
+  验收后、正式集成前审查一次整体功能与架构。候选提交、main 集成、push 和
+  release 是独立事实，不能互相冒充。
+- Reviewer 使用独立只读上下文，输入为需求、受影响 diff、实际行为结果和项目
+  规则；模型按当前宿主编排 Skill，不硬编码 Astra，不要求 SHA 或冻结材料。
+- 缺少最终审查结果、超时或工具错误不能记为 PASS。finding 由唯一 owner 修复，
+  只补受影响验证并复核该 finding，不重复整个审查流程。
 
 固定阶段：
 - M1-0：只读复核 DSH public entrypoint、profile、session、tool、事件、取消、
@@ -109,9 +90,9 @@ start/resume/tool-result/error/requestStop/settle/recovery 闭环。
   tool result、stream error、transport close、provider/DSH crash、requestStop、
   stop timeout、late event、checkpoint recall/completion、实际
   `OrganHealthProbePort` 调用/失败可见性和 Journal/Session Log 分离。
-- M1-5：只做收口和放行准备；核对源码/依赖/profile/plugin/provider lock、digest、
-  clean tree、全部 Astra receipts、验证命令、限制清单和未完成项。用户明确批准
-  后才能 merge 到 main、push 或 release。
+- M1-5：只做收口和放行准备；接收受影响行为结果、一次整体 review、限制清单
+  和未完成项。按项目已有授权完成 main 集成与 push；对外 release 单独按实际
+  发布需要处理。不计算摘要、不建立冻结材料或候选身份清单。
 
 生命周期与错误闭环：
 - 启动顺序：resolve HumanAgent config → validate lock → load fixed Harness →
@@ -127,8 +108,8 @@ start/resume/tool-result/error/requestStop/settle/recovery 闭环。
   前台影响必须立即进入 Attention/用户可见错误路径。
 
 验收：
-- M1-0 至 M1-5 每个阶段均有候选 SHA、focused validation 结果、独立 Astra
-  review receipt、findings/修复/重验记录和唯一 owner。
+- M1-0 至 M1-5 每个阶段均有 focused validation 结果、真实入口证据和唯一 owner；
+  完整 milestone 有一次独立整体 review 及适用 finding 修复结果。
 - `cc`/`cc-sol` Responses 与 `goaichat` Anthropic 有分离 codec、stream、tool、
   error、cancel/settle 和 real same-entry 证据；provider identity 未被合并。
 - RCC 4444 的 listener readiness、协议 readiness、same-entry request replay 和
@@ -139,8 +120,8 @@ start/resume/tool-result/error/requestStop/settle/recovery 闭环。
   lifecycle semantics 一致；失败、等待、阻塞、取消、stopping、stopped 和恢复均有证据。
 - 高层 contracts/core/runtime 不导入 DSH/RCC 类型；Journal 与 DSH Session Log
   分离；旧 epoch 事件不会推进新 cycle；cancel 不会伪造 stopped。
-- adapter、profile、plugin、provider config、dependency 和 artifact 具有可复核
-  的版本/digest 锁定；敏感值不进入仓库、Journal、review prompt 或最终报告。
+- adapter、profile、plugin、provider config 和 dependency 依据实际声明配置加载；
+  不追加版本/digest 身份包装。敏感值不进入仓库、Journal、review prompt 或最终报告。
 - 最终报告明确列出已验证、未验证、限制、剩余风险、下一动作和 owner。
 
 依据：

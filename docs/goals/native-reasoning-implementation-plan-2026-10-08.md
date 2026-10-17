@@ -102,7 +102,7 @@ RCC 作为第一条真实 Provider 入口。通用 Provider 机制后续允许�
 
 逐工具语义审查输入已落盘：[native-tool-semantics-plan-2026-10-08.md](../architecture/native-tool-semantics-plan-2026-10-08.md)。它列出各工具决定性事实与证明边界；状态是待 tool-owner review 的设计规则，非提取实现或测试 PASS。D0/F-H 校准实际 inventory 后更新该唯一设计记录，不再另建同义规则文件。
 
-统一输入：执行前 fetch 最新 `origin/main`，记录 HEAD/tree 和相关配置摘要；下表源码路径均相对候选 worktree。代码位于 `/Volumes/Intel/playground/humanagent/<task>`；外置盘不可用停止，不回退主树。共享 `contracts/src/index.ts` 只有 D0 owner 写。编排者派发时把下列合同展开为独占任务记录与精确 allowlist；未列路径禁止写。拟新增路径尚非现有实现或测试证据。
+统一输入：执行前 fetch 最新 `origin/main`，读取受影响 diff 和实际声明配置，不建立 HEAD/tree 或配置摘要包装；下表源码路径均相对候选 worktree。代码位于 `/Volumes/Intel/playground/humanagent/<task>`；外置盘不可用停止，不回退主树。共享 `contracts/src/index.ts` 只有 D0 owner 写。编排者派发时把下列合同展开为独占任务记录与精确 allowlist；未列路径禁止写。拟新增路径尚非现有实现或测试证据。
 
 所有 peer 禁止修改 ACP/DSH、外部 RCC、auth/secrets、daemon、部署、全局 Skill/记忆、其他 worktree、主树未归属文件与相邻 UI 改版。发现需要扩大范围先回报依赖缺口。
 
@@ -223,9 +223,9 @@ node scripts/dagpipe-bind-graphs.mjs docs/dagpipe/native-turn-checkpoint.graph.j
 
 ## 10. 增量放行、资源与后续
 
-每层基础：契约和源文件→针对性单测/负向例→独立 review。每个可用组合增量：作者完成 focused tests、真实入口/E2E 和故障/清理验证→独立 Codex review（milestone oauth/gpt-6.1-sol；按当前 skill/project gate）→集成裁决。没有当前候选最终 review 结果不能标 PASS；设计核对不替代代码 review。
+每层基础完成契约、源文件和针对性单测/负向例，内部节点不单独触发 review。完整且重大的可交付 milestone 完成 focused tests、适用真实入口/E2E 和故障/清理验证后，在正式集成前执行一次独立整体 review；模型沿当前编排 Skill 选择。缺少该次 review 不能宣称 milestone 已完成；设计核对不替代代码 review。
 
-每次 peer 回传 candidate SHA、changed files、测试数量/原始结果、真实 receipt、独立 review 状态、清理列表与剩余风险。主编排 fetch 最新 main，将候选组合到最新输入并重跑受影响验证。dirty main先分类，不提交他人的文件。按项目已授权标准流程完成候选→main→重建产物并重启本地实例→复验→push origin/main，不逐项再请求授权；破坏性迁移、改历史、清权限等超范围动作仍按原边界。
+每次 peer 回传实际改动、受影响行为结果、真实 receipt、清理列表与剩余风险；已有提交可附普通 Git 回执，不建立候选身份包装。主编排 fetch 最新 main，将候选组合到最新输入，只补受输入变化影响的验证，直接复用仍有效的结果。dirty main先分类，不提交他人的文件。按项目已授权标准流程完成候选→main→重建产物并重启适用本地实例→复验→push origin/main，不逐项再请求授权；破坏性迁移、改历史、清权限等超范围动作仍按原边界。
 
 安装后的 canonical entry 已核对为 `/opt/homebrew/bin/humanagent`。作者 candidate 构建与安装后执行分层，未来 planner依据项目打包/安装入口填实命令；不能只运行 worktree 内临时文件就声称本地实例已更新。只有本任务证明拥有的 PID、stream、worker、worktree、运行 root 和锁可回收；未知/未 settled 责任先保留，清理失败记录 INCOMPLETE。
 
