@@ -230,6 +230,87 @@ test('inspection runtime helpers stop follows exact v2 receipt to original v1 an
   await assert.rejects(f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), /committed source/);
 });
 
+test('inspection runtime helpers stop resolves exact initial-open predecessor binding', async () => {
+  // Failure basis: the exact initial-open prefix carries the original binding, but stop discarded it.
+  // Impact: a legitimate cold stop is blocked without its accepted plan and check. Probability: unknown.
+  // Cost: one typed local consumer reusing the existing v2 fixture and cut.
+  const f = inspectionHelperConsumer();
+  const helper = f.helpers();
+  const context = await helper.selectionReader.readSelectionContext('inspection-turn');
+  const inspection = await helper.occurrenceOpening.open({
+    context,
+    logicalTurnId: 'inspection-turn',
+    executionScope: scope,
+    assignment: f.assignment,
+    checkId: 'a',
+  });
+  const checkpoint: CommittedCheckpointRecord = { checkpoint: { id: id('checkpoint', 'stop-initial-open'), scope,
+    cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 2,
+    outcome: 'stopped', summary: 'stop initial open', recoveryStateRef: f.raw.ref, evidenceRefs: [], next: { kind: 'stop' } },
+    previous: null, commitRef: f.receipt('stop-initial-open-checkpoint') };
+  const invocation: ChildInvocationRecord = { invocationId: 'initial-open-child', childTurnId: 'initial-open-child-turn',
+    checkpointReceiptRef: 'child-checkpoint', binding: { kind: 'execution', assignment: f.assignment, inspection } };
+  const delivery: AcceptedExecutionChildDelivery = { kind: 'execution', seq: 1, invocationId: invocation.invocationId,
+    assignment: f.assignment, refinedDelivery: f.raw,
+    result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child',
+      assignmentId: f.assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
+      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: 'observed a',
+      outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
+    inspectionDelivery: { checkId: 'a', resultId: 'inspection-result:initial-open-child', attempt: 1,
+      outcome: { status: 'completed', judgment: 'a observed before stop' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
+  const original = { ...f.capture(), childInvocations: [invocation], entries: [delivery] };
+  const businessTurnRef = { businessTurnId: 'inspection-turn', bindingCommitRef: f.receipt('binding'), execution: original.binding.execution };
+  const segmentBinding = { businessTurnRef, assignment: { ...f.assignment, executionEpoch: 2 },
+    execution: { runtimeId: 'resumed', executionEpoch: 2 }, scope,
+    incarnation: { runtimeId: 'resumed', generation: 1, agentInstanceId: 'resumed-agent', roleId: 'execution',
+      taskId: f.assignment.taskId, assignmentId: f.assignment.assignmentId, executionEpoch: 2 } };
+  const anchor = { bindingCommitRef: f.receipt('binding'), recordsThroughCommitRef: f.receipt('initial-open-record') };
+  const predecessor = { segmentId: 'inspection-turn', initialOpen: anchor };
+  const opened = { kind: 'segment-opened' as const, segmentId: 'resumed', businessTurnRef, predecessor,
+    binding: segmentBinding, authorityCommitRef: f.receipt('authority'), businessRegistrationCommitRef: f.receipt('registration'),
+    requestRef: 'open-resumed', inputIdentity: { requestRef: 'open-resumed', digest: 'input' } };
+  const segmentSource = { originalAdmittedTurn: original.binding.admittedTurn, originalBusinessTurnRef: businessTurnRef,
+    opened, openedCommitRef: f.receipt('opened') };
+  const recovery = { recoveryResponsibilityRef: 'recovery', unresolvedOperationRefs: [], rawTurnRefs: [], laterErrorRefs: [],
+    commitIdentity: 'save', stages: [], durablePhases: [], durableReceiptRefs: [] };
+  const prepared = { body: { version: 2 as const, segmentId: 'resumed', businessTurnRef, binding: segmentBinding,
+    initialInput: original.initialInput, entries: [], requests: [], childInvocations: [], cut: original.cut, predecessor },
+    controlRecordCount: 0, producerDrains: [], completionLookups: [], recovery };
+  const receipt = { commitIdentity: 'committed:v2-initial-open', journalReceiptRef: 'journal:v2-initial-open',
+    commitFactDigest: 'fact', journalSeq: 7, recordDigest: 'record', businessTurnId: 'inspection-turn',
+    segmentId: 'resumed', boundaryId: 'boundary', capture: f.raw };
+  const reads: string[] = [];
+  let initialOpenReads = 0;
+  f.stop(checkpoint, { turn: context.turn, boundaryId: 'boundary', segmentSource,
+    recoveryAssetsReceiptRef: 'committed:v2-initial-open',
+    assets: {
+      readRecoveryAssetsExact: async () => { throw new Error('unexpected v1 recovery receipt'); },
+      readBoundaryRecoveryAssetsExact: async (ref: string) => {
+        reads.push(ref);
+        if (ref === 'committed:v2-initial-open') return { version: 2 as const, assets: { receipt, prepared }, source: segmentSource };
+        throw new Error('unexpected recovery receipt');
+      },
+    },
+    segments: {
+      readInitialOpenExact: async (input) => {
+        initialOpenReads += 1;
+        assert.deepEqual(input.anchor, anchor);
+        return { anchor, prefix: { kind: 'live-accepted-prefix' as const, source: 'inspection-turn',
+          binding: original.binding, initialInput: original.initialInput, entries: original.entries,
+          requests: original.requests, childInvocations: original.childInvocations,
+          watermark: { lastAcceptedSeq: 1, controlRecordCount: 0 }, obligations: [] } };
+      },
+      readSegmentInterruptedExact: async () => { throw new Error('unexpected interrupted'); },
+    } });
+
+  const facts = await f.helpers().occurrences.readOccurrencesForStop({ checkpoint });
+  assert.equal(facts.length, 1);
+  assert.deepEqual(reads, ['committed:v2-initial-open']);
+  assert.equal(initialOpenReads, 1);
+  assert.deepEqual(facts[0]!.opening.record.planRevisionCommitRef, f.receipt(f.plan.revisionId));
+  assert.deepEqual(facts[0]!.deliveries, [{ invocation, delivery }]);
+});
+
 test('inspection runtime helpers treat a stop without an opened occurrence as not applicable', async () => {
   // Failure basis: stop applicability required a physical capture before checking the durable occurrence.
   // Impact: an ordinary prepared stop is falsely blocked. Probability: unknown. Cost: one existing fixture assertion.
