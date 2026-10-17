@@ -361,7 +361,7 @@ async function recordChildReturnRecord(
     try {
       validateChildInvocationReferences([invocation], [entry], 'active-turn');
     } catch (error) {
-      fail('active-turn.child.references-invalid', error instanceof Error ? error.message : 'child references are invalid');
+      fail('active-turn.child.references-invalid', error instanceof Error ? error.message : 'child references are invalid', error);
     }
   }
   await state.append(state.commitId(`delivery:${input.invocationId}`), { kind: 'child-delivery', entry });
