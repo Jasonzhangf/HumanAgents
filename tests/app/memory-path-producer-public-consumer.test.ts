@@ -48,6 +48,7 @@ import { createJsonlOperationControlJournal, readOperationControlFromRecords } f
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import { readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
+import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import { AgentLoopRuntime } from '../../packages/runtime/src/agent-loop/runtime.js';
 import { prepareCheckpointClosure } from '../../packages/runtime/src/checkpoints/closure.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
@@ -1082,6 +1083,7 @@ test('C3b canonical correction rewind forward chain reaches Memory analysis from
       readonly value?: {
         readonly result?: {
           readonly curation?: {
+            readonly operationId: { readonly value: string };
             readonly outcome: string;
             readonly explanation: string;
             readonly sourceRefs: readonly string[];
@@ -1134,6 +1136,25 @@ test('C3b canonical correction rewind forward chain reaches Memory analysis from
     });
     if (!receipt) throw new Error('C3b Memory consumer receipt is missing');
     assert.equal(receipt.disposition, 'applied', JSON.stringify(receipt));
+
+    const feedbackQuery = { streamId: `memory-feedback:${taskId.value}`, afterSequence: 0, limit: 10 };
+    const feedback = await memory.journal.readEvents(feedbackQuery);
+    assert.equal(feedback.length, 1, 'applied task analysis must persist its audit feedback');
+    const coldJournal = createJsonlEventJournal({ filePath: join(paths.journalRoot, 'events.jsonl') });
+    const coldFeedback = await coldJournal.readEvents(feedbackQuery);
+    assert.deepEqual(coldFeedback, feedback);
+    const audit = coldFeedback[0]!.payload as unknown as {
+      analysisRef: string; sourceRefs: readonly string[]; outcome: string; explanation: string;
+    };
+    assert.equal(audit.analysisRef, admission.value!.result!.curation!.operationId.value);
+    assert.deepEqual(audit.sourceRefs, curation.sourceRefs);
+    assert.equal(audit.outcome, curation.outcome);
+    assert.equal(audit.explanation, curation.explanation);
+    assert.deepEqual(await coldJournal.readReceipt({
+      consumerKey: receipt.consumerKey, messageId: event.messageId,
+    }), receipt);
+    const coldCursor = await coldJournal.readCursor({ streamId: taskStreamId, consumerKey: receipt.consumerKey });
+    assert.equal(coldCursor?.lastHandledSequence, event.sequence);
 
     const payload = event.payload as {
       readonly projectPatch?: { readonly patchRef: string; readonly patchDigest: string };
@@ -1206,6 +1227,7 @@ test('C3b canonical correction rewind forward chain reaches Memory analysis from
       receiptLocator(checkpointACommitted),
       receiptLocator(recoveryCommitted),
     ]);
+    for (const sourceRef of analysisInputs.actualPathRefs) assert.ok(audit.sourceRefs.includes(sourceRef));
     for (const chain of analysisInputs.rewindChains) {
       const reentryFactRef = chain.reentryFactRef;
       if (!reentryFactRef) throw new Error('C3b rewind chain has no transition fact');
@@ -1250,6 +1272,19 @@ test('C3b canonical correction rewind forward chain reaches Memory analysis from
       messageId: event.messageId,
     });
     assert.deepEqual(reopenedReceipt, receipt);
+    assert.deepEqual(await reopenedMemory.journal.readEvents(feedbackQuery), coldFeedback);
+    assert.deepEqual(await reopenedMemory.journal.readCursor({
+      streamId: taskStreamId, consumerKey: receipt.consumerKey,
+    }), coldCursor);
+    assert.equal(admissions.length, 1, 'reconcile must not repeat the original analysis');
+    console.log('C3b cold audit receipt', JSON.stringify({
+      coldJournalPath: join(paths.journalRoot, 'events.jsonl'),
+      audit,
+      receipt,
+      cursor: coldCursor,
+      repeatedConsumptionCommits: afterOrdinaryReconcile.consumed.committed.length,
+      feedbackCountAfterReconcile: coldFeedback.length,
+    }));
     const updatedProjectAgents = await readFile(join(workspace, 'AGENTS.md'), 'utf8');
     assert.equal(
       updatedProjectAgents,

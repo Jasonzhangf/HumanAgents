@@ -98,6 +98,7 @@ export interface MemoryTaskAnalysisWakeBinding {
 export interface MemoryTaskAnalysisEventConsumerOptions {
   readonly binding: MemoryTaskAnalysisWakeBinding;
   readonly admission: MemoryAnalysisAdmissionPort;
+  readonly publishFeedback?: (event: EventEnvelope) => Promise<void>;
   readonly now?: () => string;
   readonly retryDelayMs?: number;
   readonly retryOwnerRef?: string;
@@ -870,6 +871,12 @@ export function createMemoryTaskAnalysisEventHandler(
       );
     }
     const admitted = admissionOutcome.value;
+    if (admitted.result !== undefined) {
+      if (!options.publishFeedback) {
+        throw new Error('memory analysis feedback publisher is not configured');
+      }
+      await options.publishFeedback(feedbackEvent(event, admitted.result));
+    }
     return {
       consumerKey: options.binding.bindingRef,
       messageId: event.messageId,
