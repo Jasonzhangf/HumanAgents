@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- r233 parser已source/compiled并compile0，worker自身原case遇EMFILE/watch退出，未提交；不当产品错。宿主同case已越过review，最终在 `resumedContext.indexOf(TURN_ONE_GOAL) < resumedContext.indexOf(CHILD_BODY)` 失败，fixture `text-only-cqZ0gy` 保留（0/1）。r235独立OAuth核对结构与真实index命中，不先删断言。r234独立OAuth并行规划生产start/settle finding；无新增worktree、无重叠writer。完整cold仍未GREEN。
+
 - r232 READY 已确认当前最小owner仍是fixture `reviewPayload()`：生产请求为 `{prompt: segments + reviewMaterialJSON}`，原parser误查外层role，纯内存实际反例 recognized=false。现有review Provider composition的start/observe/settle身份一致，不补假scope。r233 fresh GCM仅修原test parser后跑原cold及两/三轮；r231已退出，写权无重叠。另记生产finding：serve-orchestration `runProviderAgent()`在driver本地start后即started=true，真实port.start失败移除session后仍settle，产生次级missing.active.execution；原cause仍挂链。此finding尚未修复，不把它误归冷scope漏接，也不在fixture任务越界修改。
 
 - 冷child模板缺口已由独立r230确定为fixture bootstrap遗漏，r231两条动态import/初始化已进入原test及编译产物，tsc0。宿主原coldcase仍RED0/1，但已越过空prompt，当前fixture `text-only-wDp9j5` 返回409：`provider review failed and settlement also failed: provider operation has no active execution scope`。r232独立OAuth小Plan沿review port的scope绑定/生命周期定位，尚无产品patch；不绕review或写假scope。
