@@ -4,6 +4,7 @@ import {
   createRuntimeReadPublication,
   element,
   formatTime,
+  freezeJsonValue,
   isAuthSessionError,
   loginHref,
   queryParam,
@@ -2059,6 +2060,7 @@ export function mountSemanticObservationPanel(host, { taskId, apiClient = api, o
         render()
         return
       }
+      freezeJsonValue(next)
       envelope = next
       readError = null
       streamDisconnected = false
@@ -2088,7 +2090,7 @@ export function mountSemanticObservationPanel(host, { taskId, apiClient = api, o
 
   async function read() {
     try {
-      envelope = await apiClient.semanticObservation(taskId)
+      envelope = freezeJsonValue(await apiClient.semanticObservation(taskId))
       readError = null
       streamDisconnected = false
     } catch (error) {

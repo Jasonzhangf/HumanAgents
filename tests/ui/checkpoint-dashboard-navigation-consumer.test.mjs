@@ -133,6 +133,104 @@ test('F2 a different checkpoint selection is a different read identity and a fai
   assert.equal(publication.state().failure.code, 'checkpoint.read.failed')
 })
 
+// Failure mode: a scoped publication exposes mutable nested content, so one
+// consumer can rewrite another consumer and the current publication without a
+// new request. Basis: the public factory currently shares the exact value it
+// received and only freezes the outer snapshot. Impact: confirmed business
+// content changes without a version or request serial change. Cost: low, this
+// reuses the existing Node publication consumer and adds no framework.
+test('G12 shared publication content blocks nested and array writes while preserving identity and old versions', async () => {
+  let version = 1
+  const publication = createRuntimeReadPublication({
+    read: async () => {
+      if (version === 2) {
+        return {
+          ok: true,
+          value: {
+            surface: 'runtime-checkpoint-history',
+            version: 2,
+            statusSections: { business: 'new-business', technical: 'new-technical' },
+            evidence: ['new-one', 'new-two'],
+          },
+        }
+      }
+      if (version === 'failed') {
+        return {
+          ok: false,
+          failure: {
+            code: 'checkpoint.read.failed',
+            ownerId: 'humanagent.app',
+            message: 'same-scope refresh failed',
+            nextAction: 'retry the same checkpoint read',
+          },
+        }
+      }
+      return {
+        ok: true,
+        value: {
+          surface: 'runtime-checkpoint-history',
+          version: 1,
+          statusSections: { business: 'confirmed-business', technical: 'confirmed-technical' },
+          evidence: ['confirmed-one', 'confirmed-two'],
+        },
+      }
+    },
+  })
+
+  await publication.refresh(CATALOG_SCOPE)
+  const first = publication.state()
+  const second = publication.state()
+  assert.equal(first.content, second.content, 'consumers of one publication must share the same content object')
+  assert.equal(first.content.statusSections, second.content.statusSections)
+  assert.equal(first.content.evidence, second.content.evidence)
+
+  function mutationBlocked(mutate) {
+    try {
+      mutate()
+      return false
+    } catch (error) {
+      return error instanceof TypeError
+    }
+  }
+
+  const propertyBlocked = mutationBlocked(() => {
+    first.content.statusSections.business = 'consumer-mutated'
+  })
+  const arrayPushBlocked = mutationBlocked(() => {
+    first.content.evidence.push('consumer-mutated')
+  })
+  const arrayIndexBlocked = mutationBlocked(() => {
+    first.content.evidence[0] = 'consumer-mutated'
+  })
+  assert.deepEqual(
+    { propertyBlocked, arrayPushBlocked, arrayIndexBlocked },
+    { propertyBlocked: true, arrayPushBlocked: true, arrayIndexBlocked: true },
+  )
+  assert.equal(second.content.statusSections.business, 'confirmed-business')
+  assert.deepEqual(second.content.evidence, ['confirmed-one', 'confirmed-two'])
+  assert.equal(publication.state().content.statusSections.business, 'confirmed-business')
+  assert.equal(publication.state().requestSerial, 1)
+
+  version = 2
+  await publication.refresh(CATALOG_SCOPE)
+  const next = publication.state()
+  assert.notEqual(next.content, first.content, 'a new version must replace the shared content reference')
+  assert.equal(next.content.version, 2)
+  assert.equal(first.content.version, 1)
+  assert.equal(first.content.statusSections.business, 'confirmed-business')
+  assert.deepEqual(first.content.evidence, ['confirmed-one', 'confirmed-two'])
+
+  version = 'failed'
+  await publication.refresh(CATALOG_SCOPE)
+  const stale = publication.state()
+  assert.equal(stale.stale, true)
+  assert.equal(stale.content, next.content, 'same-scope failure must keep the latest confirmed object by identity')
+  assert.equal(mutationBlocked(() => {
+    stale.content.statusSections.business = 'stale-consumer-mutated'
+  }), true)
+  assert.equal(stale.content.statusSections.business, 'new-business')
+})
+
 // Failure mode: a body read sends the descriptor, scope, locator or an invented
 // control key as authority, or addresses a different checkpoint than the one the
 // user opened. Basis: the frozen route takes projectKey/mode plus the same four

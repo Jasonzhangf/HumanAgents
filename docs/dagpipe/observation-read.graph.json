@@ -3,14 +3,13 @@
   "version": "4",
   "meta": {
     "title": "按授权范围读取事实，经统一语义归类与配对渲染多视角观测",
-    "baseline": "9d1f39c53f09e31a4636fa75f97042c18e8bb114",
     "designStatus": "candidate",
     "capabilityStatus": "pending",
     "prototypeBoundary": "docs/ui/semantic-observation-tour.html is a standalone semantic Mock design; it does not consume or prove this production chain",
     "browserDesignContract": "Shared semantic controls compose all views; declared events connect modules; immutable payload references are shared along data arcs; unknown/stale/empty and evidence remain explicit",
     "payloadReferenceStatus": "candidate browser shared-reference contract; native Arc type and production wiring remain pending",
     "agentActivityContract": "Task-scoped instance ownership is read from actual native bindings, acquired incarnations, resumed segments and owner-decoded Journal receipts. It reaches semantic projection through the direct task_projection arc; event normalization and role frames never generate or replace instance identity.",
-    "agentActivityOwner": "packages/runtime/src/observation/agent-activity.ts selects exact typed ownership; packages/app/src/ui-runtime/agent-activity-read.ts reads existing owner decoders; packages/ui/projection/agent-activity.ts projects the same source; docs/ui/agent-activity.js renders it without control effects. These modules are planned, not production acceptance.",
+    "agentActivityOwner": "packages/runtime/src/observation/agent-activity.ts selects exact typed ownership; packages/app/src/ui-runtime/agent-activity-read.ts reads existing owner decoders; packages/ui/projection/agent-activity.ts projects the same source; docs/ui/agent-activity.js renders it without control effects. The published task-scoped read slice is implemented and proven; cross-scope aggregation and live closure remain pending.",
     "terminalContract": {
       "success": "rendered_view",
       "failure": "explicit stale/disconnected/unmapped projection; no raw inference or fake live state",
