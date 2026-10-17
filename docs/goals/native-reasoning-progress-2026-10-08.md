@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r110 跨 turn 已实际编译成功并取得断言 RED：A 卡在第二轮 createDriver 时应为 implicit-admission.waiting，实际 undefined；产品修正进行中。r106 最终44/46，除fixture EPERM外，原P1-L2实际抓到 drain 在exact-output保存前返回，未接收；fresh OAuth技术r112原树已复现同一RED，修完整批次生产屏障，不弱化断言。r111独立入口计划已返回，owner已补读r59实际 requestReceipt.body：model/stream/input/tools结构确实存在，但不能据array无items推出socket根因；仍UNKNOWN。后继使用原真实Task脚本、单次独占fixture预算和正式pair/cleanup，不自动重放。UX正在完成p1只读验收，安装窗口尚未释放，本侧不安装/restart。
+
 - r109 只读接线观察已完成：child-producer 返回的工具 port 与 execution-composition 的包装 port 是并发声明的两处 owner；现有 native public fixture 已有预算2，尚缺双 invocation/latch。既有 r93 组合计划仍适用，不需要改 cross-turn coordinator/service。r107 已100次命令读取且0改动，owner 精确 INT、确认原PID消失后，由独立 OAuth GPT-6.1 medium r110 原树接手既有 r91 计划，避免重复探索；r106 Provider 修正继续，App 接线仍等基础验收后派发。
 
 - r108 真实 Responses source explicit-stop 原 consumer 单次执行取得 PASS receipt：generationAttempts=1、stop accepted、drain boundary matched/1 request、settlement stopped/released/committed、durable/lifecycle cancelled、close/cleanup closed、pendingStart=false，无 error/assertionError/cleanupError。回执 `~/.humanagent/test-fixtures/provider-explicit-stop-r108-20261017/run-cRsA8j/proof-receipt.json`，原 stdout 与摘要在外置 r108 run。外层 shell 退出1原因为 worker 使用 zsh 只读变量 `status`（`zsh:1: read-only variable: status`）；不冒 shell exit0，不重新请求。此证据只覆盖已合成 source library stop，不证明 installed App Task 或厂商身份。r106/r107 两实现继续，整体目标仍 ACTIVE。
