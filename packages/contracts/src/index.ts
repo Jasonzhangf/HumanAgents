@@ -1907,6 +1907,7 @@ export * from './active-turn-context.js';
 export * from './review-data.js';
 export * from './inspection.js';
 export * from './i2-history.js';
+export * from './agent-activity.js';
 
 /**
  * Requirement pipeline node identity. Single source of truth for the thirteen nodes of
