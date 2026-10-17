@@ -2,6 +2,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- App aggregate wire `3a0a99b0` 已正常merge candidate；Appbuild0/App-testtsc0/标准原standard-turn-control-public-consumer11/11PASS（session37945，inspection-aggregate-wire-composed-20261017.txt）。只证明accepted summary与shared schema/validator，不冒native durable两occurrence。UX确认sourceclean/terminal后正常关闭；Appcapture与Runtime stopsource继续各自独占。
+
 - Runtime aggregate `aee3aebc` 已正常FF candidate；contractsbuild0/agentlooptsc0/原named settlement3/3PASS（session53145，inspection-aggregate-settlement-composed-20261017.txt）。sole summary.inspectionOutcome控制总体判断，缺项不补造；只证明Runtime port，不冒完整native/I2。已通知UX关来源并继续同域stophelper。
 - r289结束但最终观察报告不完整。父核实manager pool未acquired返回waiting、App child-producer约1718将waiting/blocked一律输出ToolExecutionResult blocked、Provider非成功路径；尚未证明该终点不可恢复。r290独立Gemini4medium计划已启动，要求核实实际resume再判断最小必要修改或NONE。32round只列证据缺口，不认定永久总上限；当前不派本侧实现、不碰UX三路writer。
 
