@@ -47,7 +47,7 @@ import {
   waitForDom,
   waitForTerminal,
 } from '../lib/browser.mjs';
-import { compactSourceIdentity, finalizeSourceIdentity, taskIdValue } from '../lib/binding.mjs';
+import { taskIdValue } from '../lib/binding.mjs';
 import { journalPathFor, readJournalStrict, scopeFactsFromRecords } from '../lib/journal.mjs';
 
 export const SCENARIO = 'existing-task-change';
@@ -335,7 +335,6 @@ export async function runExistingTaskChangeScenario(binding) {
     taskId: existingTaskId,
   });
 
-  const sourceIdentity = await finalizeSourceIdentity(binding);
   const observation = {
     taskId: existingTaskId,
     scenarioMarkers: { seedMarker, revisionMarker, changeInput },
@@ -395,13 +394,6 @@ export async function runExistingTaskChangeScenario(binding) {
       terminal: facts.finalTerminals.slice(-1)[0]?.state ?? null,
     },
     terminal: { state: dashboard.state ?? null, rendered },
-    sourceIdentity: {
-      stable: sourceIdentity.stable,
-      changedPaths: sourceIdentity.changedPaths,
-      sidecarPath: binding.sourceIdentityPath ?? null,
-      start: compactSourceIdentity(sourceIdentity.start),
-      end: compactSourceIdentity(sourceIdentity.end),
-    },
   };
 
   const missing = changeObservationProblems(observation);
@@ -427,7 +419,6 @@ export async function runExistingTaskChangeScenario(binding) {
       execution: observation.execution,
       journalFacts: observation.journalFacts,
       terminal: observation.terminal,
-      sourceIdentity: observation.sourceIdentity,
       confirmation: {
         status: confirmationStatus,
         request: traffic.confirmation[0]?.body ?? null,
@@ -670,12 +661,6 @@ export function changeObservationProblems(observation) {
     missing.push('the changed task dashboard did not show the confirmed revision as the current input');
   }
 
-  if (observation.sourceIdentity?.stable !== true) {
-    missing.push(
-      `candidate source identity changed during the run: `
-      + `${(observation.sourceIdentity?.changedPaths ?? []).join(', ') || 'unknown input'}`,
-    );
-  }
   return missing;
 }
 

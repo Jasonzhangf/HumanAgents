@@ -682,6 +682,14 @@ interface TaskJournalReplayState {
   deletedTaskIds: Set<string>;
 }
 
+/** Attach the already-accepted operation identity without starting execution. */
+function attachReplayedOperationIdentity(task: TaskRecord, operation: OperationRecord): void {
+  task.operationId = operation.operationId;
+  task.executionEpoch = operation.executionEpoch;
+  task.input = operation.input;
+  task.orchestrated = operation.orchestrated;
+}
+
 /** Rebuild disposable read facts only; no lifecycle or recovery owner is started. */
 function replayTaskJournalRecords(state: TaskJournalReplayState, records: readonly RuntimeTaskJournalRecord[]): void {
   for (const record of records) {
@@ -754,11 +762,16 @@ function replayTaskJournalRecords(state: TaskJournalReplayState, records: readon
             `journal operation ${record.operationId.value} identity does not match its first start`,
             'repair or discard the UI runtime journal before restarting');
         }
-        state.operations.set(record.operationId.value, existing ?? {
+        const operation = existing ?? {
           operationId: record.operationId, taskId: record.taskId, executionEpoch: record.executionEpoch,
           input: record.input, orchestrated: record.orchestrated === true, events: [], seq: 0,
-        });
+        };
+        state.operations.set(record.operationId.value, operation);
         state.scopes.set(record.operationId.value, record.scope);
+        const task = state.tasks.get(record.taskId.value);
+        if (task) {
+          attachReplayedOperationIdentity(task, operation);
+        }
         break;
       }
       case 'operation.event': {
@@ -782,10 +795,7 @@ function replayTaskJournalRecords(state: TaskJournalReplayState, records: readon
         task.events.push(record.event);
         task.updatedAt = record.event.occurredAt;
         if (record.event.kind === 'execution.started') {
-          task.operationId = operation.operationId;
-          task.executionEpoch = operation.executionEpoch;
-          task.input = operation.input;
-          task.orchestrated = operation.orchestrated;
+          attachReplayedOperationIdentity(task, operation);
           task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
         }
         if (record.taskOutput !== undefined) task.output = record.taskOutput;
@@ -4700,6 +4710,10 @@ export class RuntimeTaskCoordinator {
           };
           this.operations.set(record.operationId.value, operation);
           this.scopes.set(record.operationId.value, record.scope);
+          const task = this.tasks.get(record.taskId.value);
+          if (task) {
+            attachReplayedOperationIdentity(task, operation);
+          }
           break;
         }
         case 'operation.event': {
@@ -4739,10 +4753,7 @@ export class RuntimeTaskCoordinator {
           task.events.push(record.event);
           task.updatedAt = record.event.occurredAt;
           if (record.event.kind === 'execution.started') {
-            task.operationId = operation.operationId;
-            task.executionEpoch = operation.executionEpoch;
-            task.input = operation.input;
-            task.orchestrated = operation.orchestrated;
+            attachReplayedOperationIdentity(task, operation);
             task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
           }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;

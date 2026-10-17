@@ -46,12 +46,10 @@ import {
 } from './lib/browser.mjs';
 import {
   bindCandidate,
-  finalizeSourceIdentity,
   prepareAttemptRoots,
   registerAttemptResources,
   resolveAttemptPaths,
   resolveFormalAttachPaths,
-  sourceIdentityEvidence,
 } from './lib/binding.mjs';
 import {
   closeSettledAttempt,
@@ -501,11 +499,6 @@ export async function runScenario(scenario, options = {}) {
   const status = !deviation && requestedOutcomeReached && settlement.settled && cleanupCompleted && outcome === 'success'
     ? 'SUCCESS'
     : 'INCOMPLETE';
-  // The end source identity is captured here, at the one place before the receipt
-  // sink, so every branch records it: success, a scenario error, a failure before
-  // the scenario ran, and an unsettled attempt. The call is idempotent and never
-  // overwrites an end identity a scenario already finalized.
-  await finalizeSourceIdentity(binding);
   const receipt = buildReceipt(binding, {
     // The final result is derived only after strict settlement and cleanup.
     result: status,
@@ -517,14 +510,7 @@ export async function runScenario(scenario, options = {}) {
     checkpointCommitted: evidence.checkpointCommitted ?? 0,
     terminalRecord,
     evidenceRefs,
-    scenarioEvidence: {
-      ...(evidence.scenarioEvidence ?? {}),
-      // The receipt has no other owner for the end identity, so the sink records
-      // the finalized one for every branch. A scenario that already wrote its own
-      // end identity keeps it; finalizeSourceIdentity is idempotent, so both name
-      // the same capture.
-      sourceIdentity: evidence.scenarioEvidence?.sourceIdentity ?? sourceIdentityEvidence(binding),
-    },
+    scenarioEvidence: evidence.scenarioEvidence ?? null,
     screenshots: evidence.screenshots ?? [],
     missingEvidence: visibleMissingEvidence,
     draft: evidence.draft ?? binding.draft ?? null,
@@ -577,7 +563,6 @@ export async function main(argv, runOptions = {}) {
     outcome: result.outcome,
     settled: result.settled,
     requestedOutcomeReached: result.requestedOutcomeReached,
-    candidateSha: result.receipt.candidate.sha,
     attemptId: result.receipt.attemptId,
     taskId: result.receipt.task.taskId,
     terminalState: result.receipt.task.terminalState,

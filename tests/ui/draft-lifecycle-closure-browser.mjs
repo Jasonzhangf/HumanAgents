@@ -650,8 +650,6 @@ async function sectionReal() {
       controlRoot: binding.controlRoot,
       workspace: binding.workspace,
       receiptDir: binding.receiptDir,
-      candidateSha: binding.candidateSha,
-      treeDigest: binding.treeDigest,
     });
     await harness.probeProvider(binding);
     await harness.startServeForAttempt(binding, { readyTimeoutMs: 120_000 });
@@ -670,39 +668,6 @@ async function sectionReal() {
       error: error instanceof Error ? error.message : String(error),
       raw: String(error?.stack ?? error),
     };
-  }
-
-  // The real proof's receipt carries the same start/end source identity as the
-  // official scenario receipts, so it is bound to this exact candidate revision
-  // and proves the source did not move during the run.
-  if (binding) {
-    try {
-      const sourceIdentity = await bindingLib.finalizeSourceIdentity(binding);
-      evidence.scenarioEvidence = {
-        ...(evidence.scenarioEvidence ?? {}),
-        sourceIdentity: {
-          stable: sourceIdentity.stable,
-          changedPaths: sourceIdentity.changedPaths,
-          sidecarPath: binding.sourceIdentityPath ?? null,
-          start: bindingLib.compactSourceIdentity(sourceIdentity.start),
-          end: bindingLib.compactSourceIdentity(sourceIdentity.end),
-        },
-      };
-      if (sourceIdentity.stable !== true) {
-        evidence.missingEvidence = [
-          ...(evidence.missingEvidence ?? []),
-          `candidate source identity changed during the run: ${sourceIdentity.changedPaths.join(', ') || 'unknown input'}`,
-        ];
-      }
-    } catch (error) {
-      if (!deviation) {
-        deviation = {
-          stage: 'source_identity',
-          error: error instanceof Error ? error.message : String(error),
-          raw: String(error?.stack ?? error),
-        };
-      }
-    }
   }
 
   // attempt_stop_settle -> cleanup. The official owner decides settlement from
@@ -787,12 +752,8 @@ async function sectionReal() {
     result: status,
     markdownPath: written.markdownPath,
     jsonPath: written.jsonPath,
-    sourceIdentityPath: binding.sourceIdentityPath ?? null,
   });
 
-  record('the real proof is bound to one exact candidate revision',
-    /^[0-9a-f]{40}$/.test(String(binding.candidateSha ?? '')),
-    { candidateSha: binding.candidateSha, treeDigest: binding.treeDigest });
   record('the real proof wrote its receipt to the candidate receipt root',
     Boolean(written.markdownPath) && Boolean(written.jsonPath),
     written);

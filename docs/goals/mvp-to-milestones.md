@@ -250,23 +250,23 @@ stop/settle 的阶段必须停在 `capability-unavailable`、`health-blocked` �
 - DSH provider 崩溃、plugin 不兼容、transport close 和 stop timeout 都有明确 owner、Attention、settle 和 checkpoint 证据。
 - `cc`/`cc-sol` 的 Responses 和 `goaichat` 的 Anthropic 分别有 codec、stream、tool、error、cancel/settle 证据；不得以共用 4444 listener 代替协议验证。
 - RCC v3 `4444` 的 listener、协议 readiness、同入口请求和 DSH 绑定分别有证据；配置路径和凭据没有被复制进仓库或 HumanAgent Journal。
-- M1-0 至 M1-5 每个小阶段都有独立 Astra PASS receipt；review 失败会回到对应 owner 修复并重验，不跨阶段带病前进。
+- M1-0 至 M1-5 各小阶段保留受影响行为验收；完整重大 milestone 在正式集成前执行一次独立整体 review，finding 由对应 owner 修复并补受影响验证。
 - 不存在 checkout-relative `src/*` 依赖、静默 fake fallback 或控制字段写入业务 payload。
 
 ### 4.4 Milestone 1 不做
 
 不做多 provider 路由策略、多 DSH profile、长程历史压缩、跨进程高可用、额外的 DSH WebUI 产品范围和生产发布；不修改 `~/.rcc`；继承 MVP HumanAgent UI，并只验证一个专用 DSH profile、一个 Cordis bridge、两种协议和三个独立 ProviderBinding（Responses 的 `cc`、`cc-sol` 与 Anthropic 的 `goaichat`）。
 
-### 4.5 Milestone 1 小阶段与 Astra gates
+### 4.5 Milestone 1 小阶段与行为验收
 
-| 阶段 | 唯一 owner 与范围 | 完成 iff | 最小验证/证据 | Astra gate |
-|---|---|---|---|---|
-| M1-0 | adapter owner；只读 DSH/RCC 能力复核 | public entrypoint、DSH profile、RCC 4444、两种协议和失败矩阵已锁定 | clean DSH commit/tree、listener、非敏感配置摘要、未验证项清单 | `Astra-M1-0` PASS |
-| M1-1 | contracts/adapter owner；Provider-neutral port | fake 与未来 DSH/协议 adapter 共享 port；外部身份不泄漏 | 类型检查、identity/protocol 负向测试、binding digest | `Astra-M1-1` PASS |
-| M1-2 | `packages/adapters/provider`：Responses/Anthropic codec；`packages/adapters/dsh`：DSH profile/bridge；`packages/app`：组装 | `cc`、`cc-sol`、`goaichat` 三个 ProviderBinding 只能按显式 protocol 加载，DSH bridge 只消费 Provider readiness | codec fixture、readiness、tool/error/cancel contract、profile lock | `Astra-M1-2` PASS |
-| M1-3 | DSH mapping owner；session/event/evidence/stop | DSH 事件、Provider 事件、HumanAgent operation/epoch/attention 可追溯 | recorded replay、late-event、cancel≠stopped、settle/checkpoint 测试 | `Astra-M1-3` PASS |
-| M1-4 | validation owner；真实同入口 | RCC 4444 直连和 DSH profile 路径均覆盖允许的 start/resume/stop/recovery | fake、recorded、real RCC、real DSH 四层证据；tool/error、transport close、crash/stop timeout、Journal/Session Log 分离 | `Astra-M1-4` PASS |
-| M1-5 | integration/release owner；只做收口 | lock、限制、receipt、clean tree 和用户批准的交付范围完整 | 候选复核、文档范围检查、Astra receipt 汇总 | `Astra-M1-5` PASS |
+| 阶段 | 唯一 owner 与范围 | 完成 iff | 最小验证/证据 |
+|---|---|---|---|
+| M1-0 | adapter owner；只读 DSH/RCC 能力复核 | public entrypoint、DSH profile、RCC 4444、两种协议和失败矩阵明确 | 实际接口、listener、非敏感配置和未验证项 |
+| M1-1 | contracts/adapter owner；Provider-neutral port | fake 与未来 DSH/协议 adapter 共享 port；外部身份不泄漏 | 类型检查、identity/protocol 负向测试 |
+| M1-2 | Provider codec、DSH bridge 与 App 组装的各自 owner | 三个 ProviderBinding 按显式 protocol 加载，DSH bridge 只消费 Provider readiness | codec fixture、readiness、tool/error/cancel contract |
+| M1-3 | DSH mapping owner；session/event/evidence/stop | 事件、operation/epoch/attention 可追溯 | recorded replay、late-event、cancel≠stopped、settle/checkpoint 测试 |
+| M1-4 | validation owner；真实同入口 | RCC 与 DSH 路径覆盖允许的 start/resume/stop/recovery | fake、recorded、real RCC、real DSH 各适用证据；错误、停止、恢复和 Journal/Session Log 分离 |
+| M1-5 | integration owner；只做收口 | 行为结果、限制和交付范围完整 | 作者验收后一次整体 review，按已有授权交付 |
 
 每个阶段都是可重入的：恢复时从最近一个未通过 gate 的阶段继续，已通过且
 输入版本未变化的阶段可复用 receipt；源、配置、环境、候选或协议事实变化
@@ -309,16 +309,16 @@ stop/settle 的阶段必须停在 `capability-unavailable`、`health-blocked` �
 
 不做跨节点一致性、无限扩展、多租户权限模型、复杂 UI 工作台和未验证的自动迁移。
 
-### 5.5 Milestone 2 小阶段与 Astra gates
+### 5.5 Milestone 2 小阶段与行为验收
 
-| 阶段 | 交付 | 最小验证/证据 | Astra gate |
-|---|---|---|---|
-| M2-0 | 长程输入、恢复和故障矩阵 | 受影响的 MVP/M1 receipt、输入版本和 owner map | `Astra-M2-0` PASS |
-| M2-1 | Index、Journal segment、资产引用和重建 | 删除 Index 后仅凭 Journal 重建、digest/seq 引用校验 | `Astra-M2-1` PASS |
-| M2-2 | checkpoint compaction、Working/Reporting Window | recovery state 独立准确、历史压缩不改变控制真相 | `Astra-M2-2` PASS |
-| M2-3 | crash recovery、supervision、有限重试和等待 | 写入/提交/停止/重启故障注入、无空转、每个异常有 owner | `Astra-M2-3` PASS |
-| M2-4 | template/plugin/memory context snapshot | 版本/digest/context receipt 可重放，旧 Task 不被新配置污染 | `Astra-M2-4` PASS |
-| M2-5 | Milestone 2 closeout | 多 cycle replay、真实 DSH/fake 语义一致、clean candidate | `Astra-M2-5` PASS |
+| 阶段 | 交付 | 最小验证/证据 |
+|---|---|---|
+| M2-0 | 长程输入、恢复和故障矩阵 | 受影响的 MVP/M1 行为结果和 owner |
+| M2-1 | Index、Journal segment、资产引用和重建 | 删除 Index 后仅凭 Journal 重建、业务 digest/seq 引用校验 |
+| M2-2 | checkpoint compaction、Working/Reporting Window | recovery state 独立准确、历史压缩不改变控制真相 |
+| M2-3 | crash recovery、supervision、有限重试和等待 | 写入/提交/停止/重启故障注入、无空转、异常有 owner |
+| M2-4 | template/plugin/memory context snapshot | 业务 context 可重放，旧 Task 不被新配置污染 |
+| M2-5 | Milestone 2 closeout | 多 cycle replay、适用真实 DSH/fake 语义一致，作者验收后一次整体 review |
 
 ## 6. Milestone 3：可交付运行时
 
@@ -353,29 +353,29 @@ stop/settle 的阶段必须停在 `capability-unavailable`、`health-blocked` �
 
 不默认承诺跨地域高可用、跨节点强一致 Journal、无限吞吐、自动模型切换或未经真实证据支持的自治恢复。
 
-### 6.5 Milestone 3 小阶段与 Astra gates
+### 6.5 Milestone 3 小阶段与行为验收
 
-| 阶段 | 交付 | 最小验证/证据 | Astra gate |
-|---|---|---|---|
-| M3-0 | 多 Task/多 Organ scope、资源和权限模型 | scope/epoch/Journal 隔离、资源拒绝和控制/业务隔离 | `Astra-M3-0` PASS |
-| M3-1 | 并发、背压、取消和正式 Host 入口 | 实际入口下并发限制、背压、释放和 stopped checkpoint | `Astra-M3-1` PASS |
-| M3-2 | 安全、插件来源、依赖和配置迁移 | 权限失败、签名/来源、license、安装前校验和回滚 | `Astra-M3-2` PASS |
-| M3-3 | metrics、trace、Attention 运维投影 | 观测可追溯但不能成为控制真源，告警 owner 闭环 | `Astra-M3-3` PASS |
-| M3-4 | 发布包、安装、启动、升级和回滚 | 从安装包完成 start→run→attention→stop→restart/replay | `Astra-M3-4` PASS |
-| M3-5 | Milestone 3 closeout | 兼容矩阵、源/依赖/产物/环境绑定、独立 review 和限制清单 | `Astra-M3-5` PASS |
+| 阶段 | 交付 | 最小验证/证据 |
+|---|---|---|
+| M3-0 | 多 Task/多 Organ scope、资源和权限模型 | scope/epoch/Journal 隔离、资源拒绝和控制/业务隔离 |
+| M3-1 | 并发、背压、取消和正式 Host 入口 | 实际入口下并发限制、背压、释放和 stopped checkpoint |
+| M3-2 | 安全、插件来源、依赖和配置迁移 | 实际权限失败、数据保留和迁移恢复；发布检查仅在对外 release 实际需要时执行 |
+| M3-3 | metrics、trace、Attention 运维投影 | 观测不成为控制真源，告警 owner 闭环 |
+| M3-4 | 发布包、安装、启动、升级和回滚 | 从安装包完成 start→run→attention→stop→restart/replay |
+| M3-5 | Milestone 3 closeout | 兼容行为、限制清单和作者验收后一次整体 review |
 
 ## 7. 依赖和闸门顺序
 
 ### 7.0 子阶段 gate 规则
 
-每个 Milestone 的每个小阶段都必须有独立 owner、输入版本、allowed paths、
-正常/等待/阻塞/失败/取消出口、下一动作、focused validation 和 Astra review。
-Astra review 必须审查当前候选，不审查口头计划；无 PASS receipt 不得进入下
-一小阶段。PASS 不授予 Git、发布或生产权限。
+每个 Milestone 的小阶段都有独立 owner、allowed paths、正常/等待/阻塞/失败/
+取消出口、下一动作和 focused validation。小阶段不单独触发 review；完整且重大
+的可交付 milestone 完成作者自检和适用真实入口验收后，在正式集成前执行一次
+独立整体 review，模型沿当前编排 Skill。review 不扩展项目已有授权范围。
 
-小阶段 gate 是可重入的：阶段完成后保存 receipt、候选 SHA、配置/环境摘要和
-验证结果；下一轮先比较这些输入，未变化则复用，变化则从最早受影响阶段
-重跑。失败必须保留原始错误和 owner，不能用更晚阶段的绿色结果覆盖。
+小阶段 gate 是可重入的：保存实际行为结果、原始错误和 owner，直接复用仍有效
+的结果。具体输入变化时只补受影响验证，不计算摘要、不冻结材料、不建立候选
+身份绑定。不能用更晚阶段的绿色结果覆盖原始失败。
 
 ```text
 设计锁定

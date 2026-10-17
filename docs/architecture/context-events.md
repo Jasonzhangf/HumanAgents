@@ -18,7 +18,7 @@ DSH Context 层提供了一个有价值的抽象（约 40 种事件类型，结�
 2. **计划有完整生命周期**：`plan_enter → plan_approved / plan_rejected → plan_exit`，连“被拒的方案”都记下来，避免恢复后模型又提同一个被否掉的方案。
 3. **连“重试循环”都单独成事件**：`retry_detected` 说明它在检测模型是不是在原地打转——这通常是 context 烧掉的前兆。
 
-> **声明假设**：当前 DSH checkout（`/Volumes/extension/code/dsh`，HEAD `639ed01539`）中未找到 `src/session/extract.ts`；该路径存在 `packages/session/`、`packages/compaction/`。上述 40 类事件与三个要点是**设计输入假设**，不是已核实的源码事实。实现不得声称已核对 DSH 源码；若后续要以 DSH 为参考，必须先核对对应版本并记录 SHA。
+> **声明假设**：当时 DSH checkout（`/Volumes/extension/code/dsh`）中未找到 `src/session/extract.ts`；该路径存在 `packages/session/`、`packages/compaction/`。上述 40 类事件与三个要点是**设计输入假设**，不是已核实的源码事实。实现不得声称已核对 DSH 源码；后续采用 DSH 参考时，只读取受影响的真实接口与行为，不追加 SHA 或身份包装。
 
 ## 2. 现有实现基线（复用，不重复造）
 

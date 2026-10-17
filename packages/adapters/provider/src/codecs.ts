@@ -2072,7 +2072,11 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     const messages: AnthropicWireMessage[] = execution.requestContext === undefined
       ? [{ role: 'user', content: [{ type: 'text', text: businessText(execution, payload) }] }]
       : [...anthropicContextMessages(execution.requestContext)];
-    const tools: AnthropicWireTool[] = [];
+    const tools: AnthropicWireTool[] = (execution.tools ?? []).map((tool) => ({
+      name: tool.toolId,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }));
     return {
       protocol: 'anthropic',
       type: 'anthropic.request',

@@ -49,7 +49,7 @@ import {
 } from './runner.mjs';
 import {
   bindCandidate,
-  finalizeSourceIdentity,
+  registerAttemptResources,
   resolveAttemptPaths,
   resolveFormalAttachPaths,
 } from './lib/binding.mjs';
@@ -248,6 +248,20 @@ test('a resolver that roots the control root inside the attempt tmp fails closed
     () => resolveAttemptPaths(binding, { resolvePaths: badResolver }),
     /persistent control root inside the ephemeral attempt tmp/,
   );
+});
+
+test('a plain non-Git directory can bind an attempt and register resources', async () => {
+  // The acceptance harness must not depend on the checkout being a Git worktree.
+  // A plain temporary directory is enough to establish an attempt and register
+  // the resources it owns; no candidate revision identity is required.
+  const repo = await makeTempRoot('non-git-binding');
+  const binding = bindCandidate(repo, { scenario: 'local-file-search', attemptIdSuffix: 'non-git' });
+  assert.equal(binding.repoPath, resolve(repo));
+  assert.equal(typeof binding.attemptId, 'string');
+  assert.ok(binding.attemptId.endsWith('non-git'), 'the attempt id carries the scenario and suffix');
+  assert.ok(binding.workspace.startsWith(binding.attemptRoot), 'the workspace stays inside the attempt root');
+  const registered = registerAttemptResources(binding);
+  assert.equal(registered, binding, 'resource registration returns the same attempt binding');
 });
 
 /**
@@ -1691,137 +1705,6 @@ test('runScenario writes a config-rooted receipt and retains resources when it c
   const written = JSON.parse(await readFile(result.receiptPaths.jsonPath, 'utf8'));
   assert.equal(written.result, 'INCOMPLETE');
   assert.equal(JSON.stringify(written).includes('HA_SESSION'), false);
-  // The unsettled branch records the finalized source identity too: the start
-  // capture, the end capture, the stability verdict and the paths that moved.
-  const unsettledIdentity = result.receipt.evidence.scenarioEvidence.sourceIdentity;
-  assert.ok(unsettledIdentity, 'an unsettled receipt must still carry the source identity');
-  assert.equal(typeof unsettledIdentity.stable, 'boolean');
-  assert.equal(unsettledIdentity.stable, true);
-  assert.ok(unsettledIdentity.start?.digest, 'the start capture is recorded');
-  assert.ok(unsettledIdentity.end?.digest, 'the end capture is recorded');
-});
-
-test('a provider probe failure before the scenario still records the start and end source identity', async () => {
-  assertResolverAvailable();
-  const controlRoot = await makeTempRoot('identity-probe-control');
-  const previousRcc = process.env.HUMANAGENT_RCC_BASE_URL;
-  // A closed loopback port fails the provider probe before any scenario runs.
-  // This is the branch that previously produced a receipt with a start identity
-  // only, so it is the regression the sink call must close.
-  process.env.HUMANAGENT_RCC_BASE_URL = 'http://127.0.0.1:9';
-  let result;
-  try {
-    const { runScenario } = await import('./runner.mjs');
-    result = await runScenario('local-file-search', {
-      entry: 'dashboard',
-      outcome: 'success',
-      serviceMode: 'candidate',
-      attemptIdSuffix: 'identity-probe',
-      resolvePaths: resolveRuntimePaths,
-      controlRoot,
-    });
-  } finally {
-    if (previousRcc === undefined) delete process.env.HUMANAGENT_RCC_BASE_URL;
-    else process.env.HUMANAGENT_RCC_BASE_URL = previousRcc;
-  }
-
-  assert.equal(result.receipt.result, 'INCOMPLETE');
-  assert.equal(result.receipt.deviation.stage, 'attempt');
-  const scenarioEvidence = result.receipt.evidence.scenarioEvidence;
-  assert.ok(scenarioEvidence, 'a failure before the scenario must still carry receipt evidence');
-  const identity = scenarioEvidence.sourceIdentity;
-  assert.ok(identity, 'a failure before the scenario must still record the source identity');
-  assert.equal(typeof identity.stable, 'boolean');
-  assert.equal(identity.stable, true);
-  assert.deepEqual(identity.changedPaths, []);
-  assert.ok(identity.start?.digest, 'the start capture is recorded');
-  assert.ok(identity.end?.digest, 'the end capture is recorded');
-  assert.equal(identity.end.digest, identity.start.digest);
-  assert.equal(identity.start.candidateSha, result.receipt.candidate.sha);
-  assert.equal(identity.start.digest, result.receipt.candidate.treeDigest);
-  // The end identity is persisted beside the receipt, so it can be checked
-  // without trusting the runner's own claim.
-  const sidecarPath = join(dirname(result.receiptPaths.jsonPath), 'source-identity.json');
-  const sidecar = JSON.parse(await readFile(sidecarPath, 'utf8'));
-  assert.equal(sidecar.schema, 'humanagent.dashboard-e2e.source-identity.v1');
-  assert.equal(sidecar.stable, true);
-  assert.equal(sidecar.candidateSha, result.receipt.candidate.sha);
-  assert.equal(sidecar.treeDigest, result.receipt.candidate.treeDigest);
-  assert.ok(sidecar.end?.digest, 'the sidecar carries the end capture');
-  // The persisted receipt carries the same identity, not only the in-memory one.
-  const persisted = JSON.parse(await readFile(result.receiptPaths.jsonPath, 'utf8'));
-  assert.equal(persisted.evidence.scenarioEvidence.sourceIdentity.stable, true);
-  assert.ok(persisted.evidence.scenarioEvidence.sourceIdentity.end.digest);
-});
-
-test('a scenario that throws still records the start and end source identity', async () => {
-  assertResolverAvailable();
-  const controlRoot = await makeTempRoot('identity-throw-control');
-  const owned = spawnIdle();
-  let bindingRef;
-  try {
-    const { runScenario } = await import('./runner.mjs');
-    const result = await runScenario('local-file-search', {
-      entry: 'dashboard',
-      outcome: 'success',
-      serviceMode: 'candidate',
-      attemptIdSuffix: 'identity-throw',
-      resolvePaths: resolveRuntimePaths,
-      controlRoot,
-      hooks: {
-        probeProvider: async () => {},
-        startServeForAttempt: async (binding) => {
-          bindingRef = binding;
-          binding.serveBaseUrl = 'http://127.0.0.1:1';
-          binding.servePort = null;
-          binding.servePid = owned.pid;
-        },
-        launchBrowserSession: async (binding) => { binding.browser = { close: async () => {} }; },
-        runScenario: async () => { throw new Error('scenario threw before any evidence'); },
-      },
-    });
-
-    assert.equal(result.receipt.result, 'INCOMPLETE');
-    assert.equal(result.receipt.deviation.stage, 'attempt');
-    assert.match(result.receipt.deviation.error, /scenario threw before any evidence/);
-    const scenarioEvidence = result.receipt.evidence.scenarioEvidence;
-    assert.ok(scenarioEvidence, 'a scenario error must still carry receipt evidence');
-    const identity = scenarioEvidence.sourceIdentity;
-    assert.ok(identity, 'a scenario error must still record the source identity');
-    assert.equal(typeof identity.stable, 'boolean');
-    assert.equal(identity.stable, true);
-    assert.deepEqual(identity.changedPaths, []);
-    assert.ok(identity.start?.digest, 'the start capture is recorded');
-    assert.ok(identity.end?.digest, 'the end capture is recorded');
-    assert.equal(identity.start.digest, result.receipt.candidate.treeDigest);
-  } finally {
-    await stopChild(owned);
-    if (bindingRef?.attemptRoot) await rm(bindingRef.attemptRoot, { recursive: true, force: true }).catch(() => {});
-    await rm(controlRoot, { recursive: true, force: true }).catch(() => {});
-  }
-});
-
-test('finalizeSourceIdentity is idempotent and never overwrites a recorded end identity', async () => {
-  assertResolverAvailable();
-  const controlRoot = await makeTempRoot('identity-idempotent-control');
-  const binding = bindCandidate(REPO, { scenario: 'local-file-search', attemptIdSuffix: 'identity-idempotent' });
-  await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths, controlRoot });
-  const first = await finalizeSourceIdentity(binding);
-  const sidecarPath = binding.sourceIdentityPath;
-  const firstSidecar = await readFile(sidecarPath, 'utf8');
-  // A scenario may already have finalized the end identity. The sink call must
-  // return that exact capture and must not rewrite the persisted sidecar.
-  const second = await finalizeSourceIdentity(binding);
-  assert.equal(second, first);
-  assert.equal(second.end.digest, first.end.digest);
-  assert.equal(second.stable, first.stable);
-  assert.deepEqual(second.changedPaths, first.changedPaths);
-  assert.equal(await readFile(sidecarPath, 'utf8'), firstSidecar);
-  // A binding that was never bound fails closed instead of inventing an identity.
-  await assert.rejects(
-    () => finalizeSourceIdentity({ repoPath: REPO }),
-    /requires a binding record from bindCandidate/,
-  );
 });
 
 test('public main/CLI stays INCOMPLETE when scenario success has no strict Journal settlement', async () => {
@@ -1948,15 +1831,6 @@ test('public main/CLI keeps SUCCESS when strict settlement and cleanup both comp
     assert.equal(result.receipt.settlement.settled, true);
     assert.equal(result.receipt.cleaned, true);
     assert.equal(result.stageErrors.find((stage) => stage.stage === 'local-file-search_cleanup').ok, true);
-    // The success branch carries the same finalized source identity, so every
-    // branch of the single sink records one shape.
-    const successIdentity = result.receipt.evidence.scenarioEvidence.sourceIdentity;
-    assert.ok(successIdentity, 'a SUCCESS receipt must carry the source identity');
-    assert.equal(typeof successIdentity.stable, 'boolean');
-    assert.equal(successIdentity.stable, true);
-    assert.deepEqual(successIdentity.changedPaths, []);
-    assert.ok(successIdentity.start?.digest, 'the start capture is recorded');
-    assert.ok(successIdentity.end?.digest, 'the end capture is recorded');
   } finally {
     await stopChild(owned);
   }
