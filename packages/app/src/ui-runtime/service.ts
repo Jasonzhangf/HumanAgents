@@ -467,6 +467,11 @@ export interface UiRuntimeGrantExecutionReceipt {
   readonly apiError?: UiRuntimeApiErrorBody;
 }
 
+export interface UiRuntimeTaskControlTarget {
+  readonly projectKey: string;
+  readonly mode: RuntimeMode;
+}
+
 export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
   readonly maxConcurrentTasks?: number;
@@ -1860,6 +1865,52 @@ export class UiRuntimeService {
     const source = await this.findProjectSource(projectKey);
     if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
     return this.taskPlanHistoryFor(source, mode, taskId);
+  }
+
+  /**
+   * Resolve the exact serve-bound Task from Config-owned RuntimePaths and the
+   * live coordinator snapshot. A scope from the request is only compared here;
+   * it never becomes the source of the returned project/mode.
+   */
+  async verifyControllableTaskTarget(
+    taskId: TaskId,
+    projectKey: string,
+    mode: RuntimeMode,
+  ): Promise<UiRuntimeTaskControlTarget> {
+    const source = this.boundProjectSource();
+    if (source === undefined || !this.isBoundScope(projectKey, mode)) {
+      throw new UiRuntimeApiError(
+        'task-control.target.not-bound',
+        APP_OWNER,
+        `task control target ${projectKey}/${mode} is outside the serve-bound scope`,
+        'open the formal task navigation for the active project and mode',
+        409,
+      );
+    }
+    try {
+      const task = this.taskDetail(taskId);
+      if (task.taskId.value !== taskId.value) {
+        throw new UiRuntimeApiError(
+          'task-control.target.not-bound',
+          APP_OWNER,
+          `task control target ${taskId.value} is not the live Task`,
+          'open the formal task navigation for the active live Task',
+          409,
+        );
+      }
+    } catch (error) {
+      if (error instanceof UiRuntimeApiError) throw error;
+      throw new UiRuntimeApiError(
+        'task-control.target.not-bound',
+        APP_OWNER,
+        `task control target ${taskId.value} is not a live Task in ${source.projectKey}/${this.mode}`,
+        'open the formal task navigation for the active live Task',
+        409,
+        undefined,
+        error,
+      );
+    }
+    return { projectKey: source.projectKey, mode: this.mode };
   }
 
   private readonly mode: 'fake' | 'rcc';

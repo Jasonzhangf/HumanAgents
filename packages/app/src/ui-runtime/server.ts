@@ -141,6 +141,23 @@ function requireReadScope(url: URL): { readonly projectKey: string; readonly mod
   return { projectKey, mode };
 }
 
+function optionalTaskControlScope(url: URL): { readonly projectKey: string; readonly mode: 'fake' | 'rcc' } | undefined {
+  const projectKey = url.searchParams.get('projectKey');
+  const mode = url.searchParams.get('mode');
+  if (projectKey === null && mode === null) return undefined;
+  const trimmed = projectKey?.trim();
+  if (!trimmed || (mode !== 'fake' && mode !== 'rcc')) {
+    throw new UiRuntimeApiError(
+      'task-control.scope.invalid',
+      APP_OWNER,
+      'task control scope requires a non-empty projectKey and mode=fake|rcc',
+      'send both projectKey=<declared projectKey>&mode=fake|rcc, or omit both for the legacy route',
+      400,
+    );
+  }
+  return { projectKey: trimmed, mode };
+}
+
 function requireHistoryLimit(url: URL, family: 'context-history' | 'checkpoints' | 'i2-history'): number {
   const limitParam = url.searchParams.get('limit');
   const limit = limitParam === null ? 20 : Number(limitParam);
@@ -831,8 +848,13 @@ async function handleRequest(
       if (verification.state !== 'valid') throw sessionError(verification);
       const principalOwner = verification.principal.owner;
       const taskId = id('task', decodeURIComponent((taskGrantControl ?? taskRevokeControl)![1]!));
+      const scope = optionalTaskControlScope(url);
+      const targetScope = scope === undefined
+        ? undefined
+        : await service.verifyControllableTaskTarget(taskId, scope.projectKey, scope.mode);
       if (taskGrantControl && method === 'GET') {
-        writeJson(response, 200, await taskControl.read(taskId, principalOwner));
+        const receipt = await taskControl.read(taskId, principalOwner);
+        writeJson(response, 200, targetScope === undefined ? receipt : { ...receipt, targetScope });
         return;
       }
       if ((taskGrantControl && method === 'POST') || (taskRevokeControl && method === 'POST')) {
@@ -849,9 +871,10 @@ async function handleRequest(
         if (taskGrantControl) {
           const receipt = await taskControl.grant(input);
           const execution = await service.releaseGrantedTaskExecution(taskId);
-          writeJson(response, 200, { ...receipt, execution });
+          writeJson(response, 200, { ...receipt, execution, ...(targetScope === undefined ? {} : { targetScope }) });
         } else {
-          writeJson(response, 200, await taskControl.revoke(input));
+          const receipt = await taskControl.revoke(input);
+          writeJson(response, 200, targetScope === undefined ? receipt : { ...receipt, targetScope });
         }
         return;
       }

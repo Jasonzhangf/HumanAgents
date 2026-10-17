@@ -4,7 +4,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createServer } from 'node:http';
-import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
+import {
+  ensureControlLayout,
+  resolveRuntimePaths,
+  type AgentRole,
+  type EffectiveAgentProviderBinding,
+} from '../../packages/config/src/index.js';
 import type { AnyProviderExecutionIdentityRef, ProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
 import { prepareAgentProvider, prepareExecutionAgentProvider, createAgentProviderPort } from '../../packages/app/src/agent-driver-composition.js';
 import { startUiRuntime, type UiRuntime, uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/index.js';
@@ -22,6 +27,183 @@ import { FileCheckpointStore, FakeReplayExecutionRuntimePort, UiRuntimeJournal, 
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { UiTaskGrantControl, TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY, type TaskGrantControlReceipt } from '../../packages/app/src/ui-runtime/task-control.js';
+
+test('scoped task control rejects a different bound target before grant or release', async () => {
+  const base = join(homedir(), '.humanagent', 'test-fixtures');
+  await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'task-grant-scoped-target-http-'));
+  let server: UiRuntimeServer | undefined;
+  try {
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+    await ensureControlLayout(paths);
+    const organId = id('organ', 'scoped-target-organ');
+    const binding: ProviderBinding = {
+      bindingId: 'scoped-target-binding', providerId: 'scoped-target-provider', protocol: 'responses',
+      endpointRef: 'fixture:unused', modelRef: 'fixture', configDigest: 'sha256:fixture', capabilityDigest: 'sha256:fixture',
+    };
+    class CountingPort extends FakeReplayExecutionRuntimePort {
+      readonly starts: ProviderStartInput[] = [];
+      override async start(input: ProviderStartInput) {
+        this.starts.push(input);
+        return super.start(input);
+      }
+    }
+    const port = new CountingPort({ binding, stepDelayMs: 1 });
+    const runtimeJournal = new UiRuntimeJournal(join(root, 'runtime.jsonl'));
+    const service = new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      binding,
+      port,
+      providerState: 'ready',
+      journal: runtimeJournal,
+      closurePort: runtimeJournal,
+      checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `${taskId.value}-${cycleId.value}.jsonl`)),
+      attentionPort: {
+        async publish(input) { return { attentionId: input.attentionId, delivered: true }; },
+        async resolve(input) { return { attentionId: input.attentionId, delivered: true }; },
+      },
+      memory: {
+        coordinator: new MemoryCoordinator(),
+        backend: new DeterministicMemoryBackend(),
+        projectKey: paths.projectKey,
+        roleId: 'execution',
+      },
+      explicitBrainInterpreter: { async interpret() { throw new Error('not used by control flow'); } },
+      projectKey: paths.projectKey,
+      runtimePaths: paths,
+    });
+    const task = service.createTask({ title: 'scoped HTTP grant fixture' });
+    const journal = new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(paths.checkpointsRoot, 'fake')));
+    const grants = new JsonlTaskGrantJournal(journal);
+    const taskControl = new UiTaskGrantControl({
+      journal,
+      organId,
+      capability: { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY] },
+      now: () => new Date(),
+      taskScope(taskId) {
+        return { organId, taskId: service.taskDetail(taskId).taskId };
+      },
+      stopTask: (taskId) => service.stop(taskId),
+    });
+    const accessControl = await AccessControlService.open({
+      credentialPath: join(root, 'security', 'web-access.json'),
+      create: true,
+    });
+    const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('scoped-target-lease', 1).code);
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    server = await startUiRuntimeServer({ service, accessControl, taskControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
+    const path = `/api/tasks/${encodeURIComponent(task.taskId.value)}/control`;
+    const request = async (suffix: string, body?: unknown, query = '') => {
+      const response = await fetch(`${server!.url}${path}/${suffix}${query}`, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: { cookie, origin: server!.url, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      return {
+        status: response.status,
+        body: await response.json() as TaskGrantControlReceipt & {
+          readonly targetScope?: { readonly projectKey: string; readonly mode: 'fake' | 'rcc' };
+          readonly error?: { readonly code: string };
+          readonly execution?: { readonly state: string };
+        },
+      };
+    };
+
+    const unscopedRead = await request('grant');
+    assert.equal(unscopedRead.status, 200);
+    assert.equal(unscopedRead.body.targetScope, undefined);
+    const unscopedGrant = await request('grant', { requestId: 'unscoped-grant', expectedRevision: 0 });
+    assert.equal(unscopedGrant.status, 200);
+    assert.equal(unscopedGrant.body.targetScope, undefined);
+    assert.equal(unscopedGrant.body.readback.grant?.state, 'granted');
+    const unscopedRevoke = await request('revoke', {
+      requestId: 'unscoped-revoke',
+      expectedRevision: unscopedGrant.body.readback.grant!.revision,
+    });
+    assert.equal(unscopedRevoke.status, 200);
+    assert.equal(unscopedRevoke.body.readback.grant?.state, 'revoked');
+    const baseline = (await journal.verify()).records.length;
+    const expectedRevision = unscopedRevoke.body.readback.grant!.revision;
+    const baselineGrant = unscopedRevoke.body.readback.grant;
+
+    const wrongProject = await request('grant', { requestId: 'wrong-project-grant', expectedRevision },
+      `?projectKey=${encodeURIComponent(`${paths.projectKey}-other`)}&mode=fake`);
+    assert.deepEqual({
+      status: wrongProject.status,
+      errorCode: wrongProject.body.error?.code,
+      journalRecords: (await journal.verify()).records.length,
+      providerStarts: port.starts.length,
+      grant: (await grants.readTaskGrant(task.taskId)).grant,
+    }, {
+      status: 409,
+      errorCode: 'task-control.target.not-bound',
+      journalRecords: baseline,
+      providerStarts: 0,
+      grant: baselineGrant,
+    });
+
+    const wrongMode = await request('grant', { requestId: 'wrong-mode-grant', expectedRevision },
+      `?projectKey=${encodeURIComponent(paths.projectKey)}&mode=rcc`);
+    assert.deepEqual({
+      status: wrongMode.status,
+      errorCode: wrongMode.body.error?.code,
+      journalRecords: (await journal.verify()).records.length,
+      providerStarts: port.starts.length,
+      grant: (await grants.readTaskGrant(task.taskId)).grant,
+    }, {
+      status: 409,
+      errorCode: 'task-control.target.not-bound',
+      journalRecords: baseline,
+      providerStarts: 0,
+      grant: baselineGrant,
+    });
+
+    for (const [label, query] of [
+      ['partial', `?projectKey=${encodeURIComponent(paths.projectKey)}`],
+      ['invalid', `?projectKey=${encodeURIComponent(paths.projectKey)}&mode=dsh`],
+    ] as const) {
+      const rejected = await request('grant', { requestId: `${label}-scope-grant`, expectedRevision }, query);
+      assert.deepEqual({
+        status: rejected.status,
+        errorCode: rejected.body.error?.code,
+        journalRecords: (await journal.verify()).records.length,
+        providerStarts: port.starts.length,
+        grant: (await grants.readTaskGrant(task.taskId)).grant,
+      }, {
+        status: 400,
+        errorCode: 'task-control.scope.invalid',
+        journalRecords: baseline,
+        providerStarts: 0,
+        grant: baselineGrant,
+      });
+    }
+
+    const scopedRead = await request('grant', undefined,
+      `?projectKey=${encodeURIComponent(paths.projectKey)}&mode=fake`);
+    assert.equal(scopedRead.status, 200);
+    assert.deepEqual(scopedRead.body.targetScope, { projectKey: paths.projectKey, mode: 'fake' });
+    const scopedGrant = await request('grant', { requestId: 'scoped-grant', expectedRevision },
+      `?projectKey=${encodeURIComponent(paths.projectKey)}&mode=fake`);
+    assert.equal(scopedGrant.status, 200);
+    assert.deepEqual(scopedGrant.body.targetScope, { projectKey: paths.projectKey, mode: 'fake' });
+    assert.equal(scopedGrant.body.readback.grant?.state, 'granted');
+    assert.equal(scopedGrant.body.execution?.state, 'not-applicable');
+    const scopedRevoke = await request('revoke', {
+      requestId: 'scoped-revoke',
+      expectedRevision: scopedGrant.body.readback.grant!.revision,
+    }, `?projectKey=${encodeURIComponent(paths.projectKey)}&mode=fake`);
+    assert.equal(scopedRevoke.status, 200);
+    assert.deepEqual(scopedRevoke.body.targetScope, { projectKey: paths.projectKey, mode: 'fake' });
+    assert.equal(scopedRevoke.body.readback.grant?.state, 'revoked');
+    assert.equal(port.starts.length, 0);
+  } finally {
+    await server?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('HTTP grant control uses verified owner and durable readback without releasing execution', async () => {
   const base = join(homedir(), '.humanagent', 'test-fixtures');
