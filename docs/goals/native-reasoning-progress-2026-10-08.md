@@ -2,6 +2,9 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- App新turn准入b52cbd65+b1e32b2b已正常合candidate；contracts/Appbuild、app testtsc均0，原inspect/cold受影响两个consumer2/2PASS（session78014，inspection-turn-plan-admission-composed-20261017.txt）。本次candidate sourceCLI，未冒installed新product；真实RED来自acceptedPlan缺字段及boundary-only误读currentPlan，原holdtimeout不当RED。最终producer/helper接线仍OPEN，源码生命周期回执由peer负责。
+- N2观察r272与N3观察r273均完成，独立规划并行推进。N2已有列表summary/committedAt、App确认控制facade、追加路径/精确结论排除、proposal-only Memory及对应main公有consumer；拒绝额外description/time resolver和“重跑原进程内case变installed证明”的扩面。r276仅规划必要调用边/缺证据。N3确认live dispatched map与durable returned恢复的边界，r274核心缺口有依据，但需求ID/真实helperID后缀/API参数/tsc配置含错误，退同Planner会话r275局部修订后才可实现。相关Runtime会话/原consumer无UXwriter已确认，勿重复询问；父acceptance文件保存两观察的证明边界。
+
 - 独立交付已完成的installed冷恢复测试改进，不等UX producer：唯一candidate已接收的8e9a4283/9a088896正常cherry-pick main为ff0423a3/3c6cd1ec，仅原native consumer文件变化，产品源码未变。main目标tsc0、installed原五公开consumer5/5PASS（session14029，installed-cold-main-delivery-20261017.txt），包括C1/C2 metadata与Journal比对。常规测试提交复用有效产品milestone Review，不新增leafReview；未变产品不重复安装/restart。实际新OS冷恢复仍同op3/businessTurn、epoch3→4、initial-open、raw排除/noeffectsreplay/EXACT_BODY/Plannercomplete。受控上游证据不扩真实RCC，后者仍INCOMPLETE。该测试改进已在main，UX producer基础仍仅candidate。
 
 - inspection业务范围出处已核实一次：docs/ui/semantic-observation-audit-2026-10-07.md“权威需求”原始用户问题明确巡检/长程/单次，G1/F04/巡检模板/验收要求两次兼容巡检并按check ID比较；docs/goals/semantic-observation-execution-plan-2026-10-08.md I2绑定该生产缺口。peer另提供本线程用户按检查项ID比较及后续UX生产接管原话。v14账本没有inspection专条，不虚称存在、不为此补改；既有声明需求足以支撑UX I2的typed producer接线。原范围疑问已关闭，不重复查证或请求批准；不将该业务扩为Provider门禁/新自动调度。旧文档固定角色顺序按后来v14动态编排要求覆盖。peer现有App准入/stop/helpers/childproducer四路独占继续。
