@@ -24,6 +24,10 @@ r187 作者报告已在并发屏障取得两实例，但宿主实际运行虽 1/
 
 双 Task 有效基线已通过：r196 纠正 typed Journal reader 的 root 层级（fixture 的已派生 `checkpointRoot` 不再交给项目 root helper 多加 `ui-runtime`），宿主原 named consumer **1/1 PASS**。实际 `executionInitials=2`、`maxActiveExecutionInitials=2`、`plannerRequests=2`，两份精确 final 输出，runtime IDs 为 `ui-runtime-ui-operation-implicit-draft-2` 与 `ui-runtime-ui-operation-implicit-draft-4`；非空、互异、实际 allocation/运行状态/请求 barrier 三类证据同在。来源未提交合流；r197 复用同树继续 r192 已规划的预算2第三任务容量反例，不新增产品能力，未把并发基线冒充容量限制证明。
 
+容量后续有效 GREEN：r197 实际退出时仍有 TS2367（误比较 UI surface state 与 succeeded），未接受其退出码；r200 仅修测试，用 output.state/精确输出与 typed operation final success。宿主原 consumer **1/1 PASS**：第三 Task 在两个运行中收到 `implicit-admission.waiting` / `runtime-coordinator` / `wait:queue.execution.concurrency`，第一个正常完成后可重走同一公开动作准入并 grant release；3份精确 final、3 Planner，最高同时请求2。来源测试已提交 `ba711a9c`，尚未合流。r201 只在生成测试 artifact 临时把 maxConcurrentTasks2改3，保留原断言取得真实反例，再恢复 GREEN；不改产品或源码测试。
+
+语义图/规则前置已提交 `001c634f`，五文件 diff 与现有图 validate 通过（8nodes/8edges/7waves）。r198 最终回复不含实际检查，宿主补足检查后才接受。r199 正实施现有模板与工具描述；发现 child delivery 广告真实 owner 在 child-producer.ts，后续只修准确文案 owner，不复制控制定义。wire投影仍OPEN。UX正式grant入口两源按最小target合同推进，不与本侧source冲突。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
