@@ -362,7 +362,6 @@ export function createDefaultExecutionComposition(input: {
     const selected = await input.prepareAgentProvider({ roleId: source.allocation.role ?? 'execution',
       ...(source.allocation.configuredAgentId === undefined ? {} : { configuredAgentId: source.allocation.configuredAgentId }) });
     try {
-      if (selected.roleId !== 'execution') missing('actual cold Provider selection does not bind the execution role');
       const initialBinding = initialBindingOf(source.initial);
       return { contextHistory: context, request: { role: 'execution', mode: 'observation',
         profiles: [{ profileId: 'task-execution-context', role: 'execution', mode: 'observation',
