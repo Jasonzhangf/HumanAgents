@@ -2,6 +2,9 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- 冷来源已宿主原case1/1、两三turn2/2并source提交7f455088；正常merge冲突经r239/r240保留双方后，宿主唯一candidate原五consumer 5/5 PASS（inspect/two/three/cold/genericHTTP），Appbuild/tsc0。merge提交f8ec6ee4。cold实证新OS同op3/businessTurn、epoch3→4、initial-open、前两完成语义/child/raw排除/noeffectsreplay、exact final/Plannercomplete；不扩真实RCC。原cold来源clean/无进程后remove/prune/pathabsent。最新docs-onlyorigin/main e053acc7已正常合。
+- I2 UI b0520813已正常合candidate，与已合I2App组合后原selected browser consumer36/36 PASS，证据run i2-ui-composed-20261017；已告知UXowner收来源。未main/install/push。start/settle source hostProvider两例2/2 PASS，serve-runtime整文件17/19：confirmed requirement非成功收拢case未消费、同Taskepochcase缺grant，尚未归因；不将EMFILE或目标case通过扩为整文件PASS。
+
 - r235 READY 实读 `cqZ0gy` 两次真实出站body：epoch3/4均C1先C2、C1含child，key排序为actions/adoptedChildren/goal，旧字符位置断言无契约依据。r237 GCM在原cold树将其替换为checkpoint有序结构与child归属断言，并要求内存交换/删除/移动反例实际失败，原最终条件保持。r234 start/settle计划已接受；另一个独占clean来源树 `provider-review-start-settle-20261017` 从唯一candidate创建，r236 GCM拥有4指定文件，先原consumer RED再driver真实acquisition查询/App镜像消融。两GCM已核实存活，尚未验收、未提交来源、未main交付。其余来源盘点仅control/candidate/cold/UXUI，未清他人资源。
 
 - r233 parser已source/compiled并compile0，worker自身原case遇EMFILE/watch退出，未提交；不当产品错。宿主同case已越过review，最终在 `resumedContext.indexOf(TURN_ONE_GOAL) < resumedContext.indexOf(CHILD_BODY)` 失败，fixture `text-only-cqZ0gy` 保留（0/1）。r235独立OAuth核对结构与真实index命中，不先删断言。r234独立OAuth并行规划生产start/settle finding；无新增worktree、无重叠writer。完整cold仍未GREEN。
