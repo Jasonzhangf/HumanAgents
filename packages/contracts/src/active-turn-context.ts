@@ -31,8 +31,12 @@ import type { RecoveryHoldFacts } from './native-reasoning.js';
 import {
   validateInspectionExecutableCheck,
   validateInspectionExecutionBinding,
+  validateInspectionItemDelivery,
+  validateJournalCommitRef,
   type InspectionExecutionBinding,
   type InspectionExecutableCheck,
+  type InspectionItemDelivery,
+  type JournalCommitRef,
 } from './i2-history.js';
 
 /**
@@ -179,6 +183,7 @@ export interface AcceptedExecutionChildDelivery {
   readonly refinedDelivery: RawAsset;
   readonly assignment: WorkAssignment;
   readonly result: WorkResult;
+  readonly inspectionDelivery?: InspectionItemDelivery;
 }
 
 /**
@@ -279,12 +284,19 @@ export interface CompletionRef {
   readonly effectRef?: string;
 }
 
+/** The accepted plan revision committed for one active turn. */
+export interface TurnPlanBinding {
+  readonly revisionId: string;
+  readonly revisionCommitRef: JournalCommitRef;
+}
+
 /** The Runtime-owned business identity of one active turn. */
 export interface ActiveTurnBinding {
   readonly admittedTurn: AdmittedTurn;
   readonly assignment: WorkAssignment;
   readonly execution: ActiveTurnProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
+  readonly acceptedPlan?: TurnPlanBinding;
 }
 
 /**
@@ -540,6 +552,16 @@ function assertChildCallBinding(value: unknown, label: string): asserts value is
   throw new ContractError(`${label} kind is invalid`);
 }
 
+export function validateTurnPlanBinding(
+  value: unknown,
+  label = 'turn plan binding',
+): asserts value is TurnPlanBinding {
+  assertPlainObject(value, label);
+  assertNonEmptyString(value.revisionId, `${label} revisionId`);
+  assertPlainObject(value.revisionCommitRef, `${label} revisionCommitRef`);
+  validateJournalCommitRef(value.revisionCommitRef as unknown as JournalCommitRef);
+}
+
 export function validateChildInvocationIncarnation(
   incarnation: unknown,
   binding: ChildCallBinding,
@@ -573,6 +595,33 @@ function assertSameExecutionAssignmentIdentity(binding: WorkAssignment, delivery
   }
 }
 
+function assertInspectionDeliveryMatchesInvocation(
+  invocation: ChildInvocationRecord,
+  delivery: AcceptedExecutionChildDelivery,
+): void {
+  if (invocation.binding.kind !== 'execution' || invocation.binding.inspection === undefined) {
+    throw new ContractError('capture child inspection delivery requires an inspection invocation');
+  }
+  if (delivery.inspectionDelivery === undefined) {
+    throw new ContractError('capture inspection invocation requires typed inspection delivery');
+  }
+  if (delivery.inspectionDelivery.checkId !== invocation.binding.inspection.check.checkId) {
+    throw new ContractError('capture inspection delivery check does not match its invocation binding');
+  }
+  if (delivery.inspectionDelivery.attempt !== delivery.assignment.attempt) {
+    throw new ContractError('capture inspection delivery attempt does not match its invocation assignment');
+  }
+  if (delivery.inspectionDelivery.resultId !== `inspection-result:${invocation.invocationId}`) {
+    throw new ContractError('capture inspection delivery result id does not match its invocation');
+  }
+  const inspectionBinding = invocation.binding.inspection.binding;
+  if (inspectionBinding.executionEpoch !== delivery.assignment.executionEpoch
+    || inspectionBinding.executionScope.taskId?.value !== delivery.assignment.taskId.value
+    || inspectionBinding.occurrence.scope.taskId.value !== delivery.assignment.taskId.value) {
+    throw new ContractError('capture inspection binding does not match its invocation assignment');
+  }
+}
+
 export function validateAcceptedChildDelivery(input: unknown): asserts input is AcceptedChildDelivery {
   assertPlainObject(input, 'accepted child delivery');
   assertPositiveSafeInteger(input.seq, 'accepted child delivery seq');
@@ -582,9 +631,15 @@ export function validateAcceptedChildDelivery(input: unknown): asserts input is 
     assertWorkAssignmentShape(input.assignment, 'accepted child delivery assignment');
     assertPlainObject(input.result, 'accepted child delivery result');
     validateWorkResult(input.result as unknown as WorkResult, input.assignment);
+    if (input.inspectionDelivery !== undefined) {
+      validateInspectionItemDelivery(input.inspectionDelivery as unknown as InspectionItemDelivery);
+    }
     return;
   }
   if (input.kind === 'review') {
+    if (input.inspectionDelivery !== undefined) {
+      throw new ContractError('accepted review child delivery cannot carry inspection delivery');
+    }
     validateReviewAssignment(input.assignment);
     validateReviewResult(input.result);
     assertReviewResultMatchesAssignment(input.assignment, input.result);
@@ -652,6 +707,11 @@ export function validateChildInvocationReferences(
     if (entry.kind !== invocation.binding.kind) throw new ContractError(`${label} child delivery kind does not match its invocation binding`);
     if (entry.kind === 'execution' && invocation.binding.kind === 'execution') {
       assertSameExecutionAssignmentIdentity(invocation.binding.assignment, entry.assignment);
+      if (invocation.binding.inspection !== undefined) {
+        assertInspectionDeliveryMatchesInvocation(invocation, entry);
+      } else if (entry.inspectionDelivery !== undefined) {
+        throw new ContractError(`${label} ordinary execution delivery cannot carry inspection delivery`);
+      }
     } else if (entry.kind === 'review' && invocation.binding.kind === 'review') {
       assertReviewAssignmentsMatch(invocation.binding.assignment, entry.assignment);
     }
@@ -665,6 +725,9 @@ export function validateActiveTurnCaptureBody(input: unknown): asserts input is 
 
   assertPlainObject(input.binding, 'capture binding');
   const binding = input.binding as unknown as ActiveTurnBinding;
+  if (binding.acceptedPlan !== undefined) {
+    validateTurnPlanBinding(binding.acceptedPlan, 'capture binding acceptedPlan');
+  }
   assertPlainObject(binding.admittedTurn, 'capture binding admittedTurn');
   assertNonEmptyString(binding.admittedTurn.turnId, 'capture binding admittedTurn.turnId');
   assertNonEmptyString(binding.admittedTurn.workAssignmentRef, 'capture binding admittedTurn.workAssignmentRef');

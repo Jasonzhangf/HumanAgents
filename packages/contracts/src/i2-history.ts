@@ -7,6 +7,7 @@ import type {
   NextAction,
   ScopeRef,
   WorkAssignment,
+  WorkResult,
 } from './index.js';
 import { validateTaskFlowBinding } from './task-flow.js';
 import type { TaskFlowBinding } from './task-flow.js';
@@ -211,6 +212,16 @@ export interface InspectionCheckPort {
     readonly binding: InspectionExecutionBinding;
     readonly check: InspectionExecutableCheck;
     readonly assignment: WorkAssignment;
+  }): Promise<InspectionItemDelivery>;
+}
+
+export interface InspectionAcceptedCheckPort extends InspectionCheckPort {
+  accept(input: {
+    readonly binding: InspectionExecutionBinding;
+    readonly check: InspectionExecutableCheck;
+    readonly assignment: WorkAssignment;
+    readonly result: WorkResult;
+    readonly delivery: InspectionItemDelivery;
   }): Promise<InspectionItemDelivery>;
 }
 

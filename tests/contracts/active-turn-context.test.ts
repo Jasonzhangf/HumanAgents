@@ -44,6 +44,7 @@ import { ContractError as SourceContractError } from '../../packages/contracts/s
 import {
   type InspectionExecutableCheck,
   type InspectionExecutionBinding,
+  type InspectionItemDelivery,
 } from '../../packages/contracts/src/i2-history.js';
 
 const organId = id('organ', 'organ-a');
@@ -158,24 +159,32 @@ function inspectionBody(
   };
 }
 
-test('inspection child binding accepts typed inspection and rejects an incomplete nested check', () => {
-  const inspectionBinding: InspectionExecutionBinding = {
-    occurrence: { scope: { organId, taskId }, occurrenceId: 'occurrence-a' },
-    executionScope: scope,
-    cycleId: 'cycle-a',
-    executionEpoch: 3,
-    definition: { definitionId: 'definition-a', definitionVersion: 'v1' },
-    definitionCommitRef: { commitId: 'commit-definition', journalSeq: 1, recordDigest: 'sha256:definition' },
-    definitionDigest: 'sha256:inspection-definition',
-    cycleOpenedCommitRef: { commitId: 'commit-cycle-open', journalSeq: 2, recordDigest: 'sha256:cycle-open' },
-    scheduleOccurrenceRef: null,
-  };
-  const inspectionCheck: InspectionExecutableCheck = {
-    checkId: 'check-a',
-    criterion: 'Observe the child result',
-    inputRefs: [],
-  };
+const inspectionBinding: InspectionExecutionBinding = {
+  occurrence: { scope: { organId, taskId }, occurrenceId: 'occurrence-a' },
+  executionScope: scope,
+  cycleId: 'cycle-a',
+  executionEpoch: 3,
+  definition: { definitionId: 'definition-a', definitionVersion: 'v1' },
+  definitionCommitRef: { commitId: 'commit-definition', journalSeq: 1, recordDigest: 'sha256:definition' },
+  definitionDigest: 'sha256:inspection-definition',
+  cycleOpenedCommitRef: { commitId: 'commit-cycle-open', journalSeq: 2, recordDigest: 'sha256:cycle-open' },
+  scheduleOccurrenceRef: null,
+};
+const inspectionCheck: InspectionExecutableCheck = {
+  checkId: 'check-a',
+  criterion: 'Observe the child result',
+  inputRefs: [],
+};
+const inspectionDelivery: InspectionItemDelivery = {
+  checkId: inspectionCheck.checkId,
+  resultId: 'inspection-result:invocation-a',
+  attempt: assignment.attempt,
+  outcome: { status: 'completed', judgment: 'satisfies' },
+  evidenceRefs: [evidence('inspection-delivery')],
+  completedAt: '2026-10-17T00:00:00.000Z',
+};
 
+test('inspection child binding accepts typed inspection and rejects an incomplete nested check', () => {
   assert.doesNotThrow(() => validateActiveTurnCaptureBody(inspectionBody({
     kind: 'execution',
     assignment,
@@ -187,6 +196,123 @@ test('inspection child binding accepts typed inspection and rejects an incomplet
     assignment,
     inspection: { binding: inspectionBinding, check: { ...inspectionCheck, criterion: '' } },
   })), ContractError);
+});
+
+test('inspection delivery keeps its typed result and rejects missing or mismatched invocation delivery', () => {
+  const inspectionResult: WorkResult = {
+    ...childResult,
+    assignmentId: assignment.assignmentId,
+    pipelineNodeId: assignment.pipelineNodeId,
+    summary: 'inspection child delivery',
+  };
+  const inspectionEntry = {
+    kind: 'execution' as const,
+    seq: 6,
+    invocationId: 'invocation-a',
+    refinedDelivery: rawAsset('refined-inspection'),
+    assignment,
+    result: inspectionResult,
+    inspectionDelivery,
+  };
+  const capture = {
+    ...baseBody,
+    entries: [...baseBody.entries.slice(0, -1), inspectionEntry],
+    childInvocations: [
+      {
+        invocationId: 'invocation-a',
+        childTurnId: 'turn-child',
+        checkpointReceiptRef: 'checkpoint-receipt-a',
+        binding: {
+          kind: 'execution' as const,
+          assignment,
+          inspection: { binding: inspectionBinding, check: inspectionCheck },
+        },
+        adoptedResultSeq: 6,
+      },
+    ],
+  };
+
+  assert.doesNotThrow(() => validateActiveTurnCaptureBody(capture));
+  const retained = (capture.entries[5] as unknown as { inspectionDelivery?: InspectionItemDelivery }).inspectionDelivery;
+  assert.deepEqual(retained?.outcome, { status: 'completed', judgment: 'satisfies' });
+  assert.equal(retained?.evidenceRefs[0]?.evidenceId.value, 'inspection-delivery');
+
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    entries: [...capture.entries.slice(0, -1), { ...inspectionEntry, inspectionDelivery: undefined }],
+  }), ContractError);
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    entries: [...capture.entries.slice(0, -1), {
+      ...inspectionEntry,
+      inspectionDelivery: { ...inspectionDelivery, checkId: 'check-other' },
+    }],
+  }), ContractError);
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    entries: [...capture.entries.slice(0, -1), {
+      ...inspectionEntry,
+      inspectionDelivery: { ...inspectionDelivery, resultId: 'inspection-result:invocation-other' },
+    }],
+  }), ContractError);
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    entries: [...capture.entries.slice(0, -1), {
+      ...inspectionEntry,
+      inspectionDelivery: { ...inspectionDelivery, attempt: 2 },
+    }],
+  }), ContractError);
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    childInvocations: [{
+      ...capture.childInvocations[0]!,
+      binding: {
+        ...capture.childInvocations[0]!.binding,
+        inspection: {
+          ...capture.childInvocations[0]!.binding.inspection,
+          binding: { ...inspectionBinding, executionEpoch: 4 },
+        },
+      },
+    }],
+  }), ContractError);
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    childInvocations: [{
+      ...capture.childInvocations[0]!,
+      binding: { kind: 'execution' as const, assignment },
+    }],
+  }), ContractError);
+});
+
+test('accepted turn plan keeps a valid explicit binding and rejects invalid structure', () => {
+  const acceptedPlan = {
+    revisionId: 'revision-a',
+    revisionCommitRef: {
+      commitId: 'commit-plan-a',
+      journalSeq: 9,
+      recordDigest: 'sha256:plan-a',
+    },
+  };
+  const capture = {
+    ...baseBody,
+    binding: { ...baseBody.binding, acceptedPlan },
+  };
+
+  assert.doesNotThrow(() => validateActiveTurnCaptureBody(capture));
+  const retained = (capture.binding as unknown as { acceptedPlan?: typeof acceptedPlan }).acceptedPlan;
+  assert.deepEqual(retained, acceptedPlan);
+  assert.doesNotThrow(() => validateActiveTurnCaptureBody(baseBody));
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    binding: { ...capture.binding, acceptedPlan: { ...acceptedPlan, revisionId: '' } },
+  }), ContractError);
+  assert.throws(() => validateActiveTurnCaptureBody({
+    ...capture,
+    binding: {
+      ...capture.binding,
+      acceptedPlan: { ...acceptedPlan, revisionCommitRef: { ...acceptedPlan.revisionCommitRef, recordDigest: '' } },
+    },
+  }), ContractError);
 });
 
 test('production capture proof binds the actual producer boundary and durable raw sequence', () => {
@@ -627,6 +753,13 @@ const reviewBody: ActiveTurnCaptureBody = {
   ],
   cut: { ...baseBody.cut, lastSeq: 7 },
 };
+
+test('inspection delivery is rejected for a review child delivery', () => {
+  assert.throws(
+    () => validateAcceptedChildDelivery({ ...reviewDelivery, inspectionDelivery }),
+    ContractError,
+  );
+});
 
 test('a review delivery is bound to its review invocation and keeps findings, subject and evidence', () => {
   assert.doesNotThrow(() => validateActiveTurnCaptureBody(reviewBody));
