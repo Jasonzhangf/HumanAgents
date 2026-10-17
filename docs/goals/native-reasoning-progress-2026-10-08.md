@@ -58,6 +58,8 @@ M4既有consumer已接候选 `67507112`（标准FF）：只修改原agent-activi
 
 正确第三轮恢复当前首错：r216已移除无独立保证的firstTurnFacts固定总数块，保留真实完成与无重放条件，compile0。宿主原case（fixture `text-only-Aa0CoO`）前两轮完成、第三轮dispatched、第二OSchild正式resume返回409 `cold-execution.source-unavailable`，原因为canonical current context与committed segment tail incarnation不匹配。故障边界为App `cold-execution-source.ts` 的scope/runtimeId/positionEpoch/loopCheckpointEpoch联合比较。独立OAuth小Plan r217定位实际左右值与唯一producer/selector根因，未放宽predicate、未产品patch。旧turn1role409不是本次第三轮首错。M4来源已回正常remove/prune/pathabsent。
 
+冷生产两项局部修复已在来源：r217核实producer已写thirdroot/currentseq137/138，错误是readColdCurrent按taskScope找到secondcheckpointepoch2而误走checkpoint-bound；r218仅以allocation完整scope选分支，source `4fdf834b`，build/compile0，宿主原例越过context/tail条件但在固定execution role检查409（`text-only-p2Jl17`）。r219核实真实prepareowner已有角色一致性校验，r220只删除重复错误检查，source `d73bda64`，build/compile0。宿主原例再越过角色拒绝，现到 `orchestration.dispatch.failed` / review acceptance criteria content does not match acceptanceCriteriaDigest（`text-only-mt7JxT`）。r221独立小Plan核对cold是否误进M3及实际review材料owner；不删除材料断言，不扩guard/框架。完整coldconsumer仍未GREEN，来源未合候选。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
