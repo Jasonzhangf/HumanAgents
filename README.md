@@ -88,7 +88,7 @@ session，写入 `~/.humanagent/main/sessions/explicit-brain.jsonl`。对项目�
 session 仍写入 `~/.humanagent/sessions/<project-key>/<session-id>.jsonl`；启动目录
 只作为 workspace，不改变这两个持久化位置。
 
-`pnpm build` 使用 `~/.humanagent/build/checkpoints/build/<project-key>/manifest.json` 保存 `typecheck → compile` 的 stage checkpoint；`pnpm run ci` 使用独立的 `.../checkpoints/ci/<project-key>/manifest.json`；`pnpm build:release` 使用独立的 `.../checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke`。三条链共享 `~/.humanagent/build/locks/<project-key>/.run.lock`，不会并发改写同一工作树的编译产物。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
+`pnpm build` 直接运行类型检查和编译；`pnpm run ci` 在此基础上运行服务回归。两者不保存治理 checkpoint 或候选身份材料。复用已有有效行为结果，不以摘要或冻结记录决定日常放行；本地打包和安装用法见下文。
 
 `serve` 启动本地 HumanAgent Runtime API 和打包内置 UI（源码开发时才回退到
 `docs/ui`）。默认 provider 来自 `~/.humanagent/config.toml` 的 `[provider]`，
