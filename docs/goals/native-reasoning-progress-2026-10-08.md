@@ -6,6 +6,10 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 后继接线：r24确认main无另一条已闭合新Task入口，UXpeer也未提供不同入口证据；独立Gemini4 medium r26只规划正式identity/grant/defaultadmission闭包，与peer readonly hydrate分hunk，不整candidate入main。独立Provider安装消费r25依赖根机制已接收，但拒绝退为普通单请求：GCM r27将原proof全部9imports统一选canonical根，父随后跑原TOOL_LOOP，AppTask仍单列INCOMPLETE。peer确认暂保当前canonical供此轮消费。
+- Memory hook技术候选 `f1dea48c` 已正常提交，build/tsc0，production缺hook实际RED已取得；hot/fresh现在均在真实跨cycle group发布处RED，`event evidence scope exceeds event scope`。业务epoch6/7继续、原Planner与收口、可选Memory故障原cause/HTTP degraded、启动补审不重播已有实际部分证据；不能冒group/appliedreceipt/curation通过。独立scope小Planner r21核producer共同Task scope最小修复，不放宽Runtime通用scope校验或篡改旧refs。
+- N3 r33已核唯一丢失点child-run mapper，GCM r34应用raw+accepted evidence单hunk并继续原case；模型body引用缺失已解除，最新case到父收口仍失败 `actual parent lifecycle control is unknown`，Planner尚未运行，不计GREEN。停止边界GCM r4约45读0edit已精确INT13148→exit1/absent，同树technical r5续条件反例，不把源码假设当缺陷。当前各未通过项保持开放。
+
 - 2026-10-17 Provider slice整体Review已由现有controller原函数校验PASS（Gemini4 medium/SUCCESS/exit0/schema有效/findings[]），control main先FF最新origin再FF delivery至 `69854637`，仅7个Provider/contracts/proof文件。main正式source/config/App构建、package:candidate、canonical install:global均exit0，版本0.1.0031。UXpeer让出安装窗口但保53007，父隔离新root `~/.humanagent/test-fixtures/provider-main-installed-r24-20261017` 启动canonical serve并官方restart exit0：gen1/PID25837→gen2/PID52264/端口50341，legacyClose clean。未碰原53007/A0。
 - 安装后业务复验未通过：正式pair→新Task→公开executions→SSE final立即blocked，`execution admission source is not bound`，无Provider请求。原公开消费脚本exit0仅OBSERVED，不计PASS。receipt与安装/restart日志在main review r23目录。main尚未push，不宣称标准交付；已同步UXpeer并派独立小Planner r24核正式入口与最小App owner缺边，禁止绕grant/手写Journal/整candidate合入。Provider公共三协议3/3有效证据不扩成App可用。
 - Child map `256df637` 接收后父正常build/tsc0、原完整consumer4PASS/1FAIL，首错为新fixture漏既有必填instructions；同树technical r32只修合法交接输入并继续原断言。Memory正确基础GCM r19约40批读0edit，父精确INT88211→exit1/absent，原树technical r20续已接受hook合同。stop复核r3接受P1/P2-a条件红测、否决P3误报和宽catch；fresh GCM r4在唯一新stop-boundaries树执行Provider下层反例，未动App/Memory测试。
