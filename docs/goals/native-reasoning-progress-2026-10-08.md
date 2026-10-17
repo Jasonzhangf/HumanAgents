@@ -46,6 +46,8 @@ wire主线已接收候选 `00bbfb41`：r208实际双轮/三轮在成功CLI后的
 
 direct工具压缩后续已接收 `9abc11d1`：r210确认fixture错在turn2找turn1readfact，并非产品inspect失败；r211只改原consumer，将inspect约束首turn，保留原singleturn拒绝Planner用例。实际typed首turnacceptedfile_read scope/ref与turn2capturedcheckpoint中的限定结论、完整ref相等；按结构排除旧rawcall/result且完整EXACT_BODY不在后turn。compile0、原双轮1/1、inspect+双轮+三轮组合3/3 PASS（2/3Planner及原终态/metadata断言保留）。未加case或产品框架。该controlledfixture证明信息与引用可跨压缩保留，不证明真实模型自动提炼质量或v2/childencoder运行路径。coldr209仍独立分析正式409。
 
+UX A已接收：source `ff534a21` 正常merge为唯一候选 `31832937`，仅runtime-api/runtime-shell/task-dashboard及原browserconsumer4文件。Peer有有效main基线RED4/6，非零revision实际counterexample45/46后恢复46/46；宿主组合后原task-grant-onlyconsumer **46/46 PASS / Node0**，证据 `native-reasoning-d0-20261012/grant-composed-20261017`。正式scoped授权drawer、default只读、target验证、回执与刷新失败分离、技术原错、双端焦点返回被受控证明；未真实RCC。已通知UXowner当轮remove/prune A来源树，run证据保留。A/B均为候选接收，不冒main/install交付。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
