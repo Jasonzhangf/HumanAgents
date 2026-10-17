@@ -58,19 +58,6 @@ const expectedState = new Map(realRoot.scope.nodes.map((node) => [node.nodeId, n
 // Human state label the node card carries on the top-level pipeline node projection.
 const expectedDisplay = new Map(realRoot.nodes.map((node) => [node.nodeId, node.stateDisplay]))
 
-function rowOf(node) {
-  return typeof node.row === 'number' ? node.row : Number.MAX_SAFE_INTEGER
-}
-
-function toneOf(state) {
-  if (state === 'running' || state === 'settling' || state === 'admitted') return 'active'
-  if (state === 'succeeded' || state === 'stopped') return 'done'
-  return 'pending'
-}
-
-const orderedNodes = [...realRoot.nodes].sort((a, b) => rowOf(a) - rowOf(b))
-const expectedEdgeTones = orderedNodes.slice(1).map((node) => toneOf(expectedState.get(node.nodeId)))
-
 const expectedInputs = realSelected.selectedNode.inputs.map((entry) => entry.ref)
 const expectedOutputs = realSelected.selectedNode.outputs.map((entry) => entry.ref)
 const expectedEvidence = realSelected.selectedNode.evidenceRefs.map((ref) => ref.locator)
@@ -207,7 +194,6 @@ async function readFlow(page) {
       chipText: card.querySelector('.state-chip')?.textContent ?? '',
       chipTone: card.querySelector('.state-chip')?.dataset.tone ?? '',
     })),
-    edgeList: [...document.querySelectorAll('.flow-edges-list li')].map((item) => item.dataset.tone),
   }))
 }
 
@@ -266,20 +252,6 @@ try {
     .map((node) => ({ nodeId: node.nodeId, rendered: node.chipText, projection: expectedDisplay.get(node.nodeId) }))
   record('flow-node-state-chip-uses-projection-state-display', displayMismatches.length === 0, displayMismatches)
 
-  const edgeMismatches = flow.edgeList
-    .map((tone, index) => ({ index, rendered: tone, projection: expectedEdgeTones[index] }))
-    .filter((edge) => edge.rendered !== edge.projection)
-  record('flow-edge-tones-follow-projection-node-state', edgeMismatches.length === 0, {
-    mismatches: edgeMismatches,
-    rendered: flow.edgeList,
-    projection: expectedEdgeTones,
-  })
-  record(
-    'flow-edges-are-not-all-pending-for-a-settled-scope',
-    flow.edgeList.includes('done'),
-    { rendered: flow.edgeList },
-  )
-
   // --- Real captured payload: the drawer refs tab must show the selected refs.
   await page.click(`.flow-node[data-node-id="${selectedNodeId}"]`)
   const drawerOpened = await waitForCondition(page, () => document.querySelector('dialog[open]') !== null)
@@ -326,12 +298,6 @@ try {
     noStateFlow.nodes.length > 0 && noStateFlow.nodes.every((node) => node.state === 'unknown' && node.chipTone === 'gray'),
     noStateFlow.nodes,
   )
-  record(
-    'unprojected-node-edges-stay-pending',
-    noStateFlow.edgeList.length > 0 && noStateFlow.edgeList.every((tone) => tone === 'pending'),
-    noStateFlow.edgeList,
-  )
-
   record('observation-page-raised-no-errors', pageErrors.length === 0, pageErrors)
   browserErrors = pageErrors
   bodyText = await page.evaluate(() => document.body.innerText)

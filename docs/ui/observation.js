@@ -32,11 +32,6 @@ const UNASSIGNED_LANE = Object.freeze({
   role: 'projection 未给出 agentId / ownerAgentRole',
 })
 
-// Distance from the last node box edge to the routing channel, and the channel width itself.
-// The channel width is CSS-owned (`--flow-corridor` on .flow-canvas) so JS only reads it.
-const EDGE_GAP = 1.5
-const EDGE_STUB = 24
-
 const taskId = taskIdFromQuery()
 // The agent-instance selection is URL view state decoded through the shared A3
 // helpers with the canonical task id. A bad explicit deep link stays visible
@@ -94,7 +89,6 @@ let drawerCard
 let triggerNodeId
 let returnFocusPending = false
 let selectedNodeId
-let edgeFrame
 // The scope the page is currently showing, so a node click reloads the same scope with the node
 // selected instead of re-deriving scope refs on the page.
 let currentScopeRef
@@ -160,14 +154,6 @@ function nodeState(node) {
   return typeof state === 'string' && state.length > 0 ? state : 'unknown'
 }
 
-function isRunningState(state) {
-  return state === 'running' || state === 'settling' || state === 'admitted'
-}
-
-function isSettledState(state) {
-  return state === 'succeeded' || state === 'stopped'
-}
-
 function unresolvedList(values, fallback) {
   const items = Array.isArray(values) ? values.filter((value) => typeof value === 'string' && value.length > 0) : []
   if (items.length === 0) return { items: [fallback], empty: true }
@@ -176,27 +162,25 @@ function unresolvedList(values, fallback) {
 
 function renderAgentChain(nodes, lanes) {
   const section = element('section', undefined, 'agent-chain')
-  section.setAttribute('aria-label', 'agent 链路')
+  section.setAttribute('aria-label', '角色归属概览')
   const head = element('header', undefined, 'agent-chain-head')
   head.append(
-    element('h2', 'agent 链路'),
-    element('span', '上游 agent → 下游 agent', 'agent-chain-note'),
+    element('h2', '角色归属概览'),
+    element('span', '按系统角色汇总归属节点', 'agent-chain-note'),
   )
   section.append(head)
   const strip = element('ol', undefined, 'chain-strip')
   const activeLanes = new Set(nodes.map((node) => agentLaneFor(node, lanes).laneId))
-  lanes.forEach((lane, index) => {
+  lanes.forEach((lane) => {
     const item = element('li', undefined, 'chain-step')
     const chip = element('div', undefined, 'chain-chip')
     if (activeLanes.has(lane.laneId)) chip.dataset.active = 'true'
-    chip.append(element('span', lane.label, 'chain-chip-role'), element('small', lane.role))
+    const count = nodes.filter((node) => agentLaneFor(node, lanes).laneId === lane.laneId).length
+    chip.append(
+      element('span', lane.label, 'chain-chip-role'),
+      element('small', `${count} 个节点`),
+    )
     item.append(chip)
-    const next = lanes[index + 1]
-    if (next) {
-      const arrow = element('span', '→', 'chain-arrow')
-      arrow.setAttribute('aria-hidden', 'true')
-      item.append(arrow)
-    }
     strip.append(item)
   })
   section.append(strip)
@@ -216,11 +200,18 @@ function renderNodeCard(node, index) {
     element('span', String(index + 1).padStart(2, '0'), 'flow-node-index'),
     element('strong', node.title),
   )
-  const chip = element('span', node.stateDisplay || state, 'state-chip')
+  const chip = element(
+    'span',
+    currentScopeStates.has(node.nodeId) && typeof node.stateDisplay === 'string' && node.stateDisplay.trim()
+      ? node.stateDisplay
+      : currentScopeStates.has(node.nodeId) ? state : '未知',
+    'state-chip',
+  )
   chip.dataset.tone = stateTone(state)
   head.append(chip)
   const meta = element('span', undefined, 'flow-node-meta')
-  const owner = element('small', `归属：${role || UNASSIGNED_LANE.label}`)
+  const lane = agentLaneFor(node, currentFrames)
+  const owner = element('small', `归属：${node.roleDisplay || lane.label || UNASSIGNED_LANE.label}`)
   if (!role) owner.dataset.empty = 'true'
   meta.append(element('small', node.kindDisplay || node.kind || '未标注类型'), owner)
   const summary = element('span', node.summary || '尚未投影节点摘要', 'flow-node-summary')
@@ -239,8 +230,7 @@ function renderLane(lane, laneNodes, startIndex) {
   const section = element('section', undefined, 'agent-lane')
   section.dataset.laneId = lane.laneId
   const head = element('header', undefined, 'agent-lane-head')
-  const count = laneNodes.length === 0 ? '0 个节点' : `${laneNodes.length} 个节点`
-  head.append(element('h3', lane.label), element('span', `${lane.role} · ${count}`, 'agent-lane-meta'))
+  head.append(element('h3', lane.label), element('span', `${laneNodes.length} 个节点`, 'agent-lane-meta'))
   section.append(head)
   const body = element('div', undefined, 'agent-lane-body')
   if (laneNodes.length === 0) {
@@ -256,11 +246,6 @@ function renderLane(lane, laneNodes, startIndex) {
 
 function buildFlow(nodes, lanes) {
   const canvas = element('div', undefined, 'flow-canvas')
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-  svg.setAttribute('class', 'flow-edges')
-  svg.setAttribute('aria-hidden', 'true')
-  svg.setAttribute('focusable', 'false')
-  canvas.append(svg)
 
   // Sort by the row the projection carries; the projection's own order (registry order for pipeline
   // nodes, event order for provider sub-events) breaks ties. The page owns no node-order table.
@@ -270,13 +255,9 @@ function buildFlow(nodes, lanes) {
   // "归属未投影" band instead of being inferred from owner/module names.
   const buckets = new Map(lanes.map((lane) => [lane.laneId, []]))
   buckets.set(UNASSIGNED_LANE.laneId, [])
-  const laneOf = new Map()
-  const lanePositionOf = new Map()
   for (const node of ordered) {
     const laneId = agentLaneFor(node, lanes).laneId
     const bucket = buckets.get(laneId)
-    lanePositionOf.set(node.nodeId, bucket.length)
-    laneOf.set(node.nodeId, laneId)
     bucket.push(node)
   }
 
@@ -287,143 +268,7 @@ function buildFlow(nodes, lanes) {
     canvas.append(renderLane(lane, laneNodes, index))
     index += laneNodes.length
   }
-
-  const edges = []
-  ordered.forEach((node, position) => {
-    if (position === 0) return
-    const from = ordered[position - 1]
-    const state = nodeState(node)
-    edges.push({
-      fromNodeId: from.nodeId,
-      toNodeId: node.nodeId,
-      tone: isRunningState(state) ? 'active' : isSettledState(state) ? 'done' : 'pending',
-      label: `${from.title || from.nodeId} → ${node.title || node.nodeId}`,
-      // Only vertically adjacent cards in the same band may be joined by a direct line;
-      // every other pair detours through the corridor beside the node boxes.
-      direct: laneOf.get(from.nodeId) === laneOf.get(node.nodeId)
-        && lanePositionOf.get(node.nodeId) === lanePositionOf.get(from.nodeId) + 1,
-    })
-  })
-  if (edges.length === 0 && ordered.length === 1) {
-    edges.push({ fromNodeId: null, toNodeId: ordered[0].nodeId, tone: 'pending', label: `上游未标注 → ${ordered[0].title || ordered[0].nodeId}`, direct: true })
-  }
-
-  const flowList = element('ol', undefined, 'flow-edges-list')
-  flowList.setAttribute('aria-label', '节点上下游顺序')
-  for (const edge of edges) {
-    const item = element('li', truncate(edge.label, 120))
-    item.dataset.tone = edge.tone
-    flowList.append(item)
-  }
-  canvas.append(flowList)
-  return { canvas, svg, edges }
-}
-
-function truncate(text, limit) {
-  const value = String(text)
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value
-}
-
-function drawEdges(flow) {
-  const { canvas, svg, edges } = flow
-  const canvasRect = canvas.getBoundingClientRect()
-  const width = canvas.clientWidth
-  const height = canvas.scrollHeight
-  const corridorWidth = Number.parseFloat(getComputedStyle(canvas).getPropertyValue('--flow-corridor')) || 26
-  const corridorX = Math.max(width - corridorWidth / 2, 1)
-  svg.setAttribute('viewBox', `0 0 ${Math.max(width, 1)} ${Math.max(height, 1)}`)
-  svg.setAttribute('width', String(Math.max(width, 1)))
-  svg.setAttribute('height', String(Math.max(height, 1)))
-  clearNode(svg)
-  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs')
-  const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker')
-  marker.setAttribute('id', 'flow-arrow')
-  marker.setAttribute('viewBox', '0 0 10 10')
-  marker.setAttribute('refX', '9')
-  marker.setAttribute('refY', '5')
-  marker.setAttribute('markerWidth', '7')
-  marker.setAttribute('markerHeight', '7')
-  marker.setAttribute('orient', 'auto-start-reverse')
-  const markerPath = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-  markerPath.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z')
-  markerPath.setAttribute('class', 'flow-arrow-head')
-  marker.append(markerPath)
-  defs.append(marker)
-  svg.append(defs)
-
-  const rectOf = (nodeId) => {
-    const card = nodeId === null ? null : canvas.querySelector(`.flow-node[data-node-id="${CSS.escape(String(nodeId))}"]`)
-    if (!card) return null
-    const rect = card.getBoundingClientRect()
-    return {
-      top: rect.top - canvasRect.top,
-      bottom: rect.bottom - canvasRect.top,
-      left: rect.left - canvasRect.left,
-      right: rect.right - canvasRect.left,
-      width: rect.width,
-      height: rect.height,
-      centerX: rect.left - canvasRect.left + rect.width / 2,
-      centerY: rect.top - canvasRect.top + rect.height / 2,
-    }
-  }
-
-  // Edges stay 1.5px clear of every node box: a direct line for vertically adjacent cards in a
-  // band, and an orthogonal detour through the corridor beside the boxes for everything else.
-  const edgePath = (edge, source, target) => {
-    if (!source) {
-      return `M ${target.centerX} ${Math.max(target.top - EDGE_STUB, 0)} L ${target.centerX} ${target.top - EDGE_GAP}`
-    }
-    if (edge.direct) {
-      return `M ${source.centerX} ${source.bottom + EDGE_GAP} L ${target.centerX} ${target.top - EDGE_GAP}`
-    }
-    return [
-      `M ${source.right + EDGE_GAP} ${source.centerY}`,
-      `L ${corridorX} ${source.centerY}`,
-      `L ${corridorX} ${target.centerY}`,
-      `L ${target.right + EDGE_GAP} ${target.centerY}`,
-    ].join(' ')
-  }
-
-  const midArrow = (path) => {
-    const total = path.getTotalLength()
-    if (!(total > 0)) return null
-    const middle = total / 2
-    const reach = Math.min(2, total / 4)
-    const before = path.getPointAtLength(middle - reach)
-    const after = path.getPointAtLength(middle + reach)
-    const angle = Math.atan2(after.y - before.y, after.x - before.x) * (180 / Math.PI)
-    const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-    arrow.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z')
-    arrow.setAttribute('class', 'flow-arrow-head flow-arrow-head--mid')
-    arrow.setAttribute('transform', `translate(${after.x} ${after.y}) rotate(${angle}) translate(-10 -5)`)
-    return arrow
-  }
-
-  for (const edge of edges) {
-    const target = rectOf(edge.toNodeId)
-    if (!target) continue
-    const source = edge.fromNodeId === null ? null : rectOf(edge.fromNodeId)
-    if (edge.fromNodeId !== null && !source) continue
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-    path.setAttribute('d', edgePath(edge, source, target))
-    path.setAttribute('class', `flow-edge flow-edge--${edge.tone}`)
-    path.dataset.tone = edge.tone
-    if (edge.tone === 'done') {
-      svg.append(path)
-      const arrow = midArrow(path)
-      if (arrow) svg.append(arrow)
-      continue
-    }
-    if (edge.tone === 'active') {
-      path.setAttribute('marker-end', 'url(#flow-arrow)')
-    }
-    svg.append(path)
-  }
-}
-
-function scheduleEdgeDraw(flow) {
-  cancelAnimationFrame(edgeFrame)
-  edgeFrame = requestAnimationFrame(() => drawEdges(flow))
+  return canvas
 }
 
 function buildDrawer() {
@@ -789,6 +634,34 @@ function openAgentDetail(payload) {
   })
 }
 
+function observationRolePairs(frames) {
+  const pairs = []
+  const seen = new Set()
+  for (const frame of frames) {
+    const raw = typeof frame.role === 'string' ? frame.role.trim() : ''
+    const human = typeof frame.label === 'string' ? frame.label.trim() : ''
+    if (!raw || !human || seen.has(raw)) continue
+    seen.add(raw)
+    pairs.push({ raw, human })
+  }
+  return pairs
+}
+
+function observationTechnicalDetail(projection) {
+  const rolePairs = observationRolePairs(currentFrames)
+  return openTechnicalDetail({
+    title: '观测技术详情',
+    entries: [
+      ['mode', runtimeMode || '未提供'],
+      ['source', projection.data?.state || '未提供'],
+      ['scopeRef', projection.scope?.scopeRef || '未提供'],
+      ['projectionSeq', projection.scope?.projectionSeq || '未提供'],
+      ['目录说明', projection.scope?.summary || '未提供'],
+      ...rolePairs.map(({ raw, human }) => [`角色 ${raw}`, `${human} / ${raw}`]),
+    ],
+  })
+}
+
 function renderObservation(projection) {
   if (agentViewDispose) {
     agentViewDispose()
@@ -803,20 +676,31 @@ function renderObservation(projection) {
 
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
+  const nextStep = element(
+    'p',
+    typeof projection.data?.detail === 'string' && projection.data.detail.trim()
+      ? `下一步：${projection.data.detail.trim()}`
+      : '本次读取未提供下一步说明。',
+    'lede',
+  )
+  nextStep.dataset.observationNextStep = 'true'
   copy.append(
-    element('p', '只读 Observation', 'eyebrow'),
+    element('p', '任务观测 · 只读', 'eyebrow'),
     element('h1', projection.scope?.title || '任务处理流水'),
-    element('p', projection.scope?.summary || '', 'lede'),
+    nextStep,
   )
   const meta = element('div', undefined, 'observation-meta')
-  if (runtimeMode) meta.append(element('span', `mode=${runtimeMode}`, 'mode-chip'))
   if (runtimeMode === 'fake') {
-    const fake = element('span', 'fake 模式：非真实 Provider 结果', 'state-chip')
+    const fake = element('span', '演示模式：非真实 Provider 结果', 'state-chip')
     fake.dataset.tone = 'warning'
     meta.append(fake)
   }
-  meta.append(element('span', `source=${projection.data?.state || 'unknown'}`, 'mode-chip'))
   meta.append(element('span', projection.data?.label || '未投影状态', 'state-chip'))
+  const technical = element('button', '技术详情', 'button button--quiet')
+  technical.type = 'button'
+  technical.dataset.observationTechnicalTrigger = 'true'
+  technical.addEventListener('click', () => observationTechnicalDetail(projection))
+  meta.append(technical)
   heading.append(copy, meta)
   main.append(heading)
 
@@ -844,10 +728,13 @@ function renderObservation(projection) {
   const flowSection = element('section', undefined, 'flow-section')
   const flowHead = element('header', undefined, 'section-head')
   flowHead.append(
-    element('h2', '节点流转'),
-    element('span', `${projection.nodes.length} 个节点 · projection seq ${projection.scope?.projectionSeq || '0'}`, 'section-meta'),
+    element('h2', '系统节点目录'),
+    element('span', `${projection.nodes.length} 个系统节点`, 'section-meta'),
   )
   flowSection.append(flowHead)
+  const catalogueNote = element('p', '系统注册表节点目录；这些节点按所属角色分组，不代表任务执行依赖顺序。', 'section-note')
+  catalogueNote.dataset.catalogueSummary = 'true'
+  flowSection.append(catalogueNote)
 
   if (projection.nodes.length === 0) {
     const empty = element('p', '当前 scope 没有节点。', 'flow-empty')
@@ -857,19 +744,10 @@ function renderObservation(projection) {
     return
   }
 
-  const flow = buildFlow(projection.nodes, currentFrames)
-  const canvas = flow.canvas
-  canvas.append(renderLegend())
+  const canvas = buildFlow(projection.nodes, currentFrames)
   flowSection.append(canvas)
   main.append(flowSection)
-  scheduleEdgeDraw(flow)
   requestAnimationFrame(restoreFocusAfterRender)
-  window.addEventListener('resize', () => scheduleEdgeDraw(flow))
-  if (typeof ResizeObserver === 'function') {
-    const observer = new ResizeObserver(() => scheduleEdgeDraw(flow))
-    observer.observe(canvas)
-    canvas.dataset.observed = 'true'
-  }
 
   // The typed detail of the selected node opens the read-only drawer; `selectedNodeId` is cleared so
   // the drawer opens once per selection and breadcrumb navigation starts from a clean state.
@@ -907,20 +785,6 @@ function renderSemanticObservationSection() {
   section.dataset.semanticObservation = semanticObservationPanel ? 'mounted' : 'unavailable'
   section.append(semanticObservationHost)
   return section
-}
-
-function renderLegend() {
-  const legend = element('div', undefined, 'flow-legend')
-  for (const [tone, label] of [
-    ['done', '已完成的流程：静态线，箭头在中点'],
-    ['active', '正在运行的流程：流动线，箭头在终点'],
-    ['pending', '未开始的流程：静态线，暂无箭头'],
-  ]) {
-    const item = element('span', label, 'legend-item')
-    item.dataset.tone = tone
-    legend.append(item)
-  }
-  return legend
 }
 
 async function load(scopeRef) {
