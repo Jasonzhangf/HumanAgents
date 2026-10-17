@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 定点解阻：Transport GCM r16 与 Memory GCM r17 各超过约30批读取且 tracked 无改动，父分别精确停止 PID96036/PID96232，均 exit1/absent，原树转独立 GPT-6.1 medium technical r17/r18。非后端不可用，不改变普通执行默认GCM。Transport技术作者已取得5个缺 receipt 原consumer RED；main请求链typed接缝新未知由独立小Planner r18核实，不删验收。Codec GCM已取得缺工具声明RED（原file5PASS/1FAIL）；已知contracts旧fixture TS2561不冒本次产品失败。N3 GCM继续；另fresh GCM只读stop/settle/resume的具体证据缺口，不发请求、不操作服务。各自原错与接收记录位于对应RUN。尚无本轮新增main交付。
+
 - 2026-10-17 N3 资源核查已由 owner 接收：旧 helper 提交是当前 candidate 祖先，tracked clean，只有 `.pnpm-store/` 保留。只读 GCM 已精确停止 PID96438、exit1/absent；不是模型不可用，也未冒最终报告。原树正常 FF 到 `af0d755a`，fresh GCM `provider-n3-default-mount-gcm-r28-20261017` 已原地接手 r26 挂载计划，无新增同域树。当前四路均为实现者，N3 的 CLI/index 仅 roster hunks，Memory 只写 Memory hunks；正常 Git 合流由父负责。接收证据为 r27/owner-reception.md。
 
 - 2026-10-17 接收：C3a source `4a996234` 已正常合候选 `482270c5`；唯一冲突只合并 native-delivery consumer 双方 imports。组合 App build 与 App 测试编译均 exit0；原 hot 1/1、fresh 双进程 1/1（seed 自然退出后启动不同 PID 的 next）、两个受影响 native consumer 2/2，原 source Runtime 两个受影响 case 2/2。真实链覆盖 correction/rewind/forward 后 epoch6、保留语义/排除错误引用、工具 drain、标准收口、独立 Planner 返回和零已确认副作用重放。纠正下方历史“fresh 尚无 GREEN”；这些是候选作者证据，尚未整体 Review/main/正式运行交付。
