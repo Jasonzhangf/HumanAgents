@@ -2,6 +2,10 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- child producer `4b48d753 + 1152c5c6` 已正常 merge 唯一 candidate；组合 contracts/App build、App test tsc 均 0，原 `inspection-check-public-consumer` 5/5 PASS（session50998）。覆盖 typed 新结果与 durable replay 接纳，不扩为 configured native 端到端或完整 I2。已回传 UX owner，由其清理来源。
+- r279 Runtime 原 consumer 实际 9/9 PASS；App 在 worker 内先遇 EMFILE，父宿主原命令复验未遇该错误，实际 HTTP500 原因为缺 active supervisor lease authority。r282 fresh GCM 同树处理原 consumer fixture/接线，禁止删生产 authority 检查；App 尚未 PASS，未进入 Review。
+- r280 最终报告未完成证据交付，父核实真实 wire 只投影 claims/constraints，类型已有 committedAt 但没有独立 description 字段。r283 独立 Gemini4 medium 局部计划已启动，核对其他 formatter 与现有 claims 是否已满足可读语义，再确定最小修复。未据此新增字段或宣称缺陷已修。
+
 - r278 独立 Gemini 修订计划已接收：N2 当前不需要新增代码、测试或 DAG 编辑。现有四节点 reentry 图及 Memory owner 绑定有效；现有 C3a 已是两个 OS 进程的 seed/next consumer，不复制 harness。源码存在不等于本轮运行通过；真实 RCC model-mode Memory 语义质量仍 UNVERIFIED，DAG Operator factory 未注册声明继续保留。依据：`native-path-memory-amend-r278-20261017/plan.md`。
 - r277 已终止，但最后结果只有准备运行 App consumer 的意图，不算交付。原树仍有 Runtime session 与 helper consumer 两文件改动。已 fresh GCM r279 复用 `explicit-helper-recovery-20261017` 同树续派，要求分别核实 durable adoption / ordinal 两项 RED，完成原 Runtime 与 App 公开 consumer 后正常来源提交；不新建同域树，不额外 leaf Review。
 - fresh GCM r280 并行只读检查显式 Brain prior checkpoint 的 wire metadata。只确认 time/description/identity 是否在其他 formatter 中传递；未确认前不认定缺陷，不增加描述查询。两个启动 PID 分别 20594、20632，启动时已核实存活；PID 仅为本次启动回执，不作持续运行声明。
