@@ -16,6 +16,11 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- 三turn source7230b8ad已通过真实CLI因果RED缺C1→原scope选择修复→2/3turn2/2、history4/4。generic1069958a合流冲突由r167消解后两turn/generic组合2/2并完成merge2a3660e8；generic来源树已normalremove/prune/pathabsent。再合三turn冲突由r172保turnCount与HTTP第五参数，Appbuild/tsc0、组合两turn/三turn/generic3/3，完成mergefb18eec2。r175 live checkpoint receipt计划复用现有readDurableCheckpointReceipt；r178原native树实施原用例时间RED→GREEN。双Task两Planner/精确输出已到达，原等待只看output导致final事件断言竞态；parent确认record.state设置后awaitpersist再push final，r179只让原15秒waiter同时等typedfinal，不增加timeout/断言弱化。r176独立冷计划明确C1/C2是两逻辑turn，真实新进程+生产HTTPresume，非新对象或v1/v2同turn段冒充。
+- fake App准入与transport唯一交付owner已明确移交UX，复用其519ad633来源树，不由root再开fake树/派代码作者；其原goal明确要求编码前独立Review，沿70400结果，不重复派审。r174是双方唯一officialfake入口事实producer，canonicalmain188独立HOMEfixture/产品0写，安装source已确认fake解释消费fake replay port非RCC，但prose/JSON合同疑似不符，实际回执未到前不宣称通过。main/install归UX，gen22/p3保护。
+
+- generic默认HTTP实际证据成立：host真实TOML→childenvcredential→Responses/Bearer/model/noRCCdiscovery→标准closure/Tasksucceeded；只临时省略编译产物credential解析后，原consumer实际RED http401/blocked vs expectedsucceeded，已恢复。r166删除冗余manualauthprobes后final新+原textOnly consumer2/2，production0改动，source `1069958a`；候选正常合流有fixture4th参数冲突，r167按parent裁决保twoTurn第4/topLevelHttp第5消解并编译。UXObservation已main18827bc4/gen22正式交付，本侧正常合originmain `83d0ce08`，未重装/动gen22/p3。r165有界诊断host实际抓到双Task Plannerpayload到达但旧classifierunknown→500，fixtureu4gmDt；r168仅替换parser并删除临时诊断，不改产品。r162纠正计划已接受A，r164复用两turn树先做真实CLI3turnRED，coldB仍需真实进程证明。r163只读核durablecheckpoint混合回执，未预设owner。
+
 - r153最终计划未准入执行：虽有逐bound原scope枚举publication的有效源码分析，但虚构现有CLI case中的driver3/coordinator手动调用、使用不适配.js imports的strip-types命令，且把fresh对象当freshprocess。已同Planner terminal后续投r162，限6次定向读取纠正为真实CLI自动3turn，冷进程B后置、未知明说；未因该错误计划改源码或放宽scope。r157/159后继r160仅修真实genericHTTP fixture并编译；r161仅规划双Task真实Planner底层错误。完整goal仍ACTIVE，已交付stop与已接受twoTurn证据不重验。
 
 - r158已补真实serve assembly/sharedpool2并严格编译0；host原双Task仍RED，但首次边界已前进：fixture `provider-two-top-tasks-xqyVHq` 两final在cleanup前变为 `runtime.execution.failure / independent Planner call failed and its own settlement also failed`，不再缺assembly。r161独立小Planner定位底层cause，不延长15秒或改断言。genericHTTP r157实际写265行却exit0误称无编辑；r159技术核源码后因sharedstore子沙盒EPERM未编译，parent正常offlinefrozeninstall成功(下载0)，r160freshGCM同树仅修虚构auth-epoch头/父env污染并编译，未盲改生产credential转发。r153三turn/cold Planner进程仍live，未因观察时间长重启。UX main/install继续持有，双方已互通其fake SSE错误与本侧missingassembly证据不能当同因。
