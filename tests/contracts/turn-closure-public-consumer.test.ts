@@ -83,6 +83,10 @@ function summaryWith(ref: EvidenceRef): TurnCloseSummary {
   };
 }
 
+function summaryWithInspectionOutcome(inspectionOutcome: unknown): TurnCloseSummary {
+  return { ...summaryWith(parentEvidence), inspectionOutcome } as TurnCloseSummary;
+}
+
 function commandWith(ref: EvidenceRef): StandardTurnEndCommand {
   return {
     kind: 'standard-turn-end',
@@ -116,6 +120,18 @@ test('four semantic sections may have empty evidence arrays with a direct text d
     deliveryText: 'The independent delivery text.',
     deliveryRefs: [],
   }, parentScope));
+});
+
+test('inspection outcome stays optional and uses the existing outcome contract', () => {
+  assert.doesNotThrow(() => validateTurnCloseSummary(summaryWith(parentEvidence), parentScope));
+  assert.throws(
+    () => validateTurnCloseSummary(summaryWithInspectionOutcome({ status: 'completed' }), parentScope),
+    ContractError,
+  );
+  assert.throws(
+    () => validateTurnCloseSummary(summaryWithInspectionOutcome({ status: 'unknown' }), parentScope),
+    ContractError,
+  );
 });
 
 test('without context the exact parent scope is still required', () => {
