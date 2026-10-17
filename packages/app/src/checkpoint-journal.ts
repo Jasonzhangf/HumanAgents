@@ -542,10 +542,6 @@ function semanticHistoryJournal(input: SemanticHistoryReadDependencies & {
         'app-checkpoint-journal',
       );
     }
-    const publicationsByCheckpoint = new Map<string, {
-      readonly lookup: SemanticHistoryExactLookupV1;
-      readonly checkpoint: Checkpoint;
-    }[]>();
     for (const entry of publications) {
       if (!sameScope(entry.checkpoint.scope, scope)) {
         throw new AppLifecycleError(
@@ -555,15 +551,25 @@ function semanticHistoryJournal(input: SemanticHistoryReadDependencies & {
           'app-checkpoint-journal',
         );
       }
-      const key = checkpointLineageKey(entry.checkpoint.id);
-      const candidates = publicationsByCheckpoint.get(key);
-      if (candidates === undefined) publicationsByCheckpoint.set(key, [entry]);
-      else candidates.push(entry);
     }
     const priorCompletedTurns: SemanticHistoryExactLookupV1[] = [];
     for (const bound of activePath) {
-      const candidates = publicationsByCheckpoint.get(bound.key);
-      if (candidates === undefined) continue;
+      const conflicting = publications.find((entry) =>
+        checkpointLineageKey(entry.checkpoint.id) === bound.key
+        && canonicalJsonStringify(entry.checkpoint) !== canonicalJsonStringify(bound.checkpoint));
+      if (conflicting !== undefined) {
+        throw new AppLifecycleError(
+          'checkpoint-active-reasoning-lineage-binding-mismatch',
+          `semantic publication for checkpoint ${bound.checkpoint.id.value} does not bind the active reasoning checkpoint payload ${bound.commitRef.commitId}`,
+          'preserve the committed journal and repair the active reasoning binding before reading the lineage',
+          'app-checkpoint-journal',
+        );
+      }
+      const boundPublications = sameScope(bound.checkpoint.scope, scope)
+        ? publications : await publicationEntries(bound.checkpoint.scope);
+      const candidates = boundPublications.filter((entry) =>
+        checkpointLineageKey(entry.checkpoint.id) === bound.key);
+      if (candidates.length === 0) continue;
       const exact = candidates.find((entry) =>
         canonicalJsonStringify(entry.checkpoint) === canonicalJsonStringify(bound.checkpoint));
       if (exact === undefined) {
