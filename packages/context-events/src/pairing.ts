@@ -49,6 +49,7 @@ export function pairRuntimeSemantics(
 ): SemanticPairingResult {
   if (context === undefined) return { events: applyPairingOutcome(events), pairing: [], coverageIssues: [] };
   const sourceById = new Map(sources.map((source) => [source.eventId, source]));
+  const sourceOrder = new Map(sources.map((source, index) => [source.eventId, index]));
   const conflicts = new Set([
     ...conflictedSourceIds,
     ...priorCoverage.filter((issue) => issue.reason === 'duplicate-conflict')
@@ -90,11 +91,24 @@ export function pairRuntimeSemantics(
   }
   const coverageIssues: CoverageIssue[] = [];
   const groups: PairedExecutionGroup[] = [];
+  const endedStartSourceIds = new Set<string>();
   const eligible = (source: RuntimeTaskEventLike, kind: PairedExecutionGroup['kind']) => {
     if (kind === 'operation') return true;
     if (kind === 'request') return validIdentity(source.requestId)
       && (source.kind === 'execution.terminal' ? source.terminalPhase === 'provider' : REQUEST_KINDS.has(source.kind));
     return isToolSource(source) && validIdentity(source.requestId) && validIdentity(source.callId) && validIdentity(source.toolId);
+  };
+  const endingAfter = (members: readonly RuntimeTaskEventLike[], kind: PairedExecutionGroup['kind']) => {
+    const ownSources = members.filter((source) => eligible(source, kind));
+    const lastOwn = ownSources[ownSources.length - 1];
+    if (lastOwn === undefined) return undefined;
+    return sources.find((source) => validOperationIdentity(source)
+      && source.taskId.value === lastOwn.taskId.value && source.operationId === lastOwn.operationId
+      && source.executionEpoch === lastOwn.executionEpoch
+      && source.kind === 'execution.terminal' && source.terminalPhase === 'final'
+      && ['succeeded', 'failed', 'cancelled', 'stopped', 'blocked'].includes(source.state)
+      && !conflicts.has(source.eventId)
+      && sourceOrder.get(source.eventId)! > sourceOrder.get(lastOwn.eventId)!);
   };
   for (const [key, bucket] of groupBuckets) {
     const { kind, members } = bucket;
@@ -105,7 +119,11 @@ export function pairRuntimeSemantics(
       : kind === 'request'
         ? source.kind === 'execution.terminal' && source.terminalPhase === 'provider'
         : source.kind === 'provider.tool' || source.kind === 'provider.tool-result');
-    const state = memberConflicted ? 'unknown' : reduceState(kind, legalStateSources);
+    const reducedState = memberConflicted ? 'unknown' : reduceState(kind, legalStateSources);
+    // An ended execution cannot leave a subordinate live, but cannot supply its missing outcome.
+    const missingOutcome = kind !== 'operation' && reducedState === 'open'
+      && endingAfter(members, kind) !== undefined;
+    const state = missingOutcome ? 'unknown' : reducedState;
     const eventRefs: SemanticEventRef[] = [];
     for (const source of members) {
       if (!eligible(source, kind)) continue;
@@ -128,17 +146,27 @@ export function pairRuntimeSemantics(
       coverageIssues.push(issueFor('duplicate-conflict', bucket.scope, source, events));
     }
     if (memberConflicted) continue;
+    if (missingOutcome) coverageIssues.push(issueFor('correlation-unavailable', bucket.scope, members.find((source) => eligible(source, kind))!, events));
     if (kind === 'operation' && legalStateSources.length > 1) coverageIssues.push(issueFor('closer-conflict', bucket.scope, members[0], events));
     if (kind === 'request' && legalStateSources.length > 1) coverageIssues.push(issueFor('closer-conflict', bucket.scope, members[0], events));
     if (kind === 'invocation') {
       const openers = legalStateSources.filter((source) => source.kind === 'provider.tool');
       const results = legalStateSources.filter((source) => source.kind === 'provider.tool-result');
+      if (openers.length === 1 && results.length === 1 && state !== 'open' && state !== 'unknown'
+        && sourceOrder.get(results[0].eventId)! > sourceOrder.get(openers[0].eventId)!) {
+        endedStartSourceIds.add(openers[0].eventId);
+      }
       if (openers.length > 1) coverageIssues.push(issueFor('multi-opener', bucket.scope, openers[0], events));
       if (openers.length === 0 && results.length > 0) coverageIssues.push(issueFor('opener-missing', bucket.scope, results[0], events));
       if (results.length > 1) coverageIssues.push(issueFor('closer-conflict', bucket.scope, results[0], events));
     }
   }
   for (const source of sources) {
+    if (validOperationIdentity(source) && !conflicts.has(source.eventId)
+      && (source.kind === 'execution.started' || isToolSource(source))
+      && endingAfter([source], 'operation') !== undefined) {
+      endedStartSourceIds.add(source.eventId);
+    }
     if (isToolSource(source) && (!validIdentity(source.requestId) || !validIdentity(source.callId) || !validIdentity(source.toolId))) {
       coverageIssues.push(issueFor('correlation-unavailable', runtimeScopeForPairing(context?.scope, source), source, events));
     }
@@ -159,9 +187,11 @@ export function pairRuntimeSemantics(
     if (bucket === undefined) canonicalBuckets.set(key, [event]);
     else bucket.push(event);
   }
+  const endedStartEventIds = new Set(events.filter((event) => event.type === 'operation.started'
+    && endedStartSourceIds.has(event.sourceId)).map((event) => event.eventId));
   const pairedById = new Map<string, CanonicalContextEvent>();
   for (const bucket of canonicalBuckets.values()) {
-    for (const event of applyPairingOutcome(bucket)) pairedById.set(event.eventId, event);
+    for (const event of applyPairingOutcome(bucket, endedStartEventIds)) pairedById.set(event.eventId, event);
   }
   const pairedEvents = events.map((event) => pairedById.get(event.eventId) ?? event);
   return { events: pairedEvents, pairing: groups, coverageIssues };
@@ -333,6 +363,7 @@ export function buildPairingIndex(events: readonly CanonicalContextEvent[]): Pai
  */
 export function applyPairingOutcome(
   events: readonly CanonicalContextEvent[],
+  endedStartEventIds?: ReadonlySet<string>,
 ): readonly CanonicalContextEvent[] {
   const index = buildPairingIndex(events);
 
@@ -347,6 +378,9 @@ export function applyPairingOutcome(
 
   return events.map((event) => {
     if (event.status === 'superseded') return event;
+    if (event.type === 'operation.started' && endedStartEventIds?.has(event.eventId)) {
+      return { ...event, status: 'completed' };
+    }
 
     if (isCloserType(event.type)) {
       const opened = openedByCloserEventId.get(event.eventId);
