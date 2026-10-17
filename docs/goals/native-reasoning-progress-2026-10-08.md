@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Appcapture `2fb247eb` 正常merge候选；contracts/Appbuild/native-delivery tsc0。首次误用旧dist/tests只执行普通case1/1，不计stop证明；父核对config改用dist/tests-native-text后原stop+text2/2PASS（session36452），capture18<checkpoint19，无standard saveintent/closure/Planner。已通知UX关来源；不扩installed/v2/closeonce计数。
+- r291局部修订已接受：明确nonsuccess状态遇error仍保留，只有blocked+typederror retryable+error.nextActionwait继续本turn；普通manualblock/failed不放行。既有manager注册、无queue/自动重放/假success；真实RED仍待执行。r292 Provider2file、r293 App2file freshGCM从最新origin/main并行独占新树，彼此无写冲突；App完整续推consumer在Provider基础合流后验收。旧图闭合复用，不改图或重复validate。
+
 - Runtime stop source `b2bd7f5d` 已正常merge candidate；contractsbuild0/agentlooptsc0/原helpers+boundary9/9PASS（session92762，inspection-runtime-stop-source-composed-20261017.txt）。去NativeSaveIntent依赖、ordinary stop不读capture；Appcapture/fullnative停止仍未验收。UX已正常remove/prune/确认来源不存在。
 - r290独立计划返回并纠正r289：capacity wait并未造成不可恢复cold lock，blocked之后仍generation-ready；真实缺口是正常wait中断当前turn且丢原owner等待语义。初稿未接受执行：父核实toolStatus有error即failed，blocked-only predicate不可达；ProviderToolResult无顶层nextAction；dist-tests命令/毫秒成本编造。已退同Planner r291只修这些局部缺口，继续禁止先改代码/假成功/新waitqueue/背景重放。32round非已证总上限仍不改。
 
