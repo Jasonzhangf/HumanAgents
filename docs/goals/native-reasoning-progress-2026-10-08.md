@@ -12,6 +12,10 @@
 
 本轮四路 GCM 分工为冷恢复、双 Task 证据、Memory 接线观察、main 合流冲突。其余依赖未满足的实施不提前派发。下一步接收真实回执，完成合流及受影响验证，再进入连贯 milestone 的整体审查和标准交付。
 
+续接验收：r189 四文件解冲突已接受，候选正常完成 merge `ee1f1545`。作者 App build、正常严格 no-emit、图 validate、网络脚本语法检查通过；额外 noUnused 探针失败属于未要求检查，不增加门禁。宿主组合 `tests/app/tsconfig.json` 编译 exit0，实际双轮/三轮 CLI 与默认 HTTP credential consumer **3/3 PASS**，分别为 2/3 个 Planner、最终 succeeded、历史 raw 排除与实际 HTTP 请求。fixture `text-only-S3JpGl`、`text-only-TDfg8b`、`text-only-hO1rvl` 保留。未运行 active-SSE case，不宣称该项通过。UX 后续 docs-only `ec17a0d3` 尚待正常合流。
+
+r188 已完成：现有默认 CLI Memory hooks 在恢复 checkpoint 后调用 reconciler，启动时也补发遗漏 group；facade 本身不直接发布。r52 `non-network.log` 与 `c3a-process-boundary.json` 已有热路径和新进程成功证据。此处无需新 route/Operator 或重复发布代码；这些证据不替代 r182 的多轮实际冷恢复。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
