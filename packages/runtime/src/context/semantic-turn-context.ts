@@ -1,6 +1,5 @@
 import {
   assertEvidenceRef,
-  assertSameScope,
   validateWorkAssignment,
   type CheckpointId,
   type EvidenceRef,
@@ -286,9 +285,9 @@ function assertInput<T>(input: SemanticTurnContextInput<T>): void {
     throw new SemanticTurnContextError('runtime scope task does not match assignment task');
   }
   for (const checkpoint of input.semanticCheckpoints) {
-    assertSameScope(input.scope, checkpoint.scope);
+    assertTaskCompatibleScope(input.scope, checkpoint.scope, 'semantic checkpoint');
     for (const ref of checkpoint.evidenceRefs) {
-      assertCompatibleScope(input.scope, ref.scope, 'checkpoint evidence');
+      assertCompatibleScope(checkpoint.scope, ref.scope, 'checkpoint evidence');
     }
   }
   for (const entry of input.activeTurn) {

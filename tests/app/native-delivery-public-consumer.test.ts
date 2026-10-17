@@ -28,7 +28,9 @@ import { STANDARD_TURN_END_TOOL } from '../../packages/app/src/ui-runtime/standa
 import { ADVERTISED_STANDARD_TURN_END_TOOL } from '../../packages/app/src/ui-runtime/standard-turn-composition.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
-import { createJsonlContextHistoryPort } from '../../packages/app/src/checkpoint-journal.js';
+import { createJsonlContextHistoryPort, createJsonlCheckpointClosurePort } from '../../packages/app/src/checkpoint-journal.js';
+import { readCheckpointClosurePreparation } from '../../packages/runtime/src/checkpoints/closure.js';
+import type { NativeSaveIntent } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
 
 /** The one fixture root allowed for this pure-text App slice. */
 const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
@@ -791,6 +793,19 @@ test('native text-only delivery advertised end, independent Planner closure and 
     // Actual accepted end-call provenance, bound through the real active-turn
     // journal. The raw arguments asset is the exact materialization App owns.
     const verified = await fixture.journal.verify();
+    // Observed three App constants mislabeled accepted tool closure as control.
+    // Impact: valid empty business refs cannot close. Cost: three exact reads
+    // in this existing public consumer; no additional fixture or request.
+    const intentRecord = verified.records.find((record) => record.payload?.['type'] === 'native-save-intent');
+    if (!intentRecord) throw new Error('text-only delivery must commit its native save intent');
+    const intent = (intentRecord.payload?.['intent'] as { readonly completeIntent: NativeSaveIntent }).completeIntent;
+    assert.equal(intent.closure.source, 'agent-tool', 'native intent preserves the accepted tool source');
+    const closurePort = createJsonlCheckpointClosurePort({ filePath: fixture.layout.organJournalPath, journal: fixture.journal });
+    const closure = await closurePort.read(intent.closure.closureId);
+    if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') throw new Error('canonical checkpoint closure is required');
+    assert.equal(closure.source, 'agent-tool', 'canonical closure preserves the accepted tool source');
+    const preparation = await readCheckpointClosurePreparation(closurePort, intent.checkpoint.checkpoint);
+    assert.equal(preparation?.coreClosure.source, 'agent-tool', 'preparation preserves the same accepted tool source');
     const coverage = [...verified.records].reverse()
       .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
     const scope = coverage?.scope as ScopeRef;

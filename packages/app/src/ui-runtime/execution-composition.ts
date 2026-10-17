@@ -16,7 +16,7 @@ import { PreparedExecutionStop, type PreparedExecutionStopPreparationLease } fro
 import { TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from './task-control.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
-import { createJsonlActiveTurnJournal } from '../../../adapters/jsonl/src/active-turn.js';
+import { createJsonlActiveTurnJournal, createJsonlActiveTurnSegmentJournal } from '../../../adapters/jsonl/src/active-turn.js';
 import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
 import { produceAdmittedTurn, newActiveTurnId } from '../../../runtime/src/admission/admitted-turn.js';
 import { AgentLoopRuntime, type HistoricalTurnBinding, type RecoverTurnResult } from '../../../runtime/src/agent-loop/runtime.js';
@@ -33,10 +33,11 @@ import type { RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '.
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/agent-driver.js';
 import type { AcceptedRawFact, AdmittedTurnIdentity, CompletionReadInput, EvidenceRef,
-  ProviderToolDefinition, RawAsset, WorkAssignment } from '../../../contracts/src/index.js';
+  ProviderToolDefinition, RawAsset, ScopeRef, WorkAssignment } from '../../../contracts/src/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { createResponsesFileToolExecutor } from '../provider-tool-execution.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
+import type { SemanticHistoryExactLookupV1 } from '../../../runtime/src/context/semantic-history.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
 import type { NativeSaveIntent, NativeSaveIntentV1, NativeSegmentSaveIntentV2 } from '../../../runtime/src/checkpoints/native-save-contract.js';
 import type { ActiveTurnInitialSegmentSource, NativeSegmentSaveSourceV2, ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
@@ -56,9 +57,43 @@ import type {
 } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import type { RetryCycleJournalPort } from '../../../runtime/src/orchestration/retry-cycle.js';
 import type { ResumeActiveTurnSegmentInput } from '../../../runtime/src/context/active-turn-segments.js';
+import {
+  executeConfirmedTaskCheckpointReentry,
+  executeConfirmedTaskContextCorrection,
+  type CommittedTaskCheckpointReentryReceipt,
+  type CommittedTaskContextCorrectionReceipt,
+  type ExecuteConfirmedTaskCheckpointReentryInput,
+  type ExecuteConfirmedTaskContextCorrectionInput,
+} from './reentry-current-facts.js';
+
+/**
+ * Public confirmed-control request the App assembly binds to the physical
+ * owners. The caller supplies only the confirmed business intent; `filePath`,
+ * `journal` and `principalOwner` are owned by the assembly, never the request.
+ */
+export type ServiceContextCorrectionRequest =
+  Omit<ExecuteConfirmedTaskContextCorrectionInput, 'filePath' | 'journal' | 'principalOwner'>;
+export type ServiceCheckpointReentryRequest =
+  Omit<ExecuteConfirmedTaskCheckpointReentryInput, 'filePath' | 'journal' | 'principalOwner'>;
 
 function initialBindingOf(initial: ActiveTurnInitialSegmentSource) {
   return initial.kind === 'captured' ? initial.body.binding : initial.binding;
+}
+
+/**
+ * The active-lineage enumerator keeps the exact committed Checkpoint payload so
+ * callers can compare bindings, but the public exact-lookup contract accepts
+ * only checkpoint identity. Project the identity before passing it into the
+ * semantic turn reader.
+ */
+function exactCompletedTurnLookups(
+  lookups: readonly SemanticHistoryExactLookupV1[],
+): readonly SemanticHistoryExactLookupV1[] {
+  return lookups.map((lookup) => ({
+    scope: lookup.scope,
+    checkpoint: { id: lookup.checkpoint.id, scope: lookup.checkpoint.scope },
+    publicationReceiptRef: lookup.publicationReceiptRef,
+  }));
 }
 
 function initialInputOf(initial: ActiveTurnInitialSegmentSource) {
@@ -663,6 +698,29 @@ export function createDefaultExecutionComposition(input: {
         }
         return lookups;
       };
+      const timeAuthority = { source: 'harness' as const, owner: 'runtime-checkpoint-control-owner' as const,
+        authorityRef: `execution:${allocation.operationId.value}`, sampleCommittedAt: async () => input.now().toISOString() };
+      // One per-turn reader serves both the active-lineage history and the
+      // native request context. The queried prior business turn ID, not the
+      // current allocation, is the binding authority.
+      const segmentJournalFor = (businessTurnId: string) =>
+        createJsonlActiveTurnSegmentJournal({ journal: input.journal, businessTurnId });
+      const history = createJsonlSemanticHistoryJournal({ filePath: input.filePath, journal: input.journal,
+        artifactsRoot: input.artifactsRoot, activeTurnJournal, rawContent, timeAuthority,
+        segmentJournalFor });
+      // The active seed and the source context come from the canonical committed
+      // position, read before the loop installs its own root context. The
+      // canonical position is the only source; a failed read is an explicit
+      // error and never becomes an empty seed. The source context's own scope is
+      // the publication scope, because the new allocation already carries a new
+      // cycle/operation identity.
+      const taskScope: ScopeRef = { organId: allocation.scope.organId, taskId: allocation.taskId };
+      const canonicalPosition = await checkpoints.readExecutionPosition(taskScope);
+      const sourceContextRecord = canonicalPosition === null ? null
+        : await context.readContextCommit(taskScope, canonicalPosition.contextCommitRef);
+      const activeLineage = sourceContextRecord === null ? null
+        : await history.selectActiveReasoningLineage(sourceContextRecord.scope);
+      const activeContextRecord = activeLineage?.activeContextRecord ?? null;
       const loop = resume?.loop ?? await AgentLoopRuntime.start({ agentRuntimeId: allocation.runtimeId, role: 'execution', mode: 'observation',
         profiles: [{ profileId: 'task-execution-context', role: 'execution', mode: 'observation',
           observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
@@ -672,10 +730,13 @@ export function createDefaultExecutionComposition(input: {
         observationStreamId: `execution:${allocation.operationId.value}`, now: input.now,
         turn: { identity: projectAdmittedTurnIdentityV1(admittedTurn), cycleId: allocation.scope.cycleId!, directiveRevision: allocation.directiveRevision,
           ownerId: allocation.ownerId, journal: nativeCheckpoints, closurePort: closures },
-        activeRefs: allocation.inputRefs, omittedRefs: [], durableContext: {
+        activeRefs: activeContextRecord?.contextView.activeRefs ?? allocation.inputRefs,
+        omittedRefs: activeLineage?.omittedRefs ?? [],
+        durableContext: activeContextRecord?.durableContext ?? {
           stablePrefix: [objective], indexRefs: allocation.inputRefs, dynamicHead: [binding.admissionCommitRef.commitId], repairRefs: [] } }, context);
-      const timeAuthority = { source: 'harness' as const, owner: 'runtime-checkpoint-control-owner' as const,
-        authorityRef: `execution:${allocation.operationId.value}`, sampleCommittedAt: async () => input.now().toISOString() };
+      // The current turn's own installed context receipt. The native request and
+      // its closure must consume this receipt, never the predecessor position.
+      const activeContextCommitRef = loop.contextCommitRef();
       // The bound standard-turn end action. The model reaches it through the
       // actual advertised tool surface; the executor validates the semantic
       // summary/delivery against the trusted admitted turn and routes the
@@ -812,20 +873,18 @@ export function createDefaultExecutionComposition(input: {
           commit: (intent: import('../../../runtime/src/checkpoints/native-save-contract.js').NativeSaveIntent) => native.savePorts[phase as keyof typeof native.savePorts].commit(intent),
         }])) as import('../../../runtime/src/checkpoints/native-save-contract.js').NativeSavePorts,
       });
-      const history = createJsonlSemanticHistoryJournal({ filePath: input.filePath, journal: input.journal,
-        artifactsRoot: input.artifactsRoot, activeTurnJournal, rawContent, timeAuthority,
-        ...(segment === undefined ? {} : { segmentJournal: resume!.source.segmentJournal }) });
-      const activeLineage = await history.selectActiveReasoningLineage(allocation.scope);
-      const priorCompletedTurns = activeLineage.priorCompletedTurns;
+      if (retainedIntent === undefined && activeContextCommitRef === null) {
+        missing('the started execution loop installed no root context receipt');
+      }
       native = retainedIntent ? createNativeBoundaryContinuation({ intent: retainedIntent, segmentJournal: resume!.source.segmentJournal,
         journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot, activeTurnJournal,
         rawContent, timeAuthority, completionJournal: completion }) : createNativeExecution({ admitted: nativeAdmission!,
         journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot, activeTurnJournal,
+        segmentJournalFor,
         rawEvidence, rawContent, fullContext: context, completionJournal: completion, now: input.now, rules: [],
-        priorCompletedTurns, timeAuthority,
-        ...(activeLineage.activeExecutionPosition === null
-          ? {} : { activeContextCommitRef: activeLineage.activeExecutionPosition.contextCommitRef }),
-        ...(activeLineage.omittedRefs.length === 0 && activeLineage.verifiedDeadEnds.length === 0
+        priorCompletedTurns: exactCompletedTurnLookups(activeLineage?.priorCompletedTurns ?? []), timeAuthority,
+        ...(activeContextCommitRef === null ? {} : { activeContextCommitRef }),
+        ...(activeLineage === null || (activeLineage.omittedRefs.length === 0 && activeLineage.verifiedDeadEnds.length === 0)
           ? {} : { reasoningLineage: { omittedRefs: activeLineage.omittedRefs,
             ...(activeLineage.verifiedDeadEnds.length === 0 ? {} : { verifiedDeadEnds: activeLineage.verifiedDeadEnds }) } }),
         orientation: async () => undefined,
@@ -840,7 +899,7 @@ export function createDefaultExecutionComposition(input: {
         if (!frozen) missing('historical lifecycle has no restored frozen candidate');
         closingInput = { ...frozen.inputs, reviewCommitRefs: frozen.reviewCommitRefs,
           ...(frozen.bound ? { prepareCheckpointClosure: (checkpoint: import('../../../contracts/src/index.js').Checkpoint) =>
-            native.prepareTurnClosure(checkpoint, boundaryId) } : {}) };
+            native.prepareTurnClosure(checkpoint, boundaryId, frozen.inputs.source) } : {}) };
       }
       turnFacts.set(allocation.taskId.value, { loop, native });
       async function publishLifecycle(status: import('../../../contracts/src/index.js').OperationStatus,
@@ -886,6 +945,8 @@ export function createDefaultExecutionComposition(input: {
         }
         const relationship = await checkpoints.readNativeCheckpoint({ checkpoint: { scope: allocation.scope, id: checkpoint.id } });
         if (!relationship) missing('native save requires the canonical native checkpoint receipt');
+        const canonicalClosure = await closures.read(`checkpoint-closure:${checkpointCommitId(checkpoint)}`);
+        if (!canonicalClosure || !('closureKind' in canonicalClosure) || canonicalClosure.closureKind !== 'checkpoint') missing('native save requires the canonical typed checkpoint closure');
         const turn = projectAdmittedTurnIdentityV1(admittedTurn);
         const key = { turn, boundaryId, checkpoint: { id: checkpoint.id, scope: checkpoint.scope } };
         const semanticKey = { turn, checkpoint: key.checkpoint };
@@ -918,7 +979,7 @@ export function createDefaultExecutionComposition(input: {
           checkpoint: { checkpoint, timeAuthority: relationship.receipt.timeAuthority,
             previousCheckpointId: checkpoint.previousCheckpointId, acceptedAt: captured.prepared.body.cut.frozenAt },
           closure: { closureId: `checkpoint-closure:${checkpointCommitId(checkpoint)}`, checkpoint: key.checkpoint,
-            source: 'harness-control', closureSummary: checkpoint.summary, closureEvidenceRefs: checkpoint.evidenceRefs },
+            source: canonicalClosure.source, closureSummary: checkpoint.summary, closureEvidenceRefs: checkpoint.evidenceRefs },
           contextView: { key: semanticKey, accepted: { version: 1, admittedTurn, checkpoint: relationship,
             acceptance: { ownerId: allocation.ownerId, acceptanceRef: relationship.receipt.commitIdentity,
               sourceEvidenceRefs: checkpoint.evidenceRefs },
@@ -1294,10 +1355,10 @@ export function createDefaultExecutionComposition(input: {
                 missing('native preparation changed the frozen closing candidate');
               }
               closingCheckpoint = structuredClone(checkpoint);
-              return native.prepareTurnClosure(checkpoint, boundaryId);
+              return native.prepareTurnClosure(checkpoint, boundaryId, closingInput!.source);
             },
             outcome: facts.unresolvedOperationRefs.length > 0 ? 'unknown'
-              : facts.permission.revoked || facts.hardBlockers.length > 0 ? 'blocked' : 'waiting', source: 'harness-control',
+              : facts.permission.revoked || facts.hardBlockers.length > 0 ? 'blocked' : 'waiting', source: 'agent-tool',
             permissionRevoked: facts.permission.revoked, hardBlockers: facts.hardBlockers,
             recovery: { contextRef: contextRef.commitId, unfinishedRef: admittedTurn.recoveryStateRef,
               unreturnedCallRefs: [...facts.unreturnedCallRefs], unresolvedOperationRefs: [...facts.unresolvedOperationRefs] } };
@@ -1342,6 +1403,12 @@ export function createDefaultExecutionComposition(input: {
   const coldProducer: RuntimeColdExecutionProducer = { readColdExecutionSource, admitSegment,
     readIncarnationBinding, recoverOriginalTurn, createResumedExecutionDriver };
   return { currentStateFacts, admitExecution, createExecutionDriver, preparedExecutionStop, ...coldProducer, resolveColdExecutionResumeRequest, grants, context, checkpoints,
+    executeConfirmedTaskContextCorrection: (request: ServiceContextCorrectionRequest): Promise<CommittedTaskContextCorrectionReceipt> =>
+      executeConfirmedTaskContextCorrection({ ...request, filePath: input.filePath, journal: input.journal,
+        principalOwner: input.principalOwner }),
+    executeConfirmedTaskCheckpointReentry: (request: ServiceCheckpointReentryRequest): Promise<CommittedTaskCheckpointReentryReceipt> =>
+      executeConfirmedTaskCheckpointReentry({ ...request, filePath: input.filePath, journal: input.journal,
+        principalOwner: input.principalOwner }),
     async admitNewBusiness(value: Parameters<import('./task-control.js').TaskControlAdmissionPort['admitNewBusiness']>[0]) {
       return (await owner(value.request.taskId)).admitNewBusiness(value);
     },
@@ -1389,8 +1456,8 @@ export function createServiceExecutionAdmission(input: {
     const parentLifecycle: PreparedParentLifecycle = {
       event: { eventId: `parent-admitted:${allocation.operationId.value}`, schemaVersion: 1,
         kind: 'operation.accepted', operationId: allocation.operationId, taskId: allocation.taskId,
-        executionEpoch: 1, status: 'accepted', occurredAt: route.selectedAt, evidenceRefs: [] },
-      control: { intent, registration: parentRegistration, route, status: 'accepted', executionEpoch: 1,
+        executionEpoch: allocation.executionEpoch, status: 'accepted', occurredAt: route.selectedAt, evidenceRefs: [] },
+      control: { intent, registration: parentRegistration, route, status: 'accepted', executionEpoch: allocation.executionEpoch,
         namespaceKey: operationIdempotencyKey(intent),
         fingerprintKey: operationSemanticFingerprintKey(operationSemanticFingerprint(intent, parentRegistration)) },
     };

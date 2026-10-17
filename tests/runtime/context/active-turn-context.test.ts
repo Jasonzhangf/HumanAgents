@@ -132,6 +132,26 @@ test('request phases commit independently and concurrent producers receive uniqu
   assert.equal(context.controlRecordCount(), 5);
 });
 
+// Observed in C3a: historical pending phases survived settlement and blocked
+// lawful closure. One public case also guards the inverse loss of a real duty.
+// Cost: one in-memory journal and five durable request records.
+test('live request obligations use the latest phase while preserving request history', async () => {
+  const { context } = await open();
+  await context.registerRequest({ request, scope, phase: 'dispatching' });
+  await context.registerRequest({ request, scope, phase: 'waiting' });
+  await context.registerRequest({ request, scope, phase: 'settled' });
+  const pending = { turnId: 'pending-turn', requestId: 'request-pending' };
+  await context.registerRequest({ request: pending, scope, phase: 'dispatching' });
+  await context.registerRequest({ request: pending, scope, phase: 'dispatched' });
+  const prefix = await context.readLivePrefix('latest-request-phase');
+  assert.deepEqual(prefix.obligations, [
+    { kind: 'request', requestId: pending.requestId, phase: 'dispatched' },
+  ]);
+  assert.deepEqual(context.requests().map((record) => record.phase),
+    ['dispatching', 'waiting', 'settled', 'dispatching', 'dispatched']);
+  assert.deepEqual(prefix.requests, context.requests());
+});
+
 test('unregistered raw and unknown continuation fail without inventing registration', async () => {
   const { context, records } = await open();
   await assert.rejects(context.acceptRawFact(envelope(1)));

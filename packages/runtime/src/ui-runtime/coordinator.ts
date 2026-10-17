@@ -2211,6 +2211,27 @@ export class RuntimeTaskCoordinator {
     return context;
   }
 
+  /**
+   * Monotonic live floor for a committed confirmed-control epoch. The App
+   * confirmed-control facade commits a conditional transition that carries its
+   * own `newExecutionEpoch`; the next fresh allocation must sit strictly above
+   * it. This advances only the in-memory Task record epoch, never an old
+   * operation, allocation, scope or runtime identity. A repeated receipt with an
+   * equal or lower epoch is a no-op.
+   */
+  synchronizeCommittedExecutionEpoch(taskId: TaskId, committedExecutionEpoch: number): void {
+    const record = this.requireTask(taskId);
+    if (!Number.isSafeInteger(committedExecutionEpoch) || committedExecutionEpoch <= 0) {
+      throw new RuntimeTaskControlError(
+        'execution.epoch.invalid',
+        RUNTIME_OWNER,
+        'committed execution epoch must be a positive integer',
+        'supply the committed confirmed-control epoch',
+      );
+    }
+    if (committedExecutionEpoch > (record.executionEpoch ?? 0)) record.executionEpoch = committedExecutionEpoch;
+  }
+
   prepareExecution(taskId: TaskId, input: {
     readonly prompt: string;
     readonly orchestrate?: boolean;
@@ -5667,9 +5688,19 @@ export class RuntimeTaskCoordinator {
         // this operation. Adopt its epoch before any later task snapshot read.
         const currentOperationCheckpoint = checkpoint.scope.operationId !== undefined
           && sameId(checkpoint.scope.operationId, task.operationId);
-        if (currentOperationCheckpoint) {
-          task.executionEpoch = checkpoint.executionEpoch;
-        }
+        // A committed confirmed control advances the canonical execution
+        // position above the physical checkpoint epoch, so the cold floor is
+        // the maximum of the replayed value, the checkpoint epoch for the
+        // current operation and the canonical position epoch. This keeps the
+        // next fresh allocation strictly above every committed control and
+        // never lowers a later value.
+        const canonicalPosition = await store.readExecutionPosition({ organId: this.options.organId, taskId: task.taskId });
+        const coldFloor = Math.max(
+          task.executionEpoch ?? 0,
+          canonicalPosition?.executionEpoch ?? 0,
+          currentOperationCheckpoint ? checkpoint.executionEpoch : 0,
+        );
+        if (coldFloor > 0) task.executionEpoch = coldFloor;
         await this.hydratePublicOutput(task, scope,
           currentOperationCheckpoint ? checkpoint.executionEpoch : undefined);
         if (task.error?.code === 'execution.context-commit-hook.blocked') {
