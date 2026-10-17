@@ -2,6 +2,10 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Explicit完整增量已本地main交付 `7f868b12`（两来源1af06f3b/f93992e8，6文件）。r287 Opus实际quota429、未执行审查；按后备r288 Gemini4medium SUCCESS/exit0、有效JSON/findings空，现有原classifier裁决pass，证据 `native-explicit-milestone-review-r288-20261017/classification.json`。交付分支正常组合最新origin/main后FF main，无未完inspection混入。
+- main正式contracts/config/App重建、package:candidate、install:global全部exit0（session51021），canonical官方restart exit0（session81315）：generation25/PID92806 → generation26/PID87116，port53007，legacyCloseReceipt clean。新PID实际存活、installed launcher、页面入口HTTP200。main原Runtime4/4+AppHTTP/wire2/2复验PASS（session66534）；这些行为证据仍为JSONL/受控上游公开consumer，不扩称live RCC或新OS helper恢复验收。完整goal仍INCOMPLETE。
+- 作者/Reviewer均terminal，交付树clean；`explicit-checkpoint-metadata-20261017` 已正常remove/prune/testabsent。旧helper来源亦已关闭。此增量后续只剩本轮main push回执记录；inspection后继由peer继续，RCC原UNKNOWN边界不变。
+
 - metadata 来源 `73e3327b` 已正常提交并合 candidate；r286 原 Runtime2 项 assertion RED→GREEN、Appwire1 项 assertion RED→GREEN已亲读，首次fixture JSON解析失败不计RED。组合 session20106 contracts/Runtime/App编译0、Runtime2/2+App1/1 PASS。
 - 同一已清洁 metadata树切到 `codex/explicit-brain-delivery-20261017`，从 origin/main 正常 cherry-pick 两项来源为 `1af06f3b/f93992e8`，仅6文件完整 Explicit增量，不带未完inspection。该交付组合 session74053 contracts/Runtime编译0+Runtime4/4，Appbuild/tsc0+HTTP/wire2/2 PASS。r287 fresh Opus5.5 medium 整体只读 Review 已启动，未返回裁决，不称main产品交付。不是逐leaf Review，也不证明live RCC/installed新版本。
 - stop `ecd6126f + f964898d` 已正常合candidate，组合contracts/Appbuild/App/UI Runtime tsc0、原两file9/9 PASS（session74916），已回传UX；owner确认来源正常关闭。无closure/aggregate后继合同仍由UX推进，不与Explicit交付互锁。
