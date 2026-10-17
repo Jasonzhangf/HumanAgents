@@ -18,13 +18,14 @@
 
 - candidate 已保留 `a02a57e8` 的内部 principal owner、typed Task identity、prepared grant boundary、child、stop、cold 和 current-state 接线。固定 HTTP source `aee69cb1` 正常 merge 为 `9f7eccb3`；固定 Memory feedback source `4d2e8caf` 正常 merge 为 `d1e4ddc6`。重复 readiness 声明清理为 `25ffb505`。这些尚未进入 main。
 - HTTP admission 复用既有 requestable predicate 与 `unknownHealthRequestable`，两处调用共用一个局部 admission-input helper；UI readiness 仍为 unknown，disconnected 不可请求。组合 App build、focused 编译通过；原 explicit/preparation/grant 三文件 26/26，Memory producer 3/3、Runtime Memory focused 4/4 通过。首次编译的重复声明与外置测试缺模板环境原错保存在 r47 RUN，修正后通过。未重取无变化的 Provider 6/native/gateway 旧证据。
-- Memory source r38 的真实 C3b RED（actual 0 / expected 1）→GREEN 1/1、producer 3/3 与 Runtime 4/4 原证据有效；grant 后等待原 publisher 才标 applied。真模型 positive 仍由 GCM r39 推进，原三个 analysis run FAIL 不被覆盖。
+- Memory source r38 的真实 C3b RED（actual 0 / expected 1）→GREEN 1/1、producer 3/3 与 Runtime 4/4 原证据有效；task handler 等待原 publisher 才标 applied。后继真实 P2-b 材料已执行一次模型分析，实际形成待审候选；原 named case 因错误要求 task consumer 必有 external-operation 记录而 FAIL，窄修 helper 后同一次结果离线核验 exit0（actualSubmits=1、positive=true）。未再次调用模型。GCM `provider-memory-evidence-finish-gcm-r41-20261017` 正在完成非联网回归和单文件提交。原三个 analysis run FAIL 保留，不被此正例覆盖。证据为 r40 的 `positive-reopen-fixed.log`、`offline-audit.log` 和 `c3a-next-turn-QppklP/receipt.json`。
 - r47 已按 r44+r45 补 App grant→原 allocation release→existing watch，未改 Runtime。原 typed HTTP consumer 明确 RED：durable grant 后缺 execution receipt，grant 前 executor 为 0。新接线验证了同 operation/epoch release、running duplicate 不增加 POST，以及确定 release 拒绝保 durable grant/error 且不 reprepare。无 operation 原 case 继续不启动。原 native 标准结束 consumer 1/1 有效。
 - 阶段二仍 INCOMPLETE：最终 affected explicit+grant 为 24/25、build/严格 focused 编译为 0。唯一 FAIL 是新 typed HTTP 成功 case 的标准结束后继：turn-end、drain、checkpoint 后报 `the readback assignment does not match the caller assignment`，未到独立 Planner。实际 Journal assignment 为 `pipeline.execute` / `mergeGate=not-required`，Runtime orchestration 构造为 `stage-<operation>` / `required`；需父核定 assignment 唯一 owner，不能在本轮 App allowlist 外修改或放宽断言。成功终态 duplicate 尚未验收。失败 fixture 保留在 `~/.humanagent/test-fixtures/task-grant-prepared-http-kCRq5a`；服务、Provider socket、orchestration pool 已关闭。
-- r46 仅负责原 E2E 脚本，后继由父标准 Git 合流。r47 candidate source commit 只保留本增量及失败反例，不表示可集成或完整 Task 已通过；未 main/push/install/restart。完整真实 Task、正式安装及 A–G 总目标仍未完成。命令/退出与失败证据见外置 r47 RUN。
-- stop 边界 `08e2c15a` 已正常合候选，原两处 RED→GREEN 与 27 个消费者证据有效；完整 stop/resume 产品验收和已准入 submit 的停止分类仍 OPEN。
-- 原 53007 restart 由 peer 查 previous-close-unverified；本侧不安装、不重启。完整候选和完整 goal 均未交付。
-- r29 续接当前 main merge：保留 taskless 泛型、实际出站 body、typed 请求链、stop 边界及全部 9 proof imports 的统一 runtime root。受影响 Responses consumer 1/1、transport 20/20 通过；公开 consumer 整文件 4/6，Anthropic/Chat 原状态序列断言因多一个 settled 失败，未改断言或扩大修复范围。原错与组合证据保留在外置 r29 RUN。
+- r47 已自然 exit0，candidate clean，writer 释放。独立 Gemini 4 medium 局部 Planner `provider-assignment-owner-plan-agy-r49-20261017` 已启动，实际型号与独立 conversation 已核对；只定位 assignment 首次分歧及唯一 owner，不放宽 readback equality。r44+r45 的 5 项接线工作中，明确公开 RED 已完成 1 项，其余实现验收、脚本和正式运行尚未全部通过。
+- 原 E2E 脚本由同一 App source 树的技术攻关者 `provider-real-task-script-technical-r48-20261017` 接续。GCM r46 连续读取无改动后已精确停止，exit1/absent，无新 worktree。后继脚本正常提交后标准 Git 合流，语法检查不冒真实运行 PASS。
+- stop 边界 `08e2c15a` 已正常合候选；P2-b typed continuation cause 已由 `621f4014` 修复并合流，原 RED→GREEN 有效。完整 stop/resume 产品验收仍 OPEN。
+- UX peer 报告原 53007 正式恢复至 gen17，旧 gen16 clean、Task dashboard200/succeeded；其 F09 现场仍有 interrupted predecessor 读取依赖缺口，正在窄修。canonical 窗口仍由 peer 持有，本侧不安装、不重启，不把旧 Task 恢复算作新 Provider Task 验收。
+- 历史 r29 的公开 consumer 4/6 已由后继 `4e1d65c5` 对齐真实阶段顺序为 6/6；缺少 settled、提前 settled、错误 root 的可执行反例仍会失败。原 native1/1、gateway2/2 及 Provider6/6 组合证据已在 r42 接收。完整候选和完整 goal 均未交付 main。
 
 ### 续接记录（历史，截至 2026-10-17）
 
