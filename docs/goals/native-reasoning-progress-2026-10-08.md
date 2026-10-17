@@ -6,6 +6,12 @@
 
 ### 续接增量（2026-10-16）
 
+- C2 r1目标consumer1/1已GREEN，但未接收：Root确认其又扩跑未派App/uiRuntime全组并追作者报告15FAIL，精确SIGINT50790/absent/exit1，保存2dirtyfiles，同树freshGCM `provider-n2-c-memory-finish-gcm-r2-20261016` 收尾，不把15FAIL新增为C2门禁。Root源码发现id+task倒序latest可误选另一cycle（S已真实证明同ID跨cycle合法），及按caller命名无条件把checkpoint当errors证据；r2只纠正原exact-binding/真实错误依据并补原1consumer可执行RED/接口/清理，不扩面。C2仍未验收，C3MemoryABI仍conditional。
+
+- C1与错误refs模块均已验收：C1提交 `9f71159b101ea0603467539f043f02f1a5ca9abd`，错误refs提交 `b3b09c5`，标准组合candidate3052e773；Root组合Appbuild0/两scopedtsc0/公开C1一case1/1+Provider六affected6/6exit0。C1有实际coverageomissionRED16!=17及真实coverage readback/幂等；Provider新增causechainassert实际[]丢refsRED，五旧exact预期已保语义更新。作者额外129suite只留历史，不新增门禁/不重复。Provider来源clean/exit0/无占用后normalremove/prune/absent，注册6→5，C1Rootfixture已归档Journal并清空目录。
+- C1确认重复reader已等价消融，提交 `962ffa2`（1+/12-），原consumer前后1/1/tsc0、无新case/ABI变化；已标准合candidate `7e1334dbc608e966a422e040fb0a0605b417b966`。N2原树继续保留C3，无retry新树。C3独立Planner续r3/PID35417按真实C1interface只安排剩余hot/cold epoch/context/publicService/Memory真实caller，C2ABI未冻结不猜。
+- RCCdirect观察证伪“Req04检查缺items”的具体假设：Req04不做该schema验证。hyper UserBody指RCC响应体，但内层typederror仍UNKNOWN；trace是core返回后批量输出，缺executed不能证明某中间节点未执行。当前磁盘config无MiniMaxroute尚不能等同loaded配置。三轮requestrecords/serverwindow/directsource仍未解后已按疑难规则请求独立OAuth/Astra只读技术攻关 `provider-a0-astra-technical-20261016`，非Reviewer/零请求/不改RCC。CLI模型目录刷新timeout/子ephemeralgoaltools不可用不是产品阻塞，实际已继续读RCC源码；仅按启动参数记录requestedmodel，不凭自称宣称后端型号证实。C2 GCM并行继续，完整goal/N2-C/A0均未完成。
+
 - A0独立r2plan已返回并接受只读动作A：取消盲加关联header/responseHeaders再撞一次；新GCM `provider-a0-direct-owner-observe-gcm-r1-20261016` 只从installedRCC入口/非敏感映射追directBody首个Err。Root不接受JSONSchema items/properties是通用必需或只读必100%定因的表述，须实际RCC契约/可归属样本；时间吻合证据不扩大成MiniMax上游拒绝。另已源码实核persistError两行覆盖前置refs，按r2已接受独立修正项派GCM `provider-error-evidence-execute-gcm-r1-20261016`，只transport/原causechainconsumer，不新字段/矩阵，不称socket修好。新唯一provider-error-evidence树baseeab06d5，注册5→6；C1/C2/只读direct/错误refs共4路GCM，无其他ready不冲突实现待派。
 
 - C调度纠正：整包GCM已133commands但源码零delta，Root精确SIGINT17701/确认absent/exit1，未把停单当后端不可用。保持已接受方案，执行拆C1（三files控制facade+原consumer）/C2（两filesMemoryproducer+原consumer）并行，C3待两真实ABI冻结后单writer接Service/Coordinator/CLI/nextrequest。J/S标准merge唯一candidate为 `379b0d61443bfe53990b55b58a72003158dd0cd9`，组合Appbuild0，N2原树cleanFF同候选；source-only未restart。freshGCM control-r2复用N2树，memory-r1新唯一独立domain n2-memory-producer-20261016（同candidatebase），边界不重叠；注册4→5。C总验收仍未完成，N2本轮2/3不变。
