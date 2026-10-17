@@ -6,20 +6,16 @@
   },
   "nodes": {
     "typecheck": {
-      "ownerPath": "scripts/checkpoint-stages.mjs",
-      "ownerRel": "scripts/checkpoint-stages.mjs"
+      "ownerPath": "scripts/run-ci.mjs",
+      "ownerRel": "scripts/run-ci.mjs"
     },
     "compile": {
-      "ownerPath": "scripts/checkpoint-stages.mjs",
-      "ownerRel": "scripts/checkpoint-stages.mjs"
+      "ownerPath": "scripts/run-ci.mjs",
+      "ownerRel": "scripts/run-ci.mjs"
     },
     "regression": {
-      "ownerPath": "scripts/checkpoint-stages.mjs",
-      "ownerRel": "scripts/checkpoint-stages.mjs"
-    },
-    "ci_gate": {
-      "ownerPath": "scripts/checkpoint-stages.mjs",
-      "ownerRel": "scripts/checkpoint-stages.mjs"
+      "ownerPath": "scripts/run-ci.mjs",
+      "ownerRel": "scripts/run-ci.mjs"
     }
   }
 }

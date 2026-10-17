@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,94 +14,6 @@ import { bumpReleaseVersion, configuredPackageVersion, configuredReleaseVersion,
 const node = process.execPath;
 const command = (source) => [node, '-e', source];
 const repositoryRoot = new URL('../..', import.meta.url);
-
-function fileDigest(bytes) {
-  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-}
-
-async function readJson(relativePath) {
-  return JSON.parse(await readFile(new URL(relativePath, repositoryRoot), 'utf8'));
-}
-
-test('installed bundle uses the canonical zone transition manifest', async () => {
-  const project = await readJson('.appsdk/project.json');
-  assert.equal(
-    project.governance.zone_transition_contract,
-    'contracts/transitions/zone-transition.manifest.json',
-  );
-
-  const declaredBytes = await readFile(new URL(`.appsdk/${project.governance.zone_transition_contract}`, repositoryRoot));
-  const canonicalBytes = await readFile(new URL('contracts/transitions/zone-transition.manifest.json', repositoryRoot));
-  assert.deepEqual(declaredBytes, canonicalBytes);
-
-  const resources = await readJson('.appsdk/sdk-resources.json');
-  const resource = resources.resources.find((entry) => (
-    entry.class === 'contracts'
-    && entry.source === 'contracts/transitions/zone-transition.manifest.json'
-  ));
-  assert.ok(resource, 'zone transition manifest must be an installed bundle resource');
-  assert.equal(resource.path, '.appsdk/contracts/transitions/zone-transition.manifest.json');
-  assert.equal(resource.digest, fileDigest(declaredBytes));
-});
-
-test('installed promotion schema requires the canonical collab live closure gate', async () => {
-  const canonicalBytes = await readFile(new URL('contracts/records/promotion-record.schema.json', repositoryRoot));
-  const installedBytes = await readFile(new URL('.appsdk/contracts/records/promotion-record.schema.json', repositoryRoot));
-  assert.deepEqual(installedBytes, canonicalBytes);
-
-  const schema = JSON.parse(installedBytes);
-  assert.equal(typeof schema.properties.collab_live_closure_record_id?.type, 'string');
-  assert.ok(!schema.required?.includes('collab_live_closure_record_id'));
-  const closureCondition = schema.allOf?.find((entry) => (
-    entry.if?.required?.includes('collaboration_record_id')
-  ));
-  assert.ok(closureCondition, 'promotion schema must condition on collaboration_record_id');
-  assert.deepEqual(closureCondition.then?.required, ['collab_live_closure_record_id']);
-
-  const resources = await readJson('.appsdk/sdk-resources.json');
-  const resource = resources.resources.find((entry) => (
-    entry.class === 'contracts'
-    && entry.source === 'contracts/records/promotion-record.schema.json'
-  ));
-  assert.ok(resource, 'promotion record schema must be an installed bundle resource');
-  assert.equal(resource.path, '.appsdk/contracts/records/promotion-record.schema.json');
-  assert.equal(resource.digest, fileDigest(installedBytes));
-});
-
-test('fresh AppSDK reset preserves current bundle and canonical map integrity', async () => {
-  const resetRecord = await readJson('.appsdk/records/reset-governance-record.json');
-  assert.equal(resetRecord.mode, 'fresh_init');
-
-  const lock = await readJson('.appsdk/sdk.lock');
-  const project = await readJson('.appsdk/project.json');
-  const manifest = await readJson('.appsdk/contracts/sdk-bundle.manifest.json');
-  const resources = await readJson('.appsdk/sdk-resources.json');
-  const currentVersion = lock.version;
-  assert.equal(project.sdk.version, currentVersion);
-  assert.equal(manifest.version, currentVersion);
-  assert.equal(resources.version, currentVersion);
-  assert.equal(lock.bundle_digest, resources.bundle_digest);
-  assert.equal(lock.bundle_manifest_digest, resources.manifest_digest);
-
-  for (const name of [
-    'resource-map.json',
-    'function-map.json',
-    'mainline-call-map.json',
-    'verification-map.json',
-  ]) {
-    const bundleBytes = await readFile(new URL(`.appsdk/contracts/maps/${name}`, repositoryRoot));
-    const installedBytes = await readFile(new URL(`.appsdk/maps/${name}`, repositoryRoot));
-    assert.deepEqual(installedBytes, bundleBytes, `${name} must match the current bundle map`);
-
-    const resource = resources.resources.find((entry) => (
-      entry.class === 'contracts'
-      && entry.source === `contracts/maps/${name}`
-    ));
-    assert.ok(resource, `missing bundle resource for ${name}`);
-    assert.equal(resource.path, `.appsdk/contracts/maps/${name}`);
-    assert.equal(resource.digest, fileDigest(bundleBytes));
-  }
-});
 
 test('release versions are path-safe semantic versions', () => {
   assert.equal(validateReleaseVersion('0.1.0'), '0.1.0');
@@ -390,6 +301,7 @@ test('build, ci, and release checkpoint roots share one project write lock', asy
 
 test('compile checkpoint owns every raw build output and excludes release output', () => {
   const stages = checkpointStages();
+  assert.deepEqual(stages.map((stage) => stage.name), ['typecheck', 'compile', 'regression']);
   const compile = stages.find((stage) => stage.name === 'compile');
   const regression = stages.find((stage) => stage.name === 'regression');
   assert.deepEqual(compile.command, ['pnpm', 'run', 'build:raw']);

@@ -65,8 +65,10 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
   但仍保留已有 dirty 状态。
 - 每个 peer 任务必须写明入口、唯一 owner、allowed/forbidden paths、交付物、测试命令、
   E2E/manual 验证、review 条件和资源清理条件。
-- peer 回传必须包含 candidate SHA、changed files、测试数量与结果、真实入口/E2E 或手动验证证据、
-  独立 review PASS、清理列表和剩余风险。READ IS NOT DONE；测试和 review 是 gate，不是建议。
+- peer 回传必须包含自然 Git 提交标识（若有提交）、changed files、受影响测试结果、
+  真实入口/E2E 或手动验证证据、清理列表和剩余风险。READ IS NOT DONE；测试和 review 是 gate，不是建议。
+  对外 release 前不主动计算 SHA/checksum、目录摘要、冻结快照或候选身份绑定；子任务不单独触发独立
+  Review，仅在完整且重大的可交付 milestone 完成作者自检与适用黑盒验收后、正式集成前执行一次整体独立 Review。
 - master 合并前必须 fetch 最新 `origin/main`，确认候选已组合到最新 main 并重跑受影响验证；
   若当前 main 有大量 dirty 或未归属候选，先派 audit/classification 任务，不得直接提交。
 - 资源清理是终点生命周期：只核销 owner 明确、已确认 stale 且本任务可负责的资源；清理失败必须
