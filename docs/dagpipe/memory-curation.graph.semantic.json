@@ -6,6 +6,9 @@
     "compose_memory_request": "组装记忆请求",
     "run_memory_agent": "运行记忆 Agent",
     "curate_lesson": "整理经验候选",
-    "write_memory_event": "写入持久经验"
+    "write_memory_event": "保存持久审计结果与待审候选"
+  },
+  "contracts": {
+    "outputs": "出口是已持久保存的审计结果；有候选时候选保持待审，无候选时允许以审计结果收口。二者都不表示规则或记忆已发布。"
   }
 }
