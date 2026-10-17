@@ -21,6 +21,7 @@ const SOURCE_KIND_LABELS: Record<TaskAgentActivitySourceKind, string> = {
   'runtime-pool-lease': '运行池租约',
   'child-invocation': '子调用',
   'milestone-review': '里程碑复核',
+  'closed-turn-planner-call': '回合收口规划',
 };
 
 const CURRENCY_LABELS: Record<TaskAgentActivityCurrency, string> = {
@@ -69,23 +70,33 @@ function projectCommitRef(ref: {
 }
 
 function projectEntry(record: TaskAgentActivityOwnershipRecord): RuntimeAgentActivityEntryProjection {
-  return {
+  const common = {
     taskId: record.taskId,
     instance: projectInstance(record.instance),
     assignmentId: record.assignmentId,
     ...(record.attempt === undefined ? {} : { attempt: record.attempt }),
     executionEpoch: record.executionEpoch,
-    objective: record.objective,
     ...(record.businessTurnId === undefined ? {} : { businessTurnId: record.businessTurnId }),
     ...(record.segmentId === undefined ? {} : { segmentId: record.segmentId }),
     ...(record.nodeId === undefined ? {} : { nodeId: record.nodeId }),
-    sourceKind: record.sourceKind,
     sourceKindLabel: SOURCE_KIND_LABELS[record.sourceKind],
     currency: record.currency,
     currencyLabel: CURRENCY_LABELS[record.currency],
     ...(record.missingSource === undefined ? {} : { missingSource: record.missingSource }),
     commitRefs: record.commitRefs.map(projectCommitRef),
     evidenceRefs: record.evidenceRefs,
+  };
+  if (record.sourceKind === 'closed-turn-planner-call') {
+    return {
+      ...common,
+      sourceKind: 'closed-turn-planner-call',
+      ...(record.objective === undefined ? {} : { objective: record.objective }),
+    };
+  }
+  return {
+    ...common,
+    sourceKind: record.sourceKind,
+    objective: record.objective,
   };
 }
 
