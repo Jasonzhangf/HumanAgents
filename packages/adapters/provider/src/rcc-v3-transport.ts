@@ -6,6 +6,7 @@ import {
   type ProviderCloseResult,
   type ProviderError,
   type ProviderExecutionIdentityRef,
+  type ProviderRequestIdentityRef,
   type ProviderReadiness,
   type ProviderRecoveryResult,
   type ProviderObserveInput,
@@ -513,7 +514,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
     this.assertProtocol(protocol);
     const route = requestRoute(request);
     const controller = new AbortController();
-    const response = await this.send(protocol, request, controller);
+    const sent = await this.send(protocol, request, controller);
+    const response = sent.response;
     const body = response.body;
     if (!body) {
       controller.abort('RCC v3 start returned no streaming body');
@@ -542,6 +544,13 @@ export class RccV3ProviderTransport implements ProviderTransport {
         protocol,
         model: request.model,
         route,
+        requestReceipt: this.requestReceipt(input, sent.body, {
+          status: response.status,
+          endpoint: endpointPath(protocol),
+          protocol,
+          model: request.model,
+          route,
+        }),
       });
     } catch (cause) {
       controller.abort('RCC v3 start evidence persistence failed');
@@ -593,9 +602,9 @@ export class RccV3ProviderTransport implements ProviderTransport {
     active.terminalError = undefined;
     active.streamCompletion = undefined;
     active.responsesToolCallsPending = false;
-    let response: RccV3FetchResponse;
+    let sent: { readonly body: string; readonly response: RccV3FetchResponse };
     try {
-      response = await this.send(protocol, request, controller);
+      sent = await this.send(protocol, request, controller);
     } catch (cause) {
       active.streamDone = true;
       active.resourceReleased = true;
@@ -606,6 +615,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       }
       throw cause;
     }
+    const response = sent.response;
     if (!response.body) {
       active.streamDone = true;
       active.resourceReleased = true;
@@ -622,6 +632,17 @@ export class RccV3ProviderTransport implements ProviderTransport {
       ...(input.toolContinuations === undefined || input.toolContinuations.length === 0 ? {} : {
         callIds: input.toolContinuations.map((continuation) => continuation.callId),
         continuationRef: input.toolContinuations[0].continuationRef,
+      }),
+      requestReceipt: this.requestReceipt(input, sent.body, {
+        status: response.status,
+        endpoint: endpointPath(protocol),
+        protocol,
+        model: request.model,
+        route,
+        ...(input.toolContinuations === undefined || input.toolContinuations.length === 0 ? {} : {
+          callIds: input.toolContinuations.map((continuation) => continuation.callId),
+          continuationRef: input.toolContinuations[0].continuationRef,
+        }),
       }),
     });
     return { ...input, status: 'accepted', outputRefs: [], evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'continue', ref: 'rcc-v3.observe' } };
@@ -926,7 +947,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return reason;
   }
 
-  private async send(protocol: 'responses' | 'anthropic' | 'openai', request: ProviderWireRequest, controller: AbortController): Promise<RccV3FetchResponse> {
+  private async send(protocol: 'responses' | 'anthropic' | 'openai', request: ProviderWireRequest, controller: AbortController): Promise<{ readonly body: string; readonly response: RccV3FetchResponse }> {
     const headers: Record<string, string> = { accept: 'text/event-stream', 'content-type': 'application/json' };
     if (this.source === 'http') {
       if (protocol === 'anthropic') {
@@ -936,17 +957,44 @@ export class RccV3ProviderTransport implements ProviderTransport {
         headers.authorization = `Bearer ${this.credential}`;
       }
     }
+    const body = JSON.stringify(requestPayload(request));
     const response = await this.fetcher(urlFor(this.options.baseUrl, endpointPath(protocol)), {
       method: 'POST',
       headers,
-      body: JSON.stringify(requestPayload(request)),
+      body,
       signal: controller.signal,
     });
     if (response.status < 200 || response.status >= 300) {
       const body = (await response.text()).slice(0, this.maxEventBytes);
       throw new ProviderAdapterError({ code: `http.${response.status}`, category: 'provider', phase: 'start', message: `RCC v3 returned HTTP ${response.status}${body ? `: ${body}` : ''}`, scope: this.options.binding });
     }
-    return response;
+    return { body, response };
+  }
+
+  private requestReceipt(input: ProviderExecutionIdentityRef & Partial<ProviderRequestIdentityRef>, body: string, wire: {
+    readonly status: number;
+    readonly endpoint: string;
+    readonly protocol: 'responses' | 'anthropic' | 'openai';
+    readonly model: string;
+    readonly route: string;
+    readonly callIds?: readonly string[];
+    readonly continuationRef?: string;
+  }) {
+    const identity: ProviderExecutionIdentityRef = {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      ...(input.organId === undefined ? {} : { organId: input.organId }),
+      ...(input.cycleId === undefined ? {} : { cycleId: input.cycleId }),
+      executionEpoch: input.executionEpoch,
+    };
+    return {
+      body, identity,
+      ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+      ...(input.parentRequestId === undefined ? {} : { parentRequestId: input.parentRequestId }),
+      ...wire,
+    };
   }
 
   private errorEvidence(scope: ScopeRef, label: string): EvidenceRef {

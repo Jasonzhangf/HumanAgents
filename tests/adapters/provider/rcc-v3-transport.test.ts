@@ -228,10 +228,22 @@ test('RCC v3 Responses submit opens a second stream bound to the completed tool 
     route: 'cc:test-route',
     callIds: ['call-readme'],
     continuationRef: 'response-round-1',
+    requestReceipt: {
+      body: calls[1]?.init.body,
+      identity: execution,
+      status: 200,
+      endpoint: '/v1/responses',
+      protocol: 'responses',
+      model: 'provider.model',
+      route: 'cc:test-route',
+      callIds: ['call-readme'],
+      continuationRef: 'response-round-1',
+    },
   });
 });
 
 test('RCC v3 Responses typed submit sends the native context without legacy continuation fields', async () => {
+  const requestIdentity = { turnId: 'turn-native', requestId: 'request-native-2', parentRequestId: 'request-native-1' };
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const streams = [
     chunks([
@@ -259,6 +271,7 @@ test('RCC v3 Responses typed submit sends the native context without legacy cont
 
   const submitted = await built.adapter.submit({
     ...execution,
+    ...requestIdentity,
     inputRefs: ['asset://provider-tool/output/call-native'],
     evidenceRefs: [evidence('native-tool-result')],
     payload: { toolResultRef: 'asset://provider-tool/output/call-native' },
@@ -281,6 +294,16 @@ test('RCC v3 Responses typed submit sends the native context without legacy cont
     protocol: 'responses',
     model: 'provider.model',
     route: 'cc:test-route',
+    requestReceipt: {
+      body: calls[1]?.init.body,
+      identity: execution,
+      ...requestIdentity,
+      status: 200,
+      endpoint: '/v1/responses',
+      protocol: 'responses',
+      model: 'provider.model',
+      route: 'cc:test-route',
+    },
   });
 });
 
@@ -332,6 +355,15 @@ test('RCC v3 openai typed submit sends the continuation to Chat Completions', as
     protocol: 'openai',
     model: 'provider.model',
     route: 'rcc-openai-entry:test-route',
+    requestReceipt: {
+      body: calls[1]?.init.body,
+      identity: execution,
+      status: 200,
+      endpoint: '/v1/chat/completions',
+      protocol: 'openai',
+      model: 'provider.model',
+      route: 'rcc-openai-entry:test-route',
+    },
   });
 });
 
@@ -386,6 +418,15 @@ test('RCC v3 anthropic typed submit sends the continuation to Messages', async (
     protocol: 'anthropic',
     model: 'provider.model',
     route: 'goaichat:test-route',
+    requestReceipt: {
+      body: calls[1]?.init.body,
+      identity: execution,
+      status: 200,
+      endpoint: '/v1/messages',
+      protocol: 'anthropic',
+      model: 'provider.model',
+      route: 'goaichat:test-route',
+    },
   });
 });
 
@@ -734,13 +775,14 @@ test('RCC v3 probe treats a non-ok health payload as not-ready', async () => {
 });
 
 test('RCC v3 start sends the explicit request and returns a receipt', async () => {
+  const requestIdentity = { turnId: 'turn-start', requestId: 'request-start' };
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const body = chunks([
     'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1"}}\n\n',
   ]);
   const built = adapter(fetchStub(body, calls));
 
-  const receipt = await built.adapter.start(startInput());
+  const receipt = await built.adapter.start({ ...startInput(), ...requestIdentity });
   assert.equal(receipt.runtimeId, execution.runtimeId);
   assert.equal(receipt.taskId.value, execution.taskId.value);
   assert.equal(receipt.operationId.value, execution.operationId.value);
@@ -763,6 +805,16 @@ test('RCC v3 start sends the explicit request and returns a receipt', async () =
   });
   assert.deepEqual(built.writes.map((write) => write.type), ['start']);
   assert.equal((built.writes[0].content as { route?: string }).route, 'cc:test-route');
+  assert.deepEqual((built.writes[0].content as { requestReceipt?: unknown }).requestReceipt, {
+    body: calls[0].init.body,
+    identity: execution,
+    ...requestIdentity,
+    status: 200,
+    endpoint: '/v1/responses',
+    protocol: 'responses',
+    model: 'provider.model',
+    route: 'cc:test-route',
+  });
 });
 
 test('provider wire bodies carry business text and never internal control refs', async () => {
