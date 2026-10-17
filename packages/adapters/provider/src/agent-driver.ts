@@ -74,6 +74,10 @@ interface ToolBarrier {
   readonly release: () => void;
 }
 
+type ProviderToolExecutionOutcome =
+  | { readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }
+  | { readonly call: ProviderToolCall; readonly cause: unknown };
+
 function createToolBarrier(): ToolBarrier {
   let release!: () => void;
   const promise = new Promise<void>((resolve) => { release = resolve; });
@@ -166,6 +170,7 @@ export interface ProviderToolExecutionResult {
 export interface ProviderToolExecutionPort<
   TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
 > {
+  canRunConcurrently?(call: ProviderToolCall): boolean;
   execute(input: {
     readonly execution: TIdentity;
     readonly scope: ScopeRef;
@@ -368,7 +373,7 @@ export class ProviderAgentDriver<
   private readonly execution: TIdentity;
   private readonly evidenceRef: EvidenceRef;
   private stopping = false;
-  private toolController?: AbortController;
+  private readonly toolControllers = new Set<AbortController>();
   private toolBarrier?: ToolBarrier;
   private continuationCompletion?: Promise<void>;
   private initialPayload?: BusinessPayload;
@@ -628,7 +633,8 @@ export class ProviderAgentDriver<
       if (this.options.maxToolRounds !== undefined && rounds > this.options.maxToolRounds) {
         throw this.error('tool.round-limit', 'provider tool round limit was exceeded', 'observe', 'runtime');
       }
-      for (const call of toolCalls) {
+      for (let callIndex = 0; callIndex < toolCalls.length;) {
+        const call = toolCalls[callIndex]!;
         if (this.stopping) return;
         // The declared tool list IS this Harness's tool surface. A backend
         // harness tool the model reached for anyway (for example a shell or
@@ -646,78 +652,19 @@ export class ProviderAgentDriver<
           if (this.stopping) return;
           yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} unavailable`);
           toolHistory.push({ call, result: unowned });
+          callIndex += 1;
           continue;
         }
-        this.toolController = new AbortController();
-        const toolController = this.toolController;
-        const toolBarrier = createToolBarrier();
-        this.toolBarrier = toolBarrier;
-        const releaseBarrier = (): void => {
-          this.toolController = undefined;
-          toolBarrier.release();
-          if (this.toolBarrier === toolBarrier) this.toolBarrier = undefined;
-        };
-        let result: ProviderToolExecutionResult;
-        try {
-          result = await this.track(this.options.executeTool.execute({
-            execution: this.execution,
-            scope: this.options.scope,
-            ...(this.activeRequest === undefined ? {} : { requestId: this.activeRequest.requestId }),
-            call,
-            signal: toolController.signal,
-          }));
-        } catch (cause) {
-          // A stop aborts the tool signal. Whether the executor rejected with
-          // that abort or with its own failure, the outcome is evidence: it must
-          // emit a typed result bound to the same callId instead of only
-          // returning or throwing, so a cancelled tool never disappears from
-          // the journal. No output was returned, so no raw asset is fabricated.
-          // The barrier is released before any yield: a consumer that stops
-          // resuming must never hold the barrier and deadlock settle()/drain.
-          if (this.stopping) {
-            releaseBarrier();
-            yield* this.toolFailedEvents(request, call, cause, 'cancelled');
-            return;
+        const batch = [call];
+        if (this.options.executeTool.canRunConcurrently?.(call) === true) {
+          for (const candidate of toolCalls.slice(callIndex + 1)) {
+            if (!(this.options.tools ?? []).some((tool) => tool.toolId === candidate.toolId)) break;
+            if (this.options.executeTool.canRunConcurrently?.(candidate) !== true) break;
+            batch.push(candidate);
           }
-          // Latch the real executor failure before releasing the barrier and
-          // yielding, so a consumer that stops resuming here leaves
-          // settle()/drain reporting it instead of a normal result. It is not
-          // a durable producer failure: once this throw reaches the caller the
-          // latch is cleared and settle() must still reach the port.
-          if (this.unconsumedToolFailure === undefined) this.unconsumedToolFailure = cause;
-          releaseBarrier();
-          yield* this.toolFailedEvents(request, call, cause, 'failed');
-          if (this.unconsumedToolFailure === cause) this.unconsumedToolFailure = undefined;
-          throw cause;
         }
-        const status: ProviderToolStatus = result.error !== undefined
-          ? result.status === 'cancelled' ? 'cancelled' : 'failed'
-          : result.status === 'cancelled'
-            ? 'cancelled'
-            : result.status ?? 'succeeded';
-        const toolResult: ProviderToolResult<TIdentity> = this.toolResult(request, call, result, status);
-        // Save and durably accept the exact output before any projection, early
-        // stop return or continuation: a late result must still reach the
-        // Runtime, and a failing acceptance must not read as a normal stop.
-        try {
-          await this.track(this.persistToolResult(request, call, result, toolResult));
-        } catch (cause) {
-          this.recordProducerFailure(cause);
-          throw cause;
-        } finally {
-          releaseBarrier();
-        }
-        if (this.stopping) return;
-        if (status !== 'succeeded') {
-          yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} ${status}`);
-          if (result.status === 'failed' && isStandardTurnEndToolId(call.toolId)) {
-            toolHistory.push({ call, result });
-            continue;
-          }
-          throw this.toolResultFailure(toolResult);
-        }
-        yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} succeeded`);
-        toolHistory.push({ call, result });
+        yield* this.executeToolBatch(request, batch, this.options.executeTool, toolHistory);
+        callIndex += batch.length;
       }
       if (this.stopping) return;
       await this.commitObservedCompletion(request);
@@ -779,7 +726,9 @@ export class ProviderAgentDriver<
       throw this.error('runtime.identity.mismatch', 'provider stop is not bound to the current execution', 'stop', 'runtime');
     }
     this.stopping = true;
-    this.toolController?.abort(new DOMException('operator requested stop', 'AbortError'));
+    for (const controller of this.toolControllers) {
+      controller.abort(new DOMException('operator requested stop', 'AbortError'));
+    }
     let receipt: ProviderStopReceipt<TIdentity>;
     try {
       receipt = await this.port.requestStop({
@@ -968,6 +917,92 @@ export class ProviderAgentDriver<
 
   private recordProducerFailure(cause: unknown): void {
     if (this.producerFailure === undefined) this.producerFailure = cause;
+  }
+
+  private async *executeToolBatch(
+    request: RequestAttempt,
+    calls: readonly ProviderToolCall[],
+    port: ProviderToolExecutionPort<TIdentity>,
+    toolHistory: Array<{ readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }>,
+  ): AsyncGenerator<ProviderAgentEvent<TIdentity>, void, void> {
+    const controllers = calls.map(() => new AbortController());
+    for (const controller of controllers) this.toolControllers.add(controller);
+    const toolBarrier = createToolBarrier();
+    this.toolBarrier = toolBarrier;
+    let released = false;
+    const releaseBarrier = (): void => {
+      if (released) return;
+      released = true;
+      for (const controller of controllers) this.toolControllers.delete(controller);
+      toolBarrier.release();
+      if (this.toolBarrier === toolBarrier) this.toolBarrier = undefined;
+    };
+
+    try {
+      // Track execution and durable persistence as one producer so draining
+      // cannot finish in the microtask gap between those phases.
+      const { outcomes, toolResults, persistenceFailure } = await this.track((async () => {
+        const outcomes = await Promise.allSettled(calls.map(async (call, index) => port.execute({
+          execution: this.execution,
+          scope: this.options.scope,
+          ...(this.activeRequest === undefined ? {} : { requestId: this.activeRequest.requestId }),
+          call,
+          signal: controllers[index]!.signal,
+        }))).then((settled) => settled.map((entry, index): ProviderToolExecutionOutcome => entry.status === 'fulfilled'
+          ? { call: calls[index]!, result: entry.value }
+          : { call: calls[index]!, cause: entry.reason }));
+
+        const toolResults = new Map<string, { readonly status: ProviderToolStatus; readonly result: ProviderToolResult<TIdentity> }>();
+        let persistenceFailure: unknown;
+        // Persist every started call before releasing the barrier. A later failed
+        // result must not erase a successful sibling's exact output.
+        for (const outcome of outcomes) {
+          if (!('result' in outcome)) continue;
+          const status = this.toolStatus(outcome.result);
+          const result = this.toolResult(request, outcome.call, outcome.result, status);
+          toolResults.set(outcome.call.callId, { status, result });
+          try {
+            await this.persistToolResult(request, outcome.call, outcome.result, result);
+          } catch (cause) {
+            this.recordProducerFailure(cause);
+            persistenceFailure ??= cause;
+          }
+        }
+        return { outcomes, toolResults, persistenceFailure };
+      })());
+
+      // A suspended consumer must never hold settlement: all durable work above
+      // is complete, so release before the first projection yield.
+      releaseBarrier();
+      if (persistenceFailure !== undefined) throw persistenceFailure;
+
+      for (const outcome of outcomes) {
+        if ('cause' in outcome) {
+          if (this.stopping) {
+            yield* this.toolFailedEvents(request, outcome.call, outcome.cause, 'cancelled');
+            continue;
+          }
+          if (this.unconsumedToolFailure === undefined) this.unconsumedToolFailure = outcome.cause;
+          yield* this.toolFailedEvents(request, outcome.call, outcome.cause, 'failed');
+          if (this.unconsumedToolFailure === outcome.cause) this.unconsumedToolFailure = undefined;
+          throw outcome.cause;
+        }
+        const toolResult = toolResults.get(outcome.call.callId)!;
+        if (this.stopping) continue;
+        if (toolResult.status !== 'succeeded') {
+          yield* this.toolResultEvents(request, outcome.call, toolResult.result, `${outcome.call.toolId} ${toolResult.status}`);
+          if (outcome.result.status === 'failed' && isStandardTurnEndToolId(outcome.call.toolId)) {
+            toolHistory.push({ call: outcome.call, result: outcome.result });
+            continue;
+          }
+          throw this.toolResultFailure(toolResult.result);
+        }
+        yield* this.toolResultEvents(request, outcome.call, toolResult.result, `${outcome.call.toolId} succeeded`);
+        toolHistory.push({ call: outcome.call, result: outcome.result });
+      }
+    } finally {
+      releaseBarrier();
+    }
   }
 
   /**
@@ -1277,6 +1312,12 @@ export class ProviderAgentDriver<
     status: 'failed' | 'cancelled',
   ): Iterable<ProviderAgentEvent<TIdentity>> {
     return this.toolResultEvents(request, call, this.toolFailureResult(call, cause, status), `${call.toolId} ${status}`);
+  }
+
+  private toolStatus(result: ProviderToolExecutionResult): ProviderToolStatus {
+    if (result.error !== undefined) return result.status === 'cancelled' ? 'cancelled' : 'failed';
+    if (result.status === 'cancelled') return 'cancelled';
+    return result.status ?? 'succeeded';
   }
 
   private toolResult(request: RequestAttempt, call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult<TIdentity> {
