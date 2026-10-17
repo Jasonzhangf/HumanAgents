@@ -1896,7 +1896,7 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
               OWNER,
             );
           }
-          if (rewind.errors === undefined || rewind.errors.length === 0) {
+          if (rewind.errors === undefined) {
             throw new AppLifecycleError(
               'memory-boundary-rewind-incomplete',
               'rewind boundary is missing error evidence',

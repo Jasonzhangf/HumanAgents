@@ -298,6 +298,12 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
     assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), '# Memory path producer\n');
     assert.equal((await readdir(paths.artifactsRoot)).some((name) => name.startsWith('memory-project-patch-')), false);
 
+    // This input points the failed slot at the succeeded recovery checkpoint,
+    // so it is a legal errorless path change and the old "missing error
+    // evidence" rejection no longer applies. The remaining rejection is the
+    // real conflict: the same primary recovery checkpoint already committed the
+    // rewind boundary, so re-publishing it with a different body under the same
+    // event identity is rejected by the event journal.
     await assert.rejects(
       async () => { await publishRewindMemoryBoundaryFromJournal({
         memory,
@@ -307,7 +313,8 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
         recoveryCheckpointId: recoveryCommitted.checkpoint.id,
         reentryClosureId: reentry.closureId,
       }); },
-      (error: unknown) => error instanceof Error && /missing error evidence/.test(error.message),
+      (error: unknown) => error instanceof Error
+        && /event identity conflicts with committed history/.test(error.message),
     );
 
     const otherCycleId = id('cycle', 'memory-path-producer-other-cycle');
@@ -343,6 +350,147 @@ test('rewind publisher feeds the existing memory consumer committed path and cor
       afterSequence: 0,
       limit: 10,
     })).length, 1);
+
+    // Legal errorless path change: the departed, selected, and recovery
+    // checkpoints are distinct committed records. All three succeeded and no
+    // committed DeadEnd exists, so the Memory audit must keep an empty errors
+    // list instead of rejecting the boundary as missing error evidence.
+    const departed = checkpoint({
+      suffix: 'departed',
+      seq: 4,
+      previousCheckpointId: recovery.id,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+    });
+    const destination = checkpoint({
+      suffix: 'destination',
+      seq: 5,
+      previousCheckpointId: departed.id,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+    });
+    const recovery2 = checkpoint({
+      suffix: 'errorless-recovery',
+      seq: 6,
+      previousCheckpointId: destination.id,
+      executionEpoch: 2,
+      outcome: 'succeeded',
+    });
+    for (const current of [departed, destination, recovery2]) {
+      await checkpointJournal.append({
+        ownerId: 'memory-path-producer-test',
+        commitId: checkpointCommitId(current),
+        checkpoint: current,
+      });
+    }
+    const [departedCommitted, destinationCommitted, recovery2Committed] = await Promise.all([
+      committed(departed),
+      committed(destination),
+      committed(recovery2),
+    ]);
+
+    const destinationClosure = {
+      closureKind: 'checkpoint' as const,
+      compatibilityVersion: 1 as const,
+      closureId: 'checkpoint-closure:memory-path-producer-destination',
+      checkpointId: destinationCommitted.checkpoint.id,
+      source: 'agent-tool' as const,
+      outcome: destinationCommitted.checkpoint.outcome,
+      summary: 'errorless destination checkpoint closed',
+      next: destinationCommitted.checkpoint.next,
+      evidenceRefs: destinationCommitted.checkpoint.evidenceRefs,
+      reentry: { allowed: true, reason: 'errorless destination path admitted' },
+    };
+    await closurePort.commit(destinationClosure);
+    const committedDestinationClosure = await closurePort.read(destinationClosure.closureId);
+    if (!committedDestinationClosure) throw new Error('committed destination closure was not readable');
+
+    const errorlessReentry = {
+      closureKind: 'reentry' as const,
+      closureId: 'reentry:memory-path-producer:errorless',
+      checkpointId: destinationCommitted.checkpoint.id,
+      checkpointExecutionEpoch: destinationCommitted.checkpoint.executionEpoch,
+      previousExecutionEpoch: destinationCommitted.checkpoint.executionEpoch,
+      newExecutionEpoch: recovery2Committed.checkpoint.executionEpoch,
+      nextAction: { kind: 'continue' as const, ref: 'resume-errorless-destination' },
+      reentry: { allowed: true, reason: 'errorless destination path admitted' },
+    };
+    await closurePort.commit(errorlessReentry);
+    const committedErrorlessReentry = await closurePort.read(errorlessReentry.closureId);
+    if (!committedErrorlessReentry) throw new Error('committed errorless reentry closure was not readable');
+
+    const errorlessConsumed = await publishRewindMemoryBoundaryFromJournal({
+      memory,
+      checkpointJournalPath: checkpointFile,
+      taskScope: { organId, taskId },
+      failedCheckpointId: departedCommitted.checkpoint.id,
+      recoveryCheckpointId: recovery2Committed.checkpoint.id,
+      failedCheckpointCommitRef: await committedRef(departed),
+      recoveryCheckpointCommitRef: await committedRef(recovery2),
+      reentryClosureId: errorlessReentry.closureId,
+    });
+
+    const errorlessEvents = await memory.journal.readEvents({
+      streamId: `memory-boundaries:${taskId.value}`,
+      afterSequence: 0,
+      limit: 10,
+    });
+    assert.equal(errorlessEvents.length, 2);
+    const errorlessEvent = errorlessEvents[1]!;
+    const errorlessInputs = (errorlessEvent.payload as {
+      readonly analysisInputs?: {
+        readonly corrections: readonly { readonly sourceRef: string; readonly sourceDigest: string; readonly fingerprint: string }[];
+        readonly errors: readonly { readonly sourceRef: string; readonly sourceDigest: string; readonly fingerprint: string }[];
+        readonly rewindChains: readonly {
+          readonly failedBranchRef: string;
+          readonly rewindCheckpointRef: string;
+          readonly recoveryCheckpointRef: string;
+          readonly reentryFactRef?: string;
+          readonly successfulBranchRefs: readonly string[];
+          readonly successEvidenceRefs: readonly string[];
+          readonly absoluteJournalRefs: readonly string[];
+        }[];
+        readonly actualPathRefs: readonly string[];
+        readonly declaredPathRefs: readonly string[];
+      };
+    } | undefined)?.analysisInputs;
+    if (!errorlessInputs) throw new Error('errorless rewind analysis inputs were not published');
+    assert.deepEqual(errorlessInputs.errors, []);
+    assert.deepEqual(errorlessInputs.corrections, [{
+      sourceRef: checkpointClosureEvidenceLocator(errorlessReentry.closureId),
+      sourceDigest: checkpointClosureEvidenceDigest(committedErrorlessReentry),
+      fingerprint: errorlessReentry.closureId,
+    }]);
+    assert.deepEqual(errorlessInputs.actualPathRefs, [
+      checkpointEvidenceLocator(destinationCommitted.checkpoint),
+      checkpointEvidenceLocator(recovery2Committed.checkpoint),
+    ]);
+    assert.deepEqual(errorlessInputs.declaredPathRefs, [
+      checkpointClosureEvidenceLocator(destinationClosure.closureId),
+    ]);
+    const errorlessChain = errorlessInputs.rewindChains[0]!;
+    assert.equal(errorlessChain.failedBranchRef, checkpointEvidenceLocator(departedCommitted.checkpoint));
+    assert.equal(errorlessChain.rewindCheckpointRef, checkpointEvidenceLocator(destinationCommitted.checkpoint));
+    assert.equal(errorlessChain.recoveryCheckpointRef, checkpointEvidenceLocator(recovery2Committed.checkpoint));
+    assert.equal(errorlessChain.reentryFactRef, checkpointClosureEvidenceLocator(errorlessReentry.closureId));
+    assert.deepEqual(errorlessChain.successfulBranchRefs, [errorlessChain.reentryFactRef!]);
+    assert.deepEqual(errorlessChain.successEvidenceRefs, [checkpointEvidenceLocator(recovery2Committed.checkpoint)]);
+    assert.ok(errorlessChain.absoluteJournalRefs.includes(checkpointEvidenceLocator(departedCommitted.checkpoint)));
+    assert.ok(errorlessChain.absoluteJournalRefs.includes(checkpointClosureEvidenceLocator(destinationClosure.closureId)));
+    assert.ok(errorlessChain.absoluteJournalRefs.includes(checkpointClosureEvidenceLocator(errorlessReentry.closureId)));
+    const errorlessEvidence = new Map(errorlessEvent.evidenceRefs.map((evidence) => [evidence.locator, evidence.digest]));
+    assert.equal(
+      errorlessEvidence.get(checkpointClosureEvidenceLocator(destinationClosure.closureId)),
+      checkpointClosureEvidenceDigest(committedDestinationClosure),
+    );
+    assert.equal(
+      errorlessEvidence.get(checkpointEvidenceLocator(departedCommitted.checkpoint)),
+      checkpointEvidenceDigest(departedCommitted.checkpoint),
+    );
+    assert.equal(errorlessConsumed.retries.length, 0, JSON.stringify(errorlessConsumed));
+    assert.equal(errorlessConsumed.committed.length, 1, JSON.stringify(errorlessConsumed));
+    assert.equal(errorlessConsumed.committed[0]?.disposition, 'applied', JSON.stringify(errorlessConsumed));
+    assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), '# Memory path producer\n');
     passed = true;
   } finally {
     if (passed) await rm(root, { recursive: true, force: true });
