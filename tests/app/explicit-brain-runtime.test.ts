@@ -21,8 +21,12 @@ import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src
 import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
 import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import { prepareAgentProvider, prepareExecutionAgentProvider, createAgentProviderPort, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
+import { createRccServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
+import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
 import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/fake-port.js';
-import { FileCheckpointStore, UiRuntimeJournal, UiRuntimeService, startUiRuntime, type UiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { FileCheckpointStore, UiRuntimeApiError, UiRuntimeJournal, UiRuntimeService, startUiRuntime, type UiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import type { UiRuntimeGrantExecutionReceipt } from '../../packages/app/src/ui-runtime/service.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
 import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
@@ -75,6 +79,12 @@ import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task
 import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
 import type { TaskGrantControlReceipt } from '../../packages/app/src/ui-runtime/task-control.js';
 import type { PersistedFinalSubmitReceipt } from '../../packages/runtime/src/explicit-brain/router.js';
+import { JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/task-plan-revisions.js';
+import {
+  TaskPlanRevisionConsumer,
+  readCurrentTaskPlan,
+} from '../../packages/runtime/src/orchestration/task-plan-revisions.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 
 for (const source of ['rcc', 'http'] as const) {
 test(`default App composition admits the retained Task only after real HTTP grant and releases native Provider (${source})`, async () => {
@@ -185,6 +195,762 @@ test(`default App composition admits the retained Task only after real HTTP gran
   }
 });
 }
+
+// Probability unknown: no two-Task App consumer covered scheduling/context bleed.
+// Impact: serialization or false completion; cost: one bounded local HTTP consumer.
+test('two top-level native tasks share one App and overlap real execution requests with independent Planners', async () => {
+  const projectKey = `two-top-level-native-${randomUUID()}`;
+  const fixtureBase = join(process.env.HOME ?? '/Users/fanzhang', '.humanagent', 'test-fixtures');
+  await mkdir(fixtureBase, { recursive: true });
+  const root = await mkdtemp(join(fixtureBase, 'provider-two-top-tasks-'));
+  const taskSpecs = [
+    {
+      rawInput: `TOP-LEVEL-TASK-A-${randomUUID()}`,
+      title: 'Top level task A',
+      objective: 'Deliver the exact top-level A result',
+      deliveryText: `TOP-LEVEL-DELIVERY-A-${randomUUID()}`,
+    },
+    {
+      rawInput: `TOP-LEVEL-TASK-B-${randomUUID()}`,
+      title: 'Top level task B',
+      objective: 'Deliver the exact top-level B result',
+      deliveryText: `TOP-LEVEL-DELIVERY-B-${randomUUID()}`,
+    },
+    {
+      rawInput: `TOP-LEVEL-TASK-C-${randomUUID()}`,
+      title: 'Top level task C',
+      objective: 'Deliver the exact top-level C result',
+      deliveryText: `TOP-LEVEL-DELIVERY-C-${randomUUID()}`,
+    },
+  ] as const;
+  type TaskSpec = typeof taskSpecs[number];
+  type Dispatched = Awaited<ReturnType<UiRuntime['service']['dispatchNextExplicitRequirement']>>;
+  type ConfirmedRequirement = Awaited<ReturnType<UiRuntime['service']['confirmExplicitRequirement']>>;
+  type ReleasedExecution = NonNullable<UiRuntimeGrantExecutionReceipt['current']>;
+  type ReleasedExecutionAtBarrier = ReleasedExecution & {
+    readonly operationId: string;
+    readonly executionEpoch: number;
+  };
+  type PreparedEntry = {
+    readonly spec: TaskSpec;
+    readonly dispatch: Dispatched;
+    grantRevision?: number;
+    releasedExecution?: ReleasedExecutionAtBarrier;
+  };
+  const initialTaskSpecs = taskSpecs.slice(0, 2);
+  const capacityTaskSpec = taskSpecs[2]!;
+  const prepared: PreparedEntry[] = [];
+  const thirdCapacityObservation: Record<string, unknown> = {};
+  const executionInitials: Array<{ readonly body: string; readonly spec: TaskSpec }> = [];
+  const plannerRequests: Array<{ readonly body: string; readonly spec: TaskSpec; readonly payload: Record<string, unknown> }> = [];
+  let activeExecutionInitials = 0;
+  let maxActiveExecutionInitials = 0;
+  let resolveCapacityExecution!: () => void;
+  const capacityExecutionReached = new Promise<void>((resolve) => { resolveCapacityExecution = resolve; });
+  let overlapSettled = false;
+  let resolveOverlap!: () => void;
+  let rejectOverlap!: (error: Error) => void;
+  const overlapReached = new Promise<void>((resolve, reject) => {
+    resolveOverlap = resolve;
+    rejectOverlap = reject;
+  });
+  const heldSpecs = new Set<TaskSpec>(initialTaskSpecs);
+  const executionGateResolvers = new Map<TaskSpec, () => void>();
+  const executionGates = new Map<TaskSpec, Promise<void>>();
+  let overlapTimer: ReturnType<typeof setTimeout> | undefined;
+  const overlapTimeout = () => {
+    if (overlapSettled) return;
+    overlapSettled = true;
+    rejectOverlap(new Error('two top-level native Tasks did not overlap their initial execution requests'));
+  };
+  const executionGate = (spec: TaskSpec): Promise<void> => {
+    const existing = executionGates.get(spec);
+    if (existing !== undefined) return existing;
+    let resolve!: () => void;
+    const gate = new Promise<void>((settle) => { resolve = settle; });
+    executionGateResolvers.set(spec, resolve);
+    executionGates.set(spec, gate);
+    return gate;
+  };
+  const releaseExecutionGate = (spec: TaskSpec) => {
+    const resolve = executionGateResolvers.get(spec);
+    if (resolve === undefined) return;
+    executionGateResolvers.delete(spec);
+    heldSpecs.delete(spec);
+    resolve();
+  };
+  const releaseAllExecutionGates = () => {
+    if (overlapTimer !== undefined) clearTimeout(overlapTimer);
+    for (const spec of [...heldSpecs]) releaseExecutionGate(spec);
+  };
+  const requestTasks = new Set<Promise<void>>();
+
+  const requireRecord = (value: unknown, label: string): Record<string, unknown> => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`missing ${label}`);
+    return value as Record<string, unknown>;
+  };
+  const requireText = (value: unknown, label: string): string => {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`missing ${label}`);
+    return value;
+  };
+  const requireNumber = (value: unknown, label: string): number => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`missing ${label}`);
+    return value;
+  };
+  const evidenceLocators = (value: unknown): readonly string[] => {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((ref) => {
+      const locator = (ref as { readonly locator?: unknown } | null)?.locator;
+      return typeof locator === 'string' && locator.length > 0 ? [locator] : [];
+    });
+  };
+  const closureSection = (value: unknown, label: string): { readonly text: string; readonly locators: readonly string[] } => {
+    const section = requireRecord(value, `Planner closure ${label}`);
+    return { text: requireText(section.text, `Planner closure ${label} text`),
+      locators: evidenceLocators(section.evidenceRefs) };
+  };
+  const plannerPayload = (body: string): Record<string, unknown> | undefined => {
+    let wire: unknown;
+    try {
+      wire = JSON.parse(body);
+    } catch {
+      return undefined;
+    }
+    if (typeof wire !== 'object' || wire === null || Array.isArray(wire)) return undefined;
+    const input = (wire as Record<string, unknown>).input;
+    if (!Array.isArray(input)) return undefined;
+    for (const item of input) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+      const message = item as Record<string, unknown>;
+      if (message.type !== 'message' || message.role !== 'user' || !Array.isArray(message.content)) continue;
+      for (const part of message.content) {
+        if (typeof part !== 'object' || part === null || Array.isArray(part)) continue;
+        const content = part as Record<string, unknown>;
+        if (content.type !== 'input_text' || typeof content.text !== 'string') continue;
+        let candidate: unknown;
+        try {
+          candidate = JSON.parse(content.text);
+        } catch {
+          continue;
+        }
+        if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+          && (candidate as Record<string, unknown>).role === 'planner') return candidate as Record<string, unknown>;
+      }
+    }
+    return undefined;
+  };
+  const hasTurnEndSurface = (body: string): boolean => {
+    try {
+      const wire = requireRecord(JSON.parse(body), 'Responses wire');
+      return Array.isArray(wire.tools) && wire.tools.some((tool) =>
+        typeof tool === 'object' && tool !== null && (tool as Record<string, unknown>).name === 'humanagent_turn_end');
+    } catch {
+      return false;
+    }
+  };
+  const hasFunctionOutput = (body: string): boolean => {
+    try {
+      const wire = requireRecord(JSON.parse(body), 'Responses wire');
+      return Array.isArray(wire.input) && wire.input.some((item) =>
+        typeof item === 'object' && item !== null && (item as Record<string, unknown>).type === 'function_call_output');
+    } catch {
+      return false;
+    }
+  };
+  const specFor = (body: string): TaskSpec => {
+    const own = taskSpecs.filter((spec) => body.includes(spec.rawInput));
+    if (own.length !== 1) throw new Error(`expected one Task sentinel in wire, found ${own.length}`);
+    return own[0]!;
+  };
+  const frames = (items: readonly unknown[]) => items.map((item) => `data: ${JSON.stringify(item)}\n\n`).join('');
+  const plannerFrames = (payload: Record<string, unknown>, body: string): readonly unknown[] => {
+    const task = requireRecord(payload.task, 'Planner task');
+    const closure = requireRecord(payload.closure, 'Planner closure');
+    const summary = requireRecord(closure.summary, 'Planner closure summary');
+    const title = requireText(task.title, 'Planner task title');
+    const directive = requireText(task.directive, 'Planner task directive');
+    const confirmedSource = requireRecord(payload.confirmedSource, 'Planner confirmed source');
+    const goal = closureSection(summary.goal, 'goal');
+    const actions = closureSection(summary.actions, 'actions');
+    const result = closureSection(summary.result, 'result');
+    const expectedNextStep = closureSection(summary.expectedNextStep, 'expectedNextStep');
+    const source = {
+      requirementId: requireText(confirmedSource.requirementId, 'Planner confirmed requirement ID'),
+      inputRevision: requireNumber(confirmedSource.inputRevision, 'Planner confirmed input revision'),
+      draftId: requireText(confirmedSource.draftId, 'Planner confirmed draft ID'),
+      draftRevisionVersion: requireNumber(confirmedSource.draftRevisionVersion, 'Planner confirmed draft revision version'),
+      draftRevisionHash: requireText(confirmedSource.draftRevisionHash, 'Planner confirmed draft revision hash'),
+      confirmationRef: requireText(confirmedSource.confirmationRef, 'Planner confirmed confirmation reference'),
+      evidenceLocators: evidenceLocators(confirmedSource.evidenceRefs),
+    };
+    const refinedResults = (Array.isArray(payload.refinedResults) ? payload.refinedResults : []).map((entry) => {
+      const refined = requireRecord(entry, 'Planner refined result');
+      return {
+        role: requireText(refined.role, 'Planner refined result role'),
+        assignmentId: requireText(refined.assignmentId, 'Planner refined result assignment ID'),
+        status: requireText(refined.status, 'Planner refined result status'),
+        evidenceLocators: evidenceLocators(refined.evidenceRefs),
+      };
+    });
+    const responseId = `planner-${specFor(body).title.replaceAll(' ', '-')}`;
+    return [
+      { type: 'response.created', response: { id: responseId } },
+      { type: 'response.output_text.done', item_id: `${responseId}-text`, text: JSON.stringify({
+        decision: 'complete',
+        snapshot: {
+          title,
+          summary: `Whole-task plan for "${title}": the directive is "${directive}". The closed turn records the goal "${goal.text}", the actions "${actions.text}", the result "${result.text}", and the expected next step "${expectedNextStep.text}".`,
+          completeness: { scope: 'whole-task', status: 'complete' },
+          acceptanceCriteria: [{
+            criterionId: 'original-directive-satisfied',
+            description: `Satisfy the original directive "${directive}" and preserve the confirmed effect cited by the closed turn.`,
+          }],
+          nodes: [{
+            nodeId: 'whole-task',
+            kind: 'task',
+            title,
+            intent: directive,
+            definition: {
+              directive,
+              goal: goal.text,
+              actions: actions.text,
+              result: result.text,
+              expectedNextStep: expectedNextStep.text,
+              confirmedSource: source,
+              refinedResults,
+              evidenceLocators: [...new Set([
+                ...goal.locators, ...actions.locators, ...result.locators, ...expectedNextStep.locators,
+                ...source.evidenceLocators, ...refinedResults.flatMap((refined) => refined.evidenceLocators),
+              ])],
+            },
+          }],
+          phases: [],
+          relations: [],
+        },
+        reasonText: 'The whole-task plan aligns with this Task original directive and closed turn.',
+      }) },
+      { type: 'response.completed', response: { id: responseId } },
+    ];
+  };
+  const handleProviderRequest = async (
+    request: import('node:http').IncomingMessage,
+    response: import('node:http').ServerResponse,
+  ) => {
+    const path = request.url ?? '';
+    if (request.method === 'GET' && (path === '/health' || path === '/v1/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(path === '/health'
+        ? { status: 'ok', version: 'two-top-native' }
+        : { data: taskSpecs.map((spec, index) => ({ id: index === 0 ? 'controlled-execution' : 'controlled-orchestration' })) }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = Buffer.concat(chunks).toString('utf8');
+    const planner = plannerPayload(body);
+    const functionOutput = hasFunctionOutput(body);
+    const turnEndSurface = hasTurnEndSurface(body);
+    if (planner !== undefined) {
+      const spec = specFor(body);
+      plannerRequests.push({ body, spec, payload: planner });
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(frames(plannerFrames(planner, body)));
+      return;
+    }
+    if (functionOutput) {
+      const spec = specFor(body);
+      const responseId = `drain-${spec.title.replaceAll(' ', '-')}`;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(frames([
+        { type: 'response.created', response: { id: responseId } },
+        { type: 'response.output_text.done', item_id: `${responseId}-text`, text: `drained ${spec.deliveryText}` },
+        { type: 'response.completed', response: { id: responseId } },
+      ]));
+      return;
+    }
+    if (!turnEndSurface) throw new Error('controlled Provider received an unknown Responses request');
+    const spec = specFor(body);
+    executionInitials.push({ body, spec });
+    if (spec === capacityTaskSpec) resolveCapacityExecution();
+    activeExecutionInitials += 1;
+    maxActiveExecutionInitials = Math.max(maxActiveExecutionInitials, activeExecutionInitials);
+    if (!overlapSettled && initialTaskSpecs.every((held) => executionInitials.some((request) => request.spec === held))) {
+      overlapSettled = true;
+      if (overlapTimer !== undefined) clearTimeout(overlapTimer);
+      resolveOverlap();
+    }
+    try {
+      if (heldSpecs.has(spec)) await executionGate(spec);
+    } finally {
+      activeExecutionInitials -= 1;
+    }
+    const section = (text: string) => ({ text, evidenceRefs: [] });
+    const responseId = `execution-${spec.title.replaceAll(' ', '-')}`;
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(frames([
+      { type: 'response.created', response: { id: responseId } },
+      { type: 'response.output_item.done', output_index: 0, item: {
+        type: 'function_call',
+        call_id: `turn-end-${spec.title.replaceAll(' ', '-')}`,
+        name: 'humanagent_turn_end',
+        arguments: JSON.stringify({
+          summary: {
+            goal: section(spec.objective),
+            actions: section(`Execute ${spec.rawInput}`),
+            result: section(spec.deliveryText),
+            expectedNextStep: section('Close this Task'),
+          },
+          deliveryText: spec.deliveryText,
+          deliveryRefs: [],
+        }),
+      } },
+      { type: 'response.completed', response: { id: responseId } },
+    ]));
+  };
+  const provider = createServer((request, response) => {
+    let task!: Promise<void>;
+    task = handleProviderRequest(request, response)
+      .catch((error: unknown) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (!response.writableEnded) {
+          response.writeHead(500, { 'content-type': 'text/plain' });
+          response.end(errorMessage);
+        }
+      })
+      .finally(() => { requestTasks.delete(task); });
+    requestTasks.add(task);
+  });
+  await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve));
+
+  let runtime: UiRuntime | undefined;
+  let orchestration: ReturnType<typeof createServeRuntimeComposition> | undefined;
+  let accessControl: AccessControlService | undefined;
+  let cookie: string | undefined;
+  let passed = false;
+  try {
+    const address = provider.address();
+    if (address === null || typeof address === 'string') throw new Error('missing controlled Provider address');
+    const entries: EffectiveAgentProviderBinding[] = [
+      { agentId: 'controlled-execution', roleId: 'execution', source: 'agent',
+        provider: { source: 'rcc', provider: 'rcc', binding: 'two-top-execution', protocol: 'responses',
+          model: 'controlled-execution', route: 'controlled-execution', baseUrl: `http://127.0.0.1:${address.port}` } },
+      { agentId: 'controlled-orchestration', roleId: 'orchestration', source: 'agent',
+        provider: { source: 'rcc', provider: 'rcc', binding: 'two-top-orchestration', protocol: 'responses',
+          model: 'controlled-orchestration', route: 'controlled-orchestration', baseUrl: `http://127.0.0.1:${address.port}` } },
+    ];
+    const select = async <TIdentity extends AnyProviderExecutionIdentityRef = import('../../packages/contracts/src/index.js').ProviderExecutionIdentityRef>(
+      selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string },
+    ) => prepareAgentProvider<TIdentity>({ ...selection, agentProviderBindings: entries, evidenceRoot: join(root, 'assets') });
+    const launch = await select({ roleId: 'execution' });
+    const eventJournal = createJsonlEventJournal({ filePath: join(root, 'events.jsonl') });
+    const publishers = { async resolvePublisher() { return null; } };
+    orchestration = createServeRuntimeComposition({
+      maxRuntimes: 2,
+      eventBusPorts: { journal: eventJournal, publishers, consumers: { async resolveConsumer() { return null; } },
+        externalOperations: eventJournal, barrierIntents: eventJournal },
+      feedbackPorts: { journal: eventJournal, publishers }, feedbackPublisherId: 'two-top-native-orchestration',
+      ...createRccServeOrchestrationPorts({ port: launch.port, binding: launch.binding, prepareAgentProvider: select,
+        promptSegments: { review: [] } }),
+    });
+    accessControl = await AccessControlService.open({ credentialPath: join(root, 'security', 'web-access.json'), create: true });
+    runtime = await startUiRuntime({ mode: 'rcc', accessControl, organId: id('organ', 'two-top-native'),
+      binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: root,
+      evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
+      maxConcurrentTasks: 2,
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey, roleId: 'execution' },
+      explicitBrainInterpreter: {
+        async interpret(input: { readonly rawInput?: string }) {
+          const spec = taskSpecs.find((candidate) => candidate.rawInput === input.rawInput);
+          if (spec === undefined) throw new Error('unknown explicit input');
+          return { kind: 'requirement', intent: 'create',
+            normalizedInput: [spec.rawInput, `Objective: ${spec.objective}`,
+              `Deliverable: ${spec.deliveryText}`, 'Delivery condition: deliver the exact sentinel'].join('\n'),
+            proposal: spec.deliveryText, knownFacts: [], decisionRefs: [],
+            structuredProposal: { revision: 1, intent: 'create', title: spec.title, objective: spec.objective,
+              deliverable: spec.deliveryText, deliveryConditions: ['deliver the exact sentinel'],
+              evidenceRefs: [], blockingGaps: [] } };
+        },
+      },
+      runtimeComposition: {
+        prepareAgentProvider: select,
+        createTaskAssembly: orchestration.createTaskAssembly,
+        prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({ roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          createPort: (selected) => createAgentProviderPort(selected, join(root, 'assets')) }, owner, lease),
+      },
+    });
+    await runtime.service.quiesceImplicitConsumption();
+
+    const submitTopLevelTask = async (
+      spec: TaskSpec,
+      suffix: string = spec.title,
+    ): Promise<{ readonly receipt: ConfirmedRequirement; readonly interactionId: string }> => {
+      const interactionId = await runtime!.service.receiveExplicitInput({ sourceRef: `ui:${suffix}`, rawInput: spec.rawInput,
+        channel: 'business', requestKind: 'new-task-preview' });
+      await runtime!.service.interpretExplicitInput({ interactionId });
+      const preview = await runtime!.service.inspectExplicitInteraction(interactionId);
+      if (preview.draft === undefined) throw new Error(`missing explicit draft for ${spec.title}`);
+      const receipt = await runtime!.service.confirmExplicitRequirement({ interactionId, draftId: preview.draft.draftId,
+        inputRevision: preview.draft.inputRevision, confirmationRef: `confirmation:${suffix}`,
+        confirmedBy: 'human:operator', confirmedAt: '2026-10-17T00:00:00.000Z',
+        payloadRef: `asset://${suffix.replaceAll(' ', '-')}`, requestKind: 'new-task-create' });
+      return { receipt, interactionId };
+    };
+    const submitAndDispatch = async (spec: TaskSpec): Promise<Dispatched> => {
+      await submitTopLevelTask(spec);
+      return await runtime!.service.dispatchNextExplicitRequirement();
+    };
+    for (const spec of initialTaskSpecs) {
+      const dispatch = await submitAndDispatch(spec);
+      if (dispatch.operationId === undefined) throw new Error(`missing prepared operation for ${spec.title}`);
+      prepared.push({ spec, dispatch });
+    }
+
+    assert.equal(prepared.length, 2);
+    assert.equal(prepared[0]!.dispatch.taskId.value === prepared[1]!.dispatch.taskId.value, false);
+    assert.equal(prepared[0]!.dispatch.operationId!.value === prepared[1]!.dispatch.operationId!.value, false);
+    assert.equal(executionInitials.length, 0, 'no execution request may start before grant');
+
+    const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('two-top-level-native', 2).code);
+    cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    if (runtime === undefined || cookie === undefined) throw new Error('two-task HTTP grant owner is unavailable');
+    const grantedRuntime: UiRuntime = runtime;
+    const grantedCookie: string = cookie;
+    overlapTimer = setTimeout(overlapTimeout, 4000);
+    overlapTimer.unref?.();
+    // Observe the rejection immediately, including while HTTP grant release awaits.
+    void overlapReached.catch(() => {});
+    const grantPreparedTask = async (entry: PreparedEntry, requestId: string) => {
+      const operationId = entry.dispatch.operationId;
+      if (operationId === undefined) throw new Error('prepared operation disappeared');
+      const controlPath = `${grantedRuntime.server.url}/api/tasks/${entry.dispatch.taskId.value}/control`;
+      const initial = await fetch(`${controlPath}/grant`, { headers: { cookie: grantedCookie } });
+      assert.equal(initial.status, 200);
+      const read = await initial.json() as TaskGrantControlReceipt;
+      const grantResponse = await fetch(`${controlPath}/grant`, { method: 'POST',
+        headers: { cookie: grantedCookie, origin: grantedRuntime.server.url, 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId, expectedRevision: read.readback.grant?.revision ?? 0 }) });
+      const grant = await grantResponse.json() as TaskGrantControlReceipt & {
+        readonly execution: UiRuntimeGrantExecutionReceipt;
+      };
+      assert.equal(grantResponse.status, 200);
+      assert.equal(grant.readback.grant?.state, 'granted');
+      entry.grantRevision = grant.readback.grant?.revision;
+      const released: ReleasedExecution | undefined = grant.execution.current;
+      if (released !== undefined) {
+        assert.equal(released.taskId.value, entry.dispatch.taskId.value);
+        if (released.operationId !== undefined && released.executionEpoch !== undefined) {
+          entry.releasedExecution = { ...released, operationId: released.operationId,
+            executionEpoch: released.executionEpoch };
+        }
+      }
+      return grant;
+    };
+    await Promise.all(prepared.map(async (entry, index) => {
+      const grant = await grantPreparedTask(entry, `two-top-grant-${index}`);
+      assert.equal(grant.execution.state, 'released');
+      const released = entry.releasedExecution;
+      if (released === undefined) throw new Error('released grant execution has no operation and execution epoch');
+      assert.equal(released.operationId, entry.dispatch.operationId!.value);
+      assert.equal(released.state, 'running');
+    }));
+    await overlapReached;
+    assert.equal(maxActiveExecutionInitials, 2, 'both initial execution HTTP requests must be active together');
+    assert.equal(executionInitials.length, 2);
+    const taskJournalAtBarrier = new UiRuntimeJournal(
+      join(root, 'rcc', 'ui-runtime-journal.jsonl'),
+    ).replay();
+    if (runtime === undefined) throw new Error('missing runtime at overlap barrier');
+    const barrierRuntime: UiRuntime = runtime;
+    const preparedAllocations = prepared.map((entry) => {
+      const operationId = entry.dispatch.operationId;
+      if (operationId === undefined) throw new Error('prepared operation disappeared at barrier');
+      const released = entry.releasedExecution;
+      if (released === undefined) throw new Error('released execution disappeared at barrier');
+      const matches = taskJournalAtBarrier.filter((record) =>
+        record.kind === 'operation.prepared'
+        && record.allocation.taskId.value === released.taskId.value
+        && record.allocation.operationId.value === released.operationId
+        && record.allocation.executionEpoch === released.executionEpoch);
+      assert.equal(matches.length, 1,
+        `${entry.spec.title} must have exactly one prepared allocation at its Task, operation and epoch`);
+      const match = matches[0];
+      if (match?.kind !== 'operation.prepared') throw new Error(`missing typed prepared allocation for ${entry.spec.title}`);
+      const allocation = match.allocation;
+      assert.equal(allocation.taskId.value, released.taskId.value);
+      assert.equal(allocation.operationId.value, operationId.value);
+      assert.equal(allocation.executionEpoch, released.executionEpoch);
+      assert.equal(allocation.scope.taskId?.value, released.taskId.value);
+      assert.equal(allocation.scope.operationId?.value, operationId.value);
+      assert.equal(allocation.assignmentId, `assignment-${operationId.value}`);
+      assert.ok(allocation.runtimeId.length > 0, `${entry.spec.title} must have a nonempty runtime ID`);
+      const dashboard = barrierRuntime.service.taskDashboard(released.taskId);
+      assert.equal(dashboard.state, 'running', `${entry.spec.title} must be running at the overlap barrier`);
+      assert.equal(dashboard.operationId, operationId.value);
+      assert.equal(dashboard.executionEpoch, allocation.executionEpoch);
+      return allocation;
+    });
+    assert.equal(preparedAllocations.length, 2);
+    const barrierRuntimeIds = preparedAllocations.map(({ runtimeId }) => runtimeId);
+    assert.equal(new Set(barrierRuntimeIds).size, 2,
+      'the two Tasks must use distinct actual runtime instances at the barrier');
+
+    const waitForTask = async (
+      spec: TaskSpec,
+      taskId: Dispatched['taskId'],
+      operationId: NonNullable<Dispatched['operationId']>,
+    ) => {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const detail = runtime!.service.taskDetail(taskId);
+        const finalSucceeded = runtime!.service.eventsSince(operationId).some((event) =>
+          event.kind === 'execution.terminal'
+          && event.terminalPhase === 'final'
+          && event.state === 'succeeded');
+        if (detail.output?.state === 'succeeded'
+          && detail.output.summary === spec.deliveryText
+          && finalSucceeded) {
+          return detail;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error(`Task ${spec.title} did not reach its exact delivered terminal output and operation final success`);
+    };
+
+    const { receipt: thirdConfirmation, interactionId: thirdInteractionId } =
+      await submitTopLevelTask(capacityTaskSpec, 'capacity-third');
+    let thirdDispatch: Dispatched | undefined;
+    let thirdWaitingReceipt: UiRuntimeApiError | undefined;
+    try {
+      thirdDispatch = await runtime.service.dispatchNextExplicitRequirement();
+    } catch (error) {
+      if (!(error instanceof UiRuntimeApiError)) throw error;
+      thirdWaitingReceipt = error;
+    }
+    assert.equal(executionInitials.some((request) => request.spec === capacityTaskSpec), false,
+      'grant or admission must not count as third execution');
+    assert.equal(executionInitials.length, 2);
+    assert.equal(activeExecutionInitials, 2);
+    thirdCapacityObservation.beforeRelease = thirdWaitingReceipt === undefined ? {
+      kind: 'dispatched', taskId: thirdDispatch!.taskId.value,
+      operationId: thirdDispatch!.operationId?.value, executionEpoch: thirdDispatch!.executionEpoch,
+    } : {
+      kind: 'waiting-error', code: thirdWaitingReceipt.code, ownerId: thirdWaitingReceipt.ownerId,
+      nextAction: thirdWaitingReceipt.nextAction,
+    };
+
+    let capacityEntry: PreparedEntry | undefined;
+    if (thirdDispatch === undefined) {
+      if (thirdWaitingReceipt === undefined) throw new Error('third dispatch produced neither receipt nor error');
+      assert.equal(thirdWaitingReceipt.code, 'implicit-admission.waiting');
+      assert.equal(thirdWaitingReceipt.ownerId, 'runtime-coordinator');
+      assert.equal(thirdWaitingReceipt.nextAction, 'wait:queue.execution.concurrency');
+      assert.equal((await runtime.service.inspectExplicitInteraction(thirdInteractionId)).state, 'confirmed');
+
+      releaseExecutionGate(initialTaskSpecs[0]!);
+      await waitForTask(initialTaskSpecs[0]!, prepared[0]!.dispatch.taskId, prepared[0]!.dispatch.operationId!);
+      assert.equal(runtime.service.taskDashboard(prepared[1]!.dispatch.taskId).state, 'running',
+        'the second Task must remain held while only the first capacity slot is released');
+      const retried = await runtime.service.dispatchNextExplicitRequirement();
+      assert.equal(retried.requirement.draftId, thirdConfirmation.requirement.draftId);
+      assert.equal(retried.taskId.value === prepared[0]!.dispatch.taskId.value, false);
+      assert.equal(retried.taskId.value === prepared[1]!.dispatch.taskId.value, false);
+      if (retried.operationId === undefined) throw new Error('freed capacity did not prepare the third task');
+      capacityEntry = { spec: capacityTaskSpec, dispatch: retried };
+      prepared.push(capacityEntry);
+      const grant = await grantPreparedTask(capacityEntry, 'two-top-capacity-grant');
+      assert.equal(grant.execution.state, 'released');
+      assert.equal(grant.execution.current?.state, 'running');
+      await Promise.race([capacityExecutionReached, new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error(
+          'third Task did not start after the same public action and one capacity release'
+        )), 5000);
+        timer.unref?.();
+      })]);
+      thirdCapacityObservation.afterRelease = {
+        kind: 'started', taskId: retried.taskId.value, operationId: retried.operationId.value,
+        executionEpoch: grant.execution.current?.executionEpoch,
+        grantExecutionState: grant.execution.state,
+      };
+    } else {
+      if (thirdDispatch.operationId === undefined) {
+        throw new Error('third dispatch returned a Task without its prepared operation');
+      }
+      capacityEntry = { spec: capacityTaskSpec, dispatch: thirdDispatch };
+      prepared.push(capacityEntry);
+      const grant = await grantPreparedTask(capacityEntry, 'two-top-capacity-grant');
+      const started = grant.execution.state === 'released'
+        || (grant.execution.state === 'current' && grant.execution.current?.state === 'running');
+      thirdCapacityObservation.afterGrant = {
+        taskId: thirdDispatch.taskId.value, operationId: thirdDispatch.operationId?.value,
+        executionEpoch: thirdDispatch.executionEpoch, grantExecutionState: grant.execution.state,
+        grantExecutionCurrentState: grant.execution.current?.state,
+        grantApiError: grant.execution.apiError,
+      };
+      assert.equal(started, false, 'third Task must not run while two Tasks occupy capacity 2');
+      assert.equal(executionInitials.some((request) => request.spec === capacityTaskSpec), false);
+      releaseExecutionGate(initialTaskSpecs[0]!);
+      await waitForTask(initialTaskSpecs[0]!, prepared[0]!.dispatch.taskId, prepared[0]!.dispatch.operationId!);
+      assert.equal(runtime.service.taskDashboard(prepared[1]!.dispatch.taskId).state, 'running',
+        'the second Task must remain held while only the first capacity slot is released');
+      if (!started) {
+        const retriedGrant = await grantPreparedTask(capacityEntry, 'two-top-capacity-grant-retry');
+        assert.equal(retriedGrant.execution.state, 'released');
+      }
+      await Promise.race([capacityExecutionReached, new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error(
+          'third Task did not start after the same public action and one capacity release'
+        )), 5000);
+        timer.unref?.();
+      })]);
+      thirdCapacityObservation.afterRelease = { kind: 'started', taskId: thirdDispatch.taskId.value,
+        operationId: thirdDispatch.operationId?.value, executionEpoch: thirdDispatch.executionEpoch };
+    }
+
+    releaseAllExecutionGates();
+    const details = await Promise.all(prepared.map((entry) =>
+      waitForTask(entry.spec, entry.dispatch.taskId, entry.dispatch.operationId!)));
+    assert.equal(details[0]!.output?.summary, taskSpecs[0].deliveryText);
+    assert.equal(details[1]!.output?.summary, taskSpecs[1].deliveryText);
+    assert.equal(details[2]!.output?.summary, capacityTaskSpec.deliveryText);
+    assert.equal(details[0]!.taskId.value === details[1]!.taskId.value, false);
+
+    const checkpointIds: string[] = [];
+    const taskControlJournal = new JsonlOrganJournal(
+      uiRuntimeControlJournalPath(join(root, 'rcc')),
+    );
+    const identities = await new JsonlTaskIdentityJournal(taskControlJournal).replay();
+    const plans = new TaskPlanRevisionConsumer(
+      new JsonlTaskPlanRevisionJournal(taskControlJournal),
+    );
+    const currentStates = createJsonlRuntimeTaskCurrentStateJournal({
+      journal: taskControlJournal,
+    });
+    for (const entry of prepared) {
+      const others = taskSpecs.filter((spec) => spec !== entry.spec);
+      const operationId = entry.dispatch.operationId!;
+      const replay = runtime.service.eventsSince(operationId);
+      assert.ok(replay.some((event) => event.state === 'succeeded' && event.terminalPhase === 'final'),
+        `operation ${operationId.value} must reach final success`);
+      assert.ok(replay.every((event) => event.taskId.value === entry.dispatch.taskId.value));
+      const ownExecution = executionInitials.find((request) => request.spec === entry.spec);
+      if (ownExecution === undefined) throw new Error(`missing execution request for ${entry.spec.title}`);
+      assert.ok(ownExecution.body.includes(entry.spec.rawInput));
+      assert.ok(ownExecution.body.includes(entry.spec.deliveryText));
+      for (const other of others) {
+        assert.equal(ownExecution.body.includes(other.rawInput), false);
+        assert.equal(ownExecution.body.includes(other.deliveryText), false);
+      }
+      const ownPlanner = plannerRequests.find((request) => request.spec === entry.spec);
+      if (ownPlanner === undefined) throw new Error(`missing role-backed Planner request for ${entry.spec.title}`);
+      assert.ok(ownPlanner.body.includes(entry.spec.rawInput));
+      assert.ok(ownPlanner.body.includes(entry.spec.deliveryText));
+      for (const other of others) {
+        assert.equal(ownPlanner.body.includes(other.rawInput), false);
+        assert.equal(ownPlanner.body.includes(other.deliveryText), false);
+      }
+
+      const dashboard = runtime.service.taskDashboard(entry.dispatch.taskId);
+      assert.equal(dashboard.taskId.value, entry.dispatch.taskId.value);
+
+      const matches = identities.filter(
+        (identity) => identity.scope.taskId.value === entry.dispatch.taskId.value,
+      );
+      assert.equal(matches.length, 1, 'Task must have one committed identity');
+      const identity = matches[0]!;
+
+      assert.equal(identity.scope.organId.value, 'two-top-native');
+      assert.equal(identity.scope.taskId.value, entry.dispatch.taskId.value);
+
+      const revisions = await plans.list(identity.scope);
+      const accepted = await currentStates.read(identity.scope);
+      if (accepted.state === 'unknown') {
+        throw new Error(`unknown Runtime current state: ${accepted.reason}`);
+      }
+      const currentPlan = accepted.value.currentPlan;
+      if (currentPlan === undefined) {
+        throw new Error(`missing Runtime-accepted plan for ${entry.spec.title}`);
+      }
+
+      const selected = await readCurrentTaskPlan({
+        plans,
+        identity,
+        currentPlan,
+      });
+      const plan = revisions.find(
+        (revision) => revision.revisionId === selected.revision.revisionId,
+      );
+      if (plan === undefined) throw new Error(`missing current Planner revision for ${entry.spec.title}`);
+      const planText = JSON.stringify(plan.snapshot);
+      assert.ok(planText.includes(entry.spec.deliveryText));
+      for (const other of others) {
+        assert.equal(planText.includes(other.deliveryText), false);
+      }
+      const checkpoint = dashboard.checkpoint;
+      if (checkpoint === undefined) throw new Error(`missing checkpoint for ${entry.spec.title}`);
+      checkpointIds.push(checkpoint.checkpointId);
+      assert.equal(requireText(requireRecord(requireRecord(ownPlanner.payload.closure, 'Planner closure').checkpointId,
+        'Planner checkpoint ID').value,
+        'Planner checkpoint'), checkpoint.checkpointId);
+      const plannerTaskId = requireRecord(requireRecord(ownPlanner.payload.task, 'Planner task').taskId, 'Planner task ID');
+      assert.equal(plannerTaskId.value, entry.dispatch.taskId.value);
+    }
+    assert.equal(new Set(checkpointIds).size, prepared.length);
+
+    console.log(JSON.stringify({
+      taskIds: prepared.map((entry) => entry.dispatch.taskId.value),
+      operationIds: prepared.map((entry) => entry.dispatch.operationId!.value),
+      executionInitials: executionInitials.length,
+      maxActiveExecutionInitials,
+      plannerRequests: plannerRequests.length,
+      deliveryTexts: prepared.map((entry) => entry.spec.deliveryText),
+      runtimeIds: barrierRuntimeIds,
+      thirdCapacity: thirdCapacityObservation,
+    }));
+    passed = true;
+  } finally {
+    releaseAllExecutionGates();
+    if (runtime !== undefined && accessControl !== undefined && cookie !== undefined) {
+      for (const [index, entry] of prepared.entries()) {
+        if (passed || entry.grantRevision === undefined) continue;
+        try {
+          const controlPath = `${runtime.server.url}/api/tasks/${entry.dispatch.taskId.value}/control`;
+          await fetch(`${controlPath}/revoke`, { method: 'POST',
+            headers: { cookie, origin: runtime.server.url, 'content-type': 'application/json' },
+            body: JSON.stringify({ requestId: `two-top-cleanup-revoke-${index}`, expectedRevision: entry.grantRevision }) });
+        } catch {
+          // Preserve the primary test failure; runtime close still owns settlement.
+        }
+      }
+    }
+    try {
+      let runtimeCloseFailure: unknown;
+      let orchestrationDisposeFailure: unknown;
+      try {
+        await runtime?.close();
+      } catch (error) {
+        runtimeCloseFailure = error;
+      }
+      try {
+        await orchestration?.dispose();
+      } catch (error) {
+        orchestrationDisposeFailure = error;
+      }
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
+      await Promise.allSettled([...requestTasks]);
+      if (runtimeCloseFailure !== undefined) throw runtimeCloseFailure;
+      if (orchestrationDisposeFailure !== undefined) throw orchestrationDisposeFailure;
+    } finally {
+      provider.closeIdleConnections?.();
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
+      if (passed) await rm(root, { recursive: true, force: true });
+      else console.log(JSON.stringify({ retainedFixture: root, runtimeReturned: runtime !== undefined,
+        preparedTaskIds: prepared.map((entry) => entry.dispatch.taskId.value),
+        executionInitials: executionInitials.length, plannerRequests: plannerRequests.length }));
+    }
+  }
+});
 
 test('typed final FIFO establishes exact TaskIdentity before execution and preserves write-failure retry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-final-source-'));
