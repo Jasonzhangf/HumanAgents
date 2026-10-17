@@ -2,6 +2,12 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- 独立交付已完成的installed冷恢复测试改进，不等UX producer：唯一candidate已接收的8e9a4283/9a088896正常cherry-pick main为ff0423a3/3c6cd1ec，仅原native consumer文件变化，产品源码未变。main目标tsc0、installed原五公开consumer5/5PASS（session14029，installed-cold-main-delivery-20261017.txt），包括C1/C2 metadata与Journal比对。常规测试提交复用有效产品milestone Review，不新增leafReview；未变产品不重复安装/restart。实际新OS冷恢复仍同op3/businessTurn、epoch3→4、initial-open、raw排除/noeffectsreplay/EXACT_BODY/Plannercomplete。受控上游证据不扩真实RCC，后者仍INCOMPLETE。该测试改进已在main，UX producer基础仍仅candidate。
+
+- inspection业务范围出处已核实一次：docs/ui/semantic-observation-audit-2026-10-07.md“权威需求”原始用户问题明确巡检/长程/单次，G1/F04/巡检模板/验收要求两次兼容巡检并按check ID比较；docs/goals/semantic-observation-execution-plan-2026-10-08.md I2绑定该生产缺口。peer另提供本线程用户按检查项ID比较及后续UX生产接管原话。v14账本没有inspection专条，不虚称存在、不为此补改；既有声明需求足以支撑UX I2的typed producer接线。原范围疑问已关闭，不重复查证或请求批准；不将该业务扩为Provider门禁/新自动调度。旧文档固定角色顺序按后来v14动态编排要求覆盖。peer现有App准入/stop/helpers/childproducer四路独占继续。
+
+- Runtime boundary基础dad3ebb0已正常合candidate；目标agent-loop tsc0、原五namedconsumer5/5PASS（session36302，inspection-turn-boundary-composed-20261017.txt）。证据覆盖共用opening/逐check选择、持久checkpoint时间、重复cycle-close排除、durableitem不重执行、committedstoppedcheckpoint收拢；不覆盖真实productionreader/open/facts helpers。owner已指出aggregate outcome由nextAction粗分仍须纠正，完整milestone前修复并走真实consumer；本基础不main、不leafReview。App新turn准入第三轮holdtimeout尚未到目标字段断言，不算需求RED，由原worker同树定位。
+
 - 持久绑定59b95565+11231520已正常合candidate；组合contractsbuild、context/jsonl/admission三目标tsc均0，原named5consumer5/5PASS，session66658/inspection-turn-plan-persistence-composed-20261017.txt。App新turn准入GCM已由peer从含接口候选实际启动，独占execution-composition.ts与原nativeconsumer；不等整层。模板shape补正0399ea4e已合candidate。未将这些内部基础记成完整producer或main产品交付。
 - r269边界源码观察、r270当前工件取证、r271Astra只读攻关均已实际返回：neutral SSE注释对应专用disconnect出口；error_chain/provider_terminal可能重叠，固定pool-exhausted文字不证明实际耗尽。目标工件未保留，内部根因UNKNOWN；无证据支持HumanAgent代码修复。该条installedApp→RCC验收INCOMPLETE，停止重发/旧日志扩搜。需RCC owner提供既存原始原因/可靠关联；已列出实际维护聊天并异步请求用户明确交接目标（通信用法要求目标授权），其余producer/runtime继续，不标整体blocked。
 
