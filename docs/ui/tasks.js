@@ -14,7 +14,16 @@ import {
 
 const readScope = projectReadScopeFromQuery()
 const projectView = readScope.kind === 'project'
-const { main, status } = makePageShell(
+
+function projectBreadcrumbs(label) {
+  return [
+    { label: '系统', href: './dashboard.html' },
+    { label: '项目', href: systemTasksHref() },
+    { label, href: null },
+  ]
+}
+
+const { main, status, setBreadcrumbs } = makePageShell(
   'Task List',
   '',
   projectView ? '项目任务' : '全部项目',
@@ -24,11 +33,7 @@ const { main, status } = makePageShell(
   {
     scope: readScope,
     breadcrumbs: projectView
-      ? [
-          { label: '系统', href: './dashboard.html' },
-          { label: '项目', href: systemTasksHref() },
-          { label: readScope.projectKey, href: null },
-        ]
+      ? projectBreadcrumbs('当前项目')
       : [
           { label: '系统', href: './dashboard.html' },
           { label: '全部项目', href: null },
@@ -70,6 +75,18 @@ function renderReadState(state) {
   }
 }
 
+function applyProjectBreadcrumb(state) {
+  if (!projectView) return
+  const content = state?.content
+  const label = content?.scope?.kind === 'project'
+    && content.scope.projectKey === readScope.projectKey
+    && typeof content.label === 'string'
+    && content.label.trim() !== ''
+    ? content.label
+    : '当前项目'
+  setBreadcrumbs(projectBreadcrumbs(label))
+}
+
 async function load() {
   try {
     const [read, runtime] = await Promise.all([
@@ -79,6 +96,7 @@ async function load() {
     if (!read.published) return
     renderRuntimeStatus(status, runtime.status, runtime.error)
     renderReadState(read.state)
+    applyProjectBreadcrumb(read.state)
   } catch (error) {
     renderPageError(status, error)
   }

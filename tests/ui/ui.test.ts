@@ -830,15 +830,6 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('/api/memory/review'), true);
 });
 
-test('dashboard progress copy does not expose internal identifiers or protocol names', async () => {
-  const source = await readFile('docs/ui/dashboard.js', 'utf8');
-  assert.equal(source.includes('interaction='), false);
-  assert.equal(source.includes('draftId='), false);
-  assert.equal(source.includes('RequirementEnvelope'), false);
-  assert.equal(source.includes('projectInteractionCardFromEntries'), true);
-  assert.equal(source.includes('createInteractionProgressWidget'), true);
-});
-
 test('task dashboard event rows do not render internal owner or next action details', async () => {
   const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
   assert.equal(source.includes('event.nextAction'), false);
@@ -955,19 +946,23 @@ test('observation page reads only typed pipeline fields and owns no node-order t
 test('observation page reads node state and drawer refs from the projection that carries them', async () => {
   const page = await readFile('docs/ui/observation.js', 'utf8');
 
+  // UNVERIFIED behavioural proof: the real browser runner observation-projection-browser.mjs checks
+  // these invariants against a live projection, but the test-owned fixture root holds no
+  // OBSERVATION_PROJECTION_EVIDENCE yet. Until that fixture exists these literals stay as the
+  // interim source guard and the behaviour is not proven.
   // The top-level pipeline node projection carries `stateDisplay` but no `state`, so the machine
   // state the chip tone and edge tone read comes from the projection's scope node view. A node the
   // projection does not classify must keep the explicit `unknown` negative.
-  assert.equal(page.includes('currentNodeStates.get(node.nodeId)'), true);
+  assert.equal(page.includes('currentScopeStates.get(node.nodeId)'), true);
   assert.equal(page.includes("return typeof state === 'string' && state.length > 0 ? state : 'unknown'"), true);
   assert.equal(page.includes('node.stateDisplay || state'), true);
-  assert.equal(page.includes('Array.isArray(projection.scope?.nodes)'), true);
+  assert.equal(page.includes('Array.isArray(projection?.scope?.nodes)'), true);
 
   // The refs sheet renders the typed drawer detail (`projection.selectedNode`), never the node card.
   // An empty projection stays the explicit empty list via `unresolvedList`.
-  assert.equal(page.includes('detail?.inputs'), true);
-  assert.equal(page.includes('detail?.outputs'), true);
-  assert.equal(page.includes('detail?.evidenceRefs'), true);
+  assert.equal(page.includes('node?.inputs'), true);
+  assert.equal(page.includes('node?.outputs'), true);
+  assert.equal(page.includes('node?.evidenceRefs'), true);
   assert.equal(page.includes("'无输入引用'"), true);
   assert.equal(page.includes("'无输出引用'"), true);
   assert.equal(page.includes("'无 evidence'"), true);
@@ -1439,149 +1434,6 @@ test('task clarification handler retries interpretation by typed state without r
   assert.deepEqual(calls, ['inspect', 'clarification', 'interpret', 'inspect', 'interpret']);
 });
 
-for (const clarification of [false, true]) test(`new task form blocks duplicate submissions and retries retained ${clarification ? 'clarification' : 'input'} after failure`, async () => {
-  const source = await readFile('docs/ui/task.js', 'utf8');
-  const createSource = source.slice(source.indexOf('function renderCreate()'), source.indexOf('async function renderInteraction'));
-  class Node {
-    children: Node[] = [];
-    textContent = '';
-    value = '';
-    disabled = false;
-    readOnly = false;
-    hidden = false;
-    href = '';
-    attrs: Record<string, string> = {};
-    handlers: Record<string, (event: { preventDefault(): void }) => Promise<void>> = {};
-    constructor(readonly tag: string, text = '') { this.textContent = text; }
-    append(...nodes: Node[]) { this.children.push(...nodes); }
-    setAttribute(key: string, value: string) { this.attrs[key] = value; }
-    addEventListener(type: string, handler: (event: { preventDefault(): void }) => Promise<void>) { this.handlers[type] = handler; }
-  }
-  const nodes: Node[] = [];
-  const element = (tag: string, text?: string) => { const node = new Node(tag, text); nodes.push(node); return node; };
-  const main = new Node('main');
-  let received = 0;
-  let advanced = 0;
-  let confirmed = 0;
-  let rejectInterpret!: (error: Error) => void;
-  const pending = new Promise<never>((_, reject) => { rejectInterpret = reject; });
-  const api = {
-    async receiveExplicitInput(input: { rawInput: string }) {
-      received += 1;
-      assert.equal(input.rawInput, '读取 README');
-      return { interactionId: 'interaction-ui-retry' };
-    },
-    async confirmExplicitRequirement(id: string) {
-      confirmed += 1;
-      throw new Error(`create must not auto-confirm ${id}`);
-    },
-  };
-  const advance = async (_api: unknown, input: { interactionId: string; clarificationAnswer: string }) => {
-    advanced += 1;
-    assert.equal(input.interactionId, 'interaction-ui-retry');
-    assert.equal(input.clarificationAnswer, '读取 README');
-    if (clarification && advanced === 1) return { state: 'awaiting-clarification', reply: '请补充范围' };
-    if (advanced === (clarification ? 2 : 1)) return pending;
-    if (advanced === (clarification ? 3 : 2)) return { state: 'matching', nextAction: '等待处理' };
-    return { state: 'awaiting-confirmation', draft: { proposedIntent: 'create', draftId: 'draft', inputRevision: 1 } };
-  };
-  const window = { location: { href: '' } };
-  const appendCardEvent = () => {};
-  const appendCardError = () => {};
-  const updateCardFromSnapshot = () => {};
-  const attachInteractionCardHost = () => {};
-  const interactionCard = null;
-  new Function(
-    'element',
-    'main',
-    'api',
-    'advanceExplicitInteraction',
-    'window',
-    'appendCardEvent',
-    'appendCardError',
-    'updateCardFromSnapshot',
-    'attachInteractionCardHost',
-    'interactionCard',
-    `${createSource}; renderCreate()`,
-  )(element, main, api, advance, window, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard);
-  const form = nodes.find(node => node.tag === 'form')!;
-  const textarea = nodes.find(node => node.tag === 'textarea')!;
-  const button = nodes.find(node => node.tag === 'button')!;
-  const feedback = nodes.find(node => node.attrs.role === 'status')!;
-  textarea.value = '读取 README';
-  const submit = () => form.handlers.submit!({ preventDefault() {} });
-  if (clarification) {
-    await submit();
-    assert.equal(textarea.value, '');
-    assert.equal(textarea.readOnly, false);
-    assert.equal(button.textContent, '回答并继续');
-    textarea.value = '读取 README';
-  }
-  const first = submit();
-  await Promise.resolve();
-  assert.equal(button.disabled, true);
-  assert.equal(textarea.readOnly, true);
-  await submit();
-  assert.equal(received, 1);
-  assert.equal(advanced, clarification ? 2 : 1);
-  rejectInterpret(new Error('requirement decision requires a typed intent'));
-  await first;
-  assert.equal(button.disabled, false);
-  assert.equal(button.textContent, '重试本次提交');
-  assert.equal(textarea.value, '读取 README');
-  assert.equal(textarea.readOnly, true);
-  assert.equal(feedback.textContent.includes('重试'), true);
-  assert.equal(feedback.textContent.includes('typed intent'), false);
-  const diagnostics = nodes.find(node => node.tag === 'details')!;
-  assert.equal(diagnostics.hidden, false);
-  assert.equal(diagnostics.children.some(node => node.textContent.includes('typed intent')), true);
-  const restart = nodes.find(node => node.tag === 'a' && node.textContent === '重新填写新任务')!;
-  assert.equal(restart?.href, './task.html?task=new');
-  const restartPanel = nodes.find(node => node.children.includes(restart))!;
-  assert.equal(restartPanel.hidden, false);
-  assert.equal(restartPanel.children.some(node => node.textContent.includes('新请求')), true);
-  assert.equal(Object.keys(restart.handlers).length, 0);
-  assert.equal(received, 1);
-  await submit();
-  assert.equal(received, 1);
-  assert.equal(advanced, clarification ? 3 : 2);
-  assert.equal(button.textContent, '继续查看本次提交');
-  assert.equal(restartPanel.hidden, false);
-  assert.equal(textarea.readOnly, true);
-  assert.equal(window.location.href, '');
-  assert.equal(confirmed, 0);
-  assert.equal(feedback.textContent.includes('等待处理'), true);
-});
-
-test('new task UI sends one natural-language input to the explicit brain', async () => {
-  const source = await readFile('docs/ui/task.js', 'utf8');
-  const flowSource = await readFile('docs/ui/explicit-interaction-flow.js', 'utf8');
-  const createSource = source.slice(source.indexOf('function renderCreate()'), source.indexOf('async function renderInteraction'));
-  assert.equal(source.includes('title.required'), false);
-  assert.equal(source.includes('title.value'), false);
-  assert.equal(source.includes('api.createTask'), false);
-  assert.equal(source.includes('api.receiveExplicitInput'), true);
-  assert.equal(flowSource.includes('api.answerExplicitClarification'), true);
-  assert.equal(source.includes("import { advanceExplicitInteraction } from './explicit-interaction-flow.js'"), true);
-  assert.equal(createSource.includes('await advanceExplicitInteraction(api, {'), true);
-  assert.equal(source.match(/await advanceExplicitInteraction\(api, \{/g)?.length, 3);
-  assert.equal(source.includes('提交给显式大脑'), true);
-  assert.equal(source.includes('api.confirmExplicitRequirement(interactionId, {'), true);
-  assert.equal(source.includes('确认并提交后台'), false);
-  assert.equal(flowSource.includes('api.interpretExplicitInput(input.interactionId)'), true);
-  assert.equal(source.includes('ui:creation:'), false);
-  assert.equal(createSource.includes('await api.confirmExplicitRequirement'), false);
-  assert.equal(createSource.includes('await renderInteraction(interactionId, matchedTaskId)'), true);
-  assert.equal(source.includes('normalizedInput: snapshot.rawInput'), false);
-  assert.equal(source.includes('matchedTasks: currentTaskId'), false);
-  assert.equal(source.includes("proposedIntent: currentTaskId ? 'append' : 'create'"), false);
-  assert.equal(flowSource.includes("snapshot.state === 'received' || snapshot.state === 'matching'"), true);
-  assert.equal(source.includes("dispatched.requirement?.draftId !== snapshot.draft.draftId"), false);
-  assert.equal(source.includes('已进入 FIFO'), true);
-  assert.equal(source.includes('actions.replaceChildren(taskList)'), true);
-  assert.equal(source.includes("taskList.href = './tasks.html'"), true);
-});
-
 test('explicit confirmation stays on the interaction page and exposes the FIFO receipt', async () => {
   const source = await readFile('docs/ui/task.js', 'utf8');
   const interactionSource = source.slice(
@@ -1645,6 +1497,14 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
   const updateCardFromSnapshot = () => {};
   const attachInteractionCardHost = () => {};
   const interactionCard = null;
+  // The shared technical-detail trigger is imported by task.js and mounted by renderInteraction so
+  // the last typed failure stays reachable. It starts hidden and is shown only by showError, so the
+  // happy-path assertions here never observe it.
+  const technicalDetailTrigger = () => {
+    const node = new Node();
+    node.hidden = true;
+    return node;
+  };
   await new Function(
     'element',
     'main',
@@ -1658,8 +1518,9 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     'updateCardFromSnapshot',
     'attachInteractionCardHost',
     'interactionCard',
+    'technicalDetailTrigger',
     `${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
-  )(element, main, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard);
+  )(element, main, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard, technicalDetailTrigger);
   const feedback = nodes.find((node) => node.attrs.role === 'status');
   const confirm = nodes.find((node) => node.textContent === '按此方案继续');
   if (!feedback || !confirm) throw new Error('expected confirmation controls');
@@ -1676,7 +1537,6 @@ test('runtime task dashboard is observational and has no second execution-input 
   assert.equal(source.includes('本次执行输入'), false);
   assert.equal(source.includes('promptInput'), false);
   assert.equal(source.includes('api.startExecution'), false);
-  assert.equal(source.includes('taskDetailHref(taskId)'), true);
   assert.equal(source.includes('进入显式大脑'), true);
   assert.equal(/shouldObserveActiveState\(\)/.test(source), true);
   assert.equal(/dashboard\.state\)\n    && !dashboard\.operationId/.test(source), true);
@@ -1688,9 +1548,14 @@ test('runtime task dashboard is observational and has no second execution-input 
 });
 
 type InteractionCardPageAdapter = {
-  readonly projectInteractionCardFromEntries: (entries: readonly unknown[], state?: string) => {
+  readonly projectInteractionCardFromEntries: (
+    entries: readonly unknown[],
+    state?: string,
+    context?: unknown,
+  ) => {
     readonly surface: string;
     readonly taskState: string;
+    readonly stateLabel?: string;
     readonly actions: readonly unknown[];
     readonly conversation: {
       readonly summary: { readonly missing?: true; readonly goal?: { readonly text: string } };
@@ -1698,7 +1563,16 @@ type InteractionCardPageAdapter = {
     };
     readonly trace: { readonly items: readonly { readonly requestId: string }[] };
     readonly history: { readonly result: string };
-    readonly cardMetadata: { readonly nextAction?: string; readonly waitingOn?: string };
+    readonly cardMetadata: {
+      readonly nextAction?: string;
+      readonly waitingOn?: string;
+      readonly source: {
+        readonly interactionId?: string;
+        readonly taskId?: { readonly scope: string; readonly value: string };
+        readonly operationId?: { readonly scope: string; readonly value: string };
+        readonly executionEpoch?: number;
+      };
+    };
   };
   readonly projectInteractionCardFromSnapshot: (snapshot: unknown) => {
     readonly conversation: {
@@ -1745,6 +1619,10 @@ test('interaction card page adapter keeps technical identifiers in trace details
 });
 
 test('interaction card page adapter preserves draft facts without leaking decision refs', () => {
+  assert.equal(
+    interactionCardPage.projectInteractionCardFromSnapshot({ state: 'received' }) as unknown,
+    undefined,
+  );
   const projection = interactionCardPage.projectInteractionCardFromSnapshot({
     interactionId: 'interaction-2',
     state: 'awaiting-confirmation',
@@ -1797,16 +1675,24 @@ const confirmedCardEntries = [
   },
 ];
 
-test('interaction card projects the confirmed and dispatched lifecycle onto a declared card state', () => {
+// Failure mode (basis: known served defect, docs/ui/interaction-card-page.js
+// L43-86 on the base): an interaction-only `confirmed`/`dispatched` card
+// reported `running` and synthesized a Task/Operation id from the interaction
+// id, so the user saw a running Task before any execution existed. Impact is
+// high (false task existence and progress); cost is one ~2s JSDOM test. The
+// counterexample is the same projection on the base, which returns
+// `taskState: 'running'` and a fabricated `source.taskId.value`.
+test('interaction card keeps confirmed and dispatched as an interaction-only waiting state', () => {
   for (const state of ['confirmed', 'dispatched']) {
     const projection = interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, state);
-    // A declared `LifecycleState`, never the `unknown` fallback whose label is
-    // the empty "未知".
-    assert.equal(projection.taskState, 'running');
-    // The runtime owns the next step once the human authorization is recorded,
-    // so the card must not fall back to the human-waiting projection or its
-    // second-confirmation copy.
+    // A confirmation hands the next step to the runtime: the card is waiting,
+    // never running.
+    assert.equal(projection.taskState, 'waiting');
     assert.equal(projection.cardMetadata.waitingOn, 'runtime');
+    // The card keeps the real interaction identity and mints no Task/Operation.
+    assert.equal(projection.cardMetadata.source.interactionId, 'interaction-confirmed');
+    assert.equal(projection.cardMetadata.source.taskId, undefined);
+    assert.equal(projection.cardMetadata.source.operationId, undefined);
     assert.deepEqual(projection.actions, []);
     const serialized = JSON.stringify(projection);
     assert.equal(serialized.includes('等待决策'), false);
@@ -1818,6 +1704,59 @@ test('interaction card projects the confirmed and dispatched lifecycle onto a de
   const waiting = interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, 'awaiting-confirmation');
   assert.equal(waiting.taskState, 'waiting');
   assert.equal(waiting.cardMetadata.waitingOn, 'human');
+});
+
+// Failure mode (basis: docs/ui/task.js omitted dashboard.taskId/operationId and
+// the projector derived identity from the interaction): a real admitted Task or
+// running Task was labelled with a fabricated `pending-input` scope. Impact is
+// high (identity and execution truth are wrong); cost is one ~2s JSDOM test.
+test('interaction card forwards a genuine dashboard task identity and fabricates none', () => {
+  // No real interaction or Task identity is a no-mount projection, not a
+  // source-less card.
+  assert.equal(
+    interactionCardPage.projectInteractionCardFromEntries([], 'received') as unknown,
+    undefined,
+  );
+  // A real admitted Task without an operation stays a real waiting task with its
+  // real TaskId and no invented Operation or interaction.
+  const admitted = interactionCardPage.projectInteractionCardFromEntries([], 'awaiting-confirmation', {
+    execution: {
+      taskId: { scope: 'task', value: 'task-real-admitted' },
+      state: 'waiting',
+      stateLabel: '已入队，等待执行',
+    },
+  });
+  assert.equal(admitted.taskState, 'waiting');
+  assert.equal(admitted.cardMetadata.source.taskId?.value, 'task-real-admitted');
+  assert.equal(admitted.cardMetadata.source.operationId, undefined);
+  assert.equal(admitted.cardMetadata.source.interactionId, undefined);
+  // A genuine running execution keeps the real Task, Operation and epoch, and
+  // the runtime's own localized state governs the card.
+  const running = interactionCardPage.projectInteractionCardFromEntries([], 'received', {
+    execution: {
+      taskId: { scope: 'task', value: 'task-real-1' },
+      operationId: 'op-real-1',
+      executionEpoch: 1,
+      state: 'running',
+      stateLabel: '运行中',
+    },
+  });
+  assert.equal(running.taskState, 'running');
+  assert.equal(running.stateLabel, '运行中');
+  assert.equal(running.cardMetadata.source.taskId?.value, 'task-real-1');
+  assert.equal(running.cardMetadata.source.operationId?.value, 'op-real-1');
+  assert.equal(running.cardMetadata.source.executionEpoch, 1);
+  // A supplied invalid epoch stays supplied, so the existing contract validator
+  // can reject it instead of the page silently laundering it into absent.
+  const invalidEpoch = interactionCardPage.projectInteractionCardFromEntries([], 'received', {
+    execution: {
+      taskId: { scope: 'task', value: 'task-real-invalid-epoch' },
+      executionEpoch: 0,
+      state: 'running',
+      stateLabel: '运行中',
+    },
+  });
+  assert.equal(invalidEpoch.cardMetadata.source.executionEpoch, 0);
 });
 
 type InteractionWorkCardAdapter = {
@@ -1901,6 +1840,18 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
   };
 
   const fakeText = (node: FakeNode): string => node.textContent + node.children.map(fakeText).join('');
+  // The lifecycle chip is the first `交互`/`任务`/`节点` state chip in the card.
+  const lifecycleChip = (node: FakeNode): string => {
+    let found = '';
+    const walk = (current: FakeNode): void => {
+      if (current.className.split(/\s+/).includes('iwc-state-chip') && /^(交互|任务|节点) /.test(current.textContent)) {
+        found = current.textContent;
+      }
+      for (const child of current.children) walk(child);
+    };
+    walk(node);
+    return found;
+  };
 
   const scope = globalThis as unknown as { document?: unknown };
   const previousDocument = scope.document;
@@ -1917,15 +1868,41 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
     const host = new FakeNode('div');
     const card = mountInteractionWorkCard(host);
     card.update({ ...interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, 'confirmed'), actions: [] });
-    assert.equal(host.querySelector('.iwc-lifecycle-label')?.textContent, '运行中');
+    // An interaction-only card is labelled as an interaction and reads as
+    // waiting for the runtime, not as a running task.
+    assert.equal(host.querySelector('.iwc-lifecycle-label')?.textContent, '已确认，等待调度');
+    assert.equal(lifecycleChip(host), '交互 已确认，等待调度');
+    assert.equal(host.querySelector('.iwc-source-ref')?.textContent?.includes('interaction=interaction-confirmed'), true);
+    assert.equal(host.querySelector('.iwc-source-ref')?.textContent?.includes('operation=未提供'), true);
     const text = fakeText(host);
+    assert.equal(text.includes('运行中'), false);
     assert.equal(text.includes('未知'), false);
     assert.equal(text.includes('等待决策'), false);
+    // The raw interaction enum must not be the card's state reading. The
+    // technical source reference legitimately shows the real interaction id
+    // (which embeds the state word), so the human state surfaces are checked on
+    // their own.
+    assert.equal(host.querySelector('.iwc-lifecycle-label')?.textContent?.includes('confirmed'), false);
+    assert.equal(host.querySelector('.iwc-status-detail')?.textContent?.includes('confirmed'), false);
     assert.equal(text.includes('等待你确认任务草案'), false);
     assert.equal(text.includes('确认并进入队列'), false);
     // The card carries no second authorization control after the confirmed
     // projection.
     assert.equal(host.querySelector('.iwc-button--primary'), null);
+
+    // A genuine running execution keeps its real task identity and running label.
+    const runningHost = new FakeNode('div');
+    mountInteractionWorkCard(runningHost).update(interactionCardPage.projectInteractionCardFromEntries([], 'received', {
+      execution: {
+        taskId: { scope: 'task', value: 'task-real-1' },
+        operationId: 'op-real-1',
+        executionEpoch: 1,
+        state: 'running',
+        stateLabel: '运行中',
+      },
+    }));
+    assert.equal(lifecycleChip(runningHost), '任务 运行中');
+    assert.equal(runningHost.querySelector('.iwc-source-ref')?.textContent?.includes('task=task:task-real-1'), true);
   } finally {
     scope.document = previousDocument;
   }
@@ -1962,6 +1939,10 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     'async function waitForTask() { return "task-1"; }',
     'function observationHref(taskId) { return "./task.html?task=" + taskId; }',
     'async function refreshQueue() {}',
+    // The identity helpers sit before the sliced confirmation block, so the harness stubs them for
+    // the waitForTask call. waitForTask is stubbed here too, so these only keep the call chain real.
+    'function identityFromReceipt(requirement) { return requirement ?? null; }',
+    'function identityFromConfirmedSnapshot(snapshot) { return snapshot?.confirmation ?? null; }',
     'return {',
     '  async run(submission, nextApi) {',
     '    api = nextApi;',

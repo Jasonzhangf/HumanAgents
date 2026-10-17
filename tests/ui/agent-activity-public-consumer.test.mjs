@@ -168,7 +168,7 @@ test('historical selected detail keeps current facts and exact node/commit/evide
 })
 
 test('query roundtrip preserves parent parameters and distinguishes tagged identities without confirming them', () => {
-  const parent = new URLSearchParams('task=task-exact&project=p&mode=live&display=compact&planRevision=r&planPublication=pub&checkpoint=c&cycle=cy&occurrence=o&other=one&other=two')
+  const parent = new URLSearchParams('task=task-exact&project=p&mode=live&display=compact&planRevision=r&planPublication=pub&checkpoint=c&cycle=cy&occurrence=o&other=one&other=two&projectKey=original&view=activity')
   const original = parent.toString()
   assert.deepEqual(agentActivitySelectionFromQuery(parent, taskId), { ok: true, value: { taskId } })
   for (const selection of [oldSelection, nativeSelection,
@@ -192,6 +192,15 @@ test('query roundtrip preserves parent parameters and distinguishes tagged ident
     ok: true, value: { ...incarnation, assignmentId: 'assignment-old' },
   })
   assert.equal(encoded.value.has('agentAttempt'), false)
+  const unknownParent = new URLSearchParams('agentFoo=1&projectKey=original&mode=rcc&view=activity')
+  const unknownOriginal = unknownParent.toString()
+  const decoded = agentActivitySelectionFromQuery(unknownParent, taskId)
+  assert.equal(decoded.ok, false)
+  assert.equal(decoded.failure.code, 'agent-activity.invalid-selection')
+  const unknownEncoded = agentActivityQuery(unknownParent, nativeSelection)
+  assert.equal(unknownEncoded.ok, false)
+  assert.equal(unknownEncoded.failure.code, 'agent-activity.invalid-selection')
+  assert.equal(unknownParent.toString(), unknownOriginal)
   assert.equal(parent.toString(), original)
 })
 

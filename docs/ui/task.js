@@ -186,10 +186,15 @@ function subscribeTaskStream(operationId) {
 function projectTaskLiveness(dashboard) {
   // The card is built from the interaction entries; the execution facts come
   // from the runtime dashboard read the page performed. Both are reported
-  // facts, and the execution side may be absent.
+  // facts, and the execution side may be absent. The dashboard's own Task,
+  // Operation and epoch identity are forwarded verbatim so the card reports the
+  // real execution identity instead of deriving one from the interaction.
   return projectInteractionCardFromEntries(cardState.entries, activeInteractionId ? 'received' : 'awaiting-confirmation', {
     liveness: dashboard.liveness,
     execution: {
+      taskId: dashboard.taskId,
+      operationId: dashboard.operationId,
+      executionEpoch: dashboard.executionEpoch,
       state: dashboard.state,
       // The runtime's own localized label. Without it the card would fall back
       // to a raw LifecycleState value and show the human `任务 failed`.
@@ -207,6 +212,7 @@ function updateTaskExecution(dashboard) {
   // `cardState.projection` stays the base that history is re-applied onto.
   lastDashboard = dashboard
   const base = projectTaskLiveness(dashboard)
+  if (!base) return
   const projection = {
     ...base,
     // The page-local four-value stream fact rides on its OWN carrier.
@@ -339,6 +345,7 @@ function updateCard(projection) {
   // A loaded history page is a real runtime fact, so rebuilding the card from
   // local interaction events must not drop it. `cardState.projection` stays the
   // base projection; the last loaded history page is re-applied on top.
+  if (!projection) return
   cardState.projection = projection
   presentInteractionCard(cardState.history
     ? withTaskHistory(projection, cardState.history.query, cardState.history.result)
@@ -347,7 +354,9 @@ function updateCard(projection) {
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   cardState.sequence += 1
-  const interactionId = detail.interactionId || activeInteractionId || 'pending-input'
+  // The interaction id is only the one the runtime reported. The page never
+  // mints a placeholder identity for an event that carries none.
+  const interactionId = detail.interactionId || activeInteractionId
   cardState.entries = [
     ...cardState.entries,
     {

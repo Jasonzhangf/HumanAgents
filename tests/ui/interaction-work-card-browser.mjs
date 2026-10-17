@@ -256,7 +256,9 @@ const HARNESS_HTML = `<!doctype html>
   </main>
   <script type="module">
     import { mountInteractionWorkCard } from '/interaction-work-card.js'
+    import { projectInteractionCardFromEntries } from '/interaction-card-page.js'
     window.__mountInteractionWorkCard = mountInteractionWorkCard
+    window.__projectInteractionCardFromEntries = projectInteractionCardFromEntries
     window.__iwcReady = true
   </script>
 </body>
@@ -488,6 +490,86 @@ try {
     'the lifecycle chip names the localized state and never the raw enum',
     card.stateChip === '任务 运行中' && !/任务\s+(running|settling|failed|succeeded|cancelled|stopped)\b/.test(card.status),
     { chip: card.stateChip, status: card.status.slice(0, 200) },
+  );
+
+  // --- identity truth: interaction-only vs admitted vs running ----------------
+  // The card must name the human scope from the real source: an interaction-only
+  // confirmation is `交互 <waiting label>` and carries no Task/Operation, an
+  // admitted Task keeps its real TaskId with no Operation, and a running Task
+  // keeps the real Task/Operation/epoch. None of these may fabricate a
+  // `pending-input` scope or claim `运行中` from a confirmation.
+  const identityProbe = await page.evaluate(() => {
+    const project = window.__projectInteractionCardFromEntries;
+    const mount = (projection) => {
+      const host = document.createElement('div');
+      host.style.height = '600px';
+      document.body.append(host);
+      window.__mountInteractionWorkCard(host, {}).update(projection);
+      const chip = [...host.querySelectorAll('.iwc-state-chip')]
+        .find((node) => /^(交互|任务|节点) /.test(node.textContent ?? ''))?.textContent ?? '';
+      return {
+        chip,
+        label: host.querySelector('.iwc-lifecycle-label')?.textContent ?? '',
+        sourceRef: host.querySelector('.iwc-source-ref')?.textContent ?? '',
+        text: host.innerText ?? '',
+      };
+    };
+    const interactionEntries = [
+      { sequence: 1, interactionId: 'int-confirmed', kind: 'user', sourceKind: 'user', eventKey: 'explicit.raw-input', text: '读取 README' },
+      { sequence: 2, interactionId: 'int-confirmed', kind: 'decision', sourceKind: 'decision', eventKey: 'explicit.confirmation-submitted', text: '任务已提交' },
+    ];
+    return {
+      confirmed: mount(project(interactionEntries, 'confirmed')),
+      dispatched: mount(project(interactionEntries, 'dispatched')),
+      admitted: mount(project([], 'awaiting-confirmation', {
+        execution: { taskId: { scope: 'task', value: 'task-fixture-admitted' }, state: 'waiting', stateLabel: '已入队，等待执行' },
+      })),
+      running: mount(project([], 'received', {
+        execution: {
+          taskId: { scope: 'task', value: 'task-fixture-running' },
+          operationId: 'operation-fixture-running',
+          executionEpoch: 1,
+          state: 'running',
+          stateLabel: '运行中',
+        },
+      })),
+    };
+  });
+  record(
+    'interaction-only confirmed card names the interaction scope and waiting label',
+    identityProbe.confirmed.chip === '交互 已确认，等待调度'
+      && identityProbe.confirmed.label === '已确认，等待调度'
+      && identityProbe.confirmed.sourceRef.includes('interaction=int-confirmed')
+      && identityProbe.confirmed.sourceRef.includes('task=未提供')
+      && identityProbe.confirmed.sourceRef.includes('operation=未提供')
+      && !identityProbe.confirmed.text.includes('运行中'),
+    identityProbe.confirmed,
+  );
+  record(
+    'interaction-only dispatched card names the interaction scope and queued label',
+    identityProbe.dispatched.chip === '交互 已入队，等待执行'
+      && identityProbe.dispatched.label === '已入队，等待执行'
+      && identityProbe.dispatched.sourceRef.includes('interaction=int-confirmed')
+      && identityProbe.dispatched.sourceRef.includes('task=未提供')
+      && !identityProbe.dispatched.text.includes('运行中'),
+    identityProbe.dispatched,
+  );
+  record(
+    'admitted Task without operation keeps its real TaskId and no Operation',
+    identityProbe.admitted.chip === '任务 已入队，等待执行'
+      && identityProbe.admitted.sourceRef.includes('task=task:task-fixture-admitted')
+      && identityProbe.admitted.sourceRef.includes('operation=未提供')
+      && !identityProbe.admitted.sourceRef.includes('pending-input')
+      && !identityProbe.admitted.text.includes('运行中'),
+    identityProbe.admitted,
+  );
+  record(
+    'genuine running Task keeps the real Task/Operation/epoch identity',
+    identityProbe.running.chip === '任务 运行中'
+      && identityProbe.running.sourceRef.includes('task=task:task-fixture-running')
+      && identityProbe.running.sourceRef.includes('operation=operation:operation-fixture-running')
+      && identityProbe.running.sourceRef.includes('epoch=1'),
+    identityProbe.running,
   );
 
   // --- the animated dot follows the REPORTED liveness ----------------------
@@ -785,6 +867,7 @@ try {
     );
   }
 
+  console.log('controlled-fixture Playwright browser proof of candidate docs/ui modules (no live Provider execution claim)');
   console.log(`interaction work card browser proof: ${checks.length} checks passed`);
   for (const check of checks) console.log(`  - ${check.name}`);
 } finally {

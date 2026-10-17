@@ -5,11 +5,12 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
+  mountSemanticObservationPanel,
   observationHref,
   openTechnicalDetail,
   queryParam,
+  readHistoryFilters,
   readScopeLabel,
-  renderCheckpointHistory,
   renderContextHistory,
   renderI2BusinessCycles,
   renderI2InspectionComparison,
@@ -18,11 +19,20 @@ import {
   renderPageError,
   renderRuntimeStatus,
   renderTaskRecords,
+  sameStoredRecordRef,
   stateTone,
   taskDetailHref,
   taskIdFromQuery,
   taskReadScopeFromQuery,
 } from './runtime-shell.js'
+import { sameCheckpointAssetBodyAddress } from './runtime-api.js'
+import {
+  checkpointQuery,
+  checkpointSelectionFromQuery,
+  renderCheckpointAssetBody,
+  renderCheckpointHistory,
+  renderCheckpointHistoryDetail,
+} from './checkpoint-history.js'
 import {
   planControlErrorMessage,
   planControlKey,
@@ -70,6 +80,12 @@ let agentDetailLayer = null
 let agentReadFailure
 let agentReadPending = false
 
+// The shared semantic panel keeps one live mount for the page lifetime: a
+// dashboard redraw re-attaches the retained element instead of building a
+// second panel and a second observation subscription.
+let semanticObservationPanel = null
+let semanticObservationHost = null
+
 // The request carries only the validated agent keys; the API owner adds the
 // canonical project/mode/task scope itself. An absent instance means a task
 // catalog read, which sends no agent keys at all.
@@ -98,25 +114,21 @@ let planHistoryState = {
 let dashboardStale = false
 let dashboardFailure
 
-// Reading-mode surface for this page. `current` is the already rendered task
-// projection with the accepted reasoning plan. `semantic` reads the same
-// authoritative history from the current projection. `actions` and `raw` are
-// real scoped record reads.
+// Reading-mode surface for this page. Every mode drives the one shared semantic
+// panel the page mounts; the plan history and the authoritative records stay
+// reachable through the explicit detail sections the panel-backed view shows.
 const TASK_DISPLAY_SURFACE = {
   get supportedModes() {
     const modes = ['current']
-    if (explicitScope) modes.push('actions', 'raw')
-    if (planHistoryState.ok) modes.push('semantic')
+    if (taskId) modes.push('semantic', 'actions', 'raw')
     return modes
   },
   get unavailableReasons() {
     const reasons = {}
-    if (!planHistoryState.ok) {
-      reasons.semantic = planHistoryState.failure?.message || '权威计划版本历史还没有可用接口。'
-    }
-    if (!explicitScope) {
-      reasons.actions = '这个页面没有已确认的 task scope，无法读取动作轨迹。'
-      reasons.raw = '这个页面没有已确认的 task scope，无法读取原始记录。'
+    if (!taskId) {
+      reasons.semantic = '这个页面没有 task 参数，无法挂载共享语义观测面板。'
+      reasons.actions = reasons.semantic
+      reasons.raw = reasons.semantic
     }
     return reasons
   },
@@ -195,6 +207,7 @@ function evidenceTrigger(ref) {
 const {
   main,
   status,
+  applyDisplayMode,
   initializeDisplayPreference,
   disposeDisplayPreference,
 } = makePageShell(
@@ -260,8 +273,8 @@ const checkpointHistoryRead = createScopedReadPublication((scope) => api.taskChe
   projectKey: scope.projectKey,
   mode: scope.mode,
   ...(scope.filters || {}),
-  ...(scope.viewed ? { viewed: scope.viewed } : {}),
   ...(scope.cursor ? { cursor: scope.cursor } : {}),
+  ...(scope.checkpointQuery ? { checkpointQuery: scope.checkpointQuery } : {}),
 }))
 const businessCyclesRead = createScopedReadPublication((scope) => api.taskBusinessCycles(scope.taskId, {
   ...(scope.viewed ? { viewed: scope.viewed } : {}),
@@ -281,10 +294,24 @@ const inspectionComparisonRead = createScopedReadPublication((scope) => api.task
 }))
 
 function leaveRecords() {
+  recordsNavigationVersion += 1
   void recordsRead.refresh({ kind: 'closed' })
 }
 
 const displayModeHosts = new Map()
+let recordsNavigationVersion = 0
+
+// One-level source return for the raw reference jump. The actions host stays
+// retained while raw is shown, so returning reuses its confirmed page and the
+// exact trigger the user left.
+let rawActionsReturn = null
+let pendingRawRecordRef = null
+// The plan history and the authoritative records are explicit details of the
+// panel-backed perspectives. A plain perspective switch never reads records;
+// an explicit open, a page turn, or a record reference jump does.
+let planHistoryDetailOpen = false
+let executionTraceDetailOpen = false
+const recordsDetailOpen = { actions: false, raw: false }
 
 function mountDisplayModeHost(mode) {
   const host = element('section', undefined, 'display-mode-host')
@@ -310,7 +337,32 @@ function staleReadFailure() {
   }
 }
 
+function panelUnavailableFailure() {
+  return {
+    code: 'semantic-observation.panel-unavailable',
+    ownerId: 'humanagent.ui',
+    message: '共享语义观测面板尚未挂载。',
+    nextAction: '刷新这个任务后再切换阅读方式',
+  }
+}
+
+// The retained instance is the single panel this page mounts. It follows the
+// page's active perspective, so a redraw re-attaches the same host instead of
+// mounting a second panel and a second observation subscription.
+function syncPanelMode(mode) {
+  if (!semanticObservationPanel || typeof semanticObservationPanel.setMode !== 'function') return false
+  semanticObservationPanel.setMode(mode)
+  return true
+}
+
 async function applyTaskDisplayMode({ mode, origin }) {
+  if (mode !== 'current' && mode !== 'semantic' && mode !== 'actions' && mode !== 'raw') {
+    return { ok: false, failure: unavailableModeFailure(mode, '这个页面不能渲染这层内容。') }
+  }
+  if (origin === 'manual' || mode === 'current' || mode === 'semantic') {
+    rawActionsReturn = null
+    if (origin === 'manual') pendingRawRecordRef = null
+  }
   if (mode === 'current') {
     if (!dashboard) return { ok: false, failure: currentUnavailableFailure() }
     if (dashboardStale) return { ok: false, failure: staleReadFailure() }
@@ -318,41 +370,119 @@ async function applyTaskDisplayMode({ mode, origin }) {
       const current = resolveCurrentPlanRevision(planHistoryState.value, { explicitScope })
       if (!current.ok) return { ok: false, failure: current.failure }
     }
+    leaveRecords()
     displayMode = 'current'
     if (origin === 'manual') updatePlanViewUrl({ display: 'current', selection: null })
     renderDashboard()
     return { ok: true, mode: 'current' }
   }
-  if (mode === 'semantic') {
-    if (!dashboard) return { ok: false, failure: currentUnavailableFailure() }
-    if (dashboardStale) return { ok: false, failure: staleReadFailure() }
-    if (!planHistoryState.ok) return { ok: false, failure: planHistoryState.failure }
-    const host = displayModeHosts.get('semantic') || mountDisplayModeHost('semantic')
-    displayModeHosts.set('semantic', host)
-    const receipt = await commitScopedReadTransition({
-      // The authoritative history already arrived in the single Dashboard GET.
-      // This transition only stages and commits its real render.
-      read: async () => ({
-        published: true,
-        reason: 'published',
-        state: { content: planHistoryState, stale: false },
-      }),
-      build: (content) => renderTaskPlanSemanticView(content, planViewOptions()),
-      commit: (staged) => {
-        clearNode(host)
-        host.append(staged)
-        host.dataset.planHistoryState = 'confirmed'
-        displayMode = 'semantic'
-        renderPlanHistoryView(host)
-      },
-    })
-    if (!receipt.ok) return { ok: false, failure: receipt.failure, superseded: receipt.superseded === true }
-    if (origin === 'manual') updatePlanViewUrl({ display: 'semantic' })
-    return { ok: true, mode: 'semantic' }
+  if (!dashboard) return { ok: false, failure: currentUnavailableFailure() }
+  if (!semanticObservationPanel) return { ok: false, failure: panelUnavailableFailure() }
+  // Every panel-backed perspective keeps the same live panel and its exact
+  // range. Only the panel's own reading mode changes; the page re-presents the
+  // content it already holds, and no records GET happens here.
+  leaveRecords()
+  displayMode = mode
+  try {
+    if (!syncPanelMode(mode)) return { ok: false, failure: panelUnavailableFailure() }
+  } catch {
+    return { ok: false, failure: panelUnavailableFailure() }
   }
-  if (mode !== 'actions' && mode !== 'raw') {
-    return { ok: false, failure: unavailableModeFailure(mode, '这个页面不能渲染这层内容。') }
+  // A revision/publication deep link opens its exact plan-history detail; an
+  // ordinary semantic switch keeps the detail as the user left it.
+  if (mode === 'semantic' && hasPlanSelection(readPlanSelectionFromQuery())) planHistoryDetailOpen = true
+  renderActiveReadingMode()
+  // A raw record reference jump is an explicit detail read. The plain mode
+  // switch above did not read anything.
+  const rawJump = mode === 'raw' ? pendingRawRecordRef : null
+  pendingRawRecordRef = null
+  let receipt = { ok: true, mode }
+  if (rawJump) {
+    recordsDetailOpen.raw = true
+    receipt = await openRecordsDetail('raw', { selectedRef: rawJump })
+    if (receipt.superseded) return receipt
   }
+  if (origin === 'manual' || origin === 'programmatic') {
+    updatePlanViewUrl({ display: mode, selection: mode === 'semantic' ? undefined : null })
+  }
+  return receipt.ok ? { ok: true, mode } : receipt
+}
+
+let renderedPlanHistoryState = null
+function renderSemanticHost() {
+  const host = displayModeHosts.get('semantic')
+  if (!host || !planHistoryState.ok) return
+  clearNode(host)
+  host.append(renderTaskPlanSemanticView(planHistoryState, planViewOptions()))
+  host.dataset.planHistoryState = 'confirmed'
+  renderedPlanHistoryState = planHistoryState
+}
+
+function renderPlanHistoryDetailSection() {
+  const section = element('section', undefined, 'section display-mode-detail')
+  section.dataset.planHistoryDetail = 'true'
+  section.append(element('h2', '任务计划版本历史'))
+  if (!planHistoryState.ok) {
+    section.dataset.planHistoryState = 'unavailable'
+    const notice = element('div')
+    renderPageError(notice, planHistoryState.failure, '重新读取这个任务后再查看计划历史')
+    section.append(notice)
+    return section
+  }
+  section.dataset.planHistoryState = 'confirmed'
+  const details = element('details', undefined, 'display-detail-fold')
+  details.dataset.planHistoryFold = 'true'
+  details.open = planHistoryDetailOpen
+  details.append(element('summary', '权威计划版本历史'))
+  details.addEventListener('toggle', () => { planHistoryDetailOpen = details.open })
+  const host = displayModeHosts.get('semantic') || mountDisplayModeHost('semantic')
+  displayModeHosts.set('semantic', host)
+  if (host.dataset.planHistoryState !== 'confirmed'
+    || (!dashboardStale && renderedPlanHistoryState !== planHistoryState)) renderSemanticHost()
+  details.append(host)
+  section.append(details)
+  return section
+}
+
+function renderRecordsDetailSection(mode) {
+  const section = element('section', undefined, 'section display-mode-detail')
+  section.dataset.recordsDetail = explicitScope
+    ? (recordsDetailOpen[mode] ? 'open' : 'closed')
+    : 'unavailable'
+  section.append(element('h2', mode === 'raw' ? '权威原始记录' : '权威动作记录'))
+  if (!explicitScope) {
+    section.append(element('p', '这个页面没有已确认的 task scope，无法读取动作轨迹。', 'empty'))
+    return section
+  }
+  const host = displayModeHosts.get(mode) || mountDisplayModeHost(mode)
+  displayModeHosts.set(mode, host)
+  const toggle = element('button', recordsDetailOpen[mode] ? '收起权威记录' : `打开${displayModeLabel(mode)}`, 'button button--quiet')
+  toggle.type = 'button'
+  toggle.dataset.recordsDetailToggle = mode
+  toggle.setAttribute('aria-expanded', String(recordsDetailOpen[mode]))
+  toggle.addEventListener('click', () => {
+    if (recordsDetailOpen[mode]) {
+      recordsDetailOpen[mode] = false
+      renderActiveReadingMode()
+      return
+    }
+    void openRecordsDetail(mode)
+  })
+  section.append(toggle)
+  if (!recordsDetailOpen[mode]) return section
+  if (host.dataset.recordsState === 'pending') section.append(element('p', '正在读取权威记录…', 'muted'))
+  if (mode === 'raw' && rawActionsReturn) {
+    const back = element('button', '返回动作轨迹', 'button button--quiet')
+    back.type = 'button'
+    back.dataset.recordsReturn = 'actions'
+    back.addEventListener('click', () => void returnToActionsSource())
+    section.append(back)
+  }
+  section.append(host)
+  return section
+}
+
+async function openRecordsDetail(mode, { selectedRef } = {}) {
   if (!explicitScope) {
     return {
       ok: false,
@@ -364,47 +494,81 @@ async function applyTaskDisplayMode({ mode, origin }) {
       },
     }
   }
+  const navigationVersion = ++recordsNavigationVersion
   const host = displayModeHosts.get(mode) || mountDisplayModeHost(mode)
   displayModeHosts.set(mode, host)
-  const receipt = await loadRecords(mode, host)
-  if (!receipt.ok) return receipt
-  displayMode = mode
-  renderRecordsView(mode, host)
-  if (origin === 'manual') updatePlanViewUrl({ display: mode, selection: null })
+  recordsDetailOpen[mode] = true
+  // Returning to a confirmed actions page is a view switch over the retained
+  // content, not a new read.
+  if (mode === 'actions' && !selectedRef && host.dataset.recordsState === 'confirmed') {
+    renderActiveReadingMode()
+    return { ok: true, mode }
+  }
+  host.dataset.recordsState = 'pending'
+  renderActiveReadingMode()
+  const receipt = await loadRecords(mode, host, { selectedRef, navigationVersion })
+  if (navigationVersion !== recordsNavigationVersion) return { ok: false, superseded: true }
+  if (!receipt.ok) {
+    host.dataset.recordsState = 'failed'
+    renderPageError(host, receipt.failure)
+    return receipt
+  }
+  renderActiveReadingMode()
+  if (mode === 'raw' && selectedRef) {
+    const selected = host.querySelector('[data-record-selected="true"]')
+    selected?.focus({ preventScroll: true })
+    selected?.scrollIntoView({ block: 'start', behavior: 'instant' })
+  }
   return { ok: true, mode }
 }
 
-function renderSemanticHost() {
-  const host = displayModeHosts.get('semantic')
-  if (!host || !planHistoryState.ok) return
-  clearNode(host)
-  host.append(renderTaskPlanSemanticView(planHistoryState, planViewOptions()))
-  host.dataset.planHistoryState = 'confirmed'
+async function openRawRecord(ref, trigger) {
+  const sourceHost = displayModeHosts.get('actions')
+  sourceHost?.querySelector('[data-records-navigation-failure]')?.remove()
+  // The shell controller owns the selected mode, so the jump goes through the
+  // public programmatic transition. `pendingRawRecordRef` turns that transition
+  // into the one explicit raw-detail read the jump needs.
+  pendingRawRecordRef = ref
+  rawActionsReturn = { trigger: trigger?.focus ? trigger : null }
+  recordsDetailOpen.actions = false
+  const result = await applyDisplayMode('raw')
+  if (!result?.ok && !result?.superseded) {
+    pendingRawRecordRef = null
+    rawActionsReturn = null
+    // The raw read failed, so the page stays on the confirmed actions detail
+    // and shows the recoverable failure there instead of a departed page.
+    recordsDetailOpen.raw = false
+    recordsDetailOpen.actions = true
+    // The fallback is a local re-presentation of the retained actions page, so
+    // it does not re-enter the controller transition.
+    displayMode = 'actions'
+    try {
+      syncPanelMode('actions')
+    } catch {
+      // The failed raw read already owns the visible failure receipt.
+    }
+    updatePlanViewUrl({ display: 'actions', selection: null })
+    renderActiveReadingMode()
+    if (sourceHost?.isConnected) {
+      const notice = element('div', undefined, 'records-navigation-failure')
+      notice.dataset.recordsNavigationFailure = 'true'
+      notice.setAttribute('role', 'alert')
+      renderPageError(notice, result.failure)
+      sourceHost.prepend(notice)
+    }
+  }
 }
 
-function renderPlanHistoryView(host) {
-  clearNode(main)
-  const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
-  copy.append(element('p', '只读计划历史', 'eyebrow'), element('h1', displayModeLabel('semantic')))
-  heading.append(copy, status, refreshButton)
-  const section = element('section', undefined, 'section')
-  section.append(host)
-  main.append(heading, section)
-}
-
-function renderRecordsView(mode, host) {
-  clearNode(main)
-  const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
-  copy.append(
-    element('p', '只读记录', 'eyebrow'),
-    element('h1', displayModeLabel(mode)),
-  )
-  heading.append(copy, status, refreshButton)
-  const section = element('section', undefined, 'section')
-  section.append(host)
-  main.append(heading, section)
+async function returnToActionsSource() {
+  if (!rawActionsReturn) return
+  recordsDetailOpen.actions = true
+  recordsDetailOpen.raw = false
+  const trigger = rawActionsReturn.trigger
+  rawActionsReturn = null
+  // Returning is a programmatic transition over the confirmed actions page, so
+  // it reuses the retained content without a second read.
+  const result = await applyDisplayMode('actions')
+  if (result?.ok && trigger?.isConnected) trigger.focus()
 }
 
 /**
@@ -417,50 +581,59 @@ function renderActiveReadingMode() {
     renderDashboard()
     return
   }
-  if (displayMode === 'semantic') {
-    const host = displayModeHosts.get('semantic') || mountDisplayModeHost('semantic')
-    displayModeHosts.set('semantic', host)
-    // A stale refresh keeps the last confirmed history; a fresh, readable
-    // history rebuilds from the new projection before the view is re-shown.
-    if (!dashboardStale && planHistoryState.ok) {
-      clearNode(host)
-      host.append(renderTaskPlanSemanticView(planHistoryState, planViewOptions()))
-      host.dataset.planHistoryState = 'confirmed'
-    }
-    renderPlanHistoryView(host)
-    return
+  renderPanelPerspectiveView(displayMode)
+}
+
+/**
+ * Every non-current perspective keeps the shared panel as its reading body. The
+ * plan history and the authoritative records stay readable as explicit detail
+ * sections, so the original readers are preserved without bypassing the panel.
+ */
+function renderPanelPerspectiveView(mode) {
+  if (agentViewDispose) {
+    agentViewDispose()
+    agentViewDispose = null
   }
-  const host = displayModeHosts.get(displayMode)
-  if (host) {
-    renderRecordsView(displayMode, host)
-    return
-  }
-  renderDashboard()
+  clearNode(main)
+  const heading = element('section', undefined, 'page-heading')
+  const copy = element('div', undefined, 'page-heading-copy')
+  copy.append(element('p', '只读阅读', 'eyebrow'), element('h1', displayModeLabel(mode)))
+  heading.append(copy, status, refreshButton)
+  main.append(heading)
+  main.append(renderSemanticObservationSection())
+  main.append(mode === 'semantic' ? renderPlanHistoryDetailSection() : renderRecordsDetailSection(mode))
+  const trace = element('details', undefined, 'display-detail-fold')
+  trace.dataset.executionTraceDetail = 'true'
+  trace.open = executionTraceDetailOpen
+  trace.append(element('summary', '任务事件明细'))
+  trace.addEventListener('toggle', () => { executionTraceDetailOpen = trace.open })
+  trace.append(renderExecutionTraceSection())
+  main.append(trace)
 }
 
 function recordsContentHasRef(content, selectedRef) {
-  return (content?.raw || []).some((record) => (
-    ['projectKey', 'mode', 'source', 'ordinal', 'operationId', 'executionEpoch', 'checkpointId']
-      .every((key) => record.ref[key] === selectedRef[key])
-    && record.ref.taskId.value === selectedRef.taskId.value
-  ))
+  return (content?.raw || []).some((record) => sameStoredRecordRef(record.ref, selectedRef))
 }
 
-async function readRecordsUntilRef(view, cursor, selectedRef) {
+async function readRecordsUntilRef(view, cursor, selectedRef, navigationVersion) {
   let read = await recordsRead.refresh({
     ...explicitScope,
     view,
     ...(cursor ? { cursor } : {}),
   })
+  if (navigationVersion !== recordsNavigationVersion) return { published: false }
   while (selectedRef && read.published && read.state?.content && !recordsContentHasRef(read.state.content, selectedRef)) {
+    if (read.state.stale || read.state.failure) break
     if (!read.state.content.hasMore || !read.state.content.nextCursor) break
     read = await recordsRead.refresh({
       ...explicitScope,
       view,
       cursor: read.state.content.nextCursor,
     })
+    if (navigationVersion !== recordsNavigationVersion) return { published: false }
   }
-  if (selectedRef && read.published && read.state?.content && !recordsContentHasRef(read.state.content, selectedRef)) {
+  if (selectedRef && read.published && !read.state?.stale && !read.state?.failure
+    && read.state?.content && !recordsContentHasRef(read.state.content, selectedRef)) {
     return {
       published: true,
       reason: 'read-failed',
@@ -479,7 +652,7 @@ async function readRecordsUntilRef(view, cursor, selectedRef) {
   return read
 }
 
-async function loadRecords(view, host, { cursor, selectedRef } = {}) {
+async function loadRecords(view, host, { cursor, selectedRef, navigationVersion = recordsNavigationVersion } = {}) {
   if (!explicitScope) {
     return {
       ok: false,
@@ -492,11 +665,12 @@ async function loadRecords(view, host, { cursor, selectedRef } = {}) {
     }
   }
   const receipt = await commitScopedReadTransition({
-    read: () => readRecordsUntilRef(view, cursor, selectedRef),
+    read: () => readRecordsUntilRef(view, cursor, selectedRef, navigationVersion),
     build: (content) => renderTaskRecords(content, {
       view,
+      ...(selectedRef ? { selectedRef } : {}),
       onNext: (nextCursor) => void loadRecords(view, host, { cursor: nextCursor }),
-      onRawRef: (ref) => void loadRecords('raw', host, { selectedRef: ref }),
+      onRawRef: (ref, trigger) => void openRawRecord(ref, trigger),
     }),
     commit: (staged) => {
       clearNode(host)
@@ -509,15 +683,16 @@ async function loadRecords(view, host, { cursor, selectedRef } = {}) {
 }
 
 // ── I5 readonly history navigation ─────────────────────────────────────────
-// Checkpoint and Context history are separate scoped reads. The user's viewed
-// old point is a local selection sent as the read-only `viewed` query; the
-// current execution point is whatever the read returns and is never written by
-// selecting, filtering, paginating, returning or closing.
+// Checkpoint and Context history are separate scoped reads. A viewed old point
+// is a read-only selection (the checkpoint target rides on the URL four-key
+// query, the context target on its own `viewed` query); the current execution
+// point is whatever the read returns and is never written by selecting,
+// paginating, returning or closing.
 let historyView = ''
+let historyHost = null
 let contextHistoryCursor = ''
 let checkpointHistoryCursor = ''
 let checkpointHistoryFilters = {}
-let viewedCheckpointId = ''
 let businessCycleCursor = ''
 let viewedCycleId = ''
 let milestoneReviewCursor = ''
@@ -526,12 +701,23 @@ let inspectionCursor = ''
 let viewedInspectionId = ''
 let comparisonLeft = ''
 
+// The checkpoint selection lives in the URL only: the old local
+// `viewedCheckpointId` is gone. The frozen C5 helper encodes and decodes the four
+// keys, so reload and popstate restore the exact target. The main layer and the
+// shared shell detail layer each own a disposer so replacing a renderer cannot
+// leave a stale listener behind.
+let checkpointViewDispose = null
+let checkpointRenderRead = null
+let checkpointDetailDispose = null
+let checkpointDetailLayer = null
+
 function leaveHistory() {
   historyView = ''
+  historyHost = null
+  checkpointRenderRead = null
   contextHistoryCursor = ''
   checkpointHistoryCursor = ''
   checkpointHistoryFilters = {}
-  viewedCheckpointId = ''
   businessCycleCursor = ''
   viewedCycleId = ''
   milestoneReviewCursor = ''
@@ -539,6 +725,8 @@ function leaveHistory() {
   inspectionCursor = ''
   viewedInspectionId = ''
   comparisonLeft = ''
+  closeCheckpointDetail()
+  disposeCheckpointView()
   void contextHistoryRead.refresh({ kind: 'closed' })
   void checkpointHistoryRead.refresh({ kind: 'closed' })
   void businessCyclesRead.refresh({ kind: 'closed' })
@@ -577,12 +765,321 @@ function i2IdentityFailure(projection, expectedSurface) {
   return null
 }
 
+const CHECKPOINT_SELECTION_NOT_CONFIRMED = Object.freeze({
+  code: 'checkpoint-history.selection-not-confirmed',
+  ownerId: 'humanagent.ui.checkpoint-history',
+  message: '这次读取没有返回所选 checkpoint，不能把当前执行点当作该选择。',
+  nextAction: '重试所选 checkpoint 读取，或清除选择并返回当前执行位置。',
+})
+
+const CHECKPOINT_HISTORY_FILTER_LABELS = Object.freeze({
+  directiveRevision: '任务版本',
+  executionEpoch: '执行轮次',
+  cycleId: '任务周期',
+  occurrenceRef: '巡检轮次',
+})
+
+function sameCommitReceipt(left, right) {
+  return Boolean(left && right)
+    && left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest
+}
+
+// The checkpoint projection carries its scope in `projection.scope`, not at the
+// top level. A projection for another project/mode/task, or one that does not
+// confirm the exact requested target, is refused as a typed failure; it is never
+// rendered as this selection's content.
+function checkpointReadFailure(content, requestedViewed) {
+  if (content.surface !== 'runtime-checkpoint-history'
+    || content.scope?.kind !== 'task'
+    || content.scope.projectKey !== explicitScope.projectKey
+    || content.scope.mode !== explicitScope.mode
+    || content.scope.taskId?.value !== explicitScope.taskId?.value) {
+    return {
+      code: 'history.identity.mismatch',
+      ownerId: 'humanagent.ui',
+      message: '历史读取返回了其他任务、模式或 surface 的投影',
+      nextAction: '重新打开该任务的历史',
+    }
+  }
+  if (requestedViewed === undefined) return null
+  const identity = content.viewed?.identity
+  if (requestedViewed.checkpointId !== undefined
+    && identity?.checkpointId?.value !== requestedViewed.checkpointId) {
+    return CHECKPOINT_SELECTION_NOT_CONFIRMED
+  }
+  if (requestedViewed.commitRef !== undefined
+    && !sameCommitReceipt(identity?.commitRef, requestedViewed.commitRef)) {
+    return CHECKPOINT_SELECTION_NOT_CONFIRMED
+  }
+  return null
+}
+
+// ── exact checkpoint asset body read ───────────────────────────────────────
+// The body read is bound to the exact clicked checkpoint identity, receipt and
+// selector before any await. Only the serial decides whether a late response may
+// still publish: back, close, level leave or a newer body read invalidates it, so
+// a response can never land in a target it was not asked for.
+let checkpointAssetBodySerial = 0
+
+const CHECKPOINT_ASSET_BODY_IDENTITY_MISMATCH = Object.freeze({
+  code: 'checkpoint-asset.identity-mismatch',
+  ownerId: 'humanagent.ui.task-dashboard',
+  message: '正文读取返回了其他检查点或资产角色的投影。',
+  nextAction: '重试这次读取，或返回检查点详情核对来源。',
+})
+
+function invalidateCheckpointAssetBody() {
+  checkpointAssetBodySerial += 1
+}
+
+function checkpointAssetBodyFailure(error) {
+  return {
+    code: error?.code ?? 'checkpoint-asset.read-failed',
+    ownerId: error?.ownerId ?? 'humanagent.ui.task-dashboard',
+    message: error?.message ?? '资产正文读取失败。',
+    nextAction: error?.nextAction ?? '重试这次读取，或返回检查点详情核对来源。',
+  }
+}
+
+function checkpointAssetBodyOptions(address) {
+  return {
+    element,
+    onBack: () => openCheckpointDetail(),
+    onRetry: () => openCheckpointAssetBody(address),
+  }
+}
+
+function showCheckpointAssetBody(state, address) {
+  const view = renderCheckpointAssetBody(state, checkpointAssetBodyOptions(address))
+  showCheckpointDetail('资产正文', view.element, view.dispose)
+}
+
+function openCheckpointAssetBody(address) {
+  if (!explicitScope || !address?.target?.commitRef || address.selector === undefined) return
+  // Snapshot the clicked address so a later mutation cannot change the request.
+  const frozen = {
+    target: {
+      checkpointId: address.target.checkpointId,
+      commitRef: {
+        commitId: address.target.commitRef.commitId,
+        journalSeq: address.target.commitRef.journalSeq,
+        recordDigest: address.target.commitRef.recordDigest,
+      },
+    },
+    selector: address.selector,
+  }
+  const serial = ++checkpointAssetBodySerial
+  showCheckpointAssetBody({ pending: true }, frozen)
+  void readCheckpointAssetBody(frozen, serial)
+}
+
+async function readCheckpointAssetBody(address, serial) {
+  const encoded = checkpointQuery(new URLSearchParams(), { viewed: address.target })
+  let result
+  if (!encoded.ok) {
+    result = { ok: false, failure: encoded.failure }
+  } else {
+    try {
+      const projection = await api.taskCheckpointAssetBody(explicitScope.taskId, {
+        projectKey: explicitScope.projectKey,
+        mode: explicitScope.mode,
+        checkpointQuery: encoded.value,
+        selector: address.selector,
+      })
+      result = { ok: true, value: projection }
+    } catch (error) {
+      result = { ok: false, failure: checkpointAssetBodyFailure(error) }
+    }
+  }
+  // A closed, switched or replaced layer must not receive this response. The
+  // serial covers staleness; the address check refuses a payload for another
+  // checkpoint, receipt or asset role.
+  if (serial !== checkpointAssetBodySerial) return
+  if (result.ok && !sameCheckpointAssetBodyAddress(result.value, address)) {
+    result = { ok: false, failure: CHECKPOINT_ASSET_BODY_IDENTITY_MISMATCH }
+  }
+  showCheckpointAssetBody(result.ok ? result : { ok: false, failure: result.failure }, address)
+}
+
+function disposeCheckpointView() {
+  if (checkpointViewDispose) {
+    checkpointViewDispose()
+    checkpointViewDispose = null
+  }
+}
+
+function closeCheckpointDetail() {
+  invalidateCheckpointAssetBody()
+  if (checkpointDetailDispose) {
+    checkpointDetailDispose()
+    checkpointDetailDispose = null
+  }
+  if (checkpointDetailLayer?.open) checkpointDetailLayer.close()
+  checkpointDetailLayer = null
+}
+
+// Every drill-down reuses the one shell layer, so the exact checkpoint detail and
+// a chosen reference share the same desktop side panel / mobile bottom drawer.
+// There is no second overlay and no page-owned store.
+function showCheckpointDetail(title, content, dispose) {
+  if (checkpointDetailDispose) {
+    checkpointDetailDispose()
+    checkpointDetailDispose = null
+  }
+  checkpointDetailDispose = dispose ?? null
+  checkpointDetailLayer = openTechnicalDetail({
+    title,
+    content,
+    onClose: closeCheckpointDetail,
+  })
+}
+
+function checkpointReferenceRows(reference) {
+  const ref = reference.ref
+  const rows = reference.kind === 'commit'
+    ? [
+        ['commitId', ref?.commitId],
+        ['journalSeq', ref?.journalSeq],
+        ['recordDigest', ref?.recordDigest],
+      ]
+    : reference.kind === 'asset'
+      ? [
+          ['evidenceId', ref?.ref?.evidenceId?.value],
+          ['view.kind', ref?.view?.kind],
+        ]
+      : [
+          ['evidenceId', ref?.evidenceId?.value],
+          ['kind', ref?.kind],
+          ['source', ref?.source],
+          ['locator', ref?.locator],
+          ['digest', ref?.digest],
+        ]
+  return rows.filter(([, value]) => value !== undefined && value !== null && value !== '')
+}
+
+// Node, commit and evidence references have no supported exact task-scoped deep
+// link yet, so the layer shows the exact typed reference and says so plainly
+// instead of fabricating a URL.
+function openCheckpointReference(reference) {
+  invalidateCheckpointAssetBody()
+  const wrap = element('div', undefined, 'checkpoint-reference')
+  const back = element('button', '返回检查点详情', 'button button--quiet')
+  back.type = 'button'
+  back.addEventListener('click', () => openCheckpointDetail())
+  const list = element('dl', undefined, 'draft-receipt')
+  for (const [label, value] of checkpointReferenceRows(reference)) {
+    const row = element('div')
+    const detail = element('dd', String(value))
+    detail.setAttribute('data-detail-label', label)
+    row.append(element('dt', label), detail)
+    list.append(row)
+  }
+  wrap.append(back, list, element('p', '没有可用的任务内深链；上面是该引用的精确内容。', 'muted'))
+  showCheckpointDetail('关联引用', wrap)
+}
+
+function openCheckpointDetail() {
+  if (!checkpointRenderRead) return
+  invalidateCheckpointAssetBody()
+  const detail = renderCheckpointHistoryDetail(checkpointRenderRead, {
+    element,
+    onOpenReference: openCheckpointReference,
+    // A body read is bound to the exact checkpoint this detail renders, so a body
+    // opened from an older read can never re-read the currently selected one.
+    onReadAssetBody: (request) => openCheckpointAssetBody({
+      target: request.target,
+      selector: request.selector,
+    }),
+  })
+  appendCheckpointCapabilityDiagnostics(detail.element, checkpointRenderRead)
+  showCheckpointDetail('检查点精确详情', detail.element, detail.dispose)
+}
+
+function checkpointDetailTrigger() {
+  const button = element('button', '技术详情', 'button button--quiet')
+  button.type = 'button'
+  button.addEventListener('click', () => openCheckpointDetail())
+  return button
+}
+
+function checkpointHistoryFiltersView(host, capabilities) {
+  const filters = element('div', undefined, 'history-filters')
+  for (const [name, labelText] of Object.entries(CHECKPOINT_HISTORY_FILTER_LABELS)) {
+    if (capabilities?.[name]?.state !== 'available') continue
+    const label = element('label', undefined, 'history-filter')
+    label.append(element('span', labelText))
+    const input = element('input')
+    input.type = name === 'executionEpoch' ? 'number' : 'text'
+    input.value = checkpointHistoryFilters[name] ?? ''
+    input.dataset.filter = name
+    label.append(input)
+    filters.append(label)
+  }
+  if (filters.children.length === 0) return null
+  const apply = element('button', '应用筛选', 'button button--quiet')
+  apply.type = 'button'
+  apply.addEventListener('click', () => {
+    checkpointHistoryFilters = readHistoryFilters(filters)
+    checkpointHistoryCursor = ''
+    void renderCheckpointHistoryView(host, true)
+  })
+  filters.append(apply)
+  return filters
+}
+
+function checkpointHistoryActions(host, read) {
+  const actions = element('div', undefined, 'history-actions')
+  const refresh = element('button', '重新读取历史', 'button button--quiet')
+  refresh.type = 'button'
+  refresh.addEventListener('click', () => void renderCheckpointHistoryView(host, true))
+  actions.append(refresh)
+  const nextCursor = read?.ok ? read.value.nextCursor : undefined
+  if (nextCursor !== undefined && nextCursor !== null && nextCursor !== '') {
+    const next = element('button', '继续读取下一页', 'button button--quiet')
+    next.type = 'button'
+    next.dataset.nextCursor = String(nextCursor)
+    next.addEventListener('click', () => {
+      checkpointHistoryCursor = nextCursor
+      void renderCheckpointHistoryView(host, true)
+    })
+    actions.append(next)
+  }
+  return actions
+}
+
+// C5 already renders unavailable capability reasons in the shared detail.
+// Unknown or malformed states stay out of the main layer and remain diagnosable here.
+function appendCheckpointCapabilityDiagnostics(root, read) {
+  if (!read?.ok) return
+  const entries = Object.entries(read.value.capabilities ?? {})
+    .filter(([, capability]) => capability?.state !== 'available' && capability?.state !== 'unavailable')
+  if (entries.length === 0) return
+  const section = element('section', undefined, 'history-section')
+  section.append(element('h3', '筛选能力尚未确定'))
+  const list = element('ul', undefined, 'history-capabilities')
+  for (const [name, capability] of entries) {
+    const row = element('li')
+    row.dataset.capability = name
+    row.dataset.capabilityState = capability?.state || 'unknown'
+    row.append(
+      element('strong', CHECKPOINT_HISTORY_FILTER_LABELS[name] || name),
+      element('span', ` · ${capability?.reason || '读取结果未提供原因'}`),
+    )
+    list.append(row)
+  }
+  section.append(list)
+  root.append(section)
+}
+
 async function loadHistory(view, host) {
   if (!explicitScope) {
     host.append(element('p', '当前页面没有已确认的 task scope，无法读取历史。', 'empty'))
     return
   }
   historyView = view
+  historyHost = host
   if (view === 'context') {
     contextHistoryCursor = ''
     await renderContextHistoryView(host)
@@ -609,7 +1106,6 @@ async function loadHistory(view, host) {
   }
   checkpointHistoryCursor = ''
   checkpointHistoryFilters = {}
-  viewedCheckpointId = ''
   await renderCheckpointHistoryView(host)
 }
 
@@ -653,19 +1149,70 @@ async function renderContextHistoryView(host, keep = false) {
   }))
 }
 
+// Selecting or leaving a checkpoint writes the four keys into the URL and re-reads
+// the same task. It is URL view state only: the call never writes current, a
+// preference, or another scope's read.
+function pushCheckpointSelection(viewed) {
+  const encoded = checkpointQuery(new URLSearchParams(location.search), { viewed })
+  if (!encoded.ok) {
+    void checkpointHistoryRead.refresh({ kind: 'closed' })
+    if (historyHost) mountCheckpointView(historyHost, { ok: false, failure: encoded.failure })
+    return
+  }
+  window.history.pushState(null, '', `${location.pathname}?${encoded.value}${location.hash}`)
+  if (historyHost) void renderCheckpointHistoryView(historyHost, true)
+}
+
+function mountCheckpointView(host, read) {
+  disposeCheckpointView()
+  checkpointRenderRead = read
+  const view = renderCheckpointHistory(read, {
+    element,
+    onSelect: (selection) => pushCheckpointSelection(selection),
+    onReturnToCurrent: () => pushCheckpointSelection(undefined),
+  })
+  checkpointViewDispose = view.dispose
+  clearNode(host)
+  const filters = read.ok ? checkpointHistoryFiltersView(host, read.value.capabilities) : null
+  if (filters) host.append(filters)
+  host.append(view.element)
+  const actions = checkpointHistoryActions(host, read)
+  actions.append(checkpointDetailTrigger())
+  host.append(actions)
+  // An open detail layer belongs to the previous read. Refresh it so it can never
+  // show content for a selection the page no longer displays.
+  if (checkpointDetailLayer?.open) openCheckpointDetail()
+}
+
 async function renderCheckpointHistoryView(host, keep = false) {
+  closeCheckpointDetail()
+  checkpointRenderRead = null
+  disposeCheckpointView()
   if (!keep) {
     clearNode(host)
     host.append(element('p', '正在读取 Checkpoint 历史…', 'muted'))
   }
+  // The URL is the single source of the viewed target. A malformed four-key
+  // deep link is its own failure; the page keeps the URL and never issues a
+  // fallback read that would silently show the authoritative current.
+  const selection = checkpointSelectionFromQuery(new URLSearchParams(location.search))
+  const encoded = selection.ok
+    ? checkpointQuery(new URLSearchParams(), { viewed: selection.value.viewed })
+    : selection
+  if (!encoded.ok) {
+    await checkpointHistoryRead.refresh({ kind: 'closed' })
+    mountCheckpointView(host, { ok: false, failure: encoded.failure })
+    return
+  }
+  const requestedViewed = selection.value.viewed
   let read
   try {
     read = await checkpointHistoryRead.refresh({
       ...explicitScope,
       view: 'checkpoint-history',
       ...(Object.keys(checkpointHistoryFilters).length ? { filters: checkpointHistoryFilters } : {}),
-      ...(viewedCheckpointId ? { viewed: viewedCheckpointId } : {}),
       ...(checkpointHistoryCursor ? { cursor: checkpointHistoryCursor } : {}),
+      ...(encoded.value.size ? { checkpointQuery: encoded.value } : {}),
     })
   } catch (error) {
     clearNode(host)
@@ -674,34 +1221,12 @@ async function renderCheckpointHistoryView(host, keep = false) {
   }
   // A late read from a departed level or an older selection must not publish.
   if (!read.published) return
-  clearNode(host)
-  if (!read.state.content) {
-    renderPageError(host, read.state.failure)
-    return
-  }
-  const mismatch = historyIdentityFailure(read.state.content, 'runtime-checkpoint-history')
-  if (mismatch) {
-    renderPageError(host, mismatch)
-    return
-  }
-  if (read.state.stale) renderPageError(host, read.state.failure)
-  host.append(renderCheckpointHistory(read.state.content, {
-    filters: checkpointHistoryFilters,
-    onRefresh: () => void renderCheckpointHistoryView(host, true),
-    onSelect: (checkpointId) => {
-      viewedCheckpointId = checkpointId
-      void renderCheckpointHistoryView(host, true)
-    },
-    onFilter: (filters) => {
-      checkpointHistoryFilters = filters
-      checkpointHistoryCursor = ''
-      void renderCheckpointHistoryView(host, true)
-    },
-    onNext: (next) => {
-      checkpointHistoryCursor = next
-      void renderCheckpointHistoryView(host, true)
-    },
-  }))
+  // A failed, stale or unconfirmed read must not let older content impersonate
+  // the requested selection: the renderer receives the typed failure instead.
+  const failure = read.state.stale || read.state.failure || !read.state.content
+    ? read.state.failure
+    : checkpointReadFailure(read.state.content, requestedViewed)
+  mountCheckpointView(host, failure ? { ok: false, failure } : { ok: true, value: read.state.content })
 }
 
 async function renderBusinessCyclesView(host, keep = false) {
@@ -1251,8 +1776,16 @@ function renderDashboard() {
   clearNode(main)
 
   const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
-  copy.append(element('p', '当前任务', 'eyebrow'), element('h1', dashboard.taskTitle))
+  const copy = element('div', undefined, 'page-heading-copy')
+  const titleBlock = element('div', undefined, 'task-title-block')
+  titleBlock.append(element('h1', dashboard.taskTitle, 'task-title'))
+  const fullTitle = element('details', undefined, 'task-title-full')
+  fullTitle.append(
+    element('summary', '查看完整标题'),
+    element('p', dashboard.taskTitle, 'task-title-full-text'),
+  )
+  titleBlock.append(fullTitle)
+  copy.append(element('p', '当前任务', 'eyebrow'), titleBlock)
   const stateChip = element('span', businessStateLabel(), 'state-chip')
   stateChip.dataset.tone = stateTone(dashboard.state)
   copy.append(stateChip)
@@ -1261,9 +1794,9 @@ function renderDashboard() {
     breadcrumbs.setAttribute('aria-label', '范围面包屑')
     const system = element('a', '全部项目')
     system.href = './tasks.html'
-    const project = element('a', explicitScope.projectKey)
+    const project = element('a', '所属项目')
     project.href = `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}`
-    breadcrumbs.append(system, project, element('span', taskId))
+    breadcrumbs.append(system, project, element('span', '当前任务'))
     copy.append(breadcrumbs)
   }
   heading.append(copy, status, refreshButton)
@@ -1281,16 +1814,37 @@ function renderDashboard() {
   }
   main.append(statuses)
 
+  const technicalDetail = element('button', '技术详情', 'button button--quiet')
+  technicalDetail.type = 'button'
+  technicalDetail.addEventListener('click', () => openTechnicalDetail({
+    title: '任务技术详情',
+    entries: [
+      ['当前执行节点', dashboard.currentNode],
+      ['projectKey', explicitScope?.projectKey],
+      ['taskId', taskId],
+      ['mode', dashboard.mode],
+      ['error.ownerId', dashboard.error?.ownerId],
+      ['error.code', dashboard.error?.code],
+      ['error.message', dashboard.error?.message],
+      ['error.nextAction', dashboard.error?.nextAction],
+      ['error.cleanupError（清理错误链）', dashboard.error?.cleanupError === undefined
+        ? undefined
+        : JSON.stringify(dashboard.error.cleanupError, null, 2)],
+      ['保留的 checkpoint 记录', dashboard.checkpoint ? '以下为保留记录，不表示任务当前受阻。' : undefined],
+      ['checkpoint.outcome', dashboard.checkpoint?.outcome],
+      ['checkpoint.seq', dashboard.checkpoint?.seq],
+      ['checkpoint.summary', dashboard.checkpoint?.summary],
+    ].filter(([, value]) => value !== undefined && value !== null),
+  }))
+  main.append(technicalDetail)
+
   const facts = element('dl', undefined, 'detail-grid')
   for (const [label, value] of [
     ['当前状态', dashboard.stateLabel],
-    ['当前执行节点', dashboard.currentNode],
     ['模式', dashboard.mode],
     ['最近下一步', dashboard.nextStep],
     ['输入', dashboard.input || '尚未输入'],
     ['输出', dashboard.output || '尚无输出'],
-    ['错误 owner', dashboard.error ? `${dashboard.error.ownerId} · ${dashboard.error.nextAction}` : '无错误'],
-    ['Checkpoint', dashboard.checkpoint ? `${dashboard.checkpoint.outcome} · seq=${dashboard.checkpoint.seq} · ${dashboard.checkpoint.summary}` : '本任务尚无 checkpoint'],
     ['最近业务事件', lastEventAt ? formatPreciseTime(lastEventAt) : '尚无业务事件'],
   ]) {
     const cell = element('div', undefined, 'detail-cell')
@@ -1298,6 +1852,16 @@ function renderDashboard() {
     facts.append(cell)
   }
   main.append(facts)
+  if (dashboard.error) {
+    const errorNotice = element('div', undefined, 'status-banner')
+    errorNotice.dataset.tone = 'danger'
+    errorNotice.setAttribute('role', 'status')
+    errorNotice.append(
+      element('strong', '任务执行遇到问题，需要处理。'),
+      element('p', '请打开技术详情，按错误记录中的处理建议处理，再检查任务状态。'),
+    )
+    main.append(errorNotice)
+  }
 
   const execution = element('section', undefined, 'section')
   execution.append(element('h2', '任务控制'))
@@ -1367,10 +1931,24 @@ function renderDashboard() {
   const agentSection = renderAgentActivitySection()
   if (agentSection) main.append(agentSection)
 
+  main.append(renderSemanticObservationSection())
+  main.append(renderExecutionTraceSection())
+  const observationLink = element('a', '打开只读 Observation', 'button')
+  observationLink.href = observationHref(taskId, explicitScope)
+  main.append(observationLink)
+}
+
+/**
+ * The task event trace stays available in every perspective. The panel-backed
+ * views keep it folded as an explicit detail; `current` keeps its original
+ * inline position.
+ */
+function renderExecutionTraceSection() {
   const events = element('section', undefined, 'section')
   events.append(element('h2', '执行轨迹'))
   const eventPanel = element('div', undefined, 'panel')
-  const history = dashboard.history ?? { events: dashboard.recentEvents, hasMore: false, omitted: 0, gap: false, total: dashboard.recentEvents.length }
+  const recentEvents = dashboard.recentEvents ?? []
+  const history = dashboard.history ?? { events: recentEvents, hasMore: false, omitted: 0, gap: false, total: recentEvents.length }
   const allHistoryEvents = visibleRecentEvents(history.events ?? [])
   const chunks = historyChunks(allHistoryEvents)
   const pageCount = Math.max(1, chunks.length)
@@ -1394,14 +1972,14 @@ function renderDashboard() {
       older.disabled = pageStart === 0
       older.addEventListener('click', () => {
         historyPage += 1
-        renderDashboard()
+        renderActiveReadingMode()
       })
       const newer = element('button', '更新', 'button button--quiet')
       newer.type = 'button'
       newer.disabled = historyPage <= 0
       newer.addEventListener('click', () => {
         historyPage -= 1
-        renderDashboard()
+        renderActiveReadingMode()
       })
       pager.append(older, newer)
       eventPanel.append(pager)
@@ -1449,11 +2027,42 @@ function renderDashboard() {
     }
   }
   events.append(eventPanel)
-  main.append(events)
+  return events
+}
 
-  const observationLink = element('a', '打开只读 Observation', 'button')
-  observationLink.href = observationHref(taskId, explicitScope)
-  main.append(observationLink)
+/**
+ * The shared semantic observation panel, mounted once per page load and
+ * re-attached on every render. `semantic` here is the typed envelope
+ * presentation of the journal projection, not the plan-history surface, so
+ * both surfaces stay readable without claiming to be the same content.
+ */
+function renderSemanticObservationSection() {
+  if (!semanticObservationPanel) {
+    semanticObservationHost = element('div', undefined, 'semantic-observation-host')
+    semanticObservationHost.dataset.semanticObservationHost = taskId ? 'task' : 'missing'
+    if (taskId) {
+      semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, {
+        taskId,
+        // The panel's own four buttons reuse the shell programmatic transition,
+        // so a local click cannot write follow-last. The corner buttons keep the
+        // original manual controller path. An equal mode is already applied.
+        onModeChange: (mode) => {
+          if (mode === displayMode) return
+          void applyDisplayMode(mode)
+        },
+      })
+    } else {
+      semanticObservationHost.append(element('p', '当前 URL 没有 task 参数，无法读取语义观测。', 'empty'))
+    }
+  }
+  // The one retained panel follows the page's active perspective on every
+  // re-attach. This is a mode update, not a remount, reload, or new read.
+  if (semanticObservationPanel) syncPanelMode(displayMode)
+  const section = element('section', undefined, 'section semantic-observation-section')
+  section.dataset.semanticObservation = semanticObservationPanel ? 'mounted' : 'unavailable'
+  section.append(element('h2', '语义观测'))
+  section.append(semanticObservationHost)
+  return section
 }
 
 /**
@@ -1664,10 +2273,26 @@ void load().then(() => initializeDisplayPreference())
 
 const refreshButton = element('button', '刷新当前范围', 'button button--quiet')
 refreshButton.type = 'button'
-refreshButton.addEventListener('click', () => void refresh().catch(setRefreshError))
+refreshButton.addEventListener('click', () => {
+  // A manual refresh is the one path that re-reads the shared semantic panel.
+  // Plain re-renders re-attach its retained host without a new request.
+  void refresh().then(() => semanticObservationPanel?.reload()).catch(setRefreshError)
+})
 status.after(refreshButton)
 
+// Back and forward re-read the exact target the URL now names. Only the open
+// checkpoint level reacts; leaving the level or closing the drawer clears it, so
+// a late popstate cannot publish into a departed host.
+window.addEventListener('popstate', () => {
+  if (historyView === 'checkpoints' && historyHost?.isConnected) {
+    void renderCheckpointHistoryView(historyHost, true)
+  }
+})
+
 window.addEventListener('pagehide', () => {
+  semanticObservationPanel?.dispose()
+  semanticObservationPanel = null
+  semanticObservationHost = null
   disposeDisplayPreference()
   closeStream()
   stopObserving()

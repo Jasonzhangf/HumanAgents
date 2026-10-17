@@ -339,6 +339,23 @@ function assertPolicy(name, policy, expectedKeys) {
   check(`${name}: typed execution policy contract accepts the submission`, contractError === null, contractError);
 }
 
+// After a successful confirmation the runtime owns the next step, so the real
+// entry card must report that wait, never a second human confirmation. The chip
+// under test is the interaction-scope chip (`交互 <label>`) the work card writes
+// in `renderStatus`; the other `.iwc-state-chip` nodes name the source, provider
+// and transport. Read the one that carries the `交互 ` prefix.
+async function readDecisionStateChip(page) {
+  return page.evaluate(() => {
+    const chips = [
+      ...document.querySelectorAll(
+        '[data-interaction-work-card-host][data-entry="entry"] .iwc-card .iwc-state-chip',
+      ),
+    ];
+    const interactionChip = chips.find((chip) => /^交互 /.test((chip.textContent || '').trim()));
+    return interactionChip ? (interactionChip.textContent || '').trim() : null;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
@@ -348,9 +365,9 @@ async function visibilityScenario() {
     const once = await page.evaluate(probeForm);
     await capture(page, 'default-once');
     observe('default once form', once);
-    check('default form renders the task input, execution type and submit only',
+    check('default form renders the task input, task type, execution type and submit only',
       once.hasForm
-      && JSON.stringify(once.visibleControls) === JSON.stringify(['rawInput', 'executionMode', 'button']),
+      && JSON.stringify(once.visibleControls) === JSON.stringify(['rawInput', 'taskFlowKind', 'executionMode', 'button']),
       once.visibleControls);
     check('default once form renders no scheduling field', once.visibleSchedulingFields.length === 0, once.visibleSchedulingFields);
     for (const name of SCHEDULING_FIELDS) {
@@ -358,7 +375,7 @@ async function visibilityScenario() {
       check(`default once form keeps ${name} present but not rendered`, field.present && !field.visible, field);
       check(`default once form does not require the hidden ${name}`, field.present && !field.required, field);
     }
-    check('default once form keeps the existing submit label', once.submitLabel === '创建并执行', once.submitLabel);
+    check('default once form keeps the existing submit label', once.submitLabel === '提交任务', once.submitLabel);
     check('default once form keeps the error panel hidden', once.errorPanelHidden === true, once.errorPanelHidden);
 
     await selectMode(page, 'scheduled');
@@ -411,9 +428,9 @@ async function visibilityScenario() {
     const backToOnce = await page.evaluate(probeForm);
     await capture(page, 'once-after-switch');
     observe('once form after mode switch', backToOnce);
-    check('switching back to once hides every scheduling field again',
+    check('switching back to once hides every scheduling field and keeps the core controls',
       backToOnce.visibleSchedulingFields.length === 0
-      && JSON.stringify(backToOnce.visibleControls) === JSON.stringify(['rawInput', 'executionMode', 'button']),
+      && JSON.stringify(backToOnce.visibleControls) === JSON.stringify(['rawInput', 'taskFlowKind', 'executionMode', 'button']),
       backToOnce);
     check('switching back to once drops the hidden required flags',
       SCHEDULING_FIELDS.every((name) => backToOnce.fields[name].required === false),
@@ -448,6 +465,24 @@ async function submissionScenario() {
         'busyPolicy', 'canonicalInstant', 'dstAmbiguousPolicy', 'dstMissedPolicy', 'dstMode',
         'executionMode', 'latePolicy', 'policyId', 'policyRevision', 'startAt', 'timezone',
       ]);
+      // A scheduled submit stays on the page, so the confirmation card this
+      // check reads is the public post-confirmation behaviour. Wait for the
+      // interaction-scope chip to render, then assert the state.
+      await page.waitForFunction(() => [
+        ...document.querySelectorAll(
+          '[data-interaction-work-card-host][data-entry="entry"] .iwc-card .iwc-state-chip',
+        ),
+      ].some((chip) => /^交互 /.test((chip.textContent || '').trim())), undefined, { timeout: 10_000 });
+      const decisionChip = await readDecisionStateChip(page);
+      observe('scheduled post-confirmation card chip', decisionChip);
+      check(
+        'scheduled confirmed card reports the runtime owns the next step, not a second human confirmation',
+        typeof decisionChip === 'string'
+        && decisionChip.includes('交互')
+        && !decisionChip.includes('等待确认')
+        && (decisionChip.includes('已确认，等待调度') || decisionChip.includes('已入队，等待执行')),
+        decisionChip,
+      );
     });
   }
   {

@@ -12,6 +12,7 @@ import {
 } from './runtime-api.js'
 import {
   createDisplayPreferenceController,
+  DISPLAY_ORIGINS,
   DISPLAY_MODES,
   DISPLAY_PREFERENCE_MODES,
 } from './display-preferences.js'
@@ -25,8 +26,12 @@ import {
   groupTaskFlowRows,
   unclassifiedTaskFlowReason,
 } from './task-flow-groups.js'
+import { mountSemanticObservation } from './semantic-observation.js'
+import { buildSemanticObservationProjection } from './semantic-observation-projection.js'
 
 export const api = createRuntimeApi()
+
+export { buildSemanticObservationProjection }
 
 // The path the browser is on now. Pairing must return the user to the entry that
 // actually failed instead of dropping them on a default page.
@@ -152,6 +157,26 @@ export const RUNTIME_READ_MODES = Object.freeze(['fake', 'rcc'])
 
 function taskIdValue(taskId) {
   return taskId && typeof taskId === 'object' ? taskId.value : taskId
+}
+
+const TASK_RECORD_REF_KEYS = Object.freeze([
+  'projectKey',
+  'mode',
+  'source',
+  'ordinal',
+  'operationId',
+  'executionEpoch',
+  'checkpointId',
+])
+
+/**
+ * Exact stored-record identity shared by the scoped pagination check and the
+ * raw renderer.
+ */
+export function sameStoredRecordRef(left, right) {
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  return TASK_RECORD_REF_KEYS.every((key) => left[key] === right[key])
+    && taskIdValue(left.taskId) === taskIdValue(right.taskId)
 }
 
 export function readScopeLabel(scope) {
@@ -633,12 +658,23 @@ export function renderTaskRecords(projection, options = {}) {
   section.append(element('p', `范围：${readScopeLabel(projection.scope)}`, 'muted'))
   const list = element('div', undefined, 'record-list')
   if (options.view === 'raw') {
+    let selectionMarked = false
     for (const record of projection.raw || []) {
-      const item = element('article', undefined, 'record-item')
+      const selected = !selectionMarked && sameStoredRecordRef(record.ref, options.selectedRef)
+      if (selected) selectionMarked = true
+      const item = element('article', undefined, selected ? 'record-item record-item--selected' : 'record-item')
       item.dataset.source = record.ref.source
       item.dataset.ordinal = String(record.ref.ordinal)
+      if (selected) {
+        item.dataset.recordSelected = 'true'
+        item.setAttribute('aria-current', 'true')
+        item.tabIndex = -1
+      }
       item.append(
         element('p', `${record.ref.source} · ordinal=${record.ref.ordinal} · ${record.body?.kind || 'unknown'}`, 'record-kind'),
+      )
+      if (selected) item.append(element('p', '正在查看这条记录', 'record-selected-tag'))
+      item.append(
         element('time', formatTime(record.occurredAt), 'record-time'),
         element('pre', JSON.stringify(record.body, null, 2), 'record-body'),
       )
@@ -658,7 +694,7 @@ export function renderTaskRecords(projection, options = {}) {
       if (action.rawRef && options.onRawRef) {
         const raw = element('button', '查看这条原始记录', 'button button--quiet')
         raw.type = 'button'
-        raw.addEventListener('click', () => options.onRawRef(action.rawRef))
+        raw.addEventListener('click', (event) => options.onRawRef(action.rawRef, event.currentTarget))
         item.append(raw)
       }
       list.append(item)
@@ -676,13 +712,6 @@ export function renderTaskRecords(projection, options = {}) {
   return section
 }
 
-const HISTORY_FILTER_LABELS = Object.freeze({
-  directiveRevision: '任务版本',
-  executionEpoch: '执行轮次',
-  cycleId: '任务周期',
-  occurrenceRef: '巡检轮次',
-})
-
 // Typed enums are mapped for display only. An unrecognized raw value keeps a
 // truthful "not yet determined" default here, and the raw value moves to the
 // evidence detail instead of being guessed or treated as success/failure.
@@ -692,18 +721,8 @@ const REPLACEMENT_REASON_LABELS = Object.freeze({
   recovery: '恢复任务',
 })
 
-const CAPABILITY_STATE_LABELS = Object.freeze({
-  available: '可筛选',
-  unavailable: '暂不能筛选',
-  unknown: '尚未确定',
-})
-
 function replacementReasonLabel(reason) {
   return REPLACEMENT_REASON_LABELS[reason] || '未说明原因'
-}
-
-function capabilityStateLabel(state) {
-  return CAPABILITY_STATE_LABELS[state] || '尚未确定'
 }
 
 // Evidence-only detail level. Raw commit IDs, digests and cursors stay here so
@@ -720,23 +739,6 @@ function historyRawDetail(pairs) {
   }
   details.append(list)
   return details
-}
-
-function historyPositionCell(label, cursor, checkpoints) {
-  const cell = element('div', undefined, 'detail-cell')
-  cell.dataset.position = label
-  cell.append(element('dt', label))
-  const value = element('dd')
-  if (!cursor) {
-    value.textContent = label === '正在查看' ? '未选择旧点' : '未提供'
-  } else {
-    const match = (checkpoints || []).find((checkpoint) => checkpoint.checkpointId === cursor.checkpointId)
-    value.textContent = match && match.summary
-      ? `${match.summary} · 执行轮次 ${cursor.executionEpoch}`
-      : `执行轮次 ${cursor.executionEpoch}`
-  }
-  cell.append(value)
-  return cell
 }
 
 function historyActions(projection, options) {
@@ -818,99 +820,7 @@ export function renderContextHistory(projection, options = {}) {
   return section
 }
 
-export function renderCheckpointHistory(projection, options = {}) {
-  const section = element('section', undefined, 'history-section')
-  const head = element('header', undefined, 'section-head')
-  head.append(
-    element('h2', '阶段记录'),
-    element('span', `${projection.checkpoints?.length || 0} 条 · ${projection.nextCursor ? '还有更多' : '已到末尾'}`, 'section-meta'),
-  )
-  section.append(head)
-  section.append(historyRawDetail([
-    ['mode', projection.mode],
-    ['taskId', taskIdValue(projection.taskId)],
-  ]))
-
-  const positions = element('dl', undefined, 'detail-grid history-positions')
-  positions.append(historyPositionCell('当前执行点', projection.current, projection.checkpoints))
-  positions.append(historyPositionCell('正在查看', projection.viewed, projection.checkpoints))
-  section.append(positions)
-
-  const capabilities = Object.entries(projection.capabilities || {})
-  if (capabilities.length > 0) {
-    const list = element('ul', undefined, 'history-capabilities')
-    for (const [name, value] of capabilities) {
-      const row = element('li')
-      row.dataset.capability = name
-      row.dataset.capabilityState = value?.state || 'unknown'
-      row.append(
-        element('strong', HISTORY_FILTER_LABELS[name] || name),
-        element('span', ` · ${capabilityStateLabel(value?.state)}`),
-        historyRawDetail([
-          ['state', value?.state],
-          ['reason', value?.reason],
-        ]),
-      )
-      list.append(row)
-    }
-    section.append(list)
-  }
-
-  const available = Object.keys(HISTORY_FILTER_LABELS)
-    .filter((name) => projection.capabilities?.[name]?.state === 'available')
-  if (available.length > 0) {
-    const filters = element('div', undefined, 'history-filters')
-    for (const name of available) {
-      const label = element('label', undefined, 'history-filter')
-      label.append(element('span', HISTORY_FILTER_LABELS[name]))
-      const input = element('input')
-      input.type = name === 'executionEpoch' ? 'number' : 'text'
-      input.value = options.filters?.[name] ?? ''
-      input.dataset.filter = name
-      label.append(input)
-      filters.append(label)
-    }
-    const apply = element('button', '应用筛选', 'button button--quiet')
-    apply.type = 'button'
-    apply.addEventListener('click', () => options.onFilter?.(readHistoryFilters(filters)))
-    filters.append(apply)
-    section.append(filters)
-  }
-
-  const list = element('div', undefined, 'history-list')
-  for (const checkpoint of projection.checkpoints || []) {
-    const viewed = projection.viewed?.checkpointId === checkpoint.checkpointId
-    const item = element('article', undefined, 'history-item')
-    item.dataset.checkpoint = checkpoint.checkpointId
-    item.dataset.viewed = String(viewed)
-    item.append(
-      element('p', checkpoint.summary || '未提供摘要', 'history-item-title'),
-      element('p', `执行轮次 ${checkpoint.executionEpoch} · 序号 ${checkpoint.seq}${checkpoint.committedAt ? ` · ${formatTime(checkpoint.committedAt)}` : ''}`, 'muted'),
-    )
-    if (viewed) item.append(element('span', '正在查看', 'history-viewed-tag'))
-    const select = element('button', viewed ? '正在查看此点' : '查看此旧点', 'button button--quiet')
-    select.type = 'button'
-    select.disabled = viewed
-    select.addEventListener('click', () => options.onSelect?.(checkpoint.checkpointId))
-    item.append(select)
-    item.append(historyRawDetail([
-      ['checkpointId', checkpoint.checkpointId],
-      ['directiveRevision', checkpoint.directiveRevision],
-      ['cycleId', checkpoint.cycleId],
-      ['occurrenceRef', checkpoint.occurrenceRef],
-      ['commitId', checkpoint.commitRef?.commitId],
-      ['journalSeq', checkpoint.commitRef === undefined ? undefined : checkpoint.commitRef.journalSeq],
-      ['recordDigest', checkpoint.commitRef?.recordDigest],
-    ]))
-    list.append(item)
-  }
-  if (list.children.length === 0) list.append(element('p', '这个任务还没有记录到阶段。', 'empty'))
-  section.append(list)
-  section.append(historyActions(projection, options))
-  return section
-}
-
-function readHistoryFilters(host) {
+export function readHistoryFilters(host) {
   const filters = {}
   for (const input of host.querySelectorAll('[data-filter]')) {
     const value = String(input.value ?? '').trim()
@@ -1372,6 +1282,9 @@ function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) 
 // document only ever has one open shell layer: opening the detail closes any other open layer,
 // and closing it returns focus to the trigger.
 let technicalDetailLayer = null
+// Register the drawer's lifetime owner before any handoff. The technical frame
+// retains that same owner until the replacement layer actually leaves.
+const shellLayerLeaves = new WeakMap()
 // `content` lets a page module host its own read-only drill-down (for example the
 // shared agent-activity detail) in this same shell layer. Either way the layer stays
 // the one desktop side panel / mobile bottom drawer: the header, close button, single
@@ -1385,12 +1298,25 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
       titleId: 'technical-detail-title',
     })
     frame.layer.dataset.technicalDetail = 'true'
+    frame.layer.addEventListener('close', () => {
+      // A queued close from an earlier opening cannot close a reopened frame.
+      if (!frame.layer.open) closeTechnicalDetailLayer()
+    })
     document.body.append(frame.layer)
     technicalDetailLayer = frame
   }
   const { layer, title: titleNode, body, close } = technicalDetailLayer
+  if (!technicalDetailLayer.active) {
+    technicalDetailLayer.returnFocus = document.activeElement
+    technicalDetailLayer.active = true
+  }
+  technicalDetailLayer.onClose = onClose
   for (const openLayer of document.querySelectorAll('dialog.shell-layer[open]')) {
-    if (openLayer !== layer) openLayer.close()
+    if (openLayer !== layer) {
+      // Transfer before close() queues the drawer's native close event.
+      technicalDetailLayer.leaveDrawer = shellLayerLeaves.get(openLayer)
+      openLayer.close()
+    }
   }
   titleNode.textContent = title
   clearNode(body)
@@ -1411,14 +1337,24 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
     body.append(list)
   }
   if (footer) body.append(element('p', footer))
-  const opener = document.activeElement
-  layer.addEventListener('close', () => {
-    if (typeof onClose === 'function') onClose()
-    if (opener && opener.isConnected) opener.focus()
-  }, { once: true })
   if (!layer.open) layer.showModal()
   close.focus()
   return layer
+}
+
+// Native close, section changes and page leave all consume this one lifetime.
+// Clear ownership before callbacks, which can themselves close the same dialog.
+function closeTechnicalDetailLayer() {
+  if (!technicalDetailLayer?.active) return
+  const { layer, onClose, leaveDrawer, returnFocus } = technicalDetailLayer
+  technicalDetailLayer.active = false
+  technicalDetailLayer.onClose = null
+  technicalDetailLayer.leaveDrawer = null
+  technicalDetailLayer.returnFocus = null
+  if (layer.open) layer.close()
+  if (typeof onClose === 'function') onClose()
+  if (leaveDrawer) leaveDrawer()
+  else if (returnFocus?.isConnected && !returnFocus.closest('dialog:not([open]), [hidden]')) returnFocus.focus()
 }
 
 // A contextual trigger for the technical-detail layer. It is not a global configuration
@@ -1606,6 +1542,7 @@ export function mountShellLayer(context = {}) {
   let returnFocus = null
   let currentContext = { ...context }
   let openPanelId = null
+  let drawerReadsActive = false
   let displayController = null
   let displayUnsubscribe = null
   let draftDefault = null
@@ -1646,9 +1583,17 @@ export function mountShellLayer(context = {}) {
     }
     if (id === 'view') {
       const content = viewSectionContent(currentContext)
-      for (const text of content.paragraphs) section.append(element('p', text))
+      const parentNodes = []
+      for (const text of content.paragraphs) {
+        const paragraph = element('p', text)
+        parentNodes.push(paragraph)
+        section.append(paragraph)
+      }
+      // The chooser's own display:grid rule overrides [hidden], so the parent
+      // visibility switch owns this plain wrapper instead.
+      const parentChoice = element('div')
       if (currentContext.displaySurface) {
-        section.append(renderDisplayModeChooser({
+        parentChoice.append(renderDisplayModeChooser({
           surface: currentContext.displaySurface,
           state: displayController?.getState(),
           onSelect: (mode) => void selectDisplayMode(mode),
@@ -1660,8 +1605,10 @@ export function mountShellLayer(context = {}) {
           element('strong', '阅读方式未接入'),
           element('p', '这个页面没有可切换的阅读层。', 'muted'),
         )
-        section.append(missing)
+        parentChoice.append(missing)
       }
+      parentNodes.push(parentChoice)
+      section.append(parentChoice)
       if (!content.showHistory) {
         restorePanelFocus(section, focusKey)
         return
@@ -1676,10 +1623,14 @@ export function mountShellLayer(context = {}) {
         focusTarget?.focus()
       }
       const openLevel = (run) => {
+        // The records/history sublayer owns the view panel while active: the
+        // parent mode copy stays hidden until the back entry rebuilds it.
+        for (const node of parentNodes) node.hidden = true
         const back = element('button', '返回查看方式', 'button button--quiet')
         back.type = 'button'
         back.addEventListener('click', backToView)
         actions.replaceChildren(back)
+        drawerReadsActive = true
         void run()
       }
       for (const [view, label] of [
@@ -1752,6 +1703,14 @@ export function mountShellLayer(context = {}) {
     await displayController.selectMode(mode)
   }
 
+  // Page-owned navigation uses the existing controller instead of replacing a
+  // page host directly. The origin stays programmatic, so no manual preference
+  // write is triggered by an in-page reference jump.
+  function applyDisplayMode(mode) {
+    if (!displayController) return Promise.resolve({ ok: false, failure: displayMountFailure() })
+    return displayController.applyMode(mode, { origin: DISPLAY_ORIGINS.programmatic })
+  }
+
   async function saveDisplayDefault() {
     if (!displayController) return
     const state = displayController.getState()
@@ -1818,9 +1777,11 @@ export function mountShellLayer(context = {}) {
   function open(id) {
     const item = SHELL_SECTIONS.find((entry) => entry.id === id)
     if (!item) return
+    closeTechnicalDetailLayer()
     leaveDrawerReads()
     returnFocus = triggers.get(id) || null
     openPanelId = id
+    drawerReadsActive = true
     title.textContent = item.title
     for (const [key, section] of panels) {
       section.hidden = key !== id
@@ -1834,18 +1795,34 @@ export function mountShellLayer(context = {}) {
   // read that belonged to the departed level, so a late response cannot publish
   // into a level the user already left.
   function leaveDrawerReads() {
+    if (!drawerReadsActive) return
+    drawerReadsActive = false
     currentContext.capabilities?.onLeaveRecords?.()
     currentContext.capabilities?.onLeaveHistory?.()
   }
 
-  // Return/close restores focus to the triggering corner when that button still exists.
-  layer.addEventListener('close', () => {
-    leaveDrawerReads()
+  // Return/close restores focus to the visible corner, including after a detail
+  // handoff where the original opener now belongs to the closed drawer.
+  function leaveDrawer() {
+    if (openPanelId === null) return
     openPanelId = null
+    if (layer.open) layer.close()
+    leaveDrawerReads()
     const target = returnFocus
     returnFocus = null
     for (const section of panels.values()) section.hidden = true
     if (target && target.isConnected) target.focus()
+  }
+  shellLayerLeaves.set(layer, leaveDrawer)
+  layer.addEventListener('close', () => {
+    // The technical frame owns the departed drawer until its final close. A
+    // queued close also cannot tear down a section that has already reopened.
+    if (layer.open || technicalDetailLayer?.leaveDrawer === leaveDrawer) return
+    leaveDrawer()
+  })
+  window.addEventListener('pagehide', () => {
+    closeTechnicalDetailLayer()
+    leaveDrawer()
   })
   for (const [id, button] of triggers) button.addEventListener('click', () => open(id))
 
@@ -1857,7 +1834,7 @@ export function mountShellLayer(context = {}) {
     currentContext = { ...currentContext, capabilities }
   }
 
-  return { open, setScope, setCapabilities, initializeDisplayPreference, disposeDisplayPreference }
+  return { open, setScope, setCapabilities, applyDisplayMode, initializeDisplayPreference, disposeDisplayPreference }
 }
 
 export function makePageShell(active, eyebrow, title, lede, options = {}) {
@@ -1872,16 +1849,21 @@ export function makePageShell(active, eyebrow, title, lede, options = {}) {
   if (lede) copy.append(element('p', lede, 'lede'))
   const breadcrumbs = element('nav', undefined, 'breadcrumbs')
   breadcrumbs.setAttribute('aria-label', '范围面包屑')
-  for (const crumb of options.breadcrumbs || []) {
-    if (crumb.href) {
-      const link = element('a', crumb.label)
-      link.href = crumb.href
-      breadcrumbs.append(link)
-    } else {
-      breadcrumbs.append(element('span', crumb.label))
+  // Pages can publish a human scope name after their initial scoped read.
+  function setBreadcrumbs(items) {
+    breadcrumbs.replaceChildren()
+    for (const crumb of items || []) {
+      if (crumb.href) {
+        const link = element('a', crumb.label)
+        link.href = crumb.href
+        breadcrumbs.append(link)
+      } else {
+        breadcrumbs.append(element('span', crumb.label))
+      }
     }
+    if (breadcrumbs.children.length > 0 && !breadcrumbs.isConnected) copy.append(breadcrumbs)
   }
-  if (breadcrumbs.children.length > 0) copy.append(breadcrumbs)
+  setBreadcrumbs(options.breadcrumbs)
   const status = element('div', undefined, 'status-banner')
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
@@ -1897,10 +1879,12 @@ export function makePageShell(active, eyebrow, title, lede, options = {}) {
   return {
     main,
     status,
+    setBreadcrumbs,
     interactionCardHosts,
     openShellSection: shellLayer.open,
     setShellScope: shellLayer.setScope,
     setShellCapabilities: shellLayer.setCapabilities,
+    applyDisplayMode: shellLayer.applyDisplayMode,
     initializeDisplayPreference: shellLayer.initializeDisplayPreference,
     disposeDisplayPreference: shellLayer.disposeDisplayPreference,
   }
@@ -1944,6 +1928,200 @@ export function taskIdFromQuery(required = true) {
   const taskId = queryParam('task')
   if (!taskId && required) throw new Error('URL 缺少 task 参数')
   return taskId
+}
+
+/**
+ * Read-only semantic observation panel over the public GET/SSE contract.
+ *
+ * The confirmed envelope is the only cached state. A dropped stream, a
+ * malformed revision or a rejected reload keeps the last confirmed content and
+ * marks it stale: an `open` that delivers no revision is not freshness, and only
+ * a decoded revision restores it. Mode and breadcrumb selection re-project the
+ * envelope already in memory, so no switch issues a request. The panel never
+ * writes a task, consumes a queue, retries an operation or steers an execution.
+ *
+ * @param {HTMLElement} host
+ * @param {{ taskId: string, apiClient?: Object, onModeChange?: (mode: string) => void }} options
+ * @returns {{ reload: () => Promise<void>, setMode: (mode: string) => void, setScopeRef: (scopeRef: string) => void, dispose: () => void }}
+ */
+export function mountSemanticObservationPanel(host, { taskId, apiClient = api, onModeChange } = {}) {
+  if (!(host instanceof HTMLElement)) throw new TypeError('mountSemanticObservationPanel requires an HTMLElement host')
+  if (typeof taskId !== 'string' || !taskId) throw new TypeError('mountSemanticObservationPanel requires a taskId')
+
+  let envelope = null
+  let displayMode = 'current'
+  let scopeRef = ''
+  let streamDisconnected = false
+  let readError = null
+  let source = null
+  let disposed = false
+
+  const view = mountSemanticObservation(host, {
+    onModeChange(nextMode) {
+      displayMode = nextMode
+      onModeChange?.(nextMode)
+      render()
+    },
+    onScopeRequest(nextScopeRef) {
+      scopeRef = nextScopeRef
+      render()
+    },
+    onEvidenceRequest(evidence, trigger) {
+      view.openEvidence(evidence, trigger)
+    },
+  })
+
+  // The public stream serves revisions until the operation it observes is
+  // terminal. Only the operation named by `envelope.scope` decides that, so a
+  // retained earlier closed operation never stops a live one. Admission follows
+  // that typed pairing group instead of one event kind, so a new event kind
+  // cannot silently freeze the panel.
+  function observedOperationGroup(envelope) {
+    const observedOperationId = envelope?.scope?.operationId?.value
+    if (typeof observedOperationId !== 'string' || !observedOperationId) return undefined
+    return (Array.isArray(envelope.pairing) ? envelope.pairing : []).find(
+      (group) => group?.kind === 'operation' && group?.scope?.operationId?.value === observedOperationId,
+    )
+  }
+
+  function canStream(envelope) {
+    if (envelope === null) return false
+    const group = observedOperationGroup(envelope)
+    // No typed group for the observed operation keeps the stream open on
+    // purpose: a not-yet-paired operation still publishes its first revision.
+    if (group === undefined) return true
+    return group.state !== 'closed'
+  }
+
+  function render() {
+    if (disposed) return
+    if (envelope === null) {
+      view.update({
+        contractVersion: 'semantic-observation-view@1',
+        mode: displayMode,
+        modes: [
+          { id: 'current', label: '简洁' },
+          { id: 'semantic', label: '语义' },
+          { id: 'actions', label: '动作' },
+          { id: 'raw', label: '原始' },
+        ],
+        scope: { scopeRef: `task:${taskId}`, title: `任务范围 · ${taskId}`, summary: '', breadcrumbs: [] },
+        state: 'loading',
+        stateLabel: '读取中',
+        projectionVersion: '未标注',
+        summary: [],
+        notices: [{ tone: 'loading', title: '正在读取语义观测', detail: '只读读取任务语义观测信封。' }],
+        emptyMessage: '正在读取语义观测。',
+        capabilities: [],
+        sections: [],
+      })
+      return
+    }
+    view.update(buildSemanticObservationProjection(envelope, {
+      mode: displayMode,
+      ...(scopeRef ? { scopeRef } : {}),
+      stale: streamDisconnected || readError !== null,
+      streamDisconnected,
+      ...(readError ? { error: readError } : {}),
+    }))
+  }
+
+  function closeStream() {
+    if (source) {
+      source.onerror = null
+      source.onmessage = null
+      source.close()
+      source = null
+    }
+  }
+
+  function openStream() {
+    if (disposed || source !== null || typeof EventSource !== 'function') return
+    if (!canStream(envelope)) return
+    const stream = new EventSource(apiClient.semanticEventsUrl(taskId))
+    stream.addEventListener('semantic.observation', (event) => {
+      if (disposed) return
+      let next = null
+      try {
+        next = JSON.parse(event.data)
+      } catch {
+        next = null
+      }
+      if (!next || typeof next !== 'object') {
+        // A malformed revision is not a silent drop: the confirmed content stays
+        // and the typed read failure is shown.
+        readError = {
+          code: 'semantic.stream.malformed',
+          message: '实时语义事件流格式无效',
+          ownerId: 'humanagent.ui',
+          nextAction: '重新读取语义观测',
+        }
+        render()
+        return
+      }
+      envelope = next
+      readError = null
+      streamDisconnected = false
+      render()
+    })
+    // Reconnecting only means the socket opened again. Freshness returns only
+    // with a decoded revision, so `onopen` deliberately changes nothing.
+    stream.onopen = () => {}
+    stream.onerror = () => {
+      if (disposed) return
+      // The transport dropped. The confirmed envelope stays; the stale notice is
+      // explicit, and a decoded revision is the only thing that clears it.
+      streamDisconnected = true
+      render()
+    }
+    source = stream
+  }
+
+  function typedError(error, fallbackCode, fallbackMessage) {
+    return {
+      code: error?.code || fallbackCode,
+      message: error?.message || fallbackMessage,
+      ...(error?.ownerId ? { ownerId: error.ownerId } : {}),
+      ...(error?.nextAction ? { nextAction: error.nextAction } : {}),
+    }
+  }
+
+  async function read() {
+    try {
+      envelope = await apiClient.semanticObservation(taskId)
+      readError = null
+      streamDisconnected = false
+    } catch (error) {
+      // A rejected read keeps the last confirmed envelope and marks it stale. It
+      // never claims a stream disconnection, because a plain GET failure means no
+      // stream was ever involved.
+      readError = typedError(error, 'semantic.read.failed', '语义观测读取失败')
+    }
+    render()
+    openStream()
+  }
+
+  render()
+  void read()
+
+  return {
+    async reload() {
+      await read()
+    },
+    setMode(nextMode) {
+      displayMode = nextMode
+      render()
+    },
+    setScopeRef(nextScopeRef) {
+      scopeRef = nextScopeRef
+      render()
+    },
+    dispose() {
+      disposed = true
+      closeStream()
+      view.dispose()
+    },
+  }
 }
 
 export { clearNode, element, formatTime, queryParam, readScopeKey, stateTone }
