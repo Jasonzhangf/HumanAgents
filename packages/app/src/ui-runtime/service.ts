@@ -141,7 +141,14 @@ import {
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
-import { createDefaultExecutionComposition } from './execution-composition.js';
+import { createDefaultExecutionComposition,
+  type ServiceCheckpointReentryRequest,
+  type ServiceContextCorrectionRequest,
+} from './execution-composition.js';
+import type {
+  CommittedTaskCheckpointReentryReceipt,
+  CommittedTaskContextCorrectionReceipt,
+} from './reentry-current-facts.js';
 import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
 import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
 import { TaskPlanRevisionConsumer } from '../../../runtime/src/orchestration/task-plan-revisions.js';
@@ -412,6 +419,18 @@ type ServiceExecutionPorts = Pick<
     readonly taskId: TaskId;
     readonly operationId: OperationId;
   }) => Promise<RuntimeColdExecutionResumeRequest>;
+  /**
+   * The two confirmed-control facades bound to the physical owners. The
+   * assembly owns `filePath`, `journal` and `principalOwner`; the public
+   * consumer supplies only the confirmed business intent and reads the real
+   * C1 receipt back.
+   */
+  readonly executeConfirmedTaskContextCorrection?: (
+    request: ServiceContextCorrectionRequest,
+  ) => Promise<CommittedTaskContextCorrectionReceipt>;
+  readonly executeConfirmedTaskCheckpointReentry?: (
+    request: ServiceCheckpointReentryRequest,
+  ) => Promise<CommittedTaskCheckpointReentryReceipt>;
 };
 
 /**
@@ -1850,6 +1869,8 @@ export class UiRuntimeService {
   private readonly implicitBrain: ImplicitBrainFifo;
   private readonly i2Reader?: I2HistoryReader;
   private readonly resolveColdExecutionResumeRequest?: ServiceExecutionPorts['resolveColdExecutionResumeRequest'];
+  private readonly contextCorrectionPort?: ServiceExecutionPorts['executeConfirmedTaskContextCorrection'];
+  private readonly checkpointReentryPort?: ServiceExecutionPorts['executeConfirmedTaskCheckpointReentry'];
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
@@ -1915,6 +1936,8 @@ export class UiRuntimeService {
       recordProviderRequestIdentity: (event) => this.coordinator.recordProviderRequestIdentity(event),
     });
     this.resolveColdExecutionResumeRequest = executionPorts?.resolveColdExecutionResumeRequest;
+    this.contextCorrectionPort = executionPorts?.executeConfirmedTaskContextCorrection;
+    this.checkpointReentryPort = executionPorts?.executeConfirmedTaskCheckpointReentry;
     const nativeDriverBound = executionPorts?.createDriver !== undefined;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
@@ -4200,6 +4223,64 @@ export class UiRuntimeService {
     } catch (error) {
       throw apiError(error);
     }
+  }
+
+  /**
+   * Public confirmed-control facade for a Context correction. The bound App
+   * assembly owns the journal path and principal; the caller supplies only the
+   * confirmed business intent. After the real committed receipt is read back,
+   * the Coordinator advances its live execution-epoch floor so the next fresh
+   * allocation sits strictly above the committed transition.
+   */
+  async executeConfirmedTaskContextCorrection(
+    request: ServiceContextCorrectionRequest,
+  ): Promise<CommittedTaskContextCorrectionReceipt> {
+    const callback = this.contextCorrectionPort;
+    if (callback === undefined) {
+      throw new RuntimeTaskControlError(
+        'confirmed-control.context-correction-unbound',
+        RUNTIME_OWNER,
+        'the confirmed Context correction facade is not bound',
+        'bind the launch execution composition before committing a confirmed correction',
+      );
+    }
+    const receipt = await callback(request);
+    this.synchronizeCommittedExecutionEpoch(request.taskScope.taskId, receipt.record.newExecutionEpoch);
+    return receipt;
+  }
+
+  /**
+   * Public confirmed-control facade for a checkpoint reentry (rewind or
+   * forward). It mirrors the Context correction: the assembly owns the journal
+   * path and principal, and the committed receipt advances the live epoch floor.
+   */
+  async executeConfirmedTaskCheckpointReentry(
+    request: ServiceCheckpointReentryRequest,
+  ): Promise<CommittedTaskCheckpointReentryReceipt> {
+    const callback = this.checkpointReentryPort;
+    if (callback === undefined) {
+      throw new RuntimeTaskControlError(
+        'confirmed-control.checkpoint-reentry-unbound',
+        RUNTIME_OWNER,
+        'the confirmed checkpoint reentry facade is not bound',
+        'bind the launch execution composition before committing a confirmed reentry',
+      );
+    }
+    const receipt = await callback(request);
+    this.synchronizeCommittedExecutionEpoch(request.taskScope.taskId, receipt.record.newExecutionEpoch);
+    return receipt;
+  }
+
+  private synchronizeCommittedExecutionEpoch(taskId: TaskId | undefined, committedExecutionEpoch: number): void {
+    if (taskId === undefined) {
+      throw new RuntimeTaskControlError(
+        'confirmed-control.task-scope-missing',
+        RUNTIME_OWNER,
+        'the committed confirmed control carries no task scope',
+        'supply the confirmed organ and task scope',
+      );
+    }
+    this.coordinator.synchronizeCommittedExecutionEpoch(taskId, committedExecutionEpoch);
   }
 
   /**

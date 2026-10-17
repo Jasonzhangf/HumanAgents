@@ -345,6 +345,7 @@ export function createJsonlSemanticHistoryJournal(input: {
   readonly artifactsRoot: string;
   readonly activeTurnJournal: ActiveTurnJournalPort;
   readonly segmentJournal?: ActiveTurnSegmentJournalPort;
+  readonly segmentJournalFor?: (turnId: string) => Pick<ActiveTurnSegmentJournalPort, 'readSegmentRecords'>;
   readonly rawContent: RawContentReadPort;
   readonly timeAuthority: CheckpointTimeAuthority;
 }): SemanticHistoryPersistencePort & {
@@ -353,7 +354,9 @@ export function createJsonlSemanticHistoryJournal(input: {
 } {
   return semanticHistoryJournal({ ...input,
     activeTurnJournalFor: () => input.activeTurnJournal,
-    ...(input.segmentJournal === undefined ? {} : { segmentJournalFor: () => input.segmentJournal! }),
+    ...(input.segmentJournalFor !== undefined
+      ? { segmentJournalFor: input.segmentJournalFor }
+      : input.segmentJournal === undefined ? {} : { segmentJournalFor: () => input.segmentJournal! }),
   });
 }
 

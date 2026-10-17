@@ -33,6 +33,10 @@ import {
 import type { JournalCommitRef } from '../../../packages/contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../../packages/contracts/src/framework.js';
 import type {
+  CommittedSemanticCheckpoint,
+  SemanticHistoryExactLookupV1,
+} from '../../../packages/runtime/src/context/semantic-history.js';
+import type {
   ActiveTurnLivePrefix,
   ActiveTurnProductionObligationRef,
   ActiveTurnSegmentLivePrefix,
@@ -258,6 +262,155 @@ async function readFixture(fixture: Fixture): Promise<ResolvedSemanticTurnContex
     assignment,
   });
 }
+
+const historyCycleId = id('cycle', 'cycle-history');
+const historyOperationId = id('operation', 'operation-history');
+const historyScope: ScopeRef = {
+  organId,
+  taskId,
+  cycleId: historyCycleId,
+  operationId: historyOperationId,
+};
+const historyPublicationReceiptRef =
+  `humanagent://journal-record/v1/${'1'.repeat(64)}/51/${'2'.repeat(64)}`;
+
+function historyLookup(scopeValue: ScopeRef): SemanticHistoryExactLookupV1 {
+  return {
+    scope: scopeValue,
+    checkpoint: {
+      id: id('checkpoint', 'history-checkpoint'),
+      scope: scopeValue,
+    },
+    publicationReceiptRef: historyPublicationReceiptRef,
+  };
+}
+
+function committedHistory(
+  checkpointScope: ScopeRef,
+  evidenceScope: ScopeRef,
+): CommittedSemanticCheckpoint {
+  return {
+    version: 1,
+    turn: {
+      turnId: 'prior-business-turn',
+      workAssignmentRef: 'prior-assignment',
+      taskRef: checkpointScope.taskId!,
+      scopeRef: checkpointScope,
+      cycleRef: checkpointScope.cycleId!,
+      inputRevision: 1,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      runtimeBindingRef: 'prior-runtime-binding',
+      permissionRevision: '1',
+    },
+    scope: checkpointScope,
+    time: '2026-10-14T00:00:00.000Z',
+    description: 'prior completed turn',
+    semantics: {
+      goal: 'retain the prior turn',
+      actions: 'committed the prior result',
+      result: 'the prior result is available',
+      nextStep: 'continue from the current turn',
+    },
+    save: {
+      checkpoint: {
+        checkpoint: {
+          id: id('checkpoint', 'history-checkpoint'),
+          scope: checkpointScope,
+        },
+      },
+    },
+    evidenceRefs: [{
+      evidenceId: id('evidence', 'history-evidence'),
+      kind: 'tool',
+      source: 'semantic-history-public-consumer',
+      locator: 'test://semantic-history/evidence',
+      scope: evidenceScope,
+    }],
+    adoptedChildren: [],
+  } as unknown as CommittedSemanticCheckpoint;
+}
+
+async function readFixtureWithHistory(
+  fixture: Fixture,
+  committed: CommittedSemanticCheckpoint,
+  lookup: SemanticHistoryExactLookupV1,
+): Promise<ResolvedSemanticTurnContext> {
+  return readSemanticTurnContext({
+    history: {
+      async readCommittedSemanticCheckpoint(requested) {
+        assert.deepEqual(requested, lookup);
+        return committed;
+      },
+    },
+    priorCompletedTurns: [lookup],
+    live: { prefix: fixture.prefix, rawContent: fixture.read },
+    runtimeId: execution.runtimeId,
+    scope,
+    assignment,
+  });
+}
+
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error('expected the semantic context read to reject');
+}
+
+test('semantic history scope: prior execution keeps its original scope and evidence while cross-task or organ history stays refused', async () => {
+  const fixture = buildFixture();
+  const visible = await readFixtureWithHistory(
+    fixture,
+    committedHistory(historyScope, historyScope),
+    historyLookup(historyScope),
+  );
+  assert.equal(visible.context.semanticHistory.length, 1);
+  assert.equal(visible.context.semanticHistory[0]!.checkpointId.value, 'history-checkpoint');
+  assert.equal(visible.context.semanticHistory[0]!.evidenceRefs[0]!.scope.operationId?.value,
+    historyOperationId.value);
+
+  const otherTaskScope: ScopeRef = {
+    ...historyScope,
+    taskId: id('task', 'task-other'),
+  };
+  const taskMessage = await rejectionMessage(readFixtureWithHistory(
+    fixture,
+    committedHistory(otherTaskScope, otherTaskScope),
+    historyLookup(otherTaskScope),
+  ));
+  if (!/semantic checkpoint task scope does not match/.test(taskMessage)) {
+    throw new Error(`unexpected cross-task history result: ${taskMessage}`);
+  }
+
+  const otherOrganScope: ScopeRef = {
+    ...historyScope,
+    organId: id('organ', 'organ-other'),
+  };
+  const organMessage = await rejectionMessage(readFixtureWithHistory(
+    fixture,
+    committedHistory(otherOrganScope, otherOrganScope),
+    historyLookup(otherOrganScope),
+  ));
+  if (!/semantic checkpoint organ scope does not match/.test(organMessage)) {
+    throw new Error(`unexpected cross-organ history result: ${organMessage}`);
+  }
+
+  const otherOperationEvidenceScope: ScopeRef = {
+    ...historyScope,
+    operationId: id('operation', 'operation-history-evidence-other'),
+  };
+  const evidenceMessage = await rejectionMessage(readFixtureWithHistory(
+    fixture,
+    committedHistory(historyScope, otherOperationEvidenceScope),
+    historyLookup(historyScope),
+  ));
+  if (!/checkpoint evidence operation scope does not match/.test(evidenceMessage)) {
+    throw new Error(`unexpected checkpoint evidence result: ${evidenceMessage}`);
+  }
+});
 
 test('delivery refs: reader keeps accepted tool-result evidence refs and exact raw bytes', async () => {
   const fixture = buildFixture();

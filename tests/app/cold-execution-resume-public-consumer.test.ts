@@ -17,6 +17,7 @@ import {
   type FileWriteEffect,
   type OperationId,
   type PreparedRecoveryCapture,
+  type PublishedTaskPlanRevision,
   type ProviderBinding,
   type RecoveryHoldFacts,
   type ScopeRef,
@@ -60,8 +61,10 @@ import {
   createJsonlCheckpointJournal,
   createJsonlCheckpointClosurePort,
   createJsonlContextHistoryPort,
+  closureFromRecord,
   contextHistoryFromRecord,
 } from '../../packages/app/src/checkpoint-journal.js';
+import { readOperationControlFromRecords } from '../../packages/app/src/operation-control-journal.js';
 import { createNativeRecoveryAssets, createActiveTurnSegmentJournal } from '../../packages/app/src/native-recovery-assets.js';
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
@@ -75,7 +78,8 @@ import type { UiRuntimeServiceOptions } from '../../packages/app/src/ui-runtime/
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
-import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskIdentityJournal, JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { TaskPlanRevisionConsumer, readCurrentTaskPlan } from '../../packages/runtime/src/orchestration/task-plan-revisions.js';
 import { ExplicitIntake, MemoryCoordinator, RequirementInbox, type AttentionPort } from '../../packages/runtime/src/index.js';
 import { ConfirmationLedger, RequirementSubmissionOwner } from '../../packages/runtime/src/explicit-brain/router.js';
 import { createJsonlNativeSaveProgressPort } from '../../packages/adapters/jsonl/src/native-save-progress.js';
@@ -119,6 +123,13 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
 const EVIDENCE_ROOT = process.env.HUMANAGENT_TEST_EVIDENCE_ROOT ?? PERSISTENCE_ROOT;
 const at = '2026-10-14T00:00:00.000Z';
 const organId = id('organ', 'cold-resume-organ');
+const c3aWrongRef = 'wrong-business-ref';
+const c3aAcceptedRef = 'accepted-prefix';
+const c3aOmittedRef = 'older-view';
+const c3aContextSeed = {
+  activeRefs: [c3aAcceptedRef, c3aWrongRef],
+  omittedRefs: [c3aOmittedRef],
+} as const;
 const processMode = process.argv.find((arg) => arg.startsWith('--cold-process='))?.split('=', 2)[1];
 const processKind = process.argv.find((arg) => arg.startsWith('--fixture-kind='))?.split('=', 2)[1] ?? 'captured';
 const processRoot = process.argv.find((arg) => arg === '--fixture-root') === undefined
@@ -196,7 +207,13 @@ function evidence(scope: ScopeRef, label: string): EvidenceRef {
     locator: `humanagent://cold-resume/${label}`, scope };
 }
 
-function contextRecord(scope: ScopeRef, runtime: string, epoch: number): ContextHistoryRecord {
+function contextRecord(
+  scope: ScopeRef,
+  runtime: string,
+  epoch: number,
+  activeRefs: readonly string[] = ['accepted-prefix'],
+  omittedRefs: readonly string[] = ['older-view'],
+): ContextHistoryRecord {
   const ref = { checkpointId: id('checkpoint', `loop-${epoch}`), digest: `loop-digest-${epoch}` };
   const watermark = { streamId: 'cold-resume-stream', sequence: 0 };
   const observationScopeId = `observation-${epoch}`;
@@ -204,7 +221,7 @@ function contextRecord(scope: ScopeRef, runtime: string, epoch: number): Context
     dynamicHead: ['accepted reasoning', 'accepted tool result'], repairRefs: ['retained duty'] };
   return { kind: 'context-history', schemaVersion: 1, scope, agentRuntimeId: runtime,
     contextView: { contextViewRef: `context-${epoch}`, executionEpoch: epoch, checkpoint: ref,
-      contextDigest: `refs-${epoch}`, activeRefs: ['accepted-prefix'], omittedRefs: ['older-view'] },
+      contextDigest: `refs-${epoch}`, activeRefs, omittedRefs },
     loopCheckpoint: { ...ref, sequence: epoch, predecessor: null, executionEpoch: epoch,
       eventWatermark: watermark, observationScopeId, contextViewRef: `context-${epoch}` },
     replacement: null, previousContextCommitRef: null, durableContext,
@@ -219,8 +236,19 @@ function contextRecord(scope: ScopeRef, runtime: string, epoch: number): Context
 }
 
 interface Upstream {
+  readonly useNextDelivery: () => void;
   readonly baseUrl: string;
   readonly wires: { readonly path: string; readonly body: string }[];
+  readonly errors: {
+    readonly path: string;
+    readonly body: string;
+    readonly name: string;
+    readonly message: string;
+    readonly stack: string | undefined;
+    readonly cause: string | undefined;
+    readonly errors: string | undefined;
+    readonly status: number;
+  }[];
   readonly close: () => Promise<void>;
 }
 
@@ -233,7 +261,7 @@ interface Upstream {
  * committed Journal and immutable assets.
  */
 interface ColdProcessReceipt {
-  readonly phase: 'seed' | 'resume';
+  readonly phase: 'seed' | 'resume' | 'c3a-seed' | 'c3a-next';
   readonly pid: number;
   readonly ppid: number;
   readonly root: string;
@@ -314,7 +342,9 @@ async function runResumeProcess(): Promise<void> {
 
 /** One real Responses HTTP request, decoded only as far as its cold-resume stage. */
 interface ResponsesWireItem {
+  readonly output?: string;
   readonly type?: string;
+  readonly call_id?: string;
   readonly role?: string;
   readonly name?: string;
   readonly content?: readonly { readonly type?: string; readonly text?: string }[];
@@ -363,10 +393,31 @@ function plannerPayload(raw: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-/** True once the recovered execution request replays the accepted standard-end call. */
-function declaresTurnEnd(raw: string): boolean {
-  return (parseResponsesWire(raw)?.input ?? [])
-    .some((item) => item.type === 'function_call' && item.name === 'humanagent_turn_end');
+/**
+ * The request after an accepted turn-end carries that exact call followed by
+ * its function output. A fresh execution request has the turn-end tool surface
+ * but no completed turn-end call in its input.
+ */
+function isPostStandardEndContinuation(raw: string): boolean {
+  const input = parseResponsesWire(raw)?.input ?? [];
+  let callIndex = -1;
+  let call: ResponsesWireItem | undefined;
+  for (let index = 0; index < input.length; index += 1) {
+    const item = input[index]!;
+    if (item.type !== 'function_call') continue;
+    callIndex = index;
+    call = item;
+  }
+  if (call?.name !== 'humanagent_turn_end') return false;
+  const output = input.slice(callIndex + 1).find((item) =>
+    item.type === 'function_call_output' && item.call_id === call.call_id);
+  if (output?.output === undefined) return false;
+  const result = JSON.parse(output.output.split('\n[HumanAgent evidence refs]')[0]!) as {
+    readonly kind?: string; readonly accepted?: boolean };
+  if (result.kind !== 'standard-turn-end' || result.accepted !== true) {
+    throw new Error(`standard end rejected: ${output.output}`);
+  }
+  return true;
 }
 
 /** True when the request declares the Harness standard-end tool surface (the recovered execution). */
@@ -410,22 +461,57 @@ function closureSection(value: unknown, label: string): { readonly text: string;
   return { text: requireText(section.text, `the closure ${label} text`), locators: evidenceLocators(section.evidenceRefs) };
 }
 
+async function readFixturePriorPlan(
+  fixture: Pick<ColdFixture, 'journal' | 'taskScope'>,
+): Promise<PublishedTaskPlanRevision | null> {
+  const taskScope = { organId: fixture.taskScope.organId, taskId: fixture.taskScope.taskId };
+  const identity = await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal))
+    .read(taskScope);
+  if (identity === undefined) throw new Error('the fixture Task must have a confirmed identity');
+  const state = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal })
+    .read(taskScope);
+  assert.equal(state.state, 'known', 'the fixture Task current state must be known');
+  if (state.state !== 'known') throw new Error('the fixture Task current state is unknown');
+  const plans = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(fixture.journal));
+  if (!state.value.currentPlan) {
+    assert.deepEqual(await plans.list(taskScope), [],
+      'an unselected current plan is lawful only before the first publication');
+    return null;
+  }
+  return (await readCurrentTaskPlan({ plans, identity, currentPlan: state.value.currentPlan })).revision;
+}
+
 /**
- * The first (and only) lawful Planner response, built only from the actual
+ * The lawful Planner response for this publication, built from the actual
  * request payload. The owner still derives the publication, sequence, digests
  * and alignment from the committed facts; this text carries only the
  * whole-task plan decision the Planner is asked for.
  */
-function plannerFrames(model: string, payload: Record<string, unknown>): readonly Record<string, unknown>[] {
+function plannerFrames(
+  model: string,
+  payload: Record<string, unknown>,
+  expectedPriorPlan: PublishedTaskPlanRevision | null,
+): readonly Record<string, unknown>[] {
   const task = requireRecord(payload.task, 'the task');
   const closure = requireRecord(payload.closure, 'the closure');
   const summary = requireRecord(closure.summary, 'the closure summary');
   const title = requireText(task.title, 'the task title');
   const directive = requireText(task.directive, 'the task directive');
-  if (payload.priorPlan !== null) {
-    throw new Error('the Planner request did not carry the expected null priorPlan for the first publication');
+  if (expectedPriorPlan === null) {
+    assert.equal(payload.priorPlan, null, 'the first publication must carry an explicit null priorPlan');
+  } else {
+    assert.deepEqual(task.organId, expectedPriorPlan.scope.organId);
+    assert.deepEqual(task.taskId, expectedPriorPlan.scope.taskId);
+    assert.deepEqual(payload.priorPlan, {
+      revisionId: expectedPriorPlan.revisionId,
+      sequence: expectedPriorPlan.sequence,
+      contentDigest: expectedPriorPlan.contentDigest,
+      snapshot: expectedPriorPlan.snapshot,
+    }, 'the Planner prior must equal the exact durable selected Task plan');
   }
-  const confirmedSource = requireRecord(payload.confirmedSource, 'the confirmed source');
+  const confirmedSource = expectedPriorPlan === null
+    ? requireRecord(payload.confirmedSource, 'the confirmed source')
+    : { ...expectedPriorPlan.source };
   const goal = closureSection(summary.goal, 'goal');
   const actions = closureSection(summary.actions, 'actions');
   const result = closureSection(summary.result, 'result');
@@ -481,7 +567,7 @@ function plannerFrames(model: string, payload: Record<string, unknown>): readonl
   const text = JSON.stringify({
     decision: 'complete',
     snapshot,
-    reasonText: 'first whole-task plan aligned to the original directive and the confirmed closed turn',
+    reasonText: 'whole-task plan aligned to the original directive and the confirmed closed turn',
   });
   return [
     { type: 'response.created', response: { id: `response-${model}-planner` } },
@@ -501,36 +587,70 @@ function plannerFrames(model: string, payload: Record<string, unknown>): readonl
  * accepted end result as a transport-only text answer. A transport-only text
  * answer is never a standard end, and an unrecognized request fails closed.
  */
-async function upstream(model: string, deliveryRef: string, deliveryText?: string): Promise<Upstream> {
+function safeStringify(value: unknown): string {
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+async function upstream(
+  model: string,
+  deliveryRef: string,
+  fixture: Pick<ColdFixture, 'journal' | 'taskScope'>,
+  deliveryText?: string,
+): Promise<Upstream> {
   const wires: { path: string; body: string }[] = [];
-  const section = (text: string) => ({ text, evidenceRefs: [deliveryRef] });
-  const frames = [
-    { type: 'response.created', response: { id: `response-${model}` } },
-    { type: 'response.output_item.added', output_index: 0,
-      item: { type: 'function_call', call_id: 'cold-resume-end', name: 'humanagent_turn_end', arguments: '' } },
-    { type: 'response.output_item.done', output_index: 0,
-      item: { type: 'function_call', call_id: 'cold-resume-end', name: 'humanagent_turn_end',
-        arguments: JSON.stringify({ summary: {
-          goal: section('resume the original business turn'), actions: section('retained the confirmed effect'),
-          result: section('standard end accepted on the resumed incarnation'),
-          expectedNextStep: section('planner aligns the exact current plan') },
-          deliveryRefs: [deliveryRef], ...(deliveryText === undefined ? {} : { deliveryText }) }) } },
-    { type: 'response.completed', response: { id: `response-${model}` } },
-  ];
+  const errors: Upstream['errors'] = [];
+  let nextDelivery = false;
+  let endCallCount = 0;
+  const section = (text: string) => ({ text, evidenceRefs: nextDelivery ? [] : [deliveryRef] });
+  const turnEndFrames = () => {
+    const callId = `cold-resume-end-${++endCallCount}`;
+    return [
+      { type: 'response.created', response: { id: `response-${model}` } },
+      { type: 'response.output_item.added', output_index: 0,
+        item: { type: 'function_call', call_id: callId, name: 'humanagent_turn_end', arguments: '' } },
+      { type: 'response.output_item.done', output_index: 0,
+        item: { type: 'function_call', call_id: callId, name: 'humanagent_turn_end',
+          arguments: JSON.stringify({ summary: {
+            goal: section(nextDelivery ? 'complete the next execution' : 'resume the original business turn'),
+            actions: section(nextDelivery ? 'used the corrected forward context' : 'retained the confirmed effect'),
+            result: section(nextDelivery ? 'delivered the next execution result' : 'C3A prior-v2 resumed semantic marker'),
+            expectedNextStep: section('planner aligns the exact current plan') },
+            deliveryRefs: nextDelivery ? [] : [deliveryRef],
+            ...(nextDelivery ? { deliveryText: 'Next execution completed from the corrected forward context.' }
+              : deliveryText === undefined ? {} : { deliveryText }) }) } },
+      { type: 'response.completed', response: { id: `response-${model}` } },
+    ];
+  };
   const server = createServer((request, response) => {
+    let requestPath = request.url ?? '';
+    let requestBody = '';
     void (async () => {
       const chunks: Uint8Array[] = [];
       for await (const chunk of request) chunks.push(chunk);
-      const path = request.url ?? '';
-      const body = Buffer.concat(chunks).toString('utf8');
-      wires.push({ path, body });
+      requestBody = Buffer.concat(chunks).toString('utf8');
+      wires.push({ path: requestPath, body: requestBody });
+      const body = requestBody;
       const payload = plannerPayload(body);
       if (payload !== undefined) {
+        const expectedPriorPlan = await readFixturePriorPlan(fixture);
+        const task = requireRecord(payload.task, 'the task');
+        assert.deepEqual(task.organId, fixture.taskScope.organId);
+        assert.deepEqual(task.taskId, fixture.taskScope.taskId);
+        if (expectedPriorPlan === null) {
+          const identity = await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal))
+            .read(fixture.taskScope);
+          if (identity === undefined) throw new Error('the first Planner source requires the confirmed Task identity');
+          const { evidenceRefs, ...source } = requireRecord(payload.confirmedSource, 'the confirmed source');
+          assert.deepEqual(source, identity.source, 'the first Planner source must match the confirmed Task identity');
+          assert.deepEqual(evidenceLocators(evidenceRefs), [identity.journalCommitRef]);
+        }
+        const frames = plannerFrames(model, payload, expectedPriorPlan);
+        const serialized = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
         response.writeHead(200, { 'content-type': 'text/event-stream' });
-        response.end(plannerFrames(model, payload).map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+        response.end(serialized);
         return;
       }
-      if (declaresTurnEnd(body)) {
+      if (isPostStandardEndContinuation(body)) {
         const drain = [
           { type: 'response.created', response: { id: `response-${model}-drain` } },
           { type: 'response.output_text.done', item_id: 'message-final', text: `drained-${model}` },
@@ -544,8 +664,22 @@ async function upstream(model: string, deliveryRef: string, deliveryText?: strin
         throw new Error('the controlled upstream could not identify a lawful cold-resume Responses stage');
       }
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+      response.end(turnEndFrames().map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
     })().catch((error: unknown) => {
+      const record = error as { cause?: unknown; errors?: unknown };
+      const describe = (value: unknown): string => value instanceof Error
+        ? (value.stack ?? `${value.name}: ${value.message}`)
+        : safeStringify(value);
+      errors.push({
+        path: requestPath,
+        body: requestBody,
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        cause: error instanceof Error ? describe(record.cause) : undefined,
+        errors: error instanceof Error ? describe(record.errors) : undefined,
+        status: 500,
+      });
       response.writeHead(500);
       response.end(String(error));
     });
@@ -557,8 +691,10 @@ async function upstream(model: string, deliveryRef: string, deliveryText?: strin
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('missing socket address');
   return {
+    useNextDelivery: () => { nextDelivery = true; },
     baseUrl: `http://127.0.0.1:${address.port}`,
     wires,
+    errors,
     close: async () => {
       server.closeIdleConnections?.();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -973,7 +1109,12 @@ async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
 async function buildColdFixture(name: string,
   expectedOutputRefs: readonly string[] = ['original-output'],
   targetRefs: readonly string[] = ['original-target'],
-  failInitialRelease = false): Promise<ColdFixture> {
+  failInitialRelease = false,
+  outstandingRequestId?: string,
+  contextSeed?: {
+    readonly activeRefs: readonly string[];
+    readonly omittedRefs: readonly string[];
+  }): Promise<ColdFixture> {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, `${name}-`));
   const preparedPath = join(root, 'prepared.jsonl');
@@ -1171,6 +1312,15 @@ async function buildColdFixture(name: string,
       result: { ...execution, toolId: 'file.write', callId: effectBinding.callId, status: 'succeeded',
         outputRefs: ['artifact://accepted-output'], evidenceRefs: [evidence(scope, 'accepted-output')] } } });
   await active.registerRequest({ request: { turnId: businessTurnId, requestId }, scope, phase: 'settled' });
+  // A legal initial seed for a genuinely unsettled turn: one admitted request
+  // whose latest verified phase is still outstanding. It carries no accepted
+  // facts, so its producer drain sequence is zero.
+  if (outstandingRequestId !== undefined) {
+    await active.registerRequest({ request: { turnId: businessTurnId, requestId: outstandingRequestId },
+      scope, phase: 'dispatching' });
+    await active.registerRequest({ request: { turnId: businessTurnId, requestId: outstandingRequestId },
+      scope, phase: 'dispatched' });
+  }
   const body = await active.prepareCapture({ pauseId: 'original-boundary', frozenAt: at, initialInput,
     checkpointPath: [], completionRefs: [{ requestId, producerSeq: 2, effectRef: acceptedCompletion.commitIdentity }] });
   const lookups = await completion.discoverExactExecution({ execution });
@@ -1179,14 +1329,20 @@ async function buildColdFixture(name: string,
     durableReceiptRefs: [], recoveryResponsibilityRef: 'original-recovery-owner' };
   const prepared: PreparedRecoveryCapture = { body, controlRecordCount: active.controlRecordCount(),
     producerDrains: [{ execution: binding.execution, boundaryId: body.cut.pauseId,
-      requests: [{ request: { turnId: businessTurnId, requestId }, lastProducerSeq: 2 }] }],
+      requests: [
+        { request: { turnId: businessTurnId, requestId }, lastProducerSeq: 2 },
+        ...(outstandingRequestId === undefined ? [] : [{
+          request: { turnId: businessTurnId, requestId: outstandingRequestId }, lastProducerSeq: 0,
+        }]),
+      ] }],
     completionLookups: lookups, recovery };
   const v1Receipt = await native.commitCapturePhase({ turnId: businessTurnId, boundaryId: body.cut.pauseId, prepared });
 
   const checkpoints = createJsonlCheckpointJournal({ filePath: journalPath, journal });
   const closures = createJsonlCheckpointClosurePort({ filePath: journalPath, journal });
   const history = createJsonlContextHistoryPort({ filePath: journalPath, journal });
-  const sourceContext = contextRecord(scope, allocation.runtimeId, allocation.executionEpoch);
+  const sourceContext = contextRecord(scope, allocation.runtimeId, allocation.executionEpoch,
+    contextSeed?.activeRefs, contextSeed?.omittedRefs);
   const sourceContextCommit = (await produceContextHistory(history, { record: sourceContext,
     expectedCurrentContextCommitRef: null })).commitRef;
   const checkpoint = { id: id('checkpoint', 'original-checkpoint'), scope, cycleId: scope.cycleId!, seq: 1,
@@ -1579,6 +1735,8 @@ async function buildResumeService(
               return await resolvedSelector(input);
             },
           }),
+          executeConfirmedTaskContextCorrection: composition.executeConfirmedTaskContextCorrection,
+          executeConfirmedTaskCheckpointReentry: composition.executeConfirmedTaskCheckpointReentry,
         };
       },
     },
@@ -1790,6 +1948,480 @@ function effectRecordCount(records: readonly JournalRecord[], effectId: string):
   return count;
 }
 
+function knownCurrent(records: readonly JournalRecord[], taskScope: ScopeRef) {
+  const current = readCurrentFromRecords(records, taskScope);
+  if (current.state !== 'known') throw new Error(current.reason);
+  return current;
+}
+
+function wireText(body: string): readonly string[] {
+  return (parseResponsesWire(body)?.input ?? []).flatMap((item) =>
+    (item.content ?? []).flatMap((part) => part.type === 'input_text' && typeof part.text === 'string'
+      ? [part.text] : []));
+}
+
+async function waitForTaskTerminal(
+  service: UiRuntimeService,
+  taskId: TaskId,
+  fixture: ColdFixture,
+  operationId: OperationId,
+): Promise<{ readonly state: string; readonly currentState: string }> {
+  let subscription: ReturnType<UiRuntimeService['subscribeReplay']> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onEvent: Parameters<UiRuntimeService['subscribeReplay']>[2] = (event) => {
+        if (event.kind !== 'execution.terminal' || event.terminalPhase !== 'final') return;
+        try {
+          // Live events follow append; immediate replay must prove the same
+          // durable fact before this fixture can close or remove its root.
+          assert.ok(fixture.preparedJournal.replay().some((record) => record.kind === 'operation.event'
+            && record.operationId.value === operationId.value
+            && record.event.eventId === event.eventId
+            && record.event.kind === 'execution.terminal' && record.event.terminalPhase === 'final'),
+          'the next execution final terminal must be persisted before cleanup');
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      };
+      subscription = service.subscribeReplay(operationId, undefined, onEvent);
+      subscription.replay.forEach(onEvent);
+    });
+  } finally {
+    subscription?.unsubscribe();
+  }
+  const projection = service.listTasks();
+  const rows = [...projection.running, ...projection.waiting, ...projection.completed,
+    ...projection.stopped, ...projection.failed, ...projection.draft];
+  const row = rows.find((candidate) => candidate.taskId.value === taskId.value);
+  if (row === undefined) throw new Error('the completed execution must retain its task projection');
+  return { state: row.state, currentState: row.currentState };
+}
+
+async function archiveC3aReceipts(
+  fixture: ColdFixture,
+  http: Upstream,
+  receipt: Readonly<Record<string, unknown>>,
+): Promise<string> {
+  await mkdir(EVIDENCE_ROOT, { recursive: true });
+  const archiveRoot = await mkdtemp(join(EVIDENCE_ROOT, 'c3a-next-turn-'));
+  await writeFile(join(archiveRoot, 'upstream-wires.json'), JSON.stringify(http.wires, null, 2), 'utf8');
+  await writeFile(join(archiveRoot, 'upstream-errors.json'), JSON.stringify(http.errors, null, 2), 'utf8');
+  await writeFile(join(archiveRoot, 'organ-journal.jsonl'), await readFile(fixture.journalPath, 'utf8'), 'utf8');
+  await writeFile(join(archiveRoot, 'prepared.jsonl'), await readFile(fixture.preparedPath, 'utf8'), 'utf8');
+  await writeFile(join(archiveRoot, 'receipt.json'), JSON.stringify(receipt, null, 2), 'utf8');
+  return archiveRoot;
+}
+
+/**
+ * Runs the accepted confirmed-control sequence and starts one real next
+ * execution. All targets are exact committed checkpoint receipts. The current
+ * Task goal/directive and retained duties are compared across the controls;
+ * no Task state is restored from the rewind target.
+ */
+async function runC3aControlChain(
+  service: UiRuntimeService,
+  fixture: ColdFixture,
+  http: Upstream,
+): Promise<{
+  readonly correction: Awaited<ReturnType<UiRuntimeService['executeConfirmedTaskContextCorrection']>>;
+  readonly rewind: Awaited<ReturnType<UiRuntimeService['executeConfirmedTaskCheckpointReentry']>>;
+  readonly forward: Awaited<ReturnType<UiRuntimeService['executeConfirmedTaskCheckpointReentry']>>;
+  readonly controlFloor: number;
+  readonly resumedPositionEpoch: number;
+}> {
+  const taskScope: ScopeRef = { organId, taskId: fixture.taskId };
+  const checkpoints = createJsonlCheckpointJournal({ filePath: fixture.journalPath, journal: fixture.journal });
+  const originalPosition = await checkpoints.readExecutionPosition(taskScope);
+  if (originalPosition === null) throw new Error('the fixture has no original execution position');
+  const release = await service.resumeExecution(fixture.taskId, { operationId: fixture.allocation.operationId });
+  assert.equal(release.state, 'released');
+  const resumedPosition = await checkpoints.readExecutionPosition(taskScope);
+  if (resumedPosition === null) throw new Error('the standard tail has no committed execution position');
+  assert.equal(resumedPosition.executionEpoch, originalPosition.executionEpoch + 1);
+
+  const currentAfterResume = knownCurrent((await fixture.journal.verify()).records, taskScope);
+  assert.ok(currentAfterResume.context.contextView.activeRefs.includes(c3aWrongRef));
+  assert.ok(currentAfterResume.context.contextView.activeRefs.includes(c3aAcceptedRef));
+
+  const correctionTaskScope = { organId: taskScope.organId, taskId: fixture.taskId };
+  const correction = await service.executeConfirmedTaskContextCorrection({
+    taskScope,
+    commandId: 'c3a-hot-correction',
+    wrongRefs: [{ taskScope: correctionTaskScope, ref: c3aWrongRef }],
+    repairText: 'remove the confirmed wrong business ref and retain the accepted conclusion',
+    confirmationRef: 'c3a-hot-correction-confirmation',
+  });
+  assert.equal(correction.record.newExecutionEpoch, resumedPosition.executionEpoch + 1);
+  assert.deepEqual(correction.record.currentTask, currentAfterResume.task);
+  assert.deepEqual(correction.record.retainedDuties, currentAfterResume.retainedDuties);
+  assert.ok(!correction.record.correctedContext.contextView.activeRefs.includes(c3aWrongRef));
+  assert.ok(correction.record.correctedContext.contextView.activeRefs.includes(c3aAcceptedRef));
+  assert.ok(correction.record.correctedContext.contextView.omittedRefs.includes(c3aWrongRef));
+
+  const rewind = await service.executeConfirmedTaskCheckpointReentry({
+    taskScope,
+    commandId: 'c3a-hot-rewind',
+    targetCheckpointCommitRef: originalPosition.checkpointCommitRef,
+    confirmationRef: 'c3a-hot-rewind-confirmation',
+  });
+  assert.equal(rewind.record.newExecutionEpoch, correction.record.newExecutionEpoch + 1);
+  assert.deepEqual(rewind.record.currentTask, currentAfterResume.task);
+  assert.deepEqual(rewind.record.retainedDuties, currentAfterResume.retainedDuties);
+  assert.ok(!rewind.record.restoredContext.contextView.activeRefs.includes(c3aWrongRef));
+  assert.ok(rewind.record.restoredContext.contextView.activeRefs.includes(c3aAcceptedRef));
+
+  const forward = await service.executeConfirmedTaskCheckpointReentry({
+    taskScope,
+    commandId: 'c3a-hot-forward',
+    targetCheckpointCommitRef: resumedPosition.checkpointCommitRef,
+    confirmationRef: 'c3a-hot-forward-confirmation',
+  });
+  assert.equal(forward.record.newExecutionEpoch, rewind.record.newExecutionEpoch + 1);
+  assert.deepEqual(forward.record.currentTask, currentAfterResume.task);
+  assert.deepEqual(forward.record.retainedDuties, currentAfterResume.retainedDuties);
+  assert.deepEqual(forward.record.restoredContext.contextView.activeRefs,
+    correction.record.correctedContext.contextView.activeRefs);
+  assert.ok(forward.record.restoredContext.contextView.omittedRefs.includes(c3aWrongRef));
+  assert.ok(forward.record.restoredContext.contextView.omittedRefs.includes(c3aOmittedRef));
+
+  const floorPosition = await checkpoints.readExecutionPosition(taskScope);
+  assert.equal(floorPosition?.executionEpoch, forward.record.newExecutionEpoch);
+  return { correction, rewind, forward, controlFloor: forward.record.newExecutionEpoch,
+    resumedPositionEpoch: resumedPosition.executionEpoch };
+}
+
+async function runC3aHotChain(service: UiRuntimeService, fixture: ColdFixture, http: Upstream) {
+  const controls = await runC3aControlChain(service, fixture, http);
+  const next = await runNextExecutionAssertions(service, fixture, http, controls.controlFloor,
+    controls.forward.record.restoredContext);
+  return { ...controls, next };
+}
+
+async function runC3aProcess(): Promise<void> {
+  const seeding = processMode === 'c3a-seed';
+  if (!seeding && (processRoot === undefined || processTask === undefined)) {
+    throw new Error('the C3a next child requires the durable root and task');
+  }
+  const fixture = seeding
+    ? await buildColdFixture('c3a-fresh', ['original-output'], ['original-target'], false, undefined, c3aContextSeed)
+    : await reopenColdFixture(processRoot!, processTask!);
+  const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
+  let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+  let archiveRoot: string | undefined;
+  try {
+    app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true);
+    if (seeding) {
+      const controls = await runC3aControlChain(app.service, fixture, http);
+      archiveRoot = await archiveC3aReceipts(fixture, http, { mode: processMode, pid: process.pid,
+        controlFloor: controls.controlFloor, resumedPositionEpoch: controls.resumedPositionEpoch,
+        correction: controls.correction.record, rewind: controls.rewind.record, forward: controls.forward.record });
+    } else {
+      await app.service.hydrate();
+      const records = (await fixture.journal.verify()).records;
+      const taskScope: ScopeRef = { organId, taskId: fixture.taskId };
+      const position = await createJsonlCheckpointJournal({ filePath: fixture.journalPath, journal: fixture.journal })
+        .readExecutionPosition(taskScope);
+      assert.equal(position?.executionEpoch, 5, 'fresh hydrate must read the actual committed control floor');
+      const current = knownCurrent(records, taskScope);
+      assert.ok(current.context.contextView.activeRefs.includes(c3aAcceptedRef));
+      assert.ok(!current.context.contextView.activeRefs.includes(c3aWrongRef));
+      assert.ok(current.context.contextView.omittedRefs.includes(c3aWrongRef));
+      assert.ok(current.context.contextView.omittedRefs.includes(c3aOmittedRef));
+      assert.equal(http.wires.length, 0, 'hydrate must not send a Provider request');
+      const next = await runNextExecutionAssertions(app.service, fixture, http, position!.executionEpoch, current.context);
+      archiveRoot = await archiveC3aReceipts(fixture, http, { mode: processMode, pid: process.pid,
+        controlFloor: position!.executionEpoch, currentTask: current.task, retainedDuties: current.retainedDuties,
+        activeRefs: current.context.contextView.activeRefs, omittedRefs: current.context.contextView.omittedRefs, next });
+    }
+  } catch (error) {
+    await archiveC3aReceipts(fixture, http, { mode: processMode, pid: process.pid,
+      root: fixture.root, failure: String(error) });
+    throw error;
+  } finally {
+    try {
+      if (app !== undefined) await app.close();
+    } finally {
+      await http.close();
+    }
+  }
+  emitReceipt({ phase: seeding ? 'c3a-seed' : 'c3a-next', pid: process.pid, ppid: processPpid,
+    root: fixture.root, taskId: fixture.taskId.value, archiveRoot });
+}
+
+/**
+ * Starts the next execution only after the caller has established the durable
+ * control floor. The assertions bind the new root context, request, closure and
+ * parent control envelope to the actual allocation returned by startExecution.
+ */
+async function runNextExecutionAssertions(
+  service: UiRuntimeService,
+  fixture: ColdFixture,
+  http: Upstream,
+  expectedFloor: number,
+  expectedContext: ContextHistoryRecord,
+): Promise<{
+  readonly operationId: string;
+  readonly executionEpoch: number;
+  readonly rootCommitId: string;
+  readonly requestId: string;
+  readonly closureCommitId: string;
+  readonly parentControlCommitId: string;
+  readonly plannerStage: 'returned';
+  readonly publicationText: string;
+}> {
+  const taskScope: ScopeRef = { organId, taskId: fixture.taskId };
+  const checkpoints = createJsonlCheckpointJournal({ filePath: fixture.journalPath, journal: fixture.journal });
+  const before = await checkpoints.readExecutionPosition(taskScope);
+  assert.equal(before?.executionEpoch, expectedFloor, 'the next start must see the committed control floor');
+  const beforeRecords = (await fixture.journal.verify()).records;
+  const preExistingRequestIds = new Set(beforeRecords.flatMap((record) => {
+    if (record.kind !== 'event' || record.payload?.['type'] !== 'active-turn.record') return [];
+    const activeRecord = record.payload['record'] as {
+      readonly kind?: string;
+      readonly record?: { readonly request?: { readonly requestId?: string } };
+    } | undefined;
+    return activeRecord?.kind === 'request' && activeRecord.record?.request?.requestId !== undefined
+      ? [activeRecord.record.request.requestId]
+      : [];
+  }));
+  const wireOffset = http.wires.length;
+  const effectBefore = await readFile(fixture.effectPath, 'utf8');
+  const effectsBefore = effectRecordCount((await fixture.journal.verify()).records, fixture.effect.effectId);
+  http.useNextDelivery();
+  const started = await service.startExecution(fixture.taskId, { prompt: 'next turn input' });
+  assert.ok(started.operationId.value !== fixture.allocation.operationId.value,
+    'the next execution must allocate a new operation');
+  assert.equal(started.executionEpoch, expectedFloor + 1,
+    'the new allocation must be strictly above the last committed control floor');
+  const terminal = await waitForTaskTerminal(service, fixture.taskId, fixture, started.operationId);
+  assert.equal(terminal.state, 'succeeded', `the next execution must close successfully: ${terminal.currentState}`);
+
+  const prepared = fixture.preparedJournal.replay().find((record) =>
+    record.kind === 'operation.prepared' && record.allocation.operationId.value === started.operationId.value);
+  if (prepared?.kind !== 'operation.prepared') throw new Error('the next allocation is not durable in prepared.jsonl');
+  const allocation = prepared.allocation;
+  assert.equal(allocation.executionEpoch, started.executionEpoch);
+  const records = (await fixture.journal.verify()).records;
+
+  const bindingRecord = records.flatMap((record) => {
+    if (record.kind !== 'event' || record.payload?.['type'] !== 'active-turn.record') return [];
+    const value = record.payload['record'] as { readonly kind?: string;
+      readonly binding?: { readonly scope?: ScopeRef; readonly admittedTurn?: { readonly turnId?: string } } } | undefined;
+    if (value?.kind !== 'binding-opened' || value.binding?.scope?.operationId?.value !== started.operationId.value) return [];
+    return value.binding.admittedTurn?.turnId === undefined ? [] : [{
+      turnId: value.binding.admittedTurn.turnId,
+      scope: value.binding.scope,
+    }];
+  });
+  assert.equal(bindingRecord.length, 1, 'the next execution must own exactly one admitted turn binding');
+  const nextTurnId = bindingRecord[0]!.turnId;
+  const activeRecords = decodeActiveTurnRecords(records, nextTurnId);
+  const requestRecords = activeRecords.filter((record) => record.kind === 'request');
+  assert.ok(requestRecords.length > 0, 'the next execution must commit a real admitted request');
+  const registeredRequestIds = [...new Set(requestRecords.map((record) =>
+    record.kind === 'request' ? record.record.request.requestId : ''))];
+  const rootRequests = requestRecords.filter((record) =>
+    record.kind === 'request' && record.record.request.parentRequestId === undefined);
+  assert.equal(rootRequests.length > 0, true, 'the next execution must commit a real admitted root request');
+  const rootRequestIds = [...new Set(rootRequests.map((record) =>
+    record.kind === 'request' ? record.record.request.requestId : ''))];
+  assert.equal(rootRequestIds.length, 1, 'the next execution must commit exactly one root request');
+  const requestId = rootRequestIds[0]!;
+  const nextProviderTurnId = rootRequests[0]!.record.request.turnId;
+  assert.ok(requestRecords.every((record) => record.record.request.turnId === nextProviderTurnId),
+    'the root and continuations must belong to the same Provider turn');
+  assert.ok(!preExistingRequestIds.has(requestId), 'the next root request must be new in this fixture');
+  const childRequests = requestRecords.filter((record) =>
+    record.kind === 'request' && record.record.request.parentRequestId !== undefined);
+  assert.ok(childRequests.every((record) =>
+    record.kind === 'request'
+    && record.record.request.parentRequestId === requestId
+    && record.record.parentRequestId === requestId),
+  'the next execution must only carry direct continuations of the root request');
+  const childRequestIds = [...new Set(childRequests.map((record) =>
+    record.kind === 'request' ? record.record.request.requestId : ''))];
+  assert.ok(!childRequestIds.includes(requestId), 'a continuation must not reuse the root request id');
+  assert.equal(registeredRequestIds.length, rootRequestIds.length + childRequestIds.length,
+    'the next execution must carry the root and its direct continuations only');
+  assert.ok(!childRequestIds.some((id) => preExistingRequestIds.has(id)),
+    'the next continuations must be new in this fixture');
+  const expectedPhases = ['dispatching', 'dispatched'] as const;
+  for (const phaseRequestId of [requestId, ...childRequestIds]) {
+    const phases = requestRecords.flatMap((record) =>
+      record.kind === 'request' && record.record.request.requestId === phaseRequestId
+        ? [record.record.phase]
+        : []);
+    assert.deepEqual(phases.slice(0, 2), [...expectedPhases],
+      `request ${phaseRequestId} must dispatch in order`);
+    assert.equal(phases.at(-1), 'settled', `request ${phaseRequestId} must reach its settled phase`);
+    assert.ok(!phases.includes('failed') && !phases.includes('cancelled'),
+      `request ${phaseRequestId} must not fail or cancel`);
+  }
+
+  const turnEndResults = activeRecords.flatMap((record) =>
+    record.kind === 'accepted-fact'
+      && record.entry.envelope.request.requestId === requestId
+      && record.entry.envelope.fact.kind === 'tool-result'
+      ? [record.entry.envelope.fact]
+      : []);
+  const turnEndToolCalls = activeRecords.flatMap((record) =>
+    record.kind === 'accepted-fact'
+      && record.entry.envelope.request.requestId === requestId
+      && record.entry.envelope.fact.kind === 'tool-call'
+      ? [record.entry.envelope.fact]
+      : []);
+  assert.equal(turnEndToolCalls.length, 1, 'the root request must produce exactly one tool call');
+  assert.equal(turnEndToolCalls[0]!.call.toolId, 'humanagent_turn_end');
+  assert.equal(turnEndResults.length, 1, 'the root tool call must produce exactly one tool result');
+  assert.equal(turnEndResults[0]!.callId, turnEndToolCalls[0]!.call.callId);
+  assert.equal(turnEndResults[0]!.result.status, 'succeeded',
+    'the standard turn end tool result must be accepted');
+  const acceptedEntries = activeRecords.flatMap((record) =>
+    record.kind === 'accepted-fact' ? [record.entry] : []);
+  const journalSeqs = new Map<string, readonly number[]>();
+  const settledSeqs = new Map<string, number>();
+  for (const record of records) {
+    if (record.kind !== 'event' || record.payload?.['type'] !== 'active-turn.record') continue;
+    if (!record.commitId?.startsWith(`active-turn:${nextTurnId}:`)) continue;
+    const value = record.payload['record'] as ActiveTurnJournalRecord | undefined;
+    if (value?.kind === 'accepted-fact') {
+      const request = value.entry.envelope.request;
+      if (request.turnId !== nextProviderTurnId || !registeredRequestIds.includes(request.requestId)) continue;
+      const requestIdOfRecord = request.requestId;
+      journalSeqs.set(requestIdOfRecord, [...(journalSeqs.get(requestIdOfRecord) ?? []), record.seq]);
+    } else if (value?.kind === 'request' && value.record.phase === 'settled') {
+      const request = value.record.request;
+      if (request.turnId !== nextProviderTurnId || !registeredRequestIds.includes(request.requestId)) continue;
+      settledSeqs.set(request.requestId, record.seq);
+    }
+  }
+  const childSeqs = childRequestIds.flatMap((id) => [...(journalSeqs.get(id) ?? [])]);
+  assert.ok(childSeqs.length > 0, 'the continuation must produce accepted wire facts');
+  for (const childRequestId of childRequestIds) {
+    assert.ok(Math.min(...(journalSeqs.get(childRequestId)!)) > settledSeqs.get(requestId)!,
+      'the continuation must start after the root request settles');
+  }
+  assert.ok(acceptedEntries.every((entry) =>
+    entry.envelope.request.turnId === nextProviderTurnId
+    && entry.envelope.execution.runtimeId === allocation.runtimeId
+    && entry.envelope.execution.executionEpoch === allocation.executionEpoch
+    && entry.envelope.scope.operationId?.value === started.operationId.value
+    && (entry.envelope.request.requestId === requestId
+      || childRequestIds.includes(entry.envelope.request.requestId))),
+  'accepted wire facts must stay in the new execution identity and registered request ids');
+
+  const rootCandidates = records.flatMap((record) => {
+    const context = contextHistoryFromRecord(record);
+    if (context === null || record.commitId === undefined) return [];
+    if (context.scope.operationId?.value !== started.operationId.value
+      || context.agentRuntimeId !== allocation.runtimeId
+      || context.contextView.executionEpoch !== started.executionEpoch
+      || context.previousContextCommitRef !== null) return [];
+    return [{
+      context,
+      commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
+    }];
+  });
+  assert.equal(rootCandidates.length, 1, 'the next execution must install one new root context');
+  const root = rootCandidates[0]!;
+  assert.deepEqual(root.context.scope, allocation.scope);
+  assert.deepEqual(root.context.contextView.activeRefs, expectedContext.contextView.activeRefs);
+  assert.deepEqual(root.context.contextView.omittedRefs, expectedContext.contextView.omittedRefs);
+  assert.deepEqual(root.context.durableContext, expectedContext.durableContext);
+  assert.equal(root.context.durableContextDigest, expectedContext.durableContextDigest);
+  assert.ok(root.context.contextView.activeRefs.includes(c3aAcceptedRef));
+  assert.ok(!root.context.contextView.activeRefs.includes(c3aWrongRef));
+  assert.ok(root.context.contextView.omittedRefs.includes(c3aWrongRef));
+
+  const nextWires = http.wires.slice(wireOffset);
+  const executionWires = nextWires.filter((wire) => plannerPayload(wire.body) === undefined
+    && hasTurnEndSurface(wire.body) && !isPostStandardEndContinuation(wire.body));
+  assert.equal(executionWires.length, 1, 'the next execution must issue one real execution request');
+  const executionText = wireText(executionWires[0]!.body);
+  assert.ok(executionText.some((text) => text.includes('next turn input')));
+  assert.ok(['accepted reasoning', 'accepted tool result', 'retained duty']
+    .every((semantic) => executionText.some((text) => text.includes(semantic))),
+  'the actual next wire must retain the accepted context semantics and duty');
+  assert.ok(executionText.some((text) => text.includes('C3A prior-v2 resumed semantic marker')),
+    'the actual next wire must consume the resumed v2 checkpoint semantics');
+  assert.ok(!executionText.some((text) => text.includes(c3aWrongRef)),
+    'the corrected wrong ref must not return as active reasoning');
+
+  const closureCandidate = records.flatMap((record) => {
+    const closure = closureFromRecord(record);
+    if (closure === null || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') return [];
+    if (closure.recoveryBinding?.contextCommitRef.commitId !== root.commitRef.commitId
+      || record.scope.operationId?.value !== started.operationId.value
+      || record.commitId === undefined) return [];
+    return [{
+      closure,
+      commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
+    }];
+  });
+  assert.equal(closureCandidate.length, 1, 'the next standard closure must bind its own root context');
+  const closure = closureCandidate[0]!;
+  assert.equal(closure.closure.recoveryBinding?.coreClosure.executionEpoch, started.executionEpoch,
+    'the next closure must carry the new allocation epoch');
+
+  const control = readOperationControlFromRecords(records, {
+    scope: allocation.scope,
+    agentRuntimeId: allocation.runtimeId,
+    harnessExecutionEpoch: allocation.executionEpoch,
+  });
+  assert.equal(control.state, 'complete', control.state === 'complete' ? undefined : control.reason);
+  if (control.state !== 'complete') throw new Error(control.reason);
+  const parent = control.operations.find((operation) =>
+    operation.intent.operationId.value === started.operationId.value);
+  if (parent === undefined) throw new Error('the next allocation has no parent operation-control record');
+  assert.equal(parent.binding.harnessExecutionEpoch, started.executionEpoch);
+  const parentRecord = records.find((record) =>
+    record.payload?.['kind'] === 'operation-control-envelope/v1'
+    && (record.payload['event'] as { readonly eventId?: string } | undefined)?.eventId
+      === `parent-admitted:${started.operationId.value}`);
+  if (parentRecord === undefined) throw new Error('the next allocation has no parent admission envelope');
+  const parentEvent = parentRecord.payload!['event'] as { readonly executionEpoch?: number };
+  const parentControl = parentRecord.payload!['control'] as { readonly executionEpoch?: number };
+  assert.equal(parentEvent.executionEpoch, started.executionEpoch);
+  assert.equal(parentControl.executionEpoch, started.executionEpoch);
+
+  const progress = latestNativeSaveProgress(records);
+  assert.ok(progress, 'the next execution must commit native-save progress');
+  assert.equal(progress!.key.checkpoint.scope.operationId?.value, started.operationId.value);
+  assert.equal(progress!.key.turn.turnId, nextTurnId);
+  assert.deepEqual(progress!.phases.filter((phase) => phase.state === 'committed')
+    .map((phase) => phase.phase).sort(), [...NATIVE_SAVE_PHASES].sort());
+
+  const duties = records.filter((record) => record.payload?.type === 'closed-turn-planner-call')
+    .map((record) => record.payload!.record as ClosedTurnPlannerCallRecord)
+    .filter((record) => record.duty.checkpointId.value === progress!.key.checkpoint.id.value);
+  assert.deepEqual(duties.map((record) => record.stage), ['prepared', 'invoked', 'returned'],
+    'the new standard closure must reach its own independent Planner return');
+  assert.ok(duties.every((record) => record.duty.scope.operationId?.value === started.operationId.value));
+  const publication = await new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal,
+    () => new Date(at)).readPublicOutputs({ scope: allocation.scope, executionEpoch: started.executionEpoch });
+  assert.equal(publication.state, 'committed');
+  assert.equal(publication.commits.length, 1);
+  const publicationText = publication.commits[0]!.text;
+  assert.equal(publicationText, 'Next execution completed from the corrected forward context.');
+  assert.equal(await readFile(fixture.effectPath, 'utf8'), effectBefore);
+  assert.equal(effectRecordCount(records, fixture.effect.effectId), effectsBefore,
+    'starting the next execution must not replay the confirmed effect');
+
+  const after = await checkpoints.readExecutionPosition(taskScope);
+  assert.equal(after?.executionEpoch, started.executionEpoch);
+  return {
+    operationId: started.operationId.value,
+    executionEpoch: started.executionEpoch,
+    rootCommitId: root.commitRef.commitId,
+    requestId,
+    closureCommitId: closure.commitRef.commitId,
+    parentControlCommitId: parentRecord.commitId!,
+    plannerStage: 'returned',
+    publicationText,
+  };
+}
+
 /**
  * The full cold-resume assertion surface, shared by the in-process consumer
  * case and by the fresh resume child. Only the resume child runs it for the
@@ -1803,7 +2435,7 @@ async function runResumeAssertions(fixture: ColdFixture, model: string): Promise
   const selected = await controlledColdResumeSelector(fixture)({
     taskId: fixture.taskId, operationId: fixture.allocation.operationId,
   });
-  const http = await upstream(model, fixture.acceptedEvidenceLocator);
+  const http = await upstream(model, fixture.acceptedEvidenceLocator, fixture);
   let assemblies: ReturnType<typeof buildResumeRuntime>['assemblies'] = [];
   let succeeded = false;
   try {
@@ -1995,7 +2627,7 @@ async function runHttpResumeAssertions(
 ): Promise<string> {
   const interrupted = mode === true;
   const initialOpen = mode === 'initial-open';
-  const provider = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator);
+  const provider = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
   const prefix = await readFile(fixture.journalPath, 'utf8');
   const before = (await fixture.journal.verify()).records;
   const priorSegments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
@@ -2122,8 +2754,11 @@ async function runHttpResumeAssertions(
     succeeded = true;
     return archiveRoot;
   } finally {
-    await app?.close();
-    await provider.close();
+    try {
+      await app?.close();
+    } finally {
+      await provider.close();
+    }
     await mkdir(EVIDENCE_ROOT, { recursive: true });
     await writeFile(join(EVIDENCE_ROOT, `http-${fixture.root.split('/').at(-1)}-wires.json`),
       JSON.stringify(provider.wires, null, 2), 'utf8');
@@ -2142,7 +2777,7 @@ function registerPublicConsumers(): void {
     assert.deepEqual(fixture.assignment.expectedOutputRefs, ['original-output']);
     assert.deepEqual(fixture.assignment.targetRefs, ['original-target', 'original-delivery-text-target']);
     const deliveryText = '已恢复原任务。确认的文件与副作用保持不变。\n最终业务结果：冷恢复交付完成。';
-    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, deliveryText);
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture, deliveryText);
     const owned: ResumeAssembly[] = [];
     let succeeded = false;
     try {
@@ -2381,7 +3016,7 @@ function registerPublicConsumers(): void {
 
   test('public resumeExecution holds with zero generation and zero effects when the current grant denies the resumed incarnation', async () => {
   const fixture = await buildColdFixture('resume-grant-denied');
-  const http = await upstream('cold-resume-denied.model', fixture.acceptedEvidenceLocator);
+  const http = await upstream('cold-resume-denied.model', fixture.acceptedEvidenceLocator, fixture);
   let assemblies: ReturnType<typeof buildResumeRuntime>['assemblies'] = [];
   let succeeded = false;
   try {
@@ -2457,9 +3092,298 @@ function registerPublicConsumers(): void {
     if (resumeRun.stderr.length > 0) await writeFile(join(archiveRoot!, 'resume-child.stderr.log'), resumeRun.stderr, 'utf8');
     await rm(root, { recursive: true, force: true });
   });
+
+  // C3a target behavior. After a committed confirmed control the next fresh turn
+  // must allocate strictly above the committed epoch floor, seed from the active
+  // context and bind its own turn context receipt. Failure mode: the next turn
+  // keeps the old epoch/context receipt. Probability: unknown. Impact: the
+  // request is rejected or the closure binds the predecessor context. Cost: the
+  // existing fixture, provider wire capture and one scoped start.
+  //
+  // Observed at candidate base: the bound Service confirmed-control facade
+  // reaches the real C1 owner. This rejection case seeds one genuinely
+  // outstanding request (dispatched with no terminal phase), so the settled
+  // current-incarnation guard still refuses real unsettled work. The retained
+  // prepared operation then refuses a plain restart with 'task.busy'. The test
+  // records these exact facts and does not loosen either guard.
+  test('C3a confirmed-control facade is bound and the existing guards refuse an unsettled prepared fixture', async () => {
+    const fixture = await buildColdFixture('c3a-control-blocked', ['original-output'], ['original-target'], false,
+      'c3a-control-pending-request');
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
+    let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+    let succeeded = false;
+    try {
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true);
+      const journalBefore = await readFile(fixture.journalPath, 'utf8');
+      const unsettled = readCurrentFromRecords((await fixture.journal.verify()).records,
+        { organId, taskId: fixture.taskId });
+      assert.equal(unsettled.state, 'known');
+      if (unsettled.state !== 'known') throw new Error(unsettled.reason);
+      assert.ok(unsettled.unresolvedDisplacedRefs.includes('c3a-control-pending-request'),
+        'the rejection case must carry a genuinely outstanding request');
+      const checkpoints = createJsonlCheckpointJournal({ filePath: fixture.journalPath, journal: fixture.journal });
+      const positionBefore = await checkpoints.readExecutionPosition({ organId, taskId: fixture.taskId });
+      assert.equal(positionBefore?.executionEpoch, fixture.allocation.executionEpoch);
+      // The Service facade is bound and forwards to the real C1 owner; the owner
+      // refuses the unsettled current incarnation without appending anything.
+      await assert.rejects(
+        () => app!.service.executeConfirmedTaskContextCorrection({
+          taskScope: { organId, taskId: fixture.taskId },
+          commandId: 'c3a-control-blocked',
+          wrongRefs: [{ taskScope: { organId, taskId: fixture.taskId }, ref: 'accepted-prefix' }],
+          repairText: 'drop the superseded prefix',
+          confirmationRef: 'c3a-control-blocked-confirmation',
+        }),
+        /confirmed transition requires a settled current incarnation with no unresolved displaced work/,
+      );
+      assert.equal(await readFile(fixture.journalPath, 'utf8'), journalBefore,
+        'a refused confirmed control must append no durable record');
+      const positionAfter = await checkpoints.readExecutionPosition({ organId, taskId: fixture.taskId });
+      assert.equal(positionAfter?.executionEpoch, positionBefore?.executionEpoch,
+        'a refused control must not advance the canonical execution position');
+      // The retained prepared operation is not silently restarted as a new turn.
+      await assert.rejects(
+        () => app!.service.startExecution(fixture.taskId, { prompt: 'next turn input' }),
+        (error: unknown) => (error as { readonly code?: string }).code === 'task.busy',
+      );
+      assert.equal(http.wires.length, 0, 'a refused control and start must issue no provider request');
+      succeeded = true;
+    } finally {
+      try {
+        if (app !== undefined) await app.close();
+      } finally {
+        await http.close();
+      }
+      if (succeeded) await rm(fixture.root, { recursive: true, force: true });
+      else console.error(`c3a blocked fixture retained for evidence at ${fixture.root}`);
+    }
+  });
+
+  // C3a live floor. The Coordinator must advance its in-memory task execution
+  // epoch to the committed confirmed-control epoch and never lower it. Failure
+  // mode: a repeated or stale receipt lowers the floor. Probability: unknown.
+  // Impact: the next fresh allocation lands at or below a committed control.
+  // Cost: the existing fixture and three public Coordinator calls.
+  test('C3a Coordinator advances the live execution-epoch floor monotonically', async () => {
+    const fixture = await buildColdFixture('c3a-floor');
+    const runtime = buildResumeRuntime(fixture, 'http://127.0.0.1:1', 'cold-resume.model');
+    const { coordinator } = runtime;
+    try {
+      const before = coordinator.taskSnapshot(fixture.taskId).executionEpoch;
+      assert.equal(before, fixture.allocation.executionEpoch);
+      coordinator.synchronizeCommittedExecutionEpoch(fixture.taskId, 5);
+      assert.equal(coordinator.taskSnapshot(fixture.taskId).executionEpoch, 5,
+        'the committed confirmed-control epoch becomes the live floor');
+      // A stale or repeated receipt never lowers the floor.
+      coordinator.synchronizeCommittedExecutionEpoch(fixture.taskId, 3);
+      coordinator.synchronizeCommittedExecutionEpoch(fixture.taskId, 5);
+      assert.equal(coordinator.taskSnapshot(fixture.taskId).executionEpoch, 5,
+        'the live execution-epoch floor is monotonic');
+    } finally {
+      for (const assembly of runtime.assemblies) await assembly.runtimePool.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // C3a settled. The original execution must be closed by the real standard
+  // tail before a confirmed correction may read the request as settled. Failure
+  // mode: an early dispatching/dispatched phase keeps the later settled phase
+  // invisible and the guard refuses a lawfully closed incarnation. Probability
+  // UNKNOWN. Impact: the N2 confirmed-control chain is unreachable even after a
+  // real standard closure. Cost: one existing fixture, one public resume and
+  // one public correction.
+  test('C3a settled execution reaches a lawful confirmed correction after the real standard tail', async () => {
+    const fixture = await buildColdFixture('c3a-settled');
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
+    let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+    let succeeded = false;
+    try {
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true);
+      const taskScope: ScopeRef = { organId, taskId: fixture.taskId };
+      const checkpoints = createJsonlCheckpointJournal({ filePath: fixture.journalPath, journal: fixture.journal });
+      const positionBefore = await checkpoints.readExecutionPosition(taskScope);
+      assert.equal(positionBefore?.executionEpoch, fixture.allocation.executionEpoch,
+        'the fixture starts on the displaced execution epoch');
+
+      // The real public resume awaits the standard tail: closure, Planner
+      // alignment and the standard advance, not only the provider dispatch.
+      const release = await app.service.resumeExecution(fixture.taskId, {
+        operationId: fixture.allocation.operationId,
+      });
+      assert.equal(release.state, 'released');
+      assert.ok(http.wires.length > 0, 'the resumed execution must reach the controlled Provider');
+
+      const records = (await fixture.journal.verify()).records;
+      const positionAfter = await checkpoints.readExecutionPosition(taskScope);
+      assert.ok(positionAfter !== null, 'the standard tail must commit a canonical execution position');
+      assert.equal(positionAfter!.executionEpoch, fixture.allocation.executionEpoch + 1,
+        'the standard tail advances the canonical position above the displaced epoch');
+
+      // The original request has an early dispatching/dispatched sequence and a
+      // later settled phase. The latest verified phase must win.
+      const requestPhases: string[] = [];
+      for (const record of decodeActiveTurnRecords(records, fixture.businessTurnId)) {
+        if (record.kind !== 'request') continue;
+        if (record.record.request.requestId !== 'accepted-tool-request') continue;
+        requestPhases.push(record.record.phase);
+      }
+      assert.deepEqual(requestPhases, ['dispatching', 'dispatched', 'settled'],
+        'the fixture records the full request lifecycle before resume');
+
+      const current = readCurrentFromRecords(records, taskScope);
+      assert.equal(current.state, 'known');
+      if (current.state !== 'known') throw new Error(current.reason);
+      assert.ok(!current.unresolvedDisplacedRefs.includes('accepted-tool-request'),
+        'a settled request must not remain an unresolved displaced obligation');
+
+      // The public confirmed correction resolves the authoritative current
+      // facts, grant and operation control itself. The caller supplies only the
+      // confirmed business intent.
+      const receipt = await app.service.executeConfirmedTaskContextCorrection({
+        taskScope,
+        commandId: 'c3a-settled-correction',
+        wrongRefs: [{ taskScope: { organId, taskId: fixture.taskId }, ref: 'accepted-prefix' }],
+        repairText: 'drop the superseded prefix after the standard tail settled the original turn',
+        confirmationRef: 'c3a-settled-confirmation',
+      });
+      assert.equal(receipt.record.newExecutionEpoch, positionAfter!.executionEpoch + 1,
+        'the confirmed correction advances the canonical position');
+      assert.ok(!receipt.record.correctedContext.contextView.activeRefs.includes('accepted-prefix'),
+        'the confirmed correction removes the wrong active ref');
+      assert.ok(receipt.record.correctedContext.contextView.omittedRefs.includes('accepted-prefix'),
+        'the confirmed correction retains the wrong ref as omitted');
+      const positionCorrected = await checkpoints.readExecutionPosition(taskScope);
+      assert.equal(positionCorrected?.executionEpoch, receipt.record.newExecutionEpoch,
+        'the committed correction is durable at its new execution epoch');
+      console.log(JSON.stringify({
+        c3aSettled: {
+          release,
+          providerWires: http.wires.length,
+          requestPhases,
+          positionBeforeEpoch: positionBefore?.executionEpoch,
+          positionAfterEpoch: positionAfter?.executionEpoch,
+          unresolvedBeforeCorrection: current.unresolvedDisplacedRefs,
+          correctionCommitId: receipt.commitRef.commitId,
+          correctionExecutionEpoch: receipt.record.newExecutionEpoch,
+          expectedGrantCommitId: receipt.record.expectedGrantCommitRef.commitId,
+          expectedOperationControlCommitId: receipt.record.expectedOperationControlCommitRef.commitId,
+          expectedControlCommitId: receipt.record.basis.expectedControlReceipt.commitId,
+          expectedContextCommitId: receipt.record.basis.expectedContextReceipt.commitId,
+          sourceCheckpointCommitId: receipt.record.basis.sourceCheckpointReceipt.commitId,
+          coverageCommitId: receipt.coverageCommitRef.commitId,
+          correctedActiveRefs: receipt.record.correctedContext.contextView.activeRefs,
+          correctedOmittedRefs: receipt.record.correctedContext.contextView.omittedRefs,
+          positionCorrectedEpoch: positionCorrected?.executionEpoch,
+        },
+      }));
+      succeeded = true;
+    } finally {
+      try {
+        if (app !== undefined) await app.close();
+      } finally {
+        await http.close();
+      }
+      if (succeeded) await rm(fixture.root, { recursive: true, force: true });
+      else console.error(`c3a settled fixture retained for evidence at ${fixture.root}`);
+    }
+  });
+
+  // Same failure impact as hot, plus cold loss of the committed control floor
+  // or lineage. Cost: two sequential child processes over one durable fixture.
+  test('C3a fresh process hydrates the confirmed-control floor and closes the next execution', async () => {
+    const compiledPath = new URL(import.meta.url).pathname;
+    const seed = spawnColdProcess([compiledPath, '--cold-process=c3a-seed']);
+    const seeded = await collectColdProcess(seed);
+    assert.equal(seeded.close.code, 0, seeded.stderr);
+    assert.equal(seeded.close.signal, null);
+    assert.equal(seed.pid, seeded.receipt.pid);
+    assert.ok(seed.pid !== process.pid);
+    // collectColdProcess resolves only after natural close. No control object
+    // crosses the boundary; the new PID derives floor and lineage from owners.
+    const next = spawnColdProcess([compiledPath, '--cold-process=c3a-next',
+      '--fixture-root', seeded.receipt.root, '--task-id', seeded.receipt.taskId]);
+    const resumed = await collectColdProcess(next);
+    assert.equal(resumed.close.code, 0, resumed.stderr);
+    assert.equal(resumed.close.signal, null);
+    assert.equal(next.pid, resumed.receipt.pid);
+    assert.ok(next.pid !== seed.pid && next.pid !== process.pid);
+    assert.equal(resumed.receipt.root, seeded.receipt.root);
+    assert.equal(resumed.receipt.taskId, seeded.receipt.taskId);
+    const receipt = { seed: { ...seeded.receipt, ...seeded.close },
+      next: { ...resumed.receipt, ...resumed.close }, seedClosedBeforeNextSpawned: true };
+    await writeFile(join(EVIDENCE_ROOT, 'c3a-process-boundary.json'), JSON.stringify(receipt, null, 2), 'utf8');
+    await writeFile(join(EVIDENCE_ROOT, 'c3a-seed-child.log'), seeded.stdout, 'utf8');
+    await writeFile(join(EVIDENCE_ROOT, 'c3a-next-child.log'), resumed.stdout, 'utf8');
+    console.log(JSON.stringify({ c3aFresh: receipt }));
+    await rm(seeded.receipt.root, { recursive: true, force: true });
+  });
+
+  // C3a hot. One live Service must carry the real standard tail through
+  // correction, exact-target rewind and forward, then start and close the next
+  // execution above the committed control floor. Failure mode: the next turn
+  // reuses the predecessor root/request/closure or resurrects the corrected
+  // wrong ref. Probability UNKNOWN. Impact: long-horizon reorientation loses its
+  // current goal or binds the wrong turn identity. Cost: the existing fixture,
+  // controlled Provider and one scoped next execution.
+  test('C3a hot confirmed-control chain starts and closes the next execution with the corrected context', async () => {
+    const fixture = await buildColdFixture('c3a-hot', ['original-output'], ['original-target'],
+      false, undefined, c3aContextSeed);
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
+    let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+    let succeeded = false;
+    try {
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true);
+      const chain = await runC3aHotChain(app.service, fixture, http);
+      const receipt = {
+        mode: 'hot',
+        pid: process.pid,
+        controlFloor: chain.controlFloor,
+        resumedPositionEpoch: chain.resumedPositionEpoch,
+        correction: {
+          commitId: chain.correction.commitRef.commitId,
+          newExecutionEpoch: chain.correction.record.newExecutionEpoch,
+          targetCheckpointCommitId: chain.correction.record.basis.sourceCheckpointReceipt.commitId,
+          activeRefs: chain.correction.record.correctedContext.contextView.activeRefs,
+          omittedRefs: chain.correction.record.correctedContext.contextView.omittedRefs,
+        },
+        rewind: {
+          commitId: chain.rewind.commitRef.commitId,
+          newExecutionEpoch: chain.rewind.record.newExecutionEpoch,
+          targetCheckpointCommitId: chain.rewind.record.sourceCheckpointCommitRef.commitId,
+          activeRefs: chain.rewind.record.restoredContext.contextView.activeRefs,
+        },
+        forward: {
+          commitId: chain.forward.commitRef.commitId,
+          newExecutionEpoch: chain.forward.record.newExecutionEpoch,
+          targetCheckpointCommitId: chain.forward.record.sourceCheckpointCommitRef.commitId,
+          activeRefs: chain.forward.record.restoredContext.contextView.activeRefs,
+          omittedRefs: chain.forward.record.restoredContext.contextView.omittedRefs,
+          durableContext: chain.forward.record.restoredContext.durableContext,
+        },
+        next: chain.next,
+      };
+      const archiveRoot = await archiveC3aReceipts(fixture, http, receipt);
+      console.log(JSON.stringify({ c3aHot: { ...receipt, archiveRoot } }));
+      succeeded = true;
+    } catch (error) {
+      await archiveC3aReceipts(fixture, http, { mode: 'hot', pid: process.pid,
+        root: fixture.root, failure: String(error) });
+      throw error;
+    } finally {
+      try {
+        if (app !== undefined) await app.close();
+      } finally {
+        await http.close();
+      }
+      if (succeeded) await rm(fixture.root, { recursive: true, force: true });
+      else console.error(`c3a hot fixture retained for evidence at ${fixture.root}`);
+    }
+  });
 }
 
-if (processMode === 'seed' || processMode === 'resume') {
+if (processMode === 'c3a-seed' || processMode === 'c3a-next') {
+  await runC3aProcess();
+} else if (processMode === 'seed' || processMode === 'resume') {
   await (processMode === 'seed' ? runSeedProcess() : runResumeProcess());
 } else {
   registerPublicConsumers();

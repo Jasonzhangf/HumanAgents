@@ -61,6 +61,8 @@ export interface NativeExecutionInput {
   readonly filePath: string;
   readonly artifactsRoot: string;
   readonly activeTurnJournal: ActiveTurnJournalPort;
+  /** Per-turn segment reader for prior completed v2 turns; the query's turn ID is the authority. */
+  readonly segmentJournalFor?: (businessTurnId: string) => Pick<ActiveTurnSegmentJournalPort, 'readSegmentRecords'>;
   /** Actual shared completion port. Recovery-assets cold reads resolve completion truth through it. */
   readonly completionJournal?: OperationCompletionJournalPort;
   readonly rawEvidence: ProviderEvidenceSink;
@@ -98,6 +100,7 @@ export function createNativeExecution(input: NativeExecutionInput) {
     ...(input.completionJournal === undefined ? {} : { completionJournal: input.completionJournal }) });
   const semantic = createJsonlSemanticHistoryJournal({ filePath: input.filePath, journal: input.journal,
     artifactsRoot: input.artifactsRoot, activeTurnJournal: input.activeTurnJournal,
+    ...(input.segmentJournalFor === undefined ? {} : { segmentJournalFor: input.segmentJournalFor }),
     rawContent: input.rawContent, timeAuthority: input.timeAuthority });
 
   async function latestFullContext() {
@@ -247,14 +250,15 @@ export function createNativeExecution(input: NativeExecutionInput) {
     }
   }
 
-  async function prepareTurnClosure(checkpoint: import('../../../contracts/src/index.js').Checkpoint, boundaryId: string) {
+  async function prepareTurnClosure(checkpoint: import('../../../contracts/src/index.js').Checkpoint, boundaryId: string,
+    source: Parameters<typeof prepareCheckpointClosure>[0]['source']) {
     const frozen = await prepareCapture(boundaryId);
     const full = await latestFullContext();
     const facts = await input.owners.readClosureFacts(full.commitRef);
     if (!facts) throw new Error('native closure owner facts are unknown');
     const selector: OperationControlSelector = { scope: binding.scope, agentRuntimeId: binding.execution.runtimeId,
       harnessExecutionEpoch: binding.execution.executionEpoch };
-    const preparation = await prepareCheckpointClosure({ checkpoint, source: 'harness-control',
+    const preparation = await prepareCheckpointClosure({ checkpoint, source,
       closureReason: 'standard-turn-closure', contextCommitRef: full.commitRef, contextHistory: input.fullContext,
       operationSelector: selector, operationControl: await input.owners.readControl(selector), ...facts, closurePort: closures, now: input.now });
     return { preparation, turnRecoveryRef: frozen.captureRef };
@@ -262,7 +266,7 @@ export function createNativeExecution(input: NativeExecutionInput) {
 
   async function prepareClosure(intent: NativeSaveIntent, checkpoint: Parameters<Parameters<typeof createJsonlNativeTurnSave>[0]['prepareClosure']>[1]) {
     if (intent.closure.closureId !== `checkpoint-closure:${checkpointCommitId(checkpoint.checkpoint)}`) throw new Error('native closure requires the canonical P3 closure identity');
-    const { preparation, turnRecoveryRef } = await prepareTurnClosure(checkpoint.checkpoint, intent.key.boundaryId);
+    const { preparation, turnRecoveryRef } = await prepareTurnClosure(checkpoint.checkpoint, intent.key.boundaryId, intent.closure.source);
     const committed = await checkpoints.readCommitted(binding.scope, checkpoint.checkpoint.id);
     if (!committed) throw new Error('native bound closure requires the actual committed checkpoint');
     const submitted = await submitCheckpoint({ journal: checkpoints, closurePort: closures, ownerId: intent.ownerId,

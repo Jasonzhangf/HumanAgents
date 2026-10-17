@@ -492,10 +492,19 @@ function displacedObligationRefs(
       && fence.executionEpoch === binding.execution.executionEpoch
       && sameScope(fence.scope, binding.scope));
     if (!fenced) continue;
+    // One request identity owns one admitted turn and one request id. The codec
+    // commits each lifecycle phase as its own record, so the latest verified
+    // phase is the only current state of that request: an early dispatching or
+    // dispatched record must not outlive a later settled, failed or cancelled
+    // phase for the same identity.
+    const latestRequestPhase = new Map<string, string>();
     for (const record of turnRecords) {
-      if (record.kind === 'request' && outstandingRequestPhase(record.record.phase)) {
-        refs.push(record.record.request.requestId);
-      }
+      if (record.kind === 'request') latestRequestPhase.set(record.record.request.requestId, record.record.phase);
+    }
+    for (const [requestId, phase] of latestRequestPhase) {
+      if (outstandingRequestPhase(phase)) refs.push(requestId);
+    }
+    for (const record of turnRecords) {
       if (record.kind === 'child-invocation' && record.record.adoptedResultSeq === undefined) {
         refs.push(record.record.invocationId);
       }

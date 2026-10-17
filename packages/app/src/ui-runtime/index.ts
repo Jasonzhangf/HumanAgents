@@ -546,6 +546,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           currentStatePort: currentState,
           currentStateFacts: composition.currentStateFacts,
           resolveColdExecutionResumeRequest: composition.resolveColdExecutionResumeRequest,
+          executeConfirmedTaskContextCorrection: composition.executeConfirmedTaskContextCorrection,
+          executeConfirmedTaskCheckpointReentry: composition.executeConfirmedTaskCheckpointReentry,
         };
       },
     } : fakeAdmission === undefined ? {} : {
@@ -711,6 +713,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
 export { UiRuntimeApiError } from './errors.js';
 export { MemoryBoundExecutionDriver, MemoryContextCapture, UiRuntimeService } from './service.js';
 export type { TaskCheckpointStore, UiRuntimeMemoryComposition } from './service.js';
+export type { ServiceCheckpointReentryRequest, ServiceContextCorrectionRequest } from './execution-composition.js';
 export { FileCheckpointStore, UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
 export { FakeReplayExecutionRuntimePort } from './fake-port.js';
 export { UiRuntimeScheduler } from './scheduler.js';

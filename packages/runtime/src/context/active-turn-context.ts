@@ -65,6 +65,14 @@ function fail(code: string, message: string): never {
   throw new RuntimeActiveTurnError(code, message);
 }
 
+function projectRequestObligations(requests: readonly RuntimeRequestRecord[]): ActiveTurnProductionObligationRef[] {
+  const latest = new Map<string, RuntimeRequestRecord>();
+  for (const record of requests) latest.set(record.request.requestId, record);
+  return [...latest.values()]
+    .filter((record) => record.phase === 'dispatching' || record.phase === 'dispatched' || record.phase === 'waiting')
+    .map((record) => ({ kind: 'request', requestId: record.request.requestId, phase: record.phase }));
+}
+
 function sameScopedId(
   left: { readonly scope: string; readonly value: string } | undefined,
   right: { readonly scope: string; readonly value: string } | undefined,
@@ -704,13 +712,7 @@ export class ActiveTurnContext {
     const requests = this.requests();
     const childInvocations = this.childInvocations();
     const obligations: ActiveTurnProductionObligationRef[] = [
-      ...requests
-        .filter((record) => record.phase === 'dispatching' || record.phase === 'dispatched' || record.phase === 'waiting')
-        .map((record): ActiveTurnProductionObligationRef => ({
-          kind: 'request',
-          requestId: record.request.requestId,
-          phase: record.phase,
-        })),
+      ...projectRequestObligations(requests),
       ...projectChildObligations(childInvocations, entries),
     ];
     const initialInput = this.initialInput();
@@ -1017,13 +1019,7 @@ export class ActiveTurnSegmentContext {
     const requests = this.requests();
     const childInvocations = this.childInvocations();
     const obligations: ActiveTurnProductionObligationRef[] = [
-      ...requests
-        .filter((record) => record.phase === 'dispatching' || record.phase === 'dispatched' || record.phase === 'waiting')
-        .map((record): ActiveTurnProductionObligationRef => ({
-          kind: 'request',
-          requestId: record.request.requestId,
-          phase: record.phase,
-        })),
+      ...projectRequestObligations(requests),
       ...projectChildObligations(childInvocations, entries),
     ];
     return {
