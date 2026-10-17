@@ -14,6 +14,7 @@ import type {
   RequirementIntent,
   RequirementSubmitArguments,
   TaskId,
+  TaskFlowBinding,
   ToolIntent,
 } from '../../../contracts/src/index.js';
 import {
@@ -95,6 +96,7 @@ export interface RequirementDraftRevision {
   readonly draftRevisionVersion?: number;
   readonly draftRevisionHash?: string;
   readonly executionControlRef?: string;
+  readonly taskFlow?: TaskFlowBinding;
 }
 
 /**
@@ -113,6 +115,7 @@ export interface RegisteredDraftRevision {
   readonly taskRef?: TaskId;
   readonly payloadRef: string;
   readonly executionControlRef?: string;
+  readonly taskFlow?: TaskFlowBinding;
   /**
    * The authorization the revision is allowed to receive. A revision created
    * for `existing-task-change` can never be dispatched as a new task and vice
@@ -413,6 +416,7 @@ export class ConfirmationLedger {
       draftRevisionVersion: revision.draftRevisionVersion,
       draftRevisionHash: revision.draftRevisionHash,
       ...(revision.executionControlRef === undefined ? {} : { executionControlRef: revision.executionControlRef }),
+      ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
     });
     this.confirmations.set(input.draftId, {
       interactionId: input.interactionId,
@@ -845,6 +849,7 @@ export class RequirementSubmissionOwner {
       confirmedAt: confirmation.confirmedAt,
       fifoSeq: this.inbox.expectedNextFifoSeq,
       payloadRef: revision.payloadRef,
+      ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
     };
     if (durable && JSON.stringify(durable) !== JSON.stringify(envelope)) {
       throw new ExplicitBrainRouterError('duplicate-submit', `durable requirement submission differs from the current revision: ${revision.draftId}`);

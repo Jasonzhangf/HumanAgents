@@ -48,6 +48,7 @@ import {
   type ProviderEvent,
   type StopRequestReceipt,
   type TaskId,
+  type TaskFlowBinding,
   canonicalJsonStringify,
   type AuthorizedRequirement,
   type DraftRevision,
@@ -609,6 +610,7 @@ export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft
   readonly requestKind?: 'new-task-create' | 'existing-task-change';
   readonly taskRef?: TaskId;
   readonly executionPolicy?: ExecutionPolicyDefinition;
+  readonly taskFlow?: TaskFlowBinding;
   readonly goal?: string;
   readonly scope?: string;
   readonly constraints?: readonly string[];
@@ -5254,6 +5256,7 @@ export class UiRuntimeService {
   private requiresTypedFinalSubmit(input: ConfirmExplicitRequirementInput): boolean {
     if (input.requestKind === 'new-task-create' || input.requestKind === 'existing-task-change') return true;
     if (input.executionPolicy !== undefined) return true;
+    if (input.taskFlow !== undefined) return true;
     if (input.interactionId === undefined) return false;
     return this.explicitIntake.currentDraftRevision(input.interactionId) !== undefined;
   }
@@ -5364,6 +5367,7 @@ export class UiRuntimeService {
     if (!existingTaskChange && revision === undefined) {
       revision = await this.ensureTypedDraftRevision(interactionId, {
         executionPolicy: input.executionPolicy,
+        taskFlow: input.taskFlow,
         goal: input.goal,
         scope: input.scope,
         constraints: input.constraints,
@@ -5391,6 +5395,7 @@ export class UiRuntimeService {
         actualRevisionHash: revision.revisionHash,
       });
     }
+    let bindExecutionPolicy = false;
     if (input.executionPolicy !== undefined) {
       if (existingTaskChange && revision.executionPolicy === undefined) {
         throw new UiRuntimeApiError(
@@ -5414,14 +5419,44 @@ export class UiRuntimeService {
           409,
         );
       }
-      if (revision.executionPolicy === undefined) {
-        // Interpretation mints the reviewable draft before confirmation, so a
-        // submit that carries the execution policy must bind it through the
-        // revision owner as a new version. The app only names the base revision
-        // and the changed fields; the owner mints and persists the revision.
-        revision = await this.refineDraftWithExecutionPolicy(interactionId, revision, input, input.executionPolicy);
-        this.persistExplicitBrainState();
+      bindExecutionPolicy = revision.executionPolicy === undefined;
+    }
+    let bindTaskFlow = false;
+    if (input.taskFlow !== undefined) {
+      if (existingTaskChange && revision.taskFlow === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.existing-task-change-revision-immutable',
+          RUNTIME_OWNER,
+          'existing-task-change cannot mint a task flow revision after the caller confirmed the exact revision',
+          'refine the reviewable draft before confirmation or omit the task flow',
+          409,
+        );
       }
+      if (revision.taskFlow !== undefined
+        && (revision.taskFlow.kind !== input.taskFlow.kind
+          || revision.taskFlow.definitionVersion !== input.taskFlow.definitionVersion)) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.task-flow-binding-conflict',
+          RUNTIME_OWNER,
+          `draft revision already carries a different task flow: ${revision.draftId}`,
+          'refine the reviewable draft to the intended task flow before final submission',
+          409,
+        );
+      }
+      bindTaskFlow = revision.taskFlow === undefined;
+    }
+    if (bindExecutionPolicy || bindTaskFlow) {
+      // Interpretation mints the reviewable draft before confirmation. Bind
+      // only the missing typed inputs in one revision; an omitted input keeps
+      // the value already carried by the draft.
+      revision = await this.refineDraftWithConfirmationBindings(
+        interactionId,
+        revision,
+        input,
+        bindExecutionPolicy ? input.executionPolicy : undefined,
+        bindTaskFlow ? input.taskFlow : undefined,
+      );
+      this.persistExplicitBrainState();
     }
 
     const draftRevisionVersion = existingTaskChange ? input.draftRevisionVersion! : revision.revisionVersion;
@@ -5437,6 +5472,7 @@ export class UiRuntimeService {
       payloadRef: input.payloadRef,
       requestKind,
       ...(input.taskRef === undefined ? {} : { taskRef: input.taskRef }),
+      ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
     });
     const confirmation = await this.explicitIntake.confirmDraftRevision({
       interactionId,
@@ -5505,26 +5541,31 @@ export class UiRuntimeService {
    * and the changed policy, so the immutable revision structure stays with its
    * owner. The task body remains the human-readable normalized input.
    */
-  private async refineDraftWithExecutionPolicy(
+  private async refineDraftWithConfirmationBindings(
     interactionId: string,
     current: DraftRevision,
     input: ConfirmExplicitRequirementInput,
-    executionPolicy: ExecutionPolicyDefinition,
+    executionPolicy?: ExecutionPolicyDefinition,
+    taskFlow?: TaskFlowBinding,
   ): Promise<DraftRevision> {
     const fields: Record<string, unknown> = {
       ...(input.goal === undefined ? {} : { goal: input.goal }),
       ...(input.scope === undefined ? {} : { scope: input.scope }),
       ...(input.constraints === undefined ? {} : { constraints: input.constraints }),
       ...(input.deliverables === undefined ? {} : { deliverables: input.deliverables }),
-      executionPolicy,
+      ...(executionPolicy === undefined ? {} : { executionPolicy }),
+      ...(taskFlow === undefined ? {} : { taskFlow }),
     };
-    const idempotencyKey = `final-submit-policy:${interactionId}:${current.draftId}:${current.revisionVersion}:${canonicalJsonStringify(executionPolicy)}`;
+    const idempotencyKey = `final-submit-binding:${interactionId}:${current.draftId}:${current.revisionVersion}:${canonicalJsonStringify({
+      ...(executionPolicy === undefined ? {} : { executionPolicy }),
+      ...(taskFlow === undefined ? {} : { taskFlow }),
+    })}`;
     return await this.explicitIntake.refineDraft(interactionId, {
       draftId: current.draftId,
       baseRevisionVersion: current.revisionVersion,
       requestedRevisionHash: current.revisionHash,
       fields,
-      instructionRef: `final-submit-policy:${interactionId}`,
+      instructionRef: `final-submit-binding:${interactionId}`,
       idempotencyKey,
     });
   }
@@ -5542,6 +5583,7 @@ export class UiRuntimeService {
     interactionId: string,
     options: {
       readonly executionPolicy?: ExecutionPolicyDefinition;
+      readonly taskFlow?: TaskFlowBinding;
       readonly goal?: string;
       readonly scope?: string;
       readonly constraints?: readonly string[];
@@ -5566,6 +5608,7 @@ export class UiRuntimeService {
         knownFacts: draft.knownFacts,
         decisionRefs: draft.decisionRefs,
         ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }),
+        ...(options.taskFlow === undefined ? {} : { taskFlow: options.taskFlow }),
       });
     } catch (error) {
       // A concurrent caller may have created the revision first. Reuse that
