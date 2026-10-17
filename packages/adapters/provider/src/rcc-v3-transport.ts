@@ -6,6 +6,7 @@ import {
   type ProviderCloseResult,
   type ProviderError,
   type ProviderExecutionIdentityRef,
+  type ProviderRequestIdentityRef,
   type ProviderReadiness,
   type ProviderRecoveryResult,
   type ProviderObserveInput,
@@ -970,7 +971,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return { body, response };
   }
 
-  private requestReceipt(input: ProviderExecutionIdentityRef, body: string, wire: {
+  private requestReceipt(input: ProviderExecutionIdentityRef & Partial<ProviderRequestIdentityRef>, body: string, wire: {
     readonly status: number;
     readonly endpoint: string;
     readonly protocol: 'responses' | 'anthropic' | 'openai';
@@ -987,7 +988,13 @@ export class RccV3ProviderTransport implements ProviderTransport {
       ...(input.cycleId === undefined ? {} : { cycleId: input.cycleId }),
       executionEpoch: input.executionEpoch,
     };
-    return { body, identity, ...wire };
+    return {
+      body, identity,
+      ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+      ...(input.parentRequestId === undefined ? {} : { parentRequestId: input.parentRequestId }),
+      ...wire,
+    };
   }
 
   private errorEvidence(scope: ScopeRef, label: string): EvidenceRef {
