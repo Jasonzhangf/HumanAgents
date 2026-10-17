@@ -24,6 +24,7 @@ import {
   type InspectionOccurrenceFacts,
 } from '../../../packages/runtime/src/agent-loop/inspection-turn-boundary.js';
 import { createInspectionRuntimeHelpers, type InspectionRuntimeHelperDependencies } from '../../../packages/runtime/src/agent-loop/inspection-runtime-helpers.js';
+import { createRuntimeInspectionStopSettlementPort } from '../../../packages/runtime/src/agent-loop/inspection-stop-completion.js';
 import { createPublishedTaskPlanRevision } from '../../../packages/core/src/task-plan-revision.js';
 import type {
   ActiveTurnCaptureBody,
@@ -241,6 +242,91 @@ test('inspection runtime helpers treat a stop without an opened occurrence as no
   f.failForCheckpoint();
 
   assert.deepEqual(await f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), []);
+});
+
+test('inspection stop completion helper rejects unresolved facts for a known exact turn opening', async () => {
+  // Failure basis: a known exact-turn opening was conflated with no occurrence. Impact: stop recovery can report
+  // not-applicable without the required durable facts. Probability: unknown. Cost: one existing helper fixture.
+  const f = inspectionHelperConsumer();
+  const helper = f.helpers();
+  const context = await helper.selectionReader.readSelectionContext('inspection-turn');
+  await helper.occurrenceOpening.open({
+    context,
+    logicalTurnId: 'inspection-turn',
+    executionScope: scope,
+    assignment: f.assignment,
+    checkId: 'a',
+  });
+  const checkpoint: CommittedCheckpointRecord = { checkpoint: { id: id('checkpoint', 'stop-unresolved'), scope,
+    cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 1,
+    outcome: 'stopped', summary: 'stop with unresolved facts', recoveryStateRef: f.raw.ref, evidenceRefs: [], next: { kind: 'stop' } },
+    previous: null, commitRef: f.receipt('stop-unresolved-checkpoint') };
+  const body = { ...f.capture(), binding: { ...f.capture().binding, acceptedPlan: undefined } };
+  const receipt = { commitIdentity: 'committed:unresolved', journalReceiptRef: 'journal:unresolved',
+    commitFactDigest: 'fact:unresolved', journalSeq: 2, recordDigest: 'record:unresolved',
+    turnId: 'inspection-turn', boundaryId: 'boundary', capture: f.raw };
+  const readback = { receipt, prepared: { body, controlRecordCount: 0, producerDrains: [], completionLookups: [],
+    recovery: { recoveryResponsibilityRef: 'recovery', unresolvedOperationRefs: [], rawTurnRefs: [], laterErrorRefs: [],
+      commitIdentity: 'save', stages: [], durablePhases: [], durableReceiptRefs: [] } } };
+  f.stop(checkpoint, { turn: context.turn, boundaryId: 'boundary', recoveryAssetsReceiptRef: 'committed:unresolved',
+    assets: {
+      readRecoveryAssetsExact: async () => readback,
+      readBoundaryRecoveryAssetsExact: async () => ({ version: 1, assets: readback }),
+    },
+    segments: {
+      readInitialOpenExact: async () => { throw new Error('unexpected initial-open'); },
+      readSegmentInterruptedExact: async () => { throw new Error('unexpected interrupted'); },
+    } });
+
+  await assert.rejects(
+    () => f.helpers().occurrences.readOccurrencesForStop({ checkpoint }),
+    /unresolved required facts/,
+  );
+});
+
+test('inspection stop completion helper does not resettle a historical turn opening', async () => {
+  // Failure basis: a stop read could widen to another historical logical turn sharing the cycle. Impact: a later
+  // stop resettles old inspection work. Probability: unknown. Cost: one existing helper fixture.
+  const f = inspectionHelperConsumer();
+  const first = f.helpers();
+  const firstContext = await first.selectionReader.readSelectionContext('inspection-turn');
+  await first.occurrenceOpening.open({
+    context: firstContext,
+    logicalTurnId: 'inspection-turn',
+    executionScope: scope,
+    assignment: f.assignment,
+    checkId: 'a',
+  });
+  const historicalOpening = f.entries.find(({ record }) => record.kind === 'inspection-occurrence-opened')!;
+  const nextTurnId = 'inspection-turn-2';
+  f.setCapture({ ...f.capture(), binding: { ...f.capture().binding,
+    admittedTurn: { ...f.capture().binding.admittedTurn, turnId: nextTurnId } } });
+  f.resources.logicalTurnId = nextTurnId;
+  const checkpoint: CommittedCheckpointRecord = { checkpoint: { id: id('checkpoint', 'stop-next-turn'), scope,
+    cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 1,
+    outcome: 'stopped', summary: 'stop next turn', recoveryStateRef: f.raw.ref, evidenceRefs: [], next: { kind: 'stop' } },
+    previous: null, commitRef: f.receipt('stop-next-turn-checkpoint') };
+  const context = await f.helpers().selectionReader.readSelectionContext(nextTurnId);
+  const body = { ...f.capture() };
+  const receipt = { commitIdentity: 'committed:next-turn', journalReceiptRef: 'journal:next-turn',
+    commitFactDigest: 'fact:next-turn', journalSeq: 2, recordDigest: 'record:next-turn',
+    turnId: nextTurnId, boundaryId: 'boundary', capture: f.raw };
+  const readback = { receipt, prepared: { body, controlRecordCount: 0, producerDrains: [], completionLookups: [],
+    recovery: { recoveryResponsibilityRef: 'recovery', unresolvedOperationRefs: [], rawTurnRefs: [], laterErrorRefs: [],
+      commitIdentity: 'save', stages: [], durablePhases: [], durableReceiptRefs: [] } } };
+  f.stop(checkpoint, { turn: context.turn, boundaryId: 'boundary', recoveryAssetsReceiptRef: 'committed:next-turn',
+    assets: {
+      readRecoveryAssetsExact: async () => readback,
+      readBoundaryRecoveryAssetsExact: async () => ({ version: 1, assets: readback }),
+    },
+    segments: {
+      readInitialOpenExact: async () => { throw new Error('unexpected initial-open'); },
+      readSegmentInterruptedExact: async () => { throw new Error('unexpected interrupted'); },
+    } });
+
+  assert.deepEqual(await f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), []);
+  assert.equal(f.entries.find(({ record }) => record.kind === 'inspection-occurrence-opened'), historicalOpening);
+  assert.equal(f.entries.some(({ record }) => record.kind === 'inspection-occurrence-settled'), false);
 });
 
 const observationProfile: AgentModeCapabilityProfile = {
@@ -1569,4 +1655,201 @@ test('inspection turn boundary consumer only settles a committed stopped checkpo
     () => boundary.settleStop({ checkpoint: { ...stopped, checkpoint: { ...stopped.checkpoint, outcome: 'succeeded' } } }),
     /exact committed checkpoint/,
   );
+});
+
+test('inspection stop completion rejects an existing cycle close for another checkpoint', async () => {
+  // Failure basis: existingClose returned without checking its checkpoint, settlement, outcome or next action.
+  // Impact: a false complete receipt for unrelated durable history. Probability: unknown. Cost: one local consumer.
+  const committedAt = '2026-10-17T00:00:00.000Z';
+  const checkpoint = {
+    checkpoint: {
+      id: id('checkpoint', 'inspection-close-conflict'),
+      scope,
+      cycleId: scope.cycleId!,
+      seq: 2,
+      previousCheckpointId: null,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'stopped',
+      summary: 'stop inspection',
+      recoveryStateRef: { evidenceId: id('evidence', 'inspection-close-recovery'), kind: 'operation', source: 'test', locator: 'checkpoint', scope },
+      evidenceRefs: [],
+      next: { kind: 'stop' },
+    },
+    previous: null,
+    commitRef: { commitId: 'checkpoint:inspection-close-conflict', journalSeq: 4, recordDigest: digest('checkpoint-close-conflict') },
+  } as const;
+  const openingCommitRef = { commitId: 'opening:inspection-close-conflict', journalSeq: 3, recordDigest: digest('opening-close-conflict') };
+  const cycleOpenedCommitRef = { commitId: 'cycle:inspection-close-conflict', journalSeq: 2, recordDigest: digest('cycle-close-conflict') };
+  const settlementCommitRef = { commitId: 'settlement:inspection-close-conflict', journalSeq: 5, recordDigest: digest('settlement-close-conflict') };
+  const wrongCheckpointCommitRef = { commitId: 'checkpoint:inspection-close-other', journalSeq: 6, recordDigest: digest('checkpoint-close-other') };
+  const wrongSettlementCommitRef = { commitId: 'settlement:inspection-close-other', journalSeq: 7, recordDigest: digest('settlement-close-other') };
+  const settlementEntry = {
+    record: {
+      kind: 'inspection-occurrence-settled',
+      schemaVersion: 1,
+      openingCommitRef,
+      occurrence: { scope: scope as typeof scope & { taskId: NonNullable<typeof scope.taskId> }, occurrenceId: 'inspection-close-conflict' },
+      definition: { definitionId: 'inspection-definition-close-conflict', definitionVersion: '1' },
+      itemResultCommitRefs: [],
+      outcome: { status: 'unknown', reason: 'stopped before inspection completed' },
+      checkpointCommitRef: checkpoint.commitRef,
+      settledAt: committedAt,
+    },
+    commitRef: settlementCommitRef,
+  } as const;
+  const occurrence: InspectionOccurrenceFacts = {
+    logicalTurnId: 'turn-inspection-close-conflict',
+    opening: {
+      record: {
+        kind: 'inspection-occurrence-opened',
+        schemaVersion: 1,
+        logicalTurnId: 'turn-inspection-close-conflict',
+        occurrence: { scope: scope as typeof scope & { taskId: NonNullable<typeof scope.taskId> }, occurrenceId: 'inspection-close-conflict' },
+        executionScope: scope,
+        cycleId: scope.cycleId!.value,
+        executionEpoch: 1,
+        definition: { definitionId: 'inspection-definition-close-conflict', definitionVersion: '1' },
+        definitionCommitRef: { commitId: 'definition:inspection-close-conflict', journalSeq: 1, recordDigest: digest('definition-close-conflict') },
+        definitionDigest: `sha256:${'5'.repeat(64)}`,
+        planRevisionCommitRef: { commitId: 'plan:inspection-close-conflict', journalSeq: 1, recordDigest: digest('plan-close-conflict') },
+        cycleOpenedCommitRef,
+        scheduleOccurrenceRef: null,
+        openedAt: committedAt,
+      },
+      commitRef: openingCommitRef,
+    },
+    cycleOpening: {
+      record: {
+        kind: 'business-cycle-opened',
+        schemaVersion: 1,
+        cycle: { id: scope.cycleId!, scope, directiveRevision: 1, executionEpoch: 1, state: 'admitted' },
+        taskFlow: { kind: 'inspection', definitionVersion: 1 },
+        planRevisionCommitRef: { commitId: 'plan:inspection-close-conflict', journalSeq: 1, recordDigest: digest('plan-close-conflict') },
+        previousCycleCommitRef: null,
+        openedAt: committedAt,
+        openingReason: 'inspection close conflict',
+      },
+      commitRef: cycleOpenedCommitRef,
+    },
+    deliveries: [],
+    items: [],
+    settlement: settlementEntry,
+    close: {
+      record: {
+        kind: 'business-cycle-closed',
+        schemaVersion: 1,
+        openedCommitRef: cycleOpenedCommitRef,
+        cycleId: scope.cycleId!,
+        outcome: 'stop',
+        checkpointCommitRef: wrongCheckpointCommitRef,
+        milestoneAlignmentCommitRefs: [],
+        inspectionSettlementCommitRef: wrongSettlementCommitRef,
+        next: { kind: 'stop' },
+        closedAt: committedAt,
+      },
+      commitRef: { commitId: 'close:inspection-close-conflict', journalSeq: 8, recordDigest: digest('close-close-conflict') },
+    },
+  };
+  const boundary = new InspectionTurnBoundary({
+    selectionReader: { readSelectionContext: async () => { throw new Error('stop must not select'); } },
+    journal: {
+      commit: async () => { throw new Error('conflicting close must not commit'); },
+      read: async () => { throw new Error('stop must use list'); },
+      list: async () => ({ entries: [settlementEntry] }),
+    },
+    occurrenceOpening: { open: async () => { throw new Error('stop must not open'); } },
+    acceptedDeliveryReader: { readAcceptedDelivery: async () => null },
+    acceptedDelivery: { accept: async () => null },
+    occurrences: {
+      readOccurrenceForTurn: async () => null,
+      readOccurrencesForStop: async () => [occurrence],
+    },
+    checkpoints: {
+      readCommitted: async () => checkpoint,
+      readCheckpointRecoveryBinding: async () => null,
+      readNativeCheckpoint: async () => checkpointRelationship(checkpoint, committedAt),
+    },
+    clock: { now: () => new Date(committedAt) },
+  });
+
+  await assert.rejects(() => boundary.settleStop({ checkpoint }), /cycle close/);
+});
+
+test('inspection stop completion query precedes recovery and reuses its exact settlement', async () => {
+  // Failure basis: action and query disagree on durability, or a pure query writes settlement facts.
+  // Impact: false completion or missed recovery. Probability: unknown. Cost: one existing consumer.
+  const f = inspectionHelperConsumer();
+  const helpers = f.helpers();
+  const context = await helpers.selectionReader.readSelectionContext('inspection-turn');
+  await helpers.occurrenceOpening.open({ context, logicalTurnId: 'inspection-turn', executionScope: scope,
+    assignment: f.assignment, checkId: 'a' });
+  const checkpoint: CommittedCheckpointFixture = { checkpoint: { id: id('checkpoint', 'stop-completion'), scope,
+    cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 1,
+    outcome: 'stopped', summary: 'stop inspection', recoveryStateRef: f.raw.ref, evidenceRefs: [], next: { kind: 'stop' } },
+    previous: null, commitRef: { commitId: 'checkpoint:stop-completion', journalSeq: 9,
+      recordDigest: digest('checkpoint-stop-completion') } };
+  const receipt = { commitIdentity: 'committed:stop-completion', journalReceiptRef: 'journal:stop-completion',
+    commitFactDigest: 'fact:stop-completion', journalSeq: 2, recordDigest: 'record:stop-completion',
+    turnId: 'inspection-turn', boundaryId: 'boundary', capture: f.raw };
+  const readback = { receipt, prepared: { body: f.capture(), controlRecordCount: 0, producerDrains: [], completionLookups: [],
+    recovery: { recoveryResponsibilityRef: 'recovery', unresolvedOperationRefs: [], rawTurnRefs: [], laterErrorRefs: [],
+      commitIdentity: 'save', stages: [], durablePhases: [], durableReceiptRefs: [] } } };
+  let stopReads = 0;
+  f.stop(checkpoint, { turn: context.turn, boundaryId: 'boundary', recoveryAssetsReceiptRef: 'committed:stop-completion',
+    assets: {
+      readRecoveryAssetsExact: async () => readback,
+      readBoundaryRecoveryAssetsExact: async () => {
+        stopReads += 1;
+        return { version: 1, assets: readback };
+      },
+    },
+    segments: {
+      readInitialOpenExact: async () => { throw new Error('unexpected initial-open'); },
+      readSegmentInterruptedExact: async () => { throw new Error('unexpected interrupted'); },
+    } });
+  let writes = 0;
+  const commit = f.dependencies.journal.commit;
+  f.dependencies.journal.commit = async (record) => {
+    writes += 1;
+    return commit(record);
+  };
+  const boundary = new InspectionTurnBoundary({
+    selectionReader: helpers.selectionReader,
+    journal: f.dependencies.journal,
+    occurrenceOpening: helpers.occurrenceOpening,
+    acceptedDeliveryReader: helpers.acceptedDeliveryReader,
+    acceptedDelivery: helpers.acceptedDelivery,
+    occurrences: helpers.occurrences,
+    checkpoints: {
+      readCommitted: async () => checkpoint,
+      readCheckpointRecoveryBinding: async () => null,
+      readNativeCheckpoint: async () => checkpointRelationship(checkpoint, f.time),
+    },
+    clock: { now: () => new Date(f.time) },
+  });
+  const port = createRuntimeInspectionStopSettlementPort({ boundary, occurrences: helpers.occurrences });
+
+  const before = await port.readStopCompletion({ checkpoint });
+  assert.equal(before.state, 'recovery-required');
+  assert.equal(writes, 0);
+  assert.equal(stopReads, 1);
+  await assert.rejects(() => port.readStopCompletion({ checkpoint: { ...checkpoint,
+    checkpoint: { ...checkpoint.checkpoint, outcome: 'succeeded', next: { kind: 'continue' } } } }),
+  /requires a stopped checkpoint/);
+
+  const action = await port.settleStop({ checkpoint });
+  assert.equal(action.state, 'complete');
+  const writesAfterAction = writes;
+  const readsAfterAction = stopReads;
+  const after = await port.readStopCompletion({ checkpoint });
+  assert.equal(after.state, 'complete');
+  assert.deepEqual(after, action);
+  assert.equal(writes, writesAfterAction);
+  assert.equal(stopReads, readsAfterAction + 1);
+
+  f.entries.splice(f.entries.findIndex(({ record }) => record.kind === 'inspection-occurrence-settled'), 1);
+  const missing = await port.readStopCompletion({ checkpoint });
+  assert.equal(missing.state, 'recovery-required');
+  assert.equal(writes, writesAfterAction);
 });

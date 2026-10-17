@@ -27,6 +27,7 @@ import {
 } from '../../../contracts/src/i2-history.js';
 import type { CommittedCheckpointRecord, NativeCheckpointJournalPort } from '../checkpoints/ports.js';
 import { AgentLoopRuntimeError } from './errors.js';
+import { hasMatchingInspectionCloseIdentity } from './inspection-stop-completion.js';
 
 export interface InspectionClock {
   now(): Date;
@@ -555,7 +556,10 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     };
     readonly committedAt: string;
   }): Promise<JournalCommitRef | undefined> {
-    if (_input.existingClose) return _input.existingClose.commitRef;
+    if (_input.existingClose) {
+      assertReusableClose(_input, _input.existingClose);
+      return _input.existingClose.commitRef;
+    }
     const cycleKey = `${_input.checkpoint.checkpoint.cycleId.value}\u0000${commitKey(_input.cycleOpeningCommitRef)}`;
     if (_input.next.kind === 'continue' || _input.next.kind === 'wait' || _input.next.kind === 'recover') {
       return undefined;
@@ -586,9 +590,15 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     };
     readonly committedAt: string;
   }): Promise<JournalCommitRef | undefined> {
-    if (_input.existingClose) return _input.existingClose.commitRef;
+    if (_input.existingClose) {
+      assertReusableClose(_input, _input.existingClose);
+      return _input.existingClose.commitRef;
+    }
     const durableClose = await this.findCycleClose(_input.checkpoint, _input.cycleOpeningCommitRef);
-    if (durableClose !== null) return durableClose.commitRef;
+    if (durableClose !== null) {
+      assertReusableClose(_input, durableClose);
+      return durableClose.commitRef;
+    }
     if (_input.settlement === undefined) {
       throw new AgentLoopRuntimeError('invalid-state', 'terminal inspection cycle close requires an occurrence settlement');
     }
@@ -651,4 +661,23 @@ function sameOutcome(left: InspectionExecutionOutcome, right: InspectionExecutio
   }
   if (right.status === 'completed') return false;
   return left.reason === right.reason && left.judgment === right.judgment;
+}
+
+function assertReusableClose(
+  input: {
+    readonly checkpoint: CommittedCheckpointRecord;
+    readonly cycleOpeningCommitRef: JournalCommitRef;
+    readonly next: NextAction;
+    readonly settlement?: JournalCommitRef;
+  },
+  close: {
+    readonly record: BusinessCycleClosedRecord;
+    readonly commitRef: JournalCommitRef;
+  },
+): void {
+  const { record } = close;
+  if (!hasMatchingInspectionCloseIdentity({ close: record, checkpoint: input.checkpoint,
+    cycleOpeningCommitRef: input.cycleOpeningCommitRef, settlementCommitRef: input.settlement, next: input.next })) {
+    throw new AgentLoopRuntimeError('conflict', 'inspection cycle close does not match the terminal checkpoint and settlement');
+  }
 }

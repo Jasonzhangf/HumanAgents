@@ -570,39 +570,58 @@ async function readOccurrenceFactsForTurn(
   dependencies: InspectionRuntimeHelperDependencies,
   logicalTurnId: string,
   taskScope: InspectionOccurrenceRef['scope'],
-  exactRecords?: InspectionTurnExactRecords,
+  exact?: {
+    readonly records: InspectionTurnExactRecords;
+    readonly binding: ActiveTurnBinding | undefined;
+  },
 ): Promise<InspectionOccurrenceFacts | null> {
+  const turnOpenings = (await listAll(dependencies.journal, {
+    taskScope,
+    kinds: ['inspection-occurrence-opened'],
+    limit: PAGE_LIMIT,
+  })).filter((entry): entry is CommittedRecord<InspectionOccurrenceOpenedRecord> =>
+    entry.record.kind === 'inspection-occurrence-opened'
+    && entry.record.logicalTurnId === logicalTurnId)
+    .map((entry) => ({ record: entry.record, commitRef: entry.commitRef }));
+  const exactTurnOccurrenceIds = new Set(turnOpenings.map(({ record }) => record.occurrence.occurrenceId));
+  if (exactTurnOccurrenceIds.size > 1) {
+    throw fail('conflict', 'inspection logical turn has conflicting occurrence openings');
+  }
+  if (turnOpenings.length === 0) return null;
+  if (exact !== undefined && exact.binding === undefined) {
+    throw fail('invalid-state', 'inspection stop has unresolved required facts: exact original turn binding');
+  }
+
   const resources = await dependencies.resources.forTurn(logicalTurnId);
-  if (resources === null) return null;
-  const source = await resources.segments.readInitialSegmentSource(logicalTurnId);
-  if (source === null) return null;
-  const binding = initialBinding(source);
+  if (resources === null) {
+    throw fail('invalid-state', `inspection turn ${logicalTurnId} has no durable active-turn resource`);
+  }
+  const source = exact === undefined ? await resources.segments.readInitialSegmentSource(logicalTurnId) : null;
+  if (exact === undefined && source === null) {
+    throw fail('invalid-state', `inspection turn ${logicalTurnId} has no durable initial binding`);
+  }
+  const binding = exact?.binding ?? initialBinding(source!);
   const acceptedPlan = binding.acceptedPlan;
-  if (acceptedPlan === undefined) return null;
+  if (acceptedPlan === undefined) {
+    throw fail('invalid-state', 'inspection stop has unresolved required facts: accepted plan binding');
+  }
   const selected = await readCurrentTaskPlan({
     plans: dependencies.plans,
     identity: resources.identity,
     currentPlan: acceptedPlan,
   });
   const content = selected.revision.snapshot.inspectionDefinition;
-  if (content === undefined) return null;
+  if (content === undefined) {
+    throw fail('invalid-state', 'inspection turn has no durable plan inspection definition');
+  }
   const definition = await exactDefinitionForPlan(dependencies, taskScope, content);
-  if (definition === null) return null;
+  if (definition === null) {
+    throw fail('invalid-state', 'inspection turn has no durable inspection definition');
+  }
   const occurrenceId = occurrenceIdentity(logicalTurnId, definition.record);
-  const openingEntries = await listAll(dependencies.journal, {
-    taskScope,
-    kinds: ['inspection-occurrence-opened'],
-    inspectionOccurrenceId: occurrenceId,
-    limit: PAGE_LIMIT,
-  });
-  const openings = openingEntries
-    .filter((entry): entry is CommittedRecord<InspectionOccurrenceOpenedRecord> =>
-      entry.record.kind === 'inspection-occurrence-opened'
-      && entry.record.occurrence.occurrenceId === occurrenceId
-      && entry.record.logicalTurnId === logicalTurnId)
-    .map((entry) => ({ record: entry.record, commitRef: entry.commitRef }));
+  const openings = turnOpenings.filter(({ record }) => record.occurrence.occurrenceId === occurrenceId);
   const opening = onlyMatching(`inspection occurrence ${occurrenceId}`, openings, () => true);
-  if (opening === null) return null;
+  if (opening === null) throw fail('conflict', 'inspection logical turn has conflicting occurrence openings');
   assertInspectionOccurrenceOpened(opening.record, definition.record);
   if (!sameRef(opening.record.planRevisionCommitRef, acceptedPlan.revisionCommitRef)
     || !sameRef(opening.record.definitionCommitRef, definition.commitRef)) {
@@ -646,14 +665,14 @@ async function readOccurrenceFactsForTurn(
     .map((entry) => ({ record: entry.record, commitRef: entry.commitRef }));
   const close = onlyMatching(`business cycle close ${cycleId}`, closes, () => true);
   const segmentRecords: InspectionTurnExactRecords[] = [];
-  for (const segment of exactRecords === undefined ? await resources.segments.readSegments(logicalTurnId) : []) {
+  for (const segment of exact === undefined ? await resources.segments.readSegments(logicalTurnId) : []) {
     segmentRecords.push(fromSegmentRecords(await resources.segments.readSegmentRecords({
       businessTurnId: logicalTurnId,
       segmentId: segment.segmentId,
     })));
   }
-  const merged = exactRecords ?? mergeRecords([
-    ...(source.kind === 'captured' ? [exactCaptureRecords(source.body)] : []),
+  const merged = exact?.records ?? mergeRecords([
+    ...(source?.kind === 'captured' ? [exactCaptureRecords(source.body)] : []),
     fromActiveTurnRecords(await resources.journal.replay()),
     ...segmentRecords,
   ]);
@@ -698,7 +717,7 @@ async function readOccurrenceFactsForStop(
     && sameScope(entry.record.executionScope, committed.checkpoint.scope));
   if (!applicable) return [];
 
-  const binding = await dependencies.checkpoints.readCheckpointRecoveryBinding(
+  const recoveryBinding = await dependencies.checkpoints.readCheckpointRecoveryBinding(
     committed.checkpoint.scope,
     committed.commitRef,
   );
@@ -706,7 +725,7 @@ async function readOccurrenceFactsForStop(
   if (source === null) {
     throw fail('invalid-state', 'inspection stop capture relationship is recovery-required');
   }
-  if (binding !== null && source.recoveryAssetsReceiptRef !== binding.turnRecoveryRef) {
+  if (recoveryBinding !== null && source.recoveryAssetsReceiptRef !== recoveryBinding.turnRecoveryRef) {
     throw fail('conflict', 'inspection stop receipt does not match its checkpoint binding');
   }
   const reader = source.assets.readBoundaryRecoveryAssetsExact;
@@ -716,6 +735,7 @@ async function readOccurrenceFactsForStop(
   const readback = await reader.call(source.assets, source.recoveryAssetsReceiptRef);
   let executionEpoch: number;
   let cut: InspectionTurnExactRecords;
+  let originalBinding: ActiveTurnBinding | undefined;
   let currentSegmentId: string | undefined;
   let predecessor: ActiveTurnSegmentPredecessorRef | undefined;
   if (readback.version === 2) {
@@ -735,6 +755,7 @@ async function readOccurrenceFactsForStop(
       throw fail('conflict', 'inspection stop capture does not match its committed source');
     }
     executionEpoch = body.binding.execution.executionEpoch;
+    originalBinding = undefined;
     currentSegmentId = body.segmentId;
     predecessor = body.predecessor;
     cut = exactCaptureRecords(body);
@@ -751,6 +772,7 @@ async function readOccurrenceFactsForStop(
       throw fail('conflict', 'inspection stop capture does not match its committed source');
     }
     executionEpoch = body.binding.execution.executionEpoch;
+    originalBinding = body.binding;
     cut = exactCaptureRecords(body);
   }
   if (executionEpoch !== committed.checkpoint.executionEpoch) {
@@ -775,6 +797,7 @@ async function readOccurrenceFactsForStop(
             throw fail('conflict', 'inspection stop original capture belongs to a different turn');
           }
           prior.push(exactCaptureRecords(exact.assets.prepared.body));
+          originalBinding = exact.assets.prepared.body.binding;
           predecessor = undefined;
         } else {
           if (exact.assets.receipt.businessTurnId !== source.turn.turnId
@@ -808,7 +831,8 @@ async function readOccurrenceFactsForStop(
     }
   }
   const merged = mergeRecords([...prior, cut]);
-  const facts = await readOccurrenceFactsForTurn(dependencies, source.turn.turnId, taskScope, merged);
+  const facts = await readOccurrenceFactsForTurn(dependencies, source.turn.turnId, taskScope,
+    { records: merged, binding: originalBinding });
   if (facts === null) return [];
   const deliveries = merged.entries.flatMap((delivery) => {
     const invocation = merged.childInvocations.find((candidate) => candidate.invocationId === delivery.invocationId);
