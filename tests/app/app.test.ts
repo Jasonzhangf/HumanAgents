@@ -15,7 +15,7 @@ import { canonicalJsonStringify, checkpointCommitIdentityV2 } from '../../packag
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
-import { JsonlOrganJournal, JournalCommitConflictError } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlOrganJournal, JournalCommitConflictError, JournalIntegrityError } from '../../packages/adapters/jsonl/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import { submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
 import { readCommittedCheckpoint } from '../../packages/app/src/checkpoint-journal.js';
@@ -793,6 +793,51 @@ test('native CLI preparation control input', async () => {
     if (planner === null || planner === undefined || planner.record.stage !== 'returned') throw new Error('planner not returned');
     assert.equal(planner.record.decision, 'complete');
     assert.ok(planner.record.publication.revisionId.length > 0, 'the Planner response produced the real publication');
+
+    // The old furthest-stage read returns only the returned record and provably
+    // cannot deliver the prepared incarnation. The new duty read must keep the
+    // prepared identity together with every real stage commit receipt.
+    assert.equal('incarnation' in planner.record, false,
+      'the furthest-stage read cannot deliver the prepared incarnation');
+    const plannerDuties = await createJsonlClosedTurnPlannerCallJournal({ journal: fixture.journal })
+      .readTaskDuties(scope);
+    const plannerDuty = plannerDuties.find((entry) => entry.dutyKey === plannerReturned!.duty!.dutyKey!);
+    assert.ok(plannerDuty, 'the duty read must return the committed Planner duty');
+    if (plannerDuty === undefined) throw new Error('planner duty not returned');
+    assert.equal(plannerDuty.prepared.record.stage, 'prepared');
+    assert.equal(plannerDuty.prepared.record.incarnation.taskId.value, retainedTaskId.value,
+      'the duty read preserves the prepared incarnation task identity');
+    assert.equal(plannerDuty.prepared.record.incarnation.executionEpoch,
+      plannerDuty.prepared.record.execution.executionEpoch,
+      'the duty read preserves the prepared allocation epoch');
+    assert.ok(plannerDuty.invoked, 'the duty read keeps the committed invocation stage');
+    assert.ok(plannerDuty.returned, 'the duty read keeps the committed return stage');
+    if (plannerDuty.invoked === undefined || plannerDuty.returned === undefined) throw new Error('planner stages incomplete');
+    assert.equal(plannerDuty.invoked.record.preparationCommitRef.commitId, plannerDuty.prepared.commitRef.commitId,
+      'the invocation binds the exact committed preparation');
+    assert.equal(plannerDuty.returned.record.invocationId, plannerDuty.prepared.record.invocationId,
+      'the return binds the exact prepared invocation');
+    const dutyCommitRefs = [plannerDuty.prepared.commitRef, plannerDuty.invoked.commitRef, plannerDuty.returned.commitRef];
+    assert.equal(new Set(dutyCommitRefs.map((ref) => ref.commitId)).size, 3,
+      'each stage keeps its own real commit receipt');
+    assert.ok(dutyCommitRefs.every((ref) => ref.commitId.length > 0 && ref.journalSeq > 0 && ref.recordDigest.length > 0),
+      'each stage receipt is a real journal commit identity');
+
+    // The append path binds only the invocation id, so it admits an invoked
+    // record whose preparationCommitRef points at a foreign commit. The reader
+    // must reject that broken stage chain instead of returning a duty.
+    const foreignJournal = new JsonlOrganJournal(join(fixture.root, 'foreign-preparation.jsonl'));
+    const foreignPlanner = createJsonlClosedTurnPlannerCallJournal({ journal: foreignJournal });
+    await foreignPlanner.append(plannerDuty.prepared.record);
+    await foreignPlanner.append({
+      ...plannerDuty.invoked.record,
+      preparationCommitRef: { commitId: 'foreign-preparation-commit', journalSeq: 999, recordDigest: 'foreign-record-digest' },
+    });
+    await assert.rejects(
+      () => foreignPlanner.readTaskDuties(scope),
+      (error: unknown) => error instanceof JournalIntegrityError
+        && error.message === 'closed-turn planner invocation does not match its committed preparation',
+    );
 
     const current = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal }).read({ organId, taskId: retainedTaskId });
     assert.equal(current.state, 'known', 'exact current-state readback uses the same Organ Journal owner');
