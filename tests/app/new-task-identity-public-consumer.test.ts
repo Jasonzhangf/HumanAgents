@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import {
   id,
@@ -35,6 +35,7 @@ import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/sr
 import {
   FakeReplayExecutionRuntimePort,
   startUiRuntime,
+  UiRuntimeJournal,
   type UiRuntimeLaunchOptions,
 } from '../../packages/app/src/ui-runtime/index.js';
 import { assembleProviderExecutionPort } from '../../packages/app/src/provider-assembly.js';
@@ -197,18 +198,22 @@ function memoryFor(projectKey: string) {
 
 const createInterpreter: ExplicitBrainInputInterpreter = {
   async interpret(input) {
+    const existing = input.rawInput.startsWith('change ')
+      ? input.taskCandidates.find((task) => task.title === 'existing task-flow target')
+      : undefined;
     return {
       kind: 'requirement',
       normalizedInput: input.rawInput,
+      ...(existing === undefined ? {} : { matchedTaskId: existing.taskId }),
       knownFacts: [],
-      intent: 'create',
-      proposal: `create a task for ${input.rawInput}`,
+      intent: existing === undefined ? 'create' : 'change',
+      proposal: `${existing === undefined ? 'create a task for' : 'change'} ${input.rawInput}`,
       structuredProposal: {
         revision: input.inputRevision,
-        intent: 'create',
+        intent: existing === undefined ? 'create' : 'change',
         title: input.rawInput,
         objective: input.rawInput,
-        deliverable: `create a task for ${input.rawInput}`,
+        deliverable: `${existing === undefined ? 'create a task for' : 'change'} ${input.rawInput}`,
         deliveryConditions: [],
         evidenceRefs: [],
         blockingGaps: [],
@@ -336,6 +341,7 @@ async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
   readonly mode?: 'fake' | 'rcc';
   readonly providerSource?: 'rcc' | 'http';
   readonly binding?: ProviderBinding;
+  readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
   readonly runtimeComposition?: UiRuntimeLaunchOptions['runtimeComposition'];
   readonly taskIdentity?: (principalOwner: string, taskControlPath: string) => TaskIdentityConsumer;
 }) {
@@ -356,7 +362,7 @@ async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
     workspaceRoot: root,
     memory: memoryFor(extra.projectKey),
     accessControl: auth.accessControl,
-    explicitBrainInterpreter: createInterpreter,
+    explicitBrainInterpreter: extra.explicitBrainInterpreter ?? createInterpreter,
     ...(extra.providerSource === undefined ? {} : { providerSource: extra.providerSource }),
     ...(extra.runtimeComposition === undefined ? {} : { runtimeComposition: extra.runtimeComposition }),
     ...(taskIdentity === undefined ? {} : { taskIdentity }),
@@ -422,6 +428,56 @@ async function submitNewTask(runtime: Awaited<ReturnType<typeof startUiRuntime>>
     revisionHash: inspected.revision!.revisionHash,
     receipt,
     confirmationParams,
+  };
+}
+
+async function prepareNewTaskConfirmation(
+  runtime: Awaited<ReturnType<typeof startUiRuntime>>,
+  suffix: string,
+  taskFlow?: TaskFlowBinding,
+) {
+  const post = async (path: string, body?: unknown): Promise<Response> => fetch(`${runtime.server.url}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const receive = await post('/api/explicit/inputs', {
+    sourceRef: `ui:${suffix}`,
+    rawInput: `create the ${suffix} task`,
+    channel: 'business',
+    requestKind: 'new-task-create' as const,
+  });
+  assert.equal(receive.status, 201);
+  const { interactionId } = await receive.json() as { readonly interactionId: string };
+  const interpret = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, {});
+  assert.equal(interpret.status, 200);
+  const inspected = await (await fetch(
+    `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}`,
+  )).json() as {
+    readonly draft?: { readonly draftId: string; readonly inputRevision: number };
+    readonly revision?: { readonly revisionVersion: number; readonly revisionHash: string };
+  };
+  assert.ok(inspected.draft);
+  assert.ok(inspected.revision);
+  return {
+    interactionId,
+    draftId: inspected.draft!.draftId,
+    inputRevision: inspected.draft!.inputRevision,
+    revisionVersion: inspected.revision!.revisionVersion,
+    revisionHash: inspected.revision!.revisionHash,
+    confirmationParams: {
+      interactionId,
+      draftId: inspected.draft!.draftId,
+      inputRevision: inspected.draft!.inputRevision,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-14T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+      requestKind: 'new-task-create' as const,
+      draftRevisionVersion: inspected.revision!.revisionVersion,
+      draftRevisionHash: inspected.revision!.revisionHash,
+      ...(taskFlow === undefined ? {} : { taskFlow }),
+    },
   };
 }
 
@@ -497,6 +553,16 @@ async function createdTaskIds(runtime: Awaited<ReturnType<typeof startUiRuntime>
     ...tasks.draft,
     ...tasks.failed,
   ].map((row) => row.taskId.value);
+}
+
+async function pendingRequirementCount(taskControlPath: string): Promise<number> {
+  const records = new UiRuntimeJournal(join(dirname(taskControlPath), 'ui-runtime-journal.jsonl')).replay();
+  const state = records
+    .filter((record): record is Extract<(typeof records)[number], { readonly kind: 'explicit-brain.state' }> => (
+      record.kind === 'explicit-brain.state'
+    ))
+    .at(-1)?.state;
+  return state?.inbox.pendingDraftIds.length ?? 0;
 }
 
 function taskPlanEvidence(label: string, scope: ScopeRef): EvidenceRef {
@@ -590,6 +656,20 @@ function dashboardSchedulePolicy(): ExecutionPolicyDefinition {
     intervalMinutes: 60,
   };
 }
+
+const onceExecutionPolicy: ExecutionPolicyDefinition = {
+  policyId: 'policy-once',
+  policyRevision: 1,
+  executionMode: 'once',
+  timezone: 'America/Los_Angeles',
+  canonicalInstant: '2026-11-01T17:00:00Z',
+  dstMode: 'wall',
+  dstMissedPolicy: 'shift-forward',
+  dstAmbiguousPolicy: 'earlier-offset',
+  latePolicy: 'skip',
+  busyPolicy: 'skip',
+  dueAt: '2026-11-01T17:00:00Z',
+};
 
 async function readOptionalFile(path: string): Promise<string | undefined> {
   try {
@@ -713,6 +793,179 @@ test('public new-task submit binds the real typed source and cold-reads before a
   }
 
   await rm(root, { recursive: true, force: true });
+});
+
+test('taskFlow intake fidelity preserves direct and refined bindings and rejects unconfirmed mutation', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-task-flow-intake-'));
+  const taskControlPath = taskControlPathFor(root);
+  const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const runtime = await startRuntime(root, port, {
+    projectKey: 'project-task-flow-intake',
+    taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path),
+  });
+  try {
+    const direct = await prepareNewTaskConfirmation(runtime, 'task-flow-direct');
+    const directTaskFlow: TaskFlowBinding = {
+      kind: 'inspection',
+      definitionVersion: TASK_FLOW_DEFINITION_VERSION,
+    };
+    const directResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(direct.interactionId)}/confirmation`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...direct.confirmationParams, taskFlow: directTaskFlow }),
+      },
+    );
+    assert.equal(directResponse.status, 200);
+    await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 1));
+    const directIdentity = (await identityRecords(taskControlPath))[0]!;
+    assert.deepEqual(directIdentity.taskFlow, directTaskFlow);
+
+    const refined = await prepareNewTaskConfirmation(runtime, 'task-flow-refined');
+    const refinedTaskFlow: TaskFlowBinding = {
+      kind: 'one-shot',
+      definitionVersion: TASK_FLOW_DEFINITION_VERSION,
+    };
+    const refinement = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(refined.interactionId)}/refine`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          draftId: refined.draftId,
+          baseRevisionVersion: refined.revisionVersion,
+          requestedRevisionHash: refined.revisionHash,
+          fields: { taskFlow: refinedTaskFlow },
+          instructionRef: 'task-flow-intake-fidelity-refine',
+        }),
+      },
+    );
+    assert.equal(refinement.status, 200);
+    const refinedSnapshot = await refinement.json() as {
+      readonly revision: { readonly revisionVersion: number; readonly revisionHash: string };
+    };
+    const omittedResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(refined.interactionId)}/confirmation`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...refined.confirmationParams,
+          draftRevisionVersion: refinedSnapshot.revision.revisionVersion,
+          draftRevisionHash: refinedSnapshot.revision.revisionHash,
+        }),
+      },
+    );
+    assert.equal(omittedResponse.status, 200);
+    await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 2));
+    const refinedIdentity = (await identityRecords(taskControlPath))[1]!;
+    assert.deepEqual(refinedIdentity.taskFlow, refinedTaskFlow);
+
+    const conflict = await prepareNewTaskConfirmation(runtime, 'task-flow-conflict');
+    const conflictRefinement = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(conflict.interactionId)}/refine`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          draftId: conflict.draftId,
+          baseRevisionVersion: conflict.revisionVersion,
+          requestedRevisionHash: conflict.revisionHash,
+          fields: { taskFlow: refinedTaskFlow },
+          instructionRef: 'task-flow-intake-fidelity-conflict',
+        }),
+      },
+    );
+    assert.equal(conflictRefinement.status, 200);
+    const conflictSnapshot = await conflictRefinement.json() as {
+      readonly revision: { readonly revisionVersion: number; readonly revisionHash: string };
+    };
+    const tasksBeforeConflict = runtime.service.listTasks().counts.total;
+    const identitiesBeforeConflict = (await identityRecords(taskControlPath)).length;
+    const pendingBeforeConflict = await pendingRequirementCount(taskControlPath);
+    const conflictResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(conflict.interactionId)}/confirmation`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...conflict.confirmationParams,
+          draftRevisionVersion: conflictSnapshot.revision.revisionVersion,
+          draftRevisionHash: conflictSnapshot.revision.revisionHash,
+          executionPolicy: onceExecutionPolicy,
+          taskFlow: directTaskFlow,
+        }),
+      },
+    );
+    assert.equal(conflictResponse.status, 409);
+    assert.equal(
+      ((await conflictResponse.json()) as { readonly error: { readonly code: string } }).error.code,
+      'explicit-brain.task-flow-binding-conflict',
+    );
+    assert.equal(runtime.service.listTasks().counts.total, tasksBeforeConflict);
+    assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeConflict);
+    assert.equal(await pendingRequirementCount(taskControlPath), pendingBeforeConflict);
+
+    const target = runtime.service.createTask({ title: 'existing task-flow target' });
+    const existingReceive = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:task-flow-existing-target',
+        rawInput: 'change the existing task-flow target',
+        channel: 'business',
+        requestKind: 'existing-task-change',
+      }),
+    });
+    assert.equal(existingReceive.status, 201);
+    const existingInteractionId = ((await existingReceive.json()) as { readonly interactionId: string }).interactionId;
+    assert.equal((await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(existingInteractionId)}/interpret`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+    )).status, 200);
+    const existingSnapshot = await (await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(existingInteractionId)}`,
+    )).json() as {
+      readonly draft: { readonly draftId: string; readonly inputRevision: number };
+      readonly revision: { readonly revisionVersion: number; readonly revisionHash: string };
+    };
+    const tasksBeforeRejectedInjection = runtime.service.listTasks().counts.total;
+    const identitiesBeforeRejectedInjection = (await identityRecords(taskControlPath)).length;
+    const pendingBeforeRejectedInjection = await pendingRequirementCount(taskControlPath);
+    const rejectedInjection = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(existingInteractionId)}/confirmation`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          draftId: existingSnapshot.draft.draftId,
+          inputRevision: existingSnapshot.draft.inputRevision,
+          confirmationRef: 'confirmation:task-flow-existing-rejected',
+          confirmedBy: 'human:operator',
+          confirmedAt: '2026-10-14T00:00:00.000Z',
+          payloadRef: 'asset://requirements/task-flow-existing-rejected',
+          requestKind: 'existing-task-change',
+          taskRef: target.taskId,
+          draftRevisionVersion: existingSnapshot.revision.revisionVersion,
+          draftRevisionHash: existingSnapshot.revision.revisionHash,
+          taskFlow: directTaskFlow,
+        }),
+      },
+    );
+    assert.equal(rejectedInjection.status, 409);
+    assert.equal(
+      ((await rejectedInjection.json()) as { readonly error: { readonly code: string } }).error.code,
+      'explicit-brain.existing-task-change-revision-immutable',
+    );
+    assert.equal(runtime.service.listTasks().counts.total, tasksBeforeRejectedInjection);
+    assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeRejectedInjection);
+    assert.equal(await pendingRequirementCount(taskControlPath), pendingBeforeRejectedInjection);
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 /**
