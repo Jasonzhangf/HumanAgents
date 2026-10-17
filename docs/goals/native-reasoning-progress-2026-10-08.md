@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r158已补真实serve assembly/sharedpool2并严格编译0；host原双Task仍RED，但首次边界已前进：fixture `provider-two-top-tasks-xqyVHq` 两final在cleanup前变为 `runtime.execution.failure / independent Planner call failed and its own settlement also failed`，不再缺assembly。r161独立小Planner定位底层cause，不延长15秒或改断言。genericHTTP r157实际写265行却exit0误称无编辑；r159技术核源码后因sharedstore子沙盒EPERM未编译，parent正常offlinefrozeninstall成功(下载0)，r160freshGCM同树仅修虚构auth-epoch头/父env污染并编译，未盲改生产credential转发。r153三turn/cold Planner进程仍live，未因观察时间长重启。UX main/install继续持有，双方已互通其fake SSE错误与本侧missingassembly证据不能当同因。
+
 - 两turn原native公开consumer已实际GREEN：r152最终Runtime投影仅携真实childTurnId/原scope/refined descriptor/bytes，不借用父assignment伪造child身份，三处encoder保精炼正文；未改测试断言。parent在最终源码重新Appbuild/tsc0、原two.turn1/1和原跨Task/organ scope1/1，通过op2epoch2/Task succeeded、两Planner、priorPlanseq1、四段+CHILD_BODY、旧raw/callIDs排除和exactbody。source `82428b30` 正常合唯一候选 `89be4df9`；组合Appbuild/tsc0、同原consumer再1/1。尚非整体native main交付。原两turn树clean保留供已在规划的三turn同域续用，未另开同域树。r156确认双Task仅fixture漏createTaskAssembly，freshGCM r158单改原test补真实serve composition/sharedpool2，编译后host验收。r155未发现默认request必经漏credential顶层port，故不盲修生产；r157在新独立genericHTTP domain树复用nativefixture补实际TOML→envcredential→本地HTTP证据，行为通过前不宣称完整generic入口。存量6树均为control/candidate/本侧两活动域/UX两活动域，未有本次可回收旧树；新增generic树parent负责验收合流后关闭。
 
 - r154观察未解码operation error前结束，parent补读唯一缺口：本次双Task fixture `WtStir/rcc/ui-runtime-journal.jsonl` 两个execution.terminal/final均为blocked，code `task.assembly.missing`、无live orchestration assembly。错误15:36:40Z在cleanup revoke15:36:53Z之前；journal taskOutput键仅Provider drained文本，不能冒最终交付。r156独立小Planner核fixture是否缺正式assembly接线，未据此盲改Runtime。r152语义投影作者仍活动，r153多turn/cold与r155默认HTTP入口计划独立运行；main/install继续归UX，不写其auth graph2/access-control/server/networktest五路径。
