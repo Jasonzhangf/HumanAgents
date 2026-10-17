@@ -825,18 +825,7 @@ export function createJsonlContextCorrectionSubmissionPort(input: {
       taskScope: ScopeRef,
       commandId: string,
     ): Promise<ContextCorrectionReadback | null> {
-      const recordsValue = await records();
-      for (const record of recordsValue) {
-        const correction = contextCorrectionFromRecord(record);
-        if (!correction || correction.basis.commandId !== commandId) continue;
-        if (!inTaskScope(correction.scope, taskScope)) continue;
-        if (!record.commitId) throw new Error('context correction record has no physical commit identity');
-        return {
-          record: correction,
-          commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
-        };
-      }
-      return null;
+      return readContextCorrectionFromRecords(await records(), taskScope, commandId);
     },
   };
 }
