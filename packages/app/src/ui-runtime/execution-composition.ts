@@ -136,6 +136,7 @@ import { createIndependentTurnPlanner, type IndependentTurnPlannerPort } from '.
 import { activeTurnCommitId } from '../../../runtime/src/context/active-turn-journal.js';
 import { materializeAdoptedChildSource, type AdoptedChildSourceV1 } from '../../../runtime/src/context/semantic-history-adoption.js';
 import { readCurrentTaskPlan } from '../../../runtime/src/orchestration/task-plan-revisions.js';
+import { acceptanceCriteriaContent, digestOf } from '../../../runtime/src/orchestration/review-material.js';
 import type { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
 import type { RuntimeTaskCurrentPlan } from '../../../runtime/src/ui-runtime/current-state.js';
 import { createPublishedTaskPlanRevision, assertTaskPlanRevisionRetryMatches,
@@ -362,7 +363,6 @@ export function createDefaultExecutionComposition(input: {
     const selected = await input.prepareAgentProvider({ roleId: source.allocation.role ?? 'execution',
       ...(source.allocation.configuredAgentId === undefined ? {} : { configuredAgentId: source.allocation.configuredAgentId }) });
     try {
-      if (selected.roleId !== 'execution') missing('actual cold Provider selection does not bind the execution role');
       const initialBinding = initialBindingOf(source.initial);
       return { contextHistory: context, request: { role: 'execution', mode: 'observation',
         profiles: [{ profileId: 'task-execution-context', role: 'execution', mode: 'observation',
@@ -605,13 +605,17 @@ export function createDefaultExecutionComposition(input: {
       });
       const objective = prepared.input.prompt;
       if (typeof objective !== 'string') missing('prepared execution input has no immutable prompt');
+      const criteria = {
+        objective,
+        successCriteria: ['standard turn closure and canonical Planner alignment'],
+        failureCriteria: ['execution error'],
+        incompleteCriteria: ['standard turn or Planner alignment remains pending'],
+      };
       const assignment: WorkAssignment = resume?.source.assignment ?? { assignmentId: allocation.assignmentId, taskId: allocation.taskId,
         pipelineNodeId: 'pipeline.execute', attempt: 1, executionEpoch: allocation.attemptExecutionEpoch,
-        inputRevision: allocation.inputRevision, objective, targetRefs: allocation.inputRefs,
+        inputRevision: allocation.inputRevision, ...criteria, targetRefs: allocation.inputRefs,
         expectedOutputRefs: [`operation://${allocation.operationId.value}/output`],
-        acceptanceCriteriaDigest: executionAdmissionInputDigest(identity, prepared),
-        successCriteria: ['standard turn closure and canonical Planner alignment'],
-        failureCriteria: ['execution error'], incompleteCriteria: ['standard turn or Planner alignment remains pending'],
+        acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
         requiredCapabilities: grant.grant.capability.capabilities, mergeGate: 'not-required' };
       const initialBinding = resume ? initialBindingOf(resume.source.initial) : undefined;
       const turnId = initialBinding?.admittedTurn.turnId ?? newActiveTurnId(allocation.operationId.value);
