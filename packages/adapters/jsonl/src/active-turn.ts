@@ -20,6 +20,7 @@ import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import {
   activeTurnSegmentCommitId,
   validateResumedTurnSegmentOpened,
+  type ActiveTurnInitialOpenAnchor,
   type ActiveTurnSegmentBinding,
   type ResumedTurnSegmentOpened,
 } from '../../../contracts/src/active-turn-segments.js';
@@ -778,6 +779,33 @@ function assertPredecessorReceiptRef(records: readonly JournalRecord[], receiptR
   }
 }
 
+/**
+ * The durable anchor of an original turn that opened in v1: the real
+ * `binding-opened` commit and the last committed `active-turn:<businessTurnId>:*`
+ * record (the binding commit itself when it committed nothing else). It returns
+ * null when no binding-opened record exists, so a caller never invents an anchor
+ * for an unopened turn. It carries no capture and claims no save.
+ */
+function initialOpenAnchorOf(
+  records: readonly JournalRecord[],
+  businessTurnId: string,
+): ActiveTurnInitialOpenAnchor | null {
+  const bindingCommitId = activeTurnCommitId(businessTurnId, ACTIVE_TURN_BINDING_DISCRIMINATOR);
+  const bindingRecord = records.find((candidate) => candidate.commitId === bindingCommitId);
+  if (bindingRecord === undefined) return null;
+  const bindingPayload = payloadOf(bindingRecord);
+  if (bindingPayload.kind !== 'binding-opened') {
+    throw new JournalIntegrityError('active turn binding commit id does not match its record');
+  }
+  bindingOfRecord(bindingPayload, businessTurnId);
+  const owned = records.filter((record) => isActiveTurnCarrier(record) && isBoundTurnCarrier(record, businessTurnId));
+  if (owned.length === 0) {
+    throw new JournalIntegrityError(`active turn binding is not committed: ${businessTurnId}`);
+  }
+  const last = owned[owned.length - 1]!;
+  return { bindingCommitRef: journalCommitRef(bindingRecord), recordsThroughCommitRef: journalCommitRef(last) };
+}
+
 export interface JsonlActiveTurnSegmentJournalOptions {
   readonly filePath?: string;
   /** Actual shared Organ Journal object; preferred over a second path handle. */
@@ -836,6 +864,15 @@ export class JsonlActiveTurnSegmentJournal {
 
   async readSegmentOpened(segmentId: string): Promise<ResumedTurnSegmentOpened | null> {
     return findSegmentOpened(await this.journal.replay(), this.businessTurnId, nonEmpty(segmentId, 'segmentId'));
+  }
+
+  /**
+   * The durable anchor of the original turn when it opened in v1 but never
+   * committed a v1 capture, or null when no binding-opened record exists for the
+   * bound business turn.
+   */
+  async readInitialOpenAnchor(): Promise<ActiveTurnInitialOpenAnchor | null> {
+    return initialOpenAnchorOf(await this.journal.replay(), this.businessTurnId);
   }
 
   async appendSegmentOpened(input: {
@@ -903,11 +940,36 @@ export class JsonlActiveTurnSegmentJournal {
         // The predecessor must be the current committed chain tail.
         const chain = decodeSegmentChain(records, this.businessTurnId);
         const tail = chain.length === 0 ? undefined : chain[chain.length - 1];
-        const expectedPredecessor = tail ? tail.segmentId : this.businessTurnId;
-        if (record.predecessor.segmentId !== expectedPredecessor) {
-          throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+        if (record.predecessor.initialOpen !== undefined) {
+          // The initial-open predecessor must still be the unsaved original turn
+          // with no resumed segment yet; the anchor is re-derived under the lock
+          // and must equal the supplied anchor exactly. The App's held-transaction
+          // verifyPredecessorReceipt re-checks that no v1 receipt exists.
+          if (chain.length !== 0) {
+            throw new JournalIntegrityError('segment-opened initial-open predecessor requires the unsaved original turn');
+          }
+          if (record.predecessor.segmentId !== this.businessTurnId) {
+            throw new JournalIntegrityError('segment-opened initial-open predecessor must name the original business turn');
+          }
+          const anchor = initialOpenAnchorOf(records, this.businessTurnId);
+          if (anchor === null) {
+            throw new JournalIntegrityError('segment-opened initial-open predecessor is not a committed original turn');
+          }
+          if (anchor.bindingCommitRef.commitId !== record.predecessor.initialOpen.bindingCommitRef.commitId
+            || anchor.bindingCommitRef.journalSeq !== record.predecessor.initialOpen.bindingCommitRef.journalSeq
+            || anchor.bindingCommitRef.recordDigest !== record.predecessor.initialOpen.bindingCommitRef.recordDigest
+            || anchor.recordsThroughCommitRef.commitId !== record.predecessor.initialOpen.recordsThroughCommitRef.commitId
+            || anchor.recordsThroughCommitRef.journalSeq !== record.predecessor.initialOpen.recordsThroughCommitRef.journalSeq
+            || anchor.recordsThroughCommitRef.recordDigest !== record.predecessor.initialOpen.recordsThroughCommitRef.recordDigest) {
+            throw new JournalIntegrityError('segment-opened initial-open anchor does not match the committed initial turn facts');
+          }
+        } else {
+          const expectedPredecessor = tail ? tail.segmentId : this.businessTurnId;
+          if (record.predecessor.segmentId !== expectedPredecessor) {
+            throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+          }
+          assertPredecessorReceiptRef(records, record.predecessor.recoveryAssetsReceiptRef);
         }
-        assertPredecessorReceiptRef(records, record.predecessor.recoveryAssetsReceiptRef);
         this.verifyPredecessorReceipt?.(records, record.predecessor);
         return { kind: 'append' as const, scope: record.binding.scope, commitId: input.commitId };
       },

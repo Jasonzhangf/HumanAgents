@@ -13,6 +13,7 @@ import {
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
+import { decodeTaskAgentActivitySelectionQuery } from './agent-activity-read.js';
 import type { RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import { AppLifecycleError } from '../errors.js';
@@ -1058,10 +1059,11 @@ async function handleRequest(
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);
     if (taskDashboard && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskDashboard[1]!));
+      const agentSelection = decodeTaskAgentActivitySelectionQuery(url.searchParams, taskId);
       if (url.searchParams.has('projectKey') || url.searchParams.has('mode')) {
         const scope = readScope(url);
-        writeReadResult(response, await service.scopedTaskDashboard(taskId, scope.projectKey, scope.mode));
-      } else writeJson(response, 200, await service.taskDashboardWithPlan(taskId));
+        writeReadResult(response, await service.scopedTaskDashboard(taskId, scope.projectKey, scope.mode, agentSelection));
+      } else writeJson(response, 200, await service.taskDashboardWithPlan(taskId, agentSelection));
       return;
     }
     if (path === '/api/ui/display-preference' && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {

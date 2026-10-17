@@ -227,6 +227,9 @@ import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/ope
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { providerRawContentReader, filesystemProviderEvidenceSink } from '../../../adapters/provider/src/evidence.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
+import { createJsonlI2JournalPort } from '../i2-journal.js';
+import { readTaskAgentActivity, type DecodedTaskAgentActivitySelectionQuery,
+  type AssembleTaskAgentActivityRemainingSourcesOptions } from './agent-activity-read.js';
 import { projectRuntimeContextHistory, projectRuntimeTaskWaitingStatus } from '../../../ui/projection/runtime.js';
 import { bindUiDisplayPreferenceResource, type UiDisplayPreferenceMethod } from './display-preferences.js';
 import { saveUiDisplayPreference, DEFAULT_UI_DISPLAY_PREFERENCE } from '../../../config/src/index.js';
@@ -266,7 +269,9 @@ function uiRuntimeTaskCheckpointPath(checkpointsRoot: string, mode: RuntimeMode,
   return join(uiRuntimeModeRoot(checkpointsRoot, mode), `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
 }
 
-function readUiRuntimeTaskJournal(checkpointsRoot: string, mode: RuntimeMode): { readonly records: readonly UiRuntimeJournalRecord[]; readonly failure?: RuntimeReadFailure } {
+export type DurableJournalReadResult = { readonly records: readonly UiRuntimeJournalRecord[]; readonly failure?: RuntimeReadFailure };
+
+export function readUiRuntimeTaskJournal(checkpointsRoot: string, mode: RuntimeMode): DurableJournalReadResult {
   try {
     return { records: new UiRuntimeJournal(uiRuntimeJournalPath(checkpointsRoot, mode)).replay() };
   } catch (error) {
@@ -1320,16 +1325,18 @@ export class UiRuntimeService {
       coverage: 'configured-projects-in-current-control-root', projects, taskCount: projects.reduce((sum, project) => sum + project.taskCount, 0), complete: !failures.length, failures };
   }
 
-  async scopedTaskDashboard(taskId: TaskId, projectKey: string, mode: RuntimeMode): Promise<RuntimeReadResult<RuntimeTaskDashboardView>> {
+  async scopedTaskDashboard(taskId: TaskId, projectKey: string, mode: RuntimeMode, agentSelection?: DecodedTaskAgentActivitySelectionQuery): Promise<RuntimeReadResult<RuntimeTaskDashboardView>> {
     try {
-      if (projectKey === this.options.projectKey && mode === this.mode) return { ok: true, value: await this.taskDashboardWithPlan(taskId) };
+      if (projectKey === this.options.projectKey && mode === this.mode) return { ok: true, value: await this.taskDashboardWithPlan(taskId, agentSelection) };
       const source = await this.findProjectSource(projectKey);
       if (!source) return readRejected('project.unknown', projectKey);
       const inventory = await this.readDurableInventory(source, mode);
       const entry = inventory.entries.find((candidate) => candidate.snapshot.taskId.value === taskId.value);
       if (!entry) return inventory.failures[0] ? { ok: false, failure: inventory.failures[0] } : readRejected('task.not-found', taskId.value);
       if (mode === 'dsh') return readRejected('read.mode.unsupported', 'DSH has no durable UI runtime reader');
-      return { ok: true, value: { ...runtimeTaskDashboard(entry.snapshot, mode), taskPlanHistory: await this.taskPlanHistory(taskId, projectKey, mode) } };
+      return { ok: true, value: { ...runtimeTaskDashboard(entry.snapshot, mode),
+        taskPlanHistory: await this.taskPlanHistory(taskId, projectKey, mode),
+        agentActivity: await this.taskAgentActivityFor(source, mode, taskId, agentSelection) } };
     } catch (error) { return { ok: false, failure: readFailure(error) }; }
   }
 
@@ -2489,13 +2496,42 @@ export class UiRuntimeService {
    * the synchronous `taskDashboard` stays free of journal I/O for the internal
    * callers that only need task state.
    */
-  async taskDashboardWithPlan(taskId: TaskId): Promise<RuntimeTaskDashboardView> {
+  async taskDashboardWithPlan(taskId: TaskId, agentSelection?: DecodedTaskAgentActivitySelectionQuery): Promise<RuntimeTaskDashboardView> {
     const dashboard = this.taskDashboard(taskId);
     const plan = await this.executionPlanForTask(taskId);
     const paths = this.readResources?.runtimePaths ?? this.options.runtimePaths;
     const taskPlanHistory = paths ? await this.taskPlanHistory(taskId, paths.projectKey, this.mode)
       : readRejected('task-plan-history.read-failed', 'the serve-bound project has no Config runtime paths');
-    return { ...dashboard, ...(plan === undefined ? {} : { plan }), taskPlanHistory };
+    const agentActivity = await this.taskAgentActivityFor(paths, this.mode, taskId, agentSelection);
+    return { ...dashboard, ...(plan === undefined ? {} : { plan }), taskPlanHistory, agentActivity };
+  }
+
+  private async taskAgentActivityFor(
+    source: ConfiguredProjectReadSource | undefined,
+    mode: RuntimeMode,
+    taskId: TaskId,
+    selection?: DecodedTaskAgentActivitySelectionQuery,
+  ): ReturnType<typeof readTaskAgentActivity> {
+    if (selection !== undefined && !selection.ok) return { ok: false, failure: selection.failure };
+    if (source === undefined) return { ok: false, failure: {
+      code: 'agent-activity.scope-unavailable', ownerId: 'humanagent.app.ui-runtime.agent-activity',
+      message: 'the serve-bound project has no configured runtime paths',
+      nextAction: 'bind the canonical project runtime paths',
+    } };
+    const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode));
+    const controlJournal = new JsonlOrganJournal(filePath);
+    const bound = source.projectKey === this.options.projectKey && mode === this.mode;
+    const live: AssembleTaskAgentActivityRemainingSourcesOptions['live'] = bound ? {
+      snapshot: this.coordinatorOrQueuedTaskSnapshot(taskId),
+      inspectPool: () => this.coordinator.inspectTaskRuntimePool(taskId),
+      currentLocations: this.coordinator.readTaskCurrentActivityLocations(taskId),
+    } : undefined;
+    return readTaskAgentActivity({
+      taskId, query: selection?.ok ? selection.value : { taskId },
+      taskJournal: readUiRuntimeTaskJournal(source.checkpointsRoot, mode), controlJournal,
+      i2Journal: createJsonlI2JournalPort({ filePath, journal: controlJournal }),
+      ...(live === undefined ? {} : { live }),
+    });
   }
 
   /**
