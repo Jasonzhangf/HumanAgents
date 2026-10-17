@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- 首milestone整体Review r242 exit0/SUCCESS/findings空，经现有schema/classifier为pass；同Reviewer r244更正Provider19/19及错误build命令引用后再次classifier pass。完整候选已正常FF main；contracts/config/App构建、正式package/install:global成功。官方显式targetrestart completed 23→24，PID3303→22814、port53007不变、legacyCloseReceipt clean；新进程确认installed launcher运行。main原coldconsumer1/1、grant公开整文件4/4复验通过；installed UI root原selectedbrowser36/36。源码cold不冒installed深层恢复证明，真实RCCAppTask与v2/childwire等原UNVERIFIED保持。r243只读installedrecipe未返回；尚未push，标准交付未最终收口。
+
 - start/settle四文件source d1788f33已正常合candidate：组合Appbuild/tsc0、原目标Reviewconsumer1/1、Provider两例2/2。原serve-runtime另两失败在未合修复candidate同样0/2复现，明确不属该fix新增，仍记整文件17/19；目标真实RED/GREEN见r236/r238与宿主回执。来源clean后remove/prune/pathabsent。I2UI来源也由UXowner正常关闭，证据保留。
 - 首完整milestone整体Review r241按首选Opus5.5medium实际quotaERROR/exit3/空结果，未审代码；r242已用全新独立Gemini4medium同scope继续。r243 GCM只读准备正式installed入口recipe，不写产品/服务，不以sourceconsumer冒installed证明。尚无ReviewPASS、main产品merge、安装重启或push；gen23/53007/p3保护。完整目标ACTIVE / INCOMPLETE。
 
