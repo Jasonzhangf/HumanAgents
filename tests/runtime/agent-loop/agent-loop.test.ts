@@ -19,7 +19,14 @@ import {
 } from '../../../packages/contracts/src/index.js';
 import { AgentLoopRuntime, type AgentLoopActor, type AgentLoopStartRequest } from '../../../packages/runtime/src/agent-loop/runtime.js';
 import { AgentLoopRuntimeError } from '../../../packages/runtime/src/agent-loop/errors.js';
-import { InspectionTurnBoundary } from '../../../packages/runtime/src/agent-loop/inspection-turn-boundary.js';
+import {
+  InspectionTurnBoundary,
+  type InspectionOccurrenceFacts,
+} from '../../../packages/runtime/src/agent-loop/inspection-turn-boundary.js';
+import { createInspectionRuntimeHelpers, type InspectionRuntimeHelperDependencies } from '../../../packages/runtime/src/agent-loop/inspection-runtime-helpers.js';
+import { createPublishedTaskPlanRevision } from '../../../packages/core/src/task-plan-revision.js';
+import type { ActiveTurnCaptureBody, AcceptedExecutionChildDelivery, ChildInvocationRecord, PublishedTaskPlanRevision } from '../../../packages/contracts/src/index.js';
+import type { NativeSaveIntent, NativeSegmentSaveIntentV2 } from '../../../packages/runtime/src/checkpoints/native-save-contract.js';
 import type {
   CommittedCheckpointRecord,
   ContextHistoryPort,
@@ -32,6 +39,190 @@ const scope: ScopeRef = {
   taskId: id('task', 'task-agent-loop'),
   cycleId: id('cycle', 'cycle-agent-loop'),
 };
+
+function inspectionHelperConsumer() {
+  const taskScope = { organId: scope.organId, taskId: scope.taskId! };
+  const time = '2026-10-17T00:00:00.000Z';
+  const receipt = (commitId: string, journalSeq = 1): JournalCommitRef => ({ commitId, journalSeq, recordDigest: `record:${commitId}` });
+  const source = { requirementId: 'inspection', inputRevision: 1, draftId: 'inspection', draftRevisionVersion: 1,
+    draftRevisionHash: 'draft:inspection', confirmationRef: 'confirmed:inspection' };
+  const plan = createPublishedTaskPlanRevision({
+    scope: taskScope, revisionId: 'inspection-plan-1', sequence: 1, predecessor: null,
+    snapshot: { title: 'Inspect', summary: 'Inspect two checks', completeness: { scope: 'whole-task', status: 'complete' },
+      acceptanceCriteria: [{ criterionId: 'observed', description: 'Report observed checks' }],
+      nodes: [{ nodeId: 'inspect', kind: 'work', title: 'Inspect', intent: 'Observe', definition: {} }], phases: [], relations: [],
+      inspectionDefinition: { definition: { definitionId: 'checks', definitionVersion: '1',
+        target: { targetRef: 'target', sourceRef: 'confirmed' }, checkItems: [{ checkId: 'a' }, { checkId: 'b' }] },
+        checks: [{ checkId: 'a', criterion: 'Observe a', inputRefs: [] }, { checkId: 'b', criterion: 'Observe b', inputRefs: [] }] } },
+    source: { ...source, evidenceRefs: [] }, reason: { kind: 'initial', basisRefs: [] },
+    historyCoverage: 'prior-history-unavailable', publishedAt: time, publishedBy: 'planner', journalCommitRef: 'jsonl:inspection-plan-1',
+  });
+  const plans = new Map<string, PublishedTaskPlanRevision>([[plan.revisionId, plan]]);
+  const assignment = { assignmentId: 'inspection-assignment', taskId: taskScope.taskId, pipelineNodeId: 'inspect',
+    attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'Inspect', targetRefs: [], expectedOutputRefs: [],
+    acceptanceCriteriaDigest: 'criteria', successCriteria: ['observe'], failureCriteria: [], incompleteCriteria: [],
+    requiredCapabilities: [], mergeGate: 'not-required' as const };
+  const admittedTurn = { turnId: 'inspection-turn', workAssignmentRef: assignment.assignmentId, taskRef: taskScope.taskId,
+    scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 1,
+    runtimeBindingRef: 'binding', permissionRevision: 'permission', admissionEvidenceRefs: [], currentTurnRef: 'current', recoveryStateRef: 'recovery' };
+  const raw = { ref: { evidenceId: id('evidence', 'inspection-raw'), kind: 'execution' as const, source: 'consumer', locator: 'raw', scope }, view: { kind: 'utf8-text' as const } };
+  let capture: ActiveTurnCaptureBody = { version: 1, binding: { admittedTurn, assignment, execution: { runtimeId: 'runtime', executionEpoch: 1 },
+    scope, acceptedPlan: { revisionId: plan.revisionId, revisionCommitRef: receipt(plan.revisionId) } }, initialInput: raw,
+    entries: [], childInvocations: [], requests: [], checkpointPath: [], cut: { pauseId: 'boundary', lastSeq: 0, producersDrained: true, frozenAt: time }, completionRefs: [] };
+  const entries: { record: I2Record; commitRef: JournalCommitRef }[] = [{ record: {
+    kind: 'business-cycle-opened', schemaVersion: 1,
+    cycle: { id: scope.cycleId!, scope, directiveRevision: 1, executionEpoch: 1, state: 'admitted' },
+    taskFlow: { kind: 'inspection', definitionVersion: 1 }, planRevisionCommitRef: receipt(plan.revisionId),
+    previousCycleCommitRef: null, openedAt: time, openingReason: 'inspect',
+  }, commitRef: receipt('cycle') }];
+  let stopSource: Awaited<ReturnType<InspectionRuntimeHelperDependencies['resources']['forCheckpoint']>> = null;
+  let committedCheckpoint: CommittedCheckpointRecord | null = null;
+  let forbiddenTail = false;
+  const resources = {
+    logicalTurnId: admittedTurn.turnId, identity: { scope: taskScope, source, journalCommitRef: 'jsonl:identity' },
+    journal: { replay: async () => { if (forbiddenTail) throw new Error('stop read mutable tail'); return []; } },
+    segments: { readInitialSegmentSource: async () => ({ kind: 'captured' as const, body: capture, bindingCommitRef: receipt('binding') }),
+      readSegments: async () => { if (forbiddenTail) throw new Error('stop scanned segments'); return []; }, readSegmentRecords: async () => [] },
+  };
+  const dependencies: InspectionRuntimeHelperDependencies = {
+    resources: { forTurn: async (turnId) => turnId === resources.logicalTurnId ? resources : null,
+      forInvocation: async () => resources, forCheckpoint: async () => stopSource },
+    journal: { commit: async (record) => { const commitRef = receipt(`i2:${entries.length}`, entries.length + 1); entries.push({ record, commitRef }); return commitRef; },
+      read: async (_scope, ref) => { const entry = entries.find((entry) => entry.commitRef.commitId === ref.commitId); if (!entry) throw new Error('missing exact record'); return entry.record; },
+      list: async (query) => ({ entries: entries.filter(({ record }) => query.kinds?.includes(record.kind) ?? true) }) },
+    plans: { get: async (_scope, revisionId) => plans.get(revisionId) ?? null,
+      getCommitRef: async (_scope, revisionId) => plans.has(revisionId) ? receipt(revisionId) : null, list: async () => [...plans.values()] },
+    checkpoints: { readCommitted: async () => committedCheckpoint, readCheckpointRecoveryBinding: async () => null },
+    acceptedCheck: { accept: async (input) => input.delivery }, clock: { now: () => new Date(time) },
+  };
+  return { dependencies, resources, entries, plan, plans, receipt, assignment, raw, time,
+    capture: () => capture, setCapture: (value: ActiveTurnCaptureBody) => { capture = value; },
+    stop: (checkpoint: CommittedCheckpointRecord, value: NonNullable<typeof stopSource>) => { committedCheckpoint = checkpoint; stopSource = value; forbiddenTail = true; },
+    helpers: () => createInspectionRuntimeHelpers(dependencies) };
+}
+
+test('inspection runtime helpers preserve original accepted plan, reuse definition and replay typed captured delivery', async () => {
+  // Concrete source failures: current-plan drift, definition duplication and captured-only child loss.
+  // Probability demonstrated by the draft reader. Impact: wrong execution/history. Cost: one local public-port consumer.
+  const f = inspectionHelperConsumer();
+  const helper = f.helpers();
+  const context = await helper.selectionReader.readSelectionContext('inspection-turn');
+  const open = (checkId: string) => helper.occurrenceOpening.open({ context, logicalTurnId: 'inspection-turn', executionScope: scope, assignment: f.assignment, checkId });
+  const [a, b] = await Promise.all([open('a'), open('b')]);
+  assert.equal(a.binding.occurrence.occurrenceId, b.binding.occurrence.occurrenceId);
+  assert.equal(f.entries.filter(({ record }) => record.kind === 'inspection-occurrence-opened').length, 1);
+  await assert.rejects(open('unknown'), /not declared/);
+  const original = f.entries.find(({ record }) => record.kind === 'inspection-definition')!;
+  const later = createPublishedTaskPlanRevision({ ...f.plan, revisionId: 'inspection-plan-2', sequence: 2,
+    predecessor: { revisionId: f.plan.revisionId, sequence: 1, contentDigest: f.plan.contentDigest },
+    reason: { kind: 'adjustment', text: 'later turn', basisRefs: [] }, journalCommitRef: 'jsonl:inspection-plan-2' });
+  f.plans.set(later.revisionId, later);
+  assert.equal((await f.helpers().selectionReader.readSelectionContext('inspection-turn')).plan.revisionId, f.plan.revisionId);
+  f.setCapture({ ...f.capture(), binding: { ...f.capture().binding,
+    admittedTurn: { ...f.capture().binding.admittedTurn, turnId: 'inspection-turn-2' },
+    acceptedPlan: { revisionId: later.revisionId, revisionCommitRef: f.receipt(later.revisionId) } } });
+  f.resources.logicalTurnId = 'inspection-turn-2';
+  const next = f.helpers();
+  const nextContext = await next.selectionReader.readSelectionContext('inspection-turn-2');
+  const opened = await next.occurrenceOpening.open({ context: nextContext, logicalTurnId: 'inspection-turn-2', executionScope: scope, assignment: f.assignment, checkId: 'a' });
+  assert.deepEqual(opened.binding.definitionCommitRef, original.commitRef);
+  const laterOpening = f.entries.find(({ record }) => record.kind === 'inspection-occurrence-opened'
+    && record.logicalTurnId === 'inspection-turn-2')!;
+  assert.equal(laterOpening.record.kind === 'inspection-occurrence-opened' && laterOpening.record.planRevisionCommitRef.commitId, later.revisionId);
+  assert.deepEqual(f.entries.find(({ record }) => record.kind === 'inspection-definition'), original);
+  assert.equal(f.entries.filter(({ record }) => record.kind === 'inspection-definition').length, 1);
+  const invocation: ChildInvocationRecord = { invocationId: 'captured-child', childTurnId: 'child', checkpointReceiptRef: 'child-checkpoint',
+    binding: { kind: 'execution', assignment: f.assignment, inspection: opened } };
+  const delivery: AcceptedExecutionChildDelivery = { kind: 'execution', seq: 1, invocationId: invocation.invocationId,
+    assignment: f.assignment, refinedDelivery: f.raw,
+    result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child', assignmentId: f.assignment.assignmentId,
+      attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded',
+      summary: 'observed a', outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
+    inspectionDelivery: { checkId: 'a', resultId: 'inspection-result:captured-child', attempt: 1,
+      outcome: { status: 'completed', judgment: 'a observed' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
+  f.setCapture({ ...f.capture(), childInvocations: [invocation], entries: [delivery] });
+  const cold = f.helpers();
+  const accepted = await cold.acceptedDeliveryReader.readAcceptedDelivery('captured-child');
+  assert.deepEqual(accepted, delivery);
+  assert.deepEqual(await cold.acceptedDelivery.accept({ invocation, delivery: accepted! }), delivery.inspectionDelivery);
+  assert.equal(await cold.acceptedDeliveryReader.readAcceptedDelivery('missing-child'), null);
+  f.setCapture({ ...f.capture(), entries: [delivery, { ...delivery, result: { ...delivery.result, summary: 'conflict' } }] });
+  await assert.rejects(cold.acceptedDeliveryReader.readAcceptedDelivery('captured-child'), /conflicting durable/);
+  f.setCapture({ ...f.capture(), binding: { ...f.capture().binding, acceptedPlan: undefined } });
+  await assert.rejects(f.helpers().selectionReader.readSelectionContext('inspection-turn-2'), /no durable accepted plan/);
+});
+
+test('inspection runtime helpers stop follows exact v2 receipt to original v1 and excludes mutable tail', async () => {
+  // Draft failures are concrete: selector/receipt confusion and v2-only predecessor decoding.
+  // Impact: stop loses recovery facts or includes later work. Probability demonstrated. Cost: one typed local consumer.
+  const f = inspectionHelperConsumer();
+  const helper = f.helpers();
+  const context = await helper.selectionReader.readSelectionContext('inspection-turn');
+  const inspection = await helper.occurrenceOpening.open({ context, logicalTurnId: 'inspection-turn', executionScope: scope, assignment: f.assignment, checkId: 'a' });
+  const checkpoint: CommittedCheckpointRecord = { checkpoint: { id: id('checkpoint', 'stop-cut'), scope,
+    cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 2,
+    outcome: 'stopped', summary: 'stop', recoveryStateRef: f.raw.ref, evidenceRefs: [], next: { kind: 'stop' } },
+    previous: null, commitRef: f.receipt('stop-checkpoint') };
+  const invocation: ChildInvocationRecord = { invocationId: 'stop-child', childTurnId: 'stop-child-turn', checkpointReceiptRef: 'child-checkpoint',
+    binding: { kind: 'execution', assignment: f.assignment, inspection } };
+  const delivery: AcceptedExecutionChildDelivery = { kind: 'execution', seq: 1, invocationId: invocation.invocationId,
+    assignment: f.assignment, refinedDelivery: f.raw,
+    result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child', assignmentId: f.assignment.assignmentId,
+      attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded',
+      summary: 'observed a', outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
+    inspectionDelivery: { checkId: 'a', resultId: 'inspection-result:stop-child', attempt: 1,
+      outcome: { status: 'completed', judgment: 'a observed before stop' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
+  const original = { ...f.capture(), childInvocations: [invocation], entries: [delivery] };
+  const businessTurnRef = { businessTurnId: 'inspection-turn', bindingCommitRef: f.receipt('binding'), execution: original.binding.execution };
+  const segmentBinding = { businessTurnRef, assignment: { ...f.assignment, executionEpoch: 2 },
+    execution: { runtimeId: 'resumed', executionEpoch: 2 }, scope,
+    incarnation: { runtimeId: 'resumed', generation: 1, agentInstanceId: 'resumed-agent', roleId: 'execution',
+      taskId: f.assignment.taskId, assignmentId: f.assignment.assignmentId, executionEpoch: 2 } };
+  const predecessor = { segmentId: 'original', recoveryAssetsReceiptRef: 'committed:v1' };
+  const opened = { kind: 'segment-opened' as const, segmentId: 'resumed', businessTurnRef, predecessor,
+    binding: segmentBinding, authorityCommitRef: f.receipt('authority'), businessRegistrationCommitRef: f.receipt('registration'),
+    requestRef: 'open-resumed', inputIdentity: { requestRef: 'open-resumed', digest: 'input' } };
+  const source = { originalAdmittedTurn: original.binding.admittedTurn, originalBusinessTurnRef: businessTurnRef,
+    opened, openedCommitRef: f.receipt('opened') };
+  const recovery = { recoveryResponsibilityRef: 'recovery', unresolvedOperationRefs: [], rawTurnRefs: [], laterErrorRefs: [],
+    commitIdentity: 'save', stages: [], durablePhases: [], durableReceiptRefs: [] };
+  const prepared = { body: { version: 2 as const, segmentId: 'resumed', businessTurnRef, binding: segmentBinding,
+    initialInput: original.initialInput, entries: [], requests: [], childInvocations: [], cut: original.cut, predecessor },
+    controlRecordCount: 0, producerDrains: [], completionLookups: [], recovery };
+  const receipt = { commitIdentity: 'committed:v2', journalReceiptRef: 'journal:v2', commitFactDigest: 'fact', journalSeq: 7,
+    recordDigest: 'record', businessTurnId: 'inspection-turn', segmentId: 'resumed', boundaryId: 'boundary', capture: f.raw };
+  const originalRead = { receipt: { ...receipt, commitIdentity: 'committed:v1', turnId: 'inspection-turn' },
+    prepared: { ...prepared, body: original } };
+  const reads: string[] = [];
+  let missing = false;
+  const assets = { readRecoveryAssetsExact: async () => originalRead,
+    readBoundaryRecoveryAssetsExact: async (ref: string) => {
+      reads.push(ref);
+      if (ref === 'committed:v2') return { version: 2 as const, assets: { receipt, prepared }, source };
+      if (ref === 'committed:v1' && !missing) return { version: 1 as const, assets: originalRead };
+      throw new Error('exact capture missing');
+    } };
+  const intent: NativeSegmentSaveIntentV2 = { key: { version: 2, turn: context.turn, segment: { segmentId: 'resumed', openedCommitRef: source.openedCommitRef },
+    boundaryId: 'boundary', checkpoint: checkpoint.checkpoint }, source, ownerId: 'native', inputIntentDigest: 'input', ...recovery,
+    recoveryAssets: { source, boundaryId: 'boundary', captureRef: 'prepared-selector' },
+    checkpoint: { checkpoint: checkpoint.checkpoint, timeAuthority: checkpointTimeAuthority, previousCheckpointId: null, acceptedAt: f.time },
+    closure: { closureId: 'closure', checkpoint: checkpoint.checkpoint, source: 'harness-control', closureSummary: 'stop', closureEvidenceRefs: [] },
+    contextView: { source, acceptance: { ownerId: 'native', acceptanceRef: 'acceptance', sourceEvidenceRefs: [] },
+      semantics: { goal: 'stop', actions: 'stop', result: 'stopped', nextStep: 'recover' }, adoptedChildren: [],
+      recovery: { ...recovery, recoveryStateRef: 'recovery-state' } } };
+  f.stop(checkpoint, { intent, recoveryAssetsReceiptRef: 'committed:v2', assets,
+    segments: { readInitialOpenExact: async () => { throw new Error('unexpected initial-open'); },
+      readSegmentInterruptedExact: async () => { throw new Error('unexpected interrupted'); } } });
+  const facts = await f.helpers().occurrences.readOccurrencesForStop({ checkpoint });
+  assert.equal(facts.length, 1);
+  assert.deepEqual(reads, ['committed:v2', 'committed:v1']);
+  assert.deepEqual(facts[0]!.deliveries, [{ invocation, delivery }]);
+  missing = true;
+  await assert.rejects(f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), /exact capture missing/);
+  f.stop(checkpoint, { intent: { ...intent, key: { ...intent.key, checkpoint: { ...checkpoint.checkpoint, id: id('checkpoint', 'wrong') } } },
+    recoveryAssetsReceiptRef: 'committed:v2', assets, segments: { readInitialOpenExact: async () => { throw new Error('unexpected'); }, readSegmentInterruptedExact: async () => { throw new Error('unexpected'); } } });
+  await assert.rejects(f.helpers().occurrences.readOccurrencesForStop({ checkpoint }), /intent does not match/);
+});
 
 const observationProfile: AgentModeCapabilityProfile = {
   profileId: 'orchestration-observation-1',

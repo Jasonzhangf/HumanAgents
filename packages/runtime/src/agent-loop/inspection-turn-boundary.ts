@@ -86,6 +86,10 @@ export interface InspectionOccurrenceFacts {
     readonly record: InspectionItemResultRecord;
     readonly commitRef: JournalCommitRef;
   }[];
+  readonly definition?: {
+    readonly record: import('../../../contracts/src/index.js').DurableInspectionDefinition;
+    readonly commitRef: JournalCommitRef;
+  };
   readonly settlement?: {
     readonly record: InspectionOccurrenceSettledRecord;
     readonly commitRef: JournalCommitRef;
