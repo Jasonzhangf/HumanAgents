@@ -302,11 +302,11 @@ export function createScopedReadPublication(read) {
   })
 }
 
-// Human failure copy for one scoped/page read. The mapping covers only the codes the
-// runtime owner actually returns; every other code keeps the confirmed default (this read
-// failed, the specific reason is not confirmed yet) instead of guessing a direction. The
-// runtime's code/owner/message/nextAction stay verbatim in the evidence detail, so the
-// mapping never hides or relabels an unknown failure.
+// Human failure copy for one scoped/page read. The mapping covers the codes the runtime
+// or the scoped UI read owner actually returns; every other code keeps the confirmed
+// default (this read failed, the specific reason is not confirmed yet) instead of guessing
+// a direction. The exact code/owner/message/nextAction stay verbatim in the evidence
+// detail, so the mapping never hides or relabels an unknown failure.
 const READ_FAILURE_COPY = Object.freeze({
   'auth.session.missing': {
     result: '这台浏览器尚未配对',
@@ -343,6 +343,14 @@ const READ_FAILURE_COPY = Object.freeze({
   'i2.history.unavailable': {
     result: '权威历史读取尚未接入',
     next: '此次历史结果暂不可用，请查看已有详情。',
+  },
+  'history.identity.mismatch': {
+    result: '历史读取范围不匹配',
+    next: '请从所属项目重新打开任务历史。',
+  },
+  'history.comparison.mismatch': {
+    result: '巡检对比记录与所选轮次不一致',
+    next: '请重新选择两次记录比较。',
   },
   'project-manifest-missing': {
     result: '该项目资源未登记',
@@ -929,7 +937,14 @@ function i2ItemDetail(item) {
 }
 
 function i2TaskScopeDetail(projection) {
+  const scope = projection.scope?.kind === 'task'
+    ? [
+        ['projectKey', projection.scope.projectKey],
+        ['mode', projection.scope.mode],
+      ]
+    : []
   return [
+    ...scope,
     ['organId', projection.taskScope?.organId?.value],
     ['taskId', projection.taskScope?.taskId?.value],
   ]
