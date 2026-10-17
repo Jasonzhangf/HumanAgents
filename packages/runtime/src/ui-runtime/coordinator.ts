@@ -569,17 +569,13 @@ export type RuntimeInspectionStopCompletion =
   | { readonly state: 'unknown'; readonly reason: string };
 
 /**
- * Runtime-owned inspection stop settlement. The coordinator only orders the
- * durable checkpoint handoff and the read-only completion projection; the
- * injected owner reads retained deliveries and commits I2 facts.
+ * Runtime-owned inspection stop settlement. The injected owner reads retained
+ * deliveries, commits I2 facts, and returns its own completion result.
  */
 export interface RuntimeInspectionStopSettlementPort {
   settleStop(input: {
     readonly checkpoint: CommittedCheckpointRecord;
-  }): Promise<{
-    readonly settlementCommitRefs: readonly JournalCommitRef[];
-    readonly cycleClosedCommitRef?: JournalCommitRef;
-  }>;
+  }): Promise<RuntimeInspectionStopCompletion>;
   readStopCompletion(input: {
     readonly checkpoint: CommittedCheckpointRecord;
   }): Promise<RuntimeInspectionStopCompletion>;
@@ -5563,10 +5559,7 @@ export class RuntimeTaskCoordinator {
   private async settleInspectionStopRecord(record: TaskRecord, exact: CommittedCheckpointRecord): Promise<void> {
     if (this.options.inspectionStop === undefined || exact.checkpoint.outcome !== 'stopped') return;
     try {
-      await this.options.inspectionStop.settleStop({ checkpoint: exact });
-      // Settlement success is not completion truth. Re-read the same exact
-      // checkpoint through the read-only owner before opening or finalizing.
-      const completion = await this.options.inspectionStop.readStopCompletion({ checkpoint: exact });
+      const completion = await this.options.inspectionStop.settleStop({ checkpoint: exact });
       if (completion.state !== 'complete' && completion.state !== 'not-applicable') {
         throw new RuntimeTaskControlError(
           'inspection.stop-settlement.pending',

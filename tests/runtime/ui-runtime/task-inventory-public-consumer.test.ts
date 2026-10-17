@@ -190,7 +190,7 @@ test('named inspection inventory only reads durable stop completion', async () =
   const commitRef = { commitId: 'inspection-checkpoint', journalSeq: 2, recordDigest: 'inspection-receipt' };
   let settleCalls = 0;
   const inspection: RuntimeInspectionStopSettlementPort = {
-    settleStop: async () => { settleCalls += 1; return { settlementCommitRefs: [] }; },
+    settleStop: async () => { settleCalls += 1; return { state: 'complete', settlementCommitRefs: [] }; },
     readStopCompletion: async ({ checkpoint: exact }) => {
       assert.equal(exact.commitRef, commitRef);
       assert.equal(exact.checkpoint, checkpoint);
@@ -245,7 +245,7 @@ test('named inspection inventory only reads durable stop completion', async () =
         settleCalls += 1;
         assert.strictEqual(retained, exact);
         if (failSupplement) throw new Error('retained inspection supplement failed');
-        return { settlementCommitRefs: [] };
+        return { state: 'complete', settlementCommitRefs: [] };
       },
       readStopCompletion: async () => ({ state: 'complete', settlementCommitRefs: [] }),
     },

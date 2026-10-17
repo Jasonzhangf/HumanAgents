@@ -600,7 +600,6 @@ test('prepared admission holds effects until release and retains denial or stop 
   const producer = new PreparedExecutionStop({ journal: organJournal, taskJournal, admission: admissionOwner });
   const store = new FileCheckpointStore(join(root, 'checkpoints.jsonl'));
   let supplementFails = failSupplement;
-  let settledCheckpoint: CommittedCheckpointRecord | undefined;
   let supplementCalls = 0;
   let producerSettleCalls = 0;
   const originalSettle = producer.settle.bind(producer);
@@ -619,12 +618,10 @@ test('prepared admission holds effects until release and retains denial or stop 
       'I2 supplement must precede stop terminal/finalization');
       assert.equal(heldDriver.closeCalls, 0, 'supplement precedes any close');
       if (supplementFails) throw new Error('inspection supplement unavailable');
-      settledCheckpoint = checkpoint;
-      return { settlementCommitRefs: [] };
-    },
-    async readStopCompletion({ checkpoint }) {
-      assert.deepEqual(checkpoint, settledCheckpoint);
       return { state: 'complete', settlementCommitRefs: [] };
+    },
+    async readStopCompletion() {
+      throw new Error('mutating settlement must use its own typed result');
     },
   };
   const stopped = preparedCoordinator(stopJournal,
