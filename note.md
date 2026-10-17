@@ -18,6 +18,12 @@
 
 本节更新日常开发与本地安装入口；下方旧候选记录只作历史，不作为当前检查要求。
 
+本轮补查（用户再次要求按 bootstrap-migration 执行）：两个独立 GCM 观察者分别检查程序入口和活动规则。日常 build/ci/test/package/install 未再发现 SHA 调用，三节点 CI 图保持闭合；不重跑已有有效验收。正文继续删除 M1/M2/M3 每小阶段 Astra 门、派单 SHA、配置摘要、冻结后才释放依赖及旧脚手架对 checkpoint-runner 的日常调用要求。README 将 release 命令移出日常启动示例。纯文档批次提交 `bcacc988`；随后正常合流 peer 已推送的 Provider 增量，不改其候选或运行现场。
+
+程序补查发现 `proof:cordis-host-closeout` 与 Dashboard E2E 仍做候选 commit/tree/source/artifact 摘要和运行前后稳定性包装，尚未消融完成。已交独立小计划 Planner，代码由外置独占 `governance-entry-ablation-20261017` 执行，保留 Task/operation/epoch、授权、settlement、业务 Journal/asset 完整性和资源收口。另有 release 测试中的文案匹配及固定配置断言待移除；release 专属程序不扩改。
+
+SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 binary 摘要，并写迁移材料。本轮不执行该包装命令，不重复 init，不手改受管 Skills、pin 或 lock。受管 Skills/maps 仍有旧治理，因此不能报告整体消融全部完成；唯一修复 owner 为 AppSDK 的正常资源升级入口。
+
 本轮续查读取了当前全局治理 Skill 与 bootstrap-migration 的消融章节、有效需求、项目 AGENTS、日常 build/CI/package/install/restart 入口及现有审查回执。当前仓库未配置 core.hooksPath，`.git/hooks` 只有未启用的 sample；没有 `.github` CI 工作流。现有三节点 CI 图与 `typecheck → build:raw → test:compiled:services` 调用一致，拓扑未变，不重复跑图校验或行为测试。
 
 续查发现三份旧计划会重新引入治理：`human-visible-integration-plan.md`、`live-composition-closeout-plan.md` 与 `native-provider-gap-plan-2026-10-11.md`。已从正文删除输入/产物哈希、候选 SHA/tree 绑定、候选 digest 重算、identity 复用门槛、独立 reuse/rerun 账本及 AGY+Codex+Astra 多轮审查要求。Provider 旧状态明确为历史，未把旧结果升级为当前 PASS。保留三脑功能、公开入口、任务隔离、恢复、真实模型、数据正确性和一次完整 milestone review。此批只改文档，不改变程序入口，无新增测试、构建或服务重启。
