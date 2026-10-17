@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- C3a r8阶段回执已到、Root编译产物原3cases3/3Node0：真实resume标准尾部position1→2后legalcorrection3成功，真实pending仍拒绝。Root核producer同admittedturn固定requestId完整身份，latestphase fold不另加假设校验；历史request扫描具体RED/源修正有效。但r8在result后仍收尾test/receipt，exit尚未到且报告testblob与最终源有差异，不启动并写；r9 hot/freshcold派单已准备，待真实writer关闭/最终hash对齐。六文件C3a尚未commit/merge，全链未验收。
+- N3预算底层已freshGCM补位，独占n3-admission-budget/basea51ba5e，仅implicit-admission.ts与原admission.test消费显式maxConcurrentTasks，不重复现有Pool/barrel，不改App/runtimeindex。旧selector来源已先关，当前所有新域均有activeowner；UXA3 source08a440b→候选50a853d5ee7cc052974682c224bf7f9afb4690d6，peer组合UItsc0/原3focusedPASS并正常关树，不Appbuild/restart。UXA2仍独占runtime/index，Appreader仅独立只读计划，挂载待C3a释放。
+
 - 无错误路径基础已接收sourceafaf336→候选94078a4770c7836f2a4b3aa83daed6dd784f3ac8，production仅删除errors.length===0限制。Root实读actualTAP缺error证据RED（shell wrapper0不冒Node1），来源/组合consumer各1/1Node0、组合Appbuild/scopedtsc0。原failed链断言保留，真实distinct succeeded records的errors[]路径消费applied；无真实conditional/production/cold声明。原Memory树cleanFF候选后直接续freshGCM C3b module r2，不新重试树；同identity不同body的独立敏感性留C3b幂等验证，不以当前时间变化冲突冒证明。
 - N3 deadselector消融已接收sourcea01a772→候选7284c6cdf15572df26f015dbf6e15021c6221e9c，唯一file净删372行，真实TaskFlowRefinedResult ABI保留。组合Appbuild/tsc0、原1Plannerconsumer1/1Node0，作者去export的编译反例恰3consumer失败，未冒运行RED。来源clean/无占用后normalremove/prune/pathabsent；Root独占fixture三份receipt/wires/Journal已归档run/root-boundary-receipt、fixture父目录已清，无新test/graph。N3动态编排未接通。
 - 两份OAuth精确计划已接收：C3b module先Journal分组/全完整历史reconcile/同identity幂等与patch保analysisInputs，真实taskscope/epoch须走既有taskconsumer；CLI/Coordinatorhook待C3a释放，不重复epoch。N3 helper每callcheckpoint真实Runtime+Jsonl基础freshGCM独占新domain/basef067180，requiredhost语义/时间与返回采纳分离，App挂载后置；明确不碰UXA2的runtime/src/index。当前本侧C3a基础、C3b模块、N3 helper三GCM，UXA2/A3另两GCM；loaded仍9357966/gen15，未mainpush。
