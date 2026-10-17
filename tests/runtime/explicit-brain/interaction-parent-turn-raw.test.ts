@@ -391,21 +391,27 @@ test('neutral interaction parent raw owner keeps one durable, parent-only raw hi
       dispatchAcceptedAt: committedAt,
       evidenceRefs: [childEvidence],
     });
-    await helperJournal.appendReturned({
-      kind: 'returned',
-      result: childResult,
-      returnedAt: committedAt,
-      evidenceRefs: [childEvidence],
-    });
-    await helperJournal.appendOwnerAccepted({
-      kind: 'owner-accepted',
-      result: childResult,
-      refinedResult: { ref: childEvidence, view: { kind: 'utf8-text' } },
-      acceptedBy: 'owner',
-      acceptanceRef: 'acceptance://child-only',
-      acceptedAt: committedAt,
-      evidenceRefs: [childEvidence],
-    });
+    await helperJournal.appendReturned(
+      {
+        kind: 'returned',
+        result: childResult,
+        returnedAt: committedAt,
+        evidenceRefs: [childEvidence],
+      },
+      { description: 'Return the child-only result for the parent raw-turn fixture' },
+    );
+    await helperJournal.appendOwnerAccepted(
+      {
+        kind: 'owner-accepted',
+        result: childResult,
+        refinedResult: { ref: childEvidence, view: { kind: 'utf8-text' } },
+        acceptedBy: 'owner',
+        acceptanceRef: 'acceptance://child-only',
+        acceptedAt: committedAt,
+        evidenceRefs: [childEvidence],
+      },
+      { description: 'Adopt the child-only result for the parent raw-turn fixture' },
+    );
     await helperJournal.appendSemanticCheckpoint({
       kind: 'semantic-checkpoint',
       organId,
@@ -806,6 +812,7 @@ test('explicit semantic close folds the settled parent turn and separates accept
       },
       inputs: { request: 'bounded helper-a request' },
       evidenceRefs: [semanticCloseEvidence('dispatch-a')],
+      checkpointDescription: 'Return the first bounded observation for the parent turn',
       conclude: ({ output }) => helperResultFields({
         agentId: 'agent-helper-a',
         summary: 'RAW-SUMMARY-A-MUST-NOT-APPEAR',
@@ -828,6 +835,7 @@ test('explicit semantic close folds the settled parent turn and separates accept
       },
       inputs: { request: 'bounded helper-b request' },
       evidenceRefs: [semanticCloseEvidence('dispatch-b')],
+      checkpointDescription: 'Return the second bounded observation without adoption',
       conclude: ({ output }) => helperResultFields({
         agentId: 'agent-helper-b',
         summary: 'RAW-SUMMARY-B-MUST-NOT-APPEAR',
@@ -840,6 +848,7 @@ test('explicit semantic close folds the settled parent turn and separates accept
     const acceptEvidence = semanticCloseEvidence('owner-accepted-a');
     await session.acceptHelper({
       helperCallId: accepted.identity.helperCallId,
+      checkpointDescription: 'Adopt the first bounded observation for semantic close',
       refinedResult: refinedA,
       acceptedBy: 'parent-owner',
       acceptanceRef: 'acceptance://helper-a',

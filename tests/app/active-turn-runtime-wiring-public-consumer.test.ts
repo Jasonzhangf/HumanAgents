@@ -55,6 +55,7 @@ import { MemoryCoordinator, type AttentionPort } from '../../packages/runtime/sr
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/evidence.js';
+import { createFilesystemRefinedDeliveryStore } from '../../packages/app/src/ui-runtime/refined-delivery-store.js';
 import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-active-turn-test');
@@ -962,6 +963,8 @@ test('behavior 3: request chain, checkpoint and child delivery survive object re
   const root = await mkdtemp(join(tmpdir(), 'humanagent-active-turn-replay-'));
   const activeTurnPath = join(root, 'active-turn.jsonl');
   const checkpointPath = join(root, 'checkpoints.jsonl');
+  const assetRoot = join(root, 'native-assets');
+  const refinedDeliveryStore = createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(assetRoot));
   const taskId = id('task', 'active-turn-replay-task');
   const scope: ScopeRef = {
     organId,
@@ -969,11 +972,12 @@ test('behavior 3: request chain, checkpoint and child delivery survive object re
     cycleId: id('cycle', 'active-turn-replay-cycle'),
     operationId: id('operation', 'active-turn-replay-operation'),
   };
-  const refinedDeliveryStore = new MemoryRefinedDeliveryStore();
   try {
     const journal = new FileActiveTurnJournal(activeTurnPath);
     const checkpointStore = new FileCheckpointStore(checkpointPath);
     const assignment = workAssignment(taskId, scope, 'stage-active-turn-1');
+    // Exact bytes handed to the store; a cold read from a new instance must return them unchanged.
+    const originalBytes = new TextEncoder().encode(JSON.stringify({ assignmentId: assignment.assignmentId, status: 'succeeded' }));
     const admittedTurn = produceAdmittedTurn({
       runtime: { ...permissionSnapshot, executionEpoch: assignment.executionEpoch },
       taskId,
@@ -1032,7 +1036,7 @@ test('behavior 3: request chain, checkpoint and child delivery survive object re
     const refinedDelivery = await refinedDeliveryStore.store({
       scope,
       invocationId: 'invocation-1',
-      bytes: new TextEncoder().encode(JSON.stringify({ assignmentId: assignment.assignmentId, status: 'succeeded' })),
+      bytes: originalBytes,
     });
     const delivery = await context.recordChildReturn({
       kind: 'execution',
@@ -1072,8 +1076,11 @@ test('behavior 3: request chain, checkpoint and child delivery survive object re
     if ('envelope' in rebuiltDelivery) throw new Error('expected a child delivery entry after reconstruction');
     assert.equal(rebuiltDelivery.seq, delivery.seq);
     assert.equal(rebuiltDelivery.invocationId, 'invocation-1');
-    const rebuiltBytes = await refinedDeliveryStore.read(rebuiltDelivery.refinedDelivery);
-    assert.deepEqual(JSON.parse(new TextDecoder().decode(rebuiltBytes)), { assignmentId: assignment.assignmentId, status: 'succeeded' });
+    // New store object and new adapter over the same asset root prove the bytes
+    // are truly on disk, not held in this test's process memory.
+    const rebuiltStore = createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(assetRoot));
+    const rebuiltBytes = await rebuiltStore.read(rebuiltDelivery.refinedDelivery);
+    assert.deepEqual(rebuiltBytes, originalBytes);
 
     const latest = await rebuiltCheckpointStore.readLatest(scope);
     assert.ok(latest);

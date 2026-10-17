@@ -1,7 +1,7 @@
 # HumanAgent AppSDK Upgrade and Governance Plan
 
 Date: 2026-10-10
-Status: `INCOMPLETE`
+Status: `HISTORICAL` — 日常治理流程已由 2026-10-16 用户消融要求替代。
 Owner: project controller
 
 ## Objective
@@ -13,16 +13,14 @@ peer or make AppSDK endpoint registration part of this task.
 
 ## Acceptance
 
-- Installed `appsdk version` matches the AppSDK source release on
-  `origin/main`; installed binary bytes match that release build.
+- Installed `appsdk version` reports the intended SDK release.
 - HumanAgent `.appsdk` bundle is on the same SDK version.
 - The authorized fresh reset is represented by an official reset record; old
   AppSDK local control state is handled only by an official AppSDK reset
   command.
 - `appsdk verify` has an explicit result. `baseline_required` remains
   incomplete and is never reported as a pass.
-- The project-rule audit records each proposed change with its owner, action,
-  basis, retained safeguards, and affected entrypoints.
+- Project-rule changes preserve module ownership and affected behavior.
 - No unrelated existing dirty or untracked project files are changed.
 - Governance changes receive one independent review at the completed
   milestone. Document-only checks stay scoped to the changed guidance.
@@ -31,24 +29,20 @@ peer or make AppSDK endpoint registration part of this task.
 
 | Node | Work | State | Evidence |
 |---|---|---|---|
-| G1 | Install AppSDK from current `origin/main` and verify installed version, binary identity, and the three shipped Skills. | `PASS` | AppSDK source `d1a3c267a8a31d18144967ba13fd6a2593f7c934`; `appsdk version` = `0.1.0014`; installed/build SHA-256 = `f1dc60aa28e1e7d33d14cef0995850c77c66bb33787a597deafd2150a07cb389`; all three Skill `cmp` checks exited 0. |
+| G1 | Install AppSDK and read its version. | `PASS` | Historical result: `appsdk version` = `0.1.0014`. Binary hashes and byte comparisons are removed from the acceptance contract. |
 | G2 | Reconcile HumanAgent's reset baseline and current local AppSDK state. | `INCOMPLETE` | Reset record in the prior baseline says `fresh_init`, but the canonical workspace still reports ignored `.appsdk-control/` as present. `appsdk verify .` reports `ok:false`, `reason:baseline_required`, `stage:contract_bound`; requirements report `not_established`. Canonical fresh init was not repeated because the official flow may internally invoke App Server identity context, and the user explicitly said not to register a peer. |
 | G3 | Audit project rules against AppSDK 0.1.0014, project Skills, package scripts, and actual CI/hook entrypoints. | `PASS` | Read `AGENTS.md`, AppSDK project-governance Skill, current template, package scripts, and release/CI scripts; see the entrypoint inventory below. |
-| G4 | Produce a scoped GuidanceSetupProposal and make only authorized, owner-correct governance changes. | `PARTIAL` | Bootstrap returned a read-only proposal, not persisted task state. The reviewed candidate removes only the obsolete task-specific SHA from `AGENTS.md`; candidate tree `d4e435e2b4c8a63979d2971062f1998f966145cd`. |
-| G5 | Run the targeted governance checks and obtain one independent review for the complete change. | `PASS` | Independent review PASS for the single `AGENTS.md` change; staged `git diff --check` passed. Commit `c5b88cfa5decb305ab09ccc6e7937e2f76b7d138` was fast-forwarded to `main` and pushed to `origin/main`. The broader upgrade remains open because G2 is incomplete. |
+| G4 | Produce a scoped GuidanceSetupProposal and make only authorized, owner-correct governance changes. | `PARTIAL` | Bootstrap returned a read-only proposal. The document change removed an obsolete task-specific starting commit from `AGENTS.md`. |
+| G5 | Deliver the document change. | `PASS` | The change was reviewed, merged and pushed. It did not establish the broader SDK reset baseline. Individual document edits no longer require independent Review. |
 
 ## Audit findings so far
 
 1. Keep HumanAgent purpose, module ownership, semantic invariants, MVP
    boundaries, and product acceptance gates in `AGENTS.md`; they are project
    facts and are more specific than the advisory template.
-2. `AGENTS.md` line 48 contained a task-specific starting SHA,
-   `4ec6313cfad75c00363bbbedd6234928234121dd`. The reviewed candidate removes
-   this one-off execution fact while retaining the separate clean-worktree
-   requirement. Independent review used base
-   `2a25f20a8195e8eda7391a20c059cf04b3c2b541` and candidate tree
-   `d4e435e2b4c8a63979d2971062f1998f966145cd`; the review found no blocking
-   issues. The current native-reasoning plan owns per-task base commits.
+2. The obsolete task-specific starting commit was removed from `AGENTS.md`.
+   Clean worktree ownership remains required. Per-task commit identities are
+   not a development or governance admission gate.
 3. `AGENTS.md` includes detailed peer task and delivery procedures. Before
    moving or narrowing them, compare coverage with the installed project
    governance Skill and avoid creating duplicate procedure owners.
@@ -60,7 +54,11 @@ peer or make AppSDK endpoint registration part of this task.
    `GuidanceSetupProposal` intake. Its output did not persist task state or
    authorize a source edit by itself.
 
-## Entrypoint inventory
+## Historical entrypoint inventory
+
+These observations describe 2026-10-10. They do not prescribe current gates.
+The 2026-10-16 ablation removes ordinary build/CI hash checkpoints, automatic
+release/DAG gates, frozen candidate binding and minimum test counts.
 
 - `package.json` declares `ci:check` as typecheck, the full `test` chain, and
   release tests. `test:release` runs release-gate and DAGPipe-binding tests.
@@ -93,9 +91,9 @@ peer or make AppSDK endpoint registration part of this task.
 4. The reviewed `AGENTS.md` candidate is integrated and pushed as
    `c5b88cfa5decb305ab09ccc6e7937e2f76b7d138`. Keep other project semantics
    unless the audit shows a concrete owner or duplication defect.
-5. Run only the applicable document, AppSDK contract, and affected HumanAgent
-   gates for each remaining accepted change; do not describe the single
-   document review as review of the entire AppSDK upgrade.
+5. This historical upgrade plan does not authorize new reset, hash, snapshot,
+   baseline or packaging work. Current work follows the affected behavior and
+   the user's minimal-process requirement.
 
 ## Boundaries
 

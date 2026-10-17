@@ -22,7 +22,7 @@
       "ownerPath": "packages/runtime/src/context/active-turn-context.ts",
       "ownerRel": "packages/runtime/src/context/active-turn-context.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "建立独立 Provider/model 与 context"
+      "designNote": "建立独立 Provider/model 与 context；child business 登记后，初始化 child binding 时精确读取 parent 本体及既有 provenance，不以该 namespace 全部 child control 已完整为前提；namespace 完整性读取仍保留所有未受控 child 义务。"
     },
     "execute": {
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",

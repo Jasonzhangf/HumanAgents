@@ -32,7 +32,6 @@ export interface SupervisorCleanupFailure {
 
 export interface SupervisorSourceReceipt {
   readonly entryPath: string;
-  readonly entryDigest: string;
   readonly packageVersion: string;
   readonly releaseVersion?: string;
 }
@@ -59,7 +58,6 @@ export interface SupervisorRestartTransition {
   readonly previousGeneration: number;
   readonly previousProcessStartToken: string;
   readonly targetEntryPath: string;
-  readonly targetEntryDigest: string;
   readonly completedAt?: string;
   readonly failure?: SupervisorRestartFailure;
 }
@@ -239,8 +237,6 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
       || startup.args.some((argument) => typeof argument !== 'string')
       || typeof startup.source?.entryPath !== 'string'
       || !startup.source.entryPath
-      || typeof startup.source.entryDigest !== 'string'
-      || !startup.source.entryDigest
       || typeof startup.source.packageVersion !== 'string'
       || !startup.source.packageVersion
       || (startup.source.releaseVersion !== undefined && typeof startup.source.releaseVersion !== 'string')
@@ -263,8 +259,6 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
       || !restart.previousProcessStartToken
       || typeof restart.targetEntryPath !== 'string'
       || !restart.targetEntryPath
-      || typeof restart.targetEntryDigest !== 'string'
-      || !restart.targetEntryDigest
       || (restart.completedAt !== undefined && typeof restart.completedAt !== 'string')
       || (restart.failure !== undefined && (
         typeof restart.failure.errorCode !== 'string'

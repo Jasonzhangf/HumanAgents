@@ -1,4 +1,5 @@
 @import "./state-colors.css";
+@import "./semantic-observation.css";
 :root {
   color-scheme: light;
   --ink: #17201d;

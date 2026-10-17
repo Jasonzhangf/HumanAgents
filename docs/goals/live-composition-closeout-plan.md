@@ -22,7 +22,7 @@ confirmed requirement
 
 ## 当前基线纠偏
 
-旧的 `feature-flow-dag-audit.md` 绑定较早的源码 SHA，不能直接作为当前结论。
+旧的 `feature-flow-dag-audit.md` 描述较早的实现，不能直接作为当前行为结论。未变且适用的证据直接复用。
 
 当前代码检查已确认：
 
@@ -36,13 +36,13 @@ confirmed requirement
 
 ### G0：当前基线审计
 
-范围：更新 live composition audit，记录当前 SHA、入口调用边、能力 projection 和已有测试证据。
+范围：更新 live composition audit，记录入口调用边、能力 projection 和适用行为证据。
 
-当前进度：候选审计已刷新；最终 SHA/tree 绑定待 review 后回填。
+当前进度：候选审计已刷新；各能力仍按真实入口证据判定，不追加 SHA/tree 绑定。
 
 完成条件：
 
-- 审计绑定当前候选 commit，而非旧 SHA。
+- 审计说明当前受影响调用边和行为，普通 Git 回执仅记录交付，不作为额外身份门禁。
 - 每项能力分为 `LIVE`、`PARTIAL`、`UNWIRED`、`MISSING` 或 `UNKNOWN`。
 - 明确区分源码实现、模块测试、live serve 和真实入口回放。
 - 不修改已有用户 dirty 文件。
@@ -98,7 +98,7 @@ confirmed requirement
 - `serve --mode fake` 真实回放通过。
 - RCC 入口至少完成 provider readiness 和不影响既有单 Agent 回放的回归。
 - 相关 typecheck、focused tests、compiled regression 通过。
-- 普通独立 review 绑定候选 SHA 并通过；阻塞 finding 修复后重跑受影响 gate。
+- 完整 milestone 作者验收完成后、正式集成前进行一次独立整体 review；finding 修复后只补受影响验证并复核该 finding。
 - README、AGENTS、目标文档和 audit 的状态一致。
 - 未完成的 DSH UI、真实 RAG、long-horizon schedule 和完整 ACP live path 仍明确标为未完成或未验证。
 
@@ -111,7 +111,7 @@ confirmed requirement
 | orchestration | `packages/runtime/src/orchestration`、`packages/app/src/m3-assembly.ts` | 编排和组装边界 |
 | memory | `packages/app/src/memory-*`、`packages/runtime/src/memory` | memory boundary 和 scope |
 | UI projection | `packages/runtime/src/ui-runtime`、`packages/ui` | typed projection，不读 raw journal |
-| 审计文档 | `docs/architecture`、`docs/goals` | 当前 SHA 的事实和计划 |
+| 审计文档 | `docs/architecture`、`docs/goals` | 当前调用边、行为证据和计划 |
 
 禁止：修改 DSH 源码、把 DSH 类型提升为领域类型、在 dirty main 开发、清理他人 worktree、用测试 fixture 伪造 live 入口完成。
 

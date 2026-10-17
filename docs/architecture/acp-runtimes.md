@@ -189,4 +189,5 @@ user_configuration → resolve_agent_config → compose_acp_driver → open_acp_
 `close.closed === true` 且已请求停止时，才把闭包判为 `stopped`，否则失败关闭并
 由控制面显式报错。
 
-用 `pnpm dagpipe:validate` 与 `pnpm dagpipe:bind` 校验。
+图有修改时，只对受影响图运行 `dagpipe graph validate <graph>` 和
+`node scripts/dagpipe-bind-graphs.mjs <graph>` 一次。

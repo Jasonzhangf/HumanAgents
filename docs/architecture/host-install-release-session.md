@@ -227,7 +227,6 @@ JSONL 逐条追加，每条至少包含：
   "workspaceCwd": "/Volumes/extension/code/humanagent",
   "projectKey": "-Volumes-extension-code-humanagent",
   "state": "ready",
-  "runtimeManifestDigest": "sha256:...",
   "checkpointRef": "checkpoint:task-1:4",
   "ownerId": "host",
   "occurredAt": "2026-09-12T00:00:00.000Z"
@@ -288,45 +287,37 @@ MVP 的 `run` 完成 create/opening/ready 后交还宿主，session 保持 `read
 当前 release version 的唯一规则见 [`release-version.md`](release-version.md)。标准
 release build 使用 `pnpm build:release`：它要求 clean worktree，自动 bump patch
 version，同步 package metadata 和本架构记录，提交版本变更，然后执行完整的
-checkpointed regression/release chain。它不是普通 `pnpm build` 的别名。
+release 打包流程。它是显式发布入口，不能作为普通开发或本地安装的前置。
 
 ```text
-clean candidate
-  → version / lock verification
-  → build
-  → focused tests
-  → runtime integration
-  → config/template/plugin compile
-  → artifact assembly
-  → digest + release manifest
-  → isolated package install
-  → arbitrary-cwd smoke
-  → session persistence/restart smoke
-  → Astra review
-  → user-authorized commit/publish
+日常构建：类型检查 → 编译 → 返回结果
+显式 CI：类型检查 → 编译 → 服务回归 → 返回结果
+本地安装：读取已组装包的路径 → npm 全局安装 → 返回真实结果
 ```
 
-Release manifest 必须绑定：`releaseVersion`、source commit、config schema version、plugin manifest digest、DSH baseline（若该 release 包含 DSH）、artifact digest、测试命令和 review id。发布候选只能从 clean worktree 构建；工作树 dirty、依赖 lock 漂移、缺少真实入口验证或 Astra 未通过时，最多是 local candidate，不是 release。
+三条路径发生错误时立即报告并停止其下游。普通构建与 CI 不创建治理 checkpoint，
+不计算源码、输出目录或候选摘要；CI 不自动执行全图治理或 release 测试。
+业务运行时的 checkpoint、Journal 和恢复状态不受这项消融影响。
 
-编译 gate 使用同一份 checkpoint manifest，位置为：
+本地打包入口是 `pnpm package`，它调用 `package:candidate`，生成
+`dist/release/humanagent-cli-<releaseVersion>.tgz`。这条路径不读取 release
+manifest，也不计算源码、输出目录或候选摘要。显式 `package:release` 保持独立，
+不会由本地打包或安装自动执行。
+
+本地安装默认选择上述 candidate 包，也接受一个本地包位置参数：
 
 ```text
-~/.humanagent/build/checkpoints/<project-key>/manifest.json
+pnpm install:global
+pnpm install:global -- "/path/to/humanagent-cli-<releaseVersion>.tgz"
 ```
 
-固定 stage 顺序：
+传入路径时按调用者当前目录解析。选定包作为单个参数交给
+`npm install --global`。包不存在、包不可访问或 npm 失败都显式报错并停止，
+不寻找替代产物，不自动 build 或 release，也不声称安装成功。
 
-```text
-typecheck → compile → regression → ci → package → package-smoke
-```
-
-其中 `typecheck` 执行 `pnpm run typecheck`，`compile` 执行 `pnpm run build:raw`，`regression` 执行 `pnpm run test:compiled:services`，`ci` 执行 `pnpm run dagpipe:gate`（DAGpipe 图校验加 release-gate 自测），`package` 组装候选 tarball，`package-smoke` 在隔离 prefix 和任意临时 workspace 中安装并验证 doctor/run/session inspect。它们都是独立 checkpoint stage；本轮只要 identity 未变化就复用 PASS，不把“编译命令成功”当作回归或 CI 成功。
-
-每个 stage 的执行 identity 由 `stage name + owner + argv + explicit env + input digest + dependency PASS identities` 组成；可复用证据还绑定声明的 output path digest。输入、执行语义、依赖身份和输出 evidence 未变且上次为 PASS 时标记 `reused`；输出被篡改、缺失或首次失败的 stage 及其下游不复用，修复后从该 stage 重跑。实际执行的 stage 会产生新的 evidence identity，确保依赖的 smoke/review gate 不会复用旧执行结果。前置 PASS stage 不重跑。每个 stage 记录 owner、argv、状态、时间、退出码、stdout/stderr artifact、首个偏离和下一动作；禁止 shell 拼接和吞错。
-
-因此重复执行 `pnpm build:release` 的语义是增量 gate，不是无条件全量回归。依赖、配置、代码、测试或脚本输入发生变化时，identity 传播到受影响 stage；孤立且仍有效的 PASS 保留。
-
-全局安装必须先读取并通过 `release-manifest.json` 的 `release:check`，然后只安装 manifest 绑定且 digest 已验证的绝对 candidate artifact；不按目录中“最新” tarball 选择，也不直接把当前 checkout 的 source link 当 release。安装后验证：
+对外发布只选实际分发需要的打包、安装及公开入口验证。旧 release 脚本的摘要
+机制目前仍限于显式发布入口；它不构成日常放行条件，也不代表全部旧检查都有
+必要。实际准备对外发布时再按发布需求收窄。适用安装后验证复用已有结果，例如：
 
 ```text
 which humanagent
@@ -364,7 +355,7 @@ target。
 - internal/user/project config 分层加载，越权覆盖和重复 Agent 显式失败。
 - session JSONL 可 create/open/append/close，重启可恢复，损坏尾行不伪造成功。
 - user profile、global memory、project memory、task memory 和 session 路径相互分离。
-- release build 生成带 digest 的 manifest，并可用相同 artifact 做 isolated install/smoke。
+- 发布包可被实际安装，并通过受影响的公开 CLI/服务入口验证；不以摘要匹配代替行为。
 - 启动、release、session、memory 的失败都有 owner、错误码、下一动作；未完成 DSH 验证不被本 slice 升级为 DSH release。
 
 本次不声称：DSH clean version binding、真实 provider resume、生产签名、多节点高可用、RAG/vector backend 或 UI 完成。

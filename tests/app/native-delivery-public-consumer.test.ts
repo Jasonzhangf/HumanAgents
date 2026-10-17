@@ -28,7 +28,10 @@ import { STANDARD_TURN_END_TOOL } from '../../packages/app/src/ui-runtime/standa
 import { ADVERTISED_STANDARD_TURN_END_TOOL } from '../../packages/app/src/ui-runtime/standard-turn-composition.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
-import { createJsonlContextHistoryPort, createJsonlCheckpointClosurePort } from '../../packages/app/src/checkpoint-journal.js';
+import { createJsonlContextHistoryPort, createJsonlCheckpointJournal, createJsonlCheckpointClosurePort } from '../../packages/app/src/checkpoint-journal.js';
+import { createAppChildCheckpointAdapter } from '../../packages/app/src/ui-runtime/child-checkpoint-adapter.js';
+import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import type { AdmittedTurn, ReviewAssignment, ReviewResult } from '../../packages/contracts/src/index.js';
 import { readCheckpointClosurePreparation } from '../../packages/runtime/src/checkpoints/closure.js';
 import type { NativeSaveIntent } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
 
@@ -43,6 +46,153 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
  */
 const EXACT_BODY = 'EXACT\u4f53 single logical delivery \ud83d\ude80\nline two';
 const SUMMARY_RESULT = 'summary result is a different material';
+
+// Missing adapter and the legacy/native append split can lose recovery anchors.
+// Impact: false committed success or an old-epoch anchor. Cost: one local Journal
+// fixture, no model/network/process; the same fixture covers replay and failure.
+// Raw input dumps obscure decision semantics. The existing fixture adds readable
+// summary assertions at low cost; the old dump must fail the no-control-key check.
+test('App child checkpoint adapter commits native pre/review post and preserves replay across current segments', async () => {
+  await mkdir(PERSISTENCE_ROOT, { recursive: true });
+  const root = await mkdtemp(join(PERSISTENCE_ROOT, 'child-checkpoint-'));
+  const filePath = join(root, 'organ.jsonl');
+  const journal = new JsonlOrganJournal(filePath);
+  const scope = { organId: id('organ', 'child-organ'), taskId: id('task', 'child-task'),
+    cycleId: id('cycle', 'initial-cycle'), operationId: id('operation', 'initial-operation') };
+  const fact = async (label: string, factScope: ScopeRef = scope) => {
+    const record = await journal.append({ kind: 'event', commitId: label, scope: factScope, payload: { fact: label } });
+    if (!record.commitId) throw new Error('fixture commit is missing');
+    return { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
+  };
+  const admission = await fact('admission');
+  const evidence = (commitId: string, factScope: ScopeRef = scope): EvidenceRef => ({
+    evidenceId: id('evidence', commitId), kind: 'operation', source: 'consumer-journal', locator: commitId, scope: factScope,
+  });
+  const recoveryStateRef = evidence(admission.commitId);
+  const worker: WorkAssignment = { assignmentId: 'worker', taskId: scope.taskId, pipelineNodeId: 'child-node',
+    attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'review child', targetRefs: [], expectedOutputRefs: [],
+    acceptanceCriteriaDigest: 'criteria', successCriteria: ['native checkpoint readback'], failureCriteria: [], incompleteCriteria: [],
+    requiredCapabilities: [], mergeGate: 'not-required' };
+  const originalAdmittedTurn: AdmittedTurn = { turnId: 'child-turn', workAssignmentRef: worker.assignmentId,
+    taskRef: scope.taskId, scopeRef: scope, cycleRef: scope.cycleId, inputRevision: 1, directiveRevision: 3,
+    executionEpoch: 1, runtimeBindingRef: 'parent-runtime', permissionRevision: 'permission',
+    admissionEvidenceRefs: [admission.commitId], currentTurnRef: 'current', recoveryStateRef: admission.commitId };
+  const parent = await ActiveTurnContext.open({ journal: createJsonlActiveTurnJournal({ filePath, journal, turnId: originalAdmittedTurn.turnId }),
+    binding: { admittedTurn: originalAdmittedTurn, assignment: worker, scope,
+      execution: { runtimeId: 'parent-runtime', executionEpoch: 1 } }, currentTurnRef: 'current' });
+  const call = { invocationId: `invocation:child:${'a'.repeat(64)}`, providerRequestId: 'request', toolCallId: 'tool-call',
+    parentExecution: { runtimeId: 'parent-runtime', executionEpoch: 1, ...scope },
+    businessRegistrationCommitRef: await fact('child-registration') };
+  const review: ReviewAssignment = { assignmentId: 'review-assignment', taskId: scope.taskId.value,
+    workerAgentId: 'reviewer', reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
+    acceptanceCriteriaDigest: worker.acceptanceCriteriaDigest, subjectRefs: ['subject'], subjectDigests: ['subject-digest'],
+    workerCapabilities: ['provider.execution'], requiredCapabilities: ['review.quality'], mergeGate: 'not-required' };
+  const selected = { kind: 'review' as const, invocationId: call.invocationId, assignment: review,
+    agentId: 'reviewer', attempt: 1, executionEpoch: 1, scope };
+  const store = new ServiceExecutionCheckpointStore(filePath, journal, () => new Date('2026-10-17T00:00:00.000Z'));
+  const adapter = createAppChildCheckpointAdapter({ store, parent, originalAdmittedTurn, recoveryStateRef });
+  const pre = await adapter.pre({ call, selected, worker });
+  assert.ok(!pre.checkpoint.summary.includes('businessRegistrationCommitRef'));
+  assert.ok(pre.checkpoint.summary.includes(`目的：${worker.objective}`));
+  assert.ok(pre.checkpoint.summary.includes(worker.successCriteria[0]!));
+  assert.ok(pre.checkpoint.summary.includes('审查类型：quality'));
+  assert.ok(pre.checkpoint.summary.includes('尚未取得该 child 的返回结果'));
+  assert.ok(!pre.checkpoint.summary.includes('审查通过'));
+  await parent.openChildInvocation({ invocationId: call.invocationId, childTurnId: 'review-turn',
+    checkpointReceiptRef: pre.checkpoint.id.value, binding: { kind: 'review', assignment: review } });
+  const result: ReviewResult = { ...review, resultId: 'review-result', status: 'passed', findings: [{
+    findingId: 'readability', severity: 'advisory', locationRef: 'checkpoint summary',
+    problem: 'next action needs clarification', expected: 'state the pending acceptance decision', evidenceRefs: [recoveryStateRef],
+  }], evidenceRefs: [recoveryStateRef] };
+  const returned = { kind: 'review' as const, invocationId: call.invocationId, assignment: review, result, scope };
+  await assert.rejects(() => adapter.post({ call, returned, worker }), /durable review return/);
+  const assets = new ImmutableAssetStore(join(root, 'assets'));
+  const asset = await assets.write('review-delivery', new TextEncoder().encode('review passed'));
+  const refinedDelivery = { ref: { ...recoveryStateRef, evidenceId: id('evidence', asset.assetId),
+    locator: asset.assetId, digest: asset.digest }, view: { kind: 'utf8-text' as const } };
+  await parent.recordChildReturn({ ...returned, refinedDelivery });
+  const post = await adapter.post({ call, returned, worker });
+  assert.ok(!post.checkpoint.summary.includes('businessRegistrationCommitRef'));
+  assert.ok(post.checkpoint.summary.includes(`目的：${worker.objective}`));
+  assert.ok(post.checkpoint.summary.includes('已收到并核对持久化的 quality 审查返回'));
+  assert.ok(post.checkpoint.summary.includes('当前结果：passed'));
+  for (const finding of result.findings) {
+    for (const text of [finding.severity, finding.locationRef, finding.problem, finding.expected]) {
+      assert.ok(post.checkpoint.summary.includes(text));
+    }
+  }
+  assert.ok(post.checkpoint.summary.includes('由编排者核对验收依据并决定是否接纳及继续'));
+  await parent.recordReviewCheckpoint(call.invocationId, post.checkpoint.id.value);
+  assert.ok(pre.checkpoint.id.value !== post.checkpoint.id.value);
+  assert.deepEqual(post.previous, pre.checkpoint);
+  const freshStore = new ServiceExecutionCheckpointStore(filePath, new JsonlOrganJournal(filePath), () => new Date());
+  for (const committed of [pre, post]) {
+    assert.deepEqual(await freshStore.readCommitted(scope, committed.checkpoint.id), committed);
+    assert.ok(await createJsonlCheckpointJournal({ filePath }).readNativeCheckpoint({ checkpoint: committed.checkpoint }),
+      'each returned record has a real native envelope');
+  }
+  const beforeReplay = await readFile(filePath, 'utf8');
+  const freshAdapter = createAppChildCheckpointAdapter({ store: freshStore, parent, originalAdmittedTurn, recoveryStateRef });
+  assert.deepEqual(await freshAdapter.pre({ call, selected, worker }), pre);
+  assert.deepEqual(await freshAdapter.post({ call, returned, worker }), post);
+  await assert.rejects(() => freshAdapter.post({ call, returned: { ...returned, result: { ...result, resultId: 'changed' } }, worker }));
+  await assert.rejects(() => freshAdapter.pre({ call, selected, worker: { ...worker, objective: 'different review goal' } }), /replay conflicts/);
+  assert.equal(await readFile(filePath, 'utf8'), beforeReplay, 'replay appends no second checkpoint');
+  assert.equal(parent.childInvocations()[0]?.checkpointReceiptRef, pre.checkpoint.id.value);
+  assert.equal(parent.childInvocations()[0]?.postReviewCheckpointRef, post.checkpoint.id.value);
+
+  const segmentScope = { ...scope, cycleId: id('cycle', 'segment-cycle'), operationId: id('operation', 'segment-operation') };
+  const activeRecords = (await journal.verify()).records.filter((record) => record.commitId?.startsWith('active-turn:'));
+  const bindingRecord = activeRecords.find((record) => record.commitId?.endsWith(':binding-opened'))!;
+  const tailRecord = activeRecords.at(-1)!;
+  const bindingCommitRef = { commitId: bindingRecord.commitId!, journalSeq: bindingRecord.seq, recordDigest: bindingRecord.recordDigest };
+  const recordsThroughCommitRef = { commitId: tailRecord.commitId!, journalSeq: tailRecord.seq, recordDigest: tailRecord.recordDigest };
+  const businessTurnRef = { businessTurnId: originalAdmittedTurn.turnId, bindingCommitRef,
+    execution: parent.executionIdentity() };
+  const segmentRegistration = await fact('segment-registration', segmentScope);
+  const segment = await ActiveTurnSegmentContext.open({
+    segment: { kind: 'segment-opened', segmentId: 'segment-2', businessTurnRef,
+      predecessor: { segmentId: 'initial', initialOpen: { bindingCommitRef, recordsThroughCommitRef } },
+      binding: { businessTurnRef, assignment: { ...worker, executionEpoch: 2 }, scope: segmentScope,
+        execution: { runtimeId: 'segment-runtime', executionEpoch: 2 },
+        incarnation: { runtimeId: 'segment-runtime', generation: 2, agentInstanceId: 'segment-agent', roleId: 'executor',
+          taskId: scope.taskId, assignmentId: worker.assignmentId, executionEpoch: 2 } },
+      authorityCommitRef: admission, businessRegistrationCommitRef: segmentRegistration,
+      requestRef: 'segment-request', inputIdentity: { requestRef: 'segment-request', digest: 'segment-intent' } },
+    initialInput: refinedDelivery, port: { async readSegmentRecords() { return []; }, async appendSegmentRecord() { throw new Error('unused'); } },
+  });
+  const segmentRecovery = evidence(segmentRegistration.commitId, segmentScope);
+  const segmentAdapter = createAppChildCheckpointAdapter({ store, parent: segment, originalAdmittedTurn, recoveryStateRef: segmentRecovery });
+  const segmentCall = { ...call, invocationId: 'segment-child', parentExecution: { runtimeId: 'segment-runtime', executionEpoch: 2, ...segmentScope },
+    businessRegistrationCommitRef: await fact('segment-child-registration', segmentScope) };
+  const segmentSelected = { ...selected, scope: segmentScope, invocationId: segmentCall.invocationId,
+    assignment: { ...review, executionEpoch: 2 }, executionEpoch: 2 };
+  const segmentPre = await segmentAdapter.pre({ call: segmentCall, selected: segmentSelected, worker });
+  assert.equal(segmentPre.checkpoint.executionEpoch, 2, 'checkpoint uses current segment epoch, not original admission epoch');
+  assert.deepEqual(segmentPre.checkpoint.scope, segmentScope);
+  assert.deepEqual(segmentPre.checkpoint.cycleId, segmentScope.cycleId);
+  assert.equal(segmentPre.checkpoint.directiveRevision, 3);
+  assert.deepEqual(await freshStore.readCommitted(segmentScope, segmentPre.checkpoint.id), segmentPre);
+
+  // Fail the actual native transaction, while keeping the normal read methods.
+  const failingJournal = new JsonlOrganJournal(filePath);
+  failingJournal.transaction = async () => { throw new Error('native commit refused'); };
+  const failed = createAppChildCheckpointAdapter({
+    store: new ServiceExecutionCheckpointStore(filePath, failingJournal, () => new Date()), parent,
+    originalAdmittedTurn, recoveryStateRef,
+  });
+  const failureCall = { ...call, invocationId: 'failed-child' };
+  const beforeFailure = await readFile(filePath, 'utf8');
+  await assert.rejects(async () => {
+    const record = await failed.pre({ call: failureCall, selected: { ...selected, invocationId: failureCall.invocationId }, worker });
+    await parent.openChildInvocation({ invocationId: failureCall.invocationId, childTurnId: 'failed-turn',
+      checkpointReceiptRef: record.checkpoint.id.value, binding: { kind: 'review', assignment: review } });
+  }, /native commit refused/);
+  assert.equal(await readFile(filePath, 'utf8'), beforeFailure);
+  assert.equal(parent.childInvocations().some((entry) => entry.invocationId === failureCall.invocationId), false);
+  console.log('App child checkpoint adapter evidence', JSON.stringify({ nativeRecords: 3, replayUnchanged: true,
+    originalEpoch: originalAdmittedTurn.executionEpoch, segmentEpoch: segmentPre.checkpoint.executionEpoch, fixture: root }));
+});
 
 // Observed failure: a committed inspect result strands settling without an
 // effect completion. Impact: delivery cannot close. Cost: one in-memory public

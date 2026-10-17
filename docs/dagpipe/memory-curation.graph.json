@@ -64,7 +64,7 @@
       "operator": "humanagent-write-memory-event",
       "operator_version": "1",
       "inputs": ["memory_candidate"],
-      "output": { "id": "durable_memory_lesson", "schema": "Object" },
+      "output": { "id": "memory_audit_result", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -77,5 +77,5 @@
     { "from": "run_memory_agent", "to": "curate_lesson", "arc_id": "memory_analysis" },
     { "from": "curate_lesson", "to": "write_memory_event", "arc_id": "memory_candidate" }
   ],
-  "outputs": ["durable_memory_lesson"]
+  "outputs": ["memory_audit_result"]
 }

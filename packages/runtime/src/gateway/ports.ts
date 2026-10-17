@@ -160,6 +160,8 @@ export interface OperationControlSelector {
   readonly scope: ScopeRef;
   readonly agentRuntimeId?: string;
   readonly harnessExecutionEpoch?: number;
+  /** Select control.intent.operationId itself; omission reads the whole namespace, including pending child obligations. */
+  readonly operationId?: OperationId;
 }
 
 /**

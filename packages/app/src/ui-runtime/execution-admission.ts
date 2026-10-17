@@ -301,6 +301,7 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
       scope: binding.scope,
       agentRuntimeId: binding.agentRuntimeId,
       harnessExecutionEpoch: binding.harnessExecutionEpoch,
+      operationId: binding.parentOperationId,
     });
     if (readback.state !== 'complete') invalid('child admission parent control namespace is unknown');
     const index = readback.operations.findIndex((record) => sameScopedId(record.intent.operationId, binding.parentOperationId));
@@ -455,6 +456,7 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
       scope: binding.scope,
       agentRuntimeId: binding.agentRuntimeId,
       harnessExecutionEpoch: binding.harnessExecutionEpoch,
+      operationId: binding.parentOperationId,
     });
     if (control.state !== 'complete') invalid('child binding parent control namespace is unknown');
     const parent = control.operations.find((record) => sameScopedId(record.intent.operationId, binding.parentOperationId));

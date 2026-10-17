@@ -285,6 +285,9 @@ import {
   type I2HistoryReadPorts,
   type I2HistoryReader,
 } from './i2-history.js';
+import { createJsonlI2JournalPort } from '../i2-journal.js';
+import { readTaskAgentActivity, type DecodedTaskAgentActivitySelectionQuery,
+  type AssembleTaskAgentActivityRemainingSourcesOptions } from './agent-activity-read.js';
 import type {
   ConfiguredProjectCatalog,
   ConfiguredProjectReadSource,
@@ -2960,7 +2963,7 @@ export class UiRuntimeService {
    * the synchronous `taskDashboard` stays free of journal I/O for the internal
    * callers that only need task state.
    */
-  async taskDashboardWithPlan(taskId: TaskId): Promise<RuntimeTaskDashboardView> {
+  async taskDashboardWithPlan(taskId: TaskId, agentSelection?: DecodedTaskAgentActivitySelectionQuery): Promise<RuntimeTaskDashboardView> {
     const dashboard = this.taskDashboard(taskId);
     const plan = await this.executionPlanForTask(taskId);
     const publicOutput = await this.authoritativePublicOutputForTask(taskId);
@@ -2971,7 +2974,37 @@ export class UiRuntimeService {
       ...withPublication,
       ...(plan === undefined ? {} : { plan }),
       taskPlanHistory: await this.boundTaskPlanHistory(taskId),
+      agentActivity: await this.taskAgentActivityFor(this.boundProjectSource(), this.mode, taskId, agentSelection),
     };
+  }
+
+  private async taskAgentActivityFor(
+    source: ConfiguredProjectReadSource | undefined,
+    mode: RuntimeMode,
+    taskId: TaskId,
+    selection?: DecodedTaskAgentActivitySelectionQuery,
+  ): ReturnType<typeof readTaskAgentActivity> {
+    if (selection !== undefined && !selection.ok) return { ok: false, failure: selection.failure };
+    if (source === undefined) return { ok: false, failure: {
+      code: 'agent-activity.scope-unavailable', ownerId: 'humanagent.app.ui-runtime.agent-activity',
+      message: 'the serve-bound project has no configured runtime paths',
+      nextAction: 'bind the canonical project runtime paths',
+    } };
+    const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode));
+    const controlJournal = new JsonlOrganJournal(filePath);
+    const bound = this.isBoundScope(source.projectKey, mode);
+    const live: AssembleTaskAgentActivityRemainingSourcesOptions['live'] = bound ? {
+      snapshot: this.coordinatorOrQueuedTaskSnapshot(taskId),
+      inspectPool: () => this.coordinator.inspectTaskRuntimePool(taskId),
+      currentLocations: this.coordinator.readTaskCurrentActivityLocations(taskId),
+    } : undefined;
+    return readTaskAgentActivity({
+      taskId, query: selection?.ok ? selection.value : { taskId },
+      taskJournal: readUiRuntimeTaskJournal(source.checkpointsRoot, mode), controlJournal,
+      i2Journal: bound && this.options.i2History !== undefined
+        ? this.options.i2History.journal : createJsonlI2JournalPort({ filePath, journal: controlJournal }),
+      ...(live === undefined ? {} : { live }),
+    });
   }
 
   /**
@@ -3600,10 +3633,11 @@ export class UiRuntimeService {
     taskId: TaskId,
     projectKey: string,
     mode: 'fake' | 'rcc',
+    agentSelection?: DecodedTaskAgentActivitySelectionQuery,
   ): Promise<RuntimeReadResult<RuntimeTaskDashboardView>> {
     if (this.isBoundScope(projectKey, mode)) {
       try {
-        return { ok: true, value: await this.taskDashboardWithPlan(taskId) };
+        return { ok: true, value: await this.taskDashboardWithPlan(taskId, agentSelection) };
       } catch (error) {
         return { ok: false, failure: readFailureFromError(error) };
       }
@@ -3621,6 +3655,7 @@ export class UiRuntimeService {
       value: {
         ...runtimeTaskDashboard(entry.snapshot, mode),
         taskPlanHistory: await this.taskPlanHistoryFor(source, mode, taskId),
+        agentActivity: await this.taskAgentActivityFor(source, mode, taskId, agentSelection),
       },
     };
   }

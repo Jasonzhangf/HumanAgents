@@ -5,6 +5,7 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
+  mountSemanticObservationPanel,
   observationHref,
   openTechnicalDetail,
   queryParam,
@@ -79,6 +80,12 @@ let agentDetailLayer = null
 let agentReadFailure
 let agentReadPending = false
 
+// The shared semantic panel keeps one live mount for the page lifetime: a
+// dashboard redraw re-attaches the retained element instead of building a
+// second panel and a second observation subscription.
+let semanticObservationPanel = null
+let semanticObservationHost = null
+
 // The request carries only the validated agent keys; the API owner adds the
 // canonical project/mode/task scope itself. An absent instance means a task
 // catalog read, which sends no agent keys at all.
@@ -107,25 +114,21 @@ let planHistoryState = {
 let dashboardStale = false
 let dashboardFailure
 
-// Reading-mode surface for this page. `current` is the already rendered task
-// projection with the accepted reasoning plan. `semantic` reads the same
-// authoritative history from the current projection. `actions` and `raw` are
-// real scoped record reads.
+// Reading-mode surface for this page. Every mode drives the one shared semantic
+// panel the page mounts; the plan history and the authoritative records stay
+// reachable through the explicit detail sections the panel-backed view shows.
 const TASK_DISPLAY_SURFACE = {
   get supportedModes() {
     const modes = ['current']
-    if (explicitScope) modes.push('actions', 'raw')
-    if (planHistoryState.ok) modes.push('semantic')
+    if (taskId) modes.push('semantic', 'actions', 'raw')
     return modes
   },
   get unavailableReasons() {
     const reasons = {}
-    if (!planHistoryState.ok) {
-      reasons.semantic = planHistoryState.failure?.message || '权威计划版本历史还没有可用接口。'
-    }
-    if (!explicitScope) {
-      reasons.actions = '这个页面没有已确认的 task scope，无法读取动作轨迹。'
-      reasons.raw = '这个页面没有已确认的 task scope，无法读取原始记录。'
+    if (!taskId) {
+      reasons.semantic = '这个页面没有 task 参数，无法挂载共享语义观测面板。'
+      reasons.actions = reasons.semantic
+      reasons.raw = reasons.semantic
     }
     return reasons
   },
@@ -301,8 +304,14 @@ let recordsNavigationVersion = 0
 // One-level source return for the raw reference jump. The actions host stays
 // retained while raw is shown, so returning reuses its confirmed page and the
 // exact trigger the user left.
-let pendingRawRecordRef = null
 let rawActionsReturn = null
+let pendingRawRecordRef = null
+// The plan history and the authoritative records are explicit details of the
+// panel-backed perspectives. A plain perspective switch never reads records;
+// an explicit open, a page turn, or a record reference jump does.
+let planHistoryDetailOpen = false
+let executionTraceDetailOpen = false
+const recordsDetailOpen = { actions: false, raw: false }
 
 function mountDisplayModeHost(mode) {
   const host = element('section', undefined, 'display-mode-host')
@@ -328,10 +337,32 @@ function staleReadFailure() {
   }
 }
 
+function panelUnavailableFailure() {
+  return {
+    code: 'semantic-observation.panel-unavailable',
+    ownerId: 'humanagent.ui',
+    message: '共享语义观测面板尚未挂载。',
+    nextAction: '刷新这个任务后再切换阅读方式',
+  }
+}
+
+// The retained instance is the single panel this page mounts. It follows the
+// page's active perspective, so a redraw re-attaches the same host instead of
+// mounting a second panel and a second observation subscription.
+function syncPanelMode(mode) {
+  if (!semanticObservationPanel || typeof semanticObservationPanel.setMode !== 'function') return false
+  semanticObservationPanel.setMode(mode)
+  return true
+}
+
 async function applyTaskDisplayMode({ mode, origin }) {
-  const navigationVersion = ++recordsNavigationVersion
-  if (mode !== 'raw' || origin !== 'programmatic') pendingRawRecordRef = null
-  if (origin !== 'programmatic' || mode === 'current' || mode === 'semantic') rawActionsReturn = null
+  if (mode !== 'current' && mode !== 'semantic' && mode !== 'actions' && mode !== 'raw') {
+    return { ok: false, failure: unavailableModeFailure(mode, '这个页面不能渲染这层内容。') }
+  }
+  if (origin === 'manual' || mode === 'current' || mode === 'semantic') {
+    rawActionsReturn = null
+    if (origin === 'manual') pendingRawRecordRef = null
+  }
   if (mode === 'current') {
     if (!dashboard) return { ok: false, failure: currentUnavailableFailure() }
     if (dashboardStale) return { ok: false, failure: staleReadFailure() }
@@ -339,41 +370,119 @@ async function applyTaskDisplayMode({ mode, origin }) {
       const current = resolveCurrentPlanRevision(planHistoryState.value, { explicitScope })
       if (!current.ok) return { ok: false, failure: current.failure }
     }
+    leaveRecords()
     displayMode = 'current'
     if (origin === 'manual') updatePlanViewUrl({ display: 'current', selection: null })
     renderDashboard()
     return { ok: true, mode: 'current' }
   }
-  if (mode === 'semantic') {
-    if (!dashboard) return { ok: false, failure: currentUnavailableFailure() }
-    if (dashboardStale) return { ok: false, failure: staleReadFailure() }
-    if (!planHistoryState.ok) return { ok: false, failure: planHistoryState.failure }
-    const host = displayModeHosts.get('semantic') || mountDisplayModeHost('semantic')
-    displayModeHosts.set('semantic', host)
-    const receipt = await commitScopedReadTransition({
-      // The authoritative history already arrived in the single Dashboard GET.
-      // This transition only stages and commits its real render.
-      read: async () => ({
-        published: true,
-        reason: 'published',
-        state: { content: planHistoryState, stale: false },
-      }),
-      build: (content) => renderTaskPlanSemanticView(content, planViewOptions()),
-      commit: (staged) => {
-        clearNode(host)
-        host.append(staged)
-        host.dataset.planHistoryState = 'confirmed'
-        displayMode = 'semantic'
-        renderPlanHistoryView(host)
-      },
-    })
-    if (!receipt.ok) return { ok: false, failure: receipt.failure, superseded: receipt.superseded === true }
-    if (origin === 'manual') updatePlanViewUrl({ display: 'semantic' })
-    return { ok: true, mode: 'semantic' }
+  if (!dashboard) return { ok: false, failure: currentUnavailableFailure() }
+  if (!semanticObservationPanel) return { ok: false, failure: panelUnavailableFailure() }
+  // Every panel-backed perspective keeps the same live panel and its exact
+  // range. Only the panel's own reading mode changes; the page re-presents the
+  // content it already holds, and no records GET happens here.
+  leaveRecords()
+  displayMode = mode
+  try {
+    if (!syncPanelMode(mode)) return { ok: false, failure: panelUnavailableFailure() }
+  } catch {
+    return { ok: false, failure: panelUnavailableFailure() }
   }
-  if (mode !== 'actions' && mode !== 'raw') {
-    return { ok: false, failure: unavailableModeFailure(mode, '这个页面不能渲染这层内容。') }
+  // A revision/publication deep link opens its exact plan-history detail; an
+  // ordinary semantic switch keeps the detail as the user left it.
+  if (mode === 'semantic' && hasPlanSelection(readPlanSelectionFromQuery())) planHistoryDetailOpen = true
+  renderActiveReadingMode()
+  // A raw record reference jump is an explicit detail read. The plain mode
+  // switch above did not read anything.
+  const rawJump = mode === 'raw' ? pendingRawRecordRef : null
+  pendingRawRecordRef = null
+  let receipt = { ok: true, mode }
+  if (rawJump) {
+    recordsDetailOpen.raw = true
+    receipt = await openRecordsDetail('raw', { selectedRef: rawJump })
+    if (receipt.superseded) return receipt
   }
+  if (origin === 'manual' || origin === 'programmatic') {
+    updatePlanViewUrl({ display: mode, selection: mode === 'semantic' ? undefined : null })
+  }
+  return receipt.ok ? { ok: true, mode } : receipt
+}
+
+let renderedPlanHistoryState = null
+function renderSemanticHost() {
+  const host = displayModeHosts.get('semantic')
+  if (!host || !planHistoryState.ok) return
+  clearNode(host)
+  host.append(renderTaskPlanSemanticView(planHistoryState, planViewOptions()))
+  host.dataset.planHistoryState = 'confirmed'
+  renderedPlanHistoryState = planHistoryState
+}
+
+function renderPlanHistoryDetailSection() {
+  const section = element('section', undefined, 'section display-mode-detail')
+  section.dataset.planHistoryDetail = 'true'
+  section.append(element('h2', '任务计划版本历史'))
+  if (!planHistoryState.ok) {
+    section.dataset.planHistoryState = 'unavailable'
+    const notice = element('div')
+    renderPageError(notice, planHistoryState.failure, '重新读取这个任务后再查看计划历史')
+    section.append(notice)
+    return section
+  }
+  section.dataset.planHistoryState = 'confirmed'
+  const details = element('details', undefined, 'display-detail-fold')
+  details.dataset.planHistoryFold = 'true'
+  details.open = planHistoryDetailOpen
+  details.append(element('summary', '权威计划版本历史'))
+  details.addEventListener('toggle', () => { planHistoryDetailOpen = details.open })
+  const host = displayModeHosts.get('semantic') || mountDisplayModeHost('semantic')
+  displayModeHosts.set('semantic', host)
+  if (host.dataset.planHistoryState !== 'confirmed'
+    || (!dashboardStale && renderedPlanHistoryState !== planHistoryState)) renderSemanticHost()
+  details.append(host)
+  section.append(details)
+  return section
+}
+
+function renderRecordsDetailSection(mode) {
+  const section = element('section', undefined, 'section display-mode-detail')
+  section.dataset.recordsDetail = explicitScope
+    ? (recordsDetailOpen[mode] ? 'open' : 'closed')
+    : 'unavailable'
+  section.append(element('h2', mode === 'raw' ? '权威原始记录' : '权威动作记录'))
+  if (!explicitScope) {
+    section.append(element('p', '这个页面没有已确认的 task scope，无法读取动作轨迹。', 'empty'))
+    return section
+  }
+  const host = displayModeHosts.get(mode) || mountDisplayModeHost(mode)
+  displayModeHosts.set(mode, host)
+  const toggle = element('button', recordsDetailOpen[mode] ? '收起权威记录' : `打开${displayModeLabel(mode)}`, 'button button--quiet')
+  toggle.type = 'button'
+  toggle.dataset.recordsDetailToggle = mode
+  toggle.setAttribute('aria-expanded', String(recordsDetailOpen[mode]))
+  toggle.addEventListener('click', () => {
+    if (recordsDetailOpen[mode]) {
+      recordsDetailOpen[mode] = false
+      renderActiveReadingMode()
+      return
+    }
+    void openRecordsDetail(mode)
+  })
+  section.append(toggle)
+  if (!recordsDetailOpen[mode]) return section
+  if (host.dataset.recordsState === 'pending') section.append(element('p', '正在读取权威记录…', 'muted'))
+  if (mode === 'raw' && rawActionsReturn) {
+    const back = element('button', '返回动作轨迹', 'button button--quiet')
+    back.type = 'button'
+    back.dataset.recordsReturn = 'actions'
+    back.addEventListener('click', () => void returnToActionsSource())
+    section.append(back)
+  }
+  section.append(host)
+  return section
+}
+
+async function openRecordsDetail(mode, { selectedRef } = {}) {
   if (!explicitScope) {
     return {
       ok: false,
@@ -385,86 +494,61 @@ async function applyTaskDisplayMode({ mode, origin }) {
       },
     }
   }
+  const navigationVersion = ++recordsNavigationVersion
   const host = displayModeHosts.get(mode) || mountDisplayModeHost(mode)
   displayModeHosts.set(mode, host)
-  // Returning from a raw reference jump is a view switch over the confirmed
-  // actions host, not a new read, so the page the user left stays intact.
-  if (mode === 'actions' && origin === 'programmatic'
-    && rawActionsReturn && host.dataset.recordsState === 'confirmed') {
-    displayMode = 'actions'
-    renderRecordsView('actions', host)
-    updatePlanViewUrl({ display: 'actions', selection: null })
-    return { ok: true, mode: 'actions' }
+  recordsDetailOpen[mode] = true
+  // Returning to a confirmed actions page is a view switch over the retained
+  // content, not a new read.
+  if (mode === 'actions' && !selectedRef && host.dataset.recordsState === 'confirmed') {
+    renderActiveReadingMode()
+    return { ok: true, mode }
   }
-  const selectedRef = mode === 'raw' ? pendingRawRecordRef : undefined
+  host.dataset.recordsState = 'pending'
+  renderActiveReadingMode()
   const receipt = await loadRecords(mode, host, { selectedRef, navigationVersion })
   if (navigationVersion !== recordsNavigationVersion) return { ok: false, superseded: true }
   if (!receipt.ok) {
-    pendingRawRecordRef = null
+    host.dataset.recordsState = 'failed'
+    renderPageError(host, receipt.failure)
     return receipt
   }
-  displayMode = mode
-  renderRecordsView(mode, host)
+  renderActiveReadingMode()
   if (mode === 'raw' && selectedRef) {
     const selected = host.querySelector('[data-record-selected="true"]')
     selected?.focus({ preventScroll: true })
     selected?.scrollIntoView({ block: 'start', behavior: 'instant' })
   }
-  if (mode === 'raw') pendingRawRecordRef = null
-  if (origin === 'manual' || origin === 'programmatic') {
-    updatePlanViewUrl({ display: mode, selection: null })
-  }
   return { ok: true, mode }
-}
-
-function renderSemanticHost() {
-  const host = displayModeHosts.get('semantic')
-  if (!host || !planHistoryState.ok) return
-  clearNode(host)
-  host.append(renderTaskPlanSemanticView(planHistoryState, planViewOptions()))
-  host.dataset.planHistoryState = 'confirmed'
-}
-
-function renderPlanHistoryView(host) {
-  clearNode(main)
-  const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
-  copy.append(element('p', '只读计划历史', 'eyebrow'), element('h1', displayModeLabel('semantic')))
-  heading.append(copy, status, refreshButton)
-  const section = element('section', undefined, 'section')
-  section.append(host)
-  main.append(heading, section)
-}
-
-function renderRecordsView(mode, host) {
-  clearNode(main)
-  const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
-  copy.append(
-    element('p', '只读记录', 'eyebrow'),
-    element('h1', displayModeLabel(mode)),
-  )
-  heading.append(copy, status, refreshButton)
-  const section = element('section', undefined, 'section')
-  if (mode === 'raw' && rawActionsReturn) {
-    const back = element('button', '返回动作轨迹', 'button button--quiet')
-    back.type = 'button'
-    back.dataset.recordsReturn = 'actions'
-    back.addEventListener('click', () => void returnToActionsSource())
-    section.append(back)
-  }
-  section.append(host)
-  main.append(heading, section)
 }
 
 async function openRawRecord(ref, trigger) {
   const sourceHost = displayModeHosts.get('actions')
   sourceHost?.querySelector('[data-records-navigation-failure]')?.remove()
+  // The shell controller owns the selected mode, so the jump goes through the
+  // public programmatic transition. `pendingRawRecordRef` turns that transition
+  // into the one explicit raw-detail read the jump needs.
   pendingRawRecordRef = ref
   rawActionsReturn = { trigger: trigger?.focus ? trigger : null }
+  recordsDetailOpen.actions = false
   const result = await applyDisplayMode('raw')
   if (!result?.ok && !result?.superseded) {
+    pendingRawRecordRef = null
     rawActionsReturn = null
+    // The raw read failed, so the page stays on the confirmed actions detail
+    // and shows the recoverable failure there instead of a departed page.
+    recordsDetailOpen.raw = false
+    recordsDetailOpen.actions = true
+    // The fallback is a local re-presentation of the retained actions page, so
+    // it does not re-enter the controller transition.
+    displayMode = 'actions'
+    try {
+      syncPanelMode('actions')
+    } catch {
+      // The failed raw read already owns the visible failure receipt.
+    }
+    updatePlanViewUrl({ display: 'actions', selection: null })
+    renderActiveReadingMode()
     if (sourceHost?.isConnected) {
       const notice = element('div', undefined, 'records-navigation-failure')
       notice.dataset.recordsNavigationFailure = 'true'
@@ -477,9 +561,14 @@ async function openRawRecord(ref, trigger) {
 
 async function returnToActionsSource() {
   if (!rawActionsReturn) return
+  recordsDetailOpen.actions = true
+  recordsDetailOpen.raw = false
+  const trigger = rawActionsReturn.trigger
+  rawActionsReturn = null
+  // Returning is a programmatic transition over the confirmed actions page, so
+  // it reuses the retained content without a second read.
   const result = await applyDisplayMode('actions')
-  if (result?.ok && rawActionsReturn?.trigger?.isConnected) rawActionsReturn.trigger.focus()
-  if (result?.ok) rawActionsReturn = null
+  if (result?.ok && trigger?.isConnected) trigger.focus()
 }
 
 /**
@@ -492,25 +581,34 @@ function renderActiveReadingMode() {
     renderDashboard()
     return
   }
-  if (displayMode === 'semantic') {
-    const host = displayModeHosts.get('semantic') || mountDisplayModeHost('semantic')
-    displayModeHosts.set('semantic', host)
-    // A stale refresh keeps the last confirmed history; a fresh, readable
-    // history rebuilds from the new projection before the view is re-shown.
-    if (!dashboardStale && planHistoryState.ok) {
-      clearNode(host)
-      host.append(renderTaskPlanSemanticView(planHistoryState, planViewOptions()))
-      host.dataset.planHistoryState = 'confirmed'
-    }
-    renderPlanHistoryView(host)
-    return
+  renderPanelPerspectiveView(displayMode)
+}
+
+/**
+ * Every non-current perspective keeps the shared panel as its reading body. The
+ * plan history and the authoritative records stay readable as explicit detail
+ * sections, so the original readers are preserved without bypassing the panel.
+ */
+function renderPanelPerspectiveView(mode) {
+  if (agentViewDispose) {
+    agentViewDispose()
+    agentViewDispose = null
   }
-  const host = displayModeHosts.get(displayMode)
-  if (host) {
-    renderRecordsView(displayMode, host)
-    return
-  }
-  renderDashboard()
+  clearNode(main)
+  const heading = element('section', undefined, 'page-heading')
+  const copy = element('div', undefined, 'page-heading-copy')
+  copy.append(element('p', '只读阅读', 'eyebrow'), element('h1', displayModeLabel(mode)))
+  heading.append(copy, status, refreshButton)
+  main.append(heading)
+  main.append(renderSemanticObservationSection())
+  main.append(mode === 'semantic' ? renderPlanHistoryDetailSection() : renderRecordsDetailSection(mode))
+  const trace = element('details', undefined, 'display-detail-fold')
+  trace.dataset.executionTraceDetail = 'true'
+  trace.open = executionTraceDetailOpen
+  trace.append(element('summary', '任务事件明细'))
+  trace.addEventListener('toggle', () => { executionTraceDetailOpen = trace.open })
+  trace.append(renderExecutionTraceSection())
+  main.append(trace)
 }
 
 function recordsContentHasRef(content, selectedRef) {
@@ -1833,10 +1931,24 @@ function renderDashboard() {
   const agentSection = renderAgentActivitySection()
   if (agentSection) main.append(agentSection)
 
+  main.append(renderSemanticObservationSection())
+  main.append(renderExecutionTraceSection())
+  const observationLink = element('a', '打开只读 Observation', 'button')
+  observationLink.href = observationHref(taskId, explicitScope)
+  main.append(observationLink)
+}
+
+/**
+ * The task event trace stays available in every perspective. The panel-backed
+ * views keep it folded as an explicit detail; `current` keeps its original
+ * inline position.
+ */
+function renderExecutionTraceSection() {
   const events = element('section', undefined, 'section')
   events.append(element('h2', '执行轨迹'))
   const eventPanel = element('div', undefined, 'panel')
-  const history = dashboard.history ?? { events: dashboard.recentEvents, hasMore: false, omitted: 0, gap: false, total: dashboard.recentEvents.length }
+  const recentEvents = dashboard.recentEvents ?? []
+  const history = dashboard.history ?? { events: recentEvents, hasMore: false, omitted: 0, gap: false, total: recentEvents.length }
   const allHistoryEvents = visibleRecentEvents(history.events ?? [])
   const chunks = historyChunks(allHistoryEvents)
   const pageCount = Math.max(1, chunks.length)
@@ -1860,14 +1972,14 @@ function renderDashboard() {
       older.disabled = pageStart === 0
       older.addEventListener('click', () => {
         historyPage += 1
-        renderDashboard()
+        renderActiveReadingMode()
       })
       const newer = element('button', '更新', 'button button--quiet')
       newer.type = 'button'
       newer.disabled = historyPage <= 0
       newer.addEventListener('click', () => {
         historyPage -= 1
-        renderDashboard()
+        renderActiveReadingMode()
       })
       pager.append(older, newer)
       eventPanel.append(pager)
@@ -1915,11 +2027,42 @@ function renderDashboard() {
     }
   }
   events.append(eventPanel)
-  main.append(events)
+  return events
+}
 
-  const observationLink = element('a', '打开只读 Observation', 'button')
-  observationLink.href = observationHref(taskId, explicitScope)
-  main.append(observationLink)
+/**
+ * The shared semantic observation panel, mounted once per page load and
+ * re-attached on every render. `semantic` here is the typed envelope
+ * presentation of the journal projection, not the plan-history surface, so
+ * both surfaces stay readable without claiming to be the same content.
+ */
+function renderSemanticObservationSection() {
+  if (!semanticObservationPanel) {
+    semanticObservationHost = element('div', undefined, 'semantic-observation-host')
+    semanticObservationHost.dataset.semanticObservationHost = taskId ? 'task' : 'missing'
+    if (taskId) {
+      semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, {
+        taskId,
+        // The panel's own four buttons reuse the shell programmatic transition,
+        // so a local click cannot write follow-last. The corner buttons keep the
+        // original manual controller path. An equal mode is already applied.
+        onModeChange: (mode) => {
+          if (mode === displayMode) return
+          void applyDisplayMode(mode)
+        },
+      })
+    } else {
+      semanticObservationHost.append(element('p', '当前 URL 没有 task 参数，无法读取语义观测。', 'empty'))
+    }
+  }
+  // The one retained panel follows the page's active perspective on every
+  // re-attach. This is a mode update, not a remount, reload, or new read.
+  if (semanticObservationPanel) syncPanelMode(displayMode)
+  const section = element('section', undefined, 'section semantic-observation-section')
+  section.dataset.semanticObservation = semanticObservationPanel ? 'mounted' : 'unavailable'
+  section.append(element('h2', '语义观测'))
+  section.append(semanticObservationHost)
+  return section
 }
 
 /**
@@ -2130,7 +2273,11 @@ void load().then(() => initializeDisplayPreference())
 
 const refreshButton = element('button', '刷新当前范围', 'button button--quiet')
 refreshButton.type = 'button'
-refreshButton.addEventListener('click', () => void refresh().catch(setRefreshError))
+refreshButton.addEventListener('click', () => {
+  // A manual refresh is the one path that re-reads the shared semantic panel.
+  // Plain re-renders re-attach its retained host without a new request.
+  void refresh().then(() => semanticObservationPanel?.reload()).catch(setRefreshError)
+})
 status.after(refreshButton)
 
 // Back and forward re-read the exact target the URL now names. Only the open
@@ -2143,6 +2290,9 @@ window.addEventListener('popstate', () => {
 })
 
 window.addEventListener('pagehide', () => {
+  semanticObservationPanel?.dispose()
+  semanticObservationPanel = null
+  semanticObservationHost = null
   disposeDisplayPreference()
   closeStream()
   stopObserving()

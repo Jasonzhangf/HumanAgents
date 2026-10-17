@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import test from 'node:test';
-import { JsonlOrganJournal } from '../../../packages/adapters/jsonl/src/index.js';
+import {
+  JsonlOrganJournal,
+  type JournalAppendInput,
+  type JournalRecord,
+  type JournalTransactionContext,
+} from '../../../packages/adapters/jsonl/src/index.js';
 import { JsonlInteractionHelperJournal } from '../../../packages/adapters/jsonl/src/interaction-helper-journal.js';
 import {
   type AgentClosure,
@@ -27,6 +32,7 @@ import {
 } from '../../../packages/contracts/src/index.js';
 import {
   acceptTasklessInteractionHelperResult,
+  describeReturnedInteractionHelperCheckpoint,
   executeTasklessInteractionHelper,
   type InteractionHelperJournalPort,
   type TasklessHelperExecutionBinding,
@@ -107,6 +113,9 @@ const execution: TasklessHelperExecutionBinding = {
   operationId,
   executionEpoch: 3,
 };
+
+const returnedCheckpointDescription = 'Return the bounded conclusion and decide whether to adopt it';
+const adoptedCheckpointDescription = 'Adopt the returned conclusion for the next parent decision';
 
 interface RecordingDriver extends AgentDriver<TasklessProviderExecutionIdentityRef> {
   readonly startRequests: AgentStartRequest<TasklessProviderExecutionIdentityRef>[];
@@ -193,11 +202,46 @@ function journalFor(file: string): InteractionHelperJournalPort {
   return new JsonlInteractionHelperJournal(new JsonlOrganJournal(file));
 }
 
+class FailingCheckpointAppendJournal extends JsonlOrganJournal {
+  failCheckpointAppend = false;
+  private appendOrdinal = 0;
+
+  override async transaction<T, R>(
+    read: (context: JournalTransactionContext) => T | Promise<T>,
+    apply: (
+      input: T,
+      append: (input: JournalAppendInput) => Promise<JournalRecord>,
+    ) => Promise<R>,
+  ): Promise<R> {
+    return super.transaction(read, async (input, append) => {
+      this.appendOrdinal = 0;
+      return apply(input, async (next) => {
+        this.appendOrdinal += 1;
+        if (this.failCheckpointAppend && this.appendOrdinal === 2) {
+          throw new Error('checkpoint append failed after durable fact');
+        }
+        return append(next);
+      });
+    });
+  }
+}
+
 test('taskless helper execution keeps dispatch, return and owner acceptance separately durable', async () => {
   const { file, cleanup } = await fixture();
   try {
     const journal = journalFor(file);
     const driver = recordingDriver();
+    const secondAssignment: InteractionHelperAssignment = {
+      ...assignment,
+      assignmentId: 'assignment-taskless-second',
+      helperCallId: 'call-taskless-second',
+    };
+    const secondIdentity: InteractionHelperIdentity = {
+      ...identity,
+      assignmentId: secondAssignment.assignmentId,
+      helperCallId: secondAssignment.helperCallId,
+    };
+    const secondDriver = recordingDriver();
     const executed = await executeTasklessInteractionHelper({
       journal,
       driver,
@@ -208,6 +252,7 @@ test('taskless helper execution keeps dispatch, return and owner acceptance sepa
       dispatchAcceptedAt: '2026-10-15T00:00:01.000Z',
       returnedAt: '2026-10-15T00:00:02.000Z',
       evidenceRefs: [evidence('dispatch-taskless')],
+      checkpointDescription: returnedCheckpointDescription,
       conclude: ({ closure: settled, output, events }) => {
         if (settled.state !== 'succeeded') throw new Error('unexpected settled state for the fixture');
         return {
@@ -221,6 +266,29 @@ test('taskless helper execution keeps dispatch, return and owner acceptance sepa
           nextAction: 'settle',
         };
       },
+    });
+    const secondExecuted = await executeTasklessInteractionHelper({
+      journal,
+      driver: secondDriver,
+      assignment: secondAssignment,
+      binding,
+      execution,
+      inputs: { request: 'bounded helper request' },
+      dispatchAcceptedAt: '2026-10-15T00:00:11.000Z',
+      returnedAt: '2026-10-15T00:00:12.000Z',
+      evidenceRefs: [evidence('dispatch-taskless-second')],
+      checkpointDescription: returnedCheckpointDescription,
+      conclude: () => ({
+        agentId: 'agent-taskless-helper-second',
+        producedArtifactRefs: [],
+        producedArtifactDigests: [],
+        status: 'incomplete',
+        summary: 'A distinct partial result requires more evidence',
+        outputRefs: [],
+        evidenceRefs: [evidence('returned-taskless-second')],
+        nextAction: 'wait',
+        conditionRef: 'condition://helper-taskless-second',
+      }),
     });
 
     // The real binding/runtime/operation incarnation is durable before any dispatch.
@@ -246,6 +314,54 @@ test('taskless helper execution keeps dispatch, return and owner acceptance sepa
     assert.notEqual(afterExecute.returned, null);
     assert.equal(afterExecute.ownerAccepted, null);
     assert.deepEqual(afterExecute.returned?.fact.result, executed.result);
+    assert.equal(afterExecute.returnedCheckpoint?.checkpoint.phase, 'returned');
+    const firstDescription = afterExecute.returnedCheckpoint?.checkpoint.description;
+    assert.ok(firstDescription?.includes(returnedCheckpointDescription));
+    assert.ok(firstDescription?.includes('owner acceptance is pending'));
+    assert.ok(firstDescription?.includes('succeeded'));
+    assert.ok(firstDescription?.includes('The bounded taskless helper conclusion'));
+    assert.ok(firstDescription?.includes('settle'));
+    assert.equal(
+      afterExecute.returnedCheckpoint?.checkpoint.recordedAt,
+      '2026-10-15T00:00:02.000Z',
+    );
+    assert.deepEqual(afterExecute.returnedCheckpoint?.checkpoint.recovery, {
+      dispatchAcceptedCommitId: executed.dispatchCommit.commit.commitId,
+      returnedCommitId: executed.returnedCommit.commit.commitId,
+    });
+    assert.equal(afterExecute.adoptedCheckpoint, null);
+    // The returned checkpoint carries the typed outcome in its description but
+    // still never copies the result body (produced artifact refs, raw output).
+    assert.equal(
+      JSON.stringify(afterExecute.returnedCheckpoint?.checkpoint).includes(
+        'artifact://helper-taskless',
+      ),
+      false,
+    );
+
+    const afterSecondExecute = await journal.readExact(secondIdentity);
+    assert.notEqual(afterSecondExecute.returned, null);
+    assert.equal(afterSecondExecute.ownerAccepted, null);
+    assert.deepEqual(afterSecondExecute.returned?.fact.result, secondExecuted.result);
+    const secondDescription = afterSecondExecute.returnedCheckpoint?.checkpoint.description;
+    assert.ok(secondDescription?.includes(returnedCheckpointDescription));
+    assert.ok(secondDescription?.includes('owner acceptance is pending'));
+    assert.ok(secondDescription?.includes('incomplete'));
+    assert.ok(secondDescription?.includes('A distinct partial result requires more evidence'));
+    assert.ok(secondDescription?.includes('wait'));
+    assert.ok(secondDescription?.includes('condition://helper-taskless-second'));
+    assert.notEqual(secondDescription, firstDescription);
+
+    // Failure basis: a returned fact can be durable without the per-call
+    // checkpoint that recovery needs. Impact: the helper call disappears from
+    // semantic recovery even though its result exists. Cost: one replay of the
+    // existing fixture.
+    const physical = await new JsonlOrganJournal(file).replay();
+    assert.equal(
+      physical.filter((record) => record.payload?.kind === 'interaction-helper.call-checkpoint.v1').length,
+      2,
+      'returned must commit a per-call checkpoint',
+    );
   } finally {
     await cleanup();
   }
@@ -260,8 +376,10 @@ test('a taskless helper dispatch append failure prevents any driver start or sub
       appendDispatchAccepted: async () => {
         throw new Error('durable dispatch append failed');
       },
-      appendReturned: (fact) => journal.appendReturned(fact),
-      appendOwnerAccepted: (fact) => journal.appendOwnerAccepted(fact),
+      appendReturned: (fact, input) => journal.appendReturned(fact, input),
+      appendOwnerAccepted: (fact, input) => journal.appendOwnerAccepted(fact, input),
+      readCallCheckpointExact: (helperIdentity, phase) =>
+        journal.readCallCheckpointExact(helperIdentity, phase),
       readExact: (helperIdentity) => journal.readExact(helperIdentity),
     };
 
@@ -277,6 +395,7 @@ test('a taskless helper dispatch append failure prevents any driver start or sub
           dispatchAcceptedAt: '2026-10-15T00:00:03.000Z',
           returnedAt: '2026-10-15T00:00:04.000Z',
           evidenceRefs: [evidence('dispatch-fail-taskless')],
+          checkpointDescription: returnedCheckpointDescription,
           conclude: () => {
             throw new Error('conclude must not run without a durable dispatch');
           },
@@ -310,6 +429,7 @@ test('a taskless helper observe failure still settles the started driver exactly
           dispatchAcceptedAt: '2026-10-15T00:00:13.000Z',
           returnedAt: '2026-10-15T00:00:14.000Z',
           evidenceRefs: [evidence('dispatch-observe-fail-taskless')],
+          checkpointDescription: returnedCheckpointDescription,
           conclude: () => {
             throw new Error('conclude must not run when observation fails');
           },
@@ -355,6 +475,7 @@ test('owner acceptance accepts a durable returned conclusion and keeps its real 
       dispatchAcceptedAt: '2026-10-15T00:00:05.000Z',
       returnedAt: '2026-10-15T00:00:06.000Z',
       evidenceRefs: [evidence('dispatch-failed-taskless')],
+      checkpointDescription: returnedCheckpointDescription,
       conclude: () => ({
         agentId: 'agent-taskless-helper',
         producedArtifactRefs: [],
@@ -380,6 +501,7 @@ test('owner acceptance accepts a durable returned conclusion and keeps its real 
       acceptanceRef: 'acceptance://helper-taskless-failed',
       acceptedAt: '2026-10-15T00:00:07.000Z',
       evidenceRefs: [evidence('owner-accepted-failed-taskless')],
+      checkpointDescription: adoptedCheckpointDescription,
     });
 
     const readback = await journal.readExact(identity);
@@ -391,6 +513,18 @@ test('owner acceptance accepts a durable returned conclusion and keeps its real 
     assert.equal(acceptance.latestTurnEntry.result.status, 'failed');
     assert.equal(acceptance.latestTurnEntry.result.failureRef, 'failure://helper-taskless');
     assert.equal(acceptance.latestTurnEntry.refinedResult.ref.evidenceId.value, 'refined-failed-taskless');
+    assert.equal(readback.returnedCheckpoint?.checkpoint.phase, 'returned');
+    assert.equal(readback.adoptedCheckpoint?.checkpoint.phase, 'adopted');
+    assert.equal(readback.adoptedCheckpoint?.checkpoint.description, adoptedCheckpointDescription);
+    assert.equal(
+      readback.adoptedCheckpoint?.checkpoint.recordedAt,
+      '2026-10-15T00:00:07.000Z',
+    );
+    assert.deepEqual(readback.adoptedCheckpoint?.checkpoint.recovery, {
+      dispatchAcceptedCommitId: executed.dispatchCommit.commit.commitId,
+      returnedCommitId: executed.returnedCommit.commit.commitId,
+      ownerAcceptedCommitId: acceptance.ownerAcceptedCommit.commit.commitId,
+    });
   } finally {
     await cleanup();
   }
@@ -411,6 +545,7 @@ test('owner acceptance without an append is refused, and a fabricated result can
       dispatchAcceptedAt: '2026-10-15T00:00:08.000Z',
       returnedAt: '2026-10-15T00:00:09.000Z',
       evidenceRefs: [evidence('dispatch-incomplete-taskless')],
+      checkpointDescription: returnedCheckpointDescription,
       conclude: () => ({
         agentId: 'agent-taskless-helper',
         producedArtifactRefs: [],
@@ -440,6 +575,7 @@ test('owner acceptance without an append is refused, and a fabricated result can
           acceptanceRef: 'acceptance://helper-taskless-fabricated',
           acceptedAt: '2026-10-15T00:00:10.000Z',
           evidenceRefs: [evidence('owner-accepted-fabricated-taskless')],
+          checkpointDescription: adoptedCheckpointDescription,
         }),
       /does not match the durable returned fact/,
     );
@@ -454,6 +590,7 @@ test('owner acceptance without an append is refused, and a fabricated result can
           acceptanceRef: 'acceptance://helper-taskless-missing-returned',
           acceptedAt: '2026-10-15T00:00:11.000Z',
           evidenceRefs: [evidence('owner-accepted-unrelated-taskless')],
+          checkpointDescription: adoptedCheckpointDescription,
         }),
       /no durable returned fact to accept/,
     );
@@ -468,6 +605,7 @@ test('owner acceptance without an append is refused, and a fabricated result can
       acceptanceRef: 'acceptance://helper-taskless-incomplete',
       acceptedAt: '2026-10-15T00:00:12.000Z',
       evidenceRefs: [evidence('owner-accepted-incomplete-taskless')],
+      checkpointDescription: adoptedCheckpointDescription,
     });
     assert.equal(acceptance.latestTurnEntry.result.status, 'incomplete');
     assert.equal(acceptance.latestTurnEntry.result.conditionRef, 'condition://helper-taskless');
@@ -758,6 +896,9 @@ test('explicit turn helper session dispatches two independent helpers and accept
       clock,
       factory,
     });
+    const execReturnedCheckpointDescription = 'Return the bounded exploration for parent adoption';
+    const reviewReturnedCheckpointDescription = 'Return the bounded review without accepting it';
+    const execAdoptedCheckpointDescription = 'Adopt the exploration result for the next parent decision';
 
     const execFields: InteractionHelperAssignmentFields = {
       objective: 'Explore the bounded question',
@@ -788,6 +929,7 @@ test('explicit turn helper session dispatches two independent helpers and accept
       assignmentFields: execFields,
       inputs: { question: 'bounded-question-a' },
       evidenceRefs: [sessionEvidence('dispatch-exec')],
+      checkpointDescription: execReturnedCheckpointDescription,
       conclude: sessionIncompleteConclude('agent-exec-1'),
     });
     const dispatchedReview = await session.dispatchHelper({
@@ -795,8 +937,12 @@ test('explicit turn helper session dispatches two independent helpers and accept
       assignmentFields: reviewFields,
       inputs: { artifactRef: 'artifact://bounded-review-b' },
       evidenceRefs: [sessionEvidence('dispatch-review')],
+      checkpointDescription: reviewReturnedCheckpointDescription,
       conclude: sessionSucceededConclude('agent-review-1'),
     });
+
+    // A returned helper stays outside the latest turn until the owner adopts it.
+    assert.equal(session.latestTurn().entries.length, 1);
 
     const refinedResultExec: RawAsset = {
       ref: sessionEvidence('refined-exec'),
@@ -804,6 +950,7 @@ test('explicit turn helper session dispatches two independent helpers and accept
     };
     const acceptance = await session.acceptHelper({
       helperCallId: dispatchedExec.identity.helperCallId,
+      checkpointDescription: execAdoptedCheckpointDescription,
       refinedResult: refinedResultExec,
       acceptedBy: 'runtime-explicit-turn-owner',
       acceptanceRef: 'acceptance://explicit-turn-session-exec',
@@ -888,12 +1035,48 @@ test('explicit turn helper session dispatches two independent helpers and accept
     assert.equal(readExec.returned?.fact.result.status, 'incomplete');
     assert.equal(readExec.ownerAccepted?.fact.result.status, 'incomplete');
     assert.equal(readExec.ownerAccepted?.fact.acceptedBy, 'runtime-explicit-turn-owner');
+    const readExecReturnedDescription = readExec.returnedCheckpoint?.checkpoint.description;
+    assert.ok(readExecReturnedDescription?.includes(execReturnedCheckpointDescription));
+    assert.ok(readExecReturnedDescription?.includes('incomplete'));
+    assert.ok(readExecReturnedDescription?.includes('bounded helper returned a partial conclusion'));
+    assert.ok(readExecReturnedDescription?.includes('wait'));
+    assert.ok(readExecReturnedDescription?.includes('condition://explicit-turn-session'));
+    assert.equal(readExec.returnedCheckpoint?.checkpoint.phase, 'returned');
+    assert.deepEqual(readExec.returnedCheckpoint?.checkpoint.recovery, {
+      dispatchAcceptedCommitId: readExec.dispatchAccepted!.commit.commitId,
+      returnedCommitId: readExec.returned!.commit.commitId,
+    });
+    assert.equal(readExec.adoptedCheckpoint?.checkpoint.phase, 'adopted');
+    assert.equal(
+      readExec.adoptedCheckpoint?.checkpoint.description,
+      execAdoptedCheckpointDescription,
+    );
+    assert.deepEqual(readExec.adoptedCheckpoint?.checkpoint.recovery, {
+      dispatchAcceptedCommitId: readExec.dispatchAccepted!.commit.commitId,
+      returnedCommitId: readExec.returned!.commit.commitId,
+      ownerAcceptedCommitId: readExec.ownerAccepted!.commit.commitId,
+    });
 
     assert.notEqual(readReview.dispatchAccepted, null);
     assert.notEqual(readReview.returned, null);
     // A returned success is not auto-accepted.
     assert.equal(readReview.ownerAccepted, null);
     assert.equal(readReview.returned?.fact.result.status, 'succeeded');
+    assert.equal(readReview.returnedCheckpoint?.checkpoint.phase, 'returned');
+    const readReviewReturnedDescription = readReview.returnedCheckpoint?.checkpoint.description;
+    assert.ok(readReviewReturnedDescription?.includes(reviewReturnedCheckpointDescription));
+    assert.ok(readReviewReturnedDescription?.includes('succeeded'));
+    assert.ok(readReviewReturnedDescription?.includes('bounded helper returned a complete conclusion'));
+    assert.ok(readReviewReturnedDescription?.includes('settle'));
+    assert.equal(readReview.adoptedCheckpoint, null);
+
+    const coldReader = new JsonlInteractionHelperJournal(new JsonlOrganJournal(file));
+    const coldExec = await coldReader.readExact(dispatchedExec.identity);
+    assert.deepEqual(coldExec, readExec);
+    assert.deepEqual(
+      await coldReader.readCallCheckpointExact(dispatchedExec.identity, 'adopted'),
+      readExec.adoptedCheckpoint,
+    );
 
     // Only the accepted helper result enters the latest turn.
     const latest = session.latestTurn();
@@ -913,6 +1096,229 @@ test('explicit turn helper session dispatches two independent helpers and accept
     assert.equal(records[1]!.settleCalls.length, 1);
     assert.equal(records[0]!.closes, 1);
     assert.equal(records[1]!.closes, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a partial call checkpoint stays missing until the real session and writer repair it exactly once', async () => {
+  const { file, cleanup } = await fixture(process.env.HUMANAGENT_TEST_ROOT ?? tmpdir());
+  try {
+    // Failure basis: each handoff fact and its independent call checkpoint are
+    // two appends inside one Journal transaction, so the checkpoint append can
+    // fail after the fact is durable. Impact: a derived checkpoint would claim
+    // recovery responsibility that never persisted. Cost: one existing session
+    // fixture plus one transaction wrapper.
+    const failingJournal = new FailingCheckpointAppendJournal(file);
+    const journal = new JsonlInteractionHelperJournal(failingJournal);
+    const binding: ProviderBinding = {
+      bindingId: 'binding-partial',
+      providerId: 'rcc-partial',
+      protocol: 'anthropic',
+      endpointRef: 'endpoint://partial',
+      modelRef: 'model-partial',
+      configDigest: `sha256:${'5'.repeat(64)}`,
+      capabilityDigest: `sha256:${'6'.repeat(64)}`,
+    };
+    const { clock } = sessionClock();
+    const { factory, records } = sessionFactory({
+      execution: { binding, closureState: 'succeeded' },
+    });
+    const session = new ExplicitTurnHelperSession({
+      identity: sessionIdentity,
+      latestTurn: sessionInitialLatestTurn,
+      journal,
+      clock,
+      factory,
+    });
+    const fields: InteractionHelperAssignmentFields = {
+      objective: 'Return a bounded partial-write conclusion',
+      targetRefs: ['interaction://explicit-turn-session-partial'],
+      expectedOutputRefs: [reviewOutputRef],
+      expectedArtifactDigests: [reviewDigest],
+      acceptanceCriteriaDigest: `sha256:${'d'.repeat(64)}`,
+      successCriteria: ['Return a complete conclusion'],
+      failureCriteria: ['Return no conclusion'],
+      incompleteCriteria: ['Return a partial conclusion'],
+      requiredCapabilities: ['text-generation'],
+      mergeGate: 'not-required',
+    };
+    const returnedDescription = 'Return the bounded conclusion without adoption';
+    const adoptedDescription = 'Adopt the returned conclusion for the next decision';
+    const coldReader = new JsonlInteractionHelperJournal(new JsonlOrganJournal(file));
+
+    // Returned phase: the returned fact is durable, but dispatch must not report
+    // checkpoint success and the external helper must not run again.
+    failingJournal.failCheckpointAppend = true;
+    await assert.rejects(
+      () => session.dispatchHelper({
+        selection: { roleId: 'execution' },
+        assignmentFields: fields,
+        inputs: { question: 'returned-partial' },
+        evidenceRefs: [sessionEvidence('dispatch-partial-returned')],
+        checkpointDescription: returnedDescription,
+        conclude: sessionSucceededConclude('agent-partial-returned'),
+      }),
+      /checkpoint append failed after durable fact/,
+    );
+    assert.equal(records.length, 1);
+    assert.equal(records[0]!.startRequests.length, 1);
+    assert.equal(records[0]!.submitPayloads.length, 1);
+    assert.equal(records[0]!.settleCalls.length, 1);
+    assert.equal(records[0]!.closes, 1);
+    assert.equal(session.latestTurn().entries.length, 1);
+
+    const returnedIdentity = sessionHelperIdentity(records[0]!.assignment);
+    const bytesBeforeReturnedRead = await readFile(file, 'utf8');
+    const returnedPartial = await coldReader.readExact(returnedIdentity);
+    assert.notEqual(returnedPartial.returned, null);
+    assert.equal(returnedPartial.returnedCheckpoint, null);
+    assert.equal(returnedPartial.adoptedCheckpoint, null);
+    assert.equal(
+      await coldReader.readCallCheckpointExact(returnedIdentity, 'returned'),
+      null,
+    );
+    assert.equal(await readFile(file, 'utf8'), bytesBeforeReturnedRead);
+
+    failingJournal.failCheckpointAppend = false;
+    // The repair reuses the first final description: the same dispatch input and
+    // the durable returned result deterministically reproduce it, so the reader
+    // consistency check never sees a second version and no helper reruns.
+    const repairReturnedDescription = describeReturnedInteractionHelperCheckpoint(
+      returnedDescription,
+      returnedPartial.returned!.fact.result,
+    );
+    const repairedReturn = await journal.appendReturned(returnedPartial.returned!.fact, {
+      description: repairReturnedDescription,
+    });
+    assert.deepEqual(repairedReturn.commit, returnedPartial.returned!.commit);
+    assert.notEqual(
+      repairedReturn.checkpointCommit.commit.commitId,
+      repairedReturn.commit.commitId,
+    );
+    assert.equal(records[0]!.startRequests.length, 1);
+    const repairedReturnRead = await coldReader.readExact(returnedIdentity);
+    assert.deepEqual(repairedReturnRead.returnedCheckpoint, repairedReturn.checkpointCommit);
+    assert.equal(
+      repairedReturnRead.returnedCheckpoint?.checkpoint.description,
+      repairReturnedDescription,
+    );
+
+    // Adopted phase: the second helper returns normally, then the accepted fact
+    // is durable while the adopted checkpoint append fails. The refined
+    // latest-turn entry must wait for the real checkpoint.
+    const dispatched = await session.dispatchHelper({
+      selection: { roleId: 'execution' },
+      assignmentFields: fields,
+      inputs: { question: 'adopted-partial' },
+      evidenceRefs: [sessionEvidence('dispatch-partial-adopted')],
+      checkpointDescription: returnedDescription,
+      conclude: sessionSucceededConclude('agent-partial-adopted'),
+    });
+    assert.equal(records.length, 2);
+    assert.equal(records[1]!.startRequests.length, 1);
+    assert.equal(session.latestTurn().entries.length, 1);
+    const returnedCheckpoint = await coldReader.readCallCheckpointExact(
+      dispatched.identity,
+      'returned',
+    );
+    assert.equal(returnedCheckpoint?.commit.commitId, dispatched.returnedCheckpointCommitId);
+
+    failingJournal.failCheckpointAppend = true;
+    const refinedResult: RawAsset = {
+      ref: sessionEvidence('refined-partial-adopted'),
+      view: { kind: 'utf8-text' },
+    };
+    const acceptInput = {
+      helperCallId: dispatched.identity.helperCallId,
+      checkpointDescription: adoptedDescription,
+      refinedResult,
+      acceptedBy: 'runtime-explicit-turn-owner',
+      acceptanceRef: 'acceptance://explicit-turn-session-partial',
+      evidenceRefs: [sessionEvidence('owner-accepted-partial-adopted')],
+    } as const;
+    await assert.rejects(
+      () => session.acceptHelper(acceptInput),
+      /checkpoint append failed after durable fact/,
+    );
+    assert.equal(session.latestTurn().entries.length, 1);
+    assert.equal(records[1]!.startRequests.length, 1);
+    assert.equal(records[1]!.settleCalls.length, 1);
+
+    const bytesBeforeAdoptedRead = await readFile(file, 'utf8');
+    const adoptedPartial = await coldReader.readExact(dispatched.identity);
+    assert.equal(adoptedPartial.ownerAccepted?.fact.acceptedBy, 'runtime-explicit-turn-owner');
+    assert.deepEqual(adoptedPartial.returnedCheckpoint, returnedCheckpoint);
+    assert.equal(adoptedPartial.adoptedCheckpoint, null);
+    assert.equal(
+      await coldReader.readCallCheckpointExact(dispatched.identity, 'adopted'),
+      null,
+    );
+    assert.equal(await readFile(file, 'utf8'), bytesBeforeAdoptedRead);
+
+    failingJournal.failCheckpointAppend = false;
+    const acceptance = await session.acceptHelper(acceptInput);
+    assert.equal(session.latestTurn().entries.length, 2);
+    const helperEntries = session.latestTurn().entries.filter(
+      (entry): entry is Extract<InteractionLatestTurnEntry, { kind: 'helper-result' }> =>
+        entry.kind === 'helper-result',
+    );
+    assert.equal(helperEntries.length, 1);
+    assert.equal(helperEntries[0]!.result.helperCallId, dispatched.identity.helperCallId);
+    assert.equal(helperEntries[0]!.refinedResult.ref.evidenceId.value, 'refined-partial-adopted');
+    assert.equal(records[1]!.startRequests.length, 1);
+    assert.equal(records[1]!.settleCalls.length, 1);
+    assert.equal(records[1]!.closes, 1);
+
+    const repairedAdopted = await coldReader.readExact(dispatched.identity);
+    assert.deepEqual(repairedAdopted.returnedCheckpoint, returnedCheckpoint);
+    assert.deepEqual(
+      repairedAdopted.adoptedCheckpoint,
+      acceptance.ownerAcceptedCommit.checkpointCommit,
+    );
+    assert.notEqual(
+      acceptance.ownerAcceptedCommit.checkpointCommit.commit.commitId,
+      acceptance.ownerAcceptedCommit.commit.commitId,
+    );
+    assert.equal(
+      repairedAdopted.adoptedCheckpoint!.checkpoint.recovery.ownerAcceptedCommitId,
+      acceptance.ownerAcceptedCommit.commit.commitId,
+    );
+    // Returned and adopted stay distinct records and commits.
+    assert.equal(repairedAdopted.returnedCheckpoint!.checkpoint.phase, 'returned');
+    assert.equal(repairedAdopted.adoptedCheckpoint!.checkpoint.phase, 'adopted');
+    assert.notEqual(
+      repairedAdopted.returnedCheckpoint!.commit.commitId,
+      repairedAdopted.adoptedCheckpoint!.commit.commitId,
+    );
+
+    // Physical replay proves each receipt points at a real typed checkpoint
+    // record, and the handoff facts were not duplicated.
+    const physical = await new JsonlOrganJournal(file).replay();
+    assert.equal(
+      physical.filter((record) => record.payload?.kind === 'interaction-helper.handoff.v1').length,
+      5,
+    );
+    const checkpointRecords = physical.filter(
+      (record) => record.payload?.kind === 'interaction-helper.call-checkpoint.v1',
+    );
+    assert.equal(checkpointRecords.length, 3);
+    for (const receipt of [
+      repairedReturn.checkpointCommit,
+      returnedCheckpoint!,
+      acceptance.ownerAcceptedCommit.checkpointCommit,
+    ]) {
+      const record = physical.find((candidate) => candidate.commitId === receipt.commit.commitId);
+      assert.equal(record?.payload?.kind, 'interaction-helper.call-checkpoint.v1');
+      assert.deepEqual(
+        {
+          commitId: record!.commitId,
+          journalSeq: record!.seq,
+          recordDigest: record!.recordDigest,
+        },
+        receipt.commit,
+      );
+    }
   } finally {
     await cleanup();
   }

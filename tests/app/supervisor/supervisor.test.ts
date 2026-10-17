@@ -74,7 +74,6 @@ test('code handoff preserves the first replacement spawn failure', async () => {
     args: ['--workspace', paths.workspaceCwd, '--control-root', paths.controlRoot, '--provider', 'fake', '--port', '0'],
     source: {
       entryPath: '/definitely/missing/cli.js',
-      entryDigest: 'sha256:missing-cli',
       packageVersion: '0.1.29',
     },
   };
@@ -232,7 +231,6 @@ test('restart transition crosses the disposed lease and completes only on the ne
     args: ['--provider', 'fake', '--port', '0'],
     source: {
       entryPath: '/fixture/candidate/runtime/app/src/cli.js',
-      entryDigest: 'sha256:candidate-cli',
       packageVersion: '0.1.31',
     },
   };
@@ -247,7 +245,6 @@ test('restart transition crosses the disposed lease and completes only on the ne
     previousGeneration: first.record.generation,
     previousProcessStartToken: first.record.processStartToken,
     targetEntryPath: startup.source.entryPath,
-    targetEntryDigest: startup.source.entryDigest,
   };
   const requested = await recordDaemonRestartTransition(paths, {
     leaseId: first.record.leaseId,
