@@ -16,6 +16,12 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r147 实际工具回执已完成两处冲突标记移除，但最终回复误称未编辑；parent核对实际diff、严格Provider编译及P-Stop原3/3通过后正常完成merge `284b51cc`，保留双方已有语义。r141 CLI等待修复的host原两turn用例已实际进入operation2/epoch2/Task succeeded/Planner2 final，但原断言仍RED：turn2缺 `Independent child result for adoption`；fixture `text-only-zyeN2e` 保留，r149独立小Planner定位首次语义丢失，不放宽scope。r142确认child环境独立watch仍EMFILE，cleanup修正已保留；parent host watch正常，原双Task用例实际RED为HTTPgrant已自动release后fixture重复release。r148独立计划已核实真实API，freshGCM r150仅修原fixture的并发grant/公开release receipt，编译后由host验收。r145只读观察确认存在跨operation历史过滤风险，尚无三turn行为RED；后续复用已成立两turn基础再推进，不预改sameScope。
+
+- stop 独立增量标准交付完成：source `a7644054`、main merge `bc5b06c5`、交付记录 `831a3873`，push `60f46c33..831a3873 main→main` 成功。r144 Gemini4 medium SUCCESS/exit0/schema有效，现有 classifier PASS/findings[]；main contracts/config/App/provider编译0，修正产物路径并正常 offline frozen install 后 P-Stop1 1/1。package/globalinstall0；r146自有隔离canonical正式restart gen1/PID65081→gen2/PID65342、pair/status200、generation0、dispose15:26:37Z且PIDabsent。来源树已正常remove/prune/pathabsent，窗口归还UX。native候选组合origin/main时两处同义stop/相邻既有test冲突；parent已裁决保留双边union，GCM r147仅消解指定冲突并复验原P-Stop组，不动其他实现或需求。完整goal仍ACTIVE；r145只读观察后续多turn/cold缺口，未新增测试。
+
+- r142–r144 续接已实际补位：r141 CLI Task 等待修复 GCM 仍在运行；r139 双顶层 Task consumer 编译通过，但单独 fs.watch 也报 EMFILE，未证明产品并发失败或成功，fresh GCM r142 复用原树定位环境/自有资源并续验，不改生产或弱化断言。stop 独立来源 r136 已编译、P-Stop1 1/1、相关 76/76，parent App build0；r140 真实 RCC 一次 generation 的 receipt 为 PASS、closure/settlement stopped、resourceRelease released、close/cleanup closed。完整 stop milestone Review r143 Opus 实际 quota ERROR 后转 fresh Gemini4 medium r144，尚未取得裁决，未 commit/main/install/push。当前两执行域及独立 Review 并行，完整 goal 保持 ACTIVE；main/install 窗口已向 UX peer 协调，不动 gen21/53007/p3。原始证据在既有 RUN 根相应 r139–r144 目录。
+
 - main buffered-stop独立移植r133已确认原harness/API兼容，contracts/provider编译0，原PStop1实际mainRED为observe等待buffered pending tail超时，不是编译失败。r133自然exit0止于RED，freshGCM r136复用唯一stop树，只应用33b8761d原三hunk并续GREEN/现有回归，未盲摘347行混合差异。
 - 顶层Task计划r129/r132因错误API/字段/summary/routes未采纳；独立小Planner r134校正公开调用。parent进一步核实validateSummarySection允许evidenceRefs空数组，schema无minItems，真实非空deliveryText足够，消除了伪造admission引用的假依赖。freshGCM r135在唯一two-top-tasks树，仅tests/app/explicit-brain-runtime.test.ts实现一App/coordinator预算2的真实双Taskconsumer；不复用同Task双child证据，不改生产，真实失败再按owner补计划。r130两turn原树继续；当前三GCM写入域不重叠，Pool已交付事实不变。
 
