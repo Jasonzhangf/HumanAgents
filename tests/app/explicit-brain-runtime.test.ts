@@ -76,7 +76,8 @@ import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/t
 import type { TaskGrantControlReceipt } from '../../packages/app/src/ui-runtime/task-control.js';
 import type { PersistedFinalSubmitReceipt } from '../../packages/runtime/src/explicit-brain/router.js';
 
-test('default App composition admits the retained Task only after real HTTP grant and releases native Provider', async () => {
+for (const source of ['rcc', 'http'] as const) {
+test(`default App composition admits the retained Task only after real HTTP grant and releases native Provider (${source})`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-default-native-consumer-'));
   let runtime: UiRuntime | undefined;
   let posts = 0;
@@ -95,7 +96,7 @@ test('default App composition admits the retained Task only after real HTTP gran
     const address = provider.address();
     if (address === null || typeof address === 'string') throw new Error('missing controlled Provider address');
     const entries: EffectiveAgentProviderBinding[] = [{ agentId: 'controlled-execution', roleId: 'execution', source: 'agent',
-      provider: { source: 'rcc', provider: 'rcc', binding: 'controlled-native', protocol: 'responses',
+      provider: { source, provider: 'rcc', binding: 'controlled-native', protocol: 'responses',
         model: 'controlled-native', route: 'controlled-native', baseUrl: `http://127.0.0.1:${address.port}` } }];
     let selections = 0;
     const select = async <TIdentity extends AnyProviderExecutionIdentityRef = import('../../packages/contracts/src/index.js').ProviderExecutionIdentityRef>(selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string }) => {
@@ -103,9 +104,15 @@ test('default App composition admits the retained Task only after real HTTP gran
       return prepareAgentProvider<TIdentity>({ ...selection, agentProviderBindings: entries, evidenceRoot: join(root, 'assets') });
     };
     const launch = await select({ roleId: 'execution' });
+    const readiness = await launch.port.probe(launch.binding);
+    if (source === 'http') {
+      assert.equal(readiness.state, 'unknown');
+      assert.equal(readiness.nextAction?.kind, 'continue');
+      assert.equal(readiness.nextAction?.ref, 'http.start');
+    }
     const accessControl = await AccessControlService.open({ credentialPath: join(root, 'security', 'web-access.json'), create: true });
     runtime = await startUiRuntime({ mode: 'rcc', accessControl, organId: id('organ', 'default-native-consumer'),
-      binding: launch.binding, port: launch.port, providerSource: 'rcc', checkpointRoot: root,
+      binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: root,
       evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
       memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'default-native', roleId: 'execution' },
       explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
@@ -136,6 +143,7 @@ test('default App composition admits the retained Task only after real HTTP gran
      const operationId = dispatched.operationId;
      if (operationId === undefined) throw new Error('ungranted dispatch has no prepared operation');
      await assert.rejects(() => runtime!.service.releaseExecution(dispatched.taskId, operationId), /verified TG1 owner is absent/);
+    assert.equal(runtime.service.status().providerState, readiness.state);
     assert.equal(posts, 0, 'typed confirmation and TaskIdentity are not execution authority');
     assert.equal(selections, 1, 'no target execution Provider may be selected before grant');
     const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('controlled-lease', 1).code);
@@ -166,7 +174,8 @@ test('default App composition admits the retained Task only after real HTTP gran
     assert.equal(accessControl.readRuntimeProductIdentity().owner, runtimeOwner);
     assert.equal(runtime.service.taskDetail(dispatched.taskId).taskId.value, dispatched.taskId.value);
     assert.equal(posts, 1, 'revoke may not start new Provider business');
-    console.log(JSON.stringify({ confirmed, dispatched, released, posts, selections, revoke: revoked.stop }));
+    assert.equal(runtime.service.status().providerState, readiness.state);
+    console.log(JSON.stringify({ source, readiness, confirmed, dispatched, released, posts, selections, revoke: revoked.stop }));
   } finally {
     try { await runtime?.close(); } finally {
       provider.closeIdleConnections?.();
@@ -175,6 +184,7 @@ test('default App composition admits the retained Task only after real HTTP gran
     }
   }
 });
+}
 
 test('typed final FIFO establishes exact TaskIdentity before execution and preserves write-failure retry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-final-source-'));

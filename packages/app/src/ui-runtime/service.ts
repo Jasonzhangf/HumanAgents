@@ -43,6 +43,7 @@ import {
   type RawAsset,
   type ScopeRef,
   type ProviderBinding,
+  type ProviderReadiness,
   type ProviderCloseResult,
   type ProviderReadiness,
   type ProviderEvent,
@@ -474,6 +475,7 @@ export interface UiRuntimeServiceOptions {
    */
   readonly taskGrantPort?: TaskGrantPort;
   readonly providerSource?: ProviderTransportSource;
+  readonly providerReadiness?: ProviderReadiness;
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;
@@ -5859,20 +5861,25 @@ export class UiRuntimeService {
     return exact;
   }
 
-  private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {
+  private providerAdmissionInputs() {
     const status = this.status();
     const providerRequestable = this.canStartProviderExecution(status);
     const health = status.state === 'ready'
-      ? 'healthy'
+      ? 'healthy' as const
       : status.state === 'degraded'
-        ? 'degraded'
+        ? 'degraded' as const
         : status.state === 'unknown'
-          ? 'unknown'
-          : 'unhealthy';
+          ? 'unknown' as const
+          : 'unhealthy' as const;
     const availableCapabilities = providerRequestable
       ? [PROVIDER_EXECUTION_CAPABILITY]
       : [];
     const unknownHealthRequestable = status.state === 'unknown' && providerRequestable;
+    return { health, availableCapabilities, unknownHealthRequestable };
+  }
+
+  private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {
+    const { health, availableCapabilities, unknownHealthRequestable } = this.providerAdmissionInputs();
     const queue = classifyConfirmedRequirement(envelope);
     const tasks = this.coordinator.taskSnapshots();
     const isTaskInputUpdate = envelope.taskRef !== undefined
@@ -5930,19 +5937,7 @@ export class UiRuntimeService {
   private async consumePendingRequirements(): Promise<void> {
     while (this.implicitConsumerEnabled) {
       try {
-        const status = this.status();
-        const providerRequestable = this.canStartProviderExecution(status);
-        const health = status.state === 'ready'
-          ? 'healthy'
-          : status.state === 'degraded'
-            ? 'degraded'
-            : status.state === 'unknown'
-              ? 'unknown'
-              : 'unhealthy';
-        const availableCapabilities = providerRequestable
-          ? [PROVIDER_EXECUTION_CAPABILITY]
-          : [];
-        const unknownHealthRequestable = status.state === 'unknown' && providerRequestable;
+        const { health, availableCapabilities, unknownHealthRequestable } = this.providerAdmissionInputs();
         // Share the explicit dispatch mutex so a manual /api/explicit/dispatch-next
         // cannot interleave with the background FIFO drain on the same head.
         const attempt = await this.withDispatchLock(() => this.implicitBrain.drainNext({
