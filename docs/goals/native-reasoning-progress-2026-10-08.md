@@ -2,6 +2,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r293已终止但未完成：Appmapping20行与测试imports已写，尚无testbody/RED/GREEN，最终只有future-intent，未计验收/提交。父正常FF已验Provider基础c58ce3f6到同一App树，解除真实集成依赖；r294 freshGCM复用原树只完成既定publicconsumer/RED→GREEN，禁止重复扩读/新harness/其他文件。App无业务RED前不得接受来源；整体milestone仍OPEN。
+
 - 容量wait Provider基础 `c58ce3f6` 已正常merge candidate：r292原两新case实际RED→GREEN，保留明确blocked状态/ownerwait、普通manualblock拒绝；原相邻四casePASS。父亲读原events/diff后正常来源提交（作者future-intent退出未提交），组合contracts/provider tsc0+目标6/6PASS（session31898）。sourceclean/terminal后正常remove/prune/absent。App r293仍同树写child-producer+i2consumer，完整same-turn集成未完成，不派leafReview、不称main产品交付。
 
 - Appcapture `2fb247eb` 正常merge候选；contracts/Appbuild/native-delivery tsc0。首次误用旧dist/tests只执行普通case1/1，不计stop证明；父核对config改用dist/tests-native-text后原stop+text2/2PASS（session36452），capture18<checkpoint19，无standard saveintent/closure/Planner。已通知UX关来源；不扩installed/v2/closeonce计数。
