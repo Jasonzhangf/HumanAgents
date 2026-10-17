@@ -2,6 +2,12 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- r268一次新Interpret实际执行完毕，HTTP409/UND_ERR_SOCKET、Task0，预算1/1 consumed。raw capture证明HTTP200的142byteheaders+8raw chunkbody，仅解码SSE注释`:\n\n`3bytes，之后RCC面对EOF先于clientEOF，无modelcontent/terminal；精确请求model/tools/instructions/business均匹配原baseline。不能据此指定内部根因。新RCCrequestId关联未建立，collector的gpt5.5候选无关，不冒归属。worker沙盒ps拒绝清理，父核实exactownedPID54910后SIGTERM，PIDabsent/lease disposedAt21:09:20.776Z；relay关闭，fixture/evidence保留。实际结果与边界见r268/parent-acceptance.md、host-cleanup.json、diag-state.json与relay-wire-capture.redacted.json。根因UNKNOWN；r269 GCM只读至多6个RCC边界源文件定位现有error owner/sink，不发请求/改RCC。
+- planner模板c8abb025已合candidate，复用有效compile不新增镜像string测试；peer发现首轮缺definition具体shape，保同来源补单句字段说明，后继commit待接。manager/App accept来源均由peer确认正常remove/prune/pathabsent。producer完整交付仍INCOMPLETE。
+
+- 共享contracts ea11de39已合candidate，build:contracts0与约定consumer3/3；manager0e4a1f41已合candidate，orchestration定向compile0/原consumer1/1；App accept f51dcfc1+215608ce已正常合candidate，tests/app compile0/原公开整文件3/3。stdout分别归档inspection-delivery-contract-composed、inspection-manager-composed、inspection-check-accept-composed-20261017.txt。peer已收到各结果并负责来源生命周期；不把基础接收计作完整producer、durable replay或冷恢复。后继持久绑定、Runtime boundary与planner输出模板由peer独占执行。
+- r267独立Gemini4medium计划已实际SUCCESS/exit0并接受：新隔离installed public Interpret最多1次，通过临时raw TCP relay保留缺失字节，RCC/产品readonly。父补正不推定中继延迟/内部根因、敏感header落盘前脱敏（不保存未脱敏headerhex）。r268 GCM仅own run+新testfixture写入，旧日志不重搜，尚无请求发送回执。r265观察未发现当前可独立新增的Provider功能；其建议逐A–G扩live验证不采纳，沿现有最小充分验收合同。
+
 - RCC旧请求取证已闭合为证据不足，不是修复：r263整理exit0；r264独立OAuth接受零请求定点提取；r266一次读取目标日志取得6条exact request/execution/port/connection记录。20:36:36.933Z response200后socket_write150bytes、同毫秒Body stream error、.934Z关闭；完整记录无inner cause/body/frame/artifact引用，不能确认根因或owner。r266/exact-records.jsonl与result.md保留；旧日志不再重搜。旧新business input/instructions/tools相同，只有sourceRef身份不同。r267独立Gemini4medium规划新隔离取证（最多一次Interpret，尚未执行），不改产品/RCC/模型；r265 GCM并行校准A–G当前缺代码与缺证据，未新建产品writer。
 - UX图源58039143只有三族9个图文件，正常合唯一candidate；复用owner三图validate/inspect/binding有效结果，不重复检查。owner已关闭原树；共享契约GCM独占inspection-delivery-contract-20261017开始，实现inspectionDelivery/acceptedPlan/InspectionAcceptedCheckPort，后继持久层与manager等待该明确接口。UX文档80566366已从origin/main正常合candidate。以上候选基础不计完整producer交付。
 
