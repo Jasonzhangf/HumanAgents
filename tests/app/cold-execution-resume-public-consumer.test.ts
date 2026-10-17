@@ -2186,6 +2186,24 @@ async function c3aMemoryEvidence(app: Awaited<ReturnType<typeof buildResumeServi
   const events = await memory.journal.readEvents({ streamId: `memory-boundaries:task:${fixture.taskId.value}`, afterSequence: 0, limit: 100 });
   const groups = events.filter((event) => event.messageId.startsWith('rewind-group-'));
   assert.equal(groups.length, 1, 'production hook must publish one actual committed group');
+  const group = groups[0]!;
+  assert.deepEqual(group.scope, { organId, taskId: fixture.taskId }, 'the group must publish one common Task scope');
+  assert.equal(group.scope.cycleId, undefined, 'the group scope must not pin a committed cycle');
+  assert.equal(group.scope.operationId, undefined, 'the group scope must not pin a committed operation');
+  const originalScope = fixture.allocation.scope;
+  assert.ok(group.evidenceRefs.some((evidence) =>
+    canonicalJsonStringify(evidence.scope) === canonicalJsonStringify(originalScope)),
+  'the group must retain the original checkpoint execution scope');
+  const primary = group.evidenceRefs.find((evidence) =>
+    evidence.evidenceId.value.startsWith('rewind-group-primary-checkpoint-'));
+  if (primary === undefined) throw new Error('the group must retain its recovery checkpoint evidence');
+  const receiptSeq = Number(/checkpoint-receipt\/(\d+)\//.exec(primary.locator)?.[1]);
+  const recoveryRecord = (await fixture.journal.verify()).records
+    .find((record) => record.kind === 'checkpoint' && record.seq === receiptSeq);
+  if (recoveryRecord?.checkpoint === undefined) throw new Error('the recovery evidence must bind one committed receipt');
+  assert.deepEqual(primary.scope, recoveryRecord.checkpoint.scope, 'the recovery evidence must keep its own execution scope');
+  assert.ok(primary.scope.cycleId !== undefined && primary.scope.operationId !== undefined,
+    'the recovery evidence must keep its committed cycle and operation');
   const receipts = await Promise.all(groups.map((event) => memory.journal.readReceipt({
     consumerKey: `memory-binding:${fixture.taskId.value}`, messageId: event.messageId })));
   assert.ok(receipts.every((receipt) => receipt?.disposition === 'applied'), JSON.stringify(receipts));
