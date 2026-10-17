@@ -16,6 +16,9 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- main buffered-stop独立移植r133已确认原harness/API兼容，contracts/provider编译0，原PStop1实际mainRED为observe等待buffered pending tail超时，不是编译失败。r133自然exit0止于RED，freshGCM r136复用唯一stop树，只应用33b8761d原三hunk并续GREEN/现有回归，未盲摘347行混合差异。
+- 顶层Task计划r129/r132因错误API/字段/summary/routes未采纳；独立小Planner r134校正公开调用。parent进一步核实validateSummarySection允许evidenceRefs空数组，schema无minItems，真实非空deliveryText足够，消除了伪造admission引用的假依赖。freshGCM r135在唯一two-top-tasks树，仅tests/app/explicit-brain-runtime.test.ts实现一App/coordinator预算2的真实双Taskconsumer；不复用同Task双child证据，不改生产，真实失败再按owner补计划。r130两turn原树继续；当前三GCM写入域不重叠，Pool已交付事实不变。
+
 - r128实际两turnconsumer已编译0并运行RED，但首错是新fixture Turn1end同时缺deliveryText且deliveryRefs=[]，实际standard-turn-end.arguments拒绝；CLIexit0而Taskblocked，不能当JournalbindingRED或完成。生产未改，失败fixture/stream与close次生错误保留且因果尚未证明。freshGCM r130原树仅先把Turn1真实child产物合法交付，再续实际two-turn验证，不删契约检查。r127顶层runtime观察确认同Task双child不等于2顶层Task，现有singleTaskfixture不足；独立Gemini4medium r129只规划一App/coordinator双Task公开consumer，文件与两turnwriter隔离，尚未准入实施。
 
 - r125两turnGCM已自然exit0，但止于新增consumer断言turnTwoWire可能undefined的编译错误，尚无行为RED、生产0改动；不记业务缺陷/完成。fresh OAuth技术r128原树接手同r122合同，先修测试收窄再实际CLI RED/GREEN，保scope与schema。另一路fresh GCM r127只读核两个顶层Task runtime并行的公开fixture/接线，不以同Task双child当N顶层runtime证据。Pool已main/remote交付不重验，完整goal仍ACTIVE。
