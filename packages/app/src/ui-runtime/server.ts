@@ -13,6 +13,7 @@ import {
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
+import { decodeTaskAgentActivitySelectionQuery } from './agent-activity-read.js';
 import type { CheckpointHistoryReadInput } from './checkpoint-history.js';
 import type { RuntimeReadResult, RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
 import type { RuntimeCheckpointAssetSelector } from '../../../ui/contracts/checkpoint-history.js';
@@ -1284,6 +1285,7 @@ async function handleRequest(
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);
     if (taskDashboard && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskDashboard[1]!));
+      const agentSelection = decodeTaskAgentActivitySelectionQuery(url.searchParams, taskId);
       const projectKey = url.searchParams.get('projectKey');
       const mode = url.searchParams.get('mode');
       if (projectKey !== null || mode !== null) {
@@ -1305,10 +1307,10 @@ async function handleRequest(
             400,
           );
         }
-        writeReadResult(response, await service.scopedTaskDashboard(taskId, projectKey, mode));
+        writeReadResult(response, await service.scopedTaskDashboard(taskId, projectKey, mode, agentSelection));
         return;
       }
-      writeJson(response, 200, await service.taskDashboardWithPlan(taskId));
+      writeJson(response, 200, await service.taskDashboardWithPlan(taskId, agentSelection));
       return;
     }
     const taskRecords = /^\/api\/tasks\/([^/]+)\/records$/.exec(path);
