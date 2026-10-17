@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17后继：C3a segment小计划r10已准入，freshGCM r11在原树补checkpoint-journal/native-execution/composition真实segmentJournalFor接线并续hot/fresh-process，未验收。helper新观察由独立OAuth r4确认：returned描述虽有派单语义却缺实际result；freshGCM r5在旧helper树已关后开唯一后继树，仅Runtime映射与原Runtime/Appconsumer，复用typed summary/status/nextAction，不改旧Journal/模型字段。Memory r6继续真实facade链。childGemini r3实际exit0但未准入，当前ABI已store字节/使用checkpoints.pre，计划反而新增重复store和假checkpoint；已同conversation续r4纠正真实API、pnpm/选中consumer与candidate依赖，不等待先合main。来源结果不直接作准入事实，两侧无冲突GCM共6路；全goal仍OPEN。
+
 - 2026-10-17续接：helper基础7e43bc8与App语义映射d07af70已完整组合最新候选9f5e9a0，经标准merge形成3f319669b07d61d133efc5eb95ab193a8dfa7c89并FF唯一candidate。Root组合Appbuild/测试tsc exit0，原两个公开consumer实际2/2 Node0；returned/adopted真实记录、时间/refs、missing读null/writer补写、活跃turn不提前压缩均有证据。来源正常remove/prune/pathabsent。仅内部单元接收，无leaf review；完整N3/整体Review/main/push与loaded更新仍OPEN。
 - C3a r9退出0但行为未通过：hot实际correction3→rewind4→forward5后新operation epoch6，发wire前因native-execution缺segment Journal绑定而失败，原namedconsumer0/1，fresh-process未跑。新独立OAuth r10只规划该真实缺边，保原树/首错，不降epoch或丢前序语义。C3b r5真实C1链计划已接收，freshGCM r6在原Memory树修非相邻transition/递进epoch/精确receipt与真实analysis，旧手拼fixture结果不接收。child production seam观察已实际exit0，独立Gemini4 r3规划单runtime接线，代码仍等C3a共享writer释放。UX query43e305及resumed-epoch9f5e9a0已由peer正常合流并关闭来源；新规DAG检查与既有授权已传递，未新请求/restart。
 
