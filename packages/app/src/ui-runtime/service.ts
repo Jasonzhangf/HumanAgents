@@ -4705,7 +4705,7 @@ export class UiRuntimeService {
   startImplicitConsumer(): void {
     this.implicitConsumerEnabled = true;
     for (const task of this.coordinator.taskSnapshots()) {
-      if ((task.state === 'running' || task.state === 'settling') && task.operationId) {
+      if (this.isTaskOccupyingExecutionSlot(task) && task.operationId) {
         this.watchExecutionForImplicitWakeup(id('operation', task.operationId));
       }
     }
@@ -5789,7 +5789,7 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
       const current = this.coordinator.taskSnapshot(task.taskId);
       if (executionEpoch === undefined) {
-        if (current.state === 'running' || current.state === 'settling') {
+        if (this.isTaskOccupyingExecutionSlot(current)) {
           // The target is busy. Do not start a conflicting execution (that used
           // to surface as task.busy); keep the confirmed requirement pending in
           // the FIFO so the running task's terminal wake consumes the appended
@@ -5963,13 +5963,17 @@ export class UiRuntimeService {
     return { health, availableCapabilities, unknownHealthRequestable };
   }
 
+  private isTaskOccupyingExecutionSlot(task: RuntimeTaskSnapshot): boolean {
+    return task.state === 'running' || task.state === 'settling' || task.executionRelease === 'releasing';
+  }
+
   private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {
     const { health, availableCapabilities, unknownHealthRequestable } = this.providerAdmissionInputs();
     const queue = classifyConfirmedRequirement(envelope);
     const tasks = this.coordinator.taskSnapshots();
     const isTaskInputUpdate = envelope.taskRef !== undefined
       && (envelope.intent === 'append' || envelope.intent === 'change');
-    const runningTasks = tasks.filter((task) => task.state === 'running' || task.state === 'settling');
+    const runningTasks = tasks.filter((task) => this.isTaskOccupyingExecutionSlot(task));
     return admitRequirement({
       envelope,
       queue: defaultAdmissionQueueConfig(queue, this.options.maxConcurrentTasks),
@@ -6027,7 +6031,7 @@ export class UiRuntimeService {
         // cannot interleave with the background FIFO drain on the same head.
         const attempt = await this.withDispatchLock(() => this.implicitBrain.drainNext({
           queueLoad: {
-            running: this.coordinator.taskSnapshots().filter((task) => task.state === 'running' || task.state === 'settling').length,
+            running: this.coordinator.taskSnapshots().filter((task) => this.isTaskOccupyingExecutionSlot(task)).length,
             queued: this.coordinator.taskSnapshots().filter((task) => task.state === 'created' || task.state === 'admitted').length,
           },
           requiredCapabilities: [PROVIDER_EXECUTION_CAPABILITY],
@@ -6096,6 +6100,15 @@ export class UiRuntimeService {
     const finish = (): void => {
       if (!this.implicitWatchedOperations.delete(operationId.value)) return;
       unsubscribe();
+      const taskId = this.coordinator.operationTask(operationId);
+      const task = this.coordinator.taskSnapshot(taskId);
+      if (task.operationId !== undefined && task.operationId !== operationId.value
+        && this.isTaskOccupyingExecutionSlot(task)) {
+        this.watchExecutionForImplicitWakeup(id('operation', task.operationId));
+        return;
+      }
+      // A same-operation final may arrive just before finalize clears its
+      // running state. Keep its normal deferred FIFO wake.
       this.scheduleImplicitConsumption();
     };
     const subscription = this.coordinator.subscribeReplay(operationId, undefined, (event) => {

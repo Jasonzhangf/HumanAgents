@@ -205,6 +205,7 @@ export interface RuntimeTaskSnapshot {
   readonly output: string;
   readonly currentNode: string;
   readonly operationId?: string;
+  readonly executionRelease?: 'prepared' | 'releasing' | 'released';
   readonly executionEpoch?: number;
   readonly cycleId?: string;
   /** Rebuildable committed public-output projection for the current operation/epoch. */
@@ -718,6 +719,7 @@ export interface TaskRecord {
   allocation?: RuntimeExecutionAllocation;
   release?: RuntimeExecutionRelease;
   releasePending?: Promise<RuntimeExecutionRelease>;
+  advancingTurn?: boolean;
   resolveRelease?: (release: RuntimeExecutionRelease) => void;
   rejectRelease?: (error: unknown) => void;
   composition?: RuntimeExecutionComposition;
@@ -2466,6 +2468,7 @@ export class RuntimeTaskCoordinator {
     record.resolveRelease?.(record.release);
     record.resolveRelease = undefined;
     record.rejectRelease = undefined;
+    record.releasePending = undefined;
   }
 
   /**
@@ -2805,8 +2808,19 @@ export class RuntimeTaskCoordinator {
       await this.commitStandardTurnDelivery(record, operation, scope, standardTurn,
         input.expectedExecutionEpoch);
     }
-    await this.applyStandardTurnAdvance(record, operation, scope, advance);
-    if (advance.state === 'advancing') await this.startNextStandardTurn(record, operation, advance);
+    record.advancingTurn = advance.state === 'advancing';
+    let terminal: RuntimeTaskEvent | undefined;
+    try {
+      terminal = await this.applyStandardTurnAdvance(record, operation, scope, advance);
+      if (advance.state === 'advancing') await this.startNextStandardTurn(record, operation, advance);
+    } finally {
+      record.advancingTurn = false;
+      // The old operation stays final in the Journal. Notify live consumers
+      // after the successor allocation/release exists so they can follow it.
+      if (advance.state === 'advancing' && terminal) {
+        this.listeners.emit(operation.operationId.value, terminal);
+      }
+    }
     return advance;
   }
 
@@ -2953,7 +2967,7 @@ export class RuntimeTaskCoordinator {
   }
 
   private async applyStandardTurnAdvance(record: TaskRecord, operation: OperationRecord, scope: ScopeRef,
-    advance: AdvanceTurnResult): Promise<void> {
+    advance: AdvanceTurnResult): Promise<RuntimeTaskEvent> {
     if (!advance.admission || !advance.alignment || (advance.state !== 'advancing' && advance.state !== 'terminal')) {
       throw new RuntimeTaskControlError('turn.alignment.pending', RUNTIME_OWNER,
         advance.reason, 'recover alignment on the same logical turn');
@@ -2964,12 +2978,14 @@ export class RuntimeTaskCoordinator {
     record.error = undefined;
     await this.persistCurrentState(record,
       `turn-aligned:${record.taskId.value}:${operation.operationId.value}:${advance.alignment.planRevisionId}`, scope);
-    this.pushEvent(record, operation, 'execution.terminal', state, advance.reason,
-      record.checkpoint?.evidenceRefs ?? [], undefined, undefined, undefined, undefined, 'final');
+    const terminal = this.pushEvent(record, operation, 'execution.terminal', state, advance.reason,
+      record.checkpoint?.evidenceRefs ?? [], undefined, undefined, undefined, undefined, 'final', advance.state === 'advancing');
     this.finalize(record, state);
     if (advance.state === 'advancing') {
+      record.advancingTurn = true;
       record.allowedActions = ['start'];
     }
+    return terminal;
   }
 
   private async startNextStandardTurn(record: TaskRecord, operation: OperationRecord, advance: AdvanceTurnResult) {
@@ -5377,6 +5393,9 @@ export class RuntimeTaskCoordinator {
   }
 
   private finalize(record: TaskRecord, state: LifecycleState): void {
+    record.releasePending = undefined;
+    record.release = undefined;
+    record.advancingTurn = false;
     record.state = state;
     record.running = false;
     record.stopping = false;
@@ -5431,7 +5450,8 @@ export class RuntimeTaskCoordinator {
       readonly zeroEffectAdmissionDenial?: true;
     },
     terminalPhase?: 'provider' | 'final',
-  ): void {
+    deferEmission = false,
+  ): RuntimeTaskEvent {
     operation.seq += 1;
     const event: RuntimeTaskEvent = {
       eventId: `${operation.operationId.value}-${operation.seq}`,
@@ -5477,7 +5497,8 @@ export class RuntimeTaskCoordinator {
       error: details?.error,
       ...(details?.zeroEffectAdmissionDenial === undefined ? {} : { zeroEffectAdmissionDenial: details.zeroEffectAdmissionDenial }),
     });
-    this.listeners.emit(operation.operationId.value, event);
+    if (!deferEmission) this.listeners.emit(operation.operationId.value, event);
+    return event;
   }
 
   private replayJournal(): void {
@@ -5844,6 +5865,11 @@ export class RuntimeTaskCoordinator {
       output: record.output,
       currentNode: record.currentNode,
       operationId: record.operationId?.value,
+      executionRelease: record.release?.state === 'released' && record.running
+        ? 'released'
+        : record.advancingTurn === true || (record.release?.state === 'prepared' && record.releasePending !== undefined)
+          ? 'releasing'
+          : record.release?.state === 'prepared' ? 'prepared' : undefined,
       executionEpoch: record.executionEpoch,
       cycleId: record.cycleId?.value,
       publicOutput: record.publicOutput,
