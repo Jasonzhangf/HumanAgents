@@ -29,6 +29,10 @@
 
 本节更新日常开发与本地安装入口；下方旧候选记录只作历史，不作为当前检查要求。
 
+本轮续查读取了当前全局治理 Skill 与 bootstrap-migration 的消融章节、有效需求、项目 AGENTS、日常 build/CI/package/install/restart 入口及现有审查回执。当前仓库未配置 core.hooksPath，`.git/hooks` 只有未启用的 sample；没有 `.github` CI 工作流。现有三节点 CI 图与 `typecheck → build:raw → test:compiled:services` 调用一致，拓扑未变，不重复跑图校验或行为测试。
+
+续查发现三份旧计划会重新引入治理：`human-visible-integration-plan.md`、`live-composition-closeout-plan.md` 与 `native-provider-gap-plan-2026-10-11.md`。已从正文删除输入/产物哈希、候选 SHA/tree 绑定、候选 digest 重算、identity 复用门槛、独立 reuse/rerun 账本及 AGY+Codex+Astra 多轮审查要求。Provider 旧状态明确为历史，未把旧结果升级为当前 PASS。保留三脑功能、公开入口、任务隔离、恢复、真实模型、数据正确性和一次完整 milestone review。此批只改文档，不改变程序入口，无新增测试、构建或服务重启。
+
 - 已交付的日常 build/CI 消融继续复用。它们直接运行类型检查、编译及适用服务回归，不建立哈希检查点、冻结材料或候选身份清单。本批不重跑全仓 CI。
 - 本地 package assembly 删除两次目录摘要与比较、`artifactDigest` 返回。普通 `package` 改走 `package:candidate`。本地 installer 直接选择当前版本 tgz 或显式路径，不再依赖 release manifest。保留真实文件复制、contracts、模板、UI 资产、CLI 封装和 npm 失败传播。
 - restart 删除入口文件摘要计算、lease/transition 摘要必填项和交接摘要比较。保留 lease/generation/processStartToken、路径、子进程 PID、ready、request 关联、旧进程退出、错误与资源收口。原公开 restart consumer 保留任务数据断言；UX 候选测试通过正式 grant API 获权，main 使用其原有执行准入。
