@@ -59,17 +59,40 @@ export interface OriginalBusinessTurnRef {
   readonly execution: ActiveTurnProviderExecutionIdentityRef;
 }
 
-/** Exact predecessor link: the segment this one resumes and its recovery receipt. */
+/**
+ * Durable anchor of a predecessor segment that opened and appended records but
+ * never committed a recovery receipt. It is a location, not a capture, and
+ * never claims a save.
+ */
+export interface ActiveTurnSegmentInterruptedAnchor {
+  readonly openedCommitRef: JournalCommitRef;
+  readonly recordsThroughCommitRef: JournalCommitRef;
+}
+
+/**
+ * Exact predecessor link. The captured branch carries the recovery receipt that
+ * closed the predecessor; the interrupted branch carries its durable anchor when
+ * no receipt was saved; the initial-open branch anchors the original turn before
+ * any resumed segment. Field presence is the only discriminator.
+ */
 export type ActiveTurnSegmentPredecessorRef =
   | {
       readonly segmentId: string;
       /** Exact J1 recovery-assets receipt that closed the predecessor segment. */
       readonly recoveryAssetsReceiptRef: string;
+      readonly interrupted?: never;
       readonly initialOpen?: never;
     }
   | {
       readonly segmentId: string;
       readonly recoveryAssetsReceiptRef?: never;
+      readonly interrupted: ActiveTurnSegmentInterruptedAnchor;
+      readonly initialOpen?: never;
+    }
+  | {
+      readonly segmentId: string;
+      readonly recoveryAssetsReceiptRef?: never;
+      readonly interrupted?: never;
       /** Durable anchor of the original turn that was never captured. */
       readonly initialOpen: ActiveTurnInitialOpenAnchor;
     };
@@ -264,24 +287,41 @@ export function validateActiveTurnInitialOpenAnchor(input: unknown): asserts inp
   }
 }
 
+export function validateActiveTurnSegmentInterruptedAnchor(input: unknown): asserts input is ActiveTurnSegmentInterruptedAnchor {
+  assertPlainObject(input, 'segment interrupted anchor');
+  validateJournalCommitRef(input.openedCommitRef as JournalCommitRef);
+  validateJournalCommitRef(input.recordsThroughCommitRef as JournalCommitRef);
+  const openedCommitRef = input.openedCommitRef as JournalCommitRef;
+  const recordsThroughCommitRef = input.recordsThroughCommitRef as JournalCommitRef;
+  if (recordsThroughCommitRef.journalSeq < openedCommitRef.journalSeq) {
+    throw new ContractError('segment interrupted anchor recordsThroughCommitRef cannot precede its openedCommitRef');
+  }
+}
+
 /**
  * Enforce the exclusive-or predecessor link. The captured branch carries the
- * exact J1 recovery-assets receipt that closed the predecessor; the initial-open
- * branch carries the durable anchor of an original turn with no capture. Field
- * presence is the only discriminator, so a record holding both facts or neither
- * is rejected here rather than resolved downstream. Commit refs use the existing
+ * exact J1 recovery-assets receipt that closed the predecessor; the interrupted
+ * branch carries the durable anchor of a predecessor with no receipt; the
+ * initial-open branch anchors the original turn with no capture. Field presence
+ * is the only discriminator, so a record holding more than one fact or none is
+ * rejected here rather than resolved downstream. Commit refs use the existing
  * Journal validator. This never reinterprets the initial binding.
  */
 export function validateActiveTurnSegmentPredecessorRef(input: unknown): asserts input is ActiveTurnSegmentPredecessorRef {
   assertPlainObject(input, 'segment predecessor');
   assertNonEmptyString(input.segmentId, 'segment predecessor segmentId');
   const hasReceipt = input.recoveryAssetsReceiptRef !== undefined;
+  const hasInterrupted = input.interrupted !== undefined;
   const hasInitialOpen = input.initialOpen !== undefined;
-  if ((hasReceipt ? 1 : 0) + (hasInitialOpen ? 1 : 0) !== 1) {
-    throw new ContractError('segment predecessor requires exactly one of a recovery receipt or an initial-open anchor');
+  if ((hasReceipt ? 1 : 0) + (hasInterrupted ? 1 : 0) + (hasInitialOpen ? 1 : 0) !== 1) {
+    throw new ContractError('segment predecessor requires exactly one of a recovery receipt, interrupted anchor, or initial-open anchor');
   }
   if (hasReceipt) {
     assertNonEmptyString(input.recoveryAssetsReceiptRef, 'segment predecessor recoveryAssetsReceiptRef');
+    return;
+  }
+  if (hasInterrupted) {
+    validateActiveTurnSegmentInterruptedAnchor(input.interrupted);
     return;
   }
   validateActiveTurnInitialOpenAnchor(input.initialOpen);
