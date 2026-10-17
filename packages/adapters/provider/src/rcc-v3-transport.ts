@@ -918,6 +918,9 @@ export class RccV3ProviderTransport<
         }
         yield raw;
       }
+      if (active.protocol === 'openai' && active.stopRequested && active.terminalState === 'succeeded' && !active.terminalError) {
+        active.terminalState = 'stopped';
+      }
       if (!active.terminalState) {
         const error = this.providerError(active.evidenceScope, 'observe', 'stream.missing-terminal', 'RCC v3 SSE stream ended without a terminal event', 'protocol');
         active.terminalError = error;

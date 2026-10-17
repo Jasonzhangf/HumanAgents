@@ -564,7 +564,7 @@ function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCode
     ...extra,
   };
   const transport = createV3ProviderHttpTransport(options);
-  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes, evidence: transportEvidence };
+  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), binding: provider, calls, writes, evidence: transportEvidence };
 }
 
 function openAIAdapter(fetch: V3ProviderFetch) {
@@ -580,6 +580,29 @@ function openAIAdapter(fetch: V3ProviderFetch) {
   };
   return adapter(fetch, provider, new OpenAIChatProviderCodec());
 }
+
+test('P-Stop1: accepted stop after Chat finish chunk converges on stopped after normal DONE', async () => {
+  let release!: () => void;
+  const remaining = new Promise<void>((resolve) => { release = resolve; });
+  const built = openAIAdapter(async () => response((async function* () {
+    yield new TextEncoder().encode(`data: ${JSON.stringify({ object: 'chat.completion.chunk', id: 'chat-stop-window', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+    await remaining;
+    yield new TextEncoder().encode('data: [DONE]\n\n');
+  })()));
+  await built.adapter.start(startInput());
+  const iterator = built.adapter.observe(execution)[Symbol.asyncIterator]();
+  const finish = await iterator.next();
+  assert.equal(finish.value?.terminalState, 'succeeded');
+  const stop = await built.adapter.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' });
+  assert.equal(stop.status, 'accepted');
+  release();
+  while (!(await iterator.next()).done) { /* consume normal DONE and EOF */ }
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'stopped');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal((await built.adapter.close(built.binding)).state, 'closed');
+  assert.equal((built.writes.find((write) => write.type === 'stop-requested')?.content as { remoteStopSupported: boolean }).remoteStopSupported, false);
+});
 
 function transportHarness() {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];

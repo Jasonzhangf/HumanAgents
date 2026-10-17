@@ -2338,6 +2338,8 @@ interface RawPersistenceHarnessInput {
   ) => (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>;
   readonly registerRequest?: (registration: NativeRequestRegistration) => Promise<RuntimeRequestRecord>;
   readonly parentRequest?: ActiveTurnProviderRequestIdentityRef;
+  readonly requestContext?: ProviderRequestContextHook;
+  readonly beforeSubmit?: () => Promise<void>;
 }
 
 function sseResponseReturning(onClose: () => void): V3ProviderFetch {
@@ -2388,8 +2390,9 @@ async function rawPersistenceHarness(input: RawPersistenceHarnessInput): Promise
     capabilities: (target) => adapter.capabilities(target),
     start: (startInput) => adapter.start(startInput),
     resume: (resumeInput) => adapter.resume(resumeInput),
-    submit: (submitInput) => {
+    submit: async (submitInput) => {
       submissions.push(submitInput);
+      await input.beforeSubmit?.();
       return adapter.submit(submitInput);
     },
     observe: (observeInput) => adapter.observe(observeInput),
@@ -2432,6 +2435,7 @@ async function rawPersistenceHarness(input: RawPersistenceHarnessInput): Promise
     rawEvidence: input.sink ?? baseSink,
     acceptRawFact,
     registerRequest,
+    ...(input.requestContext === undefined ? {} : { requestContext: input.requestContext }),
     executeTool: input.executeTool,
   });
   return { instance, context, store, baseSink, submissions, settleCalls: () => settleCalls };
@@ -2466,6 +2470,91 @@ function durableToolResultFact(context: ActiveTurnContext) {
   if (fact.kind !== 'tool-result') throw new Error('expected tool-result raw fact');
   return fact;
 }
+
+test('P-Stop2: stop during continuation context prevents submit and retains the completed raw result', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-stop-context-'));
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  try {
+    const harness = await rawPersistenceHarness({
+      root,
+      fetch: singleToolRoundFetch('call-stop-context', 'resp-stop-context'),
+      executeTool: { async execute() { return { output: 'COMPLETED_RAW', outputRefs: [], evidenceRefs: [evidence] }; } },
+      requestContext: async (input) => {
+        if (input.phase === 'continuation') {
+          entered.resolve();
+          await release.promise;
+        }
+        return { canonical: { units: [{ kind: 'message', role: 'user', text: 'read README.md' }] } };
+      },
+    });
+    await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+    await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-r1', payload: { prompt: 'read README.md' } });
+    const observing = (async () => { for await (const _event of harness.instance.observe({ runtimeId: identity.runtimeId })) { /* drain */ } })().then(() => undefined, (cause: unknown) => cause);
+    await entered.promise;
+    const stop = await harness.instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch, operationId });
+    assert.equal(stop.requested, true);
+    release.resolve();
+    const observationError = await observing;
+    assert.equal(harness.submissions.length, 0, 'continuation submitted after accepted stop');
+    assert.equal(observationError, undefined);
+    const drained = await harness.instance.closeProductionAndDrain({ execution: identity, boundaryId: 'stop-context' });
+    assert.equal(drained.requests.length, 2);
+    assert.equal((await harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch })).state, 'stopped');
+    assert.equal(harness.context.requests().at(-1)?.phase, 'cancelled');
+    assert.equal(await coldRead(harness, durableToolResultFact(harness.context)), 'COMPLETED_RAW');
+    assert.equal((await harness.instance.close()).state, 'closed');
+  } finally {
+    release.resolve();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('P-Stop2-b: already admitted submit preserves typed stopped rejection and independent failure chains', async () => {
+  // Stop races after submit admission here, so both outcomes remain errors.
+  // This is classification evidence, not permission for a stopping catch-all.
+  for (const failure of ['typed-stop', 'independent'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-stop-submit-'));
+    const socketError = new Error('independent socket failure');
+    const submitError = new Error('independent submit failure', { cause: socketError });
+    try {
+      const harness = await rawPersistenceHarness({
+        root,
+        fetch: singleToolRoundFetch('call-submit-race', 'resp-submit-race'),
+        executeTool: { async execute() { return { output: 'ADMITTED_RAW', outputRefs: [], evidenceRefs: [evidence] }; } },
+        beforeSubmit: async () => {
+          assert.equal((await harness.instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch, operationId })).requested, true);
+          if (failure === 'independent') throw submitError;
+        },
+      });
+      await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+      await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-r1', payload: { prompt: 'read README.md' } });
+      let observedError: unknown;
+      try {
+        for await (const _event of harness.instance.observe({ runtimeId: identity.runtimeId })) { /* consume */ }
+      } catch (cause) { observedError = cause; }
+      if (failure === 'typed-stop') {
+        assert.ok(observedError instanceof ProviderAdapterError);
+        assert.equal(observedError.providerError.code, 'tool.continuation.rejected');
+        assert.equal(observedError.cause, undefined);
+        assert.match(observedError.message, /stopped before tool continuation/);
+        console.info(`P-Stop2-b observe: ${observedError.providerError.code}: ${observedError.message}; cause absent (receipt converted by driver)`);
+      } else {
+        assert.equal(observedError, submitError);
+        assert.equal((observedError as Error).cause, socketError);
+        console.info(`P-Stop2-b observe: ${submitError.message} -> ${(submitError.cause as Error).message}`);
+      }
+      const drained = await harness.instance.closeProductionAndDrain({ execution: identity, boundaryId: `submit-${failure}` });
+      assert.equal(drained.requests.length, 2);
+      assert.equal((await harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch })).state, 'stopped');
+      assert.equal(await coldRead(harness, durableToolResultFact(harness.context)), 'ADMITTED_RAW');
+      assert.equal((await harness.instance.close()).state, 'closed');
+      console.info(`P-Stop2-b ${failure}: drain resolved; settle stopped; close closed; raw output retained; observe error still required`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
 
 async function coldRead(harness: RawPersistenceHarness, fact: ReturnType<typeof durableToolResultFact>): Promise<string> {
   const reader = providerRawContentReader(harness.baseSink);
