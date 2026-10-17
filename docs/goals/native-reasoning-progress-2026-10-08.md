@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r109 只读接线观察已完成：child-producer 返回的工具 port 与 execution-composition 的包装 port 是并发声明的两处 owner；现有 native public fixture 已有预算2，尚缺双 invocation/latch。既有 r93 组合计划仍适用，不需要改 cross-turn coordinator/service。r107 已100次命令读取且0改动，owner 精确 INT、确认原PID消失后，由独立 OAuth GPT-6.1 medium r110 原树接手既有 r91 计划，避免重复探索；r106 Provider 修正继续，App 接线仍等基础验收后派发。
+
 - r108 真实 Responses source explicit-stop 原 consumer 单次执行取得 PASS receipt：generationAttempts=1、stop accepted、drain boundary matched/1 request、settlement stopped/released/committed、durable/lifecycle cancelled、close/cleanup closed、pendingStart=false，无 error/assertionError/cleanupError。回执 `~/.humanagent/test-fixtures/provider-explicit-stop-r108-20261017/run-cRsA8j/proof-receipt.json`，原 stdout 与摘要在外置 r108 run。外层 shell 退出1原因为 worker 使用 zsh 只读变量 `status`（`zsh:1: read-only variable: status`）；不冒 shell exit0，不重新请求。此证据只覆盖已合成 source library stop，不证明 installed App Task 或厂商身份。r106/r107 两实现继续，整体目标仍 ACTIVE。
 
 - 当前候选已完成 UX/native merge `e1900ca1` 与 Pool merge `97dc7867`。组合 orchestration 正常编译，原 runtime-pool 7/7，包括同 tick 两 idle 实例不得撞槽。Pool 来源 clean、无活动进程，已正常 remove/prune 并确认路径消失。fresh GCM r107 已在唯一新域 `provider-cross-turn-occupancy-20261017`（base 为合成后的候选）执行已接受 r91 计划，只做跨 turn 预算占用/FIFO 终态唤醒，与 r106 Provider 文件无重叠；不跑完整 UI/release 矩阵。当前两路 GCM，后续 App child 并行接线仍等 r106 基础可用。
