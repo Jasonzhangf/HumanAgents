@@ -339,6 +339,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     attentionPort,
     providerState,
     providerError,
+    ...(readiness === undefined ? {} : { providerReadiness: readiness }),
     ...(options.providerSource === undefined ? {} : { providerSource: options.providerSource }),
     journal,
     closurePort: interactionJournal ?? journal,

@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
+import { canStartProviderRequest } from '../provider-admission.js';
 import {
   assertNotExpired,
   ContractError,
@@ -41,6 +42,7 @@ import {
   type OrganId,
   type ScopeRef,
   type ProviderBinding,
+  type ProviderReadiness,
   type ProviderCloseResult,
   type ProviderEvent,
   type StopRequestReceipt,
@@ -299,6 +301,7 @@ export interface UiRuntimeServiceOptions {
   readonly attentionPort: AttentionPort;
   readonly providerState: string;
   readonly providerSource?: ProviderTransportSource;
+  readonly providerReadiness?: ProviderReadiness;
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;
@@ -3917,18 +3920,27 @@ export class UiRuntimeService {
     };
   }
 
-  private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {
-    const status = this.status();
-    const health = status.state === 'ready'
+  private providerAdmissionInputs(): {
+    health: 'healthy' | 'degraded' | 'unknown' | 'unhealthy';
+    availableCapabilities: string[];
+  } {
+    const readiness = this.options.providerReadiness;
+    const state = this.connected ? readiness?.state ?? this.options.providerState : 'disconnected';
+    const requestable = this.connected && (readiness
+      ? canStartProviderRequest(this.options.providerSource ?? 'rcc', readiness)
+      : state === 'ready' || state === 'degraded');
+    const health = state === 'ready'
       ? 'healthy'
-      : status.state === 'degraded'
+      : state === 'degraded' || (state === 'unknown' && requestable)
         ? 'degraded'
-        : status.state === 'unknown'
+        : state === 'unknown'
           ? 'unknown'
           : 'unhealthy';
-    const availableCapabilities = status.state === 'ready' || status.state === 'degraded'
-      ? [PROVIDER_EXECUTION_CAPABILITY]
-      : [];
+    return { health, availableCapabilities: requestable ? [PROVIDER_EXECUTION_CAPABILITY] : [] };
+  }
+
+  private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {
+    const { health, availableCapabilities } = this.providerAdmissionInputs();
     const queue = classifyConfirmedRequirement(envelope);
     const tasks = this.coordinator.taskSnapshots();
     const isTaskInputUpdate = envelope.taskRef !== undefined
@@ -3985,17 +3997,7 @@ export class UiRuntimeService {
   private async consumePendingRequirements(): Promise<void> {
     while (this.implicitConsumerEnabled) {
       try {
-        const status = this.status();
-        const health = status.state === 'ready'
-          ? 'healthy'
-          : status.state === 'degraded'
-            ? 'degraded'
-            : status.state === 'unknown'
-              ? 'unknown'
-              : 'unhealthy';
-        const availableCapabilities = status.state === 'ready' || status.state === 'degraded'
-          ? [PROVIDER_EXECUTION_CAPABILITY]
-          : [];
+        const { health, availableCapabilities } = this.providerAdmissionInputs();
         // Share the explicit dispatch mutex so a manual /api/explicit/dispatch-next
         // cannot interleave with the background FIFO drain on the same head.
         const attempt = await this.withDispatchLock(() => this.implicitBrain.drainNext({

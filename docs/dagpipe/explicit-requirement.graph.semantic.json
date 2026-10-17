@@ -2,7 +2,7 @@
   "graph": "humanagent-explicit-requirement",
   "labels": {
     "establish_task_identity": "精确匹配最终回执与队列来源，建立任务身份；失败保留消费责任",
-    "admit_task_execution": "用稳定产品身份与实际分配独立校验任务授权；拒绝时不请求执行",
+    "admit_task_execution": "入口 capability 与本地 health 使用同 binding 的 typed source/readiness 及既有请求谓词；可请求 HTTP unknown 的本地 health 为 degraded，展示仍 unknown，不产生 TaskGrant；用稳定产品身份与实际分配独立校验任务授权，拒绝保留消费责任且不请求执行",
     "requirement_result": "返回本轮处理结果，失败不得提前确认消费",
     "sensory_inbox": "接收用户任务",
     "explicit_normalize": "显式整理需求",
