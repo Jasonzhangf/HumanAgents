@@ -54,6 +54,10 @@ import {
   sameTaskExecutionInstanceIdentity, validateTaskAgentActivityOwnershipRecord, validateTaskAgentActivitySelectionQuery,
   type TaskExecutionInstanceIdentity, type TaskAgentActivityOwnershipRecord, type TaskAgentActivitySelectionQuery,
 } from '@humanagent/contracts';
+import {
+  validateInspectionOccurrenceOpenedRecord,
+  type InspectionOccurrenceOpenedRecord,
+} from '@humanagent/contracts';
 
 const memoryActor = (overrides: Partial<MemoryActorContext> = {}): MemoryActorContext => ({
   actorId: 'actor-a',
@@ -242,6 +246,29 @@ test('positive minimum fixtures validate', () => {
   assert.doesNotThrow(() => validateWorkAssignment(assignment));
   assert.doesNotThrow(() => validateWorkResult(successfulResult(), assignment));
   assert.doesNotThrow(() => assertCheckpointLink(checkpoint(1, null), null));
+});
+
+test('inspection logical turn accepts explicit and legacy records and rejects empty values', () => {
+  const record: InspectionOccurrenceOpenedRecord = {
+    kind: 'inspection-occurrence-opened',
+    schemaVersion: 1,
+    occurrence: { scope: { organId: organ, taskId: task }, occurrenceId: 'occurrence-a' },
+    logicalTurnId: 'logical-turn-a',
+    executionScope: { ...scope, cycleId: id('cycle', 'cycle-a'), operationId: operation },
+    cycleId: 'cycle-a',
+    executionEpoch: 1,
+    definition: { definitionId: 'definition-a', definitionVersion: '1' },
+    definitionCommitRef: { commitId: 'definition-commit-a', journalSeq: 1, recordDigest: 'digest-definition-a' },
+    definitionDigest: 'sha256:definition-a',
+    planRevisionCommitRef: { commitId: 'plan-commit-a', journalSeq: 2, recordDigest: 'digest-plan-a' },
+    cycleOpenedCommitRef: { commitId: 'cycle-commit-a', journalSeq: 3, recordDigest: 'digest-cycle-a' },
+    scheduleOccurrenceRef: null,
+    openedAt: '2026-10-17T00:00:00Z',
+  };
+
+  assert.doesNotThrow(() => validateInspectionOccurrenceOpenedRecord(record));
+  assert.doesNotThrow(() => validateInspectionOccurrenceOpenedRecord({ ...record, logicalTurnId: undefined }));
+  assert.throws(() => validateInspectionOccurrenceOpenedRecord({ ...record, logicalTurnId: '   ' }), ContractError);
 });
 
 test('rejects illegal scopes and epochs', () => {
