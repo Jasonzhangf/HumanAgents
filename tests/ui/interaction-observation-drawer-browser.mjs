@@ -457,6 +457,23 @@ try {
       focusNode: document.activeElement?.getAttribute('data-node-id') ?? '',
     }))
     record(`${run.label} Escape closes and returns focus to trigger`, closed.open === false && closed.focusNode === 'pipeline.execute', closed)
+    if (run.label === 'desktop') {
+      // The four-corner chooser must drive the real panel, not only its own
+      // pressed state. A pure mode switch may not re-read the observation.
+      await page.locator('button[data-shell-section="view"]').click()
+      await page.locator('button[data-display-mode="raw"]').click()
+      await page.waitForFunction(() => document.querySelector('.semantic-observation')?.dataset.mode === 'raw', undefined, { timeout: 5000 }).catch(() => {})
+      const switched = await page.evaluate(() => {
+        const panel = document.querySelector('.semantic-observation')
+        return {
+          mode: panel?.dataset.mode ?? '',
+          pressed: panel?.querySelector('.so-mode[data-semantic-mode="raw"]')?.getAttribute('aria-pressed') ?? '',
+          body: panel?.innerText ?? '',
+        }
+      })
+      record('desktop four-corner switch drives the panel mode and body', switched.mode === 'raw' && switched.pressed === 'true' && switched.body.includes('原始记录'), switched)
+      await page.locator('.shell-layer-close:visible').click()
+    }
     await context.close()
   }
   record('observation page issues no mutation request', mutationRequests === 0, mutationRequests)
