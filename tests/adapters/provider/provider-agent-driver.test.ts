@@ -2494,14 +2494,17 @@ test('provider agent driver publishes a failed lifecycle endpoint when the initi
     },
   });
   await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  assert.equal(instance.hasAcquiredExecution(), false);
   await assert.rejects(
     () => instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'fail' } }),
     /connection refused/,
   );
+  assert.equal(instance.hasAcquiredExecution(), false);
   assert.deepEqual(lifecycle.map((event) => event.phase), ['dispatching', 'failed']);
   assert.equal(lifecycle.every((event) => event.turnId === lifecycle[0]?.turnId), true);
   assert.equal(lifecycle[1]?.requestId, lifecycle[0]?.requestId);
   assert.equal(lifecycle.some((event) => event.phase === 'dispatched'), false);
+  assert.equal((await instance.close()).state, 'closed');
 });
 
 class MemoryActiveTurnJournal implements ActiveTurnJournalPort {
@@ -3528,18 +3531,21 @@ test('P1-L1: native registration is awaited before the external start and a reje
   assert.equal(registrations[0]?.record.phase, 'dispatching');
   gate.resolve();
   await submit;
+  assert.equal(instance.hasAcquiredExecution(), true);
   assert.equal(dispatchCalls, 1);
   assert.deepEqual(registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched']);
   assert.equal(registrations.every((entry) => entry.execution.runtimeId === identity.runtimeId), true);
   assert.equal(registrations.every((entry) => entry.record.scope.organId.value === organ.value), true);
 
   let rejectedDispatchCalls = 0;
+  const rejectedRegistrations: NativeRequestRegistration[] = [];
   const rejected = nativeDriver({
     fetch: async () => {
       rejectedDispatchCalls += 1;
       throw new Error('dispatch must not run');
     },
-    registerRequest: async () => {
+    registerRequest: async (registration) => {
+      rejectedRegistrations.push(structuredClone(registration));
       throw new Error('active turn journal append failed');
     },
   });
@@ -3553,7 +3559,45 @@ test('P1-L1: native registration is awaited before the external start and a reje
     }),
     (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'request.registration.failed',
   );
+  assert.equal(rejected.hasAcquiredExecution(), false);
   assert.equal(rejectedDispatchCalls, 0, 'a rejected registration still dispatched to the provider');
+
+  let partialDispatchCalls = 0;
+  const partialRegistrations: NativeRequestRegistration[] = [];
+  const partial = nativeDriver({
+    fetch: async () => {
+      partialDispatchCalls += 1;
+      return sseResponse([{ type: 'response.completed', response: { id: 'resp-partial' } }]);
+    },
+    registerRequest: async (registration) => {
+      partialRegistrations.push(structuredClone(registration));
+      if (registration.record.phase === 'dispatched') throw new Error('dispatched registration failed');
+      return registration.record;
+    },
+  });
+  await partial.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await assert.rejects(
+    () => partial.submit({
+      taskId,
+      executionEpoch: identity.executionEpoch,
+      assignmentId: 'assignment-native',
+      payload: { prompt: 'partial submit' },
+    }),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'request.registration.failed',
+  );
+  assert.equal(partial.hasAcquiredExecution(), true);
+  assert.equal(partialDispatchCalls, 1);
+  assert.deepEqual(partialRegistrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched']);
+  const partialStop = await partial.requestStop({
+    runtimeId: identity.runtimeId,
+    executionEpoch: identity.executionEpoch,
+    operationId,
+  });
+  assert.equal(partialStop.requested, true);
+  const partialSettlement = await partial.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch });
+  assert.equal(partialSettlement.state, 'stopped');
+  assert.equal(partial.settlement()?.resourceRelease.state, 'released');
+  assert.equal((await partial.close()).state, 'closed');
 });
 
 test('P1-L1: continuation registration carries the parent request id and both dispatch phases', async () => {

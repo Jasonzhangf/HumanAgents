@@ -211,7 +211,6 @@ async function runProviderAgent(input: {
     inputRefs: [...input.inputRefs, input.prompt],
     ownerId: 'humanagent.app.serve-orchestration',
   });
-  let started = false;
   const events: AgentEvent[] = [];
   try {
     await driver.start({
@@ -223,7 +222,6 @@ async function runProviderAgent(input: {
       ...(input.scope.cycleId === undefined ? {} : { cycleId: input.scope.cycleId }),
       operationId,
     });
-    started = true;
     await driver.submit({
       taskId: input.taskId,
       executionEpoch: input.executionEpoch,
@@ -235,13 +233,13 @@ async function runProviderAgent(input: {
       if (event.terminalState !== undefined) break;
     }
   } catch (error) {
-    if (started) {
+    if (driver.hasAcquiredExecution()) {
       try {
         await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
       } catch (settlementError) {
-        throw new Error(
-          `provider ${input.role} failed and settlement also failed: ${settlementError instanceof Error ? settlementError.message : String(settlementError)}`,
-          { cause: error },
+        throw new AggregateError(
+          [error, settlementError],
+          `provider ${input.role} failed and settlement also failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }

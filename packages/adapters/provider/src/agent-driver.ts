@@ -444,6 +444,10 @@ export class ProviderAgentDriver<
     };
   }
 
+  hasAcquiredExecution(): boolean {
+    return this.providerStarted;
+  }
+
   async start(input: AgentStartRequest<TIdentity>): Promise<AgentHandle> {
     this.assertIdentity(input);
     if (this.handle) throw this.error('runtime.already.started', 'provider agent driver is already started', 'start');
@@ -484,12 +488,12 @@ export class ProviderAgentDriver<
         ...this.requestContextFields(context),
         ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
       }));
+      this.providerStarted = true;
       this.assertProviderIdentity(receipt, 'provider start receipt', 'start');
     } catch (cause) {
       if (!this.stopping) await this.publishFailed(request, cause, 'start');
       throw cause;
     }
-    this.providerStarted = true;
     this.initialPayload = input.payload;
     await this.commitRequestPhase(request, 'dispatched');
     this.publishLifecycle(request, 'dispatched', [], receipt.evidenceRefs);
