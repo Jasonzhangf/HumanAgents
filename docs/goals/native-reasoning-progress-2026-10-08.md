@@ -16,6 +16,9 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r115候选正式build通过；GCM打包在npm cache子沙盒EPERM退出，owner核目录归属正常后同正式package/install命令均0，未改权限。新独占canonical60982/gen1/PID21192 ready，官方pair后原real-explicit-implicit脚本仅一次调用，interpret409：start200后UND_ERR_SOCKET、abortedfalse，settlefailed/streamDonetrue且close证据存在，未创建Task。回执 `~/.humanagent/test-fixtures/provider-canonical-new-task-r115-20261017/e2e-receipt.json`，根因仍UNKNOWN，不切provider/重试/补schema。自有实例正式SIGINT→dispose，PIDabsent、disposedAt2026-10-17T14:13:22.236Z。原gen20/p3不动，安装窗口已交还UX。只读lsof4444查询被工具自动审查以killchain拒绝，未重试该查询或操作RCC进程。
+- UX候选49daab38（共享payload）与30ed5852（旧guidance消融）已收到但未合本候选；为避免独立完成增量等待native长链，main Git与安装窗口均交还UX peer，由其独立完整milestone一次review/标准main交付。后续native标准合最新origin/main。r114 App并行原树继续；不把候选/安装或HTTP200记真实Task完成。
+
 - Provider并行基础已接收source `4e2ae409` 并合入 `f165256a`：可选通用并发声明、连续合法批次、顺序保存/continuation、全部在途signal取消，完整批次执行+durable persistence由同一producer覆盖。r112正常compile/原driver+replay46/46，原P1-L2实际RED→GREEN。r113对第二结果漏存做局部可执行反例，corrected sibling原断言实际RED（writes少call-a）→恢复GREEN，未新增测试。组合Provider编译0；来源clean无进程后正常remove/prune/pathabsent。fresh GCM r114已在唯一后继App接线树从f165执行r93/r109组合，不碰cross-turn owner。
 - 跨turn预算/wakeup source `7e8922eb` 已标准合流：原新case编译成功RED（waiting缺失），移除successor订阅再得wake-only RED（completed1非2），恢复后新1/1+受影响7/7。contracts/Appbuild0；原prepared-stop子沙盒EPERM由owner同compiled用例补1/1；组合Apptsc0、新case+prepared-stop2/2。来源clean无进程后正常remove/prune/pathabsent。两组件仅候选基础验收，不等于N物理runtime/完整Task或main交付。UX已释放安装/独占新fixture窗口，原gen20/p3不动。
 
