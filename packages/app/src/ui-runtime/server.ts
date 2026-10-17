@@ -23,6 +23,8 @@ import {
   type AccessSession,
   type SessionVerification,
 } from './access-control.js';
+import type { RuntimeReadResult, RuntimeMode } from '../../../ui/contracts/runtime.js';
+import type { RuntimeCheckpointAssetTarget, RuntimeCheckpointAssetSelector } from '../../../ui/contracts/checkpoint-history.js';
 
 const APP_OWNER = 'humanagent.app';
 
@@ -79,6 +81,47 @@ function writeJson(response: ServerResponse, status: number, body: unknown, head
   const payload = JSON.stringify(body);
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
   response.end(payload);
+}
+
+function writeReadResult<T>(response: ServerResponse, result: RuntimeReadResult<T>): void {
+  if (result.ok) writeJson(response, 200, result.value);
+  else writeJson(response, 409, { error: result.failure });
+}
+
+function readScope(url: URL): { projectKey: string; mode: RuntimeMode } {
+  const projectKey = url.searchParams.get('projectKey');
+  const mode = url.searchParams.get('mode');
+  if (!projectKey?.trim() || (mode !== 'fake' && mode !== 'rcc')) throw new UiRuntimeApiError('read.scope.invalid', APP_OWNER, 'projectKey and fake/rcc mode are required', 'select an explicit configured project and mode', 400);
+  return { projectKey, mode };
+}
+
+function readLimit(url: URL): number {
+  const value = Number(url.searchParams.get('limit') ?? 20);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 500) throw new UiRuntimeApiError('history.limit.invalid', APP_OWNER, 'limit must be an integer from 1 to 500', 'send a valid history limit', 400);
+  return value;
+}
+
+function checkpointTarget(url: URL): RuntimeCheckpointAssetTarget | undefined {
+  const allowed = new Set(['projectKey', 'mode', 'limit', 'cursor', 'directiveRevision', 'executionEpoch', 'cycleId', 'occurrenceRef',
+    'checkpointId', 'checkpointCommitId', 'checkpointJournalSeq', 'checkpointRecordDigest']);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) throw new UiRuntimeApiError('checkpoint-history.query-invalid', APP_OWNER, `unsupported or repeated checkpoint query key: ${key}`, 'send each checkpoint query key exactly once', 400);
+  }
+  const names = ['checkpointId', 'checkpointCommitId', 'checkpointJournalSeq', 'checkpointRecordDigest'] as const;
+  const values = names.map((name) => url.searchParams.get(name));
+  if (values.every((value) => value === null)) return undefined;
+  if (values.some((value) => value === null || !value.trim())) throw new UiRuntimeApiError('checkpoint-history.viewed-partial', APP_OWNER, 'checkpoint selection requires its complete Journal receipt', 'supply all four checkpoint receipt fields', 400);
+  const journalSeq = Number(values[2]);
+  if (!/^[1-9]\d*$/.test(values[2]!) || !Number.isSafeInteger(journalSeq) || !/^sha256:[0-9a-f]{64}$/.test(values[3]!)) throw new UiRuntimeApiError('checkpoint-history.viewed-invalid', APP_OWNER, 'checkpoint physical receipt is malformed', 'supply the exact checkpoint Journal receipt', 400);
+  return { checkpointId: id('checkpoint', values[0]!), commitRef: { commitId: values[1]!, journalSeq, recordDigest: values[3]! } };
+}
+
+function optionalPositiveInteger(url: URL, key: string): number | undefined {
+  const raw = url.searchParams.get(key);
+  if (raw === null) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) throw new UiRuntimeApiError('history.filter.invalid', APP_OWNER, `${key} must be a positive safe integer`, 'supply a valid history filter', 400);
+  return value;
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
@@ -429,6 +472,15 @@ function createSseRegistry() {
   };
 }
 
+export function createUiRuntimeRequestDispatcher(options: Omit<UiRuntimeServerOptions, 'host' | 'port'> & { readonly isClosing: () => boolean }) {
+  const sseRegistry = createSseRegistry();
+  const listener = (request: IncomingMessage, response: ServerResponse): void => {
+    void handleRequest(request, response, options.service, options.accessControl, sseRegistry, options.isClosing,
+      options.uiRoot, options.restart, options.identity, options.schedulerStatus).catch((error) => writeError(response, error));
+  };
+  return { listener, sseRegistry };
+}
+
 export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Promise<UiRuntimeServer> {
   const host = options.host ?? '127.0.0.1';
   if (host !== '0.0.0.0' && host !== '::' && host !== '127.0.0.1' && host !== '::1') {
@@ -436,7 +488,8 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   }
   const service = options.service;
   const accessControl = options.accessControl;
-  const sseRegistry = createSseRegistry();
+  let closing = false;
+  const { listener, sseRegistry } = createUiRuntimeRequestDispatcher({ ...options, isClosing: () => closing });
   accessControl.startCredentialWatch(
     () => sseRegistry.revalidateNow(accessControl).then(() => undefined),
     async (error) => {
@@ -444,15 +497,9 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
       throw error;
     },
   );
-  let closing = false;
   let closeReceipt: ListenerShutdownReceipt | undefined;
   let closePromise: Promise<ListenerShutdownReceipt> | undefined;
-  const server = createServer((request, response) => {
-    void handleRequest(request, response, service, accessControl, sseRegistry, () => closing, options.uiRoot, options.restart, options.identity, options.schedulerStatus)
-      .catch((error) => {
-        writeError(response, error);
-      });
-  });
+  const server = createServer(listener);
   let bound: { readonly address: string; readonly family: string; readonly port: number };
   try {
     bound = await new Promise<{ readonly address: string; readonly family: string; readonly port: number }>((resolve, reject) => {
@@ -766,7 +813,14 @@ async function handleRequest(
       return;
     }
     if (path === '/api/dashboard' && method === 'GET') {
-      writeJson(response, 200, service.dashboard());
+      const scope = url.searchParams.get('scope');
+      if (scope === 'system') writeJson(response, 200, await service.systemRead());
+      else if (scope === 'project') {
+        const projectKey = url.searchParams.get('projectKey');
+        if (!projectKey?.trim()) throw new UiRuntimeApiError('read.scope.invalid', APP_OWNER, 'projectKey is required', 'select a configured project', 400);
+        writeReadResult(response, await service.projectRead(projectKey));
+      } else if (scope !== null) throw new UiRuntimeApiError('read.scope.invalid', APP_OWNER, 'dashboard scope must be system or project', 'select a supported scope', 400);
+      else writeJson(response, 200, service.dashboard());
       return;
     }
     if (path === '/api/tasks' && method === 'GET') {
@@ -1003,7 +1057,51 @@ async function handleRequest(
     }
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);
     if (taskDashboard && method === 'GET') {
-      writeJson(response, 200, await service.taskDashboardWithPlan(id('task', decodeURIComponent(taskDashboard[1]!))));
+      const taskId = id('task', decodeURIComponent(taskDashboard[1]!));
+      if (url.searchParams.has('projectKey') || url.searchParams.has('mode')) {
+        const scope = readScope(url);
+        writeReadResult(response, await service.scopedTaskDashboard(taskId, scope.projectKey, scope.mode));
+      } else writeJson(response, 200, await service.taskDashboardWithPlan(taskId));
+      return;
+    }
+    if (path === '/api/ui/display-preference' && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {
+      writeJson(response, 200, await service.displayPreference(method, method === 'PUT' ? await readBody(request) : undefined));
+      return;
+    }
+    const checkpointAssets = /^\/api\/tasks\/([^/]+)\/checkpoints\/assets\/(.*)$/.exec(path);
+    if (checkpointAssets && method === 'GET') {
+      const scope = readScope(url);
+      const viewed = checkpointTarget(url);
+      if (!viewed) throw new UiRuntimeApiError('checkpoint-history.viewed-partial', APP_OWNER, 'asset read requires a complete checkpoint receipt', 'select a checkpoint', 400);
+      const parts = checkpointAssets[2]!.split('/').map(decodeURIComponent);
+      let selector: RuntimeCheckpointAssetSelector;
+      if (parts.length === 1 && parts[0] === 'capture') selector = { kind: 'capture' };
+      else if (parts.length === 4 && parts[0] === 'adopted-child' && parts[1]?.trim() && parts[2]?.trim() && Number.isSafeInteger(Number(parts[3])) && Number(parts[3]) > 0) {
+        selector = { kind: 'adopted-child', invocationId: parts[1], childTurnId: parts[2], deliverySeq: Number(parts[3]) };
+      } else throw new UiRuntimeApiError('checkpoint-asset.selector-invalid', APP_OWNER, 'asset selector must identify one capture or adopted delivery', 'supply the exact asset selector', 400);
+      writeReadResult(response, await service.taskCheckpointAssetBody(id('task', decodeURIComponent(checkpointAssets[1]!)), { ...scope, viewed, selector }));
+      return;
+    }
+    const taskRead = /^\/api\/tasks\/([^/]+)\/(checkpoints|records|context-history|task-plan-history)$/.exec(path);
+    if (taskRead && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskRead[1]!));
+      const scope = readScope(url);
+      const limit = readLimit(url);
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      switch (taskRead[2]) {
+        case 'checkpoints':
+          writeReadResult(response, await service.taskCheckpointHistory(taskId, { ...scope, limit, cursor, viewed: checkpointTarget(url),
+            directiveRevision: optionalPositiveInteger(url, 'directiveRevision'), executionEpoch: optionalPositiveInteger(url, 'executionEpoch'),
+            ...(url.searchParams.has('cycleId') ? { cycleId: id('cycle', url.searchParams.get('cycleId')!) } : {}), occurrenceRef: url.searchParams.get('occurrenceRef') ?? undefined })); break;
+        case 'records': {
+          const view = url.searchParams.get('view');
+          if (view !== 'actions' && view !== 'raw') throw new UiRuntimeApiError('records.view.invalid', APP_OWNER, 'records view must be actions or raw', 'select a records view', 400);
+          writeReadResult(response, await service.taskRecords(taskId, { ...scope, view, limit, cursor })); break;
+        }
+        case 'context-history': writeReadResult(response, await service.taskContextHistory(taskId, { ...scope, limit, cursor,
+          agentRuntimeId: url.searchParams.get('agentRuntimeId') ?? undefined, contextViewRef: url.searchParams.get('contextViewRef') ?? undefined })); break;
+        case 'task-plan-history': writeReadResult(response, await service.taskPlanHistory(taskId, scope.projectKey, scope.mode)); break;
+      }
       return;
     }
     const taskObservation = /^\/api\/tasks\/([^/]+)\/observation$/.exec(path);
