@@ -21,7 +21,9 @@ import {
   type RuntimeTaskCoordinatorOptions,
   type RuntimeTaskJournalPort,
   type RuntimeTaskJournalRecord,
+  type RuntimeInspectionStopSettlementPort,
 } from '../../../packages/runtime/src/ui-runtime/coordinator.js';
+import type { CommittedCheckpointRecord } from '../../../packages/runtime/src/checkpoints/ports.js';
 
 const organId = id('organ', 'tool-execution-fact-organ');
 const toolIdentity = {
@@ -558,11 +560,6 @@ test('prepared admission holds effects until release and retains denial or stop 
   await assert.rejects(missing.stop(missingTask.taskId), (error: unknown) => error instanceof RuntimeTaskControlError
     && error.code === 'task.not.running');
 
-  const stopJournal = new MemoryTaskJournal();
-  let finishStoppedFactory!: (driver: PreparedExecutionDriver) => void;
-  const stoppedGate = new Promise<PreparedExecutionDriver>((resolve) => {
-    finishStoppedFactory = resolve;
-  });
   // Observed checkpoint-free stopped loses recovery. Cost: one local real producer/store.
   // This structural consumer has no admitted parent; the App consumer proves that boundary.
   // Load the actual App build without importing App declarations into Runtime's isolated tsconfig.
@@ -580,6 +577,15 @@ test('prepared admission holds effects until release and retains denial or stop 
   const { JsonlTaskGrantJournal } = await appModule('adapters/jsonl/src/task-grants.js');
   const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures', 'provider-prepared-stop-producer-20261016');
   await mkdir(fixtureRoot, { recursive: true });
+  // Missing I2 leaves an otherwise durable stopped execution falsely complete.
+  // Probability: observed missing callsite; impact: recovery/cycle never closes.
+  // Cost: reuse this real prepared-stop producer and Journal, no new harness.
+  for (const failSupplement of [false, true]) {
+  const stopJournal = new MemoryTaskJournal();
+  let finishStoppedFactory!: (driver: PreparedExecutionDriver) => void;
+  const stoppedGate = new Promise<PreparedExecutionDriver>((resolve) => {
+    finishStoppedFactory = resolve;
+  });
   const root = await mkdtemp(join(fixtureRoot, 'runtime-consumer-'));
   try {
   const organJournal = new JsonlOrganJournal(join(root, 'organ.jsonl'));
@@ -593,9 +599,34 @@ test('prepared admission holds effects until release and retains denial or stop 
   });
   const producer = new PreparedExecutionStop({ journal: organJournal, taskJournal, admission: admissionOwner });
   const store = new FileCheckpointStore(join(root, 'checkpoints.jsonl'));
+  let supplementFails = failSupplement;
+  let supplementCalls = 0;
+  let producerSettleCalls = 0;
+  const originalSettle = producer.settle.bind(producer);
+  producer.settle = async (...args: unknown[]) => {
+    producerSettleCalls += 1;
+    return originalSettle(...args);
+  };
+  const inspectionStop: RuntimeInspectionStopSettlementPort = {
+    async settleStop({ checkpoint }) {
+      supplementCalls += 1;
+      const exact = await store.readCommitted(checkpoint.checkpoint.scope, checkpoint.checkpoint.id);
+      assert.deepEqual(checkpoint, exact, 'supplement receives the exact durable committed record');
+      assert.equal(checkpoint.checkpoint.outcome, 'stopped');
+      assert.equal(taskJournal.replay().some((record: RuntimeTaskJournalRecord) => record.kind === 'operation.event'
+        && record.event.kind === 'execution.terminal' && record.event.terminalPhase === 'final'), false,
+      'I2 supplement must precede stop terminal/finalization');
+      assert.equal(heldDriver.closeCalls, 0, 'supplement precedes any close');
+      if (supplementFails) throw new Error('inspection supplement unavailable');
+      return { state: 'complete', settlementCommitRefs: [] };
+    },
+    async readStopCompletion() {
+      throw new Error('mutating settlement must use its own typed result');
+    },
+  };
   const stopped = preparedCoordinator(stopJournal,
     async () => stoppedGate, async () => {}, {
-      journal: taskJournal, checkpointStoreFor: () => store, preparedExecutionStop: producer,
+      journal: taskJournal, checkpointStoreFor: () => store, preparedExecutionStop: producer, inspectionStop,
     });
   const stoppedTask = stopped.createTask({ title: 'stop held preparation', directive: 'stop before release' });
   const stoppedAllocation = stopped.prepareExecution(stoppedTask.taskId, { prompt: 'held input' });
@@ -609,7 +640,9 @@ test('prepared admission holds effects until release and retains denial or stop 
   await entered;
   const heldDriver = new PreparedExecutionDriver(stoppedAllocation);
   const stoppedRelease = assert.rejects(stopped.releaseExecution(stoppedTask.taskId, stoppedAllocation.operationId),
-    (error: unknown) => error instanceof RuntimeTaskControlError && error.code === 'execution.preparation.stopped');
+    (error: unknown) => error instanceof Error && (failSupplement
+      ? error.message === 'inspection supplement unavailable'
+      : error instanceof RuntimeTaskControlError && error.code === 'execution.preparation.stopped'));
   await tick();
   const stopPromise = stopped.stop(stoppedTask.taskId);
   await tick();
@@ -617,9 +650,34 @@ test('prepared admission holds effects until release and retains denial or stop 
   assert.equal((await stopPromise).state, 'settling', 'actual active preparation retains stop duty');
   assert.deepEqual(stopped.taskSnapshot(stoppedTask.taskId).allowedActions, ['retry-stop']);
   assert.equal((await stopped.retryStop(stoppedTask.taskId)).state, 'settling', 'pending retry must not claim stopped');
+  assert.equal(supplementCalls, 0, 'pending stop must not trigger I2');
   finishPreparation();
   await preparation;
+  if (failSupplement) {
+    await assert.rejects(stopped.retryStop(stoppedTask.taskId), /inspection supplement unavailable/);
+    const failed = stopped.taskSnapshot(stoppedTask.taskId);
+    assert.equal(failed.state, 'blocked');
+    assert.equal(failed.checkpoint?.outcome, 'stopped', 'supplement failure retains the stopped commit');
+    assert.equal(failed.error?.code, 'inspection.stop-settlement.failed');
+    assert.deepEqual(failed.allowedActions, [], 'I2 recovery must not advertise re-stop or start');
+    assert.equal(failed.currentState, 'checkpoint 已提交，等待恢复');
+    const settleCount = producerSettleCalls;
+    supplementFails = false;
+    const cold = preparedCoordinator(stopJournal, async () => { throw new Error('cold hydrate must not create a driver'); },
+      async () => { throw new Error('cold hydrate must not readmit execution'); }, {
+        journal: taskJournal, checkpointStoreFor: () => store, preparedExecutionStop: producer, inspectionStop,
+      });
+    await cold.hydrate();
+    assert.equal(cold.taskSnapshot(stoppedTask.taskId).state, 'stopped');
+    assert.equal(cold.taskSnapshot(stoppedTask.taskId).error, undefined);
+    assert.deepEqual(cold.taskSnapshot(stoppedTask.taskId).allowedActions, ['start']);
+    assert.equal(producerSettleCalls, settleCount, 'cold supplement never re-stops the execution');
+    assert.equal(supplementCalls, 2, 'cold recovery only supplements the retained stopped checkpoint');
+    await stoppedRelease;
+    continue;
+  }
   assert.equal((await stopped.retryStop(stoppedTask.taskId)).state, 'stopped');
+  assert.equal(supplementCalls, 1);
   await stoppedRelease;
   const stoppedSnapshot = stopped.taskSnapshot(stoppedTask.taskId);
   assert.equal(heldDriver.startCalls, 0, 'no late provider start after stop while held');
@@ -639,4 +697,5 @@ test('prepared admission holds effects until release and retains denial or stop 
   assert.equal(taskJournal.replay().some((record: RuntimeTaskJournalRecord) => record.kind === 'operation.event'
     && record.event.kind === 'execution.started'), false, 'stopped preparation never reports a running Provider');
   } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });

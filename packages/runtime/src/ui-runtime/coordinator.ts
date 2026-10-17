@@ -45,7 +45,7 @@ import {
   type StandardTurnDeliveryBinding,
   type StandardTurnDeliveryReadback,
 } from './standard-turn-delivery.js';
-import { checkpointCommitId, completeCheckpoint, completeNativeCheckpoint, recallCheckpoint, sameJournalCommitRef } from '../checkpoints/coordinator.js';
+import { checkpointCommitId, completeCheckpoint, completeNativeCheckpoint, recallCheckpoint, sameCheckpoint, sameJournalCommitRef } from '../checkpoints/coordinator.js';
 import type { CommittedCheckpointRecord, LatestCheckpointRecord, NativeCheckpointJournalPort } from '../checkpoints/ports.js';
 import type { AdvanceTurnResult } from '../agent-loop/runtime.js';
 import { selectRuntimeTaskCurrentState } from './current-state.js';
@@ -554,6 +554,35 @@ export interface RuntimePreparedExecutionStopPort {
   settle(selector: RuntimePreparedStopSelector): Promise<RuntimePreparedStopSettleResult>;
 }
 
+export type RuntimeInspectionStopCompletion =
+  | { readonly state: 'not-applicable' }
+  | {
+      readonly state: 'complete';
+      readonly settlementCommitRefs: readonly JournalCommitRef[];
+      readonly cycleClosedCommitRef?: JournalCommitRef;
+    }
+  | {
+      readonly state: 'recovery-required';
+      readonly settlementCommitRefs: readonly JournalCommitRef[];
+      readonly cycleClosedCommitRef?: JournalCommitRef;
+    }
+  | { readonly state: 'unknown'; readonly reason: string };
+
+/**
+ * Runtime-owned inspection stop settlement. The injected owner reads retained
+ * deliveries, commits I2 facts, and returns its own completion result.
+ */
+export interface RuntimeInspectionStopSettlementPort {
+  settleStop(input: {
+    readonly checkpoint: CommittedCheckpointRecord;
+  }): Promise<RuntimeInspectionStopCompletion>;
+  readStopCompletion(input: {
+    readonly checkpoint: CommittedCheckpointRecord;
+  }): Promise<RuntimeInspectionStopCompletion>;
+}
+
+export type RuntimeInspectionStopCompletionReadPort = Pick<RuntimeInspectionStopSettlementPort, 'readStopCompletion'>;
+
 export interface RuntimeTaskHydrateReadSource {
   readonly checkpoint: Pick<CheckpointJournalPort, 'verify' | 'readLatest' | 'readCommitted' | 'readExecutionPosition'>
     & Partial<Pick<NativeCheckpointJournalPort, 'readNativeCheckpoint'>>;
@@ -601,6 +630,8 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
   readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
+  /** Runtime-owned I2 settlement for committed stopped checkpoints. */
+  readonly inspectionStop?: RuntimeInspectionStopSettlementPort;
   /**
    * Narrow durable boundary for the Runtime-owned active turn. When bound, the
    * coordinator opens a durable admitted turn at admission, registers the real
@@ -1209,6 +1240,7 @@ export async function projectDurableTaskInventory(input: {
   readonly records: readonly RuntimeTaskJournalRecord[];
   readonly checkpointFor: (taskId: TaskId, cycleId: CycleId) => DurableTaskCheckpointReadPort;
   readonly currentStateFor?: (taskId: TaskId) => DurableTaskCurrentStateReadPort | undefined;
+  readonly inspectionStopFor?: (taskId: TaskId, cycleId: CycleId) => RuntimeInspectionStopCompletionReadPort | undefined;
 }): Promise<DurableTaskInventory> {
   const state: TaskJournalReplayState = {
     taskCounter: 0,
@@ -1265,6 +1297,37 @@ export async function projectDurableTaskInventory(input: {
         const committed = checkpointRead.readCommitted
           ? await checkpointRead.readCommitted(latest.checkpoint.scope, latest.checkpoint.id)
           : null;
+        let inspectionRecoveryRequired = false;
+        const inspectionStop = latest.checkpoint.outcome === 'stopped'
+          ? input.inspectionStopFor?.(record.taskId, scope.cycleId)
+          : undefined;
+        if (inspectionStop) {
+          let completion: RuntimeInspectionStopCompletion;
+          try {
+            completion = committed
+              ? await inspectionStop.readStopCompletion({ checkpoint: committed })
+              : { state: 'unknown', reason: 'stopped checkpoint exact committed record is absent' };
+          } catch (error) {
+            completion = {
+              state: 'unknown',
+              reason: error instanceof Error ? error.message : String(error),
+            };
+          }
+          inspectionRecoveryRequired = completion.state === 'recovery-required' || completion.state === 'unknown';
+          if (inspectionRecoveryRequired) {
+            record.error = appendInspectionError(record.error, {
+              code: 'inspection.stop-settlement.pending',
+              ownerId: RUNTIME_OWNER,
+              message: completion.state === 'unknown'
+                ? completion.reason
+                : 'stopped inspection settlement has not reached its durable completion',
+              retryable: true,
+              nextAction: 'resume inspection stop settlement from the committed stopped checkpoint',
+            });
+          } else {
+            record.error = clearInspectionError(record.error);
+          }
+        }
         const currentStatePort = input.currentStateFor?.(record.taskId);
         const currentStateRead = committed && currentStatePort
           ? await currentStatePort.read(scope)
@@ -1277,14 +1340,18 @@ export async function projectDurableTaskInventory(input: {
               currentState: currentStateRead,
             })
           : null;
-        reconcileSelectedCurrentError(record, selection);
-        record.state = selection?.basis === 'terminal'
+        if (!inspectionRecoveryRequired) reconcileSelectedCurrentError(record, selection);
+        record.state = inspectionRecoveryRequired ? 'blocked' : selection?.basis === 'terminal'
           ? selection.lifecycle
           : latest.checkpoint.outcome;
         record.running = false;
         record.stopping = false;
-        record.currentState = lifecycleStateLabel(record.state);
-        record.nextStep = selection?.basis === 'terminal'
+        record.currentState = inspectionRecoveryRequired
+          ? '检查补交待恢复'
+          : lifecycleStateLabel(record.state);
+        record.nextStep = inspectionRecoveryRequired
+          ? 'resume inspection stop settlement from the committed stopped checkpoint'
+          : selection?.basis === 'terminal'
           ? record.state === 'succeeded'
             ? '可发起新的执行或停止'
             : record.state === 'stopped'
@@ -1293,7 +1360,7 @@ export async function projectDurableTaskInventory(input: {
           : latest.checkpoint.next.kind === 'continue'
           ? '可发起新的执行'
           : `${latest.checkpoint.next.kind}${latest.checkpoint.next.ref ? `:${latest.checkpoint.next.ref}` : ''}`;
-        record.allowedActions = record.state === 'succeeded'
+        record.allowedActions = inspectionRecoveryRequired ? [] : record.state === 'succeeded'
           || record.state === 'stopped'
           || record.state === 'failed'
           || record.state === 'cancelled'
@@ -1307,7 +1374,10 @@ export async function projectDurableTaskInventory(input: {
           if (currentStateRead.value.currentPlan) record.currentPlan = currentStateRead.value.currentPlan;
         }
         record.updatedAt = record.events.at(-1)?.occurredAt ?? record.updatedAt;
-        entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'checkpoint' });
+        entries.push({
+          snapshot: taskSnapshotFromRecord(record, state.scopes),
+          durableState: inspectionRecoveryRequired ? 'recovery-required' : 'checkpoint',
+        });
       } else {
         record.state = 'unknown';
         record.running = false;
@@ -1435,6 +1505,24 @@ function recoveryProjection(recovery: StopSettlementRecovery): RuntimeTaskError 
     retryable: recovery.retryable,
     nextAction: recovery.nextAction,
   };
+}
+
+function appendInspectionError(primary: RuntimeTaskError | undefined, inspection: RuntimeTaskError): RuntimeTaskError {
+  if (primary === undefined) return inspection;
+  if (primary.code === inspection.code) return primary;
+  return {
+    ...primary,
+    cleanupError: appendInspectionError(primary.cleanupError, inspection),
+  };
+}
+
+function clearInspectionError(error: RuntimeTaskError | undefined): RuntimeTaskError | undefined {
+  if (!error) return undefined;
+  const cleanupError = clearInspectionError(error.cleanupError);
+  if (error.code === 'inspection.stop-settlement.pending' || error.code === 'inspection.stop-settlement.failed') {
+    return cleanupError;
+  }
+  return { ...error, cleanupError };
 }
 
 class RuntimeContextCommitError extends RuntimeTaskControlError {
@@ -3186,6 +3274,7 @@ export class RuntimeTaskCoordinator {
         record.checkpointSeq = result.checkpoint.seq;
         record.checkpointReceipt = result.receipt;
         this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'stopped checkpoint committed', result.checkpoint.evidenceRefs);
+        await this.settleInspectionStopAfterCommit(record, operation, result.closure.evidenceRefs, 'regular');
         const close = await this.closeForExecution(operation.operationId, record.driver, result.closure.evidenceRefs);
         if (close.state !== 'closed') {
           throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
@@ -3206,6 +3295,14 @@ export class RuntimeTaskCoordinator {
         await this.throwCommittedStopRecovery(record, operation, error, error.recovery);
       }
       const projection = errorFromUnknown(error);
+      if (record.postCommitRecoveryPending) {
+        // The stopped checkpoint is durable and the attached recovery error is
+        // the task's control truth. Do not re-advertise stop for an I2-only
+        // recovery obligation.
+        throw error instanceof RuntimeTaskControlError
+          ? error
+          : new RuntimeTaskControlError('inspection.stop-settlement.failed', projection.ownerId, projection.message, projection.nextAction);
+      }
       record.error = projection;
       this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
       record.state = 'blocked';
@@ -3278,6 +3375,7 @@ export class RuntimeTaskCoordinator {
         record.checkpointSeq = result.checkpoint.seq;
         record.checkpointReceipt = result.receipt;
         this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'stopped checkpoint committed', result.checkpoint.evidenceRefs);
+        await this.settleInspectionStopAfterCommit(record, operation, result.closure.evidenceRefs, 'regular');
         const close = await this.closeForExecution(operation.operationId, record.driver, result.closure.evidenceRefs);
         if (close.state !== 'closed') {
           throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
@@ -3298,6 +3396,11 @@ export class RuntimeTaskCoordinator {
         await this.throwCommittedStopRecovery(record, operation, error, error.recovery);
       }
       const projection = errorFromUnknown(error);
+      if (record.postCommitRecoveryPending) {
+        throw error instanceof RuntimeTaskControlError
+          ? error
+          : new RuntimeTaskControlError('inspection.stop-settlement.failed', projection.ownerId, projection.message, projection.nextAction);
+      }
       record.error = projection;
       this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
       record.state = 'blocked';
@@ -4100,10 +4203,13 @@ export class RuntimeTaskCoordinator {
       const committed = await boundary.commit(checkpoint, previous);
       await boundary.publish(committed, previous, this.options.checkpointBoundary);
       this.recordCommittedCheckpoint(record, committed, 'stopped');
+      await this.settleInspectionStopAfterCommit(record, operation, committed.checkpoint.evidenceRefs, 'prepared');
     } catch (stopFailure) {
-      record.state = 'settling';
-      record.allowedActions = ['retry-stop'];
-      record.nextStep = 'retry prepared execution stop with the original allocation';
+      if (!record.postCommitRecoveryPending) {
+        record.state = 'settling';
+        record.allowedActions = ['retry-stop'];
+        record.nextStep = 'retry prepared execution stop with the original allocation';
+      }
       record.resolveExecutionReady?.(false);
       if (operation.preparationFailure) {
         throw new AggregateError([operation.preparationFailure.cause, stopFailure],
@@ -4813,6 +4919,13 @@ export class RuntimeTaskCoordinator {
           const stopped = await this.stopAbandonedProviderExecution(record, operation, scope);
           cleanupEvidenceRefs = [...cleanupEvidenceRefs, ...stopped.evidenceRefs];
         } catch (stopError) {
+          if (record.postCommitRecoveryPending) {
+            // The stopped checkpoint is durable and the original failure stays
+            // primary. Inspection settlement and Provider cleanup are attached
+            // under it by the stop owner, so no second close or failure
+            // checkpoint may erase that recovery obligation.
+            return;
+          }
           cleanupFailure = stopError;
         }
       }
@@ -5029,6 +5142,7 @@ export class RuntimeTaskCoordinator {
       record.checkpointSeq = result.checkpoint.seq;
       record.checkpointReceipt = result.receipt;
       this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'failure cleanup released the abandoned provider execution', result.checkpoint.evidenceRefs);
+      await this.settleInspectionStopAfterCommit(record, operation, result.closure.evidenceRefs, 'abandoned');
       return { checkpoint: result.checkpoint, evidenceRefs: result.closure.evidenceRefs };
     } catch (error) {
       if (error instanceof StopSettlementCommitError && error.checkpointCommitted && error.recovery) {
@@ -5337,6 +5451,17 @@ export class RuntimeTaskCoordinator {
     record.checkpointReceipt = error.receipt;
     record.error = committedProjection;
     this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
+    if (this.options.inspectionStop) try {
+      const exact = await this.readInspectionStopExact(record);
+      await this.settleInspectionStopRecord(record, exact);
+    } catch (inspectionFailure) {
+      const inspectionProjection = errorFromUnknown(inspectionFailure);
+      record.error = appendInspectionError(record.error, {
+        ...inspectionProjection,
+        code: inspectionProjection.code === 'inspection.stop-settlement.pending'
+          ? inspectionProjection.code : 'inspection.stop-settlement.failed',
+      });
+    }
     this.pushEvent(
       record,
       operation,
@@ -5347,7 +5472,7 @@ export class RuntimeTaskCoordinator {
       committedProjection.ownerId,
       true,
       committedProjection.nextAction,
-      { error: committedProjection },
+      { error: record.error },
       'final',
     );
     let cleanupError: RuntimeTaskError | undefined;
@@ -5372,8 +5497,8 @@ export class RuntimeTaskCoordinator {
         cleanupError = errorFromUnknown(failure);
       }
     }
-    if (cleanupError) committedProjection.cleanupError = cleanupError;
     if (cleanupError) {
+      committedProjection.cleanupError = appendInspectionError(record.error?.cleanupError, cleanupError);
       record.error = committedProjection;
       this.pushEvent(
         record,
@@ -5413,6 +5538,115 @@ export class RuntimeTaskCoordinator {
         : '检查错误 owner 与 next action';
     record.updatedAt = this.now().toISOString();
     if (record.operationId) this.scopes.delete(record.operationId.value);
+  }
+
+  private async readInspectionStopExact(record: TaskRecord): Promise<CommittedCheckpointRecord> {
+    const checkpoint = record.checkpoint;
+    if (!checkpoint) {
+      throw new RuntimeTaskControlError('inspection.stop-settlement.failed', RUNTIME_OWNER,
+        'inspection stop settlement has no committed checkpoint', 'settle the stop before reading its inspection state');
+    }
+    const scope = checkpoint.scope;
+    const store = this.options.checkpointStoreFor(record.taskId, checkpoint.cycleId);
+    const exact = await store.readCommitted(scope, checkpoint.id);
+    if (exact === null || !sameCheckpoint(exact.checkpoint, checkpoint)) {
+      throw new RuntimeTaskControlError('inspection.stop-settlement.failed', RUNTIME_OWNER,
+        'stopped checkpoint exact committed record is absent or changed', 'inspect the checkpoint journal before claiming a stop settlement');
+    }
+    return exact;
+  }
+
+  private async settleInspectionStopRecord(record: TaskRecord, exact: CommittedCheckpointRecord): Promise<void> {
+    if (this.options.inspectionStop === undefined || exact.checkpoint.outcome !== 'stopped') return;
+    try {
+      const completion = await this.options.inspectionStop.settleStop({ checkpoint: exact });
+      if (completion.state !== 'complete' && completion.state !== 'not-applicable') {
+        throw new RuntimeTaskControlError(
+          'inspection.stop-settlement.pending',
+          RUNTIME_OWNER,
+          completion.state === 'unknown'
+            ? completion.reason
+            : 'stopped inspection settlement has not reached its durable completion',
+          'resume inspection stop settlement from the committed stopped checkpoint',
+        );
+      }
+      record.error = clearInspectionError(record.error);
+      if (!record.error) record.postCommitRecoveryPending = false;
+    } catch (error) {
+      const projection = errorFromUnknown(error);
+      record.error = appendInspectionError(record.error, {
+        ...projection,
+        code: projection.code === 'inspection.stop-settlement.pending'
+          ? projection.code : 'inspection.stop-settlement.failed',
+      });
+      record.postCommitRecoveryPending = true;
+      if (error instanceof RuntimeTaskControlError) throw error;
+      throw new RuntimeTaskControlError('inspection.stop-settlement.failed', projection.ownerId, projection.message, projection.nextAction);
+    }
+  }
+
+  /**
+   * Ordering owner for a committed stopped checkpoint. The stop fact is already
+   * durable; I2 settlement failure becomes an attached recovery obligation and
+   * never replaces the committed checkpoint, a successful stop, or the original
+   * failure that triggered this cleanup.
+   */
+  private async settleInspectionStopAfterCommit(
+    record: TaskRecord,
+    operation: OperationRecord,
+    evidenceRefs: readonly EvidenceRef[],
+    lane: 'regular' | 'prepared' | 'abandoned',
+  ): Promise<void> {
+    if (this.options.inspectionStop === undefined) return;
+    try {
+      await this.settleInspectionStopRecord(record, await this.readInspectionStopExact(record));
+    } catch (failure) {
+      const projection = errorFromUnknown(failure);
+      record.postCommitRecoveryPending = true;
+      record.error = appendInspectionError(record.error, projection);
+      // Provider cleanup stays best effort relative to the committed stop. The
+      // prepared lane has no started Provider and keeps producer-owned custody.
+      if (lane !== 'prepared') await this.closeOnPostCommitRecovery(record, operation, evidenceRefs);
+      this.markCommittedCheckpointRecovery(record, projection.nextAction);
+      this.pushEvent(record, operation, 'provider.error', 'blocked', projection.message,
+        projection.evidenceRefs ?? [], projection.ownerId, true, projection.nextAction, { error: record.error });
+      if (lane === 'prepared') {
+        record.rejectRelease?.(failure instanceof Error
+          ? failure
+          : new RuntimeTaskControlError('inspection.stop-settlement.failed', projection.ownerId, projection.message, projection.nextAction));
+        record.rejectRelease = undefined;
+        record.resolveRelease = undefined;
+        record.resolveExecutionReady?.(false);
+        record.resolveExecutionReady = undefined;
+      }
+      throw failure instanceof RuntimeTaskControlError
+        ? failure
+        : new RuntimeTaskControlError('inspection.stop-settlement.failed', projection.ownerId, projection.message, projection.nextAction);
+    }
+  }
+
+  /** Best-effort Provider cleanup that never replaces the committed stop fact. */
+  private async closeOnPostCommitRecovery(
+    record: TaskRecord,
+    operation: OperationRecord,
+    evidenceRefs: readonly EvidenceRef[],
+  ): Promise<void> {
+    if (!record.driver) return;
+    try {
+      const close = await this.closeForExecution(operation.operationId, record.driver, evidenceRefs);
+      if (close.state !== 'closed') {
+        record.error = appendInspectionError(record.error, {
+          code: 'provider.close.failed',
+          ownerId: close.ownerId ?? RUNTIME_OWNER,
+          message: `provider close is ${close.state}`,
+          retryable: false,
+          nextAction: toNextActionText(close.nextAction) ?? 'inspect provider close evidence',
+          evidenceRefs: close.evidenceRefs,
+        });
+      }
+    } catch (cleanupFailure) {
+      record.error = appendInspectionError(record.error, errorFromUnknown(cleanupFailure));
+    }
   }
 
   private pushEvent(
@@ -5760,6 +5994,25 @@ export class RuntimeTaskCoordinator {
         task.checkpointReceipt = exactRecord === null
           ? undefined
           : (await readDurableCheckpointReceipt(store, exactRecord)) ?? undefined;
+        if (this.options.inspectionStop && checkpoint.outcome === 'stopped') {
+          try {
+            if (!exactRecord) {
+              throw new RuntimeTaskControlError('inspection.stop-settlement.failed', RUNTIME_OWNER,
+                'stopped checkpoint exact committed record is absent',
+                'restore the committed stopped checkpoint before inspection settlement');
+            }
+            await this.settleInspectionStopRecord(task, exactRecord);
+          } catch (failure) {
+            const projection = errorFromUnknown(failure);
+            task.error = appendInspectionError(task.error, {
+              ...projection,
+              code: projection.code === 'inspection.stop-settlement.pending'
+                ? projection.code : 'inspection.stop-settlement.failed',
+            });
+            this.markCommittedCheckpointRecovery(task, task.error.nextAction);
+            continue;
+          }
+        }
         // The committed checkpoint is the authoritative physical position for
         // this operation. Adopt its epoch before any later task snapshot read.
         const currentOperationCheckpoint = checkpoint.scope.operationId !== undefined
