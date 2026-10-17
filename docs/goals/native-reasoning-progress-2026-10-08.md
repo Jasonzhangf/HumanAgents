@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- r245退出仅未来意图，不接为观察完成；r247已从其命令证据形成正式RCC结构对照。r115首异常仍start200后的observeUND_ERR_SOCKET，精确upstreamraw缺失，根因UNKNOWN。唯一候选为accept_helper.evidenceRefs array无items（dispatchhelper有），另有instructions/body规模等混杂；r248独立OAuth核实当前typed/schema合同及最小诊断，不发请求、不切Provider、不修改RCC。r246独立Gemini仍规划全程installed深层cold，不冒sourceconsumer证明。UX文档main0b65670b已正常FF，无产品变化不重复构建。
+
 - r243只读recipe已接收，复用既有runtime-reload-public consumer指定old/new全局humanagent入口，宿主隔离运行1/1 PASS。证明installed官方restart/配对/既有fakeTask事实连续，不扩RCCnative多turn。owned fixture native-milestone-installed-R8m5sP 的generation2 PID5316 absent、disposedAt已写，日志/receipt归档r243/installed-reload-evidence后仅删该新fixture；canonicalgen24/53007不动。r245 GCM只读比较r115失败与r28/r140成功出站结构，不发请求；r246独立Gemini复杂局部Plan设计全程installed深层cold最小增量。candidate已同步已推main，无新代码writer/来源树。
 
 - 已正常push origin/main，远端回执 e053acc7..e87751d4 main→main。本轮已审、组合、构建安装、官方restart和原受影响复验的增量已远端交付；未将r243辅助观察当作停推前置。安装深层多turn/cold、真实RCCAppTask、v2/childwire与模型语义质量仍按各自范围UNVERIFIED/INCOMPLETE，完整目标不关闭。UX正在正式配对恢复p1后只读既有Task/checkpoint，p3不动；TaskFlow后继独立，不混为已交付。
