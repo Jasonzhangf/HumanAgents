@@ -1101,6 +1101,248 @@ test('explicit turn helper session dispatches two independent helpers and accept
   }
 });
 
+test('cold-recovered explicit turn helper session accepts a durable returned helper from the same unclosed turn', async () => {
+  // Failure basis: unknown; the recovered dispatched map starts empty even
+  // though the durable same-turn return exists. Impact: high, because the
+  // recovered parent owner cannot explicitly adopt the real result. Cost: one
+  // existing local JSONL session fixture with no external provider process.
+  const { file, cleanup } = await fixture(
+    process.env.HUMANAGENT_TEST_ROOT ?? join(homedir(), '.humanagent', 'test-fixtures'),
+  );
+  try {
+    const binding: ProviderBinding = {
+      bindingId: 'binding-recovered-accept',
+      providerId: 'rcc-recovered-accept',
+      protocol: 'responses',
+      endpointRef: 'endpoint://recovered-accept',
+      modelRef: 'model-recovered-accept',
+      configDigest: `sha256:${'7'.repeat(64)}`,
+      capabilityDigest: `sha256:${'8'.repeat(64)}`,
+    };
+    const { clock } = sessionClock();
+    const initialJournal = journalFor(file);
+    const initial = sessionFactory({
+      execution: { binding, closureState: 'succeeded' },
+    });
+    const original = new ExplicitTurnHelperSession({
+      identity: sessionIdentity,
+      latestTurn: sessionInitialLatestTurn,
+      journal: initialJournal,
+      clock,
+      factory: initial.factory,
+    });
+    const fields: InteractionHelperAssignmentFields = {
+      objective: 'Return a result that survives to the recovered owner',
+      targetRefs: ['interaction://explicit-turn-session-recovered-accept'],
+      expectedOutputRefs: [reviewOutputRef],
+      expectedArtifactDigests: [reviewDigest],
+      acceptanceCriteriaDigest: `sha256:${'9'.repeat(64)}`,
+      successCriteria: ['Return a complete conclusion'],
+      failureCriteria: ['Return no conclusion'],
+      incompleteCriteria: ['Return a partial conclusion'],
+      requiredCapabilities: ['text-generation'],
+      mergeGate: 'not-required',
+    };
+    const returned = await original.dispatchHelper({
+      selection: { roleId: 'execution', configuredAgentId: 'agent-recovered-accept' },
+      assignmentFields: fields,
+      inputs: { question: 'durable-before-recovery' },
+      evidenceRefs: [sessionEvidence('dispatch-recovered-accept')],
+      checkpointDescription: 'Return the conclusion without automatic adoption',
+      conclude: sessionSucceededConclude('agent-recovered-accept'),
+    });
+
+    assert.equal(original.latestTurn().entries.length, 1);
+    const recoveredJournal = new JsonlInteractionHelperJournal(new JsonlOrganJournal(file));
+    const beforeAcceptance = await recoveredJournal.readTurnHelpers(sessionIdentity);
+    assert.equal(beforeAcceptance.length, 1);
+    assert.equal(beforeAcceptance[0]!.identity.helperCallId, returned.identity.helperCallId);
+    assert.notEqual(beforeAcceptance[0]!.readback.returned, null);
+    assert.equal(beforeAcceptance[0]!.readback.ownerAccepted, null);
+
+    let factoryCalls = 0;
+    const recovered = new ExplicitTurnHelperSession({
+      identity: sessionIdentity,
+      latestTurn: sessionInitialLatestTurn,
+      journal: recoveredJournal,
+      clock,
+      factory: async () => {
+        factoryCalls += 1;
+        throw new Error('recovered acceptance must not rerun the helper');
+      },
+      turnHelperJournal: recoveredJournal,
+    });
+    const refinedResult: RawAsset = {
+      ref: sessionEvidence('refined-recovered-accept'),
+      view: { kind: 'utf8-text' },
+    };
+    const acceptance = await recovered.acceptHelper({
+      helperCallId: returned.identity.helperCallId,
+      checkpointDescription: 'Adopt the durable recovered conclusion explicitly',
+      refinedResult,
+      acceptedBy: 'runtime-explicit-turn-recovered-owner',
+      acceptanceRef: 'acceptance://explicit-turn-session-recovered',
+      evidenceRefs: [sessionEvidence('owner-accepted-recovered')],
+    });
+
+    assert.equal(factoryCalls, 0);
+    assert.equal(acceptance.latestTurnEntry.result.helperCallId, returned.identity.helperCallId);
+    assert.equal(acceptance.latestTurnEntry.result.status, 'succeeded');
+    const durable = await recoveredJournal.readExact(returned.identity);
+    assert.equal(durable.ownerAccepted?.fact.acceptedBy, 'runtime-explicit-turn-recovered-owner');
+    assert.deepEqual(
+      durable.ownerAccepted?.fact.refinedResult,
+      refinedResult,
+    );
+    const recoveredEntries = recovered.latestTurn().entries;
+    assert.equal(recoveredEntries.length, 2);
+    assert.equal(recoveredEntries[0]!.kind, 'user-input');
+    assert.equal(recoveredEntries[1]!.kind, 'helper-result');
+    assert.equal(original.latestTurn().entries.length, 1);
+    assert.equal(initial.records.length, 1);
+    assert.equal(initial.records[0]!.startRequests.length, 1);
+    assert.equal(initial.records[0]!.submitPayloads.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('cold-recovered explicit turn helper session restores helper ordinals beyond durable incarnations with assignment overrides', async () => {
+  // Failure basis: unknown; a fresh session sequence starts at zero while the
+  // same-turn dispatches are already durable. Impact: high, because a recovered
+  // turn reuses helper 1 and cannot dispatch the requested follow-up. Cost: one
+  // local JSONL session fixture with two prior helpers and one follow-up.
+  const { file, cleanup } = await fixture(
+    process.env.HUMANAGENT_TEST_ROOT ?? join(homedir(), '.humanagent', 'test-fixtures'),
+  );
+  try {
+    const binding: ProviderBinding = {
+      bindingId: 'binding-recovered-ordinal',
+      providerId: 'rcc-recovered-ordinal',
+      protocol: 'anthropic',
+      endpointRef: 'endpoint://recovered-ordinal',
+      modelRef: 'model-recovered-ordinal',
+      configDigest: `sha256:${'a'.repeat(64)}`,
+      capabilityDigest: `sha256:${'b'.repeat(64)}`,
+    };
+    const { clock } = sessionClock();
+    const initialJournal = journalFor(file);
+    const initial = sessionFactory({
+      execution: { binding, closureState: 'succeeded' },
+      review: { binding, closureState: 'succeeded' },
+    });
+    const original = new ExplicitTurnHelperSession({
+      identity: sessionIdentity,
+      latestTurn: sessionInitialLatestTurn,
+      journal: initialJournal,
+      clock,
+      factory: initial.factory,
+    });
+    const fields: InteractionHelperAssignmentFields = {
+      objective: 'Return a bounded conclusion before recovery',
+      targetRefs: ['interaction://explicit-turn-session-recovered-ordinal'],
+      expectedOutputRefs: [reviewOutputRef],
+      expectedArtifactDigests: [reviewDigest],
+      acceptanceCriteriaDigest: `sha256:${'c'.repeat(64)}`,
+      successCriteria: ['Return a complete conclusion'],
+      failureCriteria: ['Return no conclusion'],
+      incompleteCriteria: ['Return a partial conclusion'],
+      requiredCapabilities: ['text-generation'],
+      mergeGate: 'not-required',
+    };
+    const first = await original.dispatchHelper({
+      selection: { roleId: 'execution' },
+      assignmentFields: fields,
+      inputs: { question: 'first-durable-helper' },
+      evidenceRefs: [sessionEvidence('dispatch-recovered-ordinal-first')],
+      checkpointDescription: 'Return the first helper conclusion',
+      conclude: sessionSucceededConclude('agent-recovered-ordinal-first'),
+    });
+    const overrideFields = {
+      ...fields,
+      objective: 'Return a bounded conclusion with caller assignment fields',
+      assignmentId: 'caller-override-helper-2-assignment',
+      helperCallId: 'caller-override-helper-2-call',
+    } as InteractionHelperAssignmentFields;
+    const second = await original.dispatchHelper({
+      selection: { roleId: 'review' },
+      assignmentFields: overrideFields,
+      inputs: { question: 'second-durable-helper' },
+      evidenceRefs: [sessionEvidence('dispatch-recovered-ordinal-second')],
+      checkpointDescription: 'Return the second helper conclusion',
+      conclude: sessionSucceededConclude('agent-recovered-ordinal-second'),
+    });
+
+    assert.equal(first.identity.helperCallId, `${sessionTurnId}-helper-1-call`);
+    assert.equal(second.identity.assignmentId, 'caller-override-helper-2-assignment');
+    assert.equal(second.identity.helperCallId, 'caller-override-helper-2-call');
+    assert.equal(second.identity.assignmentId.includes(`${sessionTurnId}-helper-2`), false);
+    assert.equal(second.identity.helperCallId.includes(`${sessionTurnId}-helper-2`), false);
+    const secondDurable = await initialJournal.readExact(second.identity);
+    assert.equal(
+      secondDurable.dispatchAccepted?.fact.incarnation?.runtimeId,
+      `${sessionTurnId}-helper-2-runtime`,
+    );
+    assert.equal(
+      secondDurable.dispatchAccepted?.fact.incarnation?.operationId.value,
+      `${sessionTurnId}-helper-2`,
+    );
+
+    const recoveredJournal = new JsonlInteractionHelperJournal(new JsonlOrganJournal(file));
+    const recoveredFactory = sessionFactory({
+      execution: { binding, closureState: 'succeeded' },
+    });
+    const recovered = new ExplicitTurnHelperSession({
+      identity: sessionIdentity,
+      latestTurn: sessionInitialLatestTurn,
+      journal: recoveredJournal,
+      clock,
+      factory: recoveredFactory.factory,
+      turnHelperJournal: recoveredJournal,
+    });
+    const followUp = await recovered.dispatchHelper({
+      selection: { roleId: 'execution' },
+      assignmentFields: {
+        ...fields,
+        objective: 'Return the post-recovery follow-up conclusion',
+      },
+      inputs: { question: 'follow-up-after-recovery' },
+      evidenceRefs: [sessionEvidence('dispatch-recovered-ordinal-follow-up')],
+      checkpointDescription: 'Return the follow-up conclusion without adoption',
+      conclude: sessionSucceededConclude('agent-recovered-ordinal-follow-up'),
+    });
+
+    assert.equal(followUp.identity.assignmentId, `${sessionTurnId}-helper-3-assignment`);
+    assert.equal(followUp.identity.helperCallId, `${sessionTurnId}-helper-3-call`);
+    assert.equal(followUp.execution.runtimeId, `${sessionTurnId}-helper-3-runtime`);
+    assert.equal(followUp.execution.operationId.value, `${sessionTurnId}-helper-3`);
+    assert.equal(recoveredFactory.records.length, 1);
+    assert.equal(recoveredFactory.records[0]!.assignment.helperCallId, followUp.identity.helperCallId);
+    assert.equal(
+      JSON.stringify(recoveredFactory.records[0]!.submitPayloads[0]).includes(parentTranscriptSentinel),
+      false,
+    );
+    assert.equal(recovered.latestTurn().entries.length, 1);
+
+    const durableHelpers = await recoveredJournal.readTurnHelpers(sessionIdentity);
+    assert.equal(durableHelpers.length, 3);
+    assert.deepEqual(
+      durableHelpers.map((entry) => entry.identity.assignmentId),
+      [
+        `${sessionTurnId}-helper-1-assignment`,
+        'caller-override-helper-2-assignment',
+        `${sessionTurnId}-helper-3-assignment`,
+      ],
+    );
+    for (const helper of durableHelpers) {
+      assert.notEqual(helper.readback.returned, null);
+      assert.equal(helper.readback.ownerAccepted, null);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 test('a partial call checkpoint stays missing until the real session and writer repair it exactly once', async () => {
   const { file, cleanup } = await fixture(process.env.HUMANAGENT_TEST_ROOT ?? tmpdir());
   try {
