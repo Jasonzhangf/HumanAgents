@@ -1,5 +1,6 @@
 import {
   ContractError,
+  assertEvidenceRef,
   assertSameScope,
   validateWorkAssignment,
   validateWorkResult,
@@ -7,16 +8,21 @@ import {
   type ScheduleOccurrenceRef,
   type ScopeRef,
   type ScopedId,
+  type WorkAssignment,
   type WorkResult,
 } from '../../contracts/src/index.js';
 import {
   validateDurableInspectionDefinition,
   validateInspectionExecutionBinding,
   validateInspectionExecutableCheck,
+  validateInspectionItemDelivery,
   validateInspectionItemResultRecord,
+  type InspectionAcceptedCheckPort,
   type I2JournalPort,
   type InspectionCheckPort,
   type InspectionExecutionBinding,
+  type InspectionExecutableCheck,
+  type InspectionItemDelivery,
   type InspectionItemResultRecord,
 } from '../../contracts/src/i2-history.js';
 import {
@@ -47,61 +53,11 @@ export function createInspectionCheckPort(input: {
     request: InspectionCheckRequest,
     result: WorkResult,
   ) => Promise<ReviewSubjectMaterial>;
-}): InspectionCheckPort {
+}): InspectionAcceptedCheckPort {
   return {
     async run(request) {
       const { binding, check, assignment } = request;
-
-      validateInspectionExecutionBinding(binding);
-      validateInspectionExecutableCheck(check);
-      validateWorkAssignment(assignment);
-
-      const definitionRecord = await input.journal.read(
-        binding.occurrence.scope,
-        binding.definitionCommitRef,
-      );
-      if (definitionRecord.kind !== 'inspection-definition') {
-        throw new ContractError('inspection check requires an inspection-definition record');
-      }
-      const definition = definitionRecord;
-      validateDurableInspectionDefinition(definition);
-
-      assertSameScope(definition.taskScope, binding.occurrence.scope);
-      if (
-        definition.content.definition.definitionId !== binding.definition.definitionId
-        || definition.content.definition.definitionVersion !== binding.definition.definitionVersion
-      ) {
-        throw new ContractError('inspection definition identity does not match the requested binding');
-      }
-      if (definition.definitionDigest !== binding.definitionDigest) {
-        throw new ContractError('inspection definition digest does not match the requested binding');
-      }
-
-      const committedCheck = definition.content.checks.find(
-        (candidate) => candidate.checkId === check.checkId,
-      );
-      if (committedCheck === undefined) {
-        throw new ContractError('requested inspection check is not declared in the committed definition');
-      }
-      if (committedCheck.criterion !== check.criterion) {
-        throw new ContractError('requested inspection criterion does not match the committed definition');
-      }
-      if (!sameStrings(committedCheck.inputRefs, check.inputRefs)) {
-        throw new ContractError('requested inspection input refs do not match the committed definition');
-      }
-
-      if (assignment.taskId.value !== binding.executionScope.taskId?.value) {
-        throw new ContractError('inspection assignment task does not match the execution task');
-      }
-      if (
-        binding.executionScope.cycleId !== undefined
-        && binding.executionScope.cycleId.value !== binding.cycleId
-      ) {
-        throw new ContractError('inspection execution scope cycle does not match the binding cycle');
-      }
-      if (assignment.executionEpoch !== binding.executionEpoch) {
-        throw new ContractError('inspection assignment execution epoch does not match the binding');
-      }
+      await validateRequest(input.journal, request);
 
       const execution = await input.execute(request);
       const result = 'result' in execution ? execution.result : execution;
@@ -130,18 +86,93 @@ export function createInspectionCheckPort(input: {
       if (!sameBinding(record.binding, binding)) {
         throw new ContractError('inspection item result binding does not match the requested binding');
       }
-      if (record.delivery.checkId !== check.checkId) {
-        throw new ContractError('inspection item result check id does not match the requested check');
-      }
-      if (record.delivery.attempt !== assignment.attempt) {
-        throw new ContractError('inspection item result attempt does not match the requested assignment');
-      }
-      if (result.status !== 'succeeded' && record.delivery.outcome.status === 'completed') {
-        throw new ContractError('inspection non-successful execution cannot produce a completed delivery');
-      }
+      validateDeliveryMatch(check, assignment, result, record.delivery);
       return record.delivery;
     },
+    async accept({ binding, check, assignment, result, delivery }) {
+      await validateRequest(input.journal, { binding, check, assignment });
+      validateWorkResult(result, assignment);
+      for (const ref of result.evidenceRefs) assertEvidenceRef(ref);
+      validateInspectionItemDelivery(delivery);
+      validateDeliveryMatch(check, assignment, result, delivery);
+      return delivery;
+    },
   };
+}
+
+async function validateRequest(
+  journal: Pick<I2JournalPort, 'read'>,
+  request: InspectionCheckRequest,
+): Promise<void> {
+  const { binding, check, assignment } = request;
+
+  validateInspectionExecutionBinding(binding);
+  validateInspectionExecutableCheck(check);
+  validateWorkAssignment(assignment);
+
+  const definitionRecord = await journal.read(
+    binding.occurrence.scope,
+    binding.definitionCommitRef,
+  );
+  if (definitionRecord.kind !== 'inspection-definition') {
+    throw new ContractError('inspection check requires an inspection-definition record');
+  }
+  const definition = definitionRecord;
+  validateDurableInspectionDefinition(definition);
+
+  assertSameScope(definition.taskScope, binding.occurrence.scope);
+  if (
+    definition.content.definition.definitionId !== binding.definition.definitionId
+    || definition.content.definition.definitionVersion !== binding.definition.definitionVersion
+  ) {
+    throw new ContractError('inspection definition identity does not match the requested binding');
+  }
+  if (definition.definitionDigest !== binding.definitionDigest) {
+    throw new ContractError('inspection definition digest does not match the requested binding');
+  }
+
+  const committedCheck = definition.content.checks.find(
+    (candidate) => candidate.checkId === check.checkId,
+  );
+  if (committedCheck === undefined) {
+    throw new ContractError('requested inspection check is not declared in the committed definition');
+  }
+  if (committedCheck.criterion !== check.criterion) {
+    throw new ContractError('requested inspection criterion does not match the committed definition');
+  }
+  if (!sameStrings(committedCheck.inputRefs, check.inputRefs)) {
+    throw new ContractError('requested inspection input refs do not match the committed definition');
+  }
+
+  if (assignment.taskId.value !== binding.executionScope.taskId?.value) {
+    throw new ContractError('inspection assignment task does not match the execution task');
+  }
+  if (
+    binding.executionScope.cycleId !== undefined
+    && binding.executionScope.cycleId.value !== binding.cycleId
+  ) {
+    throw new ContractError('inspection execution scope cycle does not match the binding cycle');
+  }
+  if (assignment.executionEpoch !== binding.executionEpoch) {
+    throw new ContractError('inspection assignment execution epoch does not match the binding');
+  }
+}
+
+function validateDeliveryMatch(
+  check: InspectionExecutableCheck,
+  assignment: WorkAssignment,
+  result: WorkResult,
+  delivery: InspectionItemDelivery,
+): void {
+  if (delivery.checkId !== check.checkId) {
+    throw new ContractError('inspection item result check id does not match the requested check');
+  }
+  if (delivery.attempt !== assignment.attempt) {
+    throw new ContractError('inspection item result attempt does not match the requested assignment');
+  }
+  if (result.status !== 'succeeded' && delivery.outcome.status === 'completed') {
+    throw new ContractError('inspection non-successful execution cannot produce a completed delivery');
+  }
 }
 
 function parseInspectionItemResultRecord(body: string): InspectionItemResultRecord {
