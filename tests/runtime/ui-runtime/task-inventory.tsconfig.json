@@ -1,0 +1,10 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/task-inventory",
+    "noEmitOnError": true
+  },
+  "include": ["node-modules.d.ts", "task-inventory-public-consumer.test.ts"]
+}
