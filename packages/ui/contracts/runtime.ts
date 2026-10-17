@@ -717,6 +717,7 @@ export interface RuntimeInspectionOccurrenceProjection {
 export interface RuntimeInspectionOccurrenceHistoryProjection {
   readonly surface: 'runtime-inspection-occurrences';
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly occurrenceId: string } | null;
   readonly entries: readonly RuntimeInspectionOccurrenceProjection[];
@@ -726,6 +727,7 @@ export interface RuntimeInspectionOccurrenceHistoryProjection {
 export interface RuntimeInspectionOccurrenceEntryProjection {
   readonly surface: 'runtime-inspection-occurrence';
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly occurrenceId: string } | null;
   readonly entry: RuntimeInspectionOccurrenceProjection;
@@ -773,6 +775,7 @@ export interface RuntimeMilestoneReviewProjection {
 export interface RuntimeMilestoneReviewHistoryProjection {
   readonly surface: 'runtime-milestone-reviews';
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly entries: readonly RuntimeMilestoneReviewProjection[];
   readonly nextCursor?: string;
@@ -805,6 +808,7 @@ export interface RuntimeBusinessCycleProjection {
 export interface RuntimeBusinessCycleHistoryProjection {
   readonly surface: 'runtime-business-cycles';
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly cycleId: string } | null;
   readonly entries: readonly RuntimeBusinessCycleProjection[];
@@ -814,6 +818,7 @@ export interface RuntimeBusinessCycleHistoryProjection {
 export interface RuntimeBusinessCycleEntryProjection {
   readonly surface: 'runtime-business-cycle';
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly cycleId: string } | null;
   readonly entry: RuntimeBusinessCycleProjection;
@@ -830,6 +835,7 @@ export interface RuntimeInspectionItemComparisonProjection {
 export interface RuntimeInspectionComparisonProjection {
   readonly surface: 'runtime-inspection-comparison';
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly left: { readonly occurrenceId: string };
   readonly right: { readonly occurrenceId: string };

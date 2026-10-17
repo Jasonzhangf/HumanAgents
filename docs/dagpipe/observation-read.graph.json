@@ -10,6 +10,7 @@
     "payloadReferenceStatus": "candidate browser shared-reference contract; native Arc type and production wiring remain pending",
     "agentActivityContract": "Task-scoped instance ownership is read from actual native bindings, acquired incarnations, resumed segments and owner-decoded Journal receipts. It reaches semantic projection through the direct task_projection arc; event normalization and role frames never generate or replace instance identity.",
     "agentActivityOwner": "packages/runtime/src/observation/agent-activity.ts selects exact typed ownership; packages/app/src/ui-runtime/agent-activity-read.ts reads existing owner decoders; packages/ui/projection/agent-activity.ts projects the same source; docs/ui/agent-activity.js renders it without control effects. The published task-scoped read slice is implemented and proven; cross-scope aggregation and live closure remain pending.",
+    "i2HistoryContract": "Six I2 read contracts (inspection occurrences, inspection occurrence entry, milestone reviews, business cycles, business cycle entry and inspection comparison) are carried from load_task_truth to project_semantic_views on the direct task_projection arc. Each contract can carry a task read scope identifying projectKey, mode and taskId. This diagram only declares the projection boundary and does not claim that cross-project App reads or browser consumption are implemented.",
     "terminalContract": {
       "success": "rendered_view",
       "failure": "explicit stale/disconnected/unmapped projection; no raw inference or fake live state",
