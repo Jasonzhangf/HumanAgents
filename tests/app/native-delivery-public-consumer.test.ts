@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type AnyProviderExecutionIdentityRef, type ProviderExecutionIdentityRef, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId } from '../../packages/contracts/src/index.js';
+import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -17,22 +17,9 @@ import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../
 import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui-runtime/index.js';
 import { createDefaultExecutionComposition, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
-import {
-  closeAgentProvider,
-  prepareAgentProvider,
-  prepareExecutionAgentProvider,
-  createAgentProviderPort,
-} from '../../packages/app/src/agent-driver-composition.js';
-import { createRccServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
-import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
-import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import { createJsonlClosedTurnPlannerCallJournal } from '../../packages/app/src/ui-runtime/planner-call-journal.js';
 import { createActiveTurnSegmentJournal } from '../../packages/app/src/native-recovery-assets.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
-import type { AgentRole } from '../../packages/config/src/index.js';
-import type { EventBusPorts, EventPublisherRegistryPort } from '../../packages/runtime/src/events/index.js';
-import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
-import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-cycle-journal.js';
@@ -47,12 +34,20 @@ import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/sr
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
 import { createJsonlContextHistoryPort, createJsonlCheckpointJournal, createJsonlCheckpointClosurePort } from '../../packages/app/src/checkpoint-journal.js';
 import { createAppChildCheckpointAdapter } from '../../packages/app/src/ui-runtime/child-checkpoint-adapter.js';
+import { readDaemonLease } from '../../packages/app/src/supervisor/supervisor.js';
 import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import type { AdmittedTurn, ReviewAssignment, ReviewResult } from '../../packages/contracts/src/index.js';
 import { readCheckpointClosurePreparation } from '../../packages/runtime/src/checkpoints/closure.js';
 import type { NativeSaveIntent } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
 
 const coldConsumerMode = process.argv.includes('--cold-consumer');
+
+function consumerCliEntry(): string {
+  const configured = process.env.HUMANAGENT_CONSUMER_CLI?.trim();
+  return configured === undefined || configured.length === 0
+    ? new URL('../../../app/app/src/cli.js', import.meta.url).pathname
+    : configured;
+}
 
 /** The one fixture root allowed for this pure-text App slice. */
 const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
@@ -1095,7 +1090,7 @@ async function startNativeMultiTurnConsumer(
   fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
   turnCount: 2 | 3,
 ) {
-  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const cli = consumerCliEntry();
   const organId = id('organ', 'humanagent-ui');
   const label = turnCount === 2 ? 'two-turn' : 'three-turn';
   const taskId = id('task', `native-${label}-consumer`);
@@ -1133,7 +1128,7 @@ async function startNativeMultiTurnConsumer(
     'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
     '--plan', 'default', '--session', `native-${label}-run`, '--task', taskId.value,
     '--prompt', `${label} delivery probe`, '--control-session-file', controlFile],
-  { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  { cwd: fixture.workspace, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   processChild.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
@@ -1400,7 +1395,7 @@ async function runHeldColdConsumer(input: {
       '--cookie-file', join(fixture.root, 'control-session.txt'),
       '--ui-root', join(fixture.root, 'ui'),
     ], {
-      cwd: process.cwd(),
+      cwd: fixture.workspace,
       env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_OPTIONS')),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -1425,7 +1420,10 @@ async function runHeldColdConsumer(input: {
     if (receiptLine === undefined) throw new Error(`the cold consumer child emitted no receipt: ${stderr}`);
     const receipt = JSON.parse(receiptLine.slice('COLD_CONSUMER_RECEIPT '.length)) as ColdConsumerReceipt;
     assert.equal(receipt.status, 202);
-    assert.equal(receipt.pid, resumedPid);
+    assert.ok(receipt.pid !== process.pid, 'the serve helper is not the test process');
+    assert.ok(receipt.pid !== seedPid, 'the serve helper is not the seed CLI process');
+    assert.ok(receipt.pid !== resumedPid, 'the serve helper is not the cold test child');
+    assert.equal(receipt.parentPid, process.pid, 'the cold test child retains its real parent PID');
     assert.equal(receipt.task.state, 'succeeded');
     assert.equal(receipt.task.output, EXACT_BODY);
     assert.equal(receipt.task.operationId, interruption.operationId.value);
@@ -1536,117 +1534,37 @@ async function runColdConsumerChild(): Promise<void> {
   const workspace = coldConsumerArgument(coldConsumerWorkspace, '--workspace');
   const controlRoot = coldConsumerArgument(coldConsumerControlRoot, '--control-root');
   const cookieFile = coldConsumerArgument(coldConsumerCookie, '--cookie-file');
+  const configuredCli = process.env.HUMANAGENT_CONSUMER_CLI?.trim();
   const uiRoot = coldConsumerArgument(coldConsumerUiRoot, '--ui-root');
-  const { configureBuiltinPromptRoot } = await import('../../packages/app/src/index.js');
-  configureBuiltinPromptRoot();
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   await mkdir(join(paths.journalRoot, 'ui-runtime'), { recursive: true });
-  const configuration = await loadConfiguration(paths);
   const modeRoot = join(paths.checkpointsRoot, 'ui-runtime', 'rcc');
   const controlJournalPath = join(modeRoot, 'task-control.jsonl');
   const journal = new JsonlOrganJournal(controlJournalPath);
   const preparedJournal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
-  const configuredAgentId = configuration.effective.project?.defaultAgent
-    ?? configuration.agentRoster[0]!.agentId;
-  const configuredAgent = configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
-  if (configuredAgent === undefined) {
-    throw new Error(`no configured agent matches the selected default ${configuredAgentId}`);
-  }
-  const selected = await prepareAgentProvider({
-    roleId: configuredAgent.roleId,
-    configuredAgentId: configuredAgent.agentId,
-    agentProviderBindings: configuration.agentProviderBindings,
-    legacyProvider: configuration.effective.provider,
-    evidenceRoot: join(paths.artifactsRoot, 'ui-provider-evidence'),
-  });
-  const eventJournal = createJsonlEventJournal({ filePath: join(paths.journalRoot, 'ui-runtime', 'events.jsonl') });
-  const publishers: EventPublisherRegistryPort = { async resolvePublisher() { return null; } };
-  const eventBusPorts: EventBusPorts = {
-    journal: eventJournal,
-    publishers,
-    consumers: { async resolveConsumer() { return null; } },
-    externalOperations: eventJournal,
-    barrierIntents: eventJournal,
-  };
-  const prepare = <T extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(
-    selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string },
-  ) => prepareAgentProvider<T>({
-    ...selection,
-    agentProviderBindings: configuration.agentProviderBindings,
-    legacyProvider: configuration.effective.provider,
-    evidenceRoot: join(paths.artifactsRoot, 'ui-provider-evidence'),
-  });
-  const orchestrationPorts = createRccServeOrchestrationPorts({
-    port: selected.port,
-    binding: selected.binding,
-    prepareAgentProvider: prepare,
-    promptSegments: {
-      review: (configuration.promptCatalog.review?.segments ?? []).map((segment) => segment.content),
-    },
-  });
-  const serveRuntime = createServeRuntimeComposition({
-    maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
-    eventBusPorts,
-    feedbackPorts: { journal: eventJournal, publishers },
-    feedbackPublisherId: 'native-cold-consumer',
-    ...orchestrationPorts,
-  });
-  const accessControl = await AccessControlService.open({
-    credentialPath: paths.webAccessCredentialPath,
-    create: false,
-  });
   const cookie = (await readFile(cookieFile, 'utf8')).split('\n')[0]!.trim();
   if (cookie.length === 0) throw new Error('cold consumer cookie file is empty');
-  const runtime = await startUiRuntime({
-    mode: 'rcc',
-    maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
-    accessControl,
-    organId: id('organ', 'humanagent-ui'),
-    binding: selected.binding,
-    providerSource: selected.source,
-    port: selected.port,
-    checkpointRoot: join(paths.checkpointsRoot, 'ui-runtime'),
-    interactionRoot: paths.mainRoot,
-    evidenceRoot: join(paths.artifactsRoot, 'ui-provider-evidence'),
-    projectKey: paths.projectKey,
-    workspaceRoot: paths.workspaceCwd,
-    uiRoot,
-    host: '127.0.0.1',
-    portNumber: 0,
-    agentRoster: configuration.agentRoster,
-    memory: {
-      coordinator: new MemoryCoordinator(),
-      backend: new DeterministicMemoryBackend(),
-      projectKey: paths.projectKey,
-      roleId: configuredAgent.roleId,
-    },
-    explicitBrainInterpreter: {
-      async interpret() {
-        throw new Error('cold consumer does not interpret a new explicit Brain input');
-      },
-    },
-    runtimePaths: paths,
-    runtimeComposition: {
-      createTaskAssembly: serveRuntime.createTaskAssembly,
-      prepareAgentProvider: prepare,
-      prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
-        roleId: selection.roleId,
-        ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
-        agentProviderBindings: configuration.agentProviderBindings,
-        legacyProvider: configuration.effective.provider,
-        createPort: (binding) => createAgentProviderPort(
-          binding,
-          join(paths.artifactsRoot, 'ui-provider-evidence'),
-        ),
-      }, owner, lease),
-    },
-  });
+  const serve = await startServe({ controlRoot, workspace, uiRoot });
   const taskId = id('task', task);
   let receipt: ColdConsumerReceipt | undefined;
   try {
+    assert.ok(serve.pid !== process.pid, 'serve is a new OS process, not the cold test child');
+    assert.ok(serve.pid !== (process as unknown as { readonly ppid: number }).ppid,
+      'serve is a child of the cold test child, not its parent');
+    const lease = await readDaemonLease(paths);
+    if (lease === undefined) throw new Error('the official cold-resume serve helper created no supervisor lease');
+    assert.equal(lease.pid, serve.pid, 'the cold-resume serve lease belongs to the exact helper PID');
+    assert.equal(lease.disposedAt, undefined, 'the cold-resume serve lease is active while the helper runs');
+    if (configuredCli !== undefined && configuredCli.length > 0) {
+      assert.equal(lease.startup?.launcherPath, await realpath(consumerCliEntry()),
+        'the configured cold-resume launcher is the one in the lease');
+      assert.equal(lease.startup?.source.entryPath,
+        await realpath('/opt/homebrew/lib/node_modules/humanagent-cli/runtime/app/src/cli.js'),
+        'the installed cold-resume lease starts from the installed source entry');
+    }
     const response = await fetch(
-      `${runtime.server.url}/api/tasks/${encodeURIComponent(task)}/resume`,
+      `${serve.origin}/api/tasks/${encodeURIComponent(task)}/resume`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json', cookie },
@@ -1657,17 +1575,44 @@ async function runColdConsumerChild(): Promise<void> {
     assert.equal(response.status, 202, JSON.stringify(responseBody));
     const taskScope = { organId: id('organ', 'humanagent-ui'), taskId };
     const taskFinal = await waitFor(
-      () => runtime.service.taskDashboardWithPlan(taskId),
+      async () => {
+        const current = await fetch(
+          `${serve.origin}/api/tasks/${encodeURIComponent(task)}/dashboard`,
+          { headers: { cookie, accept: 'application/json' } },
+        );
+        const body = await current.json() as {
+          readonly state?: string;
+          readonly output?: string;
+          readonly operationId?: string;
+          readonly executionEpoch?: number;
+          readonly publicOutput?: PublicOutputPublicationView;
+        };
+        assert.equal(current.status, 200, JSON.stringify(body));
+        return body;
+      },
       (dashboard) => dashboard.state === 'succeeded' && dashboard.publicOutput?.state === 'committed',
       'the resumed task did not reach its committed public outcome',
       60_000,
     );
     assert.equal(taskFinal.operationId, operation);
-    const checked = await runtime.service.taskDashboardWithPlan(taskId);
+    const checkedResponse = await fetch(
+      `${serve.origin}/api/tasks/${encodeURIComponent(task)}/dashboard`,
+      { headers: { cookie, accept: 'application/json' } },
+    );
+    const checked = await checkedResponse.json() as {
+      readonly output?: string;
+      readonly publicOutput?: PublicOutputPublicationView;
+    };
+    assert.equal(checkedResponse.status, 200, JSON.stringify(checked));
     const publicOutput = checked.publicOutput;
     if (publicOutput === undefined) throw new Error('the resumed task has no public output');
     assert.ok(publicOutput?.commits?.some((commit) => commit.text === EXACT_BODY),
       `the resumed task did not deliver the exact body: ${JSON.stringify(publicOutput)}`);
+    assert.equal(taskFinal.state, 'succeeded', 'the resumed dashboard reports task success');
+    assert.equal(checked.output, EXACT_BODY, 'the resumed dashboard output is the exact delivery body');
+    if (taskFinal.state !== 'succeeded' || checked.output === undefined) {
+      throw new Error('the resumed dashboard has no successful task output');
+    }
     const planner = await waitFor(
       () => createJsonlClosedTurnPlannerCallJournal({ journal }).readTaskDuties(taskScope),
       (duties) => duties.some((duty) => duty.returned?.record.decision === 'complete'),
@@ -1720,13 +1665,13 @@ async function runColdConsumerChild(): Promise<void> {
     assert.equal(publication.state, 'committed');
     assert.ok(publication.commits.some((commit) => commit.text === EXACT_BODY));
     receipt = {
-      pid: process.pid,
+      pid: serve.pid,
       parentPid: (process as unknown as { readonly ppid: number }).ppid,
       status: response.status,
       response: responseBody,
       task: {
         state: taskFinal.state,
-        output: taskFinal.output,
+        output: checked.output,
         operationId: taskFinal.operationId,
         executionEpoch: taskFinal.executionEpoch,
       },
@@ -1756,10 +1701,14 @@ async function runColdConsumerChild(): Promise<void> {
       publicOutput,
     };
   } finally {
-    await runtime.close();
-    await closeAgentProvider(selected);
-    await serveRuntime.dispose();
-    await accessControl.closeCredentialWatch();
+    await serve.stop();
+    const disposed = await waitFor(
+      () => readDaemonLease(paths),
+      (value) => value?.disposedAt !== undefined,
+      'the cold-resume serve lease did not record disposal',
+      30_000,
+    );
+    assert.equal(disposed?.pid, serve.pid, 'only the cold-resume helper lease is disposed');
   }
   if (receipt === undefined) throw new Error('the cold consumer produced no completed receipt');
   console.log(`COLD_CONSUMER_RECEIPT ${JSON.stringify(receipt)}`);
@@ -1793,16 +1742,19 @@ async function readCanonicalPublication(
  * listener.
  */
 async function startServe(input: {
-  readonly fixture: Awaited<ReturnType<typeof textOnlyFixture>>;
-}): Promise<{ readonly origin: string; stop(): Promise<void> }> {
-  const { fixture } = input;
-  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  readonly controlRoot: string;
+  readonly workspace: string;
+  readonly uiRoot?: string;
+}): Promise<{ readonly origin: string; readonly pid: number; stop(): Promise<void> }> {
   const child = spawn(process.execPath, [
-    cli, 'serve',
-    '--control-root', fixture.controlRoot,
-    '--workspace', fixture.workspace,
+    consumerCliEntry(), 'serve',
+    '--control-root', input.controlRoot,
+    '--workspace', input.workspace,
     '--port', '0',
-  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    ...(input.uiRoot === undefined ? [] : ['--ui-root', input.uiRoot]),
+  ], { cwd: input.workspace, stdio: ['ignore', 'pipe', 'pipe'] });
+  const pid = child.pid;
+  if (pid === undefined) throw new Error('serve child has no exact PID');
   let stdout = '';
   let stderr = '';
   child.stdout?.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
@@ -1820,6 +1772,7 @@ async function startServe(input: {
   });
   return {
     origin: `http://127.0.0.1:${listenPort}`,
+    pid,
     async stop() {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise<void>((resolve) => { child.once('exit', () => resolve()); });
@@ -1867,7 +1820,7 @@ if (!coldConsumerMode) test('native inspect producer and cold saved boundary pre
       draftRevisionHash: 'inspect-draft-hash', confirmationRef: 'inspect-confirmation' } });
     await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: 'inspect-grant', taskId,
       owner: caller.principal.owner, capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } }, expectedRevision: 0 });
-    const cli = join(process.cwd(), 'dist/app/app/src/cli.js');
+    const cli = consumerCliEntry();
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(process.execPath, [cli, 'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
         '--plan', 'default', '--session', 'inspect-run', '--task', taskId.value, '--prompt', 'read delivery', '--control-session-file', controlFile],
@@ -1967,7 +1920,7 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
       capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
       expectedRevision: 0 });
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const processChild = spawn(process.execPath, [join(process.cwd(), 'dist/app/app/src/cli.js'),
+      const processChild = spawn(process.execPath, [consumerCliEntry(),
         'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
         '--plan', 'default', '--session', 'native-parallel-run', '--task', taskId.value,
         '--prompt', 'text-only delivery probe', '--control-session-file', controlFile],
@@ -2340,7 +2293,7 @@ if (!coldConsumerMode) test('native three-turn public consumer cold-resumes inte
 
 if (!coldConsumerMode) test('native text-only delivery advertised end, independent Planner closure and exact asset readback', async () => {
   const fixture = await textOnlyFixture(false, true);
-  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const cli = consumerCliEntry();
   const organId = id('organ', 'humanagent-ui');
   const retainedTaskId = id('task', 'native-text-only-retained');
   const controlFile = join(fixture.root, 'control-session.txt');
@@ -2706,7 +2659,7 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
     // regenerate or resume execution, so the Provider POST count cannot move.
     const postsBeforePublicGet = posts().length;
     let servedDashboard: Record<string, unknown> | undefined;
-    const serve = await startServe({ fixture });
+    const serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
     try {
       const response = await fetch(
         `${serve.origin}/api/tasks/${encodeURIComponent(retained.taskId.value)}/dashboard`,
@@ -2858,7 +2811,7 @@ if (!coldConsumerMode) test('default native CLI inherits top-level HTTP credenti
     credentialRef,
     requiredBearer: credentialValue,
   });
-  const cli = join(process.cwd(), 'dist/app/app/src/cli.js');
+  const cli = consumerCliEntry();
   const organId = id('organ', 'humanagent-ui');
   const taskId = id('task', 'native-default-http');
   const controlFile = join(fixture.root, 'control-session.txt');
