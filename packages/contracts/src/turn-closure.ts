@@ -1,5 +1,10 @@
 import { assertEvidenceRef, assertSameScope, type CheckpointId, type EvidenceRef, type ScopeRef } from './index.js';
-import { validateJournalCommitRef, type JournalCommitRef } from './i2-history.js';
+import {
+  validateInspectionExecutionOutcome,
+  validateJournalCommitRef,
+  type InspectionExecutionOutcome,
+  type JournalCommitRef,
+} from './i2-history.js';
 import { validateAdmittedTurnIdentity, type AdmittedTurnIdentity } from './native-reasoning.js';
 import { isCanonicalInstant } from './time.js';
 import { ContractError } from './errors.js';
@@ -21,6 +26,7 @@ export interface TurnCloseSummary {
   readonly actions: TurnSummarySection;
   readonly result: TurnSummarySection;
   readonly expectedNextStep: TurnSummarySection;
+  readonly inspectionOutcome?: InspectionExecutionOutcome;
 }
 
 /** Durable closure relationship for exactly one admitted turn: identity, checkpoint, and closure commit. */
@@ -236,6 +242,9 @@ export function validateTurnCloseSummary(
   validateSummarySection(summary.actions, 'turn summary actions', scope, allow);
   validateSummarySection(summary.result, 'turn summary result', scope, allow);
   validateSummarySection(summary.expectedNextStep, 'turn summary expectedNextStep', scope, allow);
+  if (summary.inspectionOutcome !== undefined) {
+    validateInspectionExecutionOutcome(summary.inspectionOutcome);
+  }
 }
 
 export function validateTurnClosureReference(close: TurnClosureReference, context?: TurnSummaryEvidenceContext): void {
