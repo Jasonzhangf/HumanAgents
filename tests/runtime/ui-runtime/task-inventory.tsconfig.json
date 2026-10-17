@@ -6,5 +6,5 @@
     "outDir": "../../../dist/task-inventory",
     "noEmitOnError": true
   },
-  "include": ["node-modules.d.ts", "task-inventory-public-consumer.test.ts"]
+  "include": ["../../app/node-modules.d.ts", "task-inventory-public-consumer.test.ts"]
 }
