@@ -300,9 +300,9 @@ function buildResumed(
     );
   }
   if (incarnation.assignmentId !== assignment.assignmentId
-    || incarnation.executionEpoch !== assignment.executionEpoch) {
+    || incarnation.executionEpoch !== opened.binding.execution.executionEpoch) {
     return conflict(
-      `resumed segment ${source.sourceId} incarnation does not match its assignment`,
+      `resumed segment ${source.sourceId} incarnation does not match its assignment or the segment physical execution`,
     );
   }
   const base: RecordBase = {
