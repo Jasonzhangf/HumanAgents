@@ -15,6 +15,20 @@
   - 长期执行计划：[整体执行计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)、[Provider 缺口计划](docs/goals/native-provider-gap-plan-2026-10-11.md)。
   - 进度汇总：[Native Reasoning & UX 进度摘要](docs/goals/native-reasoning-progress-2026-10-08.md)（历史完整流水账已归档至 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/`）。
 
+## 2026-10-17 共享读取保护与旧治理消融
+
+本轮源提交为 `49daab38` 和 `30ed5852`，已通过标准 Git 合流进入 main，集成提交 `bf4fface`。完整 I1–I5 / G1–G14 / F01–F20 仍 ACTIVE；本轮关闭浏览器共享读取边界的缺陷和项目选中的旧 Guidance，不宣称跨任务 live、Provider 或完整恢复写链完成。
+
+成功的 scoped publication 和 semantic GET/SSE 在接收时递归冻结同一个 JSON 对象。消费者继续共享引用，新版本不改写旧对象。失败、stale、HTTP/SSE 解码和控制语义保持原契约。Node 公开 consumer 4/4、真实生产面板浏览器 consumer 69/69 通过。分别移除 GET 或 SSE 保护时，各自只触发对应攻击断言失败；恢复后 69/69 通过。没有新增测试框架、publisher、缓存或逐消费者复制。
+
+实际删除项目配置中的旧 `guidance` 选择、仅运行 typecheck 并复制配置的 `humanagent-governance` 占位 module，以及 953 行派生 `.appsdk/guidance/compiled.json`。观测图的 `meta.baseline` 也已删除，拓扑未变。保留 app module、需求、goal、历史记录、事务、控制状态、受管 Skill 正文、SDK lock/pin 和业务数据完整性机制。Schema 与解析对象保留比较均通过；真实 `appsdk guide status` 返回 `guide_flow_required: false`、`first_failing_gate: null`、保留的 app module，不再加载旧 Guidance。未跟随初始化提示，也未运行 reset/fresh、SDK 刷新或摘要包装。
+
+组合候选经一次整体独立 Gemini 4 medium review，原始结构化结果由既有裁决器判为 PASS，findings 为空。本次 Opus 配额错误保留，未当作代码失败。源码 contracts、config、App、package 与正式安装完成；额外误选的 `build:contracts` alias 因两处旧测试 fixture 字段编译失败，原错保留，不报该 alias 通过。该 fixture 迁移已在 peer 的 native 候选内，本轮未重复修复或放宽断言。
+
+正式 restart 将原 53007 实例从 generation 20 更新到 21。真实页面的共享 publication 保持同一引用，嵌套写入被阻止，另一个读者和当前 publication 都保留“已完成 · 结果可用”。Task 仍 succeeded，结果和计划可读，偏好 current/null，桌面无横向溢出，抽屉关闭，Journal 保持 640 行。此前补齐的实例详情/引用返回、未知项目错误、独立 Observation 和偏好保存/深链/重置证据继续有效。
+
+证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-shared-payload-delivery-20261017/`、`ux-payload-mutability-20261017/` 和 `ux-canonical-remaining-read-acceptance-20261017/`。两棵子任务源树已合流后正常移除。剩余整体目标继续按既有计划执行，native 与 Provider 的未完成项不从本轮 PASS 推导为完成。
+
 ## 2026-10-17 首个生产 UX 读取切片交付
 
 完整 I1–I5 / G1–G14 / F01–F20 继续 ACTIVE；本节只关闭已有真实任务的这批读取与交互子能力，不宣称新 Task 执行、跨项目隔离或 checkpoint 修正／恢复写链全部完成。

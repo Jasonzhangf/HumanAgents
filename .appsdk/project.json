@@ -61,27 +61,6 @@
     ],
     "zone_transition_contract": "contracts/transitions/zone-transition.manifest.json"
   },
-  "guidance": {
-    "compiled_manifest": ".appsdk/guidance/compiled.json",
-    "enforcement": "advisory",
-    "rule_sources": [
-      {
-        "kind": "agents",
-        "path": "AGENTS.md",
-        "precedence": 100,
-        "required": false,
-        "source_id": "project-agents"
-      },
-      {
-        "contract_path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
-        "kind": "skill",
-        "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
-        "precedence": 200,
-        "required": true,
-        "source_id": "appsdk-governance-skill"
-      }
-    ]
-  },
   "lifecycle": {
     "stage": "contract_bound"
   },
@@ -92,40 +71,6 @@
     "source_snapshot": "mutable"
   },
   "modules": [
-    {
-      "active_artifact": "active/lib/humanagent-governance/**",
-      "artifact_paths": [
-        "governance-contract.json"
-      ],
-      "build": {
-        "args": [
-          "-c",
-          "pnpm run typecheck && mkdir -p generated/modules/humanagent-governance/lib && cp .appsdk/project.json generated/modules/humanagent-governance/lib/governance-contract.json"
-        ],
-        "program": "sh",
-        "working_directory": "."
-      },
-      "contract_paths": [
-        ".appsdk/project.json",
-        ".appsdk/goal.json",
-        ".appsdk/sdk.lock",
-        ".appsdk/sdk-resources.json",
-        "contracts/**"
-      ],
-      "dependency_modules": [],
-      "generated_outputs": [
-        "generated/**"
-      ],
-      "module_id": "humanagent-governance",
-      "owned_paths": [
-        ".appsdk/**",
-        ".appsdk-prepare.json",
-        ".gitignore",
-        "contracts/**"
-      ],
-      "source_owner": "humanagent-governance",
-      "stage": "source_implemented"
-    },
     {
       "active_artifact": "active/lib/app/**",
       "artifact_paths": [
