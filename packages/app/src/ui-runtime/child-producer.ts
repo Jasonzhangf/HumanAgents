@@ -271,7 +271,6 @@ export interface AppChildOperationAdmissionInput {
   readonly invocationId: string;
   readonly childOperationId: OperationId;
   readonly kind: 'execution' | 'review';
-  readonly inspection?: NonNullable<ExecutionChildCallBinding['inspection']>;
   readonly selected: { readonly agentId: string; readonly roleId: AgentRole };
   readonly parentExecution: ProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
@@ -764,13 +763,21 @@ function reorientationInstructions(scope: ScopeRef): string {
   ].join(' ');
 }
 
-function executionPrompt(assignment: WorkAssignment): string {
+function executionPrompt(
+  assignment: WorkAssignment,
+  inspection?: NonNullable<ExecutionChildCallBinding['inspection']>,
+): string {
   return [
     'You are one independent HumanAgent child execution for a single bounded assignment.',
     'You receive only the bounded instructions and criteria below. Do not assume any parent transcript.',
     `Objective: ${assignment.objective}`,
     `Success criteria: ${assignment.successCriteria.join('; ')}`,
-    'If this assignment names an inspection check, report its measured inspectionOutcome separately from the complete result body. A completed outcome carries the observed judgment; a non-completed outcome keeps its explicit reason.',
+    ...(inspection === undefined ? [] : [
+      `Inspection check: ${inspection.check.checkId}`,
+      `Inspection criterion: ${inspection.check.criterion}`,
+      `Inspection input refs: ${inspection.check.inputRefs.join('; ')}`,
+      'Report the measured inspectionOutcome separately from the complete result body. A completed outcome carries the observed judgment; a non-completed outcome keeps its explicit reason.',
+    ]),
     ...(assignment.failureCriteria.length === 0 ? [] : [`Failure criteria: ${assignment.failureCriteria.join('; ')}`]),
     ...(assignment.incompleteCriteria.length === 0 ? [] : [`Incomplete criteria: ${assignment.incompleteCriteria.join('; ')}`]),
     'Use the tools you were given for the real work, then record the complete result with the delivery tool, and end this turn with the standard end action.',
@@ -1436,7 +1443,7 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
             agentId: execution.agentId,
             invocationId: input.call.invocationId,
             inputRefs: [...execution.assignment.targetRefs, `child:${input.call.invocationId}`],
-            prompt: executionPrompt(execution.assignment),
+            prompt: executionPrompt(execution.assignment, input.inspection),
             signal: execution.signal ?? new AbortController().signal,
           });
           if (resolved.state === 'blocked') {
@@ -1990,10 +1997,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           if (delivery.kind !== 'execution') {
             throw new Error('inspection child replay requires its exact execution delivery');
           }
-          await inspectionPorts.acceptDelivery({
-            invocation: existing,
-            delivery,
-          });
+          await inspectionPorts.acceptDelivery({ invocation: existing, delivery });
         }
         return replayed;
       }

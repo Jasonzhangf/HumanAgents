@@ -645,7 +645,6 @@ test('App child producer settles the same typed inspection delivery on new and r
       },
       intent: {} as never,
       registration: {} as never,
-      ...(input.inspection === undefined ? {} : { inspection: input.inspection }),
     }),
     inspectionSelection: {
       async readSelectionContext() {
