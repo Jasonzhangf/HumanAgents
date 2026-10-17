@@ -43,7 +43,6 @@ import {
   type RawAsset,
   type ScopeRef,
   type ProviderBinding,
-  type ProviderReadiness,
   type ProviderCloseResult,
   type ProviderReadiness,
   type ProviderEvent,
@@ -475,7 +474,6 @@ export interface UiRuntimeServiceOptions {
    */
   readonly taskGrantPort?: TaskGrantPort;
   readonly providerSource?: ProviderTransportSource;
-  readonly providerReadiness?: ProviderReadiness;
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;
