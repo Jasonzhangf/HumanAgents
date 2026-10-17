@@ -22,6 +22,10 @@
  * that proves the last breadcrumb names the current scope in human terms: it
  * starts as 当前项目, becomes the published DTO label, keeps the full
  * projectKey in 工作范围, and never issues a business write.
+ * `--i2-scoped-only` selects the controlled System -> Project -> Task I2
+ * history path at desktop and mobile sizes. It proves scope propagation,
+ * foreign-scope rejection, exact comparison-pair rejection and drawer focus
+ * recovery without running any other fixture.
  *
  * Set INTERACTION_PAGE_EVIDENCE to the execution-owned evidence root and
  * INTERACTION_PAGE_UI_ROOT (optional) to a directory whose layout mirrors
@@ -45,6 +49,7 @@ const taskIdentityOnly = process.argv.includes('--task-identity-only');
 const checkpointAssetsOnly = process.argv.includes('--checkpoint-assets-only');
 const rawFocusTitleOnly = process.argv.includes('--raw-focus-title-only');
 const projectBreadcrumbOnly = process.argv.includes('--project-breadcrumb-only');
+const i2ScopedOnly = process.argv.includes('--i2-scoped-only');
 
 const playwrightModule = await import(
   process.env.INTERACTION_CARD_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js',
@@ -203,7 +208,7 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
 
-  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly || projectBreadcrumbOnly ? [] : [
+  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly || projectBreadcrumbOnly || i2ScopedOnly ? [] : [
     { file: 'dashboard.html', entry: 'dashboard' },
     { file: 'task.html', query: '?task=new', entry: 'task' },
     { file: 'index.html', entry: 'entry' },
@@ -256,7 +261,7 @@ try {
   // card's technical source reference with no invented Operation, so an admitted
   // Task is not mislabelled as a running execution and no `pending-input` scope
   // is minted.
-  if (!checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly) {
+  if (!checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly) {
   const TASK_WIRING_ID = 'task-wiring-proof';
   const taskPage = await context.newPage();
   const taskPageErrors = [];
@@ -330,7 +335,7 @@ try {
   await taskPage.close();
   }
 
-  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly) {
+  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly) {
   // GAP B proof: the bounded original cause the runtime reports must reach the
   // human, not just a status code. The runtime stub answers the real
   // explicit-interaction read with a 500 body shaped exactly like the one
@@ -1058,6 +1063,498 @@ try {
         releaseProjectRead?.();
         observe(`${label} project breadcrumb requests`, requests);
         await fixturePage.close();
+      }
+    }
+  }
+  if (i2ScopedOnly) {
+    // Two independent scoped-read invariants are exercised through the real
+    // page modules and the existing Chromium/static-server consumer:
+    //   1. every I2 GET carries the exact project/mode pair;
+    //   2. a projection or comparison pair from another scope/target is refused.
+    // The unknown-scope response is a controlled public projection, not a
+    // legacy dashboard body, and every other unexpected route stays a 404.
+    const projectKey = 'proj-alpha'
+    const mode = 'fake'
+    const taskId = { scope: 'task', value: 'task-shared-i2' }
+    const scope = { kind: 'task', projectKey, mode, taskId }
+    const taskScope = { organId: { scope: 'organ', value: 'organ-i2-proof' }, taskId }
+    const current = { state: 'unknown', reason: 'scope is not bound to live runtime' }
+
+    const systemRead = {
+      surface: 'runtime-system',
+      scope: { kind: 'system' },
+      observedAt: '2026-10-17T00:00:00Z',
+      runtime: {
+        surface: 'runtime-status', mode, state: 'ready', connected: true,
+        providerState: 'ready', modes: [{ mode, enabled: true, state: 'ready' }],
+      },
+      coverage: 'configured-projects-in-current-control-root',
+      projects: [],
+      taskCount: 1,
+      complete: true,
+      failures: [],
+    }
+    systemRead.projects.push({
+      surface: 'runtime-project',
+      scope: { kind: 'project', projectKey },
+      label: 'Alpha workspace',
+      observedAt: '2026-10-17T00:00:00Z',
+      tasks: [{
+        scope,
+        basis: 'durable-history',
+        task: {
+          taskId,
+          title: 'Scoped I2 history proof',
+          state: 'waiting',
+          stateLabel: '等待中',
+          taskFlow: { kind: 'long-running', definitionVersion: 1 },
+          currentState: '等待人工核对',
+          nextStep: '查看 I2 历史',
+          updatedAt: '2026-10-17T00:00:00Z',
+          entry: 'task-dashboard',
+        },
+      }],
+      taskCount: 1,
+      complete: true,
+      failures: [],
+    })
+    const projectRead = {
+      surface: 'runtime-project',
+      scope: { kind: 'project', projectKey },
+      label: 'Alpha workspace',
+      observedAt: '2026-10-17T00:00:00Z',
+      tasks: [{
+        scope,
+        basis: 'durable-history',
+        task: {
+          taskId,
+          title: 'Scoped I2 history proof',
+          state: 'waiting',
+          stateLabel: '等待中',
+          taskFlow: { kind: 'long-running', definitionVersion: 1 },
+          currentState: '等待人工核对',
+          nextStep: '查看 I2 历史',
+          updatedAt: '2026-10-17T00:00:00Z',
+          entry: 'task-dashboard',
+        },
+      }],
+      taskCount: 1,
+      complete: true,
+      failures: [],
+    }
+    const taskRead = {
+      surface: 'runtime-task-dashboard',
+      mode,
+      taskId,
+      taskTitle: 'Scoped I2 history proof',
+      state: 'waiting',
+      stateLabel: '等待中',
+      statusSections: { business: '等待人工核对', waiting: '尚无执行等待信息' },
+      currentNode: 'runtime.waiting',
+      observationRef: `task://${taskId.value}/observation`,
+      nextStep: '打开查看方式并核对历史',
+      input: '核对作用域历史',
+      output: '尚无输出',
+      allowedActions: [],
+      recentEvents: [],
+      taskPlanHistory: {
+        ok: false,
+        failure: {
+          code: 'task-plan-history.fixture-unavailable',
+          ownerId: 'test',
+          message: 'controlled scoped browser fixture has no plan history',
+          nextAction: 'none',
+        },
+      },
+    }
+    const taskGrantRead = {
+      targetScope: { projectKey, mode },
+      readback: { taskId, grant: null, commit: null },
+      authority: null,
+    }
+    const semanticRead = {
+      scope: { organId: taskScope.organId, taskId },
+      projectionVersion: 'runtime-semantic-v1',
+      sourceWatermark: 0,
+      events: [],
+      coverageIssues: [],
+      pairing: [],
+      capabilities: [],
+    }
+    const cyclesRead = {
+      surface: 'runtime-business-cycles',
+      taskScope,
+      scope,
+      current,
+      viewed: null,
+      entries: [{
+        cycleId: 'cycle-1', state: 'waiting', directiveRevision: 1, executionEpoch: 1,
+        taskFlow: { kind: 'long-running', definitionVersion: 1 },
+        openedAt: '2026-10-17T00:00:00Z', openingReason: '核对作用域边界',
+        openedCommitRef: { commitId: 'commit-cycle-open', journalSeq: 1, recordDigest: 'digest-cycle-open' },
+        planRevisionCommitRef: { commitId: 'commit-plan', journalSeq: 2, recordDigest: 'digest-plan' },
+        previousCycleCommitRef: null,
+        scheduleOccurrenceRef: null,
+        inspectionOccurrenceId: null,
+        progress: 'open', outcome: null, next: null, closedAt: null,
+        closureCommitRef: null, checkpointCommitRef: null, inspectionSettlementCommitRef: null,
+        reviews: [], alignmentPending: 0,
+      }],
+    }
+    const reviewsRead = {
+      surface: 'runtime-milestone-reviews',
+      taskScope,
+      scope,
+      current,
+      entries: [{
+        milestoneId: 'milestone-1', cycleId: 'cycle-1', status: 'passed',
+        reviewKind: 'milestone', findings: [], outputText: '范围核对通过',
+        artifactRef: null, artifactDigest: null,
+        reviewer: {
+          runtimeId: 'reviewer-1', generation: 1, agentInstanceId: 'agent-reviewer-1',
+          roleId: 'role-reviewer', assignmentId: 'assignment-reviewer-1', executionEpoch: 1,
+        },
+        completedAt: '2026-10-17T00:00:00Z',
+        reviewCommitRef: { commitId: 'commit-review', journalSeq: 3, recordDigest: 'digest-review' },
+        planRevisionCommitRef: { commitId: 'commit-plan', journalSeq: 2, recordDigest: 'digest-plan' },
+        alignment: 'aligned',
+        alignmentCommitRef: { commitId: 'commit-alignment', journalSeq: 4, recordDigest: 'digest-alignment' },
+        alignedPlanRevisionCommitRef: { commitId: 'commit-plan', journalSeq: 2, recordDigest: 'digest-plan' },
+        checkpointCommitRef: null, evidenceRefs: [],
+      }],
+    }
+    const occurrence = (occurrenceId, judgment) => ({
+      occurrenceId,
+      cycleId: 'cycle-1',
+      executionEpoch: 1,
+      definitionId: 'definition-inspection',
+      definitionVersion: '1',
+      definitionDigest: 'digest-inspection-definition',
+      definitionCommitRef: { commitId: 'commit-definition', journalSeq: 5, recordDigest: 'digest-definition' },
+      openingCommitRef: { commitId: `commit-${occurrenceId}-open`, journalSeq: 6, recordDigest: `digest-${occurrenceId}-open` },
+      settlementCommitRef: null,
+      openedAt: '2026-10-17T00:00:00Z',
+      settledAt: null,
+      state: 'open',
+      outcome: 'pending',
+      outcomeReason: null,
+      scheduleOccurrenceRef: null,
+      items: [{
+        checkId: 'check-1', criterion: '核对任务只读取当前项目',
+        state: 'completed', outcome: 'completed', judgment,
+        reason: null, resultRef: null, completedAt: '2026-10-17T00:00:00Z', evidenceRefs: [],
+      }],
+      evidenceRefs: [],
+    })
+    const occurrencesRead = {
+      surface: 'runtime-inspection-occurrences',
+      taskScope,
+      scope,
+      current,
+      viewed: { occurrenceId: 'occ-1' },
+      entries: [occurrence('occ-1', '项目范围一致'), occurrence('occ-2', '范围仍一致')],
+    }
+    const comparisonRead = {
+      surface: 'runtime-inspection-comparison',
+      taskScope,
+      scope,
+      current,
+      left: { occurrenceId: 'occ-1' },
+      right: { occurrenceId: 'occ-2' },
+      comparable: true,
+      reason: null,
+      definition: { definitionId: 'definition-inspection', definitionVersion: '1' },
+      items: [
+        {
+          checkId: 'check-changed', criterion: '项目范围保持一致',
+          change: 'changed',
+          before: { checkId: 'check-changed', criterion: '项目范围保持一致', state: 'completed', outcome: 'completed', judgment: '旧结果', reason: null, resultRef: null, completedAt: '2026-10-17T00:00:00Z', evidenceRefs: [] },
+          after: { checkId: 'check-changed', criterion: '项目范围保持一致', state: 'completed', outcome: 'completed', judgment: '新结果', reason: null, resultRef: null, completedAt: '2026-10-17T00:00:00Z', evidenceRefs: [] },
+        },
+        {
+          checkId: 'check-unchanged', criterion: '模式保持一致',
+          change: 'unchanged',
+          before: { checkId: 'check-unchanged', criterion: '模式保持一致', state: 'completed', outcome: 'completed', judgment: '一致', reason: null, resultRef: null, completedAt: '2026-10-17T00:00:00Z', evidenceRefs: [] },
+          after: { checkId: 'check-unchanged', criterion: '模式保持一致', state: 'completed', outcome: 'completed', judgment: '一致', reason: null, resultRef: null, completedAt: '2026-10-17T00:00:00Z', evidenceRefs: [] },
+        },
+        {
+          checkId: 'check-not-compared', criterion: '定义版本可比较',
+          change: 'not-compared',
+          before: { checkId: 'check-not-compared', criterion: '定义版本可比较', state: 'completed', outcome: 'completed', judgment: '旧定义', reason: null, resultRef: null, completedAt: '2026-10-17T00:00:00Z', evidenceRefs: [] },
+          after: { checkId: 'check-not-compared', criterion: '定义版本可比较', state: 'missing', outcome: 'missing', judgment: null, reason: '定义版本不同', resultRef: null, completedAt: null, evidenceRefs: [] },
+        },
+      ],
+    }
+
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+      const fixturePage = await context.newPage();
+      await fixturePage.setViewportSize(viewport);
+      const label = `${viewport.width}px`
+      const requests = []
+      const errors = []
+      let foreignCycleResponse = false
+      let wrongPairResponse = false
+      let nextCycleResponse = null
+      let nextComparisonResponse = null
+      fixturePage.on('pageerror', (error) => errors.push(error.message))
+      await fixturePage.route('**/api/**', async (route) => {
+        const request = route.request()
+        const url = new URL(request.url())
+        const query = Object.fromEntries(url.searchParams)
+        requests.push({ method: request.method(), path: url.pathname, query })
+        const fulfill = (payload, statusCode = 200) => route.fulfill({
+          status: statusCode,
+          contentType: 'application/json',
+          body: JSON.stringify(payload),
+        })
+        if (request.method() !== 'GET') return fulfill({
+          error: { code: 'fixture.unexpected-write', ownerId: 'test', message: `unexpected ${request.method()} ${url.pathname}`, nextAction: 'none' },
+        }, 405)
+        if (url.pathname === '/api/runtime/status') return fulfill({
+          surface: 'runtime-status', mode, state: 'ready', connected: true,
+          providerState: 'ready', modes: [{ mode, enabled: true, state: 'ready' }],
+        })
+        if (url.pathname === '/api/dashboard' && query.scope === 'system') return fulfill(systemRead)
+        if (url.pathname === '/api/dashboard' && query.scope === 'project' && query.projectKey === projectKey) return fulfill(projectRead)
+        if (url.pathname === '/api/runtime/scheduler') return fulfill({ plans: [] })
+        if (url.pathname === '/api/ui/display-preference') return fulfill({ preference: { mode: 'current' }, defaultMode: 'current' })
+        if (url.pathname === `/api/tasks/${taskId.value}/dashboard`
+          && query.projectKey === projectKey && query.mode === mode) return fulfill(taskRead)
+        if (url.pathname === `/api/tasks/${taskId.value}/control/grant`
+          && query.projectKey === projectKey && query.mode === mode) return fulfill(taskGrantRead)
+        if (url.pathname === `/api/tasks/${taskId.value}/semantic`) return fulfill(semanticRead)
+        if (url.pathname === `/api/tasks/${taskId.value}/records`) return fulfill({
+          surface: 'runtime-task-records', scope, observedAt: '2026-10-17T00:00:00Z',
+          actions: [], raw: [], hasMore: false,
+        })
+        if (url.pathname === `/api/tasks/${taskId.value}/cycles`) {
+          if (foreignCycleResponse) {
+            const response = await fulfill({ ...cyclesRead, scope: { ...scope, projectKey: 'proj-beta' }, entries: [{ ...cyclesRead.entries[0], cycleId: 'cycle-foreign' }] })
+            nextCycleResponse?.()
+            return response
+          }
+          const response = await fulfill(cyclesRead)
+          nextCycleResponse?.()
+          return response
+        }
+        if (url.pathname === `/api/tasks/${taskId.value}/reviews`) return fulfill(reviewsRead)
+        if (url.pathname === `/api/tasks/${taskId.value}/inspection-occurrences`) return fulfill(occurrencesRead)
+        if (url.pathname === `/api/tasks/${taskId.value}/inspection-comparison`) {
+          if (wrongPairResponse) {
+            const response = await fulfill({ ...comparisonRead, right: { occurrenceId: 'occ-stale' } })
+            nextComparisonResponse?.()
+            return response
+          }
+          const response = await fulfill(comparisonRead)
+          nextComparisonResponse?.()
+          return response
+        }
+        return fulfill({
+          error: { code: 'fixture.unexpected-request', ownerId: 'test', message: `unexpected GET ${url.pathname}`, nextAction: 'keep this route explicit' },
+        }, 404)
+      })
+
+      const viewButton = fixturePage.locator('button[data-shell-section="view"]')
+      const waitForShellLayersClosed = async () => {
+        await fixturePage.waitForFunction(() => document.querySelectorAll('dialog.shell-layer[open]').length === 0)
+      }
+      const openHistory = async (view) => {
+        const activeDrawer = fixturePage.locator('dialog.shell-layer[open]:not([data-technical-detail])')
+        if (!(await activeDrawer.count())) await viewButton.click()
+        await activeDrawer.locator(`button[data-history-view="${view}"]`).click()
+      }
+      const backToView = async () => {
+        const activeDrawer = fixturePage.locator('dialog.shell-layer[open]:not([data-technical-detail])')
+        const back = activeDrawer.getByRole('button', { name: '返回查看方式', exact: true })
+        if (await back.isVisible()) {
+          await back.click()
+          await activeDrawer.locator('button[data-history-view]').first().waitFor()
+          return
+        }
+        if (!(await activeDrawer.count())) {
+          await viewButton.click()
+          await activeDrawer.waitFor({ state: 'visible' })
+        }
+      }
+      const expandDetail = async (root, summary) => {
+        const summaryNode = root.locator('details.history-detail > summary')
+          .filter({ hasText: new RegExp(`^${summary}$`) }).first()
+        const details = summaryNode.locator('..')
+        const visible = details.locator('dl')
+        if (!(await visible.isVisible())) await summaryNode.click()
+        await visible.waitFor()
+        return visible.innerText()
+      }
+      const expandInspectionItems = async () => {
+        const details = fixturePage.locator('[data-i2-history="inspections"] [data-occurrence="occ-1"] details.history-detail')
+          .filter({ hasText: '检查明细' }).first()
+        const rows = details.locator('[data-check-item="check-1"]')
+        if (!(await rows.isVisible())) await details.locator('summary').filter({ hasText: /^检查明细$/ }).click()
+        await rows.waitFor()
+        return rows.innerText()
+      }
+      const waitForResponse = (setSignal) => new Promise((resolveResponse) => {
+        setSignal(resolveResponse)
+      })
+      const waitForCycleRead = async () => {
+        await waitForResponse((resolveResponse) => { nextCycleResponse = resolveResponse })
+      }
+      const closeDrawer = async () => {
+        await fixturePage.locator('dialog.shell-layer[open]:not([data-technical-detail]) .shell-layer-close').click()
+        await waitForShellLayersClosed()
+      }
+      const scopedI2Reads = () => requests.filter((request) => request.path.includes('/api/tasks/')
+        && (request.path.endsWith('/cycles') || request.path.endsWith('/reviews')
+          || request.path.endsWith('/inspection-occurrences') || request.path.endsWith('/inspection-comparison')))
+
+      try {
+        const settle = () => fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+        await fixturePage.goto(`${server.url}/dashboard.html`, { waitUntil: 'domcontentloaded' })
+        await fixturePage.getByRole('link', { name: 'Alpha workspace', exact: true }).click()
+        await fixturePage.waitForURL((url) => url.pathname.endsWith('/tasks.html') && url.searchParams.get('projectKey') === projectKey)
+        const taskLink = fixturePage.locator('a.task-item-main').filter({
+          has: fixturePage.getByRole('heading', { name: 'Scoped I2 history proof', exact: true }),
+        })
+        await taskLink.waitFor()
+        const taskHref = new URL(await taskLink.getAttribute('href'), fixturePage.url())
+        if (taskHref.pathname !== '/task-dashboard.html'
+          || taskHref.searchParams.get('task') !== taskId.value
+          || taskHref.searchParams.get('projectKey') !== projectKey
+          || taskHref.searchParams.get('mode') !== mode) {
+          throw new Error(`task row does not carry the formal scoped href: ${taskHref.href}`)
+        }
+        await taskLink.click()
+        await fixturePage.waitForURL((url) => url.pathname.endsWith('/task-dashboard.html')
+          && url.searchParams.get('task') === taskId.value
+          && url.searchParams.get('projectKey') === projectKey
+          && url.searchParams.get('mode') === mode)
+        await fixturePage.getByRole('heading', { name: 'Scoped I2 history proof', exact: true }).waitFor()
+        await settle()
+
+        await openHistory('cycles')
+        await fixturePage.locator('[data-i2-history="cycles"]').waitFor()
+        const cycleRequest = scopedI2Reads().find((request) => request.path.endsWith('/cycles'))
+        record(`${label} cycle read carries the exact project and mode`, cycleRequest?.query.projectKey === projectKey
+          && cycleRequest?.query.mode === mode, cycleRequest)
+        const cycleText = await fixturePage.locator('[data-i2-history="cycles"]').innerText()
+        const cycleDetails = await expandDetail(fixturePage.locator('[data-i2-history="cycles"]'), '证据详情')
+        record(`${label} cycle main copy leads with human history and keeps scope machine fields in details`,
+          cycleText.includes('核对作用域边界') && cycleText.includes('当前执行位置未知')
+            && !cycleText.includes('digest-cycle-open') && cycleDetails.includes(projectKey)
+            && cycleDetails.includes('projectKey') && cycleDetails.includes(mode)
+            && cycleDetails.includes('mode'), { cycleText, cycleDetails })
+        record(`${label} unknown current never marks the latest historical cycle as viewed`,
+          await fixturePage.locator('[data-business-cycle="cycle-1"] .history-viewed-tag').count() === 0)
+
+        foreignCycleResponse = true
+        const cycleResponse = waitForCycleRead()
+        await fixturePage.getByRole('button', { name: '重新读取历史', exact: true }).click()
+        await cycleResponse
+        const foreignDrawer = fixturePage.locator('dialog.shell-layer[open]:not([data-technical-detail])')
+        await foreignDrawer.getByText('历史读取范围不匹配', { exact: true }).waitFor()
+        const foreignDrawerText = await foreignDrawer.innerText()
+        record(`${label} foreign project response is refused before rendering`,
+          foreignDrawerText.includes('历史读取范围不匹配')
+          && foreignDrawerText.includes('请从所属项目重新打开任务历史')
+          && !foreignDrawerText.includes('具体原因尚未确认')
+          && await fixturePage.locator('[data-business-cycle="cycle-foreign"]').count() === 0,
+          foreignDrawerText)
+
+        foreignCycleResponse = false
+        await backToView()
+        await openHistory('reviews')
+        await fixturePage.locator('[data-i2-history="reviews"]').waitFor()
+        const reviewRequest = scopedI2Reads().find((request) => request.path.endsWith('/reviews'))
+        record(`${label} review read carries the exact project and mode`, reviewRequest?.query.projectKey === projectKey && reviewRequest?.query.mode === mode, reviewRequest)
+
+        await backToView()
+        await openHistory('inspections')
+        await fixturePage.locator('[data-i2-history="inspections"]').waitFor()
+        const inspectionRequest = scopedI2Reads().find((request) => request.path.endsWith('/inspection-occurrences'))
+        record(`${label} inspection read carries the exact project and mode`, inspectionRequest?.query.projectKey === projectKey && inspectionRequest?.query.mode === mode, inspectionRequest)
+        const inspectionText = await fixturePage.locator('[data-i2-history="inspections"]').innerText()
+        const inspectionItemText = await expandInspectionItems()
+        record(`${label} inspection main layer shows criterion, judged result and unknown current`,
+          inspectionItemText.includes('核对任务只读取当前项目') && inspectionItemText.includes('项目范围一致')
+            && inspectionText.includes('当前执行位置未知') && !inspectionItemText.includes('digest-inspection-definition'),
+          inspectionItemText)
+        const inspectionDetails = await expandDetail(fixturePage.locator('[data-i2-history="inspections"]'), '证据详情')
+        const inspectionCheckDetails = await expandDetail(
+          fixturePage.locator('[data-i2-history="inspections"] [data-occurrence="occ-1"]'),
+          '证据详情',
+        )
+        record(`${label} inspection details expose project and mode`,
+          inspectionDetails.includes(projectKey) && inspectionDetails.includes('projectKey')
+            && inspectionDetails.includes(mode) && inspectionDetails.includes('mode'), inspectionDetails)
+        record(`${label} inspection item details expose check identity after opening`,
+          inspectionCheckDetails.includes('check-1') && inspectionCheckDetails.includes('checkId')
+            && inspectionCheckDetails.includes('项目范围一致') && inspectionCheckDetails.includes('judgment'),
+          inspectionCheckDetails)
+        record(`${label} viewed inspection remains distinct from the unknown current`,
+          await fixturePage.locator('[data-i2-history="inspections"] .history-viewed-tag').count() === 1
+            && (await fixturePage.locator('[data-i2-history="inspections"] .history-viewed-tag').innerText()).includes('正在查看'))
+
+        await fixturePage.locator('[data-occurrence="occ-1"]').getByRole('button', { name: '选择为对比基准', exact: true }).click()
+        await fixturePage.locator('[data-occurrence="occ-2"]').getByRole('button', { name: '作为右侧对比', exact: true }).click()
+        await fixturePage.locator('[data-i2-history="comparison"]').waitFor()
+        const comparisonRequest = scopedI2Reads().find((request) => request.path.endsWith('/inspection-comparison'))
+        record(`${label} comparison read carries exact scope and occurrence pair`, comparisonRequest?.query.projectKey === projectKey
+          && comparisonRequest?.query.mode === mode && comparisonRequest?.query.left === 'occ-1'
+          && comparisonRequest?.query.right === 'occ-2', comparisonRequest)
+        const comparisonText = await fixturePage.locator('[data-i2-history="comparison"]').innerText()
+        record(`${label} comparison changes stay human readable`,
+          comparisonText.includes('有变化') && comparisonText.includes('无变化') && comparisonText.includes('未可比对'), comparisonText)
+
+        await fixturePage.getByRole('button', { name: '返回巡检历史', exact: true }).click()
+        await fixturePage.locator('[data-occurrence="occ-2"]').waitFor()
+        wrongPairResponse = true
+        const comparisonResponse = waitForResponse((resolveResponse) => { nextComparisonResponse = resolveResponse })
+        await fixturePage.locator('[data-occurrence="occ-1"]').getByRole('button', { name: '选择为对比基准', exact: true }).click()
+        await fixturePage.locator('[data-occurrence="occ-2"]').getByRole('button', { name: '作为右侧对比', exact: true }).click()
+        await comparisonResponse
+        const pairDrawer = fixturePage.locator('dialog.shell-layer[open]:not([data-technical-detail])')
+        await pairDrawer.getByText('巡检对比记录与所选轮次不一致', { exact: true }).waitFor()
+        const pairDrawerText = await pairDrawer.innerText()
+        record(`${label} mismatched requested occurrence pair is refused`,
+          pairDrawerText.includes('巡检对比记录与所选轮次不一致')
+          && pairDrawerText.includes('请重新选择两次记录比较')
+          && !pairDrawerText.includes('具体原因尚未确认'), pairDrawerText)
+        record(`${label} mismatched pair never mounts foreign comparison rows`,
+          await fixturePage.locator('[data-comparison-item="check-changed"]').count() === 0)
+
+        await backToView()
+        await openHistory('inspections')
+        await fixturePage.locator('[data-i2-history="inspections"]').waitFor()
+        const layout = await fixturePage.locator('dialog.shell-layer[open]:not([data-technical-detail])').evaluate((node) => {
+          const rect = node.getBoundingClientRect()
+          return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }
+        })
+        if (viewport.width === 1280) {
+          record(`${label} drawer opens beside the main content`, layout.right >= viewport.width - 20 && layout.left > viewport.width / 2, layout)
+        } else {
+          record(`${label} drawer opens from the mobile bottom edge`, layout.bottom >= viewport.height - 1
+            && layout.left <= 1 && layout.right >= viewport.width - 1 && layout.top > 0, layout)
+        }
+
+        await closeDrawer()
+        await fixturePage.waitForFunction(() => document.activeElement?.dataset?.shellSection === 'view')
+        const focused = await fixturePage.evaluate(() => document.activeElement?.dataset?.shellSection)
+        record(`${label} closing the history drawer restores focus to 查看方式`, focused === 'view', focused)
+
+        record(`${label} scoped I2 flow issues only GETs`,
+          requests.length > 0 && requests.every((request) => request.method === 'GET'), requests.filter((request) => request.method !== 'GET'))
+        record(`${label} scoped I2 flow raises no page error`, errors.length === 0, errors)
+        await fixturePage.screenshot({ path: join(artifactDir, `i2-scoped-${viewport.width}.png`), fullPage: true })
+      } catch (error) {
+        record(`${label} scoped I2 browser fixture completed`, false, {
+          message: error.message,
+          errors,
+          pageText: await fixturePage.locator('body').innerText().catch(() => ''),
+        })
+        await fixturePage.screenshot({ path: join(artifactDir, `i2-scoped-failure-${viewport.width}.png`), fullPage: true }).catch(() => {})
+      } finally {
+        observe(`${label} scoped I2 requests`, requests)
+        await fixturePage.close()
       }
     }
   }

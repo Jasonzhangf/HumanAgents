@@ -133,6 +133,11 @@ export function taskControlScopeQuery({ projectKey, mode } = {}) {
   return `?${new URLSearchParams({ projectKey, mode })}`
 }
 
+function appendI2TaskScope(query, scope) {
+  for (const [key, value] of new URLSearchParams(taskControlScopeQuery(scope))) query.set(key, value)
+  return query
+}
+
 // A checkpoint asset body is addressed only by its role, or by the exact adopted
 // child triple. The four checkpoint selection keys on the query already name the
 // exact checkpoint; nothing else may be sent as authority.
@@ -336,33 +341,41 @@ export function createRuntimeApi(options = {}) {
     // injected I2 authority is service-scoped, so the builder carries only the
     // exact task identity and the read-only selection/filters. `viewed` is a
     // selection: it never writes the current execution position.
-    taskBusinessCycles: (taskId, { viewed, cursor, limit = 20 } = {}) => {
-      const query = new URLSearchParams({ limit: String(limit) })
+    taskBusinessCycles: (taskId, { projectKey, mode, viewed, cursor, limit = 20 } = {}) => {
+      const query = appendI2TaskScope(new URLSearchParams({ limit: String(limit) }), { projectKey, mode })
       if (viewed) query.set('viewed', viewed)
       if (cursor) query.set('cursor', cursor)
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/cycles?${query}`, { method: 'GET' })
     },
-    taskBusinessCycle: (taskId, cycleId) => request(`/api/tasks/${encodeURIComponent(taskId.value)}/cycles/${encodeURIComponent(cycleId)}`, { method: 'GET' }),
+    taskBusinessCycle: (taskId, cycleId, { projectKey, mode } = {}) => {
+      const query = appendI2TaskScope(new URLSearchParams(), { projectKey, mode })
+      const suffix = query.size ? `?${query}` : ''
+      return request(`/api/tasks/${encodeURIComponent(taskId.value)}/cycles/${encodeURIComponent(cycleId)}${suffix}`, { method: 'GET' })
+    },
     // Independent AND filters: cycleId and milestoneId are separate query fields
     // and are never merged into one identity.
-    taskMilestoneReviews: (taskId, { cycleId, milestoneId, cursor, limit = 20 } = {}) => {
-      const query = new URLSearchParams({ limit: String(limit) })
+    taskMilestoneReviews: (taskId, { projectKey, mode, cycleId, milestoneId, cursor, limit = 20 } = {}) => {
+      const query = appendI2TaskScope(new URLSearchParams({ limit: String(limit) }), { projectKey, mode })
       if (cursor) query.set('cursor', cursor)
       if (cycleId) query.set('cycleId', cycleId)
       if (milestoneId) query.set('milestoneId', milestoneId)
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/reviews?${query}`, { method: 'GET' })
     },
-    taskInspectionOccurrences: (taskId, { viewed, cursor, limit = 20 } = {}) => {
-      const query = new URLSearchParams({ limit: String(limit) })
+    taskInspectionOccurrences: (taskId, { projectKey, mode, viewed, cursor, limit = 20 } = {}) => {
+      const query = appendI2TaskScope(new URLSearchParams({ limit: String(limit) }), { projectKey, mode })
       if (viewed) query.set('viewed', viewed)
       if (cursor) query.set('cursor', cursor)
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/inspection-occurrences?${query}`, { method: 'GET' })
     },
-    taskInspectionOccurrence: (taskId, occurrenceId) => request(`/api/tasks/${encodeURIComponent(taskId.value)}/inspection-occurrences/${encodeURIComponent(occurrenceId)}`, { method: 'GET' }),
+    taskInspectionOccurrence: (taskId, occurrenceId, { projectKey, mode } = {}) => {
+      const query = appendI2TaskScope(new URLSearchParams(), { projectKey, mode })
+      const suffix = query.size ? `?${query}` : ''
+      return request(`/api/tasks/${encodeURIComponent(taskId.value)}/inspection-occurrences/${encodeURIComponent(occurrenceId)}${suffix}`, { method: 'GET' })
+    },
     // Comparison joins by checkId and immutable definition identity/version on
     // the server; the browser only names the exact left/right occurrences.
-    taskInspectionComparison: (taskId, { left, right }) => {
-      const query = new URLSearchParams({ left, right })
+    taskInspectionComparison: (taskId, { projectKey, mode, left, right }) => {
+      const query = appendI2TaskScope(new URLSearchParams({ left, right }), { projectKey, mode })
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/inspection-comparison?${query}`, { method: 'GET' })
     },
     taskHistory: (taskId, { cursor, limit = 20, kinds, search } = {}) => {

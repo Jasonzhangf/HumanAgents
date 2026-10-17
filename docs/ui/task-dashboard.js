@@ -308,18 +308,26 @@ const checkpointHistoryRead = createScopedReadPublication((scope) => api.taskChe
   ...(scope.checkpointQuery ? { checkpointQuery: scope.checkpointQuery } : {}),
 }))
 const businessCyclesRead = createScopedReadPublication((scope) => api.taskBusinessCycles(scope.taskId, {
+  projectKey: scope.projectKey,
+  mode: scope.mode,
   ...(scope.viewed ? { viewed: scope.viewed } : {}),
   ...(scope.cursor ? { cursor: scope.cursor } : {}),
 }))
 const milestoneReviewsRead = createScopedReadPublication((scope) => api.taskMilestoneReviews(scope.taskId, {
+  projectKey: scope.projectKey,
+  mode: scope.mode,
   ...(scope.filters || {}),
   ...(scope.cursor ? { cursor: scope.cursor } : {}),
 }))
 const inspectionOccurrencesRead = createScopedReadPublication((scope) => api.taskInspectionOccurrences(scope.taskId, {
+  projectKey: scope.projectKey,
+  mode: scope.mode,
   ...(scope.viewed ? { viewed: scope.viewed } : {}),
   ...(scope.cursor ? { cursor: scope.cursor } : {}),
 }))
 const inspectionComparisonRead = createScopedReadPublication((scope) => api.taskInspectionComparison(scope.taskId, {
+  projectKey: scope.projectKey,
+  mode: scope.mode,
   left: scope.filters?.left,
   right: scope.filters?.right,
 }))
@@ -780,17 +788,30 @@ function historyIdentityFailure(projection, expectedSurface) {
   return null
 }
 
-// I2 history carries a task scope instead of an I5 mode/taskId pair. The
-// identity guard is the same idea: a projection for another task or surface is
-// refused rather than rendered as this task's history.
-function i2IdentityFailure(projection, expectedSurface) {
+// I2 history carries a task scope instead of an I5 mode/taskId pair. A missing
+// or mismatched scope must never fall back to the surrounding task.
+function i2IdentityFailure(projection, expectedSurface, expectedComparison) {
   if (projection.surface !== expectedSurface
-    || projection.taskScope?.taskId?.value !== explicitScope.taskId?.value) {
+    || projection.taskScope?.taskId?.value !== explicitScope.taskId?.value
+    || projection.scope?.kind !== 'task'
+    || projection.scope.projectKey !== explicitScope.projectKey
+    || projection.scope.mode !== explicitScope.mode
+    || projection.scope.taskId?.value !== explicitScope.taskId?.value) {
     return {
       code: 'history.identity.mismatch',
       ownerId: 'humanagent.ui',
-      message: '历史读取返回了其他任务或 surface 的投影',
+      message: '历史读取返回了其他项目、任务、模式或 surface 的投影',
       nextAction: '重新打开该任务的历史',
+    }
+  }
+  if (expectedComparison
+    && (projection.left?.occurrenceId !== expectedComparison.left
+      || projection.right?.occurrenceId !== expectedComparison.right)) {
+    return {
+      code: 'history.comparison.mismatch',
+      ownerId: 'humanagent.ui',
+      message: '巡检对比返回了非当前所选的巡检记录对',
+      nextAction: '重新选择两次巡检后再执行对比',
     }
   }
   return null
@@ -1413,7 +1434,7 @@ async function renderInspectionComparisonView(host, left, right) {
     renderPageError(host, read.state.failure)
     return
   }
-  const mismatch = i2IdentityFailure(read.state.content, 'runtime-inspection-comparison')
+  const mismatch = i2IdentityFailure(read.state.content, 'runtime-inspection-comparison', { left, right })
   if (mismatch) {
     renderPageError(host, mismatch)
     return
