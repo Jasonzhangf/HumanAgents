@@ -88,3 +88,10 @@ SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 bin
   1. 在唯一集成候选工作树合流后端与前端候选分支，跑通 `pnpm dagpipe:validate`、`pnpm typecheck`、`pnpm build:app` 与受影响聚焦测试。
   2. 完成垂直切片 1（`M0 + M1 + M2`：真实 RCC 4444 + Ego14 浏览器首屏/新建任务/Checkpoint 验收）与 1 次独立 Milestone Review 后合入 `main`。
   3. 推进垂直切片 2（`M3 + M4 + M5`：子 Agent 动态调用与审查闭环 + 偏好/响应式抽屉验收）。
+
+## 2026-10-17 Pool 并发占槽独立增量
+
+- 完整修复 source `4990a696` 已集成至 main `13dab3ac`：复用 idle 实例前同步占位，失败时只恢复仍属自己的未持 lease 预占，防止同 tick 两次 acquire 返回同一实例。仅 runtime-pool 与原 consumer 两文件。
+- 原两 idle 公开反例 RED 已复用；当前 main 派生候选同编译选项定向编译成功，相关 consumer 9/9，main 组合 distinct-idle 原用例 1/1。原目录级 retry fixture 类型错误保留，未改无关 fixture 或断言。独立 Opus 本次 quota 错误后，Gemini 4 medium SUCCESS/exit0；现有 controller 裁决 pass、findings[]。
+- main source contracts/config/App build、package、global install 均成功。自有 canonical 隔离实例正式 restart generation1/PID12468→generation2/PID17889，官方重新配对后公开 runtime status HTTP200，模型请求0；正式 SIGINT→dispose 后 PID absent、lease disposedAt2026-10-17T14:46:08.691Z。原 gen21/p3 未动。初次诊断误用 `/api/status` 的404保留，实际公开入口为 `/api/runtime/status`。
+- 来源树 clean/无活动进程后正常 remove/prune/path absent；证据在外置 `provider-pool-delivery-review-gemini-r124-20261017/` 的 classification、main-build/package/install、restart 与 runtime-read 回执。本增量不证明完整 native 目标或真实 RCC App Task 已完成。
