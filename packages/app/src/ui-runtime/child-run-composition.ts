@@ -2,10 +2,17 @@ import { createHash } from 'node:crypto';
 import {
   canonicalJsonStringify,
   id,
+  operationIdempotencyKey,
+  operationSemanticFingerprint,
+  operationSemanticFingerprintKey,
+  validateRouteSelection,
   type EvidenceRef,
+  type OperationEvent,
+  type OperationResult,
   type ProviderExecutionIdentityRef,
   type ProviderToolDefinition,
   type RawAsset,
+  type RouteSelection,
   type ScopeRef,
   type WorkAssignment,
 } from '../../../contracts/src/index.js';
@@ -21,6 +28,7 @@ import { readSemanticTurnContext } from '../../../runtime/src/context/semantic-t
 import type { ToolExecutionGateway } from '../../../runtime/src/gateway/gateway.js';
 import type {
   OperationControlBinding,
+  OperationControlRecord,
   OperationPermissionPort,
   OperationTaskBoundaryPort,
 } from '../../../runtime/src/gateway/ports.js';
@@ -47,7 +55,12 @@ import {
   createStandardTurnEndWireExecutor,
   isStandardTurnEndCall,
 } from './standard-turn-composition.js';
-import type { BindChildRunPort, BoundChildRun, ChildBodyAssetPort } from './child-producer.js';
+import type {
+  BindChildRunPort,
+  BoundChildRun,
+  ChildBodyAssetPort,
+  ChildControlLifecyclePort,
+} from './child-producer.js';
 import type { ToolOperationAdmissionReceipt } from './execution-admission.js';
 
 const OWNER = 'humanagent.app.child-run-composition';
@@ -128,6 +141,77 @@ function parentAdmissionEvidence(binding: OperationControlBinding, scope: ScopeR
     source: OWNER,
     locator: binding.admissionCommitRef.commitId,
     scope,
+  };
+}
+
+/**
+ * The child's own control chain over the existing Gateway append owner. The
+ * binding is the durable parent namespace binding; the operation identity,
+ * registration, admission receipts, route and fingerprint come from the exact
+ * admitted child. No parent `task.execute` control is copied.
+ */
+function createChildControlLifecycle(input: {
+  readonly gateway: ToolExecutionGateway;
+  readonly binding: OperationControlBinding;
+  readonly operation: ToolOperationAdmissionReceipt;
+  readonly executionEpoch: number;
+  readonly occurredAt: () => string;
+  readonly admissionEvidenceRefs: readonly EvidenceRef[];
+}): ChildControlLifecyclePort {
+  const { intent, registration } = input.operation;
+  const route: RouteSelection = {
+    operationId: intent.operationId,
+    routeId: registration.routeId,
+    routeVersion: registration.routeVersion,
+    mode: registration.mode,
+    contractVersion: registration.contractVersion,
+    effectiveScope: intent.requestedScope,
+    selectionReason: 'explicit child tool operation admission',
+    selectedAt: input.occurredAt(),
+  };
+  validateRouteSelection(route, registration);
+  const base: OperationControlRecord = {
+    binding: input.binding,
+    childAdmission: input.operation.childAdmission,
+    intent,
+    registration,
+    route,
+    status: 'accepted',
+    executionEpoch: input.executionEpoch,
+    namespaceKey: operationIdempotencyKey(intent),
+    fingerprintKey: operationSemanticFingerprintKey(operationSemanticFingerprint(intent, registration)),
+  };
+  const commit = async (
+    status: OperationControlRecord['status'],
+    kind: OperationEvent['kind'],
+    evidenceRefs: readonly EvidenceRef[],
+    result?: OperationResult,
+  ): Promise<void> => {
+    await input.gateway.applyExternalLifecycle({
+      control: { ...base, status, ...(result === undefined ? {} : { result }) },
+      event: {
+        eventId: `child-control:${kind}:${intent.operationId.value}`,
+        schemaVersion: 1,
+        kind,
+        operationId: intent.operationId,
+        taskId: intent.taskId,
+        executionEpoch: input.executionEpoch,
+        status,
+        occurredAt: input.occurredAt(),
+        evidenceRefs: [...evidenceRefs],
+      },
+    });
+  };
+  return {
+    accept: () => commit('accepted', 'operation.accepted', input.admissionEvidenceRefs),
+    running: ({ evidenceRefs }) => commit('running', 'operation.started', evidenceRefs),
+    settle: ({ status, evidenceRefs, result }) => commit(status,
+      status === 'succeeded' ? 'operation.completed'
+        : status === 'failed' ? 'operation.failed'
+        : status === 'cancelled' ? 'operation.cancelled'
+        : 'operation.blocked',
+      evidenceRefs,
+      result),
   };
 }
 
@@ -237,6 +321,14 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
     const currentTurnRef = `active-turn://${turnId}`;
     const admissionEvidence = [childAdmissionEvidence(operation, childScope)];
     const recoveryStateRef = parentAdmissionEvidence(parentBinding, childScope);
+    const control = createChildControlLifecycle({
+      gateway: input.admission.gateway,
+      binding: parentBinding,
+      operation,
+      executionEpoch: incarnation.executionEpoch,
+      occurredAt: () => input.now().toISOString(),
+      admissionEvidenceRefs: admissionEvidence,
+    });
     const admittedTurn = produceAdmittedTurn({
       runtime: {
         runtimeId: incarnation.runtimeId,
@@ -319,7 +411,7 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
           if (unit.kind === 'initial-input') units.push({ kind: 'message', role: 'user', text: text(unit.bytes) });
           else if (unit.kind === 'content') units.push({ kind: 'message', role: 'assistant', text: text(unit.bytes) });
           else if (unit.kind === 'tool-call') units.push({ kind: 'tool-call', callId: unit.callId, toolId: unit.toolId, arguments: unit.arguments });
-          else units.push({ kind: 'tool-result', callId: unit.callId, toolId: unit.toolId, output: text(unit.rawOutput), status: unit.status, evidenceRefs: [unit.rawOutputRef] });
+          else units.push({ kind: 'tool-result', callId: unit.callId, toolId: unit.toolId, output: text(unit.rawOutput), status: unit.status, evidenceRefs: [unit.rawOutputRef, ...unit.evidenceRefs] });
         }
       }
       return { canonical: { units }, ...(resolved.instructions === undefined ? {} : { instructions: resolved.instructions }) };
@@ -426,6 +518,7 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
       toolDefinitions: [...input.tools, ADVERTISED_STANDARD_TURN_END_TOOL],
       toolExecution,
       standardEndOwner: endOwner,
+      control,
     };
     return bound;
   };

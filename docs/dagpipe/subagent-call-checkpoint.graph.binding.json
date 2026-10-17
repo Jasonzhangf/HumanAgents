@@ -28,13 +28,13 @@
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "执行角色并返回语义交付"
+      "designNote": "执行角色并由真实 child controller 通过既有 Gateway typed control owner 提交登记、running 与真实 settle/close 后继；业务 output、模型文本或 diagnostic 不产生控制真相。"
     },
     "acceptance": {
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "由编排者输出接纳或待补充决定"
+      "designNote": "由编排者接纳精炼结果；缺少真实控制收拢或提交失败时保留恢复责任并显式失败，不以 refined 结果代替。"
     }
   }
 }

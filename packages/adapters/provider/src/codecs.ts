@@ -302,6 +302,9 @@ const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
   ['create_goal', 'create_goal'],
   ['update_goal', 'update_goal'],
   ['present', 'present'],
+  ['child.call', 'child_call'],
+  ['child.adopt', 'child_adopt'],
+  ['child.not_select', 'child_not_select'],
 ]);
 const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
   ['file_read', 'file.read'],
@@ -316,6 +319,9 @@ const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
   ['create_goal', 'create_goal'],
   ['update_goal', 'update_goal'],
   ['present', 'present'],
+  ['child_call', 'child.call'],
+  ['child_adopt', 'child.adopt'],
+  ['child_not_select', 'child.not_select'],
 ]);
 
 /** Server-side tools the backend harness may invoke on the model's behalf. */
