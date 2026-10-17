@@ -292,6 +292,20 @@ interface Wire {
   readonly authorization?: string;
 }
 
+interface SemanticCheckpointWire {
+  readonly goal?: unknown;
+  readonly checkpointId?: unknown;
+  readonly committedAt?: unknown;
+  readonly description?: unknown;
+  readonly evidenceRefs?: unknown;
+  readonly adoptedChildren?: readonly {
+    readonly childTurnId?: unknown;
+    readonly scope?: unknown;
+    readonly content?: unknown;
+    readonly text?: unknown;
+  }[];
+}
+
 function deferred(): { readonly promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;
   const promise = new Promise<void>((settle) => { resolve = settle; });
@@ -357,6 +371,68 @@ function declaresTurnEnd(raw: string): boolean {
 /** True when the request declares the Harness standard-end tool surface. */
 function hasTurnEndSurface(raw: string): boolean {
   return (parseResponsesWire(raw)?.tools ?? []).some((tool) => tool.name === 'humanagent_turn_end');
+}
+
+function semanticCheckpointWires(raw: string): readonly SemanticCheckpointWire[] {
+  const checkpoints: SemanticCheckpointWire[] = [];
+  for (const item of parseResponsesWire(raw)?.input ?? []) {
+    if (item.type !== 'message' || item.role !== 'assistant') continue;
+    for (const part of item.content ?? []) {
+      if (typeof part.text !== 'string') continue;
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(part.text);
+      } catch {
+        continue;
+      }
+      if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue;
+      const checkpoint = candidate as SemanticCheckpointWire;
+      if (['goal', 'actions', 'result', 'nextStep', 'adoptedChildren'].every((key) =>
+        Object.hasOwn(checkpoint, key))) checkpoints.push(checkpoint);
+    }
+  }
+  return checkpoints;
+}
+
+async function assertPriorSemanticCheckpointWire(
+  fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
+  raw: string,
+  taskId: { readonly value: string },
+  goal: string,
+): Promise<void> {
+  const wire = semanticCheckpointWires(raw).find((entry) => entry.goal === goal);
+  assert.ok(wire, `the captured execution request contains the ${goal} semantic checkpoint`);
+  if (!wire) throw new Error(`the captured execution request is missing the ${goal} semantic checkpoint`);
+  const publicationRecord = (await fixture.journal.verify()).records.find((record) =>
+    record.payload?.['kind'] === 'native-semantic-history-publication'
+    && record.scope.taskId?.value === taskId.value
+    && (() => {
+      const relationship = record.payload?.['checkpoint'];
+      if (typeof relationship !== 'object' || relationship === null || Array.isArray(relationship)) return false;
+      const checkpoint = (relationship as Record<string, unknown>)['checkpoint'];
+      if (typeof checkpoint !== 'object' || checkpoint === null || Array.isArray(checkpoint)) return false;
+      const summary = (checkpoint as Record<string, unknown>)['summary'];
+      return typeof summary === 'string' && summary.includes(goal);
+    })());
+  assert.ok(publicationRecord, `the durable ${goal} semantic publication exists`);
+  if (!publicationRecord) throw new Error(`the durable ${goal} semantic publication is absent`);
+  const relationship = publicationRecord.payload?.['checkpoint'] as {
+    readonly checkpoint?: { readonly id?: unknown; readonly summary?: unknown; readonly evidenceRefs?: unknown };
+    readonly receipt?: { readonly committedAt?: unknown };
+  } | undefined;
+  const checkpoint = relationship?.checkpoint;
+  if (!checkpoint || typeof checkpoint.summary !== 'string') {
+    throw new Error(`the durable ${goal} semantic checkpoint is malformed`);
+  }
+  assert.deepEqual(wire.checkpointId, checkpoint.id,
+    `the ${goal} wire checkpointId equals the durable typed checkpoint ID`);
+  assert.equal(wire.committedAt, relationship?.receipt?.committedAt,
+    `the ${goal} wire committedAt equals the durable receipt time`);
+  assert.equal(wire.description, checkpoint.summary,
+    `the ${goal} wire description equals the durable checkpoint summary`);
+  assert.deepEqual(wire.evidenceRefs, checkpoint.evidenceRefs,
+    `the ${goal} wire top-level evidenceRefs equal the committed evidence references`);
+  assert.ok(Array.isArray(wire.adoptedChildren), `the ${goal} wire keeps its adopted children`);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
@@ -1239,6 +1315,7 @@ test('native two.turn public CLI consumer retains adopted child context and comp
     for (const expected of [TURN_ONE_GOAL, TURN_ONE_ACTIONS, TURN_ONE_RESULT, TURN_ONE_NEXT, CHILD_BODY]) {
       assert.ok(turnTwoContext.includes(expected), `the second turn retains the first-turn semantic fact: ${expected}`);
     }
+    await assertPriorSemanticCheckpointWire(fixture, turnTwoWire.body, taskId, TURN_ONE_GOAL);
     assert.equal(turnTwoWire.body.includes('call-parent-child'), false,
       'the second turn excludes the first turn raw child-call history');
     assert.equal(turnTwoWire.body.includes('call-parent-adopt'), false,
@@ -1354,6 +1431,8 @@ test('native three.turn public CLI consumer retains multi-turn semantic history 
       assert.equal(turnThreeWire.body.includes(rawCallId), false,
         `the third turn excludes prior raw execution history: ${rawCallId}`);
     }
+    await assertPriorSemanticCheckpointWire(fixture, turnThreeWire.body, taskId, TURN_ONE_GOAL);
+    await assertPriorSemanticCheckpointWire(fixture, turnThreeWire.body, taskId, TURN_TWO_GOAL);
     assert.equal(turnThreeWire.body.includes(TURN_TWO_DELIVERY), false,
       'the third turn excludes the prior turn delivery body from semantic history');
 

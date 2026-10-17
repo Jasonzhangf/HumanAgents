@@ -404,6 +404,10 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
           objective: message.objective, rules: message.rules, successCriteria: message.successCriteria,
           failureCriteria: message.failureCriteria, incompleteCriteria: message.incompleteCriteria }) });
         else if (message.kind === 'semantic-checkpoint') units.push({ kind: 'message', role: 'assistant', text: canonicalJsonStringify({
+          checkpointId: message.checkpoint.checkpointId,
+          committedAt: message.checkpoint.committedAt,
+          description: message.checkpoint.description,
+          evidenceRefs: message.checkpoint.evidenceRefs,
           goal: message.checkpoint.goal, actions: message.checkpoint.did, result: message.checkpoint.result, nextStep: message.checkpoint.next,
           adoptedChildren: message.checkpoint.adoptedChildren.map((child) => ({
             childTurnId: child.childTurnId,
