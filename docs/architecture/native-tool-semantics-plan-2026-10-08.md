@@ -1,133 +1,72 @@
 # 原生推理逐工具语义规则设计
 
-状态：DESIGN-RULES / D0-A-SOURCE-INVENTORY-COMPLETE / PENDING-TOOL-OWNER-REVIEW。独立 planner 与 D0-A source inventory 已交叉核对主要注册/执行边界；尚未实施提取器、执行语义测试或取得工具 owner 的独立 review PASS。
+状态：DESIGN-RULES / NATIVE-SURFACE-17 / INCREMENT-1-DOCS。独立 planner 已确认 12 个基础 Responses 工具、标准 turn close、三个条件 parent child 控制和一个 child delivery 的语义边界。此文档候选只对齐设计、规则和 DAG 元数据；它不实施运行时规则、不证明 Provider wire，也不宣称 live exposure 完成。
 
-递进实施步骤与验收以主编排单独维护的实施计划为准；该计划不属于本 docs-only 候选，本文件不复制它。D0-A inventory：`/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261008/d0-a/tool-inventory.md`。本表是 D0/F-H 的审查输入，不能把列出工具解释成实际可用。
+递进实施步骤与验收以主编排单独维护的实施计划为准；该计划不属于本 docs-only 候选，本文件不复制它。D0-A inventory：`/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261008/d0-a/tool-inventory.md`。本表不能把列出工具解释成每个请求都已启用。
 
-工具身份按 `(surface, tool ID, binding, route)` 识别。同名工具不得跨 Responses Provider、Explicit Brain catalog、Gateway route 和 role template 合并；只有 inventory 标记为当前注册且执行端已接线的具体实例才可清理 raw。Inventory 中的 `exposure-unverified`、`declared-only`、`unsupported-tool` 与 `not-found-within-audited-scope` 各有不同含义，实施时保留原状态，不折叠成成功/失败布尔值。
+工具身份按 `(surface, tool ID, binding, route)` 识别。同名工具不得跨 Responses Provider、Explicit Brain catalog、Gateway route 和 role template 合并。只有 inventory 标记为当前注册且执行端已接线的具体实例才可清理 raw。`exposure-unverified`、`declared-only`、`unsupported-tool` 与 `not-found-within-audited-scope` 保持不同含义，不折叠成成功或失败布尔值。
 
-## 每个实际工具的语义提取规则
+## 当前 native 工具联合面
 
-实施前生成绑定候选、角色、配置与 capability digest 的实际工具 inventory。区分“注册”“对角色可见”“通过准入”“执行端已接线”。缺 port 的工具保持 unavailable，不能只因模板列出名称就宣称可用。
+当前 native 语义审查的联合面是 17 个工具：
 
-所有规则共同保存：工具身份与完整执行绑定、原始证据引用/digest、提取器版本、决定性事实、结论范围、失败/unknown、截断或遗漏原因。提取器不能再执行工具、批准状态、提交 checkpoint 或触发控制命令。
+1. 12 个基础 Responses 工具：`file.read`、`file.list`、`file.search`、`file.write`、`file.edit`、`bash`、`todo_write`、`get_goal`、`create_goal`、`update_goal`、`present`、`web.search`。
+2. 标准 turn close：`humanagent_turn_end`。
+3. 条件 parent child 控制：`child.call`、`child.adopt`、`child.not_select`。
+4. child 精炼 delivery：`humanagent_child_deliver`。
 
-以下是已核对工具的逐项规则。未实际暴露的工具按 inventory 标记，不能假定上线。
+这是工具联合面，不是单次请求的启用清单。基础工具受实际 route、workspace 和 capability 约束；parent child 控制只在 roster 绑定时进入 parent 请求；`humanagent_child_deliver` 只在 child run 中进入；`humanagent_turn_end` 只在已准入的 standard closure 路径中进入。任何请求只应看到其 binding 和 admission 允许的子集。
 
-| 工具 | 历史语义保留与证明边界 |
-|---|---|
-| Responses `file.read` | workspace/path、读取内容及 receipt 的 output digest/evidence refs；只证明本次读取，不证明之后未变 |
-| Explicit Brain `file.read` | 已授权 scope/pathRef 与返回内容；只证明读取注册 workspace 路径，不证明之后未变 |
-| Gateway `file.read` | workspaceRef/path、经过 route verifier 的读取 report/output digest 与 evidence refs；不能与 Explicit Brain 或 Responses executor 的 admission/receipt 合并 |
-| `file.list` | 查询范围、规则、决定性路径、完整/截断状态；不把限量列表当全集 |
-| Responses `file.search` | queryKind、path、query、搜索/发现文件数、命中、`resultsTruncated`、`searchComplete`、unresolved paths 及报告引用；未设置 `requireComplete` 时 `succeeded` 仍可能是部分结果 |
-| Explicit Brain `file.search` | query、授权 scope 与返回 matches/complete；当前 port 只做最多 100 个已发现文件的 literal search，不等于 Responses regex/symbol 搜索 |
-| Gateway `code.search` | 保留搜索范围、命中、截断、完整度、未解析路径与报告引用；`succeeded` 不自动证明搜索完整。生产 app 暴露未找到；它与 Responses `file.search` 是不同工具实例 |
-| `deterministic.inspect` | 保留 operation ID、输入 digest、revision、scope 与 receipt；它只生成确定性检查记录，不读取输入内容或验证外部现实状态。Gateway 注册不等于角色可见或 Provider 可调用 |
-| Responses `file.write` | 目标、变更意图、实际结果与返回的 before/after 文本；当前 receipt 不提供 digest。写成功不等于验收成功 |
-| Responses `file.edit` | 匹配与替换范围、实际 before/after 文本；当前 receipt 不提供 digest。不能只保存“已编辑” |
-| Responses `bash` | 命令意图、cwd、退出/信号、超时/取消、截断输出；继承环境，receipt 不证明子进程/副作用已 settle |
-| `todo_write` | 接受的列表修订及变化；模型标 completed 不证明完成 |
-| `get_goal` | 实际读取的目标身份、revision 与业务目标；控制状态不从文本推断 |
-| `create_goal` | 已接纳/拒绝的操作与目标引用；不能旁路创建 HumanAgent 业务 Task |
-| `update_goal` | 修订请求、实际接纳状态与引用；权限及生命周期仍由 owner 决定 |
-| Responses `present` | 声明的文件路径/描述与存在性；不提供内容 digest 或 review 状态，声明不等于验收 PASS |
-| Responses `web.search` | query、来源、页面范围、完整 report 引用和模型收到的 summary/top-5；snippet 不证明完整页面 |
-| Gateway `web.search` | query、来源、页面范围、完整度、unresolved sources 与 report reference；生产 app 暴露未找到 |
-| `checkpoint.inspect` | 当前只返回 latest checkpoint（至多一个候选）的时间、description/引用和不可用原因；不能据此宣称支持多点选择或回退 |
-| `checkpoint.recall` | 读取及完整性结果、恢复引用；不向模型展开旧 raw，不改变执行位置 |
-| `checkpoint.save` | 接纳/拒绝、提交引用及语义材料；summary 不替代 receipt |
-| `checkpoint.record-dead-end` | 已否定假设、结论范围、证据、候选替代路径；不删除失败分支 |
-| `checkpoint.reenter` | 若未来接线，保留目标、准入结果、新分支/epoch 与证据；当前仅在 built-in 名称集合中，未分配给 role，也未在 Responses Provider 注册，不能称为可用 |
-| `task.query` | 查询时点、范围、权威状态引用；不提升为新状态真源 |
-| `task.match` | 匹配依据、候选和歧义；不自动变更任务 |
-| `runtime.status` | 观察时点与状态来源；快照不等于未来健康 |
-| `queue.inspect` | 队列水位、类别与范围；不消费或重排 |
-| `resource.query` | 能力/占用快照及限制；不等于准入 grant |
-| `workspace.list` | workspace 范围、路径、遗漏条件；不推断不存在 |
-| `agent.query` | 获准对象的状态/结果引用；不读取其他 agent 的隐式会话 |
-| `agent.message` | 收件对象、消息类别与投递 receipt；送达不等于执行完成 |
-| `bug.query` | 查询条件和候选引用；无结果不证明没有 bug |
-| `bug.inspect` | 身份、revision、事实与缺证据项；描述不等于复现 |
-| `channel.query` | 受权频道、时点、读取水位；不扩大访问范围 |
-| Explicit Brain `memory.search` | scope、query、来源与匹配边界；当前 executor 有 port，但 app explicit runtime 未装配，不能当作已准入/可调用 |
-| Explicit Brain `memory.inspect` | source/digest/批准状态及适用范围；当前 app explicit runtime 未装配，不能据声明复活已失效结论 |
-| Explicit Brain `memory.compare` | 比较对象、重复/冲突依据和 unknown；当前 app explicit runtime 未装配，不静默覆盖 |
-| Explicit Brain `memory.save_candidate` | candidate 引用与 intake 结果；当前 app explicit runtime 未装配，不宣称已发布 |
-| Explicit Brain `memory.operation.status` | 当前显式 memory executor 没有此 case；保持 `declared-only`/`unsupported-tool`，不从 summary 推断完成 |
-| `interaction.ask` | 问题、待确认事项与请求引用；无回复不是同意 |
-| `interaction.propose` | 提案及 input revision；提案不是确认 |
-| `interaction.approve` | 对应输入版本和实际确认 receipt；不得代人批准 |
-| `channel.reply` | 内容引用、目标与投递结果；不证明对方已读 |
-| `channel.notify` | 通知目标及投递结果；不证明问题解决 |
-| `requirement.submit` | envelope、确认版本、FIFO receipt；不能直接派业务 child |
-| `trigger.submit` | trigger 准入与目标绑定；不代替需求确认 |
-| `route.submit` | 已接受的路由引用及范围；不授予目标权限 |
-| `resource.request` | grant/deny/wait receipt；不把申请当准入 |
-| `subscription.request` | 实际订阅结果与 owner；不推断执行发生 |
-| `attention.list` | 查询范围、未完成项及来源 |
-| `attention.inspect` | 问题、证据、owner、下一动作引用 |
-| `attention.triage` | 被接受的分类决定与理由；模型建议不是权威决定 |
-| `attention.ack` | 已确认接收；不等于解决 |
-| `attention.defer` | 被接受的延后条件；不隐藏恢复责任 |
-| `attention.notify` | 通知 receipt；不等于被处理 |
-| `attention.resolve` | 实际解决依据与 owner 接纳；无证据不能关闭 |
-| `bug.report` | intake/去重结果与事实引用；不冒充已定位根因 |
-| `bug.propose-update` | 提案、目标 revision 与证据；不冒充已应用 |
-| `bug.resolve` | 实际解决状态和验证来源；不以文字关闭 |
-| `bug.reopen` | 重开依据与版本；不改写历史事实 |
+## Native 语义提取边界
 
-默认使用结构化结果的纯提取器。开放文本允许模型提炼，但必须绑定 source，并保留 unknown。语义质量在模块测试与增量 review 检查，不为每次工具调用默认启动 reviewer。未知工具显式报告 `semantic-extractor-unavailable`；不能清除 raw 后假装已有可恢复语义。
+语义提取发生在两个模型 authored 边界：
 
-### D0-A 实际接线边界
+1. child 边界：`humanagent_child_deliver` 将 child 自己的原始工具观察提炼为独立结果；随后 child 的 `humanagent_turn_end` 收拢这个 child turn。
+2. parent 边界：parent 对每个 returned child 使用 `child.adopt` 或 `child.not_select` 作出显式决定，再用 `humanagent_turn_end` 的 `goal`、`actions`、`result`、`expectedNextStep` 四段语义收拢直接工具事实和 adopted child 结果。
 
-- Responses UI Runtime 源码组装了 12 个 Provider tool 定义和对应 executor；当前真实 outbound exposure 仍 `exposure-unverified`。CLI/RCC binding 条件是实现层的 source fact，不是 live readiness。
-- Explicit Brain catalog 有 39 个名称。当前 app binding 授予 5 个 operational port（`workspace.list`、`file.read`、`file.search`、`agent.query`、`agent.message`）；其余 34 个在当前 binding 被拒，若其他 binding 准入则 generic handler 返回 `unsupported-tool`。Memory executor 另外存在，但当前没有装配进 `createExplicitBrainRuntime`；其 4 个能力及 `memory.operation.status` 不可据声明认作运行可用。
-- Gateway `deterministic.inspect` 默认注册，但没有角色/template/Responses tool exposure；`code.search`、`web.search` route 是条件注册，目前 inventory 未在生产 app 组合中找到它们。Gateway `file.read` 有 Responses app injection，但仍没有 live Provider receipt。
-- Role template 校验只验证声明名属于 allowlist/registry，不代表执行 port 已注册。`checkpoint.reenter` 位于 built-in 名称集合但未分配给任何 role；checkpoint 工具均未在 Responses Provider executor 注册。Memory path comparison 是 Runtime agent 内部能力，不是 Provider/tool surface。
+两个边界只能引用本次已接受工具结果或 adopted child delivery 的 `[HumanAgent evidence refs]`。Runtime 校验 scope 和引用，不重新执行工具。Checkpoint/Control Owner 是 checkpoint 与 closure 的写入 owner；模型 authored close 不是 completion authority。
 
-## D0-A 独立源码复核（2026-10-08）
+所有语义保留完整工具身份、执行 scope、原始证据引用或 digest、失败与 unresolved 状态、完整或截断边界，以及“执行了动作”与“有证据验证结果”的区别。新增逐工具运行时 parser、强制 `SemanticClaim[]`、强制 `SemanticConstraint[]` 或内部目录迁移不是本增量的要求。
 
-- 独立 provider-audit peer 对 `code.search`、`deterministic.inspect` 和 Provider 工具装配边界做了源码复核。它确认 `code.search` 有独立 Gateway route、报告 artifact 与 verifier；Responses Provider 当前映射清单含 `file.search`，由本地 `CodeSearchService` 执行。现有证据未证明生产 app 装配 `codeSearchRoute`，也未证明 Provider 可调用 `code.search`。
-- `code.search` 报告包含 scope、命中、truncation、completeness 与 unresolved paths。未要求完整搜索时 unresolved path 仍可导致 `succeeded`；verifier 检查 `searchComplete`，不检查 `resultsTruncated`。抽取器需逐字段保存这几类状态，不能用单一 succeeded 推断完整。
-- `deterministic.inspect` 在 Gateway assembly 默认注册，但没有 role/template 或 Provider 工具入口。它按 operation ID、input digest、revision、scope 产生确定性 receipt；不读取输入内容，也不检查外部真实状态。
-- 以上均是 source evidence，不是生产 Provider 暴露或运行证据。D0-A 的 tool inventory 已完成并经主编排抽样复核；其中 Explicit Brain catalog 数量误写为 40，主编排按源码更正为 39。Inventory 还保留 live exposure 未知和 audited-scope 的限定；执行层仍需测试与真实入口验证。
+当前 turn 可以保留 raw tool calls 和 results。prior turn 只保留已提交四段语义、可信 checkpoint metadata、verified evidence refs 和 adopted child refined deliveries；不得带入 prior raw tool bodies、call IDs 或 child transcripts。r186/r195 仍 OPEN：App semantic-checkpoint wire encoder 尚未完整投影 checkpoint identity、`committedAt`、`description`、顶层 `evidenceRefs` 和 adopted-child `evidenceRefs`。后续运行时 instruction、wire test 与 public consumer proof 是单独步骤。
 
-## F1-H 语义校准（2026-10-09；source-only）
+## 17 工具提取规则
 
-此处把“工具可用”拆成四个独立事实：**source-wired**（源码存在接线）、**declared**（模板或 catalog 声明）、**admitted**（本次调用通过绑定/权限准入）、**executed**（本次工具 executor 返回执行事实）。`live-exposed` 只可由真实 Provider 请求/回执证明。前四项不能推导最后一项；catalog、模板、app 工厂条件或 fake test 都不证明 live exposure。
+| 工具（wire name） | 当前 turn 原始事实 | 四段 close / child delivery 提取边界 | 禁止推论 |
+|---|---|---|---|
+| `file.read` (`file_read`) | target path、read range、content digest/output ref、`[HumanAgent evidence refs]` | 记录 target path、实际读取范围和范围内观察到的事实，并引用 tool-result evidence；只证明本次读取 | 文件以后未变；内容就是业务真值 |
+| `file.list` (`file_list`) | path、entries、`truncated`、`unresolvedPaths`、evidence refs | 记录查询目录、相关 present/absent entry 和完整或截断边界，并引用 tool-result evidence | 限量列表是全集；范围外路径不存在；未列出内容可递归推断 |
+| `file.search` (`file_search`) | path、query、queryKind、matchesFound、key matched paths/lines、`searchComplete`、`resultsTruncated`、unresolvedPaths、report ref/digest、evidence refs | 记录实际 query/scope、命中位置和完整度，并引用 report 或 tool-result evidence；零命中只覆盖已搜索范围 | `succeeded` 等于完整搜索；无命中等于不存在 |
+| `file.write` (`file_write`) | target path、bytesWritten/create/update、before/after、output ref/digest、evidence refs | 记录 target path、写入 side effect、预期改动摘要和字节 readback，并引用 evidence；区分写入动作与后续测试/验收 | 写入成功等于测试通过、review 通过或需求完成 |
+| `file.edit` (`file_edit`) | target path、old/new、replace_all、match/replacement count、before/after、evidence refs | 记录实际 edit、匹配范围和 replacement count，并引用 evidence；oldText 未匹配时保留 exact failure | 只写“已编辑”；编辑成功等于验证通过 |
+| `bash` (`bash`) | command、cwd、exitCode/signal、timeout/abort、stdout/stderr 及截断、evidence refs | 记录 command、cwd、exit code、关键失败行或 assertion line、输出范围和 side effect，并引用 evidence | exit 0 等于业务成功；shell close 等于所有子进程和副作用已 settle |
+| `todo_write` (`todo_write`) | 接受或拒绝的 full replacement list、counts、evidence refs | 在 `actions` 或 `expectedNextStep` 记录 checklist transition 和 evidence | 模型标 completed 等于工作完成 |
+| `get_goal` (`get_goal`) | goal 或 null、id、revision、phase、evidence refs | 记录读取时点的 local goal identity/revision/phase 和 evidence | local goal 是 HumanAgent Task 生命周期真相 |
+| `create_goal` (`create_goal`) | 接纳或拒绝的 local goal、id、revision、phase、evidence refs | 记录创建动作、返回身份和 evidence | 创建了业务 Task、已派发或已执行 |
+| `update_goal` (`update_goal`) | 请求 action、接受或拒绝的 revision transition、new state、evidence refs | 记录实际状态转换、new revision 和 evidence；拒绝/冲突保留为原事实 | goal 状态自动等于 Task 完成、阻塞或暂停 |
+| `present` (`present`) | paths/descriptions、regular-file 检查、title/content、artifacts、immutable artifact refs/digests、evidence refs | 记录 presented title、artifact path/ref 和 evidence；presentation 只是存在性/交付动作 | 出现即内容正确；presentation 等于 review PASS |
+| `web.search` (`web_search`) | query/filters、status、来源与页数、truncated、unresolved sources、report ref/digest、top-five summary、evidence refs | 记录 query、实际 source/title/URL、范围和 bounded factual takeaway，并引用 evidence；外部结果仍是未验证观察 | snippet 或 top-five 等于完整页面或穷尽检索；外部来源天然可信 |
+| `child.call` (`child_call`) | returned/blocked、invocationId、childTurnId、summary、refinedDeliveryRef、evidence refs | 每个 returned child 在同一 parent turn 必须由 `child.adopt` 或 `child.not_select` 作出显式决定，并引用 decision evidence | returned 等于已采纳；parent 可以携带 child raw transcript |
+| `child.adopt` (`child_adopt`) | adopted、invocationId、childTurnId、refinedDeliveryRef、retained assignment、refined asset、evidence refs | 被选 refined delivery 进入 parent `adoptedChildren`；parent close 引用 child refined evidence | 模型可替换 child body；adoption 代表 owner 完成验收 |
+| `child.not_select` (`child_not_select`) | not-selected、invocationId、immutable delivery、reason、evidence refs | 不写入 `adoptedChildren`；若 reason 影响下一步，在 close 中简短记录并引用 decision evidence | not-selected 删除历史证据；未选择等于 child 失败 |
+| `humanagent_child_deliver` (`humanagent.child.deliver`) | 独立 body、judgment/findings、body asset ref/digest、own evidence refs | 独立提炼 child 观察，包含结论、scope、完整或截断、副作用与验证、失败和剩余风险，并引用 own evidence | parent 会收到 child raw output；summary 或 ref 可替代 body |
+| `humanagent_turn_end` (`humanagent.turn.end`) | 四段 summary（`goal`/`actions`/`result`/`expectedNextStep`）各含 text 与 evidenceRefs、delivery text/refs | 模型 authored 四段语义收拢当前 turn 的直接工具事实和 adopted child 结果；Runtime 校验 admitted turn、accepted tool-result/base refs、adoption 与 delivery refs | 每工具强制 claim array；turn end 直接完成 Task；summary 代替 checkpoint receipt |
 
-下列两个矩阵逐项绑定已审查的 12 个 Responses tool ID 和 5 个 Explicit Brain app operational tool。H-O1 source/public-consumer observation 已完成：`/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261008/f1-h-o1/observation.md`（SHA-256 `eb3bea8e61eb7a5a0deceb07cd0bae4fc177fb1671389efebecf56f013e9fab9`）与 `result.md`（SHA-256 `c10d74ef80e99dff7977da1ef7817985a162f1e037801f14910601cd7fc58a1f`）。授权的 app TypeScript 检查通过；在冻结安装后两个 public-consumer 测试文件为 15/15。来源和 consumer 证明：三个工具 `file.read`、`file.search`、`web.search` 有 report ref/digest 和 digest-checked readback；另九个工具没有本观察 readback 路径可用的 durable report descriptor；所有 inline output body 在 persisted Provider tool event 投影时被移除。它们不证明 live Provider 曾暴露或调用这些工具，也不证明 live receipt。故 `live-exposed` 与 live execution 对所有工具仍 `UNKNOWN`；另外，app composition 中没有生产 Explicit agent callback producer，外部 injection 与回调阶段仍未知。语义规则只允许从实际、可读、scope/digest 相符的证据作结论。`certainty` 是提取器对每项 claim 的允许标签，不是静态目录赋予工具的可信等级：来源缺失或行为未观察时只能为 `unknown`；receipt 直接支持且范围明确时为 `confirmed`；截断/局部来源为 `partial`；有新证据推翻旧 claim 时为 `corrected`，同时保留旧 claim 的引用，不覆写历史。
+## 历史 source evidence 保留
 
-### Responses Provider：12 个 source-wired 工具
+以下内容是已确认的历史证据，不能因本增量删除或改写：
 
-来源绑定：`packages/app/src/provider-tool-execution.ts:38-229,511-593`；app 注入 `packages/app/src/ui-runtime/index.ts:294-340`；driver 转发 `packages/adapters/provider/src/agent-driver.ts:190-200,247-309`。静态接线需同时满足 `mode=rcc`、`protocol=responses`、`workspaceRoot` 和 `projectKey`；这不是 live 可见性证明。下表的纠正规则对每次提取通用：保留原 raw/evidence ref；更正必须引用新 receipt/owner evidence 与适用范围，不允许因工具名或成功 status 推定旧结论。
+- H-O1 的 source/public-consumer observation 证明当时 persisted Provider tool event projection 移除 inline body。`file.read`、`file.search` 和 `web.search` 有 durable report ref/digest/readback，其他九个当时没有同一 readback descriptor。该结果仍不证明 live Provider exposure。
+- F1-H 的 12 个 Responses 工具和 5 个 Explicit Brain operational port source 审查仍是各 surface 的工具证据。它们不等同于本增量列出的 17 个 native union，也不能跨 surface 合并工具身份。
+- `packages/runtime/src/context/tool-semantics.ts`、`deriveFileSearchObservation` 及其测试仍是历史 source evidence。它们在此 Increment 1 保留；删除或 API cleanup 属单独授权，不能被文档对齐顺带执行。
+- 当前 source 已观察到 `file.write` 在 durable intent 后做目标字节 digest readback，`present` 写入 immutable file artifacts，但这些源码事实仍不等于 Provider live receipt 或 owner acceptance。
 
-| 工具 | 输入边界 | 源码可见结果字段 | 可支持的关键语义 / 条件 | certainty 与纠正 | 未知与证据源 | 禁止推论 |
-|---|---|---|---|---|---|---|
-| `file.read` | workspace scope、规范化 path；由 app executor 经 Hand / Gateway FileReadRoute | content；成功时 outputRef、outputDigest、evidenceRefs；错误为 typed error 路径 | 本次指定 workspace/path 在本次执行返回了该内容；只对实际读回的 ref/digest 成立 | 可读、digest-checked report 可对该次读取 `confirmed`；内容后续变化须新读取并以新 ref `corrected` | H-O1 确认 source/public-consumer readback；live call/body 仍 `UNKNOWN`，失败时是否有 report 取决于保存阶段 | 文件以后未变化；内容就是业务真相；Provider 已 live 暴露该工具 |
-| `file.list` | workspace/path scope 与 `maxFiles` 上限 | `{workspaceRef, path, entries[{path, kind}], truncated, unresolvedPaths}`；当前报告未回显 maxFiles，须与原调用绑定 | 仅声明范围内已发现的路径集合；完整性需同时有原始输入上限与完整 discovery receipt | 截断或未解析时 `partial`；补齐同 scope discovery 后新证据可纠正，不能删除原部分结果 | 无 durable report descriptor，inline body 被 persisted event 投影移除；实际 live invocation `UNKNOWN`；H-O1 public consumer/source review | 范围外路径不存在；限量结果是全集 |
-| `file.search` | workspace/path scope、query 与 queryKind、结果/上下文限制 | matches/hits、files discovered/searched、resultsTruncated、searchComplete、unresolved paths、report ref/digest | 命中只适用于此 query/scope 与实际 scanned paths；`succeeded` 可为部分结果，`requireComplete` 未在 Provider schema 暴露 | digest-checked report 可按记录的覆盖范围确认；截断为 `partial`；补证据后以新报告纠正 | H-O1 确认 report descriptor/readback 的 source/public-consumer 边界；live call/output `UNKNOWN` | succeeded 等于完整搜索；无命中等于不存在 |
-| `file.write` | workspace scope、目标 path、create/update 意图与正文 | 成功返回 before/after 文本及 evidence；当前无 immutable outputRef/digest | 仅说明该次写入 executor 返回了哪些前后内容；必须保留本次路径和 call identity | 无不可变 ref 时最多 `partial`；后续 workspace readback 可用新证据纠正；不反向改写写入结果 | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；live call 与后续 readback `UNKNOWN` | 写入正确、验收通过、内容已 review 或可复现 |
-| `file.edit` | workspace scope、目标 path、literal old/new、replace_all 参数 | 成功返回 before/after 文本及 evidence；当前无 immutable outputRef/digest | 仅支持本次匹配/替换结果；必须记录 replace_all 与实际 before/after | 有后续 readback 才确认该时点文件观察；否则 `partial`；readback 冲突时追加 `corrected` claim | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；live call 与 readback `UNKNOWN` | 意图正确、所有预期内容均被修改、review/验收通过 |
-| `bash` | 精确 command、description、cwd；进程通过 `spawn('bash',['-c',...])` 执行并继承环境 | exitCode、signal、timeout/abort、stdout/stderr（有上限及截断标记） | 仅支持 shell 进程层的观察；exit/signal 与输出范围、timeout/截断须同时保留 | 完整未截断输出按实际范围 `confirmed`；受限输出或 timeout 为 `partial`；后来核验副作用应另建 claim | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；后代进程、具体副作用及 live invocation `UNKNOWN` | 环境被 sandbox；shell close 证明所有子进程/副作用 settle；exit 0 代表业务成功 |
-| `todo_write` | 输入中的 replacement list | 接受/拒绝结果及列表变化/count；当前没有 revision、digest、artifact ref | 只支持 executor 接受了本次 todo 列表更新 | 只有持久读回才能确认当前状态；否则 `partial`；读回不符后以新 revision 纠正 | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；具体 readback/live invocation `UNKNOWN` | 模型标注 completed 证明任务完成 |
-| `get_goal` | app 本地 goal store 查询 | `{goal: null}` 或 goal object（id, revision, objective, phase, roundsStarted, optional maxGoalRounds/blockedReason） | 只描述该本地读取时点的 goal 状态 | 直接带身份/revision 的读回可确认该时点；时间变化后重新读并追加修正 | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；额外 report ref/digest 与 live invocation `UNKNOWN` | goal 是 HumanAgent Task 或业务 task lifecycle 权威 |
-| `create_goal` | goal objective 与可选 budget | 创建后的本地 goal id/revision/objective/phase/budget 或明确失败 | 只支持本地 goal store 接纳的创建结果；需保留返回 id/revision | 成功 receipt 仅确认创建本地 goal；若无持久读回为 `partial`；读回矛盾时纠正 | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；外部派发/Task receipt 与 live invocation `UNKNOWN` | 创建了业务 Task、已派发、已有执行者 |
-| `update_goal` | goal id、revision 及请求的 action/update | 请求 action 与 app 接受的 goal revision transition 或失败 | 只支持 owner 接受的本地状态转换及其 revision | 有新 revision 的读回才确认当前状态；拒绝/冲突须保留为原事实，不改写旧状态 | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；额外 report ref/digest 与 live invocation `UNKNOWN` | goal 已对应完成/阻塞/暂停 HumanAgent Task |
-| `present` | 声明的文件 paths/descriptions | `{turn: executionEpoch, files:[{path, optional description}]}`，仅在每个 path 是 regular file 时返回 | 只支持本次存在性检查的 path/time 观察；`turn` 不是独立 turn id | 当前检查可 `confirmed`；过期后须重查并追加纠正 | H-O1 确认无 durable report descriptor，inline body 不在 persisted Provider event；内容 digest、review receipt 与 live invocation `UNKNOWN` | 存在即内容正确、review 通过；`turn` 是真实 turn identity |
-| `web.search` | query 与 filters；backend 为 optional injection | status、result count、pages fetched、result scope/completeness、unresolved sources、full report ref/digest；模型侧只收到 top-five summary | 只能按报告实际来源/页数/完整度作结论；model-side top-five 与完整报告是不同来源 | H-O1 确认 success 和 service-reported failure report 都产生 ref/digest；public readback 仅接受 `succeeded` event，故失败 event 不符合该 API 的 readback 前提 | success report 的 source/public-consumer readback 已观察；live backend/call 仍 `UNKNOWN`，保存失败可无 descriptor | snippet/top-five 等于完整页面或穷尽检索；配置存在即 backend ready |
+## Owner 边界
 
-### Explicit Brain：5 个当前 app-bound operational tools
+- 工具 executor/adapter 保存原始执行事实、错误、scope、完整度与 evidence refs；它不能把未观察的业务结果标为完成。
+- `packages/runtime/src/context/` 负责 native semantic-history projection 和 checkpoint-history assembly；它投影已提交四段语义、verified refs 与 adopted child deliveries，不执行或重复工具。
+- `packages/runtime/src/explicit-brain/interaction-turn-session.ts` 负责 Explicit Brain interaction turn checkpoint 构造；它仍在 `packages/runtime` owner 内，不建立第二套 native semantic-history owner。
+- `packages/agent-templates` 可声明 instruction，但不能实现 extractor 或决定验收；`packages/app` 可组装 provider tools 和 semantic-checkpoint encoder，但不能复制第二套语义 checkpoint。
+- Task/pipeline owner 决定 owner acceptance 和 Task completion。Checkpoint/Control Owner 决定 checkpoint、closure、recovery 与 raw-release eligibility。
 
-绑定来源：catalog `packages/contracts/src/explicit-brain.ts:18-82`；准入 `packages/runtime/src/explicit-brain/tool-registry.ts:130-192,425-529`；当前 app binding `packages/app/src/explicit-brain-runtime.ts:445-489`；执行端 `packages/runtime/src/explicit-brain/operational-tools.ts:55-121`。当前 binding 只授予下列五个；catalog 中其余 34 项仍为未授予/未接线，不纳入这份“已执行工具”清单。Provider Explicit Brain interpreter 未传 `tools`/`executeTool`，所以也不能把以下 app operational ports 当成 Provider-live tool call。
-
-| 工具 | 输入边界 | 源码可见结果字段 | 可支持的关键语义 / 条件 | certainty 与纠正 | 未知与证据源 | 禁止推论 |
-|---|---|---|---|---|---|---|
-| `workspace.list` | 固定 `scope:workspace:<projectKey>`，经过当前 binding/scope admission | discovered paths、discovery complete/unresolved fields | 仅限注册 workspace 和本次发现边界；complete 必须由完整 discovery receipt 支持 | 有完整同 scope receipt 才可确认；unresolved/truncated 为 `partial`，后续发现以新证据纠正 | explicit app binding/workspace source 已审；typed result/ref/digest 与 live provider invocation `UNKNOWN`；H-O1 public consumer 不将其变成 Provider tool | workspace 外不存在；超 traversal limit 后仍完整 |
-| `file.read` | 相同固定 workspace scope、已准入 pathRef | requested path 与返回 content | 只证明本次读取 scope/path 内容 | 可读且 identity 相符时确认本次读取；文件后续变更需新读取并追加纠正 | 真实 result envelope/ref/digest `UNKNOWN`；explicit runtime/workspace port/H-O1 | 内容持久不变、内容是业务真相 |
-| `file.search` | 固定 workspace scope，literal substring query，匹配文件 `limit`；当前最多扫描 100 个已发现路径 | query、matches（path/line numbers，不含 line text）、`complete: files.complete` | 必须同时保留发现完整度与已检查候选数/limit 停止原因；当前 `complete` 会在 loop 因匹配 limit 提前停止时错误反映 discovery complete | 当前结果不得据 `complete=true` 判完整；最多 `partial`/`unknown`，直到 H-A1 修复并有回归证据；更正只追加新版本事实 | live output/ref/digest 与完整 receipt `UNKNOWN`；`explicit-brain-runtime.ts`、`operational-tools.ts`、workspace search 源；H-A1 红绿测试 | complete=true 即所有候选均搜索；matches 包含行文本；等同 Responses regex/symbol search |
-| `agent.query` | 精确登记 target、`queryable` ACL、configured query port | 当前返回类型为 `unknown`，executor 原样转发 port result | 只可表达从已授权 target/port 收到的具体内容；不得扩成 target session/history 以外的结论 | 未有 typed receipt 映射前 certainty=unknown；收到可核验带 identity 的结果后按其证据范围确认/部分确认 | inspected app composition 没有生产 callback producer；若未外部注入会显式失败；外部 injection、返回字段/阶段、时间、ref/digest `UNKNOWN`；H-O1 source observation | 隐式 session 可访问；未知 result 是完整状态或已验收 |
-| `agent.message` | 精确登记 recipient、allowed message class、message ref 和 configured send port | 当前返回类型为 `unknown`，executor 原样转发 port result | 只表达调用的 send port 返回了什么阶段；accepted/queued/delivered/read/executed/completed 必须各有真实 receipt 支持 | 阶段未知时 certainty=unknown；若后续 receipt 证明阶段，以新证据追加/纠正，不升格为 child completion | inspected app composition 没有生产 callback producer；若未外部注入会显式失败；外部 injection、各阶段字段、result ref/digest `UNKNOWN`；H-O1 source observation | ACK=已读/执行/完成；send 返回=owner 接受子任务 |
-
-这些矩阵是工具 owner 的 source-bound 语义审查，不是 F-S mapper 实现。H-O1 证明 persisted Provider tool event 投影丢失成功 body；只有 `file.read`、`file.search`、`web.search` 有 durable report ref/digest/readback，其余九项没有该 report descriptor。工具 owner 保存必要的原始输出及可读引用；唯一纯提取与历史组装位置是 `packages/runtime/src/context/`（F-S / Context owner），不得在 templates 或 app 复制 mapper。需要从 executor 边界保留 body 或建立 descriptor 时，由 contracts/app 对应 owner 规划 typed receipt；本文件不新增 public field，也不把 local source/public-consumer evidence 声称为 live Provider 证据。
+本文件不新增 public field、tool、feature、runtime behavior 或 provider-wire proof。No-Task helper、独立 typed handoff schema 和 deterministic per-tool mapper 都不是本增量的实现产物。

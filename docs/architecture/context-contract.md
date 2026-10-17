@@ -75,7 +75,7 @@ Checkpoint 处于 `waiting`、`failed` 或 `unknown` 时，不能作为成功依
 
 ### 1.4 Control Fields 不进入 Context
 
-模型在 end-turn/stop 返回的 `summary`、`goal`、`blocked`、`next`、`checkpoint proposal`、`completion proposal` 和 `memory.learned` 都属于控制面。它们被 Decoder 解析后发布事件，不直接成为 Context Slot，也不自动拼回下一轮 Prompt。Tool `reason` 同样属于控制面，但 Tool Owner 可以把它转换成专门的紧凑 `ToolReasonProjection`，供下一轮推理参考。
+模型在 end-turn/stop 返回的 `summary`、`goal`、`blocked`、`next`、`checkpoint proposal`、`completion proposal` 和 `memory.learned` 都属于控制面。它们被 Decoder 解析后发布事件，不直接成为 Context Slot，也不自动拼回下一轮 Prompt。例外是已准入 standard turn 的 `humanagent_turn_end` 四段语义：它仍是模型 authored 的语义材料，只有 Checkpoint/Control Owner 校验 admitted turn、scope 和 evidence refs 并 durable commit 后，才作为 prior-turn semantic history 投影。Tool `reason` 同样属于控制面，但 Tool Owner 可以把它转换成专门的紧凑 `ToolReasonProjection`，供下一轮推理参考。
 
 ```text
 模型响应
@@ -134,7 +134,7 @@ compatibility boundary and not a second submission owner.
 
 沿用现有 Checkpoint `summary` 字段作为人可读的 description，不增加同义的 `description` 字段。它必须说明当前可证实的进展、限制/未决问题，以及可用于判断是否选择该恢复点的下一项决策；用户应能仅凭 description 选择回退点，无需先查询或展开 raw 历史。description 是语义摘要，不代替 recovery state、未决 Operation 状态或证据。
 
-Checkpoint 的保存时间由 Runtime/Checkpoint 提交 owner 在首次 durable commit 时赋可信 UTC 时间及 Harness 来源；不能采信模型时间。相同 commit identity 的重试返回首次提交的事实与时间。Journal seq 和提交关系拥有逻辑顺序；不通过篡改时间掩盖时钟回拨。现有 Checkpoint shape 尚无保存时间字段，本节定义后续 native contract 的要求，不声称当前实现已有该字段。
+Checkpoint 的保存时间由 Runtime/Checkpoint 提交 owner 在首次 durable commit 时赋可信 UTC 时间及 Harness 来源；不能采信模型时间。相同 commit identity 的重试返回首次提交的事实与时间。Journal seq 和提交关系拥有逻辑顺序；不通过篡改时间掩盖时钟回拨。当前 Runtime semantic-history entry 已提供 `committedAt`、`description`、`evidenceRefs` 和 `adoptedChildren`；App semantic-checkpoint wire encoder 对这些字段的完整投影仍为 OPEN（r186/r195），不能据 Runtime 类型存在而宣称 Provider wire 已验证。
 
 保存边界按独立 receipt 记录 recovery asset、checkpoint、closure、Context View 和合格 history publication 阶段。Checkpoint committed 不等于 turn closed；history publication 也不等于 turn closure 或 next-turn eligibility。只有完整 durable turn receipt 才允许把 raw 从 active Context 移出；若任何阶段失败或结果 unknown，则保留 raw、原错、commit identity、已提交阶段及恢复责任。副作用不得因 Context 回退而被假定已撤销。
 
@@ -495,7 +495,7 @@ detail
 
 ## 7. Tool Result、Context Mapper 和 Committer
 
-Tool 结果进入 Context 的固定顺序是：
+通用结构化 Tool Result 进入 Context 的顺序是：
 
 ```text
 Operation started
@@ -526,6 +526,8 @@ Mapper 只返回数据 Projection 和映射诊断，不得：
 - 创建 Checkpoint；
 - 发送 Attention；
 - 修改权限或触发 steer。
+
+Native turn 语义历史不要求为每个工具建立 `ToolResultContextMapper`，也不强制生成 `SemanticClaim[]` 或 `SemanticConstraint[]`。其唯一路径是当前 turn raw tool results 和 child decisions → 模型 authored `humanagent_turn_end` 四段 close 或 `humanagent_child_deliver` 精炼 child body → Runtime 校验 admitted scope、accepted evidence refs 与 adoption → Checkpoint/Control Owner 提交。prior turn 只投影已提交四段语义、可信 metadata、verified refs 和 adopted child deliveries；不得投影 prior raw body、call ID 或 child transcript。
 
 ContextCommitter 只提交已经由 core/runtime 接受的 View revision，并绑定：
 
@@ -672,7 +674,9 @@ Journal Fact
 | Memory Backend | 授权范围内的索引、召回和比较 |
 | ContextBuilder | 统一预算、Slot 选择和上下文装配 |
 | ContextCommitter | 幂等提交已批准的 Context View |
-| Tool Mapper | Tool Result 到数据 Projection 的纯映射 |
+| Native Turn Semantic Projection | `packages/runtime/src/context/`：投影当前 turn 装配、四段 checkpoint 历史、verified refs 与 adopted child refined deliveries；不执行工具 |
+| Explicit Brain Interaction Turn Checkpoint | `packages/runtime/src/explicit-brain/interaction-turn-session.ts`：构造 Explicit Brain interaction turn checkpoint；不建立第二套 native semantic-history owner |
+| Structured Tool Projection | 仅在具体 adapter/runtime owner 声明的结构化数据场景执行 Tool Result 到 Projection 的纯映射；不是 native 四段语义的必需通用层 |
 | Prompt Renderer | Provider/DSH 请求格式编码和最终消息校验 |
 | Plugin Host | 版本锁定、唯一绑定、加载、启动和释放 |
 
@@ -693,8 +697,9 @@ Context Contract 必须能回答以下样例：
 9. 交互 Agent 尚无 Task：使用 `interaction` Binding，不创建伪 Task。
 10. Commit Intent 已持久化但进程崩溃：恢复只提交同一 View，不重新执行 Tool。
 11. View 已提交但未发布：恢复可重新发布，并重新检查权限。
-12. end-turn/stop 的 Control summary 被解析并发事件，但不生成 Context Slot。
+12. `humanagent_turn_end` 的四段 summary 是模型 authored 语义材料；只有 standard turn 与 Checkpoint/Control Owner 校验并 durable commit 后，才进入 prior-turn semantic history。普通 end-turn/stop control summary 不自动生成 Context Slot。
 13. `memory.learned` 只由 Memory Owner 建立 index；Tool `reason` 由 Tool Owner 生成紧凑 `ToolReasonProjection` 后才可进入下一轮 Context，原始控制字段不进入。
+14. 当前 turn 可保留 raw tool calls/results；prior turn 只保留四段语义、trusted checkpoint metadata、verified evidence refs 和 adopted child refined deliveries，不保留 prior raw body、call ID 或 child transcript。
 
 ## 13. 进入下一阶段的条件
 

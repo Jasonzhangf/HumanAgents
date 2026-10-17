@@ -3,9 +3,9 @@
   "labels": {
     "assemble_turn_context": "装配固定规则、checkpoint 语义历史与当前 turn 内容",
     "execute_one_child_turn": "执行已准入的单个 native child turn",
-    "collect_turn_facts": "计划收集本 turn 工具、子任务、operation 与验收事实；当前 ProviderToolResult.executionFact 尚未接通",
-    "derive_semantic_candidate": "仅从已验证事实和原始来源按规则整理带不确定度的语义候选；原始报告本身不是语义结论",
-    "save_checkpoint_boundary": "调用唯一 checkpoint 保存边界并保留未完成责任",
+    "collect_turn_facts": "收集当前 turn 的原始工具结果、子任务决定、证据引用与失败状态",
+    "derive_semantic_candidate": "由模型在 humanagent_turn_end 生成四段语义收拢，并在 humanagent_child_deliver 独立提炼 child 结果；Runtime 校验 scope、证据引用与 child 采纳关系",
+    "save_checkpoint_boundary": "通过唯一 checkpoint 保存边界提交四段语义、已验证引用与已采纳 child 结果",
     "project_success_disposition": "仅当完整 durable receipt 且无未决责任时投影成功候选",
     "recovery_hold": "汇总首错、后续错误、raw、未决操作、阶段与恢复责任",
     "assess_turn_disposition": "汇合成功候选与恢复保持并返回唯一处置"
@@ -19,7 +19,12 @@
     "recoveryHoldFields": ["firstErrorRef", "laterReconcileAndSaveErrorRefs", "rawTurnRefs", "unresolvedOperationRefs", "stageAndDurablePhaseFacts", "recoveryResponsibilityRef"],
     "routingEvidence": "DAGpipe 0.1.1 installed SDK edge schema contains only from/to/arc_id and scheduler schedules every node in each topological wave. This graph is a target topology and contract, not runtime conditional-routing evidence.",
     "checkpointSubgraph": "native-turn-checkpoint",
-    "rawRetention": "Keep current-turn raw evidence until a complete durable turn receipt exists. Keep immutable journal and evidence references after raw leaves active context.",
+    "semanticCheckpointBoundary": "The model authors the four-part humanagent_turn_end summary (goal, actions, result, expectedNextStep). Each part carries text and evidenceRefs. Runtime accepts only evidence bound to the current admitted turn or its admitted base refs. Adopted child deliveries enter only through child.adopt. A deterministic per-tool SemanticClaim extractor and forced claims/constraints arrays are not required.",
+    "enabledToolSurface": "The review union is 17 tools: 12 base Responses tools, humanagent_turn_end, child.call, child.adopt, child.not_select and humanagent_child_deliver. This is not a per-request enablement claim. Base tools depend on the bound route and request surface; the three parent child controls require a child roster; child delivery belongs to a child run; turn end is the standard closure action where that closure path is admitted.",
+    "toolSemanticRules": "Semantic extraction is authored at humanagent_child_deliver and humanagent_turn_end, not by a new runtime parser for every tool. Each conclusion keeps tool identity, exact scope, completeness or truncation, failure or unresolved state, whether the executor only performed an action or evidence verified the result, and exact [HumanAgent evidence refs]. No new tool or feature is introduced.",
+    "rawCurrentAndSemanticPriorBoundary": "Current-turn raw tool calls and results remain available in the active turn for model compression. A completed prior turn contributes only the committed four-part semantic checkpoint, verified evidenceRefs and adopted child refined deliveries. Prior raw calls, raw tool bodies, call IDs and child transcripts do not enter prior semantic history.",
+    "wireProjectionOpen": "OPEN in r186/r195: the App semantic-checkpoint wire encoders still require a later implementation and outbound proof for checkpoint identity, committedAt, description, top-level evidenceRefs and adopted-child evidenceRefs. This graph update does not claim those fields already survive the Provider wire or that future behavior is verified.",
+    "rawRetention": "Keep current-turn raw evidence until a complete durable turn receipt exists. Keep immutable Journal facts, artifact references and semantic evidence references after raw leaves active context.",
     "publicationBoundary": "Publishing semantic history alone does not close the turn or grant next-turn eligibility.",
     "f1HTypedFactBoundary": "ProviderToolResult.executionFact attachment is the intended validated fact boundary. This is a target contract; no runtime behavior is established by this graph update.",
     "factCollectionEdge": {
@@ -34,21 +39,8 @@
       "requiredRelationValidation": "Public relation validation must bind the replay event, request, call, tool, operation, status, state, result ref and result digest to the trusted expected ToolIdentity and request before a ToolExecutionFact is admitted.",
       "pendingFinding": "H-A2 P1 remains unimplemented and has not passed independent review; this graph records the required boundary only."
     },
-    "limitedNextProof": "The next limited proof covers one Responses file.search source/report receipt only. The report is the raw evidence source; it does not by itself assert semantic completeness or constitute a semantic claim.",
-    "rawReportBoundary": "The original file.search report remains raw evidence and must retain its original status, completeness, truncation, failure, and result fields. Semantic content requires a separately validated mapper and evidence-based claim.",
-    "qualifiedReportBoundary": {
-      "node": "derive_semantic_candidate",
-      "status": "blocked-public-qualification-seam",
-      "validator": "Only validateCodeSearchReport(unknown), or an owner-approved equivalent public versioned report validator, may qualify the raw report for semantic derivation.",
-      "preconditions": [
-        "The report ref, descriptor and digest equal the trusted event and qualified fact result selection.",
-        "Readback is digest checked and the original report bytes are preserved.",
-        "The descriptor scope and identity agree with the trusted request context."
-      ],
-      "outputLimit": "A qualified report can yield only a bounded semantic candidate. Failed, partial, truncated and unresolved outcomes remain distinct; execution event success does not imply business search success or completeness.",
-      "implementationStatus": "The public report validator, original report retention path and semantic mapper are not implemented by this graph update."
-    },
+    "rawToolResultBoundary": "Every current tool result remains raw evidence with its original status, failure, scope, completeness, truncation and result fields. Historical file.search report validation and the test-only deriveFileSearchObservation evidence remain historical source evidence. They are not a general qualification gate for the native 17-tool surface.",
     "projectionAuthority": "UI projection journal replay can demonstrate observation readback only; it is not Organ Journal authority and does not prove authoritative recovery state.",
-    "checkpointAndRawReleaseEligibility": "Report bytes, UI projection replay and mapper output are observation or candidate evidence only; none is checkpoint, recovery, closure, next-turn, reentry or raw-release authority. A local checkpointAndClosureCommitted fact is not full five-phase readiness. The five-phase coordinator decides separately. Raw remains retained until the independently implemented complete durable turn receipt boundary is proven."
+    "checkpointAndRawReleaseEligibility": "Current-turn raw bytes, semantic text, UI projection replay and model-authored summaries are evidence or semantic material only. None is checkpoint, recovery, closure, next-turn, reentry or raw-release authority. The checkpoint/control owner and five-phase coordinator retain those decisions. Raw remains retained until the complete durable turn receipt boundary is proven."
   }
 }

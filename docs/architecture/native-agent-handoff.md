@@ -1,6 +1,6 @@
 # Native Agent Task Handoff Semantics
 
-Status: `DESIGN-RULES / F1-H-D1 / SOURCE-ONLY`. This document defines the semantic interpretation of the existing Task-bound handoff contract. It adds no public field, status, queue, event, or second state machine. Receipt fields not proven by current source are marked `UNKNOWN`; the receipt-boundary observation is recorded separately before any contract change.
+Status: `DESIGN-RULES / INCREMENT-1-DOCS`. This document defines the semantic interpretation of the existing Task-bound handoff contract. It adds no public field, status, queue, event, or second state machine. Receipt fields not proven by current source are marked `UNKNOWN`; the receipt-boundary observation is recorded separately before any contract change.
 
 ## Existing identity and source of truth
 
@@ -23,28 +23,31 @@ Use the existing dispatch/result observations where available. If the current pr
 
 ## Semantic artifact carried by the handoff
 
-The `summary` field is a short index for a human or orchestrator. It is not the semantic handoff. The result must reference an artifact that carries the evidence needed to continue without replaying old raw tool transcripts into the orchestrator's history. Until a typed semantic artifact contract is approved, this is a content requirement for a referenced artifact, not a new `WorkResult` field.
+The `summary` field is a short index for a human or orchestrator. It is not the semantic handoff. The result must reference the independently refined child delivery that carries the evidence needed to continue without replaying old raw tool transcripts into the orchestrator's history. This is a content and reference requirement of the existing delivery, not a new `WorkResult` field.
 
-The artifact should state:
+The model-authored four-part turn close and the refined child delivery should state:
 
 - the assignment identity and the source tool facts it covers, using surface-qualified tool identity and the call/operation evidence actually available;
-- each proven conclusion and its certainty (`confirmed`, `partial`, `unknown`, or `corrected`), with source refs that can be read and verified;
-- conditions and scope under which each conclusion holds;
+- the bounded conclusions drawn from current-turn raw tool results and adopted child deliveries, with evidence refs that can be read and verified;
+- conditions and scope under which each conclusion holds, including result limits, truncation, and any failed or unknown state;
 - incomplete work, unresolved questions, truncation, missing receipt fields, and any blocked dependency;
-- corrections as new claims that cite both the new evidence and the superseded claim; preserve the earlier record instead of rewriting it;
-- output artifact refs and digests, the semantic rule/extractor version, and evidence needed for owner acceptance.
+- corrections as new evidence-backed statements that preserve the earlier record instead of rewriting it;
+- output artifact refs and digests, plus evidence needed for owner acceptance.
 
-No artifact may claim more than its evidence supports. An unreadable ref, digest mismatch, absent tool result, or unknown callback phase keeps the affected claim unknown and the acceptance decision unresolved. Retain raw tool results at their existing immutable owner location; the handoff carries semantic claims and evidence refs, not copies of historical raw output into the orchestrator's context.
+They must distinguish an action that caused a side effect from separate evidence that verified the result. A successful write, edit, command, presentation, or goal update does not prove correctness by itself.
+
+Neither the four-part close nor a refined delivery may claim more than its evidence supports. An unreadable ref, digest mismatch, absent tool result, unadopted child, or unknown callback phase keeps the affected conclusion unresolved and the acceptance decision open. The four-part close is not completion authority. Retain raw tool results at their existing immutable owner location; the handoff carries bounded conclusions and evidence refs, not copies of historical raw output into the orchestrator's context.
 
 ## Owner boundaries
 
 - The tool executor/adapter that owns an operation produces its execution facts, raw evidence, and result references. It must not label an unobserved business outcome as accepted or complete.
-- The F-S / Context owner at `packages/runtime/src/context/` owns the only pure semantic mapper and checkpoint-history assembly. It maps verified typed receipts to semantic claims; it does not execute or repeat tools.
+- The Runtime Context owner at `packages/runtime/src/context/` owns native semantic turn projection and checkpoint-history assembly. It projects the committed four-part close, verified evidence refs, and adopted child refined deliveries. It does not execute or repeat tools.
+- The Runtime Explicit Brain owner at `packages/runtime/src/explicit-brain/interaction-turn-session.ts` owns Explicit Brain interaction turn checkpoint projection. It remains inside `packages/runtime` and does not create a second semantic-history owner for native turns.
 - `packages/agent-templates` may state the handoff instructions and required sections, but must not implement an extractor or determine acceptance.
-- `packages/app` may assemble the existing executor and storage ports. It must not duplicate semantic extraction rules.
+- `packages/app` owns Provider wire composition, the tool surface, and semantic-checkpoint encoding. It must not derive a second semantic checkpoint or duplicate the model-authored four-part summary. Its current semantic-checkpoint encoders still have OPEN r186/r195 field projection work; do not infer Provider-wire retention from the Runtime history type.
 - The designated task/pipeline owner owns acceptance against the matching `WorkAssignment` criteria. A `WorkResult` is not accepted merely because a child produced it.
 
-The current contracts provide only part of the required typed shape. `SemanticClaim` has `fact`, `certainty`, and `sourceRefs`; it has no explicit condition or correction linkage. `SemanticClosureCandidate` has claims, constraints, unresolved questions, semantic/raw refs, and requested outcome. `WorkResult` has output/evidence refs and optional bodies, but does not define a semantic bundle or per-claim evidence map. Any new typed shape belongs to a future contracts-owned plan after the receipt boundary is observed and reviewed; this document does not prescribe field names or alter the contract.
+The current contracts provide only part of the Task-bound handoff shape. `SemanticClaim` has `fact`, `certainty`, and `sourceRefs`; it has no explicit condition or correction linkage. `SemanticClosureCandidate` has claims, constraints, unresolved questions, semantic/raw refs, and requested outcome. `WorkResult` has output/evidence refs and optional bodies, but does not define its own semantic bundle. Native turn compression does not require every tool result to become a `SemanticClaim`: `humanagent_turn_end` carries the four-part close and `humanagent_child_deliver` carries the independent refined child result. Any new Task-bound typed shape belongs to a future contracts-owned plan after its receipt boundary is observed and reviewed.
 
 ## No-Task interaction helper
 
@@ -67,6 +70,7 @@ Still `UNKNOWN`:
 - whether an external caller injects the Explicit callbacks, its exact result envelope, and whether any callback result means `accepted`, `queued`, `delivered`, `read`, `executed`, or `completed`;
 - the real external-side-effect state and recovery owner when work succeeds but report/event persistence fails;
 - whether owner acceptance has a durable receipt at a production boundary;
+- whether all required semantic-checkpoint metadata reaches the Provider wire; r186/r195 record an open fieldwise projection and outbound-proof gap for checkpoint identity, trusted `committedAt`, description, top-level `evidenceRefs`, and adopted-child `evidenceRefs`;
 - endpoint authorization/deployment behavior outside the inspected app source.
 
 These facts update the source and local consumer evidence, but do not change the semantic rule: absent evidence for a phase or outcome, keep it unknown. `WorkResult` identity/output validation remains distinct from orchestration review/merge and owner acceptance.
@@ -77,4 +81,4 @@ These facts update the source and local consumer evidence, but do not change the
 - `WorkAssignment`, `WorkResult`, and validation: `packages/contracts/src/index.ts:729-735,848-877`.
 - Turn dispatch/result observations and semantic claim contracts: `packages/contracts/src/native-reasoning.ts:37-78`.
 - Acceptance/review decision boundary: `packages/runtime/src/orchestration/manager.ts:526-535`.
-- F-S sole mapper location: `packages/runtime/src/context/` as assigned by the F1 plan; no mapper implementation or runtime behavior is claimed here.
+- Native semantic projection owner: `packages/runtime/src/context/`; Explicit Brain interaction checkpoint owner: `packages/runtime/src/explicit-brain/interaction-turn-session.ts`; no new runtime behavior or completed wire projection is claimed here.
