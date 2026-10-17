@@ -566,9 +566,13 @@ try {
     // Raw external projections exercise the real page controller. The known
     // raw/envelope mismatch loses readable bodies (observed source defect);
     // this bounded browser case also protects return navigation at low cost.
-    const fixtureRoot = '/private/tmp/humanagent-g14-body-plan-20261015/ui-page-red/fixtures';
+    const fixtureRoot = process.env.INTERACTION_PAGE_CHECKPOINT_FIXTURE_ROOT;
+    if (!fixtureRoot?.trim()) {
+      throw new Error('INTERACTION_PAGE_CHECKPOINT_FIXTURE_ROOT is required; point it at the checkpoint fixture directory');
+    }
     const history = JSON.parse(await readFile(join(fixtureRoot, 'history.json'), 'utf8'));
     const capture = JSON.parse(await readFile(join(fixtureRoot, 'capture.json'), 'utf8'));
+    capture.text += 'W'.repeat(2048);
     const children = JSON.parse(await readFile(join(fixtureRoot, 'children.json'), 'utf8'));
     observe('fixture provenance', JSON.parse(await readFile(join(fixtureRoot, 'provenance.json'), 'utf8')));
     const scope = history.scope;
@@ -667,6 +671,25 @@ try {
             (cell) => [cell.querySelector('dt')?.textContent, cell.querySelector('dd')?.textContent])),
         }));
         record(`task-dashboard renders exact ${kind} body ${index}`, rendered, { expectedText: projection.text, ...observation });
+        const layout = await dialog.evaluate((node) => {
+          const body = node.querySelector('[data-checkpoint-role="asset-body-text"]');
+          const host = body?.parentElement;
+          if (!body || !host) return null;
+          const dialogRect = node.getBoundingClientRect();
+          const dialogStyle = getComputedStyle(node);
+          const bodyRect = body.getBoundingClientRect();
+          return {
+            contentLeft: dialogRect.left + parseFloat(dialogStyle.borderLeftWidth) + parseFloat(dialogStyle.paddingLeft),
+            contentRight: dialogRect.right - parseFloat(dialogStyle.borderRightWidth) - parseFloat(dialogStyle.paddingRight),
+            bodyLeft: bodyRect.left,
+            bodyRight: bodyRect.right,
+            bodyOverflow: body.scrollWidth <= body.clientWidth + 1,
+            hostOverflow: host.scrollWidth <= host.clientWidth + 1,
+          };
+        });
+        record(`task-dashboard keeps ${kind} body within the open drawer ${index}`,
+          Boolean(layout) && layout.bodyLeft >= layout.contentLeft - 1 && layout.bodyRight <= layout.contentRight + 1
+            && layout.bodyOverflow && layout.hostOverflow, layout);
         const expectedIdentity = {
           '检查点 ID': selected.checkpointId.value,
           '物理 Journal 序号': String(selected.commitRef.journalSeq),

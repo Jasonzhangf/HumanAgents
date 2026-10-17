@@ -4,11 +4,13 @@ import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import {
   id,
   validateExecutionPolicyDefinition,
+  validateTaskFlowBinding,
   validateInteractionDecision,
   type ExecutionPolicyDefinition,
   type InteractionRequestKind,
   type InteractionTraceKind,
   type TaskId,
+  type TaskFlowBinding,
 } from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
@@ -489,6 +491,22 @@ function optionalExecutionPolicy(body: Record<string, unknown>): ExecutionPolicy
     );
   }
   return value as ExecutionPolicyDefinition;
+}
+
+function optionalTaskFlow(body: Record<string, unknown>): TaskFlowBinding | undefined {
+  const value = body.taskFlow;
+  if (value === undefined) return undefined;
+  try {
+    validateTaskFlowBinding(value as TaskFlowBinding);
+  } catch (error) {
+    throw new UiRuntimeApiError(
+      'request.invalid-field',
+      APP_OWNER,
+      `request field taskFlow is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      'provide a valid task flow binding',
+    );
+  }
+  return value as TaskFlowBinding;
 }
 
 function writeSse(response: ServerResponse, event: RuntimeSseEvent): void {
@@ -1279,6 +1297,7 @@ async function handleRequest(
     if (explicitConfirmation && method === 'POST') {
       const body = await readBody(request);
       const executionPolicy = optionalExecutionPolicy(body);
+      const taskFlow = optionalTaskFlow(body);
       const goal = optionalString(body, 'goal');
       const scope = optionalString(body, 'scope');
       const idempotencyKey = optionalString(body, 'idempotencyKey');
@@ -1300,6 +1319,7 @@ async function handleRequest(
         ...(requestKind === undefined ? {} : { requestKind }),
         ...(taskRef === undefined ? {} : { taskRef }),
         ...(executionPolicy === undefined ? {} : { executionPolicy }),
+        ...(taskFlow === undefined ? {} : { taskFlow }),
         ...(goal === undefined ? {} : { goal }),
         ...(scope === undefined ? {} : { scope }),
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),

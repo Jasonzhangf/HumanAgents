@@ -9,6 +9,7 @@ import type {
   InteractionRequestKind,
   RequirementIntent,
   TaskId,
+  TaskFlowBinding,
 } from '../../../contracts/src/index.js';
 import {
   canonicalJsonStringify,
@@ -264,6 +265,7 @@ export interface DraftIntent {
   readonly decisionRefs?: readonly string[];
   readonly executionPolicy?: ExecutionPolicyDefinition;
   readonly executionControlRef?: string;
+  readonly taskFlow?: TaskFlowBinding;
 }
 
 export interface ConfirmDraftRevisionInput {
@@ -779,6 +781,7 @@ export class ExplicitIntake {
       decisionRefs: intent.decisionRefs,
       executionPolicy: intent.executionPolicy,
       executionControlRef: intent.executionControlRef,
+      taskFlow: intent.taskFlow,
       immutableOriginalRef: `raw-input:${interaction.interactionId}:${interaction.inputRevision}`,
     });
     const createdAt = interaction.occurredAt ?? new Date().toISOString();
