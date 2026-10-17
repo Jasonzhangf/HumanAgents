@@ -108,6 +108,7 @@ export interface RccModeConfig {
 
 export interface UiRuntimeLaunchOptions {
   readonly mode: 'fake' | 'rcc';
+  readonly maxConcurrentTasks?: number;
   readonly accessControl?: AccessControlService;
   readonly organId: OrganId;
   readonly binding: ProviderBinding;
@@ -561,6 +562,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   };
   const runtimeService = new UiRuntimeService({
     mode: options.mode,
+    maxConcurrentTasks: options.maxConcurrentTasks,
     organId: options.organId,
     binding: options.binding,
     port: options.port,

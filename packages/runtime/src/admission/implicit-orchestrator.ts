@@ -133,6 +133,7 @@ export type ImplicitRequirementDispatchResult =
 
 export interface ImplicitBrainFifoOptions {
   readonly inbox: RequirementInbox;
+  readonly maxConcurrentTasks?: number;
   readonly consumerId: string;
   readonly orchestration?: OrchestrationManager;
   readonly ownerId?: string;
@@ -329,7 +330,8 @@ export class ImplicitBrainFifo {
       throw new Error('implicit FIFO requires either an orchestration manager or a dispatchRequirement port');
     }
     this.planSubtasks = options.planSubtasks ?? createDefaultImplicitExecutorSubtasks;
-    this.admit = options.admit ?? defaultAdmit;
+    const maxConcurrentTasks = options.maxConcurrentTasks;
+    this.admit = options.admit ?? ((input) => defaultAdmit(input, maxConcurrentTasks));
   }
 
   async drainNext(input: ImplicitBrainFifoDrainOptions): Promise<ImplicitBrainFifoDrainResult> {
@@ -431,11 +433,11 @@ function defaultAdmit(input: {
   readonly providedInputRefs: readonly string[];
   readonly checkpoint: CheckpointRecoveryFacts;
   readonly ownerId: string;
-}): RequirementAdmissionReceipt {
+}, maxConcurrentTasks?: number): RequirementAdmissionReceipt {
   const queue: AdmissionQueueKind = classifyConfirmedRequirement(input.envelope);
   return admitRequirement({
     envelope: input.envelope,
-    queue: defaultAdmissionQueueConfig(queue),
+    queue: defaultAdmissionQueueConfig(queue, maxConcurrentTasks),
     registeredQueues: ACTIVE_ADMISSION_QUEUE_KINDS,
     queueLoad: input.queueLoad,
     requiredCapabilities: input.requiredCapabilities,

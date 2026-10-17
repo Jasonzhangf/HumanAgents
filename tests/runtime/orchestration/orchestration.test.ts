@@ -11,6 +11,7 @@ import {
 import { RequirementInbox } from '../../../packages/runtime/src/intake/requirement-inbox.js';
 import {
   ImplicitBrainFifo,
+  RequirementAdmissionError,
   createDefaultImplicitExecutorSubtasks,
   dispatchImplicitExecutorSubtasks,
 } from '../../../packages/runtime/src/admission/index.js';
@@ -1876,6 +1877,49 @@ test('implicit FIFO admits and dispatches executor subtasks to terminal success 
   assert.equal(review.results.length, 1);
   assert.equal(result.evidenceRefs.length >= 2, true);
   assert.equal(inbox.size, 0);
+});
+
+test('implicit FIFO maxConcurrentTasks budget seam admits running one and waits at running two', async () => {
+  const inbox = new RequirementInbox();
+  await appendImplicitConfirmed(inbox, implicitEnvelope());
+  const { orchestration } = implicitAssembly();
+  const options = {
+    inbox,
+    consumerId: 'implicit-budget-test',
+    orchestration,
+    maxConcurrentTasks: 2,
+  };
+  const brain = new ImplicitBrainFifo(options);
+  const second = await brain.drainNext({
+    ...implicitDrainOptions(),
+    queueLoad: { running: 1, queued: 0 },
+  });
+  assert.equal(second.kind, 'succeeded');
+  if (second.kind !== 'succeeded') return;
+  assert.equal(second.admission.decision.status, 'admitted');
+  assert.equal(inbox.size, 0);
+
+  const thirdEnvelope = implicitEnvelope({
+    requirementId: 'requirement-implicit-third',
+    draftId: 'draft-implicit-third',
+    fifoSeq: 2,
+  });
+  await appendImplicitConfirmed(inbox, thirdEnvelope);
+  await assert.rejects(
+    () => brain.drainNext({
+      ...implicitDrainOptions(),
+      queueLoad: { running: 2, queued: 0 },
+    }).catch((error: unknown) => {
+      if (error instanceof RequirementAdmissionError) {
+        assert.equal(error.decision.status, 'waiting');
+        assert.equal(error.decision.condition, 'queue.execution.concurrency');
+      }
+      throw error;
+    }),
+    RequirementAdmissionError,
+  );
+  assert.equal(inbox.size, 1);
+  assert.deepEqual(await inbox.peekNext({ consumerId: 'implicit-budget-test' }), thirdEnvelope);
 });
 
 test('implicit executor dispatch uses the execution agent override for every subtask', async () => {

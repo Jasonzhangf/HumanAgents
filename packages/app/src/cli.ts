@@ -1774,6 +1774,7 @@ export async function main(args: readonly string[]): Promise<void> {
         start: async () => {
           runtime = await startUiRuntime({
             agentRoster: configuration.agentRoster,
+            maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
             mode,
             accessControl,
             organId: id('organ', 'humanagent-ui'),

@@ -469,6 +469,7 @@ export interface UiRuntimeGrantExecutionReceipt {
 
 export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
+  readonly maxConcurrentTasks?: number;
   readonly organId: OrganId;
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
@@ -2006,6 +2007,7 @@ export class UiRuntimeService {
     });
     this.implicitBrain = new ImplicitBrainFifo({
       inbox: this.requirementInbox,
+      maxConcurrentTasks: options.maxConcurrentTasks,
       consumerId: RUNTIME_OWNER,
       ownerId: RUNTIME_OWNER,
       admit: (input) => {
@@ -5951,7 +5953,7 @@ export class UiRuntimeService {
     const runningTasks = tasks.filter((task) => task.state === 'running' || task.state === 'settling');
     return admitRequirement({
       envelope,
-      queue: defaultAdmissionQueueConfig(queue),
+      queue: defaultAdmissionQueueConfig(queue, this.options.maxConcurrentTasks),
       registeredQueues: ADMISSION_QUEUE_KINDS,
       queueLoad: {
         // An append/change to an already-running task does not occupy a new
