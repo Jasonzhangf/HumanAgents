@@ -25,7 +25,14 @@ import {
 } from '../../../packages/runtime/src/agent-loop/inspection-turn-boundary.js';
 import { createInspectionRuntimeHelpers, type InspectionRuntimeHelperDependencies } from '../../../packages/runtime/src/agent-loop/inspection-runtime-helpers.js';
 import { createPublishedTaskPlanRevision } from '../../../packages/core/src/task-plan-revision.js';
-import type { ActiveTurnCaptureBody, AcceptedExecutionChildDelivery, ChildInvocationRecord, PublishedTaskPlanRevision } from '../../../packages/contracts/src/index.js';
+import type {
+  ActiveTurnCaptureBody,
+  AcceptedExecutionChildDelivery,
+  ChildInvocationRecord,
+  InspectionExecutionOutcome,
+  PublishedTaskPlanRevision,
+  TurnCloseSummary,
+} from '../../../packages/contracts/src/index.js';
 import type { NativeSaveIntent, NativeSegmentSaveIntentV2 } from '../../../packages/runtime/src/checkpoints/native-save-contract.js';
 import type {
   CommittedCheckpointRecord,
@@ -1179,6 +1186,197 @@ test('inspection turn boundary consumer commits a settled occurrence without a s
   assert.deepEqual(receipt, { settlementCommitRefs: [settlementCommitRef], cycleClosedCommitRef: closeCommitRef });
   assert.deepEqual(replay, receipt);
   assert.deepEqual(commits, ['business-cycle-closed']);
+});
+
+test('inspection turn boundary consumer settles declared aggregate outcome without inventing missing item results', async () => {
+  // Failure basis: next action was used as the aggregate outcome. Impact: completed inspection history can be recorded
+  // as blocked/unknown, and replay can silently reuse a conflicting declaration. Probability: unknown. Cost: one local
+  // public-port consumer with the existing checkpoint and scope fixtures.
+  const createConsumer = (suffix: string, inspectionOutcome?: InspectionExecutionOutcome) => {
+    const logicalTurnId = `turn-inspection-aggregate-${suffix}`;
+    const checkpointCommitRef = {
+      commitId: `checkpoint:inspection-aggregate-${suffix}`,
+      journalSeq: 4,
+      recordDigest: digest(`checkpoint-aggregate-${suffix}`),
+    };
+    const openingCommitRef = {
+      commitId: `opening:inspection-aggregate-${suffix}`,
+      journalSeq: 3,
+      recordDigest: digest(`opening-aggregate-${suffix}`),
+    };
+    const cycleOpenedCommitRef = {
+      commitId: `journal:cycle:inspection-aggregate-${suffix}`,
+      journalSeq: 2,
+      recordDigest: digest(`cycle-aggregate-${suffix}`),
+    };
+    const settlementCommitRef = {
+      commitId: `settlement:inspection-aggregate-${suffix}`,
+      journalSeq: 5,
+      recordDigest: digest(`settlement-aggregate-${suffix}`),
+    };
+    const committedAt = '2026-09-20T00:00:00.000Z';
+    const next = { kind: 'continue' } as const;
+    const checkpoint = {
+      checkpoint: {
+        id: id('checkpoint', `inspection-aggregate-${suffix}`),
+        scope,
+        cycleId: scope.cycleId!,
+        seq: 2,
+        previousCheckpointId: null,
+        directiveRevision: 1,
+        executionEpoch: 1,
+        outcome: 'succeeded',
+        summary: 'inspection aggregate settlement',
+        recoveryStateRef: { evidenceId: id('evidence', `inspection-aggregate-recovery-${suffix}`),
+          kind: 'operation', source: 'test', locator: 'checkpoint', scope },
+        evidenceRefs: [],
+        next,
+      },
+      previous: null,
+      commitRef: checkpointCommitRef,
+    } as const;
+    const summary: TurnCloseSummary = {
+      goal: { text: 'inspect the target', evidenceRefs: [] },
+      actions: { text: 'record the declared aggregate result', evidenceRefs: [] },
+      result: { text: 'the target was inspected', evidenceRefs: [] },
+      expectedNextStep: { text: 'continue the shared cycle', evidenceRefs: [] },
+      ...(inspectionOutcome === undefined ? {} : { inspectionOutcome }),
+    };
+    const closure = {
+      identity: {
+        turnId: logicalTurnId,
+        workAssignmentRef: `assignment:inspection-aggregate-${suffix}`,
+        taskRef: scope.taskId!,
+        scopeRef: scope,
+        cycleRef: scope.cycleId!,
+        inputRevision: 1,
+        directiveRevision: 1,
+        executionEpoch: 1,
+        runtimeBindingRef: `runtime-binding:inspection-aggregate-${suffix}`,
+        permissionRevision: `permission:inspection-aggregate-${suffix}`,
+      },
+      checkpointId: checkpoint.checkpoint.id,
+      closureRef: `turn-closure:inspection-aggregate-${suffix}`,
+      summary,
+      recoveryStateRef: checkpoint.checkpoint.recoveryStateRef,
+      closedAt: committedAt,
+    } as const;
+    const occurrence = {
+      logicalTurnId,
+      opening: {
+        record: {
+          kind: 'inspection-occurrence-opened',
+          schemaVersion: 1,
+          occurrence: { scope: scope as typeof scope & { taskId: NonNullable<typeof scope.taskId> },
+            occurrenceId: `inspection-occurrence-aggregate-${suffix}` },
+          executionScope: scope,
+          cycleId: scope.cycleId!.value,
+          executionEpoch: 1,
+          definition: { definitionId: 'inspection-definition-aggregate', definitionVersion: '1' },
+          definitionCommitRef: { commitId: 'journal:definition:inspection-aggregate', journalSeq: 1,
+            recordDigest: digest('definition-aggregate') },
+          definitionDigest: `sha256:${'4'.repeat(64)}`,
+          planRevisionCommitRef: { commitId: 'journal:plan:inspection-aggregate', journalSeq: 1,
+            recordDigest: digest('plan-aggregate') },
+          cycleOpenedCommitRef,
+          scheduleOccurrenceRef: null,
+          openedAt: committedAt,
+        },
+        commitRef: openingCommitRef,
+      },
+      cycleOpening: {
+        record: {
+          kind: 'business-cycle-opened',
+          schemaVersion: 1,
+          cycle: { id: scope.cycleId!, scope, directiveRevision: 1, executionEpoch: 1, state: 'admitted' },
+          taskFlow: { kind: 'inspection', definitionVersion: 1 },
+          planRevisionCommitRef: { commitId: 'journal:plan:inspection-aggregate', journalSeq: 1,
+            recordDigest: digest('plan-aggregate') },
+          previousCycleCommitRef: null,
+          openedAt: committedAt,
+          openingReason: 'inspection aggregate settlement',
+        },
+        commitRef: cycleOpenedCommitRef,
+      },
+      deliveries: [],
+      items: [],
+    } as const;
+    const durableEntries: { readonly record: I2Record; readonly commitRef: JournalCommitRef }[] = [];
+    const committed: I2Record[] = [];
+    const boundary = new InspectionTurnBoundary({
+      selectionReader: { readSelectionContext: async () => { throw new Error('settle must not select'); } },
+      journal: {
+        commit: async (record) => {
+          committed.push(record);
+          if (record.kind !== 'inspection-occurrence-settled') throw new Error(`unexpected commit: ${record.kind}`);
+          durableEntries.push({ record, commitRef: settlementCommitRef });
+          return settlementCommitRef;
+        },
+        read: async () => { throw new Error('settle scan must use list'); },
+        list: async () => ({ entries: durableEntries }),
+      },
+      occurrenceOpening: { open: async () => { throw new Error('settle must not open'); } },
+      acceptedDeliveryReader: { readAcceptedDelivery: async () => null },
+      acceptedDelivery: { accept: async () => null },
+      occurrences: {
+        readOccurrenceForTurn: async () => occurrence,
+        readOccurrencesForStop: async () => [],
+      },
+      checkpoints: {
+        readCommitted: async () => checkpoint,
+        readCheckpointRecoveryBinding: async () => null,
+        readNativeCheckpoint: async () => checkpointRelationship(checkpoint, committedAt),
+      },
+      clock: { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    });
+    return { boundary, checkpoint, closure, committed };
+  };
+
+  const declared = createConsumer('declared', { status: 'completed', judgment: 'target inspected with free-form judgment' });
+  const declaredInput = {
+    logicalTurnId: declared.closure.identity.turnId,
+    closure: declared.closure,
+    checkpoint: declared.checkpoint,
+    next: { kind: 'continue' as const },
+    milestoneAlignmentCommitRefs: [],
+  };
+  const declaredReceipt = await declared.boundary.settleClosure(declaredInput);
+  assert.deepEqual(declaredReceipt, { settlementCommitRefs: [{
+    commitId: 'settlement:inspection-aggregate-declared', journalSeq: 5,
+    recordDigest: digest('settlement-aggregate-declared'),
+  }] });
+  const declaredSettlement = declared.committed[0];
+  assert.equal(declaredSettlement?.kind, 'inspection-occurrence-settled');
+  assert.deepEqual(declaredSettlement?.kind === 'inspection-occurrence-settled' && declaredSettlement.outcome,
+    { status: 'completed', judgment: 'target inspected with free-form judgment' });
+  assert.deepEqual(declaredSettlement?.kind === 'inspection-occurrence-settled' && declaredSettlement.itemResultCommitRefs, []);
+
+  const matchingReplay = await declared.boundary.settleClosure(declaredInput);
+  assert.deepEqual(matchingReplay, declaredReceipt);
+  assert.equal(declared.committed.length, 1);
+  await assert.rejects(
+    () => declared.boundary.settleClosure({
+      ...declaredInput,
+      closure: {
+        ...declared.closure,
+        summary: { ...declared.closure.summary,
+          inspectionOutcome: { status: 'completed', judgment: 'conflicting replay judgment' } },
+      },
+    }),
+    /outcome conflicts/,
+  );
+  assert.equal(declared.committed.length, 1);
+
+  const undeclared = createConsumer('undeclared');
+  await undeclared.boundary.settleClosure({
+    logicalTurnId: undeclared.closure.identity.turnId,
+    closure: undeclared.closure,
+    checkpoint: undeclared.checkpoint,
+    next: { kind: 'continue' },
+    milestoneAlignmentCommitRefs: [],
+  });
+  const undeclaredSettlement = undeclared.committed[0];
+  assert.equal(undeclaredSettlement?.kind === 'inspection-occurrence-settled' && undeclaredSettlement.outcome.status, 'unknown');
 });
 
 test('inspection turn boundary consumer reuses a durable item without executing the child twice', async () => {

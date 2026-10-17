@@ -7,6 +7,7 @@ import type {
   ExecutionChildCallBinding,
   I2JournalPort,
   InspectionExecutionBinding,
+  InspectionExecutionOutcome,
   InspectionItemDelivery,
   InspectionItemResultRecord,
   InspectionOccurrenceOpenedRecord,
@@ -20,6 +21,7 @@ import type {
   WorkAssignment,
 } from '../../../contracts/src/index.js';
 import {
+  validateInspectionExecutionOutcome,
   validateInspectionItemDelivery,
   validateInspectionItemResultRecord,
 } from '../../../contracts/src/i2-history.js';
@@ -241,6 +243,10 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
       || JSON.stringify(input.next) !== JSON.stringify(input.checkpoint.checkpoint.next)) {
       throw new AgentLoopRuntimeError('conflict', 'inspection closure, checkpoint, or next action conflicts');
     }
+    const settlementOutcome = closureOutcome(input.closure);
+    if (settlementOutcome.declaredOutcome !== undefined) {
+      validateInspectionExecutionOutcome(settlementOutcome.declaredOutcome);
+    }
     const occurrence = await this.dependencies.occurrences.readOccurrenceForTurn({
       logicalTurnId: input.logicalTurnId,
       taskScope: taskScopeOf(input.checkpoint.checkpoint.scope),
@@ -250,9 +256,7 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
       occurrence,
       checkpoint: input.checkpoint,
       committedAt,
-      outcome: occurrence.settlement !== undefined && sameCommit(occurrence.settlement.record.checkpointCommitRef, input.checkpoint.commitRef)
-        ? occurrence.settlement.record.outcome
-        : outcomeForTerminal(input.next),
+      ...settlementOutcome,
     });
     const cycleClosedCommitRef = await this.closeCycleIfTerminal({
       checkpoint: input.checkpoint,
@@ -336,7 +340,8 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     readonly occurrence: InspectionOccurrenceFacts;
     readonly checkpoint: CommittedCheckpointRecord;
     readonly committedAt: string;
-    readonly outcome: InspectionItemDelivery['outcome'];
+    readonly outcome: InspectionExecutionOutcome;
+    readonly declaredOutcome?: InspectionExecutionOutcome;
   }): Promise<{ readonly record: InspectionOccurrenceSettledRecord; readonly commitRef: JournalCommitRef }> {
     const key = `${commitKey(input.checkpoint.commitRef)}\u0000${input.occurrence.opening.record.occurrence.occurrenceId}`;
     const running = this.settlementOps.get(key);
@@ -354,7 +359,8 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     readonly occurrence: InspectionOccurrenceFacts;
     readonly checkpoint: CommittedCheckpointRecord;
     readonly committedAt: string;
-    readonly outcome: InspectionItemDelivery['outcome'];
+    readonly outcome: InspectionExecutionOutcome;
+    readonly declaredOutcome?: InspectionExecutionOutcome;
   }): Promise<{ readonly record: InspectionOccurrenceSettledRecord; readonly commitRef: JournalCommitRef }> {
     const durableSettlement = await this.findSettlement(input.occurrence.opening.record.occurrence, input.checkpoint.commitRef);
     const itemRefs: JournalCommitRef[] = [];
@@ -397,6 +403,9 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
       }
       if (!sameRefs(existing.record.itemResultCommitRefs, itemRefs)) {
         throw new AgentLoopRuntimeError('conflict', 'inspection settlement item receipts conflict with durable deliveries');
+      }
+      if (input.declaredOutcome !== undefined && !sameOutcome(existing.record.outcome, input.declaredOutcome)) {
+        throw new AgentLoopRuntimeError('conflict', 'inspection settlement outcome conflicts with the declared closure outcome');
       }
       return { record: existing.record, commitRef: existing.commitRef };
     }
@@ -632,7 +641,21 @@ function sameRefs(left: readonly JournalCommitRef[], right: readonly JournalComm
   return left.length === right.length && left.every((ref, index) => sameCommit(ref, right[index]!));
 }
 
-function outcomeForTerminal(next: NextAction): InspectionItemDelivery['outcome'] {
-  if (next.kind === 'stop') return { status: 'unknown', reason: 'turn stopped without an explicit inspection outcome' };
-  return { status: 'blocked', reason: `turn closed with ${next.kind} before all inspection checks completed` };
+function closureOutcome(closure: TurnClosureReference): {
+  readonly outcome: InspectionExecutionOutcome;
+  readonly declaredOutcome?: InspectionExecutionOutcome;
+} {
+  const declaredOutcome = closure.summary.inspectionOutcome;
+  return declaredOutcome === undefined
+    ? { outcome: { status: 'unknown', reason: 'turn closed without an explicit inspection outcome' } }
+    : { outcome: declaredOutcome, declaredOutcome };
+}
+
+function sameOutcome(left: InspectionExecutionOutcome, right: InspectionExecutionOutcome): boolean {
+  if (left.status !== right.status) return false;
+  if (left.status === 'completed') {
+    return right.status === 'completed' && left.judgment === right.judgment;
+  }
+  if (right.status === 'completed') return false;
+  return left.reason === right.reason && left.judgment === right.judgment;
 }
