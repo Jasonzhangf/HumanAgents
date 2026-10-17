@@ -76,7 +76,7 @@
     "resume": "pnpm build:app && node dist/app/app/src/cli.js resume",
     "ci": "node scripts/run-ci.mjs",
     "release": "pnpm run release:check",
-    "package": "pnpm run package:release",
+    "package": "pnpm run package:candidate",
     "package:release": "node scripts/package-release.mjs",
     "package:candidate": "node scripts/package-candidate.mjs",
     "package:smoke": "node scripts/verify-package.mjs",
