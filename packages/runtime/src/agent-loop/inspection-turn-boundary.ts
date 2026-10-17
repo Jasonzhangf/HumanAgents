@@ -279,13 +279,6 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     if (input.checkpoint.checkpoint.outcome !== 'stopped') {
       throw new AgentLoopRuntimeError('invalid-state', 'inspection stop settlement requires a committed stopped checkpoint');
     }
-    const binding = await this.dependencies.checkpoints.readCheckpointRecoveryBinding(
-      input.checkpoint.checkpoint.scope,
-      input.checkpoint.commitRef,
-    );
-    if (binding === null) {
-      throw new AgentLoopRuntimeError('invalid-state', 'committed stopped checkpoint has no recovery binding');
-    }
     const occurrences = await this.dependencies.occurrences.readOccurrencesForStop({ checkpoint: input.checkpoint });
     const settlementCommitRefs: JournalCommitRef[] = [];
     let cycleClosedCommitRef: JournalCommitRef | undefined;
