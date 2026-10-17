@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- 已正常push origin/main，远端回执 e053acc7..e87751d4 main→main。本轮已审、组合、构建安装、官方restart和原受影响复验的增量已远端交付；未将r243辅助观察当作停推前置。安装深层多turn/cold、真实RCCAppTask、v2/childwire与模型语义质量仍按各自范围UNVERIFIED/INCOMPLETE，完整目标不关闭。UX正在正式配对恢复p1后只读既有Task/checkpoint，p3不动；TaskFlow后继独立，不混为已交付。
+
 - 首milestone整体Review r242 exit0/SUCCESS/findings空，经现有schema/classifier为pass；同Reviewer r244更正Provider19/19及错误build命令引用后再次classifier pass。完整候选已正常FF main；contracts/config/App构建、正式package/install:global成功。官方显式targetrestart completed 23→24，PID3303→22814、port53007不变、legacyCloseReceipt clean；新进程确认installed launcher运行。main原coldconsumer1/1、grant公开整文件4/4复验通过；installed UI root原selectedbrowser36/36。源码cold不冒installed深层恢复证明，真实RCCAppTask与v2/childwire等原UNVERIFIED保持。r243只读installedrecipe未返回；尚未push，标准交付未最终收口。
 
 - start/settle四文件source d1788f33已正常合candidate：组合Appbuild/tsc0、原目标Reviewconsumer1/1、Provider两例2/2。原serve-runtime另两失败在未合修复candidate同样0/2复现，明确不属该fix新增，仍记整文件17/19；目标真实RED/GREEN见r236/r238与宿主回执。来源clean后remove/prune/pathabsent。I2UI来源也由UXowner正常关闭，证据保留。
