@@ -6,9 +6,16 @@ import {
   type AdmittedTurn,
   type EvidenceRef,
   type ScopeRef,
+  type TaskIdentityRecord,
   type TaskId,
+  type TurnPlanBinding,
   type WorkAssignment,
 } from '../../../contracts/src/index.js';
+import {
+  readCurrentTaskPlan,
+  type TaskPlanRevisionConsumerPort,
+} from '../orchestration/task-plan-revisions.js';
+import type { RuntimeTaskCurrentPlan } from '../ui-runtime/current-state.js';
 import { AdmissionError } from './errors.js';
 
 /**
@@ -34,6 +41,12 @@ export interface AdmittedTurnProducerInput {
   readonly currentTurnRef: string;
   readonly admissionEvidence: readonly EvidenceRef[];
   readonly recoveryStateRef: EvidenceRef;
+}
+
+export interface AcceptedTurnPlanProducerInput {
+  readonly plans: Pick<TaskPlanRevisionConsumerPort, 'get' | 'getCommitRef'>;
+  readonly identity: TaskIdentityRecord;
+  readonly currentPlan: RuntimeTaskCurrentPlan;
 }
 
 function assertNonEmpty(value: string, label: string): void {
@@ -102,4 +115,15 @@ export function produceAdmittedTurn(input: AdmittedTurnProducerInput): AdmittedT
 /** Runtime-owned active-turn identity, minted once when the turn is opened. */
 export function newActiveTurnId(operationId: string): string {
   return id('operation', `active-turn-${operationId}`).value;
+}
+
+/**
+ * Produce the exact accepted plan reference for an active-turn binding. The
+ * existing task-plan owner validates the confirmed Task identity, publication
+ * and physical receipt; this function only projects that verified reference.
+ */
+export async function produceAcceptedTurnPlanBinding(
+  input: AcceptedTurnPlanProducerInput,
+): Promise<TurnPlanBinding> {
+  return (await readCurrentTaskPlan(input)).currentPlan;
 }

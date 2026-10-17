@@ -4,6 +4,10 @@ import {
   id,
   type ActiveTurnBinding,
   type AcceptedChildDelivery,
+  type EvidenceRef,
+  type InspectionExecutableCheck,
+  type InspectionExecutionBinding,
+  type InspectionItemDelivery,
   type RawAsset,
   type RawFactEnvelope,
   type ReviewAssignment,
@@ -42,6 +46,14 @@ const initialInput: RawAsset = {
   ref: { evidenceId: id('evidence', 'initial'), kind: 'execution', source: 'capture-fixture', locator: 'initial', digest: `sha256:${'a'.repeat(64)}`, scope },
   view: { kind: 'utf8-text' },
 };
+const acceptedPlan = {
+  revisionId: 'accepted-plan',
+  revisionCommitRef: {
+    commitId: 'accepted-plan-commit',
+    journalSeq: 4,
+    recordDigest: 'sha256:accepted-plan',
+  },
+} as const;
 const captureInput = { pauseId: 'boundary', frozenAt: '2026-10-13T00:00:00.000Z', initialInput, checkpointPath: [], completionRefs: [] };
 const request = { turnId: 'provider-turn', requestId: 'request-a' };
 function envelope(seq: number): RawFactEnvelope {
@@ -66,6 +78,38 @@ const childDeliveryAsset: RawAsset = {
     locator: 'child-refined', digest: `sha256:${'c'.repeat(64)}`, scope,
   },
   view: { kind: 'utf8-text' },
+};
+const inspectionEvidence: EvidenceRef = {
+  evidenceId: id('evidence', 'inspection-delivery'),
+  kind: 'execution',
+  source: 'runtime-fixture',
+  locator: 'inspection-delivery',
+  digest: `sha256:${'f'.repeat(64)}`,
+  scope,
+};
+const inspectionBinding: InspectionExecutionBinding = {
+  occurrence: { scope: { organId: scope.organId, taskId: scope.taskId }, occurrenceId: 'inspection-occurrence' },
+  executionScope: scope,
+  cycleId: scope.cycleId.value,
+  executionEpoch: binding.execution.executionEpoch,
+  definition: { definitionId: 'inspection-definition', definitionVersion: 'v1' },
+  definitionCommitRef: { commitId: 'inspection-definition-commit', journalSeq: 1, recordDigest: 'sha256:inspection-definition' },
+  definitionDigest: 'sha256:inspection-definition',
+  cycleOpenedCommitRef: { commitId: 'inspection-cycle-open', journalSeq: 2, recordDigest: 'sha256:inspection-cycle-open' },
+  scheduleOccurrenceRef: null,
+};
+const inspectionCheck: InspectionExecutableCheck = {
+  checkId: 'check-a',
+  criterion: 'Observe the child result',
+  inputRefs: [],
+};
+const inspectionDelivery: InspectionItemDelivery = {
+  checkId: inspectionCheck.checkId,
+  resultId: 'inspection-result:inspection-child',
+  attempt: binding.assignment.attempt,
+  outcome: { status: 'completed', judgment: 'satisfies' },
+  evidenceRefs: [inspectionEvidence],
+  completedAt: '2026-10-17T00:00:00.000Z',
 };
 const reviewAssignment: ReviewAssignment = {
   assignmentId: 'review-assignment', taskId: scope.taskId.value, workerAgentId: 'review-agent',
@@ -326,4 +370,118 @@ test('a review post-checkpoint requires the durable review return, not adoption'
   await expectRejects(() => context.recordReviewCheckpoint('review-a', 'pre-call-r'), 'must differ');
   await expectRejects(() => context.recordReviewCheckpoint('review-a', 'another'), 'already has a review-result checkpoint');
   assert.equal(context.childInvocations()[0]!.postReviewCheckpointRef, 'post-review-r');
+});
+
+test('inspection persisted delivery is retained in the accepted execution entry and rejects a conflicting retry', async () => {
+  const { context } = await open();
+  const invocationId = 'inspection-child';
+  await context.openChildInvocation({
+    invocationId,
+    childTurnId: 'inspection-child-turn',
+    checkpointReceiptRef: 'inspection-pre-call',
+    binding: {
+      kind: 'execution',
+      assignment: binding.assignment,
+      inspection: { binding: inspectionBinding, check: inspectionCheck },
+    },
+  });
+  const returnInput = {
+    kind: 'execution' as const,
+    invocationId,
+    assignment: binding.assignment,
+    result: childResult,
+    refinedDelivery: childDeliveryAsset,
+    inspectionDelivery,
+  };
+  const delivery = await context.recordChildReturn(returnInput);
+  assert.deepEqual(
+    (delivery as AcceptedChildDelivery & { inspectionDelivery?: InspectionItemDelivery }).inspectionDelivery,
+    inspectionDelivery,
+  );
+  assert.deepEqual(
+    (context.entries()[0] as AcceptedChildDelivery & { inspectionDelivery?: InspectionItemDelivery }).inspectionDelivery,
+    inspectionDelivery,
+  );
+  await expectRejects(
+    () => context.recordChildReturn({
+      ...returnInput,
+      inspectionDelivery: {
+        ...inspectionDelivery,
+        outcome: { status: 'completed', judgment: 'does not satisfy' },
+      },
+    }),
+    'conflicting durable identity',
+  );
+  assert.deepEqual(
+    (context.entries()[0] as AcceptedChildDelivery & { inspectionDelivery?: InspectionItemDelivery }).inspectionDelivery,
+    inspectionDelivery,
+  );
+});
+
+test('inspection delivery rejects a mismatched child attempt before it is accepted', async () => {
+  const { context } = await open();
+  await context.openChildInvocation({
+    invocationId: 'inspection-attempt-child',
+    childTurnId: 'inspection-attempt-turn',
+    checkpointReceiptRef: 'inspection-attempt-pre-call',
+    binding: {
+      kind: 'execution',
+      assignment: binding.assignment,
+      inspection: { binding: inspectionBinding, check: inspectionCheck },
+    },
+  });
+  await expectRejects(
+    () => context.recordChildReturn({
+      kind: 'execution',
+      invocationId: 'inspection-attempt-child',
+      assignment: binding.assignment,
+      result: childResult,
+      refinedDelivery: childDeliveryAsset,
+      inspectionDelivery: {
+        ...inspectionDelivery,
+        resultId: 'inspection-result:inspection-attempt-child',
+        attempt: 2,
+      },
+    }),
+    'capture inspection delivery attempt does not match its invocation assignment',
+  );
+  assert.equal(context.entries().length, 0);
+});
+
+test('accepted turn plan is retained through open, capture and reconstruct, while a same-turn conflict fails', async () => {
+  const records: ActiveTurnJournalRecord[] = [];
+  const commits = new Map<string, string>();
+  const journal: ActiveTurnJournalPort = {
+    async append(input) {
+      const bytes = JSON.stringify(input.record);
+      const previous = commits.get(input.commitId);
+      if (previous !== undefined) {
+        if (previous !== bytes) throw new Error('conflicting durable identity');
+        return;
+      }
+      commits.set(input.commitId, bytes);
+      records.push(structuredClone(input.record));
+    },
+    async replay() { return structuredClone(records); },
+  };
+  const plannedBinding: ActiveTurnBinding = { ...binding, acceptedPlan };
+  const context = await ActiveTurnContext.open({ journal, binding: plannedBinding, currentTurnRef: 'current' });
+  assert.deepEqual(context.activeBinding.acceptedPlan, acceptedPlan);
+  await context.closeAndDrainProducers();
+  const capture = context.capture(captureInput);
+  assert.deepEqual(capture.binding.acceptedPlan, acceptedPlan);
+
+  const reconstructed = await ActiveTurnContext.reconstruct(journal, binding.admittedTurn.turnId);
+  assert.deepEqual(reconstructed.activeBinding.acceptedPlan, acceptedPlan);
+  await expectRejects(
+    () => ActiveTurnContext.open({
+      journal,
+      binding: {
+        ...plannedBinding,
+        acceptedPlan: { ...acceptedPlan, revisionId: 'different-plan' },
+      },
+      currentTurnRef: 'current',
+    }),
+    'conflicting durable identity',
+  );
 });

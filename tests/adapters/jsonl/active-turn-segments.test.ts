@@ -6,6 +6,10 @@ import test from 'node:test';
 import {
   id,
   type ActiveTurnBinding,
+  type EvidenceRef,
+  type InspectionExecutableCheck,
+  type InspectionExecutionBinding,
+  type InspectionItemDelivery,
   type RawAsset,
   type RuntimeRequestRecord,
   type ScopeRef,
@@ -22,7 +26,10 @@ import {
   type ActiveTurnInitialOpenAnchor,
   type ResumedTurnSegmentOpened,
 } from '../../../packages/contracts/src/active-turn-segments.js';
-import { activeTurnCommitId } from '../../../packages/runtime/src/context/active-turn-journal.js';
+import {
+  activeTurnCommitId,
+  type ActiveTurnJournalRecord,
+} from '../../../packages/runtime/src/context/active-turn-journal.js';
 import type { TaskGrantAuthority, TaskGrantRegistrationPort } from '../../../packages/runtime/src/admission/task-grant.js';
 import {
   JournalIntegrityError,
@@ -50,6 +57,38 @@ const scope: ScopeRef = { organId, taskId, cycleId };
 const turnId = 'jsonl-initial-turn';
 const owner = 'jsonl-initial-owner';
 const digestA = `sha256:${'a'.repeat(64)}`;
+const acceptedPlan = {
+  revisionId: 'jsonl-plan-revision',
+  revisionCommitRef: {
+    commitId: 'jsonl-plan-commit',
+    journalSeq: 3,
+    recordDigest: 'sha256:jsonl-plan',
+  },
+} as const;
+const inspectionEvidence: EvidenceRef = {
+  evidenceId: id('evidence', 'jsonl-inspection-delivery'),
+  kind: 'execution',
+  source: 'jsonl-initial-fixture',
+  locator: 'jsonl-inspection-delivery',
+  digest: `sha256:${'b'.repeat(64)}`,
+  scope,
+};
+const inspectionBinding: InspectionExecutionBinding = {
+  occurrence: { scope: { organId, taskId }, occurrenceId: 'jsonl-inspection-occurrence' },
+  executionScope: scope,
+  cycleId: cycleId.value,
+  executionEpoch: 1,
+  definition: { definitionId: 'jsonl-inspection-definition', definitionVersion: 'v1' },
+  definitionCommitRef: { commitId: 'jsonl-inspection-definition-commit', journalSeq: 1, recordDigest: 'sha256:jsonl-inspection-definition' },
+  definitionDigest: 'sha256:jsonl-inspection-definition',
+  cycleOpenedCommitRef: { commitId: 'jsonl-inspection-cycle-open', journalSeq: 2, recordDigest: 'sha256:jsonl-inspection-cycle-open' },
+  scheduleOccurrenceRef: null,
+};
+const inspectionCheck: InspectionExecutableCheck = {
+  checkId: 'jsonl-check',
+  criterion: 'Observe the persisted JSONL delivery',
+  inputRefs: [],
+};
 const capability: CheckpointControlCapabilityRef = {
   actionId: 'checkpoint.save',
   capabilities: ['provider.execution'],
@@ -59,6 +98,7 @@ const capability: CheckpointControlCapabilityRef = {
 const binding: ActiveTurnBinding = {
   execution: { runtimeId: 'jsonl-runtime', executionEpoch: 1 },
   scope,
+  acceptedPlan,
   admittedTurn: {
     turnId,
     workAssignmentRef: 'jsonl-assignment',
@@ -91,6 +131,14 @@ const binding: ActiveTurnBinding = {
     requiredCapabilities: [],
     mergeGate: 'not-required',
   },
+};
+const inspectionDelivery: InspectionItemDelivery = {
+  checkId: inspectionCheck.checkId,
+  resultId: 'inspection-result:jsonl-inspection',
+  attempt: binding.assignment.attempt,
+  outcome: { status: 'completed', judgment: 'satisfies' },
+  evidenceRefs: [inspectionEvidence],
+  completedAt: '2026-10-17T00:00:00.000Z',
 };
 
 const initialInput: RawAsset = {
@@ -228,6 +276,7 @@ test('initial-open anchor exact read: real binding and record tail, then stale a
     const exact = await segmentJournal.readInitialOpenExact({ businessTurnId: turnId, anchor });
     assert.equal(exact.prefix.kind, 'live-accepted-prefix');
     assert.equal(exact.prefix.source, turnId);
+    assert.deepEqual(exact.prefix.binding.acceptedPlan, acceptedPlan);
     assert.deepEqual(exact.prefix.requests, [requestRecord]);
     assert.deepEqual(exact.prefix.initialInput, initialInput);
 
@@ -288,6 +337,15 @@ test('initial-open append rechecks the anchor under the lock and fences a later 
       record: segmentOpenedFor({ segmentId: 'jsonl-segment-2', anchor, businessTurnRef, epoch: 2, ...realGrant }),
     });
     assert.equal(opened.commitId, activeTurnSegmentCommitId('jsonl-segment-2', 'segment-opened'));
+    const segment = await segmentJournal.readSegmentOpened('jsonl-segment-2');
+    assert.ok(segment);
+    if (!segment) return;
+    assert.deepEqual(segment.businessTurnRef.bindingCommitRef, anchor.bindingCommitRef);
+    const segmentRecords = await segmentJournal.readSegmentRecords({
+      businessTurnId: turnId,
+      segmentId: 'jsonl-segment-2',
+    });
+    assert.deepEqual(segmentRecords, []);
     const bytesAfterSuccessor = await readFile(journalPath, 'utf8');
 
     // A late epoch-1 writer with a new record is fenced by the retired original.
@@ -300,5 +358,71 @@ test('initial-open append rechecks the anchor under the lock and fences a later 
         && error.message.includes('active turn append is fenced'),
     );
     assert.equal(await readFile(journalPath, 'utf8'), bytesAfterSuccessor);
+  });
+});
+
+test('inspection persisted delivery survives actual JSONL read and reopen', async () => {
+  await withFixture(async (journalPath) => {
+    const journal = new JsonlOrganJournal(journalPath);
+    await openInitialTurn(journal);
+    const active = createJsonlActiveTurnJournal({ journal, turnId });
+    const invocationId = 'jsonl-inspection';
+    await active.append({
+      commitId: activeTurnCommitId(turnId, `invocation:${invocationId}`),
+      record: {
+        kind: 'child-invocation',
+        record: {
+          invocationId,
+          childTurnId: 'jsonl-inspection-child-turn',
+          checkpointReceiptRef: 'jsonl-inspection-pre-call',
+          binding: {
+            kind: 'execution',
+            assignment: binding.assignment,
+            inspection: { binding: inspectionBinding, check: inspectionCheck },
+          },
+        },
+      },
+    });
+    await active.append({
+      commitId: activeTurnCommitId(turnId, `delivery:${invocationId}`),
+      record: {
+        kind: 'child-delivery',
+        entry: {
+          kind: 'execution',
+          seq: 1,
+          invocationId,
+          refinedDelivery: initialInput,
+          assignment: binding.assignment,
+          result: {
+            taskId,
+            pipelineNodeId: binding.assignment.pipelineNodeId,
+            agentId: 'jsonl-agent',
+            assignmentId: binding.assignment.assignmentId,
+            attempt: binding.assignment.attempt,
+            executionEpoch: binding.assignment.executionEpoch,
+            inputRevision: binding.assignment.inputRevision,
+            producedArtifactRefs: [],
+            producedArtifactDigests: [],
+            status: 'succeeded',
+            summary: 'inspection child delivery',
+            outputRefs: [],
+            evidenceRefs: [inspectionEvidence],
+            nextAction: 'settle',
+          },
+          inspectionDelivery,
+        },
+      },
+    });
+
+    const reopened = createJsonlActiveTurnJournal({ journal: new JsonlOrganJournal(journalPath), turnId });
+    const records = await reopened.replay();
+    const bindingRecord = records.find((record): record is Extract<ActiveTurnJournalRecord, { kind: 'binding-opened' }> =>
+      record.kind === 'binding-opened');
+    assert.deepEqual(bindingRecord?.binding.acceptedPlan, acceptedPlan);
+    const delivery = records.find((record): record is Extract<ActiveTurnJournalRecord, { kind: 'child-delivery' }> =>
+      record.kind === 'child-delivery');
+    assert.ok(delivery);
+    if (!delivery || delivery.entry.kind !== 'execution') return;
+    assert.deepEqual(delivery.entry.inspectionDelivery, inspectionDelivery);
   });
 });
