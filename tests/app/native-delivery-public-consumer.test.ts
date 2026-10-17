@@ -48,6 +48,8 @@ const SUMMARY_RESULT = 'summary result is a different material';
 // Missing adapter and the legacy/native append split can lose recovery anchors.
 // Impact: false committed success or an old-epoch anchor. Cost: one local Journal
 // fixture, no model/network/process; the same fixture covers replay and failure.
+// Raw input dumps obscure decision semantics. The existing fixture adds readable
+// summary assertions at low cost; the old dump must fail the no-control-key check.
 test('App child checkpoint adapter commits native pre/review post and preserves replay across current segments', async () => {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'child-checkpoint-'));
@@ -88,9 +90,18 @@ test('App child checkpoint adapter commits native pre/review post and preserves 
   const store = new ServiceExecutionCheckpointStore(filePath, journal, () => new Date('2026-10-17T00:00:00.000Z'));
   const adapter = createAppChildCheckpointAdapter({ store, parent, originalAdmittedTurn, recoveryStateRef });
   const pre = await adapter.pre({ call, selected, worker });
+  assert.ok(!pre.checkpoint.summary.includes('businessRegistrationCommitRef'));
+  assert.ok(pre.checkpoint.summary.includes(`目的：${worker.objective}`));
+  assert.ok(pre.checkpoint.summary.includes(worker.successCriteria[0]!));
+  assert.ok(pre.checkpoint.summary.includes('审查类型：quality'));
+  assert.ok(pre.checkpoint.summary.includes('尚未取得该 child 的返回结果'));
+  assert.ok(!pre.checkpoint.summary.includes('审查通过'));
   await parent.openChildInvocation({ invocationId: call.invocationId, childTurnId: 'review-turn',
     checkpointReceiptRef: pre.checkpoint.id.value, binding: { kind: 'review', assignment: review } });
-  const result: ReviewResult = { ...review, resultId: 'review-result', status: 'passed', findings: [], evidenceRefs: [recoveryStateRef] };
+  const result: ReviewResult = { ...review, resultId: 'review-result', status: 'passed', findings: [{
+    findingId: 'readability', severity: 'advisory', locationRef: 'checkpoint summary',
+    problem: 'next action needs clarification', expected: 'state the pending acceptance decision', evidenceRefs: [recoveryStateRef],
+  }], evidenceRefs: [recoveryStateRef] };
   const returned = { kind: 'review' as const, invocationId: call.invocationId, assignment: review, result, scope };
   await assert.rejects(() => adapter.post({ call, returned, worker }), /durable review return/);
   const assets = new ImmutableAssetStore(join(root, 'assets'));
@@ -99,6 +110,16 @@ test('App child checkpoint adapter commits native pre/review post and preserves 
     locator: asset.assetId, digest: asset.digest }, view: { kind: 'utf8-text' as const } };
   await parent.recordChildReturn({ ...returned, refinedDelivery });
   const post = await adapter.post({ call, returned, worker });
+  assert.ok(!post.checkpoint.summary.includes('businessRegistrationCommitRef'));
+  assert.ok(post.checkpoint.summary.includes(`目的：${worker.objective}`));
+  assert.ok(post.checkpoint.summary.includes('已收到并核对持久化的 quality 审查返回'));
+  assert.ok(post.checkpoint.summary.includes('当前结果：passed'));
+  for (const finding of result.findings) {
+    for (const text of [finding.severity, finding.locationRef, finding.problem, finding.expected]) {
+      assert.ok(post.checkpoint.summary.includes(text));
+    }
+  }
+  assert.ok(post.checkpoint.summary.includes('由编排者核对验收依据并决定是否接纳及继续'));
   await parent.recordReviewCheckpoint(call.invocationId, post.checkpoint.id.value);
   assert.ok(pre.checkpoint.id.value !== post.checkpoint.id.value);
   assert.deepEqual(post.previous, pre.checkpoint);
@@ -113,7 +134,7 @@ test('App child checkpoint adapter commits native pre/review post and preserves 
   assert.deepEqual(await freshAdapter.pre({ call, selected, worker }), pre);
   assert.deepEqual(await freshAdapter.post({ call, returned, worker }), post);
   await assert.rejects(() => freshAdapter.post({ call, returned: { ...returned, result: { ...result, resultId: 'changed' } }, worker }));
-  await assert.rejects(() => freshAdapter.pre({ call, selected, worker: { ...worker, assignmentId: 'changed' } }), /replay conflicts/);
+  await assert.rejects(() => freshAdapter.pre({ call, selected, worker: { ...worker, objective: 'different review goal' } }), /replay conflicts/);
   assert.equal(await readFile(filePath, 'utf8'), beforeReplay, 'replay appends no second checkpoint');
   assert.equal(parent.childInvocations()[0]?.checkpointReceiptRef, pre.checkpoint.id.value);
   assert.equal(parent.childInvocations()[0]?.postReviewCheckpointRef, post.checkpoint.id.value);
