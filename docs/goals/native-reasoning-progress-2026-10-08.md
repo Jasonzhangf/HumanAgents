@@ -6,6 +6,10 @@
 
 ### 续接增量（2026-10-16）
 
+- UX A1合同2471476已由peer标准合候选00bb4c12bc6ad55998e15205d52aae293f264676，peer组合contractsbuild0/focused4/4、来源normalremove/prune/absent；仅source-only，未Appbuild/restart，loaded仍9357966/gen15。A3纯projection GCM与A2精确selectorAPI计划并行，不写本侧共享App。
+- N3 stage r3仅deadselector消融部分准入：Root实核TaskFlowSelectorConsumer无外部caller，只有TaskFlowRefinedResult被三个生产consumer使用；不存在计划所称TaskFlowStageRole，admission/index本已导出Orchestrator/Pool，不做重复补链。freshGCM独占n3-selector-ablation/base00bb4c1，只改该一源码，保原RefinedResult ABI/原1Plannerconsumer，不新测试；offlineinstall与productcontractscompile0。显式perhelper真实checkpoint基础另派独立OAuth小APIfreeze，必须真实Journal持久实现，不以可选内存port冒生产。
+- C3b Gemini r3仍未准入：又引入不存在memory-composition事件函数/不可靠字段与.ts.js命令fallback，且多reentry同recovery消息身份冲突未闭。已转独立OAuth小API核对（已定Journal重建+唯一boundary方向不变），不以换模型推翻有效业务finding；两个本侧GCM基础继续。当前本侧3路GCM实现（settled-control、errors[]、deadselector）与UX1路GCM、两侧API计划并行，未计新增验收。
+
 - C3a r7局部计划已接收：先公开resumeExecution标准收拢再confirmed控制；发现displacedObligationRefs可能让历史dispatch覆盖后续terminal的具体投影疑点，须实际RED后才改唯一owner。freshGCM r8复用原N2树仅此Batch1，后续hot/fresh-processnextwire/closure不降验。C3b r2局部“合法errors[]”基础已准入，freshGCM独立memorydomain/basef646d15，仅memory-runtime+原consumer；不与C3a文件交叉。前C2来源已关无同域重试树，开树前fetchmain仍2981230；新树offline frozeninstall0，lock未改。完整C3b生产hook仍未准入，原Gemini r3修真实boundary/binding/record ABI及更早完整未发布路径的cold补发；events.ts已透传无需改。
 - N3 Gemini阶段r2已返但首批未准入：tsx无依赖/测试路径未区分新增、originmain缺候选底层、childproducer新wrapper必要性未证明；原Planner定向r3，只修可派首批，不造ready任务。UX A1独立contracts GCM继续，scope与本侧无重叠。当前两路本侧GCM实现+UX一GCM，两个独立Planner定向修订并行；完整goal/A0/N2C/N3均未验收，无mainpush。
 
