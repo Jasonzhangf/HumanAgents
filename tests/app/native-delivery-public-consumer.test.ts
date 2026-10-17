@@ -281,6 +281,26 @@ interface Wire {
   readonly body: string;
 }
 
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+async function withDeadline<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`deadline exceeded after ${milliseconds}ms`)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 function parseResponsesWire(raw: string): ResponsesWireBody | undefined {
   let parsed: unknown;
   try {
@@ -494,10 +514,17 @@ async function textOnlyResponsesUpstream(input: {
   readonly journal: JsonlOrganJournal;
   readonly inspect?: boolean;
   readonly child?: boolean;
-}): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; close(): Promise<void> }> {
+  readonly parallelChild?: boolean;
+}): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
+  completedInReverse(): boolean; close(): Promise<void> }> {
   const wires: Wire[] = [];
   let plannerAttempts = 0;
   let readIssued = false;
+  const childAEntered = deferred();
+  const childBEntered = deferred();
+  const finishChildB = deferred();
+  let overlap = false;
+  let reversedCompletion = false;
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -525,6 +552,7 @@ async function textOnlyResponsesUpstream(input: {
         return;
       }
       if (declaresTurnEnd(body)) {
+        if (input.parallelChild && body.includes('call-child-1-end')) finishChildB.resolve();
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.end(frame([
           { type: 'response.created', response: { id: 'text-drain' } },
@@ -536,7 +564,7 @@ async function textOnlyResponsesUpstream(input: {
       if (!hasTurnEndSurface(body)) {
         throw new Error('the controlled upstream could not identify a lawful Responses stage');
       }
-      if (input.child) {
+      if (input.child || input.parallelChild) {
         const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
           input?: { type: string; call_id?: string; output?: string; name?: string }[] };
         const invoke = (callId: string, name: string, args: unknown) => {
@@ -554,9 +582,27 @@ async function textOnlyResponsesUpstream(input: {
           assert.equal(body.includes('text-only delivery probe'), false, 'child does not inherit parent request history');
           const records = (await input.journal.verify()).records;
           assert.ok(records.some((record) => record.kind === 'checkpoint'), 'pre-call checkpoint is committed before child Provider request');
-          const delivered = resultFor('call-child-delivery');
+          const parallelIndex = input.parallelChild && body.includes('Independent child result b') ? 1 : 0;
+          const deliveryId = input.parallelChild ? `call-child-${parallelIndex}-delivery` : 'call-child-delivery';
+          const endId = input.parallelChild ? `call-child-${parallelIndex}-end` : 'call-child-end';
+          const bodyText = input.parallelChild ? `parallel child ${parallelIndex} result` : CHILD_BODY;
+          const delivered = resultFor(deliveryId);
+          if (input.parallelChild && !delivered) {
+            if (parallelIndex === 0) {
+              childAEntered.resolve();
+              try {
+                await withDeadline(childBEntered.promise, 2_000);
+                overlap = true;
+                await withDeadline(finishChildB.promise, 10_000);
+                reversedCompletion = true;
+              } catch { /* The consumer assertion reports serial execution after actual settle. */ }
+            } else {
+              childBEntered.resolve();
+              await withDeadline(childAEntered.promise, 2_000);
+            }
+          }
           if (!delivered) {
-            invoke('call-child-delivery', 'humanagent_child_deliver', { body: CHILD_BODY });
+            invoke(deliveryId, 'humanagent_child_deliver', { body: bodyText });
           } else {
             const deliveryEvidence = delivered.output!.split('\n')
               .find((line) => line.startsWith('- evidenceId=child-body-execution-'));
@@ -566,29 +612,67 @@ async function textOnlyResponsesUpstream(input: {
               throw new Error(`child delivery result has no asset: ${delivered.output}`);
             }
             const section = { text: 'Child work complete', evidenceRefs: [ref] };
-            invoke('call-child-end', 'humanagent_turn_end', { summary: {
+            invoke(endId, 'humanagent_turn_end', { summary: {
               goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [ref] });
           }
           return;
         }
-        const called = resultFor('call-parent-child');
-        if (!called) {
-          for (const name of ['child_call', 'child_adopt', 'child_not_select']) {
-            assert.ok(wire.tools?.some((tool) => tool.name === name), `default composition advertises ${name}`);
+        if (input.parallelChild) {
+          const calledA = resultFor('call-parent-child-a');
+          const calledB = resultFor('call-parent-child-b');
+          if (!calledA || !calledB) {
+            for (const name of ['child_call', 'child_adopt', 'child_not_select']) {
+              assert.ok(wire.tools?.some((tool) => tool.name === name), `default composition advertises ${name}`);
+            }
+            response.writeHead(200, { 'content-type': 'text/event-stream' });
+            response.end(frame([
+              { type: 'response.created', response: { id: 'parallel-child-calls' } },
+              ...['a', 'b'].map((suffix, outputIndex) => ({ type: 'response.output_item.done', output_index: outputIndex, item: {
+                type: 'function_call', call_id: `call-parent-child-${suffix}`, name: 'child_call',
+                arguments: JSON.stringify({ purpose: `Produce independent result ${suffix}`,
+                  instructions: 'Independently produce the complete child result, publish it with humanagent_child_deliver, and finish the child turn.',
+                  target: `Independent child result ${suffix}`, agentId: 'orchestration-default', kind: 'execution',
+                  successCriteria: ['Return the complete result'] }),
+              } })),
+              { type: 'response.completed', response: { id: 'parallel-child-calls' } },
+            ]));
+            return;
           }
-          invoke('call-parent-child', 'child_call', { purpose: 'Produce an independent result',
-            instructions: 'Independently produce the complete child result, publish it with humanagent_child_deliver, and finish the child turn with evidence for the parent to adopt.',
-            target: 'Independent child result for the parent to adopt',
-            agentId: 'orchestration-default', kind: 'execution', successCriteria: ['Return the complete result'] });
-          return;
-        }
-        const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
-          state?: string; invocationId?: string; summary?: string };
-        assert.equal(refined.state, 'returned', `real producer returns the child: ${called.output}`);
-        assert.equal(refined.summary, CHILD_BODY);
-        if (!resultFor('call-parent-adopt')) {
-          invoke('call-parent-adopt', 'child_adopt', { invocationId: refined.invocationId });
-          return;
+          const refined = [calledA, calledB].map((called) => JSON.parse(
+            called!.output!.split('\n[HumanAgent evidence refs]')[0]!,
+          ) as { state?: string; invocationId?: string; summary?: string });
+          assert.deepEqual(refined.map((entry) => entry.state), ['returned', 'returned']);
+          assert.equal(refined[0]?.invocationId === refined[1]?.invocationId, false,
+            'two child calls have distinct invocation identities');
+          assert.deepEqual(refined.map((entry) => entry.summary), ['parallel child 0 result', 'parallel child 1 result']);
+          if (!resultFor('call-parent-adopt-a')) {
+            invoke('call-parent-adopt-a', 'child_adopt', { invocationId: refined[0]!.invocationId });
+            return;
+          }
+          if (!resultFor('call-parent-adopt-b')) {
+            invoke('call-parent-adopt-b', 'child_adopt', { invocationId: refined[1]!.invocationId });
+            return;
+          }
+        } else {
+          const called = resultFor('call-parent-child');
+          if (!called) {
+            for (const name of ['child_call', 'child_adopt', 'child_not_select']) {
+              assert.ok(wire.tools?.some((tool) => tool.name === name), `default composition advertises ${name}`);
+            }
+            invoke('call-parent-child', 'child_call', { purpose: 'Produce an independent result',
+              instructions: 'Independently produce the complete child result, publish it with humanagent_child_deliver, and finish the child turn with evidence for the parent to adopt.',
+              target: 'Independent child result for the parent to adopt',
+              agentId: 'orchestration-default', kind: 'execution', successCriteria: ['Return the complete result'] });
+            return;
+          }
+          const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+            state?: string; invocationId?: string; summary?: string };
+          assert.equal(refined.state, 'returned', `real producer returns the child: ${called.output}`);
+          assert.equal(refined.summary, CHILD_BODY);
+          if (!resultFor('call-parent-adopt')) {
+            invoke('call-parent-adopt', 'child_adopt', { invocationId: refined.invocationId });
+            return;
+          }
         }
       }
       if (input.inspect && !readIssued) {
@@ -648,6 +732,8 @@ async function textOnlyResponsesUpstream(input: {
   if (address === null || typeof address === 'string') throw new Error('missing text-only upstream socket address');
   return {
     wires,
+    overlapped: () => overlap,
+    completedInReverse: () => reversedCompletion,
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: async () => {
       server.closeIdleConnections?.();
@@ -657,7 +743,7 @@ async function textOnlyResponsesUpstream(input: {
 }
 
 /** Canonical fixture: real workspace, real native control layout, controlled Provider. */
-async function textOnlyFixture(inspect = false, child = false) {
+async function textOnlyFixture(inspect = false, child = false, parallelChild = false) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
   const controlRoot = join(root, 'control');
@@ -670,7 +756,7 @@ async function textOnlyFixture(inspect = false, child = false) {
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child });
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild });
   const configPath = join(controlRoot, 'config.toml');
   // Both the default execution agent and the independent orchestration agent
   // select this real local Provider through the normal compiled roster.
@@ -869,6 +955,88 @@ test('native inspect producer and cold saved boundary preserve facts without exe
     await fixture.upstream.close();
     if (passed) await rm(fixture.root, { recursive: true });
     else console.error(`inspect fixture retained: ${fixture.root}`);
+  }
+});
+
+// Observed missing App concurrency forwarding can serialize independent children.
+// Frequency is unknown; impact is lost overlap/failure isolation. Cost: one existing
+// local CLI consumer with budget two, including durable checkpoints and Planner.
+test('native parallel child calls overlap and retain ordered refined results and checkpoints', async () => {
+  const fixture = await textOnlyFixture(false, true, true);
+  try {
+    const organId = id('organ', 'humanagent-ui');
+    const taskId = id('task', 'native-parallel-child');
+    const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
+    const session = await access.consumePairingCode(access.createPairingChallenge('parallel-child-lease', 1).code);
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    const controlFile = join(fixture.root, 'control-session.txt');
+    await writeFile(controlFile, `${cookie}\n`, 'utf8');
+    const caller = await access.verifyProductPrincipal(cookie);
+    if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
+    const seed = new RuntimeTaskCoordinator({
+      organId, taskIdPrefix: 'native-parallel', journal: new UiRuntimeJournal(fixture.layout.preparedJournalPath),
+      checkpointStoreFor: () => new FileCheckpointStore(join(fixture.layout.modeRoot, 'seed-checkpoint.jsonl')),
+      attentionPort: {
+        async publish(value) { return { attentionId: value.attentionId, delivered: true }; },
+        async resolve(value) { return { attentionId: value.attentionId, delivered: true }; },
+      },
+      async createDriver() { throw new Error('seed coordinator never releases execution'); },
+    });
+    seed.createTask({ taskId, title: 'parallel children', directive: 'run independent children' });
+    await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)).establish({
+      scope: { organId, taskId }, source: {
+        requirementId: `requirement:${taskId.value}`, inputRevision: 1, draftId: `draft:${taskId.value}`,
+        draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`, confirmationRef: `confirmation:${taskId.value}`,
+      },
+    });
+    await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
+      owner: caller.principal.owner,
+      capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
+      expectedRevision: 0 });
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const processChild = spawn(process.execPath, [join(process.cwd(), 'dist/app/app/src/cli.js'),
+        'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
+        '--plan', 'default', '--session', 'native-parallel-run', '--task', taskId.value,
+        '--prompt', 'text-only delivery probe', '--control-session-file', controlFile],
+      { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      processChild.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+      processChild.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+      processChild.once('error', reject);
+      processChild.once('exit', (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(fixture.upstream.overlapped(), true, 'child B enters real Provider execution before child A returns');
+    assert.equal(fixture.upstream.completedInReverse(), true, 'child B reaches its final drain before child A delivers');
+    assert.equal(result.code, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout.slice(result.stdout.indexOf('{'), result.stdout.lastIndexOf('}') + 1));
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
+    assert.equal(receipt.output, EXACT_BODY);
+    assert.equal(receipt.error, undefined);
+    const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    assert.equal(posts.filter((wire) => plannerPayload(wire.body) !== undefined).length, 1);
+    const continuation = posts.map((wire) => JSON.parse(wire.body) as {
+      input?: { type: string; call_id?: string; output?: string }[];
+    }).find((wire) => wire.input?.some((item) => item.call_id === 'call-parent-child-b' && item.type === 'function_call_output'));
+    const returned = continuation?.input?.filter((item) => item.type === 'function_call_output'
+      && ['call-parent-child-a', 'call-parent-child-b'].includes(item.call_id!)) ?? [];
+    assert.deepEqual(returned.map((item) => item.call_id), ['call-parent-child-a', 'call-parent-child-b']);
+    const refined = returned.map((item) => JSON.parse(item.output!.split('\n[HumanAgent evidence refs]')[0]!));
+    assert.deepEqual(refined.map((entry) => entry.state), ['returned', 'returned']);
+    assert.deepEqual(refined.map((entry) => entry.summary), ['parallel child 0 result', 'parallel child 1 result']);
+    assert.equal(refined[0].invocationId === refined[1].invocationId, false);
+    const verified = await fixture.journal.verify();
+    const checkpoints = verified.records.filter((record) => record.kind === 'checkpoint');
+    for (const entry of refined) {
+      const checkpointId = `child-call-${Buffer.from(entry.invocationId, 'utf8').toString('base64url')}`;
+      assert.ok(checkpoints.some((record) => record.checkpoint?.id.value === checkpointId),
+        'each child has its own committed pre-call checkpoint');
+    }
+    console.log('parallel child consumer settled', JSON.stringify({ overlap: true, calls: returned.map((item) => item.call_id),
+      invocations: refined.map((entry) => entry.invocationId), fixture: fixture.root }));
+  } finally {
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true });
   }
 });
 

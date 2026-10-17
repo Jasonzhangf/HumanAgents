@@ -859,6 +859,7 @@ export function createDefaultExecutionComposition(input: {
       const providerToolExecution = {
             tools: [...(toolScope?.tools ?? input.providerOptions.tools ?? []), ADVERTISED_STANDARD_TURN_END_TOOL],
             executeTool: {
+              canRunConcurrently: (call) => childProducer?.canRunConcurrently?.(call) === true,
               execute: (request: Parameters<ProviderToolExecutionPort['execute']>[0]) => {
                 if (isStandardTurnEndCall(request.call.toolId)) return endExecutor.execute(request);
                 if (APP_CHILD_TOOLS.some((tool) => tool.toolId === request.call.toolId)) {
