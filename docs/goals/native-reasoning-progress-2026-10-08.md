@@ -32,6 +32,10 @@ r187 作者报告已在并发屏障取得两实例，但宿主实际运行虽 1/
 
 r199 实际 App build/strict compile0、standard-turn9/9、模板17/17，但模板文字修改因现有registry内容锁不在派单范围被恢复。因此新模板规则尚未生效，模板GREEN不算新指令证明。当前仅两App工具描述dirty；独立小Plan r202处理真实 child-producer owner 和现有template registry最小绑定，不放宽原gate、不新增治理hash包装。
 
+模板后续已收口候选 `1ee05765`：r202确认沿现有loader更新registry两产品绑定即可，r203完成两roleprompt、sharedclose和真实childdelivery描述，撤掉重复childcloseclone。实际新模板17/17、Appbuild0；worker退出前未跑最后两步，宿主补 tests/app compile0、standardturn9/9。未验证实际模型语义质量，未修改已安装活动模板。
+
+wire调度已解耦：r204独立计划允许r203交写权后直接用唯一候选推进，不再等待r182整例。r205现独占候选consumer与3encoder，先实际出站RED再实现；r182仅在原coldsource分支继续，未来标准Git merge处理hunks。两者不在同树双写，不新开树。r182实际Appbuild和测试compile0，单个进程边界用例尚待运行结果。UX原A/B两路继续，已共享本侧容量证据，不重复后端矩阵。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
