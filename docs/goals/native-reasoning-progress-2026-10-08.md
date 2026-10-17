@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- pureaccept `7e0e111e` 正常FF候选，contracts/Appbuild/Apptsc0+原dedicated5/5PASS（session56073，inspection-pure-accept-composed-20261017.txt）；复用journal-only接纳实现，无新增case。UX正常关闭来源。
+- r294写出227行consumer但尚无有效RED。父核实新事实：公开child.call由turn/request/toolcall生成invocation，parse不提供旧invocation retryselector，故r291“模型新轮重试同invocation”前提错误。已明确SIGTERM自有PID58300以停止错误设计执行，非超时重启；保留同树改动。r295退原Planner只修公开身份/最小consumer前提，不造API；Manager内部同注册retry与模型freshcall分开。Provider已验6/6不变，App待正确设计后继续。
+
 - r293已终止但未完成：Appmapping20行与测试imports已写，尚无testbody/RED/GREEN，最终只有future-intent，未计验收/提交。父正常FF已验Provider基础c58ce3f6到同一App树，解除真实集成依赖；r294 freshGCM复用原树只完成既定publicconsumer/RED→GREEN，禁止重复扩读/新harness/其他文件。App无业务RED前不得接受来源；整体milestone仍OPEN。
 
 - 容量wait Provider基础 `c58ce3f6` 已正常merge candidate：r292原两新case实际RED→GREEN，保留明确blocked状态/ownerwait、普通manualblock拒绝；原相邻四casePASS。父亲读原events/diff后正常来源提交（作者future-intent退出未提交），组合contracts/provider tsc0+目标6/6PASS（session31898）。sourceclean/terminal后正常remove/prune/absent。App r293仍同树写child-producer+i2consumer，完整same-turn集成未完成，不派leafReview、不称main产品交付。
