@@ -21,6 +21,7 @@ import {
   activeTurnSegmentCommitId,
   validateResumedTurnSegmentOpened,
   type ActiveTurnInitialOpenAnchor,
+  type ActiveTurnSegmentInterruptedAnchor,
   type ActiveTurnSegmentBinding,
   type ResumedTurnSegmentOpened,
 } from '../../../contracts/src/active-turn-segments.js';
@@ -806,6 +807,37 @@ function initialOpenAnchorOf(
   return { bindingCommitRef: journalCommitRef(bindingRecord), recordsThroughCommitRef: journalCommitRef(last) };
 }
 
+function sameCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean {
+  return left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest;
+}
+
+/**
+ * The durable anchor of one committed segment: its real `segment-opened` commit
+ * and the last committed record in that segment's commit-id namespace. It
+ * returns null when no matching opened record exists, so a caller never invents
+ * an anchor for an unopened segment. It carries no capture and claims no save.
+ */
+function segmentAnchorOf(
+  records: readonly JournalRecord[],
+  businessTurnId: string,
+  segmentId: string,
+): ActiveTurnSegmentInterruptedAnchor | null {
+  const openedCommitId = activeTurnSegmentCommitId(segmentId, 'segment-opened');
+  const openedRecord = records.find((record) => record.commitId === openedCommitId);
+  if (openedRecord === undefined) return null;
+  const opened = decodeSegmentOpened(openedRecord);
+  if (opened.businessTurnRef.businessTurnId !== businessTurnId) return null;
+  const prefix = `${ACTIVE_TURN_SEGMENT_COMMIT_PREFIX}${segmentId}:`;
+  const owned = records.filter((record) => isSegmentCarrier(record) && record.commitId.startsWith(prefix));
+  const last = owned[owned.length - 1] ?? openedRecord;
+  return {
+    openedCommitRef: journalCommitRef(openedRecord),
+    recordsThroughCommitRef: journalCommitRef(last),
+  };
+}
+
 export interface JsonlActiveTurnSegmentJournalOptions {
   readonly filePath?: string;
   /** Actual shared Organ Journal object; preferred over a second path handle. */
@@ -875,6 +907,14 @@ export class JsonlActiveTurnSegmentJournal {
     return initialOpenAnchorOf(await this.journal.replay(), this.businessTurnId);
   }
 
+  /**
+   * The durable anchor of a committed segment of the bound business turn, or
+   * null when no segment-opened record exists for that segment id.
+   */
+  async readSegmentAnchor(segmentId: string): Promise<ActiveTurnSegmentInterruptedAnchor | null> {
+    return segmentAnchorOf(await this.journal.replay(), this.businessTurnId, nonEmpty(segmentId, 'segmentId'));
+  }
+
   async appendSegmentOpened(input: {
     readonly commitId: string;
     readonly record: ResumedTurnSegmentOpened;
@@ -938,9 +978,8 @@ export class JsonlActiveTurnSegmentJournal {
         }
 
         // The predecessor must be the current committed chain tail.
-        const chain = decodeSegmentChain(records, this.businessTurnId);
-        const tail = chain.length === 0 ? undefined : chain[chain.length - 1];
         if (record.predecessor.initialOpen !== undefined) {
+          const chain = decodeSegmentChain(records, this.businessTurnId);
           // The initial-open predecessor must still be the unsaved original turn
           // with no resumed segment yet; the anchor is re-derived under the lock
           // and must equal the supplied anchor exactly. The App's held-transaction
@@ -963,8 +1002,21 @@ export class JsonlActiveTurnSegmentJournal {
             || anchor.recordsThroughCommitRef.recordDigest !== record.predecessor.initialOpen.recordsThroughCommitRef.recordDigest) {
             throw new JournalIntegrityError('segment-opened initial-open anchor does not match the committed initial turn facts');
           }
+        } else if (record.predecessor.interrupted !== undefined) {
+          const expectedPredecessor = decodeSegmentChain(records, this.businessTurnId).at(-1);
+          if (expectedPredecessor === undefined || record.predecessor.segmentId !== expectedPredecessor.segmentId) {
+            throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+          }
+          const anchor = segmentAnchorOf(records, this.businessTurnId, record.predecessor.segmentId);
+          if (anchor === null) {
+            throw new JournalIntegrityError('segment-opened interrupted predecessor is not a committed segment');
+          }
+          if (!sameCommitRef(anchor.openedCommitRef, record.predecessor.interrupted.openedCommitRef)
+            || !sameCommitRef(anchor.recordsThroughCommitRef, record.predecessor.interrupted.recordsThroughCommitRef)) {
+            throw new JournalIntegrityError('segment-opened interrupted anchor does not match the committed segment facts');
+          }
         } else {
-          const expectedPredecessor = tail ? tail.segmentId : this.businessTurnId;
+          const expectedPredecessor = decodeSegmentChain(records, this.businessTurnId).at(-1)?.segmentId ?? this.businessTurnId;
           if (record.predecessor.segmentId !== expectedPredecessor) {
             throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
           }
