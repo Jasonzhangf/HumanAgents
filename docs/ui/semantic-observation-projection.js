@@ -93,6 +93,13 @@ const EVENT_STATE_LABELS = Object.freeze({
   superseded: '已替换',
 })
 
+// Only capability identifiers the projection already knows get a display name;
+// an unknown identifier keeps a neutral label instead of being reported as
+// unavailable. The original identifier stays readable in the raw record.
+const CAPABILITY_LABELS = Object.freeze({
+  'runtime-task-events': '任务事件记录',
+})
+
 function array(value) {
   return Array.isArray(value) ? value : []
 }
@@ -110,11 +117,11 @@ function scopeBreadcrumbs(scope) {
   const source = scope && typeof scope === 'object' ? scope : {}
   const crumbs = []
   const organId = scopeValue(source.organId)
-  if (organId) crumbs.push({ scopeRef: `organ:${organId}`, title: `组织范围 · ${organId}` })
+  if (organId) crumbs.push({ scopeRef: `organ:${organId}`, title: '所属器官' })
   const taskId = scopeValue(source.taskId)
-  if (taskId) crumbs.push({ scopeRef: `task:${taskId}`, title: `任务范围 · ${taskId}` })
+  if (taskId) crumbs.push({ scopeRef: `task:${taskId}`, title: '当前任务' })
   const operationId = scopeValue(source.operationId)
-  if (operationId) crumbs.push({ scopeRef: `operation:${operationId}`, title: `当前操作 · ${operationId}` })
+  if (operationId) crumbs.push({ scopeRef: `operation:${operationId}`, title: '当前操作' })
   return crumbs
 }
 
@@ -141,13 +148,14 @@ function eventTone(status) {
 }
 
 // Technical identifiers belong to the read-only evidence drawer and raw mode.
-function eventEvidence(event, scopeTitle) {
+function eventEvidence(event, scopeTitle, scopeRef) {
   const refs = array(event.evidenceRefs)
     .map((ref) => text(ref?.locator))
     .filter((locator) => locator.length > 0)
   const raw = [
     `eventId: ${text(event.eventId)}`,
     `type: ${text(event.type)}`,
+    ...(scopeRef ? [`scope: ${scopeRef}`] : []),
     `sourceId: ${text(event.sourceId)}`,
     `payloadRef: ${text(event.payloadRef)}`,
     `dataDigest: ${text(event.dataDigest)}`,
@@ -155,7 +163,7 @@ function eventEvidence(event, scopeTitle) {
   return {
     evidenceId: text(event.eventId),
     title: text(event.summary, '只读证据'),
-    summary: '来自规范语义观测信封的只读证据。',
+    summary: '只读观测记录的原始证据。',
     scopeLabel: scopeTitle,
     sourceLabel: text(event.sourceId),
     ...(refs.length > 0 ? { refs } : {}),
@@ -166,17 +174,17 @@ function eventEvidence(event, scopeTitle) {
   }
 }
 
-function eventItem(event, kind, scopeTitle, meta) {
+function eventItem(event, kind, scopeTitle, meta, scopeRef) {
   const status = text(event.status, 'unknown')
   return {
     id: text(event.eventId),
-    title: text(event.summary, text(event.type, '未命名事件')),
+    title: text(event.summary, '事件记录'),
     meta,
     state: status,
     stateLabel: EVENT_STATE_LABELS[status] ?? '未知',
     tone: eventTone(status),
     kind,
-    evidence: eventEvidence(event, scopeTitle),
+    evidence: eventEvidence(event, scopeTitle, scopeRef),
   }
 }
 
@@ -233,7 +241,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
   if (coverageIssues.length > 0) {
     notices.push({
       tone: 'unknown',
-      title: '覆盖不完整（partial）',
+      title: '覆盖不完整',
       detail: '部分事实缺少关联或来源信息，保持未知而不显示成功。',
     })
     if (coverageIssues.some((issue) => issue?.reason === 'waiting-is-not-terminal')) {
@@ -261,25 +269,50 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
   }
 
   const humanMeta = (event) => [text(event.occurredAt)].filter((entry) => entry.length > 0)
-  const semanticItems = visibleEvents.map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event)))
+  const semanticItems = visibleEvents.map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event), selectedScopeRef))
   const stableItems = visibleEvents
     .filter((event) => event?.status === 'completed' || event?.status === 'resolved')
-    .map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event)))
+    .map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event), selectedScopeRef))
   const liveItems = visibleEvents
     .filter((event) => event?.status === 'active')
-    .map((event) => eventItem(event, 'live', scopeTitle, humanMeta(event)))
+    .map((event) => eventItem(event, 'live', scopeTitle, humanMeta(event), selectedScopeRef))
   const actionItems = visibleEvents.map((event) => eventItem(
     event,
     'action',
     scopeTitle,
-    [text(event.type), ...humanMeta(event)].filter((entry) => entry.length > 0),
+    humanMeta(event),
+    selectedScopeRef,
   ))
-  const rawItems = visibleEvents.map((event) => ({
-    id: text(event.eventId),
-    title: text(event.type, '未命名事件'),
-    meta: [text(event.sourceId), text(event.payloadRef), text(event.dataDigest)].filter((entry) => entry.length > 0),
+  // The raw record carries the original envelope values, including when no event
+  // exists. It is a direct display of decoded fields, never a rebuilt summary.
+  const rawSourceItem = {
+    id: 'observation-source',
+    title: '观测来源',
+    meta: [
+      ...crumbs.map((crumb) => `范围 ${crumb.scopeRef}`),
+      `投影版本 ${text(source.projectionVersion, '未标注')}`,
+      ...array(source.capabilities).map((capability) => [
+        `能力 ${text(capability?.capability, '未标注')}`,
+        text(capability?.state, 'unknown'),
+        text(capability?.reason),
+      ].filter((entry) => entry.length > 0).join(' ')),
+    ].filter((entry) => entry.length > 0),
     kind: 'raw',
-  }))
+  }
+  const rawItems = [
+    rawSourceItem,
+    ...visibleEvents.map((event) => ({
+      id: text(event.eventId),
+      title: text(event.type, '未命名事件'),
+      meta: [
+        text(event.eventId),
+        text(event.sourceId),
+        text(event.payloadRef),
+        text(event.dataDigest),
+      ].filter((entry) => entry.length > 0),
+      kind: 'raw',
+    })),
+  ]
 
   const sections = []
   if (mode === 'current') {
@@ -306,7 +339,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
       id: 'semantic',
       title: '语义事件与配对分组',
       kind: 'semantic',
-      description: '按规范语义呈现事件与配对状态。',
+      description: '按已记录的事件与执行状态呈现。',
       items: semanticItems,
     })
   } else if (mode === 'actions') {
@@ -334,7 +367,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
     scope: {
       scopeRef: selectedScopeRef,
       title: scopeTitle,
-      summary: '只读语义观测：人类可读语义在前，技术标识留在证据与原始模式。',
+      summary: '只读呈现已记录的器官、任务与操作事实。',
       breadcrumbs: crumbs.map((crumb) => ({
         scopeRef: crumb.scopeRef,
         title: crumb.title,
@@ -347,7 +380,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
     summary,
     notices,
     capabilities: array(source.capabilities).map((capability) => ({
-      capability: text(capability?.capability, '未命名能力'),
+      capability: CAPABILITY_LABELS[text(capability?.capability)] ?? '未命名能力',
       state: text(capability?.state, 'unknown'),
       ...(capability?.reason ? { reason: text(capability.reason) } : {}),
     })),

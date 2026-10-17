@@ -365,6 +365,25 @@ function panelHtml(taskId, prelude = '') {
 
 const wiredHtml = panelHtml('task-observation')
 
+// The shared wired fixture is the only source of the real scope ids, version,
+// capability and reference values, so the human-readable joint assertion below
+// reads them from the fixture instead of repeating illustrative constants.
+const wiredFirstEvent = wiredV1.events[0]
+const wiredEvidenceRefs = {
+  eventId: wiredFirstEvent.eventId,
+  payloadRef: wiredFirstEvent.payloadRef,
+  evidenceLocator: wiredFirstEvent.evidenceRefs[0].locator,
+}
+const wiredTechnicalTokens = [
+  wiredScope.organId.value,
+  wiredScope.taskId.value,
+  wiredScope.operationId.value,
+  wiredV1.projectionVersion,
+  wiredV1.capabilities[0].capability,
+  wiredV1.capabilities[0].state,
+  wiredV2.events.at(-1).type,
+]
+
 // The adapter matrix drives the real read-only projection function, not the
 // component: a fixture that hands the component an already-correct view model
 // cannot prove that typed pairing states survive the transport adapter.
@@ -1016,7 +1035,7 @@ try {
     activeText: document.activeElement?.textContent ?? '',
   }))
   observe('wired-breadcrumb-enter-focus', wiredEnterFocus)
-  record('keyboard Enter on a breadcrumb focuses the new current scope', wiredEnterFocus.activeRef === 'organ:organ-observation' && wiredEnterFocus.activeCurrent === 'page' && wiredEnterFocus.activeClass.includes('so-crumb') && wiredEnterFocus.activeText.includes('组织范围'), wiredEnterFocus)
+  record('keyboard Enter on a breadcrumb focuses the new current scope', wiredEnterFocus.activeRef === 'organ:organ-observation' && wiredEnterFocus.activeCurrent === 'page' && wiredEnterFocus.activeClass.includes('so-crumb') && wiredEnterFocus.activeText.includes('所属器官'), wiredEnterFocus)
   await wiredPage.locator('.so-crumb[data-scope-ref="operation:operation-observation-1"]').focus()
   await wiredPage.keyboard.press('Space')
   const wiredSpaceFocus = await wiredPage.evaluate(() => ({
@@ -1032,6 +1051,18 @@ try {
   const wiredDrill = await wiredPage.evaluate(() => document.body.innerText)
   record('wired breadcrumb drill-down keeps the read-only observation', wiredDrill.includes('语义观测') && requests.semantic === 1)
 
+  // Default business text stays human-readable in all three non-raw modes; the
+  // original ids, version and references remain readable in raw and evidence.
+  const readContentText = () => wiredPage.evaluate(() => document.querySelector('.so-content')?.innerText ?? '')
+  const wiredCurrentText = await readContentText()
+  await wiredPage.click('.so-mode[data-semantic-mode="semantic"]')
+  const wiredSemanticText = await readContentText()
+  await wiredPage.click('.so-mode[data-semantic-mode="actions"]')
+  const wiredActionsText = await readContentText()
+  await wiredPage.click('.so-mode[data-semantic-mode="raw"]')
+  const wiredRawText = await readContentText()
+  await wiredPage.click('.so-mode[data-semantic-mode="current"]')
+
   // Evidence drawer is read-only.
   await wiredPage.locator('.so-evidence').first().click()
   const wiredDrawer = await wiredPage.evaluate(() => {
@@ -1039,6 +1070,20 @@ try {
     return { open: Boolean(dialog?.open), text: dialog?.innerText ?? '', active: document.activeElement?.className ?? '' }
   })
   record('wired evidence drawer opens read-only and focuses its close control', wiredDrawer.open && wiredDrawer.text.includes('只读证据') && wiredDrawer.active.includes('so-drawer-close'), wiredDrawer)
+  record('wired default modes are human-readable and raw evidence stays traceable',
+    [wiredCurrentText, wiredSemanticText, wiredActionsText].every((body) =>
+      !wiredTechnicalTokens.some((token) => body.includes(token)))
+      && wiredCurrentText.includes('当前操作')
+      && wiredCurrentText.includes('所属器官')
+      && wiredCurrentText.includes('当前任务')
+      && wiredCurrentText.includes('任务事件记录')
+      && wiredCurrentText.includes('可用')
+      && wiredCurrentText.includes('覆盖不完整')
+      && wiredTechnicalTokens.every((token) => wiredRawText.includes(token))
+      && wiredDrawer.text.includes(wiredEvidenceRefs.eventId)
+      && wiredDrawer.text.includes(wiredEvidenceRefs.payloadRef)
+      && wiredDrawer.text.includes(wiredEvidenceRefs.evidenceLocator),
+    { currentText: wiredCurrentText, semanticText: wiredSemanticText, actionsText: wiredActionsText, rawText: wiredRawText, drawerText: wiredDrawer.text })
   await wiredPage.keyboard.press('Escape')
 
   record('wired panel exposes no executable control and issues no mutation request', wiredInitial.controls === 0 && requests.mutations === 0, { controls: wiredInitial.controls, requests })
@@ -1080,7 +1125,7 @@ try {
     reason: 'waiting-is-not-terminal',
     scope: adapterScope,
   }]))
-  record('adapter keeps the coverage gap visible beside the typed state', covered.state === 'waiting' && covered.notices.includes('覆盖不完整（partial）') && covered.notices.includes('等待不等于结束'), covered)
+  record('adapter keeps the coverage gap visible beside the typed state', covered.state === 'waiting' && covered.notices.includes('覆盖不完整') && covered.notices.includes('等待不等于结束'), covered)
   record('adapter page raised no errors', adapterErrors.length === 0, adapterErrors)
   await adapterPage.close()
 
