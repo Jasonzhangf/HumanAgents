@@ -100,6 +100,7 @@ export interface InspectionItemResultRecord {
 export interface InspectionOccurrenceOpenedRecord {
   readonly kind: 'inspection-occurrence-opened';
   readonly schemaVersion: 1;
+  readonly logicalTurnId?: string;
   readonly occurrence: InspectionOccurrenceRef;
   readonly executionScope: ScopeRef;
   readonly cycleId: string;
@@ -397,6 +398,7 @@ export function validateInspectionOccurrenceOpenedRecord(record: InspectionOccur
   if (record.kind !== 'inspection-occurrence-opened') throw new ContractError('inspection occurrence opened kind is invalid');
   if (record.schemaVersion !== 1) throw new ContractError('inspection occurrence opened schemaVersion must be 1');
   validateInspectionOccurrenceRef(record.occurrence);
+  if (record.logicalTurnId !== undefined) nonEmpty(record.logicalTurnId, 'inspection logical turn id');
   assertTaskScopedRef(record.executionScope, 'inspection occurrence execution scope');
   nonEmpty(record.cycleId, 'inspection occurrence cycle id');
   positiveInteger(record.executionEpoch, 'inspection occurrence execution epoch');
