@@ -36,6 +36,8 @@ r199 实际 App build/strict compile0、standard-turn9/9、模板17/17，但模�
 
 wire调度已解耦：r204独立计划允许r203交写权后直接用唯一候选推进，不再等待r182整例。r205现独占候选consumer与3encoder，先实际出站RED再实现；r182仅在原coldsource分支继续，未来标准Git merge处理hunks。两者不在同树双写，不新开树。r182实际Appbuild和测试compile0，单个进程边界用例尚待运行结果。UX原A/B两路继续，已共享本侧容量证据，不重复后端矩阵。
 
+UX B目标绑定已接收：来源 `69c3aa87`（图前置 `7b43d444`）正常merge为候选 `29640090`，仅新增图3文件及service/server/原TaskGrantHTTPconsumer。候选 tests/app compile0，scoped wrong-target拒绝与原unscoped公开consumer **2/2 PASS**。拒绝发生在grant/revoke/release前；目标由actualboundConfig派生，不回显query。此前实际wrong-project200且Journal2→3的RED由peer保留。已通知UXowner当轮正常收口B来源树，A前端继续；未main/install/restart，gen23/p3保护。此consumer不证明正式UI已可操作。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
