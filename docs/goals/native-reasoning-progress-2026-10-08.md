@@ -2,6 +2,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r295身份修订已接受：model下一轮必须freshcall/newinvocation，旧wait无prepare/precheckpoint/执行；不造retryselector。r296 freshGCM同一App树接续原227行单一combinedconsumer，先编译/真实RED再恢复AppmappingGREEN；Provider基础已在该树，不再等依赖。三Provider轮证明waiting入续推/新调用/采纳，不将driverterminal冒称Task标准closure。尚无App业务RED/GREEN。
+
 - pureaccept `7e0e111e` 正常FF候选，contracts/Appbuild/Apptsc0+原dedicated5/5PASS（session56073，inspection-pure-accept-composed-20261017.txt）；复用journal-only接纳实现，无新增case。UX正常关闭来源。
 - r294写出227行consumer但尚无有效RED。父核实新事实：公开child.call由turn/request/toolcall生成invocation，parse不提供旧invocation retryselector，故r291“模型新轮重试同invocation”前提错误。已明确SIGTERM自有PID58300以停止错误设计执行，非超时重启；保留同树改动。r295退原Planner只修公开身份/最小consumer前提，不造API；Manager内部同注册retry与模型freshcall分开。Provider已验6/6不变，App待正确设计后继续。
 
