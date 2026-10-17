@@ -70,6 +70,7 @@ import {
   producedArtifactBody,
   producedArtifactPaths,
   type RuntimeCheckpointBoundary,
+  type RuntimeExecutionDriver,
   type RuntimeCheckpointBoundaryPort,
   type RuntimeTaskEvent,
   type RuntimeTaskJournalRecord,
@@ -107,6 +108,7 @@ import {
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import { createJsonlCheckpointJournal } from '../../packages/app/src/checkpoint-journal.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import { projectRuntimeTaskHistory } from '../../packages/app/src/ui-runtime/turn-history.js';
 import { validatePersistedToolExecutionFact } from '../../packages/app/src/ui-runtime/tool-fact-validation.js';
 import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
@@ -3273,6 +3275,140 @@ test('the queued backlog behind a blocked head is observable from the HTTP statu
     assert.equal(tasks.draft.some((row) => row.taskId.value === 'ui-task-implicit-draft-2' && row.requirementAdmission === 'queued'), true);
   } finally {
     await runtime.server.close();
+  }
+});
+
+test('cross-turn preparation occupies budget and final completion wakes FIFO without charging manual grant wait', async () => {
+  // Source gap: admission counts running/settling only and watches only the
+  // first operation. Probability is unknown; impact is over-admission or a
+  // stranded FIFO head. One local consumer/latch costs no provider requests.
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-cross-turn-'));
+  let releaseSecond!: () => void;
+  let secondEntered!: () => void;
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const secondPreparing = new Promise<void>((resolve) => { secondEntered = resolve; });
+  const grants = new JsonlTaskGrantJournal(new JsonlOrganJournal(join(root, 'grants.jsonl')));
+  const journal = new UiRuntimeJournal(join(root, 'runtime.jsonl'));
+  const factories: RuntimeExecutionAllocation[] = [];
+  const phases = new Map<string, 'open' | 'aligned'>();
+  const service = new UiRuntimeService({
+    mode: 'fake', organId, binding,
+    port: new FakeReplayExecutionRuntimePort({ binding }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `${taskId.value}-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(), providerState: 'ready', journal, closurePort: journal,
+    memory: testMemory('project-ui-test'), maxConcurrentTasks: 1, taskGrantPort: grants,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    runtimeComposition: { createExecutionPorts: () => ({
+      admitExecution: async () => {},
+      currentStatePort: createJsonlRuntimeTaskCurrentStateJournal({ journal: new JsonlOrganJournal(join(root, 'current-state.jsonl')) }),
+      currentStateFacts: { async read({ taskId }) { return { state: 'known', value: {
+        turn: { phase: phases.get(taskId.value) ?? 'open', ownerRef: `fixture:${taskId.value}`,
+          nextAction: { kind: 'continue' }, laterErrorRefs: [], unresolvedOperationRefs: [] },
+        stages: { state: 'known', stages: [] },
+      } }; } },
+      createDriver: async (allocation): Promise<RuntimeExecutionDriver> => {
+        factories.push(allocation);
+        const turn = factories.filter((entry) => entry.taskId.value === allocation.taskId.value).length;
+        if (turn === 2) { secondEntered(); await secondGate; }
+        const { scope, taskId, executionEpoch, runtimeId, assignmentId } = allocation;
+        phases.set(taskId.value, 'open');
+        const refs = [evidence(`cross-turn-${factories.length}`, scope)];
+        const identity = { turnId: `turn-${executionEpoch}`, workAssignmentRef: assignmentId,
+          taskRef: taskId, scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1,
+          directiveRevision: 1, executionEpoch, runtimeBindingRef: runtimeId, permissionRevision: '1' };
+        const checkpoint: Checkpoint = { id: id('checkpoint', `cross-turn-${factories.length}`), scope,
+          cycleId: scope.cycleId!, seq: turn, previousCheckpointId: null, directiveRevision: 1,
+          executionEpoch, outcome: 'succeeded', summary: 'turn closed', recoveryStateRef: refs[0]!,
+          evidenceRefs: refs, next: { kind: 'continue' } };
+        const summary = { goal: { text: 'finish task', evidenceRefs: refs },
+          actions: { text: 'execute turn', evidenceRefs: refs }, result: { text: 'turn done', evidenceRefs: refs },
+          expectedNextStep: { text: turn === 1 ? 'continue task' : 'complete task', evidenceRefs: refs } };
+        const continues = taskId.value === 'ui-task-implicit-draft-2' && turn === 1;
+        const decision = continues ? 'continue' as const : 'complete' as const;
+        const alignment = { identity, checkpointId: checkpoint.id, closureRef: 'closure:test',
+          planRevisionId: `plan-${executionEpoch}`, planRevisionSequence: turn,
+          planContentDigest: 'sha256:fixture' as const, decision, alignedAt: '2026-10-17T00:00:00.000Z' };
+        return {
+          kind: 'cross-turn-fixture',
+          async capabilities() { return { driverKind: 'cross-turn-fixture', capabilities: [], version: '1' }; },
+          async start() { return { runtimeId, executionEpoch }; },
+          async resume() { return { runtimeId, executionEpoch }; },
+          async submit(input) { return { ...input, outputRefs: [], evidenceRefs: refs }; },
+          async *observe() { yield { taskId, executionEpoch, kind: 'terminal', terminalState: 'succeeded', evidenceRefs: refs }; },
+          async requestStop(input) { return { requested: true, operationId: input.operationId }; },
+          async settle() { return { state: 'succeeded', evidenceRefs: refs }; },
+          async close() { return { ...binding, state: 'closed', evidenceRefs: refs }; },
+          standardTurn: {
+            async acceptReviews() {},
+            async readCheckpoint() { return { checkpoint, previous: null,
+              commitRef: { commitId: `checkpoint-${executionEpoch}`, journalSeq: turn, recordDigest: 'sha256:fixture' } }; },
+            async align() { phases.set(taskId.value, 'aligned'); return { advanced: continues, state: continues ? 'advancing' : 'terminal', reason: 'aligned', decision, alignment,
+              admission: { state: 'closed', decision, alignment, closure: { identity, checkpointId: checkpoint.id,
+                closureRef: 'closure:test', summary, recoveryStateRef: refs[0]!, closedAt: '2026-10-17T00:00:00.000Z' } } }; },
+            async readDelivery() {
+              const bytes = new TextEncoder().encode('task complete');
+              const asset = { ref: refs[0]!, view: { kind: 'utf8-text' as const } };
+              return { assignment: { assignmentId, taskId, pipelineNodeId: 'pipeline.execute', attempt: 1, executionEpoch,
+                inputRevision: 1, objective: 'finish task', targetRefs: [], expectedOutputRefs: [], acceptanceCriteriaDigest: 'fixture',
+                successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' },
+                acceptedEnd: { kind: 'standard-turn-end', identity, summary, deliveryText: 'task complete', deliveryRefs: [], resolvedEvidenceRefs: [] },
+                materials: [{ kind: 'delivery-text', deliveryEvidence: refs[0]!, rawArguments: asset, bodyAsset: asset,
+                  bytes, digest: 'sha256:fixture', sourceEvidence: refs,
+                  acceptedEndCall: { seq: 1, envelope: { execution: { runtimeId, taskId, executionEpoch }, scope,
+                    request: { turnId: identity.turnId, requestId: 'request-end' }, producerSeq: 1,
+                    fact: { kind: 'tool-call', contentUnitId: 'end', call: { callId: 'end', toolId: 'humanagent.turn.end', continuationRef: 'end-continuation', arguments: {} }, rawArguments: asset, complete: true } } } }],
+              };
+            },
+          },
+        };
+      },
+    }) },
+  });
+  try {
+    await confirmExplicitRequirementFor(service, 'manual-grant-wait');
+    const manual = await service.dispatchNextExplicitRequirement();
+    assert.equal(service.taskDetail(manual.taskId).state, 'waiting');
+    assert.equal(factories.length, 0, 'manual grant wait must not create a driver');
+    for (const draft of [2, 3]) {
+      const taskId = id('task', `ui-task-implicit-draft-${draft}`);
+      await grants.grant({ requestId: `grant-${draft}`, taskId, owner: 'human:operator', expectedRevision: 0,
+        capability: { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY], scope: { organId, taskId } } });
+    }
+    service.startImplicitConsumer();
+    await confirmExplicitRequirementFor(service, 'cross-turn-A');
+    const a = await service.dispatchNextExplicitRequirement();
+    await secondPreparing;
+    assert.equal(service.taskDetail(a.taskId).state, 'waiting');
+    assert.ok(a.operationId);
+    const firstFinal = service.eventsSince(a.operationId!).find((event) => event.kind === 'execution.terminal' && event.terminalPhase === 'final');
+    assert.ok(firstFinal, 'turn 1 remains final for its own operation');
+    const bInteraction = await confirmExplicitRequirementFor(service, 'cross-turn-B');
+    await waitFor(() => assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.waiting'));
+    assert.equal((await service.inspectExplicitInteraction(bInteraction)).state, 'confirmed');
+    assert.equal(factories.length, 2, 'B must not prepare while A owns the slot');
+    releaseSecond();
+    await waitFor(() => {
+      assert.equal(service.listTasks().counts.completed, 2);
+      for (const allocation of factories.slice(1)) {
+        assert.ok(service.eventsSince(allocation.operationId).some((event) => event.kind === 'execution.terminal'
+          && event.terminalPhase === 'final' && event.state === 'succeeded'));
+      }
+    });
+    assert.ok(service.listTasks().completed.some((task) => task.taskId.value === a.taskId.value));
+    assert.equal((await service.inspectExplicitInteraction(bInteraction)).state, 'dispatched');
+    assert.ok(service.listTasks().completed.some((task) => task.taskId.value === 'ui-task-implicit-draft-3'));
+    assert.equal(service.taskDetail(manual.taskId).state, 'waiting');
+  } finally {
+    releaseSecond();
+    await service.quiesceImplicitConsumption();
+    await waitFor(() => {
+      for (const allocation of factories) {
+        assert.ok(service.eventsSince(allocation.operationId).some((event) =>
+          event.kind === 'execution.terminal' && event.terminalPhase === 'final'),
+        `fixture operation ${allocation.operationId.value} must finish before cleanup`);
+      }
+    });
+    await rm(root, { recursive: true, force: true });
   }
 });
 
