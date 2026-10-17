@@ -260,3 +260,59 @@ test('wire executor routes through control when summary and delivery references 
   const forwardedSummary = (forwarded!.arguments as unknown as { summary: TurnCloseSummary }).summary;
   assert.equal(forwardedSummary.goal.evidenceRefs[0].evidenceId.value, 'native-file-write');
 });
+
+test('wire executor preserves an explicit inspection outcome in the accepted summary', async () => {
+  let acceptedSummary: TurnCloseSummary | undefined;
+  const owner = fakeOwner();
+  const control = createStandardTurnEndExecutor({
+    owner,
+    route: (command) => { acceptedSummary = command.summary; },
+  });
+  const wire = createStandardTurnEndWireExecutor(owner, control);
+  const result = await wire.execute({
+    execution,
+    scope,
+    call: call({
+      summary: {
+        goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
+        actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
+        result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
+        expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
+        inspectionOutcome: { status: 'completed', judgment: 'scope observed' },
+      },
+      deliveryRefs: [KNOWN_REF],
+    }),
+    signal,
+  });
+  assert.equal(result.status, 'succeeded');
+  assert.deepEqual(acceptedSummary?.inspectionOutcome, { status: 'completed', judgment: 'scope observed' });
+});
+
+test('wire executor rejects malformed inspection outcomes through the shared control validator', async () => {
+  const owner = fakeOwner();
+  let routed = 0;
+  const wire = createStandardTurnEndWireExecutor(owner, createStandardTurnEndExecutor({
+    owner,
+    route: () => { routed += 1; },
+  }));
+  for (const inspectionOutcome of [{ status: 'completed' }, { status: 'unknown' }]) {
+    const result = await wire.execute({
+      execution,
+      scope,
+      call: call({
+        summary: {
+          goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
+          actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
+          result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
+          expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
+          inspectionOutcome,
+        },
+        deliveryRefs: [KNOWN_REF],
+      }),
+      signal,
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'standard-turn-end.arguments');
+  }
+  assert.equal(routed, 0);
+});
