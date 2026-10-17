@@ -18,7 +18,7 @@ import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
 import { createJsonlActiveTurnJournal, createJsonlActiveTurnSegmentJournal } from '../../../adapters/jsonl/src/active-turn.js';
 import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
-import { produceAdmittedTurn, newActiveTurnId } from '../../../runtime/src/admission/admitted-turn.js';
+import { produceAcceptedTurnPlanBinding, produceAdmittedTurn, newActiveTurnId } from '../../../runtime/src/admission/admitted-turn.js';
 import { AgentLoopRuntime, type HistoricalTurnBinding, type RecoverTurnResult } from '../../../runtime/src/agent-loop/runtime.js';
 import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlContextHistoryPort,
   createJsonlSemanticHistoryJournal, readCommittedNativeSegmentSource } from '../checkpoint-journal.js';
@@ -629,12 +629,21 @@ export function createDefaultExecutionComposition(input: {
       const activeTurnJournal = createJsonlActiveTurnJournal({ filePath: input.filePath, turnId });
       // A boundary-only continuation owns no live Provider and opens no new
       // active-turn/segment context; only generation installs one.
+      const acceptedPlan = retainedIntent === undefined && segment === undefined ? await (async () => {
+        const taskScope = { organId: allocation.scope.organId, taskId: allocation.taskId };
+        const current = await input.currentState.read(taskScope);
+        if (current.state !== 'known' || current.value.currentPlan === undefined) return undefined;
+        const identity = await input.taskIdentity.read(taskScope);
+        if (!identity) missing('a new turn requires the actual confirmed Task identity for its accepted plan');
+        return produceAcceptedTurnPlanBinding({ plans, identity, currentPlan: current.value.currentPlan });
+      })() : undefined;
       const active = retainedIntent !== undefined ? undefined : segment !== undefined
         ? await ActiveTurnSegmentContext.open({ port: resume!.source.segmentJournal, segment,
           initialInput: initialInputOf(resume!.source.initial) })
         : await ActiveTurnContext.open({ journal: activeTurnJournal, currentTurnRef,
           binding: { admittedTurn, assignment, execution: { runtimeId: allocation.runtimeId,
-            executionEpoch: allocation.attemptExecutionEpoch }, scope: allocation.scope } });
+            executionEpoch: allocation.attemptExecutionEpoch }, scope: allocation.scope,
+            ...(acceptedPlan === undefined ? {} : { acceptedPlan }) } });
       const recovery = createNativeRecoveryAssets({ journalPath: input.filePath, journal: input.journal, assetRoot: input.artifactsRoot });
       if (active instanceof ActiveTurnContext) await active.registerInitialInput(await recovery.writeInitialInput({ scope: allocation.scope, turnId, rawInput: objective }));
       const nativeAdmission = active === undefined ? undefined : active instanceof ActiveTurnContext ? { version: 1 as const, activeTurn: active }
