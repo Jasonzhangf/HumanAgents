@@ -5,6 +5,19 @@ import type { AttentionPort, AttentionReceipt } from '../../runtime/src/index.js
 import type { RuntimePaths } from '../../config/src/index.js';
 import { AppLifecycleError } from './errors.js';
 
+/** Read only the typed Attention events written by this port. */
+export async function readJsonlAttentions(input: {
+  readonly filePath: string;
+}): Promise<readonly Attention[]> {
+  const latest = new Map<string, Attention>();
+  for (const record of await new JsonlOrganJournal(input.filePath).replay()) {
+    if (record.kind !== 'event' || record.payload?.kind !== 'attention') continue;
+    const attention = record.payload.attention as unknown as Attention;
+    latest.set(attention.attentionId, attention);
+  }
+  return [...latest.values()];
+}
+
 /**
  * Durable Attention journal.
  *

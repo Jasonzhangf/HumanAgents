@@ -398,6 +398,7 @@ export interface UiRuntimeMemoryComposition {
   readonly bindingRef?: string;
   readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
   readonly reviewState?: () => Promise<MemoryReviewState>;
+  readonly reconcileTaskScope?: (input: { readonly taskScope: ScopeRef }) => Promise<void>;
 }
 
 /**
@@ -2258,6 +2259,15 @@ export class UiRuntimeService {
   } = {}) {
     try {
       const reviewState = await this.memory.reviewState?.();
+      const boundaryMessages = [
+        ...(reviewState?.boundaryAttentions ?? [])
+          .filter((attention) => attention.state !== 'resolved')
+          .map((attention) => `${attention.message}; ${attention.nextAction?.ref ?? 'review the canonical task Journal'}`),
+        ...(reviewState?.boundaryError === undefined ? [] : [
+          `Memory diagnostic was not persisted/read: ${reviewState.boundaryError.code}: ${reviewState.boundaryError.message}; ${reviewState.boundaryError.nextAction}`,
+        ]),
+      ];
+      const boundaryDetail = boundaryMessages.join('\n');
       const namespace = input.namespace ?? 'project';
       const query = input.query?.trim();
       const view = query
@@ -2280,16 +2290,16 @@ export class UiRuntimeService {
           };
       return projectMemoryInteraction({
         source: {
-          state: 'ready',
+          state: boundaryMessages.length > 0 ? 'degraded' : 'ready',
           label: 'Memory Interaction',
-          detail: 'typed projection from the deterministic memory backend',
+          detail: boundaryDetail || 'typed projection from the deterministic memory backend',
         },
         scope: this.memory.projectKey,
-        summary: query
+        summary: boundaryDetail || (query
           ? view.entries.length === 0
             ? '当前没有匹配的长期记忆'
             : `当前有 ${view.entries.length} 条匹配记录`
-          : '未指定过滤条件',
+          : '未指定过滤条件'),
         indexState: view.indexVersion ?? this.memory.backend.indexVersion,
         entries: view.entries.map((entry) => ({
           id: entry.memoryId,

@@ -1,5 +1,9 @@
 {
   "graph": "humanagent-memory-curation",
+  "boundary": {
+    "input": "标准 turn 的实际持久收口或 startup canonical Journal 补审触发 settled 输入。",
+    "output": "输出实际审计结果与待审候选；不自动发布规则。可选 publication 失败不阻断业务，Memory 诊断和 canonical 补审依据保持可读。"
+  },
   "labels": {
     "wake_memory_agent": "唤醒记忆 Agent",
     "read_task_evidence": "读取任务证据",

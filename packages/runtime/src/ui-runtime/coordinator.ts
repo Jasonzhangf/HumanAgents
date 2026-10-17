@@ -2763,6 +2763,7 @@ export class RuntimeTaskCoordinator {
     readonly closeOwned: () => Promise<void>;
   }): Promise<AdvanceTurnResult> {
     const { record, operation, scope, standardTurn } = input;
+    const previousCheckpoint = record.checkpoint ?? null;
     const committed = await standardTurn.readCheckpoint();
     if (committed.checkpoint.scope.operationId?.value !== operation.operationId.value
       || committed.checkpoint.executionEpoch !== input.expectedExecutionEpoch) {
@@ -2775,6 +2776,11 @@ export class RuntimeTaskCoordinator {
     this.pushEvent(record, operation, 'checkpoint.committed', committed.checkpoint.outcome,
       committed.checkpoint.summary, committed.checkpoint.evidenceRefs);
     await input.closeOwned();
+    await this.options.checkpointBoundary?.publish({
+      checkpoint: committed.checkpoint,
+      previous: previousCheckpoint,
+      recordDigest: committed.commitRef.recordDigest,
+    });
     const advance = await standardTurn.align();
     // The direct native lane owns its public result through the typed accepted
     // delivery. Commit and read it back through the same public-output owner

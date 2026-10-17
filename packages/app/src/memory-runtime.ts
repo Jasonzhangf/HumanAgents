@@ -479,6 +479,8 @@ export interface MemoryReviewState {
   readonly analysis: MemoryAnalysisStatus;
   readonly autoUpdate: boolean;
   readonly candidates: readonly MemoryReviewCandidateState[];
+  readonly boundaryAttentions?: readonly import('../../contracts/src/index.js').Attention[];
+  readonly boundaryError?: AppLifecycleError;
 }
 
 export interface MemoryRuntime {
@@ -2850,7 +2852,6 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
               scope: checkpoint.scope,
               commitRef: rewind.recoveryCheckpointCommitRef,
             });
-        const boundaryScope = committed.checkpoint.scope;
         if (
           committed.checkpoint.id.value !== checkpoint.id.value
           || committed.recordDigest !== rewind.recoveryCheckpointRecordDigest
@@ -2892,7 +2893,14 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
             );
           }
         }
-        const { taskConsumer } = registerTaskConsumer(committed.checkpoint);
+        const { taskBinding, taskConsumer } = registerTaskConsumer(committed.checkpoint);
+        // The group spans multiple committed cycles of one Task. Its event
+        // boundary is the shared Task scope; each historical evidence keeps
+        // its own execution scope.
+        const boundaryScope: ScopeRef = {
+          organId: committed.checkpoint.scope.organId,
+          taskId: taskBinding.taskId,
+        };
         const primaryEvidence = checkpointReceiptEvidenceRef({
           commitRef: rewind.recoveryCheckpointCommitRef,
           checkpoint: committed.checkpoint,
