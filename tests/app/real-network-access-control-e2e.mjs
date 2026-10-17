@@ -813,8 +813,8 @@ async function wildcardBindCase(evidenceDir) {
   }
 }
 
-async function pairingAndSseCase() {
-  const serve = await startServe({ fakeStepDelayMs: 1_000 });
+async function pairingSessionCase() {
+  const serve = await startServe({});
   try {
     const pair = await runPair(serve);
     const invalid = await postPair(serve.banner.url, 'invalid-code');
@@ -838,6 +838,44 @@ async function pairingAndSseCase() {
     const tasks = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
     assert.equal(tasks.status, 200);
 
+    const logout = await request(`${serve.banner.url}/api/auth/logout`, {
+      method: 'POST',
+      headers: { cookie },
+    });
+    assert.equal(logout.status, 200);
+    const oldCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
+    assert.equal(oldCookie.status, 401);
+    const invalidCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie: 'HA_SESSION=invalid.token' } });
+    assert.equal(invalidCookie.status, 401);
+
+    return {
+      pairExitCode: pair.exit.code,
+      invalidCode: { status: invalid.status, code: invalid.body?.error?.code },
+      paired: { status: paired.status, cookieFlags: ['Path=/'] },
+      reusedCode: { status: reused.status, code: reused.body?.error?.code },
+      session: { status: session.status, authenticated: session.body?.authenticated },
+      authorizedTasks: tasks.status,
+      logout: { status: logout.status, oldCookieStatus: oldCookie.status },
+      invalidCookieStatus: invalidCookie.status,
+    };
+  } finally {
+    const closure = await closeServe(serve);
+    assert.equal(closure.exited, true, 'serve must exit after SIGTERM');
+    assert.equal(closure.pidGone, true, 'serve PID must be gone');
+    assert.equal(closure.portRefused, true, 'serve port must be refused after exit');
+    assert.equal(closure.rootReleased, true, 'owned attempt root must be removed');
+  }
+}
+
+async function pairingAndSseCase() {
+  const serve = await startServe({ fakeStepDelayMs: 1_000 });
+  try {
+    const pair = await runPair(serve);
+    const paired = await postPair(serve.banner.url, pair.receipt.code);
+    assert.equal(paired.status, 200);
+    assert.equal(paired.body?.authenticated, true);
+    const cookie = cookieValue(paired.setCookie);
+
     const { operationId } = await createTaskAndStart(serve, cookie);
     const unauthorizedSse = await openSse(`${serve.banner.url}/api/executions/${encodeURIComponent(operationId)}/events`);
     assert.equal(unauthorizedSse.response.status, 401);
@@ -853,22 +891,13 @@ async function pairingAndSseCase() {
     assert.equal(logout.status, 200);
     await stream.waitFor((event) => event.event === 'auth.invalidated' || event.data?.code === 'auth.session.invalid', 'auth.invalidated SSE');
     assert.equal(await stream.waitForClosed(), true);
-    const oldCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
-    assert.equal(oldCookie.status, 401);
-    const invalidCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie: 'HA_SESSION=invalid.token' } });
-    assert.equal(invalidCookie.status, 401);
     await stream.close();
 
     return {
       pairExitCode: pair.exit.code,
-      invalidCode: { status: invalid.status, code: invalid.body?.error?.code },
       paired: { status: paired.status, cookieFlags: ['Path=/'] },
-      reusedCode: { status: reused.status, code: reused.body?.error?.code },
-      session: { status: session.status, authenticated: session.body?.authenticated },
-      authorizedTasks: tasks.status,
       unauthorizedSse: { status: unauthorizedSse.response.status, contentType: unauthorizedSse.response.headers['content-type'] },
-      logout: { status: logout.status, sseClosed: true, oldCookieStatus: oldCookie.status },
-      invalidCookieStatus: invalidCookie.status,
+      logout: { status: logout.status, sseClosed: true },
     };
   } finally {
     const closure = await closeServe(serve);
@@ -1840,6 +1869,7 @@ async function main() {
 
   const cases = [
     ['loopback_default_and_wildcard_lan_tailscale_protected_api', () => wildcardBindCase(evidenceDir)],
+    ['pair_session_logout_invalid_cookie', pairingSessionCase],
     ['pair_session_logout_active_sse', pairingAndSseCase],
     ['invalid_request_target_survives_daemon', invalidRequestTargetCase],
     ['shared_control_root_cross_process_generation', sharedControlRootCrossProcessCase],
