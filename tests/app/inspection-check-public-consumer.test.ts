@@ -286,7 +286,7 @@ test('inspection actor returns the exact structured observation, rejects summary
 
 test('inspection accepted delivery validates committed identity without re-executing or reading output', async () => {
   const fullBody = 'full child result body; this is not inspection control JSON';
-  const result = workResult(fullBody, digestOf(fullBody));
+  const result = workResult(fullBody, completedDigest);
   const run = buildPort();
   const port = run.port;
 
