@@ -2,6 +2,10 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Runtime helpers `902ba88f` 已正常 merge candidate；contracts build、agent-loop tsc 均 0，标准 Node 原 helpers/boundary consumer 7/7 PASS（session76769），未用作者 alias。已回传 UX，来源由其确认 clean/terminal 后正常关闭。aggregate / 无 closure stop 合同 / 完整 producer 仍 OPEN。
+- r282 补原 App consumer 真实 lease fixture，生产检查未改。worker 环境仍报 EMFILE，但父宿主对同一编译 consumer 复验 1/1 PASS、exit0（session28884）；不是 cold OS/installed/live RCC 证明。r284 同树只提取两项独立 RED 与来源提交，不重复已通过检查。
+- r281 已找到并复核既有 N2 运行回执：r29 `memory-composition.log` 两项 2/2 PASS，`evidence/c3a-process-boundary.json` 记录 seed PID23124 自然退出后 next PID24486、两者 exit0；r164 `logs/10-checkpoint-history-green.log` 4/4 PASS。证据用于复用原保障，不称本轮新 HEAD 重跑或真实模型质量通过。
+
 - child producer `4b48d753 + 1152c5c6` 已正常 merge 唯一 candidate；组合 contracts/App build、App test tsc 均 0，原 `inspection-check-public-consumer` 5/5 PASS（session50998）。覆盖 typed 新结果与 durable replay 接纳，不扩为 configured native 端到端或完整 I2。已回传 UX owner，由其清理来源。
 - r279 Runtime 原 consumer 实际 9/9 PASS；App 在 worker 内先遇 EMFILE，父宿主原命令复验未遇该错误，实际 HTTP500 原因为缺 active supervisor lease authority。r282 fresh GCM 同树处理原 consumer fixture/接线，禁止删生产 authority 检查；App 尚未 PASS，未进入 Review。
 - r280 最终报告未完成证据交付，父核实真实 wire 只投影 claims/constraints，类型已有 committedAt 但没有独立 description 字段。r283 独立 Gemini4 medium 局部计划已启动，核对其他 formatter 与现有 claims 是否已满足可读语义，再确定最小修复。未据此新增字段或宣称缺陷已修。
