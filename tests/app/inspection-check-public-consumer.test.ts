@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   ContractError,
   id,
+  type ActiveTurnBinding,
   type EvidenceRef,
   type JournalCommitRef,
   type ScopeRef,
@@ -19,7 +20,17 @@ import {
   type InspectionItemResultRecord,
 } from '../../packages/contracts/src/i2-history.js';
 import { createInspectionCheckPort } from '../../packages/app/src/inspection-check.js';
+import {
+  APP_CHILD_DELIVER_TOOL,
+  APP_CHILD_TOOLS,
+  createAppChildProducer,
+  type ChildBodyAssetPort,
+} from '../../packages/app/src/ui-runtime/child-producer.js';
 import { digestOf, type ReviewSubjectMaterial } from '../../packages/runtime/src/orchestration/index.js';
+import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import type { ActiveTurnJournalPort } from '../../packages/runtime/src/context/active-turn-journal.js';
+import type { InspectionSelectionContext } from '../../packages/runtime/src/agent-loop/inspection-turn-boundary.js';
+import { produceAdmittedTurn } from '../../packages/runtime/src/admission/admitted-turn.js';
 
 type InspectionCheckRequest = Parameters<InspectionCheckPort['run']>[0];
 
@@ -442,5 +453,255 @@ test('inspection actor rejects a changed immutable check and a foreign structure
   await assert.rejects(
     () => unrelatedRefRun.port.run(request),
     expectContractError(/produced artifact/),
+  );
+});
+
+test('advertised child tools expose inspection selection and its independent outcome', () => {
+  const call = APP_CHILD_TOOLS.find((tool) => tool.toolId === 'child.call');
+  const callProperties = call?.inputSchema.properties as Record<string, { readonly type?: string }> | undefined;
+  const deliverProperties = APP_CHILD_DELIVER_TOOL.inputSchema.properties as
+    | Record<string, { readonly type?: string }>
+    | undefined;
+
+  assert.equal(callProperties?.checkId?.type, 'string');
+  assert.equal(deliverProperties?.inspectionOutcome?.type, 'object');
+});
+
+test('App child producer settles the same typed inspection delivery on new and replay without rerun', async () => {
+  // Failure basis: a new inspection call can lose its typed outcome, and replay can
+  // run the child again or skip required settlement. Impact: a measurement is lost
+  // or repeated. Probability: unknown. Cost: low local execution and one consumer.
+  const turnId = 'inspection-child-producer-turn';
+  const parentAssignment: WorkAssignment = {
+    ...assignment,
+    assignmentId: 'inspection-child-parent-assignment',
+    pipelineNodeId: 'inspection-child-parent',
+  };
+  const activeBinding: ActiveTurnBinding = {
+    admittedTurn: produceAdmittedTurn({
+      runtime: {
+        runtimeId: 'inspection-child-producer-runtime',
+        executionEpoch,
+        ownerRef: 'inspection-child-producer-owner',
+        permissionRevision: 'inspection-child-producer-permission',
+      },
+      taskId,
+      scope: executionScope,
+      assignment: parentAssignment,
+      directiveRevision: 1,
+      turnId,
+      currentTurnRef: `active-turn://${turnId}`,
+      admissionEvidence: [{ ...evidence, evidenceId: id('evidence', 'inspection-child-admission') }],
+      recoveryStateRef: { ...evidence, evidenceId: id('evidence', 'inspection-child-recovery') },
+    }),
+    assignment: parentAssignment,
+    execution: { runtimeId: 'inspection-child-producer-runtime', executionEpoch },
+    scope: executionScope,
+  };
+  const records: Parameters<ActiveTurnJournalPort['append']>[0]['record'][] = [];
+  const journal: ActiveTurnJournalPort = {
+    async append(input) {
+      if (!records.some((record) => JSON.stringify(record) === JSON.stringify({ commitId: input.commitId, record: input.record }))) {
+        records.push(input.record);
+      }
+    },
+    async replay() { return [...records]; },
+  };
+  const parent = await ActiveTurnContext.open({
+    journal,
+    binding: activeBinding,
+    currentTurnRef: activeBinding.admittedTurn.currentTurnRef,
+  });
+  const selectedInspection = {
+    binding: {
+      occurrence: binding.occurrence,
+      executionScope: binding.executionScope,
+      cycleId: binding.cycleId,
+      executionEpoch: binding.executionEpoch,
+      definition: binding.definition,
+      definitionCommitRef: binding.definitionCommitRef,
+      definitionDigest: binding.definitionDigest,
+      cycleOpenedCommitRef: binding.cycleOpenedCommitRef,
+      scheduleOccurrenceRef: binding.scheduleOccurrenceRef,
+    },
+    check: { checkId, criterion, inputRefs },
+  };
+  const accepted: InspectionItemDelivery = {
+    checkId,
+    resultId: 'inspection-result:producer-child',
+    attempt: assignment.attempt,
+    outcome: { status: 'completed', judgment: 'one TODO marker observed' },
+    evidenceRefs: [evidence],
+    completedAt: '2026-10-17T12:00:00.000Z',
+  };
+  const executionResult: WorkResult = {
+    ...workResult('the producer child observed one TODO marker', digestOf('body')),
+    agentId: 'agent-inspection-child',
+    assignmentId: parentAssignment.assignmentId,
+    pipelineNodeId: parentAssignment.pipelineNodeId,
+    producedArtifactRefs: [],
+    producedArtifactDigests: [],
+    producedArtifactBodies: [],
+    outputRefs: [...parentAssignment.expectedOutputRefs],
+    executionEpoch: parentAssignment.executionEpoch,
+  };
+  const typedAccepted = (childInvocationId: string): InspectionItemDelivery => ({
+    ...accepted,
+    resultId: `inspection-result:${childInvocationId}`,
+  });
+  const assets: ChildBodyAssetPort = {
+    target: () => outputRef,
+    async write() { throw new Error('inspection producer consumer does not execute the child'); },
+    async read() { return new Uint8Array(); },
+  };
+  let managerCalls = 0;
+  let refinedWrites = 0;
+  const acceptedCalls: Parameters<NonNullable<Parameters<typeof createAppChildProducer>[0]['inspection']>['acceptDelivery']>[0][] = [];
+  const producer = createAppChildProducer({
+    manager: {
+      async callChild(input) {
+        if (input.kind !== 'execution') throw new Error('the producer consumer registers an execution call');
+        managerCalls += 1;
+        const childInvocationId = input.call.invocationId;
+        await input.childCallPort.prepare({
+          kind: 'execution', invocationId: childInvocationId, assignment: input.assignment,
+          agentId: 'agent-inspection-child', attempt: input.assignment.attempt,
+          executionEpoch: input.assignment.executionEpoch, scope: input.scope,
+          ...(input.inspection === undefined ? {} : { inspection: input.inspection }),
+        });
+        await input.childCallPort.recordReturn({
+          kind: 'execution', invocationId: childInvocationId, assignment: input.assignment,
+          agentId: 'agent-inspection-child', attempt: input.assignment.attempt,
+          executionEpoch: input.assignment.executionEpoch, scope: input.scope,
+          result: {
+            ...executionResult,
+            assignmentId: input.assignment.assignmentId,
+            pipelineNodeId: input.assignment.pipelineNodeId,
+            attempt: input.assignment.attempt,
+            executionEpoch: input.assignment.executionEpoch,
+            inputRevision: input.assignment.inputRevision,
+          },
+          ...(input.inspection === undefined ? {} : { inspectionDelivery: typedAccepted(childInvocationId) }),
+        });
+        const returned = {
+          state: 'returned', kind: 'execution', invocationId: childInvocationId,
+          incarnation: {
+            runtimeId: 'inspection-child-producer-runtime', generation: 1,
+            agentInstanceId: 'agent-inspection-child-instance', roleId: 'execution',
+            taskId, assignmentId: input.assignment.assignmentId, executionEpoch,
+          },
+          result: executionResult,
+        } as const;
+        return input.inspection === undefined
+          ? returned
+          : { ...returned, inspectionDelivery: typedAccepted(childInvocationId) };
+      },
+    },
+    parent,
+    parentAssignment,
+    checkpoints: {
+      async pre(input) {
+        return {
+          checkpoint: {
+            id: id('checkpoint', 'inspection-producer-pre'),
+            scope: input.selected.scope,
+            cycleId: executionScope.cycleId!,
+            seq: 1,
+            previousCheckpointId: null,
+            directiveRevision: 1,
+            executionEpoch,
+            outcome: 'succeeded',
+            summary: 'inspection child pre-call anchor',
+            recoveryStateRef: evidence,
+            evidenceRefs: [evidence],
+            next: { kind: 'continue' },
+          },
+          previous: null,
+          commitRef: definitionCommitRef,
+        };
+      },
+      async post() { throw new Error('post checkpoint is outside this producer consumer'); },
+    },
+    refinedDeliveryStore: {
+      async store() {
+        refinedWrites += 1;
+        return { ref: { ...evidence, evidenceId: id('evidence', 'producer-refined') }, view: { kind: 'utf8-text' } };
+      },
+      async read() { return new TextEncoder().encode('the producer child observed one TODO marker'); },
+    },
+    bodyAssets: assets,
+    bindChildRun: async () => { throw new Error('the producer consumer replaces child execution'); },
+    prepareAgentProvider: async () => { throw new Error('the producer consumer replaces Provider composition'); },
+    roster: [{ agentId: 'agent-inspection-child', roleId: 'execution' }],
+    admitChildOperation: async (input) => ({
+      authority: {} as never,
+      authorityCommitRef: definitionCommitRef,
+      businessRegistrationCommitRef: definitionCommitRef,
+      coverageCommitRef: definitionCommitRef,
+      childAdmission: {
+        authorityCommitRef: definitionCommitRef,
+        businessRegistrationCommitRef: definitionCommitRef,
+        coverageCommitRef: definitionCommitRef,
+      },
+      intent: {} as never,
+      registration: {} as never,
+    }),
+    inspectionSelection: {
+      async readSelectionContext() {
+        return {} as InspectionSelectionContext;
+      },
+    },
+    inspection: {
+      async select() { return selectedInspection; },
+      async acceptDelivery(input) {
+        acceptedCalls.push(input);
+        return definitionCommitRef;
+      },
+    },
+  });
+  const request = {
+    execution: { runtimeId: 'inspection-child-producer-runtime', taskId,
+      operationId: id('operation', 'inspection-child-parent'), executionEpoch },
+    scope: executionScope,
+    requestId: 'request-inspection-child',
+    call: {
+      callId: 'call-inspection-child', toolId: 'child.call', continuationRef: 'continuation-inspection-child',
+      arguments: {
+        purpose: 'measure one check', agentId: 'agent-inspection-child', kind: 'execution',
+        instructions: 'measure the committed check', successCriteria: ['measure it'],
+        target: 'artifact://inspection-actor/target', checkId,
+      },
+    },
+    signal: new AbortController().signal,
+  };
+  const first = await producer.execute(request);
+  const replay = await producer.execute(request);
+  const ordinaryArguments = {
+    purpose: 'measure one ordinary call', agentId: 'agent-inspection-child', kind: 'execution',
+    instructions: 'measure the ordinary call', successCriteria: ['measure it'],
+    target: 'artifact://inspection-actor/target',
+  };
+  const ordinary = await producer.execute({
+    ...request,
+    requestId: 'request-ordinary-child',
+    call: { ...request.call, callId: 'call-ordinary-child', arguments: ordinaryArguments },
+  });
+  assert.equal(first.status, 'succeeded');
+  assert.equal(replay.status, 'succeeded');
+  assert.equal(ordinary.status, 'succeeded');
+  assert.equal(managerCalls, 2);
+  assert.equal(refinedWrites, 2);
+  assert.equal(acceptedCalls.length, 2);
+  assert.equal(
+    acceptedCalls[0].invocation.invocationId,
+    acceptedCalls[1].invocation.invocationId,
+  );
+  assert.equal(
+    acceptedCalls[0].delivery.inspectionDelivery?.resultId,
+    `inspection-result:${acceptedCalls[0].delivery.invocationId}`,
+  );
+  assert.equal(
+    acceptedCalls[1].delivery.inspectionDelivery?.resultId,
+    `inspection-result:${acceptedCalls[1].delivery.invocationId}`,
   );
 });
