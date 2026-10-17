@@ -539,6 +539,7 @@ export interface UiRuntimeServiceOptions {
     readonly journalRoot: string;
   };
   readonly runtimeComposition?: {
+    readonly hydrateReadFor?: RuntimeTaskCoordinatorOptions['hydrateReadFor'];
     readonly createTaskAssembly?: (input: {
       readonly task: import('../../../contracts/src/index.js').Task;
       readonly scope: import('../../../contracts/src/index.js').ScopeRef;
@@ -1849,6 +1850,18 @@ function checkpointAssetForSelector(
 }
 
 export class UiRuntimeService {
+  private readResources?: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> };
+
+  bindReadResources(input: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> }): void {
+    this.readResources = input;
+  }
+
+  async taskPlanHistory(taskId: TaskId, projectKey: string, mode: RuntimeMode): Promise<RuntimeReadResult<RuntimeTaskPlanHistoryProjection>> {
+    const source = await this.findProjectSource(projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
+    return this.taskPlanHistoryFor(source, mode, taskId);
+  }
+
   private readonly mode: 'fake' | 'rcc';
   private readonly coordinator: RuntimeTaskCoordinator;
   private readonly requirementInbox = new RequirementInbox();
@@ -1977,6 +1990,9 @@ export class UiRuntimeService {
             },
           }),
       ...(options.runtimeComposition === undefined ? {} : {
+        ...(options.runtimeComposition.hydrateReadFor === undefined ? {} : {
+          hydrateReadFor: options.runtimeComposition.hydrateReadFor,
+        }),
         ...(options.runtimeComposition.createTaskAssembly === undefined ? {} : {
           createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!({
             task: input.task,
@@ -3431,7 +3447,7 @@ export class UiRuntimeService {
   // ---- Public scoped history reads (I4/I5) ----------------------------------
 
   private async resolveProjectCatalog(): Promise<ConfiguredProjectCatalog> {
-    const resolver = this.options.projectCatalog;
+    const resolver = this.readResources?.projectCatalog ?? this.options.projectCatalog;
     if (resolver === undefined) {
       throw new UiRuntimeApiError(
         'read.catalog-unavailable',
@@ -3458,7 +3474,7 @@ export class UiRuntimeService {
    * catalog fails; it never scans a workspace for persistent state.
    */
   private boundProjectSource(): ConfiguredProjectReadSource | undefined {
-    const paths = this.options.runtimePaths;
+    const paths = this.readResources?.runtimePaths ?? this.options.runtimePaths;
     if (paths === undefined || this.options.projectKey === undefined || paths.projectKey !== this.options.projectKey) return undefined;
     return {
       projectKey: paths.projectKey,
@@ -3543,6 +3559,9 @@ export class UiRuntimeService {
       checkpointFor: (taskId, cycleId) => new FileCheckpointStore(
         uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
       ),
+      currentStateFor: () => createJsonlRuntimeTaskCurrentStateJournal({
+        journal: new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode))),
+      }),
     });
     return { entries: inventory.entries, failures: inventory.failures };
   }

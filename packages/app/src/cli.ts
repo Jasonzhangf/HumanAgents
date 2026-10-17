@@ -1885,6 +1885,7 @@ export async function main(args: readonly string[]): Promise<void> {
               };
             },
           });
+          runtime.service.bindReadResources({ runtimePaths: paths, projectCatalog: () => listConfiguredProjects(paths) });
         },
         dispose: async () => {
           try {

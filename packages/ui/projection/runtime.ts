@@ -1,6 +1,10 @@
 import type { EvidenceRef, LifecycleState, TaskFlowBinding, TaskId, TaskIdentitySource } from '@humanagent/contracts';
 import type { SemanticObservationEnvelope } from '@humanagent/contracts';
 import {
+  type RuntimeCommitRefProjection,
+  type RuntimeContextHistoryProjection,
+  type RuntimeContextReplacementProjection,
+  type RuntimeContextViewProjection,
   type RuntimeDashboardProjection,
   type RuntimeMode,
   type RuntimeModeStatus,
@@ -22,10 +26,6 @@ import {
   type RuntimeCheckpointFilter,
   type RuntimeCheckpointHistoryProjection,
   type RuntimeCheckpointProjection,
-  type RuntimeContextHistoryProjection,
-  type RuntimeCommitRefProjection,
-  type RuntimeContextReplacementProjection,
-  type RuntimeContextViewProjection,
   type RuntimePoolAvailabilityProjection,
   type RuntimeBusinessCycleHistoryProjection,
   type RuntimeBusinessCycleEntryProjection,
@@ -45,9 +45,9 @@ import {
   type RuntimeSelectedReviewerProjection,
   type RuntimeTaskScopeProjection,
 } from '../contracts/runtime.js';
+import type { RuntimeTaskPlanHistoryProjection } from '../contracts/task-plan-history.js';
 import type { RuntimeSemanticObservationEnvelope } from '../contracts/runtime.js';
 import { RuntimeProjectionError } from '../contracts/runtime.js';
-import type { RuntimeTaskPlanHistoryProjection } from '../contracts/task-plan-history.js';
 
 export type {
   PublicOutputCommitProjection,

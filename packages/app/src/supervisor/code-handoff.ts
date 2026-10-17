@@ -119,6 +119,23 @@ function assertStartupDeclaration(startup: SupervisorStartupDeclaration): void {
   }
 }
 
+/**
+ * The legacy close receipt reports the replaced owner's close as clean only
+ * when this handoff observed a real graceful termination of that same owner.
+ * An already-dead owner never publishes a graceful close, so it stays
+ * 'unavailable' instead of inferring clean from an old startup declaration.
+ */
+function legacyCloseReceipt(replacement: SupervisorLeaseRecord, previous: SupervisorLeaseRecord): 'clean' | 'unavailable' {
+  const takeover = replacement.takeover;
+  return takeover !== undefined
+    && previous.startup !== undefined
+    && takeover.previousLeaseId === previous.leaseId
+    && takeover.previousGeneration === previous.generation
+    && takeover.termination === 'graceful'
+    ? 'clean'
+    : 'unavailable';
+}
+
 async function waitForNewOwner(input: {
   readonly paths: RuntimePaths;
   readonly previous: SupervisorLeaseRecord;
@@ -297,7 +314,7 @@ export function startDaemonCodeHandoff(
         workspace: paths.workspaceCwd,
         projectKey: paths.projectKey,
         source,
-        legacyCloseReceipt: current.startup === undefined ? 'unavailable' : 'clean',
+        legacyCloseReceipt: legacyCloseReceipt(replacement, current),
       };
     } catch (error) {
       const failure = restartFailure(error);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -26,6 +26,8 @@ import { createJsonlCheckpointJournal, createJsonlCheckpointClosurePort, createJ
 import { createNativeRecoveryAssets } from '../../dist/app/app/src/native-recovery-assets.js';
 import { createJsonlOperationControlJournal } from '../../dist/app/app/src/operation-control-journal.js';
 import { UiRuntimeService } from '../../dist/app/app/src/ui-runtime/service.js';
+import { startUiRuntime } from '../../dist/app/app/src/ui-runtime/index.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../../dist/app/app/src/runtime-current-state-journal.js';
 import { createUiRuntimeRequestDispatcher } from '../../dist/app/app/src/ui-runtime/server.js';
 import { AccessControlService } from '../../dist/app/app/src/ui-runtime/access-control.js';
 import { UiRuntimeJournal, uiRuntimeJournalPath, uiRuntimeControlJournalPath, uiRuntimeModeRoot } from '../../dist/app/app/src/ui-runtime/journal.js';
@@ -56,7 +58,8 @@ async function snapshot(root) {
   return files;
 }
 
-export async function fixture() {
+export async function fixture({ cold = false } = {}) {
+  const scope = cold ? { ...taskScope, cycleId, operationId: id('operation', 'c3-cold-operation') } : { ...taskScope, cycleId };
   await mkdir(fixtureRoot, { recursive: true });
   const root = await mkdtemp(join(fixtureRoot, 'http-'));
   const paths = await resolveRuntimePaths({ workspace: process.cwd(), controlRoot: root });
@@ -107,8 +110,8 @@ export async function fixture() {
     locator: `humanagent://c3/${label}`, scope });
   const checkpoint = (seq, previous) => ({ id: id('checkpoint', `c3-checkpoint-${seq}`), scope, cycleId, seq,
     previousCheckpointId: previous?.id ?? null, directiveRevision: seq, executionEpoch: 4,
-    outcome: 'waiting', summary: `C3 checkpoint ${seq}`, recoveryStateRef: evidence(`recovery-${seq}`),
-    evidenceRefs: [evidence(`evidence-${seq}`)], next: { kind: 'wait', ref: owner } });
+    outcome: cold ? 'blocked' : 'waiting', summary: `C3 checkpoint ${seq}`, recoveryStateRef: evidence(`recovery-${seq}`),
+    evidenceRefs: [evidence(`evidence-${seq}`)], next: { kind: cold ? 'recover' : 'wait', ref: owner } });
   const a = checkpoint(1, null);
   const timeAuthority = { source: 'harness', owner: 'runtime-checkpoint-control-owner', authorityRef: 'c3-clock', sampleCommittedAt: async () => at };
   const turn = { turnId: 'c3-turn', workAssignmentRef: 'c3-assignment', taskRef: taskId, scopeRef: scope,
@@ -204,6 +207,21 @@ export async function fixture() {
   const recordA = await checkpoints.readCommitted(scope, a.id);
   const recordB = await checkpoints.readCommitted(scope, b.id);
   assert.ok(recordA && recordB);
+  if (cold) {
+    uiJournal.append({ kind: 'operation.started', taskId, cycleId, operationId: scope.operationId, scope,
+      executionEpoch: 4, operationCounter: 1, cycleCounter: 1, startedAt: at, input: 'read exact history' });
+    await createJsonlRuntimeTaskCurrentStateJournal({ journal }).commit({
+      taskScope: scope, transitionId: 'c3-cold-succeeded', expectedStateCommitRef: null,
+      state: {
+        task: { id: taskId, organId, title: 'C3 read', directive: 'read exact history',
+          directiveRevision: 2, state: 'succeeded', memoryScope: 'task' },
+        processing: { entryPhase: 'aligned', nextAction: { kind: 'continue' }, hardBlockers: [],
+          recoveryResponsibilityRef: owner, laterErrorRefs: [],
+          stages: [{ stageId: 'alignment', state: 'succeeded', evidenceRefs: [] }] },
+        retainedDuties: [], sourceCommitRefs: [recordB.commitRef],
+      },
+    });
+  }
   let effects = 0;
   const forbidden = () => { effects++; throw new Error('read consumer invoked an effect port'); };
   const effectPort = new Proxy({}, { get: () => forbidden });
@@ -225,6 +243,39 @@ export async function fixture() {
   return { root, paths, service, checkpoints, contextCommit, recordA, recordB, semantics, publication, capture, children, crossChild,
     effects: () => effects };
 }
+
+// The observed cold-start failure restores a blocked checkpoint instead of the
+// newer live owner state. Reuse the legal producer fixture; no Provider call is needed.
+test('App cold production entry hydrates canonical live state while checkpoint remains blocked', async () => {
+  const f = await fixture({ cold: true });
+  console.log(JSON.stringify({ event: 'cold-fixture-start', fixture: f.root, pid: process.pid }));
+  let runtime;
+  try {
+    let effects = 0;
+    const forbidden = () => { effects++; throw new Error('cold entry invoked Provider or execution'); };
+    const effectPort = new Proxy({}, { get: () => forbidden });
+    const accessControl = await AccessControlService.open({ credentialPath: f.paths.webAccessCredentialPath, create: true });
+    const before = await snapshot(f.paths.projectRoot);
+    runtime = await startUiRuntime({ mode: 'fake', organId,
+      binding: { bindingId: 'c3-unused', providerId: 'c3-unused', protocol: 'responses', endpointRef: 'c3-unused',
+        modelRef: 'c3-unused', configDigest: 'c3-unused', capabilityDigest: 'c3-unused' },
+      port: effectPort, accessControl, checkpointRoot: join(f.paths.checkpointsRoot, 'ui-runtime'),
+      evidenceRoot: join(f.paths.artifactsRoot, 'ui-provider-evidence'), uiRoot: join(process.cwd(), 'docs/ui'),
+      host: '127.0.0.1', portNumber: 0, explicitBrainInterpreter: effectPort,
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: f.paths.projectKey },
+    });
+    const dashboard = runtime.service.taskDashboard(taskId);
+    assert.equal(dashboard.state, 'succeeded');
+    assert.equal(dashboard.checkpoint.outcome, 'blocked');
+    assert.equal((await f.checkpoints.readLatest(f.recordB.checkpoint.scope)).checkpoint.outcome, 'blocked');
+    assert.equal(effects, 0);
+    assert.deepEqual(await snapshot(f.paths.projectRoot), before, 'cold hydrate changed durable project data');
+  } finally {
+    await runtime?.close();
+    await rm(f.root, { recursive: true });
+    console.log(JSON.stringify({ event: 'cold-fixture-closed', fixture: f.root, pid: process.pid }));
+  }
+});
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) test('production checkpoint GET preserves canonical current and exact viewed receipts without writes', async () => {
   const f = await fixture();

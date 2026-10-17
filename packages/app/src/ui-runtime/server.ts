@@ -1512,6 +1512,12 @@ async function handleRequest(
       }));
       return;
     }
+    const taskPlanHistory = /^\/api\/tasks\/([^/]+)\/task-plan-history$/.exec(path);
+    if (taskPlanHistory && method === 'GET') {
+      const { projectKey, mode } = requireReadScope(url);
+      writeReadResult(response, await service.taskPlanHistory(id('task', decodeURIComponent(taskPlanHistory[1]!)), projectKey, mode));
+      return;
+    }
     const taskObservation = /^\/api\/tasks\/([^/]+)\/observation$/.exec(path);
     if (taskObservation && method === 'GET') {
       const selected = url.searchParams.get('node') ?? undefined;

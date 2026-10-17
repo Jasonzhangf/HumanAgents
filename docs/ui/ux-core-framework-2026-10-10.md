@@ -1,7 +1,6 @@
 # HumanAgent UX 核心框架
 
 状态：DESIGN-CANDIDATE
-基线 SHA：`300e71063dbed389250508f8aee3e96a3a404f87`
 注意：本文件仅为设计约束，不代表实现或验收通过。
 
 ## 1. 分层模型

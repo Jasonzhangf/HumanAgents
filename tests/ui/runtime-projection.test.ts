@@ -147,6 +147,40 @@ test('runtime task list classifies every task into a visible projection group', 
   assert.deepEqual(list.counts, { running: 1, waiting: 0, completed: 1, stopped: 1, draft: 1, failed: 1, total: 5 });
 });
 
+test('task waiting copy describes settlement without guessing activity from raw nodes', () => {
+  const task: RuntimeTaskSnapshotInput = {
+    ...runtimeTask('running', 1),
+    state: 'settling',
+    currentNode: 'provider.model',
+  };
+  assert.equal(projectRuntimeTaskWaitingStatus(task), '正在收拢执行结果，等待检查点提交');
+  const unknownNodeTask = { ...task, currentNode: 'unknown.node' };
+  assert.equal(projectRuntimeTaskWaitingStatus(unknownNodeTask),
+    '正在收拢执行结果，等待检查点提交');
+  assert.equal(projectRuntimeTaskWaitingStatus({ ...task, state: 'running' }), '正在等待执行结果');
+  assert.equal(projectRuntimeTaskWaitingStatus({ ...task, state: 'created' }), '尚无执行等待信息');
+  assert.equal(projectRuntimeTaskDashboard(task, 'fake').currentNode, 'provider.model');
+});
+
+test('a checkpoint confirms a record without declaring task or public result completion', () => {
+  const task: RuntimeTaskSnapshotInput = {
+    ...runtimeTask('stopped', 2),
+    checkpoint: {
+      checkpointId: 'cp-2',
+      seq: 7,
+      outcome: 'stopped',
+      summary: '收拢记录',
+      committedAt: '2026-10-16T11:38:49.000Z',
+    },
+  };
+  assert.equal(projectRuntimeTaskWaitingStatus({ ...task, checkpoint: undefined }),
+    '停止或取消请求已受理；等待收拢完成');
+  assert.equal(projectRuntimeTaskWaitingStatus(task), '已提交收拢记录');
+  const dashboard = projectRuntimeTaskDashboard({ ...task, state: 'running' }, 'fake');
+  assert.equal(dashboard.state, 'running');
+  assert.deepEqual(dashboard.checkpoint, task.checkpoint);
+});
+
 test('runtime API maps every real task state to its declared chip tone', async () => {
   const { stateTone } = await import(runtimeApiModuleUrl);
   const expectedTones = {

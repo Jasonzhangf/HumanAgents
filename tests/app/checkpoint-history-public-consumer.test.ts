@@ -21,7 +21,7 @@ import { durableContextDigest, produceContextHistory } from '../../packages/runt
 import { prepareCheckpointClosure, type DeadEndRecord } from '../../packages/runtime/src/checkpoints/closure.js';
 import { commitDeadEnd, submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
 import { createJsonlCheckpointJournal, createJsonlCheckpointClosurePort, createJsonlSemanticHistoryJournal,
-  createJsonlContextHistoryPort, commitConditionalTransitionRecord } from '../../packages/app/src/checkpoint-journal.js';
+  createJsonlSemanticHistoryReader, createJsonlContextHistoryPort, commitConditionalTransitionRecord } from '../../packages/app/src/checkpoint-journal.js';
 import type { OperationControlSelector } from '../../packages/runtime/src/gateway/ports.js';
 import { createJsonlOperationControlJournal } from '../../packages/app/src/operation-control-journal.js';
 import { createNativeRecoveryAssets } from '../../packages/app/src/native-recovery-assets.js';
@@ -164,7 +164,7 @@ async function fixture(associations = false) {
 test('public Journal consumer resolves cycle A independently of history page and keeps bound current', async () => {
   const f = await fixture();
   const bytes = await readFile(f.filePath, 'utf8');
-  const files = (await readdir(f.root)).sort();
+  const files = await fileSnapshot(f.root);
   const position = await f.readerCheckpoints.readExecutionPosition(taskScope);
   const viewed = await f.reader.read({ ...f.input, viewed: { checkpointId: f.a.id } });
   if (!viewed.ok) throw new Error(`${viewed.failure.code}: ${viewed.failure.message}`);
@@ -194,25 +194,26 @@ test('public Journal consumer resolves cycle A independently of history page and
   assert.equal(following.value.viewed.capture.state, 'unavailable');
   assert.equal(await readFile(f.filePath, 'utf8'), bytes);
   assert.deepEqual(await f.readerCheckpoints.readExecutionPosition(taskScope), position);
-  assert.deepEqual((await readdir(f.root)).sort(), files);
+  assert.deepEqual(await fileSnapshot(f.root), files);
 });
 
 test('public owners supply semantic/capture references and a distinct effective epoch without changing viewed history', async () => {
   const f = await fixture(true);
   const store = new ImmutableAssetStore(f.artifactsRoot);
-  const semantic = createJsonlSemanticHistoryJournal({ filePath: f.filePath, artifactsRoot: f.artifactsRoot,
-    activeTurnJournal: f.activeTurnJournal, rawContent: { read: async ({ content }) => store.readEvidence(content.ref) },
-    timeAuthority: f.timeAuthority });
-  const semantics = { goal: 'keep exact history', actions: 'read committed records',
-    result: 'A stays current', nextStep: 'inspect A' };
-  const view = await commitSemanticContextViewV1({ port: semantic, accepted: { version: 1,
+  const rawContent = { read: async ({ content }: Parameters<Parameters<typeof createJsonlSemanticHistoryJournal>[0]['rawContent']['read']>[0]) => store.readEvidence(content.ref) };
+  const semanticWriter = createJsonlSemanticHistoryJournal({ filePath: f.filePath, artifactsRoot: f.artifactsRoot,
+    activeTurnJournal: f.activeTurnJournal, rawContent, timeAuthority: f.timeAuthority });
+  const semantics = { goal: 'keep exact history', actions: 'read committed records', result: 'A stays current', nextStep: 'inspect A' };
+  const view = await commitSemanticContextViewV1({ port: semanticWriter, accepted: { version: 1,
     admittedTurn: f.turn, checkpoint: f.nativeA, acceptance: { ownerId: owner,
       acceptanceRef: 'history-semantic-accepted', sourceEvidenceRefs: [evidence('semantic-accepted')] },
     semantics, adoptedChildren: [], recovery: { recoveryStateRef: f.turn.recoveryStateRef,
       recoveryResponsibilityRef: 'history-owner', unresolvedOperationRefs: [], laterErrorRefs: [] } } });
   const turn = projectAdmittedTurnIdentityV1(f.turn);
-  const publication = await commitSemanticHistoryPublicationV1({ port: semantic, ownerId: owner, turn,
+  const publication = await commitSemanticHistoryPublicationV1({ port: semanticWriter, ownerId: owner, turn,
     checkpoint: f.nativeA, contextView: { identity: await contextViewIdentityV1({ turn, checkpoint: f.a }), receipt: view } });
+  const semantic = createJsonlSemanticHistoryReader({ filePath: f.filePath, artifactsRoot: f.artifactsRoot,
+    activeTurnJournalFor: (turnId) => createJsonlActiveTurnJournal({ filePath: f.filePath, turnId }), rawContent });
   assert.deepEqual(await semantic.listCompletedTurnLookups(taskScope), []);
   assert.equal((await semantic.listCompletedTurnLookups(scope)).length, 1);
   if (f.captureReceipt === undefined) throw new Error('capture receipt missing');

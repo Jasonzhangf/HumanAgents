@@ -553,6 +553,12 @@ export interface RuntimePreparedExecutionStopPort {
   settle(selector: RuntimePreparedStopSelector): Promise<RuntimePreparedStopSettleResult>;
 }
 
+export interface RuntimeTaskHydrateReadSource {
+  readonly checkpoint: Pick<CheckpointJournalPort, 'verify' | 'readLatest' | 'readCommitted' | 'readExecutionPosition'>
+    & Partial<Pick<NativeCheckpointJournalPort, 'readNativeCheckpoint'>>;
+  readonly currentState: Pick<RuntimeTaskCurrentStatePort, 'read'>;
+}
+
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
@@ -586,6 +592,7 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly attentionPort: AttentionPort;
   readonly journal?: RuntimeTaskJournalPort;
   readonly currentStatePort?: RuntimeTaskCurrentStatePort;
+  readonly hydrateReadFor?: (scope: ScopeRef) => Promise<RuntimeTaskHydrateReadSource | undefined>;
   /** Actual AgentLoop and native-save facts; unknown never becomes an empty recovery. */
   readonly currentStateFacts?: RuntimeTaskCurrentStateFactsPort;
   readonly publicOutputStoreFor?: (taskId: TaskId, cycleId: CycleId) => PublicOutputJournalPort;
@@ -749,6 +756,15 @@ export interface TaskRecord {
   postCommitRecoveryPending?: boolean;
   executionReady?: Promise<boolean>;
   resolveExecutionReady?: (ready: boolean) => void;
+}
+
+/** Attach the already-accepted operation identity without starting execution. */
+function attachReplayedOperationIdentity(task: TaskRecord, operation: OperationRecord): void {
+  task.operationId = operation.operationId;
+  task.executionEpoch = operation.executionEpoch;
+  task.input = operation.input;
+  task.orchestrated = operation.orchestrated;
+  task.release = { state: 'released' };
 }
 
 export interface OperationRecord {
@@ -997,7 +1013,10 @@ export function replayTaskJournalRecords(
         state.operations.set(record.operationId.value, operation);
         state.scopes.set(record.operationId.value, record.scope);
         const startedTask = state.tasks.get(record.taskId.value);
-        if (startedTask) startedTask.cycleId = record.scope.cycleId;
+        if (startedTask) {
+          startedTask.cycleId = record.scope.cycleId;
+          attachReplayedOperationIdentity(startedTask, operation);
+        }
         break;
       }
       case 'operation.event': {
@@ -1037,11 +1056,7 @@ export function replayTaskJournalRecords(
         task.events.push(record.event);
         task.updatedAt = record.event.occurredAt;
         if (record.event.kind === 'execution.started') {
-          task.operationId = operation.operationId;
-          task.executionEpoch = operation.executionEpoch;
-          task.input = operation.input;
-          task.orchestrated = operation.orchestrated;
-          task.release = { state: 'released' };
+          attachReplayedOperationIdentity(task, operation);
           task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
         }
         if (record.taskOutput !== undefined) task.output = record.taskOutput;
@@ -1487,15 +1502,14 @@ function nativeCheckpointPort(store: TaskCheckpointStore): NativeCheckpointJourn
  * falls back to the legacy identity.
  */
 async function readDurableCheckpointReceipt(
-  store: TaskCheckpointStore,
+  store: Pick<CheckpointJournalPort, 'readCommitted'> & Partial<Pick<NativeCheckpointJournalPort, 'readNativeCheckpoint'>>,
   exact: CommittedCheckpointRecord,
 ): Promise<DurableCheckpointReceipt | null> {
   if (exact.commitRef.commitId === checkpointCommitId(exact.checkpoint)) return null;
-  const native = nativeCheckpointPort(store);
-  if (native === null) {
+  if (store.readNativeCheckpoint === undefined) {
     throw new Error('native checkpoint record cannot be verified without a native checkpoint reader');
   }
-  const relationship = await native.readNativeCheckpoint({ checkpoint: exact.checkpoint });
+  const relationship = await store.readNativeCheckpoint({ checkpoint: exact.checkpoint });
   if (relationship === null) {
     throw new Error('native checkpoint record is missing its durable receipt relationship');
   }
@@ -5597,7 +5611,10 @@ export class RuntimeTaskCoordinator {
           this.operations.set(record.operationId.value, operation);
           this.scopes.set(record.operationId.value, record.scope);
           const task = this.tasks.get(record.taskId.value);
-          if (task) task.cycleId = record.scope.cycleId;
+          if (task) {
+            task.cycleId = record.scope.cycleId;
+            attachReplayedOperationIdentity(task, operation);
+          }
           break;
         }
         case 'operation.event': {
@@ -5637,11 +5654,7 @@ export class RuntimeTaskCoordinator {
           task.events.push(record.event);
           task.updatedAt = record.event.occurredAt;
           if (record.event.kind === 'execution.started') {
-            task.operationId = operation.operationId;
-            task.executionEpoch = operation.executionEpoch;
-            task.input = operation.input;
-            task.orchestrated = operation.orchestrated;
-            task.release = { state: 'released' };
+            attachReplayedOperationIdentity(task, operation);
             task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
           }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;
@@ -5691,7 +5704,8 @@ export class RuntimeTaskCoordinator {
         continue;
       }
       try {
-        const store = this.options.checkpointStoreFor(task.taskId, scope.cycleId);
+        const source = await this.options.hydrateReadFor?.(scope);
+        const store = source ? source.checkpoint : this.options.checkpointStoreFor(task.taskId, scope.cycleId);
         const businessScope: ScopeRef = {
           organId: this.options.organId,
           taskId: task.taskId,
@@ -5744,7 +5758,7 @@ export class RuntimeTaskCoordinator {
           this.markCommittedCheckpointRecovery(task, task.error.nextAction);
           continue;
         }
-        const currentStatePort = this.options.currentStatePort;
+        const currentStatePort = source ? source.currentState : this.options.currentStatePort;
         let selection: RuntimeTaskCurrentStateSelection | null = null;
         if (currentStatePort) {
           const committed = await store.readCommitted(latest.checkpoint.scope, latest.checkpoint.id);

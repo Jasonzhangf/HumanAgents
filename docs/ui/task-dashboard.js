@@ -155,7 +155,8 @@ function planViewOptions() {
     selection: hasPlanSelection(selection) ? selection : null,
     conflictSelection: hasPlanSelection(selection) ? selection : null,
     explicitDisplay: queryParam('display') || '',
-    onEvidenceRef: (ref) => evidenceTrigger(ref),
+    onOpenDetail: openPlanDetail,
+    onEvidenceRef: (ref, navigation) => evidenceTrigger(ref, navigation),
     onSelectRevision: (revision) => {
       updatePlanViewUrl({
         display: 'semantic',
@@ -185,10 +186,27 @@ function updatePlanViewUrl({ display, selection } = {}) {
 // The existing contextual 技术详情 drawer is the evidence reader this surface
 // supports. It shows the exact typed reference and never fabricates a
 // checkpoint association or a resolvable link the runtime did not supply.
-function evidenceTrigger(ref) {
+function openPlanDetail({ onBack, ...detail }, trigger) {
+  const layer = openTechnicalDetail({
+    ...detail,
+    onClose: () => {
+      if (trigger?.dataset.planDetailTrigger === 'current' && !trigger.isConnected && displayMode === 'current') {
+        main.querySelector('[data-plan-detail-trigger="current"]')?.focus()
+      }
+    },
+  })
+  if (typeof onBack === 'function') {
+    const back = element('button', '返回计划详情', 'button button--quiet')
+    back.type = 'button'
+    back.addEventListener('click', onBack)
+    layer.querySelector('.shell-layer-body').append(back)
+  }
+}
+
+function evidenceTrigger(ref, { onOpenDetail = openPlanDetail } = {}) {
   const button = element('button', '查看证据', 'button button--quiet plan-evidence-trigger')
   button.type = 'button'
-  button.addEventListener('click', () => openTechnicalDetail({
+  button.addEventListener('click', () => onOpenDetail({
     title: '证据引用',
     entries: [
       ['evidenceId', ref?.evidenceId?.value],
@@ -200,7 +218,7 @@ function evidenceTrigger(ref) {
       ['scope.taskId', ref?.scope?.taskId?.value],
       ['scope.operationId', ref?.scope?.operationId?.value],
     ],
-  }))
+  }, button))
   return button
 }
 
@@ -1778,13 +1796,17 @@ function renderDashboard() {
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div', undefined, 'page-heading-copy')
   const titleBlock = element('div', undefined, 'task-title-block')
-  titleBlock.append(element('h1', dashboard.taskTitle, 'task-title'))
-  const fullTitle = element('details', undefined, 'task-title-full')
-  fullTitle.append(
-    element('summary', '查看完整标题'),
-    element('p', dashboard.taskTitle, 'task-title-full-text'),
-  )
-  titleBlock.append(fullTitle)
+  titleBlock.append(element('h1', dashboard.taskTitle, 'task-title task-title-current'))
+  const fullBrief = element('button', '查看完整任务说明', 'button button--quiet')
+  fullBrief.type = 'button'
+  fullBrief.addEventListener('click', () => openTechnicalDetail({
+    title: '任务说明',
+    entries: [
+      ['任务说明', dashboard.taskTitle],
+      ['任务输入', dashboard.input || '尚未输入'],
+    ],
+  }))
+  titleBlock.append(fullBrief)
   copy.append(element('p', '当前任务', 'eyebrow'), titleBlock)
   const stateChip = element('span', businessStateLabel(), 'state-chip')
   stateChip.dataset.tone = stateTone(dashboard.state)
@@ -1802,11 +1824,19 @@ function renderDashboard() {
   heading.append(copy, status, refreshButton)
   main.append(heading)
 
+  const outputSection = element('section', undefined, 'section business-output')
+  outputSection.append(element('h2', '交付结果'))
+  const outputPanel = element('div', undefined, 'panel')
+  outputPanel.append(element('p', dashboard.output || '尚无输出', 'business-output-text'))
+  outputSection.append(outputPanel)
+  main.append(outputSection)
+
   const statuses = element('dl', undefined, 'detail-grid status-layers')
   for (const [label, value] of [
     ['任务业务状态', dashboard.statusSections.business],
     ['等待 / 收拢状态', dashboard.statusSections.waiting],
     ['连接新鲜度', connectionText()],
+    ['最近业务事件', lastEventAt ? formatPreciseTime(lastEventAt) : '尚无业务事件'],
   ]) {
     const cell = element('div', undefined, 'detail-cell')
     cell.append(element('dt', label), element('dd', value))
@@ -1823,6 +1853,7 @@ function renderDashboard() {
       ['projectKey', explicitScope?.projectKey],
       ['taskId', taskId],
       ['mode', dashboard.mode],
+      ['nextStep', dashboard.nextStep],
       ['error.ownerId', dashboard.error?.ownerId],
       ['error.code', dashboard.error?.code],
       ['error.message', dashboard.error?.message],
@@ -1838,20 +1869,6 @@ function renderDashboard() {
   }))
   main.append(technicalDetail)
 
-  const facts = element('dl', undefined, 'detail-grid')
-  for (const [label, value] of [
-    ['当前状态', dashboard.stateLabel],
-    ['模式', dashboard.mode],
-    ['最近下一步', dashboard.nextStep],
-    ['输入', dashboard.input || '尚未输入'],
-    ['输出', dashboard.output || '尚无输出'],
-    ['最近业务事件', lastEventAt ? formatPreciseTime(lastEventAt) : '尚无业务事件'],
-  ]) {
-    const cell = element('div', undefined, 'detail-cell')
-    cell.append(element('dt', label), element('dd', value))
-    facts.append(cell)
-  }
-  main.append(facts)
   if (dashboard.error) {
     const errorNotice = element('div', undefined, 'status-banner')
     errorNotice.dataset.tone = 'danger'
@@ -1900,11 +1917,13 @@ function renderDashboard() {
       ? `执行授权失败：${taskControlError.message || String(taskControlError)}`
       : grantState
     : ''
-  actionStatus = element('p', `${actionCopy()}${controlNotice ? ` · ${controlNotice}` : ''}`, 'muted')
+  const actionMessage = explicitScope
+    ? '当前范围仅供查看，可阅读任务结果和历史，不提供启动或停止操作。'
+    : `${actionCopy()}${controlNotice ? ` · ${controlNotice}` : ''}`
+  actionStatus = element('p', actionMessage, 'muted')
   actionStatus.setAttribute('role', 'status')
   actionStatus.setAttribute('aria-live', 'polite')
   panel.append(actions, actionStatus)
-  if (explicitScope) panel.append(element('p', '此范围提供只读查看；当前控制接口不接受 projectKey 和 mode。', 'muted'))
   execution.append(panel)
   main.append(execution)
 
@@ -1915,24 +1934,29 @@ function renderDashboard() {
   main.append(renderTaskPlanCurrentSection(planHistoryState, {
     explicitScope,
     conflictSelection: hasPlanSelection(planSelection) ? planSelection : null,
-    onEvidenceRef: (ref) => evidenceTrigger(ref),
+    onOpenDetail: openPlanDetail,
+    onEvidenceRef: (ref, navigation) => evidenceTrigger(ref, navigation),
   }))
 
   // The schedule section exists only when the dashboard read reports a
   // persisted plan; a task without one must not show a schedule surface.
   if (dashboard.plan) main.append(renderTaskPlanSection(dashboard.plan))
 
-  if (explicitScope) {
-    const factsPanel = element('div', undefined, 'panel')
-    factsPanel.append(element('p', `当前 scope：${readScopeLabel(explicitScope)}`, 'scope-line'))
-    main.append(factsPanel)
-  }
-
   const agentSection = renderAgentActivitySection()
   if (agentSection) main.append(agentSection)
 
   main.append(renderSemanticObservationSection())
-  main.append(renderExecutionTraceSection())
+  const traceSection = element('section', undefined, 'section')
+  traceSection.append(element('h2', '执行轨迹'))
+  const traceTrigger = element('button', '查看执行轨迹', 'button button--quiet')
+  traceTrigger.type = 'button'
+  traceTrigger.addEventListener('click', () => {
+    const traceHost = element('div', undefined, 'execution-trace-drawer')
+    renderExecutionTraceInto(traceHost)
+    openTechnicalDetail({ title: '执行轨迹', content: traceHost })
+  })
+  traceSection.append(traceTrigger)
+  main.append(traceSection)
   const observationLink = element('a', '打开只读 Observation', 'button')
   observationLink.href = observationHref(taskId, explicitScope)
   main.append(observationLink)
@@ -1940,10 +1964,15 @@ function renderDashboard() {
 
 /**
  * The task event trace stays available in every perspective. The panel-backed
- * views keep it folded as an explicit detail; `current` keeps its original
- * inline position.
+ * views keep it folded as an explicit detail; the current layer opens the same
+ * shared technical-detail drawer and rerenders it locally for paging.
  */
-function renderExecutionTraceSection() {
+function renderExecutionTraceInto(host) {
+  clearNode(host)
+  host.append(renderExecutionTraceSection(() => renderExecutionTraceInto(host)))
+}
+
+function renderExecutionTraceSection(rerender = renderActiveReadingMode) {
   const events = element('section', undefined, 'section')
   events.append(element('h2', '执行轨迹'))
   const eventPanel = element('div', undefined, 'panel')
@@ -1972,14 +2001,14 @@ function renderExecutionTraceSection() {
       older.disabled = pageStart === 0
       older.addEventListener('click', () => {
         historyPage += 1
-        renderActiveReadingMode()
+        rerender()
       })
       const newer = element('button', '更新', 'button button--quiet')
       newer.type = 'button'
       newer.disabled = historyPage <= 0
       newer.addEventListener('click', () => {
         historyPage -= 1
-        renderActiveReadingMode()
+        rerender()
       })
       pager.append(older, newer)
       eventPanel.append(pager)

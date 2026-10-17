@@ -41,7 +41,7 @@ import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/inde
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import type { ConfiguredProjectCatalog, RuntimePaths } from '../../../config/src/index.js';
 import { resetUiDisplayPreference } from '../../../config/src/index.js';
-import { UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
+import { FileCheckpointStore, UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
 import { UiRuntimeApiError } from './errors.js';
 import { bindUiDisplayPreferenceResource } from './display-preferences.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
@@ -338,6 +338,31 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const providerError = readiness ? providerErrorFromReadiness(readiness) : undefined;
   const attentionPort = new InMemoryAttentionPort();
   const modeRoot = join(options.checkpointRoot, options.mode);
+  const canonicalJournalPath = uiRuntimeControlJournalPath(modeRoot);
+  const canonicalCheckpoints = new FileCheckpointStore(canonicalJournalPath);
+  const canonicalCurrentState = createJsonlRuntimeTaskCurrentStateJournal({
+    journal: new JsonlOrganJournal(canonicalJournalPath),
+  });
+  const hydrateReadFor: NonNullable<NonNullable<UiRuntimeServiceOptions['runtimeComposition']>['hydrateReadFor']> =
+    options.runtimeComposition?.hydrateReadFor ?? (async (scope) => {
+      const latest = await canonicalCheckpoints.readLatest(scope);
+      if (latest === null) return undefined;
+      const { checkpoint } = latest;
+      if (checkpoint.scope.organId.value !== scope.organId.value
+        || checkpoint.scope.taskId?.value !== scope.taskId?.value
+        || checkpoint.scope.cycleId?.value !== scope.cycleId?.value
+        || checkpoint.scope.operationId?.value !== scope.operationId?.value) return undefined;
+      return {
+        checkpoint: {
+          verify: (requestedScope) => canonicalCheckpoints.verify(requestedScope),
+          readLatest: (requestedScope) => canonicalCheckpoints.readLatest(requestedScope),
+          readCommitted: (requestedScope, checkpointId) => canonicalCheckpoints.readCommitted(requestedScope, checkpointId),
+          readExecutionPosition: (requestedScope) => canonicalCheckpoints.readExecutionPosition(requestedScope),
+          readNativeCheckpoint: (requested) => canonicalCheckpoints.readNativeCheckpoint(requested),
+        },
+        currentState: { read: (requestedScope) => canonicalCurrentState.read(requestedScope) },
+      };
+    });
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
   const subscriptionJournalPath = join(modeRoot, 'subscriptions.jsonl');
   const clock = options.now;
@@ -600,7 +625,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.projectCatalog === undefined ? {} : { projectCatalog: options.projectCatalog }),
     subscriptionControl,
     taskIdentity,
-    runtimeComposition: launchComposition,
+    runtimeComposition: { ...launchComposition, hydrateReadFor },
     ...(clock === undefined ? {} : { now: clock }),
   });
   service = runtimeService;

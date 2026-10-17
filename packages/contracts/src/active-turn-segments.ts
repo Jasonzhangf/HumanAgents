@@ -325,6 +325,17 @@ export function validateActiveTurnInitialOpenAnchor(input: unknown): asserts inp
   }
 }
 
+export function validateActiveTurnSegmentInterruptedAnchor(input: unknown): asserts input is ActiveTurnSegmentInterruptedAnchor {
+  assertPlainObject(input, 'segment interrupted anchor');
+  validateJournalCommitRef(input.openedCommitRef as JournalCommitRef);
+  validateJournalCommitRef(input.recordsThroughCommitRef as JournalCommitRef);
+  const openedCommitRef = input.openedCommitRef as JournalCommitRef;
+  const recordsThroughCommitRef = input.recordsThroughCommitRef as JournalCommitRef;
+  if (recordsThroughCommitRef.journalSeq < openedCommitRef.journalSeq) {
+    throw new ContractError('segment interrupted anchor recordsThroughCommitRef cannot precede its openedCommitRef');
+  }
+}
+
 /**
  * Enforce the exclusive-or predecessor link. The captured branch carries the exact
  * J1 recovery-assets receipt that closed the predecessor; the interrupted branch
@@ -340,8 +351,7 @@ export function validateActiveTurnSegmentPredecessorRef(input: unknown): asserts
   const hasReceipt = input.recoveryAssetsReceiptRef !== undefined;
   const hasInterrupted = input.interrupted !== undefined;
   const hasInitialOpen = input.initialOpen !== undefined;
-  const predecessorFacts = [hasReceipt, hasInterrupted, hasInitialOpen].filter(Boolean).length;
-  if (predecessorFacts !== 1) {
+  if ((hasReceipt ? 1 : 0) + (hasInterrupted ? 1 : 0) + (hasInitialOpen ? 1 : 0) !== 1) {
     throw new ContractError('segment predecessor requires exactly one of a recovery receipt, interrupted anchor, or initial-open anchor');
   }
   if (hasReceipt) {
@@ -349,9 +359,7 @@ export function validateActiveTurnSegmentPredecessorRef(input: unknown): asserts
     return;
   }
   if (hasInterrupted) {
-    assertPlainObject(input.interrupted, 'segment predecessor interrupted anchor');
-    validateJournalCommitRef(input.interrupted.openedCommitRef as JournalCommitRef);
-    validateJournalCommitRef(input.interrupted.recordsThroughCommitRef as JournalCommitRef);
+    validateActiveTurnSegmentInterruptedAnchor(input.interrupted);
     return;
   }
   validateActiveTurnInitialOpenAnchor(input.initialOpen);
@@ -365,9 +373,7 @@ export function validateActiveTurnSegmentRecoveryReceiptRead(input: unknown): as
     return;
   }
   if (input.status === 'interrupted') {
-    assertPlainObject(input.anchor, 'segment recovery receipt interrupted anchor');
-    validateJournalCommitRef(input.anchor.openedCommitRef as JournalCommitRef);
-    validateJournalCommitRef(input.anchor.recordsThroughCommitRef as JournalCommitRef);
+    validateActiveTurnSegmentInterruptedAnchor(input.anchor);
     return;
   }
   if (input.status === 'initial-open') {
@@ -417,7 +423,6 @@ export function validateActiveTurnSegmentChainInitial(input: unknown): asserts i
   }
   throw new ContractError('segment chain initial kind is invalid');
 }
-
 export function validateOriginalBusinessTurnRef(input: unknown): asserts input is OriginalBusinessTurnRef {
   assertPlainObject(input, 'original business turn ref');
   assertNonEmptyString(input.businessTurnId, 'original business turn businessTurnId');

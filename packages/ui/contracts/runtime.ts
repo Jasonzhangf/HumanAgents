@@ -15,6 +15,8 @@ import type {
 import type { CanonicalContextEvent } from '../../context-events/src/index.js';
 import type { TaskDetailProjection } from './models.js';
 import type { RuntimeTaskPlanHistoryProjection } from './task-plan-history.js';
+import type { RuntimeCheckpointFilter } from './checkpoint-history.js';
+export type { RuntimeCheckpointFilter } from './checkpoint-history.js';
 
 export type { TaskDetailProjection };
 
@@ -305,6 +307,36 @@ export interface RuntimeTaskCheckpointProjection {
   readonly committedAtUnavailableReason?: string;
 }
 
+export interface PublicOutputCommitProjection {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+  readonly text: string;
+}
+
+export interface PublicOutputPublicationProjection {
+  readonly state: 'pending' | 'committed' | 'unavailable' | 'unknown';
+  readonly commits: readonly PublicOutputCommitProjection[];
+  readonly publicCommitWatermark?: number;
+}
+
+export interface TaskRuntimeIncarnationProjection {
+  readonly runtimeId: string;
+  readonly generation: number;
+  readonly agentInstanceId?: string;
+  readonly roleId?: string;
+  readonly taskId: TaskId;
+  readonly assignmentId?: string;
+  readonly executionEpoch?: number;
+  readonly capabilities?: readonly string[];
+  readonly unavailable?: string;
+}
+
+export interface RuntimePoolAvailabilityProjection {
+  readonly state: 'available' | 'unavailable' | 'unknown';
+  readonly reason?: string;
+}
+
 export interface RuntimeReadFailure {
   readonly code: string;
   readonly ownerId: string;
@@ -419,36 +451,6 @@ export interface RuntimeTaskRecordsProjection {
   readonly raw: readonly RuntimeRawRecordProjection[];
   readonly nextCursor?: string;
   readonly hasMore: boolean;
-}
-
-export interface PublicOutputCommitProjection {
-  readonly commitId: string;
-  readonly journalSeq: number;
-  readonly recordDigest: string;
-  readonly text: string;
-}
-
-export interface PublicOutputPublicationProjection {
-  readonly state: 'pending' | 'committed' | 'unavailable' | 'unknown';
-  readonly commits: readonly PublicOutputCommitProjection[];
-  readonly publicCommitWatermark?: number;
-}
-
-export interface TaskRuntimeIncarnationProjection {
-  readonly runtimeId: string;
-  readonly generation: number;
-  readonly agentInstanceId?: string;
-  readonly roleId?: string;
-  readonly taskId: TaskId;
-  readonly assignmentId?: string;
-  readonly executionEpoch?: number;
-  readonly capabilities?: readonly string[];
-  readonly unavailable?: string;
-}
-
-export interface RuntimePoolAvailabilityProjection {
-  readonly state: 'available' | 'unavailable' | 'unknown';
-  readonly reason?: string;
 }
 
 export interface RuntimeTaskErrorProjection {
@@ -579,12 +581,6 @@ export interface RuntimeAgentActivityProjection {
   readonly unknown: readonly RuntimeAgentActivityEntryProjection[];
   readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
 }
-
-export type RuntimeCheckpointFilter =
-  | 'directiveRevision'
-  | 'executionEpoch'
-  | 'cycleId'
-  | 'occurrenceRef';
 
 export interface RuntimeContextViewProjection {
   readonly contextViewRef: string;

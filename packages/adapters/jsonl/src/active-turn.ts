@@ -822,7 +822,7 @@ function segmentAnchorOf(
   records: readonly JournalRecord[],
   businessTurnId: string,
   segmentId: string,
-): { readonly openedCommitRef: JournalCommitRef; readonly recordsThroughCommitRef: JournalCommitRef } | null {
+): ActiveTurnSegmentInterruptedAnchor | null {
   const openedRecord = records.find((candidate) => candidate.commitId === activeTurnSegmentCommitId(segmentId, 'segment-opened'));
   if (openedRecord === undefined) return null;
   const opened = decodeSegmentOpened(openedRecord);
@@ -856,7 +856,6 @@ function retiredSegmentIds(records: readonly JournalRecord[], businessTurnId: st
   for (const segment of chain) retired.add(segment.predecessor.segmentId);
   return retired;
 }
-
 /**
  * The durable anchor of an original turn that opened in v1: the real
  * `binding-opened` commit and the last committed `active-turn:<businessTurnId>:*`
@@ -1109,25 +1108,8 @@ export class JsonlActiveTurnSegmentJournal {
         }
 
         // The predecessor must be the current committed chain tail.
-        const chain = decodeSegmentChain(records, this.businessTurnId);
-        const tail = chain.length === 0 ? undefined : chain[chain.length - 1];
-        const expectedPredecessor = tail ? tail.segmentId : this.businessTurnId;
-        if (record.predecessor.segmentId !== expectedPredecessor) {
-          throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
-        }
-        const predecessor = record.predecessor;
-        if (predecessor.interrupted !== undefined) {
-          // An interrupted predecessor must still name the real opened segment
-          // and its exact record tail; the anchor is re-derived under the lock.
-          const anchor = segmentAnchorOf(records, this.businessTurnId, predecessor.segmentId);
-          if (anchor === null) {
-            throw new JournalIntegrityError('segment-opened interrupted predecessor is not an opened committed segment');
-          }
-          if (!sameCommitRef(anchor.openedCommitRef, predecessor.interrupted.openedCommitRef)
-            || !sameCommitRef(anchor.recordsThroughCommitRef, predecessor.interrupted.recordsThroughCommitRef)) {
-            throw new JournalIntegrityError('segment-opened interrupted anchor does not match the committed predecessor facts');
-          }
-        } else if (predecessor.initialOpen !== undefined) {
+        if (record.predecessor.initialOpen !== undefined) {
+          const chain = decodeSegmentChain(records, this.businessTurnId);
           // The initial-open predecessor must still be the unsaved original turn
           // with no resumed segment yet; the anchor is re-derived under the lock
           // and must equal the supplied anchor exactly. The App's held-transaction
@@ -1135,19 +1117,40 @@ export class JsonlActiveTurnSegmentJournal {
           if (chain.length !== 0) {
             throw new JournalIntegrityError('segment-opened initial-open predecessor requires the unsaved original turn');
           }
-          if (predecessor.segmentId !== this.businessTurnId) {
+          if (record.predecessor.segmentId !== this.businessTurnId) {
             throw new JournalIntegrityError('segment-opened initial-open predecessor must name the original business turn');
           }
           const anchor = initialOpenAnchorOf(records, this.businessTurnId);
           if (anchor === null) {
             throw new JournalIntegrityError('segment-opened initial-open predecessor is not a committed original turn');
           }
-          if (!sameCommitRef(anchor.bindingCommitRef, predecessor.initialOpen.bindingCommitRef)
-            || !sameCommitRef(anchor.recordsThroughCommitRef, predecessor.initialOpen.recordsThroughCommitRef)) {
+          if (anchor.bindingCommitRef.commitId !== record.predecessor.initialOpen.bindingCommitRef.commitId
+            || anchor.bindingCommitRef.journalSeq !== record.predecessor.initialOpen.bindingCommitRef.journalSeq
+            || anchor.bindingCommitRef.recordDigest !== record.predecessor.initialOpen.bindingCommitRef.recordDigest
+            || anchor.recordsThroughCommitRef.commitId !== record.predecessor.initialOpen.recordsThroughCommitRef.commitId
+            || anchor.recordsThroughCommitRef.journalSeq !== record.predecessor.initialOpen.recordsThroughCommitRef.journalSeq
+            || anchor.recordsThroughCommitRef.recordDigest !== record.predecessor.initialOpen.recordsThroughCommitRef.recordDigest) {
             throw new JournalIntegrityError('segment-opened initial-open anchor does not match the committed initial turn facts');
           }
+        } else if (record.predecessor.interrupted !== undefined) {
+          const expectedPredecessor = decodeSegmentChain(records, this.businessTurnId).at(-1);
+          if (expectedPredecessor === undefined || record.predecessor.segmentId !== expectedPredecessor.segmentId) {
+            throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+          }
+          const anchor = segmentAnchorOf(records, this.businessTurnId, record.predecessor.segmentId);
+          if (anchor === null) {
+            throw new JournalIntegrityError('segment-opened interrupted predecessor is not a committed segment');
+          }
+          if (!sameCommitRef(anchor.openedCommitRef, record.predecessor.interrupted.openedCommitRef)
+            || !sameCommitRef(anchor.recordsThroughCommitRef, record.predecessor.interrupted.recordsThroughCommitRef)) {
+            throw new JournalIntegrityError('segment-opened interrupted anchor does not match the committed segment facts');
+          }
         } else {
-          assertPredecessorReceiptRef(records, predecessor.recoveryAssetsReceiptRef);
+          const expectedPredecessor = decodeSegmentChain(records, this.businessTurnId).at(-1)?.segmentId ?? this.businessTurnId;
+          if (record.predecessor.segmentId !== expectedPredecessor) {
+            throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+          }
+          assertPredecessorReceiptRef(records, record.predecessor.recoveryAssetsReceiptRef);
         }
         this.verifyPredecessorReceipt?.(records, record.predecessor);
         return { kind: 'append' as const, scope: record.binding.scope, commitId: input.commitId };

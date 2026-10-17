@@ -196,4 +196,3 @@ test('G14 the asset body GET addresses the exact checkpoint and selector, never 
     }
   }
 })
-

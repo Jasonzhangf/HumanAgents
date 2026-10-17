@@ -120,6 +120,7 @@ export function labelOf(type: ContextEventType): string {
  */
 export function allowedStatusOf(type: ContextEventType): readonly ContextEventStatus[] {
   const allowed: ContextEventStatus[] = [defaultStatusOf(type), SUPERSEDED_STATUS];
+  if (type === 'operation.started') allowed.push('completed');
   for (const rule of PAIRING_RULES) {
     if (rule.open === type && !allowed.includes(rule.closedStatus)) allowed.push(rule.closedStatus);
   }
