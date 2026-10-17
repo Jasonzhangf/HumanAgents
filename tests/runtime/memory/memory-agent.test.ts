@@ -939,7 +939,7 @@ test('memory agent auto=false returns proposal-only; auto=true delegates a CAS u
   assert.deepEqual(calls, ['apply']);
 });
 
-test('memory agent analysis applies a typed project patch only when auto update is enabled', async () => {
+test('memory agent analysis returns a typed project proposal without applying updates', async () => {
   const calls: ProjectSourceUpdateProposal[] = [];
   const make = (autoUpdate: boolean) => bind(new MemoryAgent({
     projectKey: 'project-a',
@@ -978,15 +978,19 @@ test('memory agent analysis applies a typed project patch only when auto update 
   assert.equal(proposalOnly.status, 'ready');
   if (proposalOnly.status !== 'ready') throw new Error('expected proposal-only analysis');
   assert.equal(proposalOnly.value.proposal?.patchRef, 'project-agents-next');
+  assert.equal(proposalOnly.value.proposal?.patchDigest, `sha256:${'a'.repeat(64)}`);
   assert.equal(proposalOnly.value.projectUpdate, undefined);
   assert.equal(calls.length, 0);
 
-  const applied = await make(true).analyze(request);
-  assert.equal(applied.status, 'ready');
-  if (applied.status !== 'ready') throw new Error('expected automatic project update');
-  assert.equal(applied.value.projectUpdate?.updated, true);
-  assert.equal(applied.value.projectUpdate?.patchDigest, `sha256:${'a'.repeat(64)}`);
-  assert.equal(calls.length, 1);
+  const proposalWithAutoEnabled = await make(true).analyze(request);
+  assert.equal(proposalWithAutoEnabled.status, 'ready');
+  if (proposalWithAutoEnabled.status !== 'ready') {
+    throw new Error('expected proposal-only analysis with auto update enabled');
+  }
+  assert.equal(proposalWithAutoEnabled.value.proposal?.patchRef, 'project-agents-next');
+  assert.equal(proposalWithAutoEnabled.value.proposal?.patchDigest, `sha256:${'a'.repeat(64)}`);
+  assert.equal(proposalWithAutoEnabled.value.projectUpdate, undefined);
+  assert.equal(calls.length, 0);
 });
 
 test('memory agent reports durable update publication failures as attention', async () => {

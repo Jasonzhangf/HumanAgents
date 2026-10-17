@@ -1444,7 +1444,7 @@ export class MemoryAgent {
             if (
               relations.some((relation) => relation.relation === 'unknown')
               || successRelations.some((relation) => relation.relation === 'unknown')
-              || relations.some((relation) => relation.relation === 'same')
+              || relations[2]?.relation === 'same'
               || successRelations.some((relation) => relation.relation !== 'same')
             ) {
               analysisAttention = {
@@ -1645,15 +1645,6 @@ export class MemoryAgent {
         }
         proposal = this.projectUpdateProposal(input, projectSources, updateTarget);
       }
-      let projectUpdate: MemorySourceUpdateReceipt | undefined;
-      if (proposal !== undefined && this.options.autoUpdate) {
-        const update = await this.applyProjectUpdate({
-          proposal,
-          projectKey: input.projectKey,
-        });
-        if (update.status !== 'ready') return update;
-        projectUpdate = update.value;
-      }
       return {
         status: 'ready',
         value: {
@@ -1661,7 +1652,6 @@ export class MemoryAgent {
           submission,
           projectSources,
           ...(proposal === undefined ? {} : { proposal }),
-          ...(projectUpdate === undefined ? {} : { projectUpdate }),
           liveContextMutated: false,
           promptSnapshot,
         },

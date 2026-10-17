@@ -4,6 +4,7 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
+  mountSemanticObservationPanel,
   openTechnicalDetail,
   renderPageError,
   renderRuntimeStatus,
@@ -106,6 +107,12 @@ let currentScopeRef
 let currentFrames = []
 let currentHandoffs = []
 let runtimeMode = ''
+
+// One shared panel survives flow redraws and node selection. The retained host
+// element is re-attached on each render, so an EventSource is not torn down
+// just because the page re-renders the rest of Observation.
+let semanticObservationPanel = null
+let semanticObservationHost = null
 
 // Only `ownerAgentRole` (typed contract field) attributes a node. Anything else, including an
 // unrecognised role, stays in the explicit "归属未投影" band.
@@ -834,6 +841,8 @@ function renderObservation(projection) {
   const agentSection = renderAgentActivitySection(projection)
   if (agentSection) main.append(agentSection)
 
+  main.append(renderSemanticObservationSection())
+
   const flowSection = element('section', undefined, 'flow-section')
   const flowHead = element('header', undefined, 'section-head')
   flowHead.append(
@@ -875,6 +884,22 @@ function renderObservation(projection) {
       selected,
     )
   }
+}
+
+function renderSemanticObservationSection() {
+  if (!semanticObservationPanel) {
+    semanticObservationHost = element('div', undefined, 'semantic-observation-host')
+    semanticObservationHost.dataset.semanticObservationHost = taskId ? 'task' : 'missing'
+    if (taskId) {
+      semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, { taskId })
+    } else {
+      semanticObservationHost.append(element('p', '当前 URL 没有 task 参数，无法读取语义观测。', 'empty'))
+    }
+  }
+  const section = element('section', undefined, 'section semantic-observation-section')
+  section.dataset.semanticObservation = semanticObservationPanel ? 'mounted' : 'unavailable'
+  section.append(semanticObservationHost)
+  return section
 }
 
 function renderLegend() {
@@ -955,5 +980,8 @@ void (async () => {
 })()
 
 window.addEventListener('pagehide', () => {
+  semanticObservationPanel?.dispose()
+  semanticObservationPanel = null
+  semanticObservationHost = null
   disposeDisplayPreference()
 })
