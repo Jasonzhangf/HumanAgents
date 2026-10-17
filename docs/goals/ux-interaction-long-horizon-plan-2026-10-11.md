@@ -29,9 +29,11 @@
 
 - 任务授权：后端 `69c3aa87`、前端 `ff534a21`。正式 Task 导航保留完整 scope，用户明确进入共享控制抽屉；后端确认当前绑定目标，UI 将已记录命令与最新读回分开。main 缺入口的有效红测、错误项目实际写入的红测、非零 revision 错写为 0 的失败反例均已取得；正确来源及组合后公开 HTTP、双端浏览器通过。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-task-grant-entry-20261017/root-final-reception.md` 与相邻 `task-control-target-20261017/root-reception.md`。两来源树已收口。
 - 两个带 Task 项目的公开读取：`67507112`。复用原 TCP consumer 和正式 Config catalog，两个项目使用同一 TaskId、不同正文和 TaskIdentity 来源，系统/项目计数与下钻一致；A 的断言实际拒绝 B 的公开响应，GET 前后任务及相关文件未改变。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-task-bearing-projects-execute-20261017/root-reception.md`。来源树已收口；该证明不包含两个项目的活跃执行。
-- I2 scope 基础：来源 `2f788ad3`、组合 `2f92fe91`。六类历史投影保留可选 scope，不匹配 TaskId 显式失败，旧无 scope 调用不变。合法编译后取得投影丢失 scope 的实际 Node 红测，实现及组合后同用例通过。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-i2-foundation-execute-20261017/root-reception.md`。来源树已收口；跨项目 App reader 和浏览器消费尚未完成。
+- I2 scope 基础：来源 `2f788ad3`、组合 `2f92fe91`。六类历史投影保留可选 scope，不匹配 TaskId 显式失败，旧无 scope 调用不变。合法编译后取得投影丢失 scope 的实际 Node 红测，实现及组合后同用例通过。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-i2-foundation-execute-20261017/root-reception.md`。来源树已收口；后续 App 与浏览器状态见下两项。
+- I2 App scoped reader：`cb1fd426` 已正常合入唯一 native candidate。六类入口通过正式 Config、mode root、canonical control Journal 和 TaskIdentity 确定归属；未绑定 live runtime 时显示当前位置未知，旧无 scope 入口保持原行为。原 HTTP consumer 在有效跨项目历史读取上取得 404 与预期 200 的红测，实现后及组合后通过。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-i2-app-execute-20261017/root-final-reception.md`。来源树已收口；尚未安装到 main。
+- I2 浏览器 scoped history：来源 `b0520813` 已提交并交给 native owner 等待正常合流。正式 System→Project→Task 路径保留 scope；拒绝其他项目记录和非所选巡检轮次；当前/查看历史分离；技术字段按需展开。桌面/手机消费者最终 36 项通过；移除配对判断时，两端错误显示 occ-stale 且断言失败，恢复后通过。重复的通用错误技术弹层测试已消融。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-i2-browser-execute-20261017/root-final-reception.md`。来源树保留至组合通过；不扩称生产巡检或 live 已完成。
 
-当前分工：UX owner 已按独立设计 READY 并发派出 I2 App 与浏览器两路 GCM。App 只写 I2 reader/service/server 和原 HTTP consumer；UI 只写三个公共浏览器模块和原页面 consumer。两路从已合流的合同基础出发，先取得真实断言红测，再实现并用同消费者转绿，不扩大到 Runtime、Memory 或 Provider。原生 owner 继续 App 准入、多轮、冷恢复、并发任务、真实 Provider 和首个完整 milestone 的标准 main/build/restart/live/push。I2 尚未完成只阻塞其真实下游，不给其他已闭合增量增加全局门禁。两路当前活动树由各自 owner 保留至正常合流或明确失败收口，历史及其他 owner 的资源不随本计划宣称清理。
+当前分工：I2 App 作者实现及组合验证已完成；UI 作者实现和双端消费者已完成，等待唯一 candidate 先处理冷恢复合流，再正常组合 UI 并运行同一消费者。UX owner 并发补齐巡检定义正式来源的事实与剩余 ready 工作，独立 Planner 正修正 TaskFlow intake 保真计划；原先包含猜测类型、路径和 closed-turn 后执行的 producer 方案不采用。后续实现仍需编码前独立设计审阅。原生 owner 继续 App 准入、多轮、冷恢复、并发任务、真实 Provider 和首个完整 milestone 的标准 main/build/restart/live/push。巡检后续只阻塞其真实下游，不给其他已闭合增量增加全局门禁。各来源树在正常合流和接收组合证据后由原 owner 收口，历史及其他 owner 的资源不随本计划宣称清理。
 
 ### 2026-10-14 当前执行入口
 
