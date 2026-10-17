@@ -1,5 +1,10 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 最新接收：I2 App 与冷恢复定位
+
+- I2 App 来源 `cb1fd426` 已正常无冲突合入唯一候选 `05c2cf5f`，4 files：i2-history/service/server/原 public consumer。宿主组合 tests/app tsc exit0，`scoped I2 public HTTP` 原用例 1/1 PASS，证明同 TaskId 按 canonical project/mode 隔离历史。已通知 UX owner 正常收口其来源树；UI 继续独立推进。未声称 main/安装/真实 RCC 完成。
+- 冷恢复仍为原 RED：`text-only-NggQrO` 的第二进程 resume409，`missing review agent prompt segments`。r227 GCM 网络流重连5次后失败，未取得定位；已按执行/观察后备规则启动 Flash r228。r225 交付计划因旧模型名、child 类型混淆、安装验证和清理顺序缺口退回同 Planner r229 修订。无新冷恢复产品 patch；总目标 ACTIVE / INCOMPLETE。
+
 ## 2026-10-17 当前调度续接（r189）
 
 完整目标 ACTIVE / INCOMPLETE。以下为当前任务事实，不将 worker 数或候选源码计作已交付能力。
