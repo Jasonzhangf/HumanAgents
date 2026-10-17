@@ -125,6 +125,7 @@ import {
   type RuntimeExplicitBrainJournalState,
   type RuntimeExecutionCapabilities,
   type RuntimeTaskAssembly,
+  type RuntimeTaskCoordinatorOptions,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 // The declared silence budget is owned by the agent-io policy. The dashboard
@@ -421,6 +422,7 @@ export interface UiRuntimeServiceOptions {
     readonly journalRoot: string;
   };
   readonly runtimeComposition?: {
+    readonly hydrateReadFor?: RuntimeTaskCoordinatorOptions['hydrateReadFor'];
     readonly createTaskAssembly?: (input: {
       readonly task: import('../../../contracts/src/index.js').Task;
       readonly scope: import('../../../contracts/src/index.js').ScopeRef;
@@ -1545,6 +1547,9 @@ export class UiRuntimeService {
             },
           }),
       ...(options.runtimeComposition === undefined ? {} : {
+        ...(options.runtimeComposition.hydrateReadFor === undefined ? {} : {
+          hydrateReadFor: options.runtimeComposition.hydrateReadFor,
+        }),
         ...(options.runtimeComposition.createTaskAssembly === undefined ? {} : {
           createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!({
             task: input.task,
