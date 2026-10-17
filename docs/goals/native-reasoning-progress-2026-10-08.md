@@ -2,6 +2,9 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- RCC旧请求取证已闭合为证据不足，不是修复：r263整理exit0；r264独立OAuth接受零请求定点提取；r266一次读取目标日志取得6条exact request/execution/port/connection记录。20:36:36.933Z response200后socket_write150bytes、同毫秒Body stream error、.934Z关闭；完整记录无inner cause/body/frame/artifact引用，不能确认根因或owner。r266/exact-records.jsonl与result.md保留；旧日志不再重搜。旧新business input/instructions/tools相同，只有sourceRef身份不同。r267独立Gemini4medium规划新隔离取证（最多一次Interpret，尚未执行），不改产品/RCC/模型；r265 GCM并行校准A–G当前缺代码与缺证据，未新建产品writer。
+- UX图源58039143只有三族9个图文件，正常合唯一candidate；复用owner三图validate/inspect/binding有效结果，不重复检查。owner已关闭原树；共享契约GCM独占inspection-delivery-contract-20261017开始，实现inspectionDelivery/acceptedPlan/InspectionAcceptedCheckPort，后继持久层与manager等待该明确接口。UX文档80566366已从origin/main正常合candidate。以上候选基础不计完整producer交付。
+
 - r261实际16个C1/C2 metadata单字段删除/错值反例均由对应断言拒绝，原cold通过后却未来意图退出，临时循环未删，不计完成；r262复用原树删除临时代码，最终仅两次helper await，专用tsc0、installed原cold1/1 PASS（seed30950/serve32675、同业务turn/epoch3→4/Plannercomplete/effects27）。宿主正常提交9a088896并合唯一candidate。先前候选installed五公开consumer已实际5/5 PASS，session90607，证据installed-cold-composed-20261017.txt。来源clean、worker和上述测试PID消失、成功fixture absent后normal remove/prune/pathabsent完成；无新增来源树。尚未整体producer milestone Review/main产品交付。
 - r260观察扩到无关历史文件搜索，父精确TERM79175并确认退出；不接其未完成观察为根因证据。r263 fresh GCM只准读取r260/r258两个run整理已取得事实，不再外扩搜索、不重发模型请求。RCC断流根因继续UNKNOWN；本次一次Interpret预算已用，未转B或改schema。
 
