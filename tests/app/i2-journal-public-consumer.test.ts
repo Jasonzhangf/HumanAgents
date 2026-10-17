@@ -28,7 +28,8 @@ import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/task-plan-revisions.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { createJsonlI2JournalPort, I2_JOURNAL_PAYLOAD_KIND } from '../../packages/app/src/i2-journal.js';
-import { buildFakeExecutionPort, UiRuntimeService } from '../../packages/app/src/ui-runtime/index.js';
+import { buildFakeExecutionPort, FakeReplayExecutionRuntimePort, UiRuntimeService } from '../../packages/app/src/ui-runtime/index.js';
+import { APP_CHILD_CALL_TOOL, APP_CHILD_ADOPT_TOOL, appChildInvocationId, createAppChildProducer } from '../../packages/app/src/ui-runtime/child-producer.js';
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import {
@@ -46,6 +47,20 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { createReviewAssignments } from '../../packages/runtime/src/review/index.js';
+import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import { ProviderAgentDriver } from '../../packages/adapters/provider/src/index.js';
+import type {
+  ProviderSubmitInput,
+  ProviderStartInput,
+  ProviderObserveInput,
+  ProviderEvent,
+  ProviderToolCall,
+  ExecutionRuntimePort,
+} from '../../packages/contracts/src/index.js';
+import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
+import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
+import { filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/evidence.js';
+import type { StandardTurnEndOwnerPort } from '../../packages/app/src/ui-runtime/standard-turn-control.js';
 
 // Probability UNKNOWN; the physical I2JournalPort adapter had no public consumer.
 // A wrong binding or a fabricated receipt can publish false history or accept a
@@ -497,6 +512,255 @@ async function singleCallFixture() {
     async cleanup() { const disposed = await pool.dispose(); assert.equal(disposed.status, 'disposed'); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+// Concurrent child work exceeds the single real pool slot. The missing typed
+// error aborts the active parent turn instead of permitting a fresh model call.
+// Cost: one bounded case using the existing manager/Journal/assets fixture.
+test('capacity wait continues the active driver turn with a fresh model call after sibling release and adopts both results', async () => {
+  const f = await singleCallFixture();
+  try {
+    const first = await f.execution('capacity-sibling');
+
+    const root = await mkdtemp(join(await (async () => {
+      const base = process.env.HUMANAGENT_SINGLE_CALL_FIXTURE_ROOT
+        ?? '/Users/fanzhang/.humanagent/test-fixtures/ux-i0-single-call-20261013';
+      await mkdir(base, { recursive: true });
+      return base;
+    })(), 'capacity-driver-'));
+    try {
+      const taskScope: TaskScope = { organId, taskId: id('task', 'capacity-driver-task') };
+      const scope: ScopeRef = { ...taskScope, cycleId: id('cycle', 'capacity-driver-cycle') };
+      const acceptanceWork = { ...first.assignment, assignmentId: 'capacity-parent', taskId: taskScope.taskId };
+      const assignment: WorkAssignment = {
+        ...first.assignment,
+        assignmentId: 'capacity-parent',
+        taskId: taskScope.taskId,
+        acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(acceptanceWork)),
+      };
+      const execution = { runtimeId: 'capacity-parent-runtime', taskId: taskScope.taskId,
+        operationId: id('operation', 'capacity-parent-operation'), executionEpoch: 1 };
+      const evidence = { evidenceId: id('evidence', 'capacity-sibling-output'), kind: 'execution' as const,
+        source: 'capacity-public-consumer', locator: 'capacity-sibling-output', scope };
+      const admittedTurn = {
+        turnId: 'capacity-parent-turn', workAssignmentRef: assignment.assignmentId, taskRef: taskScope.taskId,
+        scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1,
+        executionEpoch: 1, runtimeBindingRef: 'capacity-parent-binding', permissionRevision: 'capacity-parent-permission',
+        admissionEvidenceRefs: ['capacity-admission'], currentTurnRef: 'active-turn://capacity-parent-turn',
+        recoveryStateRef: 'capacity-recovery',
+      };
+      const activeJournal = createJsonlActiveTurnJournal({ filePath: join(root, 'organ.jsonl'), turnId: admittedTurn.turnId });
+      const parent = await ActiveTurnContext.open({ journal: activeJournal, currentTurnRef: admittedTurn.currentTurnRef,
+        binding: { admittedTurn, assignment, execution, scope } });
+      const assets = new ImmutableAssetStore(join(root, 'assets'));
+      const preCalls: string[] = [];
+      let childExecutions = 0;
+      const childDeliveryRefs: string[] = [];
+      const childDeliveries = new Map<string, typeof evidence>();
+      const producer = createAppChildProducer({
+        manager: f.manager,
+        parent,
+        parentAssignment: assignment,
+        checkpoints: {
+          async pre(input) {
+            preCalls.push(input.call.invocationId);
+            const checkpointId = id('checkpoint', `capacity-pre-${input.call.invocationId.replace(/[^A-Za-z0-9._-]/g, '-')}`);
+            const commitRef = { commitId: checkpointId.value, journalSeq: 1, recordDigest: digestOf(checkpointId.value) };
+            return { commitRef,
+              checkpoint: { id: checkpointId, scope: input.selected.scope, cycleId: input.selected.scope.cycleId!,
+                seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 1, outcome: 'waiting',
+                summary: 'capacity pre-call checkpoint', recoveryStateRef: evidence, evidenceRefs: [evidence],
+                next: { kind: 'wait', ref: checkpointId.value } }, previous: null };
+          },
+          async post(input) {
+            const checkpointId = id('checkpoint', `capacity-post-${input.returned.invocationId.replace(/[^A-Za-z0-9._-]/g, '-')}`);
+            const commitRef = { commitId: checkpointId.value, journalSeq: 1, recordDigest: digestOf(checkpointId.value) };
+            return { commitRef,
+              checkpoint: { id: checkpointId, scope: input.returned.scope, cycleId: input.returned.scope.cycleId!,
+                seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 1, outcome: 'succeeded',
+                summary: 'capacity post-call checkpoint', recoveryStateRef: evidence, evidenceRefs: [evidence],
+                next: { kind: 'continue', ref: checkpointId.value } }, previous: null };
+          },
+        },
+        refinedDeliveryStore: {
+          async store(input) {
+            const reference = await assets.write(`capacity-refined-${input.invocationId.replace(/[^A-Za-z0-9._-]/g, '-')}`, input.bytes);
+            return { ref: { evidenceId: id('evidence', reference.assetId), kind: 'operation', source: 'capacity-public-consumer',
+              locator: reference.locator, digest: reference.digest, scope: input.scope }, view: { kind: 'utf8-text' } };
+          },
+          async read(asset) {
+            if (asset.ref.digest === undefined) throw new Error('capacity refined asset requires its digest');
+            return assets.readByDigest(asset.ref.evidenceId.value, asset.ref.digest);
+          },
+        },
+        bodyAssets: {
+          target(input) { return `capacity-child/${input.invocationId}/${input.kind}`; },
+          async write(input) {
+            const assetId = `capacity-body-${input.invocationId.replace(/[^A-Za-z0-9._-]/g, '-')}-${input.kind}`;
+            const reference = await assets.write(assetId, new TextEncoder().encode(input.body));
+            const ref = { evidenceId: id('evidence', assetId), kind: 'execution' as const, source: 'capacity-public-consumer',
+              locator: reference.locator, digest: reference.digest, scope: input.scope };
+            childDeliveries.set(reference.locator, ref);
+            childDeliveryRefs.splice(0, childDeliveryRefs.length, reference.locator);
+            return { ref, view: { kind: 'utf8-text' } };
+          },
+          async read(asset) {
+            if (asset.ref.digest === undefined) throw new Error('capacity body asset requires its digest');
+            return assets.readByDigest(asset.ref.evidenceId.value, asset.ref.digest);
+          },
+        },
+        bindChildRun: async ({ incarnation, scope: childScope, request }) => {
+          const childAssignment = request.kind === 'execution' ? request.input.assignment : request.input.workerAssignment;
+          const standardEndOwner: StandardTurnEndOwnerPort = {
+            async resolveBoundTurn() { return { turnId: `capacity-child-${incarnation.agentInstanceId}`, workAssignmentRef: childAssignment.assignmentId,
+              taskRef: childAssignment.taskId, scopeRef: childScope, cycleRef: childScope.cycleId!, inputRevision: childAssignment.inputRevision,
+              directiveRevision: childAssignment.inputRevision, executionEpoch: childAssignment.executionEpoch,
+              runtimeBindingRef: 'capacity-child-binding', permissionRevision: 'capacity-child-permission' }; },
+            async resolveDelivery({ deliveryRefs }) { return deliveryRefs.map((ref) => {
+              const resolved = childDeliveries.get(ref);
+              if (!resolved) throw new Error(`unknown child delivery ${ref}`);
+              return resolved;
+            }); },
+          };
+          return {
+            native: {
+              rawEvidence: filesystemProviderEvidenceSink(assets),
+              acceptRawFact: async (envelope) => ({ seq: 1, envelope }),
+              registerRequest: async (registration) => registration.record,
+              requestContext: async () => ({ canonical: { units: [] } }),
+            },
+            toolDefinitions: [],
+            toolExecution: { async execute() { throw new Error('capacity child has no business tools'); } },
+            standardEndOwner,
+            control: { async accept() {}, async running() {}, async settle() {} },
+          };
+        },
+        prepareAgentProvider: async (selection) => ({
+          configuredAgentId: selection.configuredAgentId, roleId: selection.roleId, source: 'http' as const,
+          provider: { source: 'http', provider: 'http', binding: 'capacity-child', protocol: 'responses',
+            model: 'capacity-child-model', route: 'default', baseUrl: 'http://127.0.0.1:9' },
+          binding: { bindingId: 'capacity-child', providerId: 'http', protocol: 'responses', endpointRef: 'http:127.0.0.1:9',
+            modelRef: 'capacity-child-model', configDigest: digestOf('capacity-child-config'), capabilityDigest: digestOf('capacity-child-capability') },
+          port: new FakeReplayExecutionRuntimePort({
+            binding: { bindingId: 'capacity-child', providerId: 'http', protocol: 'responses', endpointRef: 'http:127.0.0.1:9',
+              modelRef: 'capacity-child-model', configDigest: digestOf('capacity-child-config'), capabilityDigest: digestOf('capacity-child-capability') },
+            stepDelayMs: 0,
+            replay: [
+              { kind: 'tool', state: 'tool', summary: 'child delivery', toolPhase: 'invoke', toolCall: {
+                callId: `deliver-${++childExecutions}`, toolId: 'humanagent_child_deliver',
+                arguments: { body: 'capacity child output', evidenceRefs: [] }, continuationRef: 'child-delivery' } },
+              { kind: 'terminal', state: 'waiting', summary: 'delivery round', terminalState: 'waiting', nextAction: { kind: 'continue', ref: 'child-delivery' } },
+              { kind: 'tool', state: 'tool', summary: 'child standard end', toolPhase: 'invoke', toolCall: {
+                callId: 'child-end', toolId: 'humanagent_turn_end', arguments: {
+                  summary: Object.fromEntries(['goal', 'actions', 'result', 'expectedNextStep'].map((key) => [key, { text: 'bounded child output', evidenceRefs: [] }])),
+                  deliveryRefs: childDeliveryRefs,
+                }, continuationRef: 'child-end' } },
+              { kind: 'terminal', state: 'waiting', summary: 'child end round', terminalState: 'waiting', nextAction: { kind: 'continue', ref: 'child-end' } },
+              { kind: 'terminal', state: 'succeeded', summary: 'child ended', terminalState: 'succeeded' },
+            ],
+          }),
+        }),
+        roster: [{ agentId: 'configured-worker', roleId: 'execution' }],
+        admitChildOperation: async (input) => {
+          const registration = await f.journal.append({ commitId: `capacity-business:${input.invocationId}`, kind: 'event', scope: input.scope,
+            payload: { kind: 'single-call-fixture-business', invocationId: input.invocationId } });
+          const commit = { commitId: registration.commitId!, journalSeq: registration.seq, recordDigest: registration.recordDigest };
+          return { authority: {} as never, authorityCommitRef: commit, businessRegistrationCommitRef: commit,
+            coverageCommitRef: commit, childAdmission: { authorityCommitRef: commit, businessRegistrationCommitRef: commit, coverageCommitRef: commit },
+            intent: {} as never, registration: {} as never };
+        },
+      });
+      const childCallArguments = { purpose: 'wait for capacity', agentId: 'configured-worker', kind: 'execution',
+        instructions: 'produce bounded output', successCriteria: ['produce output'], target: 'capacity-output' };
+      const outcomes: Awaited<ReturnType<typeof producer.execute>>[] = [];
+      const requests: (ProviderStartInput | ProviderSubmitInput)[] = [];
+      const binding = { bindingId: 'capacity-parent', providerId: 'http', protocol: 'responses' as const,
+        endpointRef: 'fake://capacity-parent', modelRef: 'capacity-model',
+        configDigest: digestOf('capacity-parent-config'), capabilityDigest: digestOf('capacity-parent-capabilities') };
+      const returnedIds: string[] = [];
+      let waitingId = '';
+      class ParentModel extends FakeReplayExecutionRuntimePort {
+        override async start(input: ProviderStartInput) {
+          requests.push(input);
+          return super.start(input);
+        }
+        override async submit(input: ProviderSubmitInput) {
+          requests.push(input);
+          return super.submit(input);
+        }
+        override async *observe(input: ProviderObserveInput): AsyncIterable<ProviderEvent> {
+          const round = requests.length;
+          const call = (callId: string, toolId: string, args: ProviderToolCall['arguments']): ProviderToolCall =>
+            ({ callId, toolId, arguments: args, continuationRef: `capacity-round-${round}` });
+          const calls = round === 1
+            ? [call('capacity-sibling-call', 'child.call', childCallArguments), call('capacity-wait-call', 'child.call', childCallArguments)]
+            : round === 2
+              ? [call('adopt-sibling', 'child.adopt', { invocationId: returnedIds[0]! }), call('capacity-fresh-call', 'child.call', childCallArguments)]
+              : round === 3 ? [call('adopt-fresh', 'child.adopt', { invocationId: returnedIds[1]! })] : [];
+          assert.ok(round <= 4, 'no automatic retry or extra model round');
+          for (const toolCall of calls) yield { ...input, eventId: `${round}:${toolCall.callId}`, kind: 'tool',
+            toolPhase: 'invoke', toolCall, evidenceRefs: [evidence] };
+          yield { ...input, eventId: `${round}:terminal`, kind: 'terminal', terminalState: calls.length ? 'waiting' : 'succeeded',
+            ...(calls.length ? { nextAction: { kind: 'continue' as const, ref: `capacity-round-${round}` } } : {}), evidenceRefs: [evidence] };
+        }
+      }
+      const driver = new ProviderAgentDriver({ port: new ParentModel({ binding, stepDelayMs: 0 }), binding,
+        ...execution, assignmentId: assignment.assignmentId, scope, inputRefs: [], tools: [APP_CHILD_CALL_TOOL, APP_CHILD_ADOPT_TOOL],
+        executeTool: { canRunConcurrently: producer.canRunConcurrently, async execute(input) {
+          const result = await producer.execute(input);
+          outcomes.push(result);
+          const output = JSON.parse(result.output) as { state: string; invocationId: string };
+          if (output.state === 'returned') returnedIds.push(output.invocationId);
+          if (output.state === 'waiting') waitingId = output.invocationId;
+          return result;
+        } },
+      });
+      await driver.start({ ...execution, assignmentId: assignment.assignmentId, organId, cycleId: scope.cycleId });
+      await driver.submit({ taskId: taskScope.taskId, executionEpoch: 1, assignmentId: assignment.assignmentId,
+        payload: { instructions: 'call two children; adopt the sibling and make a fresh call after capacity wait' } });
+      const events = [];
+      let driverError: unknown;
+      try { for await (const event of driver.observe({ runtimeId: execution.runtimeId })) events.push(event); }
+      catch (error) { driverError = error; }
+      const waitingOutput = outcomes.find((result) => (JSON.parse(result.output) as { state: string }).state === 'waiting');
+      const siblingOutput = outcomes.find((result) => (JSON.parse(result.output) as { state: string }).state === 'returned');
+      assert.ok(waitingOutput, JSON.stringify({ outcomes, driverError: String(driverError) }));
+      assert.ok(siblingOutput, JSON.stringify({ outcomes, driverError: String(driverError) }));
+      if (waitingOutput === undefined || siblingOutput === undefined) throw new Error(JSON.stringify(outcomes));
+      assert.equal(waitingOutput.status, 'blocked');
+      assert.ok(waitingOutput.error, 'capacity wait must preserve its typed owner error for Driver continuation');
+      // The manager explicitly supplies its ownerId to pool.acquire; preserve
+      // that actual typed issue owner rather than the pool's default owner.
+      assert.equal(waitingOutput.error?.ownerId, 'single-call-manager');
+      assert.equal(waitingOutput.error?.retryable, 'retryable');
+      assert.equal(waitingOutput.error?.attention, 'background');
+      assert.deepEqual(waitingOutput.error?.nextAction, { kind: 'wait', ref: 'orchestration.runtime.max' });
+      assert.ok((waitingOutput.error?.evidenceRefs.length ?? 0) > 0);
+      assert.equal(siblingOutput.status, 'succeeded');
+      assert.equal(driverError, undefined);
+      assert.equal(childExecutions, 2);
+      assert.equal(requests.length, 4);
+      assert.equal(new Set(requests.map((request) => request.turnId)).size, 1, 'same active Driver turn');
+      assert.equal(new Set(requests.map((request) => request.requestId)).size, 4, 'fresh Provider requests');
+      assert.equal(returnedIds[1], appChildInvocationId({ turnId: admittedTurn.turnId, parentExecution: execution,
+        providerRequestId: requests[1]!.requestId!, toolCallId: 'capacity-fresh-call' }));
+      const roundTwo = (requests[1]! as ProviderSubmitInput).toolContinuations!;
+      assert.equal(roundTwo.length, 2);
+      assert.deepEqual(roundTwo.map((item) => (JSON.parse(item.output) as { state: string }).state).sort(), ['returned', 'waiting']);
+      assert.equal(new Set(returnedIds).size, 2);
+      assert.ok(returnedIds.every((invocationId) => invocationId !== waitingId));
+      assert.equal(parent.childInvocations().length, 2);
+      assert.ok(parent.childInvocations().every((record) => record.adoptedResultSeq !== undefined));
+      assert.equal(parent.childInvocations().some((record) => record.invocationId === waitingId), false);
+      assert.equal(preCalls.includes(waitingId), false);
+      assert.deepEqual(preCalls, returnedIds);
+      assert.equal(events.at(-1)?.terminalState, 'succeeded');
+      assert.ok(outcomes.filter((outcome) => JSON.parse(outcome.output).state === 'returned')
+        .every((outcome) => JSON.parse(outcome.output).summary === 'capacity child output'));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally { f.fail(undefined); await f.cleanup(); }
+});
 
 test('single call public API returns genuine work and standalone repeated reviews without rerunning work or adopting', async () => {
   const f = await singleCallFixture();
