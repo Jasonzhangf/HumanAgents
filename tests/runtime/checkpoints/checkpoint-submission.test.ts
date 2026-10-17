@@ -35,7 +35,7 @@ import {
   submitInteractionClosure,
   type SubmitCheckpointInput,
 } from '../../../packages/runtime/src/checkpoints/submission.js';
-import { checkpointCommitId, durableContextDigest } from '../../../packages/runtime/src/checkpoints/coordinator.js';
+import { checkpointCommitId, durableContextDigest, recallCheckpoint } from '../../../packages/runtime/src/checkpoints/coordinator.js';
 import { reconcileUnknownOperations } from '../../../packages/runtime/src/checkpoints/closure.js';
 import {
   buildConditionalReentry,
@@ -666,6 +666,40 @@ test('reentry retries are idempotent and reject a reused closure id with differe
     { scope: taskScope, commandId: command.commandId },
     { scope: taskScope, commandId: command.commandId },
   ]);
+});
+
+// Current validators deterministically reject empty business refs. Impact: a
+// legal text turn cannot close. Cost: one public save/recall and invalid-ref
+// counterexamples; reuse the existing Journal and closure fixtures.
+test('checkpoint.save accepts empty business evidence and preserves recovery while rejecting invalid refs', async () => {
+  const input = submissionInput({ checkpoint: checkpoint(1, null, {
+    outcome: 'succeeded', next: { kind: 'continue', ref: 'next-task' }, evidenceRefs: [],
+  }) });
+  const saved = await saveCheckpointTool({ ...input, admissionPort: new FakeAdmissionPort() }, { checkpoint: input.checkpoint, previous: null });
+  assert.equal(saved.outcome, 'committed');
+  assert.equal(input.journal.appended.length, 1);
+  assert.equal(input.closurePort.committed.length, 1);
+  const recalled = await recallCheckpoint(input.journal, { ownerId: input.ownerId, scope });
+  assert.deepEqual(recalled?.checkpoint, input.checkpoint);
+  assert.deepEqual(recalled?.checkpoint.evidenceRefs, []);
+  assert.deepEqual(recalled?.checkpoint.recoveryStateRef, input.checkpoint.recoveryStateRef);
+
+  for (const invalid of [
+    { ...evidence('invalid'), locator: '' },
+    evidence('outside', { ...scope, taskId: id('task', 'other-task') }),
+  ]) {
+    const rejected = submissionInput({ checkpoint: checkpoint(1, null, { evidenceRefs: [invalid] }) });
+    await assert.rejects(() => saveCheckpointTool({ ...rejected, admissionPort: new FakeAdmissionPort() }, { checkpoint: rejected.checkpoint, previous: null }));
+    assert.equal(rejected.journal.appended.length, 0);
+    assert.equal(rejected.closurePort.committed.length, 0);
+  }
+  for (const source of ['harness-control', 'recovery'] as const) {
+    const rejected = submissionInput({ source, checkpoint: checkpoint(1, null, { evidenceRefs: [] }) });
+    await assert.rejects(() => saveCheckpointTool({ ...rejected, admissionPort: new FakeAdmissionPort() }, { checkpoint: rejected.checkpoint, previous: null }),
+      /requires settle evidence/);
+    assert.equal(rejected.journal.appended.length, 0);
+    assert.equal(rejected.closurePort.committed.length, 0);
+  }
 });
 
 test('checkpoint.save tool exposes committed versus blocked outcomes without bypassing unified submission', async () => {
