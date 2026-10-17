@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- r258只完成continue脚本后exit0未运行；父核实原interaction/预算0及无重复input路径后，宿主唯一运行该脚本，Interpret1/1已用完，公开409复现terminated→UND_ERR_SOCKET。实际model/tools/instructions同原，input身份差异待核，Task后读0；ownedPID46597正常SIGTERM退出，lease disposedAt20:36:37.091Z。初次RCCcollector20:36:36.848Z offset38019281至20:36:37.069Z追加0，未取得关联ID，不等于RCC未收到。r260 freshGCM只读新窗口追读/真实listener来源定位，禁重发/转B/改schema。原与当前根因均UNKNOWN，证据r258/continue-state.json。
+
 - 下一UX增量CSS+TaskFlow8files已独立整体Review有效PASS（ux-intake-layout-milestone-review-20261017，首Opusquotaerror后新Gemini；首次多余字段protocolfailure，同Reviewer只改协议后原classifier pass/findings空）。main已FF3c684427、Appbuild/package/install成功；官方restart gen24→25 PID92806 port53007、legacycloseclean。mainRuntime/App taskFlow各1/1复验通过。原Task生产capture双端live receipt g14-installed-capture-layout-fixed-20261017已亲读：165887字符逐字HTTP正文一致，desktop401/500px、mobile276/375px，无横溢出，Task仍完成、dialogs0/焦点返回/观测器移除，p3不动。childInvocation0不扩adoptedchild或全G14完成。
 - Provider后继：r251修订纠正伪事实后已接受最小officialserve probe方向，r255独占provider-installed-cold-20261017只写原native consumer，产品readonly。r254 v2metadataPlan READY，只加原helper两次，等待r255交写权不并写。r253误将input201当失败，已创建interaction但Interpret0；r256只复用该interaction继续同一次预算，不重建input。原RCCrootcauseUNKNOWN、array缺items合法，未改schema。
 
