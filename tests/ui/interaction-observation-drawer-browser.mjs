@@ -299,8 +299,13 @@ async function readDrawer(page) {
     const trace = card?.querySelector('.iwc-panel--trace')
     const details = [...(card?.querySelectorAll('details') ?? [])]
     const traceRows = [...(trace?.querySelectorAll('.iwc-trace-row') ?? [])]
+    const drawerRect = drawer?.getBoundingClientRect()
     return {
       drawerOpen: Boolean(drawer?.open),
+      drawerRect: drawerRect
+        ? { x: drawerRect.x, y: drawerRect.y, width: drawerRect.width, height: drawerRect.height, right: drawerRect.right, bottom: drawerRect.bottom }
+        : null,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
       cardMounted: Boolean(card),
       statusRendered: Boolean(status),
       conversationRendered: Boolean(conversation),
@@ -419,6 +424,27 @@ try {
     record(`${run.label} human status and conversation keep technical ids out`, technicalTokens(`${drawer.statusText}\n${drawer.conversationText}`).length === 0, technicalTokens(`${drawer.statusText}\n${drawer.conversationText}`))
     record(`${run.label} folded detail keeps callId and returned evidence`, drawer.detailsText.includes('callId') && drawer.detailsText.includes('returned'), drawer.detailsText)
     record(`${run.label} drawer contains no executable control`, drawer.controlCount === 0, drawer.controlCount)
+    if (run.label === 'desktop') {
+      record(
+        `${run.label} drawer docks to the right with the project inset`,
+        drawer.drawerRect !== null
+          && Math.abs(drawer.viewport.width - drawer.drawerRect.right - 16) <= 0.5
+          && Math.abs(drawer.drawerRect.y - 16) <= 0.5
+          && drawer.drawerRect.width <= 500.5
+          && drawer.drawerRect.bottom <= drawer.viewport.height - 16 + 0.5,
+        { rect: drawer.drawerRect, viewport: drawer.viewport },
+      )
+    }
+    if (run.label === 'mobile') {
+      record(
+        `${run.label} drawer stays bottom-anchored without horizontal overflow`,
+        drawer.drawerRect !== null
+          && Math.abs(drawer.viewport.height - drawer.drawerRect.bottom) <= 0.5
+          && drawer.drawerRect.x >= -0.5
+          && drawer.drawerRect.right <= drawer.viewport.width + 0.5,
+        { rect: drawer.drawerRect, viewport: drawer.viewport },
+      )
+    }
     if (run.reducedMotion === 'reduce') {
       record(`${run.label} honors reduced motion`, drawer.reducedMotionEdge === 'none', drawer.reducedMotionEdge)
     }

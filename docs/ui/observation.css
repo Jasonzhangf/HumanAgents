@@ -1,34 +1,10 @@
-/* Observation surface owns the vertical node DAG, agent ownership lanes and the bottom sheet.
+/* Observation surface owns the vertical node DAG, agent ownership lanes and the node drawer.
    Shared tokens and controls stay in runtime.css; no second visual language is introduced here. */
 
 .observation-main {
   width: min(1180px, calc(100% - 40px));
   margin: 0 auto;
   padding-bottom: 64px;
-}
-
-/* Unified next-layer layout: on desktop the node detail keeps the page visible and expands in a
-   side panel. The narrow-viewport bottom sheet defined above stays the mobile behavior. */
-@media (min-width: 901px) {
-  .node-drawer {
-    inset: 16px 16px 16px auto;
-    width: min(500px, calc(100vw - 32px));
-    max-height: none;
-    border-radius: 10px;
-  }
-
-  .node-drawer::backdrop {
-    background: transparent;
-  }
-
-  .drawer-panes {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  /* Reserve the open drawer's column so the primary observation content stays visible. */
-  body:has(.node-drawer[open]) .page {
-    padding-right: calc(516px + env(safe-area-inset-right));
-  }
 }
 
 .page-heading {
@@ -375,7 +351,7 @@ dd[data-empty="true"] {
   line-height: 1.6;
 }
 
-/* Bottom sheet: opened from the bottom, two panes side by side on desktop. */
+/* Narrow viewport default: the node detail opens as a bottom sheet. */
 .node-drawer {
   position: fixed;
   inset: auto 0 0;
@@ -668,6 +644,30 @@ dd[data-empty="true"] {
 
 .drawer-enter {
   justify-self: start;
+}
+
+/* Wide viewport: the node detail docks to the right and keeps the page visible. */
+@media (min-width: 901px) {
+  .node-drawer {
+    inset: 16px 16px 16px auto;
+    width: min(500px, calc(100vw - 32px));
+    max-height: calc(100dvh - 32px);
+    margin: 0;
+    border-radius: 10px;
+  }
+
+  .node-drawer::backdrop {
+    background: transparent;
+  }
+
+  .drawer-panes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Reserve the open drawer's column so the primary observation content stays visible. */
+  body:has(.node-drawer[open]) .page {
+    padding-right: calc(516px + env(safe-area-inset-right));
+  }
 }
 
 @media (max-width: 760px) {
