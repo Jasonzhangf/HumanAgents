@@ -64,6 +64,8 @@ review材料根因已确认：r221读到production assignment producer把整个a
 
 I2 F0已接候选 `2f92fe91`：source `2f788ad3` 标准Git合流，仅observation图meta、6projection可选scope合同/投影和原projectionconsumer4files。组合tests/ui compile0、指定原例1/1 PASS；缺省不增scope键，匹配scope保真，taskId不匹配抛typed投影错误。原实际RED由UXrun保留。已通知owner当轮收来源树；不冒跨project App/UI已通，后继精确ABI继续由UXpeer负责。
 
+r222 criteria producer已source提交 `eebc5e30`，build/compile0；保留旧resume.assignment，不重写旧Journal。运行前r223源码确认review无显式roleentry会选legacy4444，且localupstream无review分支；r226仅补原fixture的legacy本地映射及真实criteria/完整subject正文断言后的Responses响应，不请求实际RCC来探测fixture。完整cold尚未GREEN。首milestone交付大阶段Plan r224 Opus5.5实际quotaERROR/exit3/空产物，按默认fallback freshGemini4 r225同scope继续；不得等待后继I2全部完成才交付无关已闭合增量。UX docs-onlymain `b78d23fc` 已fetch并正常合候选，仅进度文档变化，未产品重构建/安装/重启。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
