@@ -6,6 +6,10 @@
 
 ### 续接增量（2026-10-16）
 
+- 无错误路径基础已接收sourceafaf336→候选94078a4770c7836f2a4b3aa83daed6dd784f3ac8，production仅删除errors.length===0限制。Root实读actualTAP缺error证据RED（shell wrapper0不冒Node1），来源/组合consumer各1/1Node0、组合Appbuild/scopedtsc0。原failed链断言保留，真实distinct succeeded records的errors[]路径消费applied；无真实conditional/production/cold声明。原Memory树cleanFF候选后直接续freshGCM C3b module r2，不新重试树；同identity不同body的独立敏感性留C3b幂等验证，不以当前时间变化冲突冒证明。
+- N3 deadselector消融已接收sourcea01a772→候选7284c6cdf15572df26f015dbf6e15021c6221e9c，唯一file净删372行，真实TaskFlowRefinedResult ABI保留。组合Appbuild/tsc0、原1Plannerconsumer1/1Node0，作者去export的编译反例恰3consumer失败，未冒运行RED。来源clean/无占用后normalremove/prune/pathabsent；Root独占fixture三份receipt/wires/Journal已归档run/root-boundary-receipt、fixture父目录已清，无新test/graph。N3动态编排未接通。
+- 两份OAuth精确计划已接收：C3b module先Journal分组/全完整历史reconcile/同identity幂等与patch保analysisInputs，真实taskscope/epoch须走既有taskconsumer；CLI/Coordinatorhook待C3a释放，不重复epoch。N3 helper每callcheckpoint真实Runtime+Jsonl基础freshGCM独占新domain/basef067180，requiredhost语义/时间与返回采纳分离，App挂载后置；明确不碰UXA2的runtime/src/index。当前本侧C3a基础、C3b模块、N3 helper三GCM，UXA2/A3另两GCM；loaded仍9357966/gen15，未mainpush。
+
 - UX A1合同2471476已由peer标准合候选00bb4c12bc6ad55998e15205d52aae293f264676，peer组合contractsbuild0/focused4/4、来源normalremove/prune/absent；仅source-only，未Appbuild/restart，loaded仍9357966/gen15。A3纯projection GCM与A2精确selectorAPI计划并行，不写本侧共享App。
 - N3 stage r3仅deadselector消融部分准入：Root实核TaskFlowSelectorConsumer无外部caller，只有TaskFlowRefinedResult被三个生产consumer使用；不存在计划所称TaskFlowStageRole，admission/index本已导出Orchestrator/Pool，不做重复补链。freshGCM独占n3-selector-ablation/base00bb4c1，只改该一源码，保原RefinedResult ABI/原1Plannerconsumer，不新测试；offlineinstall与productcontractscompile0。显式perhelper真实checkpoint基础另派独立OAuth小APIfreeze，必须真实Journal持久实现，不以可选内存port冒生产。
 - C3b Gemini r3仍未准入：又引入不存在memory-composition事件函数/不可靠字段与.ts.js命令fallback，且多reentry同recovery消息身份冲突未闭。已转独立OAuth小API核对（已定Journal重建+唯一boundary方向不变），不以换模型推翻有效业务finding；两个本侧GCM基础继续。当前本侧3路GCM实现（settled-control、errors[]、deadselector）与UX1路GCM、两侧API计划并行，未计新增验收。
