@@ -1882,6 +1882,7 @@ export class UiRuntimeService {
   private readonly resolveColdExecutionResumeRequest?: ServiceExecutionPorts['resolveColdExecutionResumeRequest'];
   private readonly contextCorrectionPort?: ServiceExecutionPorts['executeConfirmedTaskContextCorrection'];
   private readonly checkpointReentryPort?: ServiceExecutionPorts['executeConfirmedTaskCheckpointReentry'];
+  private readonly nativeDriverBound: boolean;
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
@@ -1950,6 +1951,7 @@ export class UiRuntimeService {
     this.contextCorrectionPort = executionPorts?.executeConfirmedTaskContextCorrection;
     this.checkpointReentryPort = executionPorts?.executeConfirmedTaskCheckpointReentry;
     const nativeDriverBound = executionPorts?.createDriver !== undefined;
+    this.nativeDriverBound = nativeDriverBound;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
       checkpointStoreFor: options.checkpointStoreFor,
@@ -4464,7 +4466,7 @@ export class UiRuntimeService {
       const started = this.coordinator.prepareExecution(task.taskId, {
         prompt,
         operationId: input.binding.operationId,
-        ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+        ...this.defaultOrchestrate(),
       });
       if (started.operationId.value !== input.binding.operationId.value || started.executionEpoch !== input.binding.executionEpoch) {
         throw new UiRuntimeApiError(
@@ -5715,6 +5717,16 @@ export class UiRuntimeService {
     return readback.grant?.state === 'granted';
   }
 
+  /**
+   * Default prepareExecution wrapping. A native driver already owns the real
+   * pipeline.execute assignment, so only non-native assemblies orchestrate.
+   */
+  private defaultOrchestrate(): { orchestrate?: true } {
+    return !this.nativeDriverBound && this.options.runtimeComposition?.createTaskAssembly !== undefined
+      ? { orchestrate: true }
+      : {};
+  }
+
   private async completePreparedDispatch(
     consumed: RequirementEnvelope,
     prepared: DispatchLedgerEntry,
@@ -5775,7 +5787,7 @@ export class UiRuntimeService {
         if (autoStart) {
           const execution = this.coordinator.prepareExecution(task.taskId, {
             prompt,
-            ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+            ...this.defaultOrchestrate(),
             operationId,
             ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
           });
@@ -5797,7 +5809,7 @@ export class UiRuntimeService {
       } else {
         const execution = this.coordinator.prepareExecution(task.taskId, {
           prompt: consumed.normalizedInput,
-          ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+          ...this.defaultOrchestrate(),
           operationId,
           ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
         });
