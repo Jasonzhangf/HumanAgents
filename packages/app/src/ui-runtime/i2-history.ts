@@ -35,6 +35,7 @@ import type {
   RuntimeInspectionOccurrenceProjection,
   RuntimeMilestoneReviewHistoryProjection,
   RuntimeMilestoneReviewProjection,
+  RuntimeReadScope,
   RuntimeReviewFindingProjection,
   RuntimeScheduleOccurrenceProjection,
   RuntimeTaskScopeProjection,
@@ -51,6 +52,8 @@ import { UiRuntimeApiError } from './errors.js';
 
 const I2_OWNER = 'humanagent.app.ui-runtime';
 const I2_ENUMERATION_LIMIT = 10_000;
+
+export type I2TaskReadScope = Extract<RuntimeReadScope, { readonly kind: 'task' }>;
 
 /**
  * Owner-provided current execution position for an I2 history read. The reader
@@ -82,6 +85,7 @@ export interface I2HistoryReadPorts {
 
 export interface I2HistoryListQuery {
   readonly taskScope: ScopeRef;
+  readonly scope?: I2TaskReadScope;
   readonly limit: number;
   readonly cursor?: string;
 }
@@ -97,10 +101,12 @@ export interface I2HistoryReviewQuery extends I2HistoryListQuery {
 
 export interface I2HistoryEntryQuery {
   readonly taskScope: ScopeRef;
+  readonly scope?: I2TaskReadScope;
 }
 
 export interface I2HistoryComparisonQuery {
   readonly taskScope: ScopeRef;
+  readonly scope?: I2TaskReadScope;
   readonly left: string;
   readonly right: string;
 }
@@ -168,6 +174,10 @@ function toScheduleOccurrenceProjection(
 
 function fingerprint(parts: readonly (string | number)[]): string {
   return JSON.stringify(parts);
+}
+
+function scopeFingerprintParts(scope: I2TaskReadScope | undefined): readonly string[] {
+  return scope === undefined ? [] : [scope.projectKey, scope.mode];
 }
 
 function encodeCursor(cursor: I2Cursor): string {
@@ -527,7 +537,12 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
     async listInspectionOccurrences(query): Promise<RuntimeInspectionOccurrenceHistoryProjection> {
       const taskScope = query.taskScope;
       const loaded = await loadOccurrences(journal, taskScope);
-      const fp = fingerprint(['inspection-occurrences', taskScope.organId.value, requireTaskId(taskScope).value]);
+      const fp = fingerprint([
+        'inspection-occurrences',
+        ...scopeFingerprintParts(query.scope),
+        taskScope.organId.value,
+        requireTaskId(taskScope).value,
+      ]);
       const { page, nextCursor } = pageOf(loaded, query, fp);
       let viewed: { readonly occurrenceId: string } | null = null;
       if (query.viewed !== undefined) {
@@ -539,6 +554,7 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
       }
       return projectRuntimeInspectionOccurrences({
         taskScope: toTaskScopeProjection(taskScope),
+        ...(query.scope === undefined ? {} : { scope: query.scope }),
         current: await current(taskScope),
         viewed,
         occurrences: page.map(toOccurrenceProjection),
@@ -556,6 +572,7 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
       }
       return projectRuntimeInspectionOccurrence({
         taskScope: toTaskScopeProjection(taskScope),
+        ...(query.scope === undefined ? {} : { scope: query.scope }),
         current: await current(taskScope),
         viewed: { occurrenceId: target.opening.occurrence.occurrenceId },
         occurrence: toOccurrenceProjection(target),
@@ -576,10 +593,18 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
         if (query.milestoneId !== undefined && entry.record.milestoneId !== query.milestoneId) continue;
         reviews.push(await loadReview(journal, taskScope, { record: entry.record, commitRef: entry.commitRef }));
       }
-      const fp = fingerprint(['milestone-reviews', taskScope.organId.value, requireTaskId(taskScope).value, query.cycleId ?? '', query.milestoneId ?? '']);
+      const fp = fingerprint([
+        'milestone-reviews',
+        ...scopeFingerprintParts(query.scope),
+        taskScope.organId.value,
+        requireTaskId(taskScope).value,
+        query.cycleId ?? '',
+        query.milestoneId ?? '',
+      ]);
       const { page, nextCursor } = pageOf(reviews, query, fp);
       return projectRuntimeMilestoneReviews({
         taskScope: toTaskScopeProjection(taskScope),
+        ...(query.scope === undefined ? {} : { scope: query.scope }),
         current: await current(taskScope),
         reviews: page.map(toReviewProjection),
         ...(nextCursor === undefined ? {} : { nextCursor }),
@@ -594,7 +619,12 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
         if (entry.record.kind !== 'business-cycle-opened') continue;
         cycles.push(await loadCycle(journal, taskScope, { record: entry.record, commitRef: entry.commitRef }));
       }
-      const fp = fingerprint(['business-cycles', taskScope.organId.value, requireTaskId(taskScope).value]);
+      const fp = fingerprint([
+        'business-cycles',
+        ...scopeFingerprintParts(query.scope),
+        taskScope.organId.value,
+        requireTaskId(taskScope).value,
+      ]);
       const { page, nextCursor } = pageOf(cycles, query, fp);
       let viewed: { readonly cycleId: string } | null = null;
       if (query.viewed !== undefined) {
@@ -606,6 +636,7 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
       }
       return projectRuntimeBusinessCycles({
         taskScope: toTaskScopeProjection(taskScope),
+        ...(query.scope === undefined ? {} : { scope: query.scope }),
         current: await current(taskScope),
         viewed,
         cycles: page.map(toCycleProjection),
@@ -623,6 +654,7 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
       const loaded = await loadCycle(journal, taskScope, { record: entry.record, commitRef: entry.commitRef });
       return projectRuntimeBusinessCycle({
         taskScope: toTaskScopeProjection(taskScope),
+        ...(query.scope === undefined ? {} : { scope: query.scope }),
         current: await current(taskScope),
         viewed: { cycleId: loaded.opening.cycle.id.value },
         cycle: toCycleProjection(loaded),
@@ -656,6 +688,7 @@ export function createI2HistoryReader(ports: I2HistoryReadPorts): I2HistoryReade
       });
       return projectRuntimeInspectionComparison({
         taskScope: toTaskScopeProjection(taskScope),
+        ...(query.scope === undefined ? {} : { scope: query.scope }),
         current: await current(taskScope),
         left: { occurrenceId: left.opening.occurrence.occurrenceId },
         right: { occurrenceId: right.opening.occurrence.occurrenceId },

@@ -1414,7 +1414,12 @@ export interface TaskCheckpointAssetBodyQuery {
 }
 
 /** Read-only I2 history queries. Scope is the exact task; there is no write path. */
-export interface I2HistoryListQuery {
+export interface I2HistoryScopeInput {
+  readonly projectKey?: string;
+  readonly mode?: RuntimeMode;
+}
+
+export interface I2HistoryListQuery extends I2HistoryScopeInput {
   readonly limit: number;
   readonly cursor?: string;
 }
@@ -4102,16 +4107,18 @@ export class UiRuntimeService {
   private async canonicalTaskIdentityScope(
     journal: JsonlOrganJournal,
     taskId: TaskId,
+    family: 'checkpoint-history' | 'i2-history' = 'checkpoint-history',
   ): Promise<RuntimeReadResult<TaskIdentityScope>> {
     try {
       const identities = (await new JsonlTaskIdentityJournal(journal).replay())
         .filter((identity) => identity.scope.taskId.value === taskId.value);
       if (identities.length === 0 || new Set(identities.map((identity) => identity.scope.organId.value)).size !== 1) {
+        const targetLabel = family === 'i2-history' ? 'I2 history' : 'checkpoint history';
         return { ok: false, failure: {
-          code: identities.length === 0 ? 'checkpoint-history.scope-unavailable' : 'checkpoint-history.scope-mismatch',
+          code: identities.length === 0 ? `${family}.scope-unavailable` : `${family}.scope-mismatch`,
           ownerId: APP_OWNER,
           message: `task ${taskId.value} has no unique committed Task identity in this canonical Journal`,
-          nextAction: 'restore the canonical Task identity before reading this task checkpoint history',
+          nextAction: `restore the canonical Task identity before reading this task ${targetLabel}`,
         } };
       }
       return { ok: true, value: identities[0]!.scope };
@@ -4232,54 +4239,135 @@ export class UiRuntimeService {
     taskId: TaskId,
     input: I2HistoryViewedQuery,
   ): Promise<RuntimeReadResult<RuntimeBusinessCycleHistoryProjection>> {
-    return this.readI2(taskId, (reader, taskScope) => reader.listBusinessCycles({ taskScope, ...input }));
+    return this.readI2(taskId, input, (reader, taskScope, scope) => reader.listBusinessCycles({
+      taskScope,
+      ...(scope === undefined ? {} : { scope }),
+      limit: input.limit,
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(input.viewed === undefined ? {} : { viewed: input.viewed }),
+    }));
   }
 
   async taskBusinessCycle(
     taskId: TaskId,
     cycleId: string,
+    scopeInput?: I2HistoryScopeInput,
   ): Promise<RuntimeReadResult<RuntimeBusinessCycleEntryProjection>> {
-    return this.readI2(taskId, (reader, taskScope) => reader.readBusinessCycle({ taskScope, cycleId }));
+    return this.readI2(taskId, scopeInput, (reader, taskScope, scope) => reader.readBusinessCycle({
+      taskScope,
+      ...(scope === undefined ? {} : { scope }),
+      cycleId,
+    }));
   }
 
   async taskMilestoneReviews(
     taskId: TaskId,
     input: I2HistoryReviewQuery,
   ): Promise<RuntimeReadResult<RuntimeMilestoneReviewHistoryProjection>> {
-    return this.readI2(taskId, (reader, taskScope) => reader.listMilestoneReviews({ taskScope, ...input }));
+    return this.readI2(taskId, input, (reader, taskScope, scope) => reader.listMilestoneReviews({
+      taskScope,
+      ...(scope === undefined ? {} : { scope }),
+      limit: input.limit,
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(input.cycleId === undefined ? {} : { cycleId: input.cycleId }),
+      ...(input.milestoneId === undefined ? {} : { milestoneId: input.milestoneId }),
+    }));
   }
 
   async taskInspectionOccurrences(
     taskId: TaskId,
     input: I2HistoryViewedQuery,
   ): Promise<RuntimeReadResult<RuntimeInspectionOccurrenceHistoryProjection>> {
-    return this.readI2(taskId, (reader, taskScope) => reader.listInspectionOccurrences({ taskScope, ...input }));
+    return this.readI2(taskId, input, (reader, taskScope, scope) => reader.listInspectionOccurrences({
+      taskScope,
+      ...(scope === undefined ? {} : { scope }),
+      limit: input.limit,
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(input.viewed === undefined ? {} : { viewed: input.viewed }),
+    }));
   }
 
   async taskInspectionOccurrence(
     taskId: TaskId,
     occurrenceId: string,
+    scopeInput?: I2HistoryScopeInput,
   ): Promise<RuntimeReadResult<RuntimeInspectionOccurrenceEntryProjection>> {
-    return this.readI2(taskId, (reader, taskScope) => reader.readInspectionOccurrence({ taskScope, occurrenceId }));
+    return this.readI2(taskId, scopeInput, (reader, taskScope, scope) => reader.readInspectionOccurrence({
+      taskScope,
+      ...(scope === undefined ? {} : { scope }),
+      occurrenceId,
+    }));
   }
 
   async taskInspectionComparison(
     taskId: TaskId,
     left: string,
     right: string,
+    scopeInput?: I2HistoryScopeInput,
   ): Promise<RuntimeReadResult<RuntimeInspectionComparisonProjection>> {
-    return this.readI2(taskId, (reader, taskScope) => reader.compareInspections({ taskScope, left, right }));
+    return this.readI2(taskId, scopeInput, (reader, taskScope, scope) => reader.compareInspections({
+      taskScope,
+      ...(scope === undefined ? {} : { scope }),
+      left,
+      right,
+    }));
   }
 
   private async readI2<T>(
     taskId: TaskId,
-    run: (reader: I2HistoryReader, taskScope: ScopeRef) => Promise<T>,
+    scopeInput: I2HistoryScopeInput | undefined,
+    run: (
+      reader: I2HistoryReader,
+      taskScope: ScopeRef,
+      scope: Extract<RuntimeReadScope, { readonly kind: 'task' }> | undefined,
+    ) => Promise<T>,
   ): Promise<RuntimeReadResult<T>> {
-    const reader = this.i2Reader;
-    if (reader === undefined) return { ok: false, failure: i2UnavailableFailure() };
-    const taskScope: ScopeRef = { organId: this.options.organId, taskId };
+    const rawProjectKey = scopeInput?.projectKey;
+    const rawMode = scopeInput?.mode;
+    if (rawProjectKey === undefined && rawMode === undefined) {
+      const reader = this.i2Reader;
+      if (reader === undefined) return { ok: false, failure: i2UnavailableFailure() };
+      const taskScope: ScopeRef = { organId: this.options.organId, taskId };
+      try {
+        return { ok: true, value: await run(reader, taskScope, undefined) };
+      } catch (error) {
+        return { ok: false, failure: readFailureFromError(error) };
+      }
+    }
+    const projectKey = rawProjectKey?.trim();
+    if (!projectKey || (rawMode !== 'fake' && rawMode !== 'rcc')) {
+      return {
+        ok: false,
+        failure: {
+          code: 'read.scope.invalid',
+          ownerId: APP_OWNER,
+          message: 'scoped I2 history requires both projectKey and mode=fake|rcc',
+          nextAction: 'send projectKey=<declared projectKey>&mode=fake|rcc, or omit both for the legacy route',
+        },
+      };
+    }
     try {
-      return { ok: true, value: await run(reader, taskScope) };
+      const source = await this.findProjectSource(projectKey);
+      if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
+      const canonicalProjectKey = source.projectKey;
+      const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, rawMode));
+      const journal = new JsonlOrganJournal(filePath);
+      const identity = await this.canonicalTaskIdentityScope(journal, taskId, 'i2-history');
+      if (!identity.ok) return identity;
+      const currentPosition = this.isBoundScope(canonicalProjectKey, rawMode)
+        ? this.options.i2History?.currentPosition
+        : undefined;
+      const reader = createI2HistoryReader({
+        journal: createJsonlI2JournalPort({ filePath, journal }),
+        ...(currentPosition === undefined ? {} : { currentPosition }),
+      });
+      const scope: Extract<RuntimeReadScope, { readonly kind: 'task' }> = {
+        kind: 'task',
+        projectKey: canonicalProjectKey,
+        mode: rawMode,
+        taskId,
+      };
+      return { ok: true, value: await run(reader, identity.value, scope) };
     } catch (error) {
       return { ok: false, failure: readFailureFromError(error) };
     }

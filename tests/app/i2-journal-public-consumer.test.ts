@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { canonicalJsonStringify, id } from '../../packages/contracts/src/index.js';
@@ -21,10 +22,23 @@ import type {
   WorkAssignment,
   WorkResult,
 } from '../../packages/contracts/src/index.js';
+import { ensureControlLayout, listConfiguredProjects, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { computeInspectionDefinitionDigest } from '../../packages/core/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/task-plan-revisions.js';
+import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { createJsonlI2JournalPort, I2_JOURNAL_PAYLOAD_KIND } from '../../packages/app/src/i2-journal.js';
+import { buildFakeExecutionPort, UiRuntimeService } from '../../packages/app/src/ui-runtime/index.js';
+import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import {
+  UiRuntimeJournal,
+  uiRuntimeControlJournalPath,
+  uiRuntimeJournalPath,
+  uiRuntimeModeRoot,
+} from '../../packages/app/src/ui-runtime/journal.js';
+import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   AgentRuntimePoolManager, OrchestrationManager, OrchestrationError,
   acceptanceCriteriaContent, digestOf, resolveReviewMaterial,
@@ -146,6 +160,7 @@ function itemResult(input: {
   readonly cycleOpenedCommitRef: JournalCommitRef;
   readonly checkId: string;
   readonly resultId: string;
+  readonly judgment?: string;
   readonly completedAt: string;
 }): InspectionItemResultRecord {
   return {
@@ -166,7 +181,7 @@ function itemResult(input: {
       checkId: input.checkId,
       resultId: input.resultId,
       attempt: 1,
-      outcome: { status: 'completed', judgment: `judgment:${input.checkId}` },
+      outcome: { status: 'completed', judgment: input.judgment ?? `judgment:${input.checkId}` },
       evidenceRefs: [],
       completedAt: input.completedAt,
     },
@@ -1124,4 +1139,342 @@ test('actual I2 journal port rejects a foreign-task reference, an unresolved or 
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
+});
+
+interface I2HttpBody {
+  readonly scope?: {
+    readonly kind: 'task';
+    readonly projectKey: string;
+    readonly mode: 'fake' | 'rcc';
+    readonly taskId: TaskId;
+  };
+  readonly current?: {
+    readonly state: 'known' | 'unknown';
+    readonly cycleId?: string | null;
+    readonly reason?: string;
+  };
+  readonly viewed?: { readonly cycleId?: string; readonly occurrenceId?: string } | null;
+  readonly entries?: readonly {
+    readonly cycleId?: string;
+    readonly occurrenceId?: string;
+    readonly milestoneId?: string;
+  }[];
+  readonly entry?: {
+    readonly cycleId?: string;
+    readonly occurrenceId?: string;
+  };
+  readonly items?: readonly {
+    readonly checkId: string;
+    readonly change: string;
+  }[];
+  readonly nextCursor?: string;
+  readonly error?: { readonly code?: string };
+}
+
+async function runScopedI2HttpFixture(): Promise<void> {
+  const root = await mkdtemp('/private/tmp/humanagent-scoped-i2-http-');
+  let server: ReturnType<typeof createServer> | undefined;
+  let listening = false;
+  try {
+  const workspaceA = join(root, 'workspace-a');
+  const workspaceB = join(root, 'workspace-b');
+  await mkdir(workspaceA);
+  await mkdir(workspaceB);
+  const pathsA = await resolveRuntimePaths({ workspace: workspaceA, controlRoot: join(root, 'control') });
+  const pathsB = await resolveRuntimePaths({ workspace: workspaceB, controlRoot: join(root, 'control') });
+  await ensureControlLayout(pathsA);
+  await ensureControlLayout(pathsB);
+  const taskId = id('task', 'scoped-i2-shared-task');
+  const legacyTaskId = id('task', 'scoped-i2-legacy-task');
+  const unidentifiedTaskId = id('task', 'scoped-i2-unidentified-task');
+  const conflictTaskId = id('task', 'scoped-i2-conflict-task');
+  const organA = id('organ', 'scoped-i2-organ-a');
+  const organB = id('organ', 'scoped-i2-organ-b');
+  const conflictOrgan = id('organ', 'scoped-i2-organ-conflict');
+  const taskScopeA: TaskScope = { organId: organA, taskId };
+  const taskScopeB: TaskScope = { organId: organB, taskId };
+  const controlA = new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(pathsA.checkpointsRoot, 'fake')));
+  const controlB = new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(pathsB.checkpointsRoot, 'fake')));
+  const identitySource = (suffix: string) => ({
+    requirementId: `scoped-i2-requirement-${suffix}`,
+    inputRevision: 1,
+    draftId: `scoped-i2-draft-${suffix}`,
+    draftRevisionVersion: 1,
+    draftRevisionHash: `sha256:scoped-i2-${suffix}`,
+    confirmationRef: `scoped-i2-confirmation-${suffix}`,
+  });
+  await new JsonlTaskIdentityJournal(controlA).append({ scope: taskScopeA, source: identitySource('a') });
+  const identitiesB = new JsonlTaskIdentityJournal(controlB);
+  await identitiesB.append({ scope: taskScopeB, source: identitySource('b') });
+  await identitiesB.append({
+    scope: { organId: organB, taskId: conflictTaskId },
+    source: identitySource('conflict-b'),
+  });
+  await identitiesB.append({
+    scope: { organId: conflictOrgan, taskId: conflictTaskId },
+    source: identitySource('conflict-other'),
+  });
+  const portA = createJsonlI2JournalPort({
+    filePath: uiRuntimeControlJournalPath(uiRuntimeModeRoot(pathsA.checkpointsRoot, 'fake')),
+    journal: controlA,
+  });
+  const portB = createJsonlI2JournalPort({ filePath: uiRuntimeControlJournalPath(uiRuntimeModeRoot(pathsB.checkpointsRoot, 'fake')), journal: controlB });
+  await portA.commit(cycleOpened({ taskScope: taskScopeA, cycleId: 'shared-cycle', openedAt: at(1) }));
+  const legacyScope: TaskScope = { organId: organA, taskId: legacyTaskId };
+  const legacyDefinition = definitionRecord({
+    taskScope: legacyScope, definitionId: 'legacy-definition', definitionVersion: '1',
+    checkIds: ['check-1'], createdAt: at(1),
+  });
+  const legacyDefinitionRef = await portA.commit(legacyDefinition);
+  const legacyCycleRef = await portA.commit(cycleOpened({ taskScope: legacyScope, cycleId: 'legacy-cycle', openedAt: at(2) }));
+  const legacyOccurrence1Ref = await portA.commit(occurrenceOpened({
+    taskScope: legacyScope, occurrenceId: 'legacy-occurrence-1', cycleId: 'legacy-cycle',
+    definitionId: legacyDefinition.content.definition.definitionId,
+    definitionVersion: legacyDefinition.content.definition.definitionVersion,
+    definitionCommitRef: legacyDefinitionRef, definitionDigest: legacyDefinition.definitionDigest,
+    cycleOpenedCommitRef: legacyCycleRef, openedAt: at(3),
+  }));
+  const legacyOccurrence2Ref = await portA.commit(occurrenceOpened({
+    taskScope: legacyScope, occurrenceId: 'legacy-occurrence-2', cycleId: 'legacy-cycle',
+    definitionId: legacyDefinition.content.definition.definitionId,
+    definitionVersion: legacyDefinition.content.definition.definitionVersion,
+    definitionCommitRef: legacyDefinitionRef, definitionDigest: legacyDefinition.definitionDigest,
+    cycleOpenedCommitRef: legacyCycleRef, openedAt: at(4),
+  }));
+  const legacyResult1Ref = await portA.commit(itemResult({
+    taskScope: legacyScope, occurrenceId: 'legacy-occurrence-1', cycleId: 'legacy-cycle',
+    definitionId: legacyDefinition.content.definition.definitionId,
+    definitionVersion: legacyDefinition.content.definition.definitionVersion,
+    definitionCommitRef: legacyDefinitionRef, definitionDigest: legacyDefinition.definitionDigest,
+    cycleOpenedCommitRef: legacyCycleRef, checkId: 'check-1', resultId: 'legacy-result-1', completedAt: at(5),
+  }));
+  const legacyResult2Ref = await portA.commit(itemResult({
+    taskScope: legacyScope, occurrenceId: 'legacy-occurrence-2', cycleId: 'legacy-cycle',
+    definitionId: legacyDefinition.content.definition.definitionId,
+    definitionVersion: legacyDefinition.content.definition.definitionVersion,
+    definitionCommitRef: legacyDefinitionRef, definitionDigest: legacyDefinition.definitionDigest,
+    cycleOpenedCommitRef: legacyCycleRef, checkId: 'check-1', resultId: 'legacy-result-2', completedAt: at(6),
+  }));
+  await portA.commit(settled({
+    taskScope: legacyScope, occurrenceId: 'legacy-occurrence-1',
+    definitionId: legacyDefinition.content.definition.definitionId,
+    definitionVersion: legacyDefinition.content.definition.definitionVersion,
+    openingCommitRef: legacyOccurrence1Ref, itemResultCommitRefs: [legacyResult1Ref], settledAt: at(7),
+  }));
+  await portA.commit(settled({
+    taskScope: legacyScope, occurrenceId: 'legacy-occurrence-2',
+    definitionId: legacyDefinition.content.definition.definitionId,
+    definitionVersion: legacyDefinition.content.definition.definitionVersion,
+    openingCommitRef: legacyOccurrence2Ref, itemResultCommitRefs: [legacyResult2Ref], settledAt: at(8),
+  }));
+  await portA.commit(reviewResult({
+    taskScope: legacyScope, milestoneId: 'legacy-milestone', cycleId: 'legacy-cycle',
+    assignmentId: 'legacy-assignment', resultId: 'legacy-review-result', completedAt: at(9),
+  }));
+  await portA.commit(cycleOpened({ taskScope: { organId: organA, taskId: unidentifiedTaskId }, cycleId: 'unidentified-cycle', openedAt: at(10) }));
+  await portA.commit(cycleOpened({ taskScope: { organId: organA, taskId: conflictTaskId }, cycleId: 'conflict-cycle', openedAt: at(11) }));
+
+  const definitionB = definitionRecord({
+    taskScope: taskScopeB, definitionId: 'definition-b', definitionVersion: '1',
+    checkIds: ['check-1'], createdAt: at(1),
+  });
+  const definitionRefB = await portB.commit(definitionB);
+  const cycleB1Ref = await portB.commit(cycleOpened({ taskScope: taskScopeB, cycleId: 'cycle-b-1', openedAt: at(2) }));
+  const cycleB2Ref = await portB.commit(cycleOpened({
+    taskScope: taskScopeB, cycleId: 'cycle-b-2', previousCycleCommitRef: cycleB1Ref, openedAt: at(3),
+  }));
+  const occurrenceB1Ref = await portB.commit(occurrenceOpened({
+    taskScope: taskScopeB, occurrenceId: 'occurrence-b1', cycleId: 'cycle-b-1',
+    definitionId: definitionB.content.definition.definitionId,
+    definitionVersion: definitionB.content.definition.definitionVersion,
+    definitionCommitRef: definitionRefB, definitionDigest: definitionB.definitionDigest,
+    cycleOpenedCommitRef: cycleB1Ref, openedAt: at(4),
+  }));
+  const occurrenceB2Ref = await portB.commit(occurrenceOpened({
+    taskScope: taskScopeB, occurrenceId: 'occurrence-b2', cycleId: 'cycle-b-2',
+    definitionId: definitionB.content.definition.definitionId,
+    definitionVersion: definitionB.content.definition.definitionVersion,
+    definitionCommitRef: definitionRefB, definitionDigest: definitionB.definitionDigest,
+    cycleOpenedCommitRef: cycleB2Ref, openedAt: at(5),
+  }));
+  const resultB1Ref = await portB.commit(itemResult({
+    taskScope: taskScopeB, occurrenceId: 'occurrence-b1', cycleId: 'cycle-b-1',
+    definitionId: definitionB.content.definition.definitionId,
+    definitionVersion: definitionB.content.definition.definitionVersion,
+    definitionCommitRef: definitionRefB, definitionDigest: definitionB.definitionDigest,
+    cycleOpenedCommitRef: cycleB1Ref, checkId: 'check-1', resultId: 'result-b1',
+    judgment: 'before', completedAt: at(6),
+  }));
+  const resultB2Ref = await portB.commit(itemResult({
+    taskScope: taskScopeB, occurrenceId: 'occurrence-b2', cycleId: 'cycle-b-2',
+    definitionId: definitionB.content.definition.definitionId,
+    definitionVersion: definitionB.content.definition.definitionVersion,
+    definitionCommitRef: definitionRefB, definitionDigest: definitionB.definitionDigest,
+    cycleOpenedCommitRef: cycleB2Ref, checkId: 'check-1', resultId: 'result-b2',
+    judgment: 'after', completedAt: at(7),
+  }));
+  await portB.commit(settled({
+    taskScope: taskScopeB, occurrenceId: 'occurrence-b1',
+    definitionId: definitionB.content.definition.definitionId,
+    definitionVersion: definitionB.content.definition.definitionVersion,
+    openingCommitRef: occurrenceB1Ref, itemResultCommitRefs: [resultB1Ref], settledAt: at(8),
+  }));
+  await portB.commit(settled({
+    taskScope: taskScopeB, occurrenceId: 'occurrence-b2',
+    definitionId: definitionB.content.definition.definitionId,
+    definitionVersion: definitionB.content.definition.definitionVersion,
+    openingCommitRef: occurrenceB2Ref, itemResultCommitRefs: [resultB2Ref], settledAt: at(9),
+  }));
+  await portB.commit(reviewResult({
+    taskScope: taskScopeB, milestoneId: 'milestone-b', cycleId: 'cycle-b-1',
+    assignmentId: 'assignment-b', resultId: 'review-result-b', completedAt: at(10),
+  }));
+
+  const accessControl = await AccessControlService.open({ credentialPath: pathsA.webAccessCredentialPath, create: true });
+  const challenge = accessControl.createPairingChallenge('scoped-i2-http', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  const binding = {
+    bindingId: 'scoped-i2-binding', providerId: 'scoped-i2-provider', protocol: 'responses' as const,
+    endpointRef: 'fake://scoped-i2', modelRef: 'fake',
+    configDigest: 'sha256:scoped-i2', capabilityDigest: 'sha256:scoped-i2',
+  };
+  const forbidden = (): never => { throw new Error('I2 GET must remain read-only'); };
+  const uiJournal = new UiRuntimeJournal(uiRuntimeJournalPath(pathsA.checkpointsRoot, 'fake'));
+  const service = new UiRuntimeService({
+    mode: 'fake', organId: organA, binding, port: buildFakeExecutionPort(binding),
+    journal: uiJournal, closurePort: uiJournal, checkpointStoreFor: forbidden,
+    attentionPort: { publish: forbidden, resolve: forbidden }, providerState: 'ready',
+    now: () => new Date('2026-10-17T00:01:00.000Z'),
+    runtimeComposition: { createTaskAssembly: forbidden },
+    i2History: {
+      journal: portA,
+      currentPosition: {
+        read: async () => ({ state: 'known', cycleId: 'shared-cycle', planRevisionCommitRef: null }),
+      },
+    },
+    projectKey: pathsA.projectKey, workspaceRoot: workspaceA, runtimePaths: pathsA,
+    projectCatalog: () => listConfiguredProjects(pathsA),
+    explicitBrainInterpreter: { interpret: async () => { throw new Error('I2 GET must not interpret'); } },
+    memory: {
+      coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(),
+      projectKey: pathsA.projectKey, roleId: 'execution',
+    },
+  });
+  const { listener } = createUiRuntimeRequestDispatcher({
+    service, accessControl, uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false,
+  });
+  server = createServer(listener);
+  await new Promise<void>((resolve, reject) => {
+    server!.once('error', reject);
+    server!.listen(0, '127.0.0.1', () => {
+      listening = true;
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('scoped I2 HTTP consumer did not bind');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const request = async (path: string): Promise<{ readonly status: number; readonly body: I2HttpBody }> => {
+    const response = await fetch(`${baseUrl}${path}`, { headers: { cookie } });
+    return { status: response.status, body: await response.json() as I2HttpBody };
+  };
+  const beforeA = canonicalJsonStringify(await controlA.replay());
+  const beforeB = canonicalJsonStringify(await controlB.replay());
+  const taskPath = `/api/tasks/${encodeURIComponent(taskId.value)}`;
+  const legacyPath = `/api/tasks/${encodeURIComponent(legacyTaskId.value)}`;
+  const queryA = `projectKey=${encodeURIComponent(pathsA.projectKey)}&mode=fake`;
+  const queryB = `projectKey=${encodeURIComponent(pathsB.projectKey)}&mode=fake`;
+  const scopeA = { kind: 'task' as const, projectKey: pathsA.projectKey, mode: 'fake' as const, taskId };
+  const scopeB = { kind: 'task' as const, projectKey: pathsB.projectKey, mode: 'fake' as const, taskId };
+  const scopedB = {
+    cycles: await request(`${taskPath}/cycles?${queryB}&viewed=cycle-b-2`),
+    cycle: await request(`${taskPath}/cycles/cycle-b-1?${queryB}`),
+    reviews: await request(`${taskPath}/reviews?${queryB}`),
+    occurrences: await request(`${taskPath}/inspection-occurrences?${queryB}&viewed=occurrence-b2`),
+    occurrence: await request(`${taskPath}/inspection-occurrences/occurrence-b1?${queryB}`),
+    comparison: await request(`${taskPath}/inspection-comparison?${queryB}&left=occurrence-b1&right=occurrence-b2`),
+  };
+  for (const result of Object.values(scopedB)) {
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body.scope, scopeB);
+    assert.equal(result.body.current?.state, 'unknown');
+  }
+  assert.deepEqual(scopedB.cycles.body.entries?.map((entry) => entry.cycleId), ['cycle-b-1', 'cycle-b-2']);
+  assert.equal(scopedB.cycles.body.viewed?.cycleId, 'cycle-b-2');
+  assert.equal(scopedB.cycle.body.entry?.cycleId, 'cycle-b-1');
+  assert.equal(scopedB.reviews.body.entries?.[0]?.milestoneId, 'milestone-b');
+  assert.deepEqual(scopedB.occurrences.body.entries?.map((entry) => entry.occurrenceId), ['occurrence-b1', 'occurrence-b2']);
+  assert.equal(scopedB.occurrences.body.viewed?.occurrenceId, 'occurrence-b2');
+  assert.equal(scopedB.occurrence.body.entry?.occurrenceId, 'occurrence-b1');
+  assert.deepEqual(scopedB.comparison.body.items?.map((item) => [item.checkId, item.change]), [['check-1', 'changed']]);
+  const scopedA = await request(`${taskPath}/cycles?${queryA}`);
+  assert.equal(scopedA.status, 200);
+  assert.deepEqual(scopedA.body.scope, scopeA);
+  assert.equal(scopedA.body.current?.state, 'known');
+  assert.equal(scopedA.body.current?.cycleId, 'shared-cycle');
+
+  const unscoped = {
+    cycles: await request(`${legacyPath}/cycles`),
+    cycle: await request(`${legacyPath}/cycles/legacy-cycle`),
+    reviews: await request(`${legacyPath}/reviews`),
+    occurrences: await request(`${legacyPath}/inspection-occurrences?viewed=legacy-occurrence-2`),
+    occurrence: await request(`${legacyPath}/inspection-occurrences/legacy-occurrence-1`),
+    comparison: await request(`${legacyPath}/inspection-comparison?left=legacy-occurrence-1&right=legacy-occurrence-2`),
+  };
+  for (const result of Object.values(unscoped)) {
+    assert.equal(result.status, 200);
+    assert.equal(result.body.scope, undefined);
+  }
+  assert.equal(unscoped.cycle.body.entry?.cycleId, 'legacy-cycle');
+  assert.equal(unscoped.occurrence.body.entry?.occurrenceId, 'legacy-occurrence-1');
+
+  const partial = await request(`${taskPath}/cycles?projectKey=${encodeURIComponent(pathsB.projectKey)}`);
+  assert.equal(partial.status, 400);
+  assert.equal(partial.body.error?.code, 'read.scope.invalid');
+  const unknownProject = await request(`${taskPath}/cycles?projectKey=not-declared&mode=fake`);
+  assert.equal(unknownProject.status, 404);
+  assert.equal(unknownProject.body.error?.code, 'project.unknown');
+  const missingIdentity = await request(
+    `/api/tasks/${encodeURIComponent(unidentifiedTaskId.value)}/cycles?${queryB}`,
+  );
+  assert.equal(missingIdentity.status, 409);
+  assert.equal(missingIdentity.body.error?.code, 'i2-history.scope-unavailable');
+  const conflictingIdentity = await request(
+    `/api/tasks/${encodeURIComponent(conflictTaskId.value)}/cycles?${queryB}`,
+  );
+  assert.equal(conflictingIdentity.status, 409);
+  assert.equal(conflictingIdentity.body.error?.code, 'i2-history.scope-mismatch');
+  const firstPageB = await request(`${taskPath}/cycles?${queryB}&limit=1`);
+  assert.equal(firstPageB.status, 200);
+  assert.ok(firstPageB.body.nextCursor);
+  const crossProjectCursor = await request(
+    `${taskPath}/cycles?${queryA}&cursor=${encodeURIComponent(firstPageB.body.nextCursor!)}`,
+  );
+  assert.equal(crossProjectCursor.status, 400);
+  assert.equal(crossProjectCursor.body.error?.code, 'i2.cursor-scope-mismatch');
+  const unscopedCursor = await request(
+    `${legacyPath}/cycles?cursor=${encodeURIComponent(firstPageB.body.nextCursor!)}`,
+  );
+  assert.equal(unscopedCursor.status, 400);
+  assert.equal(unscopedCursor.body.error?.code, 'i2.cursor-scope-mismatch');
+  const unknownViewed = await request(`${taskPath}/cycles?${queryA}&viewed=cycle-a-does-not-exist`);
+  assert.equal(unknownViewed.status, 404);
+  assert.equal(unknownViewed.body.error?.code, 'i2.cycle.viewed-unknown');
+
+  assert.equal(canonicalJsonStringify(await controlA.replay()), beforeA);
+  assert.equal(canonicalJsonStringify(await controlB.replay()), beforeB);
+  } finally {
+    if (server !== undefined && listening) {
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve());
+      });
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test('scoped I2 public HTTP isolates same TaskId history by canonical project and mode', async () => {
+  await runScopedI2HttpFixture();
 });

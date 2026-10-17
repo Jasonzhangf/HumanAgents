@@ -158,6 +158,13 @@ function optionalTaskControlScope(url: URL): { readonly projectKey: string; read
   return { projectKey: trimmed, mode };
 }
 
+function optionalI2ReadScope(url: URL): { readonly projectKey: string; readonly mode: 'fake' | 'rcc' } | undefined {
+  const projectKey = url.searchParams.get('projectKey');
+  const mode = url.searchParams.get('mode');
+  if (projectKey === null && mode === null) return undefined;
+  return requireReadScope(url);
+}
+
 function requireHistoryLimit(url: URL, family: 'context-history' | 'checkpoints' | 'i2-history'): number {
   const limitParam = url.searchParams.get('limit');
   const limit = limitParam === null ? 20 : Number(limitParam);
@@ -1466,6 +1473,7 @@ async function handleRequest(
     const taskInspectionComparison = /^\/api\/tasks\/([^/]+)\/inspection-comparison$/.exec(path);
     if (taskInspectionComparison && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskInspectionComparison[1]!));
+      const readScope = optionalI2ReadScope(url);
       const left = url.searchParams.get('left')?.trim();
       const right = url.searchParams.get('right')?.trim();
       if (!left || !right) {
@@ -1477,23 +1485,25 @@ async function handleRequest(
           400,
         );
       }
-      writeReadResult(response, await service.taskInspectionComparison(taskId, left, right));
+      writeReadResult(response, await service.taskInspectionComparison(taskId, left, right, readScope));
       return;
     }
     const taskInspectionOccurrence = /^\/api\/tasks\/([^/]+)\/inspection-occurrences\/([^/]+)$/.exec(path);
     if (taskInspectionOccurrence && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskInspectionOccurrence[1]!));
       const occurrenceId = decodeURIComponent(taskInspectionOccurrence[2]!);
-      writeReadResult(response, await service.taskInspectionOccurrence(taskId, occurrenceId));
+      writeReadResult(response, await service.taskInspectionOccurrence(taskId, occurrenceId, optionalI2ReadScope(url)));
       return;
     }
     const taskInspectionOccurrences = /^\/api\/tasks\/([^/]+)\/inspection-occurrences$/.exec(path);
     if (taskInspectionOccurrences && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskInspectionOccurrences[1]!));
+      const readScope = optionalI2ReadScope(url);
       const limit = requireHistoryLimit(url, 'i2-history');
       const cursor = url.searchParams.get('cursor') ?? undefined;
       const viewed = url.searchParams.get('viewed')?.trim() || undefined;
       writeReadResult(response, await service.taskInspectionOccurrences(taskId, {
+        ...(readScope === undefined ? {} : readScope),
         limit,
         ...(cursor === undefined ? {} : { cursor }),
         ...(viewed === undefined ? {} : { viewed }),
@@ -1504,16 +1514,18 @@ async function handleRequest(
     if (taskBusinessCycle && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskBusinessCycle[1]!));
       const cycleId = decodeURIComponent(taskBusinessCycle[2]!);
-      writeReadResult(response, await service.taskBusinessCycle(taskId, cycleId));
+      writeReadResult(response, await service.taskBusinessCycle(taskId, cycleId, optionalI2ReadScope(url)));
       return;
     }
     const taskBusinessCycles = /^\/api\/tasks\/([^/]+)\/cycles$/.exec(path);
     if (taskBusinessCycles && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskBusinessCycles[1]!));
+      const readScope = optionalI2ReadScope(url);
       const limit = requireHistoryLimit(url, 'i2-history');
       const cursor = url.searchParams.get('cursor') ?? undefined;
       const viewed = url.searchParams.get('viewed')?.trim() || undefined;
       writeReadResult(response, await service.taskBusinessCycles(taskId, {
+        ...(readScope === undefined ? {} : readScope),
         limit,
         ...(cursor === undefined ? {} : { cursor }),
         ...(viewed === undefined ? {} : { viewed }),
@@ -1523,11 +1535,13 @@ async function handleRequest(
     const taskReviews = /^\/api\/tasks\/([^/]+)\/reviews$/.exec(path);
     if (taskReviews && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskReviews[1]!));
+      const readScope = optionalI2ReadScope(url);
       const limit = requireHistoryLimit(url, 'i2-history');
       const cursor = url.searchParams.get('cursor') ?? undefined;
       const cycleId = url.searchParams.get('cycleId')?.trim() || undefined;
       const milestoneId = url.searchParams.get('milestoneId')?.trim() || undefined;
       writeReadResult(response, await service.taskMilestoneReviews(taskId, {
+        ...(readScope === undefined ? {} : readScope),
         limit,
         ...(cursor === undefined ? {} : { cursor }),
         ...(cycleId === undefined ? {} : { cycleId }),
