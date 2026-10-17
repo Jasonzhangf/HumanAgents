@@ -71,7 +71,11 @@ import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/sr
 import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-cycle-journal.js';
 import { readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
 import { createDefaultExecutionComposition, createServiceExecutionAdmission, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
-import { UiRuntimeService, FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/index.js';
+import { UiRuntimeService, FakeReplayExecutionRuntimePort, startUiRuntime, uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/index.js';
+import { composeUiMemoryHooks } from '../../packages/app/src/cli.js';
+import { composeMemoryRuntime, createJournalCheckpointEvidencePort } from '../../packages/app/src/memory-runtime.js';
+import { resolveRuntimePaths, ensureControlLayout, loadConfiguration } from '../../packages/config/src/index.js';
+import { createJsonlAttentionPort, readJsonlAttentions } from '../../packages/app/src/attention-journal.js';
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import type { UiRuntimeServiceOptions } from '../../packages/app/src/ui-runtime/service.js';
@@ -88,7 +92,7 @@ import {
   isNativeSegmentSaveIntentV2,
   type NativeSaveProgress,
 } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
-import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import { prepareAgentProvider, prepareExecutionAgentProvider, createAgentProviderPort, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
 import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import type { ProviderConfig, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
@@ -703,6 +707,7 @@ async function upstream(
 }
 
 interface ColdFixture {
+  readonly principalOwner?: string;
   readonly root: string;
   readonly preparedPath: string;
   readonly journalPath: string;
@@ -1117,10 +1122,11 @@ async function buildColdFixture(name: string,
   }): Promise<ColdFixture> {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, `${name}-`));
-  const preparedPath = join(root, 'prepared.jsonl');
-  const journalPath = join(root, 'organ.jsonl');
+  const preparedPath = name.startsWith('c3a-') ? join(root, 'rcc', 'ui-runtime-journal.jsonl') : join(root, 'prepared.jsonl');
+  const journalPath = name.startsWith('c3a-') ? uiRuntimeControlJournalPath(join(root, 'rcc')) : join(root, 'organ.jsonl');
   const artifactsRoot = join(root, 'assets');
-  const retryPath = join(root, 'retry.jsonl');
+  const retryPath = name.startsWith('c3a-') ? join((await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: root })).journalRoot, 'ui-runtime', 'retry-cycle.jsonl') : join(root, 'retry.jsonl');
+  if (name.startsWith('c3a-')) await writeFile(join(root, 'AGENTS.md'), '# C3a project memory\n', 'utf8');
 
   const preparedJournal = new UiRuntimeJournal(preparedPath);
   const seed = new RuntimeTaskCoordinator({ organId, journal: preparedJournal,
@@ -1247,14 +1253,18 @@ async function buildColdFixture(name: string,
   const businessTurnId = 'original-business-turn';
   const grants = new JsonlTaskGrantJournal(journal);
   const capability = { actionId: 'task.execute', capabilities: ['provider.execution'], scope: taskScope };
-  const grant = await grants.grant({ requestId: 'cold-resume-grant', taskId, owner: allocation.ownerId,
+  const fixtureAccess = name.startsWith('c3a-') ? await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'), create: true }) : undefined;
+  const principalOwner = fixtureAccess?.readProductPrincipalOwner() ?? allocation.ownerId;
+  await fixtureAccess?.closeCredentialWatch();
+  const grant = await grants.grant({ requestId: 'cold-resume-grant', taskId, owner: principalOwner,
     capability, expectedRevision: 0 });
   // Establish the original parent operation-control binding through the real
   // admission owner. The public resume path reads this exact durable binding
   // (coverage plus the parent control envelope), so the fixture must not write
   // only coverage by hand.
   const admission = createServiceExecutionAdmission({ journal, preparedJournal,
-    principalOwner: allocation.ownerId, resourceBoundary: createPreparedOperationBoundary(preparedJournal),
+    principalOwner, resourceBoundary: createPreparedOperationBoundary(preparedJournal),
     now: () => new Date(at) });
   const admissionReceipt = await admission.admitExecution(allocation);
   const control = createJsonlOperationControlJournal({ journal });
@@ -1368,7 +1378,7 @@ async function buildColdFixture(name: string,
     completionJournal: completion, businessTurnId });
   const predecessor: ActiveTurnSegmentPredecessorRef = { segmentId: businessTurnId, recoveryAssetsReceiptRef: v1Receipt.commitIdentity };
 
-  return { root, preparedPath, journalPath, artifactsRoot, retryPath, allocation, assignment, taskScope,
+  return { root, preparedPath, journalPath, artifactsRoot, retryPath, allocation, assignment, taskScope, principalOwner,
     businessTurnId, predecessor, originalV1ReceiptRef: v1Receipt.commitIdentity,
     effect, effectPath: join(root, effect.relativePath), output, journal,
     acceptedEvidenceLocator: evidence(scope, 'accepted-output').locator,
@@ -1383,16 +1393,16 @@ async function buildColdFixture(name: string,
  * committed Journal, never passed across the process boundary and never re-created.
  */
 async function reopenColdFixture(root: string, taskIdValue: string): Promise<ColdFixture> {
-  const preparedPath = join(root, 'prepared.jsonl');
-  const journalPath = join(root, 'organ.jsonl');
+  const preparedPath = processMode?.startsWith('c3a-') ? join(root, 'rcc', 'ui-runtime-journal.jsonl') : join(root, 'prepared.jsonl');
+  const journalPath = processMode?.startsWith('c3a-') ? uiRuntimeControlJournalPath(join(root, 'rcc')) : join(root, 'organ.jsonl');
   const artifactsRoot = join(root, 'assets');
-  const retryPath = join(root, 'retry.jsonl');
+  const retryPath = processMode?.startsWith('c3a-') ? join((await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: root })).journalRoot, 'ui-runtime', 'retry-cycle.jsonl') : join(root, 'retry.jsonl');
   const journal = new JsonlOrganJournal(journalPath);
   const records = (await journal.verify()).records;
   const preparedJournal = new UiRuntimeJournal(preparedPath);
   const prepared = preparedJournal.replay()
     .filter((record) => record.kind === 'operation.prepared')
-    .filter((record) => record.allocation.taskId.value === taskIdValue);
+    .filter((record) => record.allocation.taskId.value === taskIdValue && record.allocation.executionEpoch === 1);
   if (prepared.length !== 1) {
     throw new Error('the committed fixture has no retained prepared allocation');
   }
@@ -1403,7 +1413,8 @@ async function reopenColdFixture(root: string, taskIdValue: string): Promise<Col
   // The v1 recovery receipt is the committed predecessor selector for a captured turn.
   // An uncaptured initial turn carries zero v1 recovery receipts.
   const v1Receipts = records.filter((record) => record.kind === 'event'
-    && record.payload?.['type'] === 'recovery-assets.phase' && record.payload?.['version'] === 1);
+    && record.payload?.['type'] === 'recovery-assets.phase' && record.payload?.['version'] === 1
+    && record.scope.operationId?.value === allocation.operationId.value);
   if (v1Receipts.length > 1) {
     throw new Error('the committed fixture carries multiple v1 recovery receipts');
   }
@@ -1594,7 +1605,7 @@ function createResumeComposition(
 ) {
   const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal });
   const composition = createDefaultExecutionComposition({
-    principalOwner: fixture.allocation.ownerId,
+    principalOwner: fixture.principalOwner ?? fixture.allocation.ownerId,
     journal: fixture.journal,
     filePath: fixture.journalPath,
     artifactsRoot: fixture.artifactsRoot,
@@ -1695,10 +1706,54 @@ async function buildResumeService(
   model: string,
   selector: ColdResumeSelector | undefined,
   useCompositionSelector = false,
+  productionMemory = false,
+  memoryFault?: { publication: boolean; diagnostics: boolean; consume?: boolean },
 ) {
   const assemblies: ResumeAssembly[] = [];
   let selectorCalls = 0;
-  const service = new UiRuntimeService({
+  const paths = productionMemory ? await resolveRuntimePaths({ controlRoot: join(fixture.root, 'control'), workspace: fixture.root }) : undefined;
+  if (paths) await ensureControlLayout(paths);
+  const memoryRuntime = paths ? await composeMemoryRuntime({
+    paths, configuration: await loadConfiguration(paths), workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot, runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'), auditPromptRef: 'project-memory-audit', autoUpdate: true,
+    checkpointEvidence: createJournalCheckpointEvidencePort({ filePath: fixture.journalPath }),
+    binding: { bindingRef: 'memory:c3a', projectKey: paths.projectKey, executionEpoch: 1,
+      scope: { namespace: 'project', projectKey: paths.projectKey, organId },
+      interactionScopeId: `runtime:${paths.projectKey}`, mainAgentId: 'c3a-main',
+      actor: { actorId: 'memory-agent', roleId: 'memory', permissions: ['memory.read', 'memory.propose'], projectKey: paths.projectKey } },
+  }) : undefined;
+  const memoryAnalyses: Array<Awaited<ReturnType<NonNullable<typeof memoryRuntime>['composition']['admission']['admit']>>> = [];
+  if (memoryRuntime) {
+    const admit = memoryRuntime.composition.admission.admit.bind(memoryRuntime.composition.admission);
+    memoryRuntime.composition.admission.admit = async (input) => {
+      const result = await admit(input);
+      memoryAnalyses.push(result);
+      return result;
+    };
+  }
+  if (memoryRuntime && memoryFault) {
+    const publishGroup = memoryRuntime.boundaryPublisher.publishRewindGroup.bind(memoryRuntime.boundaryPublisher);
+    memoryRuntime.boundaryPublisher.publishRewindGroup = async (input) => {
+      if (memoryFault.publication) throw new AppLifecycleError('memory-test-publication-failed',
+        'original Memory storage rejection', 'restore Memory publication', 'c3a-memory-storage', new Error('original storage cause'));
+      return publishGroup(input);
+    };
+    const consume = memoryRuntime.consume;
+    (memoryRuntime as { consume: typeof consume }).consume = async (input) => {
+      if (memoryFault.consume) throw new AppLifecycleError('memory-test-consume-failed',
+        'original Memory consumer failure', 'restore Memory consumer', 'c3a-memory-storage', new Error('original consumer cause'));
+      return consume(input);
+    };
+  }
+  const attentionPath = join(paths?.journalRoot ?? fixture.root, 'memory-attention.jsonl');
+  const memoryHooks = memoryRuntime && paths ? composeUiMemoryHooks({ memory: memoryRuntime,
+    checkpointJournalPath: fixture.journalPath, attentionPort: createJsonlAttentionPort({ paths, filePath: attentionPath }),
+    readAttentions: async () => {
+      if (memoryFault?.diagnostics) throw new Error('original diagnostic storage rejection');
+      return readJsonlAttentions({ filePath: attentionPath });
+    } }) : undefined;
+  const serviceOptions: UiRuntimeServiceOptions = {
     mode: 'rcc',
     organId,
     binding: serviceBinding,
@@ -1708,7 +1763,7 @@ async function buildResumeService(
     providerState: 'ready',
     journal: fixture.preparedJournal,
     closurePort: fixture.preparedJournal,
-    memory: testMemory('project-cold-resume-http'),
+    memory: memoryRuntime ? { ...memoryRuntime.composition, projectKey: paths!.projectKey, ...memoryHooks } : testMemory('project-cold-resume-http'),
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     runtimeComposition: {
       createTaskAssembly: resumeTaskAssembly(fixture, assemblies),
@@ -1740,7 +1795,7 @@ async function buildResumeService(
         };
       },
     },
-  });
+  };
   const accessControl = await AccessControlService.open({
     credentialPath: join(fixture.root, 'security', 'web-access.json'),
     create: true,
@@ -1748,6 +1803,28 @@ async function buildResumeService(
   const challenge = accessControl.createPairingChallenge('cold-resume-http', 1);
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const launchProvider: ProviderConfig = { source: 'http', provider: 'http', binding: 'cold-resume-binding',
+    protocol: 'responses', model, route: 'cold-resume-route', baseUrl: upstreamBaseUrl };
+  const launchBindings: EffectiveAgentProviderBinding[] = [
+    { agentId: 'cold-resume-agent', roleId: 'execution', source: 'agent', provider: launchProvider },
+    { agentId: 'cold-resume-planner', roleId: 'orchestration', source: 'agent', provider: launchProvider },
+  ];
+  const launched = productionMemory ? await startUiRuntime({
+    mode: 'rcc', organId, binding: serviceBinding, port: serviceOptions.port,
+    checkpointRoot: fixture.root, evidenceRoot: fixture.artifactsRoot, uiRoot: join(fixture.root, 'ui'),
+    portNumber: 0, host: '127.0.0.1', accessControl, memory: serviceOptions.memory,
+    runtimePaths: paths,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter, runtimeComposition: {
+      createTaskAssembly: serviceOptions.runtimeComposition!.createTaskAssembly,
+      prepareAgentProvider: (selection) => prepareAgentProvider({ roleId: selection.roleId,
+        agentProviderBindings: launchBindings, legacyProvider: launchProvider, evidenceRoot: fixture.artifactsRoot }),
+      prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({ roleId: selection.roleId,
+        agentProviderBindings: launchBindings, legacyProvider: launchProvider,
+        createPort: (selected) => createAgentProviderPort(selected, fixture.artifactsRoot) }, owner, lease),
+    },
+    now: () => new Date(at),
+  }) : undefined;
+  const service = launched?.service ?? new UiRuntimeService(serviceOptions);
   const dispatcher = createUiRuntimeRequestDispatcher({
     service,
     accessControl,
@@ -1768,11 +1845,16 @@ async function buildResumeService(
     url: `http://127.0.0.1:${address.port}`,
     cookie,
     assemblies,
+    memoryRuntime,
+    memoryAnalyses,
+    memoryHooks,
+    attentionPath,
     selectorCallCount: () => selectorCalls,
     close: async () => {
       server.closeIdleConnections?.();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       await accessControl.closeCredentialWatch().catch(() => undefined);
+      await launched?.close();
       for (const assembly of assemblies) await assembly.runtimePool.dispose();
     },
   };
@@ -2098,6 +2180,36 @@ async function runC3aHotChain(service: UiRuntimeService, fixture: ColdFixture, h
   return { ...controls, next };
 }
 
+async function c3aMemoryEvidence(app: Awaited<ReturnType<typeof buildResumeService>>, fixture: ColdFixture,
+  requireNewAnalysis = true) {
+  const memory = app.memoryRuntime!;
+  const events = await memory.journal.readEvents({ streamId: `memory-boundaries:task:${fixture.taskId.value}`, afterSequence: 0, limit: 100 });
+  const groups = events.filter((event) => event.messageId.startsWith('rewind-group-'));
+  assert.equal(groups.length, 1, 'production hook must publish one actual committed group');
+  const receipts = await Promise.all(groups.map((event) => memory.journal.readReceipt({
+    consumerKey: `memory-binding:${fixture.taskId.value}`, messageId: event.messageId })));
+  assert.ok(receipts.every((receipt) => receipt?.disposition === 'applied'), JSON.stringify(receipts));
+  const payload = groups[0]!.payload as { readonly analysisInputs?: { readonly corrections: readonly unknown[]; readonly rewindChains: readonly unknown[] } };
+  assert.equal(payload.analysisInputs?.corrections.length, 3, JSON.stringify(payload));
+  assert.equal(payload.analysisInputs?.rewindChains.length, 3, JSON.stringify(payload));
+  if (requireNewAnalysis) {
+    assert.ok(app.memoryAnalyses.some((outcome) => outcome.status === 'ready'
+      && outcome.value.result?.curation !== undefined), JSON.stringify(app.memoryAnalyses));
+  }
+  const review = await app.memoryHooks!.reviewState!();
+  assert.equal(review.analysis.mode, 'deterministic');
+  assert.equal(review.autoUpdate, true);
+  assert.ok(review.candidates.every((candidate) => candidate.state === 'candidate'));
+  assert.equal(await readFile(join(fixture.root, 'AGENTS.md'), 'utf8'), '# C3a project memory\n', 'Memory must not automatically apply candidates');
+  return { events, receipts, review, analyses: app.memoryAnalyses };
+}
+
+async function c3aHttpMemorySummary(app: Awaited<ReturnType<typeof buildResumeService>>) {
+  const response = await fetch(`${app.url}/api/memory/summary`, { headers: { cookie: app.cookie } });
+  assert.equal(response.status, 200);
+  return await response.json() as { readonly data: { readonly state: string; readonly detail?: string }; readonly summary: string };
+}
+
 async function runC3aProcess(): Promise<void> {
   const seeding = processMode === 'c3a-seed';
   if (!seeding && (processRoot === undefined || processTask === undefined)) {
@@ -2110,29 +2222,51 @@ async function runC3aProcess(): Promise<void> {
   let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
   let archiveRoot: string | undefined;
   try {
-    app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true);
+    app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true, true,
+      seeding ? { publication: true, diagnostics: false } : undefined);
     if (seeding) {
       const controls = await runC3aControlChain(app.service, fixture, http);
+      const recovery = await runNextExecutionAssertions(app.service, fixture, http, controls.controlFloor, controls.forward.record.restoredContext);
+      const missing = await app.memoryRuntime!.journal.readEvents({ streamId: `memory-boundaries:task:${fixture.taskId.value}`, afterSequence: 0, limit: 100 });
+      assert.equal(missing.filter((event) => event.messageId.startsWith('rewind-group-')).length, 0);
+      const summary = await c3aHttpMemorySummary(app);
+      assert.equal(summary.data.state, 'degraded');
+      assert.match(summary.data.detail!, /memory-test-publication-failed.*original Memory storage rejection/);
       archiveRoot = await archiveC3aReceipts(fixture, http, { mode: processMode, pid: process.pid,
         controlFloor: controls.controlFloor, resumedPositionEpoch: controls.resumedPositionEpoch,
-        correction: controls.correction.record, rewind: controls.rewind.record, forward: controls.forward.record });
+        correction: controls.correction.record, rewind: controls.rewind.record, forward: controls.forward.record, recovery, summary,
+        attentions: await readJsonlAttentions({ filePath: app.attentionPath }) });
     } else {
-      await app.service.hydrate();
+      const startupSummary = await c3aHttpMemorySummary(app);
+      const startupAttentions = await readJsonlAttentions({ filePath: app.attentionPath });
+      const startupEvents = await app.memoryRuntime!.journal.readEvents({ streamId: `memory-boundaries:task:${fixture.taskId.value}`, afterSequence: 0, limit: 100 });
+      const effectsBeforeReopen = effectRecordCount((await fixture.journal.verify()).records, fixture.effect.effectId);
+      await app.close();
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true, true);
+      const reopenedEvents = await app.memoryRuntime!.journal.readEvents({ streamId: `memory-boundaries:task:${fixture.taskId.value}`, afterSequence: 0, limit: 100 });
+      assert.deepEqual(reopenedEvents, startupEvents);
+      assert.deepEqual(await readJsonlAttentions({ filePath: app.attentionPath }), startupAttentions);
+      assert.equal(app.memoryAnalyses.length, 0, 'startup must not repeat applied analysis');
+      assert.equal(effectRecordCount((await fixture.journal.verify()).records, fixture.effect.effectId), effectsBeforeReopen);
       const records = (await fixture.journal.verify()).records;
       const taskScope: ScopeRef = { organId, taskId: fixture.taskId };
       const position = await createJsonlCheckpointJournal({ filePath: fixture.journalPath, journal: fixture.journal })
         .readExecutionPosition(taskScope);
-      assert.equal(position?.executionEpoch, 5, 'fresh hydrate must read the actual committed control floor');
+      assert.equal(position?.executionEpoch, 6, 'fresh hydrate must read the actual recovered execution floor');
       const current = knownCurrent(records, taskScope);
       assert.ok(current.context.contextView.activeRefs.includes(c3aAcceptedRef));
       assert.ok(!current.context.contextView.activeRefs.includes(c3aWrongRef));
       assert.ok(current.context.contextView.omittedRefs.includes(c3aWrongRef));
       assert.ok(current.context.contextView.omittedRefs.includes(c3aOmittedRef));
       assert.equal(http.wires.length, 0, 'hydrate must not send a Provider request');
-      const next = await runNextExecutionAssertions(app.service, fixture, http, position!.executionEpoch, current.context);
+      const next = await runNextExecutionAssertions(app.service, fixture, http, position!.executionEpoch, current.context,
+        'delivered the next execution result');
       archiveRoot = await archiveC3aReceipts(fixture, http, { mode: processMode, pid: process.pid,
         controlFloor: position!.executionEpoch, currentTask: current.task, retainedDuties: current.retainedDuties,
-        activeRefs: current.context.contextView.activeRefs, omittedRefs: current.context.contextView.omittedRefs, next });
+        activeRefs: current.context.contextView.activeRefs, omittedRefs: current.context.contextView.omittedRefs, next,
+        startupEvents, reopenedEvents, startupSummary, startupAttentions, summary: await c3aHttpMemorySummary(app) });
+      await c3aMemoryEvidence(app, fixture, false);
+      assert.ok(startupAttentions.some((attention) => attention.state === 'resolved' && attention.message.includes('memory-test-publication-failed')));
     }
   } catch (error) {
     await archiveC3aReceipts(fixture, http, { mode: processMode, pid: process.pid,
@@ -2160,6 +2294,7 @@ async function runNextExecutionAssertions(
   http: Upstream,
   expectedFloor: number,
   expectedContext: ContextHistoryRecord,
+  expectedCheckpointSemantic = 'C3A prior-v2 resumed semantic marker',
 ): Promise<{
   readonly operationId: string;
   readonly executionEpoch: number;
@@ -2343,7 +2478,7 @@ async function runNextExecutionAssertions(
   assert.ok(['accepted reasoning', 'accepted tool result', 'retained duty']
     .every((semantic) => executionText.some((text) => text.includes(semantic))),
   'the actual next wire must retain the accepted context semantics and duty');
-  assert.ok(executionText.some((text) => text.includes('C3A prior-v2 resumed semantic marker')),
+  assert.ok(executionText.some((text) => text.includes(expectedCheckpointSemantic)),
     'the actual next wire must consume the resumed v2 checkpoint semantics');
   assert.ok(!executionText.some((text) => text.includes(c3aWrongRef)),
     'the corrected wrong ref must not return as active reasoning');
@@ -3331,9 +3466,32 @@ function registerPublicConsumers(): void {
     const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
     let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
     let succeeded = false;
+    const memoryFault = { publication: false, diagnostics: false, consume: false };
     try {
-      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true);
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined, true, true, memoryFault);
       const chain = await runC3aHotChain(app.service, fixture, http);
+      const beforeFaultSummary = await c3aHttpMemorySummary(app);
+      memoryFault.consume = true;
+      memoryFault.diagnostics = true;
+      const current = knownCurrent((await fixture.journal.verify()).records, { organId, taskId: fixture.taskId });
+      const unaffected = await runNextExecutionAssertions(app.service, fixture, http, chain.next.executionEpoch, current.context,
+        'delivered the next execution result');
+      const faultSummary = await c3aHttpMemorySummary(app);
+      assert.equal(faultSummary.data.state, 'degraded');
+      assert.match(faultSummary.data.detail!, /memory-test-consume-failed/);
+      assert.match(faultSummary.data.detail!, /original consumer cause/);
+      assert.match(faultSummary.data.detail!, /original diagnostic storage rejection/);
+      assert.match(faultSummary.data.detail!, /canonical task Journal/);
+      const faultState = await app.memoryHooks!.reviewState!();
+      assert.ok(faultState.boundaryError?.cause instanceof AggregateError);
+      memoryFault.consume = false;
+      memoryFault.diagnostics = false;
+      const actualReview = await app.memoryRuntime!.reviewState();
+      assert.equal(actualReview.analysis.mode, 'deterministic');
+      assert.equal(actualReview.autoUpdate, true);
+      assert.ok(actualReview.candidates.length > 0);
+      assert.ok(actualReview.candidates.every((candidate) => candidate.state === 'candidate'));
+      assert.equal(await readFile(join(fixture.root, 'AGENTS.md'), 'utf8'), '# C3a project memory\n');
       const receipt = {
         mode: 'hot',
         pid: process.pid,
@@ -3361,9 +3519,16 @@ function registerPublicConsumers(): void {
           durableContext: chain.forward.record.restoredContext.durableContext,
         },
         next: chain.next,
+        unaffected,
+        beforeFaultSummary,
+        faultSummary,
+        boundaryError: faultState.boundaryError?.message,
+        actualReview,
+        attentions: await readJsonlAttentions({ filePath: app.attentionPath }),
       };
       const archiveRoot = await archiveC3aReceipts(fixture, http, receipt);
       console.log(JSON.stringify({ c3aHot: { ...receipt, archiveRoot } }));
+      await c3aMemoryEvidence(app, fixture);
       succeeded = true;
     } catch (error) {
       await archiveC3aReceipts(fixture, http, { mode: 'hot', pid: process.pid,

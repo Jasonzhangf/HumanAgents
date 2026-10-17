@@ -600,6 +600,11 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   });
   service = runtimeService;
   await runtimeService.hydrate();
+  if (options.memory.reconcileTaskScope !== undefined) {
+    for (const identity of await new JsonlTaskIdentityJournal(taskControlJournal).replay()) {
+      await options.memory.reconcileTaskScope({ taskScope: identity.scope });
+    }
+  }
   runtimeService.startImplicitConsumer();
   // The patrol is only armed when a supervisor lease is configured. Without the
   // option the runtime must not run scheduled plans at all, and the status

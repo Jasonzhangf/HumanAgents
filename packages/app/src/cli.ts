@@ -19,6 +19,7 @@ import {
   type HarnessPlugin,
   type ProviderBinding,
   type TaskId,
+  type ScopeRef,
   type AnyProviderExecutionIdentityRef,
   type ProviderExecutionIdentityRef,
   type TasklessProviderExecutionIdentityRef,
@@ -88,6 +89,9 @@ import { TaskIdentityConsumer } from '../../runtime/src/orchestration/task-ident
 import { UiRuntimeJournal, uiRuntimeControlJournalPath } from './ui-runtime/journal.js';
 import { ServiceExecutionCheckpointStore } from './ui-runtime/execution-composition.js';
 import type { AttentionPort } from '../../runtime/src/control/attention.js';
+import { createJournalCheckpointEvidencePort, reconcileCommittedReentryMemoryBoundaries, type MemoryRuntime } from './memory-runtime.js';
+import { createJsonlAttentionPort, readJsonlAttentions } from './attention-journal.js';
+import type { UiRuntimeMemoryComposition } from './ui-runtime/service.js';
 import type { RuntimeTaskEvent } from '../../runtime/src/ui-runtime/coordinator.js';
 import {
   RESPONSES_BASH_TOOL,
@@ -353,28 +357,121 @@ function memoryTrigger(outcome: Checkpoint['outcome']): 'completion' | 'blocked'
   return null;
 }
 
+export function composeUiMemoryHooks(input: {
+  readonly memory: MemoryRuntime;
+  readonly checkpointJournalPath: string;
+  readonly attentionPort: AttentionPort;
+  readonly readAttentions: () => Promise<readonly Attention[]>;
+}): Pick<UiRuntimeMemoryComposition, 'checkpointBoundary' | 'reconcileTaskScope' | 'reviewState'> {
+  const ownerId = 'humanagent.app.memory';
+  let boundaryError: AppLifecycleError | undefined;
+  let diagnosticBoundaryId: string | undefined;
+  const reason = (error: unknown): string => {
+    const own = error instanceof Error
+      ? `${'code' in error ? String(error.code) + ': ' : ''}${error.message}` : String(error);
+    if (error instanceof AggregateError) return `${own}; ${error.errors.map(reason).join('; ')}`;
+    return error instanceof Error && 'cause' in error && error.cause !== undefined
+      ? `${own}; caused by ${reason(error.cause)}` : own;
+  };
+  const attentionId = (scope: ScopeRef, phase: string, boundary: string) =>
+    `memory:${scope.organId.value}:${scope.taskId?.value ?? 'organ'}:${phase}:${boundary}`;
+  async function diagnose(scope: ScopeRef, phase: string, boundary: string, error: unknown,
+    evidenceRefs: readonly EvidenceRef[] = []): Promise<void> {
+    const attention: Attention = {
+      attentionId: attentionId(scope, phase, boundary), scope, ownerId, severity: 'info', state: 'open',
+      message: `${phase}: ${reason(error)}`,
+      nextAction: { kind: 'recover', ref: `review canonical task Journal ${input.checkpointJournalPath} for task ${scope.taskId?.value ?? 'organ'}; boundary ${boundary}` },
+      evidenceRefs,
+    };
+    try {
+      const existing = (await input.readAttentions()).find((entry) => entry.attentionId === attention.attentionId);
+      if (existing?.state !== 'open' || existing.message !== attention.message) await input.attentionPort.publish(attention);
+      if (diagnosticBoundaryId === attention.attentionId) boundaryError = undefined;
+    } catch (diagnosticError) {
+      diagnosticBoundaryId = attention.attentionId;
+      boundaryError = new AppLifecycleError('memory-boundary-diagnostic-failed',
+        `${attention.message}; diagnostic storage: ${reason(diagnosticError)}`,
+        attention.nextAction!.ref!, ownerId, new AggregateError([error, diagnosticError], 'Memory boundary and diagnostic storage failed'));
+    }
+  }
+  async function resolve(scope: ScopeRef, phase: string, boundary: string): Promise<void> {
+    try {
+      const existing = (await input.readAttentions()).find((entry) => entry.attentionId === attentionId(scope, phase, boundary));
+      if (existing && existing.state !== 'resolved') await input.attentionPort.resolve({ ...existing, state: 'resolved' });
+      if (diagnosticBoundaryId === attentionId(scope, phase, boundary)) boundaryError = undefined;
+    } catch (error) {
+      diagnosticBoundaryId = attentionId(scope, phase, boundary);
+      boundaryError = new AppLifecycleError('memory-boundary-diagnostic-failed', reason(error),
+        `read Memory diagnostics and the canonical task Journal ${input.checkpointJournalPath}`, ownerId, error);
+    }
+  }
+  async function reconcileTaskScope({ taskScope }: { readonly taskScope: ScopeRef }): Promise<void> {
+    try {
+      const result = await reconcileCommittedReentryMemoryBoundaries({
+        memory: input.memory, checkpointJournalPath: input.checkpointJournalPath, taskScope,
+      });
+      for (const issue of result.issues) {
+        await diagnose(taskScope, 'reentry', issue.reentryClosureIds.join(','),
+          new AppLifecycleError(issue.code, issue.message, 'review the canonical reentry boundary', ownerId));
+      }
+      for (const group of result.groups) await resolve(taskScope, 'reentry', group.reentryClosureIds.join(','));
+      if (result.groups.length > 0 && result.issues.length === 0) await resolve(taskScope, 'reconcile', 'history');
+    } catch (error) {
+      await diagnose(taskScope, 'reconcile', 'history', error);
+    }
+  }
+  return {
+    reconcileTaskScope,
+    async reviewState() {
+      // The actual consumer read is required; only optional hook diagnostics are isolated.
+      const review = await input.memory.reviewState();
+      let boundaryAttentions: readonly Attention[] = [];
+      try {
+        boundaryAttentions = (await input.readAttentions()).filter((entry) => entry.ownerId === ownerId);
+        if (boundaryError?.code === 'memory-boundary-diagnostic-read-failed') boundaryError = undefined;
+      } catch (error) {
+        if (boundaryError === undefined) boundaryError = new AppLifecycleError('memory-boundary-diagnostic-read-failed',
+          reason(error),
+          `read Memory diagnostics and the canonical task Journal ${input.checkpointJournalPath}`, ownerId,
+          error);
+      }
+      return { ...review, boundaryAttentions, ...(boundaryError === undefined ? {} : { boundaryError }) };
+    },
+    checkpointBoundary: {
+      async publish({ checkpoint, recordDigest }) {
+        if (checkpoint.scope.taskId !== undefined) await reconcileTaskScope({ taskScope: {
+          organId: checkpoint.scope.organId, taskId: checkpoint.scope.taskId,
+        } });
+        const trigger = memoryTrigger(checkpoint.outcome);
+        if (!trigger) return;
+        try {
+          if (!recordDigest) throw new AppLifecycleError('memory-boundary-digest-missing',
+            `checkpoint ${checkpoint.id.value} is committed without a journal record digest`,
+            'recover the committed checkpoint record before publishing the memory boundary', 'humanagent.cli');
+          if (checkpoint.scope.taskId !== undefined) {
+            await input.memory.boundaryPublisher.publishTask({ checkpoint, recordDigest, trigger });
+          } else {
+            await input.memory.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
+          }
+          await input.memory.consume();
+          await resolve(checkpoint.scope, 'publication', checkpoint.id.value);
+        } catch (error) {
+          await diagnose(checkpoint.scope, 'publication', checkpoint.id.value, error, checkpoint.evidenceRefs);
+        }
+      },
+    },
+  };
+}
+
 function uiMemoryEvidence(checkpointRoot: string, mode: 'fake' | 'rcc') {
   const filePathFor = (scope: Checkpoint['scope']) => join(
     checkpointRoot,
     mode,
     `task-${scope.taskId!.value}-cycle-${scope.cycleId!.value}.jsonl`,
   );
-  return {
-    async readCommitted({ checkpoint }: { readonly checkpoint: Checkpoint }) {
-      return readCommittedCheckpoint({
-        filePath: filePathFor(checkpoint.scope),
-        scope: checkpoint.scope,
-        checkpointId: checkpoint.id,
-      });
-    },
-    async readEvidence({ evidence }: { readonly evidence: EvidenceRef }) {
-      return readCheckpointEvidence({
-        filePath: filePathFor(evidence.scope),
-        scope: evidence.scope,
-        evidence,
-      });
-    },
-  };
+  return createJournalCheckpointEvidencePort({
+    filePath: uiRuntimeControlJournalPath(join(checkpointRoot, mode)), fallbackFilePathFor: filePathFor,
+  });
 }
 
 async function composeTaskMemory(input: {
@@ -1705,27 +1802,12 @@ export async function main(args: readonly string[]): Promise<void> {
               interaction: memoryRuntime.composition.interaction,
               bindingRef: memoryRuntime.composition.bindingRef,
               roleId: 'review',
-              reviewState: memoryRuntime.reviewState,
-              checkpointBoundary: {
-                publish: async ({ checkpoint, recordDigest }) => {
-                  const trigger = memoryTrigger(checkpoint.outcome);
-                  if (!trigger) return;
-                  if (!recordDigest) {
-                    throw new AppLifecycleError(
-                      'memory-boundary-digest-missing',
-                      `checkpoint ${checkpoint.id.value} is committed without a journal record digest`,
-                      'recover the committed checkpoint record before publishing the memory boundary',
-                      'humanagent.cli',
-                    );
-                  }
-                  if (checkpoint.scope.taskId !== undefined) {
-                    await memoryRuntime.boundaryPublisher.publishTask({ checkpoint, recordDigest, trigger });
-                  } else {
-                    await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
-                  }
-                  await memoryRuntime.consume();
-                },
-              },
+              ...composeUiMemoryHooks({
+                memory: memoryRuntime,
+                checkpointJournalPath: uiRuntimeControlJournalPath(join(checkpointRoot, mode)),
+                attentionPort: createJsonlAttentionPort({ paths, filePath: join(paths.journalRoot, 'memory-attention.jsonl') }),
+                readAttentions: () => readJsonlAttentions({ filePath: join(paths.journalRoot, 'memory-attention.jsonl') }),
+              }),
             },
             runtimeComposition: {
               ...(mode === 'fake' ? {} : {
