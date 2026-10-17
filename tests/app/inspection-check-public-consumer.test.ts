@@ -19,7 +19,10 @@ import {
   type InspectionItemDelivery,
   type InspectionItemResultRecord,
 } from '../../packages/contracts/src/i2-history.js';
-import { createInspectionCheckPort } from '../../packages/app/src/inspection-check.js';
+import {
+  createInspectionAcceptedCheckPort,
+  createInspectionCheckPort,
+} from '../../packages/app/src/inspection-check.js';
 import {
   APP_CHILD_DELIVER_TOOL,
   APP_CHILD_TOOLS,
@@ -295,11 +298,18 @@ test('inspection actor returns the exact structured observation, rejects summary
   assert.equal(failedExecutionRun.counts.execute, 1);
 });
 
-test('inspection accepted delivery validates committed identity without re-executing or reading output', async () => {
+test('inspection accepted-only port validates committed identity without re-executing or reading output', async () => {
   const fullBody = 'full child result body; this is not inspection control JSON';
   const result = workResult(fullBody, completedDigest);
-  const run = buildPort();
-  const port = run.port;
+  let reads = 0;
+  const port = createInspectionAcceptedCheckPort({
+    journal: {
+      async read() {
+        reads += 1;
+        return definition;
+      },
+    },
+  });
 
   const accepted = await port.accept({
     binding,
@@ -317,7 +327,7 @@ test('inspection accepted delivery validates committed identity without re-execu
   assert.equal(accepted.evidenceRefs, completedDelivery.evidenceRefs);
   assert.deepEqual(accepted.evidenceRefs, [evidence]);
   assert.equal(result.producedArtifactBodies?.[0], fullBody);
-  assert.deepEqual(run.counts, { execute: 0, read: 1, readOutput: 0 });
+  assert.equal(reads, 1);
 
   await assert.rejects(
     () => port.accept({
@@ -330,20 +340,26 @@ test('inspection accepted delivery validates committed identity without re-execu
     expectContractError(/definition digest/),
   );
 
-  const foreignDefinitionRun = buildPort({
-    definition: {
-      ...definition,
-      content: {
-        ...definition.content,
-        definition: {
-          ...definition.content.definition,
-          definitionVersion: 'inspection-actor-definition-foreign',
-        },
+  let foreignReads = 0;
+  const foreignDefinitionPort = createInspectionAcceptedCheckPort({
+    journal: {
+      async read() {
+        foreignReads += 1;
+        return {
+          ...definition,
+          content: {
+            ...definition.content,
+            definition: {
+              ...definition.content.definition,
+              definitionVersion: 'inspection-actor-definition-foreign',
+            },
+          },
+        };
       },
     },
   });
   await assert.rejects(
-    () => foreignDefinitionRun.port.accept({
+    () => foreignDefinitionPort.accept({
       binding,
       check,
       assignment,
@@ -352,7 +368,7 @@ test('inspection accepted delivery validates committed identity without re-execu
     }),
     expectContractError(/definition identity/),
   );
-  assert.deepEqual(foreignDefinitionRun.counts, { execute: 0, read: 1, readOutput: 0 });
+  assert.equal(foreignReads, 1);
 });
 
 test('inspection actor rejects a changed immutable check and a foreign structured delivery', async () => {

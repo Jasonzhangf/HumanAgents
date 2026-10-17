@@ -89,6 +89,18 @@ export function createInspectionCheckPort(input: {
       validateDeliveryMatch(check, assignment, result, record.delivery);
       return record.delivery;
     },
+    accept: createInspectionAcceptedCheckPort(input).accept,
+  };
+}
+
+/**
+ * Accepts an already-produced inspection delivery without executing the actor
+ * or reading its output. The journal remains the authoritative definition source.
+ */
+export function createInspectionAcceptedCheckPort(input: {
+  readonly journal: Pick<I2JournalPort, 'read'>;
+}): Pick<InspectionAcceptedCheckPort, 'accept'> {
+  return {
     async accept({ binding, check, assignment, result, delivery }) {
       await validateRequest(input.journal, { binding, check, assignment });
       validateWorkResult(result, assignment);
