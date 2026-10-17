@@ -1088,3 +1088,4 @@ export function projectMemoryInteraction(input: MemoryInteractionSurfaceInput): 
 
 export * from './runtime.js';
 export * from './interaction-work-card.js';
+export * from './agent-activity.js';

@@ -1,14 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { id } from '@humanagent/contracts';
+import {
+  id,
+  type EvidenceRef,
+  type TaskAgentActivityOwnershipRecord,
+  type TaskAgentActivitySelectionOutcome,
+  type TaskExecutionInstanceIdentity,
+} from '@humanagent/contracts';
 import {
   projectPipelineObservation,
+  projectRuntimeAgentActivity,
   type ObservationScopeSource,
   type ObservationNodeSource,
   type ObservationAgentFrameSource,
   type ObservationHandoffSource,
 } from '../../packages/ui/projection/index.js';
 import { UiProjectionError, type UiDataSource } from '../../packages/ui/contracts/models.js';
+import type { RuntimeReadScope } from '../../packages/ui/contracts/runtime.js';
 import {
   projectRuntimeDashboard,
   projectRuntimeTaskDashboard,
@@ -20,6 +28,7 @@ import {
 } from '../../packages/ui/projection/runtime.js';
 
 const runtimeApiModuleUrl = new URL('../../../../docs/ui/runtime-api.js', import.meta.url).href;
+const agentActivityModuleUrl = new URL('../../../../docs/ui/agent-activity.js', import.meta.url).href;
 
 const observationSource: UiDataSource = { state: 'ready', label: '运行记录' };
 
@@ -582,5 +591,276 @@ test('runtime dashboard reports idle instead of a liveness claim when nothing is
 test('runtime dashboard omits liveness when the runtime reported no real facts', () => {
   const dashboard = projectRuntimeTaskDashboard(livenessTask('running', undefined), 'fake');
   assert.equal(dashboard.liveness, undefined);
+});
+
+// ── Agent activity UI projection (M4/F09 A3) ───────────────────────────────
+// The projection consumes only the frozen `TaskAgentActivitySelectionOutcome`.
+// These cases prove the frozen renderer can consume its output, that current
+// and selected stay independent, and that unknown/unavailable/failure keep
+// their real meaning. No case re-runs the runtime selector.
+
+const agentTaskId = id('task', 'task-agent-activity');
+const agentOrganId = id('organ', 'organ-agent-activity');
+
+function agentEvidence(value: string): EvidenceRef {
+  return {
+    evidenceId: id('evidence', value),
+    kind: 'execution',
+    source: 'journal',
+    locator: `journal://${value}`,
+    digest: `digest-${value}`,
+    scope: { organId: agentOrganId, taskId: agentTaskId },
+  };
+}
+
+function incarnationInstance(input: {
+  readonly runtimeId: string;
+  readonly executionEpoch: number;
+  readonly roleId: string;
+  readonly generation: number;
+  readonly agentInstanceId: string;
+  readonly assignmentId: string;
+}): TaskExecutionInstanceIdentity {
+  return { kind: 'incarnation', incarnation: { ...input, taskId: agentTaskId } };
+}
+
+const agentCurrentRecord: TaskAgentActivityOwnershipRecord = {
+  taskId: agentTaskId,
+  instance: incarnationInstance({
+    runtimeId: 'runtime-current',
+    executionEpoch: 5,
+    roleId: 'role-shared',
+    generation: 2,
+    agentInstanceId: 'agent-current',
+    assignmentId: 'assignment-current',
+  }),
+  assignmentId: 'assignment-current',
+  attempt: 3,
+  executionEpoch: 5,
+  objective: 'keep the current instance independent',
+  businessTurnId: 'turn-current',
+  segmentId: 'segment-current',
+  nodeId: 'node-current',
+  sourceKind: 'active-turn',
+  currency: 'current',
+  commitRefs: [{ commitId: 'commit-current', journalSeq: 11, recordDigest: 'digest-commit-current' }],
+  evidenceRefs: [agentEvidence('evidence-current')],
+};
+
+const agentSelectedRecord: TaskAgentActivityOwnershipRecord = {
+  taskId: agentTaskId,
+  instance: incarnationInstance({
+    runtimeId: 'runtime-selected',
+    executionEpoch: 4,
+    roleId: 'role-shared',
+    generation: 1,
+    agentInstanceId: 'agent-selected',
+    assignmentId: 'assignment-selected',
+  }),
+  assignmentId: 'assignment-selected',
+  attempt: 2,
+  executionEpoch: 4,
+  objective: 'keep the selected instance independent',
+  businessTurnId: 'turn-selected',
+  segmentId: 'segment-selected',
+  nodeId: 'node-selected',
+  sourceKind: 'resumed-segment',
+  currency: 'historical',
+  commitRefs: [{ commitId: 'commit-selected', journalSeq: 9, recordDigest: 'digest-commit-selected' }],
+  evidenceRefs: [agentEvidence('evidence-selected')],
+};
+
+const agentUnknownRecord: TaskAgentActivityOwnershipRecord = {
+  taskId: agentTaskId,
+  instance: { kind: 'native-execution', execution: { runtimeId: 'runtime-unknown', executionEpoch: 6 } },
+  assignmentId: 'assignment-unknown',
+  executionEpoch: 6,
+  objective: 'unknown must stay unknown',
+  sourceKind: 'native-allocation',
+  currency: 'unknown',
+  missingSource: 'no binding record for epoch 6',
+  commitRefs: [],
+  evidenceRefs: [agentEvidence('evidence-unknown')],
+};
+
+const agentActivityScope: RuntimeReadScope = {
+  kind: 'task', projectKey: 'project-agent-activity', mode: 'fake', taskId: agentTaskId,
+};
+
+type AgentActivityValue = Extract<TaskAgentActivitySelectionOutcome, { readonly ok: true }>['value'];
+
+const agentCatalogValue: AgentActivityValue = {
+  taskId: agentTaskId,
+  mode: 'catalog',
+  current: [agentCurrentRecord],
+  historical: [agentSelectedRecord],
+  unknown: [agentUnknownRecord],
+  unavailableSources: [{
+    sourceId: 'child-invocation:invocation-1',
+    ownerId: 'humanagent.runtime.observation',
+    message: 'child invocation has no managed instance binding',
+  }],
+};
+const agentCatalogOutcome: TaskAgentActivitySelectionOutcome = { ok: true, value: agentCatalogValue };
+
+const agentSelectedValue: AgentActivityValue = {
+  taskId: agentTaskId,
+  mode: 'selected',
+  selectedInstance: agentSelectedRecord.instance,
+  selected: [agentSelectedRecord],
+  current: [agentCurrentRecord],
+  historical: [],
+  unknown: [],
+  unavailableSources: [],
+};
+const agentSelectedOutcome: TaskAgentActivitySelectionOutcome = { ok: true, value: agentSelectedValue };
+
+class AgentActivityPortElement {
+  readonly children: AgentActivityPortElement[] = [];
+  readonly attributes: Record<string, string> = {};
+  readonly listeners = new Map<string, Set<() => void>>();
+  textContent: string;
+  className: string;
+  constructor(readonly tag: string, text?: string, className?: string) {
+    this.textContent = text ?? '';
+    this.className = className ?? '';
+  }
+  append(...children: AgentActivityPortElement[]): void {
+    this.children.push(...children);
+  }
+  setAttribute(name: string, value: string): void {
+    this.attributes[name] = value;
+  }
+  addEventListener(type: string, listener: () => void): void {
+    const listeners = this.listeners.get(type) ?? new Set<() => void>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+  removeEventListener(type: string, listener: () => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+  click(): void {
+    for (const listener of this.listeners.get('click') ?? []) listener();
+  }
+}
+
+const agentActivityElement = (tag: string, text?: string, className?: string) =>
+  new AgentActivityPortElement(tag, text, className);
+
+function agentActivityNodes(root: AgentActivityPortElement): AgentActivityPortElement[] {
+  return [root, ...root.children.flatMap(agentActivityNodes)];
+}
+
+function agentActivityText(root: AgentActivityPortElement): string {
+  return agentActivityNodes(root).map((node) => node.textContent).join('\n');
+}
+
+test('agent activity projection renders a native catalog through the real consumer', async () => {
+  const result = projectRuntimeAgentActivity(agentCatalogOutcome, agentActivityScope);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.surface, 'runtime-agent-activity');
+  assert.equal(result.value.mode, 'catalog');
+  assert.deepEqual(result.value.scope, agentActivityScope);
+  assert.equal(result.value.current.length, 1);
+  assert.equal(result.value.historical.length, 1);
+  assert.equal(result.value.unknown.length, 1);
+  assert.equal(result.value.selected, undefined);
+  assert.equal(result.value.current[0].instance.label, '运行实例');
+  assert.equal(result.value.unknown[0].instance.label, '原生执行');
+  assert.equal(result.value.unknown[0].attempt, undefined);
+  assert.equal(result.value.current[0].attempt, 3);
+  assert.deepEqual(result.value.unavailableSources, agentCatalogValue.unavailableSources);
+
+  const { renderAgentActivity } = await import(agentActivityModuleUrl);
+  const view = renderAgentActivity(result, { element: agentActivityElement });
+  const rendered = agentActivityText(view.element);
+  assert.equal(/keep the current instance independent/.test(rendered), true, rendered);
+  assert.equal(/unknown must stay unknown/.test(rendered), true, rendered);
+  assert.equal(/child invocation has no managed instance binding/.test(rendered), true, rendered);
+  assert.equal(/原生执行/.test(rendered), true, rendered);
+  assert.equal(/runtime-current|agent-current|role-shared|assignment-current|node-current/.test(rendered), false, rendered);
+  view.dispose();
+});
+
+test('agent activity projection keeps current and selected independent with exact refs', () => {
+  const result = projectRuntimeAgentActivity(agentSelectedOutcome, agentActivityScope);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const value = result.value;
+  assert.equal(value.mode, 'selected');
+  assert.deepEqual(value.selectedInstance, {
+    kind: 'incarnation',
+    label: '运行实例',
+    runtimeId: 'runtime-selected',
+    executionEpoch: 4,
+    roleId: 'role-shared',
+    generation: 1,
+    agentInstanceId: 'agent-selected',
+  });
+  assert.equal(value.selected?.length, 1);
+  const selected = value.selected?.[0];
+  if (selected === undefined) throw new Error('expected a selected entry');
+  assert.equal(selected.instance.kind, 'incarnation');
+  assert.equal(selected.instance.runtimeId, 'runtime-selected');
+  assert.equal(
+    selected.instance.kind === 'incarnation' ? selected.instance.agentInstanceId : undefined,
+    'agent-selected',
+  );
+  assert.equal(selected.taskId, agentTaskId);
+  assert.equal(selected.assignmentId, 'assignment-selected');
+  assert.equal(selected.attempt, 2);
+  assert.equal(selected.businessTurnId, 'turn-selected');
+  assert.equal(selected.segmentId, 'segment-selected');
+  assert.equal(selected.nodeId, 'node-selected');
+  assert.equal(selected.currency, 'historical');
+  assert.equal(selected.currencyLabel, '历史记录');
+  assert.equal(selected.sourceKind, 'resumed-segment');
+  assert.equal(selected.sourceKindLabel, '恢复回合分段');
+  assert.deepEqual(selected.commitRefs, agentSelectedRecord.commitRefs);
+  assert.deepEqual(selected.evidenceRefs, agentSelectedRecord.evidenceRefs);
+
+  assert.equal(value.current.length, 1);
+  assert.equal(value.current[0].instance.runtimeId, 'runtime-current');
+  assert.equal(value.historical.length, 0);
+  assert.equal(value.unknown.length, 0);
+  assert.equal(selected === value.current[0], false);
+  assert.equal(selected.instance === value.current[0].instance, false);
+});
+
+test('agent activity projection preserves unknown, unavailable and failure meaning', () => {
+  const catalog = projectRuntimeAgentActivity(agentCatalogOutcome, agentActivityScope);
+  assert.equal(catalog.ok, true);
+  if (!catalog.ok) return;
+  assert.deepEqual(catalog.value.current.map((entry) => entry.instance.runtimeId), ['runtime-current']);
+  assert.deepEqual(catalog.value.unknown.map((entry) => entry.instance.runtimeId), ['runtime-unknown']);
+  assert.equal(
+    catalog.value.current.some((entry) => entry.instance.runtimeId === 'runtime-unknown'),
+    false,
+  );
+  assert.equal(catalog.value.unknown[0].currency, 'unknown');
+  assert.equal(catalog.value.unknown[0].currencyLabel, '当前归属未知');
+  assert.equal(catalog.value.unknown[0].attempt, undefined);
+  assert.equal(catalog.value.unknown[0].missingSource, 'no binding record for epoch 6');
+  assert.deepEqual(catalog.value.unavailableSources, agentCatalogValue.unavailableSources);
+
+  const failure = projectRuntimeAgentActivity({
+    ok: false,
+    failure: {
+      code: 'agent-activity.source-conflict',
+      ownerId: 'humanagent.runtime.observation',
+      message: 'record identity conflicts with the binding',
+      nextAction: 'inspect the conflicting source before selecting an instance',
+    },
+  });
+  assert.deepEqual(failure, {
+    ok: false,
+    failure: {
+      code: 'agent-activity.source-conflict',
+      ownerId: 'humanagent.runtime.observation',
+      message: 'record identity conflicts with the binding',
+      nextAction: 'inspect the conflicting source before selecting an instance',
+    },
+  });
 });
 
