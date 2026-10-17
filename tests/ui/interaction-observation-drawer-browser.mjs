@@ -385,6 +385,23 @@ try {
     }))
     observe(`${run.label} semantic panel`, semanticPanel)
     record(`${run.label} shared semantic observation panel mounts read-only`, semanticPanel.mounted && semanticPanel.contract === 'semantic-observation-view@1' && semanticPanel.modes === 4 && semanticPanel.text.includes('任务已创建'), semanticPanel)
+    if (run.label === 'desktop') {
+      // The four-corner chooser must drive the real panel, not only its own
+      // pressed state. A pure mode switch may not re-read the observation.
+      await page.locator('button[data-shell-section="view"]').click()
+      await page.locator('button[data-display-mode="raw"]').click()
+      await page.waitForFunction(() => document.querySelector('.semantic-observation')?.dataset.mode === 'raw', undefined, { timeout: 5000 }).catch(() => {})
+      const switched = await page.evaluate(() => {
+        const panel = document.querySelector('.semantic-observation')
+        return {
+          mode: panel?.dataset.mode ?? '',
+          pressed: panel?.querySelector('.so-mode[data-semantic-mode="raw"]')?.getAttribute('aria-pressed') ?? '',
+          body: panel?.innerText ?? '',
+        }
+      })
+      record('desktop four-corner switch drives the panel mode and body', switched.mode === 'raw' && switched.pressed === 'true' && switched.body.includes('原始记录'), switched)
+      await page.locator('.shell-layer-close:visible').click()
+    }
     record(`${run.label} shared status/conversation/trace card`, drawer.statusRendered && drawer.conversationRendered && drawer.traceRendered, drawer)
     record(`${run.label} conversation contains real activity and conclusion`, drawer.conversationText.includes('已接收执行请求') && drawer.conversationText.includes('执行完成'), drawer.conversationText)
     const realTurnGroups = drawer.turnGroups.filter((group) => group.turnKey === REAL_TURN_ID)

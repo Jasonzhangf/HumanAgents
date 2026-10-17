@@ -66,22 +66,19 @@ function requestAgentQuery(selection) {
   return encoded.value.size ? encoded.value : undefined
 }
 
-// Observation renders one read-only node-flow layer. Only the `current`
-// reading layer has a real renderer here, so the mode chooser offers just that
-// one and every other layer stays an explicit unavailable receipt.
+// Observation renders the node-flow layer for `current` and drives the shared
+// read-only panel for the three history perspectives. The mode chooser and the
+// panel buttons converge here; switching perspective never re-reads the page.
+const OBSERVATION_DISPLAY_MODES = ['current', 'semantic', 'actions', 'raw']
 const OBSERVATION_DISPLAY_SURFACE = {
-  supportedModes: ['current'],
-  unavailableReasons: {
-    semantic: '任务观测只呈现只读节点流转。',
-    actions: '任务观测只呈现只读节点流转。',
-    raw: '任务观测只呈现只读节点流转。',
-  },
+  supportedModes: OBSERVATION_DISPLAY_MODES,
   applyMode: applyObservationDisplayMode,
 }
 
 const {
   main,
   status,
+  applyDisplayMode,
   initializeDisplayPreference,
   disposeDisplayPreference,
 } = makePageShell(
@@ -107,6 +104,7 @@ let currentScopeRef
 let currentFrames = []
 let currentHandoffs = []
 let runtimeMode = ''
+let observationDisplayMode = 'current'
 
 // One shared panel survives flow redraws and node selection. The retained host
 // element is re-attached on each render, so an EventSource is not torn down
@@ -891,7 +889,16 @@ function renderSemanticObservationSection() {
     semanticObservationHost = element('div', undefined, 'semantic-observation-host')
     semanticObservationHost.dataset.semanticObservationHost = taskId ? 'task' : 'missing'
     if (taskId) {
-      semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, { taskId })
+      semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, {
+        taskId,
+        // The panel's own four buttons reuse the shell programmatic transition,
+        // so a local click cannot write the follow-last preference. The corner
+        // buttons keep the original manual controller path.
+        onModeChange: (mode) => {
+          if (mode === observationDisplayMode) return
+          void applyDisplayMode(mode)
+        },
+      })
     } else {
       semanticObservationHost.append(element('p', '当前 URL 没有 task 参数，无法读取语义观测。', 'empty'))
     }
@@ -937,34 +944,30 @@ async function load(scopeRef) {
 }
 
 async function applyObservationDisplayMode({ mode }) {
-  if (mode !== 'current') {
-    return { ok: false, failure: unavailableModeFailure(mode, '任务观测只呈现只读节点流转。') }
+  if (!OBSERVATION_DISPLAY_MODES.includes(mode)) {
+    return { ok: false, failure: unavailableModeFailure(mode, '任务观测支持 current、semantic、actions 和 raw。') }
   }
-  const serial = ++loadSerial
-  try {
-    const projection = await api.observation(taskId, currentScopeRef, selectedNodeId, agentQuery)
-    if (serial !== loadSerial) return { ok: false, superseded: true, failure: { code: 'observation.superseded', ownerId: 'humanagent.ui', message: '更晚的读取已经接管这个页面。', nextAction: '使用当前显示的观测结果' } }
-    agentReadPending = false
-    agentReadFailure = undefined
-    renderObservation(projection)
-    return { ok: true, mode: 'current' }
-  } catch (error) {
-    if (serial !== loadSerial) return { ok: false, superseded: true, failure: { code: 'observation.superseded', ownerId: 'humanagent.ui', message: '更晚的读取已经接管这个页面。', nextAction: '使用当前显示的观测结果' } }
-    agentReadPending = false
-    if (agentQuery) {
-      agentReadFailure = error
-      if (lastProjection) renderObservation(lastProjection)
-    }
-    renderPageError(status, error)
-    return {
-      ok: false,
-      failure: {
-        code: error?.code || 'observation.read-failed',
-        ownerId: error?.ownerId || 'humanagent.ui',
-        message: error?.message || '任务观测读取失败。',
-        nextAction: error?.nextAction || '重新读取这个任务观测。',
-      },
-    }
+  if (semanticObservationPanel) {
+    // Pure perspective switch: the panel keeps its live instance and range, and
+    // the page re-presents the projection it already holds.
+    observationDisplayMode = mode
+    semanticObservationPanel.setMode(mode)
+    if (lastProjection) renderObservation(lastProjection)
+    return { ok: true, mode }
+  }
+  if (mode === 'current' && lastProjection) {
+    observationDisplayMode = mode
+    renderObservation(lastProjection)
+    return { ok: true, mode }
+  }
+  return {
+    ok: false,
+    failure: {
+      code: 'observation.panel-unavailable',
+      ownerId: 'humanagent.ui',
+      message: '共享语义观测面板尚未挂载。',
+      nextAction: '重新打开这个任务观测。',
+    },
   }
 }
 
