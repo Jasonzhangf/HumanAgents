@@ -339,7 +339,7 @@ const wiredV2 = wiredEnvelope([
   wiredEvent('event-3', 'operation.completed', 'completed', '最终答复已提交', '2026-10-10T09:42:00Z'),
 ])
 
-function panelHtml(taskId, prelude = '') {
+function panelHtml(taskId, prelude = '', apiClient = '') {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -354,9 +354,12 @@ function panelHtml(taskId, prelude = '') {
     <div id="host"></div>
   </main>
   <script type="module">
-    import { mountSemanticObservationPanel } from '/runtime-shell.js'
+    import { api, mountSemanticObservationPanel } from '/runtime-shell.js'
     ${prelude}
-    window.__panel = mountSemanticObservationPanel(document.querySelector('#host'), { taskId: ${JSON.stringify(taskId)} })
+    window.__panel = mountSemanticObservationPanel(document.querySelector('#host'), {
+      taskId: ${JSON.stringify(taskId)},
+      ${apiClient ? `apiClient: ${apiClient},` : ''}
+    })
     window.__panelReady = true
   </script>
 </body>
@@ -561,6 +564,34 @@ const fakeEventSourcePrelude = `
     window.EventSource = FakeEventSource
 `
 
+// Keep the exact objects accepted by the production panel. GET uses the
+// existing apiClient injection. SSE temporarily wraps the fixture's JSON.parse,
+// delegates to the original parser, returns the same object, and restores the
+// parser in finally.
+const sharedPayloadPrelude = `
+    const panelApiClient = {
+      semanticObservation: async (taskId) => {
+        const accepted = await api.semanticObservation(taskId)
+        window.__acceptedGet = accepted
+        return accepted
+      },
+      semanticEventsUrl: (taskId) => api.semanticEventsUrl(taskId),
+    }
+    window.__emitCapturedSse = (data, sourceWatermark) => {
+      const originalParse = JSON.parse
+      try {
+        JSON.parse = (text) => {
+          const parsed = originalParse(text)
+          if (parsed?.sourceWatermark === sourceWatermark) window.__acceptedSse = parsed
+          return parsed
+        }
+        window.__fake.instances[0].emit(data)
+      } finally {
+        JSON.parse = originalParse
+      }
+    }
+`
+
 // The UI is served through Playwright request interception against a synthetic
 // origin. This needs no listening socket, so the proof runs in a restricted
 // sandbox without claiming a shared port.
@@ -646,7 +677,11 @@ async function serveUi(page) {
       ['/wired-state.html', panelHtml('task-state')],
       ['/wired-drill.html', panelHtml('task-drill')],
       ['/wired-transport.html', panelHtml('task-transport')],
-      ['/wired-open.html', panelHtml('task-open', fakeEventSourcePrelude)],
+      ['/wired-open.html', panelHtml(
+        'task-open',
+        `${fakeEventSourcePrelude}\n${sharedPayloadPrelude}`,
+        'panelApiClient',
+      )],
     ]) {
       if (url.pathname === path) {
         await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body })
@@ -1254,7 +1289,9 @@ try {
   openPage.on('pageerror', (error) => openErrors.push(error.message))
   await serveUi(openPage)
   await openPage.goto(`${proofOrigin}/wired-open.html`, { waitUntil: 'domcontentloaded' })
-  await waitForCondition(openPage, () => window.__panelReady === true && document.body.innerText.includes('任务已创建'))
+  await waitForCondition(openPage, () => window.__panelReady === true
+    && window.__acceptedGet?.sourceWatermark === 1
+    && document.body.innerText.includes('任务已创建'))
   const readOpen = () => openPage.evaluate(() => ({
     state: document.querySelector('.semantic-observation')?.dataset.state ?? '',
     notices: [...document.querySelectorAll('.so-notice')].map((notice) => notice.dataset.noticeKind),
@@ -1262,6 +1299,56 @@ try {
   }))
   const openInitial = await readOpen()
   record('a live open operation is projected as running before any transport error', openInitial.state === 'running', openInitial)
+
+  const getPayloadAttack = await openPage.evaluate(() => {
+    'use strict'
+    function mutationBlocked(mutate) {
+      try {
+        mutate()
+        return false
+      } catch (error) {
+        return error instanceof TypeError
+      }
+    }
+    const accepted = window.__acceptedGet
+    const originalEvent = accepted.events[0]
+    const originalSummary = originalEvent.summary
+    const propertyBlocked = mutationBlocked(() => {
+      accepted.events[0].summary = 'get-consumer-mutated'
+    })
+    const arrayPushBlocked = mutationBlocked(() => {
+      accepted.events.push({ eventId: 'get-consumer-added' })
+    })
+    const arrayIndexBlocked = mutationBlocked(() => {
+      accepted.events[0] = { eventId: 'get-consumer-replaced' }
+    })
+    if (!arrayPushBlocked) accepted.events.length = 1
+    if (!arrayIndexBlocked) accepted.events[0] = originalEvent
+    if (!propertyBlocked) accepted.events[0].summary = originalSummary
+    window.__panel.setMode('semantic')
+    const semanticText = document.querySelector('.so-content')?.innerText ?? ''
+    window.__panel.setMode('current')
+    const currentText = document.querySelector('.so-content')?.innerText ?? ''
+    return {
+      propertyBlocked,
+      arrayPushBlocked,
+      arrayIndexBlocked,
+      originalSummary,
+      semanticText,
+      currentText,
+    }
+  })
+  observe('get-payload-attack', getPayloadAttack)
+  record('GET acceptance blocks nested property and array writes and mode switches keep the confirmed values',
+    getPayloadAttack.propertyBlocked
+      && getPayloadAttack.arrayPushBlocked
+      && getPayloadAttack.arrayIndexBlocked
+      && getPayloadAttack.originalSummary === '任务已创建'
+      && getPayloadAttack.semanticText.includes('任务已创建')
+      && getPayloadAttack.currentText.includes('任务已创建')
+      && !getPayloadAttack.semanticText.includes('get-consumer-mutated')
+      && !getPayloadAttack.currentText.includes('get-consumer-mutated'),
+    getPayloadAttack)
 
   await openPage.evaluate(() => window.__fake.instances[0].fireError())
   const openDropped = await readOpen()
@@ -1275,12 +1362,69 @@ try {
     && openReconnected.notices.includes('stale')
     && openReconnected.text.includes('任务已创建'), openReconnected)
 
-  await openPage.evaluate((data) => window.__fake.instances[0].emit(data), JSON.stringify(openV2))
+  await openPage.evaluate(
+    ({ data, sourceWatermark }) => window.__emitCapturedSse(data, sourceWatermark),
+    { data: JSON.stringify(openV2), sourceWatermark: openV2.sourceWatermark },
+  )
   const openRevised = await readOpen()
   observe('open-revised', openRevised)
   record('only a decoded revision restores freshness', openRevised.state === 'running'
     && !openRevised.notices.includes('stale')
     && openRevised.text.includes('最终答复已提交'), openRevised)
+
+  const ssePayloadAttack = await openPage.evaluate(() => {
+    'use strict'
+    function mutationBlocked(mutate) {
+      try {
+        mutate()
+        return false
+      } catch (error) {
+        return error instanceof TypeError
+      }
+    }
+    const accepted = window.__acceptedSse
+    const originalEvent = accepted.events[1]
+    const originalSummary = originalEvent.summary
+    const propertyBlocked = mutationBlocked(() => {
+      accepted.events[1].summary = 'sse-consumer-mutated'
+    })
+    const arrayPushBlocked = mutationBlocked(() => {
+      accepted.events.push({ eventId: 'sse-consumer-added' })
+    })
+    const arrayIndexBlocked = mutationBlocked(() => {
+      accepted.events[1] = { eventId: 'sse-consumer-replaced' }
+    })
+    if (!arrayPushBlocked) accepted.events.length = 2
+    if (!arrayIndexBlocked) accepted.events[1] = originalEvent
+    if (!propertyBlocked) accepted.events[1].summary = originalSummary
+    window.__panel.setMode('semantic')
+    const semanticText = document.querySelector('.so-content')?.innerText ?? ''
+    window.__panel.setMode('current')
+    const currentText = document.querySelector('.so-content')?.innerText ?? ''
+    return {
+      acceptedWatermark: accepted.sourceWatermark,
+      propertyBlocked,
+      arrayPushBlocked,
+      arrayIndexBlocked,
+      originalSummary,
+      retainedGetSummary: window.__acceptedGet.events[0]?.summary ?? '',
+      semanticText,
+      currentText,
+    }
+  })
+  observe('sse-payload-attack', ssePayloadAttack)
+  record('SSE acceptance blocks nested property and array writes, keeps mode values, and retains the old GET version',
+    ssePayloadAttack.acceptedWatermark === 2
+      && ssePayloadAttack.propertyBlocked
+      && ssePayloadAttack.arrayPushBlocked
+      && ssePayloadAttack.arrayIndexBlocked
+      && ssePayloadAttack.originalSummary === '最终答复已提交'
+      && ssePayloadAttack.retainedGetSummary === '任务已创建'
+      && ssePayloadAttack.semanticText.includes('最终答复已提交')
+      && ssePayloadAttack.currentText.includes('最终答复已提交')
+      && !ssePayloadAttack.semanticText.includes('sse-consumer-mutated')
+      && !ssePayloadAttack.currentText.includes('sse-consumer-mutated'),
+    ssePayloadAttack)
   record('open page raised no errors', openErrors.length === 0, openErrors)
   await openPage.close()
   }

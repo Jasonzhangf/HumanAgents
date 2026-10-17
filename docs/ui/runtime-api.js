@@ -406,6 +406,21 @@ export function readScopeKey(scope) {
 }
 
 /**
+ * Freeze one parsed JSON value in place, children before parents. The same
+ * object or array reference is returned, so every consumer of one publication
+ * or envelope keeps the exact received value.
+ */
+export function freezeJsonValue(value) {
+  if (value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) {
+    for (const item of value) freezeJsonValue(item)
+  } else {
+    for (const item of Object.values(value)) freezeJsonValue(item)
+  }
+  return Object.freeze(value)
+}
+
+/**
  * Shared publication owner for scoped reads.
  *
  * `read(scope)` must return a promise resolving to `RuntimeReadResult`. The
@@ -496,7 +511,7 @@ export function createRuntimeReadPublication({ read }) {
     if (!isCurrent(capture, serial)) return { published: false, reason: 'discarded-late', state: snapshot() }
 
     if (result && result.ok === true) {
-      content = result.value
+      content = freezeJsonValue(result.value)
       stale = false
       pending = false
       failure = undefined
