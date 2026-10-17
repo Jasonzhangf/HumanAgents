@@ -1,5 +1,6 @@
 import { assertEvidenceRef, assertScope, type BusinessPayload, type EvidenceRef, type ScopeRef } from './index.js';
 import { ContractError } from './errors.js';
+import { validateInspectionDefinitionContent, type InspectionDefinitionContent } from './i2-history.js';
 import { isCanonicalInstant } from './time.js';
 
 export type TaskPlanRevisionId = string;
@@ -50,6 +51,7 @@ export interface TaskPlanSnapshot {
   readonly nodes: readonly TaskPlanNode[];
   readonly phases: readonly TaskPlanPhase[];
   readonly relations: readonly TaskPlanRelation[];
+  readonly inspectionDefinition?: InspectionDefinitionContent;
 }
 
 export interface TaskPlanInputSource {
@@ -252,6 +254,9 @@ export function validateTaskPlanSnapshot(snapshot: TaskPlanSnapshot): void {
       visited.add(nodeId);
     };
     for (const nodeId of nodeIds) visit(nodeId);
+  }
+  if (snapshot.inspectionDefinition !== undefined) {
+    validateInspectionDefinitionContent(snapshot.inspectionDefinition);
   }
 }
 

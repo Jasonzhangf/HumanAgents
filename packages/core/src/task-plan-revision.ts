@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalJsonStringify } from '../../contracts/src/explicit-brain.js';
 import { ContractError } from '../../contracts/src/errors.js';
+import { canonicalInspectionDefinitionContent } from './i2-history.js';
 import {
   validateTaskPlanRevisionMetadata,
   validateTaskPlanSnapshot,
@@ -54,6 +55,23 @@ export function validateTaskPlanRevisionTransition(
     next.predecessor.contentDigest !== previous.contentDigest
   ) {
     throw new ContractError('task plan revision predecessor identity, sequence, or digest does not match');
+  }
+  const previousDefinition = previous.snapshot.inspectionDefinition;
+  const nextDefinition = next.snapshot.inspectionDefinition;
+  if (previousDefinition !== undefined) {
+    if (nextDefinition === undefined) {
+      throw new ContractError('task plan revision must retain its published inspection definition');
+    }
+    const sameIdentity =
+      previousDefinition.definition.definitionId === nextDefinition.definition.definitionId &&
+      previousDefinition.definition.definitionVersion === nextDefinition.definition.definitionVersion;
+    if (
+      sameIdentity &&
+      canonicalJsonStringify(canonicalInspectionDefinitionContent(previousDefinition)) !==
+        canonicalJsonStringify(canonicalInspectionDefinitionContent(nextDefinition))
+    ) {
+      throw new ContractError('task plan inspection definition content must not change within the same definition version');
+    }
   }
 }
 

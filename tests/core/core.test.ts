@@ -70,6 +70,10 @@ import {
   type ExecutionEventFence,
 } from '../../packages/core/src/index.js';
 import {
+  createPublishedTaskPlanRevision,
+  validateTaskPlanRevisionTransition,
+} from '../../packages/core/src/task-plan-revision.js';
+import {
   ContractError, consumerKey, id,
   type AgentLoopBudget, type AgentLoopBudgetUsage, type AgentLoopCheckpointRef, type AgentModeCapabilityProfile, type AgentModeState,
   type AgentModeTransition, type ContextReplacement, type ModeLease, type ObservationBatch, type ObservationDelta,
@@ -77,6 +81,7 @@ import {
   type AgentProviderBinding, type Checkpoint, type CheckpointClosureRecord, type CheckpointReentryRecord,
   type DraftConfirmation, type DraftRevisionInput, type FinalSubmit,
   type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation, type EvidenceRef, type OrganHealthSnapshot, type RuntimeBinding, type ScopeRef,
+  type InspectionDefinitionContent, type TaskPlanRevisionPublicationInput,
 } from '../../packages/contracts/src/index.js';
 
 const organ = id('organ', 'organ-a');
@@ -949,4 +954,97 @@ test('draft confirmation and final submit bind the exact revision', () => {
   // change) preserves the content hash that a confirmation is bound to.
   assert.equal(superseded.revisionHash, edited.revisionHash);
   assert.doesNotThrow(() => assertDraftRevisionHash(superseded));
+});
+
+const inspectionDefinition: InspectionDefinitionContent = {
+  definition: {
+    definitionId: 'inspect-target',
+    definitionVersion: '1',
+    target: { targetRef: 'target-a', sourceRef: 'source-a' },
+    checkItems: [{ checkId: 'reachable' }],
+  },
+  checks: [{ checkId: 'reachable', criterion: 'target responds', inputRefs: ['input-a'] }],
+};
+
+function taskPlanPublication(overrides: Partial<TaskPlanRevisionPublicationInput> = {}): TaskPlanRevisionPublicationInput {
+  return {
+    scope: { organId: scope.organId, taskId: task },
+    revisionId: 'plan-a',
+    sequence: 1,
+    predecessor: null,
+    snapshot: {
+      title: 'Inspect target',
+      summary: 'Run the formal inspection.',
+      inspectionDefinition,
+      completeness: { scope: 'whole-task', status: 'complete' },
+      acceptanceCriteria: [{ criterionId: 'inspect', description: 'The inspection result is trustworthy.' }],
+      nodes: [{ nodeId: 'inspect', kind: 'inspection', title: 'Inspect', intent: 'Inspect the target', definition: {} }],
+      phases: [],
+      relations: [],
+    },
+    reason: { kind: 'initial', basisRefs: [] },
+    source: {
+      requirementId: 'requirement-a',
+      inputRevision: 1,
+      draftId: 'draft-a',
+      draftRevisionVersion: 1,
+      draftRevisionHash: 'draft-hash-a',
+      confirmationRef: 'confirmation-a',
+      evidenceRefs: [],
+    },
+    historyCoverage: 'complete-from-task-start',
+    publishedAt: '2026-10-17T00:00:00.000Z',
+    publishedBy: 'planner-a',
+    journalCommitRef: 'journal-a',
+    ...overrides,
+  };
+}
+
+function nextTaskPlan(previous: ReturnType<typeof createPublishedTaskPlanRevision>, snapshot: TaskPlanRevisionPublicationInput['snapshot']) {
+  return createPublishedTaskPlanRevision(taskPlanPublication({
+    revisionId: 'plan-b',
+    sequence: previous.sequence + 1,
+    predecessor: { revisionId: previous.revisionId, sequence: previous.sequence, contentDigest: previous.contentDigest },
+    snapshot,
+    reason: { kind: 'adjustment', basisRefs: [] },
+    journalCommitRef: 'journal-b',
+  }));
+}
+
+test('inspection definition validates embedded snapshot content', () => {
+  assert.doesNotThrow(() => createPublishedTaskPlanRevision(taskPlanPublication()));
+  const invalid = {
+    ...inspectionDefinition,
+    checks: [{ ...inspectionDefinition.checks[0], checkId: 'undeclared' }],
+  };
+  assert.throws(
+    () => createPublishedTaskPlanRevision(taskPlanPublication({ snapshot: { ...taskPlanPublication().snapshot, inspectionDefinition: invalid } })),
+    ContractError,
+  );
+});
+
+test('inspection definition transition preserves same-version content and deletion', () => {
+  const previous = createPublishedTaskPlanRevision(taskPlanPublication());
+  assert.doesNotThrow(() => validateTaskPlanRevisionTransition(previous, nextTaskPlan(previous, previous.snapshot)));
+  assert.throws(
+    () => validateTaskPlanRevisionTransition(previous, nextTaskPlan(previous, {
+      ...previous.snapshot,
+      inspectionDefinition: {
+        ...inspectionDefinition,
+        checks: [{ ...inspectionDefinition.checks[0], criterion: 'changed criterion' }],
+      },
+    })),
+    ContractError,
+  );
+  const withoutDefinition = { ...previous.snapshot };
+  delete withoutDefinition.inspectionDefinition;
+  assert.throws(() => validateTaskPlanRevisionTransition(previous, nextTaskPlan(previous, withoutDefinition)), ContractError);
+  assert.doesNotThrow(() => validateTaskPlanRevisionTransition(previous, nextTaskPlan(previous, {
+    ...previous.snapshot,
+    inspectionDefinition: {
+      ...inspectionDefinition,
+      definition: { ...inspectionDefinition.definition, definitionVersion: '2' },
+      checks: [{ ...inspectionDefinition.checks[0], criterion: 'next version criterion' }],
+    },
+  })));
 });
