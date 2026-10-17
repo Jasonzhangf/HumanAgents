@@ -13,8 +13,11 @@ import {
 } from '../../../contracts/src/index.js';
 import type {
   ClosedTurnPlannerCallCommittedRecord,
+  ClosedTurnPlannerCallInvocationRecord,
   ClosedTurnPlannerCallJournalPort,
+  ClosedTurnPlannerCallPreparationRecord,
   ClosedTurnPlannerCallRecord,
+  ClosedTurnPlannerCallReturnRecord,
   ClosedTurnPlannerCallStage,
 } from '../../../runtime/src/orchestration/closed-turn-planner-call.js';
 
@@ -40,6 +43,25 @@ const STAGE_ORDER: Readonly<Record<ClosedTurnPlannerCallStage, number>> = {
   invoked: 1,
   returned: 2,
 };
+
+export interface ClosedTurnPlannerCallCommittedStage<
+  TRecord extends ClosedTurnPlannerCallRecord = ClosedTurnPlannerCallRecord,
+> {
+  readonly record: TRecord;
+  readonly commitRef: JournalCommitRef;
+}
+
+/** All committed stages of one Planner duty, with each stage's real commit receipt. */
+export interface ClosedTurnPlannerCallTaskDutyRead {
+  readonly dutyKey: string;
+  readonly prepared: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallPreparationRecord>;
+  readonly invoked?: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallInvocationRecord>;
+  readonly returned?: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallReturnRecord>;
+}
+
+export interface ClosedTurnPlannerCallJournalReader extends ClosedTurnPlannerCallJournalPort {
+  readTaskDuties(scope: ScopeRef): Promise<readonly ClosedTurnPlannerCallTaskDutyRead[]>;
+}
 
 function nonEmpty(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -157,6 +179,63 @@ function furthest(records: readonly JournalRecord[]): JournalRecord {
   return selected;
 }
 
+interface ClosedTurnPlannerCallStageSlots {
+  readonly prepared?: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallPreparationRecord>;
+  readonly invoked?: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallInvocationRecord>;
+  readonly returned?: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallReturnRecord>;
+}
+
+/** Places each committed stage under its typed slot and rejects duplicate stages. */
+function committedStages(records: readonly JournalRecord[]): ClosedTurnPlannerCallStageSlots {
+  let prepared: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallPreparationRecord> | undefined;
+  let invoked: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallInvocationRecord> | undefined;
+  let returned: ClosedTurnPlannerCallCommittedStage<ClosedTurnPlannerCallReturnRecord> | undefined;
+  for (const record of records) {
+    const payload = readPayload(record);
+    if (!payload) continue;
+    const stageRecord = payload.record;
+    if (stageRecord.stage === 'prepared') {
+      if (prepared) throw new JournalIntegrityError('closed-turn planner call duty has duplicate committed stages');
+      prepared = { record: stageRecord, commitRef: receipt(record) };
+    } else if (stageRecord.stage === 'invoked') {
+      if (invoked) throw new JournalIntegrityError('closed-turn planner call duty has duplicate committed stages');
+      invoked = { record: stageRecord, commitRef: receipt(record) };
+    } else {
+      if (returned) throw new JournalIntegrityError('closed-turn planner call duty has duplicate committed stages');
+      returned = { record: stageRecord, commitRef: receipt(record) };
+    }
+  }
+  return { prepared, invoked, returned };
+}
+
+/**
+ * Reads one duty's committed stage chain. The preparation is mandatory and every
+ * later stage must bind the exact committed preparation receipt. Source
+ * integrity errors propagate; a broken duty is never reported as an empty read.
+ */
+function taskDutyRead(records: readonly JournalRecord[], dutyKey: string): ClosedTurnPlannerCallTaskDutyRead {
+  assertSingleDuty(records, dutyKey);
+  const { prepared, invoked, returned } = committedStages(records);
+  if (!prepared) {
+    throw new JournalIntegrityError('closed-turn planner call duty is missing its committed preparation');
+  }
+  if (returned && !invoked) {
+    throw new JournalIntegrityError('closed-turn planner return requires its committed invocation');
+  }
+  if (invoked) {
+    if (invoked.record.invocationId !== prepared.record.invocationId
+      || invoked.record.preparationCommitRef.commitId !== prepared.commitRef.commitId
+      || invoked.record.preparationCommitRef.journalSeq !== prepared.commitRef.journalSeq
+      || invoked.record.preparationCommitRef.recordDigest !== prepared.commitRef.recordDigest) {
+      throw new JournalIntegrityError('closed-turn planner invocation does not match its committed preparation');
+    }
+  }
+  if (returned && returned.record.invocationId !== prepared.record.invocationId) {
+    throw new JournalIntegrityError('closed-turn planner return does not match its committed invocation');
+  }
+  return { dutyKey, prepared, invoked, returned };
+}
+
 /**
  * Serializes the Runtime typed call records into the same authoritative Organ
  * Journal. Each stage is one transaction keyed by the duty and stage, so an
@@ -165,7 +244,7 @@ function furthest(records: readonly JournalRecord[]): JournalRecord {
  */
 export function createJsonlClosedTurnPlannerCallJournal(input: {
   readonly journal: JsonlOrganJournal;
-}): ClosedTurnPlannerCallJournalPort {
+}): ClosedTurnPlannerCallJournalReader {
   const { journal } = input;
 
   async function verifiedRecords(): Promise<readonly JournalRecord[]> {
@@ -186,6 +265,25 @@ export function createJsonlClosedTurnPlannerCallJournal(input: {
     if (!payload) throw new JournalIntegrityError('closed-turn planner call record has no payload');
     assertRecord(payload.record);
     return { record: payload.record, commitRef: receipt(selected) };
+  }
+
+  async function readTaskDuties(scope: ScopeRef): Promise<readonly ClosedTurnPlannerCallTaskDutyRead[]> {
+    const groups = new Map<string, JournalRecord[]>();
+    for (const record of await verifiedRecords()) {
+      if (!inTask(record.scope, scope)) continue;
+      const payload = readPayload(record);
+      if (!payload) continue;
+      assertRecord(payload.record);
+      const dutyKey = payload.record.duty.dutyKey;
+      const group = groups.get(dutyKey);
+      if (group) group.push(record);
+      else groups.set(dutyKey, [record]);
+    }
+    const duties: ClosedTurnPlannerCallTaskDutyRead[] = [];
+    for (const [dutyKey, group] of groups) {
+      duties.push(taskDutyRead(group, dutyKey));
+    }
+    return duties;
   }
 
   async function append(record: ClosedTurnPlannerCallRecord): Promise<JournalCommitRef> {
@@ -273,5 +371,5 @@ export function createJsonlClosedTurnPlannerCallJournal(input: {
     throw new JournalIntegrityError('closed-turn planner call exact readback is absent; installation held');
   }
 
-  return { append, read };
+  return { append, read, readTaskDuties };
 }
