@@ -1966,6 +1966,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
   }
 
   return {
+    canRunConcurrently: (call) => call.toolId === APP_CHILD_CALL_TOOL.toolId,
     async execute(request: Parameters<ProviderToolExecutionPort['execute']>[0]): Promise<ProviderToolExecutionResult> {
       const toolId: ProviderToolCall['toolId'] = request.call.toolId;
       if (toolId === APP_CHILD_CALL_TOOL.toolId) return dispatchCall(request);
