@@ -46,6 +46,7 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
  */
 const EXACT_BODY = 'EXACT\u4f53 single logical delivery \ud83d\ude80\nline two';
 const SUMMARY_RESULT = 'summary result is a different material';
+const CHILD_BODY = 'Independent child result for adoption';
 
 // Missing adapter and the legacy/native append split can lose recovery anchors.
 // Impact: false committed success or an old-epoch anchor. Cost: one local Journal
@@ -492,6 +493,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly organFilePath: string;
   readonly journal: JsonlOrganJournal;
   readonly inspect?: boolean;
+  readonly child?: boolean;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; close(): Promise<void> }> {
   const wires: Wire[] = [];
   let plannerAttempts = 0;
@@ -508,7 +510,7 @@ async function textOnlyResponsesUpstream(input: {
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify(path === '/health'
           ? { status: 'ok', version: 'text-only-slice' }
-          : { data: [{ id: input.model }] }));
+          : { data: [{ id: input.model }, { id: 'child.only.model' }] }));
         return;
       }
       const planner = plannerPayload(body);
@@ -534,6 +536,61 @@ async function textOnlyResponsesUpstream(input: {
       if (!hasTurnEndSurface(body)) {
         throw new Error('the controlled upstream could not identify a lawful Responses stage');
       }
+      if (input.child) {
+        const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
+          input?: { type: string; call_id?: string; output?: string; name?: string }[] };
+        const invoke = (callId: string, name: string, args: unknown) => {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.end(frame([
+            { type: 'response.created', response: { id: callId } },
+            { type: 'response.output_item.done', output_index: 0, item: {
+              type: 'function_call', call_id: callId, name, arguments: JSON.stringify(args) } },
+            { type: 'response.completed', response: { id: callId } },
+          ]));
+        };
+        const resultFor = (callId: string) => wire.input?.find((item) => item.type === 'function_call_output' && item.call_id === callId);
+        if (wire.tools?.some((tool) => tool.name === 'humanagent_child_deliver')) {
+          assert.equal(wire.model, 'child.only.model', 'child selects its configured Provider model');
+          assert.equal(body.includes('text-only delivery probe'), false, 'child does not inherit parent request history');
+          const records = (await input.journal.verify()).records;
+          assert.ok(records.some((record) => record.kind === 'checkpoint'), 'pre-call checkpoint is committed before child Provider request');
+          const delivered = resultFor('call-child-delivery');
+          if (!delivered) {
+            invoke('call-child-delivery', 'humanagent_child_deliver', { body: CHILD_BODY });
+          } else {
+            const deliveryEvidence = delivered.output!.split('\n')
+              .find((line) => line.startsWith('- evidenceId=child-body-execution-'));
+            const ref = deliveryEvidence === undefined ? undefined : /locator=([^\s]+)/.exec(deliveryEvidence)?.[1];
+            if (!ref) {
+              console.error('child delivery result has no body asset', delivered.output);
+              throw new Error(`child delivery result has no asset: ${delivered.output}`);
+            }
+            const section = { text: 'Child work complete', evidenceRefs: [ref] };
+            invoke('call-child-end', 'humanagent_turn_end', { summary: {
+              goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [ref] });
+          }
+          return;
+        }
+        const called = resultFor('call-parent-child');
+        if (!called) {
+          for (const name of ['child_call', 'child_adopt', 'child_not_select']) {
+            assert.ok(wire.tools?.some((tool) => tool.name === name), `default composition advertises ${name}`);
+          }
+          invoke('call-parent-child', 'child_call', { purpose: 'Produce an independent result',
+            instructions: 'Independently produce the complete child result, publish it with humanagent_child_deliver, and finish the child turn with evidence for the parent to adopt.',
+            target: 'Independent child result for the parent to adopt',
+            agentId: 'orchestration-default', kind: 'execution', successCriteria: ['Return the complete result'] });
+          return;
+        }
+        const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+          state?: string; invocationId?: string; summary?: string };
+        assert.equal(refined.state, 'returned', `real producer returns the child: ${called.output}`);
+        assert.equal(refined.summary, CHILD_BODY);
+        if (!resultFor('call-parent-adopt')) {
+          invoke('call-parent-adopt', 'child_adopt', { invocationId: refined.invocationId });
+          return;
+        }
+      }
       if (input.inspect && !readIssued) {
         readIssued = true;
         response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -546,7 +603,7 @@ async function textOnlyResponsesUpstream(input: {
         return;
       }
       const verified = await input.journal.verify();
-      const coverage = [...verified.records].reverse()
+      const coverage = verified.records
         .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
       const payload = coverage?.payload as { admissionCommitRef?: { commitId?: string } } | undefined;
       const admissionCommitId = payload?.admissionCommitRef?.commitId;
@@ -600,7 +657,7 @@ async function textOnlyResponsesUpstream(input: {
 }
 
 /** Canonical fixture: real workspace, real native control layout, controlled Provider. */
-async function textOnlyFixture(inspect = false) {
+async function textOnlyFixture(inspect = false, child = false) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
   const controlRoot = join(root, 'control');
@@ -613,7 +670,7 @@ async function textOnlyFixture(inspect = false) {
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect });
+    organFilePath: layout.organJournalPath, journal, inspect, child });
   const configPath = join(controlRoot, 'config.toml');
   // Both the default execution agent and the independent orchestration agent
   // select this real local Provider through the normal compiled roster.
@@ -626,7 +683,11 @@ async function textOnlyFixture(inspect = false) {
     'provider.route = "text-only-route"',
     `provider.baseUrl = "${upstream.baseUrl}"`,
   ].join('\n');
-  const config = (await readFile(configPath, 'utf8')).replaceAll('driverRef = "fake"', providerBlock);
+  const original = await readFile(configPath, 'utf8');
+  const config = child ? original.replace('driverRef = "fake"', providerBlock)
+    .replace('driverRef = "fake"', providerBlock.replace('text.only.model', 'child.only.model'))
+    .replace('maxConcurrentTasks = 1', 'maxConcurrentTasks = 2')
+    : original.replaceAll('driverRef = "fake"', providerBlock);
   await writeFile(configPath, config, 'utf8');
   const configuration = await loadConfiguration(paths);
   return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration };
@@ -812,7 +873,7 @@ test('native inspect producer and cold saved boundary preserve facts without exe
 });
 
 test('native text-only delivery advertised end, independent Planner closure and exact asset readback', async () => {
-  const fixture = await textOnlyFixture();
+  const fixture = await textOnlyFixture(false, true);
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const organId = id('organ', 'humanagent-ui');
   const retainedTaskId = id('task', 'native-text-only-retained');
@@ -903,9 +964,9 @@ test('native text-only delivery advertised end, independent Planner closure and 
     const posts = () => fixture.upstream.wires.filter((wire) => wire.method === 'POST');
     const plannerPosts = () => posts().filter((wire) => plannerPayload(wire.body) !== undefined);
     const executionPosts = () => posts().filter((wire) => plannerPayload(wire.body) === undefined);
-    assert.equal(executionPosts().length, 2, 'the execution uses exactly the end call and drain requests');
+    assert.equal(executionPosts().length, 7, 'parent call/adopt/end/drain and independent child delivery/end/drain');
     assert.equal(plannerPosts().length, 1, 'the complete sample uses one independent Planner request');
-    assert.equal(posts().length, 3, 'the complete sample uses exactly two execution requests and one Planner request');
+    assert.equal(posts().length, 8, 'seven execution requests and one independent Planner request');
     const postsBeforeCold = posts().length;
     // The real wire carries the advertised schema under the transport-legal id,
     // not only the underlying dotted control id.
@@ -918,6 +979,9 @@ test('native text-only delivery advertised end, independent Planner closure and 
     };
     const advertisedWire = sent.tools?.find((tool) => tool.name === 'humanagent_turn_end' && tool.parameters);
     assert.ok(advertisedWire, 'the generation request advertises the standard-turn end wire tool');
+    for (const name of ['child_call', 'child_adopt', 'child_not_select']) {
+      assert.ok(sent.tools?.some((tool) => tool.name === name), `default composition advertises ${name}`);
+    }
     if (!advertisedWire) throw new Error('advertised wire tool is absent');
     assert.equal(advertisedWire.parameters?.properties?.['deliveryText']?.type, 'string');
     assert.equal(advertisedWire.parameters?.properties?.['deliveryRefs']?.minItems, undefined);
@@ -956,11 +1020,80 @@ test('native text-only delivery advertised end, independent Planner closure and 
     assert.equal(closure.source, 'agent-tool', 'canonical closure preserves the accepted tool source');
     const preparation = await readCheckpointClosurePreparation(closurePort, intent.checkpoint.checkpoint);
     assert.equal(preparation?.coreClosure.source, 'agent-tool', 'preparation preserves the same accepted tool source');
-    const coverage = [...verified.records].reverse()
+    const coverage = verified.records
       .find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
     const scope = coverage?.scope as ScopeRef;
     const operationId = scope?.operationId?.value;
     if (!operationId) throw new Error('native run has admitted operation coverage');
+    // The real child commits its own control chain through the existing
+    // Gateway owner. A refined result without durable child control is not
+    // acceptance, and the terminal state must come from the actual controller.
+    type ControlEnvelopePayload = {
+      readonly kind: string;
+      readonly event: { readonly kind: string };
+      readonly control: {
+        readonly status: string;
+        readonly intent: { readonly operationId: { readonly scope: 'operation'; readonly value: string } };
+        readonly binding: {
+          readonly scope: ScopeRef;
+          readonly agentRuntimeId: string;
+          readonly harnessExecutionEpoch: number;
+        };
+        readonly childAdmission?: {
+          readonly businessRegistrationCommitRef: {
+            readonly commitId: string;
+            readonly journalSeq: number;
+            readonly recordDigest: string;
+          };
+        };
+      };
+    };
+    const controlEnvelopes = verified.records.flatMap((record): ControlEnvelopePayload[] => {
+      const payload = record.payload as ControlEnvelopePayload | undefined;
+      return payload?.kind === 'operation-control-envelope/v1'
+        && payload.control.childAdmission !== undefined ? [payload] : [];
+    });
+    assert.equal(controlEnvelopes.length, 3,
+      'the real child commits accepted, running and terminal control');
+    assert.deepEqual(controlEnvelopes.map((entry) => entry.control.status),
+      ['accepted', 'running', 'succeeded'],
+      'child control follows the actual controller lifecycle');
+    const childControl = controlEnvelopes.at(-1)!;
+    assert.equal(childControl.event.kind, 'operation.completed');
+    assert.ok(childControl.control.intent.operationId.value.startsWith('child-'),
+      'child control carries the real child operation identity');
+    const childAdmission = childControl.control.childAdmission!;
+    const childRegistrationRecord = verified.records.find((record) =>
+      record.payload?.['kind'] === 'task-business-registration'
+      && record.commitId === childAdmission.businessRegistrationCommitRef.commitId);
+    assert.ok(childRegistrationRecord, 'child control cites the real durable business registration');
+    const childProvenance = (childRegistrationRecord!.payload as {
+      readonly registration?: { readonly operationProvenance?: {
+        readonly kind?: string;
+        readonly parentOperationId?: { readonly value?: string };
+      } };
+    }).registration?.operationProvenance;
+    assert.equal(childProvenance?.kind, 'provider-tool');
+    assert.equal(childProvenance?.parentOperationId?.value, operationId,
+      'child control registration joins the exact parent operation');
+    // Fresh reader: a new Journal instance must read the committed child
+    // control, not an in-process copy.
+    const freshControl = createJsonlOperationControlJournal({
+      journal: new JsonlOrganJournal(fixture.layout.organJournalPath),
+    });
+    const freshChildReadback = await freshControl.readControl({
+      scope: childControl.control.binding.scope,
+      agentRuntimeId: childControl.control.binding.agentRuntimeId,
+      harnessExecutionEpoch: childControl.control.binding.harnessExecutionEpoch,
+      operationId: childControl.control.intent.operationId,
+    });
+    assert.equal(freshChildReadback.state, 'complete',
+      'fresh reader reads the committed child control');
+    if (freshChildReadback.state !== 'complete') throw new Error('fresh child control read is unknown');
+    assert.equal(freshChildReadback.operations.length, 1);
+    assert.equal(freshChildReadback.operations[0]?.status, 'succeeded');
+    assert.equal(freshChildReadback.operations[0]?.result?.status, 'succeeded');
+    assert.deepEqual(freshChildReadback.operations[0]?.childAdmission, childAdmission);
     const active = await createJsonlActiveTurnJournal({ filePath: fixture.layout.organJournalPath,
       journal: fixture.journal, turnId: newActiveTurnId(operationId) }).replay();
     const endCalls = active.filter(
@@ -1222,9 +1355,9 @@ test('native text-only delivery advertised end, independent Planner closure and 
       'repeated cold read returns identical bytes');
     assert.equal(createHash('sha256').update(coldBytes).digest('hex'), fact.rawArguments.ref.digest?.replace(/^sha256:/, ''));
     assert.equal(posts().length, postsBeforeCold, 'cold asset readback adds no Provider POST');
-    assert.equal(executionPosts().length, 2, 'the pure-text run uses exactly the end call and drain requests');
+    assert.equal(executionPosts().length, 7, 'parent and child complete through their own standard end');
     assert.equal(plannerPosts().length, 1, 'the pure-text run uses exactly one independent Planner request');
-    assert.equal(posts().length, 3, 'the complete sample uses exactly two execution requests and one Planner request');
+    assert.equal(posts().length, 8, 'seven execution requests and one independent Planner request');
     console.log('native text-only delivery', JSON.stringify({
       body: parsedArgs.deliveryText,
       bodyBytes: Buffer.from(EXACT_BODY, 'utf8').length,

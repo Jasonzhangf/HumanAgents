@@ -53,6 +53,9 @@ export interface ToolOperationAdmissionReceipt {
   readonly businessRegistrationCommitRef: JournalCommitRef;
   readonly coverageCommitRef: JournalCommitRef;
   readonly childAdmission: OperationChildAdmission;
+  /** The exact child intent/registration this registration was admitted with. */
+  readonly intent: OperationIntent;
+  readonly registration: ToolRegistration;
 }
 
 export interface ExecutionAdmissionOptions {
@@ -374,6 +377,8 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
         businessRegistrationCommitRef: registered.businessRegistrationCommitRef,
         coverageCommitRef,
       },
+      intent,
+      registration,
     };
   }
 

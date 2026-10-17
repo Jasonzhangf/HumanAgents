@@ -13,6 +13,7 @@ import {
   type ChildInvocationRecord,
   type EvidenceRef,
   type OperationId,
+  type OperationResult,
   type ProviderExecutionIdentityRef,
   type ProviderSettlement,
   type ProviderToolDefinition,
@@ -306,12 +307,32 @@ export type ChildCreatorRequest =
   | { readonly kind: 'execution'; readonly input: ExecutionAgentInput }
   | { readonly kind: 'review'; readonly input: ReviewAgentInput };
 
+/**
+ * Narrow control-lifecycle seam for one real child run. The existing child run
+ * composition owns the typed Gateway append; the producer only calls it at the
+ * real admission, submit and settlement points. It never exposes the Gateway or
+ * journal to a model tool, and it never invents control facts.
+ */
+export interface ChildControlLifecyclePort {
+  /** Commit the child registration after real business admission, before any effect. */
+  accept(): Promise<void>;
+  /** Commit the running state from the actual submit receipt. */
+  running(input: { readonly evidenceRefs: readonly EvidenceRef[] }): Promise<void>;
+  /** Commit the terminal state from the actual drain/settle/close outcome. */
+  settle(input: {
+    readonly status: 'succeeded' | 'failed' | 'cancelled' | 'blocked';
+    readonly evidenceRefs: readonly EvidenceRef[];
+    readonly result?: OperationResult;
+  }): Promise<void>;
+}
+
 export interface BoundChildRun {
   readonly native: ChildDriverNativePorts;
   readonly toolDefinitions: readonly ProviderToolDefinition[];
   readonly toolExecution: ProviderToolExecutionPort;
   readonly maxToolRounds?: number;
   readonly standardEndOwner: StandardTurnEndOwnerPort;
+  readonly control: ChildControlLifecyclePort;
 }
 
 export type BindChildRunPort = (input: {
@@ -619,12 +640,13 @@ async function runIndependentChild(input: {
       ...(input.scope.cycleId === undefined ? {} : { cycleId: input.scope.cycleId }),
       operationId: input.operationId,
     });
-    await driver.submit({
+    const submitted = await driver.submit({
       taskId,
       executionEpoch,
       assignmentId: input.assignmentId,
       payload: input.payload,
     });
+    await input.run.control.running({ evidenceRefs: submitted.evidenceRefs });
     requests = 1;
     while (true) {
       input.signal.throwIfAborted();
@@ -688,6 +710,10 @@ async function runIndependentChild(input: {
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.name === 'CanceledError');
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -1146,6 +1172,21 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
     bodyAssets: input.input.bodyAssets,
     acceptedEvidence,
   });
+  // Real child business admission already happened before this creator ran.
+  // Commit the child's own control registration before any Provider effect.
+  try {
+    await input.run.control.accept();
+  } catch (error) {
+    let closeError: unknown;
+    try { await input.closer.close(); } catch (caught) { closeError = caught; }
+    if (closeError !== undefined) {
+      throw new AggregateError(
+        [error, closeError],
+        'child control admission failed and its composition did not close',
+      );
+    }
+    return { state: 'blocked', reason: `child control admission failed: ${errorMessage(error)}` };
+  }
   const outcome = await runIndependentChild({
     composition: input.composition,
     run: { ...input.run, ...surface },
@@ -1184,7 +1225,7 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
   } finally {
     closed = await input.closer.close();
   }
-  return resolveRunOutcome({
+  const resolved = await resolveRunOutcome({
     kind: input.kind,
     state: input.state,
     outcome,
@@ -1197,6 +1238,41 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
     closed,
     ...(input.input.now === undefined ? {} : { now: input.input.now }),
   });
+  // The control successor is derived from the actual controller facts, not
+  // from model text or business payload. A failed append must not release the
+  // refined result as success.
+  const status: 'succeeded' | 'failed' | 'cancelled' | 'blocked' = resolved.state === 'returned'
+    ? 'succeeded'
+    : outcome.state === 'failed' || settlement?.state === 'failed' ? 'failed'
+    : settlement?.state === 'cancelled' || settlement?.state === 'stopped' ? 'cancelled'
+    : 'blocked';
+  const terminalEvidence = [
+    ...(settlement?.evidenceRefs ?? []),
+    ...(input.state.acceptedCommand?.resolvedEvidenceRefs ?? []),
+  ];
+  const result: OperationResult | undefined = status === 'succeeded' && terminalEvidence.length > 0
+    ? {
+        operationId: input.operationId,
+        status: 'succeeded',
+        evidenceRefs: terminalEvidence,
+        verifier: {
+          name: 'humanagent.child-run-composition',
+          version: '1',
+          decision: 'accepted child standard end, provider settlement, producer drain, composition close and body readback verified',
+        },
+        completedAt: (input.input.now?.() ?? new Date()).toISOString(),
+      }
+    : undefined;
+  try {
+    await input.run.control.settle({
+      status,
+      evidenceRefs: terminalEvidence,
+      ...(result === undefined ? {} : { result }),
+    });
+  } catch (error) {
+    return { state: 'blocked', reason: `child control settlement failed: ${errorMessage(error)}` };
+  }
+  return resolved;
 }
 
 /**

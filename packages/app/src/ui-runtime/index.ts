@@ -169,6 +169,7 @@ export interface UiRuntimeLaunchOptions {
    * physical journal, so a fault can be observed at the real adapter boundary.
    */
   readonly taskIdentity?: TaskIdentityConsumer;
+  readonly agentRoster?: readonly { readonly agentId: string; readonly roleId: AgentRole }[];
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: Omit<NonNullable<UiRuntimeServiceOptions['runtimeComposition']>, 'prepareAgentProvider'> & {
     readonly prepareAgentProvider?: <TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(selection: {
@@ -515,6 +516,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           preparedJournal: journal,
           resourceBoundary,
           prepareAgentProvider: prepareAgentProvider!,
+          ...(options.agentRoster === undefined ? {} : { agentRoster: options.agentRoster }),
           prepareTaskAgentProvider: prepareTaskAgentProvider!,
           providerOptions: {
             onRequestLifecycle: (event) => coordinator.recordProviderRequestIdentity(event),

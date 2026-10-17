@@ -5,8 +5,8 @@
     "assignment": "明确角色目标输入与交付合同",
     "checkpoint": "保存本次调用 checkpoint 与未返回义务",
     "context": "建立独立 Provider/model 与 context",
-    "execute": "执行角色并返回语义交付",
-    "acceptance": "由编排者输出接纳或待补充决定"
+    "execute": "执行角色并通过既有控制 owner 提交运行与收拢事实",
+    "acceptance": "由编排者接纳精炼结果；控制未收拢不得代替"
   },
   "owners": {
     "assignment": "packages/contracts",

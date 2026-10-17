@@ -962,6 +962,7 @@ async function runNativeTask(input: {
     const preparation = createTaskExecutionPreparation({
       principalOwner: principal.owner,
       composition: {
+        agentRoster: configuration.agentRoster,
         journal,
         filePath: controlJournalPath,
         artifactsRoot: evidenceRoot,
@@ -1675,6 +1676,7 @@ export async function main(args: readonly string[]): Promise<void> {
         nextAction: 'repair UI runtime startup before retrying serve',
         start: async () => {
           runtime = await startUiRuntime({
+            agentRoster: configuration.agentRoster,
             mode,
             accessControl,
             organId: id('organ', 'humanagent-ui'),

@@ -24,6 +24,11 @@ import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJ
   createJsonlSemanticHistoryJournal, readCommittedNativeSegmentSource } from '../checkpoint-journal.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
 import { createNativeExecution } from './native-execution.js';
+import { APP_CHILD_CALL_TOOL, APP_CHILD_TOOLS, createAppChildProducer } from './child-producer.js';
+import { createAppChildOperationAdmission } from './child-operation-admission.js';
+import { createAppChildCheckpointAdapter } from './child-checkpoint-adapter.js';
+import { createChildRunComposition } from './child-run-composition.js';
+import { createFilesystemRefinedDeliveryStore } from './refined-delivery-store.js';
 import { createNativeBoundaryContinuation } from './native-boundary-continuation.js';
 import { createJsonlNativeSaveProgressPort } from '../../../adapters/jsonl/src/native-save-progress.js';
 import { frozenTurnCloseRef, readCheckpointClosurePreparation } from '../../../runtime/src/checkpoints/closure.js';
@@ -163,6 +168,15 @@ const parentRegistration: ToolRegistration = {
   retryPolicy: 'humanagent://task-execution/retry', owner: 'humanagent.runtime',
 };
 
+const CHILD_CALL_CAPABILITY = 'provider.child.call';
+const childCallRegistration: ToolRegistration = {
+  toolName: APP_CHILD_CALL_TOOL.toolId, contractVersion: '1.0.0', supportedKinds: ['run'],
+  routeId: 'harness-child-call-controller', routeVersion: '1', mode: 'gateway', acceptedScopes: [{}],
+  inputContract: 'humanagent://child-call/input/v1', outputContract: 'humanagent://child-call/output/v1',
+  verifier: 'humanagent://child-call/standard-end', capabilities: [CHILD_CALL_CAPABILITY],
+  retryPolicy: 'humanagent://child-call/retry', owner: 'humanagent.app.child-operation-admission',
+};
+
 function missing(message: string): never {
   throw new AppLifecycleError('execution-composition.owner-source-missing', message,
     'supply the exact prepared execution owner record before release', 'humanagent.app.execution-composition');
@@ -224,6 +238,10 @@ export function createDefaultExecutionComposition(input: {
     readonly tools: readonly ProviderToolDefinition[];
     readonly webSearchProviderConfig?: WebSearchBackendConfig;
   };
+  readonly agentRoster?: readonly {
+    readonly agentId: string;
+    readonly roleId: import('../../../config/src/index.js').AgentRole;
+  }[];
   readonly now: () => Date;
   readonly currentState: RuntimeTaskCurrentStatePort;
   readonly publishCurrentTurnState: (taskId: RuntimeExecutionAllocation['taskId']) => Promise<unknown>;
@@ -837,11 +855,16 @@ export function createDefaultExecutionComposition(input: {
           missing('retained accepted standard-end conflicts with the exact frozen close');
         }
       }
+      let childProducer: ProviderToolExecutionPort | undefined;
       const providerToolExecution = {
             tools: [...(toolScope?.tools ?? input.providerOptions.tools ?? []), ADVERTISED_STANDARD_TURN_END_TOOL],
             executeTool: {
               execute: (request: Parameters<ProviderToolExecutionPort['execute']>[0]) => {
                 if (isStandardTurnEndCall(request.call.toolId)) return endExecutor.execute(request);
+                if (APP_CHILD_TOOLS.some((tool) => tool.toolId === request.call.toolId)) {
+                  if (!childProducer) missing('the child tool has no bound child producer');
+                  return childProducer.execute(request);
+                }
                 const executor = providerToolExecutor?.executor ?? input.providerOptions.executeTool;
                 if (!executor) missing('the advertised tool has no admitted executor');
                 return executor.execute(request);
@@ -906,7 +929,7 @@ export function createDefaultExecutionComposition(input: {
         kind: import('../../../contracts/src/index.js').OperationEventKind, evidenceRefs: readonly import('../../../contracts/src/index.js').EvidenceRef[],
         result?: import('../../../contracts/src/index.js').OperationResult) {
         const control = await admitted.gateway.readControl({ scope: allocation.scope, agentRuntimeId: physical.runtimeId,
-          harnessExecutionEpoch: physical.executionEpoch });
+          harnessExecutionEpoch: physical.executionEpoch, operationId: allocation.operationId });
         if (control.state !== 'complete') missing('actual parent lifecycle control is unknown');
         const parent = control.operations.find((item) => item.intent.operationId.value === allocation.operationId.value);
         if (!parent) missing('actual parent lifecycle record is absent');
@@ -1296,6 +1319,25 @@ export function createDefaultExecutionComposition(input: {
       };
       const liveNative = native;
       const driver: RuntimeExecutionDriver = { standardTurn,
+        bindChildCallManager(manager) {
+          if (input.agentRoster === undefined) return;
+          if (!input.agentRoster.length) missing('the configured child roster is empty');
+          if (!active || !composition || !toolScope) missing('the configured child producer requires a live parent, Provider and tool scope');
+          const childRun = createChildRunComposition({ admission: admitted,
+            journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot,
+            workspaceRoot: toolScope.workspaceRoot, projectKey: toolScope.projectKey, tools: toolScope.tools,
+            ...(toolScope.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: toolScope.webSearchProviderConfig }),
+            principalOwner: input.principalOwner, now: input.now });
+          childProducer = createAppChildProducer({ manager, parent: active, parentAssignment: assignment,
+            checkpoints: createAppChildCheckpointAdapter({ store: nativeCheckpoints, parent: active,
+              originalAdmittedTurn: admittedTurn, recoveryStateRef }),
+            refinedDeliveryStore: createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(input.artifactsRoot)),
+            bodyAssets: childRun.bodyAssets, bindChildRun: childRun.bindChildRun,
+            prepareAgentProvider: input.prepareAgentProvider, roster: input.agentRoster,
+            admitChildOperation: createAppChildOperationAdmission({ admission: admitted, binding,
+              parent: active, registration: childCallRegistration }), now: input.now });
+          providerToolExecution.tools.push(...APP_CHILD_TOOLS);
+        },
         kind: liveNative.driver.kind, capabilities: () => liveNative.driver.capabilities(),
         start: (value) => liveNative.driver.start(value), resume: (value) => liveNative.driver.resume(value),
         async submit(value) {
