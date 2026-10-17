@@ -1,7 +1,6 @@
 # DAGpipe Binding
 
-Status: candidate for `humanagent.dagpipe.binding`
-Base: `7f00515cb288dccd70b3606b457052e4782a4130`
+Status: binding format reference; validate affected graph changes only.
 
 ## Purpose
 
@@ -9,8 +8,9 @@ This change makes DAGpipe SESE audit enforceable. Every
 `docs/dagpipe/*.graph.json` must now have a sibling
 `docs/dagpipe/*.graph.binding.json` that binds every node to a real owner path,
 declares the graph-level operator, and preserves single source/sink
-reachability. `pnpm dagpipe:validate` runs DAGpipe's own graph validator plus
-this binding validator; `pnpm dagpipe:bind` runs the binding-only check.
+reachability. `pnpm dagpipe:validate` remains an explicit whole-graph command.
+For a changed graph, use the graph CLI and the existing binding script on that
+file. Ordinary build and CI do not invoke the whole-graph or release gate.
 
 ## Binding contract
 
@@ -213,25 +213,18 @@ lifecycle or persistence truth outside these bindings.
 Each graph is a single-source single-exit DAG with a real owner path on every
 node. The binding gate is deterministic and fail-closed, so a future graph
 edit cannot silently introduce a second source, second sink, disconnected
-node, unreachable sink, or unmapped node without the release gate failing.
+node, unreachable sink, or unmapped node without the affected graph check failing.
 
 ## Gate commands
 
 ```sh
-pnpm dagpipe:validate
-pnpm dagpipe:bind
-node --test tests/release/dagpipe-binding.test.mjs
-pnpm typecheck
-pnpm dagpipe:gate
+dagpipe graph validate docs/dagpipe/<changed>.graph.json
+node scripts/dagpipe-bind-graphs.mjs docs/dagpipe/<changed>.graph.json
 ```
 
 Expected results:
 
-- `pnpm dagpipe:validate` prints `validated <n> DAGpipe graph(s)` where `<n>` is
-  the directory graph count.
-- `pnpm dagpipe:bind` prints one `bound <graph>: <n> nodes ok` line per graph.
-- `node --test tests/release/dagpipe-binding.test.mjs` prints all binding
-  fail-closed fixtures passing.
-- `pnpm dagpipe:gate` runs `dagpipe:validate` followed by `test:release` and
-  is wired into the checkpointed `ci` release stage.
-- `pnpm typecheck` exits `0`.
+- The graph CLI validates the changed graph topology.
+- The binding script reports the changed graph's owner mapping.
+- Do not append typecheck, a release suite or another whole-graph pass merely
+  because a graph or its documentation changed. Reuse valid results.
