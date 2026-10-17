@@ -470,6 +470,63 @@ test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks un
   assert.equal(released.status, 'released');
 });
 
+test('runtime pool reserves distinct idle runtimes before yielding', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 2,
+    initialRuntimes: [
+      { runtimeId: 'idle-a', capabilities: ['execute'] },
+      { runtimeId: 'idle-b', capabilities: ['execute'] },
+    ],
+  });
+
+  let first: Awaited<ReturnType<typeof pool.acquire>> | undefined;
+  let second: Awaited<ReturnType<typeof pool.acquire>> | undefined;
+  try {
+    [first, second] = await Promise.all([
+      pool.acquire({
+        requiredCapabilities: ['execute'],
+        executionEpoch: 1,
+        ...poolExecutionIdentity('assignment-a'),
+        scope,
+      }),
+      pool.acquire({
+        requiredCapabilities: ['execute'],
+        executionEpoch: 1,
+        ...poolExecutionIdentity('assignment-b'),
+        scope,
+      }),
+    ]);
+
+    assert.equal(first.status, 'acquired');
+    assert.equal(second.status, 'acquired');
+    if (first.status !== 'acquired' || second.status !== 'acquired') return;
+
+    assert.notEqual(first.lease.runtimeId, second.lease.runtimeId);
+    assert.notEqual(first.handle, second.handle);
+    assert.notEqual(first.lease.leaseId, second.lease.leaseId);
+    assert.notEqual(first.incarnation.agentInstanceId, second.incarnation.agentInstanceId);
+
+    assert.equal(first.handle.incarnation.runtimeId, first.lease.runtimeId);
+    assert.equal(second.handle.incarnation.runtimeId, second.lease.runtimeId);
+    assert.equal(first.handle.incarnation.agentInstanceId, first.incarnation.agentInstanceId);
+    assert.equal(second.handle.incarnation.agentInstanceId, second.incarnation.agentInstanceId);
+  } finally {
+    try {
+      if (first?.status === 'acquired') {
+        await pool.release(first.lease, { scope });
+      }
+    } finally {
+      try {
+        if (second?.status === 'acquired') {
+          await pool.release(second.lease, { scope });
+        }
+      } finally {
+        await pool.dispose();
+      }
+    }
+  }
+});
+
 test('runtime pool fences release by assignment, lease, generation, and execution epoch', async () => {
   const { pool } = factoryPool({
     maxRuntimes: 1,
