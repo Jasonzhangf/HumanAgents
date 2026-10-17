@@ -6,6 +6,10 @@
 
 ### 续接增量（2026-10-16）
 
+- N3预算基础sourceb75b026→候选02ee5be2432f4307d81a820ebb4935cbba2447e3已接收：Root实读旧值capacity1而非2的可编译RED（shell1）、来源1focused/组合1focused各1/1Node0、组合Appbuild/Admissiontsc0。只证明显式budget到原准入predicate，负载1→2→1是调用方snapshot，不冒真实Poolrelease/N物理并行。来源normalremove/prune/pathabsent，无fixture。App绑定和N实例运行后继仍OPEN。
+- helpercheckpoint r1未接收：Root发现独立typedcheckpoint写入失败时derivedReturned/AdoptedCheckpoint拿handofffact.commit拼receipt，磁盘checkpoint0仍声称可冷读保存成功，违反已定save契约。作者已自然exit0，freshGCM r2同树纠正truthful missing/null+原writer实际补写/无副作用重跑，不改publicABI、不新增ledger；额外原parent-turn测试仅机械必填description迁移已核无断言变弱。App两file精确计划已准入（使用已有objective/criteria/refinedText语义，不新增模型必填字段），代码待基础修复后同域续，不提前合brokenApp。
+- UXA2 source8555eec→候选9f4bc8575ece951310382c8a2c1aa3d597c08265，peer实际跨Task authority反例RED后组合tsc0/8/8Node0，来源正常关，runtime/index锁释放。A4a reader GCM与第七Planner来源只读GCM已启动，sharedApp挂载仍后置。本侧新GCM仅补N3 child producer精确seam只读输入，不改源码/外部请求；C3a hot/cold、Memorymodule、helperrepair三路实现继续，loaded935/gen15未变、全goal未验收。
+
 - C3a r8已自然exit0/turn.completed，最终sourcefoldffad9953/test7544f533已对齐；Root编译产物原3cases3/3Node0：真实resume标准尾部position1→2后legalcorrection3成功，真实pending仍拒绝。producer同admittedturn固定requestId完整身份，latestphase fold不另加假设校验；历史request扫描具体RED/源修正有效。前worker关闭后已在原六dirty树freshGCM r9续r7 Batch2/3 hot/fresh-process nextallocation/root/wire/closure，不并写不新树。六文件C3a尚未commit/merge，全链未验收。
 - N3预算底层已freshGCM补位，独占n3-admission-budget/basea51ba5e，仅implicit-admission.ts与原admission.test消费显式maxConcurrentTasks，不重复现有Pool/barrel，不改App/runtimeindex。旧selector来源已先关，当前所有新域均有activeowner；UXA3 source08a440b→候选50a853d5ee7cc052974682c224bf7f9afb4690d6，peer组合UItsc0/原3focusedPASS并正常关树，不Appbuild/restart。UXA2仍独占runtime/index，Appreader仅独立只读计划，挂载待C3a释放。
 
