@@ -22,7 +22,7 @@
 
 完成 iff：下述 G0–G5 的适用验收全部有当前版本证据，候选通过独立 review，按项目标准交付到 main、重建和重启本地实例、同入口复测、push，并清理本轮临时资源。仅创建计划、启动 worker、通过类型检查、fake 回放或显示 ready，均不算完成。
 
-本计划是本轮整合的唯一任务计划；复用既有 `live-composition-closeout-plan.md`、agent-framework 文档中的 owner 和实现，不重新建设治理框架。阶段执行状态、候选身份和 gate 证据复用项目现有 lifecycle/evidence store；本文件只记录计划、结论和证据引用，不复制事件账本。
+本计划记录三脑整合的功能范围；当前整体推进沿 `ux-interaction-long-horizon-plan-2026-10-11.md` 和现有节点笔记。复用既有 owner、实现和有效行为证据，不建设候选身份或 lifecycle 包装。本文件只记录计划、结论和证据引用，不复制事件账本。
 
 ## 基线与已知边界
 
@@ -62,13 +62,13 @@ UI 输入
 
 完成条件：
 
-1. 核实 origin/main、本地 main、在途工作、实际运行产物和配置，形成准确输入身份。
+1. 在集成或运行验收边界检查 main、在途工作、实际运行入口和配置，只补当前缺口。
 2. 审核已有 DAG：入口、caller/callee、唯一 owner、终点及证据；缺链先补，禁止扩展断链下游。
 3. 指定一个正式验收实例；候选测试使用隔离控制目录和空闲端口，不影响他人实例。
-4. 记录 source SHA、产物版本/哈希、进程或 lease 身份、模式和 capability；不得仅用 ready 代表完整能力。
+4. 记录实际入口、产物版本、进程或 lease、模式和 capability；用公开入口行为证明能力，不生成或比较源码与产物摘要。
 5. MCPX 新 worktree 注册已写入配置；若共享 Runtime 尚未刷新，不擅自重启共享服务。记录不可用边界，按适用规则使用宿主工具，不能借父 workspace 冒充子 worktree。
 
-验证：Git 身份、现有入口与实际 API 对照、`pnpm typecheck`，复用身份一致的既有 PASS。
+验证：现有入口与实际 API 对照，以及受影响的类型检查。输入和行为未变的有效结果直接复用。
 
 ## G1：显式大脑真实理解闭环
 
@@ -131,11 +131,11 @@ UI 输入
 
 ## G5：独立审查与标准交付
 
-1. 本轮实现者之外独立审查；普通阶段按 AGY + Codex review，整合 milestone 按 Astra。FAIL 修 owner 后只重跑受影响验证及 review。
+1. 完整且重大的可交付 milestone 完成作者自检与适用黑盒验收后，在正式集成前执行一次独立整体 review。角色模型沿当前编排 Skill；内部阶段不重复审查。finding 修复后只补受影响验证并复核该 finding。
 2. 按项目授权：候选 commit → clean main 集成 → main 重新分配版本并重建 → 重启本地运行实例 → 同入口复验 → push origin/main。
 3. dirty main 或并行集成冲突必须保持现有内容，给出具体首个阻断边界与最小解决方案，不通过 stash/reset/删除他人文件绕过。
 4. Web/Node 项目不凭空引入 Android、emulator、真机或 OTA 流程；仅对项目现有且受影响的交付物执行适用检查，说明适用性依据。
-5. 最终记录 candidate/main SHA、review verdict、产物版本/哈希、实际运行身份、G4 证据和资源回收；缺项只能报 INCOMPLETE/UNVERIFIED。
+5. 最终记录普通 Git 交付回执、review 结论、产物版本、实际运行入口、G4 行为证据和资源回收。不增加候选身份绑定或哈希清单；必要行为缺证据时报告 INCOMPLETE/UNVERIFIED。
 
 ## Luna 派单与并行边界
 
@@ -143,8 +143,8 @@ UI 输入
 - 每个 worker 独占新工作树和明确文件范围；必须说明还有其他执行者，不覆盖或回滚他人变更。
 - `cli.ts`、`ui-runtime/service.ts`、`server.ts`、`runtime-api.js` 等共享组装点由单一集成 owner 持有。实现者先交独立模块和测试，再由该 owner 接线；不得平分目标造成重叠写入。
 - G0 后锁定 G1/G2 接口；无文件冲突的 Memory 核心和测试可并行。UI 接线等待 typed contract 稳定。G4 依赖 G1/G2/G3。
-- 每个合同包含输入 SHA、独占 worktree、允许/禁止路径、完成 iff、具体测试及预期、产物位置、阻塞与回报格式。
-- 复用 identity 未变的有效 PASS；按现有 evidence store 记录 reuse/rerun，避免重复全量验证。
+- 每个合同包含目标、必要输入、独占 worktree、允许/禁止路径、完成条件、受影响测试及预期、产物位置、阻塞与回报格式。
+- 复用有效行为结果；只在相关输入、行为或环境变化时补受影响验证，不新增 reuse/rerun 账本。
 - 不接管其他 Desktop 任务；如需 task-to-task 协调只用已发现的 native thread bridge。缺能力时报告，不自建 Collab 身份或冒充 master。
 
 ## 非目标与硬约束
