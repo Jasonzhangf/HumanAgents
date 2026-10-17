@@ -2,6 +2,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- inspection aggregate Contracts `0b0a8d34` 已正常merge唯一candidate；contractsbuild0、原turn-closure-public-consumer9/9PASS（session17638，inspection-aggregate-contract-composed-20261017.txt）。只证明optional summary.inspectionOutcome既有validator合同，不冒完整aggregate。UX已正常关闭来源，并从含基础candidate并发Appwire/Runtimeboundary两个GCM；本侧不抢写。r289仍原进程只读观察，未终结、不重启；无新预算行为结论。
+
 - 该Explicit增量远端交付已完成：`342f5d43..512e8bce main -> main` 正常push回执成功，不再待push。canonical窗口已释放并通知UX。唯一candidate正常合入最新origin/main，只带已记录文档变化。
 - 下一N3观察 r289 fresh GCM：仅核对隐式runtime实际总推理上限、预算耗尽后的continuation/wait/恢复行为及动态委派剩余缺口。区分合理单请求/实例预算与永久截断未完成任务；不重复r265全Provider审计，不重发RCC，不碰UX inspection writer。观察前不新增代码或测试，完整goal ACTIVE。
 
