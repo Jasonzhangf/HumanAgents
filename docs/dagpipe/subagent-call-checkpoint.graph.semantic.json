@@ -2,18 +2,28 @@
   "graph": "humanagent-subagent-call-checkpoint",
   "requirements_version": 11,
   "labels": {
-    "assignment": "明确角色目标输入与交付合同",
-    "checkpoint": "保存本次调用 checkpoint 与未返回义务",
-    "context": "建立独立 Provider/model 与 context",
-    "execute": "执行角色并通过既有控制 owner 提交运行与收拢事实",
-    "acceptance": "由编排者接纳精炼结果；控制未收拢不得代替"
+    "assignment": "明确角色任务；巡检时选择正式检查",
+    "checkpoint": "保存子调用绑定与未返回义务",
+    "context": "装配独立上下文",
+    "execute": "执行角色并返回完整正文与类型化交付",
+    "acceptance": "接纳持久返回；巡检时补交检查结果"
   },
   "owners": {
-    "assignment": "packages/contracts",
+    "assignment": "packages/runtime",
     "checkpoint": "packages/runtime",
     "context": "packages/runtime",
     "execute": "packages/runtime",
     "acceptance": "packages/runtime"
   },
-  "implementationStatus": "UNVERIFIED"
+  "implementationStatus": "UNVERIFIED",
+  "design": {
+    "status": "USER-REQUIREMENT-DESIGN-REVIEWED",
+    "assignment": "普通 execution/review 保持明确角色任务；只有 execution 显式 check 时，Runtime 才选择正式 definition 并按需打开同一 logical turn 的 occurrence。contracts 仅提供类型，不拥有 open occurrence 副作用。",
+    "binding": "checkpoint 保存子调用绑定与未返回义务；显式 check 时才绑定检查。context 消费 typed binding 并保留独立 Provider/model 含义，不从业务正文或日志重建状态。",
+    "execution": "普通 execution/review 保持原作用；显式 check 时才产生完整 child 正文及独立 typed delivery，正文不声明控制完成。",
+    "acceptance": "acceptance 接纳 durable child return；显式 check 时才由 Runtime 幂等补 I2 receipt，普通任务无 occurrence 时不创建 I2 记录。恢复只补提交，不重复 child。",
+    "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 是计划中的 Runtime 协调 owner，当前尚未实现。",
+    "wiring": "packages/app 只做 wiring，不拥有 inspection binding、delivery 或提交语义。",
+    "roleOrder": "不固定探索、计划、执行、审查顺序。"
+  }
 }

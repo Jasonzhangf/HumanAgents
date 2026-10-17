@@ -7,8 +7,8 @@
     "deliver": "捕获真实已接受的标准交付来源，不声明传输完成或重复保存正文",
     "checkpoint": "完成标准动作后提交 checkpoint 与 closure",
     "planner": "调用独立 Planner 进行下一轮计划",
-    "adopt": "编排者核实适合性与目标事实",
-    "next_state": "消费已校验交付并提交 canonical 公开输出后，输出继续任务或真实终点决定"
+    "adopt": "编排者接受正式计划与定义",
+    "next_state": "先结算本逻辑轮；消费已校验交付并提交 canonical 公开输出后，输出继续任务或真实终点决定"
   },
   "owners": {
     "compress": "packages/runtime",
@@ -27,6 +27,10 @@
     "continueBranch": "CONTINUE 分支保持既有 checkpoint 与独立 Planner 语义，不受交付门影响。",
     "canonicalOutputExclusion": "canonical output 不得使用 native drain 或 summary。正文只来自已校验的标准交付。",
     "noForcedRoleSequence": "该图不强制编排者、Planner 或 reviewer 的固定角色顺序，也不新增模型完成标签。",
-    "runtimeBoundary": "本图是目标契约。在真实 typed readDelivery、canonical public-output commit 与 exact readback 组合回执出现之前，implementationStatus 保持 UNVERIFIED。"
+    "runtimeBoundary": "本图是目标契约。在真实 typed readDelivery、canonical public-output commit 与 exact readback 组合回执出现之前，implementationStatus 保持 UNVERIFIED。",
+    "adoption": "adopt 接受正式 plan 与 definition，不以自由文本或角色顺序代替。",
+    "logicalTurnSettlement": "next_state 推进前结算本 logical turn；continue 不关闭共享 cycle，只有真实终态关闭它。",
+    "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 是计划中的 Runtime 协调 owner，当前尚未实现。",
+    "appWiring": "App 只做 wiring，不拥有 turn settlement 或 inspection 状态。"
   }
 }

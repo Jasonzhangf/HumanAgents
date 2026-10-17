@@ -16,11 +16,20 @@
       "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
       "humanagent-continuation-oriented-by-explicit-dispatch-template"
     ],
-    "designStatus": "USER-REQUIREMENT-DESIGN",
+    "designStatus": "USER-REQUIREMENT-DESIGN-REVIEWED",
     "implementationStatus": "UNVERIFIED",
     "bindingBoundary": "语义设计责任名称，不声明 Operator 已注册或 runtime 执行",
     "outcomeBoundary": "业务不满足条件时输出保留当前 turn/待补充的结果；不伪造 checkpoint 提交或强行执行。",
-    "existingCheckpointDesign": "native-turn-checkpoint.graph.json"
+    "existingCheckpointDesign": "native-turn-checkpoint.graph.json",
+    "assignmentContract": "普通 execution/review 仍由 assignment 明确角色任务；只有 execution 显式 check 时才选择正式 definition，并按需打开同一 logical turn 的 occurrence。",
+    "inspectionBindingContract": "checkpoint 保存子调用绑定与未返回义务；显式 check 时绑定检查，context 只从该 typed binding 恢复独立 Provider/model 与执行上下文。",
+    "executionContract": "普通 execution/review 保持原角色作用；显式 check 时才产生完整 child 正文与独立 typed delivery，业务文本不是控制真源。",
+    "acceptanceContract": "acceptance 接纳 durable child return；显式 check 时才由 Runtime 幂等补 I2 receipt。恢复只补缺失提交，不重启 child。",
+    "runtimeCoordination": {
+      "ownerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "status": "planned/unimplemented"
+    },
+    "appWiringBoundary": "App 只提供 wiring，不拥有 inspection turn boundary 或检查状态。"
   },
   "inputs": [
     {
@@ -37,7 +46,7 @@
         "input"
       ],
       "output": {
-        "id": "assignment_result",
+        "id": "assignment_with_optional_inspection",
         "schema": "Object"
       },
       "input_selector": {
@@ -57,10 +66,10 @@
       "operator": "humanagent-subagent-call-checkpoint-checkpoint",
       "operator_version": "1",
       "inputs": [
-        "assignment_result"
+        "assignment_with_optional_inspection"
       ],
       "output": {
-        "id": "checkpoint_result",
+        "id": "checkpointed_child_binding",
         "schema": "Object"
       },
       "input_selector": {
@@ -80,10 +89,10 @@
       "operator": "humanagent-subagent-call-checkpoint-context",
       "operator_version": "1",
       "inputs": [
-        "checkpoint_result"
+        "checkpointed_child_binding"
       ],
       "output": {
-        "id": "context_result",
+        "id": "independent_child_context",
         "schema": "Object"
       },
       "input_selector": {
@@ -103,10 +112,10 @@
       "operator": "humanagent-subagent-call-checkpoint-execute",
       "operator_version": "1",
       "inputs": [
-        "context_result"
+        "independent_child_context"
       ],
       "output": {
-        "id": "execute_result",
+        "id": "complete_child_body_and_typed_delivery",
         "schema": "Object"
       },
       "input_selector": {
@@ -126,10 +135,10 @@
       "operator": "humanagent-subagent-call-checkpoint-acceptance",
       "operator_version": "1",
       "inputs": [
-        "execute_result"
+        "complete_child_body_and_typed_delivery"
       ],
       "output": {
-        "id": "acceptance_result",
+        "id": "durable_child_return_with_optional_i2_receipt",
         "schema": "Object"
       },
       "input_selector": {
@@ -149,25 +158,25 @@
     {
       "from": "assignment",
       "to": "checkpoint",
-      "arc_id": "assignment_result"
+      "arc_id": "assignment_with_optional_inspection"
     },
     {
       "from": "checkpoint",
       "to": "context",
-      "arc_id": "checkpoint_result"
+      "arc_id": "checkpointed_child_binding"
     },
     {
       "from": "context",
       "to": "execute",
-      "arc_id": "context_result"
+      "arc_id": "independent_child_context"
     },
     {
       "from": "execute",
       "to": "acceptance",
-      "arc_id": "execute_result"
+      "arc_id": "complete_child_body_and_typed_delivery"
     }
   ],
   "outputs": [
-    "acceptance_result"
+    "durable_child_return_with_optional_i2_receipt"
   ]
 }

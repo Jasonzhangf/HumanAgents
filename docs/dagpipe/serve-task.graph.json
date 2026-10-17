@@ -19,7 +19,14 @@
     "productionSubscriptionWiringEvidence": "packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create/schedule/control；packages/app/src/ui-runtime/service.ts:765 RequirementSubmissionOwner stub port",
     "ownerFenceStatus": "IMPLEMENTED; withCurrentDaemonOwner authenticates the local caller, initializes the absent-admission owner inside the Journal transaction, and proves a committed replacement for existing admissions",
     "ownerFenceGuardOrder": "existing withDaemonLeaseGuard -> authenticate injected SupervisorLease.assertActive -> re-read durable lease -> callback passes authenticated caller + replacement predicate -> journal.transaction validates absent-admission first branch or existing-A authority -> append; same scope; release in finally",
-    "graphStatus": "author implementation; durable replay and real RCC evidence; independent review pending"
+    "graphStatus": "author implementation; durable replay and real RCC evidence; independent review pending",
+    "settlementContract": "stop_or_settle 停止或结算真实副作用并形成 settlement_for_checkpoint；checkpoint_commit 提交精确检查点；receipt_commit 提交 durable terminal receipt。只有存在巡检 occurrence 时才补交 I2 检查结算。",
+    "inspectionRecoveryContract": "失败时保留恢复责任。巡检 stop 的恢复不重 stop、不重 child，且 missing 未执行项不得伪造为 cancelled；普通完成按原 settlement 语义处理。",
+    "inspectionCoordinationOwner": {
+      "ownerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "status": "planned/unimplemented"
+    },
+    "appWiringBoundary": "App 只提供 wiring，不拥有 stop、I2、settle 或 close 语义。"
   },
   "inputs": [
     { "id": "persisted_execution_plan", "schema": "Object" }
@@ -130,7 +137,7 @@
       "operator": "humanagent-serve-stop-settle",
       "operator_version": "1",
       "inputs": ["task_verification_receipt"],
-      "output": { "id": "settlement_receipt", "schema": "Object" },
+      "output": { "id": "settlement_for_checkpoint", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -139,8 +146,8 @@
       "id": "checkpoint_commit",
       "operator": "humanagent-serve-checkpoint-commit",
       "operator_version": "1",
-      "inputs": ["settlement_receipt"],
-      "output": { "id": "terminal_checkpoint", "schema": "Object" },
+      "inputs": ["settlement_for_checkpoint"],
+      "output": { "id": "exact_committed_checkpoint", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -149,8 +156,8 @@
       "id": "receipt_commit",
       "operator": "humanagent-serve-receipt-commit",
       "operator_version": "1",
-      "inputs": ["terminal_checkpoint"],
-      "output": { "id": "durable_terminal_receipt", "schema": "Object" },
+      "inputs": ["exact_committed_checkpoint"],
+      "output": { "id": "durable_terminal_receipt_with_optional_i2", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -159,7 +166,7 @@
       "id": "task_terminal",
       "operator": "humanagent-serve-task-terminal",
       "operator_version": "1",
-      "inputs": ["durable_terminal_receipt"],
+      "inputs": ["durable_terminal_receipt_with_optional_i2"],
       "output": { "id": "task_terminal_projection", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -177,9 +184,9 @@
     { "from": "bind_verification_evidence", "to": "produce_observation_evidence", "arc_id": "verification_binding" },
     { "from": "produce_observation_evidence", "to": "verify_task_result", "arc_id": "observation_production_result" },
     { "from": "verify_task_result", "to": "stop_or_settle", "arc_id": "task_verification_receipt" },
-    { "from": "stop_or_settle", "to": "checkpoint_commit", "arc_id": "settlement_receipt" },
-    { "from": "checkpoint_commit", "to": "receipt_commit", "arc_id": "terminal_checkpoint" },
-    { "from": "receipt_commit", "to": "task_terminal", "arc_id": "durable_terminal_receipt" }
+    { "from": "stop_or_settle", "to": "checkpoint_commit", "arc_id": "settlement_for_checkpoint" },
+    { "from": "checkpoint_commit", "to": "receipt_commit", "arc_id": "exact_committed_checkpoint" },
+    { "from": "receipt_commit", "to": "task_terminal", "arc_id": "durable_terminal_receipt_with_optional_i2" }
   ],
   "outputs": ["task_terminal_projection"]
 }

@@ -11,9 +11,16 @@
     "bind_verification_evidence": "绑定真实执行身份与产物摘要",
     "produce_observation_evidence": "从绑定产物生产视觉观测回执",
     "verify_task_result": "执行必需检查并消费校验回执",
-    "stop_or_settle": "停止并收拢副作用",
-    "checkpoint_commit": "提交任务检查点",
-    "receipt_commit": "在同一 owner fence 下提交正常或 replacement 可重放 receipt",
+    "stop_or_settle": "停止或结算真实副作用",
+    "checkpoint_commit": "提交精确检查点",
+    "receipt_commit": "提交终态回执；存在巡检时补交检查结算",
     "task_terminal": "生成任务终态与恢复责任"
+  },
+  "design": {
+    "inspectionSettlement": "普通任务按原语义停止或结算副作用并提交终态回执；仅显式巡检 stop 时，在 checkpoint 后幂等补 I2 检查结算并 close。",
+    "recovery": "巡检 stop 恢复共用 exact committed checkpoint；失败保留恢复责任，不重 stop、不重 child。普通完成保持原 settlement 语义。",
+    "missingItems": "missing 未执行项不伪造为 cancelled。",
+    "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 是计划中的 Runtime 协调 owner，当前尚未实现。",
+    "appWiring": "App 只做 wiring，不拥有 stop、I2、settle 或 close 语义。"
   }
 }
