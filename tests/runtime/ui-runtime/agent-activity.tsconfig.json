@@ -1,0 +1,10 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/agent-activity-runtime",
+    "noEmitOnError": true
+  },
+  "include": ["node-modules.d.ts", "agent-activity-public-consumer.test.ts"]
+}

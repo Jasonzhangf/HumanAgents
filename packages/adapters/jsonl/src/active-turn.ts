@@ -1,4 +1,11 @@
-import { assertSameScope, canonicalJsonStringify, validateAcceptedChildDelivery, validateAcceptedRawFact } from '../../../contracts/src/index.js';
+import {
+  assertSameScope,
+  canonicalJsonStringify,
+  validateAcceptedChildDelivery,
+  validateAcceptedRawFact,
+  scopeContains,
+  validateTaskIdentityScope,
+} from '../../../contracts/src/index.js';
 import type {
   AcceptedChildDelivery,
   AcceptedRawFact,
@@ -7,6 +14,7 @@ import type {
   RawAsset,
   RuntimeRequestRecord,
   ScopeRef,
+  TaskIdentityScope,
 } from '../../../contracts/src/index.js';
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import {
@@ -44,6 +52,7 @@ import { readTaskBusinessRegistration } from './task-grants.js';
 
 const ACTIVE_TURN_PAYLOAD_TYPE = 'active-turn.record';
 const ACTIVE_TURN_COMMIT_PREFIX = 'active-turn:';
+const ACTIVE_TURN_BINDING_DISCRIMINATOR = 'binding-opened';
 const REQUEST_PHASES: readonly RuntimeRequestRecord['phase'][] = ['dispatching', 'dispatched', 'waiting', 'settled', 'failed', 'cancelled'];
 const ACTIVE_TURN_KINDS: readonly ActiveTurnJournalRecord['kind'][] = [
   'binding-opened', 'initial-input', 'request', 'accepted-fact', 'child-invocation', 'child-delivery',
@@ -111,6 +120,14 @@ function turnIdFromCommitId(commitId: string, discriminator: string, admittedTur
     throw new JournalIntegrityError(`active turn commit id does not belong to the admitted turn ${admittedTurnId}`);
   }
   return turnId;
+}
+
+/** The turn a binding-opened commit id names, or null when it names nothing. */
+function bindingOpenedTurnId(commitId: string): string | null {
+  const suffix = `:${ACTIVE_TURN_BINDING_DISCRIMINATOR}`;
+  if (!commitId.startsWith(ACTIVE_TURN_COMMIT_PREFIX) || !commitId.endsWith(suffix)) return null;
+  const turnId = commitId.slice(ACTIVE_TURN_COMMIT_PREFIX.length, commitId.length - suffix.length);
+  return turnId === '' ? null : turnId;
 }
 
 function validateRawAssetContent(asset: RawAsset, label: string): void {
@@ -447,7 +464,7 @@ function validateRecords(
  * bindings belong to their own ports, so they are left untouched here.
  */
 function bindingOf(records: readonly JournalRecord[], admittedTurnId: string): ActiveTurnBinding {
-  const expectedCommitId = activeTurnCommitId(admittedTurnId, 'binding-opened');
+  const expectedCommitId = activeTurnCommitId(admittedTurnId, ACTIVE_TURN_BINDING_DISCRIMINATOR);
   let found: ActiveTurnBinding | undefined;
   for (const record of records) {
     if (!isActiveTurnCarrier(record)) continue;
@@ -459,6 +476,11 @@ function bindingOf(records: readonly JournalRecord[], admittedTurnId: string): A
   }
   if (!found) throw new JournalIntegrityError(`active turn binding is not committed: ${admittedTurnId}`);
   return found;
+}
+
+/** The physical receipt of one committed binding-opened record. */
+function taskBindingCommitRef(record: ActiveTurnCarrierRecord): JournalCommitRef {
+  return { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
 }
 
 export interface JsonlActiveTurnJournalOptions {
@@ -478,6 +500,38 @@ export function decodeActiveTurnRecords(
   admittedTurnId: string,
 ): readonly ActiveTurnJournalRecord[] {
   return validateRecords(records, admittedTurnId, bindingOf(records, admittedTurnId)).records;
+}
+
+export type TaskActiveTurnBindingEntry = {
+  readonly binding: ActiveTurnBinding;
+  readonly commitRef: JournalCommitRef;
+};
+
+/**
+ * Task-scoped enumeration over the same verified Organ Journal. It reads the
+ * codec's own committed binding-opened carriers without naming one turn, and
+ * it never appends or prepares a capture.
+ */
+export async function listTaskActiveTurnBindings(input: {
+  readonly journal: Pick<JsonlOrganJournal, 'replay'>;
+  readonly scope: TaskIdentityScope;
+}): Promise<readonly TaskActiveTurnBindingEntry[]> {
+  validateTaskIdentityScope(input.scope);
+  const committed = await input.journal.replay();
+  const bindings: TaskActiveTurnBindingEntry[] = [];
+  for (const record of committed) {
+    if (!isActiveTurnCarrier(record)) continue;
+    const typed = payloadOf(record);
+    if (typed.kind !== 'binding-opened') continue;
+    const turnId = bindingOpenedTurnId(record.commitId);
+    if (turnId === null) {
+      throw new JournalIntegrityError('active turn binding commit id does not match its record');
+    }
+    const binding = bindingOfRecord(typed, turnId);
+    if (!scopeContains(input.scope, binding.scope)) continue;
+    bindings.push({ binding, commitRef: taskBindingCommitRef(record) });
+  }
+  return bindings;
 }
 
 /**
@@ -524,6 +578,15 @@ export class JsonlActiveTurnJournal implements ActiveTurnJournalPort {
   async replay(): Promise<readonly ActiveTurnJournalRecord[]> {
     const records = await this.journal.replay();
     return validateRecords(records, this.turnId, bindingOf(records, this.turnId)).records;
+  }
+
+  /**
+   * Task-scoped enumeration over the same verified Organ Journal. It reads the
+   * codec's own committed binding-opened carriers without limiting this port
+   * instance to one turn, and it never appends or prepares a capture.
+   */
+  listTaskBindings(scope: TaskIdentityScope): Promise<readonly TaskActiveTurnBindingEntry[]> {
+    return listTaskActiveTurnBindings({ journal: this.journal, scope });
   }
 }
 
