@@ -2,6 +2,10 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- metadata 来源 `73e3327b` 已正常提交并合 candidate；r286 原 Runtime2 项 assertion RED→GREEN、Appwire1 项 assertion RED→GREEN已亲读，首次fixture JSON解析失败不计RED。组合 session20106 contracts/Runtime/App编译0、Runtime2/2+App1/1 PASS。
+- 同一已清洁 metadata树切到 `codex/explicit-brain-delivery-20261017`，从 origin/main 正常 cherry-pick 两项来源为 `1af06f3b/f93992e8`，仅6文件完整 Explicit增量，不带未完inspection。该交付组合 session74053 contracts/Runtime编译0+Runtime4/4，Appbuild/tsc0+HTTP/wire2/2 PASS。r287 fresh Opus5.5 medium 整体只读 Review 已启动，未返回裁决，不称main产品交付。不是逐leaf Review，也不证明live RCC/installed新版本。
+- stop `ecd6126f + f964898d` 已正常合candidate，组合contracts/Appbuild/App/UI Runtime tsc0、原两file9/9 PASS（session74916），已回传UX；owner确认来源正常关闭。无closure/aggregate后继合同仍由UX推进，不与Explicit交付互锁。
+
 - helper 来源 `ae72d6a6` 已正常 merge candidate；组合 contracts/Runtime tsc0 + 原 consumer9/9，App build/tsc0 + 原 HTTP consumer1/1（session42984、59190）。父亲读 r277 item65/item68，分别确认 durable adoption ContractError 与 ordinal duplicate append RED，未计模块解析/环境错误。r284 Git沙盒 index.lock 拒绝后，父宿主正常提交；未绕 metadata。来源 clean/无活动执行者后正常 remove/prune/pathabsent，已关闭。
 - r283 方案经 r285 同会话修订后接受：不新增 description，既有四项 claims/constraints 足够；仅修历史请求投影丢 committedAt/turn归属。旧 tsx/全量套件命令已撤回，使用真实 tsc布局和原 Runtime2 + Appwire1 named consumer。r286 fresh GCM 已在唯一新树 `explicit-checkpoint-metadata-20261017` 启动，base为唯一候选，前一 helper树已关闭。完整 Explicit Brain 增量完成后一次整体 Review，当前未 main产品交付。
 
