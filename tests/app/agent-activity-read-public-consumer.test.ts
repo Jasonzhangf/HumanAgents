@@ -46,6 +46,8 @@ import {
   readTaskAgentActivity,
 } from '../../packages/app/src/ui-runtime/agent-activity-read.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
+import { createJsonlClosedTurnPlannerCallJournal } from '../../packages/app/src/ui-runtime/planner-call-journal.js';
+import type { ClosedTurnPlannerCallPreparationRecord } from '../../packages/runtime/src/orchestration/closed-turn-planner-call.js';
 
 // Failure modes and cost are recorded in the accepted r2 note before this test.
 // The fixture writes real UI/control JSONL through the owning public writers.
@@ -476,6 +478,97 @@ test('high-level reader retains child instances and original review commits acro
     assert.ok(records.some((entry) => entry.sourceKind === 'runtime-pool-lease' && entry.objective === childAssignment.objective));
     assert.ok(read.value.unavailableSources.some((entry) => entry.sourceId === 'runtime-pool-lease:unknown-lease'));
     assert.ok(read.value.unavailableSources.some((entry) => entry.sourceId === `milestone-review:${firstCommit.commitId}`));
+  } finally {
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
+// Probability unknown; the seventh source was omitted. Failure hides Planner
+// calls or makes them historical early. Extending this fixture has low cost.
+test('high-level reader retains epoch 1 Planner stages under epoch 3 Task authority until its own return', async () => {
+  const value = await fixture(true);
+  try {
+    const incarnation = { ...incarnationFor(1), runtimeId: 'planner-runtime',
+      agentInstanceId: 'planner-instance', assignmentId: 'planner-assignment' };
+    const anchor = { commitId: 'fixture:planner-anchor', journalSeq: 1, recordDigest: 'fixture-anchor' };
+    const checkpointId = id('checkpoint', 'planner-checkpoint');
+    // This operation differs from the task's active operation. Task filtering
+    // must retain it without replacing its physical epoch with Task authority.
+    const plannerScope = { ...scope, operationId: id('operation', 'planner-operation') };
+    const prepared: ClosedTurnPlannerCallPreparationRecord = {
+      kind: 'closed-turn-planner-call', stage: 'prepared',
+      duty: { dutyKey: 'planner-duty', taskId, scope: plannerScope,
+        closureRef: 'fixture:closed-turn', checkpointId, checkpointCommitRef: anchor,
+        inputDigest: 'fixture:planner-input', predecessorRevisionId: 'plan-1' },
+      invocationId: 'planner-call', incarnation,
+      execution: { ...plannerScope, taskId, runtimeId: incarnation.runtimeId, executionEpoch: 1 },
+      lease: { leaseId: 'planner-lease', runtimeId: incarnation.runtimeId, generation: 1,
+        incarnation, executionEpoch: 1, ownerId: owner, assignmentId: incarnation.assignmentId,
+        capabilities: ['provider.execution'] },
+      decision: { action: 'spawn', ownerId: owner, condition: 'orchestration.runtime.capacity',
+        nextAction: { kind: 'continue', ref: incarnation.runtimeId }, reason: 'fixture capacity',
+        runtimeId: incarnation.runtimeId },
+      grantCommitRef: anchor, admissionCommitRef: anchor,
+      checkpoint: { checkpoint: { id: checkpointId, scope: plannerScope, cycleId, seq: 1,
+        previousCheckpointId: null, directiveRevision: 1, executionEpoch: 3, outcome: 'succeeded',
+        summary: 'fixture closed checkpoint', recoveryStateRef: rawInitialInput().ref,
+        evidenceRefs: [], next: { kind: 'continue', ref: 'planner' } }, previous: null, commitRef: anchor },
+      preparedAt: '2026-10-16T00:02:00.000Z',
+    };
+    const writer = createJsonlClosedTurnPlannerCallJournal({ journal: value.controlJournal });
+    const preparationCommit = await writer.append(prepared);
+    const read = () => readTaskAgentActivity({ taskId, query: { taskId }, taskJournal: value.taskJournal,
+      controlJournal: new JsonlOrganJournal(join(value.root, 'task-control.jsonl')),
+      i2Journal: createJsonlI2JournalPort({ filePath: join(value.root, 'task-control.jsonl') }),
+      currentAuthority: { taskId, executionEpoch: 3, locations: [] } });
+    const before = await read();
+    assert.equal(before.ok, true);
+    if (!before.ok) return;
+    const planner = before.value.unknown.find((entry) => entry.sourceKind === 'closed-turn-planner-call');
+    assert.ok(planner, 'prepared Planner must be visible and unknown despite Task epoch 3');
+    if (planner === undefined) throw new Error('prepared Planner missing');
+    assert.equal(planner.executionEpoch, 1);
+    assert.equal(planner.assignmentId, incarnation.assignmentId);
+    assert.equal(planner.instance.kind, 'incarnation');
+    if (planner.instance.kind === 'incarnation') assert.equal(planner.instance.agentInstanceId, incarnation.agentInstanceId);
+    assert.equal(planner.objective, undefined);
+    assert.equal('attempt' in planner, false);
+    assert.deepEqual(planner.commitRefs[0], preparationCommit);
+    assert.equal(before.value.historical.some((entry) => entry.sourceKind === 'closed-turn-planner-call'), false);
+    const invocationCommit = await writer.append({ kind: prepared.kind, stage: 'invoked',
+      duty: prepared.duty, invocationId: prepared.invocationId, preparationCommitRef: preparationCommit,
+      invokedAt: '2026-10-16T00:02:01.000Z' });
+    const invoked = await read();
+    assert.equal(invoked.ok, true);
+    if (!invoked.ok) return;
+    const pending = invoked.value.unknown.find((entry) => entry.sourceKind === 'closed-turn-planner-call');
+    assert.ok(pending, 'invoked Planner stays unknown until its own returned commit');
+    if (pending === undefined) throw new Error('invoked Planner missing');
+    assert.deepEqual(pending.commitRefs.slice(0, 2), [preparationCommit, invocationCommit]);
+    const returnCommit = await writer.append({ kind: prepared.kind, stage: 'returned',
+      duty: prepared.duty, invocationId: prepared.invocationId, decision: 'continue',
+      returnedAt: '2026-10-16T00:02:02.000Z', publication: {
+        scope: { organId, taskId }, revisionId: 'plan-2', sequence: 2,
+        predecessor: { revisionId: 'plan-1', sequence: 1, contentDigest: 'sha256:fixture-prior-plan' },
+        snapshot: { title: 'Planner result', summary: 'Continue work',
+          completeness: { scope: 'whole-task', status: 'complete' },
+          acceptanceCriteria: [{ criterionId: 'criterion', description: 'Return plan' }],
+          nodes: [{ nodeId: 'work', kind: 'work', title: 'Work', intent: 'Continue', definition: {} }],
+          phases: [], relations: [] },
+        reason: { kind: 'adjustment', text: 'Planner returned', basisRefs: [] },
+        source: { requirementId: 'requirement', inputRevision: 1, draftId: 'draft',
+          draftRevisionVersion: 1, draftRevisionHash: 'fixture-draft', confirmationRef: 'confirmation', evidenceRefs: [] },
+        historyCoverage: 'complete-from-task-start', publishedAt: '2026-10-16T00:02:02.000Z', publishedBy: 'planner',
+      } });
+    const after = await read();
+    assert.equal(after.ok, true);
+    if (!after.ok) return;
+    const historical = after.value.historical.find((entry) => entry.sourceKind === 'closed-turn-planner-call');
+    assert.ok(historical, 'only the Planner return makes its call historical');
+    if (historical === undefined) throw new Error('returned Planner missing');
+    assert.deepEqual(historical.instance, planner.instance);
+    assert.deepEqual(historical.commitRefs.slice(0, 3), [preparationCommit, invocationCommit, returnCommit]);
+    assert.equal(after.value.unknown.some((entry) => entry.sourceKind === 'closed-turn-planner-call'), false);
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }

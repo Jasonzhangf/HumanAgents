@@ -32,6 +32,10 @@ import {
   type DurableJournalReadResult,
 } from './journal.js';
 import {
+  createJsonlClosedTurnPlannerCallJournal,
+  type ClosedTurnPlannerCallTaskDutyRead,
+} from './planner-call-journal.js';
+import {
   activeTurnCommitId,
   type ActiveTurnJournalRecord,
 } from '../../../runtime/src/context/active-turn-journal.js';
@@ -42,6 +46,7 @@ import {
   type AgentActivityCurrentAuthority,
   type AgentActivityCurrentLocation,
   type AgentActivityNativeSource,
+  type AgentActivityPlannerSource,
   type AgentActivityPoolSource,
   type AgentActivityResumedSource,
   type AgentActivityReviewSource,
@@ -290,6 +295,66 @@ function readFailure(
   nextAction: string,
 ): { readonly ok: false; readonly failure: AgentActivityCoreReadFailure } {
   return { ok: false, failure: { code, ownerId: OWNER_ID, message, nextAction } };
+}
+
+export interface ReadTaskAgentActivityPlannerSourcesOptions {
+  readonly controlJournal: JsonlOrganJournal;
+  readonly canonicalScope: TaskIdentityScope;
+}
+
+export type TaskAgentActivityPlannerAssembly =
+  | {
+      readonly ok: true;
+      readonly value: {
+        readonly plannerCalls: readonly AgentActivityPlannerSource[];
+      };
+    }
+  | {
+      readonly ok: false;
+      readonly failure: AgentActivityCoreReadFailure;
+    };
+
+function plannerSourceFromDuty(
+  duty: ClosedTurnPlannerCallTaskDutyRead,
+): AgentActivityPlannerSource {
+  return {
+    sourceId: `closed-turn-planner-call:${duty.dutyKey}`,
+    ownerId: OWNER_ID,
+    commitRefs: [],
+    evidenceRefs: [],
+    boundLive: undefined,
+    terminalCommitRefs: duty.returned === undefined ? [] : [duty.returned.commitRef],
+    prepared: duty.prepared.record,
+    preparationCommitRef: duty.prepared.commitRef,
+    ...(duty.invoked === undefined
+      ? {}
+      : { invoked: duty.invoked.record, invocationCommitRef: duty.invoked.commitRef }),
+    ...(duty.returned === undefined
+      ? {}
+      : { returned: duty.returned.record, returnCommitRef: duty.returned.commitRef }),
+  };
+}
+
+/**
+ * Reads every committed stage of the closed-turn Planner duties for one trusted
+ * task scope from the same Organ Journal. The App decodes and forwards stage
+ * facts only; Runtime keeps all classification and finality rules.
+ */
+export async function readTaskAgentActivityPlannerSources(
+  options: ReadTaskAgentActivityPlannerSourcesOptions,
+): Promise<TaskAgentActivityPlannerAssembly> {
+  let duties: readonly ClosedTurnPlannerCallTaskDutyRead[];
+  try {
+    duties = await createJsonlClosedTurnPlannerCallJournal({ journal: options.controlJournal })
+      .readTaskDuties(options.canonicalScope);
+  } catch (error) {
+    return readFailure(
+      'agent-activity.planner-source-corrupt',
+      error instanceof Error ? error.message : String(error),
+      'inspect the closed-turn planner call records in this task control journal before reading agent activity',
+    );
+  }
+  return { ok: true, value: { plannerCalls: duties.map(plannerSourceFromDuty) } };
 }
 
 function sameScope(left: ScopeRef, right: ScopeRef): boolean {
@@ -569,6 +634,7 @@ interface SelectAndProjectAgentActivityInput {
   readonly remainingSources: TaskAgentActivityRemainingSources;
   readonly unavailableSources?: readonly TaskAgentActivityUnavailableSource[];
   readonly scope?: RuntimeReadScope;
+  readonly plannerCalls?: readonly AgentActivityPlannerSource[];
 }
 
 function selectAndProjectAgentActivity(
@@ -584,6 +650,7 @@ function selectAndProjectAgentActivity(
     childInvocations: input.remainingSources.childInvocations,
     runtimePoolLeases: input.remainingSources.runtimePoolLeases,
     milestoneReviews: input.remainingSources.milestoneReviews,
+    ...(input.plannerCalls === undefined ? {} : { plannerCalls: input.plannerCalls }),
     unavailableSources: [
       ...input.core.unavailableSources,
       ...(input.unavailableSources ?? []),
@@ -941,7 +1008,7 @@ function assembleMilestoneReviews(input: {
   return { sources, unavailableSources };
 }
 
-/** The single App entry that assembles all six declared activity sources. */
+/** The single App entry that assembles all seven declared activity sources. */
 export async function readTaskAgentActivity(
   options: AssembleTaskAgentActivityRemainingSourcesOptions & {
     readonly query: TaskAgentActivitySelectionQuery;
@@ -952,6 +1019,11 @@ export async function readTaskAgentActivity(
   if (!assembled.ok) return projectionFailure(assembled.failure);
   try {
     const context = assembled.value;
+    const planner = await readTaskAgentActivityPlannerSources({
+      controlJournal: options.controlJournal,
+      canonicalScope: context.taskScope,
+    });
+    if (!planner.ok) return projectionFailure(planner.failure);
     const bindings = await listTaskActiveTurnBindings({ journal: options.controlJournal, scope: context.taskScope });
     const work: ReturnedWork[] = [];
     const collectWork = (entries: readonly ActiveTurnJournalRecord[]) => {
@@ -990,6 +1062,7 @@ export async function readTaskAgentActivity(
       taskId: options.taskId, query: options.query, core: context.sources,
       ...(currentAuthority === undefined ? {} : { currentAuthority }),
       remainingSources: { childInvocations: child.sources, runtimePoolLeases: pool.sources, milestoneReviews: review.sources },
+      plannerCalls: planner.value.plannerCalls,
       unavailableSources: [...child.unavailableSources, ...pool.unavailableSources, ...review.unavailableSources],
     });
   } catch (error) {
