@@ -276,6 +276,7 @@ interface ResponsesWireItem {
   readonly type?: string;
   readonly role?: string;
   readonly name?: string;
+  readonly call_id?: string;
   readonly content?: readonly { readonly type?: string; readonly text?: string }[];
 }
 
@@ -297,6 +298,7 @@ interface SemanticCheckpointWire {
   readonly checkpointId?: unknown;
   readonly committedAt?: unknown;
   readonly description?: unknown;
+  readonly result?: unknown;
   readonly evidenceRefs?: unknown;
   readonly adoptedChildren?: readonly {
     readonly childTurnId?: unknown;
@@ -668,7 +670,7 @@ async function textOnlyResponsesUpstream(input: {
       if (planner !== undefined) {
         plannerAttempts += 1;
         response.writeHead(200, { 'content-type': 'text/event-stream' });
-        response.end(frame(input.inspect && plannerAttempts === 1 ? [
+        response.end(frame(input.inspect && input.turnCount === undefined && plannerAttempts === 1 ? [
           { type: 'response.created', response: { id: 'planner-refused' } },
           { type: 'response.output_text.done', item_id: 'planner-refused-text', text: '{}' },
           { type: 'response.completed', response: { id: 'planner-refused' } },
@@ -800,7 +802,9 @@ async function textOnlyResponsesUpstream(input: {
           }
         }
       }
-      if (input.inspect && !readIssued) {
+      const inspectThisTurn = input.inspect
+        && (input.turnCount === undefined || plannerAttempts === 0);
+      if (inspectThisTurn && !readIssued) {
         readIssued = true;
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.end(frame([
@@ -819,20 +823,28 @@ async function textOnlyResponsesUpstream(input: {
       const admissionCommitId = payload?.admissionCommitRef?.commitId;
       if (!admissionCommitId) throw new Error('text-only run has no admitted operation coverage');
       const section = (text: string) => ({ text, evidenceRefs: [admissionCommitId] });
-      const activeEntries = input.inspect ? await createJsonlActiveTurnJournal({ filePath: input.organFilePath,
+      const activeEntries = inspectThisTurn ? await createJsonlActiveTurnJournal({ filePath: input.organFilePath,
         journal: input.journal, turnId: newActiveTurnId(coverage!.scope.operationId!.value) }).replay() : [];
       const readFact = activeEntries.find((entry) => entry.kind === 'accepted-fact'
         && entry.entry.envelope.fact.kind === 'tool-result' && entry.entry.envelope.fact.callId === 'call-inspect-read');
-      if (input.inspect && (readFact?.kind !== 'accepted-fact'
+      if (inspectThisTurn && (readFact?.kind !== 'accepted-fact'
         || readFact.entry.envelope.fact.kind !== 'tool-result'
         || readFact.entry.envelope.fact.result.status !== 'succeeded')) throw new Error('real inspect result is absent');
+      if (readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result') {
+        assert.deepEqual(readFact.entry.envelope.scope, coverage!.scope);
+        assert.deepEqual(readFact.entry.envelope.fact.rawOutput.ref.scope, coverage!.scope);
+      }
       const deliveryRefs = readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result'
         ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
       const multiTurn = input.turnCount !== undefined;
       const endCallId = multiTurn ? `call-turn-${plannerAttempts + 1}-end` : 'call-text-end';
       const endSummary = multiTurn ? (plannerAttempts === 0 ? {
         goal: section(TURN_ONE_GOAL), actions: section(TURN_ONE_ACTIONS),
-        result: section(TURN_ONE_RESULT), expectedNextStep: section(TURN_ONE_NEXT),
+        result: inspectThisTurn
+          ? { text: `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`,
+            evidenceRefs: [admissionCommitId, ...deliveryRefs] }
+          : section(TURN_ONE_RESULT),
+        expectedNextStep: section(TURN_ONE_NEXT),
       } : input.turnCount === 3 && plannerAttempts === 1 ? {
         goal: section(TURN_TWO_GOAL), actions: section(TURN_TWO_ACTIONS),
         result: section(TURN_TWO_RESULT), expectedNextStep: section(TURN_TWO_NEXT),
@@ -856,7 +868,7 @@ async function textOnlyResponsesUpstream(input: {
         { type: 'response.output_item.done', output_index: 0,
           item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: JSON.stringify({
             summary: endSummary,
-            ...(input.inspect ? {} : { deliveryText }),
+            ...(inspectThisTurn ? {} : { deliveryText }),
             deliveryRefs,
           }) } },
         { type: 'response.completed', response: { id: 'text-end' } },
@@ -1256,7 +1268,7 @@ test('native parallel child calls overlap and retain ordered refined results and
 });
 
 test('native two.turn public CLI consumer retains adopted child context and completes the prior plan', async () => {
-  const fixture = await textOnlyFixture(false, true, false, 2);
+  const fixture = await textOnlyFixture(true, true, false, 2);
   let passed = false;
   try {
     const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
@@ -1307,6 +1319,7 @@ test('native two.turn public CLI consumer retains adopted child context and comp
       readonly input?: readonly {
         readonly type?: string;
         readonly role?: string;
+        readonly call_id?: string;
         readonly content?: readonly { readonly type?: string; readonly text?: string }[];
       }[];
     };
@@ -1320,6 +1333,23 @@ test('native two.turn public CLI consumer retains adopted child context and comp
       'the second turn excludes the first turn raw child-call history');
     assert.equal(turnTwoWire.body.includes('call-parent-adopt'), false,
       'the second turn excludes the first turn raw child-adopt history');
+    const priorCallIds = new Set([
+      'call-inspect-read',
+      'call-parent-child',
+      'call-parent-adopt',
+      'call-child-delivery',
+      'call-child-end',
+      'call-turn-1-end',
+    ]);
+    assert.equal(
+      (turnTwoBody.input ?? []).some((item) =>
+        (item.type === 'function_call' || item.type === 'function_call_output')
+        && priorCallIds.has(item.call_id ?? '')),
+      false,
+      'the second turn excludes prior raw call and result entries',
+    );
+    assert.equal(turnTwoWire.body.includes(EXACT_BODY), false,
+      'the second turn excludes the complete raw file body');
 
     const verified = await fixture.journal.verify();
     const currentCheckpoint = receipt.checkpoint;
@@ -1339,6 +1369,42 @@ test('native two.turn public CLI consumer retains adopted child context and comp
     const coverageRecords = verified.records
       .filter((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
     const parentCoverageRecords = coverageRecords.filter((record) => record.scope.taskId?.value === taskId.value);
+    const firstParentCoverage = parentCoverageRecords.find((record) =>
+      typeof record.scope.operationId?.value === 'string');
+    if (!firstParentCoverage) throw new Error('the first parent operation coverage must be durable');
+    if (!firstParentCoverage.scope.operationId) throw new Error('the first parent operation identity must be durable');
+    const firstTurnEntries = await createJsonlActiveTurnJournal({
+      filePath: fixture.layout.organJournalPath,
+      journal: fixture.journal,
+      turnId: newActiveTurnId(firstParentCoverage.scope.operationId.value),
+    }).replay();
+    const acceptedInspectRead = firstTurnEntries.find((entry) => entry.kind === 'accepted-fact'
+      && entry.entry.envelope.fact.kind === 'tool-result'
+      && entry.entry.envelope.fact.callId === 'call-inspect-read'
+      && entry.entry.envelope.fact.result.status === 'succeeded');
+    if (acceptedInspectRead?.kind !== 'accepted-fact'
+      || acceptedInspectRead.entry.envelope.fact.kind !== 'tool-result') {
+      throw new Error('the first turn must retain its accepted successful inspect read');
+    }
+    assert.deepEqual(acceptedInspectRead.entry.envelope.scope, firstParentCoverage.scope);
+    const acceptedInspectRef = acceptedInspectRead.entry.envelope.fact.rawOutput.ref;
+    assert.deepEqual(acceptedInspectRef.scope, firstParentCoverage.scope);
+    const inspectCheckpoint = semanticCheckpointWires(turnTwoWire.body).find((entry) => entry.goal === TURN_ONE_GOAL);
+    if (!inspectCheckpoint) throw new Error('the second turn must retain the first-turn semantic checkpoint');
+    const inspectResult = requireText(inspectCheckpoint.result, 'the first-turn semantic result');
+    assert.ok(inspectResult.includes(
+      'Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed',
+    ), 'the first-turn result retains the bounded inspect conclusion');
+    assert.equal(inspectResult === EXACT_BODY, false, 'the bounded conclusion is not the complete raw file body');
+    assert.ok(Array.isArray(inspectCheckpoint.evidenceRefs),
+      'the first-turn semantic checkpoint exposes top-level evidence refs');
+    const inspectEvidence = (inspectCheckpoint.evidenceRefs as readonly {
+      readonly locator?: unknown;
+      readonly scope?: unknown;
+    }[]).find((ref) => ref.locator === acceptedInspectRef.locator);
+    assert.ok(inspectEvidence, 'the first-turn semantic checkpoint cites the accepted inspect locator');
+    assert.deepEqual(inspectEvidence, acceptedInspectRef,
+      'the first-turn semantic checkpoint cites the exact accepted inspect ref');
     const operationIds = parentCoverageRecords
       .map((record) => record.scope.operationId?.value)
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
