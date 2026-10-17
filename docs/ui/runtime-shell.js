@@ -1845,16 +1845,21 @@ export function makePageShell(active, eyebrow, title, lede, options = {}) {
   if (lede) copy.append(element('p', lede, 'lede'))
   const breadcrumbs = element('nav', undefined, 'breadcrumbs')
   breadcrumbs.setAttribute('aria-label', '范围面包屑')
-  for (const crumb of options.breadcrumbs || []) {
-    if (crumb.href) {
-      const link = element('a', crumb.label)
-      link.href = crumb.href
-      breadcrumbs.append(link)
-    } else {
-      breadcrumbs.append(element('span', crumb.label))
+  // Pages can publish a human scope name after their initial scoped read.
+  function setBreadcrumbs(items) {
+    breadcrumbs.replaceChildren()
+    for (const crumb of items || []) {
+      if (crumb.href) {
+        const link = element('a', crumb.label)
+        link.href = crumb.href
+        breadcrumbs.append(link)
+      } else {
+        breadcrumbs.append(element('span', crumb.label))
+      }
     }
+    if (breadcrumbs.children.length > 0 && !breadcrumbs.isConnected) copy.append(breadcrumbs)
   }
-  if (breadcrumbs.children.length > 0) copy.append(breadcrumbs)
+  setBreadcrumbs(options.breadcrumbs)
   const status = element('div', undefined, 'status-banner')
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
@@ -1870,6 +1875,7 @@ export function makePageShell(active, eyebrow, title, lede, options = {}) {
   return {
     main,
     status,
+    setBreadcrumbs,
     interactionCardHosts,
     openShellSection: shellLayer.open,
     setShellScope: shellLayer.setScope,
