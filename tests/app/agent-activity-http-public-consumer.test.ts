@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { basename, join, relative } from 'node:path';
 import test from 'node:test';
 import { createServer } from 'node:http';
 import { id, type ActiveTurnBinding, type ProviderBinding } from '../../packages/contracts/src/index.js';
-import { resolveRuntimePaths } from '../../packages/config/src/index.js';
+import { ensureControlLayout, listConfiguredProjects, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -16,7 +16,59 @@ import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runt
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { UiRuntimeJournal, uiRuntimeJournalPath, uiRuntimeControlJournalPath, uiRuntimeModeRoot } from '../../packages/app/src/ui-runtime/journal.js';
-import type { RuntimeAgentActivityProjection, RuntimeReadResult } from '../../packages/ui/contracts/runtime.js';
+import type {
+  RuntimeAgentActivityProjection,
+  RuntimeProjectReadProjection,
+  RuntimeReadResult,
+  RuntimeSystemReadProjection,
+  RuntimeTaskDashboardProjection,
+} from '../../packages/ui/contracts/runtime.js';
+
+interface FixtureFile {
+  readonly path: string;
+  readonly content: Uint8Array;
+}
+
+async function readFixtureFiles(root: string): Promise<readonly FixtureFile[]> {
+  const files: FixtureFile[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else if (entry.isFile()) {
+        files.push({ path: relative(root, path), content: await readFile(path) });
+      }
+    }
+  };
+  await visit(root);
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function assertFixtureFilesUnchanged(before: readonly FixtureFile[], after: readonly FixtureFile[]): void {
+  assert.deepEqual(after.map((file) => file.path), before.map((file) => file.path), 'GET changed the fixture file set');
+  for (const file of before) {
+    const current = after.find((candidate) => candidate.path === file.path);
+    if (current === undefined) throw new Error(`GET removed fixture file ${file.path}`);
+    assert.equal(sameBytes(current.content, file.content), true, `GET changed fixture file ${file.path}`);
+  }
+}
+
+function requireAgentActivity(
+  dashboard: RuntimeTaskDashboardProjection,
+): RuntimeReadResult<RuntimeAgentActivityProjection> {
+  const activity = dashboard.agentActivity;
+  if (activity === undefined) throw new Error('dashboard must expose the activity reader');
+  return activity;
+}
 
 // Known missing HTTP edge; likelihood unknown. Impact: missing catalog, lost
 // exact selection or cold/live scope confusion. One temporary public consumer
@@ -32,6 +84,8 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     await mkdir(coldWorkspace);
     const paths = await resolveRuntimePaths({ workspace, controlRoot: join(root, 'control') });
     const coldPaths = await resolveRuntimePaths({ workspace: coldWorkspace, controlRoot: join(root, 'control') });
+    await ensureControlLayout(paths);
+    await ensureControlLayout(coldPaths);
     const organId = id('organ', 'http-organ');
     const taskId = id('task', 'http-task');
     const operationId = id('operation', 'http-operation');
@@ -48,10 +102,18 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     const fixtures = [
       { source: paths, turnId: boundTurnId, runtimeId: boundRuntimeId, assignmentId: boundAssignmentId,
         objective: boundObjective, inputRef: 'task://http-task/input', targetRef: 'task://http-task',
-        expectedOutputRef: 'task://http-task/output', title: 'HTTP fixture' },
+        expectedOutputRef: 'task://http-task/output', title: 'HTTP fixture', identity: {
+          requirementId: 'http-requirement-a', inputRevision: 1, draftId: 'http-draft-a',
+          draftRevisionVersion: 1, draftRevisionHash: 'sha256:http-fixture-a',
+          confirmationRef: 'http-confirmation-a',
+        } },
       { source: coldPaths, turnId: coldTurnId, runtimeId: coldRuntimeId, assignmentId: coldAssignmentId,
         objective: coldObjective, inputRef: 'task://http-task/cold/input', targetRef: 'task://http-task/cold',
-        expectedOutputRef: 'task://http-task/cold/output', title: 'Cold HTTP fixture' },
+        expectedOutputRef: 'task://http-task/cold/output', title: 'Cold HTTP fixture', identity: {
+          requirementId: 'http-requirement-b', inputRevision: 1, draftId: 'http-draft-b',
+          draftRevisionVersion: 1, draftRevisionHash: 'sha256:http-fixture-b',
+          confirmationRef: 'http-confirmation-b',
+        } },
     ];
     const activeBindingFor = (fixture: typeof fixtures[number]): ActiveTurnBinding => ({
       scope, execution: { runtimeId: fixture.runtimeId, executionEpoch: 1 },
@@ -70,7 +132,6 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         currentTurnRef: `active-turn://${fixture.turnId}`, recoveryStateRef: `recovery://${fixture.turnId}`,
       },
     });
-    const journalPaths: string[] = [];
     for (const fixture of fixtures) {
       const taskPath = uiRuntimeJournalPath(fixture.source.checkpointsRoot, 'fake');
       const journal = new UiRuntimeJournal(taskPath);
@@ -83,18 +144,13 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       }, input: fixture.objective, operationCounter: 1, cycleCounter: 1 });
       const controlPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(fixture.source.checkpointsRoot, 'fake'));
       const control = new JsonlOrganJournal(controlPath);
-      await new JsonlTaskIdentityJournal(control).append({ scope: { organId, taskId }, source: {
-        requirementId: 'http-requirement', inputRevision: 1,
-        draftId: 'http-draft', draftRevisionVersion: 1, draftRevisionHash: 'sha256:http-fixture',
-        confirmationRef: 'http-confirmation',
-      } });
+      await new JsonlTaskIdentityJournal(control).append({ scope: { organId, taskId }, source: fixture.identity });
       const activeBinding = activeBindingFor(fixture);
       await createJsonlActiveTurnJournal({ journal: control, turnId: fixture.turnId }).append({
         commitId: activeTurnCommitId(fixture.turnId, 'binding-opened'),
         record: { kind: 'binding-opened', binding: activeBinding,
           currentTurnRef: activeBinding.admittedTurn.currentTurnRef },
       });
-      journalPaths.push(taskPath, controlPath);
     }
     const accessControl = await AccessControlService.open({ credentialPath: paths.webAccessCredentialPath, create: true });
     const challenge = accessControl.createPairingChallenge('http-fixture', 1);
@@ -114,7 +170,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         filePath: uiRuntimeControlJournalPath(uiRuntimeModeRoot(paths.checkpointsRoot, 'fake')),
       }) },
       projectKey: paths.projectKey, workspaceRoot: workspace, runtimePaths: paths,
-      projectCatalog: async () => ({ projects: [paths, coldPaths], failures: [] }),
+      projectCatalog: () => listConfiguredProjects(paths),
       explicitBrainInterpreter: { interpret: async () => { throw new Error('GET must not interpret'); } },
       memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(),
         projectKey: paths.projectKey, roleId: 'execution' },
@@ -122,7 +178,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     const { listener } = createUiRuntimeRequestDispatcher({ service, accessControl,
       uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false });
     const taskView = () => JSON.stringify(service.taskDashboard(taskId));
-    const before = { task: taskView(), journals: await Promise.all(journalPaths.map((path) => readFile(path, 'utf8'))) };
+    const before = { task: taskView(), files: await readFixtureFiles(root) };
     server = createServer(listener);
     const httpServer = server;
     await new Promise<void>((resolve, reject) => {
@@ -132,15 +188,78 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     const address = httpServer.address();
     if (address === null || typeof address === 'string') throw new Error('HTTP consumer did not bind a socket');
     const baseUrl = `http://127.0.0.1:${address.port}`;
-    const get = async (query = '') => {
-      const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard${query}`, {
-        headers: { cookie: accessControl.sessionCookie(session).split(';')[0]! },
-      });
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    const request = async (path: string) => {
+      const response = await fetch(`${baseUrl}${path}`, { headers: { cookie } });
       const payload = await response.text();
-      assert.equal(response.status, 200, payload);
-      return JSON.parse(payload) as { agentActivity: RuntimeReadResult<RuntimeAgentActivityProjection> };
+      return { response, payload };
     };
-    const catalog = (await get()).agentActivity;
+    const get = async (query = ''): Promise<RuntimeTaskDashboardProjection> => {
+      const { response, payload } = await request(`/api/tasks/${encodeURIComponent(taskId.value)}/dashboard${query}`);
+      assert.equal(response.status, 200, payload);
+      return JSON.parse(payload) as RuntimeTaskDashboardProjection;
+    };
+    const getDashboard = async (query: string): Promise<RuntimeProjectReadProjection | RuntimeSystemReadProjection> => {
+      const { response, payload } = await request(`/api/dashboard?${query}`);
+      assert.equal(response.status, 200, payload);
+      return JSON.parse(payload) as RuntimeProjectReadProjection | RuntimeSystemReadProjection;
+    };
+    const system = await getDashboard('scope=system') as RuntimeSystemReadProjection;
+    assert.equal(system.surface, 'runtime-system');
+    assert.equal(system.scope.kind, 'system');
+    assert.equal(system.coverage, 'configured-projects-in-current-control-root');
+    assert.equal(system.projects.length, 2, JSON.stringify(system));
+    assert.equal(system.taskCount, 2, JSON.stringify(system));
+    assert.equal(system.complete, true, JSON.stringify(system.failures));
+    assert.deepEqual(system.failures, []);
+    const systemProjects = new Map(system.projects.map((project) => [project.scope.projectKey, project]));
+    assert.deepEqual([...systemProjects.keys()].sort(), fixtures.map((fixture) => fixture.source.projectKey).sort());
+    for (const fixture of fixtures) {
+      const project = systemProjects.get(fixture.source.projectKey);
+      if (project === undefined) throw new Error(`system omitted project ${fixture.source.projectKey}`);
+      assert.equal(project.taskCount, 1, `${fixture.source.projectKey} task count`);
+      assert.equal(project.tasks.length, 1, `${fixture.source.projectKey} task rows`);
+    }
+
+    const projectReads = new Map<string, RuntimeProjectReadProjection>();
+    for (const fixture of fixtures) {
+      const project = await getDashboard(`scope=project&projectKey=${encodeURIComponent(fixture.source.projectKey)}`) as RuntimeProjectReadProjection;
+      projectReads.set(fixture.source.projectKey, project);
+      assert.equal(project.surface, 'runtime-project');
+      assert.equal(project.scope.kind, 'project');
+      assert.equal(project.scope.projectKey, fixture.source.projectKey);
+      assert.equal(project.label, basename(fixture.source.workspaceCwd));
+      assert.equal(project.taskCount, 1, JSON.stringify(project));
+      assert.equal(project.complete, true, JSON.stringify(project.failures));
+      assert.deepEqual(project.failures, []);
+      assert.equal(project.tasks.length, 1, JSON.stringify(project));
+      const row = project.tasks[0]!;
+      assert.deepEqual(row.scope, { kind: 'task', projectKey: fixture.source.projectKey, mode: 'fake', taskId });
+      assert.equal(row.task.taskId.value, taskId.value);
+      assert.equal(row.task.title, fixture.title);
+      assert.deepEqual(row.task.identitySource, fixture.identity);
+      for (const other of fixtures) {
+        if (other.source.projectKey !== fixture.source.projectKey) {
+          assert.equal(row.task.title === other.title, false, 'project row borrowed another project title');
+          assert.equal(row.task.identitySource?.requirementId === other.identity.requirementId, false,
+            'project row borrowed another project identity');
+        }
+      }
+      const systemProject = systemProjects.get(fixture.source.projectKey);
+      if (systemProject === undefined) throw new Error(`system omitted project ${fixture.source.projectKey}`);
+      assert.deepEqual(project.tasks, systemProject.tasks, 'project row must match its system row');
+    }
+
+    const assertTaskA = (body: RuntimeTaskDashboardProjection): void => {
+      assert.equal(body.taskTitle, fixtures[0]!.title, 'scope A title mismatch');
+      assert.equal(body.input, fixtures[0]!.objective, 'scope A input mismatch');
+    };
+    const taskA = await get(`?projectKey=${encodeURIComponent(paths.projectKey)}&mode=fake`);
+    assertTaskA(taskA);
+    assert.equal(taskA.taskId.value, taskId.value);
+    assert.equal(taskA.mode, 'fake');
+
+    const catalog = requireAgentActivity(await get());
     assert.ok(catalog, 'dashboard must expose the activity reader');
     assert.equal(catalog.ok, true, JSON.stringify(catalog));
     if (!catalog.ok) throw new Error('catalog unavailable');
@@ -152,7 +271,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     assert.equal(catalogEntries.some((entry) => entry.instance.runtimeId === coldRuntimeId
       || entry.assignmentId === coldAssignmentId || entry.objective === coldObjective), false,
     'bound catalog must not include cold facts');
-    const selected = (await get(`?agentKind=native-execution&agentRuntimeId=${boundRuntimeId}&agentExecutionEpoch=1&agentAssignmentId=${boundAssignmentId}`)).agentActivity;
+    const selected = requireAgentActivity(await get(`?agentKind=native-execution&agentRuntimeId=${boundRuntimeId}&agentExecutionEpoch=1&agentAssignmentId=${boundAssignmentId}`));
     assert.equal(selected.ok, true, JSON.stringify(selected));
     if (!selected.ok) throw new Error('selection unavailable');
     assert.equal(selected.value.mode, 'selected');
@@ -160,11 +279,14 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     assert.ok(selected.value.selected!.every((entry) => entry.instance.kind === 'native-execution'
       && entry.instance.runtimeId === boundRuntimeId && entry.executionEpoch === 1 && entry.assignmentId === boundAssignmentId));
     for (const query of ['?agentUnknown=x', '?agentKind=native-execution']) {
-      const invalid = (await get(query)).agentActivity;
+      const invalid = requireAgentActivity(await get(query));
       assert.equal(invalid.ok, false);
       if (!invalid.ok) assert.equal(invalid.failure.code, 'agent-activity.invalid-selection');
     }
-    const cold = (await get(`?projectKey=${coldPaths.projectKey}&mode=fake`)).agentActivity;
+    const coldTask = await get(`?projectKey=${encodeURIComponent(coldPaths.projectKey)}&mode=fake`);
+    assert.equal(coldTask.taskTitle, fixtures[1]!.title);
+    assert.equal(coldTask.input, fixtures[1]!.objective);
+    const cold = requireAgentActivity(coldTask);
     assert.equal(cold.ok, true, JSON.stringify(cold));
     if (!cold.ok) throw new Error('cold catalog unavailable');
     assert.deepEqual(cold.value.current, []);
@@ -176,7 +298,19 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     assert.equal(coldEntries.some((entry) => entry.instance.runtimeId === boundRuntimeId
       || entry.assignmentId === boundAssignmentId || entry.objective === boundObjective), false,
     'cold catalog must not include bound facts');
-    assert.deepEqual({ task: taskView(), journals: await Promise.all(journalPaths.map((path) => readFile(path, 'utf8'))) }, before);
+    await assert.rejects(async () => assertTaskA(coldTask), /scope A title mismatch/);
+    console.log(JSON.stringify({ event: 'cross-scope-assertion-rejected', assertion: 'scope A title mismatch' }));
+
+    const unknown = await request(`/api/dashboard?scope=project&projectKey=${encodeURIComponent('unknown-project')}`);
+    assert.equal(unknown.response.status, 404, unknown.payload);
+    const unknownBody = JSON.parse(unknown.payload) as { readonly error?: { readonly code?: string } };
+    assert.equal(unknownBody.error?.code, 'project.unknown');
+    assert.equal(Object.hasOwn(unknownBody, 'projects'), false, 'unknown project must not return a success body');
+
+    const after = { task: taskView(), files: await readFixtureFiles(root) };
+    assert.equal(after.task, before.task, 'GET changed the task view');
+    assertFixtureFilesUnchanged(before.files, after.files);
+    console.log(JSON.stringify({ event: 'read-only-fixture-unchanged', files: before.files.length }));
   } finally {
     const httpServer = server;
     if (httpServer !== undefined && listening) {
