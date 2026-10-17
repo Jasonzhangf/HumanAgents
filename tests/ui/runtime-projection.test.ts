@@ -16,14 +16,27 @@ import {
   type ObservationHandoffSource,
 } from '../../packages/ui/projection/index.js';
 import { UiProjectionError, type UiDataSource } from '../../packages/ui/contracts/models.js';
-import type { RuntimeReadScope } from '../../packages/ui/contracts/runtime.js';
 import {
+  RuntimeProjectionError,
+  type RuntimeReadScope,
+} from '../../packages/ui/contracts/runtime.js';
+import {
+  projectRuntimeBusinessCycle,
+  projectRuntimeBusinessCycles,
   projectRuntimeDashboard,
+  projectRuntimeInspectionComparison,
+  projectRuntimeInspectionOccurrence,
+  projectRuntimeInspectionOccurrences,
+  projectRuntimeMilestoneReviews,
   projectRuntimeTaskDashboard,
   projectRuntimeTaskWaitingStatus,
   projectRuntimeTaskList,
+  type RuntimeBusinessCycleProjection,
+  type RuntimeInspectionItemComparisonProjection,
+  type RuntimeInspectionOccurrenceProjection,
   type RuntimeLivenessInput,
   type RuntimeLivenessProjection,
+  type RuntimeMilestoneReviewProjection,
   type RuntimeTaskSnapshotInput,
 } from '../../packages/ui/projection/runtime.js';
 
@@ -962,4 +975,87 @@ test('agent activity projection renders a closed-turn planner call without a fab
   assert.equal(/closed-turn-planner-call/.test(rendered), false, rendered);
   assert.equal(/undefined/.test(rendered), false, rendered);
   view.dispose();
+});
+
+test('I2 runtime projections preserve optional task read scope and reject mismatched taskId', () => {
+  const taskId = id('task', 'i2-scope-task');
+  const foreignTaskId = id('task', 'i2-scope-foreign-task');
+  const taskScope = { organId: id('organ', 'i2-scope-organ'), taskId };
+  const scope: RuntimeReadScope = {
+    kind: 'task',
+    projectKey: 'project-alpha',
+    mode: 'fake',
+    taskId,
+  };
+  const current = { state: 'known' as const, cycleId: 'cycle-1', planRevisionCommitRef: null };
+  const commitRef = { commitId: 'commit-1', journalSeq: 1, recordDigest: 'digest-1' };
+  const item: RuntimeInspectionItemComparisonProjection = {
+    checkId: 'check-1',
+    criterion: 'criterion-1',
+    change: 'unchanged',
+    before: {
+      checkId: 'check-1', criterion: 'criterion-1', state: 'completed', outcome: 'completed',
+      judgment: 'ok', reason: null, resultRef: 'result-1', completedAt: '2026-10-17T00:00:00.000Z', evidenceRefs: [],
+    },
+    after: {
+      checkId: 'check-1', criterion: 'criterion-1', state: 'completed', outcome: 'completed',
+      judgment: 'ok', reason: null, resultRef: 'result-2', completedAt: '2026-10-17T00:01:00.000Z', evidenceRefs: [],
+    },
+  };
+  const occurrence: RuntimeInspectionOccurrenceProjection = {
+    occurrenceId: 'occurrence-1', cycleId: 'cycle-1', executionEpoch: 1, definitionId: 'definition-1',
+    definitionVersion: '1', definitionDigest: 'digest-definition-1', definitionCommitRef: commitRef,
+    openingCommitRef: commitRef, settlementCommitRef: null, openedAt: '2026-10-17T00:00:00.000Z',
+    settledAt: null, state: 'open', outcome: 'pending', outcomeReason: null, scheduleOccurrenceRef: null,
+    items: [], evidenceRefs: [],
+  };
+  const review: RuntimeMilestoneReviewProjection = {
+    milestoneId: 'milestone-1', cycleId: 'cycle-1', status: 'passed', reviewKind: 'quality', findings: [],
+    outputText: 'passed', artifactRef: null, artifactDigest: null,
+    reviewer: {
+      runtimeId: 'runtime-1', generation: 1, agentInstanceId: 'agent-1', roleId: 'reviewer',
+      assignmentId: 'assignment-1', executionEpoch: 1,
+    },
+    completedAt: '2026-10-17T00:02:00.000Z', reviewCommitRef: commitRef, planRevisionCommitRef: commitRef,
+    alignment: 'aligned', alignmentCommitRef: commitRef, alignedPlanRevisionCommitRef: commitRef,
+    checkpointCommitRef: commitRef, evidenceRefs: [],
+  };
+  const cycle: RuntimeBusinessCycleProjection = {
+    cycleId: 'cycle-1', state: 'running', directiveRevision: 1, executionEpoch: 1,
+    taskFlow: { kind: 'inspection', definitionVersion: 1 }, openedAt: '2026-10-17T00:00:00.000Z',
+    openingReason: 'authorized start', openedCommitRef: commitRef, planRevisionCommitRef: commitRef,
+    previousCycleCommitRef: null, scheduleOccurrenceRef: null, inspectionOccurrenceId: 'occurrence-1',
+    progress: 'open', outcome: null, next: null, closedAt: null, closureCommitRef: null,
+    checkpointCommitRef: null, inspectionSettlementCommitRef: null, reviews: [review], alignmentPending: 0,
+  };
+  const historyInput = { taskScope, current, viewed: null, occurrences: [occurrence] };
+  const occurrenceEntryInput = { taskScope, current, viewed: null, occurrence };
+  const reviewInput = { taskScope, current, reviews: [review] };
+  const cycleHistoryInput = { taskScope, current, viewed: null, cycles: [cycle] };
+  const cycleEntryInput = { taskScope, current, viewed: null, cycle };
+  const comparisonInput = {
+    taskScope, current, left: { occurrenceId: 'occurrence-1' }, right: { occurrenceId: 'occurrence-2' },
+    comparable: true, reason: null,
+    definition: { definitionId: 'definition-1', definitionVersion: '1' }, items: [item],
+  };
+  type OptionalTaskScope = { readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }> };
+  const projectors = [
+    (input: OptionalTaskScope) => projectRuntimeInspectionOccurrences({ ...historyInput, ...input }),
+    (input: OptionalTaskScope) => projectRuntimeInspectionOccurrence({ ...occurrenceEntryInput, ...input }),
+    (input: OptionalTaskScope) => projectRuntimeMilestoneReviews({ ...reviewInput, ...input }),
+    (input: OptionalTaskScope) => projectRuntimeBusinessCycles({ ...cycleHistoryInput, ...input }),
+    (input: OptionalTaskScope) => projectRuntimeBusinessCycle({ ...cycleEntryInput, ...input }),
+    (input: OptionalTaskScope) => projectRuntimeInspectionComparison({ ...comparisonInput, ...input }),
+  ] as const;
+  for (const projector of projectors) {
+    assert.equal('scope' in projector({}), false);
+    assert.deepEqual((projector({ scope }) as { readonly scope?: unknown }).scope, scope);
+  }
+  const mismatchedScope = { ...scope, taskId: foreignTaskId };
+  for (const projector of projectors) {
+    assert.throws(
+      () => projector({ scope: mismatchedScope }),
+      RuntimeProjectionError,
+    );
+  }
 });

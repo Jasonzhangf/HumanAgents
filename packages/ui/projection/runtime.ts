@@ -22,6 +22,7 @@ import {
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
   type RuntimeReadResult,
+  type RuntimeReadScope,
   type PublicOutputPublicationProjection,
   type RuntimeCheckpointFilter,
   type RuntimeCheckpointHistoryProjection,
@@ -235,6 +236,7 @@ export interface RuntimeCheckpointHistoryInput {
 
 export interface RuntimeInspectionOccurrenceHistoryInput {
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly occurrenceId: string } | null;
   readonly occurrences: readonly RuntimeInspectionOccurrenceProjection[];
@@ -243,6 +245,7 @@ export interface RuntimeInspectionOccurrenceHistoryInput {
 
 export interface RuntimeInspectionOccurrenceEntryInput {
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly occurrenceId: string } | null;
   readonly occurrence: RuntimeInspectionOccurrenceProjection;
@@ -250,6 +253,7 @@ export interface RuntimeInspectionOccurrenceEntryInput {
 
 export interface RuntimeMilestoneReviewHistoryInput {
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly reviews: readonly RuntimeMilestoneReviewProjection[];
   readonly nextCursor?: string;
@@ -257,6 +261,7 @@ export interface RuntimeMilestoneReviewHistoryInput {
 
 export interface RuntimeBusinessCycleHistoryInput {
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly cycleId: string } | null;
   readonly cycles: readonly RuntimeBusinessCycleProjection[];
@@ -265,6 +270,7 @@ export interface RuntimeBusinessCycleHistoryInput {
 
 export interface RuntimeBusinessCycleEntryInput {
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly viewed: { readonly cycleId: string } | null;
   readonly cycle: RuntimeBusinessCycleProjection;
@@ -272,6 +278,7 @@ export interface RuntimeBusinessCycleEntryInput {
 
 export interface RuntimeInspectionComparisonInput {
   readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
   readonly current: RuntimeI2CurrentPosition;
   readonly left: { readonly occurrenceId: string };
   readonly right: { readonly occurrenceId: string };
@@ -623,6 +630,21 @@ function projectCommitRef(ref: RuntimeCommitRefInput): RuntimeCommitRefProjectio
   return { ...ref };
 }
 
+function projectOptionalI2TaskReadScope(input: {
+  readonly taskScope: RuntimeTaskScopeProjection;
+  readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+}): { readonly scope?: Extract<RuntimeReadScope, { readonly kind: 'task' }> } {
+  if (input.scope === undefined) {
+    return {};
+  }
+  if (input.scope.taskId.value !== input.taskScope.taskId.value) {
+    throw new RuntimeProjectionError(
+      `task read scope taskId ${input.scope.taskId.value} does not match ${input.taskScope.taskId.value}`,
+    );
+  }
+  return { scope: { ...input.scope } };
+}
+
 export function projectRuntimeContextHistory(input: RuntimeContextHistoryInput): RuntimeContextHistoryProjection {
   return {
     surface: 'runtime-context-history',
@@ -658,6 +680,7 @@ export function projectRuntimeInspectionOccurrences(
   return {
     surface: 'runtime-inspection-occurrences',
     taskScope: { ...input.taskScope },
+    ...projectOptionalI2TaskReadScope(input),
     current: input.current,
     viewed: input.viewed,
     entries: input.occurrences.map((occurrence) => ({ ...occurrence })),
@@ -671,6 +694,7 @@ export function projectRuntimeInspectionOccurrence(
   return {
     surface: 'runtime-inspection-occurrence',
     taskScope: { ...input.taskScope },
+    ...projectOptionalI2TaskReadScope(input),
     current: input.current,
     viewed: input.viewed,
     entry: { ...input.occurrence },
@@ -683,6 +707,7 @@ export function projectRuntimeMilestoneReviews(
   return {
     surface: 'runtime-milestone-reviews',
     taskScope: { ...input.taskScope },
+    ...projectOptionalI2TaskReadScope(input),
     current: input.current,
     entries: input.reviews.map((review) => ({ ...review })),
     ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
@@ -695,6 +720,7 @@ export function projectRuntimeBusinessCycles(
   return {
     surface: 'runtime-business-cycles',
     taskScope: { ...input.taskScope },
+    ...projectOptionalI2TaskReadScope(input),
     current: input.current,
     viewed: input.viewed,
     entries: input.cycles.map((cycle) => ({ ...cycle })),
@@ -708,6 +734,7 @@ export function projectRuntimeBusinessCycle(
   return {
     surface: 'runtime-business-cycle',
     taskScope: { ...input.taskScope },
+    ...projectOptionalI2TaskReadScope(input),
     current: input.current,
     viewed: input.viewed,
     entry: { ...input.cycle },
@@ -720,6 +747,7 @@ export function projectRuntimeInspectionComparison(
   return {
     surface: 'runtime-inspection-comparison',
     taskScope: { ...input.taskScope },
+    ...projectOptionalI2TaskReadScope(input),
     current: input.current,
     left: { ...input.left },
     right: { ...input.right },
