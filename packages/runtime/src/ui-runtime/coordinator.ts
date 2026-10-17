@@ -2752,6 +2752,37 @@ export class RuntimeTaskCoordinator {
     return this.taskAssembly(taskId).runtimePool;
   }
 
+  /** Observe only an already-instantiated pool; GET never creates an assembly. */
+  inspectTaskRuntimePool(taskId: TaskId): ReturnType<AgentRuntimePoolManager['inspect']> | undefined {
+    return this.tasks.get(taskId.value)?.taskAssembly?.runtimePool.inspect();
+  }
+
+  readTaskCurrentActivityLocations(
+    taskId: TaskId,
+  ): readonly import('../observation/agent-activity.js').AgentActivityCurrentLocation[] {
+    const record = this.tasks.get(taskId.value);
+    if (!record?.running || record.release?.state !== 'released') return [];
+    const locations: import('../observation/agent-activity.js').AgentActivityCurrentLocation[] = [];
+    if (record.allocation && record.allocation.executionEpoch === record.executionEpoch) {
+      locations.push({
+        instance: { kind: 'native-execution', execution: {
+          runtimeId: record.allocation.runtimeId,
+          executionEpoch: record.allocation.executionEpoch,
+        } },
+        assignmentId: record.allocation.assignmentId,
+        ...(record.activeTurn === undefined ? {} : { businessTurnId: record.activeTurn.admittedTurn.turnId }),
+      });
+    }
+    for (const runtime of record.taskAssembly?.runtimePool.inspect().runtimes ?? []) {
+      if (runtime.state === 'running' && runtime.incarnation?.taskId.value === taskId.value
+        && runtime.incarnation.executionEpoch === record.executionEpoch) {
+        locations.push({ instance: { kind: 'incarnation', incarnation: runtime.incarnation },
+          assignmentId: runtime.incarnation.assignmentId });
+      }
+    }
+    return locations;
+  }
+
   taskAssembly(taskId: TaskId): RuntimeTaskAssembly {
     const assembly = this.requireTask(taskId).taskAssembly;
     if (!assembly) {
