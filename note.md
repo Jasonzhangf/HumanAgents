@@ -15,6 +15,16 @@
   - 长期执行计划：[整体执行计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)、[Provider 缺口计划](docs/goals/native-provider-gap-plan-2026-10-11.md)。
   - 进度汇总：[Native Reasoning & UX 进度摘要](docs/goals/native-reasoning-progress-2026-10-08.md)（历史完整流水账已归档至 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/`）。
 
+## 2026-10-17 两个声明项目的只读归属验收
+
+G7/F10 的“两空项目归属、列表和返回导航”子证明已通过。使用已安装 HumanAgent 官方 init 在独立 control root 声明 workspace-a、workspace-b，再通过官方 serve/pair 和实际浏览器读取；未创建 Task、未编造 Journal 或模型结果。这不关闭两任务计数、任务明细、活动实例隔离或整个 G7/F10。
+
+公开 system API 返回两个不同的官方 projectKey、总任务数 0、complete=true、无失败。A/B 各自返回准确的 key、名称和空任务列表，计数相加与系统总数一致。未知项目返回 HTTP 409 / project.unknown，没有被替换为空成功。实际浏览器完成总览 → A → 面包屑返回 → B → 未知项目；名称、链接、空态和错误均正确。
+
+fixture 使用 localhost 会话，与原 127.0.0.1 页面隔离。新配对 cookie 已清理，p1 原地址和关闭抽屉状态已恢复；未写显示偏好，原 53007 generation21 和 p3 未操作。父宿主持有自有 serve 进程至验收结束，再正式 SIGTERM：退出码0、lease disposed、PID消失、端口关闭；仅删除自有 fixture。最终没有保留临时服务或控制目录。
+
+早期执行脚本的 CLI127、自设就绪超时和子进程交接消失均保留为失败记录，不当作产品启动故障或验收通过。最终证据位于 /Volumes/Intel/playground/humanagent/.worker-runs/ux-two-project-acceptance-20261017/browser-r4-receipt.json、root-cleanup-receipt.json 和 root-reception.md。Observation 默认层仍有机械字段、缺少下一步和合成顺序边；独立设计已通过，源码实现正在独占 worktree 推进。完整 I/G/F 保持 ACTIVE。
+
 ## 2026-10-17 共享读取保护与旧治理消融
 
 本轮源提交为 `49daab38` 和 `30ed5852`，已通过标准 Git 合流进入 main，集成提交 `bf4fface`。完整 I1–I5 / G1–G14 / F01–F20 仍 ACTIVE；本轮关闭浏览器共享读取边界的缺陷和项目选中的旧 Guidance，不宣称跨任务 live、Provider 或完整恢复写链完成。
@@ -101,6 +111,13 @@ SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 bin
   1. 在唯一集成候选工作树合流后端与前端候选分支，跑通 `pnpm dagpipe:validate`、`pnpm typecheck`、`pnpm build:app` 与受影响聚焦测试。
   2. 完成垂直切片 1（`M0 + M1 + M2`：真实 RCC 4444 + Ego14 浏览器首屏/新建任务/Checkpoint 验收）与 1 次独立 Milestone Review 后合入 `main`。
   3. 推进垂直切片 2（`M3 + M4 + M5`：子 Agent 动态调用与审查闭环 + 偏好/响应式抽屉验收）。
+
+## 2026-10-17 Provider buffered-stop 独立增量
+
+- 两文件修复 `a7644054` 已正常合 main `bc5b06c5`。SSE buffered frame 前与 yield 后检查已接受 stop，并在无既有错误时记录 stopped，结束 pending tail 等待；保留原错误及正常 settle owner。
+- 原 main P-Stop1 实际超时 RED；来源严格编译、同用例 GREEN、driver/transport/replay 76/76。独立整体 Review 本次 Opus quota ERROR 后 Gemini4 medium SUCCESS/exit0，现有 controller schema/classify 裁决 PASS、无 findings。真实 RCC source proof 只一次 generation：stopped、released、committed、cancelled、close/cleanup closed。
+- main contracts/config/App 与 Provider 测试编译成功。初次用错测试产物路径，纠正为 dist/tests-provider 后发现缺 workspace 链接；正常 offline frozen install 修复，原 P-Stop1 1/1 PASS，未改测试断言。正式 package/global install 成功。
+- 安装后自有 fixture `~/.humanagent/test-fixtures/provider-stop-installed-r146-qz1gep5a` 正式 restart gen1/PID65081→gen2/PID65342，官方 pair 与公开 `/api/runtime/status` HTTP200，模型请求0；正式 SIGINT→dispose，lease disposedAt `2026-10-17T15:26:37.469Z`。原 gen21/53007/p3 未动。证据在外置 RUN `provider-stop-review-gemini-r144-20261017/` classification 与 installed-runtime-receipt.json；完整 native goal 仍未完成。
 
 ## 2026-10-17 Pool 并发占槽独立增量
 
