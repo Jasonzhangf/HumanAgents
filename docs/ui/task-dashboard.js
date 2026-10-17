@@ -22,10 +22,13 @@ import {
   sameStoredRecordRef,
   stateTone,
   taskDetailHref,
+  taskControlHref,
   taskIdFromQuery,
   taskReadScopeFromQuery,
 } from './runtime-shell.js'
-import { sameCheckpointAssetBodyAddress } from './runtime-api.js'
+import {
+  sameCheckpointAssetBodyAddress,
+} from './runtime-api.js'
 import {
   checkpointQuery,
   checkpointSelectionFromQuery,
@@ -62,6 +65,7 @@ const taskId = taskIdFromQuery(false)
 const readScope = taskReadScopeFromQuery()
 const explicitScope = readScope.kind === 'task' ? readScope : null
 const scopeFailure = readScope.kind === 'invalid' ? readScope.failure : null
+const taskGrantIntent = queryParam('control') === '1'
 let displayMode = 'current'
 
 // The agent-instance selection is URL view state, decoded once through the shared
@@ -261,6 +265,15 @@ const {
 
 let dashboard
 let taskGrantControl = null
+let taskGrantRead = null
+let taskGrantReadState = 'idle'
+let taskGrantReadError
+let taskGrantReceipt
+let taskGrantControlHost = null
+let taskGrantEntry = null
+let taskGrantDrawerOpen = false
+let taskGrantDrawerDismissed = false
+let taskGrantBusy = false
 let stream
 let closingStream = false
 let subscribedOperationId
@@ -1785,6 +1798,230 @@ function openAgentDetail(payload) {
   })
 }
 
+function controlTaskIdValue(value) {
+  return value && typeof value === 'object' ? value.value : value
+}
+
+function taskGrantTargetMatches(read = taskGrantRead) {
+  if (!explicitScope || !read) return false
+  return controlTaskIdValue(read.readback?.taskId) === taskId
+    && read.targetScope?.projectKey === explicitScope.projectKey
+    && read.targetScope?.mode === explicitScope.mode
+}
+
+function taskGrantStatusCopy() {
+  if (taskGrantReadState === 'pending') return '正在读取最新控制状态…'
+  if (taskGrantReadState === 'unconfirmed') {
+    return taskGrantReceipt
+      ? '上次操作已记录，最新状态暂不能确认。'
+      : '最新控制状态暂不能确认；先前没有控制命令回执，授权操作不可用。'
+  }
+  if (taskGrantReadState === 'target-unverified') return '控制目标未验证，授权操作不可用。'
+  if (taskGrantReadState === 'unavailable') {
+    if (taskGrantReadError?.status === 400) return '控制范围不完整，未发送控制请求。'
+    return taskGrantReadError
+      ? '控制状态暂时不可用，授权操作不可用。'
+      : '尚未读取控制状态。'
+  }
+  if (taskGrantReadState !== 'ready') return '尚未读取控制状态。'
+  const grant = taskGrantRead?.readback?.grant
+  if (grant?.state === 'granted') return '最新状态已确认：执行授权有效。'
+  if (grant?.state === 'revoked') return '最新状态已确认：执行授权已撤销。'
+  return '最新状态已确认：当前没有执行授权。'
+}
+
+function taskGrantReceiptCopy() {
+  if (!taskGrantReceipt) return '尚未提交控制命令。'
+  const execution = taskGrantReceipt.execution
+  if (execution?.state === 'blocked') {
+    return '上次控制命令已记录，但执行未完成；请核对技术详情中的原错误与下一步。'
+  }
+  if (taskGrantReceipt.code) return '上次控制命令已记录；执行结果需要核对。'
+  return '上次控制命令已记录。'
+}
+
+function taskGrantTechnicalEntries() {
+  const grant = taskGrantRead?.readback?.grant
+  const execution = taskGrantReceipt?.execution
+  return [
+    ['targetScope.projectKey', taskGrantRead?.targetScope?.projectKey],
+    ['targetScope.mode', taskGrantRead?.targetScope?.mode],
+    ['readback.taskId', controlTaskIdValue(taskGrantRead?.readback?.taskId)],
+    ['readback.commitId', taskGrantRead?.readback?.commit?.commitId],
+    ['readback.grant.revision', grant?.revision],
+    ['readback.grant.state', grant?.state],
+    ['readback.grant.owner', grant?.owner],
+    ['authority', taskGrantRead?.authority === undefined ? undefined : JSON.stringify(taskGrantRead.authority)],
+    ['read.error.code', taskGrantReadError?.code],
+    ['read.error.ownerId', taskGrantReadError?.ownerId],
+    ['read.error.message', taskGrantReadError?.message],
+    ['read.error.nextAction', taskGrantReadError?.nextAction],
+    ['execution.state', execution?.state],
+    ['execution.current.state', execution?.current?.state],
+    ['execution.current.error.code', execution?.current?.error?.code],
+    ['execution.current.error.message', execution?.current?.error?.message],
+    ['execution.current.nextStep', execution?.current?.nextStep],
+    ['execution.apiError.code', execution?.apiError?.code],
+    ['execution.apiError.message', execution?.apiError?.message],
+    ['execution.error.code', execution?.error?.code],
+    ['execution.error.ownerId', execution?.error?.ownerId],
+    ['execution.error.message', execution?.error?.message],
+    ['execution.error.nextAction', execution?.error?.nextAction],
+    ['error.code', taskGrantReceipt?.error?.code],
+    ['error.ownerId', taskGrantReceipt?.error?.ownerId],
+    ['error.message', taskGrantReceipt?.error?.message],
+    ['error.nextAction', taskGrantReceipt?.error?.nextAction],
+    ['apiError.code', taskGrantReceipt?.apiError?.code],
+    ['apiError.message', taskGrantReceipt?.apiError?.message],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== '')
+}
+
+function renderTaskGrantControlInto(host) {
+  if (!host) return
+  clearNode(host)
+  const section = element('section', undefined, 'section')
+  section.dataset.taskGrantControl = 'true'
+  section.dataset.controlState = taskGrantReadState === 'ready' ? 'ready' : 'unavailable'
+  section.append(element('h2', '任务控制 / 执行授权'))
+  const panel = element('div', undefined, 'panel')
+  const actions = element('div', undefined, 'actions')
+  const grant = taskGrantRead?.readback?.grant
+  const confirmed = taskGrantReadState === 'ready'
+
+  const grantButton = element('button', '授权执行', 'button button--primary')
+  grantButton.type = 'button'
+  grantButton.dataset.taskGrantAction = 'grant'
+  grantButton.disabled = !confirmed || taskGrantBusy || grant?.state === 'granted'
+  grantButton.addEventListener('click', () => void runTaskGrantCommand('grant'))
+
+  const revokeButton = element('button', '撤销执行授权', 'button button--danger')
+  revokeButton.type = 'button'
+  revokeButton.dataset.taskGrantAction = 'revoke'
+  revokeButton.disabled = !confirmed || taskGrantBusy || grant?.state !== 'granted'
+  revokeButton.addEventListener('click', () => void runTaskGrantCommand('revoke'))
+  actions.append(grantButton, revokeButton)
+
+  const actionStatus = element('p', taskGrantStatusCopy(), 'muted')
+  actionStatus.dataset.taskGrantActionStatus = 'true'
+  actionStatus.setAttribute('role', 'status')
+  actionStatus.setAttribute('aria-live', 'polite')
+  const receipt = element('p', taskGrantReceiptCopy(), 'muted')
+  receipt.dataset.taskGrantReceipt = 'true'
+  const technical = element('button', '查看控制技术详情', 'button button--quiet')
+  technical.type = 'button'
+  technical.dataset.taskGrantTechnical = 'true'
+  technical.addEventListener('click', () => openTechnicalDetail({
+    title: '任务控制技术详情',
+    entries: taskGrantTechnicalEntries(),
+    onClose: () => {
+      if (!taskGrantIntent) return
+      openTaskGrantControl()
+      taskGrantControlHost?.querySelector('[data-task-grant-technical]')?.focus()
+    },
+  }))
+  panel.append(actions, actionStatus, receipt, technical)
+  section.append(panel)
+  host.append(section)
+}
+
+function openTaskGrantControl() {
+  if (!taskGrantIntent || !explicitScope) return
+  taskGrantDrawerDismissed = false
+  if (!taskGrantControlHost || !taskGrantControlHost.isConnected) {
+    taskGrantControlHost = element('div')
+    taskGrantControlHost.dataset.taskGrantControlHost = 'true'
+  }
+  renderTaskGrantControlInto(taskGrantControlHost)
+  taskGrantDrawerOpen = true
+  const detail = openTechnicalDetail({
+    title: '任务控制 / 执行授权',
+    content: taskGrantControlHost,
+    onClose: () => {
+      taskGrantDrawerOpen = false
+      taskGrantDrawerDismissed = true
+      if (taskGrantEntry?.isConnected) taskGrantEntry.focus()
+    },
+  })
+  detail.dataset.taskGrantControlDrawer = 'true'
+}
+
+async function refreshTaskGrantControl() {
+  if (!taskGrantIntent) return
+  if (!explicitScope) {
+    taskGrantRead = null
+    taskGrantReadState = 'unavailable'
+    taskGrantReadError = scopeFailure ?? {
+      code: 'read.scope.invalid',
+      ownerId: 'humanagent.ui',
+      message: '任务控制需要 task、projectKey 和 mode。',
+      nextAction: '从正式任务导航重新打开任务控制。',
+    }
+    return
+  }
+  const previousRead = taskGrantRead
+  taskGrantReadState = 'pending'
+  taskGrantReadError = undefined
+  renderTaskGrantControlInto(taskGrantControlHost)
+  try {
+    taskGrantRead = await api.readTaskGrant(taskId, {
+      projectKey: explicitScope.projectKey,
+      mode: explicitScope.mode,
+    })
+    taskGrantReadState = taskGrantTargetMatches() ? 'ready' : 'unconfirmed'
+  } catch (error) {
+    taskGrantRead = error?.status === 409 || error?.status === 400 ? null : previousRead
+    taskGrantReadState = error?.status === 409 ? 'target-unverified'
+      : error?.status === 400 ? 'unavailable'
+        : taskGrantReceipt ? 'unconfirmed' : 'unavailable'
+    taskGrantReadError = error
+  }
+  renderTaskGrantControlInto(taskGrantControlHost)
+}
+
+async function runTaskGrantCommand(action) {
+  if (!explicitScope || taskGrantReadState !== 'ready' || taskGrantBusy) return
+  const grant = taskGrantRead?.readback?.grant
+  const expectedRevision = action === 'revoke' ? grant?.revision : grant?.revision ?? 0
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return
+  const scope = { projectKey: explicitScope.projectKey, mode: explicitScope.mode }
+  taskGrantBusy = true
+  taskGrantReadError = undefined
+  renderTaskGrantControlInto(taskGrantControlHost)
+  const input = {
+    requestId: `control:${action}:task-dashboard:${Date.now()}`,
+    expectedRevision,
+  }
+  try {
+    const receipt = action === 'grant'
+      ? await api.grantTaskControl(taskId, input, scope)
+      : await api.revokeTaskGrant(taskId, input, scope)
+    taskGrantReceipt = receipt
+    taskGrantBusy = false
+    try {
+      await refreshTaskGrantControl()
+    } catch (error) {
+      taskGrantReadError = error
+      taskGrantReadState = 'unconfirmed'
+    }
+    renderTaskGrantControlInto(taskGrantControlHost)
+  } catch (error) {
+    taskGrantBusy = false
+    if (error?.status) {
+      taskGrantReceipt = {
+        code: error.code,
+        ownerId: error.ownerId,
+        message: error.message,
+        nextAction: error.nextAction,
+        execution: error?.execution,
+        apiError: error?.apiError,
+      }
+    }
+    taskGrantReadError = error
+    taskGrantReadState = error?.execution?.state === 'blocked' ? 'ready' : 'unconfirmed'
+    renderTaskGrantControlInto(taskGrantControlHost)
+  }
+}
+
 function renderDashboard() {
   if (!dashboard) return
   if (agentViewDispose) {
@@ -1820,6 +2057,20 @@ function renderDashboard() {
     project.href = `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}`
     breadcrumbs.append(system, project, element('span', '当前任务'))
     copy.append(breadcrumbs)
+  }
+  if (explicitScope) {
+    const control = element('button', '任务控制 / 执行授权', 'button button--quiet')
+    control.dataset.taskGrantControlEntry = 'entry'
+    control.setAttribute('aria-haspopup', 'dialog')
+    control.addEventListener('click', () => {
+      if (!taskGrantIntent) {
+        location.assign(taskControlHref(explicitScope.taskId, explicitScope))
+        return
+      }
+      openTaskGrantControl()
+    })
+    copy.append(control)
+    taskGrantEntry = control
   }
   heading.append(copy, status, refreshButton)
   main.append(heading)
@@ -2141,6 +2392,11 @@ async function refresh() {
       }
       markSync()
       renderActiveReadingMode()
+      await refreshTaskGrantControl()
+      if (!taskGrantDrawerOpen && !taskGrantDrawerDismissed && taskGrantEntry?.isConnected) {
+        openTaskGrantControl()
+      }
+      renderTaskGrantControlInto(taskGrantControlHost)
       return
     }
     dashboard = await api.taskDashboard(taskId, agentQuery)
@@ -2150,10 +2406,12 @@ async function refresh() {
     dashboardFailure = undefined
     planHistoryState = applyPlanHistoryRead(dashboard)
     taskControlError = undefined
-    taskGrantControl = await api.readTaskGrant(taskId).catch((error) => {
-      taskControlError = error
-      return null
-    })
+    if (!taskGrantIntent) {
+      taskGrantControl = await api.readTaskGrant(taskId).catch((error) => {
+        taskControlError = error
+        return null
+      })
+    }
     status.dataset.tone = 'success'
     status.textContent = '任务投影已同步'
     markSync()

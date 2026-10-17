@@ -86,6 +86,8 @@ export class RuntimeApiError extends Error {
     this.ownerId = body?.ownerId || 'humanagent.app'
     this.nextAction = body?.nextAction || 'inspect the runtime error'
     this.evidenceRefs = body?.evidenceRefs || []
+    this.execution = body?.execution
+    this.apiError = body?.apiError
     this.status = status
   }
 }
@@ -120,6 +122,17 @@ function appendCheckpointSelection(query, checkpointQuery) {
   return query
 }
 
+// Task control scope is an explicit pair or absent. A partial pair is invalid
+// at the page boundary, so a caller cannot accidentally compose a legacy URL.
+export function taskControlScopeQuery({ projectKey, mode } = {}) {
+  if (projectKey === undefined && mode === undefined) return ''
+  if (typeof projectKey !== 'string' || projectKey === ''
+    || (mode !== 'fake' && mode !== 'rcc')) {
+    throw new TypeError('task control scope requires projectKey and mode=fake|rcc')
+  }
+  return `?${new URLSearchParams({ projectKey, mode })}`
+}
+
 // A checkpoint asset body is addressed only by its role, or by the exact adopted
 // child triple. The four checkpoint selection keys on the query already name the
 // exact checkpoint; nothing else may be sent as authority.
@@ -148,7 +161,7 @@ export function createRuntimeApi(options = {}) {
     if (init.body !== undefined) headers.set('content-type', 'application/json')
     const response = await fetchImpl(`${baseUrl}${path}`, { ...init, headers })
     const body = await response.json().catch(() => ({}))
-    if (!response.ok) throw new RuntimeApiError(body.error || body, response.status)
+    if (!response.ok) throw new RuntimeApiError(body.error ? { ...body, ...body.error } : body, response.status)
     return body
   }
 
@@ -182,15 +195,21 @@ export function createRuntimeApi(options = {}) {
       body: JSON.stringify({ taskIds, action }),
     }),
     createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
-    readTaskGrant: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/control/grant`),
-    grantTaskControl: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}/control/grant`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
-    revokeTaskGrant: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}/control/revoke`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
+    readTaskGrant: (taskId, scope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/control/grant${taskControlScopeQuery(scope)}`,
+    ),
+    grantTaskControl: (taskId, input, scope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/control/grant${taskControlScopeQuery(scope)}`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+    revokeTaskGrant: (taskId, input, scope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/control/revoke${taskControlScopeQuery(scope)}`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
     receiveExplicitInput: (input) => request('/api/explicit/inputs', {
       method: 'POST',
       body: JSON.stringify({ ...input, channel: 'business' }),

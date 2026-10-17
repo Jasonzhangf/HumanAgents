@@ -54,6 +54,10 @@
  *   PLAN_CONTROL_RCC_BASE_URL  default http://127.0.0.1:4444
  *   PLAN_CONTROL_RCC_MODEL     default gpt-5.5
  *   PLAN_CONTROL_PLAYWRIGHT    default /opt/homebrew/lib/node_modules/playwright/index.js
+ *
+ * `--task-grant-only` runs only section C, the formal task navigation and
+ * scoped grant/revoke consumer. It never enters the unscoped plan proof or the
+ * real RCC section.
  */
 
 import { createServer } from 'node:http';
@@ -68,6 +72,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const uiRoot = resolve(process.env.PLAN_CONTROL_UI_ROOT ?? join(repoRoot, 'dist', 'app', 'ui'));
 const evidenceRoot = process.env.PLAN_CONTROL_EVIDENCE?.trim();
 const skipReal = process.env.PLAN_CONTROL_SKIP_REAL === '1';
+const taskGrantOnly = process.argv.includes('--task-grant-only');
 const rccBaseUrl = (process.env.PLAN_CONTROL_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
 const rccModel = process.env.PLAN_CONTROL_RCC_MODEL ?? 'gpt-5.5';
 const cliPath = resolve(repoRoot, 'dist', 'app', 'app', 'src', 'cli.js');
@@ -348,6 +353,520 @@ async function clickControl(page, action) {
   if (await locator.count() === 0) return false;
   await locator.first().click();
   return true;
+}
+
+function taskGrantDashboardBody({ taskId, projectKey, mode }) {
+  return {
+    surface: 'runtime-task-dashboard',
+    mode,
+    taskId: { scope: 'task', value: taskId },
+    taskTitle: '核对任务控制边界',
+    state: 'waiting',
+    stateLabel: '等待执行授权',
+    statusSections: { business: '等待执行授权', waiting: '尚无执行等待信息', connection: '由浏览器 SSE 连接状态呈现' },
+    currentNode: 'admission.task-grant',
+    observationRef: `task=${taskId}`,
+    nextStep: '打开任务控制并核对当前授权',
+    input: '核对任务控制边界',
+    output: '尚无输出',
+    history: { events: [], hasMore: false, total: 0, omitted: 0, gap: false },
+    allowedActions: [],
+    recentEvents: [],
+    taskPlanHistory: {
+      ok: false,
+      failure: {
+        code: 'task-plan-history.not-read',
+        ownerId: 'humanagent.ui',
+        message: 'fixture has no task plan history',
+        nextAction: 'none',
+      },
+    },
+  };
+}
+
+function taskGrantReadBody({ taskId, projectKey, mode, grant = null, authority = null, omitTargetScope = false }) {
+  return {
+    taskId: { scope: 'task', value: taskId },
+    ...(omitTargetScope ? {} : { targetScope: { projectKey, mode } }),
+    readback: {
+      taskId: { scope: 'task', value: taskId },
+      grant,
+      commit: grant === null ? null : { commitId: 'commit-task-grant-readback' },
+    },
+    authority,
+  };
+}
+
+function taskGrantSemanticBody(taskId) {
+  return {
+    scope: {
+      organId: { scope: 'organ', value: 'organ-task-grant-fixture' },
+      taskId: { scope: 'task', value: taskId },
+    },
+    projectionVersion: 'runtime-semantic-v1',
+    sourceWatermark: 0,
+    events: [],
+    coverageIssues: [],
+    pairing: [],
+    capabilities: [],
+  };
+}
+
+function readTaskGrantSurface(page) {
+  return page.evaluate(() => {
+    const section = document.querySelector('[data-task-grant-control]');
+    const drawer = document.querySelector('dialog[data-technical-detail="true"]');
+    const entry = document.querySelector('[data-task-grant-control-entry]');
+    return {
+      sectionPresent: Boolean(section),
+      drawerOpen: Boolean(drawer?.open),
+      drawerTitle: drawer?.querySelector('.shell-layer-title')?.textContent ?? '',
+      drawerCloseHook: drawer?.querySelector('.shell-layer-close')?.className ?? '',
+      panelText: section?.innerText ?? '',
+      actionText: document.querySelector('[data-task-grant-action-status]')?.textContent ?? '',
+      receiptText: document.querySelector('[data-task-grant-receipt]')?.textContent ?? '',
+      technicalText: drawer?.innerText ?? '',
+      grantButtonDisabled: document.querySelector('[data-task-grant-action="grant"]')?.disabled ?? null,
+      revokeButtonDisabled: document.querySelector('[data-task-grant-action="revoke"]')?.disabled ?? null,
+      activeText: document.activeElement?.textContent ?? '',
+      activeHook: document.activeElement?.dataset?.taskGrantAction
+        ?? document.activeElement?.dataset?.taskGrantTechnical
+        ?? document.activeElement?.dataset?.taskGrantControlEntry
+        ?? (document.activeElement === entry ? 'entry' : undefined)
+        ?? document.activeElement?.className
+        ?? '',
+    };
+  });
+}
+
+async function closeTaskGrantDrawer(page) {
+  await page.locator('dialog[data-technical-detail="true"][open] .shell-layer-close').click();
+  await page.locator('dialog[data-technical-detail="true"][open]').waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => {
+    const entry = document.querySelector('[data-task-grant-control-entry]');
+    return Boolean(entry && document.activeElement === entry);
+  }, undefined, { timeout: 15_000 });
+}
+
+async function refreshTaskDashboard(page) {
+  await page.getByRole('button', { name: '刷新当前范围' }).click();
+  await page.waitForFunction(() => document.querySelector('[data-task-grant-control-entry]'), undefined, { timeout: 15_000 });
+  await sleep(300);
+}
+
+async function openTaskGrantControlFromEntry(page, { waitReady = true } = {}) {
+  await page.locator('[data-task-grant-control-entry]').click();
+  await page.waitForFunction(() => {
+    const drawer = document.querySelector('dialog[data-technical-detail="true"][open]');
+    return Boolean(drawer?.querySelector('[data-task-grant-control]'));
+  }, undefined, { timeout: 15_000 });
+  if (waitReady) {
+    await page.waitForFunction(() => document.querySelector('[data-task-grant-control]')?.dataset.controlState === 'ready', undefined, { timeout: 15_000 });
+  }
+}
+
+async function taskGrantViewportProof(browser, baseUrl, artifactDir, viewport, state) {
+  const context = await browser.newContext({ viewport });
+  const page = await context.newPage();
+  const pageErrors = [];
+  const unexpectedRequests = [];
+  const apiRequests = [];
+  page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
+  await page.route('**/api/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    apiRequests.push(`${request.method()} ${path}${url.search}`);
+    const body = (payload, status = 200) => route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(payload),
+    });
+    if (path === '/api/runtime/status') {
+      return body({ state: 'ready', mode: state.mode, providerState: 'ready', connected: true });
+    }
+    if (path === '/api/dashboard'
+      && url.searchParams.get('scope') === 'project'
+      && url.searchParams.get('projectKey') === state.projectKey) {
+      return body(taskGrantProjectBody(state));
+    }
+    if (path === '/api/tasks') {
+      return body({ draft: [], waiting: [], running: [], completed: [], stopped: [], failed: [] });
+    }
+    if (path === `/api/tasks/${state.taskId}/dashboard`) {
+      return body(taskGrantDashboardBody(state));
+    }
+    if (path === `/api/tasks/${state.taskId}/semantic` && request.method() === 'GET') {
+      return body(taskGrantSemanticBody(state.taskId));
+    }
+    if (path === `/api/tasks/${state.taskId}/semantic/stream` && request.method() === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream; charset=utf-8',
+        body: '',
+      });
+    }
+    if (path === '/api/ui/display-preference' && request.method() === 'GET') {
+      return body({ preference: { mode: 'current' }, defaultMode: 'current' });
+    }
+    const control = path.match(new RegExp(`^/api/tasks/${state.taskId}/control/(grant|revoke)$`));
+    if (control && request.method() === 'GET') {
+      state.reads += 1;
+      state.readQueries.push(Object.fromEntries(url.searchParams));
+      if (state.failNextRead) {
+        state.failNextRead = false;
+        return body({ error: {
+          code: 'task-control.read.unavailable',
+          ownerId: 'humanagent.app',
+          message: '控制状态暂不可读取',
+          nextAction: '保留已记录结果并稍后读取',
+        } }, 503);
+      }
+      return body(taskGrantReadBody({
+        ...state,
+        grant: state.grant,
+        authority: state.authority,
+        omitTargetScope: state.omitTargetScope,
+      }));
+    }
+    if (control && request.method() === 'POST') {
+      const payload = request.postDataJSON();
+      state.posts.push({ path, query: Object.fromEntries(url.searchParams), payload });
+      if (state.rejectPost) {
+        return body({
+          error: {
+            code: 'task-control.blocked',
+            ownerId: 'humanagent.app',
+            message: '执行分配未能释放',
+            nextAction: '检查执行分配后再处理',
+          },
+          taskId: state.taskId,
+          targetScope: { projectKey: state.projectKey, mode: state.mode },
+          readback: { taskId: state.taskId, grant: state.grant, commit: null },
+          authority: null,
+          execution: {
+            state: 'blocked',
+            current: {
+              state: 'blocked',
+              error: { code: 'operation.release-refused', message: '保留的执行分配拒绝释放' },
+              nextStep: '检查执行分配后再处理',
+            },
+            apiError: { code: 'operation.release-error', message: '底层释放命令失败' },
+          },
+        }, 409);
+      }
+      state.grant = {
+        task: { scope: 'task', value: state.taskId },
+        revision: payload.expectedRevision + 1,
+        requestId: payload.requestId,
+        owner: 'human:fixture',
+        state: control[1] === 'revoke' ? 'revoked' : 'granted',
+        updatedAt: state.now,
+        capability: {
+          actionId: 'task.execution',
+          capabilities: ['provider.execution'],
+          scope: { organId: { scope: 'organ', value: 'organ-fixture' }, taskId: { scope: 'task', value: state.taskId } },
+        },
+      };
+      state.authority = state.grant.state === 'granted'
+        ? { commit: { commitId: 'commit-task-grant-authority' } }
+        : null;
+      return body(taskGrantReadBody({
+        ...state,
+        grant: state.grant,
+        authority: state.authority,
+      }));
+    }
+    unexpectedRequests.push(`${request.method()} ${path}`);
+    return body({ error: { code: 'unexpected-route', message: path, ownerId: 'test', nextAction: 'none' } }, 404);
+  });
+
+  const listUrl = `${baseUrl}/tasks.html?projectKey=${encodeURIComponent(state.projectKey)}`;
+  await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
+  const formalLink = page.locator('.task-item-main').first();
+  await formalLink.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {});
+  const linkHref = await formalLink.getAttribute('href').catch(() => null);
+  const linkPass = Boolean(
+    linkHref
+      && new URL(linkHref, baseUrl).searchParams.get('task') === state.taskId
+      && new URL(linkHref, baseUrl).searchParams.get('projectKey') === state.projectKey
+      && new URL(linkHref, baseUrl).searchParams.get('mode') === state.mode
+  );
+  const listDiagnostic = linkPass ? linkHref : {
+    href: linkHref,
+    url: page.url(),
+    pageErrors,
+    apiRequests,
+    bodyText: (await page.locator('body').innerText().catch(() => '')).slice(0, 1200),
+  };
+  record(`${viewport.label} formal task list link carries task/project/mode`, linkPass, listDiagnostic);
+  if (!linkHref) {
+    await context.close();
+    return;
+  }
+  await formalLink.click();
+  await page.waitForSelector('.page-heading', { timeout: 15_000 }).catch(() => {});
+  await sleep(300);
+  const navigationUrl = new URL(page.url());
+  record(`${viewport.label} formal link opens the default readonly task page`,
+    navigationUrl.pathname.endsWith('/task-dashboard.html')
+      && navigationUrl.searchParams.get('control') === null
+      && state.posts.length === 0,
+    { url: page.url(), posts: state.posts.length });
+
+  const entry = page.locator('[data-task-grant-control-entry]');
+  await entry.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {});
+  const entryCount = await entry.count();
+  record(`${viewport.label} default readonly page exposes the task control entry`, entryCount === 1, entryCount);
+  if (entryCount !== 1) {
+    await context.close();
+    return;
+  }
+  state.posts.length = 0;
+  state.failNextRead = true;
+  await openTaskGrantControlFromEntry(page, { waitReady: false });
+  await page.waitForFunction(
+    () => document.querySelector('[data-task-grant-control]')?.dataset.controlState === 'unavailable',
+    undefined,
+    { timeout: 15_000 },
+  );
+  const opened = await readTaskGrantSurface(page);
+  observe(`${viewport.label} control entry`, { url: page.url(), surface: opened });
+  record(`${viewport.label} explicit control intent is carried in the URL`,
+    new URL(page.url()).searchParams.get('control') === '1',
+    page.url());
+  record(`${viewport.label} control surface is shown in the shared drawer`,
+    opened.sectionPresent,
+    opened);
+  record(`${viewport.label} readonly page never posts a control command`,
+    state.posts.length === 0,
+    state.posts);
+  record(`${viewport.label} scoped control read uses query-only target scope`,
+    state.readQueries[0]?.projectKey === state.projectKey
+      && state.readQueries[0]?.mode === state.mode
+      && Object.keys(state.readQueries[0] ?? {}).sort().join(',') === 'mode,projectKey',
+    state.readQueries);
+  record(`${viewport.label} initial control read failure has no invented command receipt`,
+    opened.actionText.includes('控制状态暂时不可用')
+      && !opened.actionText.includes('上次操作已记录')
+      && opened.receiptText.includes('尚未提交')
+      && opened.grantButtonDisabled !== false
+      && opened.revokeButtonDisabled !== false
+      && state.posts.length === 0,
+    opened);
+  const drawerBox = await page.locator('dialog[data-technical-detail="true"][open]').boundingBox();
+  if (viewport.mobile) {
+    record(`${viewport.label} control drawer anchors to the bottom`,
+      Boolean(drawerBox && Math.abs((drawerBox.y + drawerBox.height) - viewport.height) <= 2),
+      drawerBox);
+  } else {
+    record(`${viewport.label} control drawer opens as a desktop side panel`,
+      Boolean(drawerBox && drawerBox.x > viewport.width / 3),
+      drawerBox);
+  }
+  const corners = await page.evaluate(() => [...document.querySelectorAll('[data-shell-corner]')].map((item) => ({
+    corner: item.dataset.shellCorner,
+    offsetParent: item.offsetParent !== null,
+  })));
+  record(`${viewport.label} four shell corners stay mounted`, corners.length === 4 && corners.every((item) => item.offsetParent), corners);
+
+  await closeTaskGrantDrawer(page);
+  const closed = await readTaskGrantSurface(page);
+  record(`${viewport.label} closing the control drawer returns focus to its entry`,
+    closed.activeHook === 'entry',
+    closed);
+  await refreshTaskDashboard(page);
+  const afterClosedRefresh = await readTaskGrantSurface(page);
+  record(`${viewport.label} refresh after closing the control drawer does not reopen it`,
+    afterClosedRefresh.drawerOpen === false,
+    afterClosedRefresh);
+  await openTaskGrantControlFromEntry(page);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('dialog[data-technical-detail="true"][open]', { state: 'hidden' }).catch(() => {});
+  const escaped = await readTaskGrantSurface(page);
+  record(`${viewport.label} Escape returns focus to its entry`, escaped.activeHook === 'entry', escaped);
+
+  await page.goBack().catch(() => {});
+  await page.waitForFunction(() => Boolean(document.querySelector('[data-task-grant-control-entry]')), undefined, { timeout: 15_000 }).catch(() => {});
+  state.posts.length = 0;
+  await openTaskGrantControlFromEntry(page);
+  await page.waitForFunction(() => document.querySelector('[data-task-grant-action="grant"]')?.disabled === false, undefined, { timeout: 15_000 }).catch(() => {});
+  const ready = await readTaskGrantSurface(page);
+  record(`${viewport.label} matching targetScope enables grant without posting`,
+    ready.sectionPresent && ready.grantButtonDisabled === false && state.posts.length === 0,
+    ready);
+  const controlDrawer = page.locator('dialog[data-technical-detail="true"][open]');
+  const controlDrawerBox = await controlDrawer.boundingBox();
+  record(`${viewport.label} control and technical details use the same shared layer`,
+    (await page.locator('dialog[data-technical-detail="true"]').count()) === 1
+      && Boolean(controlDrawerBox),
+    controlDrawerBox);
+  await page.locator('dialog[data-technical-detail="true"][open] .shell-layer-close').click();
+  await page.locator('dialog[data-technical-detail="true"][open]').waitFor({ state: 'hidden' });
+  state.omitTargetScope = true;
+  await refreshTaskDashboard(page);
+  await openTaskGrantControlFromEntry(page, { waitReady: false });
+  const legacyApi = await readTaskGrantSurface(page);
+  record(`${viewport.label} legacy 200 without targetScope disables both controls`,
+    legacyApi.actionText.includes('暂不能确认')
+      && legacyApi.grantButtonDisabled !== false
+      && legacyApi.revokeButtonDisabled !== false
+      && state.posts.length === 0,
+    legacyApi);
+  await closeTaskGrantDrawer(page);
+  state.omitTargetScope = false;
+  await refreshTaskDashboard(page);
+  await openTaskGrantControlFromEntry(page);
+  const grantButton = page.locator('[data-task-grant-action="grant"]');
+  if (await grantButton.count()) {
+    state.posts.length = 0;
+    await grantButton.click();
+    await page.waitForFunction(
+      (rejectPost) => {
+        const receipt = document.querySelector('[data-task-grant-receipt]')?.textContent ?? '';
+        return rejectPost ? receipt.includes('执行未完成') : receipt.includes('已记录');
+      },
+      state.rejectPost,
+      { timeout: 15_000 },
+    ).catch(() => {});
+  }
+  const granted = await readTaskGrantSurface(page);
+  record(`${viewport.label} one grant click posts the original body fields with query-only scope`,
+    state.posts.length === 1
+      && state.posts[0].path.endsWith('/control/grant')
+      && state.posts[0].query.projectKey === state.projectKey
+      && state.posts[0].query.mode === state.mode
+      && Object.keys(state.posts[0].payload).sort().join(',') === 'expectedRevision,requestId'
+      && state.posts[0].payload.expectedRevision === 0,
+    state.posts);
+  if (state.rejectPost) {
+    record(`${viewport.label} blocked command keeps its human receipt separate from technical errors`,
+      granted.receiptText.includes('执行未完成')
+        && !granted.receiptText.toLowerCase().includes('blocked')
+        && !granted.actionText.toLowerCase().includes('blocked'),
+      granted);
+  } else {
+    record(`${viewport.label} grant receipt and latest readback remain distinguishable`,
+      granted.receiptText.includes('已记录') && granted.actionText.includes('最新'),
+      granted);
+    state.failNextRead = true;
+    state.posts.length = 0;
+    await page.locator('[data-task-grant-action="revoke"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-task-grant-action-status]')?.textContent?.includes('暂不能确认'), undefined, { timeout: 15_000 }).catch(() => {});
+    const unconfirmed = await readTaskGrantSurface(page);
+    record(`${viewport.label} POST success then GET 503 keeps recorded receipt and unconfirmed status`,
+      state.posts.length === 1
+        && unconfirmed.receiptText.includes('已记录')
+        && unconfirmed.actionText.includes('暂不能确认')
+        && !unconfirmed.actionText.toLowerCase().includes('denied')
+        && unconfirmed.grantButtonDisabled !== false
+        && unconfirmed.revokeButtonDisabled !== false,
+      unconfirmed);
+    record(`${viewport.label} revoke sends the confirmed non-zero revision`,
+      state.posts[0]?.path.endsWith('/control/revoke')
+        && state.posts[0]?.query.projectKey === state.projectKey
+        && state.posts[0]?.query.mode === state.mode
+        && state.posts[0]?.payload.expectedRevision === 1,
+      state.posts);
+    state.failNextRead = false;
+  }
+
+  await page.locator('[data-task-grant-technical]').click().catch(() => {});
+  await page.waitForSelector('dialog[data-technical-detail="true"][open]', { timeout: 5_000 }).catch(() => {});
+  const technical = await readTaskGrantSurface(page);
+  if (state.rejectPost) {
+    record(`${viewport.label} technical details retain blocked current error and apiError separately`,
+      technical.technicalText.includes('operation.release-refused')
+        && technical.technicalText.includes('保留的执行分配拒绝释放')
+        && technical.technicalText.includes('检查执行分配后再处理')
+        && technical.technicalText.includes('operation.release-error')
+        && technical.technicalText.includes('底层释放命令失败'),
+      technical);
+  } else {
+    record(`${viewport.label} technical details retain the independent refresh failure`,
+      technical.technicalText.includes('task-control.read.unavailable')
+        && technical.technicalText.includes('控制状态暂不可读取'),
+      technical);
+  }
+  await page.locator('dialog[data-technical-detail="true"][open] .shell-layer-close').click();
+  await page.waitForFunction(() => {
+    const drawer = document.querySelector('dialog[data-technical-detail="true"][open]');
+    return Boolean(drawer?.querySelector('[data-task-grant-control]'));
+  }, undefined, { timeout: 5_000 }).catch(() => {});
+  const returned = await readTaskGrantSurface(page);
+  record(`${viewport.label} technical detail returns to the same control layer`,
+    returned.drawerOpen
+      && returned.drawerTitle === '任务控制 / 执行授权'
+      && returned.sectionPresent
+      && returned.activeHook === 'true'
+      && returned.activeText === '查看控制技术详情',
+    returned);
+  record(`${viewport.label} task-grant consumer has no page errors`, pageErrors.length === 0, pageErrors);
+  record(`${viewport.label} task-grant consumer has no unexpected API request`, unexpectedRequests.length === 0, unexpectedRequests);
+  await page.screenshot({ path: join(artifactDir, `task-grant-${viewport.label}.png`), fullPage: true });
+  await context.close();
+}
+
+function taskGrantProjectBody({ taskId, projectKey, mode, now }) {
+  return {
+    surface: 'runtime-project',
+    scope: { kind: 'project', projectKey },
+    label: 'fixture-project',
+    observedAt: now,
+    tasks: [{
+      scope: {
+        kind: 'task',
+        projectKey,
+        mode,
+        taskId: { scope: 'task', value: taskId },
+      },
+      task: {
+        taskId: { scope: 'task', value: taskId },
+        title: '核对任务控制边界',
+        state: 'waiting',
+        stateLabel: '等待决策',
+        currentState: '等待执行授权',
+        nextStep: '打开任务控制并核对当前授权',
+        updatedAt: now,
+        entry: 'task-dashboard',
+      },
+      basis: 'durable-history',
+    }],
+    taskCount: 1,
+    complete: true,
+    failures: [],
+  };
+}
+
+async function sectionTaskGrant(browser, baseUrl, artifactDir) {
+  await taskGrantViewportProof(browser, baseUrl, artifactDir,
+    { label: 'desktop', width: 1440, height: 1000, mobile: false },
+    {
+      taskId: 'task-grant-entry',
+      projectKey: 'project-grant',
+      mode: 'fake',
+      now: '2026-10-17T12:00:00.000Z',
+      grant: null,
+      authority: null,
+      reads: 0,
+      readQueries: [],
+      posts: [],
+      rejectPost: false,
+    });
+  await taskGrantViewportProof(browser, baseUrl, artifactDir,
+    { label: 'mobile', width: 390, height: 844, mobile: true },
+    {
+      taskId: 'task-grant-entry',
+      projectKey: 'project-grant',
+      mode: 'fake',
+      now: '2026-10-17T12:00:00.000Z',
+      grant: null,
+      authority: null,
+      reads: 0,
+      readQueries: [],
+      posts: [],
+      rejectPost: true,
+    });
 }
 
 async function sectionDeterministic(browser, baseUrl, artifactDir) {
@@ -1450,8 +1969,6 @@ async function sectionReal(browser, artifactDir, root) {
 const artifactDir = join(evidenceRoot, 'artifacts');
 await mkdir(artifactDir, { recursive: true });
 
-await sectionClientUnit();
-
 const playwrightModule = await import(
   process.env.PLAN_CONTROL_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js'
 );
@@ -1461,10 +1978,17 @@ const browser = await playwright.chromium.launch({ headless: true });
 let server;
 try {
   server = await startServer();
-  await sectionDeterministic(browser, server.url, artifactDir);
+  if (taskGrantOnly) {
+    await sectionTaskGrant(browser, server.url, artifactDir);
+  } else {
+    await sectionClientUnit();
+    await sectionDeterministic(browser, server.url, artifactDir);
+  }
 } finally {
   await closeServer(server);
-  if (skipReal) {
+  if (taskGrantOnly) {
+    observe('plan-control real runtime section', 'skipped by --task-grant-only');
+  } else if (skipReal) {
     observe('real runtime section', 'skipped via PLAN_CONTROL_SKIP_REAL=1');
   } else {
     const root = await mkdtemp(join(tmpdir(), 'plan-control-proof-'));
@@ -1480,7 +2004,7 @@ try {
 
 await writeFile(
   join(evidenceRoot, 'checks.json'),
-  `${JSON.stringify({ uiRoot, rccBaseUrl, rccModel, frozenActions: FROZEN_ACTIONS, checks, observations }, null, 2)}\n`,
+  `${JSON.stringify({ uiRoot, rccBaseUrl, rccModel, taskGrantOnly, frozenActions: FROZEN_ACTIONS, checks, observations }, null, 2)}\n`,
 );
 
 const failed = checks.filter((check) => !check.pass);
