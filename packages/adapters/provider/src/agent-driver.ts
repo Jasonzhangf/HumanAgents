@@ -727,10 +727,12 @@ export class ProviderAgentDriver<
       this.continuationCompletion = continuationCompletion;
       let submitted: ProviderSubmitResult<TIdentity>;
       const continuation = this.nextRequest();
-      await this.commitRequestPhase(continuation, 'dispatching');
-      this.publishLifecycle(continuation, 'dispatching');
       try {
+        await this.commitRequestPhase(continuation, 'dispatching');
+        this.publishLifecycle(continuation, 'dispatching');
+        if (this.stopping) return;
         const context = await this.materializeRequestContext(continuation, 'continuation');
+        if (this.stopping) return;
         submitted = await this.track(this.port.submit({
           ...this.execution,
           ...this.continuationRequestIdentity(continuation),
