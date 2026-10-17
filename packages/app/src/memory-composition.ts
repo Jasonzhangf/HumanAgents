@@ -1308,6 +1308,9 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     taskEventHandlerFor: ({ binding }) => createMemoryTaskAnalysisEventHandler({
       binding,
       admission,
+      ...(input.feedbackPublisher === undefined
+        ? {}
+        : { publishFeedback: (event) => input.feedbackPublisher!.publish(event) }),
     }),
     barrierDriver,
   };

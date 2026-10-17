@@ -1493,6 +1493,77 @@ test('consumer errors remain explicit for an unregistered memory consumer', asyn
   );
 });
 
+for (const failure of ['missing publisher', 'rejected publisher'] as const) {
+  test(`task-bound memory analysis does not commit with ${failure}`, async () => {
+    const journal = new FakeJournal();
+    const registry = new FakeRegistry();
+    const taskStreamId = `memory-boundaries:task:${task.value}`;
+    registry.consumers.set(taskBinding.bindingRef, {
+      ...consumer,
+      consumerKey: taskBinding.bindingRef,
+      streamIds: [taskStreamId],
+    });
+    const bus = ports(journal, registry);
+    await publishEvent(bus, { publisherId: publisher.publisherId, event: event({ streamId: taskStreamId }) });
+    const prompt = {
+      promptRef: 'project-memory-audit',
+      canonicalRef: 'prompt://project-a/project-memory-audit',
+      revision: 'sha256:prompt-revision',
+      digest: 'sha256:prompt-digest',
+      loadedAt: occurredAt,
+    };
+    const admission: MemoryAnalysisAdmissionPort = {
+      admit: async () => ({
+        status: 'ready',
+        value: {
+          admissionRef: 'memory-task:audited',
+          result: {
+            curation: {
+              operationId: id('operation', 'task-analysis-a'),
+              auditPrompt: prompt,
+              sourceRefs: ['journal://project-a/checkpoint-a'],
+              outcome: 'no-op',
+              matchedMemoryIds: [],
+              conflictRefs: [],
+              explanation: 'no reusable memory in this checkpoint',
+              nextAction: 'none',
+            },
+            projectSources: [],
+            liveContextMutated: false,
+            promptSnapshot: prompt,
+          },
+        },
+      }),
+    };
+    const publicationError = new Error('task feedback journal unavailable');
+    const consume = (publishFeedback?: (event: EventEnvelope) => Promise<void>) => consumeEvents(
+      bus,
+      { consumerKey: taskBinding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryTaskAnalysisEventHandler({ binding: taskBinding, admission, publishFeedback }),
+    );
+    await assert.rejects(
+      consume(failure === 'missing publisher' ? undefined : async () => { throw publicationError; }),
+      failure === 'missing publisher'
+        ? /memory analysis feedback publisher is not configured/
+        : (error: unknown) => error === publicationError,
+    );
+    assert.equal(journal.receipts.size, 0);
+    assert.equal(journal.cursors.size, 0);
+    const published: EventEnvelope[] = [];
+    const recovered = await consume(async (feedback) => {
+      assert.equal(journal.receipts.size, 0);
+      assert.equal(journal.cursors.size, 0);
+      published.push(feedback);
+    });
+    assert.equal(published.length, 1);
+    assert.equal(published[0]?.kind, MEMORY_FEEDBACK_KIND);
+    assert.equal(recovered.committed[0]?.disposition, 'applied');
+    assert.equal(journal.cursors.size, 1);
+    await consume(async (feedback) => { published.push(feedback); });
+    assert.equal(published.length, 1);
+  });
+}
+
 test('task-bound memory analysis keeps the admitted task identity and rejects cross-task events', async () => {
   const record: EventRecord = {
     ...event(),
