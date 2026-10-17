@@ -2,7 +2,21 @@
 
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
-## 1. 当前目标与总体进度（截至 2026-10-15）
+## 1. 当前目标与总体进度（更新至 2026-10-17）
+
+完整 goal 仍为 ACTIVE / INCOMPLETE。本轮独立 Provider 组件增量已完成 1/1 项标准交付；这不代表 A–G 全部生产闭环、App Task 或完整原生框架已完成。
+
+- 已正常合入并推送 `origin/main`：生产增量 `69854637`（Anthropic 工具声明、同一次序列化的实际出站 body receipt、typed 请求链）和原 proof 安装依赖根 `80b18b1f`。未合入整个 native candidate。
+- 作者证据：原公开 consumer 实际 RED→GREEN；严格 source/Provider 编译与 config/App build 通过；公开请求 consumer 6/6、transport focused 6/6、fake contract 9/9、录制 Responses/Anthropic replay 5/5。原 contracts 整文件仍有两处旧 fixture TS2561，未冒其通过；本次公开 validator 从严格 source dist 取得反例和恢复证据。
+- 真实入口：main 派生组合三协议工具循环 3/3 PASS；canonical 安装根下全部 9 模块的 Responses 完整工具循环另一次 PASS，2 requests、真实工具结果、settlement succeeded、资源 released、persistence committed、close/cleanup closed。安装消费 receipt 为 `~/.humanagent/test-fixtures/provider-installed-component-r28-20261017/run-adE3Yx/proof-receipt.json`。未证明厂商身份。
+- 整体 Review：独立 Gemini 4 medium SUCCESS/exit0；现有 controller 的 schema/classify 返回 pass、findings 为空。main 正式构建、打包、canonical 安装与隔离实例官方 restart 均成功，版本 `0.1.0031`。审查、红绿和交付原证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/` 对应 r15–r28 记录。
+- 正式 App 新 Task 验收仍 INCOMPLETE：隔离公开入口创建 201、执行 202，随后同 operation final blocked，`execution admission source is not bound`，零 Provider 请求。独立 r24 已确认 main 缺新意图到 Task identity/grant/default admission 的闭包，不是本七文件新增回归。该 Task 失败不被组件 PASS 覆盖；App 接线计划 r26 继续推进。
+- 已收口本增量自有资源：codec 来源树和 Provider delivery 树均正常 remove/prune/path absent；隔离实例通过正式 CLI 的 SIGINT→supervisor.dispose 处理器关闭，PID52264 absent，lease disposedAt 已写入。保留 fixture/receipt 供后继；原 53007/Task/A0 未动，安装与 main Git 窗口已交还 UX peer。
+- 剩余主线：App 正式准入闭包；Memory 生产 group 的共同 Task scope；默认 child 的父生命周期收口；Provider 停止边界；随后组合完整双脑/N runtime 和最终交付。各局部候选不提前计为全目标完成。
+
+### 2026-10-15 历史基线
+
+以下保留旧回执及当时计数，不作为当前 main、进程或运行状态。
 
 - **Provider/native 当前核验状态**：完整 goal ACTIVE；Provider main **0/7**。原25例组合基线仍 **22 PASS / 3 FAIL**，不以局部结果覆盖。唯一集成分支 `codex/native-delivery-candidate-20261015` clean HEAD `4ba88f40`：已接原UX22/native25/terminal6/T1/T2/T3/G-P/App17/Config/cold/Memory、reload `ee0be443`、117行重复路由消融 `38f4ca25`、T6两行预算 `9567b413`、T4a `b9b22190`、验收文档 `75a53b3`、v14/SESE `33fca9f`，再接A4为 `08961ab1`，最后正常无冲突merge localmain `27532680`。localmain领先remote `db915e7a` 的113提交属于清理保存的待推闭包，尚未整体Review；不能当已验收。该合流保留退役删除，新增运行差异是coordinator13行，App正常重建0。首I1整体Review须覆盖remote→完整组合闭包，不能只审最近leaf。未整体PASS、未安装/正式发布或push。
 - **N3 最新纠正**：T2旧turn/revision混用已实际RED→GREEN，正常compile0/原一case1PASS，final source `f83e6ddb…`、consumer `3809e434…`。已接受基础为 **T1/T2/T3 = 3/6**；T4a合同子包已正常提交 `af033dff`，contracts及原consumer均正常compile0、原3case PASS。T4b Provider driver、T4c Runtime helper已取得同一Git依赖并并行执行；完整T4、T5生产组装、T6真实CLI预算仍未验。T3是真实Journal基础，不是helper执行。
