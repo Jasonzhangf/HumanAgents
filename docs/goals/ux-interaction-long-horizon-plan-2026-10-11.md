@@ -39,7 +39,9 @@
 
 后继基础已完成候选组合：三组既有 DAG `58039143`；typed delivery/acceptedPlan/check-port 共享合同 `ea11de39`；manager 透传 `0e4a1f41`；纯接受交付 adapter `f51dcfc1`、`215608ce`；Runtime/JSONL 持久绑定 `59b95565`、`11231520`；boundary 基础 `dad3ebb0`；Planner 模板 `c8abb025`、`0399ea4e`。各来源经过针对性验证和候选组合后已正常清理，独占 run 保留原始 RED/GREEN 和接收记录。这些是 Contracts/Runtime/App 的实际开发增量，不等于完整 producer 已进入 main。
 
-当前并行实现四个不冲突范围：App 新 turn 接受精确计划、coordinator stop/异常/冷恢复接线、Runtime 生产 reader/open/facts helper、正式 child producer。Runtime helper 还须修正把 nextAction 粗分成巡检 unknown/blocked 的语义；巡检结果与 cycle 下一动作分开，missing 不自动变失败。App 准入的冷恢复消费者尚未到目标字段断言时，缺 CLI 构建和父/child binding 计数错误均不算需求 RED。Scope 与进度按真实入口证据推进，不按 worker 宣称完成推进。
+App 新 turn 接受精确计划已完成候选组合：`b52cbd65`、`b1e32b2b` 把真实计划 publication receipt 写入原 turn binding，并让边界续跑不再读取当前 plan/identity。原三轮冷恢复消费者实际抓到 acceptedPlan 缺失，原边界消费者实际抓到多余读取；修复及候选组合后两个消费者均通过，来源树已正常关闭。该证据证明持久保留，不代替“最新计划已变化时仍选择原 turn 计划”的生产读取证明，也不代替安装后验收。接收记录见独占 run `inspection-turn-plan-admission-20261017/root-reception.md`。
+
+当前继续实现三个不冲突范围：coordinator stop/异常/冷恢复接线、Runtime 生产 reader/open/facts helper、正式 child producer。Runtime helper 还须修正把 nextAction 粗分成巡检 unknown/blocked 的语义；巡检结果与 cycle 下一动作分开，missing 不自动变失败，任意非空结果文本也不能自动当作巡检完成。另有只读 worker 提前定位 App 最终组装的物理资源入口，不写产品、不另建治理。缺 CLI 构建、测试产物、类型错误和不正确的 fixture 计数均不算需求 RED；退出后仍有编译错误或只有后续意图的 worker 不计完成。Scope 与进度按真实入口证据推进。
 
 代码前设计已认可不等于运行行为通过。完整 producer 仍须真实 native 两轮、公开比较及适用恢复反例，再进入一次整体 milestone Review 和标准交付。设计与逐项复核证据保留在独占 run：`inspection-producer-design-attack-20261017/{plan,two-findings-plan,selection-context-plan-r3}.md` 和 `inspection-producer-design-review-20261017/{followup-attack-review,followup-two-review,selection-r3-review}.md`。原生 owner 独立推进 installed deep-cold 与真实 RCC App Task；本 I2 生产补全不扩成 Provider 新增放行条件。局部依赖只约束真实下游，不为已交付增量追加全局门禁；其他 owner 资源保持其责任边界。
 
