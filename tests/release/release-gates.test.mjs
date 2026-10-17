@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -316,15 +316,31 @@ test('compile checkpoint owns every raw build output and excludes release output
   assert.deepEqual(regression.command, ['pnpm', 'run', 'test:compiled:services']);
 });
 
-test('assembled CLI bin remains executable', async () => {
+test('assembled CLI package installs and runs its public consumer behavior', async (t) => {
   const fixtureValue = await fixture();
+  t.after(() => rm(fixtureValue.root, { recursive: true, force: true }));
   const releaseRoot = join(fixtureValue.root, 'release');
   await mkdir(join(fixtureValue.projectRoot, 'dist', 'app'), { recursive: true });
   await mkdir(join(fixtureValue.projectRoot, 'dist', 'app', 'agent-templates', 'templates', 'builtin'), { recursive: true });
+  await mkdir(join(fixtureValue.projectRoot, 'dist', 'app', 'app', 'src'), { recursive: true });
+  await mkdir(join(fixtureValue.projectRoot, 'dist', 'app', 'ui'), { recursive: true });
   await mkdir(join(fixtureValue.projectRoot, 'packages', 'contracts', 'dist'), { recursive: true });
   await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'agent-templates', 'templates', 'builtin', 'prompt-registry.json'), '{}\n', 'utf8');
+  await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'ui', 'index.html'), '<!doctype html><title>humanagent</title>\n', 'utf8');
   await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'placeholder.txt'), 'runtime\n', 'utf8');
   await writeFile(join(fixtureValue.projectRoot, 'packages', 'contracts', 'dist', 'index.js'), 'export const id = (scope, value) => ({ scope, value });\n', 'utf8');
+  await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'app', 'src', 'cli.js'), [
+    "import { readFile } from 'node:fs/promises';",
+    "import { join } from 'node:path';",
+    "import { id } from '@humanagent/contracts';",
+    "export const formatCliError = (error) => error.message;",
+    "export async function main() {",
+    "  const registry = JSON.parse(await readFile(join(process.env.HUMANAGENT_TEMPLATE_ROOT, 'builtin', 'prompt-registry.json'), 'utf8'));",
+    "  const ui = await readFile(join(process.env.HUMANAGENT_UI_ROOT, 'index.html'), 'utf8');",
+    "  console.log(JSON.stringify({ releaseVersion: process.env.HUMANAGENT_RELEASE_VERSION, contract: id('fixture', 'ok'), registry, ui: ui.trim() }));",
+    "}",
+    '',
+  ].join('\n'), 'utf8');
   const result = await assemblePackage({ projectRoot: fixtureValue.projectRoot, releaseRoot, version: '0.1.1', releaseVersion: '0.1.0001' });
   const mode = (await stat(join(result.packageRoot, 'bin', 'humanagent.mjs'))).mode;
   assert.equal(mode & 0o111, 0o111);
@@ -337,6 +353,92 @@ test('assembled CLI bin remains executable', async () => {
   const cliPackage = JSON.parse(await readFile(join(result.packageRoot, 'package.json'), 'utf8'));
   assert.equal(cliPackage.version, '0.1.1');
   assert.equal(cliPackage.releaseVersion, '0.1.0001');
+  const consumerRoot = join(fixtureValue.root, 'consumer');
+  execFileSync('npm', ['install', '--prefix', consumerRoot, '--ignore-scripts', result.packagePath], {
+    cwd: fixtureValue.root,
+    stdio: 'pipe',
+  });
+  const cli = join(consumerRoot, 'node_modules', '.bin', 'humanagent');
+  const hm = join(consumerRoot, 'node_modules', '.bin', 'hm');
+  await access(hm);
+  const output = JSON.parse(execFileSync(cli, { encoding: 'utf8' }));
+  assert.deepEqual(output, {
+    releaseVersion: '0.1.0001',
+    contract: { scope: 'fixture', value: 'ok' },
+    registry: {},
+    ui: '<!doctype html><title>humanagent</title>',
+  });
+});
+
+async function localInstallerFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-local-installer-'));
+  const projectRoot = join(root, 'project');
+  const callerRoot = join(root, 'caller workspace');
+  const fakeBin = join(root, 'fake-bin');
+  const npmArgsPath = join(root, 'npm-args.json');
+  await mkdir(join(projectRoot, 'scripts'), { recursive: true });
+  await mkdir(callerRoot, { recursive: true });
+  await mkdir(fakeBin, { recursive: true });
+  await writeFile(join(projectRoot, 'scripts', 'install-global.mjs'), await readFile(new URL('../../scripts/install-global.mjs', import.meta.url)), 'utf8');
+  await writeFile(join(projectRoot, 'scripts', 'release-version.mjs'), await readFile(new URL('../../scripts/release-version.mjs', import.meta.url)), 'utf8');
+  await writeFile(join(projectRoot, 'package.json'), JSON.stringify({ version: '0.1.31', releaseVersion: '0.1.0031' }) + '\n', 'utf8');
+  const npmPath = join(fakeBin, 'npm');
+  await writeFile(npmPath, [
+    '#!/usr/bin/env node',
+    "import { writeFileSync } from 'node:fs';",
+    "writeFileSync(process.env.HUMANAGENT_NPM_ARGS, JSON.stringify(process.argv.slice(2)));",
+    "console.log('fake npm invoked');",
+    "if (process.env.HUMANAGENT_NPM_EXIT) process.exit(Number(process.env.HUMANAGENT_NPM_EXIT));",
+    '',
+  ].join('\n'), 'utf8');
+  await chmod(npmPath, 0o755);
+  return { root, projectRoot, callerRoot, fakeBin, npmArgsPath };
+}
+
+function runLocalInstaller(fixtureValue, args = [], { cwd = fixtureValue.projectRoot, npmExit = 0 } = {}) {
+  return execFileSync(node, [join(fixtureValue.projectRoot, 'scripts', 'install-global.mjs'), ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${fixtureValue.fakeBin}:${process.env.PATH}`,
+      HUMANAGENT_NPM_ARGS: fixtureValue.npmArgsPath,
+      HUMANAGENT_NPM_EXIT: String(npmExit),
+    },
+  });
+}
+
+test('local installer selects the package and preserves npm failures', async (t) => {
+  const fixtureValue = await localInstallerFixture();
+  t.after(() => rm(fixtureValue.root, { recursive: true, force: true }));
+  const defaultArtifact = join(fixtureValue.projectRoot, 'dist', 'release', 'humanagent-cli-0.1.0031.tgz');
+  await mkdir(join(fixtureValue.projectRoot, 'dist', 'release'), { recursive: true });
+  await writeFile(defaultArtifact, 'package fixture\n', 'utf8');
+  assert.match(runLocalInstaller(fixtureValue), /humanagent-cli-0\.1\.0031\.tgz/);
+  assert.deepEqual(JSON.parse(await readFile(fixtureValue.npmArgsPath, 'utf8')), ['install', '--global', await realpath(defaultArtifact)]);
+
+  const explicitArtifact = join(fixtureValue.callerRoot, 'local package.tgz');
+  await writeFile(explicitArtifact, 'explicit package fixture\n', 'utf8');
+  await rm(fixtureValue.npmArgsPath, { force: true });
+  runLocalInstaller(fixtureValue, ['local package.tgz'], { cwd: fixtureValue.callerRoot });
+  assert.deepEqual(JSON.parse(await readFile(fixtureValue.npmArgsPath, 'utf8')), ['install', '--global', await realpath(explicitArtifact)]);
+
+  await rm(defaultArtifact, { force: true });
+  await rm(fixtureValue.npmArgsPath, { force: true });
+  assert.throws(() => runLocalInstaller(fixtureValue), /ENOENT/);
+  await assert.rejects(access(fixtureValue.npmArgsPath));
+
+  await writeFile(defaultArtifact, 'package fixture\n', 'utf8');
+  await rm(fixtureValue.npmArgsPath, { force: true });
+  let failure;
+  try {
+    runLocalInstaller(fixtureValue, [], { npmExit: 7 });
+  } catch (error) {
+    failure = error;
+  }
+  assert.notEqual(failure.status, 0);
+  assert.deepEqual(JSON.parse(await readFile(fixtureValue.npmArgsPath, 'utf8')), ['install', '--global', await realpath(defaultArtifact)]);
+  assert.doesNotMatch(failure.stdout, /humanagent-cli-0\.1\.0031\.tgz/);
 });
 
 async function releaseFixture() {
