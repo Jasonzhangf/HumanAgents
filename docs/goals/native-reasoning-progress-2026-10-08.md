@@ -6,6 +6,10 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 main派生Provider组合已取得真实三协议3/3 PASS：Responses `provider-main-n4-responses-r21-20261017/run-Z1YBWx`、Chat `provider-main-n4-openai-r21-20261017/run-RLA2P5`、Anthropic `provider-main-n4-anthropic-r21-20261017/run-oUKB9V`，均位于 `~/.humanagent/test-fixtures/`；父直接读receipt，2request、无error/assertionError、settlement succeeded/resource released/persistence committed/close+cleanup closed。Responses/Anthropic自然Node0有作者原回执；Chat旧background shell13294在fixture创建前消失，父确认无fixture/receipt/进程后精确停止GCM89316，前台session56654实际唯一运行Node0，接收记录保留。未动原Task/A0，不冒厂商身份。
+- 请求链 `69854637` 已接收：父读生产diff/原3GREEN日志，typed start/submit复用现有身份/validator，原public6/6、transport6/6、fake9/9、recorded replay5/5、strict compile与Appbuild0；contracts旧fixture整file仍受两处TS2561阻挡，公开source validator反例/恢复独立有效。delivery fetch+merge最新origin Already up to date。完整slice整体Review首选Opus实际quota ERROR/exit3无结论，已按顺序新建Gemini4 medium r23（conversation312e8957-793d-4c5b-b1d0-d35c55f4be85，cwd为delivery）独立审查。未判PASS/main/正式安装或push。
+- N3 r30六项正反向map计划已接收，fresh GCM r31仅写codecs.ts，原四文件dirty保留；Memory GCM继续。stop/resume Gemini复杂计划已返回但未接受：100%概率/毫秒成本无证据、未核命令、共享coldconsumer冲突和泛化stopping吞错建议需纠正；OAuth小Planner r3只核三处源码断言与最小Provider下层反例，不阻断main slice Review。
+
 - 2026-10-17 Provider交付树已正常merge codec `be26fdb7`，保body receipt与两proof；request-chain GCM r19约30读0产品delta且在/tmp新增TEMPcase，父未接纳其为RED，精确停止16731→exit1/absent。原树technical r20一次负责公开类型/receipt/原transport与真实Driver消费者，不再等共享文件。Memory GCM r19继续。独立stop/resume Gemini4 medium已真实init（conversation12d380ee-1746-46b4-b73f-9505cad8288e），只读plan在途。
 - N3真实默认入口取得新缺边：technical r29先缺广告RED，完成四文件挂载后Appbuild/tsc0，但出站前报 `tool.name.unsupported: child.call`；Responses双向工具名表缺三个child工具，未发生ProviderPOST，不冒独立child/precheckpoint/adopt GREEN。dirty挂载保原树，未提交或跨树复制。独立小Planner r30只核codec最小映射及原consumer继续合同，后续由Provider owner补齐，不改producer/预算/权限来避错。原nativefile5case为3PASS/2FAIL，两个默认入口同首错。正式运行/main/总goal仍OPEN。
 
