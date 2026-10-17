@@ -658,6 +658,49 @@ test('J1 v2 backing: original v1 capture, real TG1 reservation to S1/S2, fresh c
       /does not belong to this segment boundary and execution/,
     );
 
+    // The same exact reader follows the committed receipt version. S2 reads the
+    // actual v2 capture; the original receipt still reads its v1 predecessor.
+    const s2BoundaryId = `boundary-s2-${turnId}`;
+    const s2Body: ActiveTurnSegmentCaptureV2 = {
+      version: 2,
+      segmentId: segmentId2,
+      businessTurnRef: s2.segment.businessTurnRef,
+      binding: s2.segment.binding,
+      initialInput,
+      entries: [],
+      requests: [],
+      childInvocations: [],
+      cut: { pauseId: s2BoundaryId, lastSeq: 0, producersDrained: true, frozenAt: '2026-10-13T00:02:00.000Z' },
+      predecessor: s2.segment.predecessor,
+    };
+    const s2Receipt = await initialNative.writeSegmentCapturePhase({
+      businessTurnId: turnId,
+      segmentId: segmentId2,
+      boundaryId: s2BoundaryId,
+      prepared: {
+        body: s2Body,
+        controlRecordCount: 5,
+        producerDrains: [],
+        completionLookups: [],
+        recovery: recoveryFacts({ binding: value.binding, unresolvedOperationRefs: [] }),
+      },
+    });
+    const s2Exact = await initialNative.readCaptureAssetsExact(s2Receipt.commitIdentity);
+    assert.equal(s2Exact.version, 2);
+    if (s2Exact.version !== 2) return;
+    assert.equal(s2Exact.assets.receipt.commitIdentity, s2Receipt.commitIdentity);
+    assert.equal(s2Exact.assets.receipt.segmentId, segmentId2);
+    assert.deepEqual(s2Exact.assets.prepared.body, s2Body);
+    const v1Exact = await initialNative.readCaptureAssetsExact(originalV1Receipt.commitIdentity);
+    assert.equal(v1Exact.version, 1);
+    if (v1Exact.version !== 1) return;
+    assert.equal(v1Exact.assets.receipt.commitIdentity, originalV1Receipt.commitIdentity);
+    assert.deepEqual(v1Exact.assets.prepared.body, body);
+    await assert.rejects(
+      () => initialNative.readCaptureAssetsExact('recovery-assets:v2:missing'),
+      /receipt is not committed/,
+    );
+
     // The original v1 records and the v1 receipt bytes are unchanged.
     const finalBytes = await readFile(journalPath, 'utf8');
     assert.equal(finalBytes.slice(0, journalBytesBeforeSegments.length), journalBytesBeforeSegments, 'the original v1 journal prefix is byte-stable');

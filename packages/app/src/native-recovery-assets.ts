@@ -110,6 +110,10 @@ export type NativeRecoveryAssetsReadback = RecoveryAssetsReadback & {
   readonly completions: readonly RecoveryAssetsCompletionReadback[];
 };
 
+export type NativeCaptureAssetsReadback =
+  | { readonly version: 1; readonly assets: NativeRecoveryAssetsReadback }
+  | { readonly version: 2; readonly assets: NativeActiveTurnSegmentCaptureReadback };
+
 export interface NativeRecoveryAssets {
   writeInitialInput(input: {
     readonly scope: ScopeRef;
@@ -120,6 +124,7 @@ export interface NativeRecoveryAssets {
   readRecoveryAssetsExact(receiptRef: string): Promise<NativeRecoveryAssetsReadback>;
   writeSegmentCapturePhase(input: SegmentRecoveryAssetsPhaseInput): Promise<ActiveTurnSegmentRecoveryAssetsReceipt>;
   readSegmentRecoveryAssetsExact(receiptRef: string): Promise<NativeActiveTurnSegmentCaptureReadback>;
+  readCaptureAssetsExact(receiptRef: string): Promise<NativeCaptureAssetsReadback>;
 }
 
 function nonEmpty(value: unknown, label: string): string {
@@ -644,12 +649,29 @@ export function createNativeRecoveryAssets(input: {
     return { receipt, prepared };
   }
 
+  async function readCaptureAssetsExact(receiptRef: string): Promise<NativeCaptureAssetsReadback> {
+    nonEmpty(receiptRef, 'receiptRef');
+    const record = await journal.findByCommitId(receiptRef);
+    if (!record || record.kind !== 'event' || record.payload?.type !== RECOVERY_ASSETS_PAYLOAD_TYPE) {
+      throw new RecoveryAssetsIntegrityError(`recovery-assets receipt is not committed: ${receiptRef}`);
+    }
+    const version = record.payload.version ?? 1;
+    if (version === 1) {
+      return { version, assets: await readRecoveryAssetsExact(receiptRef) };
+    }
+    if (version === 2) {
+      return { version, assets: await readSegmentRecoveryAssetsExact(receiptRef) };
+    }
+    throw new RecoveryAssetsIntegrityError(`unsupported recovery-assets receipt version: ${String(version)}`);
+  }
+
   return {
     writeInitialInput,
     commitCapturePhase,
     readRecoveryAssetsExact,
     writeSegmentCapturePhase,
     readSegmentRecoveryAssetsExact,
+    readCaptureAssetsExact,
   };
 }
 
