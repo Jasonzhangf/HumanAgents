@@ -2536,9 +2536,14 @@ test('P-Stop2-b: already admitted submit preserves typed stopped rejection and i
       if (failure === 'typed-stop') {
         assert.ok(observedError instanceof ProviderAdapterError);
         assert.equal(observedError.providerError.code, 'tool.continuation.rejected');
-        assert.equal(observedError.cause, undefined);
+        const stoppedError = observedError.cause as ProviderError | undefined;
+        assert.ok(stoppedError);
+        assert.equal(stoppedError.code, 'submit.stopped');
+        assert.ok(stoppedError.evidenceRefs.length > 0);
+        assert.ok(stoppedError.ownerId);
+        assert.ok(stoppedError.nextAction);
         assert.match(observedError.message, /stopped before tool continuation/);
-        console.info(`P-Stop2-b observe: ${observedError.providerError.code}: ${observedError.message}; cause absent (receipt converted by driver)`);
+        console.info(`P-Stop2-b observe: ${observedError.providerError.code}: ${observedError.message}; receipt error retained: ${stoppedError.code}`);
       } else {
         assert.equal(observedError, submitError);
         assert.equal((observedError as Error).cause, socketError);

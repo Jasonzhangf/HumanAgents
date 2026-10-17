@@ -766,7 +766,7 @@ export class ProviderAgentDriver<
         if (this.continuationCompletion === continuationCompletion) this.continuationCompletion = undefined;
       }
       if (submitted.status !== 'accepted' && submitted.status !== 'completed') {
-        throw this.error('tool.continuation.rejected', submitted.error?.message ?? 'provider rejected the tool continuation', 'submit', 'runtime');
+        throw this.error('tool.continuation.rejected', submitted.error?.message ?? 'provider rejected the tool continuation', 'submit', 'runtime', submitted.error);
       }
     }
   }
