@@ -2,6 +2,24 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- 独立交付已完成的installed冷恢复测试改进，不等UX producer：唯一candidate已接收的8e9a4283/9a088896正常cherry-pick main为ff0423a3/3c6cd1ec，仅原native consumer文件变化，产品源码未变。main目标tsc0、installed原五公开consumer5/5PASS（session14029，installed-cold-main-delivery-20261017.txt），包括C1/C2 metadata与Journal比对。常规测试提交复用有效产品milestone Review，不新增leafReview；未变产品不重复安装/restart。实际新OS冷恢复仍同op3/businessTurn、epoch3→4、initial-open、raw排除/noeffectsreplay/EXACT_BODY/Plannercomplete。受控上游证据不扩真实RCC，后者仍INCOMPLETE。该测试改进已在main，UX producer基础仍仅candidate。
+
+- inspection业务范围出处已核实一次：docs/ui/semantic-observation-audit-2026-10-07.md“权威需求”原始用户问题明确巡检/长程/单次，G1/F04/巡检模板/验收要求两次兼容巡检并按check ID比较；docs/goals/semantic-observation-execution-plan-2026-10-08.md I2绑定该生产缺口。peer另提供本线程用户按检查项ID比较及后续UX生产接管原话。v14账本没有inspection专条，不虚称存在、不为此补改；既有声明需求足以支撑UX I2的typed producer接线。原范围疑问已关闭，不重复查证或请求批准；不将该业务扩为Provider门禁/新自动调度。旧文档固定角色顺序按后来v14动态编排要求覆盖。peer现有App准入/stop/helpers/childproducer四路独占继续。
+
+- Runtime boundary基础dad3ebb0已正常合candidate；目标agent-loop tsc0、原五namedconsumer5/5PASS（session36302，inspection-turn-boundary-composed-20261017.txt）。证据覆盖共用opening/逐check选择、持久checkpoint时间、重复cycle-close排除、durableitem不重执行、committedstoppedcheckpoint收拢；不覆盖真实productionreader/open/facts helpers。owner已指出aggregate outcome由nextAction粗分仍须纠正，完整milestone前修复并走真实consumer；本基础不main、不leafReview。App新turn准入第三轮holdtimeout尚未到目标字段断言，不算需求RED，由原worker同树定位。
+
+- 持久绑定59b95565+11231520已正常合candidate；组合contractsbuild、context/jsonl/admission三目标tsc均0，原named5consumer5/5PASS，session66658/inspection-turn-plan-persistence-composed-20261017.txt。App新turn准入GCM已由peer从含接口候选实际启动，独占execution-composition.ts与原nativeconsumer；不等整层。模板shape补正0399ea4e已合candidate。未将这些内部基础记成完整producer或main产品交付。
+- r269边界源码观察、r270当前工件取证、r271Astra只读攻关均已实际返回：neutral SSE注释对应专用disconnect出口；error_chain/provider_terminal可能重叠，固定pool-exhausted文字不证明实际耗尽。目标工件未保留，内部根因UNKNOWN；无证据支持HumanAgent代码修复。该条installedApp→RCC验收INCOMPLETE，停止重发/旧日志扩搜。需RCC owner提供既存原始原因/可靠关联；已列出实际维护聊天并异步请求用户明确交接目标（通信用法要求目标授权），其余producer/runtime继续，不标整体blocked。
+
+- r268一次新Interpret实际执行完毕，HTTP409/UND_ERR_SOCKET、Task0，预算1/1 consumed。raw capture证明HTTP200的142byteheaders+8raw chunkbody，仅解码SSE注释`:\n\n`3bytes，之后RCC面对EOF先于clientEOF，无modelcontent/terminal；精确请求model/tools/instructions/business均匹配原baseline。不能据此指定内部根因。新RCCrequestId关联未建立，collector的gpt5.5候选无关，不冒归属。worker沙盒ps拒绝清理，父核实exactownedPID54910后SIGTERM，PIDabsent/lease disposedAt21:09:20.776Z；relay关闭，fixture/evidence保留。实际结果与边界见r268/parent-acceptance.md、host-cleanup.json、diag-state.json与relay-wire-capture.redacted.json。根因UNKNOWN；r269 GCM只读至多6个RCC边界源文件定位现有error owner/sink，不发请求/改RCC。
+- planner模板c8abb025已合candidate，复用有效compile不新增镜像string测试；peer发现首轮缺definition具体shape，保同来源补单句字段说明，后继commit待接。manager/App accept来源均由peer确认正常remove/prune/pathabsent。producer完整交付仍INCOMPLETE。
+
+- 共享contracts ea11de39已合candidate，build:contracts0与约定consumer3/3；manager0e4a1f41已合candidate，orchestration定向compile0/原consumer1/1；App accept f51dcfc1+215608ce已正常合candidate，tests/app compile0/原公开整文件3/3。stdout分别归档inspection-delivery-contract-composed、inspection-manager-composed、inspection-check-accept-composed-20261017.txt。peer已收到各结果并负责来源生命周期；不把基础接收计作完整producer、durable replay或冷恢复。后继持久绑定、Runtime boundary与planner输出模板由peer独占执行。
+- r267独立Gemini4medium计划已实际SUCCESS/exit0并接受：新隔离installed public Interpret最多1次，通过临时raw TCP relay保留缺失字节，RCC/产品readonly。父补正不推定中继延迟/内部根因、敏感header落盘前脱敏（不保存未脱敏headerhex）。r268 GCM仅own run+新testfixture写入，旧日志不重搜，尚无请求发送回执。r265观察未发现当前可独立新增的Provider功能；其建议逐A–G扩live验证不采纳，沿现有最小充分验收合同。
+
+- RCC旧请求取证已闭合为证据不足，不是修复：r263整理exit0；r264独立OAuth接受零请求定点提取；r266一次读取目标日志取得6条exact request/execution/port/connection记录。20:36:36.933Z response200后socket_write150bytes、同毫秒Body stream error、.934Z关闭；完整记录无inner cause/body/frame/artifact引用，不能确认根因或owner。r266/exact-records.jsonl与result.md保留；旧日志不再重搜。旧新business input/instructions/tools相同，只有sourceRef身份不同。r267独立Gemini4medium规划新隔离取证（最多一次Interpret，尚未执行），不改产品/RCC/模型；r265 GCM并行校准A–G当前缺代码与缺证据，未新建产品writer。
+- UX图源58039143只有三族9个图文件，正常合唯一candidate；复用owner三图validate/inspect/binding有效结果，不重复检查。owner已关闭原树；共享契约GCM独占inspection-delivery-contract-20261017开始，实现inspectionDelivery/acceptedPlan/InspectionAcceptedCheckPort，后继持久层与manager等待该明确接口。UX文档80566366已从origin/main正常合candidate。以上候选基础不计完整producer交付。
+
 - r261实际16个C1/C2 metadata单字段删除/错值反例均由对应断言拒绝，原cold通过后却未来意图退出，临时循环未删，不计完成；r262复用原树删除临时代码，最终仅两次helper await，专用tsc0、installed原cold1/1 PASS（seed30950/serve32675、同业务turn/epoch3→4/Plannercomplete/effects27）。宿主正常提交9a088896并合唯一candidate。先前候选installed五公开consumer已实际5/5 PASS，session90607，证据installed-cold-composed-20261017.txt。来源clean、worker和上述测试PID消失、成功fixture absent后normal remove/prune/pathabsent完成；无新增来源树。尚未整体producer milestone Review/main产品交付。
 - r260观察扩到无关历史文件搜索，父精确TERM79175并确认退出；不接其未完成观察为根因证据。r263 fresh GCM只准读取r260/r258两个run整理已取得事实，不再外扩搜索、不重发模型请求。RCC断流根因继续UNKNOWN；本次一次Interpret预算已用，未转B或改schema。
 
