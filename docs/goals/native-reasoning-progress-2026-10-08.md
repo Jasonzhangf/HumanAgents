@@ -1,5 +1,17 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 当前调度续接（r189）
+
+完整目标 ACTIVE / INCOMPLETE。以下为当前任务事实，不将 worker 数或候选源码计作已交付能力。
+
+- r182 GCM 在原 native consumer 树实施真实多轮冷恢复公开 consumer；当前进程已确认存活。仅允许测试修改；HTTP 202 不代替最终任务结果。checkpoint wire 元数据实施等待此文件 writer 交还。
+- r185 的双 Task 原公开用例经宿主执行：两个执行请求、两个 Planner 已产生，任务结果、终态及此前上下文/计划断言通过，最终在 `missing Task runtime instances` 失败。原失败目录 `~/.humanagent/test-fixtures/provider-two-top-tasks-sG9IgK` 保留。r187 GCM 在同一来源树检查公开 pool 取证时机，不修改产品以迎合测试。
+- r188 GCM 只读核对默认 reentry/correction 与 Memory boundary 发布/恢复接线；只解决 r183 尚未确认的生产绑定，不新增路由或框架。
+- UX 已交付并推送 transport 消融到 main `c4cef143`，官方实例 gen23 / 53007 由双方保护。已 fetch 并开始正常 merge 到唯一 native candidate；auth graph/semantic、server.ts、real-network-access-control-e2e.mjs 四文件冲突未完成。r189 GCM 是这四文件唯一冲突 writer，保留 native 准入/恢复和批准的 transport 消融。未完成 merge，不宣称候选已组合最新 main。
+- 已告知 UX：本侧没有 UI grant writer，正式 task-scoped grant UI 可独立推进。main/install 窗口已归还，本侧尚未安装或重启。
+
+本轮四路 GCM 分工为冷恢复、双 Task 证据、Memory 接线观察、main 合流冲突。其余依赖未满足的实施不提前派发。下一步接收真实回执，完成合流及受影响验证，再进入连贯 milestone 的整体审查和标准交付。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）

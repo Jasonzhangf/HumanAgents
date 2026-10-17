@@ -804,7 +804,7 @@ async function handleRequest(
       requireSupervisor(accessControl, request, identity);
     }
     if (path.startsWith('/api/') && !supervisorControlled) {
-      const session = await requireSession(accessControl, request);
+      await requireSession(accessControl, request);
       if (path === '/api/executions/' || path.startsWith('/api/executions/')) {
         if (isClosing()) {
           throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);

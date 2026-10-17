@@ -731,6 +731,29 @@ async function wildcardBindCase(evidenceDir) {
     assert.equal(unauthLanTasks.status, 401, 'unauthenticated LAN access must be rejected');
     assert.equal(unauthLanTasks.body?.error?.code, 'auth.session.missing');
 
+    const lanHost = new URL(lanOrigin).host;
+    const supervisorFromLan = await request(`${lanOrigin}/api/runtime/identity`);
+    assert.equal(supervisorFromLan.status, 401, 'LAN supervisor call without a token must require supervisor auth');
+    assert.equal(supervisorFromLan.body?.error?.code, 'auth.supervisor.required');
+    const loopbackIdentity = await request(`${serve.loopbackOrigin}/api/runtime/identity`);
+    assert.equal(loopbackIdentity.status, 401, 'supervisor call without a token must be unauthorized');
+    assert.equal(loopbackIdentity.body?.error?.code, 'auth.supervisor.required');
+    const lease = JSON.parse(await readFile(serve.banner.supervisor.leasePath, 'utf8'));
+    const { deriveSupervisorToken } = await import(
+      pathToFileURL(join(repoPath, 'dist/app/app/src/ui-runtime/access-control.js')).href
+    );
+    const supervisorToken = await deriveSupervisorToken(
+      join(serve.controlRoot, 'security', 'web-access.json'),
+      lease.leaseId,
+      lease.generation,
+    );
+    const authorizedLanIdentity = await request(`${lanOrigin}/api/runtime/identity`, {
+      headers: { authorization: `Bearer ${supervisorToken}` },
+    });
+    assert.equal(authorizedLanIdentity.status, 200, 'authenticated LAN supervisor identity read must succeed');
+    assert.equal(authorizedLanIdentity.body?.leaseId, lease.leaseId);
+    assert.equal(authorizedLanIdentity.body?.generation, lease.generation);
+
     const pair = await runPair(serve);
     assert.equal(pair.exit.code, 0);
     const paired = await postPair(lanOrigin, pair.receipt.code);
@@ -740,10 +763,6 @@ async function wildcardBindCase(evidenceDir) {
     const authorizedLanTasks = await request(`${lanOrigin}/api/tasks`, { headers: { cookie } });
     assert.equal(authorizedLanTasks.status, 200, 'authenticated LAN read must succeed');
 
-    const lanHost = new URL(lanOrigin).host;
-    const loopbackIdentity = await request(`${serve.loopbackOrigin}/api/runtime/identity`);
-    assert.equal(loopbackIdentity.status, 401, 'supervisor call without a token must be unauthorized');
-    assert.equal(loopbackIdentity.body?.error?.code, 'auth.supervisor.required');
     const rawLanLiveness = await rawHttpRequest(
       new URL(lanOrigin).hostname,
       serve.port,
@@ -775,7 +794,9 @@ async function wildcardBindCase(evidenceDir) {
       },
       authenticatedLanTasks: { status: authorizedLanTasks.status, total: authorizedLanTasks.body?.counts?.total },
       supervisorIdentity: {
+        lanWithoutToken: { status: supervisorFromLan.status, code: supervisorFromLan.body?.error?.code },
         withoutToken: { status: loopbackIdentity.status, code: loopbackIdentity.body?.error?.code },
+        lanAuthenticated: { status: authorizedLanIdentity.status, generation: authorizedLanIdentity.body?.generation },
       },
       rawLanHttp: {
         livenessStatusLine: rawLanLiveness.split('\r\n', 1)[0],
@@ -792,8 +813,8 @@ async function wildcardBindCase(evidenceDir) {
   }
 }
 
-async function pairingAndSseCase() {
-  const serve = await startServe({ fakeStepDelayMs: 1_000 });
+async function pairingSessionCase() {
+  const serve = await startServe({});
   try {
     const pair = await runPair(serve);
     const invalid = await postPair(serve.banner.url, 'invalid-code');
@@ -817,6 +838,44 @@ async function pairingAndSseCase() {
     const tasks = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
     assert.equal(tasks.status, 200);
 
+    const logout = await request(`${serve.banner.url}/api/auth/logout`, {
+      method: 'POST',
+      headers: { cookie },
+    });
+    assert.equal(logout.status, 200);
+    const oldCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
+    assert.equal(oldCookie.status, 401);
+    const invalidCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie: 'HA_SESSION=invalid.token' } });
+    assert.equal(invalidCookie.status, 401);
+
+    return {
+      pairExitCode: pair.exit.code,
+      invalidCode: { status: invalid.status, code: invalid.body?.error?.code },
+      paired: { status: paired.status, cookieFlags: ['Path=/'] },
+      reusedCode: { status: reused.status, code: reused.body?.error?.code },
+      session: { status: session.status, authenticated: session.body?.authenticated },
+      authorizedTasks: tasks.status,
+      logout: { status: logout.status, oldCookieStatus: oldCookie.status },
+      invalidCookieStatus: invalidCookie.status,
+    };
+  } finally {
+    const closure = await closeServe(serve);
+    assert.equal(closure.exited, true, 'serve must exit after SIGTERM');
+    assert.equal(closure.pidGone, true, 'serve PID must be gone');
+    assert.equal(closure.portRefused, true, 'serve port must be refused after exit');
+    assert.equal(closure.rootReleased, true, 'owned attempt root must be removed');
+  }
+}
+
+async function pairingAndSseCase() {
+  const serve = await startServe({ fakeStepDelayMs: 1_000 });
+  try {
+    const pair = await runPair(serve);
+    const paired = await postPair(serve.banner.url, pair.receipt.code);
+    assert.equal(paired.status, 200);
+    assert.equal(paired.body?.authenticated, true);
+    const cookie = cookieValue(paired.setCookie);
+
     const { operationId } = await createTaskAndStart(serve, cookie);
     const unauthorizedSse = await openSse(`${serve.banner.url}/api/executions/${encodeURIComponent(operationId)}/events`);
     assert.equal(unauthorizedSse.response.status, 401);
@@ -827,27 +886,18 @@ async function pairingAndSseCase() {
     await stream.waitFor((event) => event.data?.kind !== undefined || event.event !== undefined, 'first SSE event');
     const logout = await request(`${serve.banner.url}/api/auth/logout`, {
       method: 'POST',
-      headers: authHeaders(cookie, serve.banner.url),
+      headers: { cookie },
     });
     assert.equal(logout.status, 200);
     await stream.waitFor((event) => event.event === 'auth.invalidated' || event.data?.code === 'auth.session.invalid', 'auth.invalidated SSE');
     assert.equal(await stream.waitForClosed(), true);
-    const oldCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie } });
-    assert.equal(oldCookie.status, 401);
-    const invalidCookie = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie: 'HA_SESSION=invalid.token' } });
-    assert.equal(invalidCookie.status, 401);
     await stream.close();
 
     return {
       pairExitCode: pair.exit.code,
-      invalidCode: { status: invalid.status, code: invalid.body?.error?.code },
       paired: { status: paired.status, cookieFlags: ['Path=/'] },
-      reusedCode: { status: reused.status, code: reused.body?.error?.code },
-      session: { status: session.status, authenticated: session.body?.authenticated },
-      authorizedTasks: tasks.status,
       unauthorizedSse: { status: unauthorizedSse.response.status, contentType: unauthorizedSse.response.headers['content-type'] },
-      logout: { status: logout.status, sseClosed: true, oldCookieStatus: oldCookie.status },
-      invalidCookieStatus: invalidCookie.status,
+      logout: { status: logout.status, sseClosed: true },
     };
   } finally {
     const closure = await closeServe(serve);
@@ -920,7 +970,7 @@ async function healthCase() {
     assert.equal(snapshotBefore.body?.error?.code, 'health-snapshot-missing');
     const probe = await request(`${serve.banner.url}/api/health/probe`, {
       method: 'POST',
-      headers: authHeaders(cookie, serve.banner.url),
+      headers: { cookie },
     });
     assert.equal(probe.status, 200);
     assert.equal(probe.body?.surface, 'organ-health');
@@ -1808,8 +1858,6 @@ async function main() {
     startedAt: new Date().toISOString(),
     candidate: {
       cwd: repoPath,
-      head: process.env.HUMANAGENT_E2E_HEAD ?? null,
-      tree: process.env.HUMANAGENT_E2E_TREE ?? null,
     },
     cliPath,
     cases: [],
@@ -1821,6 +1869,7 @@ async function main() {
 
   const cases = [
     ['loopback_default_and_wildcard_lan_tailscale_protected_api', () => wildcardBindCase(evidenceDir)],
+    ['pair_session_logout_invalid_cookie', pairingSessionCase],
     ['pair_session_logout_active_sse', pairingAndSseCase],
     ['invalid_request_target_survives_daemon', invalidRequestTargetCase],
     ['shared_control_root_cross_process_generation', sharedControlRootCrossProcessCase],

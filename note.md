@@ -15,6 +15,18 @@
   - 长期执行计划：[整体执行计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)、[Provider 缺口计划](docs/goals/native-provider-gap-plan-2026-10-11.md)。
   - 进度汇总：[Native Reasoning & UX 进度摘要](docs/goals/native-reasoning-progress-2026-10-08.md)（历史完整流水账已归档至 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/`）。
 
+## 2026-10-17 MVP 传输门禁消融交付
+
+源码 519ad633，现有测试拆分 a30c3292，main 集成 e61a6fdf。删除 Origin 检查函数与 pair/logout/通用 mutation 的实际调用、session/clear cookie 的 HttpOnly/SameSite 标志、supervisor 的 socket.remoteAddress 环回拒绝及专属 helper。auth 图与语义删除旧要求，保留六节点五边拓扑和原 binding；既有网络 consumer 删除退役专属断言及可选 head/tree 身份包装字段。没有修改 CLI、Runtime、Provider 或新增 fakeApp。
+
+保留签名、过期、session generation、一次性配对、产品身份、任务授权、supervisor token 和 lease/generation 约束。最小选测为 session、health、LAN 三个公开 HTTP case，均实际 PASS。原配对与 LAN 红测有效复用；临时只恢复 logout Origin 或通用 mutation Origin 时，分别实际触发 logout/probe 的403对200断言失败，正确源码恢复后再次通过。图只校验一次；不扩跑全仓、release 或身份校验。
+
+现有 combined case 拆为无 Task 的 session/logout/旧 cookie 失效用例，以及保留全部强断言的 active execution SSE 用例；两者都在默认 full runner 注册。后者仍因 main 既有 execution admission 缺口而 INCOMPLETE，未跳过或报告通过。SSE registry/revalidateNow/logout generation 未改；没有为了该继承失败扩实现整套 fake interpreter/准入。官方 fake typed interpret 的既有 invalid JSON 500、Task0/RCC0另记完整 App 后继，不被本次 PASS 覆盖。
+
+整体独立审查 Opus 本次后端失败后按规则 Gemini4 medium SUCCESS/exit0，既有分类器 PASS/无阻断 finding。main 的 contracts 源码、config、App、package、安装均退出0。正式 restart108d25e5：generation22/PID95695 → generation23/PID3303，53007保持，旧实例 clean 收拢。
+
+canonical 安装入口另起隔离官方 fake 实例，实际无 Origin pair200/probe200/logout200，invalid/reused pair401、无会话401、旧cookie401、GET probe405、snapshot200、LAN supervisor无token401/有效token200；cookie仅Path和Max-Age，Task计数0。实例PID11608退出0、PID消失、端口拒绝、lease disposed、目录删除，无EMFILE/cleanup-failed。原浏览器Task页会话200/已完成可见/抽屉关闭/无横溢出，p3未操作。自有源码树正常remove/prune/path不存在。证据 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-transport-ablation-plan-20261017/` 的 root-final-reception.md、milestone-classification.json、各RED/final-host文件、main日志、installed-public-receipt.json、live-browser.json。完整 I1–I5/G1–G14/F01–F20 继续 ACTIVE，真实 App/native 后继未完成。
+
 ## 2026-10-17 观察界面信息分层交付
 
 源码提交 837dc952，集成提交 feaa72cd。观察页默认显示人读状态和运行时提供的下一步，未提供时明确说明不可用。mode、source、scopeRef、projectionSeq、目录说明和原始角色标识进入现有技术详情抽屉。固定注册表明确标为系统节点目录；物理删除按排序虚构的依赖连线、角色箭头、图例、绘图/resize 代码与专属 CSS。保留各节点独立状态、引用、真实交接、语义面板、执行实例与键盘交互。删除两项源码文本锁定测试和旧连线断言，复用原浏览器 consumer。
