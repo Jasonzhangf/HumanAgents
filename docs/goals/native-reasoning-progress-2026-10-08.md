@@ -2,6 +2,8 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- 冷child模板缺口已由独立r230确定为fixture bootstrap遗漏，r231两条动态import/初始化已进入原test及编译产物，tsc0。宿主原coldcase仍RED0/1，但已越过空prompt，当前fixture `text-only-wDp9j5` 返回409：`provider review failed and settlement also failed: provider operation has no active execution scope`。r232独立OAuth小Plan沿review port的scope绑定/生命周期定位，尚无产品patch；不绕review或写假scope。
+
 - I2 App 来源 `cb1fd426` 已正常无冲突合入唯一候选 `05c2cf5f`，4 files：i2-history/service/server/原 public consumer。宿主组合 tests/app tsc exit0，`scoped I2 public HTTP` 原用例 1/1 PASS，证明同 TaskId 按 canonical project/mode 隔离历史。已通知 UX owner 正常收口其来源树；UI 继续独立推进。未声称 main/安装/真实 RCC 完成。
 - 冷恢复仍为原 RED：`text-only-NggQrO` 的第二进程 resume409，`missing review agent prompt segments`。r227 GCM 网络流重连5次后失败，未取得定位；已按执行/观察后备规则启动 Flash r228。r225 交付计划因旧模型名、child 类型混淆、安装验证和清理顺序缺口退回同 Planner r229 修订。无新冷恢复产品 patch；总目标 ACTIVE / INCOMPLETE。
 
