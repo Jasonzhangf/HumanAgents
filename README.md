@@ -88,7 +88,7 @@ session，写入 `~/.humanagent/main/sessions/explicit-brain.jsonl`。对项目�
 session 仍写入 `~/.humanagent/sessions/<project-key>/<session-id>.jsonl`；启动目录
 只作为 workspace，不改变这两个持久化位置。
 
-`pnpm build` 使用 `~/.humanagent/build/checkpoints/build/<project-key>/manifest.json` 保存 `typecheck → compile` 的 stage checkpoint；`pnpm run ci` 使用独立的 `.../checkpoints/ci/<project-key>/manifest.json`；`pnpm build:release` 使用独立的 `.../checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke`。三条链共享 `~/.humanagent/build/locks/<project-key>/.run.lock`，不会并发改写同一工作树的编译产物。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
+`pnpm build` 直接运行类型检查和编译；`pnpm run ci` 在此基础上运行服务回归。两者不保存治理 checkpoint 或候选身份材料。复用已有有效行为结果，不以摘要或冻结记录决定日常放行；本地打包和安装用法见下文。
 
 `serve` 启动本地 HumanAgent Runtime API 和打包内置 UI（源码开发时才回退到
 `docs/ui`）。默认 provider 来自 `~/.humanagent/config.toml` 的 `[provider]`，
@@ -110,13 +110,6 @@ session，未配对客户端不能调用任务、执行、stop、runtime identit
 在该页输入 `humanagent pair` 打印的一次性配对码即完成同源配对。
 Supervisor 控制端点始终只接受 loopback socket 加派生 token，不跟随 wildcard 监听。
 局域网明文 HTTP 的风险仍存在；本实现不提供 TLS 或公网部署。
-`pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。
-
-标准 release 使用 `pnpm build:release`：它要求 clean worktree，自动递增 patch
-版本，同步架构版本记录并提交版本变更，然后执行 checkpointed
-`typecheck → compile → regression → ci → package → package-smoke`。普通
-`pnpm build` 不递增版本；`pnpm build:release:gate` 只运行不 bump 的底层 gate。
-
 日常入口：
 
 ```sh
@@ -124,14 +117,12 @@ pnpm run doctor -- --workspace /absolute/project
 pnpm run run -- --workspace /absolute/project --plan default
 pnpm run resume -- --workspace /absolute/project --session <session-id>
 pnpm run ci
-pnpm run build:release
-pnpm run review:record -- --review-id <review-id>
-pnpm run release
 pnpm run package
+pnpm run install:global
 ```
 
-`ci` 通过 checkpoint runner 在 `~/.humanagent/build/checkpoints/ci/<project-key>/manifest.json` 执行 `typecheck → compile → regression → ci`；已通过且输入/输出 digest 未变的 stage 会复用，失败从首个失效 stage 继续。需要强制全量诊断时才直接运行 `pnpm run ci:check`。
+`ci` 直接执行 `typecheck → build:raw → test:compiled:services`。它不生成哈希检查点、冻结材料或候选身份清单。局部开发按受影响行为选测，已有有效结果直接复用，不因提交或汇报重跑全量 CI。
 
-发布使用独立的 release checkpoint：`pnpm run build:release` 生成 candidate 与 `dist/release/release-manifest.json`（`review.status = pending`）；`pnpm run review:record -- --review-id <review-id>` 读取 `.agent-collab/review/<review-id>/` 的独立 review receipt，校验完整 review 输出契约、PASS verdict、base 和 source commit 与当前 candidate 一致、且无 P0/P1 finding 后写入 commit-scoped review 证据；最后 `pnpm run release` 只执行 `release:check`，校验 source commit、stage manifest、release artifact、package artifact 及 commit-scoped review 证据，其中 artifact 完整性由 release gate 独立校验，不由 review receipt 冒充。`review:record` 拒绝覆盖已 passed 的 review，`package` 只消费已通过 `release:check` 的 manifest。
+`package` 调用 `package:candidate`，将已编译资产组装为本地 tgz。`install:global` 按当前版本选择该包，也接受显式包路径；两者不依赖 release manifest 或摘要。安装后用正式 `humanagent restart` 交接运行实例，并验证受影响的公开行为。
 
-checkpoint 的 `regression` 阶段运行 `test:compiled:services`，只消费 compile 已生成的测试产物，不在下游重新编译并污染 compile 输出；`pnpm run test` 仍是需要强制重编译的全量诊断入口。
+`build:release`、`build:release:gate`、`review:record`、`release` 和 `package:release` 是显式对外发布入口。它们保留旧 release 机制，当前日常开发、安装和交付不调用，也不将其作为验收前提。对外发布时须按实际分发需求选取检查，不能将发布记录链扩成日常保护流程。`pnpm run test` 是需要重编译的全量诊断入口。

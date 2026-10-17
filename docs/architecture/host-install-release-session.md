@@ -227,7 +227,6 @@ JSONL 逐条追加，每条至少包含：
   "workspaceCwd": "/Volumes/extension/code/humanagent",
   "projectKey": "-Volumes-extension-code-humanagent",
   "state": "ready",
-  "runtimeManifestDigest": "sha256:...",
   "checkpointRef": "checkpoint:task-1:4",
   "ownerId": "host",
   "occurredAt": "2026-09-12T00:00:00.000Z"
