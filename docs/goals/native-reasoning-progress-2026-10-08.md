@@ -2,6 +2,9 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- start/settle四文件source d1788f33已正常合candidate：组合Appbuild/tsc0、原目标Reviewconsumer1/1、Provider两例2/2。原serve-runtime另两失败在未合修复candidate同样0/2复现，明确不属该fix新增，仍记整文件17/19；目标真实RED/GREEN见r236/r238与宿主回执。来源clean后remove/prune/pathabsent。I2UI来源也由UXowner正常关闭，证据保留。
+- 首完整milestone整体Review r241按首选Opus5.5medium实际quotaERROR/exit3/空结果，未审代码；r242已用全新独立Gemini4medium同scope继续。r243 GCM只读准备正式installed入口recipe，不写产品/服务，不以sourceconsumer冒installed证明。尚无ReviewPASS、main产品merge、安装重启或push；gen23/53007/p3保护。完整目标ACTIVE / INCOMPLETE。
+
 - 冷来源已宿主原case1/1、两三turn2/2并source提交7f455088；正常merge冲突经r239/r240保留双方后，宿主唯一candidate原五consumer 5/5 PASS（inspect/two/three/cold/genericHTTP），Appbuild/tsc0。merge提交f8ec6ee4。cold实证新OS同op3/businessTurn、epoch3→4、initial-open、前两完成语义/child/raw排除/noeffectsreplay、exact final/Plannercomplete；不扩真实RCC。原cold来源clean/无进程后remove/prune/pathabsent。最新docs-onlyorigin/main e053acc7已正常合。
 - I2 UI b0520813已正常合candidate，与已合I2App组合后原selected browser consumer36/36 PASS，证据run i2-ui-composed-20261017；已告知UXowner收来源。未main/install/push。start/settle source hostProvider两例2/2 PASS，serve-runtime整文件17/19：confirmed requirement非成功收拢case未消费、同Taskepochcase缺grant，尚未归因；不将EMFILE或目标case通过扩为整文件PASS。
 
