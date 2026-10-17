@@ -159,20 +159,6 @@ async function createAndSettleTask(auth) {
   assert.equal(created.status, 201);
   const task = await created.json();
   const taskId = task.taskId.value;
-  const grant = await auth.request(`/api/tasks/${encodeURIComponent(taskId)}/control/grant`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      requestId: `runtime-reload-public-grant:${taskId}`,
-      expectedRevision: 0,
-      capability: {
-        actionId: 'task.execute',
-        capabilities: ['provider.execution'],
-      },
-    }),
-  });
-  const grantBody = await grant.text();
-  assert.equal(grant.status, 200, grantBody);
   const started = await auth.request(`/api/tasks/${encodeURIComponent(taskId)}/executions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

@@ -14,6 +14,22 @@
   - 本轮核销：共归档并移除 **791 个**非活动工作树（438 个 clean 树 + 281 个历史未提交树快照归档至 `refs/archive/wt-dirty/*` + 72 个已完成 `20261014/15` 候选树直接提交至各自 `codex/<name>` 分支后移除），并移出 290 个未注册孤儿条目与仓库内 `playground/` 目录。
   - 当前保留：仅 **6 个**注册工作树（主树 `main` + 5 个当前有活动进程占用的 `PROTECTED_HOLD` 工作树：`provider-context-correction-r1-20261015`、`provider-native-public-composition-r1-20261014`、`provider-production-task-identity-r1-20261014`、`provider-ux-served-composition-r1-20261014`、`runtime-reload-r1-20261015`）。
 
+## 2026-10-17 旧治理消融补漏
+
+本节更新日常开发与本地安装入口；下方旧候选记录只作历史，不作为当前检查要求。
+
+- 已交付的日常 build/CI 消融继续复用。它们直接运行类型检查、编译及适用服务回归，不建立哈希检查点、冻结材料或候选身份清单。本批不重跑全仓 CI。
+- 本地 package assembly 删除两次目录摘要与比较、`artifactDigest` 返回。普通 `package` 改走 `package:candidate`。本地 installer 直接选择当前版本 tgz 或显式路径，不再依赖 release manifest。保留真实文件复制、contracts、模板、UI 资产、CLI 封装和 npm 失败传播。
+- restart 删除入口文件摘要计算、lease/transition 摘要必填项和交接摘要比较。保留 lease/generation/processStartToken、路径、子进程 PID、ready、request 关联、旧进程退出、错误与资源收口。原公开 restart consumer 保留任务数据断言；测试任务通过正式 grant API 获得执行权限。
+- 有效作者证据：真实 tgz 安装/CLI consumer 与 installer 成功失败两项通过；正常主机 supervisor 原 24 项通过，删除新增重复 codec 用例后原 23 项通过；UX 候选原公开 restart consumer 1 项通过。后续主干组合仅重跑输入实质改变的用例，不为记笔记重复检查。隔离 modern-to-modern fixture 不证明已安装旧 owner 的兼容。
+- 主干组合的无摘要 lease 反例：原 main 公开 decoder 实际报 `daemon-lease-corrupt`；消融后同一输入成功，无摘要计算。主干 supervisor 23 项通过。首次主干 public consumer 在新增 grant helper 收到 404，因为 main 尚无该路由；只对主干移除这段候选专属前置，保留原 main 的执行准入，未修改产品授权。该失败不能伪报为 restart 失败或通过。
+- 本批独立交付树从最新 `origin/main` 开始，只合治理消融，不合尚未完成验收的 UX、Provider 或 Memory 候选。
+- SDK 受管副本仍有旧规则。外置树正常 `appsdk init .` 返回 `INIT_REQUIRES_CANONICAL_PROJECT_MAIN_TREE:.`；项目正式主树同一入口返回 `SDK_VERSION_MIGRATION_REQUIRED:0.1.0014:0.1.0015:run=appsdk pin-lock <project> --binary <path>`。未刷新，未伪报通过。按治理 Skill 停止这一受影响链；不手写 pin/lock/摘要，不执行 fresh/reset，不重启 daemon。该兼容缺口属于 AppSDK owner，受管副本未完成不能宣称整体治理消融完成。
+
+主干组合最终结果：package 两项通过；supervisor 原 23 项通过；无摘要 lease 反例由失败转成功；正式 public restart consumer 1 项通过，真实交接/任务数据/退出和资源断言完整。GCM执行者完成重复测试删除后出现network error，owner接收并跑组合测试；适配main测试前置由已授权AGY Flash后备完成。只读观察者同样断流，没有完整报告，不算已完成独立审计。
+
+详细原始日志复用 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-local-package-ablation-execute-20261017/` 与 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-restart-ablation-acceptance-20261017/`。正式 main 集成、安装与 restart 结果在交付后补记。
+
 ## 2. 当前候选分支与待交付切片
 
 - **主干与候选基线**：
