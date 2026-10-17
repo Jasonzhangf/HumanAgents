@@ -575,6 +575,11 @@ dialog::backdrop {
   padding: 22px;
 }
 
+[data-checkpoint-role="asset-body-text"] {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .dialog-head {
   display: flex;
   justify-content: space-between;
