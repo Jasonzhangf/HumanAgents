@@ -18,29 +18,29 @@
           </nav>
           <div class="scope-heading">
             <div>
-              <span class="region-kicker">后台 · 只读</span>
+              <span class="region-kicker">任务观测 · 只读</span>
               <h1 id="scope-title" data-scope-title>任务处理流水</h1>
-              <p data-scope-summary>从输入到任务输出的只读节点流转。</p>
+              <p data-observation-next-step="true">本次读取未提供下一步说明。</p>
             </div>
-            <span class="mode-chip" data-runtime-mode>mode</span>
+            <button type="button" class="button button--quiet" data-observation-technical-trigger="true">技术详情</button>
           </div>
           <p class="observation-rule">节点只读；页面不消费需求、不修改队列、不重试 operation，也不下发控制命令。</p>
         </section>
 
-        <section class="region agent-chain" aria-labelledby="chain-title">
+        <section class="region agent-chain" aria-label="角色归属概览">
           <header class="region-heading">
             <div>
-              <span class="region-kicker">归属链路</span>
-              <h2 id="chain-title">agent 链路</h2>
+              <span class="region-kicker">角色归属</span>
+              <h2>角色归属概览</h2>
             </div>
-            <span class="scope-seq">上游 agent → 下游 agent</span>
+            <span class="scope-seq">按系统角色汇总归属节点</span>
           </header>
           <ol class="chain-strip" data-agent-chain>
-            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">交互</span><small>交互 agent</small></div><span class="chain-arrow" aria-hidden="true">→</span></li>
-            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">任务编排</span><small>任务编排 agent</small></div><span class="chain-arrow" aria-hidden="true">→</span></li>
-            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">执行</span><small>执行 agent</small></div><span class="chain-arrow" aria-hidden="true">→</span></li>
-            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">审核</span><small>审核 agent</small></div><span class="chain-arrow" aria-hidden="true">→</span></li>
-            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">经验整理</span><small>经验整理 agent</small></div></li>
+            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">交互</span><small>3 个节点</small></div></li>
+            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">任务编排</span><small>2 个节点</small></div></li>
+            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">执行</span><small>2 个节点</small></div></li>
+            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">审核</span><small>2 个节点</small></div></li>
+            <li class="chain-step"><div class="chain-chip"><span class="chain-chip-role">经验整理</span><small>1 个节点</small></div></li>
           </ol>
         </section>
 
@@ -48,40 +48,32 @@
           <header class="region-heading">
             <div>
               <span class="region-kicker">当前 scope</span>
-              <h2 id="flow-title">节点流转</h2>
+              <h2 id="flow-title">系统节点目录</h2>
             </div>
-            <span class="scope-seq" data-scope-seq>projection seq 0</span>
+            <span class="scope-seq">13 个系统节点</span>
           </header>
+          <p class="section-note" data-catalogue-summary="true">系统注册表节点目录；这些节点按所属角色分组，不代表任务执行依赖顺序。</p>
           <div class="flow-canvas" data-flow-canvas>
-            <svg class="flow-edges" aria-hidden="true" focusable="false"></svg>
             <section class="agent-lane" data-lane-id="interaction">
-              <header class="agent-lane-head"><h3>交互</h3><span class="agent-lane-meta">交互 agent</span></header>
+              <header class="agent-lane-head"><h3>交互</h3><span class="agent-lane-meta">3 个节点</span></header>
               <div class="agent-lane-body"><p class="flow-empty" data-empty="true">节点由 Runtime projection 渲染。</p></div>
             </section>
             <section class="agent-lane" data-lane-id="orchestration">
-              <header class="agent-lane-head"><h3>任务编排</h3><span class="agent-lane-meta">任务编排 agent</span></header>
+              <header class="agent-lane-head"><h3>任务编排</h3><span class="agent-lane-meta">2 个节点</span></header>
               <div class="agent-lane-body"><p class="flow-empty" data-empty="true">节点由 Runtime projection 渲染。</p></div>
             </section>
             <section class="agent-lane" data-lane-id="execution">
-              <header class="agent-lane-head"><h3>执行</h3><span class="agent-lane-meta">执行 agent</span></header>
+              <header class="agent-lane-head"><h3>执行</h3><span class="agent-lane-meta">2 个节点</span></header>
               <div class="agent-lane-body"><p class="flow-empty" data-empty="true">节点由 Runtime projection 渲染。</p></div>
             </section>
             <section class="agent-lane" data-lane-id="review">
-              <header class="agent-lane-head"><h3>审核</h3><span class="agent-lane-meta">审核 agent</span></header>
+              <header class="agent-lane-head"><h3>审核</h3><span class="agent-lane-meta">2 个节点</span></header>
               <div class="agent-lane-body"><p class="flow-empty" data-empty="true">节点由 Runtime projection 渲染。</p></div>
             </section>
             <section class="agent-lane" data-lane-id="memory">
-              <header class="agent-lane-head"><h3>经验整理</h3><span class="agent-lane-meta">经验整理 agent</span></header>
+              <header class="agent-lane-head"><h3>经验整理</h3><span class="agent-lane-meta">1 个节点</span></header>
               <div class="agent-lane-body"><p class="flow-empty" data-empty="true">节点由 Runtime projection 渲染。</p></div>
             </section>
-            <div class="flow-legend">
-              <span class="legend-item" data-tone="done">已完成的流程：静态线，箭头在中点</span>
-              <span class="legend-item" data-tone="active">正在运行的流程：流动线，箭头在终点</span>
-              <span class="legend-item" data-tone="pending">未开始的流程：静态线，暂无箭头</span>
-            </div>
-            <ol class="flow-edges-list" data-flow-edges-list aria-label="节点上下游顺序">
-              <li data-tone="pending">按节点顺序渲染上下游链路</li>
-            </ol>
           </div>
         </section>
       </main>
