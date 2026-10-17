@@ -41,7 +41,14 @@
 
 App 新 turn 接受精确计划已完成候选组合：`b52cbd65`、`b1e32b2b` 把真实计划 publication receipt 写入原 turn binding，并让边界续跑不再读取当前 plan/identity。原三轮冷恢复消费者实际抓到 acceptedPlan 缺失，原边界消费者实际抓到多余读取；修复及候选组合后两个消费者均通过，来源树已正常关闭。该证据证明持久保留，不代替“最新计划已变化时仍选择原 turn 计划”的生产读取证明，也不代替安装后验收。接收记录见独占 run `inspection-turn-plan-admission-20261017/root-reception.md`。
 
-当前继续实现三个不冲突范围：coordinator stop/异常/冷恢复接线、Runtime 生产 reader/open/facts helper、正式 child producer。Runtime helper 还须修正把 nextAction 粗分成巡检 unknown/blocked 的语义；巡检结果与 cycle 下一动作分开，missing 不自动变失败，任意非空结果文本也不能自动当作巡检完成。另有只读 worker 提前定位 App 最终组装的物理资源入口，不写产品、不另建治理。缺 CLI 构建、测试产物、类型错误和不正确的 fixture 计数均不算需求 RED；退出后仍有编译错误或只有后续意图的 worker 不计完成。Scope 与进度按真实入口证据推进。
+以下增量也已完成候选组合和来源清理。它们补齐了实际生产模块，尚未证明整个巡检 producer 已接通或安装。
+
+- 正式 child producer 已传递真实 criterion、inputRefs、checkId 和 typed delivery；新交付及已落盘交付的补交走同一纯接受路径。来源 `4b48d753`、`1152c5c6`；接收记录保留在 `inspection-child-producer-20261017` 独占 run。该消费者证明 typed producer 接缝，不代替实际配置子代理、标准结束及公开比较的完整证明。
+- Runtime helper `902ba88f` 已拥有原 turn 计划读取、定义复用、occurrence 开启、交付事实及精确 stop cut 读取。后继 `b2bd7f5d` 去掉 stop source 对尚未创建的 NativeSaveIntent 的依赖，使用真实 turn、boundary、segment 与提交 receipt；普通无 occurrence 停止先返回，不读取 physical capture。coordinator 来源 `ecd6126f`、`f964898d` 已接入停止补交及纯 inventory 查询；动作直接消费本次结算结果，删除随后的重复查询。接收记录见 `inspection-runtime-helpers-20261017`、`inspection-runtime-stop-source-20261017` 和对应 stop 独占 run。
+- 聚合结果已与 cycle 下一动作分离。Contracts `0b0a8d34`、Runtime `aee3aebc`、App wire `3a0a99b0` 共同保留唯一的 `closure.summary.inspectionOutcome`。completed 必须有真实判断，其他结果必须说明原因；无声明保持 unknown，missing 不自动变失败，非空摘要不自动当作完成。原反例能抓到把 continue 误判为 blocked 和 wire 丢字段。重复结算不追加，相冲突的显式声明被拒；这些证据仍是模块消费者，未覆盖原生两轮的整体判断。
+- App `2fb247eb` 已补标准结束前停止的真实 capture 路径。不存在标准关闭候选时不查询虚构 save key；实际 key 存在时保留原 exact progress、phase receipt 和未知错误处理。真实 stopped/cancelled 且无 acceptedEnd 才走 capture-only；普通 no-end 错误仍保留恢复责任。公开 CLI/HTTP 消费者读到 capture 先于停止 checkpoint，且没有伪造标准 intent、closure 或 Planner；普通标准结束消费者仍通过。v2、显式 Provider close-once 计数、安装后行为尚未独立证明。组合回执为 `inspection-app-stop-capture-20261017/root-reception.md`。
+
+当前下一步是 App 最终物理组装：按真实 turn、invocation 和 checkpoint 注入资源 reader，连接 child、AgentLoop、停止结算动作与纯查询，再用实际配置子代理产生两个 occurrence 并从公开入口按检查项 ID 比较。独立生命周期核对已确认 `parent.runProducer` 与 `ActiveTurnProducerBarrier.closeAndDrain` 在真实派发路径阻止关闭后的新执行，无需给 helper 增加第二套关闭状态或校验；历史 selection 读取供结算与 replay 保留。对应决定见 `inspection-runtime-stop-source-20261017/selection-lifecycle-plan.md`。缺 CLI 构建、测试产物、类型错误和错误 fixture 计数不算需求 RED；只有后续意图的退出不计完成。
 
 代码前设计已认可不等于运行行为通过。完整 producer 仍须真实 native 两轮、公开比较及适用恢复反例，再进入一次整体 milestone Review 和标准交付。设计与逐项复核证据保留在独占 run：`inspection-producer-design-attack-20261017/{plan,two-findings-plan,selection-context-plan-r3}.md` 和 `inspection-producer-design-review-20261017/{followup-attack-review,followup-two-review,selection-r3-review}.md`。原生 owner 独立推进 installed deep-cold 与真实 RCC App Task；本 I2 生产补全不扩成 Provider 新增放行条件。局部依赖只约束真实下游，不为已交付增量追加全局门禁；其他 owner 资源保持其责任边界。
 
