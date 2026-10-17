@@ -26,7 +26,7 @@ export const ADVERTISED_STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
       summary: { type: 'object', properties: Object.fromEntries(
         ['goal', 'actions', 'result', 'expectedNextStep'].map((section) => [section, {
           type: 'object', properties: { text: { type: 'string' },
-            evidenceRefs: { type: 'array', items: { type: 'string' }, minItems: 1 } },
+            evidenceRefs: { type: 'array', items: { type: 'string' } } },
           required: ['text', 'evidenceRefs'], additionalProperties: false,
         }]),
       ), required: ['goal', 'actions', 'result', 'expectedNextStep'], additionalProperties: false },

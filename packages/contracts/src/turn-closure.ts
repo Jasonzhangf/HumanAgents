@@ -209,8 +209,8 @@ function scopeBoundEvidenceRef(ref: EvidenceRef, scope: AdmittedTurnIdentity['sc
 function validateSummarySection(section: TurnSummarySection, label: string, scope: AdmittedTurnIdentity['scopeRef'], allow?: ReadonlySet<string>): void {
   if (typeof section !== 'object' || section === null) throw new ContractError(`${label} must be an object`);
   nonEmpty(section.text, `${label} text`);
-  if (!Array.isArray(section.evidenceRefs) || section.evidenceRefs.length === 0) {
-    throw new ContractError(`${label} requires at least one evidence reference`);
+  if (!Array.isArray(section.evidenceRefs)) {
+    throw new ContractError(`${label} evidence references must be an array`);
   }
   const seen = new Set<string>();
   for (const ref of section.evidenceRefs) {
