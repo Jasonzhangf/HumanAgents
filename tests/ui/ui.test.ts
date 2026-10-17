@@ -910,64 +910,6 @@ test('memory review button exposes typed API failure and becomes usable again', 
   });
 });
 
-test('observation page reads only typed pipeline fields and owns no node-order table', async () => {
-  const page = await readFile('docs/ui/observation.js', 'utf8');
-
-  // Field names must match the typed contract: `ownerAgentRole`, `toolSteps`, top-level `handoffs`.
-  assert.equal(page.includes('ownerAgentRole'), true);
-  assert.equal(page.includes('projection.handoffs'), true);
-  assert.equal(page.includes('projection.selectedNode'), true);
-  assert.equal(page.includes("mode: 'observation'"), true);
-  assert.equal(page.includes('fromRoleDisplay'), true);
-  assert.equal(page.includes('carrySummary'), true);
-
-  // The old producerless field names and the second node-order table are gone.
-  for (const stale of [
-    'node.toolCalls',
-    'toolName',
-    'node.handoffs',
-    'node.inputRefs',
-    'node.outputRefs',
-    'renderToolHistory',
-    'renderSummaryPane',
-    'fromAgent ',
-    'notReturned',
-    'export const PIPELINE_ROWS',
-    'PIPELINE_ORDER',
-  ]) {
-    assert.equal(page.includes(stale), false, `observation.js must not keep ${stale}`);
-  }
-
-  // Attribution comes from the typed field only, and the row comes from the projection.
-  assert.equal(page.includes("const role = node.ownerAgentRole"), true);
-  assert.equal(page.includes('node.row'), true);
-});
-
-test('observation page reads node state and drawer refs from the projection that carries them', async () => {
-  const page = await readFile('docs/ui/observation.js', 'utf8');
-
-  // UNVERIFIED behavioural proof: the real browser runner observation-projection-browser.mjs checks
-  // these invariants against a live projection, but the test-owned fixture root holds no
-  // OBSERVATION_PROJECTION_EVIDENCE yet. Until that fixture exists these literals stay as the
-  // interim source guard and the behaviour is not proven.
-  // The top-level pipeline node projection carries `stateDisplay` but no `state`, so the machine
-  // state the chip tone and edge tone read comes from the projection's scope node view. A node the
-  // projection does not classify must keep the explicit `unknown` negative.
-  assert.equal(page.includes('currentScopeStates.get(node.nodeId)'), true);
-  assert.equal(page.includes("return typeof state === 'string' && state.length > 0 ? state : 'unknown'"), true);
-  assert.equal(page.includes('node.stateDisplay || state'), true);
-  assert.equal(page.includes('Array.isArray(projection?.scope?.nodes)'), true);
-
-  // The refs sheet renders the typed drawer detail (`projection.selectedNode`), never the node card.
-  // An empty projection stays the explicit empty list via `unresolvedList`.
-  assert.equal(page.includes('node?.inputs'), true);
-  assert.equal(page.includes('node?.outputs'), true);
-  assert.equal(page.includes('node?.evidenceRefs'), true);
-  assert.equal(page.includes("'无输入引用'"), true);
-  assert.equal(page.includes("'无输出引用'"), true);
-  assert.equal(page.includes("'无 evidence'"), true);
-});
-
 test('observation work-card adapter pairs tool calls with results and marks unprojected turns', async () => {
   const { projectObservationWorkCard } = await import(new URL(
     `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,

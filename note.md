@@ -15,6 +15,16 @@
   - 长期执行计划：[整体执行计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)、[Provider 缺口计划](docs/goals/native-provider-gap-plan-2026-10-11.md)。
   - 进度汇总：[Native Reasoning & UX 进度摘要](docs/goals/native-reasoning-progress-2026-10-08.md)（历史完整流水账已归档至 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/`）。
 
+## 2026-10-17 观察界面信息分层交付
+
+源码提交 837dc952，集成提交 feaa72cd。观察页默认显示人读状态和运行时提供的下一步，未提供时明确说明不可用。mode、source、scopeRef、projectionSeq、目录说明和原始角色标识进入现有技术详情抽屉。固定注册表明确标为系统节点目录；物理删除按排序虚构的依赖连线、角色箭头、图例、绘图/resize 代码与专属 CSS。保留各节点独立状态、引用、真实交接、语义面板、执行实例与键盘交互。删除两项源码文本锁定测试和旧连线断言，复用原浏览器 consumer。
+
+作者浏览器检查 82/82。临时改错节点状态来源并清空引用后，三个视口的状态/引用共六项断言实际失败；恢复后 82/82。与最新 main 组合后同一 consumer 82/82。整体独立审查首选 Opus 本次配额失败，按规则 Gemini4 medium 返回有效结果；既有分类器判 PASS，无阻断 finding。未扩跑无关套件，未进行 release 身份包装。
+
+main 的 contracts 源码、config、App、package 和安装均退出0。正式 restart 成功：generation21/PID43563 → generation22/PID95695，端口53007保持，旧实例 clean 收拢。实际安装后的浏览器在1280×900与390×844读取新界面；桌面技术抽屉500×868，手机390×658.3125贴底；均无横向溢出。默认头部无机械字段，技术详情可查完整角色对应。系统目录13节点、虚构边0；原“收拢受阻”和“覆盖不完整/未知”保持可见。验收只读，原p1任务页恢复且抽屉关闭，p3未操作。
+
+已合流自有 ux-observation-layer-20261017 树当轮正常 remove/prune，路径已不存在。证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-observation-layer-observe-20261017/`：root-reception.md、各checks.json、milestone-classification.json、main-*.log、live-receipt.json 与双端截图。传输限制消融仍在独立树作者排障，尚未计为交付。完整 I1–I5/G1–G14/F01–F20 继续 ACTIVE。
+
 ## 2026-10-17 两个声明项目的只读归属验收
 
 G7/F10 的“两空项目归属、列表和返回导航”子证明已通过。使用已安装 HumanAgent 官方 init 在独立 control root 声明 workspace-a、workspace-b，再通过官方 serve/pair 和实际浏览器读取；未创建 Task、未编造 Journal 或模型结果。这不关闭两任务计数、任务明细、活动实例隔离或整个 G7/F10。

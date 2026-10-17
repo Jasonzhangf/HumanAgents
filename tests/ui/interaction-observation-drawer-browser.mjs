@@ -27,10 +27,28 @@ const playwrightModule = await import(
 const playwright = playwrightModule.default ?? playwrightModule
 
 const TASK_ID = 'task-observation'
+const MISSING_STATE_TASK_ID = 'task-observation-missing-state'
 const TIME = '2026-10-05T12:00:00Z'
 // The turn identity the provider binding reported for this node. The proof
 // asserts the drawer displays this literal id, not an ordinal.
 const REAL_TURN_ID = 'turn-3c7d1f8a-52b4-4e19-8a60-1d9f4b2c7e35'
+const ROLE_PAIRS = [
+  { raw: 'execution', human: '执行' },
+  { raw: 'review', human: '审核' },
+  { raw: 'memory', human: '经验整理' },
+  { raw: 'unclassified', human: '未归类' },
+]
+const EXPECTED_REFS = Object.freeze({
+  inputs: ['operation://operation-observation/input'],
+  outputs: ['artifact://observation-result'],
+  evidence: ['evidence:ev-observation'],
+})
+const SIMULTANEOUS_STATES = Object.freeze({
+  'pipeline.execute': { state: 'running', label: '运行中', tone: 'active' },
+  settle: { state: 'blocked', label: '受阻', tone: 'warning' },
+  'pipeline.unclassified': { state: 'unknown', label: '未知', tone: 'gray' },
+  'pipeline.remember': { state: 'stale', label: '过期', tone: 'gray' },
+})
 
 function evidenceRef(locator) {
   return {
@@ -45,70 +63,121 @@ function evidenceRef(locator) {
   }
 }
 
-function selectedNode() {
+function selectedNode(taskId, nodeId = 'pipeline.execute', { emptyRefs = false } = {}) {
+  const identity = {
+    'pipeline.execute': {
+      title: '执行流水线',
+      kindDisplay: '执行',
+      stateDisplay: '运行中',
+      owner: 'agent-execution',
+      ownerAgentRole: 'execution',
+      roleDisplay: '执行',
+      summary: '执行完成，输出已投影。',
+    },
+    settle: {
+      title: '收拢',
+      kindDisplay: '收拢',
+      stateDisplay: '受阻',
+      owner: 'agent-review',
+      ownerAgentRole: 'review',
+      roleDisplay: '审核',
+      summary: '等待收拢',
+    },
+    'pipeline.remember': {
+      title: '经验整理',
+      kindDisplay: '记忆',
+      stateDisplay: '过期',
+      owner: 'agent-memory',
+      ownerAgentRole: 'memory',
+      roleDisplay: '经验整理',
+      summary: '经验投影已过期',
+    },
+    'pipeline.unclassified': {
+      title: '未归类节点',
+      kindDisplay: '未知',
+      stateDisplay: '未知',
+      owner: 'agent-unclassified',
+      ownerAgentRole: 'unclassified',
+      roleDisplay: '未归类',
+      summary: '等待分类',
+    },
+  }[nodeId]
   return {
-    nodeId: 'pipeline.execute',
-    title: '执行流水线',
-    kindDisplay: '执行',
-    stateDisplay: '运行中',
-    owner: 'agent-execution',
-    ownerAgentRole: 'execution',
-    roleDisplay: '执行',
+    nodeId,
+    ...identity,
     iteration: 2,
     updatedAt: '2026-10-05T12:00:05Z',
     // The provider binding reported this turn id for the node's real events.
-    turnId: REAL_TURN_ID,
-    summary: '执行完成，输出已投影。',
-    inputs: [{ ref: 'operation://operation-observation/input', label: '执行输入' }],
-    outputs: [{ ref: 'artifact://observation-result', label: '结果' }],
-    evidenceRefs: [evidenceRef('evidence:ev-observation')],
-    activity: [
-      { activityRef: 'activity:receive', summary: '已接收执行请求', occurredAt: '2026-10-05T12:00:00Z', turnId: REAL_TURN_ID },
-      // The runtime's own settling activity carries no provider turn; it must
-      // show the explicit no-turn state instead of a fabricated number.
-      { activityRef: 'activity:return', summary: 'provider 返回结果', occurredAt: '2026-10-05T12:00:04Z' },
-    ],
-    toolSteps: [
-      {
-        stepId: 'call-returned',
-        name: 'read.file',
-        status: 'succeeded',
-        statusDisplay: '已返回',
-        returned: 'status=succeeded · outputRef=asset://output/call-returned',
-        occurredAt: '2026-10-05T12:00:01Z',
-        turnId: REAL_TURN_ID,
-      },
-      {
-        stepId: 'call-unreturned',
-        name: 'write.file',
-        status: 'unknown',
-        statusDisplay: '未知',
-        returned: 'status=unknown · call=write.file',
-        occurredAt: '2026-10-05T12:00:02Z',
-      },
-    ],
-    childScopeRef: `task://${TASK_ID}/observation/pipeline.execute`,
+    turnId: nodeId === 'pipeline.execute' ? REAL_TURN_ID : undefined,
+    inputs: emptyRefs || nodeId !== 'pipeline.execute'
+      ? []
+      : [{ ref: 'operation://operation-observation/input', label: '执行输入' }],
+    outputs: emptyRefs || nodeId !== 'pipeline.execute'
+      ? []
+      : [{ ref: 'artifact://observation-result', label: '结果' }],
+    evidenceRefs: emptyRefs || nodeId !== 'pipeline.execute'
+      ? []
+      : [evidenceRef('evidence:ev-observation')],
+    activity: nodeId === 'pipeline.execute'
+      ? [
+          { activityRef: 'activity:receive', summary: '已接收执行请求', occurredAt: '2026-10-05T12:00:00Z', turnId: REAL_TURN_ID },
+          // The runtime's own settling activity carries no provider turn; it must
+          // show the explicit no-turn state instead of a fabricated number.
+          { activityRef: 'activity:return', summary: 'provider 返回结果', occurredAt: '2026-10-05T12:00:04Z' },
+        ]
+      : [],
+    toolSteps: nodeId === 'pipeline.execute'
+      ? [
+          {
+            stepId: 'call-returned',
+            name: 'read.file',
+            status: 'succeeded',
+            statusDisplay: '已返回',
+            returned: 'status=succeeded · outputRef=asset://output/call-returned',
+            occurredAt: '2026-10-05T12:00:01Z',
+            turnId: REAL_TURN_ID,
+          },
+          {
+            stepId: 'call-unreturned',
+            name: 'write.file',
+            status: 'unknown',
+            statusDisplay: '未知',
+            returned: 'status=unknown · call=write.file',
+            occurredAt: '2026-10-05T12:00:02Z',
+          },
+        ]
+      : [],
+    childScopeRef: `task://${taskId}/observation/${nodeId}`,
     feedback: [],
   }
 }
 
-function observationProjection(withDrawer) {
-  const detail = selectedNode()
+function observationProjection(withDrawer, taskId, selectedNodeId) {
+  const missingState = taskId === MISSING_STATE_TASK_ID
+  const detail = selectedNode(taskId, selectedNodeId || 'pipeline.execute', { emptyRefs: missingState })
+  const scopeNodes = [
+    { nodeId: 'pipeline.execute', title: '执行流水线', state: 'running', stateDisplay: '运行中', kindDisplay: '执行', summary: '执行中', owner: 'agent-execution', updatedAt: TIME, hasChildScope: true, evidenceCount: 1 },
+    { nodeId: 'settle', title: '收拢', state: 'blocked', stateDisplay: '受阻', kindDisplay: '收拢', summary: '等待收拢', owner: 'agent-review', updatedAt: TIME, hasChildScope: false, evidenceCount: 0 },
+    { nodeId: 'pipeline.remember', title: '经验整理', state: 'stale', stateDisplay: '过期', kindDisplay: '记忆', summary: '经验投影已过期', owner: 'agent-memory', updatedAt: TIME, hasChildScope: false, evidenceCount: 0 },
+    { nodeId: 'pipeline.unclassified', title: '未归类节点', state: 'unknown', stateDisplay: '未知', kindDisplay: '未知', summary: '等待分类', owner: 'agent-unclassified', updatedAt: TIME, hasChildScope: false, evidenceCount: 0 },
+  ]
+  if (missingState) delete scopeNodes.find((node) => node.nodeId === 'settle').state
   return {
     surface: 'observation',
     state: 'running',
-    data: { state: 'running', label: '运行中', detail: '真实投影样本' },
+    data: {
+      state: 'running',
+      label: '运行中',
+      ...(missingState ? {} : { detail: '真实投影样本' }),
+    },
     scope: {
-      scopeRef: `task://${TASK_ID}/observation`,
+      scopeRef: `task://${taskId}/observation`,
       title: '任务处理流水',
       summary: '只读观测样本',
       projectionSeq: 'seq-12',
-      breadcrumbs: [{ ref: `task://${TASK_ID}/observation`, title: '任务处理流水' }],
+      breadcrumbs: [{ ref: `task://${taskId}/observation`, title: '任务处理流水' }],
       canReturn: false,
-      nodes: [
-        { nodeId: 'pipeline.execute', title: '执行流水线', state: 'running', stateDisplay: '运行中', kindDisplay: '执行', summary: '执行中', owner: 'agent-execution', updatedAt: TIME, hasChildScope: true, evidenceCount: 1 },
-        { nodeId: 'settle', title: '收拢', state: 'running', stateDisplay: '收拢中', kindDisplay: '收拢', summary: '等待收拢', owner: 'agent-review', updatedAt: TIME, hasChildScope: false, evidenceCount: 0 },
-      ],
+      nodes: scopeNodes,
     },
     nodes: [
       {
@@ -124,7 +193,6 @@ function observationProjection(withDrawer) {
         summary: detail.summary,
         updatedAt: detail.updatedAt,
         toolSteps: detail.toolSteps,
-        state: 'running',
       },
       {
         nodeId: 'settle',
@@ -133,18 +201,47 @@ function observationProjection(withDrawer) {
         kindDisplay: '收拢',
         ownerAgentRole: 'review',
         roleDisplay: '审核',
-        stateDisplay: '收拢中',
+        stateDisplay: '受阻',
         iteration: 2,
         activity: [],
         summary: '等待收拢',
         updatedAt: TIME,
         toolSteps: [],
-        state: 'running',
+      },
+      {
+        nodeId: 'pipeline.remember',
+        title: '经验整理',
+        row: 10,
+        kindDisplay: '记忆',
+        ownerAgentRole: 'memory',
+        roleDisplay: '经验整理',
+        stateDisplay: '过期',
+        iteration: 2,
+        activity: [],
+        summary: '经验投影已过期',
+        updatedAt: TIME,
+        toolSteps: [],
+      },
+      {
+        nodeId: 'pipeline.unclassified',
+        title: '未归类节点',
+        row: 11,
+        kindDisplay: '未知',
+        ownerAgentRole: 'unclassified',
+        roleDisplay: '未归类',
+        stateDisplay: '未知',
+        iteration: 2,
+        activity: [],
+        summary: '等待分类',
+        updatedAt: TIME,
+        toolSteps: [],
       },
     ],
     agentFrames: [
       { agentId: 'agent-execution', role: 'execution', roleDisplay: '执行', stateDisplay: '运行中', iteration: 2, nodeIds: ['pipeline.execute'] },
-      { agentId: 'agent-review', role: 'review', roleDisplay: '审核', stateDisplay: '运行中', iteration: 2, nodeIds: ['settle'] },
+      { agentId: 'agent-review', role: 'review', roleDisplay: '审核', stateDisplay: '受阻', iteration: 2, nodeIds: ['settle'] },
+      { agentId: 'agent-memory', role: 'memory', roleDisplay: '经验整理', stateDisplay: '过期', iteration: 2, nodeIds: ['pipeline.remember'] },
+      { agentId: 'agent-unclassified', role: 'unclassified', roleDisplay: '未归类', stateDisplay: '未知', iteration: 2, nodeIds: ['pipeline.unclassified'] },
     ],
     handoffs: [{
       handoffId: 'handoff-execution-to-review',
@@ -186,10 +283,10 @@ function mimeType(path) {
 // The observation page now also mounts the shared read-only semantic panel from
 // the runtime's public semantic GET. A terminal envelope keeps the proof
 // subscription-free while still exercising the real page wiring.
-function semanticEnvelope() {
+function semanticEnvelope(taskId) {
   const scope = {
     organId: { scope: 'organ', value: 'organ-observation' },
-    taskId: { scope: 'task', value: TASK_ID },
+    taskId: { scope: 'task', value: taskId },
     operationId: { scope: 'operation', value: 'operation-observation-1' },
   }
   return {
@@ -237,13 +334,18 @@ async function startServer() {
       const semanticMatch = /^\/api\/tasks\/([^/]+)\/semantic$/.exec(url.pathname)
       if (semanticMatch) {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        response.end(JSON.stringify(semanticEnvelope()))
+        response.end(JSON.stringify(semanticEnvelope(decodeURIComponent(semanticMatch[1]))))
         return
       }
       const observationMatch = /^\/api\/tasks\/([^/]+)\/observation$/.exec(url.pathname)
       if (observationMatch) {
+        const taskId = decodeURIComponent(observationMatch[1])
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        response.end(JSON.stringify(observationProjection(url.searchParams.has('node'))))
+        response.end(JSON.stringify(observationProjection(
+          url.searchParams.has('node'),
+          taskId,
+          url.searchParams.get('node'),
+        )))
         return
       }
       const relative = decodeURIComponent(url.pathname === '/' ? '/observation.html' : url.pathname).replace(/^\/+/, '')
@@ -330,7 +432,96 @@ async function readDrawer(page) {
       unpairedRowText: traceRows.find((row) => row.dataset.callId === 'call-unreturned')?.innerText ?? '',
       unpairedRowState: traceRows.find((row) => row.dataset.callId === 'call-unreturned')?.dataset.toolPaired ?? '',
       controlCount: drawer?.querySelectorAll('button[data-iwc-action="invoke"], form, [data-action="retry"], [data-action="stop"]').length ?? 0,
-      reducedMotionEdge: getComputedStyle(document.querySelector('.flow-edge--active') ?? document.body).animationName,
+      prefersReducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    }
+  })
+}
+
+async function readDefaultObservation(page) {
+  return page.evaluate(() => {
+    const textOf = (selector) => document.querySelector(selector)?.innerText ?? ''
+    const nodes = [...document.querySelectorAll('.flow-node')].map((card) => ({
+      nodeId: card.dataset.nodeId ?? '',
+      state: card.dataset.state ?? '',
+      chipText: card.querySelector('.state-chip')?.textContent ?? '',
+      chipTone: card.querySelector('.state-chip')?.dataset.tone ?? '',
+      metaText: card.querySelector('.flow-node-meta')?.innerText ?? '',
+      laneLabel: card.closest('.agent-lane')?.querySelector('h3')?.textContent ?? '',
+    }))
+    return {
+      headingText: textOf('.page-heading'),
+      nextStepText: document.querySelector('[data-observation-next-step="true"]')?.textContent ?? '',
+      catalogueTitle: textOf('.flow-section h2'),
+      catalogueMeta: textOf('.flow-section .section-meta'),
+      catalogueNote: document.querySelector('[data-catalogue-summary="true"]')?.textContent ?? '',
+      chainText: textOf('.agent-chain'),
+      chainChips: [...document.querySelectorAll('.chain-chip')].map((chip) => chip.innerText),
+      laneHeads: [...document.querySelectorAll('.agent-lane-head')].map((head) => head.innerText),
+      nodeText: nodes.map((node) => `${node.metaText} ${node.laneLabel}`).join('\n'),
+      pageDefaultText: `${textOf('.page-heading')}\n${textOf('.agent-chain')}\n${textOf('.flow-section')}`,
+      flowEdgeSvgCount: document.querySelectorAll('svg.flow-edges').length,
+      flowEdgeListCount: document.querySelectorAll('.flow-edges-list').length,
+      chainArrowCount: document.querySelectorAll('.chain-arrow').length,
+      technicalTriggerCount: document.querySelectorAll('[data-observation-technical-trigger="true"]').length,
+      nodes,
+    }
+  })
+}
+
+async function openObservationTechnicalDetail(page) {
+  const trigger = page.locator('[data-observation-technical-trigger="true"]')
+  if (await trigger.count() === 0) {
+    return { present: false, open: false, rows: [], text: '', dialogCount: 0, rect: null, viewport: null }
+  }
+  await trigger.click()
+  await page.waitForSelector('dialog[data-technical-detail="true"][open]', { timeout: 5000 }).catch(() => {})
+  return page.evaluate(() => {
+    const dialog = document.querySelector('dialog[data-technical-detail="true"][open]')
+    const rect = dialog?.getBoundingClientRect()
+    return {
+      present: true,
+      open: Boolean(dialog?.open),
+      title: dialog?.querySelector('.shell-layer-title')?.textContent ?? '',
+      rows: [...(dialog?.querySelectorAll('.draft-receipt > div') ?? [])].map((row) => ({
+        label: row.querySelector('dt')?.textContent ?? '',
+        value: row.querySelector('dd')?.textContent ?? '',
+      })),
+      text: dialog?.innerText ?? '',
+      dialogCount: document.querySelectorAll('dialog.shell-layer[open]').length,
+      rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom } : null,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    }
+  })
+}
+
+async function closeObservationTechnicalDetail(page, path) {
+  if (path === 'escape') {
+    await page.keyboard.press('Escape')
+  } else {
+    const close = page.locator('dialog[data-technical-detail="true"][open] .shell-layer-close')
+    if (await close.count() > 0) await close.click()
+  }
+  await page.waitForTimeout(100)
+  return page.evaluate(() => ({
+    open: Boolean(document.querySelector('dialog[data-technical-detail="true"][open]')),
+    triggerFocused: document.activeElement?.getAttribute('data-observation-technical-trigger') === 'true',
+  }))
+}
+
+async function readNodeRefs(page) {
+  await page.click('button[data-tab-id="refs"]')
+  return page.evaluate(() => {
+    const sheet = [...document.querySelectorAll('.drawer-section')]
+      .find((section) => section.dataset.tabId === 'refs')
+    return {
+      present: Boolean(sheet),
+      rows: sheet
+        ? [...sheet.querySelectorAll('.drawer-facts > div')].map((cell) => ({
+            label: cell.querySelector('dt')?.textContent ?? '',
+            value: cell.querySelector('dd')?.textContent ?? '',
+            empty: cell.querySelector('dd')?.dataset.empty === 'true',
+          }))
+        : [],
     }
   })
 }
@@ -367,6 +558,116 @@ try {
     page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`))
     await page.goto(`${server.url}/observation.html?task=${TASK_ID}`, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 10000 })
+
+    const defaultObservation = await readDefaultObservation(page)
+    observe(`${run.label} default observation`, defaultObservation)
+    record(
+      `${run.label} default layer shows the provided next step`,
+      defaultObservation.pageDefaultText.includes('下一步：真实投影样本')
+        && defaultObservation.headingText.includes('真实投影样本'),
+      defaultObservation.headingText,
+    )
+    record(
+      `${run.label} default layer keeps machine diagnostics out`,
+      !defaultObservation.pageDefaultText.includes('mode=fake')
+        && !defaultObservation.pageDefaultText.includes('source=running')
+        && !defaultObservation.pageDefaultText.includes('projection seq')
+        && ROLE_PAIRS.every(({ raw }) => !defaultObservation.pageDefaultText.split(/\s+/).includes(raw)),
+      defaultObservation.pageDefaultText,
+    )
+    record(
+      `${run.label} catalogue is labelled as the fixed read-only system catalogue`,
+      defaultObservation.catalogueTitle.includes('系统节点目录')
+        && defaultObservation.catalogueMeta.includes('4 个系统节点')
+        && defaultObservation.catalogueNote.trim().length > 0
+        && !defaultObservation.catalogueNote.includes('只读观测样本'),
+      {
+        title: defaultObservation.catalogueTitle,
+        meta: defaultObservation.catalogueMeta,
+        note: defaultObservation.catalogueNote,
+      },
+    )
+    record(
+      `${run.label} no invented node edges or role chain arrows remain`,
+      defaultObservation.flowEdgeSvgCount === 0
+        && defaultObservation.flowEdgeListCount === 0
+        && defaultObservation.chainArrowCount === 0,
+      {
+        svg: defaultObservation.flowEdgeSvgCount,
+        list: defaultObservation.flowEdgeListCount,
+        arrows: defaultObservation.chainArrowCount,
+      },
+    )
+    const renderedStates = new Map(defaultObservation.nodes.map((node) => [node.nodeId, node]))
+    const stateMismatches = Object.entries(SIMULTANEOUS_STATES)
+      .map(([nodeId, expected]) => ({ nodeId, expected, rendered: renderedStates.get(nodeId) }))
+      .filter(({ expected, rendered }) => rendered?.state !== expected.state
+        || rendered?.chipText !== expected.label
+        || rendered?.chipTone !== expected.tone)
+    record(
+      `${run.label} every card state and human label comes from its exact scope node`,
+      stateMismatches.length === 0,
+      stateMismatches,
+    )
+    record(
+      `${run.label} default layer shows the exact supplied role and node attribution`,
+      ROLE_PAIRS.every(({ raw, human }) => defaultObservation.chainChips.some((text) => text.includes(human) && !text.split(/\s+/).includes(raw)))
+        && ROLE_PAIRS.every(({ raw, human }) => defaultObservation.laneHeads.some((text) => text.includes(human) && !text.split(/\s+/).includes(raw)))
+        && defaultObservation.nodeText.includes('归属：执行')
+        && !defaultObservation.nodeText.includes('归属：execution'),
+      {
+        chips: defaultObservation.chainChips,
+        lanes: defaultObservation.laneHeads,
+        nodes: defaultObservation.nodeText,
+      },
+    )
+
+    const technical = await openObservationTechnicalDetail(page)
+    observe(`${run.label} observation technical detail`, technical)
+    const technicalRow = (label) => technical.rows.find((row) => row.label === label)?.value
+    record(
+      `${run.label} existing technical detail exposes diagnostics and exact role pairs`,
+      technical.present
+        && technical.open
+        && technical.title === '观测技术详情'
+        && technicalRow('mode') === 'fake'
+        && technicalRow('source') === 'running'
+        && technicalRow('scopeRef') === `task://${TASK_ID}/observation`
+        && technicalRow('projectionSeq') === 'seq-12'
+        && technicalRow('目录说明') === '只读观测样本'
+        && ROLE_PAIRS.every(({ raw, human }) => technical.text.includes(`${human} / ${raw}`)),
+      technical,
+    )
+    if (run.label === 'desktop' || run.label === 'mobile') {
+      record(
+        `${run.label} technical detail uses the existing docked or bottom drawer`,
+        technical.rect !== null
+          && (run.label === 'desktop'
+            ? technical.rect.x > 0
+              && technical.rect.y >= 0
+              && technical.rect.height > 0
+            : Math.abs(technical.viewport.height - technical.rect.bottom) <= 0.5)
+          && technical.rect.x >= -0.5
+          && technical.rect.right <= technical.viewport.width + 0.5,
+        { rect: technical.rect, viewport: technical.viewport },
+      )
+    }
+    const technicalClosed = await closeObservationTechnicalDetail(page, run.label === 'mobile' ? 'escape' : 'button')
+    record(
+      `${run.label} technical detail closes and returns focus to its trigger`,
+      technicalClosed.open === false && technicalClosed.triggerFocused,
+      technicalClosed,
+    )
+
+    const beforeRefs = await page.evaluate(() => ({
+      open: Boolean(document.querySelector('.node-drawer')?.open),
+      focusNode: document.activeElement?.getAttribute('data-node-id') ?? '',
+    }))
+    record(
+      `${run.label} technical detail leaves the shared node surface interactive`,
+      beforeRefs.open === false,
+      beforeRefs,
+    )
     await page.locator('.flow-node[data-node-id="pipeline.execute"]').click()
     try {
       await page.waitForSelector('.node-drawer[open] .iwc-card', { timeout: 5000 })
@@ -424,6 +725,18 @@ try {
     record(`${run.label} human status and conversation keep technical ids out`, technicalTokens(`${drawer.statusText}\n${drawer.conversationText}`).length === 0, technicalTokens(`${drawer.statusText}\n${drawer.conversationText}`))
     record(`${run.label} folded detail keeps callId and returned evidence`, drawer.detailsText.includes('callId') && drawer.detailsText.includes('returned'), drawer.detailsText)
     record(`${run.label} drawer contains no executable control`, drawer.controlCount === 0, drawer.controlCount)
+    const refs = await readNodeRefs(page)
+    observe(`${run.label} selected node refs`, refs)
+    const refValues = Object.fromEntries(refs.rows.map((row) => [row.label, row]))
+    record(
+      `${run.label} refs show the exact selected node inputs, outputs and evidence`,
+      refs.present
+        && refValues['输入引用']?.value === EXPECTED_REFS.inputs.join(', ')
+        && refValues['输出引用']?.value === EXPECTED_REFS.outputs.join(', ')
+        && refValues.Evidence?.value === EXPECTED_REFS.evidence.join(', ')
+        && refs.rows.every((row) => !row.empty),
+      refs,
+    )
     if (run.label === 'desktop') {
       record(
         `${run.label} drawer docks to the right with the project inset`,
@@ -446,7 +759,11 @@ try {
       )
     }
     if (run.reducedMotion === 'reduce') {
-      record(`${run.label} honors reduced motion`, drawer.reducedMotionEdge === 'none', drawer.reducedMotionEdge)
+      record(
+        `${run.label} keeps the drawer usable with reduced motion`,
+        drawer.drawerOpen && drawer.prefersReducedMotion,
+        { open: drawer.drawerOpen, reduced: drawer.prefersReducedMotion },
+      )
     }
     await page.screenshot({ path: join(artifactDir, `${run.label}-drawer.png`), fullPage: false })
 
@@ -474,6 +791,39 @@ try {
       record('desktop four-corner switch drives the panel mode and body', switched.mode === 'raw' && switched.pressed === 'true' && switched.body.includes('原始记录'), switched)
       await page.locator('.shell-layer-close:visible').click()
     }
+    await context.close()
+  }
+
+  {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
+    const page = await context.newPage()
+    const pageErrors = []
+    page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`))
+    await page.goto(`${server.url}/observation.html?task=${MISSING_STATE_TASK_ID}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.flow-node[data-node-id="settle"]', { timeout: 10000 })
+    const missingState = await readDefaultObservation(page)
+    const settle = missingState.nodes.find((node) => node.nodeId === 'settle')
+    observe('missing state observation', { page: missingState, pageErrors })
+    record(
+      'missing scope state stays unknown and uses the human unknown label',
+      settle?.state === 'unknown' && settle?.chipText === '未知' && settle?.chipTone === 'gray',
+      settle,
+    )
+    await page.locator('.flow-node[data-node-id="pipeline.execute"]').click()
+    try {
+      await page.waitForSelector('.node-drawer[open] .iwc-card', { timeout: 5000 })
+    } catch {}
+    const emptyRefs = await readNodeRefs(page)
+    observe('missing and empty selected node refs', emptyRefs)
+    record(
+      'three empty selected node refs stay explicit',
+      emptyRefs.present
+        && emptyRefs.rows.length === 3
+        && emptyRefs.rows.every((row) => row.empty)
+        && emptyRefs.rows.map((row) => row.value).join('|') === '无输入引用|无输出引用|无 evidence',
+      emptyRefs,
+    )
+    record('missing state page raises no script error', pageErrors.length === 0, pageErrors)
     await context.close()
   }
   record('observation page issues no mutation request', mutationRequests === 0, mutationRequests)
