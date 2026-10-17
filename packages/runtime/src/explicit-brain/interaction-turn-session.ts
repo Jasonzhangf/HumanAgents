@@ -250,6 +250,47 @@ function sameTurnIdentity(left: InteractionTurnIdentity, right: InteractionTurnI
     && left.turnId === right.turnId;
 }
 
+function parsedHelperOrdinal(
+  turnId: string,
+  value: string,
+): number {
+  const prefix = `${turnId}-helper-`;
+  if (!value.startsWith(prefix)) return 0;
+  const digits = value.slice(prefix.length);
+  return /^[1-9]\d*$/u.test(digits) ? Number(digits) : 0;
+}
+
+function helperBelongsToTurn(
+  turn: InteractionTurnIdentity,
+  helper: InteractionHelperIdentity,
+): boolean {
+  return sameTurnIdentity(turn, {
+    organId: helper.organId,
+    interactionScopeId: helper.interactionScopeId,
+    interactionId: helper.interactionId,
+    inputRevision: helper.inputRevision,
+    turnId: helper.parentTurnId,
+  });
+}
+
+function durableHelperOrdinalFloor(
+  turn: InteractionTurnIdentity,
+  entries: readonly InteractionHelperTurnReadbackEntry[],
+): number {
+  let floor = 0;
+  for (const entry of entries) {
+    if (!helperBelongsToTurn(turn, entry.identity)) continue;
+    const incarnation = entry.readback.dispatchAccepted?.fact.incarnation;
+    if (incarnation === undefined) continue;
+    floor = Math.max(
+      floor,
+      parsedHelperOrdinal(turn.turnId, incarnation.runtimeId),
+      parsedHelperOrdinal(turn.turnId, incarnation.operationId.value),
+    );
+  }
+  return floor;
+}
+
 function sameHelperIdentity(left: InteractionHelperIdentity, right: InteractionHelperIdentity): boolean {
   return left.organId.scope === right.organId.scope
     && left.organId.value === right.organId.value
@@ -378,7 +419,13 @@ export class ExplicitTurnHelperSession {
     input: DispatchExplicitTurnHelperInput,
   ): Promise<DispatchedExplicitTurnHelper> {
     assertCheckpointDescription(input.checkpointDescription, 'explicit turn helper dispatch checkpoint description');
-    const ordinal = this.sequence + 1;
+    const durableFloor = this.turnHelperJournal === undefined
+      ? 0
+      : durableHelperOrdinalFloor(
+          this.identity,
+          await this.turnHelperJournal.readTurnHelpers(this.identity),
+        );
+    const ordinal = Math.max(this.sequence, durableFloor) + 1;
     this.sequence = ordinal;
     const slug = `${this.identity.turnId}-helper-${ordinal}`;
     const assignment: InteractionHelperAssignment = {
@@ -472,16 +519,35 @@ export class ExplicitTurnHelperSession {
     input: AcceptExplicitTurnHelperInput,
   ): Promise<TasklessInteractionHelperAcceptance> {
     assertCheckpointDescription(input.checkpointDescription, 'explicit turn helper accept checkpoint description');
-    const dispatched = this.dispatched.get(input.helperCallId);
-    if (dispatched === undefined) {
+    const live = this.dispatched.get(input.helperCallId);
+    let target: { readonly identity: InteractionHelperIdentity; readonly result: InteractionHelperResult };
+    if (live !== undefined) {
+      target = live;
+    } else if (this.turnHelperJournal !== undefined) {
+      const durable = (await this.turnHelperJournal.readTurnHelpers(this.identity)).find(
+        (entry) => entry.identity.helperCallId === input.helperCallId
+          && helperBelongsToTurn(this.identity, entry.identity),
+      );
+      if (
+        durable !== undefined
+        && durable.readback.dispatchAccepted !== null
+        && durable.readback.returned !== null
+      ) {
+        target = { identity: durable.identity, result: durable.readback.returned.fact.result };
+      } else {
+        throw new ContractError(
+          `explicit turn helper ${input.helperCallId} was not dispatched in this turn`,
+        );
+      }
+    } else {
       throw new ContractError(
         `explicit turn helper ${input.helperCallId} was not dispatched in this turn`,
       );
     }
     const acceptance = await acceptTasklessInteractionHelperResult({
       journal: this.journal,
-      identity: dispatched.identity,
-      result: dispatched.result,
+      identity: target.identity,
+      result: target.result,
       refinedResult: input.refinedResult,
       acceptedBy: input.acceptedBy,
       acceptanceRef: input.acceptanceRef,

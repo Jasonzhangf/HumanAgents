@@ -21,7 +21,13 @@ import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/j
 import { filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
-import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
+import {
+  ensureControlLayout,
+  resolveRuntimePaths,
+  type AgentRole,
+  type EffectiveAgentProviderBinding,
+} from '../../packages/config/src/index.js';
+import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
 import {
   buildFakeExecutionPort,
   FakeReplayExecutionRuntimePort,
@@ -156,6 +162,7 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
     })().catch((error: unknown) => { response.writeHead(500); response.end(String(error)); });
   });
   let runtime: Awaited<ReturnType<typeof startUiRuntimeOwner>> | undefined;
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
   try {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
     const address = server.address();
@@ -191,11 +198,19 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
       return owned;
     };
     const auth = await testAccessControl(root);
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    const paths = await resolveRuntimePaths({
+      controlRoot: join(root, 'control'),
+      workspace,
+    });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths, { ownerId: 'semantic-observation-public' });
     runtime = await startUiRuntimeOwner({
       mode: 'fake', organId, binding, port: buildFakeExecutionPort(binding, 0), checkpointRoot, evidenceRoot,
       uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0, memory: memory('default-parent'),
       accessControl: auth.accessControl, explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
-      runtimeComposition: { prepareAgentProvider: prepare }, explicitBrainHelperProviderPreparer: prepare,
+      runtimeComposition: { prepareAgentProvider: prepare }, explicitBrainHelperProviderPreparer: prepare, lease,
     });
     testSessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
     const received = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
@@ -245,6 +260,7 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
     assert.ok(await helperJournal.readSemanticCheckpointExact(parentStarts[1].interactionTurn));
   } finally {
     if (runtime) { testSessionByOrigin.delete(new URL(runtime.server.url).origin); await runtime.close(); }
+    if (lease) await lease.release();
     server.closeIdleConnections?.();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await rm(root, { recursive: true, force: true });
