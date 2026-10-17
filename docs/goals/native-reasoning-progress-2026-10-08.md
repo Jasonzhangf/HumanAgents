@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 Codec `be26fdb7` 已接收：父核两文件11+/1-，原缺声明RED5PASS/1FAIL→GREEN6/6、strict consumer compile0，作者exit0/PIDabsent/trackedclean后normalremove/prune/pathabsent，分支保留等待请求链writer释放delivery后正常merge。UX peer确认control main仅落后origin、无待夹带native闭包；最终先fetch+FF再合已验收增量，main Git窗口本侧可用，canonical/53007仍归peer。N3 GCM r28约30读0edit已精确INT94819→exit1/absent，原树technical r29续r26真实挂载，不称GCM后端不可用；request-chain与Memory production两路GCM继续。未重开来源树、未放宽验收。
+
 - 2026-10-17 本轮实际源码接收：Transport `43f9fbb4` 同serialized body receipt，父亲读产品diff及GREEN日志，原缺失RED5/5→受影响GREEN12/12，source/consumer严格编译与Appbuild0。原transport树正常切换为唯一delivery分支 `codex/provider-main-increment-delivery-20261017`，proof两提交正常摘入为 `d166a43d`/`ae197d4d`，未新开第三集成树。请求链r18独立计划确认Driver已有runtime字段、缺公开类型与receipt投影；fresh GCM r19在同树补既有ProviderRequestIdentityRef/validator，public共享consumer待codec释放后再接。
 - Memory输入纠正：原N2树虽有C3a但缺候选已验收C3b API；父先前派单未组合完整依赖，不能归为Memory产品缺陷。技术r18正常提交独立诊断接缝 `58cc314c`（5files）；Appbuild/tsc0、旧hot/fresh2/2仅基线，不冒hook验收。父正常合candidate入原树为 `368ed586`，已确认createJournalCheckpointEvidencePort/reconcileCommittedReentryMemoryBoundaries真实存在；fresh GCM r19原地续生产hook，仍未验收。stop只读GCM超过6批读取边界已精确停止PID38847、exit1/absent，未冒最终报告或stop完成；证据保留，后续只复用具体源码事实。完整goal与main交付仍OPEN。
 
