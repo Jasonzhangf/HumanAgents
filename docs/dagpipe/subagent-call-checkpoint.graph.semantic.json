@@ -22,7 +22,7 @@
     "binding": "checkpoint 保存子调用绑定与未返回义务；显式 check 时才绑定检查。context 消费 typed binding 并保留独立 Provider/model 含义，不从业务正文或日志重建状态。",
     "execution": "普通 execution/review 保持原作用；显式 check 时才产生完整 child 正文及独立 typed delivery，正文不声明控制完成。",
     "acceptance": "acceptance 接纳 durable child return；显式 check 时才由 Runtime 幂等补 I2 receipt，普通任务无 occurrence 时不创建 I2 记录。恢复只补提交，不重复 child。",
-    "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 是计划中的 Runtime 协调 owner，当前尚未实现。",
+    "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 已实现 typed binding 选择、交付接受与幂等结算；App child producer 的 typed delivery 接缝已组合到候选，实际配置子代理与整链接线仍未验收。",
     "wiring": "packages/app 只做 wiring，不拥有 inspection binding、delivery 或提交语义。",
     "roleOrder": "不固定探索、计划、执行、审查顺序。"
   }

@@ -30,7 +30,7 @@
     "runtimeBoundary": "本图是目标契约。在真实 typed readDelivery、canonical public-output commit 与 exact readback 组合回执出现之前，implementationStatus 保持 UNVERIFIED。",
     "adoption": "adopt 接受正式 plan 与 definition，不以自由文本或角色顺序代替。",
     "logicalTurnSettlement": "next_state 推进前结算本 logical turn；continue 不关闭共享 cycle，只有真实终态关闭它。",
-    "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 是计划中的 Runtime 协调 owner，当前尚未实现。",
+    "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 已实现巡检选择、交付接受及轮次结算；inspection-runtime-helpers.ts 提供真实计划、定义和精确 capture 事实。模块已组合到候选，App 最终资源接线与原生整链仍未验收。",
     "appWiring": "App 只做 wiring，不拥有 turn settlement 或 inspection 状态。"
   }
 }
