@@ -2,6 +2,9 @@
 
 ## 2026-10-17 最新接收：I2 App 与冷恢复定位
 
+- r261实际16个C1/C2 metadata单字段删除/错值反例均由对应断言拒绝，原cold通过后却未来意图退出，临时循环未删，不计完成；r262复用原树删除临时代码，最终仅两次helper await，专用tsc0、installed原cold1/1 PASS（seed30950/serve32675、同业务turn/epoch3→4/Plannercomplete/effects27）。宿主正常提交9a088896并合唯一candidate。先前候选installed五公开consumer已实际5/5 PASS，session90607，证据installed-cold-composed-20261017.txt。来源clean、worker和上述测试PID消失、成功fixture absent后normal remove/prune/pathabsent完成；无新增来源树。尚未整体producer milestone Review/main产品交付。
+- r260观察扩到无关历史文件搜索，父精确TERM79175并确认退出；不接其未完成观察为根因证据。r263 fresh GCM只准读取r260/r258两个run整理已取得事实，不再外扩搜索、不重发模型请求。RCC断流根因继续UNKNOWN；本次一次Interpret预算已用，未转B或改schema。
+
 - r259 installed冷恢复已完成最终源码compile0及原case1/1 PASS：seed57728、独立official serve59764，同op3/businessTurn、initial-open epoch3→4、C1/C2/child语义、raw排除、原effects不重放、EXACT_BODY与Plannercomplete保持。成功fixture text-only-uz3Rgn已自行删除，宿主核实这两个PID均不存在。删除测试内deep assembly，改走正式serve与公开resume/dashboard。worker Git metadata沙盒拒绝后，宿主正常提交单文件8e9a4283并标准merge唯一candidate；尚未整体Review/main交付。r259 terminal exit0后同树串行启动r261 GCM，仅补已接受r254计划的C1/C2 metadata helper与实际内存反例；无第二writer/新树。
 - UX来源4626965c inspection child binding已正常合唯一candidate，原组合build:contracts及对应公开契约用例1/1 PASS，session90928 exit0；原stdout保存inspection-child-binding-composed-20261017.txt。UX owner已接收并关闭该来源树。仅证明基础合同，不计完整producer或总目标完成。
 
