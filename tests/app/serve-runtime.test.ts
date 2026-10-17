@@ -1039,6 +1039,8 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
   assert.equal(prepared, 2);
 
   const runError = new Error('review dispatch failed');
+  const missingActiveError = new Error('provider operation has no active execution scope');
+  const settleError = new Error('review settle failed');
   const closeError = new Error('review close failed');
   const failedComposition = compositions[0]!;
   let errorPrepared = 0;
@@ -1054,11 +1056,13 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
         ...failedComposition,
         port: {
           ...failedComposition.port,
-          async start() { throw runError; },
+          async start() {
+            errorLifecycle.push('start');
+            throw runError;
+          },
           async settle(request) {
-            const settlement = await failedComposition.port.settle(request);
             errorLifecycle.push('settle');
-            return settlement;
+            throw missingActiveError;
           },
           async close(binding) {
             assert.equal(binding, failedComposition.binding);
@@ -1085,7 +1089,101 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
   });
   assert.equal(errorPrepared, 1);
   assert.equal(errorClosed, 1);
-  assert.deepEqual(errorLifecycle, ['settle', 'close']);
+  assert.deepEqual(errorLifecycle, ['start', 'close']);
+
+  const acquiredError = new Error('review observe failed after acquisition');
+  let acquiredClosed = 0;
+  const acquiredLifecycle: string[] = [];
+  const acquiredPorts = createRccServeOrchestrationPorts({
+    port: providerPort({ state: 'succeeded' }),
+    binding: providerBinding(),
+    promptSegments: { review: ['review system prompt'] },
+    async prepareAgentProvider() {
+      return {
+        ...failedComposition,
+        port: {
+          ...failedComposition.port,
+          async start(request) {
+            acquiredLifecycle.push('start');
+            return failedComposition.port.start(request);
+          },
+          observe: async function* () {
+            acquiredLifecycle.push('observe');
+            throw acquiredError;
+          },
+          async settle(request) {
+            acquiredLifecycle.push('settle');
+            return failedComposition.port.settle(request);
+          },
+          async close(binding) {
+            assert.equal(binding, failedComposition.binding);
+            acquiredClosed += 1;
+            acquiredLifecycle.push('close');
+            return failedComposition.port.close(binding);
+          },
+        },
+      };
+    },
+  });
+  await assert.rejects(() => acquiredPorts.reviewAgent.review({
+    reviewAssignment,
+    workerAssignment,
+    workerResult,
+    reviewMaterial: materialFor(workerAssignment, workerResult),
+    scope,
+  }), (error: unknown) => error === acquiredError);
+  assert.equal(acquiredClosed, 1);
+  assert.deepEqual(acquiredLifecycle, ['start', 'observe', 'settle', 'close']);
+
+  const settleFailureError = new Error('review observe failed with acquired execution');
+  let settleFailureClosed = 0;
+  const settleFailureLifecycle: string[] = [];
+  const settleFailurePorts = createRccServeOrchestrationPorts({
+    port: providerPort({ state: 'succeeded' }),
+    binding: providerBinding(),
+    promptSegments: { review: ['system prompt'] },
+    async prepareAgentProvider() {
+      return {
+        ...failedComposition,
+        port: {
+          ...failedComposition.port,
+          async start(request) {
+            settleFailureLifecycle.push('start');
+            return failedComposition.port.start(request);
+          },
+          observe: async function* () {
+            settleFailureLifecycle.push('observe');
+            throw settleFailureError;
+          },
+          async settle() {
+            settleFailureLifecycle.push('settle');
+            throw settleError;
+          },
+          async close() {
+            settleFailureClosed += 1;
+            settleFailureLifecycle.push('close');
+            return failedComposition.port.close(failedComposition.binding);
+          },
+        },
+      };
+    },
+  });
+  await assert.rejects(() => settleFailurePorts.reviewAgent.review({
+    reviewAssignment,
+    workerAssignment,
+    workerResult,
+    reviewMaterial: materialFor(workerAssignment, workerResult),
+    scope,
+  }), (error: unknown) => {
+    if (!(error instanceof AggregateError)) throw error;
+    assert.equal(error.errors.length, 2);
+    assert.equal(error.errors[0], settleFailureError);
+    assert.equal(error.errors[1], settleError);
+    assert.match(error.message, /review observe failed with acquired execution/);
+    return true;
+  });
+  assert.equal(settleFailureClosed, 1);
+  assert.deepEqual(settleFailureLifecycle, ['start', 'observe', 'settle', 'close']);
 });
 
 test('RCC review agent retries an inconclusive verdict before accepting a later pass', async () => {
