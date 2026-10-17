@@ -1,0 +1,22 @@
+{
+  "graph": "humanagent-task-grant-control-entry",
+  "labels": {
+    "open_formal_task_navigation": "从正式任务导航进入显式控制意图",
+    "verify_controllable_task_target": "验证当前绑定范围内的实际可控任务",
+    "submit_scoped_task_control": "提交带成对范围的任务控制请求",
+    "converge_control_receipt_and_readback": "分别保存控制回执与最新读回并收敛结果"
+  },
+  "design": {
+    "entry": "任务列表的正式主链接先打开默认只读任务页；控制入口保留 task、projectKey、mode 并显式携带 control=1。",
+    "targetVerificationOwner": "packages/app/src/ui-runtime/service.ts 的 verifyControllableTaskTarget；由后端 owner 按已接受合同实施，本图不声称已运行。",
+    "requestBoundary": "控制意图只在用户点击 grant 或 revoke 后形成请求；业务任务提交不是授权，UI 不要求用户填写 principal、revision、ID 或 capability。",
+    "resultBoundary": "控制回执只说明控制命令结果，不改写 Task 状态。最新读回失败时保留已记录回执，不推断 denied，不自动重提。",
+    "singleWriter": "任务控制领域状态仍由既有控制 owner 写入；本图只表达 UI 导航、目标验证、请求和结果收敛。",
+    "exclusions": [
+      "只读 Observation",
+      "agent 编排",
+      "重试回边",
+      "legacy 无 scope 写路径"
+    ]
+  }
+}
