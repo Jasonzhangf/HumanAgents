@@ -11,6 +11,7 @@ import {
 } from '../../packages/contracts/src/index.js';
 import {
   type DurableInspectionDefinition,
+  type InspectionAcceptedCheckPort,
   type InspectionCheckPort,
   type InspectionExecutionBinding,
   type InspectionExecutableCheck,
@@ -146,6 +147,7 @@ const failedDelivery: InspectionItemDelivery = {
 interface PortCounts {
   execute: number;
   read: number;
+  readOutput: number;
 }
 
 function workResult(body: string, digest: string): WorkResult {
@@ -182,8 +184,12 @@ function buildPort(options: {
   readonly result?: WorkResult | { readonly result: WorkResult };
   readonly material?: ReviewSubjectMaterial;
   readonly definition?: DurableInspectionDefinition;
-} = {}): { readonly port: InspectionCheckPort; readonly counts: PortCounts; readonly executed: InspectionCheckRequest[] } {
-  const counts: PortCounts = { execute: 0, read: 0 };
+} = {}): {
+  readonly port: InspectionAcceptedCheckPort;
+  readonly counts: PortCounts;
+  readonly executed: InspectionCheckRequest[];
+} {
+  const counts: PortCounts = { execute: 0, read: 0, readOutput: 0 };
   const executed: InspectionCheckRequest[] = [];
   const port = createInspectionCheckPort({
     journal: {
@@ -197,7 +203,10 @@ function buildPort(options: {
       executed.push(received);
       return options.result ?? workResult(completedBody, completedDigest);
     },
-    readOutput: async () => options.material ?? { ref: outputRef, body: completedBody, digest: completedDigest },
+    readOutput: async () => {
+      counts.readOutput += 1;
+      return options.material ?? { ref: outputRef, body: completedBody, digest: completedDigest };
+    },
   });
   return { port, counts, executed };
 }
@@ -273,6 +282,66 @@ test('inspection actor returns the exact structured observation, rejects summary
     expectContractError(/non-successful execution.*completed/),
   );
   assert.equal(failedExecutionRun.counts.execute, 1);
+});
+
+test('inspection accepted delivery validates committed identity without re-executing or reading output', async () => {
+  const fullBody = 'full child result body; this is not inspection control JSON';
+  const result = workResult(fullBody, completedDigest);
+  const run = buildPort();
+  const port = run.port;
+
+  const accepted = await port.accept({
+    binding,
+    check,
+    assignment,
+    result,
+    delivery: completedDelivery,
+  });
+
+  assert.equal(accepted, completedDelivery);
+  assert.equal(
+    accepted.outcome.status === 'completed' ? accepted.outcome.judgment : undefined,
+    'one TODO marker observed',
+  );
+  assert.equal(accepted.evidenceRefs, completedDelivery.evidenceRefs);
+  assert.deepEqual(accepted.evidenceRefs, [evidence]);
+  assert.equal(result.producedArtifactBodies?.[0], fullBody);
+  assert.deepEqual(run.counts, { execute: 0, read: 1, readOutput: 0 });
+
+  await assert.rejects(
+    () => port.accept({
+      binding: { ...binding, definitionDigest: 'sha256:not-the-committed-definition' },
+      check,
+      assignment,
+      result,
+      delivery: completedDelivery,
+    }),
+    expectContractError(/definition digest/),
+  );
+
+  const foreignDefinitionRun = buildPort({
+    definition: {
+      ...definition,
+      content: {
+        ...definition.content,
+        definition: {
+          ...definition.content.definition,
+          definitionVersion: 'inspection-actor-definition-foreign',
+        },
+      },
+    },
+  });
+  await assert.rejects(
+    () => foreignDefinitionRun.port.accept({
+      binding,
+      check,
+      assignment,
+      result,
+      delivery: completedDelivery,
+    }),
+    expectContractError(/definition identity/),
+  );
+  assert.deepEqual(foreignDefinitionRun.counts, { execute: 0, read: 1, readOutput: 0 });
 });
 
 test('inspection actor rejects a changed immutable check and a foreign structured delivery', async () => {
