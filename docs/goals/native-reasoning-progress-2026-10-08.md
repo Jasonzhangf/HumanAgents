@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 本轮续接：四段语义 evidenceRefs 的无依据 min1 已消融，source `3433ab6` 标准合候选为 `b70369b`；保留四段正文、数组及实际引用校验。来源 Contracts 原 consumer 8/8，组合新 named 1/1 与原 native text-only 1/1、编译均 exit0。C3a r20 的当前 request obligation 投影按 requestId 取最新 phase，公开历史仍完整；实际基础 RED 0/1→GREEN 1/1。hot 已到 floor5→新 epoch6、请求 settled、父 operation succeeded、义务为空和 seq92 closure preparation，但 checkpoint submission 随后失败，尚无新 publication/Planner；hot 0/1，fresh-process 已编译未运行，不计验收。原树保留继承改动，无集成或运行采纳。fresh GCM r21 只读定位 submit 首错，GCM N4 只读核对剩余 Provider ready 项，Memory GCM r9 继续产品收尾；N3 child 连续错误 API 方案未准入，独立 Astra r7 只读技术攻关真实接线。普通执行/观察仍首选 GCM，不用规划结果替代实现证据。治理消融已由 UX peer 独立交付 main/remote；native 完整 milestone、正式重建/restart/运行验收仍 OPEN。
+
 - 子agent精炼字节资产适配已接收并标准合候选8bac5d9：仅App薄factory+原behavior3消费者，真实同根newstore冷读原字节1/1；字符串化反例实际TAP0/1抓到deepEqual错误（shell管道0不冒Node1），恢复及组合原1consumer均1/1Node0，App消费者编译0。没有重复错误矩阵/哈希/身份包装。来源正常remove/prune/pathabsent，生产共享挂载仍OPEN。C3a r16已修单test合法新delivery与accepted drain，原resume/Planner成功；新turn被四段summary min1拒绝。r17核需求与当前输入后裁定消融无必要的两处min1，保四段正文和实际refs解析，r18技术执行原树继续hot/fresh。Memory产品GCM继续。原I1成功不重跑，M1/M2未找到证据范围已交UXpeer；用户最新治理消融批次由peer独立向main交付，不等整个goal，当前main文档冲突已停止并在独占交付候选处理，未冒push完成。
 
 - helper返回语义已实际接收：source7f91c87经标准Git组合最新候选与origin/main后合入d56e358。真实行为RED为Runtime7项中3失败，修后Runtime7/7、App原2named2/2、Jsonl原2/2；组合Appbuild/测试编译exit0、原App2/2Node0。returned描述包含真实summary/status/nextAction及既有条件引用，同目标不同结果可区分；adopted/refinedText、missing读null/实际补写幂等、当前turn raw保留。来源正常remove/prune/pathabsent，无哈希/候选包装检查，无leafreview/restart。C3a r14 fixture计划已准入，GCMr15只修旧delivery误用和accepted drain、续hot/fresh；Memory真实链RED已接，GCMr9续产品批次。child refined store只读小计划先补独立资产适配API，不等整个共享挂载才准备基础。首个Slice1仍按原M0/M1/M2行为证据推进，完整goal/main交付未完成。
