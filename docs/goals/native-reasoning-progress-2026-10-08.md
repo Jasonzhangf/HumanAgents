@@ -18,6 +18,10 @@ r188 已完成：现有默认 CLI Memory hooks 在恢复 checkpoint 后调用 re
 
 r187 作者报告已在并发屏障取得两实例，但宿主实际运行虽 1/1 GREEN，回执为 `runtimeIds: [[], []]`。源码仍在释放后的 waiter 内取 pool，并允许空数组，最终 disjoint 断言为空通过。该 GREEN **不接受为双 runtime 验收**，未提交来源。r190 已复用同树，要求在 releaseGate 前从公开 pool 取得两个非空、逐 Task 绑定且互异的真实实例；不改产品迎合测试。已正常合入 UX docs-only main `ec17a0d3`，没有为文档重复构建或重启。
 
+双 Task 后续：r190 原用例在 barrier 实际 RED（pool 0/2，fixture `provider-two-top-tasks-ZMByJ2`）。独立 r192 已确认这是错读 M3 实例类别：顶层 native direct lane 自建 `AgentLoopRuntime`，M3 pool 用于 child/Planner，需求未要求顶层持 M3 lease。r193 改读 typed `operation.prepared` 后，宿主又在 epoch 匹配处 RED；实际两份 allocation 均存在，预授权 dispatch 的可选 epoch 不能冒充 grant 后 epoch。r194 同树只修授权后真实身份取证，未改产品。双 Task 整例仍未验收，预算2容量约束也尚未证明。
+
+工具语义 r191 只读观察已完成；它提出通用 per-tool mapper，但这不是已接受方案。独立 Gemini4 r195 正判断最小必要机制，须区分模型四项总结、模板、精炼 child adoption 与真正缺失行为，禁止仅为旧文档措辞新增提取框架。r182 多轮冷恢复仍在唯一原树实施；没有启动重复 writer 或新树。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
