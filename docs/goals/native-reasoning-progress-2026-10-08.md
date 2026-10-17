@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- 2026-10-17 接收：C3a source `4a996234` 已正常合候选 `482270c5`；唯一冲突只合并 native-delivery consumer 双方 imports。组合 App build 与 App 测试编译均 exit0；原 hot 1/1、fresh 双进程 1/1（seed 自然退出后启动不同 PID 的 next）、两个受影响 native consumer 2/2，原 source Runtime 两个受影响 case 2/2。真实链覆盖 correction/rewind/forward 后 epoch6、保留语义/排除错误引用、工具 drain、标准收口、独立 Planner 返回和零已确认副作用重放。纠正下方历史“fresh 尚无 GREEN”；这些是候选作者证据，尚未整体 Review/main/正式运行交付。
+- 当前并发：fresh GCM `provider-main-codec-gcm-r16-20261017`、`provider-main-transport-gcm-r16-20261017` 从最新 origin/main 独立实现 N4 小增量；`provider-memory-hook-gcm-r17-20261017` 复用原 N2 树落实已接受 r16 生产挂载计划；`provider-child-tree-observe-gcm-r27-20261017` 只读核清旧 helper 树，为 N3 默认挂载准备资源。三份计划 r15/r16/r26 已返回并接收。原 N2 树因继续承担同域 Memory 工作保留，不重复开树；旧 helper 的 `.pnpm-store/` 归属未决，未删除。canonical/53007 安装窗口仍由 UX peer 持有。本轮只记 4 项已启动，不计完成，不改变总体 main 完成数。证据统一位于 `.worker-runs/native-reasoning-d0-20261012/` 对应目录。
+
 - 最新已接收增量：N3 adapter74746bf7+语义3afcd362、N4工具正文a6972ab8均标准合候选。Root组合Appbuild0/App测试编译0/原adapter1case1/1，实际script旧fixture离线PASS（TOOL_OK、原错误FAIL、cleanupclosed）；两sourceclean/作者exit0/无活动child后normalremove/prune/pathabsent。N4 r12三协议各一轮真实same-entry均PASS，Root直接读取receipt：Responses run-BRXq54、Chat run-Ia9Knn、Anthropic run-OlcZxd（各自~/.humanagent/test-fixtures/provider-n4-<protocol>-r12-20261017下），每条2request、原生wire工具配对含TOOL_OK、最终OK、closure succeeded/resource released/close+cleanup closed，无error/assertionError。仅计工具循环3/3；stop/resume/defaultchild/完整N4和main交付仍OPEN，returnedModel未由publicreceipt确认，不冒厂商身份。来源闭包GCM r13只核最小main依赖，不整候选合入。
 - C3a有效边界：r39原hot完整1/1自然0；规范fresh seed0→不同PIDnext1，Planner prepared/invoked无returned。r41 mock诊断已确认HTTP500/ContractError task identity scope does not accept cycleId，来自readFixturePriorPlan直传宽scope；非产品Planner根因。r41把TEST_ROOT放RUN的运行只计诊断不作规范根验收，owner取证后精确INT/exit1/absent。GCM r42只做{organId,taskId}投影，保exactprior校验，回原规范根先fresh再组合hot→fresh；当前尚无新GREEN。完整goal保持ACTIVE，不新增总体A–G main完成数。
 
