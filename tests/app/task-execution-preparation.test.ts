@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { id, type AgentEvent, type ProviderCloseResult, type ProviderEvent, type TaskId } from '../../packages/contracts/src/index.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import {
@@ -22,6 +23,21 @@ import {
 const fixtureRoot =
   process.env.HUMANAGENT_TEST_ROOT
   ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-cli-prepared-consumer-r1-20261013');
+
+test('runtime product identity comes from the opened credential across cold instances', async () => {
+  const root = await mkdtemp(join(fixtureRoot, 'runtime-identity-'));
+  try {
+    const credentialPath = join(root, 'web-access.json');
+    const first = await AccessControlService.open({ credentialPath, create: true });
+    const cold = await AccessControlService.open({ credentialPath, create: false });
+    assert.ok('readRuntimeProductIdentity' in first, 'runtime identity assembly is absent');
+    const identity = first.readRuntimeProductIdentity();
+    assert.equal(identity.owner, cold.readRuntimeProductIdentity().owner);
+    assert.equal('session' in identity, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function buildCoordinator(
   journal: UiRuntimeJournal,

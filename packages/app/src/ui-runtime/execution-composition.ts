@@ -52,7 +52,7 @@ import {
 } from './standard-turn-control.js';
 import { ADVERTISED_STANDARD_TURN_END_TOOL, createStandardTurnEndWireExecutor, isStandardTurnEndCall } from './standard-turn-composition.js';
 import type { StandardTurnEndCommand } from '../../../contracts/src/standard-turn-end.js';
-import type { VerifiedProductPrincipal } from './access-control.js';
+import type { RuntimeProductIdentity, VerifiedProductPrincipal } from './access-control.js';
 import { createExecutionOwnerReaders } from './execution-owner-facts.js';
 import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
 import type { RuntimeTaskCurrentStatePort, RuntimeTaskCurrentStateFactsPort } from '../../../runtime/src/ui-runtime/current-state.js';
@@ -113,8 +113,10 @@ export interface StandardTurnBoundaryLifecycle {
 }
 
 /** Shared physical owner assembly. Provider selection occurs only after the durable A2 release edge. */
-export function createDefaultExecutionComposition(input: {
-  readonly principal: VerifiedProductPrincipal;
+export function createDefaultExecutionComposition(input: (
+  | { readonly principal: VerifiedProductPrincipal; readonly runtimeIdentity?: never }
+  | { readonly runtimeIdentity: RuntimeProductIdentity; readonly principal?: never }
+) & {
   readonly journal: JsonlOrganJournal;
   readonly filePath: string;
   readonly artifactsRoot: string;
@@ -146,6 +148,7 @@ export function createDefaultExecutionComposition(input: {
   readonly i2Journal: import('../../../contracts/src/index.js').I2JournalPort;
   readonly retryJournal?: RetryCycleJournalPort;
 }) {
+  const principalOwner = input.principal?.owner ?? input.runtimeIdentity!.owner;
   const grants = new JsonlTaskGrantJournal(input.journal);
   const context = createJsonlContextHistoryPort({ filePath: input.filePath, journal: input.journal });
   const checkpoints = createJsonlCheckpointJournal({ filePath: input.filePath, journal: input.journal });
@@ -170,11 +173,11 @@ export function createDefaultExecutionComposition(input: {
         ...(retained.currentPlan === undefined ? {} : { currentPlan: retained.currentPlan }) } };
     },
   };
-  const admission = createServiceExecutionAdmission({ ...input, principalOwner: input.principal.owner });
+  const admission = createServiceExecutionAdmission({ ...input, principalOwner });
   async function owner(taskId: RuntimeExecutionAllocation['taskId']) {
     const read = await grants.readTaskGrant(taskId);
     if (!read.grant || !read.commit) missing('verified TG1 owner is absent; no Provider factory can run');
-    if (read.grant.owner !== input.principal.owner) missing('the current grant does not authorize the actual verified execution origin');
+    if (read.grant.owner !== principalOwner) missing('the current grant does not authorize the actual verified execution origin');
     return admission;
   }
   /**
@@ -205,7 +208,7 @@ export function createDefaultExecutionComposition(input: {
       const requestRef = `segment-open:${intent.businessTurnRef.businessTurnId}:${intent.segmentId}`;
       const inputIdentity = { requestRef, digest: `sha256:${createHash('sha256').update(canonicalJsonStringify(intent)).digest('hex')}` };
       const request = { requestRef, taskId: intent.binding.assignment.taskId,
-        owner: input.principal.owner, capability: { actionId: TASK_EXECUTION_ACTION_ID,
+        owner: principalOwner, capability: { actionId: TASK_EXECUTION_ACTION_ID,
           capabilities: [TASK_EXECUTION_CAPABILITY], scope: { organId: intent.binding.scope.organId, taskId: intent.binding.assignment.taskId } },
         inputIdentity };
       return await admitted.admitNewBusiness({ request, register: async (authority, registration) => ({
@@ -221,7 +224,7 @@ export function createDefaultExecutionComposition(input: {
     readonly request: Parameters<typeof AgentLoopRuntime.resumeIncarnation>[0]; readonly contextHistory: typeof context;
   }> {
     const grant = await grants.readTaskGrant(source.allocation.taskId);
-    if (!grant.grant || !grant.commit || grant.grant.state !== 'granted' || grant.grant.owner !== input.principal.owner) {
+    if (!grant.grant || !grant.commit || grant.grant.state !== 'granted' || grant.grant.owner !== principalOwner) {
       missing('current grant cannot authorize the actual cold incarnation');
     }
     if (source.current.context.loopControl.mode !== 'observation') missing('actual execution factory does not support the retained first mode');
@@ -264,7 +267,7 @@ export function createDefaultExecutionComposition(input: {
    */
   async function coldLoop(source: RuntimeColdExecutionSource): Promise<AgentLoopRuntime> {
     const grant = await grants.readTaskGrant(source.allocation.taskId);
-    if (!grant.grant || !grant.commit || grant.grant.owner !== input.principal.owner) {
+    if (!grant.grant || !grant.commit || grant.grant.owner !== principalOwner) {
       missing('the current grant does not authorize the original durable turn');
     }
     const mode = source.current.context.loopControl.mode;
@@ -381,7 +384,7 @@ export function createDefaultExecutionComposition(input: {
         admission: {
           organJournal: input.journal,
           currentTaskGrantPort: admitted.permissions,
-          principalOwner: input.principal.owner,
+          principalOwner,
           resourceBoundary: input.resourceBoundary,
           bindingFor: async (request) => {
             const parent = resolveToolParentAllocation(request);
@@ -685,7 +688,7 @@ export function createDefaultExecutionComposition(input: {
         let unusedClose: Promise<void> | undefined;
         const closeUnused = () => invoked ? Promise.resolve() : unusedClose ??= closeAgentProvider(selected);
         const handles = new Map<string, TaskInstanceHandle & { readonly planner: IndependentTurnPlannerPort }>();
-        const duty = createClosedTurnPlannerCall({ ownerId: allocation.ownerId, principalOwner: input.principal.owner,
+        const duty = createClosedTurnPlannerCall({ ownerId: allocation.ownerId, principalOwner,
           roleId: selected.roleId, agentId: selected.configuredAgentId, assignmentId,
           requiredCapabilities: [TASK_EXECUTION_CAPABILITY], pool, taskGrant: grants, checkpoints,
           journal: plannerJournal, now: input.now,

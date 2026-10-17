@@ -22,6 +22,14 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
+import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
+import { createPreparedOperationBoundary } from '../prepared-operation-boundary.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
+import { createJsonlI2JournalPort } from '../i2-journal.js';
+import { createDefaultExecutionComposition } from './execution-composition.js';
+import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
+import { UiTaskGrantControl, TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from './task-control.js';
 import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
@@ -254,6 +262,19 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
   const subscriptionJournalPath = join(modeRoot, 'subscriptions.jsonl');
   const clock = options.now;
+  const executionNow = clock ?? (() => new Date());
+  const controlJournalPath = join(modeRoot, 'task-control.jsonl');
+  const controlJournal = new JsonlOrganJournal(controlJournalPath);
+  const taskIdentity = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(controlJournal));
+  const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: controlJournal });
+  const resourceBoundary = createPreparedOperationBoundary(journal);
+  const runtimeIdentity = options.accessControl.readRuntimeProductIdentity();
+  const prepareAgentProvider = options.runtimeComposition?.prepareAgentProvider;
+  if (options.mode === 'rcc' && prepareAgentProvider === undefined) {
+    throw new AppLifecycleError('ui-runtime.provider-preparation.missing',
+      'native UI runtime requires the configured Provider preparation owner',
+      'pass the CLI prepareSelectedAgentProvider callback', 'humanagent.app.ui-runtime');
+  }
   const resolveLease: () => SupervisorLease | undefined = typeof options.lease === 'function'
     ? options.lease
     : options.lease === undefined
@@ -349,8 +370,63 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     explicitBrainInterpreter,
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
+    ...(options.mode === 'rcc' ? { taskIdentity } : {}),
     subscriptionControl,
-    ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
+    runtimeComposition: {
+      ...options.runtimeComposition,
+      ...(options.mode !== 'rcc' ? {} : {
+        createExecutionPorts: (coordinator) => {
+          const composition = createDefaultExecutionComposition({
+            runtimeIdentity,
+            journal: controlJournal,
+            filePath: controlJournalPath,
+            artifactsRoot: options.evidenceRoot,
+            preparedJournal: journal,
+            resourceBoundary,
+            prepareAgentProvider: prepareAgentProvider!,
+            providerOptions: {
+              onRequestLifecycle: (event) => coordinator.recordProviderRequestIdentity(event),
+            },
+            ...(options.workspaceRoot === undefined || options.projectKey === undefined || providerToolExecutor === undefined ? {} : {
+              providerToolScope: {
+                workspaceRoot: options.workspaceRoot,
+                projectKey: options.projectKey,
+                artifactRoot: join(options.evidenceRoot, 'provider-tools'),
+                tools: [RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_LIST_TOOL, RESPONSES_FILE_SEARCH_TOOL,
+                  RESPONSES_FILE_WRITE_TOOL, RESPONSES_FILE_EDIT_TOOL, RESPONSES_BASH_TOOL,
+                  RESPONSES_TODO_WRITE_TOOL, RESPONSES_GET_GOAL_TOOL, RESPONSES_CREATE_GOAL_TOOL,
+                  RESPONSES_UPDATE_GOAL_TOOL, RESPONSES_PRESENT_TOOL, RESPONSES_WEB_SEARCH_TOOL],
+                ...(options.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: options.webSearchProviderConfig }),
+              },
+            }),
+            now: executionNow,
+            currentState,
+            publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
+            closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
+            taskIdentity,
+            i2Journal: createJsonlI2JournalPort({ filePath: controlJournalPath, journal: controlJournal }),
+            ...(options.providerRetryConfig === undefined ? {} : {
+              retryJournal: createJsonlRetryCycleJournalPort({
+                filePath: retryCycleJournalFilePath({ journalRoot: options.providerRetryConfig.journalRoot }),
+              }),
+            }),
+          });
+          return {
+            admitExecution: composition.admitExecution,
+            createDriver: composition.createExecutionDriver,
+            currentStatePort: currentState,
+            currentStateFacts: composition.currentStateFacts,
+            coldExecution: {
+              readColdExecutionSource: composition.readColdExecutionSource,
+              admitSegment: composition.admitSegment,
+              readIncarnationBinding: composition.readIncarnationBinding,
+              recoverOriginalTurn: composition.recoverOriginalTurn,
+              createResumedExecutionDriver: composition.createResumedExecutionDriver,
+            },
+          };
+        },
+      }),
+    },
     ...(clock === undefined ? {} : { now: clock }),
   });
   service = runtimeService;
@@ -369,9 +445,18 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         ...(options.schedulerIntervalMs === undefined ? {} : { intervalMs: options.schedulerIntervalMs }),
       });
   scheduler?.start();
+  const taskControl = new UiTaskGrantControl({
+    journal: controlJournal,
+    organId: options.organId,
+    capability: { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY] },
+    now: executionNow,
+    taskScope: (taskId) => ({ organId: options.organId, taskId: runtimeService.taskDetail(taskId).taskId }),
+    stopTask: (taskId) => runtimeService.stop(taskId),
+  });
   const server = await startUiRuntimeServer({
     service: runtimeService,
     accessControl: options.accessControl,
+    taskControl,
     uiRoot: options.uiRoot,
     host: options.host,
     port: options.portNumber,

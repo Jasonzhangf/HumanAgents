@@ -331,11 +331,17 @@ export interface UiRuntimeServiceOptions {
    * revision's execution policy into it.
    */
   readonly subscriptionControl?: SubscriptionControlPort;
+  readonly taskIdentity?: import('../../../runtime/src/orchestration/task-identity.js').TaskIdentityConsumer;
   readonly providerRetryConfig?: {
     readonly config: RetryCycleConfigSet;
     readonly journalRoot: string;
   };
   readonly runtimeComposition?: {
+    readonly prepareAgentProvider?: Parameters<typeof import('./execution-composition.js').createDefaultExecutionComposition>[0]['prepareAgentProvider'];
+    readonly createExecutionPorts?: (callbacks: Pick<RuntimeTaskCoordinator,
+      'publishCurrentTurnState' | 'closedTurnPlannerPool' | 'recordProviderRequestIdentity'>) => Pick<
+        import('../../../runtime/src/ui-runtime/coordinator.js').RuntimeTaskCoordinatorOptions,
+        'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts'>;
     readonly createTaskAssembly?: (input: {
       readonly task: import('../../../contracts/src/index.js').Task;
       readonly scope: import('../../../contracts/src/index.js').ScopeRef;
@@ -1178,6 +1184,11 @@ export class UiRuntimeService {
       () => this.persistExplicitBrainState(),
     );
     this.mode = options.mode;
+    const executionPorts = options.runtimeComposition?.createExecutionPorts?.({
+      publishCurrentTurnState: (taskId) => this.coordinator.publishCurrentTurnState(taskId),
+      closedTurnPlannerPool: (taskId) => this.coordinator.closedTurnPlannerPool(taskId),
+      recordProviderRequestIdentity: (event) => this.coordinator.recordProviderRequestIdentity(event),
+    });
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
       checkpointStoreFor: options.checkpointStoreFor,
@@ -1187,7 +1198,8 @@ export class UiRuntimeService {
       taskIdPrefix: randomUUID(),
       now: options.now,
       createDriver: (input) => this.createMemoryBoundDriver(input),
-      ...(options.providerRetryConfig === undefined
+      ...executionPorts,
+      ...(options.providerRetryConfig === undefined || executionPorts !== undefined
         ? {}
         : {
             providerRetry: {
@@ -2449,6 +2461,10 @@ export class UiRuntimeService {
       }
       throw apiError(error);
     }
+  }
+
+  releaseExecution(taskId: TaskId, operationId: OperationId): ReturnType<RuntimeTaskCoordinator['releaseExecution']> {
+    return this.coordinator.releaseExecution(taskId, operationId);
   }
 
   startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): { readonly operationId: OperationId; readonly executionEpoch: number } {
@@ -3759,6 +3775,37 @@ export class UiRuntimeService {
     };
   }
 
+  private async establishNewTaskIdentity(consumed: RequirementEnvelope, taskId: TaskId): Promise<void> {
+    const candidates = this.requirementSubmissions.finalReceipts()
+      .map((receipt) => receipt.requirement)
+      .filter((requirement) => requirement.requirementId === consumed.requirementId
+        && requirement.draftId === consumed.draftId
+        && requirement.inputRevision === consumed.inputRevision);
+    const source = candidates.find((requirement) => requirement.fifoSeq === consumed.fifoSeq
+      && requirement.payloadRef === consumed.payloadRef);
+    if (source === undefined) {
+      throw new UiRuntimeApiError(
+        candidates.length === 0 ? 'explicit-brain.task-identity-source-missing' : 'explicit-brain.task-identity-source-conflict',
+        APP_OWNER,
+        `requirement ${consumed.requirementId} has no exact typed final-submit source for this FIFO entry`,
+        'inspect the final-submit receipt before retrying dispatch',
+        409,
+      );
+    }
+    await this.options.taskIdentity!.establish({
+      scope: { organId: this.options.organId, taskId },
+      source: {
+        requirementId: source.requirementId,
+        inputRevision: source.inputRevision,
+        draftId: source.draftId,
+        draftRevisionVersion: source.draftRevisionVersion,
+        draftRevisionHash: source.draftRevisionHash,
+        confirmationRef: source.confirmationRef,
+      },
+      ...(consumed.taskFlow === undefined ? {} : { taskFlow: consumed.taskFlow }),
+    });
+  }
+
   private async completePreparedDispatch(
     consumed: RequirementEnvelope,
     prepared: DispatchLedgerEntry,
@@ -3772,6 +3819,9 @@ export class UiRuntimeService {
           title: consumed.normalizedInput,
           directive: consumed.normalizedInput,
         }));
+    if (consumed.taskRef === undefined && this.options.taskIdentity !== undefined) {
+      await this.establishNewTaskIdentity(consumed, task.taskId);
+    }
     const admission = this.requirementAdmissions.get(prepared.taskId.value)?.receipt;
     const implicitRequirement = admission === undefined
       ? undefined

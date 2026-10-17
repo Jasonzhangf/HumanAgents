@@ -41,6 +41,14 @@ export interface VerifiedProductPrincipal {
   readonly session: AccessSession;
 }
 
+const runtimeProductIdentity: unique symbol = Symbol('RuntimeProductIdentity');
+
+/** Product identity only: neither a verified browser session nor Task authority. */
+export interface RuntimeProductIdentity {
+  readonly owner: string;
+  readonly [runtimeProductIdentity]: true;
+}
+
 export interface PairingChallenge {
   readonly code: string;
   readonly expiresAt: number;
@@ -437,6 +445,10 @@ export class AccessControlService {
 
   isExpired(session: AccessSession): boolean {
     return session.expiresAt <= this.now();
+  }
+
+  readRuntimeProductIdentity(): RuntimeProductIdentity {
+    return { owner: this.productPrincipalOwner(), [runtimeProductIdentity]: true };
   }
 
   private productPrincipalOwner(): string {

@@ -14,6 +14,204 @@ import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtim
 import type { ProviderBinding } from '../../packages/contracts/src/index.js';
 import type { AgentRole, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import { prepareAgentProvider, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
+import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
+import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
+import { id } from '../../packages/contracts/src/index.js';
+import { FileCheckpointStore, UiRuntimeJournal, UiRuntimeService, startUiRuntime, type UiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import type { TaskGrantControlReceipt } from '../../packages/app/src/ui-runtime/task-control.js';
+import type { PersistedFinalSubmitReceipt } from '../../packages/runtime/src/explicit-brain/router.js';
+
+test('default App composition admits the retained Task only after real HTTP grant and releases native Provider', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-default-native-consumer-'));
+  let runtime: UiRuntime | undefined;
+  let posts = 0;
+  let onPost: (() => void) | undefined;
+  const posted = new Promise<void>((resolve) => { onPost = resolve; });
+  const provider = createServer((request, response) => {
+    if (request.method !== 'POST') { response.writeHead(200, { 'content-type': 'application/json' }); response.end('{"status":"ok","data":[{"id":"controlled-native"}]}'); return; }
+    posts += 1;
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(`data: ${JSON.stringify({ type: 'response.created', response: { id: 'controlled-native-request' } })}\n\n`);
+    // A real open HTTP stream lets the original revoke/stop owner settle it.
+    onPost?.();
+  });
+  await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = provider.address();
+    if (address === null || typeof address === 'string') throw new Error('missing controlled Provider address');
+    const entries: EffectiveAgentProviderBinding[] = [{ agentId: 'controlled-execution', roleId: 'execution', source: 'agent',
+      provider: { source: 'rcc', provider: 'rcc', binding: 'controlled-native', protocol: 'responses',
+        model: 'controlled-native', route: 'controlled-native', baseUrl: `http://127.0.0.1:${address.port}` } }];
+    let selections = 0;
+    const select = async (selection: { readonly roleId: AgentRole; readonly configuredAgentId?: string }) => {
+      selections += 1;
+      return prepareAgentProvider({ ...selection, agentProviderBindings: entries, evidenceRoot: join(root, 'assets') });
+    };
+    const launch = await select({ roleId: 'execution' });
+    const accessControl = await AccessControlService.open({ credentialPath: join(root, 'security', 'web-access.json'), create: true });
+    runtime = await startUiRuntime({ mode: 'rcc', accessControl, organId: id('organ', 'default-native-consumer'),
+      binding: launch.binding, port: launch.port, providerSource: 'rcc', checkpointRoot: root,
+      evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'default-native', roleId: 'execution' },
+      explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
+        normalizedInput: 'hold this controlled native task', proposal: 'hold this controlled native task', knownFacts: [], decisionRefs: [] }; } },
+      runtimeComposition: { prepareAgentProvider: select },
+    });
+    await runtime.service.quiesceImplicitConsumption();
+    const interactionId = await runtime.service.receiveExplicitInput({ sourceRef: 'ui:new-task-create', rawInput: 'hold this controlled native task',
+      channel: 'business', requestKind: 'new-task-preview' });
+    await runtime.service.interpretExplicitInput({ interactionId });
+    const preview = await runtime.service.inspectExplicitInteraction(interactionId);
+    const confirmed = await runtime.service.confirmExplicitRequirement({ interactionId, draftId: preview.draft!.draftId,
+      inputRevision: preview.draft!.inputRevision, confirmationRef: 'confirmation:default-native', confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-17T00:00:00.000Z', payloadRef: 'asset://default-native', requestKind: 'new-task-create' });
+    const dispatched = await runtime.service.dispatchNextExplicitRequirement();
+    await assert.rejects(() => runtime!.service.releaseExecution(dispatched.taskId, dispatched.operationId), /verified TG1 owner is absent/);
+    assert.equal(posts, 0, 'typed confirmation and TaskIdentity are not execution authority');
+    assert.equal(selections, 1, 'no target execution Provider may be selected before grant');
+    const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('controlled-lease', 1).code);
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    const controlPath = `${runtime.server.url}/api/tasks/${dispatched.taskId.value}/control`;
+    const initial = await fetch(`${controlPath}/grant`, { headers: { cookie } });
+    const read = await initial.json() as TaskGrantControlReceipt;
+    assert.equal(initial.status, 200, 'default startup must inject the actual grant controller');
+    const grantResponse = await fetch(`${controlPath}/grant`, { method: 'POST', headers: { cookie, origin: runtime.server.url, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: 'controlled-native-grant', expectedRevision: read.readback.grant?.revision ?? 0 }) });
+    const grant = await grantResponse.json() as TaskGrantControlReceipt;
+    assert.equal(grantResponse.status, 200);
+    assert.equal(grant.readback.grant?.state, 'granted');
+    const released = await runtime.service.releaseExecution(dispatched.taskId, dispatched.operationId);
+    assert.equal(released.state, 'released');
+    await Promise.race([posted, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('native Provider POST not reached')), 5000); timer.unref?.(); })]);
+    assert.equal(posts, 1);
+    assert.equal(selections, 2, 'same prepared allocation must select the native Provider exactly once after grant');
+    const revokeResponse = await fetch(`${controlPath}/revoke`, { method: 'POST', headers: { cookie, origin: runtime.server.url, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: 'controlled-native-revoke', expectedRevision: grant.readback.grant!.revision }) });
+    const revoked = await revokeResponse.json() as TaskGrantControlReceipt;
+    assert.equal(revokeResponse.status, 200);
+    assert.equal(revoked.readback.grant?.state, 'revoked');
+    assert.ok(revoked.stop, 'revoke must delegate to the standard stop owner');
+    const runtimeOwner = accessControl.readRuntimeProductIdentity().owner;
+    await accessControl.logout();
+    assert.ok((await accessControl.verifyProductPrincipal(cookie)).state !== 'valid');
+    assert.equal(accessControl.readRuntimeProductIdentity().owner, runtimeOwner);
+    assert.equal(runtime.service.taskDetail(dispatched.taskId).taskId.value, dispatched.taskId.value);
+    assert.equal(posts, 1, 'revoke may not start new Provider business');
+    console.log(JSON.stringify({ confirmed, dispatched, released, posts, selections, revoke: revoked.stop }));
+  } finally {
+    try { await runtime?.close(); } finally {
+      provider.closeIdleConnections?.();
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('typed final FIFO establishes exact TaskIdentity before execution and preserves write-failure retry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-final-source-'));
+  try {
+    const organId = id('organ', 'typed-source-consumer');
+    const binding: ProviderBinding = { bindingId: 'source-consumer', providerId: 'source-consumer',
+      protocol: 'responses', endpointRef: 'fixture:source', modelRef: 'fixture:source',
+      configDigest: 'fixture:source', capabilityDigest: 'fixture:source' };
+    const journal = new UiRuntimeJournal(join(root, 'runtime.jsonl'));
+    const identityJournal = new JsonlTaskIdentityJournal(new JsonlOrganJournal(join(root, 'control.jsonl')));
+    let failAppend = true;
+    const taskIdentity = new TaskIdentityConsumer({
+      replay: (scope) => identityJournal.replay(scope),
+      append: (input) => failAppend ? Promise.reject(new Error('controlled identity append failed')) : identityJournal.append(input),
+    });
+    let admissions = 0;
+    let factories = 0;
+    const serviceOptions: ConstructorParameters<typeof UiRuntimeService>[0] = {
+      mode: 'fake', organId, binding, port: new FakeReplayExecutionRuntimePort({ binding }),
+      providerState: 'ready', journal, closurePort: journal, taskIdentity,
+      checkpointStoreFor: () => new FileCheckpointStore(join(root, 'checkpoint.jsonl')),
+      attentionPort: {
+        async publish(input) { return { attentionId: input.attentionId, delivered: true }; },
+        async resolve(input) { return { attentionId: input.attentionId, delivered: true }; },
+      },
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'typed-source', roleId: 'execution' },
+      explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
+        normalizedInput: 'deliver the controlled task', proposal: 'deliver the controlled task', knownFacts: [], decisionRefs: [] }; } },
+      runtimeComposition: { createExecutionPorts: () => ({
+        admitExecution: async () => { admissions += 1; throw new Error('controlled missing grant'); },
+        createDriver: async () => { factories += 1; throw new Error('unexpected execution factory'); },
+      }) },
+    };
+    const service = new UiRuntimeService(serviceOptions);
+    const interactionId = await service.receiveExplicitInput({ sourceRef: 'ui:new-task-create',
+      rawInput: 'deliver the controlled task', channel: 'business', requestKind: 'new-task-preview' });
+    await service.interpretExplicitInput({ interactionId });
+    const preview = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(preview.draft);
+    assert.ok(preview.revision);
+    const confirmation: Parameters<UiRuntimeService['confirmExplicitRequirement']>[0] = { interactionId, draftId: preview.draft!.draftId,
+      inputRevision: preview.draft!.inputRevision, confirmationRef: 'confirmation:source-consumer',
+      confirmedBy: 'human:operator', confirmedAt: '2026-10-17T00:00:00.000Z',
+      payloadRef: 'asset://source-consumer', requestKind: 'new-task-create' };
+    const receipt = await service.confirmExplicitRequirement(confirmation);
+    const alias = await service.confirmExplicitRequirement({ ...confirmation, idempotencyKey: 'source-consumer-alias' });
+    assert.equal(alias.requirement.requirementId, receipt.requirement.requirementId);
+    await assert.rejects(() => service.dispatchNextExplicitRequirement(), /controlled identity append failed/);
+    assert.equal(admissions, 0, 'failed identity append must precede all execution preparation');
+    assert.equal(factories, 0);
+    assert.equal(service.listTasks().counts.total, 1);
+    const taskId = service.listTasks().draft[0]!.taskId;
+    assert.equal(await taskIdentity.read({ organId, taskId }), undefined);
+    const persisted = journal.replay().filter((record) => record.kind === 'explicit-brain.state').at(-1)!;
+    if (persisted.kind !== 'explicit-brain.state') throw new Error('missing actual explicit state');
+    const state = persisted.state as typeof persisted.state & { readonly finalSubmissions: readonly PersistedFinalSubmitReceipt[] };
+    for (const mismatch of ['fifoSeq', 'payloadRef', 'missing'] as const) {
+      const mismatchedState = {
+        ...state,
+        finalSubmissions: mismatch === 'missing' ? [] : state.finalSubmissions.map((entry) => ({ ...entry,
+          requirement: { ...entry.requirement,
+            ...(mismatch === 'fifoSeq' ? { fifoSeq: entry.requirement.fifoSeq + 1 } : { payloadRef: 'asset://wrong-source' }),
+          },
+        })),
+      };
+      journal.append({ kind: 'explicit-brain.state', state: mismatchedState });
+      const cold = new UiRuntimeService(serviceOptions);
+      await cold.hydrate();
+      await assert.rejects(() => cold.dispatchNextExplicitRequirement(), /no exact typed final-submit source/);
+      assert.equal(admissions, 0, 'source mismatch must not prepare/release or acknowledge the pending requirement');
+      assert.equal(factories, 0);
+      await cold.quiesceImplicitConsumption();
+      journal.append(persisted);
+    }
+    const conflictingIdentity = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(new JsonlOrganJournal(join(root, 'conflict-control.jsonl'))));
+    await conflictingIdentity.establish({ scope: { organId, taskId }, source: {
+      requirementId: receipt.requirement.requirementId, draftId: receipt.requirement.draftId,
+      inputRevision: receipt.requirement.inputRevision, draftRevisionVersion: preview.revision!.revisionVersion,
+      draftRevisionHash: preview.revision!.revisionHash, confirmationRef: 'confirmation:another-source',
+    } });
+    const conflict = new UiRuntimeService({ ...serviceOptions, taskIdentity: conflictingIdentity });
+    await conflict.hydrate();
+    await assert.rejects(() => conflict.dispatchNextExplicitRequirement(), /conflict|different|immutable/i);
+    assert.equal(admissions, 0);
+    assert.equal(factories, 0);
+    await conflict.quiesceImplicitConsumption();
+    journal.append(persisted);
+    failAppend = false;
+    const dispatched = await service.dispatchNextExplicitRequirement();
+    assert.equal(dispatched.taskId.value, taskId.value, 'retry must retain the actual Task');
+    const identity = await taskIdentity.read({ organId, taskId });
+    assert.deepEqual(identity?.source, {
+      requirementId: receipt.requirement.requirementId, draftId: receipt.requirement.draftId,
+      inputRevision: receipt.requirement.inputRevision, draftRevisionVersion: preview.revision!.revisionVersion,
+      draftRevisionHash: preview.revision!.revisionHash, confirmationRef: 'confirmation:source-consumer',
+    });
+    assert.equal(factories, 0, 'missing grant must not reach the target execution factory');
+    assert.equal(admissions, 1, 'same coordinator must reach the injected execution admission');
+    console.log(JSON.stringify({ receipt, taskId, source: identity?.source, factories, admissions }));
+    await service.quiesceImplicitConsumption();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 function digest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));

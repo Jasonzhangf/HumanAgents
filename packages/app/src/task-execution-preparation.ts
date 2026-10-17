@@ -41,10 +41,10 @@ export type TaskExecutionPreparation =
   };
 
 export type TaskExecutionPreparationInput = {
-  readonly principal: CompositionInput['principal'];
+  readonly principal: NonNullable<CompositionInput['principal']>;
   readonly composition: Omit<
     CompositionInput,
-    'principal' | 'currentState' | 'publishCurrentTurnState' | 'closedTurnPlannerPool'
+    'principal' | 'runtimeIdentity' | 'currentState' | 'publishCurrentTurnState' | 'closedTurnPlannerPool'
   >;
   readonly coordinator: Omit<
     CoordinatorInput,
