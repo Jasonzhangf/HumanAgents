@@ -16,9 +16,10 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
-- Memory hook 与 group scope 源码已正常合入候选 `c5a196af`，原来源 2/2 有效；本轮 hot/fresh 两个组合 case 2/2 通过。Memory 真模型 GCM r28 在途，未计为通过。
-- child 源码已正常提交 `bbcef714`，原 consumer 7 execution、1 Planner GREEN 1/1、准入 2/2；尚未集成候选，由父后续合入。本轮不抢合 child。
-- HTTP `a3f894d9` 原 404 RED→GREEN 1/1；App r29/r32 合同 READY，grant 技术 r33 后继与 App 组装 GCM r34 在途。App 生产准入闭包仍待组合验收。
+- candidate 已保留 `a02a57e8` 的内部 principal owner、typed Task identity、prepared grant boundary、child、stop、cold 和 current-state 接线。固定 HTTP source `aee69cb1` 正常 merge 为 `9f7eccb3`；固定 Memory feedback source `4d2e8caf` 正常 merge 为 `d1e4ddc6`。重复 readiness 声明清理为 `25ffb505`。这些尚未进入 main。
+- HTTP admission 复用既有 requestable predicate 与 `unknownHealthRequestable`，两处调用共用一个局部 admission-input helper；UI readiness 仍为 unknown，disconnected 不可请求。组合 App build、focused 编译通过；原 explicit/preparation/grant 三文件 26/26，Memory producer 3/3、Runtime Memory focused 4/4 通过。首次编译的重复声明与外置测试缺模板环境原错保存在 r47 RUN，修正后通过。未重取无变化的 Provider 6/native/gateway 旧证据。
+- Memory source r38 的真实 C3b RED（actual 0 / expected 1）→GREEN 1/1、producer 3/3 与 Runtime 4/4 原证据有效；grant 后等待原 publisher 才标 applied。真模型 positive 仍由 GCM r39 推进，原三个 analysis run FAIL 不被覆盖。
+- 当前 r47 只接续已接受的 r44+r45 App grant→原 allocation release→existing watch 接线。原 HTTP consumer RED 和 App 增量尚在执行。r46 仅负责原 E2E 脚本，后继由父标准 Git 合流。完整真实 Task、正式安装及 A–G 总目标仍未完成。
 - stop 边界 `08e2c15a` 已正常合候选，原两处 RED→GREEN 与 27 个消费者证据有效；完整 stop/resume 产品验收和已准入 submit 的停止分类仍 OPEN。
 - 原 53007 restart 由 peer 查 previous-close-unverified；本侧不安装、不重启。完整候选和完整 goal 均未交付。
 - r29 续接当前 main merge：保留 taskless 泛型、实际出站 body、typed 请求链、stop 边界及全部 9 proof imports 的统一 runtime root。受影响 Responses consumer 1/1、transport 20/20 通过；公开 consumer 整文件 4/6，Anthropic/Chat 原状态序列断言因多一个 settled 失败，未改断言或扩大修复范围。原错与组合证据保留在外置 r29 RUN。
