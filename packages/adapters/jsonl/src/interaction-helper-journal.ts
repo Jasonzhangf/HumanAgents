@@ -23,6 +23,13 @@ import type {
   InteractionHelperTurnReadPort,
   InteractionSemanticCheckpointCommit,
 } from '../../../runtime/src/explicit-brain/interaction-turn-session.js';
+import type {
+  InteractionHelperCallCheckpoint,
+  InteractionHelperCallCheckpointCommit,
+  InteractionHelperCallCheckpointPhase,
+  InteractionHelperOwnerAcceptedCommit,
+  InteractionHelperReturnedCommit,
+} from '../../../runtime/src/explicit-brain/taskless-helper-executor.js';
 import {
   JournalIntegrityError,
   type JournalRecord,
@@ -38,6 +45,7 @@ export type {
 } from '../../../runtime/src/explicit-brain/interaction-turn-session.js';
 
 const HANDOFF_RECORD_TYPE = 'interaction-helper.handoff.v1';
+const CALL_CHECKPOINT_RECORD_TYPE = 'interaction-helper.call-checkpoint.v1';
 const SEMANTIC_CHECKPOINT_RECORD_TYPE = 'interaction-helper.semantic-checkpoint.v1';
 
 type DurableHandoffFact =
@@ -59,6 +67,8 @@ export interface InteractionHelperJournalReadback {
     InteractionHelperCommittedFact<InteractionHelperReturnedFact> | null;
   readonly ownerAccepted:
     InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact> | null;
+  readonly returnedCheckpoint: InteractionHelperCallCheckpointCommit | null;
+  readonly adoptedCheckpoint: InteractionHelperCallCheckpointCommit | null;
 }
 
 interface LegacyOwnerAcceptedFact {
@@ -80,6 +90,9 @@ interface DecodedInteractionHelperJournal {
     string,
     InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact>
   >;
+  readonly callCheckpoints: ReadonlyMap<string, InteractionHelperCallCheckpointCommit>;
+  readonly returnedCheckpointDescriptions: ReadonlyMap<string, string>;
+  readonly ownerAcceptedCheckpointDescriptions: ReadonlyMap<string, string>;
   readonly semanticCheckpoints: ReadonlyMap<string, InteractionSemanticCheckpointCommit>;
   readonly legacyOwnerAcceptedMissingRefined: ReadonlyMap<string, LegacyOwnerAcceptedFact>;
 }
@@ -106,6 +119,26 @@ function helperIdentityKey(identity: InteractionHelperIdentity): string {
   ]);
 }
 
+function helperIdentityOf(result: InteractionHelperIdentity): InteractionHelperIdentity {
+  return {
+    organId: result.organId,
+    interactionScopeId: result.interactionScopeId,
+    interactionId: result.interactionId,
+    inputRevision: result.inputRevision,
+    parentTurnId: result.parentTurnId,
+    assignmentId: result.assignmentId,
+    helperCallId: result.helperCallId,
+    attempt: result.attempt,
+  };
+}
+
+function callCheckpointKey(
+  identity: InteractionHelperIdentity,
+  phase: InteractionHelperCallCheckpointPhase,
+): string {
+  return canonicalJsonStringify([phase, helperIdentityKey(identity)]);
+}
+
 function turnIdentityKey(identity: InteractionTurnIdentity): string {
   return canonicalJsonStringify([
     identity.organId.scope,
@@ -119,6 +152,15 @@ function turnIdentityKey(identity: InteractionTurnIdentity): string {
 
 function commitId(kind: DurableHandoffKind, identityKey: string): string {
   return `interaction-helper:${kind}:${createHash('sha256').update(identityKey).digest('hex')}`;
+}
+
+function callCheckpointCommitId(
+  phase: InteractionHelperCallCheckpointPhase,
+  identityKey: string,
+): string {
+  return `interaction-helper:call-checkpoint:${phase}:${createHash('sha256')
+    .update(identityKey)
+    .digest('hex')}`;
 }
 
 function semanticCheckpointCommitId(identityKey: string): string {
@@ -141,6 +183,51 @@ function assertOrganOnlyRecord(record: JournalRecord, organId: OrganId): void {
     || record.scope.operationId !== undefined) {
     throw new JournalIntegrityError('interaction helper fact must use its organ-only Journal scope');
   }
+}
+
+function assertNonEmptyString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new JournalIntegrityError(`${label} must be a non-empty string`);
+  }
+}
+
+function assertTimestamp(value: unknown, label: string): asserts value is string {
+  assertNonEmptyString(value, label);
+  if (!Number.isFinite(Date.parse(value))) {
+    throw new JournalIntegrityError(`${label} must be a valid timestamp`);
+  }
+}
+
+function validateCallCheckpoint(checkpoint: InteractionHelperCallCheckpoint): void {
+  validateInteractionHelperIdentity(checkpoint.identity);
+  if (checkpoint.phase !== 'returned' && checkpoint.phase !== 'adopted') {
+    throw new JournalIntegrityError('interaction helper call checkpoint phase is invalid');
+  }
+  assertTimestamp(checkpoint.recordedAt, 'interaction helper call checkpoint recordedAt');
+  assertNonEmptyString(checkpoint.description, 'interaction helper call checkpoint description');
+  if (checkpoint.recovery === null || typeof checkpoint.recovery !== 'object') {
+    throw new JournalIntegrityError('interaction helper call checkpoint recovery is invalid');
+  }
+  assertNonEmptyString(
+    checkpoint.recovery.dispatchAcceptedCommitId,
+    'interaction helper call checkpoint dispatch commit id',
+  );
+  assertNonEmptyString(
+    checkpoint.recovery.returnedCommitId,
+    'interaction helper call checkpoint returned commit id',
+  );
+  if (checkpoint.phase === 'returned') {
+    if (checkpoint.recovery.ownerAcceptedCommitId !== undefined) {
+      throw new JournalIntegrityError(
+        'returned interaction helper call checkpoint cannot claim owner acceptance',
+      );
+    }
+    return;
+  }
+  assertNonEmptyString(
+    checkpoint.recovery.ownerAcceptedCommitId,
+    'adopted interaction helper call checkpoint owner accepted commit id',
+  );
 }
 
 function durableHandoffFact(record: JournalRecord): DurableHandoffFact | LegacyOwnerAcceptedFact | null {
@@ -177,6 +264,30 @@ function durableHandoffFact(record: JournalRecord): DurableHandoffFact | LegacyO
     fact.kind === 'dispatch-accepted' ? fact.assignment.organId : fact.result.organId,
   );
   return fact;
+}
+
+function handoffCheckpointDescription(record: JournalRecord): string | null {
+  // The fact envelope keeps the original host description as repair input for
+  // the writer. It is not a checkpoint: the reader only uses it to reject a
+  // persisted checkpoint whose description disagrees with the fact.
+  const payload = record.payload;
+  if (payload?.kind !== HANDOFF_RECORD_TYPE) return null;
+  const description = payload.checkpointDescription;
+  if (description === undefined) return null;
+  assertNonEmptyString(description, 'interaction helper handoff checkpoint description');
+  return description;
+}
+
+function callCheckpointFromRecord(record: JournalRecord): InteractionHelperCallCheckpoint | null {
+  const payload = record.payload;
+  if (payload?.kind !== CALL_CHECKPOINT_RECORD_TYPE) return null;
+  if (!('checkpoint' in payload)) {
+    throw new JournalIntegrityError('interaction helper call checkpoint payload is missing its checkpoint');
+  }
+  const checkpoint = payload.checkpoint as InteractionHelperCallCheckpoint;
+  validateCallCheckpoint(checkpoint);
+  assertOrganOnlyRecord(record, checkpoint.identity.organId);
+  return checkpoint;
 }
 
 function semanticCheckpointFromRecord(record: JournalRecord): InteractionSemanticCheckpoint | null {
@@ -228,6 +339,61 @@ function assertOwnerAcceptanceMatchesReturned(
   }
 }
 
+function assertCallCheckpointMatchesFacts(
+  decoded: DecodedInteractionHelperJournal,
+  receipt: InteractionHelperCallCheckpointCommit,
+): void {
+  const { checkpoint } = receipt;
+  const key = helperIdentityKey(checkpoint.identity);
+  const dispatch = decoded.dispatchAccepted.get(key);
+  const returned = decoded.returned.get(key);
+  if (dispatch === undefined || returned === undefined) {
+    throw new JournalIntegrityError('interaction helper call checkpoint has no matching returned fact');
+  }
+  if (checkpoint.recovery.dispatchAcceptedCommitId !== dispatch.commit.commitId) {
+    throw new JournalIntegrityError('interaction helper call checkpoint dispatch commit does not match');
+  }
+  if (checkpoint.recovery.returnedCommitId !== returned.commit.commitId) {
+    throw new JournalIntegrityError('interaction helper call checkpoint returned commit does not match');
+  }
+  if (checkpoint.phase === 'returned') {
+    if (checkpoint.recordedAt !== returned.fact.returnedAt) {
+      throw new JournalIntegrityError('returned interaction helper call checkpoint time does not match');
+    }
+    const description = decoded.returnedCheckpointDescriptions.get(key);
+    if (description !== undefined && description !== checkpoint.description) {
+      throw new JournalIntegrityError('returned interaction helper call checkpoint description does not match');
+    }
+    return;
+  }
+
+  const ownerAccepted = decoded.ownerAccepted.get(key);
+  if (ownerAccepted === undefined) {
+    throw new JournalIntegrityError('adopted interaction helper call checkpoint has no owner acceptance');
+  }
+  if (checkpoint.recovery.ownerAcceptedCommitId !== ownerAccepted.commit.commitId) {
+    throw new JournalIntegrityError('adopted interaction helper call checkpoint acceptance commit does not match');
+  }
+  if (checkpoint.recordedAt !== ownerAccepted.fact.acceptedAt) {
+    throw new JournalIntegrityError('adopted interaction helper call checkpoint time does not match');
+  }
+  const description = decoded.ownerAcceptedCheckpointDescriptions.get(key);
+  if (description !== undefined && description !== checkpoint.description) {
+    throw new JournalIntegrityError('adopted interaction helper call checkpoint description does not match');
+  }
+}
+
+function resolveCallCheckpoint(
+  decoded: DecodedInteractionHelperJournal,
+  identity: InteractionHelperIdentity,
+  phase: InteractionHelperCallCheckpointPhase,
+): InteractionHelperCallCheckpointCommit | null {
+  // Only a physically committed CALL_CHECKPOINT_RECORD_TYPE record is a
+  // checkpoint. A durable handoff fact without that record stays a partial
+  // write: the reader reports null and the writer owns the repair.
+  return decoded.callCheckpoints.get(callCheckpointKey(identity, phase)) ?? null;
+}
+
 function decodeJournal(records: readonly JournalRecord[]): DecodedInteractionHelperJournal {
   const dispatchAccepted = new Map<
     string,
@@ -241,6 +407,9 @@ function decodeJournal(records: readonly JournalRecord[]): DecodedInteractionHel
     string,
     InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact>
   >();
+  const callCheckpoints = new Map<string, InteractionHelperCallCheckpointCommit>();
+  const returnedCheckpointDescriptions = new Map<string, string>();
+  const ownerAcceptedCheckpointDescriptions = new Map<string, string>();
   const semanticCheckpoints = new Map<string, InteractionSemanticCheckpointCommit>();
   const legacyOwnerAcceptedMissingRefined = new Map<string, LegacyOwnerAcceptedFact>();
 
@@ -265,21 +434,41 @@ function decodeJournal(records: readonly JournalRecord[]): DecodedInteractionHel
       continue;
     }
     if (handoff?.kind === 'returned') {
+      const identityKey = helperIdentityKey(handoff.result);
       insertUnique(
         returned,
-        helperIdentityKey(handoff.result),
+        identityKey,
         { fact: handoff, commit: commitRef(record) },
         'returned',
       );
+      const description = handoffCheckpointDescription(record);
+      if (description !== null) {
+        insertUnique(
+          returnedCheckpointDescriptions,
+          identityKey,
+          description,
+          'returned-checkpoint-description',
+        );
+      }
       continue;
     }
     if (handoff?.kind === 'owner-accepted') {
+      const identityKey = helperIdentityKey(handoff.result);
       insertUnique(
         ownerAccepted,
-        helperIdentityKey(handoff.result),
+        identityKey,
         { fact: handoff, commit: commitRef(record) },
         'owner-accepted',
       );
+      const description = handoffCheckpointDescription(record);
+      if (description !== null) {
+        insertUnique(
+          ownerAcceptedCheckpointDescriptions,
+          identityKey,
+          description,
+          'owner-accepted-checkpoint-description',
+        );
+      }
       continue;
     }
 
@@ -291,15 +480,38 @@ function decodeJournal(records: readonly JournalRecord[]): DecodedInteractionHel
         { checkpoint, commit: commitRef(record) },
         'semantic-checkpoint',
       );
+      continue;
+    }
+
+    const callCheckpoint = callCheckpointFromRecord(record);
+    if (callCheckpoint !== null) {
+      insertUnique(
+        callCheckpoints,
+        callCheckpointKey(callCheckpoint.identity, callCheckpoint.phase),
+        { checkpoint: callCheckpoint, commit: commitRef(record) },
+        'call-checkpoint',
+      );
     }
   }
 
-  const decoded = { dispatchAccepted, returned, ownerAccepted, semanticCheckpoints, legacyOwnerAcceptedMissingRefined };
+  const decoded = {
+    dispatchAccepted,
+    returned,
+    ownerAccepted,
+    callCheckpoints,
+    returnedCheckpointDescriptions,
+    ownerAcceptedCheckpointDescriptions,
+    semanticCheckpoints,
+    legacyOwnerAcceptedMissingRefined,
+  };
   for (const returnedFact of returned.values()) {
     assignmentForReturned(decoded, returnedFact.fact.result);
   }
   for (const acceptedFact of ownerAccepted.values()) {
     assertOwnerAcceptanceMatchesReturned(decoded, acceptedFact.fact);
+  }
+  for (const checkpoint of callCheckpoints.values()) {
+    assertCallCheckpointMatchesFacts(decoded, checkpoint);
   }
   return decoded;
 }
@@ -342,6 +554,14 @@ function committedSemanticCheckpoint(record: JournalRecord): InteractionSemantic
   return { checkpoint, commit: commitRef(record) };
 }
 
+function committedCallCheckpoint(record: JournalRecord): InteractionHelperCallCheckpointCommit {
+  const checkpoint = callCheckpointFromRecord(record);
+  if (checkpoint === null) {
+    throw new JournalIntegrityError('call checkpoint append did not produce a checkpoint');
+  }
+  return { checkpoint, commit: commitRef(record) };
+}
+
 /**
  * Typed append/exact-read codec over the existing authoritative Organ Journal.
  * The injected Journal remains the only store and transaction owner.
@@ -364,42 +584,119 @@ export class JsonlInteractionHelperJournal implements InteractionHelperTurnReadP
 
   async appendReturned(
     fact: InteractionHelperReturnedFact,
-  ): Promise<InteractionHelperCommittedFact<InteractionHelperReturnedFact>> {
+    input: { readonly description: string },
+  ): Promise<InteractionHelperReturnedCommit> {
     validateInteractionHelperHandoffFact(fact);
-    const record = await this.journal.transaction(
+    assertNonEmptyString(input.description, 'returned interaction helper call checkpoint description');
+    const identity = helperIdentityOf(fact.result);
+    const identityKey = helperIdentityKey(identity);
+    return this.journal.transaction(
       ({ records }) => {
         const decoded = decodeJournal(records);
         assignmentForReturned(decoded, fact.result);
-        return organScope(fact.result.organId);
+        const dispatch = decoded.dispatchAccepted.get(identityKey);
+        if (dispatch === undefined) {
+          throw new JournalIntegrityError('returned helper fact has no matching dispatch commit');
+        }
+        return {
+          scope: organScope(fact.result.organId),
+          dispatchAcceptedCommitId: dispatch.commit.commitId,
+        };
       },
-      async (scope, append) => await append({
-        commitId: commitId('returned', helperIdentityKey(fact.result)),
-        kind: 'event',
-        scope,
-        payload: { kind: HANDOFF_RECORD_TYPE, fact },
-      }),
+      async ({ scope, dispatchAcceptedCommitId }, append) => {
+        const factRecord = await append({
+          commitId: commitId('returned', identityKey),
+          kind: 'event',
+          scope,
+          payload: {
+            kind: HANDOFF_RECORD_TYPE,
+            fact,
+            checkpointDescription: input.description,
+          },
+        });
+        const returned = committedReturned(factRecord);
+        const checkpoint: InteractionHelperCallCheckpoint = {
+          identity,
+          phase: 'returned',
+          recordedAt: fact.returnedAt,
+          description: input.description,
+          recovery: {
+            dispatchAcceptedCommitId,
+            returnedCommitId: returned.commit.commitId,
+          },
+        };
+        const checkpointRecord = await append({
+          commitId: callCheckpointCommitId('returned', identityKey),
+          kind: 'event',
+          scope,
+          payload: { kind: CALL_CHECKPOINT_RECORD_TYPE, checkpoint },
+        });
+        return {
+          ...returned,
+          checkpointCommit: committedCallCheckpoint(checkpointRecord),
+        };
+      },
     );
-    return committedReturned(record);
   }
 
   async appendOwnerAccepted(
     fact: InteractionHelperOwnerAcceptedFact,
-  ): Promise<InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact>> {
+    input: { readonly description: string },
+  ): Promise<InteractionHelperOwnerAcceptedCommit> {
     validateInteractionHelperHandoffFact(fact);
-    const record = await this.journal.transaction(
+    assertNonEmptyString(input.description, 'adopted interaction helper call checkpoint description');
+    const identity = helperIdentityOf(fact.result);
+    const identityKey = helperIdentityKey(identity);
+    return this.journal.transaction(
       ({ records }) => {
         const decoded = decodeJournal(records);
         assertOwnerAcceptanceMatchesReturned(decoded, fact);
-        return organScope(fact.result.organId);
+        const dispatch = decoded.dispatchAccepted.get(identityKey);
+        const returned = decoded.returned.get(identityKey);
+        if (dispatch === undefined || returned === undefined) {
+          throw new JournalIntegrityError('owner-accepted helper fact has no durable dispatch and return');
+        }
+        return {
+          scope: organScope(fact.result.organId),
+          dispatchAcceptedCommitId: dispatch.commit.commitId,
+          returnedCommitId: returned.commit.commitId,
+        };
       },
-      async (scope, append) => await append({
-        commitId: commitId('owner-accepted', helperIdentityKey(fact.result)),
-        kind: 'event',
-        scope,
-        payload: { kind: HANDOFF_RECORD_TYPE, fact },
-      }),
+      async ({ scope, dispatchAcceptedCommitId, returnedCommitId }, append) => {
+        const factRecord = await append({
+          commitId: commitId('owner-accepted', identityKey),
+          kind: 'event',
+          scope,
+          payload: {
+            kind: HANDOFF_RECORD_TYPE,
+            fact,
+            checkpointDescription: input.description,
+          },
+        });
+        const accepted = committedOwnerAccepted(factRecord);
+        const checkpoint: InteractionHelperCallCheckpoint = {
+          identity,
+          phase: 'adopted',
+          recordedAt: fact.acceptedAt,
+          description: input.description,
+          recovery: {
+            dispatchAcceptedCommitId,
+            returnedCommitId,
+            ownerAcceptedCommitId: accepted.commit.commitId,
+          },
+        };
+        const checkpointRecord = await append({
+          commitId: callCheckpointCommitId('adopted', identityKey),
+          kind: 'event',
+          scope,
+          payload: { kind: CALL_CHECKPOINT_RECORD_TYPE, checkpoint },
+        });
+        return {
+          ...accepted,
+          checkpointCommit: committedCallCheckpoint(checkpointRecord),
+        };
+      },
     );
-    return committedOwnerAccepted(record);
   }
 
   async appendSemanticCheckpoint(
@@ -426,7 +723,20 @@ export class JsonlInteractionHelperJournal implements InteractionHelperTurnReadP
       dispatchAccepted: decoded.dispatchAccepted.get(key) ?? null,
       returned: decoded.returned.get(key) ?? null,
       ownerAccepted: decoded.ownerAccepted.get(key) ?? null,
+      returnedCheckpoint: resolveCallCheckpoint(decoded, identity, 'returned'),
+      adoptedCheckpoint: resolveCallCheckpoint(decoded, identity, 'adopted'),
     };
+  }
+
+  async readCallCheckpointExact(
+    identity: InteractionHelperIdentity,
+    phase: InteractionHelperCallCheckpointPhase,
+  ): Promise<InteractionHelperCallCheckpointCommit | null> {
+    validateInteractionHelperIdentity(identity);
+    if (phase !== 'returned' && phase !== 'adopted') {
+      throw new JournalIntegrityError('interaction helper call checkpoint phase is invalid');
+    }
+    return resolveCallCheckpoint(decodeJournal(await this.journal.replay()), identity, phase);
   }
 
   async readTurnHelpers(
@@ -475,6 +785,8 @@ export class JsonlInteractionHelperJournal implements InteractionHelperTurnReadP
             dispatchAccepted: dispatch,
             returned: decoded.returned.get(key) ?? null,
             ownerAccepted: decoded.ownerAccepted.get(key) ?? null,
+            returnedCheckpoint: resolveCallCheckpoint(decoded, identity, 'returned'),
+            adoptedCheckpoint: resolveCallCheckpoint(decoded, identity, 'adopted'),
           },
         });
       }
