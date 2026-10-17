@@ -35,12 +35,48 @@ export interface InteractionHelperCommittedFact<TFact> {
   readonly commit: JournalCommitRef;
 }
 
+export type InteractionHelperCallCheckpointPhase = 'returned' | 'adopted';
+
+/**
+ * One durable recovery checkpoint for a single helper call. The checkpoint stays
+ * descriptive: it stores the host-owned purpose and the exact fact commit refs,
+ * never a copy of the helper result body.
+ */
+export interface InteractionHelperCallCheckpoint {
+  readonly identity: InteractionHelperIdentity;
+  readonly phase: InteractionHelperCallCheckpointPhase;
+  readonly recordedAt: string;
+  readonly description: string;
+  readonly recovery: {
+    readonly dispatchAcceptedCommitId: string;
+    readonly returnedCommitId: string;
+    readonly ownerAcceptedCommitId?: string;
+  };
+}
+
+export interface InteractionHelperCallCheckpointCommit {
+  readonly checkpoint: InteractionHelperCallCheckpoint;
+  readonly commit: JournalCommitRef;
+}
+
+export interface InteractionHelperReturnedCommit
+  extends InteractionHelperCommittedFact<InteractionHelperReturnedFact> {
+  readonly checkpointCommit: InteractionHelperCallCheckpointCommit;
+}
+
+export interface InteractionHelperOwnerAcceptedCommit
+  extends InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact> {
+  readonly checkpointCommit: InteractionHelperCallCheckpointCommit;
+}
+
 export interface InteractionHelperJournalReadback {
   readonly dispatchAccepted:
     InteractionHelperCommittedFact<InteractionHelperDispatchAcceptedFact> | null;
   readonly returned: InteractionHelperCommittedFact<InteractionHelperReturnedFact> | null;
   readonly ownerAccepted:
     InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact> | null;
+  readonly returnedCheckpoint: InteractionHelperCallCheckpointCommit | null;
+  readonly adoptedCheckpoint: InteractionHelperCallCheckpointCommit | null;
 }
 
 export interface InteractionHelperJournalPort {
@@ -49,10 +85,16 @@ export interface InteractionHelperJournalPort {
   ): Promise<InteractionHelperCommittedFact<InteractionHelperDispatchAcceptedFact>>;
   appendReturned(
     fact: InteractionHelperReturnedFact,
-  ): Promise<InteractionHelperCommittedFact<InteractionHelperReturnedFact>>;
+    input: { readonly description: string },
+  ): Promise<InteractionHelperReturnedCommit>;
   appendOwnerAccepted(
     fact: InteractionHelperOwnerAcceptedFact,
-  ): Promise<InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact>>;
+    input: { readonly description: string },
+  ): Promise<InteractionHelperOwnerAcceptedCommit>;
+  readCallCheckpointExact(
+    identity: InteractionHelperIdentity,
+    phase: InteractionHelperCallCheckpointPhase,
+  ): Promise<InteractionHelperCallCheckpointCommit | null>;
   readExact(identity: InteractionHelperIdentity): Promise<InteractionHelperJournalReadback>;
 }
 
@@ -73,6 +115,8 @@ export interface ExecuteTasklessInteractionHelperInput {
   readonly dispatchAcceptedAt: string;
   readonly returnedAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  /** Host-owned semantics for the returned call checkpoint. */
+  readonly checkpointDescription: string;
   /**
    * Owner mapping from real driver output/closure/events to the result fields.
    * The executor still binds the 8-field identity and validates the result.
@@ -86,10 +130,16 @@ export interface ExecuteTasklessInteractionHelperInput {
 
 export interface TasklessHelperExecutionResult {
   readonly dispatchCommit: InteractionHelperCommittedFact<InteractionHelperDispatchAcceptedFact>;
-  readonly returnedCommit: InteractionHelperCommittedFact<InteractionHelperReturnedFact>;
+  readonly returnedCommit: InteractionHelperReturnedCommit;
   readonly incarnation: InteractionHelperIncarnation;
   readonly result: InteractionHelperResult;
   readonly closure: AgentClosure;
+}
+
+function assertCheckpointDescription(value: string, label: string): void {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new ContractError(`${label} must be a non-empty string`);
+  }
 }
 
 function assignmentIdentity(assignment: InteractionHelperAssignment): InteractionHelperIdentity {
@@ -141,6 +191,7 @@ export async function executeTasklessInteractionHelper(
 ): Promise<TasklessHelperExecutionResult> {
   const { assignment, binding, execution } = input;
   validateInteractionHelperAssignment(assignment);
+  assertCheckpointDescription(input.checkpointDescription, 'taskless helper returned checkpoint description');
 
   const incarnation: InteractionHelperIncarnation = {
     ...assignmentIdentity(assignment),
@@ -192,12 +243,15 @@ export async function executeTasklessInteractionHelper(
     };
     validateInteractionHelperResult(result, assignment);
 
-    const returnedCommit = await input.journal.appendReturned({
-      kind: 'returned',
-      result,
-      returnedAt: input.returnedAt,
-      evidenceRefs: input.evidenceRefs,
-    });
+    const returnedCommit = await input.journal.appendReturned(
+      {
+        kind: 'returned',
+        result,
+        returnedAt: input.returnedAt,
+        evidenceRefs: input.evidenceRefs,
+      },
+      { description: input.checkpointDescription },
+    );
 
     return { dispatchCommit, returnedCommit, incarnation, result, closure };
   } catch (error) {
@@ -230,10 +284,12 @@ export interface AcceptTasklessInteractionHelperInput {
   readonly acceptanceRef: string;
   readonly acceptedAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  /** Host-owned semantics for the adopted call checkpoint. */
+  readonly checkpointDescription: string;
 }
 
 export interface TasklessInteractionHelperAcceptance {
-  readonly ownerAcceptedCommit: InteractionHelperCommittedFact<InteractionHelperOwnerAcceptedFact>;
+  readonly ownerAcceptedCommit: InteractionHelperOwnerAcceptedCommit;
   readonly latestTurnEntry: Extract<InteractionLatestTurnEntry, { readonly kind: 'helper-result' }>;
 }
 
@@ -245,6 +301,7 @@ export async function acceptTasklessInteractionHelperResult(
   input: AcceptTasklessInteractionHelperInput,
 ): Promise<TasklessInteractionHelperAcceptance> {
   validateInteractionHelperResult(input.result);
+  assertCheckpointDescription(input.checkpointDescription, 'taskless helper adopted checkpoint description');
   const readback = await input.journal.readExact(input.identity);
   const durableReturned = readback.returned;
   if (durableReturned === null) {
@@ -256,15 +313,18 @@ export async function acceptTasklessInteractionHelperResult(
     );
   }
 
-  const ownerAcceptedCommit = await input.journal.appendOwnerAccepted({
-    kind: 'owner-accepted',
-    result: durableReturned.fact.result,
-    refinedResult: input.refinedResult,
-    acceptedBy: input.acceptedBy,
-    acceptanceRef: input.acceptanceRef,
-    acceptedAt: input.acceptedAt,
-    evidenceRefs: input.evidenceRefs,
-  });
+  const ownerAcceptedCommit = await input.journal.appendOwnerAccepted(
+    {
+      kind: 'owner-accepted',
+      result: durableReturned.fact.result,
+      refinedResult: input.refinedResult,
+      acceptedBy: input.acceptedBy,
+      acceptanceRef: input.acceptanceRef,
+      acceptedAt: input.acceptedAt,
+      evidenceRefs: input.evidenceRefs,
+    },
+    { description: input.checkpointDescription },
+  );
 
   return {
     ownerAcceptedCommit,

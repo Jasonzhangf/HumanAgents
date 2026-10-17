@@ -140,6 +140,8 @@ export interface DispatchExplicitTurnHelperInput {
   /** Bounded helper inputs. The parent transcript is never part of this API. */
   readonly inputs: BusinessPayload;
   readonly evidenceRefs: readonly EvidenceRef[];
+  /** Host-owned purpose and pending owner decision for the returned checkpoint. */
+  readonly checkpointDescription: string;
   /**
    * Owner mapping from the real driver output/closure/events to the business
    * result fields. The session does not synthesize this mapping and never reads
@@ -160,10 +162,13 @@ export interface DispatchedExplicitTurnHelper {
   readonly closure: AgentClosure;
   readonly dispatchAcceptedCommitId: string;
   readonly returnedCommitId: string;
+  readonly returnedCheckpointCommitId: string;
 }
 
 export interface AcceptExplicitTurnHelperInput {
   readonly helperCallId: string;
+  /** Host-owned adoption meaning and its effect on the next decision. */
+  readonly checkpointDescription: string;
   /** The caller's real refined asset. The session never fabricates a ref. */
   readonly refinedResult: RawAsset;
   readonly acceptedBy: string;
@@ -271,6 +276,12 @@ function helperIdentityKey(identity: InteractionHelperIdentity): string {
   ]);
 }
 
+function assertCheckpointDescription(value: string, label: string): void {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new ContractError(`${label} must be a non-empty string`);
+  }
+}
+
 function dedupeStrings(values: readonly string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -366,6 +377,7 @@ export class ExplicitTurnHelperSession {
   async dispatchHelper(
     input: DispatchExplicitTurnHelperInput,
   ): Promise<DispatchedExplicitTurnHelper> {
+    assertCheckpointDescription(input.checkpointDescription, 'explicit turn helper dispatch checkpoint description');
     const ordinal = this.sequence + 1;
     this.sequence = ordinal;
     const slug = `${this.identity.turnId}-helper-${ordinal}`;
@@ -411,6 +423,7 @@ export class ExplicitTurnHelperSession {
           return clock.now();
         },
         evidenceRefs: input.evidenceRefs,
+        checkpointDescription: input.checkpointDescription,
         conclude: input.conclude,
       });
     } catch (error) {
@@ -445,6 +458,7 @@ export class ExplicitTurnHelperSession {
       closure: result.closure,
       dispatchAcceptedCommitId: result.dispatchCommit.commit.commitId,
       returnedCommitId: result.returnedCommit.commit.commitId,
+      returnedCheckpointCommitId: result.returnedCommit.checkpointCommit.commit.commitId,
     };
     this.dispatched.set(assignment.helperCallId, dispatched);
     return dispatched;
@@ -457,6 +471,7 @@ export class ExplicitTurnHelperSession {
   async acceptHelper(
     input: AcceptExplicitTurnHelperInput,
   ): Promise<TasklessInteractionHelperAcceptance> {
+    assertCheckpointDescription(input.checkpointDescription, 'explicit turn helper accept checkpoint description');
     const dispatched = this.dispatched.get(input.helperCallId);
     if (dispatched === undefined) {
       throw new ContractError(
@@ -472,6 +487,7 @@ export class ExplicitTurnHelperSession {
       acceptanceRef: input.acceptanceRef,
       acceptedAt: this.clock.now(),
       evidenceRefs: input.evidenceRefs,
+      checkpointDescription: input.checkpointDescription,
     });
     this.entries.push(acceptance.latestTurnEntry);
     return acceptance;
