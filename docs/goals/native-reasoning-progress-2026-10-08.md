@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 精确turn/invocation reader `b65eba1d` 正常FF candidate，Appbuild/tsc0+原coldJournalconsumer1/1PASS（session82723，inspection-turn-resources-composed-20261017.txt）；forCheckpoint/physical组装仍未完成，已通知UX关闭来源。
+- r296未执行编译，已完成102次source命令仍停接口查找；父目标tsc实际失败为缺imports与kind-only假ExecutionRuntimePort等8项草稿错误，非业务RED。已因明确执行偏离SIGTERM自有PID87808/保留同树195行测试，不是超时重启。r297 freshOAuthGPT6.1medium仅做此具体consumer技术攻关（不是Reviewer或普通worker后备），两允许文件不变；通用执行仍GCM首选，Provider6PASS复用，不扩功能/测试。App业务验收仍OPEN。
+
 - r295身份修订已接受：model下一轮必须freshcall/newinvocation，旧wait无prepare/precheckpoint/执行；不造retryselector。r296 freshGCM同一App树接续原227行单一combinedconsumer，先编译/真实RED再恢复AppmappingGREEN；Provider基础已在该树，不再等依赖。三Provider轮证明waiting入续推/新调用/采纳，不将driverterminal冒称Task标准closure。尚无App业务RED/GREEN。
 
 - pureaccept `7e0e111e` 正常FF候选，contracts/Appbuild/Apptsc0+原dedicated5/5PASS（session56073，inspection-pure-accept-composed-20261017.txt）；复用journal-only接纳实现，无新增case。UX正常关闭来源。
