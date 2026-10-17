@@ -16,6 +16,8 @@
 
 ### 唯一候选后继状态（2026-10-17）
 
+- r120资源归属观察完成：旧helper来源仅133个untracked条目且全部在自身.pnpm-store，非symlink、pnpm.modules.yaml storeDir精确指向该树，不是共享store；creator命令未知但本树install元数据已证明独占缓存。owner补宿主实际进程检查无该树引用；用非force `rm -r` 清自有缓存后标准worktree remove/prune/pathabsent。清理前注册worktree/对应目录3/3，本次核销1/1，当前仅2/2：control/main与唯一active candidate。没有遗留PROTECTED_HOLD helper树或自有实现来源树。独立Gemini4medium r119仍在规划下一增量，不记计划完成或总目标完成。
+
 - App child并行source `a6868eaf` 已接收并标准合流：生产仅childproducer声明+composition转发2行，真实CLI/localProvider预算2的双invocation实际overlap RED→GREEN，B先drain，父按A/B顺序收到精炼结果，两个独立precallcheckpoint，一次Planner且Task succeeded。原4case通过；checkpoint断言曾读错Journal字段而TypeError，已纠正并最终命名1/1；owner组合Appbuild/tsc0、原newcase1/1。未复现brokenpredecessor，不加锁。来源clean无进程后remove/prune/pathabsent。最新origin/main `beee6bab` 已正常合入 `cac04fe2`，保已交付UX/Governance，组合UI4/4。r118裁定当前无原始upstream记录不新发诊断generation。独立Gemini4medium r119只规划下一原生业务增量，完整goal仍ACTIVE；本侧candidate尚未整体Review/main交付。
 
 - r114 App并行GCM运行11分钟/83命令且0改动，已精确INT并确认PID消失；fresh OAuth技术r117复用唯一App树接手原r93/r109计划，不新开同域树。r116定向证据确认r115 start/error同request-a7403879-a4e6-433f-ab46-27fbd6feeab5与turn对应，start200→UND_ERR_SOCKET；当前RCC logs与codex-samples窗口均无直接mtime匹配，未读宽泛日志，原始上游原因仍UNKNOWN。healthok/version3不覆盖失败；r118独立局部Planner只规划最小可证伪诊断，未新发模型请求、不改RCC或schema。UX独立main交付窗口继续，本侧仅候选与另树执行。
