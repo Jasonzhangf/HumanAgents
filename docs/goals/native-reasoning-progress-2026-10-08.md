@@ -40,6 +40,8 @@ UX B目标绑定已接收：来源 `69c3aa87`（图前置 `7b43d444`）正常mer
 
 冷恢复 fixture 首次运行无有效产品结论：宿主查到同一 `.test.js --cold-consumer` 的父子递归链，childmode 分流位于顶层 tests 注册之后，子进程再次运行测试并新建 fixture/child。已停止worker23424（exit1）及逐一记录的16个自有node PID，复查无匹配冷恢复node残留；未动canonical实例/UX。所有fixture保留。此为测试入口错误，不是生产恢复RED，不能据超时宣称产品缺陷。独立r206正规划最小childmode分流，原树复用且当前无writer；r205 wire继续独立候选。UX已回B来源树remove/prune/path absent，A树未动。
 
+冷恢复入口已修：r206计划由r207在同consumer逐处guard10个test注册，mode声明提前；tests/app compile0，无参数child smoke只报 `cold consumer requires --fixture-root`、无subtests，递归入口隔离有效。child跑原例遇EMFILE/watch，不当产品结论。宿主同例实际到第二OS进程HTTPresume，返回409 `execution-composition.owner-source-missing`（actual cold Provider selection does not bind the execution role），fixture `text-only-jvsynV` 保留。独立Gemini4 r209定位fixture生产组装漏项或实际owner保存/选择缺边，尚未授权产品patch。r208接续wire：此前worker退出于意图，当前只校正testhelper publication scope/identity，尚无有效出站metadataRED，不计wire修复完成。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
