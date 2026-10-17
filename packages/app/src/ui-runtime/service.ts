@@ -267,7 +267,7 @@ import type {
   PublicOutputJournalPort,
   PublicOutputPublication,
 } from '../../../contracts/src/index.js';
-import { UiRuntimeApiError } from './errors.js';
+import { UiRuntimeApiError, type UiRuntimeApiErrorBody } from './errors.js';
 import { canStartProviderRequest } from '../provider-admission.js';
 import { readProducedArtifacts, RESPONSES_FILE_SEARCH_TOOL } from '../provider-tool-execution.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
@@ -455,6 +455,16 @@ export interface UiRuntimeExecutionResumeReceipt {
   readonly operationId: string;
   readonly businessTurnId: string;
   readonly executionEpoch?: number;
+}
+
+type CurrentExecutionView = Pick<RuntimeTaskSnapshot,
+  'taskId' | 'operationId' | 'executionEpoch' | 'state' | 'allowedActions' | 'nextStep' | 'error'>;
+
+export interface UiRuntimeGrantExecutionReceipt {
+  readonly state: 'not-applicable' | 'current' | 'released' | 'blocked';
+  readonly selector?: Pick<RuntimeTaskSnapshot, 'taskId' | 'operationId' | 'executionEpoch'>;
+  readonly current?: CurrentExecutionView;
+  readonly apiError?: UiRuntimeApiErrorBody;
 }
 
 export interface UiRuntimeServiceOptions {
@@ -4218,7 +4228,51 @@ export class UiRuntimeService {
         'verified TG1 owner is absent; no Provider factory can run',
         'grant this Task before releasing its prepared operation', 409);
     }
-    return this.coordinator.releaseExecution(taskId, operationId);
+    const released = await this.coordinator.releaseExecution(taskId, operationId);
+    this.watchExecutionForImplicitWakeup(operationId);
+    return released;
+  }
+
+  async releaseGrantedTaskExecution(taskId: TaskId): Promise<UiRuntimeGrantExecutionReceipt> {
+    const view = (snapshot: RuntimeTaskSnapshot): CurrentExecutionView => {
+      const { taskId, operationId, executionEpoch, state, allowedActions, nextStep, error } = snapshot;
+      return { taskId, operationId, executionEpoch, state, allowedActions, nextStep, error };
+    };
+    let before: RuntimeTaskSnapshot;
+    try {
+      before = this.coordinator.taskSnapshot(taskId);
+    } catch (error) {
+      return { state: 'blocked', apiError: apiError(error).toBody() };
+    }
+    if (before.operationId === undefined) return { state: 'not-applicable' };
+    const selector = { taskId, operationId: before.operationId, executionEpoch: before.executionEpoch };
+    if (before.error !== undefined || before.state === 'blocked' || before.state === 'failed') {
+      return { state: 'blocked', selector, current: view(before) };
+    }
+    if (before.state !== 'waiting') return { state: 'current', selector, current: view(before) };
+    // Snapshot selects the current allocation; only the coordinator can decide
+    // whether it is prepared and releasable. Never prepare or retry here.
+    let state: 'released' | 'blocked' = 'released';
+    let failure: UiRuntimeApiErrorBody | undefined;
+    try {
+      await this.releaseExecution(taskId, id('operation', before.operationId));
+    } catch (error) {
+      state = 'blocked';
+      failure = apiError(error).toBody();
+    }
+    let after: RuntimeTaskSnapshot;
+    try {
+      after = this.coordinator.taskSnapshot(taskId);
+    } catch (error) {
+      return { state: 'blocked', selector, apiError: failure ?? apiError(error).toBody() };
+    }
+    if (after.operationId !== selector.operationId || after.executionEpoch !== selector.executionEpoch) {
+      return { state: 'blocked', selector, apiError: failure ?? new UiRuntimeApiError(
+        'execution.operation.changed', APP_OWNER, 'current execution changed while releasing the selected allocation',
+        'read the current Task before issuing another control request', 409,
+      ).toBody() };
+    }
+    return { state, selector, current: view(after), ...(failure === undefined ? {} : { apiError: failure }) };
   }
 
   async startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): Promise<{ readonly operationId: OperationId; readonly executionEpoch: number }> {

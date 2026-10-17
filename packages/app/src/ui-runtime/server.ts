@@ -846,9 +846,13 @@ async function handleRequest(
             ? { capability: optionalTaskCapability(body) }
             : {}),
         };
-        writeJson(response, 200, taskGrantControl
-          ? await taskControl.grant(input)
-          : await taskControl.revoke(input));
+        if (taskGrantControl) {
+          const receipt = await taskControl.grant(input);
+          const execution = await service.releaseGrantedTaskExecution(taskId);
+          writeJson(response, 200, { ...receipt, execution });
+        } else {
+          writeJson(response, 200, await taskControl.revoke(input));
+        }
         return;
       }
     }
