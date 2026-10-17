@@ -5,6 +5,7 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
+  mountSemanticObservationPanel,
   observationHref,
   openTechnicalDetail,
   queryParam,
@@ -78,6 +79,12 @@ let agentDetailDispose = null
 let agentDetailLayer = null
 let agentReadFailure
 let agentReadPending = false
+
+// The shared semantic panel keeps one live mount for the page lifetime: a
+// dashboard redraw re-attaches the retained element instead of building a
+// second panel and a second observation subscription.
+let semanticObservationPanel = null
+let semanticObservationHost = null
 
 // The request carries only the validated agent keys; the API owner adds the
 // canonical project/mode/task scope itself. An absent instance means a task
@@ -1833,6 +1840,8 @@ function renderDashboard() {
   const agentSection = renderAgentActivitySection()
   if (agentSection) main.append(agentSection)
 
+  main.append(renderSemanticObservationSection())
+
   const events = element('section', undefined, 'section')
   events.append(element('h2', '执行轨迹'))
   const eventPanel = element('div', undefined, 'panel')
@@ -1920,6 +1929,29 @@ function renderDashboard() {
   const observationLink = element('a', '打开只读 Observation', 'button')
   observationLink.href = observationHref(taskId, explicitScope)
   main.append(observationLink)
+}
+
+/**
+ * The shared semantic observation panel, mounted once per page load and
+ * re-attached on every render. `semantic` here is the typed envelope
+ * presentation of the journal projection, not the plan-history surface, so
+ * both surfaces stay readable without claiming to be the same content.
+ */
+function renderSemanticObservationSection() {
+  if (!semanticObservationPanel) {
+    semanticObservationHost = element('div', undefined, 'semantic-observation-host')
+    semanticObservationHost.dataset.semanticObservationHost = taskId ? 'task' : 'missing'
+    if (taskId) {
+      semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, { taskId })
+    } else {
+      semanticObservationHost.append(element('p', '当前 URL 没有 task 参数，无法读取语义观测。', 'empty'))
+    }
+  }
+  const section = element('section', undefined, 'section semantic-observation-section')
+  section.dataset.semanticObservation = semanticObservationPanel ? 'mounted' : 'unavailable'
+  section.append(element('h2', '语义观测'))
+  section.append(semanticObservationHost)
+  return section
 }
 
 /**
@@ -2130,7 +2162,11 @@ void load().then(() => initializeDisplayPreference())
 
 const refreshButton = element('button', '刷新当前范围', 'button button--quiet')
 refreshButton.type = 'button'
-refreshButton.addEventListener('click', () => void refresh().catch(setRefreshError))
+refreshButton.addEventListener('click', () => {
+  // A manual refresh is the one path that re-reads the shared semantic panel.
+  // Plain re-renders re-attach its retained host without a new request.
+  void refresh().then(() => semanticObservationPanel?.reload()).catch(setRefreshError)
+})
 status.after(refreshButton)
 
 // Back and forward re-read the exact target the URL now names. Only the open
@@ -2143,6 +2179,9 @@ window.addEventListener('popstate', () => {
 })
 
 window.addEventListener('pagehide', () => {
+  semanticObservationPanel?.dispose()
+  semanticObservationPanel = null
+  semanticObservationHost = null
   disposeDisplayPreference()
   closeStream()
   stopObserving()
