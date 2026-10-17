@@ -20,7 +20,13 @@
 
 本轮补查（用户再次要求按 bootstrap-migration 执行）：两个独立 GCM 观察者分别检查程序入口和活动规则。日常 build/ci/test/package/install 未再发现 SHA 调用，三节点 CI 图保持闭合；不重跑已有有效验收。正文继续删除 M1/M2/M3 每小阶段 Astra 门、派单 SHA、配置摘要、冻结后才释放依赖及旧脚手架对 checkpoint-runner 的日常调用要求。README 将 release 命令移出日常启动示例。纯文档批次提交 `bcacc988`；随后正常合流 peer 已推送的 Provider 增量，不改其候选或运行现场。
 
-程序补查发现 `proof:cordis-host-closeout` 与 Dashboard E2E 仍做候选 commit/tree/source/artifact 摘要和运行前后稳定性包装，尚未消融完成。已交独立小计划 Planner，代码由外置独占 `governance-entry-ablation-20261017` 执行，保留 Task/operation/epoch、授权、settlement、业务 Journal/asset 完整性和资源收口。另有 release 测试中的文案匹配及固定配置断言待移除；release 专属程序不扩改。
+程序补查发现的 `proof:cordis-host-closeout` 与 Dashboard E2E 候选 commit/tree/source/artifact 摘要、运行前后稳定性包装已物理删除。独立小计划后，由 GCM 在唯一外置 `governance-entry-ablation-20261017` 完成 13 文件修改，提交 `ba310b1d`，净删 541 行。同步清理两处浏览器脚本调用、receipt/sidecar/专属测试及 release 测试中的文案匹配和固定配置断言；没有 no-op 兼容层。保留 Task/operation/epoch、授权、settlement、业务 Journal/asset 完整性和资源收口。release 专属程序未扩改。
+
+本批作者验收：普通非 Git 临时目录建立 attempt 的公开反例由 `not a git repository` RED 转 GREEN；runner 51 项、existing-task-change 20 项公开 consumer 通过。contracts 源码、config、App 构建成功；两份受影响 DAG/binding 各校验一次。续派两处直接 caller 及 closeout 语法检查通过。有效 51+20 结果未重复执行。Opus 整体审查因配额 429 退出 3，按规则改用独立 Gemini 4 Argon medium，整体审查 PASS，无 P0/P1/P2。正式集成前仅合入 peer 进度文档与本任务笔记，不改变已验收程序输入。
+
+真实 Cordis consumer 首次因旧 fixture 无配对返回 401；已复用正式 CLI pair 和既有 auth helper，未关闭鉴权或落盘配对码。配对后同公开 HTTP/SSE 返回 `execution.terminal / blocked`，原因 `execution admission source is not bound`，原成功序列断言仍失败。该产品准入缺口已交另一 peer 的 App owner，本轮不改 packages、不造 grant、不放宽断言。因此 Cordis 成功路径仍 INCOMPLETE；真实浏览器/RCC 本轮未执行，标 UNVERIFIED。自有隔离进程/临时 root 已收拢，不动原 Task/A0、53007 或 canonical 安装。
+
+完整证据复用 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-residual-20261017/` 的计划、两路观察、RED、执行日志、owner 接收及整体 review。本批只改规则与验收 harness，无产品安装产物变更，故不重建安装或重启运行实例。main 推送与唯一任务树清理沿正常 Git 交付；SDK 受管副本缺口仍未解决，不能据本批 PASS 宣称整体旧治理消融全部完成。
 
 SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 binary 摘要，并写迁移材料。本轮不执行该包装命令，不重复 init，不手改受管 Skills、pin 或 lock。受管 Skills/maps 仍有旧治理，因此不能报告整体消融全部完成；唯一修复 owner 为 AppSDK 的正常资源升级入口。
 
