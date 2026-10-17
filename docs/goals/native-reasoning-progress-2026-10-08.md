@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Runtime stop source `b2bd7f5d` 已正常merge candidate；contractsbuild0/agentlooptsc0/原helpers+boundary9/9PASS（session92762，inspection-runtime-stop-source-composed-20261017.txt）。去NativeSaveIntent依赖、ordinary stop不读capture；Appcapture/fullnative停止仍未验收。UX已正常remove/prune/确认来源不存在。
+- r290独立计划返回并纠正r289：capacity wait并未造成不可恢复cold lock，blocked之后仍generation-ready；真实缺口是正常wait中断当前turn且丢原owner等待语义。初稿未接受执行：父核实toolStatus有error即failed，blocked-only predicate不可达；ProviderToolResult无顶层nextAction；dist-tests命令/毫秒成本编造。已退同Planner r291只修这些局部缺口，继续禁止先改代码/假成功/新waitqueue/背景重放。32round非已证总上限仍不改。
+
 - App aggregate wire `3a0a99b0` 已正常merge candidate；Appbuild0/App-testtsc0/标准原standard-turn-control-public-consumer11/11PASS（session37945，inspection-aggregate-wire-composed-20261017.txt）。只证明accepted summary与shared schema/validator，不冒native durable两occurrence。UX确认sourceclean/terminal后正常关闭；Appcapture与Runtime stopsource继续各自独占。
 
 - Runtime aggregate `aee3aebc` 已正常FF candidate；contractsbuild0/agentlooptsc0/原named settlement3/3PASS（session53145，inspection-aggregate-settlement-composed-20261017.txt）。sole summary.inspectionOutcome控制总体判断，缺项不补造；只证明Runtime port，不冒完整native/I2。已通知UX关来源并继续同域stophelper。
