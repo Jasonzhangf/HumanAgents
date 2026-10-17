@@ -52,6 +52,10 @@ UX A已接收：source `ff534a21` 正常merge为唯一候选 `31832937`，仅run
 
 wire设计状态更新已提交 `62b0c5b5`：5docs/graphmetadata改为v1真实verified、v2/childsourcefixed但runtimeUNVERIFIED，保留actualchildtypegap，图拓扑不变、validate8nodes8edges7waves。旧OPEN段属前序事实，不覆盖本段当前状态。
 
+冷fixture后续：r214实际tests/app compile0，宿主 `text-only-pFibR1` 已有3preparedop/epoch1-3、2semanticpublication，但thirdrequest只有dispatching；upstreamwriteHead未刷新header就hold。r215仅加合法SSEcomment刷新header、compile0。宿主下一次 `text-only-OEzUEB` 进入真实thirddispatched后，被无契约依据的 firstTurnFacts.length===4 卡住（实际11）。r216仅消融该冗余总数检查，保留2priorPlanner完成、typedheldscope、pre/postJournal与acceptedEffect无重放断言；当前未产品patch、未coldGREEN。
+
+M4既有consumer已接候选 `67507112`（标准FF）：只修改原agent-activity-http-public-consumer。组合dedicatedtsconfig compile0，原TCPconsumer1/1 PASS；actual cross-scope-assertion-rejected，11files unchanged。正式catalog双项目带Task聚合、正文identity隔离和unknown404为受控读取证明，不扩为双活跃项目/浏览器/安装/RCC。已通知UXowner当轮收M4来源树，run证据保留。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
