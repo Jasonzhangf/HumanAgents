@@ -2,6 +2,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 容量wait Provider基础 `c58ce3f6` 已正常merge candidate：r292原两新case实际RED→GREEN，保留明确blocked状态/ownerwait、普通manualblock拒绝；原相邻四casePASS。父亲读原events/diff后正常来源提交（作者future-intent退出未提交），组合contracts/provider tsc0+目标6/6PASS（session31898）。sourceclean/terminal后正常remove/prune/absent。App r293仍同树写child-producer+i2consumer，完整same-turn集成未完成，不派leafReview、不称main产品交付。
+
 - Appcapture `2fb247eb` 正常merge候选；contracts/Appbuild/native-delivery tsc0。首次误用旧dist/tests只执行普通case1/1，不计stop证明；父核对config改用dist/tests-native-text后原stop+text2/2PASS（session36452），capture18<checkpoint19，无standard saveintent/closure/Planner。已通知UX关来源；不扩installed/v2/closeonce计数。
 - r291局部修订已接受：明确nonsuccess状态遇error仍保留，只有blocked+typederror retryable+error.nextActionwait继续本turn；普通manualblock/failed不放行。既有manager注册、无queue/自动重放/假success；真实RED仍待执行。r292 Provider2file、r293 App2file freshGCM从最新origin/main并行独占新树，彼此无写冲突；App完整续推consumer在Provider基础合流后验收。旧图闭合复用，不改图或重复validate。
 
