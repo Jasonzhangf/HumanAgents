@@ -159,12 +159,27 @@ async function createAndSettleTask(auth) {
   assert.equal(created.status, 201);
   const task = await created.json();
   const taskId = task.taskId.value;
+  const grant = await auth.request(`/api/tasks/${encodeURIComponent(taskId)}/control/grant`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      requestId: `runtime-reload-public-grant:${taskId}`,
+      expectedRevision: 0,
+      capability: {
+        actionId: 'task.execute',
+        capabilities: ['provider.execution'],
+      },
+    }),
+  });
+  const grantBody = await grant.text();
+  assert.equal(grant.status, 200, grantBody);
   const started = await auth.request(`/api/tasks/${encodeURIComponent(taskId)}/executions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ mode: 'fake', prompt: 'settle before the code handoff' }),
   });
-  assert.equal(started.status, 202);
+  const startedBody = await started.text();
+  assert.equal(started.status, 202, startedBody);
   const settled = await waitFor(async () => {
     const response = await auth.request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`);
     if (!response.ok) return undefined;
@@ -233,7 +248,7 @@ test('official restart loads the selected new package through one graceful hando
     assert.notEqual(completion.current.processStartToken, old.lease.processStartToken);
     assert.equal(completion.previous.leaseId, old.lease.leaseId);
     assert.match(completion.source.entryPath, /runtime\/app\/src\/cli\.js$/);
-    assert.match(completion.source.entryDigest, /^sha256:[0-9a-f]{64}$/);
+    assert.equal('entryDigest' in completion.source, false);
 
     const oldExit = await waitFor(() => oldChild.exitCode !== null || oldChild.signalCode !== null, 10_000, 'old owner exit');
     assert.equal(oldExit, true);
@@ -245,7 +260,8 @@ test('official restart loads the selected new package through one graceful hando
       20_000,
     );
     assert.equal(replacement.identity.leaseId, completion.current.leaseId);
-    assert.equal(replacement.lease.startup.source.entryDigest, completion.source.entryDigest);
+    assert.equal('entryDigest' in replacement.lease.startup.source, false);
+    assert.equal('targetEntryDigest' in replacement.lease.restart, false);
     newPid = replacement.lease.pid;
     assert.equal(
       readPgid(newPid),
