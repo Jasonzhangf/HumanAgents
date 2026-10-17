@@ -20,7 +20,8 @@
     "admission_check": {
       "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
       "ownerRel": "packages/runtime/src/admission/implicit-admission.ts",
-      "ownerSymbol": "checkAdmission"
+      "ownerSymbol": "checkAdmission",
+      "designNote": "Configuration execution.maxConcurrentTasks flows through app launch/service options and FIFO default admission into the existing queue configuration helper; this wiring does not establish N runtime instances."
     },
     "load_verification_policy": {
       "ownerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
