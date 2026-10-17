@@ -44,6 +44,8 @@ UX B目标绑定已接收：来源 `69c3aa87`（图前置 `7b43d444`）正常mer
 
 wire主线已接收候选 `00bbfb41`：r208实际双轮/三轮在成功CLI后的capturedPOST缺checkpointId而RED2/2；3Appencoder补现有typed ID、原committedAt、summary-as-description、topEvidenceRefs后同例GREEN2/2，最终恢复optional修改后再2/2。现有语义、childbody、raw排除、Planner和终态断言保留。类型核实：AdoptedChildSemanticContext/Delivery没有evidenceRefs，不能把RefinedChildSemanticDelivery字段当现有projection；未新造child字段。v1实际运行；v2及childencoder仅源码修复，运行UNVERIFIED。directfile_read多轮尝试因fixture real inspect result is absent失败，完整撤回；r210独立小Plan定位最小fixture缺口，不建新工具/框架/矩阵。当前实际模型语义质量、v2/childproof及cold最终结果仍开放。
 
+direct工具压缩后续已接收 `9abc11d1`：r210确认fixture错在turn2找turn1readfact，并非产品inspect失败；r211只改原consumer，将inspect约束首turn，保留原singleturn拒绝Planner用例。实际typed首turnacceptedfile_read scope/ref与turn2capturedcheckpoint中的限定结论、完整ref相等；按结构排除旧rawcall/result且完整EXACT_BODY不在后turn。compile0、原双轮1/1、inspect+双轮+三轮组合3/3 PASS（2/3Planner及原终态/metadata断言保留）。未加case或产品框架。该controlledfixture证明信息与引用可跨压缩保留，不证明真实模型自动提炼质量或v2/childencoder运行路径。coldr209仍独立分析正式409。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
