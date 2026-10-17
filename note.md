@@ -99,6 +99,13 @@ SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 bin
   2. 完成垂直切片 1（`M0 + M1 + M2`：真实 RCC 4444 + Ego14 浏览器首屏/新建任务/Checkpoint 验收）与 1 次独立 Milestone Review 后合入 `main`。
   3. 推进垂直切片 2（`M3 + M4 + M5`：子 Agent 动态调用与审查闭环 + 偏好/响应式抽屉验收）。
 
+## 2026-10-17 Provider buffered-stop 独立增量
+
+- 两文件修复 `a7644054` 已正常合 main `bc5b06c5`。SSE buffered frame 前与 yield 后检查已接受 stop，并在无既有错误时记录 stopped，结束 pending tail 等待；保留原错误及正常 settle owner。
+- 原 main P-Stop1 实际超时 RED；来源严格编译、同用例 GREEN、driver/transport/replay 76/76。独立整体 Review 本次 Opus quota ERROR 后 Gemini4 medium SUCCESS/exit0，现有 controller schema/classify 裁决 PASS、无 findings。真实 RCC source proof 只一次 generation：stopped、released、committed、cancelled、close/cleanup closed。
+- main contracts/config/App 与 Provider 测试编译成功。初次用错测试产物路径，纠正为 dist/tests-provider 后发现缺 workspace 链接；正常 offline frozen install 修复，原 P-Stop1 1/1 PASS，未改测试断言。正式 package/global install 成功。
+- 安装后自有 fixture `~/.humanagent/test-fixtures/provider-stop-installed-r146-qz1gep5a` 正式 restart gen1/PID65081→gen2/PID65342，官方 pair 与公开 `/api/runtime/status` HTTP200，模型请求0；正式 SIGINT→dispose，lease disposedAt `2026-10-17T15:26:37.469Z`。原 gen21/53007/p3 未动。证据在外置 RUN `provider-stop-review-gemini-r144-20261017/` classification 与 installed-runtime-receipt.json；完整 native goal 仍未完成。
+
 ## 2026-10-17 Pool 并发占槽独立增量
 
 - 完整修复 source `4990a696` 已集成至 main `13dab3ac`：复用 idle 实例前同步占位，失败时只恢复仍属自己的未持 lease 预占，防止同 tick 两次 acquire 返回同一实例。仅 runtime-pool 与原 consumer 两文件。
