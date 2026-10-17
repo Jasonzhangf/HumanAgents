@@ -349,15 +349,18 @@ export class AgentRuntimePoolManager {
 
     const runtime = this.runtimes.get(decision.runtimeId);
     if (decision.action === 'reuse' && runtime) {
+      runtime.state = 'running';
       try {
         const { incarnation, handle } = await this.createInstanceHandle(runtime, input);
         const lease = this.createLease(runtime, input, decision.ownerId, incarnation);
-        runtime.state = 'running';
         runtime.lease = lease;
         runtime.handle = handle;
         runtime.acquisition = { assignment: input.assignment, agentId: input.agentId };
         return { status: 'acquired', incarnation, lease: cloneLease(lease), handle, decision };
       } catch (error) {
+        if (runtime.state === 'running' && !runtime.lease && !runtime.disposePromise && !this.disposed) {
+          runtime.state = 'idle';
+        }
         return {
           status: 'blocked',
           issue: issueFromError(error, {
