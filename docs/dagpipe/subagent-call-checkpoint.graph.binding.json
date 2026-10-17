@@ -7,34 +7,41 @@
   "status": "DESIGN-UNVERIFIED",
   "nodes": {
     "assignment": {
-      "ownerPath": "packages/contracts/src/native-reasoning.ts",
-      "ownerRel": "packages/contracts/src/native-reasoning.ts",
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "明确角色目标输入与交付合同"
+      "designNote": "普通 execution/review 明确角色任务；只有 execution 显式 check 时，Runtime 才选择正式 definition 并按需打开同一 logical turn 的 occurrence。contracts 仅提供类型，不拥有 open occurrence 副作用。",
+      "typeOwnerPath": "packages/contracts/src/native-reasoning.ts",
+      "typeOwnerRel": "packages/contracts/src/native-reasoning.ts",
+      "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "coordinationStatus": "planned/unimplemented"
     },
     "checkpoint": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
       "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "保存本次调用 checkpoint 与未返回义务"
+      "designNote": "保存子调用绑定与未返回义务；显式 check 时保存检查绑定。恢复从该 checkpoint 继续，不重做 child。"
     },
     "context": {
       "ownerPath": "packages/runtime/src/context/active-turn-context.ts",
       "ownerRel": "packages/runtime/src/context/active-turn-context.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "建立独立 Provider/model 与 context；child business 登记后，初始化 child binding 时精确读取 parent 本体及既有 provenance，不以该 namespace 全部 child control 已完整为前提；namespace 完整性读取仍保留所有未受控 child 义务。"
+      "designNote": "从 checkpoint 的 typed child binding 装配独立 Provider/model 与 context。child business 登记后，初始化 child binding 时精确读取 parent 本体及既有 provenance，不以该 namespace 全部 child control 已完整为前提；namespace 完整性读取仍保留所有未受控 child 义务。"
     },
     "execute": {
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "执行角色并由真实 child controller 通过既有 Gateway typed control owner 提交登记、running 与真实 settle/close 后继；同一父请求内多个独立 child.call 在 App 声明及预算容量内并发执行；业务 output、模型文本或 diagnostic 不产生控制真相。"
+      "designNote": "普通 execution/review 保持原角色作用；显式 check 时才执行检查并产生完整 child 正文及独立 typed delivery。业务正文不产生控制真相。真实 child controller 仍通过既有 Gateway typed control owner 提交登记、running 与 settle/close。同一父请求内多个独立 child.call 在 App 声明及预算容量内并发执行。"
     },
     "acceptance": {
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "由编排者按调用顺序接纳回填的精炼结果；缺少真实控制收拢或提交失败时保留恢复责任并显式失败，不以 refined 结果代替。"
+      "designNote": "接纳 durable child return；显式 check 时再由 Runtime 幂等补 I2 receipt，无检查 occurrence 的普通任务不创建 I2 记录。恢复只补缺失提交，不重启 child；缺少 durable return 或提交失败时保留恢复责任并显式失败，不以完整正文代替。",
+      "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "coordinationStatus": "planned/unimplemented",
+      "appWiringOnly": "packages/app"
     }
   }
 }

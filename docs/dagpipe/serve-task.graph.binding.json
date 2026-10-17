@@ -78,17 +78,26 @@
     "stop_or_settle": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerSymbol": "RuntimeTaskCoordinator.stop"
+      "ownerSymbol": "RuntimeTaskCoordinator.stop",
+      "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "coordinationStatus": "planned/unimplemented",
+      "inspectionStopSemantics": "For an explicit inspection stop, perform a real stop and commit its checkpoint first. Runtime then idempotently completes the matching I2 item from the durable child delivery and settles and closes it before terminal. Inspection stop recovery reuses that exact committed checkpoint without stopping or running the child again. Preserve recovery responsibility on failure; missing or unexecuted children must not be fabricated as cancelled. App is wiring only."
     },
     "checkpoint_commit": {
       "ownerPath": "packages/app/src/ui-runtime/journal.ts",
       "ownerRel": "packages/app/src/ui-runtime/journal.ts",
-      "ownerSymbol": "FileCheckpointStore.commit"
+      "ownerSymbol": "FileCheckpointStore.commit",
+      "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "coordinationStatus": "planned/unimplemented",
+      "inspectionStopSemantics": "For an explicit inspection stop, commit the exact real stop checkpoint. Runtime idempotently completes the corresponding I2 item from each durable child delivery and settles and closes it before terminal. Inspection stop recovery shares this committed checkpoint without another stop or child run. Failure keeps recovery responsibility; missing or unexecuted children are not converted into cancelled results. App is wiring only."
     },
     "receipt_commit": {
       "ownerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
       "ownerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
       "ownerSymbol": "DurableOccurrenceConsumer.commitTerminal",
+      "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "coordinationStatus": "planned/unimplemented",
+      "inspectionStopSemantics": "For an explicit inspection stop, commit terminal only after the real stop checkpoint and Runtime idempotent completion, settlement, and closure of the corresponding I2 item for each durable child delivery. Inspection stop recovery reuses the exact committed checkpoint without another stop or child run. Failure preserves recovery responsibility; missing or unexecuted children are not fabricated as cancelled. The normal terminal receipt needs no fabricated I2 record. This app owner is wiring only and does not claim an implemented Runtime coordination capability.",
       "implementationStatus": "implemented",
       "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
       "ownerFenceStatus": "implemented",
@@ -98,7 +107,10 @@
     "task_terminal": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
-      "ownerSymbol": "projectRuntimeTaskDashboard"
+      "ownerSymbol": "projectRuntimeTaskDashboard",
+      "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "coordinationStatus": "planned/unimplemented",
+      "inspectionStopSemantics": "For an explicit inspection stop, terminal requires the committed real stop checkpoint first, then Runtime idempotent completion, settlement, and closure of the corresponding I2 item for each durable child delivery. Inspection stop recovery reuses the exact committed checkpoint without another stop or child run. Failure preserves recovery responsibility, and missing or unexecuted children are not fabricated as cancelled. App is wiring only."
     }
   }
 }

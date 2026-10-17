@@ -40,13 +40,16 @@
       "ownerPath": "packages/runtime/src/admission/implicit-orchestrator.ts",
       "ownerRel": "packages/runtime/src/admission/implicit-orchestrator.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "编排者核实计划适合性与目标事实的边界。"
+      "designNote": "编排者核实计划适合性并接受正式 plan 与 definition。自由文本、refined 结果或角色顺序不构成执行契约。"
     },
     "next_state": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "终态推进 owner。COMPLETED 分支须先消费 typed readDelivery 校验过的 delivery body 并通过同一 canonical public-output commit 与 exact readback 才接受 succeeded/final；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与 Planner 语义。canonical output 不得使用 native drain 或 summary。"
+      "designNote": "终态推进 owner，推进前结算本 logical turn。COMPLETED 分支须先消费 typed readDelivery 校验过的 delivery body 并通过同一 canonical public-output commit 与 exact readback 才接受 succeeded/final，且只有真实终态才关闭共享 cycle；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与 Planner 语义，只结束当前 turn，不关闭共享 cycle。canonical output 不得使用 native drain 或 summary。",
+      "settlementContract": "本 logical turn 的 settlement 与共享 cycle close 分离；不固定探索、计划、执行、审查顺序。",
+      "runtimeCoordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
+      "runtimeCoordinationStatus": "planned/unimplemented"
     }
   }
 }
