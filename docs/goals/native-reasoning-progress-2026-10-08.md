@@ -6,6 +6,8 @@
 
 ### 续接增量（2026-10-16）
 
+- helper返回语义已实际接收：source7f91c87经标准Git组合最新候选与origin/main后合入d56e358。真实行为RED为Runtime7项中3失败，修后Runtime7/7、App原2named2/2、Jsonl原2/2；组合Appbuild/测试编译exit0、原App2/2Node0。returned描述包含真实summary/status/nextAction及既有条件引用，同目标不同结果可区分；adopted/refinedText、missing读null/实际补写幂等、当前turn raw保留。来源正常remove/prune/pathabsent，无哈希/候选包装检查，无leafreview/restart。C3a r14 fixture计划已准入，GCMr15只修旧delivery误用和accepted drain、续hot/fresh；Memory真实链RED已接，GCMr9续产品批次。child refined store只读小计划先补独立资产适配API，不等整个共享挂载才准备基础。首个Slice1仍按原M0/M1/M2行为证据推进，完整goal/main交付未完成。
+
 - C3a r11已terminal exit0：segmentfactory实际读到旧v2segment，Appbuild/tsc0；原hot仍0/1Node1，首错转为旧publication cycle1/op1被当前cycle2/op2的scope guard拒绝，无wire/freshprocess。独立r12亲读fixture与canonical lineage/exactreader责任后已准入，freshGCM r13同树只修Runtime历史checkpoint同task关系及evidence相对原scope、基础consumer与hot/fresh后继，不删历史/重写旧身份。Memory r6累计62读0文件改动，Root精确SIGINT61047→exit1/absent，原树GCM r7收窄到真实facade fixture可编译RED再续产品批次。helper结果r5终态回复无关面试题，只有2测试delta，无Runtime/验证，未接收；原树freshGCM r6继续。childGemini r4仍虚构Coordinator/producer返回/调用API，未准入；独立OAuth r5仅冻结当前named接口，不从错误计划派共享代码。原始证据均外置保留，完整目标未验收，无restart/main/push。
 
 - 2026-10-17后继：C3a segment小计划r10已准入，freshGCM r11在原树补checkpoint-journal/native-execution/composition真实segmentJournalFor接线并续hot/fresh-process，未验收。helper新观察由独立OAuth r4确认：returned描述虽有派单语义却缺实际result；freshGCM r5在旧helper树已关后开唯一后继树，仅Runtime映射与原Runtime/Appconsumer，复用typed summary/status/nextAction，不改旧Journal/模型字段。Memory r6继续真实facade链。childGemini r3实际exit0但未准入，当前ABI已store字节/使用checkpoints.pre，计划反而新增重复store和假checkpoint；已同conversation续r4纠正真实API、pnpm/选中consumer与candidate依赖，不等待先合main。来源结果不直接作准入事实，两侧无冲突GCM共6路；全goal仍OPEN。
