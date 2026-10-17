@@ -908,13 +908,18 @@ test('J: typed Anthropic tool loop runs one real transport round trip with fresh
   assertBefore(harness.order, 'execute:call-anthropic', 'store:tool-result-output');
   assertBefore(harness.order, 'store:tool-result-output', 'accept:tool-result:root');
   assertBefore(harness.order, 'accept:tool-result:root', 'register:dispatching:child');
+  assertBefore(harness.order, 'accept:tool-result:root', 'register:settled:root');
+  assertBefore(harness.order, 'register:settled:root', 'register:dispatching:child');
   assertBefore(harness.order, 'register:dispatching:child', 'hook:continuation');
   assertBefore(harness.order, 'hook:continuation', 'fetch:2');
 
-  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'settled', 'dispatching', 'dispatched', 'settled']);
   const rootRequestId = harness.registrations[0]!.record.request.requestId;
   const childDispatch = harness.registrations.find((entry) => entry.record.phase === 'dispatching' && entry.record.parentRequestId === rootRequestId);
   assert.ok(childDispatch, 'expected a continuation dispatching registration bound to the root request');
+  const rootSettled = harness.registrations.find((entry) => entry.record.phase === 'settled' && entry.record.parentRequestId === undefined);
+  assert.ok(rootSettled, 'expected the root request to record its own settled phase before continuation');
+  assert.equal(rootSettled!.record.request.requestId, rootRequestId);
   assert.equal(harness.lifecycle.filter((event) => event.phase === 'dispatching')[1]!.parentRequestId, rootRequestId);
   assert.equal(harness.lifecycle.every((event) => event.turnId === harness.lifecycle[0]!.turnId), true);
 
@@ -1016,14 +1021,18 @@ test('J: typed Chat tool loop runs one real transport round trip with two tools 
   assertBefore(harness.order, 'hook:initial', 'fetch:1');
   assertBefore(harness.order, 'accept:tool-call:root', 'execute:call-chat-read');
   assertBefore(harness.order, 'execute:call-chat-read', 'execute:call-chat-list');
-  assert.ok(harness.order.lastIndexOf('accept:tool-result:root') < position(harness.order, 'register:dispatching:child'));
+  assert.ok(harness.order.lastIndexOf('accept:tool-result:root') < position(harness.order, 'register:settled:root'), 'expected every root tool result to be accepted before the root request settles');
+  assert.ok(position(harness.order, 'register:settled:root') < position(harness.order, 'register:dispatching:child'));
   assertBefore(harness.order, 'register:dispatching:child', 'hook:continuation');
   assertBefore(harness.order, 'hook:continuation', 'fetch:2');
 
-  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'settled', 'dispatching', 'dispatched', 'settled']);
   const rootRequestId = harness.registrations[0]!.record.request.requestId;
   const childDispatch = harness.registrations.find((entry) => entry.record.phase === 'dispatching' && entry.record.parentRequestId === rootRequestId);
   assert.ok(childDispatch, 'expected a continuation dispatching registration bound to the root request');
+  const rootSettled = harness.registrations.find((entry) => entry.record.phase === 'settled' && entry.record.parentRequestId === undefined);
+  assert.ok(rootSettled, 'expected the root request to record its own settled phase before continuation');
+  assert.equal(rootSettled!.record.request.requestId, rootRequestId);
   assert.equal(harness.lifecycle.filter((event) => event.phase === 'dispatching')[1]!.parentRequestId, rootRequestId);
   assert.equal(harness.lifecycle.every((event) => event.turnId === harness.lifecycle[0]!.turnId), true);
 
