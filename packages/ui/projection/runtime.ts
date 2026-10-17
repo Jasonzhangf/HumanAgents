@@ -1,6 +1,10 @@
 import type { EvidenceRef, LifecycleState, TaskId } from '@humanagent/contracts';
 import type { SemanticObservationEnvelope } from '@humanagent/contracts';
 import {
+  type RuntimeCommitRefProjection,
+  type RuntimeContextHistoryProjection,
+  type RuntimeContextReplacementProjection,
+  type RuntimeContextViewProjection,
   type RuntimeDashboardProjection,
   type RuntimeMode,
   type RuntimeModeStatus,
@@ -17,7 +21,9 @@ import {
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
+  type RuntimeReadResult,
 } from '../contracts/runtime.js';
+import type { RuntimeTaskPlanHistoryProjection } from '../contracts/task-plan-history.js';
 import type { RuntimeSemanticObservationEnvelope } from '../contracts/runtime.js';
 import { RuntimeProjectionError } from '../contracts/runtime.js';
 
@@ -60,6 +66,7 @@ export interface RuntimeTaskSnapshotInput {
   readonly requirementQueue?: string;
   readonly requirementAdmission?: RuntimeTaskRowProjection['requirementAdmission'];
   readonly requirementAdmissionLabel?: string;
+  readonly taskPlanHistory?: RuntimeReadResult<RuntimeTaskPlanHistoryProjection>;
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;
@@ -98,6 +105,41 @@ export interface RuntimeSemanticObservationInput {
 }
 
 export type RuntimeSemanticObservationProjection = RuntimeSemanticObservationEnvelope;
+
+export interface RuntimeCommitRefInput {
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly recordDigest: string;
+}
+
+export interface RuntimeContextViewInput {
+  readonly contextViewRef: string;
+  readonly executionEpoch: number;
+  readonly contextDigest: string;
+  readonly checkpointId: string;
+  readonly activeRefs: readonly string[];
+  readonly omittedRefs: readonly string[];
+}
+
+export interface RuntimeContextReplacementInput {
+  readonly replacementId: string;
+  readonly executionEpoch: number;
+  readonly fromContextViewRef: string;
+  readonly toContextViewRef: string;
+  readonly toContextDigest: string;
+  readonly deltaIds: readonly string[];
+  readonly reason: RuntimeContextReplacementProjection['reason'];
+  readonly replacementDigest: string;
+}
+
+export interface RuntimeContextHistoryInput {
+  readonly mode: RuntimeMode;
+  readonly taskId: TaskId;
+  readonly currentContextCommitRef?: RuntimeCommitRefInput;
+  readonly views: readonly RuntimeContextViewInput[];
+  readonly replacements: readonly RuntimeContextReplacementInput[];
+  readonly nextCursor?: string;
+}
 
 function stateLabel(state: LifecycleState): string {
   return STATE_LABELS[state];
@@ -141,6 +183,10 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
     updatedAt: source.updatedAt,
     entry: 'task-dashboard',
   };
+}
+
+function projectCommitRef(ref: RuntimeCommitRefInput): RuntimeCommitRefProjection {
+  return { ...ref };
 }
 
 export function projectRuntimeStatus(input: RuntimeStatusInput): RuntimeStatusProjection {
@@ -232,6 +278,38 @@ export function projectRuntimeSemanticObservation(
   return input.semantic;
 }
 
+export function projectRuntimeContextHistory(
+  input: RuntimeContextHistoryInput,
+): RuntimeContextHistoryProjection {
+  return {
+    surface: 'runtime-context-history',
+    mode: input.mode,
+    taskId: input.taskId,
+    currentContextCommitRef: input.currentContextCommitRef
+      ? projectCommitRef(input.currentContextCommitRef)
+      : undefined,
+    views: input.views.map((view) => ({ ...view })),
+    replacements: input.replacements.map((replacement) => ({ ...replacement })),
+    ...(input.nextCursor === undefined ? {} : { nextCursor: input.nextCursor }),
+  };
+}
+
+/** Waiting copy describes recorded state, never activity inferred from a node. */
+export function projectRuntimeTaskWaitingStatus(
+  source: Pick<RuntimeTaskSnapshotInput, 'state' | 'checkpoint'>,
+): string {
+  if (source.checkpoint !== undefined) return '已提交收拢记录';
+  switch (source.state) {
+    case 'running': return '正在等待执行结果';
+    case 'settling': return '正在收拢执行结果，等待检查点提交';
+    case 'blocked': return '等待资源或人工处理后才能继续';
+    case 'failed': return '执行失败；等待错误证据和资源收拢';
+    case 'stopped':
+    case 'cancelled': return '停止或取消请求已受理；等待收拢完成';
+    default: return '尚无执行等待信息';
+  }
+}
+
 export function projectRuntimeTaskDashboard(
   source: RuntimeTaskSnapshotInput,
   mode: RuntimeMode,
@@ -260,6 +338,15 @@ export function projectRuntimeTaskDashboard(
     executionEpoch: source.executionEpoch,
     allowedActions: source.allowedActions,
     observationRef: `task://${source.taskId.value}/observation`,
+    taskPlanHistory: source.taskPlanHistory ?? {
+      ok: false,
+      failure: {
+        code: 'task-plan-history.not-composed',
+        ownerId: 'humanagent.ui.projection.runtime',
+        message: 'no task plan history read was composed for this dashboard projection',
+        nextAction: 'compose the task plan history read through the canonical control Journal before projecting the dashboard',
+      },
+    },
     ...(liveness === undefined ? {} : { liveness }),
   };
 }

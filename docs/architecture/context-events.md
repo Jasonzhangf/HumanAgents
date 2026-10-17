@@ -217,6 +217,8 @@ export interface CompactSnapshot {
 
 `allowedStatusOf(type)` = `{defaultStatusOf(type)}` ∪ `{'superseded'}` ∪ `{§8.2 改写表中该 type 的全部改写目标}`，是 §11 第 3 项的判据。`'superseded'` 对**所有** type 合法（任何事件都可被新事件取代），因此它必须计入 `allowedStatusOf`，否则 §11 第 3 项会拒绝 superseded 事件、而第 15 项又要求它存在，两条判据互斥。
 
+`allowedStatusOf('operation.started')` 另包含 `completed`。它表示启动已经发生且不再处于执行中，不表示工具或业务结果成功；构造期默认值仍为 `active`。
+
 | type | category | priority | narrative | defaultStatus | label |
 |---|---|---|---|---|---|
 | `task.created` | `task` | 2 | `progress` | `completed` | 任务已创建 |
@@ -288,13 +290,15 @@ export interface PairingIndex {
 }
 
 export function buildPairingIndex(events: readonly CanonicalContextEvent[]): PairingIndex;
-export function applyPairingOutcome(events: readonly CanonicalContextEvent[]): readonly CanonicalContextEvent[];
+export function applyPairingOutcome(events: readonly CanonicalContextEvent[], endedStartEventIds?: ReadonlySet<string>): readonly CanonicalContextEvent[];
 export function assertPairingConsistent(events: readonly CanonicalContextEvent[]): void;
 ```
 
 `buildPairingIndex` 要求输入已按第 12 节去重且 `eventId` 唯一；遇到重复 `eventId` 抛 `ContextEventError`。
 
 `applyPairingOutcome` 是 **`status` 改写的唯一 owner**。第 7 节说 `status` 会被配对结果改写；本函数就是那个改写者，任何其它位置不得改写 `status`。它按 `buildPairingIndex` 的结果返回**新数组**（不改输入）：为每个**已配对**的关闭事件补 `pairing.relatedEventId`，并按下面的改写表把已闭合的打开事件从 `defaultStatus` 改写为终态。**未配对的关闭事件不分配 `pairing`**（§9.3、§10.3、§11 第 11 项一致）。
+
+Runtime 配对还向本函数传入确切结束的 `operation.started` 事件 ID，将其从 `active` 改为 `completed`。证据须为无冲突、唯一匹配且顺序更晚的工具结果（invocation 状态不为 `open` 或 `unknown`），或同 task / operation / executionEpoch 下顺序更晚、无冲突且状态为 `succeeded`、`failed`、`cancelled`、`stopped` 或 `blocked` 的 `execution.terminal(final)`。provider 阶段终点不结束 execution start。晚于终点或属于其它 operation / epoch 的 start 保持 `active`。此改写不增加 `pairing` 或 related 字段，不改变通用配对规则，也不删除历史事件；缺失结果仍为 group `unknown`，失败与冲突证据保留。
 
 **不变量：`status === 'superseded'` 的事件不携带 `pairing`。** `buildPairingIndex` / `applyPairingOutcome` 一律跳过 superseded 事件，因此本模块产出的 canonical 事件永不出现该组合。这条是下游投影的前提，不是可选的：`compactContextEvents` 对 superseded 走 `reason: 'superseded'` 的丢弃分支（§10.3），而配对分组走整组同进同出；若某个 superseded 事件仍带 `pairing`，同一 `eventId` 会同时进入 `retained` 与 `omitted`，破坏 §10.3 的划分。§10.3 已要求输入必须是本函数的输出，故该组合属契约外输入；此处**显式**声明，以免被误读为未定义行为。本模块**不**为它增加运行时校验层（与「不为不可达场景增加校验层」一致）。
 
@@ -309,7 +313,7 @@ export function assertPairingConsistent(events: readonly CanonicalContextEvent[]
 | `operation.failed` | `failed` | `checkpoint.committed` | `resolved` |
 | `operation.failed` | `failed` | `checkpoint.reentered` | `resolved` |
 
-`allowedStatusOf(type)` 由 `taxonomy.ts` 导出，等于「`defaultStatusOf(type)` ∪ `{'superseded'}` ∪ 上表该 type 的全部改写目标」。它是 §11 第 3 项的可判定判据。`'superseded'` 计入所有 type（取代不是配对关系，见 §8.1 上方说明与 §9.3）。
+`allowedStatusOf(type)` 由 `taxonomy.ts` 导出，等于「`defaultStatusOf(type)` ∪ `{'superseded'}` ∪ 上表该 type 的全部改写目标」，并为 `operation.started` 包含上述 runtime 改写目标 `completed`。它是 §11 第 3 项的可判定判据。`'superseded'` 计入所有 type（取代不是配对关系，见 §8.1 上方说明与 §9.3）。
 
 `applyPairingOutcome` **不触碰** `status === 'superseded'` 的事件，也不为它们分配 `pairing`：被取代的事件不参与配对，其唯一真源是 `status` + `supersededByEventId`。
 

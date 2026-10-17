@@ -5,6 +5,7 @@ import type {
   TaskId,
   TaskOutput,
 } from '@humanagent/contracts';
+import type { RuntimeAgentActivityProjection, RuntimeReadResult } from './runtime.js';
 
 export type UiSurfaceState =
   | 'loading'
@@ -416,6 +417,11 @@ export interface PipelineObservationProjection {
   readonly scope: ObservationScopeProjection;
   readonly selectedNode?: ObservationNodeDetailProjection;
   readonly rules: ObservationPresentationRules;
+  /**
+   * Per-task Agent activity read for the observation surface. Same frozen
+   * projection as the dashboard; absent when the app composed no read.
+   */
+  readonly agentActivity?: RuntimeReadResult<RuntimeAgentActivityProjection>;
 }
 
 export interface MemoryEntryProjection {

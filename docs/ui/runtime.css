@@ -1,4 +1,5 @@
 @import "./state-colors.css";
+@import "./semantic-observation.css";
 :root {
   color-scheme: light;
   --ink: #17201d;
@@ -120,6 +121,50 @@ a {
   justify-content: space-between;
   gap: 28px;
   margin-bottom: 28px;
+}
+
+.page-heading-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.task-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.task-title-current {
+  font-size: 24px;
+  line-height: 1.25;
+  letter-spacing: 0;
+  -webkit-line-clamp: 2;
+}
+
+.business-output-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.record-item--selected {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+  scroll-margin-top: 24px;
+}
+
+/* A raw record must shrink with its container so a long JSON line or
+   locator cannot widen the page on a phone viewport. */
+.record-item,
+.record-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.record-selected-tag {
+  font-weight: 700;
+  color: var(--accent);
 }
 
 .eyebrow {
@@ -1132,6 +1177,8 @@ pre {
 
 .display-mode-host {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 10px;
 }
 
@@ -1278,16 +1325,30 @@ pre {
    new palette, and no planned node carries an executed-state tone. */
 .plan-revision-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
 .plan-revision {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 10px;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
+}
+
+/* Plan sections are grid items of .plan-revision. Let them shrink below
+   their min-content so a long reference cannot widen the whole page. */
+.plan-revision-head,
+.plan-reason,
+.plan-evidence,
+.plan-changes,
+.plan-snapshot,
+.plan-detail {
+  min-width: 0;
 }
 
 .plan-revision-head {
@@ -1301,6 +1362,7 @@ pre {
 .plan-revision-head h3 {
   margin: 0;
   font-size: 15px;
+  overflow-wrap: anywhere;
 }
 
 .plan-revision-tags {
@@ -1337,6 +1399,7 @@ pre {
 .plan-evidence-list,
 .plan-change-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   margin: 0;
   padding-left: 20px;
@@ -1345,6 +1408,27 @@ pre {
 .plan-graph {
   display: grid;
   gap: 10px;
+}
+
+/* Evidence rows keep the full reference text: only the break opportunity is
+   added, so a long locator cannot widen the page. */
+.plan-evidence-item {
+  min-width: 0;
+}
+
+.plan-evidence-ref {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.plan-reason p,
+.plan-predecessor,
+.plan-coverage,
+.plan-changes p,
+.plan-current-summary,
+.record-ref dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .plan-phase {

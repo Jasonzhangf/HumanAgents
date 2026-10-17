@@ -10,6 +10,7 @@ import {
   type ProviderToolCall,
   type ProviderToolResult,
   type ScopeRef,
+  type TaskRuntimeIncarnation,
   type WorkAssignment,
   type WorkResult,
 } from './index.js';
@@ -213,6 +214,11 @@ export interface ChildInvocationRecord {
   readonly checkpointReceiptRef: string;
   /** The typed assignment the dispatched child call is bound to. */
   readonly binding: ChildCallBinding;
+  /**
+   * The actual acquired execution instance when the producer received a real
+   * pool lease. Legacy records without this field keep the relation unknown.
+   */
+  readonly incarnation?: TaskRuntimeIncarnation;
   /**
    * Set only after the parent receives the matching refined delivery and selects
    * it for adopted semantic context. Mutually exclusive with
@@ -489,6 +495,28 @@ function assertChildCallBinding(value: unknown, label: string): asserts value is
   throw new ContractError(`${label} kind is invalid`);
 }
 
+export function validateChildInvocationIncarnation(
+  incarnation: unknown,
+  binding: ChildCallBinding,
+  label: string,
+): asserts incarnation is TaskRuntimeIncarnation {
+  assertPlainObject(incarnation, `${label} incarnation`);
+  assertNonEmptyString(incarnation.runtimeId, `${label} incarnation runtimeId`);
+  assertPositiveSafeInteger(incarnation.generation, `${label} incarnation generation`);
+  assertNonEmptyString(incarnation.agentInstanceId, `${label} incarnation agentInstanceId`);
+  assertNonEmptyString(incarnation.roleId, `${label} incarnation roleId`);
+  assertPlainObject(incarnation.taskId, `${label} incarnation taskId`);
+  assertScope(incarnation.taskId as unknown as Parameters<typeof assertScope>[0], 'task');
+  assertNonEmptyString(incarnation.assignmentId, `${label} incarnation assignmentId`);
+  assertPositiveSafeInteger(incarnation.executionEpoch, `${label} incarnation executionEpoch`);
+  const taskId = binding.kind === 'execution' ? binding.assignment.taskId.value : binding.assignment.taskId;
+  if (incarnation.taskId.value !== taskId
+    || incarnation.assignmentId !== binding.assignment.assignmentId
+    || incarnation.executionEpoch !== binding.assignment.executionEpoch) {
+    throw new ContractError(`${label} incarnation does not match its invocation binding`);
+  }
+}
+
 function assertSameExecutionAssignmentIdentity(binding: WorkAssignment, delivery: WorkAssignment): void {
   if (binding.assignmentId !== delivery.assignmentId
     || binding.taskId.value !== delivery.taskId.value
@@ -543,6 +571,9 @@ export function validateChildInvocationReferences(
     assertNonEmptyString(invocation.childTurnId, `${label} child turnId`);
     assertNonEmptyString(invocation.checkpointReceiptRef, `${label} child checkpointReceiptRef`);
     assertChildCallBinding(invocation.binding, `${label} child invocation binding`);
+    if (invocation.incarnation !== undefined) {
+      validateChildInvocationIncarnation(invocation.incarnation, invocation.binding, `${label} child invocation`);
+    }
     if (invocation.postReviewCheckpointRef !== undefined) {
       if (invocation.binding.kind !== 'review') throw new ContractError(`${label} child post-review checkpoint requires a review invocation`);
       assertNonEmptyString(invocation.postReviewCheckpointRef, `${label} child postReviewCheckpointRef`);

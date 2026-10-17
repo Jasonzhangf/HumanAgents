@@ -1,4 +1,11 @@
-import { assertSameScope, canonicalJsonStringify, validateAcceptedChildDelivery, validateAcceptedRawFact } from '../../../contracts/src/index.js';
+import {
+  assertSameScope,
+  canonicalJsonStringify,
+  validateAcceptedChildDelivery,
+  validateAcceptedRawFact,
+  scopeContains,
+  validateTaskIdentityScope,
+} from '../../../contracts/src/index.js';
 import type {
   AcceptedChildDelivery,
   AcceptedRawFact,
@@ -7,11 +14,14 @@ import type {
   RawAsset,
   RuntimeRequestRecord,
   ScopeRef,
+  TaskIdentityScope,
 } from '../../../contracts/src/index.js';
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import {
   activeTurnSegmentCommitId,
   validateResumedTurnSegmentOpened,
+  type ActiveTurnInitialOpenAnchor,
+  type ActiveTurnSegmentInterruptedAnchor,
   type ActiveTurnSegmentBinding,
   type ResumedTurnSegmentOpened,
 } from '../../../contracts/src/active-turn-segments.js';
@@ -44,6 +54,7 @@ import { readTaskBusinessRegistration } from './task-grants.js';
 
 const ACTIVE_TURN_PAYLOAD_TYPE = 'active-turn.record';
 const ACTIVE_TURN_COMMIT_PREFIX = 'active-turn:';
+const ACTIVE_TURN_BINDING_DISCRIMINATOR = 'binding-opened';
 const REQUEST_PHASES: readonly RuntimeRequestRecord['phase'][] = ['dispatching', 'dispatched', 'waiting', 'settled', 'failed', 'cancelled'];
 const ACTIVE_TURN_KINDS: readonly ActiveTurnJournalRecord['kind'][] = [
   'binding-opened', 'initial-input', 'request', 'accepted-fact', 'child-invocation', 'child-delivery',
@@ -111,6 +122,14 @@ function turnIdFromCommitId(commitId: string, discriminator: string, admittedTur
     throw new JournalIntegrityError(`active turn commit id does not belong to the admitted turn ${admittedTurnId}`);
   }
   return turnId;
+}
+
+/** The turn a binding-opened commit id names, or null when it names nothing. */
+function bindingOpenedTurnId(commitId: string): string | null {
+  const suffix = `:${ACTIVE_TURN_BINDING_DISCRIMINATOR}`;
+  if (!commitId.startsWith(ACTIVE_TURN_COMMIT_PREFIX) || !commitId.endsWith(suffix)) return null;
+  const turnId = commitId.slice(ACTIVE_TURN_COMMIT_PREFIX.length, commitId.length - suffix.length);
+  return turnId === '' ? null : turnId;
 }
 
 function validateRawAssetContent(asset: RawAsset, label: string): void {
@@ -447,7 +466,7 @@ function validateRecords(
  * bindings belong to their own ports, so they are left untouched here.
  */
 function bindingOf(records: readonly JournalRecord[], admittedTurnId: string): ActiveTurnBinding {
-  const expectedCommitId = activeTurnCommitId(admittedTurnId, 'binding-opened');
+  const expectedCommitId = activeTurnCommitId(admittedTurnId, ACTIVE_TURN_BINDING_DISCRIMINATOR);
   let found: ActiveTurnBinding | undefined;
   for (const record of records) {
     if (!isActiveTurnCarrier(record)) continue;
@@ -459,6 +478,11 @@ function bindingOf(records: readonly JournalRecord[], admittedTurnId: string): A
   }
   if (!found) throw new JournalIntegrityError(`active turn binding is not committed: ${admittedTurnId}`);
   return found;
+}
+
+/** The physical receipt of one committed binding-opened record. */
+function taskBindingCommitRef(record: ActiveTurnCarrierRecord): JournalCommitRef {
+  return { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest };
 }
 
 export interface JsonlActiveTurnJournalOptions {
@@ -478,6 +502,38 @@ export function decodeActiveTurnRecords(
   admittedTurnId: string,
 ): readonly ActiveTurnJournalRecord[] {
   return validateRecords(records, admittedTurnId, bindingOf(records, admittedTurnId)).records;
+}
+
+export type TaskActiveTurnBindingEntry = {
+  readonly binding: ActiveTurnBinding;
+  readonly commitRef: JournalCommitRef;
+};
+
+/**
+ * Task-scoped enumeration over the same verified Organ Journal. It reads the
+ * codec's own committed binding-opened carriers without naming one turn, and
+ * it never appends or prepares a capture.
+ */
+export async function listTaskActiveTurnBindings(input: {
+  readonly journal: Pick<JsonlOrganJournal, 'replay'>;
+  readonly scope: TaskIdentityScope;
+}): Promise<readonly TaskActiveTurnBindingEntry[]> {
+  validateTaskIdentityScope(input.scope);
+  const committed = await input.journal.replay();
+  const bindings: TaskActiveTurnBindingEntry[] = [];
+  for (const record of committed) {
+    if (!isActiveTurnCarrier(record)) continue;
+    const typed = payloadOf(record);
+    if (typed.kind !== 'binding-opened') continue;
+    const turnId = bindingOpenedTurnId(record.commitId);
+    if (turnId === null) {
+      throw new JournalIntegrityError('active turn binding commit id does not match its record');
+    }
+    const binding = bindingOfRecord(typed, turnId);
+    if (!scopeContains(input.scope, binding.scope)) continue;
+    bindings.push({ binding, commitRef: taskBindingCommitRef(record) });
+  }
+  return bindings;
 }
 
 /**
@@ -524,6 +580,15 @@ export class JsonlActiveTurnJournal implements ActiveTurnJournalPort {
   async replay(): Promise<readonly ActiveTurnJournalRecord[]> {
     const records = await this.journal.replay();
     return validateRecords(records, this.turnId, bindingOf(records, this.turnId)).records;
+  }
+
+  /**
+   * Task-scoped enumeration over the same verified Organ Journal. It reads the
+   * codec's own committed binding-opened carriers without limiting this port
+   * instance to one turn, and it never appends or prepares a capture.
+   */
+  listTaskBindings(scope: TaskIdentityScope): Promise<readonly TaskActiveTurnBindingEntry[]> {
+    return listTaskActiveTurnBindings({ journal: this.journal, scope });
   }
 }
 
@@ -715,6 +780,64 @@ function assertPredecessorReceiptRef(records: readonly JournalRecord[], receiptR
   }
 }
 
+/**
+ * The durable anchor of an original turn that opened in v1: the real
+ * `binding-opened` commit and the last committed `active-turn:<businessTurnId>:*`
+ * record (the binding commit itself when it committed nothing else). It returns
+ * null when no binding-opened record exists, so a caller never invents an anchor
+ * for an unopened turn. It carries no capture and claims no save.
+ */
+function initialOpenAnchorOf(
+  records: readonly JournalRecord[],
+  businessTurnId: string,
+): ActiveTurnInitialOpenAnchor | null {
+  const bindingCommitId = activeTurnCommitId(businessTurnId, ACTIVE_TURN_BINDING_DISCRIMINATOR);
+  const bindingRecord = records.find((candidate) => candidate.commitId === bindingCommitId);
+  if (bindingRecord === undefined) return null;
+  const bindingPayload = payloadOf(bindingRecord);
+  if (bindingPayload.kind !== 'binding-opened') {
+    throw new JournalIntegrityError('active turn binding commit id does not match its record');
+  }
+  bindingOfRecord(bindingPayload, businessTurnId);
+  const owned = records.filter((record) => isActiveTurnCarrier(record) && isBoundTurnCarrier(record, businessTurnId));
+  if (owned.length === 0) {
+    throw new JournalIntegrityError(`active turn binding is not committed: ${businessTurnId}`);
+  }
+  const last = owned[owned.length - 1]!;
+  return { bindingCommitRef: journalCommitRef(bindingRecord), recordsThroughCommitRef: journalCommitRef(last) };
+}
+
+function sameCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean {
+  return left.commitId === right.commitId
+    && left.journalSeq === right.journalSeq
+    && left.recordDigest === right.recordDigest;
+}
+
+/**
+ * The durable anchor of one committed segment: its real `segment-opened` commit
+ * and the last committed record in that segment's commit-id namespace. It
+ * returns null when no matching opened record exists, so a caller never invents
+ * an anchor for an unopened segment. It carries no capture and claims no save.
+ */
+function segmentAnchorOf(
+  records: readonly JournalRecord[],
+  businessTurnId: string,
+  segmentId: string,
+): ActiveTurnSegmentInterruptedAnchor | null {
+  const openedCommitId = activeTurnSegmentCommitId(segmentId, 'segment-opened');
+  const openedRecord = records.find((record) => record.commitId === openedCommitId);
+  if (openedRecord === undefined) return null;
+  const opened = decodeSegmentOpened(openedRecord);
+  if (opened.businessTurnRef.businessTurnId !== businessTurnId) return null;
+  const prefix = `${ACTIVE_TURN_SEGMENT_COMMIT_PREFIX}${segmentId}:`;
+  const owned = records.filter((record) => isSegmentCarrier(record) && record.commitId.startsWith(prefix));
+  const last = owned[owned.length - 1] ?? openedRecord;
+  return {
+    openedCommitRef: journalCommitRef(openedRecord),
+    recordsThroughCommitRef: journalCommitRef(last),
+  };
+}
+
 export interface JsonlActiveTurnSegmentJournalOptions {
   readonly filePath?: string;
   /** Actual shared Organ Journal object; preferred over a second path handle. */
@@ -773,6 +896,23 @@ export class JsonlActiveTurnSegmentJournal {
 
   async readSegmentOpened(segmentId: string): Promise<ResumedTurnSegmentOpened | null> {
     return findSegmentOpened(await this.journal.replay(), this.businessTurnId, nonEmpty(segmentId, 'segmentId'));
+  }
+
+  /**
+   * The durable anchor of the original turn when it opened in v1 but never
+   * committed a v1 capture, or null when no binding-opened record exists for the
+   * bound business turn.
+   */
+  async readInitialOpenAnchor(): Promise<ActiveTurnInitialOpenAnchor | null> {
+    return initialOpenAnchorOf(await this.journal.replay(), this.businessTurnId);
+  }
+
+  /**
+   * The durable anchor of a committed segment of the bound business turn, or
+   * null when no segment-opened record exists for that segment id.
+   */
+  async readSegmentAnchor(segmentId: string): Promise<ActiveTurnSegmentInterruptedAnchor | null> {
+    return segmentAnchorOf(await this.journal.replay(), this.businessTurnId, nonEmpty(segmentId, 'segmentId'));
   }
 
   async appendSegmentOpened(input: {
@@ -838,13 +978,50 @@ export class JsonlActiveTurnSegmentJournal {
         }
 
         // The predecessor must be the current committed chain tail.
-        const chain = decodeSegmentChain(records, this.businessTurnId);
-        const tail = chain.length === 0 ? undefined : chain[chain.length - 1];
-        const expectedPredecessor = tail ? tail.segmentId : this.businessTurnId;
-        if (record.predecessor.segmentId !== expectedPredecessor) {
-          throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+        if (record.predecessor.initialOpen !== undefined) {
+          const chain = decodeSegmentChain(records, this.businessTurnId);
+          // The initial-open predecessor must still be the unsaved original turn
+          // with no resumed segment yet; the anchor is re-derived under the lock
+          // and must equal the supplied anchor exactly. The App's held-transaction
+          // verifyPredecessorReceipt re-checks that no v1 receipt exists.
+          if (chain.length !== 0) {
+            throw new JournalIntegrityError('segment-opened initial-open predecessor requires the unsaved original turn');
+          }
+          if (record.predecessor.segmentId !== this.businessTurnId) {
+            throw new JournalIntegrityError('segment-opened initial-open predecessor must name the original business turn');
+          }
+          const anchor = initialOpenAnchorOf(records, this.businessTurnId);
+          if (anchor === null) {
+            throw new JournalIntegrityError('segment-opened initial-open predecessor is not a committed original turn');
+          }
+          if (anchor.bindingCommitRef.commitId !== record.predecessor.initialOpen.bindingCommitRef.commitId
+            || anchor.bindingCommitRef.journalSeq !== record.predecessor.initialOpen.bindingCommitRef.journalSeq
+            || anchor.bindingCommitRef.recordDigest !== record.predecessor.initialOpen.bindingCommitRef.recordDigest
+            || anchor.recordsThroughCommitRef.commitId !== record.predecessor.initialOpen.recordsThroughCommitRef.commitId
+            || anchor.recordsThroughCommitRef.journalSeq !== record.predecessor.initialOpen.recordsThroughCommitRef.journalSeq
+            || anchor.recordsThroughCommitRef.recordDigest !== record.predecessor.initialOpen.recordsThroughCommitRef.recordDigest) {
+            throw new JournalIntegrityError('segment-opened initial-open anchor does not match the committed initial turn facts');
+          }
+        } else if (record.predecessor.interrupted !== undefined) {
+          const expectedPredecessor = decodeSegmentChain(records, this.businessTurnId).at(-1);
+          if (expectedPredecessor === undefined || record.predecessor.segmentId !== expectedPredecessor.segmentId) {
+            throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+          }
+          const anchor = segmentAnchorOf(records, this.businessTurnId, record.predecessor.segmentId);
+          if (anchor === null) {
+            throw new JournalIntegrityError('segment-opened interrupted predecessor is not a committed segment');
+          }
+          if (!sameCommitRef(anchor.openedCommitRef, record.predecessor.interrupted.openedCommitRef)
+            || !sameCommitRef(anchor.recordsThroughCommitRef, record.predecessor.interrupted.recordsThroughCommitRef)) {
+            throw new JournalIntegrityError('segment-opened interrupted anchor does not match the committed segment facts');
+          }
+        } else {
+          const expectedPredecessor = decodeSegmentChain(records, this.businessTurnId).at(-1)?.segmentId ?? this.businessTurnId;
+          if (record.predecessor.segmentId !== expectedPredecessor) {
+            throw new JournalIntegrityError('segment-opened predecessor is not the current committed chain tail');
+          }
+          assertPredecessorReceiptRef(records, record.predecessor.recoveryAssetsReceiptRef);
         }
-        assertPredecessorReceiptRef(records, record.predecessor.recoveryAssetsReceiptRef);
         this.verifyPredecessorReceipt?.(records, record.predecessor);
         return { kind: 'append' as const, scope: record.binding.scope, commitId: input.commitId };
       },

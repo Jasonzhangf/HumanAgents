@@ -108,6 +108,37 @@ function agentSelectionQuery(agentQuery) {
   return appendAgentSelection(new URLSearchParams(), agentQuery).toString()
 }
 
+/**
+ * A checkpoint selection is URL view state owned by ./checkpoint-history.js. The
+ * API layer only forwards the four keys the caller already encoded: it never
+ * parses, defaults, or invents a checkpoint target, and it never imports the UI
+ * renderer. The keys ride on the same task-scoped checkpoint GET.
+ */
+function appendCheckpointSelection(query, checkpointQuery) {
+  if (!checkpointQuery) return query
+  for (const [key, value] of new URLSearchParams(checkpointQuery)) query.append(key, value)
+  return query
+}
+
+// A checkpoint asset body is addressed only by its role, or by the exact adopted
+// child triple. The four checkpoint selection keys on the query already name the
+// exact checkpoint; nothing else may be sent as authority.
+function checkpointAssetBodyPath(selector) {
+  if (!selector || typeof selector !== 'object') return null
+  if (selector.kind === 'capture') return 'capture'
+  if (selector.kind === 'adopted-child') {
+    const { invocationId, childTurnId, deliverySeq } = selector
+    if (typeof invocationId !== 'string' || !invocationId.trim()
+      || typeof childTurnId !== 'string' || !childTurnId.trim()
+      || !Number.isSafeInteger(deliverySeq) || deliverySeq < 0) {
+      return null
+    }
+    const encode = (value) => encodeURIComponent(value)
+    return `adopted-child/${encode(invocationId)}/${encode(childTurnId)}/${encode(String(deliverySeq))}`
+  }
+  return null
+}
+
 export function createRuntimeApi(options = {}) {
   const baseUrl = (options.baseUrl || '').replace(/\/$/, '')
   const fetchImpl = options.fetchImpl || globalThis.fetch.bind(globalThis)
@@ -252,18 +283,35 @@ export function createRuntimeApi(options = {}) {
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/context-history?${query}`, { method: 'GET' })
     },
     // Independent AND filters: each present filter is its own query field and
-    // the builder never merges revision/cycle/occurrence identities. `viewed`
-    // carries the selected old checkpoint so the read resolves current and
-    // viewed separately.
-    taskCheckpointHistory: (taskId, { projectKey, mode, viewed, directiveRevision, executionEpoch, cycleId, occurrenceRef, cursor, limit = 20 } = {}) => {
+    // the builder never merges revision/cycle/occurrence identities. The
+    // four-key `checkpointQuery` carries the selected old checkpoint so the read
+    // resolves current and viewed separately; the API never encodes it itself.
+    taskCheckpointHistory: (taskId, { projectKey, mode, checkpointQuery, directiveRevision, executionEpoch, cycleId, occurrenceRef, cursor, limit = 20 } = {}) => {
       const query = new URLSearchParams({ projectKey, mode, limit: String(limit) })
-      if (viewed) query.set('viewed', viewed)
+      appendCheckpointSelection(query, checkpointQuery)
       if (cursor) query.set('cursor', cursor)
       for (const [name, value] of Object.entries({ directiveRevision, executionEpoch, cycleId, occurrenceRef })) {
         if (value === undefined || value === null || value === '') continue
         query.set(name, String(value))
       }
       return request(`/api/tasks/${encodeURIComponent(taskId.value)}/checkpoints?${query}`, { method: 'GET' })
+    },
+    // The body read names the exact checkpoint with the same four selection keys
+    // and names the asset only by role or adopted-child triple. The descriptor,
+    // scope and locator stay with the service; the browser never authorizes them.
+    taskCheckpointAssetBody: (taskId, { projectKey, mode, checkpointQuery, selector } = {}) => {
+      const path = checkpointAssetBodyPath(selector)
+      if (!path) {
+        throw new RuntimeApiError({
+          code: 'checkpoint-asset.invalid-selector',
+          ownerId: 'humanagent.ui.runtime-api',
+          message: 'checkpoint 资产正文读取选择器无效。',
+          nextAction: '从检查点详情重新打开对应资产正文。',
+        })
+      }
+      const query = new URLSearchParams({ projectKey, mode })
+      appendCheckpointSelection(query, checkpointQuery)
+      return request(`/api/tasks/${encodeURIComponent(taskId.value)}/checkpoints/assets/${path}?${query}`, { method: 'GET' })
     },
     // I2 readonly history reads. These are explicit task GET builders. The
     // injected I2 authority is service-scoped, so the builder carries only the
@@ -313,6 +361,11 @@ export function createRuntimeApi(options = {}) {
       const suffix = query.size ? `?${query}` : ''
       return request(`/api/tasks/${encodeURIComponent(taskId)}/observation${suffix}`)
     },
+    // Read-only semantic observation. The plain GET carries the confirmed
+    // envelope; the SSE URL only names the same task's revision stream. Both are
+    // GET edges, and neither builder derives control state from a raw payload.
+    semanticObservation: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/semantic`),
+    semanticEventsUrl: (taskId) => `${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/semantic/stream`,
     startExecution: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',
       body: JSON.stringify(input),
@@ -331,8 +384,10 @@ export function readScopeKey(scope) {
   if (scope.kind === 'project') return `project:${scope.projectKey}`
   if (scope.kind === 'task') {
     // The canonical filter identity joins the key so two different AND-filter
-    // sets are never treated as the same scope. `viewed` is a selection, not a
-    // scope: it stays out of the key so a failed re-selection keeps the
+    // sets are never treated as the same scope. An explicit instance or
+    // checkpoint selection is also part of the identity, so a failed new
+    // selection has no prior content to re-publish as stale. The legacy I2
+    // `viewed` cursor stays out of the key so a failed re-selection keeps the
     // confirmed list for the same task/view/cursor/filters.
     const filters = scope.filters && typeof scope.filters === 'object'
       ? Object.keys(scope.filters).sort().map((key) => [key, scope.filters[key]])
@@ -342,6 +397,9 @@ export function readScopeKey(scope) {
     // read and an exact-instance read are different reads, so a failed instance
     // read never re-publishes the previous selection's content as "stale".
     if (scope.agentQuery) identity.push([...new URLSearchParams(scope.agentQuery)].sort())
+    // The same rule for an exact checkpoint selection: current, ck-a and ck-b
+    // are three distinct reads with three distinct identities.
+    if (scope.checkpointQuery) identity.push([...new URLSearchParams(scope.checkpointQuery)].sort())
     return JSON.stringify(identity)
   }
   return ''
@@ -511,6 +569,34 @@ export function stateTone(state) {
 
 export function queryParam(name) {
   return new URLSearchParams(location.search).get(name)
+}
+
+/**
+ * Whether one returned body projection is exactly the checkpoint and asset a
+ * body read asked for: the checkpoint identity, its full physical receipt and the
+ * selector. A response for another checkpoint, another receipt or another asset
+ * role is refused instead of published, so a late or mismatched response can
+ * never present itself as the opened body. Callers keep their own serial to
+ * decide whether the read is still current at all; this only compares identity.
+ */
+export function sameCheckpointAssetBodyAddress(projection, address) {
+  if (!projection || typeof projection !== 'object') return false
+  if (!address || typeof address !== 'object') return false
+  if (projection.surface !== 'runtime-checkpoint-asset-body') return false
+  if (projection.checkpoint?.checkpointId?.value !== address.target?.checkpointId) return false
+  const receipt = projection.checkpoint?.commitRef
+  const wanted = address.target?.commitRef
+  if (!receipt || !wanted) return false
+  if (receipt.commitId !== wanted.commitId) return false
+  if (receipt.journalSeq !== wanted.journalSeq) return false
+  if (receipt.recordDigest !== wanted.recordDigest) return false
+  const selector = projection.selector
+  const wantedSelector = address.selector
+  if (!selector || !wantedSelector || selector.kind !== wantedSelector.kind) return false
+  if (selector.kind === 'capture') return true
+  return selector.invocationId === wantedSelector.invocationId
+    && selector.childTurnId === wantedSelector.childTurnId
+    && selector.deliverySeq === wantedSelector.deliverySeq
 }
 
 export function clearNode(node) {

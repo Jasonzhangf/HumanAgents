@@ -24,7 +24,8 @@ import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
-import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
+import { FileCheckpointStore, UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
+import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
 import { UiRuntimeApiError } from './errors.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
 import {
@@ -251,6 +252,29 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const providerError = readiness ? providerErrorFromReadiness(readiness) : undefined;
   const attentionPort = new InMemoryAttentionPort();
   const modeRoot = join(options.checkpointRoot, options.mode);
+  const canonicalJournalPath = uiRuntimeControlJournalPath(modeRoot);
+  const canonicalCheckpoints = new FileCheckpointStore(canonicalJournalPath);
+  const canonicalCurrentState = createJsonlRuntimeTaskCurrentStateJournal({
+    journal: new JsonlOrganJournal(canonicalJournalPath),
+  });
+  const hydrateReadFor: NonNullable<NonNullable<UiRuntimeServiceOptions['runtimeComposition']>['hydrateReadFor']> =
+    options.runtimeComposition?.hydrateReadFor ?? (async (scope) => {
+      const latest = await canonicalCheckpoints.readLatest(scope);
+      if (latest === null) return undefined;
+      const { checkpoint } = latest;
+      if (checkpoint.scope.organId.value !== scope.organId.value
+        || checkpoint.scope.taskId?.value !== scope.taskId?.value
+        || checkpoint.scope.cycleId?.value !== scope.cycleId?.value
+        || checkpoint.scope.operationId?.value !== scope.operationId?.value) return undefined;
+      return {
+        checkpoint: {
+          verify: (requestedScope) => canonicalCheckpoints.verify(requestedScope),
+          readLatest: (requestedScope) => canonicalCheckpoints.readLatest(requestedScope),
+          readCommitted: (requestedScope, checkpointId) => canonicalCheckpoints.readCommitted(requestedScope, checkpointId),
+        },
+        currentState: { read: (requestedScope) => canonicalCurrentState.read(requestedScope) },
+      };
+    });
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
   const subscriptionJournalPath = join(modeRoot, 'subscriptions.jsonl');
   const clock = options.now;
@@ -350,7 +374,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     subscriptionControl,
-    ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
+    runtimeComposition: { ...options.runtimeComposition, hydrateReadFor },
     ...(clock === undefined ? {} : { now: clock }),
   });
   service = runtimeService;

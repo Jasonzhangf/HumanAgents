@@ -281,6 +281,11 @@ test('dispose cleanup failure is durable in the lease and the caller receipt', a
   assert.equal(receipt.cleanupFailure?.ownerId, 'owner-a');
   assert.match(receipt.cleanupFailure?.message ?? '', /listener close failed/);
   assert.equal(receipt.lease.failure?.errorCode, 'supervisor-dispose.cleanup-failed');
+  await assert.rejects(
+    () => acquireDaemonLease(paths, { takeover: { reason: 'retry after failed cleanup', stop: {} } }),
+    (error: any) => error.code === 'daemon-takeover.previous-close-unverified',
+  );
+  assert.equal((await readDaemonLease(paths))?.leaseId, receipt.lease.leaseId);
 });
 
 test('startup dispose remains retryable when lease release fails', async () => {
@@ -527,6 +532,62 @@ test('real child-process crash leaves a stale owner that cannot commit after tak
   const ready = await new SessionStore(paths).append(sessionId, { type: 'session.state', state: 'ready' }, freshLock);
   assert.equal(ready.state, 'ready');
   await freshLock.release();
+  await takeover.release();
+});
+
+test('startup owner crash recovery accepts an already-dead unclosed lease', async () => {
+  const paths = await fixture();
+  const configModule = new URL('../../../packages/config/src/index.js', import.meta.url).href;
+  const supervisorModule = new URL('../../../packages/app/src/supervisor/index.js', import.meta.url).href;
+  const script = `
+    import { resolveRuntimePaths } from ${JSON.stringify(configModule)};
+    import { acquireDaemonLease } from ${JSON.stringify(supervisorModule)};
+    const paths = await resolveRuntimePaths({ controlRoot: ${JSON.stringify(paths.controlRoot)}, workspace: ${JSON.stringify(paths.workspaceCwd)} });
+    const lease = await acquireDaemonLease(paths, {
+      ownerId: 'humanagent.app.serve',
+      startup: {
+        launcherPath: process.execPath,
+        cwd: ${JSON.stringify(paths.workspaceCwd)},
+        args: [],
+        source: { entryPath: process.execPath, packageVersion: '0.0.0-test' },
+      },
+    });
+    console.log(JSON.stringify({ pid: process.pid, leaseId: lease.record.leaseId }));
+  `;
+  const child = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    stdio: 'pipe',
+  })) as { readonly pid: number; readonly leaseId: string };
+
+  const crashed = await readDaemonLease(paths);
+  assert.equal(crashed?.leaseId, child.leaseId);
+  assert.equal(crashed?.pid, child.pid);
+  assert.ok(crashed?.startup);
+  assert.ok(!processIsAliveForTest(child.pid));
+  assert.equal(crashed?.disposedAt, undefined);
+
+  const previousFailure = {
+    phase: 'startup',
+    ownerId: 'humanagent.app.serve',
+    errorCode: 'fixture-unresolved-failure',
+    nextAction: 'inspect unresolved owner responsibility',
+    message: 'original owner failure',
+    occurredAt: new Date().toISOString(),
+  };
+  await writeFile(daemonLeasePath(paths), JSON.stringify({ ...crashed, failure: previousFailure }) + '\n', 'utf8');
+
+  const takeover = await acquireDaemonLease(paths, {
+    ownerId: 'humanagent.app.serve',
+    takeover: {
+      reason: 'startup owner exited without publishing disposal',
+      stop: { gracefulTimeoutMs: 1_000, pollIntervalMs: 10 },
+    },
+  });
+  assert.equal(takeover.record.generation, 2);
+  assert.equal(takeover.record.takeover?.previousLeaseId, child.leaseId);
+  assert.equal(takeover.record.takeover?.termination, 'already-dead');
+  assert.deepEqual(takeover.record.takeover?.previousFailure, previousFailure);
+  assert.equal(takeover.record.disposedAt, undefined);
   await takeover.release();
 });
 

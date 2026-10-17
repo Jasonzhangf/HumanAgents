@@ -430,6 +430,7 @@ test('§8.2 closedStatusOf：8 个关闭类型返回改写目标，其余 10 个
 test('§7/§8.2 allowedStatusOf 是唯一真源：默认状态 ∪ {superseded} ∪ 全部关闭改写目标', () => {
   for (const type of CONTEXT_EVENT_TYPES) {
     const expected = new Set<string>([defaultStatusOf(type), 'superseded']);
+    if (type === 'operation.started') expected.add('completed');
     for (const closer of CONTEXT_EVENT_TYPES) {
       if (openTypeOf(closer) !== type) continue;
       expected.add(must(closedStatusOf(closer), `closedStatusOf(${closer})`));

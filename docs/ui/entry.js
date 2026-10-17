@@ -31,7 +31,7 @@ let interactionCard = null
 // The shared work card mounts on the first real event or snapshot update. Until
 // then the host stays genuinely empty, so first entry claims no work.
 function presentInteractionCard(projection) {
-  if (!interactionCardHost) return
+  if (!interactionCardHost || !projection) return
   if (!interactionCard) interactionCard = mountInteractionWorkCard(interactionCardHost)
   interactionCard.update(projection)
 }
@@ -56,7 +56,9 @@ const TASK_FLOW_KINDS = new Set(TASK_FLOW_TYPES.map(([kind]) => kind))
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   cardState.sequence += 1
-  const activeInteractionId = detail.interactionId || interactionId || 'pending-input'
+  // The interaction id is only the one the runtime reported. The page never
+  // mints a placeholder identity for an event that carries none.
+  const activeInteractionId = detail.interactionId || interactionId
   cardState.entries = [
     ...cardState.entries,
     {
@@ -76,6 +78,7 @@ function updateCardFromSnapshot(snapshot) {
   cardState.sequence = 0
   cardState.entries = []
   const projection = projectInteractionCardFromSnapshot(snapshot)
+  if (!projection) return
   // The entry form submit is this new requirement's business confirmation. The
   // work card therefore never exposes a second confirmation action on this page.
   presentInteractionCard({ ...projection, actions: [] })
@@ -541,6 +544,26 @@ async function waitForTask(identity) {
   throw observationUnresolved('observation.task-not-ready', '任务已提交，但执行观测任务尚未就绪。')
 }
 
+// The explicit-intake states the runtime records once the human authorization is
+// done. Only these may drive the card after the confirmation request.
+const POST_CONFIRMATION_STATES = new Set(['confirmed', 'dispatched'])
+
+/**
+ * The interaction state the work card may project once the runtime accepted the
+ * requirement.
+ *
+ * The caller only reaches this after the runtime returned the typed confirmation
+ * receipt for the exact revision, so the interaction is at least `confirmed`.
+ * The interaction is re-read so the card reports the state the runtime owns now
+ * — for example `dispatched` once the coordinator consumed the requirement. The
+ * snapshot the page read before the submit is read-only draft history and never
+ * drives this projection. No state name is minted here.
+ */
+async function postConfirmationState() {
+  const current = await api.inspectExplicitInteraction(interactionId).catch(() => undefined)
+  return POST_CONFIRMATION_STATES.has(current?.state) ? current.state : 'confirmed'
+}
+
 async function executeSubmission(submission, clarificationAnswer) {
   if (!interactionId) {
     const received = await api.receiveExplicitInput({
@@ -605,6 +628,10 @@ async function executeSubmission(submission, clarificationAnswer) {
     taskFlow: submission.taskFlow,
   })
   confirmation = receipt.requirement
+  // The submit is the confirmation. `latestState` still holds the
+  // pre-confirmation snapshot the read-only draft above was rendered from, so
+  // the card must project the runtime's post-confirmation state from here on.
+  latestState = await postConfirmationState()
   appendCardEvent('decision', '需求已提交，正在打开执行观测', 'decision', { eventKey: 'explicit.confirmation-submitted' })
   status.dataset.tone = 'success'
   if (submission.executionPolicy.executionMode !== 'once') {

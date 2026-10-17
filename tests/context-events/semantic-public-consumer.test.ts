@@ -28,6 +28,39 @@ function observe(events: readonly RuntimeTaskEventLike[]) {
   return buildSemanticObservation({ scope, projectionVersion: 'test-v1', sourceWatermark: 1, events });
 }
 
+// Production observation: completed execution retains missing request outcomes and live starts.
+// Impact: false live activity. Cost: one bounded public-consumer regression.
+test('final execution facts end stale live claims without inventing subordinate success', () => {
+  const envelope = observe([
+    source({ eventId: 'execution-start', kind: 'execution.started' }),
+    source({ eventId: 'matched-tool', kind: 'provider.tool', requestId: 'intermediate', callId: 'matched', toolId: 'tool', seq: 2 }),
+    source({ eventId: 'matched-result', kind: 'provider.tool-result', requestId: 'intermediate', callId: 'matched', toolId: 'tool', status: 'succeeded', seq: 3 }),
+    source({ eventId: 'missing-result', kind: 'provider.tool', requestId: 'intermediate', callId: 'missing', toolId: 'tool', seq: 4 }),
+    source({ eventId: 'failed-final', kind: 'execution.terminal', terminalPhase: 'final', state: 'failed', seq: 5 }),
+    source({ eventId: 'retry-start', kind: 'execution.started', seq: 6 }),
+    source({ eventId: 'success-final', kind: 'execution.terminal', terminalPhase: 'final', state: 'succeeded', seq: 7 }),
+    source({ eventId: 'later-start', kind: 'execution.started', seq: 8 }),
+    source({ eventId: 'later-tool', kind: 'provider.tool', requestId: 'later-request', callId: 'later', toolId: 'tool', seq: 9 }),
+    source({ eventId: 'other-start', kind: 'execution.started', operationId: 'other-operation', seq: 10 }),
+  ]);
+  const request = envelope.pairing.find((group) => group.kind === 'request' && group.requestId === 'intermediate');
+  const matched = envelope.events.find((event) => event.sourceId === 'matched-tool')!;
+  assert.deepEqual({ request: request?.state, matchedStillActive: matched.status === 'active' },
+    { request: 'unknown', matchedStillActive: false });
+  assert.equal(envelope.pairing.find((group) => group.kind === 'invocation' && group.callId === 'missing')?.state, 'unknown');
+  assert.equal(envelope.pairing.find((group) => group.kind === 'invocation' && group.callId === 'matched')?.state, 'closed');
+  assert.equal(envelope.pairing.find((group) => group.kind === 'operation' && group.scope.operationId?.value === 'operation-1')?.state, 'unknown');
+  assert.equal(envelope.coverageIssues.some((issue) => issue.reason === 'closer-conflict'), true);
+  assert.equal(envelope.events.find((event) => event.sourceId === 'failed-final')?.status, 'failed');
+  for (const id of ['execution-start', 'retry-start', 'missing-result']) {
+    assert.notEqual(envelope.events.find((event) => event.sourceId === id)?.status, 'active');
+  }
+  for (const id of ['later-start', 'later-tool', 'other-start']) {
+    assert.equal(envelope.events.find((event) => event.sourceId === id)?.status, 'active');
+  }
+  assert.equal(envelope.pairing.find((group) => group.kind === 'request' && group.requestId === 'later-request')?.state, 'open');
+});
+
 test('public emitted API preserves multi-opener invocation uncertainty in narrative', () => {
   const envelope = observe([
     source({ eventId: 'invoke-1', kind: 'provider.tool', requestId: 'request-1', callId: 'call-1', toolId: 'tool-1' }),

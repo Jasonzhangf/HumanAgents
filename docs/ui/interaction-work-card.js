@@ -1004,7 +1004,13 @@ function renderStatus(projection) {
   const metadata = projection.cardMetadata
   const status = create('header', 'iwc-status')
   const observation = projection.mode === 'observation'
-  status.setAttribute('aria-label', observation ? '节点状态' : '任务状态')
+  // The scope prefix comes from the real source identity: an observation is a
+  // node, a source that carries a real TaskId is a task, and everything else is
+  // an explicit interaction. The card never labels an interaction-only card as
+  // a task.
+  const hasTask = Boolean(metadata.source?.taskId?.value)
+  const scopePrefix = observation ? '节点' : hasTask ? '任务' : '交互'
+  status.setAttribute('aria-label', `${scopePrefix}状态`)
   const top = create('div', 'iwc-status-top')
   const lifecycle = create('div', 'iwc-lifecycle')
   // The animated dot is the card's own progress signal, so it may only run when
@@ -1021,7 +1027,7 @@ function renderStatus(projection) {
   lifecycle.append(create('strong', 'iwc-lifecycle-label', stateLabel))
   // The chip names the same localized label. A raw `LifecycleState` value must
   // never reach the human.
-  lifecycle.append(create('span', 'iwc-state-chip', observation ? `节点 ${stateLabel}` : `任务 ${stateLabel}`))
+  lifecycle.append(create('span', 'iwc-state-chip', `${scopePrefix} ${stateLabel}`))
   top.append(lifecycle)
   const source = projection.statusbar
   const sourceChip = create('span', 'iwc-state-chip', observation ? `来源 ${source?.label || '只读投影'}` : `来源 ${source?.label || '未提供'}`)
@@ -1074,7 +1080,7 @@ function renderStatus(projection) {
       ])
   body.append(create('p', 'iwc-source-ref', observation
     ? `node=${valueOrUnknown(projection.observation?.nodeId)} · epoch=${valueOrUnknown(metadata.source?.executionEpoch)}`
-    : `task=${scopedValue(metadata.source?.taskId)} · operation=${scopedValue(metadata.source?.operationId)} · epoch=${valueOrUnknown(metadata.source?.executionEpoch)} · request=${valueOrUnknown(metadata.source?.requestId)} · turn=${valueOrUnknown(metadata.source?.turnId)}`))
+    : `${metadata.source?.interactionId === undefined ? '' : `interaction=${valueOrUnknown(metadata.source.interactionId)} · `}task=${scopedValue(metadata.source?.taskId)} · operation=${scopedValue(metadata.source?.operationId)} · epoch=${valueOrUnknown(metadata.source?.executionEpoch)} · request=${valueOrUnknown(metadata.source?.requestId)} · turn=${valueOrUnknown(metadata.source?.turnId)}`))
   details.append(body)
   status.append(details)
   return status

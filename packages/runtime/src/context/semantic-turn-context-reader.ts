@@ -475,10 +475,17 @@ async function resolvePriorSegmentCores(input: {
         `segment ${successor.segmentId} does not precede-link ${segment.segmentId}`,
       );
     }
+    const recoveryAssetsReceiptRef = successor.predecessor.recoveryAssetsReceiptRef;
+    if (recoveryAssetsReceiptRef === undefined) {
+      failSegment(
+        'semantic-turn-context.segment.predecessor-receipt-missing',
+        `segment ${successor.segmentId} requires an exact recovery receipt for predecessor ${segment.segmentId}`,
+      );
+    }
     const exact = await input.exactReads.readSegmentCaptureExact({
       businessTurnId: chain.businessTurnRef.businessTurnId,
       segmentId: segment.segmentId,
-      recoveryAssetsReceiptRef: successor.predecessor.recoveryAssetsReceiptRef,
+      recoveryAssetsReceiptRef,
     });
     validateSegmentExactCapture({ chain, segment, exact });
     resolved.push(await foldActiveTurn({

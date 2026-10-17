@@ -35,10 +35,12 @@ import {
   validateProviderEvent,
 } from '../../../contracts/src/index.js';
 import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
-import type { CommittedCheckpointRecord } from '../checkpoints/ports.js';
+import type { CommittedCheckpointRecord, LatestCheckpointRecord } from '../checkpoints/ports.js';
 import type { AdvanceTurnResult } from '../agent-loop/runtime.js';
 import type { RuntimeTaskCurrentState, RuntimeTaskCurrentStateFacts, RuntimeTaskCurrentStateFactsPort,
-  RuntimeTaskCurrentStatePort, RuntimeTaskProcessingState, RuntimeTaskCurrentPlan } from './current-state.js';
+  RuntimeTaskCurrentStatePort, RuntimeTaskProcessingState, RuntimeTaskCurrentPlan, RuntimeTaskCurrentStateRead,
+  RuntimeTaskCurrentStateSelection } from './current-state.js';
+import { selectRuntimeTaskCurrentState } from './current-state.js';
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { InteractionClosureRecord } from '../checkpoints/closure.js';
@@ -192,6 +194,7 @@ export interface RuntimeTaskSnapshot {
   readonly currentNode: string;
   readonly operationId?: string;
   readonly executionEpoch?: number;
+  readonly cycleId?: string;
   readonly orchestrated: boolean;
   readonly allowedActions: readonly string[];
   readonly recentEvents: readonly RuntimeTaskEvent[];
@@ -473,6 +476,11 @@ const RUNTIME_OWNER = 'humanagent.runtime';
 
 export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCommitPort {}
 
+export interface RuntimeTaskHydrateReadSource {
+  readonly checkpoint: Pick<CheckpointJournalPort, 'verify' | 'readLatest' | 'readCommitted'>;
+  readonly currentState: Pick<RuntimeTaskCurrentStatePort, 'read'>;
+}
+
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
@@ -505,6 +513,7 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly attentionPort: AttentionPort;
   readonly journal?: RuntimeTaskJournalPort;
   readonly currentStatePort?: RuntimeTaskCurrentStatePort;
+  readonly hydrateReadFor?: (scope: ScopeRef) => Promise<RuntimeTaskHydrateReadSource | undefined>;
   /** Actual AgentLoop and native-save facts; unknown never becomes an empty recovery. */
   readonly currentStateFacts?: RuntimeTaskCurrentStateFactsPort;
   readonly hookRegistry?: AgentHookRegistry;
@@ -661,6 +670,287 @@ export interface TaskRecord {
   postCommitRecoveryPending?: boolean;
   executionReady?: Promise<boolean>;
   resolveExecutionReady?: (ready: boolean) => void;
+}
+
+interface TaskJournalReplayState {
+  taskCounter: number;
+  operationCounter: number;
+  cycleCounter: number;
+  tasks: Map<string, TaskRecord>;
+  operations: Map<string, OperationRecord>;
+  scopes: Map<string, ScopeRef>;
+  deletedTaskIds: Set<string>;
+}
+
+/** Attach the already-accepted operation identity without starting execution. */
+function attachReplayedOperationIdentity(task: TaskRecord, operation: OperationRecord): void {
+  task.operationId = operation.operationId;
+  task.executionEpoch = operation.executionEpoch;
+  task.input = operation.input;
+  task.orchestrated = operation.orchestrated;
+}
+
+/** Rebuild disposable read facts only; no lifecycle or recovery owner is started. */
+function replayTaskJournalRecords(state: TaskJournalReplayState, records: readonly RuntimeTaskJournalRecord[]): void {
+  for (const record of records) {
+    switch (record.kind) {
+      case 'task.created':
+        state.taskCounter = Math.max(state.taskCounter, record.taskCounter);
+        if (!state.tasks.has(record.taskId.value)) state.tasks.set(record.taskId.value, {
+          taskId: record.taskId, title: record.title, directive: record.directive,
+          directiveRevision: record.directiveRevision, state: 'created', currentState: '已创建',
+          nextStep: '选择模式并发起执行', input: '', output: '',
+          currentNode: RUNTIME_NODE_MARKERS.inputReceived, createdAt: record.createdAt,
+          updatedAt: record.createdAt, allowedActions: ['start'], events: [], checkpointSeq: 0,
+          orchestrated: false, running: false, stopping: false,
+        });
+        break;
+      case 'task.updated': {
+        const task = state.tasks.get(record.taskId.value);
+        if (task) {
+          task.title = record.title;
+          task.directive = record.directive;
+          task.directiveRevision = record.directiveRevision;
+          task.updatedAt = record.updatedAt;
+        }
+        break;
+      }
+      case 'task.deleted':
+        state.deletedTaskIds.add(record.taskId.value);
+        state.tasks.delete(record.taskId.value);
+        break;
+      case 'operation.prepared': {
+        state.operationCounter = Math.max(state.operationCounter, record.operationCounter);
+        state.cycleCounter = Math.max(state.cycleCounter, record.cycleCounter);
+        const existing = state.operations.get(record.allocation.operationId.value);
+        if (existing?.allocation) {
+          if (existing.allocation.taskId.value !== record.allocation.taskId.value
+            || existing.allocation.operationId.value !== record.allocation.operationId.value
+            || existing.allocation.executionEpoch !== record.allocation.executionEpoch) {
+            throw new RuntimeTaskControlError('journal.corrupt', RUNTIME_OWNER,
+              `journal prepared allocation ${record.allocation.operationId.value} does not match its first allocation`,
+              'repair or discard the UI runtime journal before restarting');
+          }
+          break;
+        }
+        const operation: OperationRecord = existing ?? {
+          operationId: record.allocation.operationId, taskId: record.allocation.taskId,
+          executionEpoch: record.allocation.executionEpoch, input: record.input,
+          orchestrated: record.allocation.orchestrated, events: [], seq: 0,
+        };
+        operation.allocation = record.allocation;
+        state.operations.set(operation.operationId.value, operation);
+        state.scopes.set(operation.operationId.value, record.allocation.scope);
+        const task = state.tasks.get(record.allocation.taskId.value);
+        if (task) {
+          task.allocation = record.allocation;
+          task.operationId = operation.operationId;
+          task.executionEpoch = operation.executionEpoch;
+          task.input = operation.input;
+          task.orchestrated = operation.orchestrated;
+          task.release = { state: 'prepared' };
+        }
+        break;
+      }
+      case 'operation.started': {
+        state.operationCounter = Math.max(state.operationCounter, record.operationCounter);
+        state.cycleCounter = Math.max(state.cycleCounter, record.cycleCounter);
+        const existing = state.operations.get(record.operationId.value);
+        if (existing && (existing.taskId.value !== record.taskId.value
+          || existing.executionEpoch !== record.executionEpoch)) {
+          throw new RuntimeTaskControlError('journal.corrupt', RUNTIME_OWNER,
+            `journal operation ${record.operationId.value} identity does not match its first start`,
+            'repair or discard the UI runtime journal before restarting');
+        }
+        const operation = existing ?? {
+          operationId: record.operationId, taskId: record.taskId, executionEpoch: record.executionEpoch,
+          input: record.input, orchestrated: record.orchestrated === true, events: [], seq: 0,
+        };
+        state.operations.set(record.operationId.value, operation);
+        state.scopes.set(record.operationId.value, record.scope);
+        const task = state.tasks.get(record.taskId.value);
+        if (task) {
+          attachReplayedOperationIdentity(task, operation);
+        }
+        break;
+      }
+      case 'operation.event': {
+        const operation = state.operations.get(record.operationId.value);
+        if (!operation || record.event.operationId !== record.operationId.value
+          || record.event.taskId.value !== operation.taskId.value
+          || record.event.executionEpoch !== operation.executionEpoch) {
+          throw new RuntimeTaskControlError('journal.corrupt', RUNTIME_OWNER,
+            `journal event ${record.event.eventId} identity does not match operation ${record.operationId.value}`,
+            'repair or discard the UI runtime journal before restarting');
+        }
+        const task = state.tasks.get(operation.taskId.value);
+        if (!task) {
+          if (state.deletedTaskIds.has(operation.taskId.value)) break;
+          throw new RuntimeTaskControlError('journal.corrupt', RUNTIME_OWNER,
+            `journal event ${record.event.eventId} references unknown task ${operation.taskId.value}`,
+            'repair or discard the UI runtime journal before restarting');
+        }
+        operation.events.push(record.event);
+        operation.seq = Math.max(operation.seq, record.event.seq);
+        task.events.push(record.event);
+        task.updatedAt = record.event.occurredAt;
+        if (record.event.kind === 'execution.started') {
+          attachReplayedOperationIdentity(task, operation);
+          task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
+        }
+        if (record.taskOutput !== undefined) task.output = record.taskOutput;
+        if (record.error) task.error = record.error;
+        if (record.event.kind === 'provider.tool') task.currentNode = RUNTIME_NODE_MARKERS.providerTool;
+        if (record.event.kind === 'provider.model') task.currentNode = RUNTIME_NODE_MARKERS.providerModel;
+        break;
+      }
+      case 'explicit-brain.state':
+      case 'interaction.closure':
+        break;
+    }
+  }
+}
+
+function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, ScopeRef>): RuntimeTaskSnapshot {
+  const checkpointEvent = record.events.slice().reverse().find((event) => event.kind === 'checkpoint.committed');
+  return {
+    taskId: record.taskId, title: record.title, directive: record.directive,
+    directiveRevision: record.directiveRevision, state: record.state, currentState: record.currentState,
+    nextStep: record.nextStep, updatedAt: record.updatedAt, input: record.input, output: record.output,
+    currentNode: record.currentNode, operationId: record.operationId?.value, executionEpoch: record.executionEpoch,
+    cycleId: record.cycleId?.value
+      ?? (record.operationId === undefined ? undefined : scopes.get(record.operationId.value)?.cycleId?.value),
+    orchestrated: record.orchestrated, allowedActions: record.allowedActions,
+    recentEvents: record.events.slice(-20), events: record.events, requestIdentity: record.requestIdentity,
+    checkpoint: record.checkpoint ? {
+      checkpointId: record.checkpoint.id.value, seq: record.checkpoint.seq, outcome: record.checkpoint.outcome,
+      summary: record.checkpoint.summary, committedAt: checkpointEvent?.occurredAt ?? record.updatedAt,
+      evidenceRefs: record.checkpoint.evidenceRefs,
+    } : undefined,
+    error: record.error,
+  };
+}
+
+export interface DurableTaskInventoryFailure {
+  readonly code: string;
+  readonly ownerId: string;
+  readonly message: string;
+  readonly nextAction: string;
+}
+
+export interface DurableTaskInventoryEntry {
+  readonly snapshot: RuntimeTaskSnapshot;
+  readonly durableState: 'checkpoint' | 'recovery-required';
+}
+
+export interface DurableTaskInventory {
+  readonly entries: readonly DurableTaskInventoryEntry[];
+  readonly failures: readonly DurableTaskInventoryFailure[];
+}
+
+export interface DurableTaskCheckpointReadPort {
+  readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null>;
+  readCommitted?(scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null>;
+}
+
+export interface DurableTaskCurrentStateReadPort {
+  read(taskScope: ScopeRef): Promise<RuntimeTaskCurrentStateRead>;
+}
+
+function reconcileSelectedCurrentError(record: TaskRecord, selection: RuntimeTaskCurrentStateSelection | null): void {
+  if (selection?.basis !== 'terminal') return;
+  const { processing, retainedDuties } = selection.currentState;
+  if ((selection.lifecycle === 'succeeded' || selection.lifecycle === 'waiting')
+    && processing.entryPhase === 'aligned'
+    && processing.nextAction.kind === 'continue'
+    && processing.firstErrorRef === undefined
+    && processing.hardBlockers.length === 0
+    && processing.laterErrorRefs.length === 0
+    && retainedDuties.length === 0
+    && processing.stages.length > 0
+    && processing.stages.every((stage) => stage.state === 'succeeded')) {
+    record.error = undefined;
+  }
+}
+
+/** Reads durable owners without constructing or starting the execution coordinator. */
+export async function projectDurableTaskInventory(input: {
+  readonly records: readonly RuntimeTaskJournalRecord[];
+  readonly checkpointFor: (taskId: TaskId, cycleId: CycleId) => DurableTaskCheckpointReadPort;
+  readonly currentStateFor?: (taskId: TaskId) => DurableTaskCurrentStateReadPort | undefined;
+}): Promise<DurableTaskInventory> {
+  const state: TaskJournalReplayState = {
+    taskCounter: 0, operationCounter: 0, cycleCounter: 0,
+    tasks: new Map(), operations: new Map(), scopes: new Map(), deletedTaskIds: new Set(),
+  };
+  try {
+    replayTaskJournalRecords(state, input.records);
+  } catch (error) {
+    return { entries: [], failures: [{
+      code: error instanceof RuntimeTaskControlError ? error.code : 'journal.corrupt',
+      ownerId: RUNTIME_OWNER,
+      message: error instanceof Error ? error.message : String(error),
+      nextAction: 'repair or discard the UI runtime journal before reading it',
+    }] };
+  }
+  const entries: DurableTaskInventoryEntry[] = [];
+  const failures: DurableTaskInventoryFailure[] = [];
+  for (const record of state.tasks.values()) {
+    const operation = record.operationId === undefined ? undefined : state.operations.get(record.operationId.value);
+    const scope = record.operationId === undefined ? undefined : state.scopes.get(record.operationId.value);
+    if (!operation || !scope?.cycleId) {
+      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'checkpoint' });
+      continue;
+    }
+    try {
+      const checkpointRead = input.checkpointFor(record.taskId, scope.cycleId);
+      const latest = await checkpointRead.readLatest(scope);
+      if (latest && sameCheckpointBusinessScope(scope, latest.checkpoint.scope)) {
+        record.checkpoint = latest.checkpoint;
+        record.checkpointSeq = latest.checkpoint.seq;
+        const committed = checkpointRead.readCommitted
+          ? await checkpointRead.readCommitted(latest.checkpoint.scope, latest.checkpoint.id) : null;
+        const currentStatePort = input.currentStateFor?.(record.taskId);
+        const currentStateRead = committed && currentStatePort
+          ? await currentStatePort.read(scope)
+          : { state: 'unknown' as const, reason: 'no current-state read is bound to this task' };
+        const selection = committed && currentStatePort
+          ? selectRuntimeTaskCurrentState({ checkpointOutcome: latest.checkpoint.outcome, scope,
+              checkpointCommitRef: committed.commitRef, currentState: currentStateRead }) : null;
+        reconcileSelectedCurrentError(record, selection);
+        record.state = selection?.basis === 'terminal' ? selection.lifecycle : latest.checkpoint.outcome;
+        record.running = false;
+        record.stopping = false;
+        record.currentState = lifecycleStateLabel(record.state);
+        record.nextStep = selection?.basis === 'terminal'
+          ? record.state === 'succeeded' ? '可发起新的执行或停止'
+            : record.state === 'stopped' ? '已收拢；可发起新的执行' : '检查错误 owner 与 next action'
+          : latest.checkpoint.next.kind === 'continue' ? '可发起新的执行'
+            : `${latest.checkpoint.next.kind}${latest.checkpoint.next.ref ? `:${latest.checkpoint.next.ref}` : ''}`;
+        record.allowedActions = ['succeeded', 'stopped', 'failed', 'cancelled'].includes(record.state) ? ['start'] : [];
+        if (record.state === 'stopped') record.currentNode = RUNTIME_NODE_MARKERS.checkpointCommit;
+        if (selection?.basis === 'terminal' && currentStateRead.state === 'known') {
+          record.currentStateCommitRef = currentStateRead.stateCommitRef;
+          if (currentStateRead.value.currentPlan) record.currentPlan = currentStateRead.value.currentPlan;
+        }
+        record.updatedAt = record.events.at(-1)?.occurredAt ?? record.updatedAt;
+        entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'checkpoint' });
+        continue;
+      }
+    } catch (error) {
+      failures.push({ code: 'checkpoint.unreadable', ownerId: RUNTIME_OWNER,
+        message: error instanceof Error ? error.message : String(error),
+        nextAction: 'inspect the task checkpoint journal before reading the task' });
+    }
+    record.state = 'unknown';
+    record.running = false;
+    record.stopping = false;
+    record.currentState = '需要恢复确认';
+    record.nextStep = '从权威 checkpoint 恢复状态';
+    record.allowedActions = [];
+    entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'recovery-required' });
+  }
+  return { entries, failures };
 }
 
 export interface OperationRecord {
@@ -2460,6 +2750,37 @@ export class RuntimeTaskCoordinator {
   /** Return the actual Task assembly pool for the independent closed-turn Planner. */
   closedTurnPlannerPool(taskId: TaskId): AgentRuntimePoolManager {
     return this.taskAssembly(taskId).runtimePool;
+  }
+
+  /** Observe only an already-instantiated pool; GET never creates an assembly. */
+  inspectTaskRuntimePool(taskId: TaskId): ReturnType<AgentRuntimePoolManager['inspect']> | undefined {
+    return this.tasks.get(taskId.value)?.taskAssembly?.runtimePool.inspect();
+  }
+
+  readTaskCurrentActivityLocations(
+    taskId: TaskId,
+  ): readonly import('../observation/agent-activity.js').AgentActivityCurrentLocation[] {
+    const record = this.tasks.get(taskId.value);
+    if (!record?.running || record.release?.state !== 'released') return [];
+    const locations: import('../observation/agent-activity.js').AgentActivityCurrentLocation[] = [];
+    if (record.allocation && record.allocation.executionEpoch === record.executionEpoch) {
+      locations.push({
+        instance: { kind: 'native-execution', execution: {
+          runtimeId: record.allocation.runtimeId,
+          executionEpoch: record.allocation.executionEpoch,
+        } },
+        assignmentId: record.allocation.assignmentId,
+        ...(record.activeTurn === undefined ? {} : { businessTurnId: record.activeTurn.admittedTurn.turnId }),
+      });
+    }
+    for (const runtime of record.taskAssembly?.runtimePool.inspect().runtimes ?? []) {
+      if (runtime.state === 'running' && runtime.incarnation?.taskId.value === taskId.value
+        && runtime.incarnation.executionEpoch === record.executionEpoch) {
+        locations.push({ instance: { kind: 'incarnation', incarnation: runtime.incarnation },
+          assignmentId: runtime.incarnation.assignmentId });
+      }
+    }
+    return locations;
   }
 
   taskAssembly(taskId: TaskId): RuntimeTaskAssembly {
@@ -4420,6 +4741,10 @@ export class RuntimeTaskCoordinator {
           };
           this.operations.set(record.operationId.value, operation);
           this.scopes.set(record.operationId.value, record.scope);
+          const task = this.tasks.get(record.taskId.value);
+          if (task) {
+            attachReplayedOperationIdentity(task, operation);
+          }
           break;
         }
         case 'operation.event': {
@@ -4459,10 +4784,7 @@ export class RuntimeTaskCoordinator {
           task.events.push(record.event);
           task.updatedAt = record.event.occurredAt;
           if (record.event.kind === 'execution.started') {
-            task.operationId = operation.operationId;
-            task.executionEpoch = operation.executionEpoch;
-            task.input = operation.input;
-            task.orchestrated = operation.orchestrated;
+            attachReplayedOperationIdentity(task, operation);
             task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
           }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;
@@ -4499,7 +4821,8 @@ export class RuntimeTaskCoordinator {
         continue;
       }
       try {
-        const store = this.options.checkpointStoreFor(task.taskId, scope.cycleId);
+        const source = await this.options.hydrateReadFor?.(scope);
+        const store = source ? source.checkpoint : this.options.checkpointStoreFor(task.taskId, scope.cycleId);
         const businessScope: ScopeRef = {
           organId: this.options.organId,
           taskId: task.taskId,
@@ -4526,20 +4849,37 @@ export class RuntimeTaskCoordinator {
           this.markCommittedCheckpointRecovery(task, task.error.nextAction);
           continue;
         }
-        task.state = checkpoint.outcome;
+        const currentStatePort = source ? source.currentState : this.options.currentStatePort;
+        const committed = currentStatePort
+          ? await store.readCommitted(checkpoint.scope, checkpoint.id) : null;
+        const currentStateRead = committed && currentStatePort
+          ? await currentStatePort.read(scope)
+          : { state: 'unknown' as const, reason: 'no current-state read is bound to this task' };
+        const selection = committed && currentStatePort
+          ? selectRuntimeTaskCurrentState({ checkpointOutcome: checkpoint.outcome, scope,
+              checkpointCommitRef: committed.commitRef, currentState: currentStateRead }) : null;
+        reconcileSelectedCurrentError(task, selection);
+        task.state = selection?.basis === 'terminal' ? selection.lifecycle : checkpoint.outcome;
         task.running = false;
         task.stopping = false;
-        task.currentState = lifecycleStateLabel(checkpoint.outcome);
-        task.nextStep = checkpoint.next.kind === 'continue'
+        task.currentState = lifecycleStateLabel(task.state);
+        task.nextStep = selection?.basis === 'terminal'
+          ? task.state === 'succeeded' ? '可发起新的执行或停止'
+            : task.state === 'stopped' ? '已收拢；可发起新的执行' : '检查错误 owner 与 next action'
+          : checkpoint.next.kind === 'continue'
           ? '可发起新的执行'
           : `${checkpoint.next.kind}${checkpoint.next.ref ? `:${checkpoint.next.ref}` : ''}`;
-        task.allowedActions = checkpoint.outcome === 'succeeded'
-          || checkpoint.outcome === 'stopped'
-          || checkpoint.outcome === 'failed'
-          || checkpoint.outcome === 'cancelled'
+        task.allowedActions = task.state === 'succeeded'
+          || task.state === 'stopped'
+          || task.state === 'failed'
+          || task.state === 'cancelled'
           ? ['start']
           : [];
-        task.currentNode = checkpoint.outcome === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
+        task.currentNode = task.state === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
+        if (selection?.basis === 'terminal' && currentStateRead.state === 'known') {
+          task.currentStateCommitRef = currentStateRead.stateCommitRef;
+          if (currentStateRead.value.currentPlan) task.currentPlan = currentStateRead.value.currentPlan;
+        }
         task.updatedAt = task.events.at(-1)?.occurredAt ?? task.updatedAt;
       } catch {
         this.markRecoveryRequired(task);

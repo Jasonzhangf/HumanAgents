@@ -33,6 +33,11 @@ export function agentSelectionReadFailure(agentQuery, read) {
 
 /** Decode syntax only; taskId comes from the caller's canonical task scope. */
 export function agentActivitySelectionFromQuery(params, taskId) {
+  for (const key of params.keys()) {
+    if (key.startsWith('agent') && !Object.values(QUERY_FIELDS).includes(key)) {
+      return invalid(`实例选择包含未知参数：${key}`)
+    }
+  }
   const fields = {}
   for (const [field, key] of Object.entries(QUERY_FIELDS)) {
     const values = params.getAll(key)

@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type {
   Checkpoint,
   ScopeRef,
@@ -40,6 +40,18 @@ import {
 // runtime server to reconstruct tasks, operation event streams, and counters
 // after a process restart without making the browser read raw runtime state.
 export type UiRuntimeJournalRecord = RuntimeTaskJournalRecord;
+
+export function uiRuntimeModeRoot(checkpointsRoot: string, mode: string): string {
+  return join(checkpointsRoot, 'ui-runtime', mode);
+}
+
+export function uiRuntimeJournalPath(checkpointsRoot: string, mode: string): string {
+  return join(uiRuntimeModeRoot(checkpointsRoot, mode), 'ui-runtime-journal.jsonl');
+}
+
+export function uiRuntimeControlJournalPath(modeRoot: string): string {
+  return join(modeRoot, 'task-control.jsonl');
+}
 
 interface JournalValidationContext {
   readonly operationIdentities: Map<string, ToolExecutionFactOuterIdentity>;

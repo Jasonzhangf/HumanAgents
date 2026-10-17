@@ -447,7 +447,13 @@ function planCoverageLabel(coverage) {
   return `历史覆盖：${coverage || '未声明'}`
 }
 
-function planDetail(summary, pairs) {
+function planDetail(summary, pairs, options = {}) {
+  if (typeof options.onOpenDetail === 'function') {
+    const button = element('button', summary, 'button button--quiet plan-detail')
+    button.type = 'button'
+    button.addEventListener('click', () => options.onOpenDetail({ title: summary, entries: pairs }, button))
+    return button
+  }
   const details = element('details', undefined, 'plan-detail')
   details.append(element('summary', summary))
   const list = element('dl', undefined, 'record-ref')
@@ -460,7 +466,7 @@ function planDetail(summary, pairs) {
   return details
 }
 
-function renderPlanFailure(failure, prefix) {
+function renderPlanFailure(failure, prefix, options = {}) {
   const box = element('div', undefined, 'plan-failure')
   box.planFailure = failure && typeof failure === 'object'
     ? failure
@@ -476,12 +482,12 @@ function renderPlanFailure(failure, prefix) {
       ['owner', box.planFailure.ownerId],
       ['message', box.planFailure.message],
       ['nextAction', box.planFailure.nextAction],
-    ]),
+    ], options),
   )
   return box
 }
 
-function renderPlanNode(node) {
+function renderPlanNode(node, options) {
   const item = element('li', undefined, 'plan-node')
   item.dataset.planNode = node.nodeId
   item.dataset.planNodeKind = node.kind
@@ -495,7 +501,7 @@ function renderPlanNode(node) {
       ['kind', node.kind],
       ['phaseId', node.phaseId ?? '未归入阶段'],
       ['definition', JSON.stringify(node.definition ?? {})],
-    ]),
+    ], options),
   )
   return item
 }
@@ -539,7 +545,7 @@ export function renderTaskPlanSnapshot(snapshot, options = {}) {
       const node = nodeById.get(nodeId)
       if (!node) continue
       phased.add(nodeId)
-      list.append(renderPlanNode(node))
+      list.append(renderPlanNode(node, options))
     }
     if (list.children.length === 0) list.append(element('li', '这个阶段没有已声明的节点。', 'empty'))
     phaseSection.append(list)
@@ -551,7 +557,7 @@ export function renderTaskPlanSnapshot(snapshot, options = {}) {
     phaseSection.dataset.planPhase = ''
     phaseSection.append(element('h4', '未归入阶段的节点'))
     const list = element('ol', undefined, 'plan-node-list')
-    for (const node of unphased) list.append(renderPlanNode(node))
+    for (const node of unphased) list.append(renderPlanNode(node, options))
     phaseSection.append(list)
     graph.append(phaseSection)
   }
@@ -593,14 +599,16 @@ function renderEvidenceList(refs, options, label) {
     const item = element('li', undefined, 'plan-evidence-item')
     item.dataset.evidenceKind = ref?.kind || ''
     item.dataset.evidenceSource = ref?.source || ''
-    item.append(element('span', `${ref?.kind || '未声明类型'} · ${ref?.source || '未提供来源'} · ${ref?.locator || '未提供位置'}`, 'plan-evidence-ref'))
+    item.append(element('span', typeof options.onOpenDetail === 'function'
+      ? `证据 ${list.children.length + 1}`
+      : `${ref?.kind || '未声明类型'} · ${ref?.source || '未提供来源'} · ${ref?.locator || '未提供位置'}`, 'plan-evidence-ref'))
     const trigger = typeof options.onEvidenceRef === 'function' ? options.onEvidenceRef(ref) : null
     if (trigger) {
       item.append(trigger)
     } else {
       item.append(element('span', '证据读取器尚未接入', 'muted plan-evidence-unbound'))
     }
-    item.append(planDetail('证据引用', [
+    if (typeof options.onOpenDetail !== 'function') item.append(planDetail('证据引用', [
       ['evidenceId', ref?.evidenceId?.value],
       ['kind', ref?.kind],
       ['source', ref?.source],
@@ -668,14 +676,14 @@ function renderTaskPlanRevision(revision, options = {}) {
     : '上一版本：无（这是保留历史的起点）', 'muted plan-predecessor'))
   article.append(element('p', planCoverageLabel(revision.historyCoverage), 'muted plan-coverage'))
   article.append(renderPlanChanges(options.changes || planRevisionChanges(null, revision.snapshot)))
-  article.append(renderTaskPlanSnapshot(revision.snapshot, { revisionId: revision.revisionId }))
+  article.append(renderTaskPlanSnapshot(revision.snapshot, { ...options, revisionId: revision.revisionId }))
   article.append(renderEvidenceList(revision.evidenceRefs, options, '来源证据'))
   article.append(planDetail('版本身份', [
     ['revisionId', revision.revisionId],
     ['sequence', String(revision.sequence)],
     ['journalCommitRef', revision.journalCommitRef],
     ['publishedAt', revision.publishedAt],
-  ]))
+  ], options))
   return article
 }
 
@@ -703,23 +711,50 @@ export function renderTaskPlanCurrentSection(read, options = {}) {
   section.append(head)
   if (!read || read.ok !== true) {
     section.planFailure = read?.failure || planHistoryAvailability(undefined).failure
-    section.append(renderPlanFailure(section.planFailure))
+    section.append(renderPlanFailure(section.planFailure, undefined, options))
     return section
   }
   const resolved = resolveCurrentPlanRevision(read.value, { explicitScope: options.explicitScope })
   if (!resolved.ok) {
     section.planFailure = resolved.failure
-    section.append(renderPlanFailure(section.planFailure))
+    section.append(renderPlanFailure(section.planFailure, undefined, options))
     return section
   }
   if (options.conflictSelection) section.append(renderPlanConflict(options.conflictSelection))
   const revisions = planRevisions(read.value)
   const previous = resolved.index > 0 ? revisions[resolved.index - 1] : null
-  section.append(renderTaskPlanRevision(resolved.revision, {
+  const revisionOptions = {
     ...options,
     isCurrent: true,
     changes: planRevisionChanges(previous?.snapshot ?? null, resolved.revision.snapshot),
-  }))
+  }
+  if (typeof options.onOpenDetail !== 'function') {
+    section.append(renderTaskPlanRevision(resolved.revision, revisionOptions))
+    return section
+  }
+  const revision = resolved.revision
+  section.append(
+    element('h3', revision.snapshot?.title || '未命名计划'),
+    element('p', revision.snapshot?.summary || '未记录计划摘要', 'muted plan-summary'),
+    element('p', `当前权威版本 · 版本 ${revision.sequence}`, 'plan-tag plan-tag--current'),
+    element('p', planCompletenessLabel(revision.snapshot?.completeness), 'muted'),
+  )
+  const button = element('button', '查看计划详情', 'button button--quiet')
+  button.type = 'button'
+  button.dataset.planDetailTrigger = 'current'
+  const openChild = (detail) => options.onOpenDetail({ ...detail, onBack: showRevision }, button)
+  const showRevision = () => options.onOpenDetail({
+    title: '当前任务计划详情',
+    content: renderTaskPlanRevision(revision, {
+      ...revisionOptions,
+      onOpenDetail: openChild,
+      onEvidenceRef: typeof options.onEvidenceRef === 'function'
+        ? (ref) => options.onEvidenceRef(ref, { onOpenDetail: openChild })
+        : undefined,
+    }),
+  }, button)
+  button.addEventListener('click', showRevision)
+  section.append(button)
   return section
 }
 
@@ -736,7 +771,7 @@ export function renderTaskPlanSemanticView(read, options = {}) {
     section.planFailure = read?.failure || planHistoryAvailability(undefined).failure
     const head = element('header', undefined, 'section-head')
     head.append(element('h2', '任务计划历史'), element('span', '权威推理计划', 'section-meta'))
-    section.append(head, renderPlanFailure(section.planFailure))
+    section.append(head, renderPlanFailure(section.planFailure, undefined, options))
     return section
   }
 
@@ -756,11 +791,11 @@ export function renderTaskPlanSemanticView(read, options = {}) {
     section.append(element('p', `当前权威版本：序列 ${currentResolved.revision.sequence} · ${currentResolved.revision.revisionId}。`, 'muted plan-current-summary'))
   } else {
     section.planFailure = currentResolved.failure
-    section.append(renderPlanFailure(currentResolved.failure, '当前权威版本未知；下面的保留历史仍然可用。'))
+    section.append(renderPlanFailure(currentResolved.failure, '当前权威版本未知；下面的保留历史仍然可用。', options))
   }
   if (!viewedResolved.ok) {
     section.planFailure = viewedResolved.failure
-    section.append(renderPlanFailure(viewedResolved.failure))
+    section.append(renderPlanFailure(viewedResolved.failure, undefined, options))
   }
 
   if (revisions.length === 0) {
