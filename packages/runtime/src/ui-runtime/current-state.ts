@@ -1,5 +1,6 @@
 import type {
   JournalCommitRef,
+  LifecycleState,
   NextAction,
   ScopeRef,
   StageResult,
@@ -137,8 +138,53 @@ export type RuntimeTaskCurrentStateRead =
       readonly state: 'known';
       readonly value: RuntimeTaskCurrentState;
       readonly stateCommitRef: JournalCommitRef;
+      /** The original committed record scope, exposed by the serialization owner. */
+      readonly scope: ScopeRef;
     }
   | { readonly state: 'unknown'; readonly reason: string };
+
+export type RuntimeTaskCurrentStateSelection =
+  | {
+      readonly basis: 'terminal';
+      readonly lifecycle: LifecycleState;
+      readonly currentState: RuntimeTaskCurrentState;
+    }
+  | {
+      readonly basis: 'checkpoint-only';
+      readonly lifecycle: LifecycleState;
+    };
+
+function sameScopedValue(
+  left: { readonly scope: string; readonly value: string } | undefined,
+  right: { readonly scope: string; readonly value: string } | undefined,
+): boolean {
+  return left !== undefined && right !== undefined
+    && left.scope === right.scope && left.value === right.value;
+}
+
+/** Select only a later Journal state from the exact retained execution scope. */
+export function selectRuntimeTaskCurrentState(input: {
+  readonly checkpointOutcome: LifecycleState;
+  readonly scope: ScopeRef;
+  readonly checkpointCommitRef: JournalCommitRef;
+  readonly currentState: RuntimeTaskCurrentStateRead;
+}): RuntimeTaskCurrentStateSelection {
+  if (input.currentState.state !== 'known') {
+    return { basis: 'checkpoint-only', lifecycle: input.checkpointOutcome };
+  }
+  const owner = input.currentState.value;
+  const sameExecutionScope = sameScopedValue(input.currentState.scope.organId, input.scope.organId)
+    && sameScopedValue(input.currentState.scope.taskId, input.scope.taskId)
+    && sameScopedValue(input.currentState.scope.cycleId, input.scope.cycleId)
+    && sameScopedValue(input.currentState.scope.operationId, input.scope.operationId);
+  if (!sameExecutionScope) {
+    return { basis: 'checkpoint-only', lifecycle: input.checkpointOutcome };
+  }
+  if (input.currentState.stateCommitRef.journalSeq <= input.checkpointCommitRef.journalSeq) {
+    return { basis: 'checkpoint-only', lifecycle: input.checkpointOutcome };
+  }
+  return { basis: 'terminal', lifecycle: owner.task.state as LifecycleState, currentState: owner };
+}
 
 /**
  * The Runtime serialization boundary. The implementation commits the transition

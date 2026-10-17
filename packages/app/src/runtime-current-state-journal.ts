@@ -114,7 +114,7 @@ export function readRuntimeTaskCurrentStateFromRecords(
   }
   const latest = matches[matches.length - 1]!;
   const value = assertPayload(latest, taskScope);
-  return { state: 'known', value, stateCommitRef: receipt(latest) };
+  return { state: 'known', value, stateCommitRef: receipt(latest), scope: latest.scope };
 }
 
 function transitionCommitId(taskScope: ScopeRef, transitionId: string): string {
