@@ -155,7 +155,8 @@ function planViewOptions() {
     selection: hasPlanSelection(selection) ? selection : null,
     conflictSelection: hasPlanSelection(selection) ? selection : null,
     explicitDisplay: queryParam('display') || '',
-    onEvidenceRef: (ref) => evidenceTrigger(ref),
+    onOpenDetail: openPlanDetail,
+    onEvidenceRef: (ref, navigation) => evidenceTrigger(ref, navigation),
     onSelectRevision: (revision) => {
       updatePlanViewUrl({
         display: 'semantic',
@@ -185,10 +186,27 @@ function updatePlanViewUrl({ display, selection } = {}) {
 // The existing contextual 技术详情 drawer is the evidence reader this surface
 // supports. It shows the exact typed reference and never fabricates a
 // checkpoint association or a resolvable link the runtime did not supply.
-function evidenceTrigger(ref) {
+function openPlanDetail({ onBack, ...detail }, trigger) {
+  const layer = openTechnicalDetail({
+    ...detail,
+    onClose: () => {
+      if (trigger?.dataset.planDetailTrigger === 'current' && !trigger.isConnected && displayMode === 'current') {
+        main.querySelector('[data-plan-detail-trigger="current"]')?.focus()
+      }
+    },
+  })
+  if (typeof onBack === 'function') {
+    const back = element('button', '返回计划详情', 'button button--quiet')
+    back.type = 'button'
+    back.addEventListener('click', onBack)
+    layer.querySelector('.shell-layer-body').append(back)
+  }
+}
+
+function evidenceTrigger(ref, { onOpenDetail = openPlanDetail } = {}) {
   const button = element('button', '查看证据', 'button button--quiet plan-evidence-trigger')
   button.type = 'button'
-  button.addEventListener('click', () => openTechnicalDetail({
+  button.addEventListener('click', () => onOpenDetail({
     title: '证据引用',
     entries: [
       ['evidenceId', ref?.evidenceId?.value],
@@ -200,7 +218,7 @@ function evidenceTrigger(ref) {
       ['scope.taskId', ref?.scope?.taskId?.value],
       ['scope.operationId', ref?.scope?.operationId?.value],
     ],
-  }))
+  }, button))
   return button
 }
 
@@ -1916,7 +1934,8 @@ function renderDashboard() {
   main.append(renderTaskPlanCurrentSection(planHistoryState, {
     explicitScope,
     conflictSelection: hasPlanSelection(planSelection) ? planSelection : null,
-    onEvidenceRef: (ref) => evidenceTrigger(ref),
+    onOpenDetail: openPlanDetail,
+    onEvidenceRef: (ref, navigation) => evidenceTrigger(ref, navigation),
   }))
 
   // The schedule section exists only when the dashboard read reports a
