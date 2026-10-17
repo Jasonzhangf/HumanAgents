@@ -335,7 +335,7 @@ export function closedTurnPlannerOutputContract(): string {
     'You receive the exact committed turn closure, the current task directive, the accepted refined child/review results, and either the exact prior whole-task plan revision or null with the actual confirmed source for the first publication.',
     'Reply with one JSON object and nothing else:',
     '{"decision":"continue"|"complete"|"failed","snapshot":{"title":"...","summary":"...","completeness":{"scope":"whole-task","status":"complete"},"acceptanceCriteria":[...],"nodes":[...],"phases":[...],"relations":[...]},"reasonText":"..."}',
-    'The snapshot must use exactly these fields and types:',
+    'The snapshot must contain the seven required fields below. It may also contain the optional "inspectionDefinition" field:',
     '- "title": non-empty string naming the whole-task plan.',
     '- "summary": non-empty string summarising the whole-task plan.',
     '- "completeness": {"scope":"whole-task","status":"complete"}.',
@@ -343,8 +343,12 @@ export function closedTurnPlannerOutputContract(): string {
     '- "nodes": non-empty array of {"nodeId": non-empty string, "kind": non-empty string, "title": non-empty string, "intent": non-empty string, "definition": JSON object, and an optional "phaseId": non-empty string}.',
     '- "phases": array of {"phaseId": non-empty string, "title": non-empty string, "memberNodeIds": array of node ids}; may be empty.',
     '- "relations": array of {"fromNodeId": non-empty string, "toNodeId": non-empty string, "kind": "depends-on" | "parent-child" | "sequence"}; may be empty.',
+    '- Optional "inspectionDefinition": {"definition": the exact authoritative InspectionCheckDefinition object, "checks": non-empty array of {"checkId": non-empty string, "criterion": non-empty string, "inputRefs": array of non-empty strings}}. Use only the two InspectionDefinitionContent fields "definition" and "checks". Do not add publication or durable-record wrapper fields such as "schemaVersion", "taskScope", "definitionDigest", "planRevisionCommitRef" or "createdAt". Do not invent types such as "steps", "successCriteria" or "unknown".',
     'Acceptance "criterionId" values, node "nodeId" values and phase "phaseId" values must each be unique within their own array. A phase "memberNodeIds" list must not repeat a node, and relation triples must not repeat the same kind with the same "fromNodeId" and "toNodeId". Every "memberNodeIds" entry, node "phaseId" and relation endpoint must reference a declared node or phase. A phase membership and its node "phaseId" must agree in both directions. A relation must not point at itself, and the relations of one single kind must be acyclic.',
-    'The publication id, revision sequence, content digest, source binding, Journal commit and run state are owned by the framework; never emit or invent them.',
+    'When the prior whole-task plan has an inspectionDefinition, the successor snapshot must retain it. For the same definitionId and definitionVersion, semantics must not change; a semantic change requires a different definitionId or definitionVersion. Never silently delete a published inspection definition.',
+    'Do not force an ordinary task without a formal inspection definition to generate one.',
+    'Declaring inspectionDefinition does not execute checks. Do not automatically execute all checks or emit a fixed role chain.',
+    'The publication id, revision sequence, content digest, source binding, Journal commit, occurrence identity, receipt and run state are owned by the framework; never emit or invent them.',
     'A declaration of whole-task coverage is a plan, not a proof of completion. Do not report task completion; report the alignment decision only.',
   ].join('\n');
 }
