@@ -48,6 +48,10 @@ direct工具压缩后续已接收 `9abc11d1`：r210确认fixture错在turn2找tu
 
 UX A已接收：source `ff534a21` 正常merge为唯一候选 `31832937`，仅runtime-api/runtime-shell/task-dashboard及原browserconsumer4文件。Peer有有效main基线RED4/6，非零revision实际counterexample45/46后恢复46/46；宿主组合后原task-grant-onlyconsumer **46/46 PASS / Node0**，证据 `native-reasoning-d0-20261012/grant-composed-20261017`。正式scoped授权drawer、default只读、target验证、回执与刷新失败分离、技术原错、双端焦点返回被受控证明；未真实RCC。已通知UXowner当轮remove/prune A来源树，run证据保留。A/B均为候选接收，不冒main/install交付。
 
+冷恢复首次偏差纠正：r209扩到327toolsteps且多次读不存在测试路径、未产出计划，被owner明确停止并保留会话；同Gemini4相关续派r213交回事实。`text-only-jvsynV`实际只有op1、11条control记录，C1/C2未完成，旧helper在thirdinterrupt前即把turn1initial-open当heldturn；wireindex又按值传入-1。childstartup硬选execution也与fixture默认interaction binding不符。生产readIncarnationBinding确有“按保存role选择后又硬要求execution”的不一致，但该旧现场不证明第三turn恢复。r213产品伪代码含不存在字段/返回shape和额外guards，不接受照搬。r214仅修原consumer这3fixture缺口，再由宿主跑正确thirdturn；无产品patch。UX A来源树已回remove/prune/pathabsent。
+
+wire设计状态更新已提交 `62b0c5b5`：5docs/graphmetadata改为v1真实verified、v2/childsourcefixed但runtimeUNVERIFIED，保留actualchildtypegap，图拓扑不变、validate8nodes8edges7waves。旧OPEN段属前序事实，不覆盖本段当前状态。
+
 > **历史完整过程日志归档**：原 6,955 行 / 1MB 逐轮过程日志已归档至仓库外独占目录 `/Volumes/Intel/playground/humanagent/.worker-runs/archived-progress-logs-20261015/native-reasoning-progress-2026-10-08.full.md`，不再在 Git 仓库内追加长篇过程流水账。
 
 ## 1. 当前目标与总体进度（更新至 2026-10-17）
