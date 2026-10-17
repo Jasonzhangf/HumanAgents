@@ -1,621 +1,323 @@
 #!/usr/bin/env node
 /**
- * Real RCC explicit -> implicit -> executor completion proof (T4).
- *
- * Drives the built HumanAgent CLI `serve --mode rcc` entry over its HTTP
- * Runtime API:
- *
- *   explicit round 1  - business input -> real provider explicit brain draft
- *                       -> user confirmation -> implicit FIFO admission
- *                       -> executor runs file.read -> task succeeded
- *   explicit round 2  - append a second concrete requirement to the same task
- *                       -> confirmed -> second real RCC execution reads another
- *                       workspace file -> task succeeded again
- *   UI observation    - the served dashboard/task-detail/observation projections
- *                       show the nodes, tool evidence, and completed state
- *
- * Persists `dist/receipts/explicit-implicit-e2e-proof.json`.
- *
- * Required env:
- *   none (the live RCC endpoint must answer on 127.0.0.1:4444)
- * Optional env:
- *   HUMANAGENT_RCC_BASE_URL       default http://127.0.0.1:4444
- *   HUMANAGENT_UI_MODEL           default gpt-5.5
- *   HUMANAGENT_EI_RECEIPT_PATH    default ./dist/receipts/explicit-implicit-e2e-proof.json
+ * Real explicit -> FIFO -> independently granted execution -> public delivery.
+ * Uses an already allocated stable serve entry. Never starts a CLI or a model.
+ * Required env: HUMANAGENT_EI_BASE_URL, HUMANAGENT_EI_COOKIE (paired session).
+ * Optional: HUMANAGENT_EI_RECEIPT_PATH, inside ~/.humanagent/test-fixtures.
+ * Receipts contain public responses, never the pairing cookie. Failed runs keep
+ * their receipt and Task recovery responsibility; they never retry by new Task.
  */
-
-import { execFileSync, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const RCC_BASE_URL = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
-const MODEL = process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5';
-const RECEIPT_PATH = resolve(
-  process.env.HUMANAGENT_EI_RECEIPT_PATH ?? 'dist/receipts/explicit-implicit-e2e-proof.json',
-);
-const CLI_PATH = resolve('dist/app/app/src/cli.js');
 const TERMINAL_TIMEOUT_MS = 420_000;
-const MAX_INTERPRET_ATTEMPTS = 4;
+const FIXTURE_BASE = join(homedir(), '.humanagent', 'test-fixtures');
+const BUSINESS_INPUT = '分析以下交付事实并形成可执行建议。甲方案两人开发三天后可试用，缺点是导出需人工处理；乙方案一人开发七天，支持自动导出，但依赖尚未接入。首批只有五名内部用户，必须本周试用，导出每天一次即可。请先核实约束，再比较两案，给出选择、理由、两步执行建议和仍未知的问题。只使用给定材料，不访问网络或用户文件。';
+const IDENTITY_KEYS = ['requirementId', 'draftId', 'inputRevision', 'draftRevisionVersion', 'draftRevisionHash', 'confirmationRef'];
+const valueOf = (identity) => typeof identity === 'string' ? identity : identity?.value;
+const delay = () => new Promise((settle) => setTimeout(settle, 1000));
 
-function git(args) {
-  return execFileSync('git', args, { encoding: 'utf8' }).trim();
+function required(condition, field) {
+  if (!condition) throw new Error(`UNVERIFIED: missing or inconsistent public ${field}`);
 }
 
-function gitSha() {
-  return git(['rev-parse', 'HEAD']);
-}
-
-function mainSha() {
-  try {
-    return git(['rev-parse', 'main']);
-  } catch {
-    throw new Error('main ref is not resolvable; receipt cannot bind mainSha');
-  }
-}
-
-function sourceDigest() {
-  const entries = execFileSync('git', ['ls-files', '-s'], { encoding: 'utf8' })
-    .split('\n')
-    .filter((line) => line && !line.includes('docs/evidence/explicit-implicit-e2e/')
-      && !line.includes('dist/receipts/explicit-implicit-e2e-proof.json'))
-    .sort();
-  return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
-}
-
-function providerToolCallIds(dashboard) {
-  const ids = new Set();
-  for (const event of dashboard.recentEvents ?? []) {
-    if (event.kind !== 'provider.tool') continue;
-    if (event.executionEpoch !== dashboard.executionEpoch) continue;
-    for (const ref of event.evidenceRefs ?? []) {
-      // The locator appends a content digest after the call id, so stop at the
-      // first non-identifier character to record the exact provider call id.
-      const match = /call_[A-Za-z0-9_]+/.exec(String(ref.locator ?? ''));
-      if (match) ids.add(match[0]);
-    }
-  }
-  return [...ids];
-}
-
-/**
- * Repeatable contract for the multi-round completion proof. The receipt is the
- * durable artifact, so it must fail closed unless it proves two real executor
- * rounds on one task, both terminal succeeded, with real file.read tool calls
- * and a source digest bound to a concrete git commit.
- */
-export function assertReceiptContract(receipt) {
-  if (!receipt || receipt.proof !== 'explicit-implicit-e2e') {
-    throw new Error(`receipt proof marker is invalid: ${JSON.stringify(receipt?.proof ?? null)}`);
-  }
-  if (typeof receipt.gitSha !== 'string' || !/^[0-9a-f]{40}$/.test(receipt.gitSha)) {
-    throw new Error(`receipt is not bound to a git commit: ${JSON.stringify(receipt.gitSha ?? null)}`);
-  }
-  if (typeof receipt.mainSha !== 'string' || !/^[0-9a-f]{40}$/.test(receipt.mainSha)) {
-    throw new Error(`receipt is not bound to the main SHA: ${JSON.stringify(receipt.mainSha ?? null)}`);
-  }
-  if (typeof receipt.sourceDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(receipt.sourceDigest)) {
-    throw new Error(`receipt is missing a source digest: ${JSON.stringify(receipt.sourceDigest ?? null)}`);
-  }
-  const rounds = receipt.rounds ?? [];
-  if (rounds.length < 2) throw new Error(`receipt expected at least two executor rounds: ${rounds.length}`);
-  if (rounds[0].taskId !== rounds[1].taskId) throw new Error('receipt expected both rounds on the same task');
-  if (!(rounds[1].dashboard?.executionEpoch > rounds[0].dashboard?.executionEpoch)) {
-    throw new Error('receipt expected a second execution epoch on the same task');
-  }
-  rounds.forEach((round, index) => {
-    if (round.terminalState !== 'succeeded') {
-      throw new Error(`round ${index + 1} did not reach terminal succeeded: ${JSON.stringify(round.terminalState)}`);
-    }
-    if (!Array.isArray(round.toolCallIds) || round.toolCallIds.length < 1) {
-      throw new Error(`round ${index + 1} recorded no real tool call id`);
-    }
-    for (const id of round.toolCallIds) {
-      if (!/^call_[A-Za-z0-9_]+$/.test(id)) {
-        throw new Error(`round ${index + 1} recorded an invalid provider call id: ${JSON.stringify(id)}`);
-      }
-    }
+// Reuse the parent's paired session. Never read credentials/config or substitute
+// an anonymous/forged principal. Do not print headers or the cookie.
+async function jsonRequest(base, path, body) {
+  const response = await fetch(`${base}${path}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: {
+      cookie: process.env.HUMANAGENT_EI_COOKIE, origin: base, accept: 'application/json',
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(TERMINAL_TIMEOUT_MS),
   });
-  const earlier = new Set(rounds[0].toolCallIds);
-  if (!rounds[1].toolCallIds.some((id) => !earlier.has(id))) {
-    throw new Error('receipt expected round 2 to include a new tool call id not present in earlier rounds');
+  let result;
+  try { result = await response.json(); } catch {
+    throw new Error(`non-JSON public response: ${response.status} ${path}`);
   }
+  if (!response.ok) {
+    const error = new Error(`public request failed: ${response.status} ${path}`);
+    error.publicResponse = result;
+    throw error;
+  }
+  return result;
+}
+
+async function interpretUntilDraft(base, input, steps) {
+  steps.input = input;
+  steps.received = await jsonRequest(base, '/api/explicit/inputs', {
+    channel: 'business', requestKind: 'new-task-preview', inputRevision: 1,
+    sourceRef: input.sourceRef, rawInput: input.rawInput,
+  });
+  required(typeof steps.received.interactionId === 'string', 'input.interactionId');
+  const path = `/api/explicit/interactions/${encodeURIComponent(steps.received.interactionId)}`;
+  let snapshot = await jsonRequest(base, path);
+  if (snapshot.state === 'received' || snapshot.state === 'matching') {
+    snapshot = await jsonRequest(base, `${path}/interpret`, {});
+  }
+  steps.organized = snapshot;
+  required(snapshot.state === 'awaiting-confirmation' && snapshot.draft?.proposedIntent === 'create',
+    'typed new-task preview awaiting-confirmation/create (no legacy fallback)');
+  return { interaction: snapshot, draft: snapshot.draft };
+}
+
+async function confirmDraft(base, interaction, draft, identity) {
+  // Same submit-handler ordering as docs/ui/requirement-submission.js. This
+  // programmatic step does not add a second human business confirmation.
+  return jsonRequest(base, `/api/explicit/interactions/${encodeURIComponent(interaction.interactionId)}/confirmation`, {
+    draftId: draft.draftId, inputRevision: draft.inputRevision,
+    ...(interaction.revision?.revisionVersion === undefined ? {}
+      : { draftRevisionVersion: interaction.revision.revisionVersion }),
+    ...(interaction.revision?.revisionHash === undefined ? {}
+      : { draftRevisionHash: interaction.revision.revisionHash }),
+    ...identity, confirmedBy: 'human:operator',
+  });
+}
+
+function taskRows(list) {
+  return ['running', 'waiting', 'completed', 'stopped', 'draft', 'failed']
+    .flatMap((key) => list[key] ?? []);
+}
+
+async function waitForImplicitTask(base, requirement, steps) {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    steps.taskList = await jsonRequest(base, '/api/tasks');
+    // Exact committed TaskIdentity source. Never use title, a generated ID
+    // convention, the first row, or event text to decide which Task to grant.
+    const matches = taskRows(steps.taskList).filter((row) => IDENTITY_KEYS.every(
+      (key) => row.identitySource?.[key] === requirement[key]));
+    required(matches.length <= 1, 'unique TaskIdentity for accepted requirement');
+    if (matches.length === 1) {
+      const taskId = valueOf(matches[0].taskId);
+      required(typeof taskId === 'string' && taskId.length > 0, 'TaskIdentity taskId');
+      steps.identityRow = matches[0];
+      return taskId;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('UNVERIFIED: /api/tasks exposes no exact identitySource for final requirement; needs App public identity readback, not a guessed Task ID');
+    }
+    steps.scheduling = await jsonRequest(base, '/api/runtime/status');
+    const fifo = steps.scheduling.implicitScheduling;
+    if (fifo?.requirementId === requirement.requirementId) {
+      assert.equal(fifo.draftId, requirement.draftId);
+      assert.equal(fifo.fifoSeq, requirement.fifoSeq);
+      steps.fifoObservation = fifo;
+      required(!['failed', 'blocked'].includes(fifo.state), 'FIFO dispatch not blocked');
+    }
+    await delay();
+  }
+}
+
+function assertSameExecution(actual, expected) {
+  required(actual && valueOf(actual.taskId) === valueOf(expected.taskId), 'execution.taskId');
+  assert.equal(actual.operationId, expected.operationId, 'retain original prepared operation');
+  assert.equal(actual.executionEpoch, expected.executionEpoch, 'retain original allocation epoch');
+}
+
+async function pollTaskState(base, taskId, prepared, steps) {
+  const deadline = Date.now() + TERMINAL_TIMEOUT_MS;
+  for (;;) {
+    steps.dashboard = await jsonRequest(base, `/api/tasks/${encodeURIComponent(taskId)}/dashboard`);
+    assertSameExecution(steps.dashboard, prepared);
+    if (steps.dashboard.state === 'succeeded') return steps.dashboard;
+    if (['blocked', 'failed', 'stopped', 'unknown'].includes(steps.dashboard.state)) {
+      throw new Error(`Task did not complete: ${steps.dashboard.state}; inspect saved public error/nextStep`);
+    }
+    if (Date.now() >= deadline) throw new Error('UNVERIFIED: standard turn/save/Planner did not reach Task succeeded before deadline; no automatic resume/start');
+    await delay();
+  }
+}
+
+function readValue(result, field) {
+  required(result?.ok === true, `${field} readback${result?.failure?.code ? ` (${result.failure.code})` : ''}`);
+  return result.value;
+}
+
+async function captureObservation(base, taskId, dashboard, steps) {
+  const path = `/api/tasks/${encodeURIComponent(taskId)}`;
+  steps.detail = await jsonRequest(base, path);
+  steps.observation = await jsonRequest(base, `${path}/observation`);
+  const activity = readValue(dashboard.agentActivity, 'Dashboard.agentActivity');
+  steps.planner = [...activity.current, ...activity.historical, ...activity.unknown].filter(
+    (entry) => entry.sourceKind === 'closed-turn-planner-call'
+      && entry.executionEpoch === dashboard.executionEpoch);
+  required(steps.planner.some((entry) => entry.commitRefs?.length > 0), 'independent closed-turn Planner committed activity');
+  const plans = readValue(dashboard.taskPlanHistory, 'Dashboard.taskPlanHistory');
+  required(plans.current?.state === 'known', 'accepted current task plan');
+  required(plans.revisions.some((revision) => revision.revisionId === plans.current.value.revisionId),
+    'accepted current plan revision readback');
+  steps.planHistory = plans;
+  required(dashboard.checkpoint?.checkpointId && dashboard.checkpoint.seq > 0, 'committed standard checkpoint');
+  required(plans.scope?.projectKey && plans.scope.mode, 'checkpoint read projectKey/mode');
+  const query = new URLSearchParams({
+    projectKey: plans.scope.projectKey, mode: plans.scope.mode,
+    checkpointId: dashboard.checkpoint.checkpointId,
+  });
+  steps.checkpointsResponse = await jsonRequest(base, `${path}/checkpoints?${query}`);
+  // HTTP writeReadResult unwraps successful reads; Dashboard's embedded reads
+  // above retain their RuntimeReadResult wrapper.
+  const checkpoints = steps.checkpointsResponse;
+  required(checkpoints.surface === 'runtime-checkpoint-history', 'checkpoint history HTTP projection');
+  steps.checkpoint = checkpoints.viewed;
+  const closure = steps.checkpoint?.recoveryBinding;
+  required(closure?.coreClosure?.committed === true && closure.turnClosureRef
+    && closure.turnRecoveryRef && closure.alignmentRef, 'standard turn/save/checkpoint and Planner alignment references');
+  assert.equal(closure.coreClosure.executionEpoch, dashboard.executionEpoch);
+  const identity = steps.checkpoint.identity;
+  assert.equal(valueOf(identity.checkpointId), dashboard.checkpoint.checkpointId);
+  const ref = identity.commitRef;
+  required(ref?.commitId && ref.journalSeq > 0 && ref.recordDigest, 'checkpoint asset read selector');
+  query.set('checkpointCommitId', ref.commitId);
+  query.set('checkpointJournalSeq', String(ref.journalSeq));
+  query.set('checkpointRecordDigest', ref.recordDigest);
+  steps.captureResponse = await jsonRequest(base, `${path}/checkpoints/assets/capture?${query}`);
+  steps.capture = steps.captureResponse;
+  required(steps.capture.surface === 'runtime-checkpoint-asset-body', 'capture HTTP projection');
+  required(typeof steps.capture.text === 'string' && steps.capture.text.length > 0, 'capture asset body');
+}
+
+export function assertReceiptContract(receipt) {
+  required(receipt?.proof === 'explicit-implicit-e2e', 'receipt proof');
+  const { steps } = receipt;
+  const requirement = steps.confirmation?.requirement;
+  required(requirement && Number.isSafeInteger(requirement.fifoSeq) && requirement.fifoSeq > 0, 'final receipt FIFO sequence');
+  for (const key of IDENTITY_KEYS) {
+    required(requirement[key] !== undefined, `final receipt requirement.${key}`);
+    assert.deepEqual(steps.identityRow?.identitySource?.[key], requirement[key], `exact TaskIdentity ${key}`);
+  }
+  required(steps.grant?.readback?.grant?.state === 'granted', 'committed grant');
+  assert.deepEqual(steps.grantReadback.readback, steps.grant.readback, 'grant durable GET readback');
+  required(steps.grant.execution?.state === 'released', 'grant execution released');
+  assertSameExecution(steps.grant.execution.selector, steps.prepared);
+  assertSameExecution(steps.grant.execution.current, steps.prepared);
+  assertSameExecution(steps.dashboard, steps.prepared);
+  assert.equal(steps.dashboard.state, 'succeeded');
+  const publication = steps.dashboard.publicOutput;
+  required(publication?.state === 'committed', 'committed public delivery');
+  required(typeof steps.dashboard.output === 'string' && steps.dashboard.output.trim().length > 0, 'public output body');
+  required(publication.commits?.some((commit) => commit.text === steps.dashboard.output), 'public commit carrying actual output');
+  assert.equal(steps.deliveryReadback.output, steps.dashboard.output);
+  assert.deepEqual(steps.deliveryReadback.publicOutput, publication);
+  required(steps.planner?.some((entry) => entry.commitRefs?.length > 0), 'independent Planner result evidence');
+  required(steps.checkpoint?.recoveryBinding?.alignmentRef && steps.capture?.text, 'standard closure and saved capture body');
   return true;
 }
 
-async function captureReviewFeedback(root) {
-  const results = [];
-  if (!root) return results;
-  const sessionsDir = join(root, 'control', 'sessions');
-  let entries;
-  try {
-    entries = await readdir(sessionsDir, { withFileTypes: true });
-  } catch {
-    return results;
+async function main() {
+  const baseInput = process.env.HUMANAGENT_EI_BASE_URL;
+  required(baseInput && process.env.HUMANAGENT_EI_COOKIE, 'parent-allocated HUMANAGENT_EI_BASE_URL and paired HUMANAGENT_EI_COOKIE; no implicit service launch');
+  const url = new URL(baseInput);
+  required(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password
+    && url.pathname === '/' && !url.search && !url.hash, 'stable base URL origin');
+  const base = url.origin;
+  const requestedReceipt = process.env.HUMANAGENT_EI_RECEIPT_PATH;
+  if (requestedReceipt) {
+    const rel = relative(FIXTURE_BASE, resolve(requestedReceipt));
+    required(rel && rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel),
+      'receipt path inside ~/.humanagent/test-fixtures');
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const journalPath = join(sessionsDir, entry.name, 'journal', 'events.jsonl');
-    let text;
-    try {
-      text = await readFile(journalPath, 'utf8');
-    } catch {
-      continue;
-    }
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      try {
-        const record = JSON.parse(line);
-        const event = record.payload?.type === 'event' ? record.payload.event : null;
-        if (!event || typeof event.messageId !== 'string' || !event.messageId.includes('review-feedback')) continue;
-        results.push({
-          seq: record.seq,
-          committedAt: event.committedAt ?? record.committedAt ?? null,
-          summary: event.summary ?? null,
-          evidenceRefs: (event.evidenceRefs ?? []).map((ref) => ref.evidenceId?.value ?? null),
-        });
-      } catch {
-        // Ignore malformed non-event lines; the receipt only needs review feedback evidence.
-      }
-    }
-  }
-  return results.sort((a, b) => a.seq - b.seq);
-}
-
-function startServe(root) {
-  const workspace = join(root, 'workspace');
-  const controlRoot = join(root, 'control');
-  const child = spawn(process.execPath, [
-    CLI_PATH,
-    'serve',
-    '--mode', 'rcc',
-    '--protocol', 'responses',
-    '--binding', 'ui-ei-e2e-proof',
-    '--provider', 'rcc',
-    '--model', MODEL,
-    '--route', 'rcc/ui-explicit-implicit',
-    '--rcc-base-url', RCC_BASE_URL,
-    '--workspace', workspace,
-    '--control-root', controlRoot,
-    '--port', '0',
-  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
-
-  let stdout = '';
-  let stderr = '';
-  const ready = new Promise((settle, fail) => {
-    const timer = setTimeout(() => fail(new Error(`serve did not report a URL: ${stderr}`)), 30_000);
-    const onData = (chunk) => {
-      stdout += chunk.toString();
-      const match = stdout.match(/\{[\s\S]*?\n\}/);
-      if (!match) return;
-      try {
-        const parsed = JSON.parse(match[0]);
-        clearTimeout(timer);
-        settle(parsed);
-      } catch {
-        // keep buffering until the JSON object is complete
-      }
-    };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.once('exit', (code) => fail(new Error(`serve exited early (${String(code)}): ${stderr}`)));
-  });
-
-  return {
-    ready,
-    pid: child.pid,
-    stop: async () => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      const exited = new Promise((done) => child.once('exit', done));
-      child.kill('SIGTERM');
-      await exited;
+  await mkdir(FIXTURE_BASE, { recursive: true });
+  const root = await mkdtemp(join(FIXTURE_BASE, 'explicit-implicit-e2e-'));
+  const receiptPath = requestedReceipt ? resolve(requestedReceipt) : join(root, 'receipt.json');
+  const token = root.slice(root.lastIndexOf('/') + 1);
+  const steps = {};
+  const receipt = {
+    proof: 'explicit-implicit-e2e', generatedAt: new Date().toISOString(),
+    state: 'UNVERIFIED', baseUrl: base, fixtureRoot: root, receiptPath, steps,
+    resources: { ownedProcesses: [], service: 'parent-owned; never started or stopped',
+      task: 'not yet submitted', cleanup: 'receipt retained; Task cleanup belongs to parent after inspection' },
+    businessReview: {
+      state: 'UNVERIFIED',
+      criteria: ['核对本周试用、五名内部用户、每天一次导出', '比较两案人力、时间、导出和未接入依赖',
+        '给出材料支持的选择和理由', '给出两步建议和未知问题', '不引入未提供事实，不访问网络或用户文件'],
+      nextAction: 'inspect saved public output and execution evidence against these criteria; syntax/HTTP success alone is not business PASS',
     },
   };
-}
-
-async function jsonRequest(url, init) {
-  const response = await fetch(url, init);
-  const text = await response.text();
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new Error(`non-JSON response from ${url}: ${text.slice(0, 400)}`);
-  }
-  if (!response.ok) {
-    throw new Error(`request failed ${response.status} ${url}: ${text.slice(0, 800)}`);
-  }
-  return body;
-}
-
-async function statusText(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`status failed ${response.status} ${url}`);
-  return response.text();
-}
-
-async function pollTaskState(base, taskId, timeoutMs = TERMINAL_TIMEOUT_MS, minExecutionEpoch) {
-  const deadline = Date.now() + timeoutMs;
-  let dashboard;
-  for (;;) {
-    try {
-      dashboard = await jsonRequest(`${base}/api/tasks/${taskId}/dashboard`);
-    } catch (error) {
-      if (!String(error).includes('task.not.found')) throw error;
-      dashboard = undefined;
-    }
-    if (dashboard) {
-      if (minExecutionEpoch !== undefined && (dashboard.executionEpoch ?? 0) < minExecutionEpoch) {
-        if (Date.now() > deadline) return dashboard ?? null;
-        await new Promise((settle) => setTimeout(settle, 1000));
-        continue;
-      }
-      if (!['created', 'admitted', 'running', 'waiting', 'settling'].includes(dashboard.state)) {
-        return dashboard;
-      }
-    }
-    if (Date.now() > deadline) return dashboard ?? null;
-    await new Promise((settle) => setTimeout(settle, 1000));
-  }
-}
-
-async function resolveImplicitTaskId(base, draftId, timeoutMs = 30_000) {
-  const expected = `ui-task-implicit-${draftId}`;
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const list = await jsonRequest(`${base}/api/tasks`);
-    const all = [...(list.running ?? []), ...(list.waiting ?? []), ...(list.completed ?? []), ...(list.stopped ?? []), ...(list.draft ?? []), ...(list.failed ?? [])];
-    const found = all.find((task) => task.taskId?.value === expected);
-    if (found) return { taskId: expected, task: found };
-    if (Date.now() > deadline) {
-      const first = all[0];
-      if (first) return { taskId: first.taskId?.value ?? first.taskId, task: first };
-      throw new Error(`implicit task ${expected} was not created: ${JSON.stringify(all.map((task) => task.taskId?.value))}`);
-    }
-    await new Promise((settle) => setTimeout(settle, 1000));
-  }
-}
-
-async function waitForImplicitTask(base, draftId) {
-  const resolved = await resolveImplicitTaskId(base, draftId);
-  const operationId = `ui-operation-implicit-${draftId}`;
-  return { taskId: resolved.taskId, operationId, task: resolved.task };
-}
-
-async function waitForNewTask(base, excludeTaskId, timeoutMs = TERMINAL_TIMEOUT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const list = await jsonRequest(`${base}/api/tasks`);
-    const all = [...(list.running ?? []), ...(list.waiting ?? []), ...(list.completed ?? []), ...(list.stopped ?? []), ...(list.draft ?? []), ...(list.failed ?? [])];
-    const task = all.find((candidate) => (candidate.taskId?.value ?? candidate.taskId) !== excludeTaskId);
-    if (task) return { taskId: task.taskId?.value ?? task.taskId, task };
-    if (Date.now() > deadline) throw new Error(`no second task appeared after excluding ${excludeTaskId}: ${JSON.stringify(all.map((candidate) => candidate.taskId?.value))}`);
-    await new Promise((settle) => setTimeout(settle, 1000));
-  }
-}
-
-function eventKinds(dashboard) {
-  return (dashboard.recentEvents ?? []).map((event) => `${event.kind}:${event.state}`);
-}
-
-function eventRefs(dashboard) {
-  return (dashboard.recentEvents ?? [])
-    .flatMap((event) => (event.evidenceRefs ?? []).map((ref) => ref.locator || ref.digest || JSON.stringify(ref)))
-    .filter((ref) => ref && typeof ref === 'string');
-}
-
-function hasProviderEvidence(dashboard) {
-  return (dashboard.recentEvents ?? []).some((event) =>
-    String(event.kind).startsWith('provider.') && (event.evidenceRefs ?? []).length > 0);
-}
-
-async function assertAdmissionObservation(base, draftId, expectedTaskId) {
-  const status = await jsonRequest(`${base}/api/runtime/status`);
-  const observation = {
-    status,
-    taskRows: [],
-    assertion: 'none',
+  const persist = async () => {
+    await mkdir(dirname(receiptPath), { recursive: true });
+    await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
   };
-  const scheduling = status?.implicitScheduling;
-  if (scheduling?.draftId === draftId || scheduling?.state === 'queued') {
-    if (scheduling.draftId !== draftId || typeof scheduling.fifoSeq !== 'number' || scheduling.fifoSeq <= 0) {
-      throw new Error(`queued FIFO projection did not match confirmed draft ${draftId}: ${JSON.stringify(scheduling)}`);
-    }
-    observation.assertion = 'queued-fifo';
-  } else {
-    const tasks = await jsonRequest(`${base}/api/tasks`);
-    const all = [...(tasks.running ?? []), ...(tasks.waiting ?? []), ...(tasks.completed ?? []), ...(tasks.stopped ?? []), ...(tasks.draft ?? []), ...(tasks.failed ?? [])];
-    const expected = expectedTaskId ?? `ui-task-implicit-${draftId}`;
-    const row = all.find((candidate) => candidate.taskId?.value === expected);
-    if (!row || !row.requirementAdmission) {
-      throw new Error(`confirmed requirement was not queued and has no task-row admission: ${JSON.stringify(all.map((candidate) => ({ taskId: candidate.taskId?.value, admission: candidate.requirementAdmission })))}`);
-    }
-    observation.taskRows = all.map((candidate) => ({
-      taskId: candidate.taskId?.value,
-      state: candidate.state,
-      admission: candidate.requirementAdmission,
-      updatedAt: candidate.updatedAt,
-    }));
-    observation.assertion = 'task-row-admission';
-  }
-  return observation;
-}
-
-async function interpretUntilDraft(base, input) {
-  let lastError;
-  for (let attempt = 0; attempt < MAX_INTERPRET_ATTEMPTS; attempt += 1) {
-    const sourceRef = `${input.sourceRef}-attempt-${attempt + 1}`;
-    const created = await jsonRequest(`${base}/api/explicit/inputs`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        channel: 'business',
-        sourceRef,
-        rawInput: input.rawInput,
-      }),
-    });
-    const interactionId = created.interactionId;
-    let snapshot;
-    try {
-      snapshot = await jsonRequest(`${base}/api/explicit/interactions/${interactionId}/interpret`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: '{}',
-      });
-    } catch (error) {
-      lastError = error;
-      continue;
-    }
-    if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
-      lastError = new Error(`explicit interpretation reached ${snapshot.state} instead of awaiting-confirmation`);
-      continue;
-    }
-    const intents = input.requireIntents ?? (input.requireIntent ? [input.requireIntent] : []);
-    const draftMatches = (input.requireDraft
-      ? snapshot.draft.proposal.includes(input.requireDraft)
-      : true)
-      && (intents.length === 0 || intents.includes(snapshot.draft.proposedIntent))
-      && (input.requireTaskId === undefined
-        || snapshot.draft.matchedTasks.some((task) => task.taskId.value === input.requireTaskId && task.relation === 'current'));
-    if (!draftMatches) {
-      lastError = new Error(`explicit draft did not satisfy requirement: ${snapshot.draft.proposal.slice(0, 300)}`);
-      continue;
-    }
-    return { interaction: snapshot, draft: snapshot.draft };
-  }
-  throw lastError ?? new Error(`no valid explicit draft after ${MAX_INTERPRET_ATTEMPTS} attempts`);
-}
-
-async function confirmDraft(base, interaction, draft, confirmationMark) {
-  return jsonRequest(`${base}/api/explicit/interactions/${interaction.interactionId}/confirmation`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      draftId: draft.draftId,
-      inputRevision: draft.inputRevision,
-      confirmationRef: confirmationMark.confirmationRef,
-      confirmedBy: confirmationMark.confirmedBy,
-      confirmedAt: confirmationMark.confirmedAt,
-      payloadRef: confirmationMark.payloadRef,
-    }),
-  });
-}
-
-async function captureObservation(base, taskId) {
-  const dashboard = await jsonRequest(`${base}/api/tasks/${taskId}/dashboard`);
-  const observation = await jsonRequest(`${base}/api/tasks/${taskId}/observation`);
-  const detail = await jsonRequest(`${base}/api/tasks/${taskId}`);
-  return { dashboard, observation, detail };
-}
-
-async function captureTaskList(base) {
-  return jsonRequest(`${base}/api/tasks`);
-}
-
-function assertCompleted(dashboard, expect) {
-  if (dashboard.state !== 'succeeded') {
-    throw new Error(`task did not complete: state=${dashboard.state}; output=${JSON.stringify(dashboard.output ?? null).slice(0, 600)}`);
-  }
-  if (expect && (!dashboard.output || !dashboard.output.includes(expect))) {
-    throw new Error(`task output did not include expected text ${expect}: ${JSON.stringify(dashboard.output ?? null).slice(0, 600)}`);
-  }
-}
-
-function assertProviderToolRounds(dashboard, expectAtLeast = 2) {
-  const count = (dashboard.recentEvents ?? []).filter((event) => event.kind === 'provider.tool').length;
-  if (count < expectAtLeast) {
-    console.error('DEBUG_ASSERT_PROVIDER_TOOL_ROUNDS', JSON.stringify(dashboard, null, 2));
-    throw new Error(`task did not exercise ${expectAtLeast} provider.tool rounds: ${count}`);
-  }
-  if (!hasProviderEvidence(dashboard)) {
-    throw new Error(`task had no provider event with evidence refs: ${JSON.stringify((dashboard.recentEvents ?? []).map((event) => ({ kind: event.kind, refs: event.evidenceRefs?.length ?? 0 })))}`);
-  }
-}
-
-function assertObservation(observation) {
-  const ids = (observation.nodes ?? []).map((node) => node.nodeId);
-  for (const expected of ['sensory.inbox', 'explicit.normalize', 'implicit.classify', 'interactive.queue', 'execution.queue', 'pipeline.execute', 'settle', 'task.output']) {
-    if (!ids.includes(expected)) throw new Error(`observation is missing node ${expected}: ${ids.join(', ')}`);
-  }
-  const evidenceCount = (observation.scope?.nodes ?? observation.nodes ?? []).reduce((sum, node) => sum + (node.evidenceCount ?? 0), 0);
-  if (evidenceCount <= 0) throw new Error(`observation carried no evidence refs: ${JSON.stringify(observation.nodes ?? [])}`);
-}
-
-function assertCommittedCheckpoint(dashboard) {
-  if (!dashboard.checkpoint || dashboard.checkpoint.outcome !== 'succeeded') {
-    console.error('DEBUG_ASSERT_CHECKPOINT', JSON.stringify(dashboard, null, 2));
-    throw new Error(`task did not expose a committed succeeded checkpoint: ${JSON.stringify(dashboard.checkpoint ?? null)}`);
-  }
-}
-
-async function main() {
-  const root = await mkdtemp(join(tmpdir(), 'ha-explicit-implicit-4-e2e-'));
-  const keepRoot = process.env.HUMANAGENT_EI_KEEP_ROOT === '1';
-  await mkdir(join(root, 'workspace'), { recursive: true });
-  await writeFile(join(root, 'workspace', 'marker.txt'), 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C\n', 'utf8');
-  await writeFile(join(root, 'workspace', 'readme-first-line.txt'), 'FIRST_LINE_PROVEN_8B2D\n', 'utf8');
-
-  let serve;
-  const steps = {};
-  const rounds = [];
   try {
-    steps.rccHealth = await jsonRequest(`${RCC_BASE_URL}/health`);
-    serve = startServe(root);
-    const launched = await serve.ready;
-    const base = launched.url;
-    steps.serve = {
-      root,
-      url: base,
-      pid: serve.pid,
-      checkpointRoot: launched.checkpointRoot,
-      memoryAnalysisMode: launched.memoryAnalysisMode,
+    steps.status = await jsonRequest(base, '/api/runtime/status');
+    const organized = await interpretUntilDraft(base, { sourceRef: token, rawInput: BUSINESS_INPUT }, steps);
+    const identity = {
+      confirmationRef: `${token}-confirmation`, payloadRef: pathToFileURL(join(root, 'input.json')).href,
+      idempotencyKey: `${token}-submit`, confirmedAt: new Date().toISOString(),
     };
-
-    steps.status = await jsonRequest(`${base}/api/runtime/status`);
-    steps.uiRoot = await statusText(`${base}/`);
-
-    const firstInput = {
-      sourceRef: 'explicit-implicit-e2e-round-1',
-      rawInput: 'Do not clarify. Create exactly one concrete task: read the files marker.txt and readme-first-line.txt at the workspace root, combine both facts into a single completion summary that includes the exact contents of both files verbatim, and finish with the word COMPLETE.',
-      requireDraft: 'readme-first-line.txt',
-      requireIntent: 'create',
-    };
-    const first = await interpretUntilDraft(base, firstInput);
-    steps.round1Draft = first.draft;
-    await confirmDraft(base, first.interaction, first.draft, {
-      confirmationRef: `confirmation-${first.draft.draftId}`,
-      confirmedBy: 'e2e-user',
-      confirmedAt: new Date().toISOString(),
-      payloadRef: `humanagent://e2e/requirement/${first.draft.draftId}`,
-    });
-    steps.round1Admission = await assertAdmissionObservation(base, first.draft.draftId);
-    const firstImplicit = await waitForImplicitTask(base, first.draft.draftId);
-    const firstTaskId = firstImplicit.taskId;
-    const firstOperationId = firstImplicit.operationId;
-    const firstTerminal = await pollTaskState(base, firstTaskId);
-    assertCompleted(firstTerminal, 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C');
-    assertProviderToolRounds(firstTerminal);
-    assertCommittedCheckpoint(firstTerminal);
-    const firstObservation = await captureObservation(base, firstTaskId);
-    assertObservation(firstObservation.observation);
-    rounds.push({
-      round: 1,
-      interactionId: first.interaction.interactionId,
-      draftId: first.draft.draftId,
-      taskId: firstTaskId,
-      operationId: firstOperationId,
-      terminalState: firstTerminal.state,
-      toolCallIds: providerToolCallIds(firstTerminal),
-      events: eventKinds(firstTerminal),
-      dashboard: firstTerminal,
-      output: firstTerminal.output,
-      observation: firstObservation.observation,
-    });
-
-    const secondInput = {
-      sourceRef: 'explicit-implicit-e2e-round-2',
-      rawInput: `Do not clarify. Do not create a new task; apply this to the existing task ${firstTaskId}. Read the file readme-first-line.txt at the workspace root, include its exact contents verbatim in the completion summary, and finish with the word COMPLETE.`,
-      requireDraft: 'readme-first-line.txt',
-      requireTaskId: firstTaskId,
-      requireIntents: ['append', 'change'],
-    };
-    const second = await interpretUntilDraft(base, secondInput);
-    steps.round2Draft = second.draft;
-    await confirmDraft(base, second.interaction, second.draft, {
-      confirmationRef: `confirmation-${second.draft.draftId}`,
-      confirmedBy: 'e2e-user',
-      confirmedAt: new Date().toISOString(),
-      payloadRef: `humanagent://e2e/requirement/${second.draft.draftId}`,
-    });
-    const boundTask = second.draft.matchedTasks.find((task) => task.relation === 'current');
-    if (boundTask?.taskId?.value !== firstTaskId) {
-      throw new Error(`round-two draft did not bind to ${firstTaskId}: ${JSON.stringify(second.draft.matchedTasks)}`);
+    await writeFile(join(root, 'input.json'), `${JSON.stringify(steps.input, null, 2)}\n`, 'utf8');
+    steps.confirmation = await confirmDraft(base, organized.interaction, organized.draft, identity);
+    await persist();
+    const requirement = steps.confirmation.requirement;
+    required(['submitted', 'duplicate'].includes(steps.confirmation.status) && requirement, 'typed final-submit receipt');
+    assert.equal(requirement.draftId, organized.draft.draftId);
+    assert.equal(requirement.inputRevision, organized.draft.inputRevision);
+    assert.equal(requirement.confirmationRef, identity.confirmationRef);
+    assert.equal(requirement.payloadRef, identity.payloadRef);
+    if (organized.interaction.revision !== undefined) {
+      assert.equal(requirement.draftRevisionVersion, organized.interaction.revision.revisionVersion);
+      assert.equal(requirement.draftRevisionHash, organized.interaction.revision.revisionHash);
     }
-    steps.round2Admission = await assertAdmissionObservation(base, second.draft.draftId, firstTaskId);
-    const secondTerminal = await pollTaskState(base, firstTaskId, TERMINAL_TIMEOUT_MS, (firstTerminal.executionEpoch ?? 0) + 1);
-    const secondTaskId = firstTaskId;
-    assertCompleted(secondTerminal, 'FIRST_LINE_PROVEN_8B2D');
-    assertProviderToolRounds(secondTerminal);
-    assertCommittedCheckpoint(secondTerminal);
-    const secondOperationId = secondTerminal.operationId ?? null;
-    const secondObservation = await captureObservation(base, secondTaskId);
-    assertObservation(secondObservation.observation);
-
-    steps.taskList = await captureTaskList(base);
-    const completedRows = [...(steps.taskList.completed ?? []), ...(steps.taskList.waiting ?? [])];
-    const finalTaskRows = completedRows.filter((row) => row.taskId?.value === firstTaskId);
-    const finalDashboard = await jsonRequest(`${base}/api/tasks/${firstTaskId}/dashboard`);
-    if (finalDashboard.state !== 'succeeded') {
-      throw new Error(`final projection did not mark ${firstTaskId} completed: ${JSON.stringify(finalDashboard)}`);
+    required(Number.isSafeInteger(requirement.fifoSeq) && requirement.fifoSeq > 0, 'accepted FIFO sequence');
+    const taskId = await waitForImplicitTask(base, requirement, steps);
+    receipt.resources.task = { taskId, retained: true, owner: 'parent canonical fixture cleanup/recovery' };
+    const path = `/api/tasks/${encodeURIComponent(taskId)}`;
+    steps.prepared = await jsonRequest(base, `${path}/dashboard`);
+    required(steps.prepared.operationId && Number.isSafeInteger(steps.prepared.executionEpoch), 'prepared operation/epoch');
+    assert.equal(steps.prepared.state, 'waiting', 'grant must precede execution');
+    required(!(steps.prepared.recentEvents ?? []).some((event) =>
+      event.kind === 'execution.started' || String(event.kind).startsWith('provider.')), 'no pre-grant execution/provider event');
+    steps.grantBefore = await jsonRequest(base, `${path}/control/grant`);
+    required(steps.grantBefore.readback && valueOf(steps.grantBefore.taskId) === taskId,
+      'grant GET Task selector/readback');
+    required(steps.grantBefore.readback?.grant == null, 'new Task without preexisting grant');
+    steps.grantRequest = { requestId: `${token}-grant`,
+      expectedRevision: steps.grantBefore.readback.grant?.revision ?? 0,
+      capability: { actionId: 'task.execute', capabilities: ['provider.execution'] } };
+    steps.grant = await jsonRequest(base, `${path}/control/grant`, steps.grantRequest);
+    await persist();
+    steps.grantReadback = await jsonRequest(base, `${path}/control/grant`);
+    await persist();
+    required(steps.grant.readback?.grant?.state === 'granted', 'grant persisted');
+    assert.deepEqual(steps.grantReadback.readback, steps.grant.readback);
+    const execution = steps.grant.execution;
+    required(execution && ['released', 'current', 'blocked', 'not-applicable'].includes(execution.state), 'grant execution union receipt');
+    if (execution.state !== 'released') {
+      throw new Error(`UNVERIFIED: execution=${execution.state}; saved selector/current/apiError; no regrant/start/resume/confirmation fallback`);
     }
-    if (finalTaskRows.length === 0) {
-      throw new Error(`final /api/tasks did not expose ${firstTaskId} completed: ${JSON.stringify(steps.taskList)}`);
-    }
-    rounds.push({
-      round: 2,
-      interactionId: second.interaction.interactionId,
-      draftId: second.draft.draftId,
-      taskId: secondTaskId,
-      operationId: secondOperationId,
-      terminalState: secondTerminal.state,
-      toolCallIds: providerToolCallIds(secondTerminal),
-      events: eventKinds(secondTerminal),
-      dashboard: secondTerminal,
-      output: secondTerminal.output,
-      observation: secondObservation.observation,
-    });
-
-    if (rounds.length < 2) throw new Error('proof expected at least two executor rounds');
-    if (rounds[0].taskId !== rounds[1].taskId) throw new Error('proof expected both rounds on the same task');
-    if (!(rounds[1].dashboard.executionEpoch > rounds[0].dashboard.executionEpoch)) throw new Error('proof expected a second execution epoch on the same task');
-
-    const receipt = {
-      proof: 'explicit-implicit-e2e',
-      generatedAt: new Date().toISOString(),
-      gitSha: gitSha(),
-      mainSha: mainSha(),
-      sourceDigest: sourceDigest(),
-      reviewFeedback: await captureReviewFeedback(root),
-      rcc: {
-        baseUrl: RCC_BASE_URL,
-        protocol: 'responses',
-        model: MODEL,
-        route: 'rcc/ui-explicit-implicit',
-      },
-      serve: steps.serve,
-      status: steps.status,
-      taskList: steps.taskList,
-      admission: {
-        round1: steps.round1Admission,
-        round2: steps.round2Admission,
-      },
-      uiRootServed: typeof steps.uiRoot === 'string' && steps.uiRoot.startsWith('<!doctype html>') || steps.uiRoot.startsWith('<!DOCTYPE html>'),
-      dashboards: {
-        round1: rounds[0] ?? null,
-        round2: rounds[1] ?? null,
-      },
-      rounds,
-    };
+    assertSameExecution(execution.selector, steps.prepared);
+    assertSameExecution(execution.current, steps.prepared);
+    const terminal = await pollTaskState(base, taskId, steps.prepared, steps);
+    await persist();
+    await captureObservation(base, taskId, terminal, steps);
+    steps.deliveryReadback = await jsonRequest(base, `${path}/dashboard`);
     assertReceiptContract(receipt);
-    await mkdir(resolve('dist/receipts'), { recursive: true });
-    await writeFile(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-    console.log(JSON.stringify(receipt, null, 2));
+    receipt.behavior = 'PASS: typed FIFO identity, independent grant/release, standard closure/Planner, Task/public delivery readback';
+    // Semantic review must still check output quality and forbidden I/O. Never
+    // replace that check with non-empty output or keyword matching.
+    receipt.state = 'UNVERIFIED';
+    console.log(JSON.stringify({ state: receipt.state, behavior: receipt.behavior, receiptPath,
+      nextAction: receipt.businessReview.nextAction }));
+  } catch (error) {
+    receipt.state = 'INCOMPLETE';
+    receipt.failure = { message: error.message,
+      ...(error.publicResponse === undefined ? {} : { publicResponse: error.publicResponse }) };
+    throw error;
   } finally {
-    if (serve) await serve.stop();
-    if (keepRoot) {
-      console.error(`HUMANAGENT_EI_ROOT=${root}`);
-    } else {
-      await rm(root, { recursive: true, force: true });
-    }
+    await persist();
+    console.error(`HUMANAGENT_EI_RECEIPT_PATH=${receiptPath}`);
   }
 }
 
 const isMainModule = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMainModule) {
   main().catch((error) => {
-    console.error(error);
+    console.error(error.message);
     process.exitCode = 1;
   });
 }
