@@ -1163,6 +1163,11 @@ test('native two.turn public CLI consumer retains adopted child context and comp
       readonly output?: string;
       readonly error?: unknown;
       readonly terminal?: Record<string, unknown>;
+      readonly checkpoint?: {
+        readonly checkpointId?: string;
+        readonly committedAt?: string;
+        readonly committedAtUnavailableReason?: string;
+      };
     };
     console.log('two.turn receipt', JSON.stringify(receipt));
     assert.equal(receipt.command, 'run');
@@ -1208,6 +1213,20 @@ test('native two.turn public CLI consumer retains adopted child context and comp
       'the second turn excludes the first turn raw child-adopt history');
 
     const verified = await fixture.journal.verify();
+    const currentCheckpoint = receipt.checkpoint;
+    if (!currentCheckpoint?.checkpointId) throw new Error('the two-turn receipt must expose its current checkpoint');
+    const currentCheckpointRecord = verified.records.find((record) => record.kind === 'checkpoint'
+      && record.scope.taskId?.value === taskId.value
+      && record.checkpoint?.id.value === currentCheckpoint.checkpointId);
+    if (!currentCheckpointRecord?.checkpoint) throw new Error('the two-turn current checkpoint must be committed');
+    const currentCheckpointRelationship = await createJsonlCheckpointJournal({
+      filePath: fixture.layout.organJournalPath,
+    }).readNativeCheckpoint({ checkpoint: currentCheckpointRecord.checkpoint });
+    if (!currentCheckpointRelationship) throw new Error('the two-turn current checkpoint receipt must be durable');
+    assert.equal(currentCheckpoint.committedAt, currentCheckpointRelationship.receipt.committedAt,
+      'the two-turn receipt exposes the exact current checkpoint commit time');
+    assert.equal(currentCheckpoint.committedAtUnavailableReason, undefined,
+      'the two-turn receipt does not report a durable commit time as unavailable');
     const coverageRecords = verified.records
       .filter((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
     const parentCoverageRecords = coverageRecords.filter((record) => record.scope.taskId?.value === taskId.value);
@@ -1256,6 +1275,11 @@ test('native three.turn public CLI consumer retains multi-turn semantic history 
       readonly output?: string;
       readonly error?: unknown;
       readonly terminal?: Record<string, unknown>;
+      readonly checkpoint?: {
+        readonly checkpointId?: string;
+        readonly committedAt?: string;
+        readonly committedAtUnavailableReason?: string;
+      };
     };
     assert.equal(receipt.command, 'run');
     assert.equal(receipt.taskId, taskId.value);
@@ -1302,6 +1326,20 @@ test('native three.turn public CLI consumer retains multi-turn semantic history 
       'the third turn excludes the prior turn delivery body from semantic history');
 
     const verified = await fixture.journal.verify();
+    const currentCheckpoint = receipt.checkpoint;
+    if (!currentCheckpoint?.checkpointId) throw new Error('the three-turn receipt must expose its current checkpoint');
+    const currentCheckpointRecord = verified.records.find((record) => record.kind === 'checkpoint'
+      && record.scope.taskId?.value === taskId.value
+      && record.checkpoint?.id.value === currentCheckpoint.checkpointId);
+    if (!currentCheckpointRecord?.checkpoint) throw new Error('the three-turn current checkpoint must be committed');
+    const currentCheckpointRelationship = await createJsonlCheckpointJournal({
+      filePath: fixture.layout.organJournalPath,
+    }).readNativeCheckpoint({ checkpoint: currentCheckpointRecord.checkpoint });
+    if (!currentCheckpointRelationship) throw new Error('the three-turn current checkpoint receipt must be durable');
+    assert.equal(currentCheckpoint.committedAt, currentCheckpointRelationship.receipt.committedAt,
+      'the three-turn receipt exposes the exact current checkpoint commit time');
+    assert.equal(currentCheckpoint.committedAtUnavailableReason, undefined,
+      'the three-turn receipt does not report a durable commit time as unavailable');
     const parentCoverageRecords = verified.records
       .filter((record) => record.payload?.['kind'] === 'operation-control-coverage/v1'
         && record.scope.taskId?.value === taskId.value);

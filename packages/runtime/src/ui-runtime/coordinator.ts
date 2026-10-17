@@ -2787,9 +2787,13 @@ export class RuntimeTaskCoordinator {
       throw new RuntimeTaskControlError('turn.checkpoint.conflict', RUNTIME_OWNER,
         'canonical closing checkpoint belongs to another execution', 'resolve the exact turn checkpoint');
     }
+    const checkpointReceipt = await readDurableCheckpointReceipt(
+      this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+      committed,
+    );
     record.checkpoint = committed.checkpoint;
     record.checkpointSeq = committed.checkpoint.seq;
-    record.checkpointReceipt = undefined;
+    record.checkpointReceipt = checkpointReceipt ?? undefined;
     this.pushEvent(record, operation, 'checkpoint.committed', committed.checkpoint.outcome,
       committed.checkpoint.summary, committed.checkpoint.evidenceRefs);
     await input.closeOwned();
