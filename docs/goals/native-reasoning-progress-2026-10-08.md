@@ -6,6 +6,9 @@
 
 ### 续接增量（2026-10-16）
 
+- C3a r7局部计划已接收：先公开resumeExecution标准收拢再confirmed控制；发现displacedObligationRefs可能让历史dispatch覆盖后续terminal的具体投影疑点，须实际RED后才改唯一owner。freshGCM r8复用原N2树仅此Batch1，后续hot/fresh-processnextwire/closure不降验。C3b r2局部“合法errors[]”基础已准入，freshGCM独立memorydomain/basef646d15，仅memory-runtime+原consumer；不与C3a文件交叉。前C2来源已关无同域重试树，开树前fetchmain仍2981230；新树offline frozeninstall0，lock未改。完整C3b生产hook仍未准入，原Gemini r3修真实boundary/binding/record ABI及更早完整未发布路径的cold补发；events.ts已透传无需改。
+- N3 Gemini阶段r2已返但首批未准入：tsx无依赖/测试路径未区分新增、originmain缺候选底层、childproducer新wrapper必要性未证明；原Planner定向r3，只修可派首批，不造ready任务。UX A1独立contracts GCM继续，scope与本侧无重叠。当前两路本侧GCM实现+UX一GCM，两个独立Planner定向修订并行；完整goal/A0/N2C/N3均未验收，无mainpush。
+
 - C3a r6已exit0但未验收：5allowedfiles261+/19-，作者build/tsc0/新2cases2/2只证明拒绝未收拢preparedoperation与directlivefloor（真实RED1!=5）。原fixture无法达到control成功→nextrequest；hot/fresh-processcold/active seed/newroot/closure/parentepoch仍UNVERIFIED，不commit/merge。保留唯一N2树dirty；独立OAuth小planr7只解决合法settledfixture/生命周期可达性，不放宽guard或startpolicy。C3b Gemini r1假API/重复coldsync/id-only新增校验/错误dist和宽测命令未准入，原conversation定向r2修正，无实施writer。
 - N3 freshGCM观察已exit0：显式helper生产边存在；隐式FIFO串行、TaskFlowSelectorConsumer无生产caller、预算pool不等于N隐式runtime，行为未运行仍UNVERIFIED。其child-wiring B2旧描述不采用（此前fixture已修原2/2），不重复该项。N3独立大阶段首选Opus5.5实际quota ERROR/空response0turn，证据保留后已freshGemini4 medium后备r2；只规划不提前实现。UX另派F09A1 freshGCM独占contracts新module/index/原consumer，与C3a共享Appwriter隔离；本侧计划已告知该owner。
 - C2终态来源已正常remove/prune/pathabsent；注册5→4（随后UX独立A1开树，非本侧重试树）。C3b观察已接收后再关闭，无丢输入。epoch3新服务窗与旧epoch2同样200->write150->响应UserBodyerror->socketclose，无innercode；Root亲读6rows/最终产品receipt并保留UNKNOWN，不再新请求或改RCC，A0仍INCOMPLETE。
