@@ -2,11 +2,11 @@
   "graph": "humanagent-subagent-call-checkpoint",
   "requirements_version": 14,
   "labels": {
-    "assignment": "声明真实 stage 与成员任务；提交 graph fact 后才取得执行许可",
+    "assignment": "在内存 graph 声明真实 stage 与成员任务后取得执行许可",
     "checkpoint": "保存子调用绑定与未返回义务",
     "context": "装配独立上下文",
     "execute": "执行角色并返回完整正文与类型化交付",
-    "acceptance": "先提交真实 assignment 转移，再接纳持久返回；巡检时补交检查结果"
+    "acceptance": "先在内存 graph 完成 assignment 转移，再接纳持久返回；巡检时补交检查结果"
   },
   "owners": {
     "assignment": "packages/runtime",
@@ -18,11 +18,11 @@
   "implementationStatus": "UNVERIFIED",
   "design": {
     "status": "USER-REQUIREMENT-DESIGN-REVIEWED",
-    "assignment": "普通 execution/review 保持明确角色任务；只有 execution 显式 check 时，Runtime 才选择正式 definition 并按需打开同一 logical turn 的 occurrence。contracts 定义 graph DTO 与端口；Runtime 只提交、安装和重放真实事实，不拥有 open occurrence 副作用。",
+    "assignment": "普通 execution/review 保持明确角色任务；只有 execution 显式 check 时，Runtime 才选择正式 definition 并按需打开同一 logical turn 的 occurrence。Runtime 只维护同进程内存 graph，不拥有 open occurrence 副作用。",
     "binding": "checkpoint 保存子调用绑定与未返回义务；显式 check 时才绑定检查。context 消费 typed binding 并保留独立 Provider/model 含义，不从业务正文或日志重建状态。",
     "execution": "普通 execution/review 保持原作用；显式 check 时才产生完整 child 正文及独立 typed delivery，正文不声明控制完成。",
-    "acceptance": "acceptance 接纳 durable child return；显式 check 时才由 Runtime 幂等补 I2 receipt，普通任务无 occurrence 时不创建 I2 记录。所有 assignment 状态转移先提交 graph fact，再发布结果；恢复只补提交，不重复 child。",
-    "durableGraph": "stage-declared 与 assignment-transition 保留空 stage、parent、成员、完整记录和 stage.state 最后写值；同一 key 不得跨 stage 复用。",
+    "acceptance": "acceptance 接纳 durable child return；显式 check 时才由 Runtime 幂等补 I2 receipt，普通任务无 occurrence 时不创建 I2 记录。所有 assignment 状态转移先在内存 graph 完成，再发布结果；恢复不重复 child。",
+    "durableGraph": "内存 graph 保留空 stage、parent、成员、完整记录和 stage.state 最后写值；同一 key 不得跨 stage 复用。",
     "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 已实现 typed binding 选择、交付接受与幂等结算；App child producer 的 typed delivery 接缝已组合到候选，实际配置子代理与整链接线仍未验收。",
     "wiring": "packages/app 只做 wiring，不拥有 inspection binding、delivery 或提交语义。",
     "roleOrder": "不固定探索、计划、执行、审查顺序。"
