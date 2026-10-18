@@ -2364,6 +2364,9 @@ export class UiRuntimeService {
         },
         projectionVersion: 'runtime-semantic-v1',
         sourceWatermark: task.events.length,
+        ...(task.publicOutput?.publicCommitWatermark === undefined
+          ? {}
+          : { publicCommitWatermark: task.publicOutput.publicCommitWatermark }),
         events: task.events,
         capabilities: [{ capability: 'runtime-task-events', state: task.events.length > 0 ? 'available' : 'unavailable', ...(task.events.length > 0 ? {} : { reason: 'task has no runtime task events yet' }) }],
       });
@@ -2415,6 +2418,9 @@ export class UiRuntimeService {
       },
       projectionVersion: 'runtime-semantic-v1',
       sourceWatermark: entry.snapshot.events.length,
+      ...(entry.snapshot.publicOutput?.publicCommitWatermark === undefined
+        ? {}
+        : { publicCommitWatermark: entry.snapshot.publicOutput.publicCommitWatermark }),
       events: entry.snapshot.events,
       capabilities: [{
         capability: 'runtime-task-events',

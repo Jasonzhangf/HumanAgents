@@ -502,9 +502,14 @@ test('public semantic HTTP/SSE preserves canonical pairing, unknown states, refs
     const started = await runtime.service.startExecution(task.taskId, { prompt: 'semantic public lifecycle' });
 
     await waitFor(() => runtime.service.taskDashboard(task.taskId).state === 'succeeded');
+    const publication = runtime.service.taskDashboard(task.taskId).publicOutput;
+    const expected = publication?.commits.at(-1)?.journalSeq;
+    assert.ok(expected !== undefined, 'fixture must produce a public commit');
+    assert.equal(publication?.publicCommitWatermark, expected);
     const semantic = await (await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/semantic`)).json() as RuntimeSemanticObservationEnvelope;
 
     assert.equal(semantic.projectionVersion, 'runtime-semantic-v1');
+    assert.equal(semantic.publicCommitWatermark, expected);
     assert.equal(semantic.scope.organId.value, organId.value);
     assert.equal(semantic.scope.taskId?.value, task.taskId.value);
     assert.equal(semantic.scope.operationId?.value, started.operationId.value);
@@ -537,6 +542,7 @@ test('public semantic HTTP/SSE preserves canonical pairing, unknown states, refs
     assert.match(sseText, /event: semantic\.observation/);
     const frames = [...sseText.matchAll(/data: (.+)$/gm)].map((match) => JSON.parse(match[1]!) as RuntimeSemanticObservationEnvelope);
     assert.equal(frames.length >= 1, true);
+    assert.equal(frames.at(-1)?.publicCommitWatermark, expected);
     assert.equal(frames.at(-1)?.events.some((event) => event.type === 'operation.completed'), true);
     assert.equal(frames.at(-1)?.pairing.some((group) => group.kind === 'operation' && group.state === 'closed'), true);
 
