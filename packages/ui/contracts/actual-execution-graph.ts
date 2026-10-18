@@ -1,7 +1,9 @@
 import type {
-  AssignmentRecord,
-  AssignmentStatus,
   EvidenceRef,
+  JournalCommitRef,
+  TaskActualExecutionGraphEdgeKind,
+  TaskActualExecutionNodeKind,
+  TaskExecutionInstanceIdentity,
   TaskFlowKind,
   TaskIdentityScope,
 } from '@humanagent/contracts';
@@ -21,99 +23,107 @@ export interface TaskActualExecutionGuidanceProjection {
   readonly displayGroups: readonly string[];
 }
 
-export interface TaskActualExecutionResultProjection {
-  readonly status: 'succeeded' | 'failed' | 'incomplete' | 'blocked' | 'cancelled';
-  readonly statusLabel: string;
-  readonly summary: string;
-}
-
-export interface TaskActualExecutionReviewProjection {
-  readonly status: 'passed' | 'failed' | 'inconclusive';
-  readonly statusLabel: string;
-  readonly findingCount: number;
-}
-
-export interface TaskActualExecutionMemberTechnicalProjection {
-  readonly assignmentId: string;
-  readonly attempt: number;
-  readonly executionEpoch: number;
-  readonly pipelineNodeId: string;
-  readonly agentId?: string;
-  readonly evidenceRefs: readonly EvidenceRef[];
-}
-
-export interface TaskActualExecutionMemberProjection {
+/**
+ * A native fact in human wording. It never contains raw identifiers, runtime
+ * ids, commit refs, epochs, digests or node ids. Technical detail stays in
+ * `technical`.
+ */
+export interface TaskActualExecutionNodeSummaryProjection {
   readonly roleLabel: string;
-  readonly objective: string;
-  readonly status: AssignmentStatus;
-  readonly statusLabel: string;
-  readonly statusTone: TaskActualExecutionStateTone;
-  readonly result?: TaskActualExecutionResultProjection;
-  readonly reviews: readonly TaskActualExecutionReviewProjection[];
-  readonly reason: string;
-  readonly nextActionKind: AssignmentRecord['nextAction']['kind'];
-  readonly nextActionLabel: string;
-  readonly technical: TaskActualExecutionMemberTechnicalProjection;
-}
-
-export type TaskActualExecutionStageParentProjection =
-  | {
-      readonly kind: 'none';
-      readonly label: string;
-    }
-  | {
-      readonly kind: 'recorded';
-      readonly stageNodeId: string;
-      readonly label: string;
-    }
-  | {
-      readonly kind: 'missing';
-      readonly parentNodeId: string;
-      readonly label: string;
-    };
-
-export interface TaskActualExecutionStageProjection {
-  readonly stageNodeId: string;
-  readonly label: string;
-  readonly state: AssignmentStatus;
+  readonly objective?: string;
   readonly stateLabel: string;
   readonly stateTone: TaskActualExecutionStateTone;
-  readonly parent: TaskActualExecutionStageParentProjection;
-  readonly members: readonly TaskActualExecutionMemberProjection[];
-  readonly technical: {
-    readonly parentNodeId: string | null;
-    readonly assignmentKeys: readonly string[];
-  };
+  readonly outcomeLabel?: string;
+  readonly resultSummary?: string;
+  readonly adoptionLabel?: string;
+  readonly decisionLabel?: string;
+  readonly reason?: string;
+  readonly nextActionLabel?: string;
 }
 
-export interface TaskActualExecutionStreamProjection {
-  readonly ownerId: string;
-  readonly ownerLabel: string;
-  readonly stages: readonly TaskActualExecutionStageProjection[];
+export interface TaskActualExecutionEdgeSummaryProjection {
+  readonly edgeId: string;
+  readonly kind: TaskActualExecutionGraphEdgeKind;
+  readonly label: string;
+  readonly detail: string;
+}
+
+export interface TaskActualExecutionNodeTechnicalProjection {
+  readonly nodeId: string;
+  readonly nodeKind: TaskActualExecutionNodeKind;
+  readonly taskIdValue: string;
+  readonly assignmentId: string;
+  readonly instance?: TaskExecutionInstanceIdentity;
+  readonly executionEpoch?: number;
+  readonly businessTurnId?: string;
+  readonly segmentId?: string;
+  readonly pipelineNodeId?: string;
+  readonly invocationId?: string;
+  readonly childTurnId?: string;
+  readonly checkpointReceiptRef?: string;
+  readonly containingLocationKind?: 'active-turn' | 'resumed-segment';
+  readonly containingLocationBusinessTurnId?: string;
+  readonly containingLocationSegmentId?: string;
+  readonly commitRefs: readonly JournalCommitRef[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly missingSource?: string;
+  readonly message?: string;
+}
+
+export interface TaskActualExecutionNodeProjection {
+  readonly nodeId: string;
+  readonly kind: TaskActualExecutionNodeKind;
+  readonly summary: TaskActualExecutionNodeSummaryProjection;
+  readonly technical: TaskActualExecutionNodeTechnicalProjection;
+}
+
+export interface TaskActualExecutionGroupProjection {
+  readonly groupId: string;
+  readonly label: string;
+  readonly purpose: string;
+  readonly nodes: readonly TaskActualExecutionNodeProjection[];
+}
+
+export interface TaskActualExecutionUnavailableProjection {
+  readonly sourceId: string;
+  readonly label: string;
+  readonly detail: string;
+}
+
+export interface TaskActualExecutionUngroupedProjection {
+  readonly nodeId: string;
+  readonly label: string;
+  readonly detail: string;
 }
 
 export type TaskActualExecutionGraphHistoryProjection =
   | {
       readonly status: 'recorded';
       readonly summary: string;
-      readonly streamCount: number;
-      readonly stageCount: number;
-      readonly memberCount: number;
-      readonly streams: readonly TaskActualExecutionStreamProjection[];
+      readonly groupCount: number;
+      readonly nodeCount: number;
+      readonly edgeCount: number;
+      readonly groups: readonly TaskActualExecutionGroupProjection[];
+      readonly edges: readonly TaskActualExecutionEdgeSummaryProjection[];
+      readonly ungrouped: readonly TaskActualExecutionUngroupedProjection[];
+      readonly unavailable: readonly TaskActualExecutionUnavailableProjection[];
+      readonly recordCount: number;
+      readonly deliveryCount: number;
     }
   | {
       readonly status: 'not-recorded';
       readonly reason: 'no-recorded-facts';
       readonly label: string;
       readonly detail: string;
+      readonly unavailable?: readonly TaskActualExecutionUnavailableProjection[];
     };
 
 /**
  * Read-only UI projection of `TaskActualExecutionGraphSnapshot`.
  *
- * Guidance, current plan revisions and recorded execution instances keep
- * separate carriers and meanings. Raw IDs are retained only for the deliberate
- * detail layer; the default renderer does not display them.
+ * Guidance, current plan revisions and recorded execution nodes keep separate
+ * carriers and meanings. Raw IDs stay in the technical detail layer only; the
+ * default renderer does not display them.
  */
 export interface TaskActualExecutionGraphProjection {
   readonly surface: 'task-actual-execution-graph';
