@@ -9,6 +9,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r318typedancestry实际运行已越过前两层admission/Gateway错误，第一round file.write成功，第二round budgetguard前未执行对应effect。namedcase仍FAIL，公开UiRuntimeApiError.code为orchestration.dispatch.failed/message为provider tool round limit was exceeded，而test错误直接期待低层tool.round-limit。freshGCM r320同树tests-only校正公开wrapper预期与typed effect envelope断言，继续真实freshservice第二resume；不为测试改Runtime映射，不伪造错误后状态。budget恢复尚未验收，产品patch未合流。
+- r319观察仅引用r317futureintent与旧冻结分支失败，未核较新的交付回执；不接收为A/B/D当前缺陷或完成数，不据此派实现/扩测。E/F主线继续，未新增证据门禁。
+
 - childcanonicalprompt来源56967bc2已标准cherry候选bc4b683d，仅两Appfiles5add4del；复用真实wire缺完整指令RED→原inspection越过三prompt断言/2Planner16POST的新firsterror，Root普通two.turnbaseline1PASS（2Planner12POST/Task succeeded）。peer精确观察7KAHoa：同invocation107无adoptedResultSeq、141为3，其余字段相同，capture159已adopted3；Runtimehelper把合法演进当fullJSON冲突。peer独立Planner47226负责canonicalfold，不放宽全局mergeExact、不按latest猜控制。
 - r316修订已接收，导出segmentOpenedFromRecord/decodeActiveTurnRecords真实可复用，明确原始identity从businessTurnRef.execution/bindingCommitRef关联、不硬编码epoch。freshGCM r318已在原预算树实现typedancestry核验，唯一允许admission/operation-control-journal/coldconsumer/原segment图语义合同，不改Gateway或UX。r317observer terminal0却仅futureintent未接收；r319限定8命令收口A/B/D事实表，不为模糊缺证据新增测试。
 
