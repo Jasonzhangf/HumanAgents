@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 容量wait远端收口已完成：实际push `8442df17..749a885a main -> main`，最新main正常合回唯一candidate，仅progress文档差异；canonical窗口已释放，UX已知gen27/PID3091/53007。旧“仅剩push”段为前序记录，不再待办。
+- 下一必要N3证据观察r300 freshGCM只读启动：原32round限制的物理执行预算/同逻辑turn恢复/工具配对与副作用边界，最多8source+已有consumer/receipt。既不凭数值认定永久cap，也不未经证明宣称无限长程；缺证据与真实缺陷分开，不先新增测试/改限制，不碰UXwriter。
+
 - 容量wait完整增量已main `c69c33ab`：独立delivery45e76f4e/c69c33ab四文件，r299 Gemini4medium SUCCESS/exit0/有效JSON/findings空，现有原classifier裁决pass；r298 Opus实quota429未审。正常fetch/合latestorigin后FF main，无inspection候选混入。
 - main contracts/config/App重建、package:candidate/install:global均exit0（session79031）；官方restart exit0（session78905），gen26/PID87116→gen27/PID3091，port53007、legacyClose clean。新PID实际存活39秒、installedlauncher、HTTP200。main provider tsc+目标6/6、App tsc+真实combinedconsumer1/1PASS（session54488）。受控replay行为与installed启动证明分别记录，不冒real RCC或Task标准收口完成。
 - 作者/Review均terminal，原App交付树已正常remove/prune/testabsent；Provider来源已关闭。此增量仅剩本轮push收尾回执，完整goal仍ACTIVE/INCOMPLETE；inspection继续由peer唯一owner推进，RCC原UNKNOWN不变。
