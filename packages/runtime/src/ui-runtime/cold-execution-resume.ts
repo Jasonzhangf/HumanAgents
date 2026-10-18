@@ -1,6 +1,6 @@
 import {
   assertExecutionEpoch, canonicalJsonStringify,
-  type ScopeRef, type WorkAssignment,
+  type JournalCommitRef, type ScopeRef, type WorkAssignment,
 } from '../../../contracts/src/index.js';
 import type { ActiveTurnInitialSegmentSource, ActiveTurnSegmentPredecessorRef,
   ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
@@ -86,6 +86,7 @@ interface PreparedColdGeneration {
   readonly assembly: RuntimeTaskAssembly;
   readonly acquired: AcquiredColdExecution;
   readonly segment: ResumedTurnSegmentOpened;
+  readonly segmentOpenedCommitRef: JournalCommitRef;
   readonly loop: AgentLoopRuntime;
   readonly driver: RuntimeExecutionDriver & { readonly standardTurn: StandardTurnLifecycle };
 }
@@ -224,6 +225,10 @@ export async function resumeColdExecution(
     // No new physical identity or execution resource exists on this path.
     return lifecycle.releaseToLifecycle(record, operation, { source, ...preparation });
   }
+  await assembly.orchestration.initialize();
+  const stageNodeId = `stage-${operation.operationId.value}`;
+  await assembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
+  await assembly.orchestration.createAssignment(stageNodeId, source.assignment);
   const binding = await producer.readIncarnationBinding(source);
   const executionEpoch = successorEpoch(source);
   const acquired = await assembly.orchestration.acquireExecutionInstance({
@@ -264,7 +269,8 @@ export async function resumeColdExecution(
     });
     const driver = await producer.createResumedExecutionDriver({ source, allocation, segment: resumed.segment, loop });
     const prepared: PreparedColdExecution = {
-      kind: 'generation-ready', source, assembly, acquired, segment: resumed.segment, loop, driver,
+      kind: 'generation-ready', source, assembly, acquired, segment: resumed.segment,
+      segmentOpenedCommitRef: resumed.appendReceipt, loop, driver,
     };
     const release = lifecycle.releaseToLifecycle(record, operation, prepared);
     transferred = true;

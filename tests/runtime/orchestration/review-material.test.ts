@@ -25,6 +25,7 @@ import type {
   TaskReviewHandle,
   TaskReviewInstanceCreateInput,
 } from '../../../packages/runtime/src/orchestration/types.js';
+import { createTestOrchestrationManager } from './assignment-graph-test-journal.js';
 
 const organ = id('organ', 'organ-review-material');
 const task = id('task', 'task-review-material');
@@ -257,8 +258,10 @@ test('manager takes the review subject body from the worker result when the call
   // The caller cannot know a body that only exists after the worker runs, so
   // the result-carried body must reach the reviewer on its own.
   const reviewer = new RecordingReviewAgent();
-  const manager = new OrchestrationManager({
+  const manager = createTestOrchestrationManager({
     ownerId: 'orchestration-manager',
+    taskId: task,
+    organId: organ,
     runtimePool: pool(),
     executionAgent: new StaticExecutionAgent({
       result: result({
@@ -270,7 +273,7 @@ test('manager takes the review subject body from the worker result when the call
     reviewAgent: reviewer,
     mergeCoordinator: merge,
   });
-  manager.planStage({ nodeId: 'node-result-body', taskId: task });
+  await manager.planStage({ nodeId: 'node-result-body', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-result-body',
     assignment: assignment({ assignmentId: 'assignment-result-body', pipelineNodeId: 'node-result-body' }),
@@ -292,8 +295,10 @@ test('manager still blocks when the worker result carries no produced body', asy
       return { status: 'merged' as const, evidenceRefs: [evidence('merge')] };
     },
   };
-  const manager = new OrchestrationManager({
+  const manager = createTestOrchestrationManager({
     ownerId: 'orchestration-manager',
+    taskId: task,
+    organId: organ,
     runtimePool: pool(),
     executionAgent: new StaticExecutionAgent({
       result: result({
@@ -304,7 +309,7 @@ test('manager still blocks when the worker result carries no produced body', asy
     reviewAgent: reviewer,
     mergeCoordinator: recordingMerge,
   });
-  manager.planStage({ nodeId: 'node-empty-body', taskId: task });
+  await manager.planStage({ nodeId: 'node-empty-body', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-empty-body',
     assignment: assignment({ assignmentId: 'assignment-empty-body', pipelineNodeId: 'node-empty-body' }),
@@ -321,8 +326,10 @@ test('manager still blocks when the worker result carries no produced body', asy
 
 test('manager passes verified review material to the reviewer and blocks before invocation when it is missing', async () => {
   const reviewer = new RecordingReviewAgent();
-  const manager = new OrchestrationManager({
+  const manager = createTestOrchestrationManager({
     ownerId: 'orchestration-manager',
+    taskId: task,
+    organId: organ,
     runtimePool: pool(),
     executionAgent: new StaticExecutionAgent({
       result: result({ producedArtifactBodies: [subjectBody] }),
@@ -330,7 +337,7 @@ test('manager passes verified review material to the reviewer and blocks before 
     reviewAgent: reviewer,
     mergeCoordinator: merge,
   });
-  manager.planStage({ nodeId: 'node-a', taskId: task });
+  await manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -347,14 +354,16 @@ test('manager passes verified review material to the reviewer and blocks before 
   assert.equal(material!.subjects[0]?.body, subjectBody);
 
   const blockedReviewer = new RecordingReviewAgent();
-  const blockedManager = new OrchestrationManager({
+  const blockedManager = createTestOrchestrationManager({
     ownerId: 'orchestration-manager',
+    taskId: task,
+    organId: organ,
     runtimePool: pool(),
     executionAgent: new StaticExecutionAgent(result()),
     reviewAgent: blockedReviewer,
     mergeCoordinator: merge,
   });
-  blockedManager.planStage({ nodeId: 'node-b', taskId: task });
+  await blockedManager.planStage({ nodeId: 'node-b', taskId: task });
   const blocked = await blockedManager.dispatch({
     stageNodeId: 'node-b',
     assignment: assignment({ assignmentId: 'assignment-b', pipelineNodeId: 'node-b' }),

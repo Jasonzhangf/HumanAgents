@@ -263,7 +263,7 @@ export async function dispatchImplicitExecutorSubtasks(
 
   const dispatches: OrchestrationDispatchResult[] = [];
   for (const subtask of options.subtasks) {
-    options.orchestration.planStage({
+    await options.orchestration.planStage({
       nodeId: subtask.stageNodeId,
       taskId: options.taskId,
       ...(options.parentStageNodeId === undefined ? {} : { parentNodeId: options.parentStageNodeId }),
