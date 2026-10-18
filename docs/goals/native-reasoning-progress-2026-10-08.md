@@ -1,5 +1,21 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 显式跨 turn 证据充分性已裁决，不扩测
+
+- r413/r414两路只读GCM已返回：前者确认通用两turn语义历史装配、helper精炼checkpoint和冷helper恢复源码/测试边；后者确认当前独立instructions/requestContext三协议编码与config→App per-agent/role binding及匹配测试存在。未发现具体缺码；本次未运行测试，不称freshPASS，不把旧author记录未集成当当前缺实现。
+- r415独立OAuth小Planner实际SUFFICIENT并由Root接受：r288已核对的真实两turn出站1PASS、元数据2PASS及冷helper恢复历史GREEN，加r407/408/409/410公开helper精炼checkpoint/接线红绿/installed证明，足以覆盖共享assembler的该项连续性契约。缺单个helper→turn2组合case不构成额外加测理由；零新增测试、代码、工作树或canonical请求。r413的组合执行UNKNOWN只保留证据粒度，不升级产品缺陷。
+- r412阶段计划仅接受两只读观察与peer同步，未接受条件实现、强制Git身份/ancestry核对或协议×入口矩阵；r411因超出定点范围读取大文件被Root中止，同独立Planner收敛r412。N2/r330与C/G/r315继续复用充分性结论，不重开。
+- 下一具体依赖为peer的M3与prepared/cold现有收口结果接收；M5由peer报告main19a15235、installed gen36与HTTP复验已交付，本侧无相同范围写入。原interaction epoch4后未再请求，EOF根因仍UNKNOWN。完整goal仍ACTIVE/INCOMPLETE，不据局部充分性宣称总目标完成。
+
+## 2026-10-18 已交付：公开 taskless helper 接线验收
+
+- 测试候选 `2ad679f5` 已正常FF main并push，回执 `6bd955b5..2ad679f5 main -> main`。仅原公开consumer测试文件334insertions/3deletions；无永久产品修改。完整goal和完整N3长程验收仍OPEN。
+- r406单次诊断证明首错为fixture要求HTTP携带内部execution身份；实际serializer不发送它，改从真实Journal派发记录读取。Root随后实际同例暴露fixture把接受前null断言用于接受后；r407纠正阶段后compile0/原case1PASS。两次均是测试错误，不冒产品RED。
+- r408临时移除CLI helper preparer后，原同例实际HTTP409 `explicit-brain-helper-unavailable`/exit1；接线apply_patch恢复，Root实际build0、同例1PASS/exit0，日志 `native-n3-omission-r408-20261018/{run-red.log,owner-build-green.log,owner-run-green.log}`。worker未来意向未算复验。
+- r409独立完整Review实际Gemini4medium/SUCCESS/exit0，严格四字段输出，既有classifier PASS/findings[]。r410再用canonical `/opt/homebrew/bin/humanagent` 与实际installed modules执行同例1PASS/exit0，证明安装入口，不冒liveRCC或完整长程运行。候选仅测试，因此不重复安装或重启未变产品。canonical53007未操作。
+- 实际回执覆盖独立父/子model、子输入隔离、durable dispatch/returned、显式owneracceptance、精炼资产/checkpoint和最终answer。原共享consumer写窗口已交UX peer，其M3树已标准Git采用2ad679f5；本侧Review未占其writer。
+- 当轮清理完成：N3树clean/无活动worker，普通worktree remove/prune/pathabsent、merged branch删除；4份失败fixture先归档r410/failed-fixtures-evidence.tgz，两项自有fixture根与installed consumer-layout已删除。peer树保留。原始run证据留存。
+
 ## 2026-10-18 N3 公开 helper 首次行为失败，保留现场定位
 
 - r400 已接受局部公开 consumer 计划；r402 fresh GCM 在唯一 `native-n3-public-helper-20261018` 树修改原 `tests/app/native-delivery-public-consumer.test.ts`，未修改产品代码。Contracts、Config、App 及 native consumer 编译均实际 exit0。首轮编译的测试类型错误已纠正，不计产品 RED。

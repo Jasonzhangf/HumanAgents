@@ -198,9 +198,9 @@ function nextActionText(next) {
   return NEXT_TEXT[next.kind] ?? String(next.kind)
 }
 
-function rendering(options, title) {
+function rendering(options, title, rootClassName = 'panel') {
   const make = typeof options.element === 'function' ? options.element : defaultElement
-  const root = make('section', undefined, 'panel')
+  const root = make('section', undefined, rootClassName)
   root.setAttribute('aria-label', title)
   const listeners = []
   function action(parent, label, callback, payload, className = 'button button--quiet') {
@@ -492,6 +492,242 @@ function captureBlock(ui, capture, onOpenReference, bodyTarget, readOptions) {
   return box
 }
 
+function compactCommitRef(ref) {
+  if (!ref) return undefined
+  if (typeof ref.commitId !== 'string' || !ref.commitId.trim()) return undefined
+  if (!Number.isSafeInteger(ref.journalSeq) || ref.journalSeq < 0) return undefined
+  if (typeof ref.recordDigest !== 'string' || !ref.recordDigest.trim()) return undefined
+  return {
+    commitId: ref.commitId,
+    journalSeq: ref.journalSeq,
+    recordDigest: ref.recordDigest,
+  }
+}
+
+function controlFailureBlock(ui, parent) {
+  const block = ui.make('div', undefined, 'status-banner')
+  block.hidden = true
+  block.setAttribute('data-tone', 'danger')
+  const message = ui.make('p')
+  const next = ui.make('p', undefined, 'muted')
+  block.append(message, next)
+  parent.append(block)
+  return {
+    element: block,
+    show(error) {
+      block.setAttribute('data-checkpoint-role', 'checkpoint-control-failure')
+      message.textContent = error?.message || '这次控制提交未完成。'
+      next.textContent = error?.nextAction || '重新读取检查点后再确认。'
+      block.hidden = false
+    },
+    hide() {
+      block.setAttribute('data-checkpoint-role', 'checkpoint-control-message')
+      block.hidden = true
+    },
+  }
+}
+
+function setPending(ui, parent) {
+  const status = ui.make('p', undefined, 'muted')
+  status.hidden = true
+  status.setAttribute('role', 'status')
+  status.setAttribute('aria-live', 'polite')
+  status.setAttribute('data-checkpoint-role', 'checkpoint-control-pending')
+  parent.append(status)
+  return {
+    element: status,
+    set(text) {
+      status.textContent = text
+      status.hidden = false
+    },
+    clear() {
+      status.textContent = ''
+      status.hidden = true
+    },
+  }
+}
+
+function controlHeading(ui, text) {
+  const head = ui.make('div', undefined, 'section-head')
+  const title = ui.make('h3', text)
+  head.append(title)
+  return head
+}
+
+function correctionFields(ui, activeRefs) {
+  const refs = ui.make('fieldset')
+  refs.append(ui.make('legend', '选择要排除的当前引用'))
+  const options = []
+  for (const ref of activeRefs) {
+    const label = ui.make('label', undefined, 'check')
+    const input = ui.make('input')
+    input.type = 'checkbox'
+    input.value = String(ref)
+    input.setAttribute('data-checkpoint-role', 'wrong-ref-option')
+    label.append(input, ui.make('span', String(ref)))
+    refs.append(label)
+    options.push(input)
+  }
+  const extraLabel = ui.make('label')
+  extraLabel.append(ui.make('span', '其他精确引用（每行一个）'))
+  const extra = ui.make('textarea')
+  extra.rows = 2
+  extra.setAttribute('data-checkpoint-role', 'wrong-ref-input')
+  extraLabel.append(extra)
+  refs.append(extraLabel)
+  return { refs, options, extra }
+}
+
+function confirmedControl(ui, value, options, kind) {
+  const current = value.current
+  const viewed = value.viewed
+  const sourceCheckpointReceipt = compactCommitRef(viewed?.identity?.commitRef)
+  const expectedControlReceipt = compactCommitRef(current?.position?.controlCommitRef)
+  const activeRefs = current?.context?.activeRefs
+  const isCorrection = kind === 'correction'
+  const sectionTitle = isCorrection ? '修正当前 Context' : '从该检查点继续'
+  const section = ui.make('section', undefined, 'item')
+  section.setAttribute('data-checkpoint-role', isCorrection ? 'context-correction' : 'checkpoint-reentry')
+  section.append(controlHeading(ui, sectionTitle))
+  section.append(ui.make(
+    'p',
+    isCorrection
+      ? '只排除你确认错误的 Context 引用。保留历史、恢复记录与其他业务事实。'
+      : '保留历史与实际副作用，并把未完成义务交给新的执行轮；不会撤销已发生的外部操作。',
+    'muted',
+  ))
+
+  if (current?.state !== 'known' || !sourceCheckpointReceipt || !expectedControlReceipt
+    || (isCorrection && !Array.isArray(activeRefs))) {
+    const reason = current?.state !== 'known'
+      ? `当前执行位置未知，不能确认这次${isCorrection ? '修正' : '重入'}的控制基线。`
+      : !sourceCheckpointReceipt
+        ? `查看目标缺少完整提交凭据，不能${isCorrection ? '修正 Context' : '重入'}。`
+        : !expectedControlReceipt
+          ? `当前控制提交凭据缺失，不能确认这次${isCorrection ? '修正' : '重入'}。`
+          : '当前生效 Context 没有可选择的引用，不能确认修正范围。'
+    section.append(ui.make('p', `当前不能${isCorrection ? '提交修正' : '重入'}：${reason}`, 'muted'))
+    return section
+  }
+
+  const form = ui.make('div', undefined, 'stack')
+  form.hidden = true
+  form.setAttribute('data-checkpoint-role', isCorrection ? 'context-correction-form' : 'checkpoint-reentry-form')
+  const trigger = ui.action(section, sectionTitle, () => {
+    form.hidden = false
+    trigger?.setAttribute('aria-expanded', 'true')
+  }, undefined, 'button button--quiet')
+  trigger?.setAttribute('data-checkpoint-role', isCorrection ? 'context-correction-trigger' : 'checkpoint-reentry-trigger')
+  trigger?.setAttribute('aria-expanded', 'false')
+
+  let fields
+  let repair
+  let repairLabel
+  if (isCorrection) {
+    fields = correctionFields(ui, activeRefs)
+    form.append(fields.refs)
+    repairLabel = ui.make('label')
+    repairLabel.append(ui.make('span', '修正说明'))
+    repair = ui.make('textarea')
+    repair.rows = 3
+    repair.required = true
+    repair.setAttribute('data-checkpoint-role', 'repair-text')
+    repairLabel.append(repair)
+    form.append(repairLabel)
+  } else {
+    form.append(ui.make('p', '该操作追加新的控制记录，并保留历史、未完成义务和已发生的外部副作用。', 'muted'))
+    const target = ui.make('p', `重入目标：Journal #${sourceCheckpointReceipt.journalSeq} · ${sourceCheckpointReceipt.commitId}`, 'muted')
+    target.setAttribute('data-checkpoint-role', 'checkpoint-reentry-target')
+    const baseline = ui.make('p', `当前控制基线：Journal #${expectedControlReceipt.journalSeq} · ${expectedControlReceipt.commitId}`, 'muted')
+    baseline.setAttribute('data-checkpoint-role', 'checkpoint-reentry-baseline')
+    form.append(target, baseline)
+  }
+
+  const summary = ui.make('p', undefined, 'muted')
+  summary.hidden = true
+  summary.setAttribute('data-checkpoint-role', 'context-correction-summary')
+  const failure = controlFailureBlock(ui, form)
+  const pending = setPending(ui, form)
+  const actions = ui.make('div', undefined, 'actions')
+  const cancel = ui.action(actions, '取消', () => {
+    form.hidden = true
+    trigger?.setAttribute('aria-expanded', 'false')
+  }, undefined, 'button button--quiet')
+  cancel?.setAttribute('data-checkpoint-role', isCorrection ? 'context-correction-cancel' : 'checkpoint-reentry-cancel')
+  const confirm = ui.action(
+    actions,
+    isCorrection ? '确认修正' : '确认重入',
+    () => void submit(),
+    undefined,
+    'button button--primary',
+  )
+  confirm?.setAttribute('data-checkpoint-role', isCorrection ? 'context-correction-confirm' : 'checkpoint-reentry-confirm')
+  form.append(summary, failure.element, pending.element, actions)
+  section.append(form)
+
+  let submitted = false
+  let submitting = false
+  async function submit() {
+    if (submitted || submitting) return
+    let body
+    if (isCorrection) {
+      const wrongRefs = activeRefs.filter((ref, index) => fields.options[index]?.checked === true).map(String)
+      for (const line of fields.extra.value.split('\n')) {
+        const ref = line.trim()
+        if (ref && !wrongRefs.includes(ref)) wrongRefs.push(ref)
+      }
+      const repairText = repair.value.trim()
+      if (wrongRefs.length === 0 || !repairText) {
+        failure.show({
+          message: wrongRefs.length === 0 ? '请选择或输入至少一个要排除的精确引用。' : '请填写修正说明。',
+          nextAction: '补齐必要输入后再确认。',
+        })
+        return
+      }
+      failure.hide()
+      summary.textContent = `将排除引用：${wrongRefs.join('、')}。修正说明：${repairText}`
+      summary.hidden = false
+      body = { wrongRefs, repairText, sourceCheckpointReceipt, expectedControlReceipt }
+    } else {
+      body = { targetCheckpointCommitRef: sourceCheckpointReceipt, expectedCurrentControlCommitRef: expectedControlReceipt }
+    }
+    pending.set(isCorrection ? '正在提交 Context 修正' : '正在提交检查点重入')
+    submitting = true
+    confirm.disabled = true
+    try {
+      await (isCorrection ? options.onContextCorrection : options.onCheckpointReentry)(body)
+      submitted = true
+      pending.set(`${isCorrection ? '修正' : '重入'}已提交。正在读取权威 Current 与 Viewed。`)
+    } catch (error) {
+      failure.show(error)
+      pending.clear()
+      // A post-commit refresh failure is not an uncommitted request: the control
+      // record already exists, so the confirm must never become a second write.
+      if (error?.committed === true) {
+        submitted = true
+      } else {
+        confirm.disabled = false
+      }
+    } finally {
+      submitting = false
+    }
+  }
+  return section
+}
+
+function confirmedControlSections(ui, value, options) {
+  if (typeof options.onContextCorrection !== 'function'
+    && typeof options.onCheckpointReentry !== 'function') return []
+  const sections = []
+  if (typeof options.onContextCorrection === 'function') {
+    sections.push(confirmedControl(ui, value, options, 'correction'))
+  }
+  if (typeof options.onCheckpointReentry === 'function') {
+    sections.push(confirmedControl(ui, value, options, 'reentry'))
+  }
+  return sections
+}
+
 function currentSection(ui, current) {
   const section = ui.make('section')
   section.setAttribute('data-checkpoint-role', 'current')
@@ -615,7 +851,8 @@ export function renderCheckpointHistory(read, options = {}) {
 
 /** Technical layer for the shell's shared drawer. No overlay, no I/O. */
 export function renderCheckpointHistoryDetail(read, options = {}) {
-  const ui = rendering(options, '检查点精确详情')
+  const ui = rendering(options, '检查点精确详情', 'panel checkpoint-history-detail')
+  ui.root.setAttribute('data-checkpoint-role', 'checkpoint-history-detail')
   if (!read?.ok) {
     failureBlock(ui, read?.failure ?? { message: 'checkpoint 读取失败。', nextAction: '请重试读取。' }, true)
     return ui.result
@@ -691,6 +928,10 @@ export function renderCheckpointHistoryDetail(read, options = {}) {
     evidenceRef(ui, viewedDetail, '检查点恢复状态引用', identity.recoveryStateRef, options)
   }
   ui.root.append(viewedDetail)
+
+  for (const section of confirmedControlSections(ui, value, options)) {
+    ui.root.append(section)
+  }
 
   const capabilities = capabilitySection(ui, value.capabilities)
   if (capabilities) ui.root.append(capabilities)

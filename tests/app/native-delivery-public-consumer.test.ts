@@ -6,11 +6,12 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef } from '../../packages/contracts/src/index.js';
+import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef, type InteractionHelperIdentity } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
-import { JsonlOrganJournal, JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
+import { JsonlInteractionParentTurnJournal, JsonlOrganJournal, JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { createJsonlActiveTurnJournal, decodeActiveTurnRecords, listTaskActiveTurnBindings } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
@@ -62,6 +63,10 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
 const EXACT_BODY = 'EXACT\u4f53 single logical delivery \ud83d\ude80\nline two';
 const SUMMARY_RESULT = 'summary result is a different material';
 const CHILD_BODY = 'Independent child result for adoption';
+const EXPLICIT_HELPER_PARENT_MARKER = 'parent-private-n3: use the bounded helper result to answer this question.';
+const EXPLICIT_HELPER_CHILD_INPUT = 'child-only-input-n3';
+const EXPLICIT_HELPER_CHILD_SUMMARY = 'unrefined-child-result-n3';
+const EXPLICIT_HELPER_REFINED_TEXT = 'accepted-refined-result-n3';
 const INSPECTION_DEFINITION_ID = 'native-inspection-definition';
 const INSPECTION_DEFINITION_VERSION = '1';
 const INSPECTION_CHECK_A = {
@@ -323,6 +328,7 @@ interface ResponsesWireItem {
   readonly name?: string;
   readonly call_id?: string;
   readonly arguments?: string;
+  readonly output?: string;
   readonly content?: readonly { readonly type?: string; readonly text?: string }[];
 }
 
@@ -755,6 +761,47 @@ function nativeRuntimeLayout(paths: { readonly checkpointsRoot: string }) {
   };
 }
 
+interface TextOnlyFixtureScenario {
+  readonly kind: 'explicit-helper';
+  readonly parentModel: 'text.only.model';
+  readonly childModel: 'child.only.model';
+}
+
+function explicitHelperModelText(body: ResponsesWireBody): string {
+  return (body.input ?? [])
+    .filter((item) => item.type === 'message' && item.role === 'user')
+    .flatMap((item) => item.content ?? [])
+    .filter((part) => part.type === 'input_text' && typeof part.text === 'string')
+    .map((part) => part.text!)
+    .join('\n');
+}
+
+function explicitHelperToolOutput(wire: ResponsesWireBody, callId: string): string | undefined {
+  return wire.input?.find((item) =>
+    item.type === 'function_call_output' && item.call_id === callId)?.output;
+}
+
+function explicitHelperCall(
+  callId: string,
+  name: 'dispatch_helper' | 'accept_helper',
+  args: unknown,
+): readonly Record<string, unknown>[] {
+  return [
+    { type: 'response.created', response: { id: callId } },
+    { type: 'response.output_item.done', output_index: 0, item: {
+      type: 'function_call', call_id: callId, name, arguments: JSON.stringify(args) } },
+    { type: 'response.completed', response: { id: callId } },
+  ];
+}
+
+function explicitHelperText(text: string): readonly Record<string, unknown>[] {
+  return [
+    { type: 'response.created', response: { id: 'n3-explicit-helper-text' } },
+    { type: 'response.output_text.done', item_id: 'n3-explicit-helper-text', text },
+    { type: 'response.completed', response: { id: 'n3-explicit-helper-text' } },
+  ];
+}
+
 /**
  * Controlled local Responses upstream. It answers the real RCC readiness
  * probes, then serves one generation: the advertised `humanagent_turn_end`
@@ -774,6 +821,8 @@ async function textOnlyResponsesUpstream(input: {
   readonly badReviewSelector?: boolean;
   readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
+  readonly scenario?: TextOnlyFixtureScenario;
+  readonly interactionScopeId?: string;
   readonly requiredBearer?: string;
   readonly interruptThirdTurnOnce?: () => Promise<void>;
   readonly holdFirstExecutionOnce?: () => Promise<void>;
@@ -782,6 +831,7 @@ async function textOnlyResponsesUpstream(input: {
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
   inspectionInvocations(): readonly { callId: string; invocationId: string }[];
   inspectionChildRequests(): readonly { body: string; parentCallId: string }[];
+  explicitHelperPhase(): string | undefined;
   close(): Promise<void> }> {
   const wires: Wire[] = [];
   const inspectionInvocations = new Map<string, string>();
@@ -797,6 +847,7 @@ async function textOnlyResponsesUpstream(input: {
   let holdTurnThree = false;
   let firstExecutionHeld = false;
   let inspectionAdoptHeld = false;
+  let explicitHelperPhase: string | undefined;
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -822,6 +873,137 @@ async function textOnlyResponsesUpstream(input: {
         response.end(JSON.stringify(path === '/health'
           ? { status: 'ok', version: 'text-only-slice' }
           : { data: [{ id: input.model }, { id: 'child.only.model' }] }));
+        return;
+      }
+      if (input.scenario?.kind === 'explicit-helper') {
+        const wire = parseResponsesWire(body);
+        if (wire === undefined) throw new Error('explicit helper fixture received a non-JSON Responses request');
+        const invoke = (callId: string, name: 'dispatch_helper' | 'accept_helper', args: unknown) => {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.end(frame(explicitHelperCall(callId, name, args)));
+        };
+        if (wire.model === input.scenario.childModel) {
+          explicitHelperPhase = 'child-provider-start';
+          const helperJournal = new JsonlInteractionHelperJournal(input.journal);
+          const opened = await new JsonlInteractionParentTurnJournal(input.journal).readScopeOpenedTurns({
+            organId: id('organ', 'humanagent-ui'),
+            interactionScopeId: requireText(input.interactionScopeId,
+              'the explicit helper interaction scope'),
+          });
+          assert.equal(opened.length, 1, 'the isolated fixture has one open parent turn');
+          const helpers = await helperJournal.readTurnHelpers(opened[0]!.fact.turn);
+          assert.equal(helpers.length, 1, 'the open parent turn dispatched one helper');
+          const helper = helpers[0]!;
+          const dispatch = helper.readback.dispatchAccepted;
+          if (dispatch === null) throw new Error('the child Provider start has no durable dispatch');
+          const incarnation = dispatch.fact.incarnation;
+          if (incarnation === undefined) throw new Error('the durable dispatch has no incarnation');
+          assert.equal(incarnation.modelRef, input.scenario.childModel,
+            'the durable dispatch selects the configured child model');
+          assert.equal('execution' in wire, false,
+            'the child HTTP body carries no runtime execution identity');
+          assert.equal(helper.readback.returned, null, 'the child Provider start precedes the durable return');
+          const prompt = explicitHelperModelText(wire);
+          assert.ok(prompt.includes(EXPLICIT_HELPER_CHILD_INPUT),
+            'the child receives its specified handoff input');
+          assert.equal(prompt.includes('parent-private-n3'), false,
+            'the child does not inherit the parent raw marker');
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.end(frame(explicitHelperText(JSON.stringify({
+            agentId: 'orchestration-default',
+            producedArtifactRefs: [],
+            producedArtifactDigests: [],
+            status: 'succeeded',
+            summary: EXPLICIT_HELPER_CHILD_SUMMARY,
+            outputRefs: [],
+            evidenceRefs: [],
+            nextAction: 'settle',
+          }))));
+          return;
+        }
+        assert.equal(wire.model, input.scenario.parentModel,
+          'the parent selects its configured Provider model');
+        const dispatchOutput = explicitHelperToolOutput(wire, 'n3-dispatch');
+        if (dispatchOutput === undefined) {
+          explicitHelperPhase = 'parent-dispatch';
+          assert.ok(explicitHelperModelText(wire).includes(EXPLICIT_HELPER_PARENT_MARKER),
+            'the parent wire carries the private marker used by the child-context exclusion assertion');
+          assert.ok(wire.tools?.some((tool) => tool.name === 'dispatch_helper'));
+          invoke('n3-dispatch', 'dispatch_helper', {
+            selection: { roleId: 'orchestration', configuredAgentId: 'orchestration-default' },
+            assignmentFields: {
+              objective: 'Return the bounded child-only result',
+              targetRefs: [],
+              expectedOutputRefs: [],
+              expectedArtifactDigests: [],
+              acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`,
+              successCriteria: ['Return the specified structured helper result'],
+              failureCriteria: ['Unable to return the bounded result'],
+              incompleteCriteria: ['Partial result'],
+              requiredCapabilities: [],
+              mergeGate: 'not-required',
+            },
+            inputs: {
+              question: EXPLICIT_HELPER_CHILD_INPUT,
+              resultContract: 'Return the specified structured helper result',
+            },
+            evidenceRefs: [],
+          });
+          return;
+        }
+        explicitHelperPhase = 'parent-dispatch-returned';
+        const dispatched = requireRecord(JSON.parse(requireText(dispatchOutput, 'the dispatch tool output')),
+          'the dispatch receipt');
+        const dispatchedIdentity = requireRecord(dispatched.identity, 'the dispatch receipt identity');
+        const helperCallId = requireText(dispatchedIdentity.helperCallId,
+          'the dispatch receipt helper call ID');
+        const helperJournal = new JsonlInteractionHelperJournal(input.journal);
+        const dispatchIdentity: InteractionHelperIdentity = {
+          organId: id('organ', requireText(requireRecord(dispatchedIdentity.organId, 'the dispatch organ').value,
+            'the dispatch organ value')),
+          interactionScopeId: requireText(dispatchedIdentity.interactionScopeId,
+            'the dispatch interaction scope'),
+          interactionId: requireText(dispatchedIdentity.interactionId, 'the dispatch interaction ID'),
+          inputRevision: requireNumber(dispatchedIdentity.inputRevision, 'the dispatch input revision'),
+          parentTurnId: requireText(dispatchedIdentity.parentTurnId, 'the dispatch parent turn ID'),
+          assignmentId: requireText(dispatchedIdentity.assignmentId, 'the dispatch assignment ID'),
+          helperCallId,
+          attempt: requireNumber(dispatchedIdentity.attempt, 'the dispatch attempt'),
+        };
+        const returned = await helperJournal.readExact(dispatchIdentity);
+        if (returned.returned === null) throw new Error('the parent receives no durable returned helper fact');
+        assert.equal(returned.returned.fact.result.summary, EXPLICIT_HELPER_CHILD_SUMMARY,
+          'the parent receives the actual child result');
+        if (explicitHelperToolOutput(wire, 'n3-accept') === undefined) {
+          assert.equal(returned.ownerAccepted, null, 'returned is not owner acceptance before the owner accepts');
+          assert.equal(returned.adoptedCheckpoint, null, 'returned creates no adopted checkpoint before owner acceptance');
+          invoke('n3-accept', 'accept_helper', {
+            helperCallId,
+            refinedText: EXPLICIT_HELPER_REFINED_TEXT,
+            acceptanceRef: 'acceptance:n3-public-helper',
+            evidenceRefs: [],
+          });
+          return;
+        }
+        assert.ok(returned.ownerAccepted !== null, 'the accepted helper has a durable owner acceptance');
+        assert.equal(returned.ownerAccepted?.fact.result.helperCallId, helperCallId,
+          'owner acceptance retains the actual helper call ID');
+        assert.ok(returned.adoptedCheckpoint !== null,
+          'owner acceptance creates a durable adopted checkpoint');
+        explicitHelperPhase = 'parent-answer';
+        assert.deepEqual((wire.input ?? [])
+          .filter((item) => item.type === 'function_call'
+            && (item.name === 'dispatch_helper' || item.name === 'accept_helper'))
+          .map((item) => item.name), ['dispatch_helper', 'accept_helper'],
+        'the answer request replays both actual explicit helper tools');
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(frame(explicitHelperText(JSON.stringify({
+          kind: 'answer',
+          normalizedInput: 'bounded public helper proof',
+          knownFacts: [],
+          answer: EXPLICIT_HELPER_REFINED_TEXT,
+          decisionRefs: [],
+        }))));
         return;
       }
       const planner = plannerPayload(body);
@@ -1267,6 +1449,7 @@ async function textOnlyResponsesUpstream(input: {
       callId, invocationId,
     })),
     inspectionChildRequests: () => inspectionChildRequests.map((entry) => ({ ...entry })),
+    explicitHelperPhase: () => explicitHelperPhase,
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: async () => {
       server.closeIdleConnections?.();
@@ -1288,6 +1471,7 @@ async function textOnlyFixture(
   holdInspectionAfterAdoptOnce?: () => Promise<void>,
   reviewPerCycle = false,
   badReviewSelector = false,
+  scenario?: TextOnlyFixtureScenario,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1303,6 +1487,8 @@ async function textOnlyFixture(
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
     organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount, reviewPerCycle, badReviewSelector,
+    interactionScopeId: `runtime:${paths.projectKey}`,
+    ...(scenario === undefined ? {} : { scenario }),
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
@@ -1322,7 +1508,11 @@ async function textOnlyFixture(
     `provider.baseUrl = "${upstream.baseUrl}"`,
   ].join('\n');
   const original = await readFile(configPath, 'utf8');
-  const config = topLevelHttp === undefined ? (child ? original.replace('driverRef = "fake"', providerBlock)
+  const config = topLevelHttp === undefined ? (scenario?.kind === 'explicit-helper'
+    ? original.replace('driverRef = "fake"', providerBlock)
+      .replace('driverRef = "fake"', providerBlock.replace('text.only.model', 'child.only.model'))
+      .replace('maxConcurrentTasks = 1', 'maxConcurrentTasks = 2')
+    : child ? original.replace('driverRef = "fake"', providerBlock)
     .replace('driverRef = "fake"', providerBlock.replace('text.only.model', 'child.only.model'))
     .replace('maxConcurrentTasks = 1', 'maxConcurrentTasks = 2')
     : original.replaceAll('driverRef = "fake"', providerBlock))
@@ -2074,6 +2264,147 @@ async function fetchTaskForCaptureStop(origin: string, taskId: TaskId, cookie: s
   assert.equal(response.status, 200, JSON.stringify(body));
   return body;
 }
+
+if (!coldConsumerMode) test('public explicit taskless helper dispatch and owner acceptance use configured native providers', async () => {
+  const fixture = await textOnlyFixture(
+    false,
+    true,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    false,
+    false,
+    { kind: 'explicit-helper', parentModel: 'text.only.model', childModel: 'child.only.model' },
+  );
+  let serve: Awaited<ReturnType<typeof startServe>> | undefined;
+  let passed = false;
+  try {
+    const access = await AccessControlService.open({
+      credentialPath: fixture.paths.webAccessCredentialPath,
+      create: true,
+    });
+    const session = await access.consumePairingCode(
+      access.createPairingChallenge('n3-public-helper-lease', 1).code,
+    );
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+    const caller = await access.verifyProductPrincipal(cookie);
+    assert.equal(caller.state, 'valid', 'the fixture caller principal is valid');
+
+    serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+    const createdResponse = await fetch(`${serve.origin}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, accept: 'application/json' },
+      body: JSON.stringify({
+        channel: 'business',
+        requestKind: 'new-task-preview',
+        sourceRef: 'test:n3-public-helper',
+        rawInput: EXPLICIT_HELPER_PARENT_MARKER,
+      }),
+    });
+    const createdText = await createdResponse.text();
+    assert.equal(createdResponse.status, 201, createdText);
+    const created = requireRecord(JSON.parse(createdText), 'the public explicit input receipt');
+    const interactionId = requireText(created.interactionId, 'the public explicit interaction ID');
+
+    const interpretedResponse = await fetch(
+      `${serve.origin}/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`,
+      { method: 'POST', headers: { cookie, accept: 'application/json' } },
+    );
+    const interpretedText = await interpretedResponse.text();
+    assert.equal(interpretedResponse.status, 200, interpretedText);
+    const interpreted = requireRecord(JSON.parse(interpretedText), 'the public explicit interpretation');
+    assert.equal(interpreted.state, 'answered');
+    assert.equal(interpreted.reply, EXPLICIT_HELPER_REFINED_TEXT);
+    assert.equal(fixture.upstream.explicitHelperPhase(), 'parent-answer');
+
+    const organId = id('organ', 'humanagent-ui');
+    const opened = await new JsonlInteractionParentTurnJournal(fixture.journal).readScopeOpenedTurns({
+      organId,
+      interactionScopeId: `runtime:${fixture.paths.projectKey}`,
+    });
+    const turn = opened.find((entry) => entry.fact.turn.interactionId === interactionId)?.fact.turn;
+    if (turn === undefined) throw new Error('the public interaction owns no durable parent turn');
+
+    const helperJournal = new JsonlInteractionHelperJournal(fixture.journal);
+    const helpers = await helperJournal.readTurnHelpers(turn);
+    assert.equal(helpers.length, 1, 'the public interaction dispatched exactly one helper');
+    const helper = helpers[0]!;
+    const dispatch = helper.readback.dispatchAccepted;
+    const returned = helper.readback.returned;
+    const ownerAccepted = helper.readback.ownerAccepted;
+    const adoptedCheckpoint = helper.readback.adoptedCheckpoint;
+    if (dispatch === null) throw new Error('the helper dispatch is not durable');
+    if (returned === null) throw new Error('the actual child result is not durably returned');
+    assert.equal(returned.fact.result.agentId, 'orchestration-default');
+    assert.equal(returned.fact.result.summary, EXPLICIT_HELPER_CHILD_SUMMARY);
+    if (ownerAccepted === null) throw new Error('the parent did not explicitly accept the returned helper result');
+    assert.equal(ownerAccepted.fact.acceptanceRef, 'acceptance:n3-public-helper');
+    assert.equal(ownerAccepted.fact.acceptedBy, 'humanagent.runtime.explicit-brain');
+    if (adoptedCheckpoint === null) throw new Error('owner acceptance committed no adopted helper checkpoint');
+    assert.equal(adoptedCheckpoint.checkpoint.phase, 'adopted');
+    assert.equal(adoptedCheckpoint.checkpoint.description, EXPLICIT_HELPER_REFINED_TEXT);
+    assert.equal(
+      adoptedCheckpoint.checkpoint.recovery.dispatchAcceptedCommitId,
+      dispatch.commit.commitId,
+    );
+    assert.equal(
+      adoptedCheckpoint.checkpoint.recovery.returnedCommitId,
+      returned.commit.commitId,
+    );
+    assert.equal(
+      adoptedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId,
+      ownerAccepted.commit.commitId,
+    );
+
+    const evidenceRoot = join(fixture.paths.artifactsRoot, 'ui-provider-evidence');
+    const rawContent = providerRawContentReader(
+      filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot)),
+    );
+    const refinedBytes = await rawContent.read({
+      scope: ownerAccepted.fact.refinedResult.ref.scope,
+      content: ownerAccepted.fact.refinedResult,
+    });
+    assert.equal(new TextDecoder().decode(refinedBytes), EXPLICIT_HELPER_REFINED_TEXT);
+
+    const semanticCheckpoint = await helperJournal.readSemanticCheckpointExact(turn);
+    if (semanticCheckpoint === null) throw new Error('the answered turn committed no semantic checkpoint');
+    assert.ok(semanticCheckpoint.checkpoint.claims.some((claim) =>
+      claim.fact.includes(EXPLICIT_HELPER_REFINED_TEXT)),
+    'the semantic checkpoint carries the owner-accepted refined result');
+    assert.ok(semanticCheckpoint.checkpoint.semanticAssetRefs.some((ref) =>
+      ref.locator === ownerAccepted.fact.refinedResult.ref.locator),
+    'the semantic checkpoint references the durable refined asset');
+
+    console.log('n3-public-helper-receipt', JSON.stringify({
+      interactionId,
+      helperCallId: helper.identity.helperCallId,
+      dispatchCommitId: dispatch.commit.commitId,
+      returnedCommitId: returned.commit.commitId,
+      ownerAcceptedCommitId: ownerAccepted.commit.commitId,
+      phase: fixture.upstream.explicitHelperPhase(),
+      parentModel: 'text.only.model',
+      childModel: 'child.only.model',
+      returnedSummary: returned.fact.result.summary,
+      refinedText: EXPLICIT_HELPER_REFINED_TEXT,
+      answer: interpreted.reply,
+    }));
+    passed = true;
+  } finally {
+    try {
+      await serve?.stop();
+    } finally {
+      try {
+        await fixture.upstream.close();
+      } finally {
+        if (passed) await rm(fixture.root, { recursive: true, force: true });
+      }
+    }
+  }
+});
 
 // Stopping before a standard end must persist the actual turn cut, not a
 // fabricated save intent or closure. Probability is unknown; the existing

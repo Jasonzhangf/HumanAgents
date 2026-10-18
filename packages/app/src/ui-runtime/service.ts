@@ -2122,6 +2122,42 @@ export class UiRuntimeService {
     return { projectKey: source.projectKey, mode: this.mode };
   }
 
+  /**
+   * Resolve the exact committed Organ/Task identity for a confirmed control
+   * request. The serve-bound target and Config-owned Journal remain the only
+   * identity sources; the request never supplies an Organ or control path.
+   */
+  async resolveConfirmedTaskControlScope(
+    taskId: TaskId,
+    projectKey: string,
+    mode: RuntimeMode,
+  ): Promise<TaskIdentityScope> {
+    const target = await this.verifyControllableTaskTarget(taskId, projectKey, mode);
+    const source = this.boundProjectSource();
+    if (source === undefined) {
+      throw new UiRuntimeApiError(
+        'task-control.scope.unavailable',
+        APP_OWNER,
+        `task control scope ${target.projectKey}/${target.mode} has no Config-owned canonical Journal`,
+        'start the runtime through the serve entry that resolves configuration',
+        503,
+      );
+    }
+    const identity = await this.canonicalTaskIdentityScope(new JsonlOrganJournal(
+      uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, target.mode)),
+    ), taskId);
+    if (!identity.ok) {
+      throw new UiRuntimeApiError(
+        'task-control.scope.unavailable',
+        identity.failure.ownerId,
+        identity.failure.message,
+        identity.failure.nextAction,
+        503,
+      );
+    }
+    return identity.value;
+  }
+
   private readonly mode: 'fake' | 'rcc';
   private readonly coordinator: RuntimeTaskCoordinator;
   private readonly requirementInbox = new RequirementInbox();
