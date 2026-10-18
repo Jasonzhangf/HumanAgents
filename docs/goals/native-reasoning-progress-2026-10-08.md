@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 N3 公开 helper 首次行为失败，保留现场定位
+
+- r400 已接受局部公开 consumer 计划；r402 fresh GCM 在唯一 `native-n3-public-helper-20261018` 树修改原 `tests/app/native-delivery-public-consumer.test.ts`，未修改产品代码。Contracts、Config、App 及 native consumer 编译均实际 exit0。首轮编译的测试类型错误已纠正，不计产品 RED。
+- 首次指定公开用例实际 0/1：本地真实 serve 的 `/api/explicit/interactions/:id/interpret` 返回500，外层为 `taskless helper execution and settlement failed`。尚未判定是 fixture 形状错误还是产品缺陷，不称 N3 接通或根因已确定；无 omission 反例、Review、main 集成或安装交付。失败 fixture 保留在 `~/.humanagent/test-fixtures/native-n3-public-helper-20261018/text-only-5cikwe`。r402 已终态；final 的继续检查意向不算已执行。
+- fresh GCM r404 只读定位该 fixture 的 Journal/Provider 首错与最后成功阶段；不重跑业务、不改产品。peer M3 产品接线来源 `77dcecf2` 已报告首轮反例及原两cycle通过，待本侧接收；共享公开consumer文件暂保留本侧窗口，其余产品文件继续由peer并行。peer另有 prepared/cold-replay现场，由其owner定位，本侧不重复或重投。
+- r403 只读接收既有 A wire/Runtime forwarding/Responses compose、B role/instance binding、D Unit H 原回执。结果仅确认各原作者证据范围，不将旧记录的“未集成”推成当前代码缺失；没有新增测试、协议矩阵或功能。原始输出 `native-existing-proof-reception-r403-20261018/observation.md`。完整goal仍 ACTIVE/INCOMPLETE，原RCC epoch4后未再请求。
+
 ## 2026-10-18 接续：证据边界核清、原 turn 单次续跑至 epoch4 后仍失败
 
 - 当前ledger v14按最后changes[].result核对为13项active需求；首项真实ID为`humanagent-explicit-brain-semantic-turn-context`。r393阶段计划误写的别名不进入需求。仅接收P-OBS-1/2两项只读任务及peer同步；未接受新feature、三协议×入口矩阵、每需求单独重测/Review或“EXTERNAL_HOLD即goal完成”。局部4节点不冒原实现总节点数。
