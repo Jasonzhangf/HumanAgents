@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 socket 定因与当前 gap 文档校正
+
+- r450/r451已terminal0：精确HA start asset为`provider-16fdbb56e029531d-start-rcc-v3---start`，当次HTTP200后stream以UND_ERR_SOCKET终止。失败/成功Task共用MiniMax-M3/Responses/4444/rcc:default及五个wire字段，区别为instructions/input/helpertools与执行工具；没有证据证明字段无效。RCC503候选缺HAid/rawinput，仅时间相关，不能定因。原epoch5不再重投，原因UNKNOWN。
+- r453已派独立Astra技术攻关，只读形成最小补证计划；不作Reviewer、不改schema/工具、不自动epoch6。r454 fresh GCM定点核逐个实际启用工具的语义提取与既有独立review覆盖；协议工具往返不能代替这个完整goal维度，缺既有证据时仅报告具体缺口，不自动扩测。
+- r452 docs writer终态0但只输出未执行的工具调用文本，实际零diff，Root拒收；文档fastpath由Root接管。已定向更新Provider gap计划顶部/G1..G9/A–G当前状态，保留历史作者回执、未闭合taskless/治理及installed/live范围。没有改图、源码、需求或验收标准；针对性diff-check通过，不因文档更新重测代码。
+
 ## 2026-10-18 原 taskless epoch5 已执行失败，继续只读定因
 
 - r448实际脚本exit2，在官方pair对control/security chmod时被worker sandbox拒绝；attempt未建立、业务POST0。Root核目录owner/mode正常，按已授权官方pair修正同GCM派发的controlroot writable目录，未改权限或换通道绕过。r449实际脚本只执行一次业务POST，exit1；worker自身terminal0不冒业务成功。

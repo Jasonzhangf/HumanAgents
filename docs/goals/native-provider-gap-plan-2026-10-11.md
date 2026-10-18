@@ -1,6 +1,10 @@
 # HumanAgent 原生 Provider 分层 gap 与交付计划
 
-状态：`PROVIDER-INCREMENT-OPEN / FULL-NATIVE-UNVERIFIED`。Provider 总图有 7 个业务能力节点 A–G。2026-10-17 独立证据充分性计划 r315 接受 C（三协议 typed 工具往返）与 G（通用 HTTP 来源）的现有能力证据，停止为这两项新增实现或组合测试；其余节点不在本次判定范围。总目标仍 active。图沿用已接受的 A–G 消融，不新增节点；本计划不替代 [Provider 唯一设计](../architecture/provider-adapters.md)。
+状态：`PROVIDER-INCREMENT-OPEN / FULL-NATIVE-UNVERIFIED`。Provider 总图仍为 7 个业务能力节点 A–G。2026-10-18 已接收 A/B 的当前合同、wire、转发和配置消费证据，C/G 的工具与通用来源充分性裁决，以及 D/E/F 的语义上下文、标准收口和恢复回执。它们各有证明范围，不能汇总成完整原生目标完成。当前明确未闭合的是原 canonical taskless 问答和 peer 治理交付；逐工具语义审查覆盖也在定点核对。图不新增节点，本计划不替代 [Provider 唯一设计](../architecture/provider-adapters.md)。
+
+当前证据索引：既有 RUN 为 `/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012`。A/B 见 r403/r414；C/G 见 `native-provider-evidence-sufficiency-r315-20261017/plan.md`；D 见 r288/r410/r415；E/F 见 r341/r363/r375/r391 与 peer `prepared-cold-delivery-20261018`。最新 M3 与 Response 所有权增量见 `native-provider-lifetime-execute-r441-20261018/owner-acceptance.md`、`native-m3-provider-review-r442-20261018/classification.json`、`native-m3-provider-delivery-r443-20261018/delivery.md`。源码已入 main 并完成安装、正式重启、installed 原 M3 1 PASS、推送和自有资源清理。
+
+原 taskless 问答在 gen40 上只恢复一次至 epoch5，仍 HTTP409 / `UND_ERR_SOCKET`，当次 failed/closed、无 accepted output/helper/语义完成 checkpoint；没有 epoch6。r449 实际回执、r450 精确链观察与 r451 成功/失败 wire 比较均保留。已确认 start HTTP200 后流中断；同时间 RCC503 只是未关联候选，原因仍 UNKNOWN。成功 peer Task 使用相同 model/protocol/endpoint/route，不能代替 taskless 入口成功。不得据此改 schema、切模型或盲重放。
 
 当前 C/G 依据：[唯一进度记录](native-reasoning-progress-2026-10-08.md)中的 main 派生三协议真实工具循环（各 2 requests、合计 3/3 PASS）、通用 HTTP 默认入口及 credential omission RED→GREEN。配置消费、HTTP 工具循环和各协议 wire 已有独立 consumer。无需再建 source × protocol 全组合矩阵。main、候选与 installed 的证据范围分别保留；installed Responses 不扩称 installed 全协议。厂商/实际模型归属、业务 closure、stop 和持久恢复仍按对应 owner 的证据判定。r315 原文保留于既有 RUN 根 `native-provider-evidence-sufficiency-r315-20261017/plan.md`。下文未更新的早期作者回执属于历史，不覆盖本段。
 
@@ -8,7 +12,7 @@
 
 当前推进复用整体长程计划和 owner 节点笔记。删除候选 digest 重算、exact-candidate 身份包装和无提交标识即阻断交接的要求；用实际 diff、受影响行为结果和普通 Git 交付回执接收。保留请求归属、业务 completion、Journal 冷恢复和真实入口验收；治理 review 不能替代完整 milestone review，历史证据只在仍适用时复用。
 
-需求绑定：现场 `.appsdk/requirements.json` **version 14**。v14 决定 Provider 执行顺序：**先消融图的节点 → 再更新治理程序 → 之后才开始执行代码修改**（graph ablation → governance update → then source implementation）；图消融已接受，治理候选已更新并独立 Review PASS，源码阶段已启动。治理候选尚未进入 main。v12 人类可读语义分层、v13 手机/desktop 排版、底部抽屉和四角配置入口均由 UX owner 实现，不改变 Provider v10/v11 语义。Provider 相关 v10/v11 决定继续有效：显式 Brain 分流，通用临时续推依据显式派单模板，不强制存在 goal/阶段结果/交付字段，不增加重复模型 control block 或停止布尔标签。
+需求绑定：现场 `.appsdk/requirements.json` version 14。Provider 顺序仍为先消融图节点、更新受影响治理、再改源码；已完成的图与治理前置不重做。当前另有 peer 负责最新治理消融迁移，尚未整体交付，不能用早期局部 Review PASS 代替。v12 人类可读语义分层、v13 手机/desktop 排版、底部抽屉和四角配置入口由 UX owner 实现。Provider 相关语义继续有效：显式 Brain 分流，通用临时续推依据显式派单模板，不强制存在 goal/阶段结果/交付字段，不增加重复模型 control block 或停止布尔标签。
 
 本计划依据已完成的两份独立源码审计与独立 gpt-6.1-sol READY Planner，不另设计一套流程。审计基线为 main `4fe42f5418e21a8bb98fcff0bd7e73595bf6e546`；主树已有大量 dirty，源码事实与作者 worktree 增量分别记录。原始材料位于 `/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012/provider-req7-reconcile/` 的 `observation.md`、`protocol-observation.md`、`context-observation.md`、`plan.md`；目录 req7 是历史名称，Planner 实际绑定 v11，当前分支重绑 v14。源码观察证明实现位置与缺口，不证明运行成功。图消融由 parent 接受后，仅由单一 writer 修改本计划文档；本轮 v14 计划纠正同样只改文档，未执行代码、测试、build、DAGpipe gate 或真实请求。
 
@@ -29,21 +33,21 @@
 
 Provider 不规定 observation/plan/execute/review 固定顺序。请求终态、driver-local turnId、不同 driver UUID、配置对象存在、编译成功，都不能代替业务 turn 收口、持久身份、独立 context 或真实路由证据。
 
-## 2. 九项真实 gap
+## 2. 九项能力要求的当前证据与剩余缺口
 
-表中 source 指审计基线生产源码；“作者内部有证据”指后续独立 worktree 回执，尚未形成已集成能力。逐项缺口持续跟踪到实际交付，不把后继 Runtime/Core 要求从完整目标删除。“唯一 owner”列引用 §3 的 A–G 业务能力节点。
+表中早期 source 描述只代表审计基线，不再用于派发当前实现。以下按已接受的当前证据更新，仍保留各层验收边界，不把后继 Runtime/Core 要求从完整目标删除。“唯一 owner”列引用 §3 的 A–G 业务能力节点。历史作者回执继续保留在后文。
 
 | Gap | 业务要求 | 生产 source 事实 | 缺口 | 唯一 owner | 最小交付行为 | 依赖 | 证据状态 |
 |---|---|---|---|---|---|---|---|
-| **G1 实际请求输入合同** | 临时续推只进入当次请求，与业务输入分离 | 审计时 `contracts/src/index.ts` 的 AgentInput/ProviderExecutionInput 无独立字段；framework AgentRequestControl 较新，但生产 driver 用旧 AgentDriver | 需要 freeze 实际使用的合同及生命周期，不能只加 framework 类型 | Contracts（A） | `transientInstruction?: string` 出现在两个实际输入，BusinessPayload 拒绝控制键；无固定 goal/control block | 当前可独立 | 作者内部合同实现有红/绿证据；未提交/未入 main；真实 wire **UNVERIFIED** |
-| **G2 三协议临时编码与隔离** | 通用临时提示参与当前推理，不进入下一请求/context | 三协议已有文本 codec；driver 保存 initialPayload，工具 submit 重用它和 toolHistory；当前无独立 overlay 编码 | 直接拼 prompt 会重放临时文本；三协议指令位置各自缺消费 | Provider（A） | 分别编码当前请求指令，initialPayload/toolHistory/checkpoint 不持有它；工具 continuation 和新请求不自动继承 | A 内合同 freeze（Contracts writer） | 源码反例有依据但未运行；**UNVERIFIED** |
-| **G3 Runtime 生产转发** | Runtime 供应的临时输入确实到达模型 | 实际链为 coordinator → composition.submit(prompt) → AgentRuntime → memory wrapper → ProviderAgentDriver → ExecutionRuntimePort.start；目前转发业务 prompt | codec 成功不代表生产链接通 | Runtime（A） | 独立输入沿既有真实链原样转发至 driver，不回填 payload；暂不实现自动触发 | A 内合同 freeze；组合验收需要 Provider writer | 入口与转发缺口已观察；**UNVERIFIED** |
+| **G1 实际请求输入合同** | 临时续推只进入当次请求，与业务输入分离 | 当前独立输入合同及消费实现已存在 | 未发现新缺码；不能用旧“未提交”回执覆盖当前来源 | Contracts（A） | 当前请求指令与 BusinessPayload 分离，无重复布尔 control block | 复用现有合同 | r403/r414 接收合同与当前来源；不扩大为所有 installed 组合 |
+| **G2 三协议临时编码与隔离** | 通用临时提示参与当前推理，不进入下一请求/context | 当前三协议各自编码临时输入，已有 request-local consumer | 无新增矩阵理由 | Provider（A） | 当次指令不进入历史或后续 continuation | 复用既有 wire 合同 | r403/r414 及既有 provider-request-context consumer；历史 raw 排除另见 D |
+| **G3 Runtime 生产转发** | Runtime 供应的临时输入确实到达模型 | 当前 forwarding 和 Responses 组合来源及回执已核对 | codec 与组合证据仍分范围，不用一方代替另一方 | Runtime（A） | 真实链传递独立字段，不回填 payload | 复用现有 typed seam | r403/r414 接收转发和组合证据；不再派旧“缺字段”实现 |
 | **G4 独立 binding 配置** | 各 agent 可独立选 provider/protocol/model/endpoint | 有效 binding 编译、App endpoint/model/credential 消费与通用 HTTP 来源已实现 | G 来源能力证据充分；B 的角色组合范围仍按各自回执判断 | Config（B/G）、Provider（G）、App（B/G） | 保留 per-agent 优先、顶层继承、unconfigured 与旧配置兼容 | 不新增整节点屏障 | binding/source/default-entry consumer 与真实 credential omission 红绿见唯一进度记录；不扩称 installed 全组合 |
 | **G5 Chat typed 工具闭环** | OpenAI Chat 可实际执行工具并继续任务 | 工具声明、typed call、assistant tool_calls 与配对 tool result 续接已实现 | 本能力证据充分，无新增实现或测试 | Provider（C） | 声明、执行、配对结果并续接至终态 | 已有 consumer 与 live receipt | main 派生三协议真实工具循环 3/3 包含 Chat；实际模型归属不由此证明 |
 | **G6 Anthropic typed 工具闭环** | Anthropic 可实际执行工具并继续任务 | 独立 tools、typed tool_use 与 tool_result messages 续接已实现 | 本能力证据充分，无新增实现或测试 | Provider（C） | 独立协议工具往返至终态 | 已有 consumer 与 live receipt | main 派生三协议真实工具循环 3/3 包含 Anthropic；不复用 Responses wire 作为证明 |
-| **G7 实际角色 binding 与独立 context** | 显式 Brain、N 个 runtime、child 各自独立模型与 context，父接收精炼结果 | App 已创建新 driver UUID；child/reviewer 仍用 shared serve binding；显式 Brain template+JSON 与 AgentRuntime 尚未统一消费语义 checkpoint/current-turn builder | 编译 API 尚未用于实际角色；fresh identity 不证明输入/context 独立；语义历史装配待 Runtime | App（B）负责 binding 消费；Runtime 负责语义 context 后继（D） | 实际实例使用其有效 binding，交错请求无对方 marker；父只接收 child 的精炼交付，不接收 child raw transcript；后继从明确派单与 checkpoint/current-turn 引用装配输入，历史 raw/hidden previous-response 链不得跨 turn（精炼交付/无 raw 语义由既有 Runtime context 合同拥有，不重复建测） | B 内配置 freeze；A-R 共享测试交接；语义装配消费已验合同 | 原生产链已观察；App 路由/context 与后继语义装配 **UNVERIFIED** |
-| **G8 标准 turn 续推与同 turn 恢复** | 不看 finish reason；缺压缩/总结/交付则继续；错误可重试后暂停，恢复继续当前 turn | driver 无 tool call 即返回，local turnId 是请求组；Runtime stream end 后 settle/checkpoint/finalize，summary 为 execution outcome；resume unsupported；retry 新 driver/epoch 不证明原 turn/context/receipt 保留 | 标准完成判断、四项 checkpoint/planner、renderer 触发与持久同 turn 恢复未接通 | Core/Runtime 后继（E 收口/续推，F 同 turn 恢复）；Provider 提供执行事实与 A seam | 依真实任务状态及显式派单模板生成通用临时指令；标准动作与 durable receipt 成立才换 turn；暂停/恢复保留身份、活动 context、已完成动作与恢复责任 | A、D 真实输入/context；工具任务需 C | 未运行标准收口/冷恢复反例；**UNVERIFIED** |
-| **G9 完整原生同入口证明** | 每项宣称能力在用户实际入口成立；错误/stop 事实准确 | 已有 fake/replay 与旧 M1-2 基本生命周期记录；当前 real-rcc-turn-proof 仅 Responses 基本链；HTTP abort、本地 settle 且 remoteStopSupported=false | 缺每项所宣称 binding 的最小 request/response 与 route attribution，以及适用续推/恢复 receipt；本地取消不能宣称远端副作用停止 | 各 adapter/Runtime owner 提供事实，App 组合同入口，master 验收（receipt 附着 A–G） | 用真实 RCC 4444 同公开入口，对每项所宣称 binding 取得最小 request/response 与 route attribution；协议工具往返由既有 fake/replay 范围覆盖，只有产品声称依赖 live 工具执行时才补真实工具执行；适用续推/恢复证据；local/remote stop 能力与业务 stopped checkpoint 分开 | 所宣称能力的对应节点已验收；不等待无关节点 | 唯一单次 Responses live request 已完成（Provider-level lifecycle/settlement **PASS**）；严格 route/body identity attribution、业务 closure、工具、停止与冷恢复 **UNVERIFIED** |
+| **G7 实际角色 binding 与独立 context** | 显式 Brain、N 个 runtime、child 各自独立模型与 context，父接收精炼结果 | 角色 binding 消费、父子输入隔离、精炼结果和 checkpoint 历史已接线 | 不以 UUID 或一次配置编译代替行为证明 | App（B）、Runtime（D） | 父接收精炼交付，历史 raw/隐藏链不跨 turn；child 不继承父 context | 复用 B/D 已验 seam | r414、r288/r415、installed helper r410 和 M3 r443；受控预算并行证据不外推任意 N 或所有角色组合 |
+| **G8 标准 turn 续推与同 turn 恢复** | 不看 finish reason；缺压缩/总结/交付则继续；错误可停，恢复继续当前 turn | 四项收口、Planner 迭代、inspection stop、失败 capture/close 和 prepared cold 恢复已有交付 | 保留原 taskless 实际失败；不把标准机制已验误写成所有真实任务已成功 | Core/Runtime（E/F）、Provider 执行事实 | durable receipt 后换 turn；恢复保留业务身份、context 与责任 | 复用现有标准 turn/恢复接口 | installed r341/r363/r375/r391、prepared PR3 两例和 r443 两周期；本地 close 不外推远端副作用停止 |
+| **G9 完整原生同入口证明** | 每项宣称能力在用户实际入口成立；错误/stop 事实准确 | 三协议工具 consumer/live receipt、installed helper/M3 与 peer 真实 Task 请求已有各自证据 | 原 canonical taskless epoch5 仍失败，精确 RCC 归因缺失；最新治理与逐工具审查覆盖尚待收口 | 各 adapter/Runtime、App 与 master 验收 | 保留实际入口、业务 closure、恢复及资源证据，不建立全组合矩阵 | 对应能力的必要证据；不等无关节点 | r315/r410/r443 和 peer 成功 Task 仅覆盖各自范围；r449/r450/r451 明确保留失败、原因 UNKNOWN，完整目标未完成 |
 
 Chat `[DONE]` 无 finish_reason 的终态差异只是一条未运行观察假设，不列为必修 gap、不据此扩测。RCC 配置/listener/HTTP 200 也不是 G9 的交付证据。
 
@@ -60,12 +64,12 @@ Chat `[DONE]` 无 finish_reason 的终态差异只是一条未运行观察假设
 
 | 节点 | 业务能力 | 唯一实现 owner（writer 独立） | 当前证据 |
 |---|---|---|---|
-| **A** | 当前请求临时指令到达 wire 且不残留 | Contracts（输入合同）＋ Provider（三协议编码）＋ Runtime（生产转发），同一完整交付内的独立 writer | T0 作者 TS2353 红编译、绿编译、request-local 1 PASS；编码/转发行为 **UNVERIFIED**；未集成 |
-| **B** | 实际实例独立 binding 消费 | Config（有效 binding 编译）＋ App（实例消费），同一交付内独立 writer | T3a 作者原拒绝反例与定向 4 PASS；App 消费 **UNVERIFIED**；未集成 |
+| **A** | 当前请求临时指令到达 wire 且不残留 | Contracts（输入合同）＋ Provider（三协议编码）＋ Runtime（生产转发），独立 writer | 当前合同、三协议 wire、Runtime forwarding 和 Responses 组合见 r403/r414；不再沿旧“未集成”状态派单 |
+| **B** | 实际实例独立 binding 消费 | Config（有效 binding 编译）＋ App（实例消费），独立 writer | 当前配置与 App 消费见 r414；父子独立输入及精炼回传另见 r288/r410/r443，不用 UUID 代替证明 |
 | **C** | 三协议 typed 工具往返 | Provider | 当前能力证据充分：既有 typed consumer 与 main 派生真实工具循环 3/3；停止扩测，不扩称完整框架 |
-| **D** | 语义 checkpoint ＋当前 turn 独立 context | Runtime | 通用 builder 存在；实际跨 turn 装配及父子隔离 **UNVERIFIED** |
-| **E** | 动态编排、标准收口与续推 | Core 判定不变量，Runtime 编排 | 当前 terminal/finalize 路径不证明新标准；**UNVERIFIED** |
-| **F** | 同 turn 暂停与持久恢复 | Core/Runtime | 冷恢复反例未运行；**UNVERIFIED** |
+| **D** | 语义 checkpoint ＋当前 turn 独立 context | Runtime | r288/r415 接收跨 turn raw 排除与 helper 连续性，r410/r443 有 installed 公开 consumer；不外推全部 live 组合 |
+| **E** | 动态编排、标准收口与续推 | Core 判定不变量，Runtime 编排 | r363/r443 installed 两周期、四项 checkpoint、Planner continue/complete；没有新增固定角色链 |
+| **F** | 同 turn 暂停与持久恢复 | Core/Runtime | r341/r375/r391 与 prepared PR3 installed 恢复/失败收拢证据；原 taskless epoch5 失败另列 G9，不冒全目标完成 |
 | **G** | 通用 Provider 来源机制 | Config 解析，Provider readiness/transport，App 组装 | 通用 HTTP 来源、配置/凭据消费及默认入口证据充分；保留具体 main/候选/installed 边界，不新增全组合门禁 |
 
 旧 T 编号到 A–G 的迁移映射（仅作历史对照；旧 T 标签只作历史作者证据标识，出现在本表、§4 作者回执及其引用处，不构成当前交付节点）：
