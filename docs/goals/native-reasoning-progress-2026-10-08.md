@@ -1,5 +1,13 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 父级失败收拢：真实原因已捕获，修复计划待纠正
+
+- r376 同一公开失败用例已捕获两个真实 inner error：save 为 `execution-composition.owner-source-missing` / `native close has no drained frozen standard-end input`；close 为 Provider active executions 尚需 settlement/recovery。诊断代码已移除，App 重建0，本侧唯一 `native-parent-cleanup-20261017` 树 clean；无诊断产品修改进入 main。
+- r377 Planner 超过最多8次定点读取合同，重复加载完整 coordinator.ts 至 step133。Root 明确 INT PID48555，进程消失且 result ERROR/interrupted；不是模型后端不可用。r379 同一 Gemini4 medium 会话续接 terminal0，但方案引用不存在的图节点且未核 Provider outstandingFailure 对 drain/settle 的影响，尚未接受。r380 同会话精确纠正正在执行；禁止按错误计划先改代码。
+- r378 fresh GCM 只读任务 terminal，六次定点命令，证明原 case 已有 child failure/control/precall checkpoint 证据，但没有父当前 raw capture 或相关 Provider settle/close 断言。release released 不证明物理关闭。r381 fresh GCM 并行只核实际图/semantic/binding 覆盖，不重复实现 API 规划。
+- UX peer 已收到边界通知：本侧 execution-composition/native-execution/Provider；任何 coordinator catch 收拢 seam 先协调 writer，尚未派写。main/install/restart 窗口仍释放给 peer。完整 goal、父级 cleanup、M4 与原 interaction-2 EOF 保持开放；本轮新增已交付节点0。
+- 证据均在既有 `native-reasoning-d0-20261012` RUN 下 r376/r378/r379/r380/r381；下一动作是接收正确最小计划与实际图覆盖，完成必要图合同后，派 GCM 在同域原树做原单例 RED→GREEN，再整体 Review 与标准交付。
+
 ## 2026-10-17 已交付：原始 child 错误与真实 failed control；父级 cleanup 仍开放
 
 - 本增量main `20ced081` 已push（原回执`699eefe3..20ced081 main -> main`），三文件113insertions/28deletions：删除无效synthetic inconclusive结果；原错经既有异常通道传递；App binder用真实operation/owner/time/evidence构造现有OperationFailure，failed record/event均持久化。成功路径、Gateway/Contracts验证不变，无新fallback/重复guard。
