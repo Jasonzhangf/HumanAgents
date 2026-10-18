@@ -6,7 +6,7 @@
 需求修订：2026-10-08，基线 `56995b3e742b3a400efa45bb42508dd3185284fb`。该基线的 packages 与原审计输入无差异；保留有效源码事实。原测试、构建和浏览器回执仍绑定旧候选，本次未重跑。
 编排者：本次用户目标的执行者。实现由独立执行者负责；不自动建立 Collab 身份。
 
-审计结论：当前已经具备运行引擎、动态 assignment 图、执行 fencing、触发调度、任务列表、实时事件入口及两类 checkpoint 基础。完整语义观测仍未闭环。最先要修的是 context-events→公开语义投影→UX 的断边；随后复用真实 assignment/项目身份补多视角，并补任务阶段模板、计划修订历史和推理提交边界。下文共列 14 个完整目标、20 项差距及对应验收。修正上下文、历史投影查询、checkpoint 导航、整体 UI 事件模型与跨表面偏好接入仍为 OPEN；展示偏好的生产持久链路对 task-dashboard 与 observation 两个表面已落地，见 §8 生产边界说明。
+审计结论：当前已经具备运行引擎、动态 assignment 图、执行 fencing、触发调度、任务列表、实时事件入口及两类 checkpoint 基础。完整语义观测仍未闭环。最先要修的是 context-events→公开语义投影→UX 的断边；随后复用真实 assignment/项目身份补多视角，并补任务阶段模板、计划修订历史和推理提交边界。下文共列 14 个完整目标、20 项差距及对应验收。修正上下文、历史投影查询、checkpoint 导航、整体 UI 事件目标与跨表面偏好接入仍为 OPEN；展示偏好的生产持久链路与浏览器侧冻结引用、回调订阅边界已对 task-dashboard 与 observation 两个表面落地，见 §8 生产边界说明。
 
 ## 1. 权威需求
 
@@ -77,7 +77,7 @@
 | G13 | 修正后有效上下文与历史同时正确 | 仅排除声明错误 refs；未解决义务保留；旧 checkpoint/投影、动作/raw 保留且可查询；回退/前进追加历史 | core 错误/恢复规则；runtime 上下文编排；Journal 历史 owner | 修正前后 ref 集合与历史前缀核对；回退/再前进后副作用记录、责任与旧快照不变 |
 | G14 | checkpoint 当前/查看和语义/raw 可追溯 | 身份、标号、简介与 context/semantic/raw refs 可读；当前与查看游标及 plan/cycle/occurrence 独立；未知目标显式失败 | contracts 类型；runtime checkpoint 编排；app 查询；UI 导航 | 同任务及绑定 Agent 历史链接；当前/查看同时标记；跨任务、未知、未提交目标不替换为其他快照 |
 
-G1–G14 均为总目标。可用增量不降低终验条件。生产交付全部保持 OPEN；源码基础与 Mock 不能关闭新闭环。G12 的具体类型仍需消除前述语义歧义。
+G1–G14 均为总目标。可用增量不降低终验条件。生产交付全部保持 OPEN；源码基础与 Mock 不能关闭新闭环。G10/F16 的浏览器侧已交付边界、G12/F18 的当前浏览器冻结引用实现见 §8 生产边界；整体事件目标仍 OPEN，跨进程 native Arc 按真实语言边界另行确定。
 
 ## 3. 已核实的实际情况
 
@@ -272,6 +272,8 @@ Tour 必须实际改变页面、选择任务、切换版本或打开详情。必
 静态 Mock 只演示窄范围浏览器偏好。生产由 `packages/ui` 拥有展示行为，`packages/config` 拥有 typed 验证与 controlRoot 持久化路径派生，app 组装控制 API。UI 不解析 TOML，不把偏好变成领域控制真相，不在 project workspace 存 user profile。
 
 生产边界（2026-10-18 核对）：`packages/config` 的 typed `[ui.display]` 已写入 `<controlRoot>/config.toml`，`packages/app` 已挂载 `/api/ui/display-preference` 的 GET/PUT/DELETE，浏览器共享控制器已在 task-dashboard 与 observation 两个表面接管默认模式、保存与重置；该生产闭环对这两个表面已闭合。follow-last 的跨表面浏览器验收已于同日通过：真实控件保存空 follow-last、Observation 手动 actions、重载、切到 Task Dashboard 展示均保留 `lastManual`，显式 `display=semantic` 覆盖保存模式，Reset 恢复基线且 A/B Journal 不变（回执 `native-preference-browser-20261018/reception.md`）。仍未闭合的是 G10/F16 的整体声明事件模型与其他共享壳页面的偏好接入；这些缺口按原 G/F 条目继续 OPEN，不得凭本段宣称完成。
+
+浏览器事件与共享引用边界（2026-10-19 声明，复用既有回执，只记浏览器侧已交付范围）：生产实现使用模块级 owner 回调/订阅，而非全局事件总线。`docs/ui/display-preferences.js` 的 `createDisplayPreferenceController` 提供 `subscribe`（返回退订闭包）、`dispose`（递增 token、清空 listeners），并只在 `origin === DISPLAY_ORIGINS.manual && canMutate() && state.preference?.mode === 'follow-last'` 时持久化；`docs/ui/runtime-shell.js` 的 `mountSemanticObservationPanel` 以 `readSerial`/`streamRevision` 守卫语义 GET/SSE、断连保留已确认 envelope 为 stale，`closeStream`/`dispose` 关闭流与视图，`mountRuntimeShell` 订阅偏好控制器并在 `disposeDisplayPreference` 退订；`docs/ui/semantic-observation.js` 只通过 `onModeChange`/`onScopeRequest`/`onEvidenceRequest` 发出视图回调；`docs/ui/task-dashboard.js` 与 `docs/ui/observation.js` 在 `pagehide` 销毁面板、偏好控制器与流。共享引用由 `docs/ui/runtime-api.js` 的 `freezeJsonValue`（原位递归 `Object.freeze` 并返回同一引用）与 `createRuntimeReadPublication`（发布时冻结 `result.value`、`snapshot` 复用同一 `content`、按 scope 与递增 revision 丢弃过期结果、同 scope 刷新失败保留上一已确认快照并标 stale）承载。可执行证据：`ux-payload-mutability-20261017/red-receipt.json` 记录未加该保护时共享 content 的嵌套污染成功（`sharedContent=true`、`contentFrozen=false`、`mutationBlocked=false`）；`ui-pref-verify-20261018/report.md` 记录移除 manual 来源守卫后 18 项中 1 项 RED、恢复后 18/18 GREEN。此声明只覆盖浏览器侧已交付的冻结发布、订阅/退订与 manual 守卫，不关闭 G10/F16 整体目标，也不声称跨进程 native Arc 或全部未来视角。
 
 ### 8.1 控件与模块合同
 
