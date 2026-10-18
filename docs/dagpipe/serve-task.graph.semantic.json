@@ -18,7 +18,7 @@
   },
   "design": {
     "inspectionSettlement": "普通任务按原语义停止或结算副作用并提交终态回执；仅显式巡检 stop 时，在 checkpoint 后幂等补 I2 检查结算并 close。",
-    "recovery": "巡检 stop 恢复共用 exact committed checkpoint；失败保留恢复责任，不重 stop、不重 child。普通完成保持原 settlement 语义。冷启动按 typed 持久事实区分：仅有 operation.prepared 且尚无 execution.started 事件、active-turn、current-state、prepared-stop 或 checkpoint 时，恢复原 Task/operation/epoch 为 waiting(prepared)，等待 grant 后从同一入口准入；已有 execution.started、准入后的 active-turn/current-state 或其他不可判定副作用且无终态 checkpoint 时，仍标 blocked 并保留恢复责任。",
+    "recovery": "巡检 stop 恢复共用 exact committed checkpoint；失败保留恢复责任，不重 stop、不重 child。普通完成保持原 settlement 语义。冷启动按 typed 持久事实区分：只有保留原 prepared allocation、现有身份检查成立，且 typed Journal 证明尚无 admission registration、preparation entry、active-turn、current-state、execution event 或相关 checkpoint 时，才恢复原 Task/operation/epoch 为 waiting(prepared)，等待 grant 后从同一入口准入。已有 admission 或 preparation history 的无终态 checkpoint 执行继续 blocked 并保留恢复责任；resource acquisition 属于 preparation history。停止请求缺失不构成未准备证明。",
     "missingItems": "missing 未执行项不伪造为 cancelled。",
     "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 是计划中的 Runtime 协调 owner，当前尚未实现。",
     "appWiring": "App 只做 wiring，不拥有 stop、I2、settle 或 close 语义。"

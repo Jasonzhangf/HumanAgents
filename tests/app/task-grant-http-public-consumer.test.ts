@@ -13,7 +13,7 @@ import {
 import type { AnyProviderExecutionIdentityRef, ProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
 import { prepareAgentProvider, prepareExecutionAgentProvider, createAgentProviderPort } from '../../packages/app/src/agent-driver-composition.js';
 import { startUiRuntime, type UiRuntime, uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/index.js';
-import { uiRuntimeModeRoot } from '../../packages/app/src/ui-runtime/journal.js';
+import { uiRuntimeJournalPath, uiRuntimeModeRoot } from '../../packages/app/src/ui-runtime/journal.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
 import { createRccServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
@@ -313,6 +313,127 @@ test('HTTP grant control uses verified owner and durable readback without releas
   } finally {
     await server?.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('restart blocks a prepared allocation with committed preparation entry before active turn', async () => {
+  const base = join(homedir(), '.humanagent', 'test-fixtures');
+  await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'task-grant-prepared-entry-http-'));
+  let runtime: UiRuntime | undefined;
+  let orchestration: ReturnType<typeof createServeRuntimeComposition> | undefined;
+  let posts = 0;
+  let factories = 0;
+  let passed = false;
+  const controlJournal = new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(root, 'rcc')));
+  const provider = createServer((request, response) => {
+    if (request.method !== 'POST') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ data: [{ id: 'grant-model' }] }));
+      return;
+    }
+    posts += 1;
+    response.writeHead(500);
+    response.end('unexpected Provider POST');
+  });
+  await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = provider.address();
+    if (!address || typeof address === 'string') throw new Error('fixture provider address missing');
+    const bindings: EffectiveAgentProviderBinding[] = [{ agentId: 'grant-agent', roleId: 'execution', source: 'agent',
+      provider: { source: 'http', provider: 'rcc', binding: 'grant-binding', protocol: 'responses',
+        model: 'grant-model', route: 'grant-model', baseUrl: `http://127.0.0.1:${address.port}` } },
+      { agentId: 'grant-planner', roleId: 'orchestration', source: 'agent', provider: { source: 'http', provider: 'rcc',
+        binding: 'grant-planner-binding', protocol: 'responses', model: 'grant-model', route: 'grant-model',
+        baseUrl: `http://127.0.0.1:${address.port}` } }];
+    const select = <T extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(selection: { roleId: AgentRole; configuredAgentId?: string }) =>
+      prepareAgentProvider<T>({ ...selection, agentProviderBindings: bindings, evidenceRoot: join(root, 'assets') });
+    const startFresh = async () => {
+      const launch = await select({ roleId: 'execution' });
+      const eventJournal = createJsonlEventJournal({ filePath: join(root, 'events.jsonl') });
+      const publishers = { async resolvePublisher() { return null; } };
+      const nextOrchestration = createServeRuntimeComposition({
+        eventBusPorts: { journal: eventJournal, publishers, consumers: { async resolveConsumer() { return null; } },
+          externalOperations: eventJournal, barrierIntents: eventJournal },
+        feedbackPorts: { journal: eventJournal, publishers }, feedbackPublisherId: 'grant-http-orchestration',
+        ...createRccServeOrchestrationPorts({ port: launch.port, binding: launch.binding, prepareAgentProvider: select,
+          promptSegments: { review: [] } }),
+      });
+      const accessControl = await AccessControlService.open({ credentialPath: join(root, 'web-access.json'), create: true });
+      const nextRuntime = await startUiRuntime({ mode: 'rcc', organId: id('organ', 'grant-prepared'), accessControl,
+        binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: join(root, 'ui-runtime'),
+        evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
+        memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'grant-http', roleId: 'execution' },
+        explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
+          normalizedInput: 'deliver controlled result', proposal: 'deliver controlled result', knownFacts: [], decisionRefs: [],
+          structuredProposal: { revision: 1, intent: 'create', title: 'HTTP grant task', objective: 'deliver controlled result',
+            deliverable: 'controlled result', deliveryConditions: ['deliver controlled result'], evidenceRefs: [], blockingGaps: [] } }; } },
+        runtimeComposition: { prepareAgentProvider: select, createTaskAssembly: nextOrchestration.createTaskAssembly,
+          prepareTaskAgentProvider: (selection, owner, lease) => {
+            factories += 1;
+            return prepareExecutionAgentProvider({ roleId: selection.roleId,
+              ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+              agentProviderBindings: bindings, createPort: (binding) => createAgentProviderPort(binding, join(root, 'assets')) }, owner, lease);
+          } },
+      });
+      await nextRuntime.service.quiesceImplicitConsumption();
+      runtime = nextRuntime;
+      orchestration = nextOrchestration;
+      return { runtime: nextRuntime, orchestration: nextOrchestration, accessControl };
+    };
+    let active = await startFresh();
+    const interactionId = await active.runtime.service.receiveExplicitInput({ sourceRef: 'ui:new-task-create', rawInput: 'deliver controlled result',
+      channel: 'business', requestKind: 'new-task-preview' });
+    await active.runtime.service.interpretExplicitInput({ interactionId });
+    const preview = await active.runtime.service.inspectExplicitInteraction(interactionId);
+    await active.runtime.service.confirmExplicitRequirement({ interactionId, draftId: preview.draft!.draftId,
+      inputRevision: preview.draft!.inputRevision, confirmationRef: 'confirmation:grant-http', confirmedBy: 'human:operator',
+      confirmedAt: new Date().toISOString(), payloadRef: 'asset://grant-http', requestKind: 'new-task-create' });
+    const prepared = await active.runtime.service.dispatchNextExplicitRequirement();
+    const preparedOperationId = prepared.operationId;
+    if (preparedOperationId === undefined) throw new Error('prepared operation is missing');
+    assert.equal(posts, 0);
+    assert.equal(factories, 0);
+    const firstDetail = active.runtime.service.taskDashboard(prepared.taskId);
+    assert.equal(firstDetail.state, 'waiting');
+    const preparedInput = active.runtime.service.taskDetail(prepared.taskId).priorInput;
+    assert.equal(preparedInput, 'deliver controlled result');
+    const preparedRecord = new UiRuntimeJournal(uiRuntimeJournalPath(root, 'rcc')).replay()
+      .find((record) => record.kind === 'operation.prepared'
+        && record.allocation.operationId.value === preparedOperationId.value
+        && record.allocation.executionEpoch === prepared.executionEpoch);
+    if (preparedRecord?.kind !== 'operation.prepared') throw new Error('original prepared allocation is missing');
+    await controlJournal.append({
+      commitId: `prepared-entry:${preparedOperationId.value}:${prepared.executionEpoch}`,
+      kind: 'event',
+      scope: preparedRecord.allocation.scope,
+      payload: {
+        kind: 'prepared-execution-stop/v1',
+        fact: { kind: 'preparation-entered', allocation: preparedRecord.allocation },
+      },
+    });
+
+    await active.runtime.close();
+    await active.orchestration.dispose();
+    runtime = undefined;
+    orchestration = undefined;
+    active = await startFresh();
+    const hydrated = active.runtime.service.taskDashboard(prepared.taskId);
+    assert.equal(hydrated.state, 'blocked', JSON.stringify(hydrated));
+    assert.equal(hydrated.operationId, preparedOperationId.value);
+    assert.equal(hydrated.executionEpoch, prepared.executionEpoch);
+    assert.equal(active.runtime.service.taskDetail(prepared.taskId).priorInput, preparedInput);
+    assert.equal(posts, 0);
+    assert.equal(factories, 0);
+    assert.equal(active.runtime.service.eventsSince(preparedOperationId).some((event) => event.kind === 'execution.started'), false);
+    passed = true;
+  } finally {
+    await runtime?.close();
+    await orchestration?.dispose();
+    provider.closeIdleConnections?.();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+    if (passed) await rm(root, { recursive: true, force: true });
+    else console.log(JSON.stringify({ retainedFailureFixture: root }));
   }
 });
 

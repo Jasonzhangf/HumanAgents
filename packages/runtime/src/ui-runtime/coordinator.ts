@@ -551,6 +551,7 @@ export interface RuntimePreparedExecutionStopPort {
     readonly checkpoint: RuntimePreparedStopCheckpointCandidate;
   }): Promise<JournalCommitRef>;
   read(selector: RuntimePreparedStopSelector): Promise<RuntimePreparedStopReadback>;
+  hasPreparedExecutionHistory(allocation: RuntimeExecutionAllocation): Promise<boolean>;
   settle(selector: RuntimePreparedStopSelector): Promise<RuntimePreparedStopSettleResult>;
 }
 
@@ -6226,6 +6227,7 @@ export class RuntimeTaskCoordinator {
       taskId: task.taskId,
     });
     if ((canonicalPosition?.executionEpoch ?? 0) > allocation.executionEpoch) return false;
+    if (await preparedStop.hasPreparedExecutionHistory(allocation)) return false;
     const preparedStopRead = await preparedStop.read(selector);
     if (preparedStopRead.state !== 'absent') return false;
     return !await source.hasCommittedActiveTurn(selector);
