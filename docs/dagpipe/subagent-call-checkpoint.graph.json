@@ -2,7 +2,7 @@
   "id": "humanagent-subagent-call-checkpoint",
   "version": "1",
   "meta": {
-    "title": "subagent-call-checkpoint",
+    "title": "子调用登记、独立执行与持久交付",
     "requirements_version": 14,
     "requirements": [
       "humanagent-explicit-brain-semantic-turn-context",
@@ -21,11 +21,11 @@
     "bindingBoundary": "语义设计责任名称，不声明 Operator 已注册或 runtime 执行",
     "outcomeBoundary": "业务不满足条件时输出保留当前 turn/待补充的结果；不伪造 checkpoint 提交或强行执行。",
     "existingCheckpointDesign": "native-turn-checkpoint.graph.json",
-    "assignmentContract": "普通 execution/review 仍由 assignment 明确角色任务；只有 execution 显式 check 时才选择正式 definition，并按需打开同一 logical turn 的 occurrence。Runtime 在内存 graph 中声明 stage 与 assignment 后再取得执行许可。",
-    "assignmentGraphContract": "Runtime AssignmentGraph 只保留同进程内 stage、assignment、parent 与成员顺序；同一 assignment key 不得迁移到另一个 stage。它不拥有第二套持久 stream、revision、commit 或 replay 协议。",
+    "assignmentContract": "子调用通过类型化绑定明确执行或复核职责，并携带真实登记与授权。原生 callChild 不创建经典 stage，也不以 AssignmentGraph 为前置。只有执行任务显式要求检查时才选择正式检查定义，并按需打开同一业务轮次的检查 occurrence。",
+    "assignmentGraphContract": "经典 dispatch 路径仍在内存 AssignmentGraph 中维护 stage、assignment、parent 与成员顺序，同一 assignment key 不得跨 stage 复用；这不是原生 callChild 的状态真源或前置条件，也没有第二套持久协议。",
     "inspectionBindingContract": "checkpoint 保存子调用绑定与未返回义务；显式 check 时绑定检查，context 只从该 typed binding 恢复独立 Provider/model 与执行上下文。",
     "executionContract": "普通 execution/review 保持原角色作用；显式 check 时才产生完整 child 正文与独立 typed delivery，业务文本不是控制真源。",
-    "acceptanceContract": "acceptance 接纳 durable child return；显式 check 时才由 Runtime 幂等补 I2 receipt。assignment 的接纳、review、retry、blocked、escalated、succeeded 与 merged 转移在内存 graph 中完成后，再向调用方或下游发布结果。恢复不重启 child。",
+    "acceptanceContract": "原生调用通过既有 childCallPort 保存持久返回，再交父轮次决定是否接纳；里程碑复核和显式检查沿各自 Journal owner 保存结果。经典 dispatch 的内存图状态转移不替代这些原生事实。恢复不重复已完成的 child。",
     "runtimeCoordination": {
       "ownerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
       "status": "planned/unimplemented"
