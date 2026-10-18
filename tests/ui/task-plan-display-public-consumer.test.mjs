@@ -148,65 +148,41 @@ const actualTaskScope = {
   taskId: actualTaskId,
 }
 
-function actualAssignment(assignmentId, objective) {
+const commitRef = (id, journalSeq = 1) => ({
+  commitId: id,
+  journalSeq,
+  recordDigest: `sha256:${'0'.repeat(64)}`,
+})
+
+const incarnation = (suffix, executionEpoch = 2) => ({
+  runtimeId: `runtime-${suffix}`,
+  generation: 1,
+  agentInstanceId: `agent-${suffix}`,
+  roleId: 'execution',
+  taskId: actualTaskId,
+  assignmentId: `member-${suffix}`,
+  executionEpoch,
+})
+
+function nativeNode(id, assignmentId, extra) {
   return {
+    nodeId: id,
+    taskId: actualTaskId,
     assignmentId,
-    taskId: actualTaskId,
-    pipelineNodeId: 'pipeline.execute',
-    attempt: 1,
-    executionEpoch: 1,
-    inputRevision: 1,
-    objective,
-    targetRefs: [],
-    expectedOutputRefs: [],
-    successCriteria: [],
-    failureCriteria: [],
-    incompleteCriteria: [],
-    requiredCapabilities: [],
-    mergeGate: 'not-required',
+    currency: 'current',
+    commitRefs: [commitRef(`commit-${id}`)],
+    evidenceRefs: [],
+    ...extra,
   }
 }
 
-function actualRecord({
-  assignmentId,
-  objective,
-  status,
-  result,
-  reason,
-  nextAction,
-  reviewResults = [],
-}) {
-  return {
-    key: { assignmentId, attempt: 1, executionEpoch: 1 },
-    stageNodeId: 'stage-parent',
-    assignment: actualAssignment(assignmentId, objective),
-    status,
-    ownerId: 'owner-1',
-    agentId: `agent-${assignmentId}`,
-    ...(result === undefined ? {} : { result }),
-    reviewResults,
-    reason,
-    nextAction,
-    evidenceRefs: [],
-  }
-}
-
-function actualSource() {
-  const succeededResult = {
-    taskId: actualTaskId,
-    pipelineNodeId: 'pipeline.execute',
-    agentId: 'agent-member-a',
-    assignmentId: 'member-a',
-    attempt: 1,
-    executionEpoch: 1,
-    inputRevision: 1,
-    producedArtifactRefs: [],
-    status: 'succeeded',
-    summary: '成员一结果',
-    outputRefs: [],
-    evidenceRefs: [],
-    nextAction: 'continue',
-  }
+/**
+ * One compact native source covering every graph node kind and the states that
+ * must stay unlike success: an unacquired call, an unreturned review, a segment
+ * that one business closure must not close, an orphan delivery, an unresolved
+ * relation and an unavailable source.
+ */
+function nativeSource() {
   return {
     taskScope: actualTaskScope,
     guidance: {
@@ -217,58 +193,252 @@ function actualSource() {
     },
     history: {
       status: 'recorded',
-      streams: [{
-        stream: { taskScope: actualTaskScope, ownerId: 'owner-1' },
-        facts: [{ commitRef: { commitId: 'commit-1', journalSeq: 1, recordDigest: 'sha256:x' } }],
-        snapshot: {
-          stages: [
-            {
-              nodeId: 'stage-parent',
-              taskId: actualTaskId,
-              parentNodeId: null,
-              state: 'succeeded',
-              assignmentKeys: ['member-a:1:1', 'member-b:1:1'],
+      nodes: [
+        nativeNode('allocation-1', 'member-main', {
+          kind: 'native-allocation',
+          instance: {
+            kind: 'native-execution',
+            execution: { runtimeId: 'native-runtime', executionEpoch: 1 },
+          },
+          executionEpoch: 1,
+          objective: '完成主任务的原生执行分配',
+          allocation: {
+            runtimeId: 'native-runtime',
+            operationId: { scope: 'operation', value: 'op-1' },
+            executionEpoch: 1,
+            assignmentId: 'member-main',
+            scope: { organId: actualTaskScope.organId, taskId: actualTaskId },
+            inputRefs: ['input-1'],
+            ownerId: 'owner-1',
+            directiveRevision: 1,
+            inputRevision: 1,
+            orchestrated: true,
+            role: 'execution',
+          },
+        }),
+        nativeNode('turn-active', 'member-main', {
+          kind: 'active-turn',
+          instance: {
+            kind: 'native-execution',
+            execution: { runtimeId: 'native-runtime', executionEpoch: 1 },
+          },
+          executionEpoch: 1,
+          businessTurnId: 'turn-1',
+          pipelineNodeId: 'pipeline.execute',
+          objective: '完成主任务',
+          binding: {
+            admittedTurn: {},
+            assignment: { objective: '完成主任务' },
+            execution: { runtimeId: 'native-runtime', executionEpoch: 1 },
+            scope: { organId: actualTaskScope.organId, taskId: actualTaskId },
+          },
+          bindingCommitRef: commitRef('binding-turn'),
+          businessClosure: {
+            status: 'recorded',
+            closure: {
+              identity: {},
+              checkpointId: { scope: 'checkpoint', value: 'checkpoint-1' },
+              closureRef: 'closure-1',
+              summary: {
+                goal: { text: '完成主任务', evidenceRefs: [] },
+                actions: { text: '派发子任务', evidenceRefs: [] },
+                result: { text: '主任务已交付', evidenceRefs: [] },
+                expectedNextStep: { text: '等待用户确认', evidenceRefs: [] },
+              },
+              recoveryStateRef: {},
+              closedAt: '2026-10-18T00:00:00.000Z',
             },
-            {
-              nodeId: 'stage-empty',
-              taskId: actualTaskId,
-              parentNodeId: 'stage-parent',
-              state: 'planned',
-              assignmentKeys: [],
+            commitRef: commitRef('closure-turn'),
+          },
+        }),
+        nativeNode('segment-2', 'member-main', {
+          kind: 'resumed-segment',
+          instance: { kind: 'incarnation', incarnation: incarnation('segment') },
+          executionEpoch: 2,
+          businessTurnId: 'turn-1',
+          segmentId: 'segment-2',
+          opened: { kind: 'segment-opened', segmentId: 'segment-2' },
+          openedCommitRef: commitRef('segment-2'),
+          terminalCommitRefs: [],
+          segmentState: { status: 'opened' },
+        }),
+        nativeNode('child-a', 'member-a', {
+          kind: 'child-invocation',
+          callKind: 'execution',
+          invocationId: 'inv-a',
+          childTurnId: 'child-turn-a',
+          checkpointReceiptRef: 'checkpoint-a',
+          record: {
+            invocationId: 'inv-a',
+            childTurnId: 'child-turn-a',
+            checkpointReceiptRef: 'checkpoint-a',
+            binding: { kind: 'execution', assignment: { objective: '整理交付说明' } },
+            incarnation: incarnation('a'),
+            adoptedResultSeq: 3,
+          },
+          invocationCommitRef: commitRef('inv-a'),
+          containingLocation: {
+            kind: 'active-turn',
+            businessTurnId: 'turn-1',
+            bindingCommitRef: commitRef('binding-turn'),
+          },
+          linkage: { status: 'linked', parentNodeId: 'turn-active' },
+          acquisition: { status: 'acquired', incarnation: incarnation('a') },
+          returnState: {
+            status: 'returned',
+            delivery: {
+              kind: 'execution',
+              seq: 3,
+              invocationId: 'inv-a',
+              refinedDelivery: {},
+              assignment: {},
+              result: { status: 'succeeded', summary: '子任务结果已返回' },
             },
-          ],
-          assignments: [
-            actualRecord({
-              assignmentId: 'member-a',
-              objective: '成员一目标',
-              status: 'succeeded',
-              result: succeededResult,
-              reason: '成员一已完成',
-              nextAction: { kind: 'continue' },
-              reviewResults: [{
-                resultId: 'review-1',
-                assignmentId: 'member-a',
-                taskId: 'task-1',
-                workerAgentId: 'reviewer-1',
-                reviewKind: 'quality',
-                attempt: 1,
-                executionEpoch: 1,
-                inputRevision: 1,
-                subjectRefs: ['member-a'],
-                status: 'passed',
-                findings: [{ findingId: 'finding-1' }],
-                evidenceRefs: [],
-              }],
-            }),
-            actualRecord({
-              assignmentId: 'member-b',
-              objective: '成员二目标',
-              status: 'blocked',
-              reason: '等待外部输入',
-              nextAction: { kind: 'wait' },
-            }),
-          ],
-        },
+            deliveryCommitRef: commitRef('delivery-a'),
+          },
+          adoption: { status: 'adopted', resultSeq: 3 },
+        }),
+        nativeNode('child-b', 'member-b', {
+          kind: 'child-invocation',
+          callKind: 'review',
+          invocationId: 'inv-b',
+          childTurnId: 'child-turn-b',
+          checkpointReceiptRef: 'checkpoint-b',
+          record: {
+            invocationId: 'inv-b',
+            childTurnId: 'child-turn-b',
+            checkpointReceiptRef: 'checkpoint-b',
+            binding: { kind: 'review', assignment: {} },
+            incarnation: incarnation('b'),
+          },
+          invocationCommitRef: commitRef('inv-b'),
+          containingLocation: {
+            kind: 'resumed-segment',
+            businessTurnId: 'turn-1',
+            segmentId: 'segment-2',
+            openedCommitRef: commitRef('segment-2'),
+          },
+          linkage: {
+            status: 'linked',
+            parentNodeId: 'segment-2',
+          },
+          acquisition: { status: 'acquired', incarnation: incarnation('b') },
+          returnState: { status: 'unreturned' },
+          adoption: { status: 'undecided' },
+          missingSource: 'call-diagnostic:/runs/child-b.json',
+        }),
+        nativeNode('child-c', 'member-c', {
+          kind: 'child-invocation',
+          missingSource: '执行池没有提供完整的调用记录。',
+          callKind: 'execution',
+          invocationId: 'inv-c',
+          childTurnId: 'child-turn-c',
+          checkpointReceiptRef: 'checkpoint-c',
+          record: {
+            invocationId: 'inv-c',
+            childTurnId: 'child-turn-c',
+            checkpointReceiptRef: 'checkpoint-c',
+            binding: { kind: 'execution', assignment: { objective: '补充检查' } },
+          },
+          invocationCommitRef: commitRef('inv-c'),
+          containingLocation: {
+            kind: 'active-turn',
+            businessTurnId: 'turn-1',
+            bindingCommitRef: commitRef('binding-turn'),
+          },
+          linkage: { status: 'linked', parentNodeId: 'turn-active' },
+          acquisition: {
+            status: 'unacquired',
+            reason: 'acquisition-diagnostic:/runs/child-c.json',
+          },
+          returnState: { status: 'unreturned' },
+          adoption: {
+            status: 'unknown',
+            reason: 'adoption-diagnostic:/runs/child-c-adoption.json',
+          },
+          missingSource: 'source-diagnostic:/runs/child-c-source.json',
+        }),
+        nativeNode('orphan-1', 'member-orphan', {
+          kind: 'orphan-child-delivery',
+          callKind: 'execution',
+          invocationId: 'inv-orphan',
+          delivery: {
+            kind: 'execution',
+            seq: 9,
+            invocationId: 'inv-orphan',
+            refinedDelivery: {},
+            assignment: {},
+            result: { status: 'succeeded', summary: '孤立的子任务结果' },
+          },
+          containingCommitRef: commitRef('envelope-orphan'),
+          deliverySeq: 9,
+          containingLocation: {
+            kind: 'active-turn',
+            businessTurnId: 'turn-1',
+            bindingCommitRef: commitRef('binding-turn'),
+          },
+          linkage: {
+            status: 'orphan',
+            reason: 'invocation-not-recorded:/runs/orphan.json',
+          },
+        }),
+        nativeNode('review-1', 'member-review', {
+          kind: 'milestone-review',
+          instance: { kind: 'incarnation', incarnation: incarnation('review', 3) },
+          executionEpoch: 3,
+          pipelineNodeId: 'child.review',
+          record: {
+            delivery: {
+              result: { status: 'passed', findings: [{ findingId: 'finding-1' }] },
+            },
+          },
+          reviewCommitRef: commitRef('review-1'),
+        }),
+        nativeNode('planner-1', 'member-plan', {
+          kind: 'closed-turn-planner-call',
+          stage: 'returned',
+          dutyKey: 'duty-1',
+          invocationId: 'inv-planner',
+          scope: { organId: actualTaskScope.organId, taskId: actualTaskId },
+          businessTurnId: 'turn-1',
+          instance: { kind: 'incarnation', incarnation: incarnation('planner') },
+          execution: { runtimeId: 'planner-runtime', executionEpoch: 1 },
+          checkpointId: { scope: 'checkpoint', value: 'checkpoint-1' },
+          checkpointCommitRef: commitRef('checkpoint-1'),
+          closureRef: 'closure-1',
+          closureCommitRef: commitRef('closure-turn'),
+          grantCommitRef: commitRef('grant-1'),
+          admissionCommitRef: commitRef('admission-1'),
+          preparationCommitRef: commitRef('preparation-1'),
+          invocationCommitRef: commitRef('planner-inv'),
+          returnCommitRef: commitRef('planner-return'),
+          planRevision: {
+            revisionId: { scope: 'task', value: 'plan-2' },
+            sequence: 2,
+            decision: 'complete',
+          },
+        }),
+      ],
+      edges: [
+        { edgeId: 'e-contain-container', kind: 'contains', fromNodeId: 'turn-active', toNodeId: 'segment-2' },
+        { edgeId: 'e-contain-a', kind: 'contains', fromNodeId: 'turn-active', toNodeId: 'child-a' },
+        { edgeId: 'e-contain-c', kind: 'contains', fromNodeId: 'turn-active', toNodeId: 'child-c' },
+        { edgeId: 'e-contain-b', kind: 'contains', fromNodeId: 'segment-2', toNodeId: 'child-b' },
+        { edgeId: 'e-contain-a-again', kind: 'contains', fromNodeId: 'segment-2', toNodeId: 'child-a' },
+        { edgeId: 'e-precedes', kind: 'precedes', fromNodeId: 'allocation-1', toNodeId: 'turn-active' },
+        { edgeId: 'e-delegates', kind: 'delegates-child', fromNodeId: 'turn-active', toNodeId: 'child-a' },
+        { edgeId: 'e-planner', kind: 'planner-duty', fromNodeId: 'turn-active', toNodeId: 'planner-1' },
+      ],
+      ungrouped: [{
+        nodeId: 'turn-active',
+        kind: 'delegates-child',
+        targetRef: 'missing-child',
+        reason: 'relation-diagnostic:/runs/missing-child.json',
+      }],
+      unavailable: [{
+        sourceId: 'source-1',
+        ownerId: 'owner.runtime',
+        message: 'source-diagnostic:/runs/source-1.json',
       }],
     },
   }
@@ -305,6 +475,21 @@ function openTechnicalDetail(node, opened) {
   return Object.fromEntries(opened[0].detail.entries)
 }
 
+function openActualDetail(node, opened, summary = '执行记录详情') {
+  const button = walk(node).find((entry) => (
+    entry.tagName === 'BUTTON' && entry.dataset?.actualGraphDetail === summary
+  ))
+  assert.ok(button, 'the existing actual-execution detail button must be present')
+  const before = opened.length
+  button.click()
+  assert.equal(opened.length, before + 1)
+  return Object.fromEntries(opened.at(-1).detail.entries)
+}
+
+function visibleNodeIds(graph) {
+  return graph.history.groups.flatMap((group) => group.nodes.map((node) => node.nodeId))
+}
+
 const readOk = (value) => ({ ok: true, value })
 
 test('current resolves only the accepted revision, not a later published one', () => {
@@ -325,61 +510,171 @@ test('current resolves only the accepted revision, not a later published one', (
   assert.equal(byData(section, 'planRevision', 'v3').length, 0)
 })
 
-test('actual graph projection preserves owner streams, empty stages, parents and repeated roles', () => {
-  const graph = projectTaskActualExecutionGraph(actualSource())
+test('actual graph projection groups native nodes and never stamps success on unresolved facts', () => {
+  const graph = projectTaskActualExecutionGraph(nativeSource())
   assert.equal(graph.surface, 'task-actual-execution-graph')
   assert.equal(graph.guidance.kindLabel, '单次交付')
   assert.equal(graph.history.status, 'recorded')
-  assert.equal(graph.history.streamCount, 1)
-  assert.equal(graph.history.stageCount, 2)
-  assert.equal(graph.history.memberCount, 2)
+  assert.equal(graph.history.groupCount, 6)
+  assert.equal(graph.history.recordCount, 9)
+  assert.equal(graph.history.nodeCount, 9)
+  assert.equal(graph.history.edgeCount, 8)
+  assert.deepEqual(
+    graph.history.edges.map((edge) => edge.kind),
+    ['contains', 'contains', 'contains', 'contains', 'contains', 'precedes', 'delegates-child', 'planner-duty'],
+  )
+  assert.equal(graph.history.deliveryCount, 2)
+  assert.deepEqual(
+    graph.history.groups.map((group) => group.label),
+    ['执行轮次', '恢复分段', '执行分配', '里程碑复核', '计划核对', '未归组记录'],
+  )
+  const groupNodeIds = visibleNodeIds(graph)
+  assert.equal(groupNodeIds.length, graph.history.recordCount)
+  assert.equal(new Set(groupNodeIds).size, graph.history.recordCount)
 
-  const [stream] = graph.history.streams
-  assert.equal(stream.ownerLabel, '执行分组 1')
-  assert.deepEqual(stream.stages.map((stage) => stage.label), ['阶段 1', '阶段 2'])
-  assert.equal(stream.stages[0].state, 'succeeded')
-  assert.equal(stream.stages[1].state, 'planned')
-  assert.equal(stream.stages[1].members.length, 0)
-  assert.deepEqual(stream.stages[1].parent, {
-    kind: 'recorded',
-    stageNodeId: 'stage-parent',
-    label: '上级阶段：阶段 1',
-  })
-  assert.deepEqual(stream.stages[0].members.map((member) => member.roleLabel), ['执行', '执行'])
-  assert.deepEqual(stream.stages[0].members.map((member) => member.statusLabel), ['已完成', '受阻'])
-  assert.equal(stream.stages[0].members[0].result.summary, '成员一结果')
-  assert.equal(stream.stages[0].members[1].result, undefined)
+  const group = (label) => graph.history.groups.find((item) => item.label === label)
+  const nodesById = new Map(
+    graph.history.groups.flatMap((item) => item.nodes).map((node) => [node.nodeId, node]),
+  )
+  const summary = (nodeId) => nodesById.get(nodeId).summary
+
+  assert.deepEqual(
+    group('执行轮次').nodes.map((node) => node.summary.roleLabel),
+    ['执行轮次', '子任务执行', '子任务执行'],
+  )
+  assert.deepEqual(
+    group('恢复分段').nodes.map((node) => node.summary.roleLabel),
+    ['恢复分段', '子任务复核'],
+  )
+  assert.deepEqual(
+    group('未归组记录').nodes.map((node) => node.nodeId),
+    ['orphan-1'],
+  )
+  assert.equal(summary('turn-active').stateLabel, '业务已收拢')
+  assert.equal(summary('turn-active').resultSummary, '主任务已交付')
+  assert.equal(summary('turn-active').nextActionLabel, '等待用户确认')
+  assert.equal(summary('child-a').stateLabel, '已完成')
+  assert.equal(summary('child-a').adoptionLabel, '结果已采用')
+  assert.equal(summary('child-a').resultSummary, '子任务结果已返回')
+
+  // The business closure must not close the physical segment, and an
+  // unacquired or orphan record must not read as success.
+  assert.equal(summary('segment-2').stateLabel, '进行中')
+  assert.equal(summary('segment-2').stateTone, 'active')
+  assert.equal(summary('segment-2').reason, '尚未记录该分段的结束。')
+  assert.equal(summary('child-c').stateLabel, '未取得执行实例')
+  assert.equal(summary('child-c').stateTone, 'warning')
+  assert.equal(summary('child-c').reason, '该调用暂未取得执行实例。')
+  assert.equal(summary('child-b').stateLabel, '已派发，等待返回')
+  assert.equal(summary('child-b').adoptionLabel, '采用决定尚未记录')
+  assert.equal(summary('orphan-1').stateLabel, '未关联到调用记录')
+  assert.equal(summary('orphan-1').stateTone, 'warning')
+  assert.equal(summary('review-1').stateLabel, '复核通过')
+  assert.equal(summary('review-1').resultSummary, '发现 1 项问题')
+  assert.equal(summary('planner-1').decisionLabel, '完成')
+
+  assert.equal(graph.history.edges[0].detail, '执行轮次包含恢复分段')
+  assert.equal(graph.history.ungrouped[0].label, '派发子任务关系未归组')
+  assert.equal(
+    graph.history.ungrouped[0].detail,
+    'relation-diagnostic:/runs/missing-child.json',
+  )
+  assert.equal(
+    graph.history.unavailable[0].detail,
+    'source-diagnostic:/runs/source-1.json',
+  )
+
+  // Raw identities stay out of the human summary but remain on the technical layer.
+  assert.equal(graph.history.groups[0].nodes[0].technical.nodeId, 'turn-active')
+  assert.equal(graph.history.groups[0].nodes[1].technical.invocationId, 'inv-a')
   assert.equal('plan' in graph, false)
+  assert.equal('planContext' in graph, false)
 })
 
-test('actual graph renderer keeps guidance separate and shows empty stages and repeated members', () => {
-  const graph = projectTaskActualExecutionGraph(actualSource())
-  const section = renderTaskActualExecutionGraphSection(graph)
+test('actual graph renderer shows groups and hides ids, guidance, plan and detail separation', () => {
+  const graph = projectTaskActualExecutionGraph(nativeSource())
+  const opened = []
+  const section = renderTaskActualExecutionGraphSection(graph, {
+    onOpenDetail: (detail, button) => opened.push({ detail, button }),
+  })
   const text = allText(section)
   assert.equal(byData(section, 'taskFlowGuidance', 'skeleton').length, 1)
-  assert.equal(byData(section, 'actualStage', 'stage-parent').length, 1)
-  assert.equal(byData(section, 'actualStage', 'stage-empty').length, 1)
-  assert.equal(byData(section, 'actualInstance', 'member-a:1:1').length, 1)
-  assert.equal(byData(section, 'actualInstance', 'member-b:1:1').length, 1)
+  assert.equal(byData(section, 'actualExecutionGroup', 'turn-active').length, 1)
+  assert.equal(byData(section, 'actualExecutionGroup', 'group:ungrouped').length, 1)
+  assert.equal(walk(section).filter((entry) => entry.dataset?.actualExecutionNode).length, 9)
+  assert.equal(byData(section, 'actualExecutionUngrouped', 'recorded').length, 1)
+  assert.equal(byData(section, 'actualExecutionUnavailable', 'recorded').length, 1)
   assert.match(text, /处理方式：单次交付/)
-  assert.match(text, /上级阶段：阶段 1/)
-  assert.match(text, /此阶段已记录，尚无执行成员/)
-  assert.match(text, /成员一结果/)
-  assert.doesNotMatch(text, /尚未记录结果|成员一已完成|等待外部输入|下一步：继续|动态选择：|展示分组：/)
-  assert.doesNotMatch(text, /当前任务计划|Plan v2/)
-  assert.doesNotMatch(text, /stage-parent|member-a|member-b|owner-1|pipeline\.execute/)
+  assert.match(text, /已记录的实际执行/)
+  assert.match(text, /业务已收拢/)
+  assert.match(text, /主任务已交付/)
+  assert.match(text, /未取得执行实例/)
+  assert.match(text, /已派发，等待返回/)
+  assert.match(text, /未关联到调用记录/)
+  assert.match(text, /未归组记录/)
+  assert.match(text, /未归组的关系/)
+  assert.match(text, /部分执行来源不可用/)
+  assert.doesNotMatch(text, /当前任务计划|Plan v2|计划内容属于当前任务/)
+  assert.doesNotMatch(text, /diagnostic:|\/runs\/|turn-active|segment-2|child-a|child-b|child-c|orphan-1|inv-a|inv-b|commit-a|member-a|owner-1|pipeline\.execute|source-1/)
+
+  const detail = openActualDetail(section, opened)
+  assert.equal(detail['节点标识'], 'turn-active')
+  assert.equal(detail['记录类型'], 'active-turn')
+  assert.deepEqual(opened.length, 1)
+  const childTechnical = graph.history.groups
+    .flatMap((item) => item.nodes)
+    .find((node) => node.nodeId === 'child-c')
+    .technical
+  assert.equal(childTechnical.missingSource, 'source-diagnostic:/runs/child-c-source.json')
+  assert.match(childTechnical.message, /acquisition-diagnostic:\/runs\/child-c\.json/)
+  assert.match(childTechnical.message, /adoption-diagnostic:\/runs\/child-c-adoption\.json/)
+  const orphanDelivery = graph.history.groups
+    .flatMap((item) => item.nodes)
+    .find((node) => node.nodeId === 'orphan-1')
+  assert.match(orphanDelivery.technical.message, /invocation-not-recorded:\/runs\/orphan\.json/)
+
+  const relationDetail = openActualDetail(
+    byData(section, 'actualUngroupedNode', 'turn-active')[0],
+    opened,
+    '未归组关系详情',
+  )
+  const unavailableDetail = openActualDetail(
+    byData(section, 'actualUnavailableSource', 'source-1')[0],
+    opened,
+    '来源不可用详情',
+  )
+  assert.equal(relationDetail['节点标识'], 'turn-active')
+  assert.equal(relationDetail['原始原因'], 'relation-diagnostic:/runs/missing-child.json')
+  assert.equal(unavailableDetail['来源标识'], 'source-1')
+  assert.equal(unavailableDetail['原始信息'], 'source-diagnostic:/runs/source-1.json')
 })
 
 test('actual graph missing history stays explicit instead of becoming an empty graph', () => {
   const graph = projectTaskActualExecutionGraph({
     taskScope: actualTaskScope,
-    history: { status: 'not-recorded', reason: 'no-recorded-facts' },
+    history: {
+      status: 'not-recorded',
+      reason: 'no-recorded-facts',
+      unavailable: [{
+        sourceId: 'source-1',
+        ownerId: 'owner.runtime',
+        message: 'source-diagnostic:/runs/missing-history.json',
+      }],
+    },
   })
   const section = renderTaskActualExecutionGraphSection(graph)
   assert.equal(section.dataset.actualExecutionGraph, 'not-recorded')
   assert.equal(byData(section, 'actualExecutionHistory', 'not-recorded').length, 1)
   assert.match(allText(section), /暂无执行过程记录/)
   assert.match(allText(section), /这里仅展示已记录的执行过程/)
+  // The unavailable source stays explicit next to the missing-history copy.
+  assert.equal(byData(section, 'actualExecutionUnavailable', 'recorded').length, 1)
+  assert.match(allText(section), /部分执行来源不可用/)
+  assert.doesNotMatch(allText(section), /diagnostic:|\/runs\//)
+  assert.equal(
+    graph.history.unavailable[0].detail,
+    'source-diagnostic:/runs/missing-history.json',
+  )
 })
 
 test('current rejects an unknown or mismatched accepted identity instead of using the latest', () => {

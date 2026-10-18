@@ -52,17 +52,17 @@ import { RuntimeProjectionError } from '../contracts/runtime.js';
 
 export { projectTaskActualExecutionGraph } from './actual-execution-graph.js';
 export type {
+  TaskActualExecutionEdgeSummaryProjection,
   TaskActualExecutionGraphHistoryProjection,
   TaskActualExecutionGraphProjection,
+  TaskActualExecutionGroupProjection,
   TaskActualExecutionGuidanceProjection,
-  TaskActualExecutionMemberProjection,
-  TaskActualExecutionMemberTechnicalProjection,
-  TaskActualExecutionResultProjection,
-  TaskActualExecutionReviewProjection,
-  TaskActualExecutionStageParentProjection,
-  TaskActualExecutionStageProjection,
+  TaskActualExecutionNodeProjection,
+  TaskActualExecutionNodeSummaryProjection,
+  TaskActualExecutionNodeTechnicalProjection,
   TaskActualExecutionStateTone,
-  TaskActualExecutionStreamProjection,
+  TaskActualExecutionUngroupedProjection,
+  TaskActualExecutionUnavailableProjection,
 } from '../contracts/actual-execution-graph.js';
 
 export type {
