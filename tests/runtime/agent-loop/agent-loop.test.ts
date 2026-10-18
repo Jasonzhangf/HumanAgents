@@ -2211,3 +2211,106 @@ test('inspection stop completion query precedes recovery and reuses its exact se
   assert.equal(missing.state, 'recovery-required');
   assert.equal(writes, writesAfterAction);
 });
+
+test('inspection stop completion compares reordered full item evidence and rejects value drift', async () => {
+  // Failure basis: durable items and exact capture records can encode the same binding and delivery with different
+  // object key order. Impact: a fresh reader reports recovery-required or blocked for a settled stop.
+  // Probability: proven by the opened stop fixture. Cost: one existing Runtime helper consumer.
+  const f = inspectionHelperConsumer();
+  const helpers = f.helpers();
+  const context = await helpers.selectionReader.readSelectionContext('inspection-turn');
+  const inspection = await helpers.occurrenceOpening.open({ context, logicalTurnId: 'inspection-turn', executionScope: scope,
+    assignment: f.assignment, checkId: 'a' });
+  const invocation: ChildInvocationRecord = { invocationId: 'inspection-stop-order-child',
+    childTurnId: 'inspection-stop-order-child-turn', checkpointReceiptRef: 'child-checkpoint',
+    binding: { kind: 'execution', assignment: f.assignment, inspection } };
+  const delivery: AcceptedExecutionChildDelivery = { kind: 'execution', seq: 1, invocationId: invocation.invocationId,
+    assignment: f.assignment, refinedDelivery: f.raw,
+    result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child',
+      assignmentId: f.assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
+      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: 'observed a',
+      outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
+    inspectionDelivery: { checkId: 'a', resultId: `inspection-result:${invocation.invocationId}`, attempt: 1,
+      outcome: { status: 'completed', judgment: 'a observed before stop' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
+  f.setCapture({ ...f.capture(), childInvocations: [invocation], entries: [delivery] });
+  const checkpoint: CommittedCheckpointFixture = { checkpoint: { id: id('checkpoint', 'stop-completion-order'), scope,
+    cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1, executionEpoch: 1,
+    outcome: 'stopped', summary: 'stop inspection', recoveryStateRef: f.raw.ref, evidenceRefs: [], next: { kind: 'stop' } },
+    previous: null, commitRef: { commitId: 'checkpoint:stop-completion-order', journalSeq: 9,
+      recordDigest: digest('checkpoint-stop-completion-order') } };
+  const receipt = { commitIdentity: 'committed:stop-completion-order', journalReceiptRef: 'journal:stop-completion-order',
+    commitFactDigest: 'fact:stop-completion-order', journalSeq: 2, recordDigest: 'record:stop-completion-order',
+    turnId: 'inspection-turn', boundaryId: 'boundary', capture: f.raw };
+  const readback = { receipt, prepared: { body: f.capture(), controlRecordCount: 0, producerDrains: [], completionLookups: [],
+    recovery: { recoveryResponsibilityRef: 'recovery', unresolvedOperationRefs: [], rawTurnRefs: [], laterErrorRefs: [],
+      commitIdentity: 'save', stages: [], durablePhases: [], durableReceiptRefs: [] } } };
+  f.stop(checkpoint, { turn: context.turn, boundaryId: 'boundary', recoveryAssetsReceiptRef: 'committed:stop-completion-order',
+    assets: {
+      readRecoveryAssetsExact: async () => readback,
+      readBoundaryRecoveryAssetsExact: async () => ({ version: 1, assets: readback }),
+    },
+    segments: {
+      readInitialOpenExact: async () => { throw new Error('unexpected initial-open'); },
+      readSegmentInterruptedExact: async () => { throw new Error('unexpected interrupted'); },
+    } });
+  const boundary = new InspectionTurnBoundary({
+    selectionReader: helpers.selectionReader,
+    journal: f.dependencies.journal,
+    occurrenceOpening: helpers.occurrenceOpening,
+    acceptedDeliveryReader: helpers.acceptedDeliveryReader,
+    acceptedDelivery: helpers.acceptedDelivery,
+    occurrences: helpers.occurrences,
+    checkpoints: {
+      readCommitted: async () => checkpoint,
+      readCheckpointRecoveryBinding: async () => null,
+      readNativeCheckpoint: async () => checkpointRelationship(checkpoint, f.time),
+    },
+    clock: { now: () => new Date(f.time) },
+  });
+  const port = createRuntimeInspectionStopSettlementPort({ boundary, occurrences: helpers.occurrences });
+  const action = await port.settleStop({ checkpoint });
+  assert.equal(action.state, 'complete');
+  const settlement = f.entries.find(({ record }) => record.kind === 'inspection-occurrence-settled');
+  const cycleClose = f.entries.find(({ record }) => record.kind === 'business-cycle-closed');
+  if (!settlement || !cycleClose) throw new Error('the stop fixture has no settlement and cycle close');
+  assert.deepEqual(action, { state: 'complete', settlementCommitRefs: [settlement.commitRef],
+    cycleClosedCommitRef: cycleClose.commitRef });
+  const writes = f.entries.length;
+  const item = f.entries.find(({ record }) => record.kind === 'inspection-item-result');
+  if (!item || item.record.kind !== 'inspection-item-result') throw new Error('the stop fixture has no item result');
+  const reverseObjectKeys = <T extends object>(value: T): T => Object.fromEntries(
+    Object.entries(value).reverse()) as T;
+  const reordered = {
+    ...item,
+    record: {
+      ...item.record,
+      binding: reverseObjectKeys(item.record.binding),
+      delivery: reverseObjectKeys(item.record.delivery),
+    },
+  };
+  const itemIndex = f.entries.indexOf(item);
+  f.entries[itemIndex] = reordered;
+
+  assert.deepEqual(await port.readStopCompletion({ checkpoint }), action);
+  assert.equal(f.entries.length, writes);
+
+  f.entries[itemIndex] = {
+    ...reordered,
+    record: { ...reordered.record, binding: { ...reordered.record.binding, executionEpoch: 2 } },
+  };
+  await assert.rejects(() => port.readStopCompletion({ checkpoint }),
+    /inspection item result does not match its accepted delivery/);
+  f.entries[itemIndex] = {
+    ...reordered,
+    record: {
+      ...reordered.record,
+      delivery: {
+        ...reordered.record.delivery,
+        outcome: { status: 'completed', judgment: 'changed judgment' },
+      },
+    },
+  };
+  await assert.rejects(() => port.readStopCompletion({ checkpoint }),
+    /inspection item result does not match its accepted delivery/);
+  assert.equal(f.entries.length, writes);
+});

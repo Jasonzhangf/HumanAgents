@@ -5,6 +5,7 @@ import type {
   JournalCommitRef,
   NextAction,
 } from '../../../contracts/src/index.js';
+import { canonicalJsonStringify } from '../../../contracts/src/index.js';
 import type { CommittedCheckpointRecord } from '../checkpoints/ports.js';
 import type {
   RuntimeInspectionStopCompletion,
@@ -144,8 +145,8 @@ function matchingItemRef(
     throw new AgentLoopRuntimeError('conflict', 'inspection stop completion has duplicate item results');
   }
   const item = matches[0]!;
-  if (JSON.stringify(item.record.binding) !== JSON.stringify(pending.invocation.binding.inspection.binding)
-    || JSON.stringify(item.record.delivery) !== JSON.stringify(delivery)) {
+  if (canonicalJsonStringify(item.record.binding) !== canonicalJsonStringify(pending.invocation.binding.inspection.binding)
+    || canonicalJsonStringify(item.record.delivery) !== canonicalJsonStringify(delivery)) {
     throw new AgentLoopRuntimeError('conflict', 'inspection item result does not match its accepted delivery');
   }
   return item.commitRef;
