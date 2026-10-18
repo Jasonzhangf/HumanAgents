@@ -30,6 +30,7 @@
     "envelopeGating": "已安装 grammar 只有无条件边，执行器按波次调度全部节点。typed prerequisite/error envelope 承载条件：节点只在其入边声明精确前置成功后执行副作用，否则输出 not-executed 并保留原首错/恢复 ref；链条仍到达唯一输出节点。",
     "resumeNotSaveGate": "恢复不以本 segment 的 v2 capture 或 producer drain 为前置；save/drain 由真实保存边界负责，不在本图内。",
     "threeCommits": "grant commit、business registration commit、segment commit 职责分离：节点 2 在同一 held 事务产出 grant commit 与 business registration commit；节点 3 的 append 产出独立 segment commit。",
+    "dispatchBoundary": "hydrate 与 GET 只恢复事实，普通 dispatch 不获得执行许可。",
     "noFixedPipeline": "本图不写 observation/plan/execute/review 固定角色流水线，无重复/回退边；下一次恢复是本图的新执行，而非图内环。",
     "revokeOrder": "reservation 前撤权零副作用；reservation 后撤权允许完成本次已登记 segment，但新 request/child/effect 仍按当前 grant 逐次准入。",
     "statusBoundary": "本图只表达目标合同与责任名称；不证明 Operator 已注册、runtime 已执行或产品已验收。",

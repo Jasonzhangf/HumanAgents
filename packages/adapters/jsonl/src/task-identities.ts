@@ -67,6 +67,13 @@ function typedReplay(records: readonly JournalRecord[]): TaskIdentityRecord[] {
   return identities;
 }
 
+/** Pure typed replay over already verified Organ Journal records. */
+export function decodeTaskIdentityRecords(
+  records: readonly JournalRecord[],
+): readonly TaskIdentityRecord[] {
+  return typedReplay(records);
+}
+
 /** Typed append/replay surface over the existing authoritative Organ Journal. */
 export class JsonlTaskIdentityJournal {
   constructor(private readonly journal: JsonlOrganJournal) {}

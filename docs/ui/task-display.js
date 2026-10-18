@@ -592,6 +592,240 @@ function renderPlanFailure(failure, prefix, options = {}) {
   return box
 }
 
+function actualGraphDetail(summary, entries, options = {}) {
+  if (typeof options.onOpenDetail !== 'function') return null
+  const button = element('button', '查看记录详情', 'button button--quiet plan-detail')
+  button.type = 'button'
+  button.dataset.actualGraphDetail = summary
+  button.addEventListener('click', () => options.onOpenDetail({ title: summary, entries }, button))
+  return button
+}
+
+function actualNodeDetailEntries(technical) {
+  const entries = [
+    ['节点标识', technical.nodeId],
+    ['记录类型', technical.nodeKind],
+    ['任务标识', technical.taskIdValue],
+    ['分配标识', technical.assignmentId],
+    ...(technical.instance === undefined ? [] : [['执行实例', JSON.stringify(technical.instance)]]),
+    ...(technical.executionEpoch === undefined ? [] : [['执行轮次序号', String(technical.executionEpoch)]]),
+    ...(technical.businessTurnId === undefined ? [] : [['业务轮次标识', technical.businessTurnId]]),
+    ...(technical.segmentId === undefined ? [] : [['分段标识', technical.segmentId]]),
+    ...(technical.pipelineNodeId === undefined ? [] : [['流程节点', technical.pipelineNodeId]]),
+    ...(technical.invocationId === undefined ? [] : [['调用标识', technical.invocationId]]),
+    ...(technical.childTurnId === undefined ? [] : [['子任务轮次标识', technical.childTurnId]]),
+    ...(technical.checkpointReceiptRef === undefined ? [] : [['检查点接收引用', technical.checkpointReceiptRef]]),
+    ...(technical.containingLocationKind === undefined ? [] : [['所在位置', technical.containingLocationKind]]),
+    ...(technical.containingLocationBusinessTurnId === undefined ? [] : [['所在业务轮次', technical.containingLocationBusinessTurnId]]),
+    ...(technical.containingLocationSegmentId === undefined ? [] : [['所在分段', technical.containingLocationSegmentId]]),
+    ['提交引用', JSON.stringify(technical.commitRefs ?? [])],
+    ['证据引用', JSON.stringify(technical.evidenceRefs ?? [])],
+  ]
+  if (technical.missingSource !== undefined) entries.push(['缺失来源', technical.missingSource])
+  if (technical.message !== undefined) entries.push(['原始记录', technical.message])
+  return entries
+}
+
+function renderActualNode(node, options) {
+  const item = element('li', undefined, 'actual-execution-node')
+  item.dataset.actualExecutionNode = node.nodeId
+  item.dataset.actualNodeKind = node.kind
+  item.dataset.actualNodeStateTone = node.summary.stateTone
+  const head = element('header', undefined, 'plan-revision-head')
+  head.append(
+    element('strong', node.summary.roleLabel, 'plan-node-title'),
+    element('span', node.summary.stateLabel, 'plan-tag'),
+  )
+  item.append(head)
+  if (node.summary.objective) {
+    item.append(element('p', node.summary.objective, 'business-output-text actual-execution-objective'))
+  }
+  const outcome = node.summary.outcomeLabel
+  const resultSummary = node.summary.resultSummary
+  if (outcome && resultSummary) {
+    item.append(element('p', `结果（${outcome}）：${resultSummary}`, 'actual-execution-result'))
+  } else if (outcome) {
+    item.append(element('p', `结论：${outcome}`, 'actual-execution-result'))
+  } else if (resultSummary) {
+    item.append(element('p', `结果：${resultSummary}`, 'actual-execution-result'))
+  }
+  if (node.summary.adoptionLabel) {
+    item.append(element('p', `采用情况：${node.summary.adoptionLabel}`, 'muted actual-execution-adoption'))
+  }
+  if (node.summary.decisionLabel) {
+    item.append(element('p', `判定：${node.summary.decisionLabel}`, 'muted actual-execution-decision'))
+  }
+  if (node.summary.nextActionLabel) {
+    item.append(element('p', `下一步：${node.summary.nextActionLabel}`, 'muted actual-execution-next'))
+  }
+  if (node.summary.reason) {
+    item.append(element('p', `说明：${node.summary.reason}`, 'muted actual-execution-reason'))
+  }
+  const detail = actualGraphDetail('执行记录详情', actualNodeDetailEntries(node.technical), options)
+  if (detail) item.append(detail)
+  return item
+}
+
+function renderActualGroup(group, options) {
+  const article = element('section', undefined, 'plan-phase actual-execution-group')
+  article.dataset.actualExecutionGroup = group.groupId
+  article.append(
+    element('h4', group.label),
+    element('p', group.purpose, 'muted actual-execution-group-purpose'),
+  )
+  const list = element('ol', undefined, 'plan-node-list actual-execution-nodes')
+  for (const node of group.nodes) list.append(renderActualNode(node, options))
+  if (group.nodes.length === 0) {
+    list.append(element('li', '这个分组尚无已记录的执行记录。', 'empty actual-execution-empty-group'))
+  }
+  article.append(list)
+  return article
+}
+
+function renderActualEdges(edges) {
+  if (!Array.isArray(edges) || edges.length === 0) return null
+  const section = element('section', undefined, 'actual-execution-edges-section')
+  section.dataset.actualExecutionEdges = 'recorded'
+  section.append(element('h4', '已记录的执行关系'))
+  const list = element('ul', undefined, 'actual-execution-edges')
+  for (const edge of edges) {
+    const item = element('li', undefined, 'actual-execution-edge')
+    item.dataset.actualExecutionEdgeKind = edge.kind
+    item.append(element('span', edge.detail, 'actual-execution-edge-text'))
+    list.append(item)
+  }
+  section.append(list)
+  return section
+}
+
+function renderActualUngrouped(relations, options) {
+  if (!Array.isArray(relations) || relations.length === 0) return null
+  const section = element('section', undefined, 'actual-execution-ungrouped-section')
+  section.dataset.actualExecutionUngrouped = 'recorded'
+  section.append(element('h4', '未归组的关系'))
+  const list = element('ul', undefined, 'actual-execution-ungrouped')
+  for (const relation of relations) {
+    const item = element('li', undefined, 'actual-execution-ungrouped-item')
+    item.dataset.actualUngroupedNode = relation.nodeId
+    item.append(
+      element('span', relation.label, 'actual-execution-ungrouped-label'),
+      element(
+        'span',
+        '关联目标未出现在已记录的执行节点中，原始原因可在任务详情中查看。',
+        'muted actual-execution-ungrouped-detail',
+      ),
+    )
+    const detail = actualGraphDetail('未归组关系详情', [
+      ['节点标识', relation.nodeId],
+      ['原始原因', relation.detail],
+    ], options)
+    if (detail) item.append(detail)
+    list.append(item)
+  }
+  section.append(list)
+  return section
+}
+
+function renderActualUnavailable(sources, options) {
+  if (!Array.isArray(sources) || sources.length === 0) return null
+  const section = element('section', undefined, 'actual-execution-unavailable-section')
+  section.dataset.actualExecutionUnavailable = 'recorded'
+  section.append(element('h4', '部分执行来源不可用'))
+  const list = element('ul', undefined, 'actual-execution-unavailable')
+  for (const source of sources) {
+    const item = element('li', undefined, 'actual-execution-unavailable-item')
+    item.dataset.actualUnavailableSource = source.sourceId
+    item.append(
+      element('span', source.label, 'actual-execution-unavailable-label'),
+      element(
+        'span',
+        '部分执行来源记录暂时无法读取，原始信息可在任务详情中查看。',
+        'muted actual-execution-unavailable-detail',
+      ),
+    )
+    const detail = actualGraphDetail('来源不可用详情', [
+      ['来源标识', source.sourceId],
+      ['原始信息', source.detail],
+    ], options)
+    if (detail) item.append(detail)
+    list.append(item)
+  }
+  section.append(list)
+  return section
+}
+
+/**
+ * Read-only shared renderer for the actual execution graph carrier.
+ *
+ * Guidance, recorded groups, nodes and relations come from the UI projection.
+ * This function never reads a plan, registry, Journal or control surface and
+ * never derives a node state from neighbours. Raw IDs stay behind the optional
+ * existing technical-detail callback.
+ */
+export function renderTaskActualExecutionGraphSection(graph, options = {}) {
+  const section = element('section', undefined, 'section actual-execution-graph-section')
+  section.dataset.actualExecutionGraph = graph?.history?.status || 'missing'
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '任务处理方式与实际执行'),
+    element('span', '只读记录', 'section-meta'),
+  )
+  section.append(head)
+
+  if (!graph || graph.surface !== 'task-actual-execution-graph') {
+    section.append(element('p', '本次读取没有提供实际执行图记录。', 'empty actual-execution-graph-missing'))
+    return section
+  }
+
+  if (graph.guidance) {
+    const guidance = element('section', undefined, 'task-flow-guidance')
+    guidance.dataset.taskFlowGuidance = 'skeleton'
+    guidance.dataset.taskFlowKind = graph.guidance.kind
+    const guidanceDetail = actualGraphDetail('处理方式详情', [
+      ['kind', graph.guidance.kind],
+      ['aim', graph.guidance.aim],
+      ['selectionGuidance', graph.guidance.selectionGuidance],
+      ['displayGroups', JSON.stringify(graph.guidance.displayGroups)],
+    ], options)
+    guidance.append(
+      element('h3', `处理方式：${graph.guidance.kindLabel}`),
+      element('p', graph.guidance.aim, 'business-output-text'),
+    )
+    if (guidanceDetail) guidance.append(guidanceDetail)
+    section.append(guidance)
+  }
+
+  const history = graph.history
+  if (history.status === 'not-recorded') {
+    const missing = element('section', undefined, 'actual-execution-history-missing')
+    missing.dataset.actualExecutionHistory = 'not-recorded'
+    missing.append(
+      element('h3', history.label),
+      element('p', history.detail, 'muted'),
+    )
+    section.append(missing)
+    const unavailable = renderActualUnavailable(history.unavailable, options)
+    if (unavailable) section.append(unavailable)
+    return section
+  }
+
+  const recorded = element('section', undefined, 'actual-execution-history')
+  recorded.dataset.actualExecutionHistory = 'recorded'
+  recorded.append(
+    element('h3', '已记录的实际执行'),
+    element('p', history.summary, 'muted actual-execution-summary'),
+  )
+  for (const group of history.groups) recorded.append(renderActualGroup(group, options))
+  const edges = renderActualEdges(history.edges)
+  if (edges) recorded.append(edges)
+  const ungrouped = renderActualUngrouped(history.ungrouped, options)
+  if (ungrouped) recorded.append(ungrouped)
+  const unavailable = renderActualUnavailable(history.unavailable, options)
+  if (unavailable) recorded.append(unavailable)
+  section.append(recorded)
+  return section
+}
+
 function renderPlanNode(node, options) {
   const item = element('li', undefined, 'plan-node')
   item.dataset.planNode = node.nodeId

@@ -1,6 +1,8 @@
 export type ScopeKind = 'organ' | 'task' | 'cycle' | 'operation' | 'checkpoint' | 'evidence';
 
 export * from './hand-services.js';
+export * from './assignment-graph.js';
+export * from './actual-execution-graph.js';
 export * from './web-search.js';
 export * from './interaction-helper.js';
 export * from './task-flow.js';

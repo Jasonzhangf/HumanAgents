@@ -53,10 +53,7 @@ export type TaskExecutionPreparationInput = {
     | 'createDriver'
     | 'currentStatePort'
     | 'currentStateFacts'
-    | 'createTaskAssembly'
-  > & {
-    readonly createTaskAssembly: NonNullable<CoordinatorInput['createTaskAssembly']>;
-  };
+  >;
 };
 
 /** Bind production owners once; execution stays behind the original release edge. */

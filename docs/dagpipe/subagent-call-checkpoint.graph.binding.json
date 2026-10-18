@@ -4,15 +4,16 @@
     "operator": "humanagent-subagent-call-checkpoint",
     "operator_version": "1"
   },
-  "status": "DESIGN-UNVERIFIED",
+  "status": "DESIGN-APPROVED-P1-CONTRACT-UNVERIFIED",
   "nodes": {
     "assignment": {
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "普通 execution/review 明确角色任务；只有 execution 显式 check 时，Runtime 才选择正式 definition 并按需打开同一 logical turn 的 occurrence。contracts 仅提供类型，不拥有 open occurrence 副作用。",
-      "typeOwnerPath": "packages/contracts/src/native-reasoning.ts",
-      "typeOwnerRel": "packages/contracts/src/native-reasoning.ts",
+      "designNote": "原生 callChild 消费已登记的执行或复核绑定，不创建经典 stage。只有执行任务显式要求检查时，Runtime 才选择正式检查定义并按需打开同一业务轮次的 occurrence。经典 dispatch 的内存图不构成本节点的通用前置。",
+      "ownerSymbol": "OrchestrationManager.callChild / registered child binding",
+      "typeOwnerPath": "packages/contracts/src/active-turn-context.ts",
+      "typeOwnerRel": "packages/contracts/src/active-turn-context.ts",
       "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
       "coordinationStatus": "planned/unimplemented"
     },
@@ -38,7 +39,7 @@
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "接纳 durable child return；显式 check 时再由 Runtime 幂等补 I2 receipt，无检查 occurrence 的普通任务不创建 I2 记录。恢复只补缺失提交，不重启 child；缺少 durable return 或提交失败时保留恢复责任并显式失败，不以完整正文代替。",
+      "designNote": "原生调用通过 childCallPort 保存持久返回，父轮次另行决定是否接纳；里程碑复核和显式检查沿各自 owner 提交结果。恢复不重复已完成的 child，缺少持久返回时保留恢复责任；经典 dispatch 的内存图不能替代这些记录。",
       "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
       "coordinationStatus": "planned/unimplemented",
       "appWiringOnly": "packages/app"

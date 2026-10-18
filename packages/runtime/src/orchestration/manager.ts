@@ -190,6 +190,18 @@ function scopedEvidenceRefs(scope: ScopeRef, refs: readonly EvidenceRef[]): read
   return uniqueEvidenceRefs(refs.map((ref) => (scopeContains(scope, ref.scope) ? ref : { ...ref, scope })));
 }
 
+function withLeaseCleanupIssue(
+  primary: OrchestrationIssue | undefined,
+  cleanup: OrchestrationIssue,
+): OrchestrationIssue {
+  if (!primary) return cleanup;
+  return {
+    ...primary,
+    reason: `${primary.reason}; lease cleanup failed: ${cleanup.reason}`,
+    evidenceRefs: uniqueEvidenceRefs([...primary.evidenceRefs, ...cleanup.evidenceRefs]),
+  };
+}
+
 function leaseBinding(lease: RuntimePoolLease) {
   return {
     runtimeId: lease.runtimeId,
@@ -629,7 +641,7 @@ export class OrchestrationManager {
     if (this.inFlightDispatches.has(key)) {
       return { result: this.progressResult(planned) };
     }
-    if (planned.status === 'running' && planned.result) {
+    if (planned.status === 'running') {
       return { result: this.progressResult(planned) };
     }
     if (
@@ -751,38 +763,73 @@ export class OrchestrationManager {
     }
     const lease = acquired.lease;
     let result: OrchestrationDispatchResult | undefined;
+    let primaryFailure: unknown;
     try {
       result = await this.executeWithLease(input, lease, acquired.handle);
     } catch (error) {
-      const unexpected = issueFromUnknown(error, {
-        code: 'orchestration-dispatch-failed',
-        ownerId: this.ownerId,
-        scope: input.scope,
-        conditionRef: 'orchestration.dispatch',
-      });
-      result = this.blockedResult(planned, unexpected, input.scope);
-    } finally {
-      const released = await this.runtimePool.release(lease, { scope: input.scope });
-      if (released.status === 'blocked') {
-        const current = this.graph.get(input.assignment);
-        const blocked = current && current.status !== 'succeeded' && current.status !== 'merged'
-          ? this.graph.markBlocked(
-              input.assignment,
-              released.issue.reason,
-              released.issue.nextAction,
-              released.issue.evidenceRefs,
-            )
-          : current ?? planned;
-        result = {
-          status: blocked.status,
-          assignment: blocked,
-          ...(blocked.status === 'succeeded' || blocked.status === 'merged'
-            ? {}
-            : { issue: released.issue }),
-          reviewResults: blocked.reviewResults,
-        };
+      primaryFailure = error;
+      try {
+        const unexpected = issueFromUnknown(error, {
+          code: 'orchestration-dispatch-failed',
+          ownerId: this.ownerId,
+          scope: input.scope,
+          conditionRef: 'orchestration.dispatch',
+        });
+        result = this.blockedResult(planned, unexpected, input.scope);
+        primaryFailure = undefined;
+      } catch (blockedFailure) {
+        primaryFailure = blockedFailure;
       }
     }
+    let releaseIssue: OrchestrationIssue | undefined;
+    try {
+      const released = await this.runtimePool.release(lease, { scope: input.scope });
+      if (released.status === 'blocked') releaseIssue = released.issue;
+    } catch (cleanupFailure) {
+      if (primaryFailure) {
+        throw new AggregateError(
+          [primaryFailure, cleanupFailure],
+          'orchestration dispatch failed and lease release also failed',
+        );
+      }
+      throw cleanupFailure;
+    }
+    if (releaseIssue) {
+      if (!result) {
+        if (primaryFailure) {
+          throw new AggregateError(
+            [primaryFailure, releaseIssue],
+            'orchestration dispatch failed and lease release also failed',
+          );
+        }
+        throw new OrchestrationError(releaseIssue.reason, releaseIssue);
+      }
+      const current = this.graph.get(input.assignment);
+      let blocked = current ?? planned;
+      if (blocked.status !== 'succeeded' && blocked.status !== 'merged') {
+        try {
+          blocked = this.graph.markBlocked(
+            input.assignment,
+            releaseIssue.reason,
+            releaseIssue.nextAction,
+            releaseIssue.evidenceRefs,
+          );
+        } catch (blockedFailure) {
+          throw new AggregateError(
+            [primaryFailure ?? result.issue, releaseIssue, blockedFailure],
+            'orchestration dispatch and lease cleanup failed while recording the blocked state',
+          );
+        }
+      }
+      result = {
+        ...result,
+        status: blocked.status,
+        assignment: blocked,
+        issue: withLeaseCleanupIssue(result.issue, releaseIssue),
+        reviewResults: blocked.reviewResults,
+      };
+    }
+    if (primaryFailure) throw primaryFailure;
     if (!result) throw new OrchestrationError('orchestration dispatch produced no result', {
       ownerId: this.ownerId,
       reason: 'orchestration.dispatch.no-result',
@@ -1807,14 +1854,13 @@ export class OrchestrationManager {
     rejection: Extract<AssignmentResultAcceptance, { readonly accepted: false }>,
   ): OrchestrationDispatchResult {
     const record = this.graph.get(input.assignment);
-    const blocked = record
-      ? this.graph.markBlocked(
-          input.assignment,
-          rejection.reason,
-          rejection.nextAction,
-          rejection.evidenceRefs,
-        )
-      : this.graph.createAssignment(input.stageNodeId, input.assignment);
+    const created = record ?? this.graph.createAssignment(input.stageNodeId, input.assignment);
+    const blocked = this.graph.markBlocked(
+      created.assignment,
+      rejection.reason,
+      rejection.nextAction,
+      rejection.evidenceRefs,
+    );
     return {
       status: 'blocked',
       assignment: blocked,

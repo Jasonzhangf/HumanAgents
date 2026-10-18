@@ -16,6 +16,7 @@ import type { CanonicalContextEvent } from '../../context-events/src/index.js';
 import type { TaskDetailProjection } from './models.js';
 import type { RuntimeTaskPlanHistoryProjection } from './task-plan-history.js';
 import type { RuntimeCheckpointFilter } from './checkpoint-history.js';
+import type { TaskActualExecutionGraphProjection } from './actual-execution-graph.js';
 export type { RuntimeCheckpointFilter } from './checkpoint-history.js';
 
 export type { TaskDetailProjection };
@@ -580,6 +581,12 @@ export interface RuntimeAgentActivityProjection {
   readonly historical: readonly RuntimeAgentActivityEntryProjection[];
   readonly unknown: readonly RuntimeAgentActivityEntryProjection[];
   readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
+  /**
+   * App-owned read-only attachment on a successful activity value. The app
+   * projects the P1 source snapshot through the UI helper; this field never
+   * creates, replays or mutates execution state in the browser.
+   */
+  readonly actualExecutionGraph?: TaskActualExecutionGraphProjection;
 }
 
 export interface RuntimeContextViewProjection {

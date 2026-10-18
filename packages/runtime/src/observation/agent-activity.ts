@@ -8,12 +8,21 @@ import {
   validateTurnClosureReference,
 } from '../../../contracts/src/index.js';
 import type {
+  AcceptedChildDelivery,
   ActiveTurnBinding,
+  ChildCallKind,
   ChildInvocationRecord,
   EvidenceRef,
   JournalCommitRef,
   MilestoneReviewResultRecord,
   ReviewAssignment,
+  ScopeRef,
+  TaskActualExecutionBusinessClosure,
+  TaskActualExecutionContainingLocation,
+  TaskActualExecutionGraphEdge,
+  TaskActualExecutionGraphNode,
+  TaskActualExecutionGraphSnapshot,
+  TaskActualExecutionGraphUngroupedRelation,
   TaskAgentActivityOwnershipRecord,
   TaskAgentActivitySelectionFailure,
   TaskAgentActivitySelectionOutcome,
@@ -21,7 +30,9 @@ import type {
   TaskAgentActivitySourceKind,
   TaskAgentActivityUnavailableSource,
   TaskExecutionInstanceIdentity,
+  TaskFlowGuidance,
   TaskId,
+  TaskIdentityScope,
   TaskRuntimeIncarnation,
   TurnClosureReference,
   WorkAssignment,
@@ -106,6 +117,20 @@ export interface AgentActivityPoolSource extends AgentActivitySourceEvidence {
   readonly objective: WorkAssignment['objective'];
 }
 
+export interface AgentActivityGraphChildInvocationSource extends AgentActivitySourceEvidence {
+  readonly record: ChildInvocationRecord;
+  readonly commitRef: JournalCommitRef;
+  readonly containingLocation: TaskActualExecutionContainingLocation;
+  readonly objective?: WorkAssignment['objective'];
+  readonly parentLocation?: AgentActivityCurrentLocation;
+}
+
+export interface AgentActivityGraphChildDeliverySource extends AgentActivitySourceEvidence {
+  readonly delivery: AcceptedChildDelivery;
+  readonly commitRef: JournalCommitRef;
+  readonly containingLocation?: TaskActualExecutionContainingLocation;
+}
+
 export interface AgentActivityReviewSource extends AgentActivitySourceEvidence {
   readonly record: MilestoneReviewResultRecord;
   readonly commitRef: JournalCommitRef;
@@ -141,6 +166,24 @@ export interface SelectTaskAgentActivityInput {
   readonly runtimePoolLeases: readonly AgentActivityPoolSource[];
   readonly milestoneReviews: readonly AgentActivityReviewSource[];
   readonly plannerCalls?: readonly AgentActivityPlannerSource[];
+  readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
+}
+
+export interface SelectTaskActualExecutionGraphInput {
+  readonly taskScope: TaskIdentityScope;
+  readonly guidance?: TaskFlowGuidance;
+  readonly nativeAllocations: readonly AgentActivityNativeSource[];
+  readonly activeTurns: readonly AgentActivityActiveSource[];
+  readonly resumedSegments: readonly AgentActivityResumedSource[];
+  readonly rawChildInvocations: readonly AgentActivityGraphChildInvocationSource[];
+  readonly childDeliveries: readonly AgentActivityGraphChildDeliverySource[];
+  readonly businessClosures: readonly {
+    readonly closure: TurnClosureReference;
+    readonly commitRef: JournalCommitRef;
+  }[];
+  readonly milestoneReviews: readonly AgentActivityReviewSource[];
+  readonly plannerCalls: readonly AgentActivityPlannerSource[];
+  readonly currentAuthority?: AgentActivityCurrentAuthority;
   readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
 }
 
@@ -212,10 +255,12 @@ function recordMatchesLocation(
 }
 
 function classify(
-  base: RecordBase,
+  sourceKind: TaskAgentActivitySourceKind,
+  executionEpoch: number,
   boundLive: boolean | undefined,
   terminal: boolean,
   authority: AgentActivityCurrentAuthority | undefined,
+  matchesAuthorityLocation: (location: AgentActivityCurrentLocation) => boolean,
 ): { readonly currency: TaskAgentActivityOwnershipRecord['currency']; readonly missingSource?: string } {
   // A record whose epoch is older than the authoritative task epoch is history,
   // even if a live handle still exists. The identity keeps its own epoch.
@@ -223,9 +268,9 @@ function classify(
   // the resumed segment's physical epoch, so Task epoch supersession cannot
   // settle it. Planner finality requires a real returned stage commit below.
   if (
-    base.sourceKind !== 'closed-turn-planner-call'
+    sourceKind !== 'closed-turn-planner-call'
     && authority !== undefined
-    && authority.executionEpoch > base.executionEpoch
+    && authority.executionEpoch > executionEpoch
   ) {
     return { currency: 'historical' };
   }
@@ -234,7 +279,7 @@ function classify(
     if (authority === undefined) {
       return { currency: 'unknown', missingSource: 'current-authority' };
     }
-    if (authority.locations.some((location) => recordMatchesLocation(base, location))) {
+    if (authority.locations.some(matchesAuthorityLocation)) {
       return { currency: 'current' };
     }
     return { currency: 'unknown', missingSource: 'current-authority-location' };
@@ -251,7 +296,14 @@ function makeRecord(
   terminal: boolean,
   authority: AgentActivityCurrentAuthority | undefined,
 ): TaskAgentActivityOwnershipRecord {
-  const { currency, missingSource } = classify(base, boundLive, terminal, authority);
+  const { currency, missingSource } = classify(
+    base.sourceKind,
+    base.executionEpoch,
+    boundLive,
+    terminal,
+    authority,
+    (location) => recordMatchesLocation(base, location),
+  );
   const record: TaskAgentActivityOwnershipRecord = {
     ...base,
     currency,
@@ -842,6 +894,797 @@ export function selectTaskAgentActivity(
       historical,
       unknown,
       unavailableSources,
+    },
+  };
+}
+
+/**
+ * Runtime-owned pure selector for the actual execution graph. It consumes the
+ * same decoded native sources as activity selection plus the raw invocation and
+ * delivery facts, and it never reads stores or derives a relation the source
+ * does not prove.
+ */
+const ACTUAL_EXECUTION_GRAPH_OWNER_ID = 'runtime.observation.agent-activity';
+
+function requireRecord(result: BuildResult, label: string): TaskAgentActivityOwnershipRecord {
+  if (result.kind === 'record') return result.record;
+  if (result.kind === 'conflict') throw new Error(result.message);
+  if (result.kind === 'unavailable') throw new Error(result.source.message);
+  throw new Error(`${label} was not built`);
+}
+
+function sameScopeRef(left: ScopeRef, right: ScopeRef): boolean {
+  return left.organId.value === right.organId.value
+    && left.taskId?.value === right.taskId?.value
+    && left.cycleId?.value === right.cycleId?.value
+    && left.operationId?.value === right.operationId?.value;
+}
+
+function nodeCommon(
+  record: TaskAgentActivityOwnershipRecord,
+  nodeId: string,
+): {
+  readonly nodeId: string;
+  readonly taskId: TaskId;
+  readonly assignmentId: string;
+  readonly objective?: string;
+  readonly currency: TaskAgentActivityOwnershipRecord['currency'];
+  readonly missingSource?: string;
+  readonly commitRefs: readonly JournalCommitRef[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+} {
+  return {
+    nodeId,
+    taskId: record.taskId,
+    assignmentId: record.assignmentId,
+    ...(record.objective === undefined ? {} : { objective: record.objective }),
+    currency: record.currency,
+    ...(record.missingSource === undefined ? {} : { missingSource: record.missingSource }),
+    commitRefs: [...record.commitRefs],
+    evidenceRefs: [...record.evidenceRefs],
+  };
+}
+
+function nativeAllocationNodeId(
+  runtimeId: string,
+  executionEpoch: number,
+  assignmentId: string,
+  operationId: string,
+): string {
+  return `native-allocation:${runtimeId}:${executionEpoch}:${assignmentId}:${operationId}`;
+}
+
+function activeTurnNodeId(businessTurnId: string, bindingCommitRef: JournalCommitRef): string {
+  return `active-turn:${businessTurnId}:${bindingCommitRef.commitId}`;
+}
+
+function resumedSegmentNodeId(
+  businessTurnId: string,
+  segmentId: string,
+  openedCommitRef: JournalCommitRef,
+): string {
+  return `resumed-segment:${businessTurnId}:${segmentId}:${openedCommitRef.commitId}`;
+}
+
+/**
+ * Resolve the exact selected node a resumed segment precedes. The initial-open
+ * branch points at the original active turn, so it must match that node's real
+ * binding commit and a committed record of the node. The interrupted branch
+ * must match the predecessor segment's real opened commit, not its id alone.
+ * The captured branch keeps its existing receipt-free segment-id match.
+ */
+function resolvePredecessorNode(
+  predecessor: ResumedTurnSegmentOpened['predecessor'],
+  businessTurnId: string,
+  nodes: readonly TaskActualExecutionGraphNode[],
+): { readonly nodeId: string } | { readonly reason: string } {
+  if (predecessor.initialOpen !== undefined) {
+    const anchor = predecessor.initialOpen;
+    const active = nodes.find((node) =>
+      node.kind === 'active-turn'
+      && node.businessTurnId === businessTurnId
+      && sameJournalCommitRef(node.bindingCommitRef, anchor.bindingCommitRef)
+      && node.commitRefs.some((ref) => sameJournalCommitRef(ref, anchor.recordsThroughCommitRef)));
+    return active === undefined
+      ? { reason: 'the initial-open anchor has no exact original active-turn node' }
+      : { nodeId: active.nodeId };
+  }
+  if (predecessor.interrupted !== undefined) {
+    const anchor = predecessor.interrupted;
+    const interrupted = nodes.find((node) =>
+      node.kind === 'resumed-segment'
+      && node.businessTurnId === businessTurnId
+      && node.segmentId === predecessor.segmentId
+      && sameJournalCommitRef(node.openedCommitRef, anchor.openedCommitRef));
+    return interrupted === undefined
+      ? { reason: 'the interrupted predecessor anchor has no exact opened segment node' }
+      : { nodeId: interrupted.nodeId };
+  }
+  const captured = nodes.find((node) =>
+    node.kind === 'resumed-segment'
+    && node.businessTurnId === businessTurnId
+    && node.segmentId === predecessor.segmentId);
+  return captured === undefined
+    ? { reason: 'the exact predecessor segment has no selected graph node' }
+    : { nodeId: captured.nodeId };
+}
+
+function locationKey(location: TaskActualExecutionContainingLocation): string {
+  if (location.kind === 'active-turn') {
+    return `active-turn:${location.businessTurnId}:${location.bindingCommitRef.commitId}`;
+  }
+  return `resumed-segment:${location.businessTurnId}:${location.segmentId}:${location.openedCommitRef.commitId}`;
+}
+
+function childInvocationNodeId(
+  location: TaskActualExecutionContainingLocation,
+  callKind: ChildCallKind,
+  invocationId: string,
+): string {
+  return `child-invocation:${locationKey(location)}:${callKind}:${invocationId}`;
+}
+
+function orphanChildDeliveryNodeId(
+  containingCommitRef: JournalCommitRef,
+  deliverySeq: number,
+  invocationId: string,
+): string {
+  return `child-delivery:${containingCommitRef.commitId}:${deliverySeq}:${invocationId}`;
+}
+
+function milestoneReviewNodeId(reviewCommitRef: JournalCommitRef): string {
+  return `milestone-review:${reviewCommitRef.commitId}`;
+}
+
+function closedTurnPlannerNodeId(dutyKey: string, preparationCommitRef: JournalCommitRef): string {
+  return `closed-turn-planner-call:${dutyKey}:${preparationCommitRef.commitId}`;
+}
+
+interface GraphNodeLocation {
+  readonly nodeId: string;
+  readonly instance: TaskExecutionInstanceIdentity;
+  readonly assignmentId: string;
+  readonly businessTurnId?: string;
+  readonly segmentId?: string;
+  readonly pipelineNodeId?: string;
+  readonly containingLocation?: TaskActualExecutionContainingLocation;
+}
+
+function locationIndexMatches(
+  entry: GraphNodeLocation,
+  location: AgentActivityCurrentLocation,
+): boolean {
+  if (!sameTaskExecutionInstanceIdentity(entry.instance, location.instance)) return false;
+  if (entry.assignmentId !== location.assignmentId) return false;
+  if (location.businessTurnId !== undefined && entry.businessTurnId !== location.businessTurnId) return false;
+  if (location.segmentId !== undefined && entry.segmentId !== location.segmentId) return false;
+  if (location.nodeId !== undefined && entry.pipelineNodeId !== location.nodeId) return false;
+  return true;
+}
+
+function nodeIdForContainingLocation(
+  locations: readonly GraphNodeLocation[],
+  location: TaskActualExecutionContainingLocation,
+): string | undefined {
+  const key = locationKey(location);
+  return locations.find((entry) =>
+    entry.containingLocation !== undefined && locationKey(entry.containingLocation) === key)?.nodeId;
+}
+
+function admittedTurnMatchesClosure(binding: ActiveTurnBinding, closure: TurnClosureReference): boolean {
+  const identity = closure.identity;
+  const admitted = binding.admittedTurn;
+  return identity.turnId === admitted.turnId
+    && identity.workAssignmentRef === binding.assignment.assignmentId
+    && identity.taskRef.value === binding.assignment.taskId.value
+    && sameScopeRef(identity.scopeRef, binding.scope)
+    && identity.cycleRef.value === admitted.cycleRef.value
+    && identity.inputRevision === admitted.inputRevision
+    && identity.directiveRevision === admitted.directiveRevision
+    && identity.executionEpoch === binding.execution.executionEpoch
+    && identity.runtimeBindingRef === admitted.runtimeBindingRef
+    && identity.permissionRevision === admitted.permissionRevision;
+}
+
+function businessClosureFor(
+  binding: ActiveTurnBinding,
+  closures: SelectTaskActualExecutionGraphInput['businessClosures'],
+): TaskActualExecutionBusinessClosure {
+  const matching = closures.filter(({ closure }) => admittedTurnMatchesClosure(binding, closure));
+  if (matching.length === 1) {
+    return { status: 'recorded', closure: matching[0]!.closure, commitRef: matching[0]!.commitRef };
+  }
+  if (matching.length > 1) {
+    return {
+      status: 'unknown',
+      reason: 'multiple business closure records match this admitted turn',
+    };
+  }
+  return {
+    status: 'unknown',
+    reason: 'no exact business closure record matches this admitted turn',
+  };
+}
+
+/**
+ * Select the exact already-decoded business closure for one closed-turn Planner
+ * duty when the Planner source itself carries no closure. The duty's committed
+ * closureRef, checkpoint, task and scope are the join keys; a missing or
+ * ambiguous match stays unknown rather than being guessed.
+ */
+function selectPlannerDutyBusinessClosure(
+  prepared: ClosedTurnPlannerCallPreparationRecord,
+  closures: SelectTaskActualExecutionGraphInput['businessClosures'],
+  taskId: TaskId,
+):
+  | {
+      readonly status: 'matched';
+      readonly closure: TurnClosureReference;
+      readonly commitRef: JournalCommitRef;
+    }
+  | { readonly status: 'ambiguous' }
+  | undefined {
+  const duty = prepared.duty;
+  const matching = closures.filter(({ closure }) =>
+    closure.closureRef === duty.closureRef
+    && closure.checkpointId.value === duty.checkpointId.value
+    && closure.identity.taskRef.value === taskId.value
+    && sameScopeRef(closure.identity.scopeRef, duty.scope));
+  if (matching.length === 0) return undefined;
+  if (matching.length > 1) return { status: 'ambiguous' };
+  return { status: 'matched', closure: matching[0]!.closure, commitRef: matching[0]!.commitRef };
+}
+
+function graphCurrency(
+  sourceKind: TaskAgentActivitySourceKind,
+  executionEpoch: number,
+  boundLive: boolean | undefined,
+  terminal: boolean,
+  authority: AgentActivityCurrentAuthority | undefined,
+  matchesAuthorityLocation: (location: AgentActivityCurrentLocation) => boolean,
+): { readonly currency: TaskAgentActivityOwnershipRecord['currency']; readonly missingSource?: string } {
+  return classify(sourceKind, executionEpoch, boundLive, terminal, authority, matchesAuthorityLocation);
+}
+
+function childInvocationLocationMatches(
+  incarnation: TaskRuntimeIncarnation | undefined,
+  assignmentId: string,
+  location: AgentActivityCurrentLocation,
+): boolean {
+  return incarnation !== undefined
+    && sameTaskExecutionInstanceIdentity(location.instance, { kind: 'incarnation', incarnation })
+    && location.assignmentId === assignmentId;
+}
+
+function graphUnavailableSource(
+  sourceId: string,
+  ownerId: string,
+  message: string,
+): TaskAgentActivityUnavailableSource {
+  return { sourceId, ownerId, message };
+}
+
+function pushUnavailable(
+  sources: TaskAgentActivityUnavailableSource[],
+  source: TaskAgentActivityUnavailableSource,
+): void {
+  if (sources.some((existing) => existing.sourceId === source.sourceId
+    && existing.ownerId === source.ownerId
+    && existing.message === source.message)) return;
+  sources.push(source);
+}
+
+export function selectTaskActualExecutionGraph(
+  input: SelectTaskActualExecutionGraphInput,
+): TaskActualExecutionGraphSnapshot {
+  const taskId = input.taskScope.taskId;
+  const authority = input.currentAuthority;
+  const nodes: TaskActualExecutionGraphNode[] = [];
+  const edges: TaskActualExecutionGraphEdge[] = [];
+  const ungrouped: TaskActualExecutionGraphUngroupedRelation[] = [];
+  const unavailableSources = [...input.unavailableSources];
+  const locations: GraphNodeLocation[] = [];
+
+  if (authority !== undefined && authority.taskId.value !== taskId.value) {
+    throw new Error(
+      `current authority belongs to task ${authority.taskId.value}, not ${taskId.value}`,
+    );
+  }
+
+  for (const source of input.nativeAllocations) {
+    const record = requireRecord(
+      safeBuild(() => buildNative(source, taskId, authority)),
+      `native allocation ${source.sourceId}`,
+    );
+    const allocation = source.allocation;
+    nodes.push({
+      ...nodeCommon(record, nativeAllocationNodeId(
+        allocation.runtimeId,
+        allocation.executionEpoch,
+        allocation.assignmentId,
+        allocation.operationId.value,
+      )),
+      kind: 'native-allocation',
+      instance: {
+        kind: 'native-execution',
+        execution: { runtimeId: allocation.runtimeId, executionEpoch: allocation.executionEpoch },
+      },
+      executionEpoch: allocation.executionEpoch,
+      objective: source.objective,
+      allocation: {
+        runtimeId: allocation.runtimeId,
+        operationId: allocation.operationId,
+        executionEpoch: allocation.executionEpoch,
+        assignmentId: allocation.assignmentId,
+        scope: allocation.scope,
+        inputRefs: [...allocation.inputRefs],
+        ownerId: allocation.ownerId,
+        directiveRevision: allocation.directiveRevision,
+        inputRevision: allocation.inputRevision,
+        orchestrated: allocation.orchestrated,
+        ...(allocation.role === undefined ? {} : { role: allocation.role }),
+        ...(allocation.configuredAgentId === undefined
+          ? {}
+          : { configuredAgentId: allocation.configuredAgentId }),
+      },
+    });
+  }
+
+  for (const source of input.activeTurns) {
+    const record = requireRecord(
+      safeBuild(() => buildActive(source, taskId, authority)),
+      `active turn ${source.sourceId}`,
+    );
+    const binding = source.binding;
+    const businessTurnId = binding.admittedTurn.turnId;
+    const nodeId = activeTurnNodeId(businessTurnId, source.bindingCommitRef);
+    nodes.push({
+      ...nodeCommon(record, nodeId),
+      kind: 'active-turn',
+      instance: { kind: 'native-execution', execution: binding.execution },
+      executionEpoch: binding.execution.executionEpoch,
+      businessTurnId,
+      pipelineNodeId: binding.assignment.pipelineNodeId,
+      binding,
+      bindingCommitRef: source.bindingCommitRef,
+      businessClosure: businessClosureFor(binding, input.businessClosures),
+    });
+    locations.push({
+      nodeId,
+      instance: { kind: 'native-execution', execution: binding.execution },
+      assignmentId: binding.assignment.assignmentId,
+      businessTurnId,
+      pipelineNodeId: binding.assignment.pipelineNodeId,
+      containingLocation: {
+        kind: 'active-turn',
+        businessTurnId,
+        bindingCommitRef: source.bindingCommitRef,
+      },
+    });
+  }
+
+  for (const source of input.resumedSegments) {
+    const record = requireRecord(
+      safeBuild(() => buildResumed(source, taskId, authority)),
+      `resumed segment ${source.sourceId}`,
+    );
+    const opened = source.opened;
+    const businessTurnId = opened.businessTurnRef.businessTurnId;
+    const nodeId = resumedSegmentNodeId(businessTurnId, opened.segmentId, source.openedCommitRef);
+    const exactTerminalCommitRefs = source.terminalCommitRefs.filter((ref) =>
+      !input.businessClosures.some(({ commitRef }) => sameJournalCommitRef(ref, commitRef)));
+    nodes.push({
+      ...nodeCommon(record, nodeId),
+      kind: 'resumed-segment',
+      instance: { kind: 'incarnation', incarnation: opened.binding.incarnation },
+      executionEpoch: opened.binding.incarnation.executionEpoch,
+      businessTurnId,
+      segmentId: opened.segmentId,
+      pipelineNodeId: opened.binding.assignment.pipelineNodeId,
+      opened,
+      openedCommitRef: source.openedCommitRef,
+      terminalCommitRefs: exactTerminalCommitRefs,
+      segmentState: { status: 'opened' },
+    });
+    locations.push({
+      nodeId,
+      instance: { kind: 'incarnation', incarnation: opened.binding.incarnation },
+      assignmentId: opened.binding.assignment.assignmentId,
+      businessTurnId,
+      segmentId: opened.segmentId,
+      pipelineNodeId: opened.binding.assignment.pipelineNodeId,
+      containingLocation: {
+        kind: 'resumed-segment',
+        businessTurnId,
+        segmentId: opened.segmentId,
+        openedCommitRef: source.openedCommitRef,
+      },
+    });
+  }
+
+  const joinedDeliveries = new Set<AcceptedChildDelivery>();
+  for (const source of input.rawChildInvocations) {
+    const record = source.record;
+    const binding = record.binding;
+    const callKind = binding.kind;
+    const assignment = binding.assignment;
+    const assignmentTaskId = binding.kind === 'execution'
+      ? binding.assignment.taskId.value
+      : binding.assignment.taskId;
+    if (assignmentTaskId !== taskId.value) {
+      throw new Error(
+        `child invocation ${record.invocationId} belongs to task ${assignmentTaskId}, not ${taskId.value}`,
+      );
+    }
+    const invocationId = record.invocationId;
+    const nodeId = childInvocationNodeId(source.containingLocation, callKind, invocationId);
+    const matchingDeliveries = input.childDeliveries.filter(({ delivery, containingLocation }) =>
+      delivery.invocationId === invocationId
+      && delivery.kind === callKind
+      && containingLocation !== undefined
+      && locationKey(containingLocation) === locationKey(source.containingLocation));
+    if (matchingDeliveries.length > 1) {
+      throw new Error(
+        `child invocation ${invocationId} has multiple exact accepted deliveries`,
+      );
+    }
+    const matchedDelivery = matchingDeliveries[0];
+    if (matchedDelivery !== undefined) joinedDeliveries.add(matchedDelivery.delivery);
+    const returned = matchedDelivery === undefined
+      ? { status: 'unreturned' as const }
+      : {
+          status: 'returned' as const,
+          delivery: matchedDelivery.delivery,
+          deliveryCommitRef: matchedDelivery.commitRef,
+        };
+    const adoption = record.adoptedResultSeq !== undefined && record.notSelectedResultSeq !== undefined
+      ? { status: 'unknown' as const, reason: 'child invocation carries conflicting adoption facts' }
+      : record.adoptedResultSeq !== undefined
+        ? { status: 'adopted' as const, resultSeq: record.adoptedResultSeq }
+        : record.notSelectedResultSeq !== undefined
+          ? { status: 'not-selected' as const, resultSeq: record.notSelectedResultSeq }
+          : { status: 'undecided' as const };
+    const carrierNodeId = nodeIdForContainingLocation(locations, source.containingLocation);
+    const parentLocationMismatch = source.parentLocation !== undefined
+      && !locations.some((entry) =>
+        entry.nodeId === carrierNodeId && locationIndexMatches(entry, source.parentLocation!));
+    const linkage = carrierNodeId !== undefined && !parentLocationMismatch
+      ? { status: 'linked' as const, parentNodeId: carrierNodeId }
+      : {
+          status: 'ungrouped' as const,
+          reason: carrierNodeId === undefined
+            ? 'the containing location has no selected graph node'
+            : 'the explicit parent location does not match the containing location',
+        };
+    const terminal = returned.status === 'returned' || source.terminalCommitRefs.length > 0;
+    const incarnation = record.incarnation;
+    const { currency, missingSource } = graphCurrency(
+      'child-invocation',
+      assignment.executionEpoch,
+      source.boundLive,
+      terminal,
+      authority,
+      (location) => childInvocationLocationMatches(incarnation, assignment.assignmentId, location),
+    );
+    if (incarnation === undefined) {
+      pushUnavailable(unavailableSources, graphUnavailableSource(
+        source.sourceId,
+        source.ownerId,
+        `child invocation ${invocationId} has no acquired incarnation`,
+      ));
+    }
+    nodes.push({
+      nodeId,
+      taskId,
+      assignmentId: assignment.assignmentId,
+      ...(source.objective === undefined ? {} : { objective: source.objective }),
+      currency,
+      ...(missingSource === undefined ? {} : { missingSource }),
+      commitRefs: [source.commitRef, ...source.commitRefs],
+      evidenceRefs: [...source.evidenceRefs],
+      kind: 'child-invocation',
+      callKind,
+      invocationId,
+      childTurnId: record.childTurnId,
+      checkpointReceiptRef: record.checkpointReceiptRef,
+      record,
+      invocationCommitRef: source.commitRef,
+      containingLocation: source.containingLocation,
+      linkage,
+      acquisition: incarnation === undefined
+        ? { status: 'unacquired', reason: 'child invocation has no acquired incarnation' }
+        : { status: 'acquired', incarnation },
+      returnState: returned,
+      adoption,
+    });
+    if (linkage.status === 'linked') {
+      edges.push({
+        edgeId: `delegates-child:${linkage.parentNodeId}->${nodeId}`,
+        kind: 'delegates-child',
+        fromNodeId: linkage.parentNodeId,
+        toNodeId: nodeId,
+      });
+    } else {
+      ungrouped.push({
+        nodeId,
+        kind: 'delegates-child',
+        targetRef: locationKey(source.containingLocation),
+        reason: linkage.reason,
+      });
+    }
+  }
+
+  for (const source of input.childDeliveries) {
+    if (joinedDeliveries.has(source.delivery)) continue;
+    const delivery = source.delivery;
+    const assignment = delivery.assignment;
+    const deliveryTaskId = delivery.kind === 'execution'
+      ? delivery.assignment.taskId.value
+      : delivery.assignment.taskId;
+    if (deliveryTaskId !== taskId.value) {
+      throw new Error(
+        `child delivery ${delivery.invocationId} belongs to task ${deliveryTaskId}, not ${taskId.value}`,
+      );
+    }
+    const nodeId = orphanChildDeliveryNodeId(
+      source.commitRef,
+      delivery.seq,
+      delivery.invocationId,
+    );
+    const carrierNodeId = source.containingLocation === undefined
+      ? undefined
+      : nodeIdForContainingLocation(locations, source.containingLocation);
+    const { currency, missingSource } = graphCurrency(
+      'child-invocation',
+      assignment.executionEpoch,
+      source.boundLive,
+      source.terminalCommitRefs.length > 0,
+      authority,
+      () => false,
+    );
+    pushUnavailable(unavailableSources, graphUnavailableSource(
+      source.sourceId,
+      source.ownerId,
+      `child delivery ${delivery.invocationId} has no exact recorded invocation`,
+    ));
+    nodes.push({
+      nodeId,
+      taskId,
+      assignmentId: assignment.assignmentId,
+      ...(delivery.kind === 'execution' ? { objective: delivery.assignment.objective } : {}),
+      currency,
+      ...(missingSource === undefined ? {} : { missingSource }),
+      commitRefs: [source.commitRef, ...source.commitRefs],
+      evidenceRefs: [...source.evidenceRefs],
+      kind: 'orphan-child-delivery',
+      callKind: delivery.kind,
+      invocationId: delivery.invocationId,
+      delivery,
+      containingCommitRef: source.commitRef,
+      deliverySeq: delivery.seq,
+      ...(source.containingLocation === undefined
+        ? {}
+        : { containingLocation: source.containingLocation }),
+      linkage: { status: 'orphan', reason: 'invocation-not-recorded' },
+    });
+    if (carrierNodeId !== undefined) {
+      edges.push({
+        edgeId: `contains:${carrierNodeId}->${nodeId}`,
+        kind: 'contains',
+        fromNodeId: carrierNodeId,
+        toNodeId: nodeId,
+      });
+    } else {
+      ungrouped.push({
+        nodeId,
+        kind: 'contains',
+        targetRef: source.containingLocation === undefined
+          ? `child-delivery:${delivery.invocationId}`
+          : locationKey(source.containingLocation),
+        reason: 'the containing location has no selected graph node',
+      });
+    }
+  }
+
+  for (const source of input.milestoneReviews) {
+    const record = requireRecord(
+      safeBuild(() => buildReview(source, taskId, authority)),
+      `milestone review ${source.sourceId}`,
+    );
+    const reviewer = source.record.delivery.reviewer;
+    nodes.push({
+      ...nodeCommon(record, milestoneReviewNodeId(source.commitRef)),
+      kind: 'milestone-review',
+      instance: { kind: 'incarnation', incarnation: reviewer },
+      executionEpoch: reviewer.executionEpoch,
+      record: source.record,
+      reviewCommitRef: source.commitRef,
+    });
+  }
+
+  for (const source of input.plannerCalls) {
+    const record = requireRecord(
+      safeBuild(() => buildPlanner(source, taskId, authority)),
+      `closed-turn planner call ${source.sourceId}`,
+    );
+    const prepared = source.prepared;
+    const stage = source.returned !== undefined
+      ? 'returned' as const
+      : source.invoked !== undefined
+        ? 'invoked' as const
+        : 'prepared' as const;
+    const suppliedClosure = source.closure;
+    const dutyClosureMatch = suppliedClosure === undefined
+      ? selectPlannerDutyBusinessClosure(prepared, input.businessClosures, taskId)
+      : undefined;
+    const closureAmbiguous = dutyClosureMatch?.status === 'ambiguous';
+    const closure = suppliedClosure
+      ?? (dutyClosureMatch?.status === 'matched' ? dutyClosureMatch.closure : undefined);
+    const businessTurnId = closure?.identity.turnId ?? record.businessTurnId;
+    const segmentId = source.resumedSegment?.segmentId ?? record.segmentId;
+    const closureCommitRef = suppliedClosure === undefined
+      ? (dutyClosureMatch?.status === 'matched' ? dutyClosureMatch.commitRef : undefined)
+      : input.businessClosures.find(({ closure: candidate }) =>
+          candidate.closureRef === suppliedClosure.closureRef
+          && candidate.checkpointId.value === suppliedClosure.checkpointId.value
+          && candidate.identity.turnId === suppliedClosure.identity.turnId)?.commitRef;
+    const nodeId = closedTurnPlannerNodeId(prepared.duty.dutyKey, source.preparationCommitRef);
+    nodes.push({
+      ...nodeCommon(record, nodeId),
+      kind: 'closed-turn-planner-call',
+      stage,
+      dutyKey: prepared.duty.dutyKey,
+      invocationId: prepared.invocationId,
+      scope: prepared.duty.scope,
+      ...(businessTurnId === undefined ? {} : { businessTurnId }),
+      ...(segmentId === undefined ? {} : { segmentId }),
+      instance: { kind: 'incarnation', incarnation: prepared.incarnation },
+      execution: prepared.execution,
+      checkpointId: prepared.duty.checkpointId,
+      checkpointCommitRef: prepared.duty.checkpointCommitRef,
+      ...(closure === undefined ? {} : { closureRef: closure.closureRef }),
+      ...(closureCommitRef === undefined ? {} : { closureCommitRef }),
+      grantCommitRef: prepared.grantCommitRef,
+      admissionCommitRef: prepared.admissionCommitRef,
+      preparationCommitRef: source.preparationCommitRef,
+      ...(source.invocationCommitRef === undefined
+        ? {}
+        : { invocationCommitRef: source.invocationCommitRef }),
+      ...(source.returnCommitRef === undefined ? {} : { returnCommitRef: source.returnCommitRef }),
+      ...(source.returned === undefined
+        ? {}
+        : {
+            planRevision: {
+              revisionId: source.returned.publication.revisionId,
+              sequence: source.returned.publication.sequence,
+              decision: source.returned.decision,
+            },
+          }),
+    });
+    if (closure === undefined) {
+      ungrouped.push({
+        nodeId,
+        kind: 'planner-duty',
+        targetRef: prepared.duty.dutyKey,
+        reason: closureAmbiguous
+          ? 'multiple business closure records match this planner preparation'
+          : 'the planner preparation has no exact turn closure fact',
+      });
+    } else {
+      const parent = input.activeTurns.find(({ binding }) =>
+        admittedTurnMatchesClosure(binding, closure));
+      if (parent === undefined) {
+        ungrouped.push({
+          nodeId,
+          kind: 'planner-duty',
+          targetRef: closure.closureRef,
+          reason: 'the closed turn has no selected active-turn node',
+        });
+      } else {
+        edges.push({
+          edgeId: `planner-duty:${activeTurnNodeId(closure.identity.turnId, parent.bindingCommitRef)}->${nodeId}`,
+          kind: 'planner-duty',
+          fromNodeId: activeTurnNodeId(closure.identity.turnId, parent.bindingCommitRef),
+          toNodeId: nodeId,
+        });
+      }
+    }
+  }
+
+  for (const activeSource of input.activeTurns) {
+    const binding = activeSource.binding;
+    const activeNodeId = activeTurnNodeId(binding.admittedTurn.turnId, activeSource.bindingCommitRef);
+    const allocation = input.nativeAllocations.find(({ allocation: candidate }) =>
+      candidate.taskId.value === taskId.value
+      && candidate.assignmentId === binding.assignment.assignmentId
+      && candidate.executionEpoch === binding.execution.executionEpoch
+      && candidate.runtimeId === binding.execution.runtimeId
+      && candidate.operationId.value === binding.scope.operationId?.value);
+    if (allocation !== undefined) {
+      const allocationNodeId = nativeAllocationNodeId(
+        allocation.allocation.runtimeId,
+        allocation.allocation.executionEpoch,
+        allocation.allocation.assignmentId,
+        allocation.allocation.operationId.value,
+      );
+      edges.push({
+        edgeId: `contains:${allocationNodeId}->${activeNodeId}`,
+        kind: 'contains',
+        fromNodeId: allocationNodeId,
+        toNodeId: activeNodeId,
+      });
+    }
+  }
+
+  for (const resumedSource of input.resumedSegments) {
+    const opened = resumedSource.opened;
+    const businessTurnId = opened.businessTurnRef.businessTurnId;
+    const resumedNodeId = resumedSegmentNodeId(
+      businessTurnId,
+      opened.segmentId,
+      resumedSource.openedCommitRef,
+    );
+    const parent = input.activeTurns.find(({ binding, bindingCommitRef }) =>
+      binding.admittedTurn.turnId === businessTurnId
+      && sameJournalCommitRef(bindingCommitRef, opened.businessTurnRef.bindingCommitRef));
+    if (parent === undefined) {
+      ungrouped.push({
+        nodeId: resumedNodeId,
+        kind: 'contains',
+        targetRef: opened.businessTurnRef.bindingCommitRef.commitId,
+        reason: 'the original business turn has no selected active-turn node',
+      });
+    } else {
+      const parentNodeId = activeTurnNodeId(businessTurnId, parent.bindingCommitRef);
+      edges.push({
+        edgeId: `contains:${parentNodeId}->${resumedNodeId}`,
+        kind: 'contains',
+        fromNodeId: parentNodeId,
+        toNodeId: resumedNodeId,
+      });
+    }
+    const predecessorResolution = resolvePredecessorNode(
+      opened.predecessor,
+      businessTurnId,
+      nodes,
+    );
+    if ('reason' in predecessorResolution) {
+      ungrouped.push({
+        nodeId: resumedNodeId,
+        kind: 'precedes',
+        targetRef: opened.predecessor.segmentId,
+        reason: predecessorResolution.reason,
+      });
+    } else {
+      edges.push({
+        edgeId: `precedes:${predecessorResolution.nodeId}->${resumedNodeId}`,
+        kind: 'precedes',
+        fromNodeId: predecessorResolution.nodeId,
+        toNodeId: resumedNodeId,
+      });
+    }
+  }
+
+  if (nodes.length === 0) {
+    return {
+      taskScope: input.taskScope,
+      ...(input.guidance === undefined ? {} : { guidance: input.guidance }),
+      history: {
+        status: 'not-recorded',
+        reason: 'no-recorded-facts',
+        ...(unavailableSources.length === 0 ? {} : { unavailable: unavailableSources }),
+      },
+    };
+  }
+  return {
+    taskScope: input.taskScope,
+    ...(input.guidance === undefined ? {} : { guidance: input.guidance }),
+    history: {
+      status: 'recorded',
+      nodes,
+      edges,
+      ungrouped,
+      unavailable: unavailableSources,
     },
   };
 }

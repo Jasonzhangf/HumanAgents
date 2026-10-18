@@ -17,7 +17,7 @@
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
       "ownerSymbol": "UiRuntimeService scoped task read resolver/scopedObservation/projectDurableTaskInventory",
       "implementationStatus": "candidate-scoped-observation-truth",
-      "contract": "The shared resolver selects the serve-bound live source or the declared project/mode durable inventory. Foreign admissions come from that inventory, not the serve-bound requirementAdmissions map."
+      "contract": "The shared resolver selects the serve-bound live source or the declared project/mode durable inventory. Foreign admissions come from that inventory, not the serve-bound requirementAdmissions map. The same selected task scope supplies already owner-decoded native allocation, active-turn, resumed-segment, child invocation and delivery, review, and Planner records. Those typed facts are the actual-execution source; assignment-graph fact replay is not required. Missing or unavailable sources remain explicit."
     },
     "load_event_history": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
@@ -34,8 +34,11 @@
       "ownerRel": "packages/context-events/src/pairing.ts"
     },
     "project_semantic_views": {
-      "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts"
+      "ownerPath": "packages/runtime/src/observation/agent-activity.ts",
+      "ownerRel": "packages/runtime/src/observation/agent-activity.ts",
+      "ownerSymbol": "selectTaskAgentActivity and the Runtime pure actual-execution selector boundary",
+      "implementationStatus": "candidate-native-source-selection-design",
+      "contract": "The Runtime pure selector classifies the same selected task scope's typed native records without stores, logs, Manager creation, acquire, rebind, or writes. Existing RuntimeAgentActivityProjection.actualExecutionGraph then carries the contracts source through packages/ui/projection/actual-execution-graph.ts. Guidance, current plan, and recorded instances stay distinct; exact missing relations remain ungrouped or unavailable."
     },
     "project_status_and_actions": {
       "ownerPath": "packages/ui/projection/runtime.ts",
@@ -47,7 +50,7 @@
       "ownerRel": "docs/ui/observation.js",
       "ownerSymbol": "shared semantic observation panel scope and finite-stream handling",
       "implementationStatus": "ui-owned-parallel-work",
-      "contract": "The UI-owned api.observation fifth parameter carries the complete taskScope projectKey/mode. The existing scope query remains the observation subtree and node remains the selected node; the agent query keeps the existing decoder."
+      "contract": "The UI-owned api.observation fifth parameter carries the complete taskScope projectKey/mode. The existing scope query remains the observation subtree and node remains the selected node; the agent query keeps the existing decoder. Both formal pages consume the same agentActivity read and actualExecutionGraph carrier without a second fetch. Presentation keeps guidance, current plan, and actual-recorded instances separate; technical IDs and commit refs stay in detail, while unavailable and ungrouped records remain visible."
     }
   }
 }

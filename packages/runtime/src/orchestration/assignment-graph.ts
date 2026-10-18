@@ -262,6 +262,14 @@ export class AssignmentGraph {
     const key = assignmentKey(assignment);
     const existing = this.assignments.get(key);
     if (existing) {
+      if (existing.stageNodeId !== stageNodeId) {
+        throw new AssignmentGraphError('assignment key already belongs to a different stage', {
+          ownerId: existing.ownerId,
+          reason: 'assignment.stage.conflict',
+          nextAction: { kind: 'recover', ref: `assignment.stage.${stageNodeId}` },
+          evidenceRefs: existing.evidenceRefs,
+        });
+      }
       if (!sameAssignment(existing.assignment, assignment)) {
         throw new AssignmentGraphError('assignment identity conflicts with existing content', {
           ownerId: existing.ownerId,

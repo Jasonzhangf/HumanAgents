@@ -13,7 +13,10 @@ import {
   taskReadScopeFromQuery,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
-import { unavailableModeFailure } from './task-display.js'
+import {
+  renderTaskActualExecutionGraphSection,
+  unavailableModeFailure,
+} from './task-display.js'
 import {
   agentActivityQuery,
   agentActivitySelectionFromQuery,
@@ -434,7 +437,7 @@ function renderNodeDrawer(node, handoffs, detail, purpose) {
     // A recorded execution event is not a work item: show its typed facts once
     // and reuse the shared reference/technical-source block. No goal/result
     // turns, no handoff tab and no nested conversation scroll.
-    body.append(renderEventFacts(detail), renderReferences(detail))
+    body.append(renderEventFacts(detail), renderReferences(detail, true))
   } else {
     // The node drawer uses the same status/conversation/trace shell as every
     // other work card. The adapter keeps this surface read-only.
@@ -512,9 +515,53 @@ function renderEventFacts(detail) {
   return facts
 }
 
-function renderReferences(node) {
+function renderReferences(node, eventView = false) {
   const wrap = element('div')
   const source = node?.technicalSource
+  const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
+  const outputs = unresolvedList((node?.outputs || []).map((entry) => entry.ref), '无输出引用')
+  const evidence = unresolvedList((node?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
+  const groups = [
+    ['输入引用', inputs],
+    ['输出引用', outputs],
+    [eventView ? '证据' : 'Evidence', evidence],
+  ]
+  const referenceGroups = groups.filter(([, group]) => !group.empty)
+
+  if (eventView) {
+    if (!source && referenceGroups.length === 0) return wrap
+    const details = element('details', undefined, 'drawer-technical-source')
+    const counts = referenceGroups.map(([label, group]) => `${label} ${group.items.length} 项`)
+    details.append(element('summary', ['查看来源与引用', counts.length > 0 ? `（${counts.join('，')}）` : ''].join('')))
+    if (source) {
+      const sourceFacts = element('dl', undefined, 'drawer-facts')
+      for (const [label, value] of [
+        ['原始类型', source.kind],
+        ['原始标题', source.title],
+        ['原始摘要', source.summary],
+        ['原始时间', source.occurredAt],
+      ]) {
+        const cell = element('div')
+        const detail = element('dd', value || '未提供')
+        if (!value) detail.dataset.empty = 'true'
+        cell.append(element('dt', label), detail)
+        sourceFacts.append(cell)
+      }
+      details.append(sourceFacts)
+    }
+    if (referenceGroups.length > 0) {
+      const facts = element('dl', undefined, 'drawer-facts')
+      for (const [label, group] of referenceGroups) {
+        const cell = element('div')
+        cell.append(element('dt', label), element('dd', group.items.join(', ')))
+        facts.append(cell)
+      }
+      details.append(facts)
+    }
+    wrap.append(details)
+    return wrap
+  }
+
   if (source) {
     const details = element('details', undefined, 'drawer-technical-source')
     details.append(element('summary', '技术详情'))
@@ -536,10 +583,7 @@ function renderReferences(node) {
   }
   const facts = element('dl', undefined, 'drawer-facts')
   // Refs come from the typed drawer detail (`projection.selectedNode`), never from the node card.
-  const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
-  const outputs = unresolvedList((node?.outputs || []).map((entry) => entry.ref), '无输出引用')
-  const evidence = unresolvedList((node?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
-  for (const [label, group] of [['输入引用', inputs], ['输出引用', outputs], ['Evidence', evidence]]) {
+  for (const [label, group] of groups) {
     const cell = element('div')
     const dd = element('dd', group.items.join(', '))
     if (group.empty) dd.dataset.empty = 'true'
@@ -593,6 +637,17 @@ function renderAgentActivitySection(projection) {
   agentViewDispose = view.dispose
   section.append(view.element)
   return section
+}
+
+// Actual execution records are a task-level attachment on the successful
+// activity read. This read-only surface does not create a second reader or a
+// graph placeholder when the activity read is pending, failed or absent.
+function renderActualExecutionGraphSection(read) {
+  if (agentSelectionFailure || agentReadPending || agentReadFailure) return null
+  if (!read || read.ok !== true || !read.value?.actualExecutionGraph) return null
+  return renderTaskActualExecutionGraphSection(read.value.actualExecutionGraph, {
+    onOpenDetail: openTechnicalDetail,
+  })
 }
 
 // Selecting an instance is URL view state plus a re-read of the same observation
@@ -806,6 +861,9 @@ function renderObservation(projection) {
 
   const agentSection = renderAgentActivitySection(projection)
   if (agentSection) main.append(agentSection)
+
+  const actualGraphSection = renderActualExecutionGraphSection(projection?.agentActivity)
+  if (actualGraphSection) main.append(actualGraphSection)
 
   main.append(renderSemanticObservationSection())
 

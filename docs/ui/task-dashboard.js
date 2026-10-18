@@ -49,6 +49,7 @@ import {
   planHistoryAvailability,
   planHistoryScopeFailure,
   resolveCurrentPlanRevision,
+  renderTaskActualExecutionGraphSection,
   renderTaskPlanCurrentSection,
   renderTaskPlanSemanticView,
   renderTaskDescriptionContent,
@@ -1804,6 +1805,18 @@ function renderAgentActivitySection() {
   return section
 }
 
+// The actual execution graph is a task-level attachment on the successful
+// activity read. Pending or failed activity reads keep their own explicit state
+// and never render an older graph in their place.
+function renderActualExecutionGraphSection() {
+  if (agentSelectionFailure || agentReadPending || agentReadFailure) return null
+  const read = dashboard?.agentActivity
+  if (!read || read.ok !== true || !read.value?.actualExecutionGraph) return null
+  return renderTaskActualExecutionGraphSection(read.value.actualExecutionGraph, {
+    onOpenDetail: openTechnicalDetail,
+  })
+}
+
 // Selecting an instance is URL view state plus a re-read of the same task. It
 // never writes control state, a preference, or a second scope's read.
 async function selectAgentInstance(selection) {
@@ -2311,6 +2324,9 @@ function renderDashboard() {
   // The schedule section exists only when the dashboard read reports a
   // persisted plan; a task without one must not show a schedule surface.
   if (dashboard.plan) main.append(renderTaskPlanSection(dashboard.plan))
+
+  const actualGraphSection = renderActualExecutionGraphSection()
+  if (actualGraphSection) main.append(actualGraphSection)
 
   const agentSection = renderAgentActivitySection()
   if (agentSection) main.append(agentSection)

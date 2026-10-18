@@ -24,6 +24,7 @@
     "resumeNotSaveGate": "恢复成功不要求先保存本 segment 的 v2 capture、producer drain 或 recovery-assets receipt。原崩溃在保存前被杀，因此 save/drain 不能作为 resume 前置。v2 capture 仍由真实保存边界（native-save/boundary close）产出，该保存不属于本图节点。",
     "epochFloorOrder": "successorEpoch 由全部真实 durable floor facts（原 v1 epoch、已提交 segments、当前 context、operation/retry 记录）计算，先于 grant reservation commit；segment-opened commit 将新 epoch 固定到该新段。旧 epoch 迟到写按 fencing 拒绝。",
     "commitSeparation": "grant commit、business registration commit、segment commit 三种职责分离：节点 2 在同一 held 事务内产出 grant commit 与 business registration commit；节点 3 的 segment-opened append 产出独立 segment commit。禁止用任一 commit 填充另一职责。",
+    "dispatchBoundary": "hydrate 与 GET 只恢复事实，不恢复执行许可。普通 dispatch 不得因恢复出的 running 状态重新执行；只有既有 cold generation 路径消费已提交 successor segment 后，受控 retained dispatch 才能继续已获取的执行。",
     "revokeOrder": "reservation 提交前撤权：零登记、零 append、零 dispatch；reservation 提交后撤权：允许完成本次已登记 segment 的 append 与收拢，但新 request、child、effect 仍各自按当前 grant 逐次准入。",
     "immutability": "原 v1 initial capture、原 binding commit 与原业务 turn 身份（originalBusinessIdentity）保持不可变；本图只追加新 segment，不重标旧 epoch、不重写 v1 receipt、不要求旧 interrupted segment 补写 v2 capture。",
     "reuseBoundary": "复用 native-turn-checkpoint.graph.json 的节点 schema；本图不证明 Operator 已注册、runtime 已执行或产品已验收。",

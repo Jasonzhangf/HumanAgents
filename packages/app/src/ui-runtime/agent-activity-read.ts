@@ -1,16 +1,19 @@
 import type {
+  AcceptedChildDelivery,
   ChildInvocationRecord,
   I2JournalPort,
   JournalCommitRef,
   MilestoneReviewResultRecord,
   ReviewAssignment,
   ScopeRef,
+  TaskActualExecutionContainingLocation,
   TaskAgentActivitySelectionFailure,
   TaskAgentActivitySelectionQuery,
   TaskAgentActivityUnavailableSource,
   TaskExecutionInstanceIdentity,
   TaskId,
   TaskIdentityScope,
+  TurnClosureReference,
   WorkAssignment,
   WorkResult,
 } from '../../../contracts/src/index.js';
@@ -19,11 +22,14 @@ import { sameTaskExecutionInstanceIdentity } from '../../../contracts/src/index.
 import { activeTurnSegmentCommitId } from '../../../contracts/src/active-turn-segments.js';
 import type { ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
 import type { JsonlOrganJournal, JournalRecord } from '../../../adapters/jsonl/src/index.js';
+import { resolveTaskFlowGuidanceFromBinding } from '../../../core/src/task-flow-definition.js';
 import {
   createJsonlActiveTurnSegmentJournal,
   decodeActiveTurnRecords,
   listTaskActiveTurnBindings,
+  selectActiveTurnCommitRefs,
 } from '../../../adapters/jsonl/src/active-turn.js';
+import { decodeTaskIdentityRecords } from '../../../adapters/jsonl/src/task-identities.js';
 import {
   closureFromRecord,
   readCommittedNativeSegmentSource,
@@ -40,11 +46,14 @@ import {
   type ActiveTurnJournalRecord,
 } from '../../../runtime/src/context/active-turn-journal.js';
 import {
+  selectTaskActualExecutionGraph,
   selectTaskAgentActivity,
   type AgentActivityActiveSource,
   type AgentActivityChildSource,
   type AgentActivityCurrentAuthority,
   type AgentActivityCurrentLocation,
+  type AgentActivityGraphChildDeliverySource,
+  type AgentActivityGraphChildInvocationSource,
   type AgentActivityNativeSource,
   type AgentActivityPlannerSource,
   type AgentActivityPoolSource,
@@ -54,6 +63,7 @@ import {
 import type { AgentRuntimePoolManager } from '../../../runtime/src/orchestration/runtime-pool.js';
 import type { RuntimeTaskSnapshot } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { projectRuntimeAgentActivity } from '../../../ui/projection/agent-activity.js';
+import { projectTaskActualExecutionGraph } from '../../../ui/projection/actual-execution-graph.js';
 import type {
   RuntimeAgentActivityProjection,
   RuntimeReadResult,
@@ -283,6 +293,20 @@ interface AssembledTaskAgentActivityCoreContext {
   readonly sources: TaskAgentActivityCoreSources;
   readonly taskScope: TaskIdentityScope;
   readonly controlRecords: readonly JournalRecord[];
+  readonly activeSources: readonly DecodedActiveTurnSource[];
+  readonly segmentSources: readonly DecodedResumedSegmentSource[];
+}
+
+interface DecodedActiveTurnSource {
+  readonly binding: Awaited<ReturnType<typeof listTaskActiveTurnBindings>>[number]['binding'];
+  readonly bindingCommitRef: JournalCommitRef;
+  readonly entries: readonly ActiveTurnJournalRecord[];
+}
+
+interface DecodedResumedSegmentSource {
+  readonly opened: ResumedTurnSegmentOpened;
+  readonly openedCommitRef: JournalCommitRef;
+  readonly entries: readonly ActiveTurnJournalRecord[];
 }
 
 type TaskAgentActivityCoreContextAssembly =
@@ -496,20 +520,27 @@ async function assembleTaskAgentActivityCoreContext(
 
   const activeTurns: AgentActivityActiveSource[] = [];
   const resumedSegments: AgentActivityResumedSource[] = [];
+  const activeSources: DecodedActiveTurnSource[] = [];
+  const segmentSources: DecodedResumedSegmentSource[] = [];
   const unavailableSources: TaskAgentActivityUnavailableSource[] = [];
   let bindings: Awaited<ReturnType<typeof listTaskActiveTurnBindings>> = [];
   try {
-    bindings = await listTaskActiveTurnBindings({ journal: options.controlJournal, scope: taskScope });
+    bindings = await listTaskActiveTurnBindings({
+      journal: { replay: async () => controlRecords },
+      scope: taskScope,
+    });
     for (const entry of bindings) {
+      const businessTurnId = entry.binding.admittedTurn.turnId;
+      const activeEntries = decodeActiveTurnRecords(controlRecords, businessTurnId);
       activeTurns.push({
-        sourceId: `active-turn:${entry.binding.admittedTurn.turnId}`,
+        sourceId: `active-turn:${businessTurnId}`,
         ownerId: OWNER_ID,
-        commitRefs: [],
+        commitRefs: selectActiveTurnCommitRefs(controlRecords, businessTurnId),
         evidenceRefs: [],
         boundLive: undefined,
         terminalCommitRefs: terminalCommitRefs(
           controlRecords,
-          entry.binding.admittedTurn.turnId,
+          businessTurnId,
           entry.binding.assignment.assignmentId,
           entry.binding.scope,
           entry.commitRef.journalSeq,
@@ -517,8 +548,12 @@ async function assembleTaskAgentActivityCoreContext(
         binding: entry.binding,
         bindingCommitRef: entry.commitRef,
       });
+      activeSources.push({
+        binding: entry.binding,
+        bindingCommitRef: entry.commitRef,
+        entries: activeEntries,
+      });
 
-      const businessTurnId = entry.binding.admittedTurn.turnId;
       const segmentJournal = createJsonlActiveTurnSegmentJournal({
         journal: options.controlJournal,
         businessTurnId,
@@ -529,6 +564,10 @@ async function assembleTaskAgentActivityCoreContext(
           journal: options.controlJournal,
           originalAdmittedTurn: entry.binding.admittedTurn,
           opened,
+        });
+        const segmentEntries = await segmentJournal.readSegmentRecords({
+          businessTurnId,
+          segmentId: exact.opened.segmentId,
         });
         resumedSegments.push({
           sourceId: `resumed-segment:${exact.opened.segmentId}`,
@@ -545,6 +584,11 @@ async function assembleTaskAgentActivityCoreContext(
           ),
           opened: exact.opened,
           openedCommitRef: exact.openedCommitRef,
+        });
+        segmentSources.push({
+          opened: exact.opened,
+          openedCommitRef: exact.openedCommitRef,
+          entries: segmentEntries,
         });
       }
     }
@@ -599,6 +643,8 @@ async function assembleTaskAgentActivityCoreContext(
       sources: { nativeAllocations, activeTurns, resumedSegments, unavailableSources },
       taskScope,
       controlRecords,
+      activeSources,
+      segmentSources,
     },
   };
 }
@@ -618,6 +664,16 @@ export interface ReadTaskAgentActivityCoreOptions {
   readonly controlJournal: JsonlOrganJournal;
   readonly currentAuthority?: AgentActivityCurrentAuthority;
   readonly remainingSources: TaskAgentActivityRemainingSources;
+}
+
+function sameTaskIdentityScope(
+  left: TaskIdentityScope,
+  right: TaskIdentityScope,
+): boolean {
+  return left.organId.scope === right.organId.scope
+    && left.organId.value === right.organId.value
+    && left.taskId.scope === right.taskId.scope
+    && left.taskId.value === right.taskId.value;
 }
 
 function projectionFailure(
@@ -770,23 +826,22 @@ function missingSource(sourceId: string, message: string): TaskAgentActivityUnav
  * borrows a parent instance identity and a `childTurnId` never becomes the
  * parent location.
  */
-async function assembleChildInvocations(input: {
+function assembleChildInvocations(input: {
   readonly taskId: TaskId;
-  readonly bindings: readonly TaskActiveTurnBindingEntry[];
-  readonly segments: readonly { readonly turnId: string; readonly opened: ResumedTurnSegmentOpened }[];
+  readonly activeSources: readonly DecodedActiveTurnSource[];
+  readonly segmentSources: readonly DecodedResumedSegmentSource[];
   readonly controlRecords: readonly JournalRecord[];
-  readonly journal: JsonlOrganJournal;
   readonly work: readonly ReturnedWork[];
-}): Promise<{
+}): {
   readonly sources: readonly AgentActivityChildSource[];
   readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
-}> {
+} {
   const sources: AgentActivityChildSource[] = [];
   const unavailableSources: TaskAgentActivityUnavailableSource[] = [];
 
-  for (const binding of input.bindings) {
-    const turnId = binding.binding.admittedTurn.turnId;
-    const entries = decodeActiveTurnRecords(input.controlRecords, turnId);
+  for (const active of input.activeSources) {
+    const turnId = active.binding.admittedTurn.turnId;
+    const entries = active.entries;
     for (const record of invocationSnapshots(entries)) {
       const envelope = childInvocationEnvelope(input.controlRecords, turnId, record.invocationId);
       if (envelope === undefined) {
@@ -819,19 +874,17 @@ async function assembleChildInvocations(input: {
         parentLocation: {
           // The parent location is the admitted turn that committed this
           // invocation; the child turn id is never used as the parent identity.
-          instance: { kind: 'native-execution', execution: binding.binding.execution },
-          assignmentId: binding.binding.assignment.assignmentId,
+          instance: { kind: 'native-execution', execution: active.binding.execution },
+          assignmentId: active.binding.assignment.assignmentId,
           businessTurnId: turnId,
         },
       }));
     }
   }
 
-  for (const segment of input.segments) {
+  for (const segment of input.segmentSources) {
     const segmentId = segment.opened.segmentId;
-    const entries = await createJsonlActiveTurnSegmentJournal({
-      journal: input.journal, businessTurnId: segment.turnId,
-    }).readSegmentRecords({ businessTurnId: segment.turnId, segmentId });
+    const entries = segment.entries;
     for (const record of invocationSnapshots(entries)) {
       const envelope = segmentChildInvocationEnvelope(input.controlRecords, segmentId, record.invocationId);
       if (envelope === undefined) {
@@ -864,7 +917,7 @@ async function assembleChildInvocations(input: {
         parentLocation: {
           instance: { kind: 'incarnation', incarnation: segment.opened.binding.incarnation },
           assignmentId: segment.opened.binding.assignment.assignmentId,
-          businessTurnId: segment.turnId,
+          businessTurnId: segment.opened.businessTurnRef.businessTurnId,
           segmentId,
         },
       }));
@@ -902,9 +955,176 @@ function childReturnCommits(
   return ref === null ? [] : [ref];
 }
 
-type TaskActiveTurnBindingEntry = Awaited<ReturnType<
-  typeof listTaskActiveTurnBindings
->>[number];
+/** Exact committed envelope of one accepted child delivery. */
+function childDeliveryEnvelope(
+  records: readonly JournalRecord[],
+  carrierId: string,
+  invocationId: string,
+  segment: boolean,
+): JournalCommitRef | undefined {
+  const commitId = segment
+    ? activeTurnSegmentCommitId(carrierId, `delivery:${invocationId}`)
+    : activeTurnCommitId(carrierId, `delivery:${invocationId}`);
+  const record = records.find((entry) => entry.commitId === commitId);
+  return record === undefined ? undefined : journalCommitRef(record) ?? undefined;
+}
+
+interface CommittedBusinessClosure {
+  readonly closure: TurnClosureReference;
+  readonly commitRef: JournalCommitRef;
+}
+
+interface GraphChildSources {
+  readonly rawChildInvocations: readonly AgentActivityGraphChildInvocationSource[];
+  readonly childDeliveries: readonly AgentActivityGraphChildDeliverySource[];
+  readonly businessClosures: readonly CommittedBusinessClosure[];
+  readonly unavailableSources: readonly TaskAgentActivityUnavailableSource[];
+}
+
+/**
+ * Raw child sources for the native graph. Every recorded invocation and every
+ * accepted delivery is forwarded, including records whose incarnation or
+ * reviewed objective is absent; those facts stay explicit in the Runtime
+ * selector instead of being filtered into an empty history.
+ */
+function graphChildSources(input: {
+  readonly activeSources: readonly DecodedActiveTurnSource[];
+  readonly segmentSources: readonly DecodedResumedSegmentSource[];
+  readonly controlRecords: readonly JournalRecord[];
+  readonly work: readonly ReturnedWork[];
+}): GraphChildSources {
+  const rawChildInvocations: AgentActivityGraphChildInvocationSource[] = [];
+  const childDeliveries: AgentActivityGraphChildDeliverySource[] = [];
+  const unavailableSources: TaskAgentActivityUnavailableSource[] = [];
+
+  const forwardDeliveries = (
+    entries: readonly ActiveTurnJournalRecord[],
+    carrierId: string,
+    containingLocation: TaskActualExecutionContainingLocation,
+    segment: boolean,
+  ): void => {
+    for (const entry of entries) {
+      if (entry.kind !== 'child-delivery') continue;
+      const delivery: AcceptedChildDelivery = entry.entry;
+      const commitRef = childDeliveryEnvelope(
+        input.controlRecords,
+        carrierId,
+        delivery.invocationId,
+        segment,
+      );
+      if (commitRef === undefined) {
+        unavailableSources.push(missingSource(
+          `child-delivery:${carrierId}:${delivery.invocationId}`,
+          'child delivery has no committed delivery envelope',
+        ));
+        continue;
+      }
+      childDeliveries.push({
+        sourceId: `child-delivery:${carrierId}:${delivery.invocationId}`,
+        ownerId: OWNER_ID,
+        commitRefs: [commitRef],
+        evidenceRefs: [],
+        boundLive: undefined,
+        terminalCommitRefs: [],
+        delivery,
+        commitRef,
+        containingLocation,
+      });
+    }
+  };
+
+  for (const active of input.activeSources) {
+    const businessTurnId = active.binding.admittedTurn.turnId;
+    const containingLocation: TaskActualExecutionContainingLocation = {
+      kind: 'active-turn',
+      businessTurnId,
+      bindingCommitRef: active.bindingCommitRef,
+    };
+    const parentLocation: AgentActivityCurrentLocation = {
+      instance: { kind: 'native-execution', execution: active.binding.execution },
+      assignmentId: active.binding.assignment.assignmentId,
+      businessTurnId,
+    };
+    for (const record of invocationSnapshots(active.entries)) {
+      const envelope = childInvocationEnvelope(input.controlRecords, businessTurnId, record.invocationId);
+      if (envelope === undefined) {
+        unavailableSources.push(missingSource(
+          `child-invocation:${businessTurnId}:${record.invocationId}`,
+          'child invocation has no committed invocation envelope',
+        ));
+        continue;
+      }
+      const objective = childObjective(record, input.work);
+      rawChildInvocations.push({
+        sourceId: `child-invocation:${businessTurnId}:${record.invocationId}`,
+        ownerId: OWNER_ID,
+        commitRefs: [envelope],
+        evidenceRefs: [],
+        boundLive: undefined,
+        terminalCommitRefs: childReturnCommits(input.controlRecords, active.entries, record, businessTurnId),
+        record,
+        commitRef: envelope,
+        containingLocation,
+        ...(objective === undefined ? {} : { objective }),
+        parentLocation,
+      });
+    }
+    forwardDeliveries(active.entries, businessTurnId, containingLocation, false);
+  }
+
+  for (const segment of input.segmentSources) {
+    const businessTurnId = segment.opened.businessTurnRef.businessTurnId;
+    const segmentId = segment.opened.segmentId;
+    const containingLocation: TaskActualExecutionContainingLocation = {
+      kind: 'resumed-segment',
+      businessTurnId,
+      segmentId,
+      openedCommitRef: segment.openedCommitRef,
+    };
+    const parentLocation: AgentActivityCurrentLocation = {
+      instance: { kind: 'incarnation', incarnation: segment.opened.binding.incarnation },
+      assignmentId: segment.opened.binding.assignment.assignmentId,
+      businessTurnId,
+      segmentId,
+    };
+    for (const record of invocationSnapshots(segment.entries)) {
+      const envelope = segmentChildInvocationEnvelope(input.controlRecords, segmentId, record.invocationId);
+      if (envelope === undefined) {
+        unavailableSources.push(missingSource(
+          `child-invocation:${segmentId}:${record.invocationId}`,
+          'child invocation has no committed invocation envelope',
+        ));
+        continue;
+      }
+      const objective = childObjective(record, input.work);
+      rawChildInvocations.push({
+        sourceId: `child-invocation:${segmentId}:${record.invocationId}`,
+        ownerId: OWNER_ID,
+        commitRefs: [envelope],
+        evidenceRefs: [],
+        boundLive: undefined,
+        terminalCommitRefs: childReturnCommits(input.controlRecords, segment.entries, record, segmentId, true),
+        record,
+        commitRef: envelope,
+        containingLocation,
+        ...(objective === undefined ? {} : { objective }),
+        parentLocation,
+      });
+    }
+    forwardDeliveries(segment.entries, segmentId, containingLocation, true);
+  }
+
+  const businessClosures: CommittedBusinessClosure[] = [];
+  for (const record of input.controlRecords) {
+    const commitRef = journalCommitRef(record);
+    if (commitRef === null) continue;
+    const closure = closureFromRecord(record);
+    if (closure === null || !('closureKind' in closure) || closure.closureKind !== 'turn-closure') continue;
+    businessClosures.push({ closure, commitRef });
+  }
+
+  return { rawChildInvocations, childDeliveries, businessClosures, unavailableSources };
+}
 
 /** Runtime pool live leases of one task, read only through `manager.inspect()`. */
 function assembleRuntimePoolLeases(input: {
@@ -1022,30 +1242,20 @@ export async function readTaskAgentActivity(
       canonicalScope: context.taskScope,
     });
     if (!planner.ok) return projectionFailure(planner.failure);
-    const bindings = await listTaskActiveTurnBindings({ journal: options.controlJournal, scope: context.taskScope });
     const work: ReturnedWork[] = [];
-    const collectWork = (entries: readonly ActiveTurnJournalRecord[]) => {
-      for (const entry of entries) {
+    for (const source of [...context.activeSources, ...context.segmentSources]) {
+      for (const entry of source.entries) {
         if (entry.kind === 'child-delivery' && entry.entry.kind === 'execution') {
           work.push({ assignment: entry.entry.assignment, result: entry.entry.result });
         }
       }
-    };
-    for (const { binding } of bindings) collectWork(decodeActiveTurnRecords(context.controlRecords, binding.admittedTurn.turnId));
-    for (const { opened } of context.sources.resumedSegments) {
-      collectWork(await createJsonlActiveTurnSegmentJournal({ journal: options.controlJournal,
-        businessTurnId: opened.businessTurnRef.businessTurnId }).readSegmentRecords({
-        businessTurnId: opened.businessTurnRef.businessTurnId, segmentId: opened.segmentId }));
     }
-    const child = await assembleChildInvocations({
+    const child = assembleChildInvocations({
       taskId: options.taskId,
-      bindings,
+      activeSources: context.activeSources,
+      segmentSources: context.segmentSources,
       work,
-      segments: context.sources.resumedSegments.map(({ opened }) => ({
-        turnId: opened.businessTurnRef.businessTurnId, opened,
-      })),
       controlRecords: context.controlRecords,
-      journal: options.controlJournal,
     });
     const pool = assembleRuntimePoolLeases({ taskId: options.taskId,
       targets: [
@@ -1056,13 +1266,45 @@ export async function readTaskAgentActivity(
     const pages = await listMilestoneReviews({ taskScope: context.taskScope, i2Journal: options.i2Journal });
     const review = assembleMilestoneReviews({ taskId: options.taskId, pages, work });
     const currentAuthority = options.currentAuthority ?? liveAuthority(options);
-    return selectAndProjectAgentActivity({
+    const projected = selectAndProjectAgentActivity({
       taskId: options.taskId, query: options.query, core: context.sources,
       ...(currentAuthority === undefined ? {} : { currentAuthority }),
       remainingSources: { childInvocations: child.sources, runtimePoolLeases: pool.sources, milestoneReviews: review.sources },
       plannerCalls: planner.value.plannerCalls,
       unavailableSources: [...child.unavailableSources, ...pool.unavailableSources, ...review.unavailableSources],
     });
+    if (!projected.ok) return projected;
+    const identity = decodeTaskIdentityRecords(context.controlRecords)
+      .find((candidate) => sameTaskIdentityScope(candidate.scope, context.taskScope));
+    const guidance = resolveTaskFlowGuidanceFromBinding(identity?.taskFlow);
+    const graph = graphChildSources({
+      activeSources: context.activeSources,
+      segmentSources: context.segmentSources,
+      controlRecords: context.controlRecords,
+      work,
+    });
+    const actualExecutionGraph = projectTaskActualExecutionGraph(selectTaskActualExecutionGraph({
+      taskScope: context.taskScope,
+      ...(guidance === undefined ? {} : { guidance }),
+      nativeAllocations: context.sources.nativeAllocations,
+      activeTurns: context.sources.activeTurns,
+      resumedSegments: context.sources.resumedSegments,
+      rawChildInvocations: graph.rawChildInvocations,
+      childDeliveries: graph.childDeliveries,
+      businessClosures: graph.businessClosures,
+      milestoneReviews: review.sources,
+      plannerCalls: planner.value.plannerCalls,
+      ...(currentAuthority === undefined ? {} : { currentAuthority }),
+      unavailableSources: [
+        ...context.sources.unavailableSources,
+        ...child.unavailableSources,
+        ...graph.unavailableSources,
+      ],
+    }));
+    return {
+      ok: true,
+      value: { ...projected.value, actualExecutionGraph },
+    };
   } catch (error) {
     return projectionFailure(readFailure('agent-activity.remaining-source-unavailable',
       error instanceof Error ? error.message : String(error),

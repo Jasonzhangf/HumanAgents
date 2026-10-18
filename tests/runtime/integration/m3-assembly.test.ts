@@ -1,4 +1,9 @@
+/// <reference path="../../../packages/app/src/node-modules.d.ts" />
+
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   id,
@@ -8,9 +13,12 @@ import {
   type ReviewOutput,
   type ScopeRef,
   type Task,
+  type TaskFlowBinding,
   type WorkAssignment,
   type WorkResult,
 } from '../../../packages/contracts/src/index.js';
+import { JsonlOrganJournal } from '../../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskIdentityJournal } from '../../../packages/adapters/jsonl/src/task-identities.js';
 import {
   type AppendEventRequest,
   type ConsumerCommitRequest,
@@ -44,6 +52,8 @@ import {
   createM3Assembly,
   type M3Assembly,
 } from '../../../packages/app/src/m3-assembly.js';
+import { readTaskAgentActivity } from '../../../packages/app/src/ui-runtime/agent-activity-read.js';
+import { createJsonlI2JournalPort } from '../../../packages/app/src/i2-journal.js';
 import { projectTaskDashboard } from '../../../packages/ui/index.js';
 import type {
   CheckpointAppendReceipt,
@@ -62,6 +72,7 @@ const organId = id('organ', 'm3-assembly');
 const taskId = id('task', 'm3-assembly');
 const cycleId = id('cycle', 'm3-assembly');
 const scope: ScopeRef = { organId, taskId, cycleId };
+const taskFlow: TaskFlowBinding = { kind: 'long-running', definitionVersion: 1 as const };
 const task: Task = {
   id: taskId,
   organId,
@@ -121,6 +132,7 @@ function workResult(): WorkResult {
     executionEpoch: 1,
     inputRevision: 1,
     producedArtifactRefs: ['artifact://m3'],
+    producedArtifactBodies: [m3ArtifactBody],
     status: 'succeeded',
     summary: 'M3 modules assembled',
     outputRefs: ['m3-output'],
@@ -307,94 +319,128 @@ function createAssembly(): { readonly assembly: M3Assembly; readonly events: Mem
 
 test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projection', async () => {
   const { assembly, events, checkpoints } = createAssembly();
-  assembly.orchestration.planStage({ nodeId: 'm3-node', taskId });
+  const filePath = join(process.cwd(), 'dist', 'tests', 'fixtures', `m3-identity-${randomUUID()}.jsonl`);
+  try {
+    assembly.orchestration.planStage({ nodeId: 'm3-node', taskId });
 
-  const dispatched = await assembly.orchestration.dispatch({
-    stageNodeId: 'm3-node',
-    assignment: assignment(),
-    agentId: 'worker-m3',
-    scope,
-    reviewKinds: ['quality'],
-    reviewSubjects: [{ ref: 'm3-target', body: m3ArtifactBody }],
-  });
+    const dispatched = await assembly.orchestration.dispatch({
+      stageNodeId: 'm3-node',
+      assignment: assignment(),
+      agentId: 'worker-m3',
+      scope,
+      reviewKinds: ['quality'],
+      reviewSubjects: [{ ref: 'm3-target', body: m3ArtifactBody }],
+    });
 
-  assert.equal(dispatched.status, 'merged');
-  assert.equal(dispatched.assignment.status, 'merged');
-  assert.deepEqual(events.events.map((event) => event.class), ['data', 'data', 'control']);
-  assert.deepEqual(events.events.map((event) => event.publisherId), ['m3-harness', 'm3-harness', 'm3-harness']);
-  const messageIds = events.events.map((event) => event.messageId);
-  assert.equal(new Set(messageIds).size, messageIds.length);
-  for (const event of events.events) {
-    assert.equal(event.messageId.includes(`:${dispatched.assignment.assignment.assignmentId}:1:1:`), true);
-  }
+    assert.equal(dispatched.status, 'merged');
+    assert.equal(dispatched.assignment.status, 'merged');
 
-  const checkpoint: Checkpoint = {
-    id: id('checkpoint', 'm3-checkpoint'),
-    scope,
-    cycleId,
-    seq: 1,
-    previousCheckpointId: null,
-    directiveRevision: task.directiveRevision,
-    executionEpoch: 1,
-    outcome: 'succeeded',
-    summary: 'M3 assembly merged',
-    recoveryStateRef: evidence('recovery'),
-    evidenceRefs: [evidence('merge')],
-    next: { kind: 'continue', ref: 'task:m3-assembly' },
-  };
-  await assembly.appendCheckpoint({
-    ownerId: 'm3-orchestration',
-    commitId: 'm3-commit',
-    checkpoint,
-  });
-  const latest = await assembly.readLatestCheckpoint();
-  assert.equal(latest?.checkpoint.id.value, checkpoint.id.value);
-  assert.equal(checkpoints.appended.length, 1);
-  const otherCycle = id('cycle', 'm3-other-cycle');
-  await assert.rejects(
-    () => assembly.appendCheckpoint({
-      ownerId: 'm3-orchestration',
-      commitId: 'm3-invalid-cycle',
-      checkpoint: {
-        ...checkpoint,
-        id: id('checkpoint', 'm3-invalid-cycle'),
-        cycleId: otherCycle,
-        scope: { ...scope, cycleId: otherCycle },
+    const controlJournal = new JsonlOrganJournal(filePath);
+    await new JsonlTaskIdentityJournal(controlJournal).append({
+      scope: { organId, taskId },
+      taskFlow,
+      source: {
+        requirementId: 'm3-requirement',
+        inputRevision: 1,
+        draftId: 'm3-draft',
+        draftRevisionVersion: 1,
+        draftRevisionHash: 'm3-draft-hash',
+        confirmationRef: 'm3-confirmation',
       },
-    }),
-    Error,
-  );
+    });
+    const activity = await readTaskAgentActivity({
+      taskId,
+      query: { taskId },
+      taskJournal: { records: [] },
+      controlJournal,
+      i2Journal: createJsonlI2JournalPort({ filePath, journal: controlJournal }),
+    });
+    assert.equal(activity.ok, true);
+    if (!activity.ok) throw new Error(activity.failure.message);
+    assert.equal(activity.value.actualExecutionGraph?.guidance?.kind, 'long-running');
+    assert.equal(
+      activity.value.actualExecutionGraph?.guidance?.aim,
+      'Complete one whole-goal part per current revision; use applicable review, standard closure, and the Planner to update the whole-task plan.',
+    );
 
-  const projection = projectTaskDashboard({
-    source: { state: 'ready', label: task.title, updatedAt: '2026-09-18T00:00:00.000Z' },
-    task,
-    userInput: task.directive,
-    objective: dispatched.assignment.result?.summary ?? dispatched.assignment.reason,
-    currentStatus: dispatched.assignment.status,
-    agentCards: [{
-      agentId: dispatched.assignment.agentId ?? 'worker-m3',
-      role: 'orchestration',
-      statusDisplay: dispatched.assignment.status,
-      inputPreview: dispatched.assignment.assignment.objective,
-      outputPreview: dispatched.assignment.result?.summary ?? 'merged',
-    }],
-    runtimePool: {
-      available: 1,
-      active: 0,
-      runtimes: [{
-        runtimeId: 'm3-runtime',
+    assert.deepEqual(events.events.map((event) => event.class), ['data', 'data', 'control']);
+    assert.deepEqual(events.events.map((event) => event.publisherId), ['m3-harness', 'm3-harness', 'm3-harness']);
+    const messageIds = events.events.map((event) => event.messageId);
+    assert.equal(new Set(messageIds).size, messageIds.length);
+    for (const event of events.events) {
+      assert.equal(event.messageId.includes(`:${dispatched.assignment.assignment.assignmentId}:1:1:`), true);
+    }
+
+    const checkpoint: Checkpoint = {
+      id: id('checkpoint', 'm3-checkpoint'),
+      scope,
+      cycleId,
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: task.directiveRevision,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+      summary: 'M3 assembly merged',
+      recoveryStateRef: evidence('recovery'),
+      evidenceRefs: [evidence('merge')],
+      next: { kind: 'continue', ref: 'task:m3-assembly' },
+    };
+    await assembly.appendCheckpoint({
+      ownerId: 'm3-orchestration',
+      commitId: 'm3-commit',
+      checkpoint,
+    });
+    const latest = await assembly.readLatestCheckpoint();
+    assert.equal(latest?.checkpoint.id.value, checkpoint.id.value);
+    assert.equal(checkpoints.appended.length, 1);
+    const otherCycle = id('cycle', 'm3-other-cycle');
+    await assert.rejects(
+      () => assembly.appendCheckpoint({
+        ownerId: 'm3-orchestration',
+        commitId: 'm3-invalid-cycle',
+        checkpoint: {
+          ...checkpoint,
+          id: id('checkpoint', 'm3-invalid-cycle'),
+          cycleId: otherCycle,
+          scope: { ...scope, cycleId: otherCycle },
+        },
+      }),
+      Error,
+    );
+
+    const projection = projectTaskDashboard({
+      source: { state: 'ready', label: task.title, updatedAt: '2026-09-18T00:00:00.000Z' },
+      task,
+      userInput: task.directive,
+      objective: dispatched.assignment.result?.summary ?? dispatched.assignment.reason,
+      currentStatus: dispatched.assignment.status,
+      agentCards: [{
+        agentId: dispatched.assignment.agentId ?? 'worker-m3',
         role: 'orchestration',
-        state: 'available',
-        resourceSummary: 'execute',
+        statusDisplay: dispatched.assignment.status,
+        inputPreview: dispatched.assignment.assignment.objective,
+        outputPreview: dispatched.assignment.result?.summary ?? 'merged',
       }],
-    },
-    requiresUserHandling: false,
-    observationRef: 'task://m3-assembly/observation',
-  });
-  assert.equal(projection.surface, 'task-dashboard');
-  assert.equal(projection.taskId.value, taskId.value);
-  assert.equal(projection.agentCards[0]?.outputPreview, 'M3 modules assembled');
-  assert.equal(projection.runtimePool.runtimes[0]?.runtimeId, 'm3-runtime');
+      runtimePool: {
+        available: 1,
+        active: 0,
+        runtimes: [{
+          runtimeId: 'm3-runtime',
+          role: 'orchestration',
+          state: 'available',
+          resourceSummary: 'execute',
+        }],
+      },
+      requiresUserHandling: false,
+      observationRef: 'task://m3-assembly/observation',
+    });
+    assert.equal(projection.surface, 'task-dashboard');
+    assert.equal(projection.taskId.value, taskId.value);
+    assert.equal(projection.agentCards[0]?.outputPreview, 'M3 modules assembled');
+    assert.equal(projection.runtimePool.runtimes[0]?.runtimeId, 'm3-runtime');
+  } finally {
+    await rm(filePath, { force: true });
+  }
 });
 
 test('M3 feedback identity is idempotent per event and distinct across execution epochs', async () => {

@@ -50,6 +50,21 @@ import type { RuntimeTaskPlanHistoryProjection } from '../contracts/task-plan-hi
 import type { RuntimeSemanticObservationEnvelope } from '../contracts/runtime.js';
 import { RuntimeProjectionError } from '../contracts/runtime.js';
 
+export { projectTaskActualExecutionGraph } from './actual-execution-graph.js';
+export type {
+  TaskActualExecutionEdgeSummaryProjection,
+  TaskActualExecutionGraphHistoryProjection,
+  TaskActualExecutionGraphProjection,
+  TaskActualExecutionGroupProjection,
+  TaskActualExecutionGuidanceProjection,
+  TaskActualExecutionNodeProjection,
+  TaskActualExecutionNodeSummaryProjection,
+  TaskActualExecutionNodeTechnicalProjection,
+  TaskActualExecutionStateTone,
+  TaskActualExecutionUngroupedProjection,
+  TaskActualExecutionUnavailableProjection,
+} from '../contracts/actual-execution-graph.js';
+
 export type {
   PublicOutputCommitProjection,
   PublicOutputPublicationProjection,

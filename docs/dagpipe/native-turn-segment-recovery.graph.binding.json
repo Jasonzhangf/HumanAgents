@@ -140,7 +140,7 @@
         "packages/adapters/jsonl/src/active-turn.ts:JsonlActiveTurnSegmentJournal.appendSegmentOpened",
         "packages/runtime/src/context/active-turn-journal.ts:ActiveTurnSegmentAppendPort"
       ],
-      "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内复核三类 predecessor：captured receipt；interrupted anchor（opened commit、records-through、当前 chain tail、仍无相关 receipt）；initial-open anchor（chain.length===0、predecessor.segmentId===businessTurnId、零 v1 recovery-assets.phase commit、按锁内 records 重算 anchor 并 exact 相等）。旧 epoch 迟到写按 fencing 拒绝：append 在 journal.transaction 内，已存在同 commit 的相同 payload/scope 返回原记录（exact 幂等），已存在 successor segment-opened 时拒绝新 epoch-1 append 并抛 JournalIntegrityError。锁内不读网络、不执行工具。initial-open 复核与迟到写 fencing 尚未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
+      "designNote": "在提交边界核验 reservation、原 binding commit、business turn、scope 与 predecessor 后追加 segment-opened，产出独立 segment commit。相同 commit/content 返回原 receipt；异内容冲突。锁内复核三类 predecessor：captured receipt；interrupted anchor（opened commit、records-through、当前 chain tail、仍无相关 receipt）；initial-open anchor（chain.length===0、predecessor.segmentId===businessTurnId、零 v1 recovery-assets.phase commit、按锁内 records 重算 anchor 并 exact 相等）。旧 epoch 迟到写按 fencing 拒绝：append 在 journal.transaction 内，已存在同 commit 的相同 payload/scope 返回原记录（exact 幂等），已存在 successor segment-opened 时拒绝新 epoch-1 append 并抛 JournalIntegrityError。锁内不读网络、不执行工具。appendReceipt 是后续冷恢复读取该 segment 的精确引用；initial-open 复核与迟到写 fencing 尚未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
     },
     "establish_epoch_window": {
       "ownerPath": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
@@ -174,7 +174,7 @@
         "packages/runtime/src/ui-runtime/coordinator.ts:RuntimeExecutionRelease",
         "packages/runtime/src/ui-runtime/cold-execution-resume.ts:resumeColdExecution"
       ],
-      "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）的 typed outcome。failed/unknown completion 保留责任，不伪造成 complete。公开入口在 RuntimeTaskCoordinator.resumeExecution；分支判定与 hold 在 cold-execution-resume。ProviderAgentDriver 的工具轮次预算拒绝已收到但未执行的调用时，通过既有 persistToolResult 持久保存 failed/tool.round-limit/executed:false 观察结果，再抛原 typed budget error；结果不作为控制真源。恢复窗口保留这些 call/output 配对，工具 executor 不被调用，不产生被拒调用的 effect intent/completion，也不重放此前已接受 effect。"
+      "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）的 typed outcome。failed/unknown completion 保留责任，不伪造成 complete。公开入口在 RuntimeTaskCoordinator.resumeExecution；分支判定与 hold 在 cold-execution-resume。只有 cold generation 的 retained dispatch 可以消费已提交 segment 并进入已获取的执行；hydrate、GET 与普通 dispatch 不获得执行许可。ProviderAgentDriver 的工具轮次预算拒绝已收到但未执行的调用时，通过既有 persistToolResult 持久保存 failed/tool.round-limit/executed:false 观察结果，再抛原 typed budget error；结果不作为控制真源。恢复窗口保留这些 call/output 配对，工具 executor 不被调用，不产生被拒调用的 effect intent/completion，也不重放此前已接受 effect。"
     }
   }
 }
