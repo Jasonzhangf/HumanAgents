@@ -1,5 +1,10 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 socket 解阻口径纠正：外部聊天目标不是本机只读前置
+
+- Root要求复核r464为何不能本机读取server证据。已复用r455/r458原回执：request-record日志可读，无日志权限拒绝；旧两轮分别覆盖epoch5约11:54与12:16独立wire采集窗，缺显式body/request_key/rawref关联。lsof监听查询被拒不等于日志读取被拒，不据此扩大权限阻塞。
+- 新候选是r462 epoch6 UTC12:45:19.529Z的同一已知日志精确时间窗关联；旧观察发生在它之前，未见已查该窗的回执。已将最小路径/字段/时窗交Root裁定，只读不POST，不以时间相邻或label定因。外部聊天目标未答只限制发送，不证明技术上已无本机非变更路径。依据及限定接收见RUN/native-socket-owner-handoff-r464-20261018/local-unblock-reception.md；原根因UNKNOWN/无epoch7保持。
+
 ## 2026-10-18 下一大阶段计划已返回，待 Root 决定只读后继派发
 
 - r471 fresh AGY Gemini4 medium实际SUCCESS/exit0，完整计划已接收并交UX Root：下一READY是既有语义/计划公共consumer运行回执与原M4 A/B约束/失败责任的定点只读核对（NEXT-RO-1），当前UI交付不等此计划；条件差额收口在UI正式交付后。没有已证实新代码RED，不新增测试/工作树/业务请求。
