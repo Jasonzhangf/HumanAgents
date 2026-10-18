@@ -1061,6 +1061,38 @@ test('assignment graph rejects stale epochs, wrong agents and duplicate conflict
   assert.equal(conflict.code, 'duplicate-conflict');
 });
 
+test('ordinary dispatch returns progress for an existing running assignment without executing', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
+  });
+  const execution = new StaticExecutionAgent([
+    result({ nextAction: 'settle' }),
+  ]);
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: execution,
+  });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.graph.createAssignment('node-a', assignment());
+  manager.graph.assign(assignment(), 'agent-a', runtimeBinding);
+  manager.graph.start(assignment(), 'agent-a', runtimeBinding);
+
+  const dispatched = await manager.dispatch({
+    stageNodeId: 'node-a',
+    assignment: assignment(),
+    agentId: 'agent-a',
+    scope,
+  });
+
+  assert.equal(dispatched.status, 'running');
+  assert.equal(dispatched.assignment.status, 'running');
+  assert.equal(dispatched.issue?.code, 'assignment-progress-pending');
+  assert.equal(execution.inputs.length, 0);
+  assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
+});
+
 test('failed work retries within budget and escalates after budget exhaustion', async () => {
   const { pool } = factoryPool({
     maxRuntimes: 1,
