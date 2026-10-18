@@ -1,18 +1,18 @@
 {
   "graph": "humanagent-checkpoint-path-reentry",
   "labels": {
-    "read_saved_target": "读取已保存点的可读描述、可信时间与精确身份",
-    "admit_reentry": "按当前权限、控制位置与恢复责任判定是否准入",
+    "read_saved_target": "正式控制请求读取已保存点的可读描述、可信时间与精确身份",
+    "admit_reentry": "现有任务授权与条件重入所有者判定准入",
     "append_path_fact": "允许时在原 Journal 后条件追加新路径、时期与恢复引用",
-    "return_typed_outcome": "返回唯一 typed outcome（已提交或保持，拒绝分支无副作用）"
+    "return_typed_outcome": "返回唯一 typed receipt 并由最新权威投影确认结果"
   },
   "design": {
-    "status": "DESIGN-PLANNED",
-    "implementationStatus": "UNVERIFIED",
-    "purpose": "表达一次从历史或前向已保存点发起的新执行的业务对象流：精确读取目标、当前条件准入、条件追加路径事实、返回 typed outcome。",
+    "status": "IMPLEMENTING",
+    "implementationStatus": "IMPLEMENTING",
+    "purpose": "表达一次从历史或前向已保存点发起的新执行的业务对象流：正式 HTTP/UI 确认入口精确读取目标、现有条件所有者准入、条件追加路径事实、返回 typed receipt 并重读权威投影。",
     "routing": "四个节点的边是无条件 ARC 依赖，节点按单一波次线性执行。准入节点产出 typed decision 值；追加节点以该值为门，被拒绝或保持时返回 not-executed 且不写入任何路径事实；出口节点汇合返回单一 typed outcome。本图不声称条件边、运行期条件路由或仅用于可视化的成功/失败投影节点。",
     "typedOutcomes": {
-      "committed": "已提交的 conditional reentry record（新 epoch、fence 与恢复引用），原 Journal 前缀不变；须精确回读成功后才返回。",
+      "committed": "已提交的 conditional reentry 或 Context correction typed receipt；原 Journal 前缀不变，须精确回读成功后才返回。",
       "held": "因当前权限、控制位置、未知或未收拢操作、或恢复责任而保持当前位置；显式返回原因，零新增路径事实，零副作用。"
     },
     "descriptionAndIdentity": "可读 description 与可信保存时间只用于人或 Agent 判断该选哪个保存点；系统实际操作的保存点由精确 checkpoint 与 publication 身份决定。不增加语义搜索、描述查找注册表或把描述当作身份。",
@@ -22,6 +22,13 @@
       "consumerGraph": "humanagent-memory-curation",
       "boundaryOwner": "packages/app/src/memory-runtime.ts",
       "crossGraphEdge": "committed outcome 提供路径事实；完整审计须等待首个实际恢复 checkpoint/closure，由标准收口或 startup canonical 补审触发。Memory 只消费已提交的路径与纠正证据并产出候选，不决定恢复许可或规则发布。未知副作用与收拢责任仍属原 operation owner。"
+    },
+    "confirmedControlEntrances": {
+      "http": "POST /api/tasks/:taskId/control/context-correction 与 POST /api/tasks/:taskId/control/checkpoint-reentry；projectKey/mode 必须成对出现。",
+      "contextBody": "commandId、精确 string wrongRefs、repairText、confirmationRef，可选 sourceCheckpointReceipt 与 expectedControlReceipt。Server 将 string wrongRefs 绑定到已验证的同任务 organ/task scope。",
+      "reentryBody": "commandId、targetCheckpointCommitRef、confirmationRef，可选 expectedCurrentControlCommitRef。",
+      "ownerBoundary": "客户端不发送 filePath、journal、principalOwner 或自造 organ/task identity；这些由 App 服务端 owner 绑定并验证。",
+      "uiProjection": "viewed.identity.commitRef 是重入目标与修正来源，viewed.context.activeRefs 是可选精确排除列表，current.position.controlCommitRef 是 expected control；UI 不解析 Journal 或重算摘要。"
     },
     "separateSameTurnRecovery": "同一业务 turn 的冷恢复是另一张独立图；本图只表达任意历史/前向保存点的条件重入。",
     "notAdded": [

@@ -913,6 +913,65 @@ test('observation API keeps subtree, node, agent, project, and mode in one read'
   assert.equal(request.searchParams.get('mode'), 'rcc');
 });
 
+test('confirmed task controls keep the exact scope and business body', async () => {
+  const { RuntimeApiError, createRuntimeApi } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/runtime-api.js')}`,
+  ).href) as {
+    RuntimeApiError: typeof Error;
+    createRuntimeApi: (options: {
+      fetchImpl: (url: string, init: { method?: string; body?: string }) => Promise<unknown>;
+    }) => {
+      submitTaskContextCorrection: (taskId: string, body: Record<string, unknown>, scope: Record<string, unknown>) => Promise<unknown>;
+      submitTaskCheckpointReentry: (taskId: string, body: Record<string, unknown>, scope: Record<string, unknown>) => Promise<unknown>;
+    };
+  };
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  const api = createRuntimeApi({
+    fetchImpl: async (url, init) => {
+      calls.push({ url, method: init.method, body: init.body });
+      return { ok: true, status: 200, json: async () => ({ committed: true }) };
+    },
+  });
+  const scope = { projectKey: 'project-a', mode: 'rcc' };
+  const wrongRefs = [{ taskScope: { organId: 'organ-a', taskId: 'task-a' }, ref: 'ctx:idle' }];
+  const sourceCheckpointReceipt = { commitId: 'checkpoint-a', journalSeq: 7, recordDigest: 'sha256:cp' };
+  const expectedControlReceipt = { commitId: 'control-a', journalSeq: 8, recordDigest: 'sha256:control' };
+  const corrected = {
+    commandId: 'correction-1', wrongRefs, repairText: 'use committed facts',
+    confirmationRef: 'confirmation-1', sourceCheckpointReceipt, expectedControlReceipt,
+  };
+  const targetCheckpointCommitRef = { commitId: 'checkpoint-b', journalSeq: 9, recordDigest: 'sha256:target' };
+  const expectedCurrentControlCommitRef = { commitId: 'control-b', journalSeq: 10, recordDigest: 'sha256:current' };
+  const reentered = {
+    commandId: 'reentry-1', targetCheckpointCommitRef, confirmationRef: 'confirmation-2',
+    expectedCurrentControlCommitRef,
+  };
+  await api.submitTaskContextCorrection('task-a', corrected, scope);
+  await api.submitTaskCheckpointReentry('task-a', reentered, scope);
+  assert.deepEqual(calls, [
+    {
+      url: '/api/tasks/task-a/control/context-correction?projectKey=project-a&mode=rcc',
+      method: 'POST', body: JSON.stringify(corrected),
+    },
+    {
+      url: '/api/tasks/task-a/control/checkpoint-reentry?projectKey=project-a&mode=rcc',
+      method: 'POST', body: JSON.stringify(reentered),
+    },
+  ]);
+  const failing = createRuntimeApi({
+    fetchImpl: async () => ({ ok: false, status: 409, json: async () => ({ error: { code: 'control.stale', message: 'stale control' } }) }),
+  });
+  let failure: unknown;
+  try {
+    await failing.submitTaskContextCorrection('task-a', corrected, scope);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure instanceof RuntimeApiError, true);
+  assert.equal((failure as { code?: string }).code, 'control.stale');
+  assert.equal((failure as { status?: number }).status, 409);
+});
+
 test('semantic panel closes a finite stream without disconnecting or publishing stale events', async () => {
   class FakeElement {
     readonly nodeType = 1;

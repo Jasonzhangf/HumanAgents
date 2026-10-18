@@ -13,6 +13,7 @@ import {
   stateTone,
   taskDashboardHref,
   taskIdFromQuery,
+  taskReadScopeFromQuery,
   technicalDetailTrigger,
 } from './runtime-shell.js'
 import { advanceExplicitInteraction } from './explicit-interaction-flow.js'
@@ -25,6 +26,8 @@ import {
 
 const requestedTask = taskIdFromQuery(false)
 const requestedInteraction = queryParam('interaction')
+const taskReadScope = taskReadScopeFromQuery()
+const explicitScope = taskReadScope.kind === 'task' ? taskReadScope : null
 const isNew = (requestedTask === 'new' || !requestedTask) && !requestedInteraction
 const { main, status, interactionCardHosts } = makePageShell(
   'Task List',
@@ -545,7 +548,9 @@ function renderTask() {
 
   const actions = element('section', undefined, 'actions')
   const dashboardLink = element('a', '打开 Task Dashboard', 'button button--primary')
-  dashboardLink.href = taskDashboardHref(taskId)
+  // The dashboard owns the confirmed checkpoint controls, so the detail page
+  // must not drop the task's projectKey/mode on the way there.
+  dashboardLink.href = taskDashboardHref(taskId, explicitScope)
   const observationLink = element('a', '打开只读 Observation', 'button')
   observationLink.href = observationHref(taskId)
   actions.append(dashboardLink, observationLink)

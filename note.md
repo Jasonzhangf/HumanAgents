@@ -1,4 +1,14 @@
-# HumanAgent 项目状态汇总（2026-10-17）
+# HumanAgent 项目状态汇总（2026-10-18）
+
+## 2026-10-18 M5 确认控制与双端 checkpoint 交互
+
+main 集成 `d2ab27fe`。已接通 context-correction/checkpoint-reentry 的正式 POST、canonical scope resolver、物理 Journal 提交与 current-state 读回。已确认四字段任务输入从确认到执行载荷保持完整。Runtime 包装保留原 cause；已知旧基准冲突局部返回409，真实 ENOENT 保持500及原因。
+
+真实桌面/手机浏览器已证明：修正精确排除 wrong ref 并保留 accepted fact；checkpoint 重入追加 epoch/history；取消零写；409保留输入；pending禁用且一次POST；隐藏表单、桌面侧层和手机底抽屉无横溢出；原生后退/前进及真正 Page.reload 保持 current/viewed 区分，读取不写 Journal。证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/m5-confirmed-browser-20261018/`；不声称 desktop doubleclick 已验证。
+
+一次独立 Gemini4 medium 整体 Review 正常SUCCESS/exit0，严格输出经现有controller裁决PASS/findings[]。main contracts/config/App、package与全局安装退出0。正式 restart：gen35/PID15697 → gen36/PID11061，53007，旧实例clean收拢。安装模块同一个公开控制consumer1PASS；认证runtime status200，任务页及相关UI资源200，临时session已logout。完整收尾记录在 `/Volumes/Intel/playground/humanagent/.worker-runs/m5-whole-review-20261018/`。
+
+完整 I1–I5/G1–G14/F01–F20仍ACTIVE/INCOMPLETE。长程模板第二轮公开验收、prepared冷恢复、真实RCC约束交付、M1活跃组合及剩余G/F仍未完成。治理消融两份只读审计已返回，独立Planner执行中；AppSDK旧受管契约verify失败未改报PASS。下文历史状态不覆盖本节。
 
 ## UX 最新可用行为与未完成项（2026-10-15）
 

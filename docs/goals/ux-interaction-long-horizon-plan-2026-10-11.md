@@ -7,6 +7,12 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下 2026-10-17 增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。下方 2026-10-14/15 记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
+### 2026-10-18 M5 确认控制可用增量
+
+main 集成 `d2ab27fe`。正式 correction/reentry HTTP→物理owner→Journal/current-state写链已接通；四字段确认输入保真、已知stale409与未知I/O500分离已验证。真实双端浏览器证明精确修正、重入追加、取消零写、失败保留输入、pending单次提交、桌面侧层/手机底抽屉及隐藏表单修复。checkpoint viewed 的原生后退/前进/真实Page.reload已证明，读取不改变Journal。
+
+一次独立Gemini4medium整体Review/现有classifierPASS；main构建打包安装0、正式restart gen35→36/53007；安装模块公开控制consumer1PASS和认证状态200。证据 `/Volumes/Intel/playground/humanagent/.worker-runs/m5-whole-review-20261018/` 与 `m5-confirmed-browser-20261018/`。本增量关闭确认控制和checkpoint导航的明确子能力，不关闭完整G13/G14或整体I1–I5。真实RCC约束交付、prepared冷恢复、M3后继模板及M1活跃组合仍OPEN。以下M5尚未接线的记录为早前过程，不再代表当前行为。
+
 ### 2026-10-18 跨项目读取增量与剩余主线
 
 scoped-read 增量已合入 main `66228f09`，完成一次整体独立 Review、构建打包安装、正式 restart gen34→35，以及安装模块公开 HTTP consumer 和默认打包 UI 入口验收。候选双端实际链证明同名 A/B Task 的 semantic、公开正文、Observation 节点和子层不串数据；A 的 789 字符正文与 API/任务页/节点抽屉一致，B 保持受阻且无最终输出。有限 SSE、手机底部抽屉/返回焦点和四 Journal 只读副作用也已验证。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/m4-scoped-read-review-20261018/` 与 `m4-scoped-candidate-browser-r2-20261017/`。

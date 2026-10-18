@@ -63,6 +63,10 @@ function buttons(root) {
 
 function click(button) { button.dispatch('click') }
 
+async function settled() {
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
 const taskId = { scope: 'task', value: 'task-1' }
 const evidence = {
   evidenceId: { scope: 'evidence', value: 'ev-1' },
@@ -405,6 +409,124 @@ test('detail layer renders four-part semantics, epoch facts, exact refs and expl
   detail.dispose()
   click(referenceButtons[0])
   assert.equal(references.length, 1)
+})
+
+// Failure mode: the public detail renderer has no confirmed Task control, or it
+// submits while a form opens, changes or cancels. Basis: renderCheckpointHistoryDetail
+// currently accepts no confirmed-control callback and the production Task page is
+// the only surface allowed to inject them. Impact: a user cannot correct Context
+// or re-enter a checkpoint, or could write before the final confirmation. Cost:
+// low, the existing element adapter and real exported renderer.
+test('confirmed controls stay absent without callbacks and submit once only after confirmation', async () => {
+  const readonly = renderCheckpointHistoryDetail(read, { element: createElement })
+  assert.equal(role(readonly.element, 'context-correction-trigger').length, 0)
+  assert.equal(role(readonly.element, 'checkpoint-reentry-trigger').length, 0)
+  readonly.dispose()
+
+  const calls = { context: [], reentry: [], pending: 0 }
+  let resolveContext
+  const detail = renderCheckpointHistoryDetail(read, {
+    element: createElement,
+    onContextCorrection: (body) => {
+      calls.context.push(body)
+      calls.pending += 1
+      return new Promise((resolve) => { resolveContext = resolve })
+    },
+    onCheckpointReentry: async (body) => {
+      calls.reentry.push(body)
+      throw {
+        code: 'confirmed-control.stale',
+        ownerId: 'humanagent.app',
+        message: '当前控制位置已经改变。',
+        nextAction: '重新读取检查点后再确认。',
+      }
+    },
+  })
+  const root = detail.element
+
+  assert.match(text(root), /修正当前 Context/)
+  assert.match(text(root), /从该检查点继续/)
+  assert.match(text(root), /保留历史/)
+  assert.match(text(root), /外部副作用/)
+  assert.match(text(root), /未完成义务/)
+
+  // Opening, selecting an exact active ref, entering repair text and cancelling
+  // are view-only actions. None of them reaches the injected callback.
+  click(role(root, 'context-correction-trigger')[0])
+  const activeRef = role(root, 'wrong-ref-option').find((input) => input.value === 'ref-b')
+  assert.ok(activeRef, 'the current active refs are offered as exact choices')
+  activeRef.checked = true
+  activeRef.dispatch('change')
+  const extraRef = role(root, 'wrong-ref-input')[0]
+  extraRef.value = 'ref-exact-extra'
+  extraRef.dispatch('input')
+  const repair = role(root, 'repair-text')[0]
+  repair.value = '只移除这两个错误引用，保留其余业务事实。'
+  repair.dispatch('input')
+  click(role(root, 'context-correction-cancel')[0])
+  click(role(root, 'checkpoint-reentry-trigger')[0])
+  click(role(root, 'checkpoint-reentry-cancel')[0])
+  click(role(root, 'context-correction-trigger')[0])
+  assert.deepEqual(calls, { context: [], reentry: [], pending: 0 })
+
+  click(role(root, 'context-correction-confirm')[0])
+  click(role(root, 'context-correction-confirm')[0])
+  assert.equal(calls.context.length, 1, 'the pending control accepts only one final confirmation')
+  assert.equal(calls.pending, 1)
+  assert.deepEqual(calls.context[0], {
+    wrongRefs: ['ref-b', 'ref-exact-extra'],
+    repairText: '只移除这两个错误引用，保留其余业务事实。',
+    sourceCheckpointReceipt: B.commitRef,
+    expectedControlReceipt: read.value.current.position.controlCommitRef,
+  })
+  resolveContext({})
+  await settled()
+
+  click(role(root, 'checkpoint-reentry-trigger')[0])
+  click(role(root, 'checkpoint-reentry-confirm')[0])
+  await settled()
+  assert.deepEqual(calls.reentry, [{
+    targetCheckpointCommitRef: B.commitRef,
+    expectedCurrentControlCommitRef: read.value.current.position.controlCommitRef,
+  }])
+  const failure = role(root, 'checkpoint-control-failure')[0]
+  assert.ok(failure, 'the real rejected message remains visible')
+  assert.match(text(failure), /当前控制位置已经改变/)
+  assert.match(text(failure), /重新读取检查点后再确认/)
+  assert.match(text(root), /只移除这两个错误引用/)
+  assert.ok(role(root, 'wrong-ref-option').find((input) => input.value === 'ref-b').checked)
+
+  detail.dispose()
+
+  // A committed write whose follow-up refresh fails must not reopen the confirm:
+  // the control record already exists, so a second click would be a second command.
+  let committedCalls = 0
+  const committed = renderCheckpointHistoryDetail(read, {
+    element: createElement,
+    onContextCorrection: async () => {
+      committedCalls += 1
+      throw {
+        code: 'checkpoint-control.refresh-failed',
+        ownerId: 'humanagent.ui.task-dashboard',
+        message: '控制已提交，但权威检查点重读失败。',
+        nextAction: '重新读取权威任务与检查点状态后再继续。',
+        committed: true,
+      }
+    },
+  })
+  const committedRoot = committed.element
+  click(role(committedRoot, 'context-correction-trigger')[0])
+  role(committedRoot, 'wrong-ref-option').find((input) => input.value === 'ref-b').checked = true
+  role(committedRoot, 'wrong-ref-input')[0].value = ''
+  role(committedRoot, 'repair-text')[0].value = '保留其余业务事实。'
+  click(role(committedRoot, 'context-correction-confirm')[0])
+  await settled()
+  click(role(committedRoot, 'context-correction-confirm')[0])
+  await settled()
+  assert.equal(committedCalls, 1, 'a committed write must not be resubmitted after refresh failure')
+  assert.equal(role(committedRoot, 'context-correction-confirm')[0].disabled, true)
+  assert.match(text(role(committedRoot, 'checkpoint-control-failure')[0]), /控制已提交/)
+  committed.dispose()
 })
 
 test('query helpers round-trip the view target only and keep parent params and duplicates', () => {
