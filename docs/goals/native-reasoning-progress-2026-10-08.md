@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 已交付：Memory 输入与路径审计合同增量
+
+- 产品三文件 `5af0211b` 已正常FF进入main并push：远端回执 `b5913402..5af0211b main -> main`。输入显式提供metadata-only auditPrompt，保留prompt正文与sources；模板要求按真实证据说明displaced/retained路径。不增加parserfallback、重试或候选强制生成。
+- r308原payloadconsumer真实RED（auditPrompt undefined）→GREEN2/2；r310修改后原真实Memory单case1/1PASS，parent读取Qlbayu/receipt确认3start/request/output/settle/release，review model/succeeded/autoUpdatefalse。rewind解释明确移除wrong-business-ref、保留accepted-prefix；经验不足合法attention。只证明本增量，不宣称完整Memory经验质量或全目标完成。
+- 独立r311 Opus实际quota/exit3未审；r312 freshGemini4medium有效JSON/exit0/空findings，经既有classifier裁决PASS。main contracts/config/App重建、原Memory2/2、package:candidate/install:global均0（session53518）。官方installed restart0（session42359），gen27/PID3091→gen28/PID77100、53007、legacyClose clean；新进程实际存活且HTTP200。启动证明不替代真实Memory单case证据。
+- Memory来源树已clean、作者与reviewer均terminal；push后正常remove/prune/test不存在全部0（session54130）。其证据保留于既有RUN根r308/r310/r311/r312；候选与预算/peerApp仍有未完责任，不清理他人资源。完整goal ACTIVE/INCOMPLETE，segment身份冲突由r313独立规划，inspection仍由peer接线与定位。
+
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
 - Memory r308三文件作者RED（缺auditPrompt，1fail1pass）→GREEN2/2，source5af0211b正常提交并cherry候选b3a55365。修改后r310原单livecase实际1/1PASS/127s/exit0，parent读取Qlbayu/receipt确认3start/request/output/settle/release、review model/succeeded/autoUpdatefalse；rewind解释明确wrong-business-ref被移除、accepted-prefix保留并关联原/恢复checkpoint，因占位经验不足合法attention，不伪造candidate。不宣称普遍JSON保证或完整N2。独立整体增量Review r311 Opus实quota/exit3未审，fresh Gemini r312进行。
@@ -18,6 +25,11 @@
 
 - 接续实质推进：Runtime 首次 inspection cycle opening 来源 `8e0516ce` 已标准 cherry-pick 到唯一候选 `9e46f3e8`。组合 contracts build、agent-loop tsc 均 exit 0；`--test-name-pattern='inspection'` 原 consumer 15/15 PASS。仍未 main，不代替完整 App/native 或正常 settlement 验收。peer 保留原 Runtime 树继续 aligned settlement，候选 Git 窗口已释放。
 - N2 r303 单例真实 Memory 计划已接收，fresh GCM r304（tmux `ha-memory-r304`）执行 main 既有 opt-in consumer，不改源码；单次 invocation 最多三次 Memory submit、零 retry/fallback。结果待接收。N3 r302 预算错误恢复 consumer 的 PID80939 已核实仍 live；尚无改动/完成回执，不宣称完成。总目标 ACTIVE/INCOMPLETE。
+- 三来源已正常合唯一candidate：stopresources35b98540 Appbuild/tsc0+原segment4/4PASS（session96296）；G14display b4e41a92原MJS10/10PASS，HTTPtext/provenance/selector/capture不变，installedchild双端未验；tests-only519c4f11合法missinginspectionports RED复用，WIP不main、不冒positive。回执inspection-stop-resources-and-g14-composed-20261017.txt，已通知UX关来源并从组合基线派finalApp。
+- r300只读观察完成：tool.round-limit在未执行该轮tools前、已观察rawtoolcall后、未commitObservedCompletion/标准closure处触发；原Provider测试只证cutoff无副作用，原coldconsumer另seedopen状态，不证该真实budget失败后resume。r301独立Gemini4局部plan已启动，优先小阈值复用原publiccoldconsumer验证samebusinessTurn/op/epoch/工具配对和不重放；当前仅证据缺口，不直接删32或改产品。UX新发现business-cycle-opened缺生产publisher沿其独立plan，不由App伪造，不与本侧抢写。
+
+- 容量wait远端收口已完成：实际push `8442df17..749a885a main -> main`，最新main正常合回唯一candidate，仅progress文档差异；canonical窗口已释放，UX已知gen27/PID3091/53007。旧“仅剩push”段为前序记录，不再待办。
+- 下一必要N3证据观察r300 freshGCM只读启动：原32round限制的物理执行预算/同逻辑turn恢复/工具配对与副作用边界，最多8source+已有consumer/receipt。既不凭数值认定永久cap，也不未经证明宣称无限长程；缺证据与真实缺陷分开，不先新增测试/改限制，不碰UXwriter。
 
 - 容量wait完整增量已main `c69c33ab`：独立delivery45e76f4e/c69c33ab四文件，r299 Gemini4medium SUCCESS/exit0/有效JSON/findings空，现有原classifier裁决pass；r298 Opus实quota429未审。正常fetch/合latestorigin后FF main，无inspection候选混入。
 - main contracts/config/App重建、package:candidate/install:global均exit0（session79031）；官方restart exit0（session78905），gen26/PID87116→gen27/PID3091，port53007、legacyClose clean。新PID实际存活39秒、installedlauncher、HTTP200。main provider tsc+目标6/6、App tsc+真实combinedconsumer1/1PASS（session54488）。受控replay行为与installed启动证明分别记录，不冒real RCC或Task标准收口完成。
