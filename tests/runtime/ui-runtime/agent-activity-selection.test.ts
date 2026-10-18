@@ -203,6 +203,7 @@ function segment(
   segmentId: string,
   predecessorSegmentId: string,
   phase: number,
+  predecessorOverride?: ResumedTurnSegmentOpened['predecessor'],
 ): { readonly opened: ResumedTurnSegmentOpened; readonly openedCommitRef: JournalCommitRef; readonly source: AgentActivityResumedSource } {
   const segmentIncarnation = incarnation(
     'native-runtime-2',
@@ -228,7 +229,10 @@ function segment(
     kind: 'segment-opened',
     segmentId,
     businessTurnRef: originalBusinessTurnRef,
-    predecessor: { segmentId: predecessorSegmentId, recoveryAssetsReceiptRef: `receipt:${predecessorSegmentId}` },
+    predecessor: predecessorOverride ?? {
+      segmentId: predecessorSegmentId,
+      recoveryAssetsReceiptRef: `receipt:${predecessorSegmentId}`,
+    },
     binding,
     authorityCommitRef: commit(`commit-authority-${segmentId}`, 10 + phase),
     businessRegistrationCommitRef: commit(`commit-registration-${segmentId}`, 20 + phase),
@@ -254,6 +258,17 @@ function segment(
 
 const firstSegment = segment('segment-1', 'segment-0', 1);
 const secondSegment = segment('segment-2', 'segment-1', 2);
+const initialOpenSegment = segment('segment-initial-open', 'turn-2', 3, {
+  segmentId: 'turn-2',
+  initialOpen: { bindingCommitRef: activeCommit, recordsThroughCommitRef: activeCommit },
+});
+const mismatchedInitialOpenSegment = segment('segment-initial-open-mismatch', 'turn-2', 4, {
+  segmentId: 'turn-2',
+  initialOpen: {
+    bindingCommitRef: commit('commit-foreign-binding', 88),
+    recordsThroughCommitRef: commit('commit-foreign-record', 89),
+  },
+});
 
 const childAssignment = workAssignment('assignment-child', {
   pipelineNodeId: 'node-child',
@@ -410,7 +425,12 @@ test('maps exact turn and segment identities and only emits proven relations', (
     },
     nativeAllocations: [nativeSource],
     activeTurns: [activeSource],
-    resumedSegments: [firstSegment.source, secondSegment.source],
+    resumedSegments: [
+      firstSegment.source,
+      secondSegment.source,
+      initialOpenSegment.source,
+      mismatchedInitialOpenSegment.source,
+    ],
     rawChildInvocations: [childInvocationSource],
     childDeliveries: [childDeliverySource, orphanDeliverySource],
     businessClosures: [{ closure: businessClosure, commitRef: closureCommit }],
@@ -431,7 +451,10 @@ test('maps exact turn and segment identities and only emits proven relations', (
   const resumed = nodes.filter(
     (node): node is TaskActualExecutionResumedSegmentNode => node.kind === 'resumed-segment',
   );
-  assert.deepEqual(resumed.map((node) => node.segmentId).sort(), ['segment-1', 'segment-2']);
+  assert.deepEqual(
+    resumed.map((node) => node.segmentId).sort(),
+    ['segment-1', 'segment-2', 'segment-initial-open', 'segment-initial-open-mismatch'],
+  );
   assert.equal(resumed.every((node) => node.segmentState.status === 'opened'), true);
   assert.equal(
     resumed.find((node) => node.segmentId === 'segment-1')!.terminalCommitRefs.length,
@@ -467,5 +490,31 @@ test('maps exact turn and segment identities and only emits proven relations', (
   assert.equal(
     snapshot.history.edges.some((edge) => edge.kind === 'contains' && edge.toNodeId === segmentTwoId),
     true,
+  );
+  const initialOpenNode = requireNode(
+    resumed.find((node) => node.segmentId === 'segment-initial-open'),
+    'initial-open resumed segment node missing',
+  );
+  const mismatchedNode = requireNode(
+    resumed.find((node) => node.segmentId === 'segment-initial-open-mismatch'),
+    'mismatched initial-open resumed segment node missing',
+  );
+  assert.equal(
+    snapshot.history.edges.some((edge) =>
+      edge.kind === 'precedes'
+      && edge.fromNodeId === activeNode.nodeId
+      && edge.toNodeId === initialOpenNode.nodeId),
+    true,
+    'a proven initial-open anchor precedes from the exact original active-turn node',
+  );
+  assert.deepEqual(
+    {
+      edge: snapshot.history.edges.some((edge) =>
+        edge.kind === 'precedes' && edge.toNodeId === mismatchedNode.nodeId),
+      unresolved: snapshot.history.ungrouped.some((entry) =>
+        entry.kind === 'precedes' && entry.nodeId === mismatchedNode.nodeId),
+    },
+    { edge: false, unresolved: true },
+    'a mismatched initial-open anchor stays unresolved and emits no precedes edge',
   );
 });

@@ -966,6 +966,49 @@ function resumedSegmentNodeId(
   return `resumed-segment:${businessTurnId}:${segmentId}:${openedCommitRef.commitId}`;
 }
 
+/**
+ * Resolve the exact selected node a resumed segment precedes. The initial-open
+ * branch points at the original active turn, so it must match that node's real
+ * binding commit and a committed record of the node. The interrupted branch
+ * must match the predecessor segment's real opened commit, not its id alone.
+ * The captured branch keeps its existing receipt-free segment-id match.
+ */
+function resolvePredecessorNode(
+  predecessor: ResumedTurnSegmentOpened['predecessor'],
+  businessTurnId: string,
+  nodes: readonly TaskActualExecutionGraphNode[],
+): { readonly nodeId: string } | { readonly reason: string } {
+  if (predecessor.initialOpen !== undefined) {
+    const anchor = predecessor.initialOpen;
+    const active = nodes.find((node) =>
+      node.kind === 'active-turn'
+      && node.businessTurnId === businessTurnId
+      && sameJournalCommitRef(node.bindingCommitRef, anchor.bindingCommitRef)
+      && node.commitRefs.some((ref) => sameJournalCommitRef(ref, anchor.recordsThroughCommitRef)));
+    return active === undefined
+      ? { reason: 'the initial-open anchor has no exact original active-turn node' }
+      : { nodeId: active.nodeId };
+  }
+  if (predecessor.interrupted !== undefined) {
+    const anchor = predecessor.interrupted;
+    const interrupted = nodes.find((node) =>
+      node.kind === 'resumed-segment'
+      && node.businessTurnId === businessTurnId
+      && node.segmentId === predecessor.segmentId
+      && sameJournalCommitRef(node.openedCommitRef, anchor.openedCommitRef));
+    return interrupted === undefined
+      ? { reason: 'the interrupted predecessor anchor has no exact opened segment node' }
+      : { nodeId: interrupted.nodeId };
+  }
+  const captured = nodes.find((node) =>
+    node.kind === 'resumed-segment'
+    && node.businessTurnId === businessTurnId
+    && node.segmentId === predecessor.segmentId);
+  return captured === undefined
+    ? { reason: 'the exact predecessor segment has no selected graph node' }
+    : { nodeId: captured.nodeId };
+}
+
 function locationKey(location: TaskActualExecutionContainingLocation): string {
   if (location.kind === 'active-turn') {
     return `active-turn:${location.businessTurnId}:${location.bindingCommitRef.commitId}`;
@@ -1563,23 +1606,23 @@ export function selectTaskActualExecutionGraph(
         toNodeId: resumedNodeId,
       });
     }
-    const predecessorSegmentId = opened.predecessor.segmentId;
-    const predecessor = nodes.find((node) =>
-      node.kind === 'resumed-segment'
-      && node.businessTurnId === businessTurnId
-      && node.segmentId === predecessorSegmentId);
-    if (predecessor === undefined) {
+    const predecessorResolution = resolvePredecessorNode(
+      opened.predecessor,
+      businessTurnId,
+      nodes,
+    );
+    if ('reason' in predecessorResolution) {
       ungrouped.push({
         nodeId: resumedNodeId,
         kind: 'precedes',
-        targetRef: predecessorSegmentId,
-        reason: 'the exact predecessor segment has no selected graph node',
+        targetRef: opened.predecessor.segmentId,
+        reason: predecessorResolution.reason,
       });
     } else {
       edges.push({
-        edgeId: `precedes:${predecessor.nodeId}->${resumedNodeId}`,
+        edgeId: `precedes:${predecessorResolution.nodeId}->${resumedNodeId}`,
         kind: 'precedes',
-        fromNodeId: predecessor.nodeId,
+        fromNodeId: predecessorResolution.nodeId,
         toNodeId: resumedNodeId,
       });
     }
