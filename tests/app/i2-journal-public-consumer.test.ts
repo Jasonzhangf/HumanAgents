@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { canonicalJsonStringify, id } from '../../packages/contracts/src/index.js';
 import type {
+  ActiveTurnBinding,
   BusinessCycleClosedRecord,
   BusinessCycleOpenedRecord,
   DurableInspectionDefinition,
@@ -17,7 +18,9 @@ import type {
   JournalCommitRef,
   MilestoneReviewAlignedRecord,
   MilestoneReviewResultRecord,
+  RawAsset,
   ScopeRef,
+  TaskRuntimeIncarnation,
   TaskId,
   WorkAssignment,
   WorkResult,
@@ -37,7 +40,10 @@ import {
   uiRuntimeControlJournalPath,
   uiRuntimeJournalPath,
   uiRuntimeModeRoot,
+  readUiRuntimeTaskJournal,
 } from '../../packages/app/src/ui-runtime/journal.js';
+import { createJsonlCheckpointClosurePort } from '../../packages/app/src/checkpoint-journal.js';
+import { readTaskAgentActivity } from '../../packages/app/src/ui-runtime/agent-activity-read.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
@@ -49,8 +55,10 @@ import {
 import { createTestOrchestrationManager } from '../runtime/orchestration/assignment-graph-test-journal.js';
 import { createReviewAssignments } from '../../packages/runtime/src/review/index.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import { activeTurnCommitId } from '../../packages/runtime/src/context/active-turn-journal.js';
 import { ProviderAgentDriver } from '../../packages/adapters/provider/src/index.js';
 const digestOf = (value: string): string => `sha256:${createHash('sha256').update(value).digest('hex')}`;
+const assignmentGraphFactPayloadType = 'assignment-graph.fact';
 import type {
   ProviderSubmitInput,
   ProviderStartInput,
@@ -347,6 +355,85 @@ async function openFixture(prefix: string): Promise<Fixture> {
 }
 
 const at = (n: number): string => new Date(Date.UTC(2026, 9, 13, 0, 0, n)).toISOString();
+
+async function persistNativeMilestoneTurn(input: {
+  readonly organPath: string;
+  readonly taskScope: TaskScope;
+  readonly scope: ScopeRef;
+  readonly assignment: WorkAssignment;
+  readonly result: WorkResult;
+  readonly incarnation: TaskRuntimeIncarnation;
+}): Promise<{
+  readonly turnId: string;
+  readonly invocationCommitId: string;
+  readonly deliveryCommitId: string;
+}> {
+  const turnId = 'native-milestone-turn';
+  const journal = new JsonlOrganJournal(input.organPath);
+  const active = createJsonlActiveTurnJournal({ journal, turnId });
+  const admittedTurn = {
+    turnId, workAssignmentRef: input.assignment.assignmentId, taskRef: input.taskScope.taskId,
+    scopeRef: input.scope, cycleRef: input.scope.cycleId!, inputRevision: input.assignment.inputRevision,
+    directiveRevision: input.assignment.inputRevision, executionEpoch: input.assignment.executionEpoch,
+    runtimeBindingRef: input.incarnation.runtimeId, permissionRevision: 'native-milestone-permission',
+    admissionEvidenceRefs: [], currentTurnRef: `active-turn://${turnId}`, recoveryStateRef: 'native-milestone-recovery',
+  };
+  const binding: ActiveTurnBinding = {
+    admittedTurn, assignment: input.assignment,
+    execution: { runtimeId: input.incarnation.runtimeId, executionEpoch: input.assignment.executionEpoch },
+    scope: input.scope,
+  };
+  const context = await ActiveTurnContext.open({
+    journal: active, binding, currentTurnRef: admittedTurn.currentTurnRef,
+  });
+  const initialInput: RawAsset = {
+    ref: { evidenceId: id('evidence', 'native-milestone-input'), kind: 'execution',
+      source: 'i2-public-consumer', locator: 'native-milestone-input',
+      digest: digestOf('native-milestone-input'), scope: input.scope },
+    view: { kind: 'utf8-text' },
+  };
+  await context.registerInitialInput(initialInput);
+  const invocationId = input.assignment.assignmentId;
+  await context.openChildInvocation({
+    invocationId, childTurnId: `${invocationId}-child`,
+    checkpointReceiptRef: 'native-milestone-pre-call',
+    binding: { kind: 'execution', assignment: input.assignment },
+    incarnation: input.incarnation,
+  });
+  await context.recordChildReturn({
+    kind: 'execution', invocationId, refinedDelivery: initialInput,
+    assignment: input.assignment, result: input.result,
+  });
+  const invocationCommitId = activeTurnCommitId(turnId, `invocation:${invocationId}`);
+  const deliveryCommitId = activeTurnCommitId(turnId, `delivery:${invocationId}`);
+  const committed = (await journal.replay()).flatMap((record) => (
+    record.commitId === undefined ? [] : [record.commitId]
+  ));
+  assert.ok(committed.includes(invocationCommitId));
+  assert.ok(committed.includes(deliveryCommitId));
+  await createJsonlCheckpointClosurePort({ filePath: input.organPath, journal }).commit({
+    closureKind: 'turn-closure', closureId: `turn-closure:${turnId}`,
+    identity: {
+      turnId, workAssignmentRef: input.assignment.assignmentId, taskRef: input.taskScope.taskId,
+      scopeRef: input.scope, cycleRef: input.scope.cycleId!,
+      inputRevision: input.assignment.inputRevision, directiveRevision: input.assignment.inputRevision,
+      executionEpoch: input.assignment.executionEpoch,
+      runtimeBindingRef: input.incarnation.runtimeId,
+      permissionRevision: admittedTurn.permissionRevision,
+    },
+    checkpointId: id('checkpoint', 'native-milestone-close'),
+    closureRef: `turn-closure:${turnId}:1`,
+    recoveryStateRef: initialInput.ref,
+    summary: {
+      goal: { text: input.assignment.objective, evidenceRefs: [initialInput.ref] },
+      actions: { text: 'persisted the native child call', evidenceRefs: [initialInput.ref] },
+      result: { text: input.result.summary, evidenceRefs: [initialInput.ref] },
+      expectedNextStep: { text: 'read the actual execution graph', evidenceRefs: [initialInput.ref] },
+    },
+    closedAt: at(2),
+  });
+  return { turnId, invocationCommitId, deliveryCommitId };
+}
 
 // callChild failure probability UNKNOWN; API absence is source-confirmed.
 // Impact: repeated review reruns work, loses call identity, or adopts without
@@ -974,6 +1061,57 @@ test('declared milestone review commits a real I2 receipt per registered invocat
     assert.equal(receipts.length, 2, 'each registered invocation commits exactly one I2 receipt');
     assert.deepEqual(f.seenRequestInvocations(), ['milestone-review', 'milestone-review-2'],
       'each declared review request carries its own registered parent invocation');
+
+    // The default native path records the real child call as an active-turn
+    // invocation and accepted delivery in the same Organ Journal. Read the
+    // actual execution graph back from a cold Journal handle and prove the
+    // native child/review evidence exists with zero classic AssignmentGraph
+    // facts, and that the read itself never appends.
+    const native = await persistNativeMilestoneTurn({
+      organPath: join(f.root, 'organ.jsonl'), taskScope: f.taskScope, scope: f.scope,
+      assignment: workInput.assignment, result: work.result, incarnation: work.incarnation,
+    });
+    const coldJournal = new JsonlOrganJournal(join(f.root, 'organ.jsonl'));
+    const beforeRead = (await coldJournal.replay()).length;
+    const graphRead = await readTaskAgentActivity({
+      taskId: f.taskScope.taskId, query: { taskId: f.taskScope.taskId },
+      taskJournal: readUiRuntimeTaskJournal(join(f.root, 'checkpoints'), 'rcc'),
+      controlJournal: coldJournal,
+      i2Journal: createJsonlI2JournalPort({ filePath: join(f.root, 'organ.jsonl') }),
+    });
+    assert.equal(graphRead.ok, true);
+    if (!graphRead.ok) throw new Error(JSON.stringify(graphRead.failure));
+    const graph = graphRead.value.actualExecutionGraph;
+    if (graph === undefined) throw new Error('a successful native read must carry the actual execution graph');
+    assert.equal(graph.history.status, 'recorded');
+    if (graph.history.status !== 'recorded') throw new Error(JSON.stringify(graph.history));
+    const nodes = graph.history.groups.flatMap((group) => group.nodes);
+    const kinds = nodes.map((node) => node.kind);
+    assert.ok(kinds.includes('active-turn'), 'the admitted native turn must be a node');
+    assert.ok(kinds.includes('child-invocation'), 'the real child invocation must be a node');
+    assert.ok(kinds.includes('milestone-review'), 'the real milestone review must be a node');
+    assert.equal(kinds.includes('orphan-child-delivery'), false, 'the recorded delivery joined its invocation');
+    const childNode = nodes.find((node) => node.kind === 'child-invocation');
+    assert.equal(childNode?.technical.assignmentId, workInput.assignment.assignmentId);
+    assert.equal(childNode?.technical.invocationId, workInput.call.invocationId);
+    assert.equal(childNode?.technical.containingLocationKind, 'active-turn');
+    assert.equal(childNode?.technical.containingLocationBusinessTurnId, native.turnId);
+    assert.equal(childNode?.summary.objective, workInput.assignment.objective);
+    assert.equal(childNode?.summary.stateLabel, '已完成（历史）');
+    assert.equal(childNode?.summary.resultSummary, work.result.summary);
+    assert.ok(childNode?.technical.commitRefs.some((ref) => ref.commitId === native.invocationCommitId));
+    assert.match(childNode?.technical.message ?? '', new RegExp(native.deliveryCommitId));
+    const reviewNode = nodes.find((node) => node.kind === 'milestone-review');
+    assert.ok(reviewNode?.technical.commitRefs.some((ref) => ref.commitId === firstRef.commitId));
+    assert.equal(reviewNode?.summary.stateLabel, '复核通过（历史）');
+    assert.equal(reviewNode?.summary.resultSummary, '未发现问题');
+    assert.equal(reviewNode?.summary.objective, workInput.assignment.objective);
+    const readBack = await coldJournal.replay();
+    assert.equal(readBack.filter((record) => record.payload?.type === assignmentGraphFactPayloadType).length, 0,
+      'the native graph read must not depend on classic AssignmentGraph facts');
+    assert.deepEqual(f.manager.snapshot(), { stages: [], assignments: [] },
+      'the single native call path must not run classic graph dispatch');
+    assert.equal(readBack.length, beforeRead, 'reading the graph must not append Journal facts');
     console.info('declared milestone receipts', JSON.stringify({ first: firstRef, second: secondRef }));
   } finally { f.fail(undefined); await f.cleanup(); }
 });
