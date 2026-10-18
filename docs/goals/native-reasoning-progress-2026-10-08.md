@@ -2,6 +2,29 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 容量wait完整增量已main `c69c33ab`：独立delivery45e76f4e/c69c33ab四文件，r299 Gemini4medium SUCCESS/exit0/有效JSON/findings空，现有原classifier裁决pass；r298 Opus实quota429未审。正常fetch/合latestorigin后FF main，无inspection候选混入。
+- main contracts/config/App重建、package:candidate/install:global均exit0（session79031）；官方restart exit0（session78905），gen26/PID87116→gen27/PID3091，port53007、legacyClose clean。新PID实际存活39秒、installedlauncher、HTTP200。main provider tsc+目标6/6、App tsc+真实combinedconsumer1/1PASS（session54488）。受控replay行为与installed启动证明分别记录，不冒real RCC或Task标准收口完成。
+- 作者/Review均terminal，原App交付树已正常remove/prune/testabsent；Provider来源已关闭。此增量仅剩本轮push收尾回执，完整goal仍ACTIVE/INCOMPLETE；inspection继续由peer唯一owner推进，RCC原UNKNOWN不变。
+
+- 容量wait App r297已实际完成：r297/red.log断言缺typedownerwait真RED，恢复映射green1/1；source8d13795e父正常提交并merge候选，标准依赖contracts/Appbuild/tsc0+同consumer1/1PASS（session25278）。真manager/单槽pool/物理Journal/assets，model freshcall新invocation、两child实际执行/adopt，旧wait无prepare/执行；owner实际为manager。前期fixture失败不计RED，driverterminal不冒Task标准closure。
+- 同一App树clean后从latestorigin正常建立独立deliverybranch `codex/capacity-wait-delivery-20261017`，只cherry两来源为45e76f4e/c69c33ab四文件，不带inspection候选。r298 Opus实quota429/未审；r299 freshGemini4medium同scope整体Review进行，未裁决/未main安装。Provider6有效证据复用。
+- nativeassets9b537b8f正常merge候选，Appbuild/tsc0+原4/4PASS（session93126）；owner已关闭来源。Runtime stopcompletiona7d946bb原13/13PASS后peer发现initial-openbinding漏赋值，normalfollowup143803ec已合候选，原named14/14PASS（session16428），该hold解除；不回滚/不重开全审，其余fullnative边界仍未验收。
+
+- 精确turn/invocation reader `b65eba1d` 正常FF candidate，Appbuild/tsc0+原coldJournalconsumer1/1PASS（session82723，inspection-turn-resources-composed-20261017.txt）；forCheckpoint/physical组装仍未完成，已通知UX关闭来源。
+- r296未执行编译，已完成102次source命令仍停接口查找；父目标tsc实际失败为缺imports与kind-only假ExecutionRuntimePort等8项草稿错误，非业务RED。已因明确执行偏离SIGTERM自有PID87808/保留同树195行测试，不是超时重启。r297 freshOAuthGPT6.1medium仅做此具体consumer技术攻关（不是Reviewer或普通worker后备），两允许文件不变；通用执行仍GCM首选，Provider6PASS复用，不扩功能/测试。App业务验收仍OPEN。
+
+- r295身份修订已接受：model下一轮必须freshcall/newinvocation，旧wait无prepare/precheckpoint/执行；不造retryselector。r296 freshGCM同一App树接续原227行单一combinedconsumer，先编译/真实RED再恢复AppmappingGREEN；Provider基础已在该树，不再等依赖。三Provider轮证明waiting入续推/新调用/采纳，不将driverterminal冒称Task标准closure。尚无App业务RED/GREEN。
+
+- pureaccept `7e0e111e` 正常FF候选，contracts/Appbuild/Apptsc0+原dedicated5/5PASS（session56073，inspection-pure-accept-composed-20261017.txt）；复用journal-only接纳实现，无新增case。UX正常关闭来源。
+- r294写出227行consumer但尚无有效RED。父核实新事实：公开child.call由turn/request/toolcall生成invocation，parse不提供旧invocation retryselector，故r291“模型新轮重试同invocation”前提错误。已明确SIGTERM自有PID58300以停止错误设计执行，非超时重启；保留同树改动。r295退原Planner只修公开身份/最小consumer前提，不造API；Manager内部同注册retry与模型freshcall分开。Provider已验6/6不变，App待正确设计后继续。
+
+- r293已终止但未完成：Appmapping20行与测试imports已写，尚无testbody/RED/GREEN，最终只有future-intent，未计验收/提交。父正常FF已验Provider基础c58ce3f6到同一App树，解除真实集成依赖；r294 freshGCM复用原树只完成既定publicconsumer/RED→GREEN，禁止重复扩读/新harness/其他文件。App无业务RED前不得接受来源；整体milestone仍OPEN。
+
+- 容量wait Provider基础 `c58ce3f6` 已正常merge candidate：r292原两新case实际RED→GREEN，保留明确blocked状态/ownerwait、普通manualblock拒绝；原相邻四casePASS。父亲读原events/diff后正常来源提交（作者future-intent退出未提交），组合contracts/provider tsc0+目标6/6PASS（session31898）。sourceclean/terminal后正常remove/prune/absent。App r293仍同树写child-producer+i2consumer，完整same-turn集成未完成，不派leafReview、不称main产品交付。
+
+- Appcapture `2fb247eb` 正常merge候选；contracts/Appbuild/native-delivery tsc0。首次误用旧dist/tests只执行普通case1/1，不计stop证明；父核对config改用dist/tests-native-text后原stop+text2/2PASS（session36452），capture18<checkpoint19，无standard saveintent/closure/Planner。已通知UX关来源；不扩installed/v2/closeonce计数。
+- r291局部修订已接受：明确nonsuccess状态遇error仍保留，只有blocked+typederror retryable+error.nextActionwait继续本turn；普通manualblock/failed不放行。既有manager注册、无queue/自动重放/假success；真实RED仍待执行。r292 Provider2file、r293 App2file freshGCM从最新origin/main并行独占新树，彼此无写冲突；App完整续推consumer在Provider基础合流后验收。旧图闭合复用，不改图或重复validate。
+
 - Runtime stop source `b2bd7f5d` 已正常merge candidate；contractsbuild0/agentlooptsc0/原helpers+boundary9/9PASS（session92762，inspection-runtime-stop-source-composed-20261017.txt）。去NativeSaveIntent依赖、ordinary stop不读capture；Appcapture/fullnative停止仍未验收。UX已正常remove/prune/确认来源不存在。
 - r290独立计划返回并纠正r289：capacity wait并未造成不可恢复cold lock，blocked之后仍generation-ready；真实缺口是正常wait中断当前turn且丢原owner等待语义。初稿未接受执行：父核实toolStatus有error即failed，blocked-only predicate不可达；ProviderToolResult无顶层nextAction；dist-tests命令/毫秒成本编造。已退同Planner r291只修这些局部缺口，继续禁止先改代码/假成功/新waitqueue/背景重放。32round非已证总上限仍不改。
 
