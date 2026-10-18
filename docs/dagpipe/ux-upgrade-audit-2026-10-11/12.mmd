@@ -11,9 +11,9 @@ flowchart TB
  W --> A
  W --> B
  M[成功的直接手动模式选择]:::truth
- P[typed 展示偏好<br/>config 派生 ~/.humanagent 路径]:::design
+ P["typed 展示偏好<br/>[ui.display] 存 controlRoot/config.toml"]:::truth
  V[展示选择<br/>不改领域状态与业务 payload]:::derived
- M -.->|生产偏好持久边待接| P --> V
+ M -->|生产偏好持久边已接: /api/ui/display-preference + config.toml| P --> V
  V --> W
 
 classDef truth fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px;

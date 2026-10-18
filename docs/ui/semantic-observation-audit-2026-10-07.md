@@ -6,7 +6,7 @@
 需求修订：2026-10-08，基线 `56995b3e742b3a400efa45bb42508dd3185284fb`。该基线的 packages 与原审计输入无差异；保留有效源码事实。原测试、构建和浏览器回执仍绑定旧候选，本次未重跑。
 编排者：本次用户目标的执行者。实现由独立执行者负责；不自动建立 Collab 身份。
 
-审计结论：当前已经具备运行引擎、动态 assignment 图、执行 fencing、触发调度、任务列表、实时事件入口及两类 checkpoint 基础。完整语义观测仍未闭环。最先要修的是 context-events→公开语义投影→UX 的断边；随后复用真实 assignment/项目身份补多视角，并补任务阶段模板、计划修订历史和推理提交边界。下文共列 14 个完整目标、20 项差距及对应验收。修正上下文、历史投影查询、checkpoint 导航及生产展示偏好闭环仍为 OPEN。
+审计结论：当前已经具备运行引擎、动态 assignment 图、执行 fencing、触发调度、任务列表、实时事件入口及两类 checkpoint 基础。完整语义观测仍未闭环。最先要修的是 context-events→公开语义投影→UX 的断边；随后复用真实 assignment/项目身份补多视角，并补任务阶段模板、计划修订历史和推理提交边界。下文共列 14 个完整目标、20 项差距及对应验收。修正上下文、历史投影查询、checkpoint 导航、整体 UI 事件模型与跨表面偏好接入仍为 OPEN；展示偏好的生产持久链路对 task-dashboard 与 observation 两个表面已落地，见 §8 生产边界说明。
 
 ## 1. 权威需求
 
@@ -269,7 +269,9 @@ Tour 必须实际改变页面、选择任务、切换版本或打开详情。必
 
 设置显示保存值、有效默认、draft、Save 和 Reset。draft 不写存储。Save 只作用于未来非显式打开，不替换当前显式链接。只有验证成功的直接手动模式选择可更新 follow-last；初始化、hash 回放、浏览器导航、证据链接、Tour、程序路由及设置 Save 均不能记为手动选择。Reset 仅移除本偏好 key。读/写/删除失败或未知版本须标明操作与未保存状态，保留当前视图，不伪造持久化成功。
 
-静态 Mock 只演示窄范围浏览器偏好。生产由 `packages/ui` 拥有展示行为，`packages/config` 拥有 typed 验证与 `~/.humanagent` 持久化路径派生，app 组装控制 API。UI 不解析 TOML，不把偏好变成领域控制真相，不在 project workspace 存 user profile。该生产闭环 OPEN。
+静态 Mock 只演示窄范围浏览器偏好。生产由 `packages/ui` 拥有展示行为，`packages/config` 拥有 typed 验证与 controlRoot 持久化路径派生，app 组装控制 API。UI 不解析 TOML，不把偏好变成领域控制真相，不在 project workspace 存 user profile。
+
+生产边界（2026-10-18 核对）：`packages/config` 的 typed `[ui.display]` 已写入 `<controlRoot>/config.toml`，`packages/app` 已挂载 `/api/ui/display-preference` 的 GET/PUT/DELETE，浏览器共享控制器已在 task-dashboard 与 observation 两个表面接管默认模式、保存与重置；该生产闭环对这两个表面已闭合。follow-last 的跨表面浏览器验收已于同日通过：真实控件保存空 follow-last、Observation 手动 actions、重载、切到 Task Dashboard 展示均保留 `lastManual`，显式 `display=semantic` 覆盖保存模式，Reset 恢复基线且 A/B Journal 不变（回执 `native-preference-browser-20261018/reception.md`）。仍未闭合的是 G10/F16 的整体声明事件模型与其他共享壳页面的偏好接入；这些缺口按原 G/F 条目继续 OPEN，不得凭本段宣称完成。
 
 ### 8.1 控件与模块合同
 
