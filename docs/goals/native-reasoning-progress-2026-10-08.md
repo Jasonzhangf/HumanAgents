@@ -2,6 +2,7 @@
 
 ## 2026-10-17 当前接续：inspection readiness 与真实入口准入
 
+- r340 freshGemini4medium整体Review实际SUCCESS/exit0，scope base/origin-main/commitnull，有效完整六模块证据与findings[]；Root执行既有reviewOutputSchema/classifyReviewOutput裁决PASS，review-outcome.json已存同RUN。r338原Opusquota证据保留，不冒已审。准入涵盖本57file完整inspection功能/架构与适用作者/浏览证据，非原EOF或完整goal关闭；开始标准main/build/install/正式restart/安装模块复验/push，当前尚未交付。
 - 浏览器原定范围已完整接收，正式reception在外置RUN inspection-adopted-body-browser-20261017/reception.md：双端真实正文/来源/布局、HTTP原文==折叠原文及摘要==主层正文、返回详情/Esc焦点恢复均成立；两个Journal直接Buffer.equals true，自有临时serve已gone/53903拒连。peer主动结束重复面板worker后接管最后两项回执，不冒完整workerfinal。全部来源证据移出后Runtime树正常remove/prune/absent，当前仅control/candidate。已满足本57file完整milestone review准入：r338首选Opus真实quota/exit3空输出未审；r340 freshGemini4medium整体Review已启动（PID2396/session30966），尚未裁决/未main。原EOF及全goal其他义务仍OPEN，不扩为本增量门禁。
 - browser r2已有实际入口53903/官方pair200/Ego14p1，Root实际view持久desktop1440x1000与mobile390x844两图，checkpoint2/Journal74/adopted deliveryseq3真实正文完整可读，desktop右侧/mobile底部drawer，raw/source默认折叠。截图在外置RUN inspection-adopted-body-browser-20261017/shots/。撤掉peer误加的每stopcheckpoint需child/capture条件（非需求、无资产点的404不作新缺陷）；回正确已有资产点。HTTP同文/返回焦点/Journal未写/临时service收口仍待最终回执，不记完整PASS。Root r339因91commands后仍猜changes.apply已精确INT93893/实际gone/exit1，partial不接为剩余需求结论；非milestone门禁，不为凑并发再扩调查。
 - browser首派PID82427已因范围漂移主动SIGINT并确认退出（不是超时失败），115commands仍未serve，旧partial不计验收。peer已补精确startServe/CLI/docsuiRoot/control/workspace/正式pair/API与四UI文件，fresh同域r2先serve后真实双端操作，不新树/space/模型。Root并行派只读GCM r339整理原完整goal剩余义务与现有证据边界，不重开N2/C/G、不新增测试/功能、不是本milestone前置。Review仍未启动，浏览既有缺口未完成；当前next入口与资源归属已明确。
