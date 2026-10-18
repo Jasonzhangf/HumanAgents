@@ -2735,7 +2735,8 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
     ], 'each settlement uses the parent-authored aggregate standard-end outcome');
     const childPosts = posts.filter((wire) => {
       const parsed = parseResponsesWire(wire.body);
-      return parsed?.tools?.some((tool) => tool.name === 'humanagent_child_deliver') === true;
+      return plannerPayload(wire.body) === undefined
+        && parsed?.tools?.some((tool) => tool.name === 'humanagent_child_deliver') === true;
     });
     assert.equal(childPosts.some((wire) => wire.body.includes(INSPECTION_CHECK_B.checkId)), false,
       'check-b never reaches the configured child');
