@@ -2,13 +2,13 @@
   "graph": "humanagent-observation-read",
   "labels": {
     "http_api": "处理语义与观测只读请求并按显式项目、模式和任务范围选择真实读取源",
-    "load_task_truth": "读取指定任务状态、同范围准入、同源提交输出和已由 owner 解码的原生执行事实",
+    "load_task_truth": "读取指定任务状态、同范围准入、同源提交输出、已由 owner 解码的原生执行事实，并解析只读任务模板骨架",
     "load_event_history": "读取指定项目与模式的执行事实及真实关联身份",
     "normalize_context_events": "统一归类发生事件并标出语义缺口",
     "pair_context_events": "在同一执行范围内配对活动与结果",
-    "project_semantic_views": "组合已配对语义与原生实际执行快照 分开显示 guidance、当前计划与已记录实例",
+    "project_semantic_views": "组合已配对语义与原生实际执行快照 分开显示模板骨架、当前计划与已记录实例",
     "project_status_and_actions": "投影状态新鲜度与合法动作并明确缺失提交输出",
-    "browser_view": "共享语义控件按事件与模块数据边渲染观测 并携带完整任务范围及覆盖缺口原因与来源详情"
+    "browser_view": "共享语义控件按事件与模块数据边渲染观测 模板骨架与实际图分开标识 并携带完整任务范围及覆盖缺口原因与来源详情"
   },
   "design": {
     "scopeRead": "semantic GET/SSE 与 observation GET 可选携带完整 projectKey 与 mode；无 scope 保持 serve-bound 行为，完整外项目 scope 读取该配置项目与模式的 Journal inventory。query scope 仍是观测子树，node 仍是节点选择。",
@@ -17,6 +17,7 @@
     "foreignStream": "外项目 durable stream 在写 200 前完成校验和快照读取，发送一次 semantic 快照、一次空数据 semantic-complete 传输事件，然后正常结束。",
     "publicOutput": "durable inventory 使用同一 FileCheckpointStore.readPublicOutputs 读取器恢复 publicOutput，沿用 checkpoint 或 operation 的 executionEpoch 选择。有效 bound live read 把捕获的 Runtime publication state 与同 binding 的 durable commits 组合：成功读到 committed records 不清除已捕获的 typed pending state；commits、输出文本和 publicCommitWatermark 保持 durable 值，且不暴露未提交文本。读取失败以 unknown 保留当前已确认 commits 和 watermark。semantic GET/SSE 原样携带已定义的 publicCommitWatermark，且不按 publication state 过滤，因此 pending、unavailable 或 unknown 仍可保留此前确认的提交边界；缺失时字段保持省略。task.output 只使用已提交 publication；缺失、pending、unavailable 或 unknown 明确显示，不用 record.output、provider 或 model 文本回退。原始与动作证据仍可读。",
     "ownership": "http_api 与 browser_view 只保留 typed scope 和只读传输；load_task_truth/load_event_history 从声明范围读取真实 Journal；不新增跨进程 registry、HTTP proxy 或第二语义存储。浏览器侧由 runtime-api.js 原位冻结并发布同一 scope/revision 的 content 引用；runtime-shell.js 持有语义面板生命周期、偏好订阅与 GET/SSE serial/revision 隔离；semantic-observation.js 通过纯视图回调发出选择；task-dashboard.js 与 observation.js 各自在 pagehide 释放流、面板和偏好订阅。Task Dashboard 与 Pipeline Observation 是已交付的四模式偏好表面，其他共享壳页按现有展示合同不挂载该表面。该边界不声明全局事件总线、全 UI 已完成或跨进程 native Arc<T>。",
-    "actualExecutionGraph": "同一 agentActivity 成功值通过 actualExecutionGraph 携带 contracts source snapshot。Runtime 纯选择同一任务范围已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，不要求 assignment-graph fact replay，不创建 Manager、不 acquire、不 rebind；UI 只投影该 source。unavailable/not-recorded 与未归类事实明确保留，当前计划仍走既有 TaskPlanSnapshot carrier。"
+    "actualExecutionGraph": "同一 agentActivity 成功值通过 actualExecutionGraph 携带 contracts source snapshot。Runtime 纯选择同一任务范围已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，不要求 assignment-graph fact replay，不创建 Manager、不 acquire、不 rebind；UI 只投影该 source。unavailable/not-recorded 与未归类事实明确保留，当前计划仍走既有 TaskPlanSnapshot carrier。",
+    "taskTemplateSkeleton": "已提交 taskFlow 绑定在 load_task_truth 解析为只读 TaskFlowGuidance，typed 阶段、强制依赖、布局与逻辑循环随既有 task_projection 载体流到 project_semantic_views 与 browser_view，不新增节点、边或 HTTP 路径。turn-iteration 与 occurrence-repetition 只是模板元数据，不写成读 DAG 的环。模板骨架与当前计划、已记录实例保持不同含义；无绑定的旧任务保持 guidance 缺失。"
   }
 }
