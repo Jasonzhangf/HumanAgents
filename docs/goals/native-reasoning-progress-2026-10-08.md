@@ -3,9 +3,9 @@
 ## 2026-10-17 父级失败收拢：真实原因已捕获，修复计划待纠正
 
 - r376 同一公开失败用例已捕获两个真实 inner error：save 为 `execution-composition.owner-source-missing` / `native close has no drained frozen standard-end input`；close 为 Provider active executions 尚需 settlement/recovery。诊断代码已移除，App 重建0，本侧唯一 `native-parent-cleanup-20261017` 树 clean；无诊断产品修改进入 main。
-- r377 Planner 超过最多8次定点读取合同，重复加载完整 coordinator.ts 至 step133。Root 明确 INT PID48555，进程消失且 result ERROR/interrupted；不是模型后端不可用。r379 同一 Gemini4 medium 会话续接 terminal0，但方案引用不存在的图节点且未核 Provider outstandingFailure 对 drain/settle 的影响，尚未接受。r380 同会话精确纠正正在执行；禁止按错误计划先改代码。
-- r378 fresh GCM 只读任务 terminal，六次定点命令，证明原 case 已有 child failure/control/precall checkpoint 证据，但没有父当前 raw capture 或相关 Provider settle/close 断言。release released 不证明物理关闭。r381 fresh GCM 并行只核实际图/semantic/binding 覆盖，不重复实现 API 规划。
-- UX peer 已收到边界通知：本侧 execution-composition/native-execution/Provider；任何 coordinator catch 收拢 seam 先协调 writer，尚未派写。main/install/restart 窗口仍释放给 peer。完整 goal、父级 cleanup、M4 与原 interaction-2 EOF 保持开放；本轮新增已交付节点0。
+- r377 Planner 超过最多8次定点读取合同，重复加载完整 coordinator.ts 至 step133。Root 明确 INT PID48555，进程消失且 result ERROR/interrupted；不是模型后端不可用。r379 同一 Gemini4 medium 会话续接 terminal0，但方案引用不存在的图节点且未核 Provider outstandingFailure 对 drain/settle 的影响，尚未接受。r380 同会话纠正又重复读取 agent-runtime.ts，Root INT4709，result interrupted/exit1。fresh OAuth GPT6.1 medium 局部技术 Planner r382 已启动（PID63227/tmux ha-parent-plan-r382），只处理已明确失败 seam；禁止按错误计划先改代码。
+- r378 fresh GCM 只读任务 terminal，六次定点命令，证明原 case 已有 child failure/control/precall checkpoint 证据，但没有父当前 raw capture 或相关 Provider settle/close 断言。release released 不证明物理关闭。r381 GCM 已交实际图观察：既有 recovery_hold/raw retention 存在，但标准结束前失败的 drain/capture/物理 settle-close 路径未被 native-admitted-turn 显式覆盖；segment-recovery 是 resume-only，不能借用作 save 图。其八次命令超过六次合同，结论按实际图核对，不据自称完整覆盖照收。
+- UX peer 已确认 coordinator 无活动 writer，授权本侧独占 runExecution standardTurn catch 小段，保持其 inventory/read 改动不动。尚未派实现；main/install/restart 窗口仍释放给 peer。完整 goal、父级 cleanup、M4 与原 interaction-2 EOF 保持开放；本轮新增已交付节点0。
 - 证据均在既有 `native-reasoning-d0-20261012` RUN 下 r376/r378/r379/r380/r381；下一动作是接收正确最小计划与实际图覆盖，完成必要图合同后，派 GCM 在同域原树做原单例 RED→GREEN，再整体 Review 与标准交付。
 
 ## 2026-10-17 已交付：原始 child 错误与真实 failed control；父级 cleanup 仍开放
