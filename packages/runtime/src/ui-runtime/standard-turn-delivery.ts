@@ -472,15 +472,16 @@ export async function readStandardTurnDelivery(
           `the accepted inspect result for ${inspectCompletion.callId} must succeed without an execution fact`);
       }
       const bytesDigest = await digestOf(bytes);
-      if (result.outputDigest !== bytesDigest || rawOutput.ref.digest !== bytesDigest) {
+      if ((result.outputDigest !== undefined && result.outputDigest !== bytesDigest)
+        || rawOutput.ref.digest !== bytesDigest) {
         throw new StandardTurnDeliveryError('standard-turn-delivery.artifact-conflict',
           `the accepted inspect output and raw reference must match the read bytes for ${inspectCompletion.callId}`);
       }
-      const outputRef = result.outputRef;
-      if (outputRef === undefined || !outputRef.trim() || !actualArtifactRefs(fact).includes(outputRef)) {
+      if (result.outputRef !== undefined && (!result.outputRef.trim() || !actualArtifactRefs(fact).includes(result.outputRef))) {
         throw new StandardTurnDeliveryError('standard-turn-delivery.artifact-conflict',
           `the accepted inspect result for ${inspectCompletion.callId} has no actual output reference`);
       }
+      const outputRef = result.outputRef ?? rawOutput.ref.locator;
       if (!inspectCompletion.evidenceRefs.some((evidence) => evidence.kind === 'tool'
         && evidence.scope.organId.value === inspectCompletion.scope.organId.value
         && evidence.scope.taskId?.value === inspectCompletion.scope.taskId?.value
