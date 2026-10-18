@@ -434,7 +434,7 @@ function renderNodeDrawer(node, handoffs, detail, purpose) {
     // A recorded execution event is not a work item: show its typed facts once
     // and reuse the shared reference/technical-source block. No goal/result
     // turns, no handoff tab and no nested conversation scroll.
-    body.append(renderEventFacts(detail), renderReferences(detail))
+    body.append(renderEventFacts(detail), renderReferences(detail, true))
   } else {
     // The node drawer uses the same status/conversation/trace shell as every
     // other work card. The adapter keeps this surface read-only.
@@ -512,9 +512,53 @@ function renderEventFacts(detail) {
   return facts
 }
 
-function renderReferences(node) {
+function renderReferences(node, eventView = false) {
   const wrap = element('div')
   const source = node?.technicalSource
+  const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
+  const outputs = unresolvedList((node?.outputs || []).map((entry) => entry.ref), '无输出引用')
+  const evidence = unresolvedList((node?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
+  const groups = [
+    ['输入引用', inputs],
+    ['输出引用', outputs],
+    ['Evidence', evidence],
+  ]
+  const referenceGroups = groups.filter(([, group]) => !group.empty)
+
+  if (eventView) {
+    if (!source && referenceGroups.length === 0) return wrap
+    const details = element('details', undefined, 'drawer-technical-source')
+    const counts = referenceGroups.map(([label, group]) => `${label} ${group.items.length} 项`)
+    details.append(element('summary', ['查看来源与引用', counts.length > 0 ? `（${counts.join('，')}）` : ''].join('')))
+    if (source) {
+      const sourceFacts = element('dl', undefined, 'drawer-facts')
+      for (const [label, value] of [
+        ['原始类型', source.kind],
+        ['原始标题', source.title],
+        ['原始摘要', source.summary],
+        ['原始时间', source.occurredAt],
+      ]) {
+        const cell = element('div')
+        const detail = element('dd', value || '未提供')
+        if (!value) detail.dataset.empty = 'true'
+        cell.append(element('dt', label), detail)
+        sourceFacts.append(cell)
+      }
+      details.append(sourceFacts)
+    }
+    if (referenceGroups.length > 0) {
+      const facts = element('dl', undefined, 'drawer-facts')
+      for (const [label, group] of referenceGroups) {
+        const cell = element('div')
+        cell.append(element('dt', label), element('dd', group.items.join(', ')))
+        facts.append(cell)
+      }
+      details.append(facts)
+    }
+    wrap.append(details)
+    return wrap
+  }
+
   if (source) {
     const details = element('details', undefined, 'drawer-technical-source')
     details.append(element('summary', '技术详情'))
@@ -536,10 +580,7 @@ function renderReferences(node) {
   }
   const facts = element('dl', undefined, 'drawer-facts')
   // Refs come from the typed drawer detail (`projection.selectedNode`), never from the node card.
-  const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
-  const outputs = unresolvedList((node?.outputs || []).map((entry) => entry.ref), '无输出引用')
-  const evidence = unresolvedList((node?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
-  for (const [label, group] of [['输入引用', inputs], ['输出引用', outputs], ['Evidence', evidence]]) {
+  for (const [label, group] of groups) {
     const cell = element('div')
     const dd = element('dd', group.items.join(', '))
     if (group.empty) dd.dataset.empty = 'true'
