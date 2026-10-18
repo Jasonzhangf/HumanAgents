@@ -1,6 +1,6 @@
 # HumanAgent 原生 Provider 分层 gap 与交付计划
 
-状态：`PROVIDER-INCREMENT-OPEN / FULL-NATIVE-UNVERIFIED`。Provider 总图仍为 7 个业务能力节点 A–G。2026-10-18 已接收 A/B 的当前合同、wire、转发和配置消费证据，C/G 的工具与通用来源充分性裁决，以及 D/E/F 的语义上下文、标准收口和恢复回执。它们各有证明范围，不能汇总成完整原生目标完成。当前明确未闭合的是原 canonical taskless 问答和 peer 治理交付；逐工具语义审查覆盖也在定点核对。图不新增节点，本计划不替代 [Provider 唯一设计](../architecture/provider-adapters.md)。
+状态：`PROVIDER-INCREMENT-OPEN / FULL-NATIVE-UNVERIFIED`。Provider 总图仍为 7 个业务能力节点 A–G。2026-10-18 已接收 A/B 的当前合同、wire、转发和配置消费证据，C/G 的工具与通用来源充分性裁决，以及 D/E/F 的语义上下文、标准收口和恢复回执。它们各有证明范围，不能汇总成完整原生目标完成。当前明确未闭合的是原 canonical taskless 问答和 peer 治理交付。基础 12 工具及 child.not_select 的逐工具语义规则已完成 r456 独立限定审查；它不等于全部工具真实模型质量验收。图不新增节点，本计划不替代 [Provider 唯一设计](../architecture/provider-adapters.md)。
 
 当前证据索引：既有 RUN 为 `/Volumes/Intel/playground/humanagent/.worker-runs/native-reasoning-d0-20261012`。A/B 见 r403/r414；C/G 见 `native-provider-evidence-sufficiency-r315-20261017/plan.md`；D 见 r288/r410/r415；E/F 见 r341/r363/r375/r391 与 peer `prepared-cold-delivery-20261018`。最新 M3 与 Response 所有权增量见 `native-provider-lifetime-execute-r441-20261018/owner-acceptance.md`、`native-m3-provider-review-r442-20261018/classification.json`、`native-m3-provider-delivery-r443-20261018/delivery.md`。源码已入 main 并完成安装、正式重启、installed 原 M3 1 PASS、推送和自有资源清理。
 
@@ -47,7 +47,7 @@ Provider 不规定 observation/plan/execute/review 固定顺序。请求终态�
 | **G6 Anthropic typed 工具闭环** | Anthropic 可实际执行工具并继续任务 | 独立 tools、typed tool_use 与 tool_result messages 续接已实现 | 本能力证据充分，无新增实现或测试 | Provider（C） | 独立协议工具往返至终态 | 已有 consumer 与 live receipt | main 派生三协议真实工具循环 3/3 包含 Anthropic；不复用 Responses wire 作为证明 |
 | **G7 实际角色 binding 与独立 context** | 显式 Brain、N 个 runtime、child 各自独立模型与 context，父接收精炼结果 | 角色 binding 消费、父子输入隔离、精炼结果和 checkpoint 历史已接线 | 不以 UUID 或一次配置编译代替行为证明 | App（B）、Runtime（D） | 父接收精炼交付，历史 raw/隐藏链不跨 turn；child 不继承父 context | 复用 B/D 已验 seam | r414、r288/r415、installed helper r410 和 M3 r443；受控预算并行证据不外推任意 N 或所有角色组合 |
 | **G8 标准 turn 续推与同 turn 恢复** | 不看 finish reason；缺压缩/总结/交付则继续；错误可停，恢复继续当前 turn | 四项收口、Planner 迭代、inspection stop、失败 capture/close 和 prepared cold 恢复已有交付 | 保留原 taskless 实际失败；不把标准机制已验误写成所有真实任务已成功 | Core/Runtime（E/F）、Provider 执行事实 | durable receipt 后换 turn；恢复保留业务身份、context 与责任 | 复用现有标准 turn/恢复接口 | installed r341/r363/r375/r391、prepared PR3 两例和 r443 两周期；本地 close 不外推远端副作用停止 |
-| **G9 完整原生同入口证明** | 每项宣称能力在用户实际入口成立；错误/stop 事实准确 | 三协议工具 consumer/live receipt、installed helper/M3 与 peer 真实 Task 请求已有各自证据 | 原 canonical taskless epoch5 仍失败，精确 RCC 归因缺失；最新治理与逐工具审查覆盖尚待收口 | 各 adapter/Runtime、App 与 master 验收 | 保留实际入口、业务 closure、恢复及资源证据，不建立全组合矩阵 | 对应能力的必要证据；不等无关节点 | r315/r410/r443 和 peer 成功 Task 仅覆盖各自范围；r449/r450/r451 明确保留失败、原因 UNKNOWN，完整目标未完成 |
+| **G9 完整原生同入口证明** | 每项宣称能力在用户实际入口成立；错误/stop 事实准确 | 三协议工具 consumer/live receipt、installed helper/M3 与 peer 真实 Task 请求已有各自证据；r456 完成基础工具语义规则限定审查 | 原 canonical taskless epoch5 仍失败，精确 RCC 归因缺失；最新治理尚待交付 | 各 adapter/Runtime、App 与 master 验收 | 保留实际入口、业务 closure、恢复及资源证据，不建立全组合矩阵 | 对应能力的必要证据；不等无关节点 | r315/r410/r443 和 peer 成功 Task 仅覆盖各自范围；r449/r450/r451 明确保留失败、原因 UNKNOWN，完整目标未完成 |
 
 Chat `[DONE]` 无 finish_reason 的终态差异只是一条未运行观察假设，不列为必修 gap、不据此扩测。RCC 配置/listener/HTTP 200 也不是 G9 的交付证据。
 
