@@ -7,15 +7,21 @@
   "nodes": {
     "http_api": {
       "ownerPath": "packages/app/src/ui-runtime/server.ts",
-      "ownerRel": "packages/app/src/ui-runtime/server.ts"
+      "ownerRel": "packages/app/src/ui-runtime/server.ts",
+      "ownerSymbol": "UiRuntime server semantic GET/SSE routes",
+      "implementationStatus": "candidate-scoped-semantic-http"
     },
     "load_task_truth": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService.scopedSemanticObservation/projectDurableTaskInventory",
+      "implementationStatus": "candidate-scoped-truth-and-public-output"
     },
     "load_event_history": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "readUiRuntimeTaskJournal/readDurableInventory",
+      "implementationStatus": "candidate-declared-project-journal-read"
     },
     "normalize_context_events": {
       "ownerPath": "packages/context-events/src/normalize.ts",
@@ -35,7 +41,9 @@
     },
     "browser_view": {
       "ownerPath": "docs/ui/observation.js",
-      "ownerRel": "docs/ui/observation.js"
+      "ownerRel": "docs/ui/observation.js",
+      "ownerSymbol": "shared semantic observation panel scope and finite-stream handling",
+      "implementationStatus": "ui-owned-parallel-work"
     }
   }
 }

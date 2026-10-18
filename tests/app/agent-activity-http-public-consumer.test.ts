@@ -15,7 +15,7 @@ import { UiRuntimeService, buildFakeExecutionPort } from '../../packages/app/src
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
-import { UiRuntimeJournal, uiRuntimeJournalPath, uiRuntimeControlJournalPath, uiRuntimeModeRoot } from '../../packages/app/src/ui-runtime/journal.js';
+import { FileCheckpointStore, UiRuntimeJournal, uiRuntimeJournalPath, uiRuntimeControlJournalPath, uiRuntimeModeRoot } from '../../packages/app/src/ui-runtime/journal.js';
 import type {
   RuntimeAgentActivityProjection,
   RuntimeProjectReadProjection,
@@ -73,13 +73,16 @@ function requireAgentActivity(
 // Known missing HTTP edge; likelihood unknown. Impact: missing catalog, lost
 // exact selection or cold/live scope confusion. One temporary public consumer
 // covers the connected request sequence without executing a Task or Provider.
+// Cross-project output/semantic failure was observed in the installed browser.
+// Frequency unknown; impact: project data leakage and lost committed results.
+// Cost: one existing consumer/fixture; execution time is recorded in run notes.
 test('agent activity public HTTP preserves exact selection, cold scope and read-only ownership', async () => {
   const root = await mkdtemp('/private/tmp/humanagent-agent-http-');
   let server: ReturnType<typeof createServer> | undefined;
   let listening = false;
   try {
-    const workspace = join(root, 'workspace');
-    const coldWorkspace = join(root, 'cold-workspace');
+    const workspace = join(root, 'workspace-b');
+    const coldWorkspace = join(root, 'workspace-a');
     await mkdir(workspace);
     await mkdir(coldWorkspace);
     const paths = await resolveRuntimePaths({ workspace, controlRoot: join(root, 'control') });
@@ -99,6 +102,9 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     const coldRuntimeId = 'http-cold-runtime';
     const coldAssignmentId = 'http-cold-assignment';
     const coldObjective = 'observe this cold assignment';
+    const markerA = 'M4-HTTP-SEMANTIC-PROJECT-A';
+    const markerB = 'M4-HTTP-SEMANTIC-PROJECT-B';
+    const committedTextA = 'M4-HTTP-COMMITTED-PROJECT-A: durable public result';
     const fixtures = [
       { source: paths, turnId: boundTurnId, runtimeId: boundRuntimeId, assignmentId: boundAssignmentId,
         objective: boundObjective, inputRef: 'task://http-task/input', targetRef: 'task://http-task',
@@ -142,8 +148,36 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         runtimeId: fixture.runtimeId, taskId, operationId, executionEpoch: 1, assignmentId: fixture.assignmentId, scope,
         inputRefs: [fixture.inputRef], ownerId: 'http-fixture', directiveRevision: 1, inputRevision: 1, orchestrated: false,
       }, input: fixture.objective, operationCounter: 1, cycleCounter: 1 });
+      journal.append({ kind: 'operation.started', operationId, taskId, cycleId, scope,
+        executionEpoch: 1, operationCounter: 1, cycleCounter: 1,
+        startedAt: '2026-10-16T00:00:01.000Z', input: fixture.objective });
+      const isA = fixture.source.projectKey === coldPaths.projectKey;
+      const sourceId = `${fixture.runtimeId}-accepted-output`;
+      journal.append({ kind: 'operation.event', operationId, event: {
+        eventId: sourceId, seq: 1, occurredAt: '2026-10-16T00:00:02.000Z',
+        taskId, operationId: operationId.value, executionEpoch: 1,
+        kind: 'execution.terminal', state: isA ? 'succeeded' : 'blocked',
+        terminalPhase: 'final', status: isA ? 'succeeded' : 'blocked',
+        summary: isA ? markerA : markerB, evidenceRefs: [],
+      } });
       const controlPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(fixture.source.checkpointsRoot, 'fake'));
       const control = new JsonlOrganJournal(controlPath);
+      const store = new FileCheckpointStore(controlPath);
+      await store.commit({ id: id('checkpoint', `${fixture.runtimeId}-checkpoint`),
+        scope, cycleId, seq: 1, previousCheckpointId: null, directiveRevision: 1,
+        executionEpoch: 1, outcome: isA ? 'succeeded' : 'blocked',
+        summary: isA ? markerA : markerB, recoveryStateRef: {
+          evidenceId: id('evidence', `${fixture.runtimeId}-recovery`), kind: 'execution',
+          source: 'http-fixture', locator: `recovery://${fixture.runtimeId}`, scope,
+        },
+        evidenceRefs: [], next: { kind: 'continue' } });
+      if (isA) {
+        const binding = { scope, executionEpoch: 1 };
+        const ref = await store.commitPublicOutput({ binding, sourceId, text: committedTextA });
+        const publication = await store.readPublicOutputs(binding);
+        assert.equal(publication.state, 'committed', 'fixture publication must be durable');
+        assert.deepEqual(publication.commits, [{ ref, text: committedTextA }]);
+      }
       await new JsonlTaskIdentityJournal(control).append({ scope: { organId, taskId }, source: fixture.identity });
       const activeBinding = activeBindingFor(fixture);
       await createJsonlActiveTurnJournal({ journal: control, turnId: fixture.turnId }).append({
@@ -162,7 +196,9 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     const forbidden = (): never => { throw new Error('GET must not execute side effects'); };
     const service = new UiRuntimeService({ mode: 'fake', organId, binding,
       port: buildFakeExecutionPort(binding), journal, closurePort: journal,
-      checkpointStoreFor: forbidden, attentionPort: { publish: forbidden, resolve: forbidden },
+      checkpointStoreFor: () => new FileCheckpointStore(
+        uiRuntimeControlJournalPath(uiRuntimeModeRoot(paths.checkpointsRoot, 'fake'))),
+      attentionPort: { publish: forbidden, resolve: forbidden },
       providerState: 'ready',
       now: () => new Date('2026-10-16T00:01:00.000Z'),
       runtimeComposition: { createTaskAssembly: forbidden },
@@ -307,10 +343,67 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     assert.equal(unknownBody.error?.code, 'project.unknown');
     assert.equal(Object.hasOwn(unknownBody, 'projects'), false, 'unknown project must not return a success body');
 
+    // Service is bound to B. All three public reads explicitly select A's
+    // Config key, the same typed TaskId and fake mode; titles do not select scope.
+    const queryA = `?projectKey=${encodeURIComponent(coldPaths.projectKey)}&mode=fake`;
+    const semanticPath = `/api/tasks/${encodeURIComponent(taskId.value)}/semantic`;
+    const assertSemanticA = (payload: string): void => {
+      assert.ok(payload.includes(markerA), `A semantic marker missing: ${payload}`);
+      assert.equal(payload.includes(markerB), false, `A semantic read leaked B: ${payload}`);
+    };
+    const scopedReads = await Promise.allSettled([
+      (async () => {
+        const dashboard = await get(queryA);
+        assert.equal(dashboard.state, 'succeeded');
+        assert.equal(
+          dashboard.output,
+          committedTextA,
+          `foreign A dashboard lost committed public output: ${JSON.stringify(dashboard.publicOutput)}`,
+        );
+        assert.equal(dashboard.publicOutput?.state, 'committed');
+      })(),
+      (async () => {
+        const { response, payload } = await request(`${semanticPath}${queryA}`);
+        assert.equal(response.status, 200, payload);
+        assertSemanticA(payload);
+      })(),
+      (async () => {
+        const response = await fetch(`${baseUrl}${semanticPath}/stream${queryA}`, { headers: { cookie } });
+        assert.equal(response.status, 200);
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let payload = '';
+        let eof = false;
+        try {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) {
+              eof = true;
+              break;
+            }
+            payload += decoder.decode(chunk.value, { stream: true });
+          }
+          payload += decoder.decode();
+        } finally {
+          await reader.cancel().catch(() => undefined);
+        }
+        assert.equal(eof, true, 'finite semantic stream must reach EOF');
+        const frames = payload.split('\n\n').filter((frame) => frame.length > 0);
+        assert.equal(frames.length, 2, payload);
+        assert.match(frames[0]!, /^id: semantic-\d+\nevent: semantic\.observation\ndata: /);
+        assertSemanticA(frames[0]!);
+        assert.equal(frames[1], 'event: semantic-complete\ndata: {}');
+        assert.equal(payload.endsWith('\n\n'), true);
+      })(),
+    ]);
+
     const after = { task: taskView(), files: await readFixtureFiles(root) };
     assert.equal(after.task, before.task, 'GET changed the task view');
     assertFixtureFilesUnchanged(before.files, after.files);
     console.log(JSON.stringify({ event: 'read-only-fixture-unchanged', files: before.files.length }));
+    const failures = scopedReads.flatMap((result, index) => result.status === 'rejected'
+      ? [`${['dashboard', 'semantic GET', 'semantic SSE'][index]}: ${String(result.reason)}`] : []);
+    assert.equal(failures.length, 0, failures.join('\n'));
   } finally {
     const httpServer = server;
     if (httpServer !== undefined && listening) {
@@ -318,5 +411,6 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
     }
     await rm(root, { recursive: true, force: true });
+    console.log(JSON.stringify({ event: 'http-fixture-cleaned', root, listening: false }));
   }
 });

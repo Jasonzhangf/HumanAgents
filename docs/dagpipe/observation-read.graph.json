@@ -1,6 +1,6 @@
 {
   "id": "humanagent-observation-read",
-  "version": "4",
+  "version": "5",
   "meta": {
     "title": "按授权范围读取事实，经统一语义归类与配对渲染多视角观测",
     "designStatus": "candidate",
@@ -10,7 +10,10 @@
     "payloadReferenceStatus": "candidate browser shared-reference contract; native Arc type and production wiring remain pending",
     "agentActivityContract": "Task-scoped instance ownership is read from actual native bindings, acquired incarnations, resumed segments and owner-decoded Journal receipts. It reaches semantic projection through the direct task_projection arc; event normalization and role frames never generate or replace instance identity.",
     "agentActivityOwner": "packages/runtime/src/observation/agent-activity.ts selects exact typed ownership; packages/app/src/ui-runtime/agent-activity-read.ts reads existing owner decoders; packages/ui/projection/agent-activity.ts projects the same source; docs/ui/agent-activity.js renders it without control effects. The published task-scoped read slice is implemented and proven; cross-scope aggregation and live closure remain pending.",
-    "i2HistoryContract": "Six I2 read contracts (inspection occurrences, inspection occurrence entry, milestone reviews, business cycles, business cycle entry and inspection comparison) are carried from load_task_truth to project_semantic_views on the direct task_projection arc. Each contract can carry a task read scope identifying projectKey, mode and taskId. This diagram only declares the projection boundary and does not claim that cross-project App reads or browser consumption are implemented.",
+    "i2HistoryContract": "Six I2 read contracts (inspection occurrences, inspection occurrence entry, milestone reviews, business cycles, business cycle entry and inspection comparison) are carried from load_task_truth to project_semantic_views on the direct task_projection arc. Each contract carries a task read scope identifying projectKey, mode and taskId. The scoped task read resolves that declared project and mode from configuration and reads its own Journal inventory; it never borrows the serve-bound project's Coordinator, task snapshot or Organ identity.",
+    "semanticScopeContract": "GET /api/tasks/:id/semantic and /api/tasks/:id/semantic/stream accept an optional complete projectKey and mode pair. Omitting both keeps the legacy serve-bound live Coordinator read. A complete non-bound scope reads the declared project and mode Journal inventory and projects the same runtime semantic envelope from durable events. A partial or invalid pair fails before streaming as read.scope.invalid; an unknown project fails as project.unknown; a task absent from that scope fails as task.not-found.",
+    "foreignSemanticStreamContract": "A non-bound durable semantic stream validates and reads its snapshot before writing the 200 text/event-stream headers, emits one semantic snapshot, then emits the transport event semantic-complete with empty JSON data and ends normally. It never subscribes to the serve-bound Coordinator. The completion event is a transport signal and does not alter the semantic payload or add business metadata.",
+    "publicOutputContract": "Durable task inventory restores record.publicOutput through the same FileCheckpointStore.readPublicOutputs reader used by the live coordinator. The binding keeps the task's business scope and selects the committed checkpoint execution epoch when the current operation has one, otherwise the operation allocation epoch. The read never falls back to record.output and never fabricates success; a read failure remains visible as unknown with any already retained commits.",
     "terminalContract": {
       "success": "rendered_view",
       "failure": "explicit stale/disconnected/unmapped projection; no raw inference or fake live state",

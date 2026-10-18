@@ -1584,14 +1584,24 @@ async function handleRequest(
     }
     const taskSemantic = /^\/api\/tasks\/([^/]+)\/semantic$/.exec(path);
     if (taskSemantic && method === 'GET') {
-      writeJson(response, 200, service.semanticObservation(id('task', decodeURIComponent(taskSemantic[1]!))));
+      const readScope = optionalI2ReadScope(url);
+      writeJson(response, 200, await service.scopedSemanticObservation(
+        id('task', decodeURIComponent(taskSemantic[1]!)),
+        readScope?.projectKey,
+        readScope?.mode,
+      ));
       return;
     }
     const taskSemanticStream = /^\/api\/tasks\/([^/]+)\/semantic\/stream$/.exec(path);
     if (taskSemanticStream && method === 'GET') {
       const session = await requireSession(accessControl, request);
       const taskId = id('task', decodeURIComponent(taskSemanticStream[1]!));
-      service.semanticObservation(taskId);
+      const readScope = optionalI2ReadScope(url);
+      const initial = await service.scopedSemanticObservation(taskId, readScope?.projectKey, readScope?.mode);
+      if (!service.isBoundReadScope(readScope?.projectKey, readScope?.mode)) {
+        streamFiniteSemanticObservation(response, initial);
+        return;
+      }
       streamSemanticObservation(request, response, service, taskId, session, accessControl, sseRegistry);
       return;
     }
@@ -1924,6 +1934,23 @@ function streamSemanticObservation(
   response.once('close', () => {
     void closeStream('client');
   });
+}
+
+function streamFiniteSemanticObservation(
+  response: ServerResponse,
+  semantic: ReturnType<UiRuntimeService['semanticObservation']>,
+): void {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+  });
+  response.write(`id: semantic-${semantic.sourceWatermark}\n`);
+  response.write('event: semantic.observation\n');
+  response.write(`data: ${JSON.stringify(semantic)}\n\n`);
+  response.write('event: semantic-complete\n');
+  response.write('data: {}\n\n');
+  response.end();
 }
 
 /**

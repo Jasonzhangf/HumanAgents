@@ -1177,6 +1177,8 @@ export interface DurableTaskInventoryFailure {
 
 export interface DurableTaskInventoryEntry {
   readonly snapshot: RuntimeTaskSnapshot;
+  /** The Organ named by this task's actual durable operation scope. */
+  readonly organId?: OrganId;
   /**
    * `checkpoint` means a real committed checkpoint confirmed the state.
    * `recovery-required` means the durable record alone cannot confirm a live
@@ -1202,6 +1204,8 @@ export interface DurableTaskCheckpointReadPort {
    * does not bind a current-state read and keeps checkpoint-only behavior.
    */
   readCommitted?(scope: ScopeRef, checkpointId: Checkpoint['id']): Promise<CommittedCheckpointRecord | null>;
+  /** Reads the committed public publication for the same task/cycle binding. */
+  readPublicOutputs?(binding: PublicOutputBinding): Promise<PublicOutputPublication>;
 }
 
 /** Minimal read-only current-state surface the same shared selection can consume. */
@@ -1279,7 +1283,11 @@ export async function projectDurableTaskInventory(input: {
     }
     if (operation.zeroEffectAdmissionDenial === true && record.executionEpoch === operation.executionEpoch) {
       applyZeroEffectAdmissionDenial(record);
-      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'admission-denied' });
+      entries.push({
+        snapshot: taskSnapshotFromRecord(record, state.scopes),
+        organId: scope.organId,
+        durableState: 'admission-denied',
+      });
       continue;
     }
     try {
@@ -1374,18 +1382,46 @@ export async function projectDurableTaskInventory(input: {
           if (currentStateRead.value.currentPlan) record.currentPlan = currentStateRead.value.currentPlan;
         }
         record.updatedAt = record.events.at(-1)?.occurredAt ?? record.updatedAt;
+        if (checkpointRead.readPublicOutputs !== undefined) {
+          try {
+            record.publicOutput = await checkpointRead.readPublicOutputs({
+              scope,
+              executionEpoch: latest.checkpoint.scope.operationId
+                && sameId(latest.checkpoint.scope.operationId, record.operationId)
+                ? latest.checkpoint.executionEpoch
+                : operation.executionEpoch,
+            });
+          } catch {
+            record.publicOutput = { state: 'unknown', commits: record.publicOutput?.commits ?? [] };
+          }
+        }
         entries.push({
           snapshot: taskSnapshotFromRecord(record, state.scopes),
+          organId: scope.organId,
           durableState: inspectionRecoveryRequired ? 'recovery-required' : 'checkpoint',
         });
       } else {
+        if (checkpointRead.readPublicOutputs !== undefined) {
+          try {
+            record.publicOutput = await checkpointRead.readPublicOutputs({
+              scope,
+              executionEpoch: record.executionEpoch ?? operation.executionEpoch,
+            });
+          } catch {
+            record.publicOutput = { state: 'unknown', commits: record.publicOutput?.commits ?? [] };
+          }
+        }
         record.state = 'unknown';
         record.running = false;
         record.stopping = false;
         record.currentState = '需要恢复确认';
         record.nextStep = '从权威 checkpoint 恢复状态';
         record.allowedActions = [];
-        entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'recovery-required' });
+        entries.push({
+          snapshot: taskSnapshotFromRecord(record, state.scopes),
+          organId: scope.organId,
+          durableState: 'recovery-required',
+        });
       }
     } catch (error) {
       failures.push({
@@ -1400,7 +1436,11 @@ export async function projectDurableTaskInventory(input: {
       record.currentState = '需要恢复确认';
       record.nextStep = '从权威 checkpoint 恢复状态';
       record.allowedActions = [];
-      entries.push({ snapshot: taskSnapshotFromRecord(record, state.scopes), durableState: 'recovery-required' });
+      entries.push({
+        snapshot: taskSnapshotFromRecord(record, state.scopes),
+        organId: scope.organId,
+        durableState: 'recovery-required',
+      });
     }
   }
   return { entries, failures };

@@ -2136,6 +2136,93 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * Resolves an explicit task read scope before projecting semantic history.
+   * No scope keeps the legacy live Coordinator read. A complete foreign scope
+   * reads only that project's durable inventory and canonical Task identity.
+   */
+  async scopedSemanticObservation(
+    taskId: TaskId,
+    rawProjectKey?: string,
+    mode?: RuntimeMode,
+  ): Promise<RuntimeSemanticObservationEnvelope> {
+    if (rawProjectKey === undefined && mode === undefined) return this.semanticObservation(taskId);
+    const projectKey = rawProjectKey?.trim();
+    if (!projectKey || (mode !== 'fake' && mode !== 'rcc')) {
+      throw new UiRuntimeApiError(
+        'read.scope.invalid',
+        APP_OWNER,
+        'semantic observation requires both projectKey and mode',
+        'send projectKey=<declared projectKey>&mode=fake|rcc, or omit both for the bound read',
+        400,
+      );
+    }
+    const source = await this.findProjectSource(projectKey);
+    if (source === undefined) {
+      throw new UiRuntimeApiError(
+        'project.unknown',
+        APP_OWNER,
+        `no configured project: ${projectKey}`,
+        'list configured projects and retry with a declared projectKey',
+        404,
+      );
+    }
+    if (this.isBoundScope(source.projectKey, mode)) return this.semanticObservation(taskId);
+
+    const inventory = await this.readDurableInventory(source, mode);
+    if (inventory.failures.length > 0) {
+      const failure = inventory.failures[0]!;
+      throw new UiRuntimeApiError(failure.code, failure.ownerId, failure.message, failure.nextAction, 503);
+    }
+    const entry = inventory.entries.find((candidate) => candidate.snapshot.taskId.value === taskId.value);
+    if (entry === undefined) {
+      const failure = unknownTaskFailure(taskId, source.projectKey, mode);
+      throw new UiRuntimeApiError(failure.code, failure.ownerId, failure.message, failure.nextAction, 404);
+    }
+
+    let organId = entry.organId;
+    if (organId === undefined) {
+      const identity = await this.canonicalTaskIdentityScope(new JsonlOrganJournal(
+        uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
+      ), taskId);
+      if (!identity.ok) {
+        throw new UiRuntimeApiError(
+          'task.identity.missing',
+          identity.failure.ownerId,
+          identity.failure.message,
+          identity.failure.nextAction,
+          503,
+        );
+      }
+      organId = identity.value.organId;
+    }
+
+    const semantic = buildSemanticObservation({
+      scope: {
+        organId,
+        taskId,
+        ...(entry.snapshot.operationId === undefined
+          ? {}
+          : { operationId: id('operation', entry.snapshot.operationId) }),
+      },
+      projectionVersion: 'runtime-semantic-v1',
+      sourceWatermark: entry.snapshot.events.length,
+      events: entry.snapshot.events,
+      capabilities: [{
+        capability: 'runtime-task-events',
+        state: entry.snapshot.events.length > 0 ? 'available' : 'unavailable',
+        ...(entry.snapshot.events.length > 0 ? {} : { reason: 'task has no runtime task events yet' }),
+      }],
+    });
+    return projectRuntimeSemanticObservation({ taskId, semantic });
+  }
+
+  /** True when this scope reads the serve-bound live Coordinator. */
+  isBoundReadScope(projectKey?: string, mode?: RuntimeMode): boolean {
+    return projectKey === undefined && mode === undefined
+      || (projectKey !== undefined && mode !== undefined && this.isBoundScope(projectKey, mode));
+  }
+
   async executeExplicitDecision(decision: InteractionDecision): Promise<readonly unknown[]> {
     if (this.explicitBrainRuntime === undefined) {
       throw new UiRuntimeApiError(
