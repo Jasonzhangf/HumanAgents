@@ -1,22 +1,24 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
-## 2026-10-18 当前：原生实际执行图已交付，下一增量在规划
+## 2026-10-18 当前：实际图、水位与偏好证据已交付，剩余展示边在规划
 
 ### 后继实际推进：偏好验收与上下文证据复用
 
-偏好 follow-last 已由当前安装版本的真实 Observation 手动选择、刷新、Task Dashboard 跨表面恢复、显式 display 链接覆盖及重置原值验收；A/B Journal 不变，自有服务与浏览器临时状态已清理。自动来源不得写偏好的原用例已取得守卫删除 RED、恢复 GREEN。它们只覆盖 G10/G11/F16/F17 的偏好子能力；图文同步由独占 GCM 收尾，尚未交付的文档不冒称已进入 main。完整回执：`/Volumes/Intel/playground/humanagent/.worker-runs/native-preference-browser-20261018/reception.md` 与 `ui-pref-verify-20261018/owner-reception.md`。
+偏好 follow-last 已由当前安装版本的真实 Observation 手动选择、刷新、Task Dashboard 跨表面恢复、显式 display 链接覆盖及重置原值验收；A/B Journal 不变，自有服务与浏览器临时状态已清理。自动来源不得写偏好的原用例已取得守卫删除 RED、恢复 GREEN。它们只覆盖 G10/G11/F16/F17 的偏好子能力；图文已随 main `68275b0b` 交付，保留内嵌 SVG 与原放大交互。完整回执：`/Volumes/Intel/playground/humanagent/.worker-runs/native-preference-browser-20261018/reception.md` 与 `ui-pref-verify-20261018/owner-reception.md`。
 
 G13/F19 的非空义务及实际副作用保全不再只有源码证据。已定点接收 `provider-native-compose-technical-r29-20261017/memory-composition.log` 的 C3a 热链与新进程两个实际 PASS；当时测试已断言非空 retainedDuties 在 correction/rewind/forward 后保留、实际文件效果不重放/不变、原 Journal 前缀不变。G14/F20 另复用 r164 四项 checkpoint 公开消费者与 M5 十一项 UI 消费者的原始运行回执。以上按原执行范围复用，不为当前提交另建身份核验，不外推真实 RCC 质量或所有 G/F 完成，也不为补回执重跑这些用例。准确来源与覆盖在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-checkpoint-evidence-20261018/owner-reception.md`。
 
-M1 已按独立技术定界进入 GCM 实现：仅两个既有语义 builder 透传已有 publication 水位，原两个用例已取得实际遗漏 RED 和修复 GREEN。跨项目公开 HTTP/SSE 断言在同树补齐中，尚未整体 Review/main 安装交付。Root 对原 A 历史真实任务已记录旧版本缺口：真实 publication 水位1093，语义 GET/SSE 水位缺省；没有重新执行任务。证据：`native-m1-real-entry-20261018/baseline.json`。此修复只交付已提交水位读取，不关闭完整公开推理片段需求。
+M1 水位已按 main `1f731d76` 交付：仅两个既有语义 builder 透传已有 publication 水位。绑定及跨项目 HTTP/SSE 原用例均有实际遗漏 RED 和修复 GREEN，整体独立 Review r500 有效 PASS。原 A 历史任务的真实提交保持1093；旧语义 GET/SSE 缺省，候选及最终安装版本均返回1093，事件水位1022保持独立，有限流正常结束。没有重新执行任务。正式 restart generation43→44；构建、安装、推送及自有树/服务清理完成。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/native-m1-delivery-20261018/reception.md`。此修复只交付已提交水位读取，不关闭完整公开推理片段需求。
+
+F04 的不兼容定义公开接口补证已随 main `e9fdffab` 交付：同定义ID不同版本返回不可比较、明确原因与空结果；临时删除对应 Core 判断时原断言失败，恢复后通过，生产代码未改。后续不得把该子条款继续列为无执行证据。
 
 实际执行图和引用折叠已合入 main `10c6b772`，交付记录 `0508cebe` 已推送。main 构建、打包、全局安装通过；正式 restart 将 53007 从 generation42 更新到43，旧实例 clean 收拢。已安装版本的 Dashboard 与 Observation 公开接口读取原 A，均返回三条唯一记录和 Planner-duty 关联。候选桌面与手机页面、详情抽屉和焦点返回已有真实验收；整体独立 Gemini4medium Review r490 有效 PASS。
 
 最终设计以 r488 amendment 和 r489 finding 复核为准：从已有原生 Journal 事实生成只读 `agentActivity.value.actualExecutionGraph`。native `callChild` 不需要经过经典 `planStage`。第二套图持久化、CAS、prepare/apply/replay 与恢复包装已消融；原内存图及 Journal、任务身份和资源正确性保留。下文 r478–r485／P1 四路的第二持久协议是已撤销方案的历史记录，不得据此恢复代码或重派任务。
 
-所有自有候选服务与本增量 worktree 已正常回收；仅保留 main/control 与正式 generation43 运行实例。原 A/B 数据未清空。完整证据：`/Volumes/Intel/playground/humanagent/.worker-runs/native-actual-graph-delivery-20261018/reception.md`。旧 retry consumer 的7/8仍如实保留，未执行 origin/main 对照；Review 不将它作为本增量阻断，也不把它记为通过。
+所有自有候选服务与本批 worktree 已正常回收；仅保留 main/control 与正式 generation44 运行实例。原 A/B 数据未清空。实际图与水位两批证据分别在 `native-actual-graph-delivery-20261018/reception.md` 和 `native-m1-delivery-20261018/reception.md`。旧 retry consumer 的7/8仍如实保留，未执行 origin/main 对照；Review 不将它作为本增量阻断，也不把它记为通过。
 
-完整 I1–I5/G1–G14/F01–F20 仍 ACTIVE/INCOMPLETE。下一批两域独立规划：偏好跨表面适用性，以及 M1 公开推理片段/稳定水位。生产偏好 save/reset/follow-last、semantic GET/SSE、工具活动 stable/live 和身份配对已存在，不重复开发。先依据定向观察决定真实缺边，禁止把无统一 event bus 或未测类别当新增框架/矩阵理由。其余需求仍属于完整目标。
+完整 I1–I5/G1–G14/F01–F20 仍 ACTIVE/INCOMPLETE。下一批两域独立规划：已有公开正文状态的准确展示，以及现有事件/订阅/共享引用合同的充分性。公开提交正文、checkpoint四项语义、工具 stable/live、偏好与冻结引用共享已有实现；先核对真实渲染链，不把缺统一 event bus 或未测类别当新增框架/矩阵理由。其余需求仍属于完整目标。
 
 ## 历史：P1 基础已接受，四路 GCM 曾实际并发（最终方案已替代）
 

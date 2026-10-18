@@ -7,7 +7,13 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
-### 2026-10-18 最新交付：原生实际执行图
+### 2026-10-18 最新交付：公开水位、偏好图文与巡检补证
+
+main `1f731d76` 水位修复、`68275b0b` 偏好图文、`e9fdffab` 巡检不兼容接口证明已合流，随 `743d442d` 交付记录推送。M1 整体独立 Review r500 PASS；受影响 App 构建、打包、安装完成，正式 restart generation43→44。原 A 真实提交1093保持不变，语义 GET/SSE 从缺省修复为1093，事件水位1022独立、有限流正常结束。候选与安装版本均验证，无任务重执行或新模型请求。自有树/服务已清理。回执：`/Volumes/Intel/playground/humanagent/.worker-runs/native-m1-delivery-20261018/reception.md`。
+
+偏好已完成 Observation 手动选择→刷新→Task Dashboard 恢复、显式链接不改保存值、Reset 还原和 Journal 不变；图文已标明两表面真实持久链。巡检在原 HTTP fixture 中证明同定义ID不同版本不可比较，保留兼容 checkId 对比和实际遗漏反例。只关闭各自子条款，不外推完整 G10/G11/F16/F17 或 F07。当前新计划分别核定公开正文状态消费和现有事件/模块/共享引用合同；不得重复实施水位或偏好。
+
+### 2026-10-18 已交付：原生实际执行图
 
 main `10c6b772` 与交付记录 `0508cebe` 已推送。Dashboard/Observation 共用原生实际图，原 A 的三条实际记录、Planner 关联、桌面详情与手机底部抽屉已验收。最终设计 r488/r489 复用既有原生 Journal 事实及 `agentActivity.value.actualExecutionGraph`；不要求 native `callChild` 进入经典 `planStage`，也不保留第二套图持久化。整体独立 Review r490 PASS；main build/package/install 通过，正式 restart generation42→43，已安装双公开接口验证通过。自有候选树和临时服务已清理，原 A/B 数据保留。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/native-actual-graph-delivery-20261018/reception.md`。
 
