@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 三来源已正常合唯一candidate：stopresources35b98540 Appbuild/tsc0+原segment4/4PASS（session96296）；G14display b4e41a92原MJS10/10PASS，HTTPtext/provenance/selector/capture不变，installedchild双端未验；tests-only519c4f11合法missinginspectionports RED复用，WIP不main、不冒positive。回执inspection-stop-resources-and-g14-composed-20261017.txt，已通知UX关来源并从组合基线派finalApp。
+- r300只读观察完成：tool.round-limit在未执行该轮tools前、已观察rawtoolcall后、未commitObservedCompletion/标准closure处触发；原Provider测试只证cutoff无副作用，原coldconsumer另seedopen状态，不证该真实budget失败后resume。r301独立Gemini4局部plan已启动，优先小阈值复用原publiccoldconsumer验证samebusinessTurn/op/epoch/工具配对和不重放；当前仅证据缺口，不直接删32或改产品。UX新发现business-cycle-opened缺生产publisher沿其独立plan，不由App伪造，不与本侧抢写。
+
 - 容量wait远端收口已完成：实际push `8442df17..749a885a main -> main`，最新main正常合回唯一candidate，仅progress文档差异；canonical窗口已释放，UX已知gen27/PID3091/53007。旧“仅剩push”段为前序记录，不再待办。
 - 下一必要N3证据观察r300 freshGCM只读启动：原32round限制的物理执行预算/同逻辑turn恢复/工具配对与副作用边界，最多8source+已有consumer/receipt。既不凭数值认定永久cap，也不未经证明宣称无限长程；缺证据与真实缺陷分开，不先新增测试/改限制，不碰UXwriter。
 
