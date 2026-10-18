@@ -182,7 +182,10 @@ async function readCheckpointClosure(
 
 function asSubmissionError(error: unknown): CheckpointSubmissionError {
   if (error instanceof CheckpointSubmissionError) return error;
-  return new CheckpointSubmissionError(error instanceof Error ? error.message : String(error));
+  return new CheckpointSubmissionError(
+    error instanceof Error ? error.message : String(error),
+    { cause: error },
+  );
 }
 
 function assertSource(value: unknown): asserts value is CheckpointSubmissionSource {

@@ -4,11 +4,13 @@ import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import {
   id,
   validateExecutionPolicyDefinition,
+  validateJournalCommitRef,
   validateTaskFlowBinding,
   validateInteractionDecision,
   type ExecutionPolicyDefinition,
   type InteractionRequestKind,
   type InteractionTraceKind,
+  type JournalCommitRef,
   type TaskId,
   type TaskFlowBinding,
 } from '../../../contracts/src/index.js';
@@ -22,6 +24,8 @@ import type { RuntimeCheckpointAssetSelector } from '../../../ui/contracts/check
 import type { TaskCheckpointAssetBodyQuery } from './service.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import { AppLifecycleError } from '../errors.js';
+import { CheckpointSubmissionError } from '../../../runtime/src/checkpoints/errors.js';
+import { ConfirmedControlExpectedConflict } from './reentry-current-facts.js';
 import {
   AccessControlError,
   isAccessControlError,
@@ -158,6 +162,20 @@ function optionalTaskControlScope(url: URL): { readonly projectKey: string; read
     );
   }
   return { projectKey: trimmed, mode };
+}
+
+function requireTaskControlScope(url: URL): { readonly projectKey: string; readonly mode: 'fake' | 'rcc' } {
+  const scope = optionalTaskControlScope(url);
+  if (scope === undefined) {
+    throw new UiRuntimeApiError(
+      'task-control.scope.invalid',
+      APP_OWNER,
+      'task control scope requires both projectKey and mode=fake|rcc',
+      'send both projectKey=<declared projectKey>&mode=fake|rcc',
+      400,
+    );
+  }
+  return scope;
 }
 
 function optionalI2ReadScope(url: URL): { readonly projectKey: string; readonly mode: 'fake' | 'rcc' } | undefined {
@@ -299,6 +317,32 @@ function writeError(response: ServerResponse, error: unknown): void {
   });
 }
 
+function isConfirmedControlConflict(error: unknown): boolean {
+  if (error instanceof ConfirmedControlExpectedConflict) return true;
+  if (!(error instanceof CheckpointSubmissionError)) return false;
+  if (error.cause instanceof ConfirmedControlExpectedConflict) return true;
+  return error.cause instanceof AppLifecycleError
+    && (error.cause.code === 'checkpoint-closure-conflict'
+      || error.cause.code === 'checkpoint-current-control-conflict');
+}
+
+async function commitConfirmedControl<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isConfirmedControlConflict(error)) throw error;
+    throw new UiRuntimeApiError(
+      'confirmed-control.conflict',
+      APP_OWNER,
+      error instanceof Error ? error.message : String(error),
+      'read the latest authoritative current facts and retry with a new command',
+      409,
+      undefined,
+      error,
+    );
+  }
+}
+
 function sessionError(verification: SessionVerification | ProductPrincipalVerification): AccessControlError {
   if (verification.state === 'missing') {
     return new AccessControlError('auth.session.missing', 'browser session is required', 'open the login page and pair this browser', 401);
@@ -419,6 +463,24 @@ function requireStringArray(body: Record<string, unknown>, key: string): readonl
     throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be a string array`, `provide ${key} as a string array`);
   }
   return value;
+}
+
+function requireJournalCommitRef(body: Record<string, unknown>, key: string): JournalCommitRef {
+  const value = requireRecord(body, key);
+  try {
+    validateJournalCommitRef(value as unknown as JournalCommitRef);
+  } catch (error) {
+    throw new UiRuntimeApiError(
+      'request.invalid-field',
+      APP_OWNER,
+      `request field ${key} is not a complete Journal commit receipt: ${error instanceof Error ? error.message : String(error)}`,
+      `provide ${key} as { commitId, journalSeq, recordDigest }`,
+      400,
+      undefined,
+      error,
+    );
+  }
+  return value as unknown as JournalCommitRef;
 }
 
 function requireRecord(body: Record<string, unknown>, key: string): Record<string, unknown> {
@@ -903,6 +965,57 @@ async function handleRequest(
         }
         return;
       }
+    }
+    const taskContextCorrection = /^\/api\/tasks\/([^/]+)\/control\/context-correction$/.exec(path);
+    const taskCheckpointReentry = /^\/api\/tasks\/([^/]+)\/control\/checkpoint-reentry$/.exec(path);
+    if ((taskContextCorrection || taskCheckpointReentry) && method === 'POST') {
+      const cookie = request.headers.cookie;
+      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
+      if (verification.state !== 'valid') throw sessionError(verification);
+      const taskId = id('task', decodeURIComponent((taskContextCorrection ?? taskCheckpointReentry)![1]!));
+      const { projectKey, mode } = requireTaskControlScope(url);
+      const taskScope = await service.resolveConfirmedTaskControlScope(taskId, projectKey, mode);
+      const body = await readBody(request);
+      const commandId = requireString(body, 'commandId');
+      const confirmationRef = requireString(body, 'confirmationRef');
+      if (taskContextCorrection) {
+        const wrongRefs = requireStringArray(body, 'wrongRefs');
+        if (wrongRefs.length === 0 || wrongRefs.some((ref) => ref.trim() === '')) {
+          throw new UiRuntimeApiError(
+            'request.invalid-field',
+            APP_OWNER,
+            'request field wrongRefs must contain at least one exact non-empty business ref',
+            'provide wrongRefs as exact committed Context business refs',
+            400,
+          );
+        }
+        const receipt = await commitConfirmedControl(() => service.executeConfirmedTaskContextCorrection({
+          taskScope,
+          commandId,
+          wrongRefs: wrongRefs.map((ref) => ({ taskScope, ref })),
+          repairText: requireString(body, 'repairText'),
+          confirmationRef,
+          ...(body.sourceCheckpointReceipt === undefined
+            ? {}
+            : { sourceCheckpointReceipt: requireJournalCommitRef(body, 'sourceCheckpointReceipt') }),
+          ...(body.expectedControlReceipt === undefined
+            ? {}
+            : { expectedControlReceipt: requireJournalCommitRef(body, 'expectedControlReceipt') }),
+        }));
+        writeJson(response, 200, receipt);
+        return;
+      }
+      const receipt = await commitConfirmedControl(() => service.executeConfirmedTaskCheckpointReentry({
+        taskScope,
+        commandId,
+        targetCheckpointCommitRef: requireJournalCommitRef(body, 'targetCheckpointCommitRef'),
+        confirmationRef,
+        ...(body.expectedCurrentControlCommitRef === undefined
+          ? {}
+          : { expectedCurrentControlCommitRef: requireJournalCommitRef(body, 'expectedCurrentControlCommitRef') }),
+      }));
+      writeJson(response, 200, receipt);
+      return;
     }
     // The single public display-preference resource, reached only after the
     // authenticated boundary above. It is Config-backed and writes only the

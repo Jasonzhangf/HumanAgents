@@ -5,16 +5,6 @@
     "operator_version": "1"
   },
   "nodes": {
-    "establish_task_identity": {
-      "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "ownerSymbol": "UiRuntimeService.completePreparedDispatch"
-    },
-    "admit_task_execution": {
-      "ownerPath": "packages/app/src/ui-runtime/execution-composition.ts",
-      "ownerRel": "packages/app/src/ui-runtime/execution-composition.ts",
-      "ownerSymbol": "createDefaultExecutionComposition"
-    },
     "requirement_result": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
@@ -60,6 +50,10 @@
       "ownerPath": "packages/runtime/src/explicit-brain/router.ts",
       "ownerRel": "packages/runtime/src/explicit-brain/router.ts",
       "ownerSymbol": "RequirementSubmissionOwner.submitFinal",
+      "templateSerializationOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "templateSerializationOwnerRel": "packages/app/src/ui-runtime/service.ts",
+      "templateSerializationOwnerSymbol": "normalizedInputForDraftFields",
+      "confirmedPayloadContract": "同一 canonical goal/scope/constraints/deliverables JSON 从 confirmed typed revision 进入 RequirementEnvelope.normalizedInput；禁止在此节点重序列化、裁剪或替换为单句 goal",
       "confirmationOwnerPath": "packages/runtime/src/intake/explicit-intake.ts",
       "confirmationOwnerRel": "packages/runtime/src/intake/explicit-intake.ts",
       "confirmationOwnerSymbol": "ExplicitIntake.confirmDraftRevision",
@@ -79,6 +73,25 @@
       "productionOwnerRel": "packages/app/src/ui-runtime/service.ts",
       "productionOwnerSymbol": "UiRuntimeService.confirmTypedExplicitRequirement",
       "productionEvidence": "confirmTypedExplicitRequirement 调用 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）"
+    },
+    "establish_task_identity": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService.completePreparedDispatch",
+      "taskDirectiveContract": "Task.directive 保留 RequirementEnvelope.normalizedInput 的完整 canonical 四字段；Task.title 从同一模板的可读 goal 派生，不得使用整段 JSON",
+      "firstExecutorInputOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "firstExecutorInputOwnerRel": "packages/app/src/ui-runtime/service.ts",
+      "firstExecutorInputOwnerSymbol": "UiRuntimeService.startExecution",
+      "firstExecutorInputContract": "执行 prompt 与 Task.directive 使用同一完整模板；ProviderStartInput.prompt 不是公开字段，验证必须读取实际 payload/requestContext/inputRefs 或真实捕获的请求"
+    },
+    "admit_task_execution": {
+      "ownerPath": "packages/app/src/ui-runtime/execution-composition.ts",
+      "ownerRel": "packages/app/src/ui-runtime/execution-composition.ts",
+      "ownerSymbol": "createDefaultExecutionComposition",
+      "closedTurnPlannerContractOwnerPath": "packages/runtime/src/orchestration/closed-turn-planner-call.ts",
+      "closedTurnPlannerContractOwnerRel": "packages/runtime/src/orchestration/closed-turn-planner-call.ts",
+      "closedTurnPlannerContractOwnerSymbol": "closedTurnPlannerOutputContract",
+      "closedTurnPlannerInputContract": "Planner 读取 Task.directive；节点、验收项与 decision 必须遵守 directive 中 constraints/deliverables"
     },
     "compile_execution_policy": {
       "ownerPath": "packages/runtime/src/explicit-brain/router.ts",

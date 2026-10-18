@@ -22,15 +22,22 @@ import { admitTaskGrantBusiness } from '../../dist/app/runtime/src/admission/tas
 import { durableContextDigest, produceContextHistory } from '../../dist/app/runtime/src/checkpoints/coordinator.js';
 import { prepareCheckpointClosure } from '../../dist/app/runtime/src/checkpoints/closure.js';
 import { submitCheckpoint } from '../../dist/app/runtime/src/checkpoints/submission.js';
-import { createJsonlCheckpointJournal, createJsonlCheckpointClosurePort, createJsonlContextHistoryPort, createJsonlSemanticHistoryJournal } from '../../dist/app/app/src/checkpoint-journal.js';
+import { CheckpointSubmissionError } from '../../dist/app/runtime/src/checkpoints/errors.js';
+import { conditionalReentryFromRecord, contextCorrectionFromRecord, createJsonlCheckpointJournal, createJsonlCheckpointClosurePort, createJsonlContextHistoryPort, createJsonlSemanticHistoryJournal, exactJournalRecord } from '../../dist/app/app/src/checkpoint-journal.js';
 import { createNativeRecoveryAssets } from '../../dist/app/app/src/native-recovery-assets.js';
-import { createJsonlOperationControlJournal } from '../../dist/app/app/src/operation-control-journal.js';
+import { createJsonlOperationControlJournal, readOperationControlFromRecords } from '../../dist/app/app/src/operation-control-journal.js';
 import { UiRuntimeService } from '../../dist/app/app/src/ui-runtime/service.js';
 import { startUiRuntime } from '../../dist/app/app/src/ui-runtime/index.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../dist/app/app/src/runtime-current-state-journal.js';
 import { createUiRuntimeRequestDispatcher } from '../../dist/app/app/src/ui-runtime/server.js';
 import { AccessControlService } from '../../dist/app/app/src/ui-runtime/access-control.js';
 import { UiRuntimeJournal, uiRuntimeJournalPath, uiRuntimeControlJournalPath, uiRuntimeModeRoot } from '../../dist/app/app/src/ui-runtime/journal.js';
+import {
+  ConfirmedControlExpectedConflict,
+  executeConfirmedTaskCheckpointReentry,
+  executeConfirmedTaskContextCorrection,
+  readCurrentFromRecords,
+} from '../../dist/app/app/src/ui-runtime/reentry-current-facts.js';
 
 // Known old-route defects: current is always undefined and receipt query keys are ignored.
 // A wrong recovery target has high correctness impact. One local HTTP consumer costs no model calls.
@@ -44,6 +51,9 @@ const otherTaskId = id('task', 'c3-other-task');
 const otherTaskScope = { organId, taskId: otherTaskId };
 const at = '2026-10-15T02:00:00.000Z';
 const owner = 'c3-http-consumer';
+const controlWrongRef = 'business-ref:m5-wrong-a';
+const controlSimilarRef = 'business-ref:m5-wrong-a2';
+const controlAcceptedRef = 'accepted-fact';
 
 async function snapshot(root) {
   const files = {};
@@ -58,11 +68,19 @@ async function snapshot(root) {
   return files;
 }
 
-export async function fixture({ cold = false } = {}) {
-  const scope = cold ? { ...taskScope, cycleId, operationId: id('operation', 'c3-cold-operation') } : { ...taskScope, cycleId };
+export async function fixture({ cold = false, controlCase = false, principalOwner: requestedPrincipalOwner } = {}) {
+  const scope = cold || controlCase
+    ? {
+        ...taskScope,
+        cycleId,
+        operationId: id('operation', cold ? 'c3-cold-operation' : 'c3-control-operation'),
+      }
+    : { ...taskScope, cycleId };
   await mkdir(fixtureRoot, { recursive: true });
   const root = await mkdtemp(join(fixtureRoot, 'http-'));
   const paths = await resolveRuntimePaths({ workspace: process.cwd(), controlRoot: root });
+  const accessControl = await AccessControlService.open({ credentialPath: paths.webAccessCredentialPath, create: true });
+  const principalOwner = requestedPrincipalOwner ?? (controlCase ? accessControl.readProductPrincipalOwner() : owner);
   const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(paths.checkpointsRoot, 'fake'));
   const journal = new JsonlOrganJournal(filePath);
   const identities = new JsonlTaskIdentityJournal(journal);
@@ -80,21 +98,29 @@ export async function fixture({ cold = false } = {}) {
   const closures = createJsonlCheckpointClosurePort({ filePath, journal });
   const grants = new JsonlTaskGrantJournal(journal);
   const capability = { actionId: 'checkpoint.save', capabilities: ['provider.execution'], scope: taskScope };
-  await grants.grant({ requestId: 'c3-grant', taskId, owner, capability, expectedRevision: 0 });
-  const request = { requestRef: 'c3-read-business', taskId, owner, capability,
+  await grants.grant({ requestId: 'c3-grant', taskId, owner: principalOwner, capability, expectedRevision: 0 });
+  const grantReadback = await grants.readTaskGrant(taskId);
+  assert.equal(grantReadback.grant?.owner, principalOwner);
+  assert.ok(grantReadback.commit);
+  const request = { requestRef: 'c3-read-business', taskId, owner: principalOwner, capability,
     inputIdentity: { requestRef: 'c3-read-business', digest: 'c3-http-intent' } };
-  const admitted = await admitTaskGrantBusiness({ port: grants, request, principalOwner: owner,
+  const admitted = await admitTaskGrantBusiness({ port: grants, request, principalOwner,
     register: async (authority, registration) => ({ authority, registrationCommitRef:
       await registration.registerBusiness({ ...request, grantRevision: authority.grant.revision }) }) });
-  const control = createJsonlOperationControlJournal({ journal });
+  assert.equal(admitted.authority.owner, principalOwner);
+  assert.deepEqual(admitted.authority.commit, grantReadback.commit);
+  const operationControl = createJsonlOperationControlJournal({ journal });
   const selector = { scope, agentRuntimeId: 'c3-runtime', harnessExecutionEpoch: 4 };
-  await control.initializeCoverage({ ...selector, admissionCommitRef: admitted.registrationCommitRef });
+  await operationControl.initializeCoverage({ ...selector, admissionCommitRef: admitted.registrationCommitRef });
   const ref = { checkpointId: id('checkpoint', 'c3-loop'), digest: 'c3-loop-digest' };
   const watermark = { streamId: 'c3-stream', sequence: 0 };
-  const durableContext = { stablePrefix: ['instructions'], indexRefs: [], dynamicHead: ['accepted fact'], repairRefs: [] };
+  const activeRefs = controlCase
+    ? [controlAcceptedRef, controlWrongRef, controlSimilarRef]
+    : [controlAcceptedRef];
+  const durableContext = { stablePrefix: ['instructions'], indexRefs: activeRefs, dynamicHead: ['accepted fact'], repairRefs: [] };
   const context = { kind: 'context-history', schemaVersion: 1, scope, agentRuntimeId: selector.agentRuntimeId,
     contextView: { contextViewRef: 'c3-context', executionEpoch: 4, checkpoint: ref,
-      contextDigest: 'c3-context-digest', activeRefs: ['accepted-fact'], omittedRefs: [] },
+      contextDigest: 'c3-context-digest', activeRefs, omittedRefs: [] },
     loopCheckpoint: { ...ref, sequence: 1, predecessor: null, executionEpoch: 4,
       eventWatermark: watermark, observationScopeId: 'c3-observation', contextViewRef: 'c3-context' },
     replacement: null, previousContextCommitRef: null, durableContext,
@@ -106,7 +132,10 @@ export async function fixture({ cold = false } = {}) {
       appliedDeltaIds: [], appliedDeltaKeys: [], closedObservationScopeIds: [],
       budgetUsage: { modeTransitions: 1, observationScopes: 1, contextReplacements: 0, deferredEvents: 0 } } };
   const contextCommit = await produceContextHistory(contexts, { record: context, expectedCurrentContextCommitRef: null });
-  const evidence = (label) => ({ evidenceId: id('evidence', label), kind: 'operation', source: owner,
+  const contextBody = await contexts.readContextCommit(scope, contextCommit.commitRef);
+  assert.ok(contextBody);
+  if (controlCase) assert.deepEqual(contextBody.contextView.activeRefs, activeRefs);
+  const evidence = (label) => ({ evidenceId: id('evidence', label), kind: 'operation', source: principalOwner,
     locator: `humanagent://c3/${label}`, scope });
   const checkpoint = (seq, previous) => ({ id: id('checkpoint', `c3-checkpoint-${seq}`), scope, cycleId, seq,
     previousCheckpointId: previous?.id ?? null, directiveRevision: seq, executionEpoch: 4,
@@ -131,7 +160,7 @@ export async function fixture({ cold = false } = {}) {
     completionJournal: new JsonlOperationCompletionJournal({ journal }) });
   const initialInput = await nativeAssets.writeInitialInput({ scope, turnId: turn.turnId, rawInput: 'read exact history' });
   await active.registerInitialInput(initialInput);
-  const nativeA = await checkpoints.commitNativeCheckpoint({ ownerId: owner, checkpoint: a, timeAuthority });
+  const nativeA = await checkpoints.commitNativeCheckpoint({ ownerId: principalOwner, checkpoint: a, timeAuthority });
   const assets = new ImmutableAssetStore(artifactsRoot);
   const turnIdentity = projectAdmittedTurnIdentityV1(turn);
   // Legal adopted-child producer chain. Two distinct refined deliveries are written to the
@@ -141,69 +170,76 @@ export async function fixture({ cold = false } = {}) {
   const childInvocationIds = ['c3-child-alpha', 'c3-child-beta'];
   const childTexts = { [childInvocationIds[0]]: 'refined alpha delivery body', [childInvocationIds[1]]: 'refined beta delivery body' };
   const adoptedSources = [];
-  for (const [index, invocationId] of childInvocationIds.entries()) {
-    const childTurnId = `c3-child-turn-${index}`;
-    const reference = await assets.write(`c3-child-${index}`, new TextEncoder().encode(childTexts[invocationId]));
-    const refinedDelivery = { ref: evidenceReference(reference, scope, 'operation', `c3-child-body-${index}`), view: { kind: 'utf8-text' } };
-    await active.openChildInvocation({ invocationId, childTurnId, checkpointReceiptRef: nativeA.receipt.journalReceiptRef,
-      binding: { kind: 'execution', assignment } });
-    const returnedDelivery = await active.recordChildReturn({ kind: 'execution', invocationId, refinedDelivery, assignment,
-      result: { taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: owner, assignmentId: assignment.assignmentId,
-        attempt: assignment.attempt, executionEpoch: assignment.executionEpoch, inputRevision: assignment.inputRevision,
-        producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: `refined child ${index}`,
-        outputRefs: [], evidenceRefs: [evidence(`child-result-${index}`)], nextAction: 'continue' } });
-    await active.recordChildAdoption(invocationId, returnedDelivery);
-    adoptedSources.push({ parentTurn: turnIdentity, invocationId, childTurnId, deliverySeq: returnedDelivery.seq,
-      adoptionCommitId: adoptedChildAdoptionCommitIdV1(turn.turnId, invocationId),
-      deliveryCommitId: adoptedChildDeliveryCommitIdV1(turn.turnId, invocationId), kind: 'execution',
-      refinedDelivery, preCallCheckpointRef: nativeA.receipt.journalReceiptRef });
-  }
-  assert.equal(new Set(adoptedSources.map((child) => child.deliverySeq)).size, 2);
+  let crossSource;
+  let crossChild;
+  if (!controlCase) {
+    for (const [index, invocationId] of childInvocationIds.entries()) {
+      const childTurnId = `c3-child-turn-${index}`;
+      const reference = await assets.write(`c3-child-${index}`, new TextEncoder().encode(childTexts[invocationId]));
+      const refinedDelivery = { ref: evidenceReference(reference, scope, 'operation', `c3-child-body-${index}`), view: { kind: 'utf8-text' } };
+      await active.openChildInvocation({ invocationId, childTurnId, checkpointReceiptRef: nativeA.receipt.journalReceiptRef,
+        binding: { kind: 'execution', assignment } });
+      const returnedDelivery = await active.recordChildReturn({ kind: 'execution', invocationId, refinedDelivery, assignment,
+        result: { taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: principalOwner, assignmentId: assignment.assignmentId,
+          attempt: assignment.attempt, executionEpoch: assignment.executionEpoch, inputRevision: assignment.inputRevision,
+          producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: `refined child ${index}`,
+          outputRefs: [], evidenceRefs: [evidence(`child-result-${index}`)], nextAction: 'continue' } });
+      await active.recordChildAdoption(invocationId, returnedDelivery);
+      adoptedSources.push({ parentTurn: turnIdentity, invocationId, childTurnId, deliverySeq: returnedDelivery.seq,
+        adoptionCommitId: adoptedChildAdoptionCommitIdV1(turn.turnId, invocationId),
+        deliveryCommitId: adoptedChildDeliveryCommitIdV1(turn.turnId, invocationId), kind: 'execution',
+        refinedDelivery, preCallCheckpointRef: nativeA.receipt.journalReceiptRef });
+    }
+    assert.equal(new Set(adoptedSources.map((child) => child.deliverySeq)).size, 2);
   // Third adopted delivery: real return, adoption and matching source, but its refined
   // asset carries another canonical task scope. The parent assignment and result stay
   // legitimate; only the delivered asset scope crosses to c3-other-task.
-  const crossTaskIndex = childInvocationIds.length;
-  const crossInvocationId = 'c3-child-cross-task';
-  const crossTurnId = `c3-child-turn-${crossTaskIndex}`;
-  const crossText = 'refined cross-task delivery body';
-  const crossReference = await assets.write(`c3-child-${crossTaskIndex}`, new TextEncoder().encode(crossText));
-  const crossRefinedDelivery = { ref: evidenceReference(crossReference, otherTaskScope, 'operation', `c3-child-body-${crossTaskIndex}`), view: { kind: 'utf8-text' } };
-  await active.openChildInvocation({ invocationId: crossInvocationId, childTurnId: crossTurnId, checkpointReceiptRef: nativeA.receipt.journalReceiptRef,
-    binding: { kind: 'execution', assignment } });
-  const crossReturned = await active.recordChildReturn({ kind: 'execution', invocationId: crossInvocationId, refinedDelivery: crossRefinedDelivery, assignment,
-    result: { taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: owner, assignmentId: assignment.assignmentId,
-      attempt: assignment.attempt, executionEpoch: assignment.executionEpoch, inputRevision: assignment.inputRevision,
-      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: `refined child ${crossTaskIndex}`,
-      outputRefs: [], evidenceRefs: [evidence(`child-result-${crossTaskIndex}`)], nextAction: 'continue' } });
-  await active.recordChildAdoption(crossInvocationId, crossReturned);
-  const crossSource = { parentTurn: turnIdentity, invocationId: crossInvocationId, childTurnId: crossTurnId, deliverySeq: crossReturned.seq,
-    adoptionCommitId: adoptedChildAdoptionCommitIdV1(turn.turnId, crossInvocationId),
-    deliveryCommitId: adoptedChildDeliveryCommitIdV1(turn.turnId, crossInvocationId), kind: 'execution',
-    refinedDelivery: crossRefinedDelivery, preCallCheckpointRef: nativeA.receipt.journalReceiptRef };
+    const crossTaskIndex = childInvocationIds.length;
+    const crossInvocationId = 'c3-child-cross-task';
+    const crossTurnId = `c3-child-turn-${crossTaskIndex}`;
+    const crossText = 'refined cross-task delivery body';
+    const crossReference = await assets.write(`c3-child-${crossTaskIndex}`, new TextEncoder().encode(crossText));
+    const crossRefinedDelivery = { ref: evidenceReference(crossReference, otherTaskScope, 'operation', `c3-child-body-${crossTaskIndex}`), view: { kind: 'utf8-text' } };
+    await active.openChildInvocation({ invocationId: crossInvocationId, childTurnId: crossTurnId, checkpointReceiptRef: nativeA.receipt.journalReceiptRef,
+      binding: { kind: 'execution', assignment } });
+    const crossReturned = await active.recordChildReturn({ kind: 'execution', invocationId: crossInvocationId, refinedDelivery: crossRefinedDelivery, assignment,
+      result: { taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: principalOwner, assignmentId: assignment.assignmentId,
+        attempt: assignment.attempt, executionEpoch: assignment.executionEpoch, inputRevision: assignment.inputRevision,
+        producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: `refined child ${crossTaskIndex}`,
+        outputRefs: [], evidenceRefs: [evidence(`child-result-${crossTaskIndex}`)], nextAction: 'continue' } });
+    await active.recordChildAdoption(crossInvocationId, crossReturned);
+    crossSource = { parentTurn: turnIdentity, invocationId: crossInvocationId, childTurnId: crossTurnId, deliverySeq: crossReturned.seq,
+      adoptionCommitId: adoptedChildAdoptionCommitIdV1(turn.turnId, crossInvocationId),
+      deliveryCommitId: adoptedChildDeliveryCommitIdV1(turn.turnId, crossInvocationId), kind: 'execution',
+      refinedDelivery: crossRefinedDelivery, preCallCheckpointRef: nativeA.receipt.journalReceiptRef };
+    crossChild = { invocationId: crossInvocationId, childTurnId: crossTurnId, deliverySeq: crossReturned.seq,
+      refinedDelivery: crossRefinedDelivery, text: crossText, preCallCheckpointRef: crossSource.preCallCheckpointRef };
+  }
   const captureBody = await active.prepareCapture({ pauseId: 'c3-boundary', frozenAt: at, initialInput,
     checkpointPath: [], completionRefs: [] });
   const capture = await nativeAssets.commitCapturePhase({ turnId: turn.turnId, boundaryId: captureBody.cut.pauseId,
     prepared: { body: captureBody, controlRecordCount: active.controlRecordCount(), producerDrains: [], completionLookups: [],
       recovery: { commitIdentity: 'c3-hold', laterErrorRefs: [], rawTurnRefs: [turn.currentTurnRef], unresolvedOperationRefs: [],
-        stages: [], durablePhases: [], durableReceiptRefs: [], recoveryResponsibilityRef: owner } } });
+        stages: [], durablePhases: [], durableReceiptRefs: [], recoveryResponsibilityRef: principalOwner } } });
   const preparation = await prepareCheckpointClosure({ checkpoint: a, source: 'harness-control', closureReason: 'empty boundary',
     contextCommitRef: contextCommit.commitRef, contextHistory: contexts, operationSelector: selector,
-    operationControl: await control.readControl(selector), permission: { permissionRevision: admitted.authority.permissionRevision,
+    operationControl: await operationControl.readControl(selector), permission: { permissionRevision: admitted.authority.permissionRevision,
       grantCommitRef: admitted.authority.commit, revoked: false }, hardBlockers: [], unreturnedCallRefs: [],
     unresolvedOperationRefs: [], closurePort: closures, now: () => new Date(at) });
-  await submitCheckpoint({ ownerId: owner, source: 'harness-control', checkpoint: a, previous: null,
+  await submitCheckpoint({ ownerId: principalOwner, source: 'harness-control', checkpoint: a, previous: null,
     journal: checkpoints, closurePort: closures, preparation, turnRecoveryRef: capture.commitIdentity });
   const semantic = createJsonlSemanticHistoryJournal({ filePath, journal, artifactsRoot,
     activeTurnJournal, rawContent: { read: async ({ content }) => assets.readEvidence(content.ref) }, timeAuthority });
   const semantics = { goal: 'read exact history', actions: 'inspect Journal', result: 'A remains current', nextStep: 'inspect A' };
   const view = await commitSemanticContextViewV1({ port: semantic, accepted: { version: 1,
-    admittedTurn: turn, checkpoint: nativeA, acceptance: { ownerId: owner, acceptanceRef: 'c3-semantic-accepted',
-      sourceEvidenceRefs: [evidence('semantic-accepted')] }, semantics, adoptedChildren: [...adoptedSources, crossSource],
-    recovery: { recoveryStateRef: turn.recoveryStateRef, recoveryResponsibilityRef: owner, unresolvedOperationRefs: [], laterErrorRefs: [] } } });
-  const publication = await commitSemanticHistoryPublicationV1({ port: semantic, ownerId: owner, turn: turnIdentity,
+    admittedTurn: turn, checkpoint: nativeA, acceptance: { ownerId: principalOwner, acceptanceRef: 'c3-semantic-accepted',
+      sourceEvidenceRefs: [evidence('semantic-accepted')] }, semantics,
+      adoptedChildren: crossSource === undefined ? adoptedSources : [...adoptedSources, crossSource],
+    recovery: { recoveryStateRef: turn.recoveryStateRef, recoveryResponsibilityRef: principalOwner, unresolvedOperationRefs: [], laterErrorRefs: [] } } });
+  const publication = await commitSemanticHistoryPublicationV1({ port: semantic, ownerId: principalOwner, turn: turnIdentity,
     checkpoint: nativeA, contextView: { identity: await contextViewIdentityV1({ turn: turnIdentity, checkpoint: a }), receipt: view } });
   const b = checkpoint(2, a);
-  await checkpoints.commitNativeCheckpoint({ ownerId: owner, checkpoint: b, timeAuthority });
+  await checkpoints.commitNativeCheckpoint({ ownerId: principalOwner, checkpoint: b, timeAuthority });
   const recordA = await checkpoints.readCommitted(scope, a.id);
   const recordB = await checkpoints.readCommitted(scope, b.id);
   assert.ok(recordA && recordB);
@@ -222,6 +258,20 @@ export async function fixture({ cold = false } = {}) {
       },
     });
   }
+  if (controlCase) {
+    uiJournal.append({ kind: 'operation.started', taskId, cycleId, operationId: scope.operationId, scope,
+      executionEpoch: 4, operationCounter: 1, cycleCounter: 1, startedAt: at, input: 'read exact history' });
+    await createJsonlRuntimeTaskCurrentStateJournal({ journal }).commit({
+      taskScope: scope, transitionId: 'c3-http-control-current', expectedStateCommitRef: null,
+      state: {
+        task: { id: taskId, organId, title: 'C3 read', directive: 'read exact history',
+          directiveRevision: 2, state: 'waiting', memoryScope: 'task' },
+        processing: { entryPhase: 'execution', nextAction: { kind: 'continue' }, hardBlockers: [],
+          recoveryResponsibilityRef: principalOwner, laterErrorRefs: [], stages: [] },
+        retainedDuties: [], sourceCommitRefs: [recordB.commitRef],
+      },
+    });
+  }
   let effects = 0;
   const forbidden = () => { effects++; throw new Error('read consumer invoked an effect port'); };
   const effectPort = new Proxy({}, { get: () => forbidden });
@@ -231,18 +281,326 @@ export async function fixture({ cold = false } = {}) {
     port: effectPort, checkpointStoreFor: forbidden, attentionPort: effectPort, closurePort: closures,
     providerState: 'unavailable', explicitBrainInterpreter: effectPort,
     memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: paths.projectKey },
-    runtimeComposition: { admitExecution: forbidden }, journal: uiJournal,
+    runtimeComposition: {
+      admitExecution: forbidden,
+      createExecutionPorts: () => ({
+        executeConfirmedTaskContextCorrection: (input) => executeConfirmedTaskContextCorrection({
+          ...input, filePath, journal, principalOwner,
+        }),
+        executeConfirmedTaskCheckpointReentry: (input) => executeConfirmedTaskCheckpointReentry({
+          ...input, filePath, journal, principalOwner,
+        }),
+      }),
+    }, journal: uiJournal,
     runtimePaths: paths, projectKey: paths.projectKey,
     projectCatalog: async () => ({ projects: [{ projectKey: paths.projectKey, projectRoot: paths.projectRoot,
       workspaceCwd: paths.workspaceCwd, checkpointsRoot: paths.checkpointsRoot }], failures: [] }),
   });
   const children = adoptedSources.map((source) => ({ invocationId: source.invocationId, childTurnId: source.childTurnId,
     deliverySeq: source.deliverySeq, refinedDelivery: source.refinedDelivery, text: childTexts[source.invocationId] }));
-  const crossChild = { invocationId: crossInvocationId, childTurnId: crossTurnId, deliverySeq: crossReturned.seq,
-    refinedDelivery: crossRefinedDelivery, text: crossText, preCallCheckpointRef: crossSource.preCallCheckpointRef };
-  return { root, paths, service, checkpoints, contextCommit, recordA, recordB, semantics, publication, capture, children, crossChild,
-    effects: () => effects };
+  return { root, paths, service, accessControl, principalOwner, filePath, journal, taskScope, grantReadback, admitted, operationControl,
+    checkpoints, contextCommit,
+    contextBody, activeRefs, recordA, recordB, semantics, publication, capture, children, crossChild, wrongRef: controlWrongRef,
+    similarRef: controlSimilarRef, acceptedRef: controlAcceptedRef, effects: () => effects };
 }
+
+function knownCurrent(read) {
+  if (read.state !== 'known') throw new Error(`expected known current facts: ${read.reason}`);
+  return read;
+}
+
+async function verifiedRecords(journal) {
+  const verification = await journal.verify();
+  if (!verification.valid) throw new Error(verification.error ?? 'fixture Journal is invalid');
+  return verification.records;
+}
+
+test('confirmed control physical facade commits exact correction and reentry over the real Journal', async () => {
+  const f = await fixture({ controlCase: true });
+  try {
+    const before = await verifiedRecords(f.journal);
+    const current = knownCurrent(readCurrentFromRecords(before, f.taskScope));
+    assert.deepEqual(current.context.contextView.activeRefs, f.activeRefs);
+    assert.ok(current.context.contextView.activeRefs.includes(f.wrongRef));
+    assert.ok(current.context.contextView.activeRefs.includes(f.similarRef));
+
+    const correction = await f.service.executeConfirmedTaskContextCorrection({
+      taskScope: f.taskScope,
+      commandId: 'c3-http-control-correction',
+      wrongRefs: [{ taskScope: f.taskScope, ref: f.wrongRef }],
+      repairText: 'remove only the confirmed wrong ref',
+      confirmationRef: 'confirmation:c3-http-control-correction',
+      sourceCheckpointReceipt: f.recordA.commitRef,
+      expectedControlReceipt: current.position.controlCommitRef,
+    });
+    assert.equal(correction.state, 'committed');
+    assert.equal(correction.record.previousExecutionEpoch, current.position.executionEpoch);
+    assert.equal(correction.record.newExecutionEpoch, current.position.executionEpoch + 1);
+    const afterCorrection = await verifiedRecords(f.journal);
+    assert.deepEqual(afterCorrection.slice(0, before.length), before);
+    assert.equal(afterCorrection.length, before.length + 2);
+    const correctionCarrier = contextCorrectionFromRecord(exactJournalRecord(afterCorrection, correction.commitRef));
+    assert.ok(correctionCarrier);
+    assert.deepEqual(correctionCarrier, correction.record);
+    assert.deepEqual(correctionCarrier.correctedContext.contextView.activeRefs, [f.acceptedRef, f.similarRef]);
+    assert.deepEqual(correctionCarrier.correctedContext.contextView.omittedRefs, [f.wrongRef]);
+    const correctionCoverage = readOperationControlFromRecords(afterCorrection, {
+      scope: correction.record.correctedContext.scope,
+      agentRuntimeId: correction.record.correctedContext.agentRuntimeId,
+      harnessExecutionEpoch: correction.record.newExecutionEpoch,
+    });
+    assert.equal(correctionCoverage.state, 'complete');
+    assert.deepEqual(correctionCoverage.currentControlCommitRef, correction.coverageCommitRef);
+    const correctedCurrent = knownCurrent(readCurrentFromRecords(afterCorrection, f.taskScope));
+    assert.deepEqual(correctedCurrent.context.contextView.activeRefs, [f.acceptedRef, f.similarRef]);
+    assert.equal(correctedCurrent.position.controlCommitRef.commitId, correction.commitRef.commitId);
+    assert.equal(correctedCurrent.position.executionEpoch, correction.record.newExecutionEpoch);
+
+    await assert.rejects(
+      () => f.service.executeConfirmedTaskContextCorrection({
+        taskScope: f.taskScope,
+        commandId: 'c3-http-control-stale',
+        wrongRefs: [{ taskScope: f.taskScope, ref: f.similarRef }],
+        repairText: 'stale correction must not commit',
+        confirmationRef: 'confirmation:c3-http-control-stale',
+        sourceCheckpointReceipt: f.recordA.commitRef,
+        expectedControlReceipt: current.position.controlCommitRef,
+      }),
+      (error) => {
+        assert.ok(error instanceof CheckpointSubmissionError);
+        assert.ok(error.cause instanceof ConfirmedControlExpectedConflict);
+        assert.equal(error.cause.reason, 'current-control-stale');
+        return /context correction current control token is stale/.test(error.message);
+      },
+    );
+    await assert.rejects(
+      () => f.service.executeConfirmedTaskContextCorrection({
+        taskScope: f.taskScope,
+        commandId: 'c3-http-control-correction',
+        wrongRefs: [{ taskScope: f.taskScope, ref: f.wrongRef }],
+        repairText: 'different confirmed facts must not commit',
+        confirmationRef: 'confirmation:c3-http-control-correction',
+        sourceCheckpointReceipt: f.recordA.commitRef,
+        expectedControlReceipt: current.position.controlCommitRef,
+      }),
+      /already committed with different confirmed facts/,
+    );
+    assert.deepEqual(await verifiedRecords(f.journal), afterCorrection);
+
+    const originalVerify = f.journal.verify.bind(f.journal);
+    let verifyCalls = 0;
+    let injectedFailure;
+    f.journal.verify = async () => {
+      verifyCalls += 1;
+      if (verifyCalls === 2) {
+        try {
+          await readFile(join(f.root, 'missing-submission-journal.json'), 'utf8');
+        } catch (error) {
+          injectedFailure = error;
+          throw error;
+        }
+      }
+      return originalVerify();
+    };
+    try {
+      await assert.rejects(
+        () => f.service.executeConfirmedTaskContextCorrection({
+          taskScope: f.taskScope,
+          commandId: 'c3-http-control-unknown-physical',
+          wrongRefs: [{ taskScope: f.taskScope, ref: f.similarRef }],
+          repairText: 'unknown physical failure must remain a submission failure',
+          confirmationRef: 'confirmation:c3-http-control-unknown-physical',
+          sourceCheckpointReceipt: f.recordA.commitRef,
+          expectedControlReceipt: correctedCurrent.position.controlCommitRef,
+        }),
+        (error) => {
+          assert.ok(error instanceof CheckpointSubmissionError);
+          assert.equal(error.cause, injectedFailure);
+          assert.equal(error.cause?.code, 'ENOENT');
+          return true;
+        },
+      );
+    } finally {
+      f.journal.verify = originalVerify;
+    }
+    assert.equal(verifyCalls, 2);
+    assert.deepEqual(await verifiedRecords(f.journal), afterCorrection);
+
+    const reentry = await f.service.executeConfirmedTaskCheckpointReentry({
+      taskScope: f.taskScope,
+      commandId: 'c3-http-control-reentry',
+      targetCheckpointCommitRef: f.recordA.commitRef,
+      confirmationRef: 'confirmation:c3-http-control-reentry',
+      expectedCurrentControlCommitRef: correctedCurrent.position.controlCommitRef,
+    });
+    assert.equal(reentry.state, 'committed');
+    assert.equal(reentry.record.previousExecutionEpoch, correctedCurrent.position.executionEpoch);
+    assert.equal(reentry.record.newExecutionEpoch, correctedCurrent.position.executionEpoch + 1);
+    const afterReentry = await verifiedRecords(f.journal);
+    assert.deepEqual(afterReentry.slice(0, afterCorrection.length), afterCorrection);
+    assert.equal(afterReentry.length, afterCorrection.length + 2);
+    const reentryCarrier = conditionalReentryFromRecord(exactJournalRecord(afterReentry, reentry.commitRef));
+    assert.ok(reentryCarrier);
+    assert.deepEqual(reentryCarrier, reentry.record);
+    assert.deepEqual(reentryCarrier.sourceCheckpointCommitRef, f.recordA.commitRef);
+    const reentryCoverage = readOperationControlFromRecords(afterReentry, {
+      scope: reentry.record.restoredContext.scope,
+      agentRuntimeId: reentry.record.restoredContext.agentRuntimeId,
+      harnessExecutionEpoch: reentry.record.newExecutionEpoch,
+    });
+    assert.equal(reentryCoverage.state, 'complete');
+    assert.deepEqual(reentryCoverage.currentControlCommitRef, reentry.coverageCommitRef);
+    const reenteredCurrent = knownCurrent(readCurrentFromRecords(afterReentry, f.taskScope));
+    assert.equal(reenteredCurrent.position.checkpointCommitRef.commitId, f.recordA.commitRef.commitId);
+    assert.equal(reenteredCurrent.position.controlCommitRef.commitId, reentry.commitRef.commitId);
+    assert.equal(reenteredCurrent.position.executionEpoch, reentry.record.newExecutionEpoch);
+  } finally {
+    await rm(f.root, { recursive: true });
+  }
+});
+
+test('confirmed control HTTP dispatcher returns real committed receipts for the exact task scope', async () => {
+  const f = await fixture({ controlCase: true });
+  const challenge = f.accessControl.createPairingChallenge('c3-http-control', 1);
+  const session = await f.accessControl.consumePairingCode(challenge.code);
+  const cookie = f.accessControl.sessionCookie(session).split(';')[0];
+  const verification = await f.accessControl.verifyProductPrincipal(cookie);
+  assert.equal(verification.state, 'valid');
+  assert.equal(verification.principal.owner, f.principalOwner);
+  assert.equal(f.grantReadback.grant.owner, f.principalOwner);
+  assert.equal(f.admitted.authority.owner, f.principalOwner);
+  const before = await verifiedRecords(f.journal);
+  const current = knownCurrent(readCurrentFromRecords(before, f.taskScope));
+  assert.deepEqual(current.context.contextView.activeRefs, f.activeRefs);
+  assert.ok(current.context.contextView.activeRefs.includes(f.wrongRef));
+
+  const { listener } = createUiRuntimeRequestDispatcher({
+    service: f.service,
+    accessControl: f.accessControl,
+    uiRoot: join(process.cwd(), 'docs/ui'),
+    isClosing: () => false,
+  });
+  const server = createServer(listener);
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const url = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const post = async (route, body) => {
+      const requestUrl = `${url}${route}?${new URLSearchParams({ projectKey: f.paths.projectKey, mode: 'fake' })}`;
+      const response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const receipt = await response.json();
+      console.log(JSON.stringify({ url: requestUrl, status: response.status, body: receipt }));
+      return { status: response.status, body: receipt };
+    };
+
+    const correction = await post(`/api/tasks/${taskId.value}/control/context-correction`, {
+      commandId: 'c3-http-control-http-correction',
+      wrongRefs: [f.wrongRef],
+      repairText: 'remove only the confirmed wrong ref',
+      confirmationRef: 'confirmation:c3-http-control-http-correction',
+      sourceCheckpointReceipt: f.recordA.commitRef,
+      expectedControlReceipt: current.position.controlCommitRef,
+    });
+    assert.equal(correction.status, 200,
+      `expected a committed correction receipt, got ${correction.status} ${JSON.stringify(correction.body)}`);
+    assert.equal(correction.body.state, 'committed');
+    assert.ok(correction.body.commitRef);
+    assert.ok(correction.body.coverageCommitRef);
+    const afterCorrection = await verifiedRecords(f.journal);
+    const correctionRecord = contextCorrectionFromRecord(
+      exactJournalRecord(afterCorrection, correction.body.commitRef),
+    );
+    assert.ok(correctionRecord);
+    assert.deepEqual(correctionRecord.correctedContext.contextView.activeRefs, [f.acceptedRef, f.similarRef]);
+    assert.deepEqual(correctionRecord.correctedContext.contextView.omittedRefs, [f.wrongRef]);
+    const correctedCurrent = knownCurrent(readCurrentFromRecords(afterCorrection, f.taskScope));
+
+    const staleCorrection = await post(`/api/tasks/${taskId.value}/control/context-correction`, {
+      commandId: 'c3-http-control-http-correction-stale',
+      wrongRefs: [f.similarRef],
+      repairText: 'stale correction must not commit',
+      confirmationRef: 'confirmation:c3-http-control-http-correction-stale',
+      sourceCheckpointReceipt: f.recordA.commitRef,
+      expectedControlReceipt: current.position.controlCommitRef,
+    });
+    assert.equal(staleCorrection.status, 409,
+      `expected a typed stale conflict, got ${staleCorrection.status} ${JSON.stringify(staleCorrection.body)}`);
+    assert.equal(staleCorrection.body.error.code, 'confirmed-control.conflict');
+    assert.deepEqual(await verifiedRecords(f.journal), afterCorrection);
+
+    const reentry = await post(`/api/tasks/${taskId.value}/control/checkpoint-reentry`, {
+      commandId: 'c3-http-control-http-reentry',
+      targetCheckpointCommitRef: f.recordA.commitRef,
+      confirmationRef: 'confirmation:c3-http-control-http-reentry',
+      expectedCurrentControlCommitRef: correctedCurrent.position.controlCommitRef,
+    });
+    assert.equal(reentry.status, 200,
+      `expected a committed reentry receipt, got ${reentry.status} ${JSON.stringify(reentry.body)}`);
+    assert.equal(reentry.body.state, 'committed');
+    assert.ok(reentry.body.commitRef);
+    assert.ok(reentry.body.coverageCommitRef);
+    const afterReentry = await verifiedRecords(f.journal);
+    const reentryRecord = conditionalReentryFromRecord(
+      exactJournalRecord(afterReentry, reentry.body.commitRef),
+    );
+    assert.ok(reentryRecord);
+    assert.deepEqual(reentryRecord.sourceCheckpointCommitRef, f.recordA.commitRef);
+
+    const staleReentry = await post(`/api/tasks/${taskId.value}/control/checkpoint-reentry`, {
+      commandId: 'c3-http-control-http-reentry-stale',
+      targetCheckpointCommitRef: f.recordA.commitRef,
+      confirmationRef: 'confirmation:c3-http-control-http-reentry-stale',
+      expectedCurrentControlCommitRef: correctedCurrent.position.controlCommitRef,
+    });
+    assert.equal(staleReentry.status, 409,
+      `expected a typed stale conflict, got ${staleReentry.status} ${JSON.stringify(staleReentry.body)}`);
+    assert.equal(staleReentry.body.error.code, 'confirmed-control.conflict');
+    assert.deepEqual(await verifiedRecords(f.journal), afterReentry);
+
+    const reenteredCurrent = knownCurrent(readCurrentFromRecords(afterReentry, f.taskScope));
+    const originalVerify = f.journal.verify.bind(f.journal);
+    let verifyCalls = 0;
+    let injectedFailure;
+    f.journal.verify = async () => {
+      verifyCalls += 1;
+      if (verifyCalls === 2) {
+        try {
+          await readFile(join(f.root, 'missing-http-submission-journal.json'), 'utf8');
+        } catch (error) {
+          injectedFailure = error;
+          throw error;
+        }
+      }
+      return originalVerify();
+    };
+    try {
+      const unknown = await post(`/api/tasks/${taskId.value}/control/context-correction`, {
+        commandId: 'c3-http-control-http-unknown-physical',
+        wrongRefs: [f.similarRef],
+        repairText: 'unknown physical failure must remain visible',
+        confirmationRef: 'confirmation:c3-http-control-http-unknown-physical',
+        sourceCheckpointReceipt: f.recordA.commitRef,
+        expectedControlReceipt: reenteredCurrent.position.controlCommitRef,
+      });
+      assert.equal(unknown.status, 500,
+        `expected an unknown physical failure, got ${unknown.status} ${JSON.stringify(unknown.body)}`);
+      assert.equal(unknown.body.error.code, 'ui-runtime.unexpected');
+      assert.equal(unknown.body.error.cause.code, 'ENOENT');
+      assert.equal(injectedFailure?.code, 'ENOENT');
+    } finally {
+      f.journal.verify = originalVerify;
+    }
+    assert.equal(verifyCalls, 2);
+    assert.deepEqual(await verifiedRecords(f.journal), afterReentry);
+  } finally {
+    server.closeIdleConnections();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(f.root, { recursive: true });
+  }
+});
 
 // The observed cold-start failure restores a blocked checkpoint instead of the
 // newer live owner state. Reuse the legal producer fixture; no Provider call is needed.

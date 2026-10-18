@@ -1119,6 +1119,24 @@ pre {
   display: none;
 }
 
+/* The checkpoint detail is one grid item of the shared shell-layer body. Keep
+   its long receipts and fields inside the drawer without clipping content. */
+.checkpoint-history-detail {
+  min-width: 0;
+}
+
+.checkpoint-history-detail [hidden] {
+  display: none;
+}
+
+.checkpoint-history-detail :where(section, div, dl, fieldset, label, legend, .detail-cell) {
+  min-width: 0;
+}
+
+.checkpoint-history-detail :where(p, strong, dd, dt, label, legend, .detail-cell) {
+  overflow-wrap: anywhere;
+}
+
 .shell-panel p {
   margin: 0;
   color: var(--ink);
