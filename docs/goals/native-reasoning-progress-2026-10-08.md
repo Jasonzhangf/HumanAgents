@@ -9,6 +9,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- deliverycanonical来源5d40b99b已cherry候选83bed0b9；组合contracts/agentloop/nativeAppcompile0、原16/16PASS（session48248）。正确native-text+显式同源CLI原3turn一次实际FAIL（session25906），已到3Planner24POST，无delivery比较冲突。新首错`delivery evidence task-business:v1:3ab02d7f2b2ffe6978a084285c60d06fe710b8e26d887c6b1d5fa35964584f76 does not resolve to an accepted tool result`；fixturexTp1hH保留并交peer核actualref/producer/fixture，不改validator。UX纯文档7755d22b已cherry2ef8de19；stop7bc2仍hold，待definition形状小Plan，未计验收。
+
 - r322补入真实successor end/save五阶段/closure/Plannerprepared-invoked-returned/completealignment/currentTask断言后作者原case1PASS，但final仅futureintent且evidence默认落fixture根；不接受该总结为完成。Root确认作者terminal0后直接最终源码tsc0+显式RUN evidence root同原case1/1PASS（session89602，3868ms），successfixture sI0o7t已按case成功清理，当前只剩外部pendingcall2/nooutput协议缺口，r323仍在独立规划。没有Review/合流预算产品patch，也不以受控完整tail冒真实协议恢复PASS。
 
 - r321计划已接收：r320wire确到standardend+Plannerrequest，但release receipt不独立证明durabletail。r322freshGCM仅原coldcase补same-successor end/save五阶段/closure/Plannerreturned+alignment/currentTask断言，不新增case。另parent已实际search+fetch官方 `https://developers.openai.com/api/docs/guides/function-calling`（Handling function calls / Incorporating results）：每call按call_id返回output再续request，可用文本表达失败。r320恢复wire保留call2无output，不符合所述正常flow；没有实际上游拒绝证据，不编造400。r323独立Gemini规划pending义务/完整预算边界最小修复，禁止fake成功、删除Journal事实或重放已接受effect。F暂不Review/交付。
