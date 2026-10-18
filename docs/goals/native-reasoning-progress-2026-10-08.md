@@ -1,5 +1,13 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 已推送并安装：inspection 原生编排、停止与冷恢复增量
+
+- 本57file完整闭包已正常FF main `70b0f2b5` 并push，原远端回执 `af6e9be0..70b0f2b5 main -> main`（session80266）。未关闭完整goal、原显式/RCC EOF、全部G/F或I1-I5。
+- 作者两原公开consumer2/2（3turn与opened-stop）、Runtime scoped5/5及真实keyorder RED→GREEN/值漂移拒绝、readiness3/3、既有双端真实正文UI验收均已接收。整体r338 Opus实际quota未审；r340 freshGemini4medium SUCCESS/exit0/有效JSON，经既有classifier PASS/findings[]。原始review与review-outcome在既有RUN native-inspection-milestone-review-r340-20261017。
+- main Contracts/Config/App/native专用编译、package:candidate/install:global全部exit0（session7721）。正式installed restart exit0（session89826）：generation29/PID88644→generation30/PID21754，53007，legacyClose clean；caller退出后新进程已实际存活59秒，受保护status GET200/ready。
+- 安装复验复用同一原opened-stop compiled consumer，仅临时将packages引用映射到实际installed runtime，并使用 `/opt/homebrew/bin/humanagent`：完整1/1PASS/exit0（session54795），覆盖标准stop、Provider收拢、精确checkpoint/I2/cycleclose、新serve durable-history stopped及dashboard/list/detail/Journal/POST/invocations无增。证据RUN native-inspection-installed-r341-20261017/installed-stop.log、exit.json、runtime-status.json；临时consumer映射已删除，成功fixture由原case清理。无源代码/installed模块改写，不扩称live RCC生成。
+- 全部实现来源树已正常关闭，浏览临时service已退出；唯一candidate仍有下一轮M3只读GCM PID89154占用，PROTECTED_HOLD，待其终态后正常remove/prune，不开同域新树。control是main交付根保留。peer仅澄清原定M3 review→checkpoint→Planner→revision→下一cycle源码/既有consumer证据，不给本增量追加门禁。
+
 ## 2026-10-17 当前接续：inspection readiness 与真实入口准入
 
 - r340 freshGemini4medium整体Review实际SUCCESS/exit0，scope base/origin-main/commitnull，有效完整六模块证据与findings[]；Root执行既有reviewOutputSchema/classifyReviewOutput裁决PASS，review-outcome.json已存同RUN。r338原Opusquota证据保留，不冒已审。准入涵盖本57file完整inspection功能/架构与适用作者/浏览证据，非原EOF或完整goal关闭；开始标准main/build/install/正式restart/安装模块复验/push，当前尚未交付。
