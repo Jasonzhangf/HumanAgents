@@ -1968,13 +1968,13 @@ export function taskIdFromQuery(required = true) {
  * marks it stale: an `open` that delivers no revision is not freshness, and only
  * a decoded revision restores it. Mode and breadcrumb selection re-project the
  * envelope already in memory, so no switch issues a request. The panel never
- * writes a task, consumes a queue, retries an operation or steers an execution.
+ * writes a task, consumes a queue, retries an operation or changes execution.
  *
  * @param {HTMLElement} host
- * @param {{ taskId: string, apiClient?: Object, onModeChange?: (mode: string) => void }} options
+ * @param {{ taskId: string, scope?: Object, apiClient?: Object, onModeChange?: (mode: string) => void }} options
  * @returns {{ reload: () => Promise<void>, setMode: (mode: string) => void, setScopeRef: (scopeRef: string) => void, dispose: () => void }}
  */
-export function mountSemanticObservationPanel(host, { taskId, apiClient = api, onModeChange } = {}) {
+export function mountSemanticObservationPanel(host, { taskId, scope, apiClient = api, onModeChange } = {}) {
   if (!(host instanceof HTMLElement)) throw new TypeError('mountSemanticObservationPanel requires an HTMLElement host')
   if (typeof taskId !== 'string' || !taskId) throw new TypeError('mountSemanticObservationPanel requires a taskId')
 
@@ -1984,6 +1984,7 @@ export function mountSemanticObservationPanel(host, { taskId, apiClient = api, o
   let streamDisconnected = false
   let readError = null
   let source = null
+  let readSerial = 0
   let disposed = false
 
   const view = mountSemanticObservation(host, {
@@ -2068,9 +2069,10 @@ export function mountSemanticObservationPanel(host, { taskId, apiClient = api, o
   function openStream() {
     if (disposed || source !== null || typeof EventSource !== 'function') return
     if (!canStream(envelope)) return
-    const stream = new EventSource(apiClient.semanticEventsUrl(taskId))
+    const stream = new EventSource(apiClient.semanticEventsUrl(taskId, scope))
+    const streamRevision = readSerial
     stream.addEventListener('semantic.observation', (event) => {
-      if (disposed) return
+      if (disposed || source !== stream || streamRevision !== readSerial) return
       let next = null
       try {
         next = JSON.parse(event.data)
@@ -2093,6 +2095,11 @@ export function mountSemanticObservationPanel(host, { taskId, apiClient = api, o
       envelope = next
       readError = null
       streamDisconnected = false
+      render()
+    })
+    stream.addEventListener('semantic-complete', () => {
+      if (disposed || source !== stream || streamRevision !== readSerial) return
+      closeStream()
       render()
     })
     // Reconnecting only means the socket opened again. Freshness returns only
@@ -2118,11 +2125,16 @@ export function mountSemanticObservationPanel(host, { taskId, apiClient = api, o
   }
 
   async function read() {
+    const serial = ++readSerial
+    closeStream()
     try {
-      envelope = freezeJsonValue(await apiClient.semanticObservation(taskId))
+      const next = freezeJsonValue(await apiClient.semanticObservation(taskId, scope))
+      if (disposed || serial !== readSerial) return
+      envelope = next
       readError = null
       streamDisconnected = false
     } catch (error) {
+      if (disposed || serial !== readSerial) return
       // A rejected read keeps the last confirmed envelope and marks it stale. It
       // never claims a stream disconnection, because a plain GET failure means no
       // stream was ever involved.

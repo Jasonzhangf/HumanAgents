@@ -10,6 +10,7 @@ import {
   renderRuntimeStatus,
   stateTone,
   taskIdFromQuery,
+  taskReadScopeFromQuery,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
 import { unavailableModeFailure } from './task-display.js'
@@ -33,6 +34,9 @@ const UNASSIGNED_LANE = Object.freeze({
 })
 
 const taskId = taskIdFromQuery()
+const readScope = taskReadScopeFromQuery()
+const explicitScope = readScope.kind === 'task' ? readScope : null
+const scopeFailure = readScope.kind === 'invalid' ? readScope.failure : null
 // The agent-instance selection is URL view state decoded through the shared A3
 // helpers with the canonical task id. A bad explicit deep link stays visible
 // instead of being dropped to the task catalog.
@@ -769,6 +773,7 @@ function renderSemanticObservationSection() {
     if (taskId) {
       semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, {
         taskId,
+        scope: explicitScope,
         // The panel's own four buttons reuse the shell programmatic transition,
         // so a local click cannot write the follow-last preference. The corner
         // buttons keep the original manual controller path.
@@ -788,6 +793,10 @@ function renderSemanticObservationSection() {
 }
 
 async function load(scopeRef) {
+  if (scopeFailure) {
+    renderPageError(status, scopeFailure)
+    return
+  }
   const serial = ++loadSerial
   try {
     const projection = await api.observation(taskId, scopeRef, selectedNodeId, agentQuery)

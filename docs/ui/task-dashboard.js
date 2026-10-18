@@ -2344,6 +2344,7 @@ function renderSemanticObservationSection() {
     if (taskId) {
       semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, {
         taskId,
+        scope: explicitScope,
         // The panel's own four buttons reuse the shell programmatic transition,
         // so a local click cannot write follow-last. The corner buttons keep the
         // original manual controller path. An equal mode is already applied.
