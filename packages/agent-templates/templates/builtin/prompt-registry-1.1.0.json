@@ -2,13 +2,6 @@
   "kind": "humanagent.prompt-registry",
   "schemaVersion": 1,
   "templateVersion": "1.1.0",
-  "contentDigests": {
-    "interaction": "sha256:fbc1d0dc356d2249dddcc314712ee667f325e506fba91bba583df2ed6b1e3340",
-    "orchestration": "sha256:3bf35cc21debcf01068b5dcbb65a7d9525d5337cbdd95383f246b6f73cdcf2fd",
-    "execution": "sha256:4f61da8df4ac7f36ed3a0a20d015f9412fc7261941e7366ac1ed529e9913f12e",
-    "review": "sha256:6ffd0efc0391a7b1168a6eda630c4abd3751aba02fdcbf9aa78279b8fc0d1bbb",
-    "memory": "sha256:8676cb1fa760d8ca5ac2e6c683b784cc19d1d3ffe9267e9b13e07533d01d1964"
-  },
   "auditPrompts": {
     "project-memory-audit": "memory/audit/project-memory-audit.md"
   },

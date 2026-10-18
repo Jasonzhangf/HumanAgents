@@ -29,7 +29,7 @@ import {
   createAppChildProducer,
   type ChildBodyAssetPort,
 } from '../../packages/app/src/ui-runtime/child-producer.js';
-import { digestOf, type ReviewSubjectMaterial } from '../../packages/runtime/src/orchestration/index.js';
+import type { ReviewSubjectMaterial } from '../../packages/runtime/src/orchestration/index.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import type { ActiveTurnJournalPort } from '../../packages/runtime/src/context/active-turn-journal.js';
 import type { InspectionSelectionContext } from '../../packages/runtime/src/agent-loop/inspection-turn-boundary.js';
@@ -112,7 +112,6 @@ const assignment: WorkAssignment = {
   objective: 'observe the committed inspection check exactly',
   targetRefs: [outputRef],
   expectedOutputRefs: [outputRef],
-  acceptanceCriteriaDigest: 'sha256:inspection-acceptance',
   successCriteria: ['return the exact structured inspection item result'],
   failureCriteria: [],
   incompleteCriteria: [],
@@ -147,7 +146,6 @@ const completedRecord: InspectionItemResultRecord = {
   delivery: completedDelivery,
 };
 const completedBody = JSON.stringify(completedRecord);
-const completedDigest = digestOf(completedBody);
 
 const failedDelivery: InspectionItemDelivery = {
   checkId,
@@ -164,7 +162,7 @@ interface PortCounts {
   readOutput: number;
 }
 
-function workResult(body: string, digest: string): WorkResult {
+function workResult(body: string): WorkResult {
   return {
     taskId,
     pipelineNodeId: assignment.pipelineNodeId,
@@ -174,7 +172,6 @@ function workResult(body: string, digest: string): WorkResult {
     executionEpoch: assignment.executionEpoch,
     inputRevision: assignment.inputRevision,
     producedArtifactRefs: [outputRef],
-    producedArtifactDigests: [digest],
     producedArtifactBodies: [body],
     status: 'succeeded',
     summary: 'inspection observation produced',
@@ -215,11 +212,11 @@ function buildPort(options: {
     execute: async (received) => {
       counts.execute += 1;
       executed.push(received);
-      return options.result ?? workResult(completedBody, completedDigest);
+      return options.result ?? workResult(completedBody);
     },
     readOutput: async () => {
       counts.readOutput += 1;
-      return options.material ?? { ref: outputRef, body: completedBody, digest: completedDigest };
+      return options.material ?? { ref: outputRef, body: completedBody };
     },
   });
   return { port, counts, executed };
@@ -240,8 +237,8 @@ test('inspection actor returns the exact structured observation, rejects summary
   // must not become a measurement.
   const summaryOnly = 'inspection completed: one TODO marker observed';
   const summaryRun = buildPort({
-    result: workResult(summaryOnly, digestOf(summaryOnly)),
-    material: { ref: outputRef, body: summaryOnly, digest: digestOf(summaryOnly) },
+    result: workResult(summaryOnly),
+    material: { ref: outputRef, body: summaryOnly },
   });
   await assert.rejects(
     () => summaryRun.port.run(request),
@@ -272,8 +269,8 @@ test('inspection actor returns the exact structured observation, rejects summary
   // manufactured judgment and no promotion to completed.
   const failedBody = structuredRecord(failedDelivery);
   const failedRun = buildPort({
-    result: workResult(failedBody, digestOf(failedBody)),
-    material: { ref: outputRef, body: failedBody, digest: digestOf(failedBody) },
+    result: workResult(failedBody),
+    material: { ref: outputRef, body: failedBody },
   });
   const failed = await failedRun.port.run(request);
   assert.deepEqual(failed, failedDelivery);
@@ -286,7 +283,7 @@ test('inspection actor returns the exact structured observation, rejects summary
   // Valid completed JSON cannot promote an actually failed execution.
   const failedExecutionRun = buildPort({
     result: {
-      ...workResult(completedBody, completedDigest),
+      ...workResult(completedBody),
       status: 'failed',
       failureRef: 'failure://inspection-actor/execution',
     },
@@ -300,7 +297,7 @@ test('inspection actor returns the exact structured observation, rejects summary
 
 test('inspection accepted-only port validates committed identity without re-executing or reading output', async () => {
   const fullBody = 'full child result body; this is not inspection control JSON';
-  const result = workResult(fullBody, completedDigest);
+  const result = workResult(fullBody);
   let reads = 0;
   const port = createInspectionAcceptedCheckPort({
     journal: {
@@ -384,10 +381,9 @@ test('inspection actor rejects a changed immutable check and a foreign structure
     ...request, binding: distinctBinding, assignment: distinctAssignment,
   };
   const distinctBody = structuredRecord(completedDelivery, distinctBinding);
-  const distinctDigest = digestOf(distinctBody);
   const distinctRun = buildPort({
-    result: { ...workResult(distinctBody, distinctDigest), taskId: executionTaskId },
-    material: { ref: outputRef, body: distinctBody, digest: distinctDigest },
+    result: { ...workResult(distinctBody), taskId: executionTaskId },
+    material: { ref: outputRef, body: distinctBody },
   });
   assert.deepEqual(await distinctRun.port.run(distinctRequest), completedDelivery);
   assert.equal(distinctRun.executed[0]?.assignment, distinctAssignment);
@@ -426,8 +422,8 @@ test('inspection actor rejects a changed immutable check and a foreign structure
 
   const foreignDeliveryBody = structuredRecord({ ...completedDelivery, checkId: 'inspection-actor-check-other' });
   const foreignDeliveryRun = buildPort({
-    result: workResult(foreignDeliveryBody, digestOf(foreignDeliveryBody)),
-    material: { ref: outputRef, body: foreignDeliveryBody, digest: digestOf(foreignDeliveryBody) },
+    result: workResult(foreignDeliveryBody),
+    material: { ref: outputRef, body: foreignDeliveryBody },
   });
   await assert.rejects(
     () => foreignDeliveryRun.port.run(request),
@@ -439,32 +435,24 @@ test('inspection actor rejects a changed immutable check and a foreign structure
     occurrence: { ...binding.occurrence, occurrenceId: 'occurrence-inspection-actor-other' },
   });
   const foreignBindingRun = buildPort({
-    result: workResult(foreignBindingBody, digestOf(foreignBindingBody)),
-    material: { ref: outputRef, body: foreignBindingBody, digest: digestOf(foreignBindingBody) },
+    result: workResult(foreignBindingBody),
+    material: { ref: outputRef, body: foreignBindingBody },
   });
   await assert.rejects(
     () => foreignBindingRun.port.run(request),
     expectContractError(/binding/),
   );
 
-  const driftedDigestRun = buildPort({
-    material: { ref: outputRef, body: completedBody, digest: 'sha256:drifted' },
-  });
-  await assert.rejects(
-    () => driftedDigestRun.port.run(request),
-    expectContractError(/digest/),
-  );
-
   const missingBodyRun = buildPort({
-    material: { ref: outputRef, body: '', digest: completedDigest },
+    material: { ref: outputRef, body: '' },
   });
   await assert.rejects(
     () => missingBodyRun.port.run(request),
-    expectContractError(/digest/),
+    expectContractError(/inspection item result record/),
   );
 
   const unrelatedRefRun = buildPort({
-    material: { ref: 'artifact://inspection-actor/unrelated', body: completedBody, digest: completedDigest },
+    material: { ref: 'artifact://inspection-actor/unrelated', body: completedBody },
   });
   await assert.rejects(
     () => unrelatedRefRun.port.run(request),
@@ -551,12 +539,11 @@ test('App child producer settles the same typed inspection delivery on new and r
     completedAt: '2026-10-17T12:00:00.000Z',
   };
   const executionResult: WorkResult = {
-    ...workResult('the producer child observed one TODO marker', digestOf('body')),
+    ...workResult('the producer child observed one TODO marker'),
     agentId: 'agent-inspection-child',
     assignmentId: parentAssignment.assignmentId,
     pipelineNodeId: parentAssignment.pipelineNodeId,
     producedArtifactRefs: [],
-    producedArtifactDigests: [],
     producedArtifactBodies: [],
     outputRefs: [...parentAssignment.expectedOutputRefs],
     executionEpoch: parentAssignment.executionEpoch,

@@ -80,7 +80,6 @@ const externalEvidence = (label: string, session: string, scope: ScopeRef = oper
 
 const plugin: DshPluginLock = {
   bundleRef: 'humanagent-dsh-bundle:approved',
-  digest: digest(),
   entry: 'dist/index.js',
 };
 
@@ -722,7 +721,7 @@ test('DSH lock, profile, plugin, and binding descriptors validate', () => {
   assert.doesNotThrow(() => assertDshLockDescriptor(dshBaselineLock));
   assert.doesNotThrow(() => assertDshProfileDescriptor(profile));
   assert.doesNotThrow(() => assertDshProviderBinding(dshProviderBinding));
-  assert.throws(() => assertDshLockDescriptor({ ...dshBaselineLock, commit: 'bad' }), DshAdapterError);
+  assert.throws(() => assertDshLockDescriptor({ ...dshBaselineLock, describe: '' }), DshAdapterError);
   assert.throws(() => assertDshProfileDescriptor({ ...profile, profileName: 'default' }), DshAdapterError);
   assert.throws(() => assertDshProviderBinding({ ...dshProviderBinding, routeRef: 'default' }), DshAdapterError);
 });

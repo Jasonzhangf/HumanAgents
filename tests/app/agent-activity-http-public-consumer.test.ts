@@ -128,7 +128,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         assignmentId: fixture.assignmentId, taskId, pipelineNodeId: 'http-node', attempt: 1,
         executionEpoch: 1, inputRevision: 1, objective: fixture.objective,
         targetRefs: [fixture.targetRef], expectedOutputRefs: [fixture.expectedOutputRef],
-        acceptanceCriteriaDigest: 'sha256:http-fixture', successCriteria: ['read only'],
+        successCriteria: ['read only'],
         failureCriteria: ['mutation'], incompleteCriteria: ['missing facts'],
         requiredCapabilities: [], mergeGate: 'not-required',
       },

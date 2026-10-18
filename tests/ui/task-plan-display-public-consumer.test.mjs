@@ -88,6 +88,7 @@ const {
   renderTaskPlanSnapshot,
   renderTaskPlanCurrentSection,
   renderTaskPlanSemanticView,
+  renderTaskDescriptionContent,
   commitScopedReadTransition,
 } = await import('../../docs/ui/task-display.js')
 
@@ -402,4 +403,41 @@ test('snapshot and change helpers stay on typed fields', () => {
   assert.equal(byData(rendered, 'planNode', 'v1-build').length, 1)
   assert.equal(byData(rendered, 'relationKind', 'depends-on').length, 1)
   assert.match(allText(rendered), /Build v1 \(revised\)/)
+})
+
+test('task description renders complete canonical requirements and preserves other input', () => {
+  const goal = 'Write one short paragraph containing M4-CONSTRAINT-FIDELITY-OK explaining why preserving user constraints matters.'
+  const scope = '/Users/fanzhang/.humanagent/test-fixtures/m4-constraint-rcc-acceptance-20261018/workspace'
+  const constraints = [
+    'Do not create, modify, or delete any workspace files.',
+    'Do not call child agents or delegate this task.',
+    'Return the paragraph directly as the final answer.',
+  ]
+  const deliverables = ['One short paragraph containing M4-CONSTRAINT-FIDELITY-OK']
+  const canonicalInput = JSON.stringify({ constraints, deliverables, goal, scope })
+
+  const canonical = renderTaskDescriptionContent({ taskTitle: goal, input: canonicalInput })
+  assert.equal(canonical.dataset.taskDescription, 'structured')
+  assert.deepEqual(
+    walk(canonical).filter((node) => node.tagName === 'DT').map((node) => node.textContent),
+    ['目标', '范围', '约束', '交付要求'],
+  )
+  const canonicalText = canonical.textContent
+  assert.ok(canonicalText.indexOf(goal) < canonicalText.indexOf(scope))
+  assert.ok(canonicalText.indexOf(scope) < canonicalText.indexOf(constraints[0]))
+  assert.ok(canonicalText.indexOf(constraints[0]) < canonicalText.indexOf(constraints[1]))
+  assert.ok(canonicalText.indexOf(constraints[1]) < canonicalText.indexOf(constraints[2]))
+  assert.ok(canonicalText.indexOf(constraints[2]) < canonicalText.indexOf(deliverables[0]))
+  assert.doesNotMatch(canonicalText, /"constraints"|"deliverables"|"goal"|"scope"/)
+
+  const plaintext = 'First line.\n\nSecond line keeps its blank line.\n  Indented line.'
+  assert.equal(renderTaskDescriptionContent({ input: plaintext }).textContent, plaintext)
+
+  const unknownInput = JSON.stringify({ ...JSON.parse(canonicalInput), priority: 'keep this extra field' })
+  assert.equal(renderTaskDescriptionContent({ input: unknownInput }).textContent, unknownInput)
+
+  const partialInput = JSON.stringify({ goal, scope })
+  assert.equal(renderTaskDescriptionContent({ input: partialInput }).textContent, partialInput)
+
+  assert.equal(renderTaskDescriptionContent({ input: '' }).textContent, '尚未输入')
 })

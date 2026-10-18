@@ -1,5 +1,17 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
+## 2026-10-18 治理消融候选：源码与直接消费者
+
+模板静态冻结、mode/lease 重复摘要、DSH 源码/patch 身份包装，以及 Work/Review 材料哈希字段和实际调用已在治理分支消融。任务身份、正文、准则、引用、lease fencing、持久化 review 和资产完整性约束保留。Runtime/App 源码编译通过；受影响 Runtime 消费者 46 PASS、App 持久化 review 消费者 9 PASS，默认 App 测试编译现已通过。
+
+候选尚未合入 main。Runtime review 等直接 fixture 仍需迁移退役字段，再完成整体审查和标准交付。原错误及过程证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-work-review-runtime-20261018/owner-reception.md` 和 `governance-fixture-final-20261018/events.jsonl`。SDK 辅助 verify 的 FreezeRecord 兼容缺口已登记 upstream `8a8c1be`，未补回旧冻结要求。
+
+## 2026-10-18 治理消融候选：契约层
+
+治理分支已删除 Work/Review 的重复 criteria、artifact 和 subject 哈希字段、校验与直接复制调用。任务、执行者、assignment、epoch、引用、正文和准则约束保留。契约构建通过；同一无哈希输入已取得旧 validator 拒绝、当前 validator 接受的反例。当前工作树产物的既有消费者 6 PASS，身份和引用不匹配仍会失败。
+
+这只是候选的契约层证据，尚未合入 main。实际调用的后继进度见上节。过程、原错及证据保留在 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-work-review-contracts-r2-20261018/reception.md` 和同目录事件记录，不以共享依赖加载旧产物的失败冒充当前结果。
+
 ## 2026-10-18 M5 确认控制与双端 checkpoint 交互
 
 main 集成 `d2ab27fe`。已接通 context-correction/checkpoint-reentry 的正式 POST、canonical scope resolver、物理 Journal 提交与 current-state 读回。已确认四字段任务输入从确认到执行载荷保持完整。Runtime 包装保留原 cause；已知旧基准冲突局部返回409，真实 ENOENT 保持500及原因。

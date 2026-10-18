@@ -63,8 +63,6 @@ export type InteractionHelperAssignmentFields = Pick<
   | 'objective'
   | 'targetRefs'
   | 'expectedOutputRefs'
-  | 'expectedArtifactDigests'
-  | 'acceptanceCriteriaDigest'
   | 'successCriteria'
   | 'failureCriteria'
   | 'incompleteCriteria'
@@ -80,7 +78,6 @@ export type InteractionHelperResultFields = Pick<
   WorkResult,
   | 'agentId'
   | 'producedArtifactRefs'
-  | 'producedArtifactDigests'
   | 'producedArtifactBodies'
   | 'status'
   | 'summary'
@@ -347,12 +344,8 @@ export function validateInteractionHelperIncarnation(
 export function validateInteractionHelperAssignment(input: InteractionHelperAssignment): void {
   validateInteractionHelperIdentity(input);
   assertNonEmptyString(input.objective, 'helper assignment objective');
-  assertNonEmptyString(input.acceptanceCriteriaDigest, 'helper assignment acceptanceCriteriaDigest');
   assertStringArray(input.targetRefs, 'helper assignment targetRefs');
   assertStringArray(input.expectedOutputRefs, 'helper assignment expectedOutputRefs');
-  if (input.expectedArtifactDigests !== undefined) {
-    assertStringArray(input.expectedArtifactDigests, 'helper assignment expectedArtifactDigests');
-  }
   if (!Array.isArray(input.successCriteria) || input.successCriteria.length === 0) {
     throw new ContractError('helper assignment successCriteria must be a non-empty array');
   }
@@ -390,7 +383,6 @@ export function validateInteractionHelperResult(
   }
   assertNonEmptyString(input.summary, 'helper result summary');
   assertStringArray(input.producedArtifactRefs, 'helper result producedArtifactRefs');
-  assertStringArray(input.producedArtifactDigests, 'helper result producedArtifactDigests');
   assertStringArray(input.outputRefs, 'helper result outputRefs');
   assertHelperEvidenceRefs(input.evidenceRefs, input.organId, 'helper result evidenceRefs');
   if (!HELPER_NEXT_ACTIONS.includes(input.nextAction)) {
@@ -398,34 +390,11 @@ export function validateInteractionHelperResult(
   }
   if (input.nextAction === 'wait') assertNonEmptyString(input.conditionRef ?? '', 'helper result conditionRef');
   if (input.status === 'failed') assertNonEmptyString(input.failureRef ?? '', 'helper result failureRef');
-  if (input.producedArtifactRefs.length !== input.producedArtifactDigests.length) {
-    throw new ContractError('helper result artifact digests must match artifact refs');
-  }
   if (input.producedArtifactBodies !== undefined) {
     if (input.producedArtifactBodies.length !== input.producedArtifactRefs.length) {
       throw new ContractError('helper result artifact bodies must match artifact refs');
     }
     assertStringArray(input.producedArtifactBodies, 'helper result producedArtifactBodies');
-  }
-
-  if (assignment?.expectedArtifactDigests !== undefined) {
-    if (input.status === 'succeeded') {
-      if (assignment.expectedArtifactDigests.length !== input.producedArtifactDigests.length) {
-        throw new ContractError('helper result expected artifact digests must match produced artifact digests');
-      }
-      for (let index = 0; index < assignment.expectedArtifactDigests.length; index += 1) {
-        if (assignment.expectedArtifactDigests[index] !== input.producedArtifactDigests[index]) {
-          throw new ContractError('helper result artifact digest does not match expected digest');
-        }
-      }
-    } else {
-      const expected = new Set(assignment.expectedArtifactDigests);
-      for (const digest of input.producedArtifactDigests) {
-        if (!expected.has(digest)) {
-          throw new ContractError('helper result artifact digest does not match expected digest');
-        }
-      }
-    }
   }
 
   if (assignment !== undefined && input.status === 'succeeded') {

@@ -107,7 +107,6 @@ export type { RuntimeExecutionBinding } from './execution.js';
 export { executeAgentOperation, openAgentExecution } from './agent-execution.js';
 export type { AgentExecutionReceipt, AgentExecutionRequest, AgentExecutionSession } from './agent-execution.js';
 export {
-  assertDshSourceMatchesLock,
   composeAgentDriver,
   createAgentProviderPort,
   prepareAgentProvider,

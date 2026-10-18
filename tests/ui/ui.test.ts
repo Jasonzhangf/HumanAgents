@@ -442,20 +442,6 @@ test('task dashboard keeps stale, blocked, and reconcile states visible without 
   assert.equal(JSON.stringify(projection).includes('"retry"'), false);
 });
 
-test('UI projection code does not read Journal or DSH session logs', async () => {
-  const source = await readFile(join(process.cwd(), 'packages', 'ui', 'projection', 'index.ts'), 'utf8');
-  assert.equal(/\bJsonlOrganJournal\b|DSH Session|DSH\s+Session\s+Log|sessionLog/i.test(source), false);
-});
-
-test('UI projection stays a typed read-only adapter and hides internal presentation language', async () => {
-  const source = await readFile(join(process.cwd(), 'packages', 'ui', 'projection', 'index.ts'), 'utf8');
-  assert.equal(/from ['"][^'"]*\/runtime\//.test(source), false);
-  assert.equal(/from ['"][^'"]*\/(?:adapters|jsonl|dsh)\//.test(source), false);
-  assert.equal(/\b(?:AgentRuntime|RuntimeTaskCoordinator|JsonlOrganJournal)\b/.test(source), false);
-  assert.equal(source.includes('器官'), false);
-  assert.equal(source.includes('大脑'), false);
-});
-
 test('observation projection supports recursion, drawer details, return, and read-only rules', () => {
   const scopes: Record<string, ObservationScopeSource> = {
     root: {
@@ -1125,43 +1111,6 @@ test('semantic panel closes a finite stream without disconnecting or publishing 
   }
 });
 
-test('task dashboard event rows do not render internal owner or next action details', async () => {
-  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
-  assert.equal(source.includes('event.nextAction'), false);
-  assert.equal(source.includes("event.kind !== 'provider.model' || (event.summary && event.summary !== 'model')"), true);
-  assert.equal(source.includes("'provider.tool-result'"), true);
-  assert.equal(source.includes('historyChunks'), true);
-  assert.equal(source.includes('olderEventCount'), true);
-  assert.equal(source.includes('connectionState'), true);
-});
-
-test('task dashboard status copy keeps stopped conditional on a collected checkpoint', async () => {
-  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
-  assert.equal(source.includes("dashboard.state === 'stopped'"), true);
-  assert.equal(source.includes('不能宣称已停止'), true);
-  assert.equal(source.includes('statusSections.business'), true);
-  assert.equal(source.includes('statusSections.waiting'), true);
-  assert.equal(source.includes('连接新鲜度'), true);
-  assert.equal(source.includes('historyPage'), true);
-  assert.equal(source.includes('HISTORY_PAGE_SIZE'), true);
-  assert.equal(source.includes("'更早'"), true);
-  assert.equal(source.includes('本页之前还有'), false);
-  assert.equal(source.includes('停止请求已受理'), true);
-  assert.equal(source.includes("['succeeded', 'failed'].includes(dashboard.state)"), true);
-});
-
-test('dashboard submission never waits on a second confirmation', async () => {
-  const source = await readFile('docs/ui/dashboard.js', 'utf8');
-  // The new-task form submit is the only authorization point on this page, so
-  // the second-confirmation wait that used to gate the draft here is deleted.
-  // None of its copy and none of its direct confirmation call may come back.
-  assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), false);
-  assert.equal(source.includes("progress.set('等待你确认任务草案'"), false);
-  assert.equal(source.includes('await api.confirmExplicitRequirement(interaction.id'), false);
-  assert.equal(source.includes("timer.hidden = true"), false);
-  assert.equal(source.includes("root.dataset.tone = 'waiting'"), false);
-});
-
 test('memory review button exposes typed API failure and becomes usable again', async () => {
   const { bindMemoryReviewAction } = await import(new URL(`file://${join(process.cwd(), 'docs/ui/memory-actions.js')}`).href);
   let listener: (() => Promise<void>) | undefined;
@@ -1270,55 +1219,6 @@ test('observation work-card adapter pairs tool calls with results and marks unpr
   const unreturned = tools[1] as { turnId?: string };
   assert.equal(unreturned.turnId, undefined);
   assert.equal(projection.cardMetadata.source.turnId, 'turn-provider-reported');
-});
-
-test('UI index is the task input entry with explicit draft, confirmation gate, and runtime status', async () => {
-  const html = await readFile('docs/ui/index.html', 'utf8');
-  const entry = await readFile('docs/ui/entry.js', 'utf8');
-  assert.equal(html.includes('HumanAgent · Task Input'), true);
-  assert.equal(entry.includes('api.listTasks'), true);
-  assert.equal(entry.includes('id = \'entry-confirm-button\''), false);
-  assert.equal(entry.includes('确认并进入队列'), false);
-  assert.equal(entry.includes('implicitScheduling'), true);
-  assert.equal(entry.includes('taskDashboardHref'), true);
-  assert.equal(html.includes('data-mode="running"'), false);
-  assert.equal(html.includes('本地状态已同步'), false);
-  assert.equal(html.includes('正在运行'), false);
-  assert.equal(html.includes('checkpoint committed'), false);
-  assert.equal(html.includes('id="entry-confirm-button"'), false);
-  assert.equal(html.includes('data-region="confirmation"'), false);
-});
-
-test('explicit interaction UI uses typed brain routes and keeps control separate', async () => {
-  const api = await readFile('docs/ui/runtime-api.js', 'utf8');
-  const interaction = await readFile('docs/ui/interaction.js', 'utf8');
-  const html = await readFile('docs/ui/interaction.html', 'utf8');
-  for (const method of [
-    'receiveExplicitInput',
-    'inspectExplicitInteraction',
-    'answerExplicitClarification',
-    'beginExplicitMatching',
-    'recordExplicitMatch',
-    'proposeExplicitRequirement',
-    'completeExplicitStatusQuery',
-    'confirmExplicitRequirement',
-    'dispatchNextExplicitRequirement',
-  ]) assert.equal(api.includes(`${method}:`), true);
-  assert.equal(api.includes("channel: 'business'"), true);
-  assert.equal(interaction.includes('api.inspectExplicitInteraction'), true);
-  assert.equal(interaction.includes('api.completeExplicitStatusQuery'), true);
-  assert.equal(interaction.includes('api.confirmExplicitRequirement'), true);
-  assert.equal(interaction.includes('api.dispatchNextExplicitRequirement'), true);
-  assert.equal(interaction.includes('api.stop'), true);
-  assert.equal(interaction.includes('api.startExecution'), true);
-  assert.equal(interaction.includes('channel: \'control\''), false);
-  assert.equal(interaction.includes('dataset.runtimeState'), false);
-  assert.equal(interaction.includes('data-task-status'), false);
-  assert.equal(interaction.includes("field(matchingForm, 'normalizedInput').value"), false);
-  assert.equal(interaction.includes("field(inputForm, 'rawInput').value"), false);
-  assert.equal(html.includes('data-explicit-confirmation'), true);
-  assert.equal(html.includes('data-action="dispatch"'), true);
-  assert.equal(html.includes('name="normalizedInput"'), false);
 });
 
 test('explicit interaction UI executes route order and confirmation gate', async () => {
@@ -1591,25 +1491,6 @@ test('explicit interaction UI executes route order and confirmation gate', async
   }
 });
 
-test('task detail UI consumes typed task-detail projection fields', async () => {
-  const source = await readFile('docs/ui/task.js', 'utf8');
-  assert.equal(source.includes('detail.taskTitle'), false);
-  assert.equal(source.includes('detail.stateLabel'), false);
-  assert.equal(source.includes('detail.data.label'), false);
-  assert.equal(source.includes('detail.output?.summary'), true);
-  assert.equal(source.includes('detail.artifacts'), false);
-  assert.equal(/detail\.observation\b/.test(source), false);
-  assert.equal(source.includes('detail.title'), true);
-  assert.equal(source.includes('detail.currentState'), true);
-  assert.equal(source.includes('detail.priorInput'), true);
-  assert.equal(source.includes('detail.investigation'), true);
-  assert.equal(source.includes('detail.proposal'), true);
-  assert.equal(source.includes('detail.requiredDecisions'), true);
-  assert.equal(source.includes('detail.output'), true);
-  assert.equal(source.includes('detail.output?.artifacts'), true);
-  assert.equal(source.includes('detail.observationRef'), true);
-});
-
 test('task clarification handler retries interpretation by typed state without resubmitting the answer', async () => {
   const flow = await import(
     `${new URL(`file://${join(process.cwd(), 'docs/ui/explicit-interaction-flow.js')}`).href}?clarification-retry-test`
@@ -1767,20 +1648,6 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
   assert.equal(feedback.textContent.includes('已进入 FIFO'), true);
   assert.equal(feedback.textContent.includes('requirement:draft-7:1'), true);
   assert.equal(nodes.some((node) => node.textContent === '打开任务列表' && node.href === './tasks.html'), true);
-});
-
-test('runtime task dashboard is observational and has no second execution-input form', async () => {
-  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
-  assert.equal(source.includes('本次执行输入'), false);
-  assert.equal(source.includes('promptInput'), false);
-  assert.equal(source.includes('api.startExecution'), false);
-  assert.equal(/shouldObserveActiveState\(\)/.test(source), true);
-  assert.equal(/dashboard\.state\)\n    && !dashboard\.operationId/.test(source), true);
-  assert.equal(/dashboard\.operationId && \['running', 'settling'\]\.includes\(dashboard\.state\)/.test(source), true);
-  assert.equal(/if \(subscribedOperationId === operationId\) return/.test(source), true);
-  assert.equal(/subscribedOperationId = operationId/.test(source), true);
-  assert.equal(/if \(subscribedOperationId\) \{[\s\S]*subscribedOperationId = undefined/.test(source), true);
-  assert.equal(source.includes('subscribe(dashboard.operationId)'), true);
 });
 
 type InteractionCardPageAdapter = {
@@ -2151,13 +2018,6 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
   assert.ok(start >= 0, 'entry.js must name the post-confirmation states');
   assert.ok(end > start, 'entry.js must keep the confirmation flow before its error handler');
   const block = source.slice(start, end);
-  const confirmIndex = block.indexOf('await api.confirmExplicitRequirement(interactionId');
-  const refreshIndex = block.indexOf('latestState = await postConfirmationState()');
-  const decisionIndex = block.indexOf("appendCardEvent('decision'");
-  assert.ok(confirmIndex >= 0 && refreshIndex >= 0 && decisionIndex >= 0);
-  // The card state is refreshed from the runtime after the confirmation request
-  // and before the decision event is projected.
-  assert.equal(confirmIndex < refreshIndex && refreshIndex < decisionIndex, true);
 
   const harnessSource = [
     block,

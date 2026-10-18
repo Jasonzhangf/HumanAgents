@@ -73,7 +73,6 @@ const assignment: WorkAssignment = {
   objective: 'read the original task assignment',
   targetRefs: ['operation://ui-operation-1'],
   expectedOutputRefs: ['operation://ui-operation-1/output'],
-  acceptanceCriteriaDigest: 'sha256:agent-activity-acceptance',
   successCriteria: ['activity reads the real assignment'],
   failureCriteria: ['activity invents an assignment epoch'],
   incompleteCriteria: ['activity source is unverified'],
@@ -380,11 +379,9 @@ test('high-level reader retains child instances and original review commits acro
     const childAssignment = { ...assignment, assignmentId: 'child-work', objective: 'review this exact child work' };
     const childInstance = { ...incarnationFor(1), runtimeId: 'child-runtime',
       agentInstanceId: 'child-instance', assignmentId: childAssignment.assignmentId };
-    const artifactDigest = `sha256:${'1'.repeat(64)}`;
     const reviewAssignment: ReviewAssignment = { assignmentId: 'child-review', taskId: taskId.value,
       workerAgentId: 'actual-worker', reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
-      acceptanceCriteriaDigest: assignment.acceptanceCriteriaDigest,
-      subjectRefs: ['artifact://exact-child-output'], subjectDigests: [artifactDigest],
+      subjectRefs: ['artifact://exact-child-output'],
       workerCapabilities: [], requiredCapabilities: [], mergeGate: 'not-required' };
     const missing = { ...reviewAssignment, assignmentId: 'missing-review', workerAgentId: 'unrelated-worker' };
     const value = await fixture(true, async (journal) => {
@@ -398,7 +395,7 @@ test('high-level reader retains child instances and original review commits acro
         refinedDelivery: rawInitialInput(), assignment: childAssignment,
         result: { taskId, pipelineNodeId: childAssignment.pipelineNodeId, agentId: 'actual-worker',
           assignmentId: childAssignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
-          producedArtifactRefs: ['artifact://exact-child-output'], producedArtifactDigests: [artifactDigest],
+          producedArtifactRefs: ['artifact://exact-child-output'],
           status: 'succeeded', summary: 'done', outputRefs: childAssignment.expectedOutputRefs, evidenceRefs: [], nextAction: 'review' } },
     } });
     await active.append({ commitId: activeTurnCommitId(turnId, 'invocation:missing-review'), record: {

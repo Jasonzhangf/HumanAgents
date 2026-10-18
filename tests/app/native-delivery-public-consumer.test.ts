@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef, type InteractionHelperIdentity } from '../../packages/contracts/src/index.js';
+import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type WorkResult, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef, type InteractionHelperIdentity } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -17,7 +17,9 @@ import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/inde
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui-runtime/index.js';
 import { createDefaultExecutionComposition, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import { createChildBodyAssetPort } from '../../packages/app/src/ui-runtime/child-run-composition.js';
 import { startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/fake-port.js';
 import { createJsonlClosedTurnPlannerCallJournal } from '../../packages/app/src/ui-runtime/planner-call-journal.js';
 import { createActiveTurnSegmentJournal, createNativeRecoveryAssets } from '../../packages/app/src/native-recovery-assets.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
@@ -41,6 +43,8 @@ import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../packages/runt
 import type { AdmittedTurn, ReviewAssignment, ReviewResult } from '../../packages/contracts/src/index.js';
 import { readCheckpointClosurePreparation, turnBoundaryRecordRefs } from '../../packages/runtime/src/checkpoints/closure.js';
 import type { NativeSaveIntent } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
+import { APP_CHILD_CALL_TOOL, createAppChildProducer } from '../../packages/app/src/ui-runtime/child-producer.js';
+import type { IndependentChildCallInput } from '../../packages/runtime/src/orchestration/types.js';
 
 const coldConsumerMode = process.argv.includes('--cold-consumer');
 
@@ -107,6 +111,161 @@ const TURN_TWO_RESULT = 'The second-turn checkpoint is committed for the third s
 const TURN_TWO_NEXT = 'Continue in the third standard turn and deliver the exact final text body';
 const TURN_TWO_DELIVERY = 'Native second-turn delivery body: intermediate progress.';
 
+// Missing carried bodies are optional outside review, but a review cannot
+// substitute a caller body for the execution's actual immutable asset.
+// Cost: one focused in-process producer case with the real Journal and asset
+// store; no Provider, RCC, external model or second harness.
+test('configured child review reads the retained execution asset when the carried body is absent', async () => {
+  await mkdir(PERSISTENCE_ROOT, { recursive: true });
+  const root = await mkdtemp(join(PERSISTENCE_ROOT, 'review-retained-body-'));
+  try {
+    const filePath = join(root, 'organ.jsonl');
+    const journal = new JsonlOrganJournal(filePath);
+    const taskScope = { organId: id('organ', 'review-retained-organ'), taskId: id('task', 'review-retained-task') };
+    const scope: ScopeRef = { ...taskScope, cycleId: id('cycle', 'review-retained-cycle'),
+      operationId: id('operation', 'review-retained-operation') };
+    const admission = await journal.append({ commitId: 'review-retained-admission', kind: 'event', scope,
+      payload: { kind: 'review-retained-admission' } });
+    const admissionCommitRef = { commitId: admission.commitId!, journalSeq: admission.seq, recordDigest: admission.recordDigest };
+    const parentAssignment: WorkAssignment = { assignmentId: 'review-retained-parent', taskId: taskScope.taskId,
+      pipelineNodeId: 'review-retained-node', attempt: 1, executionEpoch: 1, inputRevision: 1,
+      objective: 'review the retained execution asset', targetRefs: ['retained-subject'],
+      expectedOutputRefs: ['retained-output'], successCriteria: ['review exact retained body'],
+      failureCriteria: ['review drifted body'], incompleteCriteria: ['retained body missing'],
+      requiredCapabilities: ['execute'], mergeGate: 'required' };
+    const admittedTurn: AdmittedTurn = { turnId: 'review-retained-turn',
+      workAssignmentRef: parentAssignment.assignmentId, taskRef: taskScope.taskId, scopeRef: scope,
+      cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 1,
+      runtimeBindingRef: 'review-retained-runtime', permissionRevision: 'review-retained-permission',
+      admissionEvidenceRefs: [admission.commitId!], currentTurnRef: 'review-retained-current',
+      recoveryStateRef: admission.commitId! };
+    const parent = await ActiveTurnContext.open({
+      journal: createJsonlActiveTurnJournal({ filePath, journal, turnId: admittedTurn.turnId }),
+      binding: { admittedTurn, assignment: parentAssignment, scope,
+        execution: { runtimeId: 'review-retained-runtime', executionEpoch: 1 } },
+      currentTurnRef: admittedTurn.currentTurnRef,
+    });
+    const assets = new ImmutableAssetStore(join(root, 'assets'));
+    const bodyAssets = createChildBodyAssetPort({ store: assets });
+    const exactBody = 'retained execution body from the actual immutable asset';
+    const executionInvocationId = 'review-retained-execution';
+    const reviewBinding = { bindingId: 'review-retained-binding', providerId: 'http',
+      protocol: 'responses' as const, endpointRef: 'http:127.0.0.1:9', modelRef: 'review-retained-model',
+      configDigest: 'review-retained-config', capabilityDigest: 'review-retained-capability' };
+    const asset = await bodyAssets.write({ scope, invocationId: executionInvocationId,
+      kind: 'execution', body: exactBody });
+    const checkpointId = id('checkpoint', 'review-retained-pre');
+    await parent.openChildInvocation({
+      invocationId: executionInvocationId,
+      childTurnId: 'review-retained-execution-turn',
+      checkpointReceiptRef: checkpointId.value,
+      binding: { kind: 'execution', assignment: parentAssignment },
+    });
+    const refinedDelivery = await assets.write('review-retained-refined', new TextEncoder().encode('{}'));
+    const executionResult: WorkResult = {
+      taskId: parentAssignment.taskId,
+      pipelineNodeId: parentAssignment.pipelineNodeId,
+      agentId: 'configured-worker',
+      assignmentId: parentAssignment.assignmentId,
+      attempt: parentAssignment.attempt,
+      executionEpoch: parentAssignment.executionEpoch,
+      inputRevision: parentAssignment.inputRevision,
+      producedArtifactRefs: [asset.ref.locator],
+      status: 'succeeded',
+      summary: 'execution returned the immutable body',
+      outputRefs: [...parentAssignment.expectedOutputRefs],
+      evidenceRefs: [asset.ref],
+      nextAction: 'review',
+    };
+    await parent.recordChildReturn({
+      kind: 'execution',
+      invocationId: executionInvocationId,
+      refinedDelivery: { ref: { evidenceId: id('evidence', refinedDelivery.assetId),
+        kind: 'operation', source: 'review-retained-fixture',
+        locator: refinedDelivery.locator, digest: refinedDelivery.digest, scope },
+        view: { kind: 'utf8-text' } },
+      assignment: parentAssignment,
+      result: executionResult,
+    });
+
+    let reviewedInput: Extract<IndependentChildCallInput, { readonly kind: 'review' }> | undefined;
+    const producer = createAppChildProducer({
+      manager: {
+        async callChild(input) {
+          if (input.kind !== 'review') throw new Error('fixture only dispatches review');
+          reviewedInput = input;
+          return { state: 'blocked', invocationId: input.call.invocationId,
+            issue: { code: 'fixture-review-stop', ownerId: 'review-retained-fixture',
+              reason: 'review input observed', nextAction: { kind: 'stop', ref: 'fixture.review.stop' },
+              evidenceRefs: [asset.ref] } };
+        },
+      },
+      parent,
+      parentAssignment,
+      checkpoints: {
+        async pre() { throw new Error('pre-checkpoint is not reached by this fixture'); },
+        async post() { throw new Error('post-checkpoint is not reached by this fixture'); },
+      },
+      refinedDeliveryStore: {
+        async store() { throw new Error('review fixture stores no refined delivery'); },
+        async read() { throw new Error('review fixture reads no refined delivery'); },
+      },
+      bodyAssets,
+      bindChildRun: async () => { throw new Error('review fixture does not bind a Provider run'); },
+      prepareAgentProvider: async (selection) => ({
+        configuredAgentId: selection.configuredAgentId,
+        roleId: selection.roleId,
+        source: 'http',
+        provider: { source: 'http', provider: 'http', binding: 'review-retained-binding',
+          protocol: 'responses', model: 'review-retained-model', route: 'default',
+          baseUrl: 'http://127.0.0.1:9' },
+        binding: reviewBinding,
+        port: new FakeReplayExecutionRuntimePort({
+          binding: reviewBinding,
+          stepDelayMs: 0,
+          replay: [],
+        }),
+      }),
+      roster: [{ agentId: 'configured-reviewer', roleId: 'review' }],
+      admitChildOperation: async () => ({
+        authority: {} as never,
+        authorityCommitRef: admissionCommitRef,
+        businessRegistrationCommitRef: admissionCommitRef,
+        coverageCommitRef: admissionCommitRef,
+        childAdmission: {
+          authorityCommitRef: admissionCommitRef,
+          businessRegistrationCommitRef: admissionCommitRef,
+          coverageCommitRef: admissionCommitRef,
+        },
+        intent: {} as never,
+        registration: {} as never,
+      }),
+    });
+    const execution = { runtimeId: 'review-retained-runtime', taskId: taskScope.taskId,
+      operationId: scope.operationId!, executionEpoch: 1 };
+    const call = { invocationId: 'review-retained-call', providerRequestId: 'review-retained-request',
+      toolCallId: 'review-retained-call-id', parentExecution: execution,
+      businessRegistrationCommitRef: admissionCommitRef };
+    const outcome = await producer.execute({
+      execution,
+      requestId: 'review-retained-request',
+      call: { toolId: APP_CHILD_CALL_TOOL.toolId, callId: call.toolCallId,
+        continuationRef: 'review-retained-continuation',
+        arguments: { purpose: 'review retained body', agentId: 'configured-reviewer',
+          kind: 'review', subjectInvocationId: executionInvocationId, reviewKind: 'quality',
+          target: 'retained-subject', successCriteria: ['review exact body'] } },
+      scope,
+      signal: new AbortController().signal,
+    });
+    assert.equal(outcome.status, 'blocked');
+    assert.ok(reviewedInput, 'the actual producer must reach the manager review gate');
+    assert.equal(reviewedInput!.input.workerResult.producedArtifactBodies?.[0], exactBody);
+    assert.equal(reviewedInput!.input.reviewMaterial.subjects[0]?.body, exactBody);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // Missing adapter and the legacy/native append split can lose recovery anchors.
 // Impact: false committed success or an old-epoch anchor. Cost: one local Journal
 // fixture, no model/network/process; the same fixture covers replay and failure.
@@ -131,7 +290,7 @@ if (!coldConsumerMode) test('App child checkpoint adapter commits native pre/rev
   const recoveryStateRef = evidence(admission.commitId);
   const worker: WorkAssignment = { assignmentId: 'worker', taskId: scope.taskId, pipelineNodeId: 'child-node',
     attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'review child', targetRefs: [], expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'criteria', successCriteria: ['native checkpoint readback'], failureCriteria: [], incompleteCriteria: [],
+    successCriteria: ['native checkpoint readback'], failureCriteria: [], incompleteCriteria: [],
     requiredCapabilities: [], mergeGate: 'not-required' };
   const originalAdmittedTurn: AdmittedTurn = { turnId: 'child-turn', workAssignmentRef: worker.assignmentId,
     taskRef: scope.taskId, scopeRef: scope, cycleRef: scope.cycleId, inputRevision: 1, directiveRevision: 3,
@@ -145,7 +304,7 @@ if (!coldConsumerMode) test('App child checkpoint adapter commits native pre/rev
     businessRegistrationCommitRef: await fact('child-registration') };
   const review: ReviewAssignment = { assignmentId: 'review-assignment', taskId: scope.taskId.value,
     workerAgentId: 'reviewer', reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
-    acceptanceCriteriaDigest: worker.acceptanceCriteriaDigest, subjectRefs: ['subject'], subjectDigests: ['subject-digest'],
+    subjectRefs: ['subject'],
     workerCapabilities: ['provider.execution'], requiredCapabilities: ['review.quality'], mergeGate: 'not-required' };
   const selected = { kind: 'review' as const, invocationId: call.invocationId, assignment: review,
     agentId: 'reviewer', attempt: 1, executionEpoch: 1, scope };
@@ -270,7 +429,7 @@ if (!coldConsumerMode) test('direct Runtime inspect delivery consumes verified r
     result: { ...execution, toolId: 'file.read', callId: 'read-call', status: 'succeeded', outputRefs: [outputRef], outputRef, outputDigest: digest, evidenceRefs: [evidence] },
     rawOutput: { ref: evidence, view: { kind: 'utf8-text' } },
   } } };
-  const assignment: WorkAssignment = { assignmentId: 'assignment', taskId: scope.taskId!, pipelineNodeId: 'node', attempt: 1, executionEpoch: 3, inputRevision: 1, objective: 'deliver read output', targetRefs: [], expectedOutputRefs: [], acceptanceCriteriaDigest: digest, successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' };
+  const assignment: WorkAssignment = { assignmentId: 'assignment', taskId: scope.taskId!, pipelineNodeId: 'node', attempt: 1, executionEpoch: 3, inputRevision: 1, objective: 'deliver read output', targetRefs: [], expectedOutputRefs: [], successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' };
   const section = { text: 'read output', evidenceRefs: [evidence] };
   const acceptedEnd: StandardTurnEndCommand = { kind: 'standard-turn-end', identity: { turnId: 'turn', workAssignmentRef: assignment.assignmentId, taskRef: assignment.taskId, scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 3, runtimeBindingRef: 'binding', permissionRevision: 'permission' }, summary: { goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [evidence.locator], resolvedEvidenceRefs: [evidence] };
   const inspect: InspectToolCompletionDescriptor = { execution, scope: evidence.scope, toolOperationId, requestId: 'request', callId: 'read-call', toolId: 'file.read', intentKind: 'inspect', status: 'succeeded', evidenceRefs: [evidence] };
@@ -285,7 +444,6 @@ if (!coldConsumerMode) test('direct Runtime inspect delivery consumes verified r
   const binding = bindAssignmentDelivery({ assignment, readback });
   assert.deepEqual(binding.outputRefs, [outputRef]);
   assert.deepEqual(binding.producedArtifactRefs, [outputRef]);
-  assert.deepEqual(binding.producedArtifactDigests, [digest]);
   assert.deepEqual(binding.producedArtifactBodies, [new TextDecoder().decode(bytes)]);
 
   const rejects = async (candidate: StandardTurnDeliveryReadInput, code: StandardTurnDeliveryError['code']): Promise<void> => {
@@ -3883,9 +4041,9 @@ if (!coldConsumerMode) test('native opened inspection public stop settles the oc
       journalSeq: settlementEntry.journal.seq, recordDigest: settlementEntry.journal.recordDigest };
     const openingRef: JournalCommitRef = { commitId: openingEntry.journal.commitId!,
       journalSeq: openingEntry.journal.seq, recordDigest: openingEntry.journal.recordDigest };
-    assert.deepEqual(requireRecord(settlement.openingCommitRef, 'the settlement opening ref'), openingRef);
+    assert.deepEqual(requireRecord(settlement.openingCommitRef, 'the settlement opening ref'), { ...openingRef });
     assert.deepEqual(requireRecord(settlement.occurrence, 'the settlement occurrence'), occurrence);
-    assert.deepEqual(requireRecord(settlement.checkpointCommitRef, 'the settlement checkpoint ref'), stoppedCheckpointRef);
+    assert.deepEqual(requireRecord(settlement.checkpointCommitRef, 'the settlement checkpoint ref'), { ...stoppedCheckpointRef });
     assert.deepEqual(settlement.itemResultCommitRefs, [{ commitId: itemEntry.journal.commitId!,
       journalSeq: itemEntry.journal.seq, recordDigest: itemEntry.journal.recordDigest }],
     'the settlement retains the accepted check-a commit');
@@ -3894,9 +4052,9 @@ if (!coldConsumerMode) test('native opened inspection public stop settles the oc
       reason: 'inspection stopped after the execution checkpoint; missing checks retain unknown side effects',
     }, 'stop uses the production unknown outcome, not the held parent completion');
     const close = closingEntry.record;
-    assert.deepEqual(requireRecord(close.openedCommitRef, 'the close cycle opening ref'), cycleOpenedCommitRef);
-    assert.deepEqual(requireRecord(close.checkpointCommitRef, 'the close checkpoint ref'), stoppedCheckpointRef);
-    assert.deepEqual(requireRecord(close.inspectionSettlementCommitRef, 'the close settlement ref'), settlementRef);
+    assert.deepEqual(requireRecord(close.openedCommitRef, 'the close cycle opening ref'), { ...cycleOpenedCommitRef });
+    assert.deepEqual(requireRecord(close.checkpointCommitRef, 'the close checkpoint ref'), { ...stoppedCheckpointRef });
+    assert.deepEqual(requireRecord(close.inspectionSettlementCommitRef, 'the close settlement ref'), { ...settlementRef });
     assert.equal(close.outcome, 'stop');
     assert.deepEqual(close.next, { kind: 'stop' });
     assert.equal(settled.items.some((record) => requireRecord(record.delivery,

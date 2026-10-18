@@ -54,7 +54,7 @@ const operationId = id('operation', 'operation-a');
 const scope: ScopeRef = { organId, taskId, cycleId, operationId };
 const assignment: WorkAssignment = {
   assignmentId: 'assignment-a', taskId, pipelineNodeId: 'node-a', attempt: 1, executionEpoch: 3, inputRevision: 1,
-  objective: 'inspect fixture', targetRefs: [], expectedOutputRefs: [], acceptanceCriteriaDigest: 'sha256:a',
+  objective: 'inspect fixture', targetRefs: [], expectedOutputRefs: [],
   successCriteria: ['done'], failureCriteria: ['bad'], incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required',
 };
 const admittedTurn: AdmittedTurn = {
@@ -111,7 +111,7 @@ const requestComplete = envelope(5, { kind: 'request-complete', terminal: 'compl
 const childAssignment: WorkAssignment = { ...assignment, assignmentId: 'assignment-child', pipelineNodeId: 'node-child' };
 const childResult: WorkResult = {
   taskId, pipelineNodeId: 'node-child', agentId: 'agent-child', assignmentId: 'assignment-child', attempt: 1, executionEpoch: 3, inputRevision: 1,
-  producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: 'refined child delivery',
+  producedArtifactRefs: [], status: 'succeeded', summary: 'refined child delivery',
   outputRefs: [], evidenceRefs: [evidence('child-result')], nextAction: 'settle',
 };
 const childDelivery: AcceptedChildDelivery = {
@@ -698,9 +698,7 @@ const reviewAssignment: ReviewAssignment = {
   attempt: 1,
   executionEpoch: 3,
   inputRevision: 1,
-  acceptanceCriteriaDigest: 'sha256:a',
   subjectRefs: ['ref-a'],
-  subjectDigests: ['sha256:b'],
   workerCapabilities: ['provider.execution'],
   requiredCapabilities: ['quality.review'],
   mergeGate: 'not-required',
@@ -722,9 +720,7 @@ const reviewResult: ReviewResult = {
   attempt: 1,
   executionEpoch: 3,
   inputRevision: 1,
-  acceptanceCriteriaDigest: 'sha256:a',
   subjectRefs: ['ref-a'],
-  subjectDigests: ['sha256:b'],
   status: 'inconclusive',
   findings: [reviewFinding],
   evidenceRefs: [evidence('review-result')],
@@ -769,16 +765,15 @@ test('a review delivery is bound to its review invocation and keeps findings, su
   assert.equal(adopted.result.findings[0]!.findingId, 'finding-1');
   assert.equal(adopted.result.findings[0]!.severity, 'advisory');
   assert.deepEqual(adopted.result.subjectRefs, ['ref-a']);
-  assert.deepEqual(adopted.result.subjectDigests, ['sha256:b']);
   assert.equal(adopted.result.evidenceRefs[0]!.evidenceId.value, 'review-result');
   const invocation = reviewBody.childInvocations.find((candidate) => candidate.invocationId === 'invocation-review')!;
   assert.equal(invocation.binding.kind, 'review');
   assert.notEqual(invocation.postReviewCheckpointRef, invocation.checkpointReceiptRef);
 });
 
-test('a review result whose subject digests do not match its assignment is rejected', () => {
+test('a review result whose subject refs do not match its assignment is rejected', () => {
   assert.throws(
-    () => validateAcceptedChildDelivery({ ...reviewDelivery, result: { ...reviewResult, subjectDigests: ['sha256:other'] } }),
+    () => validateAcceptedChildDelivery({ ...reviewDelivery, result: { ...reviewResult, subjectRefs: ['ref-b'] } }),
     ContractError,
   );
 });

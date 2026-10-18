@@ -143,7 +143,7 @@ function assemblePrompt(input: OpenAgentOperationInput, agent: AgentConfig): { p
   const systemPrompt = loaded.segments.map((segment) => segment.content).join('\n\n');
   return {
     prompt: `${systemPrompt}\n\n# Task input\n\n${input.prompt}`,
-    promptRef: `humanagent://template/${agent.roleId}/${loaded.contentDigest}`,
+    promptRef: `humanagent://template/${agent.roleId}/${agent.templateRef}`,
   };
 }
 

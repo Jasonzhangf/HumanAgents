@@ -1220,8 +1220,6 @@ test('runtime public entrypoint exposes security and delivery review assignments
     objective: 'audit security and delivery readiness',
     targetRefs: ['subject-wave2'],
     expectedOutputRefs: ['review-wave2'],
-    expectedArtifactDigests: ['sha256:review-wave2'],
-    acceptanceCriteriaDigest: 'sha256:review-criteria-wave2',
     successCriteria: ['security and delivery reviews pass'],
     failureCriteria: ['review binding is invalid'],
     incompleteCriteria: ['review evidence is incomplete'],
@@ -1237,7 +1235,6 @@ test('runtime public entrypoint exposes security and delivery review assignments
     executionEpoch: workAssignment.executionEpoch,
     inputRevision: workAssignment.inputRevision,
     producedArtifactRefs: ['review-wave2'],
-    producedArtifactDigests: ['sha256:review-wave2'],
     status: 'succeeded',
     summary: 'ready for security and delivery review',
     outputRefs: ['review-wave2'],
@@ -1250,7 +1247,6 @@ test('runtime public entrypoint exposes security and delivery review assignments
     workerResult: workResult,
     reviewKinds: ['security', 'delivery'],
     subjectRefs: ['subject-wave2'],
-    subjectDigests: ['sha256:subject-wave2'],
   });
 
   assert.deepEqual(reviews.map((review) => review.reviewKind), ['security', 'delivery']);

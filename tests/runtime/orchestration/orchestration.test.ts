@@ -20,8 +20,6 @@ import {
   AgentRuntimePoolManager,
   AssignmentGraph,
   OrchestrationManager,
-  acceptanceCriteriaContent,
-  digestOf,
   type ExecutionAgentInput,
   type ExecutionAgentPort,
   type ExecutionDelivery,
@@ -54,7 +52,6 @@ const runtimeBinding = {
 
 /** Produced subject body shared by the review fixtures in this file. */
 const artifactBody = 'reviewed artifact body';
-const artifactDigest = digestOf(artifactBody);
 
 function evidence(label: string): EvidenceRef {
   return {
@@ -83,8 +80,6 @@ function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
     objective: criteria.objective,
     targetRefs: ['target-a'],
     expectedOutputRefs: ['output-a'],
-    expectedArtifactDigests: [artifactDigest],
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     successCriteria: [...criteria.successCriteria],
     failureCriteria: [...criteria.failureCriteria],
     incompleteCriteria: [...criteria.incompleteCriteria],
@@ -105,7 +100,6 @@ function result(overrides: Partial<WorkResult> = {}): WorkResult {
     executionEpoch: base.executionEpoch,
     inputRevision: base.inputRevision,
     producedArtifactRefs: ['artifact-a'],
-    producedArtifactDigests: [artifactDigest],
     status: 'succeeded',
     summary: 'work completed',
     outputRefs: ['output-a'],
@@ -241,9 +235,7 @@ class PassingReviewAgent implements ReviewAgentPort {
       attempt: input.reviewAssignment.attempt,
       executionEpoch: input.reviewAssignment.executionEpoch,
       inputRevision: input.reviewAssignment.inputRevision,
-      acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
       subjectRefs: [...input.reviewAssignment.subjectRefs],
-      subjectDigests: [...input.reviewAssignment.subjectDigests],
       status: this.fail ? 'failed' : 'passed',
       findings: this.fail
         ? [{
@@ -294,8 +286,8 @@ test('manager acquires dormant execution from its bound creator and same pool', 
   const assignment: WorkAssignment = {
     assignmentId: 'original-assignment', taskId, pipelineNodeId: 'node',
     attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'bounded acquisition',
-    targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
-    acceptanceCriteriaDigest: 'criteria', successCriteria: [], failureCriteria: [],
+    targetRefs: [], expectedOutputRefs: [],
+    successCriteria: [], failureCriteria: [],
     incompleteCriteria: [], requiredCapabilities: ['execute'], mergeGate: 'not-required',
   };
   let creates = 0;
@@ -306,7 +298,7 @@ test('manager acquires dormant execution from its bound creator and same pool', 
   const delivery: WorkResult = {
     taskId, pipelineNodeId: 'node', agentId: 'worker', assignmentId: assignment.assignmentId,
     attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [],
-    producedArtifactDigests: [], status: 'succeeded', summary: 'done', outputRefs: [],
+    status: 'succeeded', summary: 'done', outputRefs: [],
     evidenceRefs: [], nextAction: 'review',
   };
   const agent: ExecutionAgentPort = {
@@ -1137,7 +1129,7 @@ test('review failure creates a remediation assignment and merge cannot precede p
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
-      { result: result(), criteria: criteria() },
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
     ]),
     reviewAgent: review,
     mergeCoordinator: merge,
@@ -1150,7 +1142,6 @@ test('review failure creates a remediation assignment and merge cannot precede p
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [artifactDigest],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'retryable');
@@ -1172,7 +1163,7 @@ test('review result mismatch is rejected before graph state advances', async () 
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
-      { result: result(), criteria: criteria() },
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
     ]),
     reviewAgent: review,
   });
@@ -1183,7 +1174,6 @@ test('review result mismatch is rejected before graph state advances', async () 
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [artifactDigest],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'blocked');
@@ -1205,7 +1195,7 @@ test('merge-required work passes review before merge and records merged status',
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
-      { result: result(), criteria: criteria() },
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
     ]),
     reviewAgent: new PassingReviewAgent(),
     mergeCoordinator: merge,
@@ -1217,7 +1207,6 @@ test('merge-required work passes review before merge and records merged status',
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [artifactDigest],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'merged');
@@ -1231,7 +1220,7 @@ test('duplicate dispatch returns recoverable progress while review is pending', 
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute', 'quality.review'] }],
   });
   const execution = new StaticExecutionAgent([
-    { result: result(), criteria: criteria() },
+    { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
   ]);
   const review = new PassingReviewAgent();
   let releaseReview!: () => void;
@@ -1277,7 +1266,6 @@ test('duplicate dispatch returns recoverable progress while review is pending', 
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality' as const],
-    reviewSubjectDigests: [artifactDigest],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   };
 
@@ -1575,7 +1563,7 @@ test('dispatch is idempotent for terminal assignments and duplicate work results
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute', 'quality.review'] }],
   });
   const execution = new StaticExecutionAgent([
-    { result: result(), criteria: criteria() },
+    { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
   ]);
   let mergeCalls = 0;
   const merge: MergeCoordinatorPort = {
@@ -1598,7 +1586,6 @@ test('dispatch is idempotent for terminal assignments and duplicate work results
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality' as const],
-    reviewSubjectDigests: [artifactDigest],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   };
   const first = await manager.dispatch(input);
@@ -1647,7 +1634,9 @@ test('review result id conflicts are rejected and merge gate uses persisted revi
   const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
-    executionAgent: new StaticExecutionAgent([{ result: result(), criteria: criteria() }]),
+    executionAgent: new StaticExecutionAgent([
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
+    ]),
     reviewAgent: firstReview,
     mergeCoordinator: {
       async merge() {
@@ -1662,7 +1651,6 @@ test('review result id conflicts are rejected and merge gate uses persisted revi
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [artifactDigest],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   const stored = manager.graph.get(assignment())?.reviewResults[0];
@@ -1716,7 +1704,9 @@ test('blocked merge outcomes expose owner, reason, next action, and fallback evi
   const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
-    executionAgent: new StaticExecutionAgent([{ result: result(), criteria: criteria() }]),
+    executionAgent: new StaticExecutionAgent([
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
+    ]),
     reviewAgent: new PassingReviewAgent(),
     mergeCoordinator: {
       async merge() {
@@ -1736,7 +1726,6 @@ test('blocked merge outcomes expose owner, reason, next action, and fallback evi
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [artifactDigest],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'blocked');
@@ -1948,7 +1937,6 @@ class ImplicitExecutor implements ExecutionAgentPort {
         executionEpoch: assignment.executionEpoch,
         inputRevision: assignment.inputRevision,
         producedArtifactRefs: [],
-        producedArtifactDigests: [],
         status: 'failed',
         summary: 'implicit executor failed',
         outputRefs: [],
@@ -1966,7 +1954,6 @@ class ImplicitExecutor implements ExecutionAgentPort {
       executionEpoch: assignment.executionEpoch,
       inputRevision: assignment.inputRevision,
       producedArtifactRefs: [...assignment.targetRefs],
-      producedArtifactDigests: [digestOf('implicit artifact body')],
       producedArtifactBodies: ['implicit artifact body'],
       status: 'succeeded',
       summary: 'implicit executor succeeded',
@@ -2002,9 +1989,7 @@ class ImplicitReviewAgent implements ReviewAgentPort {
       attempt: input.reviewAssignment.attempt,
       executionEpoch: input.reviewAssignment.executionEpoch,
       inputRevision: input.reviewAssignment.inputRevision,
-      acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
       subjectRefs: [...input.reviewAssignment.subjectRefs],
-      subjectDigests: [...input.reviewAssignment.subjectDigests],
       status: 'passed',
       findings: [],
       evidenceRefs: [implicitEvidence(`review-${input.reviewAssignment.assignmentId}`)],

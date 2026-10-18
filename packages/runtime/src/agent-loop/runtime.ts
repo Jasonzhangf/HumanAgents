@@ -2240,7 +2240,6 @@ export class AgentLoopRuntime {
       checkpoint: refOf(this.checkpoint),
       observationScopeId,
       permissionRevision: this.request.permissionRevision,
-      capabilityDigest: profile.capabilityDigest,
       state: 'active' as const,
       issuedAt: issuedAt.toISOString(),
       expiresAt: new Date(issuedAt.getTime() + this.leaseDurationMs).toISOString(),

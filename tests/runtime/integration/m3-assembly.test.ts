@@ -38,8 +38,6 @@ import {
   type TaskExecutionInstanceCreateInput,
   type TaskReviewHandle,
   type TaskReviewInstanceCreateInput,
-  acceptanceCriteriaContent,
-  digestOf,
 } from '../../../packages/runtime/src/orchestration/index.js';
 import { type ReviewResult } from '../../../packages/runtime/src/review/index.js';
 import {
@@ -86,7 +84,6 @@ function evidence(label: string): EvidenceRef {
 
 /** Produced artifact body carried into the review gate as real material. */
 const m3ArtifactBody = 'assembled module artifact body';
-const m3ArtifactDigest = digestOf(m3ArtifactBody);
 
 function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
   const criteria = {
@@ -105,8 +102,6 @@ function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
     objective: criteria.objective,
     targetRefs: ['m3-target'],
     expectedOutputRefs: ['m3-output'],
-    expectedArtifactDigests: [m3ArtifactDigest],
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     successCriteria: [...criteria.successCriteria],
     failureCriteria: [...criteria.failureCriteria],
     incompleteCriteria: [...criteria.incompleteCriteria],
@@ -126,7 +121,6 @@ function workResult(): WorkResult {
     executionEpoch: 1,
     inputRevision: 1,
     producedArtifactRefs: ['artifact://m3'],
-    producedArtifactDigests: [m3ArtifactDigest],
     status: 'succeeded',
     summary: 'M3 modules assembled',
     outputRefs: ['m3-output'],
@@ -225,9 +219,7 @@ function reviewerResult(input: Parameters<ReviewAgentPort['review']>[0]): Review
     attempt: input.reviewAssignment.attempt,
     executionEpoch: input.reviewAssignment.executionEpoch,
     inputRevision: input.reviewAssignment.inputRevision,
-    acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
     subjectRefs: input.reviewAssignment.subjectRefs,
-    subjectDigests: input.reviewAssignment.subjectDigests,
     status: 'passed',
     findings: [],
     evidenceRefs: [evidence('review')],
@@ -323,7 +315,6 @@ test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projec
     agentId: 'worker-m3',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [m3ArtifactDigest],
     reviewSubjects: [{ ref: 'm3-target', body: m3ArtifactBody }],
   });
 

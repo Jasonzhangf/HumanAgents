@@ -47,12 +47,6 @@ function evidence(scope: ScopeRef, label: string): EvidenceRef {
   };
 }
 
-function outputDigests(input: Parameters<ExecutionAgentPort['execute']>[0]): readonly string[] {
-  return input.assignment.expectedArtifactDigests
-    ? [...input.assignment.expectedArtifactDigests]
-    : input.assignment.targetRefs.map((target) => `sha256:${target}`);
-}
-
 /**
  * Deterministic ports used by `serve --mode fake`.
  *
@@ -71,7 +65,6 @@ export function createDeterministicServeOrchestrationPorts(): ServeOrchestration
       executionEpoch: input.assignment.executionEpoch,
       inputRevision: input.assignment.inputRevision,
       producedArtifactRefs: [...input.assignment.expectedOutputRefs],
-      producedArtifactDigests: [...outputDigests(input)],
       status: 'succeeded',
       summary: `fake worker completed ${input.assignment.objective}`,
       outputRefs: [...input.assignment.expectedOutputRefs],
@@ -88,9 +81,7 @@ export function createDeterministicServeOrchestrationPorts(): ServeOrchestration
     attempt: input.reviewAssignment.attempt,
     executionEpoch: input.reviewAssignment.executionEpoch,
     inputRevision: input.reviewAssignment.inputRevision,
-    acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
     subjectRefs: [...input.reviewAssignment.subjectRefs],
-    subjectDigests: [...input.reviewAssignment.subjectDigests],
     status: 'passed',
     findings: [],
     evidenceRefs: [evidence(input.scope, `review-${input.reviewAssignment.assignmentId}`)],
@@ -287,7 +278,6 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
           role: 'review',
           reviewKind: request.reviewAssignment.reviewKind,
           acceptanceCriteria: material.acceptanceCriteria,
-          acceptanceCriteriaDigest: material.acceptanceCriteriaDigest,
           subjects: material.subjects,
           executorEvidence: material.executorEvidence ?? [],
           instruction: 'Evaluate the acceptance criteria against each subject body below, using the provided executorEvidence as first-hand execution evidence to verify the subject bodies. A subject body is the artifact under review; a summary, ref, or digest is never a substitute for it. Judge only from the provided review material; do not require filesystem access or evidence outside this material. End on the final line with exactly HUMANAGENT_REVIEW: passed, failed, or inconclusive',
@@ -368,9 +358,7 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
           attempt: request.reviewAssignment.attempt,
           executionEpoch: request.reviewAssignment.executionEpoch,
           inputRevision: request.reviewAssignment.inputRevision,
-          acceptanceCriteriaDigest: request.reviewAssignment.acceptanceCriteriaDigest,
           subjectRefs: [...request.reviewAssignment.subjectRefs],
-          subjectDigests: [...request.reviewAssignment.subjectDigests],
           status,
           findings,
           evidenceRefs,

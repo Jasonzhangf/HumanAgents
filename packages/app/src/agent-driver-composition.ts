@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -57,12 +56,7 @@ const DSH_OWNER = 'humanagent.app.dsh-composition';
 const AGENT_PROVIDER_OWNER = 'humanagent.app.agent-provider-binding';
 const DSH_SETTINGS_FILE = 'settings.yaml';
 const DSH_RCC_BASE_URL = 'http://127.0.0.1:4444/v1';
-const DSH_REQUIRED_PATCHES = [
-  {
-    ref: 'apps/cli/src/sdk-source.cordis.patch.yml',
-    digest: 'sha256:f62a5f47337fe3d241d650db43bd93c867fbec9d32d7a5cc9c89c1be6bbcddee',
-  },
-] as const;
+const DSH_REQUIRED_PATCHES = ['apps/cli/src/sdk-source.cordis.patch.yml'] as const;
 
 function digest(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -115,17 +109,13 @@ export function resolveDshHome(input: { readonly paths: RuntimePaths; readonly c
 
 function dshProfile(
   config: DshExecutionConfig,
-  lock: typeof dshBaselineLock,
-  sourceRoot: string,
   patchRefs: readonly string[],
-  patchDigests: readonly string[],
 ): DshProfileDescriptor {
   return {
     profileName: config.profile,
     homeRef: 'env:DSH_HOME',
     plugin: {
       bundleRef: `humanagent-dsh-bundle:${config.profile}`,
-      digest: digest(`${lock.commit}:${lock.tree}:${sourceRoot}:${config.profile}:${config.provider}:${patchDigests.join('|')}`),
       entry: 'apps/cli/src/bin.ts',
     },
     routeRef: `explicit/dsh/${config.provider}`,
@@ -133,57 +123,34 @@ function dshProfile(
   };
 }
 
-export function assertDshSourceMatchesLock(sourceRoot: string, lock: typeof dshBaselineLock = dshBaselineLock): void {
-  try {
-    const head = execFileSync('git', ['-C', sourceRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-    const tree = execFileSync('git', ['-C', sourceRoot, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
-    const describe = execFileSync('git', ['-C', sourceRoot, 'describe', '--tags', '--always'], { encoding: 'utf8' }).trim();
-    const dirty = execFileSync('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim();
-    if (head !== lock.commit || tree !== lock.tree || describe !== lock.describe || dirty !== '') {
-      throw new Error(`DSH source does not match lock: HEAD=${head} tree=${tree} describe=${describe}`);
-    }
-  } catch (error) {
-    throw new AppLifecycleError(
-      'dsh-source-lock-mismatch',
-      `DSH source is not the locked commit/tree: ${error instanceof Error ? error.message : String(error)}`,
-      'point execution.dsh.sourceRoot at the clean locked DSH worktree and reinstall its dependencies',
-      DSH_OWNER,
-    );
-  }
-}
-
 interface DshPatchVerification {
   readonly refs: readonly string[];
   readonly files: readonly string[];
-  readonly digests: readonly string[];
 }
 
 export function verifyDshPatches(
   sourceRoot: string,
   patchRefs: readonly string[],
-  approved: readonly { readonly ref: string; readonly digest: string }[] = DSH_REQUIRED_PATCHES,
 ): DshPatchVerification {
-  const expected = new Map(approved.map((patch) => [patch.ref, patch.digest]));
+  const expected = new Set<string>(DSH_REQUIRED_PATCHES);
   const provided = new Set(patchRefs);
-  const missing = [...expected.keys()].filter((ref) => !provided.has(ref));
+  const missing = [...expected].filter((ref) => !provided.has(ref));
   if (provided.size !== patchRefs.length || patchRefs.length !== expected.size || missing.length > 0) {
     throw new AppLifecycleError(
       'dsh-patch-set-mismatch',
-      `DSH patch set must contain exactly ${expected.size} approved patch(es), received ${patchRefs.length}`,
-      'configure the locked DSH source entry patch',
+      `DSH patch set must contain exactly ${expected.size} required patch(es), received ${patchRefs.length}`,
+      'configure the required DSH source entry patch',
       DSH_OWNER,
     );
   }
   const sourceRootReal = realpathSync(sourceRoot);
   const files: string[] = [];
-  const digests: string[] = [];
   for (const patchRef of patchRefs) {
-    const expectedDigest = expected.get(patchRef);
-    if (!expectedDigest) {
+    if (!expected.has(patchRef)) {
       throw new AppLifecycleError(
         'dsh-patch-not-approved',
-        `DSH patch is not approved for the locked source: ${patchRef}`,
-        'remove unapproved patches and use the locked source patch',
+        `DSH patch is not required by this composition: ${patchRef}`,
+        'remove unexpected patches and use the required source patch',
         DSH_OWNER,
       );
     }
@@ -192,7 +159,7 @@ export function verifyDshPatches(
       throw new AppLifecycleError(
         'dsh-patch-missing',
         `DSH patch does not exist: ${patchRef}`,
-        'restore the locked DSH source patch',
+        'restore the required DSH source patch',
         DSH_OWNER,
       );
     }
@@ -205,30 +172,19 @@ export function verifyDshPatches(
         DSH_OWNER,
       );
     }
-    let patchContent: string;
     try {
-      patchContent = readFileSync(file);
+      readFileSync(file);
     } catch {
       throw new AppLifecycleError(
         'dsh-patch-invalid',
-        `DSH patch is not a regular file: ${patchRef}`,
-        'restore the locked DSH source patch',
-        DSH_OWNER,
-      );
-    }
-    const actualDigest = digest(patchContent);
-    if (actualDigest !== expectedDigest) {
-      throw new AppLifecycleError(
-        'dsh-patch-digest-mismatch',
-        `DSH patch content does not match the locked digest: ${patchRef}`,
-        'restore the locked DSH source patch',
+        `DSH patch is not a readable regular file: ${patchRef}`,
+        'restore the required DSH source patch',
         DSH_OWNER,
       );
     }
     files.push(file);
-    digests.push(actualDigest);
   }
-  return { refs: [...patchRefs], files, digests };
+  return { refs: [...patchRefs], files };
 }
 
 export interface AgentProviderPortFactoryInput {
@@ -516,14 +472,14 @@ export async function prepareExecutionAgentProvider<
 function providerBinding(
   config: DshExecutionConfig,
   profile: DshProfileDescriptor,
-  patchDigests: readonly string[],
+  patchRefs: readonly string[],
 ): ProviderBinding {
   const configDigest = digest(JSON.stringify({
     profile: config.profile,
     provider: config.provider,
     model: config.model,
     sourceRoot: config.sourceRoot,
-    patchDigests,
+    patchRefs,
     permissionMode: config.permissionMode ?? null,
   }));
   return {
@@ -533,7 +489,7 @@ function providerBinding(
     endpointRef: `local:dsh-stdio:${profile.profileName}`,
     modelRef: `${config.provider}/${config.model}`,
     configDigest,
-    capabilityDigest: digest(`${dshBaselineLock.commit}:${config.provider}:${config.model}`),
+    capabilityDigest: digest(`${config.provider}:${config.model}`),
   };
 }
 
@@ -758,11 +714,10 @@ export function composeAgentDriver(input: DshCompositionInput): ComposedAgentDri
     );
   }
   const sourceRoot = resolve(config.sourceRoot);
-  assertDshSourceMatchesLock(sourceRoot);
   const patches = verifyDshPatches(sourceRoot, config.patchFiles ?? []);
   const home = resolveDshHome({ paths: input.paths, configuredHome: config.home });
-  const profile = dshProfile(config, dshBaselineLock, sourceRoot, patches.refs, patches.digests);
-  const binding = providerBinding(config, profile, patches.digests);
+  const profile = dshProfile(config, patches.refs);
+  const binding = providerBinding(config, profile, patches.refs);
   const transport = createRealDshTransport({
     binding,
     lock: dshBaselineLock,

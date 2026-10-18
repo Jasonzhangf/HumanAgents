@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { AgentTemplateError } from './errors.js';
 import {
   AGENT_ROLE_IDS,
@@ -8,7 +7,6 @@ import {
   type AgentBuiltInTool,
   type AgentTemplateLoadInput,
   type AgentTemplateManifest,
-  type AgentModeCapabilityProfile,
   type AgentModeCapabilityProfiles,
   type AgentTemplateOwner,
   type AgentTemplateRegistry,
@@ -308,36 +306,6 @@ function roleBuiltInTools(roleId: AgentRole): readonly AgentBuiltInTool[] {
   return ROLE_BUILT_IN_TOOLS[roleId];
 }
 
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
-}
-
-function fnv1a(input: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
-}
-
-export function digestAgentTemplate(manifest: AgentTemplateManifest): string {
-  const { digest: _digest, ...content } = manifest;
-  return `fnv1a:${fnv1a(stableStringify(content))}`;
-}
-
-export function digestPromptSegments(promptSegmentRefs: readonly string[]): string {
-  return `fnv1a:${fnv1a(stableStringify(promptSegmentRefs))}`;
-}
-
-export function digestModeCapabilityProfile(profile: AgentModeCapabilityProfile): string {
-  const { capabilityDigest: _capabilityDigest, ...content } = profile;
-  return `sha256:${createHash('sha256').update(stableStringify(content), 'utf8').digest('hex')}`;
-}
-
 function assertMemoryPolicy(policy: MemoryContextPolicy): void {
   assertSubset(policy.allowedScopes, MEMORY_SCOPES, 'memory scope');
   assertSubset(policy.allowedLayers, MEMORY_LAYERS, 'memory context layer');
@@ -350,7 +318,7 @@ function assertMemoryPolicy(policy: MemoryContextPolicy): void {
   }
 }
 
-function assertModeCapabilityProfile(roleId: AgentRole, profile: AgentModeCapabilityProfile): void {
+function assertModeCapabilityProfile(roleId: AgentRole, profile: AgentModeCapabilityProfiles['observation']): void {
   assertNonEmpty(profile.profileId, 'mode capability profile id');
   if (profile.role !== roleId) throw new AgentTemplateError('mode capability profile role must match the template role');
   if (profile.mode !== 'observation' && profile.mode !== 'orchestration') {
@@ -372,7 +340,6 @@ function assertModeCapabilityProfile(roleId: AgentRole, profile: AgentModeCapabi
   }
   assertSubset(profile.observationCapabilities, MODE_OBSERVATION_CAPABILITIES[roleId], 'mode observation capability');
   assertSubset(profile.orchestrationCapabilities, MODE_ORCHESTRATION_CAPABILITIES[roleId], 'mode orchestration capability');
-  if (profile.capabilityDigest !== digestModeCapabilityProfile(profile)) throw new AgentTemplateError('mode capability digest does not match its locked content');
 }
 
 function assertModeCapabilityProfiles(roleId: AgentRole, profiles: AgentModeCapabilityProfiles): void {
@@ -438,8 +405,6 @@ export function validateAgentTemplate(
   assertMemoryPolicy(manifest.memoryContextPolicy);
   assertDriverRequirements(manifest.driverRequirements);
   if (manifest.testFixtureRefs.length === 0) throw new AgentTemplateError('template requires at least one test fixture');
-  const expectedDigest = digestAgentTemplate(manifest);
-  if (manifest.digest !== expectedDigest) throw new AgentTemplateError('template digest does not match its locked content');
   return {
     manifest,
     capabilityRefs: [...manifest.capabilityRefs],
@@ -462,7 +427,6 @@ export function compileAgentTemplate(
     toolCapabilityRefs: [...validation.toolCapabilityRefs],
     builtInTools: [...validation.manifest.builtInTools],
     promptSegmentRefs: [...validation.manifest.promptSegmentRefs],
-    promptSegmentDigest: digestPromptSegments(validation.manifest.promptSegmentRefs),
     modeCapabilityProfile: {
       observation: {
         ...validation.manifest.modeCapabilityProfile.observation,
@@ -491,7 +455,6 @@ export function compileAgentTemplate(
       allowedDriverKinds: [...validation.manifest.driverRequirements.allowedDriverKinds],
       requiredCapabilities: [...validation.manifest.driverRequirements.requiredCapabilities],
     },
-    manifestDigest: validation.manifest.digest,
   };
 }
 

@@ -75,7 +75,6 @@ function turnBinding(turnId: string, taskScope: TaskIdentityScope): ActiveTurnBi
     objective: `locate resources for ${turnId}`,
     targetRefs: [],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: `sha256:inspection-resources-${turnId}`,
     successCriteria: ['the exact turn resources are readable'],
     failureCriteria: ['a different turn is selected'],
     incompleteCriteria: ['the original turn is not located'],

@@ -82,7 +82,7 @@ function request(): AgentLoopStartRequest {
   return {
     agentRuntimeId: 'cold-old-runtime', role: 'orchestration', mode: 'observation', scope, executionEpoch: 1,
     permissionRevision: 'historical-permission', observationStreamId: 'cold-stream', now: () => new Date('2026-10-13T00:00:00.000Z'),
-    profiles: [{ profileId: 'cold-observer', role: 'orchestration', mode: 'observation', observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'project', orchestrationCapabilities: [], capabilityDigest: 'sha256:cold-profile' }],
+    profiles: [{ profileId: 'cold-observer', role: 'orchestration', mode: 'observation', observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'project', orchestrationCapabilities: [] }],
     budget: { maxModeTransitions: 2, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 2 },
     activeRefs: ['task:goal'], omittedRefs: ['raw:old'],
     durableContext: { stablePrefix: [{ goal: 'same business turn' }], indexRefs: [{ ref: 'index:task' }], dynamicHead: [{ fact: 'accepted tool result' }], repairRefs: [{ responsibility: 'recover:original', unresolvedOperationRefs: ['operation:pending'], firstErrorRef: 'error:first' }] },
@@ -125,7 +125,7 @@ test('public incarnation handoff preserves the exact same-turn context with a fr
   const source = loop.contextHistoryRecord();
   const sourceRef = loop.contextCommitRef();
   if (!sourceRef) throw new Error('start/source publication did not commit');
-  const assignment: WorkAssignment = { assignmentId: 'cold-assignment', taskId: id('task', 'cold-task'), pipelineNodeId: 'cold-node', attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'same business turn', targetRefs: ['task:goal'], expectedOutputRefs: ['task:result'], acceptanceCriteriaDigest: 'sha256:criteria', successCriteria: ['retain context'], failureCriteria: ['lost context'], incompleteCriteria: ['pending proof'], requiredCapabilities: ['provider.execution'], mergeGate: 'not-required' };
+  const assignment: WorkAssignment = { assignmentId: 'cold-assignment', taskId: id('task', 'cold-task'), pipelineNodeId: 'cold-node', attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'same business turn', targetRefs: ['task:goal'], expectedOutputRefs: ['task:result'], successCriteria: ['retain context'], failureCriteria: ['lost context'], incompleteCriteria: ['pending proof'], requiredCapabilities: ['provider.execution'], mergeGate: 'not-required' };
   const bindingRef = receipt(await journal.append({ kind: 'event', scope, commitId: 'original-binding', payload: { kind: 'binding-fixture', assignment, identity: original.turn!.identity } }));
   const authorityCommitRef = receipt(await journal.append({ kind: 'event', scope, commitId: 'current-grant', payload: { kind: 'grant-fixture', permissionRevision: 'current-permission' } }));
   const businessRegistrationCommitRef = receipt(await journal.append({ kind: 'event', scope, commitId: 'segment-registration', payload: { kind: 'registration-fixture', requestRef: 'cold-segment-request' } }));

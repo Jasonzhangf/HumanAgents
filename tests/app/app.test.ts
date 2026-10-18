@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type AgentRole } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
 import { canonicalJsonStringify, checkpointCommitIdentityV2 } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
@@ -1965,8 +1965,6 @@ test('HumanAgent operation identity is stable across driver and provider binding
   assert.deepEqual(fake.snapshot().scope.organId, dsh.snapshot().scope.organId);
   assert.equal(fake.snapshot().scope.organId.value, 'agent-execution-stable');
 
-  const source = await readFile(join(process.cwd(), 'packages/app/src/agent-operation.ts'), 'utf8');
-  assert.equal(/adapters[\\/]dsh|dshExecutionOrganId|dshOperationIdFor/.test(source), false);
 });
 
 test('agent operation assembles external builtin prompt segments before driver submission', async () => {
@@ -4256,12 +4254,6 @@ test('app rejects an invalid adapter binding before acquiring a session lock', a
   await assert.rejects(() => store.open('session-invalid-execution'), /session does not exist/);
 });
 
-test('app assembly remains DSH-neutral at the source boundary', async () => {
-  const source = await readFile(join(process.cwd(), 'packages/app/src/execution.ts'), 'utf8');
-  assert.equal(/adapters[\\/]dsh|from ['\"]dsh['\"]|require\\(['\"]dsh['\"]\\)/i.test(source), false);
-  assert.equal(/SessionId|SessionEvent/.test(source), false);
-});
-
 test('driver composition selects fake or dsh explicitly and never falls back', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-driver-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -4334,9 +4326,13 @@ test('DSH settings quote configured provider and model scalars', async () => {
   assert.equal(document.includes('\n          injected: true'), false);
 });
 
-test('DSH driver rejects a sourceRoot that does not match the locked DSH commit', async () => {
-  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-dsh-lock-');
+test('DSH driver accepts an explicitly configured readable source without source identity locks', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-dsh-compose-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const sourceRoot = join(root, 'dsh-source');
+  const patchRef = 'apps/cli/src/sdk-source.cordis.patch.yml';
+  await mkdir(join(sourceRoot, 'apps/cli/src'), { recursive: true });
+  await writeFile(join(sourceRoot, patchRef), '- id: configured\n', 'utf8');
   const agent = {
     agentId: 'execution-dsh',
     roleId: 'execution' as const,
@@ -4348,65 +4344,51 @@ test('DSH driver rejects a sourceRoot that does not match the locked DSH commit'
     memoryScopes: ['task'] as const,
     resourceClass: 'foreground',
   };
-  assert.throws(() => composeAgentDriver({
-    agent,
-    paths,
-    dsh: {
-      sourceRoot: join(workspace, 'missing-dsh-source'),
-      home: '~/.humanagent/dsh/home',
-      profile: 'sdk',
-      provider: 'rcc',
-      model: 'gpt-5.5',
-    },
-    runtimeId: 'runtime-dsh-lock',
-    workspace,
-  }), /DSH source is not the locked commit/);
+  try {
+    const composed = composeAgentDriver({
+      agent,
+      paths,
+      dsh: {
+        sourceRoot,
+        home: '~/.humanagent/dsh/home',
+        profile: 'sdk',
+        provider: 'rcc',
+        model: 'gpt-5.5',
+        patchFiles: [patchRef],
+      },
+      runtimeId: 'runtime-dsh-compose',
+      workspace,
+    });
+    assert.equal(composed.driver.kind, 'humanagent.agent-driver.dsh');
+    assert.equal(composed.execution?.provider.providerId, 'dsh');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
-test('DSH source lock rejects untracked source files', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-dsh-source-lock-'));
-  execFileSync('git', ['init'], { cwd: root, encoding: 'utf8' });
-  await writeFile(join(root, 'tracked.ts'), 'export const tracked = true;\n', 'utf8');
-  execFileSync('git', ['add', 'tracked.ts'], { cwd: root, encoding: 'utf8' });
-  execFileSync('git', ['-c', 'user.name=HumanAgent Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture'], { cwd: root, encoding: 'utf8' });
-  const lock = {
-    source: 'test-fixture',
-    reference: 'refs/heads/main',
-    commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
-    tree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: root, encoding: 'utf8' }).trim(),
-    describe: execFileSync('git', ['describe', '--tags', '--always'], { cwd: root, encoding: 'utf8' }).trim(),
-    versionTag: 'fixture',
-    recordedAt: '2026-09-14T00:00:00.000Z',
-  };
-  assertDshSourceMatchesLock(root, lock);
-  await writeFile(join(root, 'untracked.ts'), 'export const untracked = true;\n', 'utf8');
-  assert.throws(() => assertDshSourceMatchesLock(root, lock), /DSH source is not the locked commit/);
-});
-
-test('DSH patches are contained, required, and content-addressed', async () => {
+test('DSH patches are required, readable, and contained without content identity checks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-dsh-patches-'));
   const sourceRoot = join(root, 'source');
-  const patchRef = 'apps/cli/src/approved.patch.yml';
+  const patchRef = 'apps/cli/src/sdk-source.cordis.patch.yml';
   const patchFile = join(sourceRoot, patchRef);
   await mkdir(join(sourceRoot, 'apps/cli/src'), { recursive: true });
   await writeFile(patchFile, '- id: approved\n', 'utf8');
-  const approvedDigest = `sha256:${createHash('sha256').update('- id: approved\n').digest('hex')}`;
-  const approved = [{ ref: patchRef, digest: approvedDigest }];
 
-  const verified = verifyDshPatches(sourceRoot, [patchRef], approved);
+  const verified = verifyDshPatches(sourceRoot, [patchRef]);
   assert.deepEqual(verified.refs, [patchRef]);
   assert.deepEqual(verified.files, [await realpath(patchFile)]);
-  assert.deepEqual(verified.digests, [approvedDigest]);
-  assert.throws(() => verifyDshPatches(sourceRoot, [], approved), /patch set must contain exactly/);
+  assert.throws(() => verifyDshPatches(sourceRoot, []), /patch set must contain exactly/);
 
   await writeFile(patchFile, '- id: modified\n', 'utf8');
-  assert.throws(() => verifyDshPatches(sourceRoot, [patchRef], approved), /content does not match/);
+  verifyDshPatches(sourceRoot, [patchRef]);
 
-  const outsideRef = '../outside.patch.yml';
+  await rm(patchFile);
+  assert.throws(() => verifyDshPatches(sourceRoot, [patchRef]), /does not exist/);
+
   await writeFile(join(root, 'outside.patch.yml'), '- id: outside\n', 'utf8');
-  const outsideDigest = `sha256:${createHash('sha256').update('- id: outside\n').digest('hex')}`;
+  await symlink(join(root, 'outside.patch.yml'), patchFile);
   assert.throws(
-    () => verifyDshPatches(sourceRoot, [outsideRef], [{ ref: outsideRef, digest: outsideDigest }]),
+    () => verifyDshPatches(sourceRoot, [patchRef]),
     /outside the locked source tree/,
   );
 });

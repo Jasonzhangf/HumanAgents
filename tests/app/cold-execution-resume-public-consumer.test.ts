@@ -107,8 +107,6 @@ import type { ProviderConfig, EffectiveAgentProviderBinding } from '../../packag
 import {
   AgentRuntimePoolManager,
   OrchestrationManager,
-  acceptanceCriteriaContent,
-  digestOf,
   type MergeCoordinatorPort,
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
@@ -916,7 +914,6 @@ async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
     ...criteria,
     targetRefs: ['original-target'],
     expectedOutputRefs: ['original-output'],
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     requiredCapabilities: ['provider.execution'],
     mergeGate: 'not-required',
   };
@@ -1289,7 +1286,6 @@ async function buildColdFixture(name: string,
     pipelineNodeId: 'cold-resume-node', attempt: 1, executionEpoch: allocation.executionEpoch,
     inputRevision: allocation.inputRevision, ...criteria, targetRefs,
     expectedOutputRefs,
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     requiredCapabilities: ['provider.execution'], mergeGate: 'not-required' };
   const businessTurnId = 'original-business-turn';
   const grants = new JsonlTaskGrantJournal(journal);
@@ -2069,8 +2065,7 @@ function passingReviewAgent(scope: ScopeRef): ReviewAgentPort {
       workerAgentId: input.reviewAssignment.workerAgentId, reviewKind: input.reviewAssignment.reviewKind,
       attempt: input.reviewAssignment.attempt, executionEpoch: input.reviewAssignment.executionEpoch,
       inputRevision: input.reviewAssignment.inputRevision,
-      acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
-      subjectRefs: [...input.reviewAssignment.subjectRefs], subjectDigests: [...input.reviewAssignment.subjectDigests],
+      subjectRefs: [...input.reviewAssignment.subjectRefs],
       status: 'passed' as const, findings: [], evidenceRefs: [evidence(scope, 'review')] };
   }
 }
@@ -2230,7 +2225,7 @@ async function assertRealMemoryAudit(
     assert.equal(persisted.payload['outcome'], curation.outcome);
     assert.equal(persisted.payload['explanation'], curation.explanation);
     assert.ok(curation.explanation.trim().length > 0);
-    assert.deepEqual(persisted.payload['sourceRefs'], curation.sourceRefs);
+    assert.deepEqual(persisted.payload['sourceRefs'], [...curation.sourceRefs]);
     const payload = request.payload as { sourceRefs: string[]; analysisInputs: unknown };
     assert.deepEqual(curation.sourceRefs, payload.sourceRefs);
     assert.deepEqual(payload.analysisInputs, boundary.payload?.['analysisInputs']);

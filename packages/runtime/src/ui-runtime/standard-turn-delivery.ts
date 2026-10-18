@@ -119,7 +119,6 @@ export interface StandardTurnDeliveryBinding {
   readonly assignment: WorkAssignment;
   readonly outputRefs: readonly string[];
   readonly producedArtifactRefs: readonly string[];
-  readonly producedArtifactDigests: readonly string[];
   readonly producedArtifactBodies: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly readback: StandardTurnDeliveryReadback;
@@ -627,16 +626,11 @@ export function bindAssignmentDelivery(input: StandardTurnDeliveryBindInput): St
     ? textArtifactRef(material.bodyAsset)
     : material.kind === 'inspect-tool-report' ? material.outputRef
     : material.completion.fact.result.outputRef);
-  const producedArtifactDigests = readback.materials.map((material) => material.kind === 'delivery-text'
-    ? material.digest
-    : material.kind === 'inspect-tool-report' ? material.outputDigest
-    : material.completion.fact.result.outputDigest);
   return {
     assignment,
     outputRefs: assignment.expectedOutputRefs.length === 0
       ? [...producedArtifactRefs] : [...assignment.expectedOutputRefs],
     producedArtifactRefs,
-    producedArtifactDigests,
     producedArtifactBodies: readback.materials.map((material) => decodeUtf8(material.bytes, 'bound delivery body')),
     evidenceRefs,
     readback,

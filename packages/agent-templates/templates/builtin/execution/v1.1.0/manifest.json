@@ -88,8 +88,7 @@
       "orchestrationScope": "local",
       "orchestrationCapabilities": [
         "plan-own-tool-steps"
-      ],
-      "capabilityDigest": "sha256:59d2de489bb7f8b77b75c129ed577dbf4d2c4130e8a9d439fd828a9646a1391c"
+      ]
     },
     "orchestration": {
       "profileId": "builtin/execution/orchestration@1.1.0",
@@ -108,9 +107,7 @@
       "orchestrationScope": "local",
       "orchestrationCapabilities": [
         "plan-own-tool-steps"
-      ],
-      "capabilityDigest": "sha256:1a004a769e07c96f059f3a88ef8af646a0c66f9f4d79be2d6336403e573e8b80"
+      ]
     }
-  },
-  "digest": "fnv1a:712db81f"
+  }
 }

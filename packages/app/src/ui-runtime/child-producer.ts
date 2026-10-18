@@ -56,8 +56,6 @@ import type {
 } from '../../../runtime/src/orchestration/types.js';
 import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
 import {
-  acceptanceCriteriaContent,
-  digestOf,
   assertReviewMaterial,
   resolveReviewMaterial,
   type ReviewMaterial,
@@ -425,6 +423,10 @@ interface ChildRunState {
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function digestOf(value: string): string {
+  return `sha256:${sha256Hex(value)}`;
 }
 
 /**
@@ -1010,7 +1012,6 @@ function executionResult(input: {
     evidenceRefs: [...input.delivery.evidenceRefs, ...acceptedEvidenceRefs(input.events, undefined)],
     nextAction: 'review',
     producedArtifactRefs: [input.delivery.asset.ref.locator],
-    producedArtifactDigests: [input.delivery.digest],
     producedArtifactBodies: [input.delivery.body],
     status: 'succeeded',
     // The declared business target is what the assignment promised. The
@@ -1047,9 +1048,7 @@ function reviewResult(input: {
     attempt: input.assignment.attempt,
     executionEpoch: input.assignment.executionEpoch,
     inputRevision: input.assignment.inputRevision,
-    acceptanceCriteriaDigest: input.assignment.acceptanceCriteriaDigest,
     subjectRefs: [...input.assignment.subjectRefs],
-    subjectDigests: [...input.assignment.subjectDigests],
     status: input.delivery.judgment,
     findings: input.delivery.findings,
     evidenceRefs,
@@ -1482,7 +1481,6 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
               evidenceRefs: [],
               nextAction: 'attention',
               producedArtifactRefs: [],
-              producedArtifactDigests: [],
               status: 'failed',
               outputRefs: [],
               failureRef: `child:${execution.assignment.assignmentId}:no-delivery`,
@@ -1636,9 +1634,7 @@ function encodeRefinedPayload(input: ChildCallReturnInput): Uint8Array {
         attempt: input.result.attempt,
         executionEpoch: input.result.executionEpoch,
         inputRevision: input.result.inputRevision,
-        acceptanceCriteriaDigest: input.result.acceptanceCriteriaDigest,
         subjectRefs: input.result.subjectRefs,
-        subjectDigests: input.result.subjectDigests,
         status: input.result.status,
         findings: input.result.findings,
         evidenceRefs: input.result.evidenceRefs,
@@ -1684,7 +1680,6 @@ function buildExecutionAssignment(input: {
     objective,
     targetRefs: [input.bodyAssetTarget],
     expectedOutputRefs: [input.bodyAssetTarget],
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     successCriteria: criteria.successCriteria,
     failureCriteria: criteria.failureCriteria,
     incompleteCriteria: criteria.incompleteCriteria,
@@ -1895,43 +1890,30 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
 
   async function resolveReviewSource(
     subjectInvocationId: string,
-    scope: ScopeRef,
   ): Promise<{ readonly worker: WorkAssignment; readonly result: WorkResult; readonly bodies: readonly string[] }> {
     const delivery = findDelivery(parent, subjectInvocationId);
     if (!delivery || delivery.kind !== 'execution') {
       throw new Error(`review subject invocation ${subjectInvocationId} has no retained execution delivery`);
     }
     // The subject under review is the delivery's own immutable asset, read back
-    // from the filesystem. A carried copy is accepted only when it still hashes
-    // to the persisted digest; otherwise the durable asset is the authority.
-    const digests = delivery.result.producedArtifactDigests;
+    // from the filesystem and compared directly with any carried body.
     const bodies = await Promise.all(delivery.result.producedArtifactRefs.map(async (locator, index) => {
-      const digest = digests[index];
-      const carried = delivery.result.producedArtifactBodies?.[index];
-      if (carried !== undefined && digest !== undefined && digestOf(carried) === digest) return carried;
-      const bytes = await input.bodyAssets.read(rawAssetFromLocator(locator, scope, digest));
+      const ref = delivery.result.evidenceRefs.find((candidate) => candidate.locator === locator);
+      if (ref === undefined) {
+        throw new Error(`review subject ${locator} has no retained evidence reference`);
+      }
+      const bytes = await input.bodyAssets.read({ ref, view: { kind: 'utf8-text' } });
       const body = new TextDecoder().decode(bytes);
-      if (digest !== undefined && digestOf(body) !== digest) {
-        throw new Error(`review subject ${locator} does not read back to its recorded digest`);
+      const carried = delivery.result.producedArtifactBodies?.[index];
+      if (carried !== undefined && carried !== body) {
+        throw new Error(`review subject ${locator} does not match its carried body`);
       }
       return body;
     }));
-    return { worker: delivery.assignment, result: delivery.result, bodies };
-  }
-
-  /** Rebuilds the immutable asset descriptor for a durable child delivery locator. */
-  function rawAssetFromLocator(locator: string, scope: ScopeRef, digest?: string): RawAsset {
-    const assetId = locator.split('/').filter(Boolean).at(-1) ?? locator;
     return {
-      ref: {
-        evidenceId: id('evidence', assetId),
-        kind: 'execution',
-        source: OWNER,
-        locator,
-        ...(digest === undefined ? {} : { digest }),
-        scope,
-      },
-      view: { kind: 'utf8-text' },
+      worker: delivery.assignment,
+      result: { ...delivery.result, producedArtifactBodies: bodies },
+      bodies,
     };
   }
 
@@ -1996,7 +1978,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           };
         }
         if (delivery.kind === 'review' && existing.postReviewCheckpointRef === undefined) {
-          const source = await resolveReviewSource(parsed.kind === 'review' ? parsed.subjectInvocationId : '', request.scope);
+          const source = await resolveReviewSource(parsed.kind === 'review' ? parsed.subjectInvocationId : '');
           await input.checkpoints.post({
             call,
             returned: {
@@ -2083,7 +2065,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         return callResult(result, request.scope);
       }
 
-      const source = await resolveReviewSource(parsed.subjectInvocationId, request.scope);
+      const source = await resolveReviewSource(parsed.subjectInvocationId);
       // The reviewer must see the complete subject body. The authoritative copy
       // is the execution delivery's own immutable asset, read back here; a
       // body that cannot be read rejects instead of degrading into a
@@ -2102,7 +2084,6 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         workerResult: source.result,
         reviewKinds: [parsed.reviewKind],
         subjectRefs: source.worker.targetRefs,
-        subjectDigests: source.result.producedArtifactDigests,
       })[0];
       if (reviewAssignment === undefined) throw new Error('review assignment could not be constructed');
       const reviewAgent = createConfiguredReviewAgent({

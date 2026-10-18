@@ -87,7 +87,7 @@ test('Runtime child dispatch, adoption and post-review survive exact v1/v2 Journ
       assignmentId: 'lifecycle-assignment', taskId, pipelineNodeId: 'lifecycle-node',
       attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'persist refined review lifecycle',
       targetRefs: ['subject:lifecycle'], expectedOutputRefs: ['output:lifecycle'],
-      acceptanceCriteriaDigest: 'sha256:lifecycle-criteria', successCriteria: ['cold reconstruction'],
+      successCriteria: ['cold reconstruction'],
       failureCriteria: ['missing child facts'], incompleteCriteria: ['missing proof'],
       requiredCapabilities: ['provider.execution'], mergeGate: 'not-required',
     };
@@ -120,16 +120,16 @@ test('Runtime child dispatch, adoption and post-review survive exact v1/v2 Journ
     const review: ReviewAssignment = {
       assignmentId: 'lifecycle-review-assignment', taskId: taskId.value, workerAgentId: 'lifecycle-worker',
       reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
-      acceptanceCriteriaDigest: assignment.acceptanceCriteriaDigest, subjectRefs: ['subject:lifecycle'],
-      subjectDigests: ['sha256:lifecycle-subject'], workerCapabilities: ['provider.execution'],
+      subjectRefs: ['subject:lifecycle'],
+      workerCapabilities: ['provider.execution'],
       requiredCapabilities: ['review.quality'], mergeGate: 'not-required',
     };
     const result: ReviewResult = {
       resultId: 'lifecycle-review-result', assignmentId: review.assignmentId, taskId: review.taskId,
       workerAgentId: review.workerAgentId, reviewKind: review.reviewKind, attempt: review.attempt,
       executionEpoch: review.executionEpoch, inputRevision: review.inputRevision,
-      acceptanceCriteriaDigest: review.acceptanceCriteriaDigest, subjectRefs: review.subjectRefs,
-      subjectDigests: review.subjectDigests, status: 'passed', findings: [], evidenceRefs: [evidence('review')],
+      subjectRefs: review.subjectRefs,
+      status: 'passed', findings: [], evidenceRefs: [evidence('review')],
     };
     await context.openChildInvocation({
       invocationId: 'review-child', childTurnId: 'review-child-turn', checkpointReceiptRef: 'pre-call-checkpoint',
@@ -278,7 +278,7 @@ test('JSONL codec commits the exact not-selected transition and rejects a missin
       assignmentId: 'codec-assignment', taskId, pipelineNodeId: 'codec-node',
       attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'retain a terminal non-selection',
       targetRefs: ['subject:codec'], expectedOutputRefs: ['output:codec'],
-      acceptanceCriteriaDigest: 'sha256:codec-criteria', successCriteria: ['exact codec identity'],
+      successCriteria: ['exact codec identity'],
       failureCriteria: ['a mis-derived transition identity'], incompleteCriteria: ['missing cold read'],
       requiredCapabilities: ['provider.execution'], mergeGate: 'not-required',
     };
@@ -309,16 +309,16 @@ test('JSONL codec commits the exact not-selected transition and rejects a missin
     const review: ReviewAssignment = {
       assignmentId: 'codec-review-assignment', taskId: taskId.value, workerAgentId: 'codec-worker',
       reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
-      acceptanceCriteriaDigest: assignment.acceptanceCriteriaDigest, subjectRefs: ['subject:codec'],
-      subjectDigests: ['sha256:codec-subject'], workerCapabilities: ['provider.execution'],
+      subjectRefs: ['subject:codec'],
+      workerCapabilities: ['provider.execution'],
       requiredCapabilities: ['review.quality'], mergeGate: 'not-required',
     };
     const result: ReviewResult = {
       resultId: 'codec-review-result', assignmentId: review.assignmentId, taskId: review.taskId,
       workerAgentId: review.workerAgentId, reviewKind: review.reviewKind, attempt: review.attempt,
       executionEpoch: review.executionEpoch, inputRevision: review.inputRevision,
-      acceptanceCriteriaDigest: review.acceptanceCriteriaDigest, subjectRefs: review.subjectRefs,
-      subjectDigests: review.subjectDigests, status: 'passed', findings: [], evidenceRefs: [evidence('review')],
+      subjectRefs: review.subjectRefs,
+      status: 'passed', findings: [], evidenceRefs: [evidence('review')],
     };
     await context.openChildInvocation({
       invocationId: 'codec-review', childTurnId: 'codec-review-turn', checkpointReceiptRef: 'codec-pre',

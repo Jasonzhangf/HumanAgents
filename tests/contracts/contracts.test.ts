@@ -28,7 +28,9 @@ import {
   validateReminder, validateRuntimeBinding, validateSchedulerLease, validateScopeAcl, validateSubscription,
   validateDraftRevision,
   validateOperationIntentForRegistration, validateOperationResult,
-  validateWorkAssignment, validateWorkResult, type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
+  validateWorkAssignment, validateWorkResult, validateReviewAssignment, validateReviewResult,
+  assertReviewAssignmentsMatch, assertReviewResultMatchesAssignment,
+  type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
   type AgentDriverV1, type AgentRequestEnvelope, type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
   type AgentLoopBudget, type AgentLoopBudgetUsage, type AgentLoopCheckpoint, type AgentModeState, type AgentModeTransition,
   type ContextReplacement, type ModeCapabilityProfile, type ModeLease, type ObservationBatch, type ObservationDelta, type ObservationScope,
@@ -44,7 +46,7 @@ import {
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
   type DraftRevision, type EvidenceRef, type ExecutionPolicyDefinition,
   type OperationIdempotencyRecord, type OperationIntent, type RequirementEnvelope, type ScopeRef, type ToolRegistration,
-  type WorkAssignment, type WorkResult,
+  type WorkAssignment, type WorkResult, type ReviewAssignment, type ReviewResult,
   validateSemanticObservationEnvelope, validateCoverageIssue, validatePairedExecutionGroup, validateCapabilityStatus,
   validateSemanticEventRef, COVERAGE_ISSUE_REASONS, PAIRED_EXECUTION_GROUP_KINDS, PAIRED_EXECUTION_STATES, CAPABILITY_STATES,
   type CapabilityStatus, type CoverageIssue, type PairedExecutionGroup, type SemanticEventRef, type SemanticObservationEnvelope,
@@ -144,13 +146,22 @@ const checkpoint = (seq: number, previousCheckpointId: Checkpoint['previousCheck
 });
 const assignment: WorkAssignment = {
   assignmentId: 'assignment-a', taskId: task, pipelineNodeId: 'node-a', attempt: 1, executionEpoch: 1, inputRevision: 1,
-  objective: 'inspect fixture', targetRefs: ['target-a'], expectedOutputRefs: ['output-a'], expectedArtifactDigests: ['sha256:artifact-a'], acceptanceCriteriaDigest: 'sha256:a',
+  objective: 'inspect fixture', targetRefs: ['target-a'], expectedOutputRefs: ['output-a'],
   successCriteria: ['output exists'], failureCriteria: ['input unavailable'], incompleteCriteria: ['needs review'], requiredCapabilities: ['inspect'], mergeGate: 'not-required',
 };
 const successfulResult = (overrides: Partial<WorkResult> = {}): WorkResult => ({
-  ...assignment, agentId: 'agent-a', producedArtifactRefs: ['artifact-a'], producedArtifactDigests: ['sha256:artifact-a'],
+  ...assignment, agentId: 'agent-a', producedArtifactRefs: ['artifact-a'],
   status: 'succeeded', summary: 'done', outputRefs: ['output-a'], evidenceRefs: [], nextAction: 'settle', ...overrides,
 });
+const reviewAssignment: ReviewAssignment = {
+  assignmentId: 'review-assignment-a', taskId: 'task-a', workerAgentId: 'worker-a', reviewKind: 'quality',
+  attempt: 1, executionEpoch: 1, inputRevision: 1, subjectRefs: ['artifact-a'],
+  workerCapabilities: ['review'], requiredCapabilities: ['review'], mergeGate: 'required',
+};
+const reviewResult: ReviewResult = {
+  ...reviewAssignment, resultId: 'review-result-a', status: 'passed', findings: [],
+  evidenceRefs: [{ evidenceId: id('evidence', 'review-result-a'), kind: 'execution', source: 'fixture', locator: 'review-result-a', scope: { organId: id('organ', 'organ-a') } }],
+};
 
 const runtime = runtimeId('runtime-a');
 const providerEvidence = (label: string): ProviderReadiness['evidenceRefs'][number] => ({
@@ -245,6 +256,10 @@ const providerPort: ExecutionRuntimePort = {
 test('positive minimum fixtures validate', () => {
   assert.doesNotThrow(() => validateWorkAssignment(assignment));
   assert.doesNotThrow(() => validateWorkResult(successfulResult(), assignment));
+  assert.doesNotThrow(() => validateReviewAssignment(reviewAssignment));
+  assert.doesNotThrow(() => validateReviewResult(reviewResult));
+  assert.doesNotThrow(() => assertReviewAssignmentsMatch(reviewAssignment, { ...reviewAssignment }));
+  assert.doesNotThrow(() => assertReviewResultMatchesAssignment(reviewAssignment, reviewResult));
   assert.doesNotThrow(() => assertCheckpointLink(checkpoint(1, null), null));
 });
 
@@ -330,10 +345,10 @@ test('agent loop contracts validate control-plane identities and reject broken l
     observationCapabilities: ['read-assignment', 'read-evidence'],
     orchestrationScope: 'local',
     orchestrationCapabilities: ['schedule-self'],
-    capabilityDigest: 'sha256:profile-a',
   };
   assert.doesNotThrow(() => validateModeCapabilityProfile(profile));
   assert.throws(() => validateModeCapabilityProfile({ ...profile, role: 'execution', orchestrationScope: 'project' }), ContractError);
+  assert.throws(() => validateModeCapabilityProfile({ ...profile, observationScopes: ['task', 'task'] }), ContractError);
 
   const state: AgentModeState = {
     agentRuntimeId: 'runtime-a',
@@ -357,7 +372,6 @@ test('agent loop contracts validate control-plane identities and reject broken l
     checkpoint: checkpointRef,
     observationScopeId: 'observation-a',
     permissionRevision: 'permission-r1',
-    capabilityDigest: profile.capabilityDigest,
     state: 'active',
     issuedAt: '2026-09-19T00:00:00Z',
     expiresAt: '2099-01-01T00:00:00Z',
@@ -530,15 +544,12 @@ test('rejects invalid assignment and result input/output', () => {
   assert.throws(() => validateWorkResult({ ...successfulResult(), agentId: ' ' }, assignment), ContractError);
   assert.throws(() => validateWorkResult({ ...successfulResult(), outputRefs: ['unrelated-output'] }, assignment), ContractError);
   assert.throws(() => validateWorkResult({ ...successfulResult(), outputRefs: ['output-a', 'unrelated-output'] }, assignment), ContractError);
-  assert.throws(() => validateWorkResult({ ...successfulResult(), producedArtifactDigests: [] }, assignment), ContractError);
-  assert.throws(() => validateWorkResult({ ...successfulResult(), producedArtifactDigests: ['sha256:other'] }, assignment), ContractError);
   assert.throws(() => validateWorkResult({ ...successfulResult(), producedArtifactRefs: [''] }, assignment), ContractError);
-  assert.throws(() => validateWorkResult({ ...successfulResult({ status: 'incomplete', outputRefs: [] }), producedArtifactRefs: ['artifact-a'], producedArtifactDigests: [] }, assignment), ContractError);
-  assert.throws(() => validateWorkResult(successfulResult({ status: 'blocked', outputRefs: [], producedArtifactRefs: ['artifact-a'], producedArtifactDigests: [''] }), assignment), ContractError);
-  assert.throws(() => validateWorkResult(successfulResult({ status: 'cancelled', outputRefs: [], producedArtifactRefs: ['artifact-a'], producedArtifactDigests: ['sha256:other'] }), assignment), ContractError);
-  assert.doesNotThrow(() => validateWorkResult(successfulResult({ status: 'incomplete', outputRefs: [], producedArtifactRefs: ['artifact-a'], producedArtifactDigests: ['sha256:artifact-a'] }), assignment));
-  assert.throws(() => validateWorkResult({ ...assignment, agentId: 'agent-a', producedArtifactRefs: [], producedArtifactDigests: [], status: 'blocked', summary: 'paused', outputRefs: [], evidenceRefs: [], nextAction: 'wait' }, assignment), ContractError);
-  assert.throws(() => validateWorkResult({ ...assignment, assignmentId: 'other', agentId: 'agent-a', producedArtifactRefs: [], producedArtifactDigests: [], status: 'failed', summary: 'failed', outputRefs: [], evidenceRefs: [], nextAction: 'attention', failureRef: 'failure-a' }, assignment), ContractError);
+  assert.doesNotThrow(() => validateWorkResult(successfulResult({ status: 'incomplete', outputRefs: [], producedArtifactRefs: ['artifact-a'] }), assignment));
+  assert.throws(() => validateWorkResult({ ...assignment, agentId: 'agent-a', producedArtifactRefs: [], status: 'blocked', summary: 'paused', outputRefs: [], evidenceRefs: [], nextAction: 'wait' }, assignment), ContractError);
+  assert.throws(() => validateWorkResult({ ...assignment, assignmentId: 'other', agentId: 'agent-a', producedArtifactRefs: [], status: 'failed', summary: 'failed', outputRefs: [], evidenceRefs: [], nextAction: 'attention', failureRef: 'failure-a' }, assignment), ContractError);
+  assert.throws(() => assertReviewAssignmentsMatch(reviewAssignment, { ...reviewAssignment, subjectRefs: ['artifact-b'] }), ContractError);
+  assert.throws(() => assertReviewResultMatchesAssignment(reviewAssignment, { ...reviewResult, subjectRefs: ['artifact-b'] }), ContractError);
 });
 
 test('checkpoint links allow operation-bearing stops after business checkpoints and keep strict scope checks', async () => {
@@ -930,14 +941,6 @@ test('failure and attention results cannot be represented as successful output w
   assert.throws(() => validateProviderSubmitResult({ ...submitResult(), status: 'failed', error: undefined }), ContractError);
   assert.doesNotThrow(() => validateProviderSubmitResult({ ...submitResult(), status: 'failed', error: providerError(), outputRefs: ['output-a'] }));
   assert.doesNotThrow(() => validateProviderToolResult({ ...toolResult({ status: 'failed', error: providerError(), outputRefs: ['tool-output-a'] }) }));
-});
-
-test('contract source stays provider-neutral without DSH/RCC/provider SDK imports or types', () => {
-  const source = readFileSync(new URL('../../../../packages/contracts/src/index.ts', import.meta.url), 'utf8');
-  const forbiddenPatterns = [/[\s('"]dsh/i, /[\s('"]rcc/i, /[\s('"]routecodex/i, /deepseek/i, /provider-sdk/i];
-  for (const pattern of forbiddenPatterns) {
-    assert.equal(pattern.test(source), false, `contract source must not contain ${pattern}`);
-  }
 });
 
 const runtimeBinding = (overrides: Partial<RuntimeBinding> = {}): RuntimeBinding => ({

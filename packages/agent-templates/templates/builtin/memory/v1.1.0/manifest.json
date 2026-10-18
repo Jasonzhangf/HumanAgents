@@ -94,8 +94,7 @@
       "orchestrationCapabilities": [
         "plan-memory-curation",
         "propose-skill-candidate"
-      ],
-      "capabilityDigest": "sha256:e59f3ce2942b7955405b1a1d153bf09a571f99443ce1e0699bd37108536acb69"
+      ]
     },
     "orchestration": {
       "profileId": "builtin/memory/orchestration@1.1.0",
@@ -116,9 +115,7 @@
       "orchestrationCapabilities": [
         "plan-memory-curation",
         "propose-skill-candidate"
-      ],
-      "capabilityDigest": "sha256:351f89b0d60384b27e2b1563a1891ea9c05ab35d6082a44a1a0442bdbecdc9ef"
+      ]
     }
-  },
-  "digest": "fnv1a:810e4deb"
+  }
 }

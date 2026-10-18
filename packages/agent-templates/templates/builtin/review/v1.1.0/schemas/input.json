@@ -12,9 +12,7 @@
     "attempt",
     "executionEpoch",
     "inputRevision",
-    "acceptanceCriteriaDigest",
     "subjectRefs",
-    "subjectDigests",
     "requiredCapabilities"
   ],
   "properties": {
@@ -25,9 +23,7 @@
     "attempt": { "type": "integer", "minimum": 1 },
     "executionEpoch": { "type": "integer", "minimum": 1 },
     "inputRevision": { "type": "integer", "minimum": 1 },
-    "acceptanceCriteriaDigest": { "type": "string", "minLength": 1 },
     "subjectRefs": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-    "subjectDigests": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
     "workerCapabilities": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
     "requiredCapabilities": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
     "mergeGate": { "enum": ["required", "not-required"] }

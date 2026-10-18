@@ -28,7 +28,6 @@ const profile: AgentModeCapabilityProfile = {
   observationCapabilities: ['read-task'],
   orchestrationScope: 'local',
   orchestrationCapabilities: [],
-  capabilityDigest: 'sha256:integration-profile',
 };
 
 function durableContext() {

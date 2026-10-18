@@ -49,9 +49,7 @@ export interface ReviewAssignment {
   readonly attempt: number;
   readonly executionEpoch: number;
   readonly inputRevision: number;
-  readonly acceptanceCriteriaDigest: string;
   readonly subjectRefs: readonly string[];
-  readonly subjectDigests: readonly string[];
   readonly workerCapabilities: readonly string[];
   readonly requiredCapabilities: readonly string[];
   readonly mergeGate: WorkAssignment['mergeGate'];
@@ -66,9 +64,7 @@ export interface ReviewResult {
   readonly attempt: number;
   readonly executionEpoch: number;
   readonly inputRevision: number;
-  readonly acceptanceCriteriaDigest: string;
   readonly subjectRefs: readonly string[];
-  readonly subjectDigests: readonly string[];
   readonly status: ReviewStatus;
   readonly findings: readonly ReviewFinding[];
   readonly evidenceRefs: readonly EvidenceRef[];
@@ -84,9 +80,7 @@ type ReviewIdentity = Pick<
   | 'attempt'
   | 'executionEpoch'
   | 'inputRevision'
-  | 'acceptanceCriteriaDigest'
   | 'subjectRefs'
-  | 'subjectDigests'
 >;
 
 function assertPlainObject(value: unknown, label: string): asserts value is Record<string, unknown> {
@@ -151,14 +145,9 @@ export function assertReviewSeverity(value: unknown): asserts value is ReviewSev
   }
 }
 
-function assertSubjectPairs(value: Record<string, unknown>, label: string): void {
+function assertSubjectRefs(value: Record<string, unknown>, label: string): void {
   assertRefList(value.subjectRefs, `${label} subject ref`);
-  assertRefList(value.subjectDigests, `${label} subject digest`);
   assertUniqueRefs(value.subjectRefs, `${label} subject ref`);
-  assertUniqueRefs(value.subjectDigests, `${label} subject digest`);
-  if ((value.subjectRefs as readonly string[]).length !== (value.subjectDigests as readonly string[]).length) {
-    throw new ContractError(`${label} subject and digest counts must match`);
-  }
 }
 
 /** Structure and registered-value validation for a review assignment. */
@@ -168,11 +157,10 @@ export function validateReviewAssignment(input: unknown): asserts input is Revie
   nonEmpty(input.assignmentId, 'review assignment id');
   nonEmpty(input.taskId, 'review task id');
   nonEmpty(input.workerAgentId, 'review worker agent id');
-  nonEmpty(input.acceptanceCriteriaDigest, 'review acceptance criteria digest');
   assertPositiveSafeInteger(input.attempt, 'review attempt');
   assertPositiveSafeInteger(input.executionEpoch, 'review execution epoch');
   assertPositiveSafeInteger(input.inputRevision, 'review input revision');
-  assertSubjectPairs(input, 'review assignment');
+  assertSubjectRefs(input, 'review assignment');
   assertUniqueRefs(input.workerCapabilities, 'review worker capability');
   assertUniqueRefs(input.requiredCapabilities, 'review required capability');
   if ((input.requiredCapabilities as readonly string[]).length === 0) {
@@ -189,11 +177,10 @@ export function validateReviewResult(input: unknown): asserts input is ReviewRes
   nonEmpty(input.assignmentId, 'review result assignment id');
   nonEmpty(input.taskId, 'review result task id');
   nonEmpty(input.workerAgentId, 'review result worker agent id');
-  nonEmpty(input.acceptanceCriteriaDigest, 'review result acceptance criteria digest');
   assertPositiveSafeInteger(input.attempt, 'review result attempt');
   assertPositiveSafeInteger(input.executionEpoch, 'review result execution epoch');
   assertPositiveSafeInteger(input.inputRevision, 'review result input revision');
-  assertSubjectPairs(input, 'review result');
+  assertSubjectRefs(input, 'review result');
   assertEvidenceRefList(input.evidenceRefs, 'review result');
   if (!Array.isArray(input.findings)) throw new ContractError('review result findings must be an array');
   const findings = input.findings as readonly ReviewFinding[];
@@ -227,9 +214,7 @@ function sameReviewIdentity(left: ReviewIdentity, right: ReviewIdentity): boolea
     && left.attempt === right.attempt
     && left.executionEpoch === right.executionEpoch
     && left.inputRevision === right.inputRevision
-    && left.acceptanceCriteriaDigest === right.acceptanceCriteriaDigest
-    && orderedRefsMatch(left.subjectRefs, right.subjectRefs)
-    && orderedRefsMatch(left.subjectDigests, right.subjectDigests);
+    && orderedRefsMatch(left.subjectRefs, right.subjectRefs);
 }
 
 /**
@@ -244,8 +229,8 @@ export function assertReviewAssignmentsMatch(left: unknown, right: unknown): voi
 
 /**
  * A review result must carry the identity of the assignment it answers. A
- * mismatch in any shared field, including the ordered subject refs/digests,
- * means the result belongs to another attempt, epoch or review call.
+ * mismatch in any shared field, including the ordered subject refs, means the
+ * result belongs to another attempt, epoch or review call.
  */
 export function assertReviewResultMatchesAssignment(assignment: unknown, result: unknown): void {
   validateReviewAssignment(assignment);

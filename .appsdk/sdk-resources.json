@@ -1,6 +1,5 @@
 {
-  "bundle_digest": "sha256:868fe60e645e4215c87a511c04f940589d7d1096e1835e8d444da44357a85bd4",
-  "manifest_digest": "sha256:098e3fc2b0b82006bf064402927b0548aed7bd0231117a8b9b4c8755c736d918",
+  "resource_version": "0.1.0015",
   "resources": [
     {
       "class": "contracts",
@@ -532,174 +531,146 @@
     },
     {
       "class": "docs",
-      "digest": "sha256:03207804ae25e27d4407e39b55ac8ee6fe77cb167d29bf98f0fe8e84b1207ec0",
       "path": ".appsdk/docs/design/appsdk-project-integration.md",
       "source": "docs/design/appsdk-project-integration.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:37869946f63ad055067ebd7f467837da6276213c4f9d6718e92185e977718da5",
       "path": ".appsdk/docs/design/optional-test-governance.md",
       "source": "docs/design/optional-test-governance.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:29cfa6193d953f7eb06d8e87bf7bdae4324b7d2034597fe9a1ed6ee69f004d8c",
       "path": ".appsdk/docs/design/apps-sdk-communication.md",
       "source": "docs/design/apps-sdk-communication.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:2156fd67c6b411bba3be50691115363af390c22439954ab9c777c1ef32819df4",
       "path": ".appsdk/docs/design/fix-lifecycle-v2.md",
       "source": "docs/design/fix-lifecycle-v2.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:03ce24748785988df1ceac07d0b27efd34fc871ecf68a632d4f80956dde715e7",
       "path": ".appsdk/docs/design/development-scenarios.md",
       "source": "docs/design/development-scenarios.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:e880ed56924f092e24a4f32ed1542f06a8f5cf2b38d7b9d75918a045e7d95b0d",
       "path": ".appsdk/docs/design/appsdk-guidance-framework.md",
       "source": "docs/design/appsdk-guidance-framework.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:b9f4724c839d0312f8c8c3e29dc3ad941325d7132f6771f84388643545f39d42",
       "path": ".appsdk/docs/test-design/appsdk-guidance-framework.md",
       "source": "docs/test-design/appsdk-guidance-framework.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:403b032b001b3b072889f5c6f795c12ebbb360681e095360e31acff3e3c69f0c",
       "path": ".appsdk/docs/architecture/development-process-control-harness.md",
       "source": "docs/architecture/development-process-control-harness.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:aea9f2e097bb875271aa68cfd8f8c3f53c9f8273094b29976b4dfb684e513663",
       "path": ".appsdk/docs/architecture/appsdk-governance-architecture.md",
       "source": "docs/architecture/appsdk-governance-architecture.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:7c69da6074ead5628d4152f287321f65986cc9b73091a4702854fa3d9db80bf0",
       "path": ".appsdk/docs/design/project-memory.md",
       "source": "docs/design/project-memory.md"
     },
     {
       "class": "docs",
-      "digest": "sha256:be380c111d550170a5b66b0361fd2cdd41e1b4d7e1fe7cbed30ce1e0894de6de",
       "path": ".appsdk/docs/design/appsdk-global-registry.md",
       "source": "docs/design/appsdk-global-registry.md"
     },
     {
       "class": "rules",
-      "digest": "sha256:fea5be938055d2a41a921cff25dfcf154a7df645f747c4470e38e57ab7dce91c",
       "path": ".appsdk/rules/appsdk-project-governance.md",
       "source": "skills/appsdk-project-governance/SKILL.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:fea5be938055d2a41a921cff25dfcf154a7df645f747c4470e38e57ab7dce91c",
       "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
       "source": "skills/appsdk-project-governance/SKILL.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:caeea787723f1e9bf6b0cfb9d506f1a59c8cf680de5f125b08f604b75c0ba2d4",
       "path": ".appsdk/skills/appsdk-project-governance/agents/openai.yaml",
       "source": "skills/appsdk-project-governance/agents/openai.yaml"
     },
     {
       "class": "skills",
-      "digest": "sha256:565eb018676581216e97017506401734c10e60244fe3def4d7dc3fe64c9252c3",
       "path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
       "source": "skills/appsdk-project-governance/appsdk-guidance.json"
     },
     {
       "class": "skills",
-      "digest": "sha256:ad14d33e7e1abb42072d8c22c2ab1b4236b2544f658ac566be0bc2277f6f2f68",
       "path": ".appsdk/skills/appsdk-project-governance/references/bootstrap-migration.md",
       "source": "skills/appsdk-project-governance/references/bootstrap-migration.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:7bd973e57e149f28e137933bcd5033d33e967f8d58836aec39140a4659689e78",
       "path": ".appsdk/skills/appsdk-project-governance/references/command-surface.md",
       "source": "skills/appsdk-project-governance/references/command-surface.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:6aeba3519dd65cfafa5b9c5c6962c5dfcd2bf604c1762dc28ff0376c79a4b24a",
       "path": ".appsdk/skills/appsdk-project-governance/references/contracts-and-failures.md",
       "source": "skills/appsdk-project-governance/references/contracts-and-failures.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:360fc78310d3c5b86e40e93b02301ea0f80af59418ac297309e4ca11d402c94b",
       "path": ".appsdk/skills/appsdk-project-governance/references/development-debug.md",
       "source": "skills/appsdk-project-governance/references/development-debug.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:04ab122f2d91e31fc7e928701f134d16d600658bd710bd50bc7fa4b2fae2273e",
       "path": ".appsdk/skills/appsdk-project-governance/references/goal-prompt.md",
       "source": "skills/appsdk-project-governance/references/goal-prompt.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:f99489bd4a42613c2b8057544ac2ac9cfa46b1c32cb609ce1bf72c3cd54a73ea",
       "path": ".appsdk/skills/appsdk-project-governance/references/init-prompts.md",
       "source": "skills/appsdk-project-governance/references/init-prompts.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:0be5085bc51909f6cf32f14b0555cb9ce56a71a3b9f512c835e42378e3e51a2a",
       "path": ".appsdk/skills/appsdk-project-governance/references/process-control-harness.md",
       "source": "skills/appsdk-project-governance/references/process-control-harness.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:b9967a608432282fffb1908a696ed0143f09a85ff5a5ed846a52311d78903ae4",
       "path": ".appsdk/skills/appsdk-project-governance/references/review-delivery.md",
       "source": "skills/appsdk-project-governance/references/review-delivery.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:a1e634e4a5ec8cb1cd1ec6a1ff29d828a59dad9b61816760738e4269a9e23d73",
       "path": ".appsdk/skills/appsdk-project-governance/references/authoritative-review-template.md",
       "source": "skills/appsdk-project-governance/references/authoritative-review-template.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:3cee6eb1142427e81d0d762da31694578ae0b2786e76713bbdd6d2d9cfb7674b",
       "path": ".appsdk/skills/appsdk-project-governance/references/state-paths.md",
       "source": "skills/appsdk-project-governance/references/state-paths.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:d99648503a9e6433b7f29e7528abda505fddd8e0386186c07dd0f1a209d929a9",
       "path": ".appsdk/skills/appsdk-project-governance/references/subagents-config.md",
       "source": "skills/appsdk-project-governance/references/subagents-config.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:609935299de8141bd25a38e02f6ae4dc4852ae3b330d52c33debf36044a71c8b",
       "path": ".appsdk/skills/appsdk-migration/SKILL.md",
       "source": "skills/appsdk-migration/SKILL.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:aed7e89edd4d233778eafdfe66b7fd0e0be45cd1e13a9edfba8e061bcbce4dbf",
       "path": ".appsdk/skills/project-memory/SKILL.md",
       "source": "skills/project-memory/SKILL.md"
     }
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "sdk": "appsdk",
   "version": "0.1.0014"
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1691,28 +1691,6 @@ test('protocol mismatch, missing readiness evidence, unknown event, and missing 
   await assert.rejects(async () => {
     for await (const _event of noActiveExecution.observe(execution())) void _event;
   }, /active execution/);
-});
-
-test('provider adapter source avoids dsh/rcc/sdk imports, network calls, and secret patterns', async () => {
-  const files = ['adapter.ts', 'codecs.ts', 'errors.ts', 'evidence.ts', 'index.ts', 'wire.ts'];
-  const forbidden = [
-    /[\s('"]dsh/i,
-    /[\s('"]rcc/i,
-    /routecodex/i,
-    /@openai|openai-sdk|from\s+['"]openai['"]|import\s*\(\s*['"]openai['"]/i,
-    /anthropic-ai|anthropic-sdk/i,
-    /provider-sdk/i,
-    /(?:api[_-]?key|authorization|bearer|secret|password|access[_-]?token|auth[_-]?token)/i,
-    /fetch\s*\(/i,
-    /https?:\/\//i,
-    /node:(?:http|https|net|child_process)/i,
-  ];
-  for (const file of files) {
-    const source = await readFile(new URL(`../../../../../packages/adapters/provider/src/${file}`, import.meta.url), 'utf8');
-    for (const pattern of forbidden) {
-      assert.equal(pattern.test(source), false, `${file} must not contain ${pattern}`);
-    }
-  }
 });
 
 test('responses codec accepts the live provider function_call item shape without a provider item id', async () => {

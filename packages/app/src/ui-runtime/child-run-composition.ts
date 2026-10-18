@@ -281,7 +281,6 @@ function childWorkAssignment(
     objective: criteria,
     targetRefs: [...review.subjectRefs],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: review.acceptanceCriteriaDigest,
     successCriteria: [criteria],
     failureCriteria: [],
     incompleteCriteria: [],
@@ -299,7 +298,6 @@ function childInitialInput(
   const material = request.input.reviewMaterial;
   return canonicalJsonStringify({
     acceptanceCriteria: material.acceptanceCriteria,
-    acceptanceCriteriaDigest: request.input.reviewAssignment.acceptanceCriteriaDigest,
     reviewKind: request.input.reviewAssignment.reviewKind,
     subjects: material.subjects,
     executorEvidence: material.executorEvidence ?? [],

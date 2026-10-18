@@ -296,7 +296,7 @@ import type {
   ConfiguredProjectReadSource,
   RuntimePaths,
 } from '../../../config/src/index.js';
-import { digestOf, type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
+import { type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import { createJsonlCheckpointJournal, createJsonlContextHistoryPort, createJsonlSemanticHistoryReader } from '../checkpoint-journal.js';
 import { AppLifecycleError } from '../errors.js';
@@ -3082,7 +3082,6 @@ export class UiRuntimeService {
           executionEpoch: input.executionEpoch,
           inputRevision: input.assignment.inputRevision,
           producedArtifactRefs: outputRefs,
-          producedArtifactDigests: outputRefs.map(() => digestOf(artifactBody)),
           producedArtifactBodies: outputRefs.map(() => artifactBody),
           status,
           summary: producedOutput.trim() === ''

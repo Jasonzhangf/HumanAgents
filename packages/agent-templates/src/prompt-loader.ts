@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { AgentTemplateError } from './errors.js';
@@ -8,10 +7,6 @@ import type {
   CompiledAgentTemplate,
   LoadedAgentPromptSegments,
 } from './types.js';
-
-function digestContent(content: string): string {
-  return `sha256:${createHash('sha256').update(content, 'utf8').digest('hex')}`;
-}
 
 function assertInsideRoot(root: string, candidate: string): void {
   const relativePath = relative(root, candidate);
@@ -56,10 +51,7 @@ export async function loadAgentPromptSegments(
   for (const ref of template.promptSegmentRefs) {
     const content = await source.read(ref);
     if (!content.trim()) throw new AgentTemplateError(`prompt segment is empty: ${ref}`);
-    segments.push({ ref, content, digest: digestContent(content) });
+    segments.push({ ref, content });
   }
-  const contentDigest = `sha256:${createHash('sha256')
-    .update(segments.map((segment) => `${segment.ref}\0${segment.digest}`).join('\n'), 'utf8')
-    .digest('hex')}`;
-  return { segments, contentDigest };
+  return { segments };
 }

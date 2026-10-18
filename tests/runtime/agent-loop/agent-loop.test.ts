@@ -71,7 +71,7 @@ function inspectionHelperConsumer() {
   const plans = new Map<string, PublishedTaskPlanRevision>([[plan.revisionId, plan]]);
   const assignment = { assignmentId: 'inspection-assignment', taskId: taskScope.taskId, pipelineNodeId: 'inspect',
     attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'Inspect', targetRefs: [], expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'criteria', successCriteria: ['observe'], failureCriteria: [], incompleteCriteria: [],
+    successCriteria: ['observe'], failureCriteria: [], incompleteCriteria: [],
     requiredCapabilities: [], mergeGate: 'not-required' as const };
   const admittedTurn = { turnId: 'inspection-turn', workAssignmentRef: assignment.assignmentId, taskRef: taskScope.taskId,
     scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 1,
@@ -190,7 +190,7 @@ test('inspection runtime helpers preserve original accepted plan, reuse definiti
   const delivery: AcceptedExecutionChildDelivery = { kind: 'execution', seq: 1, invocationId: invocation.invocationId,
     assignment: f.assignment, refinedDelivery: f.raw,
     result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child', assignmentId: f.assignment.assignmentId,
-      attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded',
+      attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [], status: 'succeeded',
       summary: 'observed a', outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
     inspectionDelivery: { checkId: 'a', resultId: 'inspection-result:captured-child', attempt: 1,
       outcome: { status: 'completed', judgment: 'a observed' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
@@ -223,7 +223,7 @@ test('inspection runtime helpers fold adoption over the exact invocation without
     result: {
       taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child',
       assignmentId: f.assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
-      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: 'observed a',
+      producedArtifactRefs: [], status: 'succeeded', summary: 'observed a',
       outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle',
     },
     inspectionDelivery: {
@@ -268,7 +268,6 @@ test('inspection runtime helpers fold adoption over the exact invocation without
     result: {
       nextAction: delivery.result.nextAction, evidenceRefs: delivery.result.evidenceRefs, outputRefs: delivery.result.outputRefs,
       summary: delivery.result.summary, status: delivery.result.status,
-      producedArtifactDigests: delivery.result.producedArtifactDigests,
       producedArtifactRefs: delivery.result.producedArtifactRefs, inputRevision: delivery.result.inputRevision,
       executionEpoch: delivery.result.executionEpoch, attempt: delivery.result.attempt,
       assignmentId: delivery.result.assignmentId, agentId: delivery.result.agentId,
@@ -284,7 +283,7 @@ test('inspection runtime helpers fold adoption over the exact invocation without
     assignment: {
       mergeGate: f.assignment.mergeGate, requiredCapabilities: f.assignment.requiredCapabilities,
       incompleteCriteria: f.assignment.incompleteCriteria, failureCriteria: f.assignment.failureCriteria,
-      successCriteria: f.assignment.successCriteria, acceptanceCriteriaDigest: f.assignment.acceptanceCriteriaDigest,
+      successCriteria: f.assignment.successCriteria,
       expectedOutputRefs: f.assignment.expectedOutputRefs, targetRefs: f.assignment.targetRefs,
       objective: f.assignment.objective, inputRevision: f.assignment.inputRevision,
       executionEpoch: f.assignment.executionEpoch, attempt: f.assignment.attempt,
@@ -361,7 +360,7 @@ test('inspection runtime helpers stop follows exact v2 receipt to original v1 an
   const delivery: AcceptedExecutionChildDelivery = { kind: 'execution', seq: 1, invocationId: invocation.invocationId,
     assignment: f.assignment, refinedDelivery: f.raw,
     result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child', assignmentId: f.assignment.assignmentId,
-      attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded',
+      attempt: 1, executionEpoch: 1, inputRevision: 1, producedArtifactRefs: [], status: 'succeeded',
       summary: 'observed a', outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
     inspectionDelivery: { checkId: 'a', resultId: 'inspection-result:stop-child', attempt: 1,
       outcome: { status: 'completed', judgment: 'a observed before stop' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
@@ -433,7 +432,7 @@ test('inspection runtime helpers stop resolves exact initial-open predecessor bi
     assignment: f.assignment, refinedDelivery: f.raw,
     result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child',
       assignmentId: f.assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
-      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: 'observed a',
+      producedArtifactRefs: [], status: 'succeeded', summary: 'observed a',
       outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
     inspectionDelivery: { checkId: 'a', resultId: 'inspection-result:initial-open-child', attempt: 1,
       outcome: { status: 'completed', judgment: 'a observed before stop' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
@@ -597,7 +596,6 @@ const observationProfile: AgentModeCapabilityProfile = {
   observationCapabilities: ['read-task', 'read-evidence'],
   orchestrationScope: 'project',
   orchestrationCapabilities: [],
-  capabilityDigest: 'sha256:observation-profile',
 };
 
 const orchestrationProfile: AgentModeCapabilityProfile = {
@@ -608,7 +606,6 @@ const orchestrationProfile: AgentModeCapabilityProfile = {
   observationCapabilities: ['read-task', 'read-evidence'],
   orchestrationScope: 'project',
   orchestrationCapabilities: ['plan-project', 'assign-work'],
-  capabilityDigest: 'sha256:orchestration-profile',
 };
 
 function digest(value: unknown): `sha256:${string}` {
@@ -1020,9 +1017,9 @@ test('runtime loop validates profiles and budgets before issuing a lease', async
   await assert.rejects(
     () => AgentLoopRuntime.start({
       ...createRuntimeRequest(),
-      profiles: [{ ...observationProfile, capabilityDigest: '' }],
+      profiles: [{ ...observationProfile, observationScopes: ['task', 'task'] }],
     }, new MemoryContextHistory()),
-    /mode capability digest is required/,
+    /observation scopes must not contain duplicates/,
   );
   await assert.rejects(
     () => AgentLoopRuntime.start({
@@ -1206,7 +1203,6 @@ test('inspection turn boundary consumer shares one occurrence opening and select
     objective: 'Inspect one check.',
     targetRefs: ['target:inspection-1'],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'acceptance:inspection-1',
     successCriteria: [],
     failureCriteria: [],
     incompleteCriteria: [],
@@ -1864,7 +1860,6 @@ test('inspection turn boundary consumer reuses a durable item without executing 
     objective: 'Inspect one check.',
     targetRefs: ['target:inspection-1'],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'acceptance:inspection-1',
     successCriteria: [],
     failureCriteria: [],
     incompleteCriteria: [],
@@ -1880,7 +1875,6 @@ test('inspection turn boundary consumer reuses a durable item without executing 
     executionEpoch: 1,
     inputRevision: 1,
     producedArtifactRefs: [],
-    producedArtifactDigests: [],
     status: 'succeeded',
     summary: 'inspection completed',
     outputRefs: [],
@@ -2228,7 +2222,7 @@ test('inspection stop completion compares reordered full item evidence and rejec
     assignment: f.assignment, refinedDelivery: f.raw,
     result: { taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child',
       assignmentId: f.assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
-      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: 'observed a',
+      producedArtifactRefs: [], status: 'succeeded', summary: 'observed a',
       outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle' },
     inspectionDelivery: { checkId: 'a', resultId: `inspection-result:${invocation.invocationId}`, attempt: 1,
       outcome: { status: 'completed', judgment: 'a observed before stop' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };

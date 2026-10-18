@@ -4,7 +4,7 @@
 
 HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指令、执行轮次、操作、checkpoint、错误策略和恢复责任；DSH 只是可替换的执行后端。
 
-当前项目处于 `MVP-IMPLEMENTATION`：用户已批准 MVP；Wave 0/1/2 fixed Harness Runtime 已完成并进入 main，Wave 2 已通过 commit-bound Astra gate。DSH 仍只是可替换执行后端；MVP 不接 DSH provider。
+当前项目处于 `MVP-IMPLEMENTATION`：用户已批准 MVP；Wave 0/1/2 fixed Harness Runtime 已完成并进入 main。DSH 仍只是可替换执行后端；MVP 不接 DSH provider。
 
 ## 唯一 owner
 
@@ -75,12 +75,11 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 
 ## 已批准 MVP 交付门禁
 
-1. Wave 2 candidate 只有在 focused tests、runtime integration 和独立 Codex/Astra review 通过后才可进入 main；不得伪造已入 main。
-2. 先保持 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
-3. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
-4. Provider 直连路径必须通过 fake contract、Responses/Anthropic 录制 replay 和真实 RCC 4444 同入口；DSH bridge 在此基础上另行通过真实 DSH 同入口。只有声称 Provider+DSH 组合交付时，四层证据才必须同时齐全；单一 TypeScript 编译不算任一路径接入完成。
-5. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。
-6. Dashboard 输入、确认、turn 展示和结果展示的浏览器验收与清理统一按 [`docs/ui/dashboard-e2e-acceptance.md`](docs/ui/dashboard-e2e-acceptance.md) 执行；本次变更适用的真实任务 receipt 或资源清理核对缺失时标记 `INCOMPLETE`。
-7. 测试按最小充分性选择。每项测试必须对应需求/不变量、具体失败模式和应失败断言，并以已有红测或可执行反例说明抓错能力；未验证的能力标 `UNVERIFIED`。证据足够即停止，不按数量、覆盖率或场景类别扩面。
-8. 新增测试前记录失败可能性的依据（允许为 `未知`）、失败影响、执行和维护成本；没有这些理由不新增测试。测试/review 必须直接服务于本次改动的验收。
-9. MVP 首版优先功能完整。保留内存、资源与业务正确性所需约束，以及产品身份和 task-scoped 授权；不为传输安全增加或保留 TLS、Origin/CSRF、cookie 安全标志、远端访问拒绝或 supervisor loopback-only 限制及其专属测试。
+1. 先保持 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
+2. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
+3. Provider 直连路径必须通过 fake contract、Responses/Anthropic 录制 replay 和真实 RCC 4444 同入口；DSH bridge 在此基础上另行通过真实 DSH 同入口。只有声称 Provider+DSH 组合交付时，四层证据才必须同时齐全；单一 TypeScript 编译不算任一路径接入完成。
+4. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。
+5. Dashboard 输入、确认、turn 展示和结果展示的浏览器验收与清理统一按 [`docs/ui/dashboard-e2e-acceptance.md`](docs/ui/dashboard-e2e-acceptance.md) 执行；本次变更适用的真实任务 receipt 或资源清理核对缺失时标记 `INCOMPLETE`。
+6. 测试按最小充分性选择。每项测试必须对应需求/不变量、具体失败模式和应失败断言，并以已有红测或可执行反例说明抓错能力；未验证的能力标 `UNVERIFIED`。证据足够即停止，不按数量、覆盖率或场景类别扩面。
+7. 新增测试前记录失败可能性的依据（允许为 `未知`）、失败影响、执行和维护成本；没有这些理由不新增测试。测试/review 必须直接服务于本次改动的验收。
+8. MVP 首版优先功能完整。保留内存、资源与业务正确性所需约束，以及产品身份和 task-scoped 授权；不为传输安全增加或保留 TLS、Origin/CSRF、cookie 安全标志、远端访问拒绝或 supervisor loopback-only 限制及其专属测试。

@@ -24,7 +24,6 @@ import {
   type ToolIntent,
 } from '../../../packages/contracts/src/index.js';
 import {
-  digestAgentTemplate,
   loadBuiltinAgentTemplate,
   validateAgentTemplate,
   validateConfiguredAgentBinding,
@@ -271,10 +270,8 @@ test('1.1.0 interaction template loads versioned prompt segments without changin
     (segment) => segment.ref === 'interaction/profiles/explicit-brain/identity.md',
   );
   assert.ok(explicitBrainIdentity);
-  assert.notEqual(legacy.contentDigest, current.contentDigest);
   assert.match(explicitBrainIdentity.content, /Explicit Brain/);
   const manifest = await loadBuiltinAgentTemplate(root, 'interaction', '1.1.0');
-  assert.equal(manifest.digest, digestAgentTemplate(manifest));
   validateAgentTemplate(manifest, {
     capabilities: [...manifest.capabilityRefs],
     skills: [...manifest.skillRefs],

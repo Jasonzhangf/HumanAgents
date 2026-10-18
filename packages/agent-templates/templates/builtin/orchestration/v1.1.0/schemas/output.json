@@ -38,8 +38,6 @@
           "objective": { "type": "string", "minLength": 1 },
           "targetRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
           "expectedOutputRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-          "expectedArtifactDigests": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-          "acceptanceCriteriaDigest": { "type": "string", "minLength": 1 },
           "successCriteria": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
           "failureCriteria": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
           "incompleteCriteria": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },

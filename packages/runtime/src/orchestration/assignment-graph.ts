@@ -70,9 +70,6 @@ function cloneAssignment(assignment: WorkAssignment): WorkAssignment {
     taskId: { ...assignment.taskId },
     targetRefs: [...assignment.targetRefs],
     expectedOutputRefs: [...assignment.expectedOutputRefs],
-    ...(assignment.expectedArtifactDigests
-      ? { expectedArtifactDigests: [...assignment.expectedArtifactDigests] }
-      : {}),
     successCriteria: [...assignment.successCriteria],
     failureCriteria: [...assignment.failureCriteria],
     incompleteCriteria: [...assignment.incompleteCriteria],

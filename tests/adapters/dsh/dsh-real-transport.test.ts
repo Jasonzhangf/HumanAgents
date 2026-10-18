@@ -61,7 +61,7 @@ const binding: ProviderBinding = {
 const profile: DshProfileDescriptor = {
   profileName: 'humanagent',
   homeRef: 'env:DSH_HOME',
-  plugin: { bundleRef: 'humanagent-dsh-bundle:approved', digest: digest(), entry: 'dist/index.js' },
+  plugin: { bundleRef: 'humanagent-dsh-bundle:approved', entry: 'dist/index.js' },
   routeRef: 'explicit/dsh/route',
   patchRefs: [],
 };

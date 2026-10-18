@@ -42,13 +42,14 @@ import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   AgentRuntimePoolManager, OrchestrationManager, OrchestrationError,
-  acceptanceCriteriaContent, digestOf, resolveReviewMaterial,
+  resolveReviewMaterial,
   type ChildCallPort, type IndependentChildCallInput, type ExecutionAgentPort,
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { createReviewAssignments } from '../../packages/runtime/src/review/index.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import { ProviderAgentDriver } from '../../packages/adapters/provider/src/index.js';
+const digestOf = (value: string): string => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 import type {
   ProviderSubmitInput,
   ProviderStartInput,
@@ -251,9 +252,7 @@ function reviewResult(input: {
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: 'digest:criteria',
     subjectRefs: ['subject:1'],
-    subjectDigests: [`sha256:${'1'.repeat(64)}`],
     workerCapabilities: ['coding'],
     requiredCapabilities: ['coding'],
     mergeGate: 'not-required' as const,
@@ -267,9 +266,7 @@ function reviewResult(input: {
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: 'digest:criteria',
     subjectRefs: ['subject:1'],
-    subjectDigests: [`sha256:${'1'.repeat(64)}`],
     status: 'passed' as const,
     findings: [],
     evidenceRefs: [],
@@ -370,9 +367,9 @@ async function singleCallFixture() {
     attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'produce bounded child output',
     targetRefs: ['child-output'], expectedOutputRefs: ['child-output'],
     successCriteria: ['produced exact output'], failureCriteria: ['failed output'], incompleteCriteria: ['missing output'],
-    acceptanceCriteriaDigest: '', requiredCapabilities: ['execute'], mergeGate: 'not-required',
+    requiredCapabilities: ['execute'], mergeGate: 'not-required',
   };
-  const assignment = { ...work, acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(work)) };
+  const assignment = { ...work };
   let executions = 0;
   let reviews = 0;
   let releases = 0;
@@ -434,7 +431,7 @@ async function singleCallFixture() {
           const result: WorkResult = { taskId: taskScope.taskId, pipelineNodeId: assignment.pipelineNodeId,
             agentId: failure === 'identity' ? 'foreign-agent' : input.agentId,
             assignmentId: create.assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
-            producedArtifactRefs: ['child-output'], producedArtifactDigests: [digestOf(output)], producedArtifactBodies: [output],
+            producedArtifactRefs: ['child-output'], producedArtifactBodies: [output],
             status: 'succeeded', summary: 'bounded output produced', outputRefs: ['child-output'],
             evidenceRefs: [ref('child-output')], nextAction: 'review' };
           return { result, criteria: { satisfied: assignment.successCriteria, failed: [], incomplete: [] } };
@@ -502,7 +499,7 @@ async function singleCallFixture() {
     ...await common(key), agentId: 'configured-reviewer', kind: 'review', reviewAgent: makeReviewAgent(key),
     input: { scope, workerAssignment, workerResult,
       reviewAssignment: createReviewAssignments({ workerAssignment, workerResult, reviewKinds: ['quality'],
-        subjectRefs: workerAssignment.targetRefs, subjectDigests: workerResult.producedArtifactDigests })[0]!,
+        subjectRefs: workerAssignment.targetRefs })[0]!,
       reviewMaterial: resolveReviewMaterial({ workerAssignment, workerResult, subjects: [{ ref: 'child-output', body }] }),
     },
   });
@@ -530,12 +527,10 @@ test('capacity wait continues the active driver turn with a fresh model call aft
     try {
       const taskScope: TaskScope = { organId, taskId: id('task', 'capacity-driver-task') };
       const scope: ScopeRef = { ...taskScope, cycleId: id('cycle', 'capacity-driver-cycle') };
-      const acceptanceWork = { ...first.assignment, assignmentId: 'capacity-parent', taskId: taskScope.taskId };
       const assignment: WorkAssignment = {
         ...first.assignment,
         assignmentId: 'capacity-parent',
         taskId: taskScope.taskId,
-        acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(acceptanceWork)),
       };
       const execution = { runtimeId: 'capacity-parent-runtime', taskId: taskScope.taskId,
         operationId: id('operation', 'capacity-parent-operation'), executionEpoch: 1 };
@@ -998,13 +993,13 @@ test('dispatch keeps the already-committed milestone receipt when a later review
     pipelineNodeId: 'dispatch-milestone-node', attempt: 1, executionEpoch: 1, inputRevision: 1,
     objective: 'produce bounded output', targetRefs: ['child-output'], expectedOutputRefs: ['child-output'],
     successCriteria: ['produced exact output'], failureCriteria: ['failed output'], incompleteCriteria: ['missing output'],
-    acceptanceCriteriaDigest: '', requiredCapabilities: ['execute'], mergeGate: 'not-required' };
-  const assignment = { ...work, acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(work)) };
+    requiredCapabilities: ['execute'], mergeGate: 'not-required' };
+  const assignment = work;
   const ref = (label: string) => ({ evidenceId: id('evidence', label), kind: 'execution' as const,
     source: 'dispatch-public-consumer', locator: label, scope });
   const result: WorkResult = { taskId: taskScope.taskId, pipelineNodeId: assignment.pipelineNodeId, agentId: 'dispatch-worker',
     assignmentId: assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
-    producedArtifactRefs: ['child-output'], producedArtifactDigests: [digestOf(body)], producedArtifactBodies: [body],
+    producedArtifactRefs: ['child-output'], producedArtifactBodies: [body],
     status: 'succeeded', summary: 'bounded output produced', outputRefs: ['child-output'],
     evidenceRefs: [ref('worker-output')], nextAction: 'review' };
   // The dispatch execution lease is still held while the review loop runs, so
@@ -1046,7 +1041,7 @@ test('dispatch keeps the already-committed milestone receipt when a later review
   try {
     manager.planStage({ nodeId: 'dispatch-milestone-node', taskId: taskScope.taskId });
     const dispatched = await manager.dispatch({ stageNodeId: 'dispatch-milestone-node', assignment, agentId: 'dispatch-worker',
-      scope, reviewKinds: ['quality', 'security'], reviewSubjectDigests: [digestOf(body)],
+      scope, reviewKinds: ['quality', 'security'],
       reviewSubjects: [{ ref: 'child-output', body }],
       milestoneReview: { milestoneId: 'dispatch-milestone', cycleId: scope.cycleId!, taskScope,
         executionScope: scope, planRevisionCommitRef: externalRef('dispatch-plan'), reviewerAgentId: 'dispatch-reviewer' } });

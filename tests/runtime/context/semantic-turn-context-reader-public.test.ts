@@ -93,7 +93,6 @@ const assignment: WorkAssignment = {
   objective: 'delivery refs reader fixture',
   targetRefs: [],
   expectedOutputRefs: ['operation://refs/output'],
-  acceptanceCriteriaDigest: 'sha256:refs',
   successCriteria: ['the reader keeps accepted tool-result evidence refs'],
   failureCriteria: [],
   incompleteCriteria: [],

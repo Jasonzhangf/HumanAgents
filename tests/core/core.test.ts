@@ -480,7 +480,6 @@ test('agent loop fences stale leases, epochs, checkpoints, events, deltas, and c
     observationCapabilities: ['read-assignment', 'read-evidence'],
     orchestrationScope: 'local',
     orchestrationCapabilities: ['schedule-self'],
-    capabilityDigest: 'sha256:execution-profile',
   };
   const lease: ModeLease = {
     leaseId: 'lease-a',
@@ -492,7 +491,6 @@ test('agent loop fences stale leases, epochs, checkpoints, events, deltas, and c
     checkpoint,
     observationScopeId: 'observation-a',
     permissionRevision: 'permission-r1',
-    capabilityDigest: profile.capabilityDigest,
     state: 'active',
     issuedAt: '2026-09-19T00:00:00Z',
     expiresAt: '2099-01-01T00:00:00Z',
@@ -657,7 +655,6 @@ test('agent loop fences stale leases, epochs, checkpoints, events, deltas, and c
     mode: 'orchestration',
     orchestrationScope: 'project',
     orchestrationCapabilities: ['create-assignment'],
-    capabilityDigest: 'sha256:orchestration-profile',
   };
   assert.doesNotThrow(() => assertModeCapabilityGranted(orchestrationProfile, {
     kind: 'orchestration',

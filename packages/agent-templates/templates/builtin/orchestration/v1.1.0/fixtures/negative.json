@@ -18,10 +18,6 @@
         "expectedOutputRefs": [
           "artifact/a"
         ],
-        "expectedArtifactDigests": [
-          "sha256:artifact-a"
-        ],
-        "acceptanceCriteriaDigest": "sha256:criteria-a",
         "successCriteria": [
           "The requested output is produced."
         ],

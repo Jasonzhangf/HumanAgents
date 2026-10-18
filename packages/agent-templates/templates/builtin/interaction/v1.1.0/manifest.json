@@ -167,8 +167,7 @@
         "route-input",
         "ask-user",
         "submit-confirmed-requirement"
-      ],
-      "capabilityDigest": "sha256:f370ecf72dea23c60317ccd039aee309d51d5a5f95667658f83d6d9e7bd5ae36"
+      ]
     },
     "orchestration": {
       "profileId": "builtin/interaction/orchestration@1.1.0",
@@ -189,9 +188,7 @@
         "route-input",
         "ask-user",
         "submit-confirmed-requirement"
-      ],
-      "capabilityDigest": "sha256:f480ee7510d6ead321b5ea2046521b801077a6ee725b70cc3b7241b4b0c87427"
+      ]
     }
-  },
-  "digest": "fnv1a:dbe3526d"
+  }
 }

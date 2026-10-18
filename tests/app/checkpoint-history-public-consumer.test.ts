@@ -105,7 +105,7 @@ async function fixture(associations = false) {
   const assignment: WorkAssignment = { assignmentId: turn.workAssignmentRef, taskId,
     pipelineNodeId: 'history-node', attempt: 1, executionEpoch: epoch, inputRevision: 1,
     objective: 'read checkpoint history', targetRefs: [], expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'history-acceptance', successCriteria: ['exact read'],
+    successCriteria: ['exact read'],
     failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' };
   const activeTurnJournal = createJsonlActiveTurnJournal({ filePath, turnId: turn.turnId });
   const artifactsRoot = join(root, 'artifacts');

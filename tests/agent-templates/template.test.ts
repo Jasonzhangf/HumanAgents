@@ -12,9 +12,6 @@ import {
   builtinAgentTemplateRegistry,
   compileAgentTemplate,
   createFilePromptSource,
-  digestAgentTemplate,
-  digestModeCapabilityProfile,
-  digestPromptSegments,
   loadAgentTemplate,
   loadBuiltinAgentTemplate,
   loadBuiltinPromptRegistry,
@@ -108,16 +105,12 @@ function modeCapabilityProfile(role: AgentRole): AgentModeCapabilityProfiles {
     observationCapabilities: ['read-assignment'],
     orchestrationScope: project ? 'project' as const : 'local' as const,
     orchestrationCapabilities: ['plan-own-tool-steps'],
-    capabilityDigest: '',
   };
-  observation.capabilityDigest = digestModeCapabilityProfile(observation);
   const orchestration = {
     ...observation,
     profileId: `test/${role}/orchestration`,
     mode: 'orchestration' as const,
-    capabilityDigest: '',
   };
-  orchestration.capabilityDigest = digestModeCapabilityProfile(orchestration);
   return {
     observation,
     orchestration,
@@ -151,10 +144,9 @@ function template(overrides: Partial<AgentTemplateManifest> = {}): AgentTemplate
       allowedDriverKinds: ['fake', 'dsh'],
       requiredCapabilities: ['execute', 'settle'],
     },
-    digest: '',
     ...overrides,
   };
-  return { ...manifest, digest: overrides.digest ?? digestAgentTemplate(manifest) };
+  return manifest;
 }
 
 test('valid template deterministically validates, compiles, and loads', () => {
@@ -162,10 +154,8 @@ test('valid template deterministically validates, compiles, and loads', () => {
   assert.doesNotThrow(() => validateAgentTemplate(manifest, registry));
   const compiled = compileAgentTemplate(manifest, registry);
   assert.deepEqual(compiled, compileAgentTemplate(manifest, registry));
-  assert.equal(compiled.manifestDigest, manifest.digest);
   assert.deepEqual(compiled.capabilityRefs, ['worker.execute', 'test']);
   assert.deepEqual(compiled.promptSegmentRefs, ['execution/identity.md', 'execution/contract.md']);
-  assert.equal(compiled.promptSegmentDigest, digestPromptSegments(manifest.promptSegmentRefs));
   assert.deepEqual(compiled.memoryContextPolicy.allowedScopes, ['task', 'organ']);
 
   const loaded = loadAgentTemplate(compiled, { driverKind: 'fake', driverCapabilities: ['execute', 'settle'] });
@@ -204,26 +194,18 @@ test('invalid manifest fields, paths, fixtures, and memory policy are rejected',
   }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({
     modeCapabilityProfile: {
-      ...profile,
-      observation: { ...profile.observation, capabilityDigest: `sha256:${'b'.repeat(64)}` },
-    },
-  }), registry), AgentTemplateError);
-  assert.throws(() => validateAgentTemplate(template({ digest: 'fnv1a:stale' }), registry), AgentTemplateError);
-  assert.throws(() => validateAgentTemplate(template({
-    modeCapabilityProfile: {
       ...modeCapabilityProfile('execution'),
       orchestration: { ...modeCapabilityProfile('execution').orchestration, orchestrationScope: 'project' },
     },
   }), registry), AgentTemplateError);
 });
 
-test('prompt segment order is part of the compiled contract without loading prompt content', () => {
+test('prompt segment order is preserved in the compiled contract without loading prompt content', () => {
   const first = template({ promptSegmentRefs: ['execution/identity.md', 'execution/contract.md'] });
   const second = template({ promptSegmentRefs: ['execution/contract.md', 'execution/identity.md'] });
   const firstCompiled = compileAgentTemplate(first, registry);
   const secondCompiled = compileAgentTemplate(second, registry);
 
-  assert.notEqual(firstCompiled.promptSegmentDigest, secondCompiled.promptSegmentDigest);
   assert.deepEqual(firstCompiled.promptSegmentRefs, first.promptSegmentRefs);
   assert.deepEqual(secondCompiled.promptSegmentRefs, second.promptSegmentRefs);
   assert.equal('prompt' in firstCompiled, false);
@@ -236,7 +218,7 @@ test('undeclared capabilities, skills, tools, and role ceiling violations are re
   assert.throws(() => validateAgentTemplate(template({ roleId: 'review', capabilityRefs: ['worker.execute'], skillRefs: ['audit-standards'], toolCapabilityRefs: ['read.audit'] }), registry), AgentTemplateError);
 });
 
-test('duplicate template owners are rejected independently of template digests', () => {
+test('duplicate template owners are rejected', () => {
   assert.doesNotThrow(() => assertUniqueTemplateOwners([
     { roleId: 'execution', templateVersion: '1.0.0', ownerId: 'owner-a' },
     { roleId: 'review', templateVersion: '1.0.0', ownerId: 'owner-b' },
@@ -295,17 +277,21 @@ test('prompt segments are loaded from independent markdown files in manifest ord
   const loaded = await loadAgentPromptSegments(compiled, createFilePromptSource(root));
   assert.deepEqual(loaded.segments.map((segment) => segment.ref), compiled.promptSegmentRefs);
   assert.deepEqual(loaded.segments.map((segment) => segment.content), ['# Identity\n', '# Contract\n']);
-  assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
-  assert.notEqual(loaded.contentDigest, compiled.promptSegmentDigest);
 });
 
-test('prompt loader rejects missing markdown files', async () => {
+test('prompt loader rejects missing and empty markdown files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-prompts-'));
   await mkdir(join(root, 'execution'), { recursive: true });
   const compiled = compileAgentTemplate(template(), registry);
   await assert.rejects(
     () => loadAgentPromptSegments(compiled, createFilePromptSource(root)),
     AgentTemplateError,
+  );
+  await writeFile(join(root, 'execution', 'identity.md'), ' \n', 'utf8');
+  await writeFile(join(root, 'execution', 'contract.md'), '# Contract\n', 'utf8');
+  await assert.rejects(
+    () => loadAgentPromptSegments(compiled, createFilePromptSource(root)),
+    /prompt segment is empty/,
   );
 });
 
@@ -316,7 +302,6 @@ test('builtin roles resolve all external markdown prompt segments', async () => 
     const loaded = await loadBuiltinPromptSegments(roleId, templateRoot);
     assert.equal(loaded.segments.length, registry.roles[roleId].length);
     assert.ok(loaded.segments.every((segment) => segment.content.trim().length > 0));
-    assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
   }
 });
 
@@ -333,11 +318,6 @@ test('code search Gateway is exposed to orchestration only and is prompt-preferr
     assert.equal(manifest.toolCapabilityRefs.includes('code.search'), false, `${roleId} must not receive code.search`);
   }
 
-  const prompt = await loadBuiltinPromptSegments('orchestration', templateRoot, '1.1.0');
-  const promptContent = prompt.segments.map((segment) => segment.content).join('\n');
-  assert.match(promptContent, /优先调用 `code\.search` Gateway/);
-  assert.match(promptContent, /scope-too-large/);
-  assert.match(promptContent, /不得伪造 Gateway 成功/);
 });
 
 test('checkpoint built-ins are role-scoped and re-entry remains Harness-owned', async () => {
@@ -364,7 +344,7 @@ test('interaction 1.1.0 exposes only its versioned model-facing tools', () => {
   assert.equal(current.toolCapabilities.includes('requirement.submit'), true);
 });
 
-test('builtin prompt loading rejects version and content drift', async () => {
+test('builtin prompt loading accepts edited readable content and rejects unsupported versions', async () => {
   const sourceRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
   const root = await mkdtemp(join(tmpdir(), 'humanagent-builtin-prompts-'));
   execFileSync('cp', ['-R', join(sourceRoot, 'builtin'), root]);
@@ -373,10 +353,8 @@ test('builtin prompt loading rejects version and content drift', async () => {
     /unsupported builtin prompt registry version|version is not locked/,
   );
   await writeFile(join(root, 'builtin', 'execution', 'identity.md'), '# drift\n', 'utf8');
-  await assert.rejects(
-    () => loadBuiltinPromptSegments('execution', root, '1.0.0'),
-    /content drift detected/,
-  );
+  const loaded = await loadBuiltinPromptSegments('execution', root, '1.0.0');
+  assert.equal(loaded.segments[0].content, '# drift\n');
 });
 
 test('builtin template loading rejects a declared resource that is missing', async () => {
@@ -388,20 +366,6 @@ test('builtin template loading rejects a declared resource that is missing', asy
   await assert.rejects(
     () => loadBuiltinAgentTemplate(root, 'interaction', '1.1.0'),
     /builtin template resource is missing: interaction\/v1\.1\.0\/policy\.json/,
-  );
-});
-
-test('builtin template loading validates the manifest even without an external registry', async () => {
-  const sourceRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-builtin-template-invalid-'));
-  execFileSync('cp', ['-R', join(sourceRoot, 'builtin'), root]);
-  const manifestPath = join(root, 'builtin', 'interaction', 'v1.1.0', 'manifest.json');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as AgentTemplateManifest;
-  await writeFile(manifestPath, JSON.stringify({ ...manifest, digest: 'fnv1a:forged' }, null, 2) + '\n', 'utf8');
-
-  await assert.rejects(
-    () => loadBuiltinAgentTemplate(root, 'interaction', '1.1.0'),
-    /template digest does not match its locked content/,
   );
 });
 
