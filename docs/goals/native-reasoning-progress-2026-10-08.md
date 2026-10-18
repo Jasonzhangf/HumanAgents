@@ -2,6 +2,9 @@
 
 ## 2026-10-17 接续：剩余原生能力与真实错误反馈
 
+- r364原“7/7完成/0ready”被Root拒收：遗漏真实error缺口、把未闭G9计完成，且混入错误canonical模型/TaskID。r367同Planner已纠正为全G/全goalOPEN、节点完成数未建立，复用A-F/部分G的已有证据；不据M3一个用例扩称全需求完成。canonical仍taskless原interaction-2/rcc-entry/MiniMax-M3，EOF根因UNKNOWN；不使用Planner新拼接的opaque ID执行动作。
+- r366 GCM约80readcommands仍零diff，Root主动INT74971/gone/exit1，非后端不可用；原树clean并复用。独立OAuth技术r368在原树两文件取得真正针对性RED：expected原selector-bound reason，actual空证据校验错误；随后删除synthetic review返回、沿既有异常通道转发。但复测NEW primary为`child control settlement failed: failed operation event requires failure`，仍0/1，原control/无重放断言未到达，不报GREEN。真实review request已failed，operation仅accepted/running，precallcheckpoint保留、无reviewreturn/adoption，fixtureQpD7kS/QT0wrQ保留。Root亲读ChildControlLifecyclePort/producer/binder确认failed事件缺必需failure；freshGemini4局部复杂Planner r369只核该App typed control handoff，不改Contracts/Gateway、不放宽验证，尚未执行修正。
+- 当前注册4树：main、UXpeer present树、UXpeer scoped-read integration树、本侧唯一review-primary-error树。初扫2后peer并行开树，post-create4已复核并纠正r366/worktree-inventory.json；五个未注册历史目录归属未决PROTECTED_HOLD，档案/证据目录保留，不删他人。没有同域重试树。
 - M3已交付，完整goal继续。freshGemini4medium大阶段Planner r364（PID67794/session19910）核余项、现有证据与下一必要Provider增量，不复制UXpeer的present/scopedUI修复，不以旧单executor/0of7快照重造功能。
 - 已知独立ready缺口并行交freshOAuthGPT6.1medium小Planner r365：App configuredReviewAgent在真实child失败后返回空证据inconclusive，导致validator错误掩盖原始原因。r353原catchstack/diagnosis证明该链，不能因成功M3通过而遗漏；只核现有异常/failed通道最小修正与一个受控公开失败入口，不放宽证据验证/造证据/自动重放，不碰UX文件。当前仅只读计划，尚未新建实现树或宣称修复。
 
