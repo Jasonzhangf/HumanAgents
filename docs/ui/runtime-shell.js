@@ -1461,6 +1461,7 @@ function preferenceStatusCopy(state, { draftDefault, notice }) {
   if (state.preferenceRead === 'error') return '显示偏好读取失败，当前保留可用视图；保存和重置已停用。'
   if (state.pending) return '正在处理显示偏好…'
   if (state.unsaved) return '未保存：这次手动选择没有写入，仍保留上一次保存的偏好。'
+  if (state.error) return '显示偏好操作失败，仍保留上一次确认的偏好；请查看详情后重试。'
   const saved = state.preference?.mode
   const currentDraft = draftDefault ?? saved ?? ''
   if (saved && currentDraft && currentDraft !== saved) return '有未保存的修改；点保存才会写入默认阅读方式。'
