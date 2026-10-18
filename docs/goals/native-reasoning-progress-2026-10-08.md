@@ -2,6 +2,7 @@
 
 ## 2026-10-17 下一原定增量：M3 长程 review 与计划演进
 
+- r345已terminal并交实际test-only+208/-8，正常编译0；Parent在原树正常WIP提交3fec02d8保留（未main）。第二baseline1FAIL：execution child succeeded，review child实际file_read完整成功后blocked，typed settle为capability.continuation-unavailable/fully observed waiting，随后missing active scope。Root亲读三原Provider资产确认该序列，未完整定根因，不把最终cleanup症状当根因；首次错误evidenceselect属fixture错误不计RED。两cycle/Planner/cold断言未到达，人工forwarding反例未做，packages未改。失败fixture及原log保留，test/upstream已终态。fresh独立Gemini4medium r346在同树仅规划正确工具续请求/settle边界，区分fixture协议与product生命周期，不删合法file_read或弱化guard；若真实业务RED已充分，消融冗余人工mutant。当前M3仍0/1通过，完整goal未关。
 - 有限五文件观察已由peer接收并补精确caller：coordinator两处将dispatched.reviewCommitRefs交standardTurn.acceptReviews，manager聚合durable refs；不能将UNKNOWN当缺实现。独立r342进一步定位native child review→pre/post checkpoint→adoption→Planner refinedResults与coordinator startNextStandardTurn/prepareExecution新cycle源码链。此为源码依据，未运行新用例，不宣称长程两轮review生产验收完成。
 - r342错误执行合同已由同Planner r343修正并接受：真实Node/tsc、既有freshreader、合法plan语义字段，一条bounded consumer先GREEN，再一次实际Planner review转发遗漏反例RED，apply_patch恢复后GREEN。Root明确不许checkout/reset或据fixture失败改产品；真缺陷先报唯一owner。唯一fresh树m3-two-cycle-review-plan-20261017从当时最新origin/main建立，offline install0；fresh GCM r344/PID10578在原nativeconsumer单writer执行，提交只许测试文件，尚未验收。源码已有逻辑，当前证据增量不冒全部M3模板/UI/live完成。
 - r344实际约5min/>70commanditems仍零diff且无baseline，Root因扩大探索明确INT10578并确认gone/exit1，非超时或GCM服务不可用；原tree clean、note/events保留。按技术攻关路由fresh OAuth GPT6.1medium r345已在同树接管单consumer（tmux ha-native-r345），不新树或放宽交付文件，补充review-call实际必需agentId及两类child同工具的分类陷阱。当前没有产品RED或已修复结论，验收仍0/1；父保留原scope与一反例标准。
