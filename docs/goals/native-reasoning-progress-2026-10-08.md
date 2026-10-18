@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新：覆盖详情与偏好失败反馈已交付
+
+main `696d5d64` 交付coverage原因/精确来源、默认折叠及偏好失败人读反馈。真实原A1010条缺口的全展开回归已纠正为默认128px摘要，展开保留全部条目，折回事实可读；旧reset失败仍称已保存的反例已修复。原始RED、同消费者GREEN与真实Ego证据经一次整体Gemini4medium r507有效PASS。main构建/打包/安装及正式restart45→46/53007完成，安装后的默认UI两项受影响行为通过。临时服务、浏览器状态和候选树已清理。证据 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f03-f17-combined-entry-20261018/`。
+
+F08既有归属与隔离证据已充分接收，无新增重试矩阵。F15/G9结构化模板骨架是当前确认的剩余生产缺边；独立复杂计划首稿未被接受，正在同Planner修订，之后先设计独审再contracts-first。完整目标仍ACTIVE/INCOMPLETE，不以局部交付声明全部G/F完成。
+
 ## 2026-10-18 最新：公开结果状态与正文保留已交付
 
 main `3f3b8182` 已合入 App 当前绑定读失败保留、真实 pending 组合和 UI 人读状态。实际 RED/GREEN 证明旧行为丢失确认正文、将 held commit 的 pending 覆盖成 committed；修复后正文/水位取真实持久化提交，未知状态保持可见。真实 HTTP 负向响应由生产页面原样消费，正文完整且显示无法确认，恢复正常读取后原 A 已确认。一次整体 Gemini4medium Review r505 有效 PASS。main构建/打包/安装通过，正式restart44→45/53007、安装后原A HTTP200与确认正文/水位1093保持不变，默认打包UI通过。自有候选树及临时服务/浏览器状态已清理；证据 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f07-combined-entry-20261018/`。

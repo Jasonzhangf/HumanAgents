@@ -7,7 +7,13 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
-### 2026-10-18 最新交付：公开结果状态与正文保留
+### 2026-10-18 最新交付：覆盖详情与偏好失败反馈
+
+main `696d5d64` 已合入coverage人读原因/来源详情、原生默认折叠和偏好操作失败提示。真实A的1010条覆盖缺口默认区块128px、展开完整、折回后事实可读；精确来源沿原抽屉查询。真实Reset受控失败红绿证明原偏好/正文保留且明确失败。完整七文件整体Gemini4medium Review r507有效PASS，main构建/打包/安装完成，正式restart45→46/53007，安装默认UI的两项受影响行为通过。自有树/临时服务/浏览器状态正常清理。回执：`/Volumes/Intel/playground/humanagent/.worker-runs/native-f03-f17-combined-entry-20261018/reception.md`。
+
+F08已按原公开归属合同接收既有epoch2/3实例选择、attempt/epoch分离及fencing证据，不新增组合矩阵。F15/G9模板骨架仍有具体生产缺边；既有Core类型文字指引、发布计划和实际执行图不能互相替代。复杂计划正在修订，尚未进入新合同编码。保留动态可选/重复agent编排，不恢复固定角色顺序或第二图持久化协议。完整I/G/F仍ACTIVE/INCOMPLETE。
+
+### 2026-10-18 已交付：公开结果状态与正文保留
 
 main `3f3b8182` 已交付当前绑定读取失败保留已确认正文/水位、真实 pending 公开读取和人读状态展示。App、HTTP held-commit 与 UI 均有有效 RED/GREEN；生产页面消费原样真实 HTTP unknown 响应，正文保留且明确显示无法确认，恢复正常读取后原 A 仍为已确认。一次独立 Gemini4medium 整体 Review r505 有效 PASS，覆盖本轮完整九文件闭包。main build/package/install通过，正式 restart44→45/53007，安装原 A HTTP200与正文/水位1093不变、默认 UI 已确认。临时服务和浏览器状态清理，候选树正常回收。详见 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f07-combined-entry-20261018/reception.md`。
 

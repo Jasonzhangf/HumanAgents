@@ -1,5 +1,17 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
+## 2026-10-18 最新交付：覆盖原因与偏好失败反馈
+
+main `696d5d64` 已合入完整七文件增量。语义面板逐条保留公开 coverage issue 的人读原因、范围及精确来源；详情默认折叠，完整数量和说明可见，全部条目按原序保留。真实 A 的1010条缺口曾全部展开、占157956px，实际验收拒收后修正；当前窄屏默认128px，展开仍1010条，折回后已提交事实可读，桌面无横溢出。原只读证据抽屉能核对精确来源。没有分页、截断、第二状态源或新框架。
+
+偏好 reset 失败现在明确提示失败并保留原偏好和正文，生产修改只有原错误消费的一行。原页面真实按钮受控 DELETE503 取得旧“已保存默认”反例和修复 GREEN；并未模拟或声称真实磁盘故障。初始误用额外 headless 浏览器的派单已纠正，原运行不作验收，新增 runner 改动已撤除。有效验收仅使用既有 Ego14/p1，p3保留。
+
+同一消费者的原因/引用与真实 renderer 折叠 RED/GREEN、既有偏好29/29、图8/8及受影响绑定检查已接收。一轮完整 Gemini4medium Review r507 实际exit0、有效PASS、findings[]。main App构建/打包/安装通过，正式restart45→46/PID78751/53007，旧实例clean。安装后默认UI再次验证 coverage默认折叠1010项和reset失败保正文。自有临时服务、cookie/emulation、候选树已正常回收。完整记录：`/Volumes/Intel/playground/humanagent/.worker-runs/native-f03-f17-combined-entry-20261018/`。
+
+F08公开归属合同已按既有证据接收：真实node/assignment/optional attempt与physical epoch分开；安装版同assignment/attempt的epoch2/3精确读取与双端选择、历史归类和F13 fencing证据组合充分。没有新增业务重试或多attempt并行场景，不据此扩测。依据 `native-f08-attribution-evidence-20261018/owner-reception.md`。
+
+完整目标继续 ACTIVE/INCOMPLETE。当前确认的生产缺边是F15/G9模板骨架：已有任务类型文字指引、发布计划历史和原生实际执行图均不等同结构化模板。独立复杂计划首稿有错误入口/命令和多余约束，已退原Planner局部修订；新跨模块设计须先文档/DAG与独立设计审查，再contracts-first实现。它不回退本轮已交付结果。
+
 ## 2026-10-18 最新交付：公开结果状态与已确认正文保留
 
 main `3f3b8182` 已组合交付 App、UI 和 pending 修复。读取失败保留当前绑定已确认的正文、提交和水位，并明确显示无法确认；真实提交等待期间保留 Runtime 已产生的 pending，正文仍只取持久化提交。页面以“新内容待确认／结果暂时不可用／结果状态暂时无法确认”区分状态，保留精确正文，不从 task running 推断公开状态。
