@@ -62,6 +62,36 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
 const EXACT_BODY = 'EXACT\u4f53 single logical delivery \ud83d\ude80\nline two';
 const SUMMARY_RESULT = 'summary result is a different material';
 const CHILD_BODY = 'Independent child result for adoption';
+const INSPECTION_DEFINITION_ID = 'native-inspection-definition';
+const INSPECTION_DEFINITION_VERSION = '1';
+const INSPECTION_CHECK_A = {
+  checkId: 'check-a',
+  criterion: 'Count stale native records and report the observed count',
+  inputRefs: ['artifact://native-inspection/stale-records'],
+} as const;
+const INSPECTION_CHECK_B = {
+  checkId: 'check-b',
+  criterion: 'Count orphaned native records and report the observed count',
+  inputRefs: ['artifact://native-inspection/orphaned-records'],
+} as const;
+const INSPECTION_DEFINITION = {
+  definition: {
+    definitionId: INSPECTION_DEFINITION_ID,
+    definitionVersion: INSPECTION_DEFINITION_VERSION,
+    target: {
+      targetRef: 'artifact://native-inspection/target',
+      sourceRef: 'artifact://native-inspection/source',
+    },
+    checkItems: [{ checkId: INSPECTION_CHECK_A.checkId }, { checkId: INSPECTION_CHECK_B.checkId }],
+  },
+  checks: [INSPECTION_CHECK_A, INSPECTION_CHECK_B],
+} as const;
+const INSPECTION_TURN_TWO_BODY = 'native inspection check-a body: observed 2 stale records';
+const INSPECTION_TURN_THREE_BODY = 'native inspection check-a body: observed 5 stale records';
+const INSPECTION_TURN_TWO_JUDGMENT = 'check-a observed 2 stale records';
+const INSPECTION_TURN_THREE_JUDGMENT = 'check-a observed 5 stale records';
+const INSPECTION_TURN_TWO_PARENT_JUDGMENT = 'parent aggregate judgment: check-a count is 2';
+const INSPECTION_TURN_THREE_PARENT_JUDGMENT = 'parent aggregate judgment: check-a count is 5';
 const TURN_ONE_GOAL = 'Adopt the independent child result for the first turn';
 const TURN_ONE_ACTIONS = 'Call the child, adopt its returned result, and close the first turn';
 const TURN_ONE_RESULT = 'The child result is adopted and the first turn is closed';
@@ -292,6 +322,7 @@ interface ResponsesWireItem {
   readonly role?: string;
   readonly name?: string;
   readonly call_id?: string;
+  readonly arguments?: string;
   readonly content?: readonly { readonly type?: string; readonly text?: string }[];
 }
 
@@ -605,6 +636,7 @@ function plannerFrames(
   payload: Record<string, unknown>,
   multiTurnAttempt?: number,
   turnCount: 2 | 3 = 2,
+  inspection = false,
 ): readonly Record<string, unknown>[] {
   const task = requireRecord(payload.task, 'the task');
   const closure = requireRecord(payload.closure, 'the closure');
@@ -678,6 +710,7 @@ function plannerFrames(
       phases: [],
       relations: [],
     };
+    if (inspection) snapshot.inspectionDefinition = INSPECTION_DEFINITION;
     decision = multiTurnAttempt !== undefined && multiTurnAttempt < turnCount ? 'continue' : 'complete';
   } else {
     snapshot = requireRecord(requireRecord(payload.priorPlan, 'the prior plan').snapshot, 'the prior plan snapshot');
@@ -722,13 +755,17 @@ async function textOnlyResponsesUpstream(input: {
   readonly inspect?: boolean;
   readonly child?: boolean;
   readonly parallelChild?: boolean;
+  readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
   readonly requiredBearer?: string;
   readonly interruptThirdTurnOnce?: () => Promise<void>;
   readonly holdFirstExecutionOnce?: () => Promise<void>;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
-  completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean; close(): Promise<void> }> {
+  completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
+  inspectionInvocations(): readonly { callId: string; invocationId: string }[];
+  close(): Promise<void> }> {
   const wires: Wire[] = [];
+  const inspectionInvocations = new Map<string, string>();
   let plannerAttempts = 0;
   let readIssued = false;
   const childAEntered = deferred();
@@ -775,7 +812,7 @@ async function textOnlyResponsesUpstream(input: {
           { type: 'response.output_text.done', item_id: 'planner-refused-text', text: '{}' },
           { type: 'response.completed', response: { id: 'planner-refused' } },
         ] : plannerFrames(input.model, planner, input.turnCount === undefined ? undefined : plannerAttempts,
-          input.turnCount ?? 2)));
+          input.turnCount ?? 2, input.inspection === true)));
         return;
       }
       const review = reviewPayload(body);
@@ -818,6 +855,93 @@ async function textOnlyResponsesUpstream(input: {
         response.write(': interrupted third-turn hold\n\n');
         await input.interruptThirdTurnOnce();
         return;
+      }
+      if (input.inspection && input.turnCount === 3 && plannerAttempts > 0) {
+        const wire = JSON.parse(body) as {
+          model: string;
+          tools?: { name: string }[];
+          input?: { type: string; call_id?: string; output?: string; role?: string;
+            content?: readonly { type?: string; text?: string }[] }[];
+        };
+        const invoke = (callId: string, name: string, args: unknown) => {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.end(frame([
+            { type: 'response.created', response: { id: callId } },
+            { type: 'response.output_item.done', output_index: 0, item: {
+              type: 'function_call', call_id: callId, name, arguments: JSON.stringify(args) } },
+            { type: 'response.completed', response: { id: callId } },
+          ]));
+        };
+        const resultFor = (callId: string) => wire.input?.find((item) =>
+          item.type === 'function_call_output' && item.call_id === callId);
+        const inspectionTurn = plannerAttempts;
+        const childBody = inspectionTurn === 1 ? INSPECTION_TURN_TWO_BODY : INSPECTION_TURN_THREE_BODY;
+        const childJudgment = inspectionTurn === 1
+          ? INSPECTION_TURN_TWO_JUDGMENT : INSPECTION_TURN_THREE_JUDGMENT;
+        if (wire.tools?.some((tool) => tool.name === 'humanagent_child_deliver')) {
+          assert.equal(wire.model, 'child.only.model', 'inspection child selects its configured Provider model');
+          const childPrompt = (wire.input ?? []).flatMap((item) =>
+            (item.content ?? []).flatMap((part) => typeof part.text === 'string' ? [part.text] : [])).join('\n');
+          for (const expected of [
+            `Inspection check: ${INSPECTION_CHECK_A.checkId}`,
+            `Inspection criterion: ${INSPECTION_CHECK_A.criterion}`,
+            `Inspection input refs: ${INSPECTION_CHECK_A.inputRefs.join('; ')}`,
+          ]) assert.ok(childPrompt.includes(expected), `the actual child request carries ${expected}`);
+          assert.equal(childPrompt.includes(INSPECTION_CHECK_B.checkId), false,
+            'the child receives only the selected inspection check');
+          const deliveryId = `call-inspection-child-${inspectionTurn}-delivery`;
+          const endId = `call-inspection-child-${inspectionTurn}-end`;
+          const delivered = resultFor(deliveryId);
+          if (!delivered) {
+            invoke(deliveryId, 'humanagent_child_deliver', {
+              body: childBody,
+              inspectionOutcome: { status: 'completed', judgment: childJudgment },
+            });
+          } else {
+            const deliveryEvidence = delivered.output!.split('\n')
+              .find((line) => line.startsWith('- evidenceId=child-body-execution-'));
+            const ref = deliveryEvidence === undefined ? undefined : /locator=([^\s]+)/.exec(deliveryEvidence)?.[1];
+            if (!ref) throw new Error(`inspection child delivery result has no body asset: ${delivered.output}`);
+            const section = { text: 'Inspection child work complete', evidenceRefs: [ref] };
+            invoke(endId, 'humanagent_turn_end', { summary: {
+              goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [ref] });
+          }
+          return;
+        }
+        const parentCallId = `call-inspection-parent-${inspectionTurn}`;
+        const parentAdoptId = `call-inspection-parent-${inspectionTurn}-adopt`;
+        const called = resultFor(parentCallId);
+        if (!called) {
+          for (const name of ['child_call', 'child_adopt', 'child_not_select']) {
+            assert.ok(wire.tools?.some((tool) => tool.name === name), `default composition advertises ${name}`);
+          }
+          invoke(parentCallId, 'child_call', {
+            purpose: `Execute inspection ${INSPECTION_CHECK_A.checkId}`,
+            instructions: `Measure ${INSPECTION_CHECK_A.checkId} and report its complete body and inspection outcome.`,
+            successCriteria: [INSPECTION_CHECK_A.criterion],
+            target: 'artifact://native-inspection/target',
+            agentId: 'orchestration-default',
+            kind: 'execution',
+            checkId: INSPECTION_CHECK_A.checkId,
+          });
+          return;
+        }
+        const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+          state?: string;
+          invocationId?: string;
+          summary?: string;
+        };
+        assert.equal(refined.state, 'returned', `real inspection producer returns the child: ${called.output}`);
+        assert.equal(refined.summary, childBody, 'the inspection child returns its full body');
+        const invocationId = refined.invocationId;
+        if (typeof invocationId !== 'string' || invocationId.length === 0) {
+          throw new Error(`the inspection producer returns no actual child invocation id: ${called.output}`);
+        }
+        inspectionInvocations.set(parentCallId, invocationId);
+        if (!resultFor(parentAdoptId)) {
+          invoke(parentAdoptId, 'child_adopt', { invocationId });
+          return;
+        }
       }
       if ((input.child || input.parallelChild) && !(input.turnCount !== undefined && plannerAttempts > 0)) {
         const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
@@ -987,6 +1111,19 @@ async function textOnlyResponsesUpstream(input: {
         goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
         result: section(SUMMARY_RESULT), expectedNextStep: section('Close this turn'),
       };
+      const summaryWithInspection = input.inspection && multiTurn && plannerAttempts > 0
+        ? {
+            ...endSummary,
+            inspectionOutcome: {
+              status: 'completed' as const,
+              judgment: plannerAttempts === 1
+                ? INSPECTION_TURN_TWO_PARENT_JUDGMENT : INSPECTION_TURN_THREE_PARENT_JUDGMENT,
+            },
+          }
+        : endSummary;
+      const deliveryRefsWithInspection = input.inspection && multiTurn && plannerAttempts > 0
+        ? [admissionCommitId]
+        : deliveryRefs;
       const deliveryText = multiTurn ? (plannerAttempts === 0 ? CHILD_BODY
         : input.turnCount === 3 && plannerAttempts === 1 ? TURN_TWO_DELIVERY : EXACT_BODY) : EXACT_BODY;
       const toolCall = [
@@ -995,9 +1132,9 @@ async function textOnlyResponsesUpstream(input: {
           item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: '' } },
         { type: 'response.output_item.done', output_index: 0,
           item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: JSON.stringify({
-            summary: endSummary,
+            summary: summaryWithInspection,
             ...(inspectThisTurn ? {} : { deliveryText }),
-            deliveryRefs,
+            deliveryRefs: deliveryRefsWithInspection,
           }) } },
         { type: 'response.completed', response: { id: 'text-end' } },
       ];
@@ -1020,6 +1157,9 @@ async function textOnlyResponsesUpstream(input: {
     completedInReverse: () => reversedCompletion,
     interruptedThirdTurn: () => thirdTurnInterrupted,
     turnThreeHeld: () => holdTurnThree,
+    inspectionInvocations: () => [...inspectionInvocations.entries()].map(([callId, invocationId]) => ({
+      callId, invocationId,
+    })),
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: async () => {
       server.closeIdleConnections?.();
@@ -1037,6 +1177,7 @@ async function textOnlyFixture(
   topLevelHttp?: { readonly credentialRef: string; readonly requiredBearer: string },
   interruptThirdTurnOnce?: () => Promise<void>,
   holdFirstExecutionOnce?: () => Promise<void>,
+  inspection = false,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1050,7 +1191,7 @@ async function textOnlyFixture(
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, turnCount,
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount,
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(topLevelHttp === undefined ? {} : {
@@ -2401,6 +2542,195 @@ if (!coldConsumerMode) test('native three.turn public CLI consumer retains multi
     await fixture.upstream.close();
     if (passed) await rm(fixture.root, { recursive: true });
     else console.error(`three-turn fixture retained: ${fixture.root}`);
+  }
+});
+
+function inspectionRecords(records: Awaited<ReturnType<JsonlOrganJournal['verify']>>['records']) {
+  const i2 = records.flatMap((record) => {
+    const payload = record.payload;
+    const value = payload?.['record'];
+    return payload?.['kind'] === 'i2-history' && typeof value === 'object' && value !== null
+      ? [value as Record<string, unknown>] : [];
+  });
+  return {
+    definitions: i2.filter((record) => record.kind === 'inspection-definition'),
+    openings: i2.filter((record) => record.kind === 'inspection-occurrence-opened'),
+    items: i2.filter((record) => record.kind === 'inspection-item-result'),
+    settlements: i2.filter((record) => record.kind === 'inspection-occurrence-settled'),
+  };
+}
+
+// Failure basis: the default composition does not bind the existing inspection
+// selection and acceptance ports. Probability is unknown; the source owner is
+// known to omit the wiring. Impact is loss of native inspection history. Cost
+// is this one existing three-turn CLI/HTTP consumer.
+if (!coldConsumerMode) test('native inspection producer and consumer retain two occurrences across three turns', async () => {
+  const fixture = await textOnlyFixture(false, true, false, 3, undefined, undefined, undefined, true);
+  let passed = false;
+  let serve: Awaited<ReturnType<typeof startServe>> | undefined;
+  try {
+    const { taskId, result, cookie } = await runNativeMultiTurnConsumer(fixture, 3);
+    assert.equal(result.code, 0, `the real inspection CLI run must exit cleanly: ${result.stderr}`);
+    const receiptStart = result.stdout.indexOf('{');
+    const receiptEnd = result.stdout.lastIndexOf('}');
+    assert.ok(receiptStart >= 0 && receiptEnd > receiptStart, `the inspection run prints a receipt: ${result.stdout}`);
+    const receipt = JSON.parse(result.stdout.slice(receiptStart, receiptEnd + 1)) as {
+      readonly command?: string;
+      readonly taskId?: string;
+      readonly state?: string;
+      readonly output?: string;
+      readonly error?: unknown;
+    };
+    assert.equal(receipt.command, 'run');
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt.error));
+    assert.equal(receipt.error, undefined);
+
+    const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    const plannerPosts = posts.filter((wire) => plannerPayload(wire.body) !== undefined);
+    assert.equal(plannerPosts.length, 3, 'the inspection run reaches three independent Planner requests');
+    const firstPlanner = plannerPayload(plannerPosts[0]!.body);
+    const secondPlanner = plannerPayload(plannerPosts[1]!.body);
+    const thirdPlanner = plannerPayload(plannerPosts[2]!.body);
+    if (!firstPlanner || !secondPlanner || !thirdPlanner) throw new Error('all Planner requests carry business payloads');
+    assert.equal(firstPlanner.priorPlan, null);
+    assert.equal(requireNumber(requireRecord(secondPlanner.priorPlan, 'the second priorPlan').sequence,
+      'the second priorPlan sequence'), 1);
+    assert.equal(requireNumber(requireRecord(thirdPlanner.priorPlan, 'the third priorPlan').sequence,
+      'the third priorPlan sequence'), 2);
+    const publishedPlans = [...await new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(fixture.journal))
+      .replay({ organId: id('organ', 'humanagent-ui'), taskId })];
+    assert.equal(publishedPlans.length, 3, 'three actual Planner publications are durable');
+    for (const plan of publishedPlans) {
+      assert.deepEqual(plan.snapshot.inspectionDefinition, INSPECTION_DEFINITION,
+        `Planner publication ${plan.sequence} retains the exact formal definition`);
+    }
+
+    const verify = await fixture.journal.verify();
+    const records = inspectionRecords(verify.records);
+    assert.equal(records.definitions.length, 1, 'three turns retain one durable inspection definition');
+    assert.equal(records.openings.length, 2, 'two logical turns open two actual inspection occurrences');
+    assert.equal(records.items.length, 2, 'each executed turn commits one actual item result');
+    assert.equal(records.settlements.length, 2, 'each parent standard end settles one actual occurrence');
+    const actualInvocations = fixture.upstream.inspectionInvocations();
+    assert.deepEqual(actualInvocations.map((entry) => entry.callId), [
+      'call-inspection-parent-1', 'call-inspection-parent-2',
+    ], 'the two fresh model rounds produced their actual parent call outputs');
+    assert.equal(new Set(actualInvocations.map((entry) => entry.invocationId)).size, 2,
+      'two fresh parent model rounds produce two actual child invocation identities');
+    for (const definition of records.definitions) {
+      const content = requireRecord(definition.content, 'the durable inspection content');
+      assert.deepEqual(content, INSPECTION_DEFINITION);
+    }
+    const openingIds = records.openings.map((record) =>
+      requireRecord(record.occurrence, 'an inspection occurrence').occurrenceId);
+    assert.equal(new Set(openingIds).size, 2, 'the occurrences retain independent identities');
+    const openingTurns = records.openings.map((record) => record.logicalTurnId);
+    assert.equal(new Set(openingTurns).size, 2, 'the occurrences retain independent logical turns');
+    const committedItems = records.items.map((record) => requireRecord(record.delivery, 'an inspection item'));
+    assert.deepEqual(committedItems.map((item) => item.checkId), ['check-a', 'check-a'],
+      'only the selected check-a executes');
+    assert.deepEqual(committedItems.map((item) => requireRecord(item.outcome, 'inspection item outcome')),
+      [
+        { status: 'completed', judgment: INSPECTION_TURN_TWO_JUDGMENT },
+        { status: 'completed', judgment: INSPECTION_TURN_THREE_JUDGMENT },
+      ], 'durable items retain the actual body-derived judgments');
+    assert.deepEqual(committedItems.map((item) => item.resultId), actualInvocations.map((entry) =>
+      `inspection-result:${entry.invocationId}`),
+    'each durable item binds the invocation returned by the actual child producer');
+    assert.equal(committedItems.some((item) => item.checkId === INSPECTION_CHECK_B.checkId), false,
+      'check-b remains absent from durable item results');
+    assert.deepEqual(records.settlements.map((record) => record.outcome), [
+      { status: 'completed', judgment: INSPECTION_TURN_TWO_PARENT_JUDGMENT },
+      { status: 'completed', judgment: INSPECTION_TURN_THREE_PARENT_JUDGMENT },
+    ], 'each settlement uses the parent-authored aggregate standard-end outcome');
+    const childPosts = posts.filter((wire) => {
+      const parsed = parseResponsesWire(wire.body);
+      return parsed?.tools?.some((tool) => tool.name === 'humanagent_child_deliver') === true;
+    });
+    assert.equal(childPosts.length, 2, 'the child producer executes once in each inspection turn');
+    assert.equal(childPosts.some((wire) => wire.body.includes(INSPECTION_CHECK_B.checkId)), false,
+      'check-b never reaches the configured child');
+    for (const wire of childPosts) {
+      assert.deepEqual(wire.body.includes(INSPECTION_CHECK_A.checkId), true);
+      assert.deepEqual(wire.body.includes(INSPECTION_CHECK_A.criterion), true);
+      assert.deepEqual(wire.body.includes(INSPECTION_CHECK_A.inputRefs[0]), true);
+    }
+
+    const journalBeforeReads = await readFile(fixture.layout.organJournalPath);
+    const postsBeforeReads = posts.length;
+    serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+    const taskPath = `/api/tasks/${encodeURIComponent(taskId.value)}`;
+    const read = async (path: string) => {
+      const response = await fetch(`${serve!.origin}${path}`, { headers: { cookie, accept: 'application/json' } });
+      const body = await response.json() as Record<string, unknown>;
+      assert.equal(response.status, 200, `${path}: ${JSON.stringify(body)}`);
+      return body;
+    };
+    const list = await read(`${taskPath}/inspection-occurrences`);
+    const entries = list.entries as readonly Record<string, unknown>[];
+    assert.equal(entries.length, 2, 'the public history lists both actual occurrences');
+    const occurrenceIds = entries.map((entry) => entry.occurrenceId as string);
+    assert.deepEqual(occurrenceIds, openingIds, 'the public history uses the actual occurrence IDs');
+    for (const entry of entries) {
+      assert.equal(entry.definitionId, INSPECTION_DEFINITION_ID);
+      assert.equal(entry.definitionVersion, INSPECTION_DEFINITION_VERSION);
+      assert.equal(entry.state, 'settled');
+      assert.equal(entry.outcome, 'completed');
+      const items = entry.items as readonly Record<string, unknown>[];
+      assert.deepEqual(items.map((item) => [item.checkId, item.state]), [
+        ['check-a', 'completed'], ['check-b', 'missing'],
+      ], 'each occurrence retains check-a and the actual missing check-b');
+      assert.equal(items.some((item) => item.outcome === 'cancelled'), false,
+        'no cancelled inspection item is fabricated');
+    }
+    const first = entries.find((entry) => Array.isArray(entry.items) && (entry.items as readonly Record<string, unknown>[])
+      .some((item) => item.checkId === 'check-a' && item.judgment === INSPECTION_TURN_TWO_JUDGMENT));
+    const second = entries.find((entry) => Array.isArray(entry.items) && (entry.items as readonly Record<string, unknown>[])
+      .some((item) => item.checkId === 'check-a' && item.judgment === INSPECTION_TURN_THREE_JUDGMENT));
+    if (!first || !second) throw new Error('the public occurrences do not retain both changed check-a judgments');
+    const detail = await read(`${taskPath}/inspection-occurrences/${encodeURIComponent(first.occurrenceId as string)}`);
+    assert.equal((detail.entry as Record<string, unknown>).occurrenceId, first.occurrenceId);
+    const comparison = await read(`${taskPath}/inspection-comparison?left=${encodeURIComponent(first.occurrenceId as string)}`
+      + `&right=${encodeURIComponent(second.occurrenceId as string)}`);
+    assert.equal(comparison.comparable, true);
+    assert.deepEqual((comparison.items as readonly Record<string, unknown>[]).map((item) => [item.checkId, item.change]), [
+      ['check-a', 'changed'], ['check-b', 'not-compared'],
+    ]);
+    await read(`${taskPath}/inspection-occurrences`);
+    await read(`${taskPath}/inspection-occurrences/${encodeURIComponent(first.occurrenceId as string)}`);
+    await read(`${taskPath}/inspection-comparison?left=${encodeURIComponent(first.occurrenceId as string)}`
+      + `&right=${encodeURIComponent(second.occurrenceId as string)}`);
+    assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, postsBeforeReads,
+      'public reads issue no Provider request');
+    assert.deepEqual(await readFile(fixture.layout.organJournalPath), journalBeforeReads,
+      'public reads append no Journal record');
+    await serve.stop();
+    serve = undefined;
+    serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+    const cold = await fetch(`${serve.origin}${taskPath}/inspection-occurrences`, { headers: { cookie } });
+    assert.equal(cold.status, 200, 'a fresh serve process reads the same durable occurrences');
+    assert.equal(((await cold.json()) as { readonly entries?: readonly unknown[] }).entries?.length, 2);
+    assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, postsBeforeReads,
+      'the cold read issues no Provider request or child call');
+    console.log('native inspection consumer evidence', JSON.stringify({
+      fixture: fixture.root,
+      occurrenceIds,
+      judgments: [INSPECTION_TURN_TWO_JUDGMENT, INSPECTION_TURN_THREE_JUDGMENT],
+      comparison: 'check-a changed; check-b not-compared',
+    }));
+    passed = true;
+  } catch (error) {
+    console.error(`inspection fixture retained: ${fixture.root}`);
+    console.error(`inspection evidence: ${JSON.stringify({
+      plannerPosts: fixture.upstream.wires.filter((wire) => plannerPayload(wire.body) !== undefined).length,
+      posts: fixture.upstream.wires.filter((wire) => wire.method === 'POST').length,
+    })}`);
+    throw error;
+  } finally {
+    if (serve !== undefined) await serve.stop();
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
   }
 });
 
