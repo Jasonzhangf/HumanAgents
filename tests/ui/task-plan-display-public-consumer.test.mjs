@@ -90,6 +90,8 @@ const {
   renderTaskPlanSemanticView,
   renderTaskDescriptionContent,
   renderTaskActualExecutionGraphSection,
+  renderTaskPublicOutputPanel,
+  publicOutputActionCopy,
   commitScopedReadTransition,
 } = await import('../../docs/ui/task-display.js')
 const { projectTaskActualExecutionGraph } = await import(
@@ -928,4 +930,93 @@ test('task description renders complete canonical requirements and preserves oth
   assert.equal(renderTaskDescriptionContent({ input: partialInput }).textContent, partialInput)
 
   assert.equal(renderTaskDescriptionContent({ input: '' }).textContent, '尚未输入')
+})
+
+/*
+ * F07 UI state consumption. The dashboard result panel and the completed-task
+ * action copy must read the typed public output publication state, not treat
+ * any non-empty text as a confirmed result.
+ *
+ * Failure mode: a read that cannot confirm the publication (unknown) with no
+ * confirmed text renders the same as a genuine empty result, and a retained
+ * confirmed text is shown without its latest read status. Impact is a user who
+ * reads a read failure as "no output" or mistakes a stale confirmed text for
+ * the latest completed result. Cost is one bounded DOM case over the real
+ * exported production helpers.
+ */
+test('dashboard public output consumes the typed publication state and preserves confirmed text', () => {
+  const commit = { commitId: 'c1', journalSeq: 7, recordDigest: 'sha256:x', text: '第一段确认文本' }
+
+  const panelText = (input) => {
+    const panel = renderTaskPublicOutputPanel(input)
+    const primary = walk(panel).filter((node) => node.className === 'business-output-text')
+    assert.equal(primary.length, 1, 'the result panel shows exactly one primary text')
+    return { primary: primary[0].textContent, full: allText(panel) }
+  }
+
+  // unknown with no confirmed text must not be presented as a genuine empty result.
+  const unknownEmpty = panelText({ output: '', publication: { state: 'unknown', commits: [] } })
+  assert.equal(unknownEmpty.primary, '结果状态暂时无法确认')
+  assert.notEqual(unknownEmpty.primary, '尚无输出')
+  assert.doesNotMatch(unknownEmpty.full, /尚无输出|unknown|pending|committed|unavailable/)
+
+  // pending with no confirmed text is a distinct state.
+  const pendingEmpty = panelText({ output: '', publication: { state: 'pending', commits: [] } })
+  assert.equal(pendingEmpty.primary, '新内容待确认')
+  assert.doesNotMatch(pendingEmpty.full, /尚无输出|unknown|pending|committed|unavailable/)
+
+  // unavailable is distinct from unknown and from a genuine empty result.
+  const unavailableEmpty = panelText({ output: '', publication: { state: 'unavailable', commits: [] } })
+  assert.equal(unavailableEmpty.primary, '结果暂时不可用')
+  assert.doesNotMatch(unavailableEmpty.full, /尚无输出|unknown|pending|committed|unavailable/)
+
+  // A retained confirmed text stays exact and carries a short read status.
+  const retainedUnknown = panelText({ output: commit.text, publication: { state: 'unknown', commits: [commit] } })
+  assert.equal(retainedUnknown.primary, commit.text)
+  assert.match(retainedUnknown.full, /结果状态暂时无法确认/)
+  assert.match(retainedUnknown.full, /已确认的结果/)
+
+  const retainedPending = panelText({ output: commit.text, publication: { state: 'pending', commits: [commit] } })
+  assert.equal(retainedPending.primary, commit.text)
+  assert.match(retainedPending.full, /新内容待确认/)
+
+  // A genuine committed publication shows the confirmed text.
+  const committedText = panelText({ output: commit.text, publication: { state: 'committed', commits: [commit] } })
+  assert.equal(committedText.primary, commit.text)
+  assert.match(committedText.full, /已确认/)
+
+  // A read without the carrier and without confirmed text is the only empty result.
+  const absent = panelText({ output: '' })
+  assert.equal(absent.primary, '暂无结果')
+  assert.doesNotMatch(absent.full, /尚无输出|unknown|pending|committed|unavailable/)
+
+  // The completed-task action copy follows the state, not the text presence.
+  assert.equal(
+    publicOutputActionCopy({ output: commit.text, publication: { state: 'unknown', commits: [commit] } }),
+    '任务已完成；结果状态暂时无法确认。',
+  )
+  assert.doesNotMatch(
+    publicOutputActionCopy({ output: commit.text, publication: { state: 'unknown', commits: [commit] } }),
+    /结果可用/,
+  )
+  assert.equal(
+    publicOutputActionCopy({ output: '', publication: { state: 'pending', commits: [] } }),
+    '任务已完成；新内容待确认。',
+  )
+  assert.equal(
+    publicOutputActionCopy({ output: '', publication: { state: 'unavailable', commits: [] } }),
+    '任务已完成；结果暂时不可用。',
+  )
+  assert.equal(
+    publicOutputActionCopy({ output: commit.text, publication: { state: 'committed', commits: [commit] } }),
+    '任务已完成，结果已确认。',
+  )
+  assert.equal(
+    publicOutputActionCopy({ output: '', publication: { state: 'committed', commits: [] } }),
+    '任务已完成；当前没有合法操作。',
+  )
+  assert.equal(
+    publicOutputActionCopy({ output: commit.text }),
+    '任务已完成，结果可用。',
+  )
 })
