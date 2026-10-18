@@ -41,11 +41,12 @@ import {
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
-  AgentRuntimePoolManager, OrchestrationManager, OrchestrationError,
+  AgentRuntimePoolManager, OrchestrationError,
   resolveReviewMaterial,
   type ChildCallPort, type IndependentChildCallInput, type ExecutionAgentPort,
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
+import { createTestOrchestrationManager } from '../runtime/orchestration/assignment-graph-test-journal.js';
 import { createReviewAssignments } from '../../packages/runtime/src/review/index.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import { ProviderAgentDriver } from '../../packages/adapters/provider/src/index.js';
@@ -480,7 +481,8 @@ async function singleCallFixture() {
     async review() { throw new Error('direct/root review callback must never run'); },
     createInstance() { throw new Error('single-call fixture never dispatches a root reviewer'); },
   };
-  const manager = new OrchestrationManager({ ownerId: 'single-call-manager', runtimePool: pool,
+  const manager = createTestOrchestrationManager({ ownerId: 'single-call-manager',
+    taskId: taskScope.taskId, organId: taskScope.organId, runtimePool: pool,
     executionAgent, reviewAgent, reviewJournal: createJsonlI2JournalPort({ filePath: join(root, 'organ.jsonl'), journal }) });
   async function common(invocationId: string) {
     const registration = await journal.append({ commitId: `fixture-business:${invocationId}`, kind: 'event', scope,
@@ -802,7 +804,7 @@ test('single call public API returns genuine work and standalone repeated review
     assert.deepEqual(f.counts(), { executions: 1, reviews: 2, releases: 3, disposes: 3 });
     assert.deepEqual(f.seenRequestInvocations(), ['review-call:first', 'review-call:second'],
       'each review request carries its own registered parent invocation, not the review assignment');
-    assert.deepEqual(f.manager.graph.snapshot(), { stages: [], assignments: [] }, 'single calls do not run dispatch');
+    assert.deepEqual(f.manager.snapshot(), { stages: [], assignments: [] }, 'single calls do not run dispatch');
     const records = await f.journal.replay();
     assert.equal(records.filter((r) => r.payload?.kind === 'single-call-fixture-return').length, 3);
     console.info('single call receipts', JSON.stringify({ counts: f.counts(), calls: records.map((r) => r.commitId) }));
@@ -1036,7 +1038,8 @@ test('dispatch keeps the already-committed milestone receipt when a later review
       }
       return realI2.commit(record);
     } };
-  const manager = new OrchestrationManager({ ownerId: 'dispatch-manager', runtimePool: pool,
+  const manager = createTestOrchestrationManager({ ownerId: 'dispatch-manager',
+    taskId: taskScope.taskId, organId: taskScope.organId, runtimePool: pool,
     executionAgent, reviewAgent, reviewJournal });
   try {
     manager.planStage({ nodeId: 'dispatch-milestone-node', taskId: taskScope.taskId });

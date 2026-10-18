@@ -1178,6 +1178,15 @@ test('assignment graph rejects conflicting review results without replacing pers
     }),
     /conflicts with existing content/,
   );
+  assert.throws(
+    () => graph.recordReviewResult(assignment(), {
+      ...review,
+      evidenceRefs: review.evidenceRefs.map((ref, index) => (
+        index === 0 ? { ...ref, locator: 'different-evidence-locator' } : ref
+      )),
+    }),
+    /conflicts with existing content/,
+  );
   assert.deepEqual(graph.get(assignment())?.reviewResults, [review]);
 });
 

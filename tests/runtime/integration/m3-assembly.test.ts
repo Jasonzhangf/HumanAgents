@@ -11,11 +11,13 @@ import {
   type ReviewOutput,
   type ScopeRef,
   type Task,
+  type TaskFlowBinding,
   type WorkAssignment,
   type WorkResult,
 } from '../../../packages/contracts/src/index.js';
 import { JsonlOrganJournal } from '../../../packages/adapters/jsonl/src/index.js';
 import { createJsonlAssignmentGraphJournal } from '../../../packages/adapters/jsonl/src/assignment-graph.js';
+import { JsonlTaskIdentityJournal } from '../../../packages/adapters/jsonl/src/task-identities.js';
 import {
   type AppendEventRequest,
   type ConsumerCommitRequest,
@@ -69,6 +71,7 @@ const organId = id('organ', 'm3-assembly');
 const taskId = id('task', 'm3-assembly');
 const cycleId = id('cycle', 'm3-assembly');
 const scope: ScopeRef = { organId, taskId, cycleId };
+const taskFlow: TaskFlowBinding = { kind: 'long-running', definitionVersion: 1 as const };
 const task: Task = {
   id: taskId,
   organId,
@@ -128,6 +131,7 @@ function workResult(): WorkResult {
     executionEpoch: 1,
     inputRevision: 1,
     producedArtifactRefs: ['artifact://m3'],
+    producedArtifactBodies: [m3ArtifactBody],
     status: 'succeeded',
     summary: 'M3 modules assembled',
     outputRefs: ['m3-output'],
@@ -374,6 +378,18 @@ test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projec
     assert.equal(recoveredEmpty?.assignmentKeys.length, 0);
 
     const controlJournal = new JsonlOrganJournal(filePath);
+    await new JsonlTaskIdentityJournal(controlJournal).append({
+      scope: { organId, taskId },
+      taskFlow,
+      source: {
+        requirementId: 'm3-requirement',
+        inputRevision: 1,
+        draftId: 'm3-draft',
+        draftRevisionVersion: 1,
+        draftRevisionHash: 'm3-draft-hash',
+        confirmationRef: 'm3-confirmation',
+      },
+    });
     const controlRecordCountBeforeRead = (await controlJournal.replay()).length;
     const activity = await readTaskAgentActivity({
       taskId,
@@ -390,7 +406,11 @@ test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projec
       throw new Error('M3 public activity read did not attach a recorded execution graph');
     }
     assert.equal(actualExecutionGraph.surface, 'task-actual-execution-graph');
-    assert.equal(actualExecutionGraph.guidance, undefined);
+    assert.equal(actualExecutionGraph.guidance?.kind, 'long-running');
+    assert.equal(
+      actualExecutionGraph.guidance?.aim,
+      'Complete one whole-goal part per current revision; use applicable review, standard closure, and the Planner to update the whole-task plan.',
+    );
     assert.equal(actualExecutionGraph.history.streamCount, 1);
     assert.equal(actualExecutionGraph.history.stageCount, 3);
     assert.equal(actualExecutionGraph.history.memberCount, 2);

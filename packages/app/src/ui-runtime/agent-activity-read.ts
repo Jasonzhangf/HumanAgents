@@ -28,6 +28,7 @@ import {
   listTaskActiveTurnBindings,
 } from '../../../adapters/jsonl/src/active-turn.js';
 import { decodeAssignmentGraphRecords } from '../../../adapters/jsonl/src/assignment-graph.js';
+import { decodeTaskIdentityRecords } from '../../../adapters/jsonl/src/task-identities.js';
 import {
   closureFromRecord,
   readCommittedNativeSegmentSource,
@@ -57,7 +58,6 @@ import {
 } from '../../../runtime/src/observation/agent-activity.js';
 import { replayAssignmentGraph } from '../../../runtime/src/orchestration/assignment-graph.js';
 import type { AssignmentGraphStream } from '../../../runtime/src/orchestration/types.js';
-import type { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
 import type { AgentRuntimePoolManager } from '../../../runtime/src/orchestration/runtime-pool.js';
 import type { RuntimeTaskSnapshot } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { projectRuntimeAgentActivity } from '../../../ui/projection/agent-activity.js';
@@ -1075,7 +1075,6 @@ export async function readTaskAgentActivity(
   options: AssembleTaskAgentActivityRemainingSourcesOptions & {
     readonly query: TaskAgentActivitySelectionQuery;
     readonly currentAuthority?: AgentActivityCurrentAuthority;
-    readonly taskIdentity?: TaskIdentityConsumer;
   },
 ): Promise<RuntimeReadResult<RuntimeAgentActivityProjection>> {
   const assembled = await assembleTaskAgentActivityCoreContext(options);
@@ -1129,9 +1128,8 @@ export async function readTaskAgentActivity(
       unavailableSources: [...child.unavailableSources, ...pool.unavailableSources, ...review.unavailableSources],
     });
     if (!projected.ok) return projected;
-    const identity = options.taskIdentity === undefined
-      ? undefined
-      : await options.taskIdentity.read(context.taskScope);
+    const identity = decodeTaskIdentityRecords(context.controlRecords)
+      .find((candidate) => sameTaskIdentityScope(candidate.scope, context.taskScope));
     const actualExecutionGraph = projectTaskActualExecutionGraph(taskActualExecutionGraphSource({
       taskScope: context.taskScope,
       controlRecords: context.controlRecords,

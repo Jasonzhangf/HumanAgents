@@ -3506,7 +3506,6 @@ export class UiRuntimeService {
       taskJournal: readUiRuntimeTaskJournal(source.checkpointsRoot, mode), controlJournal,
       i2Journal: bound && this.options.i2History !== undefined
         ? this.options.i2History.journal : createJsonlI2JournalPort({ filePath, journal: controlJournal }),
-      ...(this.options.taskIdentity === undefined ? {} : { taskIdentity: this.options.taskIdentity }),
       ...(live === undefined ? {} : { live }),
     });
   }

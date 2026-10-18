@@ -4661,9 +4661,6 @@ export class RuntimeTaskCoordinator {
         await record.taskAssembly.orchestration.initialize();
         this.bindChildCallManager(driver, record.taskAssembly);
         const stageNodeId = `stage-${operation.operationId.value}`;
-        // The acceptance criteria digest is derived from the criteria content
-        // itself, so the review gate can re-verify the content it receives
-        // instead of trusting a label.
         // Single Runtime assignment construction (shared with the admitted-turn
         // producer); never rebuilt per admission/composition/dispatch.
         const assignment: WorkAssignment = record.assignment ?? this.buildWorkAssignment(record, operation, scope);
