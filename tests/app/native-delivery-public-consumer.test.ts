@@ -1002,7 +1002,7 @@ async function textOnlyResponsesUpstream(input: {
           }
           const delivered = resultFor(`cycle-${cycle}-child-delivery`);
           if (!delivered) {
-            const ref = /locator=([^\s]+)/.exec(resultFor(`cycle-${cycle}-review-read`)?.output ?? '')?.[1];
+            const ref = /evidenceId=([^\s]+)/.exec(resultFor(`cycle-${cycle}-review-read`)?.output ?? '')?.[1];
             invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
               body: review ? `Cycle ${cycle} independent quality review` : executionBody,
               ...(review ? { judgment: 'passed', findings: [{ detail: `Cycle ${cycle} delivery verified`,
@@ -2421,7 +2421,19 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
     if (!nextWire) throw new Error('missing second parent request');
     await assertPriorSemanticCheckpointWire(fixture, nextWire.body, taskId, TURN_ONE_GOAL);
     assert.equal((semanticCheckpointWires(nextWire.body)[0]!.adoptedChildren as unknown[]).length, 2);
-    assert.equal(nextWire.body.includes('cycle-1-child-delivery'), false, 'next parent uses semantics, not raw child tool history');
+    const nextBody = parseResponsesWire(nextWire.body);
+    if (!nextBody) throw new Error('the second-cycle parent request is not a Responses wire body');
+    assert.equal(nextBody.model, fixture.configuration.effective.provider?.model,
+      'the second-cycle request uses the configured parent model');
+    assert.deepEqual(
+      (nextBody.input ?? []).filter((item) => item.type === 'function_call' || item.type === 'function_call_output')
+        .map((item) => ({ type: item.type, callId: item.call_id })),
+      [],
+      'the second-cycle parent request excludes prior raw call and result entries',
+    );
+    const nextEnvelope = JSON.parse(nextWire.body) as { readonly previous_response_id?: unknown };
+    assert.equal(nextEnvelope.previous_response_id, undefined,
+      'the second-cycle parent request does not chain hidden provider response state');
 
     const coldJournal = new JsonlOrganJournal(fixture.layout.organJournalPath);
     const scope = { organId: id('organ', 'humanagent-ui'), taskId };

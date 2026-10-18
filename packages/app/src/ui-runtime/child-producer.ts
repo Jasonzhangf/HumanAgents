@@ -811,7 +811,7 @@ function createChildDeliveryExecutor(input: {
   readonly incarnation: TaskRuntimeIncarnation;
   readonly scope: ScopeRef;
   readonly bodyAssets: ChildBodyAssetPort;
-  readonly acceptedEvidence: () => readonly EvidenceRef[];
+  readonly standardEndOwner: StandardTurnEndOwnerPort;
 }): ProviderToolExecutionPort {
   return {
     async execute(request): Promise<ProviderToolExecutionResult> {
@@ -843,26 +843,29 @@ function createChildDeliveryExecutor(input: {
         throw new Error('a non-inspection execution cannot carry an inspection outcome');
       }
       const candidateFindings = input.kind === 'review' ? parseReviewFindingSelectors(args.findings) : [];
-      const byReference = new Map<string, EvidenceRef>();
-      for (const ref of input.acceptedEvidence()) {
-        byReference.set(ref.evidenceId.value, ref);
-        byReference.set(ref.locator, ref);
+      const identity = await input.standardEndOwner.resolveBoundTurn({
+        execution: request.execution,
+        ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+      });
+      if (identity === null) {
+        throw new Error('child delivery has no admitted turn bound to this child provider request');
       }
-      const resolve = (selector: string): EvidenceRef => {
-        const match = byReference.get(selector);
-        if (match === undefined) {
-          throw new Error(`child delivery evidence ${selector} is not accepted evidence of this child`);
-        }
-        return match;
-      };
-      const evidenceRefs = selectors.map(resolve);
+      const references = [
+        ...selectors,
+        ...candidateFindings.flatMap((finding) => finding.evidenceRefs),
+      ];
+      const resolved = references.length === 0
+        ? []
+        : [...await input.standardEndOwner.resolveDelivery({ identity, deliveryRefs: references })];
+      const evidenceRefs = resolved.slice(0, selectors.length);
+      let findingOffset = selectors.length;
       const findings = candidateFindings.map((finding) => ({
         findingId: `child-finding:${sha256Hex(`${finding.detail}\n${finding.locationRef}\n${finding.evidenceRefs.join('\n')}`)}`,
         severity: finding.severity,
         locationRef: finding.locationRef,
         problem: finding.detail,
         expected: finding.detail,
-        evidenceRefs: finding.evidenceRefs.map(resolve),
+        evidenceRefs: resolved.slice(findingOffset, findingOffset += finding.evidenceRefs.length),
       }));
       const asset = await input.bodyAssets.write({
         scope: input.scope,
@@ -1024,6 +1027,16 @@ function reviewResult(input: {
   if (input.delivery.judgment === undefined) {
     throw new Error('a review delivery must carry its business judgment');
   }
+  const seen = new Set<string>();
+  const evidenceRefs = [
+    ...input.delivery.evidenceRefs,
+    ...input.delivery.findings.flatMap((finding) => finding.evidenceRefs),
+    ...acceptedEvidenceRefs(input.events, undefined),
+  ].filter((ref) => {
+    if (seen.has(ref.evidenceId.value)) return false;
+    seen.add(ref.evidenceId.value);
+    return true;
+  });
   return {
     resultId: `review-result:${input.agentId}:${input.assignment.assignmentId}`,
     assignmentId: input.assignment.assignmentId,
@@ -1038,7 +1051,7 @@ function reviewResult(input: {
     subjectDigests: [...input.assignment.subjectDigests],
     status: input.delivery.judgment,
     findings: input.delivery.findings,
-    evidenceRefs: [...input.delivery.evidenceRefs, ...acceptedEvidenceRefs(input.events, undefined)],
+    evidenceRefs,
   };
 }
 
@@ -1212,7 +1225,6 @@ function childToolSurface(input: {
   readonly scope: ScopeRef;
   readonly incarnation: TaskRuntimeIncarnation;
   readonly bodyAssets: ChildBodyAssetPort;
-  readonly acceptedEvidence: () => readonly EvidenceRef[];
 }): {
   readonly toolDefinitions: readonly ProviderToolDefinition[];
   readonly toolExecution: ProviderToolExecutionPort;
@@ -1234,7 +1246,7 @@ function childToolSurface(input: {
     incarnation: input.incarnation,
     scope: input.scope,
     bodyAssets: input.bodyAssets,
-    acceptedEvidence: input.acceptedEvidence,
+    standardEndOwner: input.run.standardEndOwner,
   });
   const existingToolIds = new Set(input.run.toolDefinitions.map((tool) => tool.toolId));
   const additions = [APP_CHILD_DELIVER_TOOL, ADVERTISED_STANDARD_TURN_END_TOOL]
@@ -1280,7 +1292,6 @@ interface ConfiguredChildRunInput {
  */
 async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunResolvedOutcome> {
   const events: AgentEvent[] = [];
-  const acceptedEvidence = (): readonly EvidenceRef[] => acceptedEvidenceRefs(events, undefined);
   const surface = childToolSurface({
     run: input.run,
     state: input.state,
@@ -1290,7 +1301,6 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
     scope: input.scope,
     incarnation: input.incarnation,
     bodyAssets: input.input.bodyAssets,
-    acceptedEvidence,
   });
   // Real child business admission already happened before this creator ran.
   // Commit the child's own control registration before any Provider effect.
@@ -1340,8 +1350,11 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
       });
       drained = true;
     }
-    await driver.settle({ runtimeId: input.incarnation.runtimeId, executionEpoch: input.incarnation.executionEpoch });
     settlement = driver.settlement();
+    if (settlement === undefined) {
+      await driver.settle({ runtimeId: input.incarnation.runtimeId, executionEpoch: input.incarnation.executionEpoch });
+      settlement = driver.settlement();
+    }
   } finally {
     closed = await input.closer.close();
   }
