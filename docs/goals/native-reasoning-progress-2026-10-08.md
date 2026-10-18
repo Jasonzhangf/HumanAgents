@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 已交付：治理消融与完整任务说明
+
+- 已接收 peer 完整交付回执 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-ux-delivery-20261018/delivery.md`。源码正常合流并推送 main b4de7ac6，回执311e3e7e..b4de7ac6；peer 长程文档收口83e5d7f2，回执b4de7ac6..83e5d7f2。两条 P1 的原 FAIL、实际 RED/GREEN、必要 finding 复核 PASS 均保留，不以消融绕过正文或资产正确性。
+- 本侧已直接读取正式 restart 与安装消费者/默认 UI receipt：gen40→41，canonical installed CLI，53007，legacy close clean；任务展示10PASS、review正文绑定8PASS。完整回执另列真实 retained asset consumer1PASS，及 Runtime46/AppI2 9/真实CLI两周期1等受影响作者证据。默认打包 mobile 四项说明/原值顺序/长scope/底抽屉/焦点/技术原文验收成立，desktop证据明确复用，没有重执行原Task或新模型请求。
+- 自有临时浏览器/service资源已清理；治理集成树/link及已合流分支正常关闭，注册树3→2。本侧git现场确认仅main控制树和独立Observation活动树，未清他人资源。原Task/Journal/assets保留。
+- 保留的具体边界：SDK辅助verify仍报NON_CANONICAL_RECORD_CONTRACT_SET（退休FreezeRecord合同、上游owner事项），不伪称全治理verify PASS；Observation候选1b8f94db尚待peer双端浏览器/整体Review/正式交付；M3精确浏览器/F13旧activity-tail适用范围仍由peer收口；原taskless epoch6 socket失败未解，RCC交接待明确目标。完整goal仍ACTIVE/INCOMPLETE。
+
 ## 2026-10-18 旧 Operator registration 范围已裁定，不引入 SDK
 
 - r465 定向源码与后继证据观察已完成；r466 独立 OAuth GPT6.1 medium 小计划 READY，Root 接受其范围判断：按 requirements v14、原生 goal、implementation-plan 第9节与 dagpipe-runtime 两接口，旧 Operator registration UNVERIFIED 是 SDK 执行能力边界，不是当前原生推理 goal 的必要交付依赖。
