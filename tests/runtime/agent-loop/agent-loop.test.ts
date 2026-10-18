@@ -252,6 +252,52 @@ test('inspection runtime helpers fold adoption over the exact invocation without
   ]);
   assert.deepEqual(await f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId), delivery);
 
+  // Failure basis: capture and active journal can encode identical JSON with different object key order.
+  // Impact: the next turn or stop rejects an accepted delivery. Cost: one existing public reader consumer.
+  const reorderedDelivery: AcceptedExecutionChildDelivery = {
+    inspectionDelivery: {
+      completedAt: delivery.inspectionDelivery!.completedAt,
+      evidenceRefs: [{
+        scope: { cycleId: f.raw.ref.scope.cycleId, taskId: f.raw.ref.scope.taskId, organId: f.raw.ref.scope.organId },
+        locator: f.raw.ref.locator, source: f.raw.ref.source, kind: f.raw.ref.kind, evidenceId: f.raw.ref.evidenceId,
+      }],
+      outcome: { judgment: 'a observed', status: 'completed' },
+      attempt: delivery.inspectionDelivery!.attempt, resultId: delivery.inspectionDelivery!.resultId,
+      checkId: delivery.inspectionDelivery!.checkId,
+    },
+    result: {
+      nextAction: delivery.result.nextAction, evidenceRefs: delivery.result.evidenceRefs, outputRefs: delivery.result.outputRefs,
+      summary: delivery.result.summary, status: delivery.result.status,
+      producedArtifactDigests: delivery.result.producedArtifactDigests,
+      producedArtifactRefs: delivery.result.producedArtifactRefs, inputRevision: delivery.result.inputRevision,
+      executionEpoch: delivery.result.executionEpoch, attempt: delivery.result.attempt,
+      assignmentId: delivery.result.assignmentId, agentId: delivery.result.agentId,
+      pipelineNodeId: delivery.result.pipelineNodeId, taskId: delivery.result.taskId,
+    },
+    refinedDelivery: {
+      view: f.raw.view,
+      ref: {
+        scope: { cycleId: f.raw.ref.scope.cycleId, taskId: f.raw.ref.scope.taskId, organId: f.raw.ref.scope.organId },
+        locator: f.raw.ref.locator, source: f.raw.ref.source, kind: f.raw.ref.kind, evidenceId: f.raw.ref.evidenceId,
+      },
+    },
+    assignment: {
+      mergeGate: f.assignment.mergeGate, requiredCapabilities: f.assignment.requiredCapabilities,
+      incompleteCriteria: f.assignment.incompleteCriteria, failureCriteria: f.assignment.failureCriteria,
+      successCriteria: f.assignment.successCriteria, acceptanceCriteriaDigest: f.assignment.acceptanceCriteriaDigest,
+      expectedOutputRefs: f.assignment.expectedOutputRefs, targetRefs: f.assignment.targetRefs,
+      objective: f.assignment.objective, inputRevision: f.assignment.inputRevision,
+      executionEpoch: f.assignment.executionEpoch, attempt: f.assignment.attempt,
+      pipelineNodeId: f.assignment.pipelineNodeId, taskId: f.assignment.taskId, assignmentId: f.assignment.assignmentId,
+    },
+    invocationId: delivery.invocationId, seq: delivery.seq, kind: delivery.kind,
+  };
+  f.setRawJournal([
+    { kind: 'child-delivery', entry: delivery },
+    { kind: 'child-delivery', entry: reorderedDelivery },
+  ]);
+  assert.deepEqual(await f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId), delivery);
+
   f.setRawJournal(replay([{ ...invocation, adoptedResultSeq: 4 }]));
   await assert.rejects(f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId),
     /conflicting durable records/);

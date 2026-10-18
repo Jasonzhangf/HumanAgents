@@ -186,7 +186,7 @@ function mergeExact<T>(label: string, values: readonly T[], keyOf: (value: T) =>
   for (const value of values) {
     const key = keyOf(value);
     const previous = merged.get(key);
-    if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(value)) {
+    if (previous !== undefined && canonicalJsonStringify(previous) !== canonicalJsonStringify(value)) {
       throw fail('conflict', `${label} has conflicting durable records for ${key}`);
     }
     if (previous === undefined) merged.set(key, value);
