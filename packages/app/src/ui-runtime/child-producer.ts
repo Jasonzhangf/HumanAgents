@@ -1890,7 +1890,6 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
 
   async function resolveReviewSource(
     subjectInvocationId: string,
-    scope: ScopeRef,
   ): Promise<{ readonly worker: WorkAssignment; readonly result: WorkResult; readonly bodies: readonly string[] }> {
     const delivery = findDelivery(parent, subjectInvocationId);
     if (!delivery || delivery.kind !== 'execution') {
@@ -1899,7 +1898,11 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
     // The subject under review is the delivery's own immutable asset, read back
     // from the filesystem and compared directly with any carried body.
     const bodies = await Promise.all(delivery.result.producedArtifactRefs.map(async (locator, index) => {
-      const bytes = await input.bodyAssets.read(rawAssetFromLocator(locator, scope));
+      const ref = delivery.result.evidenceRefs.find((candidate) => candidate.locator === locator);
+      if (ref === undefined) {
+        throw new Error(`review subject ${locator} has no retained evidence reference`);
+      }
+      const bytes = await input.bodyAssets.read({ ref, view: { kind: 'utf8-text' } });
       const body = new TextDecoder().decode(bytes);
       const carried = delivery.result.producedArtifactBodies?.[index];
       if (carried !== undefined && carried !== body) {
@@ -1907,22 +1910,10 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
       }
       return body;
     }));
-    return { worker: delivery.assignment, result: delivery.result, bodies };
-  }
-
-  /** Rebuilds the immutable asset descriptor for a durable child delivery locator. */
-  function rawAssetFromLocator(locator: string, scope: ScopeRef, digest?: string): RawAsset {
-    const assetId = locator.split('/').filter(Boolean).at(-1) ?? locator;
     return {
-      ref: {
-        evidenceId: id('evidence', assetId),
-        kind: 'execution',
-        source: OWNER,
-        locator,
-        ...(digest === undefined ? {} : { digest }),
-        scope,
-      },
-      view: { kind: 'utf8-text' },
+      worker: delivery.assignment,
+      result: { ...delivery.result, producedArtifactBodies: bodies },
+      bodies,
     };
   }
 
@@ -1987,7 +1978,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           };
         }
         if (delivery.kind === 'review' && existing.postReviewCheckpointRef === undefined) {
-          const source = await resolveReviewSource(parsed.kind === 'review' ? parsed.subjectInvocationId : '', request.scope);
+          const source = await resolveReviewSource(parsed.kind === 'review' ? parsed.subjectInvocationId : '');
           await input.checkpoints.post({
             call,
             returned: {
@@ -2074,7 +2065,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         return callResult(result, request.scope);
       }
 
-      const source = await resolveReviewSource(parsed.subjectInvocationId, request.scope);
+      const source = await resolveReviewSource(parsed.subjectInvocationId);
       // The reviewer must see the complete subject body. The authoritative copy
       // is the execution delivery's own immutable asset, read back here; a
       // body that cannot be read rejects instead of degrading into a

@@ -7,6 +7,29 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下 2026-10-17 增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。下方 2026-10-14/15 记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
+### 2026-10-18 治理消融与完整任务说明已交付
+
+本批 main 集成并推送 `b4de7ac6`。模板内容冻结、mode/lease、DSH 候选身份和 Work/Review 包装摘要已从实际 owner、调用方及相关静态 schema/fixture 消融；源码词表、固定命令顺序和无独立保障的传输测试已删除。保留真实资产、Journal、任务身份、授权、正文和引用正确性。SDK 辅助 verify 仍受上游 FreezeRecord 合同缺陷影响，已登记 `8a8c1be`，未冒报 PASS，也未阻断未受影响的日常入口。
+
+任务说明默认按“目标／范围／约束／交付要求”展示。完整原文、顺序和技术详情保持；未知结构及普通文本保留原文。原成功 Task 的候选双端验收及安装后默认打包 UI 手机入口已通过。原 Task 没有重执行，也没有新增模型请求。
+
+整体 Review 找到两条真实 P1 后保留 FAIL：子执行 review 丢失原资产引用，以及缺实际正文时可接受 caller 正文。修复 `bc34027e` 复用原资产引用并直接绑定实际正文，`fc9f978a` 修正七个正向 fixture；两项有效 RED、真实资产及配置化 CLI GREEN、Runtime 46/46 和 App I2 9/9 已接收。必要 finding 复核独立 OAuth 正常退出，既有 classifier PASS、无 findings；未变架构结论复用，未重做整体审查。
+
+main 重建、打包、全局安装完成；正式 restart gen40→41，端口53007。安装模块上的任务展示10项、review 正文8项和真实资产读取1项原消费者通过。临时服务、cookie 和本批集成工作树已清理。完整交付回执：`/Volumes/Intel/playground/humanagent/.worker-runs/governance-ux-delivery-20261018/`。
+
+### 当前剩余主线与已替代的旧 OPEN
+
+原真实 RCC 约束 Task 已成功，四字段完整进入实际请求，提交正文与 API／浏览器一致，没有子调用或工作区写入；接收见 `original-rcc-prepared-acceptance-execute-20261018/owner-reception.md`。准备态冷恢复已随 PR3／`917ea959` 交付，M3 两周期与计划演进已随 `ed44b1dd` 完成安装验收和推送。以下旧段落中这些子能力的 OPEN 不再代表当前状态。
+
+独立后续计划已接收：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-remaining-plan-oauth-20261018/plan.md` 及 owner-acceptance.md。当前按以下实际缺口推进，不重做已有效的测试：
+
+- 嵌套 Observation 仍有已捕获的机械事件标题、英文固定摘要和错误集合名称。独立 GCM 在单独候选实现人读投影；不改事件分类、生命周期或原始历史，不混入本批已交付代码。
+- M3 的源代码、公共 HTTP 和安装后两周期证明有效；成功 fixture 已清理且没有保留完整公开响应，精确数据的浏览器呈现仍待补足。不得从日志重建业务状态或自动重跑业务任务。
+- initial-open 安装后恢复及已确认副作用不重放已有接受证据。旧 activity-tail RED 与当前后继的精确等价边界仍未知，不能直接称为当前缺码，也不据此新增崩溃矩阵。
+- 原 taskless 问答 epoch6 仍 socket 失败，由 Provider peer 保留原责任及外部交接边界；不再盲重试，不阻断未受影响的 UX 工作。
+
+完整 I1–I5／G1–G14／F01–F20 继续 ACTIVE／INCOMPLETE。以上交付只关闭明确子能力，不替代完整目标的逐项收口。
+
 ### 2026-10-18 M5 确认控制可用增量
 
 main 集成 `d2ab27fe`。正式 correction/reentry HTTP→物理owner→Journal/current-state写链已接通；四字段确认输入保真、已知stale409与未知I/O500分离已验证。真实双端浏览器证明精确修正、重入追加、取消零写、失败保留输入、pending单次提交、桌面侧层/手机底抽屉及隐藏表单修复。checkpoint viewed 的原生后退/前进/真实Page.reload已证明，读取不改变Journal。
