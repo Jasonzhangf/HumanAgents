@@ -1,4 +1,5 @@
 import type {
+  AssignmentRecord,
   AssignmentStatus,
   EvidenceRef,
   TaskFlowKind,
@@ -50,6 +51,7 @@ export interface TaskActualExecutionMemberProjection {
   readonly result?: TaskActualExecutionResultProjection;
   readonly reviews: readonly TaskActualExecutionReviewProjection[];
   readonly reason: string;
+  readonly nextActionKind: AssignmentRecord['nextAction']['kind'];
   readonly nextActionLabel: string;
   readonly technical: TaskActualExecutionMemberTechnicalProjection;
 }

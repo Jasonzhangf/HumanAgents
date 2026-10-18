@@ -601,6 +601,16 @@ function actualGraphDetail(summary, entries, options = {}) {
   return button
 }
 
+function actualNextActionHelpsExplain(member) {
+  return member.status === 'blocked'
+    || member.status === 'failed'
+    || member.status === 'incomplete'
+    || member.status === 'retryable'
+    || member.status === 'escalated'
+    || member.nextActionKind === 'stop'
+    || member.nextActionKind === 'recover'
+}
+
 function renderActualReviews(reviews) {
   if (!Array.isArray(reviews) || reviews.length === 0) return null
   const grouped = new Map()
@@ -632,21 +642,24 @@ function renderActualMember(member, stage, options) {
     element('span', member.statusLabel, 'plan-tag'),
   )
   item.append(head, element('p', member.objective, 'business-output-text actual-execution-objective'))
-  item.append(member.result
-    ? element('p', `结果（${member.result.statusLabel}）：${member.result.summary}`, 'actual-execution-result')
-    : element('p', '尚未记录结果。', 'muted actual-execution-result-missing'))
+  if (member.result) {
+    item.append(element('p', `结果（${member.result.statusLabel}）：${member.result.summary}`, 'actual-execution-result'))
+  }
   const reviews = renderActualReviews(member.reviews)
   if (reviews) item.append(reviews)
-  if (member.reason) item.append(element('p', `说明：${member.reason}`, 'muted actual-execution-reason'))
-  item.append(element('p', `下一步：${member.nextActionLabel}`, 'muted actual-execution-next'))
+  if (actualNextActionHelpsExplain(member)) {
+    item.append(element('p', `下一步：${member.nextActionLabel}`, 'muted actual-execution-next'))
+  }
   const detail = actualGraphDetail('执行成员记录详情', [
     ['阶段', stage.label],
+    ['state', member.status],
     ['assignmentId', member.technical.assignmentId],
     ['attempt', String(member.technical.attempt)],
     ['executionEpoch', String(member.technical.executionEpoch)],
     ['pipelineNodeId', member.technical.pipelineNodeId],
     ['agentId', member.technical.agentId ?? '未记录'],
-    ['reason', member.reason || '未记录'],
+    ['reason', member.reason],
+    ['nextAction', member.nextActionKind],
     ['evidenceRefs', JSON.stringify(member.technical.evidenceRefs)],
   ], options)
   if (detail) item.append(detail)
@@ -707,14 +720,17 @@ export function renderTaskActualExecutionGraphSection(graph, options = {}) {
     const guidance = element('section', undefined, 'task-flow-guidance')
     guidance.dataset.taskFlowGuidance = 'skeleton'
     guidance.dataset.taskFlowKind = graph.guidance.kind
+    const guidanceDetail = actualGraphDetail('处理方式详情', [
+      ['kind', graph.guidance.kind],
+      ['aim', graph.guidance.aim],
+      ['selectionGuidance', graph.guidance.selectionGuidance],
+      ['displayGroups', JSON.stringify(graph.guidance.displayGroups)],
+    ], options)
     guidance.append(
       element('h3', `处理方式：${graph.guidance.kindLabel}`),
       element('p', graph.guidance.aim, 'business-output-text'),
-      element('p', `动态选择：${graph.guidance.selectionGuidance}`, 'muted'),
     )
-    if (graph.guidance.displayGroups.length > 0) {
-      guidance.append(element('p', `展示分组：${graph.guidance.displayGroups.join('、')}`, 'muted'))
-    }
+    if (guidanceDetail) guidance.append(guidanceDetail)
     section.append(guidance)
   }
 
@@ -741,6 +757,10 @@ export function renderTaskActualExecutionGraphSection(graph, options = {}) {
     streamSection.dataset.actualOwnerStream = String(index)
     streamSection.append(element('h4', stream.ownerLabel))
     for (const stage of stream.stages) streamSection.append(renderActualStage(stage, options))
+    const detail = actualGraphDetail('执行分组记录详情', [
+      ['ownerId', stream.ownerId],
+    ], options)
+    if (detail) streamSection.append(detail)
     recorded.append(streamSection)
   }
   section.append(recorded)
