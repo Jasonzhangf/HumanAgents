@@ -616,9 +616,9 @@ function bodyProjection(text, selector = { kind: 'capture' }) {
   }
 }
 
-// Text of a subtree, excluding every node under `excluded`.
-function textExcept(root, excluded) {
-  const skip = new Set(walk(excluded))
+// Text of a subtree, excluding every node under the excluded details.
+function textExcept(root, ...excluded) {
+  const skip = new Set(excluded.flatMap((node) => walk(node)))
   return walk(root)
     .filter((node) => !skip.has(node))
     .map((node) => node.textContent)
@@ -649,6 +649,23 @@ test('G14 capture and adopted-child assets offer an exact body read bound to the
   assert.ok(childTrigger, 'adopted-child body trigger is rendered')
   assert.match(text(captureTrigger), /捕获正文/)
   assert.match(text(childTrigger), /精炼交付/)
+
+  // The child row names the business delivery kind. The exact call identity and
+  // other machine facts stay inside its folded technical detail.
+  const adoptedRow = role(root, 'adopted-child')[0]
+  assert.ok(adoptedRow, 'the adopted child has a human-labelled row')
+  assert.match(text(adoptedRow), /采用子交付 · 执行/)
+  const childTechnical = role(adoptedRow, 'adopted-child-technical')[0]
+  assert.ok(childTechnical, 'adopted-child machine facts are folded')
+  assert.equal(childTechnical.tagName, 'DETAILS')
+  assert.match(text(childTechnical), /inv-9/)
+  assert.match(text(childTechnical), /child-turn-9/)
+  const descriptorTechnical = role(adoptedRow, 'asset-descriptor-technical')[0]
+  assert.ok(descriptorTechnical, 'asset descriptor machine facts are folded')
+  assert.equal(descriptorTechnical.tagName, 'DETAILS')
+  assert.match(text(descriptorTechnical), /ev-child-1/)
+  assert.match(text(descriptorTechnical), /text-field/)
+  assert.doesNotMatch(textExcept(adoptedRow, descriptorTechnical, childTechnical), /inv-9|child-turn-9|ev-child-1|text-field/)
 
   click(captureTrigger)
   click(childTrigger)
@@ -735,6 +752,18 @@ test('G14 asset body layer reads the exact text, keeps whitespace and folds prov
   assert.ok(walk(root).every((node) => node.tagName !== 'A'))
   body.dispose()
 
+  // A capture is always the exact stored text, even when that text happens to
+  // be valid JSON shaped like a known child envelope.
+  const captureJsonText = '{\n  "summary": "not a capture label",\n  "producedArtifactBodies": ["not projected"]\n}'
+  const captureJson = renderCheckpointAssetBody(
+    { ok: true, value: bodyProjection(captureJsonText) },
+    { element: createElement },
+  )
+  assert.equal(role(captureJson.element, 'asset-body-text')[0].textContent, captureJsonText)
+  assert.equal(role(captureJson.element, 'asset-body-summary').length, 0)
+  assert.equal(role(captureJson.element, 'asset-body-produced').length, 0)
+  captureJson.dispose()
+
   // A legitimate empty body is its own explicit feedback, not loading or failure.
   const empty = renderCheckpointAssetBody({ ok: true, value: bodyProjection('') }, { element: createElement })
   assert.ok(role(empty.element, 'asset-body-empty')[0], 'empty body is explicit')
@@ -742,16 +771,133 @@ test('G14 asset body layer reads the exact text, keeps whitespace and folds prov
   assert.equal(role(empty.element, 'asset-body-failure').length, 0)
   empty.dispose()
 
-  // The adopted-child body names its exact triple in the folded provenance.
+  // Unparseable child text stays raw. Its exact triple stays in the folded provenance.
+  const unparseableText = 'not-json { "summary": raw text'
   const child = renderCheckpointAssetBody({
     ok: true,
-    value: bodyProjection('child body', {
+    value: bodyProjection(unparseableText, {
       kind: 'adopted-child', invocationId: 'inv-9', childTurnId: 'child-turn-9', deliverySeq: 2,
     }),
   }, { element: createElement })
+  assert.equal(role(child.element, 'asset-body-text')[0].textContent, unparseableText)
+  assert.equal(role(child.element, 'asset-body-summary').length, 0)
+  assert.equal(role(child.element, 'asset-body-produced').length, 0)
   assert.match(text(role(child.element, 'asset-body-provenance')[0]), /inv-9/)
   assert.match(text(role(child.element, 'asset-body-provenance')[0]), /child-turn-9/)
   child.dispose()
+})
+
+// Failure mode: known child envelopes are shown as escaped JSON, so the user
+// must decode machine fields to find the actual delivery. Basis: the persisted
+// execution/review payloads are source-confirmed. Impact: the adopted delivery
+// is misread or is not readable at all. Cost: low, real renderer over the
+// existing element adapter.
+test('G14 known execution envelope shows the summary and every produced body in order', () => {
+  const produced = [
+    '第一份产出\n\n  缩进与制表符\t保留',
+    '第二份产出\n结尾空格  ',
+  ]
+  const execution = {
+    assignmentId: 'assignment-execution-9',
+    attempt: 2,
+    executionEpoch: 7,
+    status: 'succeeded',
+    summary: '执行摘要：完成两项交付',
+    producedArtifactBodies: produced,
+  }
+  const raw = JSON.stringify(execution, null, 2)
+  const body = renderCheckpointAssetBody({
+    ok: true,
+    value: bodyProjection(raw, {
+      kind: 'adopted-child', invocationId: 'inv-execution-9', childTurnId: 'child-turn-9', deliverySeq: 2,
+    }),
+  }, { element: createElement })
+  const root = body.element
+
+  const title = role(root, 'asset-body-title')[0]
+  assert.ok(title, 'the body has a human-readable title')
+  assert.match(text(title), /执行交付/)
+  assert.doesNotMatch(text(title), /inv-execution-9|child-turn-9/)
+
+  const summary = role(root, 'asset-body-summary')[0]
+  assert.ok(summary, 'the saved execution summary has its own label')
+  assert.match(text(summary), /摘要/)
+  assert.match(text(summary), /执行摘要：完成两项交付/)
+
+  const bodies = role(root, 'asset-body-produced')
+  assert.equal(bodies.length, produced.length, 'every produced body is shown')
+  assert.deepEqual(bodies.map((node) => node.textContent), produced, 'order and whitespace stay exact')
+
+  const rawDetails = role(root, 'asset-body-raw')[0]
+  assert.ok(rawDetails, 'the unchanged envelope stays in folded technical details')
+  assert.equal(rawDetails.tagName, 'DETAILS')
+  assert.equal(role(rawDetails, 'asset-body-raw-text')[0].textContent, raw)
+  assert.doesNotMatch(textExcept(root, rawDetails), /assignment-execution-9|producedArtifactBodies|executionEpoch/)
+  body.dispose()
+
+  // An empty produced-body array is explicit and is never filled from summary.
+  const emptyRaw = JSON.stringify({ ...execution, summary: '摘要不是产出正文', producedArtifactBodies: [] })
+  const empty = renderCheckpointAssetBody({
+    ok: true,
+    value: bodyProjection(emptyRaw, {
+      kind: 'adopted-child', invocationId: 'inv-empty-9', childTurnId: 'child-turn-10', deliverySeq: 3,
+    }),
+  }, { element: createElement })
+  assert.equal(role(empty.element, 'asset-body-produced').length, 0)
+  assert.match(text(role(empty.element, 'asset-body-produced-empty')[0]), /未提供产出正文/)
+  assert.match(text(role(empty.element, 'asset-body-summary')[0]), /摘要不是产出正文/)
+  empty.dispose()
+})
+
+test('G14 known review envelope shows status and findings without inventing full text', () => {
+  const review = {
+    resultId: 'review-result-9',
+    assignmentId: 'review-assignment-9',
+    taskId: 'task-1',
+    workerAgentId: 'reviewer-9',
+    reviewKind: 'quality',
+    attempt: 1,
+    executionEpoch: 7,
+    inputRevision: 2,
+    acceptanceCriteriaDigest: 'acceptance-9',
+    subjectRefs: ['artifact://subject-9'],
+    subjectDigests: ['sha256:subject-9'],
+    status: 'failed',
+    findings: [{
+      findingId: 'finding-9',
+      severity: 'P1',
+      locationRef: 'docs/ui/checkpoint-history.js',
+      problem: '默认层直接显示机器字段',
+      expected: '默认层显示人读发现',
+      evidenceRefs: [],
+    }],
+    evidenceRefs: [],
+    artifactRefs: [{ evidenceId: 'review-output-9', locator: 'artifacts/review-output-9', digest: 'sha256:review-9' }],
+  }
+  const raw = JSON.stringify(review, null, 2)
+  const body = renderCheckpointAssetBody({
+    ok: true,
+    value: bodyProjection(raw, {
+      kind: 'adopted-child', invocationId: 'inv-review-9', childTurnId: 'child-turn-11', deliverySeq: 4,
+    }),
+  }, { element: createElement })
+  const root = body.element
+
+  assert.match(text(role(root, 'asset-body-title')[0]), /审查结果/)
+  assert.match(text(role(root, 'asset-body-review-status')[0]), /审查状态：未通过/)
+  const finding = role(root, 'asset-body-review-finding')[0]
+  assert.ok(finding, 'recognizable findings are shown')
+  assert.match(text(finding), /默认层直接显示机器字段/)
+  assert.match(text(finding), /默认层显示人读发现/)
+  assert.match(text(role(root, 'asset-body-review-fulltext')[0]), /未包含完整审查正文/)
+  assert.equal(role(root, 'asset-body-summary').length, 0, 'no review summary is invented')
+  assert.equal(role(root, 'asset-body-produced').length, 0, 'artifact refs are not shown as full review text')
+
+  const rawDetails = role(root, 'asset-body-raw')[0]
+  assert.equal(role(rawDetails, 'asset-body-raw-text')[0].textContent, raw)
+  const outside = textExcept(root, rawDetails)
+  assert.doesNotMatch(outside, /review-result-9|artifactRefs|artifacts\/review-output-9|finding-9/)
+  body.dispose()
 })
 
 // Failure mode: a failed or pending body read has no readable impact/next action,
