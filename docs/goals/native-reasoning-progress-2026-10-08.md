@@ -2,6 +2,9 @@
 
 ## 2026-10-18 socket 定因与当前 gap 文档校正
 
+- r456独立OAuth GPT6.1 medium限定语义规则审查terminal0，strictschema/既有classifier PASS/findings[]，逐一覆盖基础12工具和child.not_select的实际注册、规则、模型指令下发、四段summary与accepted refs边界。它关闭r454指出的缺review证据，不要求新deterministic mapper；不冒全部工具真实模型提炼质量或完整goal验收。原helper/turnend/childdelivery有效审查继续复用，无重复Review或新测试。
+- r455毫秒区间解析terminal0：21条相交RCC候选均无raw_artifact_ref，缺原HA ID/body映射，不能关联当次providerresponse。Root接受r453可选下一步，r457 fresh GCM获限定一次独立原样wire采集：保存完整响应字节/流错误和非敏感关联header，不执行工具、不进入HA turn/Journal；没有epoch6。该次诊断结果未取得前不定因，不把未来意向计为请求完成。
+- Provider gap校正已推main72fbcdd0，纯文档；没有重建未变产品。r453独立Astra技术计划terminal0并发现新的现有证据入口：`~/.rcc/logs/server-v3-4444.request-records.jsonl`使用row包装及epoch毫秒区间，过去UTC文本搜索不证明无记录。Root只接受第一步离线关联；r455 fresh GCM已派解析11:54:08..28相交请求及其明确raw_artifact_ref。计划中的可选一次原样wire采集尚未准入/执行；没有epoch6、参数矩阵或schema修改。
 - r450/r451已terminal0：精确HA start asset为`provider-16fdbb56e029531d-start-rcc-v3---start`，当次HTTP200后stream以UND_ERR_SOCKET终止。失败/成功Task共用MiniMax-M3/Responses/4444/rcc:default及五个wire字段，区别为instructions/input/helpertools与执行工具；没有证据证明字段无效。RCC503候选缺HAid/rawinput，仅时间相关，不能定因。原epoch5不再重投，原因UNKNOWN。
 - r453已派独立Astra技术攻关，只读形成最小补证计划；不作Reviewer、不改schema/工具、不自动epoch6。r454 fresh GCM定点核逐个实际启用工具的语义提取与既有独立review覆盖；协议工具往返不能代替这个完整goal维度，缺既有证据时仅报告具体缺口，不自动扩测。
 - r452 docs writer终态0但只输出未执行的工具调用文本，实际零diff，Root拒收；文档fastpath由Root接管。已定向更新Provider gap计划顶部/G1..G9/A–G当前状态，保留历史作者回执、未闭合taskless/治理及installed/live范围。没有改图、源码、需求或验收标准；针对性diff-check通过，不因文档更新重测代码。
