@@ -1,4 +1,7 @@
+/// <reference path="../../../packages/app/src/node-modules.d.ts" />
+
 import assert from 'node:assert/strict';
+import { rm } from 'node:fs/promises';
 import test from 'node:test';
 import {
   id,
@@ -11,6 +14,8 @@ import {
   type WorkAssignment,
   type WorkResult,
 } from '../../../packages/contracts/src/index.js';
+import { JsonlOrganJournal } from '../../../packages/adapters/jsonl/src/index.js';
+import { createJsonlAssignmentGraphJournal } from '../../../packages/adapters/jsonl/src/assignment-graph.js';
 import {
   type AppendEventRequest,
   type ConsumerCommitRequest,
@@ -44,6 +49,8 @@ import {
   createM3Assembly,
   type M3Assembly,
 } from '../../../packages/app/src/m3-assembly.js';
+import { readTaskAgentActivity } from '../../../packages/app/src/ui-runtime/agent-activity-read.js';
+import { createJsonlI2JournalPort } from '../../../packages/app/src/i2-journal.js';
 import { projectTaskDashboard } from '../../../packages/ui/index.js';
 import type {
   CheckpointAppendReceipt,
@@ -266,7 +273,11 @@ class Reviewer implements ReviewAgentPort {
   }
 }
 
-function createAssembly(): { readonly assembly: M3Assembly; readonly events: MemoryEventJournal; readonly checkpoints: MemoryCheckpointJournal } {
+async function createAssembly(filePath: string): Promise<{
+  readonly assembly: M3Assembly;
+  readonly events: MemoryEventJournal;
+  readonly checkpoints: MemoryCheckpointJournal;
+}> {
   const events = new MemoryEventJournal();
   const publisher: TrustedEventPublisher = {
     publisherId: 'm3-harness',
@@ -282,6 +293,19 @@ function createAssembly(): { readonly assembly: M3Assembly; readonly events: Mem
     factory: new RuntimeFactory(),
     initialRuntimes: [{ runtimeId: 'm3-runtime', capabilities: ['execute'] }],
   });
+  const graphJournal = createJsonlAssignmentGraphJournal({
+    filePath,
+    stream: { taskScope: { organId, taskId }, ownerId: 'm3-orchestration' },
+  });
+  const journal = new JsonlOrganJournal(filePath);
+  if ((await journal.replay()).length === 0) {
+    await journal.append({
+      commitId: 'm3-control-scope-init',
+      kind: 'event',
+      scope,
+      payload: { type: 'm3-control-scope' },
+    });
+  }
   const assembly = createM3Assembly({
     ownerId: 'm3-orchestration',
     task,
@@ -300,145 +324,222 @@ function createAssembly(): { readonly assembly: M3Assembly; readonly events: Mem
     },
     feedbackPublisherId: publisher.publisherId,
     checkpointJournal: checkpoints,
+    graphJournal,
     now: () => new Date('2026-09-18T00:00:00.000Z'),
   });
   return { assembly, events, checkpoints };
 }
 
 test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projection', async () => {
-  const { assembly, events, checkpoints } = createAssembly();
-  assembly.orchestration.planStage({ nodeId: 'm3-node', taskId });
+  const root = `/private/tmp/humanagent-m3-assembly-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const filePath = `${root}/task-control.jsonl`;
+  try {
+    const { assembly, events, checkpoints } = await createAssembly(filePath);
+    await assembly.orchestration.initialize();
+    await assembly.orchestration.planStage({ nodeId: 'm3-parent', taskId });
+    await assembly.orchestration.planStage({ nodeId: 'm3-node', taskId, parentNodeId: 'm3-parent' });
+    await assembly.orchestration.planStage({ nodeId: 'm3-empty', taskId });
 
-  const dispatched = await assembly.orchestration.dispatch({
-    stageNodeId: 'm3-node',
-    assignment: assignment(),
-    agentId: 'worker-m3',
-    scope,
-    reviewKinds: ['quality'],
-    reviewSubjects: [{ ref: 'm3-target', body: m3ArtifactBody }],
-  });
+    const dispatched = await assembly.orchestration.dispatch({
+      stageNodeId: 'm3-node',
+      assignment: assignment(),
+      agentId: 'worker-m3',
+      scope,
+      reviewKinds: ['quality'],
+      reviewSubjects: [{ ref: 'm3-target', body: m3ArtifactBody }],
+    });
 
-  assert.equal(dispatched.status, 'merged');
-  assert.equal(dispatched.assignment.status, 'merged');
-  assert.deepEqual(events.events.map((event) => event.class), ['data', 'data', 'control']);
-  assert.deepEqual(events.events.map((event) => event.publisherId), ['m3-harness', 'm3-harness', 'm3-harness']);
-  const messageIds = events.events.map((event) => event.messageId);
-  assert.equal(new Set(messageIds).size, messageIds.length);
-  for (const event of events.events) {
-    assert.equal(event.messageId.includes(`:${dispatched.assignment.assignment.assignmentId}:1:1:`), true);
-  }
+    assert.equal(dispatched.status, 'merged');
+    assert.equal(dispatched.assignment.status, 'merged');
+    const plannedMember = assignment({
+      assignmentId: 'm3-planned-member',
+      mergeGate: 'not-required',
+    });
+    await assembly.orchestration.createAssignment('m3-node', plannedMember);
+    const childStage = assembly.orchestration.getStage('m3-node');
+    assert.deepEqual(childStage?.assignmentKeys, ['m3-assignment:1:1', 'm3-planned-member:1:1']);
+    assert.equal(childStage?.state, 'merged');
 
-  const checkpoint: Checkpoint = {
-    id: id('checkpoint', 'm3-checkpoint'),
-    scope,
-    cycleId,
-    seq: 1,
-    previousCheckpointId: null,
-    directiveRevision: task.directiveRevision,
-    executionEpoch: 1,
-    outcome: 'succeeded',
-    summary: 'M3 assembly merged',
-    recoveryStateRef: evidence('recovery'),
-    evidenceRefs: [evidence('merge')],
-    next: { kind: 'continue', ref: 'task:m3-assembly' },
-  };
-  await assembly.appendCheckpoint({
-    ownerId: 'm3-orchestration',
-    commitId: 'm3-commit',
-    checkpoint,
-  });
-  const latest = await assembly.readLatestCheckpoint();
-  assert.equal(latest?.checkpoint.id.value, checkpoint.id.value);
-  assert.equal(checkpoints.appended.length, 1);
-  const otherCycle = id('cycle', 'm3-other-cycle');
-  await assert.rejects(
-    () => assembly.appendCheckpoint({
+    const recovered = await createAssembly(filePath);
+    await recovered.assembly.orchestration.initialize();
+    const recoveredParent = recovered.assembly.orchestration.getStage('m3-parent');
+    const recoveredChild = recovered.assembly.orchestration.getStage('m3-node');
+    const recoveredEmpty = recovered.assembly.orchestration.getStage('m3-empty');
+    assert.equal(recoveredParent?.assignmentKeys.length, 0);
+    assert.equal(recoveredChild?.parentNodeId, 'm3-parent');
+    assert.deepEqual(recoveredChild?.assignmentKeys, ['m3-assignment:1:1', 'm3-planned-member:1:1']);
+    assert.equal(recoveredChild?.state, 'merged');
+    assert.equal(recovered.assembly.orchestration.get(assignment())?.status, 'merged');
+    assert.equal(recovered.assembly.orchestration.get(plannedMember)?.status, 'planned');
+    assert.equal(recoveredEmpty?.assignmentKeys.length, 0);
+
+    const controlJournal = new JsonlOrganJournal(filePath);
+    const controlRecordCountBeforeRead = (await controlJournal.replay()).length;
+    const activity = await readTaskAgentActivity({
+      taskId,
+      query: { taskId },
+      taskJournal: { records: [] },
+      controlJournal,
+      i2Journal: createJsonlI2JournalPort({ filePath, journal: controlJournal }),
+    });
+    assert.equal((await controlJournal.replay()).length, controlRecordCountBeforeRead);
+    assert.equal(activity.ok, true);
+    if (!activity.ok) throw new Error(activity.failure.message);
+    const actualExecutionGraph = activity.value.actualExecutionGraph;
+    if (actualExecutionGraph === undefined || actualExecutionGraph.history.status !== 'recorded') {
+      throw new Error('M3 public activity read did not attach a recorded execution graph');
+    }
+    assert.equal(actualExecutionGraph.surface, 'task-actual-execution-graph');
+    assert.equal(actualExecutionGraph.guidance, undefined);
+    assert.equal(actualExecutionGraph.history.streamCount, 1);
+    assert.equal(actualExecutionGraph.history.stageCount, 3);
+    assert.equal(actualExecutionGraph.history.memberCount, 2);
+    const [stream] = actualExecutionGraph.history.streams;
+    if (stream === undefined) throw new Error('M3 public activity read lost its execution stream');
+    const [parentGraphStage, childGraphStage, emptyGraphStage] = stream.stages;
+    assert.equal(parentGraphStage?.stageNodeId, 'm3-parent');
+    assert.equal(parentGraphStage?.members.length, 0);
+    assert.equal(childGraphStage?.stageNodeId, 'm3-node');
+    assert.equal(childGraphStage?.state, 'merged');
+    assert.deepEqual(childGraphStage?.technical.parentNodeId, 'm3-parent');
+    assert.deepEqual(childGraphStage?.technical.assignmentKeys, [
+      'm3-assignment:1:1',
+      'm3-planned-member:1:1',
+    ]);
+    assert.deepEqual(childGraphStage?.members.map((member) => [member.technical.assignmentId, member.status]), [
+      ['m3-assignment', 'merged'],
+      ['m3-planned-member', 'planned'],
+    ]);
+    assert.equal(emptyGraphStage?.stageNodeId, 'm3-empty');
+    assert.equal(emptyGraphStage?.members.length, 0);
+
+    assert.deepEqual(events.events.map((event) => event.class), ['data', 'data', 'control']);
+    assert.deepEqual(events.events.map((event) => event.publisherId), ['m3-harness', 'm3-harness', 'm3-harness']);
+    const messageIds = events.events.map((event) => event.messageId);
+    assert.equal(new Set(messageIds).size, messageIds.length);
+    for (const event of events.events) {
+      assert.equal(event.messageId.includes(`:${dispatched.assignment.assignment.assignmentId}:1:1:`), true);
+    }
+
+    const checkpoint: Checkpoint = {
+      id: id('checkpoint', 'm3-checkpoint'),
+      scope,
+      cycleId,
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: task.directiveRevision,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+      summary: 'M3 assembly merged',
+      recoveryStateRef: evidence('recovery'),
+      evidenceRefs: [evidence('merge')],
+      next: { kind: 'continue', ref: 'task:m3-assembly' },
+    };
+    await assembly.appendCheckpoint({
       ownerId: 'm3-orchestration',
-      commitId: 'm3-invalid-cycle',
-      checkpoint: {
-        ...checkpoint,
-        id: id('checkpoint', 'm3-invalid-cycle'),
-        cycleId: otherCycle,
-        scope: { ...scope, cycleId: otherCycle },
-      },
-    }),
-    Error,
-  );
+      commitId: 'm3-commit',
+      checkpoint,
+    });
+    const latest = await assembly.readLatestCheckpoint();
+    assert.equal(latest?.checkpoint.id.value, checkpoint.id.value);
+    assert.equal(checkpoints.appended.length, 1);
+    const otherCycle = id('cycle', 'm3-other-cycle');
+    await assert.rejects(
+      () => assembly.appendCheckpoint({
+        ownerId: 'm3-orchestration',
+        commitId: 'm3-invalid-cycle',
+        checkpoint: {
+          ...checkpoint,
+          id: id('checkpoint', 'm3-invalid-cycle'),
+          cycleId: otherCycle,
+          scope: { ...scope, cycleId: otherCycle },
+        },
+      }),
+      Error,
+    );
 
-  const projection = projectTaskDashboard({
-    source: { state: 'ready', label: task.title, updatedAt: '2026-09-18T00:00:00.000Z' },
-    task,
-    userInput: task.directive,
-    objective: dispatched.assignment.result?.summary ?? dispatched.assignment.reason,
-    currentStatus: dispatched.assignment.status,
-    agentCards: [{
-      agentId: dispatched.assignment.agentId ?? 'worker-m3',
-      role: 'orchestration',
-      statusDisplay: dispatched.assignment.status,
-      inputPreview: dispatched.assignment.assignment.objective,
-      outputPreview: dispatched.assignment.result?.summary ?? 'merged',
-    }],
-    runtimePool: {
-      available: 1,
-      active: 0,
-      runtimes: [{
-        runtimeId: 'm3-runtime',
+    const projection = projectTaskDashboard({
+      source: { state: 'ready', label: task.title, updatedAt: '2026-09-18T00:00:00.000Z' },
+      task,
+      userInput: task.directive,
+      objective: dispatched.assignment.result?.summary ?? dispatched.assignment.reason,
+      currentStatus: dispatched.assignment.status,
+      agentCards: [{
+        agentId: dispatched.assignment.agentId ?? 'worker-m3',
         role: 'orchestration',
-        state: 'available',
-        resourceSummary: 'execute',
+        statusDisplay: dispatched.assignment.status,
+        inputPreview: dispatched.assignment.assignment.objective,
+        outputPreview: dispatched.assignment.result?.summary ?? 'merged',
       }],
-    },
-    requiresUserHandling: false,
-    observationRef: 'task://m3-assembly/observation',
-  });
-  assert.equal(projection.surface, 'task-dashboard');
-  assert.equal(projection.taskId.value, taskId.value);
-  assert.equal(projection.agentCards[0]?.outputPreview, 'M3 modules assembled');
-  assert.equal(projection.runtimePool.runtimes[0]?.runtimeId, 'm3-runtime');
+      runtimePool: {
+        available: 1,
+        active: 0,
+        runtimes: [{
+          runtimeId: 'm3-runtime',
+          role: 'orchestration',
+          state: 'available',
+          resourceSummary: 'execute',
+        }],
+      },
+      requiresUserHandling: false,
+      observationRef: 'task://m3-assembly/observation',
+    });
+    assert.equal(projection.surface, 'task-dashboard');
+    assert.equal(projection.taskId.value, taskId.value);
+    assert.equal(projection.agentCards[0]?.outputPreview, 'M3 modules assembled');
+    assert.equal(projection.runtimePool.runtimes[0]?.runtimeId, 'm3-runtime');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('M3 feedback identity is idempotent per event and distinct across execution epochs', async () => {
-  const { assembly, events } = createAssembly();
-  const oldAssignment = assignment({ executionEpoch: 1 });
-  const retryAssignment = assignment({ attempt: 2, executionEpoch: 1 });
-  const newAssignment = assignment({ executionEpoch: 2 });
+  const root = `/private/tmp/humanagent-m3-feedback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    const { assembly, events } = await createAssembly(`${root}/task-control.jsonl`);
+    const oldAssignment = assignment({ executionEpoch: 1 });
+    const retryAssignment = assignment({ attempt: 2, executionEpoch: 1 });
+    const newAssignment = assignment({ executionEpoch: 2 });
 
-  await assembly.feedbackPort.publish({
-    kind: 'work-result',
-    assignment: oldAssignment,
-    result: feedbackResult(1, 1),
-    ownerId: 'm3-orchestration',
-    scope,
-    evidenceRefs: [evidence('work')],
-  });
-  await assembly.feedbackPort.publish({
-    kind: 'work-result',
-    assignment: oldAssignment,
-    result: feedbackResult(1, 1),
-    ownerId: 'm3-orchestration',
-    scope,
-    evidenceRefs: [evidence('work')],
-  });
-  await assembly.feedbackPort.publish({
-    kind: 'work-result',
-    assignment: retryAssignment,
-    result: feedbackResult(1, 2),
-    ownerId: 'm3-orchestration',
-    scope,
-    evidenceRefs: [evidence('work')],
-  });
-  await assembly.feedbackPort.publish({
-    kind: 'work-result',
-    assignment: newAssignment,
-    result: feedbackResult(2, 1),
-    ownerId: 'm3-orchestration',
-    scope,
-    evidenceRefs: [evidence('work')],
-  });
+    await assembly.feedbackPort.publish({
+      kind: 'work-result',
+      assignment: oldAssignment,
+      result: feedbackResult(1, 1),
+      ownerId: 'm3-orchestration',
+      scope,
+      evidenceRefs: [evidence('work')],
+    });
+    await assembly.feedbackPort.publish({
+      kind: 'work-result',
+      assignment: oldAssignment,
+      result: feedbackResult(1, 1),
+      ownerId: 'm3-orchestration',
+      scope,
+      evidenceRefs: [evidence('work')],
+    });
+    await assembly.feedbackPort.publish({
+      kind: 'work-result',
+      assignment: retryAssignment,
+      result: feedbackResult(1, 2),
+      ownerId: 'm3-orchestration',
+      scope,
+      evidenceRefs: [evidence('work')],
+    });
+    await assembly.feedbackPort.publish({
+      kind: 'work-result',
+      assignment: newAssignment,
+      result: feedbackResult(2, 1),
+      ownerId: 'm3-orchestration',
+      scope,
+      evidenceRefs: [evidence('work')],
+    });
 
-  assert.equal(events.events[0]?.messageId, events.events[1]?.messageId);
-  assert.equal(new Set(events.events.map((event) => event.messageId)).size, 3);
-  assert.equal(events.events[0]?.messageId.includes(':m3-assignment:1:1:'), true);
-  assert.equal(events.events[2]?.messageId.includes(':m3-assignment:2:1:'), true);
-  assert.equal(events.events[3]?.messageId.includes(':m3-assignment:1:2:'), true);
+    assert.equal(events.events[0]?.messageId, events.events[1]?.messageId);
+    assert.equal(new Set(events.events.map((event) => event.messageId)).size, 3);
+    assert.equal(events.events[0]?.messageId.includes(':m3-assignment:1:1:'), true);
+    assert.equal(events.events[2]?.messageId.includes(':m3-assignment:2:1:'), true);
+    assert.equal(events.events[3]?.messageId.includes(':m3-assignment:1:2:'), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -5,10 +5,12 @@ import type {
   MilestoneReviewResultRecord,
   ReviewAssignment,
   ScopeRef,
+  TaskActualExecutionGraphSnapshot,
   TaskAgentActivitySelectionFailure,
   TaskAgentActivitySelectionQuery,
   TaskAgentActivityUnavailableSource,
   TaskExecutionInstanceIdentity,
+  TaskFlowBinding,
   TaskId,
   TaskIdentityScope,
   WorkAssignment,
@@ -19,11 +21,13 @@ import { sameTaskExecutionInstanceIdentity } from '../../../contracts/src/index.
 import { activeTurnSegmentCommitId } from '../../../contracts/src/active-turn-segments.js';
 import type { ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
 import type { JsonlOrganJournal, JournalRecord } from '../../../adapters/jsonl/src/index.js';
+import { resolveTaskFlowGuidanceFromBinding } from '../../../core/src/task-flow-definition.js';
 import {
   createJsonlActiveTurnSegmentJournal,
   decodeActiveTurnRecords,
   listTaskActiveTurnBindings,
 } from '../../../adapters/jsonl/src/active-turn.js';
+import { decodeAssignmentGraphRecords } from '../../../adapters/jsonl/src/assignment-graph.js';
 import {
   closureFromRecord,
   readCommittedNativeSegmentSource,
@@ -51,9 +55,13 @@ import {
   type AgentActivityResumedSource,
   type AgentActivityReviewSource,
 } from '../../../runtime/src/observation/agent-activity.js';
+import { replayAssignmentGraph } from '../../../runtime/src/orchestration/assignment-graph.js';
+import type { AssignmentGraphStream } from '../../../runtime/src/orchestration/types.js';
+import type { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
 import type { AgentRuntimePoolManager } from '../../../runtime/src/orchestration/runtime-pool.js';
 import type { RuntimeTaskSnapshot } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { projectRuntimeAgentActivity } from '../../../ui/projection/agent-activity.js';
+import { projectTaskActualExecutionGraph } from '../../../ui/projection/actual-execution-graph.js';
 import type {
   RuntimeAgentActivityProjection,
   RuntimeReadResult,
@@ -620,6 +628,62 @@ export interface ReadTaskAgentActivityCoreOptions {
   readonly remainingSources: TaskAgentActivityRemainingSources;
 }
 
+function sameTaskIdentityScope(
+  left: TaskIdentityScope,
+  right: TaskIdentityScope,
+): boolean {
+  return left.organId.scope === right.organId.scope
+    && left.organId.value === right.organId.value
+    && left.taskId.scope === right.taskId.scope
+    && left.taskId.value === right.taskId.value;
+}
+
+/**
+ * Decode already verified control records into the source DTO. Each real
+ * task/owner stream is replayed independently and never mutates a Manager.
+ */
+function taskActualExecutionGraphSource(input: {
+  readonly taskScope: TaskIdentityScope;
+  readonly controlRecords: readonly JournalRecord[];
+  readonly taskFlow?: TaskFlowBinding;
+}): TaskActualExecutionGraphSnapshot {
+  const facts = decodeAssignmentGraphRecords(input.controlRecords)
+    .filter((entry) => sameTaskIdentityScope(entry.fact.stream.taskScope, input.taskScope));
+  const byOwner = new Map<string, {
+    readonly stream: AssignmentGraphStream;
+    readonly facts: Array<typeof facts[number]>;
+  }>();
+  for (const entry of facts) {
+    const ownerId = entry.fact.stream.ownerId;
+    const current = byOwner.get(ownerId);
+    if (current === undefined) {
+      byOwner.set(ownerId, { stream: entry.fact.stream, facts: [entry] });
+    } else {
+      current.facts.push(entry);
+    }
+  }
+  const guidance = resolveTaskFlowGuidanceFromBinding(input.taskFlow);
+  if (byOwner.size === 0) {
+    return {
+      taskScope: input.taskScope,
+      ...(guidance === undefined ? {} : { guidance }),
+      history: { status: 'not-recorded', reason: 'no-recorded-facts' },
+    };
+  }
+  return {
+    taskScope: input.taskScope,
+    ...(guidance === undefined ? {} : { guidance }),
+    history: {
+      status: 'recorded',
+      streams: [...byOwner.values()].map(({ stream, facts: entries }) => ({
+        stream,
+        facts: entries,
+        snapshot: replayAssignmentGraph(stream, entries),
+      })),
+    },
+  };
+}
+
 function projectionFailure(
   failure: AgentActivityCoreReadFailure,
 ): RuntimeReadResult<RuntimeAgentActivityProjection> {
@@ -1011,6 +1075,7 @@ export async function readTaskAgentActivity(
   options: AssembleTaskAgentActivityRemainingSourcesOptions & {
     readonly query: TaskAgentActivitySelectionQuery;
     readonly currentAuthority?: AgentActivityCurrentAuthority;
+    readonly taskIdentity?: TaskIdentityConsumer;
   },
 ): Promise<RuntimeReadResult<RuntimeAgentActivityProjection>> {
   const assembled = await assembleTaskAgentActivityCoreContext(options);
@@ -1056,13 +1121,26 @@ export async function readTaskAgentActivity(
     const pages = await listMilestoneReviews({ taskScope: context.taskScope, i2Journal: options.i2Journal });
     const review = assembleMilestoneReviews({ taskId: options.taskId, pages, work });
     const currentAuthority = options.currentAuthority ?? liveAuthority(options);
-    return selectAndProjectAgentActivity({
+    const projected = selectAndProjectAgentActivity({
       taskId: options.taskId, query: options.query, core: context.sources,
       ...(currentAuthority === undefined ? {} : { currentAuthority }),
       remainingSources: { childInvocations: child.sources, runtimePoolLeases: pool.sources, milestoneReviews: review.sources },
       plannerCalls: planner.value.plannerCalls,
       unavailableSources: [...child.unavailableSources, ...pool.unavailableSources, ...review.unavailableSources],
     });
+    if (!projected.ok) return projected;
+    const identity = options.taskIdentity === undefined
+      ? undefined
+      : await options.taskIdentity.read(context.taskScope);
+    const actualExecutionGraph = projectTaskActualExecutionGraph(taskActualExecutionGraphSource({
+      taskScope: context.taskScope,
+      controlRecords: context.controlRecords,
+      ...(identity?.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
+    }));
+    return {
+      ok: true,
+      value: { ...projected.value, actualExecutionGraph },
+    };
   } catch (error) {
     return projectionFailure(readFailure('agent-activity.remaining-source-unavailable',
       error instanceof Error ? error.message : String(error),
