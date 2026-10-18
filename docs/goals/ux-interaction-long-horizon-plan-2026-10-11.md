@@ -5,7 +5,17 @@
 日期：2026-10-11
 计划状态：执行基线已更新；里程碑验收仍按下文逐项关闭。
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
-当前执行状态以以下 2026-10-17 增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。下方 2026-10-14/15 记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
+当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
+
+### 2026-10-18 嵌套 Observation 人读展示与计划历史接线已交付
+
+完整六文件 UI 增量已合入 main `bae24634`。根目录与执行事件按 typed purpose 分层；事件标题使用人读语义，原始类型、标题、摘要与时间进入折叠详情。事件抽屉不再将标签包装为目标／结果，不挂空交接页签或内层会话。根 registry 保留既有详细视图。候选原 A 桌面／手机的真实只读结果、技术原文、焦点和返回导航已接收，Root 已看图。
+
+一次独立 Gemini 4 medium 整体 Review 实际 SUCCESS／exit0，既有裁决器 PASS、无 findings。main 的 contracts/config/App 构建、打包与全局安装全部成功；正式 restart gen41→42、PID19087、53007，旧实例 clean 收拢。安装后的默认打包 UI 在原 A 的手机事件入口通过，runtime status200、精简抽屉与技术原文实际生效；没有重执行业务 Task 或新增模型调用。回执为 `/Volumes/Intel/playground/humanagent/.worker-runs/observation-readable-delivery-20261018/` 及 `observation-installed-browser-20261018/`。
+
+计划历史既有消费者新增唯一 available 分支，真实页面正向9项通过：权威 current 为第二版，semantic 保留三版顺序、原因、前版和 typed 差异。抓错反例仍 UNVERIFIED，不外推为新的真实 RCC 两周期。源码已随上述增量交付；安装前已有效的 M3 两周期与计划历史证据复用。
+
+远端推送由 peer 文档提交一并送出，原始回执 `4a1c7832..dc60f65a main→main`；它早于最后安装后验收，未冒记该时点交付完成。现已补齐实际验收。两棵自有候选树和对应分支均正常移除，仅保留 main/control；临时 installed 服务PID37017正常退出，gen9租约 disposedAt2026-10-18T15:15:26.950Z，p1空白、自有cookie0、emulation清除、p3不动，原A/B数据保留。
 
 ### 2026-10-18 治理消融与完整任务说明已交付
 
@@ -25,10 +35,11 @@ F13 恢复证据已于本轮接收闭环。独立小 Planner r470 找到并核�
 
 独立后续计划已接收：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-remaining-plan-oauth-20261018/plan.md` 及 owner-acceptance.md。当前按以下实际缺口推进，不重做已有效的测试：
 
-- 嵌套 Observation 候选 `1b8f94db` 已实现人读投影及正确集合名称，`2d3facfb` 修复实际浏览器发现的空卡片。原 A 双端已补证；Root 读截图后发现事件详情仍把标签装成目标和结果，并引入重复状态与双滚动。独立局部计划已接受，GCM 在同一候选树只消融 execution-events 抽屉内容；不改事件分类、生命周期或原始历史。完整候选尚未整体 Review 或交付 main。
-- M3 的源代码、公共 HTTP 和安装后两周期证明有效。独立充分性计划确认无需重建已清理的精确 M3 fixture，也不重跑业务任务。候选 `e435f85b` 已在既有浏览器消费者加入唯一 available 计划历史分支：三版本、权威 current 为第二版。语法检查通过，真实浏览器待执行；该证据用于补实际 Dashboard 接线，不冒充新的两周期生产运行。
+- 嵌套 Observation 和 available 计划历史页面接线已按上节交付。后续不重复原 A 双端或精确 M3 fixture；已有正向证明与尚未验证的抓错反例保持各自边界。
+- 下一阶段独立计划 r471 已接受。剩余语义消费者和三类型分组的有限材料缺口由一个既有消费者批次补证，零新增测试；F06/F15 的实际 assignment 图与模板骨架区分仍须核对具体保障，不从缺日志推断缺码。
 - initial-open 安装后恢复及已确认副作用不重放已有接受证据。r469 对保留 interrupted fixture 经当前 installed canonical resolver 单次只读解析 exit0、ok:true：选中真实 interrupted tail，保留 seq22 opened anchor、seq26 records-through 和原 dispatching pending request。此项关闭当前 selector/source readback 的具体未知，旧 RED 不再作为当前失败。它没有执行业务恢复，不能关闭 interrupted-v2 后继执行、fencing 或完整 F13；fixture 没有 retry.jsonl，缺失读取为空未创建。证据为 `native-reasoning-d0-20261012/native-f13-canonical-read-observe-r469-20261018/observation.md`。
 - 原 taskless 问答 epoch6 仍 socket 失败，由 Provider peer 保留原责任及外部交接边界；不再盲重试，不阻断未受影响的 UX 工作。
+- 原 M4 A 实际写入 scope-isolation.md，但指定五份 JSON 没有独立 constraints 原文，不能据此认定违反禁止写文件要求。原 B 保持 blocked 与恢复责任，作为失败可见性／项目隔离对照，不自动恢复或用后续任务替代；G7 不新增两任务必须成功的门槛。r474 原始事实和 owner 接收保留。
 
 完整 I1–I5／G1–G14／F01–F20 继续 ACTIVE／INCOMPLETE。以上交付只关闭明确子能力，不替代完整目标的逐项收口。
 

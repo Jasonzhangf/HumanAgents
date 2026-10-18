@@ -1,16 +1,24 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
-## 2026-10-18 治理消融候选：源码与直接消费者
+## 2026-10-18 最新交付：嵌套 Observation 与计划历史
+
+main `bae24634` 已交付 typed scope 人读事件展示、精简事件抽屉与既有计划历史浏览器消费者。候选原A双端、一次独立 Gemini4medium whole Review（实际SUCCESS/exit0、classifierPASS/findings[]）、必要构建打包安装、正式restart gen42/PID19087/53007和默认安装UI手机入口均已通过。技术原文保持可读；事件不再伪造目标/结果或挂内层会话。计划历史正向9PASS不冒充抓错反例或新真实RCC多轮。完整回执 `.worker-runs/observation-readable-delivery-20261018/`。
+
+peer普通文档push实际把UI一并推到远端（4a1c7832..dc60f65a），早于最后安装验证；该时点未算完成，现在已补齐。临时installed服务37017正常退出、gen9disposed；自有cookie/emulation清理、p1空白/p3不动。自有Observation和QA候选树及分支均已回收，当前仅main/control，无新Task或模型请求。
+
+F13按r470独立充分性与r469实测、已有interrupted HTTP/J1 fencing/installed initial-open证据已接收闭环，不再以早前RED称当前缺码。原B保留blocked与未解责任，不新增双任务成功门槛；原A的五JSON没有独立no-file-edits约束原文，不认定违约。完整I/G/F仍ACTIVE：现有语义/三类型消费者补证、实际图与模板骨架区别、简单问答socket原因继续按具体边界推进。较早OPEN仅作历史。
+
+## 2026-10-18 治理消融已交付：源码与直接消费者
 
 模板静态冻结、mode/lease 重复摘要、DSH 源码/patch 身份包装，以及 Work/Review 材料哈希字段和实际调用已在治理分支消融。任务身份、正文、准则、引用、lease fencing、持久化 review 和资产完整性约束保留。Runtime/App 源码编译通过；受影响 Runtime 消费者 46 PASS、App 持久化 review 消费者 9 PASS，默认 App 测试编译现已通过。
 
-候选尚未合入 main。Runtime review 等直接 fixture 仍需迁移退役字段，再完成整体审查和标准交付。原错误及过程证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-work-review-runtime-20261018/owner-reception.md` 和 `governance-fixture-final-20261018/events.jsonl`。SDK 辅助 verify 的 FreezeRecord 兼容缺口已登记 upstream `8a8c1be`，未补回旧冻结要求。
+已随 main `b4de7ac6` 完成整体Review、两条P1修复及finding复核、构建安装、正式restart和安装后消费者，交付回执 `governance-ux-delivery-20261018/delivery.md`。原错误及早期过程证据保留于 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-work-review-runtime-20261018/owner-reception.md` 和 `governance-fixture-final-20261018/events.jsonl`，不代表当前未交付。SDK 辅助 verify 的 FreezeRecord 兼容缺口已登记 upstream `8a8c1be`，未补回旧冻结要求。
 
-## 2026-10-18 治理消融候选：契约层
+## 2026-10-18 治理消融已交付：契约层
 
 治理分支已删除 Work/Review 的重复 criteria、artifact 和 subject 哈希字段、校验与直接复制调用。任务、执行者、assignment、epoch、引用、正文和准则约束保留。契约构建通过；同一无哈希输入已取得旧 validator 拒绝、当前 validator 接受的反例。当前工作树产物的既有消费者 6 PASS，身份和引用不匹配仍会失败。
 
-这只是候选的契约层证据，尚未合入 main。实际调用的后继进度见上节。过程、原错及证据保留在 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-work-review-contracts-r2-20261018/reception.md` 和同目录事件记录，不以共享依赖加载旧产物的失败冒充当前结果。
+这些契约与实际调用已随 `b4de7ac6` 交付；当时的分层候选证据不是当前交付缺口。过程、原错及证据保留在 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-work-review-contracts-r2-20261018/reception.md` 和同目录事件记录，不以共享依赖加载旧产物的失败冒充当前结果。
 
 ## 2026-10-18 M5 确认控制与双端 checkpoint 交互
 
