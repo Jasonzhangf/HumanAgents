@@ -587,6 +587,7 @@ export interface RuntimeTaskHydrateReadSource {
   readonly checkpoint: Pick<CheckpointJournalPort, 'verify' | 'readLatest' | 'readCommitted' | 'readExecutionPosition'>
     & Partial<Pick<NativeCheckpointJournalPort, 'readNativeCheckpoint'>>;
   readonly currentState: Pick<RuntimeTaskCurrentStatePort, 'read'>;
+  readonly hasCommittedActiveTurn?: (selector: RuntimePreparedStopSelector) => Promise<boolean>;
 }
 
 export interface RuntimeTaskCoordinatorOptions {
@@ -792,12 +793,19 @@ export interface TaskRecord {
 }
 
 /** Attach the already-accepted operation identity without starting execution. */
-function attachReplayedOperationIdentity(task: TaskRecord, operation: OperationRecord): void {
+function attachReplayedOperationIdentity(
+  task: TaskRecord,
+  operation: OperationRecord,
+  release: RuntimeExecutionRelease = operation.allocation === undefined
+    ? { state: 'released' }
+    : { state: 'prepared' },
+): void {
   task.operationId = operation.operationId;
   task.executionEpoch = operation.executionEpoch;
   task.input = operation.input;
+  task.originalInput = operation.input;
   task.orchestrated = operation.orchestrated;
-  task.release = { state: 'released' };
+  task.release = release;
 }
 
 export interface OperationRecord {
@@ -5906,6 +5914,7 @@ export class RuntimeTaskCoordinator {
             task.executionEpoch = operation.executionEpoch;
             task.cycleId = record.allocation.scope.cycleId;
             task.input = operation.input;
+            task.originalInput = operation.input;
             task.orchestrated = operation.orchestrated;
             task.release = { state: 'prepared' };
           }
@@ -5981,7 +5990,7 @@ export class RuntimeTaskCoordinator {
           task.events.push(record.event);
           task.updatedAt = record.event.occurredAt;
           if (record.event.kind === 'execution.started') {
-            attachReplayedOperationIdentity(task, operation);
+            attachReplayedOperationIdentity(task, operation, { state: 'released' });
             task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
           }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;
@@ -6026,6 +6035,10 @@ export class RuntimeTaskCoordinator {
         applyZeroEffectAdmissionDenial(task);
         continue;
       }
+      if (!operation) {
+        this.markRecoveryRequired(task);
+        continue;
+      }
       if (!scope?.cycleId) {
         this.markRecoveryRequired(task);
         continue;
@@ -6041,7 +6054,11 @@ export class RuntimeTaskCoordinator {
         const latest = await store.readLatest(scope) ?? await store.readLatest(businessScope);
         if (!latest || !sameCheckpointBusinessScope(scope, latest.checkpoint.scope)) {
           await this.hydratePublicOutput(task, scope);
-          this.markRecoveryRequired(task);
+          if (await this.isUnreleasedPreparedExecution(task, operation, scope, source)) {
+            this.markPreparedExecutionWaiting(task, operation);
+          } else {
+            this.markRecoveryRequired(task);
+          }
           continue;
         }
         const recalled = await recallCheckpoint(store, { ownerId: RUNTIME_OWNER, scope: latest.checkpoint.scope });
@@ -6174,6 +6191,70 @@ export class RuntimeTaskCoordinator {
     task.currentState = '进程已重启或缺少终态 checkpoint';
     task.nextStep = '确认 Provider 资源已释放后再发起新执行';
     task.allowedActions = [];
+  }
+
+  private async isUnreleasedPreparedExecution(
+    task: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    source: RuntimeTaskHydrateReadSource | undefined,
+  ): Promise<boolean> {
+    const allocation = operation.allocation;
+    const preparedStop = this.options.preparedExecutionStop;
+    if (
+      source === undefined
+      || source.hasCommittedActiveTurn === undefined
+      || preparedStop === undefined
+      || allocation === undefined
+      || task.release?.state !== 'prepared'
+      || operation.events.length !== 0
+      || !sameId(allocation.taskId, task.taskId)
+      || !sameId(allocation.operationId, operation.operationId)
+      || allocation.executionEpoch !== operation.executionEpoch
+      || task.executionEpoch !== operation.executionEpoch
+      || !sameScope(allocation.scope, scope)
+    ) return false;
+    const selector: RuntimePreparedStopSelector = {
+      taskId: allocation.taskId,
+      operationId: allocation.operationId,
+      executionEpoch: allocation.executionEpoch,
+    };
+    const currentState = await source.currentState.read(scope);
+    if (currentState.state !== 'unknown') return false;
+    const canonicalPosition = await source.checkpoint.readExecutionPosition({
+      organId: this.options.organId,
+      taskId: task.taskId,
+    });
+    if ((canonicalPosition?.executionEpoch ?? 0) > allocation.executionEpoch) return false;
+    const preparedStopRead = await preparedStop.read(selector);
+    if (preparedStopRead.state !== 'absent') return false;
+    return !await source.hasCommittedActiveTurn(selector);
+  }
+
+  private markPreparedExecutionWaiting(task: TaskRecord, operation: OperationRecord): void {
+    task.state = 'waiting';
+    task.running = false;
+    task.stopping = false;
+    task.currentState = '等待执行准入';
+    task.nextStep = '完成执行注册与覆盖后释放';
+    task.allowedActions = ['stop'];
+    task.release = { state: 'prepared' };
+    task.releasePending = undefined;
+    task.resolveRelease = undefined;
+    task.rejectRelease = undefined;
+    task.runtime = undefined;
+    task.driver = undefined;
+    task.advancingTurn = false;
+    task.input = operation.input;
+    task.originalInput = operation.input;
+    task.output = '';
+    task.publicOutput = undefined;
+    task.error = undefined;
+    task.orchestrated = operation.orchestrated;
+    task.executionReady = new Promise<boolean>((resolve) => {
+      task.resolveExecutionReady = resolve;
+    });
+    task.updatedAt = this.now().toISOString();
   }
 
   private snapshot(record: TaskRecord): RuntimeTaskSnapshot {
