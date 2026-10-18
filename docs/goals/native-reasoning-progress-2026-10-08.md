@@ -2,6 +2,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- N2 r304 真实 Memory 原单case实际 FAIL（1 fail/0 pass，约105s），断言 review.analysis.state：waiting≠succeeded。证据 `native-memory-live-proof-r304-20261017/c3a-node-test.log` 与 `c3a-next-turn-TtreJQ/receipt.json`（同既有RUN根）。前三个分析中前二 ready，分别 attention/no-op，第三 waiting：`memory-agent-analysis-unavailable` / `memory provider produced malformed curation JSON`。这不是此前 Interpret EOF 的根因证明。前二解释仅识别恢复/回退记账，尚未证明路径教训语义；不强求无依据candidate，不弱化原断言。fixture保留，零重试。已交原Gemini4 Planner r305只读定位协议解析/路径语义输入/fixture预期的首次偏离，不追加真实请求；PID22461/session26945。
+
 - 接续实质推进：Runtime 首次 inspection cycle opening 来源 `8e0516ce` 已标准 cherry-pick 到唯一候选 `9e46f3e8`。组合 contracts build、agent-loop tsc 均 exit 0；`--test-name-pattern='inspection'` 原 consumer 15/15 PASS。仍未 main，不代替完整 App/native 或正常 settlement 验收。peer 保留原 Runtime 树继续 aligned settlement，候选 Git 窗口已释放。
 - N2 r303 单例真实 Memory 计划已接收，fresh GCM r304（tmux `ha-memory-r304`）执行 main 既有 opt-in consumer，不改源码；单次 invocation 最多三次 Memory submit、零 retry/fallback。结果待接收。N3 r302 预算错误恢复 consumer 的 PID80939 已核实仍 live；尚无改动/完成回执，不宣称完成。总目标 ACTIVE/INCOMPLETE。
 
