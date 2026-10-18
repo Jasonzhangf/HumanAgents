@@ -2391,7 +2391,7 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
 
 // Multi-cycle review forwarding/history failure probability is unknown. Losing
 // adoption breaks Planner alignment. Cost: one bounded local CLI/HTTP fixture;
-// a temporary real forwarding omission must fail its review-role assertion.
+// restoring transient evidence resolution rejects the accepted review citation.
 if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer advances plan revisions and preserves cold semantic history', async () => {
   const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined, false, undefined, true);
   let passed = false;
