@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 旧 Operator registration 范围已裁定，不引入 SDK
+
+- r465 定向源码与后继证据观察已完成；r466 独立 OAuth GPT6.1 medium 小计划 READY，Root 接受其范围判断：按 requirements v14、原生 goal、implementation-plan 第9节与 dagpipe-runtime 两接口，旧 Operator registration UNVERIFIED 是 SDK 执行能力边界，不是当前原生推理 goal 的必要交付依赖。
+- r465 未找到 Rust crate、pipeline_runtime 与四节点 registry 的观察保持有效；不宣称 SDK 注册、compile 或 Runtime::run PASS。只修正 checkpoint-path-reentry 图的 implementationGap 说明，节点、边、binding、状态及 HTTP/browser 原文不变。N2 的 r330 充分性结论复用，P2b 原整例失败保留；HTTP/browser 不在此次裁定范围。
+- 依据为 RUN/native-operator-evidence-observe-r465-20261018/observation.md 与 RUN/native-operator-scope-plan-r466-20261018/plan.md。没有新增 SDK、产品代码、测试、worktree 或模型请求。完整 goal ACTIVE/INCOMPLETE，继续等待原问答外部交接和 peer 治理/UX 正式交付。
+
 ## 2026-10-18 原 taskless epoch6 失败，停止重投；并行接收治理与 UX
 
 - r460 独立计划结合 RCC 新正式启动声明，限定放行一次同 turn 恢复；r461 只证明声明中的 Running 写入位于 listener bind 之后，不证明当前业务可用。r462 实际只发一次 POST：UTC12:45:19.529Z，原 interaction-2 interpret 返回 HTTP409、transport.failure / UND_ERR_SOCKET。原 turn、input、binding 不变；当次 failed、resource closed/epoch6，acceptedFacts0/helper0/semanticcheckpoint null，Task 总数仍1。原问答没有成功答案，没有 epoch7；canonical 窗口已交还 UX peer。
