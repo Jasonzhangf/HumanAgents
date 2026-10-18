@@ -7,7 +7,13 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
-### 2026-10-18 最新交付：公开水位、偏好图文与巡检补证
+### 2026-10-18 最新交付：公开结果状态与正文保留
+
+main `3f3b8182` 已交付当前绑定读取失败保留已确认正文/水位、真实 pending 公开读取和人读状态展示。App、HTTP held-commit 与 UI 均有有效 RED/GREEN；生产页面消费原样真实 HTTP unknown 响应，正文保留且明确显示无法确认，恢复正常读取后原 A 仍为已确认。一次独立 Gemini4medium 整体 Review r505 有效 PASS，覆盖本轮完整九文件闭包。main build/package/install通过，正式 restart44→45/53007，安装原 A HTTP200与正文/水位1093不变、默认 UI 已确认。临时服务和浏览器状态清理，候选树正常回收。详见 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f07-combined-entry-20261018/reception.md`。
+
+本增量完成既有公开 publication 状态的真实消费，不把它扩称全部公开推理需求或全目标完成。剩余核销已识别两项独立展示缺口：coverage issue 原因/来源未呈现，以及重置失败缺明确失败文案。两项独立小计划已接收，两个 GCM 在各自独占树执行。其余条款继续按原定义和充分证据逐项裁决，不新增逐类型 RCC、全模式或全局事件总线矩阵。
+
+### 2026-10-18 已交付：公开水位、偏好图文与巡检补证
 
 main `1f731d76` 水位修复、`68275b0b` 偏好图文、`e9fdffab` 巡检不兼容接口证明已合流，随 `743d442d` 交付记录推送。M1 整体独立 Review r500 PASS；受影响 App 构建、打包、安装完成，正式 restart generation43→44。原 A 真实提交1093保持不变，语义 GET/SSE 从缺省修复为1093，事件水位1022独立、有限流正常结束。候选与安装版本均验证，无任务重执行或新模型请求。自有树/服务已清理。回执：`/Volumes/Intel/playground/humanagent/.worker-runs/native-m1-delivery-20261018/reception.md`。
 
