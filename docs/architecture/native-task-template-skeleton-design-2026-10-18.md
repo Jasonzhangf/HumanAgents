@@ -40,23 +40,27 @@
 
 ## 3. 产品对象流
 
-下图只表示产品对象流：已绑定的任务模板解析为只读骨架，经既有读取路径投影并在共享渲染器中分开呈现。图不含开发或交付流程。
+下图只表示产品对象流：读取任务及可用 binding 后，已绑定的模板解析为只读骨架，缺失绑定则保持 guidance 缺失；两条路径汇入既有读取、投影和共享呈现路径。图不含开发或交付流程。
 
 ```mermaid
 flowchart TD
-  B([任务已提交 TaskFlowBinding：kind 与 definitionVersion]):::boundary --> R[Core 解析只读任务模板骨架]:::action
+  E([读取任务及可用 binding]):::boundary
+  E -->|bound| R[Core 解析只读任务模板骨架]:::action
+  E -->|absent| N[guidance 保持缺失，不伪造骨架]:::data
   R --> G[(TaskFlowGuidance：阶段 / 依赖 / 布局 / 循环)]:::data
   G --> C[既有 guidance 读取载体携带骨架]:::action
+  N --> C
   C --> P[UI 投影为人类可读骨架视图]:::action
   P --> V[共享渲染器：模板骨架 / 已发布计划 / 已记录实例分别标识]:::action
   V --> OK([任务面板与观测面板展示]):::success
-  L([旧任务无绑定]):::boundary --> N[guidance 保持缺失，不伪造骨架]:::data
 
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
   classDef data fill:#F1EAFE,stroke:#7C3AED,color:#0F172A,stroke-width:1.5px
   classDef success fill:#E8F7EE,stroke:#16A34A,color:#0F172A,stroke-width:1.5px
 ```
+
+若 binding 的 `kind` 或 `definitionVersion` 未知，继续走既有 `ContractError`。这是既有错误边界，不新增图中分支、fallback 或降级行为。
 
 三个含义必须始终分开：模板骨架是静态方向；已发布计划 revision 是 Planner 的节点与关系；已记录实际执行是 Journal 派生的真实实例。任何一方都不得冒充另一方。
 
@@ -71,7 +75,6 @@ flowchart TD
     OC["轮末四段式检查点：目标 / 动作 / 结果 / 预期下一步"]:::action
     OP["轮末规划器对齐：完成 / 失败 / 继续"]:::action
     OD --> OC --> OP
-    OP -. "loops.turn-iteration 元数据：未完成则开启下一轮" .-> OD
   end
 
   subgraph Inspection["巡检 inspection"]
@@ -80,8 +83,6 @@ flowchart TD
     IC["轮末四段式检查点"]:::action
     IP["轮末规划器对齐"]:::action
     IT --> ID --> IC --> IP
-    IP -. "loops.turn-iteration：同一巡检轮次内继续" .-> ID
-    IP -. "loops.occurrence-repetition：下一次触发开启新巡检轮次" .-> IT
   end
 
   subgraph LongRunning["长程 long-running"]
@@ -89,13 +90,19 @@ flowchart TD
     LC["轮末四段式检查点"]:::action
     LP["轮末规划器对齐与计划演进"]:::action
     LD --> LC --> LP
-    LP -. "loops.turn-iteration：持续驱动后续轮次与阶段" .-> LD
   end
 
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
 ```
 
-虚线边只表示模板声明的逻辑循环元数据。它们不是 HTTP 读 DAG 的边，也不表示强制的运行时调度。
+图中实线只表示模板声明的强制依赖，不表示运行时调度。循环仍按 `TaskFlowLoopGuidance` 的 `kind`、`title`、`fromStageId`、`toStageId`、`summary` 和 `stopCondition` 完整形状保留，以下表文字作为元数据说明，不画成图边：
+
+| 模板 | `kind` | `fromStageId` | `toStageId` | 元数据含义 |
+| --- | --- | --- | --- | --- |
+| `one-shot` | `turn-iteration` | `planner-alignment` | `dynamic-work` | 未完成则开启下一轮。 |
+| `inspection` | `turn-iteration` | `planner-alignment` | `dynamic-work` | 同一巡检轮次内继续。 |
+| `inspection` | `occurrence-repetition` | `planner-alignment` | `occurrence-trigger` | 下一次定时或事件触发开启新巡检轮次。 |
+| `long-running` | `turn-iteration` | `planner-alignment` | `dynamic-work` | 持续驱动后续轮次与阶段。 |
 
 区分两条巡检循环：`turn-iteration` 是同一 Agent 在同一巡检轮次内的轮次迭代；`occurrence-repetition` 是下一次定时或事件触发开启的新巡检轮次，与历史巡检基线对比。二者语义不同，必须分别声明。
 
@@ -185,11 +192,15 @@ Core 的三个模板语义：
 
 渲染 owner 是 `docs/ui/task-display.js`。抽出共享卡片助手与共享关系标签助手后，三类内容复用同一组控件，并用不同数据属性分开标识：
 
+共享卡片助手与共享关系标签助手只复用现有 DOM element/text node 的创建与插入路径。不得引入 `headerHtml`、`summaryHtml` 或其它把内容拼成通用 HTML 字符串的渲染器或框架。
+
 - 模板骨架：`data-task-flow-guidance="skeleton"`、`data-template-stage`、`data-template-dependency`、`data-template-loop`。
 - 已发布计划：`data-plan-node`、`data-relation-kind`。
 - 已记录实际执行：`data-actual-execution-node`、`data-actual-execution-edge`。
 
 默认层只显示自然中文语义和非实例徽标（模板骨架仅指导方向，非实际执行记录）。机械键（`kind`、`layout`、`stageId`、`aim`、`selectionGuidance`、`displayGroups`）只放在技术详情中。桌面侧栏与手机底部抽屉使用同一渲染。
+
+实现所有权（开发说明，不是产品对象流节点）：S1 复用同一 F15 tree 作为 foundation/integration。S2A（projection）与 S2B（renderer）只能在各自独占的 subdomain trees 并行；两者以标准 Git 经唯一 integration branch 合流，任何时刻不得由两个 writer 共用同一 Git index。
 
 ## 7. 读 DAG 治理
 
@@ -206,6 +217,10 @@ Core 的三个模板语义：
 - 旧任务没有 `task.created.taskFlow` 时，`resolveTaskFlowGuidanceFromBinding` 继续返回 `undefined`。渲染层因此不产生 `data-task-flow-guidance="skeleton"` 块，也不伪造空骨架。
 - 未知 `kind` 或未知 `definitionVersion` 继续抛出既有 `ContractError`。这是既有错误行为，本文不新增降级或 fallback。
 - 缺失或不可用的实际执行来源继续显式保留，不转成伪造的空历史。
+
+已知验收事实：`/Volumes/Intel/playground/humanagent/.worker-runs/native-f07-combined-entry-20261018/installed.json` 已记录原任务 A（`ui-task-implicit-draft-2`）的 `actualExecutionGraph.guidance` 为 `one-shot`，包含 `kindLabel: 单次交付`、英文 `aim`、动态选择说明和 3 个已投影 `displayGroups`。实现阶段复用该既有 bound task；不默认新建 task，也不发 provider 请求。
+
+旧任务缺失绑定的表现由公开 consumer 验证：缺失时不产生骨架块。若当前没有真实 legacy fixture，不要求发明 live fixture。
 
 ## 9. 边界与非目标
 
@@ -226,7 +241,7 @@ Core 的三个模板语义：
 ## 11. 未知与待 Review 项
 
 - 生产链路上是否还有其它测试手工构造 `TaskFlowGuidance` 或 `TaskActualExecutionGuidanceProjection`，需在实现阶段用实编译确认。本文不预判。
-- 实际运行数据可能同时含已绑定任务与旧的无绑定任务，实现阶段必须在真实入口同时核对两种表现。本文不预判具体数据。
+- 原任务 A 的 bound `one-shot` guidance 已由上述 receipt 证明，实现阶段复用该既有任务。若当前没有真实 legacy fixture，旧任务缺失绑定只由公开 consumer 验证。
 - 骨架的视觉密度与分组在手机底部抽屉中的可读性仍需渲染验收，本文不预判结果。
 
 ## 12. 状态
