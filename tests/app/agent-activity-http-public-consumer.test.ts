@@ -106,6 +106,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     const markerA = 'M4-HTTP-SEMANTIC-PROJECT-A';
     const markerB = 'M4-HTTP-SEMANTIC-PROJECT-B';
     const committedTextA = 'M4-HTTP-COMMITTED-PROJECT-A: durable public result';
+    let committedWatermarkA: number | undefined;
     const fixtures = [
       { source: paths, turnId: boundTurnId, runtimeId: boundRuntimeId, assignmentId: boundAssignmentId,
         objective: boundObjective, inputRef: 'task://http-task/input', targetRef: 'task://http-task',
@@ -178,6 +179,9 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         const publication = await store.readPublicOutputs(binding);
         assert.equal(publication.state, 'committed', 'fixture publication must be durable');
         assert.deepEqual(publication.commits, [{ ref, text: committedTextA }]);
+        assert.equal(publication.publicCommitWatermark, ref.journalSeq,
+          'fixture readback must expose the exact committed watermark');
+        committedWatermarkA = ref.journalSeq;
       }
       await new JsonlTaskIdentityJournal(control).append({ scope: { organId, taskId }, source: fixture.identity });
       const activeBinding = activeBindingFor(fixture);
@@ -344,6 +348,9 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     assert.equal(unknownBody.error?.code, 'project.unknown');
     assert.equal(Object.hasOwn(unknownBody, 'projects'), false, 'unknown project must not return a success body');
 
+    assert.ok(committedWatermarkA !== undefined,
+      'foreign A fixture must expose a defined committed public watermark');
+
     // Service is bound to B. All three public reads explicitly select A's
     // Config key, the same typed TaskId and fake mode; titles do not select scope.
     const queryA = `?projectKey=${encodeURIComponent(coldPaths.projectKey)}&mode=fake`;
@@ -382,6 +389,12 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         const { response, payload } = await request(`${semanticPath}${queryA}`);
         assert.equal(response.status, 200, payload);
         assertSemanticA(payload);
+        const envelope = JSON.parse(payload) as { readonly publicCommitWatermark?: number };
+        assert.equal(
+          envelope.publicCommitWatermark,
+          committedWatermarkA,
+          `A semantic HTTP lost the committed watermark: ${payload}`,
+        );
       })(),
       (async () => {
         const response = await fetch(`${baseUrl}${semanticPath}/stream${queryA}`, { headers: { cookie } });
@@ -408,6 +421,15 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         assert.equal(frames.length, 2, payload);
         assert.match(frames[0]!, /^id: semantic-\d+\nevent: semantic\.observation\ndata: /);
         assertSemanticA(frames[0]!);
+        const frameData = frames[0]!.split('\n').find((line) => line.startsWith('data: '))!;
+        const frameEnvelope = JSON.parse(frameData.slice('data: '.length)) as {
+          readonly publicCommitWatermark?: number;
+        };
+        assert.equal(
+          frameEnvelope.publicCommitWatermark,
+          committedWatermarkA,
+          `A semantic SSE lost the committed watermark: ${frames[0]}`,
+        );
         assert.equal(frames[1], 'event: semantic-complete\ndata: {}');
         assert.equal(payload.endsWith('\n\n'), true);
       })(),
