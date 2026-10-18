@@ -1,6 +1,15 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
-## 2026-10-17 下一原定增量：M3 长程 review 与计划演进
+## 2026-10-17 已交付：M3 两周期独立 review、Planner 演进与冷读取
+
+- 本增量已标准交付 main `19088d24` 并push，原远端回执 `bed6ad3d..19088d24 main -> main`。完整原生goal仍INCOMPLETE，原显式interaction-2/RCC EOF、M4真实任务/展示缺陷及其余全目标义务未关闭。
+- 作者原case1/1、ordinarytwo-turn1/1、parallelchild1/1（overlaptrue）共3/3；旧transient resolver在同合法短ID输入下反向实际0/1RED，恢复canonical/App重建/原case再1/1PASS。两个实际cycle、两个operation、两独立review及采纳、四项收口、Plannercontinue/complete、revision1用于cycle2/结束current2、冷Dashboard/Journal/POST不增均已到达。原超长locator与字符串includes失败属作者输入/断言错误，不冒产品RED。
+- 唯一整体Review r362实际Gemini4medium/SUCCESS/exit0，完整有效JSON/findings[]，既有classifier裁决PASS，`review-outcome.json`存原RUN。最新origin组合仅文档变化，产品仍3文件266insertions/31deletions，不重跑未变证据或重复Review。
+- main Contracts/Config/App/nativecompile、package:candidate/install:global全部exit0（session99925）。官方installed restart0（session53597）：gen30/PID21754→gen31/PID19853，53007，legacyClose clean；新PID在caller退出后实际存活52秒，installedlauncher/protectedstatus200/ready。
+- installed同一原two-cycle consumer完整1/1PASS/exit0（session5785），CLI为`/opt/homebrew/bin/humanagent`，所有测试引用通过临时layout映射到真实installedruntime，未改installed源码。证据RUN `native-reviewed-cycle-installed-r363-20261017/{installed-two-cycle.log,exit.json,restart.json,runtime-status.json}`；不冒liveRCC生成或完整M4验收。
+- 清理已完成：原M3树clean/无占用后正常remove/prune/testabsent；注册3→2，仅maincontrol与UXpeer活动M4树保留。自有consumerlayout及临时Appbackup删除，失败fixture保留证据；`cleanup.json`已存r363。接续需独立Planner按新证据安排下一必要增量，不据旧0/7或r350错误单executor结论另造功能。
+
+## 2026-10-17 M3 开发与排障历史
 
 - M3作者完整验收已取得：r360 terminal0，原two-cycle1/1PASS（ui-cycle1/2、两个operation、两Plannercontinue/complete、revision1于cycle2执行/current2于结束、冷Dashboard/Journal/POST不增）；旧transient resolver同合法输入反向0/1实际RED，canonical恢复/App重建/原case再1/1PASS；ordinarytwo-turn与parallelchild各1/1PASS(overlaptrue)，本轮行为3/3。r359原scope-readerPASS/checkpoint拒绝复用。原字符串includes误把必要证据locator当rawhistory，已改实际wire无functioncall/output/previous_response_id，保留语义/冷恢复断言；r361仅校正文档注释未重复测试。Root读实际diff/原logs并正常候选提交e4cc060a、合最新origin仅两docs为faf3df95、注释ba518855，三文件266insertions/31deletions，未main。freshGemini4medium整体milestoneReview r362 PID43560/session41414已启动，尚未裁决；无新测试矩阵/安全门禁，canonical未动，完整goal保持INCOMPLETE。
 - r357 Gemini原会话已terminal0并交完整plan；并行r358 OAuth小契约核对也独立确认：既有invocation/assignment/result/adoption已绑定真实child返回，semantic context的accepted-child evidence应保留child/tool自己的operation，不需新registry。Root接受核心并消融额外content-ref校验、task/cycle/operation必填强化，保留原optional scope语义；仅该调用取消operation等式，checkpoint原strict保持。freshGCM r359同M3树仅Runtime semantic-turn-context修复+原consumer验证；App仅允许GREEN后临时旧resolver反向干预。Planner伪构建路径已纠正为实际dist入口，无新测试/图变更。peer M4两项目已各真实grant200/released，原operations继续settling/running，未验终态/浏览器，canonical不动。
