@@ -1106,6 +1106,36 @@ function businessClosureFor(
   };
 }
 
+/**
+ * Select the exact already-decoded business closure for one closed-turn Planner
+ * duty when the Planner source itself carries no closure. The duty's committed
+ * closureRef, checkpoint, task and scope are the join keys; a missing or
+ * ambiguous match stays unknown rather than being guessed.
+ */
+function selectPlannerDutyBusinessClosure(
+  prepared: ClosedTurnPlannerCallPreparationRecord,
+  closures: SelectTaskActualExecutionGraphInput['businessClosures'],
+  taskId: TaskId,
+):
+  | {
+      readonly status: 'matched';
+      readonly closure: TurnClosureReference;
+      readonly commitRef: JournalCommitRef;
+    }
+  | { readonly status: 'ambiguous' }
+  | undefined {
+  const duty = prepared.duty;
+  const matching = closures.filter(({ closure }) =>
+    closure.closureRef === duty.closureRef
+    && closure.checkpointId.value === duty.checkpointId.value
+    && closure.identity.taskRef.value === taskId.value
+    && closure.identity.executionEpoch === prepared.incarnation.executionEpoch
+    && sameScopeRef(closure.identity.scopeRef, duty.scope));
+  if (matching.length === 0) return undefined;
+  if (matching.length > 1) return { status: 'ambiguous' };
+  return { status: 'matched', closure: matching[0]!.closure, commitRef: matching[0]!.commitRef };
+}
+
 function graphCurrency(
   sourceKind: TaskAgentActivitySourceKind,
   executionEpoch: number,
@@ -1484,14 +1514,21 @@ export function selectTaskActualExecutionGraph(
       : source.invoked !== undefined
         ? 'invoked' as const
         : 'prepared' as const;
-    const businessTurnId = source.closure?.identity.turnId ?? record.businessTurnId;
+    const suppliedClosure = source.closure;
+    const dutyClosureMatch = suppliedClosure === undefined
+      ? selectPlannerDutyBusinessClosure(prepared, input.businessClosures, taskId)
+      : undefined;
+    const closureAmbiguous = dutyClosureMatch?.status === 'ambiguous';
+    const closure = suppliedClosure
+      ?? (dutyClosureMatch?.status === 'matched' ? dutyClosureMatch.closure : undefined);
+    const businessTurnId = closure?.identity.turnId ?? record.businessTurnId;
     const segmentId = source.resumedSegment?.segmentId ?? record.segmentId;
-    const closureCommitRef = source.closure === undefined
-      ? undefined
-      : input.businessClosures.find(({ closure }) =>
-          closure.closureRef === source.closure!.closureRef
-          && closure.checkpointId.value === source.closure!.checkpointId.value
-          && closure.identity.turnId === source.closure!.identity.turnId)?.commitRef;
+    const closureCommitRef = suppliedClosure === undefined
+      ? (dutyClosureMatch?.status === 'matched' ? dutyClosureMatch.commitRef : undefined)
+      : input.businessClosures.find(({ closure: candidate }) =>
+          candidate.closureRef === suppliedClosure.closureRef
+          && candidate.checkpointId.value === suppliedClosure.checkpointId.value
+          && candidate.identity.turnId === suppliedClosure.identity.turnId)?.commitRef;
     const nodeId = closedTurnPlannerNodeId(prepared.duty.dutyKey, source.preparationCommitRef);
     nodes.push({
       ...nodeCommon(record, nodeId),
@@ -1506,7 +1543,7 @@ export function selectTaskActualExecutionGraph(
       execution: prepared.execution,
       checkpointId: prepared.duty.checkpointId,
       checkpointCommitRef: prepared.duty.checkpointCommitRef,
-      ...(source.closure === undefined ? {} : { closureRef: source.closure.closureRef }),
+      ...(closure === undefined ? {} : { closureRef: closure.closureRef }),
       ...(closureCommitRef === undefined ? {} : { closureCommitRef }),
       grantCommitRef: prepared.grantCommitRef,
       admissionCommitRef: prepared.admissionCommitRef,
@@ -1525,15 +1562,16 @@ export function selectTaskActualExecutionGraph(
             },
           }),
     });
-    if (source.closure === undefined) {
+    if (closure === undefined) {
       ungrouped.push({
         nodeId,
         kind: 'planner-duty',
         targetRef: prepared.duty.dutyKey,
-        reason: 'the planner preparation has no exact turn closure fact',
+        reason: closureAmbiguous
+          ? 'multiple business closure records match this planner preparation'
+          : 'the planner preparation has no exact turn closure fact',
       });
     } else {
-      const closure = source.closure;
       const parent = input.activeTurns.find(({ binding }) =>
         admittedTurnMatchesClosure(binding, closure));
       if (parent === undefined) {
