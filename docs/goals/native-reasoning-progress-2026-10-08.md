@@ -2,6 +2,14 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 容量wait完整增量已main `c69c33ab`：独立delivery45e76f4e/c69c33ab四文件，r299 Gemini4medium SUCCESS/exit0/有效JSON/findings空，现有原classifier裁决pass；r298 Opus实quota429未审。正常fetch/合latestorigin后FF main，无inspection候选混入。
+- main contracts/config/App重建、package:candidate/install:global均exit0（session79031）；官方restart exit0（session78905），gen26/PID87116→gen27/PID3091，port53007、legacyClose clean。新PID实际存活39秒、installedlauncher、HTTP200。main provider tsc+目标6/6、App tsc+真实combinedconsumer1/1PASS（session54488）。受控replay行为与installed启动证明分别记录，不冒real RCC或Task标准收口完成。
+- 作者/Review均terminal，原App交付树已正常remove/prune/testabsent；Provider来源已关闭。此增量仅剩本轮push收尾回执，完整goal仍ACTIVE/INCOMPLETE；inspection继续由peer唯一owner推进，RCC原UNKNOWN不变。
+
+- 容量wait App r297已实际完成：r297/red.log断言缺typedownerwait真RED，恢复映射green1/1；source8d13795e父正常提交并merge候选，标准依赖contracts/Appbuild/tsc0+同consumer1/1PASS（session25278）。真manager/单槽pool/物理Journal/assets，model freshcall新invocation、两child实际执行/adopt，旧wait无prepare/执行；owner实际为manager。前期fixture失败不计RED，driverterminal不冒Task标准closure。
+- 同一App树clean后从latestorigin正常建立独立deliverybranch `codex/capacity-wait-delivery-20261017`，只cherry两来源为45e76f4e/c69c33ab四文件，不带inspection候选。r298 Opus实quota429/未审；r299 freshGemini4medium同scope整体Review进行，未裁决/未main安装。Provider6有效证据复用。
+- nativeassets9b537b8f正常merge候选，Appbuild/tsc0+原4/4PASS（session93126）；owner已关闭来源。Runtime stopcompletiona7d946bb原13/13PASS后peer发现initial-openbinding漏赋值，normalfollowup143803ec已合候选，原named14/14PASS（session16428），该hold解除；不回滚/不重开全审，其余fullnative边界仍未验收。
+
 - 精确turn/invocation reader `b65eba1d` 正常FF candidate，Appbuild/tsc0+原coldJournalconsumer1/1PASS（session82723，inspection-turn-resources-composed-20261017.txt）；forCheckpoint/physical组装仍未完成，已通知UX关闭来源。
 - r296未执行编译，已完成102次source命令仍停接口查找；父目标tsc实际失败为缺imports与kind-only假ExecutionRuntimePort等8项草稿错误，非业务RED。已因明确执行偏离SIGTERM自有PID87808/保留同树195行测试，不是超时重启。r297 freshOAuthGPT6.1medium仅做此具体consumer技术攻关（不是Reviewer或普通worker后备），两允许文件不变；通用执行仍GCM首选，Provider6PASS复用，不扩功能/测试。App业务验收仍OPEN。
 
