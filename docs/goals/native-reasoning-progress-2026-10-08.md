@@ -1,13 +1,23 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
-## 2026-10-18 P1 基础已接受，四路 GCM 已实际并发
+## 2026-10-18 当前：原生实际执行图已交付，下一增量在规划
+
+实际执行图和引用折叠已合入 main `10c6b772`，交付记录 `0508cebe` 已推送。main 构建、打包、全局安装通过；正式 restart 将 53007 从 generation42 更新到43，旧实例 clean 收拢。已安装版本的 Dashboard 与 Observation 公开接口读取原 A，均返回三条唯一记录和 Planner-duty 关联。候选桌面与手机页面、详情抽屉和焦点返回已有真实验收；整体独立 Gemini4medium Review r490 有效 PASS。
+
+最终设计以 r488 amendment 和 r489 finding 复核为准：从已有原生 Journal 事实生成只读 `agentActivity.value.actualExecutionGraph`。native `callChild` 不需要经过经典 `planStage`。第二套图持久化、CAS、prepare/apply/replay 与恢复包装已消融；原内存图及 Journal、任务身份和资源正确性保留。下文 r478–r485／P1 四路的第二持久协议是已撤销方案的历史记录，不得据此恢复代码或重派任务。
+
+所有自有候选服务与本增量 worktree 已正常回收；仅保留 main/control 与正式 generation43 运行实例。原 A/B 数据未清空。完整证据：`/Volumes/Intel/playground/humanagent/.worker-runs/native-actual-graph-delivery-20261018/reception.md`。旧 retry consumer 的7/8仍如实保留，未执行 origin/main 对照；Review 不将它作为本增量阻断，也不把它记为通过。
+
+完整 I1–I5/G1–G14/F01–F20 仍 ACTIVE/INCOMPLETE。下一批两域独立规划：偏好跨表面适用性，以及 M1 公开推理片段/稳定水位。生产偏好 save/reset/follow-last、semantic GET/SSE、工具活动 stable/live 和身份配对已存在，不重复开发。先依据定向观察决定真实缺边，禁止把无统一 event bus 或未测类别当新增框架/矩阵理由。其余需求仍属于完整目标。
+
+## 历史：P1 基础已接受，四路 GCM 曾实际并发（最终方案已替代）
 
 - UX owner已接收P1实际exit0与候选提交 `3b2f8c7f`。基础contracts编译0、orchestration编译0、具名assignment graph 5/5 PASS及准确 `interfaces.md` 已作为下游输入；这仅完成基础增量，不是完整生产图交付。origin/main文档已正常合入唯一候选，四棵独占任务树共同基线为 `ee1e881f`（普通Git回执，不追加身份核验）。
 - Root已同时启动四个fresh GCM，实际工具handles分别 JSONL16487、Runtime24386、App32763、UI43668；每路独占本域树，沿唯一集成分支标准Git合流。Root统一持有终态接收，本侧不双派、不重复轮询。各自task.md已接收P1真实接口与必要命令，原DRAFT状态由Root正式派单替代。
 - JSONL负责typed OrganJournal codec/持久确认，Runtime负责Manager提交/冷恢复接线，App负责factory与同批records只读组装及跨模块公开consumer，UI负责唯一helper/renderer。Runtime独占assignment-graph.ts补最小resume-binding mutation与planned记录真实agent绑定规则，属于已接受Astra冷接线，不阻其他三路。
 - 当前四路均为进行中，尚无组合行为验收、整体milestoneReview、main产品合流或安装运行交付。完整goal ACTIVE / INCOMPLETE；原taskless socket UNKNOWN仍独立保留。后续状态由Root接收实际结果后登记，不能用启动数量冒已完成节点。
 
-## 2026-10-18 设计已通过，实际图 P1 基础进入实现
+## 历史：实际图 P1 设计与实现启动（第二持久协议已撤销）
 
 - r478–r481 长计划虽各自执行成功，但错误类型/真源/图引用与基础依赖问题未获业务 READY 接受，原稿和接收记录保留。独立 GPT6.1 与 Astra 技术报告已完成源码攻关；选定同 task/owner 的 Organ Journal typed 图事实、Runtime 唯一 prepare/commit/apply/replay、真实 successor 回执授权与保留原 assignment 的冷恢复边界，不添加不存在的执行依赖引擎。技术报告不是实现或行为 PASS。
 - r482 短计划及单载体 amendment 已接受为编码前设计输入。fresh Gemini4 medium 独立 Reviewer `15b7089c-3ae6-4864-b2cb-ff5570c00955` 首 r483 三 P1 中不实引用经同 Reviewer r484 撤回；真实 carrier 缺口由 `design-amendment.md` 补正。r485 实际 SUCCESS/exit0，完整 JSON 经现有原 classifier 裁决 PASS / controller_no_blocking_findings / findings[]。本次只覆盖需求→设计→验收路径，不替代作者后的整体 milestone Review；所有新增行为仍 UNVERIFIED。证据：`RUN/native-actual-graph-design-amendment-r485-20261018/{plan.md,classification.json,owner-reception.md}`。
@@ -16,7 +26,7 @@
 - P1 完成并交付准确 `interfaces.md`、基础 consumer 后，JSONL、Runtime、App、UI 可按不重叠 owner 四路并发。App/JSONL 草稿已备于 `/Volumes/Intel/playground/humanagent/.worker-runs/actual-graph-app-20261018/task.md` 与 `actual-graph-jsonl-20261018/task.md`，均 DRAFT / NOT DISPATCHABLE，待 Root 补真实签名、选测 selector 并确认独占树。本侧未创建后续树或启动代码worker；Runtime/UI 合同由 UX owner 准备。
 - 完整 goal 仍 ACTIVE / INCOMPLETE；本条是设计与 P1 开工进度，不是完整图代码交付，也不关闭原 taskless socket UNKNOWN。纯文档更新不重复安装、重启、测试或 Review。
 
-## 2026-10-18 最新推进：UI 已交付，实际任务图缺边进入独立规划
+## 历史：UI 已交付，实际任务图缺边进入独立规划
 
 - 完整 goal 仍 ACTIVE / INCOMPLETE。下列新事实覆盖下文旧的“r471待派”“r475待核”状态，不重开已充分的 F13，也不把当前图缺边混作 Provider 协议缺陷。
 - UI Observation 人读事件与计划历史已正常合 main `bae24634`，整体 Gemini4 medium Review 有效 PASS；必要构建、打包、安装成功，正式 restart 至 gen42 / PID19087 / 53007，legacy close clean。安装后默认打包 UI 原 A 手机入口实际通过，owner 已看截图。临时服务正常退出、lease disposed，浏览器自有 cookie/emulation 已清，p3 未动；两棵自有候选树及已合流分支正常回收。完整交付回执：`/Volumes/Intel/playground/humanagent/.worker-runs/observation-readable-delivery-20261018/delivery.md`。此前提前 push 的真实顺序保留，不改写历史。

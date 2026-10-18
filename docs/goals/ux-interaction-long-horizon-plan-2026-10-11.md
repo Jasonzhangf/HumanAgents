@@ -7,6 +7,12 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
+### 2026-10-18 最新交付：原生实际执行图
+
+main `10c6b772` 与交付记录 `0508cebe` 已推送。Dashboard/Observation 共用原生实际图，原 A 的三条实际记录、Planner 关联、桌面详情与手机底部抽屉已验收。最终设计 r488/r489 复用既有原生 Journal 事实及 `agentActivity.value.actualExecutionGraph`；不要求 native `callChild` 进入经典 `planStage`，也不保留第二套图持久化。整体独立 Review r490 PASS；main build/package/install 通过，正式 restart generation42→43，已安装双公开接口验证通过。自有候选树和临时服务已清理，原 A/B 数据保留。证据：`/Volumes/Intel/playground/humanagent/.worker-runs/native-actual-graph-delivery-20261018/reception.md`。
+
+本增量关闭 F06/F15/G9 的原生实际图接线与已验证展示部分，不自动关闭整行或完整目标。下一批分别核定偏好跨表面适用性与 M1 公开推理片段/稳定水位；已有偏好 save/reset/follow-last、semantic GET/SSE、工具活动 stable/live 和身份配对不重复实现。完整 I1–I5/G1–G14/F01–F20 继续 ACTIVE/INCOMPLETE，按具体未证明行为安排最小增量。
+
 ### 2026-10-18 嵌套 Observation 人读展示与计划历史接线已交付
 
 完整六文件 UI 增量已合入 main `bae24634`。根目录与执行事件按 typed purpose 分层；事件标题使用人读语义，原始类型、标题、摘要与时间进入折叠详情。事件抽屉不再将标签包装为目标／结果，不挂空交接页签或内层会话。根 registry 保留既有详细视图。候选原 A 桌面／手机的真实只读结果、技术原文、焦点和返回导航已接收，Root 已看图。
@@ -29,11 +35,11 @@ main 重建、打包、全局安装完成；正式 restart gen40→41，端口53
 
 ### 当前剩余主线与已替代的旧 OPEN
 
-当前实际图候选尚未交付。默认 native 入口只绑定 `callChild`，不调用经典 M3 的 `planStage/createAssignment/dispatch`；仅读取新增 `assignment-graph.fact` 会使该入口持续显示无记录。现有 M3 通过证据不能关闭 native 路径的 F06/F15/G9。修正设计复用同源已持久化的轮次、恢复分段、子调用、审查及关轮规划事实，不从角色顺序、时间或谱系推断执行依赖。r486/r487 的冲突内容由 r488 `design-amendment.md` 替代；同一独立 Reviewer 的 r489 finding 复核已实际退出 0、无 findings，原裁决器 PASS。该结论只放行设计实现，不证明产品行为。
+实际图已按顶部最新交付进入 main。默认 native 入口只绑定 `callChild`，不调用经典 M3 的 `planStage/createAssignment/dispatch`；不能为展示图要求它写第二套 `assignment-graph.fact`。最终实现复用同源已持久化的轮次、恢复分段、子调用、审查及关轮规划事实，不从角色顺序、时间或谱系推断依赖。r486/r487 由 r488 amendment 与 r489 复核替代；最终代码及真实入口再经 r490 整体 Review，设计 PASS 与产品验收范围分别保留。
 
-contracts-first 契约提交 `91efaba3` 已普通合入唯一集成分支，工作树已清理。七类原生节点、真实关系、未归类事实与不可用来源沿现有读取载体进入 UI；业务关闭与物理分段状态分开，未取得实例和孤立交付不得丢弃。候选新增的图持久化 DTO 已删除，内存域类型保留。契约构建通过；旧消费者编译仍待迁移，不能称组合通过。写侧消融、Runtime 纯选择器、App 单次解码组装、UI 投影与共享渲染四路 GCM 已在互斥工作树并行。原生真实入口验收、完整 milestone Review 与 main/build/restart/live/push 尚未完成。
+contracts-first 与后继 Runtime、App、UI、写侧消融均已标准合流交付。七类节点、真实关系、未归类事实与不可用来源沿现有载体进入 UI；业务关闭与物理分段状态分开，未取得实例和孤立交付保留。新增图持久化 DTO 已删除，内存域类型保留。组合编译、具名公开消费者、两项实际反例及原 A 桌面/手机验收已接收；具体覆盖见组合与交付回执，不外推全部节点类型都经历过真实 Provider 运行。
 
-集成提交 `8799416b` 已修正指引读取使用服务绑定身份的问题，改用所选任务已验证的控制记录。所选 M3、cold、冲突与调用迁移消费者通过，只证明各自断言；两项 serve 消费者仍因缺产物正文失败，未算全绿。缺记录文案与阶段“最近记录”标识已普通合流，文案工作树已清理。以上仍在唯一集成分支，未进入本批 main/build/restart/live/push 交付。
+同源指引读取、真实后继 Journal 引用与原生 child 调用的 App 公开消费已修正并随本增量交付。缺记录文案与阶段“最近记录”标识也已合流。旧 retry consumer 的7/8仍保留，不称全部测试通过；它的 origin/main 同入口基线未建立，不用 Review 的判断冒充该对照证据。
 
 F13 恢复证据已于本轮接收闭环。独立小 Planner r470 找到并核对两份 interrupted-v2 公开 HTTP 实际 PASS、J1 精确锚点与旧段 fencing 实际 PASS，以及已接收的 installed initial-open 三轮／计划／checkpoint 证据；与 r469 当前安装版本对原 interrupted tail 的 source 读取共同覆盖 F13 原验收。Root 已读完整计划并接受按唯一 owner 组合证据，不要求同一原 fixture 再跑一遍。完整依据为 `native-reasoning-d0-20261012/native-f13-sufficiency-plan-r470-20261018/plan.md`：其中列明公开恢复保持 task/operation/business turn、后继 epoch、历史前缀、已执行副作用不重放、pending origin、stale anchor 拒绝和旧段写入 fencing 的实际断言及运行记录。没有新增测试、业务恢复、崩溃或模型调用；没有把原保留 fixture 的只读结果称为业务恢复，也没有外推为真实 RCC 成功。以下涉及 F13 未确认的早前过程以本段裁决为准；其他 G/F 与 UX 全目标仍按自身验收推进。
 
