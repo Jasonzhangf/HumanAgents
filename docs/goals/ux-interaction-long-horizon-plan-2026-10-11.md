@@ -29,7 +29,9 @@ main 重建、打包、全局安装完成；正式 restart gen40→41，端口53
 
 ### 当前剩余主线与已替代的旧 OPEN
 
-当前实际图候选尚未交付。默认 native 入口只绑定 `callChild`，不调用经典 M3 的 `planStage/createAssignment/dispatch`；仅读取新增 `assignment-graph.fact` 会使该入口持续显示无记录。现有 M3 通过证据不能关闭 native 路径的 F06/F15/G9。修正方案改为复用同源已持久化的轮次、恢复分段、子调用、审查及关轮规划事实；不得从角色顺序、时间或谱系推断执行依赖。独立复杂 Planner r486 已返回，原稿的错误回退基线、无效命令及过粗所有权切片尚待同一 Planner 定点修正；修正后完成目标要求的独立设计审查，再按 contracts-first 释放不冲突的并行实现及消融。
+当前实际图候选尚未交付。默认 native 入口只绑定 `callChild`，不调用经典 M3 的 `planStage/createAssignment/dispatch`；仅读取新增 `assignment-graph.fact` 会使该入口持续显示无记录。现有 M3 通过证据不能关闭 native 路径的 F06/F15/G9。修正设计复用同源已持久化的轮次、恢复分段、子调用、审查及关轮规划事实，不从角色顺序、时间或谱系推断执行依赖。r486/r487 的冲突内容由 r488 `design-amendment.md` 替代；同一独立 Reviewer 的 r489 finding 复核已实际退出 0、无 findings，原裁决器 PASS。该结论只放行设计实现，不证明产品行为。
+
+contracts-first 契约提交 `91efaba3` 已普通合入唯一集成分支，工作树已清理。七类原生节点、真实关系、未归类事实与不可用来源沿现有读取载体进入 UI；业务关闭与物理分段状态分开，未取得实例和孤立交付不得丢弃。候选新增的图持久化 DTO 已删除，内存域类型保留。契约构建通过；旧消费者编译仍待迁移，不能称组合通过。写侧消融、Runtime 纯选择器、App 单次解码组装、UI 投影与共享渲染四路 GCM 已在互斥工作树并行。原生真实入口验收、完整 milestone Review 与 main/build/restart/live/push 尚未完成。
 
 集成提交 `8799416b` 已修正指引读取使用服务绑定身份的问题，改用所选任务已验证的控制记录。所选 M3、cold、冲突与调用迁移消费者通过，只证明各自断言；两项 serve 消费者仍因缺产物正文失败，未算全绿。缺记录文案与阶段“最近记录”标识已普通合流，文案工作树已清理。以上仍在唯一集成分支，未进入本批 main/build/restart/live/push 交付。
 
