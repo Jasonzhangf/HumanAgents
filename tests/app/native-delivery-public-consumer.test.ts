@@ -764,9 +764,11 @@ async function textOnlyResponsesUpstream(input: {
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
   inspectionInvocations(): readonly { callId: string; invocationId: string }[];
+  inspectionChildRequests(): readonly { body: string; parentCallId: string }[];
   close(): Promise<void> }> {
   const wires: Wire[] = [];
   const inspectionInvocations = new Map<string, string>();
+  const inspectionChildRequests: { body: string; parentCallId: string }[] = [];
   let plannerAttempts = 0;
   let readIssued = false;
   const childAEntered = deferred();
@@ -881,6 +883,10 @@ async function textOnlyResponsesUpstream(input: {
         const childJudgment = inspectionTurn === 1
           ? INSPECTION_TURN_TWO_JUDGMENT : INSPECTION_TURN_THREE_JUDGMENT;
         if (wire.tools?.some((tool) => tool.name === 'humanagent_child_deliver')) {
+          inspectionChildRequests.push({
+            body,
+            parentCallId: `call-inspection-parent-${inspectionTurn}`,
+          });
           assert.equal(wire.model, 'child.only.model', 'inspection child selects its configured Provider model');
           const childPrompt = (wire.input ?? []).flatMap((item) =>
             (item.content ?? []).flatMap((part) => typeof part.text === 'string' ? [part.text] : [])).join('\n');
@@ -1168,6 +1174,7 @@ async function textOnlyResponsesUpstream(input: {
     inspectionInvocations: () => [...inspectionInvocations.entries()].map(([callId, invocationId]) => ({
       callId, invocationId,
     })),
+    inspectionChildRequests: () => inspectionChildRequests.map((entry) => ({ ...entry })),
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: async () => {
       server.closeIdleConnections?.();
@@ -2733,17 +2740,20 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
       { status: 'completed', judgment: INSPECTION_TURN_TWO_PARENT_JUDGMENT },
       { status: 'completed', judgment: INSPECTION_TURN_THREE_PARENT_JUDGMENT },
     ], 'each settlement uses the parent-authored aggregate standard-end outcome');
-    const childPosts = posts.filter((wire) => {
-      const parsed = parseResponsesWire(wire.body);
-      return plannerPayload(wire.body) === undefined
-        && parsed?.tools?.some((tool) => tool.name === 'humanagent_child_deliver') === true;
-    });
-    assert.equal(childPosts.some((wire) => wire.body.includes(INSPECTION_CHECK_B.checkId)), false,
+    const inspectionChildRequests = fixture.upstream.inspectionChildRequests();
+    const requestParentCallIds = new Set(inspectionChildRequests.map((entry) => entry.parentCallId));
+    assert.equal(requestParentCallIds.size, 2,
+      'the inspection child requests cover two actual parent calls');
+    for (const parentCallId of ['call-inspection-parent-1', 'call-inspection-parent-2']) {
+      assert.equal(requestParentCallIds.has(parentCallId), true,
+        `the inspection child requests cover ${parentCallId}`);
+    }
+    assert.equal(inspectionChildRequests.some((entry) => entry.body.includes(INSPECTION_CHECK_B.checkId)), false,
       'check-b never reaches the configured child');
-    for (const wire of childPosts) {
-      assert.deepEqual(wire.body.includes(INSPECTION_CHECK_A.checkId), true);
-      assert.deepEqual(wire.body.includes(INSPECTION_CHECK_A.criterion), true);
-      assert.deepEqual(wire.body.includes(INSPECTION_CHECK_A.inputRefs[0]), true);
+    for (const entry of inspectionChildRequests) {
+      assert.deepEqual(entry.body.includes(INSPECTION_CHECK_A.checkId), true);
+      assert.deepEqual(entry.body.includes(INSPECTION_CHECK_A.criterion), true);
+      assert.deepEqual(entry.body.includes(INSPECTION_CHECK_A.inputRefs[0]), true);
     }
 
     const journalBeforeReads = await readFile(fixture.layout.organJournalPath);
@@ -2802,6 +2812,8 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
     assert.equal(((await cold.json()) as { readonly entries?: readonly unknown[] }).entries?.length, 2);
     assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, postsBeforeReads,
       'the cold read issues no Provider request or child call');
+    assert.deepEqual(await readFile(fixture.layout.organJournalPath), journalBeforeReads,
+      'the cold read appends no Journal record');
     console.log('native inspection consumer evidence', JSON.stringify({
       fixture: fixture.root,
       occurrenceIds,
@@ -2948,7 +2960,10 @@ if (!coldConsumerMode) test('native opened inspection public stop settles the oc
       throw new Error('the opened inspection stopped checkpoint is malformed');
     }
     assert.equal(stoppedCheckpoint.scope.organId.value, organId.value);
-    assert.deepEqual(stoppedCheckpoint.checkpoint.next, { kind: 'stop' });
+    assert.deepEqual(stoppedCheckpoint.checkpoint.next, {
+      kind: 'stop',
+      ref: 'operator-stop',
+    });
     const stoppedCheckpointRef: JournalCommitRef = { commitId: stoppedCheckpoint.commitId!,
       journalSeq: stoppedCheckpoint.seq, recordDigest: stoppedCheckpoint.recordDigest };
 
