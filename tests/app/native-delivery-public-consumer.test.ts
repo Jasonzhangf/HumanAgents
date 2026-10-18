@@ -760,6 +760,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly requiredBearer?: string;
   readonly interruptThirdTurnOnce?: () => Promise<void>;
   readonly holdFirstExecutionOnce?: () => Promise<void>;
+  readonly holdInspectionAfterAdoptOnce?: () => Promise<void>;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
   inspectionInvocations(): readonly { callId: string; invocationId: string }[];
@@ -776,6 +777,7 @@ async function textOnlyResponsesUpstream(input: {
   let thirdTurnInterrupted = false;
   let holdTurnThree = false;
   let firstExecutionHeld = false;
+  let inspectionAdoptHeld = false;
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -874,7 +876,7 @@ async function textOnlyResponsesUpstream(input: {
         };
         const resultFor = (callId: string) => wire.input?.find((item) =>
           item.type === 'function_call_output' && item.call_id === callId);
-        const inspectionTurn = plannerAttempts;
+    const inspectionTurn = plannerAttempts;
         const childBody = inspectionTurn === 1 ? INSPECTION_TURN_TWO_BODY : INSPECTION_TURN_THREE_BODY;
         const childJudgment = inspectionTurn === 1
           ? INSPECTION_TURN_TWO_JUDGMENT : INSPECTION_TURN_THREE_JUDGMENT;
@@ -940,6 +942,15 @@ async function textOnlyResponsesUpstream(input: {
         inspectionInvocations.set(parentCallId, invocationId);
         if (!resultFor(parentAdoptId)) {
           invoke(parentAdoptId, 'child_adopt', { invocationId });
+          return;
+        }
+        if (input.holdInspectionAfterAdoptOnce !== undefined
+          && plannerAttempts === 1 && !inspectionAdoptHeld) {
+          inspectionAdoptHeld = true;
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.write(': inspected child adopted before parent standard end\n\n');
+          await input.holdInspectionAfterAdoptOnce();
+          response.end();
           return;
         }
       }
@@ -1178,6 +1189,7 @@ async function textOnlyFixture(
   interruptThirdTurnOnce?: () => Promise<void>,
   holdFirstExecutionOnce?: () => Promise<void>,
   inspection = false,
+  holdInspectionAfterAdoptOnce?: () => Promise<void>,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1194,6 +1206,7 @@ async function textOnlyFixture(
     organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount,
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
+    ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
     ...(topLevelHttp === undefined ? {} : {
       requiredBearer: topLevelHttp.requiredBearer,
     }) });
@@ -1241,12 +1254,11 @@ async function textOnlyFixture(
   return { root, controlRoot, workspace, paths, layout, journal, upstream, configuration, configPath };
 }
 
-async function startNativeMultiTurnConsumer(
+async function prepareNativeMultiTurnConsumer(
   fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
   turnCount: 2 | 3,
   inspection = false,
 ) {
-  const cli = consumerCliEntry();
   const organId = id('organ', 'humanagent-ui');
   const label = turnCount === 2 ? 'two-turn' : 'three-turn';
   const taskId = id('task', `native-${label}-consumer`);
@@ -1281,7 +1293,18 @@ async function startNativeMultiTurnConsumer(
     owner: caller.principal.owner,
     capability: { actionId: 'task.execute', capabilities: ['provider.execution'], scope: { organId, taskId } },
     expectedRevision: 0 });
+  return { organId, taskId, cookie, controlFile };
+}
 
+async function startNativeMultiTurnConsumer(
+  fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
+  turnCount: 2 | 3,
+  inspection = false,
+) {
+  const cli = consumerCliEntry();
+  const label = turnCount === 2 ? 'two-turn' : 'three-turn';
+  const prepared = await prepareNativeMultiTurnConsumer(fixture, turnCount, inspection);
+  const { taskId, cookie, controlFile } = prepared;
   const processChild = spawn(process.execPath, [cli,
     'run', '--workspace', fixture.workspace, '--control-root', fixture.controlRoot,
     '--plan', 'default', '--session', `native-${label}-run`, '--task', taskId.value,
@@ -2563,10 +2586,14 @@ function inspectionRecords(records: Awaited<ReturnType<JsonlOrganJournal['verify
   return {
     definitions: i2.filter(({ record }) => record.kind === 'inspection-definition').map((entry) => entry.record),
     cycles: i2.filter(({ record }) => record.kind === 'business-cycle-opened'),
+    openingEntries: i2.filter(({ record }) => record.kind === 'inspection-occurrence-opened'),
     openings: i2.filter(({ record }) => record.kind === 'inspection-occurrence-opened').map((entry) => entry.record),
+    itemEntries: i2.filter(({ record }) => record.kind === 'inspection-item-result'),
     items: i2.filter(({ record }) => record.kind === 'inspection-item-result').map((entry) => entry.record),
+    settlementEntries: i2.filter(({ record }) => record.kind === 'inspection-occurrence-settled'),
     settlements: i2.filter(({ record }) => record.kind === 'inspection-occurrence-settled').map((entry) => entry.record),
     aligned: i2.filter(({ record }) => record.kind === 'milestone-review-aligned'),
+    closingEntries: i2.filter(({ record }) => record.kind === 'business-cycle-closed'),
     closes: i2.filter(({ record }) => record.kind === 'business-cycle-closed'),
     openingByRef: (ref: JournalCommitRef) => exactInspectionEntry(i2.filter(({ record }) => record.kind === 'business-cycle-opened'), ref),
     settlementByRef: (ref: JournalCommitRef) => exactInspectionEntry(i2.filter(({ record }) => record.kind === 'inspection-occurrence-settled'), ref),
@@ -2772,6 +2799,241 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
     })}`);
     throw error;
   } finally {
+    if (serve !== undefined) await serve.stop();
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+  }
+});
+
+// Failure basis: the original stop case holds before an inspection occurrence
+// opens. Impact: an opened occurrence may remain unsettled or a cold read may
+// append recovery work. Cost: one held inspection turn and one fresh reader.
+if (!coldConsumerMode) test('native opened inspection public stop settles the occurrence and survives a fresh durable reader', async () => {
+  const inspectionHeld = deferred();
+  const releaseInspection = deferred();
+  const fixture = await textOnlyFixture(false, true, false, 3, undefined, undefined, undefined, true, async () => {
+    inspectionHeld.resolve();
+    await releaseInspection.promise;
+  });
+  let passed = false;
+  let serve: Awaited<ReturnType<typeof startServe>> | undefined;
+  let readerServe: Awaited<ReturnType<typeof startServe>> | undefined;
+  try {
+    const { organId, taskId, cookie } = await prepareNativeMultiTurnConsumer(fixture, 3, true);
+    const taskScope = { organId, taskId };
+    const taskPath = `/api/tasks/${encodeURIComponent(taskId.value)}`;
+    const liveServe = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+    serve = liveServe;
+    const startedResponse = await fetch(`${liveServe.origin}${taskPath}/executions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ mode: 'rcc', prompt: 'opened inspection stop probe' }),
+    });
+    const started = await startedResponse.json() as { readonly operationId?: string };
+    assert.equal(startedResponse.status, 202, JSON.stringify(started));
+    const startReceiptOperationId = started.operationId;
+    if (startReceiptOperationId === undefined) throw new Error('the public inspection start has no operation identity');
+    await withDeadline(inspectionHeld.promise, 30_000);
+
+    const inspect = async () => inspectionRecords((await fixture.journal.verify()).records);
+    const barrier = await waitFor(inspect,
+      (records) => records.openingEntries.length === 1 && records.itemEntries.length === 1,
+      'the opened inspection did not commit its occurrence and accepted child result', 15_000);
+    const openingEntry = barrier.openingEntries[0];
+    const itemEntry = barrier.itemEntries[0];
+    if (!openingEntry || !itemEntry) throw new Error('the opened inspection records are absent');
+    const opening = openingEntry.record;
+    const cycleOpenedCommitRef = requireRecord(opening.cycleOpenedCommitRef,
+      'the inspection cycle opening ref') as unknown as JournalCommitRef;
+    const sameRef = (left: JournalCommitRef, right: JournalCommitRef): boolean =>
+      left.commitId === right.commitId && left.journalSeq === right.journalSeq
+      && left.recordDigest === right.recordDigest;
+    assert.equal(barrier.settlementEntries.length, 0, 'the inspection has no settlement at the hold');
+    assert.equal(barrier.closingEntries.some(({ record }) => sameRef(requireRecord(record.openedCommitRef,
+      'a cycle opening ref') as unknown as JournalCommitRef, cycleOpenedCommitRef)), false,
+    'the inspection cycle is open at the hold');
+    const occurrence = requireRecord(opening.occurrence, 'the inspection occurrence');
+    const occurrenceId = requireText(occurrence.occurrenceId, 'the inspection occurrence id');
+    const executionScope = requireRecord(opening.executionScope, 'the inspection execution scope');
+    assert.deepEqual(executionScope.organId, organId, 'the inspection execution scope retains its organ');
+    assert.deepEqual(executionScope.taskId, taskId, 'the inspection execution scope retains its task');
+    const cycleOpeningEntry = barrier.cycles.find(({ journal }) => sameRef({
+      commitId: journal.commitId!, journalSeq: journal.seq, recordDigest: journal.recordDigest,
+    }, cycleOpenedCommitRef));
+    if (!cycleOpeningEntry) throw new Error('the inspection execution scope has no exact cycle opening record');
+    const cycleOpening = requireRecord(cycleOpeningEntry.record, 'the inspection cycle opening');
+    const cycle = requireRecord(cycleOpening.cycle, 'the inspection cycle');
+    assert.deepEqual(requireRecord(cycle.scope, 'the inspection cycle scope'), executionScope,
+      'the inspection occurrence binds the actual cycle and operation scope');
+    assert.equal(requireText(requireRecord(cycle.id, 'the inspection cycle id').value, 'the inspection cycle id'),
+      requireText(opening.cycleId, 'the inspection occurrence cycle id'));
+    const heldParentOperationId = requireText(
+      requireRecord(executionScope.operationId, 'the held parent operation').value,
+      'the held parent operation id',
+    );
+    assert.deepEqual(requireRecord(opening.definition, 'the inspection definition'), {
+      definitionId: INSPECTION_DEFINITION_ID, definitionVersion: INSPECTION_DEFINITION_VERSION,
+    });
+    const delivery = requireRecord(itemEntry.record.delivery, 'the accepted inspection item');
+    const actualInvocations = fixture.upstream.inspectionInvocations();
+    assert.deepEqual(actualInvocations.map((entry) => entry.callId), ['call-inspection-parent-1'],
+      'the hold follows the first actual inspection child adoption');
+    assert.equal(new Set(actualInvocations.map((entry) => entry.invocationId)).size, actualInvocations.length,
+      'the inspection invocations retain unique child identities');
+    const invocationId = actualInvocations[0]?.invocationId;
+    if (invocationId === undefined) throw new Error('the hold has no actual inspection child invocation');
+    assert.equal(delivery.checkId, INSPECTION_CHECK_A.checkId);
+    assert.equal(delivery.resultId, `inspection-result:${invocationId}`);
+    assert.deepEqual(requireRecord(delivery.outcome, 'the accepted inspection outcome'), {
+      status: 'completed', judgment: INSPECTION_TURN_TWO_JUDGMENT,
+    });
+    const childWires = fixture.upstream.wires.filter((wire) => wire.method === 'POST'
+      && parseResponsesWire(wire.body)?.tools?.some((tool) => tool.name === 'humanagent_child_deliver') === true);
+    assert.ok(childWires.some((wire) => wire.body.includes(INSPECTION_CHECK_A.checkId)
+      && wire.body.includes(INSPECTION_CHECK_A.criterion)
+      && wire.body.includes(INSPECTION_CHECK_A.inputRefs[0])),
+    'the accepted check-a has a correctly configured child request');
+    assert.equal(childWires.some((wire) => wire.body.includes(INSPECTION_CHECK_B.checkId)), false,
+      'check-b does not reach the configured child');
+
+    const stopResponse = await withDeadline(fetch(`${liveServe.origin}${taskPath}/stop`, {
+      method: 'POST', headers: { cookie },
+    }), 30_000);
+    const stopped = await stopResponse.json() as { readonly state?: string; readonly operationId?: string };
+    assert.equal(stopResponse.status, 202, JSON.stringify(stopped));
+    let taskAfterStop = await fetchTaskForCaptureStop(liveServe.origin, taskId, cookie);
+    if (stopped.state !== 'stopped') {
+      taskAfterStop = await waitFor(() => fetchTaskForCaptureStop(liveServe.origin, taskId, cookie),
+        (task) => task.state !== 'settling',
+        'the opened inspection stop remained settling without a terminal result', 5_000)
+        .catch(() => taskAfterStop);
+    }
+    assert.deepEqual(stopped, { state: 'stopped', operationId: heldParentOperationId },
+      `the stop error was ${JSON.stringify(taskAfterStop.error)}`);
+    assert.equal(taskAfterStop.state, 'stopped');
+    const stoppedCheckpoint = await waitFor(async () => (await fixture.journal.verify()).records.find(
+      (record) => record.kind === 'checkpoint' && record.scope.taskId?.value === taskId.value
+        && record.scope.operationId?.value === heldParentOperationId && record.checkpoint?.outcome === 'stopped'),
+    (value) => value !== undefined, 'the opened inspection stop committed no exact stopped checkpoint');
+    if (stoppedCheckpoint?.kind !== 'checkpoint' || !stoppedCheckpoint.checkpoint) {
+      throw new Error('the opened inspection stopped checkpoint is malformed');
+    }
+    assert.equal(stoppedCheckpoint.scope.organId.value, organId.value);
+    assert.deepEqual(stoppedCheckpoint.checkpoint.next, { kind: 'stop' });
+    const stoppedCheckpointRef: JournalCommitRef = { commitId: stoppedCheckpoint.commitId!,
+      journalSeq: stoppedCheckpoint.seq, recordDigest: stoppedCheckpoint.recordDigest };
+
+    const settled = await waitFor(inspect,
+      (records) => records.settlementEntries.length === 1 && records.closingEntries.length === 1,
+      'the opened inspection stop did not settle and close its occurrence once', 15_000);
+    assert.equal(settled.openings.length, 1, 'stop creates no replacement inspection occurrence');
+    assert.equal(settled.items.length, 1, 'stop retains only the accepted check-a result');
+    const settlementEntry = settled.settlementEntries[0];
+    const closingEntry = settled.closingEntries[0];
+    if (!settlementEntry || !closingEntry) throw new Error('the stop settlement or close is absent');
+    const settlement = settlementEntry.record;
+    const settlementRef: JournalCommitRef = { commitId: settlementEntry.journal.commitId!,
+      journalSeq: settlementEntry.journal.seq, recordDigest: settlementEntry.journal.recordDigest };
+    const openingRef: JournalCommitRef = { commitId: openingEntry.journal.commitId!,
+      journalSeq: openingEntry.journal.seq, recordDigest: openingEntry.journal.recordDigest };
+    assert.deepEqual(requireRecord(settlement.openingCommitRef, 'the settlement opening ref'), openingRef);
+    assert.deepEqual(requireRecord(settlement.occurrence, 'the settlement occurrence'), occurrence);
+    assert.deepEqual(requireRecord(settlement.checkpointCommitRef, 'the settlement checkpoint ref'), stoppedCheckpointRef);
+    assert.deepEqual(settlement.itemResultCommitRefs, [{ commitId: itemEntry.journal.commitId!,
+      journalSeq: itemEntry.journal.seq, recordDigest: itemEntry.journal.recordDigest }],
+    'the settlement retains the accepted check-a commit');
+    assert.deepEqual(requireRecord(settlement.outcome, 'the stop settlement outcome'), {
+      status: 'unknown',
+      reason: 'inspection stopped after the execution checkpoint; missing checks retain unknown side effects',
+    }, 'stop uses the production unknown outcome, not the held parent completion');
+    const close = closingEntry.record;
+    assert.deepEqual(requireRecord(close.openedCommitRef, 'the close cycle opening ref'), cycleOpenedCommitRef);
+    assert.deepEqual(requireRecord(close.checkpointCommitRef, 'the close checkpoint ref'), stoppedCheckpointRef);
+    assert.deepEqual(requireRecord(close.inspectionSettlementCommitRef, 'the close settlement ref'), settlementRef);
+    assert.equal(close.outcome, 'stop');
+    assert.deepEqual(close.next, { kind: 'stop' });
+    assert.equal(settled.items.some((record) => requireRecord(record.delivery,
+      'an inspection delivery').checkId === INSPECTION_CHECK_B.checkId), false,
+    'no unexecuted check-b item or cancelled substitute is fabricated');
+    assert.equal(fixture.upstream.wires.filter((wire) => plannerPayload(wire.body) !== undefined).length, 1,
+      'the stop path does not run the next Planner turn');
+    assert.equal(fixture.upstream.inspectionInvocations().length, 1,
+      'the stop path does not start a second inspection child');
+
+    const organJournalBytes = await readFile(fixture.layout.organJournalPath);
+    const preparedJournalBytes = await readFile(fixture.layout.preparedJournalPath);
+    const postsBeforeReader = fixture.upstream.wires.filter((wire) => wire.method === 'POST').length;
+    const invocationsBeforeReader = fixture.upstream.inspectionInvocations().length;
+    await serve.stop();
+    serve = undefined;
+    releaseInspection.resolve();
+    const readerWorkspace = join(fixture.root, 'reader-workspace');
+    await mkdir(readerWorkspace);
+    readerServe = await startServe({ controlRoot: fixture.controlRoot, workspace: readerWorkspace });
+    const read = async (path: string) => {
+      const response = await fetch(`${readerServe!.origin}${path}`, { headers: { cookie, accept: 'application/json' } });
+      const body = await response.json() as Record<string, unknown>;
+      assert.equal(response.status, 200, `${path}: ${JSON.stringify(body)}`);
+      return body;
+    };
+    const projectKey = fixture.paths.projectKey;
+    const project = await read(`/api/dashboard?scope=project&projectKey=${encodeURIComponent(projectKey)}`);
+    assert.equal(project.complete, true, JSON.stringify(project.failures));
+    const row = (project.tasks as readonly Record<string, unknown>[]).find((candidate) => {
+      const scope = requireRecord(candidate.scope, 'a durable Task scope');
+      return requireRecord(scope.taskId, 'a durable Task id').value === taskId.value && scope.mode === 'rcc';
+    });
+    if (!row) throw new Error('the fresh durable reader omitted the stopped Task');
+    assert.equal(row.basis, 'durable-history');
+    assert.equal(requireRecord(row.task, 'the durable Task row').state, 'stopped');
+
+    const scoped = `?projectKey=${encodeURIComponent(projectKey)}&mode=rcc`;
+    const dashboard = await read(`${taskPath}/dashboard${scoped}`);
+    assert.equal(dashboard.state, 'stopped');
+    assert.equal(requireRecord(dashboard.checkpoint, 'the cold stopped checkpoint').outcome, 'stopped');
+    assert.equal((dashboard.error as { readonly code?: string } | undefined)?.code, undefined,
+      'the cold reader reports no inspection settlement recovery error');
+    const list = await read(`${taskPath}/inspection-occurrences${scoped}`);
+    const entries = list.entries as readonly Record<string, unknown>[];
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.occurrenceId, occurrenceId);
+    assert.equal(entries[0]?.state, 'settled');
+    assert.equal(entries[0]?.outcome, 'unknown');
+    assert.deepEqual((entries[0]?.items as readonly Record<string, unknown>[]).map((item) =>
+      [item.checkId, item.state]), [['check-a', 'completed'], ['check-b', 'missing']]);
+    const checkA = (entries[0]?.items as readonly Record<string, unknown>[])
+      .find((item) => item.checkId === INSPECTION_CHECK_A.checkId);
+    assert.equal(checkA?.judgment, INSPECTION_TURN_TWO_JUDGMENT);
+    assert.equal(checkA?.resultRef, `inspection-result:${invocationId}`);
+    const detail = await read(`${taskPath}/inspection-occurrences/${encodeURIComponent(occurrenceId)}${scoped}`);
+    assert.deepEqual(requireRecord(detail.entry, 'the cold occurrence detail').items, entries[0]?.items);
+    await read(`${taskPath}/inspection-occurrences${scoped}`);
+    assert.deepEqual(await readFile(fixture.layout.organJournalPath), organJournalBytes,
+      'fresh durable reads append no Organ Journal record');
+    assert.deepEqual(await readFile(fixture.layout.preparedJournalPath), preparedJournalBytes,
+      'fresh durable reads append no prepared Journal record');
+    assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, postsBeforeReader,
+      'fresh durable reads issue no Provider POST');
+    assert.equal(fixture.upstream.inspectionInvocations().length, invocationsBeforeReader,
+      'fresh durable reads issue no inspection child invocation');
+    console.log('native opened inspection public stop evidence', JSON.stringify({
+      fixture: fixture.root, startReceiptOperationId, heldParentOperationId, occurrenceId,
+      stoppedCheckpoint: stoppedCheckpointRef,
+      settlement: settlementRef, close: { commitId: closingEntry.journal.commitId,
+        journalSeq: closingEntry.journal.seq, recordDigest: closingEntry.journal.recordDigest },
+      coldBasis: row.basis, unchangedPosts: postsBeforeReader,
+    }));
+    passed = true;
+  } catch (error) {
+    console.error(`opened inspection stop fixture retained: ${fixture.root}`);
+    console.error(`opened inspection stop evidence: ${JSON.stringify({
+      plannerPosts: fixture.upstream.wires.filter((wire) => plannerPayload(wire.body) !== undefined).length,
+      posts: fixture.upstream.wires.filter((wire) => wire.method === 'POST').length,
+      invocations: fixture.upstream.inspectionInvocations(),
+    })}`);
+    throw error;
+  } finally {
+    releaseInspection.resolve();
+    if (readerServe !== undefined) await readerServe.stop();
     if (serve !== undefined) await serve.stop();
     await fixture.upstream.close();
     if (passed) await rm(fixture.root, { recursive: true });
