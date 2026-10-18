@@ -209,7 +209,12 @@ function copyRawAsset(asset: RawAsset): RawAsset {
   return { ref: copyEvidenceRef(asset.ref), view: { ...asset.view } };
 }
 
-function assertCompatibleScope(expected: ScopeRef, actual: ScopeRef, label: string): void {
+function assertCompatibleScope(
+  expected: ScopeRef,
+  actual: ScopeRef,
+  label: string,
+  compareOperation = true,
+): void {
   if (expected.organId.value !== actual.organId.value) {
     throw new SemanticTurnContextError(`${label} organ scope does not match`);
   }
@@ -219,7 +224,11 @@ function assertCompatibleScope(expected: ScopeRef, actual: ScopeRef, label: stri
   if (actual.cycleId !== undefined && expected.cycleId?.value !== actual.cycleId.value) {
     throw new SemanticTurnContextError(`${label} cycle scope does not match`);
   }
-  if (actual.operationId !== undefined && expected.operationId?.value !== actual.operationId.value) {
+  if (
+    compareOperation
+    && actual.operationId !== undefined
+    && expected.operationId?.value !== actual.operationId.value
+  ) {
     throw new SemanticTurnContextError(`${label} operation scope does not match`);
   }
 }
@@ -321,7 +330,8 @@ function assertInput<T>(input: SemanticTurnContextInput<T>): void {
     if (entry.kind !== 'refined-child') continue;
     assertTaskCompatibleScope(input.scope, entry.delivery.scope, 'refined child');
     for (const ref of entry.delivery.evidenceRefs) {
-      assertCompatibleScope(entry.delivery.scope, ref.scope, 'refined child evidence');
+      // Accepted evidence keeps the child and admitted tool operations that produced it.
+      assertCompatibleScope(entry.delivery.scope, ref.scope, 'refined child evidence', false);
     }
   }
 }
