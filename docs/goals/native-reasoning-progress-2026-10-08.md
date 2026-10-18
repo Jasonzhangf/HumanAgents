@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 F13 保留 fixture 当前 canonical 只读解析成功
+
+- UX owner接受r468后批准唯一一次当前canonical只读解析；r469 fresh GCM实际使用installed owners，inline node exit0。Root直接核events命令与stdout：resolveColdExecutionResumeRequest返回ok:true，原tail分类interrupted，openedCommitRef seq22、recordsThroughCommitRef seq26，原dispatching request及origin segment责任保留。
+- fixture为原active-frontier-HK8Umg，未补材料或写control，未recover/admit/append/网络/模型/测试/新崩溃。首次here-doc因shell临时文件未执行脚本；inline-e只调用一次resolver。retry.jsonl实际缺失（纠正派单称已存），既有port只读返回null、未创建，不冒真实retry-cycle事实。
+- 结果仅关闭“当前selector能否解析原保留tail”的未知，不证明业务恢复完成、真实RCC成功或F13整体PASS。报告及Root限定接收见RUN/native-f13-canonical-read-observe-r469-20261018/{observation.md,owner-reception.md}，已交UX owner最终裁定；initial-open原installed证明保持自身范围。完整goal ACTIVE/INCOMPLETE。
+
 ## 2026-10-18 F13 旧恢复材料边界观察已交回 UX owner
 
 - r468 fresh GCM只读观察已完成。指定旧材料未出现PID42804，日志为43040；旧v1 predecessor实际存在、后续segment已opened但无v2，更接近interrupted-v2。旧脚本用initial predecessor，当前canonical先选tail；旧RED不等于当前仍失败，也不能仅凭当前source分支称旧fixture已恢复。
