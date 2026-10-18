@@ -378,8 +378,8 @@ test('actual graph missing history stays explicit instead of becoming an empty g
   const section = renderTaskActualExecutionGraphSection(graph)
   assert.equal(section.dataset.actualExecutionGraph, 'not-recorded')
   assert.equal(byData(section, 'actualExecutionHistory', 'not-recorded').length, 1)
-  assert.match(allText(section), /实际执行记录缺失/)
-  assert.match(allText(section), /没有记录实际执行图事实/)
+  assert.match(allText(section), /暂无执行过程记录/)
+  assert.match(allText(section), /这里仅展示已记录的执行过程/)
 })
 
 test('current rejects an unknown or mismatched accepted identity instead of using the latest', () => {
