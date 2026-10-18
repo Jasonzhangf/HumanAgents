@@ -226,3 +226,15 @@ main 构建、打包、安装完成，正式 restart gen40→41／53007。安装
 main contracts/config/App 构建、打包和全局安装完成。正式 restart 将 53007 实例从 generation42 更新到43，原实例 clean 收拢。已安装版本通过公开 Dashboard 与 Observation API 读取原 A，各返回三条唯一记录及 Planner-duty 关系。验收脚本曾误把公开 UI projection 当作源 DTO，已按公开类型修正；该脚本错误不记为产品红测。临时验收服务与浏览器状态按自有资源范围收口，原 A/B 数据保留。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-actual-graph-delivery-20261018/`。
 
 完整 I1–I5/G1–G14/F01–F20 继续进行。下一增量分为偏好保存/恢复默认/阅读深度，以及 M1 实时与稳定语义链路，先定向观察再独立规划。旧 retry consumer 的 7/8 结果继续保留；尚无 origin/main 同入口基线，不称全部测试通过。历史 worker 的 hook 绕过及越界实验记录未删除，本轮不复用这些违规动作。
+
+## 2026-10-18 语义公开水位与偏好图文交付
+
+M1 水位修复已合 main `1f731d76`：两个既有语义 builder 透传当前 task publication 已有的公开提交水位，缺省仍省略，不按 publication 状态过滤，不新增 producer、协议或回退。原绑定用例实际 RED 为缺省对真实序号2/6，修复后 GREEN；跨项目 HTTP/SSE 原 fixture 的水位断言经单分支遗漏反例失败、恢复后通过。一次独立 Gemini4medium 整体 Review r500 有效 PASS，无阻断问题。
+
+原 A 真实历史任务未重执行。旧版本已有公开提交1093，但语义 GET/SSE 缺水位；候选及最终安装版本均返回1093，事件水位1022保持独立，有限 SSE 正常结束。main App 构建、打包、安装完成；正式实例从 generation43 更新到44，端口53007，旧实例 clean 收拢。自有验收实例完成候选→安装版本正式交接，验收后退出。证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-m1-delivery-20261018/` 与 `native-m1-real-entry-20261018/`。
+
+偏好图文已合 main `68275b0b`：已落地的偏好持久边改为实现事实，其他事件/共享消费者缺口保留。仅更新第12张图，保留内嵌 SVG 与原放大逻辑；真实 follow-last 跨刷新/页面恢复、显式链接不覆盖保存值、重置还原与 A/B Journal 不变的回执已关联。纯文档没有额外 Review 或运行时门禁。
+
+巡检补证已合 main `e9fdffab`，仅扩原公开 HTTP fixture：同一定义ID的不同版本返回不可比较、definition-mismatch、空定义和空结果；原兼容 checkId 比较保留。临时去除 Core 判断时断言实际失败，恢复后通过；生产 Core 未改，没有新测试矩阵。此项只证明 F04 不兼容公开接口子条款。
+
+三棵本轮来源 worktree 均已正常关闭，原业务数据保留。完整目标继续 ACTIVE/INCOMPLETE：本次水位交付不代替 F07 公开正文/形成中状态展示；下一定向观察在进行。G13/F19 的非空义务、旧历史与实际文件效果保全已找回原 C3a 执行证据，按原范围复用，不重复测试。
