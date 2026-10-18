@@ -428,6 +428,12 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
           'observation subtree selection was replaced by the task read scope',
         );
         assert.equal(subtree.payload.includes(markerB), false, `A observation subtree leaked B: ${subtree.payload}`);
+        const unknownNode = await request(
+          `${observationPath}${queryA}&node=missing-node`,
+        );
+        assert.equal(unknownNode.response.status, 404, unknownNode.payload);
+        const unknownNodeBody = JSON.parse(unknownNode.payload) as { readonly error?: { readonly code?: string } };
+        assert.equal(unknownNodeBody.error?.code, 'observation.node.not-found');
         return observation;
       })(),
     ]);

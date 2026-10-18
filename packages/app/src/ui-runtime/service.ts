@@ -662,6 +662,18 @@ interface RequirementAdmissionObservation {
   readonly receipt: RequirementAdmissionReceipt;
 }
 
+function requirementAdmissionObservation(input: {
+  readonly taskId: TaskId;
+  readonly queue: AdmissionQueueKind;
+  readonly receipt: unknown;
+}): RequirementAdmissionObservation {
+  return {
+    taskId: input.taskId,
+    queue: input.queue,
+    receipt: validateRequirementAdmissionReceipt(input.receipt),
+  };
+}
+
 function durableRequirementAdmissionsFromRecords(
   records: readonly UiRuntimeJournalRecord[],
 ): ReadonlyMap<string, RequirementAdmissionObservation> {
@@ -670,11 +682,7 @@ function durableRequirementAdmissionsFromRecords(
     if (record.kind !== 'explicit-brain.state' || record.state.requirementAdmissions === undefined) continue;
     admissions.clear();
     for (const admission of record.state.requirementAdmissions) {
-      admissions.set(admission.taskId.value, {
-        taskId: admission.taskId,
-        queue: admission.queue,
-        receipt: validateRequirementAdmissionReceipt(admission.receipt),
-      });
+      admissions.set(admission.taskId.value, requirementAdmissionObservation(admission));
     }
   }
   return admissions;
@@ -1115,6 +1123,30 @@ function observationProjection(
     scopeStack: inProviderScope ? [rootScopeRef, providerScopeRef] : [rootScopeRef],
     selectedNodeId,
   });
+}
+
+function projectObservationBoundary(
+  task: RuntimeTaskSnapshot,
+  selectedNodeId?: string,
+  scopeRef?: string,
+  admission?: RequirementAdmissionObservation,
+  publicOutput?: PublicOutputPublicationProjection,
+): PipelineObservationProjection {
+  try {
+    return observationProjection(task, selectedNodeId, scopeRef, admission, publicOutput);
+  } catch (error) {
+    if (error instanceof UiProjectionError) {
+      const unknownScope = error.message.startsWith('unknown observation scope');
+      throw new UiRuntimeApiError(
+        unknownScope ? 'observation.scope.not-found' : 'observation.node.not-found',
+        APP_OWNER,
+        error.message,
+        unknownScope ? 'select an existing observation scope' : 'select an existing observation node',
+        404,
+      );
+    }
+    throw error;
+  }
 }
 
 /**
@@ -2255,43 +2287,14 @@ export class UiRuntimeService {
     mode?: RuntimeMode,
   ): Promise<RuntimeSemanticObservationEnvelope> {
     if (rawProjectKey === undefined && mode === undefined) return this.semanticObservation(taskId);
-    const projectKey = rawProjectKey?.trim();
-    if (!projectKey || (mode !== 'fake' && mode !== 'rcc')) {
-      throw new UiRuntimeApiError(
-        'read.scope.invalid',
-        APP_OWNER,
-        'semantic observation requires both projectKey and mode',
-        'send projectKey=<declared projectKey>&mode=fake|rcc, or omit both for the bound read',
-        400,
-      );
-    }
-    const source = await this.findProjectSource(projectKey);
-    if (source === undefined) {
-      throw new UiRuntimeApiError(
-        'project.unknown',
-        APP_OWNER,
-        `no configured project: ${projectKey}`,
-        'list configured projects and retry with a declared projectKey',
-        404,
-      );
-    }
-    if (this.isBoundScope(source.projectKey, mode)) return this.semanticObservation(taskId);
-
-    const inventory = await this.readDurableInventory(source, mode);
-    if (inventory.failures.length > 0) {
-      const failure = inventory.failures[0]!;
-      throw new UiRuntimeApiError(failure.code, failure.ownerId, failure.message, failure.nextAction, 503);
-    }
-    const entry = inventory.entries.find((candidate) => candidate.snapshot.taskId.value === taskId.value);
-    if (entry === undefined) {
-      const failure = unknownTaskFailure(taskId, source.projectKey, mode);
-      throw new UiRuntimeApiError(failure.code, failure.ownerId, failure.message, failure.nextAction, 404);
-    }
+    const resolved = await this.resolveTaskReadScope(taskId, rawProjectKey, mode);
+    if (resolved.kind === 'bound') return this.semanticObservation(taskId);
+    const { source, entry } = resolved;
 
     let organId = entry.organId;
     if (organId === undefined) {
       const identity = await this.canonicalTaskIdentityScope(new JsonlOrganJournal(
-        uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
+        uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, resolved.mode)),
       ), taskId);
       if (!identity.ok) {
         throw new UiRuntimeApiError(
@@ -2395,7 +2398,7 @@ export class UiRuntimeService {
     const resolved = await this.resolveTaskReadScope(taskId, rawProjectKey, mode);
     if (resolved.kind === 'bound') {
       const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
-      const projection = observationProjection(
+      const projection = projectObservationBoundary(
         task,
         selectedNodeId,
         scopeRef,
@@ -2404,7 +2407,7 @@ export class UiRuntimeService {
       );
       return { ...projection, agentActivity: await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection) };
     }
-    const projection = observationProjection(
+    const projection = projectObservationBoundary(
       resolved.entry.snapshot,
       selectedNodeId,
       scopeRef,
@@ -3671,23 +3674,13 @@ export class UiRuntimeService {
   observation(taskId: TaskId, selectedNodeId?: string, scopeRef?: string): PipelineObservationProjection {
     try {
       const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
-      return observationProjection(
+      return projectObservationBoundary(
         task,
         selectedNodeId,
         scopeRef,
         this.requirementAdmissions.get(task.taskId.value),
       );
     } catch (error) {
-      if (error instanceof UiProjectionError) {
-        const unknownScope = error.message.startsWith('unknown observation scope');
-        throw new UiRuntimeApiError(
-          unknownScope ? 'observation.scope.not-found' : 'observation.node.not-found',
-          APP_OWNER,
-          error.message,
-          unknownScope ? 'select an existing observation scope' : 'select an existing observation node',
-          404,
-        );
-      }
       throw apiError(error);
     }
   }
@@ -5069,11 +5062,7 @@ export class UiRuntimeService {
     }
     this.requirementAdmissions.clear();
     for (const admission of restored.requirementAdmissions ?? []) {
-      this.requirementAdmissions.set(admission.taskId.value, {
-        taskId: admission.taskId,
-        queue: admission.queue,
-        receipt: validateRequirementAdmissionReceipt(admission.receipt),
-      });
+      this.requirementAdmissions.set(admission.taskId.value, requirementAdmissionObservation(admission));
     }
     this.coordinator.restoreTaskInputRevisions(restored.taskInputRevisions ?? []);
     this.queuedRequirements.clear();
