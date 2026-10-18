@@ -28,6 +28,8 @@ M4 新真实执行证据位于 `/Volumes/Intel/playground/humanagent/.worker-run
 
 随后实际浏览器验收发现两个阻断 G4/G6/G7 的读取错误，M4 不能关闭：从服务 B 的系统目录进入项目 A 同名 Task 后，标题和计划正确，但语义请求未传 projectKey/mode，面板读到 B 的工具经过、marker 和受阻状态；同一 A 任务的 bound API 有 789 字符已提交输出，foreign API 却返回空输出和 publicOutput unavailable，页面显示“尚无输出”。证据为 `/Volumes/Intel/playground/humanagent/.worker-runs/m4-installed-two-project-browser-20261017/root-reception.md`、`root-desktop-A.json`、`root-http-a-bound.json`、`root-http-a-foreign.json` 和 `shots/`。Root 已实际查看桌面截图，四个 Journal 字节未变；在充分桌面失败后停止扩展手机矩阵，手机与完整双端验收仍为 UNVERIFIED。独立 App/UI scoped-read 修复计划与 Runtime present 收拢计划并行，均不得以隐藏有效 scope、未提交文本回退或跨进程代理掩盖错误。
 
+Runtime `present` 收拢错误已独立标准交付：来源 `5a72c91c`、main `bb92a996` 已推送，合法 inspect 不再被要求提供可选主输出字段；报告引用、字节与 digest 保持同一已验证数据域，实际文件引用仍在原 accepted result。真实 RED、focused GREEN、旧 inspect 公开 consumer、组合 main 构建及一次独立 Review 均通过。正式安装与 restart 后当前实例为 gen32/PID79769/53007，认证状态 HTTP200 ready；仅链接全局安装模块的同一 Runtime consumer 1 PASS，来源树和临时 layout 已清理。证据为 `/Volumes/Intel/playground/humanagent/.worker-runs/m4-inspect-delivery-review-20261017/delivery.md`。这关闭库级合法 `present` 误拒绝，不把原 B 历史任务改称已恢复，不关闭跨 scope、约束传递或整个真实 RCC 任务验收。前端 scope 候选 `3300cea4` 已合入独立集成分支，尚未交付 main；后端公开 HTTP consumer 已实际复现三项读取断言失败，正在实现。
+
 早前两项独立标准交付如下。完整源码、作者验证、整体审查、安装入口及清理证据见[项目状态汇总](../../note.md)，不在本计划重复建立验收账本。
 
 - 观察界面分层：源码 `837dc952`，集成 `feaa72cd`，交付记录 `18827bc4`。原状态/引用反例确实失败，恢复及组合浏览器检查通过；已安装双端界面保留受阻/未知/覆盖不完整，13个系统目录节点不再虚构执行边。

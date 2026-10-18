@@ -151,3 +151,10 @@ SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 bin
 - 原两 idle 公开反例 RED 已复用；当前 main 派生候选同编译选项定向编译成功，相关 consumer 9/9，main 组合 distinct-idle 原用例 1/1。原目录级 retry fixture 类型错误保留，未改无关 fixture 或断言。独立 Opus 本次 quota 错误后，Gemini 4 medium SUCCESS/exit0；现有 controller 裁决 pass、findings[]。
 - main source contracts/config/App build、package、global install 均成功。自有 canonical 隔离实例正式 restart generation1/PID12468→generation2/PID17889，官方重新配对后公开 runtime status HTTP200，模型请求0；正式 SIGINT→dispose 后 PID absent、lease disposedAt2026-10-17T14:46:08.691Z。原 gen21/p3 未动。初次诊断误用 `/api/status` 的404保留，实际公开入口为 `/api/runtime/status`。
 - 来源树 clean/无活动进程后正常 remove/prune/path absent；证据在外置 `provider-pool-delivery-review-gemini-r124-20261017/` 的 classification、main-build/package/install、restart 与 runtime-read 回执。本增量不证明完整 native 目标或真实 RCC App Task 已完成。
+
+## 2026-10-17 Runtime present 交付收拢修复
+
+- 原真实 M4 Task B 暴露合法 `present` 无可选 `outputRef/outputDigest` 却被 Runtime 强制拒绝。来源 `5a72c91c`，main 集成 `bb92a996` 已推送；只改唯一 Runtime reader 与一个公开 reader/binder consumer，保留 raw 数据、scope、assignment 和 committed inspect 来源验证。
+- 编译后的真实 `artifact-conflict` RED、修复后 focused GREEN 与旧 inspect 公开 consumer 均通过。组合最新 main 后重编 Runtime/App 并复用两项 consumer，通过一次独立 Gemini 4 medium Review；首次输出协议字段错误被正确拒收，同 Reviewer 仅修格式，现有 classifier 最终 PASS、无 findings。
+- main 构建、打包和全局安装通过。正式 restart 将本地实例从 gen31/PID19853 升到 gen32/PID79769，端口53007、legacy close clean；认证状态接口 HTTP200 ready。只链接全局安装模块的同一 Runtime consumer 1 PASS，临时 layout 已删，来源 worktree 正常关闭。
+- 完整回执：`/Volumes/Intel/playground/humanagent/.worker-runs/m4-inspect-delivery-review-20261017/delivery.md`。原 B 历史 Task 未重试或冒称恢复；App/UI 跨项目串读、foreign committed output、约束传递与整个 UX 目标继续推进。前端候选 `3300cea4` 仅合入独立 scoped-read 集成分支，尚未交付 main。
