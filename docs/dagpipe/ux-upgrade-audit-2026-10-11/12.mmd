@@ -2,12 +2,12 @@ flowchart TB
  I[同 scope 的 typed API／更新]:::derived
  T[transport 单次解码]:::derived
  R[唯一不可变共享对象与版本]:::derived
- E[声明事件通知引用与关联]:::design
- W[共用状态／对话／轨迹／图／证据控件]:::design
- A[任务与 Organ Console]:::design
- B[Pipeline Observation 与多视角]:::design
+ E[owner 回调／订阅通知引用与关联<br/>不依赖全局事件总线]:::derived
+ W[共享语义观测与偏好控件<br/>已接 Task Dashboard＋Pipeline Observation]:::derived
+ A[Task Dashboard<br/>保留面板、偏好订阅、串流版本守卫与卸载清理]:::derived
+ B[Pipeline Observation<br/>保留面板、偏好订阅、读取隔离与卸载清理]:::derived
  I --> T --> R
- R -.->|整体事件与共享消费者边待闭合| E --> W
+ R -->|同一冻结引用／scope revision；既有 RED＋GET/SSE 回执| E --> W
  W --> A
  W --> B
  M[成功的直接手动模式选择]:::truth
