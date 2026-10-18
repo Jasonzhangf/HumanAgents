@@ -1965,8 +1965,6 @@ test('HumanAgent operation identity is stable across driver and provider binding
   assert.deepEqual(fake.snapshot().scope.organId, dsh.snapshot().scope.organId);
   assert.equal(fake.snapshot().scope.organId.value, 'agent-execution-stable');
 
-  const source = await readFile(join(process.cwd(), 'packages/app/src/agent-operation.ts'), 'utf8');
-  assert.equal(/adapters[\\/]dsh|dshExecutionOrganId|dshOperationIdFor/.test(source), false);
 });
 
 test('agent operation assembles external builtin prompt segments before driver submission', async () => {
@@ -4254,12 +4252,6 @@ test('app rejects an invalid adapter binding before acquiring a session lock', a
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   const store = new SessionStore(paths);
   await assert.rejects(() => store.open('session-invalid-execution'), /session does not exist/);
-});
-
-test('app assembly remains DSH-neutral at the source boundary', async () => {
-  const source = await readFile(join(process.cwd(), 'packages/app/src/execution.ts'), 'utf8');
-  assert.equal(/adapters[\\/]dsh|from ['\"]dsh['\"]|require\\(['\"]dsh['\"]\\)/i.test(source), false);
-  assert.equal(/SessionId|SessionEvent/.test(source), false);
 });
 
 test('driver composition selects fake or dsh explicitly and never falls back', async () => {

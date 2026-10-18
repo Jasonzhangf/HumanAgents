@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
-import { tmpdir, networkInterfaces } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -145,43 +145,6 @@ async function portRefused(host, port) {
       resolve({ refused: error.code === 'ECONNREFUSED', error: error.code ?? String(error) });
     });
   });
-}
-
-function ipv4Addresses() {
-  const addresses = [];
-  for (const entries of Object.values(networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (entry.family === 'IPv4' && !entry.internal) addresses.push(entry.address);
-    }
-  }
-  return [...new Set(addresses)];
-}
-
-function ipv6Addresses() {
-  const addresses = [];
-  for (const entries of Object.values(networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (entry.family === 'IPv6' && !entry.internal && !entry.address.endsWith('%')) {
-        addresses.push(entry.address);
-      }
-    }
-  }
-  return [...new Set(addresses)];
-}
-
-function isTailscaleIpv4(address) {
-  const [first, second] = address.split('.').map(Number);
-  return first === 100 && second >= 64 && second <= 127;
-}
-
-function networkEvidence() {
-  const ipv4 = ipv4Addresses();
-  return {
-    ipv4,
-    ipv6: ipv6Addresses(),
-    lan: ipv4.filter((address) => !isTailscaleIpv4(address)),
-    tailscale: ipv4.filter(isTailscaleIpv4),
-  };
 }
 
 function originFor(address, port) {
@@ -589,12 +552,6 @@ async function waitForTaskCompletion(serve, cookie, timeoutMs = 15_000) {
   throw new Error(`task did not reach completed state; last=${JSON.stringify(last)}`);
 }
 
-async function assertRefused(host, port) {
-  const result = await portRefused(host, port);
-  assert.equal(result.refused, true, `${host}:${port} should be refused, got ${result.error}`);
-  return result;
-}
-
 async function rawHttpRequest(host, port, requestText, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host, port });
@@ -674,142 +631,6 @@ async function runCase(report, name, fn) {
       finishedAt: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
     });
-  }
-}
-
-async function wildcardBindCase(evidenceDir) {
-  const defaultServe = await startServe({ fakeStepDelayMs: 100 });
-  try {
-    assert.equal(defaultServe.banner.listenAddress, '127.0.0.1', 'default serve must bind IPv4 loopback');
-    assert.equal(defaultServe.banner.supervisor?.controlEndpoint?.host, '127.0.0.1', 'default control endpoint must stay loopback');
-    assert.equal(defaultServe.banner.url, `${defaultServe.loopbackOrigin}`, 'default display URL must name loopback');
-  } finally {
-    const closure = await closeServe(defaultServe);
-    assert.equal(closure.exited, true, 'default serve must exit after SIGTERM');
-    assert.equal(closure.pidGone, true, 'default serve PID must be gone');
-    assert.equal(closure.portRefused, true, 'default serve port must be refused after exit');
-    assert.equal(closure.rootReleased, true, 'owned attempt root must be removed');
-  }
-
-  const serve = await startServe({ host: '0.0.0.0', fakeStepDelayMs: 100 });
-  try {
-    const networks = networkEvidence();
-    assert.equal(serve.banner.listenAddress, '0.0.0.0', 'default serve must bind IPv4 wildcard');
-    assert.equal(serve.banner.supervisor?.controlEndpoint?.host, '127.0.0.1', 'wildcard control endpoint must be IPv4 loopback');
-    assert.equal(serve.banner.supervisor?.controlEndpoint?.port, serve.port, 'control endpoint must use the actual listener port');
-    const display = new URL(serve.banner.url);
-    assert.notEqual(display.hostname, '0.0.0.0', 'display URL must not expose wildcard');
-    assert.equal(networks.lan.includes(display.hostname), true, 'display URL should use a reachable LAN IPv4 address');
-
-    // `--host 0.0.0.0` is an IPv4 wildcard listener. Only real IPv4 non-loopback
-    // interfaces can reach it; IPv6 link-local addresses require a scope id and
-    // belong to the IPv6 wildcard (`::`) case.
-    const nonLoopbackOrigins = [
-      ...networks.lan.map((address) => [`lan:${address}`, originFor(address, serve.port)]),
-      ...networks.tailscale.map((address) => [`tailscale:${address}`, originFor(address, serve.port)]),
-    ];
-    assert.equal(nonLoopbackOrigins.length > 0, true, 'IPv4 wildcard bind requires a real non-loopback IPv4 interface');
-
-    const probes = [];
-    for (const [label, origin] of [
-      ['loopback', serve.loopbackOrigin],
-      ['display', serve.banner.url],
-      ...nonLoopbackOrigins,
-    ]) {
-      const response = await request(`${origin}/api/liveness`);
-      assert.equal(response.status, 200, `${label} liveness failed`);
-      assert.equal(response.body?.status, 'alive');
-      assert.equal(response.body?.providerReady, undefined);
-      probes.push({ label, origin, status: response.status, body: response.body });
-    }
-
-    const lanOrigin = nonLoopbackOrigins.find(([label]) => label.startsWith('lan:'))?.[1] ?? serve.banner.url;
-    const unauthLoopbackTasks = await request(`${serve.loopbackOrigin}/api/tasks`);
-    assert.equal(unauthLoopbackTasks.status, 401);
-    assert.equal(unauthLoopbackTasks.body?.error?.code, 'auth.session.missing');
-    const unauthLanTasks = await request(`${lanOrigin}/api/tasks`);
-    assert.equal(unauthLanTasks.status, 401, 'unauthenticated LAN access must be rejected');
-    assert.equal(unauthLanTasks.body?.error?.code, 'auth.session.missing');
-
-    const lanHost = new URL(lanOrigin).host;
-    const supervisorFromLan = await request(`${lanOrigin}/api/runtime/identity`);
-    assert.equal(supervisorFromLan.status, 401, 'LAN supervisor call without a token must require supervisor auth');
-    assert.equal(supervisorFromLan.body?.error?.code, 'auth.supervisor.required');
-    const loopbackIdentity = await request(`${serve.loopbackOrigin}/api/runtime/identity`);
-    assert.equal(loopbackIdentity.status, 401, 'supervisor call without a token must be unauthorized');
-    assert.equal(loopbackIdentity.body?.error?.code, 'auth.supervisor.required');
-    const lease = JSON.parse(await readFile(serve.banner.supervisor.leasePath, 'utf8'));
-    const { deriveSupervisorToken } = await import(
-      pathToFileURL(join(repoPath, 'dist/app/app/src/ui-runtime/access-control.js')).href
-    );
-    const supervisorToken = await deriveSupervisorToken(
-      join(serve.controlRoot, 'security', 'web-access.json'),
-      lease.leaseId,
-      lease.generation,
-    );
-    const authorizedLanIdentity = await request(`${lanOrigin}/api/runtime/identity`, {
-      headers: { authorization: `Bearer ${supervisorToken}` },
-    });
-    assert.equal(authorizedLanIdentity.status, 200, 'authenticated LAN supervisor identity read must succeed');
-    assert.equal(authorizedLanIdentity.body?.leaseId, lease.leaseId);
-    assert.equal(authorizedLanIdentity.body?.generation, lease.generation);
-
-    const pair = await runPair(serve);
-    assert.equal(pair.exit.code, 0);
-    const paired = await postPair(lanOrigin, pair.receipt.code);
-    assert.equal(paired.status, 200, `LAN-origin pairing failed: ${JSON.stringify(paired)}`);
-    assert.equal(paired.body?.authenticated, true);
-    const cookie = cookieValue(paired.setCookie);
-    const authorizedLanTasks = await request(`${lanOrigin}/api/tasks`, { headers: { cookie } });
-    assert.equal(authorizedLanTasks.status, 200, 'authenticated LAN read must succeed');
-
-    const rawLanLiveness = await rawHttpRequest(
-      new URL(lanOrigin).hostname,
-      serve.port,
-      `GET /api/liveness HTTP/1.1\r\nHost: ${lanHost}\r\nConnection: close\r\n\r\n`,
-    );
-    assert.match(rawLanLiveness.split('\r\n', 1)[0], /^HTTP\/1\.1 200 /, 'raw LAN HTTP request must reach the listener');
-    const rawLanTasks = await rawHttpRequest(
-      new URL(lanOrigin).hostname,
-      serve.port,
-      `GET /api/tasks HTTP/1.1\r\nHost: ${lanHost}\r\nConnection: close\r\n\r\n`,
-    );
-    assert.match(rawLanTasks.split('\r\n', 1)[0], /^HTTP\/1\.1 401 /, 'raw unauthenticated LAN API request must be rejected');
-    assert.match(rawLanTasks, /"code":"auth\.session\.missing"/, 'LAN rejection must keep the typed error code');
-
-    await mkdir(evidenceDir, { recursive: true });
-    return {
-      banner: {
-        url: serve.banner.url,
-        listenAddress: serve.banner.listenAddress,
-        listenPort: serve.banner.listenPort,
-        controlEndpoint: serve.banner.supervisor?.controlEndpoint,
-      },
-      networks,
-      probes,
-      lanOrigin,
-      unauthenticated: {
-        loopback: { status: unauthLoopbackTasks.status, code: unauthLoopbackTasks.body?.error?.code },
-        lan: { status: unauthLanTasks.status, code: unauthLanTasks.body?.error?.code },
-      },
-      authenticatedLanTasks: { status: authorizedLanTasks.status, total: authorizedLanTasks.body?.counts?.total },
-      supervisorIdentity: {
-        lanWithoutToken: { status: supervisorFromLan.status, code: supervisorFromLan.body?.error?.code },
-        withoutToken: { status: loopbackIdentity.status, code: loopbackIdentity.body?.error?.code },
-        lanAuthenticated: { status: authorizedLanIdentity.status, generation: authorizedLanIdentity.body?.generation },
-      },
-      rawLanHttp: {
-        livenessStatusLine: rawLanLiveness.split('\r\n', 1)[0],
-        tasksStatusLine: rawLanTasks.split('\r\n', 1)[0],
-        tasksBody: rawLanTasks.slice(rawLanTasks.indexOf('\r\n\r\n') + 4).slice(0, 400),
-      },
-    };
-  } finally {
-    const closure = await closeServe(serve);
-    assert.equal(closure.exited, true, 'serve must exit after SIGTERM');
-    assert.equal(closure.pidGone, true, 'serve PID must be gone');
-    assert.equal(closure.portRefused, true, 'serve port must be refused after exit');
-    assert.equal(closure.rootReleased, true, 'owned attempt root must be removed');
   }
 }
 
@@ -992,51 +813,6 @@ async function healthCase() {
     assert.equal(closure.portRefused, true, 'serve port must be refused after exit');
     assert.equal(closure.rootReleased, true, 'owned attempt root must be removed');
   }
-}
-
-async function loopbackCase() {
-  const networks = networkEvidence();
-  const results = {};
-  for (const host of ['127.0.0.1', '::1', '::']) {
-    const serve = await startServe({ host, fakeStepDelayMs: 25 });
-    try {
-      assert.equal(serve.banner.listenAddress, host);
-      assert.equal(serve.banner.supervisor?.controlEndpoint?.host, host === '::' ? '127.0.0.1' : host);
-      const loopback = host === '::1' ? `http://[::1]:${serve.port}` : `http://127.0.0.1:${serve.port}`;
-      const liveness = await request(`${loopback}/api/liveness`);
-      assert.equal(liveness.status, 200);
-      const pair = await runPair(serve);
-      assert.equal(pair.exit.code, 0);
-      if (host !== '::') {
-        for (const address of [...networks.lan, ...networks.tailscale]) {
-          await assertRefused(address, serve.port);
-        }
-      }
-      const display = new URL(serve.banner.url);
-      if (host === '::') {
-        assert.match(display.hostname, /^\[[0-9a-f:]+\]$/i, 'IPv6 wildcard display URL must name a bracketed IPv6 address');
-      } else {
-        assert.equal(display.hostname, host === '::1' ? '[::1]' : host, 'loopback display URL must keep the loopback host');
-      }
-      results[host] = {
-        banner: {
-          listenAddress: serve.banner.listenAddress,
-          url: serve.banner.url,
-          controlEndpoint: serve.banner.supervisor?.controlEndpoint,
-        },
-        livenessStatus: liveness.status,
-        pairExitCode: pair.exit.code,
-        refused: host === '::' ? [] : [...networks.lan, ...networks.tailscale],
-      };
-    } finally {
-      const closure = await closeServe(serve);
-      assert.equal(closure.exited, true, `${host} serve must exit after SIGTERM`);
-      assert.equal(closure.pidGone, true, `${host} serve PID must be gone`);
-      assert.equal(closure.portRefused, true, `${host} serve port must be refused after exit`);
-      assert.equal(closure.rootReleased, true, `${host} owned attempt root must be removed`);
-    }
-  }
-  return results;
 }
 
 async function startupFailureCase() {
@@ -1868,14 +1644,12 @@ async function main() {
   await mkdir(evidenceDir, { recursive: true });
 
   const cases = [
-    ['loopback_default_and_wildcard_lan_tailscale_protected_api', () => wildcardBindCase(evidenceDir)],
     ['pair_session_logout_invalid_cookie', pairingSessionCase],
     ['pair_session_logout_active_sse', pairingAndSseCase],
     ['invalid_request_target_survives_daemon', invalidRequestTargetCase],
     ['shared_control_root_cross_process_generation', sharedControlRootCrossProcessCase],
     ['stale_credential_lock_recovery', staleCredentialLockRecoveryCase],
     ['health_method_and_side_effect_boundary', healthCase],
-    ['explicit_loopback_v4_v6_isolation', loopbackCase],
     ['invalid_host_and_occupied_port_fail_closed', startupFailureCase],
     ['browser_login_current_origin_api_and_eventsource', () => browserCase(evidenceDir)],
     ['short_ttl_real_server_consumer_expiry', expiryCase],

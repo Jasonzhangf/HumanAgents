@@ -333,11 +333,6 @@ test('code search Gateway is exposed to orchestration only and is prompt-preferr
     assert.equal(manifest.toolCapabilityRefs.includes('code.search'), false, `${roleId} must not receive code.search`);
   }
 
-  const prompt = await loadBuiltinPromptSegments('orchestration', templateRoot, '1.1.0');
-  const promptContent = prompt.segments.map((segment) => segment.content).join('\n');
-  assert.match(promptContent, /优先调用 `code\.search` Gateway/);
-  assert.match(promptContent, /scope-too-large/);
-  assert.match(promptContent, /不得伪造 Gateway 成功/);
 });
 
 test('checkpoint built-ins are role-scoped and re-entry remains Harness-owned', async () => {

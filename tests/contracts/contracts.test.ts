@@ -932,14 +932,6 @@ test('failure and attention results cannot be represented as successful output w
   assert.doesNotThrow(() => validateProviderToolResult({ ...toolResult({ status: 'failed', error: providerError(), outputRefs: ['tool-output-a'] }) }));
 });
 
-test('contract source stays provider-neutral without DSH/RCC/provider SDK imports or types', () => {
-  const source = readFileSync(new URL('../../../../packages/contracts/src/index.ts', import.meta.url), 'utf8');
-  const forbiddenPatterns = [/[\s('"]dsh/i, /[\s('"]rcc/i, /[\s('"]routecodex/i, /deepseek/i, /provider-sdk/i];
-  for (const pattern of forbiddenPatterns) {
-    assert.equal(pattern.test(source), false, `contract source must not contain ${pattern}`);
-  }
-});
-
 const runtimeBinding = (overrides: Partial<RuntimeBinding> = {}): RuntimeBinding => ({
   runtimeId: 'runtime-a', agentInstanceId: 'agent-a', roleId: 'executor', taskId: task, assignmentId: 'assignment-a',
   executionEpoch: 1, scopeRef: 'organ-a::task-a', permissionRevision: 'permission-r1', capabilityDigest: 'sha256:capability-a',

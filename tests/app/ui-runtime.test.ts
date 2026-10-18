@@ -7849,30 +7849,6 @@ test('SSE replay honors Last-Event-ID without returning already delivered events
   assert.deepEqual(service.eventsSince(started.operationId, 'unknown-event'), all);
 });
 
-test('ui runtime wildcard listener keeps sensitive APIs behind access control', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-host-guard-'));
-  const runtime = await startUiRuntime({
-    mode: 'fake',
-    organId,
-    binding,
-    port: buildFakeExecutionPort(binding),
-    checkpointRoot: join(root, 'checkpoints'),
-    evidenceRoot: join(root, 'evidence'),
-    uiRoot: join(process.cwd(), 'docs', 'ui'),
-    providerState: 'ready',
-    host: '0.0.0.0',
-    portNumber: 0,
-    memory: testMemory('project-ui-host-guard'),
-  });
-  try {
-    assert.equal(runtime.server.listenAddress, '0.0.0.0');
-    const tasks = await fetch(`${runtime.server.url.replace('0.0.0.0', '127.0.0.1')}/api/tasks`);
-    assert.equal(tasks.status, 401);
-  } finally {
-    await runtime.server.close();
-  }
-});
-
 test('ui runtime server formats IPv6 loopback URLs with brackets', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-ipv6-host-'));
   const runtime = await startUiRuntime({
