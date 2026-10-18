@@ -470,7 +470,15 @@ export class JsonlOrganJournal {
     if (commitId !== undefined) {
       const existing = verification.records.find((record) => record.commitId === commitId);
       if (existing) {
-        if (existing.commitFactDigest === digestCommitFact(input)) return existing;
+        if (existing.commitFactDigest === digestCommitFact(input)) {
+          const handle = await open(this.filePath, 'a');
+          try {
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          return existing;
+        }
         throw new JournalCommitConflictError(commitId, existing);
       }
     }
@@ -637,3 +645,4 @@ export { JsonlTaskIdentityJournal } from './task-identities.js';
 export type { TaskIdentityAppendInput } from './task-identities.js';
 export { JsonlOperationCompletionJournal } from './operation-completion.js';
 export { JsonlInteractionParentTurnJournal } from './interaction-parent-turn-journal.js';
+export { createJsonlAssignmentGraphJournal, decodeAssignmentGraphRecords } from './assignment-graph.js';
