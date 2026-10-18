@@ -1,5 +1,28 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 socket 定因与当前 gap 文档校正
+
+- r450/r451已terminal0：精确HA start asset为`provider-16fdbb56e029531d-start-rcc-v3---start`，当次HTTP200后stream以UND_ERR_SOCKET终止。失败/成功Task共用MiniMax-M3/Responses/4444/rcc:default及五个wire字段，区别为instructions/input/helpertools与执行工具；没有证据证明字段无效。RCC503候选缺HAid/rawinput，仅时间相关，不能定因。原epoch5不再重投，原因UNKNOWN。
+- r453已派独立Astra技术攻关，只读形成最小补证计划；不作Reviewer、不改schema/工具、不自动epoch6。r454 fresh GCM定点核逐个实际启用工具的语义提取与既有独立review覆盖；协议工具往返不能代替这个完整goal维度，缺既有证据时仅报告具体缺口，不自动扩测。
+- r452 docs writer终态0但只输出未执行的工具调用文本，实际零diff，Root拒收；文档fastpath由Root接管。已定向更新Provider gap计划顶部/G1..G9/A–G当前状态，保留历史作者回执、未闭合taskless/治理及installed/live范围。没有改图、源码、需求或验收标准；针对性diff-check通过，不因文档更新重测代码。
+
+## 2026-10-18 原 taskless epoch5 已执行失败，继续只读定因
+
+- r448实际脚本exit2，在官方pair对control/security chmod时被worker sandbox拒绝；attempt未建立、业务POST0。Root核目录owner/mode正常，按已授权官方pair修正同GCM派发的controlroot writable目录，未改权限或换通道绕过。r449实际脚本只执行一次业务POST，exit1；worker自身terminal0不冒业务成功。
+- UTC11:54:18.405Z原interaction2 interpret→HTTP409 `transport.failure`，嵌套`UND_ERR_SOCKET: other side closed`。精确请求request-b2847fb0-09e8-4d22-88bf-e13bfd3812d3，原turn/binding/input不变，gen40；typed after-state为epochs1..5、当次failed、resourceclose closed/epoch5、acceptedFacts0、helper0、semanticcheckpoint null、原interaction matching、Task总数仍1。原问题未回答，没有epoch6或自动重放。已交付GC保活修复不因此宣称解释历史socket错误。
+- r450 fresh GCM只读核本次HA实际请求及UTC11:54:08..28的RCC现有snapshot，比较requestshape/rawresponse/error，未授权新模型请求、config变更或新测试。原因仍UNKNOWN；“新修复后仍失败”不是外部RCC定因。canonical窗口已归还peer，本侧不重启/再投业务。
+- r447需求证据映射已terminal0，13项active逐项核对；11项已有各自限定范围证据，simple-answer原canonical与治理仍未闭合。其观察截止r448前置，Root以r449实际失败更新，不保留“epoch5未执行”的过期结论。原RCC Task2仍等待peer最终owner验收。缺少installed全协议/任意N/所有角色组合样本并非新增矩阵理由，继续复用既有充分性裁决；无新增已证实产品缺码。
+- 实际回执：RUN/native-original-resume-execute-r449-20261018/{execution.json,response.json,after-state.json}；RUN/native-goal-evidence-map-observe-r447-20261018/observation.md。完整goal ACTIVE/INCOMPLETE。
+
+## 2026-10-18 下一增量：原 taskless turn 的当前状态与单次恢复
+
+- r446已terminal0但只完成前置，未来执行意向不算业务调用。实际preflight status200/ready、interaction matching、原input/currentrequest均664字节且完全相等、epochs1..4/4close/无helper/semanticcheckpoint。其requestIds过滤漏掉request记录、recordCount统计共享Journal，Root未接受这些字段作精确turn计数；应读typed snapshot.requests/acceptedFacts。脚本直接deriveSupervisorToken偏离本派单的官方pair入口，未泄漏秘密；r448 fresh GCM已明确改为installed CLI pair、内存code/cookie，沿同一未消费的预算继续实际一次POST及readback。尚无epoch5结果。
+- r447 fresh GCM并行只读整理13项有效需求及完整goal验收维度的证据映射；这是收口准备，不做新测试/功能，也不以旧UNVERIFIED单元格推断当前缺实现。结果未接收前不报全目标完成数。
+- r444独立Gemini4medium阶段计划已返回，Root部分接受并落owner-acceptance：先当前typed preflight，再至多一次原turn恢复；不增加代码/测试/图或矩阵。纠正计划猜测的Journal路径、裸r441目录lookup错误、状态schema假定，以及“失败即可定因外部RCC”的错误推断。安装新owner修复提供一次有依据的新运行条件，但不证明历史UND_ERR_SOCKET原因。
+- r445 fresh GCM只读确认当前准确Journal中的原turn只有epochs1..4、最后seq736关闭；没有后续epoch、accepted/output/semantic checkpoint/helper或相关operationcontrol。当前leasegen40/PID11939/53007。其interaction matching/rawInput等来自r399历史快照，尚不冒当前API证明；剩余缺口为typed initialInput资产、当前完整taskCandidates序列化和authenticated实际readiness。
+- peer明确释放canonical53007；r446 fresh GCM已派同一原interaction2的preflight与条件单次POST。只有完整原始请求匹配、关闭/恢复责任等typed事实成立时才发一次，无新Task/interaction/model/route；任何失败立即停止，不发第二次。官方pair只在内存使用，不写秘密，也不调用会使所有会话失效的logout。当前尚无本轮业务结果，不称epoch5已执行。
+- peer原RCC隔离fixture56431已报告Task2/op2/epoch1真实succeeded，正在验实际SSE/Provider/副作用与UI证据；不复制其业务调用，也不将其报告扩称全G/F完成。治理仍peer并行。完整goal ACTIVE/INCOMPLETE。
+
 ## 2026-10-18 M3 与 Provider Response 所有权修复：安装复验通过
 
 - 本增量已交付远端main ed44b1dd，实际push回执 `917ea959..ed44b1dd main -> main`。本轮M3树已clean/无活动进程，普通remove/prune/pathabsent、merged分支删除；注册6→5，另5树均peer治理活动资源保留。自有node_modules仅unlink、依赖目标保留；r427/r443 consumer layouts、9项自有fixture根与r439临时probe均移除。5项失败诊断fixture先归档r443/failed-diagnostic-fixtures.tgz；resource-cleanup.json记录路径。canonical PID11939在安装case后仍存活，未对原interaction再次投业务。完整goal继续ACTIVE。
