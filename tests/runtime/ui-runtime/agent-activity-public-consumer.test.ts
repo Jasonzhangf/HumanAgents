@@ -675,6 +675,30 @@ const plannerParentSource: AgentActivityActiveSource = {
 
 const plannerBusinessClosureCommit = commit('commit-planner-business-closure', 38);
 
+// The graph case exercises the business-closure join. The Planner call is an
+// independent physical execution, so its epoch must differ from the closed
+// turn's business closure epoch while its own execution, incarnation and lease
+// stay consistent. The reused closed-turn checkpoint stays the business anchor.
+const plannerGraphIncarnation: TaskRuntimeIncarnation = incarnation(
+  'orchestration-runtime-1',
+  1,
+  'planner:active-turn-ui-operation-1',
+  plannerIncarnation.assignmentId,
+  4,
+  'orchestration',
+);
+const plannerGraphPreparation: ClosedTurnPlannerCallPreparationRecord = {
+  ...plannerPreparation,
+  execution: { ...plannerExecution, executionEpoch: plannerGraphIncarnation.executionEpoch },
+  incarnation: plannerGraphIncarnation,
+  lease: {
+    ...plannerPreparation.lease,
+    incarnation: plannerGraphIncarnation,
+    executionEpoch: plannerGraphIncarnation.executionEpoch,
+    assignmentId: plannerGraphIncarnation.assignmentId,
+  },
+};
+
 function plannerGraphInput(
   businessClosures: readonly { readonly closure: TurnClosureReference; readonly commitRef: JournalCommitRef }[],
 ): SelectTaskActualExecutionGraphInput {
@@ -687,7 +711,11 @@ function plannerGraphInput(
     childDeliveries: [],
     businessClosures,
     milestoneReviews: [],
-    plannerCalls: [plannerSource({ closure: undefined })],
+    plannerCalls: [plannerSource({
+      closure: undefined,
+      prepared: plannerGraphPreparation,
+      resumedSegment: undefined,
+    })],
     unavailableSources: [],
   };
 }
