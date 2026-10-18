@@ -26,7 +26,6 @@ import {
   UiRuntimeJournal,
   UiRuntimeService,
 } from '../../packages/app/src/ui-runtime/index.js';
-import { resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
 import { createServiceExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-composition.js';
@@ -40,6 +39,7 @@ import { ActiveTurnContext, RuntimeActiveTurnError } from '../../packages/runtim
 import type { ActiveTurnJournalPort, ActiveTurnJournalRecord } from '../../packages/runtime/src/context/active-turn-journal.js';
 import {
   AgentRuntimePoolManager,
+  OrchestrationManager,
   type ExecutionAgentPort,
   type MergeCoordinatorPort,
   type ReviewAgentPort,
@@ -57,7 +57,6 @@ import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/inde
 import { filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/evidence.js';
 import { createFilesystemRefinedDeliveryStore } from '../../packages/app/src/ui-runtime/refined-delivery-store.js';
 import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
-import { createTestOrchestrationManager } from '../runtime/orchestration/assignment-graph-test-journal.js';
 
 const organId = id('organ', 'organ-active-turn-test');
 const binding: ProviderBinding = {
@@ -442,7 +441,6 @@ test('behavior 1: FIFO admission persists the binding and call checkpoint before
       organId,
       binding,
       port,
-      runtimePaths: await resolveRuntimePaths({ workspace: root, controlRoot: join(root, 'control') }),
       checkpointStoreFor: (taskId, cycleId) => {
         checkpointStore = new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`));
         return checkpointStore;
@@ -493,10 +491,8 @@ test('behavior 1: FIFO admission persists the binding and call checkpoint before
               latestCheckpointId: latest.checkpoint.id.value,
             };
           });
-          const orchestration = createTestOrchestrationManager({
+          const orchestration = new OrchestrationManager({
             ownerId: 'active-turn-test',
-            taskId: scope.taskId!,
-            organId: scope.organId,
             runtimePool: pool,
             executionAgent: recordingExecutionAgent,
             reviewAgent: passingReviewAgent(async (input) => {
@@ -672,7 +668,6 @@ async function runBlockedDispatch(
       organId,
       binding,
       port,
-      runtimePaths: await resolveRuntimePaths({ workspace: root, controlRoot: join(root, 'control') }),
       checkpointStoreFor: (taskId, cycleId) => {
         const inner = new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`));
     if (failure === 'association') return inner;
@@ -703,12 +698,10 @@ async function runBlockedDispatch(
           });
           await admission.admitExecution(allocation);
         },
-        createTaskAssembly({ scope, executionAgent, maxAttempts, childCallPort }) {
+        createTaskAssembly({ executionAgent, maxAttempts, childCallPort }) {
           const pool = runtimePool();
-          const orchestration = createTestOrchestrationManager({
+          const orchestration = new OrchestrationManager({
             ownerId: 'active-turn-test',
-            taskId: scope.taskId!,
-            organId: scope.organId,
             runtimePool: pool,
             executionAgent: recordingExecutionAgentPort(executionAgent!, async () => {
               executionCalls += 1;
@@ -843,7 +836,6 @@ test('behavior 2: refined child delivery is returned, then adopted, and never po
       organId,
       binding,
       port,
-      runtimePaths: await resolveRuntimePaths({ workspace: root, controlRoot: join(root, 'control') }),
       checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
       attentionPort: attentionPort(),
       providerState: 'ready',
@@ -872,10 +864,8 @@ test('behavior 2: refined child delivery is returned, then adopted, and never po
         },
         createTaskAssembly({ scope, checkpointJournal, executionAgent, maxAttempts, childCallPort }) {
           const pool = runtimePool();
-          const orchestration = createTestOrchestrationManager({
+          const orchestration = new OrchestrationManager({
             ownerId: 'active-turn-test',
-            taskId: scope.taskId!,
-            organId: scope.organId,
             runtimePool: pool,
             executionAgent: executionAgent!,
             reviewAgent: passingReviewAgent(() => {}),
@@ -1241,10 +1231,8 @@ test('behavior 4: the actual acquired instance is persisted on the child invocat
             return innerExecutionAgent.execute(input);
           },
         };
-        const orchestration = createTestOrchestrationManager({
+        const orchestration = new OrchestrationManager({
           ownerId: 'active-turn-test',
-          taskId: scope.taskId!,
-          organId: scope.organId,
           runtimePool: pool,
           executionAgent: recordingExecutionAgent,
           reviewAgent: passingReviewAgent(() => {}),

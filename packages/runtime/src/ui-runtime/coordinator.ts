@@ -2723,7 +2723,6 @@ export class RuntimeTaskCoordinator {
     // executor, which resolves the driver from this record instead of a second
     // acquire or a stale placeholder.
     record.driver = prepared.driver;
-    await assembly.orchestration.initialize();
     this.bindChildCallManager(prepared.driver, assembly);
     const assignment = prepared.source.assignment;
     const stageNodeId = `stage-${operation.operationId.value}`;
@@ -2732,6 +2731,7 @@ export class RuntimeTaskCoordinator {
     this.markExecutionReleased(record, operation);
     let failure: unknown;
     try {
+      assembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
       const dispatchInput: DispatchInput = {
         stageNodeId,
         assignment,
@@ -2739,11 +2739,7 @@ export class RuntimeTaskCoordinator {
         scope,
         reviewKinds: ['quality'],
       };
-      const dispatched = await assembly.orchestration.dispatchResumedAcquired({
-        dispatch: dispatchInput,
-        acquired: prepared.acquired,
-        segmentOpenedCommitRef: prepared.segmentOpenedCommitRef,
-      });
+      const dispatched = await assembly.orchestration.dispatchAcquired(dispatchInput, prepared.acquired);
       // C3 accepts the completed review receipts on the retained turn before
       // the native close. Late reviews that land after the close stay the first
       // error; the frozen closure is never rewritten to claim completion.
@@ -4658,7 +4654,6 @@ export class RuntimeTaskCoordinator {
           maxAttempts: 1,
           ...(childCallPort === undefined ? {} : { childCallPort }),
         });
-        await record.taskAssembly.orchestration.initialize();
         this.bindChildCallManager(driver, record.taskAssembly);
         const stageNodeId = `stage-${operation.operationId.value}`;
         // Single Runtime assignment construction (shared with the admitted-turn
@@ -4666,7 +4661,7 @@ export class RuntimeTaskCoordinator {
         const assignment: WorkAssignment = record.assignment ?? this.buildWorkAssignment(record, operation, scope);
         record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
         record.nextStep = '编排执行、审查并合并';
-        await record.taskAssembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
+        record.taskAssembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
         const dispatch = () => record.taskAssembly!.orchestration.dispatch({
           stageNodeId,
           assignment,
@@ -4735,7 +4730,6 @@ export class RuntimeTaskCoordinator {
             scope,
             checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
           });
-          await record.taskAssembly.orchestration.initialize();
           this.bindChildCallManager(driver, record.taskAssembly);
         }
         await composition!.start();

@@ -1,4 +1,4 @@
-import { id, type Task, type TaskIdentityScope } from '../../contracts/src/index.js';
+import { id, type Task } from '../../contracts/src/index.js';
 import type {
   AgentIoClock,
   AgentIoRequestControl,
@@ -19,7 +19,6 @@ import { HarnessNodeRuntime } from '../../runtime/src/nodes/node-runtime.js';
 import { createDefaultNodeStrategyRegistry } from '../../runtime/src/nodes/node-strategies.js';
 import {
   AgentRuntimePoolManager,
-  type AssignmentGraphJournalPort,
   type ChildCallPort,
   type ExecutionAgentPort,
   type MergeCoordinatorPort,
@@ -34,11 +33,6 @@ import { createM3Assembly, type M3Assembly } from './m3-assembly.js';
 import { AppLifecycleError } from './errors.js';
 
 const OWNER = 'humanagent.app.serve-runtime';
-
-export type AssignmentGraphJournalFor = (input: {
-  readonly taskScope: TaskIdentityScope;
-  readonly ownerId: string;
-}) => AssignmentGraphJournalPort;
 
 function unboundExecutionError(): AppLifecycleError {
   return new AppLifecycleError(
@@ -87,7 +81,6 @@ export interface ServeRuntimeComposition {
     readonly task: Task;
     readonly scope: Parameters<typeof createM3Assembly>[0]['scope'];
     readonly checkpointJournal: CheckpointJournalPort;
-    readonly graphJournal: AssignmentGraphJournalPort;
     readonly executionAgent?: ExecutionAgentPort;
     readonly maxAttempts?: number;
     readonly childCallPort?: ChildCallPort;
@@ -196,7 +189,7 @@ export function createServeRuntimeComposition(
     agentIo,
     eventBus,
     runtimePool,
-    createTaskAssembly({ task, scope, checkpointJournal, graphJournal, executionAgent, maxAttempts, childCallPort }) {
+    createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts, childCallPort }) {
       if (!input.reviewAgent || !input.mergeCoordinator) {
         throw new AppLifecycleError(
           'serve.m3.ports-missing',
@@ -219,7 +212,6 @@ export function createServeRuntimeComposition(
         },
         feedbackPublisherId: input.feedbackPublisherId,
         checkpointJournal,
-        graphJournal,
         ...(childCallPort === undefined ? {} : { childCallPort }),
         ...(maxAttempts === undefined ? {} : { maxAttempts }),
         ...(input.now === undefined ? {} : { now: input.now }),

@@ -25,7 +25,6 @@ import type {
   TaskReviewHandle,
   TaskReviewInstanceCreateInput,
 } from '../../../packages/runtime/src/orchestration/types.js';
-import { createTestOrchestrationManager } from './assignment-graph-test-journal.js';
 import {
   type RetryCycleConfigSet,
   type RetryCycleControlRecord,
@@ -322,11 +321,9 @@ function makeHarness(input: {
       async publish(attention) { attentions.push(attention); return { attentionId: attention.attentionId, delivered: true }; },
       async resolve(attention) { return { attentionId: attention.attentionId, delivered: true }; },
     },
-    createTaskAssembly({ executionAgent, scope: assemblyScope }) {
-      const orchestration = createTestOrchestrationManager({
+    createTaskAssembly({ executionAgent }) {
+      const orchestration = new OrchestrationManager({
         ownerId: 'retry10-test-orchestration',
-        taskId: assemblyScope.taskId!,
-        organId: assemblyScope.organId,
         runtimePool,
         executionAgent: executionAgent as ExecutionAgentPort,
         reviewAgent: new Reviewer(),

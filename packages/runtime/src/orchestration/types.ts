@@ -1,9 +1,6 @@
 import type {
-  AssignmentGraphCommitRequest,
-  AssignmentGraphResumeSource,
   AssignmentRecord,
   AssignmentStatus,
-  CommittedAssignmentGraphFact,
   CycleId,
   EvidenceRef,
   ExecutionChildCallBinding,
@@ -28,32 +25,13 @@ import type {
 
 export type { TaskRuntimeIncarnation } from '../../../contracts/src/index.js';
 export type {
-  AssignmentGraphAction,
-  AssignmentGraphChange,
-  AssignmentGraphCommitRequest,
-  AssignmentGraphFact,
-  AssignmentGraphResumeSource,
   AssignmentGraphSnapshot,
-  AssignmentGraphStream,
   AssignmentKey,
   AssignmentRecord,
   AssignmentRuntimeBinding,
   AssignmentStageNode,
   AssignmentStatus,
-  CommittedAssignmentGraphFact,
-  RecordedAssignmentGraphStream,
-  TaskActualExecutionGraphHistory,
-  TaskActualExecutionGraphSnapshot,
 } from '../../../contracts/src/index.js';
-
-export interface AssignmentGraphReadPort {
-  replay(): Promise<readonly CommittedAssignmentGraphFact[]>;
-  readResumeSource(openedCommitRef: JournalCommitRef): Promise<AssignmentGraphResumeSource>;
-}
-
-export interface AssignmentGraphJournalPort extends AssignmentGraphReadPort {
-  commit(input: AssignmentGraphCommitRequest): Promise<CommittedAssignmentGraphFact>;
-}
 
 export interface OrchestrationIssue {
   readonly code: string;

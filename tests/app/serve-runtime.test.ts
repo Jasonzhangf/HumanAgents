@@ -24,7 +24,6 @@ import {
   type WorkResult,
 } from '../../packages/contracts/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
-import { createJsonlAssignmentGraphJournal } from '../../packages/adapters/jsonl/src/assignment-graph.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
@@ -425,7 +424,6 @@ function providerPort(input: {
 
 test('serve runtime composes and closes a task-scoped M3 dispatch', async () => {
   const eventBus = await eventBusPorts();
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-composition-'));
   const composition = createServeRuntimeComposition({
     eventBusPorts: eventBus.ports,
     feedbackPorts: {
@@ -453,13 +451,6 @@ test('serve runtime composes and closes a task-scoped M3 dispatch', async () => 
     task,
     scope,
     checkpointJournal: {} as CheckpointJournalPort,
-    graphJournal: createJsonlAssignmentGraphJournal({
-      filePath: taskControlPathFor(root),
-      stream: {
-        taskScope: { organId: task.organId, taskId: task.id },
-        ownerId: composition.ownerId,
-      },
-    }),
   });
 
   assembly.orchestration.planStage({ nodeId: 'serve-stage', taskId: task.id });
@@ -488,7 +479,6 @@ test('serve runtime composes and closes a task-scoped M3 dispatch', async () => 
 
   await composition.dispose();
   await eventBus.close();
-  await rm(root, { recursive: true, force: true });
 });
 
 test('confirmed requirement enters task orchestration with RCC review before provider settlement', async () => {
@@ -610,13 +600,13 @@ test('confirmed requirement enters task orchestration with RCC review before pro
     });
 
     const taskId = await waitForRuntimeTask(runtime);
-    let graph: ReturnType<ReturnType<typeof runtime.service.taskAssembly>['orchestration']['snapshot']>;
+    let graph: ReturnType<ReturnType<typeof runtime.service.taskAssembly>['orchestration']['graph']['snapshot']>;
     try {
       for (let attempt = 0; attempt < 300; attempt += 1) {
         if (runtime.service.taskDashboard(taskId).state === 'succeeded') break;
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
-      graph = runtime.service.taskAssembly(taskId).orchestration.snapshot();
+      graph = runtime.service.taskAssembly(taskId).orchestration.graph.snapshot();
       assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
     } catch (error) {
       const original = error instanceof Error ? error : new Error(String(error));
@@ -736,7 +726,7 @@ test('confirmed requirement preserves non-success provider closures through orch
       await waitForTaskState(() => runtime.service.taskDashboard(taskId).state, terminalState);
       const dashboard = runtime.service.taskDashboard(taskId);
       assert.equal(dashboard.checkpoint?.outcome, terminalState);
-      assert.equal(runtime.service.taskAssembly(taskId).orchestration.snapshot().assignments[0]?.status, terminalState === 'blocked' ? 'blocked' : 'escalated');
+      assert.equal(runtime.service.taskAssembly(taskId).orchestration.graph.snapshot().assignments[0]?.status, terminalState === 'blocked' ? 'blocked' : 'escalated');
     } finally {
       await runtime.server.close();
       await runtimeComposition.dispose();
@@ -1371,7 +1361,6 @@ test('RCC review agent uses a terminal passed verdict after an earlier failed qu
 
 test('RCC ports reach the runtime review and Harness merge gates with provider artifacts', async () => {
   const eventBus = await eventBusPorts();
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-rcc-manager-'));
   const task: Task = {
     id: id('task', 'serve-rcc-manager-task'),
     organId: id('organ', 'humanagent-ui'),
@@ -1397,13 +1386,6 @@ test('RCC ports reach the runtime review and Harness merge gates with provider a
     task,
     scope,
     checkpointJournal: {} as CheckpointJournalPort,
-    graphJournal: createJsonlAssignmentGraphJournal({
-      filePath: taskControlPathFor(root),
-      stream: {
-        taskScope: { organId: task.organId, taskId: task.id },
-        ownerId: runtimeComposition.ownerId,
-      },
-    }),
   });
   const workAssignment: WorkAssignment = {
     ...assignment(task),
@@ -1429,7 +1411,6 @@ test('RCC ports reach the runtime review and Harness merge gates with provider a
   } finally {
     await runtimeComposition.dispose();
     await eventBus.close();
-    await rm(root, { recursive: true, force: true });
   }
 });
 
