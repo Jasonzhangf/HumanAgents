@@ -12,6 +12,7 @@ import {
   type AcceptedRawFact,
   type ActiveTurnBinding,
   type ActiveTurnCaptureBody,
+  type Checkpoint,
   type CompletionReadInput,
   type EvidenceRef,
   type FileWriteEffect,
@@ -44,11 +45,14 @@ import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-gr
 import type { TaskGrantAuthority, TaskGrantRegistrationPort } from '../../packages/runtime/src/admission/task-grant.js';
 import { produceAdmittedTurn, type RuntimeBindingSnapshot } from '../../packages/runtime/src/admission/admitted-turn.js';
 import { resumeActiveTurnSegment, type ActiveTurnSegmentAdmission } from '../../packages/runtime/src/context/active-turn-segments.js';
+import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import {
   createActiveTurnSegmentJournal,
   createNativeRecoveryAssets,
   segmentCaptureAssetId,
 } from '../../packages/app/src/native-recovery-assets.js';
+import { createInspectionStopResourceReader } from '../../packages/app/src/inspection-stop-resources.js';
+import { createJsonlCheckpointJournal } from '../../packages/app/src/checkpoint-journal.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import type { ActiveTurnProductionObligationRef } from '../../packages/runtime/src/context/active-turn-live-prefix.js';
@@ -153,6 +157,30 @@ function identity(turnId: string): Identity {
     scope,
   };
   return { taskId, scope, runtime, assignment, binding };
+}
+
+function checkpoint(
+  scope: ScopeRef,
+  cycleId: Checkpoint['cycleId'],
+  idValue: string,
+  executionEpoch: number,
+  seq: number,
+  previousCheckpointId: Checkpoint['previousCheckpointId'],
+): Checkpoint {
+  return {
+    id: id('checkpoint', idValue),
+    scope,
+    cycleId,
+    seq,
+    previousCheckpointId,
+    directiveRevision: 1,
+    executionEpoch,
+    outcome: 'stopped',
+    summary: `physical inspection stop ${idValue}`,
+    recoveryStateRef: evidence(`checkpoint-recovery-${idValue}`, scope),
+    evidenceRefs: [evidence(`checkpoint-evidence-${idValue}`, scope)],
+    next: { kind: 'recover', ref: `recovery://${idValue}` },
+  };
 }
 
 function rawEnvelope(input: {
@@ -685,6 +713,95 @@ test('J1 v2 backing: original v1 capture, real TG1 reservation to S1/S2, fresh c
         recovery: recoveryFacts({ binding: value.binding, unresolvedOperationRefs: [] }),
       },
     });
+
+    // Commit two real checkpoints at the physical epochs selected by the factory.
+    const checkpointJournal = createJsonlCheckpointJournal({
+      filePath: journalPath,
+      journal: new JsonlOrganJournal(journalPath),
+    });
+    const initialCheckpoint = checkpoint(
+      value.scope,
+      value.scope.cycleId!,
+      'inspection-stop-initial',
+      1,
+      1,
+      null,
+    );
+    await checkpointJournal.append({
+      ownerId: 'j1-segment-inspection-stop',
+      commitId: checkpointCommitId(initialCheckpoint),
+      checkpoint: initialCheckpoint,
+    });
+    const resumedCheckpoint = checkpoint(
+      value.scope,
+      value.scope.cycleId!,
+      'inspection-stop-s2',
+      3,
+      2,
+      initialCheckpoint.id,
+    );
+    await checkpointJournal.append({
+      ownerId: 'j1-segment-inspection-stop',
+      commitId: checkpointCommitId(resumedCheckpoint),
+      checkpoint: resumedCheckpoint,
+    });
+    const initialCommitted = await checkpointJournal.readCommitted(value.scope, initialCheckpoint.id);
+    const resumedCommitted = await checkpointJournal.readCommitted(value.scope, resumedCheckpoint.id);
+    if (initialCommitted === null || resumedCommitted === null) {
+      throw new Error('physical checkpoint readback must be committed');
+    }
+
+    const inspectionResources = createInspectionStopResourceReader({
+      journal: new JsonlOrganJournal(journalPath),
+      journalPath,
+      assetRoot,
+      completionJournalPath,
+    });
+    const initialSource = await inspectionResources.forCheckpoint(initialCommitted);
+    if (initialSource === null) throw new Error('the original physical capture must be selected');
+    assert.equal(initialSource.turn.turnId, turnId);
+    assert.equal(initialSource.boundaryId, `boundary-original-${turnId}`);
+    assert.equal(initialSource.recoveryAssetsReceiptRef, originalV1Receipt.commitIdentity);
+    assert.equal(initialSource.segmentSource, undefined);
+
+    const resumedSource = await inspectionResources.forCheckpoint(resumedCommitted);
+    if (resumedSource === null || resumedSource.segmentSource === undefined) {
+      throw new Error('the resumed S2 physical capture must be selected');
+    }
+    assert.equal(resumedSource.turn.turnId, turnId);
+    assert.equal(resumedSource.boundaryId, s2BoundaryId);
+    assert.equal(resumedSource.recoveryAssetsReceiptRef, s2Receipt.commitIdentity);
+    assert.equal(resumedSource.segmentSource.opened.segmentId, segmentId2);
+    assert.equal(resumedSource.segmentSource.originalAdmittedTurn.turnId, turnId);
+
+    const readBoundaryRecoveryAssetsExact = resumedSource.assets.readBoundaryRecoveryAssetsExact;
+    if (readBoundaryRecoveryAssetsExact === undefined) {
+      throw new Error('the inspection stop assets port must expose the exact boundary reader');
+    }
+    const s1Boundary = await readBoundaryRecoveryAssetsExact.call(
+      resumedSource.assets,
+      s1Receipt.commitIdentity,
+    );
+    assert.equal(s1Boundary.version, 2);
+    if (s1Boundary.version !== 2) return;
+    assert.equal(s1Boundary.source.opened.segmentId, segmentId1);
+    assert.equal(s1Boundary.assets.receipt.commitIdentity, s1Receipt.commitIdentity);
+    const originalBoundary = await readBoundaryRecoveryAssetsExact.call(
+      resumedSource.assets,
+      originalV1Receipt.commitIdentity,
+    );
+    assert.equal(originalBoundary.version, 1);
+    if (originalBoundary.version !== 1) return;
+    assert.equal(originalBoundary.assets.receipt.commitIdentity, originalV1Receipt.commitIdentity);
+    assert.deepEqual(originalBoundary.assets.prepared.body, body);
+    await assert.rejects(
+      () => readBoundaryRecoveryAssetsExact.call(
+        resumedSource.assets,
+        'recovery-assets:v2:missing',
+      ),
+      /receipt is not committed/,
+    );
+
     const s2Exact = await initialNative.readCaptureAssetsExact(s2Receipt.commitIdentity);
     assert.equal(s2Exact.version, 2);
     if (s2Exact.version !== 2) return;
@@ -706,6 +823,45 @@ test('J1 v2 backing: original v1 capture, real TG1 reservation to S1/S2, fresh c
     assert.equal(finalBytes.slice(0, journalBytesBeforeSegments.length), journalBytesBeforeSegments, 'the original v1 journal prefix is byte-stable');
     const rereadOriginal = await initialNative.readRecoveryAssetsExact(originalV1Receipt.commitIdentity);
     assert.deepEqual(rereadOriginal.prepared.body, body, 'the original v1 capture is unchanged');
+
+    // A second real committed binding with the same full scope and physical
+    // epoch makes the selector ambiguous. It must fail instead of taking the
+    // last Journal match.
+    const aliasTurnId = 'business-turn-alias';
+    const aliasAdmittedTurn = produceAdmittedTurn({
+      runtime: value.runtime,
+      taskId: value.taskId,
+      scope: value.scope,
+      assignment: value.assignment,
+      directiveRevision: 1,
+      turnId: aliasTurnId,
+      currentTurnRef: `active-turn://${aliasTurnId}`,
+      admissionEvidence: [evidence('ambiguous-admission', value.scope)],
+      recoveryStateRef: evidence('ambiguous-recovery', value.scope),
+    });
+    const aliasBinding: ActiveTurnBinding = {
+      admittedTurn: aliasAdmittedTurn,
+      assignment: value.assignment,
+      execution: { ...value.binding.execution },
+      scope: value.scope,
+    };
+    const aliasJournal = createJsonlActiveTurnJournal({
+      filePath: journalPath,
+      journal: new JsonlOrganJournal(journalPath),
+      turnId: aliasTurnId,
+    });
+    await aliasJournal.append({
+      commitId: activeTurnCommitId(aliasTurnId, 'binding-opened'),
+      record: {
+        kind: 'binding-opened',
+        binding: aliasBinding,
+        currentTurnRef: aliasAdmittedTurn.currentTurnRef,
+      },
+    });
+    await assert.rejects(
+      () => inspectionResources.forCheckpoint(initialCommitted),
+      /inspection stop resource physical binding is ambiguous: multiple candidates for the same task scope and execution epoch/,
+    );
   });
 });
 
