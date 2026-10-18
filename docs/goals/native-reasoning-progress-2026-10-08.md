@@ -9,6 +9,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r324派单缺精确plan路径导致worker扫描旧runs，parent承担派单错误；精确INT PID35289/exit1后保原树，r325明确绝对路径续派，无Provider编辑丢失。r325实RED缺budget-write-2结果0vs1→GREEN原完整case1/1，原Providerbudgetcase1/1，truthfulfailed/nonexecution输出已进入durablecontext，零第二工具effect。正常sourcecommit7fccbbe4+merge最新main后Root再build/tsc0、完整case1/1/既有gateway2/2/providerbudget1/1（session98426）。预算6file独立整体Review：r326Opus实quota未审，freshGemini r327进行；未混inspection/未main。
+- 按peer诊断需求，仅测试7bc2/ecf7/f036已标准组合为candidate41c33eac/509a019b/20899590，contracts/Appbuild/native-textcompile0（session62938），stablecorrectdist已交peer一次stop409inspector诊断。未重跑旧红，测试WIP不算验收；candidate dist暂停重编至peer窗口释放。
+
 - r323独立Gemini计划已接收（exit0），parent采B最小复用：Provider工具轮次预算拒绝时，为已收到但未执行的整批calls持久真实failed/code tool.round-limit/executedfalse结果，再抛原typederror；不调用executor、不产生effectintent/completion、不把输出当控制真源。方案取舍不以旧测试断言定义用户需求。r324freshGCM已在原预算树按同case配对失败output RED→driver修复→完整durabletail GREEN执行；受影响原Providerbudgetcase按变更选测，不扩矩阵。当前未验收，不Review/main。
 
 - deliverycanonical来源5d40b99b已cherry候选83bed0b9；组合contracts/agentloop/nativeAppcompile0、原16/16PASS（session48248）。正确native-text+显式同源CLI原3turn一次实际FAIL（session25906），已到3Planner24POST，无delivery比较冲突。新首错`delivery evidence task-business:v1:3ab02d7f2b2ffe6978a084285c60d06fe710b8e26d887c6b1d5fa35964584f76 does not resolve to an accepted tool result`；fixturexTp1hH保留并交peer核actualref/producer/fixture，不改validator。UX纯文档7755d22b已cherry2ef8de19；stop7bc2仍hold，待definition形状小Plan，未计验收。
