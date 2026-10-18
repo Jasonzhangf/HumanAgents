@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 F13 旧恢复材料边界观察已交回 UX owner
+
+- r468 fresh GCM只读观察已完成。指定旧材料未出现PID42804，日志为43040；旧v1 predecessor实际存在、后续segment已opened但无v2，更接近interrupted-v2。旧脚本用initial predecessor，当前canonical先选tail；旧RED不等于当前仍失败，也不能仅凭当前source分支称旧fixture已恢复。
+- initial-open已有installed fresh-process正向证据继续有效；interrupted-v2当前源码与公开case存在，但本次指定证据未找到其当前运行receipt。报告引用负向测试源码仅证明case/断言存在，不作为本轮执行PASS，也不证明全历史没有后继证据。
+- 唯一最小候选动作是对保留fixture用当前built owner只读解析canonical恢复请求，核interrupted anchor与pending obligation；按派单仅列缺口，未执行新读取/测试/崩溃/模型/恢复。完整报告与限定接收见RUN/native-f13-boundary-observe-r468-20261018/{observation.md,owner-reception.md}，已交UX owner作F13最终裁定。完整goal ACTIVE/INCOMPLETE。
+
 ## 2026-10-18 治理交付后阶段计划：本侧当前0个ready实现任务
 
 - r467 fresh Gemini4 medium 独立阶段计划已返回，CLI exit0；Root接收其调度结论：当前没有已证实且依赖已满足的本侧Provider/Runtime代码或新测试任务，不开新树、不补协议/角色矩阵。既有r315/r330/r415/r456/r466充分性范围复用；阶段计划不是最终goal审计。
