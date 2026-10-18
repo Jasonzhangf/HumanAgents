@@ -1,5 +1,14 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 设计已通过，实际图 P1 基础进入实现
+
+- r478–r481 长计划虽各自执行成功，但错误类型/真源/图引用与基础依赖问题未获业务 READY 接受，原稿和接收记录保留。独立 GPT6.1 与 Astra 技术报告已完成源码攻关；选定同 task/owner 的 Organ Journal typed 图事实、Runtime 唯一 prepare/commit/apply/replay、真实 successor 回执授权与保留原 assignment 的冷恢复边界，不添加不存在的执行依赖引擎。技术报告不是实现或行为 PASS。
+- r482 短计划及单载体 amendment 已接受为编码前设计输入。fresh Gemini4 medium 独立 Reviewer `15b7089c-3ae6-4864-b2cb-ff5570c00955` 首 r483 三 P1 中不实引用经同 Reviewer r484 撤回；真实 carrier 缺口由 `design-amendment.md` 补正。r485 实际 SUCCESS/exit0，完整 JSON 经现有原 classifier 裁决 PASS / controller_no_blocking_findings / findings[]。本次只覆盖需求→设计→验收路径，不替代作者后的整体 milestone Review；所有新增行为仍 UNVERIFIED。证据：`RUN/native-actual-graph-design-amendment-r485-20261018/{plan.md,classification.json,owner-reception.md}`。
+- 已固定只读单载体 `RuntimeAgentActivityProjection.actualExecutionGraph`，正式两端沿成功的 `agentActivity.value` 读取。App 用同批已验证 controlRecords 解码、Runtime 纯 replay、Core 原 guidance，再交 UI 唯一 helper；GET 不创建 Manager、不执行恢复，失败不伪空成功，旧历史缺 facts 明示。真实恢复引用是 `resumed.appendReceipt`（本身为 JournalCommitRef）。amendment：`/Volumes/Intel/playground/humanagent/.worker-runs/actual-graph-foundation-20261018/design-amendment.md`。
+- P1 fresh GCM 已实际开工，thread `01a14fee-4c11-7821-bce4-47f49a2cff9d` / 工具 session6125，在唯一集成树 `ux-next-increment-20261018` 承担 contracts/required ports/纯 prepare-apply-replay/受影响图合同基础。已读 worker `note.md`：完成实际源与四图职责检查，保持拓扑、更新写/恢复与只读载荷合同；尚无基础验收或候选交付结果，不能按节点笔记冒完成。记录：`/Volumes/Intel/playground/humanagent/.worker-runs/actual-graph-foundation-20261018/`。
+- P1 完成并交付准确 `interfaces.md`、基础 consumer 后，JSONL、Runtime、App、UI 可按不重叠 owner 四路并发。App/JSONL 草稿已备于 `/Volumes/Intel/playground/humanagent/.worker-runs/actual-graph-app-20261018/task.md` 与 `actual-graph-jsonl-20261018/task.md`，均 DRAFT / NOT DISPATCHABLE，待 Root 补真实签名、选测 selector 并确认独占树。本侧未创建后续树或启动代码worker；Runtime/UI 合同由 UX owner 准备。
+- 完整 goal 仍 ACTIVE / INCOMPLETE；本条是设计与 P1 开工进度，不是完整图代码交付，也不关闭原 taskless socket UNKNOWN。纯文档更新不重复安装、重启、测试或 Review。
+
 ## 2026-10-18 最新推进：UI 已交付，实际任务图缺边进入独立规划
 
 - 完整 goal 仍 ACTIVE / INCOMPLETE。下列新事实覆盖下文旧的“r471待派”“r475待核”状态，不重开已充分的 F13，也不把当前图缺边混作 Provider 协议缺陷。
