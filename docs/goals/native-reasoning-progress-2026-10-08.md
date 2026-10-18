@@ -1,5 +1,15 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 已交付：失败 parent 的准确恢复 capture 与实际 Provider close
+
+- 本增量已进入远端main `19fd6aa2`，原push回执`33641fcc..19fd6aa2 main -> main`。五文件126insertions/12deletions：两份既有图合同、App失败close、Runtime失败catch及原公开consumer；没有新Provider API/guard、事件schema、lease registry或测试矩阵。完整原生goal仍ACTIVE/INCOMPLETE，不把本增量算全G完成。
+- App在没有accepted standard end时复用prepareCapture，完成实际producer drain/settlement与exact recovery capture后关闭自有Provider；捕获失败仍尝试同一ownedclose并保留首错/aggregate。不伪造summary/标准checkpoint/Planner/steer，不重放child或工具。Runtime保留原始业务错误、区分真实cleanup，并只在实际closed且非retained时把同次close evidenceRefs转给既有parent final事件；事件是观测，不成为控制真源。
+- 原r383行为RED0/1准确暴露双重cleanup；r386独立缺失close观测RED0/1。r384仅capture/raw部分1/1，不冒物理关闭验收。后续错误checkpoint排除、locator scheme及organ字符串期待均属测试设计错误，已纠正，不冒产品RED。最终Root r388 `owner-compile.log`/`owner-test.log`（session56161）实际exit0/原单例完整1/1：原错逐字保留，exact capture/raw可读，child/precall保存、五阶段not-executed、无standardSave/Planner/replay；exact task/op/epoch final事件中真实close资产可读，内容匹配实际endpoint及binding。既有binding gate8nodes通过，拓扑不变。
+- 独立整体Review r389因重复wholefile读取被Root明确INT，非后端不可用或PASS。同一Reviewer独立conversation续r390改用定点读取，实际Gemini4medium/SUCCESS/exit0，严格四字段JSON/findings[]，既有classifier裁决PASS，原始结果与review-outcome.json留r390。无额外小节点Review。
+- main Contracts/Config/App/nativecompile、package:candidate、install:global串行全部exit0（6945）。官方installed restart0（11936）：gen33/PID87121→gen34/PID56021，53007，legacyCloseclean；随后认证runtime status HTTP200。installed同原完整case使用canonicalCLI和真实installed模块，1/1PASS/exit0（22567），不是worktree模块替代，也不冒live RCC generation或远端TCP/服务进程退出证明。证据在`native-parent-cleanup-installed-r391-20261018/{installed-test.log,restart.json,runtime-status.json,cleanup.json}`。
+- 当轮清理完成：原native-parent-cleanup树clean且已合流，普通remove/prune/testabsent，merged分支正常删除；注册6→5，仅main与4个peer活动树保留。consumer-layout和两项本侧fixture根已移除；失败fixtures先归档r391/failed-fixtures-evidence.tgz，原始run日志保留。未清理peer/历史归属未决资源。
+- 接续：本侧父级cleanup增量已交付；UX peer继续M4 scoped Observation、输入约束链及M5确认入口，peer已释放本次安装窗口。原taskless interaction-2、turn explicit-interpret-9d150a9f-ccc3-4c5b-ac86-cd1272aae6bb、rcc-entry/MiniMax-M3的EOF根因仍UNKNOWN，不盲重试或替换Task/模型。下一轮独立Planner须按完整goal与有效证据核清剩余必需项，不使用旧0/7或7/7伪计数，不新增无依据功能/测试。
+
 ## 2026-10-17 父级失败收拢实现中：原错误已消除，增强用例未全过
 
 - r382 fresh OAuth GPT6.1 medium 局部技术计划已terminal0并经Root接收：已durable接纳的业务failed tool不会永久锁住producerFailure，复用App既有prepareCapture即可drain→实际settle→精确capture；Provider实现及close guard不改。原同域树正常FF到9bee40b7，没有新树。
