@@ -1476,6 +1476,20 @@ export function createDefaultExecutionComposition(input: {
           if (closed) return closed;
           const attempt = (async () => {
             if (capturedStop) return closeOwnedProvider();
+            if (!acceptedEnd) {
+              try {
+                await liveNative.prepareCapture(boundaryId);
+              } catch (captureError) {
+                try {
+                  await closeOwnedProvider();
+                } catch (closeError) {
+                  throw new AggregateError([captureError, closeError],
+                    'native failed-turn capture and owned Provider close failed');
+                }
+                throw captureError;
+              }
+              return closeOwnedProvider();
+            }
             try { await saveBoundary(); }
             catch (error) {
               try { await closeOwnedProvider(); }
