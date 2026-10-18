@@ -87,6 +87,27 @@ import {
   segmentOpenedFromRecord,
 } from '../checkpoint-journal.js';
 
+export type ConfirmedControlExpectedConflictReason =
+  | 'current-control-stale'
+  | 'operation-control-changed'
+  | 'grant-authority-changed'
+  | 'confirmed-basis-conflict'
+  | 'command-facts-conflict';
+
+/**
+ * A verified control race or stale confirmation, not a Journal or IO fault.
+ * The HTTP owner maps this narrow class and keeps all other failures unchanged.
+ */
+export class ConfirmedControlExpectedConflict extends Error {
+  constructor(
+    readonly reason: ConfirmedControlExpectedConflictReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ConfirmedControlExpectedConflict';
+  }
+}
+
 /**
  * Cold-only current-facts read over the authoritative Organ Journal.
  *
@@ -669,7 +690,8 @@ function expectedCurrentControl(
   if (current.position.executionEpoch !== command.basis.expectedExecutionEpoch
     || !sameCommit(current.position.controlCommitRef, command.basis.expectedControlReceipt)
     || !sameCommit(current.position.contextCommitRef, command.basis.expectedContextReceipt)) {
-    throw new Error('context correction current control token is stale');
+    throw new ConfirmedControlExpectedConflict('current-control-stale',
+      'context correction current control token is stale');
   }
   return current;
 }
@@ -691,7 +713,8 @@ function assertCurrentOperationControl(
     throw new Error(`context correction operation control is unknown: ${readback.reason}`);
   }
   if (!sameCommit(readback.currentControlCommitRef, command.expectedOperationControlCommitRef)) {
-    throw new Error('context correction operation control token changed');
+    throw new ConfirmedControlExpectedConflict('operation-control-changed',
+      'context correction operation control token changed');
   }
 }
 
@@ -705,7 +728,8 @@ function assertCurrentGrant(
     || readback.grant.owner !== command.basis.principalOwner
     || String(readback.grant.revision) !== command.permissionRevision
     || !sameCommit(readback.commitRef, command.expectedGrantCommitRef)) {
-    throw new Error('context correction grant token or permission revision changed');
+    throw new ConfirmedControlExpectedConflict('grant-authority-changed',
+      'context correction grant token or permission revision changed');
   }
 }
 
@@ -762,7 +786,8 @@ function buildCorrectionFromRecords(
   };
   const basis = buildConfirmedContextCorrectionBasis(facts);
   if (JSON.stringify(basis) !== JSON.stringify(command.basis)) {
-    throw new Error('context correction confirmed basis conflicts with authoritative Journal facts');
+    throw new ConfirmedControlExpectedConflict('confirmed-basis-conflict',
+      'context correction confirmed basis conflicts with authoritative Journal facts');
   }
   return buildContextCorrection({
     command,
@@ -953,7 +978,8 @@ function buildReentryFromRecords(
   const existing = readReentryFromRecords(records, taskScope, command.commandId);
   if (existing !== null) {
     if (!sameConditionalReentryCommand(existing.record.command, command)) {
-      throw new Error('conditional reentry command id is already committed with different confirmed facts');
+      throw new ConfirmedControlExpectedConflict('command-facts-conflict',
+        'conditional reentry command id is already committed with different confirmed facts');
     }
     return existing.record;
   }
@@ -966,7 +992,8 @@ function buildReentryFromRecords(
   }
   if (current.position.executionEpoch !== command.expectedExecutionEpoch
     || !sameCommit(current.position.controlCommitRef, command.expectedCurrentControlCommitRef)) {
-    throw new Error('conditional reentry current control token is stale');
+    throw new ConfirmedControlExpectedConflict('current-control-stale',
+      'conditional reentry current control token is stale');
   }
   const operationControl = readOperationControlFromRecords(records, {
     scope: current.context.scope,
@@ -977,14 +1004,16 @@ function buildReentryFromRecords(
     throw new Error(`conditional reentry operation control is unknown: ${operationControl.reason}`);
   }
   if (!sameCommit(operationControl.currentControlCommitRef, command.expectedOperationControlCommitRef)) {
-    throw new Error('conditional reentry operation control token changed');
+    throw new ConfirmedControlExpectedConflict('operation-control-changed',
+      'conditional reentry operation control token changed');
   }
   const grant = readTaskGrantFromRecords(records, taskScope);
   if (!grant || grant.grant.state !== 'granted'
     || grant.grant.owner !== command.principalOwner
     || String(grant.grant.revision) !== command.permissionRevision
     || !sameCommit(grant.commitRef, command.expectedGrantCommitRef)) {
-    throw new Error('conditional reentry grant token or permission revision changed');
+    throw new ConfirmedControlExpectedConflict('grant-authority-changed',
+      'conditional reentry grant token or permission revision changed');
   }
   const target = boundCheckpointClosureFromRecords(records, command);
   const targetContextRecord = exactJournalRecord(records, target.closure.recoveryBinding!.contextCommitRef);
@@ -1232,7 +1261,8 @@ export async function executeConfirmedTaskContextCorrection(
   let coverageAgentRuntimeId: string;
   if (existing !== null) {
     if (!sameCorrectionCallerFacts(existing.record, input)) {
-      throw new Error('context correction command id is already committed with different confirmed facts');
+      throw new ConfirmedControlExpectedConflict('command-facts-conflict',
+        'context correction command id is already committed with different confirmed facts');
     }
     command = confirmedCommandOfCorrectionRecord(existing.record);
     coverageScope = existing.record.correctedContext.scope;
@@ -1298,7 +1328,8 @@ export async function executeConfirmedTaskCheckpointReentry(
   let coverageAgentRuntimeId: string;
   if (existing !== null) {
     if (!sameReentryCallerFacts(existing.record, input)) {
-      throw new Error('conditional reentry command id is already committed with different confirmed facts');
+      throw new ConfirmedControlExpectedConflict('command-facts-conflict',
+        'conditional reentry command id is already committed with different confirmed facts');
     }
     command = existing.record.command;
     coverageScope = existing.record.restoredContext.scope;
