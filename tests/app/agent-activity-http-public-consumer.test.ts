@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { basename, join, relative } from 'node:path';
 import test from 'node:test';
 import { createServer } from 'node:http';
@@ -475,5 +475,190 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     }
     await rm(root, { recursive: true, force: true });
     console.log(JSON.stringify({ event: 'http-fixture-cleaned', root, listening: false }));
+  }
+});
+
+// Source confirms a captured Runtime pending publication can be replaced by a
+// successful committed-record read; runtime frequency is unknown. Impact: the
+// public dashboard hides an in-progress publication. Cost: one bounded live
+// fake execution in the existing HTTP consumer.
+test('task dashboard HTTP preserves live pending public output while the final commit is held', async () => {
+  const root = await mkdtemp('/private/tmp/humanagent-f07-pending-http-');
+  let server: ReturnType<typeof createServer> | undefined;
+  let listening = false;
+  let releaseHeldCommit: (() => void) | undefined;
+  let failPublicOutputReads = false;
+  let service: UiRuntimeService | undefined;
+  let taskId: ReturnType<UiRuntimeService['createTask']>['taskId'] | undefined;
+  try {
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
+    const paths = await resolveRuntimePaths({ workspace, controlRoot: join(root, 'control') });
+    await ensureControlLayout(paths);
+    const organId = id('organ', 'f07-pending-http-organ');
+    const binding: ProviderBinding = {
+      bindingId: 'f07-pending-http-binding',
+      providerId: 'f07-pending-http-provider',
+      protocol: 'responses',
+      endpointRef: 'fake://f07-pending-http',
+      modelRef: 'fake',
+      configDigest: 'sha256:f07-pending-http',
+      capabilityDigest: 'sha256:f07-pending-http',
+    };
+    const store = new FileCheckpointStore(
+      uiRuntimeControlJournalPath(uiRuntimeModeRoot(paths.checkpointsRoot, 'fake')),
+    );
+    const commitPublicOutput = store.commitPublicOutput.bind(store);
+    const readPublicOutputs = store.readPublicOutputs.bind(store);
+    let heldResolve!: () => void;
+    const held = new Promise<void>((resolve) => { heldResolve = resolve; });
+    const release = new Promise<void>((resolve) => { releaseHeldCommit = resolve; });
+    let heldFinalCommit = false;
+    store.commitPublicOutput = async (candidate) => {
+      if (candidate.text === 'fake replay: final output chunk 2' && !heldFinalCommit) {
+        heldFinalCommit = true;
+        heldResolve();
+        await release;
+      }
+      return commitPublicOutput(candidate);
+    };
+    store.readPublicOutputs = async (requestedBinding) => {
+      if (failPublicOutputReads) throw new Error('simulated pending HTTP public output read failure');
+      return readPublicOutputs(requestedBinding);
+    };
+    const journal = new UiRuntimeJournal(uiRuntimeJournalPath(paths.checkpointsRoot, 'fake'));
+    const forbidden = (): never => { throw new Error('GET must not execute side effects'); };
+    service = new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      binding,
+      port: buildFakeExecutionPort(binding, 1),
+      journal,
+      closurePort: journal,
+      checkpointStoreFor: () => store,
+      attentionPort: { publish: forbidden, resolve: forbidden },
+      providerState: 'ready',
+      memory: {
+        coordinator: new MemoryCoordinator(),
+        backend: new DeterministicMemoryBackend(),
+        projectKey: paths.projectKey,
+        roleId: 'execution',
+      },
+      explicitBrainInterpreter: { interpret: async () => { throw new Error('GET must not interpret'); } },
+      runtimeComposition: { admitExecution: async () => {} },
+      projectKey: paths.projectKey,
+      workspaceRoot: workspace,
+      runtimePaths: paths,
+    });
+    const task = service.createTask({ title: 'pending HTTP public output' });
+    taskId = task.taskId;
+    const accessControl = await AccessControlService.open({
+      credentialPath: paths.webAccessCredentialPath,
+      create: true,
+    });
+    const challenge = accessControl.createPairingChallenge('f07-pending-http', 1);
+    const session = await accessControl.consumePairingCode(challenge.code);
+    const { listener } = createUiRuntimeRequestDispatcher({
+      service,
+      accessControl,
+      uiRoot: join(process.cwd(), 'docs/ui'),
+      isClosing: () => false,
+    });
+    server = createServer(listener);
+    const httpServer = server;
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once('error', reject);
+      httpServer.listen(0, '127.0.0.1', () => { listening = true; resolve(); });
+    });
+    const address = httpServer.address();
+    if (address === null || typeof address === 'string') throw new Error('pending HTTP consumer did not bind a socket');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    const get = async (): Promise<{
+      readonly response: Response;
+      readonly payload: string;
+      readonly body: RuntimeTaskDashboardProjection;
+    }> => {
+      const response = await fetch(
+        `${baseUrl}/api/tasks/${encodeURIComponent(task.taskId.value)}/dashboard`,
+        { headers: { cookie } },
+      );
+      const payload = await response.text();
+      assert.equal(response.status, 200, payload);
+      return { response, payload, body: JSON.parse(payload) as RuntimeTaskDashboardProjection };
+    };
+
+    await service.startExecution(task.taskId, { prompt: 'hold the final public output commit' });
+    await held;
+    const pending = await get();
+    assert.equal(pending.body.publicOutput?.state, 'pending', pending.payload);
+    assert.deepEqual(
+      pending.body.publicOutput?.commits.map((commit) => commit.text),
+      ['fake replay: draft output chunk 1'],
+      pending.payload,
+    );
+    assert.equal(pending.body.output, 'fake replay: draft output chunk 1', pending.payload);
+    assert.equal(pending.body.output.includes('fake replay: final output chunk 2'), false, pending.payload);
+    assert.ok(pending.body.publicOutput?.publicCommitWatermark !== undefined, pending.payload);
+
+    releaseHeldCommit?.();
+    releaseHeldCommit = undefined;
+    for (let attempt = 0; attempt < 200 && service.taskDashboard(task.taskId).state !== 'succeeded'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(service.taskDashboard(task.taskId).state, 'succeeded');
+    const committed = await get();
+    assert.equal(committed.body.publicOutput?.state, 'committed', committed.payload);
+    assert.deepEqual(
+      committed.body.publicOutput?.commits.map((commit) => commit.text),
+      ['fake replay: draft output chunk 1', 'fake replay: final output chunk 2'],
+      committed.payload,
+    );
+    const committedPublication = committed.body.publicOutput;
+    if (committedPublication === undefined) throw new Error(`committed dashboard omitted public output: ${committed.payload}`);
+    assert.equal(
+      committed.body.output,
+      committedPublication.commits.map((commit) => commit.text).join(''),
+      committed.payload,
+    );
+
+    failPublicOutputReads = true;
+    const unknown = await get();
+    assert.equal(unknown.body.publicOutput?.state, 'unknown', unknown.payload);
+    assert.deepEqual(unknown.body.publicOutput?.commits, committed.body.publicOutput?.commits, unknown.payload);
+    assert.equal(
+      unknown.body.publicOutput?.publicCommitWatermark,
+      committed.body.publicOutput?.publicCommitWatermark,
+      unknown.payload,
+    );
+    assert.equal(unknown.body.output, committed.body.output, unknown.payload);
+    const artifactPath = process.env.F07_PENDING_HTTP_RESPONSE_ARTIFACT;
+    if (artifactPath !== undefined) await writeFile(artifactPath, unknown.payload, 'utf8');
+    console.log(JSON.stringify({
+      event: 'pending-http-unknown-response',
+      status: unknown.response.status,
+      artifactPath: artifactPath ?? null,
+      requestPath: `/api/tasks/${task.taskId.value}/dashboard`,
+      projectKey: paths.projectKey,
+      mode: 'fake',
+      auth: 'session-cookie',
+    }));
+  } finally {
+    releaseHeldCommit?.();
+    failPublicOutputReads = false;
+    if (service !== undefined && taskId !== undefined) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const state = service.taskDashboard(taskId).state;
+        if (state !== 'running' && state !== 'settling') break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+    const httpServer = server;
+    if (httpServer !== undefined && listening) {
+      httpServer.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+    }
+    await rm(root, { recursive: true, force: true });
+    console.log(JSON.stringify({ event: 'pending-http-fixture-cleaned', root, listening: false }));
   }
 });

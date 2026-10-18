@@ -3576,9 +3576,11 @@ export class UiRuntimeService {
     const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
     const binding = publicOutputBindingFor(task, this.options.organId);
     if (binding === undefined || binding.scope.cycleId === undefined) return undefined;
+    const pending = task.publicOutput?.state === 'pending';
     try {
       const publication = await this.options.checkpointStoreFor(task.taskId, binding.scope.cycleId).readPublicOutputs(binding);
-      return toPublicOutputProjection(publication);
+      const projected = toPublicOutputProjection(publication);
+      return pending && projected !== undefined ? { ...projected, state: 'pending' } : projected;
     } catch {
       const retained = toPublicOutputProjection(task.publicOutput);
       return {
