@@ -120,7 +120,6 @@ const binding: ActiveTurnBinding = {
     objective: 'resume the same business turn on a new epoch',
     targetRefs: [],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'sha256:criteria',
     successCriteria: ['resumed'],
     failureCriteria: ['lost'],
     incompleteCriteria: ['pending'],
@@ -626,7 +625,7 @@ test('segment capture v2 shares child selection validation with the v1 capture',
   };
   const childResult: WorkResult = {
     taskId, pipelineNodeId: 'segment-child-node', agentId: 'segment-child-agent', assignmentId: 'segment-child-assignment',
-    attempt: 1, executionEpoch: 2, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [],
+    attempt: 1, executionEpoch: 2, inputRevision: 1, producedArtifactRefs: [],
     status: 'succeeded', summary: 'segment child delivery', outputRefs: [],
     evidenceRefs: [{ evidenceId: id('evidence', 'segment-child-result'), kind: 'execution', source: 'segment-fixture', locator: 'segment-child-result', digest: digestA, scope }],
     nextAction: 'settle',
@@ -678,7 +677,7 @@ test('the resumed segment shares the non-selection transition and obligation fol
   };
   const childResult: WorkResult = {
     taskId, pipelineNodeId: 'segment-ns-node', agentId: 'segment-ns-agent', assignmentId: 'segment-ns-assignment',
-    attempt: 1, executionEpoch: 2, inputRevision: 1, producedArtifactRefs: [], producedArtifactDigests: [],
+    attempt: 1, executionEpoch: 2, inputRevision: 1, producedArtifactRefs: [],
     status: 'succeeded', summary: 'segment non-selection delivery', outputRefs: [],
     evidenceRefs: [{ evidenceId: id('evidence', 'segment-ns-result'), kind: 'execution', source: 'segment-fixture', locator: 'segment-ns-result', digest: digestA, scope }],
     nextAction: 'settle',

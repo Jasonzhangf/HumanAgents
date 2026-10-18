@@ -38,7 +38,7 @@ const binding: ActiveTurnBinding = {
   assignment: {
     assignmentId: 'assignment', taskId: scope.taskId, pipelineNodeId: 'node', attempt: 1,
     executionEpoch: 1, inputRevision: 1, objective: 'capture current turn', targetRefs: [],
-    expectedOutputRefs: [], acceptanceCriteriaDigest: 'sha256:criteria', successCriteria: ['saved'],
+    expectedOutputRefs: [], successCriteria: ['saved'],
     failureCriteria: ['lost'], incompleteCriteria: ['pending'], requiredCapabilities: [], mergeGate: 'not-required',
   },
 };
@@ -64,7 +64,7 @@ const childResult: WorkResult = {
   taskId: scope.taskId, pipelineNodeId: binding.assignment.pipelineNodeId, agentId: 'child-agent',
   assignmentId: binding.assignment.assignmentId, attempt: binding.assignment.attempt,
   executionEpoch: binding.assignment.executionEpoch, inputRevision: binding.assignment.inputRevision,
-  producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded',
+  producedArtifactRefs: [], status: 'succeeded',
   summary: 'child delivery', outputRefs: [],
   evidenceRefs: [{
     evidenceId: id('evidence', 'child-result'), kind: 'execution', source: 'runtime-fixture',
@@ -114,16 +114,14 @@ const inspectionDelivery: InspectionItemDelivery = {
 const reviewAssignment: ReviewAssignment = {
   assignmentId: 'review-assignment', taskId: scope.taskId.value, workerAgentId: 'review-agent',
   reviewKind: 'quality', attempt: 1, executionEpoch: binding.execution.executionEpoch, inputRevision: 1,
-  acceptanceCriteriaDigest: binding.assignment.acceptanceCriteriaDigest, subjectRefs: ['subject:a'],
-  subjectDigests: [`sha256:${'d'.repeat(64)}`], workerCapabilities: ['provider.execution'],
+  subjectRefs: ['subject:a'], workerCapabilities: ['provider.execution'],
   requiredCapabilities: ['review.quality'], mergeGate: 'not-required',
 };
 const reviewResult: ReviewResult = {
   resultId: 'review-result', assignmentId: reviewAssignment.assignmentId, taskId: reviewAssignment.taskId,
   workerAgentId: reviewAssignment.workerAgentId, reviewKind: reviewAssignment.reviewKind,
   attempt: reviewAssignment.attempt, executionEpoch: reviewAssignment.executionEpoch,
-  inputRevision: reviewAssignment.inputRevision, acceptanceCriteriaDigest: reviewAssignment.acceptanceCriteriaDigest,
-  subjectRefs: reviewAssignment.subjectRefs, subjectDigests: reviewAssignment.subjectDigests,
+  inputRevision: reviewAssignment.inputRevision, subjectRefs: reviewAssignment.subjectRefs,
   status: 'passed', findings: [],
   evidenceRefs: [{
     evidenceId: id('evidence', 'review-result'), kind: 'execution', source: 'runtime-fixture',
