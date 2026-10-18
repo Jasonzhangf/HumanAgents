@@ -7,7 +7,7 @@
     "scope": "一次从历史或前向已保存点发起的新执行。正式 HTTP 入口携带 task、projectKey、mode 与已确认命令，App 按精确 checkpoint/publication 身份读取并校验当前任务，现有 Runtime conditional owner 按权限、控制位置与恢复责任作出准入决定；允许时由 App Journal owner 在原 Journal 之后条件追加新路径与时期事实；最终返回唯一 typed receipt，随后由最新权威投影显示 current/viewed。不包含同一 turn 的分段恢复、整个 Memory 沉淀流、历史循环或自动 replay。",
     "routingContract": "本图的边是无条件 ARC 依赖。当前安装的 DAGpipe 语法没有条件边字段，调度器会执行每个波次内的节点。准入节点产出 typed decision 值，其后每个副作用阶段都以该值为门，唯一的出口节点返回单一 typed outcome；被拒绝或保持的分支不产生副作用。本图不声称任何条件边或运行期条件路由，也不增加仅用于可视化的成功/失败投影节点。",
     "implementationStatus": "IMPLEMENTING",
-    "implementationGap": "App 已有 executeConfirmedTaskCheckpointReentry / executeConfirmedTaskContextCorrection 与 Task 授权验证；Server 两个 POST 路由仍需 Root 接线，UI 本线只按固定 api.submitTaskContextCorrection / api.submitTaskCheckpointReentry 合同注入 callback，尚缺 runtime-api.js binding 与真实 HTTP/browser 证据。四个节点没有注册为可执行 SDK Operator；下列 owner 文件是各责任当前的唯一真源。dagpipe graph validate 只证明静态拓扑与绑定形状，不证明运行行为。",
+    "implementationGap": "App 已有 executeConfirmedTaskCheckpointReentry / executeConfirmedTaskContextCorrection 与 Task 授权验证；Server 两个 POST 路由仍需 Root 接线，UI 本线只按固定 api.submitTaskContextCorrection / api.submitTaskCheckpointReentry 合同注入 callback，尚缺 runtime-api.js binding 与真实 HTTP/browser 证据。四个节点的 operator 名称和版本用于静态治理及责任绑定，实际业务执行由 binding 所列 TypeScript owner 承担。按 r465 源码观察，项目未接入 Rust pipeline_runtime，未注册这四个可执行 SDK Operator；SDK compile / Runtime::run 能力未实现、未验证。按 r466 需求范围裁定，该 SDK 能力不作为当前原生推理 goal 的交付依赖。下列 owner 文件是各责任当前的唯一真源。dagpipe graph validate / inspect 只证明静态拓扑与绑定形状，不证明运行行为。",
     "conditionalOwner": {
       "decisionAndRecord": "packages/runtime/src/checkpoints/conditional-reentry.ts",
       "canonicalSubmission": "packages/runtime/src/checkpoints/submission.ts",
