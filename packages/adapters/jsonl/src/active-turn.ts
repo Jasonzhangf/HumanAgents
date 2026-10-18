@@ -519,6 +519,25 @@ export function decodeActiveTurnRecords(
   return validateRecords(records, admittedTurnId, bindingOf(records, admittedTurnId)).records;
 }
 
+/**
+ * The physical commit receipts of one already-admitted turn, selected from
+ * records the caller already decoded and verified for that turn. It reads only
+ * the bound turn's committed envelopes, so every returned reference comes from
+ * an actual record and never from a derived string.
+ */
+export function selectActiveTurnCommitRefs(
+  records: readonly JournalRecord[],
+  admittedTurnId: string,
+): readonly JournalCommitRef[] {
+  const turnId = nonEmpty(admittedTurnId, 'active turn commit refs turnId');
+  const refs: JournalCommitRef[] = [];
+  for (const record of records) {
+    if (!isActiveTurnCarrier(record) || !isBoundTurnCarrier(record, turnId)) continue;
+    refs.push(taskBindingCommitRef(record));
+  }
+  return refs;
+}
+
 export type TaskActiveTurnBindingEntry = {
   readonly binding: ActiveTurnBinding;
   readonly commitRef: JournalCommitRef;

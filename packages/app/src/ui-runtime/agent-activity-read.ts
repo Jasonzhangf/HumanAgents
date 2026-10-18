@@ -27,6 +27,7 @@ import {
   createJsonlActiveTurnSegmentJournal,
   decodeActiveTurnRecords,
   listTaskActiveTurnBindings,
+  selectActiveTurnCommitRefs,
 } from '../../../adapters/jsonl/src/active-turn.js';
 import { decodeTaskIdentityRecords } from '../../../adapters/jsonl/src/task-identities.js';
 import {
@@ -524,14 +525,17 @@ async function assembleTaskAgentActivityCoreContext(
   const unavailableSources: TaskAgentActivityUnavailableSource[] = [];
   let bindings: Awaited<ReturnType<typeof listTaskActiveTurnBindings>> = [];
   try {
-    bindings = await listTaskActiveTurnBindings({ journal: options.controlJournal, scope: taskScope });
+    bindings = await listTaskActiveTurnBindings({
+      journal: { replay: async () => controlRecords },
+      scope: taskScope,
+    });
     for (const entry of bindings) {
       const businessTurnId = entry.binding.admittedTurn.turnId;
       const activeEntries = decodeActiveTurnRecords(controlRecords, businessTurnId);
       activeTurns.push({
         sourceId: `active-turn:${businessTurnId}`,
         ownerId: OWNER_ID,
-        commitRefs: [],
+        commitRefs: selectActiveTurnCommitRefs(controlRecords, businessTurnId),
         evidenceRefs: [],
         boundLive: undefined,
         terminalCommitRefs: terminalCommitRefs(

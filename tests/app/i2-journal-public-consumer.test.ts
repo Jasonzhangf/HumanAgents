@@ -26,7 +26,7 @@ import type {
   WorkResult,
 } from '../../packages/contracts/src/index.js';
 import { ensureControlLayout, listConfiguredProjects, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { computeInspectionDefinitionDigest } from '../../packages/core/src/index.js';
+import { computeInspectionDefinitionDigest, resolveTaskFlowGuidance } from '../../packages/core/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/task-plan-revisions.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -366,6 +366,7 @@ async function persistNativeMilestoneTurn(input: {
   readonly turnId: string;
   readonly invocationCommitId: string;
   readonly deliveryCommitId: string;
+  readonly laterEntryCommitId: string;
 }> {
   const turnId = 'native-milestone-turn';
   const journal = new JsonlOrganJournal(input.organPath);
@@ -403,13 +404,20 @@ async function persistNativeMilestoneTurn(input: {
     kind: 'execution', invocationId, refinedDelivery: initialInput,
     assignment: input.assignment, result: input.result,
   });
+  await context.registerRequest({
+    request: { turnId, requestId: 'native-milestone-followup' },
+    scope: input.scope,
+    phase: 'dispatching',
+  });
   const invocationCommitId = activeTurnCommitId(turnId, `invocation:${invocationId}`);
   const deliveryCommitId = activeTurnCommitId(turnId, `delivery:${invocationId}`);
+  const laterEntryCommitId = activeTurnCommitId(turnId, 'request:native-milestone-followup:dispatching');
   const committed = (await journal.replay()).flatMap((record) => (
     record.commitId === undefined ? [] : [record.commitId]
   ));
   assert.ok(committed.includes(invocationCommitId));
   assert.ok(committed.includes(deliveryCommitId));
+  assert.ok(committed.includes(laterEntryCommitId));
   await createJsonlCheckpointClosurePort({ filePath: input.organPath, journal }).commit({
     closureKind: 'turn-closure', closureId: `turn-closure:${turnId}`,
     identity: {
@@ -431,7 +439,7 @@ async function persistNativeMilestoneTurn(input: {
     },
     closedAt: at(2),
   });
-  return { turnId, invocationCommitId, deliveryCommitId };
+  return { turnId, invocationCommitId, deliveryCommitId, laterEntryCommitId };
 }
 
 // callChild failure probability UNKNOWN; API absence is source-confirmed.
@@ -1071,6 +1079,19 @@ test('declared milestone review commits a real I2 receipt per registered invocat
       assignment: workInput.assignment, result: work.result, incarnation: work.incarnation,
     });
     const coldJournal = new JsonlOrganJournal(join(f.root, 'organ.jsonl'));
+    const taskFlow = { kind: 'inspection' as const, definitionVersion: 1 as const };
+    await new JsonlTaskIdentityJournal(coldJournal).append({
+      scope: f.taskScope,
+      taskFlow,
+      source: {
+        requirementId: 'native-milestone-requirement',
+        inputRevision: 1,
+        draftId: 'native-milestone-draft',
+        draftRevisionVersion: 1,
+        draftRevisionHash: digestOf('native-milestone-draft'),
+        confirmationRef: 'fixture:confirmed',
+      },
+    });
     const beforeRead = (await coldJournal.replay()).length;
     const graphRead = await readTaskAgentActivity({
       taskId: f.taskScope.taskId, query: { taskId: f.taskScope.taskId },
@@ -1082,6 +1103,9 @@ test('declared milestone review commits a real I2 receipt per registered invocat
     if (!graphRead.ok) throw new Error(JSON.stringify(graphRead.failure));
     const graph = graphRead.value.actualExecutionGraph;
     if (graph === undefined) throw new Error('a successful native read must carry the actual execution graph');
+    const expectedGuidance = resolveTaskFlowGuidance(taskFlow);
+    assert.equal(graph.guidance?.kind, expectedGuidance.kind);
+    assert.equal(graph.guidance?.aim, expectedGuidance.aim);
     assert.equal(graph.history.status, 'recorded');
     if (graph.history.status !== 'recorded') throw new Error(JSON.stringify(graph.history));
     const nodes = graph.history.groups.flatMap((group) => group.nodes);
@@ -1091,6 +1115,9 @@ test('declared milestone review commits a real I2 receipt per registered invocat
     assert.ok(kinds.includes('milestone-review'), 'the real milestone review must be a node');
     assert.equal(kinds.includes('orphan-child-delivery'), false, 'the recorded delivery joined its invocation');
     const childNode = nodes.find((node) => node.kind === 'child-invocation');
+    const activeNode = nodes.find((node) => node.kind === 'active-turn');
+    assert.ok(activeNode?.technical.commitRefs.some((ref) => ref.commitId === native.laterEntryCommitId),
+      'the active-turn source must carry the later real envelope receipt');
     assert.equal(childNode?.technical.assignmentId, workInput.assignment.assignmentId);
     assert.equal(childNode?.technical.invocationId, workInput.call.invocationId);
     assert.equal(childNode?.technical.containingLocationKind, 'active-turn');
