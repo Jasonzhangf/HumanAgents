@@ -1662,7 +1662,7 @@ function markSync() {
 const STOP_ACTION_LABEL = '停止本次执行'
 const RETRY_STOP_ACTION_LABEL = '重试停止'
 const START_ACTION_LABEL = '处理任务'
-const GRANT_CONTROL_FAILURE_COPY = '执行授权状态暂时无法读取，授权操作不可用；请打开技术详情查看原因。'
+const GRANT_CONTROL_FAILURE_COPY = '执行授权处理未完成；请打开技术详情查看原因。'
 
 function actionCopy() {
   if (dashboard.state === 'succeeded') return dashboard.output ? '任务已完成，结果可用。' : '任务已完成；当前没有合法操作。'

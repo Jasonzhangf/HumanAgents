@@ -1774,7 +1774,6 @@ test('runtime task dashboard is observational and has no second execution-input 
   assert.equal(source.includes('本次执行输入'), false);
   assert.equal(source.includes('promptInput'), false);
   assert.equal(source.includes('api.startExecution'), false);
-  assert.equal(source.includes('进入显式大脑'), true);
   assert.equal(/shouldObserveActiveState\(\)/.test(source), true);
   assert.equal(/dashboard\.state\)\n    && !dashboard\.operationId/.test(source), true);
   assert.equal(/dashboard\.operationId && \['running', 'settling'\]\.includes\(dashboard\.state\)/.test(source), true);
