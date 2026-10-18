@@ -592,6 +592,161 @@ function renderPlanFailure(failure, prefix, options = {}) {
   return box
 }
 
+function actualGraphDetail(summary, entries, options = {}) {
+  if (typeof options.onOpenDetail !== 'function') return null
+  const button = element('button', '查看记录详情', 'button button--quiet plan-detail')
+  button.type = 'button'
+  button.dataset.actualGraphDetail = summary
+  button.addEventListener('click', () => options.onOpenDetail({ title: summary, entries }, button))
+  return button
+}
+
+function renderActualReviews(reviews) {
+  if (!Array.isArray(reviews) || reviews.length === 0) return null
+  const grouped = new Map()
+  for (const review of reviews) {
+    const label = review?.statusLabel || '状态未记录'
+    const current = grouped.get(label) || { count: 0, findings: 0 }
+    current.count += 1
+    current.findings += Number.isSafeInteger(review?.findingCount) ? review.findingCount : 0
+    grouped.set(label, current)
+  }
+  const text = [...grouped.entries()]
+    .map(([label, value]) => `${label} ${value.count} 次${value.findings > 0 ? `（发现 ${value.findings} 项）` : ''}`)
+    .join('、')
+  return element('p', `复核：${text}。`, 'muted actual-execution-reviews')
+}
+
+function renderActualMember(member, stage, options) {
+  const item = element('li', undefined, 'actual-execution-member')
+  item.dataset.actualInstance = [
+    member.technical.assignmentId,
+    member.technical.attempt,
+    member.technical.executionEpoch,
+  ].join(':')
+  item.dataset.actualInstanceState = member.status
+  item.dataset.actualInstanceStateTone = member.statusTone
+  const head = element('header', undefined, 'plan-revision-head')
+  head.append(
+    element('strong', member.roleLabel, 'plan-node-title'),
+    element('span', member.statusLabel, 'plan-tag'),
+  )
+  item.append(head, element('p', member.objective, 'business-output-text actual-execution-objective'))
+  item.append(member.result
+    ? element('p', `结果（${member.result.statusLabel}）：${member.result.summary}`, 'actual-execution-result')
+    : element('p', '尚未记录结果。', 'muted actual-execution-result-missing'))
+  const reviews = renderActualReviews(member.reviews)
+  if (reviews) item.append(reviews)
+  if (member.reason) item.append(element('p', `说明：${member.reason}`, 'muted actual-execution-reason'))
+  item.append(element('p', `下一步：${member.nextActionLabel}`, 'muted actual-execution-next'))
+  const detail = actualGraphDetail('执行成员记录详情', [
+    ['阶段', stage.label],
+    ['assignmentId', member.technical.assignmentId],
+    ['attempt', String(member.technical.attempt)],
+    ['executionEpoch', String(member.technical.executionEpoch)],
+    ['pipelineNodeId', member.technical.pipelineNodeId],
+    ['agentId', member.technical.agentId ?? '未记录'],
+    ['reason', member.reason || '未记录'],
+    ['evidenceRefs', JSON.stringify(member.technical.evidenceRefs)],
+  ], options)
+  if (detail) item.append(detail)
+  return item
+}
+
+function renderActualStage(stage, options) {
+  const article = element('article', undefined, 'plan-revision actual-execution-stage')
+  article.dataset.actualStage = stage.stageNodeId
+  article.dataset.actualStageState = stage.state
+  article.dataset.actualStageStateTone = stage.stateTone
+  const head = element('header', undefined, 'plan-revision-head')
+  head.append(
+    element('h4', stage.label, 'actual-execution-stage-title'),
+    element('span', stage.stateLabel, 'plan-tag'),
+  )
+  article.append(head, element('p', stage.parent.label, 'muted plan-predecessor actual-execution-parent'))
+  const list = element('ol', undefined, 'plan-node-list actual-execution-members')
+  for (const member of stage.members) list.append(renderActualMember(member, stage, options))
+  if (stage.members.length === 0) {
+    list.append(element('li', '此阶段已记录，尚无执行成员。', 'empty actual-execution-empty-stage'))
+  }
+  article.append(list)
+  const detail = actualGraphDetail('执行阶段记录详情', [
+    ['stageNodeId', stage.stageNodeId],
+    ['parentNodeId', stage.technical.parentNodeId ?? '无'],
+    ['state', stage.state],
+    ['assignmentKeys', JSON.stringify(stage.technical.assignmentKeys)],
+  ], options)
+  if (detail) article.append(detail)
+  return article
+}
+
+/**
+ * Read-only shared renderer for the actual execution graph carrier.
+ *
+ * Guidance, recorded stages and members come from the UI projection. This
+ * function never reads a plan, registry, Journal or control surface and never
+ * derives a stage state from its members. Raw IDs stay behind the optional
+ * existing technical-detail callback.
+ */
+export function renderTaskActualExecutionGraphSection(graph, options = {}) {
+  const section = element('section', undefined, 'section actual-execution-graph-section')
+  section.dataset.actualExecutionGraph = graph?.history?.status || 'missing'
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', '任务处理方式与实际执行'),
+    element('span', '只读记录', 'section-meta'),
+  )
+  section.append(head)
+
+  if (!graph || graph.surface !== 'task-actual-execution-graph') {
+    section.append(element('p', '本次读取没有提供实际执行图记录。', 'empty actual-execution-graph-missing'))
+    return section
+  }
+
+  if (graph.guidance) {
+    const guidance = element('section', undefined, 'task-flow-guidance')
+    guidance.dataset.taskFlowGuidance = 'skeleton'
+    guidance.dataset.taskFlowKind = graph.guidance.kind
+    guidance.append(
+      element('h3', `处理方式：${graph.guidance.kindLabel}`),
+      element('p', graph.guidance.aim, 'business-output-text'),
+      element('p', `动态选择：${graph.guidance.selectionGuidance}`, 'muted'),
+    )
+    if (graph.guidance.displayGroups.length > 0) {
+      guidance.append(element('p', `展示分组：${graph.guidance.displayGroups.join('、')}`, 'muted'))
+    }
+    section.append(guidance)
+  }
+
+  const history = graph.history
+  if (history.status === 'not-recorded') {
+    const missing = element('section', undefined, 'actual-execution-history-missing')
+    missing.dataset.actualExecutionHistory = 'not-recorded'
+    missing.append(
+      element('h3', history.label),
+      element('p', history.detail, 'muted'),
+    )
+    section.append(missing)
+    return section
+  }
+
+  const recorded = element('section', undefined, 'actual-execution-history')
+  recorded.dataset.actualExecutionHistory = 'recorded'
+  recorded.append(
+    element('h3', '已记录的实际执行'),
+    element('p', history.summary, 'muted actual-execution-summary'),
+  )
+  for (const [index, stream] of history.streams.entries()) {
+    const streamSection = element('section', undefined, 'plan-phase actual-execution-stream')
+    streamSection.dataset.actualOwnerStream = String(index)
+    streamSection.append(element('h4', stream.ownerLabel))
+    for (const stage of stream.stages) streamSection.append(renderActualStage(stage, options))
+    recorded.append(streamSection)
+  }
+  section.append(recorded)
+  return section
+}
+
 function renderPlanNode(node, options) {
   const item = element('li', undefined, 'plan-node')
   item.dataset.planNode = node.nodeId

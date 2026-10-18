@@ -89,8 +89,12 @@ const {
   renderTaskPlanCurrentSection,
   renderTaskPlanSemanticView,
   renderTaskDescriptionContent,
+  renderTaskActualExecutionGraphSection,
   commitScopedReadTransition,
 } = await import('../../docs/ui/task-display.js')
+const { projectTaskActualExecutionGraph } = await import(
+  '../../dist/tests/packages/ui/projection/actual-execution-graph.js'
+)
 
 const scope = { kind: 'task', projectKey: 'proj-1', mode: 'rcc', taskId: { scope: 'task', value: 'task-1' } }
 const foreignScope = { ...scope, projectKey: 'proj-2' }
@@ -136,6 +140,138 @@ function revision(sequence, id, { reason, snapshot: snap, coverage = 'complete-f
 
 function history({ revisions, current, historyScope = scope }) {
   return { surface: TASK_PLAN_HISTORY_SURFACE, scope: historyScope, current, revisions }
+}
+
+const actualTaskId = { scope: 'task', value: 'task-1' }
+const actualTaskScope = {
+  organId: { scope: 'organ', value: 'organ-1' },
+  taskId: actualTaskId,
+}
+
+function actualAssignment(assignmentId, objective) {
+  return {
+    assignmentId,
+    taskId: actualTaskId,
+    pipelineNodeId: 'pipeline.execute',
+    attempt: 1,
+    executionEpoch: 1,
+    inputRevision: 1,
+    objective,
+    targetRefs: [],
+    expectedOutputRefs: [],
+    successCriteria: [],
+    failureCriteria: [],
+    incompleteCriteria: [],
+    requiredCapabilities: [],
+    mergeGate: 'not-required',
+  }
+}
+
+function actualRecord({
+  assignmentId,
+  objective,
+  status,
+  result,
+  reason,
+  nextAction,
+  reviewResults = [],
+}) {
+  return {
+    key: { assignmentId, attempt: 1, executionEpoch: 1 },
+    stageNodeId: 'stage-parent',
+    assignment: actualAssignment(assignmentId, objective),
+    status,
+    ownerId: 'owner-1',
+    agentId: `agent-${assignmentId}`,
+    ...(result === undefined ? {} : { result }),
+    reviewResults,
+    reason,
+    nextAction,
+    evidenceRefs: [],
+  }
+}
+
+function actualSource() {
+  const succeededResult = {
+    taskId: actualTaskId,
+    pipelineNodeId: 'pipeline.execute',
+    agentId: 'agent-member-a',
+    assignmentId: 'member-a',
+    attempt: 1,
+    executionEpoch: 1,
+    inputRevision: 1,
+    producedArtifactRefs: [],
+    status: 'succeeded',
+    summary: '成员一结果',
+    outputRefs: [],
+    evidenceRefs: [],
+    nextAction: 'continue',
+  }
+  return {
+    taskScope: actualTaskScope,
+    guidance: {
+      kind: 'one-shot',
+      aim: 'Return one result after the confirmed deliverable.',
+      selectionGuidance: 'Select methods and roles dynamically.',
+      displayGroups: ['Deliverable', 'Review', 'Closure'],
+    },
+    history: {
+      status: 'recorded',
+      streams: [{
+        stream: { taskScope: actualTaskScope, ownerId: 'owner-1' },
+        facts: [{ commitRef: { commitId: 'commit-1', journalSeq: 1, recordDigest: 'sha256:x' } }],
+        snapshot: {
+          stages: [
+            {
+              nodeId: 'stage-parent',
+              taskId: actualTaskId,
+              parentNodeId: null,
+              state: 'succeeded',
+              assignmentKeys: ['member-a:1:1', 'member-b:1:1'],
+            },
+            {
+              nodeId: 'stage-empty',
+              taskId: actualTaskId,
+              parentNodeId: 'stage-parent',
+              state: 'planned',
+              assignmentKeys: [],
+            },
+          ],
+          assignments: [
+            actualRecord({
+              assignmentId: 'member-a',
+              objective: '成员一目标',
+              status: 'succeeded',
+              result: succeededResult,
+              reason: '成员一已完成',
+              nextAction: { kind: 'continue' },
+              reviewResults: [{
+                resultId: 'review-1',
+                assignmentId: 'member-a',
+                taskId: 'task-1',
+                workerAgentId: 'reviewer-1',
+                reviewKind: 'quality',
+                attempt: 1,
+                executionEpoch: 1,
+                inputRevision: 1,
+                subjectRefs: ['member-a'],
+                status: 'passed',
+                findings: [{ findingId: 'finding-1' }],
+                evidenceRefs: [],
+              }],
+            }),
+            actualRecord({
+              assignmentId: 'member-b',
+              objective: '成员二目标',
+              status: 'blocked',
+              reason: '等待外部输入',
+              nextAction: { kind: 'wait' },
+            }),
+          ],
+        },
+      }],
+    },
+  }
 }
 
 function currentKnown(revisionId, sequence) {
@@ -187,6 +323,63 @@ test('current resolves only the accepted revision, not a later published one', (
   assert.match(text, /Plan v2/)
   assert.doesNotMatch(text, /Plan v3/)
   assert.equal(byData(section, 'planRevision', 'v3').length, 0)
+})
+
+test('actual graph projection preserves owner streams, empty stages, parents and repeated roles', () => {
+  const graph = projectTaskActualExecutionGraph(actualSource())
+  assert.equal(graph.surface, 'task-actual-execution-graph')
+  assert.equal(graph.guidance.kindLabel, '单次交付')
+  assert.equal(graph.history.status, 'recorded')
+  assert.equal(graph.history.streamCount, 1)
+  assert.equal(graph.history.stageCount, 2)
+  assert.equal(graph.history.memberCount, 2)
+
+  const [stream] = graph.history.streams
+  assert.equal(stream.ownerLabel, '责任流 1')
+  assert.deepEqual(stream.stages.map((stage) => stage.label), ['阶段 1', '阶段 2'])
+  assert.equal(stream.stages[0].state, 'succeeded')
+  assert.equal(stream.stages[1].state, 'planned')
+  assert.equal(stream.stages[1].members.length, 0)
+  assert.deepEqual(stream.stages[1].parent, {
+    kind: 'recorded',
+    stageNodeId: 'stage-parent',
+    label: '上级阶段：阶段 1',
+  })
+  assert.deepEqual(stream.stages[0].members.map((member) => member.roleLabel), ['执行', '执行'])
+  assert.deepEqual(stream.stages[0].members.map((member) => member.statusLabel), ['已完成', '受阻'])
+  assert.equal(stream.stages[0].members[0].result.summary, '成员一结果')
+  assert.equal(stream.stages[0].members[1].result, undefined)
+  assert.equal('plan' in graph, false)
+})
+
+test('actual graph renderer keeps guidance separate and shows empty stages and repeated members', () => {
+  const graph = projectTaskActualExecutionGraph(actualSource())
+  const section = renderTaskActualExecutionGraphSection(graph)
+  const text = allText(section)
+  assert.equal(byData(section, 'taskFlowGuidance', 'skeleton').length, 1)
+  assert.equal(byData(section, 'actualStage', 'stage-parent').length, 1)
+  assert.equal(byData(section, 'actualStage', 'stage-empty').length, 1)
+  assert.equal(byData(section, 'actualInstance', 'member-a:1:1').length, 1)
+  assert.equal(byData(section, 'actualInstance', 'member-b:1:1').length, 1)
+  assert.match(text, /处理方式：单次交付/)
+  assert.match(text, /上级阶段：阶段 1/)
+  assert.match(text, /此阶段已记录，尚无执行成员/)
+  assert.match(text, /成员一结果/)
+  assert.match(text, /尚未记录结果/)
+  assert.doesNotMatch(text, /当前任务计划|Plan v2/)
+  assert.doesNotMatch(text, /stage-parent|member-a|member-b|owner-1|pipeline\.execute/)
+})
+
+test('actual graph missing history stays explicit instead of becoming an empty graph', () => {
+  const graph = projectTaskActualExecutionGraph({
+    taskScope: actualTaskScope,
+    history: { status: 'not-recorded', reason: 'no-recorded-facts' },
+  })
+  const section = renderTaskActualExecutionGraphSection(graph)
+  assert.equal(section.dataset.actualExecutionGraph, 'not-recorded')
+  assert.equal(byData(section, 'actualExecutionHistory', 'not-recorded').length, 1)
+  assert.match(allText(section), /实际执行记录缺失/)
+  assert.match(allText(section), /没有记录实际执行图事实/)
 })
 
 test('current rejects an unknown or mismatched accepted identity instead of using the latest', () => {
