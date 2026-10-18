@@ -237,7 +237,7 @@ classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
 - [权威 UX 需求](../../ui/semantic-observation-audit-2026-10-07.md)
 - [项目 owner 规则](../../../AGENTS.md)
 
-本图册只修正文档表达。后台错误消费、三模板、revision 历史、多视角与 checkpoint 产品查询等黄色边仍是待实现/待证实设计，不能当作已落地能力。展示偏好的持久边已在图 12 落地：`packages/config` 的 `[ui.display]` 存 `<controlRoot>/config.toml`，`packages/app` 暴露 `/api/ui/display-preference` 的 GET/PUT/DELETE，共享控制器挂载在 task-dashboard 与 observation 两个表面。图 12 的共享消费者边改为已交付的 owner 回调/订阅边界：`docs/ui/runtime-api.js` 的 `freezeJsonValue`/`createRuntimeReadPublication` 原位冻结并复用同一 scope/revision `content`，`docs/ui/runtime-shell.js` 单次解码 GET/SSE 并保留面板生命周期与 `readSerial`/`streamRevision` 守卫，`docs/ui/display-preferences.js` 提供 subscribe/dispose/token，`docs/ui/task-dashboard.js` 与 `docs/ui/observation.js` 在 pagehide 释放面板、偏好订阅和流。该声明只覆盖这两个已交付表面；其他共享壳页面接入、全局事件总线目标与跨进程 native Arc 仍未闭合或当前不适用。
+本图册只修正文档表达。后台错误消费、三模板、revision 历史、多视角与 checkpoint 产品查询等黄色边仍是待实现/待证实设计，不能当作已落地能力。展示偏好的持久边已在图 12 落地：`packages/config` 的 `[ui.display]` 存 `<controlRoot>/config.toml`，`packages/app` 暴露 `/api/ui/display-preference` 的 GET/PUT/DELETE，共享控制器挂载在 task-dashboard 与 observation 两个表面。图 12 的共享消费者边改为已交付的 owner 回调/订阅边界：`docs/ui/runtime-api.js` 的 `freezeJsonValue`/`createRuntimeReadPublication` 原位冻结并复用同一 scope/revision `content`，`docs/ui/runtime-shell.js` 单次解码 GET/SSE 并保留面板生命周期与 `readSerial`/`streamRevision` 守卫，`docs/ui/display-preferences.js` 提供 subscribe/dispose/token，`docs/ui/task-dashboard.js` 与 `docs/ui/observation.js` 在 pagehide 释放面板、偏好订阅和流。当前非四模式共享壳页面按设计不挂空控件；当前实现无需全局事件总线，跨进程 native Arc 没有真实消费边界，不适用。
 
 
 
