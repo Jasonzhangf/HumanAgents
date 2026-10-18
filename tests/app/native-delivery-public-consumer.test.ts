@@ -1244,6 +1244,7 @@ async function textOnlyFixture(
 async function startNativeMultiTurnConsumer(
   fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
   turnCount: 2 | 3,
+  inspection = false,
 ) {
   const cli = consumerCliEntry();
   const organId = id('organ', 'humanagent-ui');
@@ -1266,13 +1267,15 @@ async function startNativeMultiTurnConsumer(
     },
     async createDriver() { throw new Error('seed coordinator never releases execution'); },
   });
-  seed.createTask({ taskId, title: `native ${label} task`, directive: `complete the ${label} delivery` });
+  seed.createTask({ taskId, title: `native ${label} task`, directive: `complete the ${label} delivery`,
+    ...(inspection ? { taskFlow: { kind: 'inspection' as const, definitionVersion: 1 } } : {}) });
   await new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)).establish({
     scope: { organId, taskId }, source: {
       requirementId: `requirement:${taskId.value}`, inputRevision: 1, draftId: `draft:${taskId.value}`,
       draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`,
       confirmationRef: `confirmation:${taskId.value}`,
     },
+    ...(inspection ? { taskFlow: { kind: 'inspection' as const, definitionVersion: 1 } } : {}),
   });
   await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
     owner: caller.principal.owner,
@@ -1300,8 +1303,9 @@ async function startNativeMultiTurnConsumer(
 async function runNativeMultiTurnConsumer(
   fixture: Awaited<ReturnType<typeof textOnlyFixture>>,
   turnCount: 2 | 3,
+  inspection = false,
 ) {
-  const started = await startNativeMultiTurnConsumer(fixture, turnCount);
+  const started = await startNativeMultiTurnConsumer(fixture, turnCount, inspection);
   return { taskId: started.taskId, result: await started.result, cookie: started.cookie };
 }
 
@@ -1985,7 +1989,6 @@ if (!coldConsumerMode) test('native public stop before accepted end captures the
         draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`,
         confirmationRef: `confirmation:${taskId.value}`,
       },
-      taskFlow: { kind: 'inspection', definitionVersion: 1 },
     });
     await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
       owner: caller.principal.owner,
@@ -2570,7 +2573,7 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
   let passed = false;
   let serve: Awaited<ReturnType<typeof startServe>> | undefined;
   try {
-    const { taskId, result, cookie } = await runNativeMultiTurnConsumer(fixture, 3);
+    const { taskId, result, cookie } = await runNativeMultiTurnConsumer(fixture, 3, true);
     assert.equal(result.code, 0, `the real inspection CLI run must exit cleanly: ${result.stderr}`);
     const receiptStart = result.stdout.indexOf('{');
     const receiptEnd = result.stdout.lastIndexOf('}');
