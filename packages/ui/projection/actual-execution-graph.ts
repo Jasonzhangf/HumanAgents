@@ -237,8 +237,8 @@ function projectHistory(
       return {
         status: 'not-recorded',
         reason: source.reason,
-        label: '实际执行记录缺失',
-        detail: '这段历史没有记录实际执行图事实，不能把计划或固定节点目录当作执行记录。',
+        label: '暂无执行过程记录',
+        detail: '任务计划在计划区单独展示；这里仅展示已记录的执行过程。',
       };
   }
 }
