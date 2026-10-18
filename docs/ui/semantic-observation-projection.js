@@ -100,6 +100,18 @@ const CAPABILITY_LABELS = Object.freeze({
   'runtime-task-events': '任务事件记录',
 })
 
+const COVERAGE_REASON_LABELS = Object.freeze({
+  'unknown-kind': '有记录暂时无法归类',
+  'waiting-is-not-terminal': '等待中的记录不能当作结束',
+  'indistinguishable-tool-phase': '工具阶段暂时无法区分',
+  'correlation-unavailable': '记录缺少关联信息',
+  'source-facet-missing': '来源信息不完整',
+  'duplicate-conflict': '存在相互冲突的重复记录',
+  'opener-missing': '缺少开始记录',
+  'multi-opener': '同一项存在多个开始记录',
+  'closer-conflict': '结束记录相互冲突',
+})
+
 function array(value) {
   return Array.isArray(value) ? value : []
 }
@@ -188,6 +200,91 @@ function eventItem(event, kind, scopeTitle, meta, scopeRef) {
   }
 }
 
+function coverageScopeTitle(scope) {
+  if (scopeValue(scope?.operationId)) return '当前操作'
+  if (scopeValue(scope?.cycleId)) return '当前周期'
+  if (scopeValue(scope?.taskId)) return '当前任务'
+  return '所属器官'
+}
+
+function coverageScopeRefs(scope) {
+  const source = scope && typeof scope === 'object' ? scope : {}
+  const refs = []
+  for (const [kind, node] of [
+    ['organ', source.organId],
+    ['task', source.taskId],
+    ['cycle', source.cycleId],
+    ['operation', source.operationId],
+  ]) {
+    const value = scopeValue(node)
+    if (value) refs.push(`${kind}:${value}`)
+  }
+  return refs
+}
+
+function coverageIssueEvidence(issue, index) {
+  const reason = text(issue?.reason)
+  const label = COVERAGE_REASON_LABELS[reason] ?? '覆盖记录需要核对'
+  const sourceRef = issue?.sourceRef && typeof issue.sourceRef === 'object' ? issue.sourceRef : {}
+  const sourceScope = coverageScopeRefs(sourceRef.scope)
+  const refs = [
+    `reason: ${reason}`,
+    ...coverageScopeRefs(issue?.scope).map((ref) => `scope: ${ref}`),
+    `sourceRef.evidenceId: ${text(sourceRef.evidenceId?.value)}`,
+    `sourceRef.kind: ${text(sourceRef.kind)}`,
+    `sourceRef.source: ${text(sourceRef.source)}`,
+    `sourceRef.locator: ${text(sourceRef.locator)}`,
+    ...(sourceRef.digest ? [`sourceRef.digest: ${text(sourceRef.digest)}`] : []),
+    ...(sourceScope.length > 0 ? [`sourceRef.scope: ${sourceScope.join(', ')}`] : []),
+  ]
+  if (issue?.eventRef) {
+    const eventScope = coverageScopeRefs(issue.eventRef.scope)
+    refs.push(
+      `eventRef.eventId: ${text(issue.eventRef.eventId)}`,
+      `eventRef.sourceId: ${text(issue.eventRef.sourceId)}`,
+      ...(eventScope.length > 0 ? [`eventRef.scope: ${eventScope.join(', ')}`] : []),
+    )
+  }
+  return {
+    evidenceId: text(sourceRef.evidenceId?.value, `coverage-${index + 1}`),
+    title: `${label}的只读证据`,
+    summary: '覆盖缺口的公开原因、范围和来源引用。',
+    scopeLabel: coverageScopeTitle(issue?.scope),
+    sourceLabel: text(sourceRef.source, '未标注来源'),
+    refs,
+    raw: {
+      label: '原始覆盖缺口（主动查看）',
+      content: refs.join('\n'),
+    },
+  }
+}
+
+function coverageItem(issue, index, kind) {
+  const reason = text(issue?.reason)
+  const label = COVERAGE_REASON_LABELS[reason] ?? '覆盖记录需要核对'
+  return {
+    id: `coverage-${index + 1}`,
+    title: label,
+    detail: `影响范围：${coverageScopeTitle(issue?.scope)}。这条记录保持未知，不表示成功。`,
+    state: 'unknown',
+    stateLabel: '未知',
+    tone: 'warning',
+    kind,
+    evidence: coverageIssueEvidence(issue, index),
+  }
+}
+
+function coverageRawItem(issue, index) {
+  const evidence = coverageIssueEvidence(issue, index)
+  return {
+    id: `coverage-raw-${index + 1}`,
+    title: text(issue?.reason, '未标注覆盖原因'),
+    meta: evidence.refs,
+    kind: 'raw',
+    evidence,
+  }
+}
+
 function headlinePairingState(pairing) {
   return PAIRING_STATE_PRIORITY.find((candidate) => pairing.some((group) => group?.state === candidate)) ?? 'unknown'
 }
@@ -242,7 +339,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
     notices.push({
       tone: 'unknown',
       title: '覆盖不完整',
-      detail: '部分事实缺少关联或来源信息，保持未知而不显示成功。',
+      detail: '部分事实暂时无法完整归类或关联，保持未知而不显示成功。',
     })
     if (coverageIssues.some((issue) => issue?.reason === 'waiting-is-not-terminal')) {
       notices.push({
@@ -283,6 +380,17 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
     humanMeta(event),
     selectedScopeRef,
   ))
+  const coverageItems = coverageIssues.map((issue, index) => coverageItem(issue, index, 'semantic'))
+  const coverageRawItems = coverageIssues.map(coverageRawItem)
+  const coverageSection = coverageItems.length > 0
+    ? {
+        id: 'coverage',
+        title: '覆盖缺口',
+        kind: 'semantic',
+        description: '这些记录暂时无法完整归类或关联，保持未知。',
+        items: coverageItems,
+      }
+    : null
   // The raw record carries the original envelope values, including when no event
   // exists. It is a direct display of decoded fields, never a rebuilt summary.
   const rawSourceItem = {
@@ -316,6 +424,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
 
   const sections = []
   if (mode === 'current') {
+    if (coverageSection) sections.push(coverageSection)
     if (stableItems.length > 0) {
       sections.push({
         id: 'stable',
@@ -335,6 +444,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
       })
     }
   } else if (mode === 'semantic') {
+    if (coverageSection) sections.push(coverageSection)
     sections.push({
       id: 'semantic',
       title: '语义事件与配对分组',
@@ -343,6 +453,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
       items: semanticItems,
     })
   } else if (mode === 'actions') {
+    if (coverageSection) sections.push(coverageSection)
     sections.push({
       id: 'actions',
       title: '实际动作时间线',
@@ -351,6 +462,15 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
       items: actionItems,
     })
   } else {
+    if (coverageRawItems.length > 0) {
+      sections.push({
+        id: 'coverage',
+        title: '覆盖缺口原始记录',
+        kind: 'raw',
+        description: '直接列出公开覆盖缺口的原始标识与引用。',
+        items: coverageRawItems,
+      })
+    }
     sections.push({
       id: 'raw',
       title: '原始记录',

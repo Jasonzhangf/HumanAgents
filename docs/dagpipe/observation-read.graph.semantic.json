@@ -8,7 +8,7 @@
     "pair_context_events": "在同一执行范围内配对活动与结果",
     "project_semantic_views": "组合已配对语义与原生实际执行快照 分开显示 guidance、当前计划与已记录实例",
     "project_status_and_actions": "投影状态新鲜度与合法动作并明确缺失提交输出",
-    "browser_view": "共享语义控件按事件与模块数据边渲染观测 并携带完整任务范围"
+    "browser_view": "共享语义控件按事件与模块数据边渲染观测 并携带完整任务范围及覆盖缺口原因与来源详情"
   },
   "design": {
     "scopeRead": "semantic GET/SSE 与 observation GET 可选携带完整 projectKey 与 mode；无 scope 保持 serve-bound 行为，完整外项目 scope 读取该配置项目与模式的 Journal inventory。query scope 仍是观测子树，node 仍是节点选择。",
