@@ -14,11 +14,13 @@
 | 里程碑 | 已完成的实际工作 | 仍需完成的用户结果 |
 | --- | --- | --- |
 | M0 用户任务进入与最小核心 | typed identity、独立 grant、App admission 和原生多轮闭包已合入 main。TaskFlow 正式 HTTP 确认、草稿、信封到持久身份的保真也已交付；新任务同次提交确认，省略保留原声明，冲突和已有任务未确认注入被拒。 | 创建/执行状态码仍不能代替任务成功；安装后的新真实 RCC App Task 整链仍未验收。当前 TaskFlow 证据证明字段绑定，不扩称三类任务均已实际执行成功。 |
-| M1 语义事实链与观察框架 | 已发布真实 Journal 派生的 semantic/actions/raw 读取、来源与未知呈现、证据导航；共享 payload 在浏览器发布边界原位不可变并由共同控件消费。GET 与 SSE 的独立反例均已证明能抓到内容污染，安装后的共享引用已验收。 | 正在运行的真实任务 live→stable、并行工具、失败/停止与重启恢复仍需在原生入口闭合；历史已收拢读取不代替活跃执行证明。 |
-| M2 统一交互与任务体验 | 四角入口、共用 drawer、任务/执行详情、键盘与返回焦点已发布。正式授权入口、目标绑定及 I2 scoped 历史读取已安装。生产 capture 正文的内部横向裁切已修复：原 165887 字符与精确 HTTP text 全等，桌面侧层和手机底抽屉内均无横溢出，返回和焦点恢复通过。 | 不同活跃任务及错误/断连的生产组合仍待证明；本次 capture 正文不包含真实 adopted-child，不能把其排版通过扩成全部子交付路径完成。 |
-| M3 模板、动态编排与计划演进 | TaskFlow 正式入口声明已进入 main；计划历史和共同展示基础保留。正式 inspectionDefinition 的 Contracts/Core 基础已实现并组合：可选字段复用原校验，同定义版本的内容漂移和静默删除被拒。occurrence 的 logicalTurnId 和 execution child 的 typed inspection binding 也已完成候选组合与来源收口。这些基础不冒充 producer。 | 三类真实任务、兼容巡检按检查项 ID 比较、长程循环/复核/重编及动态 revision 的生产终点仍待证明。原五项设计阻断已逐项复核关闭；后继按已认可的 typed delivery、turn-plan 绑定与 committed-stop 恢复合同实现，行为仍未验收。 |
+| M1 语义事实链与观察框架 | 已发布真实 Journal 派生的 semantic/actions/raw 读取、来源与未知呈现、证据导航；共享 payload 在浏览器发布边界原位不可变并由共同控件消费。GET 与 SSE 的独立反例均已证明能抓到内容污染，安装后的共享引用已验收。原生巡检停止后的 durable-history 读取及安装模块消费者已通过，Journal、Provider 请求与 child 调用保持不变。 | 正在运行的真实任务 live→stable、并行工具、失败与崩溃恢复的生产组合仍待证明；已停止任务的冷读取不代替活跃执行证明。 |
+| M2 统一交互与任务体验 | 四角入口、共用 drawer、任务/执行详情、键盘与返回焦点已发布。正式授权入口、目标绑定及 I2 scoped 历史读取已安装。原 165887 字符 capture 正文的内部裁切已修复。已安装默认打包 UI 也通过真实 adopted-child 历史正文双端验收：HTTP 原文与折叠原文一致，产出与主层正文一致，桌面侧层和手机底抽屉无横溢出，返回与焦点恢复通过。 | 不同活跃任务及错误/断连的生产组合仍待证明；受控真实记录的安装后展示不代替新真实 RCC 任务整链，也不扩称全部子交付路径完成。 |
+| M3 模板、动态编排与计划演进 | TaskFlow 正式入口声明、计划历史和 inspectionDefinition 已进入 main。正式巡检 producer、原 turn 计划绑定、child 交付、轮次结算与停止恢复已完成完整 milestone 交付。三 turn 原生消费者已证明两个独立 occurrence、真实 child invocation/item 及按检查项 ID 的 changed/not-compared 比较；原停止消费者也在实际安装模块上通过。 | 三类真实 RCC 任务、长程至少两轮 review 后重编及修订采用的生产终点仍待证明。当前两轮/三轮 Planner 与冷重放证据不能自动证明 review 驱动的长程循环；现有 producer 和专用 consumer 由独立计划核实，不能以限定文件未找到调用便断言缺实现。 |
 | M4 多 scope 总览与导航 | 系统/项目/任务聚合和真实实例选择已有读取基础；两次历史执行实例的精确选择及错误选择拒绝已验收。两个正式声明的空项目已通过公开 API 与浏览器切换。带 Task 项目的 Config/TCP 聚合、同 TaskId 下钻隔离及只读副作用证据已随本批源码合入 main。 | 两个生产项目的活跃任务、安装后浏览器及同角色多实例隔离仍待证明；受控读取不代替这些结果。 |
-| M5 Context、checkpoint 与恢复 | checkpoint current/viewed 分离、Context 历史、语义→raw 引用与返回已有读取实现。原生两轮/三轮和新进程冷恢复消费者已进入 main；安装后原 Task capture 的正文、精确来源、双端内部排版与返回已验收，技术来源默认折叠。 | 受控冷恢复不代替 installed deep-cold 生产证明；真实 adopted-child 正文仍缺，当前 capture 无子调用。纠错/恢复写链的完整生产结果及 G/F 最终矩阵继续 OPEN。 |
+| M5 Context、checkpoint 与恢复 | checkpoint current/viewed 分离、Context 历史、语义→raw 引用与返回已有读取实现。原生两轮/三轮和新进程冷恢复消费者已进入 main；安装后原 Task capture 与真实 adopted-child 历史正文均已双端验收，原文/语义正文/精确来源及返回一致，技术来源默认折叠，两个 Journal 字节未变。安装后的原巡检停止消费者已完整通过 durable cold read。 | 受控记录的安装后冷读取不代替 installed deep-cold 生产证明。纠错/恢复写链的完整生产结果及 G/F 最终矩阵继续 OPEN。 |
+
+本次巡检完整增量已随 `70b0f2b5` 合入并推送 main，正式实例 generation 30；交付与资源清理记录为 `26718444`、`b43ede49`。安装后正文展示证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/inspection-adopted-body-installed-20261017/reception.md` 与同目录 `browser-evidence.json`、`no-write-and-owner.json`、`cleanup.json`、`shots/`。它复用受控实际 Journal 中 checkpoint 2 / Journal 74 / child delivery 3，经正式已安装 CLI 的默认打包 UI 验收，未创建 Task 或发起模型请求；临时服务已关闭，配对临时文件已删除，53007 未改动。该结果只关闭安装后 adopted-child 正文双端这一项，不关闭全 G14 或全部 UX 目标。
 
 早前两项独立标准交付如下。完整源码、作者验证、整体审查、安装入口及清理证据见[项目状态汇总](../../note.md)，不在本计划重复建立验收账本。
 
