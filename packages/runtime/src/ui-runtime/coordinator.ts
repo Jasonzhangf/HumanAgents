@@ -3593,6 +3593,7 @@ export class RuntimeTaskCoordinator {
     report: ReturnType<RuntimeTaskCoordinator['providerAttemptReport']>,
     composition: RuntimeExecutionComposition,
     runtime: AgentRuntime,
+    completeExecutionReady?: (ready: boolean) => void,
   ): Promise<{ readonly result: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] }; readonly closure?: AgentRuntimeClosure }> {
     const coordinator = this;
     let producedOutput = '';
@@ -3603,8 +3604,7 @@ export class RuntimeTaskCoordinator {
     const producedPaths: string[] = [];
     await composition.start();
     await composition.submit(prompt);
-    record.resolveExecutionReady?.(true);
-    record.resolveExecutionReady = undefined;
+    completeExecutionReady?.(true);
     if (record.stopping || record.postCommitRecoveryPending) {
       return {
         result: {
@@ -4126,6 +4126,16 @@ export class RuntimeTaskCoordinator {
     record: TaskRecord,
     operation: OperationRecord,
   ): Promise<'stopped' | 'pending'> {
+    const executionReadyResolver = record.resolveExecutionReady;
+    let executionReadyPending = executionReadyResolver !== undefined;
+    const completeExecutionReady = (ready: boolean): void => {
+      if (!executionReadyPending) return;
+      executionReadyPending = false;
+      executionReadyResolver?.(ready);
+      if (record.resolveExecutionReady === executionReadyResolver) {
+        record.resolveExecutionReady = undefined;
+      }
+    };
     try {
       const producer = this.options.preparedExecutionStop;
       if (!producer) throw new RuntimeTaskControlError('execution.prepared-stop.unavailable', RUNTIME_OWNER,
@@ -4175,7 +4185,7 @@ export class RuntimeTaskCoordinator {
         record.allowedActions = ['retry-stop'];
         record.nextStep = settled.reason;
         this.pushEvent(record, operation, 'execution.settling', 'settling', settled.reason, settled.evidenceRefs);
-        record.resolveExecutionReady?.(false);
+        completeExecutionReady(false);
         return 'pending';
       }
       if (canonicalJsonStringify(settled.allocation) !== canonicalJsonStringify(requested.allocation)
@@ -4210,7 +4220,7 @@ export class RuntimeTaskCoordinator {
         record.allowedActions = ['retry-stop'];
         record.nextStep = 'retry prepared execution stop with the original allocation';
       }
-      record.resolveExecutionReady?.(false);
+      completeExecutionReady(false);
       if (operation.preparationFailure) {
         throw new AggregateError([operation.preparationFailure.cause, stopFailure],
           'prepared execution stop failed after preparation failure', { cause: stopFailure });
@@ -4222,8 +4232,7 @@ export class RuntimeTaskCoordinator {
     record.rejectRelease?.(error);
     record.rejectRelease = undefined;
     record.resolveRelease = undefined;
-    record.resolveExecutionReady?.(false);
-    record.resolveExecutionReady = undefined;
+    completeExecutionReady(false);
     record.release = undefined;
     record.releasePending = undefined;
     this.pushEvent(record, operation, 'execution.terminal', 'stopped', error.message,
@@ -4255,6 +4264,16 @@ export class RuntimeTaskCoordinator {
     allocation: RuntimeExecutionAllocation,
   ): Promise<void> {
     this.scopes.set(operation.operationId.value, scope);
+    const executionReadyResolver = record.resolveExecutionReady;
+    let executionReadyPending = executionReadyResolver !== undefined;
+    const completeExecutionReady = (ready: boolean): void => {
+      if (!executionReadyPending) return;
+      executionReadyPending = false;
+      executionReadyResolver?.(ready);
+      if (record.resolveExecutionReady === executionReadyResolver) {
+        record.resolveExecutionReady = undefined;
+      }
+    };
     const runtimeId = this.runtimeId(operation.operationId);
     const evidenceRef: EvidenceRef = {
       evidenceId: id('evidence', `operation-${operation.operationId.value}-scope`),
@@ -4489,6 +4508,7 @@ export class RuntimeTaskCoordinator {
                 coordinator.providerAttemptReport(input, attemptNumber, attemptEpoch),
                 attemptComposition,
                 attemptRuntime,
+                completeExecutionReady,
               );
               closure = attempt.closure;
               let workResult = attempt.result;
@@ -4685,8 +4705,7 @@ export class RuntimeTaskCoordinator {
         }
         await composition!.start();
         await composition!.submit(prompt);
-        record.resolveExecutionReady?.(true);
-        record.resolveExecutionReady = undefined;
+        completeExecutionReady(true);
         if (record.stopping || record.postCommitRecoveryPending) return;
         for await (const observation of composition!.observe()) {
           if (record.postCommitRecoveryPending) return;
@@ -4827,10 +4846,9 @@ export class RuntimeTaskCoordinator {
         return;
       }
       if (record.postCommitRecoveryPending) return;
-      const startupFailureBeforeReady = record.resolveExecutionReady !== undefined;
+      const startupFailureBeforeReady = executionReadyPending;
       if (startupFailureBeforeReady) {
-        record.resolveExecutionReady?.(false);
-        record.resolveExecutionReady = undefined;
+        completeExecutionReady(false);
       }
       if (record.stopping && !startupFailureBeforeReady) return;
       if (record.state === 'stopped' || runtime?.snapshot().state === 'stopped') {
@@ -5052,8 +5070,7 @@ export class RuntimeTaskCoordinator {
         record.rejectRelease = undefined;
         record.resolveRelease = undefined;
       }
-      record.resolveExecutionReady?.(false);
-      record.resolveExecutionReady = undefined;
+      completeExecutionReady(false);
       this.activeExecutions.delete(operation.operationId.value);
     }
   }
@@ -5616,8 +5633,6 @@ export class RuntimeTaskCoordinator {
           : new RuntimeTaskControlError('inspection.stop-settlement.failed', projection.ownerId, projection.message, projection.nextAction));
         record.rejectRelease = undefined;
         record.resolveRelease = undefined;
-        record.resolveExecutionReady?.(false);
-        record.resolveExecutionReady = undefined;
       }
       throw failure instanceof RuntimeTaskControlError
         ? failure
