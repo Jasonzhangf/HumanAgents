@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import test from 'node:test';
 import {
   id,
@@ -1472,4 +1473,287 @@ test('RCC v3 fully observed waiting settlement releases the session and allows c
   assert.equal(settled.nextAction?.kind, 'recover');
   assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), false);
   assert.equal((await built.transport.close(binding)).state, 'closed');
+});
+
+// Failure probability basis: observed intermittently in native delivery; the
+// rate is unknown. Impact: high, because a valid provider response can become an
+// empty stream before observation. Cost: one local HTTP fixture and one GC
+// child. Failure mode: before the fix, the real Response is collected and the
+// original Undici cleanup callback cancels its unlocked body; the public
+// consumer then lacks the expected output and succeeded terminal.
+const NATIVE_RESPONSE_GC_CHILD = String.raw`
+const providerPath = process.argv[1];
+const contractsPath = process.argv[2];
+const NativeFinalizationRegistry = globalThis.FinalizationRegistry;
+const registrations = [];
+let registryCount = 0;
+let totalRegistrationCount = 0;
+let fixtureResponseUrl;
+let markFixtureWriteComplete;
+const fixtureWriteComplete = new Promise((resolve) => {
+  markFixtureWriteComplete = resolve;
+});
+
+class CapturingFinalizationRegistry extends NativeFinalizationRegistry {
+  constructor(callback) {
+    registryCount += 1;
+    super((held) => {
+      for (const registration of registrations) {
+        if (registration.held === held) registration.callbackInvoked = 'natural';
+      }
+      callback(held);
+    });
+    this.callback = callback;
+  }
+
+  register(target, held, token) {
+    totalRegistrationCount += 1;
+    if (target instanceof Response && held instanceof WeakRef) {
+      registrations.push({
+        target: new WeakRef(target),
+        held,
+        callback: this.callback,
+        callbackInvoked: undefined,
+        responseUrl: target.url,
+        matchesFixture: target.url === fixtureResponseUrl,
+        matchesBody: held.deref() === target.body,
+      });
+    }
+    return super.register(target, held, token);
+  }
+}
+
+globalThis.FinalizationRegistry = CapturingFinalizationRegistry;
+
+const { createServer } = await import('node:http');
+const { pathToFileURL } = await import('node:url');
+const provider = await import(pathToFileURL(providerPath).href);
+const { id } = await import(pathToFileURL(contractsPath).href);
+
+const scope = {
+  organId: id('organ', 'organ-native-response-gc'),
+  taskId: id('task', 'task-native-response-gc'),
+  operationId: id('operation', 'operation-native-response-gc'),
+};
+const execution = {
+  runtimeId: 'runtime-native-response-gc',
+  taskId: scope.taskId,
+  operationId: scope.operationId,
+  executionEpoch: 1,
+};
+const binding = {
+  bindingId: 'binding-native-response-gc',
+  providerId: 'cc',
+  protocol: 'responses',
+  endpointRef: 'native-response-gc',
+  modelRef: 'provider.model',
+  configDigest: 'sha256:native-response-gc-config',
+  capabilityDigest: 'sha256:native-response-gc-capability',
+};
+const evidenceSink = {
+  async write(input) {
+    return {
+      evidenceId: id('evidence', 'native-response-gc-' + input.type),
+      kind: input.kind,
+      source: 'native-response-gc-child',
+      locator: input.locator,
+      scope: input.scope,
+    };
+  },
+  async read() {
+    return new Uint8Array();
+  },
+};
+const input = {
+  ...execution,
+  inputRefs: ['task://task-native-response-gc/input/1'],
+  evidenceRefs: [{
+    evidenceId: id('evidence', 'native-response-gc-start'),
+    kind: 'execution',
+    source: 'native-response-gc-child',
+    locator: 'test://native-response-gc/start',
+    scope,
+  }],
+  payload: { prompt: 'return the exact native response' },
+};
+const expectedOutput = 'GC ownership preserved';
+const sse = [
+  'event: response.created',
+  'data: {"type":"response.created","response":{"id":"response-native-gc"}}',
+  '',
+  'event: response.output_text.done',
+  'data: {"type":"response.output_text.done","item_id":"message-native-gc","text":"' + expectedOutput + '"}',
+  '',
+  'event: response.completed',
+  'data: {"type":"response.completed","response":{"id":"response-native-gc"}}',
+  '',
+  '',
+].join('\n');
+
+const server = createServer((request, response) => {
+  if (request.method !== 'POST' || request.url !== '/v1/responses') {
+    response.statusCode = 404;
+    response.end();
+    return;
+  }
+  response.writeHead(200, { 'content-type': 'text/event-stream' });
+  response.end(sse, markFixtureWriteComplete);
+});
+await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+const baseUrl = 'http://127.0.0.1:' + server.address().port;
+fixtureResponseUrl = baseUrl + '/v1/responses';
+
+const transport = provider.createV3ProviderHttpTransport({
+  binding,
+  baseUrl,
+  evidence: evidenceSink,
+  source: 'http',
+});
+const adapter = new provider.ProviderAdapter({
+  binding,
+  routeRef: 'test-route',
+  codec: new provider.ResponsesProviderCodec(),
+  transport,
+  evidence: evidenceSink,
+});
+
+await adapter.start(input);
+await fixtureWriteComplete;
+await new Promise((resolve) => setImmediate(resolve));
+global.gc();
+await new Promise((resolve) => setImmediate(resolve));
+
+const fixtureRegistrations = registrations.filter((candidate) => candidate.matchesFixture);
+const registration = fixtureRegistrations.find((candidate) => candidate.matchesBody) ?? fixtureRegistrations[0];
+let responseAliveBeforeObserve;
+if (registration !== undefined) {
+  const target = registration.target.deref();
+  responseAliveBeforeObserve = target !== undefined;
+}
+const responseDead = registration === undefined ? undefined : responseAliveBeforeObserve === false;
+if (responseDead === true && registration.callbackInvoked === undefined) {
+  registration.callback(registration.held);
+  registration.callbackInvoked = 'scheduled';
+}
+await new Promise((resolve) => setImmediate(resolve));
+
+let output;
+let terminal;
+let observeError;
+try {
+  for await (const event of adapter.observe(input)) {
+    if (event.kind === 'output') output = event.summary;
+    if (event.kind === 'terminal') terminal = event.terminalState;
+  }
+} catch (cause) {
+  observeError = {
+    code: cause?.providerError?.code ?? cause?.code,
+    message: cause instanceof Error ? cause.message : String(cause),
+  };
+}
+
+let settledState;
+let settleError;
+try {
+  settledState = (await adapter.settle(input)).state;
+} catch (cause) {
+  settleError = cause instanceof Error ? cause.message : String(cause);
+}
+let closeState;
+let closeError;
+try {
+  closeState = (await adapter.close(binding)).state;
+} catch (cause) {
+  closeError = cause instanceof Error ? cause.message : String(cause);
+}
+server.closeAllConnections();
+await new Promise((resolve) => server.close(resolve));
+
+process.stdout.write(JSON.stringify({
+  execPath: process.execPath,
+  nodeVersion: process.versions.node,
+  undiciVersion: process.versions.undici,
+  registryCount,
+  totalRegistrationCount,
+  registrationCount: fixtureRegistrations.length,
+  registrationMatchesBody: registration?.matchesBody,
+  responseUrl: registration?.responseUrl,
+  responseAliveBeforeObserve,
+  responseDead,
+  cleanupCallback: registration?.callbackInvoked,
+  output,
+  terminal,
+  observeError,
+  settledState,
+  settleError,
+  closeState,
+  closeError,
+}) + '\n');
+`;
+
+function runNativeResponseGcChild(): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> {
+  const providerIndex = new URL('../../../packages/adapters/provider/src/index.js', import.meta.url).pathname;
+  const contractsIndex = new URL('../../../packages/contracts/src/index.js', import.meta.url).pathname;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      '--expose-gc',
+      '--input-type=module',
+      '--eval',
+      NATIVE_RESPONSE_GC_CHILD,
+      providerIndex,
+      contractsIndex,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`native Response GC child timed out; stderr=${stderr.slice(-500)}`));
+    }, 20_000);
+    child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+test('RCC v3 native fetch preserves the Response owner before observation across GC', async () => {
+  const child = await runNativeResponseGcChild();
+  assert.equal(child.code, 0, `native Response GC child exited ${String(child.code)}; stderr=${child.stderr.slice(-500)}`);
+  const result = JSON.parse(child.stdout.trim().split('\n').at(-1) ?? '{}') as {
+    readonly execPath?: string;
+    readonly nodeVersion?: string;
+    readonly undiciVersion?: string;
+    readonly registryCount?: number;
+    readonly totalRegistrationCount?: number;
+    readonly registrationCount?: number;
+    readonly registrationMatchesBody?: boolean;
+    readonly responseUrl?: string;
+    readonly responseAliveBeforeObserve?: boolean;
+    readonly responseDead?: boolean;
+    readonly cleanupCallback?: 'natural' | 'scheduled';
+    readonly output?: string;
+    readonly terminal?: string;
+    readonly observeError?: { readonly code?: string; readonly message?: string };
+    readonly settledState?: string;
+    readonly settleError?: string;
+    readonly closeState?: string;
+    readonly closeError?: string;
+  };
+  const diagnostic = `GC child evidence: ${JSON.stringify(result)}`;
+  assert.equal(result.registrationCount, 1, diagnostic);
+  assert.equal(result.registrationMatchesBody, true, diagnostic);
+  assert.equal(result.responseAliveBeforeObserve, true, diagnostic);
+  assert.equal(result.cleanupCallback, undefined, diagnostic);
+  assert.equal(result.output, 'GC ownership preserved', diagnostic);
+  assert.equal(result.terminal, 'succeeded', diagnostic);
+  assert.equal(result.observeError, undefined, diagnostic);
+  assert.equal(result.settledState, 'succeeded', diagnostic);
+  assert.equal(result.settleError, undefined, diagnostic);
+  assert.equal(result.closeState, 'closed', diagnostic);
 });

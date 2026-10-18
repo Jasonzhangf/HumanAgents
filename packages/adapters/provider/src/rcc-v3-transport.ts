@@ -139,13 +139,13 @@ function defaultFetch(url: string, init: RccV3FetchInit): Promise<RccV3FetchResp
   return globalThis.fetch(url, init as RequestInit).then(async (response) => ({
     status: response.status,
     headers: response.headers,
-    body: response.body ? readableStreamToAsyncIterable(response.body) : null,
+    body: response.body ? readableStreamToAsyncIterable(response) : null,
     text: () => response.text(),
   }));
 }
 
-async function* readableStreamToAsyncIterable(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
-  const reader = stream.getReader();
+async function* readableStreamToAsyncIterable(response: Response): AsyncIterable<Uint8Array> {
+  const reader = response.body!.getReader();
   let completed = false;
   try {
     while (true) {

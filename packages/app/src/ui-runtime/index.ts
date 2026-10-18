@@ -34,6 +34,7 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
 import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
 import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
 import { createJsonlI2JournalPort } from '../i2-journal.js';
@@ -339,20 +340,14 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const attentionPort = new InMemoryAttentionPort();
   const modeRoot = join(options.checkpointRoot, options.mode);
   const canonicalJournalPath = uiRuntimeControlJournalPath(modeRoot);
+  const taskControlJournalPath = uiRuntimeControlJournalPath(modeRoot);
+  const taskControlJournal = new JsonlOrganJournal(taskControlJournalPath);
   const canonicalCheckpoints = new FileCheckpointStore(canonicalJournalPath);
   const canonicalCurrentState = createJsonlRuntimeTaskCurrentStateJournal({
-    journal: new JsonlOrganJournal(canonicalJournalPath),
+    journal: taskControlJournal,
   });
   const hydrateReadFor: NonNullable<NonNullable<UiRuntimeServiceOptions['runtimeComposition']>['hydrateReadFor']> =
-    options.runtimeComposition?.hydrateReadFor ?? (async (scope) => {
-      const latest = await canonicalCheckpoints.readLatest(scope);
-      if (latest === null) return undefined;
-      const { checkpoint } = latest;
-      if (checkpoint.scope.organId.value !== scope.organId.value
-        || checkpoint.scope.taskId?.value !== scope.taskId?.value
-        || checkpoint.scope.cycleId?.value !== scope.cycleId?.value
-        || checkpoint.scope.operationId?.value !== scope.operationId?.value) return undefined;
-      return {
+    options.runtimeComposition?.hydrateReadFor ?? (async () => ({
         checkpoint: {
           verify: (requestedScope) => canonicalCheckpoints.verify(requestedScope),
           readLatest: (requestedScope) => canonicalCheckpoints.readLatest(requestedScope),
@@ -361,8 +356,15 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           readNativeCheckpoint: (requested) => canonicalCheckpoints.readNativeCheckpoint(requested),
         },
         currentState: { read: (requestedScope) => canonicalCurrentState.read(requestedScope) },
-      };
-    });
+        hasCommittedActiveTurn: async (selector) => {
+          const bindings = await listTaskActiveTurnBindings({
+            journal: taskControlJournal,
+            scope: { organId: options.organId, taskId: selector.taskId },
+          });
+          return bindings.some((entry) => entry.binding.scope.operationId?.value === selector.operationId.value
+            && entry.binding.execution.executionEpoch === selector.executionEpoch);
+        },
+      }));
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
   const subscriptionJournalPath = join(modeRoot, 'subscriptions.jsonl');
   const clock = options.now;
@@ -407,8 +409,6 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     : undefined;
   // I2 product history is committed through the same task-control Organ Journal the runtime already
   // owns, so the read layer reuses that authority instead of introducing a second store.
-  const taskControlJournalPath = uiRuntimeControlJournalPath(modeRoot);
-  const taskControlJournal = new JsonlOrganJournal(taskControlJournalPath);
   const explicitBrainInterpreter = options.explicitBrainInterpreter ?? (() => {
     const templateRoot = options.explicitBrainTemplateRoot?.trim();
     if (!templateRoot) {

@@ -1,5 +1,40 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 M3 与 Provider Response 所有权修复：安装复验通过
+
+- Provider 修复候选48482ead已正常合入本地main；原M3 taskFlow来源77dcecf2/20c03691一并保留。r441有效GC因果RED→同名GREEN、transport40/40；正常组合最新remote917ea959后App/nativecompile0、原M3两cycle公开case1PASS。r442沿原whole Reviewer补审，实际Gemini4medium/SUCCESS/exit0、严格schema/既有classifier PASS/findings[]，覆盖原M3闭包及新Provider两文件。
+- r443从main contracts/config/App/nativecompile/package/install全部exit0。正式installed restart gen39/PID35024→gen40/PID11939，53007，legacyCloseclean。随后原M3 consumer通过installedruntime布局和canonicalCLI执行，实际1PASS34122ms/exit0、29ProviderPOST、两Planner revisions及冷语义历史断言到达。不是worktree模块替代，不冒真实RCC生成或原taskless socket错误已解决。
+- 本增量安装行为已通过；远端push与自有M3树/诊断fixture清理正在收口，尚未以本条宣称全目标完成。原interaction-2 epoch4 EOF仍UNKNOWN，无epoch5。完整goal ACTIVE/INCOMPLETE；prepared及UX已独立远端交付，治理消融及原RCC业务验收仍由peer推进。
+- 完整回执：既有RUN下r441/owner-acceptance.md及实际红绿日志，r442/plan.md/classification.json，r443各构建.exit/restart.log/installed-m3.log。旧r427安装失败保留为历史反例，不改写成PASS。
+
+## 2026-10-18 Provider 原生 Response 生命周期因果验证进行中
+
+- r441 修正静态 import 后取得有效因果 RED：fixture 注册1/body匹配true，一次GC后Response死亡，原Undici callback自然执行；公开observe missing-terminal、settled failed、close closed。最小产品修改为传Response给lazy generator并在首次执行取body reader，原terminal/cancel/release不改。worker产品修改后未来意向退出未算验证；Root实际provider compile0、同名GC GREEN0、原transport40/40。正常合最新origin/main后App/nativecompile0、原M3两cycle公开case1PASS33201ms/exit0。r442沿原独立Gemini4medium milestone reviewer会话补审受影响两文件，尚无Review结果；未安装/推送该修复。
+- r440 独立小技术计划 terminal0，Root 接受：当前 child 静态 `node:http` import 先于 registry 包装，Node v22.22.2 的只读加载证据确认该 import 初始化 Undici。该确定的测试机制缺陷支持一次修正后的基线尝试。r441 fresh GCM 已在同一 M3 树续派，先改动态导入、稳定成功断言和 server 写完信号；再做一次 GC。有效因果 RED 前产品仍不得修改。原 r439 不升级为 RED；不循环 GC，不重跑到绿。
+- peer 已报告 prepared 独立交付完成并归还窗口：PR#3 remote917ea959，local main 正常合流，installed gen39/PID35024/53007；原 prep-entry blocked 与 true-unadmitted cold-grant/completion 两例 installed2PASS、status200。来源3f78b239及原 whole FAIL/P1、finding复核 PASS 均保留。原树/link/layout/分支已由其核销；本侧进度文档 dirty 保留。完整原始回执仍由 peer owner 管理，本侧未把其报告扩大为全目标 PASS；原 RCC Task 未执行。
+- r439 已 terminal0，但验收 INCONCLUSIVE：contracts/provider 编译0，正式具名 GC 用例 exit1，`registrationCount=0`、`responseDead=false`、`stream.missing-terminal`、settled failed。未捕获 native 注册，不能算因果 RED。只新增原 test 内248行实验，产品未改；未跑下游 Provider/M3。首次模式匹配0项的空跑不算行为 PASS。Root 接收时另发现其无条件 `responseDead=true` 断言与修复后的保活 GREEN 冲突，未接受该测试为最终合同。r440 fresh OAuth GPT6.1 medium 独立小技术 Planner 已派，只修正注册观测/稳定红绿断言机制，不重做业务设计；有效 RED 前继续禁止产品修复。
+- prepared P1 已由 peer 报告候选3f78b239、原反例红绿与 finding 复核 PASS；本侧已将 main/install/canonical 窗口再次释放给它沿已接受 r435 独立路线交付。它保留本侧进度文档 dirty，不纳入其候选；本侧不写共享 source/dist/canonical。Provider 留在隔离树，不阻断独立 prepared 交付。
+- r437 已移除全部临时 HTTP 诊断，原 M3 树恢复已提交来源；App/native 编译实际 exit0。r438 独立 Astra 技术计划已接受：现有业务图拓扑不变，只验证 native Response 在 lazy body 首次读取前的所有权。Node 原生 finalizer 会取消尚未锁定、未读取的 stream；当前仅为有源码机制支持的假设，尚无因果 RED/GREEN，不宣称已修复 M3。
+- fresh GCM r439 已启动并核对实际进程 PID61850，复用唯一 M3 树 `m3-template-production-composition-20261018`。唯一写入范围为 `rcc-v3-transport.ts` 与原 transport test。先做一个 native-fetch/GC 公开 consumer 反例；只有确认 Response 死亡与原清理 callback 后业务断言失败，才修改 lazy generator 的 Response 所有权。GC 前提不成立即回报 INCONCLUSIVE，不循环 GC 或重跑到绿。随后同例 GREEN、受影响 Provider 验证与原 M3 两周期用例；尚未取得结果。
+- UX peer 已报告独立交付并归还 main/install/canonical 窗口：PR#2 合入 remote main1155d0cb；正常合回 local main59c1f672，installed gen38/PID27675/53007。其回执包含 renderer9PASS 和浏览器只读验收，本侧尚未接收完整原始回执，不扩大为全目标 PASS。canonical 仍含待交付 M3，不能称与远端等同。本侧未新增 canonical 业务请求。
+- 实际并发为 Provider 因果验证、prepared 准入修复、治理消融三个 GCM 执行进程；后两项由 UX peer 管理。Provider 修复、整体 Review 补充、安装同例复验与推送仍未完成；原 interaction-2 EOF 仍 UNKNOWN，无 epoch5。完整 goal 保持 ACTIVE/INCOMPLETE。
+- 证据统一位于既有 RUN 下 `native-m3-httpdiag-restore-r437-20261018`、`native-response-lifetime-astra-r438-20261018` 和 `native-provider-lifetime-execute-r439-20261018`。下一步接收 r439 的实际红绿证据，不重开已充分的 N2、显式 helper 连续性或协议×入口测试矩阵。
+
+## 2026-10-18 M3 已审候选安装复验失败，交付未完成
+
+- peer正式移交M3独占树后，本侧修正原consumer仅等rowpresence的readiness前置，保留waiting/grant断言。普通产品来源77dcecf2、测试20c03691；完整4文件240+/14-。原taskFlow omission RED复用，r424移除全部临时日志后原两cycle公开case实际1PASS33604ms/2revisions/29POST，nativecompile0。r426完整独立Gemini4medium实际SUCCESS/exit0，strictschema classifierPASS/findings[]。
+- peer明确交接main/install/canonical窗口，本侧main正常FF20c03691，contracts/config/App/nativecompile/package/install实际全0；正式installedrestart gen36/PID11061→gen37/PID3831，53007/legacyCloseclean。旧诊断cookie401后官方pair临时会话status200、logout200，没有canonical业务重投。
+- r427 installedmodules+canonicalCLI原两cyclecase实际1FAIL61305ms，保留fixture `~/.humanagent/test-fixtures/m3-installed-20261018/text-only-HzY3fE`。实际task-control seq186再次child SSE missing terminal，seq187上层failed-result criterion错误。main已本地合流但尚未push；没有回滚、强推或冒交付完成。ReviewPASS与health不代替此失败的安装行为门禁。
+- 原r420同类失败、r423发送端日志PASS/r424无日志PASS均不证明根因修复。r425独立Astra技术攻关排除标准follow-up提前清空terminal假设，未准入runtime修复。当前r428按其已接受计划仅在M3隔离树做一次临时消费端bytes/frames/terminal诊断并恢复；不弱guard、不改installed模块、不新增case/矩阵或重做negative。
+- 本侧M3树与失败fixtures、r427 consumer-layout因交付未完成保留；peer继续独立governance/prepared工作。完整goalACTIVE/INCOMPLETE，原canonical interaction epoch4后未请求，EOF根因UNKNOWN。
+
+## 2026-10-18 显式跨 turn 证据充分性已裁决，不扩测
+
+- r413/r414两路只读GCM已返回：前者确认通用两turn语义历史装配、helper精炼checkpoint和冷helper恢复源码/测试边；后者确认当前独立instructions/requestContext三协议编码与config→App per-agent/role binding及匹配测试存在。未发现具体缺码；本次未运行测试，不称freshPASS，不把旧author记录未集成当当前缺实现。
+- r415独立OAuth小Planner实际SUFFICIENT并由Root接受：r288已核对的真实两turn出站1PASS、元数据2PASS及冷helper恢复历史GREEN，加r407/408/409/410公开helper精炼checkpoint/接线红绿/installed证明，足以覆盖共享assembler的该项连续性契约。缺单个helper→turn2组合case不构成额外加测理由；零新增测试、代码、工作树或canonical请求。r413的组合执行UNKNOWN只保留证据粒度，不升级产品缺陷。
+- r412阶段计划仅接受两只读观察与peer同步，未接受条件实现、强制Git身份/ancestry核对或协议×入口矩阵；r411因超出定点范围读取大文件被Root中止，同独立Planner收敛r412。N2/r330与C/G/r315继续复用充分性结论，不重开。
+- 下一具体依赖为peer的M3与prepared/cold现有收口结果接收；M5由peer报告main19a15235、installed gen36与HTTP复验已交付，本侧无相同范围写入。原interaction epoch4后未再请求，EOF根因仍UNKNOWN。完整goal仍ACTIVE/INCOMPLETE，不据局部充分性宣称总目标完成。
+
 ## 2026-10-18 已交付：公开 taskless helper 接线验收
 
 - 测试候选 `2ad679f5` 已正常FF main并push，回执 `6bd955b5..2ad679f5 main -> main`。仅原公开consumer测试文件334insertions/3deletions；无永久产品修改。完整goal和完整N3长程验收仍OPEN。
