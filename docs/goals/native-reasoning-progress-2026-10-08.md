@@ -2,6 +2,7 @@
 
 ## 2026-10-18 M3 与 Provider Response 所有权修复：安装复验通过
 
+- 本增量已交付远端main ed44b1dd，实际push回执 `917ea959..ed44b1dd main -> main`。本轮M3树已clean/无活动进程，普通remove/prune/pathabsent、merged分支删除；注册6→5，另5树均peer治理活动资源保留。自有node_modules仅unlink、依赖目标保留；r427/r443 consumer layouts、9项自有fixture根与r439临时probe均移除。5项失败诊断fixture先归档r443/failed-diagnostic-fixtures.tgz；resource-cleanup.json记录路径。canonical PID11939在安装case后仍存活，未对原interaction再次投业务。完整goal继续ACTIVE。
 - Provider 修复候选48482ead已正常合入本地main；原M3 taskFlow来源77dcecf2/20c03691一并保留。r441有效GC因果RED→同名GREEN、transport40/40；正常组合最新remote917ea959后App/nativecompile0、原M3两cycle公开case1PASS。r442沿原whole Reviewer补审，实际Gemini4medium/SUCCESS/exit0、严格schema/既有classifier PASS/findings[]，覆盖原M3闭包及新Provider两文件。
 - r443从main contracts/config/App/nativecompile/package/install全部exit0。正式installed restart gen39/PID35024→gen40/PID11939，53007，legacyCloseclean。随后原M3 consumer通过installedruntime布局和canonicalCLI执行，实际1PASS34122ms/exit0、29ProviderPOST、两Planner revisions及冷语义历史断言到达。不是worktree模块替代，不冒真实RCC生成或原taskless socket错误已解决。
 - 本增量安装行为已通过；远端push与自有M3树/诊断fixture清理正在收口，尚未以本条宣称全目标完成。原interaction-2 epoch4 EOF仍UNKNOWN，无epoch5。完整goal ACTIVE/INCOMPLETE；prepared及UX已独立远端交付，治理消融及原RCC业务验收仍由peer推进。
