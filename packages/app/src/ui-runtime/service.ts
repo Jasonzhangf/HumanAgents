@@ -3569,18 +3569,25 @@ export class UiRuntimeService {
    * Reads the committed public publication for a task's current operation from
    * the authoritative task/cycle Organ Journal. The synchronous `taskDashboard`
    * stays free of journal I/O for internal callers, so the async HTTP read model
-   * composes the durable read here. A read failure degrades to `unknown` with an
-   * empty commit list rather than hiding a published result.
+   * composes the durable read here. A read failure degrades to `unknown` while
+   * retaining any already confirmed publication for the current binding.
    */
   private async authoritativePublicOutputForTask(taskId: TaskId): Promise<PublicOutputPublicationProjection | undefined> {
     const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
     const binding = publicOutputBindingFor(task, this.options.organId);
     if (binding === undefined || binding.scope.cycleId === undefined) return undefined;
+    const pending = task.publicOutput?.state === 'pending';
     try {
       const publication = await this.options.checkpointStoreFor(task.taskId, binding.scope.cycleId).readPublicOutputs(binding);
-      return toPublicOutputProjection(publication);
+      const projected = toPublicOutputProjection(publication);
+      return pending && projected !== undefined ? { ...projected, state: 'pending' } : projected;
     } catch {
-      return { state: 'unknown', commits: [] };
+      const retained = toPublicOutputProjection(task.publicOutput);
+      return {
+        state: 'unknown',
+        commits: retained?.commits ?? [],
+        ...(retained?.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: retained.publicCommitWatermark }),
+      };
     }
   }
 

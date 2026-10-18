@@ -3924,6 +3924,45 @@ test('public semantic observation preserves typed scope and reports unsupported 
   assert.equal(semantic.coverageIssues.every((issue) => issue.scope.taskId?.value === task.taskId.value), true);
 });
 
+test('task dashboard retains current bound public output commits on read failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-public-output-read-failure-'));
+  const storePath = join(root, 'public-output.jsonl');
+  const store = new FileCheckpointStore(storePath);
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: () => store,
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal,
+    closurePort: journal,
+    memory: testMemory('project-ui-test'),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    runtimeComposition: { admitExecution: async () => {} },
+  });
+  const task = service.createTask({ title: 'retain public output on read failure' });
+  await service.startExecution(task.taskId, { prompt: 'retain public output on read failure' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const before = await service.taskDashboardWithPlan(task.taskId);
+  assert.equal(before.publicOutput?.state, 'committed');
+  assert.ok((before.publicOutput?.commits.length ?? 0) > 0, 'fixture must produce confirmed public output');
+  assert.ok(before.output.length > 0, 'fixture must project confirmed public output text');
+  assert.ok(before.publicOutput?.publicCommitWatermark !== undefined, 'fixture must produce a real public watermark');
+
+  store.readPublicOutputs = async () => {
+    throw new Error('simulated public output read failure');
+  };
+  const after = await service.taskDashboardWithPlan(task.taskId);
+  assert.equal(after.publicOutput?.state, 'unknown');
+  assert.deepEqual(after.publicOutput?.commits, before.publicOutput?.commits);
+  assert.equal(after.publicOutput?.publicCommitWatermark, before.publicOutput?.publicCommitWatermark);
+  assert.equal(after.output, before.output);
+});
+
 test('confirmed requirement cannot bypass implicit admission when the provider is unavailable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-admission-'));
   const service = serviceFor(

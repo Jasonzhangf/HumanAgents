@@ -41,6 +41,67 @@ export function displayModeLabel(mode) {
   return DISPLAY_MODE_LABELS[mode] || (mode ? String(mode) : '尚未选择')
 }
 
+// ── Public output publication presentation ──────────────────────────────────
+// The dashboard result panel and the completed-task action copy read one view
+// of the typed `PublicOutputPublicationProjection` carried by the task GET.
+// The state is one of the four explicit publication states; a read without the
+// carrier stays a legacy read. This module never inspects raw records, provider
+// text or the task lifecycle to decide the result state. A confirmed text that
+// the projection already returned stays exact in every state.
+const PUBLIC_OUTPUT_CONFIRMED_LABEL = '已确认的结果'
+const PUBLIC_OUTPUT_STATE_COPY = Object.freeze({
+  unknown: '结果状态暂时无法确认',
+  pending: '新内容待确认',
+  unavailable: '结果暂时不可用',
+})
+
+function publicOutputView({ output, publication } = {}) {
+  const state = publication?.state
+  const confirmed = typeof output === 'string' && output.length > 0
+  const confirmedText = confirmed ? output : ''
+  if (state === 'unknown' || state === 'pending' || state === 'unavailable') {
+    const copy = PUBLIC_OUTPUT_STATE_COPY[state]
+    return {
+      state,
+      confirmed,
+      message: copy,
+      text: confirmed ? confirmedText : copy,
+      status: confirmed ? `${PUBLIC_OUTPUT_CONFIRMED_LABEL} · ${copy}` : '',
+    }
+  }
+  if (state === 'committed') {
+    return {
+      state,
+      confirmed,
+      message: '已确认',
+      text: confirmed ? confirmedText : '暂无结果',
+      status: confirmed ? '已确认' : '',
+    }
+  }
+  return { state, confirmed, message: '', text: confirmed ? confirmedText : '暂无结果', status: '' }
+}
+
+/** Result panel body for the dashboard `交付结果` section. */
+export function renderTaskPublicOutputPanel(input = {}) {
+  const view = publicOutputView(input)
+  const panel = element('div', undefined, 'panel')
+  panel.append(element('p', view.text, 'business-output-text'))
+  if (view.status) panel.append(element('p', view.status, 'muted'))
+  return panel
+}
+
+/** Action copy for a succeeded task, driven by the same publication view. */
+export function publicOutputActionCopy(input = {}) {
+  const view = publicOutputView(input)
+  if (view.state === 'unknown' || view.state === 'pending' || view.state === 'unavailable') {
+    return `任务已完成；${view.message}。`
+  }
+  if (view.state === 'committed') {
+    return view.confirmed ? '任务已完成，结果已确认。' : '任务已完成；当前没有合法操作。'
+  }
+  return view.confirmed ? '任务已完成，结果可用。' : '任务已完成；当前没有合法操作。'
+}
+
 const TASK_DESCRIPTION_FIELDS = Object.freeze([
   ['goal', '目标'],
   ['scope', '范围'],

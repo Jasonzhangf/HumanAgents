@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新：公开结果状态与正文保留已交付
+
+main `3f3b8182` 已合入 App 当前绑定读失败保留、真实 pending 组合和 UI 人读状态。实际 RED/GREEN 证明旧行为丢失确认正文、将 held commit 的 pending 覆盖成 committed；修复后正文/水位取真实持久化提交，未知状态保持可见。真实 HTTP 负向响应由生产页面原样消费，正文完整且显示无法确认，恢复正常读取后原 A 已确认。一次整体 Gemini4medium Review r505 有效 PASS。main构建/打包/安装通过，正式restart44→45/53007、安装后原A HTTP200与确认正文/水位1093保持不变，默认打包UI通过。自有候选树及临时服务/浏览器状态已清理；证据 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f07-combined-entry-20261018/`。
+
+完整目标继续 ACTIVE/INCOMPLETE。两路后继 GCM 独立处理 coverage issue 原因/来源展示和偏好 reset 失败文案。原剩余核销报告只作观察；其逐类型 RCC 矩阵、公开正文 producer 缺失和过期 F15 活跃规划推断未直接采纳。不把这些猜测转为新框架或额外测试门禁。
+
 ## 2026-10-18 当前：实际图、水位与偏好证据已交付，剩余展示边在规划
 
 ### 后继实际推进：偏好验收与上下文证据复用

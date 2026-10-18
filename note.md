@@ -1,5 +1,15 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
+## 2026-10-18 最新交付：公开结果状态与已确认正文保留
+
+main `3f3b8182` 已组合交付 App、UI 和 pending 修复。读取失败保留当前绑定已确认的正文、提交和水位，并明确显示无法确认；真实提交等待期间保留 Runtime 已产生的 pending，正文仍只取持久化提交。页面以“新内容待确认／结果暂时不可用／结果状态暂时无法确认”区分状态，保留精确正文，不从 task running 推断公开状态。
+
+原 App 真实提交后读失败、HTTP held-commit 和 UI 状态均有有效 RED/GREEN；合流后 UI14/14、HTTP2/2、App保留1/1及构建编译通过。真实 HTTP unknown 响应经受控交付进入生产页面，正文完整且明确标注无法确认；该证明不冒充安装实例的存储故障。独立 Gemini4medium 整体 Review r505 实际 exit0、有效 PASS、findings[]，覆盖完整九文件闭包。
+
+main App 构建、打包、安装通过。正式 restart generation44→45、PID74672、53007，旧实例 clean 收拢。安装后的原 A 公开 HTTP200，正文与原确认提交完全一致，水位1093；默认打包页面显示正文和“已确认”。没有重执行 Task 或发新模型请求。自有临时服务已收拢，浏览器自有 cookie/emulation 清理、p1空白、p3未动；App 候选树正常 remove/prune/确认不存在。完整证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f07-combined-entry-20261018/`。
+
+完整 I1–I5/G1–G14/F01–F20 仍未完成。当前两路独立 GCM 分别处理覆盖问题原因/来源展示、偏好重置失败文案；它们不阻塞本增量交付。剩余核销中的逐类型 RCC 矩阵、额外全局总线和 native Arc 债没有采用；未验证项不自动等同缺实现。
+
 ## 2026-10-18 最新交付：嵌套 Observation 与计划历史
 
 main `bae24634` 已交付 typed scope 人读事件展示、精简事件抽屉与既有计划历史浏览器消费者。候选原A双端、一次独立 Gemini4medium whole Review（实际SUCCESS/exit0、classifierPASS/findings[]）、必要构建打包安装、正式restart gen42/PID19087/53007和默认安装UI手机入口均已通过。技术原文保持可读；事件不再伪造目标/结果或挂内层会话。计划历史正向9PASS不冒充抓错反例或新真实RCC多轮。完整回执 `.worker-runs/observation-readable-delivery-20261018/`。
