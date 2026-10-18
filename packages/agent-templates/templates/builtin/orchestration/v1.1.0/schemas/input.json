@@ -10,8 +10,7 @@
     "pipelineNodeId",
     "inputRevision",
     "executionEpoch",
-    "objective",
-    "acceptanceCriteriaDigest"
+    "objective"
   ],
   "properties": {
     "requirementId": { "type": "string", "minLength": 1 },
@@ -20,7 +19,6 @@
     "inputRevision": { "type": "integer", "minimum": 1 },
     "executionEpoch": { "type": "integer", "minimum": 1 },
     "objective": { "type": "string", "minLength": 1 },
-    "acceptanceCriteriaDigest": { "type": "string", "minLength": 1 },
     "targetRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
     "resourceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
   }

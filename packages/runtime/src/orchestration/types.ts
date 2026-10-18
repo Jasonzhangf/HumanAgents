@@ -538,10 +538,10 @@ export interface DispatchInput {
    */
   readonly reviewAgentOverride?: ReviewAgentPort;
   readonly reviewKinds?: readonly ReviewKind[];
-  readonly reviewSubjectDigests?: readonly string[];
   /**
    * Produced subject bodies for the review gate. A missing, empty, or
-   * digest-drifted body blocks before the reviewer is invoked.
+   * body that differs from the produced artifact blocks before the reviewer
+   * is invoked.
    */
   readonly reviewSubjects?: readonly {
     readonly ref: string;

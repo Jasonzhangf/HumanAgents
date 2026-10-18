@@ -13,9 +13,7 @@
     "attempt",
     "executionEpoch",
     "inputRevision",
-    "acceptanceCriteriaDigest",
     "subjectRefs",
-    "subjectDigests",
     "status",
     "findings",
     "evidenceRefs"
@@ -29,9 +27,7 @@
     "attempt": { "type": "integer", "minimum": 1 },
     "executionEpoch": { "type": "integer", "minimum": 1 },
     "inputRevision": { "type": "integer", "minimum": 1 },
-    "acceptanceCriteriaDigest": { "type": "string", "minLength": 1 },
     "subjectRefs": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-    "subjectDigests": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
     "status": { "enum": ["passed", "failed", "inconclusive"] },
     "findings": {
       "type": "array",
