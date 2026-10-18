@@ -1172,7 +1172,8 @@ export function createDefaultExecutionComposition(input: {
               outputRefs: [entry.refinedDelivery.ref.locator], evidenceRefs: entry.result.evidenceRefs });
           }
           plannerInput = structuredClone({ task: current.value.task, closure: stage.closure, ...basis,
-            refinedResults, allocation: { operationId: allocation.operationId, cycleId: allocation.scope.cycleId!,
+            ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }), refinedResults,
+            allocation: { operationId: allocation.operationId, cycleId: allocation.scope.cycleId!,
               executionEpoch: allocation.executionEpoch },
             capabilityScope: declaredCapabilityScope,
             ...(segmentSource === undefined ? {} : { segmentSource }) });

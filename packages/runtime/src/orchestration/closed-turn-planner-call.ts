@@ -20,9 +20,11 @@ import {
   type TaskId,
   type TaskIdentityRecord,
   type TaskRuntimeIncarnation,
+  type TaskFlowBinding,
   type TurnClosureReference,
   type TurnSummaryEvidenceContext,
 } from '../../../contracts/src/index.js';
+import { validateTaskFlowBinding } from '../../../contracts/src/task-flow.js';
 import { createPublishedTaskPlanRevision, validateTaskPlanRevisionTransition } from '../../../core/src/task-plan-revision.js';
 import type {
   CheckpointControlBusinessRequest,
@@ -144,6 +146,7 @@ export type ClosedTurnPlannerPlanBasis =
 export type ClosedTurnPlannerCallInput = {
   readonly task: Task;
   readonly closure: TurnClosureReference;
+  readonly taskFlow?: TaskFlowBinding;
   readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
   readonly refinedResults: readonly TaskFlowRefinedResult[];
   readonly allocation: ClosedTurnPlannerCallAllocation;
@@ -376,6 +379,7 @@ export function deriveClosedTurnPlannerDuty(input: ClosedTurnPlannerCallInput, c
     checkpointId: input.closure.checkpointId.value,
     predecessorRevisionId: input.priorPlan === null ? null : input.priorPlan.revisionId,
     predecessorContentDigest: input.priorPlan === null ? null : input.priorPlan.contentDigest,
+    ...(input.taskFlow === undefined ? {} : { taskFlow: input.taskFlow }),
     refinedResults: input.refinedResults,
     ...(input.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: input.summaryEvidenceContext }),
     ...(input.segmentSource === undefined ? {} : { segmentSource: input.segmentSource }),
@@ -426,6 +430,17 @@ function assertInput(input: ClosedTurnPlannerCallInput): void {
       { scope, nextAction: { kind: 'recover', ref: 'closed-turn-planner-call.plan' } });
   }
   if (input.priorPlan === null) validateTaskIdentityRecord(input.identity);
+  if (input.taskFlow !== undefined) {
+    validateTaskFlowBinding(input.taskFlow);
+    if (input.priorPlan === null && input.identity.taskFlow !== undefined
+      && canonicalJsonStringify(input.taskFlow) !== canonicalJsonStringify(input.identity.taskFlow)) {
+      throw new ClosedTurnPlannerCallError(
+        'planner.call.task-flow-mismatch',
+        'the Planner task flow does not match the confirmed Task identity',
+        { scope, nextAction: { kind: 'recover', ref: 'closed-turn-planner-call.task-flow' }, conditionRef: 'closed-turn-planner-call.task-flow' },
+      );
+    }
+  }
   const planScope = input.priorPlan === null ? input.identity.scope : input.priorPlan.scope;
   if (!sameScopedId(planScope.taskId, input.task.id.value)
     || planScope.organId.value !== input.task.organId.value

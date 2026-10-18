@@ -9,6 +9,7 @@ import {
   type PlannerAlignmentDecision,
   type ProviderSettlement,
   type Task,
+  type TaskFlowBinding,
   type TaskPlanRevisionReason,
   type TaskPlanSnapshot,
   type TurnClosureReference,
@@ -64,6 +65,7 @@ export type PreparedPlannerCall = PreparedClosedTurnPlannerCall;
 export type IndependentTurnPlannerInput = {
   readonly task: Task;
   readonly closure: TurnClosureReference;
+  readonly taskFlow?: TaskFlowBinding;
   readonly refinedResults: readonly TaskFlowRefinedResult[];
   readonly preparedCall: PreparedClosedTurnPlannerCall;
 } & ClosedTurnPlannerPlanBasis;
@@ -215,8 +217,10 @@ function plannerSummarySection(section: TurnSummarySection) {
 }
 
 function plannerRequestPayload(input: IndependentTurnPlannerInput): BusinessPayload {
+  const taskFlow = input.taskFlow ?? (input.priorPlan === null ? input.identity.taskFlow : undefined);
   const payload = {
     role: 'planner',
+    ...(taskFlow === undefined ? {} : { taskFlow }),
     task: {
       taskId: input.task.id,
       organId: input.task.organId,
