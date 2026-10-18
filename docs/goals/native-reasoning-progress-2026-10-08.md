@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 显式跨 turn 证据充分性已裁决，不扩测
+
+- r413/r414两路只读GCM已返回：前者确认通用两turn语义历史装配、helper精炼checkpoint和冷helper恢复源码/测试边；后者确认当前独立instructions/requestContext三协议编码与config→App per-agent/role binding及匹配测试存在。未发现具体缺码；本次未运行测试，不称freshPASS，不把旧author记录未集成当当前缺实现。
+- r415独立OAuth小Planner实际SUFFICIENT并由Root接受：r288已核对的真实两turn出站1PASS、元数据2PASS及冷helper恢复历史GREEN，加r407/408/409/410公开helper精炼checkpoint/接线红绿/installed证明，足以覆盖共享assembler的该项连续性契约。缺单个helper→turn2组合case不构成额外加测理由；零新增测试、代码、工作树或canonical请求。r413的组合执行UNKNOWN只保留证据粒度，不升级产品缺陷。
+- r412阶段计划仅接受两只读观察与peer同步，未接受条件实现、强制Git身份/ancestry核对或协议×入口矩阵；r411因超出定点范围读取大文件被Root中止，同独立Planner收敛r412。N2/r330与C/G/r315继续复用充分性结论，不重开。
+- 下一具体依赖为peer的M3与prepared/cold现有收口结果接收；M5由peer报告main19a15235、installed gen36与HTTP复验已交付，本侧无相同范围写入。原interaction epoch4后未再请求，EOF根因仍UNKNOWN。完整goal仍ACTIVE/INCOMPLETE，不据局部充分性宣称总目标完成。
+
 ## 2026-10-18 已交付：公开 taskless helper 接线验收
 
 - 测试候选 `2ad679f5` 已正常FF main并push，回执 `6bd955b5..2ad679f5 main -> main`。仅原公开consumer测试文件334insertions/3deletions；无永久产品修改。完整goal和完整N3长程验收仍OPEN。
