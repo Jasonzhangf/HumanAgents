@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId } from '../../packages/contracts/src/index.js';
+import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -2549,19 +2549,33 @@ if (!coldConsumerMode) test('native three.turn public CLI consumer retains multi
   }
 });
 
+type VerifiedJournalRecord = Awaited<ReturnType<JsonlOrganJournal['verify']>>['records'][number];
+type InspectionRecordEntry = { readonly record: Record<string, unknown>; readonly journal: VerifiedJournalRecord };
+
 function inspectionRecords(records: Awaited<ReturnType<JsonlOrganJournal['verify']>>['records']) {
-  const i2 = records.flatMap((record) => {
+  type VerifiedRecord = Awaited<ReturnType<JsonlOrganJournal['verify']>>['records'][number];
+  const i2 = records.flatMap((record): { readonly record: Record<string, unknown>; readonly journal: VerifiedRecord }[] => {
     const payload = record.payload;
     const value = payload?.['record'];
     return payload?.['kind'] === 'i2-history' && typeof value === 'object' && value !== null
-      ? [value as Record<string, unknown>] : [];
+      ? [{ record: value as Record<string, unknown>, journal: record }] : [];
   });
   return {
-    definitions: i2.filter((record) => record.kind === 'inspection-definition'),
-    openings: i2.filter((record) => record.kind === 'inspection-occurrence-opened'),
-    items: i2.filter((record) => record.kind === 'inspection-item-result'),
-    settlements: i2.filter((record) => record.kind === 'inspection-occurrence-settled'),
+    definitions: i2.filter(({ record }) => record.kind === 'inspection-definition').map((entry) => entry.record),
+    cycles: i2.filter(({ record }) => record.kind === 'business-cycle-opened'),
+    openings: i2.filter(({ record }) => record.kind === 'inspection-occurrence-opened').map((entry) => entry.record),
+    items: i2.filter(({ record }) => record.kind === 'inspection-item-result').map((entry) => entry.record),
+    settlements: i2.filter(({ record }) => record.kind === 'inspection-occurrence-settled').map((entry) => entry.record),
+    aligned: i2.filter(({ record }) => record.kind === 'milestone-review-aligned'),
+    closes: i2.filter(({ record }) => record.kind === 'business-cycle-closed'),
+    openingByRef: (ref: JournalCommitRef) => exactInspectionEntry(i2.filter(({ record }) => record.kind === 'business-cycle-opened'), ref),
+    settlementByRef: (ref: JournalCommitRef) => exactInspectionEntry(i2.filter(({ record }) => record.kind === 'inspection-occurrence-settled'), ref),
   };
+}
+
+function exactInspectionEntry(entries: readonly InspectionRecordEntry[], ref: JournalCommitRef): InspectionRecordEntry | undefined {
+  return entries.find(({ journal }) => journal.commitId === ref.commitId
+    && journal.seq === ref.journalSeq && journal.recordDigest === ref.recordDigest);
 }
 
 // Failure basis: the default composition does not bind the existing inspection
@@ -2616,6 +2630,32 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
     assert.equal(records.openings.length, 2, 'two logical turns open two actual inspection occurrences');
     assert.equal(records.items.length, 2, 'each executed turn commits one actual item result');
     assert.equal(records.settlements.length, 2, 'each parent standard end settles one actual occurrence');
+    assert.equal(records.closes.length, 1, 'the terminal parent cycle closes once');
+    const terminalClose = records.closes[0];
+    if (!terminalClose) throw new Error('the terminal parent cycle close must be committed');
+    const close = requireRecord(terminalClose.record, 'the terminal cycle close');
+    const openedRef = requireRecord(close.openedCommitRef, 'the terminal cycle opening ref') as unknown as JournalCommitRef;
+    const checkpointRef = requireRecord(close.checkpointCommitRef, 'the terminal checkpoint ref') as unknown as JournalCommitRef;
+    const settlementRef = requireRecord(close.inspectionSettlementCommitRef, 'the terminal settlement ref') as unknown as JournalCommitRef;
+    const opening = records.openingByRef(openedRef);
+    const settlement = records.settlementByRef(settlementRef);
+    if (!opening || !settlement) throw new Error('the terminal close must bind the actual cycle opening and settlement');
+    assert.equal(requireRecord(opening.record, 'the terminal cycle opening').kind, 'business-cycle-opened',
+      'the close binds an actual cycle opening');
+    assert.equal(requireRecord(settlement.record, 'the terminal settlement').kind, 'inspection-occurrence-settled',
+      'the close binds an actual inspection settlement');
+    assert.deepEqual(requireRecord(settlement.record, 'the terminal settlement').checkpointCommitRef, checkpointRef,
+      'the terminal settlement binds the close checkpoint');
+    const taskScope = { organId: id('organ', 'humanagent-ui'), taskId };
+    const binding = await createJsonlCheckpointJournal({ filePath: fixture.layout.organJournalPath, journal: fixture.journal })
+      .readCheckpointRecoveryBinding(taskScope, checkpointRef);
+    if (!binding) throw new Error('the terminal checkpoint has no committed recovery binding');
+    if (binding.alignmentRef === undefined) throw new Error('the terminal checkpoint has no durable alignment reference');
+    assert.ok(binding.alignmentRef.length > 0, 'the terminal checkpoint retains an actual durable alignment reference');
+    assert.equal(close.outcome, 'stop', 'terminal complete closes the business cycle');
+    assert.deepEqual(close.next, { kind: 'stop', ref: binding.alignmentRef },
+      'the cycle decision uses the checkpoint-bound alignment reference');
+    assert.equal(terminalClose.record.outcome, 'stop', 'terminal complete settles the business cycle without claiming human stop');
     const actualInvocations = fixture.upstream.inspectionInvocations();
     assert.deepEqual(actualInvocations.map((entry) => entry.callId), [
       'call-inspection-parent-1', 'call-inspection-parent-2',

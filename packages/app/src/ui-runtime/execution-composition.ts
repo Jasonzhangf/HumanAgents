@@ -1144,7 +1144,7 @@ export function createDefaultExecutionComposition(input: {
         const stage = await loop.recoverTurn();
         if (stage.stage === 'alignment-committed') {
           if (!stage.alignment) missing('committed alignment has no actual readback');
-          return acceptAlignedPlan(stage.alignment);
+          return acceptAlignedPlan();
         }
         if (stage.stage !== 'closure-committed-alignment-absent' || !stage.closure) {
           missing('closed-turn Planner requires the actual durable closure stage');
@@ -1222,9 +1222,14 @@ export function createDefaultExecutionComposition(input: {
         if (existing) assertTaskPlanRevisionRetryMatches(existing, candidate);
         const alignment = await loop.alignTurn({ consumer: plans, ...returned });
         if (alignment.state !== 'aligned') missing(`canonical Planner alignment retains recovery: ${alignment.firstErrorRef}`);
-        return acceptAlignedPlan(alignment.alignment);
+        return acceptAlignedPlan();
       }
-      async function acceptAlignedPlan(alignment: import('../../../contracts/src/index.js').PlannerAlignmentReference) {
+      async function acceptAlignedPlan() {
+        const stage = await loop.recoverTurn();
+        if (stage.stage !== 'alignment-committed' || !stage.closure || !stage.alignment) {
+          missing('current plan acceptance requires the exact committed turn closure and alignment');
+        }
+        const alignment = stage.alignment;
         const taskScope = { organId: allocation.scope.organId, taskId: allocation.taskId };
         const identity = await input.taskIdentity.read(taskScope);
         const receipt = await plans.getCommitRef(taskScope, alignment.planRevisionId);
@@ -1233,8 +1238,6 @@ export function createDefaultExecutionComposition(input: {
           currentPlan: { revisionId: alignment.planRevisionId, revisionCommitRef: receipt } });
         if (exact.revision.contentDigest !== alignment.planContentDigest
           || exact.revision.sequence !== alignment.planRevisionSequence) missing('aligned current plan exact publication conflicts');
-        const stage = await loop.recoverTurn();
-        if (stage.stage !== 'alignment-committed' || !stage.closure) missing('current plan acceptance requires the exact committed turn closure and alignment');
         const current = await input.currentState.read(taskScope);
         if (current.state !== 'known') missing('aligned plan acceptance has no authoritative current Task');
         let predecessor: import('../../../contracts/src/index.js').PublishedTaskPlanRevision | null = null;
@@ -1283,6 +1286,14 @@ export function createDefaultExecutionComposition(input: {
           related.push(ref);
         }
         if (related.length !== acceptedReviewRefs.length) missing('review alignment complete-list gate is incomplete');
+        await inspection.boundary.settleClosure({
+          logicalTurnId: stage.closure.identity.turnId,
+          closure: stage.closure,
+          checkpoint: anchor,
+          alignment,
+          ...(stage.summaryEvidenceContext === undefined ? {} : { summaryEvidenceContext: stage.summaryEvidenceContext }),
+          milestoneAlignmentCommitRefs: related,
+        });
         const facts = turnFacts.get(allocation.taskId.value)!;
         facts.currentPlan = exact.currentPlan;
         try {
