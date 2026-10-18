@@ -72,7 +72,7 @@ pnpm run smoke
 
 日常构建、CI、本地打包和安装不调用 release 检查链。本地分发使用 `pnpm package`
 和 `pnpm install:global`。仅在准备对外 release 时，才按实际发布需要使用
-`pnpm build:release`、`pnpm release:check` 和 release 审查记录入口。
+`pnpm build:release` 或 `pnpm build:release:gate`。
 
 全局安装后不需要从仓库目录启动。任意目录执行：
 
@@ -127,4 +127,4 @@ pnpm run install:global
 
 `package` 调用 `package:candidate`，将已编译资产组装为本地 tgz。`install:global` 按当前版本选择该包，也接受显式包路径；两者不依赖 release manifest 或摘要。安装后用正式 `humanagent restart` 交接运行实例，并验证受影响的公开行为。
 
-`build:release`、`build:release:gate`、`review:record`、`release` 和 `package:release` 是显式对外发布入口。它们保留旧 release 机制，当前日常开发、安装和交付不调用，也不将其作为验收前提。对外发布时须按实际分发需求选取检查，不能将发布记录链扩成日常保护流程。`pnpm run test` 是需要重编译的全量诊断入口。
+`build:release` 与 `build:release:gate` 是显式对外发布入口。`build:release` 先递增并提交版本，再进入构建门禁；`build:release:gate` 使用当前版本直接构建。两者按 `typecheck → build:raw → test:compiled:services → test:release → package:candidate → package:smoke` 顺序执行，只确认预期的 `humanagent-cli-<version>.tgz` 已生成，不写摘要、身份或 review 绑定清单。`pnpm run test` 是需要重编译的全量诊断入口。

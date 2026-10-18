@@ -1,17 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import test from 'node:test';
-import { runStages } from '../../scripts/checkpoint-runner.mjs';
-import { digest, treeDigest } from '../../scripts/digests.mjs';
 import { assemblePackage } from '../../scripts/package-assembly.mjs';
 import { bumpReleaseVersion, configuredPackageVersion, configuredReleaseVersion, packageVersionForRelease, validateReleaseVersion } from '../../scripts/release-version.mjs';
 
 const node = process.execPath;
-const command = (source) => [node, '-e', source];
 const repositoryRoot = new URL('../..', import.meta.url);
 
 test('release versions are path-safe semantic versions', () => {
@@ -61,238 +58,9 @@ test('release bump preserves the split npm and HumanAgent version sources', asyn
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-release-'));
   const projectRoot = join(root, 'project');
-  const checkpointRoot = join(root, 'control', 'build', 'checkpoints');
   await mkdir(projectRoot, { recursive: true });
-  await writeFile(join(projectRoot, 'input.txt'), 'v1\n', 'utf8');
-  await writeFile(join(projectRoot, 'mode.txt'), 'fail\n', 'utf8');
-  return { root, projectRoot, checkpointRoot };
+  return { root, projectRoot };
 }
-
-function stagesFor(modeFile = 'input.txt') {
-  return [
-    { name: 'compile', owner: 'compile', command: command('process.exit(0)'), inputs: [{ kind: 'literal', value: 'compile-v1' }] },
-    { name: 'regression', owner: 'regression', dependsOn: ['compile'], command: command('const fs=require("node:fs"); process.exit(fs.readFileSync("input.txt","utf8").includes("ok") ? 0 : 1)'), inputs: [{ kind: 'path', value: 'input.txt' }] },
-    { name: 'ci', owner: 'ci', dependsOn: ['regression'], command: command('process.exit(0)'), inputs: [{ kind: 'path', value: 'input.txt' }] },
-  ];
-}
-
-test('first run executes all stages and second run reuses passing checkpoints', async () => {
-  const fixtureValue = await fixture();
-  const first = await runStages({ ...fixtureValue, stages: stagesFor() });
-  assert.equal(first.overall, 'fail');
-  assert.equal(digest(JSON.parse(await readFile(first.manifestPath, 'utf8'))), first.manifestDigest);
-  assert.deepEqual(first.stages.map((stage) => stage.status), ['pass', 'fail', 'blocked']);
-  await writeFile(join(fixtureValue.projectRoot, 'input.txt'), 'ok\n', 'utf8');
-  const second = await runStages({ ...fixtureValue, stages: stagesFor() });
-  assert.equal(second.overall, 'pass');
-  assert.equal(second.stages[0].status, 'reused');
-  assert.equal(second.stages[1].status, 'pass');
-  assert.equal(second.stages[2].status, 'pass');
-  const third = await runStages({ ...fixtureValue, stages: stagesFor() });
-  assert.equal(third.stages[0].status, 'reused');
-  assert.equal(third.stages[1].status, 'reused');
-  assert.equal(third.stages[2].status, 'reused');
-});
-
-test('command failure is non-zero and records first divergence', async () => {
-  const fixtureValue = await fixture();
-  const result = await runStages({
-    ...fixtureValue,
-    stages: [{ name: 'fail', owner: 'test', command: command('console.error("first divergence"); process.exit(7)'), inputs: [{ kind: 'path', value: 'input.txt' }] }],
-  });
-  assert.equal(result.overall, 'fail');
-  assert.equal(result.stages[0].exitCode, 7);
-  assert.equal(result.stages[0].firstDivergence, 'first divergence');
-  assert.match(result.stages[0].stderrArtifactRef, /artifacts/);
-});
-
-test('changing a stage command or environment invalidates its passing checkpoint', async () => {
-  const fixtureValue = await fixture();
-  const first = await runStages({
-    ...fixtureValue,
-    stages: [{ name: 'compile', owner: 'compile', command: command('process.exit(process.env.GATE_MODE === "pass" ? 0 : 1)'), env: { GATE_MODE: 'pass' }, inputs: [{ kind: 'literal', value: 'same' }] }],
-  });
-  assert.equal(first.stages[0].status, 'pass');
-  const second = await runStages({
-    ...fixtureValue,
-    stages: [{ name: 'compile', owner: 'compile', command: command('process.exit(9)'), env: { GATE_MODE: 'changed' }, inputs: [{ kind: 'literal', value: 'same' }] }],
-  });
-  assert.equal(second.stages[0].status, 'fail');
-  assert.equal(second.stages[0].exitCode, 9);
-});
-
-test('a failed ci stage resumes at ci while regression remains checkpointed', async () => {
-  const fixtureValue = await fixture();
-  const stages = [
-    { name: 'compile', owner: 'compile', command: command('process.exit(0)'), inputs: [{ kind: 'literal', value: 'compile-v1' }] },
-    { name: 'regression', owner: 'regression', dependsOn: ['compile'], command: command('process.exit(0)'), inputs: [{ kind: 'path', value: 'input.txt' }] },
-    { name: 'ci', owner: 'ci', dependsOn: ['regression'], command: command('const fs=require("node:fs"); process.exit(fs.readFileSync("mode.txt","utf8").includes("pass") ? 0 : 1)'), inputs: [{ kind: 'path', value: 'mode.txt' }] },
-  ];
-  const first = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(first.stages.map((stage) => stage.status), ['pass', 'pass', 'fail']);
-  await writeFile(join(fixtureValue.projectRoot, 'mode.txt'), 'pass\n', 'utf8');
-  const second = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(second.stages.map((stage) => stage.status), ['reused', 'reused', 'pass']);
-});
-
-test('checkpoint inputs cannot escape the project root through paths or symlinks', async () => {
-  const fixtureValue = await fixture();
-  const outside = join(fixtureValue.root, 'outside.txt');
-  await writeFile(outside, 'outside\n', 'utf8');
-  await symlink(outside, join(fixtureValue.projectRoot, 'outside-link.txt'));
-  await assert.rejects(() => runStages({
-    ...fixtureValue,
-    stages: [{ name: 'absolute', owner: 'test', command: command('process.exit(0)'), inputs: [{ kind: 'path', value: outside }] }],
-  }), /project-relative path/);
-  await assert.rejects(() => runStages({
-    ...fixtureValue,
-    stages: [{ name: 'traversal', owner: 'test', command: command('process.exit(0)'), inputs: [{ kind: 'path', value: '../outside.txt' }] }],
-  }), /escapes project root/);
-  await assert.rejects(() => runStages({
-    ...fixtureValue,
-    stages: [{ name: 'symlink', owner: 'test', command: command('process.exit(0)'), inputs: [{ kind: 'path', value: 'outside-link.txt' }] }],
-  }), /escapes project root/);
-});
-
-test('checkpoint directory inputs reject in-root symlink cycles', async () => {
-  const fixtureValue = await fixture();
-  const cycleDirectory = join(fixtureValue.projectRoot, 'cycle');
-  await mkdir(cycleDirectory);
-  await symlink(cycleDirectory, join(cycleDirectory, 'self'));
-  await assert.rejects(() => runStages({
-    ...fixtureValue,
-    stages: [{ name: 'cycle', owner: 'test', command: command('process.exit(0)'), inputs: [{ kind: 'path', value: 'cycle' }] }],
-  }), /directory cycle/);
-});
-
-test('a changed declared output invalidates a passing checkpoint and reruns dependents', async () => {
-  const fixtureValue = await fixture();
-  const stages = [
-    { name: 'package', owner: 'package', command: command('require("node:fs").writeFileSync("output.txt", "fresh\\n")'), outputs: [{ kind: 'path', value: 'output.txt' }] },
-    { name: 'package-smoke', owner: 'smoke', dependsOn: ['package'], command: command('process.exit(0)') },
-  ];
-  const first = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(first.stages.map((stage) => stage.status), ['pass', 'pass']);
-  const second = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(second.stages.map((stage) => stage.status), ['reused', 'reused']);
-  await writeFile(join(fixtureValue.projectRoot, 'output.txt'), 'tampered\n', 'utf8');
-  const third = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(third.stages.map((stage) => stage.status), ['pass', 'pass']);
-  assert.equal(third.stages[1].reusedFromRun, undefined);
-});
-
-test('tampering with the compiled tree reruns compile and package stages', async () => {
-  const fixtureValue = await fixture();
-  const stages = [
-    {
-      name: 'compile',
-      owner: 'compile',
-      command: command('require("node:fs").mkdirSync("dist/app", { recursive: true }); require("node:fs").writeFileSync("dist/app/runtime.js", "fresh\\n")'),
-      outputs: [{ kind: 'path', value: 'dist/app' }],
-    },
-    {
-      name: 'package',
-      owner: 'package',
-      dependsOn: ['compile'],
-      command: command('require("node:fs").writeFileSync("package.txt", require("node:fs").readFileSync("dist/app/runtime.js"))'),
-      inputs: [{ kind: 'path', value: 'dist/app' }],
-      outputs: [{ kind: 'path', value: 'package.txt' }],
-    },
-  ];
-  const first = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(first.stages.map((stage) => stage.status), ['pass', 'pass']);
-  const second = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(second.stages.map((stage) => stage.status), ['reused', 'reused']);
-  await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'runtime.js'), 'tampered\n', 'utf8');
-  const third = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(third.stages.map((stage) => stage.status), ['pass', 'pass']);
-  assert.equal(third.stages[0].reusedFromRun, undefined);
-  assert.equal(third.stages[1].reusedFromRun, undefined);
-});
-
-test('an exit-zero stage without its declared output cannot pass or be reused', async () => {
-  const fixtureValue = await fixture();
-  const stages = [
-    { name: 'package', owner: 'package', command: command('process.exit(0)'), outputs: [{ kind: 'path', value: 'missing-output.txt' }] },
-    { name: 'package-smoke', owner: 'smoke', dependsOn: ['package'], command: command('process.exit(0)') },
-  ];
-  const first = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(first.stages.map((stage) => stage.status), ['fail', 'blocked']);
-  assert.match(first.stages[0].error, /declared output was not produced/);
-  const second = await runStages({ ...fixtureValue, stages });
-  assert.deepEqual(second.stages.map((stage) => stage.status), ['fail', 'blocked']);
-  assert.equal(second.stages[0].reusedFromRun, undefined);
-});
-
-test('colliding readable project keys receive isolated checkpoint namespaces', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-collision-'));
-  const firstRoot = join(root, 'a-b');
-  const secondRoot = join(root, 'a', 'b');
-  const checkpointRoot = join(root, 'control', 'build', 'checkpoints');
-  await mkdir(firstRoot, { recursive: true });
-  await mkdir(secondRoot, { recursive: true });
-  const stages = [{ name: 'compile', owner: 'compile', command: command('process.exit(0)') }];
-  const first = await runStages({ projectRoot: firstRoot, checkpointRoot, stages });
-  const second = await runStages({ projectRoot: secondRoot, checkpointRoot, stages });
-  assert.notEqual(first.manifestPath, second.manifestPath);
-  assert.notEqual(first.projectKey, second.projectKey);
-  assert.equal(first.stages[0].status, 'pass');
-  assert.equal(second.stages[0].status, 'pass');
-});
-
-test('concurrent checkpoint runs reject the second writer and release the lock', async () => {
-  const fixtureValue = await fixture();
-  const marker = join(fixtureValue.projectRoot, 'started.txt');
-  const stages = [{
-    name: 'compile',
-    owner: 'compile',
-    command: command(`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started\\n"); setTimeout(() => process.exit(0), 250)`),
-  }];
-  const firstRun = runStages({ ...fixtureValue, stages });
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    try {
-      await access(marker);
-      break;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  await assert.rejects(() => runStages({ ...fixtureValue, stages }), /checkpoint is already running/);
-  const first = await firstRun;
-  assert.equal(first.overall, 'pass');
-  const second = await runStages({ ...fixtureValue, stages });
-  assert.equal(second.stages[0].status, 'reused');
-});
-
-test('build, ci, and release checkpoint roots share one project write lock', async () => {
-  const fixtureValue = await fixture();
-  const lockRoot = join(fixtureValue.root, 'control', 'build', 'locks');
-  const firstCheckpointRoot = join(fixtureValue.root, 'control', 'build', 'checkpoints', 'build');
-  const secondCheckpointRoot = join(fixtureValue.root, 'control', 'build', 'checkpoints', 'ci');
-  const marker = join(fixtureValue.projectRoot, 'shared-lock-started.txt');
-  const stages = [{
-    name: 'compile',
-    owner: 'compile',
-    command: command(`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started\\n"); setTimeout(() => process.exit(0), 250)`),
-  }];
-  const firstRun = runStages({ ...fixtureValue, checkpointRoot: firstCheckpointRoot, lockRoot, stages });
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    try {
-      await access(marker);
-      break;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  await assert.rejects(
-    () => runStages({ ...fixtureValue, checkpointRoot: secondCheckpointRoot, lockRoot, stages }),
-    /checkpoint is already running/,
-  );
-  const first = await firstRun;
-  assert.equal(first.overall, 'pass');
-  const second = await runStages({ ...fixtureValue, checkpointRoot: secondCheckpointRoot, lockRoot, stages });
-  assert.equal(second.overall, 'pass');
-});
 
 test('assembled CLI package installs and runs its public consumer behavior', async (t) => {
   const fixtureValue = await fixture();
@@ -373,6 +141,91 @@ async function localInstallerFixture() {
   return { root, projectRoot, callerRoot, fakeBin, npmArgsPath };
 }
 
+async function releaseBuildFixture() {
+  const fixtureValue = await fixture();
+  const fakeBin = join(fixtureValue.root, 'fake-bin');
+  const logPath = join(fixtureValue.root, 'pnpm-calls.jsonl');
+  await mkdir(fakeBin, { recursive: true });
+  await writeFile(join(fixtureValue.projectRoot, 'package.json'), JSON.stringify({ releaseVersion: '0.1.0001' }) + '\n', 'utf8');
+  execFileSync('git', ['init', '-q'], { cwd: fixtureValue.projectRoot });
+  await writeFile(join(fakeBin, 'pnpm'), [
+    '#!/usr/bin/env node',
+    "import { appendFileSync } from 'node:fs';",
+    "appendFileSync(process.env.HUMANAGENT_PNPM_CALLS, JSON.stringify({ args: process.argv.slice(2), releaseVersion: process.env.HUMANAGENT_RELEASE_VERSION }) + '\\n');",
+    "if (process.env.HUMANAGENT_PNPM_FAIL_SCRIPT === process.argv[3]) {",
+    "  console.error(`release fixture failed script: ${process.argv[3]}`);",
+    "  process.exit(Number(process.env.HUMANAGENT_PNPM_FAIL_EXIT || 1));",
+    "}",
+    '',
+  ].join('\n'), 'utf8');
+  await chmod(join(fakeBin, 'pnpm'), 0o755);
+  return { ...fixtureValue, fakeBin, logPath };
+}
+
+function runReleaseBuild(fixtureValue, { failScript, failExit = 7 } = {}) {
+  return execFileSync(node, ['scripts/build-release.mjs', '--project-root', fixtureValue.projectRoot], {
+    cwd: repositoryRoot.pathname,
+    encoding: 'utf8',
+    stdio: 'pipe',
+    env: {
+      ...process.env,
+      PATH: `${fixtureValue.fakeBin}${delimiter}${process.env.PATH}`,
+      HUMANAGENT_ALLOW_DIRTY_RELEASE: '1',
+      HUMANAGENT_RELEASE_VERSION: '0.1.0001',
+      HUMANAGENT_PNPM_CALLS: fixtureValue.logPath,
+      ...(failScript ? { HUMANAGENT_PNPM_FAIL_SCRIPT: failScript, HUMANAGENT_PNPM_FAIL_EXIT: String(failExit) } : {}),
+    },
+  });
+}
+
+test('release build runs the fixed command sequence and verifies the package artifact', async (t) => {
+  const fixtureValue = await releaseBuildFixture();
+  t.after(() => rm(fixtureValue.root, { recursive: true, force: true }));
+  let failure;
+  try {
+    runReleaseBuild(fixtureValue);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure?.status, 1);
+  assert.match(failure.stderr, /did not produce the expected candidate artifact/);
+  const calls = (await readFile(fixtureValue.logPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(calls.map((call) => call.args), [
+    ['run', 'typecheck'],
+    ['run', 'build:raw'],
+    ['run', 'test:compiled:services'],
+    ['run', 'test:release'],
+    ['run', 'package:candidate'],
+    ['run', 'package:smoke'],
+  ]);
+  assert.ok(calls.every((call) => call.releaseVersion === '0.1.0001'));
+
+  const packageArtifact = join(fixtureValue.projectRoot, 'dist', 'release', 'humanagent-cli-0.1.0001.tgz');
+  await mkdir(join(fixtureValue.projectRoot, 'dist', 'release'), { recursive: true });
+  await writeFile(packageArtifact, 'package fixture\n', 'utf8');
+  const output = JSON.parse(runReleaseBuild(fixtureValue));
+  assert.equal(output.releaseVersion, '0.1.0001');
+  assert.equal(output.packageArtifactPath, packageArtifact);
+});
+
+test('release build propagates the first failure and does not run later commands', async (t) => {
+  const fixtureValue = await releaseBuildFixture();
+  t.after(() => rm(fixtureValue.root, { recursive: true, force: true }));
+  let failure;
+  try {
+    runReleaseBuild(fixtureValue, { failScript: 'test:compiled:services' });
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure);
+  assert.notEqual(failure.status, 0);
+  assert.match(failure.stderr, /release fixture failed script: test:compiled:services/);
+  assert.match(failure.stderr, /Command failed: pnpm run test:compiled:services/);
+  assert.match(failure.stderr, /status: 7/);
+  const calls = (await readFile(fixtureValue.logPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(calls.map((call) => call.args[1]), ['typecheck', 'build:raw', 'test:compiled:services']);
+});
+
 function runLocalInstaller(fixtureValue, args = [], { cwd = fixtureValue.projectRoot, npmExit = 0 } = {}) {
   return execFileSync(node, [join(fixtureValue.projectRoot, 'scripts', 'install-global.mjs'), ...args], {
     cwd,
@@ -417,418 +270,4 @@ test('local installer selects the package and preserves npm failures', async (t)
   assert.notEqual(failure.status, 0);
   assert.deepEqual(JSON.parse(await readFile(fixtureValue.npmArgsPath, 'utf8')), ['install', '--global', await realpath(defaultArtifact)]);
   assert.doesNotMatch(failure.stdout, /humanagent-cli-0\.1\.0031\.tgz/);
-});
-
-async function releaseFixture() {
-  const fixtureValue = await fixture();
-  const repositoryRoot = join(fixtureValue.root, 'repository');
-  const artifactPath = join(repositoryRoot, 'dist', 'app');
-  const packageArtifactPath = join(repositoryRoot, 'dist', 'release', 'humanagent-cli-0.1.0.tgz');
-  await mkdir(artifactPath, { recursive: true });
-  await mkdir(join(repositoryRoot, 'dist', 'release'), { recursive: true });
-  await writeFile(join(repositoryRoot, 'source.txt'), 'source\n', 'utf8');
-  await writeFile(join(artifactPath, 'app.js'), 'export {}\n', 'utf8');
-  await writeFile(packageArtifactPath, 'package fixture\n', 'utf8');
-  execFileSync('git', ['init', '-q'], { cwd: repositoryRoot });
-  execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: repositoryRoot });
-  execFileSync('git', ['config', 'user.name', 'HumanAgent Test'], { cwd: repositoryRoot });
-  execFileSync('git', ['add', '.'], { cwd: repositoryRoot });
-  execFileSync('git', ['commit', '-qm', 'fixture'], { cwd: repositoryRoot });
-  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8' }).trim();
-  const stageCommands = {
-    typecheck: ['pnpm', 'run', 'typecheck'],
-    compile: ['pnpm', 'run', 'build'],
-    regression: ['pnpm', 'run', 'test'],
-    ci: ['pnpm', 'run', 'ci:check'],
-    package: ['pnpm', 'run', 'package:candidate'],
-    'package-smoke': ['pnpm', 'run', 'package:smoke'],
-  };
-  const runId = 'run-1';
-  const stageArtifactRoot = join(fixtureValue.root, 'artifacts', runId);
-  const stages = await Promise.all(Object.entries(stageCommands).map(async ([name, commandValue]) => {
-    const stageRoot = join(stageArtifactRoot, name);
-    await mkdir(stageRoot, { recursive: true });
-    const identity = digest({
-      name,
-      owner: 'test',
-      command: commandValue,
-      env: [],
-      inputDigests: [],
-      dependencyPassIdentities: [],
-    });
-    const outputDigests = [];
-    const reusableEvidenceIdentity = digest({ identity, outputDigests });
-    await writeFile(join(stageRoot, 'stdout.txt'), '', 'utf8');
-    await writeFile(join(stageRoot, 'stderr.txt'), '', 'utf8');
-    return {
-      name,
-      owner: 'test',
-      status: 'pass',
-      command: commandValue,
-      identity,
-      reusableEvidenceIdentity,
-      evidenceIdentity: digest({ reusableEvidenceIdentity, runId }),
-      inputDigests: [],
-      outputDigests,
-      dependencyPassIdentities: [],
-      startedAt: new Date().toISOString(),
-      finishedAt: new Date().toISOString(),
-      runId,
-      exitCode: 0,
-      signal: null,
-      stdoutArtifactRef: join(stageRoot, 'stdout.txt'),
-      stderrArtifactRef: join(stageRoot, 'stderr.txt'),
-    };
-  }));
-  const stageManifest = {
-    schemaVersion: 1,
-    projectRoot: repositoryRoot,
-    projectKey: 'test',
-    runId,
-    updatedAt: new Date().toISOString(),
-    overall: 'pass',
-    stages,
-  };
-  const stagePath = join(fixtureValue.root, 'manifest.json');
-  const releasePath = join(fixtureValue.root, 'release.json');
-  const stageDigest = digest(stageManifest);
-  const artifactDigest = await treeDigest(artifactPath);
-  const packageArtifactDigest = digest(await readFile(packageArtifactPath));
-  const reviewRoot = join(fixtureValue.root, 'review');
-  const reviewId = 'review-test-1';
-  const receiptDir = join(reviewRoot, reviewId);
-  const receiptStatus = {
-    state: 'completed',
-    verdict: 'pass',
-    failureClass: null,
-    exitCode: 0,
-    mode: 'commit',
-    commit: sourceCommit,
-    base: 'a'.repeat(40),
-  };
-  const receiptFinal = JSON.stringify({
-    contract_version: '1',
-    scope: { mode: 'commit', commit: sourceCommit, base: 'a'.repeat(40) },
-    module_boundary_evidence: [{
-      module: 'release',
-      owner: 'test',
-      paths: 'scripts',
-      edges: 'build -> record -> check',
-      resources: 'release manifest',
-      gates: 'release test',
-    }],
-    findings: [],
-  });
-  await mkdir(receiptDir, { recursive: true });
-  await writeFile(join(receiptDir, 'status.json'), JSON.stringify(receiptStatus), 'utf8');
-  await writeFile(join(receiptDir, 'review.final.md'), receiptFinal, 'utf8');
-  const unsigned = {
-    schemaVersion: 1,
-    releaseVersion: '0.1.0',
-    repositoryRoot,
-    sourceCommit,
-    configSchemaVersion: 1,
-    stageManifestPath: stagePath,
-    checkpointRoot: fixtureValue.root,
-    stageManifestDigest: stageDigest,
-    gateCommands: stages.map((stage) => ({ name: stage.name, command: stage.command, status: stage.status })),
-    artifactPath,
-    artifactDigest,
-    packageArtifactPath,
-    packageArtifactDigest,
-    pluginManifest: { status: 'not-applicable', reason: 'test' },
-    dshBaseline: { status: 'not-applicable', reason: 'test' },
-    review: {
-      status: 'passed',
-      reviewId,
-      sourceCommit,
-      baseCommit: 'a'.repeat(40),
-      reviewRoot,
-      receiptDigest: digest({ status: receiptStatus, final: receiptFinal }),
-      reviewedAt: new Date().toISOString(),
-    },
-    workingTreeClean: true,
-  };
-  await writeFile(stagePath, JSON.stringify(stageManifest), 'utf8');
-  await writeFile(releasePath, JSON.stringify({ ...unsigned, releaseManifestDigest: digest(unsigned) }), 'utf8');
-  return { ...fixtureValue, repositoryRoot, stagePath, releasePath, packageArtifactPath };
-}
-
-test('release checker rejects a tampered stage manifest', async () => {
-  const fixtureValue = await releaseFixture();
-  const valid = execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8' });
-  assert.match(valid, /"valid": true/);
-  const stageManifest = JSON.parse(await readFile(fixtureValue.stagePath, 'utf8'));
-  await writeFile(fixtureValue.stagePath, JSON.stringify({ ...stageManifest, overall: 'fail' }), 'utf8');
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /stage manifest digest mismatch/);
-});
-
-test('release checker rejects a non-passing stage with forged underlying pass status', async () => {
-  const fixtureValue = await releaseFixture();
-  const stageManifest = JSON.parse(await readFile(fixtureValue.stagePath, 'utf8'));
-  stageManifest.stages[0].status = 'blocked';
-  stageManifest.stages[0].underlyingStatus = 'pass';
-  await writeFile(fixtureValue.stagePath, JSON.stringify(stageManifest), 'utf8');
-  const releaseManifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  const stageManifestDigest = digest(stageManifest);
-  const unsigned = { ...releaseManifest, stageManifestDigest };
-  delete unsigned.releaseManifestDigest;
-  await writeFile(fixtureValue.releasePath, JSON.stringify({ ...unsigned, releaseManifestDigest: digest(unsigned) }), 'utf8');
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /release stage is not passing/);
-});
-
-test('release checker rejects a forged pass stage without runner evidence', async () => {
-  const fixtureValue = await releaseFixture();
-  const stageManifest = JSON.parse(await readFile(fixtureValue.stagePath, 'utf8'));
-  delete stageManifest.stages[0].evidenceIdentity;
-  await writeFile(fixtureValue.stagePath, JSON.stringify(stageManifest), 'utf8');
-  const releaseManifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  const stageManifestDigest = digest(stageManifest);
-  const unsigned = { ...releaseManifest, stageManifestDigest };
-  delete unsigned.releaseManifestDigest;
-  await writeFile(fixtureValue.releasePath, JSON.stringify({ ...unsigned, releaseManifestDigest: digest(unsigned) }), 'utf8');
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /typecheck\.evidenceIdentity/);
-});
-
-test('release checker rejects a source tree that changed after the manifest was built', async () => {
-  const fixtureValue = await releaseFixture();
-  await writeFile(join(fixtureValue.repositoryRoot, 'source.txt'), 'changed\n', 'utf8');
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /release source is dirty/);
-});
-
-test('release checker rejects a candidate package changed after manifest creation', async () => {
-  const fixtureValue = await releaseFixture();
-  await writeFile(fixtureValue.packageArtifactPath, 'tampered package\n', 'utf8');
-  execFileSync('git', ['update-index', '--assume-unchanged', 'dist/release/humanagent-cli-0.1.0.tgz'], { cwd: fixtureValue.repositoryRoot });
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /release package artifact digest mismatch/);
-});
-
-async function pendingReleaseFixture() {
-  const fixtureValue = await releaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  const unsigned = { ...manifest, review: { status: 'pending', reviewId: null } };
-  delete unsigned.releaseManifestDigest;
-  await writeFile(fixtureValue.releasePath, JSON.stringify({ ...unsigned, releaseManifestDigest: digest(unsigned) }), 'utf8');
-  return fixtureValue;
-}
-
-async function writeReviewReceipt({
-  fixtureValue,
-  reviewId,
-  commit,
-  findings = [],
-  mode = 'commit',
-  base = 'a'.repeat(40),
-  status = {},
-  final = {},
-  moduleBoundaryEvidence = [{
-    module: 'release review receipt recording',
-    owner: 'scripts/record-review.mjs',
-    paths: 'scripts/record-review.mjs',
-    edges: 'build-release.mjs -> record-review.mjs -> check-release.mjs',
-    resources: 'release manifest and review receipt',
-    gates: 'pnpm run test:release',
-  }],
-}) {
-  const receiptDir = join(fixtureValue.root, 'review', reviewId);
-  await mkdir(receiptDir, { recursive: true });
-  await writeFile(join(receiptDir, 'status.json'), JSON.stringify({
-    state: 'completed',
-    verdict: 'pass',
-    failureClass: null,
-    exitCode: 0,
-    mode,
-    commit,
-    base,
-    ...status,
-  }), 'utf8');
-  await writeFile(join(receiptDir, 'review.final.md'), JSON.stringify({
-    contract_version: '1',
-    scope: { mode, commit, base },
-    module_boundary_evidence: moduleBoundaryEvidence,
-    findings,
-    ...final,
-  }), 'utf8');
-  return receiptDir;
-}
-
-test('record-review binds a passing receipt to the candidate and unblocks release check', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /review evidence is not passed/);
-  await writeReviewReceipt({ fixtureValue, reviewId: 'review-pass-1', commit: manifest.sourceCommit });
-  execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-pass-1',
-  ], { encoding: 'utf8' });
-  const recorded = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  assert.equal(recorded.review.status, 'passed');
-  assert.equal(recorded.review.sourceCommit, manifest.sourceCommit);
-  assert.equal(recorded.review.baseCommit, 'a'.repeat(40));
-  const valid = execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8' });
-  assert.match(valid, /"valid": true/);
-});
-
-test('record-review refuses a receipt bound to a different commit', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  await writeReviewReceipt({ fixtureValue, reviewId: 'review-wrong-commit', commit: 'f'.repeat(40) });
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-wrong-commit',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /does not match the candidate source commit/);
-});
-
-test('record-review refuses a receipt carrying blocking findings', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeReviewReceipt({
-    fixtureValue,
-    reviewId: 'review-blocking',
-    commit: manifest.sourceCommit,
-    findings: [{
-      severity: 'P1',
-      file: 'packages/app/src/cli.ts',
-      line: 1,
-      rule: 'blocking',
-      evidence: 'blocking evidence',
-      remediation: 'fix blocking finding',
-    }],
-  });
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-blocking',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /blocking findings: P1/);
-});
-
-test('record-review refuses to overwrite an already passed review', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeReviewReceipt({ fixtureValue, reviewId: 'review-pass-2', commit: manifest.sourceCommit });
-  execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-pass-2',
-  ], { encoding: 'utf8' });
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-pass-2',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /already has a passed review/);
-});
-
-test('record-review refuses a malformed review output contract', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeReviewReceipt({ fixtureValue, reviewId: 'review-malformed', commit: manifest.sourceCommit, final: { contract_version: undefined } });
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-malformed',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /does not match the review output contract/);
-});
-
-test('record-review refuses a completed receipt without a pass verdict', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeReviewReceipt({
-    fixtureValue,
-    reviewId: 'review-no-verdict',
-    commit: manifest.sourceCommit,
-    status: { verdict: 'fail' },
-  });
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-no-verdict',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /is not a passing review/);
-});
-
-test('record-review refuses a review id outside the review root', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeReviewReceipt({ fixtureValue, reviewId: '../outside-review', commit: manifest.sourceCommit });
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', '../outside-review',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /must stay below review root/);
-});
-
-test('record-review refuses empty module boundary evidence', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeReviewReceipt({
-    fixtureValue,
-    reviewId: 'review-no-evidence',
-    commit: manifest.sourceCommit,
-    moduleBoundaryEvidence: [],
-  });
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-no-evidence',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /module boundary evidence is invalid/);
-});
-
-test('record-review refuses a symlinked review receipt outside the review root', async () => {
-  const fixtureValue = await pendingReleaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  const outsideReceipt = join(fixtureValue.root, 'outside-review', 'receipt');
-  await mkdir(outsideReceipt, { recursive: true });
-  await writeFile(join(outsideReceipt, 'status.json'), JSON.stringify({
-    state: 'completed',
-    verdict: 'pass',
-    failureClass: null,
-    exitCode: 0,
-    mode: 'commit',
-    commit: manifest.sourceCommit,
-    base: 'a'.repeat(40),
-  }), 'utf8');
-  await writeFile(join(outsideReceipt, 'review.final.md'), JSON.stringify({
-    contract_version: '1',
-    scope: { mode: 'commit', commit: manifest.sourceCommit, base: 'a'.repeat(40) },
-    module_boundary_evidence: [{
-      module: 'outside',
-      owner: 'outside',
-      paths: 'outside',
-      edges: 'outside',
-      resources: 'outside',
-      gates: 'outside',
-    }],
-    findings: [],
-  }), 'utf8');
-  await mkdir(join(fixtureValue.root, 'review'), { recursive: true });
-  await symlink(outsideReceipt, join(fixtureValue.root, 'review', 'review-symlink-link'), 'dir');
-  assert.throws(() => execFileSync(node, [
-    'scripts/record-review.mjs',
-    '--manifest', fixtureValue.releasePath,
-    '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-symlink-link',
-  ], { encoding: 'utf8', stdio: 'pipe' }), /must stay below review root/);
-});
-
-test('release checker rejects a review receipt changed after recording', async () => {
-  const fixtureValue = await releaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeFile(join(manifest.review.reviewRoot, manifest.review.reviewId, 'review.final.md'), '{}', 'utf8');
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /review receipt digest mismatch/);
-});
-
-test('release checker rejects a missing review receipt', async () => {
-  const fixtureValue = await releaseFixture();
-  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await rm(join(manifest.review.reviewRoot, manifest.review.reviewId), { recursive: true, force: true });
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /review receipt is missing/);
 });
