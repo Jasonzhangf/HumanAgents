@@ -1,5 +1,13 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 原 taskless epoch6 失败，停止重投；并行接收治理与 UX
+
+- r460 独立计划结合 RCC 新正式启动声明，限定放行一次同 turn 恢复；r461 只证明声明中的 Running 写入位于 listener bind 之后，不证明当前业务可用。r462 实际只发一次 POST：UTC12:45:19.529Z，原 interaction-2 interpret 返回 HTTP409、transport.failure / UND_ERR_SOCKET。原 turn、input、binding 不变；当次 failed、resource closed/epoch6，acceptedFacts0/helper0/semanticcheckpoint null，Task 总数仍1。原问答没有成功答案，没有 epoch7；canonical 窗口已交还 UX peer。
+- r463 只读核对 exact body 与当前 RCC ingress/function-tool 条件，未发现可达结构拒绝。缺 strict/additionalProperties 不是已证明根因；当前源码不证明历史 serving executable。继续保留 UNKNOWN，不改 schema、不删 helper、不切模型猜修。
+- RCC owner 交接材料已保存 RUN/native-socket-owner-handoff-r464-20261018/handoff.md，包含 exact wire、失败 readback 和所需服务端关联事实；已询问用户发送目标，尚未发送外部聊天。r462/execution.json、response.json、after-state.json 与 r463/observation.md 为本轮证据。
+- UX peer 独占 main/install/canonical 交付窗口，继续治理+Task description 两项 P1、嵌套 Observation 人读修复，以及 M3 浏览器/F13 证据范围收口。本侧不重启、不新增 RCC 请求，不把 peer 局部 GREEN 当完整交付。
+- r330 已裁决 Memory 语义质量证据充分，P2b 原整例失败保持原记录，不重测。其明确保留的 Operator registration UNVERIFIED 尚缺后继裁决；fresh GCM r465 只读核具体要求及已有后继证据，不新增代码、测试或工作树。完整 goal ACTIVE/INCOMPLETE。
+
 ## 2026-10-18 独立原样 wire 采集已完成，失败边界不依赖 HA 消费链
 
 - r457 worker只产脚本后未来意向退出，未创建attempt/未POST；Root核单次fetch路径后实际执行一次。UTC12:16:45.721..47.055Z，8621字节原body不改，native Response强保活/立即reader，HTTP200后只收到3字节`3a 0a 0a`即SSE注释，零完整业务frame/terminal，UND_ERR_SOCKET，无本地abort/正常EOF/响应关联header。owner-capture.exit0只代表采集执行完成，不代表业务成功。
