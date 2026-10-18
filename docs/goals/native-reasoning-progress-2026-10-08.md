@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r305计划已接收（exit0/result true），接受最小输入合同修正：memoryAnalysisInput显式metadata-only auditPrompt，保留prompt正文；模板说明只复制metadata并审计displaced/retained路径。拒绝计划中未证实的“echo必然导致语法错”因果结论、parser补值/归一化及整套回归。freshGCM r308在新独占memory-input-contract-20261017树，仅Runtime Memory/template/原payloadconsumer三文件，RED→GREEN与既有drift case；无live重试。开树前注册资源仅control/candidate/peerApp/预算四树，无同域旧Memory树。
+- r307局部计划已接收：segment新business registration与bindCommittedSegment沿用旧parent intent输入不一致，是预算前admission错误的具体候选根因。freshGCM r309已在原预算树派发，先核对r306原fixture两份typed持久事实，再改既有节点合同及execution-admission唯一owner，并收紧原namedconsumer typederror/effect/pairing断言。UX peer已通知同意不重叠写域；Appassembly仍由其原树负责。两条GCM并行，不扩大测试集。
+
 - Runtime normal settlement来源7569dff1已标准cherry-pick为候选cc7b2c29；消费真实committed Planner alignment而非checkpoint wait屏障。组合contracts/agentloopcompile0，原inspection15/15PASS（session2788），已通知peer关闭来源；App新接口接线仍由peer继续，非全链交付。
 - N3 r302执行偏离已纠正：266条完成命令后仍仅23行准备改动、无目标case，精确SIGINT后进程已退出，原树保留。按疑难攻关派fresh OAuth GPT6.1 medium r306，同树写出并实际编译/运行唯一用例。compile0，业务入口先被`child admission is not physically verified: durable parent control for the child admission was not found`拒绝，尚未触tool.round-limit；不把它当预算RED或产品根因。fixture与typederror/wires保存在r306 RUN。r307独立小Planner只定位fixture控制事实/产品接线缺口，无放宽准入、无产品编辑；预算恢复仍UNVERIFIED。
 
