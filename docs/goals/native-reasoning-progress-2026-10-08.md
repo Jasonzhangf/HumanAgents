@@ -1,5 +1,28 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 父级失败收拢实现中：原错误已消除，增强用例未全过
+
+- r382 fresh OAuth GPT6.1 medium 局部技术计划已terminal0并经Root接收：已durable接纳的业务failed tool不会永久锁住producerFailure，复用App既有prepareCapture即可drain→实际settle→精确capture；Provider实现及close guard不改。原同域树正常FF到9bee40b7，没有新树。
+- r383 GCM在原树改5文件：native-admitted-turn semantic/binding、App execution-composition失败close分支、Runtime standardTurn catch、原native review failure公开用例。图拓扑8节点不变，既有binding gate通过。先build/nativecompile0，原单例真实RED0/1为cleanup aggregate；产品修复后同例已越过cleanup、exact capture、raw原错读取、child/precall和5个not-executed阶段。
+- 最新同例仍0/1：新增断言把review以外的合法child precall checkpoints误当标准结束checkpoint；physicalclose断言尚未到达。不得称GREEN，原green.log文件名不代表PASS。r383最终仅未来意向、exit0不算完成，Root已拒收；原RED和两次后续失败fixtures保留。
+- r384 fresh GCM复用原WIP树续修，仅准确约束原checkpoint断言、核实CLI实际lease/driver-owned关闭证据路径，并保留Runtime真正不同的后续错误；不新增case/matrix，不用release/blocked证明物理关闭。缺实际close observation seam则带具体证据停止，不伪造receipt。完整goal/父cleanup仍OPEN，未Review/main/install；UX peer工作继续独立推进。
+
+## 2026-10-17 父级失败收拢：真实原因已捕获，修复计划待纠正
+
+- r376 同一公开失败用例已捕获两个真实 inner error：save 为 `execution-composition.owner-source-missing` / `native close has no drained frozen standard-end input`；close 为 Provider active executions 尚需 settlement/recovery。诊断代码已移除，App 重建0，本侧唯一 `native-parent-cleanup-20261017` 树 clean；无诊断产品修改进入 main。
+- r377 Planner 超过最多8次定点读取合同，重复加载完整 coordinator.ts 至 step133。Root 明确 INT PID48555，进程消失且 result ERROR/interrupted；不是模型后端不可用。r379 同一 Gemini4 medium 会话续接 terminal0，但方案引用不存在的图节点且未核 Provider outstandingFailure 对 drain/settle 的影响，尚未接受。r380 同会话纠正又重复读取 agent-runtime.ts，Root INT4709，result interrupted/exit1。fresh OAuth GPT6.1 medium 局部技术 Planner r382 已启动（PID63227/tmux ha-parent-plan-r382），只处理已明确失败 seam；禁止按错误计划先改代码。
+- r378 fresh GCM 只读任务 terminal，六次定点命令，证明原 case 已有 child failure/control/precall checkpoint 证据，但没有父当前 raw capture 或相关 Provider settle/close 断言。release released 不证明物理关闭。r381 GCM 已交实际图观察：既有 recovery_hold/raw retention 存在，但标准结束前失败的 drain/capture/物理 settle-close 路径未被 native-admitted-turn 显式覆盖；segment-recovery 是 resume-only，不能借用作 save 图。其八次命令超过六次合同，结论按实际图核对，不据自称完整覆盖照收。
+- UX peer 已确认 coordinator 无活动 writer，授权本侧独占 runExecution standardTurn catch 小段，保持其 inventory/read 改动不动。尚未派实现；main/install/restart 窗口仍释放给 peer。完整 goal、父级 cleanup、M4 与原 interaction-2 EOF 保持开放；本轮新增已交付节点0。
+- 证据均在既有 `native-reasoning-d0-20261012` RUN 下 r376/r378/r379/r380/r381；下一动作是接收正确最小计划与实际图覆盖，完成必要图合同后，派 GCM 在同域原树做原单例 RED→GREEN，再整体 Review 与标准交付。
+
+## 2026-10-17 已交付：原始 child 错误与真实 failed control；父级 cleanup 仍开放
+
+- 本增量main `20ced081` 已push（原回执`699eefe3..20ced081 main -> main`），三文件113insertions/28deletions：删除无效synthetic inconclusive结果；原错经既有异常通道传递；App binder用真实operation/owner/time/evidence构造现有OperationFailure，failed record/event均持久化。成功路径、Gateway/Contracts验证不变，无新fallback/重复guard。
+- 原r368公开入口实际RED证明错因被替换，随后failed事件缺failure另一次真实RED。r371实现/Appbuild0但未来时退出不算验证；Root补验发现测试把直接OperationControlRecord错当.control包，r372仅纠正两字段，native-tsc0/原单例1/1PASS；正常合最新peer Runtimepresent库后App/nativecompile0、同单例1/1PASS。持久化childfailed状态/原failure.message、precallcheckpoint、无review返回/采纳/重放均到达，不把未执行断言算PASS。
+- 唯一整体Review r373实际Gemini4medium/SUCCESS/exit0，原始四字段JSON/findings[]，既有classifier PASS，review-outcome.json存原RUN。main App/nativecompile/package/install0（session30187）；官方restart0（83598）gen32/PID79769→gen33/PID87121、53007、legacyCloseclean；caller后58秒仍alive，认证/api/runtime/status200/ready。installed原同例使用canonicalCLI与真实installed模块1/1PASS/exit0（30037），证据r375/{installed-failure.log,exit.json,restart.json,runtime-status.json}。
+- 清理完成：r374只读观察terminal0后，原review-primary-error树clean/无占用，正常remove/prune/testabsent；注册3→2，仅main与peer scoped-read integration保留。installed consumerlayout删除，原REDfixture保留，r375/cleanup.json有回执。
+- 严格边界：本例仍有父级cleanupError。r374确认App execution-composition.ts1482在saveBoundary和closeOwnedProvider均reject时抛aggregate，Runtime投影丢失inner errors；这不是正常hold，实际Provider物理关闭状态UNKNOWN。已证明primary/childfailedcontrol，不宣称父级save/close闭环；下一动作同一受控入口在投影前捕获两inner error/code/cause，不加新测试矩阵/模型请求。完整goal与G仍OPEN，M4/输入约束问题由peer推进，原tasklessinteraction-2 EOF根因UNKNOWN仍hold。
+
 ## 2026-10-17 接续：剩余原生能力与真实错误反馈
 
 - r364原“7/7完成/0ready”被Root拒收：遗漏真实error缺口、把未闭G9计完成，且混入错误canonical模型/TaskID。r367同Planner已纠正为全G/全goalOPEN、节点完成数未建立，复用A-F/部分G的已有证据；不据M3一个用例扩称全需求完成。canonical仍taskless原interaction-2/rcc-entry/MiniMax-M3，EOF根因UNKNOWN；不使用Planner新拼接的opaque ID执行动作。
