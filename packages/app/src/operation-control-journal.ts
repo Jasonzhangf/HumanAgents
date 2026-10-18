@@ -22,8 +22,11 @@ import type {
 import type { OperationControlBinding } from '../../runtime/src/gateway/ports.js';
 import type { TaskGrantBusinessRegistration } from '../../runtime/src/admission/task-grant.js';
 import { readTaskBusinessRegistration } from '../../adapters/jsonl/src/task-grants.js';
+import { decodeActiveTurnRecords } from '../../adapters/jsonl/src/active-turn.js';
 import type { JournalRecord, JsonlOrganJournal } from '../../adapters/jsonl/src/index.js';
 import { AppLifecycleError } from './errors.js';
+import { segmentOpenedFromRecord } from './checkpoint-journal.js';
+import type { ResumedTurnSegmentOpened } from '../../contracts/src/active-turn-segments.js';
 
 /**
  * Physical operation-control adapter over the existing Organ Journal.
@@ -267,14 +270,77 @@ function verifyChildRelationship(
   if (parent === undefined || registeredParent === undefined
     || registeredParent.record.seq >= registrationRead.commit.journalSeq
     || parentBusiness === null || !sameCommitRef(parentBusiness.commit, binding.admissionCommitRef)
-    || !sameScopedId(parentBusiness.registration.taskId, intent.taskId)
-    || parentBusiness.registration.inputIdentity.requestRef !== parent.envelope.control.intent.inputRef
-    || parentBusiness.registration.inputIdentity.digest !== parent.envelope.control.intent.inputDigest) {
+    || !sameScopedId(parentBusiness.registration.taskId, intent.taskId)) {
     return {
       state: 'unknown',
       reason: 'durable parent control for the child admission was not found',
       missingRefs: [binding.admissionCommitRef.commitId],
     };
+  }
+  const openedEntry = records
+    .filter((record) => record.seq < registeredParent.record.seq)
+    .map((record) => ({ record, opened: segmentOpenedFromRecord(record) }))
+    .find((entry): entry is { record: JournalRecord; opened: ResumedTurnSegmentOpened } =>
+      entry.opened !== null && sameCommitRef(entry.opened.businessRegistrationCommitRef, binding.admissionCommitRef));
+  if (openedEntry === undefined) {
+    if (parentBusiness.registration.inputIdentity.requestRef !== parent.envelope.control.intent.inputRef
+      || parentBusiness.registration.inputIdentity.digest !== parent.envelope.control.intent.inputDigest) {
+      return {
+        state: 'unknown',
+        reason: 'direct parent business registration does not match its immutable operation intent',
+        missingRefs: [binding.admissionCommitRef.commitId],
+      };
+    }
+  } else {
+    const { record: openedRecord, opened } = openedEntry;
+    const originalTurn = decodeActiveTurnRecords(records, opened.businessTurnRef.businessTurnId)
+      .find((entry) => entry.kind === 'binding-opened');
+    if (!matchesExactScope(opened.binding.scope, binding.scope)
+      || opened.binding.execution.runtimeId !== binding.agentRuntimeId
+      || opened.binding.execution.executionEpoch !== binding.harnessExecutionEpoch
+      || opened.requestRef !== parentBusiness.registration.requestRef
+      || opened.inputIdentity.requestRef !== parentBusiness.registration.inputIdentity.requestRef
+      || opened.inputIdentity.digest !== parentBusiness.registration.inputIdentity.digest
+      || originalTurn === undefined
+      || !sameCommitRef(opened.businessTurnRef.bindingCommitRef, journalCommitRef(records.find((record) =>
+        record.commitId === opened.businessTurnRef.bindingCommitRef.commitId) ?? openedRecord))
+      || !matchesExactScope(originalTurn.binding.scope, binding.scope)
+      || originalTurn.binding.execution.runtimeId !== opened.businessTurnRef.execution.runtimeId
+      || originalTurn.binding.execution.executionEpoch !== opened.businessTurnRef.execution.executionEpoch) {
+      return {
+        state: 'unknown',
+        reason: 'committed segment does not join its exact original business turn and physical handle',
+        missingRefs: [openedRecord.commitId ?? `journal-seq-${openedRecord.seq}`],
+      };
+    }
+    const ancestorParent = records
+      .filter((record) => record.seq < openedRecord.seq)
+      .map((record) => ({ record, envelope: readEnvelopePayload(record) }))
+      .filter((entry): entry is { record: JournalRecord; envelope: EnvelopePayload } => entry.envelope !== null)
+      .filter((entry) => sameScopedId(entry.envelope.control.intent.operationId, binding.parentOperationId)
+        && matchesExactScope(entry.envelope.control.binding.scope, binding.scope)
+        && entry.envelope.control.binding.agentRuntimeId === opened.businessTurnRef.execution.runtimeId
+        && entry.envelope.control.binding.harnessExecutionEpoch === opened.businessTurnRef.execution.executionEpoch
+        && sameScopedId(entry.envelope.control.binding.parentOperationId, binding.parentOperationId))
+      .sort((left, right) => left.record.seq - right.record.seq)
+      .at(-1);
+    const ancestorBusiness = ancestorParent === undefined ? null
+      : readTaskBusinessRegistration({ records, commitId: ancestorParent.envelope.control.binding.admissionCommitRef.commitId });
+    if (ancestorParent === undefined || ancestorBusiness === null
+      || !sameCommitRef(ancestorBusiness.commit, ancestorParent.envelope.control.binding.admissionCommitRef)
+      || !sameScopedId(ancestorBusiness.registration.taskId, intent.taskId)
+      || ancestorBusiness.registration.inputIdentity.requestRef !== ancestorParent.envelope.control.intent.inputRef
+      || ancestorBusiness.registration.inputIdentity.digest !== ancestorParent.envelope.control.intent.inputDigest
+      || ancestorParent.envelope.control.intent.inputRef !== parent.envelope.control.intent.inputRef
+      || ancestorParent.envelope.control.intent.inputDigest !== parent.envelope.control.intent.inputDigest
+      || ancestorParent.envelope.control.namespaceKey !== parent.envelope.control.namespaceKey
+      || ancestorParent.envelope.control.fingerprintKey !== parent.envelope.control.fingerprintKey) {
+      return {
+        state: 'unknown',
+        reason: 'committed segment ancestry does not join the original parent control and business registration',
+        missingRefs: [openedRecord.commitId ?? `journal-seq-${openedRecord.seq}`],
+      };
+    }
   }
   return {
     state: 'verified',

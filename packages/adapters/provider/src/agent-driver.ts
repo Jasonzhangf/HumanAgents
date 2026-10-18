@@ -635,7 +635,31 @@ export class ProviderAgentDriver<
       }
       rounds += 1;
       if (this.options.maxToolRounds !== undefined && rounds > this.options.maxToolRounds) {
-        throw this.error('tool.round-limit', 'provider tool round limit was exceeded', 'observe', 'runtime');
+        const error = this.error('tool.round-limit', 'provider tool round limit was exceeded', 'observe', 'runtime');
+        for (const call of toolCalls) {
+          const result: ProviderToolExecutionResult = {
+            output: JSON.stringify({
+              status: 'failed',
+              code: error.providerError.code,
+              executed: false,
+              toolId: call.toolId,
+              callId: call.callId,
+              message: error.providerError.message,
+            }),
+            outputRefs: [],
+            evidenceRefs: error.providerError.evidenceRefs,
+            status: 'failed',
+            error: error.providerError,
+          };
+          const toolResult = this.toolResult(request, call, result, 'failed');
+          try {
+            await this.track(this.persistToolResult(request, call, result, toolResult));
+          } catch (cause) {
+            this.recordProducerFailure(cause);
+            throw cause;
+          }
+        }
+        throw error;
       }
       for (let callIndex = 0; callIndex < toolCalls.length;) {
         const call = toolCalls[callIndex]!;

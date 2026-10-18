@@ -253,10 +253,28 @@ export function createExecutionAdmission(options: ExecutionAdmissionOptions) {
     if (control.state !== 'complete') invalid('original parent control is unknown');
     const parent = control.operations.find((item) => item.intent.operationId.value === allocation.operationId.value);
     if (!parent) invalid('original parent controller is absent');
+    if (source.opened.businessTurnRef.execution.runtimeId !== original.agentRuntimeId
+      || source.opened.businessTurnRef.execution.executionEpoch !== original.harnessExecutionEpoch) {
+      invalid('committed segment does not retain the original parent execution identity');
+    }
+    const registrationPort = options.taskGrantPort as TaskGrantPort & Partial<BusinessRegistrationReadPort>;
+    if (typeof registrationPort.readBusinessRegistration !== 'function') {
+      invalid('the concrete grant journal cannot read the committed segment business registration');
+    }
+    const registration = await registrationPort.readBusinessRegistration({
+      taskId: allocation.taskId,
+      requestRef: source.opened.requestRef,
+    });
+    if (registration === null
+      || !sameCommitRef(registration.commit, source.opened.businessRegistrationCommitRef)
+      || canonicalJsonStringify(registration.registration.inputIdentity) !== canonicalJsonStringify(source.opened.inputIdentity)) {
+      invalid('committed segment does not retain its exact admitted business registration');
+    }
     const binding: OperationControlBinding = { ...original, agentRuntimeId: physical.execution.runtimeId,
       harnessExecutionEpoch: physical.execution.executionEpoch, admissionCommitRef: source.opened.businessRegistrationCommitRef };
     await gateway.initializeCoverage(binding);
-    const executionEpoch = parent.executionEpoch + 1;
+    const executionEpoch = physical.execution.executionEpoch;
+    if (executionEpoch <= parent.executionEpoch) invalid('committed segment execution epoch did not advance the parent control');
     const { result: _oldResult, ...parentControl } = parent;
     await gateway.applyExternalLifecycle({ control: { ...parentControl, binding, executionEpoch, status: 'accepted' },
       event: { eventId: `segment-parent-admitted:${source.opened.segmentId}`, schemaVersion: 1,

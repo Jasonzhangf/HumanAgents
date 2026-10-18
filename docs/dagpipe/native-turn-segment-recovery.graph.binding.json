@@ -157,9 +157,10 @@
         "packages/runtime/src/ui-runtime/cold-execution-resume.ts:successorEpoch",
         "packages/runtime/src/ui-runtime/cold-execution-resume.ts:resumeColdExecution",
         "packages/runtime/src/context/semantic-turn-context-reader.ts:readResumedSegmentSemanticTurnContext",
-        "packages/app/src/ui-runtime/execution-composition.ts:createResumedExecutionDriver"
+        "packages/app/src/ui-runtime/execution-composition.ts:createResumedExecutionDriver",
+        "packages/app/src/ui-runtime/execution-admission.ts:bindCommittedSegment"
       ],
-      "designNote": "按全部真实 durable floor facts 计算 successor epoch，取得真实 handle 后恢复 incarnation 执行窗口，并恢复当前语义与旧段未决义务。旧 epoch 迟到写按 fencing 拒绝；不重投旧 request/child，不自动 settle。initial-open 分支只发一次 initialInput，保留全部 open request/child obligation（segmentId 归属 businessTurnId），并保留已完成 effect（已 settle 的 file.write 不重放）。interrupted 段语义读取（readSegmentInterruptedExact）、initial-open 语义读取（readInitialOpenExact + materializeLiveAcceptedPrefix）与跨段义务 segmentId 归属尚未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
+      "designNote": "按全部真实 durable floor facts 计算 successor epoch，取得真实 handle 后恢复 incarnation 执行窗口，并恢复当前语义与旧段未决义务。新 physical parent control 的 executionEpoch 取实际 segment execution，binding.admissionCommitRef 指向该段已提交的 business registration，但原父 operation 的 intent、namespaceKey 与 fingerprintKey 保持不变。释放新段 child/effect 前，只做必需 contract identity/resource 校验：用 segmentOpenedFromRecord 找 admissionCommitRef 匹配的已提交 segment-opened，用 decodeActiveTurnRecords 校验其 businessTurnRef.bindingCommitRef 指向同 turn 的原 binding-opened、businessTurnRef.execution 与原 turn 及当前 physical handle 一致；再在 opened 之前的 records 中按该原 execution namespace 找祖先父 control envelope，要求其 intent/keys 与原父 control 相同，且其 admissionCommitRef 解析出的原业务登记 inputIdentity 与 intent.inputRef/inputDigest 相同。原父/registration/history、task/op/businessTurn、grant 与 physical segment admission 全部保留。旧 epoch 迟到写按 fencing 拒绝；不重投旧 request/child，不自动 settle。initial-open 分支只发一次 initialInput，保留全部 open request/child obligation（segmentId 归属 businessTurnId），并保留已完成 effect（已 settle 的 file.write 不重放）。interrupted 段语义读取（readSegmentInterruptedExact）、initial-open 语义读取（readInitialOpenExact + materializeLiveAcceptedPrefix）与跨段义务 segmentId 归属尚未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
     },
     "resolve_resume_outcome": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
@@ -173,7 +174,7 @@
         "packages/runtime/src/ui-runtime/coordinator.ts:RuntimeExecutionRelease",
         "packages/runtime/src/ui-runtime/cold-execution-resume.ts:resumeColdExecution"
       ],
-      "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）的 typed outcome。failed/unknown completion 保留责任，不伪造成 complete。公开入口在 RuntimeTaskCoordinator.resumeExecution；分支判定与 hold 在 cold-execution-resume。"
+      "designNote": "唯一输出：返回真实 receipts（resumed）或保留恢复责任（无新执行）的 typed outcome。failed/unknown completion 保留责任，不伪造成 complete。公开入口在 RuntimeTaskCoordinator.resumeExecution；分支判定与 hold 在 cold-execution-resume。ProviderAgentDriver 的工具轮次预算拒绝已收到但未执行的调用时，通过既有 persistToolResult 持久保存 failed/tool.round-limit/executed:false 观察结果，再抛原 typed budget error；结果不作为控制真源。恢复窗口保留这些 call/output 配对，工具 executor 不被调用，不产生被拒调用的 effect intent/completion，也不重放此前已接受 effect。"
     }
   }
 }

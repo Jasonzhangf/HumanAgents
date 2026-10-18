@@ -15,7 +15,9 @@ import {
   type AgentInput,
   type ContextHistoryRecord,
   type EvidenceRef,
+  type FileWriteCompletionFact,
   type FileWriteEffect,
+  type FileWriteEffectIntent,
   type OperationId,
   type PreparedRecoveryCapture,
   type PublishedTaskPlanRevision,
@@ -73,6 +75,10 @@ import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/sr
 import { createJsonlRetryCycleJournalPort } from '../../packages/app/src/retry-cycle-journal.js';
 import { readCurrentFromRecords } from '../../packages/app/src/ui-runtime/reentry-current-facts.js';
 import { createDefaultExecutionComposition, createServiceExecutionAdmission, ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
+import {
+  RESPONSES_FILE_WRITE_TOOL,
+} from '../../packages/app/src/provider-tool-execution.js';
+import type { ProviderToolDefinition } from '../../packages/contracts/src/index.js';
 import { UiRuntimeService, FakeReplayExecutionRuntimePort, startUiRuntime, uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/index.js';
 import { composeUiMemoryHooks, memoryDriverFactory } from '../../packages/app/src/cli.js';
 import { composeMemoryRuntime, createJournalCheckpointEvidencePort } from '../../packages/app/src/memory-runtime.js';
@@ -172,6 +178,13 @@ interface ResumeRuntimeOptions {
   readonly beforeProvider?: (roleId: string) => void;
   readonly onExecutionInstance?: () => void;
   readonly omitAssemblyFactory?: boolean;
+  readonly maxToolRounds?: number;
+  readonly providerToolScope?: {
+    readonly workspaceRoot: string;
+    readonly projectKey: string;
+    readonly artifactRoot: string;
+    readonly tools: readonly ProviderToolDefinition[];
+  };
 }
 
 type ColdResumeSelector = (input: {
@@ -351,6 +364,7 @@ interface ResponsesWireItem {
   readonly output?: string;
   readonly type?: string;
   readonly call_id?: string;
+  readonly arguments?: string;
   readonly role?: string;
   readonly name?: string;
   readonly content?: readonly { readonly type?: string; readonly text?: string }[];
@@ -597,6 +611,28 @@ function safeStringify(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
+function isObject(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+type CommittedEffectFact =
+  | { readonly kind: 'operation-effect-intent'; readonly fact: FileWriteEffectIntent }
+  | { readonly kind: 'operation-completion'; readonly fact: FileWriteCompletionFact };
+
+/** Reads the two typed completion envelopes by their committed payload keys. */
+function committedEffectFacts(records: readonly JournalRecord[]): readonly CommittedEffectFact[] {
+  const facts: CommittedEffectFact[] = [];
+  for (const record of records) {
+    const payload = record.payload;
+    if (payload?.kind === 'operation-effect-intent' && isObject(payload.intent)) {
+      facts.push({ kind: payload.kind, fact: payload.intent as unknown as FileWriteEffectIntent });
+    } else if (payload?.kind === 'operation-completion' && isObject(payload.completion)) {
+      facts.push({ kind: payload.kind, fact: payload.completion as unknown as FileWriteCompletionFact });
+    }
+  }
+  return facts;
+}
+
 async function upstream(
   model: string,
   deliveryRef: string,
@@ -604,6 +640,7 @@ async function upstream(
   deliveryText?: string,
   summaryText?: { readonly original: Readonly<Record<'goal' | 'actions' | 'result' | 'expectedNextStep', string>>;
     readonly next: Readonly<Record<'goal' | 'actions' | 'result' | 'expectedNextStep', string>> },
+  executionFrames?: (body: string) => readonly unknown[] | undefined,
 ): Promise<Upstream> {
   const wires: { path: string; body: string }[] = [];
   const errors: Upstream['errors'] = [];
@@ -672,7 +709,7 @@ async function upstream(
         throw new Error('the controlled upstream could not identify a lawful cold-resume Responses stage');
       }
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(turnEndFrames().map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+      response.end((executionFrames?.(body) ?? turnEndFrames()).map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
     })().catch((error: unknown) => {
       const record = error as { cause?: unknown; errors?: unknown };
       const describe = (value: unknown): string => value instanceof Error
@@ -1619,7 +1656,8 @@ function createResumeComposition(
     preparedJournal: fixture.preparedJournal,
     resourceBoundary: createPreparedOperationBoundary(fixture.preparedJournal),
     prepareAgentProvider: resumeProviderPreparer(fixture, upstreamBaseUrl, model, options),
-    providerOptions: {},
+    providerOptions: options.maxToolRounds === undefined ? {} : { maxToolRounds: options.maxToolRounds },
+    ...(options.providerToolScope === undefined ? {} : { providerToolScope: options.providerToolScope }),
     now: () => new Date(at),
     currentState,
     publishCurrentTurnState: callbacks.publishCurrentTurnState,
@@ -1716,6 +1754,7 @@ async function buildResumeService(
   productionMemory = false,
   memoryFault?: { publication: boolean; diagnostics: boolean; consume?: boolean },
   realMemory?: { readonly configToml: string; readonly calls: unknown[]; readonly beforeSubmit?: (input: AgentInput) => void },
+  runtimeOptions: ResumeRuntimeOptions = {},
 ) {
   const assemblies: ResumeAssembly[] = [];
   let selectorCalls = 0;
@@ -1803,9 +1842,9 @@ async function buildResumeService(
     memory: memoryRuntime ? { ...memoryRuntime.composition, projectKey: paths!.projectKey, ...memoryHooks } : testMemory('project-cold-resume-http'),
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     runtimeComposition: {
-      createTaskAssembly: resumeTaskAssembly(fixture, assemblies),
+      createTaskAssembly: resumeTaskAssembly(fixture, assemblies, runtimeOptions),
       createExecutionPorts: (callbacks) => {
-        const { composition, currentState } = createResumeComposition(fixture, upstreamBaseUrl, model, callbacks);
+        const { composition, currentState } = createResumeComposition(fixture, upstreamBaseUrl, model, callbacks, runtimeOptions);
         const resolvedSelector = useCompositionSelector
           ? composition.resolveColdExecutionResumeRequest
           : selector;
@@ -2084,6 +2123,7 @@ async function waitForTaskTerminal(
   taskId: TaskId,
   fixture: ColdFixture,
   operationId: OperationId,
+  afterEventId?: string,
 ): Promise<{ readonly state: string; readonly currentState: string }> {
   let subscription: ReturnType<UiRuntimeService['subscribeReplay']> | undefined;
   try {
@@ -2103,7 +2143,7 @@ async function waitForTaskTerminal(
           reject(error);
         }
       };
-      subscription = service.subscribeReplay(operationId, undefined, onEvent);
+      subscription = service.subscribeReplay(operationId, afterEventId, onEvent);
       subscription.replay.forEach(onEvent);
     });
   } finally {
@@ -3302,6 +3342,309 @@ function registerPublicConsumers(): void {
     if (seedRun.stderr.length > 0) await writeFile(join(archiveRoot!, 'seed-child.stderr.log'), seedRun.stderr, 'utf8');
     if (resumeRun.stderr.length > 0) await writeFile(join(archiveRoot!, 'resume-child.stderr.log'), resumeRun.stderr, 'utf8');
     await rm(root, { recursive: true, force: true });
+  });
+
+  // Failure likelihood: observed driver guard, recovery unknown. Impact: a
+  // budget slice can strand a business turn or replay an accepted file effect.
+  // Cost: two public resumes with the existing physical Journal and HTTP helper.
+  test('actual tool.round-limit public resume consumer', async () => {
+    const fixture = await buildColdFixture('actual-tool-round-limit');
+    const acceptedPath = join(fixture.root, 'round-one.txt');
+    const rejectedPath = join(fixture.root, 'round-two.txt');
+    let recovering = false;
+    let toolCalls = 0;
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture,
+      undefined, undefined, () => {
+        if (recovering) return undefined;
+        const ordinal = ++toolCalls;
+        assert.ok(ordinal <= 2, 'the configured budget must stop before a third Provider request');
+        const call = { type: 'function_call', call_id: `budget-write-${ordinal}`, name: 'file.write',
+          arguments: JSON.stringify({ file_path: ordinal === 1 ? acceptedPath : rejectedPath,
+            content: ordinal === 1 ? 'accepted once' : 'must not execute' }) };
+        return [
+          { type: 'response.created', response: { id: `budget-response-${ordinal}` } },
+          { type: 'response.output_item.added', output_index: 0, item: { ...call, arguments: '' } },
+          { type: 'response.output_item.done', output_index: 0, item: call },
+          { type: 'response.completed', response: { id: `budget-response-${ordinal}` } },
+        ];
+      });
+    const providerProjectKey = 'project-cold-resume-http';
+    const providerWorkspaceRef = `workspace:${providerProjectKey}`;
+    const options: ResumeRuntimeOptions = { maxToolRounds: 1, providerToolScope: {
+      workspaceRoot: fixture.root, projectKey: providerProjectKey,
+      artifactRoot: fixture.artifactsRoot, tools: [RESPONSES_FILE_WRITE_TOOL],
+    } };
+    let app: Awaited<ReturnType<typeof buildResumeService>> | undefined;
+    let succeeded = false;
+    try {
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined,
+        true, false, undefined, undefined, options);
+      let budgetError: unknown;
+      try {
+        await app.service.resumeExecution(fixture.taskId, { operationId: fixture.allocation.operationId });
+      } catch (error) { budgetError = error; }
+      const beforeRecords = (await fixture.journal.verify()).records;
+      const budgetCode = budgetError instanceof Error
+        ? (budgetError as Error & { readonly code?: unknown }).code : undefined;
+      const budgetMessage = budgetError instanceof Error ? budgetError.message : undefined;
+      const acceptedContent = await readFile(acceptedPath, 'utf8');
+      const rejectedFile = await readFile(rejectedPath, 'utf8').then(
+        (content) => ({ state: 'present' as const, content }),
+        (error: unknown) => ({ state: 'error' as const, code: (error as { readonly code?: string }).code }),
+      );
+      const failureEvidence = safeStringify({ error: budgetError instanceof Error
+        ? { name: budgetError.name, code: budgetCode, message: budgetMessage } : budgetError,
+        files: { accepted: acceptedContent, rejected: rejectedFile }, wires: http.wires,
+        prepared: fixture.preparedJournal.replay() });
+      await writeFile(join(EVIDENCE_ROOT, 'tool-round-limit-first-failure.json'), failureEvidence, 'utf8');
+      assert.equal(budgetCode, 'orchestration.dispatch.failed',
+        'the public wrapper must expose the orchestration dispatch boundary');
+      assert.equal(budgetMessage, 'provider tool round limit was exceeded',
+        'the public wrapper must preserve the exact guard message');
+      assert.equal(toolCalls, 2);
+      assert.equal(acceptedContent, 'accepted once');
+      assert.deepEqual(rejectedFile, { state: 'error', code: 'ENOENT' });
+      const segmentsBefore = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+      const actualBefore = segmentsBefore.at(-1)!;
+      const effectFactsBefore = committedEffectFacts(beforeRecords);
+      const acceptedFactsBefore = effectFactsBefore.filter(({ fact }) =>
+        fact.binding.execution.taskId.value === fixture.taskId.value
+        && fact.binding.execution.operationId.value === fixture.allocation.operationId.value
+        && fact.binding.callId === 'budget-write-1'
+        && fact.effect.workspaceRef === providerWorkspaceRef && fact.effect.relativePath === 'round-one.txt');
+      assert.equal(acceptedFactsBefore.length, 2, 'the accepted write must have one intent and one completion');
+      assert.deepEqual(acceptedFactsBefore.map(({ kind }) => kind).sort(), ['operation-completion', 'operation-effect-intent']);
+      const acceptedIntent = acceptedFactsBefore.find(({ kind }) => kind === 'operation-effect-intent')!.fact;
+      const acceptedCompletion = acceptedFactsBefore.find(({ kind }) => kind === 'operation-completion')!.fact;
+      assert.equal(acceptedCompletion.effect.effectId, acceptedIntent.effect.effectId,
+        'completion must retain the accepted intent effect identity');
+      assert.deepEqual(acceptedCompletion.binding, acceptedIntent.binding,
+        'completion must retain the accepted intent binding');
+      assert.equal(acceptedIntent.binding.execution.taskId.value, fixture.taskId.value);
+      assert.equal(acceptedIntent.binding.execution.operationId.value, fixture.allocation.operationId.value);
+      assert.equal(acceptedIntent.binding.execution.executionEpoch, actualBefore.binding.execution.executionEpoch);
+      const wireBefore = parseResponsesWire(http.wires.at(-1)!.body)!;
+      const inputsBefore = wireBefore.input ?? [];
+      const callOneBefore = inputsBefore.filter((item) => item.type === 'function_call' && item.call_id === 'budget-write-1');
+      const callOneOutputsBefore = inputsBefore.filter((item) =>
+        item.type === 'function_call_output' && item.call_id === 'budget-write-1');
+      const callOneOutputContent = callOneOutputsBefore[0]?.output;
+      assert.equal(inputsBefore.filter((item) => item.type === 'function_call' && item.call_id === 'budget-write-1').length, 1);
+      assert.equal(inputsBefore.filter((item) => item.type === 'function_call_output' && item.call_id === 'budget-write-1').length, 1);
+      assert.deepEqual(callOneBefore[0]?.arguments, JSON.stringify({ file_path: acceptedPath, content: 'accepted once' }),
+        'the matched call must carry the accepted write arguments');
+      assert.deepEqual(typeof callOneOutputContent === 'string'
+        ? JSON.parse(callOneOutputContent.split('\n[HumanAgent evidence refs]')[0]!) : callOneOutputContent,
+        { path: 'round-one.txt', operation: 'create', before: null, after: 'accepted once' },
+        'the matched result must carry the actual first write readback');
+      await app.close();
+      app = undefined;
+      recovering = true;
+      const wireOffset = http.wires.length;
+      app = await buildResumeService(fixture, http.baseUrl, 'cold-resume.model', undefined,
+        true, false, undefined, undefined, options);
+      const subscription = app.service.subscribeReplay(fixture.allocation.operationId, undefined, () => {});
+      const lastEventId = subscription.replay.at(-1)?.eventId;
+      subscription.unsubscribe();
+      const release = await app.service.resumeExecution(fixture.taskId, { operationId: fixture.allocation.operationId });
+      assert.equal(release.taskId, fixture.taskId.value);
+      assert.equal(release.operationId, fixture.allocation.operationId.value);
+      assert.equal(release.businessTurnId, fixture.businessTurnId);
+      const terminal = await waitForTaskTerminal(app.service, fixture.taskId, fixture,
+        fixture.allocation.operationId, lastEventId);
+      assert.equal(terminal.state, 'succeeded', `the successor execution must close successfully: ${terminal.currentState}`);
+      const segmentsAfter = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+      const successor = segmentsAfter.at(-1)!;
+      assert.ok(successor.binding.execution.executionEpoch > actualBefore.binding.execution.executionEpoch);
+      assert.ok(segmentsAfter.length > segmentsBefore.length);
+      const successorEpoch = successor.binding.execution.executionEpoch;
+      assert.equal(successor.binding.scope.operationId?.value, fixture.allocation.operationId.value,
+        'the successor segment must retain the resumed operation identity');
+      assert.equal(successor.binding.businessTurnRef.businessTurnId, fixture.businessTurnId,
+        'the successor segment must retain the original business turn');
+      const successorRecords = await fixture.segmentJournal.readSegmentRecords({
+        businessTurnId: fixture.businessTurnId,
+        segmentId: successor.segmentId,
+      });
+      const acceptedEnds = successorRecords.flatMap((record) =>
+        record.kind === 'accepted-fact'
+          && record.entry.envelope.fact.kind === 'tool-call'
+          && isStandardTurnEndToolId(record.entry.envelope.fact.call.toolId) ? [record.entry] : []);
+      assert.equal(acceptedEnds.length, 1,
+        'the successor segment must contain exactly one accepted standard-end call');
+      assert.equal(acceptedEnds[0]!.envelope.execution.executionEpoch, successorEpoch,
+        'the accepted standard end must carry the successor execution epoch');
+      assert.deepEqual(acceptedEnds[0]!.envelope.scope, successor.binding.scope,
+        'the accepted standard end must bind the successor segment scope');
+      const afterRecords = (await fixture.journal.verify()).records;
+      const effectFactsAfter = committedEffectFacts(afterRecords);
+      assert.deepEqual(effectFactsAfter, effectFactsBefore, 'the accepted file effect must not be replayed');
+      assert.equal(await readFile(acceptedPath, 'utf8'), 'accepted once');
+      await assert.rejects(() => readFile(rejectedPath, 'utf8'), (error: unknown) =>
+        (error as { code?: string }).code === 'ENOENT');
+      const resumedInput = parseResponsesWire(http.wires[wireOffset]!.body)?.input ?? [];
+      assert.ok(resumedInput.some((item) => item.type === 'function_call' && item.call_id === 'budget-write-2'));
+      const rejectedOutputs = resumedInput.filter((item) => item.type === 'function_call_output'
+        && item.call_id === 'budget-write-2');
+      const rejectedOutputContent = rejectedOutputs[0]?.output;
+      assert.equal(rejectedOutputs.length, 1, 'the rejected call must acquire exactly one durable result');
+      assert.deepEqual(typeof rejectedOutputContent === 'string'
+        ? JSON.parse(rejectedOutputContent.split('\n[HumanAgent evidence refs]')[0]!) : rejectedOutputContent,
+        {
+          status: 'failed',
+          code: 'tool.round-limit',
+          executed: false,
+          toolId: 'file.write',
+          callId: 'budget-write-2',
+          message: 'provider tool round limit was exceeded',
+        },
+        'the rejected call must carry a truthful non-executed failure result');
+      assert.equal(resumedInput.some((item) => item.type === 'function_call' && item.call_id === 'budget-write-1'),
+        true, 'the accepted call must remain in the resumed context');
+      assert.equal(resumedInput.some((item) => item.type === 'function_call_output'
+        && item.call_id === 'budget-write-1'), true, 'the accepted result must remain in the resumed context');
+      const progress = latestNativeSaveProgress(afterRecords);
+      assert.ok(progress, 'the successor turn must commit durable native-save progress');
+      if (progress) {
+        assert.ok('version' in progress.key && progress.key.version === 2,
+          'the successor native save must use a version-2 segment key');
+        if ('version' in progress.key && progress.key.version === 2) {
+          assert.equal(progress.key.segment.segmentId, successor.segmentId,
+            'the native save key must bind the actual successor segment');
+          assert.equal(progress.key.turn.turnId, fixture.businessTurnId,
+            'the native save key must bind the original business turn');
+        }
+        assert.equal(progress.key.checkpoint.scope.operationId?.value, fixture.allocation.operationId.value,
+          'the native save checkpoint must retain the resumed operation identity');
+        assert.deepEqual(progress.phases.filter((phase) => phase.state === 'committed')
+          .map((phase) => phase.phase).sort(), [...NATIVE_SAVE_PHASES].sort(),
+        'every one of the five native save phases must commit for the successor turn');
+        const intentRead = await createJsonlNativeSaveProgressPort({ journal: fixture.journal })
+          .readIntentExact?.(progress.key);
+        assert.equal(intentRead?.state, 'found',
+          'the successor native save must retain its exact immutable intent');
+        if (intentRead?.state === 'found' && isNativeSegmentSaveIntentV2(intentRead.intent)) {
+          assert.equal(intentRead.intent.key.segment.segmentId, successor.segmentId,
+            'the native save intent must bind the actual successor segment');
+          assert.equal(intentRead.intent.source.opened.segmentId, successor.segmentId,
+            'the native save source must be the actual opened successor segment');
+          assert.equal(intentRead.intent.source.opened.businessTurnRef.businessTurnId, fixture.businessTurnId,
+            'the native save source must bind the original business turn');
+          const semantics = intentRead.intent.contextView.semantics;
+          for (const part of [semantics.goal, semantics.actions, semantics.result, semantics.nextStep]) {
+            assert.ok(typeof part === 'string' && part.length > 0,
+              'the four-part turn summary must carry every section from the successor standard end');
+          }
+        }
+        const nativeReceipt = await createJsonlCheckpointJournal({
+          filePath: fixture.journalPath,
+          journal: fixture.journal,
+        }).readNativeCheckpoint({ checkpoint: progress.key.checkpoint });
+        assert.ok(nativeReceipt, 'the successor checkpoint must have a native commit envelope');
+        if (nativeReceipt) {
+          assert.equal(nativeReceipt.receipt.committedAt, at,
+            'the successor checkpoint time must come from the real owner clock');
+        }
+
+        const closureCandidates = afterRecords.flatMap((record) => {
+          const closure = closureFromRecord(record);
+          if (closure === null || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') return [];
+          if (record.scope.operationId?.value !== fixture.allocation.operationId.value
+            || closure.recoveryBinding?.coreClosure.executionEpoch !== successorEpoch
+            || record.commitId === undefined) return [];
+          return [{
+            closure,
+            commitRef: { commitId: record.commitId, journalSeq: record.seq, recordDigest: record.recordDigest },
+          }];
+        });
+        assert.equal(closureCandidates.length, 1,
+          'the successor standard end must commit exactly one checkpoint closure');
+        const successorClosure = closureCandidates[0]!;
+        const recoveryBinding = successorClosure.closure.recoveryBinding;
+        assert.ok(recoveryBinding, 'the successor closure must bind its recovery context');
+        if (recoveryBinding) {
+          assert.equal(recoveryBinding.coreClosure.executionEpoch, successorEpoch,
+            'the successor closure must carry the successor execution epoch');
+          const contextRecord = afterRecords.find((record) =>
+            record.commitId === recoveryBinding.contextCommitRef.commitId);
+          assert.ok(contextRecord, 'the successor closure must reference a committed context record');
+          if (contextRecord) {
+            const successorContext = contextHistoryFromRecord(contextRecord);
+            assert.ok(successorContext, 'the successor closure context must decode through the real owner');
+            if (successorContext) {
+              assert.equal(successorContext.contextView.executionEpoch, successorEpoch,
+                'the successor context must carry the successor execution epoch');
+              assert.equal(successorContext.scope.operationId?.value, fixture.allocation.operationId.value,
+                'the successor context must retain the resumed operation identity');
+            }
+          }
+        }
+
+        const duties = afterRecords.filter((record) =>
+          record.payload?.type === 'closed-turn-planner-call')
+          .map((record) => record.payload!.record as ClosedTurnPlannerCallRecord)
+          .filter((record) => record.duty.checkpointId.value === progress.key.checkpoint.id.value);
+        assert.deepEqual(duties.map((record) => record.stage), ['prepared', 'invoked', 'returned'],
+          'the successor closure must reach its own independent Planner return');
+        assert.ok(duties.every((record) =>
+          record.duty.taskId.value === fixture.taskId.value
+          && record.duty.scope.operationId?.value === fixture.allocation.operationId.value
+          && record.duty.closureRef === duties[0]!.duty.closureRef),
+        'the Planner duty must retain the successor task, operation and closure');
+        const returned = duties[2]!;
+        assert.equal(returned.stage, 'returned');
+        if (returned.stage === 'returned') assert.equal(returned.decision, 'complete');
+
+        const alignmentRecords = afterRecords.flatMap((record) => {
+          const closure = closureFromRecord(record);
+          if (closure === null || !('closureKind' in closure) || closure.closureKind !== 'planner-alignment') return [];
+          if (record.scope.operationId?.value !== fixture.allocation.operationId.value
+            || closure.alignment.checkpointId.value !== progress.key.checkpoint.id.value) return [];
+          return [closure];
+        });
+        assert.equal(alignmentRecords.length, 1,
+          'the successor Planner return must commit exactly one alignment');
+        const alignment = alignmentRecords[0]!;
+        assert.equal(alignment.alignment.decision, 'complete');
+        assert.equal(alignment.alignment.closureRef, duties[0]!.duty.closureRef,
+          'the successor alignment must bind the successor Planner closure');
+
+        const currentState = await createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal })
+          .read(fixture.taskScope);
+        assert.equal(currentState.state, 'known',
+          currentState.state === 'unknown' ? currentState.reason : 'the successor must publish current state');
+        if (currentState.state === 'known') {
+          assert.equal(currentState.value.task.id.value, fixture.taskId.value,
+            'the successor current state must retain the current task identity');
+          assert.ok(currentState.value.currentPlan,
+            'the successor Planner must publish an authoritative current plan');
+        }
+        const currentPlan = await readFixturePriorPlan(fixture);
+        assert.ok(currentPlan, 'the successor current plan must read back through its exact publication');
+        if (currentPlan) {
+          assert.equal(currentPlan.revisionId, alignment.alignment.planRevisionId,
+            'the successor alignment must bind the authoritative current plan');
+          assert.equal(currentPlan.sequence, alignment.alignment.planRevisionSequence);
+          assert.equal(currentPlan.contentDigest, alignment.alignment.planContentDigest);
+        }
+      }
+
+      const projection = app.service.listTasks();
+      const completed = [...projection.completed].find((row) =>
+        row.taskId.value === fixture.taskId.value);
+      assert.ok(completed, 'the successor must publish a completed task projection');
+      if (completed) {
+        assert.equal(completed.state, 'succeeded');
+        assert.equal(completed.currentState, '已完成');
+      }
+      succeeded = true;
+    } finally {
+      await writeFile(join(EVIDENCE_ROOT, 'tool-round-limit-wires.json'), JSON.stringify(http.wires, null, 2), 'utf8');
+      await writeFile(join(EVIDENCE_ROOT, 'tool-round-limit-fixture.json'), JSON.stringify({ root: fixture.root, succeeded }), 'utf8');
+      if (app) await app.close();
+      await http.close();
+      if (succeeded) await rm(fixture.root, { recursive: true, force: true });
+    }
   });
 
   test('public resumeExecution holds with zero generation and zero effects when the current grant denies the resumed incarnation', async () => {
