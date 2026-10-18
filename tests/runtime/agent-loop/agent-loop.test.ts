@@ -36,6 +36,7 @@ import type {
   TurnCloseSummary,
   TurnClosureReference,
 } from '../../../packages/contracts/src/index.js';
+import type { ActiveTurnJournalRecord } from '../../../packages/runtime/src/context/active-turn-journal.js';
 import type {
   CommittedCheckpointRecord,
   ContextHistoryPort,
@@ -84,10 +85,11 @@ function inspectionHelperConsumer() {
   let committedCheckpoint: CommittedCheckpointRecord | null = null;
   let forbiddenTail = false;
   let failForCheckpoint = false;
+  let rawJournal: readonly ActiveTurnJournalRecord[] = [];
   const resources = {
     logicalTurnId: admittedTurn.turnId, identity: { scope: taskScope, taskFlow: { kind: 'inspection' as const, definitionVersion: 1 as const },
       source, journalCommitRef: 'jsonl:identity' },
-    journal: { replay: async () => { if (forbiddenTail) throw new Error('stop read mutable tail'); return []; } },
+    journal: { replay: async () => { if (forbiddenTail) throw new Error('stop read mutable tail'); return rawJournal; } },
     segments: { readInitialSegmentSource: async () => ({ kind: 'captured' as const, body: capture, bindingCommitRef: receipt('binding') }),
       readSegments: async () => { if (forbiddenTail) throw new Error('stop scanned segments'); return []; }, readSegmentRecords: async () => [] },
   };
@@ -108,6 +110,7 @@ function inspectionHelperConsumer() {
   };
   return { dependencies, resources, entries, plan, plans, receipt, assignment, raw, time,
     capture: () => capture, setCapture: (value: ActiveTurnCaptureBody) => { capture = value; },
+    setRawJournal: (value: readonly ActiveTurnJournalRecord[]) => { rawJournal = value; },
     commitCheckpoint: (checkpoint: CommittedCheckpointRecord) => { committedCheckpoint = checkpoint; },
     failForCheckpoint: () => { failForCheckpoint = true; },
     stop: (checkpoint: CommittedCheckpointRecord, value: NonNullable<typeof stopSource>) => { committedCheckpoint = checkpoint; stopSource = value; forbiddenTail = true; },
@@ -200,6 +203,87 @@ test('inspection runtime helpers preserve original accepted plan, reuse definiti
   await assert.rejects(cold.acceptedDeliveryReader.readAcceptedDelivery('captured-child'), /conflicting durable/);
   f.setCapture({ ...f.capture(), binding: { ...f.capture().binding, acceptedPlan: undefined } });
   await assert.rejects(f.helpers().selectionReader.readSelectionContext('inspection-turn-2'), /no durable accepted plan/);
+});
+
+test('inspection runtime helpers fold adoption over the exact invocation without changing delivery history', async () => {
+  // Failure basis: the observed capture-first and replay carriers contain the opening and adopted forms.
+  // Impact: the next turn or stop cannot read an accepted inspection delivery. Cost: one existing helper consumer.
+  const f = inspectionHelperConsumer();
+  const context = await f.helpers().selectionReader.readSelectionContext('inspection-turn');
+  const opened = await f.helpers().occurrenceOpening.open({
+    context, logicalTurnId: 'inspection-turn', executionScope: scope, assignment: f.assignment, checkId: 'a',
+  });
+  const invocation: ChildInvocationRecord = {
+    invocationId: 'observed-child', childTurnId: 'observed-child-turn', checkpointReceiptRef: 'observed-checkpoint',
+    binding: { kind: 'execution', assignment: f.assignment, inspection: opened },
+  };
+  const adopted = { ...invocation, adoptedResultSeq: 3 };
+  const delivery: AcceptedExecutionChildDelivery = {
+    kind: 'execution', seq: 3, invocationId: invocation.invocationId, assignment: f.assignment, refinedDelivery: f.raw,
+    result: {
+      taskId: f.assignment.taskId, pipelineNodeId: f.assignment.pipelineNodeId, agentId: 'child',
+      assignmentId: f.assignment.assignmentId, attempt: 1, executionEpoch: 1, inputRevision: 1,
+      producedArtifactRefs: [], producedArtifactDigests: [], status: 'succeeded', summary: 'observed a',
+      outputRefs: [], evidenceRefs: [f.raw.ref], nextAction: 'settle',
+    },
+    inspectionDelivery: {
+      checkId: 'a', resultId: `inspection-result:${invocation.invocationId}`, attempt: 1,
+      outcome: { status: 'completed', judgment: 'a observed' }, evidenceRefs: [f.raw.ref], completedAt: f.time,
+    },
+  };
+  f.setCapture({ ...f.capture(), childInvocations: [adopted], entries: [delivery] });
+  const journalWriteCount = f.entries.length;
+  const replay = (invocations: readonly ChildInvocationRecord[]) => [
+    ...invocations.map((record): ActiveTurnJournalRecord => ({ kind: 'child-invocation', record })),
+    { kind: 'child-delivery', entry: delivery } as const,
+    { kind: 'child-invocation', record: adopted } as const,
+  ];
+
+  f.setRawJournal(replay([invocation]));
+  assert.deepEqual(await f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId), delivery);
+
+  f.setRawJournal(replay([adopted]));
+  assert.deepEqual(await f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId), delivery);
+
+  f.setRawJournal([
+    { kind: 'child-invocation', record: invocation },
+    { kind: 'child-delivery', entry: delivery },
+    { kind: 'child-invocation', record: invocation },
+  ]);
+  assert.deepEqual(await f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId), delivery);
+
+  f.setRawJournal(replay([{ ...invocation, adoptedResultSeq: 4 }]));
+  await assert.rejects(f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId),
+    /conflicting durable records/);
+
+  const changedBinding = {
+    ...invocation,
+    binding: { kind: 'execution' as const, assignment: { ...f.assignment, executionEpoch: 2 }, inspection: opened },
+  };
+  f.setRawJournal([
+    { kind: 'child-invocation', record: invocation },
+    { kind: 'child-invocation', record: changedBinding },
+  ]);
+  await assert.rejects(f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId),
+    /conflicting durable records/);
+
+  f.setCapture({
+    ...f.capture(),
+    entries: [delivery, { ...delivery, result: { ...delivery.result, summary: 'conflicting delivery' } }],
+  });
+  f.setRawJournal(replay([invocation]));
+  await assert.rejects(f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId),
+    /inspection child delivery has conflicting durable records/);
+
+  f.setCapture({
+    ...f.capture(),
+    childInvocations: [{ ...invocation, adoptedResultSeq: 4 }],
+    entries: [],
+  });
+  f.setRawJournal([]);
+  await assert.rejects(f.helpers().acceptedDeliveryReader.readAcceptedDelivery(invocation.invocationId),
+    /child selection resultSeq must reference an accepted entry/);
+  assert.equal(f.entries.length, journalWriteCount);
 });
 
 test('inspection runtime helpers hold fresh selection when TaskIdentity taskFlow is absent', async () => {

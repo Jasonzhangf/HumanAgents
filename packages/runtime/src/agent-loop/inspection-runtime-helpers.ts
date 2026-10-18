@@ -22,6 +22,7 @@ import type {
   TaskIdentityRecord,
   WorkAssignment,
 } from '../../../contracts/src/index.js';
+import { canonicalJsonStringify, validateChildInvocationReferences } from '../../../contracts/src/index.js';
 import {
   validateBusinessCycleOpenedRecord,
   validateInspectionExecutionBinding,
@@ -193,6 +194,26 @@ function mergeExact<T>(label: string, values: readonly T[], keyOf: (value: T) =>
   return [...merged.values()];
 }
 
+function mergeInspectionChildInvocations(values: readonly ChildInvocationRecord[]): ChildInvocationRecord[] {
+  const merged = new Map<string, ChildInvocationRecord>();
+  for (const value of values) {
+    const previous = merged.get(value.invocationId);
+    if (previous === undefined) {
+      merged.set(value.invocationId, value);
+      continue;
+    }
+    const { adoptedResultSeq: previousAdopted, ...previousRest } = previous;
+    const { adoptedResultSeq: nextAdopted, ...nextRest } = value;
+    const sameRest = canonicalJsonStringify(previousRest) === canonicalJsonStringify(nextRest);
+    if (!sameRest || previousAdopted !== undefined && nextAdopted !== undefined && previousAdopted !== nextAdopted) {
+      throw fail('conflict', `inspection child invocation has conflicting durable records for ${value.invocationId}`);
+    }
+    const adoptedResultSeq = nextAdopted ?? previousAdopted;
+    merged.set(value.invocationId, adoptedResultSeq === undefined ? previous : { ...previous, adoptedResultSeq });
+  }
+  return [...merged.values()];
+}
+
 function initialBinding(source: ActiveTurnInitialSegmentSource): ActiveTurnBinding {
   return source.kind === 'captured' ? source.body.binding : source.binding;
 }
@@ -228,12 +249,14 @@ function fromSegmentRecords(records: readonly ActiveTurnSegmentJournalRecord[]):
 }
 
 function mergeRecords(records: readonly InspectionTurnExactRecords[]): InspectionTurnExactRecords {
-  return {
-    childInvocations: mergeExact('inspection child invocation', records.flatMap((item) => item.childInvocations),
-      (item) => item.invocationId),
-    entries: mergeExact('inspection child delivery', records.flatMap((item) => item.entries),
-      (item) => item.invocationId),
-  };
+  const entries = mergeExact('inspection child delivery', records.flatMap((item) => item.entries),
+    (item) => item.invocationId);
+  const childInvocations = mergeInspectionChildInvocations(records.flatMap((item) => item.childInvocations));
+  const executionInvocations = childInvocations.filter((item): item is ChildInvocationRecord & {
+    readonly binding: Extract<ChildInvocationRecord['binding'], { kind: 'execution' }>;
+  } => item.binding.kind === 'execution');
+  validateChildInvocationReferences(executionInvocations, entries, 'inspection helper');
+  return { childInvocations, entries };
 }
 
 function occurrenceIdentity(logicalTurnId: string, definition: DurableInspectionDefinition): string {
