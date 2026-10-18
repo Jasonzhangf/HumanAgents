@@ -1091,7 +1091,7 @@ async function submitCheckpointContextCorrection(body) {
     throw checkpointControlUnavailable()
   }
   const identity = checkpointControlIdentity('context-correction')
-  const result = await api.submitTaskContextCorrection(explicitScope.taskId, {
+  const result = await api.submitTaskContextCorrection(explicitScope.taskId.value, {
     ...body,
     ...identity,
   }, explicitScope)
@@ -1106,7 +1106,7 @@ async function submitCheckpointReentry(body) {
     throw checkpointControlUnavailable()
   }
   const identity = checkpointControlIdentity('checkpoint-reentry')
-  const result = await api.submitTaskCheckpointReentry(explicitScope.taskId, {
+  const result = await api.submitTaskCheckpointReentry(explicitScope.taskId.value, {
     ...body,
     ...identity,
   }, explicitScope)
