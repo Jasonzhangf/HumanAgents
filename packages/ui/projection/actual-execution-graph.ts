@@ -98,7 +98,7 @@ const CONTAINER_PURPOSES: Readonly<Record<
 >> = {
   'active-turn': '这一轮业务处理的真实执行记录。',
   'resumed-segment': '同一业务轮次恢复后的独立执行分段。',
-  'native-allocation': 'Runtime 为原生执行入口记录的分配。',
+  'native-allocation': '已记录的执行入口分配。',
 };
 
 const AGGREGATE_GROUPS = {
@@ -248,7 +248,7 @@ function projectActiveTurn(
           resultSummary: closure.closure.summary.result.text,
           nextActionLabel: closure.closure.summary.expectedNextStep.text,
         }
-        : { reason: closure.reason }),
+        : { reason: '该业务轮次的收拢情况尚未确认。' }),
     },
     technical: {
       ...baseTechnical(node, technicalEntries([
@@ -284,7 +284,7 @@ function projectResumedSegment(
       stateTone: segmentState.status === 'unknown' ? 'neutral' : hasTerminal ? 'neutral' : 'active',
       ...(hasTerminal ? { outcomeLabel: '已记录结束' } : {}),
       ...(segmentState.status === 'unknown'
-        ? { reason: segmentState.reason }
+        ? { reason: '该恢复分段的执行状态尚未确认。' }
         : hasTerminal
           ? {}
           : { reason: '尚未记录该分段的结束。' }),
@@ -337,11 +337,14 @@ function childStatePresentation(
 }
 
 function childReason(node: TaskActualExecutionChildInvocationNode): string | undefined {
-  if (node.returnState.status === 'unknown') return node.returnState.reason;
-  if (node.returnState.status === 'unreturned' && node.acquisition.status !== 'acquired') {
-    return node.acquisition.reason;
+  if (node.returnState.status === 'unknown') return '子任务返回情况尚未确认。';
+  if (node.returnState.status === 'unreturned' && node.acquisition.status === 'unacquired') {
+    return '该调用暂未取得执行实例。';
   }
-  if (node.linkage.status === 'ungrouped') return node.linkage.reason;
+  if (node.returnState.status === 'unreturned' && node.acquisition.status === 'unknown') {
+    return '该调用的执行实例情况尚未确认。';
+  }
+  if (node.linkage.status === 'ungrouped') return '该调用尚未归入执行轮次或恢复分段。';
   return undefined;
 }
 
@@ -354,7 +357,7 @@ function childAdoptionLabel(node: TaskActualExecutionChildInvocationNode): strin
     case 'undecided':
       return '采用决定尚未记录';
     case 'unknown':
-      return `采用情况未知：${node.adoption.reason}`;
+      return '采用情况未知';
   }
 }
 
@@ -569,7 +572,7 @@ function projectNode(
 ): TaskActualExecutionNodeProjection {
   const unresolved = unresolvedRelations
     .filter((relation) => relation.nodeId === node.nodeId)
-    .map((relation) => `${EDGE_KIND_LABELS[relation.kind]}: ${relation.reason}`)
+    .map((relation) => `${EDGE_KIND_LABELS[relation.kind]}关系未归组`)
     .join('\n');
   const projected = (() => {
     switch (node.kind) {
@@ -589,18 +592,10 @@ function projectNode(
         return projectPlannerCall(node, unresolved);
     }
   })();
-  const summary = node.missingSource === undefined
-    ? projected.summary
-    : {
-      ...projected.summary,
-      reason: projected.summary.reason === undefined
-        ? `部分来源缺失：${node.missingSource}`
-        : `${projected.summary.reason}；部分来源缺失：${node.missingSource}`,
-    };
   return {
     nodeId: node.nodeId,
     kind: node.kind,
-    summary,
+    summary: projected.summary,
     technical: projected.technical,
   };
 }
@@ -694,18 +689,21 @@ function buildGroupDrafts(
     if (parentId !== undefined) addChild(parentId, node.nodeId);
   }
 
-  const containerNodes = nodes.filter((node) => (
+  const containerNodeIds = new Set(nodes.filter((node) => (
     node.kind === 'active-turn'
     || node.kind === 'resumed-segment'
     || (node.kind === 'native-allocation' && (childrenByParent.get(node.nodeId)?.length ?? 0) > 0)
-  ));
+  )).map((node) => node.nodeId));
+  const containerNodes = nodes.filter((node) => containerNodeIds.has(node.nodeId));
   const containerCounts = new Map<string, number>();
   for (const node of containerNodes) {
     containerCounts.set(node.kind, (containerCounts.get(node.kind) ?? 0) + 1);
   }
   const containerOrdinals = new Map<string, number>();
   const drafts: GroupDraft[] = [];
+  const assignedNodeIds = new Set<string>();
   for (const node of containerNodes) {
+    assignedNodeIds.add(node.nodeId);
     const ordinal = (containerOrdinals.get(node.kind) ?? 0) + 1;
     containerOrdinals.set(node.kind, ordinal);
     const numbered = (containerCounts.get(node.kind) ?? 0) > 1;
@@ -714,7 +712,13 @@ function buildGroupDrafts(
       : node.kind === 'resumed-segment'
         ? '恢复分段'
         : '执行分配';
-    const children = childrenByParent.get(node.nodeId) ?? [];
+    const children = (childrenByParent.get(node.nodeId) ?? []).flatMap((childId) => {
+      if (containerNodeIds.has(childId) || assignedNodeIds.has(childId)) return [];
+      const child = nodeById.get(childId);
+      if (child === undefined) return [];
+      assignedNodeIds.add(childId);
+      return [child];
+    });
     drafts.push({
       groupId: node.nodeId,
       label: numbered ? `${baseLabel} ${ordinal}` : baseLabel,
@@ -725,21 +729,11 @@ function buildGroupDrafts(
             ? 'resumed-segment'
             : 'native-allocation'
       ],
-      nodes: [
-        node,
-        ...children.flatMap((childId) => {
-          const child = nodeById.get(childId);
-          return child === undefined ? [] : [child];
-        }),
-      ],
+      nodes: [node, ...children],
     });
   }
 
-  const grouped = new Set<string>();
-  for (const draft of drafts) {
-    for (const node of draft.nodes) grouped.add(node.nodeId);
-  }
-  const leftovers = nodes.filter((node) => !grouped.has(node.nodeId));
+  const leftovers = nodes.filter((node) => !assignedNodeIds.has(node.nodeId));
   const allocation = leftovers.filter((node) => node.kind === 'native-allocation');
   const reviews = leftovers.filter((node) => node.kind === 'milestone-review');
   const planners = leftovers.filter((node) => node.kind === 'closed-turn-planner-call');

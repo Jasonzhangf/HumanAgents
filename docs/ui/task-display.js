@@ -698,7 +698,7 @@ function renderActualEdges(edges) {
   return section
 }
 
-function renderActualUngrouped(relations) {
+function renderActualUngrouped(relations, options) {
   if (!Array.isArray(relations) || relations.length === 0) return null
   const section = element('section', undefined, 'actual-execution-ungrouped-section')
   section.dataset.actualExecutionUngrouped = 'recorded'
@@ -709,15 +709,24 @@ function renderActualUngrouped(relations) {
     item.dataset.actualUngroupedNode = relation.nodeId
     item.append(
       element('span', relation.label, 'actual-execution-ungrouped-label'),
-      element('span', relation.detail, 'muted actual-execution-ungrouped-detail'),
+      element(
+        'span',
+        '关联目标未出现在已记录的执行节点中，原始原因可在任务详情中查看。',
+        'muted actual-execution-ungrouped-detail',
+      ),
     )
+    const detail = actualGraphDetail('未归组关系详情', [
+      ['节点标识', relation.nodeId],
+      ['原始原因', relation.detail],
+    ], options)
+    if (detail) item.append(detail)
     list.append(item)
   }
   section.append(list)
   return section
 }
 
-function renderActualUnavailable(sources) {
+function renderActualUnavailable(sources, options) {
   if (!Array.isArray(sources) || sources.length === 0) return null
   const section = element('section', undefined, 'actual-execution-unavailable-section')
   section.dataset.actualExecutionUnavailable = 'recorded'
@@ -728,8 +737,17 @@ function renderActualUnavailable(sources) {
     item.dataset.actualUnavailableSource = source.sourceId
     item.append(
       element('span', source.label, 'actual-execution-unavailable-label'),
-      element('span', source.detail, 'muted actual-execution-unavailable-detail'),
+      element(
+        'span',
+        '部分执行来源记录暂时无法读取，原始信息可在任务详情中查看。',
+        'muted actual-execution-unavailable-detail',
+      ),
     )
+    const detail = actualGraphDetail('来源不可用详情', [
+      ['来源标识', source.sourceId],
+      ['原始信息', source.detail],
+    ], options)
+    if (detail) item.append(detail)
     list.append(item)
   }
   section.append(list)
@@ -786,7 +804,7 @@ export function renderTaskActualExecutionGraphSection(graph, options = {}) {
       element('p', history.detail, 'muted'),
     )
     section.append(missing)
-    const unavailable = renderActualUnavailable(history.unavailable)
+    const unavailable = renderActualUnavailable(history.unavailable, options)
     if (unavailable) section.append(unavailable)
     return section
   }
@@ -800,9 +818,9 @@ export function renderTaskActualExecutionGraphSection(graph, options = {}) {
   for (const group of history.groups) recorded.append(renderActualGroup(group, options))
   const edges = renderActualEdges(history.edges)
   if (edges) recorded.append(edges)
-  const ungrouped = renderActualUngrouped(history.ungrouped)
+  const ungrouped = renderActualUngrouped(history.ungrouped, options)
   if (ungrouped) recorded.append(ungrouped)
-  const unavailable = renderActualUnavailable(history.unavailable)
+  const unavailable = renderActualUnavailable(history.unavailable, options)
   if (unavailable) recorded.append(unavailable)
   section.append(recorded)
   return section

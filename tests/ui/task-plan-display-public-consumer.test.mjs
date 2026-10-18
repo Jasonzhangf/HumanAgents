@@ -318,10 +318,14 @@ function nativeSource() {
             segmentId: 'segment-2',
             openedCommitRef: commitRef('segment-2'),
           },
-          linkage: { status: 'linked', parentNodeId: 'segment-2' },
+          linkage: {
+            status: 'linked',
+            parentNodeId: 'segment-2',
+          },
           acquisition: { status: 'acquired', incarnation: incarnation('b') },
           returnState: { status: 'unreturned' },
           adoption: { status: 'undecided' },
+          missingSource: 'call-diagnostic:/runs/child-b.json',
         }),
         nativeNode('child-c', 'member-c', {
           kind: 'child-invocation',
@@ -343,9 +347,16 @@ function nativeSource() {
             bindingCommitRef: commitRef('binding-turn'),
           },
           linkage: { status: 'linked', parentNodeId: 'turn-active' },
-          acquisition: { status: 'unacquired', reason: '执行池未提供实例' },
+          acquisition: {
+            status: 'unacquired',
+            reason: 'acquisition-diagnostic:/runs/child-c.json',
+          },
           returnState: { status: 'unreturned' },
-          adoption: { status: 'undecided' },
+          adoption: {
+            status: 'unknown',
+            reason: 'adoption-diagnostic:/runs/child-c-adoption.json',
+          },
+          missingSource: 'source-diagnostic:/runs/child-c-source.json',
         }),
         nativeNode('orphan-1', 'member-orphan', {
           kind: 'orphan-child-delivery',
@@ -366,7 +377,10 @@ function nativeSource() {
             businessTurnId: 'turn-1',
             bindingCommitRef: commitRef('binding-turn'),
           },
-          linkage: { status: 'orphan', reason: 'invocation-not-recorded' },
+          linkage: {
+            status: 'orphan',
+            reason: 'invocation-not-recorded:/runs/orphan.json',
+          },
         }),
         nativeNode('review-1', 'member-review', {
           kind: 'milestone-review',
@@ -406,9 +420,11 @@ function nativeSource() {
         }),
       ],
       edges: [
+        { edgeId: 'e-contain-container', kind: 'contains', fromNodeId: 'turn-active', toNodeId: 'segment-2' },
         { edgeId: 'e-contain-a', kind: 'contains', fromNodeId: 'turn-active', toNodeId: 'child-a' },
         { edgeId: 'e-contain-c', kind: 'contains', fromNodeId: 'turn-active', toNodeId: 'child-c' },
         { edgeId: 'e-contain-b', kind: 'contains', fromNodeId: 'segment-2', toNodeId: 'child-b' },
+        { edgeId: 'e-contain-a-again', kind: 'contains', fromNodeId: 'segment-2', toNodeId: 'child-a' },
         { edgeId: 'e-precedes', kind: 'precedes', fromNodeId: 'allocation-1', toNodeId: 'turn-active' },
         { edgeId: 'e-delegates', kind: 'delegates-child', fromNodeId: 'turn-active', toNodeId: 'child-a' },
         { edgeId: 'e-planner', kind: 'planner-duty', fromNodeId: 'turn-active', toNodeId: 'planner-1' },
@@ -417,12 +433,12 @@ function nativeSource() {
         nodeId: 'turn-active',
         kind: 'delegates-child',
         targetRef: 'missing-child',
-        reason: '调用记录未出现在已记录节点中。',
+        reason: 'relation-diagnostic:/runs/missing-child.json',
       }],
       unavailable: [{
         sourceId: 'source-1',
         ownerId: 'owner.runtime',
-        message: '一条执行来源记录暂时无法读取。',
+        message: 'source-diagnostic:/runs/source-1.json',
       }],
     },
   }
@@ -459,14 +475,19 @@ function openTechnicalDetail(node, opened) {
   return Object.fromEntries(opened[0].detail.entries)
 }
 
-function openActualDetail(node, opened) {
+function openActualDetail(node, opened, summary = '执行记录详情') {
   const button = walk(node).find((entry) => (
-    entry.tagName === 'BUTTON' && entry.dataset?.actualGraphDetail === '执行记录详情'
+    entry.tagName === 'BUTTON' && entry.dataset?.actualGraphDetail === summary
   ))
   assert.ok(button, 'the existing actual-execution detail button must be present')
+  const before = opened.length
   button.click()
-  assert.equal(opened.length, 1)
-  return Object.fromEntries(opened[0].detail.entries)
+  assert.equal(opened.length, before + 1)
+  return Object.fromEntries(opened.at(-1).detail.entries)
+}
+
+function visibleNodeIds(graph) {
+  return graph.history.groups.flatMap((group) => group.nodes.map((node) => node.nodeId))
 }
 
 const readOk = (value) => ({ ok: true, value })
@@ -497,12 +518,19 @@ test('actual graph projection groups native nodes and never stamps success on un
   assert.equal(graph.history.groupCount, 6)
   assert.equal(graph.history.recordCount, 9)
   assert.equal(graph.history.nodeCount, 9)
-  assert.equal(graph.history.edgeCount, 6)
+  assert.equal(graph.history.edgeCount, 8)
+  assert.deepEqual(
+    graph.history.edges.map((edge) => edge.kind),
+    ['contains', 'contains', 'contains', 'contains', 'contains', 'precedes', 'delegates-child', 'planner-duty'],
+  )
   assert.equal(graph.history.deliveryCount, 2)
   assert.deepEqual(
     graph.history.groups.map((group) => group.label),
     ['执行轮次', '恢复分段', '执行分配', '里程碑复核', '计划核对', '未归组记录'],
   )
+  const groupNodeIds = visibleNodeIds(graph)
+  assert.equal(groupNodeIds.length, graph.history.recordCount)
+  assert.equal(new Set(groupNodeIds).size, graph.history.recordCount)
 
   const group = (label) => graph.history.groups.find((item) => item.label === label)
   const nodesById = new Map(
@@ -513,6 +541,14 @@ test('actual graph projection groups native nodes and never stamps success on un
   assert.deepEqual(
     group('执行轮次').nodes.map((node) => node.summary.roleLabel),
     ['执行轮次', '子任务执行', '子任务执行'],
+  )
+  assert.deepEqual(
+    group('恢复分段').nodes.map((node) => node.summary.roleLabel),
+    ['恢复分段', '子任务复核'],
+  )
+  assert.deepEqual(
+    group('未归组记录').nodes.map((node) => node.nodeId),
+    ['orphan-1'],
   )
   assert.equal(summary('turn-active').stateLabel, '业务已收拢')
   assert.equal(summary('turn-active').resultSummary, '主任务已交付')
@@ -528,7 +564,7 @@ test('actual graph projection groups native nodes and never stamps success on un
   assert.equal(summary('segment-2').reason, '尚未记录该分段的结束。')
   assert.equal(summary('child-c').stateLabel, '未取得执行实例')
   assert.equal(summary('child-c').stateTone, 'warning')
-  assert.match(summary('child-c').reason, /执行池未提供实例.*执行池没有提供完整的调用记录/)
+  assert.equal(summary('child-c').reason, '该调用暂未取得执行实例。')
   assert.equal(summary('child-b').stateLabel, '已派发，等待返回')
   assert.equal(summary('child-b').adoptionLabel, '采用决定尚未记录')
   assert.equal(summary('orphan-1').stateLabel, '未关联到调用记录')
@@ -537,13 +573,16 @@ test('actual graph projection groups native nodes and never stamps success on un
   assert.equal(summary('review-1').resultSummary, '发现 1 项问题')
   assert.equal(summary('planner-1').decisionLabel, '完成')
 
-  assert.deepEqual(
-    graph.history.edges.map((edge) => edge.kind),
-    ['contains', 'contains', 'contains', 'precedes', 'delegates-child', 'planner-duty'],
-  )
-  assert.equal(graph.history.edges[0].detail, '执行轮次包含子任务执行')
+  assert.equal(graph.history.edges[0].detail, '执行轮次包含恢复分段')
   assert.equal(graph.history.ungrouped[0].label, '派发子任务关系未归组')
-  assert.equal(graph.history.unavailable[0].detail, '一条执行来源记录暂时无法读取。')
+  assert.equal(
+    graph.history.ungrouped[0].detail,
+    'relation-diagnostic:/runs/missing-child.json',
+  )
+  assert.equal(
+    graph.history.unavailable[0].detail,
+    'source-diagnostic:/runs/source-1.json',
+  )
 
   // Raw identities stay out of the human summary but remain on the technical layer.
   assert.equal(graph.history.groups[0].nodes[0].technical.nodeId, 'turn-active')
@@ -576,12 +615,38 @@ test('actual graph renderer shows groups and hides ids, guidance, plan and detai
   assert.match(text, /未归组的关系/)
   assert.match(text, /部分执行来源不可用/)
   assert.doesNotMatch(text, /当前任务计划|Plan v2|计划内容属于当前任务/)
-  assert.doesNotMatch(text, /turn-active|segment-2|child-a|child-b|child-c|orphan-1|inv-a|inv-b|commit-a|member-a|owner-1|pipeline\.execute|source-1/)
+  assert.doesNotMatch(text, /diagnostic:|\/runs\/|turn-active|segment-2|child-a|child-b|child-c|orphan-1|inv-a|inv-b|commit-a|member-a|owner-1|pipeline\.execute|source-1/)
 
   const detail = openActualDetail(section, opened)
   assert.equal(detail['节点标识'], 'turn-active')
   assert.equal(detail['记录类型'], 'active-turn')
   assert.deepEqual(opened.length, 1)
+  const childTechnical = graph.history.groups
+    .flatMap((item) => item.nodes)
+    .find((node) => node.nodeId === 'child-c')
+    .technical
+  assert.equal(childTechnical.missingSource, 'source-diagnostic:/runs/child-c-source.json')
+  assert.match(childTechnical.message, /acquisition-diagnostic:\/runs\/child-c\.json/)
+  assert.match(childTechnical.message, /adoption-diagnostic:\/runs\/child-c-adoption\.json/)
+  const orphanDelivery = graph.history.groups
+    .flatMap((item) => item.nodes)
+    .find((node) => node.nodeId === 'orphan-1')
+  assert.match(orphanDelivery.technical.message, /invocation-not-recorded:\/runs\/orphan\.json/)
+
+  const relationDetail = openActualDetail(
+    byData(section, 'actualUngroupedNode', 'turn-active')[0],
+    opened,
+    '未归组关系详情',
+  )
+  const unavailableDetail = openActualDetail(
+    byData(section, 'actualUnavailableSource', 'source-1')[0],
+    opened,
+    '来源不可用详情',
+  )
+  assert.equal(relationDetail['节点标识'], 'turn-active')
+  assert.equal(relationDetail['原始原因'], 'relation-diagnostic:/runs/missing-child.json')
+  assert.equal(unavailableDetail['来源标识'], 'source-1')
+  assert.equal(unavailableDetail['原始信息'], 'source-diagnostic:/runs/source-1.json')
 })
 
 test('actual graph missing history stays explicit instead of becoming an empty graph', () => {
@@ -593,7 +658,7 @@ test('actual graph missing history stays explicit instead of becoming an empty g
       unavailable: [{
         sourceId: 'source-1',
         ownerId: 'owner.runtime',
-        message: '一条执行来源记录暂时无法读取。',
+        message: 'source-diagnostic:/runs/missing-history.json',
       }],
     },
   })
@@ -605,6 +670,11 @@ test('actual graph missing history stays explicit instead of becoming an empty g
   // The unavailable source stays explicit next to the missing-history copy.
   assert.equal(byData(section, 'actualExecutionUnavailable', 'recorded').length, 1)
   assert.match(allText(section), /部分执行来源不可用/)
+  assert.doesNotMatch(allText(section), /diagnostic:|\/runs\//)
+  assert.equal(
+    graph.history.unavailable[0].detail,
+    'source-diagnostic:/runs/missing-history.json',
+  )
 })
 
 test('current rejects an unknown or mismatched accepted identity instead of using the latest', () => {
