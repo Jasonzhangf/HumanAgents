@@ -2406,8 +2406,53 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
     assert.equal(receipt.taskId, taskId.value);
     assert.equal(receipt.state, 'blocked');
     assert.equal(receipt.error?.message, 'child call finding 0 evidenceRefs item exceeds its 256 character bound');
+    assert.equal(receipt.error?.cleanupError, undefined,
+      'the known failed turn cleanup does not attach a false cleanup error');
     assert.equal(receipt.output, '');
     assert.equal(receipt.release, 'released');
+    const failureTerminal = new UiRuntimeJournal(fixture.layout.preparedJournalPath).replay()
+      .flatMap((record) => record.kind === 'operation.event' ? [record] : [])
+      .find((record) => record.operationId.value === receipt.operationId
+        && record.event.operationId === receipt.operationId
+        && record.event.taskId.value === receipt.taskId
+        && record.event.executionEpoch === receipt.executionEpoch
+        && record.event.kind === 'execution.terminal'
+        && record.event.terminalPhase === 'final')?.event;
+    assert.ok(failureTerminal, 'the failed parent has its exact final terminal event');
+    if (!failureTerminal) throw new Error('the failed parent final terminal event is absent');
+    assert.equal(failureTerminal.state, 'blocked');
+    assert.equal(failureTerminal.summary, 'child call finding 0 evidenceRefs item exceeds its 256 character bound');
+    const closeEvidenceStore = new ImmutableAssetStore(join(fixture.paths.artifactsRoot, 'ui-provider-evidence'));
+    const expectedClose = { endpoint: fixture.upstream.baseUrl, bindingId: 'text-only-binding' };
+    const closeEvidenceRefs: EvidenceRef[] = [];
+    for (const entry of failureTerminal.evidenceRefs) {
+      if (entry.kind !== 'external' || entry.source !== 'humanagent.provider-adapter'
+        || entry.digest === undefined) continue;
+      const content = JSON.parse(new TextDecoder('utf-8', { fatal: true })
+        .decode(await closeEvidenceStore.readEvidence(entry))) as {
+          readonly endpoint?: unknown;
+          readonly bindingId?: unknown;
+        };
+      if (content.endpoint === expectedClose.endpoint && content.bindingId === expectedClose.bindingId) {
+        closeEvidenceRefs.push(entry);
+      }
+    }
+    assert.ok(closeEvidenceRefs.length > 0,
+      'the final terminal retains the actual checked Provider close evidence');
+    assert.deepEqual(closeEvidenceRefs[0]?.scope, { organId: id('organ', 'provider-adapter') },
+      'the Provider close reference keeps its original organ-only scope');
+    console.log('review failure close evidence', JSON.stringify({
+      taskId: failureTerminal.taskId.value,
+      operationId: failureTerminal.operationId,
+      executionEpoch: failureTerminal.executionEpoch,
+      terminal: `${failureTerminal.kind}:${failureTerminal.terminalPhase}`,
+      closeEvidence: closeEvidenceRefs.map((entry) => ({
+        evidenceId: entry.evidenceId,
+        source: entry.source,
+        scope: entry.scope,
+        content: expectedClose,
+      })),
+    }));
     const scope = { organId: id('organ', 'humanagent-ui'), taskId };
     const verified = await fixture.journal.verify();
     const bindings = await listTaskActiveTurnBindings({ journal: fixture.journal, scope });
@@ -2443,6 +2488,45 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
     'the review request failure remains durable in its original task and operation');
     assert.ok(verified.records.some((entry) => entry.checkpoint?.id.value === review.record.checkpointReceiptRef),
       'the unreturned review retains its actual pre-call recovery checkpoint');
+    const boundaryId = `execution-close:${receipt.operationId}`;
+    const captureRecord = verified.records.find((entry) => entry.payload?.['type'] === 'recovery-assets.phase'
+      && (entry.payload['receipt'] as { readonly boundaryId?: unknown } | undefined)?.boundaryId === boundaryId);
+    assert.ok(captureRecord, 'the failed parent has its exact execution-close recovery capture');
+    if (!captureRecord) throw new Error('the failed parent recovery capture is absent');
+    const captureReceipt = (captureRecord.payload as { readonly receipt: { readonly receiptRef: string } }).receipt;
+    const readback = await createNativeRecoveryAssets({ journalPath: fixture.layout.organJournalPath,
+      journal: fixture.journal, assetRoot: join(fixture.paths.artifactsRoot, 'ui-provider-evidence') })
+      .readRecoveryAssetsExact(captureReceipt.receiptRef);
+    assert.equal(readback.prepared.body.cut.pauseId, boundaryId);
+    assert.equal(readback.prepared.body.binding.scope.operationId?.value, receipt.operationId);
+    const rawFailedResult = readback.prepared.body.entries.find((entry) => 'envelope' in entry
+      && entry.envelope.fact.kind === 'tool-result' && entry.envelope.fact.callId === 'cycle-1-review'
+      && entry.envelope.fact.result.status === 'blocked');
+    assert.ok(rawFailedResult, 'the exact capture retains the failed tool result');
+    if (!rawFailedResult || !('envelope' in rawFailedResult)
+      || rawFailedResult.envelope.fact.kind !== 'tool-result') {
+      throw new Error('the captured failed tool result is malformed');
+    }
+    assert.equal(rawFailedResult.envelope.fact.result.error?.message,
+      'child call finding 0 evidenceRefs item exceeds its 256 character bound');
+    const rawBytes = await providerRawContentReader(filesystemProviderEvidenceSink(
+      new ImmutableAssetStore(join(fixture.paths.artifactsRoot, 'ui-provider-evidence'))))
+      .read({ scope: rawFailedResult.envelope.scope, content: rawFailedResult.envelope.fact.rawOutput });
+    assert.ok(new TextDecoder('utf-8', { fatal: true }).decode(rawBytes).includes('256 character bound'),
+      'the raw failed tool result remains exact-readable');
+    assert.ok(readback.prepared.body.childInvocations.some((entry) => entry.invocationId === review.record.invocationId
+      && entry.checkpointReceiptRef === review.record.checkpointReceiptRef),
+    'the exact capture retains the unreturned review and its pre-call checkpoint');
+    assert.deepEqual(readback.prepared.recovery.durablePhases.map((phase) => phase.state),
+      ['not-executed', 'not-executed', 'not-executed', 'not-executed', 'not-executed'],
+      'failed pre-end cleanup does not fabricate standard durable phases');
+    const childCheckpointRefs = new Set(readback.prepared.body.childInvocations
+      .map((entry) => entry.checkpointReceiptRef));
+    assert.equal(verified.records.some((entry) => entry.kind === 'checkpoint'
+      && entry.checkpoint !== undefined && !childCheckpointRefs.has(entry.checkpoint.id.value)), false,
+    'failed pre-end cleanup commits no standard checkpoint');
+    assert.equal(verified.records.some((entry) => entry.payload?.['type'] === 'native-save-intent'),
+      false, 'failed pre-end cleanup commits no standard save intent');
     const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
     const reviewRequests = posts.filter((wire) => parseResponsesWire(wire.body)?.model === 'review.only.model');
     assert.equal(reviewRequests.length, 2, 'one read and one invalid delivery, with no replay or success drain');

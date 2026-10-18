@@ -4864,21 +4864,34 @@ export class RuntimeTaskCoordinator {
         // typed cleanupError instead of overwriting the first cause.
         const primaryError: MutableRuntimeTaskError | undefined = record.error;
         const effectiveError: MutableRuntimeTaskError = primaryError ?? projection;
-        if (primaryError !== undefined) primaryError.cleanupError = projection;
         record.error = effectiveError;
         record.running = false;
         record.state = 'blocked';
         record.allowedActions = [];
         record.nextStep = effectiveError.nextAction;
+        const attachCleanupError = (cleanupError: unknown) => {
+          const cleanup = errorFromUnknown(cleanupError);
+          if (cleanup.code === effectiveError.code && cleanup.message === effectiveError.message) return;
+          effectiveError.cleanupError = cleanup;
+        };
+        if (primaryError !== undefined) attachCleanupError(projection);
+        let closedProviderEvidenceRefs: readonly EvidenceRef[] = [];
         try {
-          await this.closeForExecution(operation.operationId, driver, []);
+          const close = await this.closeForExecution(operation.operationId, driver, []);
+          if (close.state !== 'closed' || close.retained) {
+            attachCleanupError(new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER,
+              close.retained ? `provider close retained active executions in state ${close.state}` : `provider close is ${close.state}`,
+              toNextActionText(close.nextAction) ?? 'inspect provider close evidence'));
+          } else {
+            closedProviderEvidenceRefs = close.evidenceRefs;
+          }
         } catch (cleanupError) {
-          projection.cleanupError = errorFromUnknown(cleanupError);
+          attachCleanupError(cleanupError);
         }
         await this.tryPersistCurrentState(record,
           `turn-pending:${record.taskId.value}:${operation.operationId.value}:${effectiveError.code}`, scope);
         this.pushEvent(record, operation, 'execution.terminal', 'blocked', effectiveError.message,
-          [], effectiveError.ownerId, true, effectiveError.nextAction, { error: effectiveError }, 'final');
+          closedProviderEvidenceRefs, effectiveError.ownerId, true, effectiveError.nextAction, { error: effectiveError }, 'final');
         return;
       }
       const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: scope.cycleId };
