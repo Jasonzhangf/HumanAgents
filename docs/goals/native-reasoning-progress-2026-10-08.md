@@ -9,6 +9,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r321计划已接收：r320wire确到standardend+Plannerrequest，但release receipt不独立证明durabletail。r322freshGCM仅原coldcase补same-successor end/save五阶段/closure/Plannerreturned+alignment/currentTask断言，不新增case。另parent已实际search+fetch官方 `https://developers.openai.com/api/docs/guides/function-calling`（Handling function calls / Incorporating results）：每call按call_id返回output再续request，可用文本表达失败。r320恢复wire保留call2无output，不符合所述正常flow；没有实际上游拒绝证据，不编造400。r323独立Gemini规划pending义务/完整预算边界最小修复，禁止fake成功、删除Journal事实或重放已接受effect。F暂不Review/交付。
+
 - Runtimeinvocationfold43814ab9已cherry候选2cb8f481；组合contracts/agentloop/nativeAppcompile0，原inspection16/16PASS（session66751）。显式同源CLI + dist/tests-native-text原inspection一次实际FAIL（session26249），新首错child delivery conflicting durable records，invocation bcc7292b9e4184c03d4a6f6711720fd9f3f94e511948aba50d917c2d77c0dddc；2Planner16POST、fixturer9tfZu保留，已交peer精确定位delivery，不放宽globalmergeExact。
 - r320当前最终源码compile0+原budgetconsumer1/1PASS，校正wrappercode/typedworkspace/evidencefooter测试预期；但parent接收发现该case未断言最终durableclosure/Planner，且resumedwire含pendingcall2无output。r321独立小Planner核对真实resumeawait合同/Responses配对与既有收口断言，区分证据缺口/实际缺陷；没有进入Review或宣称完整恢复完成。原产品patch仍仅预算树。
 
