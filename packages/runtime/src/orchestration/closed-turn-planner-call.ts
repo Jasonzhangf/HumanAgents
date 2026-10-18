@@ -333,6 +333,7 @@ export function closedTurnPlannerOutputContract(): string {
   return [
     'You are the independent Planner for exactly one HumanAgent task turn.',
     'You receive the exact committed turn closure, the current task directive, the accepted refined child/review results, and either the exact prior whole-task plan revision or null with the actual confirmed source for the first publication.',
+    'When the task directive contains goal, scope, constraints, or deliverables, the plan nodes, acceptanceCriteria, and decision must comply with those requirements and must not add conflicting requirements.',
     'Reply with one JSON object and nothing else:',
     '{"decision":"continue"|"complete"|"failed","snapshot":{"title":"...","summary":"...","completeness":{"scope":"whole-task","status":"complete"},"acceptanceCriteria":[...],"nodes":[...],"phases":[...],"relations":[...]},"reasonText":"..."}',
     'The snapshot must contain the seven required fields below. It may also contain the optional "inspectionDefinition" field:',

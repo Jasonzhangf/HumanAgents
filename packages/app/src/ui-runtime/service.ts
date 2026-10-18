@@ -1293,6 +1293,40 @@ function resultStatus(event: RuntimeTaskEvent): ObservationNodeToolStepSource['s
   return 'unknown';
 }
 
+type DraftFieldValues = {
+  readonly goal: string;
+  readonly scope: string;
+  readonly constraints: readonly string[];
+  readonly deliverables: readonly string[];
+};
+
+type DraftFieldOverrides = {
+  readonly goal?: unknown;
+  readonly scope?: unknown;
+  readonly constraints?: unknown;
+  readonly deliverables?: unknown;
+};
+
+function draftFieldValues(current: DraftFieldValues, fields: DraftFieldOverrides): DraftFieldValues {
+  return {
+    goal: typeof fields.goal === 'string' ? fields.goal : current.goal,
+    scope: typeof fields.scope === 'string' ? fields.scope : current.scope,
+    constraints: Array.isArray(fields.constraints)
+      ? fields.constraints.filter((entry): entry is string => typeof entry === 'string')
+      : current.constraints,
+    deliverables: Array.isArray(fields.deliverables)
+      ? fields.deliverables.filter((entry): entry is string => typeof entry === 'string')
+      : current.deliverables,
+  };
+}
+
+function hasExplicitDraftFields(fields: DraftFieldOverrides): boolean {
+  return fields.goal !== undefined
+    || fields.scope !== undefined
+    || fields.constraints !== undefined
+    || fields.deliverables !== undefined;
+}
+
 /**
  * Build the execution input for a revision edit from the user-facing fields.
  * Callers that submit structured text fields (goal/scope/constraints/
@@ -1300,24 +1334,49 @@ function resultStatus(event: RuntimeTaskEvent): ObservationNodeToolStepSource['s
  * binding uses the core's policy-only refinement path instead.
  */
 function normalizedInputForDraftFields(
-  current: DraftRevision,
+  current: DraftFieldValues,
   fields: Readonly<Record<string, unknown>>,
 ): string {
   if (typeof fields.normalizedInput === 'string') return fields.normalizedInput;
-  const goal = typeof fields.goal === 'string' ? fields.goal : current.goal;
-  const scope = typeof fields.scope === 'string' ? fields.scope : current.scope;
-  const constraints = Array.isArray(fields.constraints)
-    ? fields.constraints.filter((entry): entry is string => typeof entry === 'string')
-    : current.constraints;
-  const deliverables = Array.isArray(fields.deliverables)
-    ? fields.deliverables.filter((entry): entry is string => typeof entry === 'string')
-    : current.deliverables;
-  return canonicalJsonStringify({
-    goal,
-    scope,
-    constraints,
-    deliverables,
-  });
+  return canonicalJsonStringify(draftFieldValues(current, fields));
+}
+
+function normalizedInputExpressesDraftFields(normalizedInput: string, fields: DraftFieldValues): boolean {
+  try {
+    return canonicalJsonStringify(JSON.parse(normalizedInput)) === canonicalJsonStringify(fields);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The task title is a human-readable projection of the exact execution input.
+ * Only the four-field template generated above has a separate readable goal;
+ * legacy plain text remains the title without truncation or summarization.
+ */
+function taskTitleForNormalizedInput(normalizedInput: string): string {
+  try {
+    const parsed: unknown = JSON.parse(normalizedInput);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return normalizedInput;
+    const record = parsed as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    if (keys.length !== 4
+      || keys[0] !== 'constraints'
+      || keys[1] !== 'deliverables'
+      || keys[2] !== 'goal'
+      || keys[3] !== 'scope'
+      || typeof record.goal !== 'string'
+      || typeof record.scope !== 'string'
+      || !Array.isArray(record.constraints)
+      || !record.constraints.every((entry) => typeof entry === 'string')
+      || !Array.isArray(record.deliverables)
+      || !record.deliverables.every((entry) => typeof entry === 'string')) {
+      return normalizedInput;
+    }
+    return record.goal;
+  } catch {
+    return normalizedInput;
+  }
 }
 
 function apiError(error: unknown): UiRuntimeApiError {
@@ -5682,7 +5741,14 @@ export class UiRuntimeService {
       }
       bindTaskFlow = revision.taskFlow === undefined;
     }
-    if (bindExecutionPolicy || bindTaskFlow) {
+    const currentFields = draftFieldValues(revision, {});
+    const confirmationFields = draftFieldValues(currentFields, input);
+    const bindTemplate = !existingTaskChange
+      && !confirmedReplayMatches
+      && hasExplicitDraftFields(input)
+      && (canonicalJsonStringify(confirmationFields) !== canonicalJsonStringify(currentFields)
+        || !normalizedInputExpressesDraftFields(revision.normalizedInput, confirmationFields));
+    if (bindExecutionPolicy || bindTaskFlow || bindTemplate) {
       // Interpretation mints the reviewable draft before confirmation. Bind
       // only the missing typed inputs in one revision; an omitted input keeps
       // the value already carried by the draft.
@@ -5692,6 +5758,7 @@ export class UiRuntimeService {
         input,
         bindExecutionPolicy ? input.executionPolicy : undefined,
         bindTaskFlow ? input.taskFlow : undefined,
+        bindTemplate ? confirmationFields : undefined,
       );
       this.persistExplicitBrainState();
     }
@@ -5784,16 +5851,23 @@ export class UiRuntimeService {
     input: ConfirmExplicitRequirementInput,
     executionPolicy?: ExecutionPolicyDefinition,
     taskFlow?: TaskFlowBinding,
+    normalizedTemplate?: DraftFieldValues,
   ): Promise<DraftRevision> {
     const fields: Record<string, unknown> = {
       ...(input.goal === undefined ? {} : { goal: input.goal }),
       ...(input.scope === undefined ? {} : { scope: input.scope }),
       ...(input.constraints === undefined ? {} : { constraints: input.constraints }),
       ...(input.deliverables === undefined ? {} : { deliverables: input.deliverables }),
+      ...(normalizedTemplate === undefined ? {} : {
+        normalizedInput: normalizedInputForDraftFields(normalizedTemplate, normalizedTemplate),
+      }),
       ...(executionPolicy === undefined ? {} : { executionPolicy }),
       ...(taskFlow === undefined ? {} : { taskFlow }),
     };
     const idempotencyKey = `final-submit-binding:${interactionId}:${current.draftId}:${current.revisionVersion}:${canonicalJsonStringify({
+      ...(normalizedTemplate === undefined ? {} : {
+        normalizedInput: normalizedInputForDraftFields(normalizedTemplate, normalizedTemplate),
+      }),
       ...(executionPolicy === undefined ? {} : { executionPolicy }),
       ...(taskFlow === undefined ? {} : { taskFlow }),
     })}`;
@@ -5832,13 +5906,23 @@ export class UiRuntimeService {
     const snapshot = await this.explicitIntake.inspect(interactionId);
     const draft = snapshot.draft;
     if (!draft) return undefined;
+    const goal = options.goal ?? draft.proposal;
+    const scope = options.scope ?? draft.normalizedInput;
+    const fields = {
+      goal,
+      scope,
+      constraints: options.constraints ?? [],
+      deliverables: options.deliverables ?? [],
+    };
     try {
       await this.explicitIntake.createDraft(interactionId, {
-        goal: options.goal ?? draft.proposal,
-        scope: options.scope ?? draft.normalizedInput,
+        goal,
+        scope,
         constraints: options.constraints,
         deliverables: options.deliverables,
-        normalizedInput: draft.normalizedInput,
+        normalizedInput: hasExplicitDraftFields(options)
+          ? normalizedInputForDraftFields(fields, {})
+          : draft.normalizedInput,
         proposedIntent: draft.proposedIntent,
         proposal: draft.proposal,
         matchedTasks: draft.matchedTasks,
@@ -6177,7 +6261,7 @@ export class UiRuntimeService {
       ? this.coordinator.taskSnapshot(consumed.taskRef)
       : this.coordinator.createTask({
           taskId: prepared.taskId,
-          title: consumed.normalizedInput,
+          title: taskTitleForNormalizedInput(consumed.normalizedInput),
           directive: consumed.normalizedInput,
         }));
     const admission = this.requirementAdmissions.get(prepared.taskId.value)?.receipt;

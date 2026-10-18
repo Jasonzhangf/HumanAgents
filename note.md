@@ -158,3 +158,23 @@ SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 bin
 - 编译后的真实 `artifact-conflict` RED、修复后 focused GREEN 与旧 inspect 公开 consumer 均通过。组合最新 main 后重编 Runtime/App 并复用两项 consumer，通过一次独立 Gemini 4 medium Review；首次输出协议字段错误被正确拒收，同 Reviewer 仅修格式，现有 classifier 最终 PASS、无 findings。
 - main 构建、打包和全局安装通过。正式 restart 将本地实例从 gen31/PID19853 升到 gen32/PID79769，端口53007、legacy close clean；认证状态接口 HTTP200 ready。只链接全局安装模块的同一 Runtime consumer 1 PASS，临时 layout 已删，来源 worktree 正常关闭。
 - 完整回执：`/Volumes/Intel/playground/humanagent/.worker-runs/m4-inspect-delivery-review-20261017/delivery.md`。原 B 历史 Task 未重试或冒称恢复；App/UI 跨项目串读、foreign committed output、约束传递与整个 UX 目标继续推进。前端候选 `3300cea4` 仅合入独立 scoped-read 集成分支，尚未交付 main。
+
+## 2026-10-18 跨项目语义与流水读取增量
+
+本增量已合入 main `66228f09`，覆盖显式项目/模式/Task 范围的 semantic GET/SSE、已提交公开正文和 Pipeline Observation。Runtime inventory 从同源 Journal 恢复 publicOutput 与真实 Organ；App 共用范围解析和准入历史读取；UI 在任务页、观测页、节点及子层读取中透传范围。最终结果只采用已提交 publication，外项目有限 SSE 发送完成事件后正常结束。
+
+作者实际 HTTP 红测、最小 UI 请求反例与修复后回归通过。为两行前端修复新增的约 390 行模拟 DOM 已物理删除，保留 43 行 API consumer；页面行为由真实浏览器证明。一次独立 Gemini 4 medium 整体 Review 正常退出，既有 classifier 裁决 PASS、无 findings。完整审查与作者证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/m4-scoped-read-review-20261018/`。
+
+保留的真实 RCC A/B 同名 Task 已通过候选桌面和手机的系统→项目→任务→Observation→输出节点→执行子层→返回链。A 的 789 字符已提交正文与公开 API、双端任务页及节点抽屉一致；B 保持受阻且没有最终输出，双方内容不串。手机底部抽屉、关闭后焦点返回及无横向溢出通过。浏览器 SSE 实际收到一次 A 快照和完成事件后关闭。四份 Task Journal 字节未变，证据在 `m4-scoped-candidate-browser-r2-20261017/reception.md`。
+
+main 的 contracts/config/App 构建、打包和全局安装通过。正式 restart 将 canonical 从 gen34/PID56021 更新到 gen35/PID15697，端口53007，旧实例 clean 收拢；认证状态接口 HTTP200 ready。全局安装模块上的同一真实 HTTP consumer 1 PASS；默认打包 UI 的手机 A 任务→Observation→输出节点也通过，确认请求带完整 A 范围并显示 A 正文。候选及安装后临时服务、凭据文件和 consumer layout 已清理；原 A/B 数据保留。来源 UI/API 树和 scoped-read 集成树已正常关闭，保留的 M5/约束树有独立 owner。远端与最终资源回执见同目录 `delivery.md`。
+
+这只关闭跨项目读取与展示隔离子能力。原 B 失败历史、确认约束的真实模型执行、完整 Context 修正/重入写链、浏览器原生后退及 G1–G14/F01–F20 最终矩阵仍未闭环。M5 UI `0ca3157c` 与 API `21b0e98e` 已在独立候选合流，组合 53 项相关用例通过；后端入口继续实施。约束反例已在公开 HTTP 确认读取中证明 goal 丢失，修复由独立 GCM 继续完成。
+
+## 2026-10-18 原生历史补证与 M5 有效入口红测
+
+安装实例的 agent 历史读取切片已补齐原生返回证据。worker 复用 space14/p1，在真实 epoch 2/3 链接之间完成浏览器后退、前进和键盘刷新；每次实际 URL、HTTP200 selected 投影与页面身份一致。实例选择原位 replaceState，历史条目由合法 URL 导航形成；这不证明选择逐次入栈，也不关闭 checkpoint viewed 的独立验收。Root 已读回执并核对实际 CDP 命令与页面结果。临时 localhost 会话 cookie 已删除，p1/space14 保留；无源码、运行实例或任务修改。完整证据在 `m4-native-history-observation-20261018/reception.md`。
+
+M5 StageA 的真实 App facade→Journal 物理 consumer 已通过，证明纠正和 reentry 的有效 fixture 与持久 owner 可用。实际 HTTP dispatcher 则在 correction POST 返回 404 route.not-found，而预期为200 committed receipt；这是路由缺失红测，不是无权限或 fixture 失败。reentry HTTP 后续断言未到达。Root 读取实际执行日志接收该阶段，不把 worker 未来时终稿算作完成。来源在 `m5-confirmed-http-execute-20261018/events-stage-a-r2.jsonl`、`red.log`；源码保持原 M5 树待继续接线，尚未提交或集成。
+
+新证据显示局部 typed expected-conflict 可能被 submission 包装抹去，已派独立只读 OAuth 小 Planner 核对最小传播方案；未授权宽泛错误重分类。constraint fidelity GCM 继续拥有 service 确认/dispatch 片段，M5 接线等待该片段释放。peer 独立拥有原 interaction 的一次 typed 恢复窗口，本侧不重启 canonical 干扰它；并发业务写入与只读观测证据按实际时间分开。整体目标仍 ACTIVE/INCOMPLETE。

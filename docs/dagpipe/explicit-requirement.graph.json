@@ -28,7 +28,9 @@
     "productionWiringStatus": "WIRED",
     "productionWiringGap": "本图关键边已接线：confirmTypedExplicitRequirement 调用真实的 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）；端到端到点执行由 packages/app/src/ui-runtime/scheduler.ts 驱动。仍在的相邻事实（不阻断本图）：RequirementSubmissionOwner 的 RequirementSubmitPort.submit 仍是只回显 requirementId 的桩（service.ts:1007），执行计划落库不经该桩",
     "productionWiringOwner": "T14",
-    "productionWiringEvidence": "packages/app/src/ui-runtime/service.ts:2819 submitFinal 与 :2972 SubscriptionControlPort.create；packages/runtime/src/explicit-brain/router.ts:617 RequirementSubmissionOwner.submitFinal/rejectDraftRevision；tests/app/scheduler-production-wiring.test.ts 经真实 HTTP 确认路径落成计划并到期执行"
+    "productionWiringEvidence": "packages/app/src/ui-runtime/service.ts:2819 submitFinal 与 :2972 SubscriptionControlPort.create；packages/runtime/src/explicit-brain/router.ts:617 RequirementSubmissionOwner.submitFinal/rejectDraftRevision；tests/app/scheduler-production-wiring.test.ts 经真实 HTTP 确认路径落成计划并到期执行",
+    "constraintFidelityContract": "用户确认的 goal、scope、constraints、deliverables 由服务层现有 canonical JSON 模板统一承载。同一 normalizedInput 必须从 typed revision 进入 RequirementEnvelope，再进入 Task.directive 与首次 executor 输入；Task.title 单独使用可读 goal。closed-turn Planner 读取同一 Task.directive，且计划节点、验收项与 decision 必须遵守其中 constraints/deliverables；提示词传达不证明模型实际合规。StageA 只准备图、真实 HTTP 反例与提示契约，不宣称 service 修复完成。",
+    "constraintFidelityOwner": "packages/app/src/ui-runtime/service.ts typed confirmation/template serializer/dispatch；packages/runtime/src/orchestration/closed-turn-planner-call.ts Planner output contract；tests/app/new-task-identity-public-consumer.test.ts public HTTP consumer"
   },
   "inputs": [
     {

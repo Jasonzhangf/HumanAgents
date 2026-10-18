@@ -6,19 +6,24 @@ import test from 'node:test';
 import {
   id,
   TASK_FLOW_DEFINITION_VERSION,
+  type Checkpoint,
   type EvidenceRef,
   type ExecutionRuntimePort,
   type ExecutionPolicyDefinition,
   type JournalCommitRef,
+  type ProviderExecutionIdentityRef,
   type ProviderBinding,
   type ProviderStartInput,
   type ProviderStartReceipt,
   type ScopeRef,
+  type Task,
   type TaskId,
   type TaskFlowBinding,
   type TaskIdentityAppendInput,
   type TaskIdentityRecord,
   type TaskPlanSnapshot,
+  type TaskRuntimeIncarnation,
+  type TurnClosureReference,
 } from '../../packages/contracts/src/index.js';
 import {
   JsonlOrganJournal,
@@ -27,7 +32,7 @@ import {
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
-import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
+import { MemoryCoordinator, RuntimeTaskCoordinator } from '../../packages/runtime/src/index.js';
 import { TaskPlanRevisionConsumer } from '../../packages/runtime/src/orchestration/task-plan-revisions.js';
 import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
 import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
@@ -43,7 +48,10 @@ import {
   prepareAgentProvider as assembleAgentProvider,
   createAgentProviderPort,
   prepareExecutionAgentProvider,
+  type AgentProviderComposition,
 } from '../../packages/app/src/agent-driver-composition.js';
+import { createIndependentTurnPlanner } from '../../packages/app/src/ui-runtime/turn-planner.js';
+import { deriveClosedTurnPlannerDuty } from '../../packages/runtime/src/orchestration/closed-turn-planner-call.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import {
   uiRuntimeCheckpointRoot,
@@ -273,9 +281,11 @@ class TaskFlowPreparingIdentityJournal implements TaskIdentityPort {
 /** Counts real execution starts so a pure resource mount can prove none happened. */
 class CountingStartPort extends FakeReplayExecutionRuntimePort {
   startCount = 0;
+  readonly starts: ProviderStartInput[] = [];
 
   override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
     this.startCount += 1;
+    this.starts.push(structuredClone(input));
     return super.start(input);
   }
 }
@@ -962,6 +972,358 @@ test('taskFlow intake fidelity preserves direct and refined bindings and rejects
     assert.equal(runtime.service.listTasks().counts.total, tasksBeforeRejectedInjection);
     assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeRejectedInjection);
     assert.equal(await pendingRequirementCount(taskControlPath), pendingBeforeRejectedInjection);
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * StageA failure basis for the M4 typed confirmation path.
+ *
+ * Failure mode: the HTTP confirmation accepts the four explicit fields and
+ * taskFlow, but the confirmed revision's normalizedInput and the Task directive
+ * can still collapse to the original one-line goal. Impact: the first executor
+ * loses user scope and safety constraints before the closed-turn Planner sees
+ * the directive. Probability: unknown; the loss occurred in the M4 run.
+ * Cost: one continuous case in the existing HTTP consumer, with temp Journal,
+ * real grant preparation, fake local Provider transport and finally cleanup.
+ */
+test('taskFlow intake fidelity preserves confirmed template through task directive', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-task-flow-confirmation-fidelity-'));
+  const taskControlPath = taskControlPathFor(root);
+  const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const runtime = await startRuntime(root, port, {
+    projectKey: 'project-task-flow-confirmation-fidelity',
+    taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path),
+  });
+  try {
+    const goal = 'Write one short paragraph containing M4-SCOPE-MARKER-PROJECT-B explaining project scope isolation.';
+    const scope = 'workspace-b';
+    const constraints = ['No child agents, no file edits'];
+    const deliverables = ['Paragraph containing M4-SCOPE-MARKER-PROJECT-B'];
+    const taskFlow: TaskFlowBinding = {
+      kind: 'one-shot',
+      definitionVersion: TASK_FLOW_DEFINITION_VERSION,
+    };
+    const expectedTemplate = { goal, scope, constraints, deliverables };
+    const prepared = await prepareNewTaskConfirmation(runtime, 'task-flow-confirmation-fidelity');
+    const refinement = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(prepared.interactionId)}/refine`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          draftId: prepared.draftId,
+          baseRevisionVersion: prepared.revisionVersion,
+          requestedRevisionHash: prepared.revisionHash,
+          fields: { taskFlow },
+          instructionRef: 'task-flow-confirmation-fidelity-refine',
+        }),
+      },
+    );
+    assert.equal(refinement.status, 200);
+    const refinedSnapshot = await refinement.json() as {
+      readonly revision: { readonly revisionVersion: number; readonly revisionHash: string };
+    };
+
+    const confirmed = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(prepared.interactionId)}/confirmation`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...prepared.confirmationParams,
+          draftRevisionVersion: refinedSnapshot.revision.revisionVersion,
+          draftRevisionHash: refinedSnapshot.revision.revisionHash,
+          goal,
+          scope,
+          constraints,
+          deliverables,
+          taskFlow,
+        }),
+      },
+    );
+    assert.equal(confirmed.status, 200);
+
+    const inspectedResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(prepared.interactionId)}`,
+    );
+    assert.equal(inspectedResponse.status, 200);
+    const inspected = await inspectedResponse.json() as {
+      readonly revision?: {
+        readonly goal: string;
+        readonly scope: string;
+        readonly constraints: readonly string[];
+        readonly deliverables: readonly string[];
+        readonly normalizedInput: string;
+      };
+    };
+    if (!inspected.revision) throw new Error('the confirmation must expose its exact typed revision');
+    const confirmedRevision = inspected.revision;
+    assert.equal(confirmedRevision.goal, goal);
+    assert.equal(confirmedRevision.scope, scope);
+    assert.deepEqual(confirmedRevision.constraints, constraints);
+    assert.deepEqual(confirmedRevision.deliverables, deliverables);
+    assert.deepEqual(JSON.parse(confirmedRevision.normalizedInput), expectedTemplate);
+
+    const records = new UiRuntimeJournal(
+      join(dirname(taskControlPath), 'ui-runtime-journal.jsonl'),
+    ).replay();
+    const explicitState = records
+      .filter((record): record is Extract<(typeof records)[number], { readonly kind: 'explicit-brain.state' }> => (
+        record.kind === 'explicit-brain.state'
+      ))
+      .at(-1)?.state;
+    if (!explicitState) throw new Error('the confirmed requirement must have a durable explicit-brain state');
+    const confirmedState = explicitState;
+    const envelope = confirmedState.inbox.envelopes.find((entry) => entry.draftId === prepared.draftId);
+    if (!envelope) throw new Error('the confirmed draft must have one durable requirement envelope');
+    assert.equal(envelope.normalizedInput, confirmedRevision.normalizedInput);
+
+    await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 1));
+    const identity = (await identityRecords(taskControlPath))[0]!;
+    const taskResponse = await fetch(
+      `${runtime.server.url}/api/tasks/${encodeURIComponent(identity.scope.taskId.value)}`,
+    );
+    assert.equal(taskResponse.status, 200);
+    const task = await taskResponse.json() as {
+      readonly title: string;
+      readonly state: string;
+      readonly nextStep: string;
+      readonly error?: unknown;
+    };
+    assert.equal(task.title, goal);
+    const taskJournalRecords = new UiRuntimeJournal(
+      join(dirname(taskControlPath), 'ui-runtime-journal.jsonl'),
+    ).replay();
+    const createdRecord = taskJournalRecords.find((record) => record.kind === 'task.created'
+      && record.taskId.value === identity.scope.taskId.value);
+    assert.ok(createdRecord, 'the task journal must contain the durable task creation record');
+    assert.equal(createdRecord!.kind === 'task.created' ? createdRecord!.title : undefined, goal);
+    assert.deepEqual(
+      JSON.parse(createdRecord!.kind === 'task.created' ? createdRecord!.directive : '{}'),
+      expectedTemplate,
+    );
+
+    await waitFor(() => assert.equal(port.starts.length, 1, JSON.stringify(task)));
+    const startedExecution = port.starts[0]!;
+    assert.equal(startedExecution.taskId.value, identity.scope.taskId.value);
+    const submittedPrompt = startedExecution.payload?.prompt;
+    assert.equal(typeof submittedPrompt, 'string');
+    assert.deepEqual(JSON.parse(submittedPrompt as string), expectedTemplate);
+
+    const replayOnly = () => {
+      throw new Error('the fixture may only replay and read the task snapshot');
+    };
+    const replayedTask = new RuntimeTaskCoordinator({
+      organId: identity.scope.organId,
+      createDriver: replayOnly,
+      checkpointStoreFor: replayOnly,
+      attentionPort: { publish: replayOnly, resolve: replayOnly },
+      journal: { replay: () => taskJournalRecords, append: replayOnly },
+    }).taskSnapshot(identity.scope.taskId);
+    const currentTask: Task = {
+      id: replayedTask.taskId,
+      organId: identity.scope.organId,
+      title: replayedTask.title,
+      directive: replayedTask.directive,
+      directiveRevision: replayedTask.directiveRevision,
+      state: replayedTask.state,
+      memoryScope: 'task',
+    };
+    assert.equal(currentTask.directive, confirmedRevision.normalizedInput);
+    assert.equal(currentTask.title, goal);
+
+    const cycleId = id('cycle', 'planner-capture-cycle');
+    const operationId = id('operation', 'planner-capture-operation');
+    const plannerScope: ScopeRef = {
+      organId: identity.scope.organId,
+      taskId: identity.scope.taskId,
+      cycleId,
+      operationId,
+    };
+    const checkpointCommitRef: JournalCommitRef = {
+      commitId: 'planner-capture-checkpoint-commit',
+      journalSeq: 1,
+      recordDigest: `sha256:${'1'.repeat(64)}`,
+    };
+    const plannerEvidence = (label: string): EvidenceRef => ({
+      evidenceId: id('evidence', `planner-capture-${label}`),
+      kind: 'operation',
+      source: 'new-task-identity-public-consumer',
+      locator: `planner-capture/${label}`,
+      scope: plannerScope,
+    });
+    const checkpointId = id('checkpoint', 'planner-capture-checkpoint');
+    const checkpoint: Checkpoint = {
+      id: checkpointId,
+      scope: plannerScope,
+      cycleId,
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: currentTask.directiveRevision,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+      summary: 'The first execution turn closed.',
+      recoveryStateRef: plannerEvidence('recovery'),
+      evidenceRefs: [plannerEvidence('checkpoint')],
+      next: { kind: 'continue', ref: 'planner:capture' },
+    };
+    const closure: TurnClosureReference = {
+      identity: {
+        turnId: 'planner-capture-turn',
+        workAssignmentRef: 'planner-capture-assignment',
+        taskRef: identity.scope.taskId,
+        scopeRef: plannerScope,
+        cycleRef: cycleId,
+        inputRevision: identity.source.inputRevision,
+        directiveRevision: currentTask.directiveRevision,
+        executionEpoch: 1,
+        runtimeBindingRef: 'planner-capture-runtime',
+        permissionRevision: 'planner-capture-permission',
+      },
+      checkpointId,
+      closureRef: 'planner-capture-closure',
+      summary: {
+        goal: { text: 'Preserve the confirmed requirement.', evidenceRefs: [plannerEvidence('goal')] },
+        actions: { text: 'The first turn completed.', evidenceRefs: [plannerEvidence('actions')] },
+        result: { text: 'The confirmed requirement is ready to plan.', evidenceRefs: [plannerEvidence('result')] },
+        expectedNextStep: { text: 'Plan the next turn.', evidenceRefs: [plannerEvidence('next')] },
+      },
+      recoveryStateRef: plannerEvidence('closure-recovery'),
+      closedAt: '2026-10-18T00:00:00.000Z',
+    };
+    const plannerIncarnation: TaskRuntimeIncarnation = {
+      runtimeId: 'planner-capture-runtime',
+      generation: 1,
+      agentInstanceId: 'planner-capture-instance',
+      roleId: 'orchestration',
+      taskId: identity.scope.taskId,
+      assignmentId: 'planner-capture-assignment',
+      executionEpoch: 1,
+    };
+    const plannerExecution: ProviderExecutionIdentityRef = {
+      runtimeId: plannerIncarnation.runtimeId,
+      taskId: identity.scope.taskId,
+      operationId,
+      organId: identity.scope.organId,
+      cycleId,
+      executionEpoch: plannerIncarnation.executionEpoch,
+    };
+    const allocation = {
+      operationId,
+      cycleId,
+      executionEpoch: plannerIncarnation.executionEpoch,
+    };
+    const plannerInput = {
+      task: currentTask,
+      closure,
+      refinedResults: [],
+      priorPlan: null,
+      identity,
+      allocation,
+    };
+    const duty = deriveClosedTurnPlannerDuty(plannerInput, checkpointCommitRef);
+    const grantCommitRef: JournalCommitRef = {
+      commitId: 'planner-capture-grant-commit',
+      journalSeq: 2,
+      recordDigest: `sha256:${'2'.repeat(64)}`,
+    };
+    const admissionCommitRef: JournalCommitRef = {
+      commitId: 'planner-capture-admission-commit',
+      journalSeq: 3,
+      recordDigest: `sha256:${'3'.repeat(64)}`,
+    };
+    const plannerLease = {
+      leaseId: 'planner-capture-lease',
+      runtimeId: plannerIncarnation.runtimeId,
+      generation: plannerIncarnation.generation,
+      incarnation: plannerIncarnation,
+      executionEpoch: plannerIncarnation.executionEpoch,
+      ownerId: 'planner-capture-pool',
+      assignmentId: plannerIncarnation.assignmentId,
+      capabilities: ['provider.execution'],
+    };
+    const preparedCall = {
+      duty,
+      invocationId: 'planner-capture-invocation',
+      execution: plannerExecution,
+      scope: plannerScope,
+      assignmentId: plannerIncarnation.assignmentId,
+      incarnation: plannerIncarnation,
+      lease: plannerLease,
+      decision: {
+        action: 'spawn' as const,
+        ownerId: 'planner-capture-pool',
+        condition: 'orchestration.runtime.capacity',
+        nextAction: { kind: 'continue' as const, ref: plannerIncarnation.runtimeId },
+        reason: 'planner capture capacity is available',
+        runtimeId: plannerIncarnation.runtimeId,
+      },
+      grantCommitRef,
+      admissionCommitRef,
+      checkpoint: { checkpoint, previous: null, commitRef: checkpointCommitRef },
+      preparationCommitRef: {
+        commitId: 'planner-capture-preparation-commit',
+        journalSeq: 4,
+        recordDigest: `sha256:${'4'.repeat(64)}`,
+      },
+    };
+    const plannerPort = new CountingStartPort({
+      binding,
+      replay: [
+        {
+          kind: 'output',
+          state: 'output',
+          summary: JSON.stringify({
+            decision: 'continue',
+            snapshot: taskPlanSnapshot('planner-capture'),
+            reasonText: 'The confirmed requirement is represented in the plan.',
+          }),
+        },
+        {
+          kind: 'terminal',
+          state: 'succeeded',
+          summary: 'planner capture succeeded',
+          terminalState: 'succeeded',
+        },
+      ],
+      stepDelayMs: 1,
+    });
+    const planner = createIndependentTurnPlanner({
+      prepareAgentProvider: async (selection): Promise<AgentProviderComposition> => ({
+        roleId: selection.roleId,
+        provider: {
+          source: 'rcc',
+          provider: 'rcc',
+          binding: binding.bindingId,
+          protocol: 'responses',
+          model: binding.modelRef,
+          route: 'planner-capture-route',
+          baseUrl: 'http://127.0.0.1:4444',
+        },
+        source: 'rcc',
+        binding,
+        port: plannerPort,
+      }),
+      now: () => new Date('2026-10-18T00:00:01.000Z'),
+    });
+    const plannerResult = await planner.plan({
+      ...plannerInput,
+      preparedCall,
+    });
+    assert.equal(plannerResult.decision, 'continue');
+    assert.equal(plannerPort.starts.length, 1);
+    const plannerPayload = plannerPort.starts[0]!.payload as unknown as {
+      readonly role: string;
+      readonly task: { readonly title: string; readonly directive: string };
+    };
+    assert.equal(plannerPayload.role, 'planner');
+    assert.equal(plannerPayload.task.title, goal);
+    assert.equal(plannerPayload.task.directive, confirmedRevision.normalizedInput);
+    assert.deepEqual(JSON.parse(plannerPayload.task.directive), expectedTemplate);
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });

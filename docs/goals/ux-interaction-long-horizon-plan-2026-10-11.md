@@ -7,6 +7,16 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下 2026-10-17 增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。下方 2026-10-14/15 记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
+### 2026-10-18 跨项目读取增量与剩余主线
+
+scoped-read 增量已合入 main `66228f09`，完成一次整体独立 Review、构建打包安装、正式 restart gen34→35，以及安装模块公开 HTTP consumer 和默认打包 UI 入口验收。候选双端实际链证明同名 A/B Task 的 semantic、公开正文、Observation 节点和子层不串数据；A 的 789 字符正文与 API/任务页/节点抽屉一致，B 保持受阻且无最终输出。有限 SSE、手机底部抽屉/返回焦点和四 Journal 只读副作用也已验证。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/m4-scoped-read-review-20261018/` 与 `m4-scoped-candidate-browser-r2-20261017/`。
+
+当前只关闭 M4 中上述读取与展示隔离子能力。完整 I1–I5/G1–G14/F01–F20 仍 ACTIVE/INCOMPLETE：原 B 失败历史与用户约束下的新真实任务执行未完成；M5 确认 UI/API 已合流并通过 53 项相关用例，真实 HTTP→物理 owner→Journal/current-state 写链及双端交互尚待接通。下方 2026-10-17 表格是此前进度，涉及本增量的状态以本节为准，不重新执行有效验收。
+
+原生浏览器历史的实例读取切片已补证：安装实例上的合法 epoch 2/3 URL 在原生后退、前进及键盘刷新后，URL、GET 投影与页面实例身份一致。实例选择本身使用 replaceState；本次通过真实 URL 导航形成历史条目，未声称每次选择都会增加历史条目，也未关闭 checkpoint viewed 的独立历史导航验收。回执为 `/Volumes/Intel/playground/humanagent/.worker-runs/m4-native-history-observation-20261018/reception.md`。
+
+M5 后端已建立合法物理前置：同一个公开 App facade 经真实 Journal 成功提交上下文纠正与 checkpoint reentry，精确移除 wrong ref、保留相近 ref、递增 epoch 并追加历史。相同结构 fixture 经真实 HTTP dispatcher 请求 correction route 返回 404 route.not-found，形成有效路由 RED；后续 reentry HTTP 断言尚未到达。接线仍未完成。局部 expected-conflict 在 Runtime submission 包装后可能丢失类型，独立小 Planner 正核对最小传播方案；不以文案匹配或 blanket 409 代替类型边界。当前证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/m5-confirmed-http-execute-20261018/events-stage-a-r2.jsonl` 与 `red.log`。
+
 ### 2026-10-17 当前已交付工作与剩余主线
 
 完整 I1–I5 / G1–G14 / F01–F20 继续 ACTIVE / INCOMPLETE。按实际功能与证据记进度，不用节点数、测试数或静态设计完成度替代开发进度。以下是已集成、安装和推送的子成果，不把任一行扩成整个里程碑已验收。

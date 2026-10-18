@@ -1,5 +1,15 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 接续：证据边界核清、原 turn 单次续跑至 epoch4 后仍失败
+
+- 当前ledger v14按最后changes[].result核对为13项active需求；首项真实ID为`humanagent-explicit-brain-semantic-turn-context`。r393阶段计划误写的别名不进入需求。仅接收P-OBS-1/2两项只读任务及peer同步；未接受新feature、三协议×入口矩阵、每需求单独重测/Review或“EXTERNAL_HOLD即goal完成”。局部4节点不冒原实现总节点数。
+- r394/r395/r396/r397四项GCM只读观察已返回。A三协议wire、Runtime forwarding、Responses组合与B binding均有已有基础回执；缺单一组合receipt不等于当前缺代码。N1原Task真实RCC完成/cold回执指向`/private/tmp/humanagent-i1-recovery-owner-20261016/epoch-handoff/{public-commit-record.json,fresh-hydrate-receipt.json}`，仍按实际证据范围使用。N3真实helper source caller已找到：App interpret→ExplicitTurnHelperSession→dispatch_helper/accept_helper→executor durable returned/owneraccepted；Root另核CLI1874非fake preparer和service5133真实interpreter调用。当前N3公开行为证据未建立，不冒实现缺失。
+- 旧三次EOF的HA请求ID/资源closed UTC已精确记录r395；RCC已检查快照命名/mtime窗口无匹配候选，不能推成所有历史日志不存在或上游故障已定根因。只读lsof listener查询被工具自动审查以process kill chain理由拒绝，未执行/未改通道重试该查询；随后按既有RCC快照文档读取独立资产目录。无RCC配置/凭据/服务修改。
+- r398 fresh OAuth独立局部计划已接受：废除Root自加的“必须先找出并修复历史RCC根因才能恢复”前置；按现有closed/failed/zero-fact、精确原输入、owner/binding/helper/effect等typed guards做一次原turn恢复。历史原因未知不宣称修复；不删除必要控制约束。UX peer明确释放窗口后Root当前status200/ready、原interaction matching、Journal仅epoch1..3，才发一次公开interpret POST；没有新Task/interaction、切模型或配置变更。
+- 实际调用UTC`2026-10-18T07:39:17.899Z`→`07:39:18.512Z`，HTTP409/transport.failure，仍`UND_ERR_SOCKET: other side closed`。原interaction-2/rawInput/logicalturn不变，新增epoch4/request-9f5e4060-573e-4df5-86de-6ad72d10aab1，resourceclose07:39:18.448Z。该turn Journal记录15→20，原问答未完成；未发epoch5。证据`native-original-resume-r399-20261018/{attempt.json,response.json,before-turn-metadata.json,after-turn-metadata.json,after-interaction.json}`。窗口已释放，peer history只读验收已说明同期外部业务写入，不能归咎read。
+- 当前并行：r400独立OAuth小Planner设计N3最小真实公开helper验收（先查是否已有case，禁止新API/假Task/未有依据测试）；r401 fresh GCM仅按本次epoch4精确新时间段读RCC既有快照关联。两项不占main/install窗口、不改peer service确认/refinement/dispatch；没有Provider新增代码或新测试交付。完整goal仍ACTIVE/INCOMPLETE，旧/新EOF原因UNKNOWN。
+- UX peer已报告scoped-read源码66228f09/文档f1703139推送、installed gen35/1PASS及手机Observation验收，另history文档9a7ef008推送；Root已索取原始Review与browser receipt供最终表复用，不重跑。peer继续约束链、M5与M3模板只读观察，均保持唯一owner。
+
 ## 2026-10-18 已交付：失败 parent 的准确恢复 capture 与实际 Provider close
 
 - 本增量已进入远端main `19fd6aa2`，原push回执`33641fcc..19fd6aa2 main -> main`。五文件126insertions/12deletions：两份既有图合同、App失败close、Runtime失败catch及原公开consumer；没有新Provider API/guard、事件schema、lease registry或测试矩阵。完整原生goal仍ACTIVE/INCOMPLETE，不把本增量算全G完成。
