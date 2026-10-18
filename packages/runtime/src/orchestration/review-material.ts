@@ -78,8 +78,11 @@ export function resolveReviewMaterial(input: ReviewMaterialRequest): ReviewMater
     if (!subject.body.trim()) {
       throw new Error(`review subject body is empty for ${subject.ref}`);
     }
-    const carriedBody = workerResult.producedArtifactBodies?.[index];
-    if (carriedBody !== undefined && carriedBody !== subject.body) {
+    const producedBody = workerResult.producedArtifactBodies?.[index];
+    if (producedBody === undefined || producedBody.trim() === '') {
+      throw new Error(`review requires the produced artifact body for ${subject.ref}`);
+    }
+    if (producedBody !== subject.body) {
       throw new Error('review subject body must match the produced artifact body');
     }
     return { ref: subject.ref, body: subject.body };

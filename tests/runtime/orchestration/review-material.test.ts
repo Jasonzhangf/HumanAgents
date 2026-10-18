@@ -177,7 +177,7 @@ test('resolveReviewMaterial carries the assignment acceptance criteria content a
   const workerAssignment = assignment();
   const material = resolveReviewMaterial({
     workerAssignment,
-    workerResult: result(),
+    workerResult: result({ producedArtifactBodies: [subjectBody] }),
     subjects: [{ ref: 'subject-a', body: subjectBody }],
   });
   // The reviewer receives the real criteria content, never only its identity.
@@ -196,7 +196,7 @@ test('resolveReviewMaterial carries executor tool evidence additively from the w
   };
   const material = resolveReviewMaterial({
     workerAssignment: assignment(),
-    workerResult,
+    workerResult: { ...workerResult, producedArtifactBodies: [subjectBody] },
     subjects: [{ ref: 'subject-a', body: subjectBody }],
   });
   // Evidence is additional material; the artifact body and its ref stay intact.
@@ -207,7 +207,7 @@ test('resolveReviewMaterial carries executor tool evidence additively from the w
 test('resolveReviewMaterial leaves executor evidence empty when the worker result carries none', () => {
   const material = resolveReviewMaterial({
     workerAssignment: assignment(),
-    workerResult: result(),
+    workerResult: result({ producedArtifactBodies: [subjectBody] }),
     subjects: [{ ref: 'subject-a', body: subjectBody }],
   });
   // No tool evidence exists, so none may be invented; the reviewer must judge
@@ -285,6 +285,13 @@ test('manager takes the review subject body from the worker result when the call
 
 test('manager still blocks when the worker result carries no produced body', async () => {
   const reviewer = new RecordingReviewAgent();
+  let merges = 0;
+  const recordingMerge = {
+    async merge() {
+      merges += 1;
+      return { status: 'merged' as const, evidenceRefs: [evidence('merge')] };
+    },
+  };
   const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool(),
@@ -295,7 +302,7 @@ test('manager still blocks when the worker result carries no produced body', asy
       }),
     }),
     reviewAgent: reviewer,
-    mergeCoordinator: merge,
+    mergeCoordinator: recordingMerge,
   });
   manager.planStage({ nodeId: 'node-empty-body', taskId: task });
   const dispatched = await manager.dispatch({
@@ -304,10 +311,12 @@ test('manager still blocks when the worker result carries no produced body', asy
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
+    reviewSubjects: [{ ref: 'subject-a', body: subjectBody }],
   });
   assert.equal(dispatched.status, 'blocked');
   assert.equal(dispatched.issue?.code, 'review-material-invalid');
   assert.equal(reviewer.inputs.length, 0, 'an empty body must never reach the reviewer');
+  assert.equal(merges, 0, 'an empty body must never reach merge');
 });
 
 test('manager passes verified review material to the reviewer and blocks before invocation when it is missing', async () => {
@@ -316,7 +325,7 @@ test('manager passes verified review material to the reviewer and blocks before 
     ownerId: 'orchestration-manager',
     runtimePool: pool(),
     executionAgent: new StaticExecutionAgent({
-      result: result(),
+      result: result({ producedArtifactBodies: [subjectBody] }),
     }),
     reviewAgent: reviewer,
     mergeCoordinator: merge,
