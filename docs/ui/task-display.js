@@ -466,6 +466,43 @@ function planDetail(summary, pairs, options = {}) {
   return details
 }
 
+function planFailurePresentation(failure) {
+  switch (failure.code) {
+    case 'task-plan-history.current-unknown':
+      return {
+        title: '当前任务计划尚无法确认',
+        detail: '不能将保留版本当作当前计划；请打开技术详情查看原因。',
+      }
+    case 'task-plan-history.read-failed':
+      return {
+        title: '任务计划暂时无法读取',
+        detail: '任务状态不能据此判定；请打开技术详情查看原因和处理建议。',
+      }
+    case 'task-plan-history.current-mismatch':
+      return {
+        title: '当前计划版本与任务记录不一致',
+        detail: '页面不会用其他版本替代当前计划；请打开技术详情查看原因。',
+      }
+    case 'task-plan-history.scope-mismatch':
+      return {
+        title: '计划内容不属于当前任务范围',
+        detail: '页面不会展示其他任务范围的计划；请打开技术详情查看原因。',
+      }
+    case 'task-plan-history.selection-partial':
+    case 'task-plan-history.selection-unknown':
+    case 'task-plan-history.selection-mismatch':
+      return {
+        title: '无法确认所选计划版本',
+        detail: '页面不会把其他版本当作所选内容；请打开技术详情查看原因。',
+      }
+    default:
+      return {
+        title: '计划内容无法显示',
+        detail: '计划读取仍为失败状态；请打开技术详情查看原因和处理建议。',
+      }
+  }
+}
+
 function renderPlanFailure(failure, prefix, options = {}) {
   const box = element('div', undefined, 'plan-failure')
   box.planFailure = failure && typeof failure === 'object'
@@ -473,10 +510,11 @@ function renderPlanFailure(failure, prefix, options = {}) {
     : planFailure('task-plan-history.failed', String(failure ?? '计划读取失败'), 'refresh the task projection read')
   box.dataset.planFailure = box.planFailure.code || 'task-plan-history.failed'
   box.setAttribute('role', 'alert')
+  const presentation = planFailurePresentation(box.planFailure)
   if (prefix) box.append(element('p', prefix, 'muted'))
   box.append(
-    element('strong', box.planFailure.message || '计划读取失败'),
-    element('p', box.planFailure.nextAction || 'refresh the task projection read', 'muted'),
+    element('strong', presentation.title),
+    element('p', presentation.detail, 'muted'),
     planDetail('技术详情', [
       ['code', box.planFailure.code],
       ['owner', box.planFailure.ownerId],
