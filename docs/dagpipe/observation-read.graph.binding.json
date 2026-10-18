@@ -8,14 +8,16 @@
     "http_api": {
       "ownerPath": "packages/app/src/ui-runtime/server.ts",
       "ownerRel": "packages/app/src/ui-runtime/server.ts",
-      "ownerSymbol": "UiRuntime server semantic GET/SSE routes",
-      "implementationStatus": "candidate-scoped-semantic-http"
+      "ownerSymbol": "UiRuntime server semantic GET/SSE and observation GET routes",
+      "implementationStatus": "candidate-scoped-semantic-and-observation-http",
+      "contract": "The observation route parses optionalI2ReadScope, the scope subtree, node selection and decodeTaskAgentActivitySelectionQuery, then calls UiRuntimeService.scopedObservation."
     },
     "load_task_truth": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "ownerSymbol": "UiRuntimeService.scopedSemanticObservation/projectDurableTaskInventory",
-      "implementationStatus": "candidate-scoped-truth-and-public-output"
+      "ownerSymbol": "UiRuntimeService scoped task read resolver/scopedObservation/projectDurableTaskInventory",
+      "implementationStatus": "candidate-scoped-observation-truth",
+      "contract": "The shared resolver selects the serve-bound live source or the declared project/mode durable inventory. Foreign admissions come from that inventory, not the serve-bound requirementAdmissions map."
     },
     "load_event_history": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
@@ -37,13 +39,15 @@
     },
     "project_status_and_actions": {
       "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts"
+      "ownerRel": "packages/ui/projection/runtime.ts",
+      "contract": "UiRuntimeService builds node facts before this projection. task.output is projected only from authoritative committed public publication; missing publication is explicit and raw execution evidence is not presented as final output."
     },
     "browser_view": {
       "ownerPath": "docs/ui/observation.js",
       "ownerRel": "docs/ui/observation.js",
       "ownerSymbol": "shared semantic observation panel scope and finite-stream handling",
-      "implementationStatus": "ui-owned-parallel-work"
+      "implementationStatus": "ui-owned-parallel-work",
+      "contract": "The UI-owned api.observation fifth parameter carries the complete taskScope projectKey/mode. The existing scope query remains the observation subtree and node remains the selected node; the agent query keeps the existing decoder."
     }
   }
 }

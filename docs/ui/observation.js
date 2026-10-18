@@ -799,7 +799,7 @@ async function load(scopeRef) {
   }
   const serial = ++loadSerial
   try {
-    const projection = await api.observation(taskId, scopeRef, selectedNodeId, agentQuery)
+    const projection = await api.observation(taskId, scopeRef, selectedNodeId, agentQuery, explicitScope)
     if (serial !== loadSerial) return
     currentScopeRef = scopeRef
     agentReadPending = false

@@ -870,6 +870,49 @@ test('semantic observation carries one complete scope through GET, SSE, and fini
   assert.equal(legacyStreamUrl, '/api/tasks/legacy-task/semantic/stream');
 });
 
+test('observation API keeps subtree, node, agent, project, and mode in one read', async () => {
+  const { createRuntimeApi } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/runtime-api.js')}`,
+  ).href) as {
+    createRuntimeApi: (options: {
+      fetchImpl: (url: string, init: unknown) => Promise<unknown>;
+    }) => {
+      observation: (
+        taskId: string,
+        scopeRef: string,
+        selectedNodeId: string,
+        agentQuery: URLSearchParams,
+        taskScope: { kind: 'task'; projectKey: string; mode: 'rcc' },
+      ) => Promise<unknown>;
+    };
+  };
+
+  const calls: string[] = [];
+  const api = createRuntimeApi({
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+
+  await api.observation(
+    'same-task',
+    'task://same-task/observation/pipeline.execute',
+    'task.output',
+    new URLSearchParams({ agentRuntimeId: 'runtime-a', agentExecutionEpoch: '2' }),
+    { kind: 'task', projectKey: 'project-config-a', mode: 'rcc' },
+  );
+
+  const request = new URL(calls[0]!, 'http://ui.test');
+  assert.equal(request.pathname, '/api/tasks/same-task/observation');
+  assert.equal(request.searchParams.get('scope'), 'task://same-task/observation/pipeline.execute');
+  assert.equal(request.searchParams.get('node'), 'task.output');
+  assert.equal(request.searchParams.get('agentRuntimeId'), 'runtime-a');
+  assert.equal(request.searchParams.get('agentExecutionEpoch'), '2');
+  assert.equal(request.searchParams.get('projectKey'), 'project-config-a');
+  assert.equal(request.searchParams.get('mode'), 'rcc');
+});
+
 test('semantic panel closes a finite stream without disconnecting or publishing stale events', async () => {
   class FakeElement {
     readonly nodeType = 1;

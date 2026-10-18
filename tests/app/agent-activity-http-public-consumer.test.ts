@@ -23,6 +23,7 @@ import type {
   RuntimeSystemReadProjection,
   RuntimeTaskDashboardProjection,
 } from '../../packages/ui/contracts/runtime.js';
+import type { PipelineObservationProjection } from '../../packages/ui/contracts/models.js';
 
 interface FixtureFile {
   readonly path: string;
@@ -351,6 +352,21 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       assert.ok(payload.includes(markerA), `A semantic marker missing: ${payload}`);
       assert.equal(payload.includes(markerB), false, `A semantic read leaked B: ${payload}`);
     };
+    const observationPath = `/api/tasks/${encodeURIComponent(taskId.value)}/observation`;
+    const providerScope = `task://${taskId.value}/observation/pipeline.execute`;
+    const assertObservationA = (payload: string): PipelineObservationProjection => {
+      const observation = JSON.parse(payload) as PipelineObservationProjection;
+      assert.equal(observation.surface, 'observation', payload);
+      assert.equal(observation.state, 'ready', 'A observation state came from another scope');
+      const rootNodes = observation.scope.nodes;
+      const output = rootNodes.find((node) => node.nodeId === 'task.output');
+      if (output === undefined) throw new Error('A observation omitted task.output');
+      assert.equal(output.summary, committedTextA, `A task.output lost committed publication: ${payload}`);
+      assert.equal(payload.includes(markerB), false, `A observation leaked B: ${payload}`);
+      assert.equal(observation.selectedNode?.nodeId, 'task.output');
+      assert.equal(observation.selectedNode?.summary, committedTextA);
+      return observation;
+    };
     const scopedReads = await Promise.allSettled([
       (async () => {
         const dashboard = await get(queryA);
@@ -395,6 +411,31 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
         assert.equal(frames[1], 'event: semantic-complete\ndata: {}');
         assert.equal(payload.endsWith('\n\n'), true);
       })(),
+      (async () => {
+        const { response, payload } = await request(
+          `${observationPath}${queryA}&node=task.output`,
+        );
+        assert.equal(response.status, 200, payload);
+        const observation = assertObservationA(payload);
+        const subtree = await request(
+          `${observationPath}${queryA}&scope=${encodeURIComponent(providerScope)}`,
+        );
+        assert.equal(subtree.response.status, 200, subtree.payload);
+        const subtreeObservation = JSON.parse(subtree.payload) as PipelineObservationProjection;
+        assert.deepEqual(
+          subtreeObservation.scope.scopeRef,
+          providerScope,
+          'observation subtree selection was replaced by the task read scope',
+        );
+        assert.equal(subtree.payload.includes(markerB), false, `A observation subtree leaked B: ${subtree.payload}`);
+        const unknownNode = await request(
+          `${observationPath}${queryA}&node=missing-node`,
+        );
+        assert.equal(unknownNode.response.status, 404, unknownNode.payload);
+        const unknownNodeBody = JSON.parse(unknownNode.payload) as { readonly error?: { readonly code?: string } };
+        assert.equal(unknownNodeBody.error?.code, 'observation.node.not-found');
+        return observation;
+      })(),
     ]);
 
     const after = { task: taskView(), files: await readFixtureFiles(root) };
@@ -402,7 +443,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
     assertFixtureFilesUnchanged(before.files, after.files);
     console.log(JSON.stringify({ event: 'read-only-fixture-unchanged', files: before.files.length }));
     const failures = scopedReads.flatMap((result, index) => result.status === 'rejected'
-      ? [`${['dashboard', 'semantic GET', 'semantic SSE'][index]}: ${String(result.reason)}`] : []);
+      ? [`${['dashboard', 'semantic GET', 'semantic SSE', 'scoped observation'][index]}: ${String(result.reason)}`] : []);
     assert.equal(failures.length, 0, failures.join('\n'));
   } finally {
     const httpServer = server;

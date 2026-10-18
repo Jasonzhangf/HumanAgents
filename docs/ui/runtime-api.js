@@ -393,11 +393,12 @@ export function createRuntimeApi(options = {}) {
       for (const kind of kinds || []) query.append('kind', kind)
       return request(`/api/tasks/${encodeURIComponent(taskId)}/history?${query}`)
     },
-    observation: (taskId, scopeRef, selectedNodeId, agentQuery) => {
+    observation: (taskId, scopeRef, selectedNodeId, agentQuery, taskScope) => {
       const query = new URLSearchParams()
       if (scopeRef) query.set('scope', scopeRef)
       if (selectedNodeId) query.set('node', selectedNodeId)
       appendAgentSelection(query, agentQuery)
+      appendI2TaskScope(query, taskScope)
       const suffix = query.size ? `?${query}` : ''
       return request(`/api/tasks/${encodeURIComponent(taskId)}/observation${suffix}`)
     },

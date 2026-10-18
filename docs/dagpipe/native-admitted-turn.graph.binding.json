@@ -27,7 +27,7 @@
       "ownerPath": "packages/runtime/src/context/index.ts",
       "ownerRel": "packages/runtime/src/context/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "The model authors the four-part goal/actions/result/expectedNextStep semantic close and independently refined child deliveries. Runtime projects native semantic history and verifies evidence references. The native path does not require a deterministic per-tool SemanticClaim extractor or forced claims/constraints arrays. Failed, partial, truncated and unresolved outcomes remain distinct. Wire status is partial: captured two-turn/three-turn POST cases changed from RED 2/2 to GREEN 2/2 for existing checkpointId, committedAt, description and top-level evidenceRefs in v1. The v2 and child-run encoder branches are source-fixed but runtime UNVERIFIED. AdoptedChildSemanticContext/AdoptedChildSemanticDelivery have no evidenceRefs field; RefinedChildSemanticDelivery is a different existing type, no new child field was added, and the historical adopted-child evidenceRefs gap remains. Overall goal is not complete."
+      "designNote": "Only an accepted standard end can produce the four-part goal/actions/result/expectedNextStep candidate. A failure before that end returns no standard semantic candidate and carries the original cause; it must not synthesize a summary. When a candidate exists, Runtime still verifies scope, evidence references, and child adoption as before. Wire status is partial: captured two-turn/three-turn POST cases changed from RED 2/2 to GREEN 2/2 for existing checkpointId, committedAt, description and top-level evidenceRefs in v1. The v2 and child-run encoder branches are source-fixed but runtime UNVERIFIED. AdoptedChildSemanticContext/AdoptedChildSemanticDelivery have no evidenceRefs field; RefinedChildSemanticDelivery is a different existing type, no new child field was added, and the historical adopted-child evidenceRefs gap remains. Overall goal is not complete."
     },
     "save_checkpoint_boundary": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
@@ -35,17 +35,19 @@
       "implementationStatus": "pending-contract-and-runtime-validation",
       "reusesGraph": "humanagent-native-turn-checkpoint",
       "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
-      "designNote": "The checkpoint boundary commits the accepted four-part semantic summary, runtime-verified evidence references and adopted child refined deliveries through the existing checkpoint/control owner. No checkpoint, closure, durable turn receipt, next-turn, reentry or raw-release eligibility follows from this graph binding, raw bytes, replay or semantic prose. A local checkpointAndClosureCommitted fact is not full five-phase readiness; the five-phase coordinator decides separately."
+      "designNote": "With a standard candidate, the checkpoint boundary commits the accepted four-part semantic summary, runtime-verified evidence references and adopted child refined deliveries through the existing checkpoint/control owner. Without an accepted standard end, it commits no standard checkpoint, closure, history publication, durable success receipt, next-turn or reentry state. The same failure boundary may reuse packages/app/src/ui-runtime/native-execution.ts prepareCapture for producer drain and actual settlement, then packages/app/src/ui-runtime/execution-composition.ts closeOwnedProvider for physical close. The lease-owned route uses packages/app/src/ui-runtime/prepared-execution-stop.ts closePreparationProvider; its durable resource-acquired and resource-closed facts bind the exact parent operation. The driver-owned CLI route has no prepared-stop facts: it forwards the exact checked closed, non-retained evidenceRefs from the same Runtime closeForExecution result to that parent operation's final execution.terminal event as observation only, not recovery control or next-turn eligibility. Capture or close failure remains a typed recovery fact. A local checkpointAndClosureCommitted fact is not full five-phase readiness; the five-phase coordinator decides separately."
     },
     "project_success_disposition": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
       "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation"
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "This projection is inactive when the current turn failed before an accepted standard end. A released parent lifecycle, blocked task, or closed resource cannot activate success."
     },
     "recovery_hold": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
       "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation"
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "Recovery hold preserves the original failure plus actual capture, settlement, and owned Provider close results. It may represent a physically closed resource without converting the failed turn to a successful standard closure. The Runtime standard-turn catch keeps the primary error distinct from a later cleanup error and attaches only a real different cleanup failure."
     },
     "assess_turn_disposition": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
