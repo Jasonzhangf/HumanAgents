@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Memory r308三文件作者RED（缺auditPrompt，1fail1pass）→GREEN2/2，source5af0211b正常提交并cherry候选b3a55365。修改后r310原单livecase实际1/1PASS/127s/exit0，parent读取Qlbayu/receipt确认3start/request/output/settle/release、review model/succeeded/autoUpdatefalse；rewind解释明确wrong-business-ref被移除、accepted-prefix保留并关联原/恢复checkpoint，因占位经验不足合法attention，不伪造candidate。不宣称普遍JSON保证或完整N2。独立整体增量Review r311 Opus实quota/exit3未审，fresh Gemini r312进行。
+- r309原fixturetypedjournal证实新segmentregistration/旧parentinput不一致，修改后compile0，但namedconsumer新首错`external lifecycle conflicts with existing operation ui-operation-1`在Provider前。原admission修复未能通过原verifier重新证明，不能称resolved；r309候选仅保留原预算树，不合流。r313独立复杂Planner重判逻辑operation不可变输入与物理segment输入职责，禁止直接放宽Gateway指纹；可能涉及UX composition时先交其唯一writer。预算仍UNVERIFIED。
+
 - r305计划已接收（exit0/result true），接受最小输入合同修正：memoryAnalysisInput显式metadata-only auditPrompt，保留prompt正文；模板说明只复制metadata并审计displaced/retained路径。拒绝计划中未证实的“echo必然导致语法错”因果结论、parser补值/归一化及整套回归。freshGCM r308在新独占memory-input-contract-20261017树，仅Runtime Memory/template/原payloadconsumer三文件，RED→GREEN与既有drift case；无live重试。开树前注册资源仅control/candidate/peerApp/预算四树，无同域旧Memory树。
 - r307局部计划已接收：segment新business registration与bindCommittedSegment沿用旧parent intent输入不一致，是预算前admission错误的具体候选根因。freshGCM r309已在原预算树派发，先核对r306原fixture两份typed持久事实，再改既有节点合同及execution-admission唯一owner，并收紧原namedconsumer typederror/effect/pairing断言。已通知UX peer本侧写域；Appassembly仍由其原树负责。两条GCM并行，不扩大测试集。
 
