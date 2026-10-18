@@ -4,6 +4,7 @@
 
 - 有限五文件观察已由peer接收并补精确caller：coordinator两处将dispatched.reviewCommitRefs交standardTurn.acceptReviews，manager聚合durable refs；不能将UNKNOWN当缺实现。独立r342进一步定位native child review→pre/post checkpoint→adoption→Planner refinedResults与coordinator startNextStandardTurn/prepareExecution新cycle源码链。此为源码依据，未运行新用例，不宣称长程两轮review生产验收完成。
 - r342错误执行合同已由同Planner r343修正并接受：真实Node/tsc、既有freshreader、合法plan语义字段，一条bounded consumer先GREEN，再一次实际Planner review转发遗漏反例RED，apply_patch恢复后GREEN。Root明确不许checkout/reset或据fixture失败改产品；真缺陷先报唯一owner。唯一fresh树m3-two-cycle-review-plan-20261017从当时最新origin/main建立，offline install0；fresh GCM r344/PID10578在原nativeconsumer单writer执行，提交只许测试文件，尚未验收。源码已有逻辑，当前证据增量不冒全部M3模板/UI/live完成。
+- r344实际约5min/>70commanditems仍零diff且无baseline，Root因扩大探索明确INT10578并确认gone/exit1，非超时或GCM服务不可用；原tree clean、note/events保留。按技术攻关路由fresh OAuth GPT6.1medium r345已在同树接管单consumer（tmux ha-native-r345），不新树或放宽交付文件，补充review-call实际必需agentId及两类child同工具的分类陷阱。当前没有产品RED或已修复结论，验收仍0/1；父保留原scope与一反例标准。
 - 原M5 installed adopted-child同点双端证据已完整接收，Root实际view两installed截图：默认packagedUI、HTTP原文/语义正文匹配、布局/返回focus、两个Journalbyteequal，ownedserve关闭/端口拒连/pair临时文件删除；无Task/模型/canonical改动。正式证据RUN inspection-adopted-body-installed-20261017/reception.md。peer唯一UX计划更新022b164f已push，移除过期缺口但保留deepcold/真实RCC/全G14边界；Root不重复验收。peer并行仅澄清原M4专用scope/consumer的可复用证据，不重叠M3写域、不增门禁。原显式interaction-2/RCC EOF单线仍hold。
 
 ## 2026-10-17 已推送并安装：inspection 原生编排、停止与冷恢复增量
