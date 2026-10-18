@@ -137,7 +137,6 @@ function continuationBinding(): ActiveTurnBinding {
     objective: 'continuation public fixture',
     targetRefs: [],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'sha256:cont',
     successCriteria: [],
     failureCriteria: [],
     incompleteCriteria: [],
