@@ -47,8 +47,6 @@ function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
     objective: 'implement review coordinator',
     targetRefs: ['subject-a'],
     expectedOutputRefs: ['out-a'],
-    expectedArtifactDigests: ['sha256:artifact-a'],
-    acceptanceCriteriaDigest: 'sha256:criteria-a',
     successCriteria: ['review coordinates'],
     failureCriteria: ['missing evidence'],
     incompleteCriteria: ['remediation'],
@@ -69,7 +67,6 @@ function result(overrides: Partial<WorkResult> = {}): WorkResult {
     executionEpoch: base.executionEpoch,
     inputRevision: base.inputRevision,
     producedArtifactRefs: ['artifact-a'],
-    producedArtifactDigests: ['sha256:artifact-a'],
     status: 'succeeded',
     summary: 'worker completed',
     outputRefs: ['out-a'],
@@ -84,7 +81,6 @@ function reviewAssignments(count = 3): readonly ReviewAssignment[] {
     workerAssignment: assignment(),
     workerResult: result(),
     subjectRefs: ['subject-a'],
-    subjectDigests: ['sha256:subject-a'],
   });
   return count === 3 ? created : created.slice(0, count);
 }
@@ -102,9 +98,7 @@ function reviewResult(
     attempt: reviewAssignment.attempt,
     executionEpoch: reviewAssignment.executionEpoch,
     inputRevision: reviewAssignment.inputRevision,
-    acceptanceCriteriaDigest: reviewAssignment.acceptanceCriteriaDigest,
     subjectRefs: [...reviewAssignment.subjectRefs],
-    subjectDigests: [...reviewAssignment.subjectDigests],
     status: 'passed',
     findings: [],
     evidenceRefs: [evidence('review')],
@@ -158,9 +152,7 @@ test('creates all review assignments bound to the worker contract', () => {
     assert.equal(review.attempt, 1);
     assert.equal(review.executionEpoch, 1);
     assert.equal(review.inputRevision, 1);
-    assert.equal(review.acceptanceCriteriaDigest, 'sha256:criteria-a');
     assert.deepEqual(review.subjectRefs, ['subject-a']);
-    assert.deepEqual(review.subjectDigests, ['sha256:subject-a']);
     assert.deepEqual(review.workerCapabilities, ['worker.execute', 'test']);
   }
 });
@@ -171,7 +163,6 @@ test('create review assignments rejects duplicate worker assignment target refs'
       workerAssignment: assignment({ targetRefs: ['subject-a', 'subject-a'] }),
       workerResult: result(),
       subjectRefs: ['subject-a', 'subject-b'],
-      subjectDigests: ['sha256:subject-a', 'sha256:subject-b'],
     }),
     ReviewCoordinatorError,
   );
@@ -183,7 +174,6 @@ test('create review assignments rejects missing and extra worker assignment targ
       workerAssignment: assignment({ targetRefs: ['subject-a'] }),
       workerResult: result(),
       subjectRefs: ['subject-a', 'subject-b'],
-      subjectDigests: ['sha256:subject-a', 'sha256:subject-b'],
     }),
     ReviewCoordinatorError,
   );
@@ -192,7 +182,6 @@ test('create review assignments rejects missing and extra worker assignment targ
       workerAssignment: assignment({ targetRefs: ['subject-a', 'subject-b'] }),
       workerResult: result(),
       subjectRefs: ['subject-a'],
-      subjectDigests: ['sha256:subject-a'],
     }),
     ReviewCoordinatorError,
   );
@@ -216,7 +205,6 @@ test('rejects unregistered runtime review kinds before assignment validation', (
       workerResult: result(),
       reviewKinds: ['arbitrary'] as unknown as readonly ReviewAssignment['reviewKind'][],
       subjectRefs: ['subject-a'],
-      subjectDigests: ['sha256:subject-a'],
     }),
     ReviewCoordinatorError,
   );
@@ -565,12 +553,10 @@ test('review gate rejects duplicate missing and extra worker target refs at bind
   const twoTargetReview: ReviewAssignment = {
     ...review,
     subjectRefs: ['subject-a', 'subject-b'],
-    subjectDigests: ['sha256:subject-a', 'sha256:subject-b'],
   };
   const oneTargetReview: ReviewAssignment = {
     ...review,
     subjectRefs: ['subject-a'],
-    subjectDigests: ['sha256:subject-a'],
   };
   const cases: ReadonlyArray<{ workerAssignment: WorkAssignment; boundReview: ReviewAssignment }> = [
     {

@@ -375,7 +375,6 @@ const segmentAssignment: WorkAssignment = {
   objective: 'resume the same business turn on a new epoch',
   targetRefs: [],
   expectedOutputRefs: [],
-  acceptanceCriteriaDigest: digest('segment-criteria'),
   successCriteria: ['resumed'],
   failureCriteria: ['lost'],
   incompleteCriteria: ['pending'],
