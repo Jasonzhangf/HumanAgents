@@ -216,3 +216,13 @@ M5 StageA 的真实 App facade→Journal 物理 consumer 已通过，证明纠�
 main 构建、打包、安装完成，正式 restart gen40→41／53007。安装后的原消费者为任务展示10项、review正文8项、真实资产读取1项，均通过；认证状态接口200。临时服务和cookie、本批集成树及已合流分支已清理，仅保留 main 和独立 Observation UX 活动树。完整回执在 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-ux-delivery-20261018/`。
 
 唯一长程计划已同步最新交付和剩余边界。下一项是嵌套 Observation 人读展示；M3 精确浏览器证明、F13 适用边界和原 taskless socket 问题仍按各自证据推进，不新增无依据的测试矩阵。SDK 辅助 verify 的 FreezeRecord 上游缺陷 `8a8c1be` 继续明确保留，不记 PASS。
+
+## 2026-10-18 原生实际执行图集成
+
+本增量已正常合入 main `10c6b772`。Dashboard 与 Observation 共用实际执行图；Runtime 从已有原生 allocation、turn、child、review 和 Planner Journal 事实生成只读投影，App 复用同源读取。处理方式、计划历史和实际执行分别呈现。没有事实时明确显示缺失；不把固定角色目录冒充执行依赖。第二套图持久化、CAS、prepare/apply/replay 与恢复包装已消融，原有内存图、Journal 完整性和运行约束保留。
+
+原 A 任务的桌面与手机真实页面验收通过：三条记录各出现一次，Planner 正确关联业务轮次；技术记录按需展开，手机底部抽屉关闭后返回原按钮，页面无横向溢出。Planner 物理执行 epoch 与业务 closure epoch 不同的关联已有同例 RED→GREEN。整体 Gemini4medium 独立 Review r490 有效 PASS，无阻断 finding；它不代表完整 G/F 目标关闭。
+
+main contracts/config/App 构建、打包和全局安装完成。正式 restart 将 53007 实例从 generation42 更新到43，原实例 clean 收拢。已安装版本通过公开 Dashboard 与 Observation API 读取原 A，各返回三条唯一记录及 Planner-duty 关系。验收脚本曾误把公开 UI projection 当作源 DTO，已按公开类型修正；该脚本错误不记为产品红测。临时验收服务与浏览器状态按自有资源范围收口，原 A/B 数据保留。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-actual-graph-delivery-20261018/`。
+
+完整 I1–I5/G1–G14/F01–F20 继续进行。下一增量分为偏好保存/恢复默认/阅读深度，以及 M1 实时与稳定语义链路，先定向观察再独立规划。旧 retry consumer 的 7/8 结果继续保留；尚无 origin/main 同入口基线，不称全部测试通过。历史 worker 的 hook 绕过及越界实验记录未删除，本轮不复用这些违规动作。
