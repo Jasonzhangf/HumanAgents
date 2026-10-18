@@ -25,6 +25,12 @@ import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJ
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
 import { createNativeExecution } from './native-execution.js';
 import { APP_CHILD_CALL_TOOL, APP_CHILD_TOOLS, createAppChildProducer } from './child-producer.js';
+import { createInspectionTurnResourceReader } from './inspection-resources.js';
+import { createInspectionStopResourceReader } from '../inspection-stop-resources.js';
+import {
+  createProductionInspectionPorts,
+  createProductionInspectionStopPort,
+} from './inspection-composition.js';
 import { createAppChildOperationAdmission } from './child-operation-admission.js';
 import { createAppChildCheckpointAdapter } from './child-checkpoint-adapter.js';
 import { createChildRunComposition } from './child-run-composition.js';
@@ -627,6 +633,26 @@ export function createDefaultExecutionComposition(input: {
         assignment, directiveRevision: allocation.directiveRevision, turnId, currentTurnRef,
         admissionEvidence: [admitted.evidence(allocation, binding.admissionCommitRef.commitId)], recoveryStateRef });
       const activeTurnJournal = createJsonlActiveTurnJournal({ filePath: input.filePath, turnId });
+      const inspection = createProductionInspectionPorts({
+        resources: {
+          ...createInspectionTurnResourceReader({
+            filePath: input.filePath,
+            journal: input.journal,
+            artifactRoot: input.artifactsRoot,
+            taskIdentity: input.taskIdentity,
+            scope: { organId: allocation.scope.organId, taskId: allocation.scope.taskId! },
+          }),
+          ...createInspectionStopResourceReader({
+            journal: input.journal,
+            journalPath: input.filePath,
+            assetRoot: input.artifactsRoot,
+          }),
+        },
+        journal: input.i2Journal,
+        plans,
+        checkpoints: nativeCheckpoints,
+        clock: { now: input.now },
+      });
       // A boundary-only continuation owns no live Provider and opens no new
       // active-turn/segment context; only generation installs one.
       const acceptedPlan = retainedIntent === undefined && segment === undefined ? await (async () => {
@@ -1355,6 +1381,8 @@ export function createDefaultExecutionComposition(input: {
             refinedDeliveryStore: createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(input.artifactsRoot)),
             bodyAssets: childRun.bodyAssets, bindChildRun: childRun.bindChildRun,
             prepareAgentProvider: input.prepareAgentProvider, roster: input.agentRoster,
+            inspection: inspection.boundary,
+            inspectionSelection: inspection.helpers.selectionReader,
             admitChildOperation: createAppChildOperationAdmission({ admission: admitted, binding,
               parent: active, registration: childCallRegistration }), now: input.now });
           providerToolExecution.tools.push(...APP_CHILD_TOOLS);
@@ -1472,6 +1500,16 @@ export function createDefaultExecutionComposition(input: {
   const coldProducer: RuntimeColdExecutionProducer = { readColdExecutionSource, admitSegment,
     readIncarnationBinding, recoverOriginalTurn, createResumedExecutionDriver };
   return { currentStateFacts, admitExecution, createExecutionDriver, preparedExecutionStop, ...coldProducer, resolveColdExecutionResumeRequest, grants, context, checkpoints,
+    inspectionStop: createProductionInspectionStopPort({
+      journal: input.journal,
+      journalPath: input.filePath,
+      artifactRoot: input.artifactsRoot,
+      taskIdentity: input.taskIdentity,
+      i2Journal: input.i2Journal,
+      plans,
+      checkpoints: nativeCheckpoints,
+      clock: { now: input.now },
+    }),
     executeConfirmedTaskContextCorrection: (request: ServiceContextCorrectionRequest): Promise<CommittedTaskContextCorrectionReceipt> =>
       executeConfirmedTaskContextCorrection({ ...request, filePath: input.filePath, journal: input.journal,
         principalOwner: input.principalOwner }),

@@ -142,6 +142,7 @@ import {
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
+import type { RuntimeInspectionStopCompletionReadPort } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { createDefaultExecutionComposition,
   type ServiceCheckpointReentryRequest,
   type ServiceContextCorrectionRequest,
@@ -160,6 +161,7 @@ import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/ope
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
 import { createCheckpointHistoryReader, type CheckpointHistoryReadInput } from './checkpoint-history.js';
+import { createProductionInspectionStopPort } from './inspection-composition.js';
 import type {
   RuntimeCheckpointAssetBodyProjection,
   RuntimeCheckpointAssetSelector,
@@ -410,6 +412,7 @@ export interface UiRuntimeMemoryComposition {
 type ServiceExecutionPorts = Pick<
   RuntimeTaskCoordinatorOptions,
   'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts' | 'preparedExecutionStop'
+  | 'inspectionStop'
 > & {
   /**
    * The one canonical cold-resume selector. The launch execution composition
@@ -3620,8 +3623,34 @@ export class UiRuntimeService {
       currentStateFor: () => createJsonlRuntimeTaskCurrentStateJournal({
         journal: new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode))),
       }),
+      inspectionStopFor: () => this.inspectionStopFor(source, mode),
     });
     return { entries: inventory.entries, failures: inventory.failures };
+  }
+
+  private inspectionStopFor(
+    source: ConfiguredProjectReadSource,
+    mode: RuntimeMode,
+  ): RuntimeInspectionStopCompletionReadPort | undefined {
+    if (mode !== 'fake' && mode !== 'rcc') return undefined;
+    const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode));
+    const journal = new JsonlOrganJournal(filePath);
+    const taskIdentity = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(journal));
+    const plans = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(journal));
+    const checkpoints = createJsonlCheckpointJournal({ filePath, journal });
+    const artifactRoot = join(source.projectRoot, 'artifacts', 'ui-provider-evidence');
+    const i2Journal = createJsonlI2JournalPort({ filePath, journal });
+    const stop = createProductionInspectionStopPort({
+      journal,
+      journalPath: filePath,
+      artifactRoot,
+      taskIdentity,
+      i2Journal,
+      plans,
+      checkpoints,
+      clock: { now: this.now },
+    });
+    return { readStopCompletion: stop.readStopCompletion };
   }
 
   private async projectReadRows(

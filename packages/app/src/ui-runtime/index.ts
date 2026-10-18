@@ -565,6 +565,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           admitExecution: composition.admitExecution,
           createDriver: composition.createExecutionDriver,
           preparedExecutionStop: composition.preparedExecutionStop,
+          inspectionStop: composition.inspectionStop,
           coldExecution: {
             readColdExecutionSource: composition.readColdExecutionSource,
             admitSegment: composition.admitSegment,

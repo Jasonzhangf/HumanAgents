@@ -1985,6 +1985,7 @@ if (!coldConsumerMode) test('native public stop before accepted end captures the
         draftRevisionVersion: 1, draftRevisionHash: `draft-hash:${taskId.value}`,
         confirmationRef: `confirmation:${taskId.value}`,
       },
+      taskFlow: { kind: 'inspection', definitionVersion: 1 },
     });
     await new JsonlTaskGrantJournal(fixture.journal).grant({ requestId: `grant:${taskId.value}`, taskId,
       owner: caller.principal.owner,
