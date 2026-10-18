@@ -3,9 +3,12 @@ import {
   type RuntimeExecutionAllocation,
   type RuntimeTaskJournalPort,
 } from '../../runtime/src/ui-runtime/coordinator.js';
+import type { AssignmentGraphJournalPort } from '../../runtime/src/orchestration/index.js';
+import { createJsonlAssignmentGraphJournal } from '../../adapters/jsonl/src/assignment-graph.js';
 import { readPreparedExecutionInput } from './prepared-execution-input.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from './runtime-current-state-journal.js';
 import { createDefaultExecutionComposition } from './ui-runtime/execution-composition.js';
+import { serveRuntimeOwnerId } from './serve-runtime.js';
 
 /**
  * The exact prepared-execution handle the thin consumer returns: the actual
@@ -55,7 +58,11 @@ export type TaskExecutionPreparationInput = {
     | 'currentStateFacts'
     | 'createTaskAssembly'
   > & {
-    readonly createTaskAssembly: NonNullable<CoordinatorInput['createTaskAssembly']>;
+    readonly createTaskAssembly: (
+      input: Parameters<NonNullable<CoordinatorInput['createTaskAssembly']>>[0] & {
+        readonly graphJournal: AssignmentGraphJournalPort;
+      },
+    ) => ReturnType<NonNullable<CoordinatorInput['createTaskAssembly']>>;
   };
 };
 
@@ -75,6 +82,19 @@ export function createTaskExecutionPreparation(
   });
   const coordinator = new RuntimeTaskCoordinator({
     ...input.coordinator,
+    createTaskAssembly: (assemblyInput) => input.coordinator.createTaskAssembly({
+      ...assemblyInput,
+      graphJournal: createJsonlAssignmentGraphJournal({
+        filePath: input.composition.filePath,
+        stream: {
+          taskScope: {
+            organId: assemblyInput.task.organId,
+            taskId: assemblyInput.task.id,
+          },
+          ownerId: serveRuntimeOwnerId(),
+        },
+      }),
+    }),
     journal: input.composition.preparedJournal,
     currentStatePort: currentState,
     currentStateFacts: composition.currentStateFacts,
