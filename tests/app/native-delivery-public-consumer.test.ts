@@ -38,7 +38,7 @@ import { createAppChildCheckpointAdapter } from '../../packages/app/src/ui-runti
 import { readDaemonLease } from '../../packages/app/src/supervisor/supervisor.js';
 import { ActiveTurnContext, ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import type { AdmittedTurn, ReviewAssignment, ReviewResult } from '../../packages/contracts/src/index.js';
-import { readCheckpointClosurePreparation } from '../../packages/runtime/src/checkpoints/closure.js';
+import { readCheckpointClosurePreparation, turnBoundaryRecordRefs } from '../../packages/runtime/src/checkpoints/closure.js';
 import type { NativeSaveIntent } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
 
 const coldConsumerMode = process.argv.includes('--cold-consumer');
@@ -2672,13 +2672,33 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
     assert.deepEqual(requireRecord(settlement.record, 'the terminal settlement').checkpointCommitRef, checkpointRef,
       'the terminal settlement binds the close checkpoint');
     const taskScope = { organId: id('organ', 'humanagent-ui'), taskId };
-    const binding = await createJsonlCheckpointJournal({ filePath: fixture.layout.organJournalPath, journal: fixture.journal })
-      .readCheckpointRecoveryBinding(taskScope, checkpointRef);
+    const checkpointJournal = createJsonlCheckpointJournal({
+      filePath: fixture.layout.organJournalPath,
+      journal: fixture.journal,
+    });
+    const binding = await checkpointJournal.readCheckpointRecoveryBinding(taskScope, checkpointRef);
     if (!binding) throw new Error('the terminal checkpoint has no committed recovery binding');
-    if (binding.alignmentRef === undefined) throw new Error('the terminal checkpoint has no durable alignment reference');
-    assert.ok(binding.alignmentRef.length > 0, 'the terminal checkpoint retains an actual durable alignment reference');
+    const closeNext = requireRecord(close.next, 'the terminal cycle next action');
+    const alignmentRef = requireText(closeNext.ref, 'the terminal cycle alignment reference');
+    const closurePort = createJsonlCheckpointClosurePort({
+      filePath: fixture.layout.organJournalPath,
+      journal: fixture.journal,
+    });
+    const alignmentRecord = await closurePort.read(alignmentRef);
+    if (!alignmentRecord || !('closureKind' in alignmentRecord)
+      || alignmentRecord.closureKind !== 'planner-alignment') {
+      throw new Error('the terminal cycle references no committed planner alignment');
+    }
+    const alignment = alignmentRecord.alignment;
+    assert.equal(alignment.decision, 'complete', 'the terminal planner alignment records completion');
+    const committedCheckpoint = await checkpointJournal.readCommitted(alignment.identity.scopeRef, alignment.checkpointId);
+    if (!committedCheckpoint) throw new Error('the terminal planner alignment references no committed checkpoint');
+    assert.deepEqual(committedCheckpoint.commitRef, checkpointRef,
+      'the terminal planner alignment references the cycle close checkpoint');
+    assert.equal(turnBoundaryRecordRefs(alignment.identity, alignment.checkpointId).alignmentRef, alignmentRef,
+      'the terminal planner alignment uses the canonical turn-boundary identity');
     assert.equal(close.outcome, 'stop', 'terminal complete closes the business cycle');
-    assert.deepEqual(close.next, { kind: 'stop', ref: binding.alignmentRef },
+    assert.deepEqual(close.next, { kind: 'stop', ref: alignmentRef },
       'the cycle decision uses the checkpoint-bound alignment reference');
     assert.equal(terminalClose.record.outcome, 'stop', 'terminal complete settles the business cycle without claiming human stop');
     const actualInvocations = fixture.upstream.inspectionInvocations();
