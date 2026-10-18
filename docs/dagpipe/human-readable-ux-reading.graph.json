@@ -21,7 +21,7 @@
     "implementationStatus": "UNVERIFIED",
     "bindingBoundary": "设计责任名称，不声称 Operator 已注册或 Runtime 已执行",
     "visibilityBoundary": "不显示重复/无内容/无用途字段；必要失败、未知与恢复责任不得隐藏。",
-    "actualExecutionGraphContract": "truth 读取现有 agentActivity 成功值中的 actualExecutionGraph；semantic 与 purpose 分开呈现 guidance、既有当前计划和已记录 assignment instances；necessary 明确保留缺失历史、空 stage、parent、成员状态、真实 commit 证据与未归类事实；present 不把 parent、成员归属或固定 registry 宣称为执行依赖。",
+    "actualExecutionGraphContract": "truth 读取同一任务范围已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，并经 Runtime 纯选择器进入 contracts source；该候选快照通过现有 agentActivity 成功值的 actualExecutionGraph 到达 semantic 与 purpose。guidance、既有当前计划和已记录实际实例分开呈现；necessary 明确保留 unavailable/not-recorded、缺失关系与未归类事实；present 不把固定角色流程、时间、成员、技术实例 ID 或 commit ref 宣称为执行依赖或默认标签。",
     "readOnlyBoundary": "本图只有读取、解释与呈现。不得在此图消费需求、创建 Manager、提交 graph fact、acquire、execute、rebind 或执行 steer。"
   },
   "inputs": [

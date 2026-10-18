@@ -2,7 +2,7 @@
   "graph": "humanagent-human-readable-ux-reading",
   "requirements_version": 13,
   "labels": {
-    "truth": "读取同范围真实事实、责任与已记录实际执行图",
+    "truth": "读取同范围真实事实、责任与已由 owner 解码的原生实际执行记录",
     "semantic": "复用共同语义与来源",
     "purpose": "按当前阅读用途分开组织 guidance、当前计划与已记录实例",
     "necessary": "仅保留当前必要内容与合法操作 并明确缺失历史与真实证据",
@@ -17,12 +17,12 @@
   },
   "consumerNotes": {
     "actual-execution-graph": {
-      "purpose": "从同一 agentActivity 成功值读取 actualExecutionGraph；不新增端点或控制写入。",
+      "purpose": "从同一 agentActivity 成功值读取 actualExecutionGraph；实际执行来源是 Runtime 对同范围已解码原生记录的纯选择结果，不要求 assignment-graph fact replay，不新增端点或控制写入。",
       "implementationPaths": [
         "packages/contracts/src/actual-execution-graph.ts",
         "packages/ui/projection/actual-execution-graph.ts"
       ],
-      "verification": "P1 仅冻结 source DTO 与 read/journal ports；UI、App 与双入口行为仍为 UNVERIFIED。"
+      "verification": "本候选设计只校正 source/owner 语义；Runtime、App、UI 与双入口行为仍为 UNVERIFIED。"
     },
     "task-description": {
       "purpose": "同范围任务看板已读输入 → 按已声明四字段形状识别 → 按任务要求组织内容 → 完整保留必要要求 → 现有共享抽屉呈现；原始输入在现有任务技术详情按需读取。",
