@@ -198,9 +198,9 @@ function nextActionText(next) {
   return NEXT_TEXT[next.kind] ?? String(next.kind)
 }
 
-function rendering(options, title) {
+function rendering(options, title, rootClassName = 'panel') {
   const make = typeof options.element === 'function' ? options.element : defaultElement
-  const root = make('section', undefined, 'panel')
+  const root = make('section', undefined, rootClassName)
   root.setAttribute('aria-label', title)
   const listeners = []
   function action(parent, label, callback, payload, className = 'button button--quiet') {
@@ -851,7 +851,8 @@ export function renderCheckpointHistory(read, options = {}) {
 
 /** Technical layer for the shell's shared drawer. No overlay, no I/O. */
 export function renderCheckpointHistoryDetail(read, options = {}) {
-  const ui = rendering(options, '检查点精确详情')
+  const ui = rendering(options, '检查点精确详情', 'panel checkpoint-history-detail')
+  ui.root.setAttribute('data-checkpoint-role', 'checkpoint-history-detail')
   if (!read?.ok) {
     failureBlock(ui, read?.failure ?? { message: 'checkpoint 读取失败。', nextAction: '请重试读取。' }, true)
     return ui.result
