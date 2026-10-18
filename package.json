@@ -70,21 +70,16 @@
     "proof:dsh-cli": "node tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs",
     "proof:acp-runtimes": "pnpm build:contracts && pnpm build:config && pnpm build:app && node tests/adapters/acp/real-acp-runtimes-proof.mjs",
     "test": "pnpm test:contracts && pnpm test:core && pnpm test:context-events && pnpm test:agent-templates && pnpm test:explicit-brain && pnpm test:journal && pnpm test:operations && pnpm test:memory && pnpm test:config && pnpm test:provider && pnpm test:app && pnpm test:ui && pnpm test:runtime && pnpm test:hand && pnpm test:acp",
-    "ci:check": "pnpm run typecheck && pnpm run test",
     "doctor": "pnpm build:app && node dist/app/app/src/cli.js doctor",
     "run": "pnpm build:app && node dist/app/app/src/cli.js run",
     "resume": "pnpm build:app && node dist/app/app/src/cli.js resume",
     "ci": "node scripts/run-ci.mjs",
-    "release": "pnpm run release:check",
     "package": "pnpm run package:candidate",
-    "package:release": "node scripts/package-release.mjs",
     "package:candidate": "node scripts/package-candidate.mjs",
     "package:smoke": "node scripts/verify-package.mjs",
     "release:bump": "node scripts/bump-release-version.mjs",
     "install:global": "node scripts/install-global.mjs",
     "uninstall:global": "node scripts/uninstall-global.mjs",
-    "release:check": "node scripts/check-release.mjs",
-    "review:record": "node scripts/record-review.mjs",
     "smoke": "node scripts/smoke.mjs"
   }
 }
