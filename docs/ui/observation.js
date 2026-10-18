@@ -521,7 +521,7 @@ function renderReferences(node, eventView = false) {
   const groups = [
     ['输入引用', inputs],
     ['输出引用', outputs],
-    ['Evidence', evidence],
+    [eventView ? '证据' : 'Evidence', evidence],
   ]
   const referenceGroups = groups.filter(([, group]) => !group.empty)
 
