@@ -76,18 +76,14 @@ function inspectionHelperConsumer() {
   let capture: ActiveTurnCaptureBody = { version: 1, binding: { admittedTurn, assignment, execution: { runtimeId: 'runtime', executionEpoch: 1 },
     scope, acceptedPlan: { revisionId: plan.revisionId, revisionCommitRef: receipt(plan.revisionId) } }, initialInput: raw,
     entries: [], childInvocations: [], requests: [], checkpointPath: [], cut: { pauseId: 'boundary', lastSeq: 0, producersDrained: true, frozenAt: time }, completionRefs: [] };
-  const entries: { record: I2Record; commitRef: JournalCommitRef }[] = [{ record: {
-    kind: 'business-cycle-opened', schemaVersion: 1,
-    cycle: { id: scope.cycleId!, scope, directiveRevision: 1, executionEpoch: 1, state: 'admitted' },
-    taskFlow: { kind: 'inspection', definitionVersion: 1 }, planRevisionCommitRef: receipt(plan.revisionId),
-    previousCycleCommitRef: null, openedAt: time, openingReason: 'inspect',
-  }, commitRef: receipt('cycle') }];
+  const entries: { record: I2Record; commitRef: JournalCommitRef }[] = [];
   let stopSource: Awaited<ReturnType<InspectionRuntimeHelperDependencies['resources']['forCheckpoint']>> = null;
   let committedCheckpoint: CommittedCheckpointRecord | null = null;
   let forbiddenTail = false;
   let failForCheckpoint = false;
   const resources = {
-    logicalTurnId: admittedTurn.turnId, identity: { scope: taskScope, source, journalCommitRef: 'jsonl:identity' },
+    logicalTurnId: admittedTurn.turnId, identity: { scope: taskScope, taskFlow: { kind: 'inspection' as const, definitionVersion: 1 as const },
+      source, journalCommitRef: 'jsonl:identity' },
     journal: { replay: async () => { if (forbiddenTail) throw new Error('stop read mutable tail'); return []; } },
     segments: { readInitialSegmentSource: async () => ({ kind: 'captured' as const, body: capture, bindingCommitRef: receipt('binding') }),
       readSegments: async () => { if (forbiddenTail) throw new Error('stop scanned segments'); return []; }, readSegmentRecords: async () => [] },
@@ -120,7 +116,32 @@ test('inspection runtime helpers preserve original accepted plan, reuse definiti
   // Probability demonstrated by the draft reader. Impact: wrong execution/history. Cost: one local public-port consumer.
   const f = inspectionHelperConsumer();
   const helper = f.helpers();
-  const context = await helper.selectionReader.readSelectionContext('inspection-turn');
+  const [context, concurrentContext] = await Promise.all([
+    helper.selectionReader.readSelectionContext('inspection-turn'),
+    helper.selectionReader.readSelectionContext('inspection-turn'),
+  ]);
+  assert.deepEqual(concurrentContext.cycleOpenedCommitRef, context.cycleOpenedCommitRef);
+  assert.deepEqual(concurrentContext.cycleOpening, context.cycleOpening);
+  const openings = f.entries.filter(({ record }) => record.kind === 'business-cycle-opened');
+  assert.equal(openings.length, 1);
+  const opening = openings[0]!;
+  const openingRecord = opening.record;
+  assert.equal(openingRecord.kind, 'business-cycle-opened');
+  if (openingRecord.kind !== 'business-cycle-opened') throw new Error('unreachable');
+  assert.deepEqual(opening.commitRef, context.cycleOpenedCommitRef);
+  assert.deepEqual(await f.dependencies.journal.read(scope, context.cycleOpenedCommitRef), openingRecord);
+  assert.deepEqual(openingRecord.cycle, { id: scope.cycleId!, scope, directiveRevision: 1, executionEpoch: 1,
+    state: 'admitted' });
+  assert.deepEqual(openingRecord.taskFlow, f.resources.identity.taskFlow);
+  assert.deepEqual(openingRecord.planRevisionCommitRef, f.receipt(f.plan.revisionId));
+  assert.equal(openingRecord.previousCycleCommitRef, null);
+  assert.equal(openingRecord.openedAt, f.time);
+  assert.equal(openingRecord.openingReason, 'Runtime first inspection selection for admitted cycle');
+  assert.equal(f.entries.filter(({ record }) => record.kind === 'inspection-definition').length, 1);
+  const reconstructed = f.helpers();
+  const reconstructedContext = await reconstructed.selectionReader.readSelectionContext('inspection-turn');
+  assert.deepEqual(reconstructedContext.cycleOpenedCommitRef, context.cycleOpenedCommitRef);
+  assert.equal(f.entries.filter(({ record }) => record.kind === 'business-cycle-opened').length, 1);
   const open = (checkId: string) => helper.occurrenceOpening.open({ context, logicalTurnId: 'inspection-turn', executionScope: scope, assignment: f.assignment, checkId });
   const [a, b] = await Promise.all([open('a'), open('b')]);
   assert.equal(a.binding.occurrence.occurrenceId, b.binding.occurrence.occurrenceId);
@@ -138,6 +159,19 @@ test('inspection runtime helpers preserve original accepted plan, reuse definiti
   f.resources.logicalTurnId = 'inspection-turn-2';
   const next = f.helpers();
   const nextContext = await next.selectionReader.readSelectionContext('inspection-turn-2');
+  assert.equal(nextContext.plan.revisionId, later.revisionId);
+  assert.deepEqual(nextContext.cycleOpening, openingRecord);
+  assert.deepEqual(nextContext.cycleOpenedCommitRef, context.cycleOpenedCommitRef);
+  assert.equal(f.entries.filter(({ record }) => record.kind === 'business-cycle-opened').length, 1);
+  const { taskFlow: _taskFlow, ...identityWithoutFlow } = f.resources.identity;
+  f.resources.identity = identityWithoutFlow as typeof f.resources.identity;
+  const reuseWithoutFlow = await f.helpers().selectionReader.readSelectionContext('inspection-turn-2');
+  assert.deepEqual(reuseWithoutFlow.cycleOpening, openingRecord);
+  assert.equal(f.entries.filter(({ record }) => record.kind === 'business-cycle-opened').length, 1);
+  const cold = f.helpers();
+  const repeatContext = await cold.selectionReader.readSelectionContext('inspection-turn-2');
+  assert.deepEqual(repeatContext.cycleOpenedCommitRef, context.cycleOpenedCommitRef);
+  assert.equal(f.entries.filter(({ record }) => record.kind === 'business-cycle-opened').length, 1);
   const opened = await next.occurrenceOpening.open({ context: nextContext, logicalTurnId: 'inspection-turn-2', executionScope: scope, assignment: f.assignment, checkId: 'a' });
   assert.deepEqual(opened.binding.definitionCommitRef, original.commitRef);
   const laterOpening = f.entries.find(({ record }) => record.kind === 'inspection-occurrence-opened'
@@ -155,7 +189,6 @@ test('inspection runtime helpers preserve original accepted plan, reuse definiti
     inspectionDelivery: { checkId: 'a', resultId: 'inspection-result:captured-child', attempt: 1,
       outcome: { status: 'completed', judgment: 'a observed' }, evidenceRefs: [f.raw.ref], completedAt: f.time } };
   f.setCapture({ ...f.capture(), childInvocations: [invocation], entries: [delivery] });
-  const cold = f.helpers();
   const accepted = await cold.acceptedDeliveryReader.readAcceptedDelivery('captured-child');
   assert.deepEqual(accepted, delivery);
   assert.deepEqual(await cold.acceptedDelivery.accept({ invocation, delivery: accepted! }), delivery.inspectionDelivery);
@@ -164,6 +197,19 @@ test('inspection runtime helpers preserve original accepted plan, reuse definiti
   await assert.rejects(cold.acceptedDeliveryReader.readAcceptedDelivery('captured-child'), /conflicting durable/);
   f.setCapture({ ...f.capture(), binding: { ...f.capture().binding, acceptedPlan: undefined } });
   await assert.rejects(f.helpers().selectionReader.readSelectionContext('inspection-turn-2'), /no durable accepted plan/);
+});
+
+test('inspection runtime helpers hold fresh selection when TaskIdentity taskFlow is absent', async () => {
+  // Failure basis: optional identity flow could be defaulted or an opening could be committed before the hold.
+  // Impact: fabricated task-flow guidance and partial durable state. Probability: unknown. Cost: one existing fixture.
+  const f = inspectionHelperConsumer();
+  const { taskFlow: _taskFlow, ...identityWithoutFlow } = f.resources.identity;
+  f.resources.identity = identityWithoutFlow as typeof f.resources.identity;
+  await assert.rejects(
+    f.helpers().selectionReader.readSelectionContext('inspection-turn'),
+    /TaskIdentity.*taskFlow/,
+  );
+  assert.equal(f.entries.length, 0);
 });
 
 test('inspection runtime helpers stop follows exact v2 receipt to original v1 and excludes mutable tail', async () => {

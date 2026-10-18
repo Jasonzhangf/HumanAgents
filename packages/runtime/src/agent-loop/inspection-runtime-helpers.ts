@@ -23,6 +23,7 @@ import type {
   WorkAssignment,
 } from '../../../contracts/src/index.js';
 import {
+  validateBusinessCycleOpenedRecord,
   validateInspectionExecutionBinding,
   validateInspectionItemDelivery,
 } from '../../../contracts/src/i2-history.js';
@@ -363,11 +364,11 @@ async function listAll(
   return entries;
 }
 
-async function exactCycleOpening(
+async function findCycleOpening(
   journal: I2JournalPort,
   taskScope: ScopeRef,
   cycleId: string,
-): Promise<CommittedRecord<BusinessCycleOpenedRecord>> {
+): Promise<CommittedRecord<BusinessCycleOpenedRecord> | null> {
   const entries = await listAll(journal, {
     taskScope,
     kinds: ['business-cycle-opened'],
@@ -379,14 +380,40 @@ async function exactCycleOpening(
       entry.record.kind === 'business-cycle-opened' && sameCycle(cycleId, entry.record))
     .map((entry) => ({ record: entry.record, commitRef: entry.commitRef }));
   const opening = onlyMatching(`business cycle ${cycleId}`, matches, () => true);
-  if (opening === null) {
-    throw fail('invalid-state', `business cycle ${cycleId} has no durable opening`);
-  }
+  if (opening === null) return null;
   const read = await journal.read(taskScope, opening.commitRef);
   if (read.kind !== 'business-cycle-opened' || JSON.stringify(read) !== JSON.stringify(opening.record)) {
     throw fail('conflict', `business cycle ${cycleId} opening does not match its exact receipt`);
   }
   return opening;
+}
+
+async function exactCycleOpening(
+  journal: I2JournalPort,
+  taskScope: ScopeRef,
+  cycleId: string,
+): Promise<CommittedRecord<BusinessCycleOpenedRecord>> {
+  const opening = await findCycleOpening(journal, taskScope, cycleId);
+  if (opening === null) {
+    throw fail('invalid-state', `business cycle ${cycleId} has no durable opening`);
+  }
+  return opening;
+}
+
+async function latestCycleOpeningCommitRef(
+  journal: I2JournalPort,
+  taskScope: ScopeRef,
+): Promise<JournalCommitRef | null> {
+  const entries = await listAll(journal, {
+    taskScope,
+    kinds: ['business-cycle-opened'],
+    limit: PAGE_LIMIT,
+  });
+  const openings = entries
+    .filter((entry): entry is CommittedRecord<BusinessCycleOpenedRecord> =>
+      entry.record.kind === 'business-cycle-opened')
+    .sort((left, right) => left.commitRef.journalSeq - right.commitRef.journalSeq);
+  return openings.at(-1)?.commitRef ?? null;
 }
 
 async function exactDefinitionForPlan(
@@ -859,6 +886,7 @@ export function createInspectionRuntimeHelpers(
   dependencies: InspectionRuntimeHelperDependencies,
 ): InspectionRuntimeHelpers {
   const definitionCommits = new Map<string, Promise<CommittedRecord<DurableInspectionDefinition>>>();
+  const cycleOpeningCommits = new Map<string, Promise<CommittedRecord<BusinessCycleOpenedRecord>>>();
   const openingCommits = new Map<string, Promise<CommittedRecord<InspectionOccurrenceOpenedRecord>>>();
 
   async function resolveTurn(logicalTurnId: string): Promise<TurnState> {
@@ -896,6 +924,56 @@ export function createInspectionRuntimeHelpers(
     return { resources, binding, records };
   }
 
+  async function ensureCycleOpening(
+    turn: TurnState,
+    planRevisionCommitRef: JournalCommitRef,
+  ): Promise<CommittedRecord<BusinessCycleOpenedRecord>> {
+    const taskScope = taskScopeOf(turn.binding.scope);
+    const cycleId = turn.binding.admittedTurn.cycleRef.value;
+    const existing = await findCycleOpening(dependencies.journal, taskScope, cycleId);
+    if (existing !== null) return existing;
+    const taskFlow = turn.resources.identity.taskFlow;
+    if (taskFlow === undefined) {
+      throw fail('invalid-state', 'inspection first opening requires TaskIdentity taskFlow');
+    }
+    const key = [taskScope.organId.value, taskScope.taskId.value, cycleId].join('\u0000');
+    const running = cycleOpeningCommits.get(key);
+    if (running !== undefined) return running;
+    const pending = (async (): Promise<CommittedRecord<BusinessCycleOpenedRecord>> => {
+      const committed = await findCycleOpening(dependencies.journal, taskScope, cycleId);
+      if (committed !== null) return committed;
+      const record: BusinessCycleOpenedRecord = {
+        kind: 'business-cycle-opened',
+        schemaVersion: 1,
+        cycle: {
+          id: turn.binding.admittedTurn.cycleRef,
+          scope: turn.binding.scope,
+          directiveRevision: turn.binding.admittedTurn.directiveRevision,
+          executionEpoch: turn.binding.admittedTurn.executionEpoch,
+          state: 'admitted',
+        },
+        taskFlow,
+        planRevisionCommitRef,
+        previousCycleCommitRef: await latestCycleOpeningCommitRef(dependencies.journal, taskScope),
+        openedAt: dependencies.clock.now().toISOString(),
+        openingReason: 'Runtime first inspection selection for admitted cycle',
+      };
+      validateBusinessCycleOpenedRecord(record);
+      const commitRef = await dependencies.journal.commit(record);
+      const read = await dependencies.journal.read(taskScope, commitRef);
+      if (read.kind !== 'business-cycle-opened' || JSON.stringify(read) !== JSON.stringify(record)) {
+        throw fail('conflict', `business cycle ${cycleId} new opening does not match its durable receipt`);
+      }
+      return { record, commitRef };
+    })();
+    cycleOpeningCommits.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (cycleOpeningCommits.get(key) === pending) cycleOpeningCommits.delete(key);
+    }
+  }
+
   async function readSelectionContext(logicalTurnId: string): Promise<InspectionSelectionContext> {
     const turn = await resolveTurn(logicalTurnId);
     const acceptedPlan = turn.binding.acceptedPlan;
@@ -910,12 +988,7 @@ export function createInspectionRuntimeHelpers(
         revisionCommitRef: acceptedPlan.revisionCommitRef,
       },
     });
-    const cycleId = turn.binding.admittedTurn.cycleRef.value;
-    const cycleOpening = await exactCycleOpening(
-      dependencies.journal,
-      taskScopeOf(turn.binding.scope),
-      cycleId,
-    );
+    const cycleOpening = await ensureCycleOpening(turn, selected.currentPlan.revisionCommitRef);
     const context: InspectionSelectionContext = {
       turn: projectAdmittedTurnIdentityV1(turn.binding.admittedTurn),
       plan: selected.revision,
