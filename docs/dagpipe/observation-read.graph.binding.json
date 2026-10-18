@@ -15,9 +15,9 @@
     "load_task_truth": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "ownerSymbol": "UiRuntimeService scoped task read resolver/scopedObservation/projectDurableTaskInventory",
+      "ownerSymbol": "UiRuntimeService scoped task read resolver/scopedObservation/projectDurableTaskInventory/semanticObservation/scopedSemanticObservation",
       "implementationStatus": "candidate-scoped-observation-truth",
-      "contract": "The shared resolver selects the serve-bound live source or the declared project/mode durable inventory. Foreign admissions come from that inventory, not the serve-bound requirementAdmissions map. The same selected task scope supplies already owner-decoded native allocation, active-turn, resumed-segment, child invocation and delivery, review, and Planner records. Those typed facts are the actual-execution source; assignment-graph fact replay is not required. Missing or unavailable sources remain explicit."
+      "contract": "The shared resolver selects the serve-bound live source or the declared project/mode durable inventory. Foreign admissions come from that inventory, not the serve-bound requirementAdmissions map. The same selected task scope supplies already owner-decoded native allocation, active-turn, resumed-segment, child invocation and delivery, review, and Planner records. Those typed facts are the actual-execution source; assignment-graph fact replay is not required. Both semantic builders copy a defined snapshot publicOutput.publicCommitWatermark as the exact separate committed-output boundary; an absent value stays omitted. Missing or unavailable sources remain explicit."
     },
     "load_event_history": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",

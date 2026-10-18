@@ -3886,10 +3886,16 @@ test('public semantic observation preserves typed scope and reports unsupported 
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-semantic-observation-'));
   const service = serviceFor(root, new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 }));
   const task = service.createTask({ title: 'semantic observation scope' });
+  assert.equal('publicCommitWatermark' in service.semanticObservation(task.taskId), false);
   const started = await service.startExecution(task.taskId, { prompt: 'semantic observation scope' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 
   const semantic = service.semanticObservation(task.taskId);
+  const publication = service.taskDashboard(task.taskId).publicOutput;
+  const expected = publication?.commits.at(-1)?.journalSeq;
+  assert.ok(expected !== undefined, 'fixture must produce a public commit');
+  assert.equal(publication?.publicCommitWatermark, expected);
+  assert.equal(semantic.publicCommitWatermark, expected);
   assert.equal(semantic.scope.taskId?.value, task.taskId.value);
   assert.equal(semantic.scope.operationId?.value, started.operationId.value);
   assert.equal(semantic.events.some((event) => event.type === 'operation.started'), true);
