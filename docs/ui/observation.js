@@ -405,19 +405,24 @@ function renderDrawerSection(definition, node, handoffs, detail) {
   return section
 }
 
-function renderNodeDrawer(node, handoffs, detail) {
+function renderNodeDrawer(node, handoffs, detail, purpose) {
   triggerNodeId = node.nodeId
   const body = drawer.querySelector('.drawer-body')
   drawerCard?.dispose()
   drawerCard = undefined
   clearNode(body)
+  const eventView = purpose === 'execution-events'
   const head = element('header', undefined, 'drawer-head')
   const titleWrap = element('div')
   titleWrap.append(
     element('p', '节点详情 · 只读', 'eyebrow'),
     element('h2', detail?.title || node.title || node.nodeId),
-    element('p', '工具调用、工具返回和 agent 自己写入的 summary 结论；不呈现模型私有思维链。', 'drawer-note'),
   )
+  // The work-card note describes summary conclusions and CoT; an execution event
+  // is a recorded fact, not a work item, so it carries no such note.
+  if (!eventView) {
+    titleWrap.append(element('p', '工具调用、工具返回和 agent 自己写入的 summary 结论；不呈现模型私有思维链。', 'drawer-note'))
+  }
   const close = element('button', '关闭', 'button drawer-close')
   close.type = 'button'
   close.dataset.action = 'close-drawer'
@@ -425,46 +430,53 @@ function renderNodeDrawer(node, handoffs, detail) {
   head.append(titleWrap, close)
   body.append(head)
 
-  // The node drawer uses the same status/conversation/trace shell as every
-  // other work card. The adapter keeps this surface read-only.
-  const cardHost = element('div', undefined, 'drawer-work-card-host')
-  cardHost.dataset.observationWorkCard = 'true'
-  body.append(cardHost)
-  drawerCard = mountInteractionWorkCard(cardHost, { mode: 'observation' })
-  // Typed contract: `node.toolSteps` carries stepId / name / status / statusDisplay / returned.
-  // The typed drawer detail owns those steps; the node card is only the fallback identity.
-  const observationNode = detail || node
-  drawerCard.update({ node: { ...observationNode, toolSteps: observationNode.toolSteps || [] }, handoffs })
+  if (eventView) {
+    // A recorded execution event is not a work item: show its typed facts once
+    // and reuse the shared reference/technical-source block. No goal/result
+    // turns, no handoff tab and no nested conversation scroll.
+    body.append(renderEventFacts(detail), renderReferences(detail))
+  } else {
+    // The node drawer uses the same status/conversation/trace shell as every
+    // other work card. The adapter keeps this surface read-only.
+    const cardHost = element('div', undefined, 'drawer-work-card-host')
+    cardHost.dataset.observationWorkCard = 'true'
+    body.append(cardHost)
+    drawerCard = mountInteractionWorkCard(cardHost, { mode: 'observation' })
+    // Typed contract: `node.toolSteps` carries stepId / name / status / statusDisplay / returned.
+    // The typed drawer detail owns those steps; the node card is only the fallback identity.
+    const observationNode = detail || node
+    drawerCard.update({ node: { ...observationNode, toolSteps: observationNode.toolSteps || [] }, handoffs })
 
-  // Handoff lives on its own page inside the same sheet.
-  const tabs = element('div', undefined, 'drawer-tabs')
-  tabs.setAttribute('role', 'tablist')
-  tabs.setAttribute('aria-label', '节点详情页')
-  const sheets = element('div', undefined, 'drawer-sheets')
-  const definitions = [
-    { sheetId: 'handoff', label: '跨 agent 交接', render: renderHandoffPane },
-    { sheetId: 'refs', label: '输入 / 输出 / evidence', render: (_node, _handoffs, detail) => renderReferences(detail) },
-  ]
-  const tabButtons = []
-  const tabSheets = []
-  for (const definition of definitions) {
-    const tab = element('button', definition.label, 'drawer-tab')
-    tab.type = 'button'
-    tab.dataset.tabId = definition.sheetId
-    tab.setAttribute('role', 'tab')
-    tab.id = `drawer-tab-${definition.sheetId}`
-    tab.addEventListener('click', () => selectDrawerTab(tabButtons, tabSheets, definition.sheetId))
-    const sheet = renderDrawerSection(definition, node, handoffs, detail)
-    sheet.dataset.tabId = definition.sheetId
-    sheet.setAttribute('role', 'tabpanel')
-    sheet.setAttribute('aria-labelledby', tab.id)
-    tabButtons.push(tab)
-    tabSheets.push(sheet)
-    tabs.append(tab)
-    sheets.append(sheet)
+    // Handoff lives on its own page inside the same sheet.
+    const tabs = element('div', undefined, 'drawer-tabs')
+    tabs.setAttribute('role', 'tablist')
+    tabs.setAttribute('aria-label', '节点详情页')
+    const sheets = element('div', undefined, 'drawer-sheets')
+    const definitions = [
+      { sheetId: 'handoff', label: '跨 agent 交接', render: renderHandoffPane },
+      { sheetId: 'refs', label: '输入 / 输出 / evidence', render: (_node, _handoffs, detail) => renderReferences(detail) },
+    ]
+    const tabButtons = []
+    const tabSheets = []
+    for (const definition of definitions) {
+      const tab = element('button', definition.label, 'drawer-tab')
+      tab.type = 'button'
+      tab.dataset.tabId = definition.sheetId
+      tab.setAttribute('role', 'tab')
+      tab.id = `drawer-tab-${definition.sheetId}`
+      tab.addEventListener('click', () => selectDrawerTab(tabButtons, tabSheets, definition.sheetId))
+      const sheet = renderDrawerSection(definition, node, handoffs, detail)
+      sheet.dataset.tabId = definition.sheetId
+      sheet.setAttribute('role', 'tabpanel')
+      sheet.setAttribute('aria-labelledby', tab.id)
+      tabButtons.push(tab)
+      tabSheets.push(sheet)
+      tabs.append(tab)
+      sheets.append(sheet)
+    }
+    body.append(tabs, sheets)
+    selectDrawerTab(tabButtons, tabSheets, 'handoff')
   }
-  body.append(tabs, sheets)
-  selectDrawerTab(tabButtons, tabSheets, 'handoff')
 
   if (detail?.childScopeRef) {
     const enter = element('button', '进入下一层观测', 'button drawer-enter')
@@ -478,6 +490,26 @@ function renderNodeDrawer(node, handoffs, detail) {
 
   drawer.showModal()
   close.focus()
+}
+
+// Compact facts for one recorded execution event. State always shows once; the
+// record time and owning role appear only when the typed detail supplies them.
+function renderEventFacts(detail) {
+  const facts = element('dl', undefined, 'drawer-facts')
+  const status = element('div')
+  status.append(element('dt', '状态'), element('dd', detail?.stateDisplay || '未提供'))
+  facts.append(status)
+  if (detail?.updatedAt) {
+    const time = element('div')
+    time.append(element('dt', '记录时间'), element('dd', detail.updatedAt))
+    facts.append(time)
+  }
+  if (detail?.roleDisplay) {
+    const source = element('div')
+    source.append(element('dt', '来源'), element('dd', detail.roleDisplay))
+    facts.append(source)
+  }
+  return facts
 }
 
 function renderReferences(node) {
@@ -811,6 +843,7 @@ function renderObservation(projection) {
       projection.nodes.find((node) => node.nodeId === selected.nodeId) || { nodeId: selected.nodeId, title: selected.title },
       currentHandoffs,
       selected,
+      projection.scope?.purpose,
     )
   }
 }
