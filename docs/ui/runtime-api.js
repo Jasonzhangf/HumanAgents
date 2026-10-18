@@ -223,6 +223,18 @@ export function createRuntimeApi(options = {}) {
         body: JSON.stringify(input),
       },
     ),
+    submitTaskContextCorrection: (taskId, body, taskScope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/control/context-correction${taskControlScopeQuery(taskScope)}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
+    submitTaskCheckpointReentry: (taskId, body, taskScope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/control/checkpoint-reentry${taskControlScopeQuery(taskScope)}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
     receiveExplicitInput: (input) => request('/api/explicit/inputs', {
       method: 'POST',
       body: JSON.stringify({ ...input, channel: 'business' }),
