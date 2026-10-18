@@ -26,6 +26,11 @@
  * history path at desktop and mobile sizes. It proves scope propagation,
  * foreign-scope rejection, exact comparison-pair rejection and drawer focus
  * recovery without running any other fixture.
+ * `--plan-history-only` selects one controlled Task Dashboard read whose
+ * `taskPlanHistory` is available ([v1,v2,v3] with accepted current v2). It
+ * proves the real page shows only v2 as current and, after switching to
+ * semantic, keeps returned order [v1,v2,v3] with the reason, predecessor and
+ * typed change visible, without issuing any business write.
  *
  * Set INTERACTION_PAGE_EVIDENCE to the execution-owned evidence root and
  * INTERACTION_PAGE_UI_ROOT (optional) to a directory whose layout mirrors
@@ -50,6 +55,7 @@ const checkpointAssetsOnly = process.argv.includes('--checkpoint-assets-only');
 const rawFocusTitleOnly = process.argv.includes('--raw-focus-title-only');
 const projectBreadcrumbOnly = process.argv.includes('--project-breadcrumb-only');
 const i2ScopedOnly = process.argv.includes('--i2-scoped-only');
+const planHistoryOnly = process.argv.includes('--plan-history-only');
 
 const playwrightModule = await import(
   process.env.INTERACTION_CARD_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js',
@@ -208,7 +214,7 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
 
-  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly || projectBreadcrumbOnly || i2ScopedOnly ? [] : [
+  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly || projectBreadcrumbOnly || i2ScopedOnly || planHistoryOnly ? [] : [
     { file: 'dashboard.html', entry: 'dashboard' },
     { file: 'task.html', query: '?task=new', entry: 'task' },
     { file: 'index.html', entry: 'entry' },
@@ -261,7 +267,7 @@ try {
   // card's technical source reference with no invented Operation, so an admitted
   // Task is not mislabelled as a running execution and no `pending-input` scope
   // is minted.
-  if (!checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly) {
+  if (!checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly && !planHistoryOnly) {
   const TASK_WIRING_ID = 'task-wiring-proof';
   const taskPage = await context.newPage();
   const taskPageErrors = [];
@@ -335,7 +341,7 @@ try {
   await taskPage.close();
   }
 
-  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly) {
+  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly && !planHistoryOnly) {
   // GAP B proof: the bounded original cause the runtime reports must reach the
   // human, not just a status code. The runtime stub answers the real
   // explicit-interaction read with a 500 body shaped exactly like the one
@@ -1581,6 +1587,226 @@ try {
       }
     }
   }
+  if (planHistoryOnly) {
+    // Failure mode: the formal Task Dashboard may ignore the available
+    // multi-revision plan history, show a later published revision as current,
+    // or fail to switch to the semantic order. Impact: false plan orientation
+    // (empty plan, wrong current version, missing retained history) while the
+    // backend and renderer consumer still pass. Probability is unknown; the
+    // existing browser fixtures only ever served an unavailable history. Cost:
+    // one controlled dashboard GET plus the shared drawer/mode path.
+    const projectKey = 'proj-plan-history'
+    const mode = 'fake'
+    const taskId = { scope: 'task', value: 'task-plan-history' }
+    const scope = { kind: 'task', projectKey, mode, taskId }
+    // Data construction mirrors the production renderer consumer's fixture
+    // shape. The real page imports the renderer; this file never copies it and
+    // never imports the consumer test that registers its own DOM.
+    const evidenceRef = (id) => ({
+      evidenceId: { scope: 'evidence', value: id },
+      kind: 'execution',
+      source: 'task-plan-history-fixture',
+      locator: `fixture://${id}`,
+      scope: { organId: { scope: 'organ', value: 'organ-plan-history' }, taskId },
+    })
+    const snapshot = (label, { nodes, phases, relations } = {}) => ({
+      title: `Plan ${label}`,
+      summary: `Reasoning plan ${label}.`,
+      completeness: { scope: 'whole-task', status: 'complete' },
+      acceptanceCriteria: [{ criterionId: `${label}-criterion`, description: `Verify ${label}.` }],
+      nodes: nodes ?? [
+        { nodeId: `${label}-build`, kind: 'work', title: `Build ${label}`, intent: `Implement ${label}`, definition: { owner: 'runtime' }, phaseId: `${label}-phase` },
+        { nodeId: `${label}-verify`, kind: 'check', title: `Verify ${label}`, intent: `Verify ${label}`, definition: { owner: 'runtime' }, phaseId: `${label}-phase` },
+      ],
+      phases: phases ?? [{ phaseId: `${label}-phase`, title: `Phase ${label}`, memberNodeIds: [`${label}-build`, `${label}-verify`] }],
+      relations: relations ?? [{ fromNodeId: `${label}-build`, toNodeId: `${label}-verify`, kind: 'depends-on' }],
+    })
+    const revision = (sequence, id, { reason, snapshot: snap, coverage = 'complete-from-task-start', publishedAt = '2026-10-18T00:00:00.000Z' } = {}) => ({
+      revisionId: id,
+      sequence,
+      journalCommitRef: `jsonl:commit-${sequence}`,
+      predecessor: sequence === 1 ? null : { revisionId: `v${sequence - 1}`, sequence: sequence - 1 },
+      snapshot: snap ?? snapshot(id),
+      reason: reason ?? { kind: sequence === 1 ? 'initial' : 'adjustment', text: `reason ${id}`, basisRefs: [evidenceRef(`basis-${id}`)] },
+      evidenceRefs: [evidenceRef(`source-${id}`)],
+      historyCoverage: coverage,
+      publishedAt,
+    })
+    const v1 = revision(1, 'v1', { coverage: 'prior-history-unavailable' })
+    const v2 = revision(2, 'v2')
+    const v3 = revision(3, 'v3', {
+      snapshot: snapshot('v3', {
+        nodes: [
+          { nodeId: 'v3-build', kind: 'work', title: 'Build v3', intent: 'Implement v3', definition: { owner: 'runtime' }, phaseId: 'v3-phase' },
+          { nodeId: 'v3-verify', kind: 'check', title: 'Verify v3', intent: 'Verify v3', definition: { owner: 'runtime' }, phaseId: 'v3-phase' },
+          { nodeId: 'v3-ship', kind: 'work', title: 'Ship v3', intent: 'Ship v3', definition: { owner: 'runtime' }, phaseId: 'v3-phase' },
+        ],
+        phases: [{ phaseId: 'v3-phase', title: 'Phase v3', memberNodeIds: ['v3-build', 'v3-verify', 'v3-ship'] }],
+        relations: [
+          { fromNodeId: 'v3-build', toNodeId: 'v3-verify', kind: 'depends-on' },
+          { fromNodeId: 'v3-verify', toNodeId: 'v3-ship', kind: 'sequence' },
+        ],
+      }),
+    })
+    const planHistory = {
+      surface: 'runtime-task-plan-history',
+      scope,
+      current: {
+        state: 'known',
+        value: {
+          revisionId: 'v2',
+          revisionCommitRef: { commitId: 'commit-2', journalSeq: 12, recordDigest: `sha256:${'a'.repeat(64)}` },
+        },
+      },
+      revisions: [v1, v2, v3],
+    }
+    const taskRead = {
+      surface: 'runtime-task-dashboard',
+      mode,
+      taskId,
+      taskTitle: 'Available plan history proof',
+      state: 'waiting',
+      stateLabel: '等待中',
+      statusSections: { business: '等待人工核对', waiting: '尚无执行等待信息' },
+      currentNode: 'runtime.waiting',
+      observationRef: `task://${taskId.value}/observation`,
+      nextStep: '核对当前计划与保留历史',
+      input: '核对可用计划历史',
+      output: '尚无输出',
+      allowedActions: [],
+      recentEvents: [],
+      taskPlanHistory: { ok: true, value: planHistory },
+    }
+    const taskGrantRead = {
+      targetScope: { projectKey, mode },
+      readback: { taskId, grant: null, commit: null },
+      authority: null,
+    }
+    // A closed operation pairing keeps the shared semantic panel from opening a
+    // stream. This fixture only exercises the plan-history surface.
+    const operationScope = {
+      organId: { scope: 'organ', value: 'organ-plan-history' },
+      taskId,
+      operationId: { scope: 'operation', value: 'operation-plan-history' },
+    }
+    const semanticEnvelope = {
+      scope: operationScope,
+      projectionVersion: 'runtime-semantic-v1',
+      sourceWatermark: 0,
+      events: [],
+      coverageIssues: [],
+      pairing: [{
+        groupId: 'plan-history-operation', kind: 'operation', scope: operationScope,
+        executionEpoch: 1, state: 'closed', eventRefs: [],
+      }],
+      capabilities: [],
+    }
+
+    const fixturePage = await context.newPage()
+    await fixturePage.setViewportSize({ width: 1280, height: 900 })
+    const requests = []
+    const errors = []
+    fixturePage.on('pageerror', (error) => errors.push(error.message))
+    await fixturePage.route('**/api/**', async (route) => {
+      const request = route.request()
+      const url = new URL(request.url())
+      const query = Object.fromEntries(url.searchParams)
+      requests.push({ method: request.method(), path: url.pathname, query })
+      const fulfill = (payload, statusCode = 200) => route.fulfill({
+        status: statusCode,
+        contentType: 'application/json',
+        body: JSON.stringify(payload),
+      })
+      if (request.method() !== 'GET') return fulfill({
+        error: { code: 'fixture.unexpected-write', ownerId: 'test', message: `unexpected ${request.method()} ${url.pathname}`, nextAction: 'none' },
+      }, 405)
+      if (url.pathname === '/api/runtime/status') return fulfill({
+        surface: 'runtime-status', mode, state: 'ready', connected: true,
+        providerState: 'ready', modes: [{ mode, enabled: true, state: 'ready' }],
+      })
+      if (url.pathname === '/api/ui/display-preference') return fulfill({ preference: { mode: 'current' }, defaultMode: 'current' })
+      if (url.pathname === `/api/tasks/${taskId.value}/dashboard`
+        && query.projectKey === projectKey && query.mode === mode) return fulfill(taskRead)
+      if (url.pathname === `/api/tasks/${taskId.value}/control/grant`
+        && query.projectKey === projectKey && query.mode === mode) return fulfill(taskGrantRead)
+      if (url.pathname === `/api/tasks/${taskId.value}/semantic`) return fulfill(semanticEnvelope)
+      return fulfill({
+        error: { code: 'fixture.unexpected-request', ownerId: 'test', message: `unexpected GET ${url.pathname}`, nextAction: 'keep this route explicit' },
+      }, 404)
+    })
+    const settle = () => fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    try {
+      const preferenceRead = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === '/api/ui/display-preference')
+      await fixturePage.goto(`${server.url}/task-dashboard.html?${new URLSearchParams({
+        task: taskId.value, projectKey, mode, display: 'current',
+      })}`, { waitUntil: 'domcontentloaded' })
+      await preferenceRead
+      const currentSection = fixturePage.locator('[data-plan-history="current"]')
+      await currentSection.waitFor({ timeout: 20000 })
+      await settle()
+      const currentText = await currentSection.innerText()
+      record('current plan shows only the accepted revision',
+        currentText.includes('Plan v2') && currentText.includes('当前权威版本 · 版本 2')
+          && !currentText.includes('Plan v1') && !currentText.includes('Plan v3'), currentText)
+      record('current plan does not mount the retained revision list',
+        await currentSection.locator('[data-plan-revision]').count() === 0
+          && await fixturePage.locator('[data-plan-history="semantic"]').count() === 0)
+
+      // Switch to semantic through the existing shell drawer chooser. The saved
+      // preference is `current`, so a manual switch must not persist (no PUT).
+      await fixturePage.locator('button[data-shell-section="view"]').click()
+      await fixturePage.locator('button[data-display-mode="current"][aria-pressed="true"]').waitFor()
+      const semanticButton = fixturePage.locator('button[data-display-mode="semantic"]')
+      await semanticButton.click()
+      await fixturePage.locator('button[data-display-mode="semantic"][aria-pressed="true"]').waitFor()
+      await fixturePage.locator('.shell-layer-close:visible').click()
+      await fixturePage.waitForFunction(() => document.querySelectorAll('dialog.shell-layer[open]').length === 0)
+
+      const fold = fixturePage.locator('[data-plan-history-fold]')
+      await fold.waitFor({ timeout: 20000 })
+      if (!(await fold.evaluate((node) => node.open === true))) {
+        await fold.locator('summary').click()
+      }
+      const semanticSection = fixturePage.locator('[data-plan-history="semantic"]')
+      await semanticSection.waitFor()
+      await settle()
+
+      const order = await fixturePage.$$eval('[data-plan-history="semantic"] [data-plan-revision]',
+        (nodes) => nodes.map((node) => node.dataset.planRevision))
+      record('semantic keeps the returned revision order',
+        JSON.stringify(order) === JSON.stringify(['v1', 'v2', 'v3']), order)
+
+      const revisionText = (id) => fixturePage.locator(`[data-plan-history="semantic"] [data-plan-revision="${id}"]`).innerText()
+      const v1Text = await revisionText('v1')
+      const v2Text = await revisionText('v2')
+      const v3Text = await revisionText('v3')
+      record('semantic shows the accepted current reason',
+        v2Text.includes('计划调整') && v2Text.includes('reason v2'), v2Text)
+      record('semantic shows the previous-version relation',
+        v2Text.includes('上一版本：序列 1 · v1'), v2Text)
+      record('semantic shows the typed change for the later revision',
+        v3Text.includes('新增节点：Ship v3'), v3Text)
+      record('semantic keeps current distinct from the later published revision',
+        v2Text.includes('当前权威版本') && !v3Text.includes('当前权威版本')
+          && v3Text.includes('上一版本：序列 2 · v2'), { v1Text, v2Text, v3Text })
+
+      record('plan history flow issues only GETs',
+        requests.length > 0 && requests.every((request) => request.method === 'GET'),
+        requests.filter((request) => request.method !== 'GET'))
+      record('plan history flow raises no page error', errors.length === 0, errors)
+      await fixturePage.screenshot({ path: join(artifactDir, 'plan-history.png'), fullPage: true })
+    } catch (error) {
+      record('plan history browser fixture completed', false, {
+        message: error.message,
+        errors,
+        pageText: await fixturePage.locator('body').innerText().catch(() => ''),
+      })
+      await fixturePage.screenshot({ path: join(artifactDir, 'plan-history-failure.png'), fullPage: true }).catch(() => {})
+    } finally {
+      observe('plan history requests', requests)
+      await fixturePage.close()
+    }
+  }
   await context.close();
 
   await writeFile(join(evidenceRoot, 'checks.json'), JSON.stringify({ checks, observations }, null, 2), 'utf8');
@@ -1591,7 +1817,9 @@ try {
   console.log(
     taskIdentityOnly
       ? `interaction page wiring browser proof (task-identity-only): ${checks.length} checks passed`
-      : `interaction page wiring browser proof: ${checks.length} checks passed`,
+      : planHistoryOnly
+        ? `interaction page wiring browser proof (plan-history-only): ${checks.length} checks passed`
+        : `interaction page wiring browser proof: ${checks.length} checks passed`,
   );
 } finally {
   await browser.close().catch(() => {});
