@@ -5,13 +5,7 @@ import type {
   WorkAssignment,
   WorkResult,
 } from './index.js';
-import type { JournalCommitRef } from './i2-history.js';
 import type { ReviewResult } from './review-data.js';
-import type {
-  ActiveTurnInitialSegmentSource,
-  ResumedTurnSegmentOpened,
-} from './active-turn-segments.js';
-import type { TaskIdentityScope } from './task-identity.js';
 
 export type AssignmentStatus =
   | 'planned'
@@ -67,64 +61,11 @@ export interface AssignmentGraphSnapshot {
   readonly assignments: readonly AssignmentRecord[];
 }
 
-/** Stable graph stream identity. It is not a mode, plan revision or incarnation. */
-export interface AssignmentGraphStream {
-  readonly taskScope: TaskIdentityScope;
-  readonly ownerId: string;
-}
-
-export type AssignmentGraphAction =
-  | 'create-assignment'
-  | 'assign'
-  | 'start'
-  | 'accept-result'
-  | 'record-review-result'
-  | 'mark-retryable'
-  | 'mark-blocked'
-  | 'mark-escalated'
-  | 'mark-succeeded'
-  | 'mark-merged';
-
-export type AssignmentGraphChange =
-  | {
-      readonly kind: 'stage-declared';
-      readonly stage: AssignmentStageNode;
-    }
-  | {
-      readonly kind: 'assignment-transition';
-      readonly action: AssignmentGraphAction;
-      readonly assignment: AssignmentRecord;
-      readonly stage: AssignmentStageNode;
-    }
-  | {
-      readonly kind: 'assignment-transition';
-      readonly action: 'resume-binding';
-      readonly assignment: AssignmentRecord;
-      readonly stage: AssignmentStageNode;
-      readonly segmentOpenedCommitRef: JournalCommitRef;
-    };
-
-export interface AssignmentGraphFact {
-  readonly version: 1;
-  readonly stream: AssignmentGraphStream;
-  readonly revision: number;
-  readonly change: AssignmentGraphChange;
-}
-
-export interface CommittedAssignmentGraphFact {
-  readonly fact: AssignmentGraphFact;
-  readonly commitRef: JournalCommitRef;
-}
-
-export interface AssignmentGraphCommitRequest {
-  readonly commitId: string;
-  readonly expectedRevision: number;
-  readonly fact: AssignmentGraphFact;
-}
-
-export interface AssignmentGraphResumeSource {
-  readonly openedCommitRef: JournalCommitRef;
-  readonly opened: ResumedTurnSegmentOpened;
-  readonly initial: ActiveTurnInitialSegmentSource;
-  readonly segments: readonly ResumedTurnSegmentOpened[];
-}
+/**
+ * The candidate second-graph persistence DTOs (stream, action, change, fact,
+ * commit, resume source) were removed from this contracts module. The native
+ * execution graph reads committed active-turn, segment, review and Planner
+ * records directly; it does not create a second durable assignment-graph fact
+ * stream. Runtime/JSONL/App/UI consumers that referenced those DTOs are migrated
+ * by their respective owners.
+ */
