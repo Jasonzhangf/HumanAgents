@@ -6,6 +6,11 @@
 - 作者原 3 个 readiness 回归 3/3；原 opened-stop 已越过 409，实际到 stop/checkpoint/Provider settle-close/I2/cycle close。当前失败为 expected `{kind:'stop'}` 与 actual `{kind:'stop',ref:'operator-stop'}`，交 App owner 核合同；cold reader 尚未执行，不记通过。作者证据：`.worker-runs/inspection-stop-readiness-20261017/note.md`（外置 humanagent 根）。
 - r331 独立 Gemini 只读计划已终态并接收，零模型请求。原 RCC neutral-SSE/EOF 根因仍 UNKNOWN；计划要求先核当前声明 binding、readiness 与 capture 路由，未有实质变化不得重复生成。fresh GCM r332 已启动执行该零请求观察，tmux `ha-native-r332`，报告在既有 RUN `native-real-entry-owner-observe-r332-20261017`；不改配置、不换模型、不创建 Task。完整目标 ACTIVE/INCOMPLETE。
 
+## 2026-10-17 N2 后继证据复用与冷进程回归
+
+- 因预算增量改变恢复父控制核验，Root仅运行既有 `C3a fresh process hydrates the confirmed-control floor and closes the next execution`，当前main实际1/1PASS（session96673，10108ms）。r329/c3a-process-boundary.json保留seed PID33891/code0先退出、next PID35325/code0后启动事实；同fixture纠正/回退/前进后恢复控制floor、下一执行收口与Memory边界被原断言覆盖。无新用例/模型请求，成功fixture自动清理。
+- r278已接受N2不新增代码/测试/DAG；其旧liveMemory语义未知已有r310真实路径对比PASS。直接读取r40/QppklP receipt确认actualSubmits1、model/succeeded、autoUpdatefalse及procedural candidate，原case的external-operation断言失败仍保留，仅复用随后既有helper修正/离线audit证据，不伪称原casePASS。r330独立充分性计划已接受：r329进程边界+r310被替换路径/保留结论审计+r40真实项目procedural lesson及offline-audit共同补足r278这一具体未知。此范围证据充分即停止，不新增模型请求、测试或实现；DAG Operator registration仍按既有声明UNVERIFIED，完整goal/N1/N3/inspection继续开放。
+
 ## 2026-10-17 已交付：工具预算中断与同业务 turn 恢复增量
 
 - 六文件来源7fccbbe4与最新main组合为ef8c772c，独立完整Review r326 Opus实quota未审；r327 freshGemini有效JSON/exit0/空findings，既有classifier裁决PASS。main已FF并push，原始远端回执 `860ef944..ef8c772c main -> main`。未混入inspection候选。
