@@ -28,6 +28,12 @@ const OUTCOME_TEXT = Object.freeze({
   unknown: '结果未知',
 })
 
+const REVIEW_STATUS_TEXT = Object.freeze({
+  passed: '通过',
+  failed: '未通过',
+  inconclusive: '未定',
+})
+
 const NEXT_TEXT = Object.freeze({
   continue: '继续执行',
   wait: '等待',
@@ -247,6 +253,14 @@ function facts(ui, parent, pairs) {
   parent.append(list)
 }
 
+function technicalDetails(ui, role, pairs, label = '技术详情') {
+  const details = ui.make('details', undefined, 'history-detail')
+  details.setAttribute('data-checkpoint-role', role)
+  details.append(ui.make('summary', label))
+  facts(ui, details, pairs)
+  return details
+}
+
 function evidenceRef(ui, parent, label, ref, options, role) {
   const box = ui.make('div', undefined, 'item')
   if (role) box.setAttribute('data-checkpoint-role', role)
@@ -296,10 +310,10 @@ function assetDescriptor(ui, parent, label, asset, options, role, body) {
   if (asset === undefined || asset === null) {
     box.append(ui.make('p', '不可用：读取结果未提供该资产描述。', 'muted'))
   } else {
-    facts(ui, box, [
+    box.append(technicalDetails(ui, 'asset-descriptor-technical', [
       ['资产证据 ID', asset.ref?.evidenceId?.value],
       ['读取视图', asset.view?.kind],
-    ])
+    ]))
     // A persisted asset descriptor now has an exact body read. The descriptor-only
     // deep link stays dead, so this trigger replaces it instead of adding a second
     // path to the same descriptor.
@@ -419,15 +433,16 @@ function semanticBlock(ui, semantic, onOpenReference, bodyTarget, readOptions) {
   for (const ref of semantic.evidenceRefs ?? []) evidenceRef(ui, box, '语义证据引用', ref, { onOpenReference })
   for (const child of semantic.adoptedChildren ?? []) {
     const adopted = ui.make('div', undefined, 'item')
-    adopted.append(ui.make('strong', `采用子交付 ${child.kind}`))
-    facts(ui, adopted, [
+    adopted.setAttribute('data-checkpoint-role', 'adopted-child')
+    adopted.append(ui.make('strong', `采用子交付 · ${child.kind === 'review' ? '审查' : child.kind === 'execution' ? '执行' : String(child.kind)}`))
+    adopted.append(technicalDetails(ui, 'adopted-child-technical', [
       ['调用 ID', child.invocationId],
       ['子回合 ID', child.childTurnId],
       ['交付序号', child.deliverySeq],
       ['前置检查点', child.preCallCheckpointRef],
       ['审查后检查点', child.postReviewCheckpointRef],
       ['分段 ID', child.segmentId],
-    ])
+    ]))
     // The exact adopted-child triple plus the exact clicked checkpoint receipt
     // are bound when this row is rendered, before any body read starts.
     assetDescriptor(ui, adopted, '精炼交付', child.refinedDelivery, {
@@ -695,9 +710,88 @@ function assetViewText(view) {
 
 function checkpointAssetLabel(selector) {
   if (selector?.kind === 'adopted-child') {
-    return `已采用子交付 ${selector.invocationId} · ${selector.childTurnId} · 交付 ${selector.deliverySeq}`
+    return '已采用子交付'
   }
   return '恢复捕获'
+}
+
+function knownEnvelope(text) {
+  let candidate
+  try {
+    candidate = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined
+  if (typeof candidate.summary === 'string'
+    && Array.isArray(candidate.producedArtifactBodies)
+    && candidate.producedArtifactBodies.every((body) => typeof body === 'string')) {
+    return { kind: 'execution', value: candidate }
+  }
+  if (REVIEW_STATUS_TEXT[candidate.status] !== undefined && Array.isArray(candidate.findings)) {
+    return { kind: 'review', value: candidate }
+  }
+  return undefined
+}
+
+function humanText(ui, role, text, className = 'muted') {
+  const node = ui.make('p', text, className)
+  node.setAttribute('data-checkpoint-role', role)
+  return node
+}
+
+function reviewFindings(ui, findings) {
+  if (findings.length === 0) {
+    return humanText(ui, 'asset-body-review-findings-empty', '本次审查未列出审查发现。')
+  }
+  const list = ui.make('div', undefined, 'stack')
+  for (const finding of findings) {
+    if (!finding || typeof finding !== 'object') continue
+    const problem = typeof finding.problem === 'string' ? finding.problem : ''
+    const expected = typeof finding.expected === 'string' ? finding.expected : ''
+    const detail = problem || expected
+    if (!detail) continue
+    const row = ui.make('div', undefined, 'item')
+    row.setAttribute('data-checkpoint-role', 'asset-body-review-finding')
+    row.append(humanText(ui, 'asset-body-review-finding-problem', `发现：${problem || '未提供问题说明'}`))
+    if (expected) row.append(humanText(ui, 'asset-body-review-finding-expected', `期望：${expected}`))
+    list.append(row)
+  }
+  return list
+}
+
+function rawEnvelopeDetails(ui, originalText) {
+  const details = ui.make('details', undefined, 'history-detail')
+  details.setAttribute('data-checkpoint-role', 'asset-body-raw')
+  details.append(ui.make('summary', '原始正文（未改写）'))
+  const raw = ui.make('pre', originalText)
+  raw.setAttribute('data-checkpoint-role', 'asset-body-raw-text')
+  details.append(raw)
+  return details
+}
+
+function knownExecutionBody(ui, value) {
+  if (typeof value.summary === 'string' && value.summary.trim()) {
+    ui.root.append(humanText(ui, 'asset-body-summary', `摘要：${value.summary}`))
+  }
+  if (value.producedArtifactBodies.length === 0) {
+    ui.root.append(humanText(ui, 'asset-body-produced-empty', '未提供产出正文。'))
+    return
+  }
+  for (const [index, produced] of value.producedArtifactBodies.entries()) {
+    const section = ui.make('section')
+    section.append(ui.make('strong', `产出正文 ${index + 1}`))
+    const body = ui.make('pre', produced)
+    body.setAttribute('data-checkpoint-role', 'asset-body-produced')
+    section.append(body)
+    ui.root.append(section)
+  }
+}
+
+function knownReviewBody(ui, value) {
+  ui.root.append(humanText(ui, 'asset-body-review-status', `审查状态：${REVIEW_STATUS_TEXT[value.status]}`))
+  ui.root.append(reviewFindings(ui, value.findings))
+  ui.root.append(humanText(ui, 'asset-body-review-fulltext', '本次读取未包含完整审查正文；资产引用不是完整审查正文。'))
 }
 
 // The folded provenance of one body read. Every identity and machine field the
@@ -770,22 +864,32 @@ export function renderCheckpointAssetBody(result, options = {}) {
 
   const value = result.value
   const head = ui.make('div', undefined, 'stack')
-  head.append(ui.make('h3', checkpointAssetLabel(value.selector)))
+  const title = ui.make('h3', checkpointAssetLabel(value.selector))
+  title.setAttribute('data-checkpoint-role', 'asset-body-title')
+  head.append(title)
   head.append(ui.make('p', `检查点 ${value.checkpoint?.seq ?? '未提供'}`, 'muted'))
   const actions = ui.make('div', undefined, 'history-actions')
   ui.action(actions, '返回检查点详情', options.onBack, undefined, 'button button--quiet')
   head.append(actions)
   ui.root.append(head)
 
-  // Provider text keeps its own whitespace. `pre` renders it verbatim while
-  // still wrapping inside the side panel and the bottom drawer.
   const bodyText = typeof value.text === 'string' ? value.text : ''
-  if (bodyText.length === 0) {
+  const envelope = value.selector?.kind === 'adopted-child' ? knownEnvelope(bodyText) : undefined
+  if (envelope?.kind === 'execution') {
+    title.textContent = '执行交付'
+    knownExecutionBody(ui, envelope.value)
+    ui.root.append(rawEnvelopeDetails(ui, bodyText))
+  } else if (envelope?.kind === 'review') {
+    title.textContent = '审查结果'
+    knownReviewBody(ui, envelope.value)
+    ui.root.append(rawEnvelopeDetails(ui, bodyText))
+  } else if (bodyText.length === 0) {
     const empty = ui.make('div', undefined, 'item')
     empty.setAttribute('data-checkpoint-role', 'asset-body-empty')
     empty.append(ui.make('p', '该资产的正文为空，本次读取没有返回任何字符。'))
     ui.root.append(empty)
   } else {
+    // Capture, ordinary text and unrecognized payloads keep their exact text.
     const body = ui.make('pre', bodyText)
     body.setAttribute('data-checkpoint-role', 'asset-body-text')
     ui.root.append(body)
