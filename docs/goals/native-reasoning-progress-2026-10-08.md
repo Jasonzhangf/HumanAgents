@@ -3,8 +3,8 @@
 ## 2026-10-17 下一原定增量：M3 长程 review 与计划演进
 
 - 有限五文件观察已由peer接收并补精确caller：coordinator两处将dispatched.reviewCommitRefs交standardTurn.acceptReviews，manager聚合durable refs；不能将UNKNOWN当缺实现。独立r342进一步定位native child review→pre/post checkpoint→adoption→Planner refinedResults与coordinator startNextStandardTurn/prepareExecution新cycle源码链。此为源码依据，未运行新用例，不宣称长程两轮review生产验收完成。
-- r342执行合同含不存在Vitest命令、未建立openRuntimeAssembly helper、plan字段写法与抓错证明缺口，Root未准入实现；同Planner r343局部修正中（PID25235/session44391）。当前倾向只补一条既有CLI基础上的两cycle动态review公开证据，是否新增case与真实命令/冷reader/反例须待修订接受；无产品修改、新树、模型请求或新测试已执行。
-- peer并行补原M5的installed adopted-child同点双端正文证据，使用稳定installedCLI与默认packagedUI，独立临时serve，不占53007、不创建Task/调用模型。启动脚本stdout/配对变量问题由owner处理，未判产品bug，不retroactively增加已交inspection门禁。原显式interaction-2/RCC EOF单线仍hold。
+- r342错误执行合同已由同Planner r343修正并接受：真实Node/tsc、既有freshreader、合法plan语义字段，一条bounded consumer先GREEN，再一次实际Planner review转发遗漏反例RED，apply_patch恢复后GREEN。Root明确不许checkout/reset或据fixture失败改产品；真缺陷先报唯一owner。唯一fresh树m3-two-cycle-review-plan-20261017从当时最新origin/main建立，offline install0；fresh GCM r344/PID10578在原nativeconsumer单writer执行，提交只许测试文件，尚未验收。源码已有逻辑，当前证据增量不冒全部M3模板/UI/live完成。
+- 原M5 installed adopted-child同点双端证据已完整接收，Root实际view两installed截图：默认packagedUI、HTTP原文/语义正文匹配、布局/返回focus、两个Journalbyteequal，ownedserve关闭/端口拒连/pair临时文件删除；无Task/模型/canonical改动。正式证据RUN inspection-adopted-body-installed-20261017/reception.md。peer唯一UX计划更新022b164f已push，移除过期缺口但保留deepcold/真实RCC/全G14边界；Root不重复验收。peer并行仅澄清原M4专用scope/consumer的可复用证据，不重叠M3写域、不增门禁。原显式interaction-2/RCC EOF单线仍hold。
 
 ## 2026-10-17 已推送并安装：inspection 原生编排、停止与冷恢复增量
 
