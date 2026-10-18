@@ -11,7 +11,7 @@ import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryE
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { JsonlOrganJournal, JsonlTaskPlanRevisionJournal } from '../../packages/adapters/jsonl/src/index.js';
-import { createJsonlActiveTurnJournal, listTaskActiveTurnBindings } from '../../packages/adapters/jsonl/src/active-turn.js';
+import { createJsonlActiveTurnJournal, decodeActiveTurnRecords, listTaskActiveTurnBindings } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { filesystemProviderEvidenceSink, providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { UiRuntimeJournal, FileCheckpointStore } from '../../packages/app/src/ui-runtime/index.js';
@@ -771,6 +771,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly child?: boolean;
   readonly parallelChild?: boolean;
   readonly reviewPerCycle?: boolean;
+  readonly badReviewSelector?: boolean;
   readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
   readonly requiredBearer?: string;
@@ -1006,7 +1007,8 @@ async function textOnlyResponsesUpstream(input: {
             invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
               body: review ? `Cycle ${cycle} independent quality review` : executionBody,
               ...(review ? { judgment: 'passed', findings: [{ detail: `Cycle ${cycle} delivery verified`,
-                severity: 'advisory', evidenceRefs: ref === undefined ? [] : [ref] }] } : {}),
+                severity: 'advisory', evidenceRefs: input.badReviewSelector && cycle === 1
+                  ? ['x'.repeat(257)] : ref === undefined ? [] : [ref] }] } : {}),
             });
           } else {
             const deliveryEvidence = delivered.output!.split('\n')
@@ -1285,6 +1287,7 @@ async function textOnlyFixture(
   inspection = false,
   holdInspectionAfterAdoptOnce?: () => Promise<void>,
   reviewPerCycle = false,
+  badReviewSelector = false,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1299,7 +1302,7 @@ async function textOnlyFixture(
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount, reviewPerCycle,
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount, reviewPerCycle, badReviewSelector,
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
@@ -2386,6 +2389,73 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
   } finally {
     await fixture.upstream.close();
     await rm(fixture.root, { recursive: true });
+  }
+});
+
+// r353 exposed masked child failure reasons; probability is unknown. Impact:
+// wrong cause and recovery. Cost: one bounded local public CLI fixture. The
+// selector deliberately violates the declared 256-character tool schema.
+if (!coldConsumerMode) test('native review child failure preserves primary reason', async () => {
+  const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined, false, undefined, true, true);
+  let passed = false;
+  try {
+    const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
+    assert.equal(result.code, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout.slice(result.stdout.indexOf('{'), result.stdout.lastIndexOf('}') + 1));
+    console.log('review failure receipt', JSON.stringify({ fixture: fixture.root, receipt }));
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'blocked');
+    assert.equal(receipt.error?.message, 'child call finding 0 evidenceRefs item exceeds its 256 character bound');
+    assert.equal(receipt.output, '');
+    assert.equal(receipt.release, 'released');
+    const scope = { organId: id('organ', 'humanagent-ui'), taskId };
+    const verified = await fixture.journal.verify();
+    const bindings = await listTaskActiveTurnBindings({ journal: fixture.journal, scope });
+    const parent = bindings.find((entry) => entry.binding.scope.operationId?.value === receipt.operationId);
+    if (!parent) throw new Error('missing parent active turn');
+    const parentRecords = decodeActiveTurnRecords(verified.records, parent.binding.admittedTurn.turnId);
+    const reviews = parentRecords.filter((entry) => entry.kind === 'child-invocation' && entry.record.binding.kind === 'review');
+    assert.equal(reviews.length, 1, 'one review invocation is retained without automatic replay');
+    const review = reviews[0]!;
+    if (review.kind !== 'child-invocation' || review.record.binding.kind !== 'review') throw new Error('missing review invocation');
+    assert.equal(review.record.adoptedResultSeq, undefined);
+    assert.equal(review.record.postReviewCheckpointRef, undefined);
+    assert.equal(parentRecords.some((entry) => entry.kind === 'child-delivery' && entry.entry.kind === 'review'), false,
+      'no review return or synthetic inconclusive result is committed');
+    const child = bindings.find((entry) => entry.binding.assignment.assignmentId === review.record.binding.assignment.assignmentId);
+    if (!child) throw new Error('the failed review has no same-task admitted control scope');
+    const childControl = await createJsonlOperationControlJournal({ journal: fixture.journal }).readControl({
+      scope: parent.binding.scope,
+      ...(child.binding.scope.operationId === undefined ? {} : { operationId: child.binding.scope.operationId }),
+    });
+    assert.equal(childControl.state, 'complete');
+    if (childControl.state !== 'complete') throw new Error('incomplete child control journal');
+    assert.equal(childControl.operations.length, 1);
+    assert.equal(childControl.operations[0]?.status, 'failed');
+    assert.equal(
+      childControl.operations[0]?.failure?.message,
+      'child call finding 0 evidenceRefs item exceeds its 256 character bound',
+    );
+    const childRecords = decodeActiveTurnRecords(verified.records, child.binding.admittedTurn.turnId);
+    assert.ok(childRecords.some((entry) => entry.kind === 'request' && entry.record.phase === 'failed'
+      && entry.record.scope.taskId?.value === taskId.value
+      && entry.record.scope.operationId?.value === child.binding.scope.operationId?.value),
+    'the review request failure remains durable in its original task and operation');
+    assert.ok(verified.records.some((entry) => entry.checkpoint?.id.value === review.record.checkpointReceiptRef),
+      'the unreturned review retains its actual pre-call recovery checkpoint');
+    const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    const reviewRequests = posts.filter((wire) => parseResponsesWire(wire.body)?.model === 'review.only.model');
+    assert.equal(reviewRequests.length, 2, 'one read and one invalid delivery, with no replay or success drain');
+    assert.equal(posts.some((wire) => plannerPayload(wire.body) !== undefined), false,
+      'failed review cannot advance to a successful turn closure');
+    console.log('review failure control', JSON.stringify({ taskId: taskId.value,
+      invocationId: review.record.invocationId, childOperationId: child.binding.scope.operationId?.value,
+      recoveryCheckpoint: review.record.checkpointReceiptRef, reviewRequests: reviewRequests.length }));
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`review failure fixture retained: ${fixture.root}`);
   }
 });
 

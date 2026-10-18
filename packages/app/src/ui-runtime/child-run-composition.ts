@@ -8,6 +8,7 @@ import {
   validateRouteSelection,
   type EvidenceRef,
   type OperationEvent,
+  type OperationFailure,
   type OperationResult,
   type ProviderExecutionIdentityRef,
   type ProviderToolDefinition,
@@ -186,9 +187,31 @@ function createChildControlLifecycle(input: {
     kind: OperationEvent['kind'],
     evidenceRefs: readonly EvidenceRef[],
     result?: OperationResult,
+    failureInput?: { readonly message: string },
   ): Promise<void> => {
+    const occurredAt = input.occurredAt();
+    const failure: OperationFailure | undefined = status === 'failed' && failureInput !== undefined
+      ? {
+          errorId: `child-control-failure:${intent.operationId.value}:${input.executionEpoch}`,
+          operationId: intent.operationId,
+          owner: registration.owner,
+          phase: 'execution',
+          failureClass: 'executor',
+          message: failureInput.message,
+          observedAt: occurredAt,
+          impact: 'operation cannot advance to a trusted terminal result',
+          protectiveAction: 'preserve operation identity and evidence for explicit recovery',
+          nextAction: { kind: 'recover', ref: intent.operationId.value },
+          evidenceRefs: [...evidenceRefs],
+        }
+      : undefined;
     await input.gateway.applyExternalLifecycle({
-      control: { ...base, status, ...(result === undefined ? {} : { result }) },
+      control: {
+        ...base,
+        status,
+        ...(result === undefined ? {} : { result }),
+        ...(failure === undefined ? {} : { failure }),
+      },
       event: {
         eventId: `child-control:${kind}:${intent.operationId.value}`,
         schemaVersion: 1,
@@ -197,21 +220,23 @@ function createChildControlLifecycle(input: {
         taskId: intent.taskId,
         executionEpoch: input.executionEpoch,
         status,
-        occurredAt: input.occurredAt(),
+        occurredAt,
         evidenceRefs: [...evidenceRefs],
+        ...(failure === undefined ? {} : { failure }),
       },
     });
   };
   return {
     accept: () => commit('accepted', 'operation.accepted', input.admissionEvidenceRefs),
     running: ({ evidenceRefs }) => commit('running', 'operation.started', evidenceRefs),
-    settle: ({ status, evidenceRefs, result }) => commit(status,
+    settle: ({ status, evidenceRefs, result, failure }) => commit(status,
       status === 'succeeded' ? 'operation.completed'
         : status === 'failed' ? 'operation.failed'
         : status === 'cancelled' ? 'operation.cancelled'
         : 'operation.blocked',
       evidenceRefs,
-      result),
+      result,
+      failure),
   };
 }
 

@@ -348,6 +348,7 @@ export interface ChildControlLifecyclePort {
     readonly status: 'succeeded' | 'failed' | 'cancelled' | 'blocked';
     readonly evidenceRefs: readonly EvidenceRef[];
     readonly result?: OperationResult;
+    readonly failure?: { readonly message: string };
   }): Promise<void>;
 }
 
@@ -1381,6 +1382,7 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
     : settlement?.state === 'cancelled' || settlement?.state === 'stopped' ? 'cancelled'
     : 'blocked';
   const terminalEvidence = [
+    ...(status === 'failed' ? outcome.events.flatMap((event) => event.evidenceRefs) : []),
     ...(settlement?.evidenceRefs ?? []),
     ...(input.state.acceptedCommand?.resolvedEvidenceRefs ?? []),
   ];
@@ -1402,9 +1404,16 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
       status,
       evidenceRefs: terminalEvidence,
       ...(result === undefined ? {} : { result }),
+      ...(status === 'failed' && resolved.state === 'blocked'
+        ? { failure: { message: outcome.state === 'failed' ? outcome.reason : resolved.reason } }
+        : {}),
     });
   } catch (error) {
-    return { state: 'blocked', reason: `child control settlement failed: ${errorMessage(error)}` };
+    const settlementReason = `child control settlement failed: ${errorMessage(error)}`;
+    return {
+      state: 'blocked',
+      reason: resolved.state === 'blocked' ? `${resolved.reason}; ${settlementReason}` : settlementReason,
+    };
   }
   return resolved;
 }
@@ -1545,26 +1554,7 @@ export function createConfiguredReviewAgent(input: ConfiguredChildAgentInput): R
             signal: review.signal ?? new AbortController().signal,
           });
           if (resolved.state === 'blocked') {
-            return {
-              result: {
-                resultId: `review-result:${create.incarnation.agentInstanceId}:blocked`,
-                assignmentId: review.reviewAssignment.assignmentId,
-                taskId: review.reviewAssignment.taskId,
-                workerAgentId: review.reviewAssignment.workerAgentId,
-                reviewKind: review.reviewAssignment.reviewKind,
-                attempt: review.reviewAssignment.attempt,
-                executionEpoch: review.reviewAssignment.executionEpoch,
-                inputRevision: review.reviewAssignment.inputRevision,
-                acceptanceCriteriaDigest: review.reviewAssignment.acceptanceCriteriaDigest,
-                subjectRefs: [...review.reviewAssignment.subjectRefs],
-                subjectDigests: [...review.reviewAssignment.subjectDigests],
-                status: 'inconclusive',
-                findings: [],
-                evidenceRefs: [],
-              },
-              output: { text: boundedSummary(resolved.reason), artifactRef: null, artifactDigest: null },
-              completedAt: (input.now?.() ?? new Date()).toISOString(),
-            };
+            throw new Error(resolved.reason);
           }
           return resolved.result as ReviewAgentDelivery;
         },
