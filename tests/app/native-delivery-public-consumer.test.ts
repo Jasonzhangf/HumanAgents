@@ -2584,6 +2584,7 @@ function inspectionRecords(records: Awaited<ReturnType<JsonlOrganJournal['verify
       ? [{ record: value as Record<string, unknown>, journal: record }] : [];
   });
   return {
+    definitionEntries: i2.filter(({ record }) => record.kind === 'inspection-definition'),
     definitions: i2.filter(({ record }) => record.kind === 'inspection-definition').map((entry) => entry.record),
     cycles: i2.filter(({ record }) => record.kind === 'business-cycle-opened'),
     openingEntries: i2.filter(({ record }) => record.kind === 'inspection-occurrence-opened'),
@@ -2870,9 +2871,21 @@ if (!coldConsumerMode) test('native opened inspection public stop settles the oc
       requireRecord(executionScope.operationId, 'the held parent operation').value,
       'the held parent operation id',
     );
-    assert.deepEqual(requireRecord(opening.definition, 'the inspection definition'), {
+    const openingDefinition = requireRecord(opening.definition, 'the inspection definition');
+    assert.deepEqual({
+      definitionId: openingDefinition.definitionId,
+      definitionVersion: openingDefinition.definitionVersion,
+    }, {
       definitionId: INSPECTION_DEFINITION_ID, definitionVersion: INSPECTION_DEFINITION_VERSION,
-    });
+    }, 'the inspection occurrence retains the definition identity');
+    const definitionCommitRef = requireRecord(opening.definitionCommitRef,
+      'the inspection definition commit ref') as unknown as JournalCommitRef;
+    const definitionEntry = exactInspectionEntry(barrier.definitionEntries, definitionCommitRef);
+    if (!definitionEntry) throw new Error('the inspection occurrence has no exact committed definition');
+    assert.equal(opening.definitionDigest, definitionEntry.record.definitionDigest,
+      'the inspection occurrence digest binds the exact committed definition');
+    assert.deepEqual(requireRecord(definitionEntry.record.content, 'the committed inspection definition content'),
+      INSPECTION_DEFINITION, 'the referenced committed definition retains its immutable content');
     const delivery = requireRecord(itemEntry.record.delivery, 'the accepted inspection item');
     const actualInvocations = fixture.upstream.inspectionInvocations();
     assert.deepEqual(actualInvocations.map((entry) => entry.callId), ['call-inspection-parent-1'],
