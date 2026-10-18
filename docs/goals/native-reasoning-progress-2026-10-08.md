@@ -1,5 +1,14 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 已交付：公开 taskless helper 接线验收
+
+- 测试候选 `2ad679f5` 已正常FF main并push，回执 `6bd955b5..2ad679f5 main -> main`。仅原公开consumer测试文件334insertions/3deletions；无永久产品修改。完整goal和完整N3长程验收仍OPEN。
+- r406单次诊断证明首错为fixture要求HTTP携带内部execution身份；实际serializer不发送它，改从真实Journal派发记录读取。Root随后实际同例暴露fixture把接受前null断言用于接受后；r407纠正阶段后compile0/原case1PASS。两次均是测试错误，不冒产品RED。
+- r408临时移除CLI helper preparer后，原同例实际HTTP409 `explicit-brain-helper-unavailable`/exit1；接线apply_patch恢复，Root实际build0、同例1PASS/exit0，日志 `native-n3-omission-r408-20261018/{run-red.log,owner-build-green.log,owner-run-green.log}`。worker未来意向未算复验。
+- r409独立完整Review实际Gemini4medium/SUCCESS/exit0，严格四字段输出，既有classifier PASS/findings[]。r410再用canonical `/opt/homebrew/bin/humanagent` 与实际installed modules执行同例1PASS/exit0，证明安装入口，不冒liveRCC或完整长程运行。候选仅测试，因此不重复安装或重启未变产品。canonical53007未操作。
+- 实际回执覆盖独立父/子model、子输入隔离、durable dispatch/returned、显式owneracceptance、精炼资产/checkpoint和最终answer。原共享consumer写窗口已交UX peer，其M3树已标准Git采用2ad679f5；本侧Review未占其writer。
+- 当轮清理完成：N3树clean/无活动worker，普通worktree remove/prune/pathabsent、merged branch删除；4份失败fixture先归档r410/failed-fixtures-evidence.tgz，两项自有fixture根与installed consumer-layout已删除。peer树保留。原始run证据留存。
+
 ## 2026-10-18 N3 公开 helper 首次行为失败，保留现场定位
 
 - r400 已接受局部公开 consumer 计划；r402 fresh GCM 在唯一 `native-n3-public-helper-20261018` 树修改原 `tests/app/native-delivery-public-consumer.test.ts`，未修改产品代码。Contracts、Config、App 及 native consumer 编译均实际 exit0。首轮编译的测试类型错误已纠正，不计产品 RED。
