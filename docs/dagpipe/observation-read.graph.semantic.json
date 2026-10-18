@@ -2,11 +2,11 @@
   "graph": "humanagent-observation-read",
   "labels": {
     "http_api": "处理语义与观测只读请求并按显式项目、模式和任务范围选择真实读取源",
-    "load_task_truth": "读取指定任务状态、同范围准入、同源提交输出和实际实例归属",
+    "load_task_truth": "读取指定任务状态、同范围准入、同源提交输出、实际实例归属和已记录 graph facts",
     "load_event_history": "读取指定项目与模式的执行事实及真实关联身份",
     "normalize_context_events": "统一归类发生事件并标出语义缺口",
     "pair_context_events": "在同一执行范围内配对活动与结果",
-    "project_semantic_views": "组合已配对语义与原实例归属 分开显示当前和查看历史",
+    "project_semantic_views": "组合已配对语义与原实例归属 分开显示 guidance、当前计划与已记录实例",
     "project_status_and_actions": "投影状态新鲜度与合法动作并明确缺失提交输出",
     "browser_view": "共享语义控件按事件与模块数据边渲染观测 并携带完整任务范围"
   },
@@ -16,6 +16,7 @@
     "observationAgent": "observation 沿现有 decodeTaskAgentActivitySelectionQuery 解析 agent/turn/item，并从同一解析 scope 读取实际 Agent activity；不伪造 Organ。",
     "foreignStream": "外项目 durable stream 在写 200 前完成校验和快照读取，发送一次 semantic 快照、一次空数据 semantic-complete 传输事件，然后正常结束。",
     "publicOutput": "durable inventory 使用同一 FileCheckpointStore.readPublicOutputs 读取器恢复 publicOutput，沿用 checkpoint 或 operation 的 executionEpoch 选择。task.output 只使用已提交 publication；缺失、pending、unavailable 或 unknown 明确显示，不用 record.output、provider 或 model 文本回退。原始与动作证据仍可读。",
-    "ownership": "http_api 与 browser_view 只保留 typed scope 和只读传输；load_task_truth/load_event_history 从声明范围读取真实 Journal；不新增跨进程 registry、HTTP proxy 或第二语义存储。"
+    "ownership": "http_api 与 browser_view 只保留 typed scope 和只读传输；load_task_truth/load_event_history 从声明范围读取真实 Journal；不新增跨进程 registry、HTTP proxy 或第二语义存储。",
+    "actualExecutionGraph": "同一 agentActivity 成功值通过 actualExecutionGraph 携带 contracts source snapshot。App 从已验证 controlRecords 解码并按 task/owner stream replay，不创建 Manager、不 acquire、不 rebind；UI 只投影该 source。缺失历史明确标为未记录，当前计划仍走既有 TaskPlanSnapshot carrier。"
   }
 }

@@ -20,7 +20,9 @@
     "designStatus": "USER-REQUIREMENT-DESIGN",
     "implementationStatus": "UNVERIFIED",
     "bindingBoundary": "设计责任名称，不声称 Operator 已注册或 Runtime 已执行",
-    "visibilityBoundary": "不显示重复/无内容/无用途字段；必要失败、未知与恢复责任不得隐藏。"
+    "visibilityBoundary": "不显示重复/无内容/无用途字段；必要失败、未知与恢复责任不得隐藏。",
+    "actualExecutionGraphContract": "truth 读取现有 agentActivity 成功值中的 actualExecutionGraph；semantic 与 purpose 分开呈现 guidance、既有当前计划和已记录 assignment instances；necessary 明确保留缺失历史、空 stage、parent、成员状态、真实 commit 证据与未归类事实；present 不把 parent、成员归属或固定 registry 宣称为执行依赖。",
+    "readOnlyBoundary": "本图只有读取、解释与呈现。不得在此图消费需求、创建 Manager、提交 graph fact、acquire、execute、rebind 或执行 steer。"
   },
   "inputs": [
     {

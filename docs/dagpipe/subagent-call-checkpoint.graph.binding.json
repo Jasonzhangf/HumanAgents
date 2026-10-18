@@ -4,15 +4,17 @@
     "operator": "humanagent-subagent-call-checkpoint",
     "operator_version": "1"
   },
-  "status": "DESIGN-UNVERIFIED",
+  "status": "DESIGN-APPROVED-P1-CONTRACT-UNVERIFIED",
   "nodes": {
     "assignment": {
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "普通 execution/review 明确角色任务；只有 execution 显式 check 时，Runtime 才选择正式 definition 并按需打开同一 logical turn 的 occurrence。contracts 仅提供类型，不拥有 open occurrence 副作用。",
+      "designNote": "普通 execution/review 明确角色任务；只有 execution 显式 check 时，Runtime 才选择正式 definition 并按需打开同一 logical turn 的 occurrence。P1 contracts 定义 AssignmentGraph DTO、read/journal ports 与 source snapshot；Runtime 的 prepare/applyCommitted/replay 只计算和重放事实，不拥有 open occurrence 副作用。",
       "typeOwnerPath": "packages/contracts/src/native-reasoning.ts",
       "typeOwnerRel": "packages/contracts/src/native-reasoning.ts",
+      "assignmentGraphContractPath": "packages/contracts/src/assignment-graph.ts",
+      "assignmentGraphRuntimePath": "packages/runtime/src/orchestration/assignment-graph.ts",
       "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
       "coordinationStatus": "planned/unimplemented"
     },
@@ -38,7 +40,7 @@
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "接纳 durable child return；显式 check 时再由 Runtime 幂等补 I2 receipt，无检查 occurrence 的普通任务不创建 I2 记录。恢复只补缺失提交，不重启 child；缺少 durable return 或提交失败时保留恢复责任并显式失败，不以完整正文代替。",
+      "designNote": "接纳 durable child return；显式 check 时再由 Runtime 幂等补 I2 receipt，无检查 occurrence 的普通任务不创建 I2 记录。恢复只补缺失提交，不重启 child；缺少 durable return 或提交失败时保留恢复责任并显式失败，不以完整正文代替。所有 assignment 状态转移与成员接纳都经同一 committed fact apply 规则进入 live graph。",
       "coordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
       "coordinationStatus": "planned/unimplemented",
       "appWiringOnly": "packages/app"

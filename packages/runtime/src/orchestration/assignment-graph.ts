@@ -3,7 +3,9 @@ import {
   id,
   validateWorkAssignment,
   validateWorkResult,
+  validateTaskIdentityScope,
   type EvidenceRef,
+  type JournalCommitRef,
   type NextAction,
   type TaskId,
   type WorkAssignment,
@@ -13,13 +15,20 @@ import type { ReviewResult } from '../review/index.js';
 import { AssignmentGraphError } from './errors.js';
 import type {
   AssignmentGraphSnapshot,
+  AssignmentGraphAction,
+  AssignmentGraphChange,
+  AssignmentGraphFact,
+  AssignmentGraphStream,
   AssignmentKey,
   AssignmentRecord,
   AssignmentRuntimeBinding,
   AssignmentStageNode,
   AssignmentStatus,
+  CommittedAssignmentGraphFact,
   WorkCriterionEvaluation,
 } from './types.js';
+
+type AssignmentGraphTransitionAction = AssignmentGraphAction;
 
 export interface CreateStageInput {
   readonly nodeId: string;
@@ -62,7 +71,29 @@ export type AssignmentResultAcceptance =
 
 export interface AssignmentGraphOptions {
   readonly ownerId: string;
+  readonly stream?: AssignmentGraphStream;
 }
+
+export interface PreparedGraphChange<T> {
+  readonly change: AssignmentGraphChange | null;
+  readonly value: T;
+}
+
+export type GraphMutation<T> =
+  | {
+      readonly kind: 'declare-stage';
+      readonly apply: (graph: AssignmentGraph) => T;
+    }
+  | {
+      readonly kind: 'assignment-transition';
+      readonly action: AssignmentGraphTransitionAction;
+      readonly apply: (graph: AssignmentGraph) => T;
+    }
+  | {
+      readonly kind: 'resume-binding';
+      readonly segmentOpenedCommitRef: JournalCommitRef;
+      readonly apply: (graph: AssignmentGraph) => T;
+    };
 
 function cloneAssignment(assignment: WorkAssignment): WorkAssignment {
   return {
@@ -100,6 +131,12 @@ function cloneStage(stage: AssignmentStageNode): AssignmentStageNode {
 
 export function assignmentKey(input: AssignmentKey): string {
   return `${input.assignmentId}:${input.attempt}:${input.executionEpoch}`;
+}
+
+function sameStream(left: AssignmentGraphStream, right: AssignmentGraphStream): boolean {
+  return left.ownerId === right.ownerId
+    && left.taskScope.organId.value === right.taskScope.organId.value
+    && left.taskScope.taskId.value === right.taskScope.taskId.value;
 }
 
 function sameAssignment(left: WorkAssignment, right: WorkAssignment): boolean {
@@ -198,7 +235,9 @@ function validateCriteria(
 export class AssignmentGraph {
   private readonly stages = new Map<string, AssignmentStageNode>();
   private readonly assignments = new Map<string, AssignmentRecord>();
+  private revisionValue = 0;
   readonly ownerId: string;
+  readonly stream?: AssignmentGraphStream;
 
   constructor(options: AssignmentGraphOptions) {
     if (!options.ownerId.trim()) {
@@ -210,6 +249,144 @@ export class AssignmentGraph {
       });
     }
     this.ownerId = options.ownerId;
+    if (options.stream) {
+      validateTaskIdentityScope(options.stream.taskScope);
+      if (options.stream.ownerId !== options.ownerId) {
+        throw new AssignmentGraphError('assignment graph stream owner does not match graph owner', {
+          ownerId: options.ownerId,
+          reason: 'assignment.stream.owner.mismatch',
+          nextAction: { kind: 'recover', ref: 'assignment.stream.owner' },
+          evidenceRefs: [evidence(options.stream.taskScope.taskId, 'assignment.stream.owner.mismatch')],
+        });
+      }
+      this.stream = {
+        taskScope: { ...options.stream.taskScope },
+        ownerId: options.stream.ownerId,
+      };
+    }
+  }
+
+  get revision(): number {
+    return this.revisionValue;
+  }
+
+  prepare<T>(mutation: GraphMutation<T>): PreparedGraphChange<T> {
+    const draft = this.fork();
+    const value = mutation.apply(draft);
+    const changedStages = this.changedStages(draft);
+    const changedAssignments = this.changedAssignments(draft);
+
+    if (changedStages.length === 0 && changedAssignments.length === 0) {
+      return { change: null, value };
+    }
+
+    if (mutation.kind === 'declare-stage') {
+      if (changedAssignments.length !== 0 || changedStages.length !== 1) {
+        throw new AssignmentGraphError('stage declaration must change exactly one stage and no assignment', {
+          ownerId: this.ownerId,
+          reason: 'assignment.graph.prepare.stage',
+          nextAction: { kind: 'recover', ref: 'assignment.graph.prepare' },
+          evidenceRefs: [evidence(undefined, 'assignment.graph.prepare.stage')],
+        });
+      }
+      const stage = changedStages[0]!;
+      const previous = this.stages.get(stage.nodeId);
+      if (previous || stage.assignmentKeys.length !== 0) {
+        throw new AssignmentGraphError('stage declaration must add one empty stage', {
+          ownerId: this.ownerId,
+          reason: 'assignment.graph.prepare.stage',
+          nextAction: { kind: 'recover', ref: `assignment.stage.${stage.nodeId}` },
+          evidenceRefs: [evidence(stage.taskId, 'assignment.graph.prepare.stage')],
+        });
+      }
+      return {
+        change: { kind: 'stage-declared', stage: cloneStage(stage) },
+        value,
+      };
+    }
+
+    if (changedAssignments.length !== 1 || changedStages.length > 1) {
+      throw new AssignmentGraphError('assignment transition must change exactly one assignment and at most one stage', {
+        ownerId: this.ownerId,
+        reason: 'assignment.graph.prepare.transition',
+        nextAction: { kind: 'recover', ref: 'assignment.graph.prepare' },
+        evidenceRefs: [evidence(undefined, 'assignment.graph.prepare.transition')],
+      });
+    }
+    const assignment = draft.assignments.get(changedAssignments[0]!)!;
+    const stage = draft.stages.get(assignment.stageNodeId);
+    if (!stage) {
+      throw new AssignmentGraphError('prepared assignment has no stage', {
+        ownerId: this.ownerId,
+        reason: 'assignment.graph.prepare.missing-stage',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${assignment.stageNodeId}` },
+        evidenceRefs: assignment.evidenceRefs,
+      });
+    }
+    if (changedStages.length === 1 && changedStages[0]!.nodeId !== stage.nodeId) {
+      throw new AssignmentGraphError('assignment transition changed an unrelated stage', {
+        ownerId: this.ownerId,
+        reason: 'assignment.graph.prepare.stage-mismatch',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${stage.nodeId}` },
+        evidenceRefs: assignment.evidenceRefs,
+      });
+    }
+
+    const base = {
+      kind: 'assignment-transition' as const,
+      assignment: cloneRecord(assignment),
+      stage: cloneStage(stage),
+    };
+    return {
+      change: mutation.kind === 'resume-binding'
+        ? {
+            ...base,
+            action: 'resume-binding',
+            segmentOpenedCommitRef: mutation.segmentOpenedCommitRef,
+          }
+        : {
+            ...base,
+            action: mutation.action,
+          },
+      value,
+    };
+  }
+
+  applyCommitted(entry: CommittedAssignmentGraphFact): void {
+    if (!this.stream) {
+      throw new AssignmentGraphError('assignment graph stream is required to apply committed facts', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stream.required',
+        nextAction: { kind: 'recover', ref: 'assignment.stream' },
+        evidenceRefs: [evidence(undefined, 'assignment.stream.required')],
+      });
+    }
+    if (!sameStream(entry.fact.stream, this.stream)) {
+      throw new AssignmentGraphError('committed assignment fact stream does not match the graph', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stream.mismatch',
+        nextAction: { kind: 'recover', ref: 'assignment.stream' },
+        evidenceRefs: [evidence(this.stream.taskScope.taskId, 'assignment.stream.mismatch')],
+      });
+    }
+    if (entry.fact.revision !== this.revisionValue + 1) {
+      throw new AssignmentGraphError('committed assignment fact revision is not contiguous', {
+        ownerId: this.ownerId,
+        reason: 'assignment.revision.noncontiguous',
+        nextAction: { kind: 'recover', ref: `assignment.revision.${this.revisionValue + 1}` },
+        evidenceRefs: [evidence(this.stream.taskScope.taskId, 'assignment.revision.noncontiguous')],
+      });
+    }
+
+    this.validateCommittedChange(entry.fact);
+    const change = entry.fact.change;
+    if (change.kind === 'stage-declared') {
+      this.stages.set(change.stage.nodeId, cloneStage(change.stage));
+    } else {
+      this.stages.set(change.stage.nodeId, cloneStage(change.stage));
+      this.assignments.set(assignmentKey(change.assignment.key), cloneRecord(change.assignment));
+    }
+    this.revisionValue = entry.fact.revision;
   }
 
   addStage(input: CreateStageInput): AssignmentStageNode {
@@ -262,6 +439,14 @@ export class AssignmentGraph {
     const key = assignmentKey(assignment);
     const existing = this.assignments.get(key);
     if (existing) {
+      if (existing.stageNodeId !== stageNodeId) {
+        throw new AssignmentGraphError('assignment key already belongs to a different stage', {
+          ownerId: existing.ownerId,
+          reason: 'assignment.stage.conflict',
+          nextAction: { kind: 'recover', ref: `assignment.stage.${stageNodeId}` },
+          evidenceRefs: existing.evidenceRefs,
+        });
+      }
       if (!sameAssignment(existing.assignment, assignment)) {
         throw new AssignmentGraphError('assignment identity conflicts with existing content', {
           ownerId: existing.ownerId,
@@ -643,6 +828,243 @@ export class AssignmentGraph {
     return { stages: this.listStages(), assignments: this.listAssignments() };
   }
 
+  private fork(): AssignmentGraph {
+    const draft = new AssignmentGraph({
+      ownerId: this.ownerId,
+      ...(this.stream ? { stream: this.stream } : {}),
+    });
+    for (const [nodeId, stage] of this.stages) draft.stages.set(nodeId, cloneStage(stage));
+    for (const [key, record] of this.assignments) draft.assignments.set(key, cloneRecord(record));
+    draft.revisionValue = this.revisionValue;
+    return draft;
+  }
+
+  private changedStages(draft: AssignmentGraph): readonly AssignmentStageNode[] {
+    const nodeIds = new Set([...this.stages.keys(), ...draft.stages.keys()]);
+    return [...nodeIds]
+      .filter((nodeId) => {
+        const before = this.stages.get(nodeId);
+        const after = draft.stages.get(nodeId);
+        return !before || !after || JSON.stringify(before) !== JSON.stringify(after);
+      })
+      .map((nodeId) => draft.stages.get(nodeId))
+      .filter((stage): stage is AssignmentStageNode => stage !== undefined);
+  }
+
+  private changedAssignments(draft: AssignmentGraph): readonly string[] {
+    const keys = new Set([...this.assignments.keys(), ...draft.assignments.keys()]);
+    return [...keys].filter((key) => {
+      const before = this.assignments.get(key);
+      const after = draft.assignments.get(key);
+      return !before || !after || JSON.stringify(before) !== JSON.stringify(after);
+    });
+  }
+
+  private validateCommittedChange(fact: AssignmentGraphFact): void {
+    const stream = this.stream;
+    if (!stream) return;
+    const change = fact.change;
+    if (change.stage.taskId.value !== stream.taskScope.taskId.value) {
+      throw new AssignmentGraphError('committed stage task does not match the graph stream', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.task.mismatch',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${change.stage.nodeId}` },
+        evidenceRefs: [evidence(stream.taskScope.taskId, 'assignment.stage.task.mismatch')],
+      });
+    }
+
+    const existingStage = this.stages.get(change.stage.nodeId);
+    if (change.kind === 'stage-declared') {
+      if (existingStage || change.stage.state !== 'planned' || change.stage.assignmentKeys.length !== 0) {
+        throw new AssignmentGraphError('committed stage declaration is inconsistent with the graph', {
+          ownerId: this.ownerId,
+          reason: 'assignment.stage.conflict',
+          nextAction: { kind: 'recover', ref: `assignment.stage.${change.stage.nodeId}` },
+          evidenceRefs: [evidence(stream.taskScope.taskId, 'assignment.stage.conflict')],
+        });
+      }
+      return;
+    }
+
+    if (!existingStage) {
+      throw new AssignmentGraphError('committed assignment stage does not exist', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.missing',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${change.stage.nodeId}` },
+        evidenceRefs: [evidence(stream.taskScope.taskId, 'assignment.stage.missing')],
+      });
+    }
+    if (
+      existingStage.taskId.value !== change.stage.taskId.value
+      || existingStage.parentNodeId !== change.stage.parentNodeId
+    ) {
+      throw new AssignmentGraphError('committed assignment transition changed stage identity', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.conflict',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${change.stage.nodeId}` },
+        evidenceRefs: [evidence(stream.taskScope.taskId, 'assignment.stage.conflict')],
+      });
+    }
+
+    const key = assignmentKey(change.assignment.key);
+    const keyStage = [...this.stages.values()].find((stage) => stage.assignmentKeys.includes(key));
+    if (keyStage && keyStage.nodeId !== change.stage.nodeId) {
+      throw new AssignmentGraphError('assignment key already belongs to a different stage', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.conflict',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${change.stage.nodeId}` },
+        evidenceRefs: [evidence(stream.taskScope.taskId, 'assignment.stage.conflict')],
+      });
+    }
+    if (change.stage.assignmentKeys.filter((candidate) => candidate === key).length !== 1) {
+      throw new AssignmentGraphError('committed assignment stage membership is inconsistent', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.membership',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${change.stage.nodeId}` },
+        evidenceRefs: [evidence(stream.taskScope.taskId, 'assignment.stage.membership')],
+      });
+    }
+    if (change.assignment.stageNodeId !== change.stage.nodeId) {
+      throw new AssignmentGraphError('committed assignment record names another stage', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.conflict',
+        nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+        evidenceRefs: change.assignment.evidenceRefs,
+      });
+    }
+    const work = change.assignment.assignment;
+    if (
+      change.assignment.key.assignmentId !== work.assignmentId
+      || change.assignment.key.attempt !== work.attempt
+      || change.assignment.key.executionEpoch !== work.executionEpoch
+      || work.taskId.value !== change.stage.taskId.value
+    ) {
+      throw new AssignmentGraphError('committed assignment key or task does not match its work assignment', {
+        ownerId: this.ownerId,
+        reason: 'assignment.key.mismatch',
+        nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+        evidenceRefs: change.assignment.evidenceRefs,
+      });
+    }
+
+    const existing = this.assignments.get(key);
+    if (!existing) {
+      if (change.action !== 'create-assignment') {
+        throw new AssignmentGraphError('committed assignment transition has no existing assignment', {
+          ownerId: this.ownerId,
+          reason: 'assignment.missing',
+          nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+          evidenceRefs: change.assignment.evidenceRefs,
+        });
+      }
+      const expectedKeys = [...existingStage.assignmentKeys, key];
+      if (
+        change.assignment.status !== 'planned'
+        || change.assignment.ownerId !== this.ownerId
+        || change.assignment.agentId !== undefined
+        || change.assignment.runtimeBinding !== undefined
+        || change.assignment.result !== undefined
+        || change.assignment.reviewResults.length !== 0
+        || change.stage.state !== existingStage.state
+        || JSON.stringify(expectedKeys) !== JSON.stringify(change.stage.assignmentKeys)
+      ) {
+        throw new AssignmentGraphError('committed assignment creation is inconsistent with the stage', {
+          ownerId: this.ownerId,
+          reason: 'assignment.create.conflict',
+          nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+          evidenceRefs: change.assignment.evidenceRefs,
+        });
+      }
+      return;
+    }
+
+    if (
+      change.action === 'create-assignment'
+      || existing.stageNodeId !== change.stage.nodeId
+      || existing.ownerId !== change.assignment.ownerId
+      || JSON.stringify(existing.key) !== JSON.stringify(change.assignment.key)
+      || !sameAssignment(existing.assignment, change.assignment.assignment)
+      || JSON.stringify(existingStage.assignmentKeys) !== JSON.stringify(change.stage.assignmentKeys)
+    ) {
+      throw new AssignmentGraphError('committed assignment transition conflicts with existing membership', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.conflict',
+        nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+        evidenceRefs: existing.evidenceRefs,
+      });
+    }
+
+    if (change.action === 'resume-binding') {
+      const stageUnchanged = JSON.stringify(existingStage) === JSON.stringify(change.stage);
+      const recordHistoryUnchanged = existing.status === change.assignment.status
+        && existing.agentId === change.assignment.agentId
+        && JSON.stringify(existing.result) === JSON.stringify(change.assignment.result)
+        && JSON.stringify(existing.reviewResults) === JSON.stringify(change.assignment.reviewResults);
+      if (!stageUnchanged || !recordHistoryUnchanged || !change.assignment.runtimeBinding) {
+        throw new AssignmentGraphError('committed resume binding changed assignment history', {
+          ownerId: this.ownerId,
+          reason: 'assignment.resume-binding.conflict',
+          nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+          evidenceRefs: change.assignment.evidenceRefs,
+        });
+      }
+      return;
+    }
+
+    const expectedStatus: Partial<Record<AssignmentGraphTransitionAction, readonly AssignmentStatus[]>> = {
+      assign: ['assigned'],
+      start: ['running'],
+      'accept-result': ['running', 'retryable', 'escalated', 'blocked'],
+      'record-review-result': [existing.status],
+      'mark-retryable': ['retryable'],
+      'mark-blocked': ['blocked'],
+      'mark-escalated': ['escalated'],
+      'mark-succeeded': ['succeeded'],
+      'mark-merged': ['merged'],
+    };
+    const allowedStatuses = expectedStatus[change.action] ?? [];
+    if (!allowedStatuses.includes(change.assignment.status)) {
+      throw new AssignmentGraphError('committed assignment action has an invalid status', {
+        ownerId: this.ownerId,
+        reason: 'assignment.status.invalid',
+        nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+        evidenceRefs: change.assignment.evidenceRefs,
+      });
+    }
+    if (change.action === 'record-review-result') {
+      const prior = existing.reviewResults;
+      const next = change.assignment.reviewResults;
+      const appended = next.length === prior.length + 1
+        && prior.every((result, index) => JSON.stringify(result) === JSON.stringify(next[index]));
+      if (!appended) {
+        throw new AssignmentGraphError('committed review result transition is not append-only', {
+          ownerId: this.ownerId,
+          reason: 'review.result.conflict',
+          nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+          evidenceRefs: change.assignment.evidenceRefs,
+        });
+      }
+    } else if (JSON.stringify(existing.reviewResults) !== JSON.stringify(change.assignment.reviewResults)) {
+      throw new AssignmentGraphError('committed assignment transition changed review history', {
+        ownerId: this.ownerId,
+        reason: 'assignment.review.conflict',
+        nextAction: { kind: 'recover', ref: `assignment.${change.assignment.key.assignmentId}` },
+        evidenceRefs: change.assignment.evidenceRefs,
+      });
+    }
+    const stageStateExpected = change.action === 'record-review-result'
+      ? existingStage.state
+      : change.assignment.status;
+    if (change.stage.state !== stageStateExpected) {
+      throw new AssignmentGraphError('committed stage state does not match its assignment transition', {
+        ownerId: this.ownerId,
+        reason: 'assignment.stage.state',
+        nextAction: { kind: 'recover', ref: `assignment.stage.${change.stage.nodeId}` },
+        evidenceRefs: change.assignment.evidenceRefs,
+      });
+    }
+  }
+
   private requireRecord(key: AssignmentKey): AssignmentRecord {
     const record = this.assignments.get(assignmentKey(key));
     if (!record) throw new AssignmentGraphError('assignment does not exist', {
@@ -679,4 +1101,13 @@ export class AssignmentGraph {
     this.updateStage(record.stageNodeId, status);
     return cloneRecord(updated);
   }
+}
+
+export function replayAssignmentGraph(
+  stream: AssignmentGraphStream,
+  entries: readonly CommittedAssignmentGraphFact[],
+): AssignmentGraphSnapshot {
+  const graph = new AssignmentGraph({ ownerId: stream.ownerId, stream });
+  for (const entry of entries) graph.applyCommitted(entry);
+  return graph.snapshot();
 }

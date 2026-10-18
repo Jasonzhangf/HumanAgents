@@ -1,4 +1,9 @@
 import type {
+  AssignmentGraphCommitRequest,
+  AssignmentGraphResumeSource,
+  AssignmentRecord,
+  AssignmentStatus,
+  CommittedAssignmentGraphFact,
   CycleId,
   EvidenceRef,
   ExecutionChildCallBinding,
@@ -22,18 +27,33 @@ import type {
 } from '../review/index.js';
 
 export type { TaskRuntimeIncarnation } from '../../../contracts/src/index.js';
+export type {
+  AssignmentGraphAction,
+  AssignmentGraphChange,
+  AssignmentGraphCommitRequest,
+  AssignmentGraphFact,
+  AssignmentGraphResumeSource,
+  AssignmentGraphSnapshot,
+  AssignmentGraphStream,
+  AssignmentKey,
+  AssignmentRecord,
+  AssignmentRuntimeBinding,
+  AssignmentStageNode,
+  AssignmentStatus,
+  CommittedAssignmentGraphFact,
+  RecordedAssignmentGraphStream,
+  TaskActualExecutionGraphHistory,
+  TaskActualExecutionGraphSnapshot,
+} from '../../../contracts/src/index.js';
 
-export type AssignmentStatus =
-  | 'planned'
-  | 'assigned'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'incomplete'
-  | 'blocked'
-  | 'retryable'
-  | 'escalated'
-  | 'merged';
+export interface AssignmentGraphReadPort {
+  replay(): Promise<readonly CommittedAssignmentGraphFact[]>;
+  readResumeSource(openedCommitRef: JournalCommitRef): Promise<AssignmentGraphResumeSource>;
+}
+
+export interface AssignmentGraphJournalPort extends AssignmentGraphReadPort {
+  commit(input: AssignmentGraphCommitRequest): Promise<CommittedAssignmentGraphFact>;
+}
 
 export interface OrchestrationIssue {
   readonly code: string;
@@ -458,48 +478,6 @@ export type OrchestrationFeedbackEvent =
 
 export interface OrchestrationFeedbackPort {
   publish(event: OrchestrationFeedbackEvent): Promise<void>;
-}
-
-export interface AssignmentKey {
-  readonly assignmentId: string;
-  readonly attempt: number;
-  readonly executionEpoch: number;
-}
-
-export interface AssignmentRuntimeBinding {
-  readonly runtimeId: string;
-  readonly generation: number;
-  readonly leaseId: string;
-  readonly assignmentId: string;
-  readonly executionEpoch: number;
-}
-
-export interface AssignmentStageNode {
-  readonly nodeId: string;
-  readonly taskId: TaskId;
-  readonly parentNodeId: string | null;
-  readonly state: AssignmentStatus;
-  readonly assignmentKeys: readonly string[];
-}
-
-export interface AssignmentRecord {
-  readonly key: AssignmentKey;
-  readonly stageNodeId: string;
-  readonly assignment: WorkAssignment;
-  readonly status: AssignmentStatus;
-  readonly ownerId: string;
-  readonly agentId?: string;
-  readonly runtimeBinding?: AssignmentRuntimeBinding;
-  readonly result?: WorkResult;
-  readonly reviewResults: readonly ReviewResult[];
-  readonly reason: string;
-  readonly nextAction: NextAction;
-  readonly evidenceRefs: readonly EvidenceRef[];
-}
-
-export interface AssignmentGraphSnapshot {
-  readonly stages: readonly AssignmentStageNode[];
-  readonly assignments: readonly AssignmentRecord[];
 }
 
 /**

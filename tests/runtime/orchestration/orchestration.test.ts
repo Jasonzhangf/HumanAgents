@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   id,
+  type CommittedAssignmentGraphFact,
   type EvidenceRef,
   type InspectionItemDelivery,
   type RequirementEnvelope,
@@ -20,6 +21,7 @@ import {
   AgentRuntimePoolManager,
   AssignmentGraph,
   OrchestrationManager,
+  replayAssignmentGraph,
   type ExecutionAgentInput,
   type ExecutionAgentPort,
   type ExecutionDelivery,
@@ -48,6 +50,10 @@ const runtimeBinding = {
   leaseId: 'lease-a',
   assignmentId: 'assignment-a',
   executionEpoch: 1,
+} as const;
+const graphStream = {
+  taskScope: { organId: organ, taskId: task },
+  ownerId: 'orchestration-manager',
 } as const;
 
 /** Produced subject body shared by the review fixtures in this file. */
@@ -107,6 +113,32 @@ function result(overrides: Partial<WorkResult> = {}): WorkResult {
     nextAction: 'review',
     ...overrides,
   };
+}
+
+function committedGraphFact(
+  revision: number,
+  change: CommittedAssignmentGraphFact['fact']['change'],
+): CommittedAssignmentGraphFact {
+  return {
+    fact: {
+      version: 1,
+      stream: graphStream,
+      revision,
+      change,
+    },
+    commitRef: {
+      commitId: `assignment-graph-${revision}`,
+      journalSeq: revision,
+      recordDigest: `digest-${revision}`,
+    },
+  };
+}
+
+function requireGraphChange(
+  change: CommittedAssignmentGraphFact['fact']['change'] | null,
+): CommittedAssignmentGraphFact['fact']['change'] {
+  if (change === null) throw new Error('expected graph change');
+  return change;
 }
 
 function criteria(overrides: Partial<{
@@ -1001,6 +1033,112 @@ test('assignment graph accepts a complete successful path and is idempotent by a
   assert.equal(repeated.accepted, true);
   if (!repeated.accepted) return;
   assert.equal(repeated.duplicate, true);
+});
+
+test('assignment graph rejects reuse of one assignment key in a different stage', () => {
+  const graph = new AssignmentGraph({ ownerId: 'orchestration-manager' });
+  graph.addStage({ nodeId: 'node-a', taskId: task });
+  graph.addStage({ nodeId: 'node-b', taskId: task });
+  graph.createAssignment('node-a', assignment());
+
+  assert.throws(
+    () => graph.createAssignment('node-b', assignment()),
+    /different stage/,
+  );
+  assert.deepEqual(graph.getStage('node-a')?.assignmentKeys, ['assignment-a:1:1']);
+  assert.deepEqual(graph.getStage('node-b')?.assignmentKeys, []);
+});
+
+test('assignment graph prepare stays uncommitted and replay preserves recorded stage facts', () => {
+  const live = new AssignmentGraph({
+    ownerId: 'orchestration-manager',
+    stream: graphStream,
+  });
+  const entries: CommittedAssignmentGraphFact[] = [];
+  let revision = 0;
+  const commit = (change: CommittedAssignmentGraphFact['fact']['change']) => {
+    revision += 1;
+    const entry = committedGraphFact(revision, change);
+    live.applyCommitted(entry);
+    entries.push(entry);
+  };
+
+  const parent = live.prepare({
+    kind: 'declare-stage',
+    apply: (graph) => graph.addStage({ nodeId: 'stage-parent', taskId: task }),
+  });
+  commit(requireGraphChange(parent.change));
+
+  const child = live.prepare({
+    kind: 'declare-stage',
+    apply: (graph) => graph.addStage({
+      nodeId: 'stage-child',
+      taskId: task,
+      parentNodeId: 'stage-parent',
+    }),
+  });
+  assert.ok(child.change);
+  assert.equal(live.revision, 1);
+  assert.equal(live.getStage('stage-child'), undefined);
+  assert.equal(live.listStages().length, 1);
+  commit(requireGraphChange(child.change));
+
+  const empty = live.prepare({
+    kind: 'declare-stage',
+    apply: (graph) => graph.addStage({ nodeId: 'stage-empty', taskId: task }),
+  });
+  commit(requireGraphChange(empty.change));
+
+  const created = live.prepare({
+    kind: 'assignment-transition',
+    action: 'create-assignment',
+    apply: (graph) => graph.createAssignment('stage-child', assignment()),
+  });
+  assert.ok(created.change);
+  assert.equal(live.revision, 3);
+  assert.equal(live.get(assignment()), undefined);
+  assert.equal(live.getStage('stage-child')?.assignmentKeys.length, 0);
+  commit(requireGraphChange(created.change));
+
+  const assigned = live.prepare({
+    kind: 'assignment-transition',
+    action: 'assign',
+    apply: (graph) => graph.assign(assignment(), 'agent-a', runtimeBinding),
+  });
+  commit(requireGraphChange(assigned.change));
+
+  const started = live.prepare({
+    kind: 'assignment-transition',
+    action: 'start',
+    apply: (graph) => graph.start(assignment(), 'agent-a', runtimeBinding),
+  });
+  commit(requireGraphChange(started.change));
+
+  const merged = live.prepare({
+    kind: 'assignment-transition',
+    action: 'mark-merged',
+    apply: (graph) => graph.markMerged(assignment(), [evidence('merge')]),
+  });
+  commit(requireGraphChange(merged.change));
+
+  const plannedAfterMerge = live.prepare({
+    kind: 'assignment-transition',
+    action: 'create-assignment',
+    apply: (graph) => graph.createAssignment(
+      'stage-child',
+      assignment({ assignmentId: 'assignment-b' }),
+    ),
+  });
+  commit(requireGraphChange(plannedAfterMerge.change));
+
+  const childStage = live.getStage('stage-child');
+  assert.equal(live.getStage('stage-empty')?.assignmentKeys.length, 0);
+  assert.equal(childStage?.parentNodeId, 'stage-parent');
+  assert.deepEqual(childStage?.assignmentKeys, ['assignment-a:1:1', 'assignment-b:1:1']);
+  assert.equal(childStage?.state, 'merged');
+  assert.equal(live.get(assignment())?.status, 'merged');
+  assert.equal(live.get(assignment({ assignmentId: 'assignment-b' }))?.status, 'planned');
+  assert.deepEqual(replayAssignmentGraph(graphStream, entries), live.snapshot());
 });
 
 test('assignment graph rejects stale epochs, wrong agents and duplicate conflicting results', () => {
