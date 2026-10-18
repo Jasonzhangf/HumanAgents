@@ -270,7 +270,7 @@ function childInitialInput(
   request: Parameters<BindChildRunPort>[0]['request'],
   assignment: WorkAssignment,
 ): string {
-  if (request.kind === 'execution') return assignment.objective;
+  if (request.kind === 'execution') return request.initialInputText;
   const material = request.input.reviewMaterial;
   return canonicalJsonStringify({
     acceptanceCriteria: material.acceptanceCriteria,

@@ -329,7 +329,7 @@ export type ChildDriverNativePorts = Required<
 >;
 
 export type ChildCreatorRequest =
-  | { readonly kind: 'execution'; readonly input: ExecutionAgentInput }
+  | { readonly kind: 'execution'; readonly input: ExecutionAgentInput; readonly initialInputText: string }
   | { readonly kind: 'review'; readonly input: ReviewAgentInput };
 
 /**
@@ -1420,12 +1420,13 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
           closer.hold(composition);
           const operationId = childOperationId(input.call.invocationId);
           const scope: ScopeRef = { ...execution.scope, operationId };
+          const prompt = executionPrompt(execution.assignment, input.inspection);
           const run = await input.bindChildRun({
             call: input.call,
             operation: input.operation,
             incarnation: create.incarnation,
             scope,
-            request: { kind: 'execution', input: execution },
+            request: { kind: 'execution', input: execution, initialInputText: prompt },
           });
           const resolved = await runConfiguredChild({
             input,
@@ -1443,7 +1444,7 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
             agentId: execution.agentId,
             invocationId: input.call.invocationId,
             inputRefs: [...execution.assignment.targetRefs, `child:${input.call.invocationId}`],
-            prompt: executionPrompt(execution.assignment, input.inspection),
+            prompt,
             signal: execution.signal ?? new AbortController().signal,
           });
           if (resolved.state === 'blocked') {
