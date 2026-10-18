@@ -35,7 +35,6 @@ import type {
 import type { JournalCommitRef } from '../../packages/contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../packages/contracts/src/framework.js';
 import { JsonlOrganJournal, type JournalRecord } from '../../packages/adapters/jsonl/src/index.js';
-import { createJsonlAssignmentGraphJournal } from '../../packages/adapters/jsonl/src/assignment-graph.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import {
   createJsonlActiveTurnJournal,
@@ -58,7 +57,6 @@ import {
   RuntimeTaskCoordinator,
   type RuntimeExecutionAllocation,
   type RuntimeExecutionRelease,
-  type RuntimeTaskCoordinatorOptions,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../packages/runtime/src/ui-runtime/cold-execution-resume.js';
 import type { ClosedTurnPlannerCallRecord } from '../../packages/runtime/src/orchestration/closed-turn-planner-call.js';
@@ -86,7 +84,6 @@ import { composeUiMemoryHooks, memoryDriverFactory } from '../../packages/app/sr
 import { composeMemoryRuntime, createJournalCheckpointEvidencePort } from '../../packages/app/src/memory-runtime.js';
 import { resolveRuntimePaths, ensureControlLayout, loadConfiguration } from '../../packages/config/src/index.js';
 import { createJsonlAttentionPort, readJsonlAttentions } from '../../packages/app/src/attention-journal.js';
-import { serveRuntimeOwnerId } from '../../packages/app/src/serve-runtime.js';
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import type { UiRuntimeServiceOptions } from '../../packages/app/src/ui-runtime/service.js';
@@ -109,7 +106,6 @@ import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import type { ProviderConfig, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import {
   AgentRuntimePoolManager,
-  AssignmentGraph,
   OrchestrationManager,
   type MergeCoordinatorPort,
   type ReviewAgentPort,
@@ -1619,23 +1615,12 @@ function resumeTaskAssembly(
   fixture: ColdFixture,
   assemblies: ResumeAssembly[],
   options: ResumeRuntimeOptions = {},
-): NonNullable<NonNullable<UiRuntimeServiceOptions['runtimeComposition']>['createTaskAssembly']> {
-  return ({ scope, task, executionAgent, maxAttempts, graphJournal }) => {
-    if (task.id.value !== fixture.taskId.value) {
-      throw new Error('cold fixture received a task outside its retained identity');
-    }
-    const pool = new AgentRuntimePoolManager({ maxRuntimes: 4, ownerId: serveRuntimeOwnerId(),
+): NonNullable<UiRuntimeServiceOptions['runtimeComposition']>['createTaskAssembly'] {
+  return ({ scope, executionAgent, maxAttempts }) => {
+    const pool = new AgentRuntimePoolManager({ maxRuntimes: 4, ownerId: fixture.allocation.ownerId,
       factory: { async start(request) { return { runtimeId: request.runtimeId, generation: request.generation,
         capabilities: [...request.requiredCapabilities] }; }, async dispose() {} } });
-    const orchestration = new OrchestrationManager({ ownerId: serveRuntimeOwnerId(), runtimePool: pool,
-      graphJournal,
-      graph: new AssignmentGraph({
-        ownerId: serveRuntimeOwnerId(),
-        stream: {
-          taskScope: { organId: task.organId, taskId: task.id },
-          ownerId: serveRuntimeOwnerId(),
-        },
-      }),
+    const orchestration = new OrchestrationManager({ ownerId: fixture.allocation.ownerId, runtimePool: pool,
       ...(executionAgent === undefined ? {} : { executionAgent: options.onExecutionInstance === undefined ? executionAgent : {
         ...executionAgent,
         createInstance(input: Parameters<typeof executionAgent.createInstance>[0]) {
@@ -1689,7 +1674,6 @@ function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model
     publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
     closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
   }, options);
-  const taskAssemblyFactory = resumeTaskAssembly(fixture, assemblies, options);
   coordinator = new RuntimeTaskCoordinator({
     organId,
     checkpointStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
@@ -1701,19 +1685,7 @@ function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model
     currentStateFacts: composition.currentStateFacts,
     admitExecution: composition.admitExecution,
     createDriver: composition.createExecutionDriver,
-    ...(options.omitAssemblyFactory ? {} : {
-      createTaskAssembly: (input: Parameters<NonNullable<RuntimeTaskCoordinatorOptions['createTaskAssembly']>>[0]) =>
-        taskAssemblyFactory({
-          ...input,
-          graphJournal: createJsonlAssignmentGraphJournal({
-            filePath: fixture.journalPath,
-            stream: {
-              taskScope: { organId: input.task.organId, taskId: input.task.id },
-              ownerId: serveRuntimeOwnerId(),
-            },
-          }),
-        }),
-    }),
+    ...(options.omitAssemblyFactory ? {} : { createTaskAssembly: resumeTaskAssembly(fixture, assemblies, options) }),
     // The cold producer is the only new coordinator binding. The coordinator
     // owns the matching ColdExecutionLifecycleBinding internally.
     coldExecution: composition,
@@ -1783,7 +1755,6 @@ async function buildResumeService(
   const assemblies: ResumeAssembly[] = [];
   let selectorCalls = 0;
   const paths = productionMemory ? await resolveRuntimePaths({ controlRoot: join(fixture.root, 'control'), workspace: fixture.root }) : undefined;
-  const graphPaths = paths ?? await resolveRuntimePaths({ controlRoot: join(fixture.root, 'control'), workspace: fixture.root });
   if (paths) await ensureControlLayout(paths);
   if (paths && realMemory) await writeFile(join(paths.controlRoot, 'config.toml'), realMemory.configToml, 'utf8');
   const configuration = paths ? await loadConfiguration(paths) : undefined;
@@ -1859,7 +1830,6 @@ async function buildResumeService(
     organId,
     binding: serviceBinding,
     port: new FakeReplayExecutionRuntimePort({ binding: serviceBinding, stepDelayMs: 1 }),
-    runtimePaths: graphPaths,
     checkpointStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
     attentionPort: attentionPort(),
     providerState: 'ready',

@@ -5,10 +5,8 @@ import type {
   Task,
 } from '../../contracts/src/index.js';
 import {
-  AssignmentGraph,
   FeedbackHub,
   OrchestrationManager,
-  type AssignmentGraphJournalPort,
   type CheckpointJournalPort,
   type CheckpointAppendReceipt,
   type CheckpointAppendRequest,
@@ -34,7 +32,6 @@ export interface M3AssemblyOptions {
   readonly feedbackPorts: FeedbackHubPorts;
   readonly feedbackPublisherId: string;
   readonly checkpointJournal: CheckpointJournalPort;
-  readonly graphJournal: AssignmentGraphJournalPort;
   /**
    * Narrow Runtime child-call port. When bound, the manager persists the call
    * checkpoint and invocation/checkpoint association before each real child
@@ -142,10 +139,6 @@ function assertScopeMatchesTask(task: Task, scope: ScopeRef): void {
 
 export function createM3Assembly(options: M3AssemblyOptions): M3Assembly {
   assertScopeMatchesTask(options.task, options.scope);
-  const graphStream = {
-    taskScope: { organId: options.task.organId, taskId: options.task.id },
-    ownerId: options.ownerId,
-  } as const;
   const feedback = new FeedbackHub(options.feedbackPorts);
   const feedbackPort = new FeedbackHubOrchestrationPort(
     feedback,
@@ -154,8 +147,6 @@ export function createM3Assembly(options: M3AssemblyOptions): M3Assembly {
   );
   const orchestration = new OrchestrationManager({
     ownerId: options.ownerId,
-    graphJournal: options.graphJournal,
-    graph: new AssignmentGraph({ ownerId: options.ownerId, stream: graphStream }),
     runtimePool: options.runtimePool,
     executionAgent: options.executionAgent,
     reviewAgent: options.reviewAgent,

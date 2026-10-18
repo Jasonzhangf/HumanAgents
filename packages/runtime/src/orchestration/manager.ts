@@ -27,24 +27,13 @@ import {
   type ReviewDecision,
   type ReviewResult,
 } from '../review/index.js';
-import {
-  AssignmentGraph,
-  assignmentKey,
-  type AssignmentResultAcceptance,
-  type GraphMutation,
-} from './assignment-graph.js';
+import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from './assignment-graph.js';
 import { OrchestrationError } from './errors.js';
 import { assertReviewMaterial, type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
 import { AgentRuntimePoolManager, type RuntimePoolAcquireResult } from './runtime-pool.js';
 import { scopeContains } from '../events/acl.js';
 import type {
   AssignmentRecord,
-  AssignmentGraphCommitRequest,
-  AssignmentGraphJournalPort,
-  AssignmentGraphSnapshot,
-  AssignmentGraphStream,
-  AssignmentStageNode,
-  CommittedAssignmentGraphFact,
   ChildCallPort,
   PreparedChildCall,
   DispatchInput,
@@ -70,7 +59,6 @@ import type {
 export interface OrchestrationManagerOptions {
   readonly ownerId: string;
   readonly runtimePool: AgentRuntimePoolManager;
-  readonly graphJournal: AssignmentGraphJournalPort;
   readonly executionAgent?: ExecutionAgentPort;
   readonly reviewAgent?: ReviewAgentPort;
   /**
@@ -89,17 +77,6 @@ export interface OrchestrationManagerOptions {
    * absent the manager keeps the prior behaviour unchanged.
    */
   readonly childCallPort?: ChildCallPort;
-}
-
-export type AcquiredExecution = Extract<
-  RuntimePoolAcquireResult<TaskExecutionHandle>,
-  { readonly status: 'acquired' }
->;
-
-export interface ResumedAssignmentDispatchInput {
-  readonly dispatch: DispatchInput;
-  readonly acquired: AcquiredExecution;
-  readonly segmentOpenedCommitRef: JournalCommitRef;
 }
 
 function safeId(value: string): string {
@@ -213,18 +190,6 @@ function scopedEvidenceRefs(scope: ScopeRef, refs: readonly EvidenceRef[]): read
   return uniqueEvidenceRefs(refs.map((ref) => (scopeContains(scope, ref.scope) ? ref : { ...ref, scope })));
 }
 
-function withLeaseCleanupIssue(
-  primary: OrchestrationIssue | undefined,
-  cleanup: OrchestrationIssue,
-): OrchestrationIssue {
-  if (!primary) return cleanup;
-  return {
-    ...primary,
-    reason: `${primary.reason}; lease cleanup failed: ${cleanup.reason}`,
-    evidenceRefs: uniqueEvidenceRefs([...primary.evidenceRefs, ...cleanup.evidenceRefs]),
-  };
-}
-
 function leaseBinding(lease: RuntimePoolLease) {
   return {
     runtimeId: lease.runtimeId,
@@ -321,11 +286,7 @@ function assertMilestoneReviewReadback(record: I2Record, expected: MilestoneRevi
 
 export class OrchestrationManager {
   readonly ownerId: string;
-  private readonly graph: AssignmentGraph;
-  private readonly graphJournal: AssignmentGraphJournalPort;
-  private readonly initialization: Promise<void>;
-  private mutationQueue: Promise<void> = Promise.resolve();
-  private pendingCommit?: AssignmentGraphCommitRequest;
+  readonly graph: AssignmentGraph;
   private readonly runtimePool: AgentRuntimePoolManager;
   private readonly executionAgent?: ExecutionAgentPort;
   private readonly reviewAgent?: ReviewAgentPort;
@@ -335,7 +296,6 @@ export class OrchestrationManager {
   private readonly childCallPort?: ChildCallPort;
   private readonly maxAttempts: number;
   private readonly inFlightDispatches = new Map<string, Promise<OrchestrationDispatchResult>>();
-  private readonly dispatchStarts = new Map<string, Promise<AssignmentRecord>>();
   private readonly childCalls = new Map<string, ChildCallAttempt>();
 
   constructor(options: OrchestrationManagerOptions) {
@@ -355,7 +315,6 @@ export class OrchestrationManager {
     }
     this.ownerId = options.ownerId;
     this.runtimePool = options.runtimePool;
-    this.graphJournal = options.graphJournal;
     this.executionAgent = options.executionAgent;
     this.reviewAgent = options.reviewAgent;
     this.reviewJournal = options.reviewJournal;
@@ -372,239 +331,14 @@ export class OrchestrationManager {
     }
     this.graph = options.graph ?? new AssignmentGraph({ ownerId: this.ownerId });
     this.maxAttempts = options.maxAttempts ?? 2;
-    this.initialization = this.graphJournal.replay().then((entries) => {
-      for (const entry of entries) this.graph.applyCommitted(entry);
-    });
   }
 
-  initialize(): Promise<void> {
-    return this.initialization;
+  planStage(input: Parameters<AssignmentGraph['addStage']>[0]) {
+    return this.graph.addStage(input);
   }
 
-  snapshot(): AssignmentGraphSnapshot {
-    return this.graph.snapshot();
-  }
-
-  get(key: Parameters<AssignmentGraph['get']>[0]): AssignmentRecord | undefined {
-    return this.graph.get(key);
-  }
-
-  getStage(nodeId: string): AssignmentStageNode | undefined {
-    return this.graph.getStage(nodeId);
-  }
-
-  listAssignments(): readonly AssignmentRecord[] {
-    return this.graph.listAssignments();
-  }
-
-  listStages(): readonly AssignmentStageNode[] {
-    return this.graph.listStages();
-  }
-
-  async planStage(input: Parameters<AssignmentGraph['addStage']>[0]): Promise<AssignmentStageNode> {
-    return this.commitMutation({
-      kind: 'declare-stage',
-      apply: (graph) => graph.addStage(input),
-    });
-  }
-
-  async createAssignment(stageNodeId: string, assignment: WorkAssignment): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'create-assignment',
-      apply: (graph) => graph.createAssignment(stageNodeId, assignment),
-    });
-  }
-
-  private commitMutation<T>(mutation: GraphMutation<T>): Promise<T> {
-    const execute = async (): Promise<T> => {
-      await this.initialize();
-      await this.resolvePendingCommit();
-      const prepared = this.graph.prepare(mutation);
-      if (!prepared.change) return prepared.value;
-
-      const stream = this.graph.stream;
-      if (!stream) throw this.graphStreamRequired();
-      const revision = this.graph.revision + 1;
-      const request: AssignmentGraphCommitRequest = {
-        commitId: this.graphCommitId(stream, revision),
-        expectedRevision: this.graph.revision,
-        fact: {
-          version: 1,
-          stream,
-          revision,
-          change: prepared.change,
-        },
-      };
-      try {
-        const committed = await this.graphJournal.commit(request);
-        this.assertCommittedRequest(request, committed);
-        this.graph.applyCommitted(committed);
-        return prepared.value;
-      } catch (failure) {
-        if (!this.pendingCommit) {
-          this.pendingCommit = request;
-        }
-        throw failure;
-      }
-    };
-    const result = this.mutationQueue.then(execute, execute);
-    this.mutationQueue = result.then(() => undefined, () => undefined);
-    return result;
-  }
-
-  private async resolvePendingCommit(): Promise<void> {
-    const pending = this.pendingCommit;
-    if (!pending) return;
-    const committed = await this.graphJournal.commit(pending);
-    this.assertCommittedRequest(pending, committed);
-    this.graph.applyCommitted(committed);
-    this.pendingCommit = undefined;
-  }
-
-  private assertCommittedRequest(
-    request: AssignmentGraphCommitRequest,
-    committed: CommittedAssignmentGraphFact,
-  ): void {
-    if (
-      committed.commitRef.commitId !== request.commitId
-      || committed.fact.revision !== request.fact.revision
-      || canonicalJsonStringify(committed.fact) !== canonicalJsonStringify(request.fact)
-    ) {
-      throw new OrchestrationError('assignment graph journal returned a different committed fact', {
-        ownerId: this.ownerId,
-        reason: 'orchestration.graph.commit-mismatch',
-        nextAction: { kind: 'recover', ref: 'orchestration.graph.commit' },
-        evidenceRefs: [evidence({ organId: id('organ', 'orchestration-manager') }, 'orchestration.graph.commit-mismatch')],
-        conditionRef: 'orchestration.graph.commit',
-      });
-    }
-  }
-
-  private graphCommitId(stream: AssignmentGraphStream, revision: number): string {
-    return [
-      'assignment-graph',
-      encodeURIComponent(stream.ownerId),
-      encodeURIComponent(stream.taskScope.organId.value),
-      encodeURIComponent(stream.taskScope.taskId.value),
-      String(revision),
-    ].join(':');
-  }
-
-  private graphStreamRequired(): OrchestrationError {
-    return new OrchestrationError('assignment graph stream is required for durable mutation', {
-      ownerId: this.ownerId,
-      reason: 'orchestration.graph.stream-required',
-      nextAction: { kind: 'recover', ref: 'orchestration.graph.stream' },
-      evidenceRefs: [evidence({ organId: id('organ', 'orchestration-manager') }, 'orchestration.graph.stream-required')],
-      conditionRef: 'orchestration.graph.stream',
-    });
-  }
-
-  private assignToRuntime(
-    assignment: WorkAssignment,
-    agentId: string,
-    binding: ReturnType<typeof leaseBinding>,
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'assign',
-      apply: (graph) => graph.assign(assignment, agentId, binding),
-    });
-  }
-
-  private startAssignment(
-    assignment: WorkAssignment,
-    agentId: string,
-    binding: ReturnType<typeof leaseBinding>,
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'start',
-      apply: (graph) => graph.start(assignment, agentId, binding),
-    });
-  }
-
-  private acceptAssignmentResult(
-    assignment: WorkAssignment,
-    input: Parameters<AssignmentGraph['acceptResult']>[1],
-  ): Promise<AssignmentResultAcceptance> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'accept-result',
-      apply: (graph) => graph.acceptResult(assignment, input),
-    });
-  }
-
-  private recordAssignmentReview(
-    assignment: WorkAssignment,
-    reviewResult: ReviewResult,
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'record-review-result',
-      apply: (graph) => graph.recordReviewResult(assignment, reviewResult),
-    });
-  }
-
-  private markAssignmentRetryable(
-    assignment: WorkAssignment,
-    reason: string,
-    refs: readonly EvidenceRef[],
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'mark-retryable',
-      apply: (graph) => graph.markRetryable(assignment, reason, refs),
-    });
-  }
-
-  private markAssignmentBlocked(
-    assignment: WorkAssignment,
-    reason: string,
-    nextAction: NextAction,
-    refs: readonly EvidenceRef[],
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'mark-blocked',
-      apply: (graph) => graph.markBlocked(assignment, reason, nextAction, refs),
-    });
-  }
-
-  private markAssignmentEscalated(
-    assignment: WorkAssignment,
-    reason: string,
-    nextAction: NextAction,
-    refs: readonly EvidenceRef[],
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'mark-escalated',
-      apply: (graph) => graph.markEscalated(assignment, reason, nextAction, refs),
-    });
-  }
-
-  private markAssignmentSucceeded(
-    assignment: WorkAssignment,
-    refs: readonly EvidenceRef[],
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'mark-succeeded',
-      apply: (graph) => graph.markSucceeded(assignment, refs),
-    });
-  }
-
-  private markAssignmentMerged(
-    assignment: WorkAssignment,
-    refs: readonly EvidenceRef[],
-  ): Promise<AssignmentRecord> {
-    return this.commitMutation({
-      kind: 'assignment-transition',
-      action: 'mark-merged',
-      apply: (graph) => graph.markMerged(assignment, refs),
-    });
+  createAssignment(stageNodeId: string, assignment: WorkAssignment): AssignmentRecord {
+    return this.graph.createAssignment(stageNodeId, assignment);
   }
 
   async acquireExecutionInstance(input: ExecutionInstanceAcquireInput): Promise<RuntimePoolAcquireResult<TaskExecutionHandle>> {
@@ -850,10 +584,21 @@ export class OrchestrationManager {
   }
 
   async dispatch(input: DispatchInput): Promise<OrchestrationDispatchResult> {
-    const key = assignmentKey(input.assignment);
-    if (this.inFlightDispatches.has(key)) return this.progressForTrackedDispatch(input);
-    return this.trackDispatch(key, (resolveStarted, rejectStarted) =>
-      this.dispatchFirst(input, resolveStarted, rejectStarted));
+    const begun = this.beginDispatch(input);
+    if ('result' in begun) return begun.result;
+    const agent = input.executionAgentOverride ?? this.executionAgent;
+    if (!agent) {
+      const unavailable = issue(
+        'execution-agent-unavailable',
+        this.ownerId,
+        'execution agent capability port is not bound',
+        { kind: 'recover', ref: 'orchestration.execution.bind' },
+        [evidence(input.scope, 'orchestration.execution.unavailable')],
+        'orchestration.execution.unavailable',
+      );
+      return this.blockedResult(begun.planned, unavailable, input.scope);
+    }
+    return this.awaitDispatch(begun.key, this.dispatchWithLease(input, begun.planned));
   }
 
   /**
@@ -865,178 +610,26 @@ export class OrchestrationManager {
    */
   async dispatchAcquired(
     input: DispatchInput,
-    acquired: AcquiredExecution,
+    acquired: Extract<RuntimePoolAcquireResult<TaskExecutionHandle>, { status: 'acquired' }>,
   ): Promise<OrchestrationDispatchResult> {
     this.assertRetainedAcquisition(input, acquired);
-    const key = assignmentKey(input.assignment);
-    if (this.inFlightDispatches.has(key)) return this.progressForTrackedDispatch(input);
-    return this.trackDispatch(key, (resolveStarted, rejectStarted) =>
-      this.dispatchAcquiredFirst(input, acquired, resolveStarted, rejectStarted));
+    const begun = this.beginDispatch(input);
+    if ('result' in begun) return begun.result;
+    return this.awaitDispatch(
+      begun.key,
+      this.executeRetainedDispatch(input, begun.planned, acquired),
+    );
   }
 
-  async dispatchResumedAcquired(
-    input: ResumedAssignmentDispatchInput,
-  ): Promise<OrchestrationDispatchResult> {
-    this.assertRetainedAcquisition(input.dispatch, input.acquired);
-    validateJournalCommitRef(input.segmentOpenedCommitRef);
-    const key = assignmentKey(input.dispatch.assignment);
-    if (this.inFlightDispatches.has(key)) return this.progressForTrackedDispatch(input.dispatch);
-    return this.trackDispatch(key, (resolveStarted, rejectStarted) =>
-      this.dispatchResumedFirst(input, resolveStarted, rejectStarted));
-  }
-
-  private async dispatchFirst(
-    input: DispatchInput,
-    resolveStarted: (record: AssignmentRecord) => void,
-    rejectStarted: (error: unknown) => void,
-  ): Promise<OrchestrationDispatchResult> {
-    try {
-      const begun = await this.beginDispatch(input);
-      resolveStarted('result' in begun ? begun.result.assignment : begun.planned);
-      if ('result' in begun) return begun.result;
-      const agent = input.executionAgentOverride ?? this.executionAgent;
-      if (!agent) {
-        const unavailable = issue(
-          'execution-agent-unavailable',
-          this.ownerId,
-          'execution agent capability port is not bound',
-          { kind: 'recover', ref: 'orchestration.execution.bind' },
-          [evidence(input.scope, 'orchestration.execution.unavailable')],
-          'orchestration.execution.unavailable',
-        );
-        return await this.blockedResult(begun.planned, unavailable, input.scope);
-      }
-      return this.dispatchWithLease(input, begun.planned);
-    } catch (error) {
-      rejectStarted(error);
-      throw error;
-    }
-  }
-
-  private async dispatchAcquiredFirst(
-    input: DispatchInput,
-    acquired: AcquiredExecution,
-    resolveStarted: (record: AssignmentRecord) => void,
-    rejectStarted: (error: unknown) => void,
-  ): Promise<OrchestrationDispatchResult> {
-    try {
-      const begun = await this.beginDispatch(input);
-      resolveStarted('result' in begun ? begun.result.assignment : begun.planned);
-      if ('result' in begun) return begun.result;
-      return this.executeRetainedDispatch(input, begun.planned, acquired);
-    } catch (error) {
-      rejectStarted(error);
-      throw error;
-    }
-  }
-
-  private async dispatchResumedFirst(
-    input: ResumedAssignmentDispatchInput,
-    resolveStarted: (record: AssignmentRecord) => void,
-    rejectStarted: (error: unknown) => void,
-  ): Promise<OrchestrationDispatchResult> {
-    try {
-      await this.initialize();
-      const planned = await this.createAssignment(input.dispatch.stageNodeId, input.dispatch.assignment);
-      resolveStarted(planned);
-      const rebound = await this.resumeBindingForAcquisition(input);
-      return this.executeRetainedDispatch(input.dispatch, rebound, input.acquired);
-    } catch (error) {
-      rejectStarted(error);
-      throw error;
-    }
-  }
-
-  private async resumeBindingForAcquisition(
-    input: ResumedAssignmentDispatchInput,
-  ): Promise<AssignmentRecord> {
-    const { dispatch, acquired, segmentOpenedCommitRef } = input;
-    const source = await this.graphJournal.readResumeSource(segmentOpenedCommitRef);
-    if (canonicalJsonStringify(source.openedCommitRef) !== canonicalJsonStringify(segmentOpenedCommitRef)) {
-      throw this.resumeBindingError('orchestration.resume.source-ref', 'resume source does not match the exact opened commit');
-    }
-    const opened = source.opened;
-    const tail = source.segments[source.segments.length - 1];
-    if (!tail || canonicalJsonStringify(tail) !== canonicalJsonStringify(opened)) {
-      throw this.resumeBindingError('orchestration.resume.tail', 'resume source is not the current committed segment tail');
-    }
-    const initialBinding = source.initial.kind === 'captured'
-      ? source.initial.body.binding
-      : source.initial.binding;
-    if (
-      canonicalJsonStringify(initialBinding.assignment) !== canonicalJsonStringify(dispatch.assignment)
-      || canonicalJsonStringify(initialBinding.scope) !== canonicalJsonStringify(dispatch.scope)
-      || canonicalJsonStringify(opened.binding.assignment) !== canonicalJsonStringify(dispatch.assignment)
-      || canonicalJsonStringify(opened.binding.scope) !== canonicalJsonStringify(dispatch.scope)
-    ) {
-      throw this.resumeBindingError('orchestration.resume.business', 'resume source does not match the business assignment and scope');
-    }
-    if (
-      !sameIncarnation(opened.binding.incarnation, acquired.incarnation)
-      || !sameIncarnation(acquired.handle.incarnation, acquired.incarnation)
-      || !sameIncarnation(acquired.lease.incarnation, acquired.incarnation)
-      || acquired.lease.generation !== acquired.incarnation.generation
-      || opened.binding.execution.runtimeId !== acquired.lease.runtimeId
-      || opened.binding.execution.executionEpoch !== acquired.lease.executionEpoch
-    ) {
-      throw this.resumeBindingError('orchestration.resume.incarnation', 'resume source does not match the acquired execution incarnation');
-    }
-
-    const record = this.graph.get(dispatch.assignment);
-    if (!record || record.stageNodeId !== dispatch.stageNodeId) {
-      throw this.resumeBindingError('orchestration.resume.assignment', 'resume source has no matching committed assignment stage');
-    }
-    if (record.agentId && record.agentId !== dispatch.agentId) {
-      throw this.resumeBindingError('orchestration.resume.agent', 'resume source does not match the already bound dispatch agent');
-    }
-    if (record.result !== undefined || record.reviewResults.length > 0) {
-      throw this.resumeBindingError('orchestration.resume.history', 'resume binding cannot replace accepted result or review history');
-    }
-    if (record.status !== 'planned' && record.status !== 'assigned' && record.status !== 'running') {
-      throw this.resumeBindingError('orchestration.resume.status', 'resume binding requires a pre-terminal assignment');
-    }
-    if (record.runtimeBinding) {
-      const initialExecution = initialBinding.execution;
-      const matchesInitial = record.runtimeBinding.assignmentId === dispatch.assignment.assignmentId
-        && record.runtimeBinding.runtimeId === initialExecution.runtimeId
-        && record.runtimeBinding.executionEpoch === initialExecution.executionEpoch;
-      const matchesSegment = source.segments.some((segment) => (
-        record.runtimeBinding!.assignmentId === segment.binding.assignment.assignmentId
-        && record.runtimeBinding!.runtimeId === segment.binding.execution.runtimeId
-        && record.runtimeBinding!.executionEpoch === segment.binding.execution.executionEpoch
-        && record.runtimeBinding!.generation === segment.binding.incarnation.generation
-      ));
-      if (!matchesInitial && !matchesSegment) {
-        throw this.resumeBindingError('orchestration.resume.ancestor', 'existing runtime binding is not in the committed business-turn ancestor chain');
-      }
-    }
-    return this.commitMutation({
-      kind: 'resume-binding',
-      segmentOpenedCommitRef,
-      apply: (graph) => graph.resumeBinding(
-        dispatch.assignment,
-        dispatch.agentId,
-        leaseBinding(acquired.lease),
-      ),
-    });
-  }
-
-  private resumeBindingError(reason: string, message: string): OrchestrationError {
-    return new OrchestrationError(message, {
-      ownerId: this.ownerId,
-      reason,
-      nextAction: { kind: 'recover', ref: 'orchestration.resume-binding' },
-      evidenceRefs: [evidence({ organId: id('organ', 'orchestration-manager') }, reason)],
-      conditionRef: 'orchestration.resume-binding',
-    });
-  }
-
-  private async beginDispatch(input: DispatchInput): Promise<
+  private beginDispatch(input: DispatchInput):
     | { readonly result: OrchestrationDispatchResult }
-    | { readonly planned: AssignmentRecord }> {
-    await this.initialize();
-    const planned = await this.createAssignment(input.stageNodeId, input.assignment);
-    if (planned.status === 'running') {
+    | { readonly planned: AssignmentRecord; readonly key: string } {
+    const planned = this.graph.createAssignment(input.stageNodeId, input.assignment);
+    const key = assignmentKey(input.assignment);
+    if (this.inFlightDispatches.has(key)) {
+      return { result: this.progressResult(planned) };
+    }
+    if (planned.status === 'running' && planned.result) {
       return { result: this.progressResult(planned) };
     }
     if (
@@ -1066,67 +659,21 @@ export class OrchestrationManager {
         },
       };
     }
-    return { planned };
+    return { planned, key };
   }
 
   private async awaitDispatch(
     key: string,
     pending: Promise<OrchestrationDispatchResult>,
   ): Promise<OrchestrationDispatchResult> {
+    this.inFlightDispatches.set(key, pending);
     try {
       return await pending;
     } finally {
       if (this.inFlightDispatches.get(key) === pending) {
         this.inFlightDispatches.delete(key);
       }
-      this.dispatchStarts.delete(key);
     }
-  }
-
-  private trackDispatch(
-    key: string,
-    run: (
-      resolveStarted: (record: AssignmentRecord) => void,
-      rejectStarted: (error: unknown) => void,
-    ) => Promise<OrchestrationDispatchResult>,
-  ): Promise<OrchestrationDispatchResult> {
-    let resolveStarted!: (record: AssignmentRecord) => void;
-    let rejectStarted!: (error: unknown) => void;
-    const started = new Promise<AssignmentRecord>((resolve, reject) => {
-      resolveStarted = resolve;
-      rejectStarted = reject;
-    });
-    let resolveResult!: (result: OrchestrationDispatchResult) => void;
-    let rejectResult!: (error: unknown) => void;
-    const pending = new Promise<OrchestrationDispatchResult>((resolve, reject) => {
-      resolveResult = resolve;
-      rejectResult = reject;
-    });
-    this.dispatchStarts.set(key, started);
-    // The start promise may reject before any duplicate caller awaits it.
-    // Mark that rejection handled so it never becomes an unhandled rejection;
-    // real awaiters still observe the original rejection.
-    void started.catch(() => undefined);
-    this.inFlightDispatches.set(key, pending);
-    void run(resolveStarted, rejectStarted).then(resolveResult, rejectResult);
-    return this.awaitDispatch(key, pending);
-  }
-
-  private async progressForTrackedDispatch(input: DispatchInput): Promise<OrchestrationDispatchResult> {
-    const started = this.dispatchStarts.get(assignmentKey(input.assignment));
-    const record = started
-      ? await started
-      : this.graph.get(input.assignment);
-    if (!record) {
-      throw new OrchestrationError('in-flight dispatch has no committed assignment record', {
-        ownerId: this.ownerId,
-        reason: 'orchestration.dispatch.in-flight-missing',
-        nextAction: { kind: 'wait', ref: `assignment.${input.assignment.assignmentId}` },
-        evidenceRefs: [evidence(input.scope, 'orchestration.dispatch.in-flight-missing')],
-        conditionRef: 'orchestration.dispatch.in-flight',
-      });
-    }
-    return this.progressResult(this.graph.get(input.assignment) ?? record);
   }
 
   private assertRetainedAcquisition(
@@ -1168,7 +715,7 @@ export class OrchestrationManager {
     try {
       return await this.executeWithLease(input, acquired.lease, acquired.handle);
     } catch (error) {
-      return await this.blockedResult(
+      return this.blockedResult(
         planned,
         issueFromUnknown(error, {
           code: 'orchestration-dispatch-failed',
@@ -1204,75 +751,38 @@ export class OrchestrationManager {
     }
     const lease = acquired.lease;
     let result: OrchestrationDispatchResult | undefined;
-    let primaryFailure: unknown;
     try {
       result = await this.executeWithLease(input, lease, acquired.handle);
     } catch (error) {
-      primaryFailure = error;
-      if (!this.pendingCommit) {
-        try {
-          const unexpected = issueFromUnknown(error, {
-            code: 'orchestration-dispatch-failed',
-            ownerId: this.ownerId,
-            scope: input.scope,
-            conditionRef: 'orchestration.dispatch',
-          });
-          result = await this.blockedResult(planned, unexpected, input.scope);
-          primaryFailure = undefined;
-        } catch (blockedFailure) {
-          primaryFailure = blockedFailure;
-        }
-      }
-    }
-    let releaseIssue: OrchestrationIssue | undefined;
-    try {
+      const unexpected = issueFromUnknown(error, {
+        code: 'orchestration-dispatch-failed',
+        ownerId: this.ownerId,
+        scope: input.scope,
+        conditionRef: 'orchestration.dispatch',
+      });
+      result = this.blockedResult(planned, unexpected, input.scope);
+    } finally {
       const released = await this.runtimePool.release(lease, { scope: input.scope });
-      if (released.status === 'blocked') releaseIssue = released.issue;
-    } catch (cleanupFailure) {
-      if (primaryFailure) {
-        throw new AggregateError(
-          [primaryFailure, cleanupFailure],
-          'orchestration dispatch failed and lease release also failed',
-        );
+      if (released.status === 'blocked') {
+        const current = this.graph.get(input.assignment);
+        const blocked = current && current.status !== 'succeeded' && current.status !== 'merged'
+          ? this.graph.markBlocked(
+              input.assignment,
+              released.issue.reason,
+              released.issue.nextAction,
+              released.issue.evidenceRefs,
+            )
+          : current ?? planned;
+        result = {
+          status: blocked.status,
+          assignment: blocked,
+          ...(blocked.status === 'succeeded' || blocked.status === 'merged'
+            ? {}
+            : { issue: released.issue }),
+          reviewResults: blocked.reviewResults,
+        };
       }
-      throw cleanupFailure;
     }
-    if (releaseIssue) {
-      if (!result) {
-        if (primaryFailure) {
-          throw new AggregateError(
-            [primaryFailure, releaseIssue],
-            'orchestration dispatch failed and lease release also failed',
-          );
-        }
-        throw new OrchestrationError(releaseIssue.reason, releaseIssue);
-      }
-      const current = this.graph.get(input.assignment);
-      let blocked = current ?? planned;
-      if (blocked.status !== 'succeeded' && blocked.status !== 'merged') {
-        try {
-          blocked = await this.markAssignmentBlocked(
-            input.assignment,
-            releaseIssue.reason,
-            releaseIssue.nextAction,
-            releaseIssue.evidenceRefs,
-          );
-        } catch (blockedFailure) {
-          throw new AggregateError(
-            [primaryFailure ?? result.issue, releaseIssue, blockedFailure],
-            'orchestration dispatch and lease cleanup failed while recording the blocked state',
-          );
-        }
-      }
-      result = {
-        ...result,
-        status: blocked.status,
-        assignment: blocked,
-        issue: withLeaseCleanupIssue(result.issue, releaseIssue),
-        reviewResults: blocked.reviewResults,
-      };
-    }
-    if (primaryFailure) throw primaryFailure;
     if (!result) throw new OrchestrationError('orchestration dispatch produced no result', {
       ownerId: this.ownerId,
       reason: 'orchestration.dispatch.no-result',
@@ -1302,9 +812,8 @@ export class OrchestrationManager {
     lease: RuntimePoolLease,
     executionAgent: TaskExecutionHandle,
   ): Promise<OrchestrationDispatchResult> {
-    const binding = leaseBinding(lease);
-    await this.assignToRuntime(input.assignment, input.agentId, binding);
-    const planned = await this.startAssignment(input.assignment, input.agentId, binding);
+    this.graph.assign(input.assignment, input.agentId, leaseBinding(lease));
+    const planned = this.graph.start(input.assignment, input.agentId, leaseBinding(lease));
     let preparedCall: PreparedChildCall | undefined;
     if (this.childCallPort) {
       try {
@@ -1321,7 +830,7 @@ export class OrchestrationManager {
       } catch (error) {
         // A failed call checkpoint must stop dispatch: the child port is never
         // invoked without a durable recovery anchor.
-        return await this.blockedResult(
+        return this.blockedResult(
           planned,
           issueFromUnknown(error, {
             code: 'orchestration.child-checkpoint-failed',
@@ -1353,7 +862,7 @@ export class OrchestrationManager {
         conditionRef: 'orchestration.execution',
       });
       if (input.assignment.attempt < this.maxAttempts) {
-        const record = await this.markAssignmentRetryable(
+        const record = this.graph.markRetryable(
           input.assignment,
           executionIssue.reason,
           executionIssue.evidenceRefs,
@@ -1368,7 +877,7 @@ export class OrchestrationManager {
           scope: input.scope,
           evidenceRefs: executionIssue.evidenceRefs,
         });
-        if (feedbackIssue) return await this.blockedResult(record, feedbackIssue, input.scope);
+        if (feedbackIssue) return this.blockedResult(record, feedbackIssue, input.scope);
         return {
           status: 'retryable',
           assignment: record,
@@ -1377,13 +886,13 @@ export class OrchestrationManager {
           reviewResults: record.reviewResults,
         };
       }
-      const exhausted = await this.markAssignmentEscalated(
+      const exhausted = this.graph.markEscalated(
         input.assignment,
         executionIssue.reason,
         executionIssue.nextAction,
         executionIssue.evidenceRefs,
       );
-      return await this.blockedResult(exhausted, executionIssue, input.scope);
+      return this.blockedResult(exhausted, executionIssue, input.scope);
     }
 
     const delivery = normalizeDelivery(rawDelivery);
@@ -1404,7 +913,7 @@ export class OrchestrationManager {
         ...(delivery.inspectionDelivery ? { inspectionDelivery: delivery.inspectionDelivery } : {}),
       });
     }
-    const accepted = await this.acceptAssignmentResult(input.assignment, {
+    const accepted = this.graph.acceptResult(input.assignment, {
       result,
       expectedAgentId: input.agentId,
       ...(delivery.criteria ? { criteria: delivery.criteria } : {}),
@@ -1412,7 +921,7 @@ export class OrchestrationManager {
       ownerId: this.ownerId,
       runtimeBinding: leaseBinding(lease),
     });
-    if (!accepted.accepted) return await this.rejectedResult(input, accepted);
+    if (!accepted.accepted) return this.rejectedResult(input, accepted);
     if (accepted.duplicate) {
       return {
         status: accepted.record.status,
@@ -1429,7 +938,7 @@ export class OrchestrationManager {
       scope: input.scope,
       evidenceRefs: result.evidenceRefs,
     });
-    if (resultIssue) return await this.blockedResult(accepted.record, resultIssue, input.scope);
+    if (resultIssue) return this.blockedResult(accepted.record, resultIssue, input.scope);
 
     if (this.childCallPort && preparedCall) {
       // Owner adoption is a separate fact from the returned refined delivery.
@@ -1452,7 +961,7 @@ export class OrchestrationManager {
         accepted.record.status === 'retryable' ? 'retry' : 'attention',
         retry?.attempt,
       );
-      if (feedbackIssue) return await this.blockedResult(accepted.record, feedbackIssue, input.scope);
+      if (feedbackIssue) return this.blockedResult(accepted.record, feedbackIssue, input.scope);
       return {
         status: accepted.record.status,
         assignment: accepted.record,
@@ -1471,14 +980,14 @@ export class OrchestrationManager {
     }
 
     if (result.nextAction === 'attention') {
-      const escalated = await this.markAssignmentEscalated(
+      const escalated = this.graph.markEscalated(
         input.assignment,
         result.conditionRef ?? result.failureRef ?? 'work result requires attention',
         { kind: 'recover', ref: result.conditionRef ?? `attention.${input.assignment.assignmentId}` },
         result.evidenceRefs,
       );
       const feedbackIssue = await this.publishFailureFeedback(input, escalated, 'attention');
-      if (feedbackIssue) return await this.blockedResult(escalated, feedbackIssue, input.scope);
+      if (feedbackIssue) return this.blockedResult(escalated, feedbackIssue, input.scope);
       return {
         status: 'escalated',
         assignment: escalated,
@@ -1497,7 +1006,7 @@ export class OrchestrationManager {
     if (!reviewRequired) {
       return {
         status: 'succeeded',
-        assignment: await this.markAssignmentSucceeded(input.assignment, accepted.record.evidenceRefs),
+        assignment: this.graph.markSucceeded(input.assignment, accepted.record.evidenceRefs),
         reviewResults: accepted.record.reviewResults,
       };
     }
@@ -1736,7 +1245,7 @@ export class OrchestrationManager {
         [evidence(input.scope, 'orchestration.review.unavailable')],
         'orchestration.review.unavailable',
       );
-      return await this.blockedResult(record, unavailable, input.scope);
+      return this.blockedResult(record, unavailable, input.scope);
     }
 
     let reviewMaterial: ReviewMaterial;
@@ -1756,7 +1265,7 @@ export class OrchestrationManager {
         executorEvidence: (result as WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] }).executorEvidence,
       });
     } catch (error) {
-      return await this.blockedResult(
+      return this.blockedResult(
         record,
         issueFromUnknown(error, {
           code: 'review-material-invalid',
@@ -1780,7 +1289,7 @@ export class OrchestrationManager {
         subjectRefs: input.assignment.targetRefs,
       });
     } catch (error) {
-      return await this.blockedResult(
+      return this.blockedResult(
         record,
         issueFromUnknown(error, {
           code: 'review-assignment-invalid',
@@ -1816,7 +1325,7 @@ export class OrchestrationManager {
             scope: input.scope,
           });
         } catch (error) {
-          return await this.blockedResult(
+          return this.blockedResult(
             record,
             issueFromUnknown(error, {
               code: 'orchestration.child-checkpoint-failed',
@@ -1841,7 +1350,7 @@ export class OrchestrationManager {
         );
         // A failed durable step must still return the receipts already committed
         // by the earlier reviews in this loop.
-        if (!durable.ok) return await this.blockedResult(record, durable.issue, input.scope, reviewCommitRefs);
+        if (!durable.ok) return this.blockedResult(record, durable.issue, input.scope, reviewCommitRefs);
         reviewResult = durable.delivery.result;
         reviewCommitRefs.push(durable.commitRef);
       } else {
@@ -1854,7 +1363,7 @@ export class OrchestrationManager {
             scope: input.scope,
           });
         } catch (error) {
-          return await this.blockedResult(
+          return this.blockedResult(
             record,
             issueFromUnknown(error, {
               code: 'review-failed',
@@ -1868,7 +1377,7 @@ export class OrchestrationManager {
         try {
           assertReviewResultMatchesAssignment(reviewAssignment, reviewResult);
         } catch (error) {
-          return await this.blockedResult(
+          return this.blockedResult(
             record,
             issueFromUnknown(error, {
               code: 'review-result-invalid',
@@ -1894,7 +1403,7 @@ export class OrchestrationManager {
             result: reviewResult,
           });
         } catch (error) {
-          return await this.blockedResult(
+          return this.blockedResult(
             record,
             issueFromUnknown(error, {
               code: 'review-return-failed',
@@ -1916,7 +1425,7 @@ export class OrchestrationManager {
             scope: input.scope,
           });
         } catch (error) {
-          return await this.blockedResult(
+          return this.blockedResult(
             record,
             issueFromUnknown(error, {
               code: 'review-adoption-failed',
@@ -1938,7 +1447,7 @@ export class OrchestrationManager {
             scope: input.scope,
           });
         } catch (error) {
-          return await this.blockedResult(
+          return this.blockedResult(
             record,
             issueFromUnknown(error, {
               code: 'review-checkpoint-failed',
@@ -1954,9 +1463,9 @@ export class OrchestrationManager {
       }
       let recorded: AssignmentRecord;
       try {
-        recorded = await this.recordAssignmentReview(input.assignment, reviewResult);
+        recorded = this.graph.recordReviewResult(input.assignment, reviewResult);
       } catch (error) {
-        return await this.blockedResult(
+        return this.blockedResult(
           record,
           issueFromUnknown(error, {
             code: 'review-result-conflict',
@@ -1973,7 +1482,7 @@ export class OrchestrationManager {
         (candidate) => candidate.resultId === reviewResult.resultId,
       );
       if (!persistedReviewResult) {
-        return await this.blockedResult(
+        return this.blockedResult(
           record,
           issue(
             'review-result-not-recorded',
@@ -1996,7 +1505,7 @@ export class OrchestrationManager {
         scope: input.scope,
         evidenceRefs: reviewResult.evidenceRefs,
       });
-      if (feedbackIssue) return await this.blockedResult(record, feedbackIssue, input.scope, reviewCommitRefs);
+      if (feedbackIssue) return this.blockedResult(record, feedbackIssue, input.scope, reviewCommitRefs);
     }
 
     let gate: ReviewDecision;
@@ -2009,7 +1518,7 @@ export class OrchestrationManager {
         orchestrationManagerId: this.ownerId,
       });
     } catch (error) {
-      return await this.blockedResult(
+      return this.blockedResult(
         record,
         issueFromUnknown(error, {
           code: 'review-gate-invalid',
@@ -2032,8 +1541,8 @@ export class OrchestrationManager {
           })
         : undefined;
       const updated = remediation
-        ? await this.markAssignmentRetryable(input.assignment, 'review requires remediation', gate.evidenceRefs)
-        : await this.markAssignmentEscalated(
+        ? this.graph.markRetryable(input.assignment, 'review requires remediation', gate.evidenceRefs)
+        : this.graph.markEscalated(
             input.assignment,
             'review remediation budget is exhausted',
             reviewNextAction(gate),
@@ -2045,7 +1554,7 @@ export class OrchestrationManager {
         remediation ? 'retry' : 'attention',
         remediation?.attempt,
       );
-      if (feedbackIssue) return await this.blockedResult(updated, feedbackIssue, input.scope, reviewCommitRefs);
+      if (feedbackIssue) return this.blockedResult(updated, feedbackIssue, input.scope, reviewCommitRefs);
       return {
         status: updated.status,
         assignment: updated,
@@ -2062,13 +1571,13 @@ export class OrchestrationManager {
       };
     }
     if (gate.status !== 'succeeded' && !reviewWaitingForMerge(gate, input.assignment)) {
-      const blocked = await this.markAssignmentBlocked(
+      const blocked = this.graph.markBlocked(
         input.assignment,
         `review gate is ${gate.status}`,
         reviewNextAction(gate),
         gate.evidenceRefs,
       );
-      return await this.blockedResult(
+      return this.blockedResult(
         blocked,
         issue(
           `review-${gate.status}`,
@@ -2082,7 +1591,7 @@ export class OrchestrationManager {
       );
     }
     if (input.assignment.mergeGate !== 'required') {
-      const completed = await this.markAssignmentSucceeded(input.assignment, gate.evidenceRefs);
+      const completed = this.graph.markSucceeded(input.assignment, gate.evidenceRefs);
       return {
         status: 'succeeded',
         assignment: completed,
@@ -2091,7 +1600,7 @@ export class OrchestrationManager {
       };
     }
     if (!allReviewsPassed(reviewResults)) {
-      return await this.blockedResult(
+      return this.blockedResult(
         record,
         issue(
           'review-not-passed',
@@ -2105,7 +1614,7 @@ export class OrchestrationManager {
       );
     }
     if (!this.mergeCoordinator) {
-      return await this.blockedResult(
+      return this.blockedResult(
         record,
         issue(
           'merge-coordinator-unavailable',
@@ -2132,7 +1641,7 @@ export class OrchestrationManager {
       });
       for (const evidenceRef of mergeOutcome.evidenceRefs) assertEvidenceRef(evidenceRef);
     } catch (error) {
-      return await this.blockedResult(
+      return this.blockedResult(
         record,
         issueFromUnknown(error, {
           code: 'merge-failed',
@@ -2152,13 +1661,13 @@ export class OrchestrationManager {
       scope: input.scope,
       evidenceRefs: mergeOutcome.evidenceRefs,
     });
-    if (mergeFeedbackIssue) return await this.blockedResult(record, mergeFeedbackIssue, input.scope, reviewCommitRefs);
+    if (mergeFeedbackIssue) return this.blockedResult(record, mergeFeedbackIssue, input.scope, reviewCommitRefs);
 
     if (mergeOutcome.status !== 'merged') {
       const mergeEvidenceRefs = mergeOutcome.evidenceRefs.length > 0
         ? mergeOutcome.evidenceRefs
         : [evidence(input.scope, 'orchestration.merge')];
-      const blocked = await this.markAssignmentBlocked(
+      const blocked = this.graph.markBlocked(
         input.assignment,
         mergeOutcome.reason ?? `merge is ${mergeOutcome.status}`,
         mergeOutcome.nextAction ?? { kind: 'recover', ref: 'orchestration.merge' },
@@ -2189,7 +1698,7 @@ export class OrchestrationManager {
       orchestrationManagerId: this.ownerId,
     });
     if (finalGate.status !== 'succeeded') {
-      return await this.blockedResult(
+      return this.blockedResult(
         record,
         issue(
           `merge-gate-${finalGate.status}`,
@@ -2204,7 +1713,7 @@ export class OrchestrationManager {
     }
     return {
       status: 'merged',
-      assignment: await this.markAssignmentMerged(input.assignment, finalGate.evidenceRefs),
+      assignment: this.graph.markMerged(input.assignment, finalGate.evidenceRefs),
       reviewResults,
       mergeOutcome,
       ...(reviewCommitRefs.length > 0 ? { reviewCommitRefs } : {}),
@@ -2264,21 +1773,21 @@ export class OrchestrationManager {
     }
   }
 
-  private async blockedResult(
+  private blockedResult(
     record: AssignmentRecord,
     orchestrationIssue: OrchestrationIssue,
     _scope: ScopeRef,
     reviewCommitRefs: readonly JournalCommitRef[] = [],
-  ): Promise<OrchestrationDispatchResult> {
+  ): OrchestrationDispatchResult {
     const current = this.graph.get(record.assignment) ?? record;
     const terminal = current.status === 'escalated'
-      ? await this.markAssignmentEscalated(
+      ? this.graph.markEscalated(
           current.assignment,
           orchestrationIssue.reason,
           orchestrationIssue.nextAction,
           orchestrationIssue.evidenceRefs,
         )
-      : await this.markAssignmentBlocked(
+      : this.graph.markBlocked(
           current.assignment,
           orchestrationIssue.reason,
           orchestrationIssue.nextAction,
@@ -2293,25 +1802,19 @@ export class OrchestrationManager {
     };
   }
 
-  private async rejectedResult(
+  private rejectedResult(
     input: DispatchInput,
     rejection: Extract<AssignmentResultAcceptance, { readonly accepted: false }>,
-  ): Promise<OrchestrationDispatchResult> {
+  ): OrchestrationDispatchResult {
     const record = this.graph.get(input.assignment);
     const blocked = record
-      ? await this.markAssignmentBlocked(
+      ? this.graph.markBlocked(
           input.assignment,
           rejection.reason,
           rejection.nextAction,
           rejection.evidenceRefs,
         )
-      : await this.createAssignment(input.stageNodeId, input.assignment)
-        .then((created) => this.markAssignmentBlocked(
-          created.assignment,
-          rejection.reason,
-          rejection.nextAction,
-          rejection.evidenceRefs,
-        ));
+      : this.graph.createAssignment(input.stageNodeId, input.assignment);
     return {
       status: 'blocked',
       assignment: blocked,

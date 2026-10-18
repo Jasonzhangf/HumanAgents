@@ -2,9 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   id,
-  type AssignmentGraphCommitRequest,
-  type AssignmentGraphStream,
-  type CommittedAssignmentGraphFact,
   type EvidenceRef,
   type InspectionItemDelivery,
   type RequirementEnvelope,
@@ -23,11 +20,9 @@ import {
   AgentRuntimePoolManager,
   AssignmentGraph,
   OrchestrationManager,
-  replayAssignmentGraph,
   type ExecutionAgentInput,
   type ExecutionAgentPort,
   type ExecutionDelivery,
-  type GraphMutation,
   type IndependentChildCallInput,
   type ChildCallPort,
   type MergeCoordinatorPort,
@@ -43,10 +38,6 @@ import type {
   TaskReviewHandle,
   TaskReviewInstanceCreateInput,
 } from '../../../packages/runtime/src/orchestration/types.js';
-import {
-  createTestAssignmentGraphJournal,
-  type TestAssignmentGraphJournal,
-} from './assignment-graph-test-journal.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
@@ -58,48 +49,6 @@ const runtimeBinding = {
   assignmentId: 'assignment-a',
   executionEpoch: 1,
 } as const;
-const graphStream = {
-  taskScope: { organId: organ, taskId: task },
-  ownerId: 'orchestration-manager',
-} as const;
-
-function createManager(
-  options: Omit<ConstructorParameters<typeof OrchestrationManager>[0], 'graphJournal' | 'graph'>
-    & Partial<Pick<ConstructorParameters<typeof OrchestrationManager>[0], 'graph' | 'graphJournal'>>
-    & { readonly taskId?: typeof task; readonly organId?: typeof organ },
-): OrchestrationManager {
-  const { taskId = task, organId = organ, ...rest } = options;
-  const fixture = createTestAssignmentGraphJournal({ ownerId: options.ownerId, taskId, organId });
-  return new OrchestrationManager({
-    ...rest,
-    graph: options.graph ?? fixture.graph,
-    graphJournal: options.graphJournal ?? fixture,
-  });
-}
-
-function graphStreamFor(ownerId: string, taskId: typeof task, organId: typeof organ): AssignmentGraphStream {
-  return { taskScope: { organId, taskId }, ownerId };
-}
-
-async function commitGraphMutation<T>(
-  journal: TestAssignmentGraphJournal,
-  graph: AssignmentGraph,
-  mutation: GraphMutation<T>,
-): Promise<T> {
-  const prepared = graph.prepare(mutation);
-  if (!prepared.change) return prepared.value;
-  const stream = graph.stream;
-  if (!stream) throw new Error('test graph stream is required');
-  const revision = graph.revision + 1;
-  const request: AssignmentGraphCommitRequest = {
-    commitId: `test-assignment-graph:${stream.ownerId}:${revision}`,
-    expectedRevision: graph.revision,
-    fact: { version: 1, stream, revision, change: prepared.change },
-  };
-  const committed = await journal.commit(request);
-  graph.applyCommitted(committed);
-  return prepared.value;
-}
 
 /** Produced subject body shared by the review fixtures in this file. */
 const artifactBody = 'reviewed artifact body';
@@ -158,32 +107,6 @@ function result(overrides: Partial<WorkResult> = {}): WorkResult {
     nextAction: 'review',
     ...overrides,
   };
-}
-
-function committedGraphFact(
-  revision: number,
-  change: CommittedAssignmentGraphFact['fact']['change'],
-): CommittedAssignmentGraphFact {
-  return {
-    fact: {
-      version: 1,
-      stream: graphStream,
-      revision,
-      change,
-    },
-    commitRef: {
-      commitId: `assignment-graph-${revision}`,
-      journalSeq: revision,
-      recordDigest: `digest-${revision}`,
-    },
-  };
-}
-
-function requireGraphChange(
-  change: CommittedAssignmentGraphFact['fact']['change'] | null,
-): CommittedAssignmentGraphFact['fact']['change'] {
-  if (change === null) throw new Error('expected graph change');
-  return change;
 }
 
 function criteria(overrides: Partial<{
@@ -401,7 +324,7 @@ test('manager acquires dormant execution from its bound creator and same pool', 
       async dispose() {},
     },
   });
-  const manager = createManager({ ownerId: 'owner', runtimePool: pool, executionAgent: agent });
+  const manager = new OrchestrationManager({ ownerId: 'owner', runtimePool: pool, executionAgent: agent });
   const acquired = await manager.acquireExecutionInstance({ assignment, scope, agentId: 'worker', executionEpoch: 7 });
   assert.equal(acquired.status, 'acquired');
   if (acquired.status !== 'acquired') throw new Error(acquired.issue.reason);
@@ -462,14 +385,12 @@ test('retained dispatch uses the exact acquired handle without re-acquiring or r
     maxRuntimes: 2,
     initialRuntimes: [{ runtimeId: 'retained-runtime', capabilities: ['execute'] }],
   });
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: agent,
-    taskId,
-    organId: retainedScope.organId,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId });
+  manager.planStage({ nodeId: 'node-a', taskId });
   const acquired = await manager.acquireExecutionInstance({
     assignment: originalAssignment,
     scope: retainedScope,
@@ -577,7 +498,7 @@ test('inspection manager delivery preserves prepare binding, returned delivery a
     }),
   };
   const childCallPort = new RecordingChildCallPort();
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'inspection-manager',
     runtimePool: pool,
     childCallPort,
@@ -1096,192 +1017,6 @@ test('assignment graph rejects reuse of one assignment key in a different stage'
   assert.deepEqual(graph.getStage('node-b')?.assignmentKeys, []);
 });
 
-test('resume binding installs a first agent without resetting committed assignment state', async () => {
-  const stream = graphStreamFor('orchestration-manager', task, organ);
-  const journal = createTestAssignmentGraphJournal({
-    ownerId: 'orchestration-manager',
-    taskId: task,
-    organId: organ,
-  });
-  const graph = new AssignmentGraph({ ownerId: 'orchestration-manager', stream });
-  await commitGraphMutation(journal, graph, {
-    kind: 'declare-stage',
-    apply: (draft) => draft.addStage({ nodeId: 'node-a', taskId: task }),
-  });
-  await commitGraphMutation(journal, graph, {
-    kind: 'assignment-transition',
-    action: 'create-assignment',
-    apply: (draft) => draft.createAssignment('node-a', assignment()),
-  });
-  const beforeStage = graph.getStage('node-a');
-  const segmentOpenedCommitRef = {
-    commitId: 'segment-opened-a',
-    journalSeq: 9,
-    recordDigest: 'segment-opened-digest',
-  };
-
-  const rebound = await commitGraphMutation(journal, graph, {
-    kind: 'resume-binding',
-    segmentOpenedCommitRef,
-    apply: (draft) => draft.resumeBinding(assignment(), 'agent-a', runtimeBinding),
-  });
-
-  assert.equal(rebound.status, 'planned');
-  assert.equal(rebound.agentId, 'agent-a');
-  assert.deepEqual(rebound.runtimeBinding, runtimeBinding);
-  assert.deepEqual(graph.getStage('node-a'), beforeStage);
-  assert.deepEqual(graph.getStage('node-a')?.assignmentKeys, ['assignment-a:1:1']);
-  assert.throws(
-    () => graph.prepare({
-      kind: 'resume-binding',
-      segmentOpenedCommitRef,
-      apply: (draft) => draft.resumeBinding(assignment(), 'agent-b', runtimeBinding),
-    }),
-    /cannot replace the bound agent/,
-  );
-});
-
-test('assignment graph rejects conflicting review results without replacing persisted truth', () => {
-  const graph = new AssignmentGraph({ ownerId: 'orchestration-manager' });
-  graph.addStage({ nodeId: 'node-a', taskId: task });
-  graph.createAssignment('node-a', assignment());
-  graph.assign(assignment(), 'agent-a', runtimeBinding);
-  graph.start(assignment(), 'agent-a', runtimeBinding);
-  const review: ReviewResult = {
-    resultId: 'review-a',
-    assignmentId: 'assignment-a',
-    taskId: task.value,
-    workerAgentId: 'agent-a',
-    reviewKind: 'quality',
-    attempt: 1,
-    executionEpoch: 1,
-    inputRevision: 1,
-    subjectRefs: ['target-a'],
-    status: 'passed',
-    findings: [],
-    evidenceRefs: [evidence('review-a')],
-  };
-  graph.recordReviewResult(assignment(), review);
-
-  assert.throws(
-    () => graph.recordReviewResult(assignment(), {
-      ...review,
-      status: 'failed',
-      findings: [{
-        findingId: 'finding-conflict',
-        severity: 'blocker',
-        locationRef: 'artifact-a',
-        problem: 'conflict',
-        expected: 'persisted truth',
-        evidenceRefs: [evidence('conflict')],
-      }],
-    }),
-    /conflicts with existing content/,
-  );
-  assert.throws(
-    () => graph.recordReviewResult(assignment(), {
-      ...review,
-      evidenceRefs: review.evidenceRefs.map((ref, index) => (
-        index === 0 ? { ...ref, locator: 'different-evidence-locator' } : ref
-      )),
-    }),
-    /conflicts with existing content/,
-  );
-  assert.deepEqual(graph.get(assignment())?.reviewResults, [review]);
-});
-
-test('assignment graph prepare stays uncommitted and replay preserves recorded stage facts', () => {
-  const live = new AssignmentGraph({
-    ownerId: 'orchestration-manager',
-    stream: graphStream,
-  });
-  const entries: CommittedAssignmentGraphFact[] = [];
-  let revision = 0;
-  const commit = (change: CommittedAssignmentGraphFact['fact']['change']) => {
-    revision += 1;
-    const entry = committedGraphFact(revision, change);
-    live.applyCommitted(entry);
-    entries.push(entry);
-  };
-
-  const parent = live.prepare({
-    kind: 'declare-stage',
-    apply: (graph) => graph.addStage({ nodeId: 'stage-parent', taskId: task }),
-  });
-  commit(requireGraphChange(parent.change));
-
-  const child = live.prepare({
-    kind: 'declare-stage',
-    apply: (graph) => graph.addStage({
-      nodeId: 'stage-child',
-      taskId: task,
-      parentNodeId: 'stage-parent',
-    }),
-  });
-  assert.ok(child.change);
-  assert.equal(live.revision, 1);
-  assert.equal(live.getStage('stage-child'), undefined);
-  assert.equal(live.listStages().length, 1);
-  commit(requireGraphChange(child.change));
-
-  const empty = live.prepare({
-    kind: 'declare-stage',
-    apply: (graph) => graph.addStage({ nodeId: 'stage-empty', taskId: task }),
-  });
-  commit(requireGraphChange(empty.change));
-
-  const created = live.prepare({
-    kind: 'assignment-transition',
-    action: 'create-assignment',
-    apply: (graph) => graph.createAssignment('stage-child', assignment()),
-  });
-  assert.ok(created.change);
-  assert.equal(live.revision, 3);
-  assert.equal(live.get(assignment()), undefined);
-  assert.equal(live.getStage('stage-child')?.assignmentKeys.length, 0);
-  commit(requireGraphChange(created.change));
-
-  const assigned = live.prepare({
-    kind: 'assignment-transition',
-    action: 'assign',
-    apply: (graph) => graph.assign(assignment(), 'agent-a', runtimeBinding),
-  });
-  commit(requireGraphChange(assigned.change));
-
-  const started = live.prepare({
-    kind: 'assignment-transition',
-    action: 'start',
-    apply: (graph) => graph.start(assignment(), 'agent-a', runtimeBinding),
-  });
-  commit(requireGraphChange(started.change));
-
-  const merged = live.prepare({
-    kind: 'assignment-transition',
-    action: 'mark-merged',
-    apply: (graph) => graph.markMerged(assignment(), [evidence('merge')]),
-  });
-  commit(requireGraphChange(merged.change));
-
-  const plannedAfterMerge = live.prepare({
-    kind: 'assignment-transition',
-    action: 'create-assignment',
-    apply: (graph) => graph.createAssignment(
-      'stage-child',
-      assignment({ assignmentId: 'assignment-b' }),
-    ),
-  });
-  commit(requireGraphChange(plannedAfterMerge.change));
-
-  const childStage = live.getStage('stage-child');
-  assert.equal(live.getStage('stage-empty')?.assignmentKeys.length, 0);
-  assert.equal(childStage?.parentNodeId, 'stage-parent');
-  assert.deepEqual(childStage?.assignmentKeys, ['assignment-a:1:1', 'assignment-b:1:1']);
-  assert.equal(childStage?.state, 'merged');
-  assert.equal(live.get(assignment())?.status, 'merged');
-  assert.equal(live.get(assignment({ assignmentId: 'assignment-b' }))?.status, 'planned');
-  assert.deepEqual(replayAssignmentGraph(graphStream, entries), live.snapshot());
-});
-
 test('assignment graph rejects stale epochs, wrong agents and duplicate conflicting results', () => {
   const graph = new AssignmentGraph({ ownerId: 'orchestration-manager' });
   graph.addStage({ nodeId: 'node-a', taskId: task });
@@ -1334,13 +1069,13 @@ test('failed work retries within budget and escalates after budget exhaustion', 
   const execution = new StaticExecutionAgent([
     result({ status: 'failed', outputRefs: [], failureRef: 'failure-a' }),
   ]);
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: execution,
     maxAttempts: 1,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -1404,7 +1139,7 @@ test('review failure creates a remediation assignment and merge cannot precede p
       return { status: 'merged', evidenceRefs: [evidence('merge')] };
     },
   };
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -1414,7 +1149,7 @@ test('review failure creates a remediation assignment and merge cannot precede p
     mergeCoordinator: merge,
     maxAttempts: 2,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment({ mergeGate: 'required' }),
@@ -1438,7 +1173,7 @@ test('review result mismatch is rejected before graph state advances', async () 
     ...(await PassingReviewAgent.prototype.review.call(review, input)),
     executionEpoch: input.reviewAssignment.executionEpoch + 1,
   });
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -1446,7 +1181,7 @@ test('review result mismatch is rejected before graph state advances', async () 
     ]),
     reviewAgent: review,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -1470,7 +1205,7 @@ test('merge-required work passes review before merge and records merged status',
       return { status: 'merged', evidenceRefs: [evidence('merge')] };
     },
   };
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -1479,7 +1214,7 @@ test('merge-required work passes review before merge and records merged status',
     reviewAgent: new PassingReviewAgent(),
     mergeCoordinator: merge,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment({ mergeGate: 'required' }),
@@ -1524,7 +1259,7 @@ test('duplicate dispatch returns recoverable progress while review is pending', 
     await reviewGate;
     return PassingReviewAgent.prototype.review.call(review, input);
   };
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: execution,
@@ -1538,7 +1273,7 @@ test('duplicate dispatch returns recoverable progress while review is pending', 
       },
     },
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const input = {
     stageNodeId: 'node-a',
     assignment: assignment({ mergeGate: 'required' as const }),
@@ -1600,12 +1335,12 @@ test('duplicate dispatch returns recoverable progress while execution is pending
       return { result: result({ nextAction: 'settle' }), criteria: criteria() };
     },
   };
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: execution,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const input = {
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -1646,12 +1381,12 @@ test('duplicate dispatch returns recoverable progress while runtime startup is p
   const execution = new StaticExecutionAgent([
     { result: result({ nextAction: 'settle' }), criteria: criteria() },
   ]);
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: execution,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const input = {
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -1677,223 +1412,6 @@ test('duplicate dispatch returns recoverable progress while runtime startup is p
   assert.equal(execution.inputs.length, 1);
 });
 
-test('ordinary dispatch returns progress for a hydrated running assignment without executing', async () => {
-  const stream = graphStreamFor('orchestration-manager', task, organ);
-  const journal = createTestAssignmentGraphJournal({
-    ownerId: 'orchestration-manager',
-    taskId: task,
-    organId: organ,
-  });
-  const builder = new AssignmentGraph({ ownerId: 'orchestration-manager', stream });
-  await commitGraphMutation(journal, builder, {
-    kind: 'declare-stage',
-    apply: (graph) => graph.addStage({ nodeId: 'node-a', taskId: task }),
-  });
-  await commitGraphMutation(journal, builder, {
-    kind: 'assignment-transition',
-    action: 'create-assignment',
-    apply: (graph) => graph.createAssignment('node-a', assignment()),
-  });
-  await commitGraphMutation(journal, builder, {
-    kind: 'assignment-transition',
-    action: 'assign',
-    apply: (graph) => graph.assign(assignment(), 'agent-a', runtimeBinding),
-  });
-  await commitGraphMutation(journal, builder, {
-    kind: 'assignment-transition',
-    action: 'start',
-    apply: (graph) => graph.start(assignment(), 'agent-a', runtimeBinding),
-  });
-  const execution = new StaticExecutionAgent([
-    { result: result({ nextAction: 'settle' }), criteria: criteria() },
-  ]);
-  const { pool } = factoryPool({
-    maxRuntimes: 1,
-    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
-  });
-  const manager = createManager({
-    ownerId: 'orchestration-manager',
-    runtimePool: pool,
-    executionAgent: execution,
-    graph: new AssignmentGraph({ ownerId: 'orchestration-manager', stream }),
-    graphJournal: journal,
-  });
-
-  const dispatched = await manager.dispatch({
-    stageNodeId: 'node-a',
-    assignment: assignment(),
-    agentId: 'agent-a',
-    scope,
-  });
-
-  assert.equal(dispatched.status, 'running');
-  assert.equal(dispatched.assignment.status, 'running');
-  assert.equal(dispatched.issue?.code, 'assignment-progress-pending');
-  assert.equal(execution.inputs.length, 0);
-  assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
-});
-
-test('two dispatch callers before journal replay share one execution', async () => {
-  let markReplayStarted!: () => void;
-  const replayStarted = new Promise<void>((resolve) => {
-    markReplayStarted = resolve;
-  });
-  let releaseReplay!: () => void;
-  const holdReplay = new Promise<void>((resolve) => {
-    releaseReplay = resolve;
-  });
-  const stream = graphStreamFor('orchestration-manager', task, organ);
-  const journal = createTestAssignmentGraphJournal({
-    ownerId: 'orchestration-manager',
-    taskId: task,
-    organId: organ,
-    holdReplay,
-    markReplayStarted,
-  });
-  const builder = new AssignmentGraph({ ownerId: 'orchestration-manager', stream });
-  await commitGraphMutation(journal, builder, {
-    kind: 'declare-stage',
-    apply: (graph) => graph.addStage({ nodeId: 'node-a', taskId: task }),
-  });
-  const execution = new StaticExecutionAgent([
-    { result: result({ nextAction: 'settle' }), criteria: criteria() },
-  ]);
-  const { pool } = factoryPool({
-    maxRuntimes: 1,
-    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
-  });
-  const manager = createManager({
-    ownerId: 'orchestration-manager',
-    runtimePool: pool,
-    executionAgent: execution,
-    graph: new AssignmentGraph({ ownerId: 'orchestration-manager', stream }),
-    graphJournal: journal,
-  });
-  await replayStarted;
-  const input = {
-    stageNodeId: 'node-a',
-    assignment: assignment(),
-    agentId: 'agent-a',
-    scope,
-  };
-
-  const firstDispatch = manager.dispatch(input);
-  const repeatedDispatch = manager.dispatch(input);
-  releaseReplay();
-  const [first, repeated] = await Promise.all([firstDispatch, repeatedDispatch]);
-
-  assert.equal(first.status, 'succeeded');
-  assert.equal(repeated.status, 'running');
-  assert.equal(repeated.issue?.code, 'assignment-progress-pending');
-  assert.equal(execution.inputs.length, 1);
-});
-
-test('graph commit failure before durable write blocks acquire and execution', async () => {
-  const journal = createTestAssignmentGraphJournal({
-    ownerId: 'orchestration-manager',
-    taskId: task,
-    organId: organ,
-  });
-  const execution = new StaticExecutionAgent([
-    { result: result({ nextAction: 'settle' }), criteria: criteria() },
-  ]);
-  const { factory, pool } = factoryPool({ maxRuntimes: 1 });
-  const manager = createManager({
-    ownerId: 'orchestration-manager',
-    runtimePool: pool,
-    executionAgent: execution,
-    graph: journal.graph,
-    graphJournal: journal,
-  });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
-
-  journal.failNextCommitBeforeWrite();
-  let beforeWriteFailure: unknown;
-  try {
-    await manager.dispatch({
-      stageNodeId: 'node-a',
-      assignment: assignment(),
-      agentId: 'agent-a',
-      scope,
-    });
-    throw new Error('dispatch must reject when its first graph commit fails');
-  } catch (error) {
-    beforeWriteFailure = error;
-  }
-  assert.ok(beforeWriteFailure instanceof Error);
-  assert.ok((beforeWriteFailure as Error).message.includes('failed before write'));
-
-  assert.equal(factory.startInputs.length, 0);
-  assert.equal(execution.inputs.length, 0);
-  assert.equal(manager.listAssignments().length, 0);
-  assert.deepEqual(manager.getStage('node-a')?.assignmentKeys, []);
-
-  const retried = await manager.dispatch({
-    stageNodeId: 'node-a',
-    assignment: assignment(),
-    agentId: 'agent-a',
-    scope,
-  });
-  assert.equal(retried.status, 'succeeded');
-  assert.equal(factory.startInputs.length, 1);
-  assert.equal(execution.inputs.length, 1);
-  assert.equal(manager.listAssignments().length, 1);
-  assert.equal(journal.entries.length, 6);
-});
-
-test('uncertain journal receipt retains the identical commit until exact retry confirms persistence', async () => {
-  const journal = createTestAssignmentGraphJournal({
-    ownerId: 'orchestration-manager',
-    taskId: task,
-    organId: organ,
-  });
-  const execution = new StaticExecutionAgent([
-    { result: result({ nextAction: 'settle' }), criteria: criteria() },
-  ]);
-  const { factory, pool } = factoryPool({ maxRuntimes: 1 });
-  const manager = createManager({
-    ownerId: 'orchestration-manager',
-    runtimePool: pool,
-    executionAgent: execution,
-    graph: journal.graph,
-    graphJournal: journal,
-  });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
-
-  journal.failNextCommitAfterWrite();
-  let receiptFailure: unknown;
-  try {
-    await manager.dispatch({
-      stageNodeId: 'node-a',
-      assignment: assignment(),
-      agentId: 'agent-a',
-      scope,
-    });
-    throw new Error('dispatch must reject when its graph commit receipt is uncertain');
-  } catch (error) {
-    receiptFailure = error;
-  }
-  assert.ok(receiptFailure instanceof Error);
-  assert.ok((receiptFailure as Error).message.includes('receipt failed after durable write'));
-
-  assert.equal(journal.entries.length, 2);
-  assert.equal(manager.listAssignments().length, 0);
-  assert.equal(factory.startInputs.length, 0);
-  assert.equal(execution.inputs.length, 0);
-
-  const retried = await manager.dispatch({
-    stageNodeId: 'node-a',
-    assignment: assignment(),
-    agentId: 'agent-a',
-    scope,
-  });
-  assert.equal(retried.status, 'succeeded');
-  assert.equal(journal.entries.length, 6);
-  assert.equal(manager.listAssignments().length, 1);
-  assert.equal(factory.startInputs.length, 1);
-  assert.equal(execution.inputs.length, 1);
-});
-
 test('resource admission blocked keeps the same assignment reusable after release', async () => {
   const { pool } = factoryPool({
     maxRuntimes: 1,
@@ -1911,12 +1429,12 @@ test('resource admission blocked keeps the same assignment reusable after releas
   const execution = new StaticExecutionAgent([
     { result: result({ nextAction: 'settle' }), criteria: criteria() },
   ]);
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: execution,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const input = {
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -1929,7 +1447,7 @@ test('resource admission blocked keeps the same assignment reusable after releas
   assert.equal(blocked.assignment.status, 'planned');
   assert.equal(blocked.issue?.ownerId, 'orchestration-manager');
   assert.equal(blocked.issue?.nextAction.kind, 'wait');
-  assert.equal(manager.listAssignments().length, 1);
+  assert.equal(manager.graph.listAssignments().length, 1);
 
   const released = await pool.release(held.lease, { scope });
   assert.equal(released.status, 'released');
@@ -1947,7 +1465,7 @@ test('feedback failures surface as blocked business outcomes instead of success'
   });
   const feedback = new RecordingFeedback();
   feedback.failOn = 'work-result';
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -1955,7 +1473,7 @@ test('feedback failures surface as blocked business outcomes instead of success'
     ]),
     feedback,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -1973,7 +1491,7 @@ test('attention results preserve recovery ownership and never become success', a
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
   });
   const feedback = new RecordingFeedback();
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -1987,7 +1505,7 @@ test('attention results preserve recovery ownership and never become success', a
     ]),
     feedback,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -2068,14 +1586,14 @@ test('dispatch is idempotent for terminal assignments and duplicate work results
       return { status: 'merged', evidenceRefs: [evidence('merge')] };
     },
   };
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: execution,
     reviewAgent: new PassingReviewAgent(),
     mergeCoordinator: merge,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const input = {
     stageNodeId: 'node-a',
     assignment: assignment({ mergeGate: 'required' as const }),
@@ -2089,7 +1607,7 @@ test('dispatch is idempotent for terminal assignments and duplicate work results
   assert.equal(first.status, 'merged');
   assert.equal(repeated.status, 'merged');
   assert.equal(execution.inputs.length, 1);
-  assert.equal(manager.get(assignment())?.status, 'merged');
+  assert.equal(manager.graph.get(assignment())?.status, 'merged');
   assert.equal((manager as unknown as { reviewAgent?: PassingReviewAgent }).reviewAgent?.kinds.length, 1);
   assert.equal(mergeCalls, 1);
 });
@@ -2102,12 +1620,12 @@ test('dispatch is idempotent for succeeded terminal assignments', async () => {
   const execution = new StaticExecutionAgent([
     { result: result({ nextAction: 'settle' }), criteria: criteria() },
   ]);
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: execution,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const input = {
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -2121,13 +1639,13 @@ test('dispatch is idempotent for succeeded terminal assignments', async () => {
   assert.equal(execution.inputs.length, 1);
 });
 
-test('merge gate uses persisted review truth', async () => {
+test('review result id conflicts are rejected and merge gate uses persisted review truth', async () => {
   const { pool } = factoryPool({
     maxRuntimes: 1,
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute', 'quality.review'] }],
   });
   const firstReview = new PassingReviewAgent();
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -2140,7 +1658,7 @@ test('merge gate uses persisted review truth', async () => {
       },
     },
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment({ mergeGate: 'required' }),
@@ -2149,22 +1667,39 @@ test('merge gate uses persisted review truth', async () => {
     reviewKinds: ['quality'],
     reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
-  const stored = manager.get(assignment())?.reviewResults[0];
+  const stored = manager.graph.get(assignment())?.reviewResults[0];
   assert.ok(stored);
   if (!stored) return;
-  assert.equal(manager.get(assignment())?.reviewResults.length, 1);
+  assert.throws(
+    () => manager.graph.recordReviewResult(assignment(), { ...stored, status: 'failed', findings: [{
+      findingId: 'finding-conflict',
+      severity: 'blocker',
+      locationRef: 'artifact-a',
+      problem: 'conflict',
+      expected: 'persisted truth',
+      evidenceRefs: [evidence('conflict')],
+    }] }),
+    /conflicts with existing content/,
+  );
+  assert.throws(
+    () => manager.graph.recordReviewResult(assignment(), {
+      ...stored,
+      evidenceRefs: [{ ...stored.evidenceRefs[0], locator: 'different-review-evidence' }],
+    }),
+    /conflicts with existing content/,
+  );
 });
 
 test('assignment graph owner is injected by the orchestration manager and mismatches are rejected', () => {
   const { pool } = factoryPool();
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
   });
-  assert.equal(manager.ownerId, 'orchestration-manager');
+  assert.equal(manager.graph.ownerId, 'orchestration-manager');
   const graph = new AssignmentGraph({ ownerId: 'other-owner' });
   assert.throws(
-    () => createManager({
+    () => new OrchestrationManager({
       ownerId: 'orchestration-manager',
       runtimePool: pool,
       graph,
@@ -2180,7 +1715,7 @@ test('blocked merge outcomes expose owner, reason, next action, and fallback evi
     maxRuntimes: 1,
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute', 'quality.review'] }],
   });
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -2198,7 +1733,7 @@ test('blocked merge outcomes expose owner, reason, next action, and fallback evi
       },
     },
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment({ mergeGate: 'required' }),
@@ -2330,7 +1865,7 @@ test('retry control stays out of business objective and all failure issues carry
     maxRuntimes: 1,
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
   });
-  const manager = createManager({
+  const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
@@ -2338,7 +1873,7 @@ test('retry control stays out of business objective and all failure issues carry
     ]),
     maxAttempts: 2,
   });
-  await manager.planStage({ nodeId: 'node-a', taskId: task });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
   const dispatched = await manager.dispatch({
     stageNodeId: 'node-a',
     assignment: assignment(),
@@ -2487,14 +2022,12 @@ function implicitAssembly(failures = new Set<string>()) {
   });
   const executor = new ImplicitExecutor(failures);
   const review = new ImplicitReviewAgent();
-  const orchestration = createManager({
+  const orchestration = new OrchestrationManager({
     ownerId: 'implicit-test',
     runtimePool: pool,
     executionAgent: executor,
     reviewAgent: review,
     maxAttempts: 1,
-    taskId: implicitTask,
-    organId: implicitOrgan,
   });
   return { orchestration, executor, review };
 }

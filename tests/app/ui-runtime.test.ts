@@ -95,14 +95,13 @@ import { createPreparedOperationBoundary } from '../../packages/app/src/prepared
 import type { AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
 import { prepareExecutionAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
 import { createToolExecutionGateway } from '../../packages/app/src/tool-execution-gateway.js';
-import { resolveRuntimePaths } from '../../packages/config/src/index.js';
 import {
   AgentRuntimePoolManager,
+  OrchestrationManager,
   type ExecutionAgentPort,
   type MergeCoordinatorPort,
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
-import { createTestOrchestrationManager } from '../runtime/orchestration/assignment-graph-test-journal.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import { createJsonlCheckpointJournal } from '../../packages/app/src/checkpoint-journal.js';
@@ -4009,7 +4008,6 @@ test('orchestrated confirmed requirement dispatches implicit executor agents thr
     organId,
     binding,
     port,
-    runtimePaths: await resolveRuntimePaths({ workspace: root, controlRoot: join(root, 'control') }),
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
@@ -4085,10 +4083,8 @@ test('orchestrated confirmed requirement dispatches implicit executor agents thr
             };
           },
         };
-        const orchestration = createTestOrchestrationManager({
+        const orchestration = new OrchestrationManager({
           ownerId: 'ui-runtime-test',
-          taskId: task.id,
-          organId: task.organId,
           runtimePool,
           executionAgent: executionAgent,
           reviewAgent,
@@ -9552,7 +9548,6 @@ test('orchestrated review is handed the produced file bodies, not only the execu
     binding,
     port,
     workspaceRoot,
-    runtimePaths: await resolveRuntimePaths({ workspace: root, controlRoot: join(root, 'control') }),
     providerTools: [RESPONSES_FILE_WRITE_TOOL],
     providerToolExecutor: {
       async execute(request) {
@@ -9637,10 +9632,8 @@ test('orchestrated review is handed the produced file bodies, not only the execu
             };
           },
         };
-        const orchestration = createTestOrchestrationManager({
+        const orchestration = new OrchestrationManager({
           ownerId: 'ui-runtime-test',
-          taskId: task.id,
-          organId: task.organId,
           runtimePool,
           executionAgent,
           reviewAgent,

@@ -274,7 +274,6 @@ import { UiRuntimeApiError, type UiRuntimeApiErrorBody } from './errors.js';
 import { canStartProviderRequest } from '../provider-admission.js';
 import { readProducedArtifacts, RESPONSES_FILE_SEARCH_TOOL } from '../provider-tool-execution.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
-import { createJsonlAssignmentGraphJournal } from '../../../adapters/jsonl/src/assignment-graph.js';
 import {
   FileCheckpointStore,
   readUiRuntimeTaskJournal,
@@ -297,12 +296,7 @@ import type {
   ConfiguredProjectReadSource,
   RuntimePaths,
 } from '../../../config/src/index.js';
-import {
-  type AssignmentGraphJournalPort,
-  type ExecutionAgentPort,
-  type RetryCycleConfigSet,
-} from '../../../runtime/src/orchestration/index.js';
-import { serveRuntimeOwnerId, type AssignmentGraphJournalFor } from '../serve-runtime.js';
+import { type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import { createJsonlCheckpointJournal, createJsonlContextHistoryPort, createJsonlSemanticHistoryReader } from '../checkpoint-journal.js';
 import { AppLifecycleError } from '../errors.js';
@@ -559,7 +553,6 @@ export interface UiRuntimeServiceOptions {
       readonly task: import('../../../contracts/src/index.js').Task;
       readonly scope: import('../../../contracts/src/index.js').ScopeRef;
       readonly checkpointJournal: TaskCheckpointStore;
-      readonly graphJournal: AssignmentGraphJournalPort;
       readonly executionAgent?: ExecutionAgentPort;
       readonly maxAttempts?: number;
       readonly childCallPort?: import('../../../runtime/src/orchestration/types.js').ChildCallPort;
@@ -2075,27 +2068,6 @@ function checkpointAssetForSelector(
 export class UiRuntimeService {
   private readResources?: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> };
 
-  private assignmentGraphJournalFor(
-    input: Parameters<AssignmentGraphJournalFor>[0],
-  ): AssignmentGraphJournalPort {
-    const checkpointsRoot = (this.readResources?.runtimePaths ?? this.options.runtimePaths)?.checkpointsRoot;
-    if (checkpointsRoot === undefined) {
-      throw new AppLifecycleError(
-        'assignment-graph.scope-unavailable',
-        'the task assembly has no configured project checkpoint root',
-        'bind the canonical project runtime paths before creating task orchestration',
-        APP_OWNER,
-      );
-    }
-    return createJsonlAssignmentGraphJournal({
-      filePath: uiRuntimeControlJournalPath(uiRuntimeModeRoot(checkpointsRoot, this.mode)),
-      stream: {
-        taskScope: input.taskScope,
-        ownerId: input.ownerId,
-      },
-    });
-  }
-
   bindReadResources(input: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> }): void {
     this.readResources = input;
   }
@@ -2324,10 +2296,6 @@ export class UiRuntimeService {
             task: input.task,
             scope: input.scope,
             checkpointJournal: input.checkpointJournal,
-            graphJournal: this.assignmentGraphJournalFor({
-              taskScope: { organId: input.task.organId, taskId: input.task.id },
-              ownerId: serveRuntimeOwnerId(),
-            }),
             ...(input.executionAgent === undefined ? {} : { executionAgent: input.executionAgent }),
             ...(input.maxAttempts === undefined ? {} : { maxAttempts: input.maxAttempts }),
             ...(input.childCallPort === undefined ? {} : { childCallPort: input.childCallPort }),
