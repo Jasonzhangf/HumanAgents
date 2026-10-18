@@ -830,6 +830,199 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('/api/memory/review'), true);
 });
 
+test('semantic observation carries one complete scope through GET, SSE, and finite completion', async () => {
+  const { createRuntimeApi } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/runtime-api.js')}`,
+  ).href) as {
+    createRuntimeApi: (options: {
+      fetchImpl: (url: string, init: unknown) => Promise<unknown>;
+    }) => {
+      semanticObservation: (taskId: string, scope?: Record<string, unknown>) => Promise<unknown>;
+      semanticEventsUrl: (taskId: string, scope?: Record<string, unknown>) => string;
+    };
+  };
+
+  const calls: string[] = [];
+  const api = createRuntimeApi({
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+  const scope = {
+    kind: 'task',
+    projectKey: 'project-config-a',
+    mode: 'rcc',
+    taskId: { value: 'same-task' },
+  };
+
+  await api.semanticObservation('same-task', scope);
+  const streamUrl = api.semanticEventsUrl('same-task', scope);
+  await api.semanticObservation('legacy-task');
+  const legacyStreamUrl = api.semanticEventsUrl('legacy-task');
+
+  assert.equal(calls[0], '/api/tasks/same-task/semantic?projectKey=project-config-a&mode=rcc');
+  assert.equal(
+    streamUrl,
+    '/api/tasks/same-task/semantic/stream?projectKey=project-config-a&mode=rcc',
+  );
+  assert.equal(calls.at(-1), '/api/tasks/legacy-task/semantic');
+  assert.equal(legacyStreamUrl, '/api/tasks/legacy-task/semantic/stream');
+});
+
+test('semantic panel closes a finite stream without disconnecting or publishing stale events', async () => {
+  class FakeElement {
+    readonly nodeType = 1;
+    className = '';
+    textContent = '';
+    readonly dataset: Record<string, string> = {};
+    readonly children: FakeElement[] = [];
+    private readonly attributes = new Map<string, string>();
+
+    constructor(readonly tagName: string) {}
+
+    get firstChild(): FakeElement | undefined { return this.children[0]; }
+    get childElementCount(): number { return this.children.length; }
+    append(...nodes: FakeElement[]): void { this.children.push(...nodes); }
+    replaceChildren(...nodes: FakeElement[]): void {
+      this.children.length = 0;
+      this.children.push(...nodes);
+    }
+    removeChild(node: FakeElement): void {
+      const index = this.children.indexOf(node);
+      if (index >= 0) this.children.splice(index, 1);
+    }
+    addEventListener(): void {}
+    removeEventListener(): void {}
+    setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+    getAttribute(name: string): string | undefined { return this.attributes.get(name); }
+    removeAttribute(name: string): void { this.attributes.delete(name); }
+    querySelector(): FakeElement | null { return null; }
+    focus(): void {}
+    close(): void {}
+    showModal(): void {}
+    contains(node: FakeElement): boolean {
+      return this.children.some((child) => child === node || child.contains(node));
+    }
+  }
+
+  class FakeEventSource {
+    static readonly instances: FakeEventSource[] = [];
+    readonly listeners = new Map<string, Array<(event: { data: string }) => void>>();
+    closed = false;
+    onopen?: () => void;
+    onerror?: () => void;
+
+    constructor(readonly url: string) {
+      FakeEventSource.instances.push(this);
+    }
+
+    addEventListener(type: string, listener: (event: { data: string }) => void): void {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    close(): void { this.closed = true; }
+
+    emit(type: string, data: unknown = {}): void {
+      const event = { data: JSON.stringify(data) };
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+  }
+
+  const semanticEnvelope = (taskId: string, summary: string) => ({
+    projectionVersion: 'semantic-observation@1',
+    scope: { taskId: { scope: 'task', value: taskId } },
+    events: [{
+      eventId: `event-${taskId}`,
+      type: 'semantic.test',
+      status: 'completed',
+      summary,
+      scope: { taskId: { scope: 'task', value: taskId } },
+      sourceId: `source-${taskId}`,
+      evidenceRefs: [],
+    }],
+    pairing: [],
+    coverageIssues: [],
+    capabilities: [],
+  });
+  const scope = {
+    kind: 'task',
+    projectKey: 'project-config-a',
+    mode: 'rcc',
+    taskId: { value: 'same-task' },
+  };
+  const observedScopes: Array<Record<string, unknown> | undefined> = [];
+  const apiClient = {
+    semanticObservation: async (_taskId: string, receivedScope?: Record<string, unknown>) => {
+      observedScopes.push(receivedScope);
+      return semanticEnvelope('same-task', 'scope A committed output');
+    },
+    semanticEventsUrl: (_taskId: string, receivedScope?: Record<string, unknown>) => {
+      observedScopes.push(receivedScope);
+      return '/api/tasks/same-task/semantic/stream?projectKey=project-config-a&mode=rcc';
+    },
+  };
+  const text = (node: FakeElement): string => node.textContent + node.children.map(text).join('');
+  const globals = globalThis as unknown as {
+    document?: unknown;
+    HTMLElement?: unknown;
+    EventSource?: unknown;
+  };
+  const previousDocument = globals.document;
+  const previousHTMLElement = globals.HTMLElement;
+  const previousEventSource = globals.EventSource;
+  globals.document = {
+    createElement: (tag: string) => new FakeElement(tag),
+  };
+  globals.HTMLElement = FakeElement;
+  globals.EventSource = FakeEventSource;
+
+  let panel: { dispose: () => void } | undefined;
+  try {
+    const { mountSemanticObservationPanel } = await import(new URL(
+      `file://${join(process.cwd(), 'docs/ui/runtime-shell.js')}`,
+    ).href) as {
+      mountSemanticObservationPanel: (
+        host: FakeElement,
+        options: Record<string, unknown>,
+      ) => { dispose: () => void };
+    };
+    const host = new FakeElement('div');
+    panel = mountSemanticObservationPanel(host, {
+      taskId: 'same-task',
+      scope,
+      apiClient,
+    });
+    const settle = async (): Promise<void> => {
+      for (let index = 0; index < 4; index += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    };
+    await settle();
+
+    assert.equal(observedScopes.length, 2);
+    assert.deepEqual(observedScopes, [scope, scope]);
+    const stream = FakeEventSource.instances.at(-1);
+    if (!stream) throw new Error('semantic panel did not open its stream');
+
+    stream.emit('semantic-complete');
+    stream.emit('semantic.observation', semanticEnvelope('project-b', 'scope B committed output'));
+    await settle();
+
+    assert.equal(stream.closed, true);
+    assert.equal(text(host).includes('scope A committed output'), true);
+    assert.equal(text(host).includes('scope B committed output'), false);
+    assert.equal(text(host).includes('实时连接已断开'), false);
+  } finally {
+    panel?.dispose();
+    globals.document = previousDocument;
+    globals.HTMLElement = previousHTMLElement;
+    globals.EventSource = previousEventSource;
+  }
+});
+
 test('task dashboard event rows do not render internal owner or next action details', async () => {
   const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
   assert.equal(source.includes('event.nextAction'), false);

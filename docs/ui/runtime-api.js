@@ -138,6 +138,14 @@ function appendI2TaskScope(query, scope) {
   return query
 }
 
+function taskScopeSearch(scope) {
+  if (scope === undefined) return ''
+  if (scope === null || typeof scope !== 'object' || scope.kind !== 'task') {
+    throw new TypeError('semantic observation scope requires one task read scope')
+  }
+  return taskControlScopeQuery(scope)
+}
+
 // A checkpoint asset body is addressed only by its role, or by the exact adopted
 // child triple. The four checkpoint selection keys on the query already name the
 // exact checkpoint; nothing else may be sent as authority.
@@ -396,8 +404,12 @@ export function createRuntimeApi(options = {}) {
     // Read-only semantic observation. The plain GET carries the confirmed
     // envelope; the SSE URL only names the same task's revision stream. Both are
     // GET edges, and neither builder derives control state from a raw payload.
-    semanticObservation: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/semantic`),
-    semanticEventsUrl: (taskId) => `${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/semantic/stream`,
+    // An absent scope keeps the legacy serve-bound read; a task scope sends the
+    // one complete projectKey/mode pair to both edges.
+    semanticObservation: (taskId, scope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/semantic${taskScopeSearch(scope)}`,
+    ),
+    semanticEventsUrl: (taskId, scope) => `${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/semantic/stream${taskScopeSearch(scope)}`,
     startExecution: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',
       body: JSON.stringify(input),
