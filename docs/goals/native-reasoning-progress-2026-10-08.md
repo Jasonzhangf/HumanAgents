@@ -1,5 +1,13 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 M3 已审候选安装复验失败，交付未完成
+
+- peer正式移交M3独占树后，本侧修正原consumer仅等rowpresence的readiness前置，保留waiting/grant断言。普通产品来源77dcecf2、测试20c03691；完整4文件240+/14-。原taskFlow omission RED复用，r424移除全部临时日志后原两cycle公开case实际1PASS33604ms/2revisions/29POST，nativecompile0。r426完整独立Gemini4medium实际SUCCESS/exit0，strictschema classifierPASS/findings[]。
+- peer明确交接main/install/canonical窗口，本侧main正常FF20c03691，contracts/config/App/nativecompile/package/install实际全0；正式installedrestart gen36/PID11061→gen37/PID3831，53007/legacyCloseclean。旧诊断cookie401后官方pair临时会话status200、logout200，没有canonical业务重投。
+- r427 installedmodules+canonicalCLI原两cyclecase实际1FAIL61305ms，保留fixture `~/.humanagent/test-fixtures/m3-installed-20261018/text-only-HzY3fE`。实际task-control seq186再次child SSE missing terminal，seq187上层failed-result criterion错误。main已本地合流但尚未push；没有回滚、强推或冒交付完成。ReviewPASS与health不代替此失败的安装行为门禁。
+- 原r420同类失败、r423发送端日志PASS/r424无日志PASS均不证明根因修复。r425独立Astra技术攻关排除标准follow-up提前清空terminal假设，未准入runtime修复。当前r428按其已接受计划仅在M3隔离树做一次临时消费端bytes/frames/terminal诊断并恢复；不弱guard、不改installed模块、不新增case/矩阵或重做negative。
+- 本侧M3树与失败fixtures、r427 consumer-layout因交付未完成保留；peer继续独立governance/prepared工作。完整goalACTIVE/INCOMPLETE，原canonical interaction epoch4后未请求，EOF根因UNKNOWN。
+
 ## 2026-10-18 显式跨 turn 证据充分性已裁决，不扩测
 
 - r413/r414两路只读GCM已返回：前者确认通用两turn语义历史装配、helper精炼checkpoint和冷helper恢复源码/测试边；后者确认当前独立instructions/requestContext三协议编码与config→App per-agent/role binding及匹配测试存在。未发现具体缺码；本次未运行测试，不称freshPASS，不把旧author记录未集成当当前缺实现。
