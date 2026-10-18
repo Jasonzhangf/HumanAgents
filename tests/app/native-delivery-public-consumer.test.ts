@@ -1132,9 +1132,6 @@ async function textOnlyResponsesUpstream(input: {
             },
           }
         : endSummary;
-      const deliveryRefsWithInspection = input.inspection && multiTurn && plannerAttempts > 0
-        ? [admissionCommitId]
-        : deliveryRefs;
       const deliveryText = multiTurn ? (plannerAttempts === 0 ? CHILD_BODY
         : input.turnCount === 3 && plannerAttempts === 1 ? TURN_TWO_DELIVERY : EXACT_BODY) : EXACT_BODY;
       const toolCall = [
@@ -1145,7 +1142,7 @@ async function textOnlyResponsesUpstream(input: {
           item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: JSON.stringify({
             summary: summaryWithInspection,
             ...(inspectThisTurn ? {} : { deliveryText }),
-            deliveryRefs: deliveryRefsWithInspection,
+            deliveryRefs,
           }) } },
         { type: 'response.completed', response: { id: 'text-end' } },
       ];
