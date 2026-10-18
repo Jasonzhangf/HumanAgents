@@ -303,6 +303,14 @@ button.so-crumb:hover {
   white-space: nowrap;
 }
 
+.so-section-disclosure > .so-section-summary {
+  cursor: pointer;
+}
+
+.so-section-disclosure[open] > .so-section-summary {
+  margin-block-end: 10px;
+}
+
 .so-item-list {
   display: grid;
   gap: 8px;

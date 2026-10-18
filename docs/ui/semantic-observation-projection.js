@@ -30,6 +30,7 @@
  * @property {string} title
  * @property {'stable'|'live'|'semantic'|'action'|'raw'|'capability'} kind
  * @property {string} [description]
+ * @property {boolean} [collapsed] initial presentation only; no persisted state
  * @property {readonly SemanticObservationViewItem[]} items
  *
  * @typedef {Object} SemanticObservationViewNotice
@@ -388,6 +389,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
         title: '覆盖缺口',
         kind: 'semantic',
         description: '这些记录暂时无法完整归类或关联，保持未知。',
+        collapsed: true,
         items: coverageItems,
       }
     : null
@@ -468,6 +470,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
         title: '覆盖缺口原始记录',
         kind: 'raw',
         description: '直接列出公开覆盖缺口的原始标识与引用。',
+        collapsed: true,
         items: coverageRawItems,
       })
     }

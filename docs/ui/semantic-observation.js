@@ -34,6 +34,7 @@
  * @property {string} title
  * @property {'stable'|'live'|'semantic'|'action'|'raw'|'capability'|string} [kind]
  * @property {string} [description]
+ * @property {boolean} [collapsed] initial presentation only; no persisted state
  * @property {readonly SemanticObservationItem[]} items
  *
  * @typedef {Object} SemanticObservationNotice
@@ -283,17 +284,28 @@ function renderSection(section, onEvidenceRequest) {
   head.append(copy)
   const count = array(section?.items).length
   head.append(element('span', 'so-section-count', `${count} 项`))
-  node.append(head)
 
+  let content
   if (count === 0) {
-    const empty = element('p', 'so-empty', '当前范围没有已投影内容。')
-    empty.dataset.empty = 'true'
-    node.append(empty)
+    content = element('p', 'so-empty', '当前范围没有已投影内容。')
+    content.dataset.empty = 'true'
+  } else {
+    content = element('div', 'so-item-list')
+    array(section.items).forEach((item) => content.append(renderItem(item, onEvidenceRequest)))
+  }
+
+  // A collapsed section uses the native disclosure element: it starts closed
+  // and keeps the readable head and full count in its summary. Items stay in
+  // their published order inside the disclosure and no toggle state is stored.
+  if (section?.collapsed === true) {
+    const details = element('details', 'so-section-disclosure')
+    const summary = element('summary', 'so-section-summary')
+    summary.append(head)
+    details.append(summary, content)
+    node.append(details)
     return node
   }
-  const list = element('div', 'so-item-list')
-  array(section.items).forEach((item) => list.append(renderItem(item, onEvidenceRequest)))
-  node.append(list)
+  node.append(head, content)
   return node
 }
 
