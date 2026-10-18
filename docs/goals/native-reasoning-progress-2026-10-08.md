@@ -9,6 +9,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- peer正确native-text入口inspector捕获inspection首异常：受控RCC v3 HTTP500，fixture断言`the actual child request carries Inspection check: check-a`失败；context已装配，port未返回，不是context/Planner结算根因。错误dist/tests诊断不计证明。App正常alignment接线来源72113582已cherry候选fe701c96，复用本批Appbuild/tsc0、原3case2PASS1FAIL，终态assertions UNREACHED；不重跑同红，不修cleanup症状，peer独立plan核对actualchildrequest与合同。
+- 已正常merge最新main至唯一candidate1e9ecb9d，progress文本冲突保留双方事实，Memory正式交付不再待办。r314只读观察确认C/G当前实现已超越旧gap文档；其建议的新Chat组合用例尚无产品失败依据，不自动新增。r315独立小Planner核对既有协议/配置消费/真实入口证据是否充分，充分即停止补测。r313身份计划仍live，预算源树保留，不扩大Gateway修改。
+
 - Memory r308三文件作者RED（缺auditPrompt，1fail1pass）→GREEN2/2，source5af0211b正常提交并cherry候选b3a55365。修改后r310原单livecase实际1/1PASS/127s/exit0，parent读取Qlbayu/receipt确认3start/request/output/settle/release、review model/succeeded/autoUpdatefalse；rewind解释明确wrong-business-ref被移除、accepted-prefix保留并关联原/恢复checkpoint，因占位经验不足合法attention，不伪造candidate。不宣称普遍JSON保证或完整N2。独立整体增量Review r311 Opus实quota/exit3未审，fresh Gemini r312进行。
 - r309原fixturetypedjournal证实新segmentregistration/旧parentinput不一致，修改后compile0，但namedconsumer新首错`external lifecycle conflicts with existing operation ui-operation-1`在Provider前。原admission修复未能通过原verifier重新证明，不能称resolved；r309候选仅保留原预算树，不合流。r313独立复杂Planner重判逻辑operation不可变输入与物理segment输入职责，禁止直接放宽Gateway指纹；可能涉及UX composition时先交其唯一writer。预算仍UNVERIFIED。
 
