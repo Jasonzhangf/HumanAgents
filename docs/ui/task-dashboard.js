@@ -48,10 +48,12 @@ import {
   displayModeLabel,
   planHistoryAvailability,
   planHistoryScopeFailure,
+  publicOutputActionCopy,
   resolveCurrentPlanRevision,
   renderTaskActualExecutionGraphSection,
   renderTaskPlanCurrentSection,
   renderTaskPlanSemanticView,
+  renderTaskPublicOutputPanel,
   renderTaskDescriptionContent,
   unavailableModeFailure,
 } from './task-display.js'
@@ -1667,7 +1669,9 @@ const START_ACTION_LABEL = '处理任务'
 const GRANT_CONTROL_FAILURE_COPY = '执行授权处理未完成；请打开技术详情查看原因。'
 
 function actionCopy() {
-  if (dashboard.state === 'succeeded') return dashboard.output ? '任务已完成，结果可用。' : '任务已完成；当前没有合法操作。'
+  if (dashboard.state === 'succeeded') {
+    return publicOutputActionCopy({ output: dashboard.output, publication: dashboard.publicOutput })
+  }
   if (dashboard.state === 'stopped') {
     const planNote = dashboard.plan?.state === 'active'
       ? `计划仍保持生效；下次到期：${dashboard.plan.nextDueAt ? formatPreciseTime(dashboard.plan.nextDueAt) : '未提供'}。需要暂停或取消后续执行请使用下方计划控制。`
@@ -2202,9 +2206,10 @@ function renderDashboard() {
 
   const outputSection = element('section', undefined, 'section business-output')
   outputSection.append(element('h2', '交付结果'))
-  const outputPanel = element('div', undefined, 'panel')
-  outputPanel.append(element('p', dashboard.output || '尚无输出', 'business-output-text'))
-  outputSection.append(outputPanel)
+  outputSection.append(renderTaskPublicOutputPanel({
+    output: dashboard.output,
+    publication: dashboard.publicOutput,
+  }))
   main.append(outputSection)
 
   const statuses = element('dl', undefined, 'detail-grid status-layers')
