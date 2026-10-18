@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- 接续实质推进：Runtime 首次 inspection cycle opening 来源 `8e0516ce` 已标准 cherry-pick 到唯一候选 `9e46f3e8`。组合 contracts build、agent-loop tsc 均 exit 0；`--test-name-pattern='inspection'` 原 consumer 15/15 PASS。仍未 main，不代替完整 App/native 或正常 settlement 验收。peer 保留原 Runtime 树继续 aligned settlement，候选 Git 窗口已释放。
+- N2 r303 单例真实 Memory 计划已接收，fresh GCM r304（tmux `ha-memory-r304`）执行 main 既有 opt-in consumer，不改源码；单次 invocation 最多三次 Memory submit、零 retry/fallback。结果待接收。N3 r302 预算错误恢复 consumer 的 PID80939 已核实仍 live；尚无改动/完成回执，不宣称完成。总目标 ACTIVE/INCOMPLETE。
+
 - 容量wait完整增量已main `c69c33ab`：独立delivery45e76f4e/c69c33ab四文件，r299 Gemini4medium SUCCESS/exit0/有效JSON/findings空，现有原classifier裁决pass；r298 Opus实quota429未审。正常fetch/合latestorigin后FF main，无inspection候选混入。
 - main contracts/config/App重建、package:candidate/install:global均exit0（session79031）；官方restart exit0（session78905），gen26/PID87116→gen27/PID3091，port53007、legacyClose clean。新PID实际存活39秒、installedlauncher、HTTP200。main provider tsc+目标6/6、App tsc+真实combinedconsumer1/1PASS（session54488）。受控replay行为与installed启动证明分别记录，不冒real RCC或Task标准收口完成。
 - 作者/Review均terminal，原App交付树已正常remove/prune/testabsent；Provider来源已关闭。此增量仅剩本轮push收尾回执，完整goal仍ACTIVE/INCOMPLETE；inspection继续由peer唯一owner推进，RCC原UNKNOWN不变。
