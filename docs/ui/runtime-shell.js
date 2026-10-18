@@ -1292,14 +1292,15 @@ function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) 
   const titleWrap = element('div')
   const title = element('h2', titleText, 'shell-layer-title')
   if (titleId) title.id = titleId
-  titleWrap.append(element('p', eyebrow, 'eyebrow'), title)
+  const eyebrowNode = element('p', eyebrow, 'eyebrow')
+  titleWrap.append(eyebrowNode, title)
   const close = element('button', '关闭', 'button shell-layer-close')
   close.type = 'button'
   close.addEventListener('click', () => layer.close())
   head.append(titleWrap, close)
   const body = element('div', undefined, 'shell-layer-body')
   layer.append(head, body)
-  return { layer, title, body, close }
+  return { layer, eyebrow: eyebrowNode, title, body, close }
 }
 
 // The contextual 技术详情 disclosure. It reuses the shell-layer frame, so it opens as the same
@@ -1315,7 +1316,7 @@ const shellLayerLeaves = new WeakMap()
 // shared agent-activity detail) in this same shell layer. Either way the layer stays
 // the one desktop side panel / mobile bottom drawer: the header, close button, single
 // open layer and focus return are not re-implemented by the page.
-export function openTechnicalDetail({ title = '技术详情', entries = [], footer, content, onClose } = {}) {
+export function openTechnicalDetail({ title = '技术详情', eyebrow = '技术详情', entries = [], footer, content, onClose } = {}) {
   if (!technicalDetailLayer) {
     const frame = createShellLayerFrame({
       ariaLabel: '技术详情',
@@ -1331,7 +1332,7 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
     document.body.append(frame.layer)
     technicalDetailLayer = frame
   }
-  const { layer, title: titleNode, body, close } = technicalDetailLayer
+  const { layer, eyebrow: eyebrowNode, title: titleNode, body, close } = technicalDetailLayer
   if (!technicalDetailLayer.active) {
     technicalDetailLayer.returnFocus = document.activeElement
     technicalDetailLayer.active = true
@@ -1344,6 +1345,8 @@ export function openTechnicalDetail({ title = '技术详情', entries = [], foot
       openLayer.close()
     }
   }
+  layer.setAttribute('aria-label', eyebrow)
+  eyebrowNode.textContent = eyebrow
   titleNode.textContent = title
   clearNode(body)
   if (content) {

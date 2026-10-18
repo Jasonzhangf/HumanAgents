@@ -2152,6 +2152,7 @@ function renderDashboard() {
   fullBrief.type = 'button'
   fullBrief.addEventListener('click', () => openTechnicalDetail({
     title: '任务说明',
+    eyebrow: '任务说明',
     content: renderTaskDescriptionContent({ input: dashboard.input }),
   }))
   titleBlock.append(fullBrief)
