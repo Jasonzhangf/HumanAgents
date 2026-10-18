@@ -23,9 +23,9 @@ main 重建、打包、全局安装完成；正式 restart gen40→41，端口53
 
 独立后续计划已接收：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-remaining-plan-oauth-20261018/plan.md` 及 owner-acceptance.md。当前按以下实际缺口推进，不重做已有效的测试：
 
-- 嵌套 Observation 仍有已捕获的机械事件标题、英文固定摘要和错误集合名称。独立 GCM 在单独候选实现人读投影；不改事件分类、生命周期或原始历史，不混入本批已交付代码。
-- M3 的源代码、公共 HTTP 和安装后两周期证明有效；成功 fixture 已清理且没有保留完整公开响应，精确数据的浏览器呈现仍待补足。不得从日志重建业务状态或自动重跑业务任务。
-- initial-open 安装后恢复及已确认副作用不重放已有接受证据。旧 activity-tail RED 与当前后继的精确等价边界仍未知，不能直接称为当前缺码，也不据此新增崩溃矩阵。
+- 嵌套 Observation 候选 `1b8f94db` 已实现人读投影及正确集合名称，`2d3facfb` 修复实际浏览器发现的空卡片。原 A 双端已补证；Root 读截图后发现事件详情仍把标签装成目标和结果，并引入重复状态与双滚动。独立局部计划已接受，GCM 在同一候选树只消融 execution-events 抽屉内容；不改事件分类、生命周期或原始历史。完整候选尚未整体 Review 或交付 main。
+- M3 的源代码、公共 HTTP 和安装后两周期证明有效。独立充分性计划确认无需重建已清理的精确 M3 fixture，也不重跑业务任务。候选 `e435f85b` 已在既有浏览器消费者加入唯一 available 计划历史分支：三版本、权威 current 为第二版。语法检查通过，真实浏览器待执行；该证据用于补实际 Dashboard 接线，不冒充新的两周期生产运行。
+- initial-open 安装后恢复及已确认副作用不重放已有接受证据。r469 对保留 interrupted fixture 经当前 installed canonical resolver 单次只读解析 exit0、ok:true：选中真实 interrupted tail，保留 seq22 opened anchor、seq26 records-through 和原 dispatching pending request。此项关闭当前 selector/source readback 的具体未知，旧 RED 不再作为当前失败。它没有执行业务恢复，不能关闭 interrupted-v2 后继执行、fencing 或完整 F13；fixture 没有 retry.jsonl，缺失读取为空未创建。证据为 `native-reasoning-d0-20261012/native-f13-canonical-read-observe-r469-20261018/observation.md`。
 - 原 taskless 问答 epoch6 仍 socket 失败，由 Provider peer 保留原责任及外部交接边界；不再盲重试，不阻断未受影响的 UX 工作。
 
 完整 I1–I5／G1–G14／F01–F20 继续 ACTIVE／INCOMPLETE。以上交付只关闭明确子能力，不替代完整目标的逐项收口。
