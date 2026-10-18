@@ -1,5 +1,10 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 接续：剩余原生能力与真实错误反馈
+
+- M3已交付，完整goal继续。freshGemini4medium大阶段Planner r364（PID67794/session19910）核余项、现有证据与下一必要Provider增量，不复制UXpeer的present/scopedUI修复，不以旧单executor/0of7快照重造功能。
+- 已知独立ready缺口并行交freshOAuthGPT6.1medium小Planner r365：App configuredReviewAgent在真实child失败后返回空证据inconclusive，导致validator错误掩盖原始原因。r353原catchstack/diagnosis证明该链，不能因成功M3通过而遗漏；只核现有异常/failed通道最小修正与一个受控公开失败入口，不放宽证据验证/造证据/自动重放，不碰UX文件。当前仅只读计划，尚未新建实现树或宣称修复。
+
 ## 2026-10-17 已交付：M3 两周期独立 review、Planner 演进与冷读取
 
 - 本增量已标准交付 main `19088d24` 并push，原远端回执 `bed6ad3d..19088d24 main -> main`。完整原生goal仍INCOMPLETE，原显式interaction-2/RCC EOF、M4真实任务/展示缺陷及其余全目标义务未关闭。
