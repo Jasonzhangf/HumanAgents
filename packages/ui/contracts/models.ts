@@ -363,6 +363,13 @@ export interface NodePreviewProjection {
   readonly label: string;
 }
 
+export interface ObservationTechnicalSourceProjection {
+  readonly kind: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly occurredAt?: string;
+}
+
 export interface ObservationNodeDetailProjection {
   readonly nodeId: string;
   readonly title: string;
@@ -382,16 +389,20 @@ export interface ObservationNodeDetailProjection {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly activity: readonly PipelineNodeActivityProjection[];
   readonly toolSteps: readonly PipelineNodeToolStepProjection[];
+  readonly technicalSource?: ObservationTechnicalSourceProjection;
   readonly childScopeRef?: string;
   readonly assignment?: AssignmentProjection;
   readonly feedback: readonly AgentFeedbackProjection[];
   readonly reconcile?: AssignmentReconcileProjection;
 }
 
+export type ObservationScopePurpose = 'pipeline-registry' | 'execution-events';
+
 export interface ObservationScopeProjection {
   readonly scopeRef: string;
   readonly title: string;
   readonly summary: string;
+  readonly purpose?: ObservationScopePurpose;
   readonly projectionSeq: string;
   readonly nodes: readonly PipelineNodeViewProjection[];
   readonly breadcrumbs: readonly { readonly ref: string; readonly title: string }[];

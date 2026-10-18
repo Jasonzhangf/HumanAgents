@@ -28,6 +28,7 @@ import {
   type MemoryInteractionSurfaceProjection,
   type MemorySummaryProjection,
   type ObservationNodeDetailProjection,
+  type ObservationScopePurpose,
   type AgentHandoffProjection,
   type AgentOwnershipFrameProjection,
   type PipelineNodeActivityProjection,
@@ -81,6 +82,20 @@ const NODE_KIND_LABELS: Record<string, string> = {
   'review.settle': '复核',
   'review.output': '复核',
   'memory.curation': '经验整理',
+};
+
+const OBSERVATION_EVENT_KIND_LABELS: Readonly<Record<string, string>> = {
+  'execution.started': '开始执行',
+  'provider.model': '模型处理',
+  'provider.output': '模型输出',
+  'provider.tool': '工具调用',
+  'provider.tool-result': '工具返回',
+  'provider.error': '执行失败',
+  'execution.settling': '正在收拢',
+  'checkpoint.committed': '已提交检查点',
+  'execution.terminal': '执行结束',
+  'attention.opened': '需要关注',
+  'attention.resolved': '关注已处理',
 };
 
 const AGENT_ROLE_LABELS: Record<AgentRoleDisplay, string> = {
@@ -398,6 +413,7 @@ export interface ObservationScopeSource {
   readonly scopeRef: string;
   readonly title: string;
   readonly summary: string;
+  readonly purpose?: ObservationScopePurpose;
   readonly projectionSeq: string;
   readonly currentNodeId?: string;
   readonly agents?: readonly ObservationAgentFrameSource[];
@@ -754,6 +770,25 @@ function toObservationNodeView(source: ObservationNodeSource) {
   };
 }
 
+function observationNodeDisplay(
+  source: ObservationNodeSource,
+  purpose: ObservationScopePurpose | undefined,
+): Pick<ObservationNodeDetailProjection, 'title' | 'kindDisplay' | 'summary'> {
+  if (purpose !== 'execution-events') {
+    return {
+      title: source.title,
+      kindDisplay: nodeKindLabel(source.kind),
+      summary: source.summary,
+    };
+  }
+  const kindDisplay = OBSERVATION_EVENT_KIND_LABELS[source.kind] ?? '未知事件';
+  return {
+    title: kindDisplay,
+    kindDisplay,
+    summary: kindDisplay,
+  };
+}
+
 function requireNodeFrame(
   source: ObservationNodeSource,
   frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>,
@@ -772,12 +807,14 @@ function requireNodeFrame(
 function toObservationDetail(
   source: ObservationNodeSource,
   frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>,
+  purpose: ObservationScopePurpose | undefined,
 ): ObservationNodeDetailProjection {
   const { frame, role } = requireNodeFrame(source, frameByAgentId);
+  const display = observationNodeDisplay(source, purpose);
   return {
     nodeId: source.nodeId,
-    title: source.title,
-    kindDisplay: nodeKindLabel(source.kind),
+    title: display.title,
+    kindDisplay: display.kindDisplay,
     stateDisplay: stateLabel(source.state),
     owner: source.owner,
     ownerAgentRole: role,
@@ -785,12 +822,18 @@ function toObservationDetail(
     iteration: source.iteration ?? frame.iteration,
     updatedAt: source.updatedAt,
     ...(source.turnId === undefined ? {} : { turnId: source.turnId }),
-    summary: source.summary,
+    summary: display.summary,
     inputs: source.inputRefs.map((ref) => ({ ref, label: ref })),
     outputs: source.outputRefs.map((ref) => ({ ref, label: ref })),
     evidenceRefs: source.evidenceRefs,
     activity: (source.activity ?? []).map(toPipelineNodeActivity),
     toolSteps: (source.toolSteps ?? []).map(toPipelineNodeToolStep),
+    technicalSource: {
+      kind: source.kind,
+      title: source.title,
+      summary: source.summary,
+      ...(source.updatedAt === undefined ? {} : { occurredAt: source.updatedAt }),
+    },
     childScopeRef: source.childScopeRef,
     assignment: source.assignment ? toAssignment(source.assignment) : undefined,
     feedback: (source.feedback ?? []).map(toAgentFeedback),
@@ -861,22 +904,27 @@ function toPipelineNodeActivity(source: ObservationNodeActivitySource): Pipeline
   };
 }
 
-function toPipelineNode(source: ObservationNodeSource, frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>): PipelineNodeProjection {
+function toPipelineNode(
+  source: ObservationNodeSource,
+  frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>,
+  purpose: ObservationScopePurpose | undefined,
+): PipelineNodeProjection {
   const { frame, role } = requireNodeFrame(source, frameByAgentId);
+  const display = observationNodeDisplay(source, purpose);
   // Registry pipeline nodes carry their `PIPELINE_ROWS` row; provider sub-event nodes of a child
   // scope are not registry nodes and stay rowless instead of being given a fabricated position.
   const row = (PIPELINE_ROWS as Readonly<Record<string, PipelineNodeRow | undefined>>)[source.nodeId];
   return {
     nodeId: source.nodeId,
-    title: source.title,
+    title: display.title,
     ...(row === undefined ? {} : { row }),
-    kindDisplay: nodeKindLabel(source.kind),
+    kindDisplay: display.kindDisplay,
     ownerAgentRole: role,
     roleDisplay: AGENT_ROLE_LABELS[role],
     stateDisplay: stateLabel(source.state),
     iteration: source.iteration ?? frame.iteration,
     activity: (source.activity ?? []).map(toPipelineNodeActivity),
-    summary: source.summary,
+    summary: display.summary,
     updatedAt: source.updatedAt,
     toolSteps: (source.toolSteps ?? []).map(toPipelineNodeToolStep),
   };
@@ -952,7 +1000,7 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
 
   const frames = toAgentFrames(scope.agents ?? [], scope.nodes);
   const frameByAgentId = new Map((scope.agents ?? []).map((frame) => [frame.agentId, frame]));
-  const nodes = scope.nodes.map((node) => toPipelineNode(node, frameByAgentId));
+  const nodes = scope.nodes.map((node) => toPipelineNode(node, frameByAgentId, scope.purpose));
   const handoffs = toHandoffs(scope.handoffs ?? [], scope.nodes, frames);
 
   let currentNode: PipelineNodeProjection | undefined;
@@ -965,7 +1013,7 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
   if (input.selectedNodeId) {
     const node = scope.nodes.find((candidate) => candidate.nodeId === input.selectedNodeId);
     if (!node) throw new UiProjectionError(`unknown observation node ${input.selectedNodeId}`);
-    selectedNode = toObservationDetail(node, frameByAgentId);
+    selectedNode = toObservationDetail(node, frameByAgentId, scope.purpose);
   }
 
   return {
@@ -980,6 +1028,7 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
       scopeRef: currentRef,
       title: scope.title,
       summary: scope.summary,
+      purpose: scope.purpose,
       projectionSeq: scope.projectionSeq,
       nodes: scope.nodes.map(toObservationNodeView),
       breadcrumbs: input.scopeStack.map((ref) => ({

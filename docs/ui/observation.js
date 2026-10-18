@@ -218,9 +218,10 @@ function renderNodeCard(node, index) {
   const owner = element('small', `归属：${node.roleDisplay || lane.label || UNASSIGNED_LANE.label}`)
   if (!role) owner.dataset.empty = 'true'
   meta.append(element('small', node.kindDisplay || node.kind || '未标注类型'), owner)
-  const summary = element('span', node.summary || '尚未投影节点摘要', 'flow-node-summary')
-  if (!node.summary) summary.dataset.empty = 'true'
-  card.append(head, meta, summary)
+  const summaryText = node.summary && node.summary !== node.title && node.summary !== node.kindDisplay
+    ? node.summary
+    : ''
+  if (summaryText) card.append(element('span', summaryText, 'flow-node-summary'))
   // The drawer renders from the typed node detail, which only the projection carries. A click
   // therefore selects the node and reloads; the returned `selectedNode` opens the drawer.
   card.addEventListener('click', () => {
@@ -479,6 +480,27 @@ function renderNodeDrawer(node, handoffs, detail) {
 }
 
 function renderReferences(node) {
+  const wrap = element('div')
+  const source = node?.technicalSource
+  if (source) {
+    const details = element('details', undefined, 'drawer-technical-source')
+    details.append(element('summary', '技术详情'))
+    const sourceFacts = element('dl', undefined, 'drawer-facts')
+    for (const [label, value] of [
+      ['原始类型', source.kind],
+      ['原始标题', source.title],
+      ['原始摘要', source.summary],
+      ['原始时间', source.occurredAt],
+    ]) {
+      const cell = element('div')
+      const detail = element('dd', value || '未提供')
+      if (!value) detail.dataset.empty = 'true'
+      cell.append(element('dt', label), detail)
+      sourceFacts.append(cell)
+    }
+    details.append(sourceFacts)
+    wrap.append(details)
+  }
   const facts = element('dl', undefined, 'drawer-facts')
   // Refs come from the typed drawer detail (`projection.selectedNode`), never from the node card.
   const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
@@ -491,7 +513,8 @@ function renderReferences(node) {
     cell.append(element('dt', label), dd)
     facts.append(cell)
   }
-  return facts
+  wrap.append(facts)
+  return wrap
 }
 
 /**
@@ -659,11 +682,35 @@ function observationTechnicalDetail(projection) {
       ['mode', runtimeMode || '未提供'],
       ['source', projection.data?.state || '未提供'],
       ['scopeRef', projection.scope?.scopeRef || '未提供'],
+      ['用途', projection.scope?.purpose || '未提供'],
       ['projectionSeq', projection.scope?.projectionSeq || '未提供'],
       ['目录说明', projection.scope?.summary || '未提供'],
       ...rolePairs.map(({ raw, human }) => [`角色 ${raw}`, `${human} / ${raw}`]),
     ],
   })
+}
+
+function observationCollection(projection) {
+  const count = Array.isArray(projection.nodes) ? projection.nodes.length : 0
+  if (projection.scope?.purpose === 'pipeline-registry') {
+    return {
+      title: '系统节点目录',
+      meta: `${count} 个系统节点`,
+      note: '系统注册表节点目录；这些节点按所属角色分组，不代表任务执行依赖顺序。',
+    }
+  }
+  if (projection.scope?.purpose === 'execution-events') {
+    return {
+      title: '执行事件记录',
+      meta: `${count} 条执行事件`,
+      note: '按记录顺序展示执行事件；原始类型和摘要可在节点技术详情中核对。',
+    }
+  }
+  return {
+    title: '观测记录',
+    meta: `${count} 条记录`,
+    note: '当前读取未说明记录用途；原始来源可在节点技术详情中核对。',
+  }
 }
 
 function renderObservation(projection) {
@@ -731,12 +778,13 @@ function renderObservation(projection) {
 
   const flowSection = element('section', undefined, 'flow-section')
   const flowHead = element('header', undefined, 'section-head')
+  const collection = observationCollection(projection)
   flowHead.append(
-    element('h2', '系统节点目录'),
-    element('span', `${projection.nodes.length} 个系统节点`, 'section-meta'),
+    element('h2', collection.title),
+    element('span', collection.meta, 'section-meta'),
   )
   flowSection.append(flowHead)
-  const catalogueNote = element('p', '系统注册表节点目录；这些节点按所属角色分组，不代表任务执行依赖顺序。', 'section-note')
+  const catalogueNote = element('p', collection.note, 'section-note')
   catalogueNote.dataset.catalogueSummary = 'true'
   flowSection.append(catalogueNote)
 

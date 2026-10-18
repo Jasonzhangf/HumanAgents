@@ -714,6 +714,70 @@ test('observation node detail carries the typed tool steps and owner role the dr
   assert.equal(withoutTools.ownerAgentRole, 'execution');
 });
 
+test('observation projection presents typed event facts as human semantics', () => {
+  const eventScope: ObservationScopeSource = {
+    scopeRef: 'events',
+    title: '流水线执行事件',
+    summary: 'Provider 执行期间的规范化事件。',
+    purpose: 'execution-events',
+    projectionSeq: 'seq-187',
+    agents: [{ agentId: '执行', role: 'execution', stateDisplay: '运行中', iteration: 1 }],
+    nodes: [{
+      nodeId: 'event-2',
+      title: 'provider.model #2',
+      kind: 'provider.model',
+      state: 'running',
+      summary: 'provider requested model work',
+      owner: '执行',
+      ownerAgentRole: 'execution',
+      iteration: 1,
+      inputRefs: [],
+      outputRefs: [],
+      evidenceRefs: [evidence('ev-provider-model')],
+    }],
+  };
+  const eventProjection = projectPipelineObservation({
+    source: readySource,
+    scopes: { events: eventScope },
+    scopeStack: ['events'],
+  });
+  assert.equal(eventProjection.nodes[0]?.title, '模型处理');
+  assert.equal(eventProjection.nodes[0]?.kindDisplay, '模型处理');
+  assert.equal(eventProjection.nodes[0]?.summary, '模型处理');
+  assert.equal(eventProjection.scope.purpose, 'execution-events');
+
+  const eventDetail = projectPipelineObservation(openObservationDrawer({
+    source: readySource,
+    scopes: { events: eventScope },
+    scopeStack: ['events'],
+  }, 'event-2')).selectedNode;
+  assert.deepEqual(eventDetail?.technicalSource, {
+    kind: 'provider.model',
+    title: 'provider.model #2',
+    summary: 'provider requested model work',
+  });
+
+  const unknownProjection = projectPipelineObservation({
+    source: readySource,
+    scopes: {
+      events: {
+        ...eventScope,
+        nodes: [{
+          ...eventScope.nodes[0]!,
+          nodeId: 'event-3',
+          title: 'provider.unknown #3',
+          kind: 'provider.unknown',
+          summary: 'provider reported an unknown event',
+        }],
+      },
+    },
+    scopeStack: ['events'],
+  });
+  assert.equal(unknownProjection.nodes[0]?.title, '未知事件');
+  assert.equal(unknownProjection.nodes[0]?.kindDisplay, '未知事件');
+  assert.equal(unknownProjection.nodes[0]?.summary, '未知事件');
+});
+
 test('memory interaction surface keeps candidates behind explicit review', () => {
   const candidate: SkillCandidateSource = {
     candidateId: 'skill-1',
