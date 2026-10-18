@@ -87,6 +87,10 @@ main 上 contracts 源码、config、App 和 package 构建全部通过；正式
 
 ## 2026-10-17 旧治理消融补漏
 
+后继完整治理增量已交付：来源 `a1c16f0e`，main 集成 `8c3cf999`，push 原回执为 `ba432d8d..8c3cf999 main -> main`。物理删除 `digests`、`checkpoint-runner`、`checkpoint-stages`、`check-release`、`record-review`、`package-release` 六个脚本；删除五个旧命令别名和 28 项只保障包装的测试。发布构建直接顺序执行必要命令并检查 tgz，保留版本安全、真实包消费者、安装失败、首错中断与缺产物保障。同步 README 和版本模板，不留 no-op。
+
+该增量作者与 main 的 `test:release` 均 14/14 通过；受影响现有图一次校验通过。忽略首错的可执行反例实际 RED，恢复后通过。Opus 本次实际配额 429，后备独立 Gemini 4 medium 返回有效 JSON、无 findings，沿现有 classifier 裁决 PASS。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-ablation-current-20261017/`。未改产品运行代码，不安装或重启。来源树已正常移除；SDK 受管副本的正常升级缺口仍由 AppSDK owner 处理，本次不手写 pin/lock、不 reset/fresh，不声称该缺口已关闭。
+
 本节更新日常开发与本地安装入口；下方旧候选记录只作历史，不作为当前检查要求。
 
 本轮补查（用户再次要求按 bootstrap-migration 执行）：两个独立 GCM 观察者分别检查程序入口和活动规则。日常 build/ci/test/package/install 未再发现 SHA 调用，三节点 CI 图保持闭合；不重跑已有有效验收。正文继续删除 M1/M2/M3 每小阶段 Astra 门、派单 SHA、配置摘要、冻结后才释放依赖及旧脚手架对 checkpoint-runner 的日常调用要求。README 将 release 命令移出日常启动示例。纯文档批次提交 `bcacc988`；随后正常合流 peer 已推送的 Provider 增量，不改其候选或运行现场。
