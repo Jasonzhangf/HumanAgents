@@ -2,6 +2,7 @@
 
 ## 2026-10-17 当前接续：inspection readiness 与真实入口准入
 
+- r332 已终态并交完整只读报告，零模型请求。capture 路由在当前 main 与 installed 中均存在；当前 fixture 声明 rcc-entry/MiniMax-M3，与原 r268 的 r59-canonical/goaichat.deepseek-v4.1-flash 不同，实时加载与 readiness 尚未取得。子沙箱 TCP 失败不能推出服务不可用：Root 同入口 `curl` 实际 HTTP401，证明本地服务可达但需配对会话。已向授权 UX peer 索取既有 session 文件入口或已验证 status 回执，不传 cookie、不新建 Task、不发生成；原 RCC EOF 根因仍 UNKNOWN。r332 报告在既有 RUN `native-real-entry-owner-observe-r332-20261017/observation.md`。
 - Runtime 来源 `9a20417a` 已读完整 diff 和作者 note，标准 cherry-pick 为唯一候选 `e8637428`。只改 coordinator：每次 release 在 await 前捕获 readiness resolver，本地幂等完成，仅引用相等时清共享字段；Provider attempts 共用该 release 完成函数。沿既有图，拓扑不变。候选 `pnpm build:app` exit 0（session67199）。尚未整体 Review、main 或安装。
 - 作者原 3 个 readiness 回归 3/3；原 opened-stop 已越过 409，实际到 stop/checkpoint/Provider settle-close/I2/cycle close。当前失败为 expected `{kind:'stop'}` 与 actual `{kind:'stop',ref:'operator-stop'}`，交 App owner 核合同；cold reader 尚未执行，不记通过。作者证据：`.worker-runs/inspection-stop-readiness-20261017/note.md`（外置 humanagent 根）。
 - r331 独立 Gemini 只读计划已终态并接收，零模型请求。原 RCC neutral-SSE/EOF 根因仍 UNKNOWN；计划要求先核当前声明 binding、readiness 与 capture 路由，未有实质变化不得重复生成。fresh GCM r332 已启动执行该零请求观察，tmux `ha-native-r332`，报告在既有 RUN `native-real-entry-owner-observe-r332-20261017`；不改配置、不换模型、不创建 Task。完整目标 ACTIVE/INCOMPLETE。
