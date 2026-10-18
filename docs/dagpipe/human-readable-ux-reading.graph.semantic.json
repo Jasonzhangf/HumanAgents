@@ -15,5 +15,15 @@
     "necessary": "packages/ui/projection",
     "present": "packages/ui"
   },
+  "consumerNotes": {
+    "task-description": {
+      "purpose": "同范围任务看板已读输入 → 按已声明四字段形状识别 → 按任务要求组织内容 → 完整保留必要要求 → 现有共享抽屉呈现；原始输入在现有任务技术详情按需读取。",
+      "implementationPaths": [
+        "docs/ui/task-display.js",
+        "docs/ui/task-dashboard.js"
+      ],
+      "verification": "任务说明消费者有局部行为断言；整体阅读图仍为 UNVERIFIED。"
+    }
+  },
   "implementationStatus": "UNVERIFIED"
 }

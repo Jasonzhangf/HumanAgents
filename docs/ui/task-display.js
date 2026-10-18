@@ -41,6 +41,73 @@ export function displayModeLabel(mode) {
   return DISPLAY_MODE_LABELS[mode] || (mode ? String(mode) : '尚未选择')
 }
 
+const TASK_DESCRIPTION_FIELDS = Object.freeze([
+  ['goal', '目标'],
+  ['scope', '范围'],
+  ['constraints', '约束'],
+  ['deliverables', '交付要求'],
+])
+
+function canonicalTaskDescription(input) {
+  if (typeof input !== 'string') return null
+  let value
+  try {
+    value = JSON.parse(input)
+  } catch {
+    return null
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const keys = Object.keys(value)
+  if (keys.length !== TASK_DESCRIPTION_FIELDS.length) return null
+  const fields = new Map(TASK_DESCRIPTION_FIELDS)
+  if (!keys.every((key) => fields.has(key))) return null
+  if (typeof value.goal !== 'string' || typeof value.scope !== 'string') return null
+  if (!Array.isArray(value.constraints) || !value.constraints.every((item) => typeof item === 'string')) return null
+  if (!Array.isArray(value.deliverables) || !value.deliverables.every((item) => typeof item === 'string')) return null
+  return value
+}
+
+function taskDescriptionValue(value) {
+  if (!Array.isArray(value)) return element('span', value, 'business-output-text')
+  const list = element('ul', undefined, 'task-description-values')
+  for (const item of value) list.append(element('li', item, 'business-output-text'))
+  return list
+}
+
+/**
+ * Render the stored Task description for the existing shared detail drawer.
+ * Only the complete four-field DraftRevision shape is expanded. Every other
+ * non-empty input stays the exact original string.
+ */
+export function renderTaskDescriptionContent({ input } = {}) {
+  const root = element('div', undefined, 'task-description')
+  if (input === undefined || input === null || input === '') {
+    root.dataset.taskDescription = 'empty'
+    root.append(element('p', '尚未输入', 'muted'))
+    return root
+  }
+
+  const canonical = canonicalTaskDescription(input)
+  if (!canonical) {
+    root.dataset.taskDescription = 'original'
+    root.append(element('p', input, 'business-output-text'))
+    return root
+  }
+
+  root.dataset.taskDescription = 'structured'
+  const list = element('dl', undefined, 'record-ref task-description-fields')
+  for (const [key, label] of TASK_DESCRIPTION_FIELDS) {
+    const row = element('div')
+    const value = element('dd', undefined, 'task-description-value')
+    row.dataset.taskDescriptionField = key
+    value.append(taskDescriptionValue(canonical[key]))
+    row.append(element('dt', label), value)
+    list.append(row)
+  }
+  root.append(list)
+  return root
+}
+
 function normalizedFailure(value, fallbackCode = 'display-preference.transition-failed') {
   if (value && typeof value === 'object') {
     return {
