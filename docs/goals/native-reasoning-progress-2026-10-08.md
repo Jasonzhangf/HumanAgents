@@ -1,5 +1,13 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 已交付：工具预算中断与同业务 turn 恢复增量
+
+- 六文件来源7fccbbe4与最新main组合为ef8c772c，独立完整Review r326 Opus实quota未审；r327 freshGemini有效JSON/exit0/空findings，既有classifier裁决PASS。main已FF并push，原始远端回执 `860ef944..ef8c772c main -> main`。未混入inspection候选。
+- 保留逻辑operation intent/namespace/fingerprint；物理segment经typed segment→原binding→祖先parent→原businessregistration核验，epoch取真实physical。预算拒绝的已接收call先保存真实failed/tool.round-limit/executed:false结果，再抛原typederror；零工具执行、零对应effectintent/completion，恢复wire合法配对，不伪造成功或重放已接受效果。
+- 同一公开case缺结果0vs1实际RED→完整GREEN。最新main组合的contracts/config/App与App/provider tsc0，完整恢复1/1、既有child admission成功/epoch拒绝2/2、Provider原预算1/1（session98426）；main重建后完整case再次1/1，package/install0（session32874）。断言覆盖sameTask/op/businessTurn、新segment/epoch、typed一写一completion、真实failed配对、standardend、五阶段、closure/context、Plannerreturned/completealignment/currentTask。
+- 官方installed restart0（session25869）：gen28/PID77100→gen29/PID88644，53007、legacyClose clean；新进程存活75秒且HTTP200。将同一既有compiled consumer临时映射到实际安装runtime模块执行，原case1/1PASS（session58666，3645ms）；无源代码/installed模块改写。此证明是安装模块与同进程fresh-service恢复，不扩称预算错误后的OS进程冷恢复或真实远端模型交互。
+- 来源树clean且作者/reviewer terminal后normalremove/prune/testabsent0（session53436）；安装复验临时test/package布局与link已移除，r328 wire/fixture证据保留。6个确认归属的失败fixture已归档到r328/failed-fixtures-evidence.tgz并移除；actual-tool-round-limit-GERg04未确认归属，PROTECTED_HOLD，未删。完整goal ACTIVE/INCOMPLETE，inspection/stop/cold与真实RCC仍按各自剩余证据推进。
+
 ## 2026-10-17 已交付：Memory 输入与路径审计合同增量
 
 - 产品三文件 `5af0211b` 已正常FF进入main并push：远端回执 `b5913402..5af0211b main -> main`。输入显式提供metadata-only auditPrompt，保留prompt正文与sources；模板要求按真实证据说明displaced/retained路径。不增加parserfallback、重试或候选强制生成。
