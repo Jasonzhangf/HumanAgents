@@ -762,9 +762,10 @@ function nativeRuntimeLayout(paths: { readonly checkpointsRoot: string }) {
 }
 
 interface TextOnlyFixtureScenario {
-  readonly kind: 'explicit-helper';
+  readonly kind: 'explicit-helper' | 'm3-long-running';
   readonly parentModel: 'text.only.model';
   readonly childModel: 'child.only.model';
+  readonly rawInput?: string;
 }
 
 function explicitHelperModelText(body: ResponsesWireBody): string {
@@ -1003,6 +1004,34 @@ async function textOnlyResponsesUpstream(input: {
           knownFacts: [],
           answer: EXPLICIT_HELPER_REFINED_TEXT,
           decisionRefs: [],
+        }))));
+        return;
+      }
+      if (input.scenario?.kind === 'm3-long-running'
+        && body.includes('# Explicit intake decision output')) {
+        const wire = parseResponsesWire(body);
+        if (wire === undefined) throw new Error('public intake fixture received a non-JSON Responses request');
+        assert.equal(wire.model, input.scenario.parentModel,
+          'public explicit intake selects its configured interaction model');
+        const rawInput = requireText(input.scenario.rawInput, 'the public intake fixture input');
+        assert.ok(explicitHelperModelText(wire).includes(rawInput),
+          'public explicit intake receives the exact submitted business input');
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(frame(explicitHelperText(JSON.stringify({
+          kind: 'requirement',
+          normalizedInput: rawInput,
+          knownFacts: [],
+          decisionRefs: [],
+          proposal: {
+            revision: 1,
+            intent: 'create',
+            title: 'M3 public long-running dynamic task',
+            objective: rawInput,
+            deliverable: 'Two dynamic plan revisions and public plan history',
+            deliveryConditions: ['Preserve the confirmed long-running task flow'],
+            evidenceRefs: [],
+            blockingGaps: [],
+          },
         }))));
         return;
       }
@@ -2877,16 +2906,167 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
 // Multi-cycle review forwarding/history failure probability is unknown. Losing
 // adoption breaks Planner alignment. Cost: one bounded local CLI/HTTP fixture;
 // restoring transient evidence resolution rejects the accepted review citation.
+// Confirmed taskFlow loss is statically possible at each independent Planner
+// boundary; its production probability is unknown. Impact: both rounds lose the
+// user-confirmed long-running template. Cost: reuse the bounded fixture and
+// transiently remove the actual taskFlow handoff to observe the new assertion fail.
 if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer advances plan revisions and preserves cold semantic history', async () => {
-  const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined, false, undefined, true);
+  const rawInput = 'Complete the M3 public long-running dynamic two-cycle task.';
+  const taskFlow = { kind: 'long-running' as const, definitionVersion: 1 };
+  const fixture = await textOnlyFixture(
+    false, true, false, 2, undefined, undefined, undefined, false, undefined, true, false,
+    { kind: 'm3-long-running', parentModel: 'text.only.model', childModel: 'child.only.model', rawInput },
+  );
   let passed = false;
   let serve: Awaited<ReturnType<typeof startServe>> | undefined;
   try {
-    const { taskId, result, cookie } = await runNativeMultiTurnConsumer(fixture, 2);
-    assert.equal(result.code, 0, result.stderr);
-    const receipt = JSON.parse(result.stdout.slice(result.stdout.indexOf('{'), result.stdout.lastIndexOf('}') + 1));
-    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
-    assert.equal(receipt.output, EXACT_BODY);
+    serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+    const access = await AccessControlService.open({
+      credentialPath: fixture.paths.webAccessCredentialPath,
+      create: false,
+    });
+    const session = await access.consumePairingCode(
+      access.createPairingChallenge('m3-public-long-running', 1).code,
+    );
+    const cookie = access.sessionCookie(session).split(';')[0]!;
+
+    const createdResponse = await fetch(`${serve.origin}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, accept: 'application/json' },
+      body: JSON.stringify({
+        channel: 'business',
+        requestKind: 'new-task-create',
+        sourceRef: 'test:m3-public-long-running',
+        rawInput,
+      }),
+    });
+    const createdText = await createdResponse.text();
+    assert.equal(createdResponse.status, 201, createdText);
+    const created = requireRecord(JSON.parse(createdText), 'the public explicit input receipt');
+    const interactionId = requireText(created.interactionId, 'the public explicit interaction ID');
+
+    const interpretedResponse = await fetch(
+      `${serve.origin}/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`,
+      { method: 'POST', headers: { cookie, accept: 'application/json' } },
+    );
+    const interpretedText = await interpretedResponse.text();
+    assert.equal(interpretedResponse.status, 200, interpretedText);
+    const interpreted = requireRecord(JSON.parse(interpretedText), 'the public explicit interpretation');
+    assert.equal(interpreted.state, 'awaiting-confirmation');
+
+    const inspectedResponse = await fetch(
+      `${serve.origin}/api/explicit/interactions/${encodeURIComponent(interactionId)}`,
+      { headers: { cookie, accept: 'application/json' } },
+    );
+    const inspectedText = await inspectedResponse.text();
+    assert.equal(inspectedResponse.status, 200, inspectedText);
+    const inspected = requireRecord(JSON.parse(inspectedText), 'the public explicit inspection');
+    const draft = requireRecord(inspected.draft, 'the public explicit draft');
+    const revision = requireRecord(inspected.revision, 'the public explicit revision');
+    const confirmedResponse = await fetch(
+      `${serve.origin}/api/explicit/interactions/${encodeURIComponent(interactionId)}/confirmation`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie, accept: 'application/json' },
+        body: JSON.stringify({
+          interactionId,
+          draftId: requireText(draft.draftId, 'the public explicit draft ID'),
+          inputRevision: requireNumber(draft.inputRevision, 'the public explicit input revision'),
+          confirmationRef: 'confirmation:m3-public-long-running',
+          confirmedBy: 'human:operator',
+          confirmedAt: '2026-10-18T00:00:00.000Z',
+          payloadRef: 'asset://requirements/m3-public-long-running',
+          requestKind: 'new-task-create',
+          draftRevisionVersion: requireNumber(revision.revisionVersion, 'the public explicit revision version'),
+          draftRevisionHash: requireText(revision.revisionHash, 'the public explicit revision hash'),
+          goal: rawInput,
+          scope: 'M3 public two-cycle production composition evidence',
+          constraints: ['Use the confirmed dynamic task flow without a fixed role chain'],
+          deliverables: ['Two independent Planner payloads and public plan history'],
+          taskFlow,
+        }),
+      },
+    );
+    const confirmedText = await confirmedResponse.text();
+    assert.equal(confirmedResponse.status, 200, confirmedText);
+    const confirmed = requireRecord(JSON.parse(confirmedText), 'the public confirmation receipt');
+    const confirmedRequirement = requireRecord(confirmed.requirement, 'the confirmed requirement');
+    const requirementId = requireText(confirmedRequirement.requirementId, 'the confirmed requirement ID');
+    const projectKey = fixture.paths.projectKey;
+    const task = await waitFor(
+      async () => {
+        const response = await fetch(`${serve!.origin}/api/tasks`, {
+          headers: { cookie, accept: 'application/json' },
+        });
+        assert.equal(response.status, 200);
+        const list = await response.json() as {
+          readonly running: readonly Record<string, unknown>[];
+          readonly waiting: readonly Record<string, unknown>[];
+          readonly completed: readonly Record<string, unknown>[];
+          readonly stopped: readonly Record<string, unknown>[];
+          readonly draft: readonly Record<string, unknown>[];
+          readonly failed: readonly Record<string, unknown>[];
+        };
+        const rows = [
+          ...list.running, ...list.waiting, ...list.completed,
+          ...list.stopped, ...list.draft, ...list.failed,
+        ];
+        return rows.find((row) => {
+          const source = row.identitySource;
+          return typeof source === 'object' && source !== null && !Array.isArray(source)
+            && (source as Record<string, unknown>).requirementId === requirementId;
+        });
+      },
+      (candidate) => candidate !== undefined && candidate.state === 'waiting',
+      'the confirmed public Task did not reach the prepared waiting state',
+    );
+    if (task === undefined) throw new Error('the confirmed public Task row is absent');
+    assert.deepEqual(task.taskFlow, taskFlow);
+    const taskId = id('task', requireText(requireRecord(task.taskId, 'the public Task ID').value,
+      'the public Task ID value'));
+
+    assert.equal(task.state, 'waiting', 'confirmation retains the prepared task until a verified grant');
+    const grantRequestId = 'm3-public-long-running-grant';
+    const grantResponse = await fetch(
+      `${serve.origin}/api/tasks/${encodeURIComponent(taskId.value)}/control/grant`
+        + `?projectKey=${encodeURIComponent(projectKey)}&mode=rcc`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie, accept: 'application/json' },
+        body: JSON.stringify({
+          requestId: grantRequestId,
+          expectedRevision: 0,
+          capability: { actionId: 'task.execute', capabilities: ['provider.execution'] },
+        }),
+      },
+    );
+    const grantText = await grantResponse.text();
+    assert.equal(grantResponse.status, 200, grantText);
+    const grant = requireRecord(JSON.parse(grantText), 'the public task grant receipt');
+    assert.equal(requireRecord(grant.readback, 'the public grant readback').grant === undefined
+      ? undefined : requireRecord(requireRecord(grant.readback, 'the public grant readback').grant,
+        'the public grant').state, 'granted');
+    const execution = requireRecord(grant.execution, 'the public grant execution receipt');
+    assert.equal(execution.state, 'released', JSON.stringify(grant));
+    const operationId = requireText(requireRecord(execution.selector, 'the public execution selector').operationId,
+      'the released execution operation ID');
+
+    const finalDashboard = await waitFor(
+      async () => {
+        const response = await fetch(
+          `${serve!.origin}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`
+            + `?projectKey=${encodeURIComponent(projectKey)}&mode=rcc`,
+          { headers: { cookie, accept: 'application/json' } },
+        );
+        const text = await response.text();
+        assert.equal(response.status, 200, text);
+        return JSON.parse(text) as Record<string, unknown>;
+      },
+      (dashboard) => dashboard.state === 'succeeded',
+      'the public serve did not complete both execution cycles',
+      60_000,
+    );
+    assert.equal(finalDashboard.output, EXACT_BODY);
     const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
     const planners = posts.filter((wire) => plannerPayload(wire.body) !== undefined);
     assert.equal(planners.length, 2);
@@ -2895,6 +3075,8 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
     assert.equal(first.priorPlan, null);
     assert.equal(requireRecord(second.priorPlan, 'prior plan').sequence, 1);
     for (const payload of [first, second]) {
+      assert.deepEqual(payload.taskFlow, taskFlow,
+        'each independent Planner receives the confirmed long-running task flow');
       assert.deepEqual((payload.refinedResults as Record<string, unknown>[]).map((entry) => entry.role), ['execution', 'review']);
       const summary = requireRecord(requireRecord(payload.closure, 'closing checkpoint').summary, 'four-part summary');
       for (const key of ['goal', 'actions', 'result', 'expectedNextStep']) {
@@ -2970,17 +3152,41 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
     }
     const before = await readFile(fixture.layout.organJournalPath);
     const preparedBefore = await readFile(fixture.layout.preparedJournalPath);
-    serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
-    const response = await fetch(`${serve.origin}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`,
-      { headers: { cookie, accept: 'application/json' } });
-    assert.equal(response.status, 200);
-    const dashboard = await response.json() as Record<string, unknown>;
+    const historyResponse = await fetch(
+      `${serve.origin}/api/tasks/${encodeURIComponent(taskId.value)}/task-plan-history`
+        + `?projectKey=${encodeURIComponent(projectKey)}&mode=rcc`,
+      { headers: { cookie, accept: 'application/json' } },
+    );
+    const historyText = await historyResponse.text();
+    assert.equal(historyResponse.status, 200, historyText);
+    const history = JSON.parse(historyText) as {
+      readonly current: { readonly state: string; readonly value?: { readonly revisionId?: string } };
+      readonly revisions: readonly { readonly revisionId: string; readonly sequence: number }[];
+    };
+    assert.deepEqual(history.revisions.map((entry) => entry.sequence), [1, 2]);
+    assert.equal(history.current.state, 'known');
+    assert.equal(history.current.value?.revisionId, history.revisions[1]?.revisionId);
+    const dashboard = finalDashboard as Record<string, unknown> & {
+      readonly taskPlanHistory?: {
+        readonly ok?: boolean;
+        readonly value?: {
+          readonly current?: { readonly state?: string; readonly value?: { readonly revisionId?: string } };
+          readonly revisions?: readonly { readonly revisionId: string; readonly sequence: number }[];
+        };
+      };
+    };
     assert.equal(dashboard.state, 'succeeded');
     assert.equal(dashboard.output, EXACT_BODY);
+    assert.equal(dashboard.taskPlanHistory?.ok, true);
+    assert.deepEqual(dashboard.taskPlanHistory?.value?.revisions?.map((entry) => entry.sequence), [1, 2]);
+    assert.equal(dashboard.taskPlanHistory?.value?.current?.state, 'known');
+    assert.equal(dashboard.taskPlanHistory?.value?.current?.value?.revisionId, history.revisions[1]?.revisionId);
     assert.deepEqual(await readFile(fixture.layout.organJournalPath), before);
     assert.deepEqual(await readFile(fixture.layout.preparedJournalPath), preparedBefore);
     assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, posts.length);
-    console.log('two-cycle dynamic review evidence', JSON.stringify({ fixture: fixture.root, readerPid: serve.pid,
+    console.log('M3 public two-cycle evidence', JSON.stringify({ fixture: fixture.root, interactionId, requirementId,
+      taskId: taskId.value, grantRequestId, operationId, readerPid: serve.pid,
+      plannerTaskFlows: [first.taskFlow, second.taskFlow], plannerPriorSequences: [first.priorPlan, second.priorPlan],
       cycles: bindings.map((entry) => entry.binding.scope.cycleId), operations: [...operations],
       revisions: revisions.map((entry) => ({ revisionId: entry.revisionId, sequence: entry.sequence, summary: entry.snapshot.summary })),
       currentPlan: current.value.currentPlan, providerPosts: posts.length }));
