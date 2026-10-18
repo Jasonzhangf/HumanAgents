@@ -9,8 +9,9 @@
     "truth": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "读取同范围真实事实与责任；actual graph 只从现有 agentActivity 成功值的 actualExecutionGraph 进入，缺失历史明确显示，不从日志补造 stage 或成员。"
+      "ownerSymbol": "Runtime native activity source selection feeding the existing task-scoped read",
+      "implementationStatus": "candidate-native-source-selection-design",
+      "designNote": "读取同范围真实事实与责任。actual graph 来源是已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，经 Runtime 纯选择器形成 contracts source，再从现有 agentActivity 成功值的 actualExecutionGraph 进入。缺失、不可用与未归类事实明确显示，不从日志、固定角色流程或 assignment-graph replay 补造。"
     },
     "semantic": {
       "ownerPath": "packages/context-events/src/index.ts",
@@ -22,13 +23,13 @@
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "按当前阅读用途组织展示投影；guidance、当前计划与已记录实例分开，不把 parent、成员或 registry 转成执行依赖。"
+      "designNote": "按当前阅读用途组织展示投影；guidance、当前计划与已记录实际实例分开，不把角色名称、时间、成员、技术实例 ID、commit ref 或 registry 转成执行依赖或默认标签。"
     },
     "necessary": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "仅保留当前必要内容与合法操作；空 stage、parent、成员状态、真实提交证据、缺失历史与未归类事实按需保留。"
+      "designNote": "仅保留当前必要内容与合法操作；unavailable/not-recorded、缺失关系、未归类事实与真实证据按需保留。"
     },
     "present": {
       "ownerPath": "packages/ui/index.ts",
