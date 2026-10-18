@@ -7,6 +7,12 @@
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下 2026-10-17 增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。下方 2026-10-14/15 记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
+### 2026-10-18 跨项目读取增量与剩余主线
+
+scoped-read 增量已合入 main `66228f09`，完成一次整体独立 Review、构建打包安装、正式 restart gen34→35，以及安装模块公开 HTTP consumer 和默认打包 UI 入口验收。候选双端实际链证明同名 A/B Task 的 semantic、公开正文、Observation 节点和子层不串数据；A 的 789 字符正文与 API/任务页/节点抽屉一致，B 保持受阻且无最终输出。有限 SSE、手机底部抽屉/返回焦点和四 Journal 只读副作用也已验证。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/m4-scoped-read-review-20261018/` 与 `m4-scoped-candidate-browser-r2-20261017/`。
+
+当前只关闭 M4 中上述读取与展示隔离子能力。完整 I1–I5/G1–G14/F01–F20 仍 ACTIVE/INCOMPLETE：原 B 失败历史与用户约束下的新真实任务执行未完成；M5 确认 UI/API 已合流并通过 53 项相关用例，真实 HTTP→物理 owner→Journal/current-state 写链及双端交互尚待接通。浏览器原生后退仍 UNVERIFIED。下方 2026-10-17 表格是此前进度，涉及本增量的状态以本节为准，不重新执行有效验收。
+
 ### 2026-10-17 当前已交付工作与剩余主线
 
 完整 I1–I5 / G1–G14 / F01–F20 继续 ACTIVE / INCOMPLETE。按实际功能与证据记进度，不用节点数、测试数或静态设计完成度替代开发进度。以下是已集成、安装和推送的子成果，不把任一行扩成整个里程碑已验收。
