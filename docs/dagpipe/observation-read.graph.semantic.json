@@ -1,19 +1,21 @@
 {
   "graph": "humanagent-observation-read",
   "labels": {
-    "http_api": "处理浏览器只读请求并按显式项目、模式和任务范围选择真实读取源",
-    "load_task_truth": "读取任务真实状态、同源提交输出和执行者提供的实例归属",
+    "http_api": "处理语义与观测只读请求并按显式项目、模式和任务范围选择真实读取源",
+    "load_task_truth": "读取指定任务状态、同范围准入、同源提交输出和实际实例归属",
     "load_event_history": "读取指定项目与模式的执行事实及真实关联身份",
     "normalize_context_events": "统一归类发生事件并标出语义缺口",
     "pair_context_events": "在同一执行范围内配对活动与结果",
     "project_semantic_views": "组合已配对语义与原实例归属 分开显示当前和查看历史",
-    "project_status_and_actions": "投影状态新鲜度与合法动作",
-    "browser_view": "共享语义控件按事件与模块数据边渲染观测 并按需展开证据"
+    "project_status_and_actions": "投影状态新鲜度与合法动作并明确缺失提交输出",
+    "browser_view": "共享语义控件按事件与模块数据边渲染观测 并携带完整任务范围"
   },
   "design": {
-    "scopeRead": "semantic GET/SSE 可选携带完整 projectKey 与 mode；无 scope 保持 serve-bound live Coordinator，完整外项目 scope 读取该配置项目与模式的 Journal inventory。",
+    "scopeRead": "semantic GET/SSE 与 observation GET 可选携带完整 projectKey 与 mode；无 scope 保持 serve-bound 行为，完整外项目 scope 读取该配置项目与模式的 Journal inventory。query scope 仍是观测子树，node 仍是节点选择。",
+    "observationRead": "observation 使用与 semantic 相同的真实 scope 解析。任务快照和准入历史来自目标项目与模式 Journal，不读取 serve-bound requirementAdmissions。",
+    "observationAgent": "observation 沿现有 decodeTaskAgentActivitySelectionQuery 解析 agent/turn/item，并从同一解析 scope 读取实际 Agent activity；不伪造 Organ。",
     "foreignStream": "外项目 durable stream 在写 200 前完成校验和快照读取，发送一次 semantic 快照、一次空数据 semantic-complete 传输事件，然后正常结束。",
-    "publicOutput": "durable inventory 使用同一 FileCheckpointStore.readPublicOutputs 读取器恢复 publicOutput，沿用 checkpoint 或 operation 的 executionEpoch 选择，不回退 record.output。",
+    "publicOutput": "durable inventory 使用同一 FileCheckpointStore.readPublicOutputs 读取器恢复 publicOutput，沿用 checkpoint 或 operation 的 executionEpoch 选择。task.output 只使用已提交 publication；缺失、pending、unavailable 或 unknown 明确显示，不用 record.output、provider 或 model 文本回退。原始与动作证据仍可读。",
     "ownership": "http_api 与 browser_view 只保留 typed scope 和只读传输；load_task_truth/load_event_history 从声明范围读取真实 Journal；不新增跨进程 registry、HTTP proxy 或第二语义存储。"
   }
 }

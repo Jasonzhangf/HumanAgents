@@ -1577,9 +1577,19 @@ async function handleRequest(
     }
     const taskObservation = /^\/api\/tasks\/([^/]+)\/observation$/.exec(path);
     if (taskObservation && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskObservation[1]!));
       const selected = url.searchParams.get('node') ?? undefined;
       const scope = url.searchParams.get('scope') ?? undefined;
-      writeJson(response, 200, service.observation(id('task', decodeURIComponent(taskObservation[1]!)), selected, scope));
+      const readScope = optionalI2ReadScope(url);
+      const agentSelection = decodeTaskAgentActivitySelectionQuery(url.searchParams, taskId);
+      writeJson(response, 200, await service.scopedObservation(
+        taskId,
+        selected,
+        scope,
+        readScope?.projectKey,
+        readScope?.mode,
+        agentSelection,
+      ));
       return;
     }
     const taskSemantic = /^\/api\/tasks\/([^/]+)\/semantic$/.exec(path);

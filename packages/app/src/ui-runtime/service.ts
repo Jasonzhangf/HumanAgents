@@ -662,6 +662,24 @@ interface RequirementAdmissionObservation {
   readonly receipt: RequirementAdmissionReceipt;
 }
 
+function durableRequirementAdmissionsFromRecords(
+  records: readonly UiRuntimeJournalRecord[],
+): ReadonlyMap<string, RequirementAdmissionObservation> {
+  const admissions = new Map<string, RequirementAdmissionObservation>();
+  for (const record of records) {
+    if (record.kind !== 'explicit-brain.state' || record.state.requirementAdmissions === undefined) continue;
+    admissions.clear();
+    for (const admission of record.state.requirementAdmissions) {
+      admissions.set(admission.taskId.value, {
+        taskId: admission.taskId,
+        queue: admission.queue,
+        receipt: validateRequirementAdmissionReceipt(admission.receipt),
+      });
+    }
+  }
+  return admissions;
+}
+
 interface QueuedRequirementObservation {
   readonly requirementId: string;
   readonly draftId: string;
@@ -729,6 +747,7 @@ function observationNodeFacts(
   task: RuntimeTaskSnapshot,
   toolSteps: readonly ObservationNodeToolStepSource[],
   admission: RequirementAdmissionObservation | undefined,
+  publicOutput: PublicOutputPublicationProjection | undefined = toPublicOutputProjection(task.publicOutput),
 ): ObservationNodeFacts {
   const inputRef = `task://${task.taskId.value}/input`;
   const base = {
@@ -850,9 +869,14 @@ function observationNodeFacts(
         }
         : { node: unprojected, projected: false };
     case 'task.output':
-      return task.output
+      return publicOutput?.state === 'committed' && publicOutput.commits.length > 0
         ? {
-          node: { ...base, state: task.state, summary: task.output, outputRefs: [`task://${task.taskId.value}/output`] },
+          node: {
+            ...base,
+            state: task.state,
+            summary: publicOutput.commits.map((commit) => commit.text).join(''),
+            outputRefs: [`task://${task.taskId.value}/output`],
+          },
           projected: true,
         }
         : { node: unprojected, projected: false };
@@ -1007,6 +1031,90 @@ function observationToolSteps(task: RuntimeTaskSnapshot): ObservationNodeToolSte
     });
   }
   return steps;
+}
+
+function observationProjection(
+  task: RuntimeTaskSnapshot,
+  selectedNodeId?: string,
+  scopeRef?: string,
+  admission?: RequirementAdmissionObservation,
+  publicOutput?: PublicOutputPublicationProjection,
+): PipelineObservationProjection {
+  const rootScopeRef = `task://${task.taskId.value}/observation`;
+  const providerScopeRef = `${rootScopeRef}/pipeline.execute`;
+  if (scopeRef !== undefined && scopeRef !== rootScopeRef && scopeRef !== providerScopeRef) {
+    throw new UiRuntimeApiError(
+      'observation.scope.not-found',
+      APP_OWNER,
+      `unknown observation scope: ${scopeRef}`,
+      'select an existing observation scope',
+      404,
+    );
+  }
+  const inProviderScope = scopeRef === providerScopeRef;
+  const toolSteps = observationToolSteps(task);
+  const registry = nodeRegistry();
+  const projectedNodeIds = new Set<string>();
+  const nodes: ObservationNodeSource[] = registry.map((definition) => {
+    const facts = observationNodeFacts(definition, task, toolSteps, admission, publicOutput);
+    if (facts.projected) projectedNodeIds.add(definition.nodeId);
+    return definition.nodeId === 'pipeline.execute'
+      ? { ...facts.node, childScopeRef: providerScopeRef }
+      : facts.node;
+  });
+  const providerNodes: ObservationNodeSource[] = task.events.map((event) => ({
+    nodeId: `event-${event.seq}`,
+    title: `${event.kind} #${event.seq}`,
+    kind: 'provider.event',
+    state: observationNodeState(event.state),
+    owner: agentIdForRole('execution'),
+    ownerAgentRole: 'execution',
+    summary: event.summary,
+    inputRefs: [],
+    outputRefs: event.kind === 'provider.output' ? event.evidenceRefs.map((ref) => ref.locator) : [],
+    evidenceRefs: event.evidenceRefs,
+    updatedAt: event.occurredAt,
+    ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+  }));
+  const scopes: Record<string, ObservationScopeSource> = {
+    [rootScopeRef]: {
+      scopeRef: rootScopeRef,
+      title: '任务处理流水',
+      summary: '十三个流水线节点的只读记录；无运行时事实的节点保持未投影。',
+      projectionSeq: String(task.events.length),
+      currentNodeId: currentNodeOfPipeline(task),
+      agents: agentFrames(registry.map((definition) => definition.ownerRole), task.executionEpoch ?? 1),
+      handoffs: observationHandoffs(nodes, projectedNodeIds),
+      nodes,
+    },
+    [providerScopeRef]: {
+      scopeRef: providerScopeRef,
+      title: '流水线执行事件',
+      summary: 'Provider 执行期间的规范化事件，不包含原始 transport frame。',
+      projectionSeq: String(task.events.length),
+      agents: agentFrames(['execution'], task.executionEpoch ?? 1),
+      nodes: providerNodes,
+    },
+  };
+  return projectPipelineObservation({
+    source: {
+      state: task.state === 'failed' || task.state === 'blocked'
+        ? 'error'
+        : task.state === 'running' || task.state === 'settling'
+          ? 'running'
+          : task.state === 'stale'
+            ? 'stale'
+            : task.state === 'waiting'
+              ? 'waiting'
+              : 'ready',
+      label: task.currentState,
+      detail: task.nextStep,
+      updatedAt: task.updatedAt,
+    },
+    scopes,
+    scopeStack: inProviderScope ? [rootScopeRef, providerScopeRef] : [rootScopeRef],
+    selectedNodeId,
+  });
 }
 
 /**
@@ -2221,6 +2329,92 @@ export class UiRuntimeService {
   isBoundReadScope(projectKey?: string, mode?: RuntimeMode): boolean {
     return projectKey === undefined && mode === undefined
       || (projectKey !== undefined && mode !== undefined && this.isBoundScope(projectKey, mode));
+  }
+
+  private async resolveTaskReadScope(
+    taskId: TaskId,
+    rawProjectKey?: string,
+    mode?: RuntimeMode,
+  ): Promise<
+    | { readonly kind: 'bound'; readonly source: ConfiguredProjectReadSource | undefined; readonly mode: RuntimeMode }
+    | {
+      readonly kind: 'durable';
+      readonly source: ConfiguredProjectReadSource;
+      readonly mode: RuntimeMode;
+      readonly entry: DurableTaskInventoryEntry;
+      readonly admissions: ReadonlyMap<string, RequirementAdmissionObservation>;
+    }
+  > {
+    if (rawProjectKey === undefined && mode === undefined) {
+      return { kind: 'bound', source: this.boundProjectSource(), mode: this.mode };
+    }
+    const projectKey = rawProjectKey?.trim();
+    if (!projectKey || (mode !== 'fake' && mode !== 'rcc')) {
+      throw new UiRuntimeApiError(
+        'read.scope.invalid',
+        APP_OWNER,
+        'task observation requires both projectKey and mode',
+        'send projectKey=<declared projectKey>&mode=fake|rcc, or omit both for the bound read',
+        400,
+      );
+    }
+    const source = await this.findProjectSource(projectKey);
+    if (source === undefined) {
+      throw new UiRuntimeApiError(
+        'project.unknown',
+        APP_OWNER,
+        `no configured project: ${projectKey}`,
+        'list configured projects and retry with a declared projectKey',
+        404,
+      );
+    }
+    if (this.isBoundScope(source.projectKey, mode)) {
+      return { kind: 'bound', source, mode };
+    }
+    const inventory = await this.readDurableInventory(source, mode);
+    if (inventory.failures.length > 0) {
+      const failure = inventory.failures[0]!;
+      throw new UiRuntimeApiError(failure.code, failure.ownerId, failure.message, failure.nextAction, 503);
+    }
+    const entry = inventory.entries.find((candidate) => candidate.snapshot.taskId.value === taskId.value);
+    if (entry === undefined) {
+      const failure = unknownTaskFailure(taskId, source.projectKey, mode);
+      throw new UiRuntimeApiError(failure.code, failure.ownerId, failure.message, failure.nextAction, 404);
+    }
+    return { kind: 'durable', source, mode, entry, admissions: inventory.admissions };
+  }
+
+  async scopedObservation(
+    taskId: TaskId,
+    selectedNodeId?: string,
+    scopeRef?: string,
+    rawProjectKey?: string,
+    mode?: RuntimeMode,
+    agentSelection?: DecodedTaskAgentActivitySelectionQuery,
+  ): Promise<PipelineObservationProjection> {
+    const resolved = await this.resolveTaskReadScope(taskId, rawProjectKey, mode);
+    if (resolved.kind === 'bound') {
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      const projection = observationProjection(
+        task,
+        selectedNodeId,
+        scopeRef,
+        this.requirementAdmissions.get(taskId.value),
+        await this.authoritativePublicOutputForTask(taskId),
+      );
+      return { ...projection, agentActivity: await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection) };
+    }
+    const projection = observationProjection(
+      resolved.entry.snapshot,
+      selectedNodeId,
+      scopeRef,
+      resolved.admissions.get(taskId.value),
+      toPublicOutputProjection(resolved.entry.snapshot.publicOutput),
+    );
+    return {
+      ...projection,
+      agentActivity: await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection),
+    };
   }
 
   async executeExplicitDecision(decision: InteractionDecision): Promise<readonly unknown[]> {
@@ -3477,82 +3671,12 @@ export class UiRuntimeService {
   observation(taskId: TaskId, selectedNodeId?: string, scopeRef?: string): PipelineObservationProjection {
     try {
       const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
-      const rootScopeRef = `task://${taskId.value}/observation`;
-      const providerScopeRef = `${rootScopeRef}/pipeline.execute`;
-      if (scopeRef !== undefined && scopeRef !== rootScopeRef && scopeRef !== providerScopeRef) {
-        throw new UiRuntimeApiError(
-          'observation.scope.not-found',
-          APP_OWNER,
-          `unknown observation scope: ${scopeRef}`,
-          'select an existing observation scope',
-          404,
-        );
-      }
-      const inProviderScope = scopeRef === providerScopeRef;
-      const toolSteps = observationToolSteps(task);
-      const registry = nodeRegistry();
-      const projectedNodeIds = new Set<string>();
-      const admission = this.requirementAdmissions.get(task.taskId.value);
-      const nodes: ObservationNodeSource[] = registry.map((definition) => {
-        const facts = observationNodeFacts(definition, task, toolSteps, admission);
-        if (facts.projected) projectedNodeIds.add(definition.nodeId);
-        return definition.nodeId === 'pipeline.execute'
-          ? { ...facts.node, childScopeRef: providerScopeRef }
-          : facts.node;
-      });
-      const providerNodes: ObservationNodeSource[] = task.events.map((event) => ({
-        nodeId: `event-${event.seq}`,
-        title: `${event.kind} #${event.seq}`,
-        kind: 'provider.event',
-        state: observationNodeState(event.state),
-        owner: agentIdForRole('execution'),
-        ownerAgentRole: 'execution',
-        summary: event.summary,
-        inputRefs: [],
-        outputRefs: event.kind === 'provider.output' ? event.evidenceRefs.map((ref) => ref.locator) : [],
-        evidenceRefs: event.evidenceRefs,
-        updatedAt: event.occurredAt,
-        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
-      }));
-      const scopes: Record<string, ObservationScopeSource> = {
-        [rootScopeRef]: {
-          scopeRef: rootScopeRef,
-          title: '任务处理流水',
-          summary: '十三个流水线节点的只读记录；无运行时事实的节点保持未投影。',
-          projectionSeq: String(task.events.length),
-          currentNodeId: currentNodeOfPipeline(task),
-          agents: agentFrames(registry.map((definition) => definition.ownerRole), task.executionEpoch ?? 1),
-          handoffs: observationHandoffs(nodes, projectedNodeIds),
-          nodes,
-        },
-        [providerScopeRef]: {
-          scopeRef: providerScopeRef,
-          title: '流水线执行事件',
-          summary: 'Provider 执行期间的规范化事件，不包含原始 transport frame。',
-          projectionSeq: String(task.events.length),
-          agents: agentFrames(['execution'], task.executionEpoch ?? 1),
-          nodes: providerNodes,
-        },
-      };
-      return projectPipelineObservation({
-        source: {
-          state: task.state === 'failed' || task.state === 'blocked'
-            ? 'error'
-            : task.state === 'running' || task.state === 'settling'
-              ? 'running'
-              : task.state === 'stale'
-                ? 'stale'
-                : task.state === 'waiting'
-                  ? 'waiting'
-                  : 'ready',
-          label: task.currentState,
-          detail: task.nextStep,
-          updatedAt: task.updatedAt,
-        },
-        scopes,
-        scopeStack: inProviderScope ? [rootScopeRef, providerScopeRef] : [rootScopeRef],
+      return observationProjection(
+        task,
         selectedNodeId,
-      });
+        scopeRef,
+        this.requirementAdmissions.get(task.taskId.value),
+      );
     } catch (error) {
       if (error instanceof UiProjectionError) {
         const unknownScope = error.message.startsWith('unknown observation scope');
@@ -3699,9 +3823,13 @@ export class UiRuntimeService {
   private async readDurableInventory(
     source: ConfiguredProjectReadSource,
     mode: RuntimeMode,
-  ): Promise<{ entries: readonly DurableTaskInventoryEntry[]; failures: readonly RuntimeReadFailure[] }> {
+  ): Promise<{
+    readonly entries: readonly DurableTaskInventoryEntry[];
+    readonly failures: readonly RuntimeReadFailure[];
+    readonly admissions: ReadonlyMap<string, RequirementAdmissionObservation>;
+  }> {
     const read = readUiRuntimeTaskJournal(source.checkpointsRoot, mode);
-    if (read.failure !== undefined) return { entries: [], failures: [read.failure] };
+    if (read.failure !== undefined) return { entries: [], failures: [read.failure], admissions: new Map() };
     const inventory = await projectDurableTaskInventory({
       records: read.records,
       checkpointFor: (taskId, cycleId) => new FileCheckpointStore(
@@ -3712,7 +3840,11 @@ export class UiRuntimeService {
       }),
       inspectionStopFor: () => this.inspectionStopFor(source, mode),
     });
-    return { entries: inventory.entries, failures: inventory.failures };
+    return {
+      entries: inventory.entries,
+      failures: inventory.failures,
+      admissions: durableRequirementAdmissionsFromRecords(read.records),
+    };
   }
 
   private inspectionStopFor(
