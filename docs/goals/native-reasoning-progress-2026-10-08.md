@@ -1,5 +1,13 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 已交付：原始 child 错误与真实 failed control；父级 cleanup 仍开放
+
+- 本增量main `20ced081` 已push（原回执`699eefe3..20ced081 main -> main`），三文件113insertions/28deletions：删除无效synthetic inconclusive结果；原错经既有异常通道传递；App binder用真实operation/owner/time/evidence构造现有OperationFailure，failed record/event均持久化。成功路径、Gateway/Contracts验证不变，无新fallback/重复guard。
+- 原r368公开入口实际RED证明错因被替换，随后failed事件缺failure另一次真实RED。r371实现/Appbuild0但未来时退出不算验证；Root补验发现测试把直接OperationControlRecord错当.control包，r372仅纠正两字段，native-tsc0/原单例1/1PASS；正常合最新peer Runtimepresent库后App/nativecompile0、同单例1/1PASS。持久化childfailed状态/原failure.message、precallcheckpoint、无review返回/采纳/重放均到达，不把未执行断言算PASS。
+- 唯一整体Review r373实际Gemini4medium/SUCCESS/exit0，原始四字段JSON/findings[]，既有classifier PASS，review-outcome.json存原RUN。main App/nativecompile/package/install0（session30187）；官方restart0（83598）gen32/PID79769→gen33/PID87121、53007、legacyCloseclean；caller后58秒仍alive，认证/api/runtime/status200/ready。installed原同例使用canonicalCLI与真实installed模块1/1PASS/exit0（30037），证据r375/{installed-failure.log,exit.json,restart.json,runtime-status.json}。
+- 清理完成：r374只读观察terminal0后，原review-primary-error树clean/无占用，正常remove/prune/testabsent；注册3→2，仅main与peer scoped-read integration保留。installed consumerlayout删除，原REDfixture保留，r375/cleanup.json有回执。
+- 严格边界：本例仍有父级cleanupError。r374确认App execution-composition.ts1482在saveBoundary和closeOwnedProvider均reject时抛aggregate，Runtime投影丢失inner errors；这不是正常hold，实际Provider物理关闭状态UNKNOWN。已证明primary/childfailedcontrol，不宣称父级save/close闭环；下一动作同一受控入口在投影前捕获两inner error/code/cause，不加新测试矩阵/模型请求。完整goal与G仍OPEN，M4/输入约束问题由peer推进，原tasklessinteraction-2 EOF根因UNKNOWN仍hold。
+
 ## 2026-10-17 接续：剩余原生能力与真实错误反馈
 
 - r364原“7/7完成/0ready”被Root拒收：遗漏真实error缺口、把未闭G9计完成，且混入错误canonical模型/TaskID。r367同Planner已纠正为全G/全goalOPEN、节点完成数未建立，复用A-F/部分G的已有证据；不据M3一个用例扩称全需求完成。canonical仍taskless原interaction-2/rcc-entry/MiniMax-M3，EOF根因UNKNOWN；不使用Planner新拼接的opaque ID执行动作。
