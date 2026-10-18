@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, appendFile, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, appendFile, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,7 +11,19 @@ import {
   JournalCommitConflictError,
   JournalIntegrityError,
 } from '../../../packages/adapters/jsonl/src/index.js';
-import { id, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
+import {
+  createJsonlAssignmentGraphJournal,
+  decodeAssignmentGraphRecords,
+} from '../../../packages/adapters/jsonl/src/assignment-graph.js';
+import {
+  id,
+  type AssignmentGraphStream,
+  type AssignmentRecord,
+  type AssignmentStageNode,
+  type Checkpoint,
+  type ScopeRef,
+  type WorkAssignment,
+} from '@humanagent/contracts';
 import {
   OperationEventPublicationError,
   publishOperationEvent,
@@ -26,6 +38,49 @@ import {
 const organ = id('organ', 'organ-a'); const task = id('task', 'task-a'); const cycle = id('cycle', 'cycle-a');
 const checkpoint = (seq: number, previousCheckpointId: Checkpoint['previousCheckpointId']): Checkpoint => ({ id: id('checkpoint', `cp-${seq}`), scope: { organId: organ, taskId: task }, cycleId: cycle, seq, previousCheckpointId, directiveRevision: 1, executionEpoch: 1, outcome: 'waiting', summary: `cp-${seq}`, recoveryStateRef: { evidenceId: id('evidence', `ev-${seq}`), kind: 'operation', source: 'test', locator: `state-${seq}`, scope: { organId: organ, taskId: task } }, evidenceRefs: [], next: { kind: 'wait', ref: 'condition' } });
 async function fixture(): Promise<{ journal: JsonlOrganJournal; file: string }> { const dir = await mkdtemp(join(tmpdir(), 'humanagent-journal-')); const file = join(dir, 'organ.jsonl'); return { journal: new JsonlOrganJournal(file), file }; }
+
+const assignmentGraphStream: AssignmentGraphStream = {
+  taskScope: { organId: organ, taskId: task },
+  ownerId: 'orchestration-manager',
+};
+const assignmentGraphAssignment: WorkAssignment = {
+  assignmentId: 'assignment-a',
+  taskId: task,
+  pipelineNodeId: 'node-a',
+  attempt: 1,
+  executionEpoch: 1,
+  inputRevision: 1,
+  objective: 'persist typed graph poststate',
+  targetRefs: ['target-a'],
+  expectedOutputRefs: ['output-a'],
+  successCriteria: ['success-a'],
+  failureCriteria: ['failure-a'],
+  incompleteCriteria: ['incomplete-a'],
+  requiredCapabilities: ['execute'],
+  mergeGate: 'not-required',
+};
+const assignmentGraphStage: AssignmentStageNode = {
+  nodeId: 'node-a',
+  taskId: task,
+  parentNodeId: null,
+  state: 'planned',
+  assignmentKeys: [],
+};
+const assignmentGraphRecord: AssignmentRecord = {
+  key: {
+    assignmentId: assignmentGraphAssignment.assignmentId,
+    attempt: assignmentGraphAssignment.attempt,
+    executionEpoch: assignmentGraphAssignment.executionEpoch,
+  },
+  stageNodeId: assignmentGraphStage.nodeId,
+  assignment: assignmentGraphAssignment,
+  status: 'planned',
+  ownerId: assignmentGraphStream.ownerId,
+  reviewResults: [],
+  reason: 'assignment planned',
+  nextAction: { kind: 'continue', ref: 'execute' },
+  evidenceRefs: [],
+};
 
 const childCode = [
   "const url = process.argv[1];",
@@ -156,6 +211,117 @@ function runBoundedChild(code: string, args: string[]): Promise<ChildResult> {
 test('append, latest, replay and verify checkpoint chain across events', async () => { const { journal } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const second = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(2, first.checkpoint!.id) }); assert.equal((await journal.latest())!.seq, 3); assert.equal((await journal.replay()).length, 3); assert.equal((await journal.verify()).valid, true); assert.equal(second.checkpoint!.previousCheckpointId!.value, 'cp-1'); });
 test('rejects duplicate and broken sequence records', async () => { const { journal, file } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const raw = await readFile(file, 'utf8'); const [a, b] = raw.trim().split('\n').map((line) => JSON.parse(line) as { seq: number; previousRecordDigest: string | null }); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, seq: a.seq })}\n`, 'utf8'); let result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /duplicate/); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, previousRecordDigest: 'sha256:wrong' })}\n`, 'utf8'); result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /predecessor/); });
 test('commitId is idempotent for the same facts and conflicts for different facts', async () => { const { journal, file } = await fixture(); const scope = { organId: organ, taskId: task }; const first = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); const replay = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); assert.equal(replay.seq, first.seq); assert.equal(replay.commitId, 'job-1'); assert.equal((await readFile(file, 'utf8')).trim().split('\n').length, 1); await assert.rejects(() => journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 2 } }), JournalCommitConflictError); const second = await journal.append({ commitId: 'job-2', kind: 'event', scope, payload: { step: 2 } }); assert.equal(second.seq, 2); assert.equal((await journal.findByCommitId('job-1'))!.seq, 1); assert.equal((await journal.findByCommitId('job-2'))!.seq, 2); });
+test('assignment graph codec preserves typed poststate through real Journal records', async () => {
+  const { journal, file } = await fixture();
+  const port = createJsonlAssignmentGraphJournal({ filePath: file, stream: assignmentGraphStream });
+  const declaredStage: AssignmentStageNode = {
+    ...assignmentGraphStage,
+    assignmentKeys: ['assignment-a:1:1'],
+  };
+  const stageFact = {
+    version: 1 as const,
+    stream: assignmentGraphStream,
+    revision: 1,
+    change: { kind: 'stage-declared' as const, stage: assignmentGraphStage },
+  };
+  const memberFact = {
+    version: 1 as const,
+    stream: assignmentGraphStream,
+    revision: 2,
+    change: {
+      kind: 'assignment-transition' as const,
+      action: 'create-assignment' as const,
+      assignment: assignmentGraphRecord,
+      stage: declaredStage,
+    },
+  };
+
+  const stageCommit = await port.commit({
+    commitId: 'assignment-graph-stage-1',
+    expectedRevision: 0,
+    fact: stageFact,
+  });
+  const memberCommit = await port.commit({
+    commitId: 'assignment-graph-member-2',
+    expectedRevision: 1,
+    fact: memberFact,
+  });
+  assert.equal(stageCommit.commitRef.journalSeq, 1);
+  assert.equal(memberCommit.commitRef.journalSeq, 2);
+
+  const decoded = decodeAssignmentGraphRecords(await journal.replay());
+  assert.equal(decoded.length, 2);
+  assert.deepEqual(decoded.map((entry) => entry.fact), [stageFact, memberFact]);
+  assert.deepEqual(decoded[1]!.fact.change.kind, 'assignment-transition');
+  if (decoded[1]!.fact.change.kind !== 'assignment-transition') return;
+  assert.deepEqual(decoded[1]!.fact.change.assignment, assignmentGraphRecord);
+  assert.deepEqual(decoded[1]!.fact.change.stage, declaredStage);
+  assert.deepEqual(
+    await createJsonlAssignmentGraphJournal({ filePath: file, stream: assignmentGraphStream }).replay(),
+    decoded,
+  );
+});
+
+test('assignment graph exact duplicate retries only after file sync succeeds', async () => {
+  const { journal, file } = await fixture();
+  const port = createJsonlAssignmentGraphJournal({ filePath: file, stream: assignmentGraphStream });
+  const request = {
+    commitId: 'assignment-graph-sync-retry',
+    expectedRevision: 0,
+    fact: {
+      version: 1 as const,
+      stream: assignmentGraphStream,
+      revision: 1,
+      change: { kind: 'stage-declared' as const, stage: assignmentGraphStage },
+    },
+  };
+  const committed = await port.commit(request);
+  const committedBytes = await readFile(file);
+  assert.equal((await journal.replay()).length, 1);
+
+  await assert.rejects(
+    () => port.commit({
+      ...request,
+      fact: {
+        ...request.fact,
+        change: {
+          kind: 'stage-declared',
+          stage: { ...assignmentGraphStage, state: 'running' },
+        },
+      },
+    }),
+    JournalCommitConflictError,
+  );
+  assert.deepEqual(await readFile(file), committedBytes);
+
+  const journalStat = await stat(file);
+  const probe = await open(file, 'r');
+  type SyncProbe = {
+    sync(): Promise<void>;
+    stat(): Promise<{ ino: number }>;
+  };
+  const prototype = Object.getPrototypeOf(probe) as SyncProbe;
+  const originalSync = prototype.sync;
+  try {
+    prototype.sync = async function (this: SyncProbe): Promise<void> {
+      const current = await this.stat();
+      if (current.ino === journalStat.ino) throw new Error('injected journal file sync failure');
+      return originalSync.call(this);
+    };
+    await assert.rejects(
+      () => port.commit(request),
+      /injected journal file sync failure/,
+    );
+    assert.deepEqual(await readFile(file), committedBytes);
+  } finally {
+    prototype.sync = originalSync;
+    await probe.close();
+  }
+
+  assert.deepEqual(await port.commit(request), committed);
+  assert.deepEqual(await readFile(file), committedBytes);
+  assert.equal((await journal.replay()).length, 1);
+});
 test('recovers a committed journal fact after writer termination without an outer receipt', async () => {
   const fixtureRoot = '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-a2';
   await mkdir(fixtureRoot, { recursive: true });
