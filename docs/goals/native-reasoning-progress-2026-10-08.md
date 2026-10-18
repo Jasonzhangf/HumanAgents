@@ -9,6 +9,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r315独立证据充分性计划接受C三协议工具往返与G通用HTTP来源当前能力证据；不加r314建议的HTTP×Chat组合用例，不制造新RED。main旧gap中的tools=[]/unsupported/RCC-only现状已改正，docs-only860ef944已push（b4ec7848..860ef944）。保留main/候选/installed边界、实际模型归属和E/F等未完要求；不是总目标完成。
+- r313身份计划已接收，推翻r309改逻辑intent方向：保留operation input/namespace/fingerprint，physicalsegment通过typed durable segment与原business registration关联核验，Gateway不变、UXcomposition不变。计划epoch>1/epoch1假设源于fixture，不接受；r316已交原Planner限定3file修订为真实segment/ancestor事实。原预算树r309dirty保留，未合流错误patch；后续执行扩到operation-control-journal唯一owner前已通知peer。
+
 - peer正确native-text入口inspector捕获inspection首异常：受控RCC v3 HTTP500，fixture断言`the actual child request carries Inspection check: check-a`失败；context已装配，port未返回，不是context/Planner结算根因。错误dist/tests诊断不计证明。App正常alignment接线来源72113582已cherry候选fe701c96，复用本批Appbuild/tsc0、原3case2PASS1FAIL，终态assertions UNREACHED；不重跑同红，不修cleanup症状，peer独立plan核对actualchildrequest与合同。
 - 已正常merge最新main至唯一candidate1e9ecb9d，progress文本冲突保留双方事实，Memory正式交付不再待办。r314只读观察确认C/G当前实现已超越旧gap文档；其建议的新Chat组合用例尚无产品失败依据，不自动新增。r315独立小Planner核对既有协议/配置消费/真实入口证据是否充分，充分即停止补测。r313身份计划仍live，预算源树保留，不扩大Gateway修改。
 
