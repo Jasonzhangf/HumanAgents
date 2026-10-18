@@ -221,6 +221,7 @@ function renderNodeCard(node, index) {
   const summaryText = node.summary && node.summary !== node.title && node.summary !== node.kindDisplay
     ? node.summary
     : ''
+  card.append(head, meta)
   if (summaryText) card.append(element('span', summaryText, 'flow-node-summary'))
   // The drawer renders from the typed node detail, which only the projection carries. A click
   // therefore selects the node and reloads; the returned `selectedNode` opens the drawer.
