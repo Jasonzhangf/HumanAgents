@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 独立原样 wire 采集已完成，失败边界不依赖 HA 消费链
+
+- r457 worker只产脚本后未来意向退出，未创建attempt/未POST；Root核单次fetch路径后实际执行一次。UTC12:16:45.721..47.055Z，8621字节原body不改，native Response强保活/立即reader，HTTP200后只收到3字节`3a 0a 0a`即SSE注释，零完整业务frame/terminal，UND_ERR_SOCKET，无本地abort/正常EOF/响应关联header。owner-capture.exit0只代表采集执行完成，不代表业务成功。
+- 本次不经过HA parser/helper/Journal，没有工具执行、原turn重入或epoch6。这证明新失败不依赖这些HA环节；不能直接区分Node transport/RCC/具体上游，也不独自证明历史epoch5原因。原问题仍未回答，原typed状态保持epoch5failed/closed。
+- r458只读观察terminal0：已有日志仍无与新body精确绑定的request key/rawref/错误原因。当前源码keepalive直接调用传`" keepalive"`，与实际空注释不同；serving executable/源码对应仍未确认，不能用源码假设定运行时根因。Root的只读lsof监听查询被工具自动审查按killchain拒绝，未执行；未改通道做进程枚举或请求peer代跑。peer也无现成RCC启动/入口receipt，归属未知。
+- 实际证据在RUN/native-original-wire-capture-execute-r457-20261018/{capture-summary.json,raw-response.bin,owner-acceptance.md}，服务侧边界在r458/observation.md及owner-reception.md。完整goal仍ACTIVE/INCOMPLETE；peer治理+UX在P2消融及独立Review，未借其尚未安装的候选宣称放行。本侧暂无已证明的新增产品缺码，不加schema workaround、fallback或新测试。
+
 ## 2026-10-18 socket 定因与当前 gap 文档校正
 
 - r456独立OAuth GPT6.1 medium限定语义规则审查terminal0，strictschema/既有classifier PASS/findings[]，逐一覆盖基础12工具和child.not_select的实际注册、规则、模型指令下发、四段summary与accepted refs边界。它关闭r454指出的缺review证据，不要求新deterministic mapper；不冒全部工具真实模型提炼质量或完整goal验收。原helper/turnend/childdelivery有效审查继续复用，无重复Review或新测试。
