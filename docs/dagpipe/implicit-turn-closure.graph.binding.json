@@ -47,7 +47,7 @@
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
       "designNote": "终态推进 owner，推进前结算本 logical turn。COMPLETED 分支须先消费 typed readDelivery 校验过的 delivery body 并通过同一 canonical public-output commit 与 exact readback 才接受 succeeded/final，且只有真实终态才关闭共享 cycle；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与 Planner 语义，只结束当前 turn，不关闭共享 cycle。canonical output 不得使用 native drain 或 summary。",
-      "settlementContract": "本 logical turn 的 settlement 与共享 cycle close 分离；不固定探索、计划、执行、审查顺序。",
+      "settlementContract": "普通结算输入为权威 recoverTurn 的 closure、committed alignment 与可选 summaryEvidenceContext，先用 Core binding assertion 及 exact checkpoint scope/cycle 关联后才追加。checkpoint.next 是 Planner 前屏障；实际 alignment continue 映射 continue，complete/failed 映射 cycle stop，引用由 turnBoundaryRecordRefs 产生。cycle stop 不表示用户停止或 Task 成功。已知 close 在追加 settlement 前比较全部现有关联和精确 milestoneAlignmentCommitRefs；用户停止保留独立 settleStop 路径。不固定探索、计划、执行、审查顺序。",
       "runtimeCoordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
       "runtimeCoordinationStatus": "planned/unimplemented"
     }

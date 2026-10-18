@@ -29,7 +29,7 @@
     "noForcedRoleSequence": "该图不强制编排者、Planner 或 reviewer 的固定角色顺序，也不新增模型完成标签。",
     "runtimeBoundary": "本图是目标契约。在真实 typed readDelivery、canonical public-output commit 与 exact readback 组合回执出现之前，implementationStatus 保持 UNVERIFIED。",
     "adoption": "adopt 接受正式 plan 与 definition，不以自由文本或角色顺序代替。",
-    "logicalTurnSettlement": "next_state 推进前结算本 logical turn；continue 不关闭共享 cycle，只有真实终态关闭它。",
+    "logicalTurnSettlement": "next_state 从权威恢复结果消费 closure、已提交 Planner alignment 与独立的 summaryEvidenceContext。checkpoint.next 只表示 Planner 前的屏障。continue 结算本轮并保留共享 cycle；complete/failed 使用 canonical alignment 引用结束 cycle，不冒充用户停止或接管 Task 状态。追加前确认 closure/checkpoint scope、cycle 与全部关联引用；已有 close 的重放包含精确 milestoneAlignmentCommitRefs 比较。父编排者的 inspectionOutcome 独立决定巡检判定。",
     "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 已实现巡检选择、交付接受及轮次结算；inspection-runtime-helpers.ts 提供真实计划、定义和精确 capture 事实。模块已组合到候选，App 最终资源接线与原生整链仍未验收。",
     "appWiring": "App 只做 wiring，不拥有 turn settlement 或 inspection 状态。"
   }

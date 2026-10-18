@@ -25,7 +25,7 @@
     "deliveryContract": "deliver 节点捕获真实已接受的标准交付来源（acceptedEndCall 与原始 rawArguments 中的 exact deliveryText），它不同于后续 canonical public-output 发布。它不声明传输完成、任务成功，也不重复保存 body。",
     "terminalAcceptanceContract": "next_state 的 COMPLETED 分支必须先消费 typed readDelivery 校验过的 delivery body，并在同一 canonical public-output 上完成 commit 与 exact readback，之后才可接受 succeeded/final；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与独立 Planner 语义。canonical output 不得使用 native drain 或 summary。不强制角色顺序，也不新增模型完成标签。",
     "adoptionContract": "adopt 接受正式 plan 与 definition；不把角色顺序或自由文本当作执行契约。",
-    "logicalTurnSettlementContract": "next_state 在推进前结算本 logical turn。continue 只结束当前 turn 并保留共享 cycle；只有真实终态才关闭共享 cycle。"
+    "logicalTurnSettlementContract": "next_state 在推进前消费权威恢复结果中的 closure、已提交 Planner alignment 与 summaryEvidenceContext，结算本 logical turn。checkpoint.next 是 Planner 前的屏障，不是最终 cycle 决策。alignment 的 continue 保留共享 cycle；complete/failed 以 canonical alignment 引用关闭 cycle，不冒充用户停止或改写 Task 状态。追加前绑定 closure/checkpoint 的 scope 与 cycle；重放须保持全部关联引用及 milestoneAlignmentCommitRefs 一致。"
   },
   "inputs": [
     {
