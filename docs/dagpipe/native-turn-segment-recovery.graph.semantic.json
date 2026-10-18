@@ -5,8 +5,8 @@
     "read_exact_predecessor_facts": "读取前驱 segment 的真实事实：已提交 captured recovery receipt、打开但未保存的 interrupted anchor，或无前驱保存的 initial-open 原 turn anchor（binding commit + records-through）；核验同一业务 turn 与新 handle 身份。未保存不等于 capture。",
     "register_current_grant_business": "持锁读取当前 grant，并在同一 held 登记事务内登记本次 segment-open 的精确 business reservation，分别取得 grant commit 与 business registration commit",
     "append_segment_opened": "核验 reservation、本 segment 的 predecessor（captured/interrupted/initial-open）与 chain tail 后，向 Organ Journal 追加 segment-opened 并取得独立 segment commit；旧 epoch 迟到写被拒绝",
-    "establish_epoch_window": "恢复本 epoch 的执行窗口与当前语义；initial-open 只发一次 initial input，合并历史段与当前段的未决义务并保留已完成 effect，旧 epoch 迟到写被拒绝",
-    "resolve_resume_outcome": "返回实际 receipts，或返回保留恢复责任且无新执行的 typed outcome"
+    "establish_epoch_window": "恢复本 epoch 的执行窗口与当前语义；新 physical parent control 的 executionEpoch 取实际 segment execution，admissionCommitRef 绑定该段已提交业务登记，但保留原父 operation 的不可变 intent、namespaceKey 与 fingerprintKey。释放新段 child/effect 前，以 segmentOpenedFromRecord 和 decodeActiveTurnRecords 做精确 typed join：已提交 segment-open → 其 businessRegistrationCommitRef/inputIdentity → businessTurnRef.bindingCommitRef 的原 binding-opened 与 businessTurnRef.execution → 原 execution namespace 中的祖先父 control envelope → 该 control admissionCommitRef 指向的原业务登记。initial-open 只发一次 initial input，合并历史段与当前段的未决义务并保留已完成 effect，旧 epoch 迟到写被拒绝",
+    "resolve_resume_outcome": "返回实际 receipts，或返回保留恢复责任且无新执行的 typed outcome；工具轮次预算拒绝已收到的调用时，先持久保存真实 failed/tool.round-limit/executed:false 结果，再抛原 typed error，恢复请求保留 call/output 配对，不执行被拒工具、不重放已接受 effect"
   },
   "arcs": {
     "predecessor_facts_result": "已核验的原 turn、predecessor 真实事实与 typed 分类结果",
@@ -33,7 +33,7 @@
     "noFixedPipeline": "本图不写 observation/plan/execute/review 固定角色流水线，无重复/回退边；下一次恢复是本图的新执行，而非图内环。",
     "revokeOrder": "reservation 前撤权零副作用；reservation 后撤权允许完成本次已登记 segment，但新 request/child/effect 仍按当前 grant 逐次准入。",
     "statusBoundary": "本图只表达目标合同与责任名称；不证明 Operator 已注册、runtime 已执行或产品已验收。",
-    "mermaid": "flowchart TD\n  I([同一业务 turn 冷恢复入口]):::boundary\n  A1[\"读取前驱真实事实：captured receipt、interrupted anchor 或 initial-open 原 turn anchor；核验同一业务 turn 身份\"]:::action\n  A2[\"持锁登记当前 grant 与精确 business reservation；grant commit 与 registration commit\"]:::action\n  A3[\"核验三类 predecessor 与 chain tail 后追加 segment-opened；独立 segment commit；旧 epoch 迟到写被拒绝\"]:::action\n  A4[\"恢复本 epoch 执行窗口与当前语义；initial-open 只发一次 initial input，保留旧段未决义务与已完成 effect\"]:::action\n  Z([typed 恢复结果：resumed receipts 或保留恢复责任]):::boundary\n  I --> A1 --> A2 --> A3 --> A4 --> Z\n  classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px\n  classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px"
+    "mermaid": "flowchart TD\n  I([同一业务 turn 冷恢复入口]):::boundary\n  A1[\"读取前驱真实事实：captured receipt、interrupted anchor 或 initial-open 原 turn anchor；核验同一业务 turn 身份\"]:::action\n  A2[\"持锁登记当前 grant 与精确 business reservation；grant commit 与 registration commit\"]:::action\n  A3[\"核验三类 predecessor 与 chain tail 后追加 segment-opened；独立 segment commit；旧 epoch 迟到写被拒绝\"]:::action\n  A4[\"恢复本 epoch 执行窗口与当前语义；保留原 operation intent/keys；typed join segment → 原 turn/父 control/业务登记；initial-open 只发一次 input，保留旧义务与已完成 effect\"]:::action\n  Z([typed 恢复结果：resumed receipts 或保留恢复责任]):::boundary\n  I --> A1 --> A2 --> A3 --> A4 --> Z\n  classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px\n  classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px"
   },
   "implementationStatus": "UNVERIFIED"
 }
