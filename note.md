@@ -6,7 +6,7 @@ main `bae24634` 已交付 typed scope 人读事件展示、精简事件抽屉与
 
 peer普通文档push实际把UI一并推到远端（4a1c7832..dc60f65a），早于最后安装验证；该时点未算完成，现在已补齐。临时installed服务37017正常退出、gen9disposed；自有cookie/emulation清理、p1空白/p3不动。自有Observation和QA候选树及分支均已回收，当前仅main/control，无新Task或模型请求。
 
-F13按r470独立充分性与r469实测、已有interrupted HTTP/J1 fencing/installed initial-open证据已接收闭环，不再以早前RED称当前缺码。原B保留blocked与未解责任，不新增双任务成功门槛；原A的五JSON没有独立no-file-edits约束原文，不认定违约。r476既有语义30/30、三类型分组5/5已实际通过，Root读原始日志，零新增测试／源码／业务请求；抓错反例未执行，不冒覆盖实际图与模板骨架区别。完整I/G/F仍ACTIVE：该具体图区别与简单问答socket原因继续按各自边界推进。较早OPEN仅作历史。
+F13按r470独立充分性与r469实测、已有interrupted HTTP/J1 fencing/installed initial-open证据已接收闭环，不再以早前RED称当前缺码。原B保留blocked与未解责任，不新增双任务成功门槛；原A的五JSON没有独立no-file-edits约束原文，不认定违约。r476既有语义30/30、三类型分组5/5已实际通过，Root读原始日志，零新增测试／源码／业务请求；抓错反例未执行，不冒覆盖实际图与模板骨架区别。r477现已沿正式链确认模板／实际实例图未接生产UI，非单纯缺日志；静态反例尚未执行，r478复杂规划正在核真源／typed合同及最小闭环，后续先设计审查再contracts-first实现。必要展示引用折叠候选e97dc286／70430ac9原A手机已验，仍只在唯一ux-next-increment树，未冒main交付。完整I/G/F继续ACTIVE；简单问答socket原因UNKNOWN。较早OPEN仅作历史。
 
 ## 2026-10-18 治理消融已交付：源码与直接消费者
 

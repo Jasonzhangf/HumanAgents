@@ -1,5 +1,15 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新推进：UI 已交付，实际任务图缺边进入独立规划
+
+- 完整 goal 仍 ACTIVE / INCOMPLETE。下列新事实覆盖下文旧的“r471待派”“r475待核”状态，不重开已充分的 F13，也不把当前图缺边混作 Provider 协议缺陷。
+- UI Observation 人读事件与计划历史已正常合 main `bae24634`，整体 Gemini4 medium Review 有效 PASS；必要构建、打包、安装成功，正式 restart 至 gen42 / PID19087 / 53007，legacy close clean。安装后默认打包 UI 原 A 手机入口实际通过，owner 已看截图。临时服务正常退出、lease disposed，浏览器自有 cookie/emulation 已清，p3 未动；两棵自有候选树及已合流分支正常回收。完整交付回执：`/Volumes/Intel/playground/humanagent/.worker-runs/observation-readable-delivery-20261018/delivery.md`。此前提前 push 的真实顺序保留，不改写历史。
+- r475 已实际 terminal exit0。对 epoch6 UTC12:45:09..29 的唯一已知 RCC request-record 文件定点解析，35行/14个 request_key 没有目标 HA requestID/operation 的显式映射。根因 UNKNOWN，不据此断言 RCC 未收到或 HumanAgent 缺码；不重扫旧窗口、不自动 epoch7。报告与接收：`RUN/native-epoch6-log-observe-r475-20261018/{observation.md,owner-reception.md}`。
+- r476 已实际 terminal exit0：指定 context-events 编译0，原 semantic-public-consumer 30/30 PASS，原 task-flow-groups consumer 5/5 PASS；两份原始 TAP 已直接接收。这只补齐 r472/r473 的有限运行 receipt。新增测试0、反例执行0；抓错能力不外推，不覆盖 SSE、F06/F15 区分或真实 RCC 生成。worker 额外只读 Git 身份检查违反派单范围，不采纳为验收依据，不因此重跑有效行为证据。报告、原始日志与接收：`RUN/native-existing-consumers-execute-r476-20261018/`。
+- r477 已实际 terminal exit0。正式 Dashboard 消费 `projectRuntimeTaskDashboard` 和已发布计划快照；Observation 消费固定 pipeline registry。报告沿指定真实数据链确认未接入 actual assignment 图，模板骨架控件仅在 Mock；这是一条具体生产缺边，不能再仅按缺测试/日志处理。现有未归阶段计划节点保留不等于模板/实例图已实现。两份反例均未执行，示例 shape 不是冻结接口，不称 RED。`observation-read` 当前8节点8边、仍SESE闭合；r471写7边是描述笔误，不为计数改拓扑。报告与接收：`RUN/native-template-instance-observe-r477-20261018/{observation.md,owner-reception.md}`。
+- r478 已启动 fresh AGY `gemini-4-argon-medium` / medium 复杂跨模块只读 Planner，实际 init 型号已核，conversation `f31103ab-e51f-4be5-beac-cbef0bda442f`，PID13743 / 工具session65971。范围为 F06/F15/G9：先核 Runtime/Journal producer 与 durable owner、真实模板类型，再设计 typed contracts → App公开读取 → projection/sharedrenderer → 实际入口闭环。要求动态角色选择，不复活固定角色顺序，不从 lineage 伪造执行依赖，不从 raw/log 重建控制真源。完整计划与实际退出尚待返回，不预记 READY；接受后按既有要求做独立编码前设计审查，随后 contracts-first 拆分 GCM 实现。记录：`RUN/native-actual-graph-plan-r478-20261018/`。
+- UX 后继引用折叠来源 `e97dc286` + `70430ac9` 仍仅独立候选 `ux-next-increment-20261018`，不是 main 产品交付。owner 原 A 手机验证通过，临时服务已退出；不单独 leaf Review，待必要 UX 增量整体收口。本侧不并写其 `observation.js`。本次仅更新本进度文件，不改主计划、note 或候选代码。
+
 ## 2026-10-18 socket 解阻口径纠正：外部聊天目标不是本机只读前置
 
 - Root要求复核r464为何不能本机读取server证据。已复用r455/r458原回执：request-record日志可读，无日志权限拒绝；旧两轮分别覆盖epoch5约11:54与12:16独立wire采集窗，缺显式body/request_key/rawref关联。lsof监听查询被拒不等于日志读取被拒，不据此扩大权限阻塞。
