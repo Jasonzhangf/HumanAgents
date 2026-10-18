@@ -1592,6 +1592,12 @@ interface I2HttpBody {
     readonly checkId: string;
     readonly change: string;
   }[];
+  readonly comparable?: boolean;
+  readonly reason?: string | null;
+  readonly definition?: {
+    readonly definitionId: string;
+    readonly definitionVersion: string;
+  } | null;
   readonly nextCursor?: string;
   readonly error?: { readonly code?: string };
 }
@@ -1750,6 +1756,18 @@ async function runScopedI2HttpFixture(): Promise<void> {
     definitionVersion: definitionB.content.definition.definitionVersion,
     openingCommitRef: occurrenceB2Ref, itemResultCommitRefs: [resultB2Ref], settledAt: at(9),
   }));
+  const definitionB2 = definitionRecord({
+    taskScope: taskScopeB, definitionId: 'definition-b', definitionVersion: '2',
+    checkIds: ['check-1'], createdAt: at(11),
+  });
+  const definitionRefB2 = await portB.commit(definitionB2);
+  await portB.commit(occurrenceOpened({
+    taskScope: taskScopeB, occurrenceId: 'occurrence-b3', cycleId: 'cycle-b-2',
+    definitionId: definitionB2.content.definition.definitionId,
+    definitionVersion: definitionB2.content.definition.definitionVersion,
+    definitionCommitRef: definitionRefB2, definitionDigest: definitionB2.definitionDigest,
+    cycleOpenedCommitRef: cycleB2Ref, openedAt: at(12),
+  }));
   await portB.commit(reviewResult({
     taskScope: taskScopeB, milestoneId: 'milestone-b', cycleId: 'cycle-b-1',
     assignmentId: 'assignment-b', resultId: 'review-result-b', completedAt: at(10),
@@ -1829,10 +1847,18 @@ async function runScopedI2HttpFixture(): Promise<void> {
   assert.equal(scopedB.cycles.body.viewed?.cycleId, 'cycle-b-2');
   assert.equal(scopedB.cycle.body.entry?.cycleId, 'cycle-b-1');
   assert.equal(scopedB.reviews.body.entries?.[0]?.milestoneId, 'milestone-b');
-  assert.deepEqual(scopedB.occurrences.body.entries?.map((entry) => entry.occurrenceId), ['occurrence-b1', 'occurrence-b2']);
+  assert.deepEqual(scopedB.occurrences.body.entries?.map((entry) => entry.occurrenceId), ['occurrence-b1', 'occurrence-b2', 'occurrence-b3']);
   assert.equal(scopedB.occurrences.body.viewed?.occurrenceId, 'occurrence-b2');
   assert.equal(scopedB.occurrence.body.entry?.occurrenceId, 'occurrence-b1');
   assert.deepEqual(scopedB.comparison.body.items?.map((item) => [item.checkId, item.change]), [['check-1', 'changed']]);
+  assert.equal(scopedB.comparison.body.comparable, true);
+  const incompatible = await request(`${taskPath}/inspection-comparison?${queryB}&left=occurrence-b1&right=occurrence-b3`);
+  assert.equal(incompatible.status, 200);
+  assert.deepEqual(incompatible.body.scope, scopeB);
+  assert.equal(incompatible.body.comparable, false);
+  assert.equal(incompatible.body.reason, 'definition-mismatch');
+  assert.equal(incompatible.body.definition, null);
+  assert.deepEqual(incompatible.body.items, []);
   const scopedA = await request(`${taskPath}/cycles?${queryA}`);
   assert.equal(scopedA.status, 200);
   assert.deepEqual(scopedA.body.scope, scopeA);
