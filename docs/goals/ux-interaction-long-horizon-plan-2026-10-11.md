@@ -36,7 +36,7 @@ F13 恢复证据已于本轮接收闭环。独立小 Planner r470 找到并核�
 独立后续计划已接收：`/Volumes/Intel/playground/humanagent/.worker-runs/ux-remaining-plan-oauth-20261018/plan.md` 及 owner-acceptance.md。当前按以下实际缺口推进，不重做已有效的测试：
 
 - 嵌套 Observation 和 available 计划历史页面接线已按上节交付。后续不重复原 A 双端或精确 M3 fixture；已有正向证明与尚未验证的抓错反例保持各自边界。
-- 下一阶段独立计划 r471 已接受。剩余语义消费者和三类型分组的有限材料缺口由一个既有消费者批次补证，零新增测试；F06/F15 的实际 assignment 图与模板骨架区分仍须核对具体保障，不从缺日志推断缺码。
+- 下一阶段独立计划 r471 已接受。r476 已补齐两个有限运行回执缺口：既有 context-events consumer30/30、三类型分组 consumer5/5，必要编译与两次执行均exit0。原始日志在 `native-reasoning-d0-20261012/native-existing-consumers-execute-r476-20261018/logs/`，Root已读。零新增测试、源码修改、App全量或业务请求；未执行新红测／反例，抓错能力不外推。F06/F15 的实际 assignment 图与模板骨架区分不由这35项证明，r477只读沿正式数据边核对，不能从缺日志推断缺码。
 - initial-open 安装后恢复及已确认副作用不重放已有接受证据。r469 对保留 interrupted fixture 经当前 installed canonical resolver 单次只读解析 exit0、ok:true：选中真实 interrupted tail，保留 seq22 opened anchor、seq26 records-through 和原 dispatching pending request。此项关闭当前 selector/source readback 的具体未知，旧 RED 不再作为当前失败。它没有执行业务恢复，不能关闭 interrupted-v2 后继执行、fencing 或完整 F13；fixture 没有 retry.jsonl，缺失读取为空未创建。证据为 `native-reasoning-d0-20261012/native-f13-canonical-read-observe-r469-20261018/observation.md`。
 - 原 taskless 问答 epoch6 仍 socket 失败，由 Provider peer 保留原责任及外部交接边界；不再盲重试，不阻断未受影响的 UX 工作。
 - 原 M4 A 实际写入 scope-isolation.md，但指定五份 JSON 没有独立 constraints 原文，不能据此认定违反禁止写文件要求。原 B 保持 blocked 与恢复责任，作为失败可见性／项目隔离对照，不自动恢复或用后续任务替代；G7 不新增两任务必须成功的门槛。r474 原始事实和 owner 接收保留。
