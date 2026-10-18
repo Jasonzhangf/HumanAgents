@@ -2,6 +2,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Runtime normal settlement来源7569dff1已标准cherry-pick为候选cc7b2c29；消费真实committed Planner alignment而非checkpoint wait屏障。组合contracts/agentloopcompile0，原inspection15/15PASS（session2788），已通知peer关闭来源；App新接口接线仍由peer继续，非全链交付。
+- N3 r302执行偏离已纠正：266条完成命令后仍仅23行准备改动、无目标case，精确SIGINT后进程已退出，原树保留。按疑难攻关派fresh OAuth GPT6.1 medium r306，同树写出并实际编译/运行唯一用例。compile0，业务入口先被`child admission is not physically verified: durable parent control for the child admission was not found`拒绝，尚未触tool.round-limit；不把它当预算RED或产品根因。fixture与typederror/wires保存在r306 RUN。r307独立小Planner只定位fixture控制事实/产品接线缺口，无放宽准入、无产品编辑；预算恢复仍UNVERIFIED。
+
 - App inspection接线来源7151b5e4和fixture修正9220accc已标准cherry-pick为候选7b8a20aa/38904e45。组合contracts/App build/native tsc均0；原stop/text/inspection精确3例实际2PASS/1FAIL（session45674）。inspection从缺opening推进为10posts/1planner后child及自身settlement失败，末端blocked与cleanup native save/Provider close失败；不冒根因。失败fixture `~/.humanagent/test-fixtures/provider-fixture-combined-acceptance-r1-20261014/text-only-3wQZPJ`保留，已交UX peer定位最早typed error并与在做normal settlement对齐。无main交付。
 - r304作者回执已接收，parent复核receipt确有3start/request/output/settle/release；第三asset外层JSON合法、内部curation文本在column1951 Extra data（auditPrompt后多余闭括号）。解析失败证据成立，未据此新增容错或重试；前二attention/no-op的语义缺口仍由r305规划。
 
