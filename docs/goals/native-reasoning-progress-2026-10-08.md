@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 父级失败收拢实现中：原错误已消除，增强用例未全过
+
+- r382 fresh OAuth GPT6.1 medium 局部技术计划已terminal0并经Root接收：已durable接纳的业务failed tool不会永久锁住producerFailure，复用App既有prepareCapture即可drain→实际settle→精确capture；Provider实现及close guard不改。原同域树正常FF到9bee40b7，没有新树。
+- r383 GCM在原树改5文件：native-admitted-turn semantic/binding、App execution-composition失败close分支、Runtime standardTurn catch、原native review failure公开用例。图拓扑8节点不变，既有binding gate通过。先build/nativecompile0，原单例真实RED0/1为cleanup aggregate；产品修复后同例已越过cleanup、exact capture、raw原错读取、child/precall和5个not-executed阶段。
+- 最新同例仍0/1：新增断言把review以外的合法child precall checkpoints误当标准结束checkpoint；physicalclose断言尚未到达。不得称GREEN，原green.log文件名不代表PASS。r383最终仅未来意向、exit0不算完成，Root已拒收；原RED和两次后续失败fixtures保留。
+- r384 fresh GCM复用原WIP树续修，仅准确约束原checkpoint断言、核实CLI实际lease/driver-owned关闭证据路径，并保留Runtime真正不同的后续错误；不新增case/matrix，不用release/blocked证明物理关闭。缺实际close observation seam则带具体证据停止，不伪造receipt。完整goal/父cleanup仍OPEN，未Review/main/install；UX peer工作继续独立推进。
+
 ## 2026-10-17 父级失败收拢：真实原因已捕获，修复计划待纠正
 
 - r376 同一公开失败用例已捕获两个真实 inner error：save 为 `execution-composition.owner-source-missing` / `native close has no drained frozen standard-end input`；close 为 Provider active executions 尚需 settlement/recovery。诊断代码已移除，App 重建0，本侧唯一 `native-parent-cleanup-20261017` 树 clean；无诊断产品修改进入 main。
