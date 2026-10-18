@@ -51,6 +51,7 @@ import {
   resolveCurrentPlanRevision,
   renderTaskPlanCurrentSection,
   renderTaskPlanSemanticView,
+  renderTaskDescriptionContent,
   unavailableModeFailure,
 } from './task-display.js'
 import {
@@ -2151,10 +2152,7 @@ function renderDashboard() {
   fullBrief.type = 'button'
   fullBrief.addEventListener('click', () => openTechnicalDetail({
     title: '任务说明',
-    entries: [
-      ['任务说明', dashboard.taskTitle],
-      ['任务输入', dashboard.input || '尚未输入'],
-    ],
+    content: renderTaskDescriptionContent({ input: dashboard.input }),
   }))
   titleBlock.append(fullBrief)
   copy.append(element('p', '当前任务', 'eyebrow'), titleBlock)
@@ -2233,6 +2231,9 @@ function renderDashboard() {
       ['checkpoint.outcome', dashboard.checkpoint?.outcome],
       ['checkpoint.seq', dashboard.checkpoint?.seq],
       ['checkpoint.summary', dashboard.checkpoint?.summary],
+      ['任务输入', dashboard.input === undefined || dashboard.input === null || dashboard.input === ''
+        ? '尚未输入'
+        : dashboard.input],
     ].filter(([, value]) => value !== undefined && value !== null),
   }))
   main.append(technicalDetail)
