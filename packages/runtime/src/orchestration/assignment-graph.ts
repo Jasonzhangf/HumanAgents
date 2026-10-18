@@ -576,6 +576,66 @@ export class AssignmentGraph {
     return cloneRecord(updated);
   }
 
+  /**
+   * Bind one hydrated cold-resumed assignment to the real acquired execution.
+   * The Manager validates the committed segment source; this draft mutation
+   * only installs that binding without resetting business history or status.
+   */
+  resumeBinding(
+    key: AssignmentKey,
+    agentId: string,
+    runtimeBinding: AssignmentRuntimeBinding,
+  ): AssignmentRecord {
+    const record = this.requireRecord(key);
+    if (record.status !== 'planned' && record.status !== 'assigned' && record.status !== 'running') {
+      throw new AssignmentGraphError('assignment resume binding requires a pre-terminal record', {
+        ownerId: record.ownerId,
+        reason: 'assignment.resume-binding.status',
+        nextAction: { kind: 'recover', ref: `assignment.${record.assignment.assignmentId}` },
+        evidenceRefs: record.evidenceRefs,
+      });
+    }
+    if (record.result !== undefined || record.reviewResults.length > 0) {
+      throw new AssignmentGraphError('assignment resume binding cannot replace accepted history', {
+        ownerId: record.ownerId,
+        reason: 'assignment.resume-binding.history',
+        nextAction: { kind: 'recover', ref: `assignment.${record.assignment.assignmentId}` },
+        evidenceRefs: record.evidenceRefs,
+      });
+    }
+    if (!agentId.trim()) {
+      throw new AssignmentGraphError('assignment resume binding agent is required', {
+        ownerId: record.ownerId,
+        reason: 'assignment.agent.required',
+        nextAction: { kind: 'recover', ref: `assignment.${record.assignment.assignmentId}` },
+        evidenceRefs: record.evidenceRefs,
+      });
+    }
+    if (record.agentId && record.agentId !== agentId) {
+      throw new AssignmentGraphError('assignment resume binding cannot replace the bound agent', {
+        ownerId: record.ownerId,
+        reason: 'assignment.agent.fenced',
+        nextAction: { kind: 'recover', ref: `assignment.${record.assignment.assignmentId}` },
+        evidenceRefs: record.evidenceRefs,
+      });
+    }
+    if (runtimeBinding.assignmentId !== record.assignment.assignmentId) {
+      throw new AssignmentGraphError('assignment resume binding does not match its work assignment', {
+        ownerId: record.ownerId,
+        reason: 'assignment.runtime.assignment',
+        nextAction: { kind: 'recover', ref: `assignment.${record.assignment.assignmentId}` },
+        evidenceRefs: record.evidenceRefs,
+      });
+    }
+    const updated: AssignmentRecord = {
+      ...record,
+      agentId,
+      runtimeBinding: { ...runtimeBinding },
+    };
+    this.assignments.set(assignmentKey(key), updated);
+    return cloneRecord(updated);
+  }
+
   acceptResult(key: AssignmentKey, input: AssignmentResultInput): AssignmentResultAcceptance {
     const record = this.assignments.get(assignmentKey(key));
     const ownerId = input.ownerId ?? record?.ownerId ?? this.ownerId;
@@ -997,10 +1057,22 @@ export class AssignmentGraph {
     if (change.action === 'resume-binding') {
       const stageUnchanged = JSON.stringify(existingStage) === JSON.stringify(change.stage);
       const recordHistoryUnchanged = existing.status === change.assignment.status
-        && existing.agentId === change.assignment.agentId
         && JSON.stringify(existing.result) === JSON.stringify(change.assignment.result)
-        && JSON.stringify(existing.reviewResults) === JSON.stringify(change.assignment.reviewResults);
-      if (!stageUnchanged || !recordHistoryUnchanged || !change.assignment.runtimeBinding) {
+        && JSON.stringify(existing.reviewResults) === JSON.stringify(change.assignment.reviewResults)
+        && existing.reason === change.assignment.reason
+        && JSON.stringify(existing.nextAction) === JSON.stringify(change.assignment.nextAction)
+        && JSON.stringify(existing.evidenceRefs) === JSON.stringify(change.assignment.evidenceRefs);
+      const agentUnchangedOrFirstBound = existing.agentId === change.assignment.agentId
+        || (existing.agentId === undefined
+          && change.assignment.agentId !== undefined
+          && change.assignment.agentId.trim().length > 0);
+      if (
+        !stageUnchanged
+        || !recordHistoryUnchanged
+        || !agentUnchangedOrFirstBound
+        || !change.assignment.runtimeBinding
+        || change.assignment.runtimeBinding.assignmentId !== change.assignment.assignment.assignmentId
+      ) {
         throw new AssignmentGraphError('committed resume binding changed assignment history', {
           ownerId: this.ownerId,
           reason: 'assignment.resume-binding.conflict',
