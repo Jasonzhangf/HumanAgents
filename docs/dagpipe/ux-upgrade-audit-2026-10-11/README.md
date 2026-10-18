@@ -237,7 +237,7 @@ classDef evidence fill:#f1f5f9,stroke:#64748b,color:#334155;
 - [权威 UX 需求](../../ui/semantic-observation-audit-2026-10-07.md)
 - [项目 owner 规则](../../../AGENTS.md)
 
-本图册只修正文档表达。后台错误消费、三模板、revision 历史、多视角、偏好与 checkpoint 产品查询等黄色边仍是待实现/待证实设计，不能当作已落地能力。
+本图册只修正文档表达。后台错误消费、三模板、revision 历史、多视角与 checkpoint 产品查询等黄色边仍是待实现/待证实设计，不能当作已落地能力。展示偏好的持久边已在图 12 落地：`packages/config` 的 `[ui.display]` 存 `<controlRoot>/config.toml`，`packages/app` 暴露 `/api/ui/display-preference` 的 GET/PUT/DELETE，共享控制器挂载在 task-dashboard 与 observation 两个表面；整体事件与共享消费者边、其他共享壳页面接入仍未闭合。
 
 
 

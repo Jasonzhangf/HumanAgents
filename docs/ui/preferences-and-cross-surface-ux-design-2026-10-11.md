@@ -1,6 +1,6 @@
 # HumanAgent 偏好与跨表面体验设计
 
-状态：`DESIGN-CANDIDATE`。这是后续 UI/config 与共享 UI owner 的设计合同；不表示生产偏好存储、跨表面引用共享或无障碍行为已经实现或验收。
+状态：`DESIGN-CANDIDATE`。这是后续 UI/config 与共享 UI owner 的设计合同；不表示跨表面引用共享或无障碍行为已经实现或验收。展示偏好的生产存储已于 2026-10-18 核对落地，见「现状证据与未验收设计」。
 
 ## 目标与边界
 
@@ -22,7 +22,7 @@ Dashboard、Task Detail、Organ Console、Pipeline Observation 应让用户在�
 
 上述字段只作为拟议 allowlist，不预设未定义的筛选维度。自由文本搜索、临时排序、当前打开的 drawer、滚动位置及任何业务对象选择都不进入持久偏好。只有用户显式保存默认模式/列表范围时写入设置；筛选控件是否即时应用不等同于保存默认值。`follow-last` 仅在用户直接手动选中四种模式之一且呈现切换成功后更新；页面初始化、SSE 更新、Tour、程序导航、显式链接回放、历史证据跳转不得更新。
 
-偏好存放在 `~/.humanagent` 管理的用户级设置中，由 `packages/config` 提供 typed 合同及路径派生；UI 不读写 project workspace，不自行解析 TOML，也不直接拥有存储格式。浏览器 `localStorage` 只能用于隔离原型，不能证明生产交付。存储读取/解析失败时本次会话使用冷启动值并显示局部状态；保存/删除失败应保留当前视图、报告未保存，不能显示成功。未知版本或字段不能被静默覆盖；Reset 只删除本功能声明的偏好记录。
+偏好存放在 `~/.humanagent` 管理的用户级设置中，由 `packages/config` 提供 typed 合同及路径派生；UI 不读写 project workspace，不自行解析 TOML，也不直接拥有存储格式。浏览器 `localStorage` 只能用于隔离原型，不能证明生产交付。存储读取/解析失败时本次会话使用冷启动值并显示局部状态；保存/删除失败应保留当前视图、报告未保存，不能显示成功。未知版本或字段不能被静默覆盖；Reset 只删除本功能声明的偏好记录。生产已落地的字段是 `[ui.display]` 的 `mode` 与 `lastManual`（`schemaVersion: 1`），经 `packages/config` 写入 `<controlRoot>/config.toml` 并由 `/api/ui/display-preference` 读写；上表其余字段仍是设计提议，尚未进入生产 allowlist。
 
 偏好中禁止出现 task、project、organ/agent/instance、scopeRef/路径、revision、checkpoint、cycle、occurrence、action/raw 记录、projection/payload、URL/route、凭据或控制状态。Task List 的 `current|decision|history|all` 是有限的列表展示范围；Pipeline 内的 project/task/organ/agent/scope 是业务身份与导航目标，不是可保存偏好。
 
@@ -71,8 +71,8 @@ Observation 仅允许读取、展开证据、筛选与导航。偏好操作不�
 | 产品与安全约束 | `AGENTS.md` 唯一 owner/硬约束；`interaction-audit` F09/F10、§4.1/§8；`semantic-observation-audit` §1、G5/G8/G10–G12、§8 | 文档目标与验收合同，不表示生产闭环 |
 | typed Observation scope | [`models.ts`](../../packages/ui/contracts/models.ts#L390) 有 `scopeRef`、`projectionSeq`、nodes、breadcrumbs、`canReturn`；[`projection/index.ts`](../../packages/ui/projection/index.ts#L947) 按当前 stack 投影 scope，进入/返回 scope 与打开/关闭 drawer 产生新输入值 | 已有类型与纯投影函数；跨表面共享引用、订阅隔离及真实 UI 生命周期仍待验收 |
 | command 边界 | [`commands.ts`](../../packages/ui/contracts/commands.ts#L77) 将 Observation 限定为 drawer/scope/focus 命令；校验器拒绝非只读 Observation 命令 | 命令类型/校验存在；不能据此声称所有浏览器入口的实际调用均已通过 |
-| 真实 UI 读取 | [`runtime-shell.js`](../../docs/ui/runtime-shell.js#L660) 的语义面板持有 envelope、mode、scope selection；注释明确仅读，GET/SSE 新 revision 更新本地投影，断连/读取错误标 stale/error | 单面板路径有源码依据；不是四表面共享同一引用或持久偏好的证明 |
-| 持久偏好 | semantic audit §1 已规定模式优先级、follow-last、只保存版本化展示字段；§8.2 提出只读共享引用 | 本文细化默认、过滤与跨表面行为；生产 typed config、读写/错误恢复、跨页面消费和数据不变性仍未验收。Tour/localStorage 只算 mock |
+| 真实 UI 读取 | [`runtime-shell.js`](../../docs/ui/runtime-shell.js#L660) 的语义面板持有 envelope、mode、scope selection；注释明确仅读，GET/SSE 新 revision 更新本地投影，断连/读取错误标 stale/error | 单面板路径有源码依据；不是四表面共享同一引用的证明；持久偏好已有独立生产链路，见下行 |
+| 持久偏好 | `packages/config` 的 typed `[ui.display]` 写入 `<controlRoot>/config.toml`（`ui-preferences.ts` / `ui-preference-store.ts`）；`packages/app` 挂载 `/api/ui/display-preference` 的 GET/PUT/DELETE（`ui-runtime/display-preferences.ts`）；`docs/ui` 共享控制器与 task-dashboard、observation 两个表面接线；follow-last 已通过两页面真实浏览器验收（`native-preference-browser-20261018/reception.md`） | 生产 typed config、HTTP 边界、两表面控制器与 follow-last 跨页面消费已落地；四表面一致消费、引用数据不变性与完整 G10/G11/F16/F17 仍未验收。Tour/localStorage 只算 mock |
 | 无障碍与响应式 | interaction audit F09/F10、§8 明确焦点丢失、spinner reduced-motion 缺口和尚未完成的窄屏/短屏/长轨迹/200% 缩放范围 | 设计要求不等于修复完成；需要在受影响真实表面验证 |
 
 ## 后续验证入口
