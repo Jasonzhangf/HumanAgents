@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
@@ -293,7 +293,6 @@ async function run() {
             admissionEvidenceRefs: [], currentTurnRef: `fixture-current-${runId}`, recoveryStateRef: `fixture-recovery-${runId}` },
           assignment: { assignmentId, taskId, pipelineNodeId: 'provider-proof', attempt: 1, executionEpoch: 1,
             inputRevision: 1, objective: receipt.request.prompt, targetRefs: [], expectedOutputRefs: [],
-            acceptanceCriteriaDigest: `sha256:${createHash('sha256').update(receipt.request.prompt).digest('hex')}`,
             successCriteria: ['two ordinary requests in one turn'], failureCriteria: ['request failure'],
             incompleteCriteria: ['unreleased resource'], requiredCapabilities: [], mergeGate: 'not-required' },
         } });

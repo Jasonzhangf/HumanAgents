@@ -89,7 +89,6 @@ test('inspect delivery binds the raw report when an inspect result has no primar
     objective: 'inspect and present the project material',
     targetRefs: [],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'inspect-report-acceptance',
     successCriteria: [],
     failureCriteria: [],
     incompleteCriteria: [],
@@ -168,7 +167,6 @@ test('inspect delivery binds the raw report when an inspect result has no primar
 
   const binding = bindAssignmentDelivery({ assignment, readback });
   assert.deepEqual(binding.producedArtifactRefs, [rawReportLocator]);
-  assert.deepEqual(binding.producedArtifactDigests, [reportDigest]);
   assert.deepEqual(binding.producedArtifactBodies, [reportText]);
   assert.deepEqual(binding.outputRefs, [rawReportLocator]);
 

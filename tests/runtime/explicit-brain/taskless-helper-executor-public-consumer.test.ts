@@ -78,8 +78,6 @@ const assignment: InteractionHelperAssignment = {
   objective: 'Return the bounded helper conclusion',
   targetRefs: ['interaction://interaction-taskless'],
   expectedOutputRefs: ['output://helper-taskless'],
-  expectedArtifactDigests: ['sha256:helper-taskless'],
-  acceptanceCriteriaDigest: 'sha256:criteria-taskless',
   successCriteria: ['Return the bounded conclusion'],
   failureCriteria: ['Return no conclusion'],
   incompleteCriteria: ['Return a partial conclusion'],
@@ -258,7 +256,6 @@ test('taskless helper execution keeps dispatch, return and owner acceptance sepa
         return {
           agentId: 'agent-taskless-helper',
           producedArtifactRefs: ['artifact://helper-taskless'],
-          producedArtifactDigests: ['sha256:helper-taskless'],
           status: 'succeeded',
           summary: 'The bounded taskless helper conclusion',
           outputRefs: output.outputRefs,
@@ -281,7 +278,6 @@ test('taskless helper execution keeps dispatch, return and owner acceptance sepa
       conclude: () => ({
         agentId: 'agent-taskless-helper-second',
         producedArtifactRefs: [],
-        producedArtifactDigests: [],
         status: 'incomplete',
         summary: 'A distinct partial result requires more evidence',
         outputRefs: [],
@@ -479,7 +475,6 @@ test('owner acceptance accepts a durable returned conclusion and keeps its real 
       conclude: () => ({
         agentId: 'agent-taskless-helper',
         producedArtifactRefs: [],
-        producedArtifactDigests: [],
         status: 'failed',
         summary: 'The bounded taskless helper conclusion failed',
         outputRefs: [],
@@ -549,7 +544,6 @@ test('owner acceptance without an append is refused, and a fabricated result can
       conclude: () => ({
         agentId: 'agent-taskless-helper',
         producedArtifactRefs: [],
-        producedArtifactDigests: [],
         status: 'incomplete',
         summary: 'The bounded taskless helper conclusion is partial',
         outputRefs: [],
@@ -636,7 +630,6 @@ const sessionInputRevision = 7;
 const sessionTurnId = 'turn-explicit-turn-session';
 const parentTranscriptSentinel = 'parent-transcript-sentinel-session';
 const reviewOutputRef = 'output://explicit-turn-session-review';
-const reviewDigest = `sha256:${'e'.repeat(64)}`;
 const sessionClockBase = Date.parse('2026-10-15T00:00:00.000Z');
 const sessionSettleAdvanceMillis = 30_000;
 
@@ -831,7 +824,6 @@ function sessionIncompleteConclude(agentId: string): SessionConclude {
   return () => ({
     agentId,
     producedArtifactRefs: [],
-    producedArtifactDigests: [],
     status: 'incomplete',
     summary: 'bounded helper returned a partial conclusion',
     outputRefs: [],
@@ -845,7 +837,6 @@ function sessionSucceededConclude(agentId: string): SessionConclude {
   return () => ({
     agentId,
     producedArtifactRefs: [`artifact://${agentId}`],
-    producedArtifactDigests: [reviewDigest],
     status: 'succeeded',
     summary: 'bounded helper returned a complete conclusion',
     outputRefs: [reviewOutputRef],
@@ -904,7 +895,6 @@ test('explicit turn helper session dispatches two independent helpers and accept
       objective: 'Explore the bounded question',
       targetRefs: ['interaction://explicit-turn-session-a'],
       expectedOutputRefs: [],
-      acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`,
       successCriteria: ['Return a complete conclusion'],
       failureCriteria: ['Return no conclusion'],
       incompleteCriteria: ['Return a partial conclusion'],
@@ -915,8 +905,6 @@ test('explicit turn helper session dispatches two independent helpers and accept
       objective: 'Review the bounded artifact',
       targetRefs: ['interaction://explicit-turn-session-b'],
       expectedOutputRefs: [reviewOutputRef],
-      expectedArtifactDigests: [reviewDigest],
-      acceptanceCriteriaDigest: `sha256:${'b'.repeat(64)}`,
       successCriteria: ['Return a complete review'],
       failureCriteria: ['Return no review'],
       incompleteCriteria: ['Return a partial review'],
@@ -1135,8 +1123,6 @@ test('cold-recovered explicit turn helper session accepts a durable returned hel
       objective: 'Return a result that survives to the recovered owner',
       targetRefs: ['interaction://explicit-turn-session-recovered-accept'],
       expectedOutputRefs: [reviewOutputRef],
-      expectedArtifactDigests: [reviewDigest],
-      acceptanceCriteriaDigest: `sha256:${'9'.repeat(64)}`,
       successCriteria: ['Return a complete conclusion'],
       failureCriteria: ['Return no conclusion'],
       incompleteCriteria: ['Return a partial conclusion'],
@@ -1242,8 +1228,6 @@ test('cold-recovered explicit turn helper session restores helper ordinals beyon
       objective: 'Return a bounded conclusion before recovery',
       targetRefs: ['interaction://explicit-turn-session-recovered-ordinal'],
       expectedOutputRefs: [reviewOutputRef],
-      expectedArtifactDigests: [reviewDigest],
-      acceptanceCriteriaDigest: `sha256:${'c'.repeat(64)}`,
       successCriteria: ['Return a complete conclusion'],
       failureCriteria: ['Return no conclusion'],
       incompleteCriteria: ['Return a partial conclusion'],
@@ -1377,8 +1361,6 @@ test('a partial call checkpoint stays missing until the real session and writer 
       objective: 'Return a bounded partial-write conclusion',
       targetRefs: ['interaction://explicit-turn-session-partial'],
       expectedOutputRefs: [reviewOutputRef],
-      expectedArtifactDigests: [reviewDigest],
-      acceptanceCriteriaDigest: `sha256:${'d'.repeat(64)}`,
       successCriteria: ['Return a complete conclusion'],
       failureCriteria: ['Return no conclusion'],
       incompleteCriteria: ['Return a partial conclusion'],

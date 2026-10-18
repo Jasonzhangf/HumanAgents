@@ -2709,7 +2709,6 @@ function r1ActiveBinding(): ActiveTurnBinding {
     objective: 'R1 raw persistence fixture',
     targetRefs: [],
     expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'sha256:r1',
     successCriteria: [],
     failureCriteria: [],
     incompleteCriteria: [],
