@@ -2225,7 +2225,7 @@ async function assertRealMemoryAudit(
     assert.equal(persisted.payload['outcome'], curation.outcome);
     assert.equal(persisted.payload['explanation'], curation.explanation);
     assert.ok(curation.explanation.trim().length > 0);
-    assert.deepEqual(persisted.payload['sourceRefs'], curation.sourceRefs);
+    assert.deepEqual(persisted.payload['sourceRefs'], [...curation.sourceRefs]);
     const payload = request.payload as { sourceRefs: string[]; analysisInputs: unknown };
     assert.deepEqual(curation.sourceRefs, payload.sourceRefs);
     assert.deepEqual(payload.analysisInputs, boundary.payload?.['analysisInputs']);

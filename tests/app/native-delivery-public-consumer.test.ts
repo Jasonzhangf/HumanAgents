@@ -3882,9 +3882,9 @@ if (!coldConsumerMode) test('native opened inspection public stop settles the oc
       journalSeq: settlementEntry.journal.seq, recordDigest: settlementEntry.journal.recordDigest };
     const openingRef: JournalCommitRef = { commitId: openingEntry.journal.commitId!,
       journalSeq: openingEntry.journal.seq, recordDigest: openingEntry.journal.recordDigest };
-    assert.deepEqual(requireRecord(settlement.openingCommitRef, 'the settlement opening ref'), openingRef);
+    assert.deepEqual(requireRecord(settlement.openingCommitRef, 'the settlement opening ref'), { ...openingRef });
     assert.deepEqual(requireRecord(settlement.occurrence, 'the settlement occurrence'), occurrence);
-    assert.deepEqual(requireRecord(settlement.checkpointCommitRef, 'the settlement checkpoint ref'), stoppedCheckpointRef);
+    assert.deepEqual(requireRecord(settlement.checkpointCommitRef, 'the settlement checkpoint ref'), { ...stoppedCheckpointRef });
     assert.deepEqual(settlement.itemResultCommitRefs, [{ commitId: itemEntry.journal.commitId!,
       journalSeq: itemEntry.journal.seq, recordDigest: itemEntry.journal.recordDigest }],
     'the settlement retains the accepted check-a commit');
@@ -3893,9 +3893,9 @@ if (!coldConsumerMode) test('native opened inspection public stop settles the oc
       reason: 'inspection stopped after the execution checkpoint; missing checks retain unknown side effects',
     }, 'stop uses the production unknown outcome, not the held parent completion');
     const close = closingEntry.record;
-    assert.deepEqual(requireRecord(close.openedCommitRef, 'the close cycle opening ref'), cycleOpenedCommitRef);
-    assert.deepEqual(requireRecord(close.checkpointCommitRef, 'the close checkpoint ref'), stoppedCheckpointRef);
-    assert.deepEqual(requireRecord(close.inspectionSettlementCommitRef, 'the close settlement ref'), settlementRef);
+    assert.deepEqual(requireRecord(close.openedCommitRef, 'the close cycle opening ref'), { ...cycleOpenedCommitRef });
+    assert.deepEqual(requireRecord(close.checkpointCommitRef, 'the close checkpoint ref'), { ...stoppedCheckpointRef });
+    assert.deepEqual(requireRecord(close.inspectionSettlementCommitRef, 'the close settlement ref'), { ...settlementRef });
     assert.equal(close.outcome, 'stop');
     assert.deepEqual(close.next, { kind: 'stop' });
     assert.equal(settled.items.some((record) => requireRecord(record.delivery,
