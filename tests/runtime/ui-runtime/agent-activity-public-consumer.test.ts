@@ -12,6 +12,8 @@ import {
   type ProviderExecutionIdentityRef,
   type ReviewAssignment,
   type ScopeRef,
+  type TaskActualExecutionActiveTurnNode,
+  type TaskActualExecutionClosedTurnPlannerNode,
   type TaskExecutionInstanceIdentity,
   type TaskAgentActivityOwnershipRecord,
   type TaskId,
@@ -28,6 +30,7 @@ import { validateResumedTurnSegmentOpened } from '../../../packages/contracts/sr
 import { validateJournalCommitRef } from '../../../packages/contracts/src/i2-history.js';
 import {
   selectTaskAgentActivity,
+  selectTaskActualExecutionGraph,
   type AgentActivityActiveSource,
   type AgentActivityChildSource,
   type AgentActivityCurrentAuthority,
@@ -36,6 +39,7 @@ import {
   type AgentActivityPoolSource,
   type AgentActivityReviewSource,
   type AgentActivityResumedSource,
+  type SelectTaskActualExecutionGraphInput,
   type SelectTaskAgentActivityInput,
 } from '../../../packages/runtime/src/index.js';
 import type {
@@ -626,6 +630,68 @@ function plannerInput(
   };
 }
 
+// A real parent active-turn node for the Planner's closed turn. Its admitted
+// identity and scope must match plannerClosure exactly for the planner-duty
+// edge to be proven.
+const plannerParentBindingCommit = commit('commit-planner-parent', 37);
+const plannerParentAssignment = workAssignment('assignment-active', {
+  pipelineNodeId: 'node-implement',
+  attempt: 1,
+  executionEpoch: plannerClosure.identity.executionEpoch,
+  objective: 'deliver the closed turn',
+});
+const plannerParentSource: AgentActivityActiveSource = {
+  sourceId: 'active-turn-planner-parent',
+  ownerId: 'runtime-active-turn',
+  commitRefs: [],
+  evidenceRefs: [evidenceRef('evidence-planner-parent')],
+  boundLive: undefined,
+  terminalCommitRefs: [],
+  binding: {
+    admittedTurn: {
+      turnId: plannerClosure.identity.turnId,
+      workAssignmentRef: plannerClosure.identity.workAssignmentRef,
+      taskRef: TASK,
+      scopeRef: plannerClosureScope,
+      cycleRef: CYCLE,
+      inputRevision: plannerClosure.identity.inputRevision,
+      directiveRevision: plannerClosure.identity.directiveRevision,
+      executionEpoch: plannerClosure.identity.executionEpoch,
+      runtimeBindingRef: plannerClosure.identity.runtimeBindingRef,
+      permissionRevision: plannerClosure.identity.permissionRevision,
+      admissionEvidenceRefs: [],
+      currentTurnRef: plannerClosure.identity.turnId,
+      recoveryStateRef: 'recovery-planner-parent',
+    },
+    assignment: plannerParentAssignment,
+    execution: {
+      runtimeId: 'native-runtime-planner-parent',
+      executionEpoch: plannerClosure.identity.executionEpoch,
+    },
+    scope: plannerClosureScope,
+  },
+  bindingCommitRef: plannerParentBindingCommit,
+};
+
+const plannerBusinessClosureCommit = commit('commit-planner-business-closure', 38);
+
+function plannerGraphInput(
+  businessClosures: readonly { readonly closure: TurnClosureReference; readonly commitRef: JournalCommitRef }[],
+): SelectTaskActualExecutionGraphInput {
+  return {
+    taskScope: TASK_SCOPE,
+    nativeAllocations: [],
+    activeTurns: [plannerParentSource],
+    resumedSegments: [],
+    rawChildInvocations: [],
+    childDeliveries: [],
+    businessClosures,
+    milestoneReviews: [],
+    plannerCalls: [plannerSource({ closure: undefined })],
+    unavailableSources: [],
+  };
+}
+
 // Only the real live handles are authoritative current locations.
 const authority: AgentActivityCurrentAuthority = {
   taskId: TASK,
@@ -1003,4 +1069,72 @@ test('a closed-turn planner call keeps pending, returned, live and forged termin
   if (forged.ok) return;
   assert.equal(forged.failure.code, 'agent-activity.source-conflict');
   assert.equal(forged.failure.ownerId, SELECTOR_OWNER_ID);
+});
+
+test('the actual graph groups a Planner duty through its exact supplied business closure', () => {
+  // The Planner source has no `closure`; only input.businessClosures carries
+  // the exact committed turn closure, exactly as the real App decoder supplies.
+  const snapshot = selectTaskActualExecutionGraph(plannerGraphInput([
+    { closure: plannerClosure, commitRef: plannerBusinessClosureCommit },
+  ]));
+  assert.equal(snapshot.history.status, 'recorded');
+  if (snapshot.history.status !== 'recorded') return;
+
+  const plannerNode = snapshot.history.nodes.find(
+    (node): node is TaskActualExecutionClosedTurnPlannerNode => node.kind === 'closed-turn-planner-call',
+  );
+  if (plannerNode === undefined) throw new Error('planner node missing');
+  assert.equal(plannerNode.businessTurnId, 'turn-2');
+  assert.equal(plannerNode.closureRef, 'closure-turn-2');
+  assert.equal(plannerNode.closureCommitRef?.commitId, plannerBusinessClosureCommit.commitId);
+
+  const parentNode = snapshot.history.nodes.find(
+    (node): node is TaskActualExecutionActiveTurnNode => node.kind === 'active-turn',
+  );
+  if (parentNode === undefined) throw new Error('planner parent active-turn node missing');
+  assert.equal(
+    snapshot.history.edges.some((edge) =>
+      edge.kind === 'planner-duty'
+      && edge.fromNodeId === parentNode.nodeId
+      && edge.toNodeId === plannerNode.nodeId),
+    true,
+    'the exact closure plus real parent node must produce a planner-duty edge',
+  );
+  assert.equal(
+    snapshot.history.ungrouped.some((entry) =>
+      entry.kind === 'planner-duty' && entry.nodeId === plannerNode.nodeId),
+    false,
+  );
+
+  // A missing exact closure stays ungrouped with no guessed lineage.
+  const missing = selectTaskActualExecutionGraph(plannerGraphInput([]));
+  assert.equal(missing.history.status, 'recorded');
+  if (missing.history.status === 'recorded') {
+    const ungroupedPlanner = missing.history.nodes.find(
+      (node): node is TaskActualExecutionClosedTurnPlannerNode => node.kind === 'closed-turn-planner-call',
+    );
+    if (ungroupedPlanner === undefined) throw new Error('ungrouped planner node missing');
+    assert.equal(ungroupedPlanner.businessTurnId, undefined);
+    assert.equal(ungroupedPlanner.closureCommitRef, undefined);
+    assert.equal(missing.history.edges.some((edge) => edge.kind === 'planner-duty'), false);
+    assert.equal(
+      missing.history.ungrouped.some((entry) =>
+        entry.kind === 'planner-duty' && entry.nodeId === ungroupedPlanner.nodeId),
+      true,
+    );
+  }
+
+  // Two exact candidates are ambiguous and must not be guessed.
+  const ambiguous = selectTaskActualExecutionGraph(plannerGraphInput([
+    { closure: plannerClosure, commitRef: plannerBusinessClosureCommit },
+    { closure: plannerClosure, commitRef: commit('commit-planner-business-closure-2', 39) },
+  ]));
+  assert.equal(ambiguous.history.status, 'recorded');
+  if (ambiguous.history.status === 'recorded') {
+    assert.equal(ambiguous.history.edges.some((edge) => edge.kind === 'planner-duty'), false);
+    assert.equal(
+      ambiguous.history.ungrouped.some((entry) => entry.kind === 'planner-duty'),
+      true,
+    );
+  }
 });
