@@ -8,7 +8,6 @@ import type {
   TaskFlowKind,
   WorkResult,
 } from '@humanagent/contracts';
-import { UiProjectionError } from '../contracts/models.js';
 import type {
   TaskActualExecutionGraphHistoryProjection,
   TaskActualExecutionGraphProjection,
@@ -85,70 +84,14 @@ const PIPELINE_ROLE_LABELS: Readonly<Record<string, string>> = {
   'child.review': '子任务复核',
 };
 
-function fail(message: string): never {
-  throw new UiProjectionError(message);
-}
-
-function requireText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim() === '') fail(`${label} is required`);
-  return value;
-}
-
-function requireArray(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) fail(`${label} must be an array`);
-  return value;
-}
-
-function requireAssignmentStatus(value: unknown, label: string): AssignmentStatus {
-  if (typeof value !== 'string'
-    || !(ASSIGNMENT_STATE_PRESENTATION as Readonly<Record<string, StatePresentation | undefined>>)[value]) {
-    fail(`${label} has an unknown assignment status`);
-  }
-  return value as AssignmentStatus;
-}
-
-function requireResultStatus(value: unknown, label: string): WorkResult['status'] {
-  if (typeof value !== 'string'
-    || !(RESULT_STATUS_LABELS as Readonly<Record<string, string | undefined>>)[value]) {
-    fail(`${label} has an unknown result status`);
-  }
-  return value as WorkResult['status'];
-}
-
-function requireReviewStatus(value: unknown, label: string): TaskActualExecutionReviewProjection['status'] {
-  if (typeof value !== 'string'
-    || !(REVIEW_STATUS_LABELS as Readonly<Record<string, string | undefined>>)[value]) {
-    fail(`${label} has an unknown review status`);
-  }
-  return value as TaskActualExecutionReviewProjection['status'];
-}
-
-function requireNextAction(value: unknown): AssignmentRecord['nextAction']['kind'] {
-  if (typeof value !== 'string'
-    || !(NEXT_ACTION_LABELS as Readonly<Record<string, string | undefined>>)[value]) {
-    fail('assignment next action is unknown');
-  }
-  return value as AssignmentRecord['nextAction']['kind'];
-}
-
-function guidanceKind(kind: unknown): TaskFlowKind {
-  if (typeof kind !== 'string'
-    || !(GUIDANCE_KIND_LABELS as Readonly<Record<string, string | undefined>>)[kind]) {
-    fail('task-flow guidance has an unknown kind');
-  }
-  return kind as TaskFlowKind;
-}
-
 function projectGuidance(guidance: TaskFlowGuidance): TaskActualExecutionGuidanceProjection {
-  const kind = guidanceKind(guidance.kind);
-  const displayGroups = requireArray(guidance.displayGroups, 'guidance displayGroups')
-    .map((group) => requireText(group, 'guidance display group'));
+  const kind = guidance.kind;
   return {
     kind,
     kindLabel: GUIDANCE_KIND_LABELS[kind],
-    aim: requireText(guidance.aim, 'guidance aim'),
-    selectionGuidance: requireText(guidance.selectionGuidance, 'guidance selectionGuidance'),
-    displayGroups: displayGroups.map((group) => DISPLAY_GROUP_LABELS[group] ?? group),
+    aim: guidance.aim,
+    selectionGuidance: guidance.selectionGuidance,
+    displayGroups: guidance.displayGroups.map((group) => DISPLAY_GROUP_LABELS[group] ?? group),
   };
 }
 
@@ -157,51 +100,43 @@ function roleLabel(pipelineNodeId: string): string {
 }
 
 function projectResult(result: WorkResult): TaskActualExecutionMemberProjection['result'] {
-  const status = requireResultStatus(result.status, 'assignment result');
+  const status = result.status;
   return {
     status,
     statusLabel: RESULT_STATUS_LABELS[status],
-    summary: requireText(result.summary, 'assignment result summary'),
+    summary: result.summary,
   };
 }
 
 function projectReviews(record: AssignmentRecord): readonly TaskActualExecutionReviewProjection[] {
-  return requireArray(record.reviewResults, 'assignment reviewResults').map((entry, index) => {
-    if (!entry || typeof entry !== 'object') fail(`assignment review result ${index + 1} is invalid`);
-    const review = entry as { readonly status?: unknown; readonly findings?: unknown };
-    const status = requireReviewStatus(review.status, `assignment review result ${index + 1}`);
-    const findings = requireArray(review.findings, `assignment review result ${index + 1} findings`);
-    return {
-      status,
-      statusLabel: REVIEW_STATUS_LABELS[status],
-      findingCount: findings.length,
-    };
-  });
+  return record.reviewResults.map((review) => ({
+    status: review.status,
+    statusLabel: REVIEW_STATUS_LABELS[review.status],
+    findingCount: review.findings.length,
+  }));
 }
 
 function projectMember(record: AssignmentRecord): TaskActualExecutionMemberProjection {
-  const status = requireAssignmentStatus(record.status, 'assignment');
+  const status = record.status;
   const presentation = ASSIGNMENT_STATE_PRESENTATION[status];
   const assignment = record.assignment;
-  if (!assignment || typeof assignment !== 'object') fail('assignment record has no WorkAssignment');
   const key = record.key;
-  if (!key || typeof key !== 'object') fail('assignment record has no key');
-  const nextAction = requireNextAction(record.nextAction?.kind);
   return {
-    roleLabel: roleLabel(requireText(assignment.pipelineNodeId, 'assignment pipelineNodeId')),
-    objective: requireText(assignment.objective, 'assignment objective'),
+    roleLabel: roleLabel(assignment.pipelineNodeId),
+    objective: assignment.objective,
     status,
     statusLabel: presentation.label,
     statusTone: presentation.tone,
     ...(record.result === undefined ? {} : { result: projectResult(record.result) }),
     reviews: projectReviews(record),
-    reason: typeof record.reason === 'string' ? record.reason : '',
-    nextActionLabel: NEXT_ACTION_LABELS[nextAction],
+    reason: record.reason,
+    nextActionKind: record.nextAction.kind,
+    nextActionLabel: NEXT_ACTION_LABELS[record.nextAction.kind],
     technical: {
-      assignmentId: requireText(key.assignmentId, 'assignment key id'),
+      assignmentId: key.assignmentId,
       attempt: key.attempt,
       executionEpoch: key.executionEpoch,
-      pipelineNodeId: requireText(assignment.pipelineNodeId, 'assignment pipelineNodeId'),
+      pipelineNodeId: assignment.pipelineNodeId,
       ...(record.agentId === undefined ? {} : { agentId: record.agentId }),
       evidenceRefs: record.evidenceRefs,
     },
@@ -225,15 +160,11 @@ function projectStage(
   stageLabels: ReadonlyMap<string, string>,
   records: readonly AssignmentRecord[],
 ): TaskActualExecutionStageProjection {
-  const state = requireAssignmentStatus(stage.state, 'stage');
+  const state = stage.state;
   const presentation = ASSIGNMENT_STATE_PRESENTATION[state];
-  const assignmentKeys = requireArray(stage.assignmentKeys, 'stage assignmentKeys')
-    .map((key) => requireText(key, 'stage assignment key'));
-  if (assignmentKeys.length !== records.length) {
-    fail(`stage ${stage.nodeId} assignment key count does not match its recorded members`);
-  }
+  const assignmentKeys = stage.assignmentKeys;
   return {
-    stageNodeId: requireText(stage.nodeId, 'stage node id'),
+    stageNodeId: stage.nodeId,
     label: `阶段 ${stageIndex + 1}`,
     state,
     stateLabel: presentation.label,
@@ -251,39 +182,15 @@ function projectStream(
   source: RecordedAssignmentGraphStream,
   streamIndex: number,
 ): TaskActualExecutionStreamProjection {
-  const ownerId = requireText(source.stream.ownerId, 'assignment graph stream owner');
-  const stages = requireArray(source.snapshot.stages, 'assignment graph stages');
-  const assignments = requireArray(source.snapshot.assignments, 'assignment graph assignments');
-  if (stages.length === 0) fail(`assignment graph stream ${ownerId} has no recorded stages`);
-
-  const stageLabels = new Map<string, string>();
-  for (const [index, value] of stages.entries()) {
-    if (!value || typeof value !== 'object') fail(`assignment graph stage ${index + 1} is invalid`);
-    const stage = value as { readonly nodeId?: unknown; readonly taskId?: { readonly value?: unknown } };
-    const stageNodeId = requireText(stage.nodeId, `assignment graph stage ${index + 1} node id`);
-    if (stageLabels.has(stageNodeId)) fail(`assignment graph has duplicate stage ${stageNodeId}`);
-    if (stage.taskId?.value !== source.stream.taskScope.taskId.value) {
-      fail(`assignment graph stage ${stageNodeId} belongs to another task`);
-    }
-    stageLabels.set(stageNodeId, `阶段 ${index + 1}`);
-  }
+  const ownerId = source.stream.ownerId;
+  const stages = source.snapshot.stages;
+  const assignments = source.snapshot.assignments;
+  const stageLabels = new Map(
+    stages.map((stage, index) => [stage.nodeId, `阶段 ${index + 1}`]),
+  );
 
   const recordsByStage = new Map<string, AssignmentRecord[]>();
-  const seenKeys = new Set<string>();
-  for (const value of assignments) {
-    if (!value || typeof value !== 'object') fail('assignment graph assignment is invalid');
-    const record = value as AssignmentRecord;
-    const key = record.key;
-    if (!key || typeof key !== 'object') fail('assignment graph assignment has no key');
-    const keyText = `${String(key.assignmentId)}\u0000${String(key.attempt)}\u0000${String(key.executionEpoch)}`;
-    if (seenKeys.has(keyText)) fail('assignment graph has a duplicate assignment key');
-    seenKeys.add(keyText);
-    if (!stageLabels.has(record.stageNodeId)) {
-      fail(`assignment ${key.assignmentId} belongs to an unrecorded stage`);
-    }
-    if (record.assignment?.taskId?.value !== source.stream.taskScope.taskId.value) {
-      fail(`assignment ${key.assignmentId} belongs to another task`);
-    }
+  for (const record of assignments) {
     const group = recordsByStage.get(record.stageNodeId) ?? [];
     group.push(record);
     recordsByStage.set(record.stageNodeId, group);
@@ -291,28 +198,20 @@ function projectStream(
 
   return {
     ownerId,
-    ownerLabel: `责任流 ${streamIndex + 1}`,
-    stages: stages.map((value, index) => {
-      const stage = value as AssignmentStageNode;
-      return projectStage(
-        stage,
-        index,
-        stageLabels,
-        recordsByStage.get(stage.nodeId) ?? [],
-      );
-    }),
+    ownerLabel: `执行分组 ${streamIndex + 1}`,
+    stages: stages.map((stage, index) => projectStage(
+      stage,
+      index,
+      stageLabels,
+      recordsByStage.get(stage.nodeId) ?? [],
+    )),
   };
 }
 
 function projectRecordedHistory(
   source: Extract<TaskActualExecutionGraphSnapshot['history'], { readonly status: 'recorded' }>,
 ): TaskActualExecutionGraphHistoryProjection {
-  const sourceStreams = requireArray(source.streams, 'recorded assignment graph streams');
-  if (sourceStreams.length === 0) fail('recorded assignment graph has no owner streams');
-  const streams = sourceStreams.map((stream, index) => projectStream(
-    stream as RecordedAssignmentGraphStream,
-    index,
-  ));
+  const streams = source.streams.map((stream, index) => projectStream(stream, index));
   const stageCount = streams.reduce((count, stream) => count + stream.stages.length, 0);
   const memberCount = streams.reduce(
     (count, stream) => count + stream.stages.reduce((sum, stage) => sum + stage.members.length, 0),
@@ -320,7 +219,7 @@ function projectRecordedHistory(
   );
   return {
     status: 'recorded',
-    summary: `已记录 ${streams.length} 个责任流、${stageCount} 个阶段和 ${memberCount} 个执行成员。`,
+    summary: `已记录 ${streams.length} 个执行分组、${stageCount} 个阶段和 ${memberCount} 个执行成员。`,
     streamCount: streams.length,
     stageCount,
     memberCount,
@@ -328,36 +227,33 @@ function projectRecordedHistory(
   };
 }
 
+function projectHistory(
+  source: TaskActualExecutionGraphSnapshot['history'],
+): TaskActualExecutionGraphHistoryProjection {
+  switch (source.status) {
+    case 'recorded':
+      return projectRecordedHistory(source);
+    case 'not-recorded':
+      return {
+        status: 'not-recorded',
+        reason: source.reason,
+        label: '实际执行记录缺失',
+        detail: '这段历史没有记录实际执行图事实，不能把计划或固定节点目录当作执行记录。',
+      };
+  }
+}
+
 /**
  * Convert the P1 source snapshot to the one UI view consumed by both formal
- * task-reading surfaces. This function is pure and never derives a stage state,
- * dependency or historical instance from a plan, parent or member status.
+ * task-reading surfaces. The source is typed App output built from verified
+ * Journal records and Runtime replay. This function only maps semantics: it
+ * never revalidates the graph, derives a stage state, dependency or historical
+ * instance from a plan, parent or member status.
  */
 export function projectTaskActualExecutionGraph(
   source: TaskActualExecutionGraphSnapshot,
 ): TaskActualExecutionGraphProjection {
-  if (!source || typeof source !== 'object') fail('actual execution graph source is required');
   const taskScope = source.taskScope;
-  if (!taskScope || typeof taskScope !== 'object') fail('actual execution graph task scope is required');
-  requireText(taskScope.organId?.value, 'actual execution graph organ id');
-  requireText(taskScope.taskId?.value, 'actual execution graph task id');
-
-  const history = source.history;
-  if (!history || typeof history !== 'object') fail('actual execution graph history is required');
-  let projectedHistory: TaskActualExecutionGraphHistoryProjection;
-  if (history.status === 'recorded') {
-    projectedHistory = projectRecordedHistory(history);
-  } else if (history.status === 'not-recorded' && history.reason === 'no-recorded-facts') {
-    projectedHistory = {
-      status: 'not-recorded',
-      reason: 'no-recorded-facts',
-      label: '实际执行记录缺失',
-      detail: '这段历史没有记录实际执行图事实，不能把计划或固定节点目录当作执行记录。',
-    };
-  } else {
-    fail('actual execution graph history status is invalid');
-  }
-
   return {
     surface: 'task-actual-execution-graph',
     taskScope: {
@@ -365,6 +261,6 @@ export function projectTaskActualExecutionGraph(
       taskId: { ...taskScope.taskId },
     },
     ...(source.guidance === undefined ? {} : { guidance: projectGuidance(source.guidance) }),
-    history: projectedHistory,
+    history: projectHistory(source.history),
   };
 }

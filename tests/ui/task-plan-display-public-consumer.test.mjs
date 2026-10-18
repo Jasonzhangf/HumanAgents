@@ -335,7 +335,7 @@ test('actual graph projection preserves owner streams, empty stages, parents and
   assert.equal(graph.history.memberCount, 2)
 
   const [stream] = graph.history.streams
-  assert.equal(stream.ownerLabel, '责任流 1')
+  assert.equal(stream.ownerLabel, '执行分组 1')
   assert.deepEqual(stream.stages.map((stage) => stage.label), ['阶段 1', '阶段 2'])
   assert.equal(stream.stages[0].state, 'succeeded')
   assert.equal(stream.stages[1].state, 'planned')
@@ -365,7 +365,7 @@ test('actual graph renderer keeps guidance separate and shows empty stages and r
   assert.match(text, /上级阶段：阶段 1/)
   assert.match(text, /此阶段已记录，尚无执行成员/)
   assert.match(text, /成员一结果/)
-  assert.match(text, /尚未记录结果/)
+  assert.doesNotMatch(text, /尚未记录结果|成员一已完成|等待外部输入|下一步：继续|动态选择：|展示分组：/)
   assert.doesNotMatch(text, /当前任务计划|Plan v2/)
   assert.doesNotMatch(text, /stage-parent|member-a|member-b|owner-1|pipeline\.execute/)
 })
