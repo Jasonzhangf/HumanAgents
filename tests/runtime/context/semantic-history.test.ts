@@ -217,7 +217,6 @@ const segmentAssignment: WorkAssignment = {
   objective: 'continue the original business turn',
   targetRefs: [],
   expectedOutputRefs: [],
-  acceptanceCriteriaDigest: 'sha256:segment-acceptance',
   successCriteria: ['segment work is accepted'],
   failureCriteria: [],
   incompleteCriteria: [],

@@ -78,7 +78,7 @@ async function v2(segmentId: string, openedCommitRef: JournalCommitRef, authorit
   const assignment: WorkAssignment = {
     assignmentId: admitted.workAssignmentRef, taskId: scope.taskId, pipelineNodeId: 'progress-node', attempt: 1,
     executionEpoch: 1, inputRevision: 1, objective: 'save progress', targetRefs: [], expectedOutputRefs: [],
-    acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: ['saved'], failureCriteria: ['lost'],
+    successCriteria: ['saved'], failureCriteria: ['lost'],
     incompleteCriteria: ['pending'], requiredCapabilities: [], mergeGate: 'not-required',
   };
   const source: NativeSegmentSaveSourceV2 = {

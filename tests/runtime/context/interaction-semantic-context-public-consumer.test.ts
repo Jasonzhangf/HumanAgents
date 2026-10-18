@@ -84,7 +84,6 @@ const helperResult = {
   attempt: 1,
   agentId: 'agent-helper-a',
   producedArtifactRefs: ['artifact://helper-a'],
-  producedArtifactDigests: ['sha256:helper-a'],
   status: 'succeeded' as const,
   summary: 'The bounded helper result',
   outputRefs: ['output://helper-a'],
