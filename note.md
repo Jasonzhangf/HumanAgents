@@ -197,6 +197,14 @@ main 的 contracts/config/App 构建、打包和全局安装通过。正式 rest
 
 安装实例的 agent 历史读取切片已补齐原生返回证据。worker 复用 space14/p1，在真实 epoch 2/3 链接之间完成浏览器后退、前进和键盘刷新；每次实际 URL、HTTP200 selected 投影与页面身份一致。实例选择原位 replaceState，历史条目由合法 URL 导航形成；这不证明选择逐次入栈，也不关闭 checkpoint viewed 的独立验收。Root 已读回执并核对实际 CDP 命令与页面结果。临时 localhost 会话 cookie 已删除，p1/space14 保留；无源码、运行实例或任务修改。完整证据在 `m4-native-history-observation-20261018/reception.md`。
 
-M5 StageA 的真实 App facade→Journal 物理 consumer 已通过，证明纠正和 reentry 的有效 fixture 与持久 owner 可用。实际 HTTP dispatcher 则在 correction POST 返回 404 route.not-found，而预期为200 committed receipt；这是路由缺失红测，不是无权限或 fixture 失败。reentry HTTP 后续断言未到达。Root 读取实际执行日志接收该阶段，不把 worker 未来时终稿算作完成。来源在 `m5-confirmed-http-execute-20261018/events-stage-a-r2.jsonl`、`red.log`；源码保持原 M5 树待继续接线，尚未提交或集成。
+M5 StageA 的真实 App facade→Journal 物理 consumer 已通过，证明纠正和 reentry 的有效 fixture 与持久 owner 可用。实际 HTTP dispatcher 则在 correction POST 返回 404 route.not-found，而预期为200 committed receipt；这是路由缺失红测，不是无权限或 fixture 失败。reentry HTTP 后续断言未到达。Root 读取实际执行日志接收该阶段，不把 worker 未来时终稿算作完成。来源在 `m5-confirmed-http-execute-20261018/events-stage-a-r2.jsonl`、`red.log`；这是后续 M5 交付前的历史阶段，当前完成边界见长程计划的最新增量。
 
-新证据显示局部 typed expected-conflict 可能被 submission 包装抹去，已派独立只读 OAuth 小 Planner 核对最小传播方案；未授权宽泛错误重分类。constraint fidelity GCM 继续拥有 service 确认/dispatch 片段，M5 接线等待该片段释放。peer 独立拥有原 interaction 的一次 typed 恢复窗口，本侧不重启 canonical 干扰它；并发业务写入与只读观测证据按实际时间分开。整体目标仍 ACTIVE/INCOMPLETE。
+新证据显示局部 typed expected-conflict 可能被 submission 包装抹去，已派独立只读 OAuth 小 Planner 核对最小传播方案；未授权宽泛错误重分类。constraint fidelity GCM 继续拥有 service 确认/dispatch 片段，M5 接线等待该片段释放。上述派单为当时过程，不作当前 writer 或现场状态。整体目标仍 ACTIVE/INCOMPLETE。
+
+## 2026-10-18 治理与任务说明交付
+
+本批已集成并推送 main `b4de7ac6`。实际模板、mode/lease、DSH 和 Work/Review owner 与调用方已删除退役包装；必要资产、Journal、权限、正文及引用保障保留。整体 Review 的两条 P1 经有效 RED、唯一 owner 修复和必要独立 finding 复核关闭，原 FAIL 保留。任务说明已按语义分层展示，未知输入和完整原文保全；候选双端及安装后默认打包 UI 手机入口通过。
+
+main 构建、打包、安装完成，正式 restart gen40→41／53007。安装后的原消费者为任务展示10项、review正文8项、真实资产读取1项，均通过；认证状态接口200。临时服务和cookie、本批集成树及已合流分支已清理，仅保留 main 和独立 Observation UX 活动树。完整回执在 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-ux-delivery-20261018/`。
+
+唯一长程计划已同步最新交付和剩余边界。下一项是嵌套 Observation 人读展示；M3 精确浏览器证明、F13 适用边界和原 taskless socket 问题仍按各自证据推进，不新增无依据的测试矩阵。SDK 辅助 verify 的 FreezeRecord 上游缺陷 `8a8c1be` 继续明确保留，不记 PASS。
