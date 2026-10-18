@@ -31,8 +31,10 @@ import type {
   AcceptedExecutionChildDelivery,
   ChildInvocationRecord,
   InspectionExecutionOutcome,
+  PlannerAlignmentReference,
   PublishedTaskPlanRevision,
   TurnCloseSummary,
+  TurnClosureReference,
 } from '../../../packages/contracts/src/index.js';
 import type {
   CommittedCheckpointRecord,
@@ -40,6 +42,7 @@ import type {
   ContextHistoryReadQuery,
   ContextHistoryReadResult,
 } from '../../../packages/runtime/src/checkpoints/ports.js';
+import { turnBoundaryRecordRefs } from '../../../packages/runtime/src/checkpoints/closure.js';
 
 const scope: ScopeRef = {
   organId: id('organ', 'organ-agent-loop'),
@@ -480,6 +483,22 @@ const orchestrationProfile: AgentModeCapabilityProfile = {
 
 function digest(value: unknown): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
+}
+
+function inspectionAlignment(
+  closure: TurnClosureReference,
+  decision: PlannerAlignmentReference['decision'],
+): PlannerAlignmentReference {
+  return {
+    identity: closure.identity,
+    checkpointId: closure.checkpointId,
+    closureRef: closure.closureRef,
+    planRevisionId: `plan-revision:${closure.identity.turnId}`,
+    planRevisionSequence: 1,
+    planContentDigest: digest(closure.identity.turnId),
+    decision,
+    alignedAt: closure.closedAt,
+  };
 }
 
 const checkpointTimeAuthority = {
@@ -1131,9 +1150,9 @@ test('inspection turn boundary consumer shares one occurrence opening and select
   assert.equal(openedOccurrences.size, 1);
 });
 
-test('inspection turn boundary consumer persists checkpoint time when clock changes', async () => {
-  // Failure basis: settlement and cycle close used process-local clock time. Impact: recovery history drifts after restart.
-  // Probability: high for cross-process recovery. Cost: low local execution, low maintenance; uses the existing consumer.
+test('inspection turn boundary consumer closes a completed inspection after the wait barrier and persists checkpoint time', async () => {
+  // Failure basis: checkpoint.wait is treated as the cycle decision. Impact: a completed inspection stays open forever.
+  // Probability: proven by the current boundary. Cost: low local execution; extends the existing consumer.
   const checkpointCommitRef = { commitId: 'checkpoint:inspection-time', journalSeq: 4, recordDigest: digest('checkpoint-time') };
   const settlementCommitRef = { commitId: 'settlement:inspection-time', journalSeq: 5, recordDigest: digest('settlement-time') };
   const closeCommitRef = { commitId: 'close:inspection-time', journalSeq: 6, recordDigest: digest('close-time') };
@@ -1153,10 +1172,22 @@ test('inspection turn boundary consumer persists checkpoint time when clock chan
       summary: 'inspection time',
       recoveryStateRef: { evidenceId: id('evidence', 'inspection-time-recovery'), kind: 'operation', source: 'test', locator: 'checkpoint', scope },
       evidenceRefs: [],
-      next: { kind: 'stop' },
+      next: { kind: 'wait' },
     },
     previous: null,
     commitRef: checkpointCommitRef,
+  } as const;
+  const childEvidence = {
+    evidenceId: id('evidence', 'inspection-time-child'),
+    kind: 'operation',
+    source: 'test',
+    locator: 'inspection-child',
+    scope: {
+      organId: scope.organId,
+      taskId: scope.taskId!,
+      cycleId: scope.cycleId!,
+      operationId: id('operation', 'inspection-time-child'),
+    },
   } as const;
   const closure = {
     identity: {
@@ -1175,12 +1206,22 @@ test('inspection turn boundary consumer persists checkpoint time when clock chan
     closureRef: 'turn-closure:inspection-time',
     summary: {
       goal: { text: 'settle inspection time', evidenceRefs: [] },
-      actions: { text: 'settle after the checkpoint', evidenceRefs: [] },
+      actions: { text: 'settle after the checkpoint', evidenceRefs: [childEvidence] },
       result: { text: 'inspection settled', evidenceRefs: [] },
       expectedNextStep: { text: 'stop', evidenceRefs: [] },
+      inspectionOutcome: { status: 'completed', judgment: 'inspection completed' },
     },
     recoveryStateRef: checkpoint.checkpoint.recoveryStateRef,
     closedAt: '2026-09-30T00:00:00.000Z',
+  } as const;
+  const summaryEvidenceContext = {
+    identity: closure.identity,
+    children: [{
+      evidenceRef: childEvidence,
+      businessRegistrationCommitRef: openingCommitRef,
+      providerRequestId: 'request:inspection-time-child',
+      toolCallId: 'tool:inspection-time-child',
+    }],
   } as const;
   const opening = {
     kind: 'inspection-occurrence-opened',
@@ -1249,20 +1290,25 @@ test('inspection turn boundary consumer persists checkpoint time when clock chan
     logicalTurnId: 'turn-inspection-time',
     closure,
     checkpoint,
-    next: { kind: 'stop' },
+    alignment: inspectionAlignment(closure, 'complete'),
+    summaryEvidenceContext,
     milestoneAlignmentCommitRefs: [],
   });
 
   assert.deepEqual(receipt, { settlementCommitRefs: [settlementCommitRef], cycleClosedCommitRef: closeCommitRef });
   assert.deepEqual(committed.map(({ kind }) => kind), ['inspection-occurrence-settled', 'business-cycle-closed']);
+  const close = committed[1];
+  const alignmentRef = turnBoundaryRecordRefs(closure.identity, closure.checkpointId).alignmentRef;
+  assert.equal(close?.kind === 'business-cycle-closed' && close.next.kind, 'stop');
+  assert.equal(close?.kind === 'business-cycle-closed' && close.next.ref, alignmentRef);
   assert.deepEqual(committed.map((record) => record.kind === 'inspection-occurrence-settled'
     ? record.settledAt
     : record.kind === 'business-cycle-closed' ? record.closedAt : undefined), [committedAt, committedAt]);
 });
 
-test('inspection turn boundary consumer commits a settled occurrence without a second cycle close', async () => {
-  // Failure basis: retry after a committed settlement re-closed the shared cycle. Impact: invalid lifecycle history.
-  // Probability: unknown. Cost: low local execution, low maintenance; reuses the existing Runtime consumer.
+test('inspection turn boundary consumer closes failed alignment once and rejects changed milestone refs', async () => {
+  // Failure basis: failed alignment left the cycle open, or replay reused a close with different relationships.
+  // Impact: invalid lifecycle history. Probability: proven by the current boundary. Cost: extends the existing consumer.
   const checkpointCommitRef = { commitId: 'checkpoint:inspection-settled', journalSeq: 4, recordDigest: digest('checkpoint') };
   const settlementCommitRef = { commitId: 'settlement:inspection-1', journalSeq: 5, recordDigest: digest('settlement') };
   const closeCommitRef = { commitId: 'close:inspection-1', journalSeq: 6, recordDigest: digest('close') };
@@ -1313,6 +1359,8 @@ test('inspection turn boundary consumer commits a settled occurrence without a s
     recoveryStateRef: checkpoint.checkpoint.recoveryStateRef,
     closedAt: '2026-09-20T00:00:00.000Z',
   } as const;
+  const alignment = inspectionAlignment(closure, 'failed');
+  const milestone = { commitId: 'review:inspection-1', journalSeq: 7, recordDigest: digest('review-inspection-1') };
   const settlementEntry = {
     record: {
       kind: 'inspection-occurrence-settled',
@@ -1397,19 +1445,34 @@ test('inspection turn boundary consumer commits a settled occurrence without a s
     logicalTurnId: 'turn-inspection-1',
     closure,
     checkpoint,
-    next: { kind: 'stop' },
-    milestoneAlignmentCommitRefs: [],
+    alignment,
+    milestoneAlignmentCommitRefs: [milestone],
   });
   const replay = await boundary.settleClosure({
     logicalTurnId: 'turn-inspection-1',
     closure,
     checkpoint,
-    next: { kind: 'stop' },
-    milestoneAlignmentCommitRefs: [],
+    alignment,
+    milestoneAlignmentCommitRefs: [milestone],
   });
 
   assert.deepEqual(receipt, { settlementCommitRefs: [settlementCommitRef], cycleClosedCommitRef: closeCommitRef });
   assert.deepEqual(replay, receipt);
+  assert.deepEqual(commits, ['business-cycle-closed']);
+  const close = durableEntries.find(({ record }) => record.kind === 'business-cycle-closed')?.record;
+  assert.equal(close?.kind === 'business-cycle-closed' && close.outcome, 'stop');
+  assert.equal(close?.kind === 'business-cycle-closed' && close.next.ref,
+    turnBoundaryRecordRefs(alignment.identity, alignment.checkpointId).alignmentRef);
+  await assert.rejects(() => boundary.settleClosure({
+    logicalTurnId: 'turn-inspection-1',
+    closure,
+    checkpoint,
+    alignment,
+    milestoneAlignmentCommitRefs: [
+      milestone,
+      { commitId: 'review:inspection-1-other', journalSeq: 8, recordDigest: digest('review-inspection-1-other') },
+    ],
+  }), /cycle close/);
   assert.deepEqual(commits, ['business-cycle-closed']);
 });
 
@@ -1562,7 +1625,7 @@ test('inspection turn boundary consumer settles declared aggregate outcome witho
     logicalTurnId: declared.closure.identity.turnId,
     closure: declared.closure,
     checkpoint: declared.checkpoint,
-    next: { kind: 'continue' as const },
+    alignment: inspectionAlignment(declared.closure, 'continue'),
     milestoneAlignmentCommitRefs: [],
   };
   const declaredReceipt = await declared.boundary.settleClosure(declaredInput);
@@ -1587,6 +1650,11 @@ test('inspection turn boundary consumer settles declared aggregate outcome witho
         summary: { ...declared.closure.summary,
           inspectionOutcome: { status: 'completed', judgment: 'conflicting replay judgment' } },
       },
+      alignment: inspectionAlignment({
+        ...declared.closure,
+        summary: { ...declared.closure.summary,
+          inspectionOutcome: { status: 'completed', judgment: 'conflicting replay judgment' } },
+      }, 'continue'),
     }),
     /outcome conflicts/,
   );
@@ -1597,11 +1665,44 @@ test('inspection turn boundary consumer settles declared aggregate outcome witho
     logicalTurnId: undeclared.closure.identity.turnId,
     closure: undeclared.closure,
     checkpoint: undeclared.checkpoint,
-    next: { kind: 'continue' },
+    alignment: inspectionAlignment(undeclared.closure, 'continue'),
     milestoneAlignmentCommitRefs: [],
   });
   const undeclaredSettlement = undeclared.committed[0];
   assert.equal(undeclaredSettlement?.kind === 'inspection-occurrence-settled' && undeclaredSettlement.outcome.status, 'unknown');
+
+  const mismatchedScope = createConsumer('scope-mismatch');
+  const foreignScope = { ...scope, cycleId: id('cycle', 'cycle-agent-loop-foreign') };
+  const foreignIdentity = {
+    ...mismatchedScope.closure.identity,
+    scopeRef: foreignScope,
+    cycleRef: foreignScope.cycleId!,
+  };
+  await assert.rejects(() => mismatchedScope.boundary.settleClosure({
+    logicalTurnId: foreignIdentity.turnId,
+    closure: {
+      ...mismatchedScope.closure,
+      identity: foreignIdentity,
+      recoveryStateRef: { ...mismatchedScope.closure.recoveryStateRef, scope: foreignScope },
+    },
+    checkpoint: mismatchedScope.checkpoint,
+    alignment: inspectionAlignment({ ...mismatchedScope.closure, identity: foreignIdentity }, 'continue'),
+    milestoneAlignmentCommitRefs: [],
+  }), /cycle identity/);
+  assert.equal(mismatchedScope.committed.length, 0);
+
+  const mismatchedAlignment = createConsumer('alignment-mismatch');
+  await assert.rejects(() => mismatchedAlignment.boundary.settleClosure({
+    logicalTurnId: mismatchedAlignment.closure.identity.turnId,
+    closure: mismatchedAlignment.closure,
+    checkpoint: mismatchedAlignment.checkpoint,
+    alignment: {
+      ...inspectionAlignment(mismatchedAlignment.closure, 'continue'),
+      checkpointId: id('checkpoint', 'inspection-aggregate-other'),
+    },
+    milestoneAlignmentCommitRefs: [],
+  }), /closure checkpoint/);
+  assert.equal(mismatchedAlignment.committed.length, 0);
 });
 
 test('inspection turn boundary consumer reuses a durable item without executing the child twice', async () => {

@@ -16,8 +16,10 @@ import type {
   JournalCommitRef,
   NextAction,
   PublishedTaskPlanRevision,
+  PlannerAlignmentReference,
   ScopeRef,
   TurnClosureReference,
+  TurnSummaryEvidenceContext,
   WorkAssignment,
 } from '../../../contracts/src/index.js';
 import {
@@ -26,6 +28,8 @@ import {
   validateInspectionItemResultRecord,
 } from '../../../contracts/src/i2-history.js';
 import type { CommittedCheckpointRecord, NativeCheckpointJournalPort } from '../checkpoints/ports.js';
+import { assertTurnAlignmentBinding } from '../../../core/src/index.js';
+import { turnBoundaryRecordRefs } from '../checkpoints/closure.js';
 import { AgentLoopRuntimeError } from './errors.js';
 import { hasMatchingInspectionCloseIdentity } from './inspection-stop-completion.js';
 
@@ -131,7 +135,8 @@ export interface InspectionBoundaryPort {
     readonly logicalTurnId: string;
     readonly closure: TurnClosureReference;
     readonly checkpoint: CommittedCheckpointRecord;
-    readonly next: NextAction;
+    readonly alignment: PlannerAlignmentReference;
+    readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
     readonly milestoneAlignmentCommitRefs: readonly JournalCommitRef[];
   }): Promise<InspectionSettlementReceipt>;
 
@@ -234,16 +239,24 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     readonly logicalTurnId: string;
     readonly closure: TurnClosureReference;
     readonly checkpoint: CommittedCheckpointRecord;
-    readonly next: NextAction;
+    readonly alignment: PlannerAlignmentReference;
+    readonly summaryEvidenceContext?: TurnSummaryEvidenceContext;
     readonly milestoneAlignmentCommitRefs: readonly JournalCommitRef[];
   }): Promise<InspectionSettlementReceipt> {
+    assertTurnAlignmentBinding(input.closure, input.alignment, input.summaryEvidenceContext);
     const committedAt = await this.assertExactCheckpoint(input.checkpoint);
     if (input.closure.identity.turnId !== input.logicalTurnId
       || input.closure.checkpointId.value !== input.checkpoint.checkpoint.id.value
       || input.closure.checkpointId.scope !== input.checkpoint.checkpoint.id.scope
-      || JSON.stringify(input.next) !== JSON.stringify(input.checkpoint.checkpoint.next)) {
-      throw new AgentLoopRuntimeError('conflict', 'inspection closure, checkpoint, or next action conflicts');
+      || !sameScope(input.closure.identity.scopeRef, input.checkpoint.checkpoint.scope)
+      || input.closure.identity.cycleRef.value !== input.checkpoint.checkpoint.cycleId.value
+      || input.closure.identity.cycleRef.scope !== input.checkpoint.checkpoint.cycleId.scope) {
+      throw new AgentLoopRuntimeError('conflict', 'inspection closure, checkpoint, or cycle identity conflicts');
     }
+    const alignmentRef = turnBoundaryRecordRefs(input.alignment.identity, input.alignment.checkpointId).alignmentRef;
+    const cycleNext: NextAction = input.alignment.decision === 'continue'
+      ? { kind: 'continue', ref: alignmentRef }
+      : { kind: 'stop', ref: alignmentRef };
     const settlementOutcome = closureOutcome(input.closure);
     if (settlementOutcome.declaredOutcome !== undefined) {
       validateInspectionExecutionOutcome(settlementOutcome.declaredOutcome);
@@ -253,6 +266,18 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
       taskScope: taskScopeOf(input.checkpoint.checkpoint.scope),
     });
     if (occurrence === null) return { settlementCommitRefs: [] };
+    const existingClose = occurrence.close ?? await this.findCycleClose(input.checkpoint, occurrence.cycleOpening.commitRef);
+    if (existingClose !== null) {
+      const existingSettlement = occurrence.settlement
+        ?? await this.findSettlement(occurrence.opening.record.occurrence, input.checkpoint.commitRef);
+      assertReusableClose({
+        checkpoint: input.checkpoint,
+        cycleOpeningCommitRef: occurrence.cycleOpening.commitRef,
+        next: cycleNext,
+        alignmentRefs: input.milestoneAlignmentCommitRefs,
+        settlement: existingSettlement?.commitRef,
+      }, existingClose);
+    }
     const settlement = await this.settleOccurrence({
       occurrence,
       checkpoint: input.checkpoint,
@@ -262,10 +287,10 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     const cycleClosedCommitRef = await this.closeCycleIfTerminal({
       checkpoint: input.checkpoint,
       cycleOpeningCommitRef: occurrence.cycleOpening.commitRef,
-      next: input.next,
+      next: cycleNext,
       alignmentRefs: input.milestoneAlignmentCommitRefs,
       settlement: settlement.commitRef,
-      existingClose: occurrence.close,
+      existingClose: existingClose ?? undefined,
       committedAt,
     });
     return cycleClosedCommitRef === undefined
@@ -295,7 +320,6 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
         checkpoint: input.checkpoint,
         cycleOpeningCommitRef: occurrence.cycleOpening.commitRef,
         next: { kind: 'stop' },
-        alignmentRefs: [],
         settlement: settlement.commitRef,
         existingClose: occurrence.close,
         committedAt,
@@ -548,7 +572,7 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     readonly checkpoint: CommittedCheckpointRecord;
     readonly cycleOpeningCommitRef: JournalCommitRef;
     readonly next: NextAction;
-    readonly alignmentRefs: readonly JournalCommitRef[];
+    readonly alignmentRefs?: readonly JournalCommitRef[];
     readonly settlement?: JournalCommitRef;
     readonly existingClose?: {
       readonly record: BusinessCycleClosedRecord;
@@ -582,7 +606,7 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
     readonly checkpoint: CommittedCheckpointRecord;
     readonly cycleOpeningCommitRef: JournalCommitRef;
     readonly next: NextAction;
-    readonly alignmentRefs: readonly JournalCommitRef[];
+    readonly alignmentRefs?: readonly JournalCommitRef[];
     readonly settlement?: JournalCommitRef;
     readonly existingClose?: {
       readonly record: BusinessCycleClosedRecord;
@@ -609,7 +633,7 @@ export class InspectionTurnBoundary implements InspectionBoundaryPort {
       cycleId: _input.checkpoint.checkpoint.cycleId,
       outcome: _input.next.kind,
       checkpointCommitRef: _input.checkpoint.commitRef,
-      milestoneAlignmentCommitRefs: _input.alignmentRefs,
+      milestoneAlignmentCommitRefs: _input.alignmentRefs ?? [],
       inspectionSettlementCommitRef: _input.settlement,
       next: _input.next,
       closedAt: _input.committedAt,
@@ -627,6 +651,20 @@ function sameCommit(left: JournalCommitRef, right: JournalCommitRef): boolean {
   return left.commitId === right.commitId
     && left.journalSeq === right.journalSeq
     && left.recordDigest === right.recordDigest;
+}
+
+function sameScope(left: ScopeRef, right: ScopeRef): boolean {
+  return sameScopedId(left.organId, right.organId)
+    && sameScopedId(left.taskId, right.taskId)
+    && sameScopedId(left.cycleId, right.cycleId)
+    && sameScopedId(left.operationId, right.operationId);
+}
+
+function sameScopedId(
+  left: { readonly scope: string; readonly value: string } | undefined,
+  right: { readonly scope: string; readonly value: string } | undefined,
+): boolean {
+  return left?.scope === right?.scope && left?.value === right?.value;
 }
 
 function commitKey(ref: JournalCommitRef): string {
@@ -668,6 +706,7 @@ function assertReusableClose(
     readonly checkpoint: CommittedCheckpointRecord;
     readonly cycleOpeningCommitRef: JournalCommitRef;
     readonly next: NextAction;
+    readonly alignmentRefs?: readonly JournalCommitRef[];
     readonly settlement?: JournalCommitRef;
   },
   close: {
@@ -677,7 +716,8 @@ function assertReusableClose(
 ): void {
   const { record } = close;
   if (!hasMatchingInspectionCloseIdentity({ close: record, checkpoint: input.checkpoint,
-    cycleOpeningCommitRef: input.cycleOpeningCommitRef, settlementCommitRef: input.settlement, next: input.next })) {
+    cycleOpeningCommitRef: input.cycleOpeningCommitRef, settlementCommitRef: input.settlement, next: input.next })
+    || (input.alignmentRefs !== undefined && !sameRefs(record.milestoneAlignmentCommitRefs, input.alignmentRefs))) {
     throw new AgentLoopRuntimeError('conflict', 'inspection cycle close does not match the terminal checkpoint and settlement');
   }
 }
