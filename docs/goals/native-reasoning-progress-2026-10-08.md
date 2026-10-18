@@ -9,6 +9,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- Runtimeinvocationfold43814ab9已cherry候选2cb8f481；组合contracts/agentloop/nativeAppcompile0，原inspection16/16PASS（session66751）。显式同源CLI + dist/tests-native-text原inspection一次实际FAIL（session26249），新首错child delivery conflicting durable records，invocation bcc7292b9e4184c03d4a6f6711720fd9f3f94e511948aba50d917c2d77c0dddc；2Planner16POST、fixturer9tfZu保留，已交peer精确定位delivery，不放宽globalmergeExact。
+- r320当前最终源码compile0+原budgetconsumer1/1PASS，校正wrappercode/typedworkspace/evidencefooter测试预期；但parent接收发现该case未断言最终durableclosure/Planner，且resumedwire含pendingcall2无output。r321独立小Planner核对真实resumeawait合同/Responses配对与既有收口断言，区分证据缺口/实际缺陷；没有进入Review或宣称完整恢复完成。原产品patch仍仅预算树。
+
 - r318typedancestry实际运行已越过前两层admission/Gateway错误，第一round file.write成功，第二round budgetguard前未执行对应effect。namedcase仍FAIL，公开UiRuntimeApiError.code为orchestration.dispatch.failed/message为provider tool round limit was exceeded，而test错误直接期待低层tool.round-limit。freshGCM r320同树tests-only校正公开wrapper预期与typed effect envelope断言，继续真实freshservice第二resume；不为测试改Runtime映射，不伪造错误后状态。budget恢复尚未验收，产品patch未合流。
 - r319观察仅引用r317futureintent与旧冻结分支失败，未核较新的交付回执；不接收为A/B/D当前缺陷或完成数，不据此派实现/扩测。E/F主线继续，未新增证据门禁。
 
