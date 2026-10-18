@@ -229,7 +229,6 @@ test('context correction persists exact exclusions over the real Journal carrier
       observationCapabilities: ['read-task'],
       orchestrationScope: 'local',
       orchestrationCapabilities: [],
-      capabilityDigest: 'sha256:context-correction-profile',
     }],
     budget: {
       maxModeTransitions: 4,

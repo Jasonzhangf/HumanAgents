@@ -92,9 +92,7 @@ import {
 } from '../admission/index.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
 import {
-  acceptanceCriteriaContent,
   createRetryCycleManager,
-  digestOf,
   type AgentRuntimePoolManager,
   type ExecutionAgentPort,
   type ExecutorReviewEvidence,
@@ -3656,7 +3654,6 @@ export class RuntimeTaskCoordinator {
           executionEpoch: input.assignment.executionEpoch,
           inputRevision: report.inputRevision,
           producedArtifactRefs: [],
-          producedArtifactDigests: [],
           status: 'cancelled',
           summary: 'provider execution was stopped before observation completed',
           outputRefs: [],
@@ -3677,7 +3674,6 @@ export class RuntimeTaskCoordinator {
             executionEpoch: input.assignment.executionEpoch,
             inputRevision: report.inputRevision,
             producedArtifactRefs: [],
-            producedArtifactDigests: [],
             status: 'blocked',
             summary: 'provider execution reached post-commit recovery',
             outputRefs: [],
@@ -3720,7 +3716,6 @@ export class RuntimeTaskCoordinator {
           executionEpoch: input.assignment.executionEpoch,
           inputRevision: report.inputRevision,
           producedArtifactRefs: [],
-          producedArtifactDigests: [],
           status: 'blocked',
           summary: 'provider execution reached post-commit recovery',
           outputRefs: [],
@@ -3743,7 +3738,6 @@ export class RuntimeTaskCoordinator {
           executionEpoch: input.assignment.executionEpoch,
           inputRevision: report.inputRevision,
           producedArtifactRefs: [],
-          producedArtifactDigests: [],
           status: 'cancelled',
           summary: 'provider execution was stopped during observation',
           outputRefs: [],
@@ -3802,7 +3796,6 @@ export class RuntimeTaskCoordinator {
       executionEpoch: input.assignment.executionEpoch,
       inputRevision: report.inputRevision,
       producedArtifactRefs: deliveryBinding !== undefined ? [...deliveryBinding.producedArtifactRefs] : [outputRef],
-      producedArtifactDigests: deliveryBinding !== undefined ? [...deliveryBinding.producedArtifactDigests] : [digestOf(artifactBody)],
       producedArtifactBodies: deliveryBinding !== undefined ? [...deliveryBinding.producedArtifactBodies] : [artifactBody],
       executorEvidence,
       status,
@@ -3951,12 +3944,6 @@ export class RuntimeTaskCoordinator {
   ): WorkAssignment {
     if (record.assignment) return record.assignment;
     const outputRef = `operation://${operation.operationId.value}/output`;
-    const acceptanceCriteria = acceptanceCriteriaContent({
-      objective: operation.input,
-      successCriteria: ['provider execution settles successfully'],
-      failureCriteria: ['provider execution fails'],
-      incompleteCriteria: ['provider execution requires waiting or recovery'],
-    });
     return {
       assignmentId: `assignment-${operation.operationId.value}`,
       taskId: record.taskId,
@@ -3967,7 +3954,6 @@ export class RuntimeTaskCoordinator {
       objective: operation.input,
       targetRefs: [outputRef],
       expectedOutputRefs: [outputRef],
-      acceptanceCriteriaDigest: digestOf(acceptanceCriteria),
       successCriteria: ['provider execution settles successfully'],
       failureCriteria: ['provider execution fails'],
       incompleteCriteria: ['provider execution requires waiting or recovery'],
@@ -4147,9 +4133,7 @@ export class RuntimeTaskCoordinator {
           attempt: input.result.attempt,
           executionEpoch: input.result.executionEpoch,
           inputRevision: input.result.inputRevision,
-          acceptanceCriteriaDigest: input.result.acceptanceCriteriaDigest,
           subjectRefs: input.result.subjectRefs,
-          subjectDigests: input.result.subjectDigests,
           status: input.result.status,
           findings: input.result.findings,
           evidenceRefs: input.result.evidenceRefs,
@@ -4508,7 +4492,6 @@ export class RuntimeTaskCoordinator {
                     executionEpoch: input.assignment.executionEpoch,
                     inputRevision: input.assignment.inputRevision,
                     producedArtifactRefs: [],
-                    producedArtifactDigests: [],
                     status: 'cancelled',
                     summary: 'provider execution was stopped before the retry attempt started',
                     outputRefs: [],

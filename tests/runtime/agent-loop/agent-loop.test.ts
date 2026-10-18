@@ -597,7 +597,6 @@ const observationProfile: AgentModeCapabilityProfile = {
   observationCapabilities: ['read-task', 'read-evidence'],
   orchestrationScope: 'project',
   orchestrationCapabilities: [],
-  capabilityDigest: 'sha256:observation-profile',
 };
 
 const orchestrationProfile: AgentModeCapabilityProfile = {
@@ -608,7 +607,6 @@ const orchestrationProfile: AgentModeCapabilityProfile = {
   observationCapabilities: ['read-task', 'read-evidence'],
   orchestrationScope: 'project',
   orchestrationCapabilities: ['plan-project', 'assign-work'],
-  capabilityDigest: 'sha256:orchestration-profile',
 };
 
 function digest(value: unknown): `sha256:${string}` {
@@ -1020,9 +1018,9 @@ test('runtime loop validates profiles and budgets before issuing a lease', async
   await assert.rejects(
     () => AgentLoopRuntime.start({
       ...createRuntimeRequest(),
-      profiles: [{ ...observationProfile, capabilityDigest: '' }],
+      profiles: [{ ...observationProfile, observationScopes: ['task', 'task'] }],
     }, new MemoryContextHistory()),
-    /mode capability digest is required/,
+    /observation scopes must not contain duplicates/,
   );
   await assert.rejects(
     () => AgentLoopRuntime.start({

@@ -756,12 +756,12 @@ export interface TaskInteraction { readonly taskId: TaskId; readonly input?: Tas
 
 export interface WorkAssignment {
   readonly assignmentId: string; readonly taskId: TaskId; readonly pipelineNodeId: string; readonly attempt: number; readonly executionEpoch: number; readonly inputRevision: number;
-  readonly objective: string; readonly targetRefs: readonly string[]; readonly expectedOutputRefs: readonly string[]; readonly expectedArtifactDigests?: readonly string[]; readonly acceptanceCriteriaDigest: string;
+  readonly objective: string; readonly targetRefs: readonly string[]; readonly expectedOutputRefs: readonly string[];
   readonly successCriteria: readonly string[]; readonly failureCriteria: readonly string[]; readonly incompleteCriteria: readonly string[]; readonly requiredCapabilities: readonly string[]; readonly mergeGate: 'required' | 'not-required';
 }
 export interface WorkResult {
   readonly taskId: TaskId; readonly pipelineNodeId: string; readonly agentId: string; readonly assignmentId: string; readonly attempt: number; readonly executionEpoch: number; readonly inputRevision: number;
-  readonly producedArtifactRefs: readonly string[]; readonly producedArtifactDigests: readonly string[]; readonly producedArtifactBodies?: readonly string[]; readonly status: 'succeeded' | 'failed' | 'incomplete' | 'blocked' | 'cancelled'; readonly summary: string;
+  readonly producedArtifactRefs: readonly string[]; readonly producedArtifactBodies?: readonly string[]; readonly status: 'succeeded' | 'failed' | 'incomplete' | 'blocked' | 'cancelled'; readonly summary: string;
   readonly outputRefs: readonly string[]; readonly evidenceRefs: readonly EvidenceRef[]; readonly nextAction: 'continue' | 'wait' | 'attention' | 'review' | 'settle' | 'remediate'; readonly conditionRef?: string; readonly failureRef?: string;
 }
 
@@ -880,7 +880,7 @@ export function validateWorkAssignment(input: WorkAssignment): void {
   assertScope(input.taskId, 'task'); assertExecutionEpoch(input.executionEpoch);
   assertPositiveSafeInteger(input.attempt, 'work attempt');
   assertPositiveSafeInteger(input.inputRevision, 'work inputRevision');
-  if (!input.objective || !input.acceptanceCriteriaDigest || input.successCriteria.length === 0) throw new ContractError('invalid work assignment');
+  if (!input.objective || input.successCriteria.length === 0) throw new ContractError('invalid work assignment');
 }
 export function validateWorkResult(input: WorkResult, assignment: WorkAssignment): void {
   validateWorkAssignment(assignment); assertNonEmptyReference(input.agentId, 'work result agent id'); assertScope(input.taskId, 'task'); assertExecutionEpoch(input.executionEpoch);
@@ -889,22 +889,8 @@ export function validateWorkResult(input: WorkResult, assignment: WorkAssignment
   if (input.taskId.value !== assignment.taskId.value || input.assignmentId !== assignment.assignmentId || input.pipelineNodeId !== assignment.pipelineNodeId || input.attempt !== assignment.attempt || input.executionEpoch !== assignment.executionEpoch || input.inputRevision !== assignment.inputRevision) throw new ContractError('work result does not match assignment');
   if (!input.summary || (input.nextAction === 'wait' && !input.conditionRef) || (input.status === 'failed' && !input.failureRef)) throw new ContractError('invalid work result');
   for (const ref of input.producedArtifactRefs) if (!ref) throw new ContractError('work result artifact ref must be present');
-  if (input.producedArtifactRefs.length !== input.producedArtifactDigests.length) throw new ContractError('work result artifact digests must match artifact refs');
-  for (const digest of input.producedArtifactDigests) if (!digest) throw new ContractError('work result artifact digest must be present');
   if (input.producedArtifactBodies !== undefined) {
     if (input.producedArtifactBodies.length !== input.producedArtifactRefs.length) throw new ContractError('work result artifact bodies must match artifact refs');
-  }
-  if (assignment.expectedArtifactDigests) {
-    const expectedDigests = new Set(assignment.expectedArtifactDigests);
-    for (const digest of assignment.expectedArtifactDigests) if (!digest) throw new ContractError('work assignment expected artifact digest must be present');
-    if (input.status === 'succeeded') {
-      if (assignment.expectedArtifactDigests.length !== input.producedArtifactDigests.length) throw new ContractError('work result expected artifact digests must match produced artifact digests');
-      for (let i = 0; i < assignment.expectedArtifactDigests.length; i++) {
-        if (assignment.expectedArtifactDigests[i] !== input.producedArtifactDigests[i]) throw new ContractError('work result artifact digest does not match expected digest');
-      }
-    } else if (input.producedArtifactRefs.length > 0) {
-      for (const digest of input.producedArtifactDigests) if (!expectedDigests.has(digest)) throw new ContractError('work result artifact digest does not match expected digest');
-    }
   }
   if (input.status === 'succeeded') {
     const expected = new Set(assignment.expectedOutputRefs);

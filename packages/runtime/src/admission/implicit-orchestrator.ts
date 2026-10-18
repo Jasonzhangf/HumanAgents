@@ -13,7 +13,7 @@ import {
   type OrchestrationIssue,
   type OrchestrationManager,
 } from '../orchestration/index.js';
-import { acceptanceCriteriaContent, digestOf } from '../orchestration/index.js';
+import { acceptanceCriteriaContent } from '../orchestration/index.js';
 import type { ReviewKind } from '../review/index.js';
 import {
   admitRequirement,
@@ -217,7 +217,6 @@ function assignmentForSubtask(
     objective: subtask.objective,
     targetRefs: [subtask.targetRef],
     expectedOutputRefs: [subtask.expectedOutputRef],
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     successCriteria: [...subtask.successCriteria],
     failureCriteria: [...subtask.failureCriteria],
     incompleteCriteria: [...subtask.incompleteCriteria],

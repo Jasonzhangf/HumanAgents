@@ -132,7 +132,6 @@ function identity(turnId: string): Identity {
     objective: 'exercise resumed segment cold recovery',
     targetRefs: [`operation://${turnId}/output`],
     expectedOutputRefs: [`operation://${turnId}/output`],
-    acceptanceCriteriaDigest: 'sha256:j1-segment-acceptance',
     successCriteria: ['segment recovery assets are committed'],
     failureCriteria: ['segment recovery assets are missing'],
     incompleteCriteria: ['segment recovery assets are unverified'],

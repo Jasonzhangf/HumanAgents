@@ -203,7 +203,7 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     ...promptSegments,
     '# Explicit intake decision output',
     'Return one final JSON object only. You may dispatch_helper for bounded independent work and accept_helper to explicitly adopt a returned result. Do not claim task execution.',
-    'dispatch_helper takes selection (roleId and optional configuredAgentId), assignmentFields, inputs, and evidenceRefs. Helpers must return JSON with agentId, producedArtifactRefs, producedArtifactDigests, status, summary, outputRefs, evidenceRefs, nextAction, and optional conditionRef/failureRef. Returned does not mean accepted.',
+    'dispatch_helper takes selection (roleId and optional configuredAgentId), assignmentFields, inputs, and evidenceRefs. Helpers must return JSON with agentId, producedArtifactRefs, status, summary, outputRefs, evidenceRefs, nextAction, and optional conditionRef/failureRef. Returned does not mean accepted.',
     'accept_helper takes helperCallId, refinedText, acceptanceRef, and evidenceRefs. Refine the actual returned conclusion before accepting it.',
     'The object is flat at the top level. kind must be requirement, status-query, clarification, or answer.',
     'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal and the optional matchedTaskId for requirement, answer for status-query and answer, and question for clarification.',
@@ -645,11 +645,10 @@ export function createProviderExplicitBrainInterpreter(input: {
                   type: 'object', properties: {
                     objective: { type: 'string' }, targetRefs: { type: 'array', items: { type: 'string' } },
                     expectedOutputRefs: { type: 'array', items: { type: 'string' } },
-                    expectedArtifactDigests: { type: 'array', items: { type: 'string' } },
-                    acceptanceCriteriaDigest: { type: 'string' }, successCriteria: { type: 'array', items: { type: 'string' } },
+                    successCriteria: { type: 'array', items: { type: 'string' } },
                     failureCriteria: { type: 'array', items: { type: 'string' } }, incompleteCriteria: { type: 'array', items: { type: 'string' } },
                     requiredCapabilities: { type: 'array', items: { type: 'string' } }, mergeGate: { type: 'string', enum: ['required', 'not-required'] },
-                  }, required: ['objective', 'targetRefs', 'expectedOutputRefs', 'acceptanceCriteriaDigest', 'successCriteria', 'failureCriteria', 'incompleteCriteria', 'requiredCapabilities', 'mergeGate'],
+                  }, required: ['objective', 'targetRefs', 'expectedOutputRefs', 'successCriteria', 'failureCriteria', 'incompleteCriteria', 'requiredCapabilities', 'mergeGate'],
                 },
                 inputs: { type: 'object' }, evidenceRefs: { type: 'array', items: { type: 'object' } },
               }, required: ['selection', 'assignmentFields', 'inputs', 'evidenceRefs'],
@@ -686,7 +685,6 @@ export function createProviderExplicitBrainInterpreter(input: {
                     // not let returned JSON replace Runtime's helper identity.
                     return {
                       agentId: result.agentId, producedArtifactRefs: result.producedArtifactRefs,
-                      producedArtifactDigests: result.producedArtifactDigests,
                       ...(result.producedArtifactBodies === undefined ? {} : { producedArtifactBodies: result.producedArtifactBodies }),
                       status: result.status, summary: result.summary, outputRefs: result.outputRefs,
                       evidenceRefs: result.evidenceRefs, nextAction: result.nextAction,

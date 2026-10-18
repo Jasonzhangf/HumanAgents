@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { AgentTemplateError } from './errors.js';
@@ -18,7 +17,6 @@ export interface BuiltinPromptRegistry {
   readonly schemaVersion: 1;
   readonly templateVersion: string;
   readonly roles: Readonly<Record<AgentRole, readonly string[]>>;
-  readonly contentDigests: Readonly<Record<AgentRole, string>>;
   readonly auditPrompts?: Readonly<Record<string, string>>;
 }
 
@@ -26,7 +24,6 @@ export interface PreparedBuiltinAuditPrompt {
   readonly promptRef: string;
   readonly sourceRef: string;
   readonly destinationPath: string;
-  readonly contentDigest: string;
 }
 
 export function builtinPromptRegistryRef(templateVersion: string): string {
@@ -37,10 +34,6 @@ export function builtinPromptRegistryRef(templateVersion: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function contentDigest(content: string): string {
-  return `sha256:${createHash('sha256').update(content, 'utf8').digest('hex')}`;
 }
 
 function assertSafeAuditPromptRef(promptRef: string): void {
@@ -88,7 +81,6 @@ export async function prepareBuiltinAuditPrompt(input: {
     promptRef: input.promptRef,
     sourceRef,
     destinationPath,
-    contentDigest: contentDigest(written),
   };
 }
 
@@ -126,7 +118,7 @@ export async function loadBuiltinPromptRegistry(
     throw new AgentTemplateError(`builtin prompt registry is invalid: ${String(error)}`);
   }
   if (!isRecord(parsed) || parsed.kind !== 'humanagent.prompt-registry' || parsed.schemaVersion !== 1
-    || typeof parsed.templateVersion !== 'string' || !isRecord(parsed.roles) || !isRecord(parsed.contentDigests)
+    || typeof parsed.templateVersion !== 'string' || !isRecord(parsed.roles)
     || (parsed.auditPrompts !== undefined && !isRecord(parsed.auditPrompts))) {
     throw new AgentTemplateError('builtin prompt registry has an invalid shape');
   }
@@ -134,19 +126,13 @@ export async function loadBuiltinPromptRegistry(
     throw new AgentTemplateError(`builtin prompt registry version is not ${templateVersion}`);
   }
   const roles = {} as Record<AgentRole, readonly string[]>;
-  const contentDigests = {} as Record<AgentRole, string>;
   for (const roleId of AGENT_ROLE_IDS) {
     const refs = parsed.roles[roleId];
     if (!Array.isArray(refs) || refs.some((ref) => typeof ref !== 'string')) {
       throw new AgentTemplateError(`builtin prompt registry is missing role refs: ${roleId}`);
     }
     validatePromptSegmentRefs(roleId, refs);
-    const contentDigest = parsed.contentDigests[roleId];
-    if (typeof contentDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(contentDigest)) {
-      throw new AgentTemplateError(`builtin prompt registry has an invalid content digest: ${roleId}`);
-    }
     roles[roleId] = [...refs];
-    contentDigests[roleId] = contentDigest;
   }
   const unknownRole = Object.keys(parsed.roles).find((roleId) => !(AGENT_ROLE_IDS as readonly string[]).includes(roleId));
   if (unknownRole) throw new AgentTemplateError(`builtin prompt registry has unknown role: ${unknownRole}`);
@@ -163,7 +149,6 @@ export async function loadBuiltinPromptRegistry(
     schemaVersion: 1,
     templateVersion: parsed.templateVersion,
     roles,
-    contentDigests,
     ...(Object.keys(auditPrompts).length === 0 ? {} : { auditPrompts }),
   };
 }
@@ -183,14 +168,10 @@ export async function loadBuiltinPromptSegments(
   if (expectedTemplateVersion !== undefined && registry.templateVersion !== expectedTemplateVersion) {
     throw new AgentTemplateError(`builtin prompt registry version is not locked to ${expectedTemplateVersion}`);
   }
-  const loaded = await loadAgentPromptSegments(
+  return loadAgentPromptSegments(
     { promptSegmentRefs: registry.roles[roleId] },
     createFilePromptSource(join(templateRoot, 'builtin')),
   );
-  if (loaded.contentDigest !== registry.contentDigests[roleId]) {
-    throw new AgentTemplateError(`builtin prompt content drift detected: ${roleId}`);
-  }
-  return loaded;
 }
 
 export async function loadBuiltinAgentTemplate(

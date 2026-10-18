@@ -26,7 +26,6 @@ import {
   type InspectionItemResultRecord,
 } from '../../contracts/src/i2-history.js';
 import {
-  digestOf,
   type ExecutionAgentPort,
   type ReviewSubjectMaterial,
 } from '../../runtime/src/orchestration/index.js';
@@ -67,12 +66,6 @@ export function createInspectionCheckPort(input: {
       const producedIndex = result.producedArtifactRefs.indexOf(material.ref);
       if (producedIndex < 0) {
         throw new ContractError('inspection output ref is not a produced artifact of the executed assignment');
-      }
-      if (result.producedArtifactDigests[producedIndex] !== material.digest) {
-        throw new ContractError('inspection output digest does not match the produced artifact digest');
-      }
-      if (digestOf(material.body) !== material.digest) {
-        throw new ContractError('inspection output body does not match its produced digest');
       }
       if (
         result.producedArtifactBodies !== undefined

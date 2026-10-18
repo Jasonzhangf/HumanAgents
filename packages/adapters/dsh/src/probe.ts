@@ -48,7 +48,7 @@ export type DshProfileStatus =
 
 export function classifyDshProfile(profile: DshProfileDescriptor | undefined): DshProfileStatus {
   if (!profile) return { kind: 'missing-profile' };
-  if (!profile.plugin || !profile.plugin.bundleRef.trim() || !profile.plugin.digest.trim() || !profile.plugin.entry.trim()) {
+  if (!profile.plugin || !profile.plugin.bundleRef.trim() || !profile.plugin.entry.trim()) {
     return { kind: 'missing-bundle' };
   }
   try {

@@ -149,7 +149,6 @@ function copyHelperResult(result: InteractionHelperResult): InteractionHelperRes
     attempt: result.attempt,
     agentId: result.agentId,
     producedArtifactRefs: [...result.producedArtifactRefs],
-    producedArtifactDigests: [...result.producedArtifactDigests],
     ...(result.producedArtifactBodies === undefined ? {} : {
       producedArtifactBodies: [...result.producedArtifactBodies],
     }),

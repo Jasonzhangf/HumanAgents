@@ -61,7 +61,6 @@ export interface ReviewAssignmentInput {
   readonly workerResult: WorkResult;
   readonly reviewKinds?: readonly ReviewKind[];
   readonly subjectRefs: readonly string[];
-  readonly subjectDigests: readonly string[];
 }
 
 export interface RemediationRequest {
@@ -266,12 +265,7 @@ export function createReviewAssignments(input: ReviewAssignmentInput): readonly 
   nonEmpty(input.workerResult.agentId, 'work result agent id');
   assertUniqueRefs(input.workerAssignment.targetRefs, 'worker assignment target ref');
   assertNonEmptyRefs(input.subjectRefs, 'review subject ref');
-  assertNonEmptyRefs(input.subjectDigests, 'review subject digest');
   assertUniqueRefs(input.subjectRefs, 'review subject ref');
-  assertUniqueRefs(input.subjectDigests, 'review subject digest');
-  if (input.subjectRefs.length !== input.subjectDigests.length) {
-    throw new ReviewCoordinatorError('review subject and digest counts must match');
-  }
   if (!sameUniqueValues(input.subjectRefs, input.workerAssignment.targetRefs)) {
     throw new ReviewCoordinatorError('review subject refs must match worker assignment target refs');
   }
@@ -287,9 +281,7 @@ export function createReviewAssignments(input: ReviewAssignmentInput): readonly 
     attempt: input.workerAssignment.attempt,
     executionEpoch: input.workerAssignment.executionEpoch,
     inputRevision: input.workerAssignment.inputRevision,
-    acceptanceCriteriaDigest: input.workerAssignment.acceptanceCriteriaDigest,
     subjectRefs: [...input.subjectRefs],
-    subjectDigests: [...input.subjectDigests],
     workerCapabilities: [...worker],
     requiredCapabilities: [reviewCapabilityFor(kind)],
     mergeGate: input.workerAssignment.mergeGate,
@@ -423,9 +415,6 @@ function assertReviewAssignmentsMatchWorker(
     }
     if (assignment.inputRevision !== workerAssignment.inputRevision) {
       throw new ReviewCoordinatorError('review assignment input revision does not match worker assignment');
-    }
-    if (assignment.acceptanceCriteriaDigest !== workerAssignment.acceptanceCriteriaDigest) {
-      throw new ReviewCoordinatorError('review assignment acceptance criteria does not match worker assignment');
     }
     if (assignment.workerAgentId !== workerResult.agentId) {
       throw new ReviewCoordinatorError('review assignment worker does not match worker result');

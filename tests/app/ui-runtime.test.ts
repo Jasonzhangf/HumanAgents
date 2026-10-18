@@ -49,10 +49,7 @@ import { providerRawContentReader } from '../../packages/adapters/provider/src/e
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
 import { DEFAULT_AGENT_IO_POLICY } from '../../packages/runtime/src/agent-io/types.js';
 import type { RuntimeLivenessProjection } from '../../packages/ui/contracts/runtime.js';
-import {
-  digestAgentTemplate,
-  type AgentTemplateManifest,
-} from '../../packages/agent-templates/src/index.js';
+import { type AgentTemplateManifest } from '../../packages/agent-templates/src/index.js';
 import {
   AgentRuntime,
   MemoryCoordinator,
@@ -614,7 +611,7 @@ async function narrowedExecutionTemplateRoot(allowedLayers: AgentTemplateManifes
     ...manifest,
     memoryContextPolicy: { ...manifest.memoryContextPolicy, allowedLayers },
   };
-  await writeFile(manifestPath, JSON.stringify({ ...narrowed, digest: digestAgentTemplate(narrowed) }, null, 2) + '\n', 'utf8');
+  await writeFile(manifestPath, JSON.stringify(narrowed, null, 2) + '\n', 'utf8');
   return root;
 }
 
@@ -3349,7 +3346,7 @@ test('cross-turn preparation occupies budget and final completion wakes FIFO wit
               const bytes = new TextEncoder().encode('task complete');
               const asset = { ref: refs[0]!, view: { kind: 'utf8-text' as const } };
               return { assignment: { assignmentId, taskId, pipelineNodeId: 'pipeline.execute', attempt: 1, executionEpoch,
-                inputRevision: 1, objective: 'finish task', targetRefs: [], expectedOutputRefs: [], acceptanceCriteriaDigest: 'fixture',
+                inputRevision: 1, objective: 'finish task', targetRefs: [], expectedOutputRefs: [],
                 successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' },
                 acceptedEnd: { kind: 'standard-turn-end', identity, summary, deliveryText: 'task complete', deliveryRefs: [], resolvedEvidenceRefs: [] },
                 materials: [{ kind: 'delivery-text', deliveryEvidence: refs[0]!, rawArguments: asset, bodyAsset: asset,
@@ -4049,9 +4046,7 @@ test('orchestrated confirmed requirement dispatches implicit executor agents thr
           attempt: input.reviewAssignment.attempt,
           executionEpoch: input.reviewAssignment.executionEpoch,
           inputRevision: input.reviewAssignment.inputRevision,
-          acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
           subjectRefs: [...input.reviewAssignment.subjectRefs],
-          subjectDigests: [...input.reviewAssignment.subjectDigests],
           status: 'passed' as const,
           findings: [],
           evidenceRefs: [evidence('implicit-review', input.scope)],
@@ -9436,7 +9431,6 @@ test('implicit executor produced output excludes provider semantic model summari
         objective: 'summarize the model reply',
         targetRefs: ['artifact://implicit-output-summary'],
         expectedOutputRefs: ['artifact://implicit-output-summary'],
-        acceptanceCriteriaDigest: 'sha256:implicit-output-summary',
         successCriteria: ['the reply is projected'],
         failureCriteria: ['the reply is not projected'],
         incompleteCriteria: ['the reply is incomplete'],
@@ -9600,9 +9594,7 @@ test('orchestrated review is handed the produced file bodies, not only the execu
             attempt: input.reviewAssignment.attempt,
             executionEpoch: input.reviewAssignment.executionEpoch,
             inputRevision: input.reviewAssignment.inputRevision,
-            acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
             subjectRefs: [...input.reviewAssignment.subjectRefs],
-            subjectDigests: [...input.reviewAssignment.subjectDigests],
             status: 'passed' as const,
             findings: [],
             evidenceRefs: [evidence('produced-artifacts-review', input.scope)],

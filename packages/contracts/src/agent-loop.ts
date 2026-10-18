@@ -64,7 +64,6 @@ export interface ModeCapabilityProfile {
   readonly observationCapabilities: readonly string[];
   readonly orchestrationScope: OrchestrationScope;
   readonly orchestrationCapabilities: readonly string[];
-  readonly capabilityDigest: string;
 }
 
 export type AgentModeCapabilityProfile = ModeCapabilityProfile;
@@ -79,7 +78,6 @@ export interface ModeLease {
   readonly checkpoint: AgentLoopCheckpointRef;
   readonly observationScopeId?: string;
   readonly permissionRevision: string;
-  readonly capabilityDigest: string;
   readonly state: ModeLeaseState;
   readonly issuedAt: string;
   readonly expiresAt: string;
@@ -384,7 +382,6 @@ export function validateModeCapabilityProfile(input: ModeCapabilityProfile): voi
   for (const scope of input.observationScopes) assertMember(scope, OBSERVATION_SCOPE_KINDS, 'observation scope');
   uniqueRefs(input.observationCapabilities, 'observation capabilities');
   uniqueRefs(input.orchestrationCapabilities, 'orchestration capabilities');
-  nonEmpty(input.capabilityDigest, 'mode capability digest');
 }
 
 export function validateModeLease(input: ModeLease): void {
@@ -397,7 +394,6 @@ export function validateModeLease(input: ModeLease): void {
   validateAgentLoopCheckpointRef(input.checkpoint, 'mode lease checkpoint');
   if (input.observationScopeId !== undefined) nonEmpty(input.observationScopeId, 'mode lease observationScopeId');
   nonEmpty(input.permissionRevision, 'mode lease permissionRevision');
-  nonEmpty(input.capabilityDigest, 'mode lease capabilityDigest');
   assertMember(input.state, MODE_LEASE_STATES, 'mode lease state');
   validTime(input.issuedAt, 'mode lease issuedAt');
   validTime(input.expiresAt, 'mode lease expiresAt');

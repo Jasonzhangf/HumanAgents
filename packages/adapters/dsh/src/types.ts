@@ -1,7 +1,6 @@
 import type { EvidenceRef, ProviderProtocol } from '../../../contracts/src/index.js';
 import { DshAdapterError } from './errors.js';
 
-const HEX40 = /^[0-9a-f]{40}$/;
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 function nonEmpty(value: string, label: string): void {
@@ -31,8 +30,6 @@ function explicitHomeRef(value: string): boolean {
 export interface DshLockDescriptor {
   readonly source: string;
   readonly reference: string;
-  readonly commit: string;
-  readonly tree: string;
   readonly describe: string;
   readonly versionTag: string;
   readonly recordedAt: string;
@@ -41,10 +38,6 @@ export interface DshLockDescriptor {
 export function assertDshLockDescriptor(lock: DshLockDescriptor): void {
   nonEmpty(lock.source, 'DSH source');
   nonEmpty(lock.reference, 'DSH reference');
-  nonEmpty(lock.commit, 'DSH commit');
-  if (!HEX40.test(lock.commit)) throw new DshAdapterError('configuration-invalid', 'DSH commit must be a 40-character hex object id', 'dsh-adapter');
-  nonEmpty(lock.tree, 'DSH tree');
-  if (!HEX40.test(lock.tree)) throw new DshAdapterError('configuration-invalid', 'DSH tree must be a 40-character hex object id', 'dsh-adapter');
   nonEmpty(lock.describe, 'DSH describe');
   nonEmpty(lock.versionTag, 'DSH version tag');
   const recordedAt = Date.parse(lock.recordedAt);
@@ -53,13 +46,11 @@ export function assertDshLockDescriptor(lock: DshLockDescriptor): void {
 
 export interface DshPluginLock {
   readonly bundleRef: string;
-  readonly digest: string;
   readonly entry: string;
 }
 
 export function assertDshPluginLock(plugin: DshPluginLock): void {
   if (!explicit(plugin.bundleRef, 'DSH plugin bundleRef')) throw new DshAdapterError('configuration-invalid', 'DSH plugin bundle reference must be explicit (not default/implicit)', 'dsh-adapter');
-  if (!SHA256_DIGEST.test(plugin.digest)) throw new DshAdapterError('configuration-invalid', 'DSH plugin digest must be a sha256:hex digest', 'dsh-adapter');
   if (!explicit(plugin.entry, 'DSH plugin entry')) throw new DshAdapterError('configuration-invalid', 'DSH plugin entry must be explicit (not default/implicit)', 'dsh-adapter');
 }
 

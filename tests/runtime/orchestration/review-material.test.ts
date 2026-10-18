@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
   id,
@@ -12,7 +11,6 @@ import {
   AgentRuntimePoolManager,
   OrchestrationManager,
   acceptanceCriteriaContent,
-  digestOf,
   resolveReviewMaterial,
   type ExecutionAgentInput,
   type ExecutionAgentPort,
@@ -32,10 +30,6 @@ const organ = id('organ', 'organ-review-material');
 const task = id('task', 'task-review-material');
 const scope: ScopeRef = { organId: organ, taskId: task };
 
-function digest(content: string): string {
-  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
-}
-
 function evidence(label: string): EvidenceRef {
   return {
     evidenceId: id('evidence', `review-material-${label}`),
@@ -47,7 +41,12 @@ function evidence(label: string): EvidenceRef {
 }
 
 const subjectBody = 'the produced artifact body that the reviewer must evaluate';
-const criteriaDigest = 'sha256:156b02b3e7f32a21f1265237b26e5242a9aebf38c341054d6cb2641951c855fe';
+const criteriaContent = acceptanceCriteriaContent({
+  objective: 'produce one reviewed subject',
+  successCriteria: ['subject matches the acceptance criteria'],
+  failureCriteria: ['subject violates the acceptance criteria'],
+  incompleteCriteria: ['subject evidence is incomplete'],
+});
 
 function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
   const base = {
@@ -60,7 +59,6 @@ function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
     objective: 'produce one reviewed subject',
     targetRefs: ['subject-a'],
     expectedOutputRefs: ['output-a'],
-    expectedArtifactDigests: [digest(subjectBody)],
     successCriteria: ['subject matches the acceptance criteria'],
     failureCriteria: ['subject violates the acceptance criteria'],
     incompleteCriteria: ['subject evidence is incomplete'],
@@ -69,7 +67,6 @@ function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
   } as const;
   return {
     ...base,
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(base)),
     ...overrides,
   };
 }
@@ -85,7 +82,6 @@ function result(overrides: Partial<WorkResult> = {}): WorkResult {
     executionEpoch: base.executionEpoch,
     inputRevision: base.inputRevision,
     producedArtifactRefs: ['subject-a'],
-    producedArtifactDigests: [digest(subjectBody)],
     status: 'succeeded',
     summary: 'worker says the work succeeded',
     outputRefs: ['output-a'],
@@ -161,9 +157,7 @@ class RecordingReviewAgent implements ReviewAgentPort {
       attempt: input.reviewAssignment.attempt,
       executionEpoch: input.reviewAssignment.executionEpoch,
       inputRevision: input.reviewAssignment.inputRevision,
-      acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
       subjectRefs: [...input.reviewAssignment.subjectRefs],
-      subjectDigests: [...input.reviewAssignment.subjectDigests],
       status: 'passed',
       findings: [],
       evidenceRefs: [evidence('review')],
@@ -179,23 +173,18 @@ const merge = {
   },
 };
 
-test('resolveReviewMaterial carries acceptance criteria content matching its digest', () => {
+test('resolveReviewMaterial carries the assignment acceptance criteria content and subject body', () => {
   const workerAssignment = assignment();
-  assert.equal(digestOf(acceptanceCriteriaContent(workerAssignment)), criteriaDigest);
   const material = resolveReviewMaterial({
     workerAssignment,
     workerResult: result(),
     subjects: [{ ref: 'subject-a', body: subjectBody }],
   });
-  assert.equal(
-    digest(material.acceptanceCriteria),
-    criteriaDigest,
-    'acceptance criteria content must hash to the declared acceptanceCriteriaDigest',
-  );
+  // The reviewer receives the real criteria content, never only its identity.
+  assert.equal(material.acceptanceCriteria, criteriaContent);
   assert.equal(material.subjects.length, 1);
   assert.equal(material.subjects[0]?.ref, 'subject-a');
   assert.equal(material.subjects[0]?.body, subjectBody);
-  assert.equal(material.subjects[0]?.digest, digest(subjectBody));
 });
 
 test('resolveReviewMaterial carries executor tool evidence additively from the worker result', () => {
@@ -210,11 +199,9 @@ test('resolveReviewMaterial carries executor tool evidence additively from the w
     workerResult,
     subjects: [{ ref: 'subject-a', body: subjectBody }],
   });
-  // Evidence is additional material; the artifact body and its digest mapping
-  // must stay intact.
+  // Evidence is additional material; the artifact body and its ref stay intact.
   assert.deepEqual(material.executorEvidence, executorEvidence);
   assert.equal(material.subjects[0]?.body, subjectBody);
-  assert.equal(material.subjects[0]?.digest, digest(subjectBody));
 });
 
 test('resolveReviewMaterial leaves executor evidence empty when the worker result carries none', () => {
@@ -240,19 +227,11 @@ test('resolveReviewMaterial fails closed on missing, empty, or drifted material'
     workerResult,
     subjects: [{ ref: 'subject-a', body: '' }],
   }), /body is empty/);
-  assert.throws(
-    () => resolveReviewMaterial({
-      workerAssignment: assignment({ acceptanceCriteriaDigest: 'sha256:drifted-criteria' }),
-      workerResult,
-      subjects: [{ ref: 'subject-a', body: subjectBody }],
-    }),
-    /acceptanceCriteriaDigest/,
-  );
   assert.throws(() => resolveReviewMaterial({
     workerAssignment,
-    workerResult,
+    workerResult: result({ producedArtifactBodies: [subjectBody] }),
     subjects: [{ ref: 'subject-a', body: 'drifted body' }],
-  }), /must match the (declared|produced) artifact digest/);
+  }), /must match the produced artifact body/);
   assert.throws(() => resolveReviewMaterial({
     workerAssignment,
     workerResult,
@@ -261,14 +240,11 @@ test('resolveReviewMaterial fails closed on missing, empty, or drifted material'
 });
 
 test('resolveReviewMaterial rejects a supplied body that disagrees with the carried result body', () => {
-  // The digest is self-consistent with the supplied body, so only the
-  // carried-body comparison can catch the disagreement.
   const suppliedBody = 'a supplied body that the result did not produce';
   assert.throws(
     () => resolveReviewMaterial({
       workerAssignment: assignment(),
       workerResult: result({
-        producedArtifactDigests: [digest(suppliedBody)],
         producedArtifactBodies: [subjectBody],
       }),
       subjects: [{ ref: 'subject-a', body: suppliedBody }],
@@ -352,14 +328,13 @@ test('manager passes verified review material to the reviewer and blocks before 
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [digest(subjectBody)],
     reviewSubjects: [{ ref: 'subject-a', body: subjectBody }],
   });
   assert.equal(dispatched.status, 'merged');
   assert.equal(reviewer.inputs.length, 1);
   const material = reviewer.inputs[0]?.reviewMaterial;
   assert.ok(material, 'reviewer must receive review material');
-  assert.equal(digest(material!.acceptanceCriteria), assignment().acceptanceCriteriaDigest);
+  assert.equal(material!.acceptanceCriteria, criteriaContent);
   assert.equal(material!.subjects[0]?.body, subjectBody);
 
   const blockedReviewer = new RecordingReviewAgent();
@@ -377,7 +352,6 @@ test('manager passes verified review material to the reviewer and blocks before 
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [digest(subjectBody)],
   });
   assert.equal(blocked.status, 'blocked');
   assert.equal(blockedReviewer.inputs.length, 0, 'reviewer must not be invoked without material');

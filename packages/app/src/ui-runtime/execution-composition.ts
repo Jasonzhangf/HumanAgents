@@ -38,7 +38,6 @@ import { createFilesystemRefinedDeliveryStore } from './refined-delivery-store.j
 import { createNativeBoundaryContinuation } from './native-boundary-continuation.js';
 import { createJsonlNativeSaveProgressPort } from '../../../adapters/jsonl/src/native-save-progress.js';
 import { frozenTurnCloseRef, readCheckpointClosurePreparation } from '../../../runtime/src/checkpoints/closure.js';
-import { digestModeCapabilityProfile } from '../../../agent-templates/src/index.js';
 import { closeAgentProvider, type AgentProviderComposition } from '../agent-driver-composition.js';
 import type { RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
@@ -142,7 +141,6 @@ import { createIndependentTurnPlanner, type IndependentTurnPlannerPort } from '.
 import { activeTurnCommitId } from '../../../runtime/src/context/active-turn-journal.js';
 import { materializeAdoptedChildSource, type AdoptedChildSourceV1 } from '../../../runtime/src/context/semantic-history-adoption.js';
 import { readCurrentTaskPlan } from '../../../runtime/src/orchestration/task-plan-revisions.js';
-import { acceptanceCriteriaContent, digestOf } from '../../../runtime/src/orchestration/review-material.js';
 import type { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
 import type { RuntimeTaskCurrentPlan } from '../../../runtime/src/ui-runtime/current-state.js';
 import { createPublishedTaskPlanRevision, assertTaskPlanRevisionRetryMatches,
@@ -373,7 +371,7 @@ export function createDefaultExecutionComposition(input: {
       return { contextHistory: context, request: { role: 'execution', mode: 'observation',
         profiles: [{ profileId: 'task-execution-context', role: 'execution', mode: 'observation',
           observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
-          orchestrationCapabilities: [], capabilityDigest: selected.binding.capabilityDigest }],
+          orchestrationCapabilities: [] }],
         budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
         permissionRevision: String(grant.grant.revision), observationStreamId: currentContext.loopControl.inboxStreamId,
         now: input.now, turn: { identity: projectAdmittedTurnIdentityV1(initialBinding.admittedTurn),
@@ -454,15 +452,12 @@ export function createDefaultExecutionComposition(input: {
       missing('the current grant does not authorize the original durable turn');
     }
     const mode = currentContext.loopControl.mode;
-    // The read-only historical loop issues no Provider work. Its capability
-    // digest hashes this exact declared read-only profile through the existing
-    // template profile owner; it never borrows the current grant record digest.
     const historicalProfile = { profileId: 'task-execution-context', role: 'execution' as const, mode,
       observationScopes: ['task'] as const, observationCapabilities: ['read-task'] as const,
-      orchestrationScope: 'local' as const, orchestrationCapabilities: [] as const, capabilityDigest: '' };
+      orchestrationScope: 'local' as const, orchestrationCapabilities: [] as const };
     const restored = await AgentLoopRuntime.restoreHistoricalTurn({
       role: 'execution', mode,
-      profiles: [{ ...historicalProfile, capabilityDigest: digestModeCapabilityProfile(historicalProfile) }],
+      profiles: [historicalProfile],
       budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
       permissionRevision: String(grant.grant.revision),
       observationStreamId: currentContext.loopControl.inboxStreamId, now: input.now,
@@ -621,7 +616,6 @@ export function createDefaultExecutionComposition(input: {
         pipelineNodeId: 'pipeline.execute', attempt: 1, executionEpoch: allocation.attemptExecutionEpoch,
         inputRevision: allocation.inputRevision, ...criteria, targetRefs: allocation.inputRefs,
         expectedOutputRefs: [`operation://${allocation.operationId.value}/output`],
-        acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
         requiredCapabilities: grant.grant.capability.capabilities, mergeGate: 'not-required' };
       const initialBinding = resume ? initialBindingOf(resume.source.initial) : undefined;
       const turnId = initialBinding?.admittedTurn.turnId ?? newActiveTurnId(allocation.operationId.value);
@@ -786,7 +780,7 @@ export function createDefaultExecutionComposition(input: {
       const loop = resume?.loop ?? await AgentLoopRuntime.start({ agentRuntimeId: allocation.runtimeId, role: 'execution', mode: 'observation',
         profiles: [{ profileId: 'task-execution-context', role: 'execution', mode: 'observation',
           observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'local',
-          orchestrationCapabilities: [], capabilityDigest: composition!.binding.capabilityDigest }],
+          orchestrationCapabilities: [] }],
         budget: { maxModeTransitions: 4, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 4 },
         scope: allocation.scope, executionEpoch: allocation.attemptExecutionEpoch, permissionRevision: String(grant.grant.revision),
         observationStreamId: `execution:${allocation.operationId.value}`, now: input.now,

@@ -1,14 +1,11 @@
-import { createHash } from 'node:crypto';
 import type { EvidenceRef, WorkAssignment, WorkResult } from '../../../contracts/src/index.js';
 
 /**
- * One produced subject body handed to the reviewer with the ref and digest the
- * orchestration assignment already declared.
+ * One produced subject body handed to the reviewer with its declared ref.
  */
 export interface ReviewSubjectMaterial {
   readonly ref: string;
   readonly body: string;
-  readonly digest: string;
 }
 
 export interface ExecutorReviewEvidence {
@@ -22,7 +19,6 @@ export interface ExecutorReviewEvidence {
  */
 export interface ReviewMaterial {
   readonly acceptanceCriteria: string;
-  readonly acceptanceCriteriaDigest: string;
   readonly subjects: readonly ReviewSubjectMaterial[];
   readonly executorEvidence?: readonly ExecutorReviewEvidence[];
 }
@@ -45,10 +41,6 @@ export interface AcceptanceCriteriaSource {
   readonly incompleteCriteria: readonly string[];
 }
 
-export function digestOf(content: string): string {
-  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
-}
-
 /**
  * Canonical acceptance criteria content for one assignment. The content is
  * derived from the assignment's declared criteria, so it is reproducible on
@@ -65,8 +57,8 @@ export function acceptanceCriteriaContent(assignment: AcceptanceCriteriaSource):
 
 /**
  * Assemble and verify the review material before any reviewer is invoked.
- * Missing, empty, or digest-drifted material throws instead of silently
- * degrading into an identity-only review.
+ * Missing or empty material throws instead of silently degrading into an
+ * identity-only review.
  */
 export function resolveReviewMaterial(input: ReviewMaterialRequest): ReviewMaterial {
   const { workerAssignment, workerResult } = input;
@@ -74,9 +66,6 @@ export function resolveReviewMaterial(input: ReviewMaterialRequest): ReviewMater
   const acceptanceCriteria = acceptanceCriteriaContent(workerAssignment);
   if (!acceptanceCriteria.trim()) {
     throw new Error('review acceptance criteria content is empty');
-  }
-  if (digestOf(acceptanceCriteria) !== workerAssignment.acceptanceCriteriaDigest) {
-    throw new Error('review acceptance criteria content does not match acceptanceCriteriaDigest');
   }
   if (input.subjects.length !== workerAssignment.targetRefs.length) {
     throw new Error('review subjects must cover every assignment target ref');
@@ -89,20 +78,14 @@ export function resolveReviewMaterial(input: ReviewMaterialRequest): ReviewMater
     if (!subject.body.trim()) {
       throw new Error(`review subject body is empty for ${subject.ref}`);
     }
-    const digest = digestOf(subject.body);
-    const produced = workerResult.producedArtifactDigests[index];
-    if (produced === undefined || produced !== digest) {
-      throw new Error('review subject body digest must match the produced artifact digest');
-    }
     const carriedBody = workerResult.producedArtifactBodies?.[index];
     if (carriedBody !== undefined && carriedBody !== subject.body) {
       throw new Error('review subject body must match the produced artifact body');
     }
-    return { ref: subject.ref, body: subject.body, digest };
+    return { ref: subject.ref, body: subject.body };
   });
   return {
     acceptanceCriteria,
-    acceptanceCriteriaDigest: workerAssignment.acceptanceCriteriaDigest,
     subjects,
     executorEvidence: [
       ...(input.executorEvidence ?? result.executorEvidence ?? []),
@@ -121,17 +104,15 @@ export function assertReviewMaterial(material: ReviewMaterial | undefined): Revi
   if (!material.acceptanceCriteria.trim()) {
     throw new Error('review request carries empty acceptance criteria content');
   }
-  if (digestOf(material.acceptanceCriteria) !== material.acceptanceCriteriaDigest) {
-    throw new Error('review request acceptance criteria content does not match its digest');
-  }
   if (material.subjects.length === 0) {
     throw new Error('review request carries no subject bodies');
   }
+  const refs = new Set<string>();
   for (const subject of material.subjects) {
+    if (!subject.ref.trim()) throw new Error('review request carries an empty subject ref');
+    if (refs.has(subject.ref)) throw new Error(`review request carries a duplicate subject ref for ${subject.ref}`);
+    refs.add(subject.ref);
     if (!subject.body.trim()) throw new Error(`review request carries an empty subject body for ${subject.ref}`);
-    if (digestOf(subject.body) !== subject.digest) {
-      throw new Error(`review subject body does not match its digest for ${subject.ref}`);
-    }
   }
   return material;
 }

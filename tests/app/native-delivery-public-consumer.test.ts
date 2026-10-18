@@ -131,7 +131,7 @@ if (!coldConsumerMode) test('App child checkpoint adapter commits native pre/rev
   const recoveryStateRef = evidence(admission.commitId);
   const worker: WorkAssignment = { assignmentId: 'worker', taskId: scope.taskId, pipelineNodeId: 'child-node',
     attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'review child', targetRefs: [], expectedOutputRefs: [],
-    acceptanceCriteriaDigest: 'criteria', successCriteria: ['native checkpoint readback'], failureCriteria: [], incompleteCriteria: [],
+    successCriteria: ['native checkpoint readback'], failureCriteria: [], incompleteCriteria: [],
     requiredCapabilities: [], mergeGate: 'not-required' };
   const originalAdmittedTurn: AdmittedTurn = { turnId: 'child-turn', workAssignmentRef: worker.assignmentId,
     taskRef: scope.taskId, scopeRef: scope, cycleRef: scope.cycleId, inputRevision: 1, directiveRevision: 3,
@@ -145,7 +145,7 @@ if (!coldConsumerMode) test('App child checkpoint adapter commits native pre/rev
     businessRegistrationCommitRef: await fact('child-registration') };
   const review: ReviewAssignment = { assignmentId: 'review-assignment', taskId: scope.taskId.value,
     workerAgentId: 'reviewer', reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
-    acceptanceCriteriaDigest: worker.acceptanceCriteriaDigest, subjectRefs: ['subject'], subjectDigests: ['subject-digest'],
+    subjectRefs: ['subject'],
     workerCapabilities: ['provider.execution'], requiredCapabilities: ['review.quality'], mergeGate: 'not-required' };
   const selected = { kind: 'review' as const, invocationId: call.invocationId, assignment: review,
     agentId: 'reviewer', attempt: 1, executionEpoch: 1, scope };
@@ -270,7 +270,7 @@ if (!coldConsumerMode) test('direct Runtime inspect delivery consumes verified r
     result: { ...execution, toolId: 'file.read', callId: 'read-call', status: 'succeeded', outputRefs: [outputRef], outputRef, outputDigest: digest, evidenceRefs: [evidence] },
     rawOutput: { ref: evidence, view: { kind: 'utf8-text' } },
   } } };
-  const assignment: WorkAssignment = { assignmentId: 'assignment', taskId: scope.taskId!, pipelineNodeId: 'node', attempt: 1, executionEpoch: 3, inputRevision: 1, objective: 'deliver read output', targetRefs: [], expectedOutputRefs: [], acceptanceCriteriaDigest: digest, successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' };
+  const assignment: WorkAssignment = { assignmentId: 'assignment', taskId: scope.taskId!, pipelineNodeId: 'node', attempt: 1, executionEpoch: 3, inputRevision: 1, objective: 'deliver read output', targetRefs: [], expectedOutputRefs: [], successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' };
   const section = { text: 'read output', evidenceRefs: [evidence] };
   const acceptedEnd: StandardTurnEndCommand = { kind: 'standard-turn-end', identity: { turnId: 'turn', workAssignmentRef: assignment.assignmentId, taskRef: assignment.taskId, scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 3, runtimeBindingRef: 'binding', permissionRevision: 'permission' }, summary: { goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [evidence.locator], resolvedEvidenceRefs: [evidence] };
   const inspect: InspectToolCompletionDescriptor = { execution, scope: evidence.scope, toolOperationId, requestId: 'request', callId: 'read-call', toolId: 'file.read', intentKind: 'inspect', status: 'succeeded', evidenceRefs: [evidence] };
@@ -285,7 +285,6 @@ if (!coldConsumerMode) test('direct Runtime inspect delivery consumes verified r
   const binding = bindAssignmentDelivery({ assignment, readback });
   assert.deepEqual(binding.outputRefs, [outputRef]);
   assert.deepEqual(binding.producedArtifactRefs, [outputRef]);
-  assert.deepEqual(binding.producedArtifactDigests, [digest]);
   assert.deepEqual(binding.producedArtifactBodies, [new TextDecoder().decode(bytes)]);
 
   const rejects = async (candidate: StandardTurnDeliveryReadInput, code: StandardTurnDeliveryError['code']): Promise<void> => {

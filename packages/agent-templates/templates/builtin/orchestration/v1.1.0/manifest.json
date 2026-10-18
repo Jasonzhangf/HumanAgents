@@ -103,8 +103,7 @@
         "create-assignment",
         "request-review",
         "request-merge"
-      ],
-      "capabilityDigest": "sha256:a61a9c8bb17aeff23f5df071c0f8fbc5beb1f07ed62dc4199b65e236629d0cd5"
+      ]
     },
     "orchestration": {
       "profileId": "builtin/orchestration/orchestration@1.1.0",
@@ -129,9 +128,7 @@
         "create-assignment",
         "request-review",
         "request-merge"
-      ],
-      "capabilityDigest": "sha256:84ae7f91dda578ad1fe493779c04bba90c89c0d8288977a21c93907e7e3e219b"
+      ]
     }
-  },
-  "digest": "fnv1a:b1652094"
+  }
 }

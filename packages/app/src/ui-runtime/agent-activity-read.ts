@@ -751,10 +751,8 @@ function reviewedObjective(review: ReviewAssignment, work: readonly ReturnedWork
     assignment.taskId.value === review.taskId && result.agentId === review.workerAgentId
     && assignment.executionEpoch === review.executionEpoch && assignment.attempt === review.attempt
     && assignment.inputRevision === review.inputRevision
-    && assignment.acceptanceCriteriaDigest === review.acceptanceCriteriaDigest
     && review.subjectRefs.length > 0
-    && review.subjectRefs.every((ref, index) => result.producedArtifactRefs.some((artifact, at) =>
-      artifact === ref && result.producedArtifactDigests[at] === review.subjectDigests[index])));
+    && review.subjectRefs.every((ref) => result.producedArtifactRefs.includes(ref)));
   // More than one matching assignment is ambiguous, even if its text happens to agree.
   const assignments = new Map(matches.map(({ assignment }) => [assignment.assignmentId, assignment]));
   if (assignments.size !== 1) return undefined;

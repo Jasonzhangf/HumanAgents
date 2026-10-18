@@ -121,7 +121,6 @@ function identity(turnId: string): Identity {
     objective: 'exercise recovery-assets cold read',
     targetRefs: [`operation://${turnId}/output`],
     expectedOutputRefs: [`operation://${turnId}/output`],
-    acceptanceCriteriaDigest: 'sha256:j1-acceptance',
     successCriteria: ['recovery assets are committed'],
     failureCriteria: ['recovery assets are missing'],
     incompleteCriteria: ['recovery assets are unverified'],

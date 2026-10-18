@@ -30,7 +30,6 @@ export interface AgentModeCapabilityProfile {
   readonly observationCapabilities: readonly string[];
   readonly orchestrationScope: OrchestrationScope;
   readonly orchestrationCapabilities: readonly string[];
-  readonly capabilityDigest: string;
 }
 
 export interface AgentModeCapabilityProfiles {
@@ -60,7 +59,6 @@ export interface AgentTemplateManifest {
   readonly testFixtureRefs: readonly string[];
   readonly memoryContextPolicy: MemoryContextPolicy;
   readonly driverRequirements: DriverRequirements;
-  readonly digest: string;
 }
 
 export interface MemoryContextPolicy {
@@ -83,7 +81,6 @@ export interface CompiledAgentTemplate {
   readonly toolCapabilityRefs: readonly string[];
   readonly builtInTools: readonly AgentBuiltInTool[];
   readonly promptSegmentRefs: readonly string[];
-  readonly promptSegmentDigest: string;
   readonly modeCapabilityProfile: AgentModeCapabilityProfiles;
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
@@ -91,7 +88,6 @@ export interface CompiledAgentTemplate {
   readonly observationProjectionRef: string;
   readonly memoryContextPolicy: MemoryContextPolicy;
   readonly driverRequirements: DriverRequirements;
-  readonly manifestDigest: string;
 }
 
 export interface LoadedAgentTemplate extends CompiledAgentTemplate {
@@ -102,7 +98,6 @@ export interface LoadedAgentTemplate extends CompiledAgentTemplate {
 export interface AgentPromptSegment {
   readonly ref: string;
   readonly content: string;
-  readonly digest: string;
 }
 
 export interface AgentPromptSource {
@@ -111,7 +106,6 @@ export interface AgentPromptSource {
 
 export interface LoadedAgentPromptSegments {
   readonly segments: readonly AgentPromptSegment[];
-  readonly contentDigest: string;
 }
 
 export interface AgentTemplateRegistry {

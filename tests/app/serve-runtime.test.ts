@@ -39,7 +39,7 @@ import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/i
 import type { CheckpointJournalPort } from '../../packages/runtime/src/checkpoints/ports.js';
 import type { ReviewAssignment } from '../../packages/runtime/src/review/index.js';
 import type { ReviewResult } from '../../packages/runtime/src/review/index.js';
-import { AgentRuntimePoolManager, acceptanceCriteriaContent, digestOf, resolveReviewMaterial } from '../../packages/runtime/src/orchestration/index.js';
+import { AgentRuntimePoolManager, resolveReviewMaterial } from '../../packages/runtime/src/orchestration/index.js';
 import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
 import type { ExecutionAgentPort, TaskExecutionHandle } from '../../packages/runtime/src/orchestration/index.js';
 
@@ -183,7 +183,6 @@ function assignment(task: Task, overrides: Partial<WorkAssignment> = {}): WorkAs
     objective: criteria.objective,
     targetRefs: ['serve-target'],
     expectedOutputRefs: ['serve-output'],
-    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
     successCriteria: [...criteria.successCriteria],
     failureCriteria: [...criteria.failureCriteria],
     incompleteCriteria: [...criteria.incompleteCriteria],
@@ -455,14 +454,12 @@ test('serve runtime composes and closes a task-scoped M3 dispatch', async () => 
   });
 
   assembly.orchestration.planStage({ nodeId: 'serve-stage', taskId: task.id });
-  const serveArtifactDigest = digestOf(serveArtifactBody);
   const dispatched = await assembly.orchestration.dispatch({
     stageNodeId: 'serve-stage',
-    assignment: assignment(task, { expectedArtifactDigests: [serveArtifactDigest] }),
+    assignment: assignment(task),
     agentId: 'serve-worker',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: [serveArtifactDigest],
     reviewSubjects: [{ ref: 'serve-target', body: serveArtifactBody }],
   });
 
@@ -491,8 +488,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
   const deterministicPorts = createDeterministicServeOrchestrationPorts();
   // The deterministic fixture execution agent returns refs and digests but no
   // produced body, which would make the review gate fail closed on an empty
-  // subject. Give it a real body derived from the same target refs it reports
-  // so refs, digests and body all describe one artifact.
+  // subject. Give it a real body derived from the same target refs it reports.
   const fixtureWorker = deterministicPorts.executionAgent!;
   const fixtureBody = 'serve orchestration fixture artifact body';
   const decorateWorkerDelivery = (
@@ -502,9 +498,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
     const result = 'result' in delivery ? delivery.result : delivery;
     return {
       ...result,
-      // One artifact: the ref, its digest and its body must all describe the
-      // same produced text, so the review gate can recompute the digest.
-      producedArtifactDigests: input.assignment.targetRefs.map(() => digestOf(fixtureBody)),
+      // One artifact: the ref and body describe the same produced text.
       producedArtifactBodies: input.assignment.targetRefs.map(() => fixtureBody),
       // The composed provider fixture reports its own organ; the feedback
       // event scope is the task's, so evidence must be re-scoped to it.
@@ -833,7 +827,6 @@ test('RCC orchestration ports provide review and merge agents for the live execu
     pipelineNodeId: 'serve-rcc-stage',
     targetRefs: ['serve-rcc-output'],
     expectedOutputRefs: ['serve-rcc-output'],
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   const worker = await runDeterministicWorker({
     workerPorts,
@@ -845,7 +838,6 @@ test('RCC orchestration ports provide review and merge agents for the live execu
   assert.equal(worker.status, 'succeeded');
   assert.equal(worker.agentId, 'serve-rcc-execution-agent');
   assert.deepEqual(worker.outputRefs, ['serve-rcc-output']);
-  assert.equal(worker.producedArtifactDigests.length, 1);
 
   const reviewAssignment: ReviewAssignment = {
     assignmentId: 'serve-rcc-review',
@@ -855,9 +847,7 @@ test('RCC orchestration ports provide review and merge agents for the live execu
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
     subjectRefs: ['serve-rcc-output'],
-    subjectDigests: [],
     workerCapabilities: ['provider.execution'],
     requiredCapabilities: ['quality.review'],
     mergeGate: 'required',
@@ -905,7 +895,6 @@ test('RCC review agent stays inconclusive when the model exhausts retries withou
   const workAssignment = {
     ...assignment(task),
     assignmentId: 'serve-rcc-omission-worker',
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   const worker = await runDeterministicWorker({
     workerPorts,
@@ -923,9 +912,7 @@ test('RCC review agent stays inconclusive when the model exhausts retries withou
       attempt: 1,
       executionEpoch: 1,
       inputRevision: 1,
-      acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
       subjectRefs: ['serve-output'],
-      subjectDigests: [],
       workerCapabilities: ['provider.execution'],
       requiredCapabilities: ['quality.review'],
       mergeGate: 'required',
@@ -996,9 +983,7 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: 'sha256:serve-rcc-review-retry-criteria',
     subjectRefs: ['serve-output'],
-    subjectDigests: [],
     workerCapabilities: ['provider.execution'],
     requiredCapabilities: ['quality.review'],
     mergeGate: 'required',
@@ -1006,7 +991,6 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
   const workerAssignment: WorkAssignment = {
     ...assignment(task),
     assignmentId: 'serve-rcc-retry-worker',
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   const workerResult: WorkResult = {
     ...assignment(task),
@@ -1018,7 +1002,6 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
     inputRevision: 1,
     taskId: task.id,
     producedArtifactRefs: ['serve-output'],
-    producedArtifactDigests: [digestOf(serveArtifactBody)],
     status: 'succeeded',
     summary: 'worker result',
     outputRefs: ['serve-output'],
@@ -1224,7 +1207,6 @@ test('RCC review agent renders executor tool evidence into the review prompt', a
     ...assignment(task),
     assignmentId: 'serve-rcc-review-executor-worker',
     pipelineNodeId: 'serve-rcc-review-executor-stage',
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   const worker = await runDeterministicWorker({
     workerPorts,
@@ -1254,9 +1236,7 @@ test('RCC review agent renders executor tool evidence into the review prompt', a
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
     subjectRefs: [...workAssignment.targetRefs],
-    subjectDigests: [...worker.producedArtifactDigests],
     workerCapabilities: ['provider.execution'],
     requiredCapabilities: ['quality.review'],
     mergeGate: 'required',
@@ -1328,9 +1308,7 @@ test('RCC review agent uses the terminal verdict when review markers conflict', 
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: 'sha256:serve-rcc-review-criteria',
     subjectRefs: ['serve-output'],
-    subjectDigests: [],
     workerCapabilities: ['provider.execution'],
     requiredCapabilities: ['quality.review'],
     mergeGate: 'required',
@@ -1338,7 +1316,6 @@ test('RCC review agent uses the terminal verdict when review markers conflict', 
   const workerAssignment: WorkAssignment = {
     ...assignment(task),
     assignmentId: 'serve-rcc-conflict-worker',
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   const workerResult: WorkResult = {
     ...assignment(task),
@@ -1350,7 +1327,6 @@ test('RCC review agent uses the terminal verdict when review markers conflict', 
     inputRevision: 1,
     taskId: task.id,
     producedArtifactRefs: ['serve-output'],
-    producedArtifactDigests: [digestOf(serveArtifactBody)],
     status: 'succeeded',
     summary: 'worker result',
     outputRefs: ['serve-output'],
@@ -1417,7 +1393,6 @@ test('RCC ports reach the runtime review and Harness merge gates with provider a
     pipelineNodeId: 'serve-rcc-manager-stage',
     targetRefs: ['serve-rcc-manager-output'],
     expectedOutputRefs: ['serve-rcc-manager-output'],
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   try {
     assembly.orchestration.planStage({ nodeId: workAssignment.pipelineNodeId, taskId: task.id });
@@ -1467,7 +1442,6 @@ async function reviewWithProviderText(input: {
     ...assignment(task),
     assignmentId: `serve-chunk-${input.taskSuffix}-assignment`,
     pipelineNodeId: `serve-chunk-${input.taskSuffix}-stage`,
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   const worker = await runDeterministicWorker({
     workerPorts,
@@ -1484,9 +1458,7 @@ async function reviewWithProviderText(input: {
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
     subjectRefs: [...workAssignment.targetRefs],
-    subjectDigests: [...worker.producedArtifactDigests],
     workerCapabilities: ['provider.execution'],
     requiredCapabilities: ['quality.review'],
     mergeGate: 'required',
@@ -1585,7 +1557,6 @@ test('RCC review instance delivers the actual provider text of the same review c
   const workAssignment: WorkAssignment = {
     ...assignment(task),
     assignmentId: 'serve-rcc-instance-delivery-worker',
-    expectedArtifactDigests: [digestOf(serveArtifactBody)],
   };
   const worker = await runDeterministicWorker({
     workerPorts,
@@ -1602,9 +1573,7 @@ test('RCC review instance delivers the actual provider text of the same review c
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
     subjectRefs: ['serve-output'],
-    subjectDigests: [],
     workerCapabilities: ['provider.execution'],
     requiredCapabilities: ['quality.review'],
     mergeGate: 'required',

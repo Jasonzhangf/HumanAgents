@@ -29,7 +29,7 @@ import {
 } from '../review/index.js';
 import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from './assignment-graph.js';
 import { OrchestrationError } from './errors.js';
-import { assertReviewMaterial, digestOf, type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
+import { assertReviewMaterial, type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
 import { AgentRuntimePoolManager, type RuntimePoolAcquireResult } from './runtime-pool.js';
 import { scopeContains } from '../events/acl.js';
 import type {
@@ -267,7 +267,7 @@ type DurableReviewOutcome =
 
 type ReturnedChildCall = Extract<IndependentChildCallResult, { readonly state: 'returned' }>;
 interface ChildCallAttempt {
-  readonly digest: string;
+  readonly canonicalInput: string;
   inFlight?: Promise<IndependentChildCallResult>;
   returned?: ReturnedChildCall;
   terminal?: IndependentChildCallResult;
@@ -389,7 +389,7 @@ export class OrchestrationManager {
         scope: input.scope, conditionRef: invocationId,
       }),
     });
-    let digest: string;
+    let canonicalInput: string;
     try {
       for (const value of [invocationId, input.call.providerRequestId, input.call.toolCallId, input.agentId]) {
         if (!value.trim()) throw new Error('registered child call identity is required');
@@ -411,7 +411,6 @@ export class OrchestrationManager {
           executorEvidence: input.input.reviewMaterial.executorEvidence,
         });
         if (material.acceptanceCriteria !== input.input.reviewMaterial.acceptanceCriteria
-          || material.acceptanceCriteriaDigest !== input.input.reviewMaterial.acceptanceCriteriaDigest
           || canonicalJsonStringify(material.subjects) !== canonicalJsonStringify(input.input.reviewMaterial.subjects)
           || canonicalJsonStringify(input.input.scope) !== canonicalJsonStringify(input.scope)) {
           throw new Error('review material or scope does not match the real worker');
@@ -419,7 +418,7 @@ export class OrchestrationManager {
         const expected = createReviewAssignments({
           workerAssignment: worker, workerResult: input.input.workerResult,
           reviewKinds: [input.input.reviewAssignment.reviewKind],
-          subjectRefs: worker.targetRefs, subjectDigests: input.input.workerResult.producedArtifactDigests,
+          subjectRefs: worker.targetRefs,
         })[0];
         if (canonicalJsonStringify(expected) !== canonicalJsonStringify(input.input.reviewAssignment)) {
           throw new Error('review assignment does not match the real worker');
@@ -437,20 +436,20 @@ export class OrchestrationManager {
           validateJournalCommitRef(input.milestoneReview.planRevisionCommitRef);
         }
       }
-      digest = digestOf(canonicalJsonStringify({
+      canonicalInput = canonicalJsonStringify({
         call: input.call, kind: input.kind, agentId: input.agentId, scope: input.scope,
         roleId: input.kind === 'execution' ? input.executionAgent.roleId : input.reviewAgent.roleId,
         request: input.kind === 'execution' ? input.assignment : { ...input.input, signal: undefined },
         inspection: input.kind === 'execution' ? input.inspection ?? null : null,
         milestoneReview: input.kind === 'review' ? input.milestoneReview ?? null : null,
-      }));
+      });
     } catch (error) { return blocked(error); }
     let attempt = this.childCalls.get(invocationId);
-    if (attempt && attempt.digest !== digest) return blocked(new Error('registered invocation already binds different child input'));
+    if (attempt && attempt.canonicalInput !== canonicalInput) return blocked(new Error('registered invocation already binds different child input'));
     if (attempt?.inFlight) return attempt.inFlight;
     if (attempt?.terminal) return attempt.terminal;
     if (!attempt) {
-      attempt = { digest, invoked: false };
+      attempt = { canonicalInput, invoked: false };
       this.childCalls.set(invocationId, attempt);
     }
     const current = attempt;
@@ -1249,26 +1248,9 @@ export class OrchestrationManager {
       return this.blockedResult(record, unavailable, input.scope);
     }
 
-    const subjectDigests = input.reviewSubjectDigests ?? result.producedArtifactDigests;
-    if (subjectDigests.length !== input.assignment.targetRefs.length) {
-      return this.blockedResult(
-        record,
-        issue(
-          'review-subject-invalid',
-          this.ownerId,
-          'review subject digests must match assignment target refs',
-          { kind: 'recover', ref: 'orchestration.review.subject' },
-          [evidence(input.scope, 'orchestration.review.subject')],
-          'orchestration.review.subject',
-        ),
-        input.scope,
-      );
-    }
-
     let reviewMaterial: ReviewMaterial;
     try {
-      // The produced body is carried by the result, the same way the subject
-      // digests already fall back to the result: the caller cannot know a
+      // The produced body is carried by the result: the caller cannot know a
       // body that only exists after the worker ran. A caller-supplied subject
       // remains an explicit override.
       const overrides = new Map((input.reviewSubjects ?? []).map((subject) => [subject.ref, subject.body]));
@@ -1305,7 +1287,6 @@ export class OrchestrationManager {
         workerResult: result,
         ...(input.reviewKinds ? { reviewKinds: input.reviewKinds } : {}),
         subjectRefs: input.assignment.targetRefs,
-        subjectDigests,
       });
     } catch (error) {
       return this.blockedResult(

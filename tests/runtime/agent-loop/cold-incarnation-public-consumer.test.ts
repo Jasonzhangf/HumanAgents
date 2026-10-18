@@ -82,7 +82,7 @@ function request(): AgentLoopStartRequest {
   return {
     agentRuntimeId: 'cold-old-runtime', role: 'orchestration', mode: 'observation', scope, executionEpoch: 1,
     permissionRevision: 'historical-permission', observationStreamId: 'cold-stream', now: () => new Date('2026-10-13T00:00:00.000Z'),
-    profiles: [{ profileId: 'cold-observer', role: 'orchestration', mode: 'observation', observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'project', orchestrationCapabilities: [], capabilityDigest: 'sha256:cold-profile' }],
+    profiles: [{ profileId: 'cold-observer', role: 'orchestration', mode: 'observation', observationScopes: ['task'], observationCapabilities: ['read-task'], orchestrationScope: 'project', orchestrationCapabilities: [] }],
     budget: { maxModeTransitions: 2, maxObservationScopes: 4, maxContextReplacements: 4, maxDeferredEvents: 2 },
     activeRefs: ['task:goal'], omittedRefs: ['raw:old'],
     durableContext: { stablePrefix: [{ goal: 'same business turn' }], indexRefs: [{ ref: 'index:task' }], dynamicHead: [{ fact: 'accepted tool result' }], repairRefs: [{ responsibility: 'recover:original', unresolvedOperationRefs: ['operation:pending'], firstErrorRef: 'error:first' }] },

@@ -681,7 +681,6 @@ test('C3b canonical correction rewind forward chain reaches Memory analysis from
         observationCapabilities: ['read-task'],
         orchestrationScope: 'local',
         orchestrationCapabilities: [],
-        capabilityDigest: 'sha256:c3b-real-chain-profile',
       }],
       budget: {
         maxModeTransitions: 4,
