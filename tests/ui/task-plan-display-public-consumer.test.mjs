@@ -158,6 +158,16 @@ function byData(node, key, value) {
   return walk(node).filter((entry) => entry.dataset?.[key] === value)
 }
 
+function openTechnicalDetail(node, opened) {
+  const button = walk(node).find((entry) => (
+    entry.tagName === 'BUTTON' && entry.textContent === '技术详情'
+  ))
+  assert.ok(button, 'the existing technical-detail button must be present')
+  button.click()
+  assert.equal(opened.length, 1)
+  return Object.fromEntries(opened[0].detail.entries)
+}
+
 const readOk = (value) => ({ ok: true, value })
 
 test('current resolves only the accepted revision, not a later published one', () => {
@@ -193,12 +203,25 @@ test('current rejects an unknown or mismatched accepted identity instead of usin
   assert.equal(mismatched.ok, false)
   assert.equal(mismatched.failure.code, 'task-plan-history.current-mismatch')
 
+  const opened = []
   const section = renderTaskPlanCurrentSection(readOk(history({
     revisions: [revision(1, 'v1')],
     current: { state: 'unknown', reason: 'not accepted yet' },
-  })))
+  })), {
+    onOpenDetail: (detail, button) => opened.push({ detail, button }),
+  })
   assert.equal(byData(section, 'planRevision', 'v1').length, 0)
-  assert.match(allText(section), /当前权威计划版本未知/)
+  const mainText = allText(section)
+  assert.match(mainText, /当前任务计划尚无法确认/)
+  assert.match(mainText, /不能将保留版本当作当前计划/)
+  assert.doesNotMatch(mainText, /not accepted yet|refresh the original task projection read/)
+  const detail = openTechnicalDetail(section, opened)
+  assert.deepEqual(detail, {
+    code: section.planFailure.code,
+    owner: section.planFailure.ownerId,
+    message: section.planFailure.message,
+    nextAction: section.planFailure.nextAction,
+  })
 })
 
 test('semantic renders complete returned order with reasons, changes and coverage', () => {
@@ -296,8 +319,20 @@ test('scoped and read failures stay explicit, preserve prior content and never m
   assert.equal(missing.ok, false)
   assert.equal(missing.failure.code, 'task-plan-history.unexpected-surface')
 
-  const failureView = renderTaskPlanSemanticView(failed)
-  assert.match(allText(failureView), /journal read failed/)
+  const opened = []
+  const failureView = renderTaskPlanSemanticView(failed, {
+    onOpenDetail: (detail, button) => opened.push({ detail, button }),
+  })
+  const failureText = allText(failureView)
+  assert.match(failureText, /任务计划暂时无法读取/)
+  assert.match(failureText, /任务状态不能据此判定/)
+  assert.doesNotMatch(failureText, /journal read failed|restore the read/)
+  assert.deepEqual(openTechnicalDetail(failureView, opened), {
+    code: 'task-plan-history.read-failed',
+    owner: 'humanagent.app.ui-runtime.task-plan-history',
+    message: 'journal read failed',
+    nextAction: 'restore the read',
+  })
   assert.equal(walk(failureView).filter((n) => n.dataset?.planRevision).length, 0)
 
   // The real staged transition keeps prior content and cannot report success on

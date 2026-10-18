@@ -550,6 +550,16 @@ export class PreparedExecutionStop {
     };
   }
 
+  async hasPreparedExecutionHistory(allocation: RuntimeExecutionAllocation): Promise<boolean> {
+    const records = await this.journal.replay();
+    if (findRegistration(records, allocation) !== null) return true;
+    return records
+      .map(factEntry)
+      .some((entry) => entry !== null
+        && entry.fact.kind === 'preparation-entered'
+        && sameAllocation(entry.fact.allocation, allocation));
+  }
+
   async settle(selector: PreparedExecutionStopSelector): Promise<PreparedExecutionStopSettleResult> {
     const initialRecords = await this.journal.replay();
     const requested = findRequestedBySelector(initialRecords, selector);
