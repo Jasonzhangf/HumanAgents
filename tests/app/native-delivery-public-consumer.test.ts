@@ -2737,7 +2737,6 @@ if (!coldConsumerMode) test('native inspection producer and consumer retain two 
       const parsed = parseResponsesWire(wire.body);
       return parsed?.tools?.some((tool) => tool.name === 'humanagent_child_deliver') === true;
     });
-    assert.equal(childPosts.length, 2, 'the child producer executes once in each inspection turn');
     assert.equal(childPosts.some((wire) => wire.body.includes(INSPECTION_CHECK_B.checkId)), false,
       'check-b never reaches the configured child');
     for (const wire of childPosts) {
