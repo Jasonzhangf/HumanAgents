@@ -637,6 +637,7 @@ function plannerFrames(
   multiTurnAttempt?: number,
   turnCount: 2 | 3 = 2,
   inspection = false,
+  reviewPerCycle = false,
 ): readonly Record<string, unknown>[] {
   const task = requireRecord(payload.task, 'the task');
   const closure = requireRecord(payload.closure, 'the closure');
@@ -716,12 +717,26 @@ function plannerFrames(
     snapshot = requireRecord(requireRecord(payload.priorPlan, 'the prior plan').snapshot, 'the prior plan snapshot');
     decision = multiTurnAttempt !== undefined && multiTurnAttempt < turnCount ? 'continue' : 'complete';
   }
+  let reviewReason: string | undefined;
+  if (reviewPerCycle) {
+    const refined = (payload.refinedResults as unknown[]).map((entry) => requireRecord(entry, 'adopted refined result'));
+    assert.deepEqual(refined.map((entry) => entry.role), ['execution', 'review'],
+      'each independent Planner receives adopted execution and review results');
+    assert.deepEqual(refined.map((entry) => entry.status), ['succeeded', 'succeeded']);
+    const review = requireText(refined[1]!.summary, 'adopted review summary');
+    reviewReason = `Cycle ${multiTurnAttempt}: ${review}; ${decision}`;
+    snapshot = { ...snapshot, summary: `${goal.text}; ${result.text}; ${reviewReason}`,
+      nodes: (snapshot.nodes as Record<string, unknown>[]).map((node) => ({ ...node,
+        intent: `${directive}; ${reviewReason}`,
+        ...(firstPublication ? { definition: { directive } } : {}),
+      })) };
+  }
   const text = JSON.stringify({
     decision,
     snapshot,
-    reasonText: decision === 'continue'
+    reasonText: reviewReason ?? (decision === 'continue'
       ? 'the first closed turn adopted a child and requires the next standard turn'
-      : 'the whole-task plan is aligned to the closed turn',
+      : 'the whole-task plan is aligned to the closed turn'),
   });
   return [
     { type: 'response.created', response: { id: `response-${model}-planner` } },
@@ -755,6 +770,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly inspect?: boolean;
   readonly child?: boolean;
   readonly parallelChild?: boolean;
+  readonly reviewPerCycle?: boolean;
   readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
   readonly requiredBearer?: string;
@@ -816,7 +832,7 @@ async function textOnlyResponsesUpstream(input: {
           { type: 'response.output_text.done', item_id: 'planner-refused-text', text: '{}' },
           { type: 'response.completed', response: { id: 'planner-refused' } },
         ] : plannerFrames(input.model, planner, input.turnCount === undefined ? undefined : plannerAttempts,
-          input.turnCount ?? 2, input.inspection === true)));
+          input.turnCount ?? 2, input.inspection === true, input.reviewPerCycle === true)));
         return;
       }
       const review = reviewPayload(body);
@@ -960,7 +976,80 @@ async function textOnlyResponsesUpstream(input: {
           return;
         }
       }
-      if ((input.child || input.parallelChild) && !(input.turnCount !== undefined && plannerAttempts > 0)) {
+      if (input.reviewPerCycle) {
+        const cycle = plannerAttempts + 1;
+        const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
+          input?: { type: string; call_id?: string; output?: string }[] };
+        const resultFor = (callId: string) => wire.input?.find((item) => item.type === 'function_call_output' && item.call_id === callId);
+        const invoke = (callId: string, name: string, args: unknown) => {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.end(frame([
+            { type: 'response.created', response: { id: callId } },
+            { type: 'response.output_item.done', output_index: 0, item: {
+              type: 'function_call', call_id: callId, name, arguments: JSON.stringify(args) } },
+            { type: 'response.completed', response: { id: callId } },
+          ]));
+        };
+        const executionBody = cycle === 1 ? CHILD_BODY : TURN_TWO_DELIVERY;
+        if (wire.tools?.some((tool) => tool.name === 'humanagent_child_deliver')) {
+          const review = wire.model === 'review.only.model';
+          assert.equal(wire.model, review ? 'review.only.model' : 'child.only.model');
+          assert.equal(body.includes('text-only delivery probe'), false, 'child context excludes parent transcript');
+          if (review) assert.ok(body.includes(executionBody), 'review receives complete execution subject');
+          if (review && !resultFor(`cycle-${cycle}-review-read`)) {
+            invoke(`cycle-${cycle}-review-read`, 'file_read', { path: 'review-evidence.txt' });
+            return;
+          }
+          const delivered = resultFor(`cycle-${cycle}-child-delivery`);
+          if (!delivered) {
+            const ref = /locator=([^\s]+)/.exec(resultFor(`cycle-${cycle}-review-read`)?.output ?? '')?.[1];
+            invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
+              body: review ? `Cycle ${cycle} independent quality review` : executionBody,
+              ...(review ? { judgment: 'passed', findings: [{ detail: `Cycle ${cycle} delivery verified`,
+                severity: 'advisory', evidenceRefs: ref === undefined ? [] : [ref] }] } : {}),
+            });
+          } else {
+            const deliveryEvidence = delivered.output!.split('\n')
+              .find((line) => line.startsWith(`- evidenceId=child-body-${review ? 'review' : 'execution'}-`));
+            const ref = /locator=([^\s]+)/.exec(deliveryEvidence ?? '')?.[1];
+            assert.ok(ref, 'child delivery returns real evidence');
+            const section = { text: `Cycle ${cycle} child complete`, evidenceRefs: [ref] };
+            invoke(`cycle-${cycle}-child-end`, 'humanagent_turn_end', { summary: {
+              goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [ref] });
+          }
+          return;
+        }
+        const execCall = `cycle-${cycle}-execution`;
+        const reviewCall = `cycle-${cycle}-review`;
+        const execution = resultFor(execCall);
+        if (!execution) {
+          invoke(execCall, 'child_call', { kind: 'execution', agentId: 'orchestration-default',
+            purpose: `Cycle ${cycle} execution`, instructions: 'Publish the complete execution result and end the child turn.',
+            target: `Cycle ${cycle} delivery`, successCriteria: ['Return complete delivery'] });
+          return;
+        }
+        const refined = (output: string) => requireRecord(JSON.parse(output.split('\n[HumanAgent evidence refs]')[0]!), 'returned child');
+        const executed = refined(execution.output!);
+        assert.equal(executed.state, 'returned');
+        assert.equal(executed.summary, executionBody);
+        const reviewed = resultFor(reviewCall);
+        if (!reviewed) {
+          invoke(reviewCall, 'child_call', { kind: 'review', agentId: 'cycle-review',
+            subjectInvocationId: executed.invocationId, reviewKind: 'quality',
+            purpose: `Cycle ${cycle} quality review`, instructions: 'Review the complete execution subject, publish judgment and findings, then end the child turn.',
+            target: `Cycle ${cycle} delivery`, successCriteria: ['Verify complete delivery'] });
+          return;
+        }
+        const review = refined(reviewed.output!);
+        assert.equal(review.state, 'returned');
+        for (const [kind, child] of [['execution', executed], ['review', review]] as const) {
+          if (!resultFor(`cycle-${cycle}-adopt-${kind}`)) {
+            invoke(`cycle-${cycle}-adopt-${kind}`, 'child_adopt', { invocationId: child.invocationId });
+            return;
+          }
+        }
+      }
+      if (!input.reviewPerCycle && (input.child || input.parallelChild) && !(input.turnCount !== undefined && plannerAttempts > 0)) {
         const wire = JSON.parse(body) as { model: string; tools?: { name: string }[];
           input?: { type: string; call_id?: string; output?: string; name?: string }[] };
         const invoke = (callId: string, name: string, args: unknown) => {
@@ -1114,7 +1203,7 @@ async function textOnlyResponsesUpstream(input: {
             evidenceRefs: [admissionCommitId, ...deliveryRefs] }
           : section(TURN_ONE_RESULT),
         expectedNextStep: section(TURN_ONE_NEXT),
-      } : input.turnCount === 3 && plannerAttempts === 1 ? {
+      } : (input.turnCount === 3 || input.reviewPerCycle) && plannerAttempts === 1 ? {
         goal: section(TURN_TWO_GOAL), actions: section(TURN_TWO_ACTIONS),
         result: section(TURN_TWO_RESULT), expectedNextStep: section(TURN_TWO_NEXT),
       } : input.turnCount === 3 && plannerAttempts === 2 ? {
@@ -1155,6 +1244,7 @@ async function textOnlyResponsesUpstream(input: {
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end(frame(toolCall));
     })().catch((error: unknown) => {
+      if (input.reviewPerCycle) console.error('two-cycle upstream fixture error', error);
       response.writeHead(500, { 'content-type': 'text/plain' });
       response.end(String(error));
     });
@@ -1194,6 +1284,7 @@ async function textOnlyFixture(
   holdFirstExecutionOnce?: () => Promise<void>,
   inspection = false,
   holdInspectionAfterAdoptOnce?: () => Promise<void>,
+  reviewPerCycle = false,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1201,13 +1292,14 @@ async function textOnlyFixture(
   const workspace = join(root, 'workspace');
   await mkdir(workspace);
   if (inspect) await writeFile(join(workspace, 'read-delivery.txt'), EXACT_BODY, 'utf8');
+  if (reviewPerCycle) await writeFile(join(workspace, 'review-evidence.txt'), `${CHILD_BODY}\n${TURN_TWO_DELIVERY}`, 'utf8');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   const layout = nativeRuntimeLayout(paths);
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount,
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount, reviewPerCycle,
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
@@ -1241,9 +1333,10 @@ async function textOnlyFixture(
       .replace('route = "default"', 'route = "default-http-route"')
       .replace('baseUrl = "http://127.0.0.1:4444"', `baseUrl = "${upstream.baseUrl}"`)
       .replaceAll('driverRef = "fake"', 'driverRef = "rcc"');
-  await writeFile(configPath, config, 'utf8');
+  const reviewConfig = reviewPerCycle ? `${config}\n[[agents]]\nagentId = "cycle-review"\nroleId = "review"\ntemplateRef = "builtin/review@1.0.0"\nskills = []\ntools = []\npermissions = []\nmemoryScopes = ["task"]\nresourceClass = "background"\n${providerBlock.replace('text.only.model', 'review.only.model')}\n` : config;
+  await writeFile(configPath, reviewConfig, 'utf8');
   const configuration = await loadConfiguration(paths);
-  if (topLevelHttp === undefined) {
+  if (topLevelHttp === undefined && !reviewPerCycle) {
     const bindings = configuration.agentProviderBindings;
     assert.deepEqual(bindings.map((binding) => [binding.agentId, binding.roleId, binding.provider?.model]), [
       ['interaction-default', 'interaction', 'text.only.model'],
@@ -2293,6 +2386,113 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
   } finally {
     await fixture.upstream.close();
     await rm(fixture.root, { recursive: true });
+  }
+});
+
+// Multi-cycle review forwarding/history failure probability is unknown. Losing
+// adoption breaks Planner alignment. Cost: one bounded local CLI/HTTP fixture;
+// a temporary real forwarding omission must fail its review-role assertion.
+if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer advances plan revisions and preserves cold semantic history', async () => {
+  const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined, false, undefined, true);
+  let passed = false;
+  let serve: Awaited<ReturnType<typeof startServe>> | undefined;
+  try {
+    const { taskId, result, cookie } = await runNativeMultiTurnConsumer(fixture, 2);
+    assert.equal(result.code, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout.slice(result.stdout.indexOf('{'), result.stdout.lastIndexOf('}') + 1));
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
+    assert.equal(receipt.output, EXACT_BODY);
+    const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
+    const planners = posts.filter((wire) => plannerPayload(wire.body) !== undefined);
+    assert.equal(planners.length, 2);
+    const first = plannerPayload(planners[0]!.body)!;
+    const second = plannerPayload(planners[1]!.body)!;
+    assert.equal(first.priorPlan, null);
+    assert.equal(requireRecord(second.priorPlan, 'prior plan').sequence, 1);
+    for (const payload of [first, second]) {
+      assert.deepEqual((payload.refinedResults as Record<string, unknown>[]).map((entry) => entry.role), ['execution', 'review']);
+      const summary = requireRecord(requireRecord(payload.closure, 'closing checkpoint').summary, 'four-part summary');
+      for (const key of ['goal', 'actions', 'result', 'expectedNextStep']) {
+        requireText(requireRecord(summary[key], key).text, key);
+      }
+    }
+    const nextWire = posts.slice(posts.indexOf(planners[0]!) + 1).find((wire) => hasTurnEndSurface(wire.body));
+    assert.ok(nextWire);
+    if (!nextWire) throw new Error('missing second parent request');
+    await assertPriorSemanticCheckpointWire(fixture, nextWire.body, taskId, TURN_ONE_GOAL);
+    assert.equal((semanticCheckpointWires(nextWire.body)[0]!.adoptedChildren as unknown[]).length, 2);
+    assert.equal(nextWire.body.includes('cycle-1-child-delivery'), false, 'next parent uses semantics, not raw child tool history');
+
+    const coldJournal = new JsonlOrganJournal(fixture.layout.organJournalPath);
+    const scope = { organId: id('organ', 'humanagent-ui'), taskId };
+    const plans = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(coldJournal));
+    const revisions = [...await plans.replay(scope)].sort((a, b) => a.sequence - b.sequence);
+    assert.deepEqual(revisions.map((entry) => entry.sequence), [1, 2]);
+    assert.ok(revisions[0]!.revisionId !== revisions[1]!.revisionId);
+    assert.ok(revisions[0]!.snapshot.summary !== revisions[1]!.snapshot.summary);
+    for (let index = 0; index < 2; index++) {
+      assert.ok(revisions[index]!.snapshot.summary.includes(`Cycle ${index + 1}`));
+      assert.ok(revisions[index]!.snapshot.nodes[0]!.intent.includes(`Cycle ${index + 1}`));
+    }
+    const duties = await createJsonlClosedTurnPlannerCallJournal({ journal: coldJournal }).readTaskDuties(scope);
+    assert.equal(duties.length, 2);
+    assert.deepEqual(duties.map((entry) => entry.returned?.record.decision), ['continue', 'complete']);
+    const operations = new Set(duties.map((entry) => entry.returned!.record.duty.scope.operationId!.value));
+    const bindings = [...await listTaskActiveTurnBindings({ journal: coldJournal, scope })]
+      .filter((entry) => operations.has(entry.binding.scope.operationId!.value))
+      .sort((a, b) => a.commitRef.journalSeq - b.commitRef.journalSeq);
+    assert.equal(bindings.length, 2);
+    assert.equal(operations.size, 2);
+    assert.ok(bindings.every((entry) => entry.binding.scope.cycleId !== undefined));
+    assert.ok(bindings[0]!.binding.scope.cycleId!.value !== bindings[1]!.binding.scope.cycleId!.value);
+    assert.equal(bindings[0]!.binding.acceptedPlan, undefined);
+    assert.deepEqual(bindings[1]!.binding.acceptedPlan, { revisionId: revisions[0]!.revisionId,
+      revisionCommitRef: await plans.getCommitRef(scope, revisions[0]!.revisionId) });
+    const current = await createJsonlRuntimeTaskCurrentStateJournal({ journal: coldJournal }).read(scope);
+    assert.equal(current.state, 'known');
+    if (current.state !== 'known') throw new Error('missing durable current state');
+    assert.equal(current.value.task.state, 'succeeded');
+    assert.equal(current.value.currentPlan?.revisionId, revisions[1]!.revisionId);
+    const verified = await coldJournal.verify();
+    const publications = verified.records.filter((entry) => entry.payload?.['kind'] === 'native-semantic-history-publication'
+      && operations.has(entry.scope.operationId?.value ?? ''));
+    assert.equal(publications.length, 2);
+    for (const publication of publications) {
+      const context = requireRecord(publication.payload?.['contextView'], 'published context');
+      const viewRecord = verified.records.find((entry) => entry.payload?.['kind'] === 'native-semantic-context-view'
+        && JSON.stringify(entry.payload?.['identity']) === JSON.stringify(context.identity));
+      assert.ok(viewRecord, 'publication resolves its actual semantic context view');
+      const children = viewRecord!.payload?.['adoptedChildren'] as Record<string, unknown>[];
+      assert.deepEqual(children.map((child) => child.kind), ['execution', 'review']);
+      const review = children.find((child) => child.kind === 'review')!;
+      assert.ok(review.postReviewCheckpointRef);
+      assert.ok(verified.records.some((entry) => entry.checkpoint?.id.value === review.postReviewCheckpointRef),
+        'review references an actual durable post-review checkpoint');
+      const checkpoint = requireRecord(requireRecord(publication.payload?.['checkpoint'], 'checkpoint receipt').checkpoint, 'checkpoint');
+      requireText(checkpoint.summary, 'closing checkpoint summary');
+    }
+    const before = await readFile(fixture.layout.organJournalPath);
+    const preparedBefore = await readFile(fixture.layout.preparedJournalPath);
+    serve = await startServe({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+    const response = await fetch(`${serve.origin}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`,
+      { headers: { cookie, accept: 'application/json' } });
+    assert.equal(response.status, 200);
+    const dashboard = await response.json() as Record<string, unknown>;
+    assert.equal(dashboard.state, 'succeeded');
+    assert.equal(dashboard.output, EXACT_BODY);
+    assert.deepEqual(await readFile(fixture.layout.organJournalPath), before);
+    assert.deepEqual(await readFile(fixture.layout.preparedJournalPath), preparedBefore);
+    assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, posts.length);
+    console.log('two-cycle dynamic review evidence', JSON.stringify({ fixture: fixture.root, readerPid: serve.pid,
+      cycles: bindings.map((entry) => entry.binding.scope.cycleId), operations: [...operations],
+      revisions: revisions.map((entry) => ({ revisionId: entry.revisionId, sequence: entry.sequence, summary: entry.snapshot.summary })),
+      currentPlan: current.value.currentPlan, providerPosts: posts.length }));
+    passed = true;
+  } finally {
+    if (serve !== undefined) await serve.stop();
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`two-cycle review fixture retained: ${fixture.root}`);
   }
 });
 
