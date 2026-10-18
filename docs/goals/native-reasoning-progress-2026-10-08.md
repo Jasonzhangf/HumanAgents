@@ -9,6 +9,9 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- childcanonicalprompt来源56967bc2已标准cherry候选bc4b683d，仅两Appfiles5add4del；复用真实wire缺完整指令RED→原inspection越过三prompt断言/2Planner16POST的新firsterror，Root普通two.turnbaseline1PASS（2Planner12POST/Task succeeded）。peer精确观察7KAHoa：同invocation107无adoptedResultSeq、141为3，其余字段相同，capture159已adopted3；Runtimehelper把合法演进当fullJSON冲突。peer独立Planner47226负责canonicalfold，不放宽全局mergeExact、不按latest猜控制。
+- r316修订已接收，导出segmentOpenedFromRecord/decodeActiveTurnRecords真实可复用，明确原始identity从businessTurnRef.execution/bindingCommitRef关联、不硬编码epoch。freshGCM r318已在原预算树实现typedancestry核验，唯一允许admission/operation-control-journal/coldconsumer/原segment图语义合同，不改Gateway或UX。r317observer terminal0却仅futureintent未接收；r319限定8命令收口A/B/D事实表，不为模糊缺证据新增测试。
+
 - r315独立证据充分性计划接受C三协议工具往返与G通用HTTP来源当前能力证据；不加r314建议的HTTP×Chat组合用例，不制造新RED。main旧gap中的tools=[]/unsupported/RCC-only现状已改正，docs-only860ef944已push（b4ec7848..860ef944）。保留main/候选/installed边界、实际模型归属和E/F等未完要求；不是总目标完成。
 - r313身份计划已接收，推翻r309改逻辑intent方向：保留operation input/namespace/fingerprint，physicalsegment通过typed durable segment与原business registration关联核验，Gateway不变、UXcomposition不变。计划epoch>1/epoch1假设源于fixture，不接受；r316已交原Planner限定3file修订为真实segment/ancestor事实。原预算树r309dirty保留，未合流错误patch；后续执行扩到operation-control-journal唯一owner前已通知peer。
 
