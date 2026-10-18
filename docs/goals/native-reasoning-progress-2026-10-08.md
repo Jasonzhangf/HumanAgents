@@ -3,7 +3,7 @@
 ## 2026-10-17 N2 后继证据复用与冷进程回归
 
 - 因预算增量改变恢复父控制核验，Root仅运行既有 `C3a fresh process hydrates the confirmed-control floor and closes the next execution`，当前main实际1/1PASS（session96673，10108ms）。r329/c3a-process-boundary.json保留seed PID33891/code0先退出、next PID35325/code0后启动事实；同fixture纠正/回退/前进后恢复控制floor、下一执行收口与Memory边界被原断言覆盖。无新用例/模型请求，成功fixture自动清理。
-- r278已接受N2不新增代码/测试/DAG；其旧liveMemory语义未知现有r310真实路径对比PASS。另直接读取r40/QppklP receipt确认actualSubmits1、model/succeeded、autoUpdatefalse及procedural candidate，原case的external-operation断言失败仍保留，仅复用随后既有helper修正/离线audit证据，不伪称原casePASS。r330独立小Planner正在核对N2证据充分性，默认不新发真实模型请求；总目标不关闭。
+- r278已接受N2不新增代码/测试/DAG；其旧liveMemory语义未知已有r310真实路径对比PASS。直接读取r40/QppklP receipt确认actualSubmits1、model/succeeded、autoUpdatefalse及procedural candidate，原case的external-operation断言失败仍保留，仅复用随后既有helper修正/离线audit证据，不伪称原casePASS。r330独立充分性计划已接受：r329进程边界+r310被替换路径/保留结论审计+r40真实项目procedural lesson及offline-audit共同补足r278这一具体未知。此范围证据充分即停止，不新增模型请求、测试或实现；DAG Operator registration仍按既有声明UNVERIFIED，完整goal/N1/N3/inspection继续开放。
 
 ## 2026-10-17 已交付：工具预算中断与同业务 turn 恢复增量
 
