@@ -247,14 +247,6 @@ function graphPayload(fact: AssignmentGraphFact): UnknownRecord {
   return { type: GRAPH_PAYLOAD_TYPE, fact };
 }
 
-function validateCommitId(commitId: unknown): string {
-  const value = nonEmpty(commitId, 'assignment graph commitId');
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) {
-    throw new JournalIntegrityError('invalid journal commitId');
-  }
-  return value;
-}
-
 function sameCommitRef(left: JournalCommitRef, right: JournalCommitRef): boolean {
   return left.commitId === right.commitId
     && left.journalSeq === right.journalSeq
@@ -400,7 +392,7 @@ export function createJsonlAssignmentGraphJournal(input: {
 
   async function commit(request: AssignmentGraphCommitRequest): Promise<CommittedAssignmentGraphFact> {
     plainObject(request, 'assignment graph commit request');
-    const commitId = validateCommitId(request.commitId);
+    const commitId = request.commitId;
     const expectedRevision = nonNegativeInteger(request.expectedRevision, 'assignment graph expectedRevision');
     const fact = assertFact(request.fact, stream);
     if (fact.revision !== expectedRevision + 1) {
