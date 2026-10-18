@@ -1,5 +1,30 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 F13 保留 fixture 当前 canonical 只读解析成功
+
+- UX owner接受r468后批准唯一一次当前canonical只读解析；r469 fresh GCM实际使用installed owners，inline node exit0。Root直接核events命令与stdout：resolveColdExecutionResumeRequest返回ok:true，原tail分类interrupted，openedCommitRef seq22、recordsThroughCommitRef seq26，原dispatching request及origin segment责任保留。
+- fixture为原active-frontier-HK8Umg，未补材料或写control，未recover/admit/append/网络/模型/测试/新崩溃。首次here-doc因shell临时文件未执行脚本；inline-e只调用一次resolver。retry.jsonl实际缺失（纠正派单称已存），既有port只读返回null、未创建，不冒真实retry-cycle事实。
+- 结果仅关闭“当前selector能否解析原保留tail”的未知，不证明业务恢复完成、真实RCC成功或F13整体PASS。报告及Root限定接收见RUN/native-f13-canonical-read-observe-r469-20261018/{observation.md,owner-reception.md}，已交UX owner最终裁定；initial-open原installed证明保持自身范围。完整goal ACTIVE/INCOMPLETE。
+
+## 2026-10-18 F13 旧恢复材料边界观察已交回 UX owner
+
+- r468 fresh GCM只读观察已完成。指定旧材料未出现PID42804，日志为43040；旧v1 predecessor实际存在、后续segment已opened但无v2，更接近interrupted-v2。旧脚本用initial predecessor，当前canonical先选tail；旧RED不等于当前仍失败，也不能仅凭当前source分支称旧fixture已恢复。
+- initial-open已有installed fresh-process正向证据继续有效；interrupted-v2当前源码与公开case存在，但本次指定证据未找到其当前运行receipt。报告引用负向测试源码仅证明case/断言存在，不作为本轮执行PASS，也不证明全历史没有后继证据。
+- 唯一最小候选动作是对保留fixture用当前built owner只读解析canonical恢复请求，核interrupted anchor与pending obligation；按派单仅列缺口，未执行新读取/测试/崩溃/模型/恢复。完整报告与限定接收见RUN/native-f13-boundary-observe-r468-20261018/{observation.md,owner-reception.md}，已交UX owner作F13最终裁定。完整goal ACTIVE/INCOMPLETE。
+
+## 2026-10-18 治理交付后阶段计划：本侧当前0个ready实现任务
+
+- r467 fresh Gemini4 medium 独立阶段计划已返回，CLI exit0；Root接收其调度结论：当前没有已证实且依赖已满足的本侧Provider/Runtime代码或新测试任务，不开新树、不补协议/角色矩阵。既有r315/r330/r415/r456/r466充分性范围复用；阶段计划不是最终goal审计。
+- 剩余必要工作保持原owner：原taskless问答未成功，r464外部交接材料待用户明确聊天目标；UX peer继续Observation候选1b8f94db的验收交付及M3/F13/原RCC Task2边界收口。辅助SDK verify退休合同事项保留真实失败，不新增当前goal依赖。
+- Root限定接收：r457仅隔离该次wire失败与HA消费链，不能证明全部历史epoch同根因，也不能区分Node transport/RCC/上游。根因仍UNKNOWN；不接受计划中泛化归因，不自动发epoch7。新实质证据到达后再裁定下一动作。原计划与接收说明见RUN/native-post-governance-stage-plan-r467-20261018/{plan.md,owner-acceptance.md}。完整goal ACTIVE/INCOMPLETE，peer独立工作继续。
+
+## 2026-10-18 已交付：治理消融与完整任务说明
+
+- 已接收 peer 完整交付回执 `/Volumes/Intel/playground/humanagent/.worker-runs/governance-ux-delivery-20261018/delivery.md`。源码正常合流并推送 main b4de7ac6，回执311e3e7e..b4de7ac6；peer 长程文档收口83e5d7f2，回执b4de7ac6..83e5d7f2。两条 P1 的原 FAIL、实际 RED/GREEN、必要 finding 复核 PASS 均保留，不以消融绕过正文或资产正确性。
+- 本侧已直接读取正式 restart 与安装消费者/默认 UI receipt：gen40→41，canonical installed CLI，53007，legacy close clean；任务展示10PASS、review正文绑定8PASS。完整回执另列真实 retained asset consumer1PASS，及 Runtime46/AppI2 9/真实CLI两周期1等受影响作者证据。默认打包 mobile 四项说明/原值顺序/长scope/底抽屉/焦点/技术原文验收成立，desktop证据明确复用，没有重执行原Task或新模型请求。
+- 自有临时浏览器/service资源已清理；治理集成树/link及已合流分支正常关闭，注册树3→2。本侧git现场确认仅main控制树和独立Observation活动树，未清他人资源。原Task/Journal/assets保留。
+- 保留的具体边界：SDK辅助verify仍报NON_CANONICAL_RECORD_CONTRACT_SET（退休FreezeRecord合同、上游owner事项），不伪称全治理verify PASS；Observation候选1b8f94db尚待peer双端浏览器/整体Review/正式交付；M3精确浏览器/F13旧activity-tail适用范围仍由peer收口；原taskless epoch6 socket失败未解，RCC交接待明确目标。完整goal仍ACTIVE/INCOMPLETE。
+
 ## 2026-10-18 旧 Operator registration 范围已裁定，不引入 SDK
 
 - r465 定向源码与后继证据观察已完成；r466 独立 OAuth GPT6.1 medium 小计划 READY，Root 接受其范围判断：按 requirements v14、原生 goal、implementation-plan 第9节与 dagpipe-runtime 两接口，旧 Operator registration UNVERIFIED 是 SDK 执行能力边界，不是当前原生推理 goal 的必要交付依赖。
