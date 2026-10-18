@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 P1 基础已接受，四路 GCM 已实际并发
+
+- UX owner已接收P1实际exit0与候选提交 `3b2f8c7f`。基础contracts编译0、orchestration编译0、具名assignment graph 5/5 PASS及准确 `interfaces.md` 已作为下游输入；这仅完成基础增量，不是完整生产图交付。origin/main文档已正常合入唯一候选，四棵独占任务树共同基线为 `ee1e881f`（普通Git回执，不追加身份核验）。
+- Root已同时启动四个fresh GCM，实际工具handles分别 JSONL16487、Runtime24386、App32763、UI43668；每路独占本域树，沿唯一集成分支标准Git合流。Root统一持有终态接收，本侧不双派、不重复轮询。各自task.md已接收P1真实接口与必要命令，原DRAFT状态由Root正式派单替代。
+- JSONL负责typed OrganJournal codec/持久确认，Runtime负责Manager提交/冷恢复接线，App负责factory与同批records只读组装及跨模块公开consumer，UI负责唯一helper/renderer。Runtime独占assignment-graph.ts补最小resume-binding mutation与planned记录真实agent绑定规则，属于已接受Astra冷接线，不阻其他三路。
+- 当前四路均为进行中，尚无组合行为验收、整体milestoneReview、main产品合流或安装运行交付。完整goal ACTIVE / INCOMPLETE；原taskless socket UNKNOWN仍独立保留。后续状态由Root接收实际结果后登记，不能用启动数量冒已完成节点。
+
 ## 2026-10-18 设计已通过，实际图 P1 基础进入实现
 
 - r478–r481 长计划虽各自执行成功，但错误类型/真源/图引用与基础依赖问题未获业务 READY 接受，原稿和接收记录保留。独立 GPT6.1 与 Astra 技术报告已完成源码攻关；选定同 task/owner 的 Organ Journal typed 图事实、Runtime 唯一 prepare/commit/apply/replay、真实 successor 回执授权与保留原 assignment 的冷恢复边界，不添加不存在的执行依赖引擎。技术报告不是实现或行为 PASS。
