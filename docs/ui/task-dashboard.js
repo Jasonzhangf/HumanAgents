@@ -60,6 +60,7 @@ import {
   renderAgentActivity,
   renderAgentActivityDetail,
 } from './agent-activity.js'
+import { createSubmissionIdentity } from './requirement-submission.js'
 
 const taskId = taskIdFromQuery(false)
 const readScope = taskReadScopeFromQuery()
@@ -1032,6 +1033,89 @@ function openCheckpointReference(reference) {
   showCheckpointDetail('关联引用', wrap)
 }
 
+function checkpointControlIdentity(kind) {
+  const identity = createSubmissionIdentity(kind)
+  return { commandId: identity.submissionId, confirmationRef: identity.confirmationRef }
+}
+
+function checkpointControlReceipt(result) {
+  const receipt = result?.receipt ?? result
+  if (receipt?.state === 'committed') return
+  throw Object.assign(new Error('控制请求已返回，但没有显示已提交的权威收据。'), {
+    code: 'checkpoint-control.no-commit-receipt',
+    ownerId: 'humanagent.ui.task-dashboard',
+    nextAction: '重新读取检查点，确认当前状态后再继续。',
+  })
+}
+
+function checkpointControlUnavailable() {
+  return Object.assign(new Error('当前页面没有已确认的任务范围或控制提交接口。'), {
+    code: 'checkpoint-control.unavailable',
+    ownerId: 'humanagent.ui.task-dashboard',
+    nextAction: '重新打开这个任务的看板后再试。',
+  })
+}
+
+function checkpointControlRefreshFailure(error, stage) {
+  return Object.assign(new Error(`控制已提交，但${stage}失败：${error?.message || String(error)}`), {
+    code: error?.code || 'checkpoint-control.refresh-failed',
+    ownerId: error?.ownerId || 'humanagent.ui.task-dashboard',
+    nextAction: error?.nextAction || '重新读取权威任务与检查点状态后再继续。',
+    // The write already exists. The renderer must keep the control closed so a
+    // refresh failure can never turn into a second confirmed command.
+    committed: true,
+  })
+}
+
+async function refreshCheckpointAfterControl() {
+  const reopenDetail = checkpointDetailLayer?.open === true
+  try {
+    if (!historyHost) throw checkpointControlUnavailable()
+    await renderCheckpointHistoryView(historyHost, true)
+    if (reopenDetail) openCheckpointDetail()
+  } catch (error) {
+    throw checkpointControlRefreshFailure(error, '权威检查点重读')
+  }
+}
+
+async function refreshDashboardAfterControl() {
+  try {
+    await refresh()
+  } catch (error) {
+    throw checkpointControlRefreshFailure(error, '任务看板刷新')
+  }
+}
+
+async function submitCheckpointContextCorrection(body) {
+  if (!explicitScope || typeof api.submitTaskContextCorrection !== 'function') {
+    throw checkpointControlUnavailable()
+  }
+  const identity = checkpointControlIdentity('context-correction')
+  const result = await api.submitTaskContextCorrection(explicitScope.taskId, {
+    ...body,
+    ...identity,
+  }, explicitScope)
+  checkpointControlReceipt(result)
+  await refreshDashboardAfterControl()
+  await refreshCheckpointAfterControl()
+  return result
+}
+
+async function submitCheckpointReentry(body) {
+  if (!explicitScope || typeof api.submitTaskCheckpointReentry !== 'function') {
+    throw checkpointControlUnavailable()
+  }
+  const identity = checkpointControlIdentity('checkpoint-reentry')
+  const result = await api.submitTaskCheckpointReentry(explicitScope.taskId, {
+    ...body,
+    ...identity,
+  }, explicitScope)
+  checkpointControlReceipt(result)
+  await refreshDashboardAfterControl()
+  await refreshCheckpointAfterControl()
+  return result
+}
+
 function openCheckpointDetail() {
   if (!checkpointRenderRead) return
   invalidateCheckpointAssetBody()
@@ -1044,6 +1128,8 @@ function openCheckpointDetail() {
       target: request.target,
       selector: request.selector,
     }),
+    onContextCorrection: submitCheckpointContextCorrection,
+    onCheckpointReentry: submitCheckpointReentry,
   })
   appendCheckpointCapabilityDiagnostics(detail.element, checkpointRenderRead)
   showCheckpointDetail('检查点精确详情', detail.element, detail.dispose)

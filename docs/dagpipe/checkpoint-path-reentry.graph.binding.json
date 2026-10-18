@@ -4,22 +4,43 @@
     "operator": "humanagent-checkpoint-path-reentry",
     "operator_version": "1"
   },
+  "status": "IMPLEMENTING",
+  "uiConsumer": {
+    "ownerPath": "docs/ui/checkpoint-history.js",
+    "ownerRel": "docs/ui/checkpoint-history.js",
+    "ownerSymbol": "renderCheckpointHistoryDetail optional onContextCorrection / onCheckpointReentry callbacks",
+    "surface": "docs/ui/task-dashboard.js Task control surface injects the optional callbacks; readonly Observation and other consumers leave them absent",
+    "implementationStatus": "implementing",
+    "projection": "viewed.identity.commitRef, current.context.activeRefs, current.position.controlCommitRef"
+  },
   "nodes": {
     "read_saved_target": {
       "ownerPath": "packages/app/src/checkpoint-journal.ts",
-      "ownerRel": "packages/app/src/checkpoint-journal.ts"
+      "ownerRel": "packages/app/src/checkpoint-journal.ts",
+      "ownerSymbol": "JsonlOrganJournal exact checkpoint and publication read",
+      "implementationStatus": "implemented",
+      "entry": "Task confirmation callback supplies the exact viewed receipt; the HTTP owner binds taskScope and principal"
     },
     "admit_reentry": {
       "ownerPath": "packages/runtime/src/checkpoints/conditional-reentry.ts",
-      "ownerRel": "packages/runtime/src/checkpoints/conditional-reentry.ts"
+      "ownerRel": "packages/runtime/src/checkpoints/conditional-reentry.ts",
+      "ownerSymbol": "conditional reentry record, command and relationship validation",
+      "implementationStatus": "implemented",
+      "entry": "packages/app/src/ui-runtime/service.ts executeConfirmedTaskContextCorrection / executeConfirmedTaskCheckpointReentry with verifyControllableTaskTarget"
     },
     "append_path_fact": {
       "ownerPath": "packages/app/src/checkpoint-journal.ts",
-      "ownerRel": "packages/app/src/checkpoint-journal.ts"
+      "ownerRel": "packages/app/src/checkpoint-journal.ts",
+      "ownerSymbol": "commitContextCorrection / commitReentry append and exact readback",
+      "implementationStatus": "implemented",
+      "physicalOwner": "packages/app/src/ui-runtime/reentry-current-facts.ts"
     },
     "return_typed_outcome": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
-      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerSymbol": "commitReentry canonical prepare-commit-readback",
+      "implementationStatus": "implemented",
+      "receiptContract": "CommittedTaskContextCorrectionReceipt / CommittedTaskCheckpointReentryReceipt are the real typed outcomes; the UI consumes the latest authoritative current/viewed projection and does not invent a receipt field"
     }
   }
 }
