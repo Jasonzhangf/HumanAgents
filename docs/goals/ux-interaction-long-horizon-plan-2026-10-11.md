@@ -29,6 +29,10 @@ main 重建、打包、全局安装完成；正式 restart gen40→41，端口53
 
 ### 当前剩余主线与已替代的旧 OPEN
 
+当前实际图候选尚未交付。默认 native 入口只绑定 `callChild`，不调用经典 M3 的 `planStage/createAssignment/dispatch`；仅读取新增 `assignment-graph.fact` 会使该入口持续显示无记录。现有 M3 通过证据不能关闭 native 路径的 F06/F15/G9。修正方案改为复用同源已持久化的轮次、恢复分段、子调用、审查及关轮规划事实；不得从角色顺序、时间或谱系推断执行依赖。独立复杂 Planner r486 已返回，原稿的错误回退基线、无效命令及过粗所有权切片尚待同一 Planner 定点修正；修正后完成目标要求的独立设计审查，再按 contracts-first 释放不冲突的并行实现及消融。
+
+集成提交 `8799416b` 已修正指引读取使用服务绑定身份的问题，改用所选任务已验证的控制记录。所选 M3、cold、冲突与调用迁移消费者通过，只证明各自断言；两项 serve 消费者仍因缺产物正文失败，未算全绿。缺记录文案与阶段“最近记录”标识已普通合流，文案工作树已清理。以上仍在唯一集成分支，未进入本批 main/build/restart/live/push 交付。
+
 F13 恢复证据已于本轮接收闭环。独立小 Planner r470 找到并核对两份 interrupted-v2 公开 HTTP 实际 PASS、J1 精确锚点与旧段 fencing 实际 PASS，以及已接收的 installed initial-open 三轮／计划／checkpoint 证据；与 r469 当前安装版本对原 interrupted tail 的 source 读取共同覆盖 F13 原验收。Root 已读完整计划并接受按唯一 owner 组合证据，不要求同一原 fixture 再跑一遍。完整依据为 `native-reasoning-d0-20261012/native-f13-sufficiency-plan-r470-20261018/plan.md`：其中列明公开恢复保持 task/operation/business turn、后继 epoch、历史前缀、已执行副作用不重放、pending origin、stale anchor 拒绝和旧段写入 fencing 的实际断言及运行记录。没有新增测试、业务恢复、崩溃或模型调用；没有把原保留 fixture 的只读结果称为业务恢复，也没有外推为真实 RCC 成功。以下涉及 F13 未确认的早前过程以本段裁决为准；其他 G/F 与 UX 全目标仍按自身验收推进。
 
 原真实 RCC 约束 Task 已成功，四字段完整进入实际请求，提交正文与 API／浏览器一致，没有子调用或工作区写入；接收见 `original-rcc-prepared-acceptance-execute-20261018/owner-reception.md`。准备态冷恢复已随 PR3／`917ea959` 交付，M3 两周期与计划演进已随 `ed44b1dd` 完成安装验收和推送。以下旧段落中这些子能力的 OPEN 不再代表当前状态。
