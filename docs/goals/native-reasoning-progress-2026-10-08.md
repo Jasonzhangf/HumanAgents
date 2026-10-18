@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 下一原定增量：M3 长程 review 与计划演进
+
+- 有限五文件观察已由peer接收并补精确caller：coordinator两处将dispatched.reviewCommitRefs交standardTurn.acceptReviews，manager聚合durable refs；不能将UNKNOWN当缺实现。独立r342进一步定位native child review→pre/post checkpoint→adoption→Planner refinedResults与coordinator startNextStandardTurn/prepareExecution新cycle源码链。此为源码依据，未运行新用例，不宣称长程两轮review生产验收完成。
+- r342执行合同含不存在Vitest命令、未建立openRuntimeAssembly helper、plan字段写法与抓错证明缺口，Root未准入实现；同Planner r343局部修正中（PID25235/session44391）。当前倾向只补一条既有CLI基础上的两cycle动态review公开证据，是否新增case与真实命令/冷reader/反例须待修订接受；无产品修改、新树、模型请求或新测试已执行。
+- peer并行补原M5的installed adopted-child同点双端正文证据，使用稳定installedCLI与默认packagedUI，独立临时serve，不占53007、不创建Task/调用模型。启动脚本stdout/配对变量问题由owner处理，未判产品bug，不retroactively增加已交inspection门禁。原显式interaction-2/RCC EOF单线仍hold。
+
 ## 2026-10-17 已推送并安装：inspection 原生编排、停止与冷恢复增量
 
 - 本57file完整闭包已正常FF main `70b0f2b5` 并push，原远端回执 `af6e9be0..70b0f2b5 main -> main`（session80266）。未关闭完整goal、原显式/RCC EOF、全部G/F或I1-I5。
