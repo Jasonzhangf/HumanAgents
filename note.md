@@ -170,3 +170,11 @@ SDK 缺口未解除：只读源码确认 `pin-lock` 仍计算并比较运行 bin
 main 的 contracts/config/App 构建、打包和全局安装通过。正式 restart 将 canonical 从 gen34/PID56021 更新到 gen35/PID15697，端口53007，旧实例 clean 收拢；认证状态接口 HTTP200 ready。全局安装模块上的同一真实 HTTP consumer 1 PASS；默认打包 UI 的手机 A 任务→Observation→输出节点也通过，确认请求带完整 A 范围并显示 A 正文。候选及安装后临时服务、凭据文件和 consumer layout 已清理；原 A/B 数据保留。来源 UI/API 树和 scoped-read 集成树已正常关闭，保留的 M5/约束树有独立 owner。远端与最终资源回执见同目录 `delivery.md`。
 
 这只关闭跨项目读取与展示隔离子能力。原 B 失败历史、确认约束的真实模型执行、完整 Context 修正/重入写链、浏览器原生后退及 G1–G14/F01–F20 最终矩阵仍未闭环。M5 UI `0ca3157c` 与 API `21b0e98e` 已在独立候选合流，组合 53 项相关用例通过；后端入口继续实施。约束反例已在公开 HTTP 确认读取中证明 goal 丢失，修复由独立 GCM 继续完成。
+
+## 2026-10-18 原生历史补证与 M5 有效入口红测
+
+安装实例的 agent 历史读取切片已补齐原生返回证据。worker 复用 space14/p1，在真实 epoch 2/3 链接之间完成浏览器后退、前进和键盘刷新；每次实际 URL、HTTP200 selected 投影与页面身份一致。实例选择原位 replaceState，历史条目由合法 URL 导航形成；这不证明选择逐次入栈，也不关闭 checkpoint viewed 的独立验收。Root 已读回执并核对实际 CDP 命令与页面结果。临时 localhost 会话 cookie 已删除，p1/space14 保留；无源码、运行实例或任务修改。完整证据在 `m4-native-history-observation-20261018/reception.md`。
+
+M5 StageA 的真实 App facade→Journal 物理 consumer 已通过，证明纠正和 reentry 的有效 fixture 与持久 owner 可用。实际 HTTP dispatcher 则在 correction POST 返回 404 route.not-found，而预期为200 committed receipt；这是路由缺失红测，不是无权限或 fixture 失败。reentry HTTP 后续断言未到达。Root 读取实际执行日志接收该阶段，不把 worker 未来时终稿算作完成。来源在 `m5-confirmed-http-execute-20261018/events-stage-a-r2.jsonl`、`red.log`；源码保持原 M5 树待继续接线，尚未提交或集成。
+
+新证据显示局部 typed expected-conflict 可能被 submission 包装抹去，已派独立只读 OAuth 小 Planner 核对最小传播方案；未授权宽泛错误重分类。constraint fidelity GCM 继续拥有 service 确认/dispatch 片段，M5 接线等待该片段释放。peer 独立拥有原 interaction 的一次 typed 恢复窗口，本侧不重启 canonical 干扰它；并发业务写入与只读观测证据按实际时间分开。整体目标仍 ACTIVE/INCOMPLETE。
