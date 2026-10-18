@@ -1,5 +1,12 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 已交付：Memory 输入与路径审计合同增量
+
+- 产品三文件 `5af0211b` 已正常FF进入main并push：远端回执 `b5913402..5af0211b main -> main`。输入显式提供metadata-only auditPrompt，保留prompt正文与sources；模板要求按真实证据说明displaced/retained路径。不增加parserfallback、重试或候选强制生成。
+- r308原payloadconsumer真实RED（auditPrompt undefined）→GREEN2/2；r310修改后原真实Memory单case1/1PASS，parent读取Qlbayu/receipt确认3start/request/output/settle/release，review model/succeeded/autoUpdatefalse。rewind解释明确移除wrong-business-ref、保留accepted-prefix；经验不足合法attention。只证明本增量，不宣称完整Memory经验质量或全目标完成。
+- 独立r311 Opus实际quota/exit3未审；r312 freshGemini4medium有效JSON/exit0/空findings，经既有classifier裁决PASS。main contracts/config/App重建、原Memory2/2、package:candidate/install:global均0（session53518）。官方installed restart0（session42359），gen27/PID3091→gen28/PID77100、53007、legacyClose clean；新进程实际存活且HTTP200。启动证明不替代真实Memory单case证据。
+- Memory来源树已clean、作者与reviewer均terminal；push后正常remove/prune/test不存在全部0（session54130）。其证据保留于既有RUN根r308/r310/r311/r312；候选与预算/peerApp仍有未完责任，不清理他人资源。完整goal ACTIVE/INCOMPLETE，segment身份冲突由r313独立规划，inspection仍由peer接线与定位。
+
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
 - 三来源已正常合唯一candidate：stopresources35b98540 Appbuild/tsc0+原segment4/4PASS（session96296）；G14display b4e41a92原MJS10/10PASS，HTTPtext/provenance/selector/capture不变，installedchild双端未验；tests-only519c4f11合法missinginspectionports RED复用，WIP不main、不冒positive。回执inspection-stop-resources-and-g14-composed-20261017.txt，已通知UX关来源并从组合基线派finalApp。

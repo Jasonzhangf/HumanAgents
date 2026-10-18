@@ -372,6 +372,15 @@ test('memory agent sends the audit prompt body and inspected source text to the 
 
   assert.equal(result.status, 'ready');
   assert.equal((captured!.prompt as { readonly content: string }).content, '# Audit\n');
+  const auditPrompt = captured!.auditPrompt as Record<string, unknown>;
+  assert.deepEqual(auditPrompt, {
+    promptRef: 'project-memory-audit',
+    canonicalRef: 'prompt://project-a/project-memory-audit',
+    revision: 'sha256:prompt-revision',
+    digest: 'sha256:prompt-digest',
+    loadedAt: '2026-09-17T00:00:00.000Z',
+  });
+  assert.equal(Object.hasOwn(auditPrompt, 'content'), false);
   const sources = captured!.sources as readonly { readonly sourceRef: string; readonly text: string }[];
   assert.equal(sources[0]!.sourceRef, 'journal://project-a/checkpoint');
   assert.equal(sources[0]!.text, 'source');

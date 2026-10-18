@@ -688,6 +688,13 @@ function memoryAnalysisInput(
       requestedKind: input.requestedKind,
       candidateCategory: input.candidateCategory,
       trigger: input.trigger,
+      auditPrompt: {
+        promptRef: prompt.promptRef,
+        canonicalRef: prompt.canonicalRef,
+        revision: prompt.revision,
+        digest: prompt.digest,
+        loadedAt: prompt.loadedAt,
+      },
       prompt: {
         promptRef: prompt.promptRef,
         canonicalRef: prompt.canonicalRef,
