@@ -9,6 +9,8 @@
 
 ## 2026-10-17 Provider 接续：N2 消融与 N3 收尾
 
+- r323独立Gemini计划已接收（exit0），parent采B最小复用：Provider工具轮次预算拒绝时，为已收到但未执行的整批calls持久真实failed/code tool.round-limit/executedfalse结果，再抛原typederror；不调用executor、不产生effectintent/completion、不把输出当控制真源。方案取舍不以旧测试断言定义用户需求。r324freshGCM已在原预算树按同case配对失败output RED→driver修复→完整durabletail GREEN执行；受影响原Providerbudgetcase按变更选测，不扩矩阵。当前未验收，不Review/main。
+
 - deliverycanonical来源5d40b99b已cherry候选83bed0b9；组合contracts/agentloop/nativeAppcompile0、原16/16PASS（session48248）。正确native-text+显式同源CLI原3turn一次实际FAIL（session25906），已到3Planner24POST，无delivery比较冲突。新首错`delivery evidence task-business:v1:3ab02d7f2b2ffe6978a084285c60d06fe710b8e26d887c6b1d5fa35964584f76 does not resolve to an accepted tool result`；fixturexTp1hH保留并交peer核actualref/producer/fixture，不改validator。UX纯文档7755d22b已cherry2ef8de19；stop7bc2仍hold，待definition形状小Plan，未计验收。
 
 - r322补入真实successor end/save五阶段/closure/Plannerprepared-invoked-returned/completealignment/currentTask断言后作者原case1PASS，但final仅futureintent且evidence默认落fixture根；不接受该总结为完成。Root确认作者terminal0后直接最终源码tsc0+显式RUN evidence root同原case1/1PASS（session89602，3868ms），successfixture sI0o7t已按case成功清理，当前只剩外部pendingcall2/nooutput协议缺口，r323仍在独立规划。没有Review/合流预算产品patch，也不以受控完整tail冒真实协议恢复PASS。
