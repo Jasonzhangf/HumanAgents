@@ -31,6 +31,11 @@
  * proves the real page shows only v2 as current and, after switching to
  * semantic, keeps returned order [v1,v2,v3] with the reason, predecessor and
  * typed change visible, without issuing any business write.
+ * `--actual-graph-only` selects the successful, not-recorded and failed
+ * `agentActivity` branches on Task Dashboard and Observation. It proves the
+ * shared actual-execution section reads only the successful carrier, keeps the
+ * 13-node registry separate, and opens technical identities in the existing
+ * detail drawer at desktop and mobile widths.
  *
  * Set INTERACTION_PAGE_EVIDENCE to the execution-owned evidence root and
  * INTERACTION_PAGE_UI_ROOT (optional) to a directory whose layout mirrors
@@ -56,6 +61,7 @@ const rawFocusTitleOnly = process.argv.includes('--raw-focus-title-only');
 const projectBreadcrumbOnly = process.argv.includes('--project-breadcrumb-only');
 const i2ScopedOnly = process.argv.includes('--i2-scoped-only');
 const planHistoryOnly = process.argv.includes('--plan-history-only');
+const actualGraphOnly = process.argv.includes('--actual-graph-only');
 
 const playwrightModule = await import(
   process.env.INTERACTION_CARD_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js',
@@ -214,7 +220,7 @@ try {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`));
 
-  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly || projectBreadcrumbOnly || i2ScopedOnly || planHistoryOnly ? [] : [
+  for (const target of (taskIdentityOnly || checkpointAssetsOnly || rawFocusTitleOnly || projectBreadcrumbOnly || i2ScopedOnly || planHistoryOnly || actualGraphOnly ? [] : [
     { file: 'dashboard.html', entry: 'dashboard' },
     { file: 'task.html', query: '?task=new', entry: 'task' },
     { file: 'index.html', entry: 'entry' },
@@ -267,7 +273,7 @@ try {
   // card's technical source reference with no invented Operation, so an admitted
   // Task is not mislabelled as a running execution and no `pending-input` scope
   // is minted.
-  if (!checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly && !planHistoryOnly) {
+  if (!checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly && !planHistoryOnly && !actualGraphOnly) {
   const TASK_WIRING_ID = 'task-wiring-proof';
   const taskPage = await context.newPage();
   const taskPageErrors = [];
@@ -341,7 +347,7 @@ try {
   await taskPage.close();
   }
 
-  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly && !planHistoryOnly) {
+  if (!taskIdentityOnly && !checkpointAssetsOnly && !rawFocusTitleOnly && !projectBreadcrumbOnly && !i2ScopedOnly && !planHistoryOnly && !actualGraphOnly) {
   // GAP B proof: the bounded original cause the runtime reports must reach the
   // human, not just a status code. The runtime stub answers the real
   // explicit-interaction read with a 500 body shaped exactly like the one
@@ -1587,6 +1593,408 @@ try {
       }
     }
   }
+  if (actualGraphOnly) {
+    // Failure mode: either formal page may ignore the successful
+    // `agentActivity.value.actualExecutionGraph` carrier, fabricate a graph from
+    // the plan/13-node registry, or turn a failed/missing read into an empty or
+    // historical-looking graph. Impact: an invisible feature or misleading
+    // execution history. Probability is unknown; this is the existing served
+    // page consumer, now selected for this one carrier only. Cost: one
+    // controlled GET set per surface and the shared technical-detail drawer.
+    const projectKey = 'proj-actual-graph'
+    const mode = 'fake'
+    const taskId = { scope: 'task', value: 'task-actual-graph' }
+    const scope = { kind: 'task', projectKey, mode, taskId }
+    const taskScope = { organId: { scope: 'organ', value: 'organ-actual-graph' }, taskId }
+    const operationScope = {
+      organId: { scope: 'organ', value: 'organ-actual-graph' },
+      taskId,
+      operationId: { scope: 'operation', value: 'operation-actual-graph' },
+    }
+    const member = (assignmentId, pipelineNodeId, objective) => ({
+      roleLabel: pipelineNodeId === 'pipeline.execute' ? '执行' : '子任务复核',
+      objective,
+      status: 'succeeded',
+      statusLabel: '已完成',
+      statusTone: 'success',
+      result: { status: 'succeeded', statusLabel: '已完成', summary: `${objective} 的结果已记录。` },
+      reviews: [{ status: 'passed', statusLabel: '通过', findingCount: 0 }],
+      reason: '执行记录完整',
+      nextActionLabel: '继续',
+      technical: {
+        assignmentId,
+        attempt: 1,
+        executionEpoch: 2,
+        pipelineNodeId,
+        agentId: `agent-${assignmentId}`,
+        evidenceRefs: [],
+      },
+    })
+    const recordedGraph = {
+      surface: 'task-actual-execution-graph',
+      taskScope,
+      guidance: {
+        kind: 'long-running',
+        kindLabel: '长程任务',
+        aim: '按负责人动态选择并保留真实执行记录。',
+        selectionGuidance: '由编排者按当前判断选择下一步，不套用固定阶段顺序。',
+        displayGroups: ['交付物', '复核', '收拢'],
+      },
+      history: {
+        status: 'recorded',
+        summary: '已记录 1 个责任流、2 个阶段和 2 个执行成员。',
+        streamCount: 1,
+        stageCount: 2,
+        memberCount: 2,
+        streams: [{
+          ownerId: 'orchestration-manager',
+          ownerLabel: '责任流 1',
+          stages: [
+            {
+              stageNodeId: 'stage-deliver',
+              label: '阶段 1',
+              state: 'succeeded',
+              stateLabel: '已完成',
+              stateTone: 'success',
+              parent: { kind: 'none', label: '无上级阶段' },
+              members: [member('assignment-deliver', 'pipeline.execute', '完成实际交付')],
+              technical: { parentNodeId: null, assignmentKeys: ['assignment-deliver'] },
+            },
+            {
+              stageNodeId: 'stage-review',
+              label: '阶段 2',
+              state: 'succeeded',
+              stateLabel: '已完成',
+              stateTone: 'success',
+              parent: { kind: 'recorded', stageNodeId: 'stage-deliver', label: '上级阶段：阶段 1' },
+              members: [member('assignment-review', 'child.review', '复核实际交付')],
+              technical: { parentNodeId: 'stage-deliver', assignmentKeys: ['assignment-review'] },
+            },
+          ],
+        }],
+      },
+    }
+    const missingGraph = {
+      surface: 'task-actual-execution-graph',
+      taskScope,
+      history: {
+        status: 'not-recorded',
+        reason: 'no-recorded-facts',
+        label: '实际执行记录缺失',
+        detail: '这段历史没有记录实际执行图事实，不能把计划或固定节点目录当作执行记录。',
+      },
+    }
+    const activityRead = (readBehavior) => {
+      if (readBehavior === 'failed') {
+        return {
+          ok: false,
+          failure: {
+            code: 'actual-execution-graph.read-failed',
+            ownerId: 'humanagent.app',
+            message: '实际执行图读取失败',
+            nextAction: '检查这份执行记录后重试读取',
+          },
+        }
+      }
+      return {
+        ok: true,
+        value: {
+          surface: 'runtime-agent-activity',
+          scope,
+          taskId,
+          mode: 'catalog',
+          current: [],
+          historical: [],
+          unknown: [],
+          unavailableSources: [],
+          actualExecutionGraph: readBehavior === 'not-recorded' ? missingGraph : recordedGraph,
+        },
+      }
+    }
+    const taskRead = (readBehavior) => ({
+      surface: 'runtime-task-dashboard',
+      mode,
+      taskId,
+      taskTitle: 'Actual graph mount proof',
+      state: 'waiting',
+      stateLabel: '等待中',
+      statusSections: { business: '等待核对实际执行记录', waiting: '尚无执行等待信息' },
+      currentNode: 'runtime.waiting',
+      observationRef: `task://${taskId.value}/observation`,
+      nextStep: '分别核对当前计划、实际执行和固定节点目录',
+      input: '核对实际执行图挂载',
+      output: '尚无输出',
+      allowedActions: [],
+      recentEvents: [],
+      agentActivity: activityRead(readBehavior),
+      taskPlanHistory: {
+        ok: false,
+        failure: {
+          code: 'task-plan-history.fixture-unavailable',
+          ownerId: 'test',
+          message: 'controlled actual-graph fixture has no plan history',
+          nextAction: 'none',
+        },
+      },
+    })
+    const registryNodes = Array.from({ length: 13 }, (_, index) => ({
+      nodeId: `registry-node-${index + 1}`,
+      title: `系统节点 ${index + 1}`,
+      row: index + 1,
+      kindDisplay: '系统节点目录',
+      ownerAgentRole: 'execution',
+      roleDisplay: '执行',
+      stateDisplay: '已登记',
+      iteration: 1,
+      activity: [],
+      summary: `固定节点 ${index + 1}`,
+      toolSteps: [],
+    }))
+    const observationProjection = (readBehavior) => ({
+      surface: 'observation',
+      state: 'running',
+      data: { state: 'running', label: '运行中', detail: '实际执行图与固定节点目录分开显示' },
+      scope: {
+        scopeRef: `task://${taskId.value}/observation`,
+        title: '实际执行图挂载证明',
+        summary: '固定 13 节点目录只读样本',
+        purpose: 'pipeline-registry',
+        projectionSeq: 'seq-actual-graph',
+        nodes: registryNodes.map((node) => ({
+          nodeId: node.nodeId,
+          title: node.title,
+          state: 'succeeded',
+          stateDisplay: node.stateDisplay,
+          kindDisplay: node.kindDisplay,
+          summary: node.summary,
+          owner: 'agent-execution',
+          updatedAt: '2026-10-18T00:00:00Z',
+          hasChildScope: false,
+          evidenceCount: 0,
+        })),
+        breadcrumbs: [{ ref: `task://${taskId.value}/observation`, title: '任务处理流水' }],
+        canReturn: false,
+      },
+      nodes: registryNodes,
+      agentFrames: [{
+        agentId: 'agent-execution',
+        role: 'execution',
+        roleDisplay: '执行',
+        stateDisplay: '运行中',
+        iteration: 1,
+        nodeIds: registryNodes.map((node) => node.nodeId),
+      }],
+      handoffs: [],
+      rules: {
+        keyboardFocus: ['节点可聚焦', '抽屉关闭后回到触发节点'],
+        narrowWidth: ['单列布局', '底部只读抽屉'],
+        mobileOrder: 'single-column',
+        drawer: 'read-only-modal',
+        readOnly: true,
+      },
+      agentActivity: activityRead(readBehavior),
+    })
+    const semanticEnvelope = {
+      scope: operationScope,
+      projectionVersion: 'runtime-semantic-v1',
+      sourceWatermark: 0,
+      events: [],
+      coverageIssues: [],
+      pairing: [{
+        groupId: 'actual-graph-operation',
+        kind: 'operation',
+        scope: operationScope,
+        executionEpoch: 1,
+        state: 'closed',
+        eventRefs: [],
+      }],
+      capabilities: [],
+    }
+    const taskGrantRead = {
+      targetScope: { projectKey, mode },
+      readback: { taskId, grant: null, commit: null },
+      authority: null,
+    }
+    let activityMode = 'recorded'
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+      for (const surface of ['dashboard', 'observation']) {
+        const label = `${viewport.width}px ${surface}`
+        const fixturePage = await context.newPage()
+        await fixturePage.setViewportSize(viewport)
+        const requests = []
+        const errors = []
+        const unexpected = []
+        fixturePage.on('pageerror', (error) => errors.push(error.message))
+        await fixturePage.route('**/api/**', async (route) => {
+          const request = route.request()
+          const url = new URL(request.url())
+          const query = Object.fromEntries(url.searchParams)
+          requests.push({ method: request.method(), path: url.pathname, query })
+          const fulfill = (payload, statusCode = 200) => route.fulfill({
+            status: statusCode,
+            contentType: 'application/json',
+            body: JSON.stringify(payload),
+          })
+          if (request.method() !== 'GET') return fulfill({
+            error: { code: 'fixture.unexpected-write', ownerId: 'test', message: `unexpected ${request.method()} ${url.pathname}`, nextAction: 'none' },
+          }, 405)
+          if (url.pathname === '/api/runtime/status') return fulfill({
+            surface: 'runtime-status', mode, state: 'ready', connected: true,
+            providerState: 'ready', modes: [{ mode, enabled: true, state: 'ready' }],
+          })
+          if (url.pathname === '/api/ui/display-preference') return fulfill({ preference: { mode: 'current' }, defaultMode: 'current' })
+          if (surface === 'dashboard'
+            && url.pathname === `/api/tasks/${taskId.value}/dashboard`
+            && query.projectKey === projectKey && query.mode === mode) return fulfill(taskRead(activityMode))
+          if (surface === 'dashboard' && url.pathname === `/api/tasks/${taskId.value}/control/grant`) return fulfill(taskGrantRead)
+          if (surface === 'observation'
+            && url.pathname === `/api/tasks/${taskId.value}/observation`
+            && query.projectKey === projectKey && query.mode === mode) return fulfill(observationProjection(activityMode))
+          if (url.pathname === `/api/tasks/${taskId.value}/semantic`) return fulfill(semanticEnvelope)
+          unexpected.push({ method: request.method(), path: url.pathname, query })
+          return fulfill({
+            error: { code: 'fixture.unexpected-request', ownerId: 'test', message: `unexpected GET ${url.pathname}`, nextAction: 'keep this route explicit' },
+          }, 404)
+        })
+        const settle = () => fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+        try {
+          activityMode = 'recorded'
+          await fixturePage.goto(
+            `${server.url}/${surface === 'dashboard' ? 'task-dashboard.html' : 'observation.html'}?${new URLSearchParams({
+              task: taskId.value,
+              projectKey,
+              mode,
+              ...(surface === 'dashboard' ? { display: 'current' } : {}),
+            })}`,
+            { waitUntil: 'domcontentloaded' },
+          )
+          const graphSection = fixturePage.locator('[data-actual-execution-graph="recorded"]')
+          await graphSection.waitFor({ timeout: 20000 })
+          await settle()
+          const graphText = await graphSection.innerText()
+          const stageCount = await graphSection.locator('[data-actual-stage]').count()
+          const instanceCount = await graphSection.locator('[data-actual-instance]').count()
+          const guidanceCount = await graphSection.locator('[data-task-flow-guidance="skeleton"]').count()
+          record(`${label} mounts the successful actual graph carrier`,
+            graphText.includes('任务处理方式与实际执行')
+              && graphText.includes('处理方式：长程任务')
+              && graphText.includes('阶段 1')
+              && graphText.includes('阶段 2')
+              && guidanceCount === 1
+              && stageCount === 2
+              && instanceCount === 2,
+            { graphText, guidanceCount, stageCount, instanceCount })
+          const leaked = ['assignment-deliver', 'stage-deliver', 'pipeline.execute', 'assignmentId', 'stageNodeId']
+            .filter((token) => graphText.includes(token))
+          record(`${label} keeps technical execution identities in the detail layer`,
+            leaked.length === 0, { leaked, graphText })
+          if (surface === 'dashboard') {
+            const plan = fixturePage.locator('[data-plan-history="current"]')
+            await plan.waitFor()
+            const graphInPlan = await fixturePage.evaluate(() => {
+              const graph = document.querySelector('[data-actual-execution-graph="recorded"]')
+              const currentPlan = document.querySelector('[data-plan-history="current"]')
+              return Boolean(graph && currentPlan && currentPlan.contains(graph))
+            })
+            record(`${label} keeps the actual graph distinct from the current plan`,
+              !graphInPlan && await plan.locator('[data-plan-failure]').count() > 0,
+              { graphInPlan, planText: await plan.innerText() })
+          } else {
+            const flow = fixturePage.locator('.flow-section')
+            await flow.waitFor()
+            const registryCount = await flow.locator('.flow-node[data-node-id]').count()
+            const graphInFlow = await fixturePage.evaluate(() => {
+              const graph = document.querySelector('[data-actual-execution-graph="recorded"]')
+              const flowSection = document.querySelector('.flow-section')
+              return Boolean(graph && flowSection && flowSection.contains(graph))
+            })
+            record(`${label} keeps the actual graph distinct from the 13-node registry`,
+              registryCount === 13 && !graphInFlow,
+              { registryCount, graphInFlow })
+          }
+
+          const detailTrigger = graphSection.locator('button[data-actual-graph-detail="执行成员记录详情"]').first()
+          await detailTrigger.evaluate((node) => { window.__actualGraphTrigger = node })
+          await detailTrigger.click()
+          const dialog = fixturePage.locator('dialog[data-technical-detail="true"][open]')
+          await dialog.waitFor({ timeout: 10000 })
+          const detail = await dialog.evaluate((node) => ({
+            assignmentId: node.querySelector('[data-detail-label="assignmentId"]')?.textContent ?? null,
+            pipelineNodeId: node.querySelector('[data-detail-label="pipelineNodeId"]')?.textContent ?? null,
+            text: node.innerText,
+          }))
+          record(`${label} opens the exact actual-member identity in the shared drawer`,
+            detail.assignmentId === 'assignment-deliver'
+              && detail.pipelineNodeId === 'pipeline.execute'
+              && detail.text.includes('执行成员记录详情'),
+            detail)
+          const geometry = await dialog.evaluate((node) => {
+            const rect = node.getBoundingClientRect()
+            return {
+              left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
+              width: rect.width, height: rect.height,
+              viewportWidth: innerWidth, viewportHeight: innerHeight,
+              noHorizontalOverflow: document.documentElement.scrollWidth <= innerWidth,
+            }
+          })
+          record(`${label} keeps the shared drawer inside the viewport`,
+            geometry.left >= -1 && geometry.right <= geometry.viewportWidth + 1
+              && geometry.top >= -1 && geometry.bottom <= geometry.viewportHeight + 1
+              && geometry.noHorizontalOverflow,
+            geometry)
+          await dialog.locator('.shell-layer-close').click()
+          await dialog.waitFor({ state: 'hidden' })
+          const focusReturned = await fixturePage.waitForFunction(
+            () => document.activeElement === window.__actualGraphTrigger,
+            undefined,
+            { timeout: 5000 },
+          ).then(() => true).catch(() => false)
+          record(`${label} returns focus to the actual-member detail trigger`, focusReturned)
+
+          activityMode = 'not-recorded'
+          await fixturePage.reload({ waitUntil: 'domcontentloaded' })
+          const missingSection = fixturePage.locator('[data-actual-execution-graph="not-recorded"]')
+          await missingSection.waitFor({ timeout: 20000 })
+          const missingText = await missingSection.innerText()
+          record(`${label} keeps missing recorded history explicit`,
+            missingText.includes('实际执行记录缺失')
+              && await missingSection.locator('[data-actual-stage]').count() === 0
+              && await missingSection.locator('[data-actual-instance]').count() === 0,
+            { missingText })
+
+          activityMode = 'failed'
+          await fixturePage.reload({ waitUntil: 'domcontentloaded' })
+          const failedActivity = fixturePage.locator('.agent-activity-section[data-agent-activity="failed"]')
+          await failedActivity.waitFor({ timeout: 20000 })
+          const failedText = await failedActivity.innerText()
+          record(`${label} preserves the failed activity read without a graph fallback`,
+            failedText.includes('实际执行图读取失败')
+              && await fixturePage.locator('[data-actual-execution-graph]').count() === 0,
+            { failedText, graphCount: await fixturePage.locator('[data-actual-execution-graph]').count() })
+
+          record(`${label} actual-graph flow issues only scoped GETs`,
+            requests.length > 0 && requests.every((request) => request.method === 'GET')
+              && requests.filter((request) => request.path.endsWith('/dashboard') || request.path.endsWith('/observation'))
+                .every((request) => request.query.projectKey === projectKey && request.query.mode === mode),
+            { requests })
+          record(`${label} actual-graph flow has no unexpected route or page error`,
+            unexpected.length === 0 && errors.length === 0,
+            { unexpected, errors })
+          await fixturePage.screenshot({ path: join(artifactDir, `actual-graph-${surface}-${viewport.width}.png`), fullPage: true })
+        } catch (error) {
+          record(`${label} actual-graph fixture completed`, false, {
+            message: error.message,
+            errors,
+            pageText: await fixturePage.locator('body').innerText().catch(() => ''),
+          })
+          await fixturePage.screenshot({ path: join(artifactDir, `actual-graph-${surface}-${viewport.width}-failure.png`), fullPage: true }).catch(() => {})
+        } finally {
+          observe(`${label} actual-graph requests`, requests)
+          await fixturePage.close()
+        }
+      }
+    }
+  }
   if (planHistoryOnly) {
     // Failure mode: the formal Task Dashboard may ignore the available
     // multi-revision plan history, show a later published revision as current,
@@ -1817,9 +2225,11 @@ try {
   console.log(
     taskIdentityOnly
       ? `interaction page wiring browser proof (task-identity-only): ${checks.length} checks passed`
-      : planHistoryOnly
-        ? `interaction page wiring browser proof (plan-history-only): ${checks.length} checks passed`
-        : `interaction page wiring browser proof: ${checks.length} checks passed`,
+      : actualGraphOnly
+        ? `interaction page wiring browser proof (actual-graph-only): ${checks.length} checks passed`
+        : planHistoryOnly
+          ? `interaction page wiring browser proof (plan-history-only): ${checks.length} checks passed`
+          : `interaction page wiring browser proof: ${checks.length} checks passed`,
   );
 } finally {
   await browser.close().catch(() => {});

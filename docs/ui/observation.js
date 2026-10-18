@@ -13,7 +13,10 @@ import {
   taskReadScopeFromQuery,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
-import { unavailableModeFailure } from './task-display.js'
+import {
+  renderTaskActualExecutionGraphSection,
+  unavailableModeFailure,
+} from './task-display.js'
 import {
   agentActivityQuery,
   agentActivitySelectionFromQuery,
@@ -636,6 +639,17 @@ function renderAgentActivitySection(projection) {
   return section
 }
 
+// Actual execution records are a task-level attachment on the successful
+// activity read. This read-only surface does not create a second reader or a
+// graph placeholder when the activity read is pending, failed or absent.
+function renderActualExecutionGraphSection(read) {
+  if (agentSelectionFailure || agentReadPending || agentReadFailure) return null
+  if (!read || read.ok !== true || !read.value?.actualExecutionGraph) return null
+  return renderTaskActualExecutionGraphSection(read.value.actualExecutionGraph, {
+    onOpenDetail: openTechnicalDetail,
+  })
+}
+
 // Selecting an instance is URL view state plus a re-read of the same observation
 // scope. It writes no control state and opens no second scope.
 async function selectAgentInstance(selection) {
@@ -847,6 +861,9 @@ function renderObservation(projection) {
 
   const agentSection = renderAgentActivitySection(projection)
   if (agentSection) main.append(agentSection)
+
+  const actualGraphSection = renderActualExecutionGraphSection(projection?.agentActivity)
+  if (actualGraphSection) main.append(actualGraphSection)
 
   main.append(renderSemanticObservationSection())
 
