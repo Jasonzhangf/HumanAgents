@@ -47,12 +47,11 @@ import { readTaskAgentActivity } from '../../packages/app/src/ui-runtime/agent-a
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
-  AgentRuntimePoolManager, OrchestrationError,
+  AgentRuntimePoolManager, OrchestrationError, OrchestrationManager,
   resolveReviewMaterial,
   type ChildCallPort, type IndependentChildCallInput, type ExecutionAgentPort,
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
-import { createTestOrchestrationManager } from '../runtime/orchestration/assignment-graph-test-journal.js';
 import { createReviewAssignments } from '../../packages/runtime/src/review/index.js';
 import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import { activeTurnCommitId } from '../../packages/runtime/src/context/active-turn-journal.js';
@@ -568,9 +567,9 @@ async function singleCallFixture() {
     async review() { throw new Error('direct/root review callback must never run'); },
     createInstance() { throw new Error('single-call fixture never dispatches a root reviewer'); },
   };
-  const manager = createTestOrchestrationManager({ ownerId: 'single-call-manager',
-    taskId: taskScope.taskId, organId: taskScope.organId, runtimePool: pool,
-    executionAgent, reviewAgent, reviewJournal: createJsonlI2JournalPort({ filePath: join(root, 'organ.jsonl'), journal }) });
+  const manager = new OrchestrationManager({ ownerId: 'single-call-manager',
+    runtimePool: pool, executionAgent, reviewAgent,
+    reviewJournal: createJsonlI2JournalPort({ filePath: join(root, 'organ.jsonl'), journal }) });
   async function common(invocationId: string) {
     const registration = await journal.append({ commitId: `fixture-business:${invocationId}`, kind: 'event', scope,
       payload: { kind: 'single-call-fixture-business', invocationId } });
@@ -891,7 +890,7 @@ test('single call public API returns genuine work and standalone repeated review
     assert.deepEqual(f.counts(), { executions: 1, reviews: 2, releases: 3, disposes: 3 });
     assert.deepEqual(f.seenRequestInvocations(), ['review-call:first', 'review-call:second'],
       'each review request carries its own registered parent invocation, not the review assignment');
-    assert.deepEqual(f.manager.snapshot(), { stages: [], assignments: [] }, 'single calls do not run dispatch');
+    assert.deepEqual(f.manager.graph.snapshot(), { stages: [], assignments: [] }, 'single calls do not run dispatch');
     const records = await f.journal.replay();
     assert.equal(records.filter((r) => r.payload?.kind === 'single-call-fixture-return').length, 3);
     console.info('single call receipts', JSON.stringify({ counts: f.counts(), calls: records.map((r) => r.commitId) }));
@@ -1109,7 +1108,7 @@ test('declared milestone review commits a real I2 receipt per registered invocat
     const readBack = await coldJournal.replay();
     assert.equal(readBack.filter((record) => record.payload?.type === assignmentGraphFactPayloadType).length, 0,
       'the native graph read must not depend on classic AssignmentGraph facts');
-    assert.deepEqual(f.manager.snapshot(), { stages: [], assignments: [] },
+    assert.deepEqual(f.manager.graph.snapshot(), { stages: [], assignments: [] },
       'the single native call path must not run classic graph dispatch');
     assert.equal(readBack.length, beforeRead, 'reading the graph must not append Journal facts');
     console.info('declared milestone receipts', JSON.stringify({ first: firstRef, second: secondRef }));
@@ -1176,9 +1175,8 @@ test('dispatch keeps the already-committed milestone receipt when a later review
       }
       return realI2.commit(record);
     } };
-  const manager = createTestOrchestrationManager({ ownerId: 'dispatch-manager',
-    taskId: taskScope.taskId, organId: taskScope.organId, runtimePool: pool,
-    executionAgent, reviewAgent, reviewJournal });
+  const manager = new OrchestrationManager({ ownerId: 'dispatch-manager',
+    runtimePool: pool, executionAgent, reviewAgent, reviewJournal });
   try {
     manager.planStage({ nodeId: 'dispatch-milestone-node', taskId: taskScope.taskId });
     const dispatched = await manager.dispatch({ stageNodeId: 'dispatch-milestone-node', assignment, agentId: 'dispatch-worker',
