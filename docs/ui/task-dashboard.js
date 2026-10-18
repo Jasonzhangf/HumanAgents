@@ -1659,6 +1659,10 @@ function markSync() {
   }
 }
 
+const STOP_ACTION_LABEL = 'Stop / 收拢'
+const RETRY_STOP_ACTION_LABEL = 'Retry Stop / 重试收拢'
+const START_ACTION_LABEL = '进入显式大脑'
+
 function actionCopy() {
   if (dashboard.state === 'succeeded') return dashboard.output ? '任务已完成，结果可用。' : '任务已完成；当前没有合法操作。'
   if (dashboard.state === 'stopped') {
@@ -1666,17 +1670,18 @@ function actionCopy() {
       ? `计划仍保持生效；下次到期：${dashboard.plan.nextDueAt ? formatPreciseTime(dashboard.plan.nextDueAt) : '未提供'}。需要暂停或取消后续执行请使用下方计划控制。`
       : ''
     return dashboard.checkpoint
-      ? `已停止；收拢 receipt / checkpoint 已提交。${planNote}`
-      : `停止请求已受理，但尚未收到收拢 receipt；不能宣称已停止。${planNote}`
+      ? `本次执行已停止，停止结果已保存。${planNote}`
+      : `停止请求已受理，尚未确认停止完成。${planNote}`
   }
   if (dashboard.state === 'blocked') return '执行失败或受阻，仍在释放资源；请按详情中的恢复动作处理。'
-  if (dashboard.state === 'failed') return dashboard.error
-    ? `执行失败：${dashboard.error.nextAction}`
-    : '执行失败；请查看详情中的证据。'
-  if (dashboard.allowedActions.includes('start')) return '当前没有正在运行的执行；可以进入显式大脑发起新的处理。'
-  return dashboard.allowedActions.length > 0
-    ? `当前可用操作：${dashboard.allowedActions.join(', ')}。`
-    : '当前没有合法操作；请等待收拢或按详情处理。'
+  if (dashboard.state === 'failed') return '执行失败，请打开技术详情查看原因和处理建议。'
+  if (dashboard.allowedActions.includes('start')) return `当前没有正在运行的执行；可以使用“${START_ACTION_LABEL}”发起新的处理。`
+  const actionLabels = []
+  if (dashboard.allowedActions.includes('stop')) actionLabels.push(STOP_ACTION_LABEL)
+  if (dashboard.allowedActions.includes('retry-stop')) actionLabels.push(RETRY_STOP_ACTION_LABEL)
+  return actionLabels.length > 0
+    ? `当前可用操作：${actionLabels.join('、')}。`
+    : '当前没有本页可执行的操作；请等待收拢或打开技术详情查看原因。'
 }
 
 // The plan surface is owned by `plan-control.js`, which renders the durable
@@ -2242,11 +2247,11 @@ function renderDashboard() {
   execution.append(element('h2', '任务控制'))
   const panel = element('div', undefined, 'panel')
   const actions = element('div', undefined, 'actions')
-  const stopButton = element('button', 'Stop / 收拢', 'button button--danger')
+  const stopButton = element('button', STOP_ACTION_LABEL, 'button button--danger')
   stopButton.type = 'button'
   stopButton.disabled = !dashboard.allowedActions.includes('stop')
   stopButton.addEventListener('click', () => void stopExecution())
-  const retryStopButton = element('button', 'Retry Stop / 重试收拢', 'button button--danger')
+  const retryStopButton = element('button', RETRY_STOP_ACTION_LABEL, 'button button--danger')
   retryStopButton.type = 'button'
   retryStopButton.disabled = !dashboard.allowedActions.includes('retry-stop')
   retryStopButton.addEventListener('click', () => void retryStopExecution())
@@ -2263,7 +2268,7 @@ function renderDashboard() {
   if (!explicitScope && dashboard.allowedActions.includes('retry-stop')) actions.append(retryStopButton)
   if (!explicitScope && revokeGrantButton) actions.append(revokeGrantButton)
   if (!explicitScope && dashboard.allowedActions.includes('start')) {
-    const detailLink = element('a', '进入显式大脑', 'button button--primary')
+    const detailLink = element('a', START_ACTION_LABEL, 'button button--primary')
     detailLink.href = `${taskDetailHref(taskId, explicitScope)}#task-interaction`
     actions.append(detailLink)
   }
