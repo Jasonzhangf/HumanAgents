@@ -674,7 +674,7 @@ function renderActualStage(stage, options) {
   const head = element('header', undefined, 'plan-revision-head')
   head.append(
     element('h4', stage.label, 'actual-execution-stage-title'),
-    element('span', stage.stateLabel, 'plan-tag'),
+    element('span', `最近记录：${stage.stateLabel}`, 'plan-tag'),
   )
   article.append(head, element('p', stage.parent.label, 'muted plan-predecessor actual-execution-parent'))
   const list = element('ol', undefined, 'plan-node-list actual-execution-members')
