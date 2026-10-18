@@ -1129,7 +1129,6 @@ function selectPlannerDutyBusinessClosure(
     closure.closureRef === duty.closureRef
     && closure.checkpointId.value === duty.checkpointId.value
     && closure.identity.taskRef.value === taskId.value
-    && closure.identity.executionEpoch === prepared.incarnation.executionEpoch
     && sameScopeRef(closure.identity.scopeRef, duty.scope));
   if (matching.length === 0) return undefined;
   if (matching.length > 1) return { status: 'ambiguous' };
