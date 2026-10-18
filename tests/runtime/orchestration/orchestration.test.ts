@@ -1129,7 +1129,7 @@ test('review failure creates a remediation assignment and merge cannot precede p
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
-      { result: result(), criteria: criteria() },
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
     ]),
     reviewAgent: review,
     mergeCoordinator: merge,
@@ -1163,7 +1163,7 @@ test('review result mismatch is rejected before graph state advances', async () 
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
-      { result: result(), criteria: criteria() },
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
     ]),
     reviewAgent: review,
   });
@@ -1195,7 +1195,7 @@ test('merge-required work passes review before merge and records merged status',
     ownerId: 'orchestration-manager',
     runtimePool: pool,
     executionAgent: new StaticExecutionAgent([
-      { result: result(), criteria: criteria() },
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
     ]),
     reviewAgent: new PassingReviewAgent(),
     mergeCoordinator: merge,
@@ -1220,7 +1220,7 @@ test('duplicate dispatch returns recoverable progress while review is pending', 
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute', 'quality.review'] }],
   });
   const execution = new StaticExecutionAgent([
-    { result: result(), criteria: criteria() },
+    { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
   ]);
   const review = new PassingReviewAgent();
   let releaseReview!: () => void;
@@ -1563,7 +1563,7 @@ test('dispatch is idempotent for terminal assignments and duplicate work results
     initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute', 'quality.review'] }],
   });
   const execution = new StaticExecutionAgent([
-    { result: result(), criteria: criteria() },
+    { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
   ]);
   let mergeCalls = 0;
   const merge: MergeCoordinatorPort = {
@@ -1634,7 +1634,9 @@ test('review result id conflicts are rejected and merge gate uses persisted revi
   const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
-    executionAgent: new StaticExecutionAgent([{ result: result(), criteria: criteria() }]),
+    executionAgent: new StaticExecutionAgent([
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
+    ]),
     reviewAgent: firstReview,
     mergeCoordinator: {
       async merge() {
@@ -1702,7 +1704,9 @@ test('blocked merge outcomes expose owner, reason, next action, and fallback evi
   const manager = new OrchestrationManager({
     ownerId: 'orchestration-manager',
     runtimePool: pool,
-    executionAgent: new StaticExecutionAgent([{ result: result(), criteria: criteria() }]),
+    executionAgent: new StaticExecutionAgent([
+      { result: result({ producedArtifactBodies: [artifactBody] }), criteria: criteria() },
+    ]),
     reviewAgent: new PassingReviewAgent(),
     mergeCoordinator: {
       async merge() {
