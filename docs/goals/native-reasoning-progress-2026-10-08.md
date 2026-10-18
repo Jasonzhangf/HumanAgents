@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-17 当前接续：inspection readiness 与真实入口准入
+
+- Runtime 来源 `9a20417a` 已读完整 diff 和作者 note，标准 cherry-pick 为唯一候选 `e8637428`。只改 coordinator：每次 release 在 await 前捕获 readiness resolver，本地幂等完成，仅引用相等时清共享字段；Provider attempts 共用该 release 完成函数。沿既有图，拓扑不变。候选 `pnpm build:app` exit 0（session67199）。尚未整体 Review、main 或安装。
+- 作者原 3 个 readiness 回归 3/3；原 opened-stop 已越过 409，实际到 stop/checkpoint/Provider settle-close/I2/cycle close。当前失败为 expected `{kind:'stop'}` 与 actual `{kind:'stop',ref:'operator-stop'}`，交 App owner 核合同；cold reader 尚未执行，不记通过。作者证据：`.worker-runs/inspection-stop-readiness-20261017/note.md`（外置 humanagent 根）。
+- r331 独立 Gemini 只读计划已终态并接收，零模型请求。原 RCC neutral-SSE/EOF 根因仍 UNKNOWN；计划要求先核当前声明 binding、readiness 与 capture 路由，未有实质变化不得重复生成。fresh GCM r332 已启动执行该零请求观察，tmux `ha-native-r332`，报告在既有 RUN `native-real-entry-owner-observe-r332-20261017`；不改配置、不换模型、不创建 Task。完整目标 ACTIVE/INCOMPLETE。
+
 ## 2026-10-17 已交付：工具预算中断与同业务 turn 恢复增量
 
 - 六文件来源7fccbbe4与最新main组合为ef8c772c，独立完整Review r326 Opus实quota未审；r327 freshGemini有效JSON/exit0/空findings，既有classifier裁决PASS。main已FF并push，原始远端回执 `860ef944..ef8c772c main -> main`。未混入inspection候选。
