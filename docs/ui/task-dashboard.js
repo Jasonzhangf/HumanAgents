@@ -1659,9 +1659,10 @@ function markSync() {
   }
 }
 
-const STOP_ACTION_LABEL = 'Stop / 收拢'
-const RETRY_STOP_ACTION_LABEL = 'Retry Stop / 重试收拢'
-const START_ACTION_LABEL = '进入显式大脑'
+const STOP_ACTION_LABEL = '停止本次执行'
+const RETRY_STOP_ACTION_LABEL = '重试停止'
+const START_ACTION_LABEL = '处理任务'
+const GRANT_CONTROL_FAILURE_COPY = '执行授权状态暂时无法读取，授权操作不可用；请打开技术详情查看原因。'
 
 function actionCopy() {
   if (dashboard.state === 'succeeded') return dashboard.output ? '任务已完成，结果可用。' : '任务已完成；当前没有合法操作。'
@@ -2221,6 +2222,10 @@ function renderDashboard() {
       ['error.code', dashboard.error?.code],
       ['error.message', dashboard.error?.message],
       ['error.nextAction', dashboard.error?.nextAction],
+      ['control.error.ownerId', taskControlError?.ownerId],
+      ['control.error.code', taskControlError?.code],
+      ['control.error.message', taskControlError?.message],
+      ['control.error.nextAction', taskControlError?.nextAction],
       ['error.cleanupError（清理错误链）', dashboard.error?.cleanupError === undefined
         ? undefined
         : JSON.stringify(dashboard.error.cleanupError, null, 2)],
@@ -2277,7 +2282,7 @@ function renderDashboard() {
     : '尚无执行授权'
   const controlNotice = !explicitScope
     ? taskControlError
-      ? `执行授权失败：${taskControlError.message || String(taskControlError)}`
+      ? GRANT_CONTROL_FAILURE_COPY
       : grantState
     : ''
   const actionMessage = explicitScope
