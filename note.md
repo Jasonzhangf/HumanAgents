@@ -1,5 +1,17 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
+## 2026-10-18 最新交付：公开结果接入共同语义观测
+
+main `99a47e2e` 已合入完整十五文件 F07 增量。既有 typed `PublicOutputPublication` 经 contracts/context-events 和两个 App builder 原样进入语义 GET/SSE，共享 UI 显示已确认正文、pending 状态及 unknown/unavailable 保留提示。未提交文本不公开；两个水位保持独立。完整引用含已定义的 harness/provider turn 与 request 字段，raw 使用同一引用数组。没有新 producer、Journal、endpoint、cache 或 canonical taxonomy。
+
+作者实际 RED/GREEN 覆盖原载体丢失、跨 scope、HTTP/SSE遗漏、稳定文本遗漏、unknown无提交误空及可选binding引用遗漏。原 A foreign GET/SSE200、正文与原提交顺序/引用不变、公开1093/事件1022独立。真实长引用首次在手机裁切，既有 CSS 修正后手机贴底、桌面侧栏、完整换行、滚动关闭可达和焦点返回均已验收。
+
+首选 Review 因额度退出、首个后备因角色说明错误未审业务，两结果保留并拒收。修正后的独立 OAuth 整体审查发现一项真实 P1：可选 binding 引用丢失。修正99a47e2e取得原消费者RED→GREEN2/2及原A受影响复验，finding-only独立复核有效PASS，其余整体结论复用。没有重复全审或用空findings冒报通过。
+
+main contracts/App构建、打包、安装成功；正式restart47→48/PID10077/53007，旧实例clean。自有fixture正式切安装版27/PID15080并显式使用安装UI；安装后原A GET/SSE、完整正文/引用、水位及手机证据层通过。自有fixture已正常TERM，租约disposedAt `2026-10-19T01:29:15.445Z`；自有HA_SESSION与emulation清理、p1空白、p3不动。真实产品回执在配置 `run-notes/ux-f07-semantic-publication-20261018/`，代码/审查接收在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f07-semantic-commit-design-20261018/root-combined-reception.md`。来源树在推送后正常回收。
+
+完整目标仍ACTIVE/INCOMPLETE。最后阶段独立计划已逐13有效需求/G1–14/F01–20/I1–5映射现有证据。F12原浏览器69项中的断连保留、重开无数据仍stale、新解码版本恢复，以及空/不可用/读取失败均有实际PASS，复用受控EventSource→真实生产组件证据，不扩称物理RCC断网。R3计划历史及N1负向的定点接收继续区分实际范围，不新增矩阵。原简单问答interaction-2 epoch6仍未成功；当前已交付工具输入形状已变化，但socket根因UNKNOWN，尚未追加请求。独立小计划要求先核实完整typed ProviderSettlement的正式取得边，定点观察进行中。
+
 ## 2026-10-18 最新交付：结构化任务模板与按需阅读
 
 main `a33a471c` 已合入 F15 完整十二文件增量。Core 拥有单次交付、巡检、长程的 typed 阶段、依赖、布局和循环；探索、规划、审查、执行仍由编排者动态选择，轮末检查点与规划对齐保持必经。模板、已发布计划和真实执行记录共用 DOM 卡片与关系控件，三者分别标识，不新增持久图或校验引擎。

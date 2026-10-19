@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新：F07共同语义公开结果已安装验收
+
+main `99a47e2e` 完成既有typed publication→共享信封→bound/foreign App→共同UI的十五文件闭包。原HTTP/SSE及共享consumer有实际RED/GREEN，真实原A公开1093/事件1022保持独立，完整确认正文/顺序/引用不变。unknown无内容误空和optional binding refs遗漏已修正。整体Review真实P1经最小修复与finding-only复核有效PASS，其他结论复用。main构建/打包/安装和正式restart47→48/53007完成，默认安装UI/原A GET/SSE及mobile证据层通过。自有fixture27已disposed，cookie/emulation/p1清理，p3保留。配置产品receipt为 `run-notes/ux-f07-semantic-publication-20261018/`。
+
+总目标仍ACTIVE。原F12断连→保留stale→重开无数据仍stale→decodedrevision恢复的旧生产browser69项actualPASS已找回，属于受控EventSource的UI行为证据，不需新矩阵。原taskless问答epoch6仍无答案，rootcauseUNKNOWN；已交付schema消融带来真实输入形状变化，但尚未重试，先定点确认原typed settlement的正式读取/发布边。其余条款按最后阶段计划与精确receipt核销，不以局部交付关闭完整目标。
+
 ## 2026-10-18 最新：F15任务模板生产闭环
 
 main `a33a471c` 合入Core typed模板、公共投影与共享renderer。默认目的/静态提示/入口与完整骨架分层，手机约133px、桌面约111px；完整动态区、强制轮末checkpoint→Planner、依赖与循环在既有详情阅读。作者实际RED/GREEN、原A双端与Observation交互、一次r516整体独立PASS齐全。main contracts/App构建、打包、安装及正式restart46→47/53007完成，安装后原A手机抽屉/默认层/原正文通过。真实产品回执位于配置 `run-notes/ux-f15-template-layering-20261018/`；完整接收在 `native-f15-combined-entry-20261018/reception.md`。

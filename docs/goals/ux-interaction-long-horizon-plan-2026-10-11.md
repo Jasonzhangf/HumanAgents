@@ -4,6 +4,8 @@
 
 日期：2026-10-11
 计划状态：执行基线已更新；里程碑验收仍按下文逐项关闭。
+
+最新交付更新：F07共同语义公开结果已随main `99a47e2e` 完成完整候选验收、整体审查及一项binding引用finding修复复核、构建安装与正式restart47→48。原A安装GET/SSE/完整正文/水位及mobile证据层通过，自有临时服务与浏览器状态清理，来源树于push后关闭。详见项目note与 `native-f07-semantic-commit-design-20261018/root-combined-reception.md`。F15已随1775effb标准交付。完整I/G/F仍ACTIVE，原taskless成功与最后定点证据裁决未完成；下文较早pending状态保留为历史。
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
 
