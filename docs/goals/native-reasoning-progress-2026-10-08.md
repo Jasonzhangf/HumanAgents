@@ -1,5 +1,9 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新：原问答一次验证失败，预算已用尽
+
+Receipt 增量标准交付后，原交互保持原输入/turn/binding执行一次，epoch7仍返回HTTP409/transport.failure/UND_ERR_SOCKET，资源closed，无答案或成功settlement。Task与任务checkpoint未变，禁止追加请求。具体样本、预检边界和恢复责任只维护于 `note.md` 最新现场段及对应 Root 接收记录。新样本正在只读关联，根因仍未知；完整目标未完成。
+
 ## 2026-10-18 最新：taskless settlement 正式边已标准交付
 
 main `c2527d54` 已推送。原完整 typed settlement 经同一 parent Journal 发布与独立控制 GET 读取；正式消费者实际 RED→GREEN，唯一旧版 completed-answer 兼容 finding 补证并通过独立局部复核。main 构建/安装、正式 restart48→49、已安装入口同消费者1/1及自有来源树/分支清理完成。具体行为、证据范围及路径只维护于 `note.md` 的本次交付段。

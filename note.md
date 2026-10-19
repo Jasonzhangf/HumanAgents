@@ -1,5 +1,13 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
+## 2026-10-18 最新现场：原简单问答 epoch7 仍因连接终止失败
+
+Receipt 增量标准交付完成后，Root 按已有独立计划执行一次原 `interaction-2` 的公开 interpret。首次预检因 checkpoint 读取 URL 缺少既有 projectKey/mode 参数而停止，业务请求0；修正仅限验收脚本的只读 URL，原错保留。随后现场前置通过，保持原输入、revision1、逻辑 turn 和完整 binding，唯一一次业务调用生成 epoch7/request `request-c5e6ce5d-1dd6-4036-907f-ac2c225fc259`。
+
+实际结果为 HTTP409/transport.failure，TypeError terminated，cause `UND_ERR_SOCKET: other side closed`。物理资源于 `2026-10-19T03:57:59.532Z` 收拢 closed；acceptedFacts0、helper0、无答案、无语义 checkpoint，interaction仍matching。原 Task 数量与任务 checkpoint 均未变。一次预算已用尽，禁止追加 interpret、切 Provider 或模型、重建问题、手工推进 epoch。没有成功 settlement 或原问答展示验收。
+
+原始结果、typed before/after、唯一发送声明和 Root 接收记录在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-taskless-shape-revalidation-plan-20261018/installed-*.json` 及 `owner-installed-reception.md`。本次精确新样本已交授权 peer 做只读关联，限新时窗、实际 HA/Provider/RCC 证据；不重扫旧日志窗、不发模型、不改配置。Socket 根因仍 UNKNOWN，完整目标继续 ACTIVE / INCOMPLETE。下方 receipt 增量的交付结论保持有效，不能外推为原问答已恢复。
+
 ## 2026-10-18 最新交付：taskless 结束结果的正式持久发布与读取
 
 main `c2527d54` 已推送到 `origin/main`。完整 `InteractionProviderSettlementReceipt` 通过现有 parent Journal 持久化，并经独立控制 GET 返回原 fact/commit。解释器、发布和读取共用同一 Journal，物理请求路径与逻辑 turn 分开。没有新增 store、producer、业务字段或 Task。关闭后仅补充该控制记录，普通请求和 raw 写入仍冻结；旧 epoch 不能代替当前请求。相同内容幂等，冲突和缺失显式失败。
