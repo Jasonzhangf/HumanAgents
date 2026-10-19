@@ -5,9 +5,22 @@
 日期：2026-10-11
 计划状态：执行基线已更新；里程碑验收仍按下文逐项关闭。
 
-最新交付更新：F07共同语义公开结果已随main `99a47e2e` 完成完整候选验收、整体审查及一项binding引用finding修复复核、构建安装与正式restart47→48。原A安装GET/SSE/完整正文/水位及mobile证据层通过，自有临时服务与浏览器状态清理，来源树于push后关闭。详见项目note与 `native-f07-semantic-commit-design-20261018/root-combined-reception.md`。F15已随1775effb标准交付。完整I/G/F仍ACTIVE，原taskless成功与最后定点证据裁决未完成；下文较早pending状态保留为历史。
+最新交付更新：F07、F15与taskless settlement receipt已完成标准main/build/install/restart/push/cleanup；F20五个原条款已有分层历史执行覆盖，F10已按产品主体认证、catalog未知拒绝与scope隔离收口。I1–I4可按原条款及既有修正证据逐项限定接受，但不表示5/5或9/9；I5与完整目标仍ACTIVE/INCOMPLETE，尚缺原taskless简单问答成功及最终whole-goal收口审查。当前裁决见下方「2026-10-18 证据收口与当前边界」；更早的pending/OPEN文字保留为历史。
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
+
+### 2026-10-18 证据收口与当前边界
+
+本节是当前G/F/I状态裁决入口，取代下文较早状态段落中与本节冲突的语句。证据来自 `native-evidence-closeout-20261018/` 的a/b/c/d/e报告、reception/de-reception、F10窄计划及已知项目未授权receipt；本轮文档核销没有重跑测试、构建、浏览器、模型或服务动作。Root仅补了一次F10无凭据只读GET，没有改变需求或原验收文字。
+
+- F07共同语义公开结果已按main `99a47e2e`、交付记录 `314f53aa`完成标准交付；F15已按main `a33a471c`、交付记录 `1775effb`完成标准交付。两者均已完成构建、安装、正式restart、推送及来源清理。
+- taskless settlement receipt已按源码 `6539874f`、test-only `c2527d54`、交付记录 `4d6ba897`完成main/build/install/restart/push/cleanup，后续note保留交付事实。该receipt不表示原taskless业务问答成功；原简单问答仍是未完成业务结果。
+- F20原五个检查条款判定为已覆盖：checkpoint身份/摘要/证据可读；current与viewed同时分离；plan/cycle/occurrence独立；unknown/uncommitted/cross-task目标显式失败且不替换其他快照；导航不执行。证据按历史App4 4/4、UI11 11/11、dashboard 10/10与已安装浏览器分层复用，不要求新增dashboard测试或current-version identity重跑。
+- F10判定为产品主体认证、项目catalog未知拒绝和声明项目scope隔离共同满足原条款，不新增project ACL。Root取得的唯一canonical已知项目请求不带Cookie与Authorization，返回HTTP 401 `auth.session.missing`；body只有error与login/pair guidance，没有项目projection。初次本地执行还出现额外`ok=false`断言失败，该失败仅属harness；其后没有发送第二次HTTP请求。
+- I1–I4按原条款及a–e修正证据分别判定为限定接受；各项只在其原始scope内成立，不合并为5/5，也不把c的9/9统计作为接受结果。I5与完整目标继续ACTIVE/INCOMPLETE，等待原简单问答成功、对应typed settlement以及最终whole-goal收口审查。
+- epoch7首次偏离已确认：RCC `V3Req04StandardizedResponses`将合法tool-schema属性`requiredCapabilities`误判；HA socket到wire终止映射仍未确定。旧预算USED，不据陈旧worker报告更新live RCC，也不发新请求；业务恢复由Root持有。
+- 未定位实际RED或可执行反例的条款继续标`FC-UNVERIFIED`；普通成功/失败receipt不证明抓错能力。典型边界包括F20负向选择、F11/I3计划历史浏览器断言、F12 freshness、F13完整恢复路径、per-call checkpoint及raw泄漏反例。F19的P2b whole-case失败保留，已接受的C3a duties/effects/prefix子集边界不变。
+- 本轮不推导arbitrary-N、全协议、全模式、live-RCC、物理磁盘或组合矩阵债务。以上收口只用于当前文档裁决；代码、gate、需求和历史证据均未修改。
 
 ### 2026-10-18 最新交付：覆盖详情与偏好失败反馈
 
@@ -323,6 +336,8 @@ R1-X 旧 root 收口与独立新 E1 并行。新 E1 在功能组合和公开消�
 **退出条件：**上述多 scope 的公开入口与浏览器验收通过。F11 仅在 M5 的 checkpoint/history 查询完成后最终关闭；Agent 或项目身份任一未公开时不得宣称全视角完成。
 **状态（2026-10-15）：系统/项目/任务聚合及实例观测基础已开发，生产多视角尚未验收。** canonical 聚合读取已有真实 HTTP 证据。实例目录/精确选择投影、共享实例 renderer 和独立 URL 选择已实现，保留同角色多实例及 native/acquired 两类真实身份；显示偏好资源和计划历史已有独立消费者。新前端 successor 正采用冻结候选并接共享下钻；App typed reader 的真实 codec consumer、无 turn 的 task-only 入口及当前归属/子实例来源仍在补齐。两项目/两任务隔离、真实桌面/手机下钻、偏好与历史深链整体验收仍未完成。
 
+**2026-10-18 证据收口补记：**F10原条款已按产品主体认证、catalog未知拒绝和scope隔离限定接受，不新增project ACL；该接受不把M4整体或完整目标改为验收通过。
+
 ### M5 — Context 修正、checkpoint 浏览、恢复与 UX 总收口
 
 **用户结果：**用户能区分 runtime 当前游标与自己正在查看的历史；从 checkpoint/修订追到语义、动作与 raw 证据；上下文纠错、回退或继续都保留旧历史、未完成义务和真实副作用状态。恢复后导航与执行责任仍正确。
@@ -336,6 +351,8 @@ R1-X 旧 root 收口与独立新 E1 并行。新 E1 在功能组合和公开消�
 **进入条件：**M0 的恢复能力和 M1/M3/M4 的身份、语义、历史查询可用。
 **退出条件：**G1–G14 与 F01–F20 的最终矩阵逐项有真实证据或明确不适用依据；所有用户可见路径成功/失败/未知状态可解释；资源全部结案或逐项标记 `INCOMPLETE` 并交代 owner。执行适用的 focused tests、真实 UX E2E 和一次完整里程碑独立 review 后，按项目标准交付流程集成。AItest/Panda 不属于该验收。
 **状态（2026-10-15）：checkpoint 只读基础已实现并验证，修正与恢复生产闭环未完成。** C1 已用真实 Journal/Context/native/semantic/capture/typed reentry consumer 验证 current/viewed、精确身份、四段语义、引用和 effective/original epoch 分离，查询保持 Journal/位置/文件集不变。C2 的 pure Core correction 已按独立计划解除对 UI reader 的错误串行依赖并派发；C5 共享 checkpoint 界面已派发。原 App 控制/查询挂载、精确 wrong refs 持久化与后续装配、实际恢复/CAS/fencing、新进程恢复和浏览器验收继续按原条件执行；库级 consumer 不关闭 G13/G14/F13。
+
+**2026-10-18 证据收口补记：**F20原五条款已按App4/UI11、dashboard 10/10与已安装浏览器分层证据限定接受，不新增测试或current-version identity门禁。I5及完整目标仍ACTIVE/INCOMPLETE，等待原简单问答成功、typed settlement和最终whole-goal收口审查；P2b whole-case失败与已接受子集边界保留。
 
 ## 依赖、停点与并发编排
 
