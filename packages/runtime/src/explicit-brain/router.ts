@@ -81,6 +81,7 @@ interface AutomaticOccurrence {
 }
 
 export interface RequirementDraftRevision {
+  readonly title?: string;
   readonly interactionId: string;
   readonly draftId: string;
   readonly inputRevision: number;
@@ -105,6 +106,7 @@ export interface RequirementDraftRevision {
  * the policy payload).
  */
 export interface RegisteredDraftRevision {
+  readonly title?: string;
   readonly interactionId: string;
   readonly draftId: string;
   readonly inputRevision: number;
@@ -417,6 +419,7 @@ export class ConfirmationLedger {
       draftRevisionHash: revision.draftRevisionHash,
       ...(revision.executionControlRef === undefined ? {} : { executionControlRef: revision.executionControlRef }),
       ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
+      ...(revision.title === undefined ? {} : { title: revision.title }),
     });
     this.confirmations.set(input.draftId, {
       interactionId: input.interactionId,
@@ -850,6 +853,7 @@ export class RequirementSubmissionOwner {
       fifoSeq: this.inbox.expectedNextFifoSeq,
       payloadRef: revision.payloadRef,
       ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
+      ...(revision.title === undefined ? {} : { title: revision.title }),
     };
     if (durable && JSON.stringify(durable) !== JSON.stringify(envelope)) {
       throw new ExplicitBrainRouterError('duplicate-submit', `durable requirement submission differs from the current revision: ${revision.draftId}`);

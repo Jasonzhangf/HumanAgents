@@ -144,6 +144,7 @@ test('durable inventory never claims live and only clears fully aligned errors',
         outcome: snapshot.checkpoint.outcome,
       }, { id: checkpoint.id.value, seq: 1, outcome: 'blocked' });
       assert.deepEqual(snapshot.allowedActions, ['start']);
+      assert.equal(snapshot.nextStep, '查看任务详情');
       if (!retainedError) {
         const hookError = { ...error, code: 'execution.context-commit-hook.blocked', nextAction: 'repair context hook' };
         const hookRecords = records.map((record) => record.kind === 'operation.event'
@@ -243,7 +244,7 @@ test('named inspection inventory only reads durable stop completion', async () =
     inspectionStop: {
       async settleStop({ checkpoint: retained }) {
         settleCalls += 1;
-        assert.strictEqual(retained, exact);
+        assert.equal(retained, exact);
         if (failSupplement) throw new Error('retained inspection supplement failed');
         return { state: 'complete', settlementCommitRefs: [] };
       },
@@ -268,4 +269,58 @@ test('named inspection inventory only reads durable stop completion', async () =
   assert.equal(snapshot.error?.cleanupError, undefined, 'only resolved I2 error is cleared');
   assert.equal(snapshot.nextStep, hookError.nextAction);
   assert.deepEqual(snapshot.allowedActions, []);
+});
+
+// Known source incident: lifecycle labels alone produced a human-decision and
+// stop claim. Impact: false state and actions in the public inventory. Cost: one
+// read-only fixture reused for the waiting and blocked states.
+test('waiting and blocked inventory keep a concrete action without inventing a decision', async () => {
+  const taskId = id('task', 'inventory-pending-copy');
+  const cycleId = id('cycle', 'inventory-pending-copy');
+  const operationId = id('operation', 'inventory-pending-copy');
+  const scope = { organId: id('organ', 'inventory-pending-copy'), taskId, cycleId, operationId };
+  const records: RuntimeTaskJournalRecord[] = [
+    { kind: 'task.created', taskId, title: 'pending copy', directive: '', directiveRevision: 1,
+      createdAt: '2026-10-17T00:00:00Z', taskCounter: 1 },
+    { kind: 'operation.started', taskId, cycleId, operationId, scope, executionEpoch: 1,
+      operationCounter: 1, cycleCounter: 1, startedAt: '2026-10-17T00:00:00Z', input: 'read' },
+  ];
+  const checkpoint: Checkpoint = {
+    id: id('checkpoint', 'inventory-pending-copy'), scope, cycleId, seq: 1, previousCheckpointId: null,
+    directiveRevision: 1, executionEpoch: 1, outcome: 'blocked', summary: 'needs recovery',
+    recoveryStateRef: { evidenceId: id('evidence', 'recovery'), kind: 'external', source: 'runtime',
+      locator: 'recovery', scope }, evidenceRefs: [], next: { kind: 'recover', ref: 'runtime' },
+  };
+  const commitRef = { commitId: 'pending-checkpoint', journalSeq: 2, recordDigest: 'pending-receipt' };
+  const checkpointFor = () => ({
+    readLatest: async () => ({ checkpoint, previous: null }),
+    readCommitted: async () => ({ checkpoint, previous: null, commitRef }),
+  });
+  for (const state of ['waiting', 'blocked'] as const) {
+    const value: RuntimeTaskCurrentState = {
+      task: { id: taskId, organId: scope.organId, title: 'pending copy', directive: '',
+        directiveRevision: 1, state, memoryScope: 'task' },
+      processing: {
+        entryPhase: 'aligned', nextAction: { kind: 'recover', ref: 'runtime' }, hardBlockers: [],
+        recoveryResponsibilityRef: 'runtime', laterErrorRefs: [], stages: [],
+      },
+      retainedDuties: [], sourceCommitRefs: [commitRef],
+    };
+    const sourceRecord = {
+      version: 1, previousRecordDigest: null, kind: 'event', seq: 3,
+      commitId: `pending-${state}`, recordDigest: 'pending-receipt', scope,
+      payload: { type: 'runtime-task-current-state', schemaVersion: 1, transitionId: `pending-${state}`, state: value },
+    } as JournalRecord;
+    const port: DurableTaskCurrentStateReadPort = {
+      read: async (taskScope) => readRuntimeTaskCurrentStateFromRecords([sourceRecord], taskScope),
+    };
+    const result = await projectDurableTaskInventory({
+      records, checkpointFor, currentStateFor: () => port,
+    });
+    const snapshot = result.entries[0].snapshot;
+    assert.equal(snapshot.state, state);
+    assert.equal(snapshot.currentState, state === 'waiting' ? '等待中' : '受阻');
+    assert.equal(snapshot.nextStep, 'recover:runtime');
+    assert.deepEqual(snapshot.allowedActions, []);
+  }
 });

@@ -253,6 +253,7 @@ function revisionEditRequestDigest(input: DraftRevisionInput): string {
  * {@link DraftRevision} through the core invariant module.
  */
 export interface DraftIntent {
+  readonly title?: string;
   readonly goal: string;
   readonly scope: string;
   readonly constraints?: readonly string[];
@@ -782,6 +783,7 @@ export class ExplicitIntake {
       executionPolicy: intent.executionPolicy,
       executionControlRef: intent.executionControlRef,
       taskFlow: intent.taskFlow,
+      ...(intent.title === undefined ? {} : { title: intent.title }),
       immutableOriginalRef: `raw-input:${interaction.interactionId}:${interaction.inputRevision}`,
     });
     const createdAt = interaction.occurredAt ?? new Date().toISOString();

@@ -21,9 +21,12 @@ import {
   validateOccurrenceClaim,
   validateOccurrenceSettlementInput,
   validateOccurrenceTaskBinding,
+  validateRequirementEnvelope,
   validateServeTaskTerminalReceipt,
   validateSubscriptionControlRequest,
   validateTaskExecutionEvidence,
+  validateTaskIdentityAppendInput,
+  validateTaskIdentityRecord,
   validateTaskCheckPolicy,
   validateTaskObservationProductionResult,
   validateTaskVerificationPolicy,
@@ -54,6 +57,8 @@ import {
   type SubscriptionControlRequest,
   type TaskExecutionEvidence,
   type TaskCheckPolicy,
+  type TaskIdentityAppendInput,
+  type TaskIdentityRecord,
   type TaskNativeCheckPolicy,
   type TaskVerificationPolicy,
   type TaskVerificationResult,
@@ -1162,3 +1167,75 @@ function i1cCompileTimeGuards(): void {
   void malformedRef;
 }
 void i1cCompileTimeGuards;
+
+test('semantic title is an optional typed revision fact and rejects a blank value', () => {
+  // Legacy revisions have no title and must stay valid with their existing readable facts.
+  assert.doesNotThrow(() => validateDraftRevision(draftRevision));
+
+  const titledRevision = { ...draftRevision, title: 'Inspect the contract surface' };
+  assert.doesNotThrow(() => validateDraftRevision(titledRevision));
+  assert.throws(
+    () => validateDraftRevision({ ...draftRevision, title: '   ' }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateDraftRevision({ ...draftRevision, title: 7 as unknown as string }),
+    ContractError,
+  );
+});
+
+test('requirement envelope carries an optional semantic title without rewriting its input', () => {
+  const envelope = {
+    requirementId: 'requirement-title-a',
+    draftId: 'draft-title-a',
+    inputRevision: 1,
+    intent: 'create' as const,
+    normalizedInput: 'the complete execution input stays verbatim',
+    confirmedBy: 'user-a',
+    confirmedAt: '2026-11-01T16:01:00Z',
+    fifoSeq: 1,
+    payloadRef: 'asset://draft-title-a/authorized',
+  };
+  assert.doesNotThrow(() => validateRequirementEnvelope(envelope));
+  assert.doesNotThrow(() => validateRequirementEnvelope({ ...envelope, title: 'Inspect the contract surface' }));
+  assert.throws(
+    () => validateRequirementEnvelope({ ...envelope, title: '   ' }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateRequirementEnvelope({ ...envelope, title: 7 as unknown as string }),
+    ContractError,
+  );
+});
+
+test('task identity carries an optional semantic title and rejects a blank value', () => {
+  const appendInput: TaskIdentityAppendInput = {
+    scope: { organId: id('organ', 'organ-a'), taskId: task },
+    source: {
+      requirementId: 'requirement-title-a',
+      inputRevision: 1,
+      draftId: 'draft-title-a',
+      draftRevisionVersion: 1,
+      draftRevisionHash: 'sha256:draft-title-a',
+      confirmationRef: 'confirmation-title-a',
+    },
+    taskFlow: { kind: 'inspection', definitionVersion: 1 },
+  };
+  assert.doesNotThrow(() => validateTaskIdentityAppendInput(appendInput));
+  const titledInput = { ...appendInput, title: 'Inspect the contract surface' };
+  assert.doesNotThrow(() => validateTaskIdentityAppendInput(titledInput));
+  assert.throws(
+    () => validateTaskIdentityAppendInput({ ...appendInput, title: '   ' }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateTaskIdentityAppendInput({ ...appendInput, title: 7 as unknown as string }),
+    ContractError,
+  );
+
+  const record: TaskIdentityRecord = {
+    ...titledInput,
+    journalCommitRef: 'journal-identity-title-a',
+  };
+  assert.doesNotThrow(() => validateTaskIdentityRecord(record));
+});
