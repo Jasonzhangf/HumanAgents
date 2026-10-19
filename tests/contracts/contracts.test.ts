@@ -23,6 +23,7 @@ import {
   validateMemoryReviewReceipt, validateMemorySubmission, validateProjectSourceUpdateProposal,
   validateAuditPromptSnapshot, validateEpisodicMemorySource, validateProceduralMemoryCandidate, validateSemanticMemoryCandidate,
   validateProviderCloseResult, validateProviderError, validateProviderEvent, validateProviderReadiness, validateProviderRecoveryResult, validateProviderResumeInput,
+  validateInteractionProviderSettlementReceipt,
   validateProviderSettleInput, validateProviderSettlement, validateProviderStartInput, validateProviderStartReceipt, validateProviderStopReceipt,
   validateProviderStopRequest, validateProviderSubmitInput, validateProviderSubmitResult, validateProviderToolResult, validateRequirementEnvelope,
   validateReminder, validateRuntimeBinding, validateSchedulerLease, validateScopeAcl, validateSubscription,
@@ -41,6 +42,7 @@ import {
   type InteractionClosure,
   type Occurrence, type Reminder, type RuntimeBinding, type SchedulerLease, type ScopeAcl, type Subscription,
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderImageContent, type ProviderReadiness,
+  type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
   type AnyProviderExecutionIdentityRef,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
@@ -883,6 +885,59 @@ test('settle requires settlement evidence and resource/persistence results', () 
   });
   assert.doesNotThrow(() => validateProviderSettlement(failed));
   assert.throws(() => validateProviderSettlement({ ...settlement(), state: 'failed', error: undefined }), ContractError);
+});
+
+test('interaction provider settlement receipt validates complete envelope and rejects association mismatches', () => {
+  const receiptOrgan = id('organ', 'organ-receipt');
+  const receiptOperation = id('operation', 'operation-receipt');
+  const interactionTurn = {
+    organId: receiptOrgan,
+    interactionScopeId: 'interaction-scope-receipt',
+    interactionId: 'interaction-receipt',
+    inputRevision: 4,
+    turnId: 'logical-turn-receipt',
+  } as const;
+  const execution: InteractionParentProviderExecutionIdentityRef = {
+    runtimeId: runtimeId('runtime-receipt'),
+    organId: receiptOrgan,
+    operationId: receiptOperation,
+    executionEpoch: 2,
+    interactionTurn,
+  };
+  const receiptEvidence: EvidenceRef = {
+    evidenceId: id('evidence', 'provider-receipt'),
+    kind: 'execution',
+    source: 'contracts-test',
+    locator: 'provider-settlement-receipt',
+    scope: { organId: receiptOrgan, operationId: receiptOperation },
+  };
+  const receipt: InteractionProviderSettlementReceipt = {
+    interactionId: interactionTurn.interactionId,
+    inputRevision: interactionTurn.inputRevision,
+    request: { turnId: 'physical-request-turn-receipt', requestId: 'request-receipt' },
+    settlement: {
+      ...execution,
+      state: 'succeeded',
+      evidenceRefs: [receiptEvidence],
+      resourceRelease: { state: 'released', evidenceRefs: [receiptEvidence] },
+      persistence: { state: 'committed', evidenceRefs: [receiptEvidence] },
+    },
+  };
+
+  assert.notEqual(receipt.request.turnId, receipt.settlement.interactionTurn.turnId);
+  assert.doesNotThrow(() => validateInteractionProviderSettlementReceipt(receipt));
+  assert.throws(
+    () => validateInteractionProviderSettlementReceipt({ ...receipt, interactionId: 'interaction-other' }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateInteractionProviderSettlementReceipt({ ...receipt, inputRevision: receipt.inputRevision + 1 }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateInteractionProviderSettlementReceipt({ ...receipt, request: { ...receipt.request, turnId: ' ' } }),
+    ContractError,
+  );
 });
 
 test('settlement completion evidence is bound to the settlement execution scope', () => {
