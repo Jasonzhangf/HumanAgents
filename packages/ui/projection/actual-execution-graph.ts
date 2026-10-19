@@ -17,6 +17,9 @@ import type {
   TaskAgentActivityUnavailableSource,
   TaskFlowGuidance,
   TaskFlowKind,
+  TaskFlowLayoutMode,
+  TaskFlowLoopKind,
+  TaskFlowStageRole,
   WorkResult,
 } from '@humanagent/contracts';
 import type {
@@ -58,6 +61,29 @@ const GUIDANCE_KIND_LABELS: Readonly<Record<TaskFlowKind, string>> = {
   'long-running': '长程任务',
 };
 
+const GUIDANCE_AIM_LABELS: Readonly<Record<TaskFlowKind, string>> = {
+  'one-shot': '完成已确认交付物，并在适用复核或标准收拢后返回一个结果。',
+  inspection: '对同一巡检定义持续产生巡检结果，分离发现与必要处置，并保留历史。',
+  'long-running': '按当前修订完成整体目标的一部分，并在适用复核与标准收拢后由规划器更新整项计划。',
+};
+
+const LAYOUT_LABELS: Readonly<Record<TaskFlowLayoutMode, string>> = {
+  'turn-closure-loop': '轮次收拢循环',
+  'occurrence-and-turn-closure-loop': '巡检触发与轮次收拢循环',
+};
+
+const STAGE_ROLE_LABELS: Readonly<Record<TaskFlowStageRole, string>> = {
+  'occurrence-trigger': '巡检触发边界',
+  'dynamic-choice-region': '编排动态选择区',
+  'mandatory-turn-checkpoint': '轮末必经检查点',
+  'mandatory-planner-alignment': '轮末必经规划对齐',
+};
+
+const LOOP_KIND_LABELS: Readonly<Record<TaskFlowLoopKind, string>> = {
+  'turn-iteration': '轮次迭代',
+  'occurrence-repetition': '巡检重复',
+};
+
 const DISPLAY_GROUP_LABELS: Readonly<Record<string, string>> = {
   Deliverable: '交付物',
   Review: '复核',
@@ -69,6 +95,10 @@ const DISPLAY_GROUP_LABELS: Readonly<Record<string, string>> = {
   History: '历史',
   'Current Part': '当前部分',
   'Plan Update': '计划更新',
+  'Occurrence Trigger': '巡检触发',
+  'Dynamic Work': '轮内动态选择',
+  'Turn Checkpoint': '轮末检查点',
+  'Planner Alignment': '规划对齐',
 };
 
 const ROLE_LABELS: Readonly<Record<AgentRoleDisplay, string>> = {
@@ -125,12 +155,50 @@ const AGGREGATE_GROUPS = {
 } as const;
 
 function projectGuidance(guidance: TaskFlowGuidance): TaskActualExecutionGuidanceProjection {
+  const stageTitleById = new Map(guidance.stages.map((stage) => [stage.stageId, stage.title]));
+  const stageTitle = (stageId: string): string => stageTitleById.get(stageId)!;
+  const prerequisiteTitlesByStageId = new Map<string, string[]>();
+  for (const dependency of guidance.dependencies) {
+    const titles = prerequisiteTitlesByStageId.get(dependency.toStageId) ?? [];
+    titles.push(stageTitle(dependency.fromStageId));
+    prerequisiteTitlesByStageId.set(dependency.toStageId, titles);
+  }
   return {
     kind: guidance.kind,
     kindLabel: GUIDANCE_KIND_LABELS[guidance.kind],
     aim: guidance.aim,
     selectionGuidance: guidance.selectionGuidance,
     displayGroups: guidance.displayGroups.map((group) => DISPLAY_GROUP_LABELS[group] ?? group),
+    aimLabel: GUIDANCE_AIM_LABELS[guidance.kind],
+    layout: guidance.layout,
+    layoutLabel: LAYOUT_LABELS[guidance.layout],
+    stages: guidance.stages.map((stage) => ({
+      stageId: stage.stageId,
+      title: stage.title,
+      summary: stage.summary,
+      role: stage.role,
+      roleLabel: STAGE_ROLE_LABELS[stage.role],
+      groupLabel: DISPLAY_GROUP_LABELS[stage.group],
+      ...(stage.dynamicChoices === undefined ? {} : { dynamicChoices: stage.dynamicChoices }),
+      prerequisiteTitles: prerequisiteTitlesByStageId.get(stage.stageId) ?? [],
+    })),
+    dependencies: guidance.dependencies.map((dependency) => ({
+      fromStageId: dependency.fromStageId,
+      toStageId: dependency.toStageId,
+      fromTitle: stageTitle(dependency.fromStageId),
+      toTitle: stageTitle(dependency.toStageId),
+    })),
+    loops: guidance.loops.map((loop) => ({
+      kind: loop.kind,
+      kindLabel: LOOP_KIND_LABELS[loop.kind],
+      title: loop.title,
+      fromStageId: loop.fromStageId,
+      toStageId: loop.toStageId,
+      fromTitle: stageTitle(loop.fromStageId),
+      toTitle: stageTitle(loop.toStageId),
+      summary: loop.summary,
+      stopCondition: loop.stopCondition,
+    })),
   };
 }
 

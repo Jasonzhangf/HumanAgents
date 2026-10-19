@@ -192,6 +192,43 @@ function nativeSource() {
       aim: 'Return one result after the confirmed deliverable.',
       selectionGuidance: 'Select methods and roles dynamically.',
       displayGroups: ['Deliverable', 'Review', 'Closure'],
+      layout: 'turn-closure-loop',
+      stages: [
+        {
+          stageId: 'dynamic-work',
+          title: '轮内动态选择区',
+          summary: '探索、规划、审查和执行由编排者按需选择，可重复且不要求固定顺序。',
+          role: 'dynamic-choice-region',
+          group: 'Dynamic Work',
+          dynamicChoices: ['探索', '规划', '审查', '执行'],
+        },
+        {
+          stageId: 'turn-checkpoint',
+          title: '轮末检查点',
+          summary: '每个结束的轮次先记录目标、动作、结果和预期下一步。',
+          role: 'mandatory-turn-checkpoint',
+          group: 'Turn Checkpoint',
+        },
+        {
+          stageId: 'planner-alignment',
+          title: '轮末规划对齐',
+          summary: '检查点之后由规划器核对目标，并决定完成、失败或继续。',
+          role: 'mandatory-planner-alignment',
+          group: 'Planner Alignment',
+        },
+      ],
+      dependencies: [
+        { fromStageId: 'dynamic-work', toStageId: 'turn-checkpoint' },
+        { fromStageId: 'turn-checkpoint', toStageId: 'planner-alignment' },
+      ],
+      loops: [{
+        kind: 'turn-iteration',
+        title: '轮次迭代',
+        fromStageId: 'planner-alignment',
+        toStageId: 'dynamic-work',
+        summary: '未完成则开启下一轮。',
+        stopCondition: '任务完成或失败。',
+      }],
     },
     history: {
       status: 'recorded',
@@ -488,6 +525,22 @@ function openActualDetail(node, opened, summary = '执行记录详情') {
   return Object.fromEntries(opened.at(-1).detail.entries)
 }
 
+function nativeDetailEntries(node, summary = '技术详情') {
+  const details = walk(node).find((entry) => (
+    entry.tagName === 'DETAILS' &&
+    entry.children.some((child) => child.tagName === 'SUMMARY' && child.textContent === summary)
+  ))
+  assert.ok(details, `the native ${summary} disclosure must be present`)
+  const entries = {}
+  for (const row of walk(details)) {
+    if (row.tagName !== 'DIV') continue
+    const dt = row.children.find((child) => child.tagName === 'DT')
+    const dd = row.children.find((child) => child.tagName === 'DD')
+    if (dt && dd) entries[dt.textContent] = dd.textContent
+  }
+  return entries
+}
+
 function visibleNodeIds(graph) {
   return graph.history.groups.flatMap((group) => group.nodes.map((node) => node.nodeId))
 }
@@ -666,6 +719,7 @@ test('actual graph missing history stays explicit instead of becoming an empty g
   })
   const section = renderTaskActualExecutionGraphSection(graph)
   assert.equal(section.dataset.actualExecutionGraph, 'not-recorded')
+  assert.equal(byData(section, 'taskFlowGuidance', 'skeleton').length, 0)
   assert.equal(byData(section, 'actualExecutionHistory', 'not-recorded').length, 1)
   assert.match(allText(section), /暂无执行过程记录/)
   assert.match(allText(section), /这里仅展示已记录的执行过程/)
@@ -677,6 +731,206 @@ test('actual graph missing history stays explicit instead of becoming an empty g
     graph.history.unavailable[0].detail,
     'source-diagnostic:/runs/missing-history.json',
   )
+})
+
+/*
+ * F15 template skeleton layering.
+ *
+ * Failure basis: the shared renderer unconditionally appends all projected
+ * stages, dependencies and loops to the default reading surface, so the static
+ * template occupies more than a screen before recorded execution. Impact is
+ * that users cannot scan the task's purpose and recorded facts first. Cost is
+ * one bounded DOM case over the real exported renderer with an accepted Core
+ * guidance fixture routed through the real exported projection; the first
+ * position assertion fails on the current default layer. The case does not
+ * clone projection logic or run a browser.
+ */
+test('template skeleton stays in the default summary and opens full content', () => {
+  const templateGuidance = {
+    kind: 'inspection',
+    aim: 'Inspect the target and report only recorded findings.',
+    selectionGuidance: 'Select methods and roles dynamically.',
+    displayGroups: ['Occurrence Trigger', 'Dynamic Work', 'Turn Checkpoint', 'Planner Alignment'],
+    layout: 'occurrence-and-turn-closure-loop',
+    stages: [
+      {
+        stageId: 'occurrence-trigger',
+        title: '轮次触发与基线绑定',
+        summary: '按下一次定时或事件触发开始巡检，并绑定当前基线。',
+        role: 'occurrence-trigger',
+        group: 'Occurrence Trigger',
+      },
+      {
+        stageId: 'dynamic-work',
+        title: '轮内动态选择区',
+        summary: '探索、规划、审查和执行由编排者按需选择，可重复且不要求固定顺序。',
+        role: 'dynamic-choice-region',
+        group: 'Dynamic Work',
+        dynamicChoices: ['探索', '规划', '审查', '执行'],
+      },
+      {
+        stageId: 'turn-checkpoint',
+        title: '轮末检查点',
+        summary: '每个结束的轮次先记录目标、动作、结果和预期下一步。',
+        role: 'mandatory-turn-checkpoint',
+        group: 'Turn Checkpoint',
+      },
+      {
+        stageId: 'planner-alignment',
+        title: '轮末规划对齐',
+        summary: '检查点之后由规划器核对目标，并决定完成、失败或继续。',
+        role: 'mandatory-planner-alignment',
+        group: 'Planner Alignment',
+      },
+    ],
+    dependencies: [
+      { fromStageId: 'occurrence-trigger', toStageId: 'dynamic-work' },
+      { fromStageId: 'dynamic-work', toStageId: 'turn-checkpoint' },
+      { fromStageId: 'turn-checkpoint', toStageId: 'planner-alignment' },
+    ],
+    loops: [
+      {
+        kind: 'turn-iteration',
+        title: '轮次迭代',
+        fromStageId: 'planner-alignment',
+        toStageId: 'dynamic-work',
+        summary: '未完成则开启下一轮。',
+        stopCondition: '任务完成或失败。',
+      },
+      {
+        kind: 'occurrence-repetition',
+        title: '巡检重复',
+        fromStageId: 'planner-alignment',
+        toStageId: 'occurrence-trigger',
+        summary: '下一次定时或事件触发开启新的巡检轮次，并与历史基线对比。',
+        stopCondition: '巡检停止或被替换。',
+      },
+    ],
+  }
+  const recorded = projectTaskActualExecutionGraph({
+    ...nativeSource(),
+    guidance: templateGuidance,
+  })
+  const opened = []
+  const section = renderTaskActualExecutionGraphSection(
+    recorded,
+    { onOpenDetail: (detail, button) => opened.push({ detail, button }) },
+  )
+  const text = allText(section)
+
+  // Default layer keeps purpose and the static non-execution notice.
+  assert.equal(byData(section, 'taskFlowGuidance', 'skeleton').length, 1)
+  assert.match(text, /处理方式：巡检/)
+  assert.match(text, /静态指导/)
+  assert.match(text, /非执行记录/)
+  assert.match(text, /对同一巡检定义持续产生巡检结果/)
+
+  // RED on the current renderer: the full skeleton is not expanded by default.
+  assert.equal(byData(section, 'templateStage', 'dynamic-work').length, 0)
+  assert.deepEqual(
+    walk(section).filter((node) => node.dataset?.templateStage !== undefined)
+      .map((node) => node.dataset.templateStage),
+    [],
+  )
+  assert.equal(
+    walk(section).filter((node) => node.dataset?.templateDependency !== undefined).length,
+    0,
+  )
+  assert.equal(
+    walk(section).filter((node) => node.dataset?.templateLoop !== undefined).length,
+    0,
+  )
+
+  // The default layer offers the entry into the existing content detail.
+  const trigger = walk(section).find((node) => (
+    node.tagName === 'BUTTON' && node.textContent === '查看任务模板'
+  ))
+  assert.ok(trigger, 'the default layer must offer the template detail entry')
+
+  // The entry opens the existing content detail, not a new shell.
+  trigger.click()
+  assert.equal(opened.length, 1)
+  const detail = opened[0].detail
+  assert.equal(detail.title, '任务模板详情')
+  assert.ok(detail.content, 'the detail must carry the real template DOM')
+  assert.equal(opened[0].button, trigger)
+
+  // The full template semantics live in the opened content.
+  const content = detail.content
+  const detailText = allText(content)
+  assert.match(detailText, /处理方式：巡检/)
+  assert.match(detailText, /静态指导/)
+  assert.match(detailText, /非执行记录/)
+  assert.match(detailText, /对同一巡检定义持续产生巡检结果/)
+  assert.match(detailText, /巡检触发与轮次收拢循环/)
+  assert.match(detailText, /巡检触发边界/)
+  assert.match(detailText, /编排动态选择区/)
+  assert.match(detailText, /轮末必经检查点/)
+  assert.match(detailText, /轮末必经规划对齐/)
+
+  // Exactly one optional repeatable dynamic region carries the four choices.
+  const stageIds = walk(content)
+    .filter((node) => node.dataset?.templateStage !== undefined)
+    .map((node) => node.dataset.templateStage)
+  assert.deepEqual(stageIds, [
+    'occurrence-trigger',
+    'dynamic-work',
+    'turn-checkpoint',
+    'planner-alignment',
+  ])
+  const dynamicStage = byData(content, 'templateStage', 'dynamic-work')[0]
+  assert.match(allText(dynamicStage), /探索、规划、审查、执行/)
+  const choiceCards = walk(content)
+    .filter((node) => node.dataset?.templateStage !== undefined)
+    .filter((node) => allText(node).includes('探索'))
+  assert.equal(choiceCards.length, 1)
+
+  // Only the declared mandatory skeleton relations are drawn.
+  const dependencies = walk(content)
+    .filter((node) => node.dataset?.templateDependency !== undefined)
+    .map((node) => node.dataset.templateDependency)
+  assert.deepEqual(dependencies, [
+    'occurrence-trigger->dynamic-work',
+    'dynamic-work->turn-checkpoint',
+    'turn-checkpoint->planner-alignment',
+  ])
+
+  // The inspection occurrence repetition stays separate from the turn iteration.
+  const loops = walk(content)
+    .filter((node) => node.dataset?.templateLoop !== undefined)
+    .map((node) => node.dataset.templateLoop)
+  assert.deepEqual(loops, [
+    'turn-iteration:planner-alignment->dynamic-work',
+    'occurrence-repetition:planner-alignment->occurrence-trigger',
+  ])
+  assert.match(detailText, /轮次迭代/)
+  assert.match(detailText, /巡检重复/)
+  assert.match(detailText, /停止条件：任务完成或失败/)
+
+  // Raw keys stay in the native technical detail inside the opened content.
+  assert.doesNotMatch(
+    text,
+    /occurrence-trigger|dynamic-work|turn-checkpoint|planner-alignment|occurrence-and-turn-closure-loop|Inspect the target|Select methods/,
+  )
+  const technical = nativeDetailEntries(content)
+  assert.equal(technical.kind, 'inspection')
+  assert.equal(technical.layout, 'occurrence-and-turn-closure-loop')
+  assert.equal(technical.aim, 'Inspect the target and report only recorded findings.')
+  assert.match(technical.stages, /dynamic-work/)
+  assert.match(technical.dependencies, /occurrence-trigger->dynamic-work/)
+  assert.match(technical.loops, /occurrence-repetition/)
+
+  // The no-callback consumer keeps the existing complete reading surface.
+  const inline = renderTaskActualExecutionGraphSection(recorded)
+  assert.deepEqual(
+    walk(inline).filter((node) => node.dataset?.templateStage !== undefined)
+      .map((node) => node.dataset.templateStage),
+    ['occurrence-trigger', 'dynamic-work', 'turn-checkpoint', 'planner-alignment'],
+  )
+
+  // Recorded execution stays separate and keeps its original markers.
+  assert.equal(walk(section).filter((node) => node.dataset?.actualExecutionNode).length, 9)
+  assert.match(text, /已记录的实际执行/)
 })
 
 test('current rejects an unknown or mismatched accepted identity instead of using the latest', () => {

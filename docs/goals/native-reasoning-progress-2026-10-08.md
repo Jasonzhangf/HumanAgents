@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新：F15任务模板生产闭环
+
+main `a33a471c` 合入Core typed模板、公共投影与共享renderer。默认目的/静态提示/入口与完整骨架分层，手机约133px、桌面约111px；完整动态区、强制轮末checkpoint→Planner、依赖与循环在既有详情阅读。作者实际RED/GREEN、原A双端与Observation交互、一次r516整体独立PASS齐全。main contracts/App构建、打包、安装及正式restart46→47/53007完成，安装后原A手机抽屉/默认层/原正文通过。真实产品回执位于配置 `run-notes/ux-f15-template-layering-20261018/`；完整接收在 `native-f15-combined-entry-20261018/reception.md`。
+
+F07 common typed publication基础/App/UI候选已组合；原A foreign GET/SSE与稳定完整正文已经通过，剩余实际证据层长引用裁切与手机定位修正。完整I/G/F仍ACTIVE/INCOMPLETE，不以本次模板增量关闭整体目标。
+
 ## 2026-10-18 最新：覆盖详情与偏好失败反馈已交付
 
 main `696d5d64` 交付coverage原因/精确来源、默认折叠及偏好失败人读反馈。真实原A1010条缺口的全展开回归已纠正为默认128px摘要，展开保留全部条目，折回事实可读；旧reset失败仍称已保存的反例已修复。原始RED、同消费者GREEN与真实Ego证据经一次整体Gemini4medium r507有效PASS。main构建/打包/安装及正式restart45→46/53007完成，安装后的默认UI两项受影响行为通过。临时服务、浏览器状态和候选树已清理。证据 `/Volumes/Intel/playground/humanagent/.worker-runs/native-f03-f17-combined-entry-20261018/`。

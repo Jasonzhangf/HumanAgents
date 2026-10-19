@@ -9,6 +9,8 @@
 
 ### 2026-10-18 最新交付：覆盖详情与偏好失败反馈
 
+更新：F15/G9结构化模板已按 main `a33a471c` 完成实现、r516整体独立PASS、构建安装与正式restart46→47。默认层手机133px/桌面111px，完整模板经既有底抽屉/侧栏按需读取，动态选择区、轮末checkpoint→Planner、巡检两类循环保留；安装后原A入口通过，原公开正文1093未变。配置派生 `run-notes/ux-f15-template-layering-20261018/` 保存实际红样本、双端/Observation和installed-green。F07 common typed publication基础/App/UI已组合，跨项目GET/SSE及正文通过；真实长refs的证据层样式仍在修正，整体目标未关闭。下列F15尚未编码的文字保留为历史时点，不是当前状态。
+
 main `696d5d64` 已合入coverage人读原因/来源详情、原生默认折叠和偏好操作失败提示。真实A的1010条覆盖缺口默认区块128px、展开完整、折回后事实可读；精确来源沿原抽屉查询。真实Reset受控失败红绿证明原偏好/正文保留且明确失败。完整七文件整体Gemini4medium Review r507有效PASS，main构建/打包/安装完成，正式restart45→46/53007，安装默认UI的两项受影响行为通过。自有树/临时服务/浏览器状态正常清理。回执：`/Volumes/Intel/playground/humanagent/.worker-runs/native-f03-f17-combined-entry-20261018/reception.md`。
 
 F08已按原公开归属合同接收既有epoch2/3实例选择、attempt/epoch分离及fencing证据，不新增组合矩阵。F15/G9模板骨架仍有具体生产缺边；既有Core类型文字指引、发布计划和实际执行图不能互相替代。复杂计划正在修订，尚未进入新合同编码。保留动态可选/重复agent编排，不恢复固定角色顺序或第二图持久化协议。完整I/G/F仍ACTIVE/INCOMPLETE。
