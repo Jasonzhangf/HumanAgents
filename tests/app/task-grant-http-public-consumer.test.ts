@@ -574,7 +574,7 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
         evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
         memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: schedulerPaths.projectKey, roleId: 'execution' },
         lease: () => schedulerLease,
-        schedulerIntervalMs: 10,
+        schedulerIntervalMs: executionPolicy === undefined ? 10 : 3_600_000,
         explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
           normalizedInput: 'deliver controlled result', proposal: 'deliver controlled result', knownFacts: [], decisionRefs: [],
           structuredProposal: { revision: 1, intent: 'create', title: 'HTTP grant task', objective: 'deliver controlled result',
@@ -610,6 +610,7 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
       assert.equal(posts, 0);
       assert.equal(factories, 0);
       assert.equal(active.runtime.service.taskDetail(prepared.taskId).title, 'HTTP grant task');
+      await active.runtime.scheduler!.tick();
       const deadline = Date.now() + 10_000;
       let occurrenceId: string | undefined;
       let childTaskId: string | undefined;
@@ -711,20 +712,36 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       assert.equal(active.runtime.service.taskDashboard(id('task', resolvedChildTaskId)).state, 'succeeded');
-      const schedulerAfterGrant = await (async () => {
-        const end = Date.now() + 10_000;
-        while (Date.now() < end) {
-          const status = await active.runtime.scheduler!.status();
-          if (status.settled === 1) return status;
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        return await active.runtime.scheduler!.status();
-      })();
+      if (executionPolicy !== undefined) await active.runtime.scheduler!.tick();
+      const schedulerAfterGrant = executionPolicy !== undefined
+        ? await active.runtime.scheduler!.status()
+        : await (async () => {
+          const end = Date.now() + 10_000;
+          while (Date.now() < end) {
+            const status = await active.runtime.scheduler!.status();
+            if (status.settled === 1) return status;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          return await active.runtime.scheduler!.status();
+        })();
       assert.equal(schedulerAfterGrant.settled, 1);
+      assert.equal(schedulerAfterGrant.plans.flatMap((plan) => plan.settlements).length, 1,
+        'exact occurrence must settle once after the manual terminal tick');
       assert.equal(factories, 1);
       assert.equal(active.runtime.service.eventsSince(childOperationId)
         .filter((event) => event.kind === 'execution.started').length, 1,
       'the occurrence must own exactly one released execution');
+      if (executionPolicy !== undefined) {
+        await active.runtime.scheduler!.tick();
+        const schedulerAfterIdle = await active.runtime.scheduler!.status();
+        assert.equal(schedulerAfterIdle.settled, 1);
+        assert.equal(schedulerAfterIdle.executed, 1);
+        assert.equal(schedulerAfterIdle.plans.flatMap((plan) => plan.settlements).length, 1);
+        assert.equal(factories, 1, 'a terminal occurrence must not reprepare on the next patrol');
+        assert.equal(active.runtime.service.eventsSince(childOperationId)
+          .filter((event) => event.kind === 'execution.started').length, 1,
+        'a terminal occurrence must not reexecute on the next patrol');
+      }
       console.log(JSON.stringify({ label, prepared, posts, factories, occurrenceId, childTaskId: resolvedChildTaskId, granted }));
       passed = true;
       return;
