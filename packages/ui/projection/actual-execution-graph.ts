@@ -178,7 +178,7 @@ function projectGuidance(guidance: TaskFlowGuidance): TaskActualExecutionGuidanc
       summary: stage.summary,
       role: stage.role,
       roleLabel: STAGE_ROLE_LABELS[stage.role],
-      groupLabel: DISPLAY_GROUP_LABELS[stage.group] ?? stage.group,
+      groupLabel: DISPLAY_GROUP_LABELS[stage.group],
       ...(stage.dynamicChoices === undefined ? {} : { dynamicChoices: stage.dynamicChoices }),
       prerequisiteTitles: prerequisiteTitlesByStageId.get(stage.stageId) ?? [],
     })),

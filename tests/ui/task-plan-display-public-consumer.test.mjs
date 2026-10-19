@@ -192,6 +192,43 @@ function nativeSource() {
       aim: 'Return one result after the confirmed deliverable.',
       selectionGuidance: 'Select methods and roles dynamically.',
       displayGroups: ['Deliverable', 'Review', 'Closure'],
+      layout: 'turn-closure-loop',
+      stages: [
+        {
+          stageId: 'dynamic-work',
+          title: '轮内动态选择区',
+          summary: '探索、规划、审查和执行由编排者按需选择，可重复且不要求固定顺序。',
+          role: 'dynamic-choice-region',
+          group: 'Dynamic Work',
+          dynamicChoices: ['探索', '规划', '审查', '执行'],
+        },
+        {
+          stageId: 'turn-checkpoint',
+          title: '轮末检查点',
+          summary: '每个结束的轮次先记录目标、动作、结果和预期下一步。',
+          role: 'mandatory-turn-checkpoint',
+          group: 'Turn Checkpoint',
+        },
+        {
+          stageId: 'planner-alignment',
+          title: '轮末规划对齐',
+          summary: '检查点之后由规划器核对目标，并决定完成、失败或继续。',
+          role: 'mandatory-planner-alignment',
+          group: 'Planner Alignment',
+        },
+      ],
+      dependencies: [
+        { fromStageId: 'dynamic-work', toStageId: 'turn-checkpoint' },
+        { fromStageId: 'turn-checkpoint', toStageId: 'planner-alignment' },
+      ],
+      loops: [{
+        kind: 'turn-iteration',
+        title: '轮次迭代',
+        fromStageId: 'planner-alignment',
+        toStageId: 'dynamic-work',
+        summary: '未完成则开启下一轮。',
+        stopCondition: '任务完成或失败。',
+      }],
     },
     history: {
       status: 'recorded',
@@ -689,107 +726,79 @@ test('actual graph missing history stays explicit instead of becoming an empty g
  * default layer cannot tell static template guidance from recorded execution,
  * and the single repeatable choice region, checkpoint->Planner dependency and
  * the separate inspection occurrence loop stay invisible. Cost is one bounded
- * DOM case over the real exported renderer with an agreed presentation
- * fixture; it does not clone projection logic or run a browser.
+ * DOM case over the real exported renderer with an accepted Core guidance
+ * fixture routed through the real exported projection; it does not clone
+ * projection logic or run a browser.
  */
 test('template skeleton renders static guidance through the shared card and relation controls', () => {
   const templateGuidance = {
     kind: 'inspection',
-    kindLabel: '巡检',
     aim: 'Inspect the target and report only recorded findings.',
     selectionGuidance: 'Select methods and roles dynamically.',
     displayGroups: ['Occurrence Trigger', 'Dynamic Work', 'Turn Checkpoint', 'Planner Alignment'],
-    aimLabel: '按巡检目标检查当前对象，只报告有记录依据的发现。',
     layout: 'occurrence-and-turn-closure-loop',
-    layoutLabel: '巡检触发与轮次收拢循环',
     stages: [
       {
         stageId: 'occurrence-trigger',
         title: '轮次触发与基线绑定',
         summary: '按下一次定时或事件触发开始巡检，并绑定当前基线。',
         role: 'occurrence-trigger',
-        roleLabel: '巡检触发边界',
-        groupLabel: '巡检触发',
-        prerequisiteTitles: [],
+        group: 'Occurrence Trigger',
       },
       {
         stageId: 'dynamic-work',
         title: '轮内动态选择区',
         summary: '探索、规划、审查和执行由编排者按需选择，可重复且不要求固定顺序。',
         role: 'dynamic-choice-region',
-        roleLabel: '编排动态选择区',
-        groupLabel: '动态工作',
+        group: 'Dynamic Work',
         dynamicChoices: ['探索', '规划', '审查', '执行'],
-        prerequisiteTitles: ['轮次触发与基线绑定'],
       },
       {
         stageId: 'turn-checkpoint',
         title: '轮末检查点',
         summary: '每个结束的轮次先记录目标、动作、结果和预期下一步。',
         role: 'mandatory-turn-checkpoint',
-        roleLabel: '轮末必经检查点',
-        groupLabel: '轮末检查点',
-        prerequisiteTitles: ['轮内动态选择区'],
+        group: 'Turn Checkpoint',
       },
       {
         stageId: 'planner-alignment',
         title: '轮末规划对齐',
         summary: '检查点之后由规划器核对目标，并决定完成、失败或继续。',
         role: 'mandatory-planner-alignment',
-        roleLabel: '轮末必经规划对齐',
-        groupLabel: '规划对齐',
-        prerequisiteTitles: ['轮末检查点'],
+        group: 'Planner Alignment',
       },
     ],
     dependencies: [
-      {
-        fromStageId: 'occurrence-trigger',
-        toStageId: 'dynamic-work',
-        fromTitle: '轮次触发与基线绑定',
-        toTitle: '轮内动态选择区',
-      },
-      {
-        fromStageId: 'dynamic-work',
-        toStageId: 'turn-checkpoint',
-        fromTitle: '轮内动态选择区',
-        toTitle: '轮末检查点',
-      },
-      {
-        fromStageId: 'turn-checkpoint',
-        toStageId: 'planner-alignment',
-        fromTitle: '轮末检查点',
-        toTitle: '轮末规划对齐',
-      },
+      { fromStageId: 'occurrence-trigger', toStageId: 'dynamic-work' },
+      { fromStageId: 'dynamic-work', toStageId: 'turn-checkpoint' },
+      { fromStageId: 'turn-checkpoint', toStageId: 'planner-alignment' },
     ],
     loops: [
       {
         kind: 'turn-iteration',
-        kindLabel: '轮次迭代',
         title: '轮次迭代',
         fromStageId: 'planner-alignment',
         toStageId: 'dynamic-work',
-        fromTitle: '轮末规划对齐',
-        toTitle: '轮内动态选择区',
         summary: '未完成则开启下一轮。',
         stopCondition: '任务完成或失败。',
       },
       {
         kind: 'occurrence-repetition',
-        kindLabel: '巡检重复',
         title: '巡检重复',
         fromStageId: 'planner-alignment',
         toStageId: 'occurrence-trigger',
-        fromTitle: '轮末规划对齐',
-        toTitle: '轮次触发与基线绑定',
         summary: '下一次定时或事件触发开启新的巡检轮次，并与历史基线对比。',
         stopCondition: '巡检停止或被替换。',
       },
     ],
   }
-  const recorded = projectTaskActualExecutionGraph(nativeSource())
+  const recorded = projectTaskActualExecutionGraph({
+    ...nativeSource(),
+    guidance: templateGuidance,
+  })
   const opened = []
   const section = renderTaskActualExecutionGraphSection(
-    { ...recorded, guidance: templateGuidance },
+    recorded,
     { onOpenDetail: (detail, button) => opened.push({ detail, button }) },
   )
   const text = allText(section)
@@ -801,7 +810,7 @@ test('template skeleton renders static guidance through the shared card and rela
   assert.match(text, /非执行记录/)
 
   // Human Chinese labels come from the projection, never raw records.
-  assert.match(text, /按巡检目标检查当前对象/)
+  assert.match(text, /对同一巡检定义持续产生巡检结果/)
   assert.match(text, /巡检触发与轮次收拢循环/)
   assert.match(text, /巡检触发边界/)
   assert.match(text, /编排动态选择区/)
