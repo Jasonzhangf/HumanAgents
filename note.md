@@ -1,5 +1,15 @@
 # HumanAgent 项目状态汇总（2026-10-19）
 
+## 2026-10-19 交付：全局任意目录启动与持久配对
+
+全局 `/opt/homebrew/bin/humanagent` 已安装本轮修复。默认产品已通过正式 `product use` 指向原有 control root，原产品配置声明原 workspace；未迁移数据或创建替代产品。从 `/tmp` 且移除 `HUMANAGENT_HOME` 的裸启动返回 `already-running`，原 lease/PID/endpoint 不变。裸 `pair` 不再依赖 workspace、活动 serve owner 或启动顺序。正式 restart 后，既有会话和重启前签发的配对码均可用，第二客户端配对不撤销第一会话。最终实例为 generation52/PID92127/53007，实际加载 `/opt/homebrew/lib/node_modules/humanagent-cli/runtime/app/src/cli.js`。
+
+同一 CLI 消费者覆盖相对参数首次启动、异目录 restart、普通重复启动不接管、session/challenge/rooted memory 保留；真实 RED 后 GREEN，正常构建及测试编译通过。页面的错误保输入、返回聚焦、退出和有效表单配对通过真实浏览器验收。当前用户打开的 53007 页面已通过全局裸 `pair` 配对并显示服务已连接；原输入草稿和选项已恢复，未提交新任务。唯一整体 OAuth/GPT-6.1 medium 独立 Review 有效 PASS，findings0。首选 AGY 实际型号不可用的原错保留，未计审查通过。
+
+已删除旧内存 challenge owner、空 `closeChallengeStore` 和无独立保障的重复 restart stdout-wait 用例。其 session/challenge 保证保留在真实 CLI 消费者。历史 U 全量浏览器脚本仍为7/10，三项 shell/task-list/dashboard fixture 问题保留，不冒充全量通过。首次安装后的50→51正式重启成功，但验收脚本复用旧 HTTP 连接而 ECONNRESET，未记缺失断言为通过；仅补一次独立连接的正式重启51→52取得完整证据，没有重复安装。
+
+本轮记录位于 `/Volumes/Intel/playground/humanagent/.worker-runs/pairing-recovery-20261019/`：`author-acceptance.md`、`root-browser-acceptance.md`、`installed-acceptance.json` 和 `installed-browser.png`。main 推送与唯一候选回收由本轮交付负责人接续执行，结果写入该目录最终交付记录。旧 UX 目标和下方历史记录保持原结论。
+
 ## 2026-10-19 最终交付：原 taskless 简单问答恢复与 answered 展示修复
 
 原 `interaction-2` 简单问答已按用户明确纠正，以原 interaction2/revision1、逻辑 turn 与完整 turnInput 执行同轮正式恢复，epoch8 返回 API200 answer `4`；typed receipt succeeded/released/committed，parent close closed、helpers 0、语义 checkpoint present，Task 数量与既有任务 checkpoint 不变。生产 UI 三行修复 `bf44e09f` 把 answered 映射为 succeeded／「已回答」，真实 RED unknown≠succeeded 后同一消费者 GREEN 6/6，候选与安装后 renderer 的浏览器验证通过。最终整体独立 Review 一次 PASS（10 模块、findings0）；main/build/install0、正式 restart49→50/PID38376/53007 clean，安装后原 GET 显示 `4`／已回答／交互已回答且既有 typed receipt 仍 succeeded，源码已推送。候选树与分支已回收（worktrees 2→1，仅剩 main/control）；自有浏览器 cookie/emulation 已清理，受保护 p3 保留。Root 已完成最终核验，本次文档提交记录完整目标收口；UX G/F/I 裁决见 [UX 长程计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)「2026-10-19 最终收口」。[最终交付证据](/Volumes/Intel/playground/humanagent/.worker-runs/native-answered-status-20261019/cleanup.md)与[原问答恢复](/Volumes/Intel/playground/humanagent/.worker-runs/native-taskless-shape-revalidation-plan-20261018/user-resume-reception.md)可独立读取。FC-UNVERIFIED、P2b whole-case 失败、epoch7 历史失败与 RCC wire 映射 UNKNOWN 保留；一次成功不等于所有 RCC 错误已修。下方 2026-10-18 记录保留为历史。

@@ -1,6 +1,6 @@
 # Pairing and workspace foundation contract
 
-Status: foundation candidate. The ledger and DAG contracts are ready; no runtime source or behavior in this document is implemented. Root accepted the default-product selection supplement and the complete owner-entry plan on 2026-10-19; this record adds no ledger row and does not relax the persistence boundary.
+Status: implemented, integrated into main, and installed globally on 2026-10-19. The independent milestone review passed. Installed naked launch, pairing, formal restart, session/challenge preservation, and normal browser form pairing passed at `http://127.0.0.1:53007/`. This contract preserves the existing persistence boundary.
 
 ## Requirements and authority
 
@@ -81,7 +81,7 @@ controlRoot = "/absolute/path/to/the/selected/product"
 
 This file is the user default product selector. It stores no workspace, port, PID, lease, credential, session, product copy, or run state. Its location always derives from `os.homedir()` and never follows cwd, `HUMANAGENT_HOME`, or the selected product, so selection cannot form a cycle. The file is bootstrap selection, not product persistence; product persistence still lives only under the selected control root.
 
-`packages/config/src/index.ts` is the single owner for reading, validating, writing, and ordering this declaration. The proposal above is not implemented yet. No product registry or run-instance directory is added.
+`packages/config/src/index.ts` is the single owner for reading, validating, writing, and ordering this declaration. No product registry or run-instance directory is added.
 
 The CLI exposes one explicit adoption entry:
 
@@ -116,7 +116,7 @@ The `formatPairingCommand` signature stays unchanged. It produces `humanagent pa
 
 ### Restart retains the resolved product
 
-The existing typed `SupervisorStartupDeclaration` keeps its owner and `args` field. When a launch is bare, its original args may omit root and workspace, so C1 must write the already resolved canonical control root and workspace as explicit arguments into the retained `args`. No restart config file and no selection state in a business payload is added. This keeps a formal restart on the same product even if the default declaration changes later. Caller cwd stays the process start context and no longer decides product or workspace. This contract records the requirement; CLI composition is C1 and is not implemented here.
+The existing typed `SupervisorStartupDeclaration` keeps its owner and `args` field. The CLI writes the already resolved canonical control root and workspace last as explicit arguments into the retained `args`, after merging invocation and retained options. Restart uses the canonical paths that located the selected lease, including for older declarations. No restart config file and no selection state in a business payload is added. This keeps a formal restart on the same product even if the default declaration changes later. Caller cwd stays the process start context and no longer decides product or workspace.
 
 ## Ordinary launch and explicit restart
 
@@ -197,27 +197,18 @@ type AuthSessionResponse =
 
 For `auth.pair.invalid`, `auth.pair.expired`, and request failure, the login surface retains the entered code and offers return-to-input, retry, and explicit return to the normalized same-origin `entryTarget`. Return-to-input hides the error and focuses the preserved value. Explicit return does not submit, mint or clear a session, or enter an automatic login redirect loop.
 
-## Graph ownership and parallel work
+## Graph ownership
 
 | Graph | Source to sink | Owner files | Status |
 |---|---|---|---|
-| `workspace-selection` | launch request to one typed selected/missing/invalid result | `cli.ts`, `config/src/index.ts` | candidate; not implemented |
-| `serve-launch` | selected product/workspace plus launch intent to one started/already-running/typed-failure result | `cli.ts`, supervisor lease guard and lazy startup; existing topology retained | candidate; not implemented |
-| `pair-issuance` | pair request to one code receipt or typed failure | `cli.ts`, `config/src/index.ts`, `access-control.ts` | candidate; not implemented |
-| `default-product-adoption` | explicit adoption request to one declaration receipt or typed failure | `cli.ts`, `config/src/index.ts` | candidate; not implemented |
-| `humanagent-auth-session` | browser public entry to one auth terminal view | login/runtime shell and access control; existing topology retained | partial current behavior; recovery contract pending |
-| `daemon-restart` | restart request to one restart result; replacement marker validated against the recorded transition | existing supervisor/code-handoff owners; topology retained | current restart flow; product-auth preservation and request-marker validation pending |
+| `workspace-selection` | launch request to one typed selected/missing/invalid result | `cli.ts`, `config/src/index.ts` | implemented and accepted |
+| `serve-launch` | selected product/workspace plus launch intent to one started/already-running/typed-failure result | `cli.ts`, supervisor lease guard and lazy startup; existing topology retained | implemented and accepted |
+| `pair-issuance` | pair request to one code receipt or typed failure | `cli.ts`, `config/src/index.ts`, `access-control.ts` | implemented and accepted |
+| `default-product-adoption` | explicit adoption request to one declaration receipt or typed failure | `cli.ts`, `config/src/index.ts` | implemented and accepted |
+| `humanagent-auth-session` | browser public entry to one auth terminal view | login/runtime shell and access control; existing topology retained | recovery and independent sessions accepted |
+| `daemon-restart` | restart request to one restart result; replacement marker validated against the recorded transition | existing supervisor/code-handoff owners; topology retained | marker, canonical paths and auth preservation accepted |
 
-After foundation acceptance, these writers may start in parallel with disjoint files:
-
-- C0 config foundation and formatter: `packages/config/src/index.ts`, config tests.
-- D default-product declaration and precedence: `packages/config/src/index.ts`, config tests, after C0 in the same tree.
-- P pair core and session projection: `access-control.ts`, `server.ts`, and existing auth test callers needed for the async issuer migration.
-- U UI recovery: `docs/ui/login.html`, `docs/ui/login.js`, `docs/ui/login.css` only if needed, and the existing login browser proof.
-
-P may implement against the frozen `formatPairingCommand` signature while C0 is in flight. P must import that function and must not copy formatting logic. Server composition and compile are checked after C0 is merged.
-
-C1 CLI composition waits for D and P. It owns `cli.ts` adoption/launch/pair wiring, the supervisor and code-handoff changes needed by the owner-entry plan, necessary exports, and affected CLI/app/supervisor tests. It must not recreate durable issuance, session projection, default-product selection, workspace selection, the lease guard, or restart transition recording inside CLI. No full config/supervisor/typecheck matrix is a foundation gate, and no latency/load matrix is added.
+CLI composes these owners without duplicating their state or rules. Implementation scheduling and individual worker results belong to the task run notes, not this product graph.
 
 ## Installed naked CLI acceptance
 
@@ -225,4 +216,4 @@ The installed global entry must be usable before delivery. Root acceptance uses 
 
 With the intended product already running, the installed naked launch from an unrelated cwd and without `HUMANAGENT_HOME` must exit 0 with `already-running`. The receipt names the declared product/workspace and the existing browser entry. The original owner's lease identity and endpoint remain unchanged; no replacement, disposal, or restart event occurs. Following the returned URL reaches the usable product, an already paired browser remains usable, and the returned pairing command addresses the same product so a second independent browser can pair while the first remains valid. Formal `humanagent restart` is verified separately and must retain the same product/workspace.
 
-The source/sink and binding checks are static only. Runtime behavior, default-product adoption, installed naked CLI selection, ordinary duplicate-launch continuation, lazy preparation, restart-marker validation, real browser recovery, pair-before-serve, restart persistence, and independent-session acceptance remain `UNVERIFIED` until their named implementation owners provide focused tests and Root runs the real entry.
+The source/sink and binding checks prove static closure only. Focused public consumers and Root's real browser/global entry acceptance separately verified the behaviors above. Evidence is recorded in `/Volumes/Intel/playground/humanagent/.worker-runs/pairing-recovery-20261019/author-acceptance.md`, `root-browser-acceptance.md`, and `installed-acceptance.json`. The historical full U harness remains 7/10; its three unrelated shell/task-list/dashboard fixture failures are retained in the author record and are not reported as a full harness pass.
