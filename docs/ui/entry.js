@@ -14,6 +14,7 @@ import {
   taskRowTitle,
   taskFlowText,
   taskDashboardHref,
+  taskExecutionHref,
   technicalDetailTrigger,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
@@ -254,7 +255,18 @@ function renderStatus(summary, rows) {
   const list = element('div', undefined, 'panel stack')
   for (const row of rows) {
     const link = element('a', undefined, 'task-row-link')
-    link.href = taskDashboardHref(row.taskId.value)
+    const currentId = row.currentExecutionTaskId && typeof row.currentExecutionTaskId === 'object'
+      ? row.currentExecutionTaskId.value
+      : row.currentExecutionTaskId
+    const currentChild = currentId === undefined || currentId === null
+      ? undefined
+      : (Array.isArray(row.executions) ? row.executions : []).find((child) => {
+          const childId = child.taskId && typeof child.taskId === 'object' ? child.taskId.value : child.taskId
+          return childId === currentId
+        })
+    link.href = currentChild
+      ? taskExecutionHref(currentChild)
+      : taskDashboardHref(row.taskId.value)
     link.dataset.taskId = row.taskId.value
     const copy = element('div')
     copy.append(element('h3', taskRowTitle(row)))
