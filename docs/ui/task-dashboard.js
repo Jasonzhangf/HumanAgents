@@ -1680,7 +1680,7 @@ function actionCopy() {
   }
   if (dashboard.state === 'stopped') {
     const planNote = dashboard.plan?.state === 'active'
-      ? `计划仍保持生效；下次到期：${dashboard.plan.nextDueAt ? formatPreciseTime(dashboard.plan.nextDueAt) : '未提供'}。需要暂停或取消后续执行请使用下方计划控制。`
+      ? `计划仍保持生效；下次到期：${dashboard.plan.nextDueAt ? formatPreciseTime(dashboard.plan.nextDueAt) : '未提供'}。需要暂停或取消后续执行，请展开“任务计划”并使用计划控制。`
       : ''
     return dashboard.checkpoint
       ? `本次执行已停止，停止结果已保存。${planNote}`
@@ -2171,6 +2171,13 @@ function absentPlanFailure(read) {
   return ABSENT_PLAN_CODES.has(state?.failure?.code) ? state.failure : undefined
 }
 
+function renderDashboardDetailFold(label, content, open = false) {
+  const details = element('details', undefined, 'display-detail-fold')
+  details.open = open === true
+  details.append(element('summary', label), content)
+  return details
+}
+
 function renderDashboard() {
   if (!dashboard) return
   if (agentViewDispose) {
@@ -2228,14 +2235,49 @@ function renderDashboard() {
   const waitingStatus = dashboard.statusSections.waiting
   const waitingStatusAbsent = !waitingStatus || waitingStatus === ABSENT_WAITING_STATUS
   const absentPlan = absentPlanFailure(planHistoryState)
+  const nextStep = typeof dashboard.nextStep === 'string' ? dashboard.nextStep.trim() : ''
+  const applicableNextStep = nextStep
+    || (!explicitScope && dashboard.allowedActions.length > 0 ? actionCopy() : '')
 
-  const outputSection = element('section', undefined, 'section business-output')
-  outputSection.append(element('h2', '交付结果'))
-  outputSection.append(renderTaskPublicOutputPanel({
-    output: dashboard.output,
-    publication: dashboard.publicOutput,
-  }))
-  main.append(outputSection)
+  if (dashboard.error) {
+    const errorNotice = element('div', undefined, 'status-banner')
+    errorNotice.dataset.tone = 'danger'
+    errorNotice.setAttribute('role', 'alert')
+    errorNotice.append(element('strong', '任务执行遇到问题，需要处理。'))
+    if (dashboard.error.message) errorNotice.append(element('p', dashboard.error.message))
+    if (dashboard.error.nextAction) errorNotice.append(element('p', `下一步：${dashboard.error.nextAction}`))
+    main.append(errorNotice)
+  }
+
+  if (!waitingStatusAbsent || applicableNextStep) {
+    const currentSection = element('section', undefined, 'section')
+    currentSection.append(element('h2', '当前进展'))
+    const currentFacts = element('dl', undefined, 'detail-grid status-layers')
+    if (!waitingStatusAbsent) {
+      const waitingCell = element('div', undefined, 'detail-cell')
+      waitingCell.append(element('dt', '等待原因'), element('dd', waitingStatus))
+      currentFacts.append(waitingCell)
+    }
+    if (applicableNextStep) {
+      const nextCell = element('div', undefined, 'detail-cell')
+      nextCell.append(element('dt', '下一步'), element('dd', applicableNextStep))
+      currentFacts.append(nextCell)
+    }
+    currentSection.append(currentFacts)
+    main.append(currentSection)
+  }
+
+  const outputPresent = (dashboard.output !== undefined && dashboard.output !== null && dashboard.output !== '')
+    || (dashboard.publicOutput !== undefined && dashboard.publicOutput !== null)
+  if (dashboard.state === 'succeeded' || outputPresent) {
+    const outputSection = element('section', undefined, 'section business-output')
+    outputSection.append(element('h2', '交付结果'))
+    outputSection.append(renderTaskPublicOutputPanel({
+      output: dashboard.output,
+      publication: dashboard.publicOutput,
+    }))
+    main.append(outputSection)
+  }
 
   const statuses = element('dl', undefined, 'detail-grid status-layers')
   for (const [label, value] of [
@@ -2249,7 +2291,6 @@ function renderDashboard() {
     cell.append(element('dt', label), element('dd', value))
     statuses.append(cell)
   }
-  main.append(statuses)
 
   const technicalDetail = element('button', '技术详情', 'button button--quiet')
   technicalDetail.type = 'button'
@@ -2285,65 +2326,54 @@ function renderDashboard() {
         : undefined],
     ].filter(([, value]) => value !== undefined && value !== null),
   }))
-  main.append(technicalDetail)
+  const supportDetails = element('div')
+  supportDetails.append(statuses, technicalDetail)
+  main.append(renderDashboardDetailFold('运行与连接详情', supportDetails))
 
-  if (dashboard.error) {
-    const errorNotice = element('div', undefined, 'status-banner')
-    errorNotice.dataset.tone = 'danger'
-    errorNotice.setAttribute('role', 'status')
-    errorNotice.append(
-      element('strong', '任务执行遇到问题，需要处理。'),
-      element('p', '请打开技术详情，按错误记录中的处理建议处理，再检查任务状态。'),
-    )
-    main.append(errorNotice)
-  }
-
-  const execution = element('section', undefined, 'section')
-  execution.append(element('h2', '任务控制'))
-  const panel = element('div', undefined, 'panel')
-  const actions = element('div', undefined, 'actions')
-  const stopButton = element('button', STOP_ACTION_LABEL, 'button button--danger')
-  stopButton.type = 'button'
-  stopButton.disabled = !dashboard.allowedActions.includes('stop')
-  stopButton.addEventListener('click', () => void stopExecution())
-  const retryStopButton = element('button', RETRY_STOP_ACTION_LABEL, 'button button--danger')
-  retryStopButton.type = 'button'
-  retryStopButton.disabled = !dashboard.allowedActions.includes('retry-stop')
-  retryStopButton.addEventListener('click', () => void retryStopExecution())
-  const grant = taskGrantControl?.readback?.grant
-  const revokeGrantButton = grant === undefined || grant === null
-    ? null
-    : element('button', '撤销执行授权', 'button button--danger')
-  if (revokeGrantButton) {
-    revokeGrantButton.type = 'button'
-    revokeGrantButton.disabled = !taskGrantControl.authority
-    revokeGrantButton.addEventListener('click', () => void revokeTaskGrantControl())
-  }
-  if (!explicitScope && dashboard.allowedActions.includes('stop')) actions.append(stopButton)
-  if (!explicitScope && dashboard.allowedActions.includes('retry-stop')) actions.append(retryStopButton)
-  if (!explicitScope && revokeGrantButton) actions.append(revokeGrantButton)
-  if (!explicitScope && dashboard.allowedActions.includes('start')) {
-    const detailLink = element('a', START_ACTION_LABEL, 'button button--primary')
-    detailLink.href = `${taskDetailHref(taskId, explicitScope)}#task-interaction`
-    actions.append(detailLink)
-  }
-  const grantState = grant
-    ? `执行授权 TG1 revision=${grant.revision} · ${grant.state}`
-    : '尚无执行授权'
-  const controlNotice = !explicitScope
-    ? taskControlError
+  if (!explicitScope) {
+    const execution = element('section', undefined, 'section')
+    execution.append(element('h2', '任务控制'))
+    const panel = element('div', undefined, 'panel')
+    const actions = element('div', undefined, 'actions')
+    const stopButton = element('button', STOP_ACTION_LABEL, 'button button--danger')
+    stopButton.type = 'button'
+    stopButton.disabled = !dashboard.allowedActions.includes('stop')
+    stopButton.addEventListener('click', () => void stopExecution())
+    const retryStopButton = element('button', RETRY_STOP_ACTION_LABEL, 'button button--danger')
+    retryStopButton.type = 'button'
+    retryStopButton.disabled = !dashboard.allowedActions.includes('retry-stop')
+    retryStopButton.addEventListener('click', () => void retryStopExecution())
+    const grant = taskGrantControl?.readback?.grant
+    const revokeGrantButton = grant === undefined || grant === null
+      ? null
+      : element('button', '撤销执行授权', 'button button--danger')
+    if (revokeGrantButton) {
+      revokeGrantButton.type = 'button'
+      revokeGrantButton.disabled = !taskGrantControl.authority
+      revokeGrantButton.addEventListener('click', () => void revokeTaskGrantControl())
+    }
+    if (dashboard.allowedActions.includes('stop')) actions.append(stopButton)
+    if (dashboard.allowedActions.includes('retry-stop')) actions.append(retryStopButton)
+    if (revokeGrantButton) actions.append(revokeGrantButton)
+    if (dashboard.allowedActions.includes('start')) {
+      const detailLink = element('a', START_ACTION_LABEL, 'button button--primary')
+      detailLink.href = `${taskDetailHref(taskId, explicitScope)}#task-interaction`
+      actions.append(detailLink)
+    }
+    const grantState = grant
+      ? `执行授权 TG1 revision=${grant.revision} · ${grant.state}`
+      : '尚无执行授权'
+    const controlNotice = taskControlError
       ? GRANT_CONTROL_FAILURE_COPY
       : grantState
-    : ''
-  const actionMessage = explicitScope
-    ? '当前范围仅供查看，可阅读任务结果和历史，不提供启动或停止操作。'
-    : `${actionCopy()}${controlNotice ? ` · ${controlNotice}` : ''}`
-  actionStatus = element('p', actionMessage, 'muted')
-  actionStatus.setAttribute('role', 'status')
-  actionStatus.setAttribute('aria-live', 'polite')
-  panel.append(actions, actionStatus)
-  execution.append(panel)
-  main.append(execution)
+    const actionMessage = `${actionCopy()}${controlNotice ? ` · ${controlNotice}` : ''}`
+    actionStatus = element('p', actionMessage, 'muted')
+    actionStatus.setAttribute('role', 'status')
+    actionStatus.setAttribute('aria-live', 'polite')
+    panel.append(actions, actionStatus)
+    execution.append(panel)
+    main.append(execution)
+  }
 
   // The accepted reasoning plan for this task: exactly the current revision the
   // runtime accepted. It is separate from the scheduling/subscription section
@@ -2351,26 +2381,43 @@ function renderDashboard() {
   // current plan stays in the technical detail instead of taking over the
   // current surface.
   const planSelection = readPlanSelectionFromQuery()
+  const planDetails = element('div')
+  let planFailureVisible = false
   if (!absentPlan) {
-    main.append(renderTaskPlanCurrentSection(planHistoryState, {
+    const planSection = renderTaskPlanCurrentSection(planHistoryState, {
       explicitScope,
       conflictSelection: hasPlanSelection(planSelection) ? planSelection : null,
       onOpenDetail: openPlanDetail,
       onEvidenceRef: (ref, navigation) => evidenceTrigger(ref, navigation),
-    }))
+    })
+    planFailureVisible = Boolean(planSection.planFailure)
+    planDetails.append(planSection)
   }
 
   // The schedule section exists only when the dashboard read reports a
   // persisted plan; a task without one must not show a schedule surface.
-  if (dashboard.plan) main.append(renderTaskPlanSection(dashboard.plan))
+  if (dashboard.plan) planDetails.append(renderTaskPlanSection(dashboard.plan))
+  if (planDetails.children.length > 0) {
+    main.append(renderDashboardDetailFold('任务计划', planDetails, planFailureVisible))
+  }
 
   const actualGraphSection = renderActualExecutionGraphSection()
-  if (actualGraphSection) main.append(actualGraphSection)
-
   const agentSection = renderAgentActivitySection()
-  if (agentSection) main.append(agentSection)
+  if (actualGraphSection || agentSection) {
+    const runtimeDetails = element('div')
+    if (actualGraphSection) runtimeDetails.append(actualGraphSection)
+    if (agentSection) runtimeDetails.append(agentSection)
+    main.append(renderDashboardDetailFold(
+      '执行实例与分配',
+      runtimeDetails,
+      agentSection?.dataset.agentActivity === 'failed'
+        || agentSection?.dataset.agentActivity === 'selection-failed',
+    ))
+  }
 
-  main.append(renderSemanticObservationSection())
+  const diagnosticsDetails = element('div')
+  const semanticSection = renderSemanticObservationSection()
+  diagnosticsDetails.append(semanticSection)
   const traceSection = element('section', undefined, 'section')
   traceSection.append(element('h2', '执行轨迹'))
   const traceTrigger = element('button', '查看执行轨迹', 'button button--quiet')
@@ -2381,10 +2428,15 @@ function renderDashboard() {
     openTechnicalDetail({ title: '执行轨迹', content: traceHost })
   })
   traceSection.append(traceTrigger)
-  main.append(traceSection)
+  diagnosticsDetails.append(traceSection)
   const observationLink = element('a', '打开只读 Observation', 'button')
   observationLink.href = observationHref(taskId, explicitScope)
-  main.append(observationLink)
+  diagnosticsDetails.append(observationLink)
+  main.append(renderDashboardDetailFold(
+    '语义观测与执行轨迹',
+    diagnosticsDetails,
+    semanticSection.dataset.semanticObservation === 'unavailable',
+  ))
 }
 
 /**
