@@ -929,9 +929,9 @@ reviewer-design 在 `55eb847` 上复跑 gate（`pnpm typecheck` / `pnpm test:con
 
 **不要把这句推广成「任一 `consumed.add` 都可被杀死」**：`projector.ts` 现有 10 个 `consumed.add` 站点，逐个删除后 9 个被杀死，**只有 `case 'plan.proposed'` 中的 `consumed.add(rejection.eventId)` 存活**（`fail 0 / pass 143`）。它要产生可观察差异，需要「被 superseded 的 `plan.rejected` 仍携带 `pairing`」，而 §8.2 已声明该组合在契约外，因此**合法域内没有测试能杀死它**——这不是覆盖漏洞。§16.2 的 ADVISORY 行已裁定保留该行代码。
 
-## 17. F07 typed public-output carrier —— DRAFT 设计材料（待独立 review）
+## 17. F07 typed public-output carrier —— foundation implemented; App/UI pending
 
-状态：`DRAFT / NOT-IMPLEMENTED / UNVERIFIED`。本节只材料化设计。它不改代码、测试、需求、Journal 或运行服务。实现与真实入口验收均未执行。本设计须先通过独立 design review，之后才允许进入代码阶段。
+状态：共享 `contracts` / `context-events` foundation 已实现并通过 scoped GREEN。App builder、UI projection 与真实入口验收仍未实现，标记 `UNVERIFIED`。已交付的 foundation 不改需求、Journal、producer/store 或运行服务。
 
 ### 17.1 需求 ID 与 UX 审计标签
 
@@ -945,11 +945,11 @@ reviewer-design 在 `55eb847` 上复跑 gate（`pnpm typecheck` / `pnpm test:con
 
 ### 17.2 现状与真实缺口（已定位符号）
 
-公开输出的权威生产、持久 Journal 与 dashboard/observation 读取已存在。真实缺口在公共语义信封：它只携带 `publicCommitWatermark`，丢弃已提交文本与提交引用。
+公开输出的权威生产、持久 Journal 与 dashboard/observation 读取已存在。公共语义信封的 foundation 缺口已由本增量关闭；剩余缺口在 App builder 与 UI projection。
 
-- `SemanticObservationEnvelope<TEvent>`（`packages/contracts/src/semantic-observation.ts:107`）没有 `publicOutput` 字段。
-- `SemanticObservationInput`（`packages/context-events/src/types.ts:228`）没有 `publicOutput` 字段。
-- `buildSemanticObservation`（`packages/context-events/src/pairing.ts:248`）只转发 `publicCommitWatermark`。
+- `SemanticObservationEnvelope<TEvent>`（`packages/contracts/src/semantic-observation.ts:107`）已有可选 `publicOutput` 字段，并在既有 boundary 内校验。
+- `SemanticObservationInput`（`packages/context-events/src/types.ts:228`）已有可选 `publicOutput` 字段。
+- `buildSemanticObservation`（`packages/context-events/src/pairing.ts:248`）已原样转发定义的 `publicOutput`。
 - `UiRuntimeService.semanticObservation`（`packages/app/src/ui-runtime/service.ts:2356`，bound 同步 builder）只从 `task.publicOutput?.publicCommitWatermark` 取值，丢弃 `task.publicOutput.commits` 与 `state`。
 - `UiRuntimeService.scopedSemanticObservation`（`packages/app/src/ui-runtime/service.ts:2384`，durable 外项目分支）同样只从 `entry.snapshot.publicOutput?.publicCommitWatermark` 取值，丢弃 commits 与 state。
 - `buildSemanticObservationProjection`（`docs/ui/semantic-observation-projection.js:298`）不读取 `source.publicOutput`，所以浏览器语义面板没有已提交公开文本。
@@ -1021,17 +1021,20 @@ SSE 现状（不改签名）：`streamSemanticObservation`（`server.ts:1980`）
 - 不改 `authoritativePublicOutputForTask` 的既有语义。
 - F15 独立：F15 拥有 `packages/contracts/src/task-flow.ts`、`packages/core` 定义与 `docs/ui/task-display.js`。本设计不复制其文件。若共享 `packages/contracts/src/index.ts` 或 graph 写入，按标准 Git 顺序协调，不共享索引。
 
-### 17.9 最小公共消费者 RED 与 Root 验收（尚未执行）
+### 17.9 最小公共消费者 RED 与 Root 验收
 
-实现前的最小失败证据（待独立 review 后执行）：
+已完成的 foundation RED/GREEN：
 
-- `tests/context-events/semantic-public-consumer.test.ts`：`buildSemanticObservation` 携带同 scope `publicOutput`，保留 exact `text` / order / refs / 两个 watermark，拒绝跨 scope commit。
-- `tests/contracts/contracts.test.ts`：`validateSemanticObservationEnvelope` 接受合法 `publicOutput`，校验 scope / ref / 空白 / state / watermark identity，拒绝跨 scope。
+- `tests/context-events/semantic-public-consumer.test.ts`：`buildSemanticObservation` 携带同 scope `publicOutput`，保留 exact `text` / order / refs / 两个 watermark；受影响的完整文件 31/31 通过。
+- `tests/contracts/contracts.test.ts`：`validateSemanticObservationEnvelope` 接受合法 `publicOutput`，校验 scope / ref / 空白 / state / watermark identity，拒绝跨 scope；受影响的完整文件 48/48 通过。
+
+尚未执行的 App/UI 与真实入口验收：
+
 - `tests/app/semantic-observation-public.test.ts`：bound 与 foreign `/api/tasks/:id/semantic`、`/semantic/stream` 返回带 authoritative `commits` 与 exact `text` 的 `publicOutput`；`buildSemanticObservationProjection` 把 committed commits 放进 stable、pending 只显示状态、committed 后清除 pending live、unknown/unavailable 保留已确认文本。
 - 命令（scoped，非全量矩阵）：`node --test dist/tests/tests/context-events/semantic-public-consumer.test.js` 与 `node --test dist/tests/tests/app/semantic-observation-public.test.js`（先按现有脚本编译）。
 - Root 验收：Root 提供现有运行 origin 与既有 task id。在既有 Ego `14`/`p1`（`p3` protected）打开 `<root-origin>/?task=<id>` 与 `<root-origin>/observation.html?task=<id>`。不新建 Task、不跑 provider/model 矩阵。验收「已提交事实」显示已接受公开提交，「当前活动」不显示未提交文本，已完成任务无残留 pending。
 
-实现状态：`UNVERIFIED`。设计：待独立 design review。
+实现状态：共享 contracts/context-events foundation 已实现并通过 scoped GREEN；App builder、UI projection 与 Root 真实入口验收仍未实现，标记 `UNVERIFIED`。
 
 ### 17.10 owner 与文件边
 
@@ -1049,4 +1052,4 @@ SSE 现状（不改签名）：`streamSemanticObservation`（`server.ts:1980`）
 
 - 浏览器侧当前 `scopeBreadcrumbs` / `eventMatchesScope` 没有 `cycle` 子范围。若产品需要按 cycle 切换，属既有 scope 控件的后续扩展，不在本 DRAFT 内新增。
 - 本设计不新增 async 语义权威读取。若后续证实在 bound 场景 `task.publicOutput` 不包含完整 durable commits，需以具体缺失字段与触发条件另立观察，不在此猜测新 helper。
-- 实现与真实入口验收未执行。设计须先独立 review。
+- App builder、UI projection 与真实入口验收未执行；共享 foundation 的 scoped GREEN 不代表这些路径已验收。

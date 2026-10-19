@@ -253,6 +253,7 @@ export function buildSemanticObservation(input: SemanticObservationInput): Seman
     projectionVersion: input.projectionVersion,
     sourceWatermark: input.sourceWatermark,
     ...(input.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: input.publicCommitWatermark }),
+    ...(input.publicOutput === undefined ? {} : { publicOutput: input.publicOutput }),
     events: paired.events,
     coverageIssues: [...normalized.coverageIssues, ...paired.coverageIssues],
     pairing: paired.pairing,

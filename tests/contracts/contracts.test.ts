@@ -49,7 +49,7 @@ import {
   type WorkAssignment, type WorkResult, type ReviewAssignment, type ReviewResult,
   validateSemanticObservationEnvelope, validateCoverageIssue, validatePairedExecutionGroup, validateCapabilityStatus,
   validateSemanticEventRef, COVERAGE_ISSUE_REASONS, PAIRED_EXECUTION_GROUP_KINDS, PAIRED_EXECUTION_STATES, CAPABILITY_STATES,
-  type CapabilityStatus, type CoverageIssue, type PairedExecutionGroup, type SemanticEventRef, type SemanticObservationEnvelope,
+  type CapabilityStatus, type CoverageIssue, type PairedExecutionGroup, type PublicOutputPublication, type SemanticEventRef, type SemanticObservationEnvelope,
 } from '@humanagent/contracts';
 import {
   validateActiveTurnProviderExecutionIdentityRef, validateTaskRuntimeIncarnation, validateTaskExecutionInstanceIdentity,
@@ -1774,6 +1774,60 @@ test('shared semantic observation envelope delegates events and isolates shared 
   assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, coverageIssues: [{ reason: 'bad' as never, scope, sourceRef }] }, () => undefined), ContractError);
   assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, pairing: [{ ...pairing[0], state: 'bad' as never }] }, () => undefined), ContractError);
   assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, capabilities: [{ capability: '', state: 'available' }] }, () => undefined), ContractError);
+});
+
+// Known missing: the boundary does not validate a defined typed public
+// publication or reject a cross-scope commit. Frequency: unknown. Impact: an
+// out-of-scope committed text can cross the shared observation boundary.
+// Cost: one bounded valid case plus one real-scope negative.
+test('shared semantic observation envelope accepts a same-scope public output and rejects a cross-scope commit', () => {
+  const taskScope: ScopeRef = { organId: id('organ', 'organ-a'), taskId: id('task', 'task-a') };
+  const publication: PublicOutputPublication = {
+    state: 'committed',
+    commits: [{
+      ref: {
+        binding: { scope: taskScope, executionEpoch: 1 },
+        sourceId: 'source-a',
+        commitId: 'commit-a',
+        journalSeq: 3,
+        recordDigest: 'digest-a',
+      },
+      text: '  exact text\n',
+    }],
+    publicCommitWatermark: 3,
+  };
+  const base = {
+    scope: taskScope,
+    projectionVersion: 'i1c-v1',
+    sourceWatermark: 7,
+    publicCommitWatermark: 3,
+    events: [],
+    coverageIssues: [],
+    pairing: [],
+    capabilities: [],
+  };
+  // Structural construction keeps the pre-field compiler green so the RED is a
+  // runtime assertion, not a missing-property compile error.
+  const envelope = { ...base, publicOutput: publication } as SemanticObservationEnvelope<{ readonly eventId: string }>;
+  assert.doesNotThrow(() => validateSemanticObservationEnvelope(envelope, () => undefined));
+  const crossScopePublication: PublicOutputPublication = {
+    ...publication,
+    commits: [{
+      ...publication.commits[0],
+      ref: {
+        ...publication.commits[0].ref,
+        binding: {
+          ...publication.commits[0].ref.binding,
+          scope: { ...taskScope, taskId: id('task', 'task-b') },
+        },
+      },
+    }],
+  };
+  const crossEnvelope = { ...base, publicOutput: crossScopePublication } as SemanticObservationEnvelope<{ readonly eventId: string }>;
+  assert.throws(
+    () => validateSemanticObservationEnvelope(crossEnvelope, () => undefined),
+    ContractError,
+  );
 });
 
 // Agent activity read projection identity (F09). The instance identity is the

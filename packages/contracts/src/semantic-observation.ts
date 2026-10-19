@@ -109,6 +109,12 @@ export interface SemanticObservationEnvelope<TEvent> {
   readonly projectionVersion: string;
   readonly sourceWatermark: number;
   readonly publicCommitWatermark?: number;
+  /**
+   * §17.4：既有 typed 公开输出发布，原样携带。缺省表示读路径未提供，不等价于空或
+   * `committed`。本字段不推导 pending、不排序、不截断、不清理；跨 scope 或非法形状在
+   * `validateSemanticObservationEnvelope` 边界显式拒绝。
+   */
+  readonly publicOutput?: PublicOutputPublication;
   readonly events: readonly TEvent[];
   readonly coverageIssues: readonly CoverageIssue[];
   readonly pairing: readonly PairedExecutionGroup[];
@@ -268,6 +274,47 @@ export function validateSemanticObservationEnvelope<TEvent>(
   assertNonEmpty(input.projectionVersion, 'semantic observation projectionVersion');
   assertWatermark(input.sourceWatermark, 'sourceWatermark');
   if (input.publicCommitWatermark !== undefined) assertWatermark(input.publicCommitWatermark, 'publicCommitWatermark');
+  // §17.4：新增字段的边界校验只在此入口内进行；复用既有私有断言并抛既有 ContractError。
+  if (input.publicOutput !== undefined) {
+    const publication = input.publicOutput;
+    if (publication.state !== 'pending' && publication.state !== 'committed'
+      && publication.state !== 'unavailable' && publication.state !== 'unknown') {
+      throw new ContractError(`unsupported public output state: ${String(publication.state)}`);
+    }
+    assertRefArray(publication.commits, 'public output commits');
+    for (const commit of publication.commits) {
+      const ref = commit.ref;
+      assertSemanticScope(ref.binding.scope, 'public output commit binding scope');
+      assertExecutionEpoch(ref.binding.executionEpoch);
+      if (ref.binding.harnessTurnId !== undefined) assertNonEmpty(ref.binding.harnessTurnId, 'public output commit harnessTurnId');
+      if (ref.binding.providerTurnId !== undefined) assertNonEmpty(ref.binding.providerTurnId, 'public output commit providerTurnId');
+      if (ref.binding.requestId !== undefined) assertNonEmpty(ref.binding.requestId, 'public output commit requestId');
+      assertNonEmpty(ref.sourceId, 'public output commit sourceId');
+      assertNonEmpty(ref.commitId, 'public output commit commitId');
+      assertWatermark(ref.journalSeq, 'public output commit journalSeq');
+      assertNonEmpty(ref.recordDigest, 'public output commit recordDigest');
+      // `text` 只要求非空字符串；不使用 `.trim()`，保留原始空白。
+      if (typeof commit.text !== 'string' || commit.text.length === 0) {
+        throw new ContractError('public output commit text must be a non-empty string');
+      }
+      // §17.4：显式拒绝跨 scope 提交。cycleId 不在信封 scope 内时不比较、不重建。
+      if (ref.binding.scope.organId.value !== input.scope.organId.value) {
+        throw new ContractError('public output commit scope organId must match the observation scope');
+      }
+      if (ref.binding.scope.taskId?.value !== input.scope.taskId?.value) {
+        throw new ContractError('public output commit scope taskId must match the observation scope');
+      }
+      if (input.scope.operationId !== undefined && ref.binding.scope.operationId?.value !== input.scope.operationId.value) {
+        throw new ContractError('public output commit scope operationId must match the observation scope');
+      }
+    }
+    if (publication.publicCommitWatermark !== undefined) {
+      assertWatermark(publication.publicCommitWatermark, 'public output publicCommitWatermark');
+      if (input.publicCommitWatermark !== undefined && publication.publicCommitWatermark !== input.publicCommitWatermark) {
+        throw new ContractError('public output publicCommitWatermark must equal the observation publicCommitWatermark');
+      }
+    }
+  }
   assertRefArray(input.events, 'semantic observation events');
   for (const event of input.events) validateEvent(event);
   assertRefArray(input.coverageIssues, 'semantic observation coverageIssues');

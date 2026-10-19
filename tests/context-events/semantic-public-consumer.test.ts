@@ -475,3 +475,56 @@ test('projection ignores identity-only and cross-scope references and does not m
   assert.deepEqual(second, first);
   assert.equal(JSON.stringify([events, pairing]), before);
 });
+
+// Known missing: the semantic builder drops a defined typed public publication.
+// Frequency: unknown. Impact: committed public text disappears from the common
+// observation envelope. Cost: one bounded public-consumer regression.
+test('builder forwards a defined public output publication unchanged', () => {
+  const observationScope = {
+    organId: { scope: 'organ' as const, value: 'organ-1' },
+    taskId: { scope: 'task' as const, value: 'task-1' },
+  };
+  const publication = {
+    state: 'committed' as const,
+    commits: [
+      {
+        ref: {
+          binding: { scope: observationScope, executionEpoch: 2 },
+          sourceId: 'provider-output-1',
+          commitId: 'commit-1',
+          journalSeq: 41,
+          recordDigest: 'digest-1',
+        },
+        text: '  exact committed text\n',
+      },
+      {
+        ref: {
+          binding: { scope: observationScope, executionEpoch: 2, harnessTurnId: 'turn-2' },
+          sourceId: 'provider-output-2',
+          commitId: 'commit-2',
+          journalSeq: 42,
+          recordDigest: 'digest-2',
+        },
+        text: 'second exact text',
+      },
+    ],
+    publicCommitWatermark: 42,
+  };
+  // A variable keeps the extra property structural on the pre-field compiler, so
+  // the old builder fails as a behavior RED instead of a compile error.
+  const input = {
+    scope: observationScope,
+    projectionVersion: 'test-v1',
+    sourceWatermark: 7,
+    publicCommitWatermark: 42,
+    events: [source({ eventId: 'public-output-source', kind: 'execution.started', seq: 3 })],
+    publicOutput: publication,
+  };
+  const envelope = buildSemanticObservation(input);
+  // Read structurally for the same reason. Same reference proves exact text,
+  // commit order, and refs are forwarded without clone or rewrite.
+  const forwarded = (envelope as { readonly publicOutput?: typeof publication }).publicOutput;
+  assert.equal(forwarded, publication);
+  assert.equal(envelope.sourceWatermark, 7);
+  assert.equal(envelope.publicCommitWatermark, 42);
+});

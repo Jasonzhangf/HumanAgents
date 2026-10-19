@@ -13,6 +13,7 @@ import type {
   CapabilityStatus,
   CoverageIssue,
   PairedExecutionGroup,
+  PublicOutputPublication,
   SemanticObservationEnvelope,
 } from '../../contracts/src/semantic-observation.js';
 
@@ -230,6 +231,8 @@ export interface SemanticObservationInput {
   readonly projectionVersion: string;
   readonly sourceWatermark: number;
   readonly publicCommitWatermark?: number;
+  /** §17.4：既有 typed 公开输出发布，原样向前；缺省表示读路径未提供。 */
+  readonly publicOutput?: PublicOutputPublication;
   readonly events: readonly RuntimeTaskEventLike[];
   readonly capabilities?: readonly CapabilityStatus[];
 }
