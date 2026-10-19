@@ -8,6 +8,7 @@ import {
   renderSystemRead,
   renderPageError,
   renderRuntimeStatus,
+  taskRowStateText,
   taskDashboardHref,
 } from './runtime-shell.js'
 import {
@@ -200,7 +201,7 @@ function taskRow(row) {
   link.href = taskDashboardHref(row.taskId.value)
   link.append(
     element('h3', row.title || '未命名任务'),
-    element('p', `${row.currentState || row.state || ''} · ${row.nextStep || ''}`),
+    element('p', taskRowStateText(row)),
   )
   const meta = element('div', undefined, 'task-item-meta')
   meta.append(
@@ -320,7 +321,13 @@ function renderTaskLists(dashboard, tasks) {
       state: 'failed',
       stateLabel: '失败',
       currentState: f.code || 'failed',
-      nextStep: f.nextAction || '',
+      error: {
+        code: f.code,
+        ownerId: f.ownerId,
+        message: f.message,
+        retryable: false,
+        nextAction: f.nextAction,
+      },
       updatedAt: f.occurredAt,
     })), '暂无失败记录。'),
   )

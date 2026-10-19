@@ -10,6 +10,7 @@ import {
   renderPageError,
   renderRuntimeStatus,
   stateTone,
+  taskRowStateText,
   taskDashboardHref,
   technicalDetailTrigger,
 } from './runtime-shell.js'
@@ -42,17 +43,6 @@ let latestState = 'received'
 let submitting = false
 let pendingSubmission
 const cardState = { sequence: 0, entries: [] }
-
-// The explicit task type is chosen by the human and never inferred from the
-// goal text or the execution trigger. It reuses the existing TaskFlowBinding
-// shape and definition version 1.
-const TASK_FLOW_DEFINITION_VERSION = 1
-const TASK_FLOW_TYPES = [
-  ['one-shot', '单次'],
-  ['inspection', '巡检'],
-  ['long-running', '长程'],
-]
-const TASK_FLOW_KINDS = new Set(TASK_FLOW_TYPES.map(([kind]) => kind))
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   cardState.sequence += 1
@@ -179,6 +169,9 @@ function renderDraft(snapshot) {
   if (snapshot.draft) {
     const panel = element('div', undefined, 'panel')
     const grid = element('dl', undefined, 'detail-grid')
+    if (typeof snapshot.revision?.title === 'string' && snapshot.revision.title.trim() !== '') {
+      renderField(grid, '任务名称', snapshot.revision.title)
+    }
     renderField(grid, '意图', snapshot.draft.proposedIntent)
     renderField(grid, '规范化输入', snapshot.draft.normalizedInput)
     renderField(grid, '已知事实', (snapshot.draft.knownFacts || []).join('\n'))
@@ -219,7 +212,6 @@ function renderStatus(summary, rows) {
     stats.append(card)
   }
   for (const [label, value] of [
-    ['已确认', confirmation ? confirmation.requirementId : '未确认'],
     ['任务数量', String(rows.length)],
   ]) {
     const card = element('article', undefined, 'stat')
@@ -229,7 +221,7 @@ function renderStatus(summary, rows) {
   section.append(stats)
 
   if (rows.length === 0) {
-    section.append(element('p', confirmation ? '已确认，等待隐式队列创建任务。' : '尚未提交任务。', 'empty'))
+    section.append(element('p', confirmation ? '需求已提交，等待隐式队列创建任务。' : '尚未提交任务。', 'empty'))
     return
   }
   const list = element('div', undefined, 'panel stack')
@@ -238,7 +230,7 @@ function renderStatus(summary, rows) {
     link.href = taskDashboardHref(row.taskId.value)
     const copy = element('div')
     copy.append(element('h3', row.title))
-    copy.append(element('p', `${row.currentState} · 下一步：${row.nextStep}`))
+    copy.append(element('p', taskRowStateText(row)))
     const stateChip = element('span', row.stateLabel, 'state-chip')
     stateChip.dataset.tone = stateTone(row.state)
     const meta = element('div', undefined, 'item-meta')
@@ -280,26 +272,9 @@ function value(form, name) {
   return control ? String(control.value).trim() : ''
 }
 
-// The task type is optional. An empty selection means the human declared no
-// type, so the request reaches the original explicit brain unchanged and the
-// brain keeps owning simple-question vs complex-task routing. A non-empty
-// selection must be one of the existing kinds; it is never inferred.
-function selectedTaskFlow(form) {
-  const kind = value(form, 'taskFlowKind')
-  if (!kind) return undefined
-  if (!TASK_FLOW_KINDS.has(kind)) {
-    throw Object.assign(new Error('无效的任务类型。'), {
-      code: 'request.invalid-field',
-      ownerId: 'humanagent.app.ui',
-      nextAction: 'choose one of 单次 / 巡检 / 长程, or leave the task type empty',
-    })
-  }
-  return { kind, definitionVersion: TASK_FLOW_DEFINITION_VERSION }
-}
-
 // Every user-selected input that must stay fixed for one attempted submission:
-// the goal text, the explicit task type, and the execution trigger. The trigger
-// feeds the execution policy and stays separate from the task type.
+// the goal text and the execution trigger. Classification is owned by the
+// explicit brain and is not a human input.
 function executionInputs(form) {
   return {
     executionMode: value(form, 'executionMode'),
@@ -315,16 +290,14 @@ function executionInputs(form) {
 }
 
 function selectionInputs(rawInput, form) {
-  return { rawInput, taskFlowKind: value(form, 'taskFlowKind'), execution: executionInputs(form) }
+  return { rawInput, execution: executionInputs(form) }
 }
 
 // Text equality alone must not reuse a prepared submission: a retry reuses the
-// same receipt identity only when the goal, the task type and the trigger are
-// all unchanged.
+// same receipt identity only when the goal and the trigger are unchanged.
 function selectionsEqual(left, right) {
   if (!left || !right) return false
   return left.rawInput === right.rawInput
-    && left.taskFlowKind === right.taskFlowKind
     && JSON.stringify(left.execution) === JSON.stringify(right.execution)
 }
 
@@ -459,10 +432,8 @@ function buildExecutionPolicy(form, submissionId) {
 
 function prepareSubmission(rawInput, form) {
   const submissionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-  const taskFlow = selectedTaskFlow(form)
   return {
     rawInput,
-    taskFlow,
     executionPolicy: buildExecutionPolicy(form, submissionId),
     confirmationRef: `confirmation:ui:${submissionId}`,
     confirmedAt: new Date().toISOString(),
@@ -625,7 +596,6 @@ async function executeSubmission(submission, clarificationAnswer) {
     goal: snapshot.draft.proposal,
     scope: snapshot.draft.normalizedInput,
     executionPolicy: submission.executionPolicy,
-    taskFlow: submission.taskFlow,
   })
   confirmation = receipt.requirement
   // The submit is the confirmation. `latestState` still holds the
@@ -696,22 +666,6 @@ function renderForm() {
   textarea.required = true
   textarea.placeholder = '描述要处理的一个任务'
   form.append(field('任务输入', textarea))
-
-  // Optional task type. The placeholder keeps the initial value empty and the
-  // control is not `required`, so a simple question reaches the explicit brain
-  // without a preclassification gate. The type is never derived from the goal
-  // text or from the execution trigger.
-  const taskType = element('select')
-  taskType.name = 'taskFlowKind'
-  const taskTypePlaceholder = element('option', '简单问答可不选；复杂任务请选择')
-  taskTypePlaceholder.value = ''
-  taskType.append(taskTypePlaceholder)
-  for (const [kind, label] of TASK_FLOW_TYPES) {
-    const option = element('option', label)
-    option.value = kind
-    taskType.append(option)
-  }
-  form.append(field('任务类型（可选）', taskType))
 
   const mode = element('select')
   mode.name = 'executionMode'
@@ -826,11 +780,11 @@ function renderForm() {
   frequency.addEventListener('change', syncExecutionFields)
   syncExecutionFields()
 
-  // Once a real interaction exists, this attempt's identity is fixed. The type
-  // and the execution trigger are disabled with the goal text so a retry cannot
-  // rebind the same receipt to a different task type or execution strategy.
+  // Once a real interaction exists, this attempt's identity is fixed. The
+  // execution trigger is disabled with the goal text so a retry cannot rebind
+  // the same receipt to a different execution strategy.
   const freezeCreationInputs = () => {
-    for (const control of [taskType, mode, timezone, startAt, endAt, maxOccurrences, frequency, intervalMinutes, timeOfDay, weekDays]) {
+    for (const control of [mode, timezone, startAt, endAt, maxOccurrences, frequency, intervalMinutes, timeOfDay, weekDays]) {
       control.disabled = true
     }
   }

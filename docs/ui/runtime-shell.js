@@ -389,6 +389,37 @@ function renderScopedFailures(failures, emptyText) {
   return panel
 }
 
+function publishedOutputText(publicOutput) {
+  const commits = publicOutput?.commits
+  if (!Array.isArray(commits)) return ''
+  for (let index = commits.length - 1; index >= 0; index -= 1) {
+    const text = commits[index]?.text
+    if (typeof text === 'string' && text.trim() !== '') return text
+  }
+  return ''
+}
+
+/**
+ * The list row reports only facts the row itself carries. A terminal row shows
+ * its committed result when one exists; otherwise the row's existing task
+ * link is the result/detail entry. It never appends a required nextStep or
+ * advertises a control that the row did not receive.
+ */
+export function taskRowStateText(task) {
+  const state = task?.currentState || task?.stateLabel || task?.state || ''
+  if (!task) return state
+  if (task.error) return [state, task.error.message].filter(Boolean).join(' · ')
+  const committed = publishedOutputText(task.publicOutput)
+  if (committed) return [state, committed].filter(Boolean).join(' · ')
+  if (typeof task.output === 'string' && task.output.trim() !== '') {
+    return [state, task.output].filter(Boolean).join(' · ')
+  }
+  if (['succeeded', 'failed', 'stopped', 'cancelled', 'blocked'].includes(task.state)) {
+    return [state, '查看任务详情'].filter(Boolean).join(' · ')
+  }
+  return state
+}
+
 function renderTaskReadRow(row, options = {}) {
   const task = row.task
   const item = element('div', undefined, 'task-item')
@@ -397,7 +428,7 @@ function renderTaskReadRow(row, options = {}) {
   link.dataset.taskScope = JSON.stringify(row.scope)
   link.append(
     element('h3', task.title || '未命名任务'),
-    element('p', `${task.currentState || task.state || ''} · ${task.nextStep || ''}`),
+    element('p', taskRowStateText(task)),
   )
   const meta = element('div', undefined, 'task-item-meta')
   const state = element('span', task.stateLabel || task.state || '', 'task-state-pill')
