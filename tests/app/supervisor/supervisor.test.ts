@@ -15,6 +15,7 @@ import {
   readDaemonLease,
   recordDaemonRestartTransition,
   runSupervisorStartup,
+  runSupervisorServeStartup,
   startDaemonCodeHandoff,
 } from '../../../packages/app/src/supervisor/index.js';
 import { AccessControlService } from '../../../packages/app/src/ui-runtime/access-control.js';
@@ -28,6 +29,18 @@ async function fixture(): Promise<RuntimePaths> {
   await ensureControlLayout(paths);
   await AccessControlService.open({ credentialPath: paths.webAccessCredentialPath, create: true });
   return paths;
+}
+
+function serveStartup(paths: RuntimePaths) {
+  return {
+    launcherPath: '/fixture/candidate/bin/humanagent.mjs',
+    cwd: paths.workspaceCwd,
+    args: ['--control-root', paths.controlRoot, '--workspace', paths.workspaceCwd, '--provider', 'fake', '--port', '0'],
+    source: {
+      entryPath: '/fixture/candidate/runtime/app/src/cli.js',
+      packageVersion: '0.1.31',
+    },
+  };
 }
 
 test('daemon lease is unique and generation advances after release', async () => {
@@ -265,6 +278,246 @@ test('restart transition crosses the disposed lease and completes only on the ne
   const ready = await replacement.markReady();
   assert.ok(ready.restart?.completedAt);
   await replacement.release();
+});
+
+test('serve launch continues a ready live owner without acquiring or preparing', async () => {
+  const paths = await fixture();
+  const startup = serveStartup(paths);
+  const origin = await runSupervisorServeStartup(paths, async () => [
+    {
+      name: 'fixture-serve',
+      ownerId: 'humanagent.app.serve',
+      start: async () => {},
+    },
+  ], { startup });
+  assert.equal(origin.status, 'started');
+  if (origin.status !== 'started') return;
+  await origin.startup.lease.setControlEndpoint({ host: '127.0.0.1', port: 45123 });
+  const original = origin.startup.lease.record;
+  assert.ok(original.readyAt);
+  assert.deepEqual(original.controlEndpoint, { host: '127.0.0.1', port: 45123 });
+
+  let prepared = 0;
+  const continued = await runSupervisorServeStartup(paths, async () => {
+    prepared += 1;
+    return [];
+  }, { startup });
+  assert.equal(continued.status, 'already-running');
+  if (continued.status !== 'already-running') return;
+  assert.equal(prepared, 0);
+  assert.equal(continued.lease.leaseId, original.leaseId);
+  assert.equal(continued.lease.generation, original.generation);
+  assert.equal(continued.lease.pid, original.pid);
+  assert.equal(continued.lease.processStartToken, original.processStartToken);
+  assert.deepEqual(continued.lease.controlEndpoint, original.controlEndpoint);
+  assert.equal(continued.lease.disposedAt, undefined);
+
+  const persisted = await readDaemonLease(paths);
+  assert.equal(persisted?.leaseId, original.leaseId);
+  assert.equal(persisted?.generation, original.generation);
+  assert.equal(persisted?.disposedAt, undefined);
+  await origin.startup.dispose();
+});
+
+test('concurrent serve launches run the lazy factory once and reject the other as not ready', async () => {
+  const paths = await fixture();
+  const startup = serveStartup(paths);
+  let prepared = 0;
+  let enteredFactory!: () => void;
+  const factoryEntered = new Promise<void>((resolve) => {
+    enteredFactory = resolve;
+  });
+  let releaseFactory!: () => void;
+  const factoryGate = new Promise<void>((resolve) => {
+    releaseFactory = resolve;
+  });
+  const createStages = async () => {
+    prepared += 1;
+    enteredFactory();
+    await factoryGate;
+    return [
+      {
+        name: 'fixture-serve',
+        ownerId: 'humanagent.app.serve',
+        start: async () => {},
+      },
+    ];
+  };
+
+  const first = runSupervisorServeStartup(paths, createStages, { startup });
+  const second = runSupervisorServeStartup(paths, createStages, { startup });
+  const settled = Promise.allSettled([first, second]);
+  await factoryEntered;
+  assert.equal(prepared, 1);
+  releaseFactory();
+  const outcomes = await settled;
+  const started = outcomes.filter((outcome): outcome is PromiseFulfilledResult<Awaited<typeof first>> => (
+    outcome.status === 'fulfilled' && outcome.value.status === 'started'
+  ));
+  const rejected = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+  assert.equal(started.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(prepared, 1);
+  const otherCode = (rejected[0]!.reason as AppLifecycleError).code;
+  assert.ok(
+    otherCode === 'daemon-serve.not-ready' || otherCode === 'daemon-lease-transition-in-progress',
+    otherCode,
+  );
+  const startedLease = started[0]!.value;
+  if (startedLease.status === 'started') await startedLease.startup.dispose();
+});
+
+test('serve launch refuses a pending restart and rejects stale restart markers before preparation', async () => {
+  const paths = await fixture();
+  const startup = serveStartup(paths);
+  const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+  await owner.markReady();
+  await owner.setControlEndpoint({ host: '127.0.0.1', port: 45124 });
+  const transition = {
+    requestId: 'restart-request-active',
+    requestedAt: new Date().toISOString(),
+    previousLeaseId: owner.record.leaseId,
+    previousGeneration: owner.record.generation,
+    previousProcessStartToken: owner.record.processStartToken,
+    targetEntryPath: startup.source.entryPath,
+  };
+  await recordDaemonRestartTransition(paths, {
+    leaseId: owner.record.leaseId,
+    generation: owner.record.generation,
+    processStartToken: owner.record.processStartToken,
+  }, transition);
+
+  let prepared = 0;
+  const createStages = async () => {
+    prepared += 1;
+    return [];
+  };
+
+  await assert.rejects(() => runSupervisorServeStartup(paths, createStages, { startup }), (error: any) => {
+    assert.equal(error.code, 'daemon-serve.restart-in-progress');
+    return true;
+  });
+  assert.equal(prepared, 0);
+
+  await assert.rejects(() => runSupervisorServeStartup(paths, createStages, {
+    startup,
+    restartRequest: 'restart-request-stale',
+  }), (error: any) => {
+    assert.equal(error.code, 'daemon-restart.request-mismatch');
+    return true;
+  });
+  assert.equal(prepared, 0);
+
+  await assert.rejects(() => runSupervisorServeStartup(paths, createStages, {
+    startup: {
+      ...startup,
+      source: { ...startup.source, entryPath: '/fixture/candidate/other-entry.js' },
+    },
+    restartRequest: transition.requestId,
+  }), (error: any) => {
+    assert.equal(error.code, 'daemon-restart.target-mismatch');
+    return true;
+  });
+  assert.equal(prepared, 0);
+
+  const persisted = await readDaemonLease(paths);
+  assert.equal(persisted?.leaseId, owner.record.leaseId);
+  assert.equal(persisted?.generation, owner.record.generation);
+  assert.equal(persisted?.disposedAt, undefined);
+  assert.equal(persisted?.restart?.requestId, transition.requestId);
+  await owner.release();
+});
+
+test('serve restart marker replaces a disposed pending owner and completes the transition', async () => {
+  const paths = await fixture();
+  const startup = serveStartup(paths);
+  const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+  await owner.markReady();
+  await owner.setControlEndpoint({ host: '127.0.0.1', port: 45125 });
+  const transition = {
+    requestId: 'restart-request-disposed',
+    requestedAt: new Date().toISOString(),
+    previousLeaseId: owner.record.leaseId,
+    previousGeneration: owner.record.generation,
+    previousProcessStartToken: owner.record.processStartToken,
+    targetEntryPath: startup.source.entryPath,
+  };
+  await recordDaemonRestartTransition(paths, {
+    leaseId: owner.record.leaseId,
+    generation: owner.record.generation,
+    processStartToken: owner.record.processStartToken,
+  }, transition);
+  await owner.release();
+
+  let prepared = 0;
+  const replacement = await runSupervisorServeStartup(paths, async () => {
+    prepared += 1;
+    return [
+      {
+        name: 'fixture-serve',
+        ownerId: 'humanagent.app.serve',
+        start: async () => {},
+      },
+    ];
+  }, { startup, restartRequest: transition.requestId });
+  assert.equal(replacement.status, 'started');
+  if (replacement.status !== 'started') return;
+  assert.equal(prepared, 1);
+  assert.equal(replacement.startup.lease.record.generation, owner.record.generation + 1);
+  assert.equal(replacement.startup.lease.record.restart?.requestId, transition.requestId);
+  assert.ok(replacement.startup.lease.record.restart?.completedAt);
+  await replacement.startup.dispose();
+});
+
+test('serve restart marker stops a live owner after the request fence and commits the replacement', async () => {
+  const paths = await fixture();
+  const startup = serveStartup(paths);
+  const child = await startLeaseChild(paths, 'exit-on-term', 'humanagent.app.serve');
+  try {
+    const childLease = await readDaemonLease(paths);
+    if (childLease === undefined) throw new Error('expected the child daemon lease');
+    const transition = {
+      requestId: 'restart-request-live',
+      requestedAt: new Date().toISOString(),
+      previousLeaseId: childLease.leaseId,
+      previousGeneration: childLease.generation,
+      previousProcessStartToken: childLease.processStartToken,
+      targetEntryPath: startup.source.entryPath,
+    };
+    await recordDaemonRestartTransition(paths, {
+      leaseId: childLease.leaseId,
+      generation: childLease.generation,
+      processStartToken: childLease.processStartToken,
+    }, transition);
+
+    let prepared = 0;
+    const replacement = await runSupervisorServeStartup(paths, async () => {
+      prepared += 1;
+      return [
+        {
+          name: 'fixture-serve',
+          ownerId: 'humanagent.app.serve',
+          start: async () => {},
+        },
+      ];
+    }, {
+      startup,
+      restartRequest: transition.requestId,
+      restartStop: { gracefulTimeoutMs: 1_000, pollIntervalMs: 10 },
+    });
+    assert.equal(replacement.status, 'started');
+    if (replacement.status !== 'started') return;
+    assert.equal(prepared, 1);
+    assert.equal(replacement.startup.lease.record.generation, childLease.generation + 1);
+    assert.equal(replacement.startup.lease.record.takeover?.previousLeaseId, childLease.leaseId);
+    assert.equal(replacement.startup.lease.record.takeover?.termination, 'graceful');
+    assert.equal(replacement.startup.lease.record.restart?.requestId, transition.requestId);
+    assert.ok(replacement.startup.lease.record.restart?.completedAt);
+    assert.equal(processIsAliveForTest(child.pid), false);
+    await replacement.startup.dispose();
+  } finally {
+    await child.stop();
+  }
 });
 
 test('dispose cleanup failure is durable in the lease and the caller receipt', async () => {
@@ -594,6 +847,7 @@ test('startup owner crash recovery accepts an already-dead unclosed lease', asyn
 async function startLeaseChild(
   paths: RuntimePaths,
   behavior: 'exit-on-term' | 'delay-term',
+  ownerId = 'supervisor',
 ): Promise<{ readonly pid: number; readonly leaseId: string; readonly stop: () => Promise<void> }> {
   const supervisorModule = new URL('../../../packages/app/src/supervisor/index.js', import.meta.url).href;
   const script = `
@@ -601,7 +855,7 @@ async function startLeaseChild(
     import { resolveRuntimePaths } from ${JSON.stringify(new URL('../../../packages/config/src/index.js', import.meta.url).href)};
     import { acquireDaemonLease } from ${JSON.stringify(supervisorModule)};
     const paths = await resolveRuntimePaths({ controlRoot: ${JSON.stringify(paths.controlRoot)}, workspace: ${JSON.stringify(paths.workspaceCwd)} });
-    const lease = await acquireDaemonLease(paths);
+    const lease = await acquireDaemonLease(paths, { ownerId: ${JSON.stringify(ownerId)} });
     const identityServer = createServer((request, response) => {
       if (request.method !== 'GET' || request.url !== '/api/runtime/identity') {
         response.writeHead(404).end();

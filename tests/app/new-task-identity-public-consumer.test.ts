@@ -190,7 +190,7 @@ async function accessControlFor(root: string) {
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('task-identity-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   return { accessControl, cookie: accessControl.sessionCookie(session).split(';')[0]! };
 }
@@ -362,6 +362,7 @@ async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
   const taskIdentity = extra.taskIdentity?.(principalOwner, taskControlPath);
   const runtime = await startUiRuntime({
     mode,
+    productRoot: root,
     organId,
     binding: extra.binding ?? binding,
     port,
@@ -1506,7 +1507,7 @@ test('app_read_mounts_preference_routes_dispatch_to_config_resource', async () =
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('pref-route-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   // The bound runtime uses Config-owned paths, so compare the exact canonical
@@ -1518,6 +1519,7 @@ test('app_read_mounts_preference_routes_dispatch_to_config_resource', async () =
   const runtime = await startUiRuntime({
     mode: 'fake',
     accessControl,
+    productRoot: paths.controlRoot,
     organId,
     binding,
     port,
@@ -1620,7 +1622,7 @@ test('app_read_mounts_dashboard_history_uses_accepted_current_and_scoped_identit
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('dashboard-history-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   const taskControlPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(paths.checkpointsRoot, 'fake'));
@@ -1630,6 +1632,7 @@ test('app_read_mounts_dashboard_history_uses_accepted_current_and_scoped_identit
   const runtime = await startUiRuntime({
     mode: 'fake',
     accessControl,
+    productRoot: paths.controlRoot,
     organId,
     binding,
     port,

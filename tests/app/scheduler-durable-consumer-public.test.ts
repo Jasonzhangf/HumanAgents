@@ -782,12 +782,13 @@ test('production HTTP confirmation persists a real scheduled subscription', asyn
       credentialPath: join(root, 'security', 'web-access.json'),
       create: true,
     });
-    const challenge = accessControl.createPairingChallenge('plan-http', 1);
+    const challenge = await accessControl.issuePairingChallenge();
     const session = await accessControl.consumePairingCode(challenge.code);
     const cookie = accessControl.sessionCookie(session).split(';')[0]!;
     runtimeServer = await startUiRuntimeServer({
       service: planService(root, planPort(root)),
       accessControl,
+      productRoot: root,
       uiRoot: join(process.cwd(), 'docs', 'ui'),
       port: 0,
     });

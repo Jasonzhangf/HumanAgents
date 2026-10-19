@@ -192,7 +192,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       });
     }
     const accessControl = await AccessControlService.open({ credentialPath: paths.webAccessCredentialPath, create: true });
-    const challenge = accessControl.createPairingChallenge('http-fixture', 1);
+    const challenge = await accessControl.issuePairingChallenge();
     const session = await accessControl.consumePairingCode(challenge.code);
     const binding: ProviderBinding = { bindingId: 'http-binding', providerId: 'http-provider',
       protocol: 'responses', endpointRef: 'fake://http', modelRef: 'fake',
@@ -216,7 +216,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(),
         projectKey: paths.projectKey, roleId: 'execution' },
     });
-    const { listener } = createUiRuntimeRequestDispatcher({ service, accessControl,
+    const { listener } = createUiRuntimeRequestDispatcher({ service, accessControl, productRoot: paths.controlRoot,
       uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false });
     const taskView = () => JSON.stringify(service.taskDashboard(taskId));
     const before = { task: taskView(), files: await readFixtureFiles(root) };
@@ -556,11 +556,12 @@ test('task dashboard HTTP preserves live pending public output while the final c
       credentialPath: paths.webAccessCredentialPath,
       create: true,
     });
-    const challenge = accessControl.createPairingChallenge('f07-pending-http', 1);
+    const challenge = await accessControl.issuePairingChallenge();
     const session = await accessControl.consumePairingCode(challenge.code);
     const { listener } = createUiRuntimeRequestDispatcher({
       service,
       accessControl,
+      productRoot: paths.controlRoot,
       uiRoot: join(process.cwd(), 'docs/ui'),
       isClosing: () => false,
     });

@@ -21,6 +21,13 @@ export interface WebAccessCredential {
   readonly secret: string;
   readonly sessionGeneration: number;
   readonly createdAt: string;
+  readonly pendingPairingChallenges?: readonly PersistedPairingChallenge[];
+}
+
+export interface PersistedPairingChallenge {
+  readonly code: string;
+  readonly expiresAt: number;
+  readonly sessionGeneration: number;
 }
 
 export interface AccessSession {
@@ -152,7 +159,55 @@ function parseCredential(raw: string): WebAccessCredential {
     fail('auth.credentials.unavailable', 'web access credential is invalid', 'remove the corrupt credential file and start serve again', 503);
   }
   decodeSecret(value.secret);
-  return value as WebAccessCredential;
+  return {
+    schemaVersion: CREDENTIAL_SCHEMA_VERSION,
+    secret: value.secret!,
+    sessionGeneration: value.sessionGeneration!,
+    createdAt: value.createdAt!,
+    pendingPairingChallenges: parsePendingPairingChallenges(value.pendingPairingChallenges),
+  };
+}
+
+function parsePendingPairingChallenges(value: unknown): readonly PersistedPairingChallenge[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    fail(
+      'auth.credentials.unavailable',
+      'web access pending pairing challenges are invalid',
+      'remove the corrupt credential file and start serve again',
+      503,
+    );
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail(
+        'auth.credentials.unavailable',
+        'web access pending pairing challenge is invalid',
+        'remove the corrupt credential file and start serve again',
+        503,
+      );
+    }
+    const challenge = entry as Partial<PersistedPairingChallenge>;
+    if (
+      typeof challenge.code !== 'string'
+      || !challenge.code
+      || !Number.isSafeInteger(challenge.expiresAt)
+      || !Number.isSafeInteger(challenge.sessionGeneration)
+      || (challenge.sessionGeneration ?? 0) < 1
+    ) {
+      fail(
+        'auth.credentials.unavailable',
+        'web access pending pairing challenge is invalid',
+        'remove the corrupt credential file and start serve again',
+        503,
+      );
+    }
+    return {
+      code: challenge.code,
+      expiresAt: challenge.expiresAt!,
+      sessionGeneration: challenge.sessionGeneration!,
+    };
+  });
 }
 
 function parseCookies(header: string | undefined): ReadonlyMap<string, string> {
@@ -199,7 +254,6 @@ export class AccessControlService {
   private readonly sessionTtlMs: number;
   private readonly pairingTtlMs: number;
   private readonly now: () => number;
-  private readonly challenges = new Map<string, number>();
   private credential: WebAccessCredential;
   private credentialWatcher?: FSWatcher;
   private credentialWatchStopped = true;
@@ -237,30 +291,59 @@ export class AccessControlService {
     return safeEqual(token, expected);
   }
 
-  createPairingChallenge(leaseId: string, generation: number): PairingChallenge {
-    this.verifySupervisorIdentity(leaseId, generation);
-    this.pruneExpiredChallenges();
-    const code = randomBytes(16).toString('base64url');
-    const expiresAt = this.now() + this.pairingTtlMs;
-    this.challenges.set(code, expiresAt);
-    return { code, expiresAt };
+  /**
+   * Issues a one-use challenge durably under the existing credential mutation
+   * lock. The optional pending collection keeps old credentials readable while
+   * making issuance survive ordinary close and restart.
+   */
+  async issuePairingChallenge(): Promise<PairingChallenge> {
+    return withPairingCredentialMutation(this.credentialPath, async () => {
+      const current = await this.readCurrentCredential();
+      this.credential = current;
+      const now = this.now();
+      const pending = (current.pendingPairingChallenges ?? [])
+        .filter((entry) => entry.expiresAt > now);
+      const code = randomBytes(16).toString('base64url');
+      const expiresAt = now + this.pairingTtlMs;
+      const next: WebAccessCredential = {
+        ...current,
+        pendingPairingChallenges: [
+          ...pending,
+          { code, expiresAt, sessionGeneration: current.sessionGeneration },
+        ],
+      };
+      await writeCredential(this.credentialPath, next);
+      this.credential = next;
+      return { code, expiresAt };
+    });
   }
 
   async consumePairingCode(code: string): Promise<AccessSession> {
     if (!code) {
       fail('auth.pair.invalid', 'pairing code is required', 'run humanagent pair again', 401);
     }
-    const expiresAt = this.challenges.get(code);
-    if (expiresAt === undefined) {
-      fail('auth.pair.invalid', 'pairing code is invalid or already used', 'run humanagent pair again', 401);
-    }
-    this.challenges.delete(code);
-    if (expiresAt <= this.now()) {
-      fail('auth.pair.expired', 'pairing code has expired', 'run humanagent pair again', 401);
-    }
-    const current = await this.readCurrentCredential();
-    this.credential = current;
-    return this.issueSession(current.sessionGeneration);
+    return withPairingCredentialMutation(this.credentialPath, async () => {
+      const current = await this.readCurrentCredential();
+      this.credential = current;
+      const pending = current.pendingPairingChallenges ?? [];
+      const found = pending.find((entry) => safeEqual(entry.code, code));
+      if (found === undefined) {
+        fail('auth.pair.invalid', 'pairing code is invalid or already used', 'run humanagent pair again', 401);
+      }
+      const next: WebAccessCredential = {
+        ...current,
+        pendingPairingChallenges: pending.filter((entry) => entry !== found),
+      };
+      await writeCredential(this.credentialPath, next);
+      this.credential = next;
+      if (found.sessionGeneration !== current.sessionGeneration) {
+        fail('auth.pair.invalid', 'pairing code is invalid or already used', 'run humanagent pair again', 401);
+      }
+      if (found.expiresAt <= this.now()) {
+        fail('auth.pair.expired', 'pairing code has expired', 'run humanagent pair again', 401);
+      }
+      return this.issueSession(current.sessionGeneration);
+    });
   }
 
   async verifySession(cookieHeader: string | undefined): Promise<SessionVerification> {
@@ -331,18 +414,16 @@ export class AccessControlService {
       await writeCredential(this.credentialPath, {
         ...current,
         sessionGeneration: nextGeneration,
+        pendingPairingChallenges: [],
       });
-      this.credential = {
+      const next: WebAccessCredential = {
         ...current,
         sessionGeneration: nextGeneration,
+        pendingPairingChallenges: [],
       };
-      this.challenges.clear();
+      this.credential = next;
       return nextGeneration;
     });
-  }
-
-  closeChallengeStore(): void {
-    this.challenges.clear();
   }
 
   async isCurrentGeneration(session: AccessSession): Promise<boolean> {
@@ -468,12 +549,6 @@ export class AccessControlService {
     return Math.max(1, Math.min(...sessions.map((session) => session.expiresAt)) - now);
   }
 
-  private verifySupervisorIdentity(leaseId: string, generation: number): void {
-    if (!leaseId || !Number.isSafeInteger(generation) || generation < 1) {
-      fail('auth.supervisor.required', 'supervisor identity is required', 'use the active daemon lease identity', 401);
-    }
-  }
-
   private issueSession(generation: number): AccessSession {
     const issuedAt = this.now();
     return {
@@ -484,12 +559,6 @@ export class AccessControlService {
     };
   }
 
-  private pruneExpiredChallenges(): void {
-    const now = this.now();
-    for (const [code, expiresAt] of this.challenges) {
-      if (expiresAt <= now) this.challenges.delete(code);
-    }
-  }
 }
 
 async function ensureCredential(path: string): Promise<WebAccessCredential> {
@@ -596,6 +665,20 @@ async function writeCredential(path: string, credential: WebAccessCredential): P
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
     throw error;
+  }
+}
+
+async function withPairingCredentialMutation<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await withCredentialMutationLock(path, operation);
+  } catch (error) {
+    if (error instanceof AccessControlError) throw error;
+    fail(
+      'auth.pair.persist-failed',
+      'pairing challenge could not be saved',
+      'repair the control-root security directory and retry pairing',
+      503,
+    );
   }
 }
 

@@ -1741,7 +1741,8 @@ async function prepareNativeMultiTurnConsumer(
   const taskId = id('task', `native-${label}-consumer`);
   const controlFile = join(fixture.root, 'control-session.txt');
   const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-  const session = await access.consumePairingCode(access.createPairingChallenge(`${label}-lease`, 1).code);
+  const challenge = await access.issuePairingChallenge();
+  const session = await access.consumePairingCode(challenge.code);
   const cookie = access.sessionCookie(session).split(';')[0]!;
   await writeFile(controlFile, `${cookie}\n`, 'utf8');
   const caller = await access.verifyProductPrincipal(cookie);
@@ -2474,9 +2475,8 @@ if (!coldConsumerMode) test('public explicit taskless helper dispatch and owner 
       credentialPath: fixture.paths.webAccessCredentialPath,
       create: true,
     });
-    const session = await access.consumePairingCode(
-      access.createPairingChallenge('n3-public-helper-lease', 1).code,
-    );
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     const caller = await access.verifyProductPrincipal(cookie);
     assert.equal(caller.state, 'valid', 'the fixture caller principal is valid');
@@ -2609,7 +2609,8 @@ if (!coldConsumerMode) test('native public stop before accepted end captures the
     const organId = id('organ', 'humanagent-ui');
     const taskId = id('task', 'native-capture-only-stop');
     const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-    const session = await access.consumePairingCode(access.createPairingChallenge('capture-only-stop-lease', 1).code);
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     const caller = await access.verifyProductPrincipal(cookie);
     if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
@@ -2737,7 +2738,8 @@ if (!coldConsumerMode) test('native inspect producer and cold saved boundary pre
     const organId = id('organ', 'humanagent-ui');
     const taskId = id('task', 'native-inspect-retained');
     const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-    const session = await access.consumePairingCode(access.createPairingChallenge('inspect-lease', 1).code);
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     const caller = await access.verifyProductPrincipal(cookie);
     if (caller.state !== 'valid') throw new Error('fixture principal unavailable');
@@ -2837,7 +2839,8 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
     const organId = id('organ', 'humanagent-ui');
     const taskId = id('task', 'native-parallel-child');
     const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-    const session = await access.consumePairingCode(access.createPairingChallenge('parallel-child-lease', 1).code);
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     const controlFile = join(fixture.root, 'control-session.txt');
     await writeFile(controlFile, `${cookie}\n`, 'utf8');
@@ -3083,9 +3086,8 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
       credentialPath: fixture.paths.webAccessCredentialPath,
       create: false,
     });
-    const session = await access.consumePairingCode(
-      access.createPairingChallenge('m3-public-long-running', 1).code,
-    );
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
 
     const createdResponse = await fetch(`${serve.origin}/api/explicit/inputs`, {
@@ -4263,7 +4265,8 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
 
     // Real fixture-owned A1 credential and paired control session.
     const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-    const session = await access.consumePairingCode(access.createPairingChallenge('text-only-lease', 1).code);
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     await writeFile(controlFile, `${cookie}\n`, 'utf8');
     const caller = await access.verifyProductPrincipal(cookie);
@@ -4778,9 +4781,8 @@ if (!coldConsumerMode) test('default native CLI inherits top-level HTTP credenti
       credentialPath: fixture.paths.webAccessCredentialPath,
       create: true,
     });
-    const session = await access.consumePairingCode(
-      access.createPairingChallenge('default-http-lease', 1).code,
-    );
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     await writeFile(controlFile, `${cookie}\n`, 'utf8');
     const caller = await access.verifyProductPrincipal(cookie);

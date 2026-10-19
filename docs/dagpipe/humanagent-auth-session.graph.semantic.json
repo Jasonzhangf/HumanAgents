@@ -2,10 +2,10 @@
   "graph": "humanagent-auth-session",
   "labels": {
     "public_entry": "接收浏览器公开入口请求（无需会话）",
-    "session_check": "读取公开会话端点判断这台浏览器是否已配对；已配对则早退并重定向回请求的同源入口，未配对时运行时的类型化拒绝（missing、expired、invalid）引导到登录面",
-    "login_surface": "登录页呈现类型化错误与一次性配对码表单；配对码由控制面 humanagent pair 产生，不属于浏览器业务载荷",
+    "session_check": "读取公开会话端点判断这台浏览器是否已配对，并取得非敏感 pairingCommand；已配对则早退到请求的同源入口，未配对时进入登录面",
+    "login_surface": "登录页显示当前产品实例的配对命令与一次性配对码表单；命令来自 session 投影，不由 UI 解析 TOML、cwd 或凭证路径",
     "pair_submission": "提交一次性配对码到公开配对端点",
-    "pair_settlement": "配对结果收拢：签发持久浏览器会话 cookie，或产出类型化失败并保留重试；两个互斥终态在此收敛",
-    "render_auth_terminal": "渲染终态视图：进入请求的入口并读取已鉴权 runtime API 与 SSE，或显示类型化错误与重试动作"
+    "pair_settlement": "在持久凭证 owner 内原子消费 challenge：成功签发独立浏览器会话，失败产出类型化拒绝或请求失败且不签发 cookie",
+    "render_auth_terminal": "渲染终态视图：成功进入请求入口；失败保留输入并支持返回输入、再次提交与暂不配对返回，显式退出不触发登录循环"
   }
 }

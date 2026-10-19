@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type AgentRole } from '../../packages/config/src/index.js';
+import { ensureControlLayout, formatPairingCommand, loadConfiguration, resolveRuntimePaths, type AgentRole } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
 import { AppLifecycleError, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
@@ -33,6 +33,7 @@ import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-gr
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import { createJsonlNativeSaveProgressPort } from '../../packages/adapters/jsonl/src/native-save-progress.js';
 import { createJsonlClosedTurnPlannerCallJournal } from '../../packages/app/src/ui-runtime/planner-call-journal.js';
+import { readDaemonLease } from '../../packages/app/src/supervisor/index.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -615,7 +616,8 @@ test('native CLI preparation control input', async () => {
     // Real fixture-owned A1 credential and paired session. The cookie header is
     // the only control-session-file content; it stays out of business payload.
     const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-    const session = await access.consumePairingCode(access.createPairingChallenge('cli-control-lease', 1).code);
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     await writeFile(controlFile, `${cookie}\n`, 'utf8');
     const cookieName = cookie.slice(0, cookie.indexOf('='));
@@ -625,7 +627,8 @@ test('native CLI preparation control input', async () => {
     if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
     // A second, independent credential gives a distinct owner for the foreign grant.
   const otherAccess = await AccessControlService.open({ credentialPath: join(fixture.root, 'other-access.json'), create: true });
-    const otherSession = await otherAccess.consumePairingCode(otherAccess.createPairingChallenge('cli-control-other', 1).code);
+    const otherChallenge = await otherAccess.issuePairingChallenge();
+    const otherSession = await otherAccess.consumePairingCode(otherChallenge.code);
     const other = await otherAccess.verifyProductPrincipal(otherAccess.sessionCookie(otherSession).split(';')[0]!);
     assert.equal(other.state, 'valid');
     if (other.state !== 'valid') throw new Error('fixture other principal unavailable');
@@ -999,33 +1002,42 @@ async function requestJson(input: string | URL, init: RequestInit = {}, auth: Se
   }
 }
 
-async function authenticateServe(controlRoot: string, workspace: string, baseUrl: string): Promise<ServeAuth> {
+async function authenticateServe(
+  controlRoot: string,
+  workspace: string,
+  baseUrl: string,
+  suppliedCode?: string,
+): Promise<ServeAuth> {
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   let stdout = '';
   let stderr = '';
-  const code = await new Promise<number | null>((resolve, reject) => {
-    const pair = spawn(process.execPath, [
-      cli,
-      'pair',
-      '--workspace',
-      workspace,
-      '--control-root',
-      controlRoot,
-    ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
-    pair.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
-    pair.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
-    pair.once('error', reject);
-    pair.once('exit', (exitCode) => resolve(exitCode));
-  });
-  if (code !== 0) throw new Error(`humanagent pair exited ${String(code)}; stderr=${stderr.slice(-800)}`);
-  let receipt: { readonly code?: unknown; readonly expiresAt?: unknown } | undefined;
-  try {
-    receipt = JSON.parse(stdout.trim()) as { readonly code?: unknown; readonly expiresAt?: unknown };
-  } catch {
-    throw new Error(`humanagent pair did not return JSON: ${stdout.slice(-400)}`);
-  }
-  if (typeof receipt?.code !== 'string' || receipt.code.length === 0) {
-    throw new Error('humanagent pair returned no pairing code');
+  let code = suppliedCode;
+  if (code === undefined) {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const pair = spawn(process.execPath, [
+        cli,
+        'pair',
+        '--workspace',
+        workspace,
+        '--control-root',
+        controlRoot,
+      ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+      pair.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+      pair.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+      pair.once('error', reject);
+      pair.once('exit', (pairExitCode) => resolve(pairExitCode));
+    });
+    if (exitCode !== 0) throw new Error(`humanagent pair exited ${String(exitCode)}; stderr=${stderr.slice(-800)}`);
+    let receipt: { readonly code?: unknown; readonly expiresAt?: unknown } | undefined;
+    try {
+      receipt = JSON.parse(stdout.trim()) as { readonly code?: unknown; readonly expiresAt?: unknown };
+    } catch {
+      throw new Error(`humanagent pair did not return JSON: ${stdout.slice(-400)}`);
+    }
+    if (typeof receipt?.code !== 'string' || receipt.code.length === 0) {
+      throw new Error('humanagent pair returned no pairing code');
+    }
+    code = receipt.code;
   }
 
   const url = new URL(baseUrl);
@@ -1051,7 +1063,7 @@ async function authenticateServe(controlRoot: string, workspace: string, baseUrl
       'content-type': 'application/json',
       origin: auth.origin,
     },
-    body: JSON.stringify({ code: receipt.code }),
+    body: JSON.stringify({ code }),
   });
   const text = await response.text();
   if (!response.ok) {
@@ -2271,24 +2283,30 @@ test('CLI binds RCC identity to the configured transport endpoint', async () => 
   }
 });
 
-test('CLI serve takes over the previous owner and keeps rooted memory across restart', async () => {
-  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
-  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+test('CLI serve continues the existing owner and preserves formal restart', async () => {
+  const fixture = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
+  const paths = await resolveRuntimePaths({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+  const controlRoot = paths.controlRoot;
+  const workspace = paths.workspaceCwd;
   await ensureControlLayout(paths);
+  const configPath = join(controlRoot, 'config.toml');
+  await writeFile(
+    configPath,
+    (await readFile(configPath, 'utf8')).replace('[project]\n', `[project]\nworkspace = ${JSON.stringify(workspace)}\n`),
+    'utf8',
+  );
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const sourceRef = 'journal://cli-memory/restart-proof';
   const sourceDigest = 'sha256:cli-memory-restart-proof';
+  const home = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-home-'));
+  const unrelatedCwd = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-cwd-'));
+  const initialCwd = fixture.root;
+  const nakedEnv: Record<string, string | undefined> = { ...process.env, HOME: home };
+  delete nakedEnv.HUMANAGENT_HOME;
 
+  type ServeProcess = ReturnType<typeof spawn>;
   const serve = async (): Promise<{
-    readonly process: {
-      readonly stdout: { on(event: 'data', listener: (chunk: Uint8Array) => void): unknown };
-      readonly once: {
-        (event: 'error', listener: (error: Error) => void): unknown;
-        (event: 'exit', listener: (code: number | null) => void): unknown;
-      };
-      readonly exitCode: number | null;
-      kill(signal?: string): boolean;
-    };
+    readonly process: ServeProcess;
     readonly stderrText: () => string;
     readonly url: string;
     readonly memoryRoot: string;
@@ -2298,14 +2316,14 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
       cli,
       'serve',
       '--workspace',
-      workspace,
+      'workspace',
       '--control-root',
-      controlRoot,
+      'control',
       '--provider',
       'fake',
       '--port',
       '0',
-    ], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'] });
+    ], { cwd: initialCwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (chunk: Uint8Array) => {
       stderr += String(chunk);
@@ -2335,18 +2353,44 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
   };
 
   const stop = async (runtime: Awaited<ReturnType<typeof serve>>): Promise<void> => {
+    if (runtime.process.exitCode !== null) return;
     runtime.process.kill('SIGTERM');
     await new Promise<void>((resolve) => {
-      if (runtime.process.exitCode !== null) {
-        resolve();
-        return;
-      }
       runtime.process.once('exit', () => resolve());
     });
   };
 
+  const waitForExit = async (child: ServeProcess): Promise<number | null> => {
+    if (child.exitCode !== null) return child.exitCode;
+    return new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+  };
+
+  const runCliProcess = (
+    args: readonly string[],
+    env: Readonly<Record<string, string | undefined>>,
+    cwd: string,
+  ): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`CLI ${args.join(' ')} timed out: stdout=${stdout.slice(-800)}; stderr=${stderr.slice(-800)}`));
+    }, 30_000);
+    child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timeout);
+      resolve({ code, stdout, stderr });
+    });
+  });
+
   const readMemoryContext = async (
-    runtime: Awaited<ReturnType<typeof serve>>,
+    runtime: { readonly url: string; readonly auth: ServeAuth; readonly stderrText: () => string },
     taskId: string,
     operationId: string,
   ): Promise<{
@@ -2372,126 +2416,214 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
     return context as NonNullable<typeof context>;
   };
 
-  const authReady = async (runtime: Awaited<ReturnType<typeof serve>>): Promise<void> => {
-    runtime.auth = await authenticateServe(controlRoot, workspace, runtime.url);
+  const authReady = async (
+    runtime: Awaited<ReturnType<typeof serve>>,
+    suppliedCode?: string,
+  ): Promise<void> => {
+    runtime.auth = await authenticateServe(controlRoot, workspace, runtime.url, suppliedCode);
   };
 
-  const first = await serve();
-  await authReady(first);
-  let taskId: string;
+  let restartedPid: number | undefined;
+  let first: Awaited<ReturnType<typeof serve>> | undefined;
+  let second: Awaited<ReturnType<typeof serve>> | undefined;
   try {
-    const duplicate = spawn(process.execPath, [
-      cli,
-      'serve',
-      '--workspace',
-      workspace,
+    const productUseRun = await runCliProcess([
+      'product',
+      'use',
       '--control-root',
       controlRoot,
-      '--mode',
-      'fake',
-      '--port',
-      '0',
-      '--json',
-    ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
-    let duplicateStderr = '';
-    duplicate.stderr.on('data', (chunk: Uint8Array) => { duplicateStderr += String(chunk); });
-    const duplicateLaunch = await new Promise<{ readonly url: string }>((resolve, reject) => {
-      let output = '';
-      // The takeover serve cannot start until the previous owner finishes its
-      // graceful shutdown, whose ceiling is now 10s. 532 measured takeover
-      // iterations show the previous owner's SIGTERM-to-exit tail at p99
-      // 2385ms under gate plus 48-96 busy-loop load and up to 8788ms under
-      // heavy oversubscription, so a legitimate takeover can outlast the old
-      // 5s startup budget. This budget only covers the first serve that has to
-      // wait for the previous owner; it does not weaken the takeover assertion.
-      const timeout = setTimeout(() => reject(new Error(`takeover serve startup timed out: ${output}; stderr=${duplicateStderr}`)), 20_000);
-      duplicate.stdout.on('data', (chunk: Uint8Array) => {
-        output += String(chunk);
-        try {
-          const parsed = JSON.parse(output.trim()) as { readonly url?: string };
-          if (!parsed.url) return;
-          clearTimeout(timeout);
-          resolve({ url: parsed.url });
-        } catch {
-          // Wait for the complete startup object.
-        }
-      });
-      duplicate.once('error', reject);
-      duplicate.once('exit', (code) => reject(new Error(`takeover serve exited before startup (${String(code)}): ${output}; stderr=${duplicateStderr}`)));
-    });
-    assert.match(duplicateLaunch.url, /^http:\/\/(?:127\.0\.0\.1:\d+|\[::1\]:\d+)$/);
-    const duplicateAuth = await authenticateServe(controlRoot, workspace, duplicateLaunch.url);
-    const originalExitCode = await new Promise<number | null>((resolve) => {
-      if (first.process.exitCode !== null) {
-        resolve(first.process.exitCode);
-        return;
-      }
-      first.process.once('exit', (code) => resolve(code));
-    });
-    assert.equal(originalExitCode, 0);
+    ], nakedEnv, unrelatedCwd);
+    assert.equal(productUseRun.code, 0, productUseRun.stderr.slice(-800));
+    const productUse = JSON.parse(productUseRun.stdout.trim()) as {
+      readonly command: string;
+      readonly controlRoot: string;
+    };
+    assert.equal(productUse.command, 'product use');
+    assert.equal(productUse.controlRoot, controlRoot);
+    const preServePairRun = await runCliProcess(['pair'], nakedEnv, unrelatedCwd);
+    assert.equal(preServePairRun.code, 0, preServePairRun.stderr.slice(-800));
+    const preServePair = JSON.parse(preServePairRun.stdout.trim()) as {
+      readonly command: string;
+      readonly code: string;
+      readonly expiresAt: string;
+    };
+    assert.equal(preServePair.command, 'pair');
+    assert.equal(typeof preServePair.code, 'string');
+    assert.ok(preServePair.code.length > 0);
+    assert.equal(await readDaemonLease(paths), undefined, 'pair before serve must not create a daemon lease');
 
-    const created = await duplicateAuth.request(`${duplicateLaunch.url}/api/tasks`, {
+    first = await serve();
+    await authReady(first, preServePair.code);
+    const originalLease = await readDaemonLease(paths);
+    if (!originalLease) throw new Error('first serve did not publish a daemon lease');
+    assert.equal(originalLease.readyAt !== undefined, true);
+    assert.ok(originalLease.controlEndpoint);
+
+    const created = await first.auth.request(`${first.url}/api/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'rooted memory before restart' }),
     });
     assert.equal(created.status, 201);
     const task = await created.json() as { readonly taskId: { readonly value: string } };
-    taskId = task.taskId.value;
-    duplicate.kill('SIGTERM');
-    if (duplicate.exitCode === null) await new Promise<void>((resolve) => duplicate.once('exit', () => resolve()));
-  } finally {
+    const taskId = task.taskId.value;
+    const grantPath = `${first.url}/api/tasks/${encodeURIComponent(taskId)}/control/grant`;
+    const grantRead = await first.auth.request(grantPath);
+    assert.equal(grantRead.status, 200);
+    const grantReadback = await grantRead.json() as {
+      readonly readback: { readonly grant?: { readonly revision?: number } };
+    };
+    const granted = await first.auth.request(grantPath, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        requestId: 'cli-restart-grant',
+        expectedRevision: grantReadback.readback.grant?.revision ?? 0,
+        capability: { actionId: 'task.execute', capabilities: ['provider.execution'] },
+      }),
+    });
+    assert.equal(granted.status, 200);
+    const grantedReceipt = await granted.json() as {
+      readonly readback: { readonly grant?: { readonly state?: string } };
+    };
+    assert.equal(grantedReceipt.readback.grant?.state, 'granted');
+
+    const duplicate = await runCliProcess([], nakedEnv, unrelatedCwd);
+    assert.equal(duplicate.code, 0);
+    const duplicateReceipt = JSON.parse(duplicate.stdout.trim()) as {
+      readonly command: string;
+      readonly status: string;
+      readonly controlRoot: string;
+      readonly workspace: string;
+      readonly projectKey: string;
+      readonly url: string;
+      readonly pairingCommand: string;
+    };
+    assert.equal(duplicateReceipt.command, 'serve');
+    assert.equal(duplicateReceipt.status, 'already-running');
+    assert.equal(duplicateReceipt.controlRoot, controlRoot);
+    assert.equal(duplicateReceipt.workspace, workspace);
+    assert.equal(duplicateReceipt.projectKey, paths.projectKey);
+    assert.equal(duplicateReceipt.url, first.url);
+    assert.equal(duplicateReceipt.pairingCommand, formatPairingCommand({ controlRoot }));
+    const retainedLease = await readDaemonLease(paths);
+    if (!retainedLease) throw new Error('ordinary duplicate launch removed the original daemon lease');
+    assert.equal(retainedLease.leaseId, originalLease.leaseId);
+    assert.equal(retainedLease.generation, originalLease.generation);
+    assert.equal(retainedLease.pid, originalLease.pid);
+    assert.equal(retainedLease.processStartToken, originalLease.processStartToken);
+    assert.deepEqual(retainedLease.controlEndpoint, originalLease.controlEndpoint);
+    assert.equal(first.process.exitCode, null, 'ordinary duplicate launch must leave the owner alive');
+    const existingSession = await first.auth.request(`${first.url}/api/tasks`);
+    assert.equal(existingSession.status, 200, 'ordinary duplicate launch must not invalidate the existing session');
+
     await stop(first);
-  }
+    const rooted = await DeterministicMemoryBackend.fromPersistence(new RootedMemoryPersistence({
+      project: join(paths.memoryRoot, 'project'),
+      global: paths.globalMemoryRoot,
+    }));
+    await rooted.addContextEntry({
+      scope: { kind: 'task', organId: id('organ', 'humanagent-ui'), taskId: id('task', taskId) },
+      sourceRef,
+      sourceDigest,
+      text: 'rooted memory available after CLI restart',
+      layer: 'current',
+      summary: 'rooted memory available after CLI restart',
+    });
 
-  const rooted = await DeterministicMemoryBackend.fromPersistence(new RootedMemoryPersistence({
-    project: join(paths.memoryRoot, 'project'),
-    global: paths.globalMemoryRoot,
-  }));
-  await rooted.addContextEntry({
-    scope: { kind: 'task', organId: id('organ', 'humanagent-ui'), taskId: id('task', taskId) },
-    sourceRef,
-    sourceDigest,
-    text: 'rooted memory available after CLI restart',
-    layer: 'current',
-    summary: 'rooted memory available after CLI restart',
-  });
-
-  const second = await serve();
-  await authReady(second);
-  try {
+    second = await serve();
+    await authReady(second);
     assert.equal(second.memoryRoot, first.memoryRoot);
-    const started = await second.auth.request(`${second.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ mode: 'fake', prompt: 'read rooted memory after restart' }),
-    });
-    assert.equal(started.status, 202);
-    const operation = await started.json() as { readonly operationId: string; readonly executionEpoch: number };
-    const context = await readMemoryContext(second, taskId, operation.operationId);
-    assert.equal(context.bindingId, `memory-binding:${taskId}`);
-    assert.equal(context.executionEpoch, operation.executionEpoch);
-    assert.equal(context.entries?.some((entry) => entry.sourceRef === sourceRef), true);
-  } finally {
-    await stop(second);
-  }
+    const secondLease = await readDaemonLease(paths);
+    if (!secondLease) throw new Error('second serve did not publish a daemon lease');
+    const restartPairRun = await runCliProcess(['pair'], nakedEnv, unrelatedCwd);
+    assert.equal(restartPairRun.code, 0, restartPairRun.stderr.slice(-800));
+    const restartPair = JSON.parse(restartPairRun.stdout.trim()) as { readonly code: string };
 
-  const third = await serve();
-  await authReady(third);
-  try {
-    const started = await third.auth.request(`${third.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
+    // The formal restart is naked and runs from an unrelated cwd. It must
+    // resolve the declared product/workspace and retain the original owner's
+    // already-resolved canonical paths, never the relative launch flags.
+    const restart = await runCliProcess(['restart'], nakedEnv, unrelatedCwd);
+    assert.equal(restart.code, 0, restart.stderr.slice(-800));
+    const completion = JSON.parse(restart.stdout.trim()) as {
+      readonly requestId: string;
+      readonly controlRoot: string;
+      readonly workspace: string;
+      readonly projectKey: string;
+      readonly previous: { readonly leaseId: string; readonly generation: number; readonly pid: number };
+      readonly current: {
+        readonly leaseId: string;
+        readonly generation: number;
+        readonly pid: number;
+        readonly controlEndpoint: { readonly host: string; readonly port: number };
+      };
+    };
+    assert.equal(completion.controlRoot, controlRoot);
+    assert.equal(completion.workspace, workspace);
+    assert.equal(completion.projectKey, paths.projectKey);
+    assert.equal(completion.previous.leaseId, secondLease.leaseId);
+    assert.equal(completion.previous.generation, secondLease.generation);
+    assert.equal(completion.previous.pid, second.process.pid);
+    assert.equal(completion.current.generation, secondLease.generation + 1);
+    assert.equal(await waitForExit(second.process), 0);
+
+    const replacementLease = await readDaemonLease(paths);
+    if (!replacementLease) throw new Error('formal restart did not publish a replacement daemon lease');
+    assert.equal(replacementLease.pid, completion.current.pid);
+    assert.equal(replacementLease.restart?.requestId, completion.requestId);
+    const retainedStartupArgs = replacementLease.startup?.args ?? [];
+    assert.equal(retainedStartupArgs.includes('--restart-request'), false);
+    assert.equal(retainedStartupArgs.includes(completion.requestId), false);
+    assert.equal(retainedStartupArgs.includes('--control-root'), true);
+    assert.equal(retainedStartupArgs.includes('--workspace'), true);
+    const retainedControlRoot = retainedStartupArgs[retainedStartupArgs.indexOf('--control-root') + 1];
+    const retainedWorkspace = retainedStartupArgs[retainedStartupArgs.indexOf('--workspace') + 1];
+    assert.equal(retainedControlRoot, controlRoot, 'retained control root must be canonical');
+    assert.equal(retainedWorkspace, workspace, 'retained workspace must be canonical');
+    restartedPid = replacementLease.pid;
+
+    const endpoint = completion.current.controlEndpoint;
+    const restartedUrl = `http://${endpoint.host === '::1' ? '[::1]' : endpoint.host}:${endpoint.port}`;
+    const survivingSession = await fetch(`${restartedUrl}/api/auth/session`, {
+      headers: { cookie: second.auth.cookie },
+    });
+    assert.equal(survivingSession.status, 200);
+    const survivingSessionBody = await survivingSession.json() as { readonly authenticated?: boolean };
+    assert.equal(survivingSessionBody.authenticated, true, 'an existing session must survive formal restart');
+    const restartedAuth = await authenticateServe(controlRoot, workspace, restartedUrl, restartPair.code);
+    const started = await restartedAuth.request(`${restartedUrl}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ mode: 'fake', prompt: 'read rooted memory after another restart' }),
+      body: JSON.stringify({ mode: 'fake', prompt: 'read rooted memory after formal restart' }),
     });
-    assert.equal(started.status, 202);
-    const operation = await started.json() as { readonly operationId: string; readonly executionEpoch: number };
-    const context = await readMemoryContext(third, taskId, operation.operationId);
+    const startedText = await started.text();
+    assert.equal(started.status, 202, startedText.slice(0, 1_000));
+    const operation = JSON.parse(startedText) as { readonly operationId: string; readonly executionEpoch: number };
+    const context = await readMemoryContext({ url: restartedUrl, auth: restartedAuth, stderrText: () => '' }, taskId, operation.operationId);
     assert.equal(context.bindingId, `memory-binding:${taskId}`);
     assert.equal(context.executionEpoch, operation.executionEpoch);
     assert.equal(context.entries?.some((entry) => entry.sourceRef === sourceRef), true);
   } finally {
-    await stop(third);
+    if (first) await stop(first).catch(() => undefined);
+    if (second) await stop(second).catch(() => undefined);
+    if (restartedPid !== undefined) {
+      try {
+        process.kill(restartedPid, 'SIGTERM');
+        await waitFor(() => assert.equal((() => {
+          try {
+            process.kill(restartedPid!, 0);
+            return true;
+          } catch (error) {
+            return (error as { code?: string }).code === 'EPERM';
+          }
+        })(), false), 5_000);
+      } catch {
+        // The replacement may already be gone after a failed restart.
+      }
+    }
+    await rm(fixture.root, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+    await rm(unrelatedCwd, { recursive: true, force: true });
   }
 });
 

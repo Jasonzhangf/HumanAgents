@@ -30,13 +30,33 @@ const pairCard = document.querySelector('[data-pair-card]')
 const form = document.querySelector('[data-pair-form]')
 const codeInput = document.querySelector('[data-pair-code]')
 const submitButton = document.querySelector('[data-pair-submit]')
+const pairCommand = document.querySelector('[data-pair-command]')
 const detailHost = document.querySelector('[data-auth-detail-host]')
 const errorCard = document.querySelector('[data-auth-error]')
 const errorHeading = document.querySelector('[data-auth-error-heading]')
 const errorImpact = document.querySelector('[data-auth-error-impact]')
 const errorRetry = document.querySelector('[data-auth-error-retry]')
+const errorReturn = document.querySelector('[data-auth-error-return]')
+const errorExit = document.querySelector('[data-auth-error-exit]')
 
 const protocolFooter = '配对码属于控制面：它只经 POST /api/auth/pair 交给运行时，不会写进任何业务请求。'
+let pairingCommand = ''
+
+errorExit.href = entryTarget
+
+function setPairingCommand(command) {
+  if (typeof command !== 'string' || command.trim() === '') return false
+  pairingCommand = command
+  pairCommand.textContent = command
+  return true
+}
+
+function retryInstruction() {
+  if (pairingCommand) {
+    return `重试：在运行 HumanAgent 的机器上重新执行 ${pairingCommand}，再把新的配对码填回上面的输入框。`
+  }
+  return '重试：在运行 HumanAgent 的机器上重新获取配对码，再把新的配对码填回上面的输入框。'
+}
 
 function setBanner(tone, text) {
   statusBanner.dataset.tone = tone
@@ -65,6 +85,7 @@ function clearTypedError() {
   errorCard.hidden = true
   errorCard.dataset.errorKind = ''
   errorRetry.hidden = true
+  codeInput.removeAttribute('aria-invalid')
   clearNode(detailHost)
 }
 
@@ -84,14 +105,15 @@ function showPairFailure(error) {
   errorHeading.textContent = '配对未完成'
   if (isPairRejection(error)) {
     errorImpact.textContent = '这次配对码没有被接受，请重新获取配对码后再试。'
-    errorRetry.textContent = '重试：在运行 HumanAgent 的机器上重新执行 humanagent pair，再把新的配对码填回上面的输入框。'
+    errorRetry.textContent = retryInstruction()
   } else {
     errorImpact.textContent = '这次配对请求没有完成，运行时没有给出配对结果。'
-    errorRetry.textContent = '重试：确认网络和运行中的 HumanAgent 都正常后，再重新提交配对码；这次请求的确切信息在技术详情里。'
+    errorRetry.textContent = `重试：确认网络和运行中的 HumanAgent 都正常后，再重新提交配对码；这次请求的确切信息在技术详情里。${pairingCommand ? ` 当前配对命令：${pairingCommand}` : ''}`
   }
   errorImpact.hidden = false
   errorRetry.dataset.authErrorRetry = 'true'
   errorRetry.hidden = false
+  codeInput.setAttribute('aria-invalid', 'true')
   errorCard.dataset.errorKind = 'pair'
   errorCard.dataset.tone = 'danger'
   errorCard.hidden = false
@@ -111,7 +133,6 @@ async function submitPairing(code) {
   } catch (error) {
     setBanner('danger', '配对未完成')
     showPairFailure(error)
-    codeInput.value = ''
     codeInput.focus()
     return false
   } finally {
@@ -122,6 +143,12 @@ async function submitPairing(code) {
 form.addEventListener('submit', (event) => {
   event.preventDefault()
   void submitPairing(codeInput.value.trim())
+})
+
+errorReturn.addEventListener('click', () => {
+  clearTypedError()
+  setBanner('warning', '请修改或重新填写配对码，再提交。')
+  codeInput.focus()
 })
 
 async function boot() {
@@ -141,6 +168,7 @@ async function boot() {
   setBanner('warning', '正在检查浏览器会话…')
   try {
     const session = await api.authSession()
+    setPairingCommand(session?.pairingCommand)
     if (session?.authenticated === true) {
       sessionState.textContent = `已配对 · 到期 ${formatTime(session.expiresAt)}`
       setBanner('success', '这台浏览器已经配对，正在回到刚才请求的那个页面…')
@@ -149,6 +177,7 @@ async function boot() {
     }
     sessionState.textContent = '未配对'
     setBanner('warning', '这台浏览器还没有配对会话。填入一次性配对码即可继续。')
+    if (!pairingCommand) pairCommand.textContent = '配对命令暂不可用'
     // The pairing card stays hidden until the session read says this browser is
     // unpaired. A paired browser following a stale pairing link is redirected
     // without ever seeing a code field it does not need.
@@ -158,6 +187,7 @@ async function boot() {
   } catch (error) {
     sessionState.textContent = '会话检查失败'
     setBanner('danger', '无法读取浏览器会话，暂时无法确认这台浏览器是否已配对。')
+    pairCommand.textContent = '配对命令暂不可用'
     renderDetail({ entries: typedEntries(error) })
     // The session could not be read, so pairing is the only remedy left; offer
     // it instead of leaving the page with no action.

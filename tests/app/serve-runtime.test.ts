@@ -553,6 +553,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
   const runtime = await startUiRuntime({
     mode: 'fake',
     accessControl,
+    productRoot: root,
     organId: id('organ', 'humanagent-ui'),
     binding,
     port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed' }),
@@ -676,6 +677,7 @@ test('confirmed requirement preserves non-success provider closures through orch
     const runtime = await startUiRuntime({
       mode: 'fake',
       accessControl: await accessControlFor(root),
+      productRoot: root,
       organId: id('organ', 'humanagent-ui'),
       binding,
       port: new FakeReplayExecutionRuntimePort({
@@ -752,6 +754,7 @@ test('same-task execution epochs commit epoch-scoped checkpoint ids', async () =
   const runtime = await startUiRuntime({
     mode: 'fake',
     accessControl: await accessControlFor(root),
+    productRoot: root,
     organId: id('organ', 'humanagent-ui'),
     binding,
     port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),

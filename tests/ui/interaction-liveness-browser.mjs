@@ -185,11 +185,12 @@ async function startHarness({ scenario, root }) {
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('liveness-e2e', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0];
   const runtime = await startUiRuntime({
     mode: 'fake',
+    productRoot: root,
     accessControl,
     organId,
     binding,

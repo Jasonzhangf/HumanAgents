@@ -6,7 +6,10 @@ export {
   readDaemonLease,
   recordDaemonRestartFailure,
   recordDaemonRestartTransition,
+  runSupervisorServeStartup,
   runSupervisorStartup,
+  SERVE_OWNER,
+  SUPERVISOR_RESTART_REQUEST_OPTION,
   waitForDaemonLeaseHandoff,
 } from './supervisor.js';
 export type {
@@ -23,6 +26,8 @@ export type {
   SupervisorRestartReceipt,
   SupervisorRestartFailure,
   SupervisorRestartTransition,
+  SupervisorServeStartupOptions,
+  SupervisorServeStartupResult,
   SupervisorStartup,
   SupervisorStartupDeclaration,
   SupervisorStartupOptions,

@@ -1872,7 +1872,7 @@ async function buildResumeService(
     credentialPath: join(fixture.root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('cold-resume-http', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   const launchProvider: ProviderConfig = { source: 'http', provider: 'http', binding: 'cold-resume-binding',
@@ -1882,7 +1882,7 @@ async function buildResumeService(
     { agentId: 'cold-resume-planner', roleId: 'orchestration', source: 'agent', provider: launchProvider },
   ];
   const launched = productionMemory ? await startUiRuntime({
-    mode: 'rcc', organId, binding: serviceBinding, port: serviceOptions.port,
+    mode: 'rcc', productRoot: paths!.controlRoot, organId, binding: serviceBinding, port: serviceOptions.port,
     checkpointRoot: fixture.root, evidenceRoot: fixture.artifactsRoot, uiRoot: join(fixture.root, 'ui'),
     portNumber: 0, host: '127.0.0.1', accessControl, memory: serviceOptions.memory,
     runtimePaths: paths,
@@ -1900,6 +1900,7 @@ async function buildResumeService(
   const dispatcher = createUiRuntimeRequestDispatcher({
     service,
     accessControl,
+    productRoot: fixture.root,
     uiRoot: join(fixture.root, 'ui'),
     isClosing: () => false,
   });

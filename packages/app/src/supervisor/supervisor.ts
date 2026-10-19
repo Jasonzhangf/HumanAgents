@@ -14,6 +14,8 @@ import { deriveSupervisorToken } from '../ui-runtime/access-control.js';
 
 const LEASE_SCHEMA_VERSION = 1 as const;
 const PROCESS_START_TOKEN = `node:${randomUUID()}`;
+export const SERVE_OWNER = 'humanagent.app.serve';
+export const SUPERVISOR_RESTART_REQUEST_OPTION = '--restart-request';
 
 export interface SupervisorFailureRecord {
   readonly phase: string;
@@ -162,6 +164,23 @@ export interface SupervisorStage {
 export interface SupervisorStartupOptions {
   readonly lease?: AcquireDaemonLeaseOptions;
 }
+
+export interface SupervisorServeStartupOptions {
+  readonly ownerId?: string;
+  readonly startup?: SupervisorStartupDeclaration;
+  readonly restartRequest?: string;
+  readonly restartStop?: SupervisorTakeoverStopOptions;
+}
+
+export type SupervisorServeStartupResult =
+  | {
+      readonly status: 'started';
+      readonly startup: SupervisorStartup;
+    }
+  | {
+      readonly status: 'already-running';
+      readonly lease: SupervisorLeaseRecord;
+    };
 
 export interface SupervisorStartup {
   readonly paths: RuntimePaths;
@@ -548,6 +567,83 @@ function leaseOwnedError(record: SupervisorLeaseRecord): AppLifecycleError {
   );
 }
 
+function serveOwnerMismatchError(record: SupervisorLeaseRecord): AppLifecycleError {
+  return supervisorError(
+    'daemon-serve.owner-mismatch',
+    `daemon lease ${record.leaseId} belongs to ${record.ownerId}, not ${SERVE_OWNER}`,
+    'inspect the active daemon owner before starting another serve process',
+    record.ownerId,
+  );
+}
+
+function serveNotReadyError(record: SupervisorLeaseRecord): AppLifecycleError {
+  return supervisorError(
+    'daemon-serve.not-ready',
+    `daemon owner ${record.leaseId} has not published a ready control endpoint`,
+    'retry after the active daemon reports ready',
+    record.ownerId,
+  );
+}
+
+function serveRestartInProgressError(record: SupervisorLeaseRecord): AppLifecycleError {
+  return supervisorError(
+    'daemon-serve.restart-in-progress',
+    `daemon restart request ${record.restart?.requestId ?? 'unknown'} is pending for lease ${record.leaseId}`,
+    'wait for the formal daemon restart to finish before launching another serve process',
+    record.ownerId,
+  );
+}
+
+function serveRecoveryRequiredError(record: SupervisorLeaseRecord): AppLifecycleError {
+  return supervisorError(
+    'daemon-serve.recovery-required',
+    `daemon lease ${record.leaseId} belongs to process ${record.pid}, which is no longer running`,
+    'run the formal restart to recover the exited owner before starting another serve process',
+    record.ownerId,
+  );
+}
+
+function restartMarkerMismatchError(record: SupervisorLeaseRecord, requestId: string): AppLifecycleError {
+  return supervisorError(
+    'daemon-restart.request-mismatch',
+    `restart request ${requestId} does not match a pending transition for lease ${record.leaseId}`,
+    'read the active daemon lease and retry the formal restart from its current owner',
+    record.ownerId,
+  );
+}
+
+function restartTargetMismatchError(record: SupervisorLeaseRecord, requestId: string): AppLifecycleError {
+  return supervisorError(
+    'daemon-restart.target-mismatch',
+    `restart request ${requestId} does not target the selected replacement entry`,
+    'restart from the recorded launcher entry before replacing the daemon',
+    record.ownerId,
+  );
+}
+
+function assertRestartMarker(
+  record: SupervisorLeaseRecord,
+  requestId: string,
+  startup: SupervisorStartupDeclaration | undefined,
+): void {
+  const transition = record.restart;
+  if (
+    transition === undefined
+    || transition.requestId !== requestId
+    || transition.completedAt !== undefined
+    || transition.failure !== undefined
+    || record.ownerId !== SERVE_OWNER
+    || transition.previousLeaseId !== record.leaseId
+    || transition.previousGeneration !== record.generation
+    || transition.previousProcessStartToken !== record.processStartToken
+  ) {
+    throw restartMarkerMismatchError(record, requestId);
+  }
+  if (startup === undefined || transition.targetEntryPath !== startup.source.entryPath) {
+    throw restartTargetMismatchError(record, requestId);
+  }
+}
+
 function newLeaseRecord(
   paths: RuntimePaths,
   generation: number,
@@ -912,6 +1008,184 @@ export async function readDaemonLease(paths: RuntimePaths): Promise<SupervisorLe
   return readLeaseRecord(paths);
 }
 
+interface ServeLeaseReplacement {
+  readonly kind: 'replace';
+  readonly existing: SupervisorLeaseRecord;
+}
+
+type ServeLeaseOutcome =
+  | { readonly kind: 'acquired'; readonly lease: SupervisorLease }
+  | { readonly kind: 'already-running'; readonly record: SupervisorLeaseRecord };
+
+function previousCloseUnverifiedError(record: SupervisorLeaseRecord): AppLifecycleError {
+  return supervisorError(
+    'daemon-takeover.previous-close-unverified',
+    `previous owner ${record.leaseId} did not publish a clean disposal receipt`,
+    'inspect the previous owner cleanup failure and recovery responsibility before starting another serve process',
+    record.ownerId,
+  );
+}
+
+function commitServeLease(
+  paths: RuntimePaths,
+  generation: number,
+  ownerId: string,
+  startup: SupervisorStartupDeclaration | undefined,
+  restart: SupervisorRestartTransition | undefined,
+  takeover?: SupervisorTakeoverRecord,
+): SupervisorLease {
+  const record = newLeaseRecord(paths, generation, {
+    ownerId,
+    ...(startup === undefined ? {} : { startup }),
+    ...(restart === undefined ? {} : { restart }),
+    ...(takeover === undefined ? {} : { takeover }),
+  });
+  return createLease(paths, record);
+}
+
+async function decideServeLease(
+  paths: RuntimePaths,
+  ownerId: string,
+  startup: SupervisorStartupDeclaration | undefined,
+  restartRequest: string | undefined,
+  restartStop: SupervisorTakeoverStopOptions | undefined,
+): Promise<ServeLeaseOutcome> {
+  const leasePath = daemonLeasePath(paths);
+  const decision = await withLeaseGuard(leasePath, async (): Promise<ServeLeaseOutcome | ServeLeaseReplacement> => {
+    const current = await readLeaseRecord(paths);
+    if (restartRequest !== undefined) {
+      if (current === undefined) {
+        throw supervisorError(
+          'daemon-restart.request-mismatch',
+          `restart request ${restartRequest} has no active daemon lease`,
+          'read the active daemon lease and retry the formal restart from its current owner',
+          SERVE_OWNER,
+        );
+      }
+      assertRestartMarker(current, restartRequest, startup);
+      if (current.disposedAt) {
+        if (hasCleanupFailure(current.failure)) throw previousCloseUnverifiedError(current);
+        const lease = commitServeLease(paths, current.generation + 1, ownerId, startup, current.restart);
+        await writeLeaseRecord(paths, lease.record);
+        return { kind: 'acquired', lease };
+      }
+      return { kind: 'replace', existing: current };
+    }
+
+    if (current === undefined || current.disposedAt) {
+      if (current !== undefined && current.restart !== undefined && current.restart.completedAt === undefined && current.restart.failure === undefined) {
+        throw serveRestartInProgressError(current);
+      }
+      if (current !== undefined && hasCleanupFailure(current.failure)) throw previousCloseUnverifiedError(current);
+      const lease = commitServeLease(
+        paths,
+        current === undefined ? 1 : current.generation + 1,
+        ownerId,
+        startup,
+        undefined,
+      );
+      await writeLeaseRecord(paths, lease.record);
+      return { kind: 'acquired', lease };
+    }
+
+    if (current.ownerId !== SERVE_OWNER) throw serveOwnerMismatchError(current);
+    if (current.restart !== undefined && current.restart.completedAt === undefined && current.restart.failure === undefined) {
+      throw serveRestartInProgressError(current);
+    }
+    if (hasCleanupFailure(current.failure)) throw previousCloseUnverifiedError(current);
+    if (!processIsAlive(current.pid)) throw serveRecoveryRequiredError(current);
+    if (current.readyAt === undefined || current.controlEndpoint === undefined) throw serveNotReadyError(current);
+    return { kind: 'already-running', record: current };
+  }, { allowStaleTakeover: restartRequest !== undefined });
+
+  if (decision.kind !== 'replace') return decision;
+
+  const existing = decision.existing;
+  let termination: TakeoverTerminationReceipt;
+  try {
+    termination = await stopActiveDaemon(paths, existing, restartStop ?? {});
+  } catch (error) {
+    await recordDaemonRestartFailure(paths, restartRequest!, {
+      errorCode: error instanceof AppLifecycleError ? error.code : 'daemon-takeover.failed',
+      ownerId: error instanceof AppLifecycleError ? error.ownerId : ownerId,
+      nextAction: error instanceof AppLifecycleError
+        ? error.nextAction
+        : 'inspect the previous daemon and retry the formal restart after confirming the replacement owner is stopped',
+      message: error instanceof Error ? error.message : String(error),
+      occurredAt: new Date().toISOString(),
+    }).catch(() => undefined);
+    throw error;
+  }
+
+  return withLeaseGuard(leasePath, async (): Promise<ServeLeaseOutcome> => {
+    const latest = await readLeaseRecord(paths);
+    if (
+      latest === undefined
+      || latest.leaseId !== existing.leaseId
+      || latest.generation !== existing.generation
+      || latest.processStartToken !== existing.processStartToken
+    ) {
+      throw supervisorError(
+        'daemon-lease-stale',
+        'daemon lease changed during the formal restart',
+        'read the current daemon owner before retrying the formal restart',
+      );
+    }
+    assertRestartMarker(latest, restartRequest!, startup);
+    if (
+      hasCleanupFailure(existing.failure)
+      || hasCleanupFailure(latest.failure)
+      || (existing.startup !== undefined && termination.termination !== 'already-dead' && latest.disposedAt === undefined)
+    ) {
+      throw previousCloseUnverifiedError(existing);
+    }
+    const lease = commitServeLease(
+      paths,
+      latest.generation + 1,
+      ownerId,
+      startup,
+      latest.restart,
+      {
+        previousLeaseId: existing.leaseId,
+        previousGeneration: existing.generation,
+        reason: `formal restart request ${restartRequest}`,
+        detectedAt: new Date().toISOString(),
+        ...termination,
+        ...((latest.failure ?? existing.failure) === undefined ? {} : { previousFailure: latest.failure ?? existing.failure }),
+      },
+    );
+    await writeLeaseRecord(paths, lease.record);
+    return { kind: 'acquired', lease };
+  }, { allowStaleTakeover: true });
+}
+
+export async function runSupervisorServeStartup(
+  paths: RuntimePaths,
+  createStages: (lease: SupervisorLease) => Promise<readonly SupervisorStage[]> | readonly SupervisorStage[],
+  options: SupervisorServeStartupOptions = {},
+): Promise<SupervisorServeStartupResult> {
+  const leasePath = daemonLeasePath(paths);
+  await mkdir(dirname(leasePath), { recursive: true });
+  const decision = await decideServeLease(
+    paths,
+    options.ownerId ?? SERVE_OWNER,
+    options.startup,
+    options.restartRequest,
+    options.restartStop,
+  );
+  if (decision.kind === 'already-running') {
+    return { status: 'already-running', lease: decision.record };
+  }
+  let stages: readonly SupervisorStage[];
+  try {
+    stages = await createStages(decision.lease);
+  } catch (error) {
+    const failure = await failAndCleanup(paths, decision.lease, error, []);
+    throw failure.error;
+  }
+  return { status: 'started', startup: await startSupervisorWithLease(paths, decision.lease, stages) };
+}
+
 export async function assertDaemonLeaseIdentity(paths: RuntimePaths, record: SupervisorLeaseRecord): Promise<void> {
   if (!processIsAlive(record.pid)) {
     throw supervisorError(
@@ -1048,8 +1322,7 @@ async function failAndCleanup(paths: RuntimePaths, lease: SupervisorLease, error
   return { error: wrapped, receipt };
 }
 
-export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly SupervisorStage[], options: SupervisorStartupOptions = {}): Promise<SupervisorStartup> {
-  const lease = await acquireDaemonLease(paths, options.lease);
+async function startSupervisorWithLease(paths: RuntimePaths, lease: SupervisorLease, stages: readonly SupervisorStage[]): Promise<SupervisorStartup> {
   const started: SupervisorStage[] = [];
   try {
     for (const stage of stages) {
@@ -1149,4 +1422,13 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
     const failure = await failAndCleanup(paths, lease, error, started);
     throw failure.error;
   }
+}
+
+export async function runSupervisorStartup(
+  paths: RuntimePaths,
+  stages: readonly SupervisorStage[],
+  options: SupervisorStartupOptions = {},
+): Promise<SupervisorStartup> {
+  const lease = await acquireDaemonLease(paths, options.lease);
+  return startSupervisorWithLease(paths, lease, stages);
 }

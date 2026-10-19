@@ -1,0 +1,81 @@
+{
+  "id": "humanagent-pair-issuance",
+  "version": "2",
+  "meta": {
+    "title": "配对码签发：产品 root 本地直达持久凭证",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "requirementsVersion": 16,
+    "terminalContract": {
+      "success": "pairing code receipt：公开 CLI 返回 command、code 与 ISO expiresAt；不读取 workspace、lease、supervisor endpoint 或 HTTP",
+      "beforeServe": "普通签发发生在 serve 之前；只有持久凭证写入失败才失败",
+      "restart": "普通关闭和正式重启保留未过期 pending challenge；logout 的既有 generation 变更仍清除 pending challenge",
+      "oneUse": "持久化消费在凭证 mutation lock 内原子移除；同一 code 至多签发一个 session",
+      "sessions": "签发和成功配对都不旋转 session generation，不吊销同一 generation 的其他独立配对终端",
+      "failure": "typed durable issue failure：不返回 code，不创建 project manifest 或 daemon lease",
+      "controlRoot": "control-root 优先级为本次显式 --control-root → HUMANAGENT_HOME → 固定 ~/.humanagent/default-product.toml 声明 → ~/.humanagent；显式 flag 或环境已选时短路，不读取或校验低优先级声明",
+      "productSelection": "pair 只消费同一 config owner 解析出的 ProductPaths；不读取 workspace、lease、daemon owner 或 HTTP 端点，默认声明只在没有更高优先级选择时决定 root"
+    },
+    "implementationGap": "当前 CLI pair 先解析 workspace、读取 active lease 并请求 supervisor HTTP challenge；AccessControlService 的 challenge 是进程内 Map。resolveProductPaths、默认产品声明读取、持久 challenge 与本地签发尚未实现；P 承接凭证 owner，C1 待 D/P 后接线。本图是待实现候选，不证明运行时能力。"
+  },
+  "inputs": [{ "id": "pair_request", "schema": "Object" }],
+  "nodes": [
+    {
+      "id": "parse_pair_request",
+      "operator": "humanagent-pair-request-parse",
+      "operator_version": "1",
+      "inputs": ["pair_request"],
+      "output": { "id": "parsed_pair_request", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_pair_product_root",
+      "operator": "humanagent-pair-product-root-resolve",
+      "operator_version": "1",
+      "inputs": ["parsed_pair_request"],
+      "output": { "id": "pair_product_paths", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "open_credential_owner",
+      "operator": "humanagent-pair-credential-open",
+      "operator_version": "1",
+      "inputs": ["pair_product_paths"],
+      "output": { "id": "opened_pair_owner", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "issue_durable_challenge",
+      "operator": "humanagent-pair-durable-issue",
+      "operator_version": "1",
+      "inputs": ["opened_pair_owner"],
+      "output": { "id": "durable_pair_issue_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "render_pair_receipt",
+      "operator": "humanagent-pair-receipt-render",
+      "operator_version": "1",
+      "inputs": ["durable_pair_issue_result"],
+      "output": { "id": "pair_issuance_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "parse_pair_request", "to": "resolve_pair_product_root", "arc_id": "parsed_pair_request" },
+    { "from": "resolve_pair_product_root", "to": "open_credential_owner", "arc_id": "pair_product_paths" },
+    { "from": "open_credential_owner", "to": "issue_durable_challenge", "arc_id": "opened_pair_owner" },
+    { "from": "issue_durable_challenge", "to": "render_pair_receipt", "arc_id": "durable_pair_issue_result" }
+  ],
+  "outputs": ["pair_issuance_result"]
+}

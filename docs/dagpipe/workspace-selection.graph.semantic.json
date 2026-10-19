@@ -1,0 +1,9 @@
+{
+  "graph": "humanagent-workspace-selection",
+  "labels": {
+    "declare_workspace_input": "接收本次启动的 workspace 声明：显式 --workspace 或无显式选择",
+    "resolve_product_root": "按显式参数、环境、固定默认产品声明、home 的顺序解析产品 root；仅前两者都缺失时读取声明，无效声明返回类型化失败，不选择项目、不读取 daemon lease",
+    "read_declared_workspace": "读取当前产品 [project].workspace 声明，并与显式选择按固定优先级合并",
+    "validate_workspace_selection": "校验绝对路径、存在性和路径策略；产出成功选择或类型化缺失/无效结果"
+  }
+}

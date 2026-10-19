@@ -1,0 +1,9 @@
+{
+  "graph": "humanagent-serve-launch",
+  "labels": {
+    "resolve_launch_selection": "解析普通 serve 启动意图并消费已选产品 root 与 workspace；不推断 cwd、不读取 lease、不选择替换 owner",
+    "guarded_lease_decision": "在既有 supervisor lease guard 内取得或继续：无 owner 或已干净释放时提交一个新 lease；ready 的同目标活 owner 返回 already-running；其余状态返回类型化失败，不做 takeover",
+    "prepare_and_start_owner": "仅 acquired 分支在取得 lease 后调用 lazy factory、启动既有阶段并发布 endpoint；already-running 与 rejected 分支不准备 runtime、不写 lease、不安装 handler",
+    "render_launch_result": "返回唯一启动结果：started、already-running（既有 URL 与 formatter pairing command，exit 0）或保留类型化失败；普通重复启动不替换 owner"
+  }
+}

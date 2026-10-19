@@ -1,20 +1,42 @@
 {
   "id": "humanagent-auth-session",
-  "version": "2",
+  "version": "3",
   "meta": {
     "title": "浏览器配对：公开入口到已鉴权运行时（控制面配对码不是浏览器业务载荷）",
     "baseline": "11dc1e30a40c232d959ccc121d00a56735faa061",
     "designStatus": "candidate",
-    "capabilityStatus": "delivered",
-    "controlPlaneBoundary": "supervisor challenge 与 supervisor token 只属于控制面 humanagent pair -> POST /api/auth/pair/challenge 这条独立边；它们不进入浏览器，也不写入任何业务 payload。浏览器只提交一次性配对码本身。",
-    "topologyNote": "单链拓扑：每个节点单入单出，整图单源单汇，outputs 恰好一个。L2 允许节点内部任意控制流（含早退），因此 session_check 有两个互斥结果：浏览器已持有有效会话 cookie 时直接早退到 success 终态（重定向回请求的同源入口，不渲染配对表单）；未配对时进入 login_surface。这条早退不是图的分支边，而是在 meta.terminalContract.alreadyAuthenticated 显式声明的终态路径。配对结果同样不是图的分支边——同一份提交在 access-control 服务端产出两种互斥终态，浏览器据此渲染不同终态视图，两条终态收敛于同一个 render_auth_terminal 节点。所有分支结果都在 meta.terminalContract 声明，与 observation-read（单一 browser_view 承载成功与失败）和 task-liveness-display（单一 render_work_card_truth 承载连接与断开）的既有约定一致。",
+    "capabilityStatus": "partially-delivered",
+    "requirementsVersion": 16,
+    "requirements": [
+      "humanagent-pairing-cwd-and-startup-order-independent",
+      "humanagent-human-readable-semantic-layered-ux-and-necessary-display"
+    ],
+    "uiRecoveryAuthorization": "你需要提供一个退出错误的机制，当前先进行页面进入后要求配对，于是去配对，提示错误",
+    "controlPlaneBoundary": "浏览器只提交一次性配对码。CLI 直接通过既有 AccessControlService 的持久凭证 owner 签发 challenge；保留的 supervisor challenge endpoint 在既有 supervisor 校验后 await 同一 issuer，不保留第二个内存 issuer，也不是 CLI 前置条件。supervisor token 与凭证内容不进入浏览器或业务 payload。",
+    "publicSessionProjection": {
+      "endpoint": "GET /api/auth/session",
+      "field": "pairingCommand",
+      "type": "string",
+      "availability": "公开、未鉴权可读；authenticated 为 true 或 false 时都返回",
+      "producer": "packages/config/src/index.ts formatPairingCommand，由 packages/app/src/ui-runtime/server.ts 投影",
+      "consumer": "docs/ui/login.js",
+      "defaultRoot": "humanagent pair --control-root <POSIX-shell-quoted-absolute-root>",
+      "customRoot": "humanagent pair --control-root <POSIX-shell-quoted-absolute-root>",
+      "excluded": "不含 workspace 参数、凭证路径、凭证内容、token、challenge、lease 或项目选择"
+    },
+    "topologyNote": "单链拓扑：每个节点单入单出，整图单源单汇，outputs 恰好一个。节点内部承载互斥结果，终态由 meta.terminalContract 完整声明。session_check 读取现有公开 session 端点；未配对状态同时取得 pairingCommand 投影。pair_settlement 只在服务端持久消费 challenge 并签发独立浏览器会话，浏览器提交前不持有控制面 challenge。配对拒绝或请求失败后，登录节点保留输入并提供返回输入、重试与显式退出；这些恢复动作不改变服务端状态。",
+    "implementationGap": "当前 challenge 仍由 AccessControlService 进程内 Map 承载，CLI pair 仍依赖 workspace lease 与 supervisor HTTP。登录页曾显示固定命令、失败后清空输入，且没有返回输入或显式退出。本图是待实现候选；拓扑校验和 binding 不证明浏览器、CLI、持久消费或重启行为。",
     "terminalContract": {
-      "success": "authenticated_terminal_view：浏览器持有有效会话并读取已鉴权的 runtime API 与 SSE。两条互斥路径到达此终态：(a) session_check 读到有效 cookie 后早退，直接重定向回请求的同源入口；(b) 配对码有效，access-control 签发持久浏览器会话 cookie 后进入请求的入口。",
-      "alreadyAuthenticated": "authenticated_entry_redirect：已配对浏览器打开 login.html 时，session_check 读到 session.authenticated === true 并早退，把浏览器重定向回请求的同源入口；不渲染配对表单，不签发新 cookie。这是 success 终态的第一条路径，不是独立 terminal 节点。",
-      "failure": "typed_pair_failure：配对码缺失、过期或无效时，浏览器渲染运行时自己的类型化错误 code/ownerId/message/nextAction，并保留重试动作；不产生会话 cookie",
-      "unauthenticated": "login_surface：未配对浏览器读到 auth.session.missing/expired/invalid，产品壳指向真实登录页而不是留下死文案；这是提交前的入口状态，不是 terminal 节点",
-      "cancel": "配对失败后不改变服务端状态，表单保持可再次提交",
-      "blocked": "控制面没有可用 serve owner 时 humanagent pair 显式失败，浏览器保持未配对而不是伪造会话"
+      "success": "authenticated_terminal_view：浏览器持有有效会话并读取已鉴权 runtime API 与 SSE。已配对早退或有效持久 challenge 被原子消费后签发独立 session cookie，均进入请求的同源入口。",
+      "alreadyAuthenticated": "authenticated_entry_redirect：session_check 读到 session.authenticated === true 后重定向到 entryTarget；不渲染配对表单、不签发新 cookie。",
+      "unauthenticated": "login_surface：未配对浏览器显示表单，并使用 GET /api/auth/session 返回的 pairingCommand；不得从 TOML、cwd 或凭证路径推断控制根。",
+      "typedRejection": "auth.pair.invalid 或 auth.pair.expired：保留输入值，显示类型化 code/ownerId/message/nextAction；不产生 session cookie。",
+      "requestFailure": "无类型化服务端结果时报告请求未完成并保留输入；不得伪报服务端拒绝或成功。",
+      "returnToInput": "返回输入：隐藏错误卡、保留输入值并重新聚焦；表单再次提交就是下一次尝试。",
+      "retry": "重试是同一页面内的新配对尝试，不属于本 DAG 的回边；旧 challenge 已失效时允许替换输入。",
+      "exit": "暂不配对，返回：导航到已规范化的同源 entryTarget；不提交、不签发/清除 session、不触发自动登录重定向循环。",
+      "cancel": "用户关闭错误或返回时不改变服务端凭证、challenge 或 session generation。",
+      "blocked": "持久 challenge 写入失败时 CLI 返回类型化错误且不返回 code；serve 不可用不阻止 CLI 本地签发，也不得伪造浏览器会话。"
     }
   },
   "inputs": [

@@ -827,7 +827,8 @@ test('local Responses file.search fact and report survive disk projection recons
   });
   const diagnostics: Record<string, unknown> = {};
   const accessControl = await FileAccessControlService.open({ credentialPath, create: true });
-  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('file-search-test', 1).code);
+  const challenge = await accessControl.issuePairingChallenge();
+  const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   try {
     const task = firstService.createTask({ title: 'local file search', directive: 'find semantic-needle' });
@@ -960,7 +961,7 @@ test('local Responses file.search fact and report survive disk projection recons
     assert.equal(Array.isArray(report.matches), true);
     assert.match(String(report.summary), /^searched 1 file\(s\), found 1 match\(es\)$/);
     const secondAccessControl = await FileAccessControlService.open({ credentialPath, create: false });
-    const secondServer = await startUiRuntimeServer({ service: secondService, accessControl: secondAccessControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
+    const secondServer = await startUiRuntimeServer({ service: secondService, accessControl: secondAccessControl, productRoot: root, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
     try {
       const httpUrl = `${secondServer.url}/api/tasks/${task.taskId.value}/operations/${started.operationId.value}/executions/${hydratedEntry.executionEpoch}/events/${hydratedEntry.seq}/tool-output`;
       const response = await fetch(httpUrl, { headers: { cookie } });

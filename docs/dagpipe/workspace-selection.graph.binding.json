@@ -1,0 +1,13 @@
+{
+  "graph": "humanagent-workspace-selection",
+  "operator": {
+    "operator": "humanagent-workspace-selection",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "declare_workspace_input": { "ownerPath": "packages/app/src/cli.ts", "ownerRel": "packages/app/src/cli.ts" },
+    "resolve_product_root": { "ownerPath": "packages/config/src/index.ts", "ownerRel": "packages/config/src/index.ts" },
+    "read_declared_workspace": { "ownerPath": "packages/config/src/index.ts", "ownerRel": "packages/config/src/index.ts" },
+    "validate_workspace_selection": { "ownerPath": "packages/config/src/index.ts", "ownerRel": "packages/config/src/index.ts" }
+  }
+}

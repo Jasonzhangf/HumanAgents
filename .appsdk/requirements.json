@@ -377,9 +377,63 @@
         "version": 1
       },
       "version": 14
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "1. 用户可以在任意目录启动 humanagent，不影响显式大脑工作路径\n2. 任何 pair 之类的逻辑不应该和启动路径和顺序绑定，只应该和是否已经配对，是否允许多个配对终端同时运行绑定",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确新增以下两行需求；原文完整保留。未提供独立 message ID。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "pairing-recovery-launch-cwd-independent-20261019",
+        "requirement_id": "humanagent-launch-cwd-independent-declared-workspace",
+        "text": "1. 用户可以在任意目录启动 humanagent，不影响显式大脑工作路径"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "1. 用户可以在任意目录启动 humanagent，不影响显式大脑工作路径\n2. 任何 pair 之类的逻辑不应该和启动路径和顺序绑定，只应该和是否已经配对，是否允许多个配对终端同时运行绑定",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确新增以下两行需求；原文完整保留。未提供独立 message ID。"
+        },
+        "requirement_id": "humanagent-launch-cwd-independent-declared-workspace",
+        "status": "active",
+        "text": "1. 用户可以在任意目录启动 humanagent，不影响显式大脑工作路径",
+        "version": 1
+      },
+      "version": 15
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "1. 用户可以在任意目录启动 humanagent，不影响显式大脑工作路径\n2. 任何 pair 之类的逻辑不应该和启动路径和顺序绑定，只应该和是否已经配对，是否允许多个配对终端同时运行绑定",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确新增以下两行需求；原文完整保留。未提供独立 message ID。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "pairing-recovery-state-not-startup-order-20261019",
+        "requirement_id": "humanagent-pairing-cwd-and-startup-order-independent",
+        "text": "2. 任何 pair 之类的逻辑不应该和启动路径和顺序绑定，只应该和是否已经配对，是否允许多个配对终端同时运行绑定"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "1. 用户可以在任意目录启动 humanagent，不影响显式大脑工作路径\n2. 任何 pair 之类的逻辑不应该和启动路径和顺序绑定，只应该和是否已经配对，是否允许多个配对终端同时运行绑定",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确新增以下两行需求；原文完整保留。未提供独立 message ID。"
+        },
+        "requirement_id": "humanagent-pairing-cwd-and-startup-order-independent",
+        "status": "active",
+        "text": "2. 任何 pair 之类的逻辑不应该和启动路径和顺序绑定，只应该和是否已经配对，是否允许多个配对终端同时运行绑定",
+        "version": 1
+      },
+      "version": 16
     }
   ],
   "project_id": "humanagent",
   "schema_version": 1,
-  "version": 14
+  "version": 16
 }

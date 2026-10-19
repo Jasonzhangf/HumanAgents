@@ -461,7 +461,7 @@ test('confirmed control physical facade commits exact correction and reentry ove
 
 test('confirmed control HTTP dispatcher returns real committed receipts for the exact task scope', async () => {
   const f = await fixture({ controlCase: true });
-  const challenge = f.accessControl.createPairingChallenge('c3-http-control', 1);
+  const challenge = await f.accessControl.issuePairingChallenge();
   const session = await f.accessControl.consumePairingCode(challenge.code);
   const cookie = f.accessControl.sessionCookie(session).split(';')[0];
   const verification = await f.accessControl.verifyProductPrincipal(cookie);
@@ -477,6 +477,7 @@ test('confirmed control HTTP dispatcher returns real committed receipts for the 
   const { listener } = createUiRuntimeRequestDispatcher({
     service: f.service,
     accessControl: f.accessControl,
+    productRoot: f.paths.controlRoot,
     uiRoot: join(process.cwd(), 'docs/ui'),
     isClosing: () => false,
   });
@@ -615,6 +616,7 @@ test('App cold production entry hydrates canonical live state while checkpoint r
     const accessControl = await AccessControlService.open({ credentialPath: f.paths.webAccessCredentialPath, create: true });
     const before = await snapshot(f.paths.projectRoot);
     runtime = await startUiRuntime({ mode: 'fake', organId,
+      productRoot: f.paths.controlRoot,
       binding: { bindingId: 'c3-unused', providerId: 'c3-unused', protocol: 'responses', endpointRef: 'c3-unused',
         modelRef: 'c3-unused', configDigest: 'c3-unused', capabilityDigest: 'c3-unused' },
       port: effectPort, accessControl, checkpointRoot: join(f.paths.checkpointsRoot, 'ui-runtime'),
@@ -638,11 +640,12 @@ test('App cold production entry hydrates canonical live state while checkpoint r
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) test('production checkpoint GET preserves canonical current and exact viewed receipts without writes', async () => {
   const f = await fixture();
   const accessControl = await AccessControlService.open({ credentialPath: f.paths.webAccessCredentialPath, create: true });
-  const challenge = accessControl.createPairingChallenge('c3-http-fixture', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0];
   // Use the production dispatcher directly: this read proof has no daemon/credential-watch lifecycle.
   const { listener } = createUiRuntimeRequestDispatcher({ service: f.service, accessControl,
+    productRoot: f.paths.controlRoot,
     uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false });
   const server = createServer(listener);
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
