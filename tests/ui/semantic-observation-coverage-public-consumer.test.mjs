@@ -246,3 +246,122 @@ test('coverage reasons stay human-readable while exact refs remain in read-only 
   const withoutIssues = buildSemanticObservationProjection({ ...envelope, coverageIssues: [] })
   assert.equal(coverageSection(withoutIssues), undefined)
 })
+
+test('typed public output keeps exact committed text and states without false emptiness', () => {
+  const binding = { scope, executionEpoch: 3, requestId: 'request-public' }
+  const firstText = '  已确认第一段\n\n第二行保留空白  \n'
+  const secondText = '\n第三段\t尾部空白  '
+  const commits = [
+    {
+      ref: {
+        binding,
+        sourceId: 'provider-output-first',
+        commitId: 'commit-first',
+        journalSeq: 41,
+        recordDigest: 'sha256:first',
+      },
+      text: firstText,
+    },
+    {
+      ref: {
+        binding,
+        sourceId: 'provider-output-second',
+        commitId: 'commit-second',
+        journalSeq: 42,
+        recordDigest: 'sha256:second',
+      },
+      text: secondText,
+    },
+  ]
+  const publicEnvelope = (state, outputCommits = commits) => freeze({
+    scope,
+    projectionVersion: 'runtime-semantic-v1',
+    sourceWatermark: 17,
+    publicCommitWatermark: 11,
+    publicOutput: { state, commits: outputCommits },
+    events: [],
+    coverageIssues: [],
+    pairing: [],
+    capabilities: [],
+  })
+
+  const pending = buildSemanticObservationProjection(publicEnvelope('pending'), { mode: 'current' })
+  const stable = pending.sections.find((section) => section.id === 'stable')
+  const live = pending.sections.find((section) => section.id === 'live')
+  assert.ok(stable, 'pending publication still shows confirmed commits as stable')
+  assert.deepEqual(stable.items.map((item) => item.detail), [firstText, secondText])
+  assert.deepEqual(stable.items.map((item) => item.stateLabel), ['已确认', '已确认'])
+  assert.equal(live.items[0].id, 'public-output-pending')
+  assert.equal(live.items[0].detail.includes(firstText), false)
+  assert.notEqual(pending.state, 'empty')
+
+  const firstEvidence = stable.items[0].evidence
+  assert.equal(firstEvidence.evidenceId, 'commit-first')
+  assert.equal(firstEvidence.sourceLabel, 'provider-output-first')
+  assert.equal(firstEvidence.scopeLabel, '当前操作')
+  assert.ok(firstEvidence.refs.includes('commitId: commit-first'))
+  assert.ok(firstEvidence.refs.includes('journalSeq: 41'))
+  assert.ok(firstEvidence.refs.includes('recordDigest: sha256:first'))
+  assert.ok(firstEvidence.refs.includes('scope: operation:operation-f03'))
+  assert.equal('occurredAt' in firstEvidence, false)
+
+  const host = new FakeNode('div')
+  const mounted = mountSemanticObservation(host, {})
+  mounted.update(pending)
+  const rendered = allNodes(host).filter((node) => node.tagName === 'ARTICLE')
+  assert.deepEqual(rendered.filter((node) => node.dataset.itemId?.startsWith('public-commit:'))
+    .map((node) => findTag(node, 'P').textContent), [firstText, secondText])
+  mounted.dispose()
+
+  for (const state of ['unknown', 'unavailable']) {
+    const projection = buildSemanticObservationProjection(publicEnvelope(state), { mode: 'current' })
+    const kept = projection.sections.find((section) => section.id === 'stable')
+    assert.deepEqual(kept.items.map((item) => item.detail), [firstText, secondText])
+    assert.notEqual(projection.state, 'empty')
+    assert.equal(
+      projection.notices.some((notice) => notice.tone === state),
+      true,
+      `${state} stays explicit`,
+    )
+  }
+
+  const noContentHost = new FakeNode('div')
+  const noContentMounted = mountSemanticObservation(noContentHost, {})
+  for (const state of ['unknown', 'unavailable']) {
+    const uncertain = buildSemanticObservationProjection(publicEnvelope(state, []), { mode: 'current' })
+    assert.notEqual(uncertain.state, 'empty')
+    assert.equal(uncertain.sections.length, 0)
+    noContentMounted.update(uncertain)
+    assert.equal(
+      allNodes(noContentHost).some((node) => node.className === 'so-empty-state'),
+      false,
+      `${state} without commits must not claim published content is absent`,
+    )
+    assert.equal(noContentHost.textContent.includes('当前范围没有已发布语义内容。'), false)
+    assert.equal(
+      noContentHost.textContent.includes(state === 'unknown' ? '公开结果状态未知' : '公开结果暂不可用'),
+      true,
+    )
+  }
+
+  const committed = buildSemanticObservationProjection(publicEnvelope('committed'), { mode: 'current' })
+  assert.equal(
+    committed.sections.some((section) => section.id === 'live'),
+    false,
+    'committed publication clears the pending live item',
+  )
+  assert.deepEqual(
+    committed.sections.find((section) => section.id === 'stable').items.map((item) => item.detail),
+    [firstText, secondText],
+  )
+
+  const empty = buildSemanticObservationProjection(publicEnvelope('committed', []), { mode: 'current' })
+  assert.equal(empty.state, 'empty')
+  noContentMounted.update(empty)
+  assert.equal(
+    allNodes(noContentHost).some((node) => node.className === 'so-empty-state'),
+    true,
+    'committed publication without commits keeps the genuine empty state',
+  )
+  noContentMounted.dispose()
+})

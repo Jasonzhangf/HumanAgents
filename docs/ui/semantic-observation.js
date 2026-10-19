@@ -452,7 +452,10 @@ export function mountSemanticObservation(host, options = {}) {
     if (capabilities) content.append(capabilities)
 
     const sections = array(projection.sections)
-    if (viewState === 'empty' || sections.length === 0) {
+    // Only an explicit projection state claims emptiness. An empty section list
+    // under unknown, unavailable, stale, loading or failed must keep its notices
+    // and must not claim that no published content exists.
+    if (viewState === 'empty') {
       const empty = element('div', 'so-empty-state')
       empty.dataset.empty = 'true'
       empty.append(

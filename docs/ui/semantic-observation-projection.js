@@ -286,6 +286,51 @@ function coverageRawItem(issue, index) {
   }
 }
 
+// A confirmed public commit carries only its real {ref, text} identity. It has
+// no occurredAt, payloadRef, dataDigest or evidenceRef, so this reuses the
+// existing read-only evidence shape with only the fields that truly exist.
+function publicCommitEvidence(commit) {
+  const ref = commit && typeof commit.ref === 'object' ? commit.ref : {}
+  const binding = ref.binding && typeof ref.binding === 'object' ? ref.binding : {}
+  const scope = binding.scope
+  const refs = [
+    `sourceId: ${text(ref.sourceId)}`,
+    `commitId: ${text(ref.commitId)}`,
+    `journalSeq: ${text(ref.journalSeq)}`,
+    `recordDigest: ${text(ref.recordDigest)}`,
+    ...(binding.executionEpoch === undefined ? [] : [`executionEpoch: ${text(binding.executionEpoch)}`]),
+    ...coverageScopeRefs(scope).map((entry) => `scope: ${entry}`),
+  ]
+  return {
+    evidenceId: text(ref.commitId),
+    title: '已确认公开输出',
+    summary: '已确认公开输出的只读提交引用。',
+    scopeLabel: coverageScopeTitle(scope),
+    sourceLabel: text(ref.sourceId),
+    refs,
+    raw: {
+      label: '公开提交引用（主动查看）',
+      content: refs.join('\n'),
+    },
+  }
+}
+
+function publicCommitItem(commit, kind) {
+  const ref = commit && typeof commit.ref === 'object' ? commit.ref : {}
+  return {
+    id: `public-commit:${text(ref.commitId)}`,
+    title: '已确认公开输出',
+    // Exact text is preserved byte-for-byte; the renderer writes textContent
+    // verbatim, so this must never trim or reorganise the accepted output.
+    detail: text(commit?.text),
+    state: 'completed',
+    stateLabel: '已确认',
+    tone: 'success',
+    kind,
+    evidence: publicCommitEvidence(commit),
+  }
+}
+
 function headlinePairingState(pairing) {
   return PAIRING_STATE_PRIORITY.find((candidate) => pairing.some((group) => group?.state === candidate)) ?? 'unknown'
 }
@@ -311,6 +356,27 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
   const scopeTitle = currentCrumb?.title ?? '当前观测范围'
 
   const visibleEvents = events.filter((event) => eventMatchesScope(event?.scope, selectedScopeRef))
+  const publicOutput = source.publicOutput && typeof source.publicOutput === 'object'
+    ? source.publicOutput
+    : undefined
+  // A commit is visible only inside the selected typed scope. Source order is
+  // preserved because filter never reorders the accepted publication.
+  const visibleCommits = array(publicOutput?.commits).filter((commit) =>
+    eventMatchesScope(commit?.ref?.binding?.scope, selectedScopeRef))
+  const publicCommitItems = (kind) => visibleCommits.map((commit) => publicCommitItem(commit, kind))
+  // Pending text is never published. Only the typed pending state becomes a
+  // live status item; confirmed commits stay in their stable sections.
+  const pendingPublicItem = publicOutput?.state === 'pending'
+    ? {
+        id: 'public-output-pending',
+        title: '公开结果待确认',
+        detail: '存在尚未提交的公开输出候选，未提交文本不公开显示。',
+        state: 'active',
+        stateLabel: '待确认',
+        tone: 'warning',
+        kind: 'live',
+      }
+    : null
   const stateCounts = new Map()
   for (const group of pairing) {
     const state = text(group?.state, 'unknown')
@@ -324,7 +390,12 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
   if (options.stale) {
     state = 'stale'
     stateLabel = '已过期'
-  } else if (pairing.length === 0 && events.length === 0) {
+  } else if (
+    pairing.length === 0
+    && events.length === 0
+    && visibleCommits.length === 0
+    && (publicOutput === undefined || publicOutput.state === 'committed')
+  ) {
     state = 'empty'
     stateLabel = '空'
   }
@@ -365,22 +436,41 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
       ...(options.error.nextAction ? { nextAction: text(options.error.nextAction) } : {}),
     })
   }
+  if (publicOutput?.state === 'unknown') {
+    notices.push({
+      tone: 'unknown',
+      title: '公开结果状态未知',
+      detail: '只显示此前已确认的公开提交；其余公开输出状态未知。',
+    })
+  } else if (publicOutput?.state === 'unavailable') {
+    notices.push({
+      tone: 'unavailable',
+      title: '公开结果暂不可用',
+      detail: '只显示此前已确认的公开提交；其余公开输出暂不可用。',
+    })
+  }
 
   const humanMeta = (event) => [text(event.occurredAt)].filter((entry) => entry.length > 0)
-  const semanticItems = visibleEvents.map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event), selectedScopeRef))
-  const stableItems = visibleEvents
-    .filter((event) => event?.status === 'completed' || event?.status === 'resolved')
-    .map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event), selectedScopeRef))
-  const liveItems = visibleEvents
-    .filter((event) => event?.status === 'active')
-    .map((event) => eventItem(event, 'live', scopeTitle, humanMeta(event), selectedScopeRef))
-  const actionItems = visibleEvents.map((event) => eventItem(
-    event,
-    'action',
-    scopeTitle,
-    humanMeta(event),
-    selectedScopeRef,
-  ))
+  const semanticItems = [
+    ...visibleEvents.map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event), selectedScopeRef)),
+    ...publicCommitItems('semantic'),
+  ]
+  const stableItems = [
+    ...visibleEvents
+      .filter((event) => event?.status === 'completed' || event?.status === 'resolved')
+      .map((event) => eventItem(event, 'semantic', scopeTitle, humanMeta(event), selectedScopeRef)),
+    ...publicCommitItems('semantic'),
+  ]
+  const liveItems = [
+    ...visibleEvents
+      .filter((event) => event?.status === 'active')
+      .map((event) => eventItem(event, 'live', scopeTitle, humanMeta(event), selectedScopeRef)),
+    ...(pendingPublicItem ? [pendingPublicItem] : []),
+  ]
+  const actionItems = [
+    ...visibleEvents.map((event) => eventItem(event, 'action', scopeTitle, humanMeta(event), selectedScopeRef)),
+    ...publicCommitItems('action'),
+  ]
   const coverageItems = coverageIssues.map((issue, index) => coverageItem(issue, index, 'semantic'))
   const coverageRawItems = coverageIssues.map(coverageRawItem)
   const coverageSection = coverageItems.length > 0
@@ -411,6 +501,7 @@ export function buildSemanticObservationProjection(envelope, options = {}) {
   }
   const rawItems = [
     rawSourceItem,
+    ...publicCommitItems('raw'),
     ...visibleEvents.map((event) => ({
       id: text(event.eventId),
       title: text(event.type, '未命名事件'),
