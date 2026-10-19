@@ -17,7 +17,12 @@ import { uiRuntimeJournalPath, uiRuntimeModeRoot } from '../../packages/app/src/
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
 import { createRccServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
-import { id, type ProviderBinding, type ProviderStartInput } from '../../packages/contracts/src/index.js';
+import {
+  id,
+  type ExecutionPolicyDefinition,
+  type ProviderBinding,
+  type ProviderStartInput,
+} from '../../packages/contracts/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -443,8 +448,30 @@ test('restart blocks a prepared allocation with committed preparation entry befo
 // retained allocation. Impact: no execution, or duplicate execution on retry.
 // Cost: the existing local HTTP/native composition and one controlled refusal;
 // Runtime cold/fault cases and native child delivery remain in their consumers.
-for (const refuseRelease of [false, true]) {
-test(`HTTP grant releases the typed prepared allocation once; refusal=${refuseRelease}`, async () => {
+const onceExecutionPolicy: ExecutionPolicyDefinition = {
+  policyId: 'policy-grant-http-once',
+  policyRevision: 1,
+  timezone: 'UTC',
+  canonicalInstant: '2026-10-05T00:00:00.000Z',
+  dstMode: 'wall',
+  dstMissedPolicy: 'shift-forward',
+  dstAmbiguousPolicy: 'earlier-offset',
+  latePolicy: 'run-once',
+  busyPolicy: 'skip',
+  executionMode: 'once',
+  dueAt: '2026-10-05T00:00:00.000Z',
+};
+const preparedHttpScenarios: readonly {
+  readonly label: string;
+  readonly refuseRelease: boolean;
+  readonly executionPolicy?: ExecutionPolicyDefinition;
+}[] = [
+  { label: 'release', refuseRelease: false },
+  { label: 'refusal', refuseRelease: true },
+  { label: 'once-policy', refuseRelease: false, executionPolicy: onceExecutionPolicy },
+];
+for (const { label, refuseRelease, executionPolicy } of preparedHttpScenarios) {
+test(`HTTP prepared execution keeps one responsibility; case=${label}`, async () => {
   const base = join(homedir(), '.humanagent', 'test-fixtures');
   await mkdir(base, { recursive: true });
   const root = await mkdtemp(join(base, 'task-grant-prepared-http-'));
@@ -559,8 +586,18 @@ test(`HTTP grant releases the typed prepared allocation once; refusal=${refuseRe
     const preview = await active.runtime.service.inspectExplicitInteraction(interactionId);
     await active.runtime.service.confirmExplicitRequirement({ interactionId, draftId: preview.draft!.draftId,
       inputRevision: preview.draft!.inputRevision, confirmationRef: 'confirmation:grant-http', confirmedBy: 'human:operator',
-      confirmedAt: new Date().toISOString(), payloadRef: 'asset://grant-http', requestKind: 'new-task-create' });
+      confirmedAt: new Date().toISOString(), payloadRef: 'asset://grant-http', requestKind: 'new-task-create',
+      ...(executionPolicy === undefined ? {} : { executionPolicy }) });
     const prepared = await active.runtime.service.dispatchNextExplicitRequirement();
+    if (executionPolicy !== undefined) {
+      assert.equal(prepared.operationId, undefined,
+        'once policy must keep the business anchor out of the immediate FIFO execution path');
+      assert.equal(posts, 0);
+      assert.equal(factories, 0);
+      console.log(JSON.stringify({ label, prepared, posts, factories }));
+      passed = true;
+      return;
+    }
     assert.ok(prepared.operationId);
     const preparedOperationId = prepared.operationId;
     if (preparedOperationId === undefined) throw new Error('prepared operation is missing');
