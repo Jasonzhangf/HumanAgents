@@ -2367,6 +2367,7 @@ export class UiRuntimeService {
         ...(task.publicOutput?.publicCommitWatermark === undefined
           ? {}
           : { publicCommitWatermark: task.publicOutput.publicCommitWatermark }),
+        ...(task.publicOutput === undefined ? {} : { publicOutput: task.publicOutput }),
         events: task.events,
         capabilities: [{ capability: 'runtime-task-events', state: task.events.length > 0 ? 'available' : 'unavailable', ...(task.events.length > 0 ? {} : { reason: 'task has no runtime task events yet' }) }],
       });
@@ -2421,6 +2422,7 @@ export class UiRuntimeService {
       ...(entry.snapshot.publicOutput?.publicCommitWatermark === undefined
         ? {}
         : { publicCommitWatermark: entry.snapshot.publicOutput.publicCommitWatermark }),
+      ...(entry.snapshot.publicOutput === undefined ? {} : { publicOutput: entry.snapshot.publicOutput }),
       events: entry.snapshot.events,
       capabilities: [{
         capability: 'runtime-task-events',
