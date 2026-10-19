@@ -190,6 +190,7 @@ async function startHarness({ scenario, root }) {
   const cookie = accessControl.sessionCookie(session).split(';')[0];
   const runtime = await startUiRuntime({
     mode: 'fake',
+    productRoot: root,
     accessControl,
     organId,
     binding,

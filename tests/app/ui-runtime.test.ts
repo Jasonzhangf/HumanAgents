@@ -182,12 +182,15 @@ const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
 const runtimeAccessControl = new WeakMap<UiRuntime, AccessControlService>();
 
 async function startUiRuntime(
-  options: Parameters<typeof startUiRuntimeOwner>[0],
+  options: Omit<Parameters<typeof startUiRuntimeOwner>[0], 'productRoot'> & { readonly productRoot?: string },
 ): ReturnType<typeof startUiRuntimeOwner> {
   const securityRoot = options.checkpointRoot;
   const auth = options.accessControl ? undefined : await testAccessControl(securityRoot);
   const runtime = await startUiRuntimeOwner({
     ...options,
+    // The fixture stores access control under its checkpoint root, so that is
+    // this wrapper's known product root. Production supplies the config root.
+    productRoot: options.productRoot ?? options.checkpointRoot,
     ...(auth === undefined ? {} : { accessControl: auth.accessControl }),
     explicitBrainInterpreter: options.explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
   });
@@ -2598,6 +2601,7 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
   const server = await startUiRuntimeServer({
     service,
     accessControl,
+    productRoot: root,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
@@ -5184,6 +5188,7 @@ test('server close releases the single tracked auth expiry timer after active SS
   const server = await startUiRuntimeServer({
     service,
     accessControl,
+    productRoot: root,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
@@ -5479,11 +5484,15 @@ test('pairing recovery expires durable challenges and logout clears them with th
 
 test('pairing recovery projects the config pairing command without authentication', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-pairing-command-'));
-  const credentialPath = join(root, 'security', 'web-access.json');
+  // Nonstandard credential location and name: the credential path cannot
+  // reveal the product root, so only the composed option can produce it.
+  const productRoot = join(root, 'products', 'known');
+  const credentialPath = join(root, 'credentials', 'pairing-secret.json');
   const accessControl = await AccessControlService.open({ credentialPath, create: true });
   const { listener } = createUiRuntimeRequestDispatcher({
     service: {} as UiRuntimeService,
     accessControl,
+    productRoot,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     isClosing: () => false,
   });
@@ -5501,7 +5510,8 @@ test('pairing recovery projects the config pairing command without authenticatio
   });
   const base = `http://127.0.0.1:${port}`;
   try {
-    const pairingCommand = formatPairingCommand({ controlRoot: root });
+    const pairingCommand = formatPairingCommand({ controlRoot: productRoot });
+    assert.ok(pairingCommand !== formatPairingCommand({ controlRoot: root }));
     const unauthenticated = await fetch(`${base}/api/auth/session`);
     assert.equal(unauthenticated.status, 200);
     assert.deepEqual(await unauthenticated.json(), { authenticated: false, pairingCommand });
@@ -5623,6 +5633,7 @@ test('runtime close settles active executions before propagating a credential wa
     binding,
     port,
     checkpointRoot,
+    productRoot: checkpointRoot,
     evidenceRoot: join(root, 'evidence'),
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
@@ -5701,6 +5712,7 @@ test('server close awaits credential watch drain and reports closure', async () 
   const server = await startUiRuntimeServer({
     service,
     accessControl,
+    productRoot: root,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
@@ -6310,6 +6322,7 @@ test('UI runtime assembly rejects an unconfigured production explicit brain befo
       organId,
       binding,
       accessControl: auth.accessControl,
+      productRoot: root,
       port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
       checkpointRoot: join(root, 'checkpoints'),
       evidenceRoot: join(root, 'evidence'),
@@ -10325,6 +10338,7 @@ test('organ health HTTP keeps the original transport failure behind the provider
   const server = await startUiRuntimeServer({
     service,
     accessControl,
+    productRoot: root,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
@@ -10553,6 +10567,7 @@ test('the runtime error body keeps the original failure instead of restating the
     const server = await startUiRuntimeServer({
       service: await serviceAt(`restart-${index}`),
       accessControl,
+      productRoot: root,
       uiRoot,
       port: 0,
       identity,
@@ -10609,6 +10624,7 @@ test('the runtime error body keeps the original failure instead of restating the
   const startupServer = await startUiRuntimeServer({
     service: await serviceAt('identity-not-ready'),
     accessControl,
+    productRoot: root,
     uiRoot,
     port: 0,
     identity: () => {
@@ -10650,6 +10666,7 @@ test('the runtime error body keeps the original failure instead of restating the
     const server = await startUiRuntimeServer({
       service: await serviceAt(`unexpected-${index}`),
       accessControl,
+      productRoot: root,
       uiRoot,
       port: 0,
       schedulerStatus: async () => {
@@ -10721,6 +10738,7 @@ test('explicit provider settlement control GET returns the exact committed recei
   const server = await startUiRuntimeServer({
     service,
     accessControl: auth.accessControl,
+    productRoot: root,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
@@ -10811,6 +10829,7 @@ test('explicit provider settlement control GET reports unavailable without a com
   const server = await startUiRuntimeServer({
     service,
     accessControl: auth.accessControl,
+    productRoot: root,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });

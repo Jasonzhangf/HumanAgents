@@ -95,7 +95,7 @@ test('scoped task control rejects a different bound target before grant or relea
     const challenge = await accessControl.issuePairingChallenge();
     const session = await accessControl.consumePairingCode(challenge.code);
     const cookie = accessControl.sessionCookie(session).split(';')[0]!;
-    server = await startUiRuntimeServer({ service, accessControl, taskControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
+    server = await startUiRuntimeServer({ service, accessControl, productRoot: root, taskControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
     const path = `/api/tasks/${encodeURIComponent(task.taskId.value)}/control`;
     const request = async (suffix: string, body?: unknown, query = '') => {
       const response = await fetch(`${server!.url}${path}/${suffix}${query}`, {
@@ -252,7 +252,7 @@ test('HTTP grant control uses verified owner and durable readback without releas
     const verified = await accessControl.verifyProductPrincipal(cookie);
     assert.equal(verified.state, 'valid');
     if (verified.state !== 'valid') throw new Error('fixture principal unavailable');
-    const options = { service, accessControl, taskControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 };
+    const options = { service, accessControl, productRoot: root, taskControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 };
     server = await startUiRuntimeServer(options);
     const path = `/api/tasks/${encodeURIComponent(task.taskId.value)}/control`;
     const request = async (suffix: string, body?: unknown, authenticated = true) => {
@@ -296,7 +296,7 @@ test('HTTP grant control uses verified owner and durable readback without releas
     assert.equal(registered, false);
     assert.equal(port.starts.length, 0);
     await server.close();
-    server = await startUiRuntimeServer({ service, accessControl, uiRoot: options.uiRoot, port: 0 });
+    server = await startUiRuntimeServer({ service, accessControl, productRoot: root, uiRoot: options.uiRoot, port: 0 });
     const unavailable = await request('grant');
     assert.equal(unavailable.status, 503);
     assert.equal(unavailable.body.error?.code, 'task-control.source.unavailable');
@@ -363,7 +363,7 @@ test('restart blocks a prepared allocation with committed preparation entry befo
       });
       const accessControl = await AccessControlService.open({ credentialPath: join(root, 'web-access.json'), create: true });
       const nextRuntime = await startUiRuntime({ mode: 'rcc', organId: id('organ', 'grant-prepared'), accessControl,
-        binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: join(root, 'ui-runtime'),
+        binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: join(root, 'ui-runtime'), productRoot: root,
         evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
         memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'grant-http', roleId: 'execution' },
         explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
@@ -531,7 +531,7 @@ test(`HTTP grant releases the typed prepared allocation once; refusal=${refuseRe
       });
       const accessControl = await AccessControlService.open({ credentialPath: join(root, 'web-access.json'), create: true });
       const nextRuntime = await startUiRuntime({ mode: 'rcc', organId: id('organ', 'grant-prepared'), accessControl,
-        binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: join(root, 'ui-runtime'),
+        binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: join(root, 'ui-runtime'), productRoot: root,
         evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
         memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'grant-http', roleId: 'execution' },
         explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',

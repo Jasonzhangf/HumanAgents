@@ -1804,7 +1804,7 @@ async function runScopedI2HttpFixture(): Promise<void> {
     },
   });
   const { listener } = createUiRuntimeRequestDispatcher({
-    service, accessControl, uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false,
+    service, accessControl, productRoot: pathsA.controlRoot, uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false,
   });
   server = createServer(listener);
   await new Promise<void>((resolve, reject) => {

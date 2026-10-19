@@ -299,6 +299,7 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
     assert.equal(legacyHistory.providerSettlements.length, 0);
     runtime = await startUiRuntimeOwner({
       mode: 'fake', organId, binding, port: buildFakeExecutionPort(binding, 0), checkpointRoot, evidenceRoot,
+      productRoot: checkpointRoot,
       uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0, memory: memory('default-parent'),
       accessControl: auth.accessControl, explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
       runtimeComposition: { prepareAgentProvider: prepare }, explicitBrainHelperProviderPreparer: prepare, lease,
@@ -495,7 +496,7 @@ class SecondObserveGatedReplayExecutionRuntimePort extends FakeReplayExecutionRu
 }
 
 async function startUiRuntime(
-  options: Parameters<typeof startUiRuntimeOwner>[0],
+  options: Omit<Parameters<typeof startUiRuntimeOwner>[0], 'productRoot'> & { readonly productRoot?: string },
   interpreter: Parameters<typeof startUiRuntimeOwner>[0]['explicitBrainInterpreter'] = {
     async interpret() { throw new Error('semantic consumer does not interpret explicit brain inputs'); },
   },
@@ -503,6 +504,9 @@ async function startUiRuntime(
   const auth = await testAccessControl(options.checkpointRoot);
   const runtime = await startUiRuntimeOwner({
     ...options,
+    // The fixture stores access control under its checkpoint root, so that is
+    // this wrapper's known product root. Production supplies the config root.
+    productRoot: options.productRoot ?? options.checkpointRoot,
     accessControl: auth.accessControl,
     explicitBrainInterpreter: interpreter,
   });

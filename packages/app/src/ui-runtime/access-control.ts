@@ -250,7 +250,7 @@ function decodeToken(token: string, secret: Uint8Array): string | undefined {
 }
 
 export class AccessControlService {
-  readonly credentialPath: string;
+  private readonly credentialPath: string;
   private readonly sessionTtlMs: number;
   private readonly pairingTtlMs: number;
   private readonly now: () => number;

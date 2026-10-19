@@ -362,6 +362,7 @@ async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
   const taskIdentity = extra.taskIdentity?.(principalOwner, taskControlPath);
   const runtime = await startUiRuntime({
     mode,
+    productRoot: root,
     organId,
     binding: extra.binding ?? binding,
     port,
@@ -1518,6 +1519,7 @@ test('app_read_mounts_preference_routes_dispatch_to_config_resource', async () =
   const runtime = await startUiRuntime({
     mode: 'fake',
     accessControl,
+    productRoot: paths.controlRoot,
     organId,
     binding,
     port,
@@ -1630,6 +1632,7 @@ test('app_read_mounts_dashboard_history_uses_accepted_current_and_scoped_identit
   const runtime = await startUiRuntime({
     mode: 'fake',
     accessControl,
+    productRoot: paths.controlRoot,
     organId,
     binding,
     port,
