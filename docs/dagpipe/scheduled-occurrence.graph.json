@@ -48,7 +48,8 @@
       "exactGrant": "每个 child execution Task 都必须以自己的 taskId 读取当前 TaskGrant，并核对 verified principal owner。parent grant、提交动作或 occurrence consumption 不得自动授权 child。",
       "noGrant": "当前 child TaskGrant 缺失、revoked、owner 不匹配或 revision stale 时，保留 prepared allocation，返回可读的等待执行授权或明确拒绝；不得创建 Provider factory、发送模型请求或把该状态写成 runtime execution failure。",
       "releaseOnce": "正式 scoped grant 复用现有 principal/control journal/readback 路径。只有 verified grant 后，同一 prepared allocation 才可进入 native TG1 owner，release 一次并执行一次；duplicate grant/replay 不得第二次 release。",
-      "unknownReceipt": "控制 receipt 已提交但 readback 未知时保留 receipt 事实，不显示 denied、不自动重提，也不绕过 exact grant。"
+      "unknownReceipt": "控制 receipt 已提交但 readback 未知时保留 receipt 事实，不显示 denied、不自动重提，也不绕过 exact grant。",
+      "immutableBindingAdmission": "admission 必须复用 exact OccurrenceTaskBinding 已 prepared/running/terminal 的 child allocation；同一 binding 的 terminal 只进入 durable receipt 与 settle，不得 reprepare 或 reexecute。"
     },
     "recoveryContract": {
       "busyReminder": "schedule({busy:true}) commits occurrence=reminder-pending and reminder=pending; the same slot with schedule({busy:false}) in recover_pending_reminder atomically commits occurrence=due and reminder=consumed only when active current revision is not invalidated and existing late/max/end rules still permit execution; when latePolicy=skip and nowAt > dueAt, it instead atomically commits occurrence=skipped-busy and matching reminder=invalidated, consumes the ordinal with existing skipped-busy accounting, and marks subscription exhausted when maxOccurrences is reached",
