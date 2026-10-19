@@ -5,6 +5,9 @@ import type {
   TaskActualExecutionNodeKind,
   TaskExecutionInstanceIdentity,
   TaskFlowKind,
+  TaskFlowLayoutMode,
+  TaskFlowLoopKind,
+  TaskFlowStageRole,
   TaskIdentityScope,
 } from '@humanagent/contracts';
 
@@ -21,6 +24,36 @@ export interface TaskActualExecutionGuidanceProjection {
   readonly aim: string;
   readonly selectionGuidance: string;
   readonly displayGroups: readonly string[];
+  readonly aimLabel: string;
+  readonly layout: TaskFlowLayoutMode;
+  readonly layoutLabel: string;
+  readonly stages: readonly {
+    readonly stageId: string;
+    readonly title: string;
+    readonly summary: string;
+    readonly role: TaskFlowStageRole;
+    readonly roleLabel: string;
+    readonly groupLabel: string;
+    readonly dynamicChoices?: readonly string[];
+    readonly prerequisiteTitles: readonly string[];
+  }[];
+  readonly dependencies: readonly {
+    readonly fromStageId: string;
+    readonly toStageId: string;
+    readonly fromTitle: string;
+    readonly toTitle: string;
+  }[];
+  readonly loops: readonly {
+    readonly kind: TaskFlowLoopKind;
+    readonly kindLabel: string;
+    readonly title: string;
+    readonly fromStageId: string;
+    readonly toStageId: string;
+    readonly fromTitle: string;
+    readonly toTitle: string;
+    readonly summary: string;
+    readonly stopCondition: string;
+  }[];
 }
 
 /**

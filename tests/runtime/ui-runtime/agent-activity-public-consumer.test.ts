@@ -42,6 +42,8 @@ import {
   type SelectTaskActualExecutionGraphInput,
   type SelectTaskAgentActivityInput,
 } from '../../../packages/runtime/src/index.js';
+import { resolveTaskFlowGuidance } from '../../../packages/core/src/task-flow-definition.js';
+import { projectTaskActualExecutionGraph } from '../../../packages/ui/projection/actual-execution-graph.js';
 import type {
   ClosedTurnPlannerCallInvocationRecord,
   ClosedTurnPlannerCallPreparationRecord,
@@ -1165,4 +1167,154 @@ test('the actual graph groups a Planner duty through its exact supplied business
       true,
     );
   }
+});
+
+interface ExpectedGuidanceProjection {
+  readonly kind?: string;
+  readonly aim?: string;
+  readonly selectionGuidance?: string;
+  readonly displayGroups?: readonly string[];
+  readonly aimLabel?: string;
+  readonly layout?: string;
+  readonly layoutLabel?: string;
+  readonly stages?: readonly {
+    readonly title?: string;
+    readonly summary?: string;
+    readonly role?: string;
+    readonly roleLabel?: string;
+    readonly groupLabel?: string;
+    readonly dynamicChoices?: readonly string[];
+    readonly prerequisiteTitles?: readonly string[];
+  }[];
+  readonly dependencies?: readonly {
+    readonly fromStageId?: string;
+    readonly toStageId?: string;
+    readonly fromTitle?: string;
+    readonly toTitle?: string;
+  }[];
+  readonly loops?: readonly {
+    readonly kind?: string;
+    readonly kindLabel?: string;
+    readonly title?: string;
+    readonly fromStageId?: string;
+    readonly toStageId?: string;
+    readonly fromTitle?: string;
+    readonly toTitle?: string;
+    readonly summary?: string;
+    readonly stopCondition?: string;
+  }[];
+}
+
+test('the public projection carries human template guidance without changing actual execution', () => {
+  // Failure basis: the accepted Core skeleton reaches projection, but the
+  // existing projection drops every new template field. Unknown because no
+  // caller had asserted presentation. Impact: renderers cannot show Chinese
+  // template labels or exact dependencies and loops. Cost: one projection call
+  // and assertions over the existing inspection skeleton.
+  const guidance = resolveTaskFlowGuidance({ kind: 'inspection', definitionVersion: 1 });
+  const source = selectTaskActualExecutionGraph({
+    ...plannerGraphInput([{ closure: plannerClosure, commitRef: plannerBusinessClosureCommit }]),
+    guidance,
+  });
+  const graph = projectTaskActualExecutionGraph(source);
+  const projected = graph.guidance as unknown as ExpectedGuidanceProjection | undefined;
+  const dynamicStage = projected?.stages?.find((stage) => stage.role === 'dynamic-choice-region');
+  const occurrenceStage = projected?.stages?.find((stage) => stage.role === 'occurrence-trigger');
+  const dynamicDependency = projected?.dependencies?.find(
+    (dependency) => dependency.fromStageId === 'occurrence-trigger'
+      && dependency.toStageId === 'dynamic-work',
+  );
+  const occurrenceLoop = projected?.loops?.find((loop) => loop.kind === 'occurrence-repetition');
+
+  assert.deepEqual(
+    {
+      technical: {
+        kind: projected?.kind,
+        aim: projected?.aim,
+        selectionGuidance: projected?.selectionGuidance,
+        displayGroups: projected?.displayGroups,
+      },
+      human: {
+        aimLabel: projected?.aimLabel,
+        layout: projected?.layout,
+        layoutLabel: projected?.layoutLabel,
+        dynamicStage: dynamicStage === undefined
+          ? undefined
+          : {
+            title: dynamicStage.title,
+            summary: dynamicStage.summary,
+            roleLabel: dynamicStage.roleLabel,
+            groupLabel: dynamicStage.groupLabel,
+            dynamicChoices: dynamicStage.dynamicChoices,
+            prerequisiteTitles: dynamicStage.prerequisiteTitles,
+          },
+        occurrenceStage: occurrenceStage === undefined
+          ? undefined
+          : {
+            title: occurrenceStage.title,
+            roleLabel: occurrenceStage.roleLabel,
+            groupLabel: occurrenceStage.groupLabel,
+            prerequisiteTitles: occurrenceStage.prerequisiteTitles,
+          },
+        dependency: dynamicDependency,
+        occurrenceLoop,
+      },
+      separation: graph.history.status,
+    },
+    {
+      technical: {
+        kind: guidance.kind,
+        aim: guidance.aim,
+        selectionGuidance: guidance.selectionGuidance,
+        displayGroups: ['巡检触发', '轮内动态选择', '轮末检查点', '规划对齐'],
+      },
+      human: {
+        aimLabel: '对同一巡检定义持续产生巡检结果，分离发现与必要处置，并保留历史。',
+        layout: 'occurrence-and-turn-closure-loop',
+        layoutLabel: '巡检触发与轮次收拢循环',
+        dynamicStage: {
+          title: '轮内动态选择区',
+          summary: '探索、规划、审查和执行由编排者按需选择，可重复且不要求固定顺序。',
+          roleLabel: '编排动态选择区',
+          groupLabel: '轮内动态选择',
+          dynamicChoices: ['探索', '规划', '审查', '执行'],
+          prerequisiteTitles: ['巡检触发'],
+        },
+        occurrenceStage: {
+          title: '巡检触发',
+          roleLabel: '巡检触发边界',
+          groupLabel: '巡检触发',
+          prerequisiteTitles: [],
+        },
+        dependency: {
+          fromStageId: 'occurrence-trigger',
+          toStageId: 'dynamic-work',
+          fromTitle: '巡检触发',
+          toTitle: '轮内动态选择区',
+        },
+        occurrenceLoop: {
+          kind: 'occurrence-repetition',
+          kindLabel: '巡检重复',
+          title: '巡检重复',
+          fromStageId: 'planner-alignment',
+          toStageId: 'occurrence-trigger',
+          fromTitle: '轮末规划对齐',
+          toTitle: '巡检触发',
+          summary: '下一次定时或事件触发开启新的巡检轮次，并与历史基线对比。',
+          stopCondition: '巡检定义停用或触发条件不再满足。',
+        },
+      },
+      separation: 'recorded',
+    },
+  );
+  assert.equal(
+    projected?.stages?.every((stage) => typeof stage.roleLabel === 'string' && stage.roleLabel.length > 0),
+    true,
+  );
+  assert.equal(
+    projected?.stages?.every((stage) => typeof stage.groupLabel === 'string' && stage.groupLabel.length > 0),
+    true,
+  );
+  assert.equal('plan' in graph, false);
+  assert.equal('guidance' in graph.history, false);
 });
