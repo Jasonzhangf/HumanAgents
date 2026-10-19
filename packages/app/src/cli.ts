@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import {
   ConfigurationError,
+  declareDefaultProduct,
   ensureControlLayout,
+  formatPairingCommand,
   listConfiguredProjects,
   loadConfiguration,
+  resolveProductPaths,
   resolveRuntimePaths,
   resolveWebSearchBackendConfig,
   type LoadedConfiguration,
@@ -47,7 +50,7 @@ import { assembleProviderExecutionPort } from './provider-assembly.js';
 import { closeAgentProvider, createAgentProviderPort, prepareAgentProvider, prepareExecutionAgentProvider,
   providerBindingFromConfig, type AgentProviderComposition } from './agent-driver-composition.js';
 import type { MemoryAgentOptions } from '../../runtime/src/memory/agent.js';
-import { AccessControlService, deriveSupervisorToken } from './ui-runtime/access-control.js';
+import { AccessControlService } from './ui-runtime/access-control.js';
 import type { ProductPrincipalVerification, VerifiedProductPrincipal } from './ui-runtime/access-control.js';
 import { providerRetryConfigFromEffective } from './retry-config.js';
 import {
@@ -65,7 +68,15 @@ import {
   serveCompositionManifestMatches,
 } from './entry-composition.js';
 import { createCordisHost } from './cordis-host.js';
-import { readDaemonLease, runSupervisorStartup, waitForDaemonLeaseHandoff, type SupervisorStartup } from './supervisor/supervisor.js';
+import {
+  readDaemonLease,
+  runSupervisorServeStartup,
+  SERVE_OWNER,
+  SUPERVISOR_RESTART_REQUEST_OPTION,
+  waitForDaemonLeaseHandoff,
+  type SupervisorStartup,
+  type SupervisorStage,
+} from './supervisor/supervisor.js';
 import {
   captureLoadedSourceReceipt,
   restartDaemonWithCodeHandoff,
@@ -75,7 +86,7 @@ import {
 } from './supervisor/restart-client.js';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { networkInterfaces } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
@@ -132,6 +143,7 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
   '--protocol',
   '--provider',
   '--rcc-base-url',
+  '--restart-request',
   '--route',
   '--session',
   '--task',
@@ -345,11 +357,6 @@ function displayOrigin(bound: { readonly listenAddress: string; readonly port: n
     : bound.listenAddress;
   const host = address.includes(':') ? `[${address}]` : address;
   return `http://${host}:${bound.port}`;
-}
-
-function controlEndpointUrl(endpoint: { readonly host: '127.0.0.1' | '::1'; readonly port: number }, path: string): string {
-  const host = endpoint.host === '::1' ? '[::1]' : endpoint.host;
-  return `http://${host}:${endpoint.port}${path}`;
 }
 
 function memoryTrigger(outcome: Checkpoint['outcome']): 'completion' | 'blocked' | 'rewind' | null {
@@ -820,14 +827,17 @@ function helpText(): string {
     '',
     '用法：humanagent [serve 选项]',
     '',
-    '默认启动 WebUI，workspace 为当前目录，端口为 10086。',
+    '默认启动 WebUI，workspace 来自 --workspace 或所选产品的 [project].workspace 声明，端口为 10086。',
     '',
     '常用选项：',
-    '  --workspace <path>       项目 workspace（默认当前目录）',
+    '  --workspace <path>       项目 workspace（默认读取所选产品的 [project].workspace）',
+    '  --control-root <path>    本次调用使用的产品 control root（默认采用已声明的默认产品）',
     '  --provider <name>        provider（默认读取 ~/.humanagent/config.toml）',
     '  --port <number>          WebUI 端口（默认 10086）',
     '  --protocol <name>        responses、openai 或 anthropic',
+    '  humanagent pair          使用当前产品的凭据直接签发一次性配对码',
     '  humanagent restart       使用原 serve owner 的启动声明完成一次代码交接',
+    '  humanagent product use --control-root <path>  声明后续裸命令使用的默认产品',
     '  --help                   显示帮助',
     '  --json                   以机器可读 JSON 输出错误',
     '',
@@ -1224,8 +1234,33 @@ export async function main(args: readonly string[]): Promise<void> {
   const command = requestedCommand === undefined || requestedCommand.startsWith('-')
     ? 'serve'
     : requestedCommand;
-  const workspace = option(args, '--workspace') ?? process.cwd();
+  const workspace = option(args, '--workspace');
   const controlRoot = option(args, '--control-root');
+  if (command === 'product') {
+    if (args[1] !== 'use') {
+      throw new AppLifecycleError(
+        'cli.command.invalid',
+        `unknown product action: ${args[1] ?? '(missing)'}`,
+        'run humanagent product use --control-root <path>',
+        'humanagent.cli',
+      );
+    }
+    if (controlRoot === undefined || !controlRoot.trim()) {
+      throw new AppLifecycleError(
+        'cli.product.control-root-required',
+        'product use requires an explicit --control-root <path>',
+        'run humanagent product use --control-root <absolute-path>',
+        'humanagent.cli',
+      );
+    }
+    const selection = await declareDefaultProduct(controlRoot);
+    console.log(JSON.stringify({
+      command: 'product use',
+      controlRoot: selection.controlRoot,
+      declarationPath: join(homedir(), '.humanagent', 'default-product.toml'),
+    }, null, 2));
+    return;
+  }
   if (command === 'init' || command === 'doctor') {
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
@@ -1266,7 +1301,7 @@ export async function main(args: readonly string[]): Promise<void> {
       });
       return;
     }
-    const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
+    const runtime = await openRuntime({ workspace: nativePaths.workspaceCwd, controlRoot: nativePaths.controlRoot, plan, sessionId });
     try {
       const configuredAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;
       const configuredAgent = runtime.configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
@@ -1361,7 +1396,12 @@ export async function main(args: readonly string[]): Promise<void> {
   if (command === 'resume') {
     const sessionId = required(option(args, '--session'), '--session');
     const prompt = required(option(args, '--prompt'), '--prompt');
-    const runtime = await resumeRuntime({ workspace, controlRoot, sessionId });
+    const resumePaths = await resolveRuntimePaths({ workspace, controlRoot });
+    const runtime = await resumeRuntime({
+      workspace: resumePaths.workspaceCwd,
+      controlRoot: resumePaths.controlRoot,
+      sessionId,
+    });
     try {
       const manifest = await readRunManifest(runtime.paths, sessionId);
       if (manifest.driverRef === 'rcc') {
@@ -1493,7 +1533,7 @@ export async function main(args: readonly string[]): Promise<void> {
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
     const lease = await readDaemonLease(paths);
-    if (lease === undefined || lease.ownerId !== 'humanagent.app.serve' || lease.disposedAt) {
+    if (lease === undefined || lease.ownerId !== SERVE_OWNER || lease.disposedAt) {
       throw new AppLifecycleError(
         'daemon-restart.owner-missing',
         'no active serve owner was found for this workspace',
@@ -1502,7 +1542,17 @@ export async function main(args: readonly string[]): Promise<void> {
       );
     }
     if (lease.startup === undefined) assertLegacyRestartOptions(args.slice(1));
-    const startup = await currentStartupDeclaration(args.slice(1), lease.startup?.args ?? []);
+    // A formal replacement keeps the already-resolved product/workspace even
+    // when the original launch was bare and the default declaration later
+    // changes. Retained explicit values win; only a legacy declaration that
+    // lacks them is filled from this invocation's resolved paths.
+    const retainedStartupArgs = lease.startup?.args ?? [];
+    const retainedStartupOptions = startupOptionMap(retainedStartupArgs);
+    const startup = await currentStartupDeclaration(args.slice(1), [
+      ...retainedStartupArgs,
+      ...(retainedStartupOptions.has('--control-root') ? [] : ['--control-root', paths.controlRoot]),
+      ...(retainedStartupOptions.has('--workspace') ? [] : ['--workspace', paths.workspaceCwd]),
+    ]);
     const completion = await restartDaemonWithCodeHandoff(paths, {
       expected: lease,
       startup,
@@ -1511,197 +1561,47 @@ export async function main(args: readonly string[]): Promise<void> {
     return;
   }
   if (command === 'pair') {
-    const paths = await resolveRuntimePaths({ workspace, controlRoot });
-    await ensureControlLayout(paths);
-    const lease = await readDaemonLease(paths);
-    if (!lease || lease.ownerId !== 'humanagent.app.serve' || lease.disposedAt) {
-      throw new AppLifecycleError(
-        'auth.pair.owner-missing',
-        'no active serve owner was found for this workspace',
-        'start humanagent serve before requesting a pairing code',
-        'humanagent.app.serve',
-      );
-    }
-    const endpoint = lease.controlEndpoint;
-    if (!endpoint) {
-      throw new AppLifecycleError(
-        'auth.pair.endpoint-missing',
-        'the active serve owner has not published its control endpoint',
-        'restart the serve owner once and retry pairing',
-        'humanagent.app.serve',
-      );
-    }
-    const token = await deriveSupervisorToken(paths.webAccessCredentialPath, lease.leaseId, lease.generation);
-    let response: Response;
-    try {
-      response = await fetch(controlEndpointUrl(endpoint, '/api/auth/pair/challenge'), {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${token}`,
-          'content-type': 'application/json',
-          accept: 'application/json',
-        },
-        body: JSON.stringify({ leaseId: lease.leaseId, generation: lease.generation }),
-      });
-    } catch (error) {
-      throw new AppLifecycleError(
-        'auth.pair.request-failed',
-        `could not reach the active serve owner: ${error instanceof Error ? error.message : String(error)}`,
-        'confirm the original serve CLI is still running and retry pairing',
-        'humanagent.app.serve',
-      );
-    }
-    const payload = await response.json().catch(() => ({})) as { readonly code?: unknown; readonly expiresAt?: unknown; readonly error?: unknown };
-    if (!response.ok) {
-      throw new AppLifecycleError(
-        'auth.pair.rejected',
-        `serve owner rejected pairing (${response.status})`,
-        'inspect the original serve CLI output and retry pairing',
-        'humanagent.app.serve',
-      );
-    }
-    if (typeof payload.code !== 'string' || typeof payload.expiresAt !== 'string') {
-      throw new AppLifecycleError(
-        'auth.pair.response-invalid',
-        'serve owner returned an invalid pairing challenge',
-        'restart the serve owner and retry pairing',
-        'humanagent.app.serve',
-      );
-    }
-    console.log(JSON.stringify({ command, code: payload.code, expiresAt: payload.expiresAt }));
+    // Pairing depends only on the selected product's durable credential owner.
+    // It never reads a lease, an endpoint, a workspace or a startup order.
+    const productPaths = await resolveProductPaths({ controlRoot });
+    const accessControl = await AccessControlService.open({
+      credentialPath: productPaths.webAccessCredentialPath,
+      create: true,
+    });
+    const challenge = await accessControl.issuePairingChallenge();
+    console.log(JSON.stringify({
+      command,
+      code: challenge.code,
+      expiresAt: new Date(challenge.expiresAt).toISOString(),
+    }));
     return;
   }
   if (command === 'serve') {
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
-    await ensureControlLayout(paths);
-    const configuration = await loadConfiguration(paths);
-    const configuredProvider = configuration.effective.provider ?? DEFAULT_RCC_PROVIDER;
-    const resolvedSource = configuredProvider.source ?? 'rcc';
-    const selected = resolveServeProvider(args, configuration.effective.provider);
-    const mode = selected.provider;
-    const protocol = (option(args, '--protocol') ?? configuredProvider.protocol) as UiProviderProtocol;
-    if (protocol !== 'responses' && protocol !== 'openai' && protocol !== 'anthropic') {
-      throw new Error('serve --protocol must be responses, openai, or anthropic');
-    }
-    const baseUrl = option(args, '--rcc-base-url') ?? configuredProvider.baseUrl;
-    const binding = providerBindingFromOptions(args, configuredProvider, protocol, mode, baseUrl, resolvedSource, selected.providerIdOverride);
-    const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
-    const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
-    const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
-    const effectiveLegacyProvider: ProviderConfig = {
-      ...configuredProvider,
-      source: resolvedSource,
-      binding: binding.bindingId,
-      provider: binding.providerId === 'rcc' || binding.providerId === 'http'
-        ? binding.providerId : configuredProvider.provider,
-      protocol,
-      model: binding.modelRef,
-      route: option(args, '--route') ?? configuredProvider.route,
-      baseUrl,
-    };
-    const prepareSelectedAgentProvider = <
-      TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
-    >(input: {
-      readonly roleId: import('../../config/src/index.js').AgentRole;
-      readonly configuredAgentId?: string;
-    }) => prepareAgentProvider<TIdentity>({
-      ...input,
-      agentProviderBindings: configuration.agentProviderBindings,
-      legacyProvider: effectiveLegacyProvider,
-      legacyBindingOverrides: {
-        endpointRef: binding.endpointRef,
-        configDigest: binding.configDigest,
-        capabilityDigest: binding.capabilityDigest,
-      },
-      maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
-      evidenceRoot,
-    });
-    const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
-    let boundPortNumber = portNumber;
-    const host = serveHost(option(args, '--host') ?? '127.0.0.1');
-    const accessControl = await AccessControlService.open({
-      credentialPath: paths.webAccessCredentialPath,
-      create: true,
-    });
-    const memoryRoot = paths.memoryRoot;
-    const port = mode === 'rcc'
-      ? assembleProviderExecutionPort({
-          binding,
-          routeRef: option(args, '--route') ?? configuredProvider.route,
-          baseUrl,
-          source: resolvedSource,
-          maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
-        }, evidenceRoot)
-      : createFakeExecutionPort(
-          binding,
-          option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined,
-          fakeScenario(args),
-        );
-    const memoryDriverFor = memoryDriverFactory({
-      paths,
-      configuration,
-      workspace: paths.workspaceCwd,
-      inputRefs: [`humanagent://memory/project/${paths.projectKey}`],
-      prepareAgentProvider: prepareSelectedAgentProvider,
-    });
-    const memoryRuntime = await composeMemoryRuntime({
-      paths,
-      configuration,
-      workspaceCwd: paths.workspaceCwd,
-      sessionsRoot: paths.sessionsRoot,
-      runNotesRoot: paths.runNotesRoot,
-      auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
-      auditPromptRef: configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
-      autoUpdate: configuration.effective.memory?.update.auto ?? false,
-      ...(memoryDriverFor === undefined ? {} : { driverFor: memoryDriverFor }),
-      binding: {
-        bindingRef: `memory-ui:${paths.projectKey}`,
-        projectKey: paths.projectKey,
-        executionEpoch: 1,
-        scope: {
-          namespace: 'project',
-          projectKey: paths.projectKey,
-          organId: id('organ', 'humanagent-ui'),
-        },
-        interactionScopeId: `runtime:${paths.projectKey}`,
-        mainAgentId: 'humanagent-ui',
-        actor: {
-          actorId: 'memory-agent',
-          roleId: 'memory',
-          permissions: ['memory.read', 'memory.propose'],
-          projectKey: paths.projectKey,
-        },
-      },
-      checkpointEvidence: uiMemoryEvidence(checkpointRoot, mode),
-      taskEvidence: filesystemTaskEvidence({
-        journalPath: join(checkpointRoot, mode, 'ui-runtime-journal.jsonl'),
-      }),
-    });
-    const plugins = servePlugins(mode, {
-      executionPort: port,
-      memory: {
-        coordinator: memoryRuntime.composition.coordinator,
-        backend: memoryRuntime.composition.backend,
-        projectKey: paths.projectKey,
-        interaction: memoryRuntime.composition.interaction,
-        bindingRef: memoryRuntime.composition.bindingRef,
-      },
-    });
-    if (!serveCompositionManifestMatches(plugins, mode)) {
-      throw new AppLifecycleError(
-        'serve.composition.manifest-mismatch',
-        `serve ${mode} plugin manifests do not match the declared composition contract`,
-        'repair the Cordis serve plugin manifests before retrying',
-        'humanagent.app.entry-composition',
-      );
-    }
-    const cordisHost = createCordisHost(plugins);
-    cordisHost.assertLoadedPlugins(SERVE_COMPOSITION_PLUGINS[mode].map((plugin) => plugin.pluginId));
-    const startup = await currentStartupDeclaration(args);
+    // A formal replacement carries a one-shot recorded request id. It is a
+    // control argument for this child invocation only. It stays out of the
+    // retained startup declaration and out of SERVE_STARTUP_OPTIONS.
+    const restartRequest = option(args, SUPERVISOR_RESTART_REQUEST_OPTION);
+    // Retain the already-resolved product and workspace as explicit startup
+    // arguments so a later formal restart cannot reselect a product from cwd
+    // or from a changed default-product declaration.
+    const startup = await currentStartupDeclaration(args, [
+      '--control-root', paths.controlRoot,
+      '--workspace', paths.workspaceCwd,
+    ]);
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
     let serveRuntime: ServeRuntimeComposition | undefined;
     let supervisor: SupervisorStartup | undefined;
     let restartInFlight: DaemonCodeHandoff | undefined;
+    let composition: {
+      readonly mode: 'fake' | 'rcc';
+      readonly binding: ProviderBinding;
+      readonly uiRoot: string;
+      readonly checkpointRoot: string;
+      readonly host: ServeHost;
+      readonly cordisHost: ReturnType<typeof createCordisHost>;
+      readonly memoryRuntime: MemoryRuntime;
+    } | undefined;
     const requestRestart = (input: { readonly leaseId: string; readonly generation: number }) => {
       if (supervisor === undefined) {
         throw new AppLifecycleError(
@@ -1743,197 +1643,339 @@ export async function main(args: readonly string[]): Promise<void> {
       console.log(JSON.stringify({ event: 'restart.accepted', ...handoff.receipt }, null, 2));
       return handoff.receipt;
     };
-    const orchestrationPorts = mode === 'fake'
-      ? createDeterministicServeOrchestrationPorts()
-      : createRccServeOrchestrationPorts({
+    const launch = await runSupervisorServeStartup(paths, async () => {
+      // A continuation invocation never reaches this factory, so it opens no
+      // credential, writes no product file, opens no listener and installs no
+      // shutdown handler. All product and runtime preparation is deferred to
+      // the committed-owner branch.
+      await ensureControlLayout(paths);
+      const configuration = await loadConfiguration(paths);
+      const configuredProvider = configuration.effective.provider ?? DEFAULT_RCC_PROVIDER;
+      const resolvedSource = configuredProvider.source ?? 'rcc';
+      const selected = resolveServeProvider(args, configuration.effective.provider);
+      const mode = selected.provider;
+      const protocol = (option(args, '--protocol') ?? configuredProvider.protocol) as UiProviderProtocol;
+      if (protocol !== 'responses' && protocol !== 'openai' && protocol !== 'anthropic') {
+        throw new Error('serve --protocol must be responses, openai, or anthropic');
+      }
+      const baseUrl = option(args, '--rcc-base-url') ?? configuredProvider.baseUrl;
+      const binding = providerBindingFromOptions(args, configuredProvider, protocol, mode, baseUrl, resolvedSource, selected.providerIdOverride);
+      const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
+      const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
+      const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
+      const effectiveLegacyProvider: ProviderConfig = {
+        ...configuredProvider,
+        source: resolvedSource,
+        binding: binding.bindingId,
+        provider: binding.providerId === 'rcc' || binding.providerId === 'http'
+          ? binding.providerId : configuredProvider.provider,
+        protocol,
+        model: binding.modelRef,
+        route: option(args, '--route') ?? configuredProvider.route,
+        baseUrl,
+      };
+      const prepareSelectedAgentProvider = <
+        TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+      >(input: {
+        readonly roleId: import('../../config/src/index.js').AgentRole;
+        readonly configuredAgentId?: string;
+      }) => prepareAgentProvider<TIdentity>({
+        ...input,
+        agentProviderBindings: configuration.agentProviderBindings,
+        legacyProvider: effectiveLegacyProvider,
+        legacyBindingOverrides: {
+          endpointRef: binding.endpointRef,
+          configDigest: binding.configDigest,
+          capabilityDigest: binding.capabilityDigest,
+        },
+        maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+        evidenceRoot,
+      });
+      const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
+      const host = serveHost(option(args, '--host') ?? '127.0.0.1');
+      const accessControl = await AccessControlService.open({
+        credentialPath: paths.webAccessCredentialPath,
+        create: true,
+      });
+      const port = mode === 'rcc'
+        ? assembleProviderExecutionPort({
+            binding,
+            routeRef: option(args, '--route') ?? configuredProvider.route,
+            baseUrl,
+            source: resolvedSource,
+            maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+          }, evidenceRoot)
+        : createFakeExecutionPort(
+            binding,
+            option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined,
+            fakeScenario(args),
+          );
+      const memoryDriverFor = memoryDriverFactory({
+        paths,
+        configuration,
+        workspace: paths.workspaceCwd,
+        inputRefs: [`humanagent://memory/project/${paths.projectKey}`],
+        prepareAgentProvider: prepareSelectedAgentProvider,
+      });
+      const memoryRuntime = await composeMemoryRuntime({
+        paths,
+        configuration,
+        workspaceCwd: paths.workspaceCwd,
+        sessionsRoot: paths.sessionsRoot,
+        runNotesRoot: paths.runNotesRoot,
+        auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+        auditPromptRef: configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
+        autoUpdate: configuration.effective.memory?.update.auto ?? false,
+        ...(memoryDriverFor === undefined ? {} : { driverFor: memoryDriverFor }),
+        binding: {
+          bindingRef: `memory-ui:${paths.projectKey}`,
+          projectKey: paths.projectKey,
+          executionEpoch: 1,
+          scope: {
+            namespace: 'project',
+            projectKey: paths.projectKey,
+            organId: id('organ', 'humanagent-ui'),
+          },
+          interactionScopeId: `runtime:${paths.projectKey}`,
+          mainAgentId: 'humanagent-ui',
+          actor: {
+            actorId: 'memory-agent',
+            roleId: 'memory',
+            permissions: ['memory.read', 'memory.propose'],
+            projectKey: paths.projectKey,
+          },
+        },
+        checkpointEvidence: uiMemoryEvidence(checkpointRoot, mode),
+        taskEvidence: filesystemTaskEvidence({
+          journalPath: join(checkpointRoot, mode, 'ui-runtime-journal.jsonl'),
+        }),
+      });
+      const plugins = servePlugins(mode, {
+        executionPort: port,
+        memory: {
+          coordinator: memoryRuntime.composition.coordinator,
+          backend: memoryRuntime.composition.backend,
+          projectKey: paths.projectKey,
+          interaction: memoryRuntime.composition.interaction,
+          bindingRef: memoryRuntime.composition.bindingRef,
+        },
+      });
+      if (!serveCompositionManifestMatches(plugins, mode)) {
+        throw new AppLifecycleError(
+          'serve.composition.manifest-mismatch',
+          `serve ${mode} plugin manifests do not match the declared composition contract`,
+          'repair the Cordis serve plugin manifests before retrying',
+          'humanagent.app.entry-composition',
+        );
+      }
+      const cordisHost = createCordisHost(plugins);
+      cordisHost.assertLoadedPlugins(SERVE_COMPOSITION_PLUGINS[mode].map((plugin) => plugin.pluginId));
+      const orchestrationPorts = mode === 'fake'
+        ? createDeterministicServeOrchestrationPorts()
+        : createRccServeOrchestrationPorts({
             port,
             binding,
             prepareAgentProvider: prepareSelectedAgentProvider,
             promptSegments: {
               review: servePromptSegments(configuration, 'review'),
             },
-        });
-    supervisor = await runSupervisorStartup(paths, [
-      {
-        name: 'cordis-host',
-        ownerId: 'humanagent.app.cordis-host',
-        nextAction: 'repair Cordis host startup before retrying serve',
-        start: async () => {
-          await cordisHost.start();
-          if (!serveCompositionComplete(cordisHost.snapshot(), mode)) {
-            throw new AppLifecycleError(
-              'serve.composition.incomplete',
-              `serve ${mode} composition does not match the declared plugin contract`,
-              'repair the Cordis serve plugin composition before retrying',
-              'humanagent.app.entry-composition',
-            );
-          }
-        },
-        dispose: async () => { await cordisHost.dispose(); },
-      },
-      {
-        name: 'serve-runtime',
-        ownerId: 'humanagent.app.serve-runtime',
-        nextAction: 'repair the serve runtime composition before retrying',
-        start: async () => {
-          serveRuntime = createServeRuntimeComposition({
-            maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
-            eventBusPorts: memoryRuntime.ports,
-            feedbackPorts: {
-              journal: memoryRuntime.ports.journal,
-              publishers: memoryRuntime.ports.publishers,
-            },
-            feedbackPublisherId: 'serve-orchestration-publisher',
-            ...(orchestrationPorts === undefined ? {} : orchestrationPorts),
           });
+      composition = { mode, binding, uiRoot, checkpointRoot, host, cordisHost, memoryRuntime };
+      const stages: SupervisorStage[] = [
+        {
+          name: 'cordis-host',
+          ownerId: 'humanagent.app.cordis-host',
+          nextAction: 'repair Cordis host startup before retrying serve',
+          start: async () => {
+            await cordisHost.start();
+            if (!serveCompositionComplete(cordisHost.snapshot(), mode)) {
+              throw new AppLifecycleError(
+                'serve.composition.incomplete',
+                `serve ${mode} composition does not match the declared plugin contract`,
+                'repair the Cordis serve plugin composition before retrying',
+                'humanagent.app.entry-composition',
+              );
+            }
+          },
+          dispose: async () => { await cordisHost.dispose(); },
         },
-        dispose: async () => {
-          if (serveRuntime) await serveRuntime.dispose();
-        },
-      },
-      {
-        name: 'ui-runtime',
-        ownerId: 'humanagent.runtime.ui',
-        nextAction: 'repair UI runtime startup before retrying serve',
-        start: async () => {
-          runtime = await startUiRuntime({
-            agentRoster: configuration.agentRoster,
-            maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
-            mode,
-            accessControl,
-            organId: id('organ', 'humanagent-ui'),
-            binding,
-            providerSource: resolvedSource,
-            port: cordisHost.getExecutionRuntimePort(),
-            checkpointRoot,
-            interactionRoot: paths.mainRoot,
-            evidenceRoot,
-            ...(providerRetryConfigFromEffective(configuration) === undefined ? {} : {
-              providerRetryConfig: {
-                config: providerRetryConfigFromEffective(configuration)!,
-                journalRoot: join(paths.journalRoot, 'ui-runtime'),
+        {
+          name: 'serve-runtime',
+          ownerId: 'humanagent.app.serve-runtime',
+          nextAction: 'repair the serve runtime composition before retrying',
+          start: async () => {
+            serveRuntime = createServeRuntimeComposition({
+              maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
+              eventBusPorts: memoryRuntime.ports,
+              feedbackPorts: {
+                journal: memoryRuntime.ports.journal,
+                publishers: memoryRuntime.ports.publishers,
               },
-            }),
-            uiRoot,
-            // The provider route binding is control-plane configuration: it is
-            // resolved here, at the entry that owns configuration, and injected
-            // into the runtime assembly instead of being hardcoded there.
-            webSearchProviderConfig: resolveWebSearchBackendConfig(),
-            ...(process.env.HUMANAGENT_TEMPLATE_ROOT === undefined ? {} : {
-              explicitBrainTemplateRoot: process.env.HUMANAGENT_TEMPLATE_ROOT,
-            }),
-            memory: {
-              coordinator: memoryRuntime.composition.coordinator,
-              backend: memoryRuntime.composition.backend,
-              projectKey: paths.projectKey,
-              interaction: memoryRuntime.composition.interaction,
-              bindingRef: memoryRuntime.composition.bindingRef,
-              roleId: 'review',
-              ...composeUiMemoryHooks({
-                memory: memoryRuntime,
-                checkpointJournalPath: uiRuntimeControlJournalPath(join(checkpointRoot, mode)),
-                attentionPort: createJsonlAttentionPort({ paths, filePath: join(paths.journalRoot, 'memory-attention.jsonl') }),
-                readAttentions: () => readJsonlAttentions({ filePath: join(paths.journalRoot, 'memory-attention.jsonl') }),
+              feedbackPublisherId: 'serve-orchestration-publisher',
+              ...(orchestrationPorts === undefined ? {} : orchestrationPorts),
+            });
+          },
+          dispose: async () => {
+            if (serveRuntime) await serveRuntime.dispose();
+          },
+        },
+        {
+          name: 'ui-runtime',
+          ownerId: 'humanagent.runtime.ui',
+          nextAction: 'repair UI runtime startup before retrying serve',
+          start: async () => {
+            runtime = await startUiRuntime({
+              agentRoster: configuration.agentRoster,
+              maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
+              mode,
+              accessControl,
+              organId: id('organ', 'humanagent-ui'),
+              binding,
+              providerSource: resolvedSource,
+              port: cordisHost.getExecutionRuntimePort(),
+              checkpointRoot,
+              interactionRoot: paths.mainRoot,
+              evidenceRoot,
+              ...(providerRetryConfigFromEffective(configuration) === undefined ? {} : {
+                providerRetryConfig: {
+                  config: providerRetryConfigFromEffective(configuration)!,
+                  journalRoot: join(paths.journalRoot, 'ui-runtime'),
+                },
               }),
-            },
-            runtimeComposition: {
+              uiRoot,
+              // The provider route binding is control-plane configuration: it is
+              // resolved here, at the entry that owns configuration, and injected
+              // into the runtime assembly instead of being hardcoded there.
+              webSearchProviderConfig: resolveWebSearchBackendConfig(),
+              ...(process.env.HUMANAGENT_TEMPLATE_ROOT === undefined ? {} : {
+                explicitBrainTemplateRoot: process.env.HUMANAGENT_TEMPLATE_ROOT,
+              }),
+              memory: {
+                coordinator: memoryRuntime.composition.coordinator,
+                backend: memoryRuntime.composition.backend,
+                projectKey: paths.projectKey,
+                interaction: memoryRuntime.composition.interaction,
+                bindingRef: memoryRuntime.composition.bindingRef,
+                roleId: 'review',
+                ...composeUiMemoryHooks({
+                  memory: memoryRuntime,
+                  checkpointJournalPath: uiRuntimeControlJournalPath(join(checkpointRoot, mode)),
+                  attentionPort: createJsonlAttentionPort({ paths, filePath: join(paths.journalRoot, 'memory-attention.jsonl') }),
+                  readAttentions: () => readJsonlAttentions({ filePath: join(paths.journalRoot, 'memory-attention.jsonl') }),
+                }),
+              },
+              runtimeComposition: {
+                ...(mode === 'fake' ? {} : {
+                  prepareAgentProvider: prepareSelectedAgentProvider,
+                  // The Task-scoped preparer hands the selected execution
+                  // composition's custody to the prepared-stop owner before the
+                  // fallible acquisition append. It reuses the same compiled
+                  // bindings, effective legacy provider and port factory as the
+                  // neutral preparer; it never re-parses config or substitutes
+                  // the default Provider.
+                  prepareTaskAgentProvider: (
+                    selection: { readonly roleId: import('../../config/src/index.js').AgentRole; readonly configuredAgentId?: string },
+                    owner: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStop,
+                    lease: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStopPreparationLease,
+                  ) => prepareExecutionAgentProvider({
+                    roleId: selection.roleId,
+                    ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+                    agentProviderBindings: configuration.agentProviderBindings,
+                    legacyProvider: effectiveLegacyProvider,
+                    legacyBindingOverrides: {
+                      endpointRef: binding.endpointRef,
+                      configDigest: binding.configDigest,
+                      capabilityDigest: binding.capabilityDigest,
+                    },
+                    createPort: (selected) => createAgentProviderPort(
+                      selected,
+                      evidenceRoot,
+                      option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+                    ),
+                  }, owner, lease),
+                }),
+                ...(orchestrationPorts === undefined ? {} : {
+                  createTaskAssembly: serveRuntime!.createTaskAssembly,
+                }),
+              },
               ...(mode === 'fake' ? {} : {
-                prepareAgentProvider: prepareSelectedAgentProvider,
-                // The Task-scoped preparer hands the selected execution
-                // composition's custody to the prepared-stop owner before the
-                // fallible acquisition append. It reuses the same compiled
-                // bindings, effective legacy provider and port factory as the
-                // neutral preparer; it never re-parses config or substitutes
-                // the default Provider.
-                prepareTaskAgentProvider: (
-                  selection: { readonly roleId: import('../../config/src/index.js').AgentRole; readonly configuredAgentId?: string },
-                  owner: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStop,
-                  lease: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStopPreparationLease,
-                ) => prepareExecutionAgentProvider({
-                  roleId: selection.roleId,
-                  ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
-                  agentProviderBindings: configuration.agentProviderBindings,
-                  legacyProvider: effectiveLegacyProvider,
-                  legacyBindingOverrides: {
-                    endpointRef: binding.endpointRef,
-                    configDigest: binding.configDigest,
-                    capabilityDigest: binding.capabilityDigest,
-                  },
-                  createPort: (selected) => createAgentProviderPort(
-                    selected,
-                    evidenceRoot,
-                    option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
-                  ),
-                }, owner, lease),
+                explicitBrainHelperProviderPreparer: (selection: {
+                  readonly roleId: import('../../config/src/index.js').AgentRole;
+                  readonly configuredAgentId?: string;
+                }) => prepareSelectedAgentProvider<TasklessProviderExecutionIdentityRef>(selection),
               }),
-              ...(orchestrationPorts === undefined ? {} : {
-                createTaskAssembly: serveRuntime!.createTaskAssembly,
-              }),
-            },
-            ...(mode === 'fake' ? {} : {
-              explicitBrainHelperProviderPreparer: (selection: {
-                readonly roleId: import('../../config/src/index.js').AgentRole;
-                readonly configuredAgentId?: string;
-              }) => prepareSelectedAgentProvider<TasklessProviderExecutionIdentityRef>(selection),
-            }),
-            host,
-            portNumber: boundPortNumber,
-            projectKey: paths.projectKey,
-            workspaceRoot: paths.workspaceCwd,
-            // Project identity comes only from the Config-owned manifest
-            // catalog; the read model derives each project/mode journal path
-            // from these canonical paths instead of scanning workspaces.
-            runtimePaths: paths,
-            projectCatalog: () => listConfiguredProjects(paths),
-            restart: requestRestart,
-            // The scheduled-occurrence patrol may only dispatch under the live
-            // supervisor lease. The stage starts before `runSupervisorStartup`
-            // returns, so the lease is read lazily at tick time; an unresolved
-            // lease fails the patrol closed with a typed reason.
-            lease: () => supervisor?.lease,
-            identity: () => {
-              if (supervisor === undefined) {
-                throw new AppLifecycleError(
-                  'daemon-identity.owner-not-ready',
-                  'serve owner has not completed startup',
-                  'wait for the original serve CLI to report ready and retry identity inspection',
-                  'humanagent.app.serve',
-                );
-              }
-              const activeLease = supervisor.lease.record;
-              return {
-                leaseId: activeLease.leaseId,
-                generation: activeLease.generation,
-                pid: activeLease.pid,
-                processStartToken: activeLease.processStartToken,
-              };
-            },
-          });
-          runtime.service.bindReadResources({ runtimePaths: paths, projectCatalog: () => listConfiguredProjects(paths) });
-        },
-        dispose: async () => {
-          try {
+              host,
+              portNumber,
+              projectKey: paths.projectKey,
+              // Product identity comes only from the Config-owned product root.
+              // The server never infers it from a credential path.
+              productRoot: paths.controlRoot,
+              workspaceRoot: paths.workspaceCwd,
+              // Project identity comes only from the Config-owned manifest
+              // catalog; the read model derives each project/mode journal path
+              // from these canonical paths instead of scanning workspaces.
+              runtimePaths: paths,
+              projectCatalog: () => listConfiguredProjects(paths),
+              restart: requestRestart,
+              // The scheduled-occurrence patrol may only dispatch under the live
+              // supervisor lease. The stage starts before the supervisor entry
+              // returns, so the lease is read lazily at tick time; an unresolved
+              // lease fails the patrol closed with a typed reason.
+              lease: () => supervisor?.lease,
+              identity: () => {
+                if (supervisor === undefined) {
+                  throw new AppLifecycleError(
+                    'daemon-identity.owner-not-ready',
+                    'serve owner has not completed startup',
+                    'wait for the original serve CLI to report ready and retry identity inspection',
+                    'humanagent.app.serve',
+                  );
+                }
+                const activeLease = supervisor.lease.record;
+                return {
+                  leaseId: activeLease.leaseId,
+                  generation: activeLease.generation,
+                  pid: activeLease.pid,
+                  processStartToken: activeLease.processStartToken,
+                };
+              },
+            });
+            runtime.service.bindReadResources({ runtimePaths: paths, projectCatalog: () => listConfiguredProjects(paths) });
+          },
+          dispose: async () => {
             if (runtime) await runtime.close();
-          } finally {
-            // Pairing challenges are process-lifetime credentials. A restart
-            // or stop must retire them without invalidating persistent
-            // browser-session generations.
-            accessControl.closeChallengeStore();
-          }
+          },
         },
-      },
-    ], {
-      lease: {
-        ownerId: 'humanagent.app.serve',
-        startup,
-        takeover: {
-          reason: 'new hm serve process takes over the previous daemon',
-          stop: {},
-        },
-      },
+      ];
+      return stages;
+    }, {
+      startup,
+      ...(restartRequest === undefined ? {} : { restartRequest }),
     });
-    if (!runtime || supervisor === undefined) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
-    boundPortNumber = runtime.server.port;
+    if (launch.status === 'already-running') {
+      const endpoint = launch.lease.controlEndpoint;
+      if (endpoint === undefined) {
+        throw new AppLifecycleError(
+          'ui-runtime.startup.missing',
+          'the existing serve owner has no published control endpoint',
+          'retry after the serve owner reports ready',
+          'humanagent.app.serve',
+        );
+      }
+      console.log(JSON.stringify({
+        command: 'serve',
+        status: 'already-running',
+        controlRoot: paths.controlRoot,
+        workspace: paths.workspaceCwd,
+        projectKey: paths.projectKey,
+        url: displayOrigin({ listenAddress: endpoint.host, port: endpoint.port }),
+        pairingCommand: formatPairingCommand(paths),
+      }, null, 2));
+      return;
+    }
+    supervisor = launch.startup;
+    if (!runtime || composition === undefined) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
+    const { mode, binding, uiRoot, checkpointRoot, host, cordisHost, memoryRuntime } = composition;
     await supervisor.lease.setControlEndpoint(controlEndpointFor(host, runtime.server.port));
     let shuttingDown = false;
     const shutdown = (): void => {
@@ -1984,7 +2026,7 @@ export async function main(args: readonly string[]): Promise<void> {
       protocol: binding.protocol,
       uiRoot,
       checkpointRoot,
-      memoryRoot,
+      memoryRoot: paths.memoryRoot,
       projectKey: paths.projectKey,
       eventJournal: join(paths.journalRoot, 'events.jsonl'),
       supervisor: {
