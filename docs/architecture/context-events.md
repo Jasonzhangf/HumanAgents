@@ -928,3 +928,125 @@ reviewer-design 在 `55eb847` 上复跑 gate（`pnpm typecheck` / `pnpm test:con
 **第 7 项是真实覆盖漏洞，已修复**：`plan.rejected` 的 `priority` 为 2，天然参与 `summary`；在默认 `summaryBudgetBytes = 2048` 下，summary 循环恰好把它消费掉，于是 `omitted` 自然为空 —— 原测试无法区分「靠 summary 顺带消费」与「靠 switch 分支显式消费」。实测在 `summaryBudgetBytes: 0` 时该变异使同一 `eventId` **同时出现在 `decisions` 与 `omitted`**，正是 §10.2 `omitted` 定义（「未进入上述任一 digest **字段**的事件」）所禁止的。修复方式是在测试中补入**受限 summary 预算**下的断言，使 `case 'plan.rejected'` 的 `consumed.add` 可被杀死；实现本身无缺陷，改动只在测试侧。
 
 **不要把这句推广成「任一 `consumed.add` 都可被杀死」**：`projector.ts` 现有 10 个 `consumed.add` 站点，逐个删除后 9 个被杀死，**只有 `case 'plan.proposed'` 中的 `consumed.add(rejection.eventId)` 存活**（`fail 0 / pass 143`）。它要产生可观察差异，需要「被 superseded 的 `plan.rejected` 仍携带 `pairing`」，而 §8.2 已声明该组合在契约外，因此**合法域内没有测试能杀死它**——这不是覆盖漏洞。§16.2 的 ADVISORY 行已裁定保留该行代码。
+
+## 17. F07 typed public-output carrier —— DRAFT 设计材料（待独立 review）
+
+状态：`DRAFT / NOT-IMPLEMENTED / UNVERIFIED`。本节只材料化设计。它不改代码、测试、需求、Journal 或运行服务。实现与真实入口验收均未执行。本设计须先通过独立 design review，之后才允许进入代码阶段。
+
+### 17.1 需求 ID 与 UX 审计标签
+
+`G3` 与 `F07` 是 UX 审计标签（见 `docs/ui/semantic-observation-audit-2026-10-07.md`），不是 `.appsdk/requirements.json` 的 requirement ID。本设计对应的 v14 有效条目：
+
+- `humanagent-explicit-brain-semantic-turn-context`（v1）：保留最新推理 turn 的完整语义。
+- `humanagent-turn-checkpoint-four-part-summary-and-planner-iteration`（v1）：turn 结束压缩为 checkpoint 四段。
+- `humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery`（v1）：标准结束动作包含交付。
+- `humanagent-human-readable-semantic-layered-ux-and-necessary-display`（v1）：按语义分层、人类可读显示。
+- `humanagent-provider-work-order-ablate-graph-governance-code`（v1）：先消融图节点，再更新治理，再改代码。
+
+### 17.2 现状与真实缺口（已定位符号）
+
+公开输出的权威生产、持久 Journal 与 dashboard/observation 读取已存在。真实缺口在公共语义信封：它只携带 `publicCommitWatermark`，丢弃已提交文本与提交引用。
+
+- `SemanticObservationEnvelope<TEvent>`（`packages/contracts/src/semantic-observation.ts:107`）没有 `publicOutput` 字段。
+- `SemanticObservationInput`（`packages/context-events/src/types.ts:228`）没有 `publicOutput` 字段。
+- `buildSemanticObservation`（`packages/context-events/src/pairing.ts:248`）只转发 `publicCommitWatermark`。
+- `UiRuntimeService.semanticObservation`（`packages/app/src/ui-runtime/service.ts:2356`，bound 同步 builder）只从 `task.publicOutput?.publicCommitWatermark` 取值，丢弃 `task.publicOutput.commits` 与 `state`。
+- `UiRuntimeService.scopedSemanticObservation`（`packages/app/src/ui-runtime/service.ts:2384`，durable 外项目分支）同样只从 `entry.snapshot.publicOutput?.publicCommitWatermark` 取值，丢弃 commits 与 state。
+- `buildSemanticObservationProjection`（`docs/ui/semantic-observation-projection.js:298`）不读取 `source.publicOutput`，所以浏览器语义面板没有已提交公开文本。
+
+现状不是要新建生产链。已提交公开输出的唯一 owner 仍是 Runtime coordinator 候选与 App Organ Journal 端口（`PublicOutputJournalPort`）。本设计只在语义读路径把既有 typed 值原样向前带。
+
+### 17.3 选定最小机制
+
+沿用既有 typed `PublicOutputPublication`，让它贯通：
+
+`task.publicOutput` / `entry.snapshot.publicOutput` → `SemanticObservationInput.publicOutput` → `buildSemanticObservation` → `SemanticObservationEnvelope.publicOutput` → `projectRuntimeSemanticObservation`（pass-through，`packages/ui/projection/runtime.ts:450`）→ 浏览器 `buildSemanticObservationProjection`。
+
+明确不采用：
+
+- 不把 `PublicOutputCommit` 伪装成 `CanonicalContextEvent`：它没有 `occurredAt` / `payloadRef` / `dataDigest` / `evidenceRefs`，强行转换会伪造时间与身份。
+- 不把 `provider.output` 提升为公共事实：它是未接受的原始 provider 遥测，运行 coordinator 路径不产出它。
+- 不新增第二 producer、cache、Journal、协议或 endpoint。
+
+### 17.4 精确 typed 字段与边界校验
+
+1. `SemanticObservationInput`（`types.ts:228`）新增 `readonly publicOutput?: PublicOutputPublication`。
+2. `SemanticObservationEnvelope<TEvent>`（`semantic-observation.ts:107`）新增 `readonly publicOutput?: PublicOutputPublication`。
+3. `buildSemanticObservation`（`pairing.ts:248`）原样转发：`...(input.publicOutput === undefined ? {} : { publicOutput: input.publicOutput })`。不排序、不过滤、不截断、不改写文本或 refs。
+4. 校验只在既有边界 `validateSemanticObservationEnvelope`（`semantic-observation.ts:263`）内做，不新增导出校验框架。`input.publicOutput !== undefined` 时用既有私有断言（`assertSemanticScope`、`assertExecutionEpoch`、`assertNonEmpty`、`assertWatermark`、`assertRefArray`）并抛既有 `ContractError`：
+   - `state` 必须是 `pending | committed | unavailable | unknown`。
+   - `commits` 必须是数组。
+   - 每条 `commit.ref.binding.scope` 合法、`executionEpoch` 合法；可选 `harnessTurnId` / `providerTurnId` / `requestId` 存在时非空。
+   - `sourceId` / `commitId` / `recordDigest` 非空，`journalSeq` 是非负安全整数。
+   - `text` 是字符串且非空；校验不使用 `.trim()`，保留原始空白。
+   - 显式拒绝跨 scope 提交：`commit.ref.binding.scope.organId` 与 `taskId` 必须等于信封 scope；信封 scope 带 `operationId` 时提交的 `operationId` 也必须相等。信封 scope 不含 `cycleId` 时不重建或比较 `cycleId`；提交的 cycle 来自其自身权威 binding，不由下游补造。
+   - `publicOutput.publicCommitWatermark` 存在时校验为 watermark；信封 `publicCommitWatermark` 也存在时两者必须相等。
+
+`sourceWatermark` 与 `publicCommitWatermark` 始终是两个独立水位：不取 max，不互相派生，不要求两者相等。
+
+### 17.5 前向语义（保持不变）
+
+- 保留 `state`、`commits`、顺序、`text`、`ref` 与两个 watermark，逐字逐引用原样向前。
+- 不静默过滤、排序、截断、去重或改写；非法来源在 §17.4 的边界显式拒绝，不先清洗再成功。
+- 不新增 pending 推导。`pending` 只来自 typed `PublicOutputPublication.state`，不从 `task.running`、事件状态或 provider 文本推断。
+- 原始权威 producer 不变：coordinator 候选、`PublicOutputJournalPort.commitPublicOutput` / `readPublicOutputs`、pending/unknown 组合行为都不改。
+
+### 17.6 App builder 调用流（精确，最小）
+
+只改两个 builder 的入参。不新增 async 权威读取 helper，不改 server API 签名。
+
+1. `UiRuntimeService.semanticObservation`（`service.ts:2356`）：保持同步签名。取 `task = this.coordinatorOrQueuedTaskSnapshot(taskId)` 后，在 `buildSemanticObservation({...})` 中增加 `...(task.publicOutput === undefined ? {} : { publicOutput: task.publicOutput })`。既有 `publicCommitWatermark` 取值不变。
+2. `UiRuntimeService.scopedSemanticObservation`（`service.ts:2384`）：bound 分支继续委托 `this.semanticObservation(taskId)`；durable 分支在 `buildSemanticObservation({...})` 中增加 `...(entry.snapshot.publicOutput === undefined ? {} : { publicOutput: entry.snapshot.publicOutput })`。既有 `publicCommitWatermark` 取值不变。
+3. `authoritativePublicOutputForTask`（`service.ts:3575`）保持不变，继续服务 dashboard/observation 的 durable 权威读取。语义 builder 不调用它，也不在 binding 缺失时回退到 retained publication。`publicOutputBindingFor` 的既有 early-`undefined` 行为不变。
+
+SSE 现状（不改签名）：`streamSemanticObservation`（`server.ts:1980`）每 250ms 重新调用 `service.semanticObservation(taskId)`，并用 `data: JSON.stringify(semantic)` 写整信封。`id: semantic-${semantic.sourceWatermark}` 只是事件 id，不是去重键。因此信封一旦携带 `publicOutput`，SSE 载荷自动携带它，无需改 server 签名。外项目 durable stream 走 `streamFiniteSemanticObservation`（单次快照）同样自动携带。此条是实际符号行为记录，不是新 API 变更。
+
+### 17.7 UI 投影映射（既有形状）
+
+`buildSemanticObservationProjection`（`semantic-observation-projection.js:298`）读取 `const publicOutput = source.publicOutput && typeof source.publicOutput === 'object' ? source.publicOutput : undefined`。
+
+- 子范围：复用既有 `eventMatchesScope(commit.ref.binding.scope, selectedScopeRef)`（`semantic-observation-projection.js:144`）与 `scopeBreadcrumbs`（:129）。既有控制支持 `organ` / `task` / `operation`；当前没有 `cycle` crumb，本设计不新增 cycle 控件，也不声称 cycle 子范围。提交按既有选中范围显示，不混入其他 scope。
+- 证据形状：复用既有 `SemanticObservationViewEvidence` 字段（`evidenceId` / `title` / `summary` / `scopeLabel` / `sourceLabel` / `refs` / `raw`）。`publicCommitEvidence(commit)` 用 `coverageScopeTitle`（:204）与 `coverageScopeRefs`（:211）填 `scopeLabel` / `refs`；`evidenceId = commit.ref.commitId`，`sourceLabel = commit.ref.sourceId`。不伪造时间、事件 ref 或新证据类型。
+- 条目：每条可见提交映射为 `{ id: 'public-commit:' + commit.ref.commitId, title: '已确认公开输出', detail: commit.text, state: 'completed', stateLabel: '已确认', tone: 'success', kind, evidence }`。`detail` 逐字保留，不 `.trim()`。
+- 分组：提交条目加入 `stableItems`（`current` 的「已提交事实」）；在 `semantic` / `actions` / `raw` 模式分别加入对应 `semanticItems` / `actionItems` / `rawItems`。
+- pending：仅当 `source.publicOutput?.state === 'pending'` 时，向 `liveItems`（「当前活动」）加入状态条目 `{ id: 'public-output-pending', title: '公开结果待确认', detail: '存在尚未提交的公开输出候选，未提交文本不公开显示。', state: 'active', stateLabel: '待确认', tone: 'warning', kind: 'live' }`。已确认提交仍在 stable。state 转为 `committed` 时该条目自然消失；不使用 `task.running`。
+- unknown / unavailable：向 `notices` 加入 `tone: state` 的提示（`unknown` → 「公开结果状态未知」；`unavailable` → 「公开结果暂不可用」），`detail` 说明只显示此前已确认提交；已确认 `commits` 保留在 stable。
+- 空态：仅当 `pairing.length === 0 && events.length === 0 && 可见 commits.length === 0 && state !== 'pending'` 时标 `empty`。
+
+### 17.8 消融与非变更
+
+- 不改 canonical 类型、taxonomy、normalizer、`provider.output` 处理。
+- 不新增状态、producer、cache、Journal、协议或 endpoint。
+- 不改 producer/store 的 pending/unknown 组合行为。
+- 不改 `authoritativePublicOutputForTask` 的既有语义。
+- F15 独立：F15 拥有 `packages/contracts/src/task-flow.ts`、`packages/core` 定义与 `docs/ui/task-display.js`。本设计不复制其文件。若共享 `packages/contracts/src/index.ts` 或 graph 写入，按标准 Git 顺序协调，不共享索引。
+
+### 17.9 最小公共消费者 RED 与 Root 验收（尚未执行）
+
+实现前的最小失败证据（待独立 review 后执行）：
+
+- `tests/context-events/semantic-public-consumer.test.ts`：`buildSemanticObservation` 携带同 scope `publicOutput`，保留 exact `text` / order / refs / 两个 watermark，拒绝跨 scope commit。
+- `tests/contracts/contracts.test.ts`：`validateSemanticObservationEnvelope` 接受合法 `publicOutput`，保留空白，拒绝跨 scope 与 `journalSeq > publicCommitWatermark`。
+- `tests/app/semantic-observation-public.test.ts`：bound 与 foreign `/api/tasks/:id/semantic`、`/semantic/stream` 返回带 authoritative `commits` 与 exact `text` 的 `publicOutput`；`buildSemanticObservationProjection` 把 committed commits 放进 stable、pending 只显示状态、committed 后清除 pending live、unknown/unavailable 保留已确认文本。
+- 命令（scoped，非全量矩阵）：`node --test dist/tests/tests/context-events/semantic-public-consumer.test.js` 与 `node --test dist/tests/tests/app/semantic-observation-public.test.js`（先按现有脚本编译）。
+- Root 验收：Root 提供现有运行 origin 与既有 task id。在既有 Ego `14`/`p1`（`p3` protected）打开 `<root-origin>/?task=<id>` 与 `<root-origin>/observation.html?task=<id>`。不新建 Task、不跑 provider/model 矩阵。验收「已提交事实」显示已接受公开提交，「当前活动」不显示未提交文本，已完成任务无残留 pending。
+
+实现状态：`UNVERIFIED`。设计：待独立 design review。
+
+### 17.10 owner 与文件边
+
+| 环节 | owner 文件 / 符号 |
+|---|---|
+| 权威生产/持久 | `packages/runtime` coordinator `publicOutput`；`packages/app/src/ui-runtime/journal.ts` `PublicOutputJournalPort` 实现（不改） |
+| 共享信封 | `packages/contracts/src/semantic-observation.ts` `SemanticObservationEnvelope` / `validateSemanticObservationEnvelope` |
+| 语义输入/构建 | `packages/context-events/src/types.ts` `SemanticObservationInput`；`packages/context-events/src/pairing.ts` `buildSemanticObservation` |
+| App 读取 | `packages/app/src/ui-runtime/service.ts` `semanticObservation` / `scopedSemanticObservation`（`authoritativePublicOutputForTask` 不变） |
+| UI runtime 投影 | `packages/ui/projection/runtime.ts` `projectRuntimeSemanticObservation`（pass-through，不改） |
+| 浏览器共享投影 | `docs/ui/semantic-observation-projection.js` `buildSemanticObservationProjection`；`docs/ui/runtime-shell.js` `mountSemanticObservationPanel`（消费信封，不改签名） |
+| 图元数据 | `docs/dagpipe/observation-read.graph.json` / `.semantic.json` / `.binding.json`（仅受影响描述；8 节点 8 边拓扑不变） |
+
+### 17.11 未决问题（不猜）
+
+- 浏览器侧当前 `scopeBreadcrumbs` / `eventMatchesScope` 没有 `cycle` 子范围。若产品需要按 cycle 切换，属既有 scope 控件的后续扩展，不在本 DRAFT 内新增。
+- 本设计不新增 async 语义权威读取。若后续证实在 bound 场景 `task.publicOutput` 不包含完整 durable commits，需以具体缺失字段与触发条件另立观察，不在此猜测新 helper。
+- 实现与真实入口验收未执行。设计须先独立 review。
