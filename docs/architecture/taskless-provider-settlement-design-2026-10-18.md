@@ -1,14 +1,16 @@
 # Taskless Provider Settlement Design
 
-Status: DESIGN-ONLY / UNVERIFIED / NOT IMPLEMENTED
+Status: IMPLEMENTED / MILESTONE REVIEW ACCEPTED / INSTALLED PUBLIC CONSUMER VERIFIED
 
 Date: 2026-10-18
 
 Base: `origin/main` at `314f53aa9de5c4dac18a087ddaf138824f776bd5`
 
-This document defines one bounded design. It does not implement, test, build, run,
-install, restart, merge, or push anything. It does not authorize product code.
-The design Review is a separate gate before code.
+This document preserves the accepted pre-implementation design. Statements below
+that distinguish actual and proposed symbols describe that design baseline.
+Implementation, independent review, main delivery and installed public-consumer
+evidence are recorded in `note.md`, under the taskless settlement delivery.
+The original question's recovery and socket root cause remain separate and open.
 
 ## 1. Goal And Boundary
 

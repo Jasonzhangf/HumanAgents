@@ -1,5 +1,17 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
+## 2026-10-18 最新交付：taskless 结束结果的正式持久发布与读取
+
+main `c2527d54` 已推送到 `origin/main`。完整 `InteractionProviderSettlementReceipt` 通过现有 parent Journal 持久化，并经独立控制 GET 返回原 fact/commit。解释器、发布和读取共用同一 Journal，物理请求路径与逻辑 turn 分开。没有新增 store、producer、业务字段或 Task。关闭后仅补充该控制记录，普通请求和 raw 写入仍冻结；旧 epoch 不能代替当前请求。相同内容幂等，冲突和缺失显式失败。
+
+契约、Runtime/JSONL、App 写/读和正式组装均已验收。实际反例覆盖缺请求关联、错误请求、关闭后错误拒绝、发布失败和冷恢复缺证据。正式消费者曾在答案成功后因 receipt 数量 0 对 1 失败，接线后通过。一次整体独立审查发现唯一 P1：旧版已完成答案无 receipt 的兼容性尚缺正式证据。`c2527d54` 仅扩展原消费者，以原 owner API 从头构造旧记录，经真实组装恢复，验证完整旧答案可读、控制 GET 明确缺失、两个 Journal 和 Provider 计数不变。测试内临时错误耦合产生 HTTP500 对200的反例，恢复后同消费者1/1；finding-only 独立复核有效 PASS，其他整体结论复用。
+
+main contracts/App 构建、普通 package 和全局安装均成功。正式 restart48→49/PID23658/53007，旧实例 clean。安装验收复用同一公开消费者，将正式入口指向安装包，结果1/1；包括旧答案、新 receipt 和读取零副作用。代码推送回执为 `314f53aa..c2527d54 main -> main`。候选正常 remove/prune，三条已合流分支正常删除；注册工作树2→1，只保留 main/control。原业务数据、证据和 canonical49 保留。
+
+受影响 helper fixture 的 `expectedArtifactDigests`、`acceptanceCriteriaDigest` 已物理删除。三次 GCM 多步骤执行失真、Flash 配额失败及拒收记录保留；Astra 只承担实现，没有自审。完整接收、独立审查、安装日志和官方 restart 回执在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-taskless-settlement-design-review-20261018/`，作者与清理回执在 `native-taskless-settlement-read-observe-20261018/`。
+
+完整 UX/native 目标仍 ACTIVE / INCOMPLETE。原 `interaction-2`、revision1、epoch6 仍是失败记录，socket 根因 UNKNOWN；本增量没有发送原问答。正式 receipt 取得边已交付，下一步按既有一次预算计划检查必要现场并验证原交互，不重做已交付功能或增加矩阵。
+
 ## 2026-10-18 最新交付：公开结果接入共同语义观测
 
 main `99a47e2e` 已合入完整十五文件 F07 增量。既有 typed `PublicOutputPublication` 经 contracts/context-events 和两个 App builder 原样进入语义 GET/SSE，共享 UI 显示已确认正文、pending 状态及 unknown/unavailable 保留提示。未提交文本不公开；两个水位保持独立。完整引用含已定义的 harness/provider turn 与 request 字段，raw 使用同一引用数组。没有新 producer、Journal、endpoint、cache 或 canonical taxonomy。

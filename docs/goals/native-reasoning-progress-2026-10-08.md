@@ -1,5 +1,11 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新：taskless settlement 正式边已标准交付
+
+main `c2527d54` 已推送。原完整 typed settlement 经同一 parent Journal 发布与独立控制 GET 读取；正式消费者实际 RED→GREEN，唯一旧版 completed-answer 兼容 finding 补证并通过独立局部复核。main 构建/安装、正式 restart48→49、已安装入口同消费者1/1及自有来源树/分支清理完成。具体行为、证据范围及路径只维护于 `note.md` 的本次交付段。
+
+原简单问答尚未新增尝试，epoch6失败及未知根因保持原状。下一步沿已接受的一次验证计划执行原交互。完整 I1–I5/G1–G14/F01–F20 与 native 目标仍开放，不以 receipt 交付替代原问答和最终目标核销。
+
 ## 2026-10-18 最新：F07共同语义公开结果已安装验收
 
 main `99a47e2e` 完成既有typed publication→共享信封→bound/foreign App→共同UI的十五文件闭包。原HTTP/SSE及共享consumer有实际RED/GREEN，真实原A公开1093/事件1022保持独立，完整确认正文/顺序/引用不变。unknown无内容误空和optional binding refs遗漏已修正。整体Review真实P1经最小修复与finding-only复核有效PASS，其他结论复用。main构建/打包/安装和正式restart47→48/53007完成，默认安装UI/原A GET/SSE及mobile证据层通过。自有fixture27已disposed，cookie/emulation/p1清理，p3保留。配置产品receipt为 `run-notes/ux-f07-semantic-publication-20261018/`。
