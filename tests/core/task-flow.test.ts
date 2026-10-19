@@ -96,6 +96,28 @@ test('task flow is part of confirmation hash and changing it stales the prior co
   assert.equal((staleError as DraftRevisionError).code, 'confirmation-stale');
 });
 
+test('title is optional hash-bound revision content and a title-only refinement preserves task flow', () => {
+  const initial = create(inspection);
+  const titled = refineDraftRevision(initial, refinement(initial, { title: 'Inspect service' }));
+
+  assert.equal(titled.title, 'Inspect service');
+  assert.equal(titled.normalizedInput, initial.normalizedInput);
+  assert.deepEqual(titled.taskFlow, inspection);
+  assert.notEqual(titled.revisionHash, initial.revisionHash);
+  assert.deepEqual(draftRevisionDiff(initial, titled), ['title']);
+  let staleError: unknown;
+  try {
+    assertDraftRevisionCurrent(titled, {
+      revisionVersion: titled.revisionVersion,
+      revisionHash: initial.revisionHash,
+    });
+  } catch (error) {
+    staleError = error;
+  }
+  assert.equal(staleError instanceof DraftRevisionError, true);
+  assert.equal((staleError as DraftRevisionError).code, 'confirmation-stale');
+});
+
 test('same task identity accepts the same binding and rejects a conflicting or newly inferred binding', () => {
   assert.doesNotThrow(() => assertTaskFlowBindingCompatible(taskId, oneShot, { ...oneShot }));
   assert.throws(

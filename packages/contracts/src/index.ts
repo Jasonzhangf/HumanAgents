@@ -110,6 +110,7 @@ export interface RequirementEnvelope {
   readonly requirementId: string;
   readonly draftId: string;
   readonly inputRevision: number;
+  readonly title?: string;
   readonly intent: RequirementIntent;
   readonly taskRef?: TaskId;
   /** Confirmed task-flow identity. Absent on legacy requirements; independent of trigger policy. */
@@ -872,6 +873,11 @@ export function assertBusinessPayload(payload: BusinessPayload): void {
 export function validateRequirementEnvelope(input: RequirementEnvelope): void {
   if (!input.requirementId || !input.draftId || !input.normalizedInput || !input.confirmedBy) throw new ContractError('invalid requirement envelope');
   assertPositiveSafeInteger(input.inputRevision, 'requirement inputRevision');
+  if (input.title !== undefined) {
+    if (typeof input.title !== 'string' || input.title.trim().length === 0) {
+      throw new ContractError('requirement title must be a non-empty string');
+    }
+  }
   assertPositiveSafeInteger(input.fifoSeq, 'requirement fifoSeq');
   assertValidTime(input.confirmedAt, 'requirement confirmedAt');
   if (input.taskFlow !== undefined) validateTaskFlowBinding(input.taskFlow);

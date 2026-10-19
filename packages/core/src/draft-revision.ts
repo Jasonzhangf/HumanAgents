@@ -65,6 +65,7 @@ export class DraftRevisionError extends CoreError {
  * derived here and can never be edited directly.
  */
 const REFINABLE_FIELDS = [
+  'title',
   'goal',
   'scope',
   'constraints',
@@ -106,6 +107,7 @@ function hashableContent(revision: DraftRevision | Omit<DraftRevision, 'revision
     immutableOriginalRef: revision.immutableOriginalRef,
     ...(revision.executionPolicy === undefined ? {} : { executionPolicy: revision.executionPolicy }),
     ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
+    ...(revision.title === undefined ? {} : { title: revision.title }),
     ...(revision.executionControlRef === undefined ? {} : { executionControlRef: revision.executionControlRef }),
   };
 }
@@ -123,6 +125,7 @@ export function draftRevisionRef(revision: DraftRevision): DraftRevisionRef {
 }
 
 export interface CreateDraftRevisionInput {
+  readonly title?: string;
   readonly draftId: string;
   readonly inputRevision: number;
   readonly goal: string;
@@ -166,6 +169,7 @@ export function createDraftRevision(input: CreateDraftRevisionInput): DraftRevis
     immutableOriginalRef: input.immutableOriginalRef,
     ...(input.executionPolicy === undefined ? {} : { executionPolicy: input.executionPolicy }),
     ...(input.taskFlow === undefined ? {} : { taskFlow: structuredClone(input.taskFlow) }),
+    ...(input.title === undefined ? {} : { title: input.title }),
     ...(input.executionControlRef ? { executionControlRef: input.executionControlRef } : {}),
   };
   const created: DraftRevision = { ...revision, revisionHash: draftRevisionHash(revision) };
@@ -220,6 +224,7 @@ function applyFields(current: DraftRevision, fields: Readonly<Record<string, unk
   const draftId = current.draftId;
   return {
     ...current,
+    ...(fields.title === undefined ? {} : { title: requireString(draftId, 'title', fields.title) }),
     goal: fields.goal === undefined ? current.goal : requireString(draftId, 'goal', fields.goal),
     scope: fields.scope === undefined ? current.scope : requireString(draftId, 'scope', fields.scope),
     constraints: fields.constraints === undefined ? current.constraints : requireStringArray(draftId, 'constraints', fields.constraints),
@@ -239,7 +244,7 @@ function applyFields(current: DraftRevision, fields: Readonly<Record<string, unk
  * Produce the next revision of a draft from an explicit typed edit. The caller
  * must name the base revision version and hash; a stale base is rejected
  * without touching the current revision. A refinement that omits
- * `normalizedInput` may change only the execution policy or task flow; every
+ * `normalizedInput` may change only the execution policy, task flow or title; every
  * other accepted refinement must change the normalized execution input.
  */
 export function refineDraftRevision(current: DraftRevision, input: DraftRevisionInput): DraftRevision {
@@ -285,11 +290,11 @@ export function refineDraftRevision(current: DraftRevision, input: DraftRevision
   const applied = applyFields(current, fields);
   const changed = draftRevisionDiff(current, applied);
   if (fields.normalizedInput === undefined) {
-    if (changed.length === 0 || changed.some((field) => field !== 'executionPolicy' && field !== 'taskFlow')) {
+    if (changed.length === 0 || changed.some((field) => field !== 'executionPolicy' && field !== 'taskFlow' && field !== 'title')) {
       fail(
         'invalid-refinement',
         current.draftId,
-        'draft refinement without normalized execution input may only change task flow or execution policy',
+        'draft refinement without normalized execution input may only change title, task flow or execution policy',
       );
     }
   } else if (applied.normalizedInput === current.normalizedInput) {
