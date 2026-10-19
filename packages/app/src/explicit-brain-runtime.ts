@@ -342,17 +342,11 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
     if (typeof record.question !== 'string' || !record.question.trim()) {
       throw new ExplicitBrainOperationalToolError('unsupported-tool', 'clarification decision requires a question');
     }
-    if (record.taskFlowKind !== undefined) {
-      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'clarification decision cannot carry taskFlowKind');
-    }
     return { kind, ...common, question: record.question };
   }
   if (kind === 'answer') {
     if (record.matchedTaskId !== undefined) {
       throw new ExplicitBrainOperationalToolError('unsupported-tool', 'answer decision cannot select a task');
-    }
-    if (record.taskFlowKind !== undefined) {
-      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'answer decision cannot carry taskFlowKind');
     }
     if (record.intent !== undefined || record.proposal !== undefined) {
       throw new ExplicitBrainOperationalToolError('unsupported-tool', 'answer decision cannot carry a requirement proposal');
@@ -366,9 +360,6 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
     ? record.matchedTaskId
     : undefined;
   if (kind === 'status-query') {
-    if (record.taskFlowKind !== undefined) {
-      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'status-query decision cannot carry taskFlowKind');
-    }
     if (typeof record.answer !== 'string' || !record.answer.trim()) {
       throw new ExplicitBrainOperationalToolError('unsupported-tool', 'status decision requires an answer');
     }
