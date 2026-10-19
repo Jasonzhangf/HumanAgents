@@ -397,6 +397,7 @@ export interface DraftRevision {
   readonly draftId: string;
   readonly revisionVersion: number;
   readonly inputRevision: number;
+  readonly title?: string;
   readonly goal: string;
   readonly scope: string;
   readonly constraints: readonly string[];
@@ -950,6 +951,9 @@ export function validateDraftRevision(input: DraftRevision): void {
   nonEmpty(input.draftId, 'draftId');
   positiveInteger(input.revisionVersion, 'draft revisionVersion');
   positiveInteger(input.inputRevision, 'draft inputRevision');
+  if (input.title !== undefined && (typeof input.title !== 'string' || input.title.trim().length === 0)) {
+    throw new ContractError('draft title must be a non-empty string');
+  }
   nonEmpty(input.goal, 'draft goal');
   nonEmpty(input.scope, 'draft scope');
   stringArray(input.constraints, 'draft constraints');
