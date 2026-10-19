@@ -1,0 +1,69 @@
+{
+  "id": "humanagent-workspace-selection",
+  "version": "1",
+  "meta": {
+    "title": "工作区选择：启动目录与产品工作路径分离",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "requirementsVersion": 16,
+    "terminalContract": {
+      "success": "canonical selected workspace: 显式 --workspace 的调用相对绝对化路径，或产品 [project].workspace 声明的绝对路径；只在成功后进入项目初始化或 serve",
+      "explicit": "--workspace 选择当前调用，不写回或覆盖产品声明",
+      "configured": "[project].workspace 必须是绝对路径；它是产品选择，不从 cwd 派生",
+      "missing": "typed workspace-selection-missing：在创建 cwd 项目或启动 serve 前返回 --workspace <path> 指令",
+      "invalid": "typed workspace-selection-invalid：拒绝相对声明、不可访问目录或路径策略违规",
+      "controlRoot": "显式 --control-root、HUMANAGENT_HOME 与 home 默认值的既有优先级保持不变",
+      "pairExclusion": "pair 不消费 workspace-selection 结果，也不读取 lease、daemon owner 或 HTTP 端点"
+    },
+    "implementationGap": "当前 packages/config/src/index.ts 的 resolveRuntimePaths 要求 workspace；packages/app/src/cli.ts 使用 option(args, '--workspace') ?? process.cwd()。本图是待实现候选，不证明运行时能力。"
+  },
+  "inputs": [{ "id": "launch_request", "schema": "Object" }],
+  "nodes": [
+    {
+      "id": "declare_workspace_input",
+      "operator": "humanagent-workspace-declare",
+      "operator_version": "1",
+      "inputs": ["launch_request"],
+      "output": { "id": "workspace_declaration", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_product_root",
+      "operator": "humanagent-product-root-resolve",
+      "operator_version": "1",
+      "inputs": ["workspace_declaration"],
+      "output": { "id": "product_root_paths", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "read_declared_workspace",
+      "operator": "humanagent-declared-workspace-read",
+      "operator_version": "1",
+      "inputs": ["product_root_paths"],
+      "output": { "id": "workspace_selection_input", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_workspace_selection",
+      "operator": "humanagent-workspace-selection-validate",
+      "operator_version": "1",
+      "inputs": ["workspace_selection_input"],
+      "output": { "id": "workspace_selection_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "declare_workspace_input", "to": "resolve_product_root", "arc_id": "workspace_declaration" },
+    { "from": "resolve_product_root", "to": "read_declared_workspace", "arc_id": "product_root_paths" },
+    { "from": "read_declared_workspace", "to": "validate_workspace_selection", "arc_id": "workspace_selection_input" }
+  ],
+  "outputs": ["workspace_selection_result"]
+}

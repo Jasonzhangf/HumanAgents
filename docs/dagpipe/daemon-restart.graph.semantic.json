@@ -1,14 +1,14 @@
 {
   "graph":"humanagent-daemon-restart",
   "labels":{
-    "validate_request":"核对正式重启请求、旧 owner 与启动声明",
+    "validate_request":"核对正式重启请求、旧 owner、规范化 workspace 与控制根启动声明",
     "record_transition":"记录本次重启责任",
     "spawn_replacement":"启动正式替换进程",
     "classify_previous":"区分已关闭、仍运行与已退出的旧 owner",
     "resolve_previous":"按实际状态取得真实关闭回执或保留未验证恢复责任；已知清理失败则停止",
-    "commit_generation":"在同一 guard 内复核身份与竞争 owner，提交新 generation",
+    "commit_generation":"在同一 guard 内复核身份与竞争 owner，提交新 daemon generation；不旋转产品 session generation",
     "start_stages":"启动既有服务阶段；失败时收拢本次资源并保留原错",
     "publish_ready":"发布服务就绪，不推断业务收拢完成",
-    "restart_result":"返回成功或明确失败及真实旧关闭状态"
+    "restart_result":"返回成功或明确失败及真实旧关闭状态；保留产品凭证、独立 session 与未过期 pending challenge"
   }
 }

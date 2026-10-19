@@ -1,0 +1,14 @@
+{
+  "graph": "humanagent-pair-issuance",
+  "operator": {
+    "operator": "humanagent-pair-issuance",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "parse_pair_request": { "ownerPath": "packages/app/src/cli.ts", "ownerRel": "packages/app/src/cli.ts" },
+    "resolve_pair_product_root": { "ownerPath": "packages/config/src/index.ts", "ownerRel": "packages/config/src/index.ts" },
+    "open_credential_owner": { "ownerPath": "packages/app/src/ui-runtime/access-control.ts", "ownerRel": "packages/app/src/ui-runtime/access-control.ts" },
+    "issue_durable_challenge": { "ownerPath": "packages/app/src/ui-runtime/access-control.ts", "ownerRel": "packages/app/src/ui-runtime/access-control.ts" },
+    "render_pair_receipt": { "ownerPath": "packages/app/src/cli.ts", "ownerRel": "packages/app/src/cli.ts" }
+  }
+}
