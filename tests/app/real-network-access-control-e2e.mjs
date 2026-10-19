@@ -965,7 +965,7 @@ async function expiryCase() {
     sessionTtlMs: 1_500,
     pairingTtlMs: 1_500,
   });
-  const challenge = accessControl.createPairingChallenge('expiry-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const runtime = await startUiRuntime({
     mode: 'fake',
     accessControl,
@@ -1146,7 +1146,7 @@ async function credentialWatchFailureActiveStopCase() {
   }
 }
 
-async function restartChallengeInvalidationCase() {
+async function restartChallengePreservationCase() {
   const serve = await startServe({ fakeStepDelayMs: 25 });
   try {
     const stale = await runPair(serve);
@@ -1167,9 +1167,11 @@ async function restartChallengeInvalidationCase() {
     assert.equal(restart.exit.code, 0, `restart CLI failed: ${restart.stderr.slice(-800)}`);
     await waitForServeEvent(serve, 'restart.ready');
 
-    const oldChallenge = await postPair(serve.banner.url, stale.receipt.code);
-    assert.equal(oldChallenge.status, 401, `stale challenge survived restart: ${JSON.stringify(oldChallenge)}`);
-    assert.equal(oldChallenge.body?.error?.code, 'auth.pair.invalid');
+    const survivingChallenge = await postPair(serve.banner.url, stale.receipt.code);
+    assert.equal(survivingChallenge.status, 200, `unexpired challenge must survive restart: ${JSON.stringify(survivingChallenge)}`);
+    const survivingCookie = cookieValue(survivingChallenge.setCookie);
+    const survivingSession = await request(`${serve.banner.url}/api/auth/session`, { headers: { cookie: survivingCookie } });
+    assert.equal(survivingSession.body?.authenticated, true, 'pre-restart challenge must issue a usable session after restart');
 
     const existingSession = await request(`${serve.banner.url}/api/auth/session`, { headers: { cookie: existingCookie } });
     assert.equal(existingSession.body?.authenticated, true, 'valid browser session must survive restart');
@@ -1183,7 +1185,7 @@ async function restartChallengeInvalidationCase() {
     assert.equal(session.body?.authenticated, true);
 
     return {
-      staleChallenge: { status: oldChallenge.status, code: oldChallenge.body?.error?.code },
+      survivingChallenge: { status: survivingChallenge.status, authenticated: survivingSession.body?.authenticated },
       existingSession: { authenticated: existingSession.body?.authenticated },
       freshChallenge: { pairExitCode: fresh.exit.code, status: paired.status, authenticated: session.body?.authenticated },
       restartCli: { exitCode: restart.exit.code },
@@ -1653,7 +1655,7 @@ async function main() {
     ['invalid_host_and_occupied_port_fail_closed', startupFailureCase],
     ['browser_login_current_origin_api_and_eventsource', () => browserCase(evidenceDir)],
     ['short_ttl_real_server_consumer_expiry', expiryCase],
-    ['restart_command_invalidates_pairing_challenge', restartChallengeInvalidationCase],
+    ['restart_command_preserves_unexpired_pairing_challenge', restartChallengePreservationCase],
     ['in_process_restart_pending_fifo_no_duplicate', restartPendingFifoCase],
     ['sigterm_pending_fifo_survives_for_replay', sigtermPendingFifoCase],
     ['sigterm_active_sse_external_closure', sigtermCase],

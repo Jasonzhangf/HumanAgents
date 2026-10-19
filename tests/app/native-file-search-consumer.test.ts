@@ -827,7 +827,8 @@ test('local Responses file.search fact and report survive disk projection recons
   });
   const diagnostics: Record<string, unknown> = {};
   const accessControl = await FileAccessControlService.open({ credentialPath, create: true });
-  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('file-search-test', 1).code);
+  const challenge = await accessControl.issuePairingChallenge();
+  const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   try {
     const task = firstService.createTask({ title: 'local file search', directive: 'find semantic-needle' });
