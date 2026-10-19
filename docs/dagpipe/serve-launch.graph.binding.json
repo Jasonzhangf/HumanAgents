@@ -1,0 +1,48 @@
+{
+  "graph": "humanagent-serve-launch",
+  "operator": {
+    "operator": "humanagent-serve-launch",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "resolve_launch_selection": {
+      "ownerPath": "packages/app/src/cli.ts",
+      "ownerRel": "packages/app/src/cli.ts",
+      "ownerSymbol": "CLI serve composition launch intent",
+      "implementationStatus": "candidate; not implemented",
+      "contract": "CLI 只提供启动意图并渲染结果；产品 root 与 workspace 由 config owner 解析，不由 CLI 重复解析。普通启动移除无条件 takeover.stop。正式 restart 的既有 typed startup args 保留已解析 canonical control root 与 workspace；lazy factory 在 lease guard 之后才构造 access control 与 runtime composition。"
+    },
+    "guarded_lease_decision": {
+      "ownerPath": "packages/app/src/supervisor/supervisor.ts",
+      "ownerRel": "packages/app/src/supervisor/supervisor.ts",
+      "ownerSymbol": "acquireDaemonLease / runSupervisorStartup lease guard",
+      "implementationStatus": "candidate; guarded decision not implemented",
+      "contract": "supervisor 是 lease 决策唯一 owner，复用它自己的 guard 与 lease 读写，不新增第二个 lease parser、lock 或状态源。分类使用既有进程活跃度分类：无 lease 或已干净释放取得 owner；live humanagent.app.serve owner 已 ready 且已发布 endpoint 返回 already-running 且不写 lease；starting 或 ready 无 endpoint 返回 not-ready；pending restart transition 返回 transition-in-progress；未 disposed 且进程已退出返回 recovery-required；wrong owner、corrupt lease、cleanup failure 返回既有 typed failure。guard 只序列化决策，不承诺 owner 之后永不停机，因此不增加 retry 或 takeover。"
+    },
+    "prepare_and_start_owner": {
+      "ownerPath": "packages/app/src/supervisor/supervisor.ts",
+      "ownerRel": "packages/app/src/supervisor/supervisor.ts",
+      "ownerSymbol": "runSupervisorStartup lazy stage factory",
+      "factoryOwnerPath": "packages/app/src/cli.ts",
+      "factoryOwnerRel": "packages/app/src/cli.ts",
+      "implementationStatus": "candidate; lazy preparation not implemented",
+      "contract": "启动入口位于 supervisor，接受 CLI 提供的 lazy stage factory，只在取得 ownership 后调用；保留既有 startup-failure 记录、反向 dispose 与 lease release。重复启动不构造第二个 runtime、不铸造 pairing code、不打开 listener、不安装 shutdown handler、不附加 runtime ownership。"
+    },
+    "render_launch_result": {
+      "ownerPath": "packages/app/src/cli.ts",
+      "ownerRel": "packages/app/src/cli.ts",
+      "ownerSymbol": "CLI serve receipt rendering",
+      "implementationStatus": "candidate; receipt not implemented",
+      "receiptFields": [
+        "command",
+        "status",
+        "controlRoot",
+        "workspace",
+        "projectKey",
+        "url",
+        "pairingCommand"
+      ],
+      "contract": "唯一输出渲染一个 typed launch result。already-running 时 url 来自 owner 已发布 controlEndpoint 与既有 IPv6 URL helper，不使用重复调用请求的 port 或默认 port；pairingCommand 来自既有 config formatter；进程 exit 0。restart marker 是控制参数，不属于业务 payload、credential、持久启动选项或第二个配置源，且必须排除在后续 restart 声明之外。"
+    }
+  }
+}

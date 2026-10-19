@@ -1,0 +1,81 @@
+{
+  "id": "humanagent-serve-launch",
+  "version": "1",
+  "meta": {
+    "title": "普通 serve 启动：同一 guard 内取得 owner 或继续 ready owner",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "requirementsVersion": 16,
+    "requirements": [
+      "humanagent-launch-cwd-independent-declared-workspace",
+      "humanagent-pairing-cwd-and-startup-order-independent"
+    ],
+    "scope": "一次裸 humanagent 或 humanagent serve 启动意图；单输入单输出 SESE。输入是已解析的产品 root、workspace 与启动意图；输出是唯一启动结果。本图不包含浏览器配对、任务执行或正式 restart 的旧 owner 替换细节。",
+    "seseBoundary": "唯一输入 serve_launch_request 由 CLI 在 workspace-selection 成功后产生；唯一输出 serve_launch_result 由 CLI 渲染。中间节点单入单出；分支只存在于 typed decision envelope 内，不增加第二入口、第二出口或回边。",
+    "routingContract": "已安装 DAGpipe 语法只有无条件 from/to/arc_id 边。guarded_lease_decision 产出 typed decision；prepare_and_start_owner 只在 decision 为 acquired 时调用 lazy factory 并启动既有阶段，already-running 与 rejected 分支原样转发 typed 结果且不准备 runtime。链条仍到达唯一输出节点，由该节点解析 started、already-running 或 typed failure。此为目标拓扑与合同，不证明 runtime 路由。",
+    "leaseDecisionContract": "packages/app/src/supervisor/supervisor.ts 是 lease 决策的唯一 owner。CLI 只提供启动意图并渲染结果。普通启动不得在 guard 外先读 lease 再决定；两个 launcher 同时看到无 owner 时，必须由同一原子 acquisition 边界选择一个取得者。",
+    "terminalContract": {
+      "started": "无 lease 或 lease 已干净释放：在同一 guard 内提交一个新 lease，随后才调用 lazy factory、启动既有阶段并发布 controlEndpoint；返回 started 与 product/workspace/projectKey/url/pairingCommand。",
+      "alreadyRunning": "live humanagent.app.serve owner 已 ready、已发布 controlEndpoint 且无 pending restart：返回 already-running、既有 endpoint URL 与 formatPairingCommand 生成的 pairing command，进程 exit 0；不写 lease、不准备 runtime、不打开 listener、不安装 shutdown handler。",
+      "notReady": "owner 仍在 starting，或 ready 但未发布 endpoint：返回 typed not-ready failure，提示 startup 完成后重试；不与 owner 竞争。",
+      "transitionInProgress": "存在 pending restart transition：返回 typed transition-in-progress failure，不参与 replacement。",
+      "recoveryRequired": "未 disposed lease 的 recorded process 已退出：返回 typed recovery-required failure，走既有正式 restart 恢复路径。",
+      "rejected": "wrong owner、corrupt lease 或未收口 cleanup failure：返回既有适用 typed failure；不继续、不 takeover。"
+    },
+    "ordinaryVsRestart": "普通重复启动永不 signal、replace、restart 或取得 live same-target owner 的 runtime ownership，并移除无条件 takeover.stop。只有正式 restart 的 spawn_replacement 携带一次性 --restart-request <recorded-request-id>，并与既有 SupervisorRestartTransition 的 request/previous owner/target 匹配时才允许 replacement；缺失 marker 一律按普通启动处理，无效或陈旧 marker 显式失败。",
+    "receiptBoundary": "already-running receipt 的 url 必须来自 owner 已发布的 controlEndpoint 与既有 IPv6 URL helper，不使用重复调用请求的 port 或默认 port。pairingCommand 必须来自既有 config formatter。receipt 不铸造 pairing code、不打开新 listener、不附加 runtime ownership。",
+    "verificationBoundary": "本图是候选合同。当前 CLI 在 supervisor acquisition 前准备 access control 与 runtime composition，并总是提供 takeover stop；runSupervisorStartup 仍是 eager stage array。guarded continuation、lazy factory、typed started/already-running result 与 restart marker 尚未实现，本图不证明运行时行为。C1 的 app ownership 扩展到 supervisor/code-handoff/必要导出与既有 app/supervisor 测试；不增加 latency/load matrix。",
+    "implementationGap": "packages/app/src/cli.ts 在启动组合阶段提前打开 AccessControlService 并构建 runtime；lease 选项无条件带 takeover.stop。packages/app/src/supervisor/supervisor.ts 的 acquireDaemonLease 在 live owner 时抛 daemon-lease-owned，runSupervisorStartup 立即执行 stage array。"
+  },
+  "inputs": [
+    { "id": "serve_launch_request", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "resolve_launch_selection",
+      "operator": "humanagent-serve-launch-selection-resolve",
+      "operator_version": "1",
+      "inputs": ["serve_launch_request"],
+      "output": { "id": "launch_selection", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "guarded_lease_decision",
+      "operator": "humanagent-serve-launch-lease-decision",
+      "operator_version": "1",
+      "inputs": ["launch_selection"],
+      "output": { "id": "lease_decision", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "prepare_and_start_owner",
+      "operator": "humanagent-serve-launch-prepare-start",
+      "operator_version": "1",
+      "inputs": ["lease_decision"],
+      "output": { "id": "startup_outcome", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "render_launch_result",
+      "operator": "humanagent-serve-launch-result-render",
+      "operator_version": "1",
+      "inputs": ["startup_outcome"],
+      "output": { "id": "serve_launch_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "resolve_launch_selection", "to": "guarded_lease_decision", "arc_id": "launch_selection" },
+    { "from": "guarded_lease_decision", "to": "prepare_and_start_owner", "arc_id": "lease_decision" },
+    { "from": "prepare_and_start_owner", "to": "render_launch_result", "arc_id": "startup_outcome" }
+  ],
+  "outputs": ["serve_launch_result"]
+}

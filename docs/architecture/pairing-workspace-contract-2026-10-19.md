@@ -1,6 +1,6 @@
 # Pairing and workspace foundation contract
 
-Status: foundation candidate. The ledger and DAG contracts are ready; no runtime source or behavior in this document is implemented. Root accepted the default-product selection supplement on 2026-10-19; this record adds no ledger row and does not relax the persistence boundary.
+Status: foundation candidate. The ledger and DAG contracts are ready; no runtime source or behavior in this document is implemented. Root accepted the default-product selection supplement and the complete owner-entry plan on 2026-10-19; this record adds no ledger row and does not relax the persistence boundary.
 
 ## Requirements and authority
 
@@ -118,6 +118,27 @@ The `formatPairingCommand` signature and behavior stay unchanged. A custom root 
 
 The existing typed `SupervisorStartupDeclaration` keeps its owner and `args` field. When a launch is bare, its original args may omit root and workspace, so C1 must write the already resolved canonical control root and workspace as explicit arguments into the retained `args`. No restart config file and no selection state in a business payload is added. This keeps a formal restart on the same product even if the default declaration changes later. Caller cwd stays the process start context and no longer decides product or workspace. This contract records the requirement; CLI composition is C1 and is not implemented here.
 
+## Ordinary launch and explicit restart
+
+`packages/app/src/supervisor/supervisor.ts` remains the sole owner of the serve lease decision. A normal `humanagent` or `humanagent serve` invocation supplies launch intent and renders the result. It does not decide ownership outside the existing guard. Ordinary serve removes the unconditional takeover option; a normal launch must not supply `takeover.stop`.
+
+Inside the guard, an ordinary launch behaves as follows:
+
+| Selected lease state | Result |
+|---|---|
+| No lease, or a cleanly disposed lease | Commit one new lease, then invoke the lazy preparation factory and start the existing stages. |
+| Live `humanagent.app.serve` owner, ready, published `controlEndpoint`, no pending restart | Return `already-running` with the owner's endpoint URL and the formatter-produced pairing command. Exit 0. Do not write a lease, prepare a runtime, open a listener, install shutdown handlers, or attach ownership. |
+| Owner still starting, or ready without a published endpoint | Return a typed not-ready failure and ask the caller to retry after startup completes. |
+| Pending restart transition | Return a typed transition-in-progress failure. Do not compete with the replacement. |
+| Undisposed lease whose recorded process has exited | Return a typed recovery-required failure and use the existing formal restart recovery path. |
+| Wrong owner, corrupt lease, or unresolved cleanup failure | Return the existing applicable typed failure. Do not continue or take over. |
+
+The lazy factory runs only after acquisition. The `already-running` receipt contains `command: 'serve'`, `status: 'already-running'`, `controlRoot`, `workspace`, `projectKey`, `url`, and `pairingCommand`. The URL comes from the published `controlEndpoint` through the existing IPv6-aware helper, never from the duplicate invocation's requested port or a default port. The pairing command comes from `formatPairingCommand`. The guard serializes the ownership decision; it does not promise the owner will stay alive after the receipt. If the owner stops later, the browser reports the connection failure. The CLI adds no retry or takeover for that possibility.
+
+An ordinary duplicate launch never signals, replaces, restarts, or acquires runtime ownership from a live same-target owner. Only a formal restart may replace an owner. `spawnReplacement` appends a one-shot internal `--restart-request <recorded-request-id>` argument tied to the already recorded `SupervisorRestartTransition`. The supervisor verifies the marker against the selected lease's pending restart request, its previous lease ID, generation, process-start token, and the declared target entry before stopping the previous owner and again at replacement commit. The marker is a control argument for that child invocation. It is not a business field, credential, persistent startup option, or new configuration source, and it is excluded from `SERVE_STARTUP_OPTIONS`. A missing marker means normal launch even when a transition exists. An invalid or stale marker fails explicitly and never falls through to takeover.
+
+The normal-launch and replacement paths reuse the existing startup-failure recording, reverse disposal, lease release, process-identity checks, graceful stop, already-dead recovery classification, and ready completion. No second lock, parser, lease reader, or state source is added. `serve-task` begins with an authorized execution plan and does not own process launch.
+
 ## Pair issuance
 
 `packages/app/src/ui-runtime/access-control.ts` owns the durable challenge mutation:
@@ -181,10 +202,11 @@ For `auth.pair.invalid`, `auth.pair.expired`, and request failure, the login sur
 | Graph | Source to sink | Owner files | Status |
 |---|---|---|---|
 | `workspace-selection` | launch request to one typed selected/missing/invalid result | `cli.ts`, `config/src/index.ts` | candidate; not implemented |
+| `serve-launch` | selected product/workspace plus launch intent to one started/already-running/typed-failure result | `cli.ts`, supervisor lease guard and lazy startup; existing topology retained | candidate; not implemented |
 | `pair-issuance` | pair request to one code receipt or typed failure | `cli.ts`, `config/src/index.ts`, `access-control.ts` | candidate; not implemented |
 | `default-product-adoption` | explicit adoption request to one declaration receipt or typed failure | `cli.ts`, `config/src/index.ts` | candidate; not implemented |
 | `humanagent-auth-session` | browser public entry to one auth terminal view | login/runtime shell and access control; existing topology retained | partial current behavior; recovery contract pending |
-| `daemon-restart` | restart request to one restart result | existing supervisor/code-handoff owners; topology retained | current restart flow; product-auth preservation pending |
+| `daemon-restart` | restart request to one restart result; replacement marker validated against the recorded transition | existing supervisor/code-handoff owners; topology retained | current restart flow; product-auth preservation and request-marker validation pending |
 
 After foundation acceptance, these writers may start in parallel with disjoint files:
 
@@ -195,10 +217,12 @@ After foundation acceptance, these writers may start in parallel with disjoint f
 
 P may implement against the frozen `formatPairingCommand` signature while C0 is in flight. P must import that function and must not copy formatting logic. Server composition and compile are checked after C0 is merged.
 
-C1 CLI composition waits for D and P. It owns `cli.ts` adoption/launch/pair wiring and affected CLI tests. It must not recreate durable issuance, session projection, default-product selection, or workspace selection inside CLI. No full config/supervisor/typecheck matrix is a foundation gate.
+C1 CLI composition waits for D and P. It owns `cli.ts` adoption/launch/pair wiring, the supervisor and code-handoff changes needed by the owner-entry plan, necessary exports, and affected CLI/app/supervisor tests. It must not recreate durable issuance, session projection, default-product selection, workspace selection, the lease guard, or restart transition recording inside CLI. No full config/supervisor/typecheck matrix is a foundation gate, and no latency/load matrix is added.
 
 ## Installed naked CLI acceptance
 
 The installed global entry must be usable before delivery. Root acceptance uses `/opt/homebrew/bin/humanagent` with no `HUMANAGENT_HOME`, from a fresh terminal and an unrelated cwd, after one explicit `humanagent product use --control-root <known-current-product>` adoption. Bare `humanagent` and bare `humanagent pair` must select the declared product and its declared workspace; the default home product must not gain a second empty service, credential, project manifest, or lease. A second isolated browser session must pair while the first session stays valid. Formal `humanagent restart` from the same environment must retain the resolved product and workspace, and an explicit `--control-root` for an isolated product B must not change the default declaration.
 
-The source/sink and binding checks are static only. Runtime behavior, default-product adoption, installed naked CLI selection, real browser recovery, pair-before-serve, restart persistence, and independent-session acceptance remain `UNVERIFIED` until their named implementation owners provide focused tests and Root runs the real entry.
+With the intended product already running, the installed naked launch from an unrelated cwd and without `HUMANAGENT_HOME` must exit 0 with `already-running`. The receipt names the declared product/workspace and the existing browser entry. The original owner's lease identity and endpoint remain unchanged; no replacement, disposal, or restart event occurs. Following the returned URL reaches the usable product, an already paired browser remains usable, and the returned pairing command addresses the same product so a second independent browser can pair while the first remains valid. Formal `humanagent restart` is verified separately and must retain the same product/workspace.
+
+The source/sink and binding checks are static only. Runtime behavior, default-product adoption, installed naked CLI selection, ordinary duplicate-launch continuation, lazy preparation, restart-marker validation, real browser recovery, pair-before-serve, restart persistence, and independent-session acceptance remain `UNVERIFIED` until their named implementation owners provide focused tests and Root runs the real entry.
