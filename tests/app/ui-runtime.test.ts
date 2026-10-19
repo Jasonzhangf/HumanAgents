@@ -13,12 +13,16 @@ import {
   operationIdempotencyKey,
   operationSemanticFingerprint,
   operationSemanticFingerprintKey,
+  validateInteractionProviderSettlementReceipt,
   validateInteractionTraceEntry,
   type Attention,
   type Checkpoint,
   type EvidenceRef,
   type ExecutionRuntimePort,
   type InteractionParentProviderExecutionIdentityRef,
+  type InteractionProviderSettlementReceipt,
+  type InteractionTurnIdentity,
+  type JournalCommitRef,
   type MemoryActorContext,
   type MemoryScope,
   type MemorySubmission,
@@ -87,6 +91,7 @@ import {
   uiRuntimeControlJournalPath,
   type UiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
+import type { ExplicitProviderSettlementReadPort } from '../../packages/app/src/ui-runtime/service.js';
 import { ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { PreparedExecutionStop, PreparedExecutionStopPreparationFailure } from '../../packages/app/src/ui-runtime/prepared-execution-stop.js';
 import { createExecutionAdmission, executionAdmissionInputDigest, type PreparedParentLifecycle } from '../../packages/app/src/ui-runtime/execution-admission.js';
@@ -625,6 +630,7 @@ function serviceFor(
   hookRegistry?: AgentHookRegistry,
   closurePort?: CheckpointClosurePort,
   explicitBrainInterpreter?: ExplicitBrainInputInterpreter,
+  explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -641,6 +647,7 @@ function serviceFor(
     ...(now ? { now } : {}),
     ...(hookRegistry ? { hookRegistry } : {}),
     explicitBrainInterpreter: explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
+    ...(explicitProviderSettlementRead ? { explicitProviderSettlementRead } : {}),
     runtimeComposition: { admitExecution: async () => {} },
   });
 }
@@ -10519,4 +10526,148 @@ test('the runtime error body keeps the original failure instead of restating the
   }
   assert.equal(unexpectedCause.message, 'subscription journal unreadable');
   assert.equal(unexpectedCause.message === unexpectedWrapped.error.message, false, `the cause must not restate the reported message: ${JSON.stringify(unexpectedWrapped.error)}`);
+});
+
+// Failure mode: the App has no route for the already-committed settlement
+// receipt. The failure probability is unknown because this is a new boundary.
+// The impact is missing public recovery evidence; the cost is one existing App
+// consumer using an injected read port.
+test('explicit provider settlement control GET returns the exact committed receipt without changing the business interaction', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-provider-settlement-read-'));
+  const auth = await testAccessControl(root);
+  let receipt: InteractionProviderSettlementReceipt | undefined;
+  let commit: JournalCommitRef | undefined;
+  let observedRead: { readonly interactionId: string; readonly inputRevision: number; readonly turnId: string } | undefined;
+  let readCalls = 0;
+  const readPort: ExplicitProviderSettlementReadPort = {
+    async read(input) {
+      readCalls += 1;
+      observedRead = structuredClone(input);
+      if (receipt === undefined || commit === undefined) {
+        throw new Error('the settlement fixture must exist before the control GET');
+      }
+      return { fact: structuredClone(receipt), commit: structuredClone(commit) };
+    },
+  };
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    unusedExplicitBrainInterpreter,
+    readPort,
+  );
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl: auth.accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  testSessionByOrigin.set(new URL(server.url).origin, auth.cookie);
+  try {
+    const inputResponse = await fetch(`${server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:provider-settlement-read',
+        rawInput: 'read the original provider settlement',
+        channel: 'business',
+        inputRevision: 3,
+      }),
+    });
+    assert.equal(inputResponse.status, 201);
+    const { interactionId } = await inputResponse.json() as { readonly interactionId: string };
+    const interactionPath = `${server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}`;
+    const businessBefore = await (await fetch(interactionPath)).json() as unknown;
+    const tasksBefore = service.listTasks();
+
+    const operationId = id('operation', 'operation-ui-explicit-provider-settlement-read');
+    const turn: InteractionTurnIdentity = {
+      organId,
+      interactionScopeId: 'interaction-scope-ui-provider-settlement-read',
+      interactionId,
+      inputRevision: 3,
+      turnId: 'turn-ui-explicit-provider-settlement-read',
+    };
+    const settlementEvidence = evidence('ui-explicit-provider-settlement-read', { organId, operationId });
+    const execution: InteractionParentProviderExecutionIdentityRef = {
+      runtimeId: 'runtime-ui-explicit-provider-settlement-read',
+      organId,
+      operationId,
+      executionEpoch: 2,
+      interactionTurn: turn,
+    };
+    receipt = {
+      interactionId,
+      inputRevision: 3,
+      request: {
+        turnId: 'request-turn-ui-explicit-provider-settlement-read',
+        requestId: 'request-ui-explicit-provider-settlement-read',
+      },
+      settlement: {
+        ...execution,
+        state: 'succeeded',
+        evidenceRefs: [settlementEvidence],
+        resourceRelease: { state: 'released', evidenceRefs: [settlementEvidence] },
+        persistence: { state: 'committed', evidenceRefs: [settlementEvidence] },
+      },
+    };
+    commit = {
+      commitId: 'commit-ui-explicit-provider-settlement-read',
+      journalSeq: 41,
+      recordDigest: 'sha256:ui-explicit-provider-settlement-read',
+    };
+    validateInteractionProviderSettlementReceipt(receipt);
+
+    const response = await fetch(
+      `${interactionPath}/control/provider-settlement?inputRevision=3&turnId=${encodeURIComponent(turn.turnId)}`,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { fact: receipt, commit });
+    assert.deepEqual(observedRead, {
+      interactionId,
+      inputRevision: 3,
+      turnId: turn.turnId,
+    });
+    assert.equal(readCalls, 1);
+
+    const businessAfter = await (await fetch(interactionPath)).json() as unknown;
+    assert.deepEqual(businessAfter, businessBefore);
+    assert.deepEqual(service.listTasks(), tasksBefore);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('explicit provider settlement control GET reports unavailable without a composed read port', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-provider-settlement-unavailable-'));
+  const auth = await testAccessControl(root);
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+  );
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl: auth.accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  testSessionByOrigin.set(new URL(server.url).origin, auth.cookie);
+  try {
+    const response = await fetch(
+      `${server.url}/api/explicit/interactions/interaction-without-read/control/provider-settlement?inputRevision=1&turnId=turn-without-read`,
+    );
+    assert.equal(response.status, 503);
+    const body = await response.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
+    assert.equal(body.error.code, 'explicit-provider-settlement.unavailable');
+    assert.equal(body.error.ownerId, 'humanagent.app');
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
