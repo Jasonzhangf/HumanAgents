@@ -1052,13 +1052,25 @@ function renderStatus(projection) {
       providerChip.dataset.state = metadata.provider.state
       top.append(providerChip)
     }
-    const livenessChip = create('span', 'iwc-state-chip', `活性 ${livenessLabel(metadata.liveness)}`)
-    livenessChip.dataset.state = metadata.liveness?.state || 'unknown'
-    top.append(livenessChip)
+    // A runtime-reported liveness verdict is a real fact, so it earns a status
+    // chip. An absent (or explicitly unknown) liveness fact stays in the
+    // collapsed 状态与技术身份 block instead of repeating a "未提供"/"未知" chip
+    // on the main reading layer.
+    if (metadata.liveness && metadata.liveness.state && metadata.liveness.state !== 'unknown'
+      && LIVENESS_STATE_LABELS[metadata.liveness.state] !== undefined) {
+      const livenessChip = create('span', 'iwc-state-chip', `活性 ${livenessLabel(metadata.liveness)}`)
+      livenessChip.dataset.state = metadata.liveness.state
+      top.append(livenessChip)
+    }
+    // The same rule for the transport fact. The card still keeps the declared
+    // `transport`/page-local `stream` reading when it exists; only a genuinely
+    // absent transport is left out of the chip row and kept in the details.
     const transport = transportDisplay(metadata)
-    const transportChip = create('span', 'iwc-state-chip', `传输 ${transport.label}`)
-    transportChip.dataset.state = transport.state
-    top.append(transportChip)
+    if (transport.state !== 'unknown') {
+      const transportChip = create('span', 'iwc-state-chip', `传输 ${transport.label}`)
+      transportChip.dataset.state = transport.state
+      top.append(transportChip)
+    }
   }
   status.append(top)
   if (source?.detail) status.append(create('p', 'iwc-status-detail', source.detail))

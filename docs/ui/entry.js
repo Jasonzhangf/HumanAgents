@@ -170,19 +170,42 @@ function renderDraft(snapshot) {
 
   if (snapshot.draft) {
     const panel = element('div', undefined, 'panel')
+    // The main layer keeps only the actual task identity the runtime committed.
     const grid = element('dl', undefined, 'detail-grid')
     if (typeof snapshot.revision?.title === 'string' && snapshot.revision.title.trim() !== '') {
       renderField(grid, '任务名称', snapshot.revision.title)
     }
     const taskType = taskFlowText(snapshot.revision?.taskFlow)
     if (taskType) renderField(grid, '任务类型', taskType)
-    renderField(grid, '意图', snapshot.draft.proposedIntent)
-    renderField(grid, '规范化输入', snapshot.draft.normalizedInput)
-    renderField(grid, '已知事实', (snapshot.draft.knownFacts || []).join('\n'))
-    panel.append(grid)
-    const proposal = element('section', undefined, 'section')
-    proposal.append(element('h3', '建议'), element('p', snapshot.draft.proposal, 'muted'))
-    panel.append(proposal)
+    if (grid.children.length > 0) panel.append(grid)
+    // The full model interpretation stays reachable in a collapsed details
+    // block so it never expands over the main reading layer. Nothing is
+    // truncated; the proposal text keeps the raw evidence refs it reported.
+    const interpretation = element('details', undefined, 'implicit-entry')
+    const summary = element('summary')
+    const summaryLabel = element('span')
+    summaryLabel.append(element('span', '+', 'details-glyph'), '整理详情')
+    summary.append(summaryLabel, element('small', '模型整理 · 默认折叠'))
+    interpretation.append(summary)
+    const content = element('div', undefined, 'implicit-content')
+    const factGrid = element('dl', undefined, 'diagnostic-grid')
+    for (const [label, value] of [
+      ['意图', snapshot.draft.proposedIntent],
+      ['规范化输入', snapshot.draft.normalizedInput],
+      ['已知事实', (snapshot.draft.knownFacts || []).join('\n')],
+    ]) {
+      const row = element('div')
+      row.append(element('dt', label), element('dd', value || '—'))
+      factGrid.append(row)
+    }
+    content.append(factGrid)
+    if (snapshot.draft.proposal) {
+      const note = element('div', undefined, 'implicit-note')
+      note.append(element('strong', '建议'), element('p', snapshot.draft.proposal))
+      content.append(note)
+    }
+    interpretation.append(content)
+    panel.append(interpretation)
     section.append(panel)
     updateCardFromSnapshot(snapshot)
     return
