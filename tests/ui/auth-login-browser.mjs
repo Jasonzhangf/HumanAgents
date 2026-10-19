@@ -173,7 +173,12 @@ function readLoginSurface(page) {
       bannerTone: document.querySelector('[data-auth-status]')?.dataset.tone ?? '',
       formPresent: Boolean(document.querySelector('[data-pair-form]')),
       codeInputPresent: Boolean(document.querySelector('[data-pair-code]')),
+      codeInputValue: document.querySelector('[data-pair-code]')?.value ?? '',
+      codeInputFocused: document.activeElement === document.querySelector('[data-pair-code]'),
+      pairCommand: document.querySelector('[data-pair-command]')?.textContent ?? '',
+      submitDisabled: Boolean(document.querySelector('[data-pair-submit]')?.disabled),
       errorVisible: Boolean(errorCard && !errorCard.hidden),
+      errorKind: errorCard?.dataset.errorKind ?? '',
       errorCode: attr('code'),
       errorOwner: attr('owner'),
       errorMessage: attr('message'),
@@ -181,6 +186,9 @@ function readLoginSurface(page) {
       errorText: errorCard?.innerText ?? '',
       retryVisible: Boolean(document.querySelector('[data-auth-error-retry]') && !document.querySelector('[data-auth-error-retry]').hidden),
       retryText: document.querySelector('[data-auth-error-retry]')?.textContent ?? '',
+      returnVisible: Boolean(document.querySelector('[data-auth-error-return]') && !document.querySelector('[data-auth-error-return]').hidden),
+      exitVisible: Boolean(document.querySelector('[data-auth-error-exit]') && !document.querySelector('[data-auth-error-exit]').hidden),
+      exitHref: document.querySelector('[data-auth-error-exit]')?.getAttribute('href') ?? '',
       url: location.href,
     }
   })
@@ -271,6 +279,90 @@ try {
   const consoleErrors = []
   page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`))
   page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+
+  // --- 0b. the login consumer uses the producer's pairing command verbatim ---
+  // This fixture stands at the public GET boundary. It proves the browser does
+  // not compose or rewrite a custom-root command; the server projection remains
+  // the only producer.
+  const customCommand = "humanagent pair --control-root '/tmp/Human Agent Control'"
+  const recoveryContext = await browser.newContext()
+  const recoveryPage = await recoveryContext.newPage()
+  const failedPairRequests = []
+  await recoveryPage.route('**/api/auth/session', async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ authenticated: false, pairingCommand: customCommand }),
+  }))
+  await recoveryPage.route('**/api/auth/pair', async (route) => {
+    failedPairRequests.push(route.request().method())
+    await route.abort('failed')
+  })
+  await recoveryPage.goto(`${binding.serveBaseUrl}/login.html?next=%2Ftasks.html`, { waitUntil: 'domcontentloaded' })
+  await recoveryPage.waitForSelector('[data-pair-code]', { timeout: 30_000 })
+  const commandSurface = await readLoginSurface(recoveryPage)
+  observe('pairing command consumer', commandSurface)
+  record('the login surface displays the exact pairingCommand returned by the session projection',
+    commandSurface.pairCommand === customCommand
+      && commandSurface.pairCommand.includes('--control-root')
+      && !commandSurface.pairCommand.includes('--workspace'),
+    { expected: customCommand, actual: commandSurface.pairCommand })
+
+  // A transport failure has no typed rejection. The page must retain the value
+  // and expose the same return/exit recovery as invalid and expired codes.
+  await recoveryPage.fill('[data-pair-code]', 'request-failure-code')
+  await recoveryPage.click('[data-pair-submit]')
+  await recoveryPage.waitForFunction(
+    () => Boolean(document.querySelector('[data-auth-error]:not([hidden])')),
+    undefined,
+    { timeout: 30_000 },
+  )
+  const requestFailure = await readLoginSurface(recoveryPage)
+  observe('pair request failure', requestFailure)
+  record('a failed pair request retains the code and offers return, retry and explicit exit',
+    requestFailure.errorVisible
+      && requestFailure.errorKind === 'pair'
+      && requestFailure.codeInputValue === 'request-failure-code'
+      && requestFailure.codeInputFocused
+      && requestFailure.returnVisible
+      && requestFailure.exitVisible
+      && requestFailure.exitHref === '/tasks.html'
+      && !requestFailure.submitDisabled,
+    requestFailure)
+  await capture(recoveryPage, 'login-request-failure')
+
+  await recoveryPage.click('[data-auth-error-return]')
+  await recoveryPage.waitForFunction(
+    () => document.querySelector('[data-auth-error]')?.hidden === true
+      && document.activeElement === document.querySelector('[data-pair-code]'),
+    undefined,
+    { timeout: 30_000 },
+  )
+  const returnedToInput = await readLoginSurface(recoveryPage)
+  observe('request failure return to input', returnedToInput)
+  record('return to input hides the error, preserves the code and restores focus',
+    returnedToInput.errorVisible === false
+      && returnedToInput.codeInputValue === 'request-failure-code'
+      && returnedToInput.codeInputFocused,
+    returnedToInput)
+
+  // Submit again to prove the preserved form is the retry action, then leave
+  // explicitly. The exit click itself must not create another pair request.
+  await recoveryPage.click('[data-pair-submit]')
+  await recoveryPage.waitForFunction(
+    () => Boolean(document.querySelector('[data-auth-error]:not([hidden])')),
+    undefined,
+    { timeout: 30_000 },
+  )
+  const pairRequestsBeforeExit = failedPairRequests.length
+  await recoveryPage.click('[data-auth-error-exit]')
+  await recoveryPage.waitForURL((url) => url.pathname === '/tasks.html', { timeout: 30_000 })
+  await recoveryPage.waitForSelector('[data-auth-pair-link]', { timeout: 30_000 })
+  record('explicit exit returns to the normalized entry without submitting or entering a login loop',
+    new URL(recoveryPage.url()).pathname === '/tasks.html'
+      && failedPairRequests.length === pairRequestsBeforeExit
+      && pairRequestsBeforeExit === 2,
+    { url: recoveryPage.url(), pairRequests: [...failedPairRequests] })
+  await recoveryContext.close()
 
   // --- 1. the runtime really gates the entry ------------------------------
   const unauthenticated = await readStatus(binding, null)
@@ -569,15 +661,33 @@ try {
       && wrong.errorMessage === 'pairing code is invalid or already used'
       && wrong.errorNext === 'run humanagent pair again'
       && wrong.formPresent
+      && wrong.codeInputValue === 'not-a-real-pairing-code'
+      && wrong.codeInputFocused
+      && wrong.returnVisible
+      && wrong.exitVisible
+      && wrong.exitHref === '/dashboard.html'
       && new URL(wrong.url).pathname === '/login.html',
     wrong)
   await capture(page, 'login-wrong-code')
 
-  // --- 6. a real pairing code completes the browser session ---------------
+  await page.click('[data-auth-error-return]')
+  await page.waitForFunction(
+    () => document.querySelector('[data-auth-error]')?.hidden === true
+      && document.activeElement === document.querySelector('[data-pair-code]'),
+    undefined,
+    { timeout: 30_000 },
+  )
+  const wrongReturned = await readLoginSurface(page)
+  observe('wrong-code return to input', wrongReturned)
+  record('return to input after a real invalid code preserves the value and focus for retry',
+    wrongReturned.errorVisible === false
+      && wrongReturned.codeInputValue === 'not-a-real-pairing-code'
+      && wrongReturned.codeInputFocused,
+    wrongReturned)
+
+  // --- 6. retry from the preserved form with a real pairing code ----------
   const first = await requestPairingCode(binding)
   observe('real pairing challenge', { expiresAt: first.expiresAt, codeLength: first.code.length })
-  await page.goto(`${binding.serveBaseUrl}/login.html?next=%2Fdashboard.html`, { waitUntil: 'domcontentloaded' })
-  await page.waitForSelector('[data-pair-code]', { timeout: 30_000 })
   await submitCode(page, first.code)
   await page.waitForURL((url) => url.pathname === '/dashboard.html', { timeout: 60_000 })
   await page.waitForSelector('.status-banner', { timeout: 30_000 })
