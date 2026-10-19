@@ -2236,8 +2236,9 @@ function renderDashboard() {
   const waitingStatusAbsent = !waitingStatus || waitingStatus === ABSENT_WAITING_STATUS
   const absentPlan = absentPlanFailure(planHistoryState)
   const nextStep = typeof dashboard.nextStep === 'string' ? dashboard.nextStep.trim() : ''
-  const applicableNextStep = nextStep
-    || (!explicitScope && dashboard.allowedActions.length > 0 ? actionCopy() : '')
+  const applicableNextStep = dashboard.allowedActions.length > 0
+    ? nextStep || (!explicitScope ? actionCopy() : '')
+    : ''
 
   if (dashboard.error) {
     const errorNotice = element('div', undefined, 'status-banner')
