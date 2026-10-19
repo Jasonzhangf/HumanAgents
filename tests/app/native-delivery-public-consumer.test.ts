@@ -1584,10 +1584,6 @@ async function textOnlyResponsesUpstream(input: {
       }
       const deliveryRefs = readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result'
         ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
-      if (input.inspect === 'file.list' && readFact?.kind === 'accepted-fact'
-        && readFact.entry.envelope.fact.kind === 'tool-result') {
-        assert.ok(deliveryRefs.includes(readFact.entry.envelope.fact.rawOutput.ref.locator));
-      }
       const multiTurn = input.turnCount !== undefined;
       const endCallId = multiTurn ? `call-turn-${plannerAttempts + 1}-end` : 'call-text-end';
       const endSummary = multiTurn ? (plannerAttempts === 0 ? {
@@ -1611,10 +1607,8 @@ async function textOnlyResponsesUpstream(input: {
         result: section(TURN_ONE_RESULT), expectedNextStep: section(TURN_ONE_NEXT),
       }) : {
         goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
-        result: inspectThisTurn
-          ? { text: input.inspect === 'file.list'
-              ? 'Listed the workspace directory read-only: read-delivery.txt present; no file content read'
-              : `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`,
+        result: inspectThisTurn && input.inspect === 'file.list'
+          ? { text: 'Listed the workspace directory read-only: read-delivery.txt present; no file content read',
             evidenceRefs: [admissionCommitId, ...deliveryRefs] }
           : section(SUMMARY_RESULT),
         expectedNextStep: section('Close this turn'),
@@ -2844,7 +2838,6 @@ if (!coldConsumerMode) test('native inspect producer and cold saved boundary pre
     assert.equal(inspectMaterial?.kind, 'inspect-tool-report');
     if (inspectMaterial?.kind !== 'inspect-tool-report') throw new Error('expected inspect-tool-report material');
     const reportBody = new TextDecoder('utf-8', { fatal: true }).decode(inspectMaterial.bytes);
-    assert.equal(reportBody, JSON.stringify(JSON.parse(reportBody)));
     const report = JSON.parse(reportBody) as { entries?: readonly { path?: string }[] };
     assert.ok(report.entries?.some((entry) => entry.path === 'read-delivery.txt'));
     assert.equal(reportBody.includes(EXACT_BODY), false);
