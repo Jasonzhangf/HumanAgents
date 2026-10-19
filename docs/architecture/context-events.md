@@ -1011,7 +1011,7 @@ SSE 现状（不改签名）：`streamSemanticObservation`（`server.ts:1980`）
 - 分组：提交条目加入 `stableItems`（`current` 的「已提交事实」）；在 `semantic` / `actions` / `raw` 模式分别加入对应 `semanticItems` / `actionItems` / `rawItems`。
 - pending：仅当 `source.publicOutput?.state === 'pending'` 时，向 `liveItems`（「当前活动」）加入状态条目 `{ id: 'public-output-pending', title: '公开结果待确认', detail: '存在尚未提交的公开输出候选，未提交文本不公开显示。', state: 'active', stateLabel: '待确认', tone: 'warning', kind: 'live' }`。已确认提交仍在 stable。state 转为 `committed` 时该条目自然消失；不使用 `task.running`。
 - unknown / unavailable：向 `notices` 加入 `tone: state` 的提示（`unknown` → 「公开结果状态未知」；`unavailable` → 「公开结果暂不可用」），`detail` 说明只显示此前已确认提交；已确认 `commits` 保留在 stable。
-- 空态：仅当 `pairing.length === 0 && events.length === 0 && 可见 commits.length === 0 && state !== 'pending'` 时标 `empty`。
+- 空态：仅当 `pairing.length === 0 && events.length === 0 && 可见 commits.length === 0`，且 `publicOutput === undefined` 或 `publicOutput.state === 'committed'` 时标 `empty`。`pending`、`unknown`、`unavailable` 均不标 `empty`；`unknown` / `unavailable` 保留其 typed headline 与 notice，已确认 `commits` 仍留在 stable。
 
 ### 17.8 消融与非变更
 
@@ -1026,7 +1026,7 @@ SSE 现状（不改签名）：`streamSemanticObservation`（`server.ts:1980`）
 实现前的最小失败证据（待独立 review 后执行）：
 
 - `tests/context-events/semantic-public-consumer.test.ts`：`buildSemanticObservation` 携带同 scope `publicOutput`，保留 exact `text` / order / refs / 两个 watermark，拒绝跨 scope commit。
-- `tests/contracts/contracts.test.ts`：`validateSemanticObservationEnvelope` 接受合法 `publicOutput`，保留空白，拒绝跨 scope 与 `journalSeq > publicCommitWatermark`。
+- `tests/contracts/contracts.test.ts`：`validateSemanticObservationEnvelope` 接受合法 `publicOutput`，校验 scope / ref / 空白 / state / watermark identity，拒绝跨 scope。
 - `tests/app/semantic-observation-public.test.ts`：bound 与 foreign `/api/tasks/:id/semantic`、`/semantic/stream` 返回带 authoritative `commits` 与 exact `text` 的 `publicOutput`；`buildSemanticObservationProjection` 把 committed commits 放进 stable、pending 只显示状态、committed 后清除 pending live、unknown/unavailable 保留已确认文本。
 - 命令（scoped，非全量矩阵）：`node --test dist/tests/tests/context-events/semantic-public-consumer.test.js` 与 `node --test dist/tests/tests/app/semantic-observation-public.test.js`（先按现有脚本编译）。
 - Root 验收：Root 提供现有运行 origin 与既有 task id。在既有 Ego `14`/`p1`（`p3` protected）打开 `<root-origin>/?task=<id>` 与 `<root-origin>/observation.html?task=<id>`。不新建 Task、不跑 provider/model 矩阵。验收「已提交事实」显示已接受公开提交，「当前活动」不显示未提交文本，已完成任务无残留 pending。
