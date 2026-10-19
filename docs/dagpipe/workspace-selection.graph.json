@@ -1,6 +1,6 @@
 {
   "id": "humanagent-workspace-selection",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "工作区选择：启动目录与产品工作路径分离",
     "designStatus": "candidate",
@@ -12,10 +12,12 @@
       "configured": "[project].workspace 必须是绝对路径；它是产品选择，不从 cwd 派生",
       "missing": "typed workspace-selection-missing：在创建 cwd 项目或启动 serve 前返回 --workspace <path> 指令",
       "invalid": "typed workspace-selection-invalid：拒绝相对声明、不可访问目录或路径策略违规",
-      "controlRoot": "显式 --control-root、HUMANAGENT_HOME 与 home 默认值的既有优先级保持不变",
+      "controlRoot": "control-root 优先级为本次显式 --control-root → HUMANAGENT_HOME → 固定 ~/.humanagent/default-product.toml 声明 → ~/.humanagent；显式 flag 或环境已选时短路，不读取或校验低优先级声明",
+      "defaultProduct": "声明只含 schemaVersion=1 与绝对 controlRoot；缺失时保留 home 默认，格式、版本或路径无效时返回类型化 default-product-selection-invalid，不静默回退、不创建空产品、不扫描 owner 或运行实例",
+      "startupArgs": "正式 restart 的既有 typed startup args 保留已解析的 canonical control root 与 workspace，不新增 restart 配置或业务选择字段",
       "pairExclusion": "pair 不消费 workspace-selection 结果，也不读取 lease、daemon owner 或 HTTP 端点"
     },
-    "implementationGap": "当前 packages/config/src/index.ts 的 resolveRuntimePaths 要求 workspace；packages/app/src/cli.ts 使用 option(args, '--workspace') ?? process.cwd()。本图是待实现候选，不证明运行时能力。"
+    "implementationGap": "当前 packages/config/src/index.ts 的 resolveRuntimePaths 直接取 options.controlRoot ?? HUMANAGENT_HOME ?? ~/.humanagent，并强制 workspace；packages/app/src/cli.ts 使用 option(args, '--workspace') ?? process.cwd()。resolveProductPaths、默认产品声明读取、workspace 声明读取与 startup args 规范化尚未实现；D 在 C0 后同树承接声明，C1 待 D/P 后接线。本图是待实现候选，不证明运行时能力。"
   },
   "inputs": [{ "id": "launch_request", "schema": "Object" }],
   "nodes": [

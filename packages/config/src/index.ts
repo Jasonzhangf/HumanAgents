@@ -1,5 +1,5 @@
 import { lstatSync } from 'node:fs';
-import { chmod, mkdir, open as openFile, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { chmod, mkdir, open as openFile, readFile, readdir, realpath, rename, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
@@ -122,6 +122,7 @@ export interface UserConfig {
   readonly project?: {
     readonly defaultAgent?: string;
     readonly reviewRequired?: boolean;
+    readonly workspace?: string;
   };
   readonly memory?: {
     readonly update: {
@@ -158,6 +159,17 @@ export interface InternalConfig {
   readonly pluginManifest: string;
   readonly releaseChannel: string;
   readonly configPolicy: 'internal-overrides-user';
+}
+
+export interface ProductPaths {
+  readonly controlRoot: string;
+  readonly securityRoot: string;
+  readonly webAccessCredentialPath: string;
+}
+
+export interface DefaultProductSelection {
+  readonly schemaVersion: 1;
+  readonly controlRoot: string;
 }
 
 export interface RuntimePaths {
@@ -592,6 +604,14 @@ function asString(value: unknown, label: string): string {
   return value;
 }
 
+function validateDeclaredWorkspace(value: unknown): string {
+  const workspace = asString(value, 'project.workspace');
+  if (!isAbsolute(workspace)) {
+    fail('workspace-selection-invalid', `project.workspace must be an absolute path: ${workspace}`, '在 config.toml 的 [project] 中声明绝对 workspace 路径');
+  }
+  return workspace;
+}
+
 function asStringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item.trim())) {
     fail('config-invalid', `${label} must be an array of non-empty strings`);
@@ -801,7 +821,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   const ui = value.ui === undefined ? undefined : asRecord(value.ui, 'ui');
-  if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'user project config');
+  if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired', 'workspace'], 'user project config');
   if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh', 'providerRetry', 'opencode', 'antigravity', 'dshAcp'], 'user execution config');
   if (ui) rejectUnknownKeys(ui, ['display'], 'user ui config');
   let display: UiDisplayPreference;
@@ -825,6 +845,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
     ...(project === undefined ? {} : { project: {
       ...(project.defaultAgent === undefined ? {} : { defaultAgent: asString(project.defaultAgent, 'project.defaultAgent') }),
       ...(project.reviewRequired === undefined ? {} : { reviewRequired: project.reviewRequired === true || project.reviewRequired === false ? project.reviewRequired : fail('config-invalid', 'project.reviewRequired must be boolean') }),
+      ...(project.workspace === undefined ? {} : { workspace: validateDeclaredWorkspace(project.workspace) }),
     }}),
     ...(memory === undefined ? {} : { memory }),
     ...(execution === undefined ? {} : { execution: {
@@ -1023,22 +1044,174 @@ function configuredTemplateRoot(): string | undefined {
   return value && value.trim() ? value : undefined;
 }
 
-export async function resolveRuntimePaths(options: { readonly workspace: string; readonly controlRoot?: string }): Promise<RuntimePaths> {
+function defaultProductSelectionPath(): string {
+  return join(homedir(), '.humanagent', 'default-product.toml');
+}
+
+function invalidDefaultProduct(message: string): never {
+  fail(
+    'default-product-selection-invalid',
+    message,
+    '修复 ~/.humanagent/default-product.toml，或重新运行 humanagent product use --control-root <path>',
+  );
+}
+
+async function validateDefaultProductRoot(value: unknown): Promise<string> {
+  if (typeof value !== 'string' || !value.trim()) {
+    invalidDefaultProduct('default product controlRoot must be a non-empty string');
+  }
+  if (!isAbsolute(value)) {
+    invalidDefaultProduct(`default product controlRoot must be an absolute path: ${value}`);
+  }
+  let info: ReturnType<typeof lstatSync>;
+  try {
+    info = lstatSync(value);
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') {
+      invalidDefaultProduct(`default product controlRoot does not exist: ${value}`);
+    }
+    throw error;
+  }
+  if (info.isSymbolicLink()) {
+    invalidDefaultProduct(`default product controlRoot cannot be a symlink: ${value}`);
+  }
+  const canonical = await realpath(value);
+  if (!(await stat(canonical)).isDirectory()) {
+    invalidDefaultProduct(`default product controlRoot is not a directory: ${value}`);
+  }
+  return canonical;
+}
+
+export async function readDefaultProductSelection(): Promise<DefaultProductSelection | undefined> {
+  const selectionPath = defaultProductSelectionPath();
+  let contents: string;
+  try {
+    const info = lstatSync(selectionPath);
+    if (info.isSymbolicLink()) {
+      invalidDefaultProduct(`default product declaration cannot be a symlink: ${selectionPath}`);
+    }
+    contents = await readFile(selectionPath, 'utf8');
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseToml(contents);
+  } catch (error) {
+    invalidDefaultProduct(`default product declaration is not valid TOML: ${(error as Error).message}`);
+  }
+  const keys = Object.keys(parsed);
+  if (keys.length !== 2 || !keys.includes('schemaVersion') || !keys.includes('controlRoot')) {
+    invalidDefaultProduct('default product declaration must contain only schemaVersion and controlRoot');
+  }
+  if (parsed.schemaVersion !== 1) {
+    invalidDefaultProduct(`default product declaration schemaVersion is unsupported: ${String(parsed.schemaVersion)}`);
+  }
+  return {
+    schemaVersion: 1,
+    controlRoot: await validateDefaultProductRoot(parsed.controlRoot),
+  };
+}
+
+export async function declareDefaultProduct(controlRoot: string): Promise<DefaultProductSelection> {
+  const canonicalRoot = await validateDefaultProductRoot(controlRoot);
+  const selectionPath = defaultProductSelectionPath();
+  const selectionRoot = dirname(selectionPath);
+  let directoryInfo: ReturnType<typeof lstatSync>;
+  try {
+    directoryInfo = lstatSync(selectionRoot);
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'ENOENT') throw error;
+    await mkdir(selectionRoot, { recursive: true });
+    directoryInfo = lstatSync(selectionRoot);
+  }
+  if (directoryInfo.isSymbolicLink() || !(await stat(selectionRoot)).isDirectory()) {
+    invalidDefaultProduct(`default product declaration directory is invalid: ${selectionRoot}`);
+  }
+  const contents = `schemaVersion = 1\ncontrolRoot = ${JSON.stringify(canonicalRoot)}\n`;
+  const tempPath = join(selectionRoot, `.default-product.toml.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  const handle = await openFile(tempPath, 'wx');
+  try {
+    await handle.writeFile(contents, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(tempPath, selectionPath);
+  return { schemaVersion: 1, controlRoot: canonicalRoot };
+}
+
+export async function resolveProductPaths(options: { readonly controlRoot?: string }): Promise<ProductPaths> {
   const environmentHome = (globalThis as { process?: { env?: { HUMANAGENT_HOME?: string } } }).process?.env?.HUMANAGENT_HOME;
-  const controlRoot = await canonicalizeControlRoot(resolve(options.controlRoot ?? environmentHome ?? join(homedir(), '.humanagent')));
+  const explicitRoot = options.controlRoot ?? environmentHome;
+  const controlRoot = explicitRoot !== undefined
+    ? await canonicalizeControlRoot(resolve(explicitRoot))
+    : (await readDefaultProductSelection())?.controlRoot ?? await canonicalizeControlRoot(join(homedir(), '.humanagent'));
+  return {
+    controlRoot,
+    securityRoot: join(controlRoot, 'security'),
+    webAccessCredentialPath: join(controlRoot, 'security', 'web-access.json'),
+  };
+}
+
+export function formatPairingCommand(paths: Pick<ProductPaths, 'controlRoot'>): string {
+  if (normalize(paths.controlRoot) === normalize(join(homedir(), '.humanagent'))) return 'humanagent pair';
+  return `humanagent pair --control-root ${quotePosixShell(paths.controlRoot)}`;
+}
+
+function quotePosixShell(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function readDeclaredWorkspace(controlRoot: string): Promise<string> {
+  const configPath = join(controlRoot, 'config.toml');
+  rejectManagedFile(configPath);
+  let contents: string;
+  try {
+    contents = await readFile(configPath, 'utf8');
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'ENOENT') throw error;
+    return missingWorkspace(controlRoot);
+  }
+  const project = parseToml(contents).project;
+  if (project === undefined) return missingWorkspace(controlRoot);
+  if (typeof project !== 'object' || project === null || Array.isArray(project)) {
+    fail('workspace-selection-invalid', 'project must be a table', '修复 config.toml 的 [project] 表后重试');
+  }
+  const workspace = (project as Record<string, unknown>).workspace;
+  if (workspace === undefined) return missingWorkspace(controlRoot);
+  return validateDeclaredWorkspace(workspace);
+}
+
+function missingWorkspace(controlRoot: string): never {
+  fail(
+    'workspace-selection-missing',
+    `no runtime workspace is selected for ${controlRoot}`,
+    `使用 --workspace <path>，或在 ${join(controlRoot, 'config.toml')} 的 [project] 中声明绝对 workspace`,
+  );
+}
+
+export async function resolveRuntimePaths(options: { readonly workspace?: string; readonly controlRoot?: string }): Promise<RuntimePaths> {
+  const productPaths = await resolveProductPaths({ controlRoot: options.controlRoot });
+  const controlRoot = productPaths.controlRoot;
+  const workspaceInput = options.workspace === undefined
+    ? await readDeclaredWorkspace(controlRoot)
+    : options.workspace.trim()
+      ? resolve(options.workspace)
+      : fail('workspace-selection-invalid', 'workspace must not be empty', '使用 --workspace <path> 指定工作目录');
   const internalPath = join(controlRoot, 'internal.toml');
   rejectManagedFile(internalPath);
   const configuredInternal = validateInternalConfig(parseToml(await readRequired(internalPath, defaultInternalToml())), controlRoot);
   const sessionRoot = await canonicalizeControlledPath(configuredInternal.sessionRoot, controlRoot, 'sessionRoot');
   const pluginManifest = await canonicalizeControlledPath(configuredInternal.pluginManifest, controlRoot, 'pluginManifest');
-  const workspaceInput = resolve(options.workspace);
   let workspaceCwd: string;
   try {
     workspaceCwd = await realpath(workspaceInput);
-    if (!(await stat(workspaceCwd)).isDirectory()) fail('workspace-invalid', `workspace is not a directory: ${workspaceInput}`, '指定一个目录作为 --workspace');
+    if (!(await stat(workspaceCwd)).isDirectory()) fail('workspace-selection-invalid', `workspace is not a directory: ${workspaceInput}`, '指定一个目录作为 workspace');
   } catch (error) {
     if (error instanceof ConfigurationError) throw error;
-    fail('workspace-invalid', `workspace does not exist or is inaccessible: ${workspaceInput}`, '指定一个可访问的 workspace 目录');
+    fail('workspace-selection-invalid', `workspace does not exist or is inaccessible: ${workspaceInput}`, '指定一个可访问的 workspace 目录');
   }
   const { readableProjectKey } = canonicalProjectKeyCandidates(workspaceCwd);
   const projectKey = await resolveProjectKey(sessionRoot, controlRoot, readableProjectKey, workspaceCwd);
@@ -1046,8 +1219,8 @@ export async function resolveRuntimePaths(options: { readonly workspace: string;
   return {
     controlRoot,
     agentCwd: controlRoot,
-    securityRoot: join(controlRoot, 'security'),
-    webAccessCredentialPath: join(controlRoot, 'security', 'web-access.json'),
+    securityRoot: productPaths.securityRoot,
+    webAccessCredentialPath: productPaths.webAccessCredentialPath,
     mainRoot: join(controlRoot, 'main'),
     mainSessionsRoot: join(controlRoot, 'main', 'sessions'),
     workspaceCwd,

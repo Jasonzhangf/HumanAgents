@@ -2,12 +2,38 @@
   "graph":"humanagent-daemon-restart",
   "operator":{"operator":"humanagent-daemon-restart","operator_version":"1"},
   "nodes":{
-    "validate_request":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"},
-    "record_transition":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"},
-    "spawn_replacement":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"},
-    "classify_previous":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
-    "resolve_previous":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
-    "commit_generation":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
+    "validate_request":{
+      "ownerPath":"packages/app/src/supervisor/code-handoff.ts",
+      "ownerRel":"packages/app/src/supervisor/code-handoff.ts",
+      "contract":"只处理正式 restart。校验当前 owner 与保留的 startup declaration；没有 restart marker 的普通 serve 不进入本图。"
+    },
+    "record_transition":{
+      "ownerPath":"packages/app/src/supervisor/code-handoff.ts",
+      "ownerRel":"packages/app/src/supervisor/code-handoff.ts",
+      "ownerSymbol":"recordDaemonRestartTransition",
+      "contract":"已记录的 SupervisorRestartTransition 是唯一授权来源：requestId、previousLeaseId、previousGeneration、previousProcessStartToken 与 targetEntryPath。"
+    },
+    "spawn_replacement":{
+      "ownerPath":"packages/app/src/supervisor/code-handoff.ts",
+      "ownerRel":"packages/app/src/supervisor/code-handoff.ts",
+      "ownerSymbol":"spawnReplacement",
+      "contract":"spawnReplacement 向 child serve 追加一次性 --restart-request <recorded-request-id>。该 marker 绑定既有 transition，是控制参数，不是业务字段、credential、持久启动选项或配置源；必须排除在 SERVE_STARTUP_OPTIONS 之外，使后续 restart 声明不保留它。"
+    },
+    "classify_previous":{
+      "ownerPath":"packages/app/src/supervisor/supervisor.ts",
+      "ownerRel":"packages/app/src/supervisor/supervisor.ts",
+      "contract":"停旧 owner 前验证 marker 匹配所选 lease 的 pending restart 请求；请求未完成也未失败；previousLeaseId、previousGeneration、previousProcessStartToken 匹配被替换 owner；所选 replacement entry 匹配 transition.targetEntryPath。"
+    },
+    "resolve_previous":{
+      "ownerPath":"packages/app/src/supervisor/supervisor.ts",
+      "ownerRel":"packages/app/src/supervisor/supervisor.ts",
+      "contract":"复用既有进程身份检查、graceful stop、disposal 要求、already-dead 恢复分类与失败记录。marker 缺失时即使存在 transition 也按普通启动处理；marker 无效或陈旧显式失败，绝不落到 takeover。"
+    },
+    "commit_generation":{
+      "ownerPath":"packages/app/src/supervisor/supervisor.ts",
+      "ownerRel":"packages/app/src/supervisor/supervisor.ts",
+      "contract":"提交新 generation 前再次应用同一 request/owner fence。不得把 marker 持久化进 startup args，也不新增第二个 lock、parser 或状态源。"
+    },
     "start_stages":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
     "publish_ready":{"ownerPath":"packages/app/src/supervisor/supervisor.ts","ownerRel":"packages/app/src/supervisor/supervisor.ts"},
     "restart_result":{"ownerPath":"packages/app/src/supervisor/code-handoff.ts","ownerRel":"packages/app/src/supervisor/code-handoff.ts"}

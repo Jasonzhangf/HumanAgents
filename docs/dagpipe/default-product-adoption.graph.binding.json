@@ -1,0 +1,13 @@
+{
+  "graph": "humanagent-default-product-adoption",
+  "operator": {
+    "operator": "humanagent-default-product-adoption",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "parse_product_use_request": { "ownerPath": "packages/app/src/cli.ts", "ownerRel": "packages/app/src/cli.ts" },
+    "validate_adoption_target": { "ownerPath": "packages/config/src/index.ts", "ownerRel": "packages/config/src/index.ts" },
+    "write_default_product_declaration": { "ownerPath": "packages/config/src/index.ts", "ownerRel": "packages/config/src/index.ts" },
+    "render_adoption_receipt": { "ownerPath": "packages/app/src/cli.ts", "ownerRel": "packages/app/src/cli.ts" }
+  }
+}

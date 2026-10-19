@@ -1,0 +1,9 @@
+{
+  "graph": "humanagent-default-product-adoption",
+  "labels": {
+    "parse_product_use_request": "解析显式 product use 请求与 --control-root，不推断 cwd 或工作区",
+    "validate_adoption_target": "校验目标为现有、可访问、符合路径策略的绝对产品 root，不扫描 owner 或运行实例",
+    "write_default_product_declaration": "由唯一配置 owner 原子写入固定默认产品声明，不初始化产品或保留部分声明",
+    "render_adoption_receipt": "渲染采用回执；成功只返回声明位置与选定 root，失败返回类型化错误"
+  }
+}

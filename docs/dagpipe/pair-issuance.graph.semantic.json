@@ -2,7 +2,7 @@
   "graph": "humanagent-pair-issuance",
   "labels": {
     "parse_pair_request": "解析 humanagent pair 的产品控制根参数，不选择项目 workspace",
-    "resolve_pair_product_root": "按既有控制根优先级解析产品 root 和 web 凭证路径，不读取 lease 或 HTTP 端点",
+    "resolve_pair_product_root": "按显式参数、环境、固定默认产品声明、home 的顺序解析产品 root 和 web 凭证路径；无效声明返回类型化失败，不读取 lease、daemon owner 或 HTTP 端点",
     "open_credential_owner": "打开既有 AccessControlService 凭证 owner，兼容无 pending 字段的旧凭证",
     "issue_durable_challenge": "在既有凭证 mutation lock 内剪除过期项并原子写入新的 TTL、一次性 challenge",
     "render_pair_receipt": "渲染公开 CLI 配对回执；成功返回 command、code、ISO expiresAt，失败返回类型化错误且不返回 code"

@@ -6,11 +6,12 @@
 
 ## 1. 设计结论
 
-HumanAgent 有两个 cwd 和两个事实面，但只有一个持久化 root：
+HumanAgent 有两个 cwd 和两个事实面，但每个产品只有一个持久化 control root。默认产品选择固定从
+`~/.humanagent/default-product.toml` 读取；未声明时 control root 仍为 `~/.humanagent`。
 
 ```text
 control plane / explicit Agent cwd
-  ~/.humanagent
+  <selected control root>（默认 ~/.humanagent）
   ├── internal.toml       系统维护，不由普通用户覆盖
   ├── config.toml         用户 Agent roster 和策略
   ├── user/               全局用户画像
@@ -19,11 +20,11 @@ control plane / explicit Agent cwd
   └── sessions/<project-key>/ 每个 workspace 的执行 session、任务历史和项目记忆
 
 execution workspace
-  当前命令 cwd 或 --workspace
+  --workspace 或所选产品 [project].workspace 声明
   └── 只代表本次项目输入和 worker 操作边界，不承载 HumanAgent 持久化
 ```
 
-显式 Agent 的 `cwd` 永远是 `~/.humanagent`。`~/.humanagent` 是全部持久化数据的唯一 root；项目路径只作为 canonical `workspaceCwd` 进入本次运行上下文。workspace 内禁止写入 session、journal、checkpoint、index、artifact、memory、user profile 和 runtime lock。worker/worktree 必须另行记录，不能通过改变显式 Agent cwd 偷渡控制面。
+显式 Agent 的 `cwd` 永远等于所选产品的 control root，默认是 `~/.humanagent`。全部产品持久化数据位于该 control root；项目路径只作为 canonical `workspaceCwd` 进入本次运行上下文。workspace 内禁止写入 session、journal、checkpoint、index、artifact、memory、user profile 和 runtime lock。worker/worktree 必须另行记录，不能通过改变显式 Agent cwd 偷渡控制面。固定 bootstrap 文件 `~/.humanagent/default-product.toml` 只保存默认产品选择，不保存 workspace、运行状态或产品数据。
 
 高层状态仍由 HumanAgent Journal 和 checkpoint 所有；Session Store 只负责宿主进程启动、恢复、退出和跨进程交接。Session 记录必须引用 task/checkpoint，而不能取代它们。
 
@@ -31,11 +32,19 @@ execution workspace
 
 ### 2.1 Control root
 
-默认 control root 为 `path.join(os.homedir(), '.humanagent')`。`HUMANAGENT_HOME` 只用于测试或明确的宿主部署配置；普通用户 CLI 不从当前目录猜测 control root。解析后记录 `controlRoot`, `agentCwd`，并要求二者相等。
+control root 优先级为本次显式 `--control-root` → `HUMANAGENT_HOME` → 固定 `~/.humanagent/default-product.toml` 声明 → `path.join(os.homedir(), '.humanagent')`。`HUMANAGENT_HOME` 只用于测试或明确的宿主部署配置；普通用户 CLI 不从当前目录猜测 control root。显式参数或环境已选时短路，不读取低优先级声明。声明缺失时保留 home 默认；声明格式、版本或路径无效时返回类型化 `default-product-selection-invalid`，不回退、不创建空产品、不扫描 owner 或运行实例。解析后记录 `controlRoot`, `agentCwd`，并要求二者相等。
+
+默认产品由显式入口写入，普通 `serve`、`pair`、`restart` 或带 `--control-root` 的调用不得改写：
+
+```sh
+humanagent product use --control-root "/known/current/product"
+```
+
+该声明只影响没有更高优先级选择的后续调用。正式 restart 的既有 typed startup args 必须保留已解析的 canonical control root 与 workspace。
 
 ### 2.2 Project key
 
-启动时将 `cwd` 或 `--workspace` 解析成 canonical absolute path：
+启动时将显式 `--workspace` 或所选产品 `[project].workspace` 解析成 canonical absolute path：
 
 1. `realpath` 已存在路径；不存在路径直接拒绝，避免两个拼写指向两个 session。
 2. 规范化分隔符为 `/`，保留根路径语义。
@@ -54,7 +63,7 @@ macOS 示例：
 ### 2.3 Project storage（仍位于 control root）
 
 ```text
-~/.humanagent/sessions/<project-key>/
+<selected control root>/sessions/<project-key>/
   project.json                  canonical path 和 project identity
   config.toml                   可选项目覆盖，只能缩小用户权限
   sessions/
@@ -72,7 +81,7 @@ macOS 示例：
 
 每个新 project 首次启动用原子 `mkdir`/`rename` 创建目录和 `project.json`；已有目录必须先核验 canonical path。不能以 session 文件名反推 project identity。
 
-这里的 “project” 是 control-root 下的 project namespace，不是 project workspace 下的目录。workspace 只读/执行；所有持久化路径必须由 `controlRoot` 和 `projectKey` 拼出，并在启动阶段校验其前缀位于 `~/.humanagent` 内。
+这里的 “project” 是 control-root 下的 project namespace，不是 project workspace 下的目录。workspace 只读/执行；所有持久化路径必须由 `controlRoot` 和 `projectKey` 拼出，并在启动阶段校验其前缀位于所选 control root 内。
 
 ## 3. 配置模型
 
@@ -87,7 +96,7 @@ authoring → parse → validate → compile → load
 ```text
 built-in defaults
   → internal.toml
-  → ~/.humanagent/config.toml
+  → <selected control root>/config.toml
   → sessions/<project-key>/config.toml
   → 本次 CLI 显式 workspace/profile 参数
 ```
@@ -174,7 +183,8 @@ Agent roster 是显式白名单。每个 `agentId`、role、template、driver、
 ```text
 CLI entry
   → resolve controlRoot / agentCwd
-  → resolve and canonicalize workspace
+  → resolve workspace from --workspace or product declaration
+  → canonicalize workspace
   → derive projectKey and verify project.json
   → read internal.toml
   → read user/project config.toml
@@ -244,12 +254,12 @@ MVP 的 `run` 完成 create/opening/ready 后交还宿主，session 保持 `read
 ### 6.1 全局位置
 
 ```text
-~/.humanagent/user/
+<selected control root>/user/
   profile.toml          稳定用户偏好、沟通和执行默认
   preferences.jsonl     带来源的偏好变更
   corrections.jsonl     用户纠正，待审核或已确认
 
-~/.humanagent/memory/global/
+<selected control root>/memory/global/
   journal.jsonl         跨项目已批准知识
   index/                可重建索引
   artifacts/            证据和大对象
@@ -259,7 +269,7 @@ MVP 的 `run` 完成 create/opening/ready 后交还宿主，session 保持 `read
 ### 6.2 项目位置
 
 ```text
-~/.humanagent/sessions/<project-key>/memory/
+<selected control root>/sessions/<project-key>/memory/
   project/journal.jsonl
   project/index/
   project/artifacts/
@@ -322,7 +332,7 @@ pnpm install:global -- "/path/to/humanagent-cli-<releaseVersion>.tgz"
 ```text
 which humanagent
 humanagent --version
-cd /tmp/another-workspace && humanagent doctor
+humanagent doctor --workspace /tmp/another-workspace
 humanagent run --workspace /tmp/another-workspace --plan default
 humanagent resume --workspace /tmp/another-workspace --session <session-id>
 restart → session list/resume → checkpoint recall
@@ -333,25 +343,24 @@ restart → session list/resume → checkpoint recall
 持久化显式交互到：
 
 ```text
-~/.humanagent/main/sessions/explicit-brain.jsonl
+<selected control root>/main/sessions/explicit-brain.jsonl
 ```
 
 项目任务 session 则写入：
 
 ```text
-~/.humanagent/sessions/<project-key>/<session-id>.jsonl
+<selected control root>/sessions/<project-key>/<session-id>.jsonl
 ```
 
-卸载只移除本次安装 prefix 中的 CLI；不得删除 `~/.humanagent/main`、
-`~/.humanagent/sessions`、user profile 或 memory。数据清理必须有独立命令和明确
-target。
+卸载只移除本次安装 prefix 中的 CLI；不得删除所选 control root 下的 `main`、
+`sessions`、user profile 或 memory。数据清理必须有独立命令和明确 target。
 
 ## 8. MVP 实现边界和验收
 
 本次 runtime-host slice 完成 iff：
 
-- 任意已存在 workspace 可通过同一 CLI 解析为稳定 project key。
-- `controlCwd === agentCwd === ~/.humanagent`，`workspaceCwd` 单独记录。
+- 任意已存在 workspace 可通过显式参数或所选产品声明解析为稳定 project key。
+- `controlCwd === agentCwd === <selected control root>`，`workspaceCwd` 单独记录。
 - internal/user/project config 分层加载，越权覆盖和重复 Agent 显式失败。
 - session JSONL 可 create/open/append/close，重启可恢复，损坏尾行不伪造成功。
 - user profile、global memory、project memory、task memory 和 session 路径相互分离。
