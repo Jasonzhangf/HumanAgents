@@ -5060,15 +5060,18 @@ export class UiRuntimeService {
   }): Promise<UiRuntimeScheduledOccurrenceAdmission> {
     try {
       const prepared = await this.prepareScheduledOccurrence(bindingFromOccurrenceClaim(input.claim));
-      const granted = await this.executionAutoStartAllowed(prepared.task.taskId);
+      const granted = prepared.terminalReuse
+        || await this.executionAutoStartAllowed(prepared.task.taskId);
       return {
         state: granted ? 'ready' : 'waiting',
         taskId: prepared.task.taskId,
         operationId: prepared.allocation.operationId,
         executionEpoch: prepared.allocation.executionEpoch,
-        message: granted
-          ? 'scheduled occurrence has its exact child execution grant'
-          : 'scheduled occurrence is prepared and waiting for its exact child execution grant',
+        message: prepared.terminalReuse
+          ? 'scheduled occurrence already has an executed terminal effect ready for settlement'
+          : granted
+            ? 'scheduled occurrence has its exact child execution grant'
+            : 'scheduled occurrence is prepared and waiting for its exact child execution grant',
         ...(this.options.projectKey === undefined
           ? {}
           : { controlTarget: { projectKey: this.options.projectKey, mode: this.mode } }),
@@ -5088,30 +5091,32 @@ export class UiRuntimeService {
   }): Promise<OccurrenceTerminalProduction> {
     try {
       const prepared = await this.prepareScheduledOccurrence(input.binding);
-      const status = this.status();
-      if (!this.canStartProviderExecution(status)) {
-        const providerError = this.options.providerError;
-        throw new UiRuntimeApiError(
-          providerError?.code ?? `provider.readiness.${status.providerState}`,
-          providerError?.ownerId ?? 'humanagent.provider-adapter',
-          providerError?.message ?? `provider readiness is ${status.providerState}`,
-          providerError?.nextAction ?? 'inspect provider readiness',
-          409,
-        );
-      }
       const task = prepared.task;
       const started = prepared.allocation;
-      if (!await this.executionAutoStartAllowed(task.taskId)) {
-        throw new UiRuntimeApiError(
-          'scheduled-occurrence.grant-pending',
-          APP_OWNER,
-          `scheduled occurrence ${input.binding.occurrenceId} is prepared but has no exact child execution grant`,
-          `grant task ${task.taskId.value} through its scoped control entry before retrying the occurrence`,
-          409,
-        );
+      if (!prepared.terminalReuse) {
+        const status = this.status();
+        if (!this.canStartProviderExecution(status)) {
+          const providerError = this.options.providerError;
+          throw new UiRuntimeApiError(
+            providerError?.code ?? `provider.readiness.${status.providerState}`,
+            providerError?.ownerId ?? 'humanagent.provider-adapter',
+            providerError?.message ?? `provider readiness is ${status.providerState}`,
+            providerError?.nextAction ?? 'inspect provider readiness',
+            409,
+          );
+        }
+        if (!await this.executionAutoStartAllowed(task.taskId)) {
+          throw new UiRuntimeApiError(
+            'scheduled-occurrence.grant-pending',
+            APP_OWNER,
+            `scheduled occurrence ${input.binding.occurrenceId} is prepared but has no exact child execution grant`,
+            `grant task ${task.taskId.value} through its scoped control entry before retrying the occurrence`,
+            409,
+          );
+        }
+        const current = this.coordinator.taskSnapshot(task.taskId);
+        if (current.state === 'waiting') await this.releaseExecution(task.taskId, started.operationId);
       }
-      const current = this.coordinator.taskSnapshot(task.taskId);
-      if (current.state === 'waiting') await this.releaseExecution(task.taskId, started.operationId);
       await this.awaitScheduledOccurrenceTerminal(started.operationId);
       const snapshot = this.coordinator.taskSnapshot(task.taskId);
       const committed = snapshot.checkpoint;
@@ -5142,7 +5147,8 @@ export class UiRuntimeService {
 
   private async prepareScheduledOccurrence(binding: OccurrenceTaskBinding): Promise<{
     readonly task: RuntimeTaskSnapshot;
-    readonly allocation: RuntimeExecutionAllocation;
+    readonly allocation: Pick<RuntimeExecutionAllocation, 'operationId' | 'executionEpoch'>;
+    readonly terminalReuse: boolean;
   }> {
     const envelope = await this.scheduledOccurrenceEnvelope(binding);
     const prompt = envelope.normalizedInput;
@@ -5159,6 +5165,35 @@ export class UiRuntimeService {
     }
     const task = existing ?? this.coordinator.createTask({ taskId: binding.taskId, title, directive: prompt });
     await this.establishScheduledOccurrenceIdentity(binding, task.taskId, envelope);
+    const current = this.coordinator.taskSnapshot(task.taskId);
+    if (
+      current.state === 'succeeded'
+      || current.state === 'failed'
+      || current.state === 'stopped'
+      || current.state === 'cancelled'
+    ) {
+      if (
+        current.operationId !== binding.operationId.value
+        || current.executionEpoch !== binding.executionEpoch
+        || this.coordinator.operationTask(binding.operationId).value !== current.taskId.value
+      ) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.execution-identity-conflict',
+          RUNTIME_OWNER,
+          `retained execution ${current.operationId ?? 'unknown'}@${current.executionEpoch ?? 'unknown'} does not match occurrence binding ${binding.operationId.value}@${binding.executionEpoch}`,
+          'inspect the persisted occurrence claim before dispatching it',
+          409,
+        );
+      }
+      return {
+        task: current,
+        allocation: {
+          operationId: id('operation', current.operationId),
+          executionEpoch: current.executionEpoch,
+        },
+        terminalReuse: true,
+      };
+    }
     const allocation = this.coordinator.prepareExecution(task.taskId, {
       prompt,
       operationId: binding.operationId,
@@ -5174,7 +5209,7 @@ export class UiRuntimeService {
         409,
       );
     }
-    return { task: this.coordinator.taskSnapshot(task.taskId), allocation };
+    return { task: this.coordinator.taskSnapshot(task.taskId), allocation, terminalReuse: false };
   }
 
   private async establishScheduledOccurrenceIdentity(
