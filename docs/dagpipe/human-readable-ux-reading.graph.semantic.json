@@ -1,12 +1,12 @@
 {
   "graph": "humanagent-human-readable-ux-reading",
-  "requirements_version": 13,
+  "requirements_version": 19,
   "labels": {
     "truth": "读取同范围真实事实、责任与已由 owner 解码的原生实际执行记录",
-    "semantic": "复用共同语义与来源",
-    "purpose": "按当前阅读用途分开组织 guidance、当前计划与已记录实例",
-    "necessary": "仅保留当前必要内容与合法操作 并明确缺失历史与真实证据",
-    "present": "共享控件人类可读呈现并按需展开"
+    "semantic": "复用共同语义并识别业务任务、真实结果与 typed lineage",
+    "purpose": "按列表与下一层详情组织最小必要信息",
+    "necessary": "保留语义名称、真实状态或结果、必要阻塞与可达入口",
+    "present": "共享控件呈现一个业务工作项并可进入完整证据层"
   },
   "owners": {
     "truth": "packages/runtime",
@@ -16,6 +16,10 @@
     "present": "packages/ui"
   },
   "consumerNotes": {
+    "task-list": {
+      "purpose": "列表只显示一个业务工作项；标题来自显式 Brain title，阶段来自真实 business/occurrence 关系，结果来自已提交 receipt/output，blocker 保留 owner。",
+      "verification": "必须由 P3/P4 public projection 与真实浏览器路径验证；P0 图不证明实现。"
+    },
     "actual-execution-graph": {
       "purpose": "从同一 agentActivity 成功值读取 actualExecutionGraph；实际执行来源是 Runtime 对同范围已解码原生记录的纯选择结果，不要求 assignment-graph fact replay，不新增端点或控制写入。",
       "implementationPaths": [

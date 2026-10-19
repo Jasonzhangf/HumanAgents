@@ -12,7 +12,7 @@
   },
   "design": {
     "scopeRead": "semantic GET/SSE 与 observation GET 可选携带完整 projectKey 与 mode；无 scope 保持 serve-bound 行为，完整外项目 scope 读取该配置项目与模式的 Journal inventory。query scope 仍是观测子树，node 仍是节点选择。",
-    "observationRead": "observation 使用与 semantic 相同的真实 scope 解析。任务快照和准入历史来自目标项目与模式 Journal，不读取 serve-bound requirementAdmissions。",
+    "observationRead": "observation 使用与 semantic 相同的真实 scope 解析。任务快照和准入历史来自目标项目与模式 Journal，不读取 serve-bound requirementAdmissions。浏览器读边上，缺省旧链接与 null 缺省在唯一位置归一为 omitted scope：请求不带 projectKey 与 mode，serve-bound 读保持有效；完整 scope 原样转发；partial/invalid 仍显式拒绝。不填造 projectKey、不新增 scope registry、不建立双路径 fallback。正式 grant/revoke 的 required scope 与目标验证保持独立。",
     "observationAgent": "observation 沿现有 decodeTaskAgentActivitySelectionQuery 解析 agent/turn/item，并从同一解析 scope 读取实际 Agent activity；不伪造 Organ。",
     "foreignStream": "外项目 durable stream 在写 200 前完成校验和快照读取，发送一次 semantic 快照、一次空数据 semantic-complete 传输事件，然后正常结束。",
     "publicOutput": "durable inventory 使用同一 FileCheckpointStore.readPublicOutputs 读取器恢复 publicOutput，沿用 checkpoint 或 operation 的 executionEpoch 选择。有效 bound live read 把捕获的 Runtime publication state 与同 binding 的 durable commits 组合：成功读到 committed records 不清除已捕获的 typed pending state；commits、输出文本和 publicCommitWatermark 保持 durable 值，且不暴露未提交文本。读取失败以 unknown 保留当前已确认 commits 和 watermark。semantic GET/SSE 的公共信封原样携带同一 typed publicOutput（state 与 commits，commit 形状为 {ref, text}）及其 publicCommitWatermark，保留顺序、文本、refs 与两个独立 watermark，且不按 publication state 过滤，因此 pending、unavailable 或 unknown 仍可保留此前确认的 commits 与提交边界；缺失时字段保持省略，不伪造时间或事件身份。task.output 只使用已提交 publication；缺失、pending、unavailable 或 unknown 明确显示，不用 record.output、provider 或 model 文本回退。原始与动作证据仍可读。",

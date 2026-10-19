@@ -291,6 +291,25 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       assert.deepEqual(project.tasks, systemProject.tasks, 'project row must match its system row');
     }
 
+    const coldRow = projectReads.get(coldPaths.projectKey)!.tasks[0]!;
+    const { taskExecutionHref } = await import(
+      `file://${join(process.cwd(), 'docs/ui/runtime-shell.js')}`
+    ) as { taskExecutionHref: (child: unknown, control?: boolean, scope?: unknown) => string | undefined };
+    const coldHref = taskExecutionHref(coldRow, false, coldRow.scope);
+    if (coldHref === undefined) throw new Error('cold task row must expose a dashboard navigation href');
+    assert.equal(
+      taskExecutionHref(coldRow, true, coldRow.scope),
+      undefined,
+      'controlTarget, not a read scope, must authorize a control href',
+    );
+    const coldDashboard = await get(new URL(coldHref, 'http://fixture.local').search);
+    assert.equal(
+      coldDashboard.taskTitle,
+      fixtures[1]!.title,
+      'known cold read scope must survive task navigation',
+    );
+    assert.equal(coldDashboard.input, fixtures[1]!.objective);
+
     const assertTaskA = (body: RuntimeTaskDashboardProjection): void => {
       assert.equal(body.taskTitle, fixtures[0]!.title, 'scope A title mismatch');
       assert.equal(body.input, fixtures[0]!.objective, 'scope A input mismatch');

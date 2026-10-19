@@ -1,11 +1,12 @@
 {
   "graph": "humanagent-explicit-requirement",
+  "requirements_version": 19,
   "labels": {
-    "establish_task_identity": "精确匹配最终回执与队列来源，建立任务身份；失败保留消费责任",
-    "admit_task_execution": "入口 capability 与本地 health 使用同 binding 的 typed source/readiness 及既有请求谓词；可请求 HTTP unknown 的本地 health 为 degraded，展示仍 unknown，不产生 TaskGrant；用稳定产品身份与实际分配独立校验任务授权，拒绝保留消费责任且不请求执行",
+    "establish_task_identity": "保存独立语义名称、完整执行输入与可选 taskFlow，建立 business Task 身份",
+    "admit_task_execution": "选择唯一执行 owner；有执行策略时只交给 occurrence，无策略时走既有立即路径",
     "requirement_result": "返回本轮处理结果，失败不得提前确认消费",
     "sensory_inbox": "接收用户任务",
-    "explicit_normalize": "显式整理需求",
+    "explicit_normalize": "显式整理需求并推理任务类型",
     "create_reviewable_draft": "生成可读任务草稿",
     "revise_draft_to_approval": "审阅并修订任务草稿",
     "confirm_exact_revision": "按精确 revision 版本与哈希确认，保留已确认 goal/scope/constraints/deliverables；旧确认显式拒绝",

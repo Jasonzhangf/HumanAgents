@@ -1,8 +1,15 @@
 {
   "id": "humanagent-task-liveness-display",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "任务实时性事实从运行时快照到工作卡片真实呈现",
+    "requirements_version": 19,
+    "requirements": [
+      "humanagent-task-list-truthful-result-and-action-boundary",
+      "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+      "humanagent-turn-checkpoint-four-part-summary-and-planner-iteration",
+      "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery"
+    ],
     "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
     "designStatus": "candidate",
     "capabilityStatus": "partial",
@@ -20,15 +27,18 @@
       "noFakeProgress": "silentForMs 只与 silenceBudgetMs 比较得出观测事实；不推断 runtime 已经或将要干预，不显示百分比、剩余时间或预计完成"
     },
     "terminalContract": {
-      "success": "rendered_liveness_truth：卡片顶部状态栏显示由真实信号推出的状态，并区分已连接/已断开/执行终态收拢",
+      "success": "rendered_liveness_truth：卡片顶部状态栏显示由真实信号推出的状态，并区分已连接/已断开/执行终态收拢。succeeded 显示已提交结果摘要或结果入口，不显示“下一步：可停止”。",
       "failure": "已失败：reported error 优先于一切其他状态，卡片显示失败而不是继续声称工作中",
       "disconnected": "实时连接已断开：传输事实为页面本地观测，断开时仍可读最近一次持久化投影。落点：断开期间卡片保留最近一次服务端读回的活性结论，并把传输显式标为『实时连接已断开』；活性结论与静默秒数只来自那次读回的服务端投影，页面计时器不得推进它们，也不得在断线后产生任何新的进展。因此断线既不会被静默重试掩盖，也不会被页面时钟伪装成仍在工作",
       "noActivity": "无活动：lifecycle 为 active 但静默超过声明预算，显示观测到的静默事实，不伪造进度",
-      "waiting": "待回答：lifecycle 等待人类或资源决策",
+      "waiting": "只有存在实际 question/options 与可提交入口时才显示“等待你决定”。缺 exact TaskGrant 显示“等待该次执行授权”；系统/资源阻塞显示真实 blocker、owner 与恢复入口。三者不得合并成 waiting-for-answer。",
       "settledStream": "执行终态时服务端关闭流属于预期收拢，不得渲染为『实时连接已断开』",
       "cancel": "最后一次持久化投影保持可读"
     },
-    "scopeBoundary": "本图只覆盖承载工作卡片的页面（docs/ui/index.html、dashboard.html、task.html）经真实 dashboard 读模型取得实时性并呈现；其中页面本地传输事实只有 docs/ui/task.js 持有（它自己开 EventSource 观测该流），index.html 与 dashboard.html 只挂载工作卡片、不持有该流、也不写入卡片传输事实；只读 Observation 页（observation.js）由 humanagent-observation-read 覆盖，不复用本图"
+    "scopeBoundary": "本图只覆盖承载工作卡片的页面（docs/ui/index.html、dashboard.html、task.html）经真实 dashboard 读模型取得实时性并呈现；其中页面本地传输事实只有 docs/ui/task.js 持有（它自己开 EventSource 观测该流），index.html 与 dashboard.html 只挂载工作卡片、不持有该流、也不写入卡片传输事实；只读 Observation 页（observation.js）由 humanagent-observation-read 覆盖，不复用本图",
+    "truthfulReadContract": "列表与详情必须来自同一 typed 任务事实：语义 title、真实 state/blocker/result、business/occurrence lineage 与已验证入口。主列表只显示一个业务工作项；内部 child 可在详情和 Observation 完整读取。无法关联的历史记录保留独立入口，不能按 title 或 ID 前缀推断关系。",
+    "actionBoundary": "action 必须具备实际 typed authority 与可用入口。succeeded 的“停止”不存在时不显示；missing grant 只链接验证过的 child control target；blocked 保留 typed error/owner/recovery；真实 decision 才提供 question/options 提交。下一步文案不得独立于 action 机械拼接。",
+    "p0Status": "本版冻结 truthful state/result/action 与 lineage 展示契约。P3/P4 必须把已冻结 typed 输入接入既有 projection/card；当前实现仍为 partial/UNVERIFIED。"
   },
   "inputs": [
     {

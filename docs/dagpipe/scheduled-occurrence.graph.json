@@ -1,8 +1,14 @@
 {
   "id": "humanagent-scheduled-occurrence",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "单个到期 occurrence 从 scheduler patrol、已提交订阅状态、认领、执行、收拢到结果投影",
+    "requirements_version": 19,
+    "requirements": [
+      "humanagent-task-list-truthful-result-and-action-boundary",
+      "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+      "humanagent-explicit-brain-semantic-turn-context"
+    ],
     "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
     "designStatus": "candidate",
     "capabilityStatus": "partial",
@@ -35,6 +41,16 @@
       "consumerCapability": "DELIVERED: OccurrenceConsumerRouter implements ServeTaskConsumerPort with ownsFirstAdmissionAuthority=true and delegates to DurableOccurrenceConsumer.forTaskCycle over the persisted OccurrenceTaskBinding; execute-or-resume, authoritative checkpoint settlement and TaskVerificationResult are proven by the production same-entry acceptance test (tests/app/scheduler-production-wiring.test.ts) and the durable consumer suites",
       "crossGraph": "typed invocation of the public serve-task input/output contract; no cross-graph node edge, back-edge, second lifecycle, or second persistence truth"
     },
+    "executionAdmissionContract": {
+      "occurrenceConsumption": "SubscriptionControlPort.consumeExecution 只取得该 occurrence 的执行消费权，不证明 TaskGrant。消费前保留 occurrence claim 与现有 lease 语义。",
+      "preparedAllocation": "执行 owner 使用精确 OccurrenceTaskBinding 准备 child Task/operation allocation；该 allocation 保留 occurrenceId、subscriptionId、scheduleRevision、occurrenceOrdinal、taskId、operationId、executionEpoch 与 inputArtifactDigest。",
+      "lineage": "business TaskIdentity.source.requirementId、Subscription.goalId 与已提交 occurrence claim/binding 形成 typed 父子关系；不从 title、ID 前缀或运行日志推断。",
+      "exactGrant": "每个 child execution Task 都必须以自己的 taskId 读取当前 TaskGrant，并核对 verified principal owner。parent grant、提交动作或 occurrence consumption 不得自动授权 child。",
+      "noGrant": "当前 child TaskGrant 缺失、revoked、owner 不匹配或 revision stale 时，保留 prepared allocation，返回可读的等待执行授权或明确拒绝；不得创建 Provider factory、发送模型请求或把该状态写成 runtime execution failure。",
+      "releaseOnce": "正式 scoped grant 复用现有 principal/control journal/readback 路径。只有 verified grant 后，同一 prepared allocation 才可进入 native TG1 owner，release 一次并执行一次；duplicate grant/replay 不得第二次 release。",
+      "unknownReceipt": "控制 receipt 已提交但 readback 未知时保留 receipt 事实，不显示 denied、不自动重提，也不绕过 exact grant。",
+      "immutableBindingAdmission": "admission 必须复用 exact OccurrenceTaskBinding 已 prepared/running/terminal 的 child allocation；同一 binding 的 terminal 只进入 durable receipt 与 settle，不得 reprepare 或 reexecute。"
+    },
     "recoveryContract": {
       "busyReminder": "schedule({busy:true}) commits occurrence=reminder-pending and reminder=pending; the same slot with schedule({busy:false}) in recover_pending_reminder atomically commits occurrence=due and reminder=consumed only when active current revision is not invalidated and existing late/max/end rules still permit execution; when latePolicy=skip and nowAt > dueAt, it instead atomically commits occurrence=skipped-busy and matching reminder=invalidated, consumes the ordinal with existing skipped-busy accounting, and marks subscription exhausted when maxOccurrences is reached",
       "slotIdentity": "recovery preserves original occurrenceId, subscriptionId, scheduleRevision, occurrenceOrdinal, and dueAt for both due recovery and skipped-busy late closure; it never recreates the slot, bypasses claim, executes a skipped slot, or introduces a browser timer",
@@ -46,7 +62,7 @@
     "terminalContract": {
       "success": "publish_occurrence_result only after verified serve-task terminal/settlement receipt and atomic occurrence settle",
       "failure": "non-success verification remains a non-success occurrence outcome with recovery responsibility; attention.opened with retry-scheduler-patrol",
-      "blocked": "attention.opened with resource-waiting",
+      "blocked": "系统/资源阻塞使用可读 blocker 与恢复 owner；缺 exact TaskGrant 单独表示为等待执行授权，不得泛化为 waiting-for-answer 或 runtime failure",
       "cancelFuture": "subscription cancelled before occurrence claim; in-flight stop is separate",
       "cleanup": "occurrence consumed, skipped-busy, or invalidated; matching reminder consumed or invalidated; lease released; journal receipt retained",
       "executionRecovery": "duplicate, concurrent, or restarted execute-or-resume returns the same execution terminal identity without a second business dispatch"
@@ -68,6 +84,8 @@
     "productionWiringGap": "due 时间触发已由 packages/app/src/ui-runtime/scheduler.ts 的 UiRuntimeScheduler 在 startUiRuntime 内按真实时钟组装并驱动 schedule→claim→consumeExecution→settleOccurrence；production app 已把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:3257 persistAuthorizedExecutionPlan→:3295 port.create），并已组装 OccurrenceConsumerRouter/DurableOccurrenceConsumer。真实剩余缺口：(1) 已 claim 且未 settle 的 occurrence 在 owner 仍存活但结果未知时按 in-progress 拒绝重新 dispatch，进程内 unknown-outcome 停摆不会自愈；(2) patrol 间隔大于约 1s 时 latePolicy=skip 的槽位可能错过；(3) dueTimes/policySlotOrdinal 每 tick 为 O(总槽位)，需要游标或闭式解；(4) 已闭合：订阅 pause/resume/cancel-future 语义的唯一 owner 是 packages/runtime/src/subscriptions/index.ts 的 SubscriptionControlPort.control，production 入口 POST /api/plans/{subscriptionId}/control 经 packages/app/src/ui-runtime/service.ts 的 UiRuntimeService.controlExecutionPlan 调用该 owner；本图不新增控制入口，只读取已提交的订阅状态；scheduler runTick 遍历全部 persisted plan，非 active plan 只是不再领取新槽位，其已提交但未收拢的 claim 仍由 step 1 resume 并 settle 收口，控制与到期派发仍是两条独立边。原重复实现 SchedulerPatrol.pause/resume 只是该 owner 的纯转发，已随 packages/runtime/src/explicit-brain/scheduler-patrol.ts 在本轮 validation-ablation 物理删除，删除未移除任何已接线能力",
     "productionWiringOwner": "T14",
     "productionWiringEvidence": "packages/app/src/ui-runtime/scheduler.ts:124 UiRuntimeScheduler；packages/app/src/ui-runtime/occurrence-router.ts:55 OccurrenceConsumerRouter；packages/app/src/ui-runtime/index.ts:277 组装 OccurrenceConsumerRouter、:359 组装 UiRuntimeScheduler、:366/:392 start/stop；packages/app/src/ui-runtime/service.ts:3295 SubscriptionControlPort.create；tests/app/scheduler-production-wiring.test.ts 生产同入口 7 用例全通过"
+    ,
+    "p0Status": "本版只冻结 occurrence 消费权、prepared lineage、精确 child TaskGrant 与 truthful result 的业务契约。P2 必须实现 prepared/no-release、正式 child grant target、same-entry TG1 release 和黑盒回归；当前实现仍为 partial/UNVERIFIED。"
   },
   "inputs": [
     {

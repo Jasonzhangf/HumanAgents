@@ -110,7 +110,7 @@ import {
 import {
   nextPolicySlotAfter,
   SubscriptionControlError,
-  type SubscriptionControlPort,
+  SubscriptionControlPort,
   type SubscriptionSnapshot,
 } from '../../../runtime/src/subscriptions/index.js';
 import type { OccurrenceClaimRecord } from '../../../runtime/src/subscriptions/ports.js';
@@ -138,6 +138,7 @@ import {
   type DurableTaskInventoryEntry,
   type RuntimeExecutionDriver,
   type RuntimeExecutionDriverInput,
+  type RuntimeExecutionAllocation,
   type RuntimeExecutionRelease,
   type RuntimeExplicitBrainJournalState,
   type RuntimeExecutionCapabilities,
@@ -314,6 +315,7 @@ import {
   type CommittedExecutionCheckpoint,
 } from './occurrence-terminal.js';
 import type { OccurrenceTerminalProduction } from './occurrence-consumer.js';
+import type { UiRuntimeScheduledOccurrenceAdmission } from './scheduler.js';
 
 const APP_OWNER = 'humanagent.app';
 const CHECKPOINT_ASSET_OWNER = 'humanagent.app.ui-runtime.checkpoint-asset';
@@ -635,7 +637,6 @@ export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft
   readonly requestKind?: 'new-task-create' | 'existing-task-change';
   readonly taskRef?: TaskId;
   readonly executionPolicy?: ExecutionPolicyDefinition;
-  readonly taskFlow?: TaskFlowBinding;
   readonly goal?: string;
   readonly scope?: string;
   readonly constraints?: readonly string[];
@@ -1586,18 +1587,17 @@ function projectExecutionPlan(snapshot: SubscriptionSnapshot): RuntimeTaskPlanPr
   };
 }
 
-function requirementIdForSubscription(subscriptionId: string): string {
-  const prefix = 'subscription:';
-  if (!subscriptionId.startsWith(prefix) || subscriptionId.length === prefix.length) {
-    throw new UiRuntimeApiError(
-      'scheduled-occurrence.plan-identity-invalid',
-      RUNTIME_OWNER,
-      `execution plan id is not a requirement subscription: ${subscriptionId}`,
-      'inspect the persisted execution plan identity before dispatching it',
-      409,
-    );
-  }
-  return subscriptionId.slice(prefix.length);
+function bindingFromOccurrenceClaim(claim: OccurrenceClaimRecord): OccurrenceTaskBinding {
+  return {
+    occurrenceId: claim.occurrenceId,
+    subscriptionId: claim.subscriptionId,
+    scheduleRevision: claim.scheduleRevision,
+    occurrenceOrdinal: claim.occurrenceOrdinal,
+    taskId: claim.taskId,
+    operationId: claim.operationId,
+    executionEpoch: claim.executionEpoch,
+    inputArtifactDigest: claim.inputArtifactDigest,
+  };
 }
 
 /**
@@ -1844,9 +1844,13 @@ function journalRecordTaskId(record: UiRuntimeJournalRecord): string | undefined
 /** Modes with a real UI runtime Journal layout. `dsh` has no durable reader here. */
 const READABLE_RUNTIME_MODES: readonly RuntimeMode[] = ['fake', 'rcc'];
 
+function taskRowsOf(inputs: readonly RuntimeTaskSnapshotInput[], mode: RuntimeMode): RuntimeTaskRowProjection[] {
+  const list = projectRuntimeTaskList({ mode, tasks: inputs });
+  return [...list.running, ...list.waiting, ...list.completed, ...list.stopped, ...list.draft, ...list.failed];
+}
+
 function taskRowOf(input: RuntimeTaskSnapshotInput, mode: RuntimeMode): RuntimeTaskRowProjection {
-  const list = projectRuntimeTaskList({ mode, tasks: [input] });
-  const row = [...list.running, ...list.waiting, ...list.completed, ...list.stopped, ...list.draft, ...list.failed][0];
+  const row = taskRowsOf([input], mode)[0];
   if (row === undefined) throw new Error('task row projection returned no row');
   return row;
 }
@@ -3413,26 +3417,41 @@ export class UiRuntimeService {
    * keeps its typed error instead of degrading into an omitted (matching) row.
    */
   async listTasksWithIdentitySource(): Promise<RuntimeTaskListProjection> {
+    return projectRuntimeTaskList({ mode: this.mode, tasks: await this.snapshotsWithIdentitySource() });
+  }
+
+  private async snapshotsWithIdentitySource(): Promise<readonly RuntimeTaskSnapshotInput[]> {
     const snapshots = this.taskListSnapshots();
     const taskIdentity = this.options.taskIdentity;
     if (taskIdentity === undefined || snapshots.length === 0) {
-      return projectRuntimeTaskList({ mode: this.mode, tasks: snapshots });
+      return snapshots;
     }
+    const identities = new Map<string, TaskIdentityRecord>();
     const enriched = await Promise.all(snapshots.map(async (snapshot): Promise<RuntimeTaskSnapshotInput> => {
       const identity = await taskIdentity.read({ organId: this.options.organId, taskId: snapshot.taskId });
+      if (identity !== undefined) identities.set(snapshot.taskId.value, identity);
       return identity === undefined
         ? snapshot
         : {
           ...snapshot,
           identitySource: identity.source,
+          ...(identity.title === undefined ? {} : { semanticTitle: identity.title }),
           ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
         };
     }));
-    return projectRuntimeTaskList({ mode: this.mode, tasks: enriched });
+    return await this.withExecutionReadFacts(enriched, identities,
+      await this.subscriptionControl?.list() ?? [], this.boundProjectSource());
   }
 
   dashboard(): RuntimeDashboardProjection {
-    const tasks = this.coordinator.taskSnapshots().map(toRuntimeTaskSnapshotInput);
+    return this.dashboardFromSnapshots(this.taskListSnapshots());
+  }
+
+  async dashboardWithIdentitySource(): Promise<RuntimeDashboardProjection> {
+    return this.dashboardFromSnapshots(await this.snapshotsWithIdentitySource());
+  }
+
+  private dashboardFromSnapshots(tasks: readonly RuntimeTaskSnapshotInput[]): RuntimeDashboardProjection {
     return projectRuntimeDashboard({
       mode: this.mode,
       tasks,
@@ -3468,11 +3487,13 @@ export class UiRuntimeService {
     const dashboard = this.taskDashboard(taskId);
     const plan = await this.executionPlanForTask(taskId);
     const publicOutput = await this.authoritativePublicOutputForTask(taskId);
+    const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
     // Re-run the same pure dashboard projection with the authoritative
     // publication so the output/narrative are computed from committed records.
     const withPublication = publicOutput === undefined ? dashboard : this.taskDashboard(taskId, publicOutput);
     return {
       ...withPublication,
+      ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
       ...(plan === undefined ? {} : { plan }),
       taskPlanHistory: await this.boundTaskPlanHistory(taskId),
       agentActivity: await this.taskAgentActivityFor(this.boundProjectSource(), this.mode, taskId, agentSelection),
@@ -3705,8 +3726,10 @@ export class UiRuntimeService {
       const snapshot = await this.subscriptionSnapshot(port, subscriptionIdForRequirement(envelope.requirementId));
       if (snapshot !== undefined) return snapshot;
     }
+    const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
     for (const snapshot of await port.list()) {
-      if (snapshot.claims.some((claim) => claim.taskId.value === taskId.value)) return snapshot;
+      if (snapshot.claims.some((claim) => claim.taskId.value === taskId.value)
+        || (identity !== undefined && snapshot.subscription.goalId === identity.source.requirementId)) return snapshot;
     }
     return undefined;
   }
@@ -3928,6 +3951,7 @@ export class UiRuntimeService {
         ? {}
         : {
           identitySource: identity.source,
+          ...(identity.title === undefined ? {} : { semanticTitle: identity.title }),
           ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
         }),
     };
@@ -3937,13 +3961,73 @@ export class UiRuntimeService {
     readonly rows: RuntimeProjectTaskReadRow[];
     readonly failure?: RuntimeReadFailure;
   }> {
-    const { byTaskId, failure } = await this.scopeCommittedIdentities(source, mode);
-    const rows = this.coordinator.taskSnapshots().map((snapshot) => ({
-      scope: { kind: 'task' as const, projectKey: source.projectKey, mode, taskId: snapshot.taskId },
-      task: taskRowOf(this.snapshotWithScopeIdentity(snapshot, byTaskId.get(snapshot.taskId.value)), mode),
+    const { byTaskId, failure: identityFailure } = await this.scopeCommittedIdentities(source, mode);
+    const subscriptions = await this.scopeSubscriptions(source, mode, byTaskId);
+    const snapshots = await this.withExecutionReadFacts(this.coordinator.taskSnapshots().map((snapshot) =>
+      this.snapshotWithScopeIdentity(snapshot, byTaskId.get(snapshot.taskId.value))), byTaskId, subscriptions.snapshots, source);
+    const rows = taskRowsOf(snapshots, mode).map((task) => ({
+      scope: { kind: 'task' as const, projectKey: source.projectKey, mode, taskId: task.taskId },
+      task,
       basis: 'live-runtime' as const,
     }));
+    const failure = identityFailure ?? subscriptions.failure;
     return failure === undefined ? { rows } : { rows, failure };
+  }
+
+  private async scopeSubscriptions(
+    source: ConfiguredProjectReadSource,
+    mode: RuntimeMode,
+    identities: ReadonlyMap<string, TaskIdentityRecord>,
+  ): Promise<{ snapshots: readonly SubscriptionSnapshot[]; failure?: RuntimeReadFailure }> {
+    const identity = identities.values().next().value as TaskIdentityRecord | undefined;
+    if (identity === undefined) return { snapshots: [] };
+    try {
+      const path = join(uiRuntimeModeRoot(source.checkpointsRoot, mode), 'subscriptions.jsonl');
+      const port = new SubscriptionControlPort(new JsonlOrganJournal(path), { organId: identity.scope.organId }, path);
+      return { snapshots: await port.list() };
+    } catch (error) {
+      return { snapshots: [], failure: {
+        code: 'read.subscription-failed', ownerId: TASK_PLAN_HISTORY_OWNER,
+        message: `subscription read failed: ${error instanceof Error ? error.message : String(error)}`,
+        nextAction: 'restore the canonical subscription Journal read for this scope',
+      } };
+    }
+  }
+
+  private async withExecutionReadFacts(
+    snapshots: readonly RuntimeTaskSnapshotInput[],
+    identities: ReadonlyMap<string, TaskIdentityRecord>,
+    subscriptions: readonly SubscriptionSnapshot[],
+    liveSource?: ConfiguredProjectReadSource,
+  ): Promise<readonly RuntimeTaskSnapshotInput[]> {
+    const childIds = new Set(subscriptions.flatMap((plan) => plan.claims.map((claim) => claim.taskId.value)));
+    const parents = new Map<string, RuntimeTaskSnapshotInput[]>();
+    for (const snapshot of snapshots) {
+      const requirementId = identities.get(snapshot.taskId.value)?.source.requirementId;
+      if (requirementId === undefined || childIds.has(snapshot.taskId.value)) continue;
+      const matches = parents.get(requirementId) ?? [];
+      matches.push(snapshot);
+      parents.set(requirementId, matches);
+    }
+    const lineage = new Map<string, NonNullable<RuntimeTaskSnapshotInput['executionLineage']>>();
+    for (const plan of subscriptions) {
+      const matches = parents.get(plan.subscription.goalId);
+      if (matches?.length !== 1) continue;
+      for (const claim of plan.claims) {
+        lineage.set(claim.taskId.value, {
+          parentTaskId: matches[0]!.taskId, subscriptionId: plan.subscription.subscriptionId, occurrenceId: claim.occurrenceId,
+        });
+      }
+    }
+    return await Promise.all(snapshots.map(async (snapshot) => {
+      const relation = lineage.get(snapshot.taskId.value);
+      if (relation === undefined) return snapshot;
+      const target = liveSource === undefined ? undefined
+        : await this.verifyControllableTaskTarget(snapshot.taskId, liveSource.projectKey, this.mode);
+      const controlTarget = target === undefined ? undefined : { projectKey: target.projectKey, mode: this.options.mode };
+      return { ...snapshot, executionLineage: relation,
+        ...(controlTarget === undefined ? {} : { controlTarget }) };
+    }));
   }
 
   private async readDurableInventory(
@@ -4014,13 +4098,14 @@ export class UiRuntimeService {
       for (const failure of inventory.failures) failures.push(failure);
       const { byTaskId, failure: identityFailure } = await this.scopeCommittedIdentities(source, mode);
       if (identityFailure !== undefined) failures.push(identityFailure);
-      for (const entry of inventory.entries) {
+      const subscriptions = await this.scopeSubscriptions(source, mode, byTaskId);
+      if (subscriptions.failure !== undefined) failures.push(subscriptions.failure);
+      const snapshots = await this.withExecutionReadFacts(inventory.entries.map((entry) =>
+        this.snapshotWithScopeIdentity(entry.snapshot, byTaskId.get(entry.snapshot.taskId.value))), byTaskId, subscriptions.snapshots);
+      for (const task of taskRowsOf(snapshots, mode)) {
         rows.push({
-          scope: { kind: 'task', projectKey: source.projectKey, mode, taskId: entry.snapshot.taskId },
-          task: taskRowOf(
-            this.snapshotWithScopeIdentity(entry.snapshot, byTaskId.get(entry.snapshot.taskId.value)),
-            mode,
-          ),
+          scope: { kind: 'task', projectKey: source.projectKey, mode, taskId: task.taskId },
+          task,
           basis: 'durable-history',
         });
       }
@@ -4115,10 +4200,14 @@ export class UiRuntimeService {
       if (inventory.failures.length > 0) return { ok: false, failure: inventory.failures[0]! };
       return { ok: false, failure: unknownTaskFailure(taskId, projectKey, mode) };
     }
+    const identities = await this.scopeCommittedIdentities(source, mode);
+    if (identities.failure !== undefined) return { ok: false, failure: identities.failure };
+    const identity = identities.byTaskId.get(taskId.value);
     return {
       ok: true,
       value: {
         ...runtimeTaskDashboard(entry.snapshot, mode),
+        ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
         taskPlanHistory: await this.taskPlanHistoryFor(source, mode, taskId),
         agentActivity: await this.taskAgentActivityFor(source, mode, taskId, agentSelection),
       },
@@ -4966,6 +5055,32 @@ export class UiRuntimeService {
    * There is no second verification truth: the returned verification and
    * checkpoint are derived from the checkpoint the coordinator really committed.
    */
+  async admitScheduledOccurrence(input: {
+    readonly claim: OccurrenceClaimRecord;
+  }): Promise<UiRuntimeScheduledOccurrenceAdmission> {
+    try {
+      const prepared = await this.prepareScheduledOccurrence(bindingFromOccurrenceClaim(input.claim));
+      const granted = prepared.terminalReuse
+        || await this.executionAutoStartAllowed(prepared.task.taskId);
+      return {
+        state: granted ? 'ready' : 'waiting',
+        taskId: prepared.task.taskId,
+        operationId: prepared.allocation.operationId,
+        executionEpoch: prepared.allocation.executionEpoch,
+        message: prepared.terminalReuse
+          ? 'scheduled occurrence already has an executed terminal effect ready for settlement'
+          : granted
+            ? 'scheduled occurrence has its exact child execution grant'
+            : 'scheduled occurrence is prepared and waiting for its exact child execution grant',
+        ...(this.options.projectKey === undefined
+          ? {}
+          : { controlTarget: { projectKey: this.options.projectKey, mode: this.mode } }),
+      };
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
   async executeScheduledOccurrence(input: {
     readonly occurrence: Occurrence;
     readonly policy: ExecutionPolicyDefinition;
@@ -4975,45 +5090,33 @@ export class UiRuntimeService {
     readonly previousCheckpoint: Checkpoint | null;
   }): Promise<OccurrenceTerminalProduction> {
     try {
-      const status = this.status();
-      if (!this.canStartProviderExecution(status)) {
-        const providerError = this.options.providerError;
-        throw new UiRuntimeApiError(
-          providerError?.code ?? `provider.readiness.${status.providerState}`,
-          providerError?.ownerId ?? 'humanagent.provider-adapter',
-          providerError?.message ?? `provider readiness is ${status.providerState}`,
-          providerError?.nextAction ?? 'inspect provider readiness',
-          409,
-        );
+      const prepared = await this.prepareScheduledOccurrence(input.binding);
+      const task = prepared.task;
+      const started = prepared.allocation;
+      if (!prepared.terminalReuse) {
+        const status = this.status();
+        if (!this.canStartProviderExecution(status)) {
+          const providerError = this.options.providerError;
+          throw new UiRuntimeApiError(
+            providerError?.code ?? `provider.readiness.${status.providerState}`,
+            providerError?.ownerId ?? 'humanagent.provider-adapter',
+            providerError?.message ?? `provider readiness is ${status.providerState}`,
+            providerError?.nextAction ?? 'inspect provider readiness',
+            409,
+          );
+        }
+        if (!await this.executionAutoStartAllowed(task.taskId)) {
+          throw new UiRuntimeApiError(
+            'scheduled-occurrence.grant-pending',
+            APP_OWNER,
+            `scheduled occurrence ${input.binding.occurrenceId} is prepared but has no exact child execution grant`,
+            `grant task ${task.taskId.value} through its scoped control entry before retrying the occurrence`,
+            409,
+          );
+        }
+        const current = this.coordinator.taskSnapshot(task.taskId);
+        if (current.state === 'waiting') await this.releaseExecution(task.taskId, started.operationId);
       }
-      const prompt = this.scheduledOccurrencePrompt(input.binding);
-      const title = `计划执行 ${input.binding.occurrenceId}`;
-      const existing = this.coordinator.taskSnapshots().find((task) => task.taskId.value === input.binding.taskId.value);
-      if (existing !== undefined && (existing.title !== title || existing.directive !== prompt)) {
-        throw new UiRuntimeApiError(
-          'scheduled-occurrence.task-identity-conflict',
-          RUNTIME_OWNER,
-          `occurrence task ${input.binding.taskId.value} already belongs to different task content`,
-          'inspect the persisted occurrence task identity before dispatching it',
-          409,
-        );
-      }
-      const task = existing ?? this.coordinator.createTask({ taskId: input.binding.taskId, title, directive: prompt });
-      const started = this.coordinator.prepareExecution(task.taskId, {
-        prompt,
-        operationId: input.binding.operationId,
-        ...this.defaultOrchestrate(),
-      });
-      if (started.operationId.value !== input.binding.operationId.value || started.executionEpoch !== input.binding.executionEpoch) {
-        throw new UiRuntimeApiError(
-          'scheduled-occurrence.execution-identity-conflict',
-          RUNTIME_OWNER,
-          `started execution ${started.operationId.value}@${started.executionEpoch} does not match occurrence binding ${input.binding.operationId.value}@${input.binding.executionEpoch}`,
-          'inspect the persisted occurrence claim before dispatching it',
-          409,
-        );
-      }
-      await this.coordinator.releaseExecution(task.taskId, started.operationId);
       await this.awaitScheduledOccurrenceTerminal(started.operationId);
       const snapshot = this.coordinator.taskSnapshot(task.taskId);
       const committed = snapshot.checkpoint;
@@ -5042,14 +5145,115 @@ export class UiRuntimeService {
     }
   }
 
+  private async prepareScheduledOccurrence(binding: OccurrenceTaskBinding): Promise<{
+    readonly task: RuntimeTaskSnapshot;
+    readonly allocation: Pick<RuntimeExecutionAllocation, 'operationId' | 'executionEpoch'>;
+    readonly terminalReuse: boolean;
+  }> {
+    const envelope = await this.scheduledOccurrenceEnvelope(binding);
+    const prompt = envelope.normalizedInput;
+    const title = `计划执行 ${binding.occurrenceId}`;
+    const existing = this.coordinator.taskSnapshots().find((task) => task.taskId.value === binding.taskId.value);
+    if (existing !== undefined && (existing.title !== title || existing.directive !== prompt)) {
+      throw new UiRuntimeApiError(
+        'scheduled-occurrence.task-identity-conflict',
+        RUNTIME_OWNER,
+        `occurrence task ${binding.taskId.value} already belongs to different task content`,
+        'inspect the persisted occurrence task identity before dispatching it',
+        409,
+      );
+    }
+    const task = existing ?? this.coordinator.createTask({ taskId: binding.taskId, title, directive: prompt });
+    await this.establishScheduledOccurrenceIdentity(binding, task.taskId, envelope);
+    const current = this.coordinator.taskSnapshot(task.taskId);
+    if (
+      current.state === 'succeeded'
+      || current.state === 'failed'
+      || current.state === 'stopped'
+      || current.state === 'cancelled'
+    ) {
+      if (
+        current.operationId !== binding.operationId.value
+        || current.executionEpoch !== binding.executionEpoch
+        || this.coordinator.operationTask(binding.operationId).value !== current.taskId.value
+      ) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.execution-identity-conflict',
+          RUNTIME_OWNER,
+          `retained execution ${current.operationId ?? 'unknown'}@${current.executionEpoch ?? 'unknown'} does not match occurrence binding ${binding.operationId.value}@${binding.executionEpoch}`,
+          'inspect the persisted occurrence claim before dispatching it',
+          409,
+        );
+      }
+      return {
+        task: current,
+        allocation: {
+          operationId: id('operation', current.operationId),
+          executionEpoch: current.executionEpoch,
+        },
+        terminalReuse: true,
+      };
+    }
+    const allocation = this.coordinator.prepareExecution(task.taskId, {
+      prompt,
+      operationId: binding.operationId,
+      ...this.defaultOrchestrate(),
+    });
+    if (allocation.operationId.value !== binding.operationId.value
+      || allocation.executionEpoch !== binding.executionEpoch) {
+      throw new UiRuntimeApiError(
+        'scheduled-occurrence.execution-identity-conflict',
+        RUNTIME_OWNER,
+        `started execution ${allocation.operationId.value}@${allocation.executionEpoch} does not match occurrence binding ${binding.operationId.value}@${binding.executionEpoch}`,
+        'inspect the persisted occurrence claim before dispatching it',
+        409,
+      );
+    }
+    return { task: this.coordinator.taskSnapshot(task.taskId), allocation, terminalReuse: false };
+  }
+
+  private async establishScheduledOccurrenceIdentity(
+    binding: OccurrenceTaskBinding,
+    taskId: TaskId,
+    envelope: RequirementEnvelope,
+  ): Promise<void> {
+    const taskIdentity = this.options.taskIdentity;
+    if (taskIdentity === undefined) return;
+    const source = this.typedFinalRequirementFor(envelope);
+    if (source === undefined) {
+      throw new UiRuntimeApiError(
+        'scheduled-occurrence.identity-source-missing',
+        APP_OWNER,
+        `scheduled occurrence ${binding.occurrenceId} has no exact typed requirement source`,
+        'inspect the confirmed requirement and execution plan before dispatching the occurrence',
+        409,
+      );
+    }
+    await taskIdentity.establish({
+      scope: { organId: this.options.organId, taskId },
+      source: {
+        requirementId: source.requirementId,
+        inputRevision: source.inputRevision,
+        draftId: source.draftId,
+        draftRevisionVersion: source.draftRevisionVersion,
+        draftRevisionHash: source.draftRevisionHash,
+        confirmationRef: source.confirmationRef,
+      },
+      ...(envelope.title === undefined ? {} : { title: envelope.title }),
+      ...(envelope.taskFlow === undefined ? {} : { taskFlow: envelope.taskFlow }),
+    });
+  }
+
   /**
    * The real business input for one execution plan. The plan carries only the
    * requirement identity, so the confirmed requirement envelope is the single
    * source of the prompt; a plan whose requirement is gone fails closed instead
    * of running a synthetic prompt.
    */
-  private scheduledOccurrencePrompt(binding: OccurrenceTaskBinding): string {
-    const requirementId = requirementIdForSubscription(binding.subscriptionId);
+  private async scheduledOccurrenceEnvelope(binding: OccurrenceTaskBinding): Promise<RequirementEnvelope> {
+    const plan = this.subscriptionControl === undefined ? undefined
+      : await this.subscriptionSnapshot(this.subscriptionControl, binding.subscriptionId);
+    const requirementId = plan?.subscription.goalId;
     const envelope = this.requirementInbox
       .exportState()
       .envelopes
@@ -5063,7 +5267,7 @@ export class UiRuntimeService {
         409,
       );
     }
-    return envelope.normalizedInput;
+    return envelope;
   }
 
   private awaitScheduledOccurrenceTerminal(operationId: OperationId): Promise<void> {
@@ -5373,7 +5577,10 @@ export class UiRuntimeService {
         });
         // The reviewable draft exists now, so mint the typed revision before
         // confirmation. The public GET can then project it for editing.
-        await this.ensureTypedDraftRevision(snapshot.interactionId);
+        await this.ensureTypedDraftRevision(snapshot.interactionId, {
+          title: interpreted.structuredProposal.title,
+          taskFlow: interpreted.taskFlow,
+        });
       }
       this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(snapshot.interactionId);
@@ -5544,21 +5751,34 @@ export class UiRuntimeService {
         proposal: interpreted.proposal,
         decisionRefs: interpreted.decisionRefs,
       });
-      if (revision !== undefined && interpreted.normalizedInput !== revision.normalizedInput) {
+      const titleChanged = revision !== undefined && interpreted.structuredProposal.title !== revision.title;
+      const inputChanged = revision !== undefined && interpreted.normalizedInput !== revision.normalizedInput;
+      const taskFlowChanged = revision !== undefined && interpreted.taskFlow !== undefined
+        && (interpreted.taskFlow.kind !== revision.taskFlow?.kind
+          || interpreted.taskFlow.definitionVersion !== revision.taskFlow?.definitionVersion);
+      if (revision !== undefined && (inputChanged || titleChanged || taskFlowChanged)) {
         await this.explicitIntake.refineDraft(interactionId, {
           draftId: revision.draftId,
           baseRevisionVersion: revision.revisionVersion,
           requestedRevisionHash: revision.revisionHash,
           fields: {
-            goal: interpreted.proposal,
-            scope: interpreted.normalizedInput,
-            normalizedInput: interpreted.normalizedInput,
-            proposal: interpreted.proposal,
-            proposedIntent: interpreted.intent,
-            knownFacts: interpreted.knownFacts,
+            ...(inputChanged ? {
+              goal: interpreted.proposal,
+              scope: interpreted.normalizedInput,
+              normalizedInput: interpreted.normalizedInput,
+              proposal: interpreted.proposal,
+              proposedIntent: interpreted.intent,
+              knownFacts: interpreted.knownFacts,
+            } : {}),
+            title: interpreted.structuredProposal.title,
+            ...(interpreted.taskFlow === undefined ? {} : { taskFlow: interpreted.taskFlow }),
           },
           instructionRef: `regenerate:${snapshot.sourceRef}`,
-          idempotencyKey: `regenerate:${interactionId}:${revision.revisionVersion}:${canonicalJsonStringify(interpreted.normalizedInput)}`,
+          idempotencyKey: `regenerate:${interactionId}:${revision.revisionVersion}:${canonicalJsonStringify({
+            normalizedInput: interpreted.normalizedInput,
+            title: interpreted.structuredProposal.title,
+            taskFlow: interpreted.taskFlow,
+          })}`,
         });
       }
       this.persistExplicitBrainState();
@@ -5646,7 +5866,6 @@ export class UiRuntimeService {
   private requiresTypedFinalSubmit(input: ConfirmExplicitRequirementInput): boolean {
     if (input.requestKind === 'new-task-create' || input.requestKind === 'existing-task-change') return true;
     if (input.executionPolicy !== undefined) return true;
-    if (input.taskFlow !== undefined) return true;
     if (input.interactionId === undefined) return false;
     return this.explicitIntake.currentDraftRevision(input.interactionId) !== undefined;
   }
@@ -5757,7 +5976,6 @@ export class UiRuntimeService {
     if (!existingTaskChange && revision === undefined) {
       revision = await this.ensureTypedDraftRevision(interactionId, {
         executionPolicy: input.executionPolicy,
-        taskFlow: input.taskFlow,
         goal: input.goal,
         scope: input.scope,
         constraints: input.constraints,
@@ -5811,30 +6029,6 @@ export class UiRuntimeService {
       }
       bindExecutionPolicy = revision.executionPolicy === undefined;
     }
-    let bindTaskFlow = false;
-    if (input.taskFlow !== undefined) {
-      if (existingTaskChange && revision.taskFlow === undefined) {
-        throw new UiRuntimeApiError(
-          'explicit-brain.existing-task-change-revision-immutable',
-          RUNTIME_OWNER,
-          'existing-task-change cannot mint a task flow revision after the caller confirmed the exact revision',
-          'refine the reviewable draft before confirmation or omit the task flow',
-          409,
-        );
-      }
-      if (revision.taskFlow !== undefined
-        && (revision.taskFlow.kind !== input.taskFlow.kind
-          || revision.taskFlow.definitionVersion !== input.taskFlow.definitionVersion)) {
-        throw new UiRuntimeApiError(
-          'explicit-brain.task-flow-binding-conflict',
-          RUNTIME_OWNER,
-          `draft revision already carries a different task flow: ${revision.draftId}`,
-          'refine the reviewable draft to the intended task flow before final submission',
-          409,
-        );
-      }
-      bindTaskFlow = revision.taskFlow === undefined;
-    }
     const currentFields = draftFieldValues(revision, {});
     const confirmationFields = draftFieldValues(currentFields, input);
     const bindTemplate = !existingTaskChange
@@ -5842,7 +6036,7 @@ export class UiRuntimeService {
       && hasExplicitDraftFields(input)
       && (canonicalJsonStringify(confirmationFields) !== canonicalJsonStringify(currentFields)
         || !normalizedInputExpressesDraftFields(revision.normalizedInput, confirmationFields));
-    if (bindExecutionPolicy || bindTaskFlow || bindTemplate) {
+    if (bindExecutionPolicy || bindTemplate) {
       // Interpretation mints the reviewable draft before confirmation. Bind
       // only the missing typed inputs in one revision; an omitted input keeps
       // the value already carried by the draft.
@@ -5851,7 +6045,6 @@ export class UiRuntimeService {
         revision,
         input,
         bindExecutionPolicy ? input.executionPolicy : undefined,
-        bindTaskFlow ? input.taskFlow : undefined,
         bindTemplate ? confirmationFields : undefined,
       );
       this.persistExplicitBrainState();
@@ -5871,6 +6064,7 @@ export class UiRuntimeService {
       requestKind,
       ...(input.taskRef === undefined ? {} : { taskRef: input.taskRef }),
       ...(revision.taskFlow === undefined ? {} : { taskFlow: revision.taskFlow }),
+      ...(revision.title === undefined ? {} : { title: revision.title }),
     });
     const confirmation = await this.explicitIntake.confirmDraftRevision({
       interactionId,
@@ -5944,7 +6138,6 @@ export class UiRuntimeService {
     current: DraftRevision,
     input: ConfirmExplicitRequirementInput,
     executionPolicy?: ExecutionPolicyDefinition,
-    taskFlow?: TaskFlowBinding,
     normalizedTemplate?: DraftFieldValues,
   ): Promise<DraftRevision> {
     const fields: Record<string, unknown> = {
@@ -5956,14 +6149,12 @@ export class UiRuntimeService {
         normalizedInput: normalizedInputForDraftFields(normalizedTemplate, normalizedTemplate),
       }),
       ...(executionPolicy === undefined ? {} : { executionPolicy }),
-      ...(taskFlow === undefined ? {} : { taskFlow }),
     };
     const idempotencyKey = `final-submit-binding:${interactionId}:${current.draftId}:${current.revisionVersion}:${canonicalJsonStringify({
       ...(normalizedTemplate === undefined ? {} : {
         normalizedInput: normalizedInputForDraftFields(normalizedTemplate, normalizedTemplate),
       }),
       ...(executionPolicy === undefined ? {} : { executionPolicy }),
-      ...(taskFlow === undefined ? {} : { taskFlow }),
     })}`;
     return await this.explicitIntake.refineDraft(interactionId, {
       draftId: current.draftId,
@@ -5989,6 +6180,7 @@ export class UiRuntimeService {
     options: {
       readonly executionPolicy?: ExecutionPolicyDefinition;
       readonly taskFlow?: TaskFlowBinding;
+      readonly title?: string;
       readonly goal?: string;
       readonly scope?: string;
       readonly constraints?: readonly string[];
@@ -6024,6 +6216,7 @@ export class UiRuntimeService {
         decisionRefs: draft.decisionRefs,
         ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }),
         ...(options.taskFlow === undefined ? {} : { taskFlow: options.taskFlow }),
+        ...(options.title === undefined ? {} : { title: options.title }),
       });
     } catch (error) {
       // A concurrent caller may have created the revision first. Reuse that
@@ -6131,13 +6324,52 @@ export class UiRuntimeService {
     } catch (error) {
       if (!(error instanceof SubscriptionControlError) || error.code !== 'not-found') throw error;
     }
-    if (!snapshot || snapshot.policy.executionMode === 'once') return false;
-    await this.requirementInbox.acknowledge({
-      consumerId: RUNTIME_OWNER,
-      requirementId: envelope.requirementId,
-    });
+    // A persisted policy owns the requirement's execution responsibility for
+    // every mode, including once. The immediate FIFO path is only for a
+    // requirement with no execution policy.
+    return snapshot !== undefined;
+  }
+
+  /**
+   * Complete a policy-backed requirement without preparing an immediate FIFO
+   * operation. The durable Subscription is the execution owner; this branch
+   * retains only the business Task anchor and its exact committed identity.
+   */
+  private async completePolicyAnchoredDispatch(
+    consumed: RequirementEnvelope,
+    prepared: DispatchLedgerEntry,
+    acknowledge = true,
+  ): Promise<ExplicitBrainDispatchReceipt> {
+    const existingTask = this.coordinator.taskSnapshots().find((task) => task.taskId.value === prepared.taskId.value);
+    const task = existingTask ?? (consumed.taskRef
+      ? this.coordinator.taskSnapshot(consumed.taskRef)
+      : this.coordinator.createTask({
+          taskId: prepared.taskId,
+          title: consumed.title ?? taskTitleForNormalizedInput(consumed.normalizedInput),
+          directive: consumed.normalizedInput,
+        }));
+    const isTaskInputUpdate = consumed.taskRef !== undefined
+      && (consumed.intent === 'append' || consumed.intent === 'change');
+    if (isTaskInputUpdate) this.coordinator.appendTaskInput(task.taskId, consumed);
+    else if (consumed.intent === 'create') await this.establishNewTaskIdentity(consumed, task.taskId);
+    await this.explicitIntake.markDraftDispatched(consumed.draftId);
     this.persistExplicitBrainState();
-    return true;
+    const requirement: InboxReceipt = {
+      requirementId: consumed.requirementId,
+      draftId: consumed.draftId,
+      fifoSeq: consumed.fifoSeq,
+    };
+    if (acknowledge) {
+      await this.requirementInbox.acknowledge({
+        consumerId: RUNTIME_OWNER,
+        requirementId: consumed.requirementId,
+      });
+      this.persistExplicitBrainState();
+      this.dispatchLedger.delete(consumed.draftId);
+      this.persistExplicitBrainState();
+      this.implicitConsumerRequirement = undefined;
+    }
+    return { requirement, taskId: task.taskId };
   }
 
   async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
@@ -6236,16 +6468,10 @@ export class UiRuntimeService {
         this.persistExplicitBrainState();
       }
       if (await this.checkExecutionPolicyGate(consumed)) {
+        const receipt = await this.completePolicyAnchoredDispatch(consumed, dispatchEntry);
         return {
           kind: 'dispatched',
-          receipt: {
-            requirement: {
-              requirementId: consumed.requirementId,
-              draftId: consumed.draftId,
-              fifoSeq: consumed.fifoSeq,
-            },
-            taskId: dispatchEntry.taskId,
-          },
+          receipt,
         };
       }
       return {
@@ -6296,6 +6522,7 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
     }
     if (await this.checkExecutionPolicyGate(envelope)) {
+      const receipt = await this.completePolicyAnchoredDispatch(envelope, dispatchEntry, false);
       return {
         status: 'succeeded',
         envelope,
@@ -6303,7 +6530,7 @@ export class UiRuntimeService {
         ownerId: RUNTIME_OWNER,
         scope,
         inputRevision,
-        taskId: dispatchEntry.taskId,
+        taskId: receipt.taskId,
         evidenceRefs: [],
       };
     }
@@ -6355,7 +6582,7 @@ export class UiRuntimeService {
       ? this.coordinator.taskSnapshot(consumed.taskRef)
       : this.coordinator.createTask({
           taskId: prepared.taskId,
-          title: taskTitleForNormalizedInput(consumed.normalizedInput),
+          title: consumed.title ?? taskTitleForNormalizedInput(consumed.normalizedInput),
           directive: consumed.normalizedInput,
         }));
     const admission = this.requirementAdmissions.get(prepared.taskId.value)?.receipt;
@@ -6505,6 +6732,7 @@ export class UiRuntimeService {
         draftRevisionHash: source.draftRevisionHash,
         confirmationRef: source.confirmationRef,
       },
+      ...(consumed.title === undefined ? {} : { title: consumed.title }),
       ...(consumed.taskFlow === undefined ? {} : { taskFlow: consumed.taskFlow }),
     });
   }

@@ -39,7 +39,7 @@
       "ownerSymbol": "projectRuntimeLiveness",
       "implementationStatus": "implemented",
       "productionWiringStatus": "wired",
-      "productionEvidence": "runtime.ts:215 projectRuntimeTaskDashboard 在 source.liveness 存在时投影并把结果放进 RuntimeTaskDashboardProjection.liveness；优先级为 reported failure > 等待人类/资源决策 > 非 active > 观测静默对比声明预算"
+      "productionEvidence": "既有 projectRuntimeTaskDashboard 投影真实 liveness；P0 合同要求 waiting-for-answer 只在有真实 question/options 时产生。缺 exact execution grant 必须使用独立授权等待事实，系统阻塞保留 typed error，不得仅按 lifecycle waiting/blocked 泛化。"
     },
     "hold_transport_fact": {
       "ownerPath": "docs/ui/task.js",
@@ -55,7 +55,7 @@
       "ownerSymbol": "projectInteractionCard / projectInteractionCardFromEntries",
       "implementationStatus": "implemented",
       "productionWiringStatus": "wired",
-      "productionEvidence": "projectInteractionCard 输出 cardMetadata 携带 liveness 与 stream（页面本地四值传输事实的独立承载位；cardMetadata.transport 保持已声明的 typed InteractionTraceTransport，不被四值状态覆盖），并转发 runtime 自己的 stateLabel；executionErrorTurn 把 runtime 错误的 message/code/nextAction 投影成可见 turn；projectInteractionCardFromEntries(entries, state, context) 转发 context.liveness 与 context.execution，docs/ui/task.js projectTaskLiveness 即以此填充"
+      "productionEvidence": "现有 projectInteractionCard 输出 cardMetadata 的 liveness/stream 与 runtime stateLabel。P0 合同要求同一转发链同时携带 semantic title、真实 result/blocker、business/occurrence lineage 和已验证主 action；不得只把 currentState 与 nextStep 机械拼接给卡片。"
     },
     "render_work_card_truth": {
       "ownerPath": "docs/ui/interaction-work-card.js",
@@ -63,7 +63,7 @@
       "ownerSymbol": "mountInteractionWorkCard",
       "implementationStatus": "implemented",
       "productionWiringStatus": "wired",
-      "productionEvidence": "renderStatus 非观测分支渲染 Provider/活性/传输 三个 chip（LIVENESS_STATE_LABELS 工作中/无活动/待回答/已失败/空闲/未知；STREAM_STATE_LABELS 已连接/已收拢/实时连接已断开/未提供），事实列表新增 活性/活性原因/传输连接/传输状态；顶部 chip 的运输读法优先页面本地 stream 事实，缺失时回落到已声明 typed transport 的 connected，两者都没有则显示未提供。动画点只在 runtime 报告 working 时渲染，不在 lifecycle running/settling 期间无条件动画（不伪造进度）。任务状态 chip 用 runtime 的 stateLabel，不显示原始 LifecycleState。renderConversation 通过 renderError 显示 下一步；tests/ui/interaction-liveness-browser.mjs 与 tests/ui/interaction-work-card-browser.mjs 以真实浏览器断言这些文案"
+      "productionEvidence": "既有 renderStatus 已渲染 liveness/stream 并以 runtime stateLabel 代替原始 lifecycle。P0 合同要求它显示真实结果或结果入口、区分授权等待/决策/系统阻塞、只渲染有入口的 actions，并停止把 succeeded 与“可停止”下一步无条件下发。既有 browser 用例不是本 P0 的验收证据。"
     }
   }
 }

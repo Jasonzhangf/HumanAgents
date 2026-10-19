@@ -8,6 +8,11 @@ import {
   renderSystemRead,
   renderPageError,
   renderRuntimeStatus,
+  renderTaskExecutions,
+  taskRowStateText,
+  taskRowTitle,
+  taskFlowText,
+  taskExecutionHref,
   taskDashboardHref,
 } from './runtime-shell.js'
 import {
@@ -41,7 +46,9 @@ const statsRegion = element('section', undefined, 'stats')
 const plansRegion = element('section', undefined, 'plan-list')
 const listRegion = element('div', undefined, 'task-lists')
 main.append(inputRegion)
-main.append(statsRegion, plansRegion, listRegion)
+const plansDetails = element('details', undefined, 'plan-list-fold')
+plansDetails.append(element('summary', '执行计划管理'), plansRegion)
+main.append(statsRegion, listRegion, plansDetails)
 
 function renderTaskEntry() {
   clearNode(inputRegion)
@@ -197,16 +204,21 @@ function renderSystemStats(projection) {
 function taskRow(row) {
   const item = element('div', undefined, 'task-item')
   const link = element('a', undefined, 'task-item-main')
-  link.href = taskDashboardHref(row.taskId.value)
+  const currentChild = taskRowCurrentExecution(row)
+  link.href = currentChild
+    ? taskExecutionHref(currentChild, false, row.scope)
+    : taskDashboardHref(row.taskId.value)
   link.append(
-    element('h3', row.title || '未命名任务'),
-    element('p', `${row.currentState || row.state || ''} · ${row.nextStep || ''}`),
+    element('h3', taskRowTitle(row)),
+    element('p', taskRowStateText(row)),
   )
   const meta = element('div', undefined, 'task-item-meta')
   meta.append(
     element('span', row.stateLabel || row.state || '', 'task-state-pill'),
     element('time', formatTime(row.updatedAt)),
   )
+  const taskType = taskFlowText(row.taskFlow)
+  if (taskType) meta.append(element('span', taskType))
   link.append(meta)
   const actions = element('div', undefined, 'task-item-actions')
   actions.append(
@@ -214,7 +226,20 @@ function taskRow(row) {
     actionButton('删除', true, (btn) => runDelete(row, btn)),
   )
   item.append(link, actions)
+  const executions = renderTaskExecutions(row, row.scope)
+  if (executions) item.append(executions)
   return item
+}
+
+function taskRowCurrentExecution(row) {
+  const currentId = taskIdValue(row.currentExecutionTaskId)
+  if (currentId === undefined || currentId === null) return undefined
+  const executions = Array.isArray(row.executions) ? row.executions : []
+  return executions.find((child) => taskIdValue(child.taskId) === currentId)
+}
+
+function taskIdValue(taskId) {
+  return taskId && typeof taskId === 'object' ? taskId.value : taskId
 }
 
 function actionButton(label, danger, onClick) {
@@ -319,8 +344,14 @@ function renderTaskLists(dashboard, tasks) {
       title: f.taskTitle || '失败任务',
       state: 'failed',
       stateLabel: '失败',
-      currentState: f.code || 'failed',
-      nextStep: f.nextAction || '',
+      currentState: '执行失败',
+      error: {
+        code: f.code,
+        ownerId: f.ownerId,
+        message: f.message,
+        retryable: false,
+        nextAction: f.nextAction,
+      },
       updatedAt: f.occurredAt,
     })), '暂无失败记录。'),
   )

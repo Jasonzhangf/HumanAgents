@@ -762,8 +762,7 @@ try {
     const chips = [...host.querySelectorAll('.iwc-state-chip')];
     const transportChip = chips.find((node) => (node.textContent ?? '').startsWith('传输'));
     return {
-      transportText: transportChip?.textContent ?? '',
-      transportState: transportChip?.dataset.state ?? '',
+      hasTransportChip: Boolean(transportChip),
       statusText: host.querySelector('.iwc-status')?.innerText ?? '',
       statusDetails: host.querySelector('.iwc-status-details')?.textContent ?? '',
       transportDetail: (() => {
@@ -784,11 +783,13 @@ try {
   const evidenceOnlyRow = absence.rows.find((row) => row.callId === 'call-evidence-only');
   const unreturnedRow = absence.rows.find((row) => row.callId === 'call-unreturned');
   record(
-    'absent transport is stated as not provided instead of a definite disconnected claim',
-    absence.transportText === '传输 未提供'
-      && absence.transportState === 'unknown'
-      && absence.transportDetail.startsWith('传输状态=未提供'),
-    { transportText: absence.transportText, transportState: absence.transportState, transportDetail: absence.transportDetail },
+    'absent transport has no main chip and its details say not provided without claiming disconnected',
+    !absence.hasTransportChip
+      && absence.transportDetail.startsWith('传输状态=未提供')
+      && absence.statusDetails.includes('传输状态=未提供')
+      && !absence.statusText.includes('未连接')
+      && !absence.statusDetails.includes('未连接'),
+    absence,
   );
   record(
     'a succeeded result with no verifiable pointer is not shown as a bare success claim',

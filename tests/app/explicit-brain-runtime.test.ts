@@ -1369,11 +1369,13 @@ test('provider explicit brain interpreter loads the interaction template and val
       const chunks: Uint8Array[] = [];
       for await (const chunk of request) chunks.push(chunk);
       if (request.method === 'POST') posts.push(Buffer.concat(chunks).toString('utf8'));
+      const requestNumber = posts.length;
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end([
         { type: 'response.created', response: { id: `selected-${posts.length}` } },
         { type: 'response.output_text.done', item_id: 'message-final', text: JSON.stringify({
           kind: 'requirement', normalizedInput: '整理启动步骤', knownFacts: ['README exists'],
+          ...(requestNumber === 1 ? { taskFlowKind: 'one-shot' } : {}),
           proposal: {
             revision: 1, intent: 'create', title: '整理启动步骤', objective: '整理项目启动步骤',
             deliverable: '可执行的启动步骤清单',
@@ -1485,12 +1487,18 @@ test('provider explicit brain interpreter loads the interaction template and val
     deliverable: '可执行的启动步骤清单', deliveryConditions: ['启动步骤完整并有证据'],
     evidenceRefs: ['README'], blockingGaps: [],
   });
+  // Missing model task-flow parsing drops the only semantic classification
+  // input. Impact: service must keep a human selector or invent a default.
+  // Cost: one existing recorded requirement response has no extra harness.
+  assert.deepEqual(Reflect.get(result, 'taskFlow'), { kind: 'one-shot', definitionVersion: 1 });
   assert.match(result.proposal, /可执行的启动步骤清单/);
   assert.equal(result.proposal.includes('awaiting-user-confirmation'), false);
   assert.equal(compositions.length, 1, 'selected interaction callback must run');
   assert.deepEqual(lifecycle, ['0:settled', '0:closed']);
-  await interpreter.interpret({ interactionId: 'interaction-provider-second', inputRevision: 1,
+  const secondResult = await interpreter.interpret({ interactionId: 'interaction-provider-second', inputRevision: 1,
     sourceRef: 'ui:second', rawInput: '第二次独立输入', clarifications: [], taskCandidates: [] });
+  // Historical model output has no kind and must remain honestly unclassified.
+  assert.equal(Reflect.get(secondResult, 'taskFlow'), undefined);
   assert.equal(compositions.length, 2);
   assert.ok(compositions[0].port !== compositions[1].port);
   assert.ok(starts[0].runtimeId !== starts[1].runtimeId);
@@ -1549,6 +1557,11 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.ok(sentPrompt.includes('# Control Boundaries'));
   assert.ok(sentPrompt.includes('# Explicit Brain'));
   assert.ok(sentPrompt.includes('# Explicit intake decision output'));
+  assert.ok(sentPrompt.includes('taskFlowKind'));
+  assert.ok(sentPrompt.includes('Omit taskFlowKind when uncertain'));
+  assert.ok(sentPrompt.includes('semantic task shape only'));
+  assert.equal(sentPrompt.includes('executionMode'), false);
+  assert.equal(sentPrompt.includes('schedule'), false);
   for (const field of ['blockingGaps', 'deliverable', 'deliveryConditions', 'evidenceRefs', 'intent', 'objective', 'revision', 'title']) {
     assert.ok(sentPrompt.includes(`"${field}"`), `intake proposal contract must include ${field}`);
   }
@@ -1707,6 +1720,53 @@ test('provider explicit brain interpreter loads the interaction template and val
     return true;
   });
   assert.deepEqual(malformedLifecycle, ['settle', 'close']);
+
+  // An unknown supplied kind must fail instead of becoming absent or defaulted.
+  // Cost: one bounded recorded response; impact: false execution classification.
+  const invalidTaskFlowOptions = {
+    ...parentDependencies(),
+    binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new RecordedParentPort({
+      binding,
+      stepDelayMs: 0,
+      replay: [
+        {
+          kind: 'output',
+          state: 'output',
+          summary: JSON.stringify({
+            kind: 'requirement',
+            normalizedInput: '检查发布状态',
+            knownFacts: [],
+            taskFlowKind: 'unknown',
+            proposal: {
+              revision: 1,
+              intent: 'create',
+              title: '检查发布状态',
+              objective: '检查发布状态',
+              deliverable: '发布状态结果',
+              deliveryConditions: [],
+              evidenceRefs: [],
+              blockingGaps: [],
+            },
+            decisionRefs: [],
+          }),
+        },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ],
+    }),
+  };
+  await assert.rejects(
+    () => createProviderExplicitBrainInterpreter(invalidTaskFlowOptions).interpret({
+      interactionId: 'interaction-invalid-task-flow',
+      inputRevision: 1,
+      sourceRef: 'ui:new-task',
+      rawInput: '检查发布状态',
+      clarifications: [],
+      taskCandidates: [],
+    }),
+    /taskFlowKind.*one-shot.*inspection.*long-running/,
+  );
 });
 
 test('neutral parent loops over exact raw tool pairs, with returned helper separate from explicit acceptance', async () => {
@@ -2397,7 +2457,10 @@ test('provider explicit brain interpreter publishes the receipt with the actual 
     endpointRef: 'fake://parent-settlement', modelRef: 'model-parent-settlement',
     configDigest: 'sha256:parent-settlement-config', capabilityDigest: 'sha256:parent-settlement-capability',
   };
-  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: 'answer this', knownFacts: [], answer: 'settlement-answer', decisionRefs: [] });
+  // A redundant non-requirement guard can lose an otherwise valid answer when
+  // the model leaves an irrelevant taskFlowKind on it. Cost: one fixture field.
+  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: 'answer this', knownFacts: [],
+    taskFlowKind: 'one-shot', answer: 'settlement-answer', decisionRefs: [] });
   const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
     { kind: 'output', state: 'output', summary: answerText },
     { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
@@ -2423,6 +2486,9 @@ test('provider explicit brain interpreter publishes the receipt with the actual 
   try {
     const result = await interpreter.interpret(request);
     assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected settlement answer');
+    assert.equal(result.answer, 'settlement-answer');
+    assert.equal(Reflect.get(result, 'taskFlow'), undefined);
     const opened = await parentJournal.readScopeOpenedTurns(scope);
     assert.equal(opened.length, 1);
     const turn = opened[0]!.fact.turn;

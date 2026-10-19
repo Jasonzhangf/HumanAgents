@@ -1,11 +1,11 @@
 {
   "graph": "humanagent-explicit-semantic-turn",
-  "requirements_version": 14,
+  "requirements_version": 19,
   "labels": {
     "assemble": "装配显式交互轮次与前序语义检查点",
-    "route": "登记父规范请求并物化规范上下文",
-    "outcome": "接纳父原始事实并区分派发返回与显式采纳",
-    "history": "分离前序语义检查点与当前原始资产",
+    "route": "物化完整当前上下文并由显式大脑推理任务类型",
+    "outcome": "保存独立语义名称、完整业务输入与可缺省分类事实",
+    "history": "分别保存前序检查点、当前原始资产与 typed 业务事实",
     "return": "返回显式解释或显式错误"
   },
   "owners": {
@@ -26,6 +26,8 @@
     "historyBoundary": "历史语义只取前序已提交 InteractionSemanticCheckpoint；当前轮次完整上下文由当前原文 RawAsset 与本轮 accepted raw facts 单独物化，二者不混用，也不形成隐藏的前次响应链。",
     "settlementEvidence": "Provider adapter 拥有 settlement 语义；原 typed 成功 Provider settlement receipt 经现有 interaction-parent Journal 的单一 provider-settlement 控制记录持久化，关联同一 interactionId、inputRevision 与真实 terminal request。除既有 continue owner-reconciliation 分支外，physical close 后只新增允许该控制记录追加，request 与 raw fact 仍冻结。独立只读 control GET 精确消费该记录；缺失、未就绪或完整性失败显式报错，不伪造、不从业务字段重建、不重放请求。explicit-brain.state、trace、非空 reply、resource-close 或任务 payload 均不能替代该凭证。已完成 answer 的旧历史无 receipt 仍可读取；强制 receipt 仅适用于需要 settlement 证据的 incomplete recovery。",
     "businessSeparation": "答案文本、任务模板、任务 checkpoint 与执行收拢凭证保持分离；简单问答不创建 Draft、FIFO、产品 Task 或任务 checkpoint。",
+    "classificationBoundary": "requirement 分类使用既有 TaskFlowBinding { kind, definitionVersion }。模型负责判断当前请求属于既有类型；用户 taskFlowKind 输入、executionPolicy 或固定触发模式不能代替该判断。没有可靠结果时字段缺省，读取方不得把它改写成用户选择或自动默认。",
+    "semanticTitleBoundary": "structuredProposal.title 是可读业务名称；objective 与 normalizedInput 继续承载完整执行目的和输入。title 不能由截断、前缀或 JSON 字符串派生，也不能替换 directive。",
     "plannedOwnerBoundary": "interaction-parent-turn-raw.ts（Runtime raw owner）与 interaction-parent-turn-journal.ts（JSONL journal）已存在；现有 ownerPath 是真实责任入口，不声明 Operator 注册或整体已验收。closed Provider epoch 不等于 logical turn complete；零 acceptedFacts 的 failed 请求在 physical epoch 真实 closed 后，可在同一 turn/interaction/revision 以新 epoch 重入，原记录只追加不改写。",
     "statusBoundary": "implementationStatus 仍为 UNVERIFIED；本图不声明 receipt 记录、control GET、Operator 注册、运行执行或验收已完成。独立只读 control GET 是否另需持久图仍是 design Review 问题；当前不创建新图。"
   },

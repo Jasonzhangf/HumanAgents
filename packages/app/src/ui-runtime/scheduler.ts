@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import {
   canonicalJsonStringify,
   id,
+  type ExecutionPolicyDefinition,
   type Occurrence,
   type OperationId,
   type TaskId,
@@ -93,6 +94,15 @@ export interface UiRuntimeSchedulerStatusProjection {
   readonly plans: readonly UiRuntimeSchedulerPlanProjection[];
 }
 
+export interface UiRuntimeScheduledOccurrenceAdmission {
+  readonly state: 'ready' | 'waiting';
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly message: string;
+  readonly controlTarget?: { readonly projectKey: string; readonly mode: 'fake' | 'rcc' };
+}
+
 export interface UiRuntimeSchedulerOptions {
   readonly port: SubscriptionControlPort;
   /**
@@ -101,6 +111,16 @@ export interface UiRuntimeSchedulerOptions {
    */
   readonly lease: () => SupervisorLease | undefined;
   readonly runningTaskCount: () => number;
+  /**
+   * Prepares the exact occurrence child before the durable consumer commits its
+   * first admission. A child without its exact TaskGrant remains prepared and
+   * claimed, but does not enter the consumer, release, or Provider factory.
+   */
+  readonly admitOccurrence?: (input: {
+    readonly occurrence: Occurrence;
+    readonly policy: ExecutionPolicyDefinition;
+    readonly claim: OccurrenceClaimRecord;
+  }) => Promise<UiRuntimeScheduledOccurrenceAdmission>;
   readonly now?: () => Date;
   readonly intervalMs?: number;
   /**
@@ -298,7 +318,7 @@ export class UiRuntimeScheduler {
         // the slot time so the plan never runs before its start.
         continue;
       }
-      await this.consume(occurrence, claim);
+      await this.consume(occurrence, claim, snapshot.policy);
       consumed.add(occurrence.occurrenceId);
     }
 
@@ -325,7 +345,7 @@ export class UiRuntimeScheduler {
     const existingClaim = snapshot.claims.find((candidate) => candidate.occurrenceId === occurrenceId);
     if (existingClaim !== undefined) {
       if (existing !== undefined && Date.parse(existing.dueAt) <= now.getTime()) {
-        await this.consume(existing, existingClaim);
+        await this.consume(existing, existingClaim, snapshot.policy);
       }
       return;
     }
@@ -367,14 +387,22 @@ export class UiRuntimeScheduler {
     });
     this.claimed += 1;
     if (Date.parse(scheduled.dueAt) > now.getTime()) return;
-    await this.consume(scheduled, claim);
+    await this.consume(scheduled, claim, snapshot.policy);
   }
 
   private isSettled(snapshot: SubscriptionSnapshot, occurrenceId: string): boolean {
     return snapshot.settlements.some((settlement) => settlement.occurrence.occurrenceId === occurrenceId);
   }
 
-  private async consume(occurrence: Occurrence, claim: OccurrenceClaimRecord): Promise<void> {
+  private async consume(
+    occurrence: Occurrence,
+    claim: OccurrenceClaimRecord,
+    policy: ExecutionPolicyDefinition,
+  ): Promise<void> {
+    const admission = this.options.admitOccurrence === undefined
+      ? undefined
+      : await this.options.admitOccurrence({ occurrence, policy, claim });
+    if (admission?.state === 'waiting') return;
     const occurrenceId = occurrence.occurrenceId ?? claim.occurrenceId;
     const terminal = await this.options.port.consumeExecution(occurrenceId, claim);
     this.executed += 1;

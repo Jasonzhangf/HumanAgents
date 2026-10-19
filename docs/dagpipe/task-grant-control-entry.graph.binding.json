@@ -10,25 +10,29 @@
       "ownerPath": "docs/ui/runtime-shell.js",
       "ownerRel": "docs/ui/runtime-shell.js",
       "ownerSymbol": "taskDashboardHref",
-      "implementationStatus": "planned-formal-control-navigation"
+      "implementationStatus": "planned-business-task-to-child-control-navigation",
+      "designNote": "业务工作主入口默认进入只读详情；显式 control=1 才进入控制面，并由实际 lineage 找到 prepared child 的正式 target。"
     },
     "verify_controllable_task_target": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
       "ownerSymbol": "UiRuntimeService.verifyControllableTaskTarget",
-      "implementationStatus": "pending-backend-owner-implementation"
+      "implementationStatus": "pending-backend-owner-implementation",
+      "designNote": "验证实际 live child Task，而不是按标题或父 Task 猜测；返回 targetScope、child taskId 与业务/occurrence 关系。缺 scope、错误 owner、stale 或未 prepared 均显式拒绝。"
     },
     "submit_scoped_task_control": {
       "ownerPath": "docs/ui/runtime-api.js",
       "ownerRel": "docs/ui/runtime-api.js",
       "ownerSymbol": "readTaskGrant/grantTaskControl/revokeTaskGrant",
-      "implementationStatus": "planned-scoped-control-client"
+      "implementationStatus": "planned-scoped-control-client",
+      "designNote": "只对验证后的 child taskId 提交成对 projectKey/mode scope；提交不是授权，父 Task grant 不继承。"
     },
     "converge_control_receipt_and_readback": {
       "ownerPath": "docs/ui/task-dashboard.js",
       "ownerRel": "docs/ui/task-dashboard.js",
       "ownerSymbol": "taskGrantControl refresh/grant/revoke convergence",
-      "implementationStatus": "planned-control-result-convergence"
+      "implementationStatus": "planned-control-result-convergence",
+      "designNote": "回执与最新读回分开保存；未知 readback 保留 receipt，不显示 denied、不自动重提，也不把父 task 状态当作 child 授权。"
     }
   }
 }

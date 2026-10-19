@@ -627,16 +627,83 @@ function renderAgentActivitySection(projection) {
     renderPageError(section, readFailure, '重试所选实例读取，或返回任务实例列表')
     return section
   }
+  const value = read.ok === true ? read.value : undefined
+  const isEmptyCatalog = value !== undefined
+    && value.mode !== 'selected'
+    && (value.current?.length ?? 0) === 0
+    && (value.historical?.length ?? 0) === 0
+    && (value.unknown?.length ?? 0) === 0
+  if (isEmptyCatalog) {
+    // A catalog read with no instance records is an honest "no execution yet",
+    // not four empty record headings. The optional runtime-pool inspector notice
+    // is not an execution fact; other unavailable sources stay visible.
+    section.dataset.agentActivity = 'empty'
+    section.append(
+      element('h2', '执行实例 / 处理经过'),
+      element('p', '尚无实际执行记录。', 'muted'),
+    )
+    const runtimePoolDiagnostic = renderRuntimePoolDiagnostic(value)
+    if (runtimePoolDiagnostic) section.append(runtimePoolDiagnostic)
+    const otherUnavailable = (value.unavailableSources ?? []).filter((source) => source?.sourceId !== 'runtime-pool')
+    if (otherUnavailable.length > 0) {
+      const block = element('section')
+      block.append(element('h3', '部分记录来源不可用'))
+      for (const source of otherUnavailable) {
+        block.append(element('p', source.message))
+        block.append(element('p', `${source.sourceId} · ${source.ownerId}`, 'muted'))
+      }
+      section.append(block)
+    }
+    return section
+  }
   section.dataset.agentActivity = read.ok ? (read.value?.mode || 'read') : 'failed'
   section.append(element('h2', '执行实例 / 处理经过'))
-  const view = renderAgentActivity(read, {
+  // The runtime-pool inspector is an optional live source, not a recorded fact.
+  // Its absence stays out of the primary read; every other unavailable source
+  // is preserved for the shared renderer.
+  const renderRead = read.ok === true && value
+    ? {
+        ...read,
+        value: {
+          ...value,
+          unavailableSources: (value.unavailableSources ?? []).filter((source) => source?.sourceId !== 'runtime-pool'),
+        },
+      }
+    : read
+  const view = renderAgentActivity(renderRead, {
     element,
     onSelect: (selection) => void selectAgentInstance(selection),
     ...(read.ok && read.value?.mode === 'selected' ? { onOpenDetail: openAgentDetail } : {}),
   })
   agentViewDispose = view.dispose
   section.append(view.element)
+  const runtimePoolDiagnostic = renderRuntimePoolDiagnostic(value)
+  if (runtimePoolDiagnostic) section.append(runtimePoolDiagnostic)
   return section
+}
+
+function renderRuntimePoolDiagnostic(value) {
+  const sources = (value?.unavailableSources ?? []).filter((source) => source?.sourceId === 'runtime-pool')
+  if (sources.length === 0) return null
+  const details = element('details', undefined, 'drawer-technical-source')
+  details.dataset.observationRuntimePoolDiagnostic = 'true'
+  details.append(element('summary', '运行池诊断'))
+  const facts = element('dl', undefined, 'drawer-facts')
+  for (const source of sources) {
+    for (const [label, text] of [
+      ['消息', source.message],
+      ['sourceId', source.sourceId],
+      ['ownerId', source.ownerId],
+    ]) {
+      const cell = element('div')
+      const detail = element('dd', text)
+      if (!text) detail.dataset.empty = 'true'
+      cell.append(element('dt', label), detail)
+      facts.append(cell)
+    }
+  }
+  details.append(facts)
+  return details
 }
 
 // Actual execution records are a task-level attachment on the successful
@@ -801,6 +868,70 @@ function observationCollection(projection) {
   }
 }
 
+function hasActualExecutionFacts(projection) {
+  const read = projection?.agentActivity
+  if (read?.ok === true && read.value) {
+    const value = read.value
+    const count = (value.selected?.length ?? 0)
+      + (value.current?.length ?? 0)
+      + (value.historical?.length ?? 0)
+      + (value.unknown?.length ?? 0)
+    if (count > 0) return true
+    if (value.actualExecutionGraph?.history?.status === 'recorded') return true
+  }
+  return projection?.scope?.purpose === 'execution-events'
+    && Array.isArray(projection.nodes)
+    && projection.nodes.length > 0
+}
+
+function observationNextStep(projection) {
+  const detail = typeof projection.data?.detail === 'string' ? projection.data.detail.trim() : ''
+  // A business anchor with no execution must not present a control next step
+  // that this read-only page cannot perform.
+  if (!hasActualExecutionFacts(projection)) return '尚无实际执行记录。'
+  return detail ? `下一步：${detail}` : '本次读取未提供下一步说明。'
+}
+
+function renderNodeCollection(projection, collection) {
+  const flowSection = element('section', undefined, 'flow-section')
+  const flowHead = element('header', undefined, 'section-head')
+  flowHead.append(
+    element('h2', collection.title),
+    element('span', collection.meta, 'section-meta'),
+  )
+  flowSection.append(flowHead)
+  const catalogueNote = element('p', collection.note, 'section-note')
+  catalogueNote.dataset.catalogueSummary = 'true'
+  flowSection.append(catalogueNote)
+  if (projection.nodes.length === 0) {
+    const empty = element('p', '当前 scope 没有节点。', 'flow-empty')
+    empty.dataset.empty = 'true'
+    flowSection.append(empty)
+    return flowSection
+  }
+  flowSection.append(buildFlow(projection.nodes, currentFrames))
+  return flowSection
+}
+
+// The static system-node registry is diagnostic material, not the task's actual
+// execution. Keep it in one deliberate disclosure on the registry scope so the
+// recorded execution facts stay the primary reading.
+function renderCatalogueDisclosure(projection, collection) {
+  const disclosure = element('details', undefined, 'observation-catalogue')
+  disclosure.dataset.observationCatalogue = 'true'
+  const summary = element('summary', undefined, 'observation-catalogue-summary')
+  summary.append(
+    element('span', collection.title),
+    element('small', `${collection.meta}；默认折叠，展开查看系统节点`, 'section-meta'),
+  )
+  disclosure.append(
+    summary,
+    renderAgentChain(projection.nodes, currentFrames),
+    renderNodeCollection(projection, collection),
+  )
+  return disclosure
+}
+
 function renderObservation(projection) {
   if (agentViewDispose) {
     agentViewDispose()
@@ -815,13 +946,7 @@ function renderObservation(projection) {
 
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
-  const nextStep = element(
-    'p',
-    typeof projection.data?.detail === 'string' && projection.data.detail.trim()
-      ? `下一步：${projection.data.detail.trim()}`
-      : '本次读取未提供下一步说明。',
-    'lede',
-  )
+  const nextStep = element('p', observationNextStep(projection), 'lede')
   nextStep.dataset.observationNextStep = 'true'
   copy.append(
     element('p', '任务观测 · 只读', 'eyebrow'),
@@ -857,7 +982,9 @@ function renderObservation(projection) {
   })
   main.append(breadcrumbs)
 
-  main.append(renderAgentChain(projection.nodes, currentFrames))
+  const collection = observationCollection(projection)
+  const catalogue = projection.scope?.purpose === 'pipeline-registry'
+  if (!catalogue) main.append(renderAgentChain(projection.nodes, currentFrames))
 
   const agentSection = renderAgentActivitySection(projection)
   if (agentSection) main.append(agentSection)
@@ -867,29 +994,10 @@ function renderObservation(projection) {
 
   main.append(renderSemanticObservationSection())
 
-  const flowSection = element('section', undefined, 'flow-section')
-  const flowHead = element('header', undefined, 'section-head')
-  const collection = observationCollection(projection)
-  flowHead.append(
-    element('h2', collection.title),
-    element('span', collection.meta, 'section-meta'),
-  )
-  flowSection.append(flowHead)
-  const catalogueNote = element('p', collection.note, 'section-note')
-  catalogueNote.dataset.catalogueSummary = 'true'
-  flowSection.append(catalogueNote)
-
-  if (projection.nodes.length === 0) {
-    const empty = element('p', '当前 scope 没有节点。', 'flow-empty')
-    empty.dataset.empty = 'true'
-    flowSection.append(empty)
-    main.append(flowSection)
-    return
-  }
-
-  const canvas = buildFlow(projection.nodes, currentFrames)
-  flowSection.append(canvas)
-  main.append(flowSection)
+  main.append(catalogue
+    ? renderCatalogueDisclosure(projection, collection)
+    : renderNodeCollection(projection, collection))
+  if (projection.nodes.length === 0) return
   requestAnimationFrame(restoreFocusAfterRender)
 
   // The typed detail of the selected node opens the read-only drawer; `selectedNodeId` is cleared so

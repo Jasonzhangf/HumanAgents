@@ -310,53 +310,67 @@ test('typed draft revisions carry an execution policy into the immutable revisio
   assert.equal(revision?.revisionHash.startsWith('sha256:'), true);
 });
 
-test('taskFlow intake fidelity preserves inspection through draft confirmation and submission', async () => {
-  const intake = new ExplicitIntake();
-  const interaction = await receivePreview(intake);
-  const taskFlow = { kind: 'inspection' as const, definitionVersion: 1 as const };
-  await intake.createDraft(interaction, draftIntent({ taskFlow }));
-  const revision = intake.currentDraftRevision(interaction);
-  assert.deepEqual(revision?.taskFlow, taskFlow);
-  assert.ok(revision);
-  const confirmation = await intake.confirmDraftRevision({
-    interactionId: interaction,
-    draftId: revision.draftId,
-    draftRevisionVersion: revision.revisionVersion,
-    draftRevisionHash: revision.revisionHash,
-    confirmationRef: 'confirm-taskflow-inspection',
-    confirmedBy: 'human:operator',
-    confirmedAt: '2026-10-03T00:00:00.000Z',
-    payloadRef: 'asset://requirements/taskflow-inspection',
-  });
-  const registered: RegisteredDraftRevision = {
-    interactionId: interaction,
-    draftId: revision.draftId,
-    inputRevision: revision.inputRevision,
-    draftRevisionVersion: revision.revisionVersion,
-    draftRevisionHash: revision.revisionHash,
-    normalizedInput: revision.normalizedInput,
-    intent: revision.proposedIntent,
-    taskRef: currentTask,
-    payloadRef: confirmation.payloadRef,
-    requestKind: 'new-task-create',
-    taskFlow,
-  };
-  const ledger = new ConfirmationLedger();
-  ledger.registerRevision(registered);
-  ledger.confirmRevision(confirmation);
-  const dispatched: RequirementEnvelope[] = [];
-  const owner = new RequirementSubmissionOwner(ledger, new RequirementInbox(), {
-    async submit(envelope) {
-      dispatched.push(envelope);
-      return { requirementId: envelope.requirementId };
-    },
-  });
-  await owner.submitFinal(finalSubmitFor(registered, confirmation.confirmationRef, 'submit-taskflow-inspection'));
-  assert.deepEqual(dispatched[0]?.taskFlow, taskFlow);
+test('title and taskFlow intake fidelity survives restart through draft confirmation and submission', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-title-taskflow-'));
+  try {
+    const journal = new FileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const interaction = await receivePreview(intake);
+    const taskFlow = { kind: 'inspection' as const, definitionVersion: 1 as const };
+    const title = 'Inspect service health';
+    await intake.createDraft(interaction, draftIntent({ taskFlow, title }));
 
-  const omittedIntake = new ExplicitIntake();
-  const omittedFixture = await confirmedDraftFixture(omittedIntake, 'asset://requirements/taskflow-omitted');
-  assert.equal(omittedFixture.revision.taskFlow, undefined);
+    const restored = new ExplicitIntake(journal);
+    const revision = restored.currentDraftRevision(interaction);
+    assert.equal(revision?.title, title);
+    assert.equal(revision?.normalizedInput, 'summarize current evidence');
+    assert.deepEqual(revision?.taskFlow, taskFlow);
+    assert.ok(revision);
+    const confirmation = await restored.confirmDraftRevision({
+      interactionId: interaction,
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      confirmationRef: 'confirm-title-taskflow-inspection',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-03T00:00:00.000Z',
+      payloadRef: 'asset://requirements/title-taskflow-inspection',
+    });
+    const registered: RegisteredDraftRevision = {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      title,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      taskRef: currentTask,
+      payloadRef: confirmation.payloadRef,
+      requestKind: 'new-task-create',
+      taskFlow,
+    };
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(registered);
+    ledger.confirmRevision(confirmation);
+    const dispatched: RequirementEnvelope[] = [];
+    const owner = new RequirementSubmissionOwner(ledger, new RequirementInbox(), {
+      async submit(envelope) {
+        dispatched.push(envelope);
+        return { requirementId: envelope.requirementId };
+      },
+    });
+    await owner.submitFinal(finalSubmitFor(registered, confirmation.confirmationRef, 'submit-title-taskflow-inspection'));
+    assert.equal(dispatched[0]?.title, title);
+    assert.deepEqual(dispatched[0]?.taskFlow, taskFlow);
+
+    const omittedIntake = new ExplicitIntake();
+    const omittedFixture = await confirmedDraftFixture(omittedIntake, 'asset://requirements/title-taskflow-omitted');
+    assert.equal(omittedFixture.revision.title, undefined);
+    assert.equal(omittedFixture.revision.taskFlow, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('typed refined preview cannot enter the legacy confirmation and submission chain', async () => {

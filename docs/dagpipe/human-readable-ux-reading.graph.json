@@ -1,8 +1,8 @@
 {
   "id": "humanagent-human-readable-ux-reading",
-  "version": "1",
+  "version": "2",
   "meta": {
-    "requirements_version": 13,
+    "requirements_version": 19,
     "requirements": [
       "humanagent-explicit-brain-semantic-turn-context",
       "humanagent-implicit-brain-budgeted-independent-orchestration",
@@ -13,6 +13,8 @@
       "humanagent-transient-goal-oriented-continuation-prompt",
       "humanagent-generic-reorientation-prompt-and-boolean-stop-control",
       "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-explicit-brain-task-kind-inference",
+      "humanagent-task-list-truthful-result-and-action-boundary",
       "humanagent-continuation-oriented-by-explicit-dispatch-template",
       "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
       "humanagent-responsive-ux-bottom-sheet-and-four-corner-configuration"
@@ -21,8 +23,12 @@
     "implementationStatus": "UNVERIFIED",
     "bindingBoundary": "设计责任名称，不声称 Operator 已注册或 Runtime 已执行",
     "visibilityBoundary": "不显示重复/无内容/无用途字段；必要失败、未知与恢复责任不得隐藏。",
+    "minimumSufficientContract": "业务工作列表只显示一个可理解的工作项，并至少给出语义 title、真实阶段或结果、必要 blocker 与主要详情/行动入口。内部 occurrence、operation、receipt 和诊断保留在下一层完整读取；不展示无用途机械字段。",
+    "lineageAndResultContract": "列表与详情的关系来自 business TaskIdentity.source.requirementId、Subscription.goalId 与 OccurrenceTaskBinding 的 typed lineage。succeeded 显示公开结果或结果入口；missing grant 显示等待该次执行授权；真实 decision 需要 question/options；系统 blocked 保留 error/owner；无法关联的历史记录仍可独立读取。",
+    "actionNecessityContract": "只有具有实际 typed authority 和可用入口的动作才能出现。不得把机械 nextStep 当 action，也不得在 succeeded 后显示不存在的 stop；详情入口是主要下一层路径，不要求把全部控制搬到列表。",
     "actualExecutionGraphContract": "truth 读取同一任务范围已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，并经 Runtime 纯选择器进入 contracts source；该候选快照通过现有 agentActivity 成功值的 actualExecutionGraph 到达 semantic 与 purpose。guidance、既有当前计划和已记录实际实例分开呈现；necessary 明确保留 unavailable/not-recorded、缺失关系与未归类事实；present 不把固定角色流程、时间、成员、技术实例 ID 或 commit ref 宣称为执行依赖或默认标签。",
-    "readOnlyBoundary": "本图只有读取、解释与呈现。不得在此图消费需求、创建 Manager、提交 graph fact、acquire、execute、rebind 或执行 steer。"
+    "readOnlyBoundary": "本图只有读取、解释与呈现。不得在此图消费需求、创建 Manager、提交 graph fact、acquire、execute、rebind 或执行 steer。已知读取范围 project/mode 必须在子项导航后保持；controlTarget 只授权控制，不授权读取范围。",
+    "p0Status": "本版冻结最小必要性、最小充分信息、lineage/result 与 action 可达性契约。P3/P4 负责投影和现有 shared controls 接线；当前实现仍为 UNVERIFIED。"
   },
   "inputs": [
     {

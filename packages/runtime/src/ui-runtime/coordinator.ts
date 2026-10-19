@@ -917,6 +917,51 @@ function lifecycleStateLabel(state: LifecycleState): string {
   }
 }
 
+function taskNextStepText(next: NextAction): string {
+  return next.kind === 'continue'
+    ? '可发起新的执行'
+    : `${next.kind}${next.ref ? `:${next.ref}` : ''}`;
+}
+
+function pendingTaskNextStepText(next: NextAction): string {
+  return next.kind === 'continue'
+    ? '查看任务详情'
+    : `${next.kind}${next.ref ? `:${next.ref}` : ''}`;
+}
+
+/**
+ * The single settled-task presentation rule. A completed task reports its
+ * committed result without inventing a stop action; a stopped task reports the
+ * committed closure without advertising another stop. Waiting or blocked alone
+ * is not a human decision: the row keeps a concrete error/checkpoint action, or
+ * points at task detail. Actual stop and retry-stop duties survive this rule.
+ */
+function applySettledTaskProjection(
+  record: Pick<TaskRecord, 'state' | 'currentState' | 'nextStep' | 'allowedActions' | 'error' | 'publicOutput'>,
+  fallbackNextStep: string,
+): void {
+  record.currentState = record.state === 'waiting' ? '等待中' : lifecycleStateLabel(record.state);
+  const retainedStopActions = record.allowedActions.filter((action) => action === 'stop' || action === 'retry-stop');
+  if (record.state === 'succeeded') {
+    record.allowedActions = ['start'];
+    record.nextStep = record.publicOutput?.state === 'committed' && record.publicOutput.commits.length > 0
+      ? '查看已提交结果'
+      : '查看任务详情';
+  } else if (record.state === 'stopped') {
+    record.allowedActions = ['start'];
+    record.nextStep = '已收拢；可发起新的执行';
+  } else if (record.state === 'failed' || record.state === 'cancelled') {
+    record.allowedActions = retainedStopActions.length > 0 ? retainedStopActions : ['start'];
+    record.nextStep = record.error?.nextAction ?? '检查错误 owner 与 next action';
+  } else if (record.state === 'waiting' || record.state === 'blocked') {
+    record.allowedActions = retainedStopActions;
+    record.nextStep = record.error?.nextAction ?? fallbackNextStep;
+  } else {
+    record.allowedActions = retainedStopActions;
+    record.nextStep = fallbackNextStep;
+  }
+}
+
 /**
  * Mutable projection state rebuilt from task Journal records. It is the exact
  * shape the coordinator's own replay writes, so a cold read-only consumer gets
@@ -1361,26 +1406,24 @@ export async function projectDurableTaskInventory(input: {
           : latest.checkpoint.outcome;
         record.running = false;
         record.stopping = false;
-        record.currentState = inspectionRecoveryRequired
-          ? '检查补交待恢复'
-          : lifecycleStateLabel(record.state);
-        record.nextStep = inspectionRecoveryRequired
-          ? 'resume inspection stop settlement from the committed stopped checkpoint'
-          : selection?.basis === 'terminal'
-          ? record.state === 'succeeded'
-            ? '可发起新的执行或停止'
-            : record.state === 'stopped'
-              ? '已收拢；可发起新的执行'
-              : '检查错误 owner 与 next action'
-          : latest.checkpoint.next.kind === 'continue'
-          ? '可发起新的执行'
-          : `${latest.checkpoint.next.kind}${latest.checkpoint.next.ref ? `:${latest.checkpoint.next.ref}` : ''}`;
-        record.allowedActions = inspectionRecoveryRequired ? [] : record.state === 'succeeded'
-          || record.state === 'stopped'
-          || record.state === 'failed'
-          || record.state === 'cancelled'
-          ? ['start']
-          : [];
+        if (inspectionRecoveryRequired) {
+          record.currentState = '检查补交待恢复';
+          record.nextStep = 'resume inspection stop settlement from the committed stopped checkpoint';
+          record.allowedActions = [];
+        } else if (selection?.basis === 'terminal') {
+          applySettledTaskProjection(record, record.state === 'waiting' || record.state === 'blocked'
+            ? pendingTaskNextStepText(latest.checkpoint.next)
+            : taskNextStepText(latest.checkpoint.next));
+        } else {
+          record.currentState = lifecycleStateLabel(record.state);
+          record.nextStep = taskNextStepText(latest.checkpoint.next);
+          record.allowedActions = record.state === 'succeeded'
+            || record.state === 'stopped'
+            || record.state === 'failed'
+            || record.state === 'cancelled'
+            ? ['start']
+            : [];
+        }
         record.currentNode = record.state === 'stopped'
           ? RUNTIME_NODE_MARKERS.checkpointCommit
           : record.currentNode;
@@ -5587,14 +5630,9 @@ export class RuntimeTaskCoordinator {
     record.state = state;
     record.running = false;
     record.stopping = false;
-    record.allowedActions = state === 'succeeded' || state === 'stopped' || state === 'failed' ? ['start'] : [];
-    record.currentState = state === 'succeeded' ? '已完成' : state === 'stopped' ? '已停止' : state === 'failed' ? '失败' : state;
+    record.currentState = lifecycleStateLabel(state);
     record.currentNode = state === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : record.currentNode;
-    record.nextStep = state === 'succeeded'
-      ? '可发起新的执行或停止'
-      : state === 'stopped'
-        ? '已收拢；可发起新的执行'
-        : '检查错误 owner 与 next action';
+    applySettledTaskProjection(record, '查看任务详情');
     record.updatedAt = this.now().toISOString();
     if (record.operationId) this.scopes.delete(record.operationId.value);
   }
@@ -6140,22 +6178,20 @@ export class RuntimeTaskCoordinator {
         }
         task.running = false;
         task.stopping = false;
-        task.currentState = lifecycleStateLabel(task.state);
-        task.nextStep = selection?.basis === 'terminal'
-          ? task.state === 'succeeded'
-            ? '可发起新的执行或停止'
-            : task.state === 'stopped'
-              ? '已收拢；可发起新的执行'
-              : '检查错误 owner 与 next action'
-          : checkpoint.next.kind === 'continue'
-          ? '可发起新的执行'
-          : `${checkpoint.next.kind}${checkpoint.next.ref ? `:${checkpoint.next.ref}` : ''}`;
-        task.allowedActions = task.state === 'succeeded'
-          || task.state === 'stopped'
-          || task.state === 'failed'
-          || task.state === 'cancelled'
-          ? ['start']
-          : [];
+        if (selection?.basis === 'terminal') {
+          applySettledTaskProjection(task, task.state === 'waiting' || task.state === 'blocked'
+            ? pendingTaskNextStepText(checkpoint.next)
+            : taskNextStepText(checkpoint.next));
+        } else {
+          task.currentState = lifecycleStateLabel(task.state);
+          task.nextStep = taskNextStepText(checkpoint.next);
+          task.allowedActions = task.state === 'succeeded'
+            || task.state === 'stopped'
+            || task.state === 'failed'
+            || task.state === 'cancelled'
+            ? ['start']
+            : [];
+        }
         task.currentNode = task.state === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
         task.updatedAt = task.events.at(-1)?.occurredAt ?? task.updatedAt;
       } catch {

@@ -461,10 +461,23 @@ function renderTextFacts(label, facts, options) {
 }
 
 function renderSummary(summary, options) {
+  const observation = options?.mode === 'observation'
+  const hasFacts = Boolean(
+    summary
+    && !summary.missing
+    && (summary.goal
+      || summary.scope
+      || summary.constraints?.length
+      || summary.deliverables?.length
+      || summary.facts?.length),
+  )
+  // The main layer carries only real public task facts. Observation keeps the
+  // explicit missing state because it is the diagnostic reading layer.
+  if (!observation && !hasFacts) return null
   const section = create('section', 'iwc-summary')
-  section.append(create('h3', undefined, options?.mode === 'observation' ? '节点公开信息' : '公开任务信息'))
+  section.append(create('h3', undefined, observation ? '节点公开信息' : '公开任务信息'))
   if (!summary || summary.missing) {
-    section.append(create('p', 'iwc-missing', options?.mode === 'observation' ? '来源未提供节点公开信息' : '来源未提供公开任务信息'))
+    section.append(create('p', 'iwc-missing', observation ? '来源未提供节点公开信息' : '来源未提供公开任务信息'))
     return section
   }
   if (summary.goal) section.append(renderTextFact('目标', summary.goal, options))
@@ -483,7 +496,8 @@ function renderConversation(projection, options, descriptorControls) {
   panel.tabIndex = 0
   panel.hidden = false
   const scroller = create('div', 'iwc-scroll iwc-conversation-scroll')
-  scroller.append(renderSummary(projection.conversation.summary, options))
+  const summary = renderSummary(projection.conversation.summary, options)
+  if (summary) scroller.append(summary)
   const turns = projection.conversation.turns || []
   if (turns.length === 0) {
     scroller.append(create('p', 'iwc-missing', '来源未提供公开对话轮次'))
@@ -795,32 +809,29 @@ function renderTrace(projection, options, state, descriptorControls) {
 
 function renderActions(projection, options, state) {
   if (projection.mode === 'observation') return null
+  const actions = projection.actions || []
+  if (actions.length === 0) return null
   const footer = create('footer', 'iwc-actions')
   footer.append(create('div', 'iwc-actions-head'))
   footer.querySelector('.iwc-actions-head').append(create('h3', undefined, '授权操作'))
-  const actions = projection.actions || []
-  if (actions.length === 0) {
-    footer.append(create('p', 'iwc-missing', '来源未提供可执行操作'))
-  } else {
-    const list = create('div', 'iwc-action-list')
-    for (const action of actions) {
-      const item = create('div', 'iwc-action-item')
-      const button = create('button', 'iwc-button iwc-button--primary', action.label)
-      button.type = 'button'
-      button.dataset.iwcAction = 'invoke'
-      button.dataset.actionId = action.id
-      button.dataset.focusKey = `action:${action.id}`
-      const unavailable = action.availability !== 'executable' || typeof options.onAction !== 'function'
-      button.disabled = unavailable
-      if (action.availability !== 'executable') button.title = action.unavailableReason || '来源标记为不可执行'
-      else if (typeof options.onAction !== 'function') button.title = '未提供 action 回调'
-      item.append(button)
-      if (action.availability !== 'executable') item.append(create('span', 'iwc-unavailable', action.unavailableReason || '来源标记为不可执行'))
-      else if (typeof options.onAction !== 'function') item.append(create('span', 'iwc-unavailable', '操作端口未提供'))
-      list.append(item)
-    }
-    footer.append(list)
+  const list = create('div', 'iwc-action-list')
+  for (const action of actions) {
+    const item = create('div', 'iwc-action-item')
+    const button = create('button', 'iwc-button iwc-button--primary', action.label)
+    button.type = 'button'
+    button.dataset.iwcAction = 'invoke'
+    button.dataset.actionId = action.id
+    button.dataset.focusKey = `action:${action.id}`
+    const unavailable = action.availability !== 'executable' || typeof options.onAction !== 'function'
+    button.disabled = unavailable
+    if (action.availability !== 'executable') button.title = action.unavailableReason || '来源标记为不可执行'
+    else if (typeof options.onAction !== 'function') button.title = '未提供 action 回调'
+    item.append(button)
+    if (action.availability !== 'executable') item.append(create('span', 'iwc-unavailable', action.unavailableReason || '来源标记为不可执行'))
+    else if (typeof options.onAction !== 'function') item.append(create('span', 'iwc-unavailable', '操作端口未提供'))
+    list.append(item)
   }
+  footer.append(list)
   return footer
 }
 
@@ -1036,16 +1047,30 @@ function renderStatus(projection) {
   if (observation) {
     top.append(create('span', 'iwc-state-chip', `归属 ${valueOrUnknown(metadata.ownerId)}`))
   } else {
-    const providerChip = create('span', 'iwc-state-chip', `Provider ${valueOrUnknown(metadata.provider?.state)}`)
-    providerChip.dataset.state = metadata.provider?.state || 'unknown'
-    top.append(providerChip)
-    const livenessChip = create('span', 'iwc-state-chip', `活性 ${livenessLabel(metadata.liveness)}`)
-    livenessChip.dataset.state = metadata.liveness?.state || 'unknown'
-    top.append(livenessChip)
+    if (metadata.provider?.state) {
+      const providerChip = create('span', 'iwc-state-chip', `Provider ${metadata.provider.state}`)
+      providerChip.dataset.state = metadata.provider.state
+      top.append(providerChip)
+    }
+    // A runtime-reported liveness verdict is a real fact, so it earns a status
+    // chip. An absent (or explicitly unknown) liveness fact stays in the
+    // collapsed 状态与技术身份 block instead of repeating a "未提供"/"未知" chip
+    // on the main reading layer.
+    if (metadata.liveness && metadata.liveness.state && metadata.liveness.state !== 'unknown'
+      && LIVENESS_STATE_LABELS[metadata.liveness.state] !== undefined) {
+      const livenessChip = create('span', 'iwc-state-chip', `活性 ${livenessLabel(metadata.liveness)}`)
+      livenessChip.dataset.state = metadata.liveness.state
+      top.append(livenessChip)
+    }
+    // The same rule for the transport fact. The card still keeps the declared
+    // `transport`/page-local `stream` reading when it exists; only a genuinely
+    // absent transport is left out of the chip row and kept in the details.
     const transport = transportDisplay(metadata)
-    const transportChip = create('span', 'iwc-state-chip', `传输 ${transport.label}`)
-    transportChip.dataset.state = transport.state
-    top.append(transportChip)
+    if (transport.state !== 'unknown') {
+      const transportChip = create('span', 'iwc-state-chip', `传输 ${transport.label}`)
+      transportChip.dataset.state = transport.state
+      top.append(transportChip)
+    }
   }
   status.append(top)
   if (source?.detail) status.append(create('p', 'iwc-status-detail', source.detail))
