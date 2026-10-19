@@ -134,7 +134,8 @@ export function taskControlScopeQuery({ projectKey, mode } = {}) {
 }
 
 function appendI2TaskScope(query, scope) {
-  for (const [key, value] of new URLSearchParams(taskControlScopeQuery(scope))) query.set(key, value)
+  const readScope = scope === null || scope === undefined ? undefined : scope
+  for (const [key, value] of new URLSearchParams(taskControlScopeQuery(readScope))) query.set(key, value)
   return query
 }
 
