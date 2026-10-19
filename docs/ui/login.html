@@ -42,7 +42,7 @@
             />
           </label>
           <p class="login-hint" id="pair-hint">
-            在运行 HumanAgent 的机器上执行 <code>humanagent pair</code>，把返回的配对码填到这里。
+            在运行 HumanAgent 的机器上执行 <code data-pair-command>humanagent pair</code>，把返回的配对码填到这里。
             配对码只生效一次，默认两分钟后过期。
           </p>
           <button class="button button--primary" type="submit" data-pair-submit>配对并进入</button>
@@ -58,6 +58,10 @@
         <h2 id="pair-error-title" data-auth-error-heading>配对未完成</h2>
         <p class="login-hint" data-auth-error-impact hidden></p>
         <p class="login-hint" data-auth-error-retry hidden></p>
+        <div class="login-error-actions">
+          <button class="button button--quiet" type="button" data-auth-error-return>返回输入</button>
+          <a class="button button--quiet" href="./dashboard.html" data-auth-error-exit>暂不配对，返回</a>
+        </div>
       </section>
     </main>
     <script type="module" src="./login.js"></script>

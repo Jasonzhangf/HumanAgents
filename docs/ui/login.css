@@ -47,6 +47,14 @@
   border-radius: 4px;
   background: var(--surface-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.login-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
 }
 
 .login-error-detail {
