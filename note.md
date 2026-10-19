@@ -1,5 +1,13 @@
 # HumanAgent 项目状态汇总（2026-10-19）
 
+## 2026-10-19 Provider/native：原 blocked turn 真实恢复通过
+
+Runtime 删除 inspect completion 的重复工具范围 digest 证据条件。合法 file.list 的实际输出已由原始结果及已提交 completion 关联证明，不应再要求重复表示。原始字节 digest、精确调用关联、唯一 completion、失败和副作用拒绝仍保留。源码提交为 `0fcdc1e5`、`f5e22c08`、`833ddec9`；只涉及 Runtime 唯一 owner 和既有公开消费者测试。相同错误 RED 后，直接消费者及真实 producer/cold boundary 两项 GREEN；应用构建和测试编译通过。
+
+Root 已安装候选包并通过正式 restart 从 generation1/PID63385 换到 generation2/PID26902/55215，旧实例 clean。原 Task/operation/turn/epoch1 经正式 resume 成功完成。完整增量只有三条 control 和两条 UI 记录；已提交的保存和 Planner alignment 被复用，没有新的执行者、工具、Planner 或 grant 记录。原 Journal 前缀和 workspace 字节不变。真实浏览器显示已完成和原三行报告。证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/global-inspect-completion-20261019/root-recovery-acceptance.md`。
+
+本增量真实行为验收已完成。fresh OAuth `gpt-6.1-sol` 显式 medium 独立增量审查 exit0、findings=[]，有效 PASS；启动和完整结果为同目录 `review-medium-launch.json`、`review-medium-final.json`。首次 controller 未显式设置 effort 的结果不充当 medium 准入。main 集成正在收口。main 正式构建、全局安装和运行验收、推送及最终资源清理由 Root 接续。本记录不表示整个 Provider/ACP 或整个项目全部完成；旧 UX、DSH 和其他未验收范围不因此变为完成。
+
 ## 2026-10-19 交付：全局任意目录启动与持久配对
 
 全局 `/opt/homebrew/bin/humanagent` 已安装本轮修复。默认产品已通过正式 `product use` 指向原有 control root，原产品配置声明原 workspace；未迁移数据或创建替代产品。从 `/tmp` 且移除 `HUMANAGENT_HOME` 的裸启动返回 `already-running`，原 lease/PID/endpoint 不变。裸 `pair` 不再依赖 workspace、活动 serve owner 或启动顺序。正式 restart 后，既有会话和重启前签发的配对码均可用，第二客户端配对不撤销第一会话。最终实例为 generation52/PID92127/53007，实际加载 `/opt/homebrew/lib/node_modules/humanagent-cli/runtime/app/src/cli.js`。
