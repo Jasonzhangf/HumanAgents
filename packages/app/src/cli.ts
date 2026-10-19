@@ -1553,18 +1553,16 @@ export async function main(args: readonly string[]): Promise<void> {
       );
     }
     if (lease.startup === undefined) assertLegacyRestartOptions(args.slice(1));
-    // A formal replacement keeps the already-resolved product/workspace even
-    // when the original launch was bare and the default declaration later
-    // changes. Retained explicit values win; only a legacy declaration that
-    // lacks them is filled from this invocation's resolved paths.
+    // A formal replacement keeps the canonical product/workspace that already
+    // located the lease. The retained declaration supplies only the other
+    // startup settings.
     const retainedStartupArgs = lease.startup?.args ?? [];
-    const retainedStartupOptions = startupOptionMap(retainedStartupArgs);
     const startup = await currentStartupDeclaration(
       args.slice(1),
       retainedStartupArgs,
       {
-        controlRoot: retainedStartupOptions.get('--control-root') ?? paths.controlRoot,
-        workspace: retainedStartupOptions.get('--workspace') ?? paths.workspaceCwd,
+        controlRoot: paths.controlRoot,
+        workspace: paths.workspaceCwd,
       },
     );
     const completion = await restartDaemonWithCodeHandoff(paths, {
