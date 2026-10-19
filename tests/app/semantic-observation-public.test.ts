@@ -20,7 +20,11 @@ import { prepareAgentProvider } from '../../packages/app/src/agent-driver-compos
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
 import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
-import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
+import { UiRuntimeJournal, uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
+import { ExplicitIntake } from '../../packages/runtime/src/intake/explicit-intake.js';
+import { RequirementInbox } from '../../packages/runtime/src/intake/requirement-inbox.js';
+import { ConfirmationLedger } from '../../packages/runtime/src/explicit-brain/router.js';
+import { createInteractionParentTurnRawOwner } from '../../packages/runtime/src/explicit-brain/interaction-parent-turn-raw.js';
 import { filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -73,6 +77,8 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
   const lifecycle: string[] = [];
   let rawParentSettlement: ProviderSettlement<InteractionParentProviderExecutionIdentityRef> | undefined;
   let parentSettleCalls = 0;
+  let providerSettleCalls = 0;
+  let providerCloseCalls = 0;
   let turn: InteractionTurnIdentity | undefined;
   let helperCallId = '';
   const refinedText = '精炼后采纳的正文，保留 helper 的 incomplete 判断。';
@@ -195,12 +201,14 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
       };
       const close = owned.port.close.bind(owned.port);
       owned.port.close = async (binding) => {
+        providerCloseCalls += 1;
         const receipt = await close(binding);
         if (selection.roleId === 'interaction') lifecycle.push('parent:closed');
         return receipt;
       };
       const settle = owned.port.settle.bind(owned.port);
       owned.port.settle = async (input) => {
+        providerSettleCalls += 1;
         const settlement = await settle(input);
         if (selection.roleId === 'interaction') {
           parentSettleCalls += 1;
@@ -224,6 +232,71 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
     });
     await ensureControlLayout(paths);
     lease = await acquireDaemonLease(paths, { ownerId: 'semantic-observation-public' });
+    // Explicit completed-legacy compatibility obligation; probability unknown.
+    // Impact: an upgrade could hide an already answered interaction or replay
+    // its Provider. Cost: one local durable fixture and two public GETs.
+    // Build pre-receipt history with the existing owners, never by deleting a
+    // newly published receipt or replacing the formal interpreter.
+    const legacyIntake = new ExplicitIntake();
+    const legacyId = await legacyIntake.receive({
+      channel: 'business', sourceRef: 'legacy:completed', rawInput: 'legacy bounded question',
+    });
+    const legacyAnswer = 'Original completed legacy answer.';
+    const legacyTurn: InteractionTurnIdentity = {
+      organId, interactionScopeId: `runtime:${organId.value}`,
+      interactionId: legacyId, inputRevision: 1, turnId: 'legacy-completed-turn',
+    };
+    const legacyScope: ScopeRef = { organId, operationId: id('operation', 'legacy-completed-operation') };
+    const legacyExecution: InteractionParentProviderExecutionIdentityRef = {
+      organId, operationId: legacyScope.operationId!, runtimeId: 'legacy-completed-runtime',
+      executionEpoch: 1, interactionTurn: legacyTurn,
+    };
+    const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot));
+    const legacyInput = await sink.write({
+      scope: legacyScope, kind: 'operation', type: 'legacy-input',
+      locator: 'operation/legacy-completed-operation/input', content: 'legacy bounded question',
+    });
+    const legacyOutput = await sink.write({
+      scope: legacyScope, kind: 'operation', type: 'legacy-output',
+      locator: 'operation/legacy-completed-operation/output', content: legacyAnswer,
+    });
+    const legacyOwner = createInteractionParentTurnRawOwner({
+      turn: legacyTurn, execution: legacyExecution, scope: legacyScope,
+      initialInput: { ref: legacyInput, view: { kind: 'utf8-text' } },
+      providerBinding: binding, journal: parentJournal, rawContent,
+    });
+    await legacyOwner.openTurnInput();
+    const legacyRequest = { turnId: 'provider-legacy-completed-turn', requestId: 'legacy-request' };
+    await legacyOwner.registerRequest({ execution: legacyExecution,
+      record: { request: legacyRequest, scope: legacyScope, phase: 'dispatching' } });
+    await legacyOwner.acceptRawFact({ execution: legacyExecution, scope: legacyScope,
+      request: legacyRequest, producerSeq: 1, fact: {
+        kind: 'content', contentUnitId: 'legacy-answer', channel: 'assistant-text',
+        update: 'full', content: { ref: legacyOutput, view: { kind: 'utf8-text' } }, complete: true,
+      } });
+    await legacyOwner.acceptRawFact({ execution: legacyExecution, scope: legacyScope,
+      request: legacyRequest, producerSeq: 2, fact: { kind: 'request-complete', terminal: 'completed' } });
+    await legacyOwner.registerRequest({ execution: legacyExecution,
+      record: { request: legacyRequest, scope: legacyScope, phase: 'settled' } });
+    assert.equal((await legacyOwner.readFinalTurnOutput()).assistantText, legacyAnswer);
+    await legacyOwner.recordProviderClose({ providerBinding: binding, closedAt: '2026-10-17T00:00:00.000Z',
+      result: { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol,
+        state: 'closed', evidenceRefs: [legacyOutput] } });
+    await helperJournal.appendSemanticCheckpoint({
+      ...legacyTurn, kind: 'semantic-checkpoint', committedAt: '2026-10-17T00:00:00.000Z',
+      claims: [{ fact: legacyAnswer, certainty: 'confirmed', sourceRefs: [legacyOutput.locator] }],
+      constraints: [], evidenceRefs: [legacyOutput], semanticAssetRefs: [legacyOutput],
+    });
+    await legacyIntake.beginMatching(legacyId);
+    await legacyIntake.completeAnswer(legacyId, legacyAnswer);
+    const legacyOriginal = JSON.parse(JSON.stringify(await legacyIntake.inspect(legacyId)));
+    const uiJournalPath = join(checkpointRoot, 'fake', 'ui-runtime-journal.jsonl');
+    new UiRuntimeJournal(uiJournalPath).append({ kind: 'explicit-brain.state', state: {
+      intake: legacyIntake.exportState(), inbox: new RequirementInbox().exportState(),
+      confirmationLedger: new ConfirmationLedger().exportState(), dispatchLedger: [], submittedSubmissions: [],
+    } });
+    const legacyHistory = await parentJournal.readTurnSnapshot(legacyTurn);
+    assert.equal(legacyHistory.providerSettlements.length, 0);
     runtime = await startUiRuntimeOwner({
       mode: 'fake', organId, binding, port: buildFakeExecutionPort(binding, 0), checkpointRoot, evidenceRoot,
       uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0, memory: memory('default-parent'),
@@ -231,6 +304,25 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
       runtimeComposition: { prepareAgentProvider: prepare }, explicitBrainHelperProviderPreparer: prepare, lease,
     });
     testSessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
+    const legacyJournalBefore = await readFile(journalPath, 'utf8');
+    const legacyUiBefore = await readFile(uiJournalPath, 'utf8');
+    const legacyCallsBefore = { requests: requests.length, settles: providerSettleCalls, closes: providerCloseCalls };
+    assert.deepEqual(legacyCallsBefore, { requests: 0, settles: 0, closes: 0 }, 'legacy hydration must not replay the Provider');
+    const legacyRead = await fetch(`${runtime.server.url}/api/explicit/interactions/${legacyId}`);
+    assert.equal(legacyRead.status, 200, 'completed legacy business GET must remain readable without a receipt');
+    assert.deepEqual(await legacyRead.json(), legacyOriginal);
+    assert.equal(legacyOriginal.state, 'answered');
+    assert.equal(legacyOriginal.reply, legacyAnswer);
+    const legacyControl = await fetch(`${runtime.server.url}/api/explicit/interactions/${legacyId}/control/provider-settlement`
+      + `?inputRevision=1&turnId=${legacyTurn.turnId}`);
+    const legacyControlText = await legacyControl.text();
+    assert.equal(legacyControl.ok, false, legacyControlText);
+    assert.match(legacyControlText, /interaction parent provider settlement is missing for the current terminal request/);
+    assert.equal(await readFile(journalPath, 'utf8'), legacyJournalBefore);
+    assert.equal(await readFile(uiJournalPath, 'utf8'), legacyUiBefore);
+    assert.deepEqual(await parentJournal.readTurnSnapshot(legacyTurn), legacyHistory);
+    assert.deepEqual({ requests: requests.length, settles: providerSettleCalls, closes: providerCloseCalls }, legacyCallsBefore);
+    assert.equal(runtime.service.listTasks().counts.total, 0);
     const received = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ channel: 'business', sourceRef: 'test:default-parent', rawInput: 'parent-private-input' }),
