@@ -982,7 +982,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly model: string;
   readonly organFilePath: string;
   readonly journal: JsonlOrganJournal;
-  readonly inspect?: boolean;
+  readonly inspect?: boolean | 'file.list';
   readonly child?: boolean;
   readonly parallelChild?: boolean;
   readonly reviewPerCycle?: boolean;
@@ -1544,11 +1544,13 @@ async function textOnlyResponsesUpstream(input: {
         && (input.turnCount === undefined || plannerAttempts === 0);
       if (inspectThisTurn && !readIssued) {
         readIssued = true;
+        const inspectName = input.inspect === 'file.list' ? 'file.list' : 'file_read';
+        const inspectArgs = input.inspect === 'file.list' ? { path: '.' } : { path: 'read-delivery.txt' };
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.end(frame([
           { type: 'response.created', response: { id: 'inspect-read' } },
           { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call',
-            call_id: 'call-inspect-read', name: 'file_read', arguments: JSON.stringify({ path: 'read-delivery.txt' }) } },
+            call_id: 'call-inspect-read', name: inspectName, arguments: JSON.stringify(inspectArgs) } },
           { type: 'response.completed', response: { id: 'inspect-read' } },
         ]));
         return;
@@ -1571,15 +1573,29 @@ async function textOnlyResponsesUpstream(input: {
       if (readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result') {
         assert.deepEqual(readFact.entry.envelope.scope, coverage!.scope);
         assert.deepEqual(readFact.entry.envelope.fact.rawOutput.ref.scope, coverage!.scope);
+        if (input.inspect === 'file.list') {
+          const result = readFact.entry.envelope.fact.result;
+          assert.deepEqual(result.outputRefs, []);
+          assert.equal(result.outputRef, undefined);
+          assert.equal(result.outputDigest, undefined);
+          assert.equal(result.executionFact, undefined);
+          assert.ok(result.evidenceRefs.some((ref) => ref.kind === 'tool' && ref.digest === undefined));
+        }
       }
       const deliveryRefs = readFact?.kind === 'accepted-fact' && readFact.entry.envelope.fact.kind === 'tool-result'
         ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
+      if (input.inspect === 'file.list' && readFact?.kind === 'accepted-fact'
+        && readFact.entry.envelope.fact.kind === 'tool-result') {
+        assert.ok(deliveryRefs.includes(readFact.entry.envelope.fact.rawOutput.ref.locator));
+      }
       const multiTurn = input.turnCount !== undefined;
       const endCallId = multiTurn ? `call-turn-${plannerAttempts + 1}-end` : 'call-text-end';
       const endSummary = multiTurn ? (plannerAttempts === 0 ? {
         goal: section(TURN_ONE_GOAL), actions: section(TURN_ONE_ACTIONS),
         result: inspectThisTurn
-          ? { text: `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`,
+          ? { text: input.inspect === 'file.list'
+              ? `${TURN_ONE_RESULT}; Listed the workspace directory read-only; no file content read`
+              : `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`,
             evidenceRefs: [admissionCommitId, ...deliveryRefs] }
           : section(TURN_ONE_RESULT),
         expectedNextStep: section(TURN_ONE_NEXT),
@@ -1595,7 +1611,13 @@ async function textOnlyResponsesUpstream(input: {
         result: section(TURN_ONE_RESULT), expectedNextStep: section(TURN_ONE_NEXT),
       }) : {
         goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
-        result: section(SUMMARY_RESULT), expectedNextStep: section('Close this turn'),
+        result: inspectThisTurn
+          ? { text: input.inspect === 'file.list'
+              ? 'Listed the workspace directory read-only: read-delivery.txt present; no file content read'
+              : `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`,
+            evidenceRefs: [admissionCommitId, ...deliveryRefs] }
+          : section(SUMMARY_RESULT),
+        expectedNextStep: section('Close this turn'),
       };
       const summaryWithInspection = input.inspection && multiTurn && plannerAttempts > 0
         ? {
@@ -1656,7 +1678,7 @@ async function textOnlyResponsesUpstream(input: {
 
 /** Canonical fixture: real workspace, real native control layout, controlled Provider. */
 async function textOnlyFixture(
-  inspect = false,
+  inspect: boolean | 'file.list' = false,
   child = false,
   parallelChild = false,
   turnCount?: 2 | 3,
@@ -2741,7 +2763,7 @@ if (!coldConsumerMode) test('native public stop before accepted end captures the
 // prefix/end gaps. Impact: a saved turn cannot reach Planner alignment. Cost:
 // one real CLI/HTTP fixture using the existing local upstream and asset store.
 if (!coldConsumerMode) test('native inspect producer and cold saved boundary preserve facts without executor replay', async () => {
-  const fixture = await textOnlyFixture(true);
+  const fixture = await textOnlyFixture('file.list');
   let passed = false;
   try {
     const organId = id('organ', 'humanagent-ui');
@@ -2818,9 +2840,18 @@ if (!coldConsumerMode) test('native inspect producer and cold saved boundary pre
     assert.equal(taskIdentityReads, 0, 'boundary-only recovery must not read the current identity dependencies');
     await boundary.finishBoundary();
     const readback = await boundary.standardTurn.readDelivery!();
-    assert.equal(readback.materials[0]?.kind, 'inspect-tool-report');
+    const inspectMaterial = readback.materials[0];
+    assert.equal(inspectMaterial?.kind, 'inspect-tool-report');
+    if (inspectMaterial?.kind !== 'inspect-tool-report') throw new Error('expected inspect-tool-report material');
+    const reportBody = new TextDecoder('utf-8', { fatal: true }).decode(inspectMaterial.bytes);
+    assert.equal(reportBody, JSON.stringify(JSON.parse(reportBody)));
+    const report = JSON.parse(reportBody) as { entries?: readonly { path?: string }[] };
+    assert.ok(report.entries?.some((entry) => entry.path === 'read-delivery.txt'));
+    assert.equal(reportBody.includes(EXACT_BODY), false);
+    assert.equal(inspectMaterial.rawOutput.ref.kind, 'tool');
     const delivery = bindAssignmentDelivery({ assignment: source.assignment, readback });
-    assert.ok(delivery.producedArtifactBodies[0]?.includes(EXACT_BODY.split('\n')[0]!));
+    assert.ok(delivery.producedArtifactRefs.includes(inspectMaterial.rawOutput.ref.locator));
+    assert.equal(delivery.producedArtifactBodies[0], reportBody);
     assert.equal(executionPosts().length, executorCount, 'boundary continuation must issue zero executor generation requests');
     assert.equal(plannerPosts().length, 1, 'boundary readback must not duplicate the independent Planner duty');
     const after = (await fixture.journal.verify()).records;
