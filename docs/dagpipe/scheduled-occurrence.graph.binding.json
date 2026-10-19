@@ -48,16 +48,24 @@
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
       "ownerSymbol": "SubscriptionControlPort.consumeExecution",
-      "implementationStatus": "implemented"
+      "implementationStatus": "implemented-occurrence-consumption-only",
+      "preparedOwnerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "preparedOwnerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "preparedOwnerSymbol": "prepared execution allocation",
+      "taskGrantReadOwnerPath": "packages/app/src/ui-runtime/execution-composition.ts",
+      "taskGrantReadOwnerRel": "packages/app/src/ui-runtime/execution-composition.ts",
+      "taskGrantReadOwnerSymbol": "createDefaultExecutionComposition owner(taskId)",
+      "designNote": "consumeExecution 只拥有 occurrence 消费权。该节点必须保留精确 OccurrenceTaskBinding 并读取 child Task 自己的 TaskGrant；缺 grant、wrong owner、revoked 或 stale revision 时只产生 typed prepared/waiting/rejected 结果，不 release、不创建 Provider factory。"
     },
     "execute_occurrence_task": {
-      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
-      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
-      "ownerSymbol": "SubscriptionControlPort.consumeExecution",
+      "ownerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerSymbol": "DurableOccurrenceConsumer.executeOccurrence",
       "implementationStatus": "implemented",
-      "consumerOwnerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
-      "consumerOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
-      "consumerOwnerSymbol": "DurableOccurrenceConsumer.executeOccurrence",
+      "nativeAdmissionOwnerPath": "packages/app/src/ui-runtime/execution-composition.ts",
+      "nativeAdmissionOwnerRel": "packages/app/src/ui-runtime/execution-composition.ts",
+      "nativeAdmissionOwnerSymbol": "createDefaultExecutionComposition",
+      "releaseContract": "仅在 child TaskGrant 的 grant.owner 与 verified principalOwner 匹配后，经现有 native TG1 admission release 同一 allocation 一次。重复 grant 或 restart 只能返回既有 execution identity，不得第二次 release。",
       "publicConsumer": "humanagent-serve-task@3"
     },
     "settle_occurrence": {
@@ -74,7 +82,7 @@
       "projectionOwnerPath": "packages/ui/projection/runtime.ts",
       "projectionOwnerRel": "packages/ui/projection/runtime.ts",
       "projectionOwnerSymbol": "projectRuntimeTaskDashboard",
-      "terminalCoverage": "success/failed/rejected/missing/blocked/cancelled/cleanup 由 terminal receipt 保留；当前尚未在 product UI 显示全部终态"
+      "terminalCoverage": "success/failed/rejected/missing/blocked/cancelled/cleanup 由 terminal receipt 保留。公开投影必须区分等待 exact execution grant、真实 decision、系统阻塞与终态结果；不得把内部 scheduled runtime failure 冒充 business success，也不得只显示机械 nextStep。"
     }
   }
 }
