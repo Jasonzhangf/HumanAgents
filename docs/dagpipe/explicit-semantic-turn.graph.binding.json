@@ -40,7 +40,7 @@
       "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
       "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "返回 ExplicitBrainInterpretation（answer/clarification/status-query/requirement）或显式错误；失败、未决请求与 ProviderSettlement 证据独立保留。"
+      "designNote": "返回 ExplicitBrainInterpretation（answer/clarification/status-query/requirement）或显式错误；失败、未决请求与 ProviderSettlement 证据独立保留。正式 composition 复用现有 JsonlInteractionParentTurnJournal：fresh/continuation answer 经现有 callback 向同一 parent Journal 追加一条 provider-settlement 控制记录，App 只增加一个独立只读 control GET 读取该记录。除既有 continue owner-reconciliation 分支外，physical close 后仅新增允许该控制记录追加，request/raw fact 仍冻结；已完成 answer 的旧历史无 receipt 不回归，缺失 receipt 的 incomplete recovery 显式失败，不伪造、不重放、不建立第二真源。详见 docs/architecture/taskless-provider-settlement-design-2026-10-18.md。"
     }
   }
 }

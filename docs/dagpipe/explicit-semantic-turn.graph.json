@@ -20,7 +20,7 @@
     "historyBoundary": "前序语义只取已提交 InteractionSemanticCheckpoint；当前轮次完整上下文由当前原文 RawAsset 与本轮 accepted raw facts 单独物化，helper 使用独立上下文。",
     "helperBoundary": "每个 helper dispatch 使用独立身份与上下文；helper 数量由调用方动态选择，不绑定固定角色集合。",
     "ablationDecision": "保留 assemble、route、outcome、history、return 五个节点；不为内部函数调用增加节点，不为假设需求增加授权或质量框架，删除数为 0。",
-    "settlementEvidenceBoundary": "explicit-brain.state、trace 或回复文本不能证明 Provider settlement。原 typed 成功 Provider settlement receipt 是独立控制证据，关联同一 interactionId 与 inputRevision；不得写入 prompt、回答 JSON、reply、explicit-brain.state、decisionRefs 或任务 payload。",
+    "settlementEvidenceBoundary": "explicit-brain.state、trace 或回复文本不能证明 Provider settlement。原 typed 成功 Provider settlement receipt 作为一条 provider-settlement 控制记录写入现有 interaction-parent Journal，关联同一 interactionId、inputRevision 与真实 terminal request；不得写入 prompt、回答 JSON、reply、explicit-brain.state、decisionRefs 或任务 payload。除既有 continue owner-reconciliation 分支外，physical close 后只新增允许该控制记录追加，request 与 raw fact 仍冻结。独立只读 control GET 精确消费该记录；缺失、未就绪或完整性失败必须显式报错，不得伪造或重放。已完成 answer 的旧历史无 receipt 仍可读取；receipt 强制只用于需要 settlement 证据的 incomplete recovery。",
     "existingCheckpointDesign": "native-turn-checkpoint.graph.json"
   },
   "inputs": [
