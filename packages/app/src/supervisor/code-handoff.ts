@@ -8,6 +8,8 @@ import {
   readDaemonLease,
   recordDaemonRestartFailure,
   recordDaemonRestartTransition,
+  SERVE_OWNER,
+  SUPERVISOR_RESTART_REQUEST_OPTION as RESTART_REQUEST_OPTION,
   type SupervisorLeaseIdentity,
   type SupervisorLeaseRecord,
   type SupervisorRestartTransition,
@@ -15,7 +17,6 @@ import {
   type SupervisorStartupDeclaration,
 } from './supervisor.js';
 
-const SERVE_OWNER = 'humanagent.app.serve';
 const DEFAULT_HANDOFF_TIMEOUT_MS = 30_000;
 const DEFAULT_HANDOFF_POLL_INTERVAL_MS = 25;
 type ChildProcessLike = ReturnType<typeof spawn>;
@@ -191,8 +192,17 @@ async function waitForNewOwner(input: {
   );
 }
 
-function spawnReplacement(startup: SupervisorStartupDeclaration): ChildProcessLike {
-  const child = spawn(process.execPath, [startup.launcherPath, 'serve', ...startup.args], {
+function spawnReplacement(startup: SupervisorStartupDeclaration, requestId: string): ChildProcessLike {
+  // The request marker is a one-shot control argument for this child only.
+  // It stays out of the retained startup declaration so later restarts do not
+  // replay a completed request.
+  const child = spawn(process.execPath, [
+    startup.launcherPath,
+    'serve',
+    ...startup.args,
+    RESTART_REQUEST_OPTION,
+    requestId,
+  ], {
     cwd: startup.cwd,
     env: process.env,
     // Own session and process group so the restart caller's terminal/session
@@ -269,7 +279,7 @@ export function startDaemonCodeHandoff(
       assertStartupDeclaration(input.startup);
       const current = assertExpectedLease(await readDaemonLease(paths), input.expected);
       await recordDaemonRestartTransition(paths, leaseIdentity(current), transition);
-      const child = spawnReplacement(input.startup);
+      const child = spawnReplacement(input.startup, requestId);
       const replacement = await waitForNewOwner({
         paths,
         previous: current,
