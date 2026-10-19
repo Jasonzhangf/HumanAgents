@@ -431,9 +431,90 @@
         "version": 1
       },
       "version": 16
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "1. 任务类型应该是显示大脑自己推理的结果，不是用户选择，这是 p1 的问题",
+          "role": "user",
+          "source": "Codex chat 01a11bec-ecd0-7182-9da9-5be4efdebb18，message 01a15424-8912-7912-9022-046ab5e448a3；Root 保存的实际原文，未做规范化。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "brain-explicit-task-kind-inference-20261019",
+        "requirement_id": "humanagent-explicit-brain-task-kind-inference",
+        "text": "1. 任务类型应该是显示大脑自己推理的结果，不是用户选择，这是 p1 的问题"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "1. 任务类型应该是显示大脑自己推理的结果，不是用户选择，这是 p1 的问题",
+          "role": "user",
+          "source": "Codex chat 01a11bec-ecd0-7182-9da9-5be4efdebb18，message 01a15424-8912-7912-9022-046ab5e448a3；Root 保存的实际原文，未做规范化。"
+        },
+        "requirement_id": "humanagent-explicit-brain-task-kind-inference",
+        "status": "active",
+        "text": "1. 任务类型应该是显示大脑自己推理的结果，不是用户选择，这是 p1 的问题",
+        "version": 1
+      },
+      "version": 17
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "2. 队列任务显示已完成，还有下一步，让人很困扰状态，并且下一步么有操作界面，这也很困扰",
+          "role": "user",
+          "source": "Codex chat 01a11bec-ecd0-7182-9da9-5be4efdebb18，message 01a15424-8912-7912-9022-046ab5e448a3；Root 保存的实际原文，未做规范化。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "task-list-truthful-result-action-boundary-20261019",
+        "requirement_id": "humanagent-task-list-truthful-result-and-action-boundary",
+        "text": "2. 队列任务显示已完成，还有下一步，让人很困扰状态，并且下一步么有操作界面，这也很困扰"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "2. 队列任务显示已完成，还有下一步，让人很困扰状态，并且下一步么有操作界面，这也很困扰",
+          "role": "user",
+          "source": "Codex chat 01a11bec-ecd0-7182-9da9-5be4efdebb18，message 01a15424-8912-7912-9022-046ab5e448a3；Root 保存的实际原文，未做规范化。"
+        },
+        "requirement_id": "humanagent-task-list-truthful-result-and-action-boundary",
+        "status": "active",
+        "text": "2. 队列任务显示已完成，还有下一步，让人很困扰状态，并且下一步么有操作界面，这也很困扰",
+        "version": 1
+      },
+      "version": 18
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "任务执行失败，并且执行任务状态很迷惑：\n\n1 一个任务下放，有两个任务生成，一个是等待决策，一个是受阻\n\n2. 等待决策点击去不是什么需要决策，是一堆显示，但是没有任何清晰呈现的等待的决策，用户 ux 极差\n\n整个 ux 没有满足最小必要性：是否显示的内容是必要的？是否用户路径都是必要的？同时也没有满足充分信息显示，没有把一个任务最小充分信息展示给用户",
+          "role": "user",
+          "source": "Codex chat 01a11bec-ecd0-7182-9da9-5be4efdebb18，message 01a1542b-e911-7ba0-b85a-a5dc73198d29；Root 保存的实际事故原文，未做规范化。"
+        },
+        "base_version": 1,
+        "operation": "replace",
+        "project_id": "humanagent",
+        "request_id": "human-readable-minimum-sufficient-incident-20261019",
+        "requirement_id": "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+        "text": "在这个基础上，你把 UX 部分重新画图，把显示部分按照人类可读优化：\n\n1. 不显示机械语言：需要根据语义显式\n2. 显示必须是按层次显式内容：当前层是干什么用，显式什么，是否必要，不必要的不显示。\n\n实际事故补充原文：\n任务执行失败，并且执行任务状态很迷惑：\n\n1 一个任务下放，有两个任务生成，一个是等待决策，一个是受阻\n\n2. 等待决策点击去不是什么需要决策，是一堆显示，但是没有任何清晰呈现的等待的决策，用户 ux 极差\n\n整个 ux 没有满足最小必要性：是否显示的内容是必要的？是否用户路径都是必要的？同时也没有满足充分信息显示，没有把一个任务最小充分信息展示给用户"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "任务执行失败，并且执行任务状态很迷惑：\n\n1 一个任务下放，有两个任务生成，一个是等待决策，一个是受阻\n\n2. 等待决策点击去不是什么需要决策，是一堆显示，但是没有任何清晰呈现的等待的决策，用户 ux 极差\n\n整个 ux 没有满足最小必要性：是否显示的内容是必要的？是否用户路径都是必要的？同时也没有满足充分信息显示，没有把一个任务最小充分信息展示给用户",
+          "role": "user",
+          "source": "Codex chat 01a11bec-ecd0-7182-9da9-5be4efdebb18，message 01a1542b-e911-7ba0-b85a-a5dc73198d29；Root 保存的实际事故原文，未做规范化。"
+        },
+        "requirement_id": "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+        "status": "active",
+        "text": "在这个基础上，你把 UX 部分重新画图，把显示部分按照人类可读优化：\n\n1. 不显示机械语言：需要根据语义显式\n2. 显示必须是按层次显式内容：当前层是干什么用，显式什么，是否必要，不必要的不显示。\n\n实际事故补充原文：\n任务执行失败，并且执行任务状态很迷惑：\n\n1 一个任务下放，有两个任务生成，一个是等待决策，一个是受阻\n\n2. 等待决策点击去不是什么需要决策，是一堆显示，但是没有任何清晰呈现的等待的决策，用户 ux 极差\n\n整个 ux 没有满足最小必要性：是否显示的内容是必要的？是否用户路径都是必要的？同时也没有满足充分信息显示，没有把一个任务最小充分信息展示给用户",
+        "version": 2
+      },
+      "version": 19
     }
   ],
   "project_id": "humanagent",
   "schema_version": 1,
-  "version": 16
+  "version": 19
 }

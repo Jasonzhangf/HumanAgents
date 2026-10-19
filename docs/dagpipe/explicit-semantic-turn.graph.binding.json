@@ -15,18 +15,19 @@
       "designNote": "装配显式交互轮次：写入当前原文 RawAsset，绑定 InteractionTurnIdentity、前序已提交语义检查点与 ExplicitTurnHelperSession；不伪造 Task 准入，也不向业务字段镜像控制真相。"
     },
     "route": {
-      "ownerPath": "packages/runtime/src/context/active-turn-materializer.ts",
-      "ownerRel": "packages/runtime/src/context/active-turn-materializer.ts",
+      "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
+      "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "plannedOwnerPath": "packages/runtime/src/explicit-brain/interaction-parent-turn-raw.ts",
-      "plannedOwnerStatus": "exists-unverified",
-      "designNote": "登记父规范请求并物化规范上下文：在外部 ProviderAgentDriver 请求迭代边界内经 registerRequest 与 requestContext(foldActiveTurn) 汇集前序语义检查点、当前原文与请求记录；外部迭代不在本 DAG 内构成环路。"
+      "contextMaterializerOwnerPath": "packages/runtime/src/context/active-turn-materializer.ts",
+      "contextMaterializerOwnerRel": "packages/runtime/src/context/active-turn-materializer.ts",
+      "interpreterOwnerSymbol": "createProviderExplicitBrainInterpreter",
+      "designNote": "既有 materializer 汇集前序检查点、当前原文与请求记录；实际 interpreter prompt/parser 在 packages/app/src/explicit-brain-runtime.ts 推理 requirement 的 taskFlow 与 structuredProposal.title。字段复用 TaskFlowBinding；没有可靠结果时保持缺省，不生成 unknown 伪分类。用户 selector、executionPolicy 或固定触发模式不得提供分类。"
     },
     "outcome": {
       "ownerPath": "packages/runtime/src/explicit-brain/index.ts",
       "ownerRel": "packages/runtime/src/explicit-brain/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "接纳父原始事实并区分派发返回与显式采纳：dispatch_helper 只产生物理 dispatch-accepted 与 returned；只有 accept_helper 才产生物理 owner-accepted 并追加 latestTurn；返回结论不自动采纳。"
+      "designNote": "接纳父原始事实并区分派发返回与显式采纳：dispatch_helper 只产生物理 dispatch-accepted 与 returned；只有 accept_helper 才产生物理 owner-accepted 并追加 latestTurn；返回结论不自动采纳。Requirement 结果把独立 title、完整 normalizedInput 与可选 taskFlow 交给既有 revision/envelope 保存；answer、clarification、status-query 不带任务分类。"
     },
     "history": {
       "ownerPath": "packages/runtime/src/context/interaction-semantic-context.ts",
@@ -34,7 +35,7 @@
       "implementationStatus": "pending-contract-and-runtime-validation",
       "plannedOwnerPath": "packages/adapters/jsonl/src/interaction-parent-turn-journal.ts",
       "plannedOwnerStatus": "exists-unverified",
-      "designNote": "语义历史只取前序已提交语义检查点；当前轮次完整上下文按原始资产单独物化。helper 使用独立上下文，历史与当前 raw 分离，无隐藏前次响应链。"
+      "designNote": "语义历史只取前序已提交语义检查点；当前轮次完整上下文按原始资产单独物化。typed taskFlow 与 title 随当前 revision/envelope 保存，不能改写前序 checkpoint、截断当前 directive 或用二次模型补造历史名称。helper 使用独立上下文。"
     },
     "return": {
       "ownerPath": "packages/app/src/explicit-brain-runtime.ts",

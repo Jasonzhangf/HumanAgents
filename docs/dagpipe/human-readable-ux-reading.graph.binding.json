@@ -17,25 +17,25 @@
       "ownerPath": "packages/context-events/src/index.ts",
       "ownerRel": "packages/context-events/src/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "复用共同语义与来源"
+      "designNote": "复用共同语义与来源，并把 business Task、真实 result/blocker 与 typed occurrence lineage 作为不同事实识别。不得用 title、ID 前缀或 lifecycle 文案推断关系。"
     },
     "purpose": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "按当前阅读用途组织展示投影；guidance、当前计划与已记录实际实例分开，不把角色名称、时间、成员、技术实例 ID、commit ref 或 registry 转成执行依赖或默认标签。"
+      "designNote": "列表按一个业务工作项组织，至少保留语义 title、真实阶段或结果与主要入口；guidance、当前计划、内部 child 与已记录实例在下一层分开读取。不把角色名称、时间、成员、技术实例 ID、commit ref 或 registry 转成默认标签。"
     },
     "necessary": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "仅保留当前必要内容与合法操作；unavailable/not-recorded、缺失关系、未归类事实与真实证据按需保留。"
+      "designNote": "删除重复、无内容、无用途字段；保留真实 result、blocker、unknown、恢复责任与有入口的 action。succeeded 不显示不存在的 stop，missing grant 不等同真实 decision，系统 blocked 不泛化成 waiting-for-answer。"
     },
     "present": {
       "ownerPath": "packages/ui/index.ts",
       "ownerRel": "packages/ui/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "共享控件人类可读呈现并按需展开"
+      "designNote": "共享控件按语义呈现一个业务工作项；详情入口进入完整 child/error/receipt/Observation 证据，不把内部实现细节堆回列表。"
     }
   }
 }

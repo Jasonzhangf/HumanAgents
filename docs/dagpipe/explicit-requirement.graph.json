@@ -1,8 +1,16 @@
 {
   "id": "humanagent-explicit-requirement",
-  "version": "3",
+  "version": "4",
   "meta": {
     "title": "用户新任务从可读草稿、修订、精确确认到单次最终提交并进入需求队列与执行计划",
+    "requirements_version": 19,
+    "requirements": [
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-explicit-brain-task-kind-inference",
+      "humanagent-task-list-truthful-result-and-action-boundary",
+      "humanagent-human-readable-semantic-layered-ux-and-necessary-display"
+    ],
     "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
     "designStatus": "candidate",
     "capabilityStatus": "partial",
@@ -14,7 +22,8 @@
     },
     "terminalContract": {
       "success": "requirement_processing_result",
-      "immediateDispatch": "真实 final receipt 按 requirementId/draftId/inputRevision/fifoSeq/payloadRef 匹配 FIFO，建立 TaskIdentity 后才进入独立 TaskGrant 准入；失败保留未确认消费责任",
+      "immediateDispatch": "仅没有 executionPolicy 的 requirement 使用既有立即执行 owner；真实 final receipt 按 requirementId/draftId/inputRevision/fifoSeq/payloadRef 匹配 FIFO，建立 business TaskIdentity 后进入独立 TaskGrant 准入。失败保留未确认消费责任。",
+      "policyDispatch": "有 executionPolicy 的 requirement，包括 once，只建立一个 business Task anchor，并把权威执行交给 occurrence 路径。该路径不得同时准备立即 FIFO business operation；后续 occurrence child 保持独立 Task/operation identity。",
       "runtimeIdentity": "AccessControl 稳定产品身份只提供 owner；不表示 session 或 grant；实际 allocation 经同一 coordinator release 原子准入",
       "failure": "draft revision or authorization failure returns explicit error and preserves input",
       "cancel": "rejected closure before dispatch; in-flight stop is separate",
@@ -29,8 +38,12 @@
     "productionWiringGap": "本图关键边已接线：confirmTypedExplicitRequirement 调用真实的 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）；端到端到点执行由 packages/app/src/ui-runtime/scheduler.ts 驱动。仍在的相邻事实（不阻断本图）：RequirementSubmissionOwner 的 RequirementSubmitPort.submit 仍是只回显 requirementId 的桩（service.ts:1007），执行计划落库不经该桩",
     "productionWiringOwner": "T14",
     "productionWiringEvidence": "packages/app/src/ui-runtime/service.ts:2819 submitFinal 与 :2972 SubscriptionControlPort.create；packages/runtime/src/explicit-brain/router.ts:617 RequirementSubmissionOwner.submitFinal/rejectDraftRevision；tests/app/scheduler-production-wiring.test.ts 经真实 HTTP 确认路径落成计划并到期执行",
-    "constraintFidelityContract": "用户确认的 goal、scope、constraints、deliverables 由服务层现有 canonical JSON 模板统一承载。同一 normalizedInput 必须从 typed revision 进入 RequirementEnvelope，再进入 Task.directive 与首次 executor 输入；Task.title 单独使用可读 goal。closed-turn Planner 读取同一 Task.directive，且计划节点、验收项与 decision 必须遵守其中 constraints/deliverables；提示词传达不证明模型实际合规。StageA 只准备图、真实 HTTP 反例与提示契约，不宣称 service 修复完成。",
-    "constraintFidelityOwner": "packages/app/src/ui-runtime/service.ts typed confirmation/template serializer/dispatch；packages/runtime/src/orchestration/closed-turn-planner-call.ts Planner output contract；tests/app/new-task-identity-public-consumer.test.ts public HTTP consumer"
+    "classificationTitleContract": "Requirement 的 taskFlow 来自显式 Brain 推理并复用现有 TaskFlowBinding；无法判定时缺省。structuredProposal.title 是独立的非空业务名称，不从用户 selector、executionPolicy、goal 前缀、截断文本或二次模型命名生成。确认表单不回写该分类。",
+    "executionOwnershipContract": "业务提交确认与执行授权是不同事实。有 executionPolicy 时只建立 business Task anchor，执行仅归 occurrence owner；无 executionPolicy 时沿用既有立即执行 owner。一个 requirement 不得同时产生 business prepared operation 与 occurrence prepared operation。每个实际执行 Task 仍读取精确 TaskGrant，父授权不自动继承。",
+    "lineageContract": "business TaskIdentity.source.requirementId、Subscription.goalId、已提交 occurrence claim/binding 是唯一层级来源；公开关系必须由这些 typed 字段建立，不按 title 或 ID 前缀猜测。无法建立关系的历史记录保留独立可读入口。",
+    "constraintFidelityContract": "用户确认的 goal、scope、constraints、deliverables 由服务层现有 canonical JSON 模板统一承载。同一 normalizedInput 必须从 typed revision 进入 RequirementEnvelope，再进入 Task.directive 与首次 executor 输入；Task.title 使用独立 structuredProposal.title，不得使用整段 JSON。closed-turn Planner 读取同一 Task.directive，且计划节点、验收项与 decision 必须遵守其中 constraints/deliverables；提示词传达不证明模型实际合规。",
+    "constraintFidelityOwner": "packages/app/src/ui-runtime/service.ts typed confirmation/template serializer/dispatch；packages/runtime/src/orchestration/closed-turn-planner-call.ts Planner output contract；tests/app/new-task-identity-public-consumer.test.ts public HTTP consumer",
+    "p0Status": "本版只冻结需求和 DAG 责任。P1/P2 必须实现 typed taskFlow/title 传播、唯一执行 owner、prepared lineage 与精确 TaskGrant admission；当前实现仍为 partial/UNVERIFIED。"
   },
   "inputs": [
     {
