@@ -20,6 +20,10 @@ import {
   type ProviderSettlement,
   type OccurrenceExecutionOwner,
   type RequirementIntent,
+  type TaskFlowBinding,
+  type TaskFlowKind,
+  TASK_FLOW_DEFINITION_VERSION,
+  TASK_FLOW_KINDS,
 } from '../../contracts/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
@@ -135,6 +139,7 @@ export type ExplicitBrainInterpretation =
       readonly matchedTaskId?: string;
       readonly knownFacts: readonly string[];
       readonly intent: RequirementIntent;
+      readonly taskFlow?: TaskFlowBinding;
       readonly proposal: string;
       readonly structuredProposal: StructuredRequirementProposal;
       readonly decisionRefs: readonly string[];
@@ -215,6 +220,7 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
     'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
     'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
+    'For requirement, choose taskFlowKind from semantic task shape only: one-shot for one bounded deliverable, inspection for recurring check-and-report work, and long-running for an open-ended goal requiring continued turns. Omit taskFlowKind when uncertain.',
     'Submitting the new-task form is already the user confirmation. For proposal.intent=create, do not write a second-confirmation blocker into objective, deliveryConditions, or blockingGaps.',
     'Do not choose a task execution owner, worker, provider, or runtime in the intake decision.',
     'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
@@ -239,6 +245,17 @@ function stringArray(record: Record<string, unknown>, field: string): readonly s
     throw new ExplicitBrainOperationalToolError('unsupported-tool', `requirement proposal ${field} must be a string array`);
   }
   return value;
+}
+
+function parseTaskFlowKind(value: unknown): TaskFlowKind | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !TASK_FLOW_KINDS.includes(value as TaskFlowKind)) {
+    throw new ExplicitBrainOperationalToolError(
+      'unsupported-tool',
+      'taskFlowKind must be one of one-shot, inspection, or long-running',
+    );
+  }
+  return value as TaskFlowKind;
 }
 
 function parseStructuredRequirementProposal(
@@ -351,12 +368,16 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
   if (record.intent !== undefined) {
     throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement decision cannot duplicate proposal intent');
   }
+  const taskFlowKind = parseTaskFlowKind(record.taskFlowKind);
   const proposal = parseStructuredRequirementProposal(record.proposal, input.inputRevision);
   return {
     kind,
     ...common,
     ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
     intent: proposal.intent,
+    ...(taskFlowKind === undefined
+      ? {}
+      : { taskFlow: { kind: taskFlowKind, definitionVersion: TASK_FLOW_DEFINITION_VERSION } }),
     proposal: renderBusinessProposal(proposal),
     structuredProposal: proposal,
   };

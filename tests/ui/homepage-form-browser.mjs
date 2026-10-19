@@ -255,6 +255,7 @@ function probeForm() {
   return {
     hasForm: Boolean(form),
     fields,
+    taskFlowKindSelectorCount: form?.querySelectorAll('select[name="taskFlowKind"]').length ?? 0,
     visibleControls: controls.filter(isRendered).map((control) => control.name || 'button'),
     visibleSchedulingFields: Object.keys(fields).filter((name) => fields[name].visible),
     submitLabel: form?.querySelector('button[type="submit"]')?.textContent?.trim() ?? null,
@@ -365,9 +366,10 @@ async function visibilityScenario() {
     const once = await page.evaluate(probeForm);
     await capture(page, 'default-once');
     observe('default once form', once);
-    check('default form renders the task input, task type, execution type and submit only',
+    check('default form renders the task input, execution type and submit only',
       once.hasForm
-      && JSON.stringify(once.visibleControls) === JSON.stringify(['rawInput', 'taskFlowKind', 'executionMode', 'button']),
+      && once.taskFlowKindSelectorCount === 0
+      && JSON.stringify(once.visibleControls) === JSON.stringify(['rawInput', 'executionMode', 'button']),
       once.visibleControls);
     check('default once form renders no scheduling field', once.visibleSchedulingFields.length === 0, once.visibleSchedulingFields);
     for (const name of SCHEDULING_FIELDS) {
@@ -430,7 +432,8 @@ async function visibilityScenario() {
     observe('once form after mode switch', backToOnce);
     check('switching back to once hides every scheduling field and keeps the core controls',
       backToOnce.visibleSchedulingFields.length === 0
-      && JSON.stringify(backToOnce.visibleControls) === JSON.stringify(['rawInput', 'taskFlowKind', 'executionMode', 'button']),
+      && backToOnce.taskFlowKindSelectorCount === 0
+      && JSON.stringify(backToOnce.visibleControls) === JSON.stringify(['rawInput', 'executionMode', 'button']),
       backToOnce);
     check('switching back to once drops the hidden required flags',
       SCHEDULING_FIELDS.every((name) => backToOnce.fields[name].required === false),

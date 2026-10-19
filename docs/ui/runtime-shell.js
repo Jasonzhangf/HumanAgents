@@ -389,6 +389,73 @@ function renderScopedFailures(failures, emptyText) {
   return panel
 }
 
+function publishedOutputText(publicOutput) {
+  const commits = publicOutput?.commits
+  if (!Array.isArray(commits)) return ''
+  for (let index = commits.length - 1; index >= 0; index -= 1) {
+    const text = commits[index]?.text
+    if (typeof text === 'string' && text.trim() !== '') return text
+  }
+  return ''
+}
+
+/**
+ * The list row reports only facts the row itself carries. A terminal row shows
+ * its committed result when one exists; otherwise the row's existing task
+ * link is the result/detail entry. It never appends a required nextStep or
+ * advertises a control that the row did not receive.
+ */
+export function taskRowTitle(task) {
+  return typeof task?.semanticTitle === 'string' && task.semanticTitle.trim() !== ''
+    ? task.semanticTitle
+    : '未整理名称的任务'
+}
+
+export function taskFlowText(taskFlow) {
+  return { 'one-shot': '单次任务', inspection: '巡检任务', 'long-running': '长程任务' }[taskFlow?.kind] || ''
+}
+
+export function taskExecutionHref(child, control = false) {
+  if (control && !child.controlTarget) return undefined
+  const scope = child.controlTarget ? { kind: 'task', ...child.controlTarget } : undefined
+  return control ? taskControlHref(child.taskId, scope) : taskDashboardHref(child.taskId, scope)
+}
+
+export function renderTaskExecutions(task) {
+  if (!task.executions?.length) return null
+  const details = element('details', undefined, 'section')
+  details.append(element('summary', `执行记录（${task.executions.length}）`))
+  for (const child of task.executions) {
+    const record = element('div', undefined, 'stack')
+    const read = element('a', `查看执行记录 · ${child.stateLabel || child.currentState}`, 'button button--sm')
+    read.href = taskExecutionHref(child)
+    record.append(element('p', taskRowStateText(child)), read)
+    if (child.controlTarget) {
+      const control = element('a', '管理此执行', 'button button--sm')
+      control.href = taskExecutionHref(child, true)
+      record.append(control)
+    }
+    details.append(record)
+  }
+  return details
+}
+
+export function taskRowStateText(task) {
+  const state = task?.currentState || task?.stateLabel || task?.state || ''
+  if (!task) return state
+  const facts = task.executions?.find((child) => taskIdValue(child.taskId) === taskIdValue(task.currentExecutionTaskId)) || task
+  if (facts.error) return [state, facts.error.message].filter(Boolean).join(' · ')
+  const committed = publishedOutputText(facts.publicOutput)
+  if (committed) return [state, '查看已提交结果'].filter(Boolean).join(' · ')
+  if (typeof facts.output === 'string' && facts.output.trim() !== '') {
+    return [state, '查看结果'].filter(Boolean).join(' · ')
+  }
+  if (['succeeded', 'failed', 'stopped', 'cancelled', 'blocked'].includes(facts.state)) {
+    return [state, '查看任务详情'].filter(Boolean).join(' · ')
+  }
+  return state
+}
+
 function renderTaskReadRow(row, options = {}) {
   const task = row.task
   const item = element('div', undefined, 'task-item')
@@ -396,20 +463,24 @@ function renderTaskReadRow(row, options = {}) {
   link.href = taskDashboardHref(row.scope.taskId, row.scope)
   link.dataset.taskScope = JSON.stringify(row.scope)
   link.append(
-    element('h3', task.title || '未命名任务'),
-    element('p', `${task.currentState || task.state || ''} · ${task.nextStep || ''}`),
+    element('h3', taskRowTitle(task)),
+    element('p', taskRowStateText(task)),
   )
   const meta = element('div', undefined, 'task-item-meta')
   const state = element('span', task.stateLabel || task.state || '', 'task-state-pill')
-  state.dataset.tone = stateTone(task.state)
+  state.dataset.tone = stateTone(task.executionState || task.state)
   meta.append(
     state,
     element('span', row.basis === 'live-runtime' ? '当前实例' : '持久历史', 'scope-basis'),
     element('time', formatTime(task.updatedAt)),
   )
+  const taskType = taskFlowText(task.taskFlow)
+  if (taskType) meta.append(element('span', taskType))
   if (options.reasonLabel) meta.append(element('span', options.reasonLabel, 'task-flow-reason'))
   link.append(meta)
   item.append(link)
+  const executions = renderTaskExecutions(task)
+  if (executions) item.append(executions)
   return item
 }
 

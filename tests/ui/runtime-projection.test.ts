@@ -6,6 +6,7 @@ import {
   type TaskAgentActivityOwnershipRecord,
   type TaskAgentActivitySelectionOutcome,
   type TaskExecutionInstanceIdentity,
+  type TaskId,
 } from '@humanagent/contracts';
 import {
   projectPipelineObservation,
@@ -19,6 +20,7 @@ import { UiProjectionError, type UiDataSource } from '../../packages/ui/contract
 import {
   RuntimeProjectionError,
   type RuntimeReadScope,
+  type RuntimeTaskRowProjection,
 } from '../../packages/ui/contracts/runtime.js';
 import {
   projectRuntimeBusinessCycle,
@@ -160,6 +162,128 @@ test('runtime task list classifies every task into a visible projection group', 
   assert.deepEqual(list.counts, { running: 1, waiting: 0, completed: 1, stopped: 1, draft: 1, failed: 1, total: 5 });
 });
 
+type GroupedRuntimeTaskRow = RuntimeTaskRowProjection & {
+  readonly executionState?: string;
+  readonly currentExecutionTaskId?: TaskId;
+  readonly semanticTitle?: string;
+  readonly executionLineage?: {
+    readonly parentTaskId: TaskId;
+    readonly subscriptionId: string;
+    readonly occurrenceId: string;
+  };
+  readonly controlTarget?: { readonly projectKey: string; readonly mode: 'fake' | 'rcc' };
+  readonly executions?: readonly RuntimeTaskRowProjection[];
+};
+
+test('runtime task list groups only exact committed lineage under one visible work item', () => {
+  const parentTaskId = id('task', 'task-lineage-parent');
+  const childTaskId = id('task', 'task-lineage-child');
+  const missingParentTaskId = id('task', 'task-lineage-missing-parent');
+  const parent = {
+    ...runtimeTask('created', 21),
+    taskId: parentTaskId,
+    title: '原始父任务全文',
+    semanticTitle: '父任务语义标题',
+    controlTarget: { projectKey: 'project-parent-scope', mode: 'fake' as const },
+    output: 'parent progress',
+  };
+  const child = {
+    ...runtimeTask('succeeded', 22),
+    taskId: childTaskId,
+    title: '独立子任务标题',
+    semanticTitle: '子任务语义标题',
+    executionLineage: {
+      parentTaskId,
+      subscriptionId: 'subscription-child-1',
+      occurrenceId: 'occurrence-child-1',
+    },
+    controlTarget: { projectKey: 'project-child-scope', mode: 'rcc' as const },
+    allowedActions: ['start', 'view-records'],
+    output: 'child committed result',
+    publicOutput: {
+      state: 'committed' as const,
+      commits: [{
+        commitId: 'child-output-1', journalSeq: 1, recordDigest: 'child-digest-1', text: 'child committed result',
+      }],
+    },
+    error: {
+      code: 'child.retained', ownerId: 'runtime', message: 'retained child fact',
+      retryable: false, nextAction: 'recover child',
+    },
+    checkpoint: { checkpointId: 'child-cp-1', seq: 3, outcome: 'succeeded', summary: 'child closed' },
+  };
+  const orphan = {
+    ...runtimeTask('failed', 23),
+    state: 'waiting' as const,
+    taskId: id('task', 'task-lineage-orphan'),
+    title: '无匹配父任务的历史子任务',
+    executionLineage: {
+      parentTaskId: missingParentTaskId,
+      subscriptionId: 'subscription-orphan-1',
+      occurrenceId: 'occurrence-orphan-1',
+    },
+    controlTarget: { projectKey: 'project-orphan-scope', mode: 'fake' as const },
+    allowedActions: ['view-records'],
+    output: 'orphan history remains readable',
+  };
+  const prefixDecoy = {
+    ...runtimeTask('succeeded', 24),
+    taskId: id('task', 'task-lineage-prefix-decoy'),
+    title: '原始父任务全文 的另一个任务',
+  };
+  const tasks = [parent, child, orphan, prefixDecoy];
+
+  const list = projectRuntimeTaskList({ mode: 'fake', tasks });
+
+  assert.deepEqual(list.running.map((row) => row.taskId.value), []);
+  assert.deepEqual(list.waiting.map((row) => row.taskId.value), ['task-lineage-orphan']);
+  assert.deepEqual(list.completed.map((row) => row.taskId.value), ['task-lineage-parent', 'task-lineage-prefix-decoy']);
+
+  const parentRow = list.completed[0] as GroupedRuntimeTaskRow;
+  assert.equal(parentRow.state, 'created');
+  assert.equal(parentRow.stateLabel, '执行已完成');
+  assert.equal(parentRow.executionState, 'succeeded');
+  assert.equal(parentRow.currentExecutionTaskId?.value, childTaskId.value);
+  assert.equal(parentRow.semanticTitle, '父任务语义标题');
+  assert.equal(parentRow.title, '原始父任务全文');
+  assert.equal(parentRow.controlTarget?.projectKey, 'project-parent-scope');
+  assert.equal(parentRow.executions?.length, 1);
+  const childRow = parentRow.executions?.[0] as GroupedRuntimeTaskRow;
+  assert.equal(childRow.taskId.value, 'task-lineage-child');
+  assert.equal(childRow.controlTarget?.projectKey, 'project-child-scope');
+  assert.equal(childRow.controlTarget?.mode, 'rcc');
+  assert.deepEqual(childRow.executionLineage, child.executionLineage);
+  assert.deepEqual(childRow.allowedActions, ['start', 'view-records']);
+  assert.equal(childRow.output, 'child committed result');
+  assert.equal(childRow.publicOutput?.commits[0]?.text, 'child committed result');
+  assert.equal(childRow.error?.code, 'child.retained');
+  assert.equal(childRow.checkpoint?.checkpointId, 'child-cp-1');
+
+  assert.equal(list.waiting[0]?.controlTarget?.projectKey, 'project-orphan-scope');
+  assert.equal(list.waiting[0]?.output, 'orphan history remains readable');
+  assert.deepEqual(list.counts, {
+    running: 0, waiting: 1, completed: 2, stopped: 0, draft: 0, failed: 0, total: 3,
+  });
+  assert.equal(tasks.length, 4);
+  const dashboard = projectRuntimeDashboard({ mode: 'fake', tasks, recentInputs: [] });
+  assert.equal(dashboard.taskCount, 3);
+  for (const state of ['running', 'blocked', 'succeeded'] as const) {
+    const stageChild = { ...child, state, currentState: `child-${state}` };
+    const stageList = projectRuntimeTaskList({ mode: 'fake', tasks: [parent, stageChild] });
+    const group = state === 'running' ? stageList.running : state === 'blocked' ? stageList.waiting : stageList.completed;
+    assert.equal(group[0]?.taskId.value, parentTaskId.value);
+    assert.equal(group[0]?.state, 'created');
+    assert.equal(group[0]?.currentState.includes(`child-${state}`), true);
+    assert.equal(group[0]?.executions?.[0]?.taskId.value, childTaskId.value);
+    assert.equal(stageList.counts.total, 1);
+  }
+  assert.deepEqual(child.executionLineage, {
+    parentTaskId,
+    subscriptionId: 'subscription-child-1',
+    occurrenceId: 'occurrence-child-1',
+  });
+});
+
 test('runtime task rows retain existing terminal actions and result facts', () => {
   const completed = {
     ...runtimeTask('succeeded', 9),
@@ -280,7 +404,6 @@ test('runtime dashboard only reports hasRunning for execution-active tasks', () 
   });
   assert.equal(dashboard.hasRunning, false);
   assert.equal(dashboard.taskCount, 1);
-  assert.equal(dashboard.waitingDecisionCount, 0);
 });
 
 test('observation projection groups nodes into stable agent frames and ordered tool steps', () => {
@@ -628,7 +751,7 @@ test('runtime dashboard refuses to derive no-activity from an unusable silence b
   assert.equal(/silence budget/.test(liveness.reason), true, liveness.reason);
 });
 
-test('runtime dashboard keeps failure and waiting-for-answer as explicit liveness states', () => {
+test('runtime dashboard keeps failure explicit without inventing a human decision', () => {
   const failed = livenessOf(livenessTask('failed', livenessFacts({
     active: false,
     observedAt: '2026-10-06T12:00:10.000Z',
@@ -643,11 +766,28 @@ test('runtime dashboard keeps failure and waiting-for-answer as explicit livenes
   }));
   assert.equal(failed.state, 'failed');
 
-  const waiting = livenessOf(livenessTask('waiting', livenessFacts({ active: false })));
-  assert.equal(waiting.state, 'waiting-for-answer');
+  // Observed incident: lifecycle waiting/blocked rows were labeled as human
+  // decisions although the projection received no question, options, or action.
+  // That false claim could send the user looking for a decision that did not
+  // exist. Reuse the existing liveness projection instead of adding a DTO.
+  const waitingTask = livenessTask('waiting', livenessFacts({ active: false }));
+  const waitingDashboard = projectRuntimeTaskDashboard(waitingTask, 'fake');
+  assert.equal(waitingDashboard.stateLabel, '等待中');
+  assert.equal(waitingDashboard.liveness?.state, 'idle');
+  assert.equal(/decision/.test(waitingDashboard.liveness?.reason ?? ''), false);
 
-  const blocked = livenessOf(livenessTask('blocked', livenessFacts({ active: false })));
-  assert.equal(blocked.state, 'waiting-for-answer');
+  const blockedTask = livenessTask('blocked', livenessFacts({ active: false }));
+  const blockedDashboard = projectRuntimeTaskDashboard(blockedTask, 'fake');
+  assert.equal(blockedDashboard.stateLabel, '受阻');
+  assert.equal(blockedDashboard.liveness?.state, 'idle');
+  assert.equal(/decision/.test(blockedDashboard.liveness?.reason ?? ''), false);
+
+  const dashboard = projectRuntimeDashboard({
+    mode: 'fake',
+    tasks: [waitingTask, blockedTask],
+    recentInputs: [],
+  });
+  assert.equal('waitingDecisionCount' in dashboard, false);
 });
 
 test('runtime dashboard reports idle instead of a liveness claim when nothing is executing', () => {

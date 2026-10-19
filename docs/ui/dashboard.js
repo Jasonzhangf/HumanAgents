@@ -8,6 +8,10 @@ import {
   renderSystemRead,
   renderPageError,
   renderRuntimeStatus,
+  renderTaskExecutions,
+  taskRowStateText,
+  taskRowTitle,
+  taskFlowText,
   taskDashboardHref,
 } from './runtime-shell.js'
 import {
@@ -199,14 +203,16 @@ function taskRow(row) {
   const link = element('a', undefined, 'task-item-main')
   link.href = taskDashboardHref(row.taskId.value)
   link.append(
-    element('h3', row.title || '未命名任务'),
-    element('p', `${row.currentState || row.state || ''} · ${row.nextStep || ''}`),
+    element('h3', taskRowTitle(row)),
+    element('p', taskRowStateText(row)),
   )
   const meta = element('div', undefined, 'task-item-meta')
   meta.append(
     element('span', row.stateLabel || row.state || '', 'task-state-pill'),
     element('time', formatTime(row.updatedAt)),
   )
+  const taskType = taskFlowText(row.taskFlow)
+  if (taskType) meta.append(element('span', taskType))
   link.append(meta)
   const actions = element('div', undefined, 'task-item-actions')
   actions.append(
@@ -214,6 +220,8 @@ function taskRow(row) {
     actionButton('删除', true, (btn) => runDelete(row, btn)),
   )
   item.append(link, actions)
+  const executions = renderTaskExecutions(row)
+  if (executions) item.append(executions)
   return item
 }
 
@@ -319,8 +327,14 @@ function renderTaskLists(dashboard, tasks) {
       title: f.taskTitle || '失败任务',
       state: 'failed',
       stateLabel: '失败',
-      currentState: f.code || 'failed',
-      nextStep: f.nextAction || '',
+      currentState: '执行失败',
+      error: {
+        code: f.code,
+        ownerId: f.ownerId,
+        message: f.message,
+        retryable: false,
+        nextAction: f.nextAction,
+      },
       updatedAt: f.occurredAt,
     })), '暂无失败记录。'),
   )

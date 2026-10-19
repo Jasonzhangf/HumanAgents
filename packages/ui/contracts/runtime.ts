@@ -226,7 +226,6 @@ export interface RuntimeDashboardProjection {
   readonly mode: RuntimeMode;
   readonly hasRunning: boolean;
   readonly taskCount: number;
-  readonly waitingDecisionCount: number;
   readonly recentInputs: readonly RuntimeRecentInputProjection[];
   readonly recentOutputs: readonly RuntimeRecentOutputProjection[];
   readonly recentFailures: readonly RuntimeRecentFailureProjection[];
@@ -235,6 +234,32 @@ export interface RuntimeDashboardProjection {
 export interface RuntimeTaskRowProjection {
   readonly taskId: TaskId;
   readonly title: string;
+  /**
+   * App-derived committed `TaskIdentityRecord.title` only. Present when an
+   * exact committed semantic name exists; absent for legacy rows. `title`
+   * stays the full original task title for detail reads.
+   */
+  readonly semanticTitle?: string;
+  /**
+   * Exact committed execution lineage of a child Task. The app supplies it
+   * only from the committed identity source and occurrence binding; the UI
+   * never infers it from titles, IDs, or query guesses.
+   */
+  readonly executionLineage?: RuntimeTaskExecutionLineage;
+  /**
+   * Navigation scope only, paired with this row's exact task ID. It is never
+   * permission evidence or a grant inherited from a parent row.
+   */
+  readonly controlTarget?: RuntimeTaskControlTarget;
+  /**
+   * Read-only children grouped under this business work item. Present only
+   * when the list projection matched explicit committed lineage; the child
+   * row still carries its own full row, history, and control target.
+   */
+  readonly executions?: readonly RuntimeTaskRowProjection[];
+  /** Actual selected child stage; the original parent state below is retained. */
+  readonly executionState?: LifecycleState;
+  readonly currentExecutionTaskId?: TaskId;
   readonly state: LifecycleState;
   readonly stateLabel: string;
   readonly taskFlow?: TaskFlowBinding;
@@ -257,6 +282,17 @@ export interface RuntimeTaskRowProjection {
   readonly error?: RuntimeTaskErrorProjection;
   readonly checkpoint?: RuntimeTaskCheckpointProjection;
   readonly entry: 'task-dashboard';
+}
+
+export interface RuntimeTaskExecutionLineage {
+  readonly parentTaskId: TaskId;
+  readonly subscriptionId: string;
+  readonly occurrenceId: string;
+}
+
+export interface RuntimeTaskControlTarget {
+  readonly projectKey: string;
+  readonly mode: 'fake' | 'rcc';
 }
 
 export interface RuntimeTaskListProjection {
