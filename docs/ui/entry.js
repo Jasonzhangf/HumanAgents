@@ -11,6 +11,7 @@ import {
   renderRuntimeStatus,
   stateTone,
   taskRowStateText,
+  taskRowTitle,
   taskDashboardHref,
   technicalDetailTrigger,
 } from './runtime-shell.js'
@@ -229,7 +230,7 @@ function renderStatus(summary, rows) {
     const link = element('a', undefined, 'task-row-link')
     link.href = taskDashboardHref(row.taskId.value)
     const copy = element('div')
-    copy.append(element('h3', row.title))
+    copy.append(element('h3', taskRowTitle(row)))
     copy.append(element('p', taskRowStateText(row)))
     const stateChip = element('span', row.stateLabel, 'state-chip')
     stateChip.dataset.tone = stateTone(row.state)

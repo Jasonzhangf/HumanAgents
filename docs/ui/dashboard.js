@@ -9,6 +9,7 @@ import {
   renderPageError,
   renderRuntimeStatus,
   taskRowStateText,
+  taskRowTitle,
   taskDashboardHref,
 } from './runtime-shell.js'
 import {
@@ -200,7 +201,7 @@ function taskRow(row) {
   const link = element('a', undefined, 'task-item-main')
   link.href = taskDashboardHref(row.taskId.value)
   link.append(
-    element('h3', row.title || '未命名任务'),
+    element('h3', taskRowTitle(row)),
     element('p', taskRowStateText(row)),
   )
   const meta = element('div', undefined, 'task-item-meta')
@@ -320,7 +321,7 @@ function renderTaskLists(dashboard, tasks) {
       title: f.taskTitle || '失败任务',
       state: 'failed',
       stateLabel: '失败',
-      currentState: f.code || 'failed',
+      currentState: '执行失败',
       error: {
         code: f.code,
         ownerId: f.ownerId,

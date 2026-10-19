@@ -405,14 +405,20 @@ function publishedOutputText(publicOutput) {
  * link is the result/detail entry. It never appends a required nextStep or
  * advertises a control that the row did not receive.
  */
+export function taskRowTitle(task) {
+  return typeof task?.semanticTitle === 'string' && task.semanticTitle.trim() !== ''
+    ? task.semanticTitle
+    : '未整理名称的任务'
+}
+
 export function taskRowStateText(task) {
   const state = task?.currentState || task?.stateLabel || task?.state || ''
   if (!task) return state
   if (task.error) return [state, task.error.message].filter(Boolean).join(' · ')
   const committed = publishedOutputText(task.publicOutput)
-  if (committed) return [state, committed].filter(Boolean).join(' · ')
+  if (committed) return [state, '查看已提交结果'].filter(Boolean).join(' · ')
   if (typeof task.output === 'string' && task.output.trim() !== '') {
-    return [state, task.output].filter(Boolean).join(' · ')
+    return [state, '查看结果'].filter(Boolean).join(' · ')
   }
   if (['succeeded', 'failed', 'stopped', 'cancelled', 'blocked'].includes(task.state)) {
     return [state, '查看任务详情'].filter(Boolean).join(' · ')
@@ -427,7 +433,7 @@ function renderTaskReadRow(row, options = {}) {
   link.href = taskDashboardHref(row.scope.taskId, row.scope)
   link.dataset.taskScope = JSON.stringify(row.scope)
   link.append(
-    element('h3', task.title || '未命名任务'),
+    element('h3', taskRowTitle(task)),
     element('p', taskRowStateText(task)),
   )
   const meta = element('div', undefined, 'task-item-meta')
