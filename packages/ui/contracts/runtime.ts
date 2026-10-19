@@ -510,6 +510,7 @@ export interface RuntimeTaskDashboardProjection {
   readonly mode: RuntimeMode;
   readonly taskId: TaskId;
   readonly taskTitle: string;
+  readonly semanticTitle?: string;
   readonly state: LifecycleState;
   readonly stateLabel: string;
   readonly currentNode: string;

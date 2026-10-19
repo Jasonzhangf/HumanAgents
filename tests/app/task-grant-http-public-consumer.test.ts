@@ -673,6 +673,11 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
       assert.equal(parentRead.status, 200);
       assert.equal(((await parentRead.json()) as { plan?: { subscriptionId: string } }).plan?.subscriptionId,
         schedulerBeforeGrant.plans[0]?.subscriptionId, 'the business anchor keeps its actual committed plan after FIFO acknowledgement');
+      const childRead = await fetch(`${active.runtime.server.url}/api/tasks/${resolvedChildTaskId}/dashboard?${new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc' })}`, { headers: { cookie } });
+      assert.equal(childRead.status, 200);
+      const childDashboard = await childRead.json() as { semanticTitle?: string; taskTitle: string };
+      assert.equal(childDashboard.semanticTitle, 'HTTP grant task');
+      assert.equal(childDashboard.taskTitle, `计划执行 ${occurrenceId}`, 'the original child title remains available as source data');
       const childGrant = async (body?: unknown) => {
         const url = `${active.runtime.server.url}/api/tasks/${resolvedChildTaskId}/control/grant?${new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc' })}`;
         const response = await fetch(url, {

@@ -3487,11 +3487,13 @@ export class UiRuntimeService {
     const dashboard = this.taskDashboard(taskId);
     const plan = await this.executionPlanForTask(taskId);
     const publicOutput = await this.authoritativePublicOutputForTask(taskId);
+    const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
     // Re-run the same pure dashboard projection with the authoritative
     // publication so the output/narrative are computed from committed records.
     const withPublication = publicOutput === undefined ? dashboard : this.taskDashboard(taskId, publicOutput);
     return {
       ...withPublication,
+      ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
       ...(plan === undefined ? {} : { plan }),
       taskPlanHistory: await this.boundTaskPlanHistory(taskId),
       agentActivity: await this.taskAgentActivityFor(this.boundProjectSource(), this.mode, taskId, agentSelection),
@@ -4198,10 +4200,14 @@ export class UiRuntimeService {
       if (inventory.failures.length > 0) return { ok: false, failure: inventory.failures[0]! };
       return { ok: false, failure: unknownTaskFailure(taskId, projectKey, mode) };
     }
+    const identities = await this.scopeCommittedIdentities(source, mode);
+    if (identities.failure !== undefined) return { ok: false, failure: identities.failure };
+    const identity = identities.byTaskId.get(taskId.value);
     return {
       ok: true,
       value: {
         ...runtimeTaskDashboard(entry.snapshot, mode),
+        ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
         taskPlanHistory: await this.taskPlanHistoryFor(source, mode, taskId),
         agentActivity: await this.taskAgentActivityFor(source, mode, taskId, agentSelection),
       },

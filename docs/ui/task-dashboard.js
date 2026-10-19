@@ -25,6 +25,7 @@ import {
   taskControlHref,
   taskIdFromQuery,
   taskReadScopeFromQuery,
+  taskRowTitle,
 } from './runtime-shell.js'
 import {
   sameCheckpointAssetBodyAddress,
@@ -2164,14 +2165,17 @@ function renderDashboard() {
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div', undefined, 'page-heading-copy')
   const titleBlock = element('div', undefined, 'task-title-block')
-  titleBlock.append(element('h1', dashboard.taskTitle, 'task-title task-title-current'))
+  titleBlock.append(element('h1', taskRowTitle(dashboard), 'task-title task-title-current'))
   const fullBrief = element('button', '查看完整任务说明', 'button button--quiet')
   fullBrief.type = 'button'
-  fullBrief.addEventListener('click', () => openTechnicalDetail({
-    title: '任务说明',
-    eyebrow: '任务说明',
-    content: renderTaskDescriptionContent({ input: dashboard.input }),
-  }))
+  fullBrief.addEventListener('click', () => {
+    const content = element('div')
+    if (dashboard.taskTitle && dashboard.taskTitle !== taskRowTitle(dashboard) && dashboard.taskTitle !== dashboard.input) {
+      content.append(element('h3', '原始任务名称'), element('p', dashboard.taskTitle, 'business-output-text'))
+    }
+    content.append(renderTaskDescriptionContent({ input: dashboard.input }))
+    openTechnicalDetail({ title: '任务说明', eyebrow: '任务说明', content })
+  })
   titleBlock.append(fullBrief)
   copy.append(element('p', '当前任务', 'eyebrow'), titleBlock)
   const stateChip = element('span', businessStateLabel(), 'state-chip')

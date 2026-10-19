@@ -558,6 +558,7 @@ export function projectRuntimeTaskDashboard(
     mode,
     taskId: source.taskId,
     taskTitle: source.title,
+    ...(source.semanticTitle === undefined ? {} : { semanticTitle: source.semanticTitle }),
     state: source.state,
     stateLabel: stateLabel(source.state),
     currentNode: source.currentNode,
