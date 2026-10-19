@@ -484,7 +484,7 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
         executionState: execution.state,
         currentExecutionTaskId: execution.taskId,
         stateLabel: `执行${execution.stateLabel}`,
-        currentState: [`当前执行：${execution.currentState}`, execution.error?.message].filter(Boolean).join(' · '),
+        currentState: `当前执行：${execution.currentState}`,
       };
     });
   const stage = (row: RuntimeTaskRowProjection) => currentExecution(row)?.state ?? row.state;

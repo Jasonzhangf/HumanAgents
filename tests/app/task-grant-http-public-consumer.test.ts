@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import {
   ensureControlLayout,
   resolveRuntimePaths,
+  listConfiguredProjects,
   type AgentRole,
   type EffectiveAgentProviderBinding,
 } from '../../packages/config/src/index.js';
@@ -32,6 +33,7 @@ import { FileCheckpointStore, FakeReplayExecutionRuntimePort, UiRuntimeJournal, 
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { UiTaskGrantControl, TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY, type TaskGrantControlReceipt } from '../../packages/app/src/ui-runtime/task-control.js';
+import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
 
 test('scoped task control rejects a different bound target before grant or release', async () => {
   const base = join(homedir(), '.humanagent', 'test-fixtures');
@@ -480,11 +482,19 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
   let posts = 0;
   let factories = 0;
   let passed = false;
+  const schedulerWorkspace = join(root, 'scheduler-workspace');
+  await mkdir(schedulerWorkspace, { recursive: true });
+  const schedulerPaths = await resolveRuntimePaths({
+    controlRoot: join(root, 'scheduler-control'),
+    workspace: schedulerWorkspace,
+  });
+  await ensureControlLayout(schedulerPaths);
+  const schedulerLease = await acquireDaemonLease(schedulerPaths, { ownerId: `${label}-native-occurrence` });
   let onPost!: () => void;
   const posted = new Promise<void>((resolve) => { onPost = resolve; });
   let finish!: () => void;
   const proceed = new Promise<void>((resolve) => { finish = resolve; });
-  const controlJournal = new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(root, 'rcc')));
+  const controlJournal = new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(schedulerPaths.checkpointsRoot, 'rcc')));
   const provider = createServer((request, response) => {
     void (async () => {
       if (request.method !== 'POST') {
@@ -558,9 +568,13 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
       });
       const accessControl = await AccessControlService.open({ credentialPath: join(root, 'web-access.json'), create: true });
       const nextRuntime = await startUiRuntime({ mode: 'rcc', organId: id('organ', 'grant-prepared'), accessControl,
-        binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: join(root, 'ui-runtime'), productRoot: root,
+        binding: launch.binding, port: launch.port, providerSource: launch.source,
+        checkpointRoot: join(schedulerPaths.checkpointsRoot, 'ui-runtime'), productRoot: root,
+        runtimePaths: schedulerPaths, projectKey: schedulerPaths.projectKey,
         evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
-        memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'grant-http', roleId: 'execution' },
+        memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: schedulerPaths.projectKey, roleId: 'execution' },
+        lease: () => schedulerLease,
+        schedulerIntervalMs: 10,
         explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
           normalizedInput: 'deliver controlled result', proposal: 'deliver controlled result', knownFacts: [], decisionRefs: [],
           structuredProposal: { revision: 1, intent: 'create', title: 'HTTP grant task', objective: 'deliver controlled result',
@@ -590,11 +604,123 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
       ...(executionPolicy === undefined ? {} : { executionPolicy }) });
     const prepared = await active.runtime.service.dispatchNextExplicitRequirement();
     if (executionPolicy !== undefined) {
+      active.runtime.service.bindReadResources({ runtimePaths: schedulerPaths, projectCatalog: () => listConfiguredProjects(schedulerPaths) });
       assert.equal(prepared.operationId, undefined,
         'once policy must keep the business anchor out of the immediate FIFO execution path');
       assert.equal(posts, 0);
       assert.equal(factories, 0);
-      console.log(JSON.stringify({ label, prepared, posts, factories }));
+      assert.equal(active.runtime.service.taskDetail(prepared.taskId).title, 'HTTP grant task');
+      const deadline = Date.now() + 10_000;
+      let occurrenceId: string | undefined;
+      let childTaskId: string | undefined;
+      while (Date.now() < deadline) {
+        const status = await active.runtime.scheduler!.status();
+        occurrenceId = status.plans.flatMap((plan) => plan.occurrences)
+          .find((occurrence) => occurrence.state === 'claimed')?.occurrenceId;
+        if (occurrenceId !== undefined) {
+          const title = `计划执行 ${occurrenceId}`;
+          const tasks = active.runtime.service.listTasks();
+          const candidate = [...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.stopped, ...tasks.draft, ...tasks.failed]
+            .find((task) => task.title === title)?.taskId;
+          if (candidate !== undefined && active.runtime.service.taskDashboard(candidate).state === 'waiting') {
+            childTaskId = candidate.value;
+          }
+        }
+        if (childTaskId !== undefined) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok(occurrenceId, 'scheduler must claim the persisted once occurrence');
+      assert.ok(childTaskId, 'scheduler must prepare the exact occurrence child');
+      const resolvedChildTaskId = childTaskId!;
+      const child = active.runtime.service.taskDashboard(id('task', resolvedChildTaskId));
+      assert.equal(child.state, 'waiting', JSON.stringify(child));
+      assert.equal(child.error, undefined, 'missing child grant must not become runtime.execution.failure');
+      assert.ok(child.operationId, 'prepared child allocation must remain readable');
+      const childOperationId = id('operation', child.operationId!);
+      assert.equal(posts, 0);
+      assert.equal(factories, 0);
+      const schedulerBeforeGrant = await active.runtime.scheduler!.status();
+      assert.equal(schedulerBeforeGrant.executed, 0);
+      assert.equal(schedulerBeforeGrant.settled, 0);
+      assert.equal(schedulerBeforeGrant.plans.flatMap((plan) => plan.settlements).length, 0);
+
+      const challenge = await active.accessControl.issuePairingChallenge();
+      const session = await active.accessControl.consumePairingCode(challenge.code);
+      const cookie = active.accessControl.sessionCookie(session).split(';')[0]!;
+      const listRead = await fetch(`${active.runtime.server.url}/api/tasks`, { headers: { cookie } });
+      assert.equal(listRead.status, 200);
+      const publicList = await listRead.json() as {
+        counts: { total: number };
+        waiting: { taskId: { value: string }; semanticTitle?: string; executions?: {
+          taskId: { value: string }; controlTarget?: { projectKey: string; mode: string };
+        }[] }[];
+      };
+      assert.equal(publicList.counts.total, 1, 'one business item must own the prepared occurrence in the public list');
+      const work = publicList.waiting[0]!;
+      assert.equal(work.taskId.value, prepared.taskId.value);
+      assert.equal(work.semanticTitle, 'HTTP grant task');
+      assert.equal(work.executions?.[0]?.taskId.value, resolvedChildTaskId);
+      assert.deepEqual(work.executions?.[0]?.controlTarget, { projectKey: schedulerPaths.projectKey, mode: 'rcc' });
+      const dashboardRead = await fetch(`${active.runtime.server.url}/api/dashboard`, { headers: { cookie } });
+      assert.equal(dashboardRead.status, 200);
+      assert.equal(((await dashboardRead.json()) as { taskCount: number }).taskCount, 1);
+      const projectRead = await fetch(`${active.runtime.server.url}/api/dashboard?${new URLSearchParams({ scope: 'project', projectKey: schedulerPaths.projectKey })}`, { headers: { cookie } });
+      assert.equal(projectRead.status, 200);
+      const project = await projectRead.json() as { taskCount: number; tasks: { task: { executions?: { taskId: { value: string } }[] } }[] };
+      assert.equal(project.taskCount, 1);
+      assert.equal(project.tasks[0]?.task.executions?.[0]?.taskId.value, resolvedChildTaskId);
+      const parentRead = await fetch(`${active.runtime.server.url}/api/tasks/${prepared.taskId.value}/dashboard?${new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc' })}`, { headers: { cookie } });
+      assert.equal(parentRead.status, 200);
+      assert.equal(((await parentRead.json()) as { plan?: { subscriptionId: string } }).plan?.subscriptionId,
+        schedulerBeforeGrant.plans[0]?.subscriptionId, 'the business anchor keeps its actual committed plan after FIFO acknowledgement');
+      const childGrant = async (body?: unknown) => {
+        const url = `${active.runtime.server.url}/api/tasks/${resolvedChildTaskId}/control/grant?${new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc' })}`;
+        const response = await fetch(url, {
+          method: body === undefined ? 'GET' : 'POST',
+          headers: { cookie, origin: active.runtime.server.url, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        const text = await response.text();
+        assert.equal(response.status, 200, text);
+        return JSON.parse(text) as TaskGrantControlReceipt & {
+          readonly execution?: { readonly state: string; readonly current?: { readonly operationId?: string; readonly state: string } };
+        };
+      };
+      const grantInput = { requestId: 'once-child-grant', expectedRevision: 0 };
+      const granted = await childGrant(grantInput);
+      assert.equal(granted.readback.grant?.state, 'granted');
+      assert.equal(granted.execution?.state, 'released');
+      assert.equal(granted.execution?.current?.operationId, child.operationId);
+      await Promise.race([posted, new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error('granted occurrence child made no Provider POST')), 5000);
+        timer.unref?.();
+      })]);
+      const duplicate = await childGrant(grantInput);
+      assert.equal(duplicate.execution?.state, 'current');
+      assert.equal(factories, 1, 'duplicate child grant must not construct a second Provider');
+      assert.equal(posts, 1, 'duplicate child grant must not issue a second Provider POST');
+      finish();
+      const childDeadline = Date.now() + 10_000;
+      while (active.runtime.service.taskDashboard(id('task', resolvedChildTaskId)).state !== 'succeeded'
+        && Date.now() < childDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(active.runtime.service.taskDashboard(id('task', resolvedChildTaskId)).state, 'succeeded');
+      const schedulerAfterGrant = await (async () => {
+        const end = Date.now() + 10_000;
+        while (Date.now() < end) {
+          const status = await active.runtime.scheduler!.status();
+          if (status.settled === 1) return status;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        return await active.runtime.scheduler!.status();
+      })();
+      assert.equal(schedulerAfterGrant.settled, 1);
+      assert.equal(factories, 1);
+      assert.equal(active.runtime.service.eventsSince(childOperationId)
+        .filter((event) => event.kind === 'execution.started').length, 1,
+      'the occurrence must own exactly one released execution');
+      console.log(JSON.stringify({ label, prepared, posts, factories, occurrenceId, childTaskId: resolvedChildTaskId, granted }));
       passed = true;
       return;
     }
@@ -685,6 +811,7 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
     finish();
     await runtime?.close();
     await orchestration?.dispose();
+    await schedulerLease.release();
     provider.closeIdleConnections?.();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
     if (passed) await rm(root, { recursive: true, force: true });
