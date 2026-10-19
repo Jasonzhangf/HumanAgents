@@ -421,6 +421,15 @@ export function taskExecutionHref(child, control = false) {
   return control ? taskControlHref(child.taskId, scope) : taskDashboardHref(child.taskId, scope)
 }
 
+// The list projection already chose the current child. Read that exact choice
+// instead of re-deriving it here, and keep an unverified row on its parent.
+function taskCurrentExecutionChild(task) {
+  const currentId = task?.currentExecutionTaskId
+  if (currentId === undefined || currentId === null) return undefined
+  const executions = Array.isArray(task?.executions) ? task.executions : []
+  return executions.find((child) => taskIdValue(child.taskId) === taskIdValue(currentId))
+}
+
 export function renderTaskExecutions(task) {
   if (!task.executions?.length) return null
   const details = element('details', undefined, 'section')
@@ -443,7 +452,7 @@ export function renderTaskExecutions(task) {
 export function taskRowStateText(task) {
   const state = task?.currentState || task?.stateLabel || task?.state || ''
   if (!task) return state
-  const facts = task.executions?.find((child) => taskIdValue(child.taskId) === taskIdValue(task.currentExecutionTaskId)) || task
+  const facts = taskCurrentExecutionChild(task) || task
   if (facts.error) {
     const label = task.stateLabel || facts.stateLabel || state
     const impact = ['failed', 'blocked', 'cancelled'].includes(facts.state)
@@ -463,10 +472,16 @@ export function taskRowStateText(task) {
 
 function renderTaskReadRow(row, options = {}) {
   const task = row.task
+  const currentChild = taskCurrentExecutionChild(task)
+  const currentScope = currentChild
+    ? { ...row.scope, ...(currentChild.controlTarget || {}), taskId: currentChild.taskId }
+    : row.scope
   const item = element('div', undefined, 'task-item')
   const link = element('a', undefined, 'task-item-main')
-  link.href = taskDashboardHref(row.scope.taskId, row.scope)
-  link.dataset.taskScope = JSON.stringify(row.scope)
+  link.href = currentChild
+    ? (currentChild.controlTarget ? taskExecutionHref(currentChild) : taskDashboardHref(currentChild.taskId, currentScope))
+    : taskDashboardHref(row.scope.taskId, row.scope)
+  link.dataset.taskScope = JSON.stringify(currentScope)
   link.append(
     element('h3', taskRowTitle(task)),
     element('p', taskRowStateText(task)),

@@ -72,6 +72,11 @@ const readScope = taskReadScopeFromQuery()
 const explicitScope = readScope.kind === 'task' ? readScope : null
 const scopeFailure = readScope.kind === 'invalid' ? readScope.failure : null
 const taskGrantIntent = queryParam('control') === '1'
+const ABSENT_WAITING_STATUS = '尚无执行等待信息'
+const ABSENT_PLAN_CODES = new Set([
+  'task-plan-history.unavailable',
+  'task-plan-history.current-unknown',
+])
 let displayMode = 'current'
 
 // The agent-instance selection is URL view state, decoded once through the shared
@@ -2154,6 +2159,18 @@ async function runTaskGrantCommand(action) {
   }
 }
 
+// A plan history the projection never returned, or a history without a known
+// current revision, is an optional absence on the current surface. Real plan
+// read failures keep their visible alert; the exact absence code and recovery
+// text stay readable in the existing technical detail.
+function absentPlanFailure(read) {
+  const state = read?.ok === true
+    ? resolveCurrentPlanRevision(read.value, { explicitScope })
+    : read
+  if (state?.ok === true) return undefined
+  return ABSENT_PLAN_CODES.has(state?.failure?.code) ? state.failure : undefined
+}
+
 function renderDashboard() {
   if (!dashboard) return
   if (agentViewDispose) {
@@ -2208,6 +2225,10 @@ function renderDashboard() {
   heading.append(copy, status, refreshButton)
   main.append(heading)
 
+  const waitingStatus = dashboard.statusSections.waiting
+  const waitingStatusAbsent = !waitingStatus || waitingStatus === ABSENT_WAITING_STATUS
+  const absentPlan = absentPlanFailure(planHistoryState)
+
   const outputSection = element('section', undefined, 'section business-output')
   outputSection.append(element('h2', '交付结果'))
   outputSection.append(renderTaskPublicOutputPanel({
@@ -2219,10 +2240,11 @@ function renderDashboard() {
   const statuses = element('dl', undefined, 'detail-grid status-layers')
   for (const [label, value] of [
     ['任务业务状态', dashboard.statusSections.business],
-    ['等待 / 收拢状态', dashboard.statusSections.waiting],
+    ['等待 / 收拢状态', waitingStatus],
     ['连接新鲜度', connectionText()],
     ['最近业务事件', lastEventAt ? formatPreciseTime(lastEventAt) : '尚无业务事件'],
   ]) {
+    if (label === '等待 / 收拢状态' && waitingStatusAbsent) continue
     const cell = element('div', undefined, 'detail-cell')
     cell.append(element('dt', label), element('dd', value))
     statuses.append(cell)
@@ -2257,6 +2279,10 @@ function renderDashboard() {
       ['任务输入', dashboard.input === undefined || dashboard.input === null || dashboard.input === ''
         ? '尚未输入'
         : dashboard.input],
+      ['等待 / 收拢状态', waitingStatusAbsent ? waitingStatus : undefined],
+      ['当前任务计划', absentPlan
+        ? `${absentPlan.code} · ${absentPlan.message} · next=${absentPlan.nextAction}`
+        : undefined],
     ].filter(([, value]) => value !== undefined && value !== null),
   }))
   main.append(technicalDetail)
@@ -2321,14 +2347,18 @@ function renderDashboard() {
 
   // The accepted reasoning plan for this task: exactly the current revision the
   // runtime accepted. It is separate from the scheduling/subscription section
-  // below, which is never used as reasoning history.
+  // below, which is never used as reasoning history. An absent or unknown
+  // current plan stays in the technical detail instead of taking over the
+  // current surface.
   const planSelection = readPlanSelectionFromQuery()
-  main.append(renderTaskPlanCurrentSection(planHistoryState, {
-    explicitScope,
-    conflictSelection: hasPlanSelection(planSelection) ? planSelection : null,
-    onOpenDetail: openPlanDetail,
-    onEvidenceRef: (ref, navigation) => evidenceTrigger(ref, navigation),
-  }))
+  if (!absentPlan) {
+    main.append(renderTaskPlanCurrentSection(planHistoryState, {
+      explicitScope,
+      conflictSelection: hasPlanSelection(planSelection) ? planSelection : null,
+      onOpenDetail: openPlanDetail,
+      onEvidenceRef: (ref, navigation) => evidenceTrigger(ref, navigation),
+    }))
+  }
 
   // The schedule section exists only when the dashboard read reports a
   // persisted plan; a task without one must not show a schedule surface.
