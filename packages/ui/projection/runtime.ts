@@ -21,6 +21,8 @@ import {
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
+  type RuntimeTaskExecutionLineage,
+  type RuntimeTaskControlTarget,
   type RuntimeReadResult,
   type RuntimeReadScope,
   type PublicOutputPublicationProjection,
@@ -140,6 +142,21 @@ export interface RuntimeStatusInput {
 export interface RuntimeTaskSnapshotInput {
   readonly taskId: TaskId;
   readonly title: string;
+  /**
+   * App-derived committed `TaskIdentityRecord.title` only. Absent for a legacy
+   * row or an uncommitted name; the projection never derives it from `title`.
+   */
+  readonly semanticTitle?: string;
+  /**
+   * Exact committed execution lineage of a child Task, supplied only by the
+   * app's committed identity/occurrence join. Absent for a top-level work item.
+   */
+  readonly executionLineage?: RuntimeTaskExecutionLineage;
+  /**
+   * Navigation scope for this row's exact task ID, supplied only for an
+   * actually verified live target. It is never a permission or parent grant.
+   */
+  readonly controlTarget?: RuntimeTaskControlTarget;
   readonly state: LifecycleState;
   /**
    * Committed task-flow binding read from this Task's identity record. Absent
@@ -353,6 +370,9 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
   return {
     taskId: source.taskId,
     title: source.title,
+    ...(source.semanticTitle === undefined ? {} : { semanticTitle: source.semanticTitle }),
+    ...(source.executionLineage === undefined ? {} : { executionLineage: source.executionLineage }),
+    ...(source.controlTarget === undefined ? {} : { controlTarget: source.controlTarget }),
     state: source.state,
     stateLabel: stateLabel(source.state),
     ...(source.taskFlow === undefined ? {} : { taskFlow: source.taskFlow }),
@@ -387,6 +407,7 @@ export function projectRuntimeStatus(input: RuntimeStatusInput): RuntimeStatusPr
 }
 
 export function projectRuntimeDashboard(input: RuntimeDashboardInput): RuntimeDashboardProjection {
+  const visibleTasks = projectRuntimeTaskList({ mode: input.mode, tasks: input.tasks });
   const recentOutputs: RuntimeRecentOutputProjection[] = input.tasks
     // Dashboard summaries display committed publication only. `task.output` can still be the
     // runtime's internal execution value, but it is not trusted public publication evidence.
@@ -415,21 +436,62 @@ export function projectRuntimeDashboard(input: RuntimeDashboardInput): RuntimeDa
   return {
     surface: 'runtime-dashboard',
     mode: input.mode,
-    hasRunning: input.tasks.some((task) => isActive(task.state)),
-    taskCount: input.tasks.length,
+    hasRunning: visibleTasks.counts.running > 0,
+    taskCount: visibleTasks.counts.total,
     recentInputs: input.recentInputs.slice(0, 5),
     recentOutputs,
     recentFailures,
   };
 }
 
+function currentExecution(row: RuntimeTaskRowProjection): RuntimeTaskRowProjection | undefined {
+  let current: RuntimeTaskRowProjection | undefined;
+  for (const child of row.executions ?? []) {
+    if (current === undefined
+      || (isActive(child.state) && !isActive(current.state))
+      || (isActive(child.state) === isActive(current.state) && child.updatedAt >= current.updatedAt)) {
+      current = child;
+    }
+  }
+  return current;
+}
+
 export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTaskListProjection {
-  const running = input.tasks.filter((task) => isActive(task.state)).map(toRow);
-  const waiting = input.tasks.filter((task) => isWaiting(task.state)).map(toRow);
-  const completed = input.tasks.filter((task) => isCompleted(task.state)).map(toRow);
-  const stopped = input.tasks.filter((task) => isStopped(task.state)).map(toRow);
-  const draft = input.tasks.filter((task) => isDraft(task.state)).map(toRow);
-  const failed = input.tasks.filter((task) => isFailed(task.state)).map(toRow);
+  const rows = input.tasks.map(toRow);
+  const rowsById = new Map(rows.map((row) => [row.taskId.value, row]));
+  const childrenByParent = new Map<string, RuntimeTaskRowProjection[]>();
+  for (const row of rows) {
+    const parentTaskId = row.executionLineage?.parentTaskId;
+    if (parentTaskId === undefined) continue;
+    const parent = rowsById.get(parentTaskId.value);
+    if (parent === undefined || parent.executionLineage !== undefined) continue;
+    const children = childrenByParent.get(parentTaskId.value) ?? [];
+    children.push(row);
+    childrenByParent.set(parentTaskId.value, children);
+  }
+  const groupedChildIds = new Set(
+    [...childrenByParent.values()].flat().map((row) => row.taskId.value),
+  );
+  const visible = rows
+    .filter((row) => !groupedChildIds.has(row.taskId.value))
+    .map((row) => {
+      const children = childrenByParent.get(row.taskId.value);
+      if (children === undefined) return row;
+      const grouped = { ...row, executions: [...children] };
+      const execution = currentExecution(grouped)!;
+      return {
+        ...grouped,
+        stateLabel: `执行${execution.stateLabel}`,
+        currentState: [`当前执行：${execution.currentState}`, execution.error?.message].filter(Boolean).join(' · '),
+      };
+    });
+  const stage = (row: RuntimeTaskRowProjection) => currentExecution(row)?.state ?? row.state;
+  const running = visible.filter((row) => isActive(stage(row)));
+  const waiting = visible.filter((row) => isWaiting(stage(row)));
+  const completed = visible.filter((row) => isCompleted(stage(row)));
+  const stopped = visible.filter((row) => isStopped(stage(row)));
+  const draft = visible.filter((row) => isDraft(stage(row)));
+  const failed = visible.filter((row) => isFailed(stage(row)));
   return {
     surface: 'runtime-task-list',
     mode: input.mode,
@@ -446,7 +508,7 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
       stopped: stopped.length,
       draft: draft.length,
       failed: failed.length,
-      total: input.tasks.length,
+      total: visible.length,
     },
   };
 }
