@@ -2457,7 +2457,10 @@ test('provider explicit brain interpreter publishes the receipt with the actual 
     endpointRef: 'fake://parent-settlement', modelRef: 'model-parent-settlement',
     configDigest: 'sha256:parent-settlement-config', capabilityDigest: 'sha256:parent-settlement-capability',
   };
-  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: 'answer this', knownFacts: [], answer: 'settlement-answer', decisionRefs: [] });
+  // A redundant non-requirement guard can lose an otherwise valid answer when
+  // the model leaves an irrelevant taskFlowKind on it. Cost: one fixture field.
+  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: 'answer this', knownFacts: [],
+    taskFlowKind: 'one-shot', answer: 'settlement-answer', decisionRefs: [] });
   const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
     { kind: 'output', state: 'output', summary: answerText },
     { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
@@ -2483,6 +2486,9 @@ test('provider explicit brain interpreter publishes the receipt with the actual 
   try {
     const result = await interpreter.interpret(request);
     assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected settlement answer');
+    assert.equal(result.answer, 'settlement-answer');
+    assert.equal(Reflect.get(result, 'taskFlow'), undefined);
     const opened = await parentJournal.readScopeOpenedTurns(scope);
     assert.equal(opened.length, 1);
     const turn = opened[0]!.fact.turn;
