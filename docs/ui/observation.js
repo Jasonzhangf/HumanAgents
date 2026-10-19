@@ -642,6 +642,8 @@ function renderAgentActivitySection(projection) {
       element('h2', '执行实例 / 处理经过'),
       element('p', '尚无实际执行记录。', 'muted'),
     )
+    const runtimePoolDiagnostic = renderRuntimePoolDiagnostic(value)
+    if (runtimePoolDiagnostic) section.append(runtimePoolDiagnostic)
     const otherUnavailable = (value.unavailableSources ?? []).filter((source) => source?.sourceId !== 'runtime-pool')
     if (otherUnavailable.length > 0) {
       const block = element('section')
@@ -675,7 +677,33 @@ function renderAgentActivitySection(projection) {
   })
   agentViewDispose = view.dispose
   section.append(view.element)
+  const runtimePoolDiagnostic = renderRuntimePoolDiagnostic(value)
+  if (runtimePoolDiagnostic) section.append(runtimePoolDiagnostic)
   return section
+}
+
+function renderRuntimePoolDiagnostic(value) {
+  const sources = (value?.unavailableSources ?? []).filter((source) => source?.sourceId === 'runtime-pool')
+  if (sources.length === 0) return null
+  const details = element('details', undefined, 'drawer-technical-source')
+  details.dataset.observationRuntimePoolDiagnostic = 'true'
+  details.append(element('summary', '运行池诊断'))
+  const facts = element('dl', undefined, 'drawer-facts')
+  for (const source of sources) {
+    for (const [label, text] of [
+      ['消息', source.message],
+      ['sourceId', source.sourceId],
+      ['ownerId', source.ownerId],
+    ]) {
+      const cell = element('div')
+      const detail = element('dd', text)
+      if (!text) detail.dataset.empty = 'true'
+      cell.append(element('dt', label), detail)
+      facts.append(cell)
+    }
+  }
+  details.append(facts)
+  return details
 }
 
 // Actual execution records are a task-level attachment on the successful
