@@ -1156,7 +1156,6 @@ export async function resolveProductPaths(options: { readonly controlRoot?: stri
 }
 
 export function formatPairingCommand(paths: Pick<ProductPaths, 'controlRoot'>): string {
-  if (normalize(paths.controlRoot) === normalize(join(homedir(), '.humanagent'))) return 'humanagent pair';
   return `humanagent pair --control-root ${quotePosixShell(paths.controlRoot)}`;
 }
 

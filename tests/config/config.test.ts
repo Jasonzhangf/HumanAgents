@@ -262,7 +262,8 @@ test('pairing config returns typed workspace selection failures', async () => {
 });
 
 test('pairing config formatPairingCommand quotes custom control roots', () => {
-  assert.equal(formatPairingCommand({ controlRoot: join(process.env.HOME ?? '', '.humanagent') }), 'humanagent pair');
+  const canonicalRoot = join(process.env.HOME ?? '', '.humanagent');
+  assert.equal(formatPairingCommand({ controlRoot: canonicalRoot }), `humanagent pair --control-root '${canonicalRoot}'`);
   const customRoot = "/tmp/human agent's root";
   const command = formatPairingCommand({ controlRoot: customRoot });
   assert.equal(command, "humanagent pair --control-root '/tmp/human agent'\\''s root'");

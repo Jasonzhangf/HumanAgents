@@ -426,14 +426,6 @@ export class AccessControlService {
     });
   }
 
-  /**
-   * Retained until the CLI composition stops calling it. Pending challenges are
-   * durable credential state now, so ordinary close no longer clears them.
-   */
-  closeChallengeStore(): void {
-    // No process-memory challenge state exists to clear.
-  }
-
   async isCurrentGeneration(session: AccessSession): Promise<boolean> {
     const current = await this.readCurrentCredential();
     this.credential = current;

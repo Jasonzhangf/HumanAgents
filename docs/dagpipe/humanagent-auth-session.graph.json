@@ -20,12 +20,12 @@
       "availability": "公开、未鉴权可读；authenticated 为 true 或 false 时都返回",
       "producer": "packages/config/src/index.ts formatPairingCommand，由 packages/app/src/ui-runtime/server.ts 投影",
       "consumer": "docs/ui/login.js",
-      "defaultRoot": "humanagent pair",
+      "defaultRoot": "humanagent pair --control-root <POSIX-shell-quoted-absolute-root>",
       "customRoot": "humanagent pair --control-root <POSIX-shell-quoted-absolute-root>",
       "excluded": "不含 workspace 参数、凭证路径、凭证内容、token、challenge、lease 或项目选择"
     },
     "topologyNote": "单链拓扑：每个节点单入单出，整图单源单汇，outputs 恰好一个。节点内部承载互斥结果，终态由 meta.terminalContract 完整声明。session_check 读取现有公开 session 端点；未配对状态同时取得 pairingCommand 投影。pair_settlement 只在服务端持久消费 challenge 并签发独立浏览器会话，浏览器提交前不持有控制面 challenge。配对拒绝或请求失败后，登录节点保留输入并提供返回输入、重试与显式退出；这些恢复动作不改变服务端状态。",
-    "implementationGap": "当前 challenge 仍由 AccessControlService 进程内 Map 承载，CLI pair 仍依赖 workspace lease 与 supervisor HTTP。登录页显示固定 humanagent pair、失败后清空输入，且没有返回输入或显式退出。本图是待实现候选；拓扑校验和 binding 不证明浏览器、CLI、持久消费或重启行为。",
+    "implementationGap": "当前 challenge 仍由 AccessControlService 进程内 Map 承载，CLI pair 仍依赖 workspace lease 与 supervisor HTTP。登录页曾显示固定命令、失败后清空输入，且没有返回输入或显式退出。本图是待实现候选；拓扑校验和 binding 不证明浏览器、CLI、持久消费或重启行为。",
     "terminalContract": {
       "success": "authenticated_terminal_view：浏览器持有有效会话并读取已鉴权 runtime API 与 SSE。已配对早退或有效持久 challenge 被原子消费后签发独立 session cookie，均进入请求的同源入口。",
       "alreadyAuthenticated": "authenticated_entry_redirect：session_check 读到 session.authenticated === true 后重定向到 entryTarget；不渲染配对表单、不签发新 cookie。",

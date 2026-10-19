@@ -62,7 +62,7 @@ export async function declareDefaultProduct(controlRoot: string): Promise<Defaul
 
 Control-root precedence is explicit `--control-root`, then `HUMANAGENT_HOME`, then the fixed default-product declaration, then `~/.humanagent`. `resolveProductPaths` does not resolve a workspace or read a lease. Workspace precedence is explicit `--workspace`, then product `[project].workspace`, then a typed `workspace-selection-missing` failure. There is no cwd fallback. An explicit invocation selection does not write product config; a declared workspace must already be absolute.
 
-`formatPairingCommand` is the only command formatter. It returns `humanagent pair` for the canonical root and `humanagent pair --control-root <POSIX-shell-quoted-absolute-root>` for a custom root. Pairing never adds a workspace option.
+`formatPairingCommand` is the only command formatter. It always returns `humanagent pair --control-root <POSIX-shell-quoted-absolute-root>`, including for the canonical root. The browser command names the exact product root because a persistent default selection may point to a different product. Pairing never adds a workspace option.
 
 ## Default product selection
 
@@ -112,7 +112,7 @@ An explicit `--control-root` or `HUMANAGENT_HOME` selection must short-circuit. 
 
 The selected root does not imply a runnable runtime. Workspace still resolves as `--workspace → selected product [project].workspace → typed workspace-selection-missing`. `pair` consumes only the resolved product root; it adds no workspace, lease, or owner lookup. The declaration changes only the root for later calls without a higher-priority selection. It does not change product identity, migrate data, or merge products. Every journal, checkpoint, credential, and session stays under the selected root with its existing owner.
 
-The `formatPairingCommand` signature and behavior stay unchanged. A custom root still produces `humanagent pair --control-root <POSIX-shell-quoted-absolute-root>` in the browser.
+The `formatPairingCommand` signature stays unchanged. It produces `humanagent pair --control-root <POSIX-shell-quoted-absolute-root>` in the browser for every root, including the canonical root. This is page-specific product binding; the naked CLI still follows the default-product declaration.
 
 ### Restart retains the resolved product
 
