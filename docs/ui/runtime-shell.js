@@ -444,7 +444,12 @@ export function taskRowStateText(task) {
   const state = task?.currentState || task?.stateLabel || task?.state || ''
   if (!task) return state
   const facts = task.executions?.find((child) => taskIdValue(child.taskId) === taskIdValue(task.currentExecutionTaskId)) || task
-  if (facts.error) return [state, facts.error.message].filter(Boolean).join(' · ')
+  if (facts.error) {
+    const label = task.stateLabel || facts.stateLabel || state
+    const impact = ['failed', 'blocked', 'cancelled'].includes(facts.state)
+      ? '暂不能继续；查看原因与恢复方式' : '查看已记录的问题'
+    return [label, impact].filter(Boolean).join(' · ')
+  }
   const committed = publishedOutputText(facts.publicOutput)
   if (committed) return [state, '查看已提交结果'].filter(Boolean).join(' · ')
   if (typeof facts.output === 'string' && facts.output.trim() !== '') {

@@ -666,6 +666,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         port: subscriptionControl,
         lease: resolveLease,
         runningTaskCount: () => runtimeService.listTasks().running.length,
+        admitOccurrence: (input) => runtimeService.admitScheduledOccurrence(input),
         ...(clock === undefined ? {} : { now: clock }),
         ...(options.schedulerIntervalMs === undefined ? {} : { intervalMs: options.schedulerIntervalMs }),
       });
@@ -775,6 +776,7 @@ export { FileCheckpointStore, UiRuntimeJournal, uiRuntimeControlJournalPath } fr
 export { FakeReplayExecutionRuntimePort } from './fake-port.js';
 export { UiRuntimeScheduler } from './scheduler.js';
 export type {
+  UiRuntimeScheduledOccurrenceAdmission,
   UiRuntimeSchedulerIssue,
   UiRuntimeSchedulerOptions,
   UiRuntimeSchedulerPlanProjection,

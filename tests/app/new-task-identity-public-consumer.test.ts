@@ -806,27 +806,31 @@ test('public new-task submit binds the real typed source and cold-reads before a
   await rm(root, { recursive: true, force: true });
 });
 
-test('taskFlow intake fidelity preserves direct and refined bindings and rejects unconfirmed mutation', async () => {
+test('taskFlow intake fidelity preserves inferred and refined bindings without a confirmation override', async () => {
   await mkdir(ROOT, { recursive: true });
   const root = await mkdtemp(join(ROOT, 'case-task-flow-intake-'));
   const taskControlPath = taskControlPathFor(root);
   const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const directTaskFlow: TaskFlowBinding = { kind: 'inspection', definitionVersion: TASK_FLOW_DEFINITION_VERSION };
   const runtime = await startRuntime(root, port, {
     projectKey: 'project-task-flow-intake',
     taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path),
+    explicitBrainInterpreter: {
+      async interpret(input) {
+        const interpreted = await createInterpreter.interpret(input);
+        return interpreted.kind === 'requirement' && interpreted.intent === 'create'
+          ? { ...interpreted, taskFlow: directTaskFlow } : interpreted;
+      },
+    },
   });
   try {
     const direct = await prepareNewTaskConfirmation(runtime, 'task-flow-direct');
-    const directTaskFlow: TaskFlowBinding = {
-      kind: 'inspection',
-      definitionVersion: TASK_FLOW_DEFINITION_VERSION,
-    };
     const directResponse = await fetch(
       `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(direct.interactionId)}/confirmation`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...direct.confirmationParams, taskFlow: directTaskFlow }),
+        body: JSON.stringify({ ...direct.confirmationParams, taskFlow: { kind: 'long-running', definitionVersion: 1 } }),
       },
     );
     assert.equal(directResponse.status, 200);
@@ -893,9 +897,7 @@ test('taskFlow intake fidelity preserves direct and refined bindings and rejects
     const conflictSnapshot = await conflictRefinement.json() as {
       readonly revision: { readonly revisionVersion: number; readonly revisionHash: string };
     };
-    const tasksBeforeConflict = runtime.service.listTasks().counts.total;
     const identitiesBeforeConflict = (await identityRecords(taskControlPath)).length;
-    const pendingBeforeConflict = await pendingRequirementCount(taskControlPath);
     const conflictResponse = await fetch(
       `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(conflict.interactionId)}/confirmation`,
       {
@@ -905,21 +907,20 @@ test('taskFlow intake fidelity preserves direct and refined bindings and rejects
           ...conflict.confirmationParams,
           draftRevisionVersion: conflictSnapshot.revision.revisionVersion,
           draftRevisionHash: conflictSnapshot.revision.revisionHash,
-          executionPolicy: onceExecutionPolicy,
           taskFlow: directTaskFlow,
         }),
       },
     );
-    assert.equal(conflictResponse.status, 409);
-    assert.equal(
-      ((await conflictResponse.json()) as { readonly error: { readonly code: string } }).error.code,
-      'explicit-brain.task-flow-binding-conflict',
-    );
-    assert.equal(runtime.service.listTasks().counts.total, tasksBeforeConflict);
-    assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeConflict);
-    assert.equal(await pendingRequirementCount(taskControlPath), pendingBeforeConflict);
+    assert.equal(conflictResponse.status, 200);
+    await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeConflict + 1));
+    assert.deepEqual((await identityRecords(taskControlPath)).at(-1)?.taskFlow, refinedTaskFlow);
 
     const target = runtime.service.createTask({ title: 'existing task-flow target' });
+    const targetGrant = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(target.taskId.value)}/control/grant`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: 'task-flow-existing-fixture-grant', expectedRevision: 0 }),
+    });
+    assert.equal(targetGrant.status, 200);
     const existingReceive = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -965,14 +966,10 @@ test('taskFlow intake fidelity preserves direct and refined bindings and rejects
         }),
       },
     );
-    assert.equal(rejectedInjection.status, 409);
-    assert.equal(
-      ((await rejectedInjection.json()) as { readonly error: { readonly code: string } }).error.code,
-      'explicit-brain.existing-task-change-revision-immutable',
-    );
-    assert.equal(runtime.service.listTasks().counts.total, tasksBeforeRejectedInjection);
+    assert.equal(rejectedInjection.status, 200);
+    await waitForAsync(async () => assert.equal(runtime.service.listTasks().counts.total, tasksBeforeRejectedInjection));
     assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeRejectedInjection);
-    assert.equal(await pendingRequirementCount(taskControlPath), pendingBeforeRejectedInjection);
+    await waitForAsync(async () => assert.equal(await pendingRequirementCount(taskControlPath), pendingBeforeRejectedInjection));
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });
@@ -995,39 +992,25 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
   const root = await mkdtemp(join(ROOT, 'case-task-flow-confirmation-fidelity-'));
   const taskControlPath = taskControlPathFor(root);
   const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const taskFlow: TaskFlowBinding = { kind: 'one-shot', definitionVersion: TASK_FLOW_DEFINITION_VERSION };
   const runtime = await startRuntime(root, port, {
     projectKey: 'project-task-flow-confirmation-fidelity',
     taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path),
+    explicitBrainInterpreter: {
+      async interpret(input) {
+        const interpreted = await createInterpreter.interpret(input);
+        return interpreted.kind === 'requirement' ? { ...interpreted, taskFlow } : interpreted;
+      },
+    },
   });
   try {
+    const semanticTitle = 'create the task-flow-confirmation-fidelity task';
     const goal = 'Write one short paragraph containing M4-SCOPE-MARKER-PROJECT-B explaining project scope isolation.';
     const scope = 'workspace-b';
     const constraints = ['No child agents, no file edits'];
     const deliverables = ['Paragraph containing M4-SCOPE-MARKER-PROJECT-B'];
-    const taskFlow: TaskFlowBinding = {
-      kind: 'one-shot',
-      definitionVersion: TASK_FLOW_DEFINITION_VERSION,
-    };
     const expectedTemplate = { goal, scope, constraints, deliverables };
     const prepared = await prepareNewTaskConfirmation(runtime, 'task-flow-confirmation-fidelity');
-    const refinement = await fetch(
-      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(prepared.interactionId)}/refine`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          draftId: prepared.draftId,
-          baseRevisionVersion: prepared.revisionVersion,
-          requestedRevisionHash: prepared.revisionHash,
-          fields: { taskFlow },
-          instructionRef: 'task-flow-confirmation-fidelity-refine',
-        }),
-      },
-    );
-    assert.equal(refinement.status, 200);
-    const refinedSnapshot = await refinement.json() as {
-      readonly revision: { readonly revisionVersion: number; readonly revisionHash: string };
-    };
 
     const confirmed = await fetch(
       `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(prepared.interactionId)}/confirmation`,
@@ -1036,13 +1019,12 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           ...prepared.confirmationParams,
-          draftRevisionVersion: refinedSnapshot.revision.revisionVersion,
-          draftRevisionHash: refinedSnapshot.revision.revisionHash,
+          draftRevisionVersion: prepared.revisionVersion,
+          draftRevisionHash: prepared.revisionHash,
           goal,
           scope,
           constraints,
           deliverables,
-          taskFlow,
         }),
       },
     );
@@ -1095,14 +1077,23 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
       readonly nextStep: string;
       readonly error?: unknown;
     };
-    assert.equal(task.title, goal);
+    assert.deepEqual(identity.taskFlow, taskFlow);
+    assert.equal(identity.title, semanticTitle);
+    const listResponse = await fetch(`${runtime.server.url}/api/tasks`);
+    assert.equal(listResponse.status, 200);
+    const list = await listResponse.json() as RuntimeTaskListProjection;
+    const visibleRow = [...list.running, ...list.waiting, ...list.completed, ...list.stopped, ...list.draft, ...list.failed]
+      .find((row) => row.taskId.value === identity.scope.taskId.value);
+    assert.equal(visibleRow?.semanticTitle, semanticTitle);
+    assert.deepEqual(visibleRow?.taskFlow, taskFlow);
+    assert.equal(task.title, semanticTitle);
     const taskJournalRecords = new UiRuntimeJournal(
       join(dirname(taskControlPath), 'ui-runtime-journal.jsonl'),
     ).replay();
     const createdRecord = taskJournalRecords.find((record) => record.kind === 'task.created'
       && record.taskId.value === identity.scope.taskId.value);
     assert.ok(createdRecord, 'the task journal must contain the durable task creation record');
-    assert.equal(createdRecord!.kind === 'task.created' ? createdRecord!.title : undefined, goal);
+    assert.equal(createdRecord!.kind === 'task.created' ? createdRecord!.title : undefined, semanticTitle);
     assert.deepEqual(
       JSON.parse(createdRecord!.kind === 'task.created' ? createdRecord!.directive : '{}'),
       expectedTemplate,
@@ -1135,7 +1126,7 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
       memoryScope: 'task',
     };
     assert.equal(currentTask.directive, confirmedRevision.normalizedInput);
-    assert.equal(currentTask.title, goal);
+    assert.equal(currentTask.title, semanticTitle);
 
     const cycleId = id('cycle', 'planner-capture-cycle');
     const operationId = id('operation', 'planner-capture-operation');
@@ -1322,7 +1313,7 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
       readonly task: { readonly title: string; readonly directive: string };
     };
     assert.equal(plannerPayload.role, 'planner');
-    assert.equal(plannerPayload.task.title, goal);
+    assert.equal(plannerPayload.task.title, semanticTitle);
     assert.equal(plannerPayload.task.directive, confirmedRevision.normalizedInput);
     assert.deepEqual(JSON.parse(plannerPayload.task.directive), expectedTemplate);
   } finally {
