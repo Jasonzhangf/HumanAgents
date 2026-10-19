@@ -2235,9 +2235,14 @@ function renderDashboard() {
   const waitingStatus = dashboard.statusSections.waiting
   const waitingStatusAbsent = !waitingStatus || waitingStatus === ABSENT_WAITING_STATUS
   const absentPlan = absentPlanFailure(planHistoryState)
-  const nextStep = typeof dashboard.nextStep === 'string' ? dashboard.nextStep.trim() : ''
-  const applicableNextStep = dashboard.allowedActions.length > 0
-    ? nextStep || (!explicitScope ? actionCopy() : '')
+  const renderedActionLabels = [
+    ['start', START_ACTION_LABEL],
+    ['stop', STOP_ACTION_LABEL],
+    ['retry-stop', RETRY_STOP_ACTION_LABEL],
+  ].filter(([action]) => !explicitScope && dashboard.allowedActions.includes(action))
+    .map(([, label]) => label)
+  const applicableNextStep = renderedActionLabels.length > 0
+    ? `可使用：${renderedActionLabels.join('、')}`
     : ''
 
   if (dashboard.error) {
@@ -2245,8 +2250,10 @@ function renderDashboard() {
     errorNotice.dataset.tone = 'danger'
     errorNotice.setAttribute('role', 'alert')
     errorNotice.append(element('strong', '任务执行遇到问题，需要处理。'))
-    if (dashboard.error.message) errorNotice.append(element('p', dashboard.error.message))
-    if (dashboard.error.nextAction) errorNotice.append(element('p', `下一步：${dashboard.error.nextAction}`))
+    const failureDetailButton = element('button', '查看失败原因', 'button button--quiet')
+    failureDetailButton.type = 'button'
+    failureDetailButton.addEventListener('click', () => technicalDetail.click())
+    errorNotice.append(failureDetailButton)
     main.append(errorNotice)
   }
 
