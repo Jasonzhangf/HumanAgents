@@ -12,6 +12,7 @@ import {
   taskRowStateText,
   taskRowTitle,
   taskFlowText,
+  taskExecutionHref,
   taskDashboardHref,
 } from './runtime-shell.js'
 import {
@@ -201,7 +202,10 @@ function renderSystemStats(projection) {
 function taskRow(row) {
   const item = element('div', undefined, 'task-item')
   const link = element('a', undefined, 'task-item-main')
-  link.href = taskDashboardHref(row.taskId.value)
+  const currentChild = taskRowCurrentExecution(row)
+  link.href = currentChild
+    ? taskExecutionHref(currentChild)
+    : taskDashboardHref(row.taskId.value)
   link.append(
     element('h3', taskRowTitle(row)),
     element('p', taskRowStateText(row)),
@@ -223,6 +227,17 @@ function taskRow(row) {
   const executions = renderTaskExecutions(row)
   if (executions) item.append(executions)
   return item
+}
+
+function taskRowCurrentExecution(row) {
+  const currentId = taskIdValue(row.currentExecutionTaskId)
+  if (currentId === undefined || currentId === null) return undefined
+  const executions = Array.isArray(row.executions) ? row.executions : []
+  return executions.find((child) => taskIdValue(child.taskId) === currentId)
+}
+
+function taskIdValue(taskId) {
+  return taskId && typeof taskId === 'object' ? taskId.value : taskId
 }
 
 function actionButton(label, danger, onClick) {
