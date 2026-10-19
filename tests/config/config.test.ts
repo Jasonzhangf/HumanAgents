@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
-import { ConfigurationError, DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, ensureControlLayout, listConfiguredProjects, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
+import { ConfigurationError, DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
 
 const minimalInteractionAgent = () => ({
   agentId: 'interaction-default',
@@ -29,6 +29,126 @@ test('rejects duplicate TOML keys and table declarations', () => {
   assert.throws(() => parseToml('schemaVersion = 1\nschemaVersion = 1\n'), /duplicate key/);
   assert.throws(() => parseToml('[project]\nreviewRequired = true\n[project]\n'), /duplicate table/);
   assert.throws(() => parseToml('[[agents]]\nagentId = "one"\nagentId = "two"\n'), /duplicate key/);
+});
+
+test('pairing config resolves product paths without workspace or product config', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-product-paths-'));
+  const explicitRoot = join(root, 'explicit-control');
+  const environmentRoot = join(root, 'environment-control');
+  await mkdir(join(explicitRoot, 'security'), { recursive: true });
+  await mkdir(environmentRoot, { recursive: true });
+  await writeFile(join(explicitRoot, 'internal.toml'), 'not valid toml =', 'utf8');
+  await writeFile(join(explicitRoot, 'config.toml'), '[project]\nworkspace = 7\n', 'utf8');
+  const previous = process.env.HUMANAGENT_HOME;
+  process.env.HUMANAGENT_HOME = environmentRoot;
+  try {
+    const explicit = await resolveProductPaths({ controlRoot: explicitRoot });
+    assert.equal(explicit.controlRoot, await realpath(explicitRoot));
+    assert.equal(explicit.securityRoot, join(explicit.controlRoot, 'security'));
+    assert.equal(explicit.webAccessCredentialPath, join(explicit.controlRoot, 'security', 'web-access.json'));
+    const environment = await resolveProductPaths({});
+    assert.equal(environment.controlRoot, await realpath(environmentRoot));
+    await assert.rejects(() => stat(join(environment.controlRoot, 'config.toml')), /ENOENT/);
+  } finally {
+    if (previous === undefined) delete process.env.HUMANAGENT_HOME;
+    else process.env.HUMANAGENT_HOME = previous;
+  }
+});
+
+test('pairing config declared workspace is independent of cwd', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-declared-workspace-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'brain');
+  const firstCwd = join(root, 'first-cwd');
+  const secondCwd = join(root, 'second-cwd');
+  await mkdir(controlRoot);
+  await mkdir(workspace);
+  await mkdir(firstCwd);
+  await mkdir(secondCwd);
+  await writeFile(join(controlRoot, 'config.toml'), `[project]\nworkspace = ${JSON.stringify(workspace)}\n`, 'utf8');
+  const processApi = process as unknown as { cwd(): string; chdir(path: string): void };
+  const previousCwd = processApi.cwd();
+  try {
+    processApi.chdir(firstCwd);
+    const first = await resolveRuntimePaths({ controlRoot });
+    processApi.chdir(secondCwd);
+    const second = await resolveRuntimePaths({ controlRoot });
+    assert.equal(first.workspaceCwd, await realpath(workspace));
+    assert.equal(second.workspaceCwd, first.workspaceCwd);
+    assert.equal(second.projectKey, first.projectKey);
+  } finally {
+    processApi.chdir(previousCwd);
+  }
+});
+
+test('pairing config explicit workspace wins without rewriting product config', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-explicit-workspace-'));
+  const controlRoot = join(root, 'control');
+  const declaredWorkspace = join(root, 'declared');
+  const explicitWorkspace = join(root, 'explicit');
+  await mkdir(controlRoot);
+  await mkdir(declaredWorkspace);
+  await mkdir(explicitWorkspace);
+  const configPath = join(controlRoot, 'config.toml');
+  await writeFile(configPath, `[project]\nworkspace = ${JSON.stringify(declaredWorkspace)}\n`, 'utf8');
+  const before = await readFile(configPath, 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace: explicitWorkspace });
+  assert.equal(paths.workspaceCwd, await realpath(explicitWorkspace));
+  assert.equal(await readFile(configPath, 'utf8'), before);
+});
+
+test('pairing config returns typed workspace selection failures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-workspace-selection-'));
+  const controlRoot = join(root, 'control');
+  await mkdir(controlRoot);
+  let missing: unknown;
+  try {
+    await resolveRuntimePaths({ controlRoot });
+  } catch (error) {
+    missing = error;
+  }
+  assert.equal(missing instanceof ConfigurationError, true);
+  assert.equal((missing as ConfigurationError).code, 'workspace-selection-missing');
+  assert.match((missing as ConfigurationError).nextAction, /--workspace/);
+  let empty: unknown;
+  try {
+    await resolveRuntimePaths({ controlRoot, workspace: '' });
+  } catch (error) {
+    empty = error;
+  }
+  assert.equal(empty instanceof ConfigurationError, true);
+  assert.equal((empty as ConfigurationError).code, 'workspace-selection-invalid');
+  const configPath = join(controlRoot, 'config.toml');
+  await assert.rejects(() => stat(configPath), /ENOENT/);
+  await writeFile(configPath, '[project]\nworkspace = "relative/workspace"\n', 'utf8');
+  let invalid: unknown;
+  try {
+    await resolveRuntimePaths({ controlRoot });
+  } catch (error) {
+    invalid = error;
+  }
+  assert.equal(invalid instanceof ConfigurationError, true);
+  assert.equal((invalid as ConfigurationError).code, 'workspace-selection-invalid');
+  assert.match((invalid as ConfigurationError).message, /absolute/);
+});
+
+test('pairing config formatPairingCommand quotes custom control roots', () => {
+  assert.equal(formatPairingCommand({ controlRoot: join(process.env.HOME ?? '', '.humanagent') }), 'humanagent pair');
+  const customRoot = "/tmp/human agent's root";
+  const command = formatPairingCommand({ controlRoot: customRoot });
+  assert.equal(command, "humanagent pair --control-root '/tmp/human agent'\\''s root'");
+  assert.equal(command.includes('--workspace'), false);
+});
+
+test('pairing config validates product workspace and rejects project override workspace', () => {
+  const workspace = '/Volumes/Intel/playground/humanagent/example';
+  const valid = validateUserConfig({
+    schemaVersion: 1,
+    agents: [minimalInteractionAgent()],
+    project: { workspace },
+  });
+  assert.equal(valid.project?.workspace, workspace);
+  assert.throws(() => validateProjectOverride({ project: { workspace } }), /unsupported key: workspace/);
 });
 
 test('resolves all persistence below control root and keeps workspace separate', async () => {
