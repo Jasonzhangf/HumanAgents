@@ -1033,7 +1033,11 @@ function renderTemplateGuidance(guidance, options) {
     const trigger = element('button', '查看任务模板', 'button button--quiet plan-detail')
     trigger.type = 'button'
     trigger.dataset.templateDetail = 'template'
-    trigger.addEventListener('click', () => options.onOpenDetail({ title: '任务模板详情', content }, trigger))
+    trigger.addEventListener('click', () => options.onOpenDetail({
+      title: '任务模板详情',
+      content,
+      eyebrow: '任务模板',
+    }, trigger))
     section.append(trigger)
   } else {
     appendTemplateSemantics(section, guidance)
