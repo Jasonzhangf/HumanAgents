@@ -8,7 +8,7 @@
     "navigationContract": "正式任务导航保留 task、projectKey、mode。默认打开只读任务页；只有显式 control=1 才表达进入任务控制面的意图。",
     "requestContract": "控制读写沿用 GET/POST /api/tasks/:taskId/control/grant 与 POST /api/tasks/:taskId/control/revoke。projectKey 与 mode 只作为成对 query scope；body 保持 requestId、expectedRevision 与原可选 capability。",
     "verificationContract": "后端在实际绑定配置来源中解析并验证当前 live Task，返回实际 targetScope。scope 缺失、非法或目标不属于当前绑定范围时，在控制读写与 release 前拒绝，不回退到无 scope 路径。",
-    "resultContract": "UI 只在 readback.taskId 与请求相符且 readback.targetScope 与请求 projectKey/mode 匹配时启用 grant/revoke。POST 回执与最新 GET 读回分开保存；最新状态无法确认时保留已记录回执，不显示 denied，也不自动重提。",
+    "resultContract": "UI 只在 receipt.taskId 与请求相符且 receipt.targetScope 与请求 projectKey/mode 匹配时启用 grant/revoke。POST 回执与最新 GET 读回分开保存；最新状态无法确认时保留已记录回执，不显示 denied，也不自动重提。",
     "terminalContract": {
       "success": "返回已记录控制回执与匹配的最新读回结论",
       "unconfirmed": "返回已记录控制回执，并明确最新控制状态暂不能确认",

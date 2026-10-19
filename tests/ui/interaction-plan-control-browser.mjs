@@ -389,7 +389,6 @@ function taskGrantReadBody({ taskId, projectKey, mode, grant = null, authority =
     taskId: { scope: 'task', value: taskId },
     ...(omitTargetScope ? {} : { targetScope: { projectKey, mode } }),
     readback: {
-      taskId: { scope: 'task', value: taskId },
       grant,
       commit: grant === null ? null : { commitId: 'commit-task-grant-readback' },
     },
@@ -542,7 +541,7 @@ async function taskGrantViewportProof(browser, baseUrl, artifactDir, viewport, s
           },
           taskId: state.taskId,
           targetScope: { projectKey: state.projectKey, mode: state.mode },
-          readback: { taskId: state.taskId, grant: state.grant, commit: null },
+          readback: { grant: state.grant, commit: null },
           authority: null,
           execution: {
             state: 'blocked',
