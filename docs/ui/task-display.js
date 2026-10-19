@@ -874,7 +874,7 @@ function renderTemplateStages(stages) {
   section.append(element('h4', '模板阶段'))
   const groups = []
   for (const stage of stages) {
-    const label = stage.groupLabel || stage.group || ''
+    const label = stage.groupLabel
     let group = groups.find((entry) => entry.label === label)
     if (!group) {
       group = { label, stages: [] }
@@ -961,8 +961,9 @@ function renderTemplateGuidance(guidance, options) {
     element('span', '静态指导 · 非执行记录', 'section-meta'),
   )
   section.append(head)
-  const aim = guidance.aimLabel ?? guidance.aim
-  if (aim) section.append(element('p', aim, 'business-output-text task-flow-aim'))
+  if (guidance.aimLabel) {
+    section.append(element('p', guidance.aimLabel, 'business-output-text task-flow-aim'))
+  }
   if (guidance.layoutLabel) {
     section.append(element('p', `布局：${guidance.layoutLabel}`, 'muted task-flow-layout'))
   }
