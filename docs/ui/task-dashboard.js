@@ -2250,7 +2250,8 @@ function renderDashboard() {
     main.append(errorNotice)
   }
 
-  if (!waitingStatusAbsent || applicableNextStep) {
+  if (!['succeeded', 'failed', 'cancelled', 'stopped'].includes(dashboard.state)
+    && (!waitingStatusAbsent || applicableNextStep)) {
     const currentSection = element('section', undefined, 'section')
     currentSection.append(element('h2', '当前进展'))
     const currentFacts = element('dl', undefined, 'detail-grid status-layers')
