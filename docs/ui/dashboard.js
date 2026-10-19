@@ -46,7 +46,9 @@ const statsRegion = element('section', undefined, 'stats')
 const plansRegion = element('section', undefined, 'plan-list')
 const listRegion = element('div', undefined, 'task-lists')
 main.append(inputRegion)
-main.append(statsRegion, plansRegion, listRegion)
+const plansDetails = element('details', undefined, 'plan-list-fold')
+plansDetails.append(element('summary', '执行计划管理'), plansRegion)
+main.append(statsRegion, listRegion, plansDetails)
 
 function renderTaskEntry() {
   clearNode(inputRegion)
