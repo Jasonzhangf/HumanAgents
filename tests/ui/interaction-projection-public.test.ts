@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   id,
   type EvidenceRef,
@@ -228,4 +230,47 @@ test('interaction projection carries the runtime liveness projection without re-
 test('interaction projection reports no liveness when the runtime reported no liveness facts', () => {
   const projection = projectInteractionWorkCard(cardSource);
   assert.equal(projection.cardMetadata.liveness, undefined);
+});
+
+type InteractionSnapshotPage = {
+  readonly projectInteractionCardFromSnapshot: (snapshot: unknown) => {
+    readonly taskState: string;
+    readonly stateLabel?: string;
+    readonly conversation: {
+      readonly turns: readonly { readonly markdown?: string }[];
+    };
+    readonly cardMetadata: {
+      readonly source: {
+        readonly interactionId?: string;
+        readonly taskId?: { readonly scope: string; readonly value: string };
+        readonly operationId?: { readonly scope: string; readonly value: string };
+        readonly executionEpoch?: number;
+      };
+    };
+  };
+};
+
+const interactionCardPage = await import(
+  pathToFileURL(resolve('docs/ui/interaction-card-page.js')).href
+) as InteractionSnapshotPage;
+
+// Failure mode (basis: known served defect in the real page adapter): an
+// explicit snapshot with `state: 'answered'` had no human label and fell
+// through `toLifecycleState` to `unknown`, so the page showed the correct
+// answer `4` next to "交互 未知". Probability is unknown; one real occurrence
+// is recorded. Impact is that the user misreads a finished simple answer as an
+// unresolved interaction. Cost is one small case in the existing public
+// consumer.
+test('answered explicit snapshot projects as a succeeded interaction without invented identity', () => {
+  const projection = interactionCardPage.projectInteractionCardFromSnapshot({
+    interactionId: 'interaction-2',
+    state: 'answered',
+    rawInput: '2 + 2 等于几？请只回答数字。',
+    reply: '4',
+  });
+
+  assert.equal(projection.taskState, 'succeeded');
+  assert.equal(projection.stateLabel, '已回答');
+  assert.equal(projection.conversation.turns.at(-1)?.markdown, '4');
+  assert.deepEqual(projection.cardMetadata.source, { interactionId: 'interaction-2' });
 });

@@ -75,6 +75,7 @@ function toLifecycleState(state) {
       return 'waiting'
     case 'status-only':
     case 'submitted':
+    case 'answered':
       return 'succeeded'
     default:
       return LIFECYCLE_STATES.has(state) ? state : 'unknown'
@@ -102,6 +103,8 @@ function interactionStateLabel(state) {
       return '状态已回执'
     case 'submitted':
       return '已提交'
+    case 'answered':
+      return '已回答'
     default:
       return undefined
   }
