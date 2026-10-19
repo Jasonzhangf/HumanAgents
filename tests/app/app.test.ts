@@ -2300,6 +2300,7 @@ test('CLI serve continues the existing owner and preserves formal restart', asyn
   const sourceDigest = 'sha256:cli-memory-restart-proof';
   const home = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-home-'));
   const unrelatedCwd = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-cwd-'));
+  const initialCwd = fixture.root;
   const nakedEnv: Record<string, string | undefined> = { ...process.env, HOME: home };
   delete nakedEnv.HUMANAGENT_HOME;
 
@@ -2315,14 +2316,14 @@ test('CLI serve continues the existing owner and preserves formal restart', asyn
       cli,
       'serve',
       '--workspace',
-      workspace,
+      'workspace',
       '--control-root',
-      controlRoot,
+      'control',
       '--provider',
       'fake',
       '--port',
       '0',
-    ], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'] });
+    ], { cwd: initialCwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (chunk: Uint8Array) => {
       stderr += String(chunk);
@@ -2539,13 +2540,10 @@ test('CLI serve continues the existing owner and preserves formal restart', asyn
     assert.equal(restartPairRun.code, 0, restartPairRun.stderr.slice(-800));
     const restartPair = JSON.parse(restartPairRun.stdout.trim()) as { readonly code: string };
 
-    const restart = await runCliProcess([
-      'restart',
-      '--workspace',
-      workspace,
-      '--control-root',
-      controlRoot,
-    ], process.env, process.cwd());
+    // The formal restart is naked and runs from an unrelated cwd. It must
+    // resolve the declared product/workspace and retain the original owner's
+    // already-resolved canonical paths, never the relative launch flags.
+    const restart = await runCliProcess(['restart'], nakedEnv, unrelatedCwd);
     assert.equal(restart.code, 0, restart.stderr.slice(-800));
     const completion = JSON.parse(restart.stdout.trim()) as {
       readonly requestId: string;
@@ -2578,10 +2576,20 @@ test('CLI serve continues the existing owner and preserves formal restart', asyn
     assert.equal(retainedStartupArgs.includes(completion.requestId), false);
     assert.equal(retainedStartupArgs.includes('--control-root'), true);
     assert.equal(retainedStartupArgs.includes('--workspace'), true);
+    const retainedControlRoot = retainedStartupArgs[retainedStartupArgs.indexOf('--control-root') + 1];
+    const retainedWorkspace = retainedStartupArgs[retainedStartupArgs.indexOf('--workspace') + 1];
+    assert.equal(retainedControlRoot, controlRoot, 'retained control root must be canonical');
+    assert.equal(retainedWorkspace, workspace, 'retained workspace must be canonical');
     restartedPid = replacementLease.pid;
 
     const endpoint = completion.current.controlEndpoint;
     const restartedUrl = `http://${endpoint.host === '::1' ? '[::1]' : endpoint.host}:${endpoint.port}`;
+    const survivingSession = await fetch(`${restartedUrl}/api/auth/session`, {
+      headers: { cookie: second.auth.cookie },
+    });
+    assert.equal(survivingSession.status, 200);
+    const survivingSessionBody = await survivingSession.json() as { readonly authenticated?: boolean };
+    assert.equal(survivingSessionBody.authenticated, true, 'an existing session must survive formal restart');
     const restartedAuth = await authenticateServe(controlRoot, workspace, restartedUrl, restartPair.code);
     const started = await restartedAuth.request(`${restartedUrl}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',

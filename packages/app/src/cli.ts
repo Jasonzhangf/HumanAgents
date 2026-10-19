@@ -261,6 +261,10 @@ function packageVersion(): string {
 async function currentStartupDeclaration(
   args: readonly string[],
   baseArgs: readonly string[] = [],
+  resolvedPaths: {
+    readonly controlRoot?: string;
+    readonly workspace?: string;
+  } = {},
 ): Promise<SupervisorStartupDeclaration> {
   const entryPath = fileURLToPath(import.meta.url);
   let launcherPath = entryPath;
@@ -272,10 +276,17 @@ async function currentStartupDeclaration(
     }
   }
   const releaseVersion = process.env.HUMANAGENT_RELEASE_VERSION?.trim();
+  // A caller-supplied relative --control-root/--workspace is resolved against
+  // this invocation's cwd. Retain the resolved absolute values last so a later
+  // restart from another cwd cannot reinterpret them.
+  const resolvedPathArgs = [
+    ...(resolvedPaths.controlRoot === undefined ? [] : ['--control-root', resolvedPaths.controlRoot]),
+    ...(resolvedPaths.workspace === undefined ? [] : ['--workspace', resolvedPaths.workspace]),
+  ];
   return {
     launcherPath,
     cwd: process.cwd(),
-    args: mergeStartupArgs(baseArgs, args),
+    args: mergeStartupArgs(mergeStartupArgs(baseArgs, args), resolvedPathArgs),
     source: await captureLoadedSourceReceipt({
       entryPath,
       packageVersion: packageVersion(),
@@ -1548,11 +1559,14 @@ export async function main(args: readonly string[]): Promise<void> {
     // lacks them is filled from this invocation's resolved paths.
     const retainedStartupArgs = lease.startup?.args ?? [];
     const retainedStartupOptions = startupOptionMap(retainedStartupArgs);
-    const startup = await currentStartupDeclaration(args.slice(1), [
-      ...retainedStartupArgs,
-      ...(retainedStartupOptions.has('--control-root') ? [] : ['--control-root', paths.controlRoot]),
-      ...(retainedStartupOptions.has('--workspace') ? [] : ['--workspace', paths.workspaceCwd]),
-    ]);
+    const startup = await currentStartupDeclaration(
+      args.slice(1),
+      retainedStartupArgs,
+      {
+        controlRoot: retainedStartupOptions.get('--control-root') ?? paths.controlRoot,
+        workspace: retainedStartupOptions.get('--workspace') ?? paths.workspaceCwd,
+      },
+    );
     const completion = await restartDaemonWithCodeHandoff(paths, {
       expected: lease,
       startup,
@@ -1585,10 +1599,10 @@ export async function main(args: readonly string[]): Promise<void> {
     // Retain the already-resolved product and workspace as explicit startup
     // arguments so a later formal restart cannot reselect a product from cwd
     // or from a changed default-product declaration.
-    const startup = await currentStartupDeclaration(args, [
-      '--control-root', paths.controlRoot,
-      '--workspace', paths.workspaceCwd,
-    ]);
+    const startup = await currentStartupDeclaration(args, [], {
+      controlRoot: paths.controlRoot,
+      workspace: paths.workspaceCwd,
+    });
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
     let serveRuntime: ServeRuntimeComposition | undefined;
     let supervisor: SupervisorStartup | undefined;
