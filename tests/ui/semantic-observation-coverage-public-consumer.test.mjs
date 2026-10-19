@@ -325,6 +325,25 @@ test('typed public output keeps exact committed text and states without false em
     )
   }
 
+  const noContentHost = new FakeNode('div')
+  const noContentMounted = mountSemanticObservation(noContentHost, {})
+  for (const state of ['unknown', 'unavailable']) {
+    const uncertain = buildSemanticObservationProjection(publicEnvelope(state, []), { mode: 'current' })
+    assert.notEqual(uncertain.state, 'empty')
+    assert.equal(uncertain.sections.length, 0)
+    noContentMounted.update(uncertain)
+    assert.equal(
+      allNodes(noContentHost).some((node) => node.className === 'so-empty-state'),
+      false,
+      `${state} without commits must not claim published content is absent`,
+    )
+    assert.equal(noContentHost.textContent.includes('当前范围没有已发布语义内容。'), false)
+    assert.equal(
+      noContentHost.textContent.includes(state === 'unknown' ? '公开结果状态未知' : '公开结果暂不可用'),
+      true,
+    )
+  }
+
   const committed = buildSemanticObservationProjection(publicEnvelope('committed'), { mode: 'current' })
   assert.equal(
     committed.sections.some((section) => section.id === 'live'),
@@ -338,4 +357,11 @@ test('typed public output keeps exact committed text and states without false em
 
   const empty = buildSemanticObservationProjection(publicEnvelope('committed', []), { mode: 'current' })
   assert.equal(empty.state, 'empty')
+  noContentMounted.update(empty)
+  assert.equal(
+    allNodes(noContentHost).some((node) => node.className === 'so-empty-state'),
+    true,
+    'committed publication without commits keeps the genuine empty state',
+  )
+  noContentMounted.dispose()
 })
