@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
-import { ConfigurationError, DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
+import { ConfigurationError, DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, declareDefaultProduct, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, readDefaultProductSelection, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
 
 const minimalInteractionAgent = () => ({
   agentId: 'interaction-default',
@@ -52,6 +52,135 @@ test('pairing config resolves product paths without workspace or product config'
   } finally {
     if (previous === undefined) delete process.env.HUMANAGENT_HOME;
     else process.env.HUMANAGENT_HOME = previous;
+  }
+});
+
+test('pairing config selects the declared default product without environment', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-default-product-'));
+  const home = join(root, 'home');
+  const declaredRoot = join(root, 'declared-product');
+  await mkdir(home);
+  await mkdir(declaredRoot);
+  const previousHome = process.env.HOME;
+  const previousHumanagentHome = process.env.HUMANAGENT_HOME;
+  process.env.HOME = home;
+  delete process.env.HUMANAGENT_HOME;
+  try {
+    const declared = await declareDefaultProduct(declaredRoot);
+    assert.deepEqual(declared, { schemaVersion: 1, controlRoot: await realpath(declaredRoot) });
+    assert.deepEqual(await readDefaultProductSelection(), declared);
+    const paths = await resolveProductPaths({});
+    assert.equal(paths.controlRoot, await realpath(declaredRoot));
+    assert.match(formatPairingCommand(paths), /--control-root/);
+    for (const entry of ['security', 'config.toml', 'internal.toml']) {
+      await assert.rejects(() => stat(join(declaredRoot, entry)), /ENOENT/);
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousHumanagentHome === undefined) delete process.env.HUMANAGENT_HOME;
+    else process.env.HUMANAGENT_HOME = previousHumanagentHome;
+  }
+});
+
+test('pairing config explicit and environment roots bypass and preserve the declaration', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-default-precedence-'));
+  const home = join(root, 'home');
+  const declaredRoot = join(root, 'declared-product');
+  const explicitRoot = join(root, 'explicit-product');
+  const environmentRoot = join(root, 'environment-product');
+  await mkdir(home);
+  await mkdir(declaredRoot);
+  await mkdir(explicitRoot);
+  await mkdir(environmentRoot);
+  const previousHome = process.env.HOME;
+  const previousHumanagentHome = process.env.HUMANAGENT_HOME;
+  process.env.HOME = home;
+  delete process.env.HUMANAGENT_HOME;
+  try {
+    await declareDefaultProduct(declaredRoot);
+    const declarationPath = join(home, '.humanagent', 'default-product.toml');
+    const before = await readFile(declarationPath, 'utf8');
+    const explicit = await resolveProductPaths({ controlRoot: explicitRoot });
+    assert.equal(explicit.controlRoot, await realpath(explicitRoot));
+    assert.equal(await readFile(declarationPath, 'utf8'), before);
+    process.env.HUMANAGENT_HOME = environmentRoot;
+    const environment = await resolveProductPaths({});
+    assert.equal(environment.controlRoot, await realpath(environmentRoot));
+    assert.equal(await readFile(declarationPath, 'utf8'), before);
+    delete process.env.HUMANAGENT_HOME;
+    const declared = await resolveProductPaths({});
+    assert.equal(declared.controlRoot, await realpath(declaredRoot));
+    await writeFile(declarationPath, 'schemaVersion = 2\ncontrolRoot = "relative/root"\n', 'utf8');
+    const explicitAgain = await resolveProductPaths({ controlRoot: explicitRoot });
+    assert.equal(explicitAgain.controlRoot, await realpath(explicitRoot));
+    process.env.HUMANAGENT_HOME = environmentRoot;
+    const environmentAgain = await resolveProductPaths({});
+    assert.equal(environmentAgain.controlRoot, await realpath(environmentRoot));
+    delete process.env.HUMANAGENT_HOME;
+    let invalid: unknown;
+    try {
+      await resolveProductPaths({});
+    } catch (error) {
+      invalid = error;
+    }
+    assert.equal(invalid instanceof ConfigurationError, true);
+    assert.equal((invalid as ConfigurationError).code, 'default-product-selection-invalid');
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousHumanagentHome === undefined) delete process.env.HUMANAGENT_HOME;
+    else process.env.HUMANAGENT_HOME = previousHumanagentHome;
+  }
+});
+
+test('pairing config rejects invalid default declarations without initializing a product', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-default-invalid-'));
+  const home = join(root, 'home');
+  const bootstrap = join(home, '.humanagent');
+  await mkdir(bootstrap, { recursive: true });
+  const declarationPath = join(bootstrap, 'default-product.toml');
+  const previousHome = process.env.HOME;
+  const previousHumanagentHome = process.env.HUMANAGENT_HOME;
+  process.env.HOME = home;
+  delete process.env.HUMANAGENT_HOME;
+  try {
+    const invalidCases = [
+      'not valid toml =',
+      'schemaVersion = 2\ncontrolRoot = "/tmp/other-product"\n',
+      'schemaVersion = 1\ncontrolRoot = "relative/root"\n',
+      `schemaVersion = 1\ncontrolRoot = ${JSON.stringify(join(root, 'missing-product'))}\n`,
+      'schemaVersion = 1\ncontrolRoot = 7\n',
+    ];
+    for (const contents of invalidCases) {
+      await writeFile(declarationPath, contents, 'utf8');
+      let failure: unknown;
+      try {
+        await resolveProductPaths({});
+      } catch (error) {
+        failure = error;
+      }
+      assert.equal(failure instanceof ConfigurationError, true);
+      assert.equal((failure as ConfigurationError).code, 'default-product-selection-invalid');
+    }
+    for (const entry of ['security', 'config.toml', 'internal.toml']) {
+      await assert.rejects(() => stat(join(bootstrap, entry)), /ENOENT/);
+    }
+    const missingTarget = join(root, 'not-created-product');
+    let declareFailure: unknown;
+    try {
+      await declareDefaultProduct(missingTarget);
+    } catch (error) {
+      declareFailure = error;
+    }
+    assert.equal(declareFailure instanceof ConfigurationError, true);
+    assert.equal((declareFailure as ConfigurationError).code, 'default-product-selection-invalid');
+    await assert.rejects(() => stat(missingTarget), /ENOENT/);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousHumanagentHome === undefined) delete process.env.HUMANAGENT_HOME;
+    else process.env.HUMANAGENT_HOME = previousHumanagentHome;
   }
 });
 

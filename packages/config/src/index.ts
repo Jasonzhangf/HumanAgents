@@ -1,5 +1,5 @@
 import { lstatSync } from 'node:fs';
-import { chmod, mkdir, open as openFile, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { chmod, mkdir, open as openFile, readFile, readdir, realpath, rename, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
@@ -165,6 +165,11 @@ export interface ProductPaths {
   readonly controlRoot: string;
   readonly securityRoot: string;
   readonly webAccessCredentialPath: string;
+}
+
+export interface DefaultProductSelection {
+  readonly schemaVersion: 1;
+  readonly controlRoot: string;
 }
 
 export interface RuntimePaths {
@@ -1039,9 +1044,110 @@ function configuredTemplateRoot(): string | undefined {
   return value && value.trim() ? value : undefined;
 }
 
+function defaultProductSelectionPath(): string {
+  return join(homedir(), '.humanagent', 'default-product.toml');
+}
+
+function invalidDefaultProduct(message: string): never {
+  fail(
+    'default-product-selection-invalid',
+    message,
+    '修复 ~/.humanagent/default-product.toml，或重新运行 humanagent product use --control-root <path>',
+  );
+}
+
+async function validateDefaultProductRoot(value: unknown): Promise<string> {
+  if (typeof value !== 'string' || !value.trim()) {
+    invalidDefaultProduct('default product controlRoot must be a non-empty string');
+  }
+  if (!isAbsolute(value)) {
+    invalidDefaultProduct(`default product controlRoot must be an absolute path: ${value}`);
+  }
+  let info: ReturnType<typeof lstatSync>;
+  try {
+    info = lstatSync(value);
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') {
+      invalidDefaultProduct(`default product controlRoot does not exist: ${value}`);
+    }
+    throw error;
+  }
+  if (info.isSymbolicLink()) {
+    invalidDefaultProduct(`default product controlRoot cannot be a symlink: ${value}`);
+  }
+  const canonical = await realpath(value);
+  if (!(await stat(canonical)).isDirectory()) {
+    invalidDefaultProduct(`default product controlRoot is not a directory: ${value}`);
+  }
+  return canonical;
+}
+
+export async function readDefaultProductSelection(): Promise<DefaultProductSelection | undefined> {
+  const selectionPath = defaultProductSelectionPath();
+  let contents: string;
+  try {
+    const info = lstatSync(selectionPath);
+    if (info.isSymbolicLink()) {
+      invalidDefaultProduct(`default product declaration cannot be a symlink: ${selectionPath}`);
+    }
+    contents = await readFile(selectionPath, 'utf8');
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseToml(contents);
+  } catch (error) {
+    invalidDefaultProduct(`default product declaration is not valid TOML: ${(error as Error).message}`);
+  }
+  const keys = Object.keys(parsed);
+  if (keys.length !== 2 || !keys.includes('schemaVersion') || !keys.includes('controlRoot')) {
+    invalidDefaultProduct('default product declaration must contain only schemaVersion and controlRoot');
+  }
+  if (parsed.schemaVersion !== 1) {
+    invalidDefaultProduct(`default product declaration schemaVersion is unsupported: ${String(parsed.schemaVersion)}`);
+  }
+  return {
+    schemaVersion: 1,
+    controlRoot: await validateDefaultProductRoot(parsed.controlRoot),
+  };
+}
+
+export async function declareDefaultProduct(controlRoot: string): Promise<DefaultProductSelection> {
+  const canonicalRoot = await validateDefaultProductRoot(controlRoot);
+  const selectionPath = defaultProductSelectionPath();
+  const selectionRoot = dirname(selectionPath);
+  let directoryInfo: ReturnType<typeof lstatSync>;
+  try {
+    directoryInfo = lstatSync(selectionRoot);
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'ENOENT') throw error;
+    await mkdir(selectionRoot, { recursive: true });
+    directoryInfo = lstatSync(selectionRoot);
+  }
+  if (directoryInfo.isSymbolicLink() || !(await stat(selectionRoot)).isDirectory()) {
+    invalidDefaultProduct(`default product declaration directory is invalid: ${selectionRoot}`);
+  }
+  const contents = `schemaVersion = 1\ncontrolRoot = ${JSON.stringify(canonicalRoot)}\n`;
+  const tempPath = join(selectionRoot, `.default-product.toml.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  const handle = await openFile(tempPath, 'wx');
+  try {
+    await handle.writeFile(contents, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(tempPath, selectionPath);
+  return { schemaVersion: 1, controlRoot: canonicalRoot };
+}
+
 export async function resolveProductPaths(options: { readonly controlRoot?: string }): Promise<ProductPaths> {
   const environmentHome = (globalThis as { process?: { env?: { HUMANAGENT_HOME?: string } } }).process?.env?.HUMANAGENT_HOME;
-  const controlRoot = await canonicalizeControlRoot(resolve(options.controlRoot ?? environmentHome ?? join(homedir(), '.humanagent')));
+  const explicitRoot = options.controlRoot ?? environmentHome;
+  const controlRoot = explicitRoot !== undefined
+    ? await canonicalizeControlRoot(resolve(explicitRoot))
+    : (await readDefaultProductSelection())?.controlRoot ?? await canonicalizeControlRoot(join(homedir(), '.humanagent'));
   return {
     controlRoot,
     securityRoot: join(controlRoot, 'security'),
