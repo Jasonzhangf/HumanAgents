@@ -21,6 +21,10 @@ import { ProviderAgentDriver } from '../../../adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
 import { JsonlInteractionHelperJournal } from '../../../adapters/jsonl/src/interaction-helper-journal.js';
 import { JsonlInteractionParentTurnJournal } from '../../../adapters/jsonl/src/interaction-parent-turn-journal.js';
+import {
+  publishInteractionProviderSettlement,
+  readInteractionProviderSettlement,
+} from '../../../runtime/src/explicit-brain/interaction-parent-turn-raw.js';
 import type { AgentRole } from '../../../config/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import type { RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
@@ -409,6 +413,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     : undefined;
   // I2 product history is committed through the same task-control Organ Journal the runtime already
   // owns, so the read layer reuses that authority instead of introducing a second store.
+  const parentJournal = new JsonlInteractionParentTurnJournal(taskControlJournal);
+  const interactionScopeId = `runtime:${options.projectKey ?? options.organId.value}`;
   const explicitBrainInterpreter = options.explicitBrainInterpreter ?? (() => {
     const templateRoot = options.explicitBrainTemplateRoot?.trim();
     if (!templateRoot) {
@@ -420,8 +426,11 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     return createProviderExplicitBrainInterpreter({
       lease: resolveLease,
       binding: options.binding, templateRoot, organId: options.organId,
-      interactionScopeId: `runtime:${options.projectKey ?? options.organId.value}`,
-      parentJournal: new JsonlInteractionParentTurnJournal(taskControlJournal),
+      interactionScopeId,
+      parentJournal,
+      publishProviderSettlement: async (receipt) => {
+        await publishInteractionProviderSettlement({ journal: parentJournal, receipt });
+      },
       helperJournal,
       turnHelperJournal: helperJournal,
       checkpointJournal: helperJournal,
@@ -620,6 +629,12 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.explicitBrainAgentMessage === undefined ? {} : { explicitBrainAgentMessage: options.explicitBrainAgentMessage }),
     ...(options.explicitBrainAgentTargets === undefined ? {} : { explicitBrainAgentTargets: options.explicitBrainAgentTargets }),
     explicitBrainInterpreter,
+    explicitProviderSettlementRead: {
+      read: (input) => readInteractionProviderSettlement({
+        journal: parentJournal,
+        turn: { ...input, organId: options.organId, interactionScopeId },
+      }),
+    },
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimePaths === undefined ? {} : { runtimePaths: options.runtimePaths }),

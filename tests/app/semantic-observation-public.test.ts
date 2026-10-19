@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,8 +10,11 @@ import {
   type ScopeRef,
   type AnyProviderExecutionIdentityRef,
   type InteractionParentProviderExecutionIdentityRef,
+  type InteractionProviderSettlementReceipt,
   type InteractionTurnIdentity,
+  type JournalCommitRef,
   type ProviderStartInput,
+  type ProviderSettlement,
 } from '../../packages/contracts/src/index.js';
 import { prepareAgentProvider } from '../../packages/app/src/agent-driver-composition.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
@@ -68,6 +71,8 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
   const childStarts: AnyProviderExecutionIdentityRef[] = [];
   const requests: any[] = [];
   const lifecycle: string[] = [];
+  let rawParentSettlement: ProviderSettlement<InteractionParentProviderExecutionIdentityRef> | undefined;
+  let parentSettleCalls = 0;
   let turn: InteractionTurnIdentity | undefined;
   let helperCallId = '';
   const refinedText = '精炼后采纳的正文，保留 helper 的 incomplete 判断。';
@@ -76,7 +81,6 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
     knownFacts: ['accepted refined helper'], answer, decisionRefs: ['final-parent'] });
   const fields = {
     objective: 'bounded helper question', targetRefs: [], expectedOutputRefs: [],
-    expectedArtifactDigests: [], acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`,
     successCriteria: ['complete conclusion'], failureCriteria: ['no conclusion'],
     incompleteCriteria: ['partial conclusion'], requiredCapabilities: ['text-generation'], mergeGate: 'not-required',
   };
@@ -195,6 +199,20 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
         if (selection.roleId === 'interaction') lifecycle.push('parent:closed');
         return receipt;
       };
+      const settle = owned.port.settle.bind(owned.port);
+      owned.port.settle = async (input) => {
+        const settlement = await settle(input);
+        if (selection.roleId === 'interaction') {
+          parentSettleCalls += 1;
+          // The preparer is generic over the execution identity. This branch is
+          // the interaction parent role, so retain the declared identity type
+          // for comparison with the committed receipt.
+          rawParentSettlement = structuredClone(
+            settlement as ProviderSettlement<InteractionParentProviderExecutionIdentityRef>,
+          );
+        }
+        return settlement;
+      };
       return owned;
     };
     const auth = await testAccessControl(root);
@@ -222,10 +240,35 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
     const interpreted = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, { method: 'POST' });
     const receipt = await interpreted.text();
     assert.equal(interpreted.status, 200, receipt);
-    assert.ok(receipt.includes(answer), receipt);
+    const interpretedBody = JSON.parse(receipt) as {
+      readonly state: string;
+      readonly reply?: string;
+      readonly draft?: unknown;
+    };
+    assert.equal(interpretedBody.state, 'answered', receipt);
+    assert.ok(interpretedBody.reply?.includes(answer), receipt);
+    assert.equal(interpretedBody.draft, undefined);
+    assert.equal(runtime.service.listTasks().counts.total, 0, 'a simple answer must not create a Task or FIFO row');
     assert.equal(parentStarts.length, 1); assert.equal(childStarts.length, 1);
+    assert.ok(turn);
+    assert.ok(rawParentSettlement);
+    assert.equal(parentSettleCalls, 1);
     assert.deepEqual(requests.map((body) => body.model), ['parent-model', 'child-model', 'parent-model', 'parent-model']);
     const snapshot = await parentJournal.readTurnSnapshot(turn!);
+    assert.equal(snapshot.providerSettlements.length, 1);
+    const durableReceipt = snapshot.providerSettlements[0]!;
+    assert.deepEqual(durableReceipt.fact.settlement, rawParentSettlement);
+    const parentRequestIds = new Set(snapshot.requests
+      .map(({ fact }) => fact.request.parentRequestId)
+      .filter((requestId): requestId is string => requestId !== undefined));
+    const terminalRequests = snapshot.requests.filter(({ fact }) =>
+      fact.phase === 'settled' && !parentRequestIds.has(fact.request.requestId));
+    assert.equal(terminalRequests.length, 1);
+    assert.deepEqual(durableReceipt.fact.request, terminalRequests[0]!.fact.request);
+    assert.ok(
+      durableReceipt.fact.request.turnId !== durableReceipt.fact.settlement.interactionTurn.turnId,
+      'the physical request turn path must remain separate from the logical interaction turn',
+    );
     const calls = snapshot.acceptedFacts.filter(({ fact }) => fact.envelope.fact.kind === 'tool-call');
     const results = snapshot.acceptedFacts.filter(({ fact }) => fact.envelope.fact.kind === 'tool-result');
     assert.equal(calls.length, 2); assert.equal(results.length, 2);
@@ -237,6 +280,40 @@ test('default explicit parent persists raw tool loop and explicitly accepts an i
       assert.equal(new TextDecoder().decode(stored), wireResult.output, 'tool continuation must preserve exact committed output bytes');
     }
     assert.ok(helperCallId);
+    const journalBeforeRead = await readFile(journalPath, 'utf8');
+    const requestsBeforeRead = requests.length;
+    const lifecycleBeforeRead = [...lifecycle];
+    const settleCallsBeforeRead = parentSettleCalls;
+    const taskCountsBeforeRead = runtime.service.listTasks().counts;
+    const settlementRead = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}/control/provider-settlement`
+        + `?inputRevision=${durableReceipt.fact.inputRevision}&turnId=${encodeURIComponent(turn!.turnId)}`,
+    );
+    const settlementReadText = await settlementRead.text();
+    assert.equal(settlementRead.status, 200, settlementReadText);
+    const settlementReadBody = JSON.parse(settlementReadText) as {
+      readonly fact: InteractionProviderSettlementReceipt;
+      readonly commit: JournalCommitRef;
+    };
+    assert.deepEqual(settlementReadBody.fact, durableReceipt.fact);
+    assert.deepEqual(settlementReadBody.commit, durableReceipt.commit);
+    assert.deepEqual(settlementReadBody.fact.settlement, rawParentSettlement);
+    assert.deepEqual(await parentJournal.readTurnSnapshot(turn!), snapshot);
+    assert.equal(await readFile(journalPath, 'utf8'), journalBeforeRead, 'the control read must not append Journal records');
+    assert.equal(requests.length, requestsBeforeRead, 'the control read must not call the Provider');
+    assert.deepEqual(lifecycle, lifecycleBeforeRead, 'the control read must not close the Provider');
+    assert.equal(parentSettleCalls, settleCallsBeforeRead, 'the control read must not settle the Provider');
+    assert.deepEqual(runtime.service.listTasks().counts, taskCountsBeforeRead);
+    const inspectedAfterRead = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}`);
+    assert.equal(inspectedAfterRead.status, 200);
+    const completedAfterRead = await inspectedAfterRead.json() as {
+      readonly state: string;
+      readonly reply?: string;
+      readonly draft?: unknown;
+    };
+    assert.equal(completedAfterRead.state, 'answered');
+    assert.equal(completedAfterRead.reply, interpretedBody.reply);
+    assert.equal(completedAfterRead.draft, undefined);
     // Observed missing default checkpoint wiring loses cross-turn history.
     // One added parent request below checks the actual wire, not assembly args.
     const firstCommit = await helperJournal.readSemanticCheckpointExact(turn!);
