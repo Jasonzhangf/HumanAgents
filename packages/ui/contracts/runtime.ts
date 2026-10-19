@@ -251,6 +251,11 @@ export interface RuntimeTaskRowProjection {
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;
+  readonly allowedActions: readonly string[];
+  readonly output: string;
+  readonly publicOutput?: PublicOutputPublicationProjection;
+  readonly error?: RuntimeTaskErrorProjection;
+  readonly checkpoint?: RuntimeTaskCheckpointProjection;
   readonly entry: 'task-dashboard';
 }
 

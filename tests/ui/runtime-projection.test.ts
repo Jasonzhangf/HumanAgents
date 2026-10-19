@@ -160,6 +160,32 @@ test('runtime task list classifies every task into a visible projection group', 
   assert.deepEqual(list.counts, { running: 1, waiting: 0, completed: 1, stopped: 1, draft: 1, failed: 1, total: 5 });
 });
 
+test('runtime task rows retain existing terminal actions and result facts', () => {
+  const completed = {
+    ...runtimeTask('succeeded', 9),
+    currentState: '已完成',
+    nextStep: '查看任务详情',
+    allowedActions: ['start'],
+    output: 'committed result',
+    publicOutput: {
+      state: 'committed',
+      commits: [{ commitId: 'out-1', journalSeq: 1, recordDigest: 'digest-1', text: 'committed result' }],
+    },
+    error: {
+      code: 'retained.failure', ownerId: 'runtime', message: 'retained',
+      retryable: false, nextAction: 'recover',
+    },
+    checkpoint: { checkpointId: 'cp-9', seq: 9, outcome: 'succeeded', summary: 'closed' },
+  } satisfies RuntimeTaskSnapshotInput;
+  const row = projectRuntimeTaskList({ mode: 'fake', tasks: [completed] }).completed[0];
+  assert.deepEqual(row.allowedActions, ['start']);
+  assert.equal(row.output, 'committed result');
+  assert.equal(row.publicOutput?.commits[0]?.text, 'committed result');
+  assert.equal(row.error?.code, 'retained.failure');
+  assert.equal(row.checkpoint?.checkpointId, 'cp-9');
+  assert.equal(row.nextStep, '查看任务详情');
+});
+
 test('task waiting copy describes settlement without guessing activity from raw nodes', () => {
   const task: RuntimeTaskSnapshotInput = {
     ...runtimeTask('running', 1),

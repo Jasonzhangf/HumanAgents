@@ -363,6 +363,11 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
     currentState: source.currentState,
     nextStep: source.nextStep,
     updatedAt: source.updatedAt,
+    allowedActions: source.allowedActions,
+    output: source.output,
+    ...(source.publicOutput === undefined ? {} : { publicOutput: projectPublicOutputPublication(source.publicOutput) }),
+    ...(source.error === undefined ? {} : { error: source.error }),
+    ...(source.checkpoint === undefined ? {} : { checkpoint: source.checkpoint }),
     entry: 'task-dashboard',
   };
 }
