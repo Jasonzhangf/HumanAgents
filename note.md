@@ -1,12 +1,16 @@
 # HumanAgent 项目状态汇总（2026-10-19）
 
-## 2026-10-19 Provider/native：原 blocked turn 真实恢复通过
+## 2026-10-19 交付：任务分流、单项状态展示与原 turn 恢复
+
+本轮 UX 已交付：任务类型由显式 Brain 推理，用户不再选择；语义短标题与完整任务说明分别保存。一次需求只有一个执行 occurrence，业务父任务不再另启执行。列表只呈现一项业务任务，内部执行记录按需展开；系统受阻不再冒充等待决策。完成页直接显示交付结果，不再显示等待原因或无可执行入口的下一步。历史任务读取带原项目范围，授权仍由独立控制目标决定；手机使用底部抽屉。原始失败原因保留在可打开的技术详情中。
 
 Runtime 删除 inspect completion 的重复工具范围 digest 证据条件。合法 file.list 的实际输出已由原始结果及已提交 completion 关联证明，不应再要求重复表示。原始字节 digest、精确调用关联、唯一 completion、失败和副作用拒绝仍保留。源码提交为 `0fcdc1e5`、`f5e22c08`、`833ddec9`；只涉及 Runtime 唯一 owner 和既有公开消费者测试。相同错误 RED 后，直接消费者及真实 producer/cold boundary 两项 GREEN；应用构建和测试编译通过。
 
 Root 已安装候选包并通过正式 restart 从 generation1/PID63385 换到 generation2/PID26902/55215，旧实例 clean。原 Task/operation/turn/epoch1 经正式 resume 成功完成。完整增量只有三条 control 和两条 UI 记录；已提交的保存和 Planner alignment 被复用，没有新的执行者、工具、Planner 或 grant 记录。原 Journal 前缀和 workspace 字节不变。真实浏览器显示已完成和原三行报告。证据位于 `/Volumes/Intel/playground/humanagent/.worker-runs/global-inspect-completion-20261019/root-recovery-acceptance.md`。
 
-本增量真实行为验收已完成。fresh OAuth `gpt-6.1-sol` 显式 medium 独立增量审查 exit0、findings=[]，有效 PASS；启动和完整结果为同目录 `review-medium-launch.json`、`review-medium-final.json`。首次 controller 未显式设置 effort 的结果不充当 medium 准入。main 集成正在收口。main 正式构建、全局安装和运行验收、推送及最终资源清理由 Root 接续。本记录不表示整个 Provider/ACP 或整个项目全部完成；旧 UX、DSH 和其他未验收范围不因此变为完成。
+本增量真实行为验收已完成。fresh OAuth `gpt-6.1-sol` 显式 medium 独立增量审查 exit0、findings=[]，有效 PASS；启动和完整结果为同目录 `review-medium-launch.json`、`review-medium-final.json`。首次 controller 未显式设置 effort 的结果不充当 medium 准入。源码已集成 main `de39e81d` 并成功推送。main 的受影响 App 构建、打包和全局安装均 exit0；正式 restart 将用户实例从 generation53/PID93224 更新为 generation54/PID74975，端口53007及原产品、workspace、配对保留，旧实例 clean。安装后原任务页的语义失败展示和详情入口已实测；没有授权、重跑或停止用户原审计任务，其旧受阻状态保持真实。
+
+本轮自测实例 PID26902 已退出；只删除本轮新增的 workspace-failure-view 及其独立项目 namespace、任务独占 npm-cache，并关闭自测页。候选 worktree 已正常移除和 prune，注册工作树2→1，仅保留 main/control。四个既存未注册目录不属于本轮资源，归属未确认，保留未动。实际恢复结果、单项完成列表、截图、独立审查和部署回执保留在上述 run 目录。旧自测归档数据明确保留，不称已删除全部测试数据。本记录不表示整个 Provider/ACP 或整个项目全部完成；DSH 和其他未验收范围不因此变为完成。
 
 ## 2026-10-19 交付：全局任意目录启动与持久配对
 
