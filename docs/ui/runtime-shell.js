@@ -411,6 +411,35 @@ export function taskRowTitle(task) {
     : '未整理名称的任务'
 }
 
+export function taskFlowText(taskFlow) {
+  return { 'one-shot': '单次任务', inspection: '巡检任务', 'long-running': '长程任务' }[taskFlow?.kind] || ''
+}
+
+export function taskExecutionHref(child, control = false) {
+  if (control && !child.controlTarget) return undefined
+  const scope = child.controlTarget ? { kind: 'task', ...child.controlTarget } : undefined
+  return control ? taskControlHref(child.taskId, scope) : taskDashboardHref(child.taskId, scope)
+}
+
+export function renderTaskExecutions(task) {
+  if (!task.executions?.length) return null
+  const details = element('details', undefined, 'section')
+  details.append(element('summary', `执行记录（${task.executions.length}）`))
+  for (const child of task.executions) {
+    const record = element('div', undefined, 'stack')
+    const read = element('a', `查看执行记录 · ${child.stateLabel || child.currentState}`, 'button button--sm')
+    read.href = taskExecutionHref(child)
+    record.append(element('p', taskRowStateText(child)), read)
+    if (child.controlTarget) {
+      const control = element('a', '管理此执行', 'button button--sm')
+      control.href = taskExecutionHref(child, true)
+      record.append(control)
+    }
+    details.append(record)
+  }
+  return details
+}
+
 export function taskRowStateText(task) {
   const state = task?.currentState || task?.stateLabel || task?.state || ''
   if (!task) return state
@@ -444,9 +473,13 @@ function renderTaskReadRow(row, options = {}) {
     element('span', row.basis === 'live-runtime' ? '当前实例' : '持久历史', 'scope-basis'),
     element('time', formatTime(task.updatedAt)),
   )
+  const taskType = taskFlowText(task.taskFlow)
+  if (taskType) meta.append(element('span', taskType))
   if (options.reasonLabel) meta.append(element('span', options.reasonLabel, 'task-flow-reason'))
   link.append(meta)
   item.append(link)
+  const executions = renderTaskExecutions(task)
+  if (executions) item.append(executions)
   return item
 }
 

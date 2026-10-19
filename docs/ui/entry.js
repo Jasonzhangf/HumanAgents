@@ -9,9 +9,11 @@ import {
   observationHref,
   renderPageError,
   renderRuntimeStatus,
+  renderTaskExecutions,
   stateTone,
   taskRowStateText,
   taskRowTitle,
+  taskFlowText,
   taskDashboardHref,
   technicalDetailTrigger,
 } from './runtime-shell.js'
@@ -173,6 +175,8 @@ function renderDraft(snapshot) {
     if (typeof snapshot.revision?.title === 'string' && snapshot.revision.title.trim() !== '') {
       renderField(grid, '任务名称', snapshot.revision.title)
     }
+    const taskType = taskFlowText(snapshot.revision?.taskFlow)
+    if (taskType) renderField(grid, '任务类型', taskType)
     renderField(grid, '意图', snapshot.draft.proposedIntent)
     renderField(grid, '规范化输入', snapshot.draft.normalizedInput)
     renderField(grid, '已知事实', (snapshot.draft.knownFacts || []).join('\n'))
@@ -236,9 +240,13 @@ function renderStatus(summary, rows) {
     stateChip.dataset.tone = stateTone(row.state)
     const meta = element('div', undefined, 'item-meta')
     meta.append(element('time', formatTime(row.updatedAt)))
+    const taskType = taskFlowText(row.taskFlow)
+    if (taskType) meta.append(element('span', taskType))
     link.append(copy, stateChip, meta)
     link.style.textDecoration = 'none'
     list.append(link)
+    const executions = renderTaskExecutions(row)
+    if (executions) list.append(executions)
   }
   section.append(list)
 }
