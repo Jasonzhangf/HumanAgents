@@ -8,8 +8,10 @@ import {
   renderSystemRead,
   renderPageError,
   renderRuntimeStatus,
+  renderTaskExecutions,
   taskRowStateText,
   taskRowTitle,
+  taskFlowText,
   taskDashboardHref,
 } from './runtime-shell.js'
 import {
@@ -209,6 +211,8 @@ function taskRow(row) {
     element('span', row.stateLabel || row.state || '', 'task-state-pill'),
     element('time', formatTime(row.updatedAt)),
   )
+  const taskType = taskFlowText(row.taskFlow)
+  if (taskType) meta.append(element('span', taskType))
   link.append(meta)
   const actions = element('div', undefined, 'task-item-actions')
   actions.append(
@@ -216,6 +220,8 @@ function taskRow(row) {
     actionButton('删除', true, (btn) => runDelete(row, btn)),
   )
   item.append(link, actions)
+  const executions = renderTaskExecutions(row)
+  if (executions) item.append(executions)
   return item
 }
 
