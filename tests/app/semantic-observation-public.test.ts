@@ -510,6 +510,28 @@ test('public semantic HTTP/SSE preserves canonical pairing, unknown states, refs
 
     assert.equal(semantic.projectionVersion, 'runtime-semantic-v1');
     assert.equal(semantic.publicCommitWatermark, expected);
+    // Known omission: the bound semantic builder forwarded only the watermark
+    // and dropped the typed publication body. Frequency is unknown; the impact
+    // is that the public semantic read cannot show confirmed text, order, or
+    // refs. Cost: one assertion block on the existing fixture, no new runtime.
+    assert.ok(publication, 'fixture must expose a typed committed publication');
+    if (publication === undefined) throw new Error('missing typed committed publication');
+    assert.equal(semantic.publicOutput?.state, publication.state);
+    assert.equal(semantic.publicOutput?.publicCommitWatermark, expected);
+    assert.deepEqual(
+      semantic.publicOutput?.commits.map((commit) => ({
+        commitId: commit.ref.commitId,
+        journalSeq: commit.ref.journalSeq,
+        recordDigest: commit.ref.recordDigest,
+        text: commit.text,
+      })),
+      publication.commits.map((commit) => ({
+        commitId: commit.commitId,
+        journalSeq: commit.journalSeq,
+        recordDigest: commit.recordDigest,
+        text: commit.text,
+      })),
+    );
     assert.equal(semantic.scope.organId.value, organId.value);
     assert.equal(semantic.scope.taskId?.value, task.taskId.value);
     assert.equal(semantic.scope.operationId?.value, started.operationId.value);
@@ -543,6 +565,25 @@ test('public semantic HTTP/SSE preserves canonical pairing, unknown states, refs
     const frames = [...sseText.matchAll(/data: (.+)$/gm)].map((match) => JSON.parse(match[1]!) as RuntimeSemanticObservationEnvelope);
     assert.equal(frames.length >= 1, true);
     assert.equal(frames.at(-1)?.publicCommitWatermark, expected);
+    const terminalFrame = frames.at(-1);
+    assert.ok(terminalFrame, 'the SSE stream must emit at least one semantic frame');
+    if (terminalFrame === undefined) throw new Error('missing terminal semantic frame');
+    assert.equal(terminalFrame.publicOutput?.state, publication.state);
+    assert.equal(terminalFrame.publicOutput?.publicCommitWatermark, expected);
+    assert.deepEqual(
+      terminalFrame.publicOutput?.commits.map((commit) => ({
+        commitId: commit.ref.commitId,
+        journalSeq: commit.ref.journalSeq,
+        recordDigest: commit.ref.recordDigest,
+        text: commit.text,
+      })),
+      publication.commits.map((commit) => ({
+        commitId: commit.commitId,
+        journalSeq: commit.journalSeq,
+        recordDigest: commit.recordDigest,
+        text: commit.text,
+      })),
+    );
     assert.equal(frames.at(-1)?.events.some((event) => event.type === 'operation.completed'), true);
     assert.equal(frames.at(-1)?.pairing.some((group) => group.kind === 'operation' && group.state === 'closed'), true);
 
