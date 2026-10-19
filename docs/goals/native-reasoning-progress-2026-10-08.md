@@ -1,5 +1,9 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-18 最新定位：epoch7 首偏离在 RCC 标准化校验
+
+精确候选的请求正文与HA样本已建立语义对应。RCC在V3Req04把合法工具参数schema中的requiredCapabilities误判为side-channel字段并拒绝，provider attempts为空。尚无上游请求或wire599证据。源码owner正在接收该校验边界问题；不得删HA字段绕过或追加原问题请求。具体证据与边界只维护于 `note.md` 最新定位段及epoch7-candidate-reception.md。完整目标未完成。
+
 ## 2026-10-18 最新：原问答一次验证失败，预算已用尽
 
 Receipt 增量标准交付后，原交互保持原输入/turn/binding执行一次，epoch7仍返回HTTP409/transport.failure/UND_ERR_SOCKET，资源closed，无答案或成功settlement。Task与任务checkpoint未变，禁止追加请求。具体样本、预检边界和恢复责任只维护于 `note.md` 最新现场段及对应 Root 接收记录。新样本正在只读关联，根因仍未知；完整目标未完成。

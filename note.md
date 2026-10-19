@@ -1,5 +1,13 @@
 # HumanAgent 项目状态汇总（2026-10-18）
 
+## 2026-10-18 最新定位：RCC 拒绝合法工具 schema 字段
+
+epoch7 新窗的一次筛选得到唯一 MiniMax-M3 错误候选。对该候选四份原始文件的有界只读对照已建立正文语义对应：全部 input 文本等于 HA requestContext，两个工具的名称、说明和完整参数 schema 相等，RCC instructions 以完整 HA instructions 为后缀；原问题、interaction2/revision1及任务上下文一致。这是正文对应，不是 RCC 保存了 HA request ID 的声明。
+
+首个明确拒绝在 RCC `V3Req04StandardizedResponses`：`RouteCodex side-channel field requiredCapabilities cannot enter request payload`。入站顶层只有 input/instructions/model/stream/tools；该字段实际位于 `tools[0].parameters.properties.assignmentFields.properties.requiredCapabilities`，属于合法函数参数定义。provider attempts为空，terminal为no_response，没有本候选的上游请求证据。RCC内部599及错误链不证明wire返回599，HA的409仍是独立公开错误；没有headers/SSE字节，不能虚构线上的HTTP终止方式。
+
+精确候选和对照记录在 `/Volumes/Intel/playground/humanagent/.worker-runs/native-taskless-shape-revalidation-plan-20261018/epoch7-candidate-reception.md`。RCC源码判定尚待其唯一owner确认并最小修复，不能把合法工具schema属性当控制字段，也不能删HA字段绕过。原问答一次预算已用尽，不追加请求或模型probe。完整目标继续开放；receipt增量交付结论不变。
+
 ## 2026-10-18 最新现场：原简单问答 epoch7 仍因连接终止失败
 
 Receipt 增量标准交付完成后，Root 按已有独立计划执行一次原 `interaction-2` 的公开 interpret。首次预检因 checkpoint 读取 URL 缺少既有 projectKey/mode 参数而停止，业务请求0；修正仅限验收脚本的只读 URL，原错保留。随后现场前置通过，保持原输入、revision1、逻辑 turn 和完整 binding，唯一一次业务调用生成 epoch7/request `request-c5e6ce5d-1dd6-4036-907f-ac2c225fc259`。
