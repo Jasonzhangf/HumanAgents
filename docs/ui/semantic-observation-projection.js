@@ -299,6 +299,9 @@ function publicCommitEvidence(commit) {
     `journalSeq: ${text(ref.journalSeq)}`,
     `recordDigest: ${text(ref.recordDigest)}`,
     ...(binding.executionEpoch === undefined ? [] : [`executionEpoch: ${text(binding.executionEpoch)}`]),
+    ...(binding.harnessTurnId === undefined ? [] : [`harnessTurnId: ${text(binding.harnessTurnId)}`]),
+    ...(binding.providerTurnId === undefined ? [] : [`providerTurnId: ${text(binding.providerTurnId)}`]),
+    ...(binding.requestId === undefined ? [] : [`requestId: ${text(binding.requestId)}`]),
     ...coverageScopeRefs(scope).map((entry) => `scope: ${entry}`),
   ]
   return {

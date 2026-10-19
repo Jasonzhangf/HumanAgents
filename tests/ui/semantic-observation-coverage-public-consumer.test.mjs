@@ -248,7 +248,13 @@ test('coverage reasons stay human-readable while exact refs remain in read-only 
 })
 
 test('typed public output keeps exact committed text and states without false emptiness', () => {
-  const binding = { scope, executionEpoch: 3, requestId: 'request-public' }
+  const binding = {
+    scope,
+    executionEpoch: 3,
+    harnessTurnId: 'harness-turn-public',
+    providerTurnId: 'provider-turn-public',
+    requestId: 'request-public',
+  }
   const firstText = '  已确认第一段\n\n第二行保留空白  \n'
   const secondText = '\n第三段\t尾部空白  '
   const commits = [
@@ -303,6 +309,12 @@ test('typed public output keeps exact committed text and states without false em
   assert.ok(firstEvidence.refs.includes('journalSeq: 41'))
   assert.ok(firstEvidence.refs.includes('recordDigest: sha256:first'))
   assert.ok(firstEvidence.refs.includes('scope: operation:operation-f03'))
+  assert.ok(firstEvidence.refs.includes('harnessTurnId: harness-turn-public'))
+  assert.ok(firstEvidence.refs.includes('providerTurnId: provider-turn-public'))
+  assert.ok(firstEvidence.refs.includes('requestId: request-public'))
+  assert.match(firstEvidence.raw.content, /harnessTurnId: harness-turn-public/)
+  assert.match(firstEvidence.raw.content, /providerTurnId: provider-turn-public/)
+  assert.match(firstEvidence.raw.content, /requestId: request-public/)
   assert.equal('occurredAt' in firstEvidence, false)
 
   const host = new FakeNode('div')
