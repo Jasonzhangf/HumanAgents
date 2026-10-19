@@ -481,15 +481,6 @@ export async function readStandardTurnDelivery(
           `the accepted inspect result for ${inspectCompletion.callId} has no actual output reference`);
       }
       const outputRef = result.outputRef ?? rawOutput.ref.locator;
-      if (!inspectCompletion.evidenceRefs.some((evidence) => evidence.kind === 'tool'
-        && evidence.scope.organId.value === inspectCompletion.scope.organId.value
-        && evidence.scope.taskId?.value === inspectCompletion.scope.taskId?.value
-        && evidence.scope.cycleId?.value === inspectCompletion.scope.cycleId?.value
-        && evidence.scope.operationId?.value === inspectCompletion.toolOperationId.value
-        && evidence.digest === bytesDigest)) {
-        throw new StandardTurnDeliveryError('standard-turn-delivery.completion-conflict',
-          `the inspect completion for ${inspectCompletion.callId} has no matching tool-scoped output evidence`);
-      }
       materials.push({
         kind: 'inspect-tool-report', deliveryEvidence: delivery, acceptedToolResult: fact,
         inspectCompletion, rawOutput, bytes, outputRef, outputDigest: bytesDigest,

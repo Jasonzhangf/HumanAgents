@@ -413,53 +413,62 @@ if (!coldConsumerMode) test('App child checkpoint adapter commits native pre/rev
     originalEpoch: originalAdmittedTurn.executionEpoch, segmentEpoch: segmentPre.checkpoint.executionEpoch, fixture: root }));
 });
 
-// Observed failure: a committed inspect result strands settling without an
-// effect completion. Impact: delivery cannot close. Cost: one in-memory public
-// consumer fixture; other boundary failure probabilities are unknown.
+// Observed failure: a committed file.list inspect result strands settling
+// without an effect completion. Impact: delivery cannot close. Cost: one
+// in-memory public consumer fixture; other boundary failure probabilities are
+// unknown.
 if (!coldConsumerMode) test('direct Runtime inspect delivery consumes verified raw bytes without an effect receipt', async () => {
   const scope: ScopeRef = { organId: id('organ', 'inspect-organ'), taskId: id('task', 'inspect-task'), cycleId: id('cycle', 'inspect-cycle'), operationId: id('operation', 'parent') };
-  const toolOperationId = id('operation', 'inspect-operation');
-  const bytes = new TextEncoder().encode('accepted read output 體\n');
+  const toolOperationId = id('operation', 'provider-tool-parent-list-call');
+  const listReport = {
+    workspaceRef: 'workspace', path: '.', entries: [{ path: 'read-delivery.txt', kind: 'file' }],
+    truncated: false, unresolvedPaths: [],
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(listReport));
   const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-  const evidence: EvidenceRef = { evidenceId: id('evidence', 'read-output'), kind: 'tool', source: 'inspect-consumer', locator: 'asset://read-output', digest, scope: { ...scope, operationId: toolOperationId } };
+  const appEvidence: EvidenceRef = { evidenceId: id('evidence', 'list-output'), kind: 'tool', source: 'humanagent.app.provider-tool-execution', locator: 'provider-tool://list-call-file-list/list-call-file-list', scope: { ...scope, operationId: toolOperationId } };
+  const rawRef: EvidenceRef = { evidenceId: id('evidence', 'list-raw-output'), kind: 'tool', source: 'humanagent.provider-adapter', locator: 'provider-tool://list-call-file-list/raw', digest, scope };
   const execution = { runtimeId: 'inspect-runtime', taskId: scope.taskId!, operationId: scope.operationId!, organId: scope.organId, cycleId: scope.cycleId!, executionEpoch: 3 };
-  const outputRef = 'asset://provider-tool/output/inspect-operation';
   const fact: AcceptedRawFact = { seq: 96, envelope: { execution, scope, request: { turnId: 'turn', requestId: 'request' }, producerSeq: 1, fact: {
-    kind: 'tool-result', contentUnitId: 'result', callId: 'read-call', continuationRef: 'continuation', complete: true,
-    result: { ...execution, toolId: 'file.read', callId: 'read-call', status: 'succeeded', outputRefs: [outputRef], outputRef, outputDigest: digest, evidenceRefs: [evidence] },
-    rawOutput: { ref: evidence, view: { kind: 'utf8-text' } },
+    kind: 'tool-result', contentUnitId: 'result', callId: 'list-call', continuationRef: 'continuation', complete: true,
+    result: { ...execution, toolId: 'file.list', callId: 'list-call', status: 'succeeded', outputRefs: [], evidenceRefs: [appEvidence] },
+    rawOutput: { ref: rawRef, view: { kind: 'utf8-text' } },
   } } };
   const assignment: WorkAssignment = { assignmentId: 'assignment', taskId: scope.taskId!, pipelineNodeId: 'node', attempt: 1, executionEpoch: 3, inputRevision: 1, objective: 'deliver read output', targetRefs: [], expectedOutputRefs: [], successCriteria: [], failureCriteria: [], incompleteCriteria: [], requiredCapabilities: [], mergeGate: 'not-required' };
-  const section = { text: 'read output', evidenceRefs: [evidence] };
-  const acceptedEnd: StandardTurnEndCommand = { kind: 'standard-turn-end', identity: { turnId: 'turn', workAssignmentRef: assignment.assignmentId, taskRef: assignment.taskId, scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 3, runtimeBindingRef: 'binding', permissionRevision: 'permission' }, summary: { goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [evidence.locator], resolvedEvidenceRefs: [evidence] };
-  const inspect: InspectToolCompletionDescriptor = { execution, scope: evidence.scope, toolOperationId, requestId: 'request', callId: 'read-call', toolId: 'file.read', intentKind: 'inspect', status: 'succeeded', evidenceRefs: [evidence] };
+  const section = { text: 'list output', evidenceRefs: [rawRef] };
+  const acceptedEnd: StandardTurnEndCommand = { kind: 'standard-turn-end', identity: { turnId: 'turn', workAssignmentRef: assignment.assignmentId, taskRef: assignment.taskId, scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 3, runtimeBindingRef: 'binding', permissionRevision: 'permission' }, summary: { goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [rawRef.locator], resolvedEvidenceRefs: [rawRef] };
+  const inspect: InspectToolCompletionDescriptor = { execution, scope: appEvidence.scope, toolOperationId, requestId: 'request', callId: 'list-call', toolId: 'file.list', intentKind: 'inspect', status: 'succeeded', evidenceRefs: [appEvidence] };
   const input: StandardTurnDeliveryReadInput = { assignment, acceptedEnd, entries: [fact], completionLookups: [], inspectCompletions: [inspect] };
   const unexpectedEffect = async (): Promise<never> => { throw new Error('inspect must not read or invent effect completion'); };
   const rawContent: RawContentReadPort = { async read(request) { assert.deepEqual(request, { scope, content: fact.envelope.fact.kind === 'tool-result' ? fact.envelope.fact.rawOutput : undefined }); return bytes; } };
   const reader: StandardTurnDeliveryReaderPort = { rawContent, completion: { readExact: unexpectedEffect, commitIntent: unexpectedEffect, commitCompletion: unexpectedEffect, discoverExactExecution: unexpectedEffect } };
   const readback = await readStandardTurnDelivery(input, reader);
-  assert.equal(readback.materials[0]?.kind, 'inspect-tool-report');
-  assert.deepEqual(readback.materials[0]?.bytes, bytes);
-  assert.equal('completion' in readback.materials[0]!, false);
+  const readMaterial = readback.materials[0];
+  assert.equal(readMaterial?.kind, 'inspect-tool-report');
+  if (readMaterial?.kind !== 'inspect-tool-report') throw new Error('fixture must produce an inspect-tool-report material');
+  assert.deepEqual(readMaterial.bytes, bytes);
+  assert.equal(new TextDecoder('utf-8', { fatal: true }).decode(readMaterial.bytes), JSON.stringify(listReport));
+  assert.equal('completion' in readMaterial, false);
+  assert.equal(readMaterial.rawOutput.ref.locator, rawRef.locator);
   const binding = bindAssignmentDelivery({ assignment, readback });
-  assert.deepEqual(binding.outputRefs, [outputRef]);
-  assert.deepEqual(binding.producedArtifactRefs, [outputRef]);
-  assert.deepEqual(binding.producedArtifactBodies, [new TextDecoder().decode(bytes)]);
+  assert.deepEqual(binding.outputRefs, [rawRef.locator]);
+  assert.deepEqual(binding.producedArtifactRefs, [rawRef.locator]);
+  assert.deepEqual(binding.producedArtifactBodies, [JSON.stringify(listReport)]);
 
   const rejects = async (candidate: StandardTurnDeliveryReadInput, code: StandardTurnDeliveryError['code']): Promise<void> => {
     await assert.rejects(() => readStandardTurnDelivery(candidate, reader), (error: unknown) => error instanceof StandardTurnDeliveryError && error.code === code);
   };
-  // Missing positive control must never turn a mutating tool into inspect.
+  // Missing positive control must never fabricate a completion from raw bytes.
   assert.equal(fact.envelope.fact.kind, 'tool-result');
   if (fact.envelope.fact.kind !== 'tool-result') throw new Error('fixture must be a tool result');
   const resultFact = fact.envelope.fact;
   const withResult = (result: typeof resultFact.result): AcceptedRawFact => ({ ...fact, envelope: { ...fact.envelope, fact: { ...resultFact, result } } });
-  await rejects({ ...input, inspectCompletions: [], entries: [withResult({ ...resultFact.result, toolId: 'file.write' })] }, 'standard-turn-delivery.completion-unknown');
+  await rejects({ ...input, inspectCompletions: [] }, 'standard-turn-delivery.completion-unknown');
   await rejects({ ...input, entries: [withResult({ ...resultFact.result, outputDigest: `sha256:${'0'.repeat(64)}` })] }, 'standard-turn-delivery.artifact-conflict');
   await rejects({ ...input, entries: [withResult({ ...resultFact.result, status: 'failed' })] }, 'standard-turn-delivery.completion-conflict');
-  await rejects({ ...input, entries: [withResult({ ...resultFact.result, executionFact: { identity: { surface: 'native', toolId: 'file.read', bindingRef: 'binding', route: 'native' }, requestRef: 'request', state: 'succeeded', rawEvidenceRefs: [evidence.locator] } })] }, 'standard-turn-delivery.completion-conflict');
-  await rejects({ ...input, inspectCompletions: [{ ...inspect, evidenceRefs: [{ ...evidence, scope }] }] }, 'standard-turn-delivery.completion-conflict');
-  await rejects({ ...input, completionLookups: [{ commitIdentity: `operation-completion:v1:${'1'.repeat(64)}`, effectId: `file-write-effect:v1:${'2'.repeat(64)}`, binding: { execution, scope: evidence.scope, toolOperationId, requestId: 'request', callId: 'read-call', continuationRef: 'continuation' } }] }, 'standard-turn-delivery.completion-conflict');
+  await rejects({ ...input, entries: [withResult({ ...resultFact.result, executionFact: { identity: { surface: 'native', toolId: 'file.list', bindingRef: 'binding', route: 'native' }, requestRef: 'request', state: 'succeeded', rawEvidenceRefs: [appEvidence.locator] } })] }, 'standard-turn-delivery.completion-conflict');
+  await rejects({ ...input, inspectCompletions: [{ ...inspect, requestId: 'other-request' }] }, 'standard-turn-delivery.completion-unknown');
+  await rejects({ ...input, completionLookups: [{ commitIdentity: `operation-completion:v1:${'1'.repeat(64)}`, effectId: `file-write-effect:v1:${'2'.repeat(64)}`, binding: { execution, scope: appEvidence.scope, toolOperationId, requestId: 'request', callId: 'list-call', continuationRef: 'continuation' } }] }, 'standard-turn-delivery.completion-conflict');
   const logicalAssignment = { ...assignment, expectedOutputRefs: ['logical-output'] };
   assert.deepEqual(bindAssignmentDelivery({ assignment: logicalAssignment, readback: { ...readback, assignment: logicalAssignment } }).outputRefs, ['logical-output']);
   assert.throws(() => bindAssignmentDelivery({ assignment, readback: { ...readback, materials: [] } }), (error: unknown) => error instanceof StandardTurnDeliveryError && error.code === 'standard-turn-delivery.binding-invalid');
