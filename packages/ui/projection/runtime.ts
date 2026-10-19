@@ -21,6 +21,8 @@ import {
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
+  type RuntimeTaskExecutionLineage,
+  type RuntimeTaskControlTarget,
   type RuntimeReadResult,
   type RuntimeReadScope,
   type PublicOutputPublicationProjection,
@@ -140,6 +142,21 @@ export interface RuntimeStatusInput {
 export interface RuntimeTaskSnapshotInput {
   readonly taskId: TaskId;
   readonly title: string;
+  /**
+   * App-derived committed `TaskIdentityRecord.title` only. Absent for a legacy
+   * row or an uncommitted name; the projection never derives it from `title`.
+   */
+  readonly semanticTitle?: string;
+  /**
+   * Exact committed execution lineage of a child Task, supplied only by the
+   * app's committed identity/occurrence join. Absent for a top-level work item.
+   */
+  readonly executionLineage?: RuntimeTaskExecutionLineage;
+  /**
+   * Navigation scope for this row's exact task ID, supplied only for an
+   * actually verified live target. It is never a permission or parent grant.
+   */
+  readonly controlTarget?: RuntimeTaskControlTarget;
   readonly state: LifecycleState;
   /**
    * Committed task-flow binding read from this Task's identity record. Absent
@@ -353,6 +370,9 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
   return {
     taskId: source.taskId,
     title: source.title,
+    ...(source.semanticTitle === undefined ? {} : { semanticTitle: source.semanticTitle }),
+    ...(source.executionLineage === undefined ? {} : { executionLineage: source.executionLineage }),
+    ...(source.controlTarget === undefined ? {} : { controlTarget: source.controlTarget }),
     state: source.state,
     stateLabel: stateLabel(source.state),
     ...(source.taskFlow === undefined ? {} : { taskFlow: source.taskFlow }),
@@ -424,12 +444,42 @@ export function projectRuntimeDashboard(input: RuntimeDashboardInput): RuntimeDa
 }
 
 export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTaskListProjection {
-  const running = input.tasks.filter((task) => isActive(task.state)).map(toRow);
-  const waiting = input.tasks.filter((task) => isWaiting(task.state)).map(toRow);
-  const completed = input.tasks.filter((task) => isCompleted(task.state)).map(toRow);
-  const stopped = input.tasks.filter((task) => isStopped(task.state)).map(toRow);
-  const draft = input.tasks.filter((task) => isDraft(task.state)).map(toRow);
-  const failed = input.tasks.filter((task) => isFailed(task.state)).map(toRow);
+  const rows = input.tasks.map(toRow);
+  const existingTaskIds = new Set(rows.map((row) => row.taskId.value));
+  const declaredChildIds = new Set(rows.flatMap((row) => {
+    const parentTaskId = row.executionLineage?.parentTaskId;
+    return parentTaskId === undefined
+      || parentTaskId.value === row.taskId.value
+      || !existingTaskIds.has(parentTaskId.value)
+      ? []
+      : [row.taskId.value];
+  }));
+  const childrenByParent = new Map<string, RuntimeTaskRowProjection[]>();
+  for (const row of rows) {
+    const parentTaskId = row.executionLineage?.parentTaskId;
+    if (parentTaskId === undefined || !declaredChildIds.has(row.taskId.value)) continue;
+    // Only a top-level business work item can own grouped children. A child of
+    // a child keeps its own row instead of disappearing from the visible list.
+    if (declaredChildIds.has(parentTaskId.value)) continue;
+    const children = childrenByParent.get(parentTaskId.value) ?? [];
+    children.push(row);
+    childrenByParent.set(parentTaskId.value, children);
+  }
+  const groupedChildIds = new Set(
+    [...childrenByParent.values()].flat().map((row) => row.taskId.value),
+  );
+  const visible = rows
+    .filter((row) => !groupedChildIds.has(row.taskId.value))
+    .map((row) => {
+      const children = childrenByParent.get(row.taskId.value);
+      return children === undefined ? row : { ...row, executions: [...children] };
+    });
+  const running = visible.filter((row) => isActive(row.state));
+  const waiting = visible.filter((row) => isWaiting(row.state));
+  const completed = visible.filter((row) => isCompleted(row.state));
+  const stopped = visible.filter((row) => isStopped(row.state));
+  const draft = visible.filter((row) => isDraft(row.state));
+  const failed = visible.filter((row) => isFailed(row.state));
   return {
     surface: 'runtime-task-list',
     mode: input.mode,
@@ -446,7 +496,7 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
       stopped: stopped.length,
       draft: draft.length,
       failed: failed.length,
-      total: input.tasks.length,
+      total: visible.length,
     },
   };
 }
