@@ -20,13 +20,14 @@ export type TaskIdentitySource = Pick<
 export interface TaskIdentityRecord {
   readonly scope: TaskIdentityScope;
   readonly taskFlow?: TaskFlowBinding;
+  readonly title?: string;
   readonly source: TaskIdentitySource;
   readonly journalCommitRef: string;
 }
 
 export type TaskIdentityAppendInput = Omit<TaskIdentityRecord, 'journalCommitRef'>;
 
-const IDENTITY_KEYS = new Set(['scope', 'taskFlow', 'source', 'journalCommitRef']);
+const IDENTITY_KEYS = new Set(['scope', 'taskFlow', 'title', 'source', 'journalCommitRef']);
 const SOURCE_KEYS = new Set([
   'requirementId',
   'inputRevision',
@@ -91,9 +92,10 @@ export function validateTaskIdentitySource(source: TaskIdentitySource): void {
 
 export function validateTaskIdentityAppendInput(input: TaskIdentityAppendInput): void {
   requireObject(input, 'task identity input');
-  requireOnlyKeys(input, new Set(['scope', 'taskFlow', 'source']), 'task identity input');
+  requireOnlyKeys(input, new Set(['scope', 'taskFlow', 'title', 'source']), 'task identity input');
   validateTaskIdentityScope(input.scope);
   if (input.taskFlow !== undefined) validateTaskIdentityBinding(input.taskFlow);
+  if (input.title !== undefined) requireText(input.title, 'task identity title');
   validateTaskIdentitySource(input.source);
 }
 
@@ -103,6 +105,7 @@ export function validateTaskIdentityRecord(record: TaskIdentityRecord): void {
   validateTaskIdentityAppendInput({
     scope: record.scope,
     taskFlow: record.taskFlow,
+    title: record.title,
     source: record.source,
   });
   requireText(record.journalCommitRef, 'task identity journalCommitRef');
