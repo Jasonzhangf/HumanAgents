@@ -2,11 +2,11 @@
 
 日期：2026-10-18（America/Los_Angeles）
 
-状态：设计已被 r510 独立评审接受；contracts/Core foundation 已实现，projection/renderer 与运行时渲染未实现。
+状态：设计已被 r510 独立评审接受；contracts/Core foundation、UI projection 与共享 renderer 已实现。默认摘要与完整详情的展示分层已进入 F15 milestone。
 
 需求绑定：项目 `.appsdk/requirements.json`（`requirements_version: 14`）的活跃需求。
 
-证据边界：本文只整理只读源码与既有回执证据。产品行为未改动，实时渲染仍为 UNVERIFIED。
+证据边界：本文只整理只读源码与既有回执证据。作者级 renderer 检查已通过；真实双端浏览器渲染仍为 UNVERIFIED。
 
 ## 1. 目标与范围
 
@@ -200,6 +200,8 @@ Core 的三个模板语义：
 
 默认层只显示自然中文语义和非实例徽标（模板骨架仅指导方向，非实际执行记录）。机械键（`kind`、`layout`、`stageId`、`aim`、`selectionGuidance`、`displayGroups`）只放在技术详情中。桌面侧栏与手机底部抽屉使用同一渲染。
 
+默认摘要与完整详情分层：默认层只显示处理方式、中文目的（`aimLabel`）与“静态指导 · 非执行记录”提示，并提供“查看任务模板”入口。完整 typed 模板（布局、阶段、动态选择、前置关系、依赖、循环路径与停止条件）进入既有下一层详情：手机底部抽屉与桌面侧栏，经现有 `onOpenDetail({ title, content })` 传入真实 DOM 内容。详情内部用同文件已有的原生 `<details>` 承载“技术详情”，机械键不与中文模板正文混排。无 `onOpenDetail` 回调的独立 consumer 保留默认层的既有完整阅读能力；不新增页面特判或全局默认回调。
+
 实现所有权（开发说明，不是产品对象流节点）：S1 复用同一 F15 tree 作为 foundation/integration。S2A（projection）与 S2B（renderer）只能在各自独占的 subdomain trees 并行；两者以标准 Git 经唯一 integration branch 合流，任何时刻不得由两个 writer 共用同一 Git index。
 
 ## 7. 读 DAG 治理
@@ -246,4 +248,4 @@ Core 的三个模板语义：
 
 ## 12. 状态
 
-状态：r510 设计评审 PASS。contracts/Core foundation 已实现；UI projection、共享 renderer 与生产运行时渲染仍未实现。
+状态：r510 设计评审 PASS。contracts/Core foundation、UI projection 与共享 renderer 已实现，并完成默认摘要与完整详情的展示分层修正。真实双端浏览器渲染与 Observation 接线验收仍为 UNVERIFIED，待 root 在同一真实任务上复核。

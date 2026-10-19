@@ -525,6 +525,22 @@ function openActualDetail(node, opened, summary = '执行记录详情') {
   return Object.fromEntries(opened.at(-1).detail.entries)
 }
 
+function nativeDetailEntries(node, summary = '技术详情') {
+  const details = walk(node).find((entry) => (
+    entry.tagName === 'DETAILS' &&
+    entry.children.some((child) => child.tagName === 'SUMMARY' && child.textContent === summary)
+  ))
+  assert.ok(details, `the native ${summary} disclosure must be present`)
+  const entries = {}
+  for (const row of walk(details)) {
+    if (row.tagName !== 'DIV') continue
+    const dt = row.children.find((child) => child.tagName === 'DT')
+    const dd = row.children.find((child) => child.tagName === 'DD')
+    if (dt && dd) entries[dt.textContent] = dd.textContent
+  }
+  return entries
+}
+
 function visibleNodeIds(graph) {
   return graph.history.groups.flatMap((group) => group.nodes.map((node) => node.nodeId))
 }
@@ -718,19 +734,18 @@ test('actual graph missing history stays explicit instead of becoming an empty g
 })
 
 /*
- * F15 template skeleton rendering.
+ * F15 template skeleton layering.
  *
- * Failure basis: the shared renderer consumes only the legacy aim text, so a
- * projected template skeleton (layout, stages, dependencies, loops and the
- * Chinese role labels) is dropped before the user sees it. Impact is that the
- * default layer cannot tell static template guidance from recorded execution,
- * and the single repeatable choice region, checkpoint->Planner dependency and
- * the separate inspection occurrence loop stay invisible. Cost is one bounded
- * DOM case over the real exported renderer with an accepted Core guidance
- * fixture routed through the real exported projection; it does not clone
- * projection logic or run a browser.
+ * Failure basis: the shared renderer unconditionally appends all projected
+ * stages, dependencies and loops to the default reading surface, so the static
+ * template occupies more than a screen before recorded execution. Impact is
+ * that users cannot scan the task's purpose and recorded facts first. Cost is
+ * one bounded DOM case over the real exported renderer with an accepted Core
+ * guidance fixture routed through the real exported projection; the first
+ * position assertion fails on the current default layer. The case does not
+ * clone projection logic or run a browser.
  */
-test('template skeleton renders static guidance through the shared card and relation controls', () => {
+test('template skeleton stays in the default summary and opens full content', () => {
   const templateGuidance = {
     kind: 'inspection',
     aim: 'Inspect the target and report only recorded findings.',
@@ -803,22 +818,58 @@ test('template skeleton renders static guidance through the shared card and rela
   )
   const text = allText(section)
 
-  // A static template block is present and is not a recorded fact.
+  // Default layer keeps purpose and the static non-execution notice.
   assert.equal(byData(section, 'taskFlowGuidance', 'skeleton').length, 1)
   assert.match(text, /处理方式：巡检/)
   assert.match(text, /静态指导/)
   assert.match(text, /非执行记录/)
-
-  // Human Chinese labels come from the projection, never raw records.
   assert.match(text, /对同一巡检定义持续产生巡检结果/)
-  assert.match(text, /巡检触发与轮次收拢循环/)
-  assert.match(text, /巡检触发边界/)
-  assert.match(text, /编排动态选择区/)
-  assert.match(text, /轮末必经检查点/)
-  assert.match(text, /轮末必经规划对齐/)
+
+  // RED on the current renderer: the full skeleton is not expanded by default.
+  assert.equal(byData(section, 'templateStage', 'dynamic-work').length, 0)
+  assert.deepEqual(
+    walk(section).filter((node) => node.dataset?.templateStage !== undefined)
+      .map((node) => node.dataset.templateStage),
+    [],
+  )
+  assert.equal(
+    walk(section).filter((node) => node.dataset?.templateDependency !== undefined).length,
+    0,
+  )
+  assert.equal(
+    walk(section).filter((node) => node.dataset?.templateLoop !== undefined).length,
+    0,
+  )
+
+  // The default layer offers the entry into the existing content detail.
+  const trigger = walk(section).find((node) => (
+    node.tagName === 'BUTTON' && node.textContent === '查看任务模板'
+  ))
+  assert.ok(trigger, 'the default layer must offer the template detail entry')
+
+  // The entry opens the existing content detail, not a new shell.
+  trigger.click()
+  assert.equal(opened.length, 1)
+  const detail = opened[0].detail
+  assert.equal(detail.title, '任务模板详情')
+  assert.ok(detail.content, 'the detail must carry the real template DOM')
+  assert.equal(opened[0].button, trigger)
+
+  // The full template semantics live in the opened content.
+  const content = detail.content
+  const detailText = allText(content)
+  assert.match(detailText, /处理方式：巡检/)
+  assert.match(detailText, /静态指导/)
+  assert.match(detailText, /非执行记录/)
+  assert.match(detailText, /对同一巡检定义持续产生巡检结果/)
+  assert.match(detailText, /巡检触发与轮次收拢循环/)
+  assert.match(detailText, /巡检触发边界/)
+  assert.match(detailText, /编排动态选择区/)
+  assert.match(detailText, /轮末必经检查点/)
+  assert.match(detailText, /轮末必经规划对齐/)
 
   // Exactly one optional repeatable dynamic region carries the four choices.
-  const stageIds = walk(section)
+  const stageIds = walk(content)
     .filter((node) => node.dataset?.templateStage !== undefined)
     .map((node) => node.dataset.templateStage)
   assert.deepEqual(stageIds, [
@@ -827,15 +878,15 @@ test('template skeleton renders static guidance through the shared card and rela
     'turn-checkpoint',
     'planner-alignment',
   ])
-  const dynamicStage = byData(section, 'templateStage', 'dynamic-work')[0]
+  const dynamicStage = byData(content, 'templateStage', 'dynamic-work')[0]
   assert.match(allText(dynamicStage), /探索、规划、审查、执行/)
-  const choiceCards = walk(section)
+  const choiceCards = walk(content)
     .filter((node) => node.dataset?.templateStage !== undefined)
     .filter((node) => allText(node).includes('探索'))
   assert.equal(choiceCards.length, 1)
 
   // Only the declared mandatory skeleton relations are drawn.
-  const dependencies = walk(section)
+  const dependencies = walk(content)
     .filter((node) => node.dataset?.templateDependency !== undefined)
     .map((node) => node.dataset.templateDependency)
   assert.deepEqual(dependencies, [
@@ -845,33 +896,41 @@ test('template skeleton renders static guidance through the shared card and rela
   ])
 
   // The inspection occurrence repetition stays separate from the turn iteration.
-  const loops = walk(section)
+  const loops = walk(content)
     .filter((node) => node.dataset?.templateLoop !== undefined)
     .map((node) => node.dataset.templateLoop)
   assert.deepEqual(loops, [
     'turn-iteration:planner-alignment->dynamic-work',
     'occurrence-repetition:planner-alignment->occurrence-trigger',
   ])
-  assert.match(text, /轮次迭代/)
-  assert.match(text, /巡检重复/)
-  assert.match(text, /停止条件：任务完成或失败/)
+  assert.match(detailText, /轮次迭代/)
+  assert.match(detailText, /巡检重复/)
+  assert.match(detailText, /停止条件：任务完成或失败/)
 
-  // Raw keys stay out of the default layer; recorded execution stays distinct.
+  // Raw keys stay in the native technical detail inside the opened content.
   assert.doesNotMatch(
     text,
     /occurrence-trigger|dynamic-work|turn-checkpoint|planner-alignment|occurrence-and-turn-closure-loop|Inspect the target|Select methods/,
   )
+  const technical = nativeDetailEntries(content)
+  assert.equal(technical.kind, 'inspection')
+  assert.equal(technical.layout, 'occurrence-and-turn-closure-loop')
+  assert.equal(technical.aim, 'Inspect the target and report only recorded findings.')
+  assert.match(technical.stages, /dynamic-work/)
+  assert.match(technical.dependencies, /occurrence-trigger->dynamic-work/)
+  assert.match(technical.loops, /occurrence-repetition/)
+
+  // The no-callback consumer keeps the existing complete reading surface.
+  const inline = renderTaskActualExecutionGraphSection(recorded)
+  assert.deepEqual(
+    walk(inline).filter((node) => node.dataset?.templateStage !== undefined)
+      .map((node) => node.dataset.templateStage),
+    ['occurrence-trigger', 'dynamic-work', 'turn-checkpoint', 'planner-alignment'],
+  )
+
+  // Recorded execution stays separate and keeps its original markers.
   assert.equal(walk(section).filter((node) => node.dataset?.actualExecutionNode).length, 9)
   assert.match(text, /已记录的实际执行/)
-
-  // Technical detail keeps the mechanical identity for diagnosis.
-  const detail = openActualDetail(section, opened, '模板骨架详情')
-  assert.equal(detail.kind, 'inspection')
-  assert.equal(detail.layout, 'occurrence-and-turn-closure-loop')
-  assert.equal(detail.aim, 'Inspect the target and report only recorded findings.')
-  assert.match(detail.stages, /dynamic-work/)
-  assert.match(detail.dependencies, /occurrence-trigger->dynamic-work/)
-  assert.match(detail.loops, /occurrence-repetition/)
 })
 
 test('current rejects an unknown or mismatched accepted identity instead of using the latest', () => {

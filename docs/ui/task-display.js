@@ -945,10 +945,74 @@ function renderTemplateLoops(loops) {
   return section
 }
 
+function templateDetailEntries(guidance) {
+  const stages = Array.isArray(guidance.stages) ? guidance.stages : []
+  const entries = [
+    ['kind', guidance.kind],
+    ['aim', guidance.aim],
+    ['selectionGuidance', guidance.selectionGuidance],
+    ['displayGroups', JSON.stringify(guidance.displayGroups)],
+  ]
+  if (guidance.layout !== undefined) entries.push(['layout', guidance.layout])
+  if (stages.length > 0) {
+    entries.push(['stages', stages.map((stage) => `${stage.stageId}(${stage.role})`).join(', ')])
+    entries.push([
+      'dependencies',
+      (guidance.dependencies ?? []).map((item) => `${item.fromStageId}->${item.toStageId}`).join(', '),
+    ])
+    entries.push([
+      'loops',
+      (guidance.loops ?? []).map((item) => `${item.kind}:${item.fromStageId}->${item.toStageId}`).join(', '),
+    ])
+  }
+  return entries
+}
+
+/*
+ * Full typed template body: layout label, stages, dependencies and loops. The
+ * caller decides whether it lands in the default layer (no detail callback) or
+ * in the opened content detail. Mechanical keys never enter this body.
+ */
+function appendTemplateSemantics(parent, guidance) {
+  if (guidance.layoutLabel) {
+    parent.append(element('p', `布局：${guidance.layoutLabel}`, 'muted task-flow-layout'))
+  }
+  const stages = Array.isArray(guidance.stages) ? guidance.stages : []
+  if (stages.length === 0) return
+  parent.append(renderTemplateStages(stages))
+  const dependencies = renderTemplateDependencies(guidance.dependencies)
+  if (dependencies) parent.append(dependencies)
+  const loops = renderTemplateLoops(guidance.loops)
+  if (loops) parent.append(loops)
+}
+
+/*
+ * Content for the existing next-layer detail (phone bottom sheet, desktop
+ * sidebar). It repeats the static identity, carries the full template body and
+ * keeps mechanical keys behind a native <details> so they do not mix with the
+ * Chinese template text. No second detail layer or shell change is added.
+ */
+function renderTemplateDetailContent(guidance) {
+  const content = element('section', undefined, 'task-flow-template-detail')
+  content.append(
+    element('p', `处理方式：${guidance.kindLabel}`),
+    element('p', '静态指导 · 非执行记录', 'section-meta'),
+  )
+  if (guidance.aimLabel) {
+    content.append(element('p', guidance.aimLabel, 'business-output-text task-flow-aim'))
+  }
+  appendTemplateSemantics(content, guidance)
+  content.append(planDetail('技术详情', templateDetailEntries(guidance)))
+  return content
+}
+
 /*
  * Static template guidance. The projection owns the Chinese labels and Core
  * owns the stage and loop text, so this renderer only places those labels. The
- * skeleton stays a separate block from the recorded execution below it.
+ * default layer shows purpose, the static non-execution notice and one entry
+ * button; the full typed skeleton opens through the existing detail callback.
+ * Without a detail callback the full body stays inline so the standalone
+ * consumer keeps its complete reading surface.
  */
 function renderTemplateGuidance(guidance, options) {
   const section = element('section', undefined, 'task-flow-guidance')
@@ -964,37 +1028,16 @@ function renderTemplateGuidance(guidance, options) {
   if (guidance.aimLabel) {
     section.append(element('p', guidance.aimLabel, 'business-output-text task-flow-aim'))
   }
-  if (guidance.layoutLabel) {
-    section.append(element('p', `布局：${guidance.layoutLabel}`, 'muted task-flow-layout'))
+  if (typeof options.onOpenDetail === 'function') {
+    const content = renderTemplateDetailContent(guidance)
+    const trigger = element('button', '查看任务模板', 'button button--quiet plan-detail')
+    trigger.type = 'button'
+    trigger.dataset.templateDetail = 'template'
+    trigger.addEventListener('click', () => options.onOpenDetail({ title: '任务模板详情', content }, trigger))
+    section.append(trigger)
+  } else {
+    appendTemplateSemantics(section, guidance)
   }
-  const stages = Array.isArray(guidance.stages) ? guidance.stages : []
-  if (stages.length > 0) {
-    section.append(renderTemplateStages(stages))
-    const dependencies = renderTemplateDependencies(guidance.dependencies)
-    if (dependencies) section.append(dependencies)
-    const loops = renderTemplateLoops(guidance.loops)
-    if (loops) section.append(loops)
-  }
-  const detailEntries = [
-    ['kind', guidance.kind],
-    ['aim', guidance.aim],
-    ['selectionGuidance', guidance.selectionGuidance],
-    ['displayGroups', JSON.stringify(guidance.displayGroups)],
-  ]
-  if (guidance.layout !== undefined) detailEntries.push(['layout', guidance.layout])
-  if (stages.length > 0) {
-    detailEntries.push(['stages', stages.map((stage) => `${stage.stageId}(${stage.role})`).join(', ')])
-    detailEntries.push([
-      'dependencies',
-      (guidance.dependencies ?? []).map((item) => `${item.fromStageId}->${item.toStageId}`).join(', '),
-    ])
-    detailEntries.push([
-      'loops',
-      (guidance.loops ?? []).map((item) => `${item.kind}:${item.fromStageId}->${item.toStageId}`).join(', '),
-    ])
-  }
-  const detail = actualGraphDetail('模板骨架详情', detailEntries, options)
-  if (detail) section.append(detail)
   return section
 }
 
