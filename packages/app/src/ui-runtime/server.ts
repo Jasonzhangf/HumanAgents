@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
-import { dirname, extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
+import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import { formatPairingCommand } from '../../../config/src/index.js';
 import {
   id,
@@ -49,6 +49,11 @@ const APP_OWNER = 'humanagent.app';
 export interface UiRuntimeServerOptions {
   readonly service: UiRuntimeService;
   readonly accessControl: AccessControlService;
+  /**
+   * Config-owned product root. It is the only source for the public pairing
+   * command; the server never infers it from a credential path.
+   */
+  readonly productRoot: string;
   readonly uiRoot: string;
   /**
    * Task-scoped grant control over the same control Organ Journal. Absent
@@ -696,6 +701,7 @@ export interface UiRuntimeRequestDispatcher {
 export function createUiRuntimeRequestDispatcher(options: {
   readonly service: UiRuntimeService;
   readonly accessControl: AccessControlService;
+  readonly productRoot: string;
   readonly uiRoot: string;
   readonly isClosing: () => boolean;
   readonly taskControl?: UiRuntimeServerOptions['taskControl'];
@@ -711,6 +717,7 @@ export function createUiRuntimeRequestDispatcher(options: {
       response,
       options.service,
       options.accessControl,
+      options.productRoot,
       sseRegistry,
       options.isClosing,
       options.uiRoot,
@@ -737,6 +744,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   const { listener, sseRegistry } = createUiRuntimeRequestDispatcher({
     service,
     accessControl,
+    productRoot: options.productRoot,
     uiRoot: options.uiRoot,
     isClosing: () => closing,
     ...(options.taskControl === undefined ? {} : { taskControl: options.taskControl }),
@@ -818,6 +826,7 @@ async function handleRequest(
   response: ServerResponse,
   service: UiRuntimeService,
   accessControl: AccessControlService,
+  productRoot: string,
   sseRegistry: ReturnType<typeof createSseRegistry>,
   isClosing: () => boolean,
   uiRoot: string,
@@ -850,11 +859,8 @@ async function handleRequest(
     if (path === '/api/auth/session' && method === 'GET') {
       const cookie = request.headers.cookie;
       const verification = await accessControl.verifySession(Array.isArray(cookie) ? cookie[0] : cookie);
-      // The product root is the credential owner's control root by the config
-      // layout (<controlRoot>/security/web-access.json). Formatting stays in
-      // the config owner; the browser never infers it.
       const pairingCommand = formatPairingCommand({
-        controlRoot: dirname(dirname(accessControl.credentialPath)),
+        controlRoot: productRoot,
       });
       writeJson(response, 200, verification.state === 'valid'
         ? { authenticated: true, expiresAt: new Date(verification.session.expiresAt).toISOString(), pairingCommand }

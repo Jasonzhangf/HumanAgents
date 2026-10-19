@@ -277,6 +277,7 @@ export async function startHarness(input: {
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   const runtime = await startUiRuntime({
     mode: 'fake',
+    productRoot: input.root,
     accessControl,
     organId,
     binding,

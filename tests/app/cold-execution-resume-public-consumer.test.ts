@@ -1882,7 +1882,7 @@ async function buildResumeService(
     { agentId: 'cold-resume-planner', roleId: 'orchestration', source: 'agent', provider: launchProvider },
   ];
   const launched = productionMemory ? await startUiRuntime({
-    mode: 'rcc', organId, binding: serviceBinding, port: serviceOptions.port,
+    mode: 'rcc', productRoot: paths!.controlRoot, organId, binding: serviceBinding, port: serviceOptions.port,
     checkpointRoot: fixture.root, evidenceRoot: fixture.artifactsRoot, uiRoot: join(fixture.root, 'ui'),
     portNumber: 0, host: '127.0.0.1', accessControl, memory: serviceOptions.memory,
     runtimePaths: paths,
@@ -1900,6 +1900,7 @@ async function buildResumeService(
   const dispatcher = createUiRuntimeRequestDispatcher({
     service,
     accessControl,
+    productRoot: fixture.root,
     uiRoot: join(fixture.root, 'ui'),
     isClosing: () => false,
   });

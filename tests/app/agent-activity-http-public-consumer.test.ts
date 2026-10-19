@@ -216,7 +216,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(),
         projectKey: paths.projectKey, roleId: 'execution' },
     });
-    const { listener } = createUiRuntimeRequestDispatcher({ service, accessControl,
+    const { listener } = createUiRuntimeRequestDispatcher({ service, accessControl, productRoot: paths.controlRoot,
       uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false });
     const taskView = () => JSON.stringify(service.taskDashboard(taskId));
     const before = { task: taskView(), files: await readFixtureFiles(root) };
@@ -561,6 +561,7 @@ test('task dashboard HTTP preserves live pending public output while the final c
     const { listener } = createUiRuntimeRequestDispatcher({
       service,
       accessControl,
+      productRoot: paths.controlRoot,
       uiRoot: join(process.cwd(), 'docs/ui'),
       isClosing: () => false,
     });

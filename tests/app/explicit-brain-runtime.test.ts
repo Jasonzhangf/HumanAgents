@@ -126,7 +126,7 @@ test(`default App composition admits the retained Task only after real HTTP gran
     }
     const accessControl = await AccessControlService.open({ credentialPath: join(root, 'security', 'web-access.json'), create: true });
     runtime = await startUiRuntime({ mode: 'rcc', accessControl, organId: id('organ', 'default-native-consumer'),
-      binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: root,
+      binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: root, productRoot: root,
       evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
       memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'default-native', roleId: 'execution' },
       explicitBrainInterpreter: { async interpret() { return { kind: 'requirement', intent: 'create',
@@ -559,7 +559,7 @@ test('two top-level native tasks share one App and overlap real execution reques
     });
     accessControl = await AccessControlService.open({ credentialPath: join(root, 'security', 'web-access.json'), create: true });
     runtime = await startUiRuntime({ mode: 'rcc', accessControl, organId: id('organ', 'two-top-native'),
-      binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: root,
+      binding: launch.binding, port: launch.port, providerSource: launch.source, checkpointRoot: root, productRoot: root,
       evidenceRoot: join(root, 'assets'), uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
       maxConcurrentTasks: 2,
       memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey, roleId: 'execution' },
@@ -2551,6 +2551,7 @@ test('provider explicit brain interpreter fresh OS default DI recovers preclose 
     const port = new RecordedParentPort({binding, stepDelayMs: 0, replay: [], evidence: parentEvidence});
     const runtime = await startUiRuntime({
       mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port,
+      productRoot: root,
       checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
       uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
       accessControl: await AccessControlService.open({credentialPath: join(root, 'security/web-access.json'), create: true}),
@@ -2711,6 +2712,7 @@ test('provider explicit brain interpreter fresh OS default DI recovers preclose 
 
     runtime = await startUiRuntime({
       mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port: parentPort as any,
+      productRoot: root,
       checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
       uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
       accessControl: await AccessControlService.open({ credentialPath: join(root, 'security/web-access.json'), create: false }),
@@ -2884,6 +2886,7 @@ test('provider explicit brain interpreter resumes a failed closed epoch under a 
     const runtime = await startUiRuntime({
       mode: 'rcc', organId: id('organ', 'explicit-test'), binding,
       port: new RecordedParentPort({binding, stepDelayMs: 0, replay: [], evidence}),
+      productRoot: root,
       checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
       uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
       accessControl: await AccessControlService.open({credentialPath: join(root, 'security/web-access.json'), create: true}),
@@ -2941,6 +2944,7 @@ test('provider explicit brain interpreter resumes a failed closed epoch under a 
     } });
     runtime = await startUiRuntime({
       mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port: port as any,
+      productRoot: root,
       checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
       uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
       accessControl: await AccessControlService.open({ credentialPath: join(root, 'security/web-access.json'), create: false }),
@@ -3315,6 +3319,7 @@ test('provider explicit brain interpreter resumes a failed closed epoch on the s
     lease = await acquireDaemonLease(paths);
     runtime = await startUiRuntime({
       mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port: port as any,
+      productRoot: root,
       checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
       uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
       accessControl: await AccessControlService.open({ credentialPath: join(root, 'security/web-access.json'), create: true }),

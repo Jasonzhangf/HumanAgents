@@ -477,6 +477,7 @@ test('confirmed control HTTP dispatcher returns real committed receipts for the 
   const { listener } = createUiRuntimeRequestDispatcher({
     service: f.service,
     accessControl: f.accessControl,
+    productRoot: f.paths.controlRoot,
     uiRoot: join(process.cwd(), 'docs/ui'),
     isClosing: () => false,
   });
@@ -615,6 +616,7 @@ test('App cold production entry hydrates canonical live state while checkpoint r
     const accessControl = await AccessControlService.open({ credentialPath: f.paths.webAccessCredentialPath, create: true });
     const before = await snapshot(f.paths.projectRoot);
     runtime = await startUiRuntime({ mode: 'fake', organId,
+      productRoot: f.paths.controlRoot,
       binding: { bindingId: 'c3-unused', providerId: 'c3-unused', protocol: 'responses', endpointRef: 'c3-unused',
         modelRef: 'c3-unused', configDigest: 'c3-unused', capabilityDigest: 'c3-unused' },
       port: effectPort, accessControl, checkpointRoot: join(f.paths.checkpointsRoot, 'ui-runtime'),
@@ -643,6 +645,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const cookie = accessControl.sessionCookie(session).split(';')[0];
   // Use the production dispatcher directly: this read proof has no daemon/credential-watch lifecycle.
   const { listener } = createUiRuntimeRequestDispatcher({ service: f.service, accessControl,
+    productRoot: f.paths.controlRoot,
     uiRoot: join(process.cwd(), 'docs/ui'), isClosing: () => false });
   const server = createServer(listener);
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });

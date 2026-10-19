@@ -115,6 +115,11 @@ export interface UiRuntimeLaunchOptions {
   readonly mode: 'fake' | 'rcc';
   readonly maxConcurrentTasks?: number;
   readonly accessControl?: AccessControlService;
+  /**
+   * Config-owned product root. The entry that owns configuration supplies the
+   * resolved control root so the server never infers it from credentials.
+   */
+  readonly productRoot: string;
   readonly organId: OrganId;
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
@@ -691,6 +696,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const server = await startUiRuntimeServer({
     service: runtimeService,
     accessControl: options.accessControl,
+    productRoot: options.productRoot,
     uiRoot: options.uiRoot,
     host: options.host,
     port: options.portNumber,

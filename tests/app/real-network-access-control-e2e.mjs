@@ -968,6 +968,7 @@ async function expiryCase() {
   const challenge = await accessControl.issuePairingChallenge();
   const runtime = await startUiRuntime({
     mode: 'fake',
+    productRoot: join(attemptRoot, 'control'),
     accessControl,
     organId: id('organ', 'network-expiry'),
     binding,
@@ -1057,6 +1058,7 @@ async function credentialWatchFailureActiveStopCase() {
   };
   const runtime = await startUiRuntime({
     mode: 'fake',
+    productRoot: join(attemptRoot, 'control'),
     accessControl: failingAccessControl,
     organId: id('organ', 'network-close-watch-failure'),
     binding,

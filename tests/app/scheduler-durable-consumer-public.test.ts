@@ -788,6 +788,7 @@ test('production HTTP confirmation persists a real scheduled subscription', asyn
     runtimeServer = await startUiRuntimeServer({
       service: planService(root, planPort(root)),
       accessControl,
+      productRoot: root,
       uiRoot: join(process.cwd(), 'docs', 'ui'),
       port: 0,
     });
