@@ -10,9 +10,13 @@ import {
   createExplicitBrainRuntime,
   createProviderExplicitBrainInterpreter,
 } from '../../packages/app/src/explicit-brain-runtime.js';
+import {
+  publishInteractionProviderSettlement,
+  readInteractionProviderSettlement,
+} from '../../packages/runtime/src/explicit-brain/index.js';
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
 import { createInteractionParentTurnRawOwner, type InteractionSemanticCheckpointJournalPort } from '../../packages/runtime/src/explicit-brain/index.js';
-import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
+import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
 import { ProviderAgentDriver, ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -1828,7 +1832,17 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
         scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
       close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); childClosed += 1; } };
     },
-    publishProviderSettlement: async ({ settlement }) => { assert.equal('taskId' in settlement, false); assert.equal(settlement.state, 'succeeded'); settlementPublished += 1; },
+    publishProviderSettlement: async (receipt) => {
+      const physicalRequest = Reflect.get(receipt, 'request') as
+        | { readonly turnId?: unknown; readonly requestId?: unknown }
+        | undefined;
+      assert.equal(typeof physicalRequest?.turnId, 'string');
+      assert.equal(typeof physicalRequest?.requestId, 'string');
+      assert.ok(physicalRequest?.turnId !== receipt.settlement.interactionTurn.turnId);
+      assert.equal('taskId' in receipt.settlement, false);
+      assert.equal(receipt.settlement.state, 'succeeded');
+      settlementPublished += 1;
+    },
   });
   try {
     const result = await interpreter.interpret({ interactionId: 'loop', inputRevision: 1, sourceRef: 'test:loop', rawInput: 'parent-private', clarifications: [], taskCandidates: [] });
@@ -2215,6 +2229,7 @@ test('provider explicit brain interpreter reuses the retained close on a same-pr
   // make a same-process retry close the original owner a second time. Impact: a
   // duplicated physical close of an owner that is already closed. Cost: one
   // injected checkpoint append fault and one retry on the real JSONL consumer.
+  // Probability is unknown because this receipt and retry boundary is new.
   await mkdir(parentFixtureRoot, { recursive: true });
   const binding: ProviderBinding = {
     bindingId: 'binding-parent-close-retry', providerId: 'provider-parent-close-retry', protocol: 'responses',
@@ -2249,12 +2264,20 @@ test('provider explicit brain interpreter reuses the retained close on a same-pr
   let closes = 0;
   const close = port.close.bind(port);
   port.close = async (bind) => { closes += 1; return close(bind); };
+  const publications: Array<Awaited<ReturnType<typeof publishInteractionProviderSettlement>>> = [];
   const interpreter = createProviderExplicitBrainInterpreter({
     ...options, port,
     prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
       provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
         model: binding.modelRef, route: 'parent-close-retry', baseUrl: binding.endpointRef },
       binding, port }),
+    publishProviderSettlement: async (receipt) => {
+      const committed = await publishInteractionProviderSettlement({
+        journal: parentJournal,
+        receipt,
+      });
+      publications.push(committed);
+    },
   });
   const request = {
     interactionId: 'parent-close-retry', inputRevision: 1, sourceRef: 'ui:new-task',
@@ -2267,15 +2290,221 @@ test('provider explicit brain interpreter reuses the retained close on a same-pr
   const opened = await parentJournal.readScopeOpenedTurns(scope);
   assert.equal(opened.length, 1);
   const turn = opened[0]!.fact.turn;
-  assert.ok((await parentJournal.readTurnSnapshot(turn)).resourceClose, 'the close is durable before the checkpoint failure');
+  const firstSnapshot = await parentJournal.readTurnSnapshot(turn);
+  assert.ok(firstSnapshot.resourceClose, 'the close is durable before the checkpoint failure');
+  assert.equal(firstSnapshot.providerSettlements.length, 1, 'the receipt commits before the checkpoint failure');
+  assert.equal(publications.length, 1);
 
   // The same-process retry reuses the retained receipt and never re-closes.
   const retried = await interpreter.interpret(request);
   assert.equal(retried.kind, 'answer');
   assert.equal(closes, 1, 'a same-process retry must not close the owner a second time');
+  assert.equal(publications.length, 2, 'the retained retry republishes the same receipt');
+  assert.deepEqual(publications[1]!.commit, publications[0]!.commit,
+    'the retained retry returns the original receipt commit');
+  const retriedSnapshot = await parentJournal.readTurnSnapshot(turn);
+  assert.equal(retriedSnapshot.providerSettlements.length, 1);
+  assert.deepEqual(retriedSnapshot.providerSettlements[0], publications[0]);
   const closeRecords = (await new JsonlOrganJournal(journalFile).replay())
     .filter((record) => (record.payload as { discriminant?: string } | undefined)?.discriminant === 'resource-close');
   assert.equal(closeRecords.length, 1, 'a same-process retry must not append a second close record');
+});
+
+// Failure basis: the durable receipt can fail before the answer completes, and
+// the turn can then recover from cold storage. Impact: a false answer without
+// its settlement control record. Cost: one fresh answer and one cold retry on
+// the existing interpreter and Journal fixture.
+// Probability is unknown because this failure boundary is new.
+test('provider explicit brain interpreter preserves a settlement publication failure and does not complete the answer', async () => {
+  const journalFile = join(parentFixtureRoot, `parent-settlement-failure-${randomUUID()}.jsonl`);
+  const journal = new JsonlOrganJournal(journalFile);
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parent-settlement-failure', providerId: 'provider-parent-settlement-failure', protocol: 'responses',
+    endpointRef: 'fake://parent-settlement-failure', modelRef: 'model-parent-settlement-failure',
+    configDigest: 'sha256:parent-settlement-failure-config', capabilityDigest: 'sha256:parent-settlement-failure-capability',
+  };
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
+    { kind: 'output', state: 'output', summary: JSON.stringify({ kind: 'answer', normalizedInput: 'answer this', knownFacts: [], answer: 'not completed', decisionRefs: [] }) },
+    { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+  ] });
+  let starts = 0;
+  const start = port.start.bind(port);
+  port.start = async (input) => { starts += 1; return start(input); };
+  let closes = 0;
+  const close = port.close.bind(port);
+  port.close = async (bind) => { closes += 1; return close(bind); };
+  const publicationError = new Error('settlement publication rejected');
+  let publicationCalls = 0;
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...parentDependencies(), binding, parentJournal, helperJournal, checkpointJournal: helperJournal,
+    turnHelperJournal: helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'parent-settlement-failure', baseUrl: binding.endpointRef },
+      binding, port }),
+    publishProviderSettlement: async () => {
+      publicationCalls += 1;
+      throw publicationError;
+    },
+  });
+  const request = {
+    interactionId: 'parent-settlement-failure', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: 'answer this', clarifications: [], taskCandidates: [],
+  };
+
+  await assert.rejects(() => interpreter.interpret(request), (error: unknown) => error === publicationError);
+  const opened = await parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(opened.length, 1);
+  const turn = opened[0]!.fact.turn;
+  const failed = await parentJournal.readTurnSnapshot(turn);
+  assert.equal(publicationCalls, 1);
+  assert.equal(starts, 1);
+  assert.equal(closes, 1);
+  assert.ok(failed.resourceClose, 'the original physical close owner still records its close');
+  assert.deepEqual(failed.providerSettlements, []);
+  assert.equal(await helperJournal.readSemanticCheckpointExact(turn), null,
+    'publication failure must not close the semantic answer');
+
+  await assert.rejects(() => interpreter.interpret(request), /provider settlement is missing for the current terminal request/);
+  assert.equal(publicationCalls, 1, 'the retained/cold recovery must not retry the failed callback');
+  assert.equal(starts, 1, 'the recovery must not replay the Provider request');
+  assert.equal(closes, 1, 'the recovery must not close the original owner again');
+  assert.deepEqual(await parentJournal.readTurnSnapshot(turn), failed,
+    'the failed recovery must not append or rewrite the original turn');
+});
+
+// Failure basis: the App callback loses the physical terminal request and cold
+// terminal recovery can complete without the exact persisted settlement. Impact:
+// the formal publisher cannot associate the retained settlement, or an
+// incomplete recovery reports success without its required receipt. Cost: one
+// fresh answer, one same-process retry, and one cold fixture read on the
+// existing real interpreter and Journal consumer.
+// Probability is unknown because this App integration boundary is new.
+test('provider explicit brain interpreter publishes the receipt with the actual terminal request and requires it on cold recovery', async () => {
+  const journalFile = join(parentFixtureRoot, `parent-settlement-${randomUUID()}.jsonl`);
+  const journal = new JsonlOrganJournal(journalFile);
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parent-settlement', providerId: 'provider-parent-settlement', protocol: 'responses',
+    endpointRef: 'fake://parent-settlement', modelRef: 'model-parent-settlement',
+    configDigest: 'sha256:parent-settlement-config', capabilityDigest: 'sha256:parent-settlement-capability',
+  };
+  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: 'answer this', knownFacts: [], answer: 'settlement-answer', decisionRefs: [] });
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
+    { kind: 'output', state: 'output', summary: answerText },
+    { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+  ] });
+  const published: InteractionProviderSettlementReceipt[] = [];
+  const dependencies = parentDependencies();
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...dependencies, binding, parentJournal, helperJournal, checkpointJournal: helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'parent-settlement', baseUrl: binding.endpointRef },
+      binding, port }),
+    publishProviderSettlement: async (receipt) => {
+      published.push(receipt);
+      await publishInteractionProviderSettlement({ journal: parentJournal, receipt });
+    },
+  });
+  const request = {
+    interactionId: 'parent-settlement', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: 'answer this', clarifications: [], taskCandidates: [],
+  };
+  try {
+    const result = await interpreter.interpret(request);
+    assert.equal(result.kind, 'answer');
+    const opened = await parentJournal.readScopeOpenedTurns(scope);
+    assert.equal(opened.length, 1);
+    const turn = opened[0]!.fact.turn;
+    const snapshot = await parentJournal.readTurnSnapshot(turn);
+    const terminalRequest = snapshot.requests.at(-1)!.fact.request;
+    assert.equal(published.length, 1);
+    assert.equal(published[0]!.interactionId, request.interactionId);
+    assert.equal(published[0]!.inputRevision, request.inputRevision);
+    assert.deepEqual(published[0]!.request, terminalRequest);
+    assert.ok(published[0]!.request.turnId !== turn.turnId);
+    assert.equal(published[0]!.settlement.state, 'succeeded');
+    assert.equal('taskId' in published[0]!.settlement, false);
+    const committed = await readInteractionProviderSettlement({ journal: parentJournal, turn });
+    assert.deepEqual(committed.fact, published[0]);
+  } finally {
+    const receipt = await port.close(binding); assert.equal(receipt.state, 'closed');
+  }
+
+  // A configured callback makes the receipt mandatory for incomplete recovery.
+  // A cold reader without the configured callback still reads legacy history.
+  const settlementJournalFile = join(parentFixtureRoot, `parent-settlement-missing-${randomUUID()}.jsonl`);
+  const settlementJournal = new JsonlOrganJournal(settlementJournalFile);
+  const settlementParent = new JsonlInteractionParentTurnJournal(settlementJournal);
+  const settlementHelper = new JsonlInteractionHelperJournal(settlementJournal);
+  const coldOptions = {
+    ...dependencies, binding, parentJournal: settlementParent,
+    checkpointJournal: settlementHelper, helperJournal: settlementHelper, turnHelperJournal: settlementHelper,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
+      { kind: 'output', state: 'output', summary: answerText },
+      { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+    ] }),
+    helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+  };
+  const missingInterpretRequest = {
+    interactionId: 'missing-settlement', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: 'answer this', clarifications: [], taskCandidates: [],
+  };
+  const missingTurn = {
+    organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+    interactionId: missingInterpretRequest.interactionId, inputRevision: 1, turnId: 'missing-settlement-turn',
+  };
+  const missingScope = { organId: scope.organId, operationId: id('operation', 'operation-missing-settlement') };
+  const missingExecution = {
+    runtimeId: 'runtime-missing-settlement', organId: scope.organId,
+    operationId: missingScope.operationId, executionEpoch: 1, interactionTurn: missingTurn,
+  };
+  const settlementOwner = createInteractionParentTurnRawOwner({
+    turn: missingTurn, execution: missingExecution, scope: missingScope,
+    initialInput: {
+      ref: await dependencies.rawEvidence.write({ scope: missingScope, kind: 'execution', type: 'initial-input',
+        locator: 'missing-settlement-turn', content: JSON.stringify(missingInterpretRequest) }),
+      view: { kind: 'utf8-text' },
+    },
+    providerBinding: binding, journal: settlementParent, rawContent: dependencies.rawContent,
+  });
+  const missingRequest = { turnId: 'provider-missing-settlement', requestId: 'request-missing-settlement' };
+  await settlementOwner.openTurnInput();
+  await settlementOwner.registerRequest({ execution: { runtimeId: 'runtime-missing-settlement', executionEpoch: 1 },
+    record: { request: missingRequest, scope: missingScope, phase: 'dispatching' } });
+  await settlementOwner.acceptRawFact({ execution: { runtimeId: 'runtime-missing-settlement', executionEpoch: 1 },
+    scope: missingScope, request: missingRequest, producerSeq: 1, fact: { kind: 'content', contentUnitId: 'text',
+      channel: 'assistant-text', update: 'full',
+      content: { ref: await dependencies.rawEvidence.write({ scope: missingScope, kind: 'execution', type: 'assistant-text', locator: 'text', content: answerText }), view: { kind: 'utf8-text' as const } },
+      complete: true } });
+  await settlementOwner.acceptRawFact({ execution: { runtimeId: 'runtime-missing-settlement', executionEpoch: 1 },
+    scope: missingScope, request: missingRequest, producerSeq: 2, fact: { kind: 'request-complete', terminal: 'completed' } });
+  await settlementOwner.registerRequest({ execution: { runtimeId: 'runtime-missing-settlement', executionEpoch: 1 },
+    record: { request: missingRequest, scope: missingScope, phase: 'settled' } });
+  await settlementOwner.recordProviderClose({ providerBinding: binding,
+    result: { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'closed',
+      evidenceRefs: [{ evidenceId: id('evidence', 'missing-settlement-close'), kind: 'operation', source: 'test', locator: 'missing-settlement-close', scope: missingScope }] },
+    closedAt: '2026-10-18T00:00:00.000Z' });
+  await assert.rejects(() => readInteractionProviderSettlement({ journal: settlementParent, turn: missingTurn }),
+    /missing for the current terminal request/);
+  await assert.rejects(() => createProviderExplicitBrainInterpreter({
+    ...coldOptions,
+    publishProviderSettlement: async () => undefined,
+  }).interpret(missingInterpretRequest),
+  /provider settlement is missing for the current terminal request/);
+  const legacy = await createProviderExplicitBrainInterpreter({
+    ...coldOptions,
+  }).interpret(missingInterpretRequest);
+  assert.equal(legacy.kind, 'answer');
 });
 
 // Failure basis: default DI currently omits the lease, and the cold App reader

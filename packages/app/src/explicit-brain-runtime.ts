@@ -10,6 +10,7 @@ import {
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionTurnIdentity,
   type OrganId,
+  type InteractionProviderSettlementReceipt,
   type RawContentReadPort,
   type InteractionHelperAssignmentFields,
   type InteractionHelperResultFields,
@@ -30,9 +31,11 @@ import {
   ExplicitBrainOperationalToolError,
   ExplicitTurnHelperSession,
   createInteractionParentTurnRawOwner,
+  readInteractionProviderSettlement,
   type ExplicitTurnHelperFactory,
   type InteractionHelperJournalPort,
   type InteractionHelperTurnReadPort,
+  type InteractionParentFinalTurnOutput,
   type InteractionParentTurnRawJournalPort,
   type InteractionParentOpenedTurnScopeReadPort,
   type InteractionSemanticCheckpointJournalPort,
@@ -383,11 +386,9 @@ export function createProviderExplicitBrainInterpreter(input: {
    * The App assembly points it at the existing interaction journal; the
    * interpreter never writes business payload fields with settlement data.
    */
-  readonly publishProviderSettlement?: (receipt: {
-    readonly interactionId: string;
-    readonly inputRevision: number;
-    readonly settlement: ProviderSettlement<InteractionParentProviderExecutionIdentityRef>;
-  }) => void | Promise<void>;
+  readonly publishProviderSettlement?: (
+    receipt: InteractionProviderSettlementReceipt,
+  ) => void | Promise<void>;
 }): ExplicitBrainInputInterpreter {
   let promptSegments: Promise<readonly string[]> | undefined;
   const loadPromptSegments = (): Promise<readonly string[]> => {
@@ -397,12 +398,24 @@ export function createProviderExplicitBrainInterpreter(input: {
       .then((loaded) => selectIntakePromptSegments(loaded.segments));
     return promptSegments;
   };
+  const requireColdAnswerSettlement = async (
+    finalParentOutput: InteractionParentFinalTurnOutput,
+    interpretation: ExplicitBrainInterpretation,
+  ): Promise<void> => {
+    if (input.publishProviderSettlement === undefined || interpretation.kind !== 'answer') return;
+    const committed = await readInteractionProviderSettlement({
+      journal: input.parentJournal,
+      turn: finalParentOutput.turnInput.fact.turn,
+    });
+    await input.publishProviderSettlement(committed.fact);
+  };
   // Retain the actual live owners only. Scoped Journal reads select every retry.
   let retained: {
     readonly owner: InteractionParentTurnRawOwner;
     readonly helpers: ExplicitTurnHelperSession;
     readonly reconciled: boolean;
     readonly settlement: ProviderSettlement<InteractionParentProviderExecutionIdentityRef> | undefined;
+    publishOnRetry: boolean;
     owned: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> | undefined;
     /**
      * The original physical close receipt, retained across same-process retries
@@ -435,20 +448,31 @@ export function createProviderExplicitBrainInterpreter(input: {
       ? await live.owner.readReconciledTurnOutput()
       : await live.owner.readFinalTurnOutput();
     const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
-    if (live.reconciled && interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
+    if ((live.reconciled || live.publishOnRetry)
+      && interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
       if (live.settlement === undefined) {
         throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
       }
       await input.publishProviderSettlement({
-        interactionId: request.interactionId, inputRevision: request.inputRevision, settlement: live.settlement,
+        interactionId: request.interactionId,
+        inputRevision: request.inputRevision,
+        request: finalParentOutput.terminalRequest.request,
+        settlement: live.settlement,
       });
     }
-    const checkpointOutput = live.reconciled
-      ? finalParentOutput
-      : live.closed === undefined
-      ? finalParentOutput
-      : await live.owner.readClosedTurnOutput();
-    await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput: checkpointOutput, outcome: interpretation });
+    try {
+      const checkpointOutput = live.reconciled
+        ? finalParentOutput
+        : live.closed === undefined
+        ? finalParentOutput
+        : await live.owner.readClosedTurnOutput();
+      await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput: checkpointOutput, outcome: interpretation });
+    } catch (error) {
+      if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
+        live.publishOnRetry = true;
+      }
+      throw error;
+    }
     retained = undefined;
     return interpretation;
   };
@@ -512,6 +536,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             && (await coldOwner.readReconciliationEligibility()).mode === 'terminal-output') {
             const finalParentOutput = await coldOwner.readClosedTurnOutput();
             const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
             return interpretation;
           }
@@ -541,6 +566,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           if (reconciliation.fact.mode === 'terminal-output') {
             const finalParentOutput = await coldOwner.readReconciledTurnOutput();
             const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
             return interpretation;
           }
@@ -741,11 +767,19 @@ export function createProviderExplicitBrainInterpreter(input: {
             await input.publishProviderSettlement({
               interactionId: request.interactionId,
               inputRevision: request.inputRevision,
+              request: finalParentOutput.terminalRequest.request,
               settlement,
             });
           }
         }
-        live = { owner: createdOwner, helpers, owned, reconciled: continuation !== undefined, settlement: driver.settlement() };
+        live = {
+          owner: createdOwner,
+          helpers,
+          owned,
+          reconciled: continuation !== undefined,
+          settlement: driver.settlement(),
+          publishOnRetry: false,
+        };
         retained = live;
       } catch (error) {
         let failure = error;
