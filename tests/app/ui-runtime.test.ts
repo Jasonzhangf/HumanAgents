@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { formatPairingCommand } from '../../packages/config/src/index.js';
 import {
   PIPELINE_NODE_IDS,
   PIPELINE_ROWS,
@@ -107,7 +109,10 @@ import {
   type MergeCoordinatorPort,
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
-import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
+import {
+  createUiRuntimeRequestDispatcher,
+  startUiRuntimeServer,
+} from '../../packages/app/src/ui-runtime/server.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import { createJsonlCheckpointJournal } from '../../packages/app/src/checkpoint-journal.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
@@ -139,7 +144,7 @@ async function testAccessControl(root: string) {
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   return { accessControl, cookie: accessControl.sessionCookie(session).split(';')[0]! };
 }
@@ -2588,7 +2593,7 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const server = await startUiRuntimeServer({
     service,
@@ -5169,7 +5174,8 @@ test('server close releases the single tracked auth expiry timer after active SS
     sessionTtlMs: 1_500,
     pairingTtlMs: 1_500,
   });
-  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('lease-timer', 1).code);
+  const challenge = await accessControl.issuePairingChallenge();
+  const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   // The Journal is the fixture's own resource: it must outlive the background
   // execution so a late provider append never finds the operation history gone.
@@ -5359,7 +5365,8 @@ test('shared control-root credential invalidation is observed by every live acce
     const credentialPath = join(root, 'security', 'web-access.json');
     const first = await AccessControlService.open({ credentialPath, create: true });
     const second = await AccessControlService.open({ credentialPath });
-    const session = await first.consumePairingCode(first.createPairingChallenge('lease-shared', 1).code);
+    const challenge = await first.issuePairingChallenge();
+    const session = await first.consumePairingCode(challenge.code);
 
     assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'valid');
     const staleGeneration = session.sessionGeneration;
@@ -5372,6 +5379,151 @@ test('shared control-root credential invalidation is observed by every live acce
     assert.equal((await first.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
     assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function issuePairingChallengeInChildProcess(credentialPath: string): Promise<{ readonly code: string; readonly expiresAt: number }> {
+  const moduleUrl = join(process.cwd(), 'dist', 'app', 'app', 'src', 'ui-runtime', 'access-control.js');
+  const script = [
+    'const [moduleUrl, credentialPath] = process.argv.slice(1);',
+    'const { AccessControlService } = await import(moduleUrl);',
+    'const access = await AccessControlService.open({ credentialPath, create: true });',
+    'const challenge = await access.issuePairingChallenge();',
+    'process.stdout.write(JSON.stringify(challenge));',
+  ].join('\n');
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script, moduleUrl, credentialPath], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+  child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', resolve);
+  });
+  if (exitCode !== 0) throw new Error(`pairing issue child failed (${String(exitCode)}): ${stderr}`);
+  return JSON.parse(stdout) as { readonly code: string; readonly expiresAt: number };
+}
+
+test('pairing recovery issues before server and consumes one durable code once across reopen', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-pairing-recovery-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    // A separate process issues the challenge before any server or lease exists.
+    const issued = await issuePairingChallengeInChildProcess(credentialPath);
+    assert.ok(issued.code.length > 0);
+    assert.ok(issued.expiresAt > Date.now());
+
+    // Reopening the credential owner stands in for the serve process that was
+    // not running when the code was issued.
+    const reopened = await AccessControlService.open({ credentialPath });
+    const generation = await reopened.readPersistedGeneration();
+    const firstSession = await reopened.consumePairingCode(issued.code);
+    assert.equal(firstSession.sessionGeneration, generation, 'pairing must not rotate the session generation');
+    await assert.rejects(
+      () => reopened.consumePairingCode(issued.code),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.pair.invalid',
+    );
+
+    // Two independent terminals pair without revoking each other.
+    const secondChallenge = await reopened.issuePairingChallenge();
+    const secondSession = await reopened.consumePairingCode(secondChallenge.code);
+    assert.equal(secondSession.sessionId !== firstSession.sessionId, true);
+    assert.equal(
+      (await reopened.verifySession(reopened.sessionCookie(firstSession))).state,
+      'valid',
+      'pairing a second terminal must not revoke the first session',
+    );
+    assert.equal((await reopened.verifySession(reopened.sessionCookie(secondSession))).state, 'valid');
+    assert.equal(await reopened.readPersistedGeneration(), generation);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('pairing recovery expires durable challenges and logout clears them with the new generation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-pairing-ttl-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    let now = Date.now();
+    const accessControl = await AccessControlService.open({
+      credentialPath,
+      create: true,
+      pairingTtlMs: 5_000,
+      now: () => now,
+    });
+    const expired = await accessControl.issuePairingChallenge();
+    now += 5_001;
+    await assert.rejects(
+      () => accessControl.consumePairingCode(expired.code),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.pair.expired',
+    );
+    await assert.rejects(
+      () => accessControl.consumePairingCode(expired.code),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.pair.invalid',
+    );
+
+    const pending = await accessControl.issuePairingChallenge();
+    const generation = await accessControl.readPersistedGeneration();
+    assert.equal(await accessControl.logout(), generation + 1);
+    await assert.rejects(
+      () => accessControl.consumePairingCode(pending.code),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.pair.invalid',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('pairing recovery projects the config pairing command without authentication', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-pairing-command-'));
+  const credentialPath = join(root, 'security', 'web-access.json');
+  const accessControl = await AccessControlService.open({ credentialPath, create: true });
+  const { listener } = createUiRuntimeRequestDispatcher({
+    service: {} as UiRuntimeService,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    isClosing: () => false,
+  });
+  const server = createServer(listener);
+  const port = await new Promise<number>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('pairing projection server did not bind a TCP port'));
+        return;
+      }
+      resolve(address.port);
+    });
+  });
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const pairingCommand = formatPairingCommand({ controlRoot: root });
+    const unauthenticated = await fetch(`${base}/api/auth/session`);
+    assert.equal(unauthenticated.status, 200);
+    assert.deepEqual(await unauthenticated.json(), { authenticated: false, pairingCommand });
+
+    const challenge = await accessControl.issuePairingChallenge();
+    const paired = await fetch(`${base}/api/auth/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: challenge.code }),
+    });
+    assert.equal(paired.status, 200);
+    const cookie = paired.headers.get('set-cookie')!.split(';')[0]!;
+    const authenticated = await fetch(`${base}/api/auth/session`, { headers: { cookie } });
+    const body = await authenticated.json() as {
+      readonly authenticated: boolean;
+      readonly expiresAt: string;
+      readonly pairingCommand: string;
+    };
+    assert.equal(body.authenticated, true);
+    assert.equal(body.pairingCommand, pairingCommand);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -5416,9 +5568,13 @@ test('credential read and write failures refuse pairing and logout explicitly', 
   try {
     const credentialPath = join(root, 'security', 'web-access.json');
     const accessControl = await AccessControlService.open({ credentialPath, create: true });
+    const challenge = await accessControl.issuePairingChallenge();
     await writeFile(credentialPath, '{not-json}\n', 'utf8');
-    const challenge = accessControl.createPairingChallenge('lease-failure', 1);
 
+    await assert.rejects(
+      () => accessControl.issuePairingChallenge(),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
+    );
     await assert.rejects(
       () => accessControl.consumePairingCode(challenge.code),
       (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
@@ -10164,7 +10320,7 @@ test('organ health HTTP keeps the original transport failure behind the provider
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const server = await startUiRuntimeServer({
     service,
@@ -10338,7 +10494,8 @@ test('the runtime error body keeps the original failure instead of restating the
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('test-lease', 1).code);
+  const challenge = await accessControl.issuePairingChallenge();
+  const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   const identity = () => ({
     leaseId: 'lease-1',

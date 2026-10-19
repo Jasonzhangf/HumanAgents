@@ -92,7 +92,8 @@ test('scoped task control rejects a different bound target before grant or relea
       credentialPath: join(root, 'security', 'web-access.json'),
       create: true,
     });
-    const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('scoped-target-lease', 1).code);
+    const challenge = await accessControl.issuePairingChallenge();
+    const session = await accessControl.consumePairingCode(challenge.code);
     const cookie = accessControl.sessionCookie(session).split(';')[0]!;
     server = await startUiRuntimeServer({ service, accessControl, taskControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
     const path = `/api/tasks/${encodeURIComponent(task.taskId.value)}/control`;
@@ -245,7 +246,8 @@ test('HTTP grant control uses verified owner and durable readback without releas
       stopTask: (taskId) => service.stop(taskId),
     });
     const accessControl = await AccessControlService.open({ credentialPath: join(root, 'security', 'web-access.json'), create: true });
-    const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('fixture-lease', 1).code);
+    const challenge = await accessControl.issuePairingChallenge();
+    const session = await accessControl.consumePairingCode(challenge.code);
     const cookie = accessControl.sessionCookie(session).split(';')[0]!;
     const verified = await accessControl.verifyProductPrincipal(cookie);
     assert.equal(verified.state, 'valid');
@@ -584,7 +586,8 @@ test(`HTTP grant releases the typed prepared allocation once; refusal=${refuseRe
       assert.equal(factories, 0);
       assert.equal(active.runtime.service.eventsSince(preparedOperationId).some((event) => event.kind === 'execution.started'), false);
     }
-    const session = await active.accessControl.consumePairingCode(active.accessControl.createPairingChallenge('grant-lease', 1).code);
+    const challenge = await active.accessControl.issuePairingChallenge();
+    const session = await active.accessControl.consumePairingCode(challenge.code);
     const cookie = active.accessControl.sessionCookie(session).split(';')[0]!;
     const url = `${active.runtime.server.url}/api/tasks/${prepared.taskId.value}/control/grant`;
     const grant = async (body?: unknown) => {

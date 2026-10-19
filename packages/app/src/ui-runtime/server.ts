@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
-import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
+import { dirname, extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
+import { formatPairingCommand } from '../../../config/src/index.js';
 import {
   id,
   validateExecutionPolicyDefinition,
@@ -849,9 +850,15 @@ async function handleRequest(
     if (path === '/api/auth/session' && method === 'GET') {
       const cookie = request.headers.cookie;
       const verification = await accessControl.verifySession(Array.isArray(cookie) ? cookie[0] : cookie);
+      // The product root is the credential owner's control root by the config
+      // layout (<controlRoot>/security/web-access.json). Formatting stays in
+      // the config owner; the browser never infers it.
+      const pairingCommand = formatPairingCommand({
+        controlRoot: dirname(dirname(accessControl.credentialPath)),
+      });
       writeJson(response, 200, verification.state === 'valid'
-        ? { authenticated: true, expiresAt: new Date(verification.session.expiresAt).toISOString() }
-        : { authenticated: false });
+        ? { authenticated: true, expiresAt: new Date(verification.session.expiresAt).toISOString(), pairingCommand }
+        : { authenticated: false, pairingCommand });
       return;
     }
     if (path === '/api/auth/pair' && method === 'POST') {
@@ -890,7 +897,7 @@ async function handleRequest(
       if (leaseId !== active.leaseId || generation !== active.generation) {
         throw new AccessControlError('auth.supervisor.forbidden', 'pairing challenge does not match the active supervisor lease', 'read the active daemon lease and retry pairing', 403);
       }
-      const challenge = accessControl.createPairingChallenge(leaseId, generation);
+      const challenge = await accessControl.issuePairingChallenge();
       writeJson(response, 200, {
         code: challenge.code,
         expiresAt: new Date(challenge.expiresAt).toISOString(),

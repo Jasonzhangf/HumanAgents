@@ -272,7 +272,7 @@ export async function startHarness(input: {
     credentialPath: join(input.root, 'security', input.credentialKey ?? 'primary', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('scheduler-production', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   const runtime = await startUiRuntime({

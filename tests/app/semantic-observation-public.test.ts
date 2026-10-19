@@ -515,7 +515,7 @@ async function testAccessControl(root: string) {
     credentialPath: join(root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('semantic-public-lease', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   return { accessControl, cookie: accessControl.sessionCookie(session).split(';')[0]! };
 }

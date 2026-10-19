@@ -160,7 +160,8 @@ test(`default App composition admits the retained Task only after real HTTP gran
     assert.equal(runtime.service.status().providerState, readiness.state);
     assert.equal(posts, 0, 'typed confirmation and TaskIdentity are not execution authority');
     assert.equal(selections, 1, 'no target execution Provider may be selected before grant');
-    const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('controlled-lease', 1).code);
+    const challenge = await accessControl.issuePairingChallenge();
+    const session = await accessControl.consumePairingCode(challenge.code);
     const cookie = accessControl.sessionCookie(session).split(';')[0]!;
     const controlPath = `${runtime.server.url}/api/tasks/${dispatched.taskId.value}/control`;
     const initial = await fetch(`${controlPath}/grant`, { headers: { cookie } });
@@ -616,7 +617,8 @@ test('two top-level native tasks share one App and overlap real execution reques
     assert.equal(prepared[0]!.dispatch.operationId!.value === prepared[1]!.dispatch.operationId!.value, false);
     assert.equal(executionInitials.length, 0, 'no execution request may start before grant');
 
-    const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('two-top-level-native', 2).code);
+    const challenge = await accessControl.issuePairingChallenge();
+    const session = await accessControl.consumePairingCode(challenge.code);
     cookie = accessControl.sessionCookie(session).split(';')[0]!;
     if (runtime === undefined || cookie === undefined) throw new Error('two-task HTTP grant owner is unavailable');
     const grantedRuntime: UiRuntime = runtime;

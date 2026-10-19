@@ -1774,7 +1774,7 @@ async function runScopedI2HttpFixture(): Promise<void> {
   }));
 
   const accessControl = await AccessControlService.open({ credentialPath: pathsA.webAccessCredentialPath, create: true });
-  const challenge = accessControl.createPairingChallenge('scoped-i2-http', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const binding = {
     bindingId: 'scoped-i2-binding', providerId: 'scoped-i2-provider', protocol: 'responses' as const,

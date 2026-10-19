@@ -615,7 +615,8 @@ test('native CLI preparation control input', async () => {
     // Real fixture-owned A1 credential and paired session. The cookie header is
     // the only control-session-file content; it stays out of business payload.
     const access = await AccessControlService.open({ credentialPath: fixture.paths.webAccessCredentialPath, create: true });
-    const session = await access.consumePairingCode(access.createPairingChallenge('cli-control-lease', 1).code);
+    const challenge = await access.issuePairingChallenge();
+    const session = await access.consumePairingCode(challenge.code);
     const cookie = access.sessionCookie(session).split(';')[0]!;
     await writeFile(controlFile, `${cookie}\n`, 'utf8');
     const cookieName = cookie.slice(0, cookie.indexOf('='));
@@ -625,7 +626,8 @@ test('native CLI preparation control input', async () => {
     if (caller.state !== 'valid') throw new Error('fixture caller principal unavailable');
     // A second, independent credential gives a distinct owner for the foreign grant.
   const otherAccess = await AccessControlService.open({ credentialPath: join(fixture.root, 'other-access.json'), create: true });
-    const otherSession = await otherAccess.consumePairingCode(otherAccess.createPairingChallenge('cli-control-other', 1).code);
+    const otherChallenge = await otherAccess.issuePairingChallenge();
+    const otherSession = await otherAccess.consumePairingCode(otherChallenge.code);
     const other = await otherAccess.verifyProductPrincipal(otherAccess.sessionCookie(otherSession).split(';')[0]!);
     assert.equal(other.state, 'valid');
     if (other.state !== 'valid') throw new Error('fixture other principal unavailable');

@@ -461,7 +461,7 @@ test('confirmed control physical facade commits exact correction and reentry ove
 
 test('confirmed control HTTP dispatcher returns real committed receipts for the exact task scope', async () => {
   const f = await fixture({ controlCase: true });
-  const challenge = f.accessControl.createPairingChallenge('c3-http-control', 1);
+  const challenge = await f.accessControl.issuePairingChallenge();
   const session = await f.accessControl.consumePairingCode(challenge.code);
   const cookie = f.accessControl.sessionCookie(session).split(';')[0];
   const verification = await f.accessControl.verifyProductPrincipal(cookie);
@@ -638,7 +638,7 @@ test('App cold production entry hydrates canonical live state while checkpoint r
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) test('production checkpoint GET preserves canonical current and exact viewed receipts without writes', async () => {
   const f = await fixture();
   const accessControl = await AccessControlService.open({ credentialPath: f.paths.webAccessCredentialPath, create: true });
-  const challenge = accessControl.createPairingChallenge('c3-http-fixture', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0];
   // Use the production dispatcher directly: this read proof has no daemon/credential-watch lifecycle.

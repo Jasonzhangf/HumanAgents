@@ -192,7 +192,7 @@ test('agent activity public HTTP preserves exact selection, cold scope and read-
       });
     }
     const accessControl = await AccessControlService.open({ credentialPath: paths.webAccessCredentialPath, create: true });
-    const challenge = accessControl.createPairingChallenge('http-fixture', 1);
+    const challenge = await accessControl.issuePairingChallenge();
     const session = await accessControl.consumePairingCode(challenge.code);
     const binding: ProviderBinding = { bindingId: 'http-binding', providerId: 'http-provider',
       protocol: 'responses', endpointRef: 'fake://http', modelRef: 'fake',
@@ -556,7 +556,7 @@ test('task dashboard HTTP preserves live pending public output while the final c
       credentialPath: paths.webAccessCredentialPath,
       create: true,
     });
-    const challenge = accessControl.createPairingChallenge('f07-pending-http', 1);
+    const challenge = await accessControl.issuePairingChallenge();
     const session = await accessControl.consumePairingCode(challenge.code);
     const { listener } = createUiRuntimeRequestDispatcher({
       service,

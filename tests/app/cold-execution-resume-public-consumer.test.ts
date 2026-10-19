@@ -1872,7 +1872,7 @@ async function buildResumeService(
     credentialPath: join(fixture.root, 'security', 'web-access.json'),
     create: true,
   });
-  const challenge = accessControl.createPairingChallenge('cold-resume-http', 1);
+  const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
   const launchProvider: ProviderConfig = { source: 'http', provider: 'http', binding: 'cold-resume-binding',
