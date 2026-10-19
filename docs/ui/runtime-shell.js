@@ -474,12 +474,12 @@ function renderTaskReadRow(row, options = {}) {
   const task = row.task
   const currentChild = taskCurrentExecutionChild(task)
   const currentScope = currentChild
-    ? { ...row.scope, ...(currentChild.controlTarget || {}), taskId: currentChild.taskId }
+    ? { kind: 'task', ...(currentChild.controlTarget || {}), taskId: currentChild.taskId }
     : row.scope
   const item = element('div', undefined, 'task-item')
   const link = element('a', undefined, 'task-item-main')
   link.href = currentChild
-    ? (currentChild.controlTarget ? taskExecutionHref(currentChild) : taskDashboardHref(currentChild.taskId, currentScope))
+    ? taskExecutionHref(currentChild)
     : taskDashboardHref(row.scope.taskId, row.scope)
   link.dataset.taskScope = JSON.stringify(currentScope)
   link.append(

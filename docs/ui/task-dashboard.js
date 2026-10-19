@@ -1941,7 +1941,7 @@ function controlTaskIdValue(value) {
 
 function taskGrantTargetMatches(read = taskGrantRead) {
   if (!explicitScope || !read) return false
-  return controlTaskIdValue(read.readback?.taskId) === taskId
+  return controlTaskIdValue(read.taskId) === taskId
     && read.targetScope?.projectKey === explicitScope.projectKey
     && read.targetScope?.mode === explicitScope.mode
 }
@@ -1983,7 +1983,7 @@ function taskGrantTechnicalEntries() {
   return [
     ['targetScope.projectKey', taskGrantRead?.targetScope?.projectKey],
     ['targetScope.mode', taskGrantRead?.targetScope?.mode],
-    ['readback.taskId', controlTaskIdValue(taskGrantRead?.readback?.taskId)],
+    ['taskId', controlTaskIdValue(taskGrantRead?.taskId)],
     ['readback.commitId', taskGrantRead?.readback?.commit?.commitId],
     ['readback.grant.revision', grant?.revision],
     ['readback.grant.state', grant?.state],
