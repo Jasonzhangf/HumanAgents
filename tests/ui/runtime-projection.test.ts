@@ -163,6 +163,8 @@ test('runtime task list classifies every task into a visible projection group', 
 });
 
 type GroupedRuntimeTaskRow = RuntimeTaskRowProjection & {
+  readonly executionState?: string;
+  readonly currentExecutionTaskId?: TaskId;
   readonly semanticTitle?: string;
   readonly executionLineage?: {
     readonly parentTaskId: TaskId;
@@ -240,6 +242,8 @@ test('runtime task list groups only exact committed lineage under one visible wo
   const parentRow = list.completed[0] as GroupedRuntimeTaskRow;
   assert.equal(parentRow.state, 'created');
   assert.equal(parentRow.stateLabel, '执行已完成');
+  assert.equal(parentRow.executionState, 'succeeded');
+  assert.equal(parentRow.currentExecutionTaskId?.value, childTaskId.value);
   assert.equal(parentRow.semanticTitle, '父任务语义标题');
   assert.equal(parentRow.title, '原始父任务全文');
   assert.equal(parentRow.controlTarget?.projectKey, 'project-parent-scope');

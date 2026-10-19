@@ -481,6 +481,8 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
       const execution = currentExecution(grouped)!;
       return {
         ...grouped,
+        executionState: execution.state,
+        currentExecutionTaskId: execution.taskId,
         stateLabel: `执行${execution.stateLabel}`,
         currentState: [`当前执行：${execution.currentState}`, execution.error?.message].filter(Boolean).join(' · '),
       };

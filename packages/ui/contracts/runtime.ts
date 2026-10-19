@@ -257,6 +257,9 @@ export interface RuntimeTaskRowProjection {
    * row still carries its own full row, history, and control target.
    */
   readonly executions?: readonly RuntimeTaskRowProjection[];
+  /** Actual selected child stage; the original parent state below is retained. */
+  readonly executionState?: LifecycleState;
+  readonly currentExecutionTaskId?: TaskId;
   readonly state: LifecycleState;
   readonly stateLabel: string;
   readonly taskFlow?: TaskFlowBinding;

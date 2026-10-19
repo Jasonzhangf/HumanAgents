@@ -443,13 +443,14 @@ export function renderTaskExecutions(task) {
 export function taskRowStateText(task) {
   const state = task?.currentState || task?.stateLabel || task?.state || ''
   if (!task) return state
-  if (task.error) return [state, task.error.message].filter(Boolean).join(' · ')
-  const committed = publishedOutputText(task.publicOutput)
+  const facts = task.executions?.find((child) => taskIdValue(child.taskId) === taskIdValue(task.currentExecutionTaskId)) || task
+  if (facts.error) return [state, facts.error.message].filter(Boolean).join(' · ')
+  const committed = publishedOutputText(facts.publicOutput)
   if (committed) return [state, '查看已提交结果'].filter(Boolean).join(' · ')
-  if (typeof task.output === 'string' && task.output.trim() !== '') {
+  if (typeof facts.output === 'string' && facts.output.trim() !== '') {
     return [state, '查看结果'].filter(Boolean).join(' · ')
   }
-  if (['succeeded', 'failed', 'stopped', 'cancelled', 'blocked'].includes(task.state)) {
+  if (['succeeded', 'failed', 'stopped', 'cancelled', 'blocked'].includes(facts.state)) {
     return [state, '查看任务详情'].filter(Boolean).join(' · ')
   }
   return state
@@ -467,7 +468,7 @@ function renderTaskReadRow(row, options = {}) {
   )
   const meta = element('div', undefined, 'task-item-meta')
   const state = element('span', task.stateLabel || task.state || '', 'task-state-pill')
-  state.dataset.tone = stateTone(task.state)
+  state.dataset.tone = stateTone(task.executionState || task.state)
   meta.append(
     state,
     element('span', row.basis === 'live-runtime' ? '当前实例' : '持久历史', 'scope-basis'),

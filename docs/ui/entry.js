@@ -237,7 +237,7 @@ function renderStatus(summary, rows) {
     copy.append(element('h3', taskRowTitle(row)))
     copy.append(element('p', taskRowStateText(row)))
     const stateChip = element('span', row.stateLabel, 'state-chip')
-    stateChip.dataset.tone = stateTone(row.state)
+    stateChip.dataset.tone = stateTone(row.executionState || row.state)
     const meta = element('div', undefined, 'item-meta')
     meta.append(element('time', formatTime(row.updatedAt)))
     const taskType = taskFlowText(row.taskFlow)
