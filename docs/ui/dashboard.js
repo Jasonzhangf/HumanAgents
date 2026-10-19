@@ -206,7 +206,7 @@ function taskRow(row) {
   const link = element('a', undefined, 'task-item-main')
   const currentChild = taskRowCurrentExecution(row)
   link.href = currentChild
-    ? taskExecutionHref(currentChild)
+    ? taskExecutionHref(currentChild, false, row.scope)
     : taskDashboardHref(row.taskId.value)
   link.append(
     element('h3', taskRowTitle(row)),
@@ -226,7 +226,7 @@ function taskRow(row) {
     actionButton('删除', true, (btn) => runDelete(row, btn)),
   )
   item.append(link, actions)
-  const executions = renderTaskExecutions(row)
+  const executions = renderTaskExecutions(row, row.scope)
   if (executions) item.append(executions)
   return item
 }

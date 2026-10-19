@@ -265,7 +265,7 @@ function renderStatus(summary, rows) {
           return childId === currentId
         })
     link.href = currentChild
-      ? taskExecutionHref(currentChild)
+      ? taskExecutionHref(currentChild, false, row.scope)
       : taskDashboardHref(row.taskId.value)
     link.dataset.taskId = row.taskId.value
     const copy = element('div')
@@ -280,7 +280,7 @@ function renderStatus(summary, rows) {
     link.append(copy, stateChip, meta)
     link.style.textDecoration = 'none'
     list.append(link)
-    const executions = renderTaskExecutions(row)
+    const executions = renderTaskExecutions(row, row.scope)
     if (executions) list.append(executions)
   }
   section.append(list)
