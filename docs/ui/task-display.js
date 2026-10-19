@@ -687,44 +687,79 @@ function actualNodeDetailEntries(technical) {
   return entries
 }
 
-function renderActualNode(node, options) {
-  const item = element('li', undefined, 'actual-execution-node')
-  item.dataset.actualExecutionNode = node.nodeId
-  item.dataset.actualNodeKind = node.kind
-  item.dataset.actualNodeStateTone = node.summary.stateTone
+/*
+ * Shared read-only presentation controls. The template skeleton, the
+ * published plan revision and the recorded actual execution reuse these two
+ * primitives, then separate themselves with their own data attributes. They
+ * build DOM elements and text nodes only; neither assembles an HTML string.
+ */
+function flowCard({ itemClass, dataset = {}, title, tag, tagClass = 'plan-tag', lines = [], detail }) {
+  const item = element('li', undefined, itemClass)
+  Object.assign(item.dataset, dataset)
   const head = element('header', undefined, 'plan-revision-head')
-  head.append(
-    element('strong', node.summary.roleLabel, 'plan-node-title'),
-    element('span', node.summary.stateLabel, 'plan-tag'),
-  )
+  head.append(element('strong', title, 'plan-node-title'))
+  if (tag !== undefined && tag !== null && tag !== '') {
+    head.append(element('span', tag, tagClass))
+  }
   item.append(head)
+  for (const line of lines) {
+    if (line === undefined || line === null) continue
+    if (line.text === undefined || line.text === null || line.text === '') continue
+    item.append(element('p', line.text, line.className))
+  }
+  if (detail) item.append(detail)
+  return item
+}
+
+function flowRelation({ itemClass, dataset = {}, segments = [] }) {
+  const item = element('li', undefined, itemClass)
+  Object.assign(item.dataset, dataset)
+  for (const segment of segments) {
+    if (segment === undefined || segment === null) continue
+    if (segment.text === undefined || segment.text === null || segment.text === '') continue
+    item.append(element('span', segment.text, segment.className))
+  }
+  return item
+}
+
+function renderActualNode(node, options) {
+  const lines = []
   if (node.summary.objective) {
-    item.append(element('p', node.summary.objective, 'business-output-text actual-execution-objective'))
+    lines.push({ text: node.summary.objective, className: 'business-output-text actual-execution-objective' })
   }
   const outcome = node.summary.outcomeLabel
   const resultSummary = node.summary.resultSummary
   if (outcome && resultSummary) {
-    item.append(element('p', `结果（${outcome}）：${resultSummary}`, 'actual-execution-result'))
+    lines.push({ text: `结果（${outcome}）：${resultSummary}`, className: 'actual-execution-result' })
   } else if (outcome) {
-    item.append(element('p', `结论：${outcome}`, 'actual-execution-result'))
+    lines.push({ text: `结论：${outcome}`, className: 'actual-execution-result' })
   } else if (resultSummary) {
-    item.append(element('p', `结果：${resultSummary}`, 'actual-execution-result'))
+    lines.push({ text: `结果：${resultSummary}`, className: 'actual-execution-result' })
   }
   if (node.summary.adoptionLabel) {
-    item.append(element('p', `采用情况：${node.summary.adoptionLabel}`, 'muted actual-execution-adoption'))
+    lines.push({ text: `采用情况：${node.summary.adoptionLabel}`, className: 'muted actual-execution-adoption' })
   }
   if (node.summary.decisionLabel) {
-    item.append(element('p', `判定：${node.summary.decisionLabel}`, 'muted actual-execution-decision'))
+    lines.push({ text: `判定：${node.summary.decisionLabel}`, className: 'muted actual-execution-decision' })
   }
   if (node.summary.nextActionLabel) {
-    item.append(element('p', `下一步：${node.summary.nextActionLabel}`, 'muted actual-execution-next'))
+    lines.push({ text: `下一步：${node.summary.nextActionLabel}`, className: 'muted actual-execution-next' })
   }
   if (node.summary.reason) {
-    item.append(element('p', `说明：${node.summary.reason}`, 'muted actual-execution-reason'))
+    lines.push({ text: `说明：${node.summary.reason}`, className: 'muted actual-execution-reason' })
   }
-  const detail = actualGraphDetail('执行记录详情', actualNodeDetailEntries(node.technical), options)
-  if (detail) item.append(detail)
-  return item
+  return flowCard({
+    itemClass: 'actual-execution-node',
+    dataset: {
+      actualExecutionNode: node.nodeId,
+      actualNodeKind: node.kind,
+      actualNodeStateTone: node.summary.stateTone,
+    },
+    title: node.summary.roleLabel,
+    tag: node.summary.stateLabel,
+    lines,
+    detail: actualGraphDetail('执行记录详情', actualNodeDetailEntries(node.technical), options),
+  })
 }
 
 function renderActualGroup(group, options) {
@@ -750,10 +785,11 @@ function renderActualEdges(edges) {
   section.append(element('h4', '已记录的执行关系'))
   const list = element('ul', undefined, 'actual-execution-edges')
   for (const edge of edges) {
-    const item = element('li', undefined, 'actual-execution-edge')
-    item.dataset.actualExecutionEdgeKind = edge.kind
-    item.append(element('span', edge.detail, 'actual-execution-edge-text'))
-    list.append(item)
+    list.append(flowRelation({
+      itemClass: 'actual-execution-edge',
+      dataset: { actualExecutionEdgeKind: edge.kind },
+      segments: [{ text: edge.detail, className: 'actual-execution-edge-text' }],
+    }))
   }
   section.append(list)
   return section
@@ -815,6 +851,153 @@ function renderActualUnavailable(sources, options) {
   return section
 }
 
+function templateStageLines(stage) {
+  const lines = []
+  if (stage.summary) lines.push({ text: stage.summary, className: 'muted plan-node-intent' })
+  if (Array.isArray(stage.dynamicChoices) && stage.dynamicChoices.length > 0) {
+    lines.push({
+      text: `可重复选择：${stage.dynamicChoices.join('、')}`,
+      className: 'business-output-text template-stage-choices',
+    })
+  }
+  if (Array.isArray(stage.prerequisiteTitles) && stage.prerequisiteTitles.length > 0) {
+    lines.push({
+      text: `前置：${stage.prerequisiteTitles.join('、')}`,
+      className: 'muted template-stage-prerequisites',
+    })
+  }
+  return lines
+}
+
+function renderTemplateStages(stages) {
+  const section = element('section', undefined, 'plan-snapshot template-stages')
+  section.append(element('h4', '模板阶段'))
+  const groups = []
+  for (const stage of stages) {
+    const label = stage.groupLabel
+    let group = groups.find((entry) => entry.label === label)
+    if (!group) {
+      group = { label, stages: [] }
+      groups.push(group)
+    }
+    group.stages.push(stage)
+  }
+  for (const group of groups) {
+    const phase = element('section', undefined, 'plan-phase template-stage-group')
+    if (group.label) phase.append(element('h4', group.label))
+    const list = element('ol', undefined, 'plan-node-list')
+    for (const stage of group.stages) {
+      list.append(flowCard({
+        itemClass: 'plan-node template-stage',
+        dataset: { templateStage: stage.stageId },
+        title: stage.title,
+        tag: stage.roleLabel,
+        tagClass: 'plan-node-kind',
+        lines: templateStageLines(stage),
+      }))
+    }
+    phase.append(list)
+    section.append(phase)
+  }
+  return section
+}
+
+function renderTemplateDependencies(dependencies) {
+  if (!Array.isArray(dependencies) || dependencies.length === 0) return null
+  const section = element('section', undefined, 'plan-edges-section template-dependencies')
+  section.append(element('h4', '模板阶段依赖'))
+  const list = element('ul', undefined, 'plan-edges')
+  for (const dependency of dependencies) {
+    list.append(flowRelation({
+      itemClass: 'plan-edge template-dependency',
+      dataset: { templateDependency: `${dependency.fromStageId}->${dependency.toStageId}` },
+      segments: [
+        { text: dependency.fromTitle, className: 'plan-edge-node' },
+        { text: '先于', className: 'plan-edge-kind' },
+        { text: dependency.toTitle, className: 'plan-edge-node' },
+      ],
+    }))
+  }
+  section.append(list)
+  return section
+}
+
+function renderTemplateLoops(loops) {
+  if (!Array.isArray(loops) || loops.length === 0) return null
+  const section = element('section', undefined, 'plan-edges-section template-loops')
+  section.append(element('h4', '模板循环'))
+  const list = element('ol', undefined, 'plan-node-list')
+  for (const loop of loops) {
+    const lines = []
+    if (loop.summary) lines.push({ text: loop.summary, className: 'muted' })
+    lines.push({ text: `路径：${loop.fromTitle} → ${loop.toTitle}`, className: 'muted' })
+    if (loop.stopCondition) lines.push({ text: `停止条件：${loop.stopCondition}`, className: 'muted' })
+    list.append(flowCard({
+      itemClass: 'plan-node template-loop',
+      dataset: { templateLoop: `${loop.kind}:${loop.fromStageId}->${loop.toStageId}` },
+      title: loop.title,
+      tag: loop.kindLabel === loop.title ? undefined : loop.kindLabel,
+      tagClass: 'plan-node-kind',
+      lines,
+    }))
+  }
+  section.append(list)
+  return section
+}
+
+/*
+ * Static template guidance. The projection owns the Chinese labels and Core
+ * owns the stage and loop text, so this renderer only places those labels. The
+ * skeleton stays a separate block from the recorded execution below it.
+ */
+function renderTemplateGuidance(guidance, options) {
+  const section = element('section', undefined, 'task-flow-guidance')
+  section.dataset.taskFlowGuidance = 'skeleton'
+  section.dataset.taskFlowKind = guidance.kind
+  if (guidance.layout) section.dataset.taskFlowLayout = guidance.layout
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h3', `处理方式：${guidance.kindLabel}`),
+    element('span', '静态指导 · 非执行记录', 'section-meta'),
+  )
+  section.append(head)
+  if (guidance.aimLabel) {
+    section.append(element('p', guidance.aimLabel, 'business-output-text task-flow-aim'))
+  }
+  if (guidance.layoutLabel) {
+    section.append(element('p', `布局：${guidance.layoutLabel}`, 'muted task-flow-layout'))
+  }
+  const stages = Array.isArray(guidance.stages) ? guidance.stages : []
+  if (stages.length > 0) {
+    section.append(renderTemplateStages(stages))
+    const dependencies = renderTemplateDependencies(guidance.dependencies)
+    if (dependencies) section.append(dependencies)
+    const loops = renderTemplateLoops(guidance.loops)
+    if (loops) section.append(loops)
+  }
+  const detailEntries = [
+    ['kind', guidance.kind],
+    ['aim', guidance.aim],
+    ['selectionGuidance', guidance.selectionGuidance],
+    ['displayGroups', JSON.stringify(guidance.displayGroups)],
+  ]
+  if (guidance.layout !== undefined) detailEntries.push(['layout', guidance.layout])
+  if (stages.length > 0) {
+    detailEntries.push(['stages', stages.map((stage) => `${stage.stageId}(${stage.role})`).join(', ')])
+    detailEntries.push([
+      'dependencies',
+      (guidance.dependencies ?? []).map((item) => `${item.fromStageId}->${item.toStageId}`).join(', '),
+    ])
+    detailEntries.push([
+      'loops',
+      (guidance.loops ?? []).map((item) => `${item.kind}:${item.fromStageId}->${item.toStageId}`).join(', '),
+    ])
+  }
+  const detail = actualGraphDetail('模板骨架详情', detailEntries, options)
+  if (detail) section.append(detail)
+  return section
+}
+
 /**
  * Read-only shared renderer for the actual execution graph carrier.
  *
@@ -839,21 +1022,7 @@ export function renderTaskActualExecutionGraphSection(graph, options = {}) {
   }
 
   if (graph.guidance) {
-    const guidance = element('section', undefined, 'task-flow-guidance')
-    guidance.dataset.taskFlowGuidance = 'skeleton'
-    guidance.dataset.taskFlowKind = graph.guidance.kind
-    const guidanceDetail = actualGraphDetail('处理方式详情', [
-      ['kind', graph.guidance.kind],
-      ['aim', graph.guidance.aim],
-      ['selectionGuidance', graph.guidance.selectionGuidance],
-      ['displayGroups', JSON.stringify(graph.guidance.displayGroups)],
-    ], options)
-    guidance.append(
-      element('h3', `处理方式：${graph.guidance.kindLabel}`),
-      element('p', graph.guidance.aim, 'business-output-text'),
-    )
-    if (guidanceDetail) guidance.append(guidanceDetail)
-    section.append(guidance)
+    section.append(renderTemplateGuidance(graph.guidance, options))
   }
 
   const history = graph.history
@@ -888,22 +1057,21 @@ export function renderTaskActualExecutionGraphSection(graph, options = {}) {
 }
 
 function renderPlanNode(node, options) {
-  const item = element('li', undefined, 'plan-node')
-  item.dataset.planNode = node.nodeId
-  item.dataset.planNodeKind = node.kind
   const kindLabel = PLAN_NODE_KIND_LABELS[node.kind] || (node.kind ? '计划节点' : '类型未声明')
-  item.append(
-    element('strong', node.title || '未命名节点', 'plan-node-title'),
-    element('span', kindLabel, 'plan-node-kind'),
-    element('p', node.intent || '未声明意图', 'muted plan-node-intent'),
-    planDetail('节点详情', [
+  return flowCard({
+    itemClass: 'plan-node',
+    dataset: { planNode: node.nodeId, planNodeKind: node.kind },
+    title: node.title || '未命名节点',
+    tag: kindLabel,
+    tagClass: 'plan-node-kind',
+    lines: [{ text: node.intent || '未声明意图', className: 'muted plan-node-intent' }],
+    detail: planDetail('节点详情', [
       ['nodeId', node.nodeId],
       ['kind', node.kind],
       ['phaseId', node.phaseId ?? '未归入阶段'],
       ['definition', JSON.stringify(node.definition ?? {})],
     ], options),
-  )
-  return item
+  })
 }
 
 /**
@@ -970,16 +1138,19 @@ export function renderTaskPlanSnapshot(snapshot, options = {}) {
   for (const relation of snapshot?.relations ?? []) {
     const from = nodeById.get(relation.fromNodeId)
     const to = nodeById.get(relation.toNodeId)
-    const item = element('li', undefined, 'plan-edge')
-    item.dataset.relationKind = relation.kind
-    item.dataset.fromNode = relation.fromNodeId
-    item.dataset.toNode = relation.toNodeId
-    item.append(
-      element('span', from?.title || relation.fromNodeId, 'plan-edge-node'),
-      element('span', planRelationLabel(relation.kind), 'plan-edge-kind'),
-      element('span', to?.title || relation.toNodeId, 'plan-edge-node'),
-    )
-    edgeList.append(item)
+    edgeList.append(flowRelation({
+      itemClass: 'plan-edge',
+      dataset: {
+        relationKind: relation.kind,
+        fromNode: relation.fromNodeId,
+        toNode: relation.toNodeId,
+      },
+      segments: [
+        { text: from?.title || relation.fromNodeId, className: 'plan-edge-node' },
+        { text: planRelationLabel(relation.kind), className: 'plan-edge-kind' },
+        { text: to?.title || relation.toNodeId, className: 'plan-edge-node' },
+      ],
+    }))
   }
   if (edgeList.children.length === 0) edgeList.append(element('li', '这个计划没有已声明的节点关系。', 'empty'))
   edgeSection.append(edgeList)

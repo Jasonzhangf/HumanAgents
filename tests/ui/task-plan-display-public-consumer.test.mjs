@@ -666,6 +666,7 @@ test('actual graph missing history stays explicit instead of becoming an empty g
   })
   const section = renderTaskActualExecutionGraphSection(graph)
   assert.equal(section.dataset.actualExecutionGraph, 'not-recorded')
+  assert.equal(byData(section, 'taskFlowGuidance', 'skeleton').length, 0)
   assert.equal(byData(section, 'actualExecutionHistory', 'not-recorded').length, 1)
   assert.match(allText(section), /暂无执行过程记录/)
   assert.match(allText(section), /这里仅展示已记录的执行过程/)
@@ -677,6 +678,191 @@ test('actual graph missing history stays explicit instead of becoming an empty g
     graph.history.unavailable[0].detail,
     'source-diagnostic:/runs/missing-history.json',
   )
+})
+
+/*
+ * F15 template skeleton rendering.
+ *
+ * Failure basis: the shared renderer consumes only the legacy aim text, so a
+ * projected template skeleton (layout, stages, dependencies, loops and the
+ * Chinese role labels) is dropped before the user sees it. Impact is that the
+ * default layer cannot tell static template guidance from recorded execution,
+ * and the single repeatable choice region, checkpoint->Planner dependency and
+ * the separate inspection occurrence loop stay invisible. Cost is one bounded
+ * DOM case over the real exported renderer with an agreed presentation
+ * fixture; it does not clone projection logic or run a browser.
+ */
+test('template skeleton renders static guidance through the shared card and relation controls', () => {
+  const templateGuidance = {
+    kind: 'inspection',
+    kindLabel: '巡检',
+    aim: 'Inspect the target and report only recorded findings.',
+    selectionGuidance: 'Select methods and roles dynamically.',
+    displayGroups: ['Occurrence Trigger', 'Dynamic Work', 'Turn Checkpoint', 'Planner Alignment'],
+    aimLabel: '按巡检目标检查当前对象，只报告有记录依据的发现。',
+    layout: 'occurrence-and-turn-closure-loop',
+    layoutLabel: '巡检触发与轮次收拢循环',
+    stages: [
+      {
+        stageId: 'occurrence-trigger',
+        title: '轮次触发与基线绑定',
+        summary: '按下一次定时或事件触发开始巡检，并绑定当前基线。',
+        role: 'occurrence-trigger',
+        roleLabel: '巡检触发边界',
+        groupLabel: '巡检触发',
+        prerequisiteTitles: [],
+      },
+      {
+        stageId: 'dynamic-work',
+        title: '轮内动态选择区',
+        summary: '探索、规划、审查和执行由编排者按需选择，可重复且不要求固定顺序。',
+        role: 'dynamic-choice-region',
+        roleLabel: '编排动态选择区',
+        groupLabel: '动态工作',
+        dynamicChoices: ['探索', '规划', '审查', '执行'],
+        prerequisiteTitles: ['轮次触发与基线绑定'],
+      },
+      {
+        stageId: 'turn-checkpoint',
+        title: '轮末检查点',
+        summary: '每个结束的轮次先记录目标、动作、结果和预期下一步。',
+        role: 'mandatory-turn-checkpoint',
+        roleLabel: '轮末必经检查点',
+        groupLabel: '轮末检查点',
+        prerequisiteTitles: ['轮内动态选择区'],
+      },
+      {
+        stageId: 'planner-alignment',
+        title: '轮末规划对齐',
+        summary: '检查点之后由规划器核对目标，并决定完成、失败或继续。',
+        role: 'mandatory-planner-alignment',
+        roleLabel: '轮末必经规划对齐',
+        groupLabel: '规划对齐',
+        prerequisiteTitles: ['轮末检查点'],
+      },
+    ],
+    dependencies: [
+      {
+        fromStageId: 'occurrence-trigger',
+        toStageId: 'dynamic-work',
+        fromTitle: '轮次触发与基线绑定',
+        toTitle: '轮内动态选择区',
+      },
+      {
+        fromStageId: 'dynamic-work',
+        toStageId: 'turn-checkpoint',
+        fromTitle: '轮内动态选择区',
+        toTitle: '轮末检查点',
+      },
+      {
+        fromStageId: 'turn-checkpoint',
+        toStageId: 'planner-alignment',
+        fromTitle: '轮末检查点',
+        toTitle: '轮末规划对齐',
+      },
+    ],
+    loops: [
+      {
+        kind: 'turn-iteration',
+        kindLabel: '轮次迭代',
+        title: '轮次迭代',
+        fromStageId: 'planner-alignment',
+        toStageId: 'dynamic-work',
+        fromTitle: '轮末规划对齐',
+        toTitle: '轮内动态选择区',
+        summary: '未完成则开启下一轮。',
+        stopCondition: '任务完成或失败。',
+      },
+      {
+        kind: 'occurrence-repetition',
+        kindLabel: '巡检重复',
+        title: '巡检重复',
+        fromStageId: 'planner-alignment',
+        toStageId: 'occurrence-trigger',
+        fromTitle: '轮末规划对齐',
+        toTitle: '轮次触发与基线绑定',
+        summary: '下一次定时或事件触发开启新的巡检轮次，并与历史基线对比。',
+        stopCondition: '巡检停止或被替换。',
+      },
+    ],
+  }
+  const recorded = projectTaskActualExecutionGraph(nativeSource())
+  const opened = []
+  const section = renderTaskActualExecutionGraphSection(
+    { ...recorded, guidance: templateGuidance },
+    { onOpenDetail: (detail, button) => opened.push({ detail, button }) },
+  )
+  const text = allText(section)
+
+  // A static template block is present and is not a recorded fact.
+  assert.equal(byData(section, 'taskFlowGuidance', 'skeleton').length, 1)
+  assert.match(text, /处理方式：巡检/)
+  assert.match(text, /静态指导/)
+  assert.match(text, /非执行记录/)
+
+  // Human Chinese labels come from the projection, never raw records.
+  assert.match(text, /按巡检目标检查当前对象/)
+  assert.match(text, /巡检触发与轮次收拢循环/)
+  assert.match(text, /巡检触发边界/)
+  assert.match(text, /编排动态选择区/)
+  assert.match(text, /轮末必经检查点/)
+  assert.match(text, /轮末必经规划对齐/)
+
+  // Exactly one optional repeatable dynamic region carries the four choices.
+  const stageIds = walk(section)
+    .filter((node) => node.dataset?.templateStage !== undefined)
+    .map((node) => node.dataset.templateStage)
+  assert.deepEqual(stageIds, [
+    'occurrence-trigger',
+    'dynamic-work',
+    'turn-checkpoint',
+    'planner-alignment',
+  ])
+  const dynamicStage = byData(section, 'templateStage', 'dynamic-work')[0]
+  assert.match(allText(dynamicStage), /探索、规划、审查、执行/)
+  const choiceCards = walk(section)
+    .filter((node) => node.dataset?.templateStage !== undefined)
+    .filter((node) => allText(node).includes('探索'))
+  assert.equal(choiceCards.length, 1)
+
+  // Only the declared mandatory skeleton relations are drawn.
+  const dependencies = walk(section)
+    .filter((node) => node.dataset?.templateDependency !== undefined)
+    .map((node) => node.dataset.templateDependency)
+  assert.deepEqual(dependencies, [
+    'occurrence-trigger->dynamic-work',
+    'dynamic-work->turn-checkpoint',
+    'turn-checkpoint->planner-alignment',
+  ])
+
+  // The inspection occurrence repetition stays separate from the turn iteration.
+  const loops = walk(section)
+    .filter((node) => node.dataset?.templateLoop !== undefined)
+    .map((node) => node.dataset.templateLoop)
+  assert.deepEqual(loops, [
+    'turn-iteration:planner-alignment->dynamic-work',
+    'occurrence-repetition:planner-alignment->occurrence-trigger',
+  ])
+  assert.match(text, /轮次迭代/)
+  assert.match(text, /巡检重复/)
+  assert.match(text, /停止条件：任务完成或失败/)
+
+  // Raw keys stay out of the default layer; recorded execution stays distinct.
+  assert.doesNotMatch(
+    text,
+    /occurrence-trigger|dynamic-work|turn-checkpoint|planner-alignment|occurrence-and-turn-closure-loop|Inspect the target|Select methods/,
+  )
+  assert.equal(walk(section).filter((node) => node.dataset?.actualExecutionNode).length, 9)
+  assert.match(text, /已记录的实际执行/)
+
+  // Technical detail keeps the mechanical identity for diagnosis.
+  const detail = openActualDetail(section, opened, '模板骨架详情')
+  assert.equal(detail.kind, 'inspection')
+  assert.equal(detail.layout, 'occurrence-and-turn-closure-loop')
+  assert.equal(detail.aim, 'Inspect the target and report only recorded findings.')
+  assert.match(detail.stages, /dynamic-work/)
+  assert.match(detail.dependencies, /occurrence-trigger->dynamic-work/)
+  assert.match(detail.loops, /occurrence-repetition/)
 })
 
 test('current rejects an unknown or mismatched accepted identity instead of using the latest', () => {
