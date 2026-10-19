@@ -1328,6 +1328,22 @@ async function handleRequest(
       }));
       return;
     }
+    const explicitProviderSettlement =
+      /^\/api\/explicit\/interactions\/([^/]+)\/control\/provider-settlement$/.exec(path);
+    if (explicitProviderSettlement && method === 'GET') {
+      writeJson(response, 200, await service.readExplicitProviderSettlement({
+        interactionId: decodeURIComponent(explicitProviderSettlement[1]!),
+        inputRevision: requirePositiveInteger(
+          { inputRevision: Number(url.searchParams.get('inputRevision')) },
+          'inputRevision',
+        ),
+        turnId: requireString(
+          { turnId: url.searchParams.get('turnId') ?? '' },
+          'turnId',
+        ),
+      }));
+      return;
+    }
     const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);
     if (explicitInteraction && method === 'GET') {
       writeJson(response, 200, await service.inspectExplicitInteraction(decodeURIComponent(explicitInteraction[1]!)));

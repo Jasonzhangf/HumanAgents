@@ -62,6 +62,7 @@ import {
   type InteractionDecision,
   type InteractionHistoryQuery,
   type InteractionHistoryResult,
+  type InteractionProviderSettlementReceipt,
   type WorkResult,
   type ContextReplacement,
   type ContextView,
@@ -69,6 +70,9 @@ import {
   type TaskIdentityScope,
   type TaskIdentityRecord,
 } from '../../../contracts/src/index.js';
+import type {
+  InteractionParentCommittedFact,
+} from '../../../runtime/src/explicit-brain/index.js';
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
@@ -471,6 +475,22 @@ export interface UiRuntimeGrantExecutionReceipt {
   readonly apiError?: UiRuntimeApiErrorBody;
 }
 
+export interface ExplicitProviderSettlementReadInput {
+  readonly interactionId: string;
+  readonly inputRevision: number;
+  readonly turnId: string;
+}
+
+/**
+ * App boundary over the Runtime exact-read owner. The formal composition binds
+ * one parent Journal and interaction scope; the public client can only name the
+ * declared interaction, revision and logical turn. An absent Journal owner is
+ * explicit, so no route fabricates an empty receipt.
+ */
+export interface ExplicitProviderSettlementReadPort {
+  read(input: ExplicitProviderSettlementReadInput): Promise<InteractionParentCommittedFact<InteractionProviderSettlementReceipt>>;
+}
+
 export interface UiRuntimeTaskControlTarget {
   readonly projectKey: string;
   readonly mode: RuntimeMode;
@@ -519,6 +539,8 @@ export interface UiRuntimeServiceOptions {
   readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
+  /** Read-only exact Provider settlement receipt over the composition-bound parent Journal. */
+  readonly explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort;
   /**
    * The existing Task identity owner over the same control Organ Journal the
    * runtime already persists. The service never opens its own journal or mints
@@ -5236,6 +5258,26 @@ export class UiRuntimeService {
   async inspectExplicitInteraction(interactionId: string): Promise<ExplicitInteractionSnapshot> {
     try {
       return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async readExplicitProviderSettlement(
+    input: ExplicitProviderSettlementReadInput,
+  ): Promise<InteractionParentCommittedFact<InteractionProviderSettlementReceipt>> {
+    const port = this.options.explicitProviderSettlementRead;
+    if (port === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-provider-settlement.unavailable',
+        APP_OWNER,
+        'this runtime has no composition-bound explicit provider settlement read port',
+        'start the runtime through the formal composition that binds the parent Journal',
+        503,
+      );
+    }
+    try {
+      return await port.read(input);
     } catch (error) {
       throw apiError(error);
     }
