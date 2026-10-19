@@ -178,7 +178,7 @@ test('runtime task list groups only exact committed lineage under one visible wo
   const childTaskId = id('task', 'task-lineage-child');
   const missingParentTaskId = id('task', 'task-lineage-missing-parent');
   const parent = {
-    ...runtimeTask('running', 21),
+    ...runtimeTask('created', 21),
     taskId: parentTaskId,
     title: '原始父任务全文',
     semanticTitle: '父任务语义标题',
@@ -233,11 +233,13 @@ test('runtime task list groups only exact committed lineage under one visible wo
 
   const list = projectRuntimeTaskList({ mode: 'fake', tasks });
 
-  assert.deepEqual(list.running.map((row) => row.taskId.value), ['task-lineage-parent']);
+  assert.deepEqual(list.running.map((row) => row.taskId.value), []);
   assert.deepEqual(list.waiting.map((row) => row.taskId.value), ['task-lineage-orphan']);
-  assert.deepEqual(list.completed.map((row) => row.taskId.value), ['task-lineage-prefix-decoy']);
+  assert.deepEqual(list.completed.map((row) => row.taskId.value), ['task-lineage-parent', 'task-lineage-prefix-decoy']);
 
-  const parentRow = list.running[0] as GroupedRuntimeTaskRow;
+  const parentRow = list.completed[0] as GroupedRuntimeTaskRow;
+  assert.equal(parentRow.state, 'created');
+  assert.equal(parentRow.stateLabel, '执行已完成');
   assert.equal(parentRow.semanticTitle, '父任务语义标题');
   assert.equal(parentRow.title, '原始父任务全文');
   assert.equal(parentRow.controlTarget?.projectKey, 'project-parent-scope');
@@ -256,9 +258,21 @@ test('runtime task list groups only exact committed lineage under one visible wo
   assert.equal(list.waiting[0]?.controlTarget?.projectKey, 'project-orphan-scope');
   assert.equal(list.waiting[0]?.output, 'orphan history remains readable');
   assert.deepEqual(list.counts, {
-    running: 1, waiting: 1, completed: 1, stopped: 0, draft: 0, failed: 0, total: 3,
+    running: 0, waiting: 1, completed: 2, stopped: 0, draft: 0, failed: 0, total: 3,
   });
   assert.equal(tasks.length, 4);
+  const dashboard = projectRuntimeDashboard({ mode: 'fake', tasks, recentInputs: [] });
+  assert.equal(dashboard.taskCount, 3);
+  for (const state of ['running', 'blocked', 'succeeded'] as const) {
+    const stageChild = { ...child, state, currentState: `child-${state}` };
+    const stageList = projectRuntimeTaskList({ mode: 'fake', tasks: [parent, stageChild] });
+    const group = state === 'running' ? stageList.running : state === 'blocked' ? stageList.waiting : stageList.completed;
+    assert.equal(group[0]?.taskId.value, parentTaskId.value);
+    assert.equal(group[0]?.state, 'created');
+    assert.equal(group[0]?.currentState.includes(`child-${state}`), true);
+    assert.equal(group[0]?.executions?.[0]?.taskId.value, childTaskId.value);
+    assert.equal(stageList.counts.total, 1);
+  }
   assert.deepEqual(child.executionLineage, {
     parentTaskId,
     subscriptionId: 'subscription-child-1',

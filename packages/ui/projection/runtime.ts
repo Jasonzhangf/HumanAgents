@@ -407,6 +407,7 @@ export function projectRuntimeStatus(input: RuntimeStatusInput): RuntimeStatusPr
 }
 
 export function projectRuntimeDashboard(input: RuntimeDashboardInput): RuntimeDashboardProjection {
+  const visibleTasks = projectRuntimeTaskList({ mode: input.mode, tasks: input.tasks });
   const recentOutputs: RuntimeRecentOutputProjection[] = input.tasks
     // Dashboard summaries display committed publication only. `task.output` can still be the
     // runtime's internal execution value, but it is not trusted public publication evidence.
@@ -435,32 +436,35 @@ export function projectRuntimeDashboard(input: RuntimeDashboardInput): RuntimeDa
   return {
     surface: 'runtime-dashboard',
     mode: input.mode,
-    hasRunning: input.tasks.some((task) => isActive(task.state)),
-    taskCount: input.tasks.length,
+    hasRunning: visibleTasks.counts.running > 0,
+    taskCount: visibleTasks.counts.total,
     recentInputs: input.recentInputs.slice(0, 5),
     recentOutputs,
     recentFailures,
   };
 }
 
+function currentExecution(row: RuntimeTaskRowProjection): RuntimeTaskRowProjection | undefined {
+  let current: RuntimeTaskRowProjection | undefined;
+  for (const child of row.executions ?? []) {
+    if (current === undefined
+      || (isActive(child.state) && !isActive(current.state))
+      || (isActive(child.state) === isActive(current.state) && child.updatedAt >= current.updatedAt)) {
+      current = child;
+    }
+  }
+  return current;
+}
+
 export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTaskListProjection {
   const rows = input.tasks.map(toRow);
-  const existingTaskIds = new Set(rows.map((row) => row.taskId.value));
-  const declaredChildIds = new Set(rows.flatMap((row) => {
-    const parentTaskId = row.executionLineage?.parentTaskId;
-    return parentTaskId === undefined
-      || parentTaskId.value === row.taskId.value
-      || !existingTaskIds.has(parentTaskId.value)
-      ? []
-      : [row.taskId.value];
-  }));
+  const rowsById = new Map(rows.map((row) => [row.taskId.value, row]));
   const childrenByParent = new Map<string, RuntimeTaskRowProjection[]>();
   for (const row of rows) {
     const parentTaskId = row.executionLineage?.parentTaskId;
-    if (parentTaskId === undefined || !declaredChildIds.has(row.taskId.value)) continue;
-    // Only a top-level business work item can own grouped children. A child of
-    // a child keeps its own row instead of disappearing from the visible list.
-    if (declaredChildIds.has(parentTaskId.value)) continue;
+    if (parentTaskId === undefined) continue;
+    const parent = rowsById.get(parentTaskId.value);
+    if (parent === undefined || parent.executionLineage !== undefined) continue;
     const children = childrenByParent.get(parentTaskId.value) ?? [];
     children.push(row);
     childrenByParent.set(parentTaskId.value, children);
@@ -472,14 +476,22 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
     .filter((row) => !groupedChildIds.has(row.taskId.value))
     .map((row) => {
       const children = childrenByParent.get(row.taskId.value);
-      return children === undefined ? row : { ...row, executions: [...children] };
+      if (children === undefined) return row;
+      const grouped = { ...row, executions: [...children] };
+      const execution = currentExecution(grouped)!;
+      return {
+        ...grouped,
+        stateLabel: `执行${execution.stateLabel}`,
+        currentState: [`当前执行：${execution.currentState}`, execution.error?.message].filter(Boolean).join(' · '),
+      };
     });
-  const running = visible.filter((row) => isActive(row.state));
-  const waiting = visible.filter((row) => isWaiting(row.state));
-  const completed = visible.filter((row) => isCompleted(row.state));
-  const stopped = visible.filter((row) => isStopped(row.state));
-  const draft = visible.filter((row) => isDraft(row.state));
-  const failed = visible.filter((row) => isFailed(row.state));
+  const stage = (row: RuntimeTaskRowProjection) => currentExecution(row)?.state ?? row.state;
+  const running = visible.filter((row) => isActive(stage(row)));
+  const waiting = visible.filter((row) => isWaiting(stage(row)));
+  const completed = visible.filter((row) => isCompleted(stage(row)));
+  const stopped = visible.filter((row) => isStopped(stage(row)));
+  const draft = visible.filter((row) => isDraft(stage(row)));
+  const failed = visible.filter((row) => isFailed(stage(row)));
   return {
     surface: 'runtime-task-list',
     mode: input.mode,
