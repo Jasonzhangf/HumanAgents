@@ -2,7 +2,7 @@
 
 日期：2026-10-18（America/Los_Angeles）
 
-状态：DRAFT / 待独立设计 Review。未获该次 Review 的 PASS 前，不得改动任何产品代码。
+状态：设计已被 r510 独立评审接受；contracts/Core foundation 已实现，projection/renderer 与运行时渲染未实现。
 
 需求绑定：项目 `.appsdk/requirements.json`（`requirements_version: 14`）的活跃需求。
 
@@ -176,7 +176,7 @@ Core 的三个模板语义：
 
 `resolveTaskFlowGuidance` 必须克隆返回的 `displayGroups`、`stages`、`dependencies` 和 `loops`，使调用方不能改写静态定义。
 
-边界校验只覆盖既有 typed 契约边界：`layout` 取值合法、`stages` 非空且字段齐全、`dependencies` 的 `fromStageId` 与 `toStageId` 非空、`loops` 非空且字段齐全、`role` 与 `kind` 取值合法。静态 Core 自有定义不需要通用图校验引擎，因此不新增 Kahn、DFS、环检测或深度引擎。
+当前 foundation 只使用 typed 编译边界和既有 `validateTaskFlowBinding`。静态 Core 自有定义不新增 `validateTaskFlowGuidance`、通用图校验引擎、Kahn、DFS、环检测或深度算法。
 
 ## 6. 公共投影与共享渲染
 
@@ -246,4 +246,4 @@ Core 的三个模板语义：
 
 ## 12. 状态
 
-状态：DRAFT。等待一次独立设计 Review 的 PASS。未获 PASS 前，不进入产品代码改动。
+状态：r510 设计评审 PASS。contracts/Core foundation 已实现；UI projection、共享 renderer 与生产运行时渲染仍未实现。
