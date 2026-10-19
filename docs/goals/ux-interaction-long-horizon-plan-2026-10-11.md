@@ -5,9 +5,22 @@
 日期：2026-10-11
 计划状态：执行基线已更新；里程碑验收仍按下文逐项关闭。
 
-最新交付更新：F07、F15与taskless settlement receipt已完成标准main/build/install/restart/push/cleanup；F20五个原条款已有分层历史执行覆盖，F10已按产品主体认证、catalog未知拒绝与scope隔离收口。I1–I4可按原条款及既有修正证据逐项限定接受，但不表示5/5或9/9；I5与完整目标仍ACTIVE/INCOMPLETE，尚缺原taskless简单问答成功及最终whole-goal收口审查。当前裁决见下方「2026-10-18 证据收口与当前边界」；更早的pending/OPEN文字保留为历史。
+最新交付更新（2026-10-19）：原 taskless 简单问答已按同轮正式恢复成功（epoch8 API200 answer `4`，typed receipt succeeded/released/committed）；生产 UI 三行修复 `bf44e09f` 把 answered 映射为 succeeded／「已回答」。最终整体独立 Review 一次 PASS（10 模块、findings0）；main/build/install0、正式 restart49→50/PID38376/53007 clean、安装后公开 GET 与推送完成，候选树已回收。Root 已按各自原 scope 逐项接受 G1–G14／F01–F20／I1–I5，并完成最终核验；本次文档提交记录完整目标收口。当前裁决见下方「2026-10-19 最终收口」；更早的 pending／OPEN 文字保留为历史。
 权威需求：[semantic observation audit](../ui/semantic-observation-audit-2026-10-07.md) G1–G14 / F01–F20；分层设计基线：[UX core framework](../ui/ux-core-framework-2026-10-10.md)（DESIGN-CANDIDATE）；生产语义链计划：[semantic observation execution plan](semantic-observation-execution-plan-2026-10-08.md)；旧交互契约：[interaction redesign plan](../ui/interaction-redesign-plan-2026-10-03.md)。
 当前执行状态以以下最新增量、[项目状态汇总](../../note.md)和各 owner 的实际交付回执为准。较早记录保留为历史，不代表当前 main、进程、候选或工作树状态；旧 `.worker-runs/ux-restart-20261011/execution-note.md` 不再作为实时状态来源。
+
+### 2026-10-19 最终收口
+
+本节是当前 G／F／I 状态裁决入口，取代下方「2026-10-18 证据收口与当前边界」中与本节冲突的语句；下方段落保留为历史。本节不改需求、原验收文字、代码、gate 或历史证据，不重跑测试、构建、浏览器、模型或服务。
+
+- 原 taskless 简单问答已不再 pending。唯一执行者依用户明确纠正，按原 `interaction-2`／revision1、逻辑 turn 与完整 turnInput 执行一次同轮正式恢复，epoch8 返回 API200、answer `4`；typed receipt succeeded／released／committed，parent close closed、helpers 0、语义 checkpoint present，Task 数量与既有任务 checkpoint 不变。证据：[恢复回执](/Volumes/Intel/playground/humanagent/.worker-runs/native-taskless-shape-revalidation-plan-20261018/user-resume-reception.md)与同目录的 `user-resume-result.json`。
+- 最终 UI 展示已修复：生产三行改动 `bf44e09f` 把 answered 映射为 succeeded／「已回答」。真实 RED 为 unknown ≠ succeeded，随后同一消费者 GREEN 6/6；精确候选 JS 与安装后生产 renderer 均通过浏览器验证。
+- F10 与 F20 判定为充分接受：F10 按产品主体认证、catalog 未知拒绝与声明项目 scope 隔离共同满足原条款；F20 原五条款按分层历史证据（App4／UI11、dashboard 10/10 与已安装浏览器）覆盖，不新增测试或 current-version identity 门禁。
+- G1–G14、F01–F20、I1–I5 按各自原 scope 逐项验收，覆盖本轮完整目标；这不表示所有假设组合或尚未验证的反例均通过。最终独立审查、安装后显示与自有资源清理已完成，Root 已接收全部必需交付证据。
+- `FC-UNVERIFIED` 保留：未定位实际 RED 或可执行反例的条款继续标该状态，普通成功／失败 receipt 不证明抓错能力。典型边界包括 F20 负向选择、F11／I3 计划历史浏览器断言、F12 freshness、F13 完整恢复路径、per-call checkpoint 及 raw 泄漏反例。F19 的 P2b whole-case 失败保留，已接受的 C3a duties／effects／prefix 子集边界不变。
+- epoch7 历史失败保留：首次偏离在 RCC `V3Req04StandardizedResponses` 误判合法 tool-schema 属性 `requiredCapabilities`；HA socket 到 wire 终止映射仍 UNKNOWN；后续一次成功不等于所有 RCC 错误已修。已撤销此前误设的 RCC 完整 Review／main／install 硬前提；现有 typed fault、资源 close 与同轮恢复实际生效，不需要自动 fallback 或 retry 框架。
+- 最终证据：[独立审查](/Volumes/Intel/playground/humanagent/.worker-runs/native-answered-status-20261019/review-final.json)、[正式重启](/Volumes/Intel/playground/humanagent/.worker-runs/native-answered-status-20261019/canonical-restart.json)、[安装后页面](/Volumes/Intel/playground/humanagent/.worker-runs/native-answered-status-20261019/installed-browser.png)、[工作树清理](/Volumes/Intel/playground/humanagent/.worker-runs/native-answered-status-20261019/cleanup.md)及同目录的 `browser-cleanup.json`。仅保留正式实例、第一个主工作树和受保护的既有 p3 页面，不清理其他 owner 的资源。
+- 本轮不推导 arbitrary-N、全协议、全模式、live-RCC、物理磁盘或组合矩阵债务；不新增矩阵、guard 或测试。
 
 ### 2026-10-18 证据收口与当前边界
 

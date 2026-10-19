@@ -1,5 +1,9 @@
 # Native Reasoning & Semantic Observation Progress Summary
 
+## 2026-10-19 当前交付：原问答恢复与已回答状态已验收
+
+原 `interaction-2` 在同一逻辑 turn 正式恢复至 epoch8，实际回答 `4`；typed settlement 为 succeeded/released/committed，资源 closed，未新建 Task 或改变任务 checkpoint。状态投影修复 `bf44e09f` 已合入并推送 main，构建、安装及正式 restart49→50 完成；安装后生产模块显示原答案与“交互 已回答”，全程只读复验，没有再次提交问题。最终独立审查覆盖完整原需求、G/F/I证据及相关规则，10个模块、无阻断 finding。完整范围的当前裁决与最终资源收口只维护在 [UX 长程计划](ux-interaction-long-horizon-plan-2026-10-11.md) 和 [项目状态汇总](../../note.md)；下文均为历史时点，不再代表原问答失败或禁止正式恢复。RCC 完整交付不作为本目标的前置条件，历史失败和未验证的抓错能力继续保留。
+
 ## 2026-10-18 最新定位：epoch7 首偏离在 RCC 标准化校验
 
 精确候选的请求正文与HA样本已建立语义对应。RCC在V3Req04把合法工具参数schema中的requiredCapabilities误判为side-channel字段并拒绝，provider attempts为空。尚无上游请求或wire599证据。源码owner正在接收该校验边界问题；不得删HA字段绕过或追加原问题请求。具体证据与边界只维护于 `note.md` 最新定位段及epoch7-candidate-reception.md。完整目标未完成。

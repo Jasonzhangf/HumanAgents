@@ -1,4 +1,8 @@
-# HumanAgent 项目状态汇总（2026-10-18）
+# HumanAgent 项目状态汇总（2026-10-19）
+
+## 2026-10-19 最终交付：原 taskless 简单问答恢复与 answered 展示修复
+
+原 `interaction-2` 简单问答已按用户明确纠正，以原 interaction2/revision1、逻辑 turn 与完整 turnInput 执行同轮正式恢复，epoch8 返回 API200 answer `4`；typed receipt succeeded/released/committed，parent close closed、helpers 0、语义 checkpoint present，Task 数量与既有任务 checkpoint 不变。生产 UI 三行修复 `bf44e09f` 把 answered 映射为 succeeded／「已回答」，真实 RED unknown≠succeeded 后同一消费者 GREEN 6/6，候选与安装后 renderer 的浏览器验证通过。最终整体独立 Review 一次 PASS（10 模块、findings0）；main/build/install0、正式 restart49→50/PID38376/53007 clean，安装后原 GET 显示 `4`／已回答／交互已回答且既有 typed receipt 仍 succeeded，源码已推送。候选树与分支已回收（worktrees 2→1，仅剩 main/control）；自有浏览器 cookie/emulation 已清理，受保护 p3 保留。Root 已完成最终核验，本次文档提交记录完整目标收口；UX G/F/I 裁决见 [UX 长程计划](docs/goals/ux-interaction-long-horizon-plan-2026-10-11.md)「2026-10-19 最终收口」。[最终交付证据](/Volumes/Intel/playground/humanagent/.worker-runs/native-answered-status-20261019/cleanup.md)与[原问答恢复](/Volumes/Intel/playground/humanagent/.worker-runs/native-taskless-shape-revalidation-plan-20261018/user-resume-reception.md)可独立读取。FC-UNVERIFIED、P2b whole-case 失败、epoch7 历史失败与 RCC wire 映射 UNKNOWN 保留；一次成功不等于所有 RCC 错误已修。下方 2026-10-18 记录保留为历史。
 
 ## 2026-10-18 最新定位：RCC 拒绝合法工具 schema 字段
 
