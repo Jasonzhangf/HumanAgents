@@ -6,6 +6,7 @@ import {
   validateAcceptedRawFact,
   validateInteractionSemanticCheckpoint,
   validateInteractionLatestTurn,
+  validateInteractionProviderSettlementReceipt,
   validateInteractionTurnIdentity,
   validateOccurrenceExecutionOwner,
   validateProviderBinding,
@@ -14,6 +15,7 @@ import {
   type AcceptedRawFact,
   type EvidenceRef,
   type InteractionParentProviderExecutionIdentityRef,
+  type InteractionProviderSettlementReceipt,
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
   type JournalCommitRef,
@@ -133,6 +135,9 @@ export interface InteractionParentTurnSnapshot {
   readonly ownerReconciliations: readonly InteractionParentCommittedFact<
     InteractionParentOwnerReconciliationFact
   >[];
+  readonly providerSettlements: readonly InteractionParentCommittedFact<
+    InteractionProviderSettlementReceipt
+  >[];
   readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null;
 }
 
@@ -165,6 +170,12 @@ export type InteractionParentTurnAppend =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentOwnerReconciliationFact;
+    }
+  | {
+      readonly kind: 'provider-settlement';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionProviderSettlementReceipt;
     };
 
 /**
@@ -473,8 +484,121 @@ function snapshotCommitFingerprint(snapshot: InteractionParentTurnSnapshot): str
     requests: snapshot.requests.map((committed) => committed.commit),
     acceptedFacts: snapshot.acceptedFacts.map((committed) => committed.commit),
     ownerReconciliations: snapshot.ownerReconciliations.map((committed) => committed.commit),
+    providerSettlements: snapshot.providerSettlements.map((committed) => committed.commit),
     resourceClose: snapshot.resourceClose?.commit ?? null,
   });
+}
+
+/**
+ * The latest durable physical epoch and owner of this business turn. A
+ * reconciliation only advances the epoch; a repeated crash keeps the latest
+ * effective epoch instead of restarting at the opening epoch.
+ */
+function activeExecutionState(
+  snapshot: InteractionParentTurnSnapshot,
+): {
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+  readonly executionOwner: OccurrenceExecutionOwner | null;
+} {
+  if (snapshot.turnInput === null) {
+    throw new ContractError('interaction parent reconciliation requires the committed turn input');
+  }
+  const latest = snapshot.ownerReconciliations.at(-1);
+  if (latest === undefined) {
+    return {
+      execution: snapshot.turnInput.fact.execution,
+      executionOwner: snapshot.turnInput.fact.executionOwner ?? null,
+    };
+  }
+  return {
+    execution: { ...snapshot.turnInput.fact.execution, executionEpoch: latest.fact.effectiveExecutionEpoch },
+    executionOwner: latest.fact.replacementOwner,
+  };
+}
+
+function ignoredRequests(snapshot: InteractionParentTurnSnapshot): readonly string[] {
+  return [...new Set(snapshot.ownerReconciliations.flatMap((entry) => entry.fact.unsettledRequestIds))];
+}
+
+/**
+ * The latest record of every request that the reconciliation has not already
+ * abandoned. Both reconciliation eligibility and continuation-anchor reading
+ * share this exact scope so they cannot disagree about which requests count.
+ */
+function nonIgnoredRequestRecords(
+  snapshot: InteractionParentTurnSnapshot,
+  ignored: ReadonlySet<string>,
+): readonly RuntimeRequestRecord[] {
+  const latest = new Map<string, RuntimeRequestRecord>();
+  for (const committed of snapshot.requests) {
+    if (ignored.has(committed.fact.request.requestId)) continue;
+    latest.set(committed.fact.request.requestId, committed.fact);
+  }
+  return [...latest.values()];
+}
+
+function hasCommittedRequestCompletion(
+  snapshot: InteractionParentTurnSnapshot,
+  record: RuntimeRequestRecord,
+): boolean {
+  return snapshot.acceptedFacts.some((committed) =>
+    sameRequestIdentity(committed.fact.envelope.request, record.request)
+    && committed.fact.envelope.fact.kind === 'request-complete');
+}
+
+/**
+ * Derive the one completed settled leaf request shared by final-output folding
+ * and provider-settlement association. The label keeps existing final-output
+ * diagnostics while the settlement path reports its own boundary.
+ */
+function completedTerminalRequest(
+  snapshot: InteractionParentTurnSnapshot,
+  ignoredRequestIds: readonly string[],
+  label: string,
+): {
+  readonly terminalRequest: RuntimeRequestRecord;
+  readonly requestCompleteCommit: JournalCommitRef;
+} {
+  const ignored = new Set(ignoredRequestIds);
+  const requests = nonIgnoredRequestRecords(snapshot, ignored);
+  if (requests.length === 0) {
+    throw new ContractError(`${label} requires at least one registered request`);
+  }
+  const unsettled = requests.filter((record) =>
+    (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
+  if (unsettled.length > 0) {
+    throw new ContractError(
+      `${label} requires every request to leave dispatching, dispatched and waiting`,
+    );
+  }
+  const parentRequestIds = new Set(
+    requests
+      .map((record) => record.request.parentRequestId)
+      .filter((parentRequestId): parentRequestId is string => parentRequestId !== undefined),
+  );
+  const terminals = requests.filter((record) =>
+    record.phase === 'settled' && !parentRequestIds.has(record.request.requestId));
+  if (terminals.length !== 1) {
+    throw new ContractError(
+      `${label} requires exactly one settled terminal request, found ${terminals.length}`,
+    );
+  }
+  const terminalRequest = terminals[0]!;
+  const completions = snapshot.acceptedFacts.filter((committed) =>
+    !ignored.has(committed.fact.envelope.request.requestId)
+    && sameRequestIdentity(committed.fact.envelope.request, terminalRequest.request)
+    && committed.fact.envelope.fact.kind === 'request-complete');
+  if (completions.length !== 1) {
+    throw new ContractError(
+      `${label} requires exactly one request-complete fact for ${terminalRequest.request.requestId}`,
+    );
+  }
+  const completion = completions[0]!;
+  if (completion.fact.envelope.fact.kind !== 'request-complete'
+    || completion.fact.envelope.fact.terminal !== 'completed') {
+    throw new ContractError(`${label} requires a completed terminal request`);
+  }
+  return { terminalRequest, requestCompleteCommit: completion.commit };
 }
 
 function toolPairKey(
@@ -658,54 +782,11 @@ export function createInteractionParentTurnRawOwner(
     if (snapshot.turnInput === null) {
       throw new ContractError('interaction parent final output requires the committed turn input');
     }
-    const ignored = new Set(ignoredRequestIds);
-    const latest = new Map<string, RuntimeRequestRecord>();
-    for (const committed of snapshot.requests) {
-      if (ignored.has(committed.fact.request.requestId)) continue;
-      latest.set(committed.fact.request.requestId, committed.fact);
-    }
-    const requests = [...latest.values()];
-    if (requests.length === 0) {
-      throw new ContractError('interaction parent final output requires at least one registered request');
-    }
-    const unsettled = requests.filter((record) =>
-      (UNSETTLED_PHASES as readonly string[]).includes(record.phase));
-    if (unsettled.length > 0) {
-      throw new ContractError(
-        'interaction parent final output requires every request to leave dispatching, dispatched and waiting',
-      );
-    }
-    // The terminal request is the settled request that no other registered
-    // request continues. A settled parent that still has a live continuation
-    // is not final, and two independent settled leaves are ambiguous.
-    const parentRequestIds = new Set(
-      requests
-        .map((record) => record.request.parentRequestId)
-        .filter((parentRequestId): parentRequestId is string => parentRequestId !== undefined),
+    const { terminalRequest, requestCompleteCommit } = completedTerminalRequest(
+      snapshot,
+      ignoredRequestIds,
+      'interaction parent final output',
     );
-    const terminals = requests.filter((record) =>
-      record.phase === 'settled' && !parentRequestIds.has(record.request.requestId));
-    if (terminals.length !== 1) {
-      throw new ContractError(
-        `interaction parent final output requires exactly one settled terminal request, found ${terminals.length}`,
-      );
-    }
-    const terminalRequest = terminals[0]!;
-    const completions = snapshot.acceptedFacts.filter((committed) =>
-      !ignored.has(committed.fact.envelope.request.requestId)
-      && sameRequestIdentity(committed.fact.envelope.request, terminalRequest.request)
-      && committed.fact.envelope.fact.kind === 'request-complete');
-    if (completions.length !== 1) {
-      throw new ContractError(
-        `interaction parent final output requires exactly one request-complete fact for ${terminalRequest.request.requestId}`,
-      );
-    }
-    const completion = completions[0]!;
-    if (completion.fact.envelope.fact.kind !== 'request-complete'
-      || completion.fact.envelope.fact.terminal !== 'completed') {
-      throw new ContractError('interaction parent final output requires a completed terminal request');
-    }
-    const requestCompleteCommit = completion.commit;
 
     const { entries: mergedEntries, contentUnits: mergedUnits, initialInputText } = await foldSnapshot(
       snapshot, terminalRequest.request.requestId, ignoredRequestIds,
@@ -751,63 +832,6 @@ export function createInteractionParentTurnRawOwner(
       assistantText,
       assistantContentRefs,
     };
-  }
-
-  /**
-   * The latest durable physical epoch and owner of this business turn. A
-   * reconciliation only advances the epoch; a repeated crash keeps the latest
-   * effective epoch instead of restarting at the opening epoch.
-   */
-  function activeExecutionState(
-    snapshot: InteractionParentTurnSnapshot,
-  ): {
-    readonly execution: InteractionParentProviderExecutionIdentityRef;
-    readonly executionOwner: OccurrenceExecutionOwner | null;
-  } {
-    if (snapshot.turnInput === null) {
-      throw new ContractError('interaction parent reconciliation requires the committed turn input');
-    }
-    const latest = snapshot.ownerReconciliations.at(-1);
-    if (latest === undefined) {
-      return {
-        execution: snapshot.turnInput.fact.execution,
-        executionOwner: snapshot.turnInput.fact.executionOwner ?? null,
-      };
-    }
-    return {
-      execution: { ...snapshot.turnInput.fact.execution, executionEpoch: latest.fact.effectiveExecutionEpoch },
-      executionOwner: latest.fact.replacementOwner,
-    };
-  }
-
-  function ignoredRequests(snapshot: InteractionParentTurnSnapshot): readonly string[] {
-    return [...new Set(snapshot.ownerReconciliations.flatMap((entry) => entry.fact.unsettledRequestIds))];
-  }
-
-  /**
-   * The latest record of every request that the reconciliation has not already
-   * abandoned. Both reconciliation eligibility and continuation-anchor reading
-   * share this exact scope so they cannot disagree about which requests count.
-   */
-  function nonIgnoredRequestRecords(
-    snapshot: InteractionParentTurnSnapshot,
-    ignored: ReadonlySet<string>,
-  ): readonly RuntimeRequestRecord[] {
-    const latest = new Map<string, RuntimeRequestRecord>();
-    for (const committed of snapshot.requests) {
-      if (ignored.has(committed.fact.request.requestId)) continue;
-      latest.set(committed.fact.request.requestId, committed.fact);
-    }
-    return [...latest.values()];
-  }
-
-  function hasCommittedRequestCompletion(
-    snapshot: InteractionParentTurnSnapshot,
-    record: RuntimeRequestRecord,
-  ): boolean {
-    return snapshot.acceptedFacts.some((committed) =>
-      sameRequestIdentity(committed.fact.envelope.request, record.request)
-      && committed.fact.envelope.fact.kind === 'request-complete');
   }
 
   /**
@@ -1476,4 +1500,138 @@ export function createInteractionParentTurnRawOwner(
       return requestEligibility(await journal.readTurnSnapshot(turn));
     },
   };
+}
+
+function settlementExecutionMatches(
+  execution: InteractionParentProviderExecutionIdentityRef,
+  receipt: InteractionProviderSettlementReceipt,
+): boolean {
+  const settlement = receipt.settlement;
+  return execution.runtimeId === settlement.runtimeId
+    && sameScopedId(execution.organId, settlement.organId)
+    && sameScopedId(execution.operationId, settlement.operationId)
+    && execution.executionEpoch === settlement.executionEpoch
+    && sameTurnIdentity(execution.interactionTurn, settlement.interactionTurn);
+}
+
+function sameProviderSettlementKey(
+  committed: InteractionProviderSettlementReceipt,
+  execution: InteractionParentProviderExecutionIdentityRef,
+  request: ProviderRequestIdentityRef,
+): boolean {
+  return committed.settlement.executionEpoch === execution.executionEpoch
+    && settlementExecutionMatches(execution, committed)
+    && sameRequestIdentity(committed.request, request);
+}
+
+/**
+ * Publish one complete Provider settlement as control evidence on the existing
+ * interaction-parent Journal. The settlement remains the exact typed value
+ * produced by the Provider owner; this function validates its association but
+ * never rebuilds or trims it.
+ */
+export async function publishInteractionProviderSettlement(input: {
+  readonly journal: InteractionParentTurnRawJournalPort;
+  readonly receipt: InteractionProviderSettlementReceipt;
+}): Promise<InteractionParentCommittedFact<InteractionProviderSettlementReceipt>> {
+  validateInteractionProviderSettlementReceipt(input.receipt);
+  const turn = input.receipt.settlement.interactionTurn;
+  const { committed, result } = await input.journal.transactTurn<
+    | {
+        readonly kind: 'existing';
+        readonly committed: InteractionParentCommittedFact<InteractionProviderSettlementReceipt>;
+      }
+    | {
+        readonly kind: 'new';
+        readonly fact: InteractionProviderSettlementReceipt;
+      }
+  >(turn, (snapshot) => {
+    if (snapshot.turnInput === null) {
+      throw new ContractError(
+        'interaction parent provider settlement requires the committed turn input',
+      );
+    }
+    if (!sameTurnIdentity(snapshot.turnInput.fact.turn, turn)) {
+      throw new ContractError('interaction parent provider settlement turn does not match the committed turn');
+    }
+    const active = activeExecutionState(snapshot);
+    if (!settlementExecutionMatches(active.execution, input.receipt)) {
+      throw new ContractError(
+        'interaction parent provider settlement requires the active physical execution epoch',
+      );
+    }
+    const { terminalRequest } = completedTerminalRequest(
+      snapshot,
+      ignoredRequests(snapshot),
+      'interaction parent provider settlement',
+    );
+    if (!sameRequestIdentity(terminalRequest.request, input.receipt.request)) {
+      throw new ContractError(
+        'interaction parent provider settlement request is not the current terminal request',
+      );
+    }
+    const existing = snapshot.providerSettlements.find((entry) =>
+      sameProviderSettlementKey(entry.fact, active.execution, terminalRequest.request));
+    if (existing !== undefined) {
+      if (canonicalJsonStringify(existing.fact) !== canonicalJsonStringify(input.receipt)) {
+        throw new ContractError(
+          'interaction parent provider settlement conflicts with the committed receipt',
+        );
+      }
+      return { result: { kind: 'existing', committed: existing } };
+    }
+    return {
+      append: {
+        kind: 'provider-settlement',
+        turn,
+        execution: active.execution,
+        fact: input.receipt,
+      },
+      result: { kind: 'new', fact: input.receipt },
+    };
+  });
+  if (result.kind === 'existing') return result.committed;
+  if (committed === undefined) {
+    throw new ContractError('interaction parent provider settlement append did not commit');
+  }
+  return { fact: result.fact, commit: committed };
+}
+
+/**
+ * Read the committed Provider settlement for the current physical epoch's
+ * actual terminal request. The read is exact and read-only: an older epoch
+ * receipt never substitutes for the current one.
+ */
+export async function readInteractionProviderSettlement(input: {
+  readonly journal: InteractionParentTurnRawJournalPort;
+  readonly turn: InteractionTurnIdentity;
+}): Promise<InteractionParentCommittedFact<InteractionProviderSettlementReceipt>> {
+  validateInteractionTurnIdentity(input.turn);
+  const snapshot = await input.journal.readTurnSnapshot(input.turn);
+  if (snapshot.turnInput === null) {
+    throw new ContractError(
+      'interaction parent provider settlement requires the committed turn input',
+    );
+  }
+  const active = activeExecutionState(snapshot);
+  const { terminalRequest } = completedTerminalRequest(
+    snapshot,
+    ignoredRequests(snapshot),
+    'interaction parent provider settlement',
+  );
+  const matches = snapshot.providerSettlements.filter((entry) =>
+    sameProviderSettlementKey(entry.fact, active.execution, terminalRequest.request));
+  if (matches.length === 0) {
+    throw new ContractError(
+      'interaction parent provider settlement is missing for the current terminal request',
+    );
+  }
+  if (matches.length !== 1) {
+    throw new ContractError(
+      'interaction parent provider settlement has more than one receipt for the current terminal request',
+    );
+  }
+  const committed = matches[0]!;
+  validateInteractionProviderSettlementReceipt(committed.fact);
+  return committed;
 }

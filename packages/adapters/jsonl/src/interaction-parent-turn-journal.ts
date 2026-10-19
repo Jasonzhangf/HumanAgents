@@ -5,12 +5,14 @@ import {
   assertProviderExecutionIdentity,
   validateAcceptedRawFact,
   validateInteractionSemanticCheckpoint,
+  validateInteractionProviderSettlementReceipt,
   validateInteractionTurnIdentity,
   validateOccurrenceExecutionOwner,
   validateProviderBinding,
   validateProviderCloseResult,
   type AcceptedRawFact,
   type InteractionParentProviderExecutionIdentityRef,
+  type InteractionProviderSettlementReceipt,
   type InteractionTurnIdentity,
   type OrganId,
   type RuntimeRequestLifecyclePhase,
@@ -89,6 +91,13 @@ type ParentRawPayload =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentOwnerReconciliationFact;
+    }
+  | {
+      readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
+      readonly discriminant: 'provider-settlement';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionProviderSettlementReceipt;
     };
 
 function sameScopedId(
@@ -104,6 +113,15 @@ function sameTurnIdentity(left: InteractionTurnIdentity, right: InteractionTurnI
     && left.interactionId === right.interactionId
     && left.inputRevision === right.inputRevision
     && left.turnId === right.turnId;
+}
+
+function sameRequestIdentity(
+  left: { readonly turnId: string; readonly requestId: string; readonly parentRequestId?: string },
+  right: { readonly turnId: string; readonly requestId: string; readonly parentRequestId?: string },
+): boolean {
+  return left.turnId === right.turnId
+    && left.requestId === right.requestId
+    && left.parentRequestId === right.parentRequestId;
 }
 
 function sameParentExecutionBusinessIdentity(
@@ -281,6 +299,31 @@ function assertOwnerReconciliationFact(
   }
 }
 
+function assertProviderSettlementFact(
+  fact: InteractionProviderSettlementReceipt,
+  turn: InteractionTurnIdentity,
+  execution: InteractionParentProviderExecutionIdentityRef,
+): void {
+  if (fact === null || typeof fact !== 'object') {
+    throw new JournalIntegrityError('interaction parent provider settlement receipt is invalid');
+  }
+  validateInteractionProviderSettlementReceipt(fact);
+  if (!sameTurnIdentity(fact.settlement.interactionTurn, turn)) {
+    throw new JournalIntegrityError(
+      'interaction parent provider settlement turn does not match its record turn',
+    );
+  }
+  if (execution.runtimeId !== fact.settlement.runtimeId
+    || !sameScopedId(execution.organId, fact.settlement.organId)
+    || !sameScopedId(execution.operationId, fact.settlement.operationId)
+    || execution.executionEpoch !== fact.settlement.executionEpoch
+    || !sameTurnIdentity(execution.interactionTurn, fact.settlement.interactionTurn)) {
+    throw new JournalIntegrityError(
+      'interaction parent provider settlement execution does not match its record execution',
+    );
+  }
+}
+
 function assertRequestRecord(
   record: RuntimeRequestRecord,
   turn: InteractionTurnIdentity,
@@ -364,6 +407,15 @@ function readParentRawPayload(record: JournalRecord): ParentRawPayload | null {
     }
     return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
   }
+  if (discriminant === 'provider-settlement') {
+    const turn = payload.turn as InteractionTurnIdentity;
+    const execution = payload.execution as InteractionParentProviderExecutionIdentityRef;
+    const fact = payload.fact as InteractionProviderSettlementReceipt;
+    assertTurn(turn);
+    assertInteractionParentExecution(execution, turn);
+    assertProviderSettlementFact(fact, turn, execution);
+    return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
+  }
   throw new JournalIntegrityError('interaction parent raw record discriminant is invalid');
 }
 
@@ -388,7 +440,11 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>
   >[] = [];
   const seenRequestPhases = new Set<string>();
+  const requestEpochs = new Map<string, number>();
   const ownerReconciliations: InteractionParentCommittedFact<InteractionParentOwnerReconciliationFact>[] = [];
+  const providerSettlements: InteractionParentCommittedFact<
+    InteractionProviderSettlementReceipt
+  >[] = [];
   let resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null = null;
 
   for (const record of records) {
@@ -436,10 +492,50 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       resourceClose = { fact: payload.fact, commit };
       continue;
     }
-    // An owner reconciliation is the only record that may follow a committed
-    // close. A post-close reconciliation must be a `continue` that opens the
-    // next physical epoch: the previous epoch's provider is already released,
-    // so the same owner may resume, while every other append stays frozen.
+    // Beyond the existing continue reconciliation branch, a Provider settlement
+    // control record may follow a committed close. Request and raw history stay
+    // frozen after physical release.
+    if (payload.discriminant === 'provider-settlement') {
+      if (turnInput === null) {
+        throw new JournalIntegrityError(
+          'interaction parent provider settlement requires the committed turn input before it',
+        );
+      }
+      const activeEpoch = ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch
+        ?? turnInput.fact.execution.executionEpoch;
+      if (!sameParentExecutionBusinessIdentity(turnInput.fact.execution, payload.execution)
+        || payload.execution.executionEpoch !== activeEpoch) {
+        throw new JournalIntegrityError(
+          'interaction parent provider settlement requires the active physical execution epoch',
+        );
+      }
+      const registered = requests
+        .filter((record) => sameRequestIdentity(record.fact.request, payload.fact.request))
+        .at(-1);
+      if (registered === undefined) {
+        throw new JournalIntegrityError(
+          'interaction parent provider settlement requires the registered terminal request',
+        );
+      }
+      if (requestEpochs.get(payload.fact.request.requestId) !== activeEpoch
+        || registered.fact.phase !== 'settled') {
+        throw new JournalIntegrityError(
+          'interaction parent provider settlement request is not settled in the active epoch',
+        );
+      }
+      if (providerSettlements.some((entry) =>
+        entry.fact.settlement.executionEpoch === activeEpoch
+        && sameRequestIdentity(entry.fact.request, payload.fact.request))) {
+        throw new JournalIntegrityError(
+          'interaction parent turn repeats a provider settlement for one request',
+        );
+      }
+      providerSettlements.push({ fact: payload.fact, commit });
+      continue;
+    }
+    // An owner reconciliation is otherwise the only record that may follow a
+    // committed close. A post-close reconciliation must be a `continue` that
+    // opens the next physical epoch.
     if (payload.discriminant === 'owner-reconciliation') {
       if (turnInput === null || turnInput.fact.executionOwner === undefined
         || turnInput.fact.providerBinding === undefined) {
@@ -472,18 +568,28 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       throw new JournalIntegrityError('interaction parent raw append follows the committed resource close');
     }
     if (payload.discriminant === 'request') {
+      if (turnInput === null) {
+        throw new JournalIntegrityError(
+          'interaction parent request requires the committed turn input before it',
+        );
+      }
       const phaseKey = `${payload.record.request.requestId}\u0000${payload.record.phase}`;
       if (seenRequestPhases.has(phaseKey)) {
         throw new JournalIntegrityError('interaction parent turn repeats a request phase record');
       }
       seenRequestPhases.add(phaseKey);
+      requestEpochs.set(
+        payload.record.request.requestId,
+        ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch
+          ?? turnInput.fact.execution.executionEpoch,
+      );
       requests.push({ fact: payload.record, commit });
       continue;
     }
     acceptedFacts.push({ fact: payload.entry, commit });
   }
 
-  return { turnInput, requests, acceptedFacts, ownerReconciliations, resourceClose };
+  return { turnInput, requests, acceptedFacts, ownerReconciliations, providerSettlements, resourceClose };
 }
 
 function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput {
@@ -547,6 +653,23 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
       payload: {
         kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
         discriminant: 'owner-reconciliation',
+        turn: append.turn,
+        execution: append.execution,
+        fact: append.fact,
+      },
+    };
+  }
+  if (append.kind === 'provider-settlement') {
+    return {
+      commitId: parentRawCommitId(
+        append.turn,
+        `provider-settlement:${append.execution.executionEpoch}:${canonicalJsonStringify(append.fact.request)}`,
+      ),
+      kind: 'event',
+      scope: parentScope(append.turn, append.execution),
+      payload: {
+        kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
+        discriminant: 'provider-settlement',
         turn: append.turn,
         execution: append.execution,
         fact: append.fact,

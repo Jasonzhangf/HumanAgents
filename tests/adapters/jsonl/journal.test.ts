@@ -8,10 +8,23 @@ import test from 'node:test';
 import {
   createJsonlEventPublicationJournal,
   JsonlOrganJournal,
+  JsonlInteractionParentTurnJournal,
   JournalCommitConflictError,
   JournalIntegrityError,
 } from '../../../packages/adapters/jsonl/src/index.js';
-import { id, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
+import {
+  id,
+  type Checkpoint,
+  type EvidenceRef,
+  type InteractionParentProviderExecutionIdentityRef,
+  type InteractionProviderSettlementReceipt,
+  type InteractionTurnIdentity,
+  type ProviderBinding,
+  type ProviderCloseResult,
+  type RawAsset,
+  type RuntimeRequestRecord,
+  type ScopeRef,
+} from '@humanagent/contracts';
 import {
   OperationEventPublicationError,
   publishOperationEvent,
@@ -915,4 +928,112 @@ test('operation event publication ignores checkpoint and ordinary journal record
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// Failure basis: the parent Journal codec adds one provider-settlement
+// discriminant. An old journal must decode an empty list, and a receipt must
+// remain readable after a physical close. Probability is unknown because the
+// record is new. Impact is a missing receipt or a post-close codec rejection.
+// Cost is one existing JSONL consumer test.
+test('interaction parent Journal decodes empty settlements and persists a post-close receipt', async () => {
+  const { journal, file } = await fixture();
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const turn: InteractionTurnIdentity = {
+    organId: organ,
+    interactionScopeId: 'jsonl-settlement-scope',
+    interactionId: 'jsonl-settlement-interaction',
+    inputRevision: 1,
+    turnId: 'jsonl-settlement-logical-turn',
+  };
+  const operation = id('operation', 'jsonl-settlement-operation');
+  const scope: ScopeRef = { organId: organ, operationId: operation };
+  const execution: InteractionParentProviderExecutionIdentityRef = {
+    runtimeId: 'runtime-jsonl-settlement',
+    organId: organ,
+    operationId: operation,
+    executionEpoch: 1,
+    interactionTurn: turn,
+  };
+  const binding: ProviderBinding = {
+    bindingId: 'binding-jsonl-settlement',
+    providerId: 'provider-jsonl-settlement',
+    protocol: 'responses',
+    endpointRef: 'endpoint://jsonl-settlement',
+    modelRef: 'model-jsonl-settlement',
+    configDigest: 'sha256:jsonl-settlement-config',
+    capabilityDigest: 'sha256:jsonl-settlement-capability',
+  };
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', 'jsonl-settlement-evidence'),
+    kind: 'operation',
+    source: 'jsonl-settlement-test',
+    locator: 'provider-settlement',
+    scope,
+  };
+  const initialInput: RawAsset = { ref: evidence, view: { kind: 'utf8-text' } };
+  const request = { turnId: 'jsonl-settlement-physical-turn', requestId: 'jsonl-settlement-request' };
+  const dispatching: RuntimeRequestRecord = { request, scope, phase: 'dispatching' };
+  const settled: RuntimeRequestRecord = { request, scope, phase: 'settled' };
+  const close: ProviderCloseResult = {
+    bindingId: binding.bindingId,
+    providerId: binding.providerId,
+    protocol: binding.protocol,
+    state: 'closed',
+    evidenceRefs: [evidence],
+  };
+  const receipt: InteractionProviderSettlementReceipt = {
+    interactionId: turn.interactionId,
+    inputRevision: turn.inputRevision,
+    request,
+    settlement: {
+      ...execution,
+      state: 'succeeded',
+      evidenceRefs: [evidence],
+      resourceRelease: { state: 'released', evidenceRefs: [evidence] },
+      persistence: { state: 'committed', evidenceRefs: [evidence] },
+    },
+  };
+
+  assert.deepEqual((await parentJournal.readTurnSnapshot(turn)).providerSettlements, []);
+  await parentJournal.transactTurn(turn, () => ({
+    append: {
+      kind: 'turn-input',
+      fact: {
+        turn,
+        execution,
+        scope,
+        initialInput,
+        providerBinding: binding,
+        priorCheckpoints: [],
+      },
+    },
+    result: undefined,
+  }));
+  await parentJournal.transactTurn(turn, () => ({
+    append: { kind: 'request', turn, execution, record: dispatching },
+    result: undefined,
+  }));
+  await parentJournal.transactTurn(turn, () => ({
+    append: { kind: 'request', turn, execution, record: settled },
+    result: undefined,
+  }));
+  await parentJournal.transactTurn(turn, () => ({
+    append: {
+      kind: 'resource-close',
+      turn,
+      execution,
+      fact: { turn, execution, providerBinding: binding, result: close, closedAt: '2026-10-18T00:00:00.000Z' },
+    },
+    result: undefined,
+  }));
+  await parentJournal.transactTurn(turn, () => ({
+    append: { kind: 'provider-settlement', turn, execution, fact: receipt },
+    result: undefined,
+  }));
+
+  const snapshot = await parentJournal.readTurnSnapshot(turn);
+  assert.equal(snapshot.providerSettlements.length, 1);
+  assert.deepEqual(snapshot.providerSettlements[0]!.fact, receipt);
+  const fresh = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(file));
+  assert.deepEqual((await fresh.readTurnSnapshot(turn)).providerSettlements[0]!.fact, receipt);
 });

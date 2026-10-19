@@ -15,6 +15,7 @@ import {
   type ProviderBinding,
   type ProviderCloseResult,
   type InteractionParentProviderExecutionIdentityRef,
+  type InteractionProviderSettlementReceipt,
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
   type OccurrenceExecutionOwner,
@@ -47,7 +48,11 @@ import {
   providerRawContentReader,
   type ProviderEvidenceSink,
 } from '../../../packages/adapters/provider/src/evidence.js';
-import { createInteractionParentTurnRawOwner } from '../../../packages/runtime/src/explicit-brain/index.js';
+import {
+  createInteractionParentTurnRawOwner,
+  publishInteractionProviderSettlement,
+  readInteractionProviderSettlement,
+} from '../../../packages/runtime/src/explicit-brain/index.js';
 import {
   prepareScopeSemanticHistory,
 } from '../../../packages/runtime/src/context/interaction-semantic-context.js';
@@ -507,6 +512,29 @@ function semanticCloseEvidence(label: string, scope: ScopeRef = semanticCloseSco
     source: 'runtime-explicit-brain-test',
     locator: `interaction://${label}`,
     scope,
+  };
+}
+
+function providerSettlementReceipt(
+  turn: InteractionTurnIdentity,
+  execution: InteractionParentProviderExecutionIdentityRef,
+  request: RuntimeRequestRecord,
+): InteractionProviderSettlementReceipt {
+  const evidence = semanticCloseEvidence('provider-settlement', {
+    organId: turn.organId,
+    operationId: execution.operationId,
+  });
+  return {
+    interactionId: turn.interactionId,
+    inputRevision: turn.inputRevision,
+    request: parentRequestIdentity(request),
+    settlement: {
+      ...execution,
+      state: 'succeeded',
+      evidenceRefs: [evidence],
+      resourceRelease: { state: 'released', evidenceRefs: [evidence] },
+      persistence: { state: 'committed', evidenceRefs: [evidence] },
+    },
   };
 }
 
@@ -1154,6 +1182,170 @@ test('neutral parent raw owner records one real resource close, gates closed out
     assert.ok(reopenedClose);
     assert.equal(reopenedClose!.fact.closedAt, committedAt);
     assert.equal((await reopened.readClosedTurnOutput()).assistantText, 'closed answer');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the accepted design adds a new durable control record whose
+// request and epoch association can drift, whose replay can duplicate, or whose
+// post-close append can accidentally reopen raw history. Probability is unknown
+// because this persistence boundary is new. Impact is a false current-success
+// receipt or post-release raw mutation. Cost is one focused Journal consumer.
+test('provider settlement publishes and reads the exact current terminal receipt', async () => {
+  const directory = await semanticCloseFixtureHome();
+  const store = new ImmutableAssetStore(join(directory, 'assets'));
+  const sink = filesystemProviderEvidenceSink(store);
+  const journalFile = join(directory, 'organ.jsonl');
+  const journal = new JsonlOrganJournal(journalFile);
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const rawContent = providerRawContentReader(sink);
+  try {
+    const turn = semanticCloseTurn('interaction-provider-settlement', 'turn-provider-settlement');
+    const operationId = id('operation', 'operation-provider-settlement');
+    const scope: ScopeRef = { organId: semanticCloseOrganId, operationId };
+    const execution = parentExecution(turn, operationId);
+    const initialInput = await semanticCloseAsset(sink, scope, 'settlement-input', 'settle the question');
+    const owner = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope,
+      initialInput,
+      providerBinding: parentProviderBinding,
+      journal: parentJournal,
+      rawContent,
+    });
+    await owner.openTurnInput();
+
+    const dispatching = parentRequestRecord(turn, scope, 'request-provider-settlement', 'dispatching');
+    await owner.registerRequest({ execution: parentExecutionRef(execution), record: dispatching });
+    const request = parentRequestIdentity(dispatching);
+    const answer = await semanticCloseAsset(sink, scope, 'settlement-answer', 'settled answer');
+    const answerFact: RawFactEnvelope<InteractionParentProviderExecutionIdentityRef> = {
+      execution: parentExecutionRef(execution),
+      scope,
+      request,
+      producerSeq: 1,
+      fact: {
+        kind: 'content',
+        contentUnitId: 'assistant-provider-settlement',
+        channel: 'assistant-text',
+        update: 'full',
+        content: answer,
+        complete: true,
+      },
+    };
+    await owner.acceptRawFact(answerFact);
+    await owner.acceptRawFact({
+      execution: parentExecutionRef(execution),
+      scope,
+      request,
+      producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await owner.registerRequest({
+      execution: parentExecutionRef(execution),
+      record: parentRequestRecord(turn, scope, 'request-provider-settlement', 'settled'),
+    });
+    const closedReceipt: ProviderCloseResult = {
+      bindingId: parentProviderBinding.bindingId,
+      providerId: parentProviderBinding.providerId,
+      protocol: parentProviderBinding.protocol,
+      state: 'closed',
+      evidenceRefs: [semanticCloseEvidence('settlement-close', scope)],
+    };
+    await owner.recordProviderClose({
+      providerBinding: parentProviderBinding,
+      result: closedReceipt,
+      closedAt: committedAt,
+    });
+
+    // An old journal has no receipt and the read is explicit, not a success.
+    assert.deepEqual((await parentJournal.readTurnSnapshot(turn)).providerSettlements, []);
+    await assert.rejects(
+      async () => { await readInteractionProviderSettlement({ journal: parentJournal, turn }); },
+      (error: unknown) => error instanceof ContractError
+        && /missing for the current terminal request/.test((error as Error).message),
+    );
+
+    const receipt = providerSettlementReceipt(turn, execution, dispatching);
+    await assert.rejects(
+      async () => {
+        await publishInteractionProviderSettlement({
+          journal: parentJournal,
+          receipt: {
+            ...receipt,
+            request: { ...receipt.request, requestId: 'request-not-terminal' },
+          },
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /not the current terminal request/.test((error as Error).message),
+    );
+    await assert.rejects(
+      async () => {
+        await publishInteractionProviderSettlement({
+          journal: parentJournal,
+          receipt: providerSettlementReceipt(
+            turn,
+            { ...execution, executionEpoch: execution.executionEpoch + 1 },
+            dispatching,
+          ),
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /active physical execution epoch/.test((error as Error).message),
+    );
+
+    // The receipt may append after physical close, and the full original value
+    // is retained. The same key is idempotent; changed content is a conflict.
+    const first = await publishInteractionProviderSettlement({ journal: parentJournal, receipt });
+    assert.deepEqual(first.fact, receipt);
+    const replay = await publishInteractionProviderSettlement({ journal: parentJournal, receipt });
+    assert.deepEqual(replay.commit, first.commit);
+    assert.equal((await parentJournal.readTurnSnapshot(turn)).providerSettlements.length, 1);
+    await assert.rejects(
+      async () => {
+        await publishInteractionProviderSettlement({
+          journal: parentJournal,
+          receipt: {
+            ...receipt,
+            settlement: {
+              ...receipt.settlement,
+              evidenceRefs: [semanticCloseEvidence('changed-provider-settlement', scope)],
+            },
+          },
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /conflicts with the committed receipt/.test((error as Error).message),
+    );
+
+    // The control record does not reopen request or raw history after close.
+    await assert.rejects(
+      async () => {
+        await owner.registerRequest({
+          execution: parentExecutionRef(execution),
+          record: parentRequestRecord(turn, scope, 'request-after-settlement', 'dispatching'),
+        });
+      },
+      (error: unknown) => error instanceof ContractError
+        && /new request lifecycle record is rejected/.test((error as Error).message),
+    );
+    await assert.rejects(
+      async () => { await owner.acceptRawFact({ ...answerFact, producerSeq: 3 }); },
+      (error: unknown) => error instanceof ContractError
+        && /new raw fact is rejected/.test((error as Error).message),
+    );
+
+    // A fresh reader sees the same durable receipt and performs no append.
+    const freshJournal = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const durable = await readInteractionProviderSettlement({ journal: freshJournal, turn });
+    assert.deepEqual(durable.fact, receipt);
+    assert.deepEqual(durable.commit, first.commit);
+    const recordCount = (await journal.replay()).length;
+    await readInteractionProviderSettlement({ journal: freshJournal, turn });
+    assert.equal((await journal.replay()).length, recordCount);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
