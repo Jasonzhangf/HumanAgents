@@ -172,7 +172,7 @@ dagpipe graph validate docs/dagpipe/explicit-semantic-turn.graph.json
 dagpipe graph inspect docs/dagpipe/explicit-semantic-turn.graph.json
 # Graph humanagent-explicit-semantic-turn@1; linear edges assemble -> route -> outcome -> history -> return
 
-node scripts/dagpipe-bind-graphs.mjs docs/dagpipe/explicit-semantic-turn.graph.json
+node scripts/dagpipe-bind-graphs.mjs docs/dagpipe/explicit-semantic-turn.graph.json docs/dagpipe/explicit-semantic-turn.graph.binding.json
 # bound humanagent-explicit-semantic-turn: 5 nodes ok
 ```
 
@@ -190,12 +190,17 @@ flowchart TD
   U([用户提交简单问答]):::boundary
   I[显式大脑解释并取得完整 typed ProviderSettlement<br/>现有 driver / adapter 产生并校验]:::action
   P[向现有 parent Journal 追加一条 provider-settlement 控制记录<br/>receipt = interactionId + inputRevision + terminal request + settlement]:::data
-  A([返回既有 answer / interaction snapshot 形状]):::success
-  F([发布失败：显式错误，不完成 answer]):::failure
+  A[形成既有 answer / interaction snapshot]:::success
+  F[形成显式错误，不完成 answer]:::failure
+  O([返回解释结果或显式错误]):::boundary
 
-  U --> I --> P
+  U --> I
+  I -->|取得适用的原 settlement| P
+  I -->|原请求失败| F
   P -->|committed| A
   P -->|failed| F
+  A --> O
+  F --> O
 
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
@@ -204,28 +209,33 @@ flowchart TD
   classDef failure fill:#FDECEC,stroke:#DC2626,color:#0F172A,stroke-width:1.5px
 ```
 
-The answer response and the control record are separate outputs. The receipt is
+The flow has one entry and one response exit; answer and error are the mutually
+exclusive response variants. The committed control record is a durable side
+effect, consumed separately by the read-only flow below. The receipt is
 not inserted into the answer, reply, decision refs, prompt, metadata,
 `explicit-brain.state`, task payload or task checkpoint.
 
 ### 4.2 Independent read-only control GET
 
 This flow is a separate product object flow. It has one GET entry and one typed
-response contract. The diagram shows the success data output and the explicit
-error terminal as the two mutually exclusive variants of that single response
-contract. It does not write, reconcile, replay or advance an epoch.
+response exit. Success and explicit error branches merge into that single typed
+response contract. It does not write, reconcile, replay or advance an epoch.
 
 ```mermaid
 flowchart TD
   G([GET control request<br/>interactionId + inputRevision + turnId]):::boundary
   V[校验控制作用域并精确读取同一 turn 的已提交快照]:::action
   D{存在同一当前 terminal request 的<br/>已提交 provider-settlement 记录?}:::decision
-  R([返回完整 receipt 与现有 Journal commit]):::success
-  E([显式错误：unavailable / missing / not-ready / integrity]):::failure
+  R[形成完整 receipt 与现有 Journal commit 响应]:::success
+  E[形成显式错误：unavailable / missing / not-ready / integrity]:::failure
+  O([返回只读控制响应]):::boundary
 
   G --> V --> D
+  V -->|读取或作用域失败| E
   D -->|yes| R
   D -->|no| E
+  R --> O
+  E --> O
 
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
@@ -278,7 +288,10 @@ The validator first calls `validateProviderSettlement()`. It then checks:
 - the envelope interaction identity matches `settlement.interactionTurn`;
 - `inputRevision` is a positive integer;
 - `request` is a valid request identity;
-- the request belongs to the same turn, execution and epoch as the settlement.
+- request identity fields retain their declared shape. The existing Journal
+  transaction verifies that this exact request belongs to the receipt's
+  execution and epoch. `ProviderRequestIdentityRef.turnId` is a request-path
+  identity; it must not be assumed equal to the logical interaction turn ID.
 
 ### 5.3 Existing parent Journal extension
 
@@ -484,7 +497,7 @@ composition and must not hand-inject the callback.
 This is an implementation dependency order, not a product flow diagram.
 
 1. **Foundation (contracts)**: add the narrow receipt contract and envelope
-   validation. Freeze this interface before upper layers.
+   validation. Establish this interface before upper layers.
 2. **Persistence**: extend the existing Runtime parent-turn owner and JSONL
    Journal codec with the single control record and exact reader.
 3. **App write path**: wire the existing callback to the Runtime publication
