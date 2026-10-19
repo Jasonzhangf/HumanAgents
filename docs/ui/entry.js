@@ -6,7 +6,6 @@ import {
   formatTime,
   loadRuntimeStatus,
   makePageShell,
-  observationHref,
   renderPageError,
   renderRuntimeStatus,
   renderTaskExecutions,
@@ -27,7 +26,7 @@ const { main, status, interactionCardHosts } = makePageShell(
   'Index',
   'Explicit Input',
   '任务输入',
-  '接受用户任务、展示只读整理反馈，并在提交后进入执行观测。',
+  '接受用户任务、展示只读整理反馈，并在提交后显示任务进展与执行入口。',
 )
 const interactionCardHost = interactionCardHosts[0]
 let interactionCard = null
@@ -233,6 +232,7 @@ function renderStatus(summary, rows) {
   for (const row of rows) {
     const link = element('a', undefined, 'task-row-link')
     link.href = taskDashboardHref(row.taskId.value)
+    link.dataset.taskId = row.taskId.value
     const copy = element('div')
     copy.append(element('h3', taskRowTitle(row)))
     copy.append(element('p', taskRowStateText(row)))
@@ -274,6 +274,30 @@ async function refreshQueue() {
       appendPairingEntry(panel, error)
     }
   }
+}
+
+// Land on the real business Task row after a submission. The row carries the
+// runtime's own executions and controlTarget links; Observation stays a
+// deliberate deeper read-only navigation.
+function focusSubmittedTask(taskIdValue) {
+  const link = [...document.querySelectorAll('#entry-live .task-row-link')]
+    .find((candidate) => candidate.dataset.taskId === taskIdValue)
+  if (link) link.scrollIntoView({ block: 'center' })
+}
+
+async function landOnSubmittedTask(identity) {
+  let taskIdValue
+  let lookupError
+  try {
+    taskIdValue = await waitForTask(identity)
+  } catch (error) {
+    // The task list is still the real business projection even when the exact
+    // row identity was not returned in time; refresh it and keep the failure.
+    lookupError = error
+  }
+  await refreshQueue()
+  if (taskIdValue) focusSubmittedTask(taskIdValue)
+  if (lookupError) throw lookupError
 }
 
 function value(form, name) {
@@ -452,11 +476,11 @@ function prepareSubmission(rawInput, form) {
   }
 }
 
-function observationUnresolved(code, message) {
+function taskLandingUnresolved(code, message) {
   return Object.assign(new Error(message), {
     code,
     ownerId: 'humanagent.app.ui',
-    nextAction: 'open the task list and retry observation',
+    nextAction: 'refresh the task list and retry',
   })
 }
 
@@ -511,7 +535,7 @@ function identityFromConfirmedSnapshot(snapshot) {
 
 async function waitForTask(identity) {
   if (!identity) {
-    throw observationUnresolved('observation.identity-unresolved', '需求已接收，但返回的执行身份不完整，无法定位精确观测任务。')
+    throw taskLandingUnresolved('entry.task-identity-unresolved', '需求已接收，但返回的执行身份不完整，无法定位本次任务。')
   }
   const deadline = Date.now() + 20_000
   while (Date.now() < deadline) {
@@ -521,7 +545,7 @@ async function waitForTask(identity) {
     if (candidate?.taskId?.value) return candidate.taskId.value
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  throw observationUnresolved('observation.task-not-ready', '任务已提交，但执行观测任务尚未就绪。')
+  throw taskLandingUnresolved('entry.task-not-ready', '任务已提交，但任务列表尚未返回本次任务。')
 }
 
 // The explicit-intake states the runtime records once the human authorization is
@@ -579,11 +603,13 @@ async function executeSubmission(submission, clarificationAnswer) {
   }
   if (snapshot.state === 'confirmed') {
     // The backend snapshot already proves the business confirmation. Keep that
-    // fact so a later observation read failure still reports the accepted
+    // fact so a later task-refresh failure still reports the accepted
     // demand instead of downgrading to an unfinished input.
     confirmation = snapshot.confirmation || confirmation || snapshot
-    const taskIdValue = await waitForTask(identityFromConfirmedSnapshot(snapshot))
-    window.location.assign(observationHref(taskIdValue))
+    status.dataset.tone = 'success'
+    status.textContent = '需求已接收，正在刷新任务进展…'
+    await landOnSubmittedTask(identityFromConfirmedSnapshot(snapshot))
+    status.textContent = '需求已接收；任务进展已刷新。'
     return snapshot
   }
   if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
@@ -611,21 +637,21 @@ async function executeSubmission(submission, clarificationAnswer) {
   // pre-confirmation snapshot the read-only draft above was rendered from, so
   // the card must project the runtime's post-confirmation state from here on.
   latestState = await postConfirmationState()
-  appendCardEvent('decision', '需求已提交，正在打开执行观测', 'decision', { eventKey: 'explicit.confirmation-submitted' })
+  appendCardEvent('decision', '需求已提交，正在刷新任务进展', 'decision', { eventKey: 'explicit.confirmation-submitted' })
   status.dataset.tone = 'success'
   if (submission.executionPolicy.executionMode !== 'once') {
-    status.textContent = '执行计划已保存，等待真实 occurrence 进入执行观测。'
+    status.textContent = '执行计划已保存；任务进展已刷新。'
     await refreshQueue()
     return snapshot
   }
-  status.textContent = '需求已提交，正在打开执行观测…'
-  const taskIdValue = await waitForTask(identityFromReceipt(receipt.requirement))
-  window.location.assign(observationHref(taskIdValue))
+  status.textContent = '需求已提交，正在刷新任务进展…'
+  await landOnSubmittedTask(identityFromReceipt(receipt.requirement))
+  status.textContent = '需求已提交；任务进展已刷新。'
   return snapshot
 }
 
 function submissionFailureSummary() {
-  if (confirmation) return '需求已接收，任务观测尚未打开。'
+  if (confirmation) return '需求已接收，任务进展尚未刷新。'
   if (interactionId) return '输入已接收，本次处理未完成。'
   return '本次提交未获接收确认。'
 }
@@ -634,7 +660,7 @@ function handleSubmissionError(error, button) {
   clearNode(status)
   status.dataset.tone = 'danger'
   const recovered = confirmation
-    ? '需求已接收；保留已返回内容，继续打开任务观测。'
+    ? '需求已接收；保留已返回内容，刷新任务进展后继续。'
     : interactionId
       ? '输入已接收；保留已返回内容，继续本次处理。'
       : '输入保留，可修正后重试本次提交。'
@@ -652,7 +678,7 @@ function handleSubmissionError(error, button) {
     })),
   )
   appendPairingEntry(status, error)
-  if (button) button.textContent = confirmation ? '重试打开任务观测' : interactionId ? '重试本次提交' : '重试提交'
+  if (button) button.textContent = confirmation ? '重试刷新任务进展' : interactionId ? '重试本次提交' : '重试提交'
 }
 
 function field(labelText, control) {

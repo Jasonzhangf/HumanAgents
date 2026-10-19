@@ -363,10 +363,12 @@ export function projectInteractionCardFromSnapshot(snapshot) {
     card: cardFromEntries(entries, interactionState, enteredAt),
     conversation: {
       summary: {
-        goal: { text: snapshot?.rawInput || '尚未收到输入' },
-        scope: draft ? { text: fallbackText(draft.proposedIntent, '当前交互范围') } : undefined,
-        constraints: snapshot?.clarifications?.at(-1)?.question ? [{ text: snapshot.clarifications.at(-1).question }] : undefined,
-        deliverables: draft ? [{ text: fallbackText(draft.normalizedInput, '整理后的任务要求') }] : undefined,
+        ...(typeof snapshot?.rawInput === 'string' && snapshot.rawInput.trim() !== ''
+          ? { goal: { text: snapshot.rawInput } }
+          : {}),
+        ...(draft?.proposedIntent ? { scope: { text: draft.proposedIntent } } : {}),
+        ...(snapshot?.clarifications?.at(-1)?.question ? { constraints: [{ text: snapshot.clarifications.at(-1).question }] } : {}),
+        ...(draft?.normalizedInput ? { deliverables: [{ text: draft.normalizedInput }] } : {}),
       },
       turns: [
         userTurn,
