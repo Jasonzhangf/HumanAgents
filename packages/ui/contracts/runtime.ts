@@ -226,7 +226,6 @@ export interface RuntimeDashboardProjection {
   readonly mode: RuntimeMode;
   readonly hasRunning: boolean;
   readonly taskCount: number;
-  readonly waitingDecisionCount: number;
   readonly recentInputs: readonly RuntimeRecentInputProjection[];
   readonly recentOutputs: readonly RuntimeRecentOutputProjection[];
   readonly recentFailures: readonly RuntimeRecentFailureProjection[];

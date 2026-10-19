@@ -280,7 +280,6 @@ test('runtime dashboard only reports hasRunning for execution-active tasks', () 
   });
   assert.equal(dashboard.hasRunning, false);
   assert.equal(dashboard.taskCount, 1);
-  assert.equal(dashboard.waitingDecisionCount, 0);
 });
 
 test('observation projection groups nodes into stable agent frames and ordered tool steps', () => {
@@ -628,7 +627,7 @@ test('runtime dashboard refuses to derive no-activity from an unusable silence b
   assert.equal(/silence budget/.test(liveness.reason), true, liveness.reason);
 });
 
-test('runtime dashboard keeps failure and waiting-for-answer as explicit liveness states', () => {
+test('runtime dashboard keeps failure explicit without inventing a human decision', () => {
   const failed = livenessOf(livenessTask('failed', livenessFacts({
     active: false,
     observedAt: '2026-10-06T12:00:10.000Z',
@@ -643,11 +642,28 @@ test('runtime dashboard keeps failure and waiting-for-answer as explicit livenes
   }));
   assert.equal(failed.state, 'failed');
 
-  const waiting = livenessOf(livenessTask('waiting', livenessFacts({ active: false })));
-  assert.equal(waiting.state, 'waiting-for-answer');
+  // Observed incident: lifecycle waiting/blocked rows were labeled as human
+  // decisions although the projection received no question, options, or action.
+  // That false claim could send the user looking for a decision that did not
+  // exist. Reuse the existing liveness projection instead of adding a DTO.
+  const waitingTask = livenessTask('waiting', livenessFacts({ active: false }));
+  const waitingDashboard = projectRuntimeTaskDashboard(waitingTask, 'fake');
+  assert.equal(waitingDashboard.stateLabel, '等待中');
+  assert.equal(waitingDashboard.liveness?.state, 'idle');
+  assert.equal(/decision/.test(waitingDashboard.liveness?.reason ?? ''), false);
 
-  const blocked = livenessOf(livenessTask('blocked', livenessFacts({ active: false })));
-  assert.equal(blocked.state, 'waiting-for-answer');
+  const blockedTask = livenessTask('blocked', livenessFacts({ active: false }));
+  const blockedDashboard = projectRuntimeTaskDashboard(blockedTask, 'fake');
+  assert.equal(blockedDashboard.stateLabel, '受阻');
+  assert.equal(blockedDashboard.liveness?.state, 'idle');
+  assert.equal(/decision/.test(blockedDashboard.liveness?.reason ?? ''), false);
+
+  const dashboard = projectRuntimeDashboard({
+    mode: 'fake',
+    tasks: [waitingTask, blockedTask],
+    recentInputs: [],
+  });
+  assert.equal('waitingDecisionCount' in dashboard, false);
 });
 
 test('runtime dashboard reports idle instead of a liveness claim when nothing is executing', () => {

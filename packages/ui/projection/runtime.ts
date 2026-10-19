@@ -117,7 +117,7 @@ const STATE_LABELS: Record<LifecycleState, string> = {
   running: '运行中',
   settling: '收拢中',
   succeeded: '已完成',
-  waiting: '等待决策',
+  waiting: '等待中',
   blocked: '受阻',
   failed: '失败',
   cancelled: '已取消',
@@ -417,7 +417,6 @@ export function projectRuntimeDashboard(input: RuntimeDashboardInput): RuntimeDa
     mode: input.mode,
     hasRunning: input.tasks.some((task) => isActive(task.state)),
     taskCount: input.tasks.length,
-    waitingDecisionCount: input.tasks.filter((task) => isWaiting(task.state)).length,
     recentInputs: input.recentInputs.slice(0, 5),
     recentOutputs,
     recentFailures,
@@ -525,9 +524,9 @@ export function projectRuntimeTaskDashboard(
 
 /**
  * Derives the single liveness state from real reported facts. Precedence:
- * reported failure, then a lifecycle that waits for a human or resource
- * decision, then a non-active execution, then the observed silence against the
- * declared budget.
+ * reported failure, then a non-active execution, then the observed silence
+ * against the declared budget. Lifecycle `waiting`/`blocked` facts do not carry
+ * a question, options, or action, so they cannot produce `waiting-for-answer`.
  *
  * States that have no real producer stay `unknown`; this function never turns a
  * missing signal into a claim about progress. The event-transport fact is not
@@ -550,13 +549,6 @@ export function projectRuntimeLiveness(
       ...base,
       state: 'failed',
       reason: `the execution reported failure (state: ${task.state})`,
-    };
-  }
-  if (task.state === 'waiting' || task.state === 'blocked') {
-    return {
-      ...base,
-      state: 'waiting-for-answer',
-      reason: `the execution is waiting for a human or resource decision (state: ${task.state})`,
     };
   }
   if (!facts.active) {
